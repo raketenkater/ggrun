@@ -18,7 +18,7 @@ import time
 import signal
 import argparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 SCRIPT_DIR = Path(__file__).parent
 LLM_SERVER = SCRIPT_DIR / "llm-server"
@@ -244,7 +244,7 @@ def main():
         result["gain_gen_pct"] = round(gain_gen, 1)
         result["gain_pp_pct"] = round(gain_pp, 1)
         result["elapsed_min"] = round(elapsed / 60, 1)
-        result["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        result["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         results.append(result)
 
         print(f"  Baseline:  gen={result['baseline_gen']:.2f} tok/s  pp={result['baseline_pp']:.2f} tok/s")

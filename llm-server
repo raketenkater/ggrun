@@ -2243,9 +2243,9 @@ append_tune_history() {
     echo "$config_name" > "$tune_msg_dir/hist_name.txt"
     python3 -c "
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 entry = {
-    'timestamp': datetime.utcnow().isoformat() + 'Z',
+    'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     'model': '${MODEL_NAME}',
     'hw_hash': '${hw_hash}',
     'round': ${round},
@@ -3067,10 +3067,10 @@ print(json.dumps(msgs))
         # is unchanged (which is exactly what "baseline wins" means).
         python3 -c "
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 cache = {
     'model': '${MODEL_NAME}',
-    'tuned_at': datetime.utcnow().isoformat() + 'Z',
+    'tuned_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     'provider': 'self',
     'baseline_gen_tps': ${baseline_gen},
     'baseline_pp_tps': ${baseline_pp},
@@ -3099,14 +3099,14 @@ print(f'  Saved marker to: ${tune_cache}')
         echo "$best_name" > "$tune_msg_dir/best_name.txt"
         BEST_FLAGS_JSON="$best_flags_json" python3 -c "
 import json, os
-from datetime import datetime
+from datetime import datetime, timezone
 try:
     best_flags = json.loads(os.environ.get('BEST_FLAGS_JSON', '{}'))
 except json.JSONDecodeError:
     best_flags = {}
 cache = {
     'model': '${MODEL_NAME}',
-    'tuned_at': datetime.utcnow().isoformat() + 'Z',
+    'tuned_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     'provider': 'self',
     'baseline_gen_tps': ${baseline_gen},
     'baseline_pp_tps': ${baseline_pp},
@@ -3312,12 +3312,17 @@ case "$STRATEGY" in
     multi_gpu_dense)
         # Find the smallest subset of fastest GPUs that can fit the model
         # GPU_ORDER is already sorted by bandwidth (descending)
+        # Use TOTAL - 1GB per GPU (not FREE): transient desktop/compositor
+        # VRAM dips on fast GPUs would otherwise spuriously reject the 2-GPU
+        # subset and pull the slow PCIe GPU back in. Matches single_gpu logic.
         USE_GPU_COUNT=$GPU_COUNT
         for n in $(seq 2 $(( GPU_COUNT ))); do
             subset_vram=0
             for j in $(seq 0 $(( n - 1 ))); do
                 gi=${GPU_ORDER[$j]}
-                (( subset_vram += GPU_VRAM_FREE[$gi] )) || true
+                gi_usable=$(( GPU_VRAM_TOTAL[gi] - 1024 ))
+                (( gi_usable < 0 )) && gi_usable=0
+                (( subset_vram += gi_usable )) || true
             done
             if (( VRAM_NEEDED_MB <= subset_vram )); then
                 USE_GPU_COUNT=$n
