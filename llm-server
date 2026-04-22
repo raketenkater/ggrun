@@ -2627,20 +2627,25 @@ _tune_progress_line() {
     pct=0
     (( total > 0 )) && pct=$(( done * 100 / total ))
     (( pct > 100 )) && pct=100
-    # 20-char progress bar
+    # 20-char progress bar (ASCII-safe — works on every terminal incl. GUI)
     filled=$(( pct / 5 ))
     empty=$(( 20 - filled ))
     bar=""
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=0; i<empty;  i++)); do bar+="░"; done
+    for ((i=0; i<filled; i++)); do bar+="#"; done
+    for ((i=0; i<empty;  i++)); do bar+="-"; done
 
-    printf '\n'
-    printf '%s╔══ AI Tune progress ═══════════════════════════════════════════╗%s\n' "$color" "$reset"
-    printf '%s║%s  round %d/%d  %s%s%s  %d%%\n' "$color" "$reset" "$done" "$total" "$color" "$bar" "$reset" "$pct"
-    printf '%s║%s  elapsed %s  %s|%s  ETA %s  %s|%s  best: %s @ %s tok/s %s%s%s\n' \
-        "$color" "$reset" "$el_s" "$dim" "$reset" "$eta_s" "$dim" "$reset" \
-        "$bname" "$bgen" "$dim" "$improvement" "$reset"
-    printf '%s╚═══════════════════════════════════════════════════════════════╝%s\n' "$color" "$reset"
+    # Build the block once, then write it to stdout AND /dev/tty (if it exists).
+    # /dev/tty fallback guarantees visibility even when stdout is piped/redirected
+    # by the GUI or a wrapping terminal.
+    local block
+    block=$(printf '\n%s================ AI Tune progress ================%s\n' "$color" "$reset"
+            printf '%s  round %d/%d  [%s]  %d%%%s\n' "$color" "$done" "$total" "$bar" "$pct" "$reset"
+            printf '%s  elapsed %s | ETA %s | best: %s @ %s tok/s %s%s%s\n' \
+                "$color" "$el_s" "$eta_s" "$bname" "$bgen" "$dim" "$improvement" "$reset"
+            printf '%s==================================================%s\n' "$color" "$reset")
+    printf '%s\n' "$block"
+    # Also mirror to /dev/tty so the user sees it even if stdout was captured
+    { printf '%s\n' "$block" > /dev/tty; } 2>/dev/null || true
 }
 
 ai_tune() {
