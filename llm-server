@@ -29,6 +29,7 @@
 #   llm-server <model.gguf> --ai-tune --retune # Force re-tune even if cache exists
 #   llm-server <model.gguf> --ai-tune --rounds 4 # Customize number of rounds
 #   llm-server <model.gguf> --ai-tune --unlimited # Deep tune: 20 rounds, LLM may perturb tensor-split
+#   llm-server <model.gguf> --ai-tune -v       # Verbose: show full ai-tune logs (default: progress box only)
 #
 # Environment variables:
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
@@ -189,7 +190,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --retune)    RETUNE=1; shift ;;
         --dry-run)   DRY_RUN=1; shift ;;
-        --verbose)   VERBOSE=1; shift ;;
+        --verbose|-v) VERBOSE=1; shift ;;
         --benchmark) BENCHMARK=1; shift ;;
         --cpu)       CPU_ONLY=1; shift ;;
         --model-dir) MODEL_DIR="$2"; shift 2 ;;
@@ -2710,7 +2711,22 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
         echo "  Rounds: ${AI_TUNE_ROUNDS}"
     fi
     echo "═══════════════════════════════════════════════════"
+    if (( ! VERBOSE )); then
+        echo "  (quiet mode — run with -v / --verbose to see full logs)"
+        echo "  Server logs: $SERVER_LOG"
+    fi
     echo ""
+
+    # Quiet mode: redirect chatty stdout/stderr to SERVER_LOG.
+    # The progress box still renders via /dev/tty inside _tune_progress_line,
+    # and we restore stdout before the final completion summary.
+    # RETURN trap guarantees restoration on any early exit path.
+    if (( ! VERBOSE )); then
+        exec 7>&1 8>&2
+        # shellcheck disable=SC2064
+        trap '{ exec 1>&7 2>&8; exec 7>&- 8>&-; } 2>/dev/null; trap - RETURN' RETURN
+        exec >> "$SERVER_LOG" 2>&1
+    fi
 
     # Hardware hash for history tracking
     local hw_hash
@@ -3132,6 +3148,13 @@ print(json.dumps(msgs))
     kill_server ""
 
     local tune_total_elapsed=$(( $(date +%s) - tune_start_ts ))
+
+    # Restore stdout/stderr so the final summary is visible in quiet mode
+    if (( ! VERBOSE )); then
+        exec 1>&7 2>&8
+        exec 7>&- 8>&-
+    fi
+
     echo ""
     echo "═══════════════════════════════════════════════════"
     if [[ "$best_name" == "baseline" ]]; then
