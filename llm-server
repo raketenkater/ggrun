@@ -2614,20 +2614,33 @@ _tune_progress_line() {
         improvement=$(python3 -c "b=float('$base'); g=float('$bgen'); print(f'{(g-b)/b*100:+.1f}%')" 2>/dev/null || echo "")
     fi
 
-    if [[ -t 1 ]]; then
+    # Use color if stdout OR stderr is a TTY (GUI may pipe one but not the other)
+    if [[ -t 1 || -t 2 ]]; then
         color=$'\033[1;36m'; dim=$'\033[2m'; reset=$'\033[0m'
     else
         color=""; dim=""; reset=""
     fi
 
-    printf '%s[%d/%d done]%s elapsed %s %s|%s ETA %s %s|%s best: %s @ %s tok/s %s%s%s\n' \
-        "$color" "$done" "$total" "$reset" \
-        "$(_tune_fmt_duration "$elapsed")" \
-        "$dim" "$reset" \
-        "$(_tune_fmt_duration "$eta_rem")" \
-        "$dim" "$reset" \
-        "$bname" "$bgen" \
-        "$dim" "$improvement" "$reset"
+    local el_s eta_s pct bar filled empty i
+    el_s=$(_tune_fmt_duration "$elapsed")
+    eta_s=$(_tune_fmt_duration "$eta_rem")
+    pct=0
+    (( total > 0 )) && pct=$(( done * 100 / total ))
+    (( pct > 100 )) && pct=100
+    # 20-char progress bar
+    filled=$(( pct / 5 ))
+    empty=$(( 20 - filled ))
+    bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty;  i++)); do bar+="░"; done
+
+    printf '\n'
+    printf '%s╔══ AI Tune progress ═══════════════════════════════════════════╗%s\n' "$color" "$reset"
+    printf '%s║%s  round %d/%d  %s%s%s  %d%%\n' "$color" "$reset" "$done" "$total" "$color" "$bar" "$reset" "$pct"
+    printf '%s║%s  elapsed %s  %s|%s  ETA %s  %s|%s  best: %s @ %s tok/s %s%s%s\n' \
+        "$color" "$reset" "$el_s" "$dim" "$reset" "$eta_s" "$dim" "$reset" \
+        "$bname" "$bgen" "$dim" "$improvement" "$reset"
+    printf '%s╚═══════════════════════════════════════════════════════════════╝%s\n' "$color" "$reset"
 }
 
 ai_tune() {
