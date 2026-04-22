@@ -2579,6 +2579,57 @@ print(' '.join(keys))
 }
 
 # Main AI tune function — iterative: benchmark → query → benchmark → query ...
+_tune_fmt_duration() {
+    # Seconds -> "XmYs" (or "Xh Ym" for >=1h). Minimum "0s".
+    local s="$1"
+    (( s < 0 )) && s=0
+    if (( s < 60 )); then
+        printf '%ds' "$s"
+    elif (( s < 3600 )); then
+        printf '%dm%02ds' $(( s / 60 )) $(( s % 60 ))
+    else
+        printf '%dh%02dm' $(( s / 3600 )) $(( (s % 3600) / 60 ))
+    fi
+}
+
+_tune_progress_line() {
+    # Args: rounds_done total_rounds start_ts best_gen best_name baseline_gen
+    # rounds_done counts baseline as round 0, so total_done = arg1 + 1.
+    local done="$1" total="$2" start="$3" bgen="$4" bname="$5" base="$6"
+    local now elapsed avg_per eta_rem remain improvement color reset dim
+    now=$(date +%s)
+    elapsed=$(( now - start ))
+    remain=$(( total - done ))
+    (( remain < 0 )) && remain=0
+    local slots_done=$(( done + 1 ))   # include round 0
+    if (( slots_done > 0 && elapsed > 0 )); then
+        avg_per=$(( elapsed / slots_done ))
+    else
+        avg_per=0
+    fi
+    eta_rem=$(( avg_per * remain ))
+
+    improvement=""
+    if [[ -n "$base" && "$base" != "0" && "$base" != "0.00" ]]; then
+        improvement=$(python3 -c "b=float('$base'); g=float('$bgen'); print(f'{(g-b)/b*100:+.1f}%')" 2>/dev/null || echo "")
+    fi
+
+    if [[ -t 1 ]]; then
+        color=$'\033[1;36m'; dim=$'\033[2m'; reset=$'\033[0m'
+    else
+        color=""; dim=""; reset=""
+    fi
+
+    printf '%s[%d/%d done]%s elapsed %s %s|%s ETA %s %s|%s best: %s @ %s tok/s %s%s%s\n' \
+        "$color" "$done" "$total" "$reset" \
+        "$(_tune_fmt_duration "$elapsed")" \
+        "$dim" "$reset" \
+        "$(_tune_fmt_duration "$eta_rem")" \
+        "$dim" "$reset" \
+        "$bname" "$bgen" \
+        "$dim" "$improvement" "$reset"
+}
+
 ai_tune() {
     mkdir -p "$CACHE_DIR"
     local vision_suffix=""
@@ -2672,6 +2723,8 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
     done
 
     # ── Round 0: Benchmark baseline ──
+    local tune_start_ts
+    tune_start_ts=$(date +%s)
     echo "Round 0/${AI_TUNE_ROUNDS}: Benchmarking baseline (heuristic config)..."
     kill_server ""
     if ! try_start; then
@@ -2684,6 +2737,7 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
     baseline_gen=$(echo "$bench_result" | awk '{print $1}')
     baseline_pp=$(echo "$bench_result" | awk '{print $2}')
     echo "  Baseline: gen=${baseline_gen} tok/s  pp=${baseline_pp} tok/s"
+    _tune_progress_line 0 "$AI_TUNE_ROUNDS" "$tune_start_ts" "$baseline_gen" "baseline" "$baseline_gen"
 
     if [[ "$baseline_gen" == "0" || "$baseline_gen" == "0.00" || -z "$baseline_gen" ]]; then
         echo "ERROR: Could not measure baseline"
@@ -2957,6 +3011,7 @@ msgs = json.loads(sys.stdin.read())
 msgs.append({'role': 'user', 'content': open('${tune_msg_dir}/feedback_${round}.txt').read()})
 print(json.dumps(msgs))
 " <<< "$messages")
+            _tune_progress_line "$round" "$AI_TUNE_ROUNDS" "$tune_start_ts" "$best_gen" "$best_name" "$baseline_gen"
             # Baseline is still running — no restart needed
             continue
         fi
@@ -3033,6 +3088,9 @@ print(json.dumps(results))
         # Append to persistent history
         append_tune_history "$round" "$round_gen" "$round_pp" "$round_status" "$config_flags_json" "$config_name"
 
+        # Progress: elapsed + ETA + best-so-far
+        _tune_progress_line "$round" "$AI_TUNE_ROUNDS" "$tune_start_ts" "$best_gen" "$best_name" "$baseline_gen"
+
         # Feed result back to LLM for next round
         local feedback
         if [[ "$round_status" == "crashed" ]]; then
@@ -3055,11 +3113,13 @@ print(json.dumps(msgs))
     kill_server "$RUNNING_PID"
     kill_server ""
 
+    local tune_total_elapsed=$(( $(date +%s) - tune_start_ts ))
     echo ""
     echo "═══════════════════════════════════════════════════"
     if [[ "$best_name" == "baseline" ]]; then
         echo "  AI Tune complete: baseline wins"
         echo "  The heuristic config is already optimal (${baseline_gen} tok/s)"
+        echo "  Total time: $(_tune_fmt_duration "$tune_total_elapsed")"
         echo "═══════════════════════════════════════════════════"
 
         # Save a marker cache so future --ai-tune runs detect "already tuned"
@@ -3093,6 +3153,7 @@ print(f'  Saved marker to: ${tune_cache}')
         total_improvement=$(python3 -c "g=${baseline_gen}; print(f'{(${best_gen}-g)/g*100:.1f}' if g>0 else '0')")
         echo "  AI Tune complete: ${best_name} wins!"
         echo "  Baseline: ${baseline_gen} tok/s → Best: ${best_gen} tok/s (+${total_improvement}%)"
+        echo "  Total time: $(_tune_fmt_duration "$tune_total_elapsed")"
         echo "═══════════════════════════════════════════════════"
 
         # Save to cache
