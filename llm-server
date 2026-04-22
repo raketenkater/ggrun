@@ -3568,6 +3568,9 @@ fi
 # Reserve VRAM on primary GPU for KV cache + batch buffers + compute scratch
 declare -a LAYERS_PER_GPU
 BUDGET_PCTS=(70 55 50 45 40 35 30 25)  # Decreasing budget for lower-priority GPUs
+# Bump sequence for redistribution. Caps at 98 because large-MoE layers can be
+# almost the full per-GPU VRAM (e.g. Kimi-K2 IQ3_K: 24GB layer on 26GB A40).
+REDIST_BUMPS=(80 85 90 95 98)
 NEXT_LAYER=0
 TOTAL_GPU_LAYERS=0
 
@@ -3621,7 +3624,7 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
     echo "  Redistributing layers to GPUs to fit in RAM..."
 
     # Recalculate with increasing GPU budgets until CPU fits in RAM
-    for bump in 80 85 90 95; do
+    for bump in "${REDIST_BUMPS[@]}"; do
         NEXT_LAYER=0
         TOTAL_GPU_LAYERS=0
         # Build budget array: primary GPU gets bump%, others get slightly less
@@ -3637,6 +3640,13 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
             layers=0
             if (( COST_PER_LAYER_MB > 0 )); then
                 layers=$(( budget_mb / COST_PER_LAYER_MB ))
+                # Hard-max floor: when per-layer cost is near per-GPU VRAM
+                # (e.g. Kimi-K2 IQ3_K with 24GB layer on 26GB A40), pct-gated
+                # budget rounds to 0 layers even though 1 would physically fit.
+                # On the final bump pass, allow up to the raw hard-fit count.
+                if (( layers == 0 && bump == ${REDIST_BUMPS[-1]} )); then
+                    layers=$(( available_mb / COST_PER_LAYER_MB ))
+                fi
             fi
             remain=$(( LAYER_COUNT - NEXT_LAYER ))
             (( layers > remain )) && layers=$remain
@@ -3655,24 +3665,50 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
     done
 fi
 
-# Phase 2: If still over RAM after maxing GPU budgets, refuse to launch
-# KV cache lives on GPUs so reducing context doesn't help RAM
+# Phase 2: If still over RAM after maxing GPU budgets, warn but allow continue
+# when mmap can reasonably handle the gap. The RAM_NEEDED estimate counts the
+# full virtual size of CPU-resident expert tensors, but with mmap (default)
+# the kernel pages cold experts out on demand. Only the hot working set needs
+# to physically fit. Safe-to-proceed floor: enough RAM for compute buffers +
+# a handful of hot layers' worth of expert working set.
 if (( RAM_NEEDED > RAM_AVAIL_MB )); then
+    # Working-set floor: compute buffers + ~8 hot expert layers + KV overhead
+    WORKING_SET_FLOOR=$(( CUDA_HOST_MB + 8 * EXPERT_PER_LAYER_MB + 2048 ))
+    SHORTFALL=$(( RAM_NEEDED - RAM_AVAIL_MB ))
     echo ""
-    echo "ERROR: MoE model does not fit in RAM after maxing GPU budgets."
+    echo "WARNING: MoE virtual RAM estimate exceeds available RAM."
     echo "  CPU expert layers: ${LAYERS_CPU} layers (${CPU_EXPERT_MB}MB)"
     echo "  CUDA host buffers: ${CUDA_HOST_MB}MB"
     echo "  RAM padding (15%): $(( TENSOR_RAM_PADDED - CPU_EXPERT_MB ))MB"
     echo "  ─────────────────────────────"
-    echo "  Total RAM needed:  ${RAM_NEEDED}MB"
+    echo "  Virtual RAM est:   ${RAM_NEEDED}MB"
     echo "  RAM available:     ${RAM_AVAIL_MB}MB"
-    echo "  Shortfall:         $(( RAM_NEEDED - RAM_AVAIL_MB ))MB"
+    echo "  Shortfall:         ${SHORTFALL}MB"
     echo ""
-    echo "  Options:"
-    echo "  1. Add more system RAM"
-    echo "  2. Use a smaller quantization (IQ3 → IQ2)"
-    echo "  3. Use a smaller model"
-    exit 1
+    if (( RAM_AVAIL_MB >= WORKING_SET_FLOOR )); then
+        echo "  Note: this is the full mmap'd model size, not working-set RAM."
+        echo "  With mmap (default), the kernel pages cold experts in/out on"
+        echo "  demand. Only the hot working set needs to physically fit."
+        echo "  Working-set floor (compute + 8 hot layers): ${WORKING_SET_FLOOR}MB"
+        echo ""
+        if [[ -t 0 ]] && (( ${LLM_ASSUME_YES:-0} == 0 )); then
+            read -r -p "  Continue anyway and let mmap handle paging? [y/N] " _reply
+            _reply="${_reply:-n}"
+            if [[ ! "$_reply" =~ ^[Yy] ]]; then
+                echo "  Aborted by user."
+                exit 1
+            fi
+        else
+            echo "  Non-interactive (or LLM_ASSUME_YES=1) — continuing."
+        fi
+        echo "  Proceeding with mmap paging (use --no-mmap to disable if unstable)."
+    else
+        echo "  Options:"
+        echo "  1. Add more system RAM"
+        echo "  2. Use a smaller quantization (IQ3 → IQ2)"
+        echo "  3. Use a smaller model"
+        exit 1
+    fi
 fi
 
 # Build -ot string
