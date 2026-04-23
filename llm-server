@@ -39,6 +39,23 @@
 
 set -euo pipefail
 
+# RUNNING_PID tracks the in-flight health-check / pre-launch server so a fatal
+# script exit (set -e landmine, SIGINT, SIGTERM) doesn't leak a 100GB+ ik_llama
+# process. `run_with_restart` explicitly resets this for the foreground server
+# since that one is the user's intended long-running process.
+RUNNING_PID=""
+_cleanup_orphan_server() {
+    local pid="${RUNNING_PID:-}"
+    [[ -z "$pid" ]] && return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    # Give it a chance to shut down cleanly, then SIGKILL.
+    kill -TERM "$pid" 2>/dev/null || true
+    local i=0
+    while (( i < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; (( ++i )); done
+    kill -9 "$pid" 2>/dev/null || true
+}
+trap _cleanup_orphan_server EXIT
+
 # ═══════════════════════════════════════════════════════════════
 # Section 1: Configuration & Argument Parsing
 # ═══════════════════════════════════════════════════════════════
@@ -339,7 +356,13 @@ _tune_backend_tag() {
 
 show_configs_table() {
     _show_backend_header
+    if [[ ! -d "$CACHE_DIR" ]]; then
+        echo "No cache dir yet ($CACHE_DIR). Run: llm-server <model> [--ai-tune]"
+        return
+    fi
     shopt -s nullglob
+    # tune_history.jsonl (append-only log) is intentionally NOT listed here —
+    # only per-model winner files `tune_<model>_<hash>_<backend>.json`.
     local tunes=("$CACHE_DIR"/tune_*.json)
     local confs=("$CACHE_DIR"/*.conf)
     shopt -u nullglob
@@ -418,7 +441,10 @@ PY
     for f in "${confs[@]}"; do
         [[ -f "$f" ]] || continue
         local model
-        model=$(grep -m1 "^# Auto-tuned config for" "$f" 2>/dev/null | sed 's/.*for //' | sed 's/\.gguf *$//')
+        # Tolerate trailing whitespace, CRLF, and future header spellings.
+        model=$(grep -m1 -iE "^# *Auto[- ]tuned config for" "$f" 2>/dev/null \
+                | sed -E 's/.*for +//; s/[[:space:]]+$//; s/\.gguf$//' \
+                || true)
         [[ -z "$model" ]] && continue
         local hit=0
         for key in "${!TUNE_FILE[@]}"; do
@@ -451,7 +477,7 @@ show_configs_detail() {
     local model_name; model_name=$(basename "$model_path")
     echo "Model: $model_name"
     echo "  Path: $model_path"
-    echo "  Size: $(du -h "$model_path" 2>/dev/null | awk '{print $1}')"
+    echo "  Size: $(du -h "$model_path" 2>/dev/null | awk '{print $1}' || true)"
     echo
     shopt -s nullglob
     local tunes=("$CACHE_DIR"/tune_"$model_name"_*.json)
@@ -504,9 +530,12 @@ fi
 if (( DOWNLOAD )); then
     TOTAL_VRAM_MB=0
     if command -v nvidia-smi >/dev/null 2>&1; then
-        TOTAL_VRAM_MB=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk '{s+=$1} END {print s}')
+        # Trailing `|| echo 0` guards pipefail: if nvidia-smi fails transiently,
+        # awk gets empty input and prints nothing; without the guard the whole
+        # `var=$(pipeline)` silently kills the script under set -euo pipefail.
+        TOTAL_VRAM_MB=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END {print s+0}' || echo 0)
     fi
-    RAM_AVAIL_MB=$(grep MemAvailable /proc/meminfo | awk '{print int($2/1024)}')
+    RAM_AVAIL_MB=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print int($2/1024)}' || echo 0)
     # Try finding the downloader in several places
     DOWNLOADER="$(dirname "$(readlink -f "$0")")/download_any_gguf.py"
     if [[ ! -f "$DOWNLOADER" ]]; then
@@ -1008,7 +1037,8 @@ echo "Binary: $LLAMA_SERVER"
 (( IS_IK_LLAMA )) && echo "Backend: ik_llama.cpp (graph split enabled)"
 
 # Detect physical CPU cores
-PHYSICAL_CORES=$(lscpu 2>/dev/null | awk '/^Core\(s\) per socket:/ {cores=$NF} /^Socket\(s\):/ {socks=$NF} END {print cores * socks}')
+# `|| true` guards pipefail — lscpu may be absent (containers, Alpine, WSL)
+PHYSICAL_CORES=$(lscpu 2>/dev/null | awk '/^Core\(s\) per socket:/ {cores=$NF} /^Socket\(s\):/ {socks=$NF} END {print cores * socks}' || true)
 PHYSICAL_CORES=${PHYSICAL_CORES:-4}
 
 # Detect RAM
@@ -1131,9 +1161,11 @@ fi
 # Get total model size (handles split GGUFs)
 MODEL_DIR_PATH=$(dirname "$MODEL_PATH")
 SPLIT_PATTERN=$(echo "$MODEL_NAME" | sed 's/-[0-9]*-of-[0-9]*\.gguf/.gguf/')
-TOTAL_SIZE_BYTES=$(find "$MODEL_DIR_PATH" -name "${SPLIT_PATTERN%.gguf}*" -type f -print0 2>/dev/null | xargs -0 du -scb 2>/dev/null | tail -1 | awk '{print $1}')
+# `|| echo 0` guards pipefail — find/du may fail on oddly-shared dirs,
+# networked filesystems, or if the split pattern matches nothing.
+TOTAL_SIZE_BYTES=$(find "$MODEL_DIR_PATH" -name "${SPLIT_PATTERN%.gguf}*" -type f -print0 2>/dev/null | xargs -0 du -scb 2>/dev/null | tail -1 | awk '{print $1}' || echo 0)
 if [[ -z "$TOTAL_SIZE_BYTES" || "$TOTAL_SIZE_BYTES" == "0" ]]; then
-    TOTAL_SIZE_BYTES=$(du -sb "$MODEL_PATH" | awk '{print $1}')
+    TOTAL_SIZE_BYTES=$(du -sb "$MODEL_PATH" 2>/dev/null | awk '{print $1}' || echo 0)
 fi
 TOTAL_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_BYTES/1048576}")
 TOTAL_SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $TOTAL_SIZE_BYTES/1073741824}")
@@ -1729,7 +1761,7 @@ fi
 VRAM_NEEDED_MB=$(( TOTAL_SIZE_MB * VRAM_OVERHEAD_PERCENT / 100 + KV_TOTAL_MB + COMPUTE_PER_GPU_MB ))
 if [[ -n "$MMPROJ_PATH" ]]; then
     if [[ -f "$MMPROJ_PATH" ]]; then
-        MMPROJ_SIZE_MB=$(du -sm "$MMPROJ_PATH" | awk '{print $1}')
+        MMPROJ_SIZE_MB=$(du -sm "$MMPROJ_PATH" 2>/dev/null | awk '{print $1}' || echo 0)
         VRAM_NEEDED_MB=$(( VRAM_NEEDED_MB + MMPROJ_SIZE_MB ))
     else
         echo "Error: Vision enabled but mmproj file not found/downloaded."
@@ -1869,7 +1901,7 @@ wait_for_ready() {
 }
 
 # Try starting server, wait for health. Sets RUNNING_PID on success.
-RUNNING_PID=""
+# (RUNNING_PID is initialized at script top so the EXIT trap can see it.)
 try_start() {
     local extra_flags=("$@")
     RUNNING_PID=""
@@ -1930,8 +1962,8 @@ run_benchmark() {
     fi
 
     local pp_tokens pp_time tg_tokens tg_time
-    pp_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('prompt_tokens',0))" 2>/dev/null)
-    tg_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('completion_tokens',0))" 2>/dev/null)
+    pp_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('prompt_tokens',0))" 2>/dev/null || echo 0)
+    tg_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('completion_tokens',0))" 2>/dev/null || echo 0)
 
     # Use timings endpoint if available (ik_llama.cpp / llama.cpp specific)
     local timings
@@ -1986,6 +2018,7 @@ run_with_restart() {
         echo "Starting server..."
         "$LLAMA_SERVER" "${flags[@]}" > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
         local pid=$!
+        RUNNING_PID="$pid"   # expose to EXIT trap so Ctrl-C cleans up the server
         # Mark server as OOM-kill target so it dies instead of the whole system
         echo 1000 > "/proc/$pid/oom_score_adj" 2>/dev/null || true
         echo "Server PID: $pid"
@@ -2571,9 +2604,12 @@ for k, v in normalized.items():
 print(' '.join(parts))
 print(' '.join(keys))
 " <<< "$overrides_json") || true
+    # NOTE: `head -1` closes stdin after one line, which SIGPIPEs echo. Under
+    # `set -euo pipefail` that fails the pipeline and aborts the whole script
+    # silently. `|| true` defuses it.
     local line1 line2
-    line1=$(echo "$flags_str" | head -1)
-    line2=$(echo "$flags_str" | tail -1)
+    line1=$(echo "$flags_str" | head -1 || true)
+    line2=$(echo "$flags_str" | tail -1 || true)
     # shellcheck disable=SC2206
     [[ -n "$line1" ]] && TUNE_OVERRIDE_FLAGS=($line1)
     [[ -n "$line2" ]] && TUNE_OVERRIDE_KEYS=($line2)
@@ -2768,8 +2804,10 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
 
     local bench_result baseline_gen baseline_pp
     bench_result=$(bench_gen_tps)
-    baseline_gen=$(echo "$bench_result" | awk '{print $1}')
-    baseline_pp=$(echo "$bench_result" | awk '{print $2}')
+    # awk reads all of stdin so no SIGPIPE here, but `|| true` keeps us safe
+    # if bench_result is empty or awk ever gets replaced.
+    baseline_gen=$(echo "$bench_result" | awk '{print $1}' || true)
+    baseline_pp=$(echo "$bench_result" | awk '{print $2}' || true)
     echo "  Baseline: gen=${baseline_gen} tok/s  pp=${baseline_pp} tok/s"
     _tune_progress_line 0 "$AI_TUNE_ROUNDS" "$tune_start_ts" "$baseline_gen" "baseline" "$baseline_gen"
 
@@ -2976,9 +3014,11 @@ print(json.dumps(msgs))
         fi
 
         local config_name config_reasoning config_flags_json
-        config_name=$(echo "$parsed" | python3 -c "import sys,json; print(json.load(sys.stdin).get('name','config_${round}'))")
-        config_reasoning=$(echo "$parsed" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reasoning',''))")
-        config_flags_json=$(echo "$parsed" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('flags',{})))")
+        # pipefail guards: a malformed LLM JSON response would silently exit
+        # the tuner (and the whole script) without these.
+        config_name=$(echo "$parsed" | python3 -c "import sys,json; print(json.load(sys.stdin).get('name','config_${round}'))" 2>/dev/null || echo "config_${round}")
+        config_reasoning=$(echo "$parsed" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reasoning',''))" 2>/dev/null || echo "")
+        config_flags_json=$(echo "$parsed" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('flags',{})))" 2>/dev/null || echo "{}")
 
         echo "  Config: ${config_name}"
         echo "  Reason: ${config_reasoning}"
@@ -3075,12 +3115,12 @@ print(json.dumps(msgs))
             # Benchmark this config
             echo "  Benchmarking..."
             bench_result=$(bench_gen_tps)
-            round_gen=$(echo "$bench_result" | awk '{print $1}')
-            round_pp=$(echo "$bench_result" | awk '{print $2}')
+            round_gen=$(echo "$bench_result" | awk '{print $1}' || true)
+            round_pp=$(echo "$bench_result" | awk '{print $2}' || true)
 
             local delta improvement
-            delta=$(python3 -c "print(f'{${round_gen} - ${baseline_gen}:.2f}')")
-            improvement=$(python3 -c "g=${baseline_gen}; print(f'{(${round_gen}-g)/g*100:.1f}' if g>0 else '0')")
+            delta=$(python3 -c "print(f'{${round_gen:-0} - ${baseline_gen:-0}:.2f}')" 2>/dev/null || echo "0.00")
+            improvement=$(python3 -c "g=${baseline_gen:-0}; print(f'{(${round_gen:-0}-g)/g*100:.1f}' if g>0 else '0')" 2>/dev/null || echo "0")
 
             if python3 -c "exit(0 if ${round_gen} > ${best_gen} else 1)"; then
                 echo "  ★ NEW BEST: gen=${round_gen} tok/s (+${improvement}%)  pp=${round_pp} tok/s"
@@ -3342,6 +3382,17 @@ except: print('0')" 2>/dev/null)
 # Section 7: Execute Strategy
 # ═══════════════════════════════════════════════════════════════
 
+# Detect user intent on mmap once, globally. USER_NO_MMAP=1 means the user
+# passed --no-mmap on the CLI — respected by every strategy. The MoE section
+# may further promote this to Phase 2's mmap path (MMAP_PATH=1).
+# (cpu_only and dense_cpu_offload still force --no-mmap by default — that is
+# intentional legacy behaviour; those paths don't benefit from paging since
+# dense models touch every layer on every token.)
+USER_NO_MMAP=0
+for _f in "${EXTRA_LLAMA_FLAGS[@]:-}"; do
+    [[ "$_f" == "--no-mmap" ]] && USER_NO_MMAP=1
+done
+
 # AI Tune: run optimization if requested
 # MoE models: ai-tune runs AFTER Section 8 expert placement (see end of Section 8)
 if (( DO_AI_TUNE )) && [[ "$STRATEGY" != "moe_offload" ]]; then
@@ -3561,6 +3612,34 @@ esac
 # Section 8: MoE Expert Placement & Auto-Tuning
 # ═══════════════════════════════════════════════════════════════
 
+# Short-circuit if the user already specified --n-cpu-moe N: they know their
+# setup. Skip the full -ot placement math (which would conflict with their
+# flag anyway) and go straight to launch. Both `-ncmoe N` and `--n-cpu-moe N`
+# forms are recognized.
+USER_NCPUMOE=""
+_prev=""
+for _f in "${EXTRA_LLAMA_FLAGS[@]:-}"; do
+    if [[ "$_prev" == "--n-cpu-moe" || "$_prev" == "-ncmoe" ]]; then
+        USER_NCPUMOE="$_f"
+        break
+    fi
+    _prev="$_f"
+done
+if [[ -n "$USER_NCPUMOE" ]]; then
+    echo ""
+    echo "User-supplied --n-cpu-moe ${USER_NCPUMOE} detected — skipping MoE placement."
+    echo "  Launching directly with your flag (expert-layer tuning is your responsibility)."
+    if (( DRY_RUN )); then
+        print_cmd "${COMMON_FLAGS[@]}"
+        exit 0
+    fi
+    if (( DO_AI_TUNE )); then
+        TUNE_EXTRA_FIXED=()
+        ai_tune
+    fi
+    run_with_restart "${COMMON_FLAGS[@]}"
+fi
+
 mkdir -p "$CACHE_DIR"
 CACHE_KEY_INPUT="${MODEL_NAME}_${TOTAL_SIZE_BYTES}_ctx${CTX_SIZE}_kv${KV_QUALITY}_gpus${GPU_COUNT}_be${BACKEND_TAG}"
 [[ -n "$GPUS_FILTER" ]] && CACHE_KEY_INPUT="${CACHE_KEY_INPUT}_filter${GPUS_FILTER}"
@@ -3586,8 +3665,9 @@ fi
 if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
     echo ""
     echo "Using cached config: $CACHE_FILE"
-    # Allow CACHED_GPU_ASSIGNMENTS (-ot path) or CACHED_NCPUMOE (recovery path)
-    if grep -qvE '^(#.*|CACHED_GPU_ASSIGNMENTS="[0-9: ]*"|CACHED_(NCPUMOE|BATCH|UBATCH|PARALLEL|KVUNIFIED)="[0-9]+"|[[:space:]]*)$' "$CACHE_FILE"; then
+    # Allow CACHED_GPU_ASSIGNMENTS (-ot path), CACHED_NCPUMOE (recovery path),
+    # and CACHED_MMAP (Phase 2 mmap opt-in so we don't forget user consent).
+    if grep -qvE '^(#.*|CACHED_GPU_ASSIGNMENTS="[0-9: ]*"|CACHED_(NCPUMOE|BATCH|UBATCH|PARALLEL|KVUNIFIED|MMAP)="[0-9]+"|[[:space:]]*)$' "$CACHE_FILE"; then
         echo "WARNING: Cache file contains unexpected content, ignoring."
         rm -f "$CACHE_FILE"
     else
@@ -3642,8 +3722,16 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_GPU_ASSIGNMENTS:-}" ]
     done
 
     if (( CACHE_VALID )); then
+        # Restore Phase-2 mmap opt-in from cache (CACHED_MMAP=1 means
+        # "user said yes to paging on demand last time"). Fall back to
+        # legacy --no-mmap for older caches without this key.
+        CACHED_MMAP_FLAGS=(--no-mmap)
+        if [[ "${CACHED_MMAP:-0}" == "1" ]]; then
+            CACHED_MMAP_FLAGS=()
+            echo "  Cache says: mmap path (Phase 2 opt-in remembered)"
+        fi
         OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
-        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --no-mmap -ot "$OT_STRING")
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" "${CACHED_MMAP_FLAGS[@]}" -ot "$OT_STRING")
         if (( DRY_RUN )); then
             print_cmd "${LAUNCH_FLAGS[@]}"
             exit 0
@@ -3652,8 +3740,8 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_GPU_ASSIGNMENTS:-}" ]
         if (( DO_AI_TUNE )); then
             echo ""
             echo "MoE placement loaded from cache. Running AI Tune with placement locked..."
-            COMMON_FLAGS+=(--no-mmap -ot "$OT_STRING")
-            TUNE_EXTRA_FIXED=(--no-mmap -ot "$OT_STRING")
+            COMMON_FLAGS+=("${CACHED_MMAP_FLAGS[@]}" -ot "$OT_STRING")
+            TUNE_EXTRA_FIXED=("${CACHED_MMAP_FLAGS[@]}" -ot "$OT_STRING")
             ai_tune
             kill_server "$RUNNING_PID"
             run_with_restart "${COMMON_FLAGS[@]}"
@@ -3767,6 +3855,19 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
     done
 fi
 
+# mmap strategy for MoE: historically the launcher forced --no-mmap for every
+# MoE launch so that the CPU-resident expert tensors had a predictable resident
+# footprint. That fails hard when the model's virtual size exceeds physical
+# RAM even if the *working set* would fit (issue #11, #7). The fix: default
+# to --no-mmap for the familiar path, but let Phase 2 switch to mmap on
+# demand when the kernel can page cold experts in/out.
+#
+# MMAP_PATH   = 1 means mmap will be used for the launch (no --no-mmap flag)
+# MMAP_PATH   = 0 means --no-mmap will be passed (full resident footprint)
+# USER_NO_MMAP was detected earlier (Section 7 header).
+MMAP_PATH=0
+MOE_MMAP_FLAGS=(--no-mmap)
+
 # Phase 2: If still over RAM after maxing GPU budgets, warn but allow continue
 # when mmap can reasonably handle the gap. The RAM_NEEDED estimate counts the
 # full virtual size of CPU-resident expert tensors, but with mmap (default)
@@ -3774,27 +3875,43 @@ fi
 # to physically fit. Safe-to-proceed floor: enough RAM for compute buffers +
 # a handful of hot layers' worth of expert working set.
 if (( RAM_NEEDED > RAM_AVAIL_MB )); then
-    # Working-set floor: compute buffers + ~8 hot expert layers + KV overhead
+    # Working-set floor: compute buffers + ~8 hot expert layers + KV overhead.
+    # This is what actually needs to be resident during inference on the mmap
+    # path — most layers sit in the page cache and are paged in on demand.
     WORKING_SET_FLOOR=$(( CUDA_HOST_MB + 8 * EXPERT_PER_LAYER_MB + 2048 ))
     SHORTFALL=$(( RAM_NEEDED - RAM_AVAIL_MB ))
+    PADDING_MB=$(( TENSOR_RAM_PADDED - CPU_EXPERT_MB ))
     echo ""
-    echo "WARNING: MoE virtual RAM estimate exceeds available RAM."
-    echo "  CPU expert layers: ${LAYERS_CPU} layers (${CPU_EXPERT_MB}MB)"
-    echo "  CUDA host buffers: ${CUDA_HOST_MB}MB"
-    echo "  RAM padding (15%): $(( TENSOR_RAM_PADDED - CPU_EXPERT_MB ))MB"
-    echo "  ─────────────────────────────"
-    echo "  Virtual RAM est:   ${RAM_NEEDED}MB"
-    echo "  RAM available:     ${RAM_AVAIL_MB}MB"
-    echo "  Shortfall:         ${SHORTFALL}MB"
+    if (( USER_NO_MMAP )); then
+        # User opted out of mmap → full resident footprint is mandatory.
+        echo "ERROR: --no-mmap requested, but full resident size exceeds available RAM."
+        echo "  With --no-mmap every CPU expert byte must stay pinned in RAM."
+        echo "  Full resident size:    ${RAM_NEEDED}MB  (CPU experts + padding + buffers)"
+        echo "  RAM available:         ${RAM_AVAIL_MB}MB"
+        echo "  Shortfall:             ${SHORTFALL}MB"
+        echo "  Remove --no-mmap to let the kernel page experts on demand,"
+        echo "  or use more GPU VRAM / a smaller quantization."
+        exit 1
+    fi
+    echo "NOTE: Full resident MoE size would exceed available RAM."
+    echo "      (On the mmap path this is informational — the kernel pages"
+    echo "       cold experts in/out and only the working set needs to fit.)"
+    echo ""
+    echo "  Breakdown:"
+    echo "    CPU expert layers:     ${LAYERS_CPU} layers (${CPU_EXPERT_MB}MB)"
+    echo "    Safety padding (15%):  ${PADDING_MB}MB"
+    echo "    CUDA host buffers:     ${CUDA_HOST_MB}MB"
+    echo "    ───────────────────────────────────"
+    echo "    Full resident size:    ${RAM_NEEDED}MB"
+    echo "    RAM available:         ${RAM_AVAIL_MB}MB"
+    echo "    Shortfall (resident):  ${SHORTFALL}MB"
     echo ""
     if (( RAM_AVAIL_MB >= WORKING_SET_FLOOR )); then
-        echo "  Note: this is the full mmap'd model size, not working-set RAM."
-        echo "  With mmap (default), the kernel pages cold experts in/out on"
-        echo "  demand. Only the hot working set needs to physically fit."
-        echo "  Working-set floor (compute + 8 hot layers): ${WORKING_SET_FLOOR}MB"
+        echo "  Working set on mmap path: ~${WORKING_SET_FLOOR}MB (compute + 8 hot layers)"
+        echo "  — that fits in your ${RAM_AVAIL_MB}MB of available RAM."
         echo ""
         if [[ -t 0 ]] && (( ${LLM_ASSUME_YES:-0} == 0 )); then
-            read -r -p "  Continue anyway and let mmap handle paging? [y/N] " _reply
+            read -r -p "  Continue and let mmap page cold experts on demand? [y/N] " _reply
             _reply="${_reply:-n}"
             if [[ ! "$_reply" =~ ^[Yy] ]]; then
                 echo "  Aborted by user."
@@ -3803,9 +3920,12 @@ if (( RAM_NEEDED > RAM_AVAIL_MB )); then
         else
             echo "  Non-interactive (or LLM_ASSUME_YES=1) — continuing."
         fi
-        echo "  Proceeding with mmap paging (use --no-mmap to disable if unstable)."
+        echo "  Proceeding with mmap paging enabled (no --no-mmap)."
+        MMAP_PATH=1
+        MOE_MMAP_FLAGS=()   # drop any --no-mmap we might have queued
     else
-        echo "  Options:"
+        echo "  Working set on mmap path would be ~${WORKING_SET_FLOOR}MB, still above"
+        echo "  ${RAM_AVAIL_MB}MB available. Options:"
         echo "  1. Add more system RAM"
         echo "  2. Use a smaller quantization (IQ3 → IQ2)"
         echo "  3. Use a smaller model"
@@ -3832,14 +3952,14 @@ echo "  CPU (RAM): ${LAYERS_CPU} layers (~${CPU_EXPERT_MB}MB)"
 OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
 
 if (( DRY_RUN )); then
-    print_cmd "${COMMON_FLAGS[@]}" --no-mmap -ot "$OT_STRING"
+    print_cmd "${COMMON_FLAGS[@]}" "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"
     exit 0
 fi
 
 # ── Auto-tuning loop ──
 echo ""
 echo "Starting server (conservative)..."
-if try_start --no-mmap -ot "$OT_STRING"; then
+if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
     echo "  Server healthy (PID $RUNNING_PID)"
 
     # Measure actual VRAM after load (server is already healthy, VRAM is settled)
@@ -3847,10 +3967,15 @@ if try_start --no-mmap -ot "$OT_STRING"; then
     declare -a ACTUAL_FREE
     for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
         gi=${GPU_ORDER[$i]}
-        raw_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ')
-        # nvidia-smi can fail or return blank on WSL2 / driver hiccups. Fall back
-        # to pre-launch free minus an estimate of what we just loaded so the script
-        # doesn't blow up on empty-string arithmetic under pipefail+nounset.
+        # CRITICAL: trailing `|| true` is required under `set -euo pipefail`.
+        # Without it, a transient nvidia-smi failure (common on cloud/datacenter
+        # rigs right after loading a huge model — driver is still settling)
+        # causes the whole pipeline to return non-zero via pipefail, which makes
+        # the `var=$(...)` assignment silently abort the script — no error, no
+        # cleanup, orphaned server. See issue #11 and #7.
+        raw_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ' || true)
+        # Fall back to pre-launch free minus an estimate of what we just loaded
+        # so the script doesn't blow up on empty-string arithmetic under nounset.
         if [[ ! "$raw_free" =~ ^[0-9]+$ ]]; then
             estimated_used=$(( LAYERS_PER_GPU[$gi] * COST_PER_LAYER_MB ))
             raw_free=$(( GPU_VRAM_FREE[$gi] - estimated_used ))
@@ -3917,20 +4042,23 @@ if try_start --no-mmap -ot "$OT_STRING"; then
         kill_server "$RUNNING_PID"
         echo ""
         echo "Restarting with optimized config (Gentle Load enabled)..."
-        # --no-mmap is critical for 397B models to prevent virtual memory blowout
         # --mlock pins CPU-resident weights so they don't get swapped — but on
         # WSL2 that pinning can freeze the Windows host, so we skip it there
-        # and let the Linux page cache handle it.
+        # and let the Linux page cache handle it. Also skip when we're on the
+        # mmap path (Phase 2 promise): mlock would pin every mmap'd page and
+        # defeat the paging-on-demand the user just consented to.
         MLOCK_ARGS=()
-        if (( ! IS_WSL2 )); then
-            MLOCK_ARGS=(--mlock)
-        else
+        if (( MMAP_PATH )); then
+            log "  mmap path active — skipping --mlock (would pin all pages)"
+        elif (( IS_WSL2 )); then
             log "  WSL2 detected — skipping --mlock to avoid host freeze"
+        else
+            MLOCK_ARGS=(--mlock)
         fi
-        if ! try_start --no-mmap "${MLOCK_ARGS[@]}" -ot "$OT_STRING"; then
+        if ! try_start "${MOE_MMAP_FLAGS[@]}" "${MLOCK_ARGS[@]}" -ot "$OT_STRING"; then
             echo "  Optimized config failed — retrying without mlock..."
             kill_server ""
-            if ! try_start --no-mmap -ot "$OT_STRING"; then
+            if ! try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
                 echo "  FAILED: Could not start server. Check $SERVER_LOG"
                 exit 1
             fi
@@ -3956,6 +4084,7 @@ if try_start --no-mmap -ot "$OT_STRING"; then
 # Generated: $(date)
 # Total layers: $LAYER_COUNT, Experts: $EXPERT_COUNT
 CACHED_GPU_ASSIGNMENTS="$CACHED_GPU_ASSIGNMENTS"
+CACHED_MMAP="${MMAP_PATH}"
 CEOF
 
     TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
@@ -3972,8 +4101,8 @@ CEOF
     if (( DO_AI_TUNE )); then
         echo ""
         echo "MoE placement complete. Running AI Tune with placement locked..."
-        COMMON_FLAGS+=(--no-mmap -ot "$OT_STRING")
-        TUNE_EXTRA_FIXED=(--no-mmap -ot "$OT_STRING")
+        COMMON_FLAGS+=("${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING")
+        TUNE_EXTRA_FIXED=("${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING")
         ai_tune
     fi
 
@@ -3983,7 +4112,7 @@ CEOF
     if (( DO_AI_TUNE )); then
         run_with_restart "${COMMON_FLAGS[@]}"
     else
-        run_with_restart "${COMMON_FLAGS[@]}" --no-mmap -ot "$OT_STRING"
+        run_with_restart "${COMMON_FLAGS[@]}" "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"
     fi
 else
     echo ""
