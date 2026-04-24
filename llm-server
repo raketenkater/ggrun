@@ -1171,7 +1171,7 @@ TOTAL_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_BYTES/1048576}")
 TOTAL_SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $TOTAL_SIZE_BYTES/1073741824}")
 
 # Read GGUF metadata
-read -r LAYER_COUNT EXPERT_COUNT HEAD_COUNT_KV KEY_LENGTH VALUE_LENGTH HAS_SSM HAS_FUSED EXPERT_BYTES NON_EXPERT_BYTES MODEL_ARCH < <(MODEL_PATH="$MODEL_PATH" python3 -c "
+read -r LAYER_COUNT EXPERT_COUNT HEAD_COUNT_KV KEY_LENGTH VALUE_LENGTH HAS_SSM HAS_FUSED EXPERT_BYTES NON_EXPERT_BYTES MODEL_ARCH EMBEDDING_LENGTH FEED_FORWARD_LENGTH EXPERT_USED_COUNT EXPERT_FF EXPERT_SHARED_FF KV_LORA_RANK Q_LORA_RANK ROPE_DIM LEADING_DENSE SLIDING_WINDOW FULL_ATTN_INTERVAL HAS_SHEXP < <(MODEL_PATH="$MODEL_PATH" python3 -c "
 import struct, sys, glob, os, re
 
 # GGUF type -> (bytes_per_block, elements_per_block) from ggml.h struct sizes
@@ -1222,10 +1222,21 @@ def skip_kv(f, kv_count):
             val = struct.unpack('<I', f.read(4))[0]
             if key.endswith('.block_count'): r['layers'] = val
             if 'expert_count' in key and 'used' not in key: r['experts'] = val
+            if key.endswith('.expert_used_count'): r['exp_used'] = val
             if 'head_count_kv' in key: r['hkv'] = val
-            if 'key_length' in key: r['kl'] = val
-            if 'value_length' in key: r['vl'] = val
+            if key.endswith('.attention.key_length'): r['kl'] = val
+            if key.endswith('.attention.value_length'): r['vl'] = val
             if 'ssm.state_size' in key: r['ssm'] = 1
+            if key.endswith('.embedding_length'): r['embd'] = val
+            if key.endswith('.feed_forward_length'): r['ff'] = val
+            if key.endswith('.expert_feed_forward_length'): r['exp_ff'] = val
+            if key.endswith('.expert_shared_feed_forward_length'): r['exp_shared_ff'] = val
+            if key.endswith('.attention.kv_lora_rank'): r['kv_lora'] = val
+            if key.endswith('.attention.q_lora_rank'): r['q_lora'] = val
+            if key.endswith('.rope.dimension_count'): r['n_rot'] = val
+            if key.endswith('.leading_dense_block_count'): r['leading_dense'] = val
+            if key.endswith('.attention.sliding_window'): r['swa'] = val
+            if key.endswith('.full_attention_interval') or key.endswith('.attention.full_attention_interval'): r['full_interval'] = val
         elif vt == 8:
             sl = struct.unpack('<Q', f.read(8))[0]
             val = f.read(sl).decode('utf-8', errors='replace')
@@ -1245,6 +1256,7 @@ def read_tensors(f, tensor_count):
         tl = struct.unpack('<Q', f.read(8))[0]
         tname = f.read(tl).decode('utf-8', errors='replace')
         if 'ffn_up_gate' in tname or 'ffn_gate_up' in tname: r['fused'] = 1
+        if '_shexp' in tname or '_chexp' in tname: r['has_shexp'] = 1
         n_dims = struct.unpack('<I', f.read(4))[0]
         dims = [struct.unpack('<Q', f.read(8))[0] for _ in range(n_dims)]
         ttype = struct.unpack('<I', f.read(4))[0]
@@ -1291,8 +1303,8 @@ try:
                 skip_kv(f, kvc)
                 read_tensors(f, tc)
 except: pass
-print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0), r.get('fused',0), r.get('expert_bytes',0), r.get('non_expert_bytes',0), r.get('arch','unknown'))
-" 2>/dev/null || echo "0 0 0 0 0 0 0 0 0 unknown")
+print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0), r.get('fused',0), r.get('expert_bytes',0), r.get('non_expert_bytes',0), r.get('arch','unknown'), r.get('embd',0), r.get('ff',0), r.get('exp_used',0), r.get('exp_ff',0), r.get('exp_shared_ff',0), r.get('kv_lora',0), r.get('q_lora',0), r.get('n_rot',0), r.get('leading_dense',0), r.get('swa',0), r.get('full_interval',0), r.get('has_shexp',0))
+" 2>/dev/null || echo "0 0 0 0 0 0 0 0 0 unknown 0 0 0 0 0 0 0 0 0 0 0 0")
 
 LAYER_COUNT=${LAYER_COUNT:-0}
 EXPERT_COUNT=${EXPERT_COUNT:-0}
@@ -1304,6 +1316,18 @@ HAS_FUSED=${HAS_FUSED:-0}
 EXPERT_BYTES=${EXPERT_BYTES:-0}
 NON_EXPERT_BYTES=${NON_EXPERT_BYTES:-0}
 MODEL_ARCH=${MODEL_ARCH:-unknown}
+EMBEDDING_LENGTH=${EMBEDDING_LENGTH:-0}
+FEED_FORWARD_LENGTH=${FEED_FORWARD_LENGTH:-0}
+EXPERT_USED_COUNT=${EXPERT_USED_COUNT:-0}
+EXPERT_FF=${EXPERT_FF:-0}
+EXPERT_SHARED_FF=${EXPERT_SHARED_FF:-0}
+KV_LORA_RANK=${KV_LORA_RANK:-0}
+Q_LORA_RANK=${Q_LORA_RANK:-0}
+ROPE_DIM=${ROPE_DIM:-0}
+LEADING_DENSE=${LEADING_DENSE:-0}
+SLIDING_WINDOW=${SLIDING_WINDOW:-0}
+FULL_ATTN_INTERVAL=${FULL_ATTN_INTERVAL:-0}
+HAS_SHEXP=${HAS_SHEXP:-0}
 
 # Parse extra GGUF metadata for mmproj auto-download (name, basename, quantizer)
 eval "$(MODEL_PATH="$MODEL_PATH" python3 -c "
@@ -1477,29 +1501,80 @@ else
 fi
 
 # ── KV cache type: high=f16, mid=q8_0 (default), low=q4_0, auto=fit-based ──
-# KV cache size estimates per type
-if (( HEAD_COUNT_KV > 0 && KEY_LENGTH > 0 && VALUE_LENGTH > 0 )); then
-    KV_Q4_MB=$(awk "BEGIN {printf \"%.0f\", $CTX_SIZE * $LAYER_COUNT * $HEAD_COUNT_KV * ($KEY_LENGTH + $VALUE_LENGTH) * 0.5 / 1048576}")
-    KV_Q8_MB=$(awk "BEGIN {printf \"%.0f\", $CTX_SIZE * $LAYER_COUNT * $HEAD_COUNT_KV * ($KEY_LENGTH + $VALUE_LENGTH) * 1.0 / 1048576}")
-    KV_F16_MB=$(awk "BEGIN {printf \"%.0f\", $CTX_SIZE * $LAYER_COUNT * $HEAD_COUNT_KV * ($KEY_LENGTH + $VALUE_LENGTH) * 2.0 / 1048576}")
+# KV cache size estimate, dispatched by family (as of 2026-04):
+#   standard — dense GQA/MQA (llama/mistral/qwen2-3/phi/mixtral/olmo/...)
+#   mla      — compressed KV projection (deepseek2/3, kimi-k2, minicpm3, plm, mistral4)
+#   iswa     — interleaved sliding-window (gemma2/3, llama4, cohere2, exaone4, plamo3)
+#   ssm      — pure SSM or SSM/attention hybrid (mamba, jamba, qwen3next,
+#              granitehybrid, falconh1, nemotron-h, lfm2) — KV only on attn layers
+# Detection is metadata-key driven (not arch allowlist) so new archs Just Work
+# as long as they emit the standard GGUF attention/SSM keys.
+KV_FAMILY="standard"
+KV_FAMILY_NOTE=""
+_kv_bytes_per_layer_per_token=$(( HEAD_COUNT_KV * (KEY_LENGTH + VALUE_LENGTH) ))
+_iswa_bytes_per_bpe=0
+if (( KV_LORA_RANK > 0 )); then
+    KV_FAMILY="mla"
+    # MLA stores compressed c^{KV} + RoPE'd key once per layer (not K+V ×2)
+    _kv_elems_total=$(( LAYER_COUNT * CTX_SIZE * (KV_LORA_RANK + ROPE_DIM) ))
+    KV_FAMILY_NOTE="MLA (kv_lora=${KV_LORA_RANK}+rope=${ROPE_DIM})"
+elif (( HAS_SSM == 1 )); then
+    KV_FAMILY="ssm"
+    if (( FULL_ATTN_INTERVAL > 0 )); then
+        _attn_layers=$(( LAYER_COUNT / FULL_ATTN_INTERVAL ))
+        (( _attn_layers < 1 )) && _attn_layers=1
+        KV_FAMILY_NOTE="SSM/hybrid (${_attn_layers}/${LAYER_COUNT} attn, interval=${FULL_ATTN_INTERVAL})"
+    elif (( HEAD_COUNT_KV == 0 )); then
+        _attn_layers=0
+        KV_FAMILY_NOTE="Pure SSM (no growing KV)"
+    else
+        _attn_layers=$(( (LAYER_COUNT + 1) / 2 ))
+        KV_FAMILY_NOTE="SSM/hybrid (~${_attn_layers}/${LAYER_COUNT} attn, default)"
+    fi
+    _kv_elems_total=$(( _attn_layers * CTX_SIZE * _kv_bytes_per_layer_per_token ))
+elif (( SLIDING_WINDOW > 0 )); then
+    KV_FAMILY="iswa"
+    # swa period: interval between full-attention layers. Missing in metadata for
+    # most gemma/llama4 GGUFs — default to 6 (matches gemma3; conservative for others).
+    _swa_period=6
+    case "$MODEL_ARCH" in
+        gemma2|cohere2|exaone4|llama4) _swa_period=4 ;;
+        gemma3) _swa_period=6 ;;
+        plamo3) _swa_period=8 ;;
+    esac
+    _full_layers=$(( (LAYER_COUNT + _swa_period - 1) / _swa_period ))
+    _swa_layers=$(( LAYER_COUNT - _full_layers ))
+    _swa_ctx=$CTX_SIZE
+    (( _swa_ctx > SLIDING_WINDOW )) && _swa_ctx=$SLIDING_WINDOW
+    _kv_elems_total=$(( _full_layers * CTX_SIZE * _kv_bytes_per_layer_per_token + _swa_layers * _swa_ctx * _kv_bytes_per_layer_per_token ))
+    KV_FAMILY_NOTE="ISWA (${_full_layers} full + ${_swa_layers} sw@${_swa_ctx})"
+else
+    _kv_elems_total=$(( LAYER_COUNT * CTX_SIZE * _kv_bytes_per_layer_per_token ))
+fi
+
+if (( HEAD_COUNT_KV > 0 && KEY_LENGTH > 0 && VALUE_LENGTH > 0 )) || [[ "$KV_FAMILY" == "mla" ]]; then
+    KV_Q4_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 0.5 / 1048576}")
+    KV_Q8_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 1.0 / 1048576}")
+    KV_F16_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 2.0 / 1048576}")
 else
     KV_Q4_MB=$(( LAYER_COUNT * 70 ))
     KV_Q8_MB=$(( LAYER_COUNT * 140 ))
     KV_F16_MB=$(( LAYER_COUNT * 280 ))
 fi
 
+_kv_family_tag="${KV_FAMILY_NOTE:+ [${KV_FAMILY_NOTE}]}"
 case "$KV_QUALITY" in
     high)
         KV_TYPE="f16"
-        echo "  KV cache: f16 (${KV_F16_MB}MB) — highest quality"
+        echo "  KV cache: f16 (${KV_F16_MB}MB) — highest quality${_kv_family_tag}"
         ;;
     mid)
         KV_TYPE="q8_0"
-        echo "  KV cache: q8_0 (${KV_Q8_MB}MB) — balanced (default)"
+        echo "  KV cache: q8_0 (${KV_Q8_MB}MB) — balanced (default)${_kv_family_tag}"
         ;;
     low)
         KV_TYPE="q4_0"
-        echo "  KV cache: q4_0 (${KV_Q4_MB}MB) — minimum VRAM"
+        echo "  KV cache: q4_0 (${KV_Q4_MB}MB) — minimum VRAM${_kv_family_tag}"
         ;;
     *)
         echo "Error: --kv-quality must be one of: high, mid, low"
@@ -3798,15 +3873,37 @@ done
 
 LAYERS_CPU=$(( LAYER_COUNT - TOTAL_GPU_LAYERS ))
 
-# RAM safety check
-# With -ngl 999: non-expert tensors (attention, norms, embeddings) go to GPUs, not RAM
-# Only expert tensors for CPU layers stay in RAM
-# CUDA_Host pinned memory ~1GB for output + compute buffers
+# RAM safety check — component-based estimate (see issue #11).
+# The old "15% of CPU_EXPERT_MB" padding scaled linearly with model size, which
+# invented ~221GB of phantom overhead on a 1.5TB-RAM server trying to load a
+# 460GB MoE. Non-weight RAM overhead is mostly CONSTANT, not a percentage:
+#   ggml compute scratch:  ~2GB  (graph exec buffers, fixed)
+#   CUDA host pinned:      ~1GB  (output + transfer buffers, fixed)
+#   mmap page tables:      ~0.2% of model size on x86_64 (8 bytes per 4KB page)
+#   CPU activation buffer: ubatch × (embd + ffn_dim) × 4 × 2-layer peak
+# ggml reuses scratch across layers so the per-layer activation peaks at ~2
+# layers' worth, not batch × n_layer.
 CPU_EXPERT_MB=$(( LAYERS_CPU * EXPERT_PER_LAYER_MB ))
-# 15% padding covers alignment, tensor metadata, graph structures, mmap overhead
-TENSOR_RAM_PADDED=$(( CPU_EXPERT_MB * 115 / 100 ))
-CUDA_HOST_MB=1024   # pinned memory for output + compute transfers
-RAM_NEEDED=$(( TENSOR_RAM_PADDED + CUDA_HOST_MB ))
+CUDA_HOST_MB=1024
+GRAPH_SCRATCH_MB=2048
+MMAP_PT_MB=$(( TOTAL_SIZE_MB / 500 ))
+# Effective FFN dim: MoE uses top-k × expert_ff (+ shared_ff); dense uses ff.
+# MLA adds compressed q/kv lora projections to per-layer activations.
+if (( EMBEDDING_LENGTH > 0 )); then
+    if (( EXPERT_COUNT > 0 && EXPERT_USED_COUNT > 0 && EXPERT_FF > 0 )); then
+        _act_ffn=$(( EXPERT_USED_COUNT * EXPERT_FF ))
+        (( EXPERT_SHARED_FF > 0 )) && _act_ffn=$(( _act_ffn + EXPERT_SHARED_FF ))
+    else
+        _act_ffn=$FEED_FORWARD_LENGTH
+    fi
+    (( KV_LORA_RANK > 0 )) && _act_ffn=$(( _act_ffn + KV_LORA_RANK + Q_LORA_RANK ))
+    CPU_ACT_MB=$(( UBATCH * (EMBEDDING_LENGTH + _act_ffn) * 4 * 2 / 1048576 ))
+    (( CPU_ACT_MB < 64 )) && CPU_ACT_MB=64
+else
+    CPU_ACT_MB=512   # fallback when arch metadata is missing
+fi
+RAM_OVERHEAD_MB=$(( CUDA_HOST_MB + GRAPH_SCRATCH_MB + MMAP_PT_MB + CPU_ACT_MB ))
+RAM_NEEDED=$(( CPU_EXPERT_MB + RAM_OVERHEAD_MB ))
 
 # Phase 1: If CPU layers would OOM, push layers to GPUs one at a time (least disruption)
 if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
@@ -3846,8 +3943,7 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
         done
         LAYERS_CPU=$(( LAYER_COUNT - TOTAL_GPU_LAYERS ))
         CPU_EXPERT_MB=$(( LAYERS_CPU * EXPERT_PER_LAYER_MB ))
-        TENSOR_RAM_PADDED=$(( CPU_EXPERT_MB * 115 / 100 ))
-        RAM_NEEDED=$(( TENSOR_RAM_PADDED + CUDA_HOST_MB ))
+        RAM_NEEDED=$(( CPU_EXPERT_MB + RAM_OVERHEAD_MB ))
         if (( RAM_NEEDED <= RAM_AVAIL_MB )); then
             echo "  Adjusted GPU budget to ${bump}% — ${LAYERS_CPU} CPU layers (${RAM_NEEDED}MB RAM)"
             break
@@ -3878,15 +3974,14 @@ if (( RAM_NEEDED > RAM_AVAIL_MB )); then
     # Working-set floor: compute buffers + ~8 hot expert layers + KV overhead.
     # This is what actually needs to be resident during inference on the mmap
     # path — most layers sit in the page cache and are paged in on demand.
-    WORKING_SET_FLOOR=$(( CUDA_HOST_MB + 8 * EXPERT_PER_LAYER_MB + 2048 ))
+    WORKING_SET_FLOOR=$(( RAM_OVERHEAD_MB + 8 * EXPERT_PER_LAYER_MB ))
     SHORTFALL=$(( RAM_NEEDED - RAM_AVAIL_MB ))
-    PADDING_MB=$(( TENSOR_RAM_PADDED - CPU_EXPERT_MB ))
     echo ""
     if (( USER_NO_MMAP )); then
         # User opted out of mmap → full resident footprint is mandatory.
         echo "ERROR: --no-mmap requested, but full resident size exceeds available RAM."
         echo "  With --no-mmap every CPU expert byte must stay pinned in RAM."
-        echo "  Full resident size:    ${RAM_NEEDED}MB  (CPU experts + padding + buffers)"
+        echo "  Full resident size:    ${RAM_NEEDED}MB  (CPU experts + overhead)"
         echo "  RAM available:         ${RAM_AVAIL_MB}MB"
         echo "  Shortfall:             ${SHORTFALL}MB"
         echo "  Remove --no-mmap to let the kernel page experts on demand,"
@@ -3899,8 +3994,10 @@ if (( RAM_NEEDED > RAM_AVAIL_MB )); then
     echo ""
     echo "  Breakdown:"
     echo "    CPU expert layers:     ${LAYERS_CPU} layers (${CPU_EXPERT_MB}MB)"
-    echo "    Safety padding (15%):  ${PADDING_MB}MB"
+    echo "    ggml compute scratch:  ${GRAPH_SCRATCH_MB}MB"
     echo "    CUDA host buffers:     ${CUDA_HOST_MB}MB"
+    echo "    mmap page tables:      ${MMAP_PT_MB}MB  (~0.2% of model size)"
+    echo "    CPU activation buffer: ${CPU_ACT_MB}MB  (ubatch=${UBATCH} × (embd+ffn) peak)"
     echo "    ───────────────────────────────────"
     echo "    Full resident size:    ${RAM_NEEDED}MB"
     echo "    RAM available:         ${RAM_AVAIL_MB}MB"
