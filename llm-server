@@ -39,6 +39,26 @@
 
 set -euo pipefail
 
+# Resolve this script's directory, following symlinks so an install at
+# ~/.local/bin/llm-server → /home/…/llm-server/llm-server still finds the
+# sibling parse_gguf.py that ships in the repo/install.
+_resolve_script_dir() {
+    local src="${BASH_SOURCE[0]}"
+    while [[ -L "$src" ]]; do
+        local dir
+        dir="$(cd "$(dirname "$src")" 2>/dev/null && pwd -P)" || break
+        src="$(readlink "$src")"
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    cd "$(dirname "$src")" 2>/dev/null && pwd -P
+}
+SCRIPT_DIR="$(_resolve_script_dir || true)"
+PARSE_GGUF="$SCRIPT_DIR/parse_gguf.py"
+if [[ ! -f "$PARSE_GGUF" ]]; then
+    _alt="$(command -v parse_gguf.py 2>/dev/null || true)"
+    [[ -n "$_alt" ]] && PARSE_GGUF="$_alt"
+fi
+
 # RUNNING_PID tracks the in-flight health-check / pre-launch server so a fatal
 # script exit (set -e landmine, SIGINT, SIGTERM) doesn't leak a 100GB+ ik_llama
 # process. `run_with_restart` explicitly resets this for the foreground server
@@ -70,6 +90,10 @@ CONFIG_FILE="$CONFIG_DIR/config.sh"
 PORT="${LLM_PORT:-8081}"
 HOST="0.0.0.0"
 CTX_SIZE="${LLM_CTX_SIZE:-65536}"
+# Set to 1 when the user explicitly passes --ctx-size or LLM_CTX_SIZE so the
+# max-context-fit suggestion stays out of their way.
+CTX_EXPLICIT=0
+[[ -n "${LLM_CTX_SIZE:-}" ]] && CTX_EXPLICIT=1
 
 # Tuning constants
 # MAX_RESTARTS: give-up threshold for repeated startup failures.
@@ -239,7 +263,7 @@ while [[ $# -gt 0 ]]; do
         --cpu)       CPU_ONLY=1; shift ;;
         --model-dir) MODEL_DIR="$2"; shift 2 ;;
         --port)      PORT="$2"; shift 2 ;;
-        --ctx-size)  CTX_SIZE="$2"; shift 2 ;;
+        --ctx-size)  CTX_SIZE="$2"; CTX_EXPLICIT=1; shift 2 ;;
         --server-bin) USER_SERVER_BIN="$2"; shift 2 ;;
         --lib-path)   USER_LIB_PATH="$2"; shift 2 ;;
         --kv-quality)
@@ -1197,141 +1221,15 @@ fi
 TOTAL_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_SIZE_BYTES/1048576}")
 TOTAL_SIZE_GB=$(awk "BEGIN {printf \"%.1f\", $TOTAL_SIZE_BYTES/1073741824}")
 
-# Read GGUF metadata
-read -r LAYER_COUNT EXPERT_COUNT HEAD_COUNT_KV KEY_LENGTH VALUE_LENGTH HAS_SSM HAS_FUSED EXPERT_BYTES NON_EXPERT_BYTES MODEL_ARCH EMBEDDING_LENGTH FEED_FORWARD_LENGTH EXPERT_USED_COUNT EXPERT_FF EXPERT_SHARED_FF KV_LORA_RANK Q_LORA_RANK ROPE_DIM LEADING_DENSE SLIDING_WINDOW FULL_ATTN_INTERVAL HAS_SHEXP < <(MODEL_PATH="$MODEL_PATH" python3 -c "
-import struct, sys, glob, os, re
-
-# GGUF type -> (bytes_per_block, elements_per_block) from ggml.h struct sizes
-GGUF_TYPE_SIZE = {
-    0:  (4, 1),       # F32
-    1:  (2, 1),       # F16
-    2:  (18, 32),     # Q4_0
-    3:  (20, 32),     # Q4_1
-    6:  (22, 32),     # Q5_0
-    7:  (24, 32),     # Q5_1
-    8:  (34, 32),     # Q8_0
-    9:  (36, 32),     # Q8_1
-    10: (84, 256),    # Q2_K
-    11: (110, 256),   # Q3_K
-    12: (144, 256),   # Q4_K
-    13: (176, 256),   # Q5_K
-    14: (210, 256),   # Q6_K
-    15: (292, 256),   # Q8_K
-    16: (66, 256),    # IQ2_XXS
-    17: (74, 256),    # IQ2_XS
-    18: (98, 256),    # IQ3_XXS
-    19: (50, 256),    # IQ1_S
-    20: (18, 32),     # IQ4_NL
-    21: (110, 256),   # IQ3_S
-    22: (82, 256),    # IQ2_S
-    23: (136, 256),   # IQ4_XS
-    24: (56, 256),    # IQ1_M
-    25: (2, 1),       # BF16
-    26: (18, 32),     # Q4_0_4_4
-    27: (18, 32),     # Q4_0_4_8
-    28: (18, 32),     # Q4_0_8_8
-    29: (40, 256),    # TQ1_0
-    30: (54, 256),    # TQ2_0
-    31: (1, 1),       # I8
-}
-
-r = {'fused': 0, 'expert_bytes': 0, 'non_expert_bytes': 0}
-
-def skip_kv(f, kv_count):
-    # KV type sizes: 0=u8(1) 1=i8(1) 2=u16(2) 3=i16(2) 4=u32(4) 5=i32(4)
-    # 6=f32(4) 7=bool(1) 8=string 9=array 10=u64(8) 11=i64(8) 12=f64(8)
-    KV_FIXED = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8}
-    for _ in range(kv_count):
-        kl = struct.unpack('<Q', f.read(8))[0]
-        key = f.read(kl).decode('utf-8', errors='replace')
-        vt = struct.unpack('<I', f.read(4))[0]
-        if vt == 4:
-            val = struct.unpack('<I', f.read(4))[0]
-            if key.endswith('.block_count'): r['layers'] = val
-            if 'expert_count' in key and 'used' not in key: r['experts'] = val
-            if key.endswith('.expert_used_count'): r['exp_used'] = val
-            if 'head_count_kv' in key: r['hkv'] = val
-            if key.endswith('.attention.key_length'): r['kl'] = val
-            if key.endswith('.attention.value_length'): r['vl'] = val
-            if 'ssm.state_size' in key: r['ssm'] = 1
-            if key.endswith('.embedding_length'): r['embd'] = val
-            if key.endswith('.feed_forward_length'): r['ff'] = val
-            if key.endswith('.expert_feed_forward_length'): r['exp_ff'] = val
-            if key.endswith('.expert_shared_feed_forward_length'): r['exp_shared_ff'] = val
-            if key.endswith('.attention.kv_lora_rank'): r['kv_lora'] = val
-            if key.endswith('.attention.q_lora_rank'): r['q_lora'] = val
-            if key.endswith('.rope.dimension_count'): r['n_rot'] = val
-            if key.endswith('.leading_dense_block_count'): r['leading_dense'] = val
-            if key.endswith('.attention.sliding_window'): r['swa'] = val
-            if key.endswith('.full_attention_interval') or key.endswith('.attention.full_attention_interval'): r['full_interval'] = val
-        elif vt == 8:
-            sl = struct.unpack('<Q', f.read(8))[0]
-            val = f.read(sl).decode('utf-8', errors='replace')
-            if key.endswith('.architecture'): r['arch'] = val
-        elif vt == 9:
-            at = struct.unpack('<I', f.read(4))[0]; al = struct.unpack('<Q', f.read(8))[0]
-            if at in KV_FIXED: f.read(al * KV_FIXED[at])
-            elif at == 8:
-                for _ in range(al): f.read(struct.unpack('<Q', f.read(8))[0])
-            elif at == 9: break  # nested arrays: bail
-            else: break
-        elif vt in KV_FIXED: f.read(KV_FIXED[vt])
-        else: break
-
-def read_tensors(f, tensor_count):
-    for _ in range(tensor_count):
-        tl = struct.unpack('<Q', f.read(8))[0]
-        tname = f.read(tl).decode('utf-8', errors='replace')
-        if 'ffn_up_gate' in tname or 'ffn_gate_up' in tname: r['fused'] = 1
-        if '_shexp' in tname or '_chexp' in tname: r['has_shexp'] = 1
-        n_dims = struct.unpack('<I', f.read(4))[0]
-        dims = [struct.unpack('<Q', f.read(8))[0] for _ in range(n_dims)]
-        ttype = struct.unpack('<I', f.read(4))[0]
-        f.read(8)  # offset
-        n_elements = 1
-        for d in dims: n_elements *= d
-        if ttype in GGUF_TYPE_SIZE:
-            bpb, epb = GGUF_TYPE_SIZE[ttype]
-            n_blocks = (n_elements + epb - 1) // epb
-            tbytes = n_blocks * bpb
-        else:
-            tbytes = n_elements * 2
-        is_expert = '_exps.' in tname or '_shexp.' in tname or 'experts.' in tname
-        if is_expert:
-            r['expert_bytes'] += tbytes
-        else:
-            r['non_expert_bytes'] += tbytes
-
-try:
-    model_path = os.environ['MODEL_PATH']
-    with open(model_path, 'rb') as f:
-        magic = f.read(4)
-        if magic != b'GGUF': sys.exit(1)
-        f.read(4)  # version
-        tensor_count = struct.unpack('<Q', f.read(8))[0]
-        kv_count = struct.unpack('<Q', f.read(8))[0]
-        skip_kv(f, kv_count)
-        read_tensors(f, tensor_count)
-
-    # For split GGUFs: always scan all sibling shards (tensors may be spread across shards)
-    m = re.search(r'-(\d+)-of-(\d+)\.gguf$', model_path)
-    if m:
-        total_shards = int(m.group(2))
-        base = model_path[:m.start()]
-        for shard_num in range(2, total_shards + 1):
-            shard_path = f'{base}-{shard_num:05d}-of-{total_shards:05d}.gguf'
-            if not os.path.exists(shard_path): continue
-            with open(shard_path, 'rb') as f:
-                magic = f.read(4)
-                if magic != b'GGUF': continue
-                f.read(4)
-                tc = struct.unpack('<Q', f.read(8))[0]
-                kvc = struct.unpack('<Q', f.read(8))[0]
-                skip_kv(f, kvc)
-                read_tensors(f, tc)
-except: pass
-print(r.get('layers',0), r.get('experts',0), r.get('hkv',0), r.get('kl',0), r.get('vl',0), r.get('ssm',0), r.get('fused',0), r.get('expert_bytes',0), r.get('non_expert_bytes',0), r.get('arch','unknown'), r.get('embd',0), r.get('ff',0), r.get('exp_used',0), r.get('exp_ff',0), r.get('exp_shared_ff',0), r.get('kv_lora',0), r.get('q_lora',0), r.get('n_rot',0), r.get('leading_dense',0), r.get('swa',0), r.get('full_interval',0), r.get('has_shexp',0))
-" 2>/dev/null || echo "0 0 0 0 0 0 0 0 0 unknown 0 0 0 0 0 0 0 0 0 0 0 0")
+# Read GGUF metadata via the shared parse_gguf.py helper. This sets ~26 shell
+# variables (LAYER_COUNT, EXPERT_COUNT, …, GGUF_MODEL_NAME, etc.) via
+# eval-of-VAR=value lines. Falls back to all-zero/empty defaults on any error
+# so every downstream `${VAR:-0}` stays defined even if Python is missing.
+if [[ -f "$PARSE_GGUF" ]]; then
+    eval "$(python3 "$PARSE_GGUF" --format shell "$MODEL_PATH" 2>/dev/null || true)"
+else
+    echo "Warning: parse_gguf.py not found next to llm-server ($SCRIPT_DIR). Re-run install.sh." >&2
+fi
 
 LAYER_COUNT=${LAYER_COUNT:-0}
 EXPERT_COUNT=${EXPERT_COUNT:-0}
@@ -1355,41 +1253,7 @@ LEADING_DENSE=${LEADING_DENSE:-0}
 SLIDING_WINDOW=${SLIDING_WINDOW:-0}
 FULL_ATTN_INTERVAL=${FULL_ATTN_INTERVAL:-0}
 HAS_SHEXP=${HAS_SHEXP:-0}
-
-# Parse extra GGUF metadata for mmproj auto-download (name, basename, quantizer)
-eval "$(MODEL_PATH="$MODEL_PATH" python3 -c "
-import struct, sys, os
-r = {}
-KV_FIXED = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8}
-try:
-    with open(os.environ['MODEL_PATH'], 'rb') as f:
-        if f.read(4) != b'GGUF': sys.exit(0)
-        f.read(4)
-        struct.unpack('<Q', f.read(8))
-        kvc = struct.unpack('<Q', f.read(8))[0]
-        for _ in range(kvc):
-            kl = struct.unpack('<Q', f.read(8))[0]
-            key = f.read(kl).decode('utf-8', errors='replace')
-            vt = struct.unpack('<I', f.read(4))[0]
-            if vt == 8:
-                sl = struct.unpack('<Q', f.read(8))[0]
-                val = f.read(sl).decode('utf-8', errors='replace')
-                if key == 'general.name': r['n'] = val
-                elif key == 'general.basename': r['b'] = val
-                elif key == 'general.quantized_by': r['q'] = val
-            elif vt == 9:
-                at = struct.unpack('<I', f.read(4))[0]; al = struct.unpack('<Q', f.read(8))[0]
-                if at in KV_FIXED: f.read(al * KV_FIXED[at])
-                elif at == 8:
-                    for _ in range(al): f.read(struct.unpack('<Q', f.read(8))[0])
-                else: break
-            elif vt in KV_FIXED: f.read(KV_FIXED[vt])
-            else: break
-except: pass
-for k,e in [('GGUF_MODEL_NAME','n'),('GGUF_BASENAME','b'),('GGUF_QUANTIZED_BY','q')]:
-    v = r.get(e,'').replace(\"'\",\"\")
-    print(f\"{k}='{v}'\")
-" 2>/dev/null)" || true
+CTX_TRAIN=${CTX_TRAIN:-0}
 GGUF_MODEL_NAME="${GGUF_MODEL_NAME:-}"
 GGUF_BASENAME="${GGUF_BASENAME:-}"
 GGUF_QUANTIZED_BY="${GGUF_QUANTIZED_BY:-}"
@@ -1615,6 +1479,65 @@ case "$KV_TYPE" in
     q8_0)  KV_TOTAL_MB=$KV_Q8_MB ;;
     q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
 esac
+
+# ── Max-context-fit suggestion ──
+# KV is (near-)linear in ctx for all four families (standard/MLA/SSM, and ISWA
+# once ctx exceeds SLIDING_WINDOW). Use the bytes-per-token we just computed
+# for the current KV type to solve for the largest ctx that still leaves
+# headroom, then offer it if it's meaningfully bigger than the user's value.
+# Skipped when --ctx-size is explicit, non-interactive, or LLM_ASSUME_YES is
+# set — no surprises in scripts.
+if (( ! CTX_EXPLICIT )) && (( KV_TOTAL_MB > 0 )) && [[ -t 0 ]] && (( ${LLM_ASSUME_YES:-0} == 0 )); then
+    _kv_bpt_b=$(( KV_TOTAL_MB * 1048576 / CTX_SIZE ))
+    if (( _kv_bpt_b > 0 )); then
+        # Budget for KV ≈ all hardware memory, minus the weights (full virtual
+        # size — some lives on GPU, some on CPU, all counted), minus 8GB for
+        # activations/compute buffers/OS headroom. This matches what the
+        # component-based RAM estimator budgets.
+        _total_hw_mb=$(( TOTAL_VRAM_MB + RAM_AVAIL_MB ))
+        _fixed_overhead_mb=$(( TOTAL_SIZE_MB + 8192 ))
+        if (( _total_hw_mb > _fixed_overhead_mb + KV_TOTAL_MB )); then
+            _kv_budget_mb=$(( _total_hw_mb - _fixed_overhead_mb ))
+            _max_ctx_raw=$(( _kv_budget_mb * 1048576 / _kv_bpt_b ))
+            # Cap at the model's trained context length if we know it — pushing
+            # past it forces RoPE extrapolation and usually breaks coherence.
+            _hw_cap_ctx=$_max_ctx_raw
+            if (( CTX_TRAIN > 0 && CTX_TRAIN < _hw_cap_ctx )); then
+                _hw_cap_ctx=$CTX_TRAIN
+            fi
+            # Snap to nearest power-of-two-ish "nice" value at or below the cap
+            _suggested_ctx=$CTX_SIZE
+            for _c in 32768 65536 131072 262144 524288 1048576 2097152 4194304; do
+                (( _c <= _hw_cap_ctx )) && _suggested_ctx=$_c
+            done
+            if (( _suggested_ctx >= CTX_SIZE * 2 )); then
+                _new_kv_mb=$(( _kv_bpt_b * _suggested_ctx / 1048576 ))
+                echo ""
+                echo "  Context headroom available:"
+                echo "    Requested:  ${CTX_SIZE} tokens → ${KV_TOTAL_MB}MB KV (${KV_TYPE})"
+                echo "    Max fit:    ${_suggested_ctx} tokens → ${_new_kv_mb}MB KV"
+                read -r -p "  Use max context ${_suggested_ctx}? [y/N] " _ctx_ans
+                _ctx_ans="${_ctx_ans:-n}"
+                if [[ "$_ctx_ans" =~ ^[Yy] ]]; then
+                    # Linear rescale — exact for standard/MLA/SSM, slight
+                    # overestimate for ISWA past the swa window (safe side).
+                    _num=$_suggested_ctx
+                    _den=$CTX_SIZE
+                    CTX_SIZE=$_suggested_ctx
+                    KV_Q4_MB=$(( KV_Q4_MB * _num / _den ))
+                    KV_Q8_MB=$(( KV_Q8_MB * _num / _den ))
+                    KV_F16_MB=$(( KV_F16_MB * _num / _den ))
+                    case "$KV_TYPE" in
+                        f16)   KV_TOTAL_MB=$KV_F16_MB ;;
+                        q8_0)  KV_TOTAL_MB=$KV_Q8_MB ;;
+                        q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
+                    esac
+                    echo "  Context bumped to ${CTX_SIZE} — KV now ${KV_TOTAL_MB}MB"
+                fi
+            fi
+        fi
+    fi
+fi
 
 # ── Hadamard K-cache: only useful with quantized KV cache ──
 KHAD_FLAG=""
@@ -1977,6 +1900,12 @@ kill_server() {
     while (( w < 10 )) && lsof -i:"${PORT}" >/dev/null 2>&1; do
         sleep 1; (( ++w ))
     done
+    # Whatever we had pinned is gone now — either we targeted it by pid above
+    # or the port sweep took it. Clear RUNNING_PID so the EXIT trap (and any
+    # later branch that reads it) doesn't chase a dead process and potentially
+    # kill an unrelated pid that wrapped around. Callers that need to track a
+    # new server will set RUNNING_PID again via try_start / run_with_restart.
+    RUNNING_PID=""
 }
 
 # Wait for server health + verify it can generate. Sets RUNNING_PID on success.
