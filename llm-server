@@ -182,8 +182,12 @@ setup_lib_hub() {
     # Require a recognizable llama.cpp / ik_llama.cpp build tree before we
     # start symlinking .so files. Marker: sibling dirs that CMake produces
     # (ggml/, src/, common/) or the binary's own dir containing libllama.so.
+    # `compgen -G` expands the glob and returns 0 only if at least one path
+    # matches — `[[ -e foo* ]]` doesn't, since [[ uses literal-glob semantics.
+    local _has_libllama_versioned=0
+    compgen -G "$bin_dir/libllama.so.*" >/dev/null 2>&1 && _has_libllama_versioned=1
     if [[ ! -d "$build_root/ggml" && ! -d "$build_root/src" && \
-          ! -e "$bin_dir/libllama.so" && ! -e "$bin_dir"/libllama.so.* ]]; then
+          ! -e "$bin_dir/libllama.so" && $_has_libllama_versioned -eq 0 ]]; then
         [[ -n "${LIB_HUB_DIR:-}" && -d "$LIB_HUB_DIR" ]] && rm -rf "$LIB_HUB_DIR"
         LIB_HUB_DIR=""
         return

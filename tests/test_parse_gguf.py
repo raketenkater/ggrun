@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Regression tests for parse_gguf.py.
+
+Run from the repo root:
+    python3 tests/test_parse_gguf.py
+
+Builds a handful of synthetic GGUFs covering the architectures that drive
+distinct code paths (dense Llama-class, MoE, MLA/DeepSeek-class, ISWA, SSM
+hybrid) and asserts the parser extracts the keys downstream code depends on.
+No network, no model files, no build step — pure stdlib.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BUILDER = os.path.join(ROOT, 'tests', 'build_synthetic_gguf.py')
+PARSER = os.path.join(ROOT, 'parse_gguf.py')
+
+
+def build(out, **kwargs):
+    cmd = ['python3', BUILDER, '--out', out]
+    for k, v in kwargs.items():
+        if v is True:
+            cmd.append(f'--{k.replace("_", "-")}')
+        elif v is False or v is None:
+            continue
+        else:
+            cmd.append(f'--{k.replace("_", "-")}')
+            cmd.append(str(v))
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def parse(path):
+    out = subprocess.run(['python3', PARSER, '--format', 'json', path],
+                         check=True, capture_output=True, text=True)
+    return json.loads(out.stdout)
+
+
+def assert_eq(actual, expected, label):
+    if actual != expected:
+        raise AssertionError(f'{label}: expected {expected!r}, got {actual!r}')
+
+
+def test_dense_llama():
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='llama', name='Test-Llama-7B', layers=32,
+              hkv=8, kl=128, vl=128, embd=4096, ff=14336, ctx_train=8192)
+        r = parse(f.name)
+    assert_eq(r['arch'], 'llama', 'arch')
+    assert_eq(r['layers'], 32, 'layers')
+    assert_eq(r['hkv'], 8, 'hkv')
+    assert_eq(r['kl'], 128, 'kl')
+    assert_eq(r['vl'], 128, 'vl')
+    assert_eq(r['ctx_train'], 8192, 'ctx_train')
+    assert_eq(r['name'], 'Test-Llama-7B', 'name')
+    assert r.get('experts', 0) == 0, 'dense should have 0 experts'
+    print('  ✓ dense_llama')
+
+
+def test_moe_qwen35():
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='qwen35moe', layers=40, hkv=2, kl=256, vl=256,
+              embd=2048, experts=256, exp_used=8, exp_ff=512,
+              ctx_train=262144, full_interval=4)
+        r = parse(f.name)
+    assert_eq(r['arch'], 'qwen35moe', 'arch')
+    assert_eq(r['experts'], 256, 'experts')
+    assert_eq(r['exp_used'], 8, 'exp_used')
+    assert_eq(r['exp_ff'], 512, 'exp_ff')
+    assert_eq(r['full_interval'], 4, 'full_interval')
+    assert_eq(r['ctx_train'], 262144, 'ctx_train')
+    print('  ✓ moe_qwen35')
+
+
+def test_mla_deepseek():
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='deepseek2', layers=61, hkv=128, kl=192, vl=128,
+              kv_lora=512, q_lora=1536, embd=7168, ctx_train=163840)
+        r = parse(f.name)
+    assert_eq(r['kv_lora'], 512, 'kv_lora')
+    assert_eq(r['q_lora'], 1536, 'q_lora')
+    assert_eq(r['layers'], 61, 'layers')
+    print('  ✓ mla_deepseek')
+
+
+def test_iswa_gemma():
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='gemma3', layers=42, hkv=4, kl=256, vl=256,
+              swa=4096, embd=3840, ctx_train=131072)
+        r = parse(f.name)
+    assert_eq(r['swa'], 4096, 'swa')
+    assert_eq(r['layers'], 42, 'layers')
+    print('  ✓ iswa_gemma')
+
+
+def test_ssm_hybrid():
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='qwen35', layers=64, hkv=4, kl=256, vl=256,
+              embd=5120, ff=17408, ctx_train=262144, full_interval=4, ssm=True)
+        r = parse(f.name)
+    assert_eq(r['ssm'], 1, 'ssm')
+    assert_eq(r['full_interval'], 4, 'full_interval')
+    print('  ✓ ssm_hybrid')
+
+
+def test_corrupted_gguf():
+    """Non-GGUF input → empty dict, never crashes."""
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        f.write(b'NOT A GGUF FILE')
+        f.flush()
+        r = parse(f.name)
+    assert r == {'fused': 0, 'expert_bytes': 0, 'non_expert_bytes': 0}, r
+    print('  ✓ corrupted_gguf')
+
+
+def test_shell_format_emits_all_keys():
+    """Shell format must always emit every variable in SHELL_KEY_MAP, even
+    when the GGUF is missing them — downstream bash relies on every var being
+    set so `set -u` doesn't blow up."""
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='llama', layers=8)
+        out = subprocess.run(['python3', PARSER, '--format', 'shell', f.name],
+                             check=True, capture_output=True, text=True).stdout
+    expected_vars = {
+        'LAYER_COUNT', 'EXPERT_COUNT', 'HEAD_COUNT_KV', 'KEY_LENGTH',
+        'VALUE_LENGTH', 'HAS_SSM', 'HAS_FUSED', 'EXPERT_BYTES',
+        'NON_EXPERT_BYTES', 'MODEL_ARCH', 'EMBEDDING_LENGTH',
+        'FEED_FORWARD_LENGTH', 'EXPERT_USED_COUNT', 'EXPERT_FF',
+        'EXPERT_SHARED_FF', 'KV_LORA_RANK', 'Q_LORA_RANK', 'ROPE_DIM',
+        'LEADING_DENSE', 'SLIDING_WINDOW', 'FULL_ATTN_INTERVAL', 'HAS_SHEXP',
+        'CTX_TRAIN', 'GGUF_MODEL_NAME', 'GGUF_BASENAME', 'GGUF_QUANTIZED_BY',
+    }
+    emitted = {ln.split('=', 1)[0] for ln in out.splitlines() if '=' in ln}
+    missing = expected_vars - emitted
+    assert not missing, f'missing vars: {missing}'
+    print('  ✓ shell_format_emits_all_keys')
+
+
+def main():
+    print('parse_gguf.py regression tests:')
+    test_dense_llama()
+    test_moe_qwen35()
+    test_mla_deepseek()
+    test_iswa_gemma()
+    test_ssm_hybrid()
+    test_corrupted_gguf()
+    test_shell_format_emits_all_keys()
+    print('All tests passed.')
+
+
+if __name__ == '__main__':
+    sys.exit(main() or 0)

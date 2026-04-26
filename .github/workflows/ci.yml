@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: .
+          additional_files: llm-server llm-server-mac llm-server-gui
+          # Gate on real bugs only. The shell scripts have many longstanding
+          # style/warning findings (SC2086, SC2155, SC2128 array-as-string,
+          # etc.) that are tracked separately — we don't want to break CI on
+          # cleanups someone hasn't gotten to yet.
+          severity: error
+
+  parser-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run parse_gguf regression tests
+        run: python3 tests/test_parse_gguf.py
+
+  estimator-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run estimator regression tests
+        run: bash tests/test_estimator.sh
