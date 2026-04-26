@@ -48,3 +48,42 @@ else
     echo "Error: Failed to update configuration file."
     exit 1
 fi
+
+# 5. Sync DCP config to match server context
+# Scale maxContextLimit to ~75% of server context, minContextLimit to ~10% (floor 15000)
+DCP_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/dcp.jsonc"
+DCP_MAX=$(( SERVER_CTX * 75 / 100 ))
+DCP_MIN=$(( SERVER_CTX * 10 / 100 ))
+[[ $DCP_MIN -lt 15000 ]] && DCP_MIN=15000
+
+if [ -f "$DCP_FILE" ]; then
+    TMP_DCP=$(mktemp)
+    sed -e "s/\"maxContextLimit\": [0-9]*/\"maxContextLimit\": $DCP_MAX/" \
+        -e "s/\"minContextLimit\": [0-9]*/\"minContextLimit\": $DCP_MIN/" \
+        "$DCP_FILE" > "$TMP_DCP" && mv "$TMP_DCP" "$DCP_FILE"
+    echo "Updated $DCP_FILE"
+    echo "  - DCP minContextLimit: $DCP_MIN"
+    echo "  - DCP maxContextLimit: $DCP_MAX"
+else
+    echo "Warning: $DCP_FILE not found. Skipping DCP sync."
+fi
+
+# 6. Sync agent context files (AGENTS.md, CLAUDE.md) so system prompts stay accurate
+AGENT_FILES=("$HOME/AGENTS.md" "$HOME/.claude/CLAUDE.md")
+DCP_TRIGGER=$DCP_MAX
+DCP_TRIGGER_FMT=$(printf "%'d" "$DCP_TRIGGER" 2>/dev/null || echo "$DCP_TRIGGER")
+DCP_BUFFER=$(( SERVER_CTX / 4 ))
+DCP_BUFFER_K=$(( DCP_BUFFER / 1000 ))
+
+for af in "${AGENT_FILES[@]}"; do
+    if [ -f "$af" ]; then
+        if grep -q "exceeds" "$af" 2>/dev/null; then
+            sed -i "s/exceeds \*\*[0-9,]* tokens\*\*/exceeds **${DCP_TRIGGER_FMT} tokens**/" "$af"
+            echo "Updated $af — DCP trigger: ${DCP_TRIGGER_FMT}"
+        fi
+        if grep -q "[0-9]*k token buffer" "$af" 2>/dev/null; then
+            sed -i "s/[0-9]*k token buffer/${DCP_BUFFER_K}k token buffer/" "$af"
+            echo "Updated $af — DCP buffer: ${DCP_BUFFER_K}k"
+        fi
+    fi
+done
