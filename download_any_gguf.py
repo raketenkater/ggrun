@@ -333,35 +333,73 @@ def get_args():
     return parser.parse_args()
 
 
-def recommend_quant(quant_list, vram_mb, ram_mb):
+def _detect_moe_active_params(repo):
+    """Look for an A##B suffix in the repo name (Qwen3.6-35B-A3B, Kimi-K2-A32B,
+    DeepSeek-V3-A37B…) — that's the active-parameter count and a strong MoE
+    signal. Returns active-params-in-billions or 0 for dense models."""
+    import re
+    m = re.search(r'A(\d+(?:\.\d+)?)B(?:[-_]|$)', repo or "", re.IGNORECASE)
+    if m:
+        try: return float(m.group(1))
+        except ValueError: pass
+    return 0
+
+
+def _estimate_overhead_mb(model_size_mb, is_moe, active_b):
+    """Pre-download overhead estimate (KV + compute + activations).
+
+    We don't know layer counts or head dims yet — that's what parse_gguf.py is
+    for, post-download. So this is a deliberately conservative size-derived
+    rule of thumb that matches what llm-server budgets at run time:
+      • Dense: ~10% of model_size + 2GB compute, capped between 2GB and 12GB.
+      • MoE:   only the active params drive compute, so use active_b * 0.5 GB
+               for compute and ~6% of total weights for KV. Same floors apply.
+
+    For accurate estimates after download, run:
+        ./parse_gguf.py <model.gguf>
+    and feed the result to llm-server's component-based estimator.
+    """
+    if is_moe and active_b > 0:
+        compute_mb = max(2048, int(active_b * 512))
+        kv_mb = int(model_size_mb * 0.06)
+    else:
+        compute_mb = 2048
+        kv_mb = int(model_size_mb * 0.10)
+    overhead = compute_mb + kv_mb
+    return max(2048, min(overhead, 12288))
+
+
+def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
     """Recommend the best quantization based on actual file sizes and hardware.
     quant_list: list of (quant_name, size_bytes) sorted by size ascending.
     Returns (quant_name, reason) or (None, None) if nothing fits."""
     total_mb = vram_mb + ram_mb
-    # Reserve overhead for KV cache, compute buffers, OS (~30% of model size or 2GB min)
-    overhead_mb = 2048
+    active_b = _detect_moe_active_params(repo)
+    is_moe = active_b > 0
 
     print(
         f"\n🖥️  Hardware detected: {vram_mb / 1024:.1f}GB VRAM | {ram_mb / 1024:.1f}GB System RAM"
     )
-    print(f"   Total Memory: {total_mb / 1024:.1f}GB (model + ~2GB overhead for KV cache & buffers)")
+    if is_moe:
+        print(f"   Detected MoE model (~{active_b:g}B active params) — experts can spill to RAM via offload.")
+    print(f"   Total memory budget: {total_mb / 1024:.1f}GB (model + KV cache + compute buffers)")
 
-    # Pick the largest quant that fits in total memory (VRAM + RAM)
-    # Iterate from largest to smallest to find the best quality that fits
     best = None
     for quant_name, size_bytes in reversed(quant_list):
         size_mb = size_bytes / (1024 * 1024)
+        overhead_mb = _estimate_overhead_mb(size_mb, is_moe, active_b)
         if size_mb + overhead_mb <= total_mb:
             fits_vram = size_mb + overhead_mb <= vram_mb
             if fits_vram:
-                reason = f"Fits entirely in VRAM ({size_mb / 1024:.1f}GB model, {vram_mb / 1024:.1f}GB available)"
+                reason = f"Fits entirely in VRAM ({size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead, {vram_mb / 1024:.1f}GB available)"
+            elif is_moe:
+                reason = f"Fits in VRAM+RAM via expert offload ({size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead, {total_mb / 1024:.1f}GB available)"
             else:
-                reason = f"Fits in VRAM+RAM ({size_mb / 1024:.1f}GB model, {total_mb / 1024:.1f}GB available)"
+                reason = f"Fits in VRAM+RAM (dense model — slower than full VRAM; {size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead)"
             best = (quant_name, reason)
             break
 
     if not best:
-        # Nothing fits — recommend smallest
         quant_name, size_bytes = quant_list[0]
         size_mb = size_bytes / (1024 * 1024)
         best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model")
@@ -395,7 +433,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
     # Get Recommendation based on actual file sizes
     rec_q = ""
     if vram_mb > 0:
-        rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb)
+        rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb, repo)
         if rec_q:
             print(f"\n🌟 RECOMMENDED: {rec_q}")
             print(f"   {rec_reason}")
