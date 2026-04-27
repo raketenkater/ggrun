@@ -99,7 +99,21 @@ build_gguf --out "$TMP/ssm.gguf" --arch qwen35 --name 'Test-Qwen35' \
 out=$(run_dry "$TMP/ssm.gguf")
 assert_contains "$out" "SSM/hybrid" "ssm_hybrid: SSM label"
 
-# ── Test 6: max-context-fit suggestion stays out of non-interactive runs ─
+# ── Test 6: mistagged DeepSeek V4 Flash (deepseek2 arch + kl_mla<=rope_dim) ─
+# The 'Flash' variant gets mistagged by stock converters as deepseek2 but
+# carries V4 metadata that hits GGML_ASSERT(n_embd_head_qk_nope >= 1) at load.
+# llm-server should bail early with a clear pointer to the antirez fork.
+echo "Test: dsv4_flash_mistag_bails_early"
+build_gguf --out "$TMP/dsv4_mistag.gguf" --arch deepseek2 --name 'DeepSeek V4 Flash' \
+    --layers 43 --hkv 1 --kl 512 --vl 512 --embd 4096 \
+    --kv-lora 512 --q-lora 512 --kl-mla 64 --vl-mla 512 --rope-dim 64 \
+    --ctx-train 1048576
+out=$(run_dry "$TMP/dsv4_mistag.gguf" 2>&1 || true)
+ec=$?
+assert_contains "$out" "DeepSeek V4 Flash mistagged" "dsv4_flash_mistag: clear error message"
+assert_contains "$out" "antirez/llama.cpp-deepseek-v4-flash" "dsv4_flash_mistag: points to fork"
+
+# ── Test 7: max-context-fit suggestion stays out of non-interactive runs ─
 echo "Test: max_ctx_suggestion_skipped_under_assume_yes"
 out=$(run_dry "$TMP/dense.gguf")
 if [[ "$out" == *"Use max context"* ]]; then

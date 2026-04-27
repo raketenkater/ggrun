@@ -51,6 +51,8 @@ def _read_kv(f, r, kv_count):
             if 'head_count_kv' in key: r['hkv'] = val
             if key.endswith('.attention.key_length'): r['kl'] = val
             if key.endswith('.attention.value_length'): r['vl'] = val
+            if key.endswith('.attention.key_length_mla'): r['kl_mla'] = val
+            if key.endswith('.attention.value_length_mla'): r['vl_mla'] = val
             if 'ssm.state_size' in key: r['ssm'] = 1
             if key.endswith('.embedding_length'): r['embd'] = val
             if key.endswith('.feed_forward_length'): r['ff'] = val
@@ -170,6 +172,8 @@ SHELL_KEY_MAP = [
     ('hkv',               'HEAD_COUNT_KV',       0),
     ('kl',                'KEY_LENGTH',          0),
     ('vl',                'VALUE_LENGTH',        0),
+    ('kl_mla',            'KEY_LENGTH_MLA',      0),
+    ('vl_mla',            'VALUE_LENGTH_MLA',    0),
     ('ssm',               'HAS_SSM',             0),
     ('fused',             'HAS_FUSED',           0),
     ('expert_bytes',      'EXPERT_BYTES',        0),

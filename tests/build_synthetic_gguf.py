@@ -90,6 +90,12 @@ def build(args):
         kv_pairs.append((f'{arch}.attention.kv_lora_rank', 'uint32', args.kv_lora))
     if args.q_lora is not None:
         kv_pairs.append((f'{arch}.attention.q_lora_rank', 'uint32', args.q_lora))
+    if args.kl_mla is not None:
+        kv_pairs.append((f'{arch}.attention.key_length_mla', 'uint32', args.kl_mla))
+    if args.vl_mla is not None:
+        kv_pairs.append((f'{arch}.attention.value_length_mla', 'uint32', args.vl_mla))
+    if args.rope_dim is not None:
+        kv_pairs.append((f'{arch}.rope.dimension_count', 'uint32', args.rope_dim))
     if args.ssm:
         kv_pairs.append((f'{arch}.ssm.state_size', 'uint32', 128))
 
@@ -130,6 +136,9 @@ def main():
     ap.add_argument('--full-interval', type=int, default=None)
     ap.add_argument('--kv-lora', type=int, default=None)
     ap.add_argument('--q-lora', type=int, default=None)
+    ap.add_argument('--kl-mla', type=int, default=None)
+    ap.add_argument('--vl-mla', type=int, default=None)
+    ap.add_argument('--rope-dim', type=int, default=None)
     ap.add_argument('--ssm', action='store_true')
     args = ap.parse_args()
     build(args)

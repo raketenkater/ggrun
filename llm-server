@@ -59,6 +59,13 @@ if [[ ! -f "$PARSE_GGUF" ]]; then
     [[ -n "$_alt" ]] && PARSE_GGUF="$_alt"
 fi
 
+# Optional user config: sourceable bash file at $XDG_CONFIG_HOME/llm-server/config
+# (defaults to ~/.config/llm-server/config). Same syntax as env vars — anything
+# settable on the command line (LLAMA_SERVER, LLM_RAM_BUDGET, LLM_DEFAULT_CTX, …)
+# can be persisted there. Loaded before defaults so explicit env still wins.
+LLM_CONFIG="${LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-server/config}"
+[[ -f "$LLM_CONFIG" ]] && source "$LLM_CONFIG"
+
 # RUNNING_PID tracks the in-flight health-check / pre-launch server so a fatal
 # script exit (set -e landmine, SIGINT, SIGTERM) doesn't leak a 100GB+ ik_llama
 # process. `run_with_restart` explicitly resets this for the foreground server
@@ -1253,6 +1260,8 @@ EXPERT_SHARED_FF=${EXPERT_SHARED_FF:-0}
 KV_LORA_RANK=${KV_LORA_RANK:-0}
 Q_LORA_RANK=${Q_LORA_RANK:-0}
 ROPE_DIM=${ROPE_DIM:-0}
+KEY_LENGTH_MLA=${KEY_LENGTH_MLA:-0}
+VALUE_LENGTH_MLA=${VALUE_LENGTH_MLA:-0}
 LEADING_DENSE=${LEADING_DENSE:-0}
 SLIDING_WINDOW=${SLIDING_WINDOW:-0}
 FULL_ATTN_INTERVAL=${FULL_ATTN_INTERVAL:-0}
@@ -1262,6 +1271,33 @@ GGUF_MODEL_NAME="${GGUF_MODEL_NAME:-}"
 GGUF_BASENAME="${GGUF_BASENAME:-}"
 GGUF_QUANTIZED_BY="${GGUF_QUANTIZED_BY:-}"
 [[ "$LAYER_COUNT" == "0" ]] && LAYER_COUNT=48 && echo "Warning: Could not detect layer count, using default (48)"
+
+# Properly-tagged DeepSeek V4 GGUFs use arch=deepseek4 (added in PR #22378 +
+# the antirez fork). Stock llama.cpp master doesn't recognize this arch yet,
+# so a non-fork binary will fail to load. Just warn — if the user pointed
+# LLAMA_SERVER at a fork build, it'll work.
+if [[ "$MODEL_ARCH" == "deepseek4" ]]; then
+    echo "Note: arch=deepseek4 — needs a build from llama.cpp PR #22378 or" >&2
+    echo "      the antirez fork. Stock llama.cpp/ik_llama.cpp won't load it." >&2
+fi
+
+# DeepSeek V4 Flash GGUFs from stock converters get tagged as `deepseek2` but
+# carry V4 metadata (key_length_mla == rope.dimension_count → zero "nope" head
+# dim, hits GGML_ASSERT(n_embd_head_qk_nope >= 1) at model load). Catch the
+# pattern early; upstream llama.cpp/ik_llama.cpp don't yet handle this arch.
+if [[ "$MODEL_ARCH" == "deepseek2" ]] && (( KEY_LENGTH_MLA > 0 )) && (( KEY_LENGTH_MLA <= ROPE_DIM )); then
+    cat >&2 <<EOF
+Error: this GGUF looks like DeepSeek V4 Flash mistagged as deepseek2.
+       key_length_mla=$KEY_LENGTH_MLA, rope.dimension_count=$ROPE_DIM
+       Both upstream llama.cpp and ik_llama.cpp will crash loading this model.
+
+       DeepSeek V4 Flash is currently only supported by:
+         https://github.com/antirez/llama.cpp-deepseek-v4-flash
+       and only with a properly-tagged 'deepseek4' GGUF (e.g.
+       https://huggingface.co/antirez/deepseek-v4-gguf), CPU + Metal only.
+EOF
+    exit 1
+fi
 
 IS_MOE=0
 (( EXPERT_COUNT > 1 )) && IS_MOE=1
