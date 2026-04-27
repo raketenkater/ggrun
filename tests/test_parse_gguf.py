@@ -27,6 +27,10 @@ def build(out, **kwargs):
             cmd.append(f'--{k.replace("_", "-")}')
         elif v is False or v is None:
             continue
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                cmd.append(f'--{k.replace("_", "-")}')
+                cmd.append(str(item))
         else:
             cmd.append(f'--{k.replace("_", "-")}')
             cmd.append(str(v))
@@ -126,7 +130,8 @@ def test_shell_format_emits_all_keys():
                              check=True, capture_output=True, text=True).stdout
     expected_vars = {
         'LAYER_COUNT', 'EXPERT_COUNT', 'HEAD_COUNT_KV', 'KEY_LENGTH',
-        'VALUE_LENGTH', 'HAS_SSM', 'HAS_FUSED', 'EXPERT_BYTES',
+        'VALUE_LENGTH', 'KEY_LENGTH_MLA', 'VALUE_LENGTH_MLA',
+        'HAS_SSM', 'HAS_FUSED', 'EXPERT_BYTES',
         'NON_EXPERT_BYTES', 'MODEL_ARCH', 'EMBEDDING_LENGTH',
         'FEED_FORWARD_LENGTH', 'EXPERT_USED_COUNT', 'EXPERT_FF',
         'EXPERT_SHARED_FF', 'KV_LORA_RANK', 'Q_LORA_RANK', 'ROPE_DIM',
@@ -139,6 +144,56 @@ def test_shell_format_emits_all_keys():
     print('  ✓ shell_format_emits_all_keys')
 
 
+def test_ik_llama_iq3_k_tensor_bytes():
+    """ik_llama.cpp custom quants (type IDs 137+) must use their actual block
+    sizes, not the F16 fallback. Issue #11: Kimi-K2.6-IQ3_K reported "313%
+    expert ratio" because IQ3_K (type 138, 3.44 bpw) was treated as 16 bpw.
+
+    Synthesizes one expert tensor with type 138 over 256k elements and
+    verifies expert_bytes is ~110kB (256k × 110/256), not ~512kB (256k × 2)."""
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        # 256 * 1024 elements = 1024 IQ3_K blocks of 256 elements
+        # Expected: 1024 × 110 = 112_640 bytes
+        build(f.name, arch='qwen35moe', layers=1,
+              tensor=['blk.0.ffn_down_exps.weight:262144:138'])
+        r = parse(f.name)
+    expected = 1024 * 110
+    actual = r['expert_bytes']
+    assert actual == expected, f'IQ3_K expert_bytes: expected {expected}, got {actual}'
+    assert r['non_expert_bytes'] == 0, f'should not classify as non-expert: {r}'
+    print('  ✓ ik_llama_iq3_k_tensor_bytes')
+
+
+def test_unknown_ttype_falls_back_to_4bpw():
+    """Unknown ttypes (e.g. brand-new ik_llama quant we haven't tabulated)
+    must default to ~4 bpw (0.5 B/elem), not F16 (2 B/elem). The old fallback
+    was the proximate cause of issue #11's expert-bytes over-count."""
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        # Type 999 is reserved-future; will hit the fallback.
+        build(f.name, arch='qwen35moe', layers=1,
+              tensor=['blk.0.ffn_down_exps.weight:1024:999'])
+        r = parse(f.name)
+    expected = 1024 // 2  # 0.5 B/elem fallback
+    actual = r['expert_bytes']
+    assert actual == expected, f'unknown ttype fallback: expected {expected}, got {actual}'
+    print('  ✓ unknown_ttype_falls_back_to_4bpw')
+
+
+def test_known_quant_table_has_ik_llama_ids():
+    """Direct check that the parser's GGUF_TYPE_SIZE table covers the ik_llama
+    custom quants we expect. Catches accidental deletion of these entries."""
+    sys.path.insert(0, ROOT)
+    import parse_gguf  # noqa: E402
+    sys.path.pop(0)
+    required = [137, 138, 139, 140, 141]  # IQ2_K..IQ6_K
+    for tid in required:
+        assert tid in parse_gguf.GGUF_TYPE_SIZE, f'missing ik_llama ttype {tid}'
+        bpb, epb = parse_gguf.GGUF_TYPE_SIZE[tid]
+        assert epb == 256, f'ttype {tid}: epb should be 256, got {epb}'
+        assert 60 < bpb < 220, f'ttype {tid}: bpb {bpb} out of plausible range'
+    print('  ✓ known_quant_table_has_ik_llama_ids')
+
+
 def main():
     print('parse_gguf.py regression tests:')
     test_dense_llama()
@@ -148,6 +203,9 @@ def main():
     test_ssm_hybrid()
     test_corrupted_gguf()
     test_shell_format_emits_all_keys()
+    test_ik_llama_iq3_k_tensor_bytes()
+    test_unknown_ttype_falls_back_to_4bpw()
+    test_known_quant_table_has_ik_llama_ids()
     print('All tests passed.')
 
 

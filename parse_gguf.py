@@ -23,6 +23,12 @@ import sys
 from typing import Any, Dict
 
 # (bytes_per_block, elements_per_block) per ggml type id — from ggml.h struct sizes.
+# IDs 0–31 are upstream llama.cpp; 137+ are ik_llama.cpp custom quants
+# (IQ2_K through IQ6_K + KS/KSS/KT/KL/KL variants and 337+ _R4 row-quantized
+# rearrangements that share bpw with their base type). Without these, the
+# fallback below treats every unknown type as F16 (2 B/elem) and
+# over-estimates expert tensor bytes 3-5x — the cause of the "313% expert"
+# RAM-fit bug for ik_llama-quantized MoE models like Kimi-K2.
 GGUF_TYPE_SIZE = {
     0: (4, 1), 1: (2, 1),
     2: (18, 32), 3: (20, 32), 6: (22, 32), 7: (24, 32),
@@ -32,6 +38,28 @@ GGUF_TYPE_SIZE = {
     20: (18, 32), 21: (110, 256), 22: (82, 256), 23: (136, 256),
     24: (56, 256), 25: (2, 1), 26: (18, 32), 27: (18, 32),
     28: (18, 32), 29: (40, 256), 30: (54, 256), 31: (1, 1),
+    # ik_llama.cpp custom quants
+    137: (76, 256),    # IQ2_K   — 2.375 bpw
+    138: (110, 256),   # IQ3_K   — 3.44 bpw
+    139: (144, 256),   # IQ4_K   — 4.5 bpw
+    140: (176, 256),   # IQ5_K   — 5.5 bpw
+    141: (212, 256),   # IQ6_K   — 6.625 bpw
+    144: (136, 256),   # IQ4_KS
+    145: (70, 256),    # IQ2_KS
+    146: (128, 256),   # IQ4_KSS
+    152: (168, 256),   # IQ5_KS
+    153: (68, 256),    # IQ2_KT
+    154: (100, 256),   # IQ3_KT
+    155: (128, 256),   # IQ4_KT
+    156: (102, 256),   # IQ3_KS
+    157: (86, 256),    # IQ2_KL
+    # _R4 row-quantized: 4 rows packed; bytes-per-element matches the base
+    337: (76, 256),    # IQ2_K_R4
+    338: (110, 256),   # IQ3_K_R4
+    339: (144, 256),   # IQ4_K_R4
+    340: (176, 256),   # IQ5_K_R4
+    344: (136, 256),   # IQ4_KS_R4
+    352: (168, 256),   # IQ5_KS_R4
 }
 
 # GGUF value-type fixed sizes. 8=string, 9=array are variable-length.
@@ -110,7 +138,13 @@ def _read_tensors(f, r, tensor_count):
                 n_blocks = (n_elements + epb - 1) // epb
                 tbytes = n_blocks * bpb
             else:
-                tbytes = n_elements * 2
+                # Unknown ttype — could be a brand-new ik_llama.cpp quant or a
+                # backend-specific format. Default 0.5 B/elem (~4 bpw) as the
+                # typical quant midpoint. Lifting this to F16 (2 B/elem) was
+                # causing 3-5x expert-bytes over-counts and false "doesn't fit
+                # in RAM" errors. Track unknown types so callers can warn.
+                tbytes = n_elements // 2
+                r.setdefault('unknown_ttypes', set()).add(ttype)
             is_expert = '_exps.' in tname or '_shexp.' in tname or 'experts.' in tname
             if is_expert:
                 r['expert_bytes'] = r.get('expert_bytes', 0) + tbytes
@@ -218,6 +252,8 @@ def main() -> int:
                     help='Output format: json (default) or shell VAR=value lines')
     args = ap.parse_args()
     r = parse(args.path)
+    if 'unknown_ttypes' in r:
+        r['unknown_ttypes'] = sorted(r['unknown_ttypes'])
     if args.format == 'json':
         json.dump(r, sys.stdout)
         sys.stdout.write('\n')

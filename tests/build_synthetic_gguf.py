@@ -46,11 +46,33 @@ def w_kv_string(buf, key, val):
     w_string(buf, val)
 
 
+def w_tensor_header(buf, name, dims, ttype, offset=0):
+    """Emit a tensor info header. parse_gguf.py reads only headers, never the
+    tensor data that would follow at `offset`, so synthetic GGUFs stay tiny."""
+    w_string(buf, name)
+    w_uint32(buf, len(dims))
+    for d in dims:
+        w_uint64(buf, d)
+    w_uint32(buf, ttype)
+    w_uint64(buf, offset)
+
+
+def parse_tensor_spec(spec):
+    """Parse 'name:dim1,dim2,...:ttype' into (name, [dims], ttype)."""
+    parts = spec.split(':')
+    if len(parts) != 3:
+        raise ValueError(f'bad --tensor spec {spec!r}: want name:dims:ttype')
+    name, dim_str, ttype_str = parts
+    dims = [int(d) for d in dim_str.split(',')]
+    return name, dims, int(ttype_str)
+
+
 def build(args):
     out = []
     out.append(b'GGUF')
     w_uint32(out, 3)               # version
-    tensor_count = 0
+    tensors = [parse_tensor_spec(s) for s in (args.tensor or [])]
+    tensor_count = len(tensors)
     kv_pairs = []
 
     arch = args.arch
@@ -109,6 +131,9 @@ def build(args):
         else:
             raise ValueError(f'unhandled type {vtype}')
 
+    for name, dims, ttype in tensors:
+        w_tensor_header(out, name, dims, ttype)
+
     blob = b''.join(out)
     with open(args.out, 'wb') as f:
         f.write(blob)
@@ -140,6 +165,10 @@ def main():
     ap.add_argument('--vl-mla', type=int, default=None)
     ap.add_argument('--rope-dim', type=int, default=None)
     ap.add_argument('--ssm', action='store_true')
+    ap.add_argument('--tensor', action='append', default=[],
+                    help='emit a synthetic tensor header: name:dim1,dim2,...:ttype '
+                         '(repeatable). No tensor data is written; the parser only '
+                         'reads headers.')
     args = ap.parse_args()
     build(args)
 
