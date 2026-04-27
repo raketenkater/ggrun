@@ -100,18 +100,20 @@ out=$(run_dry "$TMP/ssm.gguf")
 assert_contains "$out" "SSM/hybrid" "ssm_hybrid: SSM label"
 
 # ── Test 6: mistagged DeepSeek V4 Flash (deepseek2 arch + kl_mla<=rope_dim) ─
-# The 'Flash' variant gets mistagged by stock converters as deepseek2 but
-# carries V4 metadata that hits GGML_ASSERT(n_embd_head_qk_nope >= 1) at load.
-# llm-server should bail early with a clear pointer to the antirez fork.
-echo "Test: dsv4_flash_mistag_bails_early"
+# Stock converters tag DeepSeek V4 Flash GGUFs as deepseek2 but emit V4
+# metadata that crashes stock builds. llm-server should warn (not bail) so
+# users with a fork-built llama-server can still proceed.
+echo "Test: dsv4_flash_mistag_warns_but_proceeds"
 build_gguf --out "$TMP/dsv4_mistag.gguf" --arch deepseek2 --name 'DeepSeek V4 Flash' \
     --layers 43 --hkv 1 --kl 512 --vl 512 --embd 4096 \
     --kv-lora 512 --q-lora 512 --kl-mla 64 --vl-mla 512 --rope-dim 64 \
     --ctx-train 1048576
 out=$(run_dry "$TMP/dsv4_mistag.gguf" 2>&1 || true)
-ec=$?
-assert_contains "$out" "DeepSeek V4 Flash mistagged" "dsv4_flash_mistag: clear error message"
+assert_contains "$out" "DeepSeek V4 Flash mistagged" "dsv4_flash_mistag: clear warning"
 assert_contains "$out" "antirez/llama.cpp-deepseek-v4-flash" "dsv4_flash_mistag: points to fork"
+assert_contains "$out" "PR #22378" "dsv4_flash_mistag: points to upstream PR"
+# Warning must not abort the run — downstream estimator output should still appear.
+assert_contains "$out" "43 layers" "dsv4_flash_mistag: estimator continues past warning"
 
 # ── Test 7: max-context-fit suggestion stays out of non-interactive runs ─
 echo "Test: max_ctx_suggestion_skipped_under_assume_yes"

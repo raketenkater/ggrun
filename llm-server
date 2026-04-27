@@ -1283,20 +1283,19 @@ fi
 
 # DeepSeek V4 Flash GGUFs from stock converters get tagged as `deepseek2` but
 # carry V4 metadata (key_length_mla == rope.dimension_count → zero "nope" head
-# dim, hits GGML_ASSERT(n_embd_head_qk_nope >= 1) at model load). Catch the
-# pattern early; upstream llama.cpp/ik_llama.cpp don't yet handle this arch.
+# dim, hits GGML_ASSERT(n_embd_head_qk_nope >= 1) at model load on stock builds).
+# Warn — don't bail. If LLAMA_SERVER points at a fork build (antirez or
+# PR #22378) the load will succeed.
 if [[ "$MODEL_ARCH" == "deepseek2" ]] && (( KEY_LENGTH_MLA > 0 )) && (( KEY_LENGTH_MLA <= ROPE_DIM )); then
     cat >&2 <<EOF
-Error: this GGUF looks like DeepSeek V4 Flash mistagged as deepseek2.
-       key_length_mla=$KEY_LENGTH_MLA, rope.dimension_count=$ROPE_DIM
-       Both upstream llama.cpp and ik_llama.cpp will crash loading this model.
-
-       DeepSeek V4 Flash is currently only supported by:
-         https://github.com/antirez/llama.cpp-deepseek-v4-flash
-       and only with a properly-tagged 'deepseek4' GGUF (e.g.
-       https://huggingface.co/antirez/deepseek-v4-gguf), CPU + Metal only.
+Warning: this GGUF looks like DeepSeek V4 Flash mistagged as deepseek2.
+         key_length_mla=$KEY_LENGTH_MLA, rope.dimension_count=$ROPE_DIM
+         Stock llama.cpp / ik_llama.cpp will crash loading this model.
+         You need a fork build:
+           - https://github.com/antirez/llama.cpp-deepseek-v4-flash (CPU/Metal)
+           - llama.cpp PR #22378 (CUDA-capable, draft)
+         Point LLAMA_SERVER at the fork's llama-server binary if you haven't.
 EOF
-    exit 1
 fi
 
 IS_MOE=0
