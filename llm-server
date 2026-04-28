@@ -749,10 +749,24 @@ if (( DO_UPDATE )); then
             # Re-capture so we compare against branch HEAD, not the detached commit
             old_commit=$(git rev-parse HEAD 2>/dev/null)
         fi
+        # Refuse pull on dirty tree — git's "Please commit or stash" message
+        # is unactionable in this context. Tell the user what we see and skip
+        # cleanly. (Many users carry local patches like the tool-call fix in
+        # ik_llama; we don't want to silently stash those.)
+        local dirty
+        dirty=$(git status --porcelain --untracked-files=no 2>/dev/null)
+        if [[ -n "$dirty" ]]; then
+            echo "  Skip: working tree has uncommitted changes:"
+            echo "$dirty" | head -5 | sed 's/^/    /'
+            echo "    (commit or stash them in $repo_dir, then re-run --update)"
+            rm -f "${binary_backup}"
+            return 1
+        fi
         if ! git pull --ff-only 2>&1 | tail -3; then
             echo "  Warning: fast-forward pull failed, trying rebase..."
             if ! git pull --rebase 2>&1 | tail -3; then
                 echo "  FAILED: git pull failed — skipping $name"
+                rm -f "${binary_backup}"
                 return 1
             fi
         fi
@@ -762,7 +776,7 @@ if (( DO_UPDATE )); then
         if [[ "$old_commit" == "$new_commit" ]]; then
             echo "  Already up to date."
             rm -f "${binary_backup}"
-            return 0
+            return 2
         fi
         echo "  Updated: $(git log --oneline -1)"
 
@@ -915,25 +929,37 @@ if (( DO_UPDATE )); then
 
     IK_DIR="$HOME/ik_llama.cpp"
     MAIN_DIR="$HOME/llama.cpp"
-    ik_ok=0
-    main_ok=0
+    # Status codes from update_backend: 0=updated, 2=already up to date, 1=failed/skipped
+    ik_status=99
+    main_status=99
 
     if [[ -d "$IK_DIR" ]]; then
-        update_backend "ik_llama.cpp" "$IK_DIR" && ik_ok=1
+        ik_status=0
+        update_backend "ik_llama.cpp" "$IK_DIR" || ik_status=$?
     else
         echo "ik_llama.cpp not found at $IK_DIR — skipping"
     fi
 
     if [[ -d "$MAIN_DIR" ]]; then
-        update_backend "llama.cpp" "$MAIN_DIR" && main_ok=1
+        main_status=0
+        update_backend "llama.cpp" "$MAIN_DIR" || main_status=$?
     else
         echo "llama.cpp not found at $MAIN_DIR — skipping"
     fi
 
+    _update_label() {
+        case "$1" in
+            0)  echo "updated ✓" ;;
+            2)  echo "already up to date" ;;
+            99) echo "not present" ;;
+            *)  echo "failed/skipped" ;;
+        esac
+    }
+
     echo ""
     echo "═══ Update summary ═══"
-    (( ik_ok ))   && echo "  ik_llama.cpp: updated ✓" || echo "  ik_llama.cpp: unchanged/failed"
-    (( main_ok )) && echo "  llama.cpp:    updated ✓" || echo "  llama.cpp:    unchanged/failed"
+    echo "  ik_llama.cpp: $(_update_label "$ik_status")"
+    echo "  llama.cpp:    $(_update_label "$main_status")"
 
     # Show what's available now
     for dir in "$IK_DIR" "$MAIN_DIR"; do
