@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Pgid-scoped shutdown** — backends now launch under `setsid` and shut down via process-group signal, so spawned helper threads/children get cleaned up. Port-listener cleanup will refuse to `kill -9` foreign processes bound to the same port (warns instead) — the previous lsof-sweep could nuke unrelated services.
+- **Unified `launch_backend()`** — `try_start`, `run_with_restart`, and `try_start_with_overrides` all spawn through one helper that handles setsid, log offsets, OOM-score, and `RUNNING_PID` registration. `try_start` now also attempts ik→mainline fallback once on health-check failure, matching `run_with_restart` semantics.
 - **MoE `--n-cpu-moe` fallback** — when `-ot` expert placement fails (VRAM pressure, odd layouts), the launcher now sweeps `--n-cpu-moe` and caches the recovered config.
 - **`--show-configs`** — compact table of all cached model configs, with per-model detail view showing the exact command, tokens/sec, tune rounds, and backend commit freshness.
 - **Unknown flags forwarded to llama-server** — any flag `llm-server` doesn't recognize is passed through to the underlying server (after tune-cache flags, so user overrides win).

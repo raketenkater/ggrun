@@ -70,16 +70,42 @@ LLM_CONFIG="${LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-server/config}"
 # script exit (set -e landmine, SIGINT, SIGTERM) doesn't leak a 100GB+ ik_llama
 # process. `run_with_restart` explicitly resets this for the foreground server
 # since that one is the user's intended long-running process.
+#
+# V3: launches go through setsid so the server is its own session/pgid leader.
+# Cleanup targets the whole process group, which (a) catches spawned helper
+# threads/children and (b) lets us avoid the previous lsof-port-sweep that
+# could `kill -9` an unrelated service bound to the same port.
 RUNNING_PID=""
+_pgid_of() {
+    local pid="${1:-}"
+    [[ -z "$pid" ]] && return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    local pgid
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+    [[ -n "$pgid" ]] || return 1
+    echo "$pgid"
+}
 _cleanup_orphan_server() {
     local pid="${RUNNING_PID:-}"
     [[ -z "$pid" ]] && return 0
     kill -0 "$pid" 2>/dev/null || return 0
-    # Give it a chance to shut down cleanly, then SIGKILL.
-    kill -TERM "$pid" 2>/dev/null || true
+    local pgid
+    pgid=$(_pgid_of "$pid" 2>/dev/null || true)
+    # Refuse to signal our own group (would TERM the script itself).
+    if [[ -n "$pgid" && "$pgid" != "$$" && "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]]; then
+        kill -TERM -- "-$pgid" 2>/dev/null || true
+    else
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
     local i=0
     while (( i < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; (( ++i )); done
-    kill -9 "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+        if [[ -n "$pgid" && "$pgid" != "$$" && "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]]; then
+            kill -KILL -- "-$pgid" 2>/dev/null || true
+        else
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
 }
 trap _cleanup_orphan_server EXIT
 
@@ -1922,28 +1948,80 @@ build_ot_string() {
     echo "${parts[*]}"
 }
 
+# V3: pgid-scoped shutdown. Earlier versions did `kill -9 $(lsof -t -i:PORT)`
+# which can nuke any unrelated service bound to the same port. We now signal
+# the server's own process group (set up via setsid in launch_backend) and
+# only fall back to port-based cleanup against processes whose `comm` looks
+# like a llama-server binary — never foreign listeners.
+_is_llama_proc() {
+    local p="${1:-}"
+    [[ -z "$p" ]] && return 1
+    local cmd
+    cmd=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ' || true)
+    case "$cmd" in
+        llama-server|llama-cli|llama|ik_llama-server|ik_llama|server) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 kill_server() {
-    local pid=${1:-}
+    local pid="${1:-}"
+    local own_pgid pgid=""
+    own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)
+
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        kill -9 "$pid" 2>/dev/null
+        pgid=$(_pgid_of "$pid" 2>/dev/null || true)
+        if [[ -n "$pgid" && "$pgid" != "$own_pgid" ]]; then
+            kill -TERM -- "-$pgid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+        local i=0
+        while (( i < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; (( ++i )); done
+        if kill -0 "$pid" 2>/dev/null; then
+            if [[ -n "$pgid" && "$pgid" != "$own_pgid" ]]; then
+                kill -KILL -- "-$pgid" 2>/dev/null || true
+            else
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
         wait "$pid" 2>/dev/null || true
     fi
-    # Aggressive port cleanup
-    local port_pids
+
+    # Port-listener cleanup: only target llama-named processes. Foreign
+    # listeners on the same port get a warning, never SIGKILL.
+    local port_pids p cmd
     port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
     if [[ -n "$port_pids" ]]; then
-        kill -9 $port_pids 2>/dev/null || true
+        for p in $port_pids; do
+            if _is_llama_proc "$p"; then
+                kill -TERM "$p" 2>/dev/null || true
+            else
+                cmd=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ' || true)
+                [[ -n "$cmd" ]] && echo "  WARN: port ${PORT} held by foreign process '$cmd' (pid $p) — refusing to kill" >&2
+            fi
+        done
+        sleep 1
+        port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
+        for p in $port_pids; do
+            _is_llama_proc "$p" && kill -9 "$p" 2>/dev/null || true
+        done
     fi
-    # Wait for port to free (max 10s)
-    local w=0
-    while (( w < 10 )) && lsof -i:"${PORT}" >/dev/null 2>&1; do
+
+    # Wait for port to free, but only count llama-owned listeners.
+    local w=0 has_ours
+    while (( w < 10 )); do
+        has_ours=0
+        port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
+        for p in $port_pids; do
+            _is_llama_proc "$p" && { has_ours=1; break; }
+        done
+        (( has_ours )) || break
         sleep 1; (( ++w ))
     done
-    # Whatever we had pinned is gone now — either we targeted it by pid above
-    # or the port sweep took it. Clear RUNNING_PID so the EXIT trap (and any
-    # later branch that reads it) doesn't chase a dead process and potentially
-    # kill an unrelated pid that wrapped around. Callers that need to track a
-    # new server will set RUNNING_PID again via try_start / run_with_restart.
+
+    # Whatever we had pinned is gone now. Clear RUNNING_PID so the EXIT trap
+    # doesn't chase a dead pid that may have wrapped around to another process.
     RUNNING_PID=""
 }
 
@@ -1970,22 +2048,111 @@ wait_for_ready() {
     return 1
 }
 
+# V3: spawn the server in its own session/pgid via setsid so kill_server can
+# target the whole group (children, helper threads, the works). On systems
+# without setsid this falls back to a normal background launch — kill_server
+# detects the shared-pgid case and refuses pgid-kill there.
+#
+# Modes: "log_only" (append to SERVER_LOG), "tee" (tee to log + stdout),
+#        "tee_filter" (tee + filter known noisy ik_llama spam).
+# Side effects: sets RUNNING_PID, LAUNCH_LOG_OFFSET. Prints pid to stdout.
+launch_backend() {
+    local mode="$1"; shift
+    LAUNCH_LOG_OFFSET=$(wc -c < "$SERVER_LOG" 2>/dev/null || echo 0)
+    local launcher=()
+    if command -v setsid >/dev/null 2>&1; then
+        launcher=(setsid)
+    fi
+    case "$mode" in
+        log_only)
+            "${launcher[@]}" "$LLAMA_SERVER" "$@" >> "$SERVER_LOG" 2>&1 &
+            ;;
+        tee_filter)
+            "${launcher[@]}" "$LLAMA_SERVER" "$@" \
+                > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
+            ;;
+        tee|*)
+            "${launcher[@]}" "$LLAMA_SERVER" "$@" > >(tee -a "$SERVER_LOG") 2>&1 &
+            ;;
+    esac
+    local pid=$!
+    echo 1000 > "/proc/$pid/oom_score_adj" 2>/dev/null || true
+    # Set RUNNING_PID immediately so the EXIT trap catches the orphan even if
+    # the script dies before health-check completion. (V2 only set this inside
+    # wait_for_ready on success, leaving an orphan window.)
+    RUNNING_PID="$pid"
+    echo "$pid"
+}
+
+# Strip ik_llama-only flags from a named flag array (bash 4.3+ nameref).
+_strip_ik_only_flags() {
+    local -n _arr="$1"
+    local out=() skip=0 f
+    for f in "${_arr[@]}"; do
+        if (( skip )); then skip=0; continue; fi
+        case "$f" in
+            --run-time-repack|-rtr|--no-context-shift|-cram|-khad|-mqkv)
+                echo "  Removing ik-only flag: $f" ;;
+            --defrag-thold|--ctx-checkpoints|--split-mode)
+                echo "  Removing ik-only flag: $f"
+                skip=1 ;;
+            *) out+=("$f") ;;
+        esac
+    done
+    _arr=("${out[@]}")
+}
+
+# Inspect SERVER_LOG since LAUNCH_LOG_OFFSET. If ik_llama failed to load
+# the model, swap LLAMA_SERVER to mainline and strip ik-only flags from
+# the named array. Returns 0 if fallback applied, 1 otherwise.
+# Args: $1 = name of flag array variable to mutate
+_try_ik_fallback() {
+    local arr_name="$1"
+    (( ${IS_IK_LLAMA:-0} )) || return 1
+    [[ -n "${USER_SERVER_BIN:-}" ]] && return 1
+    local mainline_bin="$HOME/llama.cpp/build/bin/llama-server"
+    [[ -x "$mainline_bin" ]] || return 1
+    local recent_log
+    recent_log=$(tail -c +"$((${LAUNCH_LOG_OFFSET:-0}+1))" "$SERVER_LOG" 2>/dev/null || true)
+    # Pattern-match via case to avoid `echo | grep` SIGPIPE under pipefail.
+    case "$recent_log" in
+        *"unknown model architecture"*|*"unable to load model"*|*"error loading model"*) ;;
+        *) return 1 ;;
+    esac
+    echo ""
+    echo "═══ ik_llama.cpp cannot load this model — falling back to mainline llama.cpp ═══"
+    LLAMA_SERVER="$mainline_bin"
+    IS_IK_LLAMA=0
+    setup_lib_hub "$LLAMA_SERVER"
+    _strip_ik_only_flags "$arr_name"
+    echo "  Retrying with: $LLAMA_SERVER"
+    return 0
+}
+
 # Try starting server, wait for health. Sets RUNNING_PID on success.
-# (RUNNING_PID is initialized at script top so the EXIT trap can see it.)
+# V3: on health failure, attempts ik→llama fallback once before giving up.
+# This makes ai_tune's baseline launch as resilient as run_with_restart.
 try_start() {
     local extra_flags=("$@")
     RUNNING_PID=""
-    # Use process substitution to get the REAL pid of the server, not the tee pid
-    if (( START_OPENCODE )); then
-        # OpenCode needs the terminal — send server output to log only
-        "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" >> "$SERVER_LOG" 2>&1 &
-    else
-        "$LLAMA_SERVER" "${COMMON_FLAGS[@]}" "${extra_flags[@]}" > >(tee -a "$SERVER_LOG") 2>&1 &
+    local mode="tee"
+    (( START_OPENCODE )) && mode="log_only"
+    local launch_flags=("${COMMON_FLAGS[@]}" "${extra_flags[@]}")
+    local pid
+    pid=$(launch_backend "$mode" "${launch_flags[@]}")
+    if wait_for_ready "$pid"; then
+        return 0
     fi
-    local pid=$!
-    # Mark server as OOM-kill target so it dies instead of the whole system
-    echo 1000 > "/proc/$pid/oom_score_adj" 2>/dev/null || true
-    wait_for_ready "$pid"
+    # Failed health check. Try ik_llama → mainline fallback once.
+    if _try_ik_fallback COMMON_FLAGS; then
+        # extra_flags may also carry ik-only flags (e.g. -ot patterns)
+        _strip_ik_only_flags extra_flags
+        kill_server "$pid"
+        launch_flags=("${COMMON_FLAGS[@]}" "${extra_flags[@]}")
+        pid=$(launch_backend "$mode" "${launch_flags[@]}")
+        wait_for_ready "$pid" && return 0
+    fi
+    return 1
 }
 
 print_cmd() {
@@ -2083,14 +2250,10 @@ run_with_restart() {
 
     while true; do
         last_start=$(date +%s)
-        local log_start
-        log_start=$(wc -c < "$SERVER_LOG" 2>/dev/null || echo 0)
         echo "Starting server..."
-        "$LLAMA_SERVER" "${flags[@]}" > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
-        local pid=$!
-        RUNNING_PID="$pid"   # expose to EXIT trap so Ctrl-C cleans up the server
-        # Mark server as OOM-kill target so it dies instead of the whole system
-        echo 1000 > "/proc/$pid/oom_score_adj" 2>/dev/null || true
+        local pid
+        pid=$(launch_backend "tee_filter" "${flags[@]}")
+        local log_start="${LAUNCH_LOG_OFFSET:-0}"
         echo "Server PID: $pid"
 
         # Wait for health before declaring success
@@ -2626,9 +2789,8 @@ try_start_with_overrides() {
         done
         (( dominated )) || deduped+=("$flag")
     done
-    "$LLAMA_SERVER" "${deduped[@]}" "${TUNE_OVERRIDE_FLAGS[@]}" > >(tee -a "$SERVER_LOG") 2>&1 &
-    local pid=$!
-    echo 1000 > "/proc/$pid/oom_score_adj" 2>/dev/null || true
+    local pid
+    pid=$(launch_backend "tee" "${deduped[@]}" "${TUNE_OVERRIDE_FLAGS[@]}")
     wait_for_ready "$pid"
 }
 parse_tune_overrides() {
