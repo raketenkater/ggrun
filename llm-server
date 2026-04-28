@@ -181,7 +181,11 @@ cleanup() {
         rm -rf "$LIB_HUB_DIR"
     fi
 }
-trap cleanup EXIT
+_on_exit() {
+    _cleanup_orphan_server
+    cleanup
+}
+trap _on_exit EXIT
 
 # Create a "Lib Hub" (symlink all found .so files into one temp dir)
 # This solves the issue where libraries are scattered in build subfolders.
@@ -709,6 +713,8 @@ if (( DO_UPDATE )); then
         local name="$1" repo_dir="$2"
         local build_dir="$repo_dir/build"
         local binary="$build_dir/bin/llama-server"
+        local fallback_state_dir="$CACHE_DIR/update-fallbacks"
+        mkdir -p "$fallback_state_dir"
 
         echo ""
         echo "═══ Updating $name ═══"
@@ -721,8 +727,9 @@ if (( DO_UPDATE )); then
         cd "$repo_dir"
 
         # Save current state for rollback
-        local old_commit
+        local old_commit original_branch
         old_commit=$(git rev-parse HEAD 2>/dev/null)
+        original_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         local old_binary_hash=""
         [[ -x "$binary" ]] && old_binary_hash=$(md5sum "$binary" | awk '{print $1}')
         echo "  Current: $(git log --oneline -1)"
@@ -746,7 +753,9 @@ if (( DO_UPDATE )); then
             git checkout "$default_branch"
             # Re-capture so we compare against branch HEAD, not the detached commit
             old_commit=$(git rev-parse HEAD 2>/dev/null)
+            original_branch="$default_branch"
         fi
+        [[ -z "$original_branch" ]] && original_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "master")
         # Refuse pull on dirty tree — git's "Please commit or stash" message
         # is unactionable in this context. Tell the user what we see and skip
         # cleanly. (Many users carry local patches like the tool-call fix in
@@ -794,7 +803,7 @@ if (( DO_UPDATE )); then
         # (e.g. HEAD crashes on --help) without falling back all the way to the
         # previously-installed version. Override with LLM_SERVER_UPDATE_WALKBACK.
         local walkback_max="${LLM_SERVER_UPDATE_WALKBACK:-3}"
-        local attempt success=0 target_commit
+        local attempt success=0 target_commit success_commit=""
         for (( attempt=0; attempt < walkback_max; attempt++ )); do
             if (( attempt == 0 )); then
                 target_commit="$new_commit"
@@ -806,6 +815,7 @@ if (( DO_UPDATE )); then
             fi
             if _update_build_and_test "$build_dir" "$binary"; then
                 success=1
+                success_commit="$target_commit"
                 break
             fi
         done
@@ -817,6 +827,21 @@ if (( DO_UPDATE )); then
             [[ -f "${binary_backup}" ]] && mv "${binary_backup}" "$binary"
             echo "  Rolled back to $(git log --oneline -1)"
             return 1
+        fi
+
+        if [[ -n "$success_commit" && "$success_commit" != "$new_commit" ]]; then
+            local fallback_marker="$fallback_state_dir/${name//[^A-Za-z0-9_.-]/_}.env"
+            {
+                printf 'repo_dir=%q\n' "$repo_dir"
+                printf 'branch=%q\n' "$original_branch"
+                printf 'head_commit=%q\n' "$new_commit"
+                printf 'fallback_commit=%q\n' "$success_commit"
+                printf 'recorded_at=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > "$fallback_marker"
+            echo "  Walk-back succeeded at $(git log --oneline -1 "$success_commit")"
+            echo "  Reattaching repo to branch '$original_branch' while keeping built fallback binary."
+            git checkout --quiet "$original_branch" 2>/dev/null || \
+                echo "  Warning: could not reattach to $original_branch; repo remains at fallback commit" >&2
         fi
 
         local new_binary_hash
@@ -1050,13 +1075,51 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 log() { [[ "$VERBOSE" == "1" ]] && echo "[DEBUG] $*" >&2 || true; }
 
-# If AI tuning, kill any existing server first so GPU detection sees true free VRAM
-if (( DO_AI_TUNE )); then
-    local_port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
-    if [[ -n "$local_port_pids" ]]; then
-        echo "Stopping existing server on port ${PORT} for AI tuning..."
-        kill -9 $local_port_pids 2>/dev/null || true
-        sleep 3  # wait for VRAM release
+_is_llama_proc() {
+    local p="${1:-}"
+    [[ -z "$p" ]] && return 1
+    local cmd
+    cmd=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ' || true)
+    case "$cmd" in
+        llama-server|llama-cli|llama|ik_llama-server|ik_llama) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_port_listener_pids() {
+    lsof -nP -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true
+}
+
+_stop_llama_listeners_for_ai_tune() {
+    local port_pids p cmd
+    port_pids=$(_port_listener_pids)
+    [[ -z "$port_pids" ]] && return 0
+
+    echo "Checking existing listener on port ${PORT} before AI tuning..."
+    for p in $port_pids; do
+        if _is_llama_proc "$p"; then
+            echo "  Stopping llama-compatible listener pid $p"
+            kill -TERM "$p" 2>/dev/null || true
+        else
+            cmd=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ' || true)
+            [[ -z "$cmd" ]] && cmd="unknown"
+            echo "  WARN: port ${PORT} held by foreign process '$cmd' (pid $p); refusing to kill" >&2
+        fi
+    done
+
+    sleep 3
+    port_pids=$(_port_listener_pids)
+    for p in $port_pids; do
+        _is_llama_proc "$p" && kill -KILL "$p" 2>/dev/null || true
+    done
+}
+
+# If AI tuning, stop only llama-compatible listeners first so GPU detection sees true free VRAM.
+# Dry-run must remain side-effect free and never touch existing listeners.
+if (( DO_AI_TUNE && ! DRY_RUN )); then
+    _stop_llama_listeners_for_ai_tune
+    if [[ "${LLM_SERVER_TEST_STOP_AFTER_AI_TUNE_PRECLEANUP:-0}" == "1" ]]; then
+        exit 0
     fi
 fi
 
@@ -1258,6 +1321,37 @@ else
         echo "  GPU${GPU_INDEX[$gi]}: ${GPU_NAME[$gi]} ${GPU_VRAM_FREE[$gi]}MB free / ${GPU_VRAM_TOTAL[$gi]}MB total (PCIe x${GPU_PCIE_WIDTH[$gi]} gen${GPU_PCIE_GEN[$gi]})"
     done
 fi
+
+placement_cache_key_input() {
+    local parts=(
+        "version=$VERSION"
+        "model=$MODEL_NAME"
+        "bytes=$TOTAL_SIZE_BYTES"
+        "ctx=$CTX_SIZE"
+        "kv=$KV_QUALITY"
+        "backend=$BACKEND_TAG"
+        "llama_server=$LLAMA_SERVER"
+        "gpu_filter=${GPUS_FILTER:-all}"
+        "ram_avail=$RAM_AVAIL_MB"
+        "ram_budget=$RAM_BUDGET_MB"
+        "gpu_count=$GPU_COUNT"
+    )
+    local i free_bucket total_bucket
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        # Bucket free VRAM to 1024MB so normal allocator jitter does not churn
+        # cache files, but materially different co-tenancy invalidates placement.
+        free_bucket=$(( (GPU_VRAM_FREE[$i] / 1024) * 1024 ))
+        total_bucket=$(( (GPU_VRAM_TOTAL[$i] / 1024) * 1024 ))
+        parts+=("gpu${i}_index=${GPU_INDEX[$i]}")
+        parts+=("gpu${i}_name=${GPU_NAME[$i]}")
+        parts+=("gpu${i}_free_bucket=${free_bucket}")
+        parts+=("gpu${i}_total_bucket=${total_bucket}")
+        parts+=("gpu${i}_pcie=x${GPU_PCIE_WIDTH[$i]}g${GPU_PCIE_GEN[$i]}")
+        parts+=("gpu${i}_bandwidth=${GPU_BANDWIDTH[$i]}")
+        parts+=("gpu${i}_compute=${GPU_COMPUTE_CAP[$i]}")
+    done
+    printf '%s\n' "${parts[@]}"
+}
 
 # ═══════════════════════════════════════════════════════════════
 # Section 3: Model Detection
@@ -1782,9 +1876,9 @@ download_mmproj() {
             echo "  Downloading mmproj from ${repo}..."
             if curl -fL --progress-bar -o "$dest" "$url"; then
                 # Verify it's actually a GGUF file
-                if python3 -c "
-import struct, sys
-with open('$dest','rb') as f:
+                if DEST="$dest" python3 -c "
+import os, sys
+with open(os.environ['DEST'],'rb') as f:
     magic = f.read(4)
     if magic != b'GGUF': sys.exit(1)
 " 2>/dev/null; then
@@ -1800,11 +1894,6 @@ with open('$dest','rb') as f:
     done
     return 1
 }
-
-if [[ -n "$MMPROJ_PATH" && -f "$MMPROJ_PATH" ]]; then
-    COMMON_FLAGS+=(--mmproj "$MMPROJ_PATH")
-    echo "  Vision: mmproj loaded from $MMPROJ_PATH"
-fi
 
 # User passthrough flags are appended after tune-cache resolution (see below)
 # so they always appear last in the final command and beat both heuristic and tune.
@@ -1870,6 +1959,8 @@ if [[ -n "$MMPROJ_PATH" ]]; then
     if [[ -f "$MMPROJ_PATH" ]]; then
         MMPROJ_SIZE_MB=$(du -sm "$MMPROJ_PATH" 2>/dev/null | awk '{print $1}' || echo 0)
         VRAM_NEEDED_MB=$(( VRAM_NEEDED_MB + MMPROJ_SIZE_MB ))
+        COMMON_FLAGS+=(--mmproj "$MMPROJ_PATH")
+        echo "  Vision: mmproj loaded from $MMPROJ_PATH"
     else
         echo "Error: Vision enabled but mmproj file not found/downloaded."
         echo "Please verify model path or use --ai-tune."
@@ -1965,22 +2056,6 @@ build_ot_string() {
     echo "${parts[*]}"
 }
 
-# V3: pgid-scoped shutdown. Earlier versions did `kill -9 $(lsof -t -i:PORT)`
-# which can nuke any unrelated service bound to the same port. We now signal
-# the server's own process group (set up via setsid in launch_backend) and
-# only fall back to port-based cleanup against processes whose `comm` looks
-# like a llama-server binary — never foreign listeners.
-_is_llama_proc() {
-    local p="${1:-}"
-    [[ -z "$p" ]] && return 1
-    local cmd
-    cmd=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ' || true)
-    case "$cmd" in
-        llama-server|llama-cli|llama|ik_llama-server|ik_llama|server) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 kill_server() {
     local pid="${1:-}"
     local own_pgid pgid=""
@@ -2008,7 +2083,7 @@ kill_server() {
     # Port-listener cleanup: only target llama-named processes. Foreign
     # listeners on the same port get a warning, never SIGKILL.
     local port_pids p cmd
-    port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
+    port_pids=$(_port_listener_pids)
     if [[ -n "$port_pids" ]]; then
         for p in $port_pids; do
             if _is_llama_proc "$p"; then
@@ -2019,7 +2094,7 @@ kill_server() {
             fi
         done
         sleep 1
-        port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
+        port_pids=$(_port_listener_pids)
         for p in $port_pids; do
             _is_llama_proc "$p" && kill -9 "$p" 2>/dev/null || true
         done
@@ -2029,7 +2104,7 @@ kill_server() {
     local w=0 has_ours
     while (( w < 10 )); do
         has_ours=0
-        port_pids=$(lsof -t -i:"${PORT}" 2>/dev/null) || true
+        port_pids=$(_port_listener_pids)
         for p in $port_pids; do
             _is_llama_proc "$p" && { has_ours=1; break; }
         done
@@ -2109,9 +2184,9 @@ _strip_ik_only_flags() {
     for f in "${_arr[@]}"; do
         if (( skip )); then skip=0; continue; fi
         case "$f" in
-            --run-time-repack|-rtr|--no-context-shift|-cram|-khad|-mqkv)
+            --run-time-repack|-rtr|--no-context-shift|-khad|-mqkv|-muge|-ger)
                 echo "  Removing ik-only flag: $f" ;;
-            --defrag-thold|--ctx-checkpoints|--split-mode)
+            -cram|--defrag-thold|--ctx-checkpoints|--split-mode)
                 echo "  Removing ik-only flag: $f"
                 skip=1 ;;
             *) out+=("$f") ;;
@@ -2282,34 +2357,10 @@ run_with_restart() {
                 break
             fi
             if ! kill -0 "$pid" 2>/dev/null; then
-                # Server died, check if we need to fall back
-                if [[ "$LLAMA_SERVER" == *"/ik_llama.cpp/"* ]]; then
-                    echo ""
-                    echo "═══ ik_llama.cpp cannot load this model — falling back to mainline llama.cpp ═══"
-                    
-                    # Sanitize flags
-                    local new_flags=()
-                    local skip_next=0
-                    for f in "${flags[@]}"; do
-                        if (( skip_next )); then
-                            skip_next=0
-                            continue
-                        fi
-                        case "$f" in
-                            --run-time-repack|--defrag-thold|-cram|--ctx-checkpoints|-khad|-mqkv)
-                                echo "  Removing ik-only flag: $f"
-                                if [[ "$f" == "--defrag-thold" || "$f" == "-cram" || "$f" == "--ctx-checkpoints" ]]; then
-                                    skip_next=1
-                                fi
-                                continue ;;
-                            *) new_flags+=("$f") ;;
-                        esac
-                    done
-                    flags=("${new_flags[@]}")
-                    
-                    LLAMA_SERVER="$HOME/llama.cpp/build/bin/llama-server"
-                    echo "  Retrying with: $LLAMA_SERVER"
-                    # Restart the loop with new flags
+                # Server died; shared startup fallback handles ik_llama -> llama.cpp once.
+                if _try_ik_fallback flags; then
+                    kill_server "$pid"
+                    restarts=0
                     continue 2
                 fi
                 break
@@ -2431,42 +2482,10 @@ run_with_restart() {
         else
             echo "Startup crash. Restart $restarts/$MAX_RESTARTS in ${wait_sec}s..."
 
-            # Auto-fallback: if ik_llama.cpp can't load the model, try mainline llama.cpp
-            if (( IS_IK_LLAMA )) && [[ -z "$USER_SERVER_BIN" ]]; then
-                local recent_log
-                recent_log=$(tail -c +$((log_start)) "$SERVER_LOG" 2>/dev/null) || recent_log=""
-                if echo "$recent_log" | grep -q "unknown model architecture\|unable to load model\|error loading model"; then
-                    local mainline_bin="$HOME/llama.cpp/build/bin/llama-server"
-                    if [[ -x "$mainline_bin" ]]; then
-                        echo ""
-                        echo "═══ ik_llama.cpp cannot load this model — falling back to mainline llama.cpp ═══"
-                        LLAMA_SERVER="$mainline_bin"
-                        IS_IK_LLAMA=0
-                        setup_lib_hub "$LLAMA_SERVER"
-                        # Remove ik_llama-specific flags that mainline doesn't support
-                        local new_flags=()
-                        local skip_next=0
-                        for f in "${flags[@]}"; do
-                            if (( skip_next )); then
-                                echo "  Removing ik-only flag value: $f"
-                                skip_next=0
-                                continue
-                            fi
-                            case "$f" in
-                                --no-context-shift|-cram)
-                                    echo "  Removing ik-only flag: $f" ;;
-                                --split-mode|--ctx-checkpoints|--defrag-thold)
-                                    echo "  Removing ik-only flag: $f"
-                                    skip_next=1 ;;
-                                *)
-                                    new_flags+=("$f") ;;
-                            esac
-                        done
-                        flags=("${new_flags[@]}")
-                        restarts=0
-                        echo "  Retrying with: $LLAMA_SERVER"
-                    fi
-                fi
+            if _try_ik_fallback flags; then
+                restarts=0
+                kill_server ""
+                continue
             fi
         fi
 
@@ -2786,11 +2805,20 @@ parse_tune_overrides() {
     local overrides_json="$1"
     TUNE_OVERRIDE_FLAGS=()
     TUNE_OVERRIDE_KEYS=()
-    local flags_str
     local kv_locked="$KV_QUALITY_EXPLICIT"
-    flags_str=$(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" python3 -c "
+    while IFS= read -r -d '' item; do
+        case "$item" in
+            F$'\t'*) TUNE_OVERRIDE_FLAGS+=("${item#F$'\t'}") ;;
+            K$'\t'*) TUNE_OVERRIDE_KEYS+=("${item#K$'\t'}") ;;
+        esac
+    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" python3 -c "
 import json, os, sys
-overrides = json.loads(sys.stdin.read())
+try:
+    overrides = json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    overrides = {}
+if not isinstance(overrides, dict):
+    overrides = {}
 protected = {'-m', '--host', '--port', '--ctx-size', '-ot'}
 if os.environ.get('KV_LOCKED') == '1':
     protected |= {'--cache-type-k', '--cache-type-v'}
@@ -2808,32 +2836,23 @@ aliases = {
 }
 normalized = {}
 for k, v in overrides.items():
+    if not isinstance(k, str) or not k.startswith('-'):
+        continue
     k = aliases.get(k, k)
     normalized[k] = v
-parts = []
-keys = []
+records = []
 for k, v in normalized.items():
     if k in protected:
         continue
     if v is False:
         continue
-    keys.append(k)
-    parts.append(k)
+    records.append(('K', k))
+    records.append(('F', k))
     if v is not True and v != '' and v is not None:
-        parts.append(str(v))
-# Line 1: flags, Line 2: keys to dedup against COMMON_FLAGS
-print(' '.join(parts))
-print(' '.join(keys))
-" <<< "$overrides_json") || true
-    # NOTE: `head -1` closes stdin after one line, which SIGPIPEs echo. Under
-    # `set -euo pipefail` that fails the pipeline and aborts the whole script
-    # silently. `|| true` defuses it.
-    local line1 line2
-    line1=$(echo "$flags_str" | head -1 || true)
-    line2=$(echo "$flags_str" | tail -1 || true)
-    # shellcheck disable=SC2206
-    [[ -n "$line1" ]] && TUNE_OVERRIDE_FLAGS=($line1)
-    [[ -n "$line2" ]] && TUNE_OVERRIDE_KEYS=($line2)
+        records.append(('F', str(v)))
+for kind, value in records:
+    sys.stdout.write(kind + '\t' + value + '\0')
+" <<< "$overrides_json" || true)
 }
 
 # Main AI tune function — iterative: benchmark → query → benchmark → query ...
@@ -2932,6 +2951,7 @@ print(f'  Gen: {b.get(\"gen_tps\", \"?\")} tok/s  PP: {b.get(\"pp_tps\", \"?\")}
 print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
         echo "  Run --ai-tune --retune to re-optimize"
         echo ""
+        load_tune_cache || true
         echo "Launching with tuned config..."
         return 0
     fi
@@ -3514,11 +3534,22 @@ load_tune_cache() {
         echo "Using AI-tuned config (run --ai-tune --retune to re-optimize)"
 
         # Apply tuned overrides on top of COMMON_FLAGS (with alias normalization + dedup)
-        local tuned_parsed
-        tuned_parsed=$(python3 -c "
-import json
-d = json.load(open('$tune_cache'))
+        local tuned_extras=() override_keys=()
+        while IFS= read -r -d '' item; do
+            case "$item" in
+                F$'\t'*) tuned_extras+=("${item#F$'\t'}") ;;
+                K$'\t'*) override_keys+=("${item#K$'\t'}") ;;
+            esac
+        done < <(TUNE_CACHE="$tune_cache" python3 -c "
+import json, os, sys
+try:
+    with open(os.environ['TUNE_CACHE'], encoding='utf-8') as f:
+        d = json.load(f)
+except (OSError, json.JSONDecodeError, KeyError):
+    d = {}
 overrides = d.get('best_config', {}).get('flags', {})
+if not isinstance(overrides, dict):
+    overrides = {}
 aliases = {
     '--mg': '-mg', '--main-gpu': '-mg',
     '--batch-size': '-b', '--ubatch-size': '-ub',
@@ -3528,30 +3559,25 @@ aliases = {
     '--parallel': '--parallel', '-np': '--parallel',
     '--flash-attn': '--flash-attn', '-fa': '--flash-attn',
 }
-parts = []
-keys = []
+records = []
 for k, v in overrides.items():
+    if not isinstance(k, str) or not k.startswith('-'):
+        continue
     k = aliases.get(k, k)
     if k in ('-m', '--host', '--port', '--ctx-size', '-ot'):
         continue
     if v is False:
         continue
-    keys.append(k)
-    parts.append(k)
+    records.append(('K', k))
+    records.append(('F', k))
     if v is not True and v != '' and v is not None:
-        parts.append(str(v))
-print(' '.join(parts))
-print(' '.join(keys))
-" 2>/dev/null)
+        records.append(('F', str(v)))
+for kind, value in records:
+    sys.stdout.write(kind + '\t' + value + '\0')
+" 2>/dev/null || true)
 
-        local tuned_extras tuned_keys_str
-        tuned_extras=$(echo "$tuned_parsed" | head -1)
-        tuned_keys_str=$(echo "$tuned_parsed" | tail -1)
-
-        if [[ -n "$tuned_extras" ]]; then
+        if (( ${#tuned_extras[@]} > 0 )); then
             # Strip flags from COMMON_FLAGS that the tuned config overrides
-            # shellcheck disable=SC2206
-            local override_keys=($tuned_keys_str)
             local deduped=()
             local skip_next=0
             for (( ci=0; ci<${#COMMON_FLAGS[@]}; ci++ )); do
@@ -3569,26 +3595,25 @@ print(' '.join(keys))
                 done
                 (( dominated )) || deduped+=("$cflag")
             done
-            # shellcheck disable=SC2206
-            COMMON_FLAGS=("${deduped[@]}" $tuned_extras)
-            python3 -c "
-import json
-d = json.load(open('$tune_cache'))
+            COMMON_FLAGS=("${deduped[@]}" "${tuned_extras[@]}")
+            TUNE_CACHE="$tune_cache" python3 -c "
+import json, os
+d = json.load(open(os.environ['TUNE_CACHE']))
 b = d.get('best_config', {})
 print(f'  Config: {b.get(\"name\", \"?\")}')" 2>/dev/null
-            python3 -c "
-import json
-d = json.load(open('$tune_cache'))
+            TUNE_CACHE="$tune_cache" python3 -c "
+import json, os
+d = json.load(open(os.environ['TUNE_CACHE']))
 b = d.get('best_config', {})
 print(f'  Expected: gen={b.get(\"gen_tps\", \"?\")} tok/s  pp={b.get(\"pp_tps\", \"?\")} tok/s')" 2>/dev/null
             return 0
         else
             # baseline-wins marker: no overrides to apply, but note it was tuned
             local is_baseline_wins
-            is_baseline_wins=$(python3 -c "
-import json
+            is_baseline_wins=$(TUNE_CACHE="$tune_cache" python3 -c "
+import json, os
 try:
-    d = json.load(open('$tune_cache'))
+    d = json.load(open(os.environ['TUNE_CACHE']))
     print('1' if d.get('baseline_wins') else '0')
 except: print('0')" 2>/dev/null)
             if [[ "$is_baseline_wins" == "1" ]]; then
@@ -3597,6 +3622,14 @@ except: print('0')" 2>/dev/null)
         fi
     fi
     return 1
+}
+
+maybe_ai_tune_launch_flags() {
+    (( DO_AI_TUNE )) || return 1
+    COMMON_FLAGS=("$@")
+    TUNE_EXTRA_FIXED=()
+    ai_tune
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -3613,12 +3646,6 @@ USER_NO_MMAP=0
 for _f in "${EXTRA_LLAMA_FLAGS[@]:-}"; do
     [[ "$_f" == "--no-mmap" ]] && USER_NO_MMAP=1
 done
-
-# AI Tune: run optimization if requested
-# MoE models: ai-tune runs AFTER Section 8 expert placement (see end of Section 8)
-if (( DO_AI_TUNE )) && [[ "$STRATEGY" != "moe_offload" ]]; then
-    ai_tune
-fi
 
 # Load cached tune config if available — bypasses strategy-specific launch
 TUNE_LOADED=0
@@ -3669,6 +3696,9 @@ case "$STRATEGY" in
             print_cmd "${LAUNCH_FLAGS[@]}"
             exit 0
         fi
+        if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
+            run_with_restart "${COMMON_FLAGS[@]}"
+        fi
         run_with_restart "${LAUNCH_FLAGS[@]}"
         ;;
 
@@ -3679,6 +3709,9 @@ case "$STRATEGY" in
         if (( DRY_RUN )); then
             print_cmd "${LAUNCH_FLAGS[@]}"
             exit 0
+        fi
+        if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
+            run_with_restart "${COMMON_FLAGS[@]}"
         fi
         run_with_restart "${LAUNCH_FLAGS[@]}"
         ;;
@@ -3752,6 +3785,9 @@ case "$STRATEGY" in
             if try_start "${GRAPH_EXTRA[@]}"; then
                 echo "  Graph split works — restarting with crash recovery..."
                 kill_server "$RUNNING_PID"
+                if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
+                    run_with_restart "${COMMON_FLAGS[@]}"
+                fi
                 run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
             else
                 echo "  Graph split failed — retrying with NCCL_P2P_DISABLE=1..."
@@ -3760,11 +3796,17 @@ case "$STRATEGY" in
                 if try_start "${GRAPH_EXTRA[@]}"; then
                     echo "  Graph split works with P2P disabled — restarting with crash recovery..."
                     kill_server "$RUNNING_PID"
+                    if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
+                        run_with_restart "${COMMON_FLAGS[@]}"
+                    fi
                     run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
                 else
                     echo "  Graph split unavailable — falling back to layer split"
                     kill_server ""
                     unset NCCL_P2P_DISABLE
+                    if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${LAYER_EXTRA[@]}"; then
+                        run_with_restart "${COMMON_FLAGS[@]}"
+                    fi
                     run_with_restart "${COMMON_FLAGS[@]}" "${LAYER_EXTRA[@]}"
                 fi
             fi
@@ -3777,6 +3819,9 @@ case "$STRATEGY" in
                     exit 0
                 fi
                 echo "Mainline supports graph mode — attempting launch..."
+                if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
+                    run_with_restart "${COMMON_FLAGS[@]}"
+                fi
                 run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
             else
                 # Fallback to row split (classic mainline multi-GPU)
@@ -3784,6 +3829,9 @@ case "$STRATEGY" in
                 if (( DRY_RUN )); then
                     print_cmd "${LAUNCH_FLAGS[@]}"
                     exit 0
+                fi
+                if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
+                    run_with_restart "${COMMON_FLAGS[@]}"
                 fi
                 run_with_restart "${LAUNCH_FLAGS[@]}"
             fi
@@ -3798,13 +3846,25 @@ case "$STRATEGY" in
             if (( IS_IK_LLAMA )); then
                 # (ik_llama specific graph logic already handled above or can be simplified here)
                 if (( DRY_RUN )); then print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; exit 0; fi
+                if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
+                    run_with_restart "${COMMON_FLAGS[@]}"
+                fi
                 run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
             else
                 # Mainline
                 if timeout 5 "$LLAMA_SERVER" --help 2>&1 | grep -q "graph" 2>/dev/null; then
+                    if (( DRY_RUN )); then print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; exit 0; fi
+                    if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
+                        run_with_restart "${COMMON_FLAGS[@]}"
+                    fi
                     run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
                 else
-                    run_with_restart "${COMMON_FLAGS[@]}" --no-mmap
+                    LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --no-mmap)
+                    if (( DRY_RUN )); then print_cmd "${LAUNCH_FLAGS[@]}"; exit 0; fi
+                    if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
+                        run_with_restart "${COMMON_FLAGS[@]}"
+                    fi
+                    run_with_restart "${LAUNCH_FLAGS[@]}"
                 fi
             fi
         else
@@ -3812,6 +3872,9 @@ case "$STRATEGY" in
             if (( DRY_RUN )); then
                 print_cmd "${LAUNCH_FLAGS[@]}"
                 exit 0
+            fi
+            if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
+                run_with_restart "${COMMON_FLAGS[@]}"
             fi
             run_with_restart "${LAUNCH_FLAGS[@]}"
         fi
@@ -3862,10 +3925,46 @@ if [[ -n "$USER_NCPUMOE" ]]; then
 fi
 
 mkdir -p "$CACHE_DIR"
-CACHE_KEY_INPUT="${MODEL_NAME}_${TOTAL_SIZE_BYTES}_ctx${CTX_SIZE}_kv${KV_QUALITY}_gpus${GPU_COUNT}_be${BACKEND_TAG}"
-[[ -n "$GPUS_FILTER" ]] && CACHE_KEY_INPUT="${CACHE_KEY_INPUT}_filter${GPUS_FILTER}"
-CACHE_KEY=$(echo "$CACHE_KEY_INPUT" | md5sum | awk '{print $1}')
+CACHE_KEY_INPUT="$(placement_cache_key_input)"
+CACHE_KEY=$(printf '%s\n' "$CACHE_KEY_INPUT" | md5sum | awk '{print $1}')
 CACHE_FILE="$CACHE_DIR/${CACHE_KEY}.conf"
+
+load_placement_cache_file() {
+    local file="$1" line key value
+    unset CACHED_GPU_ASSIGNMENTS CACHED_NCPUMOE CACHED_BATCH CACHED_UBATCH CACHED_PARALLEL CACHED_KVUNIFIED CACHED_MMAP
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        [[ "$value" == \"*\" ]] || return 1
+        value="${value:1:${#value}-2}"
+        case "$key" in
+            CACHED_GPU_ASSIGNMENTS)
+                [[ "$value" =~ ^[0-9:\ ]*$ ]] || return 1
+                CACHED_GPU_ASSIGNMENTS="$value" ;;
+            CACHED_NCPUMOE)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_NCPUMOE="$value" ;;
+            CACHED_BATCH)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_BATCH="$value" ;;
+            CACHED_UBATCH)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_UBATCH="$value" ;;
+            CACHED_PARALLEL)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_PARALLEL="$value" ;;
+            CACHED_KVUNIFIED)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_KVUNIFIED="$value" ;;
+            CACHED_MMAP)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_MMAP="$value" ;;
+            *)
+                return 1 ;;
+        esac
+    done < "$file"
+}
 
 # Per-layer expert size from GGUF tensor data (fallback: estimate 90%)
 if (( EXPERT_BYTES > 0 )); then
@@ -3891,8 +3990,11 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
     if grep -qvE '^(#.*|CACHED_GPU_ASSIGNMENTS="[0-9: ]*"|CACHED_(NCPUMOE|BATCH|UBATCH|PARALLEL|KVUNIFIED|MMAP)="[0-9]+"|[[:space:]]*)$' "$CACHE_FILE"; then
         echo "WARNING: Cache file contains unexpected content, ignoring."
         rm -f "$CACHE_FILE"
+    elif ! load_placement_cache_file "$CACHE_FILE"; then
+        echo "WARNING: Cache file failed validation, ignoring."
+        rm -f "$CACHE_FILE"
     else
-        source "$CACHE_FILE"
+        :
     fi
 fi
 

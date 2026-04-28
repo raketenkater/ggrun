@@ -15,7 +15,6 @@
 #   [a] AI Tune    — Run AI-driven flag optimization (8 rounds)
 #   [b] Benchmark  — Start, run quick benchmark, print tok/s
 #   [v] Vision     — Auto-detect/download mmproj for multimodal
-#   [o] OpenCode   — Launch OpenCode after server is healthy
 #   [d] Dry Run    — Print command without executing
 #   [s] Show Cfgs  — Print cache/tune details for selected model and exit
 #   [Enter]        — Launch with defaults (skip all options)
@@ -43,6 +42,13 @@ SPECIFIC_MODEL=""
 
 # Backend preference (ik_llama or llama)
 PREFERRED_BACKEND="${LLM_BACKEND:-llama}"  # default to llama
+
+# Help flag should be side-effect free: no update checks, config prompts, or
+# backend probing before printing usage.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '4,/^$/s/^# \?//p' "$0"
+    exit 0
+fi
 
 # Auto-detect platform and use correct launcher
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -132,12 +138,6 @@ if _should_check_updates && [[ -d "$LLM_SERVER_REPO/.git" ]]; then
     fi
 fi
 
-# Help flag
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    sed -n '4,/^$/s/^# \?//p' "$0"
-    exit 0
-fi
-
 # Parse args (pass through to llm-server)
 PASSTHROUGH_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -147,6 +147,20 @@ while [[ $# -gt 0 ]]; do
         *)           PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
+
+server_bin_passthrough=0
+for arg in "${PASSTHROUGH_ARGS[@]}"; do
+    [[ "$arg" == "--server-bin" ]] && server_bin_passthrough=1
+done
+
+SERVER_BIN_FLAG=()
+if (( ! server_bin_passthrough )); then
+    if [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
+        [[ -x "$IK_BACKEND" ]] && SERVER_BIN_FLAG=(--server-bin "$IK_BACKEND")
+    else
+        [[ -x "$LLAMA_BACKEND" ]] && SERVER_BIN_FLAG=(--server-bin "$LLAMA_BACKEND")
+    fi
+fi
 
 # First-run setup: If default dir is empty/missing, ask user
 if [[ ! -d "$MODEL_DIR" || -z "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]]; then
@@ -174,7 +188,8 @@ if [[ -n "$SPECIFIC_MODEL" ]]; then
         echo "Error: Model not found: $SPECIFIC_MODEL"
         exit 1
     fi
-    exec "$LAUNCHER" "${PASSTHROUGH_ARGS[@]}" "$SPECIFIC_MODEL"
+    export LLM_SERVER_UPDATE_CHECKED=1
+    exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "$SPECIFIC_MODEL"
 fi
 
 if [[ ! -d "$MODEL_DIR" ]]; then
@@ -293,18 +308,17 @@ echo ""
 # Option toggles (skip with Enter)
 OPT_FLAGS=()
 echo "Options (toggle with letter, Enter to launch):"
-opt_aitune=0; opt_bench=0; opt_vision=0; opt_opencode=0; opt_dryrun=0; opt_keepalive=0; opt_showcfg=0
+opt_aitune=0; opt_bench=0; opt_vision=0; opt_dryrun=0; opt_keepalive=0; opt_showcfg=0
 opt_rounds=8  # default rounds for AI Tune
 print_opts() {
-    local a="off" b="off" v="off" o="off" d="off" k="off" s="off"
+    local a="off" b="off" v="off" d="off" k="off" s="off"
     (( opt_aitune )) && a="ON"
     (( opt_bench )) && b="ON"
     (( opt_vision )) && v="ON"
-    (( opt_opencode )) && o="ON"
     (( opt_dryrun )) && d="ON"
     (( opt_keepalive )) && k="ON"
     (( opt_showcfg )) && s="ON"
-    printf "  [a] AITune %-3s  [b] Bench %-3s  [v] Vision %-3s  [o] OpenCode %-3s  [d] DryRun %-3s  [k] KeepAlive %-3s  [s] ShowCfg %-3s\r" "$a" "$b" "$v" "$o" "$d" "$k" "$s"
+    printf "  [a] AITune %-3s  [b] Bench %-3s  [v] Vision %-3s  [d] DryRun %-3s  [k] KeepAlive %-3s  [s] ShowCfg %-3s\r" "$a" "$b" "$v" "$d" "$k" "$s"
 }
 print_opts
 while true; do
@@ -313,7 +327,6 @@ while true; do
         a|A) (( opt_aitune = !opt_aitune )) || true ;;
         b|B) (( opt_bench = !opt_bench )) || true ;;
         v|V) (( opt_vision = !opt_vision )) || true ;;
-        o|O) (( opt_opencode = !opt_opencode )) || true ;;
         d|D) (( opt_dryrun = !opt_dryrun )) || true ;;
         k|K) (( opt_keepalive = !opt_keepalive )) || true ;;
         s|S) (( opt_showcfg = !opt_showcfg )) || true ;;
@@ -369,7 +382,6 @@ fi
 (( opt_aitune && opt_unlimited && opt_rounds != 20 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
 (( opt_bench )) && OPT_FLAGS+=(--benchmark)
 (( opt_vision )) && OPT_FLAGS+=(--vision)
-(( opt_opencode )) && OPT_FLAGS+=(--opencode)
 (( opt_dryrun )) && OPT_FLAGS+=(--dry-run)
 (( opt_keepalive )) && OPT_FLAGS+=(--keep-alive)
 (( opt_showcfg )) && OPT_FLAGS+=(--show-configs)
@@ -377,11 +389,13 @@ fi
 echo "Launching: $(basename "$SELECTED") ${OPT_FLAGS[*]:-}"
 echo ""
 
-# Add server-bin based on backend preference
-if [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
-    SERVER_BIN_FLAG=(--server-bin "$IK_BACKEND")
-else
-    SERVER_BIN_FLAG=(--server-bin "$LLAMA_BACKEND")
+# Add server-bin based on backend preference unless the caller supplied one.
+if (( ! server_bin_passthrough )); then
+    if [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
+        SERVER_BIN_FLAG=(--server-bin "$IK_BACKEND")
+    else
+        SERVER_BIN_FLAG=(--server-bin "$LLAMA_BACKEND")
+    fi
 fi
 
 # Pass env to skip update check (already done in GUI)

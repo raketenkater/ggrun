@@ -4,3 +4,4 @@ __pycache__/
 .ruff_cache/
 unsloth_compiled_cache/
 ROADMAP.md
+gpt_fixes.md
