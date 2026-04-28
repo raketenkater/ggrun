@@ -2058,7 +2058,9 @@ wait_for_ready() {
 # Side effects: sets RUNNING_PID, LAUNCH_LOG_OFFSET. Prints pid to stdout.
 launch_backend() {
     local mode="$1"; shift
-    LAUNCH_LOG_OFFSET=$(wc -c < "$SERVER_LOG" 2>/dev/null || echo 0)
+    # Use stat (no redirect) so a missing log file doesn't print a bash
+    # redirect-failure message before the server even starts.
+    LAUNCH_LOG_OFFSET=$(stat -c %s "$SERVER_LOG" 2>/dev/null || echo 0)
     local launcher=()
     if command -v setsid >/dev/null 2>&1; then
         launcher=(setsid)
@@ -2080,8 +2082,10 @@ launch_backend() {
     # Set RUNNING_PID immediately so the EXIT trap catches the orphan even if
     # the script dies before health-check completion. (V2 only set this inside
     # wait_for_ready on success, leaving an orphan window.)
+    # Callers read RUNNING_PID — do NOT use `pid=$(launch_backend ...)`. The
+    # tee process substitution above keeps writing to this function's stdout,
+    # so a $() capture would hang until the server exits.
     RUNNING_PID="$pid"
-    echo "$pid"
 }
 
 # Strip ik_llama-only flags from a named flag array (bash 4.3+ nameref).
@@ -2138,8 +2142,8 @@ try_start() {
     local mode="tee"
     (( START_OPENCODE )) && mode="log_only"
     local launch_flags=("${COMMON_FLAGS[@]}" "${extra_flags[@]}")
-    local pid
-    pid=$(launch_backend "$mode" "${launch_flags[@]}")
+    launch_backend "$mode" "${launch_flags[@]}"
+    local pid="$RUNNING_PID"
     if wait_for_ready "$pid"; then
         return 0
     fi
@@ -2149,7 +2153,8 @@ try_start() {
         _strip_ik_only_flags extra_flags
         kill_server "$pid"
         launch_flags=("${COMMON_FLAGS[@]}" "${extra_flags[@]}")
-        pid=$(launch_backend "$mode" "${launch_flags[@]}")
+        launch_backend "$mode" "${launch_flags[@]}"
+        pid="$RUNNING_PID"
         wait_for_ready "$pid" && return 0
     fi
     return 1
@@ -2251,8 +2256,8 @@ run_with_restart() {
     while true; do
         last_start=$(date +%s)
         echo "Starting server..."
-        local pid
-        pid=$(launch_backend "tee_filter" "${flags[@]}")
+        launch_backend "tee_filter" "${flags[@]}"
+        local pid="$RUNNING_PID"
         local log_start="${LAUNCH_LOG_OFFSET:-0}"
         echo "Server PID: $pid"
 
@@ -2789,8 +2794,8 @@ try_start_with_overrides() {
         done
         (( dominated )) || deduped+=("$flag")
     done
-    local pid
-    pid=$(launch_backend "tee" "${deduped[@]}" "${TUNE_OVERRIDE_FLAGS[@]}")
+    launch_backend "tee" "${deduped[@]}" "${TUNE_OVERRIDE_FLAGS[@]}"
+    local pid="$RUNNING_PID"
     wait_for_ready "$pid"
 }
 parse_tune_overrides() {
