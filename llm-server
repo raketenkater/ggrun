@@ -21,7 +21,6 @@
 #   llm-server <model.gguf> --gpus 0,1         # Use only GPU 0 and 1
 #   llm-server <model.gguf> --ram-budget 60G   # Cap RAM usage at 60GB
 #   llm-server --update                         # Update llm-server + ik_llama.cpp + llama.cpp
-#   llm-server <model.gguf> --opencode          # Launch server, then start OpenCode
 #   llm-server <model.gguf> --vision           # Auto-detect/download mmproj for vision
 #   llm-server <model.gguf> --mmproj auto      # Same as --vision
 #   llm-server <model.gguf> --mmproj proj.gguf # Enable vision with specific mmproj file
@@ -170,10 +169,10 @@ DO_UPDATE=0
 SHOW_CONFIGS=0
 DO_AI_TUNE=0
 DO_UNLIMITED=0
-START_OPENCODE=0
 BACKEND=""  # "llama" or "ik_llama" - empty = auto-detect
 
-# Ensure common local paths are in PATH for sub-scripts (OpenCode, etc.)
+# Ensure ~/.local/bin (where install.sh puts our scripts) is on PATH so any
+# sub-process invocations resolve correctly.
 export PATH="$HOME/.local/bin:$PATH"
 
 # Cleanup on exit
@@ -310,7 +309,6 @@ while [[ $# -gt 0 ]]; do
         --ram-budget) RAM_BUDGET_MB="$2"; shift 2 ;;
         --mmproj)      MMPROJ_PATH="$2"; shift 2 ;;
         --vision)      MMPROJ_PATH="auto"; shift ;;  # alias: auto-detect/download mmproj
-        --opencode)    START_OPENCODE=1; shift ;;
         --download)  DOWNLOAD=1; shift ;;
         --update)    DO_UPDATE=1; shift ;;
         --show-configs) SHOW_CONFIGS=1; shift ;;
@@ -1065,13 +1063,6 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # Section 2: Hardware Detection
 # ═══════════════════════════════════════════════════════════════
-
-# When --opencode is set, redirect all script output to log file.
-# OpenCode needs a clean terminal — no server/script output.
-if (( START_OPENCODE )); then
-    exec 3>&1  # save real stdout for status messages
-    exec >> "$SERVER_LOG" 2>&1
-fi
 
 # ── Update check ──
 # Checks llm-server repo + backends for available updates.
@@ -2079,8 +2070,8 @@ wait_for_ready() {
 # without setsid this falls back to a normal background launch — kill_server
 # detects the shared-pgid case and refuses pgid-kill there.
 #
-# Modes: "log_only" (append to SERVER_LOG), "tee" (tee to log + stdout),
-#        "tee_filter" (tee + filter known noisy ik_llama spam).
+# Modes: "tee" (tee to log + stdout), "tee_filter" (tee + filter known
+#        noisy ik_llama spam).
 # Side effects: sets RUNNING_PID, LAUNCH_LOG_OFFSET. Prints pid to stdout.
 launch_backend() {
     local mode="$1"; shift
@@ -2092,9 +2083,6 @@ launch_backend() {
         launcher=(setsid)
     fi
     case "$mode" in
-        log_only)
-            "${launcher[@]}" "$LLAMA_SERVER" "$@" >> "$SERVER_LOG" 2>&1 &
-            ;;
         tee_filter)
             "${launcher[@]}" "$LLAMA_SERVER" "$@" \
                 > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
@@ -2166,7 +2154,6 @@ try_start() {
     local extra_flags=("$@")
     RUNNING_PID=""
     local mode="tee"
-    (( START_OPENCODE )) && mode="log_only"
     local launch_flags=("${COMMON_FLAGS[@]}" "${extra_flags[@]}")
     launch_backend "$mode" "${launch_flags[@]}"
     local pid="$RUNNING_PID"
@@ -2332,38 +2319,9 @@ run_with_restart() {
 
         if (( healthy )); then
             echo "Server healthy."
-            # Also print to real terminal if output is redirected (--opencode)
-            [[ -e /dev/fd/3 ]] && echo "Server healthy. Logs: $SERVER_LOG" >&3
             if (( BENCHMARK )); then
                 run_benchmark
                 BENCHMARK=0  # only run once
-            fi
-
-            if (( START_OPENCODE )); then
-                # Find llm-opencode (installed by install.sh)
-                local oc_bin=""
-                local base_dir
-                base_dir="$(dirname "$(readlink -f "$0")")"
-                for path in \
-                    "$(command -v llm-opencode 2>/dev/null || true)" \
-                    "$base_dir/llm-opencode" \
-                    "$HOME/.local/bin/llm-opencode" \
-                    "$HOME/llm-server/llm-opencode"; do
-                    [[ -n "$path" && -x "$path" ]] && oc_bin="$path" && break
-                done
-
-                if [[ -n "$oc_bin" ]]; then
-                    # Restore real terminal for OpenCode
-                    exec 1>&3 2>&1 3>&-
-                    # OpenCode is a TUI — give it the foreground TTY
-                    "$oc_bin" --port "$PORT" </dev/tty >/dev/tty 2>/dev/tty
-                    # Re-redirect to log after OpenCode exits
-                    exec >> "$SERVER_LOG" 2>&1
-                else
-                    echo "Warning: llm-opencode not found. Run: ./install.sh" >&3
-                    echo "  Or launch manually: llm-opencode" >&3
-                fi
-                START_OPENCODE=0
             fi
 
             restarts=0  # reset counter on successful start

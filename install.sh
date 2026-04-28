@@ -74,9 +74,9 @@ say ""
 say "── Installing scripts to $INSTALL_DIR ──"
 
 if [[ "$OS" == "Darwin" ]]; then
-    FILES=("llm-server-mac" "llm-server-gui" "llm-opencode" "parse_gguf.py")
+    FILES=("llm-server-mac" "llm-server-gui" "parse_gguf.py")
 else
-    FILES=("llm-server" "llm-server-gui" "llm-opencode" "parse_gguf.py")
+    FILES=("llm-server" "llm-server-gui" "parse_gguf.py")
 fi
 for f in "${FILES[@]}"; do
     if [[ -f "$SRC_DIR/$f" ]]; then
