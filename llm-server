@@ -4222,7 +4222,7 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
         if [[ ! "$raw_free" =~ ^[0-9]+$ ]]; then
             estimated_used=$(( LAYERS_PER_GPU[$gi] * COST_PER_LAYER_MB ))
             raw_free=$(( GPU_VRAM_FREE[$gi] - estimated_used ))
-            (( raw_free < 0 )) && raw_free=0
+            (( raw_free < 0 )) && raw_free=0 || true
             log "  GPU${GPU_INDEX[$gi]}: nvidia-smi free readback failed, estimating ${raw_free}MB"
         fi
         ACTUAL_FREE[$gi]=$raw_free
@@ -4241,13 +4241,13 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
         # Subtract KV cache that will be allocated for layers already on this GPU
         current_kv=$(( LAYERS_PER_GPU[$gi] * KV_PER_LAYER_MB ))
         usable_free=$(( ACTUAL_FREE[$gi] - current_kv - SAFETY_MB ))
-        (( usable_free < 0 )) && usable_free=0
+        (( usable_free < 0 )) && usable_free=0 || true
         if (( COST_PER_LAYER_MB > 0 )); then
             extra=$(( usable_free / COST_PER_LAYER_MB ))
         fi
-        (( extra < 0 )) && extra=0
+        (( extra < 0 )) && extra=0 || true
         EXTRA_PER_GPU[$gi]=$extra
-        (( TOTAL_EXTRA += extra ))
+        (( TOTAL_EXTRA += extra )) || true
     done
 
     # Apply extras (priority order), cap to remaining CPU layers
@@ -4258,7 +4258,7 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
             add=$(( EXTRA_PER_GPU[$gi] < remaining_cpu ? EXTRA_PER_GPU[$gi] : remaining_cpu ))
             LAYERS_PER_GPU[$gi]=$(( LAYERS_PER_GPU[$gi] + add ))
             remaining_cpu=$(( remaining_cpu - add ))
-            (( remaining_cpu <= 0 )) && break
+            (( remaining_cpu <= 0 )) && break || true
         done
         LAYERS_CPU=$remaining_cpu
         TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
