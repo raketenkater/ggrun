@@ -59,3 +59,17 @@ fi
 
 echo "  ✓ app home created"
 echo "  ✓ installed launcher uses app-home models"
+
+echo "Test: setup.sh auto-detects local Linux setup"
+APP_HOME2="$TMP/auto-setup"
+LLM_APP_HOME="$APP_HOME2" \
+LLM_SETUP_MODE=scripts \
+LLM_SETUP_BACKEND=skip \
+LLM_SETUP_PY_DEPS=skip \
+LLM_SETUP_NONINTERACTIVE=1 \
+"$ROOT/setup.sh" >/tmp/llm-server-auto-setup-test.log 2>&1
+
+test -x "$APP_HOME2/bin/llm-server"
+test -x "$APP_HOME2/bin/llm-server-gui"
+test -x "$APP_HOME2/bin/model_index.py"
+echo "  ✓ setup.sh created app home"

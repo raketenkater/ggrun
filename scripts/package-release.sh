@@ -33,11 +33,12 @@ trap cleanup EXIT
 
 mkdir -p "$PAYLOAD/bin"
 
-for f in llm-server llm-server-mac llm-server-gui parse_gguf.py model_index.py download_any_gguf.py LICENSE README.md CHANGELOG.md; do
+for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-mac llm-server-gui parse_gguf.py model_index.py download_any_gguf.py LICENSE README.md CHANGELOG.md; do
     [[ -f "$ROOT_DIR/$f" ]] || continue
     install -m 0644 "$ROOT_DIR/$f" "$PAYLOAD/$f"
 done
 chmod 0755 "$PAYLOAD/llm-server" "$PAYLOAD/llm-server-mac" "$PAYLOAD/llm-server-gui" \
+    "$PAYLOAD/setup.sh" "$PAYLOAD/setup-linux.sh" "$PAYLOAD/setup-mac.sh" \
     "$PAYLOAD/parse_gguf.py" "$PAYLOAD/model_index.py" "$PAYLOAD/download_any_gguf.py" 2>/dev/null || true
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"

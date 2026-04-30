@@ -122,6 +122,7 @@ jobs:
           scripts/package-release.sh llm-server-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/dist"
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llama-server$'
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/model_index.py$'
+          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/setup.sh$'
 
   release-install-smoke:
     runs-on: ubuntu-latest

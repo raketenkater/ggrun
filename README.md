@@ -20,10 +20,15 @@ llm-server-gui             # interactive TUI picker
 Recommended self-contained setup:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
+```
+
+Or from a clone:
+
+```bash
 git clone https://github.com/raketenkater/llm-server.git
 cd llm-server
-./setup-linux.sh   # Linux / WSL2
-./setup-mac.sh     # macOS Apple Silicon
+./setup.sh         # auto-detects Linux / WSL2 / macOS
 ```
 
 This creates `~/llm-server` with:
