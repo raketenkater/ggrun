@@ -17,13 +17,53 @@ llm-server-gui             # interactive TUI picker
 
 ## Install
 
+Recommended self-contained setup:
+
+```bash
+git clone https://github.com/raketenkater/llm-server.git
+cd llm-server
+./setup-linux.sh   # Linux / WSL2
+./setup-mac.sh     # macOS Apple Silicon
+```
+
+This creates `~/llm-server` with:
+
+```text
+~/llm-server/bin      # llm-server, llm-server-gui, bundled backend when available
+~/llm-server/models   # GGUF models and downloaded mmproj files
+~/llm-server/cache    # AI Tune caches
+~/llm-server/logs     # setup/server logs
+~/llm-server/config   # local config loaded automatically
+~/llm-server/src      # backend source/build fallback
+```
+
+Use it with:
+
+```bash
+source ~/llm-server/env.sh
+llm-server-gui
+llm-server <repo/name> --download
+```
+
+Legacy one-line install to `~/.local/bin`:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/install.sh | bash
 ```
 
-Detects your GPU, installs scripts to `~/.local/bin`, optionally clones + builds the right backend (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU). See [Requirements](#requirements) for what gets installed.
+Detects your GPU, installs scripts to `~/.local/bin`, tries a matching prebuilt release bundle, then falls back to building the right backend from source (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU). CUDA currently uses source builds unless a CUDA bundle was manually attached to the release. See [Requirements](#requirements) for what gets installed.
 
 Prefer the manual path? `git clone … && cd llm-server && ./install.sh` works identically.
+
+Installer controls:
+
+```bash
+LLM_INSTALL_MODE=release ./install.sh      # require a prebuilt bundle
+LLM_INSTALL_MODE=build ./install.sh        # force source build
+LLM_INSTALL_BACKEND=skip ./install.sh      # install scripts only
+LLM_INSTALL_PY_DEPS=skip ./install.sh      # skip downloader Python deps
+LLM_INSTALL_PREFIX=/usr/local/bin ./install.sh
+```
 
 ## Contents
 
@@ -34,6 +74,7 @@ Prefer the manual path? `git clone … && cd llm-server && ./install.sh` works i
 - [Usage](#usage)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
+- [Roadmap](ROADMAP.md)
 - [Changelog](CHANGELOG.md)
 
 ## Quick start
@@ -157,6 +198,9 @@ llm-server model.gguf --vision
 llm-server --show-configs
 llm-server --show-configs model.gguf
 
+# Launch with a specific tuned config
+llm-server model.gguf --tune-cache ~/.cache/llm-server/tune_model_hw_llama.json
+
 # Force a specific backend
 llm-server --backend llama model.gguf
 llm-server --backend ik_llama model.gguf
@@ -204,20 +248,23 @@ If ik_llama.cpp can't load a model (unsupported architecture), llm-server detect
 ## Requirements
 
 **Linux:**
-- [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) (recommended) or [llama.cpp](https://github.com/ggml-org/llama.cpp) built with CUDA
+- Prebuilt release bundle when available, otherwise [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) for CUDA or [llama.cpp](https://github.com/ggml-org/llama.cpp) for Vulkan/CPU
+- CUDA source builds need NVIDIA drivers, CUDA toolkit/nvcc, `cmake`, `make`, and a compiler toolchain
 - `nvidia-smi` (for GPU detection)
 - `python3`, `huggingface_hub`, `tqdm`, `curl`
 
 **macOS (Apple Silicon):**
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) built with Metal (or `brew install llama.cpp`)
+- Prebuilt Metal release bundle when available, otherwise [llama.cpp](https://github.com/ggml-org/llama.cpp) built with Metal (or `brew install llama.cpp`)
 - `python3`, `huggingface_hub`, `tqdm`, `curl`
+- `llm-server-mac` supports Metal auto-offload, downloader, vision/mmproj auto-detect/download, benchmarks, GUI launching, startup fallbacks, and macOS AI Tune for Metal-safe flags (batch, ubatch, KV type, threads, parallel, flash-attn). Placement tuning is Linux/WSL2-only because Apple Silicon exposes a single unified Metal GPU.
 
 **Windows:**
 - Install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install` in PowerShell)
 - Inside WSL2, follow the Linux instructions above
 - NVIDIA GPU passthrough works automatically in WSL2 with up-to-date drivers
+- Native Windows is not supported by llm-server today.
 
-The `install.sh` one-liner handles dependency checks and optional backend build automatically.
+The `install.sh` one-liner handles release bundle detection, dependency checks, Python downloader dependencies, and backend source builds automatically.
 
 ## License
 

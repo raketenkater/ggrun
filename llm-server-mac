@@ -14,6 +14,9 @@
 #   llm-server-mac <model.gguf> --cpu        # Force CPU-only (ignore Metal GPU)
 #   llm-server-mac <model.gguf> --server-bin /path/to/llama-server
 #   llm-server-mac <model.gguf> --kv-quality high  # KV cache: high(f16), mid(q8_0), low(q4_0)
+#   llm-server-mac <model.gguf> --parallel 1       # llama-server slot count
+#   llm-server-mac <model.gguf> --vision           # Auto-detect/download mmproj
+#   llm-server-mac <model.gguf> --mmproj proj.gguf # Use specific mmproj
 #
 # Environment variables:
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
@@ -32,16 +35,39 @@ PORT="${LLM_PORT:-8081}"
 HOST="0.0.0.0"
 # macOS default: 32K context (unified memory is shared, be conservative)
 CTX_SIZE="${LLM_CTX_SIZE:-32768}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+_discover_app_home() {
+    [[ -n "${LLM_APP_HOME:-}" ]] && { echo "$LLM_APP_HOME"; return 0; }
+    [[ "$(basename "$SCRIPT_DIR")" == "bin" ]] || return 1
+    local parent
+    parent="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)" || return 1
+    [[ -d "$parent/models" || -d "$parent/config" || -d "$parent/cache" ]] || return 1
+    echo "$parent"
+}
+LLM_APP_HOME="$(_discover_app_home 2>/dev/null || true)"
+[[ -n "$LLM_APP_HOME" ]] && export LLM_APP_HOME
 
 # Persistent Configuration
-CONFIG_DIR="$HOME/.config/llm-server"
+CONFIG_DIR="${LLM_CONFIG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/config}}"
+CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/llm-server}"
 CONFIG_FILE="$CONFIG_DIR/config.sh"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
-MODEL_DIR="${LLM_MODEL_DIR:-$HOME/ai_models}"
+MODEL_DIR="${LLM_MODEL_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/models}}"
+MODEL_DIR="${MODEL_DIR:-$HOME/ai_models}"
 mkdir -p "$MODEL_DIR"
-CACHE_DIR="$HOME/.cache/llm-server"
-SERVER_LOG="${TMPDIR:-/tmp}/llm-server.log"
+CACHE_DIR="${LLM_CACHE_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/cache}}"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/llm-server}"
+LOG_DIR="${LLM_LOG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/logs}}"
+LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}}"
+mkdir -p "$CACHE_DIR" "$LOG_DIR"
+SERVER_LOG="$LOG_DIR/llm-server.log"
+PARSE_GGUF="$SCRIPT_DIR/parse_gguf.py"
+if [[ ! -f "$PARSE_GGUF" ]]; then
+    _alt="$(command -v parse_gguf.py 2>/dev/null || true)"
+    [[ -n "$_alt" ]] && PARSE_GGUF="$_alt"
+fi
 
 RETUNE=0
 DOWNLOAD=0
@@ -49,9 +75,18 @@ DRY_RUN=0
 VERBOSE=0
 BENCHMARK=0
 CPU_ONLY=0
+SHOW_CONFIGS=0
+DO_AI_TUNE=0
+DO_PLACEMENT_TUNE=0
+USER_TUNE_ROUNDS=""
+EXPLICIT_TUNE_CACHE=""
+TUNE_LOADED=0
 MODEL_ARG=""
 USER_SERVER_BIN=""
 KV_QUALITY="mid"  # high (f16), mid (q8_0, default), low (q4_0)
+PARALLEL_SLOTS=""
+MMPROJ_PATH=""
+EXTRA_LLAMA_FLAGS=()
 
 # Cleanup on exit
 cleanup() { :; }
@@ -64,6 +99,8 @@ find_server_binary() {
         return
     fi
     local candidates=(
+        "$SCRIPT_DIR/llama-server"
+        "$HOME/.local/bin/llama-server"
         "$HOME/llama.cpp/build/bin/llama-server"
         "$HOME/ik_llama.cpp/build/bin/llama-server"
         "/opt/homebrew/bin/llama-server"
@@ -91,15 +128,58 @@ while [[ $# -gt 0 ]]; do
         --model-dir)   MODEL_DIR="$2"; shift 2 ;;
         --server-bin)  USER_SERVER_BIN="$2"; shift 2 ;;
         --kv-quality)  KV_QUALITY="$2"; shift 2 ;;
+        --parallel)    PARALLEL_SLOTS="$2"; shift 2 ;;
+        --mmproj)      MMPROJ_PATH="$2"; shift 2 ;;
+        --vision)      MMPROJ_PATH="auto"; shift ;;
+        --show-configs) SHOW_CONFIGS=1; shift ;;
+        --ai-tune)    DO_AI_TUNE=1; shift ;;
+        --rounds)     USER_TUNE_ROUNDS="$2"; shift 2 ;;
+        --tune-cache) EXPLICIT_TUNE_CACHE="$2"; shift 2 ;;
+        --unlimited|--placement-tune|--full-auto-tune) DO_PLACEMENT_TUNE=1; shift ;;
         --download)  DOWNLOAD=1; shift ;;
         --version)     echo "llm-server-mac v$VERSION"; exit 0 ;;
         --help|-h)
             sed -n '2,/^$/s/^# \?//p' "$0"
             exit 0
             ;;
-        *)           MODEL_ARG="$1"; shift ;;
+        --)
+            shift
+            EXTRA_LLAMA_FLAGS+=("$@")
+            break
+            ;;
+        -*)
+            EXTRA_LLAMA_FLAGS+=("$1")
+            if [[ -n "${2:-}" && "${2:-}" != -* ]]; then
+                EXTRA_LLAMA_FLAGS+=("$2")
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        *)
+            if [[ -z "$MODEL_ARG" ]]; then
+                MODEL_ARG="$1"
+            else
+                EXTRA_LLAMA_FLAGS+=("$1")
+            fi
+            shift
+            ;;
     esac
 done
+
+if (( SHOW_CONFIGS )); then
+    echo "═══ llm-server-mac cached configs ═══"
+    shopt -s nullglob
+    configs=("$CACHE_DIR"/tune_*.json)
+    shopt -u nullglob
+    if (( ${#configs[@]} == 0 )); then
+        echo "No macOS AI-tuned configs found."
+        echo "Note: full AI Tune is not implemented in llm-server-mac yet."
+    else
+        printf '  %s\n' "${configs[@]}"
+    fi
+    exit 0
+fi
 
 if [[ -z "$MODEL_ARG" ]]; then
     echo "Error: No model specified. Usage: llm-server-mac <model.gguf> or <repo/name> --download"
@@ -175,6 +255,9 @@ if [[ "$LLAMA_SERVER" == *ik_llama* ]]; then
 elif timeout 5 "$LLAMA_SERVER" --help 2>&1 | grep -q 'graph' 2>/dev/null; then
     IS_IK_LLAMA=1
 fi
+SERVER_HELP="$(timeout 5 "$LLAMA_SERVER" --help 2>&1 || true)"
+SUPPORTS_REASONING_FLAG=0
+[[ "$SERVER_HELP" == *"--reasoning"* ]] && SUPPORTS_REASONING_FLAG=1
 
 log() { [[ "$VERBOSE" == "1" ]] && echo "[DEBUG] $*" >&2 || true; }
 
@@ -399,6 +482,15 @@ HAS_SSM=${HAS_SSM:-0}
 HAS_FUSED=${HAS_FUSED:-0}
 EXPERT_BYTES=${EXPERT_BYTES:-0}
 NON_EXPERT_BYTES=${NON_EXPERT_BYTES:-0}
+GGUF_MODEL_NAME="${GGUF_MODEL_NAME:-}"
+GGUF_BASENAME="${GGUF_BASENAME:-}"
+GGUF_QUANTIZED_BY="${GGUF_QUANTIZED_BY:-}"
+if [[ -f "$PARSE_GGUF" ]]; then
+    _gguf_meta="$(python3 "$PARSE_GGUF" --format shell "$MODEL_PATH" 2>/dev/null || true)"
+    if [[ -n "$_gguf_meta" ]]; then
+        eval "$_gguf_meta"
+    fi
+fi
 
 IS_MOE=0
 (( EXPERT_COUNT > 1 )) && IS_MOE=1
@@ -537,6 +629,287 @@ if (( HAS_METAL )); then
     COMMON_FLAGS+=(-ngl 999)
     echo "  Metal GPU → all layers offloaded (-ngl 999)"
 fi
+if (( SUPPORTS_REASONING_FLAG )); then
+    COMMON_FLAGS+=(--reasoning off)
+    echo "  Reasoning: off by default for OpenAI-compatible responses"
+fi
+if [[ -n "$PARALLEL_SLOTS" ]]; then
+    COMMON_FLAGS+=(--parallel "$PARALLEL_SLOTS")
+    echo "  Parallel slots: $PARALLEL_SLOTS"
+fi
+
+mmproj_label() {
+    local candidate="$1"
+    python3 "$PARSE_GGUF" --format json "$candidate" 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    meta = json.load(sys.stdin)
+except Exception:
+    print("unknown")
+    sys.exit(0)
+
+name = meta.get("basename") or meta.get("name") or "unknown"
+arch = meta.get("arch") or "unknown"
+print(f"{name} ({arch})")
+'
+}
+
+mmproj_matches_model() {
+    local candidate="$1" meta
+
+    [[ -f "$candidate" ]] || return 1
+    if [[ "${LLM_SERVER_SKIP_MMPROJ_CHECK:-0}" == "1" ]]; then
+        echo "  Warning: skipping mmproj compatibility check for $candidate" >&2
+        return 0
+    fi
+
+    meta=$(python3 "$PARSE_GGUF" --format json "$candidate" 2>/dev/null) || return 1
+    MMPROJ_META="$meta" MMPROJ_FILE="$candidate" TEXT_MODEL_NAME="${GGUF_MODEL_NAME:-}" TEXT_MODEL_BASENAME="${GGUF_BASENAME:-}" python3 -c '
+import json
+import os
+import re
+import sys
+
+def norm(value):
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+try:
+    meta = json.loads(os.environ["MMPROJ_META"])
+except Exception:
+    sys.exit(1)
+
+if meta.get("arch") != "clip":
+    sys.exit(1)
+
+expected_bytes = int(meta.get("non_expert_bytes") or 0) + int(meta.get("expert_bytes") or 0)
+if expected_bytes > 0:
+    try:
+        actual_bytes = os.path.getsize(os.environ["MMPROJ_FILE"])
+    except OSError:
+        sys.exit(1)
+    if actual_bytes < expected_bytes:
+        sys.exit(1)
+
+text_ids = {norm(os.environ.get("TEXT_MODEL_NAME")), norm(os.environ.get("TEXT_MODEL_BASENAME"))}
+proj_ids = {norm(meta.get("name")), norm(meta.get("basename"))}
+text_ids.discard("")
+proj_ids.discard("")
+
+if not text_ids or not proj_ids or text_ids.isdisjoint(proj_ids):
+    sys.exit(1)
+'
+}
+
+find_local_mmproj() {
+    local dir="$MODEL_DIR_PATH" f
+    for f in "$dir"/mmproj-F16.gguf "$dir"/mmproj-BF16.gguf "$dir"/mmproj-F32.gguf; do
+        [[ -f "$f" ]] || continue
+        if mmproj_matches_model "$f"; then
+            echo "$f"
+            return
+        fi
+        echo "  Skipping incompatible mmproj: $f ($(mmproj_label "$f"))" >&2
+    done
+    for f in "$dir"/*mmproj*.gguf; do
+        [[ -f "$f" ]] || continue
+        if mmproj_matches_model "$f"; then
+            echo "$f"
+            return
+        fi
+        echo "  Skipping incompatible mmproj: $f ($(mmproj_label "$f"))" >&2
+    done
+    if [[ "$dir" != "$MODEL_DIR" ]]; then
+        for f in "$MODEL_DIR"/mmproj-F16.gguf "$MODEL_DIR"/mmproj-BF16.gguf; do
+            [[ -f "$f" ]] || continue
+            if mmproj_matches_model "$f"; then
+                echo "$f"
+                return
+            fi
+            echo "  Skipping incompatible mmproj: $f ($(mmproj_label "$f"))" >&2
+        done
+    fi
+    echo ""
+}
+
+list_repo_mmproj_candidates() {
+    local repo="$1" tree
+
+    tree=$(curl -sfL "https://huggingface.co/api/models/${repo}/tree/main?recursive=1" 2>/dev/null || true)
+    if [[ -n "$tree" ]]; then
+        printf '%s' "$tree" | python3 -c '
+import json
+import os
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+
+paths = []
+for item in data if isinstance(data, list) else []:
+    if not isinstance(item, dict):
+        continue
+    path = item.get("path") or item.get("rfilename") or ""
+    name = os.path.basename(path).lower()
+    if path and name.endswith(".gguf") and "mmproj" in name:
+        paths.append(path)
+
+def score(path):
+    name = os.path.basename(path).lower()
+    if name == "mmproj-f16.gguf":
+        rank = 0
+    elif name == "mmproj-bf16.gguf":
+        rank = 1
+    elif name == "mmproj-f32.gguf":
+        rank = 2
+    elif "f16" in name:
+        rank = 3
+    elif "bf16" in name:
+        rank = 4
+    elif "f32" in name:
+        rank = 5
+    elif name == "mmproj.gguf":
+        rank = 6
+    else:
+        rank = 7
+    return (rank, len(path), path)
+
+for path in sorted(set(paths), key=score):
+    print(path)
+'
+    fi
+
+    printf '%s\n' "mmproj-F16.gguf" "mmproj-BF16.gguf" "mmproj-F32.gguf" "mmproj.gguf"
+}
+
+download_mmproj() {
+    local basename="${GGUF_BASENAME:-$GGUF_MODEL_NAME}"
+    local quantizer="${GGUF_QUANTIZED_BY:-}"
+    [[ -z "$basename" ]] && return 1
+
+    local candidates=()
+    if [[ -n "$quantizer" ]]; then
+        candidates+=("${quantizer}/${basename}-GGUF")
+        [[ -n "$GGUF_MODEL_NAME" && "$GGUF_MODEL_NAME" != "$basename" ]] && \
+            candidates+=("${quantizer}/${GGUF_MODEL_NAME}-GGUF")
+    fi
+    for q in unsloth bartowski lmstudio-community; do
+        [[ "$q" == "$quantizer" ]] && continue
+        candidates+=("${q}/${basename}-GGUF")
+    done
+
+    local safe_basename
+    safe_basename=$(printf '%s' "$basename" | tr -cs 'A-Za-z0-9._+-' '_' | sed 's/^_*//; s/_*$//')
+    [[ -z "$safe_basename" ]] && safe_basename="model"
+
+    for repo in "${candidates[@]}"; do
+        local seen_remote=()
+        local remote_path
+        while IFS= read -r remote_path; do
+            [[ -n "$remote_path" ]] || continue
+            local already_seen=0 seen
+            for seen in "${seen_remote[@]}"; do
+                [[ "$seen" == "$remote_path" ]] && already_seen=1 && break
+            done
+            (( already_seen )) && continue
+            seen_remote+=("$remote_path")
+
+            local remote_base suffix safe_suffix dest tmp url
+            remote_base=$(basename "$remote_path")
+            suffix="$remote_base"
+            suffix="${suffix#mmproj-}"
+            suffix="${suffix#mmproj_}"
+            [[ "$suffix" == "$remote_base" ]] && suffix="$remote_base"
+            safe_suffix=$(printf '%s' "$suffix" | tr -cs 'A-Za-z0-9._+-' '_' | sed 's/^_*//; s/_*$//')
+            [[ -z "$safe_suffix" ]] && safe_suffix="mmproj.gguf"
+            dest="$MODEL_DIR_PATH/mmproj-${safe_basename}-${safe_suffix}"
+            tmp="${dest}.tmp.$$"
+
+            if [[ -f "$dest" ]] && mmproj_matches_model "$dest"; then
+                echo "  Found compatible downloaded mmproj: $dest" >&2
+                echo "$dest"
+                return 0
+            fi
+
+            url=$(REPO="$repo" REPO_PATH="$remote_path" python3 -c '
+import os
+from urllib.parse import quote
+
+print("https://huggingface.co/{}/resolve/main/{}".format(
+    os.environ["REPO"],
+    quote(os.environ["REPO_PATH"], safe="/"),
+))
+')
+            echo "  Trying: $url" >&2
+            if ! curl -sfL --head "$url" >/dev/null 2>&1; then
+                continue
+            fi
+
+            echo "  Downloading mmproj from ${repo}: ${remote_path}" >&2
+            rm -f "$tmp"
+            if curl -fL --progress-bar -o "$tmp" "$url"; then
+                if DEST="$tmp" python3 -c "
+import os, sys
+with open(os.environ['DEST'],'rb') as f:
+    magic = f.read(4)
+    if magic != b'GGUF': sys.exit(1)
+" 2>/dev/null; then
+                    if ! mmproj_matches_model "$tmp"; then
+                        echo "  Warning: downloaded mmproj is incomplete or does not match this model ($(mmproj_label "$tmp")), removing" >&2
+                        rm -f "$tmp"
+                        continue
+                    fi
+                    mv -f "$tmp" "$dest"
+                    echo "  Downloaded: $dest" >&2
+                    echo "$dest"
+                    return 0
+                else
+                    echo "  Warning: downloaded file is not a valid GGUF, removing" >&2
+                    rm -f "$tmp"
+                fi
+            fi
+        done < <(list_repo_mmproj_candidates "$repo")
+    done
+    return 1
+}
+
+if [[ "$MMPROJ_PATH" == "auto" ]]; then
+    MMPROJ_PATH=$(find_local_mmproj)
+    if [[ -z "$MMPROJ_PATH" ]]; then
+        MMPROJ_PATH=$(download_mmproj) || true
+    fi
+    if [[ -z "$MMPROJ_PATH" ]]; then
+        echo "Error: Vision enabled but no compatible mmproj was found." >&2
+        echo "Place the matching mmproj GGUF next to the model, pass --mmproj /path/to/mmproj.gguf, or set LLM_SERVER_SKIP_MMPROJ_CHECK=1 to bypass metadata validation." >&2
+        exit 1
+    fi
+fi
+
+if [[ -n "$MMPROJ_PATH" ]]; then
+    if [[ -f "$MMPROJ_PATH" ]]; then
+        if ! mmproj_matches_model "$MMPROJ_PATH"; then
+            echo "Error: mmproj metadata does not match the selected model, or the file is incomplete." >&2
+            echo "  Model: ${GGUF_BASENAME:-${GGUF_MODEL_NAME:-unknown}}" >&2
+            echo "  mmproj: $MMPROJ_PATH ($(mmproj_label "$MMPROJ_PATH"))" >&2
+            echo "Set LLM_SERVER_SKIP_MMPROJ_CHECK=1 only if you have manually verified compatibility." >&2
+            exit 1
+        fi
+        MMPROJ_SIZE_MB=$(du -sm "$MMPROJ_PATH" 2>/dev/null | awk '{print $1}' || echo 0)
+        ESTIMATED_TOTAL_NEEDED=$(( ESTIMATED_TOTAL_NEEDED + MMPROJ_SIZE_MB ))
+        COMMON_FLAGS+=(--mmproj "$MMPROJ_PATH")
+        echo "  Vision: mmproj loaded from $MMPROJ_PATH"
+    else
+        echo "Error: Vision enabled but mmproj file not found/downloaded."
+        exit 1
+    fi
+fi
+if (( ${#EXTRA_LLAMA_FLAGS[@]} > 0 )); then
+    COMMON_FLAGS+=("${EXTRA_LLAMA_FLAGS[@]}")
+    echo "  User flags (passthrough): ${EXTRA_LLAMA_FLAGS[*]}"
+fi
 
 echo ""
 
@@ -558,6 +931,12 @@ else
 fi
 
 echo "Strategy: $STRATEGY"
+if (( DO_PLACEMENT_TUNE )); then
+    echo "Warning: placement tuning is not applicable on macOS Metal (single unified GPU); ignoring." >&2
+fi
+if (( DO_AI_TUNE && DRY_RUN )); then
+    echo "AI Tune selected; dry-run shows the baseline macOS config before tuning." >&2
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # Section 6: Helper Functions
@@ -566,7 +945,7 @@ echo "Strategy: $STRATEGY"
 kill_server() {
     local pid=${1:-}
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        kill -9 "$pid" 2>/dev/null
+        kill -9 "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     fi
     # Port cleanup
@@ -600,7 +979,8 @@ try_start() {
         fi
         sleep 1; (( i++ ))
     done
-    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
     return 1
 }
 
@@ -627,6 +1007,355 @@ print_cmd() {
     echo "$line"
 }
 
+mac_hw_hash() {
+    HW_DESC="${CPU_BRAND}|${RAM_TOTAL_MB}|${METAL_GPU_NAME}|${HAS_METAL}|${LLAMA_SERVER}" python3 -c '
+import hashlib, os
+print(hashlib.sha1(os.environ["HW_DESC"].encode()).hexdigest()[:8])
+'
+}
+
+mac_tune_cache_path() {
+    local vision_suffix="" hw_hash
+    [[ -n "$MMPROJ_PATH" ]] && vision_suffix="_v"
+    hw_hash="$(mac_hw_hash)"
+    printf '%s/tune_%s_%s_hwm%s_llama.json\n' "$CACHE_DIR" "$MODEL_NAME" "$TOTAL_SIZE_BYTES" "${hw_hash}${vision_suffix}"
+}
+
+mac_allowed_tune_flags_json() {
+    cat <<'JSON'
+["-b","-ub","--cache-type-k","--cache-type-v","--threads","--threads-batch","--parallel","--flash-attn"]
+JSON
+}
+
+mac_apply_tune_flags_json() {
+    local flags_json="$1"
+    local records=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && records+=("$line")
+    done < <(FLAGS_JSON="$flags_json" python3 -c '
+import json, os
+try:
+    flags = json.loads(os.environ.get("FLAGS_JSON", "{}"))
+except json.JSONDecodeError:
+    flags = {}
+if not isinstance(flags, dict):
+    flags = {}
+aliases = {
+    "--batch-size": "-b",
+    "--ubatch-size": "-ub",
+    "-fa": "--flash-attn",
+    "-t": "--threads",
+    "-tb": "--threads-batch",
+    "-np": "--parallel",
+}
+allowed = {"-b","-ub","--cache-type-k","--cache-type-v","--threads","--threads-batch","--parallel","--flash-attn"}
+for k, v in flags.items():
+    if not isinstance(k, str):
+        continue
+    k = aliases.get(k, k)
+    if k not in allowed or v is False or v is None or v == "":
+        continue
+    print("K\t" + k)
+    print("F\t" + k)
+    if v is not True:
+        print("F\t" + str(v))
+')
+
+    (( ${#records[@]} == 0 )) && return 1
+
+    local override_keys=() extras=() rec kind value
+    for rec in "${records[@]}"; do
+        IFS=$'\t' read -r kind value <<< "$rec"
+        case "$kind" in
+            K) override_keys+=("$value") ;;
+            F) extras+=("$value") ;;
+        esac
+    done
+
+    local deduped=()
+    local skip_next=0 i flag key dominated
+    for (( i=0; i<${#COMMON_FLAGS[@]}; i++ )); do
+        if (( skip_next )); then
+            skip_next=0
+            continue
+        fi
+        flag="${COMMON_FLAGS[$i]}"
+        dominated=0
+        for key in "${override_keys[@]}"; do
+            if [[ "$flag" == "$key" ]]; then
+                dominated=1
+                if (( i + 1 < ${#COMMON_FLAGS[@]} )) && [[ "${COMMON_FLAGS[$((i+1))]}" != -* ]]; then
+                    skip_next=1
+                fi
+                break
+            fi
+        done
+        (( dominated )) || deduped+=("$flag")
+    done
+    COMMON_FLAGS=("${deduped[@]}" "${extras[@]}")
+}
+
+mac_load_tune_cache() {
+    local cache="${EXPLICIT_TUNE_CACHE:-$(mac_tune_cache_path)}"
+    [[ -f "$cache" ]] || return 1
+    local flags_json
+    flags_json=$(TUNE_CACHE="$cache" MODEL_NAME="$MODEL_NAME" python3 -c '
+import json, os, sys
+try:
+    with open(os.environ["TUNE_CACHE"], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as exc:
+    print(f"Error: invalid tune cache: {exc}", file=sys.stderr)
+    sys.exit(2)
+if data.get("model") != os.environ["MODEL_NAME"]:
+    print("Error: tune cache is for {}, not {}".format(data.get("model") or "?", os.environ["MODEL_NAME"]), file=sys.stderr)
+    sys.exit(2)
+best = data.get("best_config") or {}
+flags = best.get("flags") or {}
+if not isinstance(flags, dict):
+    flags = {}
+print(json.dumps(flags))
+' 2>/dev/null) || return 1
+    if mac_apply_tune_flags_json "$flags_json"; then
+        TUNE_LOADED=1
+        echo "Using macOS AI-tuned config: $(basename "$cache")"
+        return 0
+    fi
+    return 1
+}
+
+mac_bench_gen_tps() {
+    local url="http://127.0.0.1:${PORT}" result
+    result=$(curl -sf "$url/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        --max-time 180 \
+        -d '{"model":"test","messages":[{"role":"system","content":"You are a helpful assistant. /no_think"},{"role":"user","content":"Explain quantum computing in detail, covering qubits, superposition, entanglement, and error correction."}],"max_tokens":300,"temperature":0.1,"chat_template_kwargs":{"enable_thinking":false}}' \
+        2>/dev/null || true)
+    if [[ -z "$result" ]]; then
+        echo "0 0"
+        return
+    fi
+    python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    t = d.get("timings") or {}
+    gen = float(t.get("predicted_per_second") or 0)
+    pp = float(t.get("prompt_per_second") or 0)
+    print(f"{gen:.2f} {pp:.2f}")
+except Exception:
+    print("0 0")
+' <<< "$result" 2>/dev/null || echo "0 0"
+}
+
+mac_query_llm_for_flags() {
+    local prompt_file="$1" response
+    response=$(PROMPT_FILE="$prompt_file" python3 -c '
+import json, os
+prompt = open(os.environ["PROMPT_FILE"], encoding="utf-8").read()
+print(json.dumps([
+    {"role": "system", "content": "You tune llama.cpp Metal server flags. Respond only as JSON with keys name, flags, reasoning. Flags must be from the allowed list."},
+    {"role": "user", "content": prompt},
+]))
+' | while IFS= read -r messages; do
+        curl -sf "http://127.0.0.1:${PORT}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            --max-time 600 \
+            -d "{\"messages\":${messages},\"max_tokens\":2048,\"temperature\":0.2,\"chat_template_kwargs\":{\"enable_thinking\":false}}" 2>/dev/null || true
+    done)
+    if [[ -z "$response" ]]; then
+        echo "{}"
+        return
+    fi
+    python3 -c '
+import json, re, sys
+try:
+    d = json.load(sys.stdin)
+    c = d["choices"][0]["message"]
+    text = (c.get("content") or c.get("reasoning_content") or "")
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ValueError("no json")
+    obj = json.loads(m.group(0))
+    print(json.dumps(obj))
+except Exception:
+    print("{}")
+' <<< "$response"
+}
+
+mac_try_start_with_flags_json() {
+    local flags_json="$1"
+    local saved_flags=("${COMMON_FLAGS[@]}")
+    mac_apply_tune_flags_json "$flags_json" || true
+    if try_start; then
+        COMMON_FLAGS=("${saved_flags[@]}")
+        return 0
+    fi
+    COMMON_FLAGS=("${saved_flags[@]}")
+    return 1
+}
+
+mac_ai_tune() {
+    mkdir -p "$CACHE_DIR"
+    local cache
+    cache="$(mac_tune_cache_path)"
+    if [[ -f "$cache" && "$RETUNE" == "0" ]]; then
+        mac_load_tune_cache && return 0
+    fi
+
+    local rounds="${USER_TUNE_ROUNDS:-8}"
+    [[ "$rounds" =~ ^[0-9]+$ ]] || rounds=8
+    (( rounds < 1 )) && rounds=1
+    (( rounds > 30 )) && rounds=30
+
+    echo ""
+    echo "═══ macOS AI Tune — Metal-safe flag optimization ═══"
+    echo "  Model: $MODEL_NAME"
+    echo "  Rounds: $rounds"
+    echo "  Scope: batch, ubatch, KV type, threads, parallel, flash-attn"
+    echo ""
+
+    if [[ "${LLM_SERVER_TEST_MAC_AI_TUNE_CACHE_ONLY:-0}" == "1" ]]; then
+        echo "macOS AI Tune test hook: skipping live tuning."
+        return 0
+    fi
+
+    echo "Round 0/$rounds: starting baseline..."
+    if ! try_start; then
+        echo "ERROR: baseline macOS config failed to start; fallback launch will handle it."
+        return 1
+    fi
+    local bench baseline_gen baseline_pp best_gen best_pp best_name best_flags all_results
+    bench=$(mac_bench_gen_tps)
+    baseline_gen=$(awk '{print $1}' <<< "$bench")
+    baseline_pp=$(awk '{print $2}' <<< "$bench")
+    best_gen="$baseline_gen"
+    best_pp="$baseline_pp"
+    best_name="baseline"
+    best_flags="{}"
+    all_results="[]"
+    echo "  Baseline: gen=${baseline_gen} tok/s  pp=${baseline_pp} tok/s"
+
+    local round
+    for (( round=1; round<=rounds; round++ )); do
+        local prompt_file proposal name flags_json reasoning
+        prompt_file="$(mktemp -t llm-mac-tune-prompt.XXXXXX)"
+        cat > "$prompt_file" <<EOF
+Hardware:
+- CPU: $CPU_BRAND
+- Performance cores: $PERF_CORES
+- Physical cores: $PHYSICAL_CORES
+- Unified memory total MB: $RAM_TOTAL_MB
+- Available memory MB: $RAM_AVAIL_MB
+- Metal GPU: ${METAL_GPU_NAME:-none}
+
+Model:
+- Name: $MODEL_NAME
+- Size MB: $TOTAL_SIZE_MB
+- Layers: $LAYER_COUNT
+- Experts: $EXPERT_COUNT
+- Context: $CTX_SIZE
+- Strategy: $STRATEGY
+
+Current best:
+- Name: $best_name
+- Generation tok/s: $best_gen
+- Prompt tok/s: $best_pp
+
+Allowed flags only:
+$(mac_allowed_tune_flags_json)
+
+Rules:
+- Prefer stable Apple Silicon Metal settings.
+- Do not use CUDA, tensor split, device placement, mmap, mlock, or model path flags.
+- Keep memory conservative. If unsure, reduce -b/-ub or use q8_0/f16 KV.
+- Respond only JSON: {"name":"short_name","flags":{"-b":1024,"-ub":512},"reasoning":"why"}.
+EOF
+        proposal="$(mac_query_llm_for_flags "$prompt_file")"
+        rm -f "$prompt_file"
+        name=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("name") or "config")' <<< "$proposal" 2>/dev/null || echo "config")
+        flags_json=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get("flags") or {}))' <<< "$proposal" 2>/dev/null || echo "{}")
+        reasoning=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("reasoning") or "")' <<< "$proposal" 2>/dev/null || echo "")
+
+        echo "Round $round/$rounds: $name"
+        [[ -n "$reasoning" ]] && echo "  Reason: $reasoning"
+        echo "  Flags: $flags_json"
+
+        kill_server "$RUNNING_PID"
+        sleep 1
+        local gen="0" pp="0" status="ok"
+        if mac_try_start_with_flags_json "$flags_json"; then
+            bench=$(mac_bench_gen_tps)
+            gen=$(awk '{print $1}' <<< "$bench")
+            pp=$(awk '{print $2}' <<< "$bench")
+            echo "  Result: gen=${gen} tok/s  pp=${pp} tok/s"
+            if python3 -c "import sys; sys.exit(0 if float('$gen') > float('$best_gen') else 1)" 2>/dev/null; then
+                best_gen="$gen"
+                best_pp="$pp"
+                best_name="$name"
+                best_flags="$flags_json"
+                echo "  New best."
+            fi
+            kill_server "$RUNNING_PID"
+            sleep 1
+        else
+            status="crashed"
+            echo "  Result: crashed or failed health check"
+            kill_server ""
+        fi
+        all_results=$(RESULT_FLAGS="$flags_json" RESULT_NAME="$name" RESULT_STATUS="$status" RESULT_ROUND="$round" RESULT_GEN="$gen" RESULT_PP="$pp" python3 -c '
+import json, os, sys
+rows = json.loads(sys.stdin.read())
+try:
+    flags = json.loads(os.environ.get("RESULT_FLAGS") or "{}")
+except json.JSONDecodeError:
+    flags = {}
+rows.append({
+    "round": int(os.environ["RESULT_ROUND"]),
+    "name": os.environ["RESULT_NAME"],
+    "gen_tps": float(os.environ["RESULT_GEN"]),
+    "pp_tps": float(os.environ["RESULT_PP"]),
+    "flags": flags,
+    "status": os.environ["RESULT_STATUS"],
+})
+print(json.dumps(rows))
+' <<< "$all_results")
+
+        if (( round < rounds )); then
+            try_start || { echo "ERROR: cannot restart baseline for next mac AI Tune round"; break; }
+        fi
+    done
+
+    kill_server "$RUNNING_PID"
+    kill_server ""
+
+    BEST_FLAGS="$best_flags" ALL_RESULTS="$all_results" TUNE_CACHE="$cache" TUNE_MODEL="$MODEL_NAME" TUNE_BEST_NAME="$best_name" TUNE_BASE_GEN="$baseline_gen" TUNE_BASE_PP="$baseline_pp" TUNE_BEST_GEN="$best_gen" TUNE_BEST_PP="$best_pp" TUNE_ROUNDS="$rounds" python3 -c '
+import json, os
+from datetime import datetime, timezone
+best_flags = json.loads(os.environ.get("BEST_FLAGS") or "{}")
+all_results = json.loads(os.environ.get("ALL_RESULTS") or "[]")
+cache = {
+    "model": os.environ["TUNE_MODEL"],
+    "tuned_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "provider": "self-mac-metal",
+    "baseline_gen_tps": float(os.environ["TUNE_BASE_GEN"]),
+    "baseline_pp_tps": float(os.environ["TUNE_BASE_PP"]),
+    "best_config": {
+        "name": os.environ["TUNE_BEST_NAME"],
+        "flags": best_flags,
+        "gen_tps": float(os.environ["TUNE_BEST_GEN"]),
+        "pp_tps": float(os.environ["TUNE_BEST_PP"]),
+    },
+    "rounds": int(os.environ["TUNE_ROUNDS"]),
+    "all_results": all_results,
+}
+with open(os.environ["TUNE_CACHE"], "w", encoding="utf-8") as f:
+    json.dump(cache, f, indent=2)
+print("Saved macOS AI Tune cache: {}".format(os.environ["TUNE_CACHE"]))
+'
+    mac_load_tune_cache || true
+}
+
 run_benchmark() {
     local url="http://127.0.0.1:${PORT}"
     echo ""
@@ -646,10 +1375,22 @@ run_benchmark() {
     pp_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('usage',{}).get('prompt_tokens',0))" 2>/dev/null)
     tg_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('usage',{}).get('completion_tokens',0))" 2>/dev/null)
 
-    local timings
-    timings=$(curl -sf "$url/slots" 2>/dev/null)
+    local rates timings pp_rate tg_rate
+    rates=$(echo "$result" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+t=d.get('timings') or {}
+pp=t.get('prompt_per_second') or 0
+tg=t.get('predicted_per_second') or 0
+print(f'{float(pp):.1f} {float(tg):.1f}' if pp and tg else '')
+" 2>/dev/null || true)
+    if [[ -n "$rates" ]]; then
+        read -r pp_rate tg_rate <<< "$rates"
+        echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
+        echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
+    else
+        timings=$(curl -sf "$url/slots" 2>/dev/null || true)
     if [[ -n "$timings" ]]; then
-        local pp_rate tg_rate
         pp_rate=$(echo "$timings" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -674,6 +1415,7 @@ else: print('?')
         echo "  Prompt tokens: ${pp_tokens:-?}"
         echo "  Generated tokens: ${tg_tokens:-?}"
     fi
+    fi
     echo ""
     echo "Benchmark complete. Shutting down server..."
     kill_server ""
@@ -697,10 +1439,72 @@ suggest_alternatives() {
 }
 
 MAX_RESTARTS=5
+STARTUP_TIMEOUT="${LLM_SERVER_STARTUP_TIMEOUT:-240}"
+MAC_FALLBACK_FLAGS=()
+
+mac_apply_startup_fallback() {
+    local stage="$1"
+    shift
+    local skip_next=0 f
+    MAC_FALLBACK_FLAGS=()
+
+    for f in "$@"; do
+        if (( skip_next )); then
+            skip_next=0
+            continue
+        fi
+        case "$f" in
+            -b|-ub|--cache-type-k|--cache-type-v)
+                skip_next=1
+                continue
+                ;;
+        esac
+        if (( stage >= 1 )); then
+            case "$f" in
+                --flash-attn)
+                    skip_next=1
+                    continue
+                    ;;
+            esac
+        fi
+        if (( stage >= 2 )); then
+            case "$f" in
+                -ngl|--defrag-thold)
+                    skip_next=1
+                    continue
+                    ;;
+                --run-time-repack|-khad|-muge|-ger|--mlock)
+                    continue
+                    ;;
+            esac
+        fi
+        MAC_FALLBACK_FLAGS+=("$f")
+    done
+
+    case "$stage" in
+        0)
+            echo "Startup fallback: lowering Metal batch sizes."
+            MAC_FALLBACK_FLAGS+=(-b 512 -ub 256)
+            ;;
+        1)
+            echo "Startup fallback: using f16 KV and disabling flash-attn for compatibility."
+            MAC_FALLBACK_FLAGS+=(--cache-type-k f16 --cache-type-v f16 -b 512 -ub 256)
+            ;;
+        2)
+            echo "Startup fallback: disabling Metal offload and retrying CPU mode."
+            MAC_FALLBACK_FLAGS+=(-ngl 0 --cache-type-k f16 --cache-type-v f16 -b 512 -ub 256)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 run_with_restart() {
     local flags=("$@")
     local restarts=0
     local last_start=0
+    local fallback_stage=0
 
     while true; do
         last_start=$(date +%s)
@@ -710,7 +1514,7 @@ run_with_restart() {
         echo "Server PID: $pid"
 
         local healthy=0
-        for i in $(seq 1 240); do
+        for i in $(seq 1 "$STARTUP_TIMEOUT"); do
             if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
                 healthy=1
                 break
@@ -732,8 +1536,20 @@ run_with_restart() {
             local exit_code=$?
         else
             echo "Server failed to become healthy."
-            kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
             local exit_code=1
+            if mac_apply_startup_fallback "$fallback_stage" "${flags[@]}"; then
+                flags=("${MAC_FALLBACK_FLAGS[@]}")
+                fallback_stage=$(( fallback_stage + 1 ))
+                restarts=0
+                echo ""
+                if [[ "${LLM_SERVER_TEST_STOP_AFTER_MAC_FALLBACK:-0}" == "1" ]]; then
+                    print_cmd "${flags[@]}"
+                    exit 0
+                fi
+                continue
+            fi
         fi
 
         local uptime=$(( $(date +%s) - last_start ))
@@ -776,6 +1592,14 @@ run_with_restart() {
 
 # Kill any existing server on this port
 kill_server ""
+
+if [[ -n "$EXPLICIT_TUNE_CACHE" ]]; then
+    mac_load_tune_cache || exit 1
+elif (( DO_AI_TUNE && ! DRY_RUN )); then
+    mac_ai_tune || true
+elif (( ! DO_AI_TUNE && ! DRY_RUN )); then
+    mac_load_tune_cache || true
+fi
 
 case "$STRATEGY" in
     cpu_only)

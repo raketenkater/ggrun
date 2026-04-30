@@ -1,0 +1,72 @@
+name: Release
+
+# Supported targets: Linux, macOS, and Windows via WSL2. Native Windows assets
+# are intentionally not produced. CUDA/ik_llama.cpp bundles need a CUDA-capable
+# release host; see docs/releasing.md for the manual asset path.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: package ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: llm-server-linux-x86_64-cpu.tar.gz
+            cmake_flags: -DGGML_NATIVE=OFF
+          - os: macos-14
+            asset: llm-server-macos-arm64-metal.tar.gz
+            cmake_flags: -DGGML_METAL=ON -DGGML_NATIVE=OFF
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+      - name: Clone llama.cpp
+        run: git clone --depth=1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+
+      - name: Build llama-server
+        run: |
+          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }}
+          cmake --build /tmp/llama.cpp/build --config Release -j 3 -t llama-server
+
+      - name: Smoke-test backend binary
+        run: /tmp/llama.cpp/build/bin/llama-server --version
+
+      - name: Package
+        run: scripts/package-release.sh "${{ matrix.asset }}" /tmp/llama.cpp/build/bin/llama-server dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  publish:
+    name: publish release assets
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz

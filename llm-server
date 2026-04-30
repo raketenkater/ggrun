@@ -27,7 +27,8 @@
 #   llm-server <model.gguf> --ai-tune          # AI-driven flag optimization (8 rounds)
 #   llm-server <model.gguf> --ai-tune --retune # Force re-tune even if cache exists
 #   llm-server <model.gguf> --ai-tune --rounds 4 # Customize number of rounds
-#   llm-server <model.gguf> --ai-tune --unlimited # Deep tune: 20 rounds, LLM may perturb tensor-split
+#   llm-server <model.gguf> --ai-tune --placement-tune # Full tune: may change placement/split/perf flags except user-chosen flags
+#   llm-server <model.gguf> --tune-cache cache.json # Launch with an explicit tuned config
 #   llm-server <model.gguf> --ai-tune -v       # Verbose: show full ai-tune logs (default: progress box only)
 #
 # Environment variables:
@@ -58,11 +59,26 @@ if [[ ! -f "$PARSE_GGUF" ]]; then
     [[ -n "$_alt" ]] && PARSE_GGUF="$_alt"
 fi
 
+_discover_app_home() {
+    [[ -n "${LLM_APP_HOME:-}" ]] && { echo "$LLM_APP_HOME"; return 0; }
+    [[ "$(basename "$SCRIPT_DIR")" == "bin" ]] || return 1
+    local parent
+    parent="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)" || return 1
+    [[ -d "$parent/models" || -d "$parent/config" || -d "$parent/cache" ]] || return 1
+    echo "$parent"
+}
+LLM_APP_HOME="$(_discover_app_home 2>/dev/null || true)"
+[[ -n "$LLM_APP_HOME" ]] && export LLM_APP_HOME
+
 # Optional user config: sourceable bash file at $XDG_CONFIG_HOME/llm-server/config
 # (defaults to ~/.config/llm-server/config). Same syntax as env vars — anything
 # settable on the command line (LLAMA_SERVER, LLM_RAM_BUDGET, LLM_DEFAULT_CTX, …)
 # can be persisted there. Loaded before defaults so explicit env still wins.
-LLM_CONFIG="${LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-server/config}"
+if [[ -z "${LLM_CONFIG:-}" && -n "$LLM_APP_HOME" && -f "$LLM_APP_HOME/config/config.sh" ]]; then
+    LLM_CONFIG="$LLM_APP_HOME/config/config.sh"
+else
+    LLM_CONFIG="${LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-server/config}"
+fi
 [[ -f "$LLM_CONFIG" ]] && source "$LLM_CONFIG"
 
 # RUNNING_PID tracks the in-flight health-check / pre-launch server so a fatal
@@ -115,7 +131,8 @@ trap _cleanup_orphan_server EXIT
 VERSION="2.1.0"
 
 # Persistent Configuration — source early so env vars (LLM_PORT, etc.) are available
-CONFIG_DIR="$HOME/.config/llm-server"
+CONFIG_DIR="${LLM_CONFIG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/config}}"
+CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/llm-server}"
 CONFIG_FILE="$CONFIG_DIR/config.sh"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
@@ -139,11 +156,16 @@ MIN_CRAM_MB=512                  # minimum useful CPU RAM for expert offload
 VRAM_OVERHEAD_PERCENT=130        # model size * this / 100 = estimated VRAM needed
 SINGLE_GPU_HEADROOM_MB=4096      # extra VRAM headroom to fit single-GPU mode
 
-MODEL_DIR="${LLM_MODEL_DIR:-$HOME/ai_models}"
+MODEL_DIR="${LLM_MODEL_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/models}}"
+MODEL_DIR="${MODEL_DIR:-$HOME/ai_models}"
 # Ensure model directory exists
 mkdir -p "$MODEL_DIR"
-CACHE_DIR="$HOME/.cache/llm-server"
-SERVER_LOG="/tmp/llm-server.log"
+CACHE_DIR="${LLM_CACHE_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/cache}}"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/llm-server}"
+LOG_DIR="${LLM_LOG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/logs}}"
+LOG_DIR="${LOG_DIR:-/tmp}"
+mkdir -p "$CACHE_DIR" "$LOG_DIR"
+SERVER_LOG="$LOG_DIR/llm-server.log"
 # Guard against stale directory at log path
 [[ -d "$SERVER_LOG" ]] && rm -rf "$SERVER_LOG" 2>/dev/null || SERVER_LOG="/tmp/llm-server-$$.log"
 LIB_HUB_DIR=""
@@ -158,7 +180,9 @@ CPU_ONLY=0
 MODEL_ARG=""
 USER_SERVER_BIN=""
 USER_LIB_PATH=""
+EXPLICIT_TUNE_CACHE=""
 EXTRA_LLAMA_FLAGS=()   # unknown flags forwarded verbatim to llama-server
+TUNE_USER_LOCKED_KEYS=() # normalized llama flags the user explicitly chose; AI-tune must not override them
 KV_QUALITY="low"  # high (f16), mid (q8_0), low (q4_0, default)
 KV_QUALITY_EXPLICIT=0  # set to 1 when user passes --kv-quality — locks KV against AI-tune downgrades
 PARALLEL_SLOTS=""      # --parallel N passthrough, empty = llama-server default (4)
@@ -261,6 +285,10 @@ setup_lib_hub() {
 
 # Auto-detect llama-server binary
 find_server_binary() {
+    if [[ -n "${USER_SERVER_BIN:-}" && -x "$USER_SERVER_BIN" ]]; then
+        echo "$USER_SERVER_BIN"
+        return
+    fi
     if [[ -n "${LLAMA_SERVER:-}" && -x "$LLAMA_SERVER" ]]; then
         echo "$LLAMA_SERVER"
         return
@@ -272,10 +300,14 @@ find_server_binary() {
     if [[ "$BACKEND" == "ik_llama" ]]; then
         candidates+=("$HOME/ik_llama.cpp/build/bin/llama-server")
     elif [[ "$BACKEND" == "llama" ]]; then
+        candidates+=("$SCRIPT_DIR/llama-server")
+        candidates+=("$HOME/.local/bin/llama-server")
         candidates+=("$HOME/llama.cpp/build/bin/llama-server")
     else
         # Auto-detect: prefer ik_llama.cpp (faster multi-GPU)
         candidates=(
+            "$SCRIPT_DIR/llama-server"
+            "$HOME/.local/bin/llama-server"
             "$HOME/ik_llama.cpp/build/bin/llama-server"
             "$HOME/llama.cpp/build/bin/llama-server"
         )
@@ -317,7 +349,8 @@ while [[ $# -gt 0 ]]; do
         --update)    DO_UPDATE=1; shift ;;
         --show-configs) SHOW_CONFIGS=1; shift ;;
         --ai-tune)   DO_AI_TUNE=1; shift ;;
-        --unlimited) DO_UNLIMITED=1; shift ;;
+        --tune-cache) EXPLICIT_TUNE_CACHE="$2"; shift 2 ;;
+        --unlimited|--placement-tune|--full-auto-tune) DO_UNLIMITED=1; shift ;;
         --tune-long-timeout) TUNE_LONG_TIMEOUT=1; shift ;;
         --rounds)    USER_TUNE_ROUNDS="$2"; shift 2 ;;
         --parallel)  PARALLEL_SLOTS="$2"; shift 2 ;;
@@ -356,6 +389,60 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+normalize_tune_key() {
+    case "$1" in
+        --mg|--main-gpu) echo "-mg" ;;
+        --batch-size) echo "-b" ;;
+        --ubatch-size) echo "-ub" ;;
+        --ngl|--n-gpu-layers) echo "-ngl" ;;
+        --n-cpu-moe|-ncmoe) echo "--n-cpu-moe" ;;
+        --override-tensor) echo "-ot" ;;
+        --threads|-t) echo "--threads" ;;
+        --threads-batch|-tb) echo "--threads-batch" ;;
+        --parallel|-np) echo "--parallel" ;;
+        --flash-attn|-fa) echo "--flash-attn" ;;
+        --reasoning|-rea) echo "--reasoning" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+add_tune_lock_key() {
+    local key="$1" existing
+    [[ -z "$key" || "$key" != -* ]] && return 0
+    for existing in "${TUNE_USER_LOCKED_KEYS[@]}"; do
+        [[ "$existing" == "$key" ]] && return 0
+    done
+    TUNE_USER_LOCKED_KEYS+=("$key")
+}
+
+record_user_tune_locks() {
+    local i key
+    for (( i=0; i<${#EXTRA_LLAMA_FLAGS[@]}; i++ )); do
+        [[ "${EXTRA_LLAMA_FLAGS[$i]}" == -* ]] || continue
+        key=$(normalize_tune_key "${EXTRA_LLAMA_FLAGS[$i]}")
+        add_tune_lock_key "$key"
+    done
+    [[ -n "$PARALLEL_SLOTS" ]] && add_tune_lock_key "--parallel"
+    if (( KV_QUALITY_EXPLICIT )); then
+        add_tune_lock_key "--cache-type-k"
+        add_tune_lock_key "--cache-type-v"
+    fi
+    (( CTX_EXPLICIT )) && add_tune_lock_key "--ctx-size"
+    if [[ -n "$GPUS_FILTER" ]]; then
+        add_tune_lock_key "--device"
+        add_tune_lock_key "--tensor-split"
+        add_tune_lock_key "--split-mode"
+        add_tune_lock_key "-mg"
+        add_tune_lock_key "-ngl"
+        add_tune_lock_key "-ot"
+        add_tune_lock_key "--n-cpu-moe"
+    fi
+    if [[ -n "$MMPROJ_PATH" ]]; then
+        add_tune_lock_key "--mmproj"
+    fi
+}
+record_user_tune_locks
+
 # Now find the binary (BACKEND is now set from args)
 LLAMA_SERVER="$(find_server_binary)"
 
@@ -392,7 +479,8 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # --show-configs: inspect cached tune/placement per model
 # ═══════════════════════════════════════════════════════════════
-CACHE_DIR="${LLM_CACHE_DIR:-$HOME/.cache/llm-server}"
+CACHE_DIR="${LLM_CACHE_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/cache}}"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/llm-server}"
 
 _human_age() {
     # seconds → "2d ago" / "3h ago" / "12m ago"
@@ -598,8 +686,11 @@ PY
         echo
     done
     echo "Resolved launch command:"
-    # Re-invoke self with --dry-run to get the actual command without reimplementing
-    SHOW_CONFIGS=0 "$0" "$model_arg" --dry-run 2>&1 | sed -n '/^Command:/,$p' | sed 's/^/  /'
+    # Re-invoke self with --dry-run to get the actual command without reimplementing.
+    # Keep this non-interactive; otherwise a TTY caller can hang on context prompts.
+    SHOW_CONFIGS=0 LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
+        "$0" --server-bin "$LLAMA_SERVER" --ctx-size "$CTX_SIZE" "$model_arg" --dry-run 2>&1 \
+        | sed -n '/^Command:/,$p' | sed 's/^/  /'
 }
 
 if (( SHOW_CONFIGS )); then
@@ -1482,13 +1573,15 @@ setup_lib_hub "$LLAMA_SERVER"
 # Detect if we're running ik_llama.cpp (supports --split-mode graph)
 # Note: can't pipe --help | grep -q under pipefail — --help exits 1 and grep -q
 # causes SIGPIPE, both propagate as pipe failure. Use path check + variable instead.
+SERVER_HELP=$("$LLAMA_SERVER" --help 2>&1 || true)
 IS_IK_LLAMA=0
 if [[ "$LLAMA_SERVER" == *ik_llama* ]]; then
     IS_IK_LLAMA=1
 else
-    _help_out=$("$LLAMA_SERVER" --help 2>&1 || true)
-    [[ "$_help_out" == *ikawrakow* ]] && IS_IK_LLAMA=1
+    [[ "$SERVER_HELP" == *ikawrakow* ]] && IS_IK_LLAMA=1
 fi
+SUPPORTS_REASONING_FLAG=0
+[[ "$SERVER_HELP" == *"--reasoning"* ]] && SUPPORTS_REASONING_FLAG=1
 
 (( IS_IK_LLAMA )) && echo "Backend: ik_llama.cpp (graph split enabled)" || echo "Backend: llama.cpp (mainline)"
 
@@ -1761,6 +1854,17 @@ COMMON_FLAGS=(
     --threads-batch "$THREADS_BATCH"
 )
 
+USER_REASONING_EXPLICIT=0
+for _f in "${EXTRA_LLAMA_FLAGS[@]:-}"; do
+    [[ "$_f" == "--reasoning" || "$_f" == "-rea" ]] && USER_REASONING_EXPLICIT=1
+done
+if (( SUPPORTS_REASONING_FLAG && ! USER_REASONING_EXPLICIT )); then
+    # OpenAI-compatible clients generally expect assistant text in message.content.
+    # Reasoning can still be enabled explicitly with: -- --reasoning on
+    COMMON_FLAGS+=(--reasoning off)
+    echo "  Reasoning: off by default for OpenAI-compatible responses"
+fi
+
 # User-requested concurrent session count (affects KV slot split + compute buffers).
 # Default llama-server behavior (omit flag) uses 4 slots; passing --parallel 1
 # during --ai-tune gives the cleanest single-session benchmark signal.
@@ -1824,24 +1928,159 @@ fi
 # Multimodal projector (vision support)
 # --mmproj auto (or --vision): auto-detect locally or download from HuggingFace
 # --mmproj <path>: use specific file
+mmproj_label() {
+    local candidate="$1"
+    python3 "$PARSE_GGUF" --format json "$candidate" 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    meta = json.load(sys.stdin)
+except Exception:
+    print("unknown")
+    sys.exit(0)
+
+name = meta.get("basename") or meta.get("name") or "unknown"
+arch = meta.get("arch") or "unknown"
+print(f"{name} ({arch})")
+'
+}
+
+mmproj_matches_model() {
+    local candidate="$1"
+    local meta
+
+    [[ -f "$candidate" ]] || return 1
+    if [[ "${LLM_SERVER_SKIP_MMPROJ_CHECK:-0}" == "1" ]]; then
+        echo "  Warning: skipping mmproj compatibility check for $candidate" >&2
+        return 0
+    fi
+
+    meta=$(python3 "$PARSE_GGUF" --format json "$candidate" 2>/dev/null) || return 1
+    MMPROJ_META="$meta" MMPROJ_FILE="$candidate" TEXT_MODEL_NAME="${GGUF_MODEL_NAME:-}" TEXT_MODEL_BASENAME="${GGUF_BASENAME:-}" python3 -c '
+import json
+import os
+import re
+import sys
+
+def norm(value):
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+try:
+    meta = json.loads(os.environ["MMPROJ_META"])
+except Exception:
+    sys.exit(1)
+
+if meta.get("arch") != "clip":
+    sys.exit(1)
+
+expected_bytes = int(meta.get("non_expert_bytes") or 0) + int(meta.get("expert_bytes") or 0)
+if expected_bytes > 0:
+    try:
+        actual_bytes = os.path.getsize(os.environ["MMPROJ_FILE"])
+    except OSError:
+        sys.exit(1)
+    if actual_bytes < expected_bytes:
+        sys.exit(1)
+
+text_ids = {norm(os.environ.get("TEXT_MODEL_NAME")), norm(os.environ.get("TEXT_MODEL_BASENAME"))}
+proj_ids = {norm(meta.get("name")), norm(meta.get("basename"))}
+text_ids.discard("")
+proj_ids.discard("")
+
+if not text_ids or not proj_ids or text_ids.isdisjoint(proj_ids):
+    sys.exit(1)
+'
+}
+
 find_local_mmproj() {
     # Look for mmproj files in model directory, matching model name
     local dir="$MODEL_DIR_PATH"
+    local f
     # Exact match patterns (most reliable)
     for f in "$dir"/mmproj-F16.gguf "$dir"/mmproj-BF16.gguf "$dir"/mmproj-F32.gguf; do
-        [[ -f "$f" ]] && echo "$f" && return
+        [[ -f "$f" ]] || continue
+        if mmproj_matches_model "$f"; then
+            echo "$f"
+            return
+        fi
+        echo "  Skipping incompatible mmproj: $f ($(mmproj_label "$f"))" >&2
     done
     # Glob for any mmproj
     for f in "$dir"/*mmproj*.gguf; do
-        [[ -f "$f" ]] && echo "$f" && return
+        [[ -f "$f" ]] || continue
+        if mmproj_matches_model "$f"; then
+            echo "$f"
+            return
+        fi
+        echo "  Skipping incompatible mmproj: $f ($(mmproj_label "$f"))" >&2
     done
     # Also check MODEL_DIR (may differ from model's directory)
     if [[ "$dir" != "$MODEL_DIR" ]]; then
         for f in "$MODEL_DIR"/mmproj-F16.gguf "$MODEL_DIR"/mmproj-BF16.gguf; do
-            [[ -f "$f" ]] && echo "$f" && return
+            [[ -f "$f" ]] || continue
+            if mmproj_matches_model "$f"; then
+                echo "$f"
+                return
+            fi
+            echo "  Skipping incompatible mmproj: $f ($(mmproj_label "$f"))" >&2
         done
     fi
     echo ""
+}
+
+list_repo_mmproj_candidates() {
+    local repo="$1"
+    local tree
+
+    tree=$(curl -sfL "https://huggingface.co/api/models/${repo}/tree/main?recursive=1" 2>/dev/null || true)
+    if [[ -n "$tree" ]]; then
+        printf '%s' "$tree" | python3 -c '
+import json
+import os
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+
+paths = []
+for item in data if isinstance(data, list) else []:
+    if not isinstance(item, dict):
+        continue
+    path = item.get("path") or item.get("rfilename") or ""
+    name = os.path.basename(path).lower()
+    if path and name.endswith(".gguf") and "mmproj" in name:
+        paths.append(path)
+
+def score(path):
+    name = os.path.basename(path).lower()
+    if name == "mmproj-f16.gguf":
+        rank = 0
+    elif name == "mmproj-bf16.gguf":
+        rank = 1
+    elif name == "mmproj-f32.gguf":
+        rank = 2
+    elif "f16" in name:
+        rank = 3
+    elif "bf16" in name:
+        rank = 4
+    elif "f32" in name:
+        rank = 5
+    elif name == "mmproj.gguf":
+        rank = 6
+    else:
+        rank = 7
+    return (rank, len(path), path)
+
+for path in sorted(set(paths), key=score):
+    print(path)
+'
+    fi
+
+    # Fallback for repos where the tree API is unavailable or returns no files.
+    printf '%s\n' "mmproj-F16.gguf" "mmproj-BF16.gguf" "mmproj-F32.gguf" "mmproj.gguf"
 }
 
 download_mmproj() {
@@ -1866,31 +2105,78 @@ download_mmproj() {
         candidates+=("${q}/${basename}-GGUF")
     done
 
-    local mmproj_name="mmproj-F16.gguf"
-    local dest="$MODEL_DIR_PATH/$mmproj_name"
+    local safe_basename
+    safe_basename=$(printf '%s' "$basename" | tr -cs 'A-Za-z0-9._+-' '_' | sed 's/^_*//; s/_*$//')
+    [[ -z "$safe_basename" ]] && safe_basename="model"
 
     for repo in "${candidates[@]}"; do
-        local url="https://huggingface.co/${repo}/resolve/main/${mmproj_name}"
-        echo "  Trying: $url"
-        if curl -sfL --head "$url" >/dev/null 2>&1; then
-            echo "  Downloading mmproj from ${repo}..."
-            if curl -fL --progress-bar -o "$dest" "$url"; then
+        local seen_remote=()
+        local remote_path
+        while IFS= read -r remote_path; do
+            [[ -n "$remote_path" ]] || continue
+            local already_seen=0 seen
+            for seen in "${seen_remote[@]}"; do
+                [[ "$seen" == "$remote_path" ]] && already_seen=1 && break
+            done
+            (( already_seen )) && continue
+            seen_remote+=("$remote_path")
+
+            local remote_base suffix safe_suffix dest tmp url
+            remote_base=$(basename "$remote_path")
+            suffix="$remote_base"
+            suffix="${suffix#mmproj-}"
+            suffix="${suffix#mmproj_}"
+            [[ "$suffix" == "$remote_base" ]] && suffix="$remote_base"
+            safe_suffix=$(printf '%s' "$suffix" | tr -cs 'A-Za-z0-9._+-' '_' | sed 's/^_*//; s/_*$//')
+            [[ -z "$safe_suffix" ]] && safe_suffix="mmproj.gguf"
+            dest="$MODEL_DIR_PATH/mmproj-${safe_basename}-${safe_suffix}"
+            tmp="${dest}.tmp.$$"
+
+            if [[ -f "$dest" ]] && mmproj_matches_model "$dest"; then
+                echo "  Found compatible downloaded mmproj: $dest" >&2
+                echo "$dest"
+                return 0
+            fi
+
+            url=$(REPO="$repo" REPO_PATH="$remote_path" python3 -c '
+import os
+from urllib.parse import quote
+
+print("https://huggingface.co/{}/resolve/main/{}".format(
+    os.environ["REPO"],
+    quote(os.environ["REPO_PATH"], safe="/"),
+))
+')
+            echo "  Trying: $url" >&2
+            if ! curl -sfL --head "$url" >/dev/null 2>&1; then
+                continue
+            fi
+
+            echo "  Downloading mmproj from ${repo}: ${remote_path}" >&2
+            rm -f "$tmp"
+            if curl -fL --progress-bar -o "$tmp" "$url"; then
                 # Verify it's actually a GGUF file
-                if DEST="$dest" python3 -c "
+                if DEST="$tmp" python3 -c "
 import os, sys
 with open(os.environ['DEST'],'rb') as f:
     magic = f.read(4)
     if magic != b'GGUF': sys.exit(1)
 " 2>/dev/null; then
-                    echo "  Downloaded: $dest"
+                    if ! mmproj_matches_model "$tmp"; then
+                        echo "  Warning: downloaded mmproj is incomplete or does not match this model ($(mmproj_label "$tmp")), removing" >&2
+                        rm -f "$tmp"
+                        continue
+                    fi
+                    mv -f "$tmp" "$dest"
+                    echo "  Downloaded: $dest" >&2
                     echo "$dest"
                     return 0
                 else
-                    echo "  Warning: downloaded file is not a valid GGUF, removing"
-                    rm -f "$dest"
+                    echo "  Warning: downloaded file is not a valid GGUF, removing" >&2
+                    rm -f "$tmp"
                 fi
             fi
-        fi
+        done < <(list_repo_mmproj_candidates "$repo")
     done
     return 1
 }
@@ -1951,12 +2237,24 @@ if [[ "$MMPROJ_PATH" == "auto" ]]; then
     if [[ -z "$MMPROJ_PATH" ]]; then
         MMPROJ_PATH=$(download_mmproj) || true
     fi
+    if [[ -z "$MMPROJ_PATH" ]]; then
+        echo "Error: Vision enabled but no compatible mmproj was found." >&2
+        echo "Place the matching mmproj GGUF next to the model, pass --mmproj /path/to/mmproj.gguf, or set LLM_SERVER_SKIP_MMPROJ_CHECK=1 to bypass metadata validation." >&2
+        exit 1
+    fi
 fi
 
 # Calculate VRAM needed including mmproj
 VRAM_NEEDED_MB=$(( TOTAL_SIZE_MB * VRAM_OVERHEAD_PERCENT / 100 + KV_TOTAL_MB + COMPUTE_PER_GPU_MB ))
 if [[ -n "$MMPROJ_PATH" ]]; then
     if [[ -f "$MMPROJ_PATH" ]]; then
+        if ! mmproj_matches_model "$MMPROJ_PATH"; then
+            echo "Error: mmproj metadata does not match the selected model, or the file is incomplete." >&2
+            echo "  Model: ${GGUF_BASENAME:-${GGUF_MODEL_NAME:-unknown}}" >&2
+            echo "  mmproj: $MMPROJ_PATH ($(mmproj_label "$MMPROJ_PATH"))" >&2
+            echo "Set LLM_SERVER_SKIP_MMPROJ_CHECK=1 only if you have manually verified compatibility." >&2
+            exit 1
+        fi
         MMPROJ_SIZE_MB=$(du -sm "$MMPROJ_PATH" 2>/dev/null | awk '{print $1}' || echo 0)
         VRAM_NEEDED_MB=$(( VRAM_NEEDED_MB + MMPROJ_SIZE_MB ))
         COMMON_FLAGS+=(--mmproj "$MMPROJ_PATH")
@@ -2291,20 +2589,35 @@ run_benchmark() {
         return 1
     fi
 
-    local pp_tokens pp_time tg_tokens tg_time
+    local pp_tokens tg_tokens response_rates pp_rate tg_rate
     pp_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('prompt_tokens',0))" 2>/dev/null || echo 0)
     tg_tokens=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); u=d.get('usage',{}); print(u.get('completion_tokens',0))" 2>/dev/null || echo 0)
-
-    # Use timings endpoint if available (ik_llama.cpp / llama.cpp specific)
-    local timings
-    timings=$(curl -sf "$url/slots" 2>/dev/null)
-    if [[ -n "$timings" ]]; then
-        local pp_rate tg_rate
-        # Improved extraction from slot timings
-        pp_rate=$(echo "$timings" | python3 -c "
+    response_rates=$(echo "$result" | python3 -c "
 import sys,json
-d=json.load(sys.stdin)
-s=d[0] if isinstance(d,list) else d
+try:
+    d=json.load(sys.stdin)
+    t=d.get('timings', {})
+    pp=t.get('prompt_per_second') or 0
+    tg=t.get('predicted_per_second') or 0
+    print(f'{pp:.1f}\t{tg:.1f}' if pp and tg else '')
+except Exception:
+    print('')
+" 2>/dev/null || true)
+
+    if [[ -n "$response_rates" ]]; then
+        pp_rate="${response_rates%%$'\t'*}"
+        tg_rate="${response_rates#*$'\t'}"
+        echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
+        echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
+    else
+        # Use /slots as a fallback for older backends.
+        local timings
+        timings=$(curl -sf "$url/slots" 2>/dev/null)
+        if [[ -n "$timings" ]]; then
+        pp_rate=$(echo "$timings" | python3 -c "
+	import sys,json
+	d=json.load(sys.stdin)
+	s=d[0] if isinstance(d,list) else d
 t_pp = s.get('t_prompt_processing', 0)
 n_pp = s.get('n_prompt_tokens_processed', 1)
 if t_pp > 0: print(f\"{n_pp / (t_pp / 1000):.1f}\")
@@ -2317,14 +2630,15 @@ s=d[0] if isinstance(d,list) else d
 t_gen = s.get('t_token_generation', 0)
 n_gen = s.get('n_decoded', 1)
 if t_gen > 0: print(f\"{n_gen / (t_gen / 1000):.1f}\")
-else: print('?')
-" 2>/dev/null)
-        echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
-        echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
-    else
-        echo "  Prompt tokens: ${pp_tokens:-?}"
-        echo "  Generated tokens: ${tg_tokens:-?}"
-        echo "  (Install ik_llama.cpp for detailed timing)"
+	else: print('?')
+	" 2>/dev/null)
+            echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
+            echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
+        else
+            echo "  Prompt tokens: ${pp_tokens:-?}"
+            echo "  Generated tokens: ${tg_tokens:-?}"
+            echo "  (Backend did not expose detailed timing)"
+        fi
     fi
     echo ""
     # Auto-exit after benchmark to prevent "hanging"
@@ -2742,22 +3056,26 @@ except:
 
 # Build fixed flags string (these never change during tuning)
 build_fixed_flags() {
-    local flags="-m \"${MODEL_PATH}\" --host \"${HOST}\" --port \"${PORT}\" --ctx-size \"${CTX_SIZE}\""
-    
-    # If not unlimited, all Stage 1 heuristic flags are "fixed" (baseline)
+    local flags="-m \"${MODEL_PATH}\" --host \"${HOST}\" --port \"${PORT}\" --ctx-size \"${CTX_SIZE}\" --reasoning --mmproj"
+
+    # Standard mode may tune performance/memory knobs, but placement stays fixed.
+    # Full placement mode unlocks these unless the user explicitly selected them.
     if (( !DO_UNLIMITED )); then
-        for f in "${COMMON_FLAGS[@]}"; do
-            # Avoid duplicating flags already in the base string
-            if [[ " $flags " != *" $f "* ]]; then
+        flags+=" --device --tensor-split --split-mode -mg -ngl -ot --n-cpu-moe"
+    fi
+
+    # Include MoE placement flags if set; they are not tunable yet.
+    if (( ${#TUNE_EXTRA_FIXED[@]} > 0 )); then
+        for f in "${TUNE_EXTRA_FIXED[@]}"; do
+             if [[ " $flags " != *" $f "* ]]; then
                 flags+=" $f"
             fi
         done
     fi
-
-    # Include MoE placement flags if set
-    if (( ${#TUNE_EXTRA_FIXED[@]} > 0 )); then
-        for f in "${TUNE_EXTRA_FIXED[@]}"; do
-             if [[ " $flags " != *" $f "* ]]; then
+    if (( ${#TUNE_USER_LOCKED_KEYS[@]} > 0 )); then
+        local f
+        for f in "${TUNE_USER_LOCKED_KEYS[@]}"; do
+            if [[ " $flags " != *" $f "* ]]; then
                 flags+=" $f"
             fi
         done
@@ -2806,20 +3124,25 @@ parse_tune_overrides() {
     TUNE_OVERRIDE_FLAGS=()
     TUNE_OVERRIDE_KEYS=()
     local kv_locked="$KV_QUALITY_EXPLICIT"
+    local locked_keys_env
+    locked_keys_env=$(printf '%s\n' "${TUNE_USER_LOCKED_KEYS[@]:-}")
     while IFS= read -r -d '' item; do
         case "$item" in
             F$'\t'*) TUNE_OVERRIDE_FLAGS+=("${item#F$'\t'}") ;;
             K$'\t'*) TUNE_OVERRIDE_KEYS+=("${item#K$'\t'}") ;;
         esac
-    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" python3 -c "
-import json, os, sys
+    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" DO_UNLIMITED="$DO_UNLIMITED" TUNE_USER_LOCKED_KEYS="$locked_keys_env" python3 -c "
+	import json, os, sys
 try:
     overrides = json.loads(sys.stdin.read())
 except json.JSONDecodeError:
     overrides = {}
 if not isinstance(overrides, dict):
     overrides = {}
-protected = {'-m', '--host', '--port', '--ctx-size', '-ot'}
+protected = {'-m', '--host', '--port', '--ctx-size', '--mmproj', '-ot', '--reasoning'}
+protected |= {k for k in os.environ.get('TUNE_USER_LOCKED_KEYS', '').splitlines() if k}
+if os.environ.get('DO_UNLIMITED') != '1':
+    protected |= {'--device', '--tensor-split', '--split-mode', '-mg', '-ngl', '-ot', '--n-cpu-moe'}
 if os.environ.get('KV_LOCKED') == '1':
     protected |= {'--cache-type-k', '--cache-type-v'}
 if os.environ.get('WSL2') == '1':
@@ -2829,10 +3152,13 @@ aliases = {
     '--mg': '-mg', '--main-gpu': '-mg',
     '--batch-size': '-b', '--ubatch-size': '-ub',
     '--ngl': '-ngl', '--n-gpu-layers': '-ngl',
+    '--n-cpu-moe': '--n-cpu-moe', '-ncmoe': '--n-cpu-moe',
+    '--override-tensor': '-ot',
     '--threads': '--threads', '-t': '--threads',
     '--threads-batch': '--threads-batch', '-tb': '--threads-batch',
     '--parallel': '--parallel', '-np': '--parallel',
     '--flash-attn': '--flash-attn', '-fa': '--flash-attn',
+    '--reasoning': '--reasoning', '-rea': '--reasoning',
 }
 normalized = {}
 for k, v in overrides.items():
@@ -2978,10 +3304,11 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
     echo ""
     echo "═══════════════════════════════════════════════════"
     if (( DO_UNLIMITED )); then
-        echo "  AI Tune — UNLIMITED (deep) mode"
+        echo "  AI Tune — Full placement mode (--placement-tune)"
         echo "  Model: ${MODEL_NAME}"
         echo "  Rounds: ${AI_TUNE_ROUNDS}  (tensor-split + split-mode unlocked)"
-        echo "  Warning: this can take 1–3 hours on large models"
+        echo "  Scope: may change placement/split/perf flags except explicit user choices"
+        echo "  Warning: this can take 1-3 hours on large models"
     else
         echo "  AI Tune — iterative LLM-driven optimization"
         echo "  Model: ${MODEL_NAME}"
@@ -3116,7 +3443,7 @@ SYSEOF
     # Replace {unlimited_section} — only active when --unlimited is set
     local unlimited_section=""
     if (( DO_UNLIMITED )); then
-        unlimited_section=$'\n# UNLIMITED MODE — deep tuning enabled\nYou may also perturb these normally-deterministic flags:\n- --tensor-split R0,R1,R2,... (ratios across GPUs; baseline is bandwidth-weighted — try ±10-30% skews)\n- --split-mode (graph | row | layer) — test alternatives on multi-GPU\n- Per-device layer counts via -ngl (total) combined with --main-gpu / --tensor-split\nThese have larger impact on heterogeneous rigs (mixed VRAM / PCIe bandwidths). Start small (one perturbation per round) so you can attribute gains.\n'
+        unlimited_section=$'\n# FULL PLACEMENT MODE (--placement-tune / legacy --unlimited)\nYou may perturb normally-deterministic placement and performance flags, except flags explicitly chosen by the user. User-locked flags are rejected even if you propose them.\n- --tensor-split R0,R1,R2,... (ratios across GPUs; baseline is bandwidth-weighted; try small skews first)\n- --split-mode (graph | row | layer) — test alternatives on multi-GPU\n- --device / --main-gpu / -ngl when no user GPU filter was provided\n- Batch, micro-batch, parallelism, threads, memory flags, and KV cache type when not user-locked\nMoE expert -ot placement is locked after the placement pass; optimize around it unless a future mode explicitly unlocks MoE placement. Start small (one perturbation per round) so you can attribute gains.\n'
     fi
     system_prompt="${system_prompt//\{unlimited_section\}/$unlimited_section}"
 
@@ -3524,23 +3851,57 @@ load_tune_cache() {
     local tune_cache_suffix=""
     (( DO_UNLIMITED )) && tune_cache_suffix="_unlimited"
     local tune_cache="$CACHE_DIR/tune_${tune_cache_key}${tune_cache_suffix}.json"
-    # Unlimited cache preferred when --unlimited is set; fall back to regular if present
-    if (( DO_UNLIMITED )) && [[ ! -f "$tune_cache" && -f "$CACHE_DIR/tune_${tune_cache_key}.json" ]]; then
+    local explicit_cache=0
+    if [[ -n "$EXPLICIT_TUNE_CACHE" ]]; then
+        explicit_cache=1
+        tune_cache="$EXPLICIT_TUNE_CACHE"
+        if [[ ! -f "$tune_cache" ]]; then
+            echo "Error: --tune-cache not found: $tune_cache" >&2
+            exit 1
+        fi
+        if ! MODEL_NAME="$MODEL_NAME" TUNE_CACHE="$tune_cache" python3 -c "
+import json, os, sys
+try:
+    d = json.load(open(os.environ['TUNE_CACHE'], encoding='utf-8'))
+except Exception as exc:
+    print(f'Error: invalid tune cache JSON: {exc}', file=sys.stderr)
+    sys.exit(1)
+if d.get('model') != os.environ['MODEL_NAME']:
+    print(f\"Error: tune cache is for {d.get('model', '?')}, not {os.environ['MODEL_NAME']}\", file=sys.stderr)
+    sys.exit(1)
+b = d.get('best_config', {}) or {}
+if not b.get('gen_tps') and not d.get('baseline_wins'):
+    print('Error: tune cache has no successful measured config', file=sys.stderr)
+    sys.exit(1)
+"; then
+            exit 1
+        fi
+    # Full-placement cache preferred when --placement-tune is set; fall back to regular if present.
+    elif (( DO_UNLIMITED )) && [[ ! -f "$tune_cache" && -f "$CACHE_DIR/tune_${tune_cache_key}.json" ]]; then
         tune_cache="$CACHE_DIR/tune_${tune_cache_key}.json"
     fi
 
     if [[ -f "$tune_cache" ]]; then
         echo ""
-        echo "Using AI-tuned config (run --ai-tune --retune to re-optimize)"
+        if (( explicit_cache )); then
+            echo "Using selected AI-tuned config: $(basename "$tune_cache")"
+        else
+            echo "Using AI-tuned config (run --ai-tune --retune to re-optimize)"
+        fi
 
         # Apply tuned overrides on top of COMMON_FLAGS (with alias normalization + dedup)
-        local tuned_extras=() override_keys=()
+        local tuned_extras=() override_keys=() locked_keys_env allow_placement=0
+        TUNE_CACHE_HAS_PLACEMENT=0
+        if (( DO_UNLIMITED || explicit_cache )); then
+            allow_placement=1
+        fi
+        locked_keys_env=$(printf '%s\n' "${TUNE_USER_LOCKED_KEYS[@]:-}")
         while IFS= read -r -d '' item; do
             case "$item" in
                 F$'\t'*) tuned_extras+=("${item#F$'\t'}") ;;
                 K$'\t'*) override_keys+=("${item#K$'\t'}") ;;
             esac
-        done < <(TUNE_CACHE="$tune_cache" python3 -c "
+        done < <(TUNE_CACHE="$tune_cache" ALLOW_PLACEMENT="$allow_placement" TUNE_USER_LOCKED_KEYS="$locked_keys_env" python3 -c "
 import json, os, sys
 try:
     with open(os.environ['TUNE_CACHE'], encoding='utf-8') as f:
@@ -3554,17 +3915,24 @@ aliases = {
     '--mg': '-mg', '--main-gpu': '-mg',
     '--batch-size': '-b', '--ubatch-size': '-ub',
     '--ngl': '-ngl', '--n-gpu-layers': '-ngl',
+    '--n-cpu-moe': '--n-cpu-moe', '-ncmoe': '--n-cpu-moe',
+    '--override-tensor': '-ot',
     '--threads': '--threads', '-t': '--threads',
     '--threads-batch': '--threads-batch', '-tb': '--threads-batch',
     '--parallel': '--parallel', '-np': '--parallel',
     '--flash-attn': '--flash-attn', '-fa': '--flash-attn',
+    '--reasoning': '--reasoning', '-rea': '--reasoning',
 }
+protected = {'-m', '--host', '--port', '--ctx-size', '--mmproj', '-ot', '--reasoning'}
+protected |= {k for k in os.environ.get('TUNE_USER_LOCKED_KEYS', '').splitlines() if k}
+if os.environ.get('ALLOW_PLACEMENT') != '1':
+    protected |= {'--device', '--tensor-split', '--split-mode', '-mg', '-ngl', '-ot', '--n-cpu-moe'}
 records = []
 for k, v in overrides.items():
     if not isinstance(k, str) or not k.startswith('-'):
         continue
     k = aliases.get(k, k)
-    if k in ('-m', '--host', '--port', '--ctx-size', '-ot'):
+    if k in protected:
         continue
     if v is False:
         continue
@@ -3574,9 +3942,17 @@ for k, v in overrides.items():
         records.append(('F', str(v)))
 for kind, value in records:
     sys.stdout.write(kind + '\t' + value + '\0')
-" 2>/dev/null || true)
+	" 2>/dev/null || true)
 
         if (( ${#tuned_extras[@]} > 0 )); then
+            local key
+            for key in "${override_keys[@]}"; do
+                case "$key" in
+                    --device|--tensor-split|--split-mode|-mg|-ngl|-ot|--n-cpu-moe)
+                        TUNE_CACHE_HAS_PLACEMENT=1
+                        ;;
+                esac
+            done
             # Strip flags from COMMON_FLAGS that the tuned config overrides
             local deduped=()
             local skip_next=0
@@ -3632,6 +4008,30 @@ maybe_ai_tune_launch_flags() {
     return 0
 }
 
+maybe_prompt_first_run_ai_tune() {
+    (( DO_AI_TUNE || DRY_RUN || BENCHMARK || RETUNE )) && return 0
+    (( TUNE_LOADED )) && return 0
+    [[ -n "$EXPLICIT_TUNE_CACHE" ]] && return 0
+    [[ -t 0 && -r /dev/tty ]] || return 0
+    (( ${LLM_ASSUME_YES:-0} == 0 )) || return 0
+
+    local answer
+    echo ""
+    echo "No AI-tuned config found for this model/hardware/backend."
+    echo "AI Tune can create a better config now by loading the model and benchmarking several rounds."
+    echo "This usually takes a few minutes; large models or full placement mode can take longer."
+    read -r -p "Run AI Tune before launching? [y/N] " answer < /dev/tty || answer=""
+    case "${answer,,}" in
+        y|yes)
+            DO_AI_TUNE=1
+            echo "AI Tune enabled for this launch."
+            ;;
+        *)
+            echo "Continuing with heuristic config."
+            ;;
+    esac
+}
+
 # ═══════════════════════════════════════════════════════════════
 # Section 7: Execute Strategy
 # ═══════════════════════════════════════════════════════════════
@@ -3649,6 +4049,7 @@ done
 
 # Load cached tune config if available — bypasses strategy-specific launch
 TUNE_LOADED=0
+TUNE_CACHE_HAS_PLACEMENT=0
 if (( !DO_AI_TUNE )); then
     if load_tune_cache; then
         TUNE_LOADED=1
@@ -3660,12 +4061,15 @@ if (( ${#EXTRA_LLAMA_FLAGS[@]} > 0 )); then
     COMMON_FLAGS+=("${EXTRA_LLAMA_FLAGS[@]}")
 fi
 
+maybe_prompt_first_run_ai_tune
+
 # Kill any existing server on this port
 kill_server ""
 
-# If tune cache was loaded, launch directly with tuned flags (skip strategy logic)
-# EXCEPT for MoE models, which must still go through Section 8 for expert placement
-if (( TUNE_LOADED )) && [[ "$STRATEGY" != "moe_offload" ]]; then
+# Placement-tuned caches already include final placement flags, so they can skip
+# strategy logic. Plain performance caches must still flow through the selected
+# strategy so device/split flags are added after the tuned overrides.
+if (( TUNE_LOADED && TUNE_CACHE_HAS_PLACEMENT )) && [[ "$STRATEGY" != "moe_offload" ]]; then
     if (( DRY_RUN )); then
         print_cmd "${COMMON_FLAGS[@]}"
         exit 0
@@ -3689,12 +4093,16 @@ case "$STRATEGY" in
             --cache-type-k "$KV_TYPE" --cache-type-v "$KV_TYPE"
             --jinja --threads "$THREADS_GEN" --threads-batch "$THREADS_BATCH"
         )
-        # Skip --mlock on WSL2 — pinning can freeze the Windows host
-        (( ! IS_WSL2 )) && LAUNCH_FLAGS+=(--mlock)
-        [[ -n "$CONTEXT_SHIFT_FLAG" ]] && LAUNCH_FLAGS+=("$CONTEXT_SHIFT_FLAG")
-        if (( DRY_RUN )); then
-            print_cmd "${LAUNCH_FLAGS[@]}"
-            exit 0
+	        if (( SUPPORTS_REASONING_FLAG && ! USER_REASONING_EXPLICIT )); then
+	            LAUNCH_FLAGS+=(--reasoning off)
+	        fi
+	        # Skip --mlock on WSL2 — pinning can freeze the Windows host
+	        (( ! IS_WSL2 )) && LAUNCH_FLAGS+=(--mlock)
+	        [[ -n "$CONTEXT_SHIFT_FLAG" ]] && LAUNCH_FLAGS+=("$CONTEXT_SHIFT_FLAG")
+	        [[ -n "$MMPROJ_PATH" ]] && LAUNCH_FLAGS+=(--mmproj "$MMPROJ_PATH")
+	        if (( DRY_RUN )); then
+	            print_cmd "${LAUNCH_FLAGS[@]}"
+	            exit 0
         fi
         if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
             run_with_restart "${COMMON_FLAGS[@]}"

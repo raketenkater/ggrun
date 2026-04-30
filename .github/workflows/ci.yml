@@ -41,3 +41,97 @@ jobs:
           python-version: '3.11'
       - name: Run estimator regression tests
         run: bash tests/test_estimator.sh
+
+  safety-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run safety regression tests
+        run: bash tests/test_safety.sh
+
+  mac-launcher-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run mocked mac launcher regression tests
+        run: bash tests/test_mac_launcher.sh
+
+  gui-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run GUI regression tests
+        run: bash tests/test_gui.sh
+
+  setup-home-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run setup home regression tests
+        run: bash tests/test_setup_home.sh
+
+  installer-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install scripts to a temporary prefix
+        run: |
+          tmp="$(mktemp -d)"
+          LLM_INSTALL_MODE=scripts \
+            LLM_INSTALL_BACKEND=skip \
+            LLM_INSTALL_PREFIX="$tmp/bin" \
+            LLM_INSTALL_PY_DEPS=skip \
+            LLM_INSTALL_NONINTERACTIVE=1 \
+            ./install.sh
+          test -x "$tmp/bin/llm-server"
+          test -x "$tmp/bin/llm-server-gui"
+          test -x "$tmp/bin/download_any_gguf.py"
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release archive layout with a fake backend
+        run: |
+          tmp="$(mktemp -d)"
+          printf '#!/usr/bin/env sh\necho fake llama-server\n' > "$tmp/llama-server"
+          chmod +x "$tmp/llama-server"
+          scripts/package-release.sh llm-server-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/dist"
+          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llama-server$'
+
+  release-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from local release bundle outside repo
+        run: |
+          tmp="$(mktemp -d)"
+          printf '#!/usr/bin/env sh\necho fake llama-server\n' > "$tmp/llama-server"
+          chmod +x "$tmp/llama-server"
+          scripts/package-release.sh llm-server-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/release"
+          mkdir -p "$tmp/run"
+          (
+            cd "$tmp/run"
+            LLM_INSTALL_MODE=release \
+              LLM_INSTALL_BACKEND=cpu \
+              LLM_INSTALL_RELEASE_DIR="$tmp/release" \
+              LLM_INSTALL_PREFIX="$tmp/prefix" \
+              LLM_INSTALL_PY_DEPS=skip \
+              LLM_INSTALL_NONINTERACTIVE=1 \
+              "$GITHUB_WORKSPACE/install.sh"
+          )
+          test -x "$tmp/prefix/llm-server"
+          test -x "$tmp/prefix/llama-server"
+          test -x "$tmp/prefix/download_any_gguf.py"
