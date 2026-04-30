@@ -236,6 +236,8 @@ Any flag llm-server doesn't recognize is forwarded to `llama-server`, so every u
 ### Smart downloader
 `--download` calculates `Total = System VRAM + System RAM`, inspects the HuggingFace repo, and recommends the quantization level with the best speed/quality balance for your exact hardware.
 
+Downloaded and locally discovered GGUFs are indexed in `<model-dir>/.llm-server/models.json`. The index records model path, size, architecture, quant, matching local vision projectors, HuggingFace source metadata, and available AI Tune configs so the GUI can show runnable models and configs without guessing from filenames only.
+
 ### Vision
 With `--vision`, llm-server checks for an existing `mmproj`, verifies it matches the loaded model, and downloads the correct `mmproj-F16.gguf` from HuggingFace if missing. The correct repo is inferred from GGUF metadata (`general.basename` + `general.quantized_by`).
 

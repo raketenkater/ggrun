@@ -20,6 +20,7 @@ LLM_SETUP_NONINTERACTIVE=1 \
 test -x "$APP_HOME/bin/llm-server"
 test -x "$APP_HOME/bin/llm-server-gui"
 test -x "$APP_HOME/bin/download_any_gguf.py"
+test -x "$APP_HOME/bin/model_index.py"
 test -f "$APP_HOME/env.sh"
 test -f "$APP_HOME/config/config.sh"
 test -d "$APP_HOME/models"

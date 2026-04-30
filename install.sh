@@ -178,7 +178,7 @@ install_release_bundle() {
     payload_root="$(find "$tmp/payload" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     [[ -n "$payload_root" ]] || payload_root="$tmp/payload"
 
-    for f in llm-server llm-server-mac llm-server-gui parse_gguf.py download_any_gguf.py; do
+    for f in llm-server llm-server-mac llm-server-gui parse_gguf.py model_index.py download_any_gguf.py; do
         if install_payload_file "$payload_root/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         elif install_payload_file "$payload_root/bin/$f" "$INSTALL_DIR/$f"; then
@@ -235,9 +235,9 @@ if (( RELEASE_INSTALLED )); then
 else
     ensure_source_repo
     if [[ "$OS" == "Darwin" ]]; then
-        FILES=("llm-server-mac" "llm-server-gui" "parse_gguf.py" "download_any_gguf.py")
+        FILES=("llm-server-mac" "llm-server-gui" "parse_gguf.py" "model_index.py" "download_any_gguf.py")
     else
-        FILES=("llm-server" "llm-server-gui" "parse_gguf.py" "download_any_gguf.py")
+        FILES=("llm-server" "llm-server-gui" "parse_gguf.py" "model_index.py" "download_any_gguf.py")
     fi
     for f in "${FILES[@]}"; do
         if [[ -f "$SRC_DIR/$f" ]]; then
@@ -254,6 +254,10 @@ else
     if [[ -f "$SRC_DIR/download_any_gguf.py" && ! -f "$MODEL_DIR/download_any_gguf.py" ]]; then
         install -m 0755 "$SRC_DIR/download_any_gguf.py" "$MODEL_DIR/download_any_gguf.py"
         ok "Installed downloader to $MODEL_DIR"
+    fi
+    if [[ -f "$SRC_DIR/model_index.py" && ! -f "$MODEL_DIR/model_index.py" ]]; then
+        install -m 0755 "$SRC_DIR/model_index.py" "$MODEL_DIR/model_index.py"
+        ok "Installed model indexer to $MODEL_DIR"
     fi
 fi
 

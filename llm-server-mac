@@ -212,7 +212,7 @@ if (( DOWNLOAD )); then
     echo "Wait for the interactive session..."
     echo ""
 
-    python3 "$DOWNLOADER" --repo "$MODEL_ARG" --dir "$MODEL_DIR" --vram "$TOTAL_VRAM_MB" --ram "$RAM_AVAIL_MB"
+    python3 "$DOWNLOADER" --repo "$MODEL_ARG" --dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" --vram "$TOTAL_VRAM_MB" --ram "$RAM_AVAIL_MB"
 
     echo ""
     echo "Download step complete."

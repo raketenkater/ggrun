@@ -6,6 +6,7 @@ Download any GGUF model from HuggingFace with flexible options
 
 import os
 import sys
+import subprocess
 from pathlib import Path
 from huggingface_hub import hf_hub_download, list_repo_files, HfApi
 
@@ -200,6 +201,37 @@ def download_files(repo, files_to_download, output_dir):
         return [], []
 
 
+def update_model_index(repo, selected_quantization, output_dir, downloaded, cache_dir=None):
+    """Record downloaded models in the llm-server model index when available."""
+    candidates = [
+        Path(__file__).resolve().with_name("model_index.py"),
+        output_dir / "model_index.py",
+    ]
+    indexer = next((p for p in candidates if p.is_file()), None)
+    if not indexer:
+        return
+    cmd = [
+        sys.executable,
+        str(indexer),
+        "--model-dir",
+        str(output_dir),
+        "--cache-dir",
+        str(cache_dir or Path.home() / ".cache" / "llm-server"),
+        "update-download",
+        "--repo",
+        repo,
+        "--quant",
+        selected_quantization or "",
+    ]
+    for _, filepath in downloaded:
+        cmd.extend(["--file", Path(filepath).name])
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"   ✓ Updated model index: {output_dir / '.llm-server' / 'models.json'}")
+    except Exception:
+        print("   ⚠️  Model index update failed; models are still downloaded.")
+
+
 def list_files_in_directory(directory, extension=".gguf"):
     """List all files with given extension in directory"""
     return sorted(directory.glob(f"*{extension}"))
@@ -330,6 +362,7 @@ def get_args():
     parser.add_argument("--dir", type=str, help="Download directory")
     parser.add_argument("--vram", type=int, default=0, help="Available VRAM in MB")
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
+    parser.add_argument("--cache-dir", type=str, help="llm-server cache directory")
     return parser.parse_args()
 
 
@@ -511,6 +544,7 @@ def main():
         downloaded, failed = download_files(repo, files_to_download, output_dir)
 
         if downloaded:
+            update_model_index(repo, selected_quantization, output_dir, downloaded, args.cache_dir)
             print_usage_instructions(repo, output_dir)
             print("\n🎉 Download complete!")
         else:

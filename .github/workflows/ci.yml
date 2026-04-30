@@ -82,6 +82,16 @@ jobs:
       - name: Run setup home regression tests
         run: bash tests/test_setup_home.sh
 
+  model-index-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run model index regression tests
+        run: bash tests/test_model_index.sh
+
   installer-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -98,6 +108,7 @@ jobs:
           test -x "$tmp/bin/llm-server"
           test -x "$tmp/bin/llm-server-gui"
           test -x "$tmp/bin/download_any_gguf.py"
+          test -x "$tmp/bin/model_index.py"
 
   package-smoke:
     runs-on: ubuntu-latest
@@ -110,6 +121,7 @@ jobs:
           chmod +x "$tmp/llama-server"
           scripts/package-release.sh llm-server-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/dist"
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llama-server$'
+          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/model_index.py$'
 
   release-install-smoke:
     runs-on: ubuntu-latest
@@ -135,3 +147,4 @@ jobs:
           test -x "$tmp/prefix/llm-server"
           test -x "$tmp/prefix/llama-server"
           test -x "$tmp/prefix/download_any_gguf.py"
+          test -x "$tmp/prefix/model_index.py"

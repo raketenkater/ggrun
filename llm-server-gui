@@ -243,6 +243,19 @@ refresh_models() {
     idx=0
 
     [[ -d "$MODEL_DIR" ]] || return 0
+    local indexer
+    indexer="$SCRIPT_DIR/model_index.py"
+    [[ -f "$indexer" ]] || indexer="$MODEL_DIR/model_index.py"
+    if [[ -f "$indexer" ]]; then
+        while IFS=$'\t' read -r file display; do
+            [[ -n "$file" && -n "$display" ]] || continue
+            MODEL_PATHS+=("$file")
+            MODEL_DISPLAY+=("$display")
+            idx=$(( idx + 1 ))
+        done < <(python3 "$indexer" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui 2>/dev/null || true)
+        (( idx > 0 )) && return 0
+    fi
+
     while IFS= read -r file; do
         basename=$(basename "$file")
         # Projector GGUFs are dependencies for vision models, not runnable text models.
