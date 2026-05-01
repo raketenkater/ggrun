@@ -13,8 +13,14 @@ mkdir -p "$MODEL_DIR" "$CACHE_DIR"
 
 python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/Test-A3B-Q4_K_M.gguf" \
     --arch qwen35moe --name Test-A3B --basename Test-A3B \
+    --tokenizer-model gpt2 --tokenizer-pre qwen35 --vocab-size 16 \
     --layers 4 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 \
     --experts 8 --exp-used 2 --exp-ff 32 --ctx-train 4096
+
+python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/Test-Draft-Q8_0.gguf" \
+    --arch qwen35 --name Test-Draft --basename Test-Draft \
+    --tokenizer-model gpt2 --tokenizer-pre qwen35 --vocab-size 16 \
+    --layers 2 --hkv 1 --kl 16 --vl 16 --embd 32 --ff 64 --ctx-train 4096
 
 python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/mmproj-F16.gguf" \
     --arch clip --name Test-A3B --basename Test-A3B \
@@ -44,11 +50,13 @@ python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 models = data.get("models") or []
-assert len(models) == 1, models
-m = models[0]
+assert len(models) == 2, models
+m = next(row for row in models if row["file"] == "Test-A3B-Q4_K_M.gguf")
 assert m["file"] == "Test-A3B-Q4_K_M.gguf", m
 assert m["moe"] is True, m
 assert m["quant"] == "Q4_K_M", m
+assert m["tokenizer_pre"] == "qwen35", m
+assert m["vocab_size"] == 16, m
 assert m["mmproj"], m
 assert len(m["tune_configs"]) == 1, m
 assert m["tune_configs"][0]["gen_tps"] == 12.5, m
@@ -61,10 +69,17 @@ python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR"
 python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
-m = data["models"][0]
+m = next(row for row in data["models"] if row["file"] == "Test-A3B-Q4_K_M.gguf")
 assert m["download"]["repo"] == "test/repo-GGUF", m
 assert m["download"]["quant"] == "Q4_K_M", m
 PY
+
+echo "Test: model index draft suggestions"
+drafts=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+    suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf")
+[[ "$drafts" == safe* ]]
+[[ "$drafts" == *"Test-Draft-Q8_0.gguf"* ]]
+[[ "$drafts" == *"exact tokenizer match"* ]]
 
 echo "Test: model index GUI rows"
 gui=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui)

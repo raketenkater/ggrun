@@ -17,6 +17,7 @@ import sys
 
 VT_UINT32 = 4
 VT_STRING = 8
+VT_ARRAY = 9
 VT_UINT64 = 10
 
 
@@ -44,6 +45,15 @@ def w_kv_string(buf, key, val):
     w_string(buf, key)
     w_uint32(buf, VT_STRING)
     w_string(buf, val)
+
+
+def w_kv_string_array(buf, key, vals):
+    w_string(buf, key)
+    w_uint32(buf, VT_ARRAY)
+    w_uint32(buf, VT_STRING)
+    w_uint64(buf, len(vals))
+    for val in vals:
+        w_string(buf, val)
 
 
 def w_tensor_header(buf, name, dims, ttype, offset=0):
@@ -84,6 +94,12 @@ def build(args):
         kv_pairs.append(('general.basename', 'string', args.basename))
     if args.quantized_by:
         kv_pairs.append(('general.quantized_by', 'string', args.quantized_by))
+    if args.tokenizer_model:
+        kv_pairs.append(('tokenizer.ggml.model', 'string', args.tokenizer_model))
+    if args.tokenizer_pre:
+        kv_pairs.append(('tokenizer.ggml.pre', 'string', args.tokenizer_pre))
+    if args.vocab_size:
+        kv_pairs.append(('tokenizer.ggml.tokens', 'strings', [f'tok_{i}' for i in range(args.vocab_size)]))
     if args.layers is not None:
         kv_pairs.append((f'{arch}.block_count', 'uint32', args.layers))
     if args.hkv is not None:
@@ -128,6 +144,8 @@ def build(args):
             w_kv_uint32(out, key, val)
         elif vtype == 'string':
             w_kv_string(out, key, val)
+        elif vtype == 'strings':
+            w_kv_string_array(out, key, val)
         else:
             raise ValueError(f'unhandled type {vtype}')
 
@@ -147,6 +165,9 @@ def main():
     ap.add_argument('--name', default='')
     ap.add_argument('--basename', default='')
     ap.add_argument('--quantized-by', default='')
+    ap.add_argument('--tokenizer-model', default='')
+    ap.add_argument('--tokenizer-pre', default='')
+    ap.add_argument('--vocab-size', type=int, default=0)
     ap.add_argument('--layers', type=int, default=None)
     ap.add_argument('--hkv', type=int, default=None)
     ap.add_argument('--kl', type=int, default=None)

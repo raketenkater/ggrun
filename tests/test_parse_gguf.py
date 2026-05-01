@@ -137,6 +137,7 @@ def test_shell_format_emits_all_keys():
         'EXPERT_SHARED_FF', 'KV_LORA_RANK', 'Q_LORA_RANK', 'ROPE_DIM',
         'LEADING_DENSE', 'SLIDING_WINDOW', 'FULL_ATTN_INTERVAL', 'HAS_SHEXP',
         'CTX_TRAIN', 'GGUF_MODEL_NAME', 'GGUF_BASENAME', 'GGUF_QUANTIZED_BY',
+        'GGUF_TOKENIZER_MODEL', 'GGUF_TOKENIZER_PRE', 'GGUF_VOCAB_SIZE',
     }
     emitted = {ln.split('=', 1)[0] for ln in out.splitlines() if '=' in ln}
     missing = expected_vars - emitted

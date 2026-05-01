@@ -101,9 +101,13 @@ def _read_kv(f, r, kv_count):
             elif key == 'general.name': r['name'] = val
             elif key == 'general.basename': r['basename'] = val
             elif key == 'general.quantized_by': r['quantized_by'] = val
+            elif key == 'tokenizer.ggml.model': r['tokenizer_model'] = val
+            elif key == 'tokenizer.ggml.pre': r['tokenizer_pre'] = val
         elif vt == 9:  # array
             at = struct.unpack('<I', f.read(4))[0]
             al = struct.unpack('<Q', f.read(8))[0]
+            if key == 'tokenizer.ggml.tokens':
+                r['vocab_size'] = al
             if at in _KV_FIXED:
                 f.read(al * _KV_FIXED[at])
             elif at == 8:
@@ -229,6 +233,9 @@ SHELL_KEY_MAP = [
     ('name',              'GGUF_MODEL_NAME',     ''),
     ('basename',          'GGUF_BASENAME',       ''),
     ('quantized_by',      'GGUF_QUANTIZED_BY',   ''),
+    ('tokenizer_model',   'GGUF_TOKENIZER_MODEL', ''),
+    ('tokenizer_pre',     'GGUF_TOKENIZER_PRE',  ''),
+    ('vocab_size',        'GGUF_VOCAB_SIZE',     0),
 ]
 
 

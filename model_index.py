@@ -191,6 +191,9 @@ def scan_models(model_dir: Path, cache_dir: Path) -> dict[str, Any]:
             "name": meta.get("name", ""),
             "basename": meta.get("basename", ""),
             "quantized_by": meta.get("quantized_by", ""),
+            "tokenizer_model": meta.get("tokenizer_model", ""),
+            "tokenizer_pre": meta.get("tokenizer_pre", ""),
+            "vocab_size": int(meta.get("vocab_size", 0) or 0),
             "layers": int(meta.get("layers", 0) or 0),
             "experts": int(meta.get("experts", 0) or 0),
             "ctx_train": int(meta.get("ctx_train", 0) or 0),
@@ -217,6 +220,51 @@ def update_download(model_dir: Path, cache_dir: Path, repo: str, quant: str, fil
             }
     save_index(model_dir, data)
     return data
+
+
+def suggest_drafts(data: dict[str, Any], target: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    target_size = int(target.get("size_bytes", 0) or 0)
+    target_tok = (target.get("tokenizer_model") or "", target.get("tokenizer_pre") or "", target.get("vocab_size") or 0)
+    for model in data.get("models", []):
+        if model.get("path") == target.get("path"):
+            continue
+        size = int(model.get("size_bytes", 0) or 0)
+        reasons: list[str] = []
+        score = 0
+        safe = True
+
+        if target_size and size >= target_size:
+            safe = False
+            reasons.append("not smaller than target")
+        elif target_size and size <= target_size * 0.25:
+            score += 30
+            reasons.append("small enough for draft")
+        else:
+            score += 5
+            reasons.append("smaller than target")
+
+        draft_tok = (model.get("tokenizer_model") or "", model.get("tokenizer_pre") or "", model.get("vocab_size") or 0)
+        if target_tok == draft_tok:
+            score += 60
+            reasons.append("exact tokenizer match")
+        else:
+            safe = False
+            reasons.append(
+                "tokenizer mismatch "
+                f"target={target_tok[0]}/{target_tok[1]}/{target_tok[2]} "
+                f"draft={draft_tok[0]}/{draft_tok[1]}/{draft_tok[2]}"
+            )
+
+        if model.get("moe"):
+            score -= 10
+            reasons.append("draft is MoE")
+        else:
+            score += 5
+            reasons.append("draft is dense")
+
+        rows.append({"path": model["path"], "file": model["file"], "score": score, "safe": safe, "reasons": reasons})
+    return sorted(rows, key=lambda row: (row["safe"], row["score"]), reverse=True)
 
 
 def gui_rows(data: dict[str, Any]) -> None:
@@ -248,6 +296,9 @@ def main() -> int:
     upd.add_argument("--repo", required=True)
     upd.add_argument("--quant", default="")
     upd.add_argument("--file", action="append", default=[])
+    sug = sub.add_parser("suggest-drafts")
+    sug.add_argument("--target", required=True)
+    sug.add_argument("--format", choices=("json", "text"), default="text")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir).expanduser().resolve()
@@ -266,6 +317,25 @@ def main() -> int:
     if args.cmd == "update-download":
         data = update_download(model_dir, cache_dir, args.repo, args.quant, args.file)
         print(json.dumps({"index": str(index_path(model_dir)), "models": len(data.get("models", []))}, sort_keys=True))
+        return 0
+
+    if args.cmd == "suggest-drafts":
+        data = scan_models(model_dir, cache_dir)
+        save_index(model_dir, data)
+        target_path = str(Path(args.target).expanduser().resolve())
+        target = next((m for m in data.get("models", []) if str(Path(m["path"]).resolve()) == target_path), None)
+        if target is None:
+            print(f"target not found in model index: {args.target}", file=sys.stderr)
+            return 1
+        rows = suggest_drafts(data, target)
+        if args.format == "json":
+            print(json.dumps(rows, indent=2, sort_keys=True))
+        elif not rows:
+            print("No local draft candidates found.")
+        else:
+            for row in rows:
+                status = "safe" if row["safe"] else "blocked"
+                print(f"{status}\t{row['score']}\t{row['path']}\t{'; '.join(row['reasons'])}")
         return 0
 
     return 2
