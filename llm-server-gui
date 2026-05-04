@@ -31,8 +31,9 @@ set -euo pipefail
 
 SPECIFIC_MODEL=""
 
-# Backend preference (ik_llama or llama)
-PREFERRED_BACKEND="${LLM_BACKEND:-llama}"  # default to llama
+# Backend preference (ik_llama or llama). Config is sourced below, so this
+# default is applied after loading persistent settings.
+PREFERRED_BACKEND="llama"
 
 # Help flag should be side-effect free: no update checks, config prompts, or
 # backend probing before printing usage.
@@ -61,6 +62,7 @@ mkdir -p "$CONFIG_DIR"
 
 # Load persistent config
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+PREFERRED_BACKEND="${LLM_BACKEND:-$PREFERRED_BACKEND}"
 
 MODEL_DIR="${LLM_MODEL_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/models}}"
 MODEL_DIR="${MODEL_DIR:-$HOME/ai_models}"
@@ -260,6 +262,8 @@ refresh_models() {
         basename=$(basename "$file")
         # Projector GGUFs are dependencies for vision models, not runnable text models.
         [[ "${basename,,}" == *mmproj*.gguf ]] && continue
+        # Speculative draft GGUFs are dependencies, not user-launchable chat models.
+        [[ "${basename,,}" == *dflash-draft*.gguf ]] && continue
         # Skip split GGUF parts that aren't the first file
         if [[ "$basename" =~ -[0-9]+-of-[0-9]+\.gguf$ ]]; then
             [[ ! "$basename" =~ -00001-of-[0-9]+\.gguf$ ]] && continue
@@ -346,9 +350,16 @@ else
         backend_choice=2
     elif (( ! ik_avail )) && (( llama_avail )); then
         backend_choice=1
+    elif [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
+        backend_choice=2
     else
-        read -rp "Choice [1]: " backend_choice
-        backend_choice=${backend_choice:-1}
+        backend_choice=1
+    fi
+
+    if (( ik_avail && llama_avail )); then
+        local_default="$backend_choice"
+        read -rp "Choice [$local_default]: " backend_choice
+        backend_choice=${backend_choice:-$local_default}
     fi
 
     if (( backend_choice == 2 )) && (( ik_avail )); then

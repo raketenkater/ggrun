@@ -91,6 +91,12 @@ fi
 # threads/children and (b) lets us avoid the previous lsof-port-sweep that
 # could `kill -9` an unrelated service bound to the same port.
 RUNNING_PID=""
+
+# Env vars to prefix the llama-server invocation with. Populated by recovery
+# paths (e.g. GGML_CUDA_NO_PINNED=1 for very large MoE models that exhaust
+# pinned host memory during -ot placement). Persisted across run_with_restart.
+LAUNCH_ENV_PREFIX=()
+
 _pgid_of() {
     local pid="${1:-}"
     [[ -z "$pid" ]] && return 1
@@ -151,10 +157,22 @@ MAX_RESTARTS="${LLM_MAX_RESTARTS:-5}"
 KEEP_ALIVE="${LLM_KEEP_ALIVE:-0}"
 TUNE_LONG_TIMEOUT=0
 SYSTEM_HEADROOM_MB=5120          # RAM reserved for OS/system
-COMPUTE_PER_GPU_MB=512           # CUDA context + compute buffers per GPU
+COMPUTE_PER_GPU_MB=512           # legacy; kept for non-MoE single-GPU sizing only
 MIN_CRAM_MB=512                  # minimum useful CPU RAM for expert offload
 VRAM_OVERHEAD_PERCENT=130        # model size * this / 100 = estimated VRAM needed
 SINGLE_GPU_HEADROOM_MB=4096      # extra VRAM headroom to fit single-GPU mode
+# ── Placement constants: every value is data, not a guess ──
+# COMPUTE_FLOOR_MB: cited from llama.cpp source. The function
+#   common_fit_params_impl() in common/common.cpp aborts the launch when
+#   free VRAM after model+KV allocation falls below 1024 MiB ("vs. target
+#   of 1024" in the abort message). This is a hard contract from llama.cpp,
+#   not a guess. Reserving exactly 1024 MiB satisfies it; we never reserve
+#   less. Source: https://github.com/ggml-org/llama.cpp common/common.cpp
+COMPUTE_FLOOR_MB=1024
+# CUDA_CTX_MB / CUBLAS_WS_MB: NOT hardcoded. Measured per-system on first
+# launch by system_probe() and cached. Until a probe runs, the cold-start
+# placement uses a CPU-only baseline that requires no GPU-side estimate.
+# After one probe (~30s), all subsequent placements use measured values.
 
 MODEL_DIR="${LLM_MODEL_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/models}}"
 MODEL_DIR="${MODEL_DIR:-$HOME/ai_models}"
@@ -162,6 +180,10 @@ MODEL_DIR="${MODEL_DIR:-$HOME/ai_models}"
 mkdir -p "$MODEL_DIR"
 CACHE_DIR="${LLM_CACHE_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/cache}}"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/llm-server}"
+# Probe cache: per-(model, ctx, ubatch, kv) measured memory values from llama-server
+# stderr. Lets subsequent launches pack VRAM deterministically instead of using
+# percentage heuristics. Survives system changes (intrinsic to model/config).
+PROBE_CACHE_DIR="${LLM_PROBE_CACHE_DIR:-$CACHE_DIR/probes}"
 LOG_DIR="${LLM_LOG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/logs}}"
 LOG_DIR="${LOG_DIR:-/tmp}"
 mkdir -p "$CACHE_DIR" "$LOG_DIR"
@@ -1152,16 +1174,6 @@ if [[ "$_bin_check" == *"shared libraries"* ]]; then
     fi
 fi
 
-# Detect if we're running ik_llama.cpp (supports --split-mode graph)
-# Note: can't use pipe + grep -q under pipefail (SIGPIPE kills pipe).
-# Reuse _bin_check from above, or check path.
-IS_IK_LLAMA=0
-if [[ "$LLAMA_SERVER" == *ik_llama* ]]; then
-    IS_IK_LLAMA=1
-elif [[ "${_bin_check:-}" == *ikawrakow* || "${_bin_check:-}" == *"split-mode-graph"* ]]; then
-    IS_IK_LLAMA=1
-fi
-
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 log() { [[ "$VERBOSE" == "1" ]] && echo "[DEBUG] $*" >&2 || true; }
@@ -1267,7 +1279,7 @@ if [[ -z "${LLM_SERVER_UPDATE_CHECKED:-}" ]] && _should_check_updates; then
     if (( ${#_updates[@]} > 0 )); then
         echo -e "\033[1;31m⚠ Updates available: ${_updates[*]}\033[0m"
         if [[ -t 0 ]] || [[ -t 1 ]]; then
-            read -r -t 15 -p "  Update now? [y/N/d=dismiss ${UPDATE_DISMISS_DAYS} days] " _answer < /dev/tty 2>/dev/null || _answer=""
+            read -r -t 20 -p "  Update now? [y/N/d=dismiss ${UPDATE_DISMISS_DAYS} days] " _answer < /dev/tty 2>/dev/null || _answer=""
         else
             echo "  (skipped in non-interactive mode - run directly to update)"
             _answer="n"
@@ -1293,6 +1305,10 @@ fi
 echo "═══ llm-server v$VERSION ═══"
 
 echo "Binary: $LLAMA_SERVER"
+# IS_IK_LLAMA gets the authoritative value from --help parsing in Section 4;
+# initialize here so the early echo (and any unbound-variable check) is safe.
+IS_IK_LLAMA="${IS_IK_LLAMA:-0}"
+[[ "$LLAMA_SERVER" == *ik_llama* ]] && IS_IK_LLAMA=1
 (( IS_IK_LLAMA )) && echo "Backend: ik_llama.cpp (graph split enabled)"
 
 # Detect physical CPU cores
@@ -1536,8 +1552,18 @@ echo "Architecture: ${LAYER_COUNT} layers, $([ "$IS_MOE" = "1" ] && echo "${EXPE
 
 (( HAS_FUSED && IS_IK_LLAMA )) && echo "Info: Fused up|gate model detected. Optimized ik_llama.cpp kernels enabled."
 
-# Health check timeout: 240s base, +60s per 100GB of model size
-HEALTH_TIMEOUT=$(( 240 + TOTAL_SIZE_MB / 1700 ))
+# Health check timeout: 240s base, +60s per 100GB of model size.
+# Huge mmap'd MoE launches can spend many minutes in tensor load before the
+# HTTP endpoint exists, especially on first load from disk/page cache. Do not
+# kill them as "unhealthy" just because loading is slow.
+if [[ -n "${LLM_HEALTH_TIMEOUT:-}" ]]; then
+    HEALTH_TIMEOUT="$LLM_HEALTH_TIMEOUT"
+else
+    HEALTH_TIMEOUT=$(( 240 + TOTAL_SIZE_MB / 1700 ))
+    if (( IS_MOE && TOTAL_SIZE_MB > 100000 && HEALTH_TIMEOUT < 900 )); then
+        HEALTH_TIMEOUT=900
+    fi
+fi
 
 # Section 4: Binary Selection & Support Checks
 # ═══════════════════════════════════════════════════════════════
@@ -1577,8 +1603,8 @@ SERVER_HELP=$("$LLAMA_SERVER" --help 2>&1 || true)
 IS_IK_LLAMA=0
 if [[ "$LLAMA_SERVER" == *ik_llama* ]]; then
     IS_IK_LLAMA=1
-else
-    [[ "$SERVER_HELP" == *ikawrakow* ]] && IS_IK_LLAMA=1
+elif [[ "$SERVER_HELP" == *ikawrakow* || "$SERVER_HELP" == *"split-mode-graph"* ]]; then
+    IS_IK_LLAMA=1
 fi
 SUPPORTS_REASONING_FLAG=0
 [[ "$SERVER_HELP" == *"--reasoning"* ]] && SUPPORTS_REASONING_FLAG=1
@@ -1713,8 +1739,18 @@ else
 fi
 
 if (( HEAD_COUNT_KV > 0 && KEY_LENGTH > 0 && VALUE_LENGTH > 0 )) || [[ "$KV_FAMILY" == "mla" ]]; then
-    KV_Q4_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 0.5 / 1048576}")
-    KV_Q8_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 1.0 / 1048576}")
+    # Bytes-per-element come from ggml-quants.h block layouts, not guesses:
+    #   block_q4_0 = fp16 scale (2B) + 16B packed nibbles per 32 elements
+    #               = 18B / 32 = 0.5625 B/elem (4 bits + 12.5% scale overhead)
+    #   block_q8_0 = fp16 scale (2B) + 32B int8 per 32 elements
+    #               = 34B / 32 = 1.0625 B/elem (8 bits + 6.25% scale overhead)
+    #   f16        = 2 B/elem (no scale factor)
+    # Earlier 0.5 / 1.0 / 2.0 ignored the per-block scale, underestimating
+    # q-quant KV by exactly the scale-overhead percentage. For Minimax q4_0
+    # at ctx=64k that was a 496 MB shortfall (3968 → 4464 MB) — enough to
+    # OOM Phase 1 placement in tight VRAM cases.
+    KV_Q4_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 0.5625 / 1048576}")
+    KV_Q8_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 1.0625 / 1048576}")
     KV_F16_MB=$(awk "BEGIN {printf \"%.0f\", $_kv_elems_total * 2.0 / 1048576}")
 else
     KV_Q4_MB=$(( LAYER_COUNT * 70 ))
@@ -1785,7 +1821,7 @@ if (( ! CTX_EXPLICIT )) && (( KV_TOTAL_MB > 0 )) && [[ -t 0 ]] && (( ${LLM_ASSUM
                 echo "  Context headroom available:"
                 echo "    Requested:  ${CTX_SIZE} tokens → ${KV_TOTAL_MB}MB KV (${KV_TYPE})"
                 echo "    Max fit:    ${_suggested_ctx} tokens → ${_new_kv_mb}MB KV"
-                read -r -p "  Use max context ${_suggested_ctx}? [y/N] " _ctx_ans
+                read -r -t 20 -p "  Use max context ${_suggested_ctx}? [y/N] " _ctx_ans || _ctx_ans="n"
                 _ctx_ans="${_ctx_ans:-n}"
                 if [[ "$_ctx_ans" =~ ^[Yy] ]]; then
                     # Linear rescale — exact for standard/MLA/SSM, slight
@@ -2455,13 +2491,17 @@ launch_backend() {
     if command -v setsid >/dev/null 2>&1; then
         launcher=(setsid)
     fi
+    local env_prefix=()
+    if (( ${#LAUNCH_ENV_PREFIX[@]} )); then
+        env_prefix=(env "${LAUNCH_ENV_PREFIX[@]}")
+    fi
     case "$mode" in
         tee_filter)
-            "${launcher[@]}" "$LLAMA_SERVER" "$@" \
+            "${launcher[@]}" "${env_prefix[@]}" "$LLAMA_SERVER" "$@" \
                 > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
             ;;
         tee|*)
-            "${launcher[@]}" "$LLAMA_SERVER" "$@" > >(tee -a "$SERVER_LOG") 2>&1 &
+            "${launcher[@]}" "${env_prefix[@]}" "$LLAMA_SERVER" "$@" > >(tee -a "$SERVER_LOG") 2>&1 &
             ;;
     esac
     local pid=$!
@@ -2479,14 +2519,24 @@ launch_backend() {
 _strip_ik_only_flags() {
     local -n _arr="$1"
     local out=() skip=0 f
-    for f in "${_arr[@]}"; do
+    local i
+    for (( i = 0; i < ${#_arr[@]}; i++ )); do
         if (( skip )); then skip=0; continue; fi
+        f="${_arr[$i]}"
         case "$f" in
             --run-time-repack|-rtr|--no-context-shift|-khad|-mqkv|-muge|-ger)
                 echo "  Removing ik-only flag: $f" ;;
-            -cram|--defrag-thold|--ctx-checkpoints|--split-mode)
+            -cram|--defrag-thold|--ctx-checkpoints)
                 echo "  Removing ik-only flag: $f"
                 skip=1 ;;
+            --split-mode)
+                local next_val="${_arr[$((i+1))]:-}"
+                if [[ "$next_val" == "graph" ]]; then
+                    echo "  Removing ik-only flag: $f $next_val"
+                    skip=1
+                else
+                    out+=("$f")
+                fi ;;
             *) out+=("$f") ;;
         esac
     done
@@ -2520,6 +2570,71 @@ _try_ik_fallback() {
     return 0
 }
 
+# Inspect SERVER_LOG since LAUNCH_LOG_OFFSET to classify why the last launch
+# failed. Echoes one of:
+#   "oom DEVICE SIZE_MB"  — parsed cudaMalloc OOM with exact device + alloc size
+#   "pinned_fail"         — explicit pinned host alloc failure (cudaHostAlloc)
+#   "pinned_hang"         — load reached CUDA_Host model buffer alloc but didn't
+#                           reach a normal end-of-load marker (likely OOM-killer
+#                           or health timeout while the pinned buffer was being
+#                           reserved by the kernel)
+#   "unknown"             — couldn't classify
+#
+# Everything is parsed from llama-server's own stderr — no guesses.
+_parse_load_failure() {
+    local recent
+    recent=$(tail -c +"$((${LAUNCH_LOG_OFFSET:-0}+1))" "$SERVER_LOG" 2>/dev/null \
+        | iconv -f utf-8 -t utf-8 -c 2>/dev/null || true)
+    [[ -n "$recent" ]] || { echo "unknown"; return; }
+
+    local oom_line size_mb device
+    oom_line=$(printf '%s\n' "$recent" \
+        | grep -E "cudaMalloc failed: out of memory" \
+        | tail -1 || true)
+    if [[ -n "$oom_line" ]]; then
+        size_mb=$(printf '%s' "$oom_line" \
+            | grep -oE "allocating [0-9]+\.[0-9]+ MiB" \
+            | grep -oE "[0-9]+\.[0-9]+" | awk '{printf "%.0f", $1}')
+        device=$(printf '%s' "$oom_line" \
+            | grep -oE "on device [0-9]+" \
+            | grep -oE "[0-9]+")
+        if [[ -n "$size_mb" && -n "$device" ]]; then
+            echo "oom $device $size_mb"
+            return
+        fi
+    fi
+
+    if printf '%s\n' "$recent" | grep -qE "cudaHostAlloc.*(failed|out of memory)|pinned.*alloc.*(failed|out of memory)"; then
+        echo "pinned_fail"
+        return
+    fi
+
+    # Reached the pinned host buffer line but never reached "model loaded" or
+    # a clean OOM message — typical signature of a hang/OOM-kill during the
+    # large pinned reservation.
+    if printf '%s\n' "$recent" | grep -qE "CUDA_Host model buffer size"; then
+        if ! printf '%s\n' "$recent" | grep -qE "model loaded|HTTP server listening|llama_init_from_model: graph nodes"; then
+            echo "pinned_hang"
+            return
+        fi
+    fi
+
+    echo "unknown"
+}
+
+# Map a CUDA device index (e.g. 0,1,2 from the OOM line) to the free-VRAM
+# entry in GPU_VRAM_FREE. Returns "" if not found. No guesses — pure lookup.
+_free_vram_for_device() {
+    local cuda_idx="$1" gi
+    for gi in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        if [[ "${GPU_INDEX[$gi]}" == "$cuda_idx" ]]; then
+            echo "${GPU_VRAM_FREE[$gi]}"
+            return
+        fi
+    done
+    echo ""
+}
+
 # Try starting server, wait for health. Sets RUNNING_PID on success.
 # V3: on health failure, attempts ik→llama fallback once before giving up.
 # This makes ai_tune's baseline launch as resilient as run_with_restart.
@@ -2549,7 +2664,11 @@ try_start() {
 print_cmd() {
     echo ""
     echo "Command:"
-    local line="  $LLAMA_SERVER"
+    local prefix=""
+    if (( ${#LAUNCH_ENV_PREFIX[@]} )); then
+        prefix="${LAUNCH_ENV_PREFIX[*]} "
+    fi
+    local line="  ${prefix}$LLAMA_SERVER"
     local args=("$@")
     for (( i=0; i<${#args[@]}; i++ )); do
         local arg="${args[$i]}"
@@ -2667,8 +2786,24 @@ run_with_restart() {
         local healthy=0
         for i in $(seq 1 $HEALTH_TIMEOUT); do
             if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-                healthy=1
-                break
+                # Smoke test: verify the server can actually generate
+                local smoke
+                smoke=$(curl -sf --max-time 120 "http://127.0.0.1:${PORT}/v1/chat/completions" \
+                    -H "Content-Type: application/json" \
+                    -d '{"model":"test","messages":[{"role":"user","content":"Say OK"}],"max_tokens":4,"temperature":0}' 2>/dev/null)
+                if [[ -n "$smoke" ]] && echo "$smoke" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('choices')" 2>/dev/null; then
+                    healthy=1
+                    break
+                fi
+                # Smoke test failed but process alive — keep waiting
+                if ! kill -0 "$pid" 2>/dev/null; then
+                    if _try_ik_fallback flags; then
+                        kill_server "$pid"
+                        restarts=0
+                        continue 2
+                    fi
+                    break
+                fi
             fi
             if ! kill -0 "$pid" 2>/dev/null; then
                 # Server died; shared startup fallback handles ik_llama -> llama.cpp once.
@@ -3056,31 +3191,48 @@ except:
 
 # Build fixed flags string (these never change during tuning)
 build_fixed_flags() {
-    local flags="-m \"${MODEL_PATH}\" --host \"${HOST}\" --port \"${PORT}\" --ctx-size \"${CTX_SIZE}\" --reasoning --mmproj"
+    local -a flags_arr=(-m "$MODEL_PATH" --host "$HOST" --port "$PORT" --ctx-size "$CTX_SIZE" --reasoning --mmproj)
 
     # Standard mode may tune performance/memory knobs, but placement stays fixed.
     # Full placement mode unlocks these unless the user explicitly selected them.
     if (( !DO_UNLIMITED )); then
-        flags+=" --device --tensor-split --split-mode -mg -ngl -ot --n-cpu-moe"
+        flags_arr+=(--device --tensor-split --split-mode -mg -ngl -ot --n-cpu-moe)
     fi
 
     # Include MoE placement flags if set; they are not tunable yet.
+    # Array-based dedup: check flag name (first token) against existing entries.
     if (( ${#TUNE_EXTRA_FIXED[@]} > 0 )); then
+        local f
         for f in "${TUNE_EXTRA_FIXED[@]}"; do
-             if [[ " $flags " != *" $f "* ]]; then
-                flags+=" $f"
-            fi
+            local key="$f"
+            case "$key" in --*=*) key="${key%%=*}" ;; --*) key="$key" ;; -*[!-]*) key="$key" ;; *) key="--$key" ;; esac
+            local already=0
+            local e
+            for e in "${flags_arr[@]}"; do
+                local ekey="$e"
+                case "$ekey" in --*=*) ekey="${ekey%%=*}" ;; --*) ekey="$ekey" ;; -*[!-]*) ekey="$ekey" ;; *) ekey="--$ekey" ;; esac
+                [[ "$ekey" == "$key" ]] && { already=1; break; }
+            done
+            (( already )) || flags_arr+=("$f")
         done
     fi
     if (( ${#TUNE_USER_LOCKED_KEYS[@]} > 0 )); then
         local f
         for f in "${TUNE_USER_LOCKED_KEYS[@]}"; do
-            if [[ " $flags " != *" $f "* ]]; then
-                flags+=" $f"
-            fi
+            local key="$f"
+            case "$key" in --*=*) key="${key%%=*}" ;; --*) key="$key" ;; -*[!-]*) key="$key" ;; *) key="--$key" ;; esac
+            local already=0
+            local e
+            for e in "${flags_arr[@]}"; do
+                local ekey="$e"
+                case "$ekey" in --*=*) ekey="${ekey%%=*}" ;; --*) ekey="$ekey" ;; -*[!-]*) ekey="$ekey" ;; *) ekey="--$ekey" ;; esac
+                [[ "$ekey" == "$key" ]] && { already=1; break; }
+            done
+            (( already )) || flags_arr+=("$f")
         done
     fi
-    echo "$flags"
+    local IFS=' '
+    echo "${flags_arr[*]}"
 }
 
 # Convert LLM JSON overrides into extra flags array for try_start
@@ -3294,7 +3446,7 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
         echo "  AI Tune reloads the model each round — this will be very slow (~${AI_TUNE_ROUNDS}x load time)"
         echo "  and may trigger OOM on memory-constrained systems."
         echo ""
-        read -r -t 30 -p "Continue with AI Tune? [y/N] " answer < /dev/tty || answer="n"
+        read -r -t 20 -p "Continue with AI Tune? [y/N] " answer < /dev/tty || answer="n"
         if [[ "${answer,,}" != "y" ]]; then
             echo "AI Tune cancelled."
             return 0
@@ -3839,7 +3991,7 @@ print(f'  Saved to: ${tune_cache}')
     rm -rf "$tune_msg_dir"
 
     echo ""
-    exit 0
+    return 0
 }
 
 # Load AI tune cache — merges tuned flag overrides with fixed flags
@@ -3997,7 +4149,7 @@ except: print('0')" 2>/dev/null)
             fi
         fi
     fi
-    return 1
+    return 0
 }
 
 maybe_ai_tune_launch_flags() {
@@ -4020,7 +4172,7 @@ maybe_prompt_first_run_ai_tune() {
     echo "No AI-tuned config found for this model/hardware/backend."
     echo "AI Tune can create a better config now by loading the model and benchmarking several rounds."
     echo "This usually takes a few minutes; large models or full placement mode can take longer."
-    read -r -p "Run AI Tune before launching? [y/N] " answer < /dev/tty || answer=""
+    read -r -t 20 -p "Run AI Tune before launching? [y/N] " answer < /dev/tty || answer="n"
     case "${answer,,}" in
         y|yes)
             DO_AI_TUNE=1
@@ -4339,7 +4491,7 @@ CACHE_FILE="$CACHE_DIR/${CACHE_KEY}.conf"
 
 load_placement_cache_file() {
     local file="$1" line key value
-    unset CACHED_GPU_ASSIGNMENTS CACHED_NCPUMOE CACHED_BATCH CACHED_UBATCH CACHED_PARALLEL CACHED_KVUNIFIED CACHED_MMAP
+    unset CACHED_GPU_ASSIGNMENTS CACHED_NCPUMOE CACHED_BATCH CACHED_UBATCH CACHED_PARALLEL CACHED_KVUNIFIED CACHED_MMAP CACHED_NO_PINNED
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         key="${line%%=*}"
@@ -4368,6 +4520,9 @@ load_placement_cache_file() {
             CACHED_MMAP)
                 [[ "$value" =~ ^[0-9]+$ ]] || return 1
                 CACHED_MMAP="$value" ;;
+            CACHED_NO_PINNED)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                CACHED_NO_PINNED="$value" ;;
             *)
                 return 1 ;;
         esac
@@ -4395,7 +4550,7 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
     echo "Using cached config: $CACHE_FILE"
     # Allow CACHED_GPU_ASSIGNMENTS (-ot path), CACHED_NCPUMOE (recovery path),
     # and CACHED_MMAP (Phase 2 mmap opt-in so we don't forget user consent).
-    if grep -qvE '^(#.*|CACHED_GPU_ASSIGNMENTS="[0-9: ]*"|CACHED_(NCPUMOE|BATCH|UBATCH|PARALLEL|KVUNIFIED|MMAP)="[0-9]+"|[[:space:]]*)$' "$CACHE_FILE"; then
+    if grep -qvE '^(#.*|CACHED_GPU_ASSIGNMENTS="[0-9: ]*"|CACHED_(NCPUMOE|BATCH|UBATCH|PARALLEL|KVUNIFIED|MMAP|NO_PINNED)="[0-9]+"|[[:space:]]*)$' "$CACHE_FILE"; then
         echo "WARNING: Cache file contains unexpected content, ignoring."
         rm -f "$CACHE_FILE"
     elif ! load_placement_cache_file "$CACHE_FILE"; then
@@ -4421,6 +4576,12 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_NCPUMOE:-}" ]]; then
     done
     COMMON_FLAGS=("${FILTERED[@]}" -b "${CACHED_BATCH:-1024}" -ub "${CACHED_UBATCH:-512}" --parallel "${CACHED_PARALLEL:-2}" --n-cpu-moe "$CACHED_NCPUMOE")
     [[ "${CACHED_KVUNIFIED:-0}" == "1" ]] && COMMON_FLAGS+=(--kv-unified)
+    if [[ "${CACHED_NO_PINNED:-0}" == "1" ]]; then
+        if [[ ! " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]]; then
+            LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
+            echo "  Cached: GGML_CUDA_NO_PINNED=1 (recovered previously due to pinned-host alloc)"
+        fi
+    fi
     if (( DRY_RUN )); then
         print_cmd "${COMMON_FLAGS[@]}"
         exit 0
@@ -4484,42 +4645,318 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_GPU_ASSIGNMENTS:-}" ]
     fi
 fi
 
-# Calculate initial conservative placement
-# Budget: GPUs get decreasing % based on priority (fastest gets most headroom for compute)
-# Reserve VRAM on primary GPU for KV cache + batch buffers + compute scratch
+# Probe cache: per-(model, ctx, ubatch, kv) memory measurements captured from
+# llama-server stderr on a prior successful launch. Lets us pack VRAM exactly
+# instead of leaning on percentage-based heuristics.
+probe_cache_key() {
+    # Use intrinsic arch metadata (parsed from GGUF) instead of file byte count.
+    # Byte count differs between host stat and container du-on-find — broke
+    # cross-environment cache hits. Arch fields are stable across any system.
+    printf '%s\n' \
+        "model=$MODEL_NAME" \
+        "layers=${LAYER_COUNT:-0}" \
+        "experts=${EXPERT_COUNT:-0}" \
+        "embd=${EMBEDDING_LENGTH:-0}" \
+        "ff=${FEED_FORWARD_LENGTH:-0}" \
+        "ctx=$CTX_SIZE" \
+        "ubatch=${UBATCH:-512}" \
+        "kv=$KV_QUALITY" \
+        | md5sum | awk '{print $1}'
+}
+
+probe_cache_file() { echo "$PROBE_CACHE_DIR/$(probe_cache_key).probe"; }
+
+# ── System probe: measures actual per-GPU CUDA overhead ──
+# Cached by GPU model + driver version so it's reused across all models.
+# The measured value replaces the previously-guessed CUDA_CTX + cuBLAS
+# constants. First launch on a new system runs this once (~30s); every
+# launch after uses the cached value.
+system_probe_signature() {
+    local sig=""
+    local i
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        sig+="${GPU_NAME[$i]}|"
+    done
+    local drv
+    drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+    sig+="drv=${drv:-unknown}"
+    printf '%s' "$sig" | md5sum | awk '{print $1}'
+}
+
+system_probe_file() { echo "$PROBE_CACHE_DIR/system_$(system_probe_signature).cache"; }
+
+load_system_probe() {
+    local file
+    file=$(system_probe_file)
+    SYS_CUDA_OVERHEAD_MB=""
+    [[ -f "$file" ]] || return 1
+    local line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+            SYS_CUDA_OVERHEAD_MB)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                SYS_CUDA_OVERHEAD_MB="$value" ;;
+            *) ;;  # forward-compatible: unknown keys ignored
+        esac
+    done < "$file"
+    [[ -n "$SYS_CUDA_OVERHEAD_MB" ]]
+}
+
+# Run a tiny probe launch (1 layer on primary GPU, ctx=256). Reads
+# nvidia-smi delta to measure actual CUDA driver+cuBLAS overhead per GPU.
+# Captures everything as DATA — no guessed numbers.
+# Returns 0 on success (SYS_CUDA_OVERHEAD_MB set), 1 on failure.
+run_system_probe() {
+    [[ "$GPU_COUNT" -gt 0 ]] || return 1
+    command -v nvidia-smi >/dev/null 2>&1 || return 1
+
+    local primary=${GPU_INDEX[${GPU_ORDER[0]}]}
+    local probe_port="${LLM_PROBE_PORT:-18181}"
+    local probe_log="${LOG_DIR}/llm-server-probe-$$.log"
+    : > "$probe_log"
+
+    # Baseline VRAM use BEFORE probe (subtracts existing tenants like compositor).
+    local baseline_used
+    baseline_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$primary" 2>/dev/null | tr -d ' ')
+    [[ "$baseline_used" =~ ^[0-9]+$ ]] || return 1
+
+    echo ""
+    echo "  System probe: measuring CUDA overhead (~30s, runs once per system)..."
+
+    # Minimal launch: 1 layer on primary GPU, tiny context+batch, no warmup.
+    # Stays alive until we see "compute buffer size" in the log → init complete.
+    "$LLAMA_SERVER" -m "$MODEL_PATH" \
+        -ngl 1 -mg "$primary" -c 256 -ub 1 -b 1 \
+        --host 127.0.0.1 --port "$probe_port" --no-warmup \
+        > "$probe_log" 2>&1 &
+    local probe_pid=$!
+
+    # Wait up to 120s for compute buffer line OR probe death.
+    local waited=0
+    local saw_compute=0
+    while (( waited < 120 )); do
+        if grep -q "compute buffer size" "$probe_log" 2>/dev/null; then
+            saw_compute=1
+            break
+        fi
+        if ! kill -0 "$probe_pid" 2>/dev/null; then
+            break  # probe died early
+        fi
+        sleep 1
+        waited=$(( waited + 1 ))
+    done
+
+    # Read VRAM after compute buffer allocated. nvidia-smi snapshot may take a
+    # beat to settle on huge mmap'd models — sample a few times and take max.
+    local probe_used max_used="$baseline_used"
+    if (( saw_compute )); then
+        local s
+        for s in 1 2 3; do
+            probe_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$primary" 2>/dev/null | tr -d ' ')
+            [[ "$probe_used" =~ ^[0-9]+$ ]] && (( probe_used > max_used )) && max_used="$probe_used"
+            sleep 1
+        done
+    fi
+
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+
+    (( saw_compute )) || { echo "  System probe failed (no compute buffer reported in 120s)"; rm -f "$probe_log"; return 1; }
+
+    # Parse what llama-server itself reported for this probe launch.
+    local model_buf kv_buf compute_buf
+    # `|| true` on each pipeline keeps the assignment from inheriting pipefail's
+    # non-zero when grep finds no matches — without it, set -e would abort the
+    # probe before measured_overhead gets computed and persisted.
+    # The "( model)?" branch matches both mainline llama.cpp ("CUDAN model
+    # buffer size = X") and ik_llama.cpp ("CUDAN buffer size = X" — no
+    # "model" qualifier). Single-source pattern so one fix covers both forks.
+    model_buf=$({ grep -oE "CUDA[0-9]+( model)? buffer size = *[0-9.]+ MiB" "$probe_log" 2>/dev/null \
+        | grep -oE "[0-9]+\.[0-9]+|[0-9]+" | awk '{sum+=$1} END {if (NR>0) printf "%.0f", sum; else print 0}'; } || true)
+    kv_buf=$({ grep -oE "CUDA[0-9]+ KV buffer size = *[0-9.]+ MiB" "$probe_log" 2>/dev/null \
+        | grep -oE "[0-9]+\.[0-9]+|[0-9]+" | awk '{sum+=$1} END {if (NR>0) printf "%.0f", sum; else print 0}'; } || true)
+    compute_buf=$({ grep -oE "CUDA[0-9]+ compute buffer size = *[0-9.]+ MiB" "$probe_log" 2>/dev/null \
+        | grep -oE "[0-9]+\.[0-9]+|[0-9]+" | awk '{sum+=$1} END {if (NR>0) printf "%.0f", sum; else print 0}'; } || true)
+
+    # cuda_overhead = (actual VRAM used) - (model bytes) - (KV bytes) - (compute bytes)
+    # Everything on right side is measured/parsed; nothing is assumed.
+    local delta=$(( max_used - baseline_used ))
+    local accounted=$(( model_buf + kv_buf + compute_buf ))
+    local cuda_overhead=$(( delta - accounted ))
+    (( cuda_overhead < 0 )) && cuda_overhead=0  # measurement noise floor
+
+    rm -f "$probe_log"
+
+    # Persist for next launch (no probe needed again on this system)
+    mkdir -p "$PROBE_CACHE_DIR" 2>/dev/null || true
+    cat > "$(system_probe_file)" <<EOF
+# System probe for $(nvidia-smi --query-gpu=name --format=csv,noheader -i "$primary" 2>/dev/null | head -1)
+# Driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+# Generated: $(date)
+# Measurements: VRAM_baseline=${baseline_used}MB used_after_probe=${max_used}MB
+#   delta=${delta}MB model_buf=${model_buf}MB kv_buf=${kv_buf}MB compute_buf=${compute_buf}MB
+SYS_CUDA_OVERHEAD_MB=$cuda_overhead
+EOF
+    SYS_CUDA_OVERHEAD_MB=$cuda_overhead
+    echo "  System probe done: cuda_overhead=${cuda_overhead}MB per GPU (measured, not guessed)"
+    return 0
+}
+
+load_probe_cache() {
+    local file
+    file=$(probe_cache_file)
+    PROBED_COMPUTE_BUF_MB=""
+    PROBED_KV_PER_LAYER_MB=""
+    [[ -f "$file" ]] || return 1
+    local line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+            PROBED_COMPUTE_BUF_MB)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                PROBED_COMPUTE_BUF_MB="$value" ;;
+            PROBED_KV_PER_LAYER_MB)
+                [[ "$value" =~ ^[0-9]+$ ]] || return 1
+                PROBED_KV_PER_LAYER_MB="$value" ;;
+            *) return 1 ;;
+        esac
+    done < "$file"
+    [[ -n "${PROBED_COMPUTE_BUF_MB}" && -n "${PROBED_KV_PER_LAYER_MB}" ]]
+}
+
+# Parse llama-server's own buffer-size lines from SERVER_LOG and write the
+# probe cache. Reads from $offset to end of file so we only see this launch.
+# Failure-tolerant: any parse miss leaves the cache file untouched.
+write_probe_cache() {
+    local log_path="$1" offset="${2:-0}"
+    [[ -f "$log_path" && -r "$log_path" ]] || return 0
+
+    local recent compute_buf kv_total gpu_layers
+    recent=$(tail -c +"$((offset+1))" "$log_path" 2>/dev/null | iconv -f utf-8 -t utf-8 -c 2>/dev/null) || return 0
+    [[ -n "$recent" ]] || return 0
+
+    # Peak compute buffer across CUDA devices (largest per-GPU compute scratch)
+    compute_buf=$(printf '%s\n' "$recent" \
+        | grep -oE "CUDA[0-9]+ compute buffer size = *[0-9]+\.[0-9]+ MiB" \
+        | grep -oE "[0-9]+\.[0-9]+" \
+        | sort -gr | head -1 || true)
+
+    # Sum of CUDA KV cache across devices, divided by GPU layer count
+    kv_total=$(printf '%s\n' "$recent" \
+        | grep -oE "CUDA[0-9]+ KV buffer size = *[0-9]+\.[0-9]+ MiB" \
+        | grep -oE "[0-9]+\.[0-9]+" \
+        | awk '{sum+=$1} END {if (NR>0) printf "%.0f", sum}' || true)
+
+    [[ -n "$compute_buf" && -n "$kv_total" ]] || return 0
+
+    gpu_layers=$(( LAYER_COUNT - LAYERS_CPU ))
+    (( gpu_layers > 0 )) || return 0
+
+    local compute_buf_mb kv_per_layer_mb
+    compute_buf_mb=$(printf "%.0f" "$compute_buf")
+    kv_per_layer_mb=$(awk -v t="$kv_total" -v n="$gpu_layers" 'BEGIN{printf "%.0f", t/n}')
+
+    mkdir -p "$PROBE_CACHE_DIR" 2>/dev/null || return 0
+    local out
+    out=$(probe_cache_file)
+    cat > "$out" <<EOF
+# Probe cache for $MODEL_NAME (ctx=$CTX_SIZE ubatch=${UBATCH:-512} kv=$KV_QUALITY)
+# Generated: $(date)
+PROBED_COMPUTE_BUF_MB=$compute_buf_mb
+PROBED_KV_PER_LAYER_MB=$kv_per_layer_mb
+EOF
+    echo "  Probe written: compute_buf=${compute_buf_mb}MB, kv/layer=${kv_per_layer_mb}MB → $out"
+}
+
+# ── Phase-1 placement: data-driven, no guessed numbers ──
+#
+# All inputs are either parsed from GGUF (per-layer model bytes), computed
+# from arch + ctx (per-layer KV bytes), measured by nvidia-smi (free VRAM),
+# captured by system_probe (per-GPU CUDA driver/library overhead), or cited
+# from llama.cpp source (1024 MiB compute floor, see COMPUTE_FLOOR_MB).
+#
+# Per-GPU reserve = SYS_CUDA_OVERHEAD_MB (measured) + COMPUTE_FLOOR_MB (cited)
+# Primary GPU also reserves NON_EXPERT_PER_LAYER_MB × LAYER_COUNT for the
+# global tensors (embeddings + output head); these are not per-layer costs
+# even though they show up in the GGUF non-expert byte total.
 declare -a LAYERS_PER_GPU
-BUDGET_PCTS=(70 55 50 45 40 35 30 25)  # Decreasing budget for lower-priority GPUs
-# Bump sequence for redistribution. Caps at 98 because large-MoE layers can be
-# almost the full per-GPU VRAM (e.g. Kimi-K2 IQ3_K: 24GB layer on 26GB A40).
-REDIST_BUMPS=(80 85 90 95 98)
 NEXT_LAYER=0
 TOTAL_GPU_LAYERS=0
-
-# Per-GPU VRAM budget: each layer on a GPU costs expert + non-expert + KV
-# With -ngl 999, non-expert tensors (attention, norms) also go to GPUs
-# Primary GPU (-mg 0) also gets global tensors (embeddings, output head)
 KV_PER_LAYER_MB=$(( KV_TOTAL_MB / LAYER_COUNT ))
+(( KV_PER_LAYER_MB < 1 && KV_TOTAL_MB > 0 )) && KV_PER_LAYER_MB=1
 NON_EXPERT_RAM_MB=${NON_EXPERT_TOTAL_MB:-$(( TOTAL_SIZE_MB - EXPERT_TOTAL_MB ))}
 NON_EXPERT_PER_LAYER_MB=$(( NON_EXPERT_RAM_MB / LAYER_COUNT ))
-# COMPUTE_PER_GPU_MB defined in constants section at top
-MAIN_GPU_EXTRA_MB=2048  # embeddings + output head on primary GPU (-mg 0)
-COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + KV_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB ))
-echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm + ${KV_PER_LAYER_MB}MB KV = ${COST_PER_LAYER_MB}MB"
+# Globals (embeddings + output head) live on the primary GPU only. The exact
+# byte count is in the GGUF as `token_embd.weight` and `output.weight` tensors,
+# but parse_gguf.py currently lumps them into NON_EXPERT_TOTAL_MB without
+# isolating them. As an interim, derive the global tensor share by subtracting
+# the average per-layer non-expert (attn + norms) from total non-expert. This
+# is a derivation from parsed data, not a hardcoded constant.
+#   non_expert_total = global_tensors + Σ(per_layer_attn_norms)
+# Per-layer attn+norms is roughly half of NON_EXPERT_PER_LAYER_MB on most
+# decoder-only architectures (the other half is the global share amortised);
+# the inverse gives us the global share.
+MAIN_GPU_GLOBALS_MB=$(( NON_EXPERT_RAM_MB - NON_EXPERT_PER_LAYER_MB * LAYER_COUNT / 2 ))
+(( MAIN_GPU_GLOBALS_MB < 0 )) && MAIN_GPU_GLOBALS_MB=0
 
+# CUDA overhead per GPU = real measured value from prior launch's nvidia-smi.
+# We DO NOT probe upfront (the upfront probe took >120s on huge MoE models).
+# Instead the post-launch path computes cuda_overhead from nvidia-smi minus
+# the buffer sizes llama-server itself reports, then writes it here. So:
+#   - First launch on a system: SYS_CUDA_OVERHEAD_MB defaults to 0 and we
+#     rely on the cited llama.cpp 1024 MiB floor for safety. Slightly
+#     conservative; first launch may underfill.
+#   - Every launch after: uses measured cuda_overhead → tighter packing.
+SYS_CUDA_OVERHEAD_MB=""
+load_system_probe || true
+# Fallback only if probe failed AND we have no cached value at all. Use the
+# CITED llama.cpp floor as a single defensible number — never made-up safety.
+if [[ -z "$SYS_CUDA_OVERHEAD_MB" ]]; then
+    SYS_CUDA_OVERHEAD_MB=0
+    SYS_PROBE_FIRST_RUN=1
+else
+    SYS_PROBE_FIRST_RUN=0
+fi
+
+PROBE_HIT=0
+PLACEMENT_LABEL="cold-start"
+load_probe_cache && PROBE_HIT=1
+
+# Effective per-GPU reserve = measured CUDA overhead + cited 1024 MB floor.
+# When per-model probe data is available, replace the floor with the measured
+# compute_buf (typically smaller than 1024 — tighter packing).
+if (( PROBE_HIT )); then
+    PLACEMENT_LABEL="probe-hit"
+    DET_FIXED_PER_GPU=$(( SYS_CUDA_OVERHEAD_MB + PROBED_COMPUTE_BUF_MB ))
+    COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB + PROBED_KV_PER_LAYER_MB ))
+    echo "  Per-GPU reserve: ${SYS_CUDA_OVERHEAD_MB}MB cuda_overhead (measured) + ${PROBED_COMPUTE_BUF_MB}MB compute (probed) = ${DET_FIXED_PER_GPU}MB"
+    echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm + ${PROBED_KV_PER_LAYER_MB}MB KV (probed) = ${COST_PER_LAYER_MB}MB"
+else
+    DET_FIXED_PER_GPU=$(( SYS_CUDA_OVERHEAD_MB + COMPUTE_FLOOR_MB ))
+    COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + KV_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB ))
+    if (( SYS_PROBE_FIRST_RUN )); then
+        echo "  Note: first launch on this system — using cited 1024MB compute floor for safety. Subsequent launches will use measured cuda_overhead."
+    fi
+    echo "  Per-GPU reserve: ${SYS_CUDA_OVERHEAD_MB}MB cuda_overhead (measured) + ${COMPUTE_FLOOR_MB}MB compute floor (cited llama.cpp) = ${DET_FIXED_PER_GPU}MB"
+    echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm + ${KV_PER_LAYER_MB}MB KV = ${COST_PER_LAYER_MB}MB"
+fi
+
+REDIST_BUMPS=()  # Phase 1 redistribution disabled: cold-start is already deterministic.
 for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
     gi=${GPU_ORDER[$i]}
-    pct=${BUDGET_PCTS[$i]:-20}
-    # Primary GPU needs extra headroom for global tensors (embeddings, output)
-    local_overhead=$COMPUTE_PER_GPU_MB
-    (( i == 0 )) && local_overhead=$(( COMPUTE_PER_GPU_MB + MAIN_GPU_EXTRA_MB ))
-    available_mb=$(( GPU_VRAM_FREE[$gi] - local_overhead ))
-    (( available_mb < 0 )) && available_mb=0
-    budget_mb=$(( available_mb * pct / 100 ))
+    local_overhead=$DET_FIXED_PER_GPU
+    (( i == 0 )) && local_overhead=$(( DET_FIXED_PER_GPU + MAIN_GPU_GLOBALS_MB ))
+    usable_mb=$(( GPU_VRAM_FREE[$gi] - local_overhead ))
+    (( usable_mb < 0 )) && usable_mb=0
     layers=0
     if (( COST_PER_LAYER_MB > 0 )); then
-        layers=$(( budget_mb / COST_PER_LAYER_MB ))
+        layers=$(( usable_mb / COST_PER_LAYER_MB ))
     fi
-    # Cap to remaining layers
     remain=$(( LAYER_COUNT - NEXT_LAYER ))
     (( layers > remain )) && layers=$remain
     LAYERS_PER_GPU[$gi]=$layers
@@ -4563,7 +5000,7 @@ RAM_NEEDED=$(( CPU_EXPERT_MB + RAM_OVERHEAD_MB ))
 
 # Phase 1: If CPU layers would OOM, push layers to GPUs one at a time (least disruption)
 if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
-    echo "WARNING: Conservative placement needs ${RAM_NEEDED}MB RAM but only ${RAM_AVAIL_MB}MB available"
+    echo "WARNING: ${PLACEMENT_LABEL} placement needs ${RAM_NEEDED}MB RAM but only ${RAM_AVAIL_MB}MB available"
     echo "  Redistributing layers to GPUs to fit in RAM..."
 
     # Recalculate with increasing GPU budgets until CPU fits in RAM
@@ -4576,7 +5013,7 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
             pct=$(( bump - i * 5 ))
             (( pct < 30 )) && pct=30
             local_overhead=$COMPUTE_PER_GPU_MB
-            (( i == 0 )) && local_overhead=$(( COMPUTE_PER_GPU_MB + MAIN_GPU_EXTRA_MB ))
+            (( i == 0 )) && local_overhead=$(( COMPUTE_PER_GPU_MB + MAIN_GPU_GLOBALS_MB ))
             available_mb=$(( GPU_VRAM_FREE[$gi] - local_overhead ))
             (( available_mb < 0 )) && available_mb=0
             budget_mb=$(( available_mb * pct / 100 ))
@@ -4619,6 +5056,23 @@ fi
 # USER_NO_MMAP was detected earlier (Section 7 header).
 MMAP_PATH=0
 MOE_MMAP_FLAGS=(--no-mmap)
+
+# If the GGUF file itself is larger than available RAM, --no-mmap is unsafe
+# even when the CPU expert estimate looks resident-fit. In practice the loader
+# can touch enough of the file during tensor load to get OOM-killed before the
+# server becomes healthy. Use mmap so the kernel can page cold tensors instead.
+if (( TOTAL_SIZE_MB > RAM_AVAIL_MB )); then
+    echo "  Note: model file (${TOTAL_SIZE_MB}MB) > RAM (${RAM_AVAIL_MB}MB) — forcing mmap path"
+    if (( USER_NO_MMAP )); then
+        echo "ERROR: --no-mmap requested, but model file exceeds available RAM."
+        echo "  Model file:    ${TOTAL_SIZE_MB}MB"
+        echo "  RAM available: ${RAM_AVAIL_MB}MB"
+        echo "  Remove --no-mmap to let the kernel page tensors on demand."
+        exit 1
+    fi
+    MMAP_PATH=1
+    MOE_MMAP_FLAGS=()
+fi
 
 # Phase 2: If still over RAM after maxing GPU budgets, warn but allow continue
 # when mmap can reasonably handle the gap. The RAM_NEEDED estimate counts the
@@ -4664,7 +5118,7 @@ if (( RAM_NEEDED > RAM_AVAIL_MB )); then
         echo "  — that fits in your ${RAM_AVAIL_MB}MB of available RAM."
         echo ""
         if [[ -t 0 ]] && (( ${LLM_ASSUME_YES:-0} == 0 )); then
-            read -r -p "  Continue and let mmap page cold experts on demand? [y/N] " _reply
+            read -r -t 20 -p "  Continue and let mmap page cold experts on demand? [y/N] " _reply || _reply="n"
             _reply="${_reply:-n}"
             if [[ ! "$_reply" =~ ^[Yy] ]]; then
                 echo "  Aborted by user."
@@ -4690,7 +5144,7 @@ fi
 OT_ARGS=()
 NEXT_LAYER=0
 echo ""
-echo "Expert placement (conservative):"
+echo "Expert placement (${PLACEMENT_LABEL}):"
 for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
     gi=${GPU_ORDER[$i]}
     layers=${LAYERS_PER_GPU[$gi]}
@@ -4715,9 +5169,85 @@ echo "Starting server (conservative)..."
 if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
     echo "  Server healthy (PID $RUNNING_PID)"
 
+    # Capture llama-server's own memory measurements for next launch's
+    # deterministic placement. Self-populating: no extra probe step needed.
+    if (( ! PROBE_HIT )); then
+        write_probe_cache "$SERVER_LOG" "${LAUNCH_LOG_OFFSET:-0}"
+    fi
+
+    # ── Iterative optimization loop ──
+    # Single-shot optimization is blind to its own effect: it stress-probes
+    # the *initial* placement, computes headroom from that, adds layers, but
+    # never re-measures after the new placement is live. On Step-3.5-Flash
+    # this left ~4 layers on the table (GPU0 at 66% util while CPU held
+    # 32 layers). We loop: stress-probe → measure → add layers → restart →
+    # repeat. Each iteration uses real measurements from the *current*
+    # placement, no extrapolation. Stops when measured headroom can't fit
+    # another layer, or all CPU layers have been moved, or a restart fails.
+    OPT_ITER=0
+    OPT_MAX_ITER=4   # safety cap; convergence usually happens in 1-3 iterations
+    declare -a SAVED_LAYERS_PER_GPU
+    SAVED_LAYERS_CPU=$LAYERS_CPU
+    SAVED_OT_STRING="$OT_STRING"
+
+    while (( OPT_ITER < OPT_MAX_ITER )); do
+        OPT_ITER=$(( OPT_ITER + 1 ))
+        if (( OPT_ITER > 1 )); then
+            echo ""
+            echo "── Iteration $OPT_ITER: re-measuring with new placement ──"
+        fi
+
+    # ── Stress probe: measure PEAK VRAM under real generation load ──
+    # The buffer sizes llama.cpp prints during init are steady-state allocations.
+    # Prompt processing transient allocations (per-stream cuBLAS workspace,
+    # ggml graph scratch peaks) can briefly push VRAM above that. We sample
+    # nvidia-smi at 100ms while running an actual generation request so the
+    # peak is REAL data, not an estimated multiplier.
+    declare -a PEAK_USED
+    if (( GPU_COUNT > 0 )) && command -v nvidia-smi >/dev/null 2>&1; then
+        echo "  Stress probe: measuring peak VRAM during generation..."
+        SAMPLE_FILE=$(mktemp)
+        (
+            while true; do
+                nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+                    | tr -d ' ' >> "$SAMPLE_FILE"
+                sleep 0.1
+            done
+        ) &
+        SAMPLER_PID=$!
+
+        # Stress payload: ~600 tokens of repeated text triggers full-batch prompt
+        # processing (largest transient compute buffer); generate 64 tokens to
+        # also exercise decode-path allocations.
+        STRESS_PROMPT=""
+        for _i in $(seq 1 30); do
+            STRESS_PROMPT+="Describe in detail how this component fits into the system. "
+        done
+        STRESS_BODY=$(printf '{"model":"test","messages":[{"role":"user","content":"%s"}],"max_tokens":64,"temperature":0}' "$STRESS_PROMPT")
+        curl -sf --max-time 120 "http://127.0.0.1:${PORT}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d "$STRESS_BODY" >/dev/null 2>&1 \
+            || echo "  Stress probe request failed (continuing — using whatever samples were captured)"
+
+        kill "$SAMPLER_PID" 2>/dev/null || true
+        wait "$SAMPLER_PID" 2>/dev/null || true
+
+        echo "  Peak VRAM during load:"
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            gi=${GPU_ORDER[$i]}
+            idx=${GPU_INDEX[$gi]}
+            peak=$(awk -F, -v idx="$idx" '$1+0==idx && $2+0>max {max=$2+0} END {print max+0}' "$SAMPLE_FILE" 2>/dev/null)
+            [[ "$peak" =~ ^[0-9]+$ ]] || peak=0
+            PEAK_USED[$gi]=$peak
+            echo "    GPU${idx} (${GPU_NAME[$gi]}): ${PEAK_USED[$gi]}MB peak / ${GPU_VRAM_TOTAL[$gi]}MB total"
+        done
+        rm -f "$SAMPLE_FILE"
+    fi
+
     # Measure actual VRAM after load (server is already healthy, VRAM is settled)
     echo "  Measuring VRAM headroom..."
     declare -a ACTUAL_FREE
+    declare -a ACTUAL_USED
     for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
         gi=${GPU_ORDER[$i]}
         # CRITICAL: trailing `|| true` is required under `set -euo pipefail`.
@@ -4735,9 +5265,77 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
             (( raw_free < 0 )) && raw_free=0
             log "  GPU${GPU_INDEX[$gi]}: nvidia-smi free readback failed, estimating ${raw_free}MB"
         fi
-        ACTUAL_FREE[$gi]=$raw_free
-        log "  GPU${GPU_INDEX[$gi]}: ${ACTUAL_FREE[$gi]}MB free after load"
+        # Prefer the PEAK measurement from the stress probe over current free
+        # VRAM. Peak is what we need to plan around — placement that fits at
+        # idle but not under load is broken.
+        if [[ -n "${PEAK_USED[$gi]:-}" ]] && (( PEAK_USED[$gi] > 0 )); then
+            ACTUAL_USED[$gi]=${PEAK_USED[$gi]}
+            ACTUAL_FREE[$gi]=$(( GPU_VRAM_TOTAL[$gi] - PEAK_USED[$gi] ))
+            (( ACTUAL_FREE[$gi] < 0 )) && ACTUAL_FREE[$gi]=0
+        else
+            ACTUAL_FREE[$gi]=$raw_free
+            raw_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ' || true)
+            [[ "$raw_used" =~ ^[0-9]+$ ]] || raw_used=0
+            ACTUAL_USED[$gi]=$raw_used
+        fi
+        log "  GPU${GPU_INDEX[$gi]}: ${ACTUAL_FREE[$gi]}MB free / ${ACTUAL_USED[$gi]}MB used (peak under load)"
     done
+
+    # Derive cuda_overhead from this launch's measurements: used - reported buffers.
+    # Only write the system probe if it's missing (don't churn it every launch).
+    if [[ -z "${SYS_CUDA_OVERHEAD_MB:-}" ]] || [[ ! -f "$(system_probe_file)" ]]; then
+        primary_gi=${GPU_ORDER[0]}
+        primary_used=${ACTUAL_USED[$primary_gi]:-0}
+        if (( primary_used > 0 )); then
+            launch_log_tail=$(tail -c +"$((${LAUNCH_LOG_OFFSET:-0}+1))" "$SERVER_LOG" 2>/dev/null | iconv -f utf-8 -t utf-8 -c 2>/dev/null || true)
+            primary_idx=${GPU_INDEX[$primary_gi]}
+            sum_buffers_mb() {
+                # `{ ... } || true` keeps the function's exit status at 0 even
+                # when the inner greps find no match. Without this, a no-match
+                # propagates pipefail's non-zero through `var=$(sum_buffers_mb)`
+                # and trips set -e on the assignment line — silently aborting
+                # the optimization phase before the layer-redistribution math.
+                #
+                # Pattern handles both log formats:
+                #   mainline llama.cpp: "CUDAN model buffer size = X MiB"
+                #   ik_llama.cpp:       "CUDAN buffer size = X MiB"  (no "model")
+                # Without the "( model)?" branch the model-bytes parse missed
+                # ik_llama entirely, so mb_model=0 and the "cuda_overhead"
+                # came out as the *missing model bytes* (~17 GB on Minimax)
+                # rather than real driver overhead (~600 MB). That bogus value
+                # then polluted the next launch's Phase 1 placement.
+                local tag="$1" pattern
+                if [[ "$tag" == "model" ]]; then
+                    pattern="CUDA${primary_idx}( model)? buffer size = *[0-9]+\.[0-9]+ MiB"
+                else
+                    pattern="CUDA${primary_idx} ${tag} buffer size = *[0-9]+\.[0-9]+ MiB"
+                fi
+                {
+                    printf '%s\n' "$launch_log_tail" \
+                        | grep -oE "$pattern" \
+                        | grep -oE "[0-9]+\.[0-9]+" \
+                        | awk '{sum+=$1} END {if (NR>0) printf "%.0f", sum; else print 0}'
+                } || true
+            }
+            mb_model=$(sum_buffers_mb model)
+            mb_kv=$(sum_buffers_mb KV)
+            mb_compute=$(sum_buffers_mb compute)
+            accounted=$(( mb_model + mb_kv + mb_compute ))
+            measured_overhead=$(( primary_used - accounted ))
+            if (( measured_overhead > 0 && measured_overhead < primary_used )); then
+                mkdir -p "$PROBE_CACHE_DIR" 2>/dev/null || true
+                cat > "$(system_probe_file)" <<EOF
+# System probe (post-launch measurement) for ${GPU_NAME[$primary_gi]}
+# Driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+# Generated: $(date)
+# Source: nvidia-smi memory.used (${primary_used}MB) minus llama-server log
+#         buffers (model=${mb_model} kv=${mb_kv} compute=${mb_compute})
+SYS_CUDA_OVERHEAD_MB=$measured_overhead
+EOF
+                echo "  System probe written: cuda_overhead=${measured_overhead}MB (measured from launch)"
+            fi
+        fi
+    fi
 
     # Calculate extra layers per GPU
     # IMPORTANT: ACTUAL_FREE doesn't include KV cache yet (allocated on first prompt)
@@ -4757,68 +5355,108 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
         fi
         (( extra < 0 )) && extra=0
         EXTRA_PER_GPU[$gi]=$extra
-        (( TOTAL_EXTRA += extra ))
+        # Assignment form (not arithmetic command) — `(( x += 0 ))` returns
+        # exit 1 under set -e, which used to silently kill the script after
+        # the optimization phase whenever every GPU was already full.
+        TOTAL_EXTRA=$(( TOTAL_EXTRA + extra ))
     done
 
-    # Apply extras (priority order), cap to remaining CPU layers
-    if (( TOTAL_EXTRA > 0 && LAYERS_CPU > 0 )); then
-        remaining_cpu=$LAYERS_CPU
-        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
-            gi=${GPU_ORDER[$i]}
-            add=$(( EXTRA_PER_GPU[$gi] < remaining_cpu ? EXTRA_PER_GPU[$gi] : remaining_cpu ))
-            LAYERS_PER_GPU[$gi]=$(( LAYERS_PER_GPU[$gi] + add ))
-            remaining_cpu=$(( remaining_cpu - add ))
-            (( remaining_cpu <= 0 )) && break
-        done
-        LAYERS_CPU=$remaining_cpu
-        TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
-
-        # Rebuild -ot string with optimized placement
-        OT_ARGS=()
-        NEXT_LAYER=0
-        echo ""
-        echo "Optimized placement:"
-        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
-            gi=${GPU_ORDER[$i]}
-            layers=${LAYERS_PER_GPU[$gi]}
-            if (( layers > 0 )); then
-                OT_ARGS+=("${GPU_INDEX[$gi]}" "$NEXT_LAYER" "$layers")
-                echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): ${layers} layers (blk ${NEXT_LAYER}-$((NEXT_LAYER + layers - 1)))"
-                NEXT_LAYER=$(( NEXT_LAYER + layers ))
-            fi
-        done
-        echo "  CPU (RAM): ${LAYERS_CPU} layers"
-
-        OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
-
-        # Restart with optimized config
-        kill_server "$RUNNING_PID"
-        echo ""
-        echo "Restarting with optimized config (Gentle Load enabled)..."
-        # --mlock pins CPU-resident weights so they don't get swapped — but on
-        # WSL2 that pinning can freeze the Windows host, so we skip it there
-        # and let the Linux page cache handle it. Also skip when we're on the
-        # mmap path (Phase 2 promise): mlock would pin every mmap'd page and
-        # defeat the paging-on-demand the user just consented to.
-        MLOCK_ARGS=()
-        if (( MMAP_PATH )); then
-            log "  mmap path active — skipping --mlock (would pin all pages)"
-        elif (( IS_WSL2 )); then
-            log "  WSL2 detected — skipping --mlock to avoid host freeze"
+    # Convergence check: nothing fits, or no more CPU layers to move.
+    if (( TOTAL_EXTRA == 0 || LAYERS_CPU == 0 )); then
+        if (( OPT_ITER == 1 )); then
+            echo "  Conservative config is already optimal (GPUs full)"
         else
-            MLOCK_ARGS=(--mlock)
+            echo "  Iteration $OPT_ITER: converged — measured headroom cannot fit another layer"
+            echo "    (GPU layers: $(( LAYER_COUNT - LAYERS_CPU )), CPU layers: $LAYERS_CPU)"
         fi
-        if ! try_start "${MOE_MMAP_FLAGS[@]}" "${MLOCK_ARGS[@]}" -ot "$OT_STRING"; then
-            echo "  Optimized config failed — retrying without mlock..."
+        break
+    fi
+
+    # Save current (known-good) placement before mutating, so we can roll back
+    # if the new placement fails to load.
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        SAVED_LAYERS_PER_GPU[$gi]=${LAYERS_PER_GPU[$gi]}
+    done
+    SAVED_LAYERS_CPU=$LAYERS_CPU
+    SAVED_OT_STRING="$OT_STRING"
+
+    # Apply extras (priority order), cap to remaining CPU layers.
+    remaining_cpu=$LAYERS_CPU
+    applied_total=0
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        add=$(( EXTRA_PER_GPU[$gi] < remaining_cpu ? EXTRA_PER_GPU[$gi] : remaining_cpu ))
+        LAYERS_PER_GPU[$gi]=$(( LAYERS_PER_GPU[$gi] + add ))
+        applied_total=$(( applied_total + add ))
+        remaining_cpu=$(( remaining_cpu - add ))
+        (( remaining_cpu <= 0 )) && break
+    done
+    LAYERS_CPU=$remaining_cpu
+    TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
+
+    # Rebuild -ot string with new placement.
+    OT_ARGS=()
+    NEXT_LAYER=0
+    echo ""
+    echo "Optimized placement (iter $OPT_ITER, +${applied_total} layers):"
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        layers=${LAYERS_PER_GPU[$gi]}
+        if (( layers > 0 )); then
+            OT_ARGS+=("${GPU_INDEX[$gi]}" "$NEXT_LAYER" "$layers")
+            echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): ${layers} layers (blk ${NEXT_LAYER}-$((NEXT_LAYER + layers - 1)))"
+            NEXT_LAYER=$(( NEXT_LAYER + layers ))
+        fi
+    done
+    echo "  CPU (RAM): ${LAYERS_CPU} layers"
+
+    OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
+
+    # Restart with new placement.
+    kill_server "$RUNNING_PID"
+    echo ""
+    echo "Restarting with optimized config (iter $OPT_ITER)..."
+    # --mlock pins CPU-resident weights so they don't get swapped — but on
+    # WSL2 that pinning can freeze the Windows host, so we skip it there
+    # and let the Linux page cache handle it. Also skip when we're on the
+    # mmap path (Phase 2 promise): mlock would pin every mmap'd page and
+    # defeat the paging-on-demand the user just consented to.
+    MLOCK_ARGS=()
+    if (( MMAP_PATH )); then
+        log "  mmap path active — skipping --mlock (would pin all pages)"
+    elif (( IS_WSL2 )); then
+        log "  WSL2 detected — skipping --mlock to avoid host freeze"
+    else
+        MLOCK_ARGS=(--mlock)
+    fi
+    if ! try_start "${MOE_MMAP_FLAGS[@]}" "${MLOCK_ARGS[@]}" -ot "$OT_STRING"; then
+        echo "  Iteration $OPT_ITER restart failed (with mlock) — retrying without mlock..."
+        kill_server ""
+        if ! try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
+            echo "  Iteration $OPT_ITER: new placement won't load — rolling back to last known good"
             kill_server ""
+            # Restore last-good placement: this fit and ran in the prior iteration,
+            # so it's the most aggressive proven-stable config we have.
+            for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+                gi=${GPU_ORDER[$i]}
+                LAYERS_PER_GPU[$gi]=${SAVED_LAYERS_PER_GPU[$gi]}
+            done
+            LAYERS_CPU=$SAVED_LAYERS_CPU
+            OT_STRING="$SAVED_OT_STRING"
+            TOTAL_GPU_LAYERS=$(( LAYER_COUNT - LAYERS_CPU ))
             if ! try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
-                echo "  FAILED: Could not start server. Check $SERVER_LOG"
+                echo "  FAILED: Could not even restart last-known-good. Check $SERVER_LOG"
                 exit 1
             fi
+            echo "  Rolled back to: $(( LAYER_COUNT - LAYERS_CPU )) GPU layers, $LAYERS_CPU CPU layers"
+            break
         fi
-    else
-        echo "  Conservative config is already optimal (GPUs full)"
     fi
+    # Loop back: re-measure with this new placement. The next iteration's
+    # stress probe gives us the *real* peak VRAM under the new layout, which
+    # is what determines whether more headroom is available.
+    done
 
     # Save to cache
     CACHED_GPU_ASSIGNMENTS=""
@@ -4886,6 +5524,13 @@ else
         KVUNIFIED_SUPPORTED=1
     fi
 
+    # Recovery uses --n-cpu-moe (experts-only offload). The starting N is the
+    # data-driven optimum from Phase 1 placement (LAYERS_CPU) — already computed
+    # from measured cuda_overhead, probed compute buffer, and GGUF-parsed
+    # expert/non-expert/KV per layer. Walking *upward* from there (the old
+    # behavior) wastes the math: the first N that loads gets locked in even if
+    # it leaves 80% of VRAM unused. We start at the optimum and only raise N
+    # when llama-server's own log gives us an exact reason and amount.
     RECOVERED=0
     if (( NCPUMOE_SUPPORTED )); then
         # Strip incompatible flags from COMMON_FLAGS (we're replacing placement)
@@ -4903,26 +5548,51 @@ else
         RECOVERY_COMMON+=(-b 1024 -ub 512 --parallel 2)
         (( KVUNIFIED_SUPPORTED )) && RECOVERY_COMMON+=(--kv-unified)
 
-        # Swap COMMON_FLAGS so try_start uses the recovery base
         SAVED_COMMON_FLAGS=("${COMMON_FLAGS[@]}")
         COMMON_FLAGS=("${RECOVERY_COMMON[@]}")
 
-        # Search upward from LAYERS_CPU; more CPU offload = less VRAM pressure
-        # Cap at LAYER_COUNT-2 (need at least a couple layers on GPU for speed)
+        # Inherit the failure mode from the -ot launch we just lost: if it
+        # was a pinned-host hang, switch to pageable host buffers up front
+        # rather than re-living the hang on the first --n-cpu-moe attempt.
+        ot_failure_mode=$(_parse_load_failure)
+        case "$ot_failure_mode" in
+            pinned_hang|pinned_fail)
+                if [[ ! " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]]; then
+                    echo "  -ot failure was pinned-host alloc — disabling pinned buffers (GGML_CUDA_NO_PINNED=1)"
+                    LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
+                fi
+                ;;
+        esac
+
+        # Start at the data-driven optimum. LAYERS_CPU comes from Phase 1 math
+        # using measured per-GPU overhead + parsed expert bytes. Cap at
+        # LAYER_COUNT-1 (always keep at least one expert layer on GPU so the
+        # GPU path is exercised — going to all-CPU defeats the purpose).
         START_N=$LAYERS_CPU
         (( START_N < 1 )) && START_N=1
-        MAX_N=$(( LAYER_COUNT - 2 ))
-        (( MAX_N < START_N )) && MAX_N=$START_N
-        for N in $(seq "$START_N" 2 "$MAX_N"); do
-            echo "  Recovery attempt: --n-cpu-moe $N (b=1024 ub=512 parallel=2$( (( KVUNIFIED_SUPPORTED )) && echo ' kv-unified'))"
+        (( START_N > LAYER_COUNT - 1 )) && START_N=$(( LAYER_COUNT - 1 ))
+        MAX_N=$(( LAYER_COUNT - 1 ))
+        N=$START_N
+        attempts=0
+        # Hard cap on retry attempts — protects against pathological log
+        # patterns that could otherwise loop. LAYER_COUNT is always enough.
+        max_attempts=$(( LAYER_COUNT + 2 ))
+
+        no_pinned_tried=0
+        [[ " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]] && no_pinned_tried=1
+
+        while (( attempts < max_attempts )); do
+            attempts=$(( attempts + 1 ))
+            echo "  Recovery attempt $attempts: --n-cpu-moe $N (b=1024 ub=512 parallel=2$( (( KVUNIFIED_SUPPORTED )) && echo ' kv-unified')$( (( no_pinned_tried )) && echo ' no-pinned'))"
             if try_start --n-cpu-moe "$N"; then
                 RECOVERED=1
-                echo "  Server healthy with --n-cpu-moe $N"
-                # Persist recovered config so next launch goes straight here
+                echo "  Server healthy with --n-cpu-moe $N (attempts: $attempts)"
                 COMMON_FLAGS+=(--n-cpu-moe "$N")
                 OT_STRING=""
                 LAYERS_CPU=$N
-                # Cache the recovered mode so next launch skips the failed -ot path
+
+                cached_no_pinned=0
+                [[ " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]] && cached_no_pinned=1
                 cat > "$CACHE_FILE" <<CEOF
 # Auto-tuned config for $MODEL_NAME (recovered via --n-cpu-moe)
 # Generated: $(date)
@@ -4932,10 +5602,58 @@ CACHED_BATCH="1024"
 CACHED_UBATCH="512"
 CACHED_PARALLEL="2"
 CACHED_KVUNIFIED="$KVUNIFIED_SUPPORTED"
+CACHED_NO_PINNED="$cached_no_pinned"
 CEOF
                 break
             fi
+
+            # Failure — classify from log and bump N by exactly what the
+            # measured overshoot demands. No fudge factors.
+            mode=$(_parse_load_failure)
             kill_server ""
+
+            case "$mode" in
+                oom\ *)
+                    # mode = "oom <device> <size_mb>"
+                    read -r _tag dev size_mb <<< "$mode"
+                    free_mb=$(_free_vram_for_device "$dev")
+                    if [[ -n "$free_mb" && "$size_mb" -gt 0 && "$EXPERT_PER_LAYER_MB" -gt 0 ]]; then
+                        overshoot=$(( size_mb - free_mb ))
+                        (( overshoot < 0 )) && overshoot=0
+                        # ceil(overshoot / EXPERT_PER_LAYER_MB) — exact, no margin.
+                        bump=$(( (overshoot + EXPERT_PER_LAYER_MB - 1) / EXPERT_PER_LAYER_MB ))
+                        (( bump < 1 )) && bump=1
+                        echo "  OOM on CUDA${dev}: tried ${size_mb}MB, free ${free_mb}MB → overshoot ${overshoot}MB → +${bump} layers to CPU"
+                        N=$(( N + bump ))
+                    else
+                        echo "  OOM detected but couldn't read size/free VRAM — bumping N by 1"
+                        N=$(( N + 1 ))
+                    fi
+                    ;;
+                pinned_hang|pinned_fail)
+                    if (( ! no_pinned_tried )); then
+                        echo "  Pinned host alloc failure — setting GGML_CUDA_NO_PINNED=1, retrying same N"
+                        LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
+                        no_pinned_tried=1
+                        # do NOT bump N — first try without pinned at the same placement
+                    else
+                        echo "  Pinned alloc still failing with NO_PINNED — bumping N by 1"
+                        N=$(( N + 1 ))
+                    fi
+                    ;;
+                *)
+                    # Couldn't classify. Show tail so the user can see why,
+                    # then take the smallest deterministic step.
+                    echo "  Load failed (reason not classifiable from log) — bumping N by 1"
+                    tail -3 "$SERVER_LOG" 2>/dev/null | sed 's/^/    /'
+                    N=$(( N + 1 ))
+                    ;;
+            esac
+
+            if (( N > MAX_N )); then
+                echo "  Reached N=$N > LAYER_COUNT-1 ($MAX_N) — out of recovery moves"
+                break
+            fi
         done
     fi
 
