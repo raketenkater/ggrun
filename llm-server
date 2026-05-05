@@ -24,10 +24,13 @@
 #   llm-server <model.gguf> --vision           # Auto-detect/download mmproj for vision
 #   llm-server <model.gguf> --mmproj auto      # Same as --vision
 #   llm-server <model.gguf> --mmproj proj.gguf # Enable vision with specific mmproj file
-#   llm-server <model.gguf> --ai-tune          # AI-driven flag optimization (8 rounds)
+#   llm-server <model.gguf> --ai-tune          # AI-driven flag optimization
+#                                              # Scope auto-decided: MoE/single-GPU
+#                                              # tunes perf flags only; dense multi-GPU
+#                                              # also unlocks --tensor-split / --split-mode.
+#                                              # User-explicit flags are always respected.
 #   llm-server <model.gguf> --ai-tune --retune # Force re-tune even if cache exists
 #   llm-server <model.gguf> --ai-tune --rounds 4 # Customize number of rounds
-#   llm-server <model.gguf> --ai-tune --placement-tune # Full tune: may change placement/split/perf flags except user-chosen flags
 #   llm-server <model.gguf> --tune-cache cache.json # Launch with an explicit tuned config
 #   llm-server <model.gguf> --ai-tune -v       # Verbose: show full ai-tune logs (default: progress box only)
 #
@@ -134,7 +137,7 @@ trap _cleanup_orphan_server EXIT
 # Section 1: Configuration & Argument Parsing
 # ═══════════════════════════════════════════════════════════════
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 
 # Persistent Configuration — source early so env vars (LLM_PORT, etc.) are available
 CONFIG_DIR="${LLM_CONFIG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/config}}"
@@ -372,7 +375,14 @@ while [[ $# -gt 0 ]]; do
         --show-configs) SHOW_CONFIGS=1; shift ;;
         --ai-tune)   DO_AI_TUNE=1; shift ;;
         --tune-cache) EXPLICIT_TUNE_CACHE="$2"; shift 2 ;;
-        --unlimited|--placement-tune|--full-auto-tune) DO_UNLIMITED=1; shift ;;
+        --unlimited|--placement-tune|--full-auto-tune)
+            # Deprecated: AI-tune now decides the unlock set automatically
+            # from model arch + GPU count (MoE/single-GPU lock placement
+            # routing flags; dense multi-GPU unlocks them). The flag is
+            # accepted for back-compat but does nothing — the warning fires
+            # only on tty so scripts don't grow noise.
+            [[ -t 2 ]] && echo "warning: $1 is deprecated — placement scope is now auto-decided by model arch (MoE/dense) and GPU count. Use --ai-tune; the right flags will be unlocked." >&2
+            shift ;;
         --tune-long-timeout) TUNE_LONG_TIMEOUT=1; shift ;;
         --rounds)    USER_TUNE_ROUNDS="$2"; shift 2 ;;
         --parallel)  PARALLEL_SLOTS="$2"; shift 2 ;;
@@ -1488,6 +1498,22 @@ fi
 
 LAYER_COUNT=${LAYER_COUNT:-0}
 EXPERT_COUNT=${EXPERT_COUNT:-0}
+
+# Architecture-aware scope decision for AI-tune (replaces the legacy
+# --placement-tune / --unlimited toggle). Placement-routing flags
+# (--tensor-split, --split-mode, -mg, -ngl, -ot, --n-cpu-moe,
+# --device) are unlocked iff:
+#   - the model is dense (no experts), AND
+#   - we have at least 2 GPUs (so the routing flags can do anything)
+# For MoE the placement pipeline already owns -ot; for single-GPU the
+# routing flags are no-ops. The deprecated CLI flags are still parsed
+# (warning printed); their value is overwritten here so the unlock set
+# is decided from data, not from a user toggle.
+if (( EXPERT_COUNT == 0 && GPU_COUNT >= 2 )); then
+    DO_UNLIMITED=1
+else
+    DO_UNLIMITED=0
+fi
 HEAD_COUNT_KV=${HEAD_COUNT_KV:-0}
 KEY_LENGTH=${KEY_LENGTH:-0}
 VALUE_LENGTH=${VALUE_LENGTH:-0}
@@ -2572,15 +2598,25 @@ _try_ik_fallback() {
 
 # Inspect SERVER_LOG since LAUNCH_LOG_OFFSET to classify why the last launch
 # failed. Echoes one of:
-#   "oom DEVICE SIZE_MB"  — parsed cudaMalloc OOM with exact device + alloc size
-#   "pinned_fail"         — explicit pinned host alloc failure (cudaHostAlloc)
-#   "pinned_hang"         — load reached CUDA_Host model buffer alloc but didn't
-#                           reach a normal end-of-load marker (likely OOM-killer
-#                           or health timeout while the pinned buffer was being
-#                           reserved by the kernel)
-#   "unknown"             — couldn't classify
+#   "oom DEVICE SIZE_MB"    — parsed cudaMalloc OOM with exact device + alloc size
+#   "pinned_fail"           — explicit cudaHostAlloc failure (host pinned alloc)
+#   "pinned_cap_exceeded"   — cudaHostAlloc failure where signal points to the
+#                             OS pinned-memory cap (RLIMIT_MEMLOCK / ulimit -l)
+#                             rather than raw RAM exhaustion
+#   "pinned_hang"           — load reached CUDA_Host model buffer alloc but didn't
+#                             reach a normal end-of-load marker (likely OOM-killer
+#                             or health timeout while the pinned buffer was being
+#                             reserved by the kernel)
+#   "ram_oom"               — host-side OOM: process killed by kernel OOM-killer,
+#                             std::bad_alloc, or "Cannot allocate memory" outside
+#                             a pinned-alloc context. Recovery direction: bump N
+#                             DOWN (move expert layers off CPU, onto GPU).
+#   "unknown"               — couldn't classify
 #
 # Everything is parsed from llama-server's own stderr — no guesses.
+# Direction hint for callers (used by bidirectional sweep, task 8):
+#   GPU side (more CPU): oom, pinned_hang
+#   CPU side (more GPU): ram_oom, pinned_cap_exceeded, pinned_fail
 _parse_load_failure() {
     local recent
     recent=$(tail -c +"$((${LAUNCH_LOG_OFFSET:-0}+1))" "$SERVER_LOG" 2>/dev/null \
@@ -2604,9 +2640,35 @@ _parse_load_failure() {
         fi
     fi
 
+    # cudaHostAlloc failure: distinguish "RLIMIT_MEMLOCK / pinned cap" from
+    # "raw out-of-memory" using the surrounding error wording. mlock /
+    # locked-memory wording → cap; otherwise generic pinned_fail.
     if printf '%s\n' "$recent" | grep -qE "cudaHostAlloc.*(failed|out of memory)|pinned.*alloc.*(failed|out of memory)"; then
-        echo "pinned_fail"
+        if printf '%s\n' "$recent" | grep -qiE "RLIMIT_MEMLOCK|locked.memory|ulimit.*memlock|cannot allocate locked|operation not permitted"; then
+            echo "pinned_cap_exceeded"
+        else
+            echo "pinned_fail"
+        fi
         return
+    fi
+
+    # Host-side OOM: the kernel killed the process or the C++ runtime threw
+    # bad_alloc. This is RAM exhaustion, not a CUDA / pinned-cap problem.
+    # Recovery: push expert layers OFF CPU (bump N down → onto GPU).
+    if printf '%s\n' "$recent" | grep -qE "std::bad_alloc|what\\(\\):.*bad_alloc"; then
+        echo "ram_oom"
+        return
+    fi
+    if printf '%s\n' "$recent" | grep -qE "[[:space:]][0-9]+[[:space:]]+Killed[[:space:]]|received signal:? 9|signal 9 \(SIGKILL\)|out of memory.*killed|oom-kill"; then
+        echo "ram_oom"
+        return
+    fi
+    # "Cannot allocate memory" outside a CUDA-host context = host malloc fail.
+    if printf '%s\n' "$recent" | grep -qE "Cannot allocate memory|posix_memalign.*failed|mmap.*Cannot allocate"; then
+        if ! printf '%s\n' "$recent" | tail -20 | grep -qE "cudaHostAlloc|CUDA_Host"; then
+            echo "ram_oom"
+            return
+        fi
     fi
 
     # Reached the pinned host buffer line but never reached "model loaded" or
@@ -2620,6 +2682,22 @@ _parse_load_failure() {
     fi
 
     echo "unknown"
+}
+
+# Direction hint for the bidirectional sweep (task 8). Returns:
+#   "more_cpu"      — failure on a GPU device (cudaMalloc OOM on a specific GPU);
+#                     bump --n-cpu-moe N UP (move expert layers off GPU, onto CPU)
+#   "more_gpu"      — failure on host side (pinned cap, host OOM, OOM-kill during
+#                     CUDA_Host alloc); bump N DOWN (move layers off CPU, onto GPU)
+#   "indeterminate" — unknown classification, direction cannot be inferred
+# pinned_hang is host-side: the process died during the CUDA_Host pinned reservation
+# (kernel OOM-killer or RLIMIT_MEMLOCK), so the cure is fewer CPU layers.
+_failure_direction() {
+    case "$1" in
+        oom\ *) echo "more_cpu" ;;
+        ram_oom|pinned_fail|pinned_cap_exceeded|pinned_hang) echo "more_gpu" ;;
+        *) echo "indeterminate" ;;
+    esac
 }
 
 # Map a CUDA device index (e.g. 0,1,2 from the OOM line) to the free-VRAM
@@ -3283,7 +3361,26 @@ parse_tune_overrides() {
             F$'\t'*) TUNE_OVERRIDE_FLAGS+=("${item#F$'\t'}") ;;
             K$'\t'*) TUNE_OVERRIDE_KEYS+=("${item#K$'\t'}") ;;
         esac
-    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" DO_UNLIMITED="$DO_UNLIMITED" TUNE_USER_LOCKED_KEYS="$locked_keys_env" python3 -c "
+    # Architecture-aware tuning scope (replaces the legacy DO_UNLIMITED toggle):
+    #   - User-supplied flags (TUNE_USER_LOCKED_KEYS) are ALWAYS protected.
+    #     They come from add_tune_lock_key() — anything explicit on the CLI,
+    #     plus --ctx-size, --kv-quality, --parallel, --mmproj, --gpus filter.
+    #   - For MoE models, expert distribution is owned by the placement
+    #     pipeline (Phase 1 + iterative optimization → -ot). Once -ot
+    #     dictates per-tensor placement, --tensor-split / --split-mode /
+    #     -mg / -ngl have no measurable effect on tok/s, so locking them
+    #     keeps AI-tune from wasting rounds on configs that can't help.
+    #   - For single-GPU systems, the same flags don't apply.
+    #   - For dense multi-GPU, --tensor-split / --split-mode genuinely
+    #     matter and stay tunable.
+    # The unlock set is decided from data (model arch + GPU count), not from
+    # a user toggle — so --placement-tune / --unlimited become unnecessary.
+    local moe_detected=0 multi_gpu=0
+    (( EXPERT_COUNT > 0 )) && moe_detected=1
+    (( GPU_COUNT >= 2 )) && multi_gpu=1
+    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" \
+             MOE_DETECTED="$moe_detected" MULTI_GPU="$multi_gpu" \
+             TUNE_USER_LOCKED_KEYS="$locked_keys_env" python3 -c "
 	import json, os, sys
 try:
     overrides = json.loads(sys.stdin.read())
@@ -3293,7 +3390,13 @@ if not isinstance(overrides, dict):
     overrides = {}
 protected = {'-m', '--host', '--port', '--ctx-size', '--mmproj', '-ot', '--reasoning'}
 protected |= {k for k in os.environ.get('TUNE_USER_LOCKED_KEYS', '').splitlines() if k}
-if os.environ.get('DO_UNLIMITED') != '1':
+moe = os.environ.get('MOE_DETECTED') == '1'
+multi_gpu = os.environ.get('MULTI_GPU') == '1'
+# Lock placement-routing flags when they cannot move the needle:
+#   MoE         -> -ot owns placement; tensor-split/split-mode are downstream
+#   single GPU  -> these flags don't apply at all
+# Dense multi-GPU is the only case where they stay tunable.
+if moe or not multi_gpu:
     protected |= {'--device', '--tensor-split', '--split-mode', '-mg', '-ngl', '-ot', '--n-cpu-moe'}
 if os.environ.get('KV_LOCKED') == '1':
     protected |= {'--cache-type-k', '--cache-type-v'}
@@ -3453,18 +3556,25 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
         fi
     fi
 
+    # Architecture-aware tunable scope. Same auto-detection as in
+    # parse_tune_overrides() — MoE owns placement via -ot, single-GPU has
+    # no routing flags worth turning, dense multi-GPU unlocks them.
+    local _ai_moe=0 _ai_multi_gpu=0
+    (( EXPERT_COUNT > 0 )) && _ai_moe=1
+    (( GPU_COUNT >= 2 )) && _ai_multi_gpu=1
+    local _ai_scope_label="perf flags only (placement owned by Phase 1 / iterative optimization)"
+    if (( ! _ai_moe && _ai_multi_gpu )); then
+        _ai_scope_label="perf + placement-routing (--tensor-split, --split-mode unlocked for dense multi-GPU)"
+    fi
+
     echo ""
     echo "═══════════════════════════════════════════════════"
-    if (( DO_UNLIMITED )); then
-        echo "  AI Tune — Full placement mode (--placement-tune)"
-        echo "  Model: ${MODEL_NAME}"
-        echo "  Rounds: ${AI_TUNE_ROUNDS}  (tensor-split + split-mode unlocked)"
-        echo "  Scope: may change placement/split/perf flags except explicit user choices"
-        echo "  Warning: this can take 1-3 hours on large models"
-    else
-        echo "  AI Tune — iterative LLM-driven optimization"
-        echo "  Model: ${MODEL_NAME}"
-        echo "  Rounds: ${AI_TUNE_ROUNDS}"
+    echo "  AI Tune — iterative LLM-driven optimization"
+    echo "  Model: ${MODEL_NAME}"
+    echo "  Rounds: ${AI_TUNE_ROUNDS}"
+    echo "  Scope: ${_ai_scope_label}"
+    if (( ! _ai_moe && _ai_multi_gpu )); then
+        echo "  Warning: dense multi-GPU placement search can take 1-3 hours on large models"
     fi
     echo "═══════════════════════════════════════════════════"
     if (( ! VERBOSE )); then
@@ -3592,10 +3702,15 @@ SYSEOF
     # Replace {fixed_flags} placeholder
     system_prompt="${system_prompt//\{fixed_flags\}/$fixed_flags}"
 
-    # Replace {unlimited_section} — only active when --unlimited is set
+    # Replace {unlimited_section}: emit a placement-tune block ONLY when
+    # this run actually has placement-routing flags unlocked. That happens
+    # for dense multi-GPU; for MoE or single-GPU the placement pipeline (or
+    # absence of multi-device routing) makes those flags inert and they're
+    # already in the script-side protected set, so the LLM doesn't need to
+    # know about them. Replaces the legacy --unlimited toggle.
     local unlimited_section=""
-    if (( DO_UNLIMITED )); then
-        unlimited_section=$'\n# FULL PLACEMENT MODE (--placement-tune / legacy --unlimited)\nYou may perturb normally-deterministic placement and performance flags, except flags explicitly chosen by the user. User-locked flags are rejected even if you propose them.\n- --tensor-split R0,R1,R2,... (ratios across GPUs; baseline is bandwidth-weighted; try small skews first)\n- --split-mode (graph | row | layer) — test alternatives on multi-GPU\n- --device / --main-gpu / -ngl when no user GPU filter was provided\n- Batch, micro-batch, parallelism, threads, memory flags, and KV cache type when not user-locked\nMoE expert -ot placement is locked after the placement pass; optimize around it unless a future mode explicitly unlocks MoE placement. Start small (one perturbation per round) so you can attribute gains.\n'
+    if (( ! _ai_moe && _ai_multi_gpu )); then
+        unlimited_section=$'\n# Placement-routing unlocked (dense multi-GPU)\nThis run is dense multi-GPU, so the following are tunable in addition to perf flags:\n- --tensor-split R0,R1,R2,... (ratios across GPUs; baseline is bandwidth-weighted; try small skews first)\n- --split-mode (graph | row | layer) — test alternatives on multi-GPU\n- --device / --main-gpu / -ngl when no user GPU filter was provided\nFlags the user explicitly chose (incl. --gpus filter, --ctx-size, --kv-quality, --parallel, --mmproj) are rejected even if you propose them. Start small (one perturbation per round) so you can attribute gains.\n'
     fi
     system_prompt="${system_prompt//\{unlimited_section\}/$unlimited_section}"
 
@@ -4946,6 +5061,107 @@ else
     echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm + ${KV_PER_LAYER_MB}MB KV = ${COST_PER_LAYER_MB}MB"
 fi
 
+# ── Hard ceilings: data-driven feasibility check ──────────────────────────────
+# Compute the maximum number of layers each side can physically hold given
+# measured/parsed inputs (no margins). If LAYER_COUNT > MAX_GPU + MAX_CPU, the
+# model genuinely does not fit — exit now with a measured breakdown rather than
+# burning a 1-2 minute false-start. Strategy (c): default = strict --no-mmap
+# accounting; if strict says no-fit and user did not pass --no-mmap, fall back
+# to the mmap-aware ceiling (page-cache elastic) before declaring "does not fit".
+declare -a MAX_GPU_LAYERS_PER
+MAX_GPU_LAYERS=0
+for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+    gi=${GPU_ORDER[$i]}
+    _ceil_overhead=$DET_FIXED_PER_GPU
+    (( i == 0 )) && _ceil_overhead=$(( DET_FIXED_PER_GPU + MAIN_GPU_GLOBALS_MB ))
+    _ceil_usable=$(( GPU_VRAM_FREE[$gi] - _ceil_overhead ))
+    (( _ceil_usable < 0 )) && _ceil_usable=0
+    _ceil_cap=0
+    (( COST_PER_LAYER_MB > 0 )) && _ceil_cap=$(( _ceil_usable / COST_PER_LAYER_MB ))
+    (( _ceil_cap > LAYER_COUNT )) && _ceil_cap=$LAYER_COUNT
+    MAX_GPU_LAYERS_PER[$gi]=$_ceil_cap
+    MAX_GPU_LAYERS=$(( MAX_GPU_LAYERS + _ceil_cap ))
+done
+(( MAX_GPU_LAYERS > LAYER_COUNT )) && MAX_GPU_LAYERS=$LAYER_COUNT
+
+# RAM overhead components are independent of layer placement; precompute now
+# so we can build the CPU ceiling before any launch attempt. These mirror the
+# values computed in Phase 1 below — kept in sync intentionally.
+_PRE_CUDA_HOST_MB=1024
+_PRE_GRAPH_SCRATCH_MB=2048
+_PRE_MMAP_PT_MB=$(( TOTAL_SIZE_MB / 500 ))
+if (( EMBEDDING_LENGTH > 0 )); then
+    if (( EXPERT_COUNT > 0 && EXPERT_USED_COUNT > 0 && EXPERT_FF > 0 )); then
+        _PRE_ACT_FFN=$(( EXPERT_USED_COUNT * EXPERT_FF ))
+        (( EXPERT_SHARED_FF > 0 )) && _PRE_ACT_FFN=$(( _PRE_ACT_FFN + EXPERT_SHARED_FF ))
+    else
+        _PRE_ACT_FFN=$FEED_FORWARD_LENGTH
+    fi
+    (( KV_LORA_RANK > 0 )) && _PRE_ACT_FFN=$(( _PRE_ACT_FFN + KV_LORA_RANK + Q_LORA_RANK ))
+    _PRE_CPU_ACT_MB=$(( UBATCH * (EMBEDDING_LENGTH + _PRE_ACT_FFN) * 4 * 2 / 1048576 ))
+    (( _PRE_CPU_ACT_MB < 64 )) && _PRE_CPU_ACT_MB=64
+else
+    _PRE_CPU_ACT_MB=512
+fi
+RAM_OVERHEAD_PRE_MB=$(( _PRE_CUDA_HOST_MB + _PRE_GRAPH_SCRATCH_MB + _PRE_MMAP_PT_MB + _PRE_CPU_ACT_MB ))
+
+# Strict ceiling (--no-mmap path): every CPU expert byte is resident in RAM.
+_CPU_BUDGET_STRICT=$(( RAM_AVAIL_MB - RAM_OVERHEAD_PRE_MB ))
+(( _CPU_BUDGET_STRICT < 0 )) && _CPU_BUDGET_STRICT=0
+MAX_CPU_LAYERS_STRICT=0
+(( EXPERT_PER_LAYER_MB > 0 )) && MAX_CPU_LAYERS_STRICT=$(( _CPU_BUDGET_STRICT / EXPERT_PER_LAYER_MB ))
+(( MAX_CPU_LAYERS_STRICT > LAYER_COUNT )) && MAX_CPU_LAYERS_STRICT=$LAYER_COUNT
+
+# mmap-aware ceiling: only the working set (overhead + ~8 hot layers) needs to
+# fit; remaining experts page in/out of the file-backed mapping. Cap is the
+# whole layer count if the working-set floor fits in available RAM.
+_PRE_WORKING_SET_FLOOR=$(( RAM_OVERHEAD_PRE_MB + 8 * EXPERT_PER_LAYER_MB ))
+MAX_CPU_LAYERS_MMAP=0
+(( RAM_AVAIL_MB >= _PRE_WORKING_SET_FLOOR )) && MAX_CPU_LAYERS_MMAP=$LAYER_COUNT
+
+# Pick active CPU ceiling (option c): strict by default; mmap fallback only if
+# strict doesn't cover the gap and user has not forced --no-mmap.
+MAX_CPU_LAYERS=$MAX_CPU_LAYERS_STRICT
+CEIL_CPU_LABEL="strict --no-mmap"
+if (( MAX_GPU_LAYERS + MAX_CPU_LAYERS_STRICT < LAYER_COUNT )) \
+   && (( USER_NO_MMAP == 0 )) \
+   && (( MAX_CPU_LAYERS_MMAP > MAX_CPU_LAYERS_STRICT )); then
+    MAX_CPU_LAYERS=$MAX_CPU_LAYERS_MMAP
+    CEIL_CPU_LABEL="mmap (page-cache)"
+fi
+
+echo ""
+echo "Hard ceilings (measured, no margins):"
+for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+    gi=${GPU_ORDER[$i]}
+    echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): up to ${MAX_GPU_LAYERS_PER[$gi]} layers (${GPU_VRAM_FREE[$gi]}MB free)"
+done
+echo "  GPU total:      ${MAX_GPU_LAYERS} layers"
+echo "  CPU [${CEIL_CPU_LABEL}]: ${MAX_CPU_LAYERS} layers (avail ${RAM_AVAIL_MB}MB − overhead ${RAM_OVERHEAD_PRE_MB}MB, expert ${EXPERT_PER_LAYER_MB}MB/layer)"
+echo "  Total capacity: $(( MAX_GPU_LAYERS + MAX_CPU_LAYERS ))/${LAYER_COUNT} layers required"
+
+if (( MAX_GPU_LAYERS + MAX_CPU_LAYERS < LAYER_COUNT )); then
+    GAP=$(( LAYER_COUNT - MAX_GPU_LAYERS - MAX_CPU_LAYERS ))
+    GAP_VRAM_MB=$(( GAP * COST_PER_LAYER_MB ))
+    GAP_RAM_MB=$(( GAP * EXPERT_PER_LAYER_MB ))
+    echo ""
+    echo "ERROR: Model does not fit on this system."
+    echo "  Required:    ${LAYER_COUNT} layers"
+    echo "  GPU cap:     ${MAX_GPU_LAYERS} layers across ${GPU_COUNT} GPU(s)"
+    echo "  CPU cap:     ${MAX_CPU_LAYERS} layers (${CEIL_CPU_LABEL})"
+    echo "  Gap:         ${GAP} layers — need ~${GAP_VRAM_MB}MB more free VRAM or ~${GAP_RAM_MB}MB more RAM"
+    echo ""
+    echo "  Options:"
+    echo "    1. Free VRAM (close other GPU workloads, --gpus to add a card)"
+    if (( USER_NO_MMAP )); then
+        echo "    2. Drop --no-mmap so kernel can page experts on demand"
+    else
+        echo "    2. Add system RAM"
+    fi
+    echo "    3. Use a smaller quantization or smaller model"
+    exit 1
+fi
+
 REDIST_BUMPS=()  # Phase 1 redistribution disabled: cold-start is already deterministic.
 for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
     gi=${GPU_ORDER[$i]}
@@ -5578,8 +5794,20 @@ else
         START_N=$LAYERS_CPU
         (( START_N < 1 )) && START_N=1
         (( START_N > LAYER_COUNT - 1 )) && START_N=$(( LAYER_COUNT - 1 ))
+
+        # Bidirectional bounds derived from hard ceilings (task 6).
+        # MIN_N: can't push more than MAX_GPU_LAYERS onto GPUs, so CPU must
+        # carry at least LAYER_COUNT - MAX_GPU_LAYERS layers.
+        # MAX_N: can't push more than MAX_CPU_LAYERS onto CPU; also bounded
+        # by LAYER_COUNT-1 so at least one expert layer stays on GPU.
+        MIN_N=$(( LAYER_COUNT - MAX_GPU_LAYERS ))
+        (( MIN_N < 0 )) && MIN_N=0
         MAX_N=$(( LAYER_COUNT - 1 ))
+        (( MAX_CPU_LAYERS < MAX_N )) && MAX_N=$MAX_CPU_LAYERS
+
         N=$START_N
+        (( N < MIN_N )) && N=$MIN_N
+        (( N > MAX_N )) && N=$MAX_N
         attempts=0
         # Hard cap on retry attempts — protects against pathological log
         # patterns that could otherwise loop. LAYER_COUNT is always enough.
@@ -5588,9 +5816,15 @@ else
         no_pinned_tried=0
         [[ " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]] && no_pinned_tried=1
 
+        # Track sweep direction across attempts. Flipping direction (e.g. UP
+        # then DOWN) means we've crossed the boundary in both senses — the
+        # model genuinely doesn't fit at any N within [MIN_N, MAX_N].
+        last_direction=""    # "up" | "down" | ""
+        boundary_hit=0
+
         while (( attempts < max_attempts )); do
             attempts=$(( attempts + 1 ))
-            echo "  Recovery attempt $attempts: --n-cpu-moe $N (b=1024 ub=512 parallel=2$( (( KVUNIFIED_SUPPORTED )) && echo ' kv-unified')$( (( no_pinned_tried )) && echo ' no-pinned'))"
+            echo "  Recovery attempt $attempts: --n-cpu-moe $N (range [$MIN_N..$MAX_N], b=1024 ub=512 parallel=2$( (( KVUNIFIED_SUPPORTED )) && echo ' kv-unified')$( (( no_pinned_tried )) && echo ' no-pinned'))"
             if try_start --n-cpu-moe "$N"; then
                 RECOVERED=1
                 echo "  Server healthy with --n-cpu-moe $N (attempts: $attempts)"
@@ -5614,51 +5848,89 @@ CEOF
                 break
             fi
 
-            # Failure — classify from log and bump N by exactly what the
-            # measured overshoot demands. No fudge factors.
+            # Failure — classify from log, infer direction, step by exact
+            # measured amount when available (no margins).
             mode=$(_parse_load_failure)
+            direction=$(_failure_direction "$mode")
             kill_server ""
+
+            # Direction-flip detection: if last attempt failed UP-side and this
+            # one fails DOWN-side (or vice versa), we've boxed in the boundary.
+            if [[ -n "$last_direction" && "$direction" != "indeterminate" ]]; then
+                if [[ "$last_direction" == "up" && "$direction" == "more_gpu" ]] \
+                || [[ "$last_direction" == "down" && "$direction" == "more_cpu" ]]; then
+                    echo "  Direction flip: prior attempt failed wanting '${last_direction}', now wants '${direction}' — boundary boxed in."
+                    boundary_hit=1
+                    break
+                fi
+            fi
 
             case "$mode" in
                 oom\ *)
-                    # mode = "oom <device> <size_mb>"
+                    # GPU-side OOM: parse exact overshoot, push that many
+                    # layers off GPU and onto CPU.
                     read -r _tag dev size_mb <<< "$mode"
                     free_mb=$(_free_vram_for_device "$dev")
                     if [[ -n "$free_mb" && "$size_mb" -gt 0 && "$EXPERT_PER_LAYER_MB" -gt 0 ]]; then
                         overshoot=$(( size_mb - free_mb ))
                         (( overshoot < 0 )) && overshoot=0
-                        # ceil(overshoot / EXPERT_PER_LAYER_MB) — exact, no margin.
                         bump=$(( (overshoot + EXPERT_PER_LAYER_MB - 1) / EXPERT_PER_LAYER_MB ))
                         (( bump < 1 )) && bump=1
                         echo "  OOM on CUDA${dev}: tried ${size_mb}MB, free ${free_mb}MB → overshoot ${overshoot}MB → +${bump} layers to CPU"
                         N=$(( N + bump ))
                     else
-                        echo "  OOM detected but couldn't read size/free VRAM — bumping N by 1"
+                        echo "  OOM on CUDA${dev:-?} — log lacked size/free, bumping N by 1"
                         N=$(( N + 1 ))
                     fi
+                    last_direction="up"
                     ;;
-                pinned_hang|pinned_fail)
+                pinned_fail|pinned_cap_exceeded|pinned_hang)
+                    # Host-side pinned alloc failure. First try disabling
+                    # pinned buffers (cheap fix) at the same N. If that's
+                    # already been tried, step DOWN — fewer CPU layers means
+                    # less host-pinned working set.
                     if (( ! no_pinned_tried )); then
-                        echo "  Pinned host alloc failure — setting GGML_CUDA_NO_PINNED=1, retrying same N"
+                        echo "  Host pinned alloc failure (${mode}) — setting GGML_CUDA_NO_PINNED=1, retrying same N"
                         LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
                         no_pinned_tried=1
-                        # do NOT bump N — first try without pinned at the same placement
+                        # No N change, no direction change.
                     else
-                        echo "  Pinned alloc still failing with NO_PINNED — bumping N by 1"
-                        N=$(( N + 1 ))
+                        echo "  Host alloc still failing with NO_PINNED (${mode}) — moving 1 layer onto GPU"
+                        N=$(( N - 1 ))
+                        last_direction="down"
                     fi
                     ;;
+                ram_oom)
+                    # Host RAM exhausted. Move 1 layer back onto GPU per step;
+                    # exact RAM overshoot isn't always reported by the kernel.
+                    echo "  Host RAM exhausted (ram_oom) — moving 1 layer onto GPU"
+                    N=$(( N - 1 ))
+                    last_direction="down"
+                    ;;
                 *)
-                    # Couldn't classify. Show tail so the user can see why,
-                    # then take the smallest deterministic step.
+                    # Couldn't classify. Default to direction we haven't yet
+                    # tried, otherwise step UP (safer — model already hit
+                    # initial GPU placement so GPU side is more constrained).
                     echo "  Load failed (reason not classifiable from log) — bumping N by 1"
                     tail -3 "$SERVER_LOG" 2>/dev/null | sed 's/^/    /'
-                    N=$(( N + 1 ))
+                    if [[ "$last_direction" == "up" ]]; then
+                        N=$(( N - 1 ))
+                        last_direction="down"
+                    else
+                        N=$(( N + 1 ))
+                        last_direction="up"
+                    fi
                     ;;
             esac
 
             if (( N > MAX_N )); then
-                echo "  Reached N=$N > LAYER_COUNT-1 ($MAX_N) — out of recovery moves"
+                echo "  Reached N=$N > MAX_N=$MAX_N (CPU ceiling) — out of upward moves"
+                boundary_hit=1
+                break
+            fi
+            if (( N < MIN_N )); then
+                echo "  Reached N=$N < MIN_N=$MIN_N (GPU ceiling) — out of downward moves"
+                boundary_hit=1
                 break
             fi
         done
@@ -5666,23 +5938,46 @@ CEOF
 
     if (( ! RECOVERED )); then
         echo ""
-        echo "FAILED: Could not start server even with conservative config."
-        echo "Check $SERVER_LOG for details."
+        echo "FAILED: Bidirectional recovery exhausted."
+        echo "Check $SERVER_LOG for the last load attempt."
         tail -20 "$SERVER_LOG" 2>/dev/null
         echo ""
-        echo "═══ Model doesn't fit ═══"
-        echo "  Model needs: ~${VRAM_NEEDED_MB}MB (with overhead)"
-        echo "  Available:   ~$(( TOTAL_VRAM_MB + RAM_AVAIL_MB ))MB (GPU + RAM)"
+        echo "═══ Model does not fit on this system ═══"
+        echo "  Model:           ${MODEL_NAME} — ${LAYER_COUNT} layers, ${EXPERT_COUNT} experts"
+        echo "  File size:       ${TOTAL_SIZE_MB}MB"
+        echo "  Per-layer cost:  ${COST_PER_LAYER_MB}MB GPU / ${EXPERT_PER_LAYER_MB}MB CPU"
         echo ""
-        echo "  Options:"
-        echo "  1. Use a smaller quantization (e.g., Q4 → IQ3, IQ3 → IQ2)"
-        echo "  2. Reduce context size: --ctx-size 16384 or --ctx-size 8192"
-        echo "  3. Use a smaller model (fewer parameters or MoE with fewer active)"
-        if (( GPU_COUNT > 0 )); then
-            echo "  4. Add more RAM (cheapest upgrade for MoE expert offload)"
-        else
-            echo "  4. Add a GPU (even a used RTX 3060 12GB helps significantly)"
+        echo "  Measured ceilings (no margins):"
+        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+            gi=${GPU_ORDER[$i]}
+            echo "    GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): ${MAX_GPU_LAYERS_PER[$gi]} layers max (${GPU_VRAM_FREE[$gi]}MB free)"
+        done
+        echo "    GPU total:      ${MAX_GPU_LAYERS} / ${LAYER_COUNT} layers"
+        echo "    CPU [${CEIL_CPU_LABEL}]: ${MAX_CPU_LAYERS} / ${LAYER_COUNT} layers (${RAM_AVAIL_MB}MB RAM avail − ${RAM_OVERHEAD_PRE_MB}MB overhead)"
+        echo ""
+        # Sweep boundary: even though ceilings said it should fit, the actual
+        # load failed in both sweep directions. Show the gap as observed.
+        if (( boundary_hit )); then
+            echo "  Sweep result:    bidirectional recovery boxed in the boundary."
+            echo "                   Last N tried: $N (range explored [$MIN_N..$MAX_N])."
+            echo "                   Real allocation has more overhead than the ceiling math accounts for."
         fi
+        gap=$(( LAYER_COUNT - MAX_GPU_LAYERS - MAX_CPU_LAYERS ))
+        if (( gap > 0 )); then
+            gap_vram=$(( gap * COST_PER_LAYER_MB ))
+            gap_ram=$(( gap * EXPERT_PER_LAYER_MB ))
+            echo "  Static gap:      ${gap} layers — ~${gap_vram}MB more VRAM or ~${gap_ram}MB more RAM"
+        fi
+        echo ""
+        echo "  Actionable next steps:"
+        echo "    1. Free VRAM: close GPU workloads, or pass --gpus to add another card"
+        if (( USER_NO_MMAP )); then
+            echo "    2. Drop --no-mmap so the kernel can page experts on demand"
+        else
+            echo "    2. Add system RAM (cheapest upgrade for MoE expert offload)"
+        fi
+        echo "    3. Use a smaller quantization (Q4 → IQ3 → IQ2) or smaller model"
+        echo "    4. Reduce context: --ctx-size 16384 or --ctx-size 8192 (KV-bound cases)"
         echo ""
         exit 1
     fi

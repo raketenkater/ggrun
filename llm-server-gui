@@ -507,34 +507,28 @@ opt_parallel=${parallel_ans:-""}
 echo ""
 
 # AI Tune Options (only if selected)
-opt_unlimited=0
 if (( opt_aitune )); then
     echo "═══ AI Tune Options ═══"
-    echo "  Standard: LLM proposes server flags (batch, KV quant, threads...)"
-    echo "            on top of the safe heuristic baseline. 8 rounds by default."
-    echo "  Full placement: also lets the LLM perturb placement/split flags"
-    echo "            (--tensor-split, --split-mode, device/layer placement),"
-    echo "            except explicit user choices such as context, GPU filter, KV."
-    echo "            20 rounds by default. Cached separately from standard."
+    echo "  LLM proposes server flags (batch, KV quant, threads...) on top of"
+    echo "  the safe heuristic baseline. The tunable scope is auto-decided"
+    echo "  by model architecture and GPU count:"
+    echo "    MoE / single-GPU  → perf flags only (placement is owned by the"
+    echo "                        Phase 1 + iterative optimization pipeline)"
+    echo "    Dense + multi-GPU → perf + placement-routing"
+    echo "                        (--tensor-split, --split-mode also unlocked)"
+    echo "  User-explicit flags (--ctx-size, --kv-quality, --gpus, --parallel,"
+    echo "  --mmproj, anything passed via --) are always respected."
     echo ""
     echo "  Each round reloads the model, so total time ≈ rounds × cold-load."
     echo "  Crashes during a round get free retries and don't count."
     echo ""
-    read -rp "  Enable full placement mode (--placement-tune)? [y/N] " unl_ans
-    case "${unl_ans,,}" in y|yes) opt_unlimited=1 ;; esac
-
     default_rounds=8
-    (( opt_unlimited )) && default_rounds=20
     read -rp "  Number of rounds (1-30, default ${default_rounds}): " new_rounds
     opt_rounds=${new_rounds:-$default_rounds}
     [[ ! "$opt_rounds" =~ ^[0-9]+$ ]] && opt_rounds=$default_rounds
     (( opt_rounds < 1 )) && opt_rounds=1
     (( opt_rounds > 30 )) && opt_rounds=30
-    if (( opt_unlimited )); then
-        echo "  Mode: Full placement (--placement-tune)   Rounds: $opt_rounds"
-    else
-        echo "  Mode: Standard             Rounds: $opt_rounds"
-    fi
+    echo "  Rounds: $opt_rounds"
     echo ""
 fi
 
@@ -587,10 +581,13 @@ def is_vision_cache(name):
     return "_v_" in name
 
 def mode_for(name, flags):
+    # Informational label for the cache picker.
+    # Older "_unlimited" caches and newer dense-multi-GPU caches both touch
+    # placement-routing flags; everything else only tunes perf flags.
     placement_keys = {"--tensor-split", "--split-mode", "--device", "--main-gpu", "--mg", "-mg", "--ngl", "-ngl", "--n-gpu-layers"}
     if "_unlimited" in name or any(k in flags for k in placement_keys):
-        return "full placement"
-    return "standard"
+        return "perf+placement"
+    return "perf"
 
 def age_label(ts):
     try:
@@ -679,9 +676,10 @@ build_opt_flags() {
         OPT_FLAGS+=(--tune-cache "$selected_tune_cache")
     else
         (( opt_aitune )) && OPT_FLAGS+=(--ai-tune)
-        (( opt_unlimited )) && OPT_FLAGS+=(--placement-tune)
-        (( opt_aitune && opt_rounds != 8 && opt_unlimited == 0 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
-        (( opt_aitune && opt_unlimited && opt_rounds != 20 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
+        # Default rounds=8; only pass --rounds if the user changed it.
+        # --placement-tune is no longer needed here — llm-server auto-decides
+        # the tunable scope from model arch + GPU count.
+        (( opt_aitune && opt_rounds != 8 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
     fi
     (( opt_bench )) && OPT_FLAGS+=(--benchmark)
     (( opt_vision )) && OPT_FLAGS+=(--vision)

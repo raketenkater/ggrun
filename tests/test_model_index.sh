@@ -22,6 +22,11 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/Test-Draft-Q8_0.
     --tokenizer-model gpt2 --tokenizer-pre qwen35 --vocab-size 16 \
     --layers 2 --hkv 1 --kl 16 --vl 16 --embd 32 --ff 64 --ctx-train 4096
 
+python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/Test-DFlash-Draft-Q4_K_M.gguf" \
+    --arch dflash-draft --name Test-DFlash-Draft --basename Test-DFlash-Draft \
+    --tokenizer-model gpt2 --tokenizer-pre qwen35 --vocab-size 16 \
+    --layers 2 --hkv 1 --kl 16 --vl 16 --embd 32 --ff 64 --ctx-train 4096
+
 python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/mmproj-F16.gguf" \
     --arch clip --name Test-A3B --basename Test-A3B \
     --layers 1 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 --ctx-train 4096
@@ -50,7 +55,7 @@ python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 models = data.get("models") or []
-assert len(models) == 2, models
+assert len(models) == 3, models
 m = next(row for row in models if row["file"] == "Test-A3B-Q4_K_M.gguf")
 assert m["file"] == "Test-A3B-Q4_K_M.gguf", m
 assert m["moe"] is True, m
@@ -80,11 +85,19 @@ drafts=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$C
 [[ "$drafts" == safe* ]]
 [[ "$drafts" == *"Test-Draft-Q8_0.gguf"* ]]
 [[ "$drafts" == *"exact tokenizer match"* ]]
+[[ "$drafts" == *$'requires-backend'* ]]
+[[ "$drafts" == *"Test-DFlash-Draft-Q4_K_M.gguf"* ]]
+[[ "$drafts" == *"requires buun-llama-cpp DFlash backend"* ]]
+
+dflash=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+    suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf" --backend buun-llama-cpp)
+[[ "$dflash" == *$'safe\t70\t'"$MODEL_DIR/Test-DFlash-Draft-Q4_K_M.gguf"* ]]
 
 echo "Test: model index GUI rows"
 gui=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui)
 [[ "$gui" == *"Test-A3B-Q4_K_M.gguf"* ]]
+[[ "$gui" != *"Test-DFlash-Draft-Q4_K_M.gguf"* ]]
 [[ "$gui" == *"vision"* ]]
-[[ "$gui" == *"1 cfg"* ]]
+[[ "$gui" == *"1 tune cache"* ]]
 
 echo "  ✓ model index captures local models, mmproj, tune configs, and download metadata"

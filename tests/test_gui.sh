@@ -59,6 +59,59 @@ out=$(HOME="$TMP/home" LLM_ASSUME_YES=1 LLM_MODEL_DIR="$TMP/empty-model-dir" \
 assert_contains "$out" "Running on CPU only" "direct model launches through llm-server"
 assert_not_contains "$out" "First Run Setup" "direct model does not block on empty model dir"
 
+echo "Test: interactive flow honors saved backend default"
+mkdir -p "$TMP/home/ik_llama.cpp/build/bin" "$TMP/home/llama.cpp/build/bin" "$TMP/home/.config/llm-server" "$TMP/models"
+cat >"$TMP/home/ik_llama.cpp/build/bin/llama-server" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    --help|-h) echo "fake ik llama-server"; exit 0 ;;
+    --version) echo "fake ik 0.0.0"; exit 0 ;;
+esac
+exit 0
+EOF
+cat >"$TMP/home/llama.cpp/build/bin/llama-server" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    --help|-h) echo "fake llama-server"; exit 0 ;;
+    --version) echo "fake 0.0.0"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TMP/home/ik_llama.cpp/build/bin/llama-server" "$TMP/home/llama.cpp/build/bin/llama-server"
+printf 'LLM_BACKEND="ik_llama"\n' >"$TMP/home/.config/llm-server/config.sh"
+cp "$TMP/model.gguf" "$TMP/models/model.gguf"
+
+out=$(printf '\n1\n\n\n\n3\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
+    LLM_MODEL_DIR="$TMP/models" LLM_SERVER_REPO="$TMP/no-repo" "$ROOT/llm-server-gui" 2>&1)
+assert_contains "$out" "Using: ik_llama" "interactive flow selects saved backend"
+assert_contains "$out" "Binary: $TMP/home/ik_llama.cpp/build/bin/llama-server" "dry run uses saved backend binary"
+
+echo "Test: interactive flow launches chosen tuned config"
+mkdir -p "$TMP/home/.cache/llm-server"
+cat >"$TMP/home/.cache/llm-server/tune_model.gguf_test_ik.json" <<'JSON'
+{
+  "model": "model.gguf",
+  "rounds": 4,
+  "baseline_gen_tps": 10.0,
+  "tuned_at": "2026-04-30T00:00:00Z",
+  "best_config": {
+    "name": "gui-test",
+    "gen_tps": 12.0,
+    "flags": {
+      "--cache-type-k": "q8_0",
+      "-ub": 256
+    }
+  }
+}
+JSON
+
+out=$(printf '\n1\n\n\n\n2\n1\n3\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
+    LLM_MODEL_DIR="$TMP/models" LLM_SERVER_REPO="$TMP/no-repo" "$ROOT/llm-server-gui" 2>&1)
+assert_contains "$out" "Choose Tuned Config" "config chooser opens from final action menu"
+assert_contains "$out" "12.00 tok/s" "config chooser shows measured performance"
+assert_contains "$out" "Using selected AI-tuned config: tune_model.gguf_test_ik.json" "dry run uses the selected tuned config"
+assert_contains "$out" "--cache-type-k q8_0" "selected tuned config overrides launch flags"
+
 if (( FAIL > 0 )); then
     echo ""
     echo "GUI regression: $PASS passed, $FAIL failed"

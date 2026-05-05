@@ -154,6 +154,8 @@ def tune_configs(cache_dir: Path, model_file: str) -> list[dict[str, Any]]:
                 "vision": "_v_" in path.name,
                 "placement": "_unlimited" in path.name
                 or any(k in flags for k in ("--tensor-split", "--split-mode", "--device", "-mg", "--ngl")),
+                "selectable": bool(flags) and gen_f > 0,
+                "baseline_wins": bool(data.get("baseline_wins")),
                 "gen_tps": gen_f,
                 "gain_pct": ((gen_f - base_f) / base_f * 100.0) if base_f > 0 else 0.0,
                 "tuned_at": data.get("tuned_at", ""),
@@ -201,6 +203,7 @@ def scan_models(model_dir: Path, cache_dir: Path) -> dict[str, Any]:
             "mmproj": mmproj_candidates(path, model_dir),
             "tune_configs": tune_configs(cache_dir, path.name),
         }
+        model["role"] = "draft" if draft_backend_requirements(model) else "model"
         if downloads.get(str(path)):
             model["download"] = downloads[str(path)]
         models.append(model)
@@ -222,7 +225,36 @@ def update_download(model_dir: Path, cache_dir: Path, repo: str, quant: str, fil
     return data
 
 
-def suggest_drafts(data: dict[str, Any], target: dict[str, Any]) -> list[dict[str, Any]]:
+def draft_backend_requirements(model: dict[str, Any]) -> dict[str, Any]:
+    arch = str(model.get("architecture") or "").lower()
+    name = f"{model.get('file') or ''} {model.get('name') or ''} {model.get('basename') or ''}".lower()
+    if arch == "dflash-draft" or "dflash" in name:
+        return {
+            "backend": "buun-llama-cpp",
+            "capability": "dflash",
+            "flags": ["--spec-type", "dflash"],
+            "reason": "requires buun-llama-cpp DFlash backend",
+        }
+    return {}
+
+
+def backend_satisfies_requirements(requirements: dict[str, Any], backend: str, supports_dflash: bool) -> bool:
+    if not requirements:
+        return True
+    capability = requirements.get("capability")
+    required_backend = requirements.get("backend")
+    if capability == "dflash" and (supports_dflash or backend == required_backend):
+        return True
+    return False
+
+
+def suggest_drafts(
+    data: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    backend: str = "generic",
+    supports_dflash: bool = False,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     target_size = int(target.get("size_bytes", 0) or 0)
     target_tok = (target.get("tokenizer_model") or "", target.get("tokenizer_pre") or "", target.get("vocab_size") or 0)
@@ -232,10 +264,12 @@ def suggest_drafts(data: dict[str, Any], target: dict[str, Any]) -> list[dict[st
         size = int(model.get("size_bytes", 0) or 0)
         reasons: list[str] = []
         score = 0
-        safe = True
+        compatible = True
+        auto_enable = True
 
         if target_size and size >= target_size:
-            safe = False
+            compatible = False
+            auto_enable = False
             reasons.append("not smaller than target")
         elif target_size and size <= target_size * 0.25:
             score += 30
@@ -249,7 +283,8 @@ def suggest_drafts(data: dict[str, Any], target: dict[str, Any]) -> list[dict[st
             score += 60
             reasons.append("exact tokenizer match")
         else:
-            safe = False
+            compatible = False
+            auto_enable = False
             reasons.append(
                 "tokenizer mismatch "
                 f"target={target_tok[0]}/{target_tok[1]}/{target_tok[2]} "
@@ -263,12 +298,38 @@ def suggest_drafts(data: dict[str, Any], target: dict[str, Any]) -> list[dict[st
             score += 5
             reasons.append("draft is dense")
 
-        rows.append({"path": model["path"], "file": model["file"], "score": score, "safe": safe, "reasons": reasons})
-    return sorted(rows, key=lambda row: (row["safe"], row["score"]), reverse=True)
+        requirements = draft_backend_requirements(model)
+        requirements_met = backend_satisfies_requirements(requirements, backend, supports_dflash)
+        if requirements:
+            reasons.append(requirements["reason"])
+            flags = " ".join(requirements.get("flags") or [])
+            if flags:
+                reasons.append(f"requires {flags}")
+        if compatible and not requirements_met:
+            auto_enable = False
+            reasons.append("not auto-enabled for this backend")
+
+        rows.append(
+            {
+                "path": model["path"],
+                "file": model["file"],
+                "score": score,
+                "safe": bool(auto_enable),
+                "compatible": bool(compatible),
+                "auto_enable": bool(auto_enable),
+                "requires_backend": requirements.get("backend", ""),
+                "requires_capability": requirements.get("capability", ""),
+                "required_flags": requirements.get("flags", []),
+                "reasons": reasons,
+            }
+        )
+    return sorted(rows, key=lambda row: (row["auto_enable"], row["compatible"], row["score"]), reverse=True)
 
 
 def gui_rows(data: dict[str, Any]) -> None:
     for model in data.get("models", []):
+        if model.get("role") == "draft":
+            continue
         arch = "MoE" if model.get("moe") else (model.get("architecture") or "dense")
         parts = [f"{model.get('size_gb', 0):.1f}GB", arch]
         quant = model.get("quant")
@@ -278,7 +339,7 @@ def gui_rows(data: dict[str, Any]) -> None:
             parts.append("vision")
         tune_count = len(model.get("tune_configs") or [])
         if tune_count:
-            parts.append(f"{tune_count} cfg")
+            parts.append(f"{tune_count} tune cache")
         repo = (model.get("download") or {}).get("repo")
         if repo:
             parts.append(repo)
@@ -298,6 +359,8 @@ def main() -> int:
     upd.add_argument("--file", action="append", default=[])
     sug = sub.add_parser("suggest-drafts")
     sug.add_argument("--target", required=True)
+    sug.add_argument("--backend", choices=("generic", "llama", "ik_llama", "buun-llama-cpp"), default="generic")
+    sug.add_argument("--supports-dflash", action="store_true")
     sug.add_argument("--format", choices=("json", "text"), default="text")
     args = parser.parse_args()
 
@@ -327,14 +390,19 @@ def main() -> int:
         if target is None:
             print(f"target not found in model index: {args.target}", file=sys.stderr)
             return 1
-        rows = suggest_drafts(data, target)
+        rows = suggest_drafts(data, target, backend=args.backend, supports_dflash=args.supports_dflash)
         if args.format == "json":
             print(json.dumps(rows, indent=2, sort_keys=True))
         elif not rows:
             print("No local draft candidates found.")
         else:
             for row in rows:
-                status = "safe" if row["safe"] else "blocked"
+                if row["safe"]:
+                    status = "safe"
+                elif row.get("compatible") and row.get("requires_backend"):
+                    status = "requires-backend"
+                else:
+                    status = "blocked"
                 print(f"{status}\t{row['score']}\t{row['path']}\t{'; '.join(row['reasons'])}")
         return 0
 
