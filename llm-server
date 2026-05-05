@@ -5517,7 +5517,14 @@ else
     # See issue #8: RTX 4060 Ti 16GB + Qwen3.5-35B-A3B at 64k.
     NCPUMOE_SUPPORTED=0
     KVUNIFIED_SUPPORTED=0
-    if "$LLAMA_SERVER" --help 2>&1 | grep -qE "^ *-ncmoe.*--n-cpu-moe\b"; then
+    # Detect --n-cpu-moe support across both forks:
+    #   mainline llama.cpp: "-ncmoe, --n-cpu-moe N    ..."
+    #   ik_llama.cpp:       "         --n-cpu-moe N   ..."  (no shorthand)
+    # The old `-ncmoe.*--n-cpu-moe` regex required the shorthand, so on
+    # ik_llama detection returned 0 and the entire recovery sweep was
+    # skipped — making large-MoE failures land at "Model doesn't fit"
+    # instead of the data-driven --n-cpu-moe fallback.
+    if "$LLAMA_SERVER" --help 2>&1 | grep -qE "(^| )--n-cpu-moe[ =]"; then
         NCPUMOE_SUPPORTED=1
     fi
     if "$LLAMA_SERVER" --help 2>&1 | grep -qE "^ *-kvu.*--kv-unified\b"; then
