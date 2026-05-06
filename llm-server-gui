@@ -1,48 +1,35 @@
 #!/bin/bash
 # shellcheck disable=SC1090,SC2001
 #
-# llm-server-gui — Terminal model selector for llm-server
-# Lists available GGUF models and launches llm-server with the selected one.
-# After selecting a model, choose context, options, then the final action.
+# llm-server-gui — Single-screen terminal UI for llm-server.
+#
+# A main menu shows status (backend, model dir, settings file) and the
+# available models. Numbers pick a model and open a per-model config
+# screen. Letters trigger actions (settings, download, backend, model
+# dir, update check, quit). Every action returns to the main menu so
+# users always know where they are.
 #
 # Usage:
-#   llm-server-gui                    # Select from configured model dir
-#   llm-server-gui --model-dir /path  # Custom model directory
-#   llm-server-gui --model /path/to/model.gguf  # Launch specific model
-#   llm-server-gui -h|--help          # Show this help message
+#   llm-server-gui                          # interactive UI
+#   llm-server-gui --model-dir /path        # custom model directory
+#   llm-server-gui --model /path/file.gguf  # launch a specific model and exit
+#   llm-server-gui -h | --help              # show this help
 #
-# Interactive options (after model selection):
-#   [a] AI Tune    — Run AI-driven flag optimization (8 rounds)
-#   [b] Benchmark  — Start, run quick benchmark, print tok/s
-#   [v] Vision     — Auto-detect/download mmproj for multimodal
-#   Final action chooses Launch, Dry Run, or Show Cfgs for the selected model
-#   [Enter]        — Finish option toggles
-#
-# All llm-server flags can also be passed directly:
-#   llm-server-gui --benchmark
-#   llm-server-gui --model ~/models/Qwen3.5.gguf --ai-tune
-#   llm-server-gui --gpus 0,1 --port 8082
+# Any other flags are passed straight through to llm-server.
 #
 # Environment:
-#   LLM_MODEL_DIR   Default search path (default: ~/ai_models)
+#   LLM_MODEL_DIR   default search path (default: ~/ai_models)
 #
 
 set -euo pipefail
 
-SPECIFIC_MODEL=""
-
-# Backend preference (ik_llama or llama). Config is sourced below, so this
-# default is applied after loading persistent settings.
-PREFERRED_BACKEND="llama"
-
-# Help flag should be side-effect free: no update checks, config prompts, or
-# backend probing before printing usage.
+# ── Help is side-effect-free: no update check, no probes. ─────────────
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     sed -n '4,/^$/s/^# \?//p' "$0"
     exit 0
 fi
 
-# Auto-detect platform and use correct launcher
+# ── Discovery and config ──────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 _discover_app_home() {
     [[ -n "${LLM_APP_HOME:-}" ]] && { echo "$LLM_APP_HOME"; return 0; }
@@ -57,15 +44,71 @@ LLM_APP_HOME="$(_discover_app_home 2>/dev/null || true)"
 
 CONFIG_DIR="${LLM_CONFIG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/config}}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/llm-server}"
-CONFIG_FILE="$CONFIG_DIR/config.sh"
+CONFIG_FILE="$CONFIG_DIR/config"
 mkdir -p "$CONFIG_DIR"
 
-# Load persistent config
+# Migration: collapse legacy config.sh into the canonical `config` file.
+# Older versions sourced both, leading to backend/binary mismatches between
+# CLI and GUI launches when the two files disagreed. After migration, the
+# GUI and `llm-server config` write to and read from the same single file.
+_migrate_legacy_config_sh() {
+    local canonical="$1"
+    local legacy="${canonical}.sh"
+    [[ -f "$legacy" ]] || return 0
+    if [[ ! -f "$canonical" ]]; then
+        mv "$legacy" "$canonical" 2>/dev/null && \
+            echo "Note: migrated $legacy -> $canonical" >&2
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp "${canonical}.merge.XXXX")" || return 1
+    {
+        echo "# llm-server settings (merged from config + config.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+        awk -F= '
+            /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+            { key = $1; sub(/^[[:space:]]*/, "", key); sub(/[[:space:]]*$/, "", key);
+              val = $0; sub(/^[^=]*=/, "", val); kv[key] = val }
+            END { for (k in kv) print k "=" kv[k] }
+        ' "$canonical" "$legacy"
+    } > "$tmp" && mv "$tmp" "$canonical" || { rm -f "$tmp"; return 1; }
+    local backup
+    backup="$legacy.bak.$(date +%s)"
+    mv "$legacy" "$backup" 2>/dev/null && \
+        echo "Note: merged $legacy into $canonical (legacy archived at $backup)" >&2
+}
+_migrate_legacy_config_sh "$CONFIG_FILE"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
-PREFERRED_BACKEND="${LLM_BACKEND:-$PREFERRED_BACKEND}"
 
+PREFERRED_BACKEND="${LLM_BACKEND:-llama}"
 MODEL_DIR="${LLM_MODEL_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/models}}"
 MODEL_DIR="${MODEL_DIR:-$HOME/ai_models}"
+
+# Sanity-check: LLM_BACKEND vs LLAMA_SERVER agreement. Older configs could
+# contain "LLM_BACKEND=llama" alongside an LLAMA_SERVER path that points at
+# an ik_llama binary (or vice versa). The GUI launches with --server-bin
+# from PREFERRED_BACKEND, but llm-server itself reads LLAMA_SERVER from
+# the same config file when no --server-bin is given. A mismatch makes
+# different entrypoints disagree about which binary to run, and was the
+# root cause of recent "model does not fit" failures via the GUI.
+if [[ -n "${LLAMA_SERVER:-}" ]]; then
+    _server_is_ik=0
+    [[ "$LLAMA_SERVER" == *ik_llama* ]] && _server_is_ik=1
+    if (( _server_is_ik )) && [[ "$PREFERRED_BACKEND" == "llama" ]]; then
+        echo "Warning: settings disagree."
+        echo "  LLM_BACKEND=llama  (mainline) but LLAMA_SERVER points to ik_llama:"
+        echo "    $LLAMA_SERVER"
+        echo "  Pick one with [b] in the main menu, or edit settings with [s]."
+        echo ""
+    elif (( ! _server_is_ik )) && [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
+        echo "Warning: settings disagree."
+        echo "  LLM_BACKEND=ik_llama but LLAMA_SERVER points to mainline llama.cpp:"
+        echo "    $LLAMA_SERVER"
+        echo "  Pick one with [b] in the main menu, or edit settings with [s]."
+        echo ""
+    fi
+    unset _server_is_ik
+fi
+
 IS_MAC=0
 if [[ "$(uname -s)" == "Darwin" ]]; then
     IS_MAC=1
@@ -75,94 +118,84 @@ else
     LAUNCHER="$SCRIPT_DIR/llm-server"
 fi
 
-# Check if backends exist
 IK_BACKEND="$HOME/ik_llama.cpp/build/bin/llama-server"
 LLAMA_BACKEND="$HOME/llama.cpp/build/bin/llama-server"
 
-# Check for updates (same logic as llm-server - works in GUI too with TTY)
-LLM_SERVER_REPO="${LLM_SERVER_REPO:-$HOME/llm-server}"
-CACHE_DIR="$HOME/.cache/llm-server"
 CACHE_DIR="${LLM_CACHE_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/cache}}"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/llm-server}"
 mkdir -p "$CACHE_DIR"
+
+LLM_SERVER_REPO="${LLM_SERVER_REPO:-$HOME/llm-server}"
 UPDATE_DISMISS_FILE="$CACHE_DIR/update_dismissed"
 UPDATE_DISMISS_DAYS=7
 
+# ── Update check (background-safe) ────────────────────────────────────
 _check_repo_behind() {
     local repo_dir="$1" label="$2"
     [[ -d "$repo_dir/.git" ]] || return 1
-    # Fetch latest from origin
     git -C "$repo_dir" fetch origin --quiet 2>/dev/null &
     local fetch_pid=$!
     ( sleep 3; kill "$fetch_pid" 2>/dev/null ) &
     wait "$fetch_pid" 2>/dev/null || true
-    
     local local_head remote_head
     local_head=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null) || return 1
-    # Try origin/main first, then origin/master
-    remote_head=$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null) || remote_head=$(git -C "$repo_dir" rev-parse origin/master 2>/dev/null) || return 1
+    remote_head=$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null) \
+        || remote_head=$(git -C "$repo_dir" rev-parse origin/master 2>/dev/null) || return 1
     [[ "$local_head" != "$remote_head" ]] && echo "$label" && return 0
     return 1
 }
 
 _should_check_updates() {
     if [[ -f "$UPDATE_DISMISS_FILE" ]]; then
-        local dismissed_at
-        dismissed_at=$(cat "$UPDATE_DISMISS_FILE" 2>/dev/null)
-        local now
+        local d now
+        d=$(cat "$UPDATE_DISMISS_FILE" 2>/dev/null) || return 0
         now=$(date +%s)
-        if (( now - dismissed_at < UPDATE_DISMISS_DAYS * 86400 )); then
-            return 1
-        fi
+        (( now - d < UPDATE_DISMISS_DAYS * 86400 )) && return 1
     fi
     return 0
 }
 
-if _should_check_updates && [[ -d "$LLM_SERVER_REPO/.git" ]]; then
-    _updates=()
-    _check_repo_behind "$LLM_SERVER_REPO" "llm-server" && _updates+=("llm-server")
-    [[ -x "$IK_BACKEND" ]] && _check_repo_behind "$HOME/ik_llama.cpp" "ik_llama.cpp" && _updates+=("ik_llama.cpp")
-    [[ -x "$LLAMA_BACKEND" ]] && _check_repo_behind "$HOME/llama.cpp" "llama.cpp" && _updates+=("llama.cpp")
-
-    if (( ${#_updates[@]} > 0 )); then
-        echo "═══ Updates Available ═══"
-        echo "  ⚠ ${_updates[*]}"
-        echo ""
-        # Try to get input - prefer /dev/tty if available, else use stdin
-        if [[ -t 0 ]] || [[ -t 1 ]]; then
-            # Terminal mode - use stdin directly
-            read -r -p "  Update now? [y/N/d=dismiss ${UPDATE_DISMISS_DAYS} days] " _answer
-        else
-            # Pipe mode - try tty, if fail use echo as fallback
-            _answer=$(echo "" | head -1)  # Just skip for piped input
-            echo "  (skipped in piped mode - run in terminal for interactive update)"
-            _answer="n"
-        fi
-        case "${_answer,,}" in
-            y)
-                echo "  Running --update..."
-                exec "$SCRIPT_DIR/llm-server" --update
-                ;;
-            d)
-                mkdir -p "$CACHE_DIR"
-                date +%s > "$UPDATE_DISMISS_FILE"
-                echo "  Dismissed for ${UPDATE_DISMISS_DAYS} days."
-                echo ""
-                ;;
-            *)
-                echo "  Skipped."
-                echo ""
-                ;;
-        esac
+run_update_check() {
+    local force="${1:-0}"
+    if (( force == 0 )) && ! _should_check_updates; then
+        return 0
     fi
-fi
+    local updates=()
+    _check_repo_behind "$LLM_SERVER_REPO" "llm-server" && updates+=("llm-server")
+    [[ -x "$IK_BACKEND" ]] && _check_repo_behind "$HOME/ik_llama.cpp" "ik_llama.cpp" && updates+=("ik_llama.cpp")
+    [[ -x "$LLAMA_BACKEND" ]] && _check_repo_behind "$HOME/llama.cpp" "llama.cpp" && updates+=("llama.cpp")
 
-# Parse args (pass through to llm-server)
+    if (( ${#updates[@]} == 0 )); then
+        (( force )) && echo "  No updates available."
+        return 0
+    fi
+
+    echo ""
+    echo "═══ Updates Available ═══"
+    echo "  ⚠ ${updates[*]}"
+    echo ""
+    local answer
+    if [[ -t 0 ]] || [[ -t 1 ]]; then
+        read -r -p "  Update now? [y/N/d=dismiss ${UPDATE_DISMISS_DAYS} days] " answer
+    else
+        answer="n"
+    fi
+    case "${answer,,}" in
+        y) echo "  Running --update..."; exec "$LAUNCHER" --update ;;
+        d) date +%s > "$UPDATE_DISMISS_FILE"
+           echo "  Dismissed for ${UPDATE_DISMISS_DAYS} days." ;;
+        *) echo "  Skipped." ;;
+    esac
+    echo ""
+}
+
+# ── Argument pass-through ─────────────────────────────────────────────
+SPECIFIC_MODEL=""
 PASSTHROUGH_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model-dir) MODEL_DIR="$2"; shift 2 ;;
-        --model) SPECIFIC_MODEL="$2"; shift 2 ;;
+        --model)     SPECIFIC_MODEL="$2"; shift 2 ;;
         *)           PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
@@ -171,80 +204,40 @@ server_bin_passthrough=0
 ctx_passthrough=0
 for arg in "${PASSTHROUGH_ARGS[@]}"; do
     [[ "$arg" == "--server-bin" ]] && server_bin_passthrough=1
-    [[ "$arg" == "--ctx-size" ]] && ctx_passthrough=1
+    [[ "$arg" == "--ctx-size" || "$arg" == --ctx-size=* ]] && ctx_passthrough=1
 done
 
-SERVER_BIN_FLAG=()
-if (( ! server_bin_passthrough )); then
-    if [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
-        [[ -x "$IK_BACKEND" ]] && SERVER_BIN_FLAG=(--server-bin "$IK_BACKEND")
-    else
-        [[ -x "$LLAMA_BACKEND" ]] && SERVER_BIN_FLAG=(--server-bin "$LLAMA_BACKEND")
+backend_bin_flag() {
+    SERVER_BIN_FLAG=()
+    (( server_bin_passthrough )) && return 0
+    if [[ "$PREFERRED_BACKEND" == "ik_llama" && -x "$IK_BACKEND" ]]; then
+        SERVER_BIN_FLAG=(--server-bin "$IK_BACKEND")
+    elif [[ -x "$LLAMA_BACKEND" ]]; then
+        SERVER_BIN_FLAG=(--server-bin "$LLAMA_BACKEND")
     fi
-fi
+}
 
-# If a specific model is provided, launch directly without TUI or first-run
-# model-directory setup. This keeps scripted GUI entrypoints non-blocking.
+# ── Direct launch path: --model <path> bypasses the UI ────────────────
 if [[ -n "$SPECIFIC_MODEL" ]]; then
-    if [[ ! -f "$SPECIFIC_MODEL" ]]; then
-        echo "Error: Model not found: $SPECIFIC_MODEL"
-        exit 1
-    fi
-    if [[ ! -x "$LAUNCHER" ]]; then
-        echo "Error: llm-server not found at $LAUNCHER"
-        exit 1
-    fi
+    [[ -f "$SPECIFIC_MODEL" ]] || { echo "Error: Model not found: $SPECIFIC_MODEL"; exit 1; }
+    [[ -x "$LAUNCHER" ]] || { echo "Error: llm-server not found at $LAUNCHER"; exit 1; }
+    backend_bin_flag
     export LLM_SERVER_UPDATE_CHECKED=1
     exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "$SPECIFIC_MODEL"
 fi
 
-save_model_dir() {
-    local dir="$1"
-    if grep -q "LLM_MODEL_DIR" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|LLM_MODEL_DIR=.*|LLM_MODEL_DIR=\"$dir\"|" "$CONFIG_FILE"
-    else
-        echo "LLM_MODEL_DIR=\"$dir\"" >> "$CONFIG_FILE"
-    fi
-}
+[[ -x "$LAUNCHER" ]] || { echo "Error: llm-server not found at $LAUNCHER"; exit 1; }
 
-choose_model_dir() {
-    local user_path
-    read -rp "Enter the full path to your model directory: " user_path
-    user_path="${user_path/#\~/$HOME}"
-    if [[ -d "$user_path" ]]; then
-        save_model_dir "$user_path"
-        MODEL_DIR="$user_path"
-        echo "✓ Path saved to $CONFIG_FILE"
-        return 0
-    fi
-    echo "Error: Directory not found: $user_path"
-    return 1
-}
-
-download_model_flow() {
-    local repo
-    echo ""
-    echo "═══ Download GGUF Model ═══"
-    echo "Enter a Hugging Face GGUF repository, for example:"
-    echo "  unsloth/Qwen3.5-27B-GGUF"
-    echo "  bartowski/Llama-3.2-3B-Instruct-GGUF"
-    echo ""
-    read -rp "Repository [blank=cancel]: " repo
-    [[ -z "$repo" ]] && { echo "Download cancelled."; return 1; }
-    mkdir -p "$MODEL_DIR"
-    echo ""
-    echo "Downloading into: $MODEL_DIR"
-    echo "The downloader will recommend a quant based on your VRAM/RAM and ask before downloading."
-    echo ""
-    LLM_SERVER_UPDATE_CHECKED=1 "$LAUNCHER" --model-dir "$MODEL_DIR" "$repo" --download
-}
+# ── Model discovery ──────────────────────────────────────────────────
+declare -a MODEL_PATHS MODEL_DISPLAY
+MODEL_COUNT=0
 
 refresh_models() {
     MODEL_PATHS=()
     MODEL_DISPLAY=()
-    idx=0
-
+    MODEL_COUNT=0
     [[ -d "$MODEL_DIR" ]] || return 0
+
     local indexer
     indexer="$SCRIPT_DIR/model_index.py"
     [[ -f "$indexer" ]] || indexer="$MODEL_DIR/model_index.py"
@@ -253,26 +246,21 @@ refresh_models() {
             [[ -n "$file" && -n "$display" ]] || continue
             MODEL_PATHS+=("$file")
             MODEL_DISPLAY+=("$display")
-            idx=$(( idx + 1 ))
+            MODEL_COUNT=$(( MODEL_COUNT + 1 ))
         done < <(python3 "$indexer" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui 2>/dev/null || true)
-        (( idx > 0 )) && return 0
+        (( MODEL_COUNT > 0 )) && return 0
     fi
 
     while IFS= read -r file; do
+        local basename dir pattern total_bytes sz size_gb arch
         basename=$(basename "$file")
-        # Projector GGUFs are dependencies for vision models, not runnable text models.
         [[ "${basename,,}" == *mmproj*.gguf ]] && continue
-        # Speculative draft GGUFs are dependencies, not user-launchable chat models.
         [[ "${basename,,}" == *dflash-draft*.gguf ]] && continue
-        # Skip split GGUF parts that aren't the first file
         if [[ "$basename" =~ -[0-9]+-of-[0-9]+\.gguf$ ]]; then
             [[ ! "$basename" =~ -00001-of-[0-9]+\.gguf$ ]] && continue
         fi
-
-        # Get total size (including all split parts)
         dir=$(dirname "$file")
         pattern=$(echo "$basename" | sed 's/-[0-9]*-of-[0-9]*\.gguf/.gguf/')
-        # Calculate total bytes (cross-platform: macOS stat -f%z, Linux stat --printf)
         total_bytes=0
         while IFS= read -r part; do
             sz=$(stat -f%z "$part" 2>/dev/null || stat --printf="%s" "$part" 2>/dev/null || echo 0)
@@ -280,288 +268,199 @@ refresh_models() {
         done < <(find "$dir" -name "${pattern%.gguf}*" -type f 2>/dev/null)
         (( total_bytes == 0 )) && total_bytes=$(stat -f%z "$file" 2>/dev/null || stat --printf="%s" "$file" 2>/dev/null || echo 0)
         size_gb=$(awk "BEGIN {printf \"%.1f\", $total_bytes/1073741824}")
-
-        # Detect MoE from filename patterns (A3B, A10B, etc.)
         arch="dense"
         [[ "$basename" =~ A[0-9]+B ]] && arch="MoE"
-
         MODEL_PATHS+=("$file")
         MODEL_DISPLAY+=("$basename (${size_gb}GB, $arch)")
-        idx=$(( idx + 1 ))
+        MODEL_COUNT=$(( MODEL_COUNT + 1 ))
     done < <(find "$MODEL_DIR" -name "*.gguf" -type f 2>/dev/null | sort)
 }
 
-# First-run setup: if no runnable models exist, let the user download or choose a dir.
-refresh_models
-while (( idx == 0 )); do
-    echo "═══ llm-server First Run Setup ═══"
-    echo "No runnable GGUF models found in: $MODEL_DIR"
-    echo ""
-    echo "  [d] Download a model from Hugging Face"
-    echo "  [p] Choose an existing model directory"
-    echo "  [q] Quit"
-    read -rp "Choice [d]: " first_choice
-    first_choice=${first_choice:-d}
-    case "$first_choice" in
-        d|D)
-            download_model_flow || true
-            refresh_models
-            ;;
-        p|P)
-            choose_model_dir || true
-            refresh_models
-            ;;
-        q|Q)
-            exit 0
-            ;;
-        *)
-            echo "Invalid choice."
-            ;;
-    esac
-done
+# ── Persistence helpers ───────────────────────────────────────────────
+save_kv() {
+    local key="$1" value="$2"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
+    else
+        echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
+    fi
+}
 
-if [[ ! -d "$MODEL_DIR" ]]; then
-    echo "Error: Model directory not found: $MODEL_DIR"
-    exit 1
-fi
-
-if [[ ! -x "$LAUNCHER" ]]; then
-    echo "Error: llm-server not found at $LAUNCHER"
-    exit 1
-fi
-
-# Backend selection
-if (( IS_MAC )); then
-    echo "═══ macOS Metal Backend ═══"
-    echo "  Using llama.cpp Metal (Apple Silicon)"
-    PREFERRED_BACKEND="llama"
-else
-    echo "═══ Select Backend ═══"
-    echo "  [1] llama.cpp       — better stability (recommended for production)"
-    echo "  [2] ik_llama.cpp   — better performance (experimental features)"
-    echo ""
-    ik_avail=0; llama_avail=0
+# ── Action: backend selection ─────────────────────────────────────────
+cmd_backend() {
+    if (( IS_MAC )); then
+        echo "  macOS uses the bundled Metal backend; no choice needed."
+        return 0
+    fi
+    local ik_avail=0 llama_avail=0
     [[ -x "$IK_BACKEND" ]] && ik_avail=1
     [[ -x "$LLAMA_BACKEND" ]] && llama_avail=1
-
-    # If only one is available, auto-select
-    backend_choice=1
-    if (( ik_avail )) && (( ! llama_avail )); then
-        backend_choice=2
-    elif (( ! ik_avail )) && (( llama_avail )); then
-        backend_choice=1
-    elif [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
-        backend_choice=2
-    else
-        backend_choice=1
+    echo "  [1] llama.cpp     stable, recommended"
+    echo "  [2] ik_llama.cpp  faster on MoE, experimental"
+    if (( ! ik_avail && ! llama_avail )); then
+        echo "  (neither backend is built — install before selecting)"
+        return 1
     fi
-
-    if (( ik_avail && llama_avail )); then
-        local_default="$backend_choice"
-        read -rp "Choice [$local_default]: " backend_choice
-        backend_choice=${backend_choice:-$local_default}
-    fi
-
-    if (( backend_choice == 2 )) && (( ik_avail )); then
+    (( ! ik_avail ))    && echo "  (ik_llama.cpp not built at $IK_BACKEND)"
+    (( ! llama_avail )) && echo "  (llama.cpp not built at $LLAMA_BACKEND)"
+    local default=1
+    [[ "$PREFERRED_BACKEND" == "ik_llama" ]] && default=2
+    local choice
+    read -rp "  Backend [${default}]: " choice
+    choice=${choice:-$default}
+    if [[ "$choice" == "2" ]] && (( ik_avail )); then
         PREFERRED_BACKEND="ik_llama"
-        if grep -q "LLM_BACKEND" "$CONFIG_FILE" 2>/dev/null; then
-            sed -i "s|LLM_BACKEND=.*|LLM_BACKEND=\"ik_llama\"|" "$CONFIG_FILE"
-        else
-            echo 'LLM_BACKEND="ik_llama"' >> "$CONFIG_FILE"
-        fi
-    else
+    elif [[ "$choice" == "1" ]] && (( llama_avail )); then
         PREFERRED_BACKEND="llama"
-        if grep -q "LLM_BACKEND" "$CONFIG_FILE" 2>/dev/null; then
-            sed -i 's|LLM_BACKEND=.*|LLM_BACKEND="llama"|' "$CONFIG_FILE"
-        else
-            echo 'LLM_BACKEND="llama"' >> "$CONFIG_FILE"
-        fi
+    else
+        echo "  Backend not changed."
+        return 0
     fi
-fi
-echo "  Using: $PREFERRED_BACKEND"
-echo ""
+    save_kv LLM_BACKEND "$PREFERRED_BACKEND"
+    echo "  Backend: $PREFERRED_BACKEND (saved)"
+}
 
-# Display menu
-echo ""
-echo "═══ Available Models ═══"
-echo ""
-for i in $(seq 0 $(( idx - 1 ))); do
-    printf "  %2d. %s\n" "$((i+1))" "${MODEL_DISPLAY[$i]}"
-done
-echo ""
-
-# Read selection
-while true; do
-    read -rp "Select model (1-$idx, d=download, s=show-configs, q to quit): " choice
-    [[ "$choice" == "q" || "$choice" == "Q" ]] && exit 0
-    if [[ "$choice" == "d" || "$choice" == "D" ]]; then
-        echo ""
-        download_model_flow || true
+# ── Action: model directory ───────────────────────────────────────────
+cmd_model_dir() {
+    echo "  Current model dir: $MODEL_DIR"
+    local user_path
+    read -rp "  New path (Enter to cancel, ~ allowed): " user_path
+    [[ -z "$user_path" ]] && { echo "  Cancelled."; return 0; }
+    user_path="${user_path/#\~/$HOME}"
+    if [[ -d "$user_path" ]]; then
+        save_kv LLM_MODEL_DIR "$user_path"
+        MODEL_DIR="$user_path"
+        echo "  Model dir saved: $MODEL_DIR"
         refresh_models
-        echo ""
-        echo "═══ Available Models ═══"
-        echo ""
-        for i in $(seq 0 $(( idx - 1 ))); do
-            printf "  %2d. %s\n" "$((i+1))" "${MODEL_DISPLAY[$i]}"
-        done
-        echo ""
-        continue
+    else
+        echo "  Error: not a directory: $user_path"
     fi
-    if [[ "$choice" == "s" || "$choice" == "S" ]]; then
-        echo ""
-        "$LAUNCHER" --show-configs
-        echo ""
-        continue
-    fi
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= idx )); then
-        break
-    fi
-    echo "Invalid choice."
-done
+}
 
-SELECTED="${MODEL_PATHS[$((choice-1))]}"
-echo ""
+# ── Action: download model ────────────────────────────────────────────
+cmd_download() {
+    local repo
+    echo "  Hugging Face GGUF repository (e.g. unsloth/Qwen3.5-27B-GGUF)."
+    read -rp "  Repository [Enter=cancel]: " repo
+    [[ -z "$repo" ]] && { echo "  Cancelled."; return 0; }
+    mkdir -p "$MODEL_DIR"
+    echo "  Downloading into: $MODEL_DIR"
+    LLM_SERVER_UPDATE_CHECKED=1 "$LAUNCHER" --model-dir "$MODEL_DIR" "$repo" --download || true
+    refresh_models
+}
 
-prompt_context_size() {
-    local model_path="$1"
-    local default_ctx="${LLM_CTX_SIZE:-65536}"
-    local max_ctx="" parsed line answer
+# ── Action: settings ──────────────────────────────────────────────────
+cmd_settings() {
+    "$LAUNCHER" config show
+    echo ""
+    local ed
+    read -rp "  Edit settings file in \$EDITOR? [y/N] " ed
+    [[ "${ed,,}" == "y" ]] && "$LAUNCHER" config edit
+}
+
+# ── Per-model: detect max train context ───────────────────────────────
+detect_max_ctx() {
+    local model_path="$1" max_ctx="" parsed line
     local parse_gguf="$SCRIPT_DIR/parse_gguf.py"
-    if [[ -f "$parse_gguf" ]]; then
-        parsed=$(python3 "$parse_gguf" --format shell "$model_path" 2>/dev/null || true)
-        while IFS= read -r line; do
-            case "$line" in
-                CTX_TRAIN=*) max_ctx="${line#CTX_TRAIN=}" ;;
-            esac
-        done <<< "$parsed"
-    fi
-    [[ "$default_ctx" =~ ^[0-9]+$ ]] || default_ctx=65536
-    [[ "$max_ctx" =~ ^[0-9]+$ ]] || max_ctx=""
+    [[ -f "$parse_gguf" ]] || { echo ""; return 0; }
+    parsed=$(python3 "$parse_gguf" --format shell "$model_path" 2>/dev/null || true)
+    while IFS= read -r line; do
+        case "$line" in CTX_TRAIN=*) max_ctx="${line#CTX_TRAIN=}" ;; esac
+    done <<< "$parsed"
+    [[ "$max_ctx" =~ ^[0-9]+$ ]] && echo "$max_ctx" || echo ""
+}
 
-    echo "═══ Context Size ═══" >&2
-    if [[ -n "$max_ctx" && "$max_ctx" != "0" ]]; then
-        echo "  Model train context: $max_ctx" >&2
-        echo "  Default context:     $default_ctx" >&2
-        read -rp "  Context size [Enter=$default_ctx, max=$max_ctx]: " answer
-        case "${answer,,}" in
-            "") echo "$default_ctx" ;;
-            max|m) echo "$max_ctx" ;;
-            *)
-                if [[ "$answer" =~ ^[0-9]+$ && "$answer" -gt 0 ]]; then
-                    echo "$answer"
-                else
-                    echo "  Invalid context, using default $default_ctx" >&2
-                    echo "$default_ctx"
-                fi
-                ;;
+# ── Per-model: estimate max ctx that actually fits in available memory ──
+# Returns a max-ctx estimate in tokens, or empty if there is not enough
+# measured data to produce one.
+#
+# Strict data rule: we only report ctx values we have empirical evidence for.
+# The "fit" estimate is the LARGEST ctx for which a valid probe exists for
+# this model (probes are written by llm-server only after a successful
+# load + KV allocation). We do not extrapolate past that — the closed-form
+# math doesn't account for per-GPU constraints under kv_unified, where
+# even abundant total VRAM cannot hold the contiguous KV buffer that ends
+# up on the main GPU. So instead of guessing, we only promise what we've
+# seen work.
+#
+# If we have no valid probe for this model we return empty: the user's
+# first launch will write one, and from then on the estimate is real.
+estimate_fit_ctx() {
+    local model_path="$1"
+    local parse_gguf="$SCRIPT_DIR/parse_gguf.py"
+    [[ -f "$parse_gguf" ]] || { echo ""; return 0; }
+
+    local model_name; model_name=$(basename "$model_path")
+    local LAYER_COUNT=0 CTX_TRAIN=0
+    local key val
+    while IFS='=' read -r key val; do
+        val="${val%\'}"; val="${val#\'}"
+        case "$key" in
+            LAYER_COUNT|CTX_TRAIN)
+                [[ "$val" =~ ^[0-9]+$ ]] && eval "$key=$val" ;;
         esac
-    else
-        read -rp "  Context size [Enter=$default_ctx]: " answer
-        if [[ "$answer" =~ ^[0-9]+$ && "$answer" -gt 0 ]]; then
-            echo "$answer"
-        else
-            echo "$default_ctx"
+    done < <(python3 "$parse_gguf" --format shell "$model_path" 2>/dev/null || true)
+    (( LAYER_COUNT > 0 )) || { echo ""; return 0; }
+
+    local probe_dir="$CACHE_DIR/probes"
+    [[ -d "$probe_dir" ]] || { echo ""; return 0; }
+
+    # Walk every probe entry that mentions this model. Each probe header
+    # records the ctx it was taken at, and the body has PROBED_KV_PER_LAYER_MB.
+    # A probe was only written if the model successfully loaded + allocated
+    # KV at that ctx — so the probe ctx is empirical evidence that this
+    # ctx works on this hardware.
+    #
+    # Reject readings whose implied total KV exceeds total system memory:
+    # those entries caught a transient buffer rather than steady-state KV
+    # (observed on Minimax: 13392 MB/layer × 62 = 830 GB at 196k ctx, which
+    # is physically impossible). When that filter trips we drop the entry
+    # entirely — we can't trust any number from a corrupted probe.
+    local total_sys_mem_mb=0
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local _vram_total
+        _vram_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+            | awk '{s+=$1} END {print s+0}')
+        total_sys_mem_mb=$_vram_total
+    fi
+    local _ram_total
+    _ram_total=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+    total_sys_mem_mb=$(( total_sys_mem_mb + _ram_total ))
+
+    local max_valid_ctx=0 f probe_ctx probe_kv_layer
+    while IFS= read -r f; do
+        probe_ctx=$(grep -oE "ctx=[0-9]+" "$f" 2>/dev/null | head -1 | cut -d= -f2)
+        probe_kv_layer=$(grep -oE "PROBED_KV_PER_LAYER_MB=[0-9]+" "$f" 2>/dev/null | head -1 | cut -d= -f2)
+        [[ "$probe_ctx" =~ ^[0-9]+$ && "$probe_kv_layer" =~ ^[0-9]+$ ]] || continue
+        (( probe_ctx > 0 && probe_kv_layer > 0 )) || continue
+        # Reject corrupted probes: implied total KV must fit somewhere.
+        if (( total_sys_mem_mb > 0 )); then
+            local implied_kv_total=$(( probe_kv_layer * LAYER_COUNT ))
+            (( implied_kv_total > total_sys_mem_mb )) && continue
         fi
-    fi
+        # This probe is from a real successful load at this ctx → record.
+        (( probe_ctx > max_valid_ctx )) && max_valid_ctx=$probe_ctx
+    done < <(grep -l "$model_name" "$probe_dir"/*.probe 2>/dev/null)
+
+    (( max_valid_ctx > 0 )) || { echo ""; return 0; }
+    (( CTX_TRAIN > 0 && max_valid_ctx > CTX_TRAIN )) && max_valid_ctx=$CTX_TRAIN
+    echo "$max_valid_ctx"
 }
 
-opt_ctx=""
-if (( ! ctx_passthrough )); then
-    opt_ctx=$(prompt_context_size "$SELECTED")
-    echo "  Using context: $opt_ctx"
-    echo ""
-fi
-
-# Option toggles (skip with Enter)
-OPT_FLAGS=()
-echo "Options (toggle with letter, Enter when done):"
-opt_aitune=0; opt_bench=0; opt_vision=0; opt_keepalive=0
-opt_rounds=8  # default rounds for AI Tune
-print_opts() {
-    local a="off" b="off" v="off" k="off"
-    (( opt_aitune )) && a="ON"
-    (( opt_bench )) && b="ON"
-    (( opt_vision )) && v="ON"
-    (( opt_keepalive )) && k="ON"
-    printf "  [a] AITune %-3s  [b] Bench %-3s  [v] Vision %-3s  [k] KeepAlive %-3s\r" "$a" "$b" "$v" "$k"
-}
-print_opts
-while true; do
-    read -rsn1 key
-    case "$key" in
-        a|A) (( opt_aitune = !opt_aitune )) || true ;;
-        b|B) (( opt_bench = !opt_bench )) || true ;;
-        v|V) (( opt_vision = !opt_vision )) || true ;;
-        k|K) (( opt_keepalive = !opt_keepalive )) || true ;;
-        "") break ;;
-        *) continue ;;
-    esac
-    printf "\r%200s\r" ""
-    print_opts
-done
-echo ""
-
-# Parallel slots selection (available for all launches)
-read -rp "  Number of parallel users/slots (default 4): " parallel_ans
-opt_parallel=${parallel_ans:-""}
-echo ""
-
-# AI Tune Options (only if selected)
-if (( opt_aitune )); then
-    echo "═══ AI Tune Options ═══"
-    echo "  LLM proposes server flags (batch, KV quant, threads...) on top of"
-    echo "  the safe heuristic baseline. The tunable scope is auto-decided"
-    echo "  by model architecture and GPU count:"
-    echo "    MoE / single-GPU  → perf flags only (placement is owned by the"
-    echo "                        Phase 1 + iterative optimization pipeline)"
-    echo "    Dense + multi-GPU → perf + placement-routing"
-    echo "                        (--tensor-split, --split-mode also unlocked)"
-    echo "  User-explicit flags (--ctx-size, --kv-quality, --gpus, --parallel,"
-    echo "  --mmproj, anything passed via --) are always respected."
-    echo ""
-    echo "  Each round reloads the model, so total time ≈ rounds × cold-load."
-    echo "  Crashes during a round get free retries and don't count."
-    echo ""
-    default_rounds=8
-    read -rp "  Number of rounds (1-30, default ${default_rounds}): " new_rounds
-    opt_rounds=${new_rounds:-$default_rounds}
-    [[ ! "$opt_rounds" =~ ^[0-9]+$ ]] && opt_rounds=$default_rounds
-    (( opt_rounds < 1 )) && opt_rounds=1
-    (( opt_rounds > 30 )) && opt_rounds=30
-    echo "  Rounds: $opt_rounds"
-    echo ""
-fi
-
-# Add server-bin based on backend preference unless the caller supplied one.
-if (( ! server_bin_passthrough )); then
-    if [[ "$PREFERRED_BACKEND" == "ik_llama" ]]; then
-        [[ -x "$IK_BACKEND" ]] && SERVER_BIN_FLAG=(--server-bin "$IK_BACKEND")
-    else
-        [[ -x "$LLAMA_BACKEND" ]] && SERVER_BIN_FLAG=(--server-bin "$LLAMA_BACKEND")
-    fi
-fi
-
-selected_tune_cache=""
-selected_tune_label="auto"
-
-choose_tuned_config() {
-    local model_name backend_tag vision_flag
-    model_name=$(basename "$SELECTED")
+# ── Per-model: tuned config picker ────────────────────────────────────
+list_tuned_configs() {
+    # Args: model_basename
+    # Output: TAB-separated rows  "<path>\t<label>" sorted by gen tok/s desc.
+    local model_name="$1" backend_tag vision_flag
     case "$PREFERRED_BACKEND" in
         ik_llama) backend_tag="ik" ;;
-        llama) backend_tag="llama" ;;
-        *) backend_tag="llama" ;;
+        *)        backend_tag="llama" ;;
     esac
-    vision_flag=0
-    (( opt_vision )) && vision_flag=1
-
-    local entries=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && entries+=("$line")
-    done < <(MODEL_NAME="$model_name" BACKEND_TAG="$backend_tag" VISION_FLAG="$vision_flag" CACHE_DIR="$CACHE_DIR" python3 - <<'PY'
-import glob, json, os, sys
+    vision_flag="${2:-0}"
+    MODEL_NAME="$model_name" BACKEND_TAG="$backend_tag" VISION_FLAG="$vision_flag" \
+        CACHE_DIR="$CACHE_DIR" python3 - <<'PY'
+import glob, json, os
 from datetime import datetime, timezone
-
 cache_dir = os.environ["CACHE_DIR"]
 model = os.environ["MODEL_NAME"]
 backend = os.environ["BACKEND_TAG"]
@@ -569,22 +468,16 @@ want_vision = os.environ.get("VISION_FLAG") == "1"
 
 def cache_backend(name):
     stem = name[:-5] if name.endswith(".json") else name
-    if "_vulkan" in stem:
-        return "vulkan"
-    if "_ik" in stem:
-        return "ik"
-    if "_llama" in stem:
-        return "llama"
+    if "_vulkan" in stem: return "vulkan"
+    if "_ik" in stem:     return "ik"
+    if "_llama" in stem:  return "llama"
     return "llama"
 
-def is_vision_cache(name):
-    return "_v_" in name
+def is_vision_cache(name): return "_v_" in name
 
 def mode_for(name, flags):
-    # Informational label for the cache picker.
-    # Older "_unlimited" caches and newer dense-multi-GPU caches both touch
-    # placement-routing flags; everything else only tunes perf flags.
-    placement_keys = {"--tensor-split", "--split-mode", "--device", "--main-gpu", "--mg", "-mg", "--ngl", "-ngl", "--n-gpu-layers"}
+    placement_keys = {"--tensor-split","--split-mode","--device","--main-gpu",
+                      "--mg","-mg","--ngl","-ngl","--n-gpu-layers"}
     if "_unlimited" in name or any(k in flags for k in placement_keys):
         return "perf+placement"
     return "perf"
@@ -599,139 +492,390 @@ def age_label(ts):
 rows = []
 for path in glob.glob(os.path.join(cache_dir, f"tune_{model}_*.json")):
     name = os.path.basename(path)
-    if cache_backend(name) != backend:
-        continue
-    if is_vision_cache(name) != want_vision:
-        continue
+    if cache_backend(name) != backend: continue
+    if is_vision_cache(name) != want_vision: continue
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.load(open(path, encoding="utf-8"))
     except Exception:
         continue
-    if data.get("model") != model:
-        continue
+    if data.get("model") != model: continue
     best = data.get("best_config") or {}
     flags = best.get("flags") or {}
-    if not isinstance(flags, dict) or not flags:
-        continue
-    gen = best.get("gen_tps") or 0
-    base = data.get("baseline_gen_tps") or 0
+    if not isinstance(flags, dict) or not flags: continue
     try:
-        gen = float(gen)
-        base = float(base)
+        gen  = float(best.get("gen_tps") or 0)
+        base = float(data.get("baseline_gen_tps") or 0)
     except Exception:
         continue
-    if gen <= 0:
-        continue
+    if gen <= 0: continue
     gain = ((gen - base) / base * 100.0) if base > 0 else 0.0
     kv = flags.get("--cache-type-k") or flags.get("--cache-type-v") or "base-kv"
     rounds = data.get("rounds", "?")
-    mode = mode_for(name, flags)
-    label = f"{gen:.2f} tok/s ({gain:+.1f}%) | {mode} | {backend} | {kv} | {rounds} rounds | {age_label(data.get('tuned_at'))}"
+    label = (f"{gen:.2f} tok/s ({gain:+.1f}%) | {mode_for(name, flags)} | "
+             f"{backend} | {kv} | {rounds} rounds | {age_label(data.get('tuned_at'))}")
     rows.append((gen, path, label))
 
 for _, path, label in sorted(rows, reverse=True):
     print(path + "\t" + label)
 PY
-)
+}
 
-    echo ""
-    echo "═══ Choose Tuned Config ═══"
-    if (( ${#entries[@]} == 0 )); then
-        echo "  No runnable tuned configs match this model/backend/options."
-        echo "  Run AI Tune first to add one, or use auto launch."
+count_tuned_configs() {
+    local model_name="$1"
+    list_tuned_configs "$model_name" 2>/dev/null | grep -c . || true
+}
+
+# ── Per-model configure & launch screen ───────────────────────────────
+configure_model() {
+    local model_path="$1"
+    local model_name; model_name=$(basename "$model_path")
+    local max_ctx; max_ctx=$(detect_max_ctx "$model_path")
+    local fit_ctx; fit_ctx=$(estimate_fit_ctx "$model_path")
+
+    local default_ctx="${LLM_CTX_SIZE:-65536}"
+    [[ "$default_ctx" =~ ^[0-9]+$ ]] || default_ctx=65536
+    # If the requested default exceeds what fits, start at the fit estimate
+    # so the user's first impulse (Enter at every prompt) doesn't trigger
+    # the does-not-fit safety exit.
+    local ctx="$default_ctx"
+    if (( ctx_passthrough )); then
+        ctx=""
+    elif [[ -n "$fit_ctx" ]] && (( ctx > fit_ctx )); then
+        ctx=$fit_ctx
+    fi
+    local parallel=""
+    local kv_place="${LLM_KV_PLACEMENT:-auto}"
+    case "$kv_place" in auto|gpu|cpu) ;; *) kv_place="auto" ;; esac
+    local opt_aitune=0 opt_bench=0 opt_vision=0 opt_keepalive=0
+    local opt_rounds=8
+    local tune_cache="" tune_label="auto"
+
+    while true; do
+        clear 2>/dev/null || printf '\033c'
+        echo "═══ Configure: $model_name ═══"
+        local ctx_hint=""
+        if [[ -n "$max_ctx" || -n "$fit_ctx" ]]; then
+            ctx_hint=" ("
+            [[ -n "$fit_ctx" ]] && ctx_hint+="fits ~$fit_ctx"
+            [[ -n "$fit_ctx" && -n "$max_ctx" ]] && ctx_hint+=", "
+            [[ -n "$max_ctx" ]] && ctx_hint+="train max $max_ctx"
+            ctx_hint+=")"
+        fi
+        printf "  [c] Context size       %s%s\n" "${ctx:-passthrough}" "$ctx_hint"
+        printf "  [p] Parallel slots     %s\n" "${parallel:-default (4)}"
+        printf "  [K] KV placement       %s\n" "$kv_place"
+        printf "  [t] Tuned config       %s\n" "$tune_label"
+        printf "  [a] AI tune            %s\n" "$( (( opt_aitune )) && echo on || echo off)"
+        if (( opt_aitune )); then
+            printf "  [r] AI tune rounds     %s\n" "$opt_rounds"
+        fi
+        printf "  [v] Vision (mmproj)    %s\n" "$( (( opt_vision )) && echo on || echo off)"
+        printf "  [b] Benchmark mode     %s\n" "$( (( opt_bench )) && echo on || echo off)"
+        printf "  [k] Keep-alive restart %s\n" "$( (( opt_keepalive )) && echo on || echo off)"
         echo ""
+        echo "  [L] Launch              [D] Dry run"
+        echo "  [S] Show configs        [<] Back to main menu"
+        echo ""
+        local key
+        read -rp "  Action: " key
+        case "$key" in
+            c|C)
+                local ans hint="${ctx:-passthrough}"
+                [[ -n "$fit_ctx" ]] && hint+=", fit=$fit_ctx"
+                [[ -n "$max_ctx" ]] && hint+=", max=$max_ctx"
+                read -rp "    Context (number, 'fit'=largest that fits, 'max'=train max) [$hint]: " ans
+                case "${ans,,}" in
+                    fit|f) [[ -n "$fit_ctx" ]] && ctx="$fit_ctx" ;;
+                    max|m) [[ -n "$max_ctx" ]] && ctx="$max_ctx" ;;
+                    "")    : ;;
+                    *)
+                        if [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]]; then
+                            ctx="$ans"
+                            if [[ -n "$fit_ctx" ]] && (( ans > fit_ctx )); then
+                                echo "    Note: $ans > fit estimate ($fit_ctx) — may trigger does-not-fit."
+                                sleep 1
+                            fi
+                        fi
+                        ;;
+                esac
+                ;;
+            p|P)
+                local ans
+                read -rp "    Parallel slots (Enter=default 4): " ans
+                parallel="$ans"
+                ;;
+            K)
+                local ans
+                read -rp "    KV placement: [a]uto GPU-first, [g]pu, [c]pu [$kv_place]: " ans
+                case "${ans,,}" in
+                    a|auto) kv_place="auto" ;;
+                    g|gpu)  kv_place="gpu" ;;
+                    c|cpu)  kv_place="cpu" ;;
+                    "")     : ;;
+                esac
+                ;;
+            a|A) (( opt_aitune = !opt_aitune )) || true ;;
+            r|R)
+                if (( opt_aitune )); then
+                    local ans
+                    read -rp "    AI tune rounds (1-30, default 8): " ans
+                    if [[ "$ans" =~ ^[0-9]+$ ]]; then
+                        opt_rounds=$ans
+                        (( opt_rounds < 1 )) && opt_rounds=1
+                        (( opt_rounds > 30 )) && opt_rounds=30
+                    fi
+                fi
+                ;;
+            v|V) (( opt_vision = !opt_vision )) || true ;;
+            b|B) (( opt_bench = !opt_bench )) || true ;;
+            k) (( opt_keepalive = !opt_keepalive )) || true ;;
+            t|T)
+                pick_tuned_config "$model_name" "$opt_vision"
+                tune_cache="$_picked_path"
+                tune_label="$_picked_label"
+                ;;
+            L)
+                run_action launch ;;
+            D)
+                run_action dry ;;
+            S)
+                run_action configs ;;
+            "<"|q|Q|"")
+                return 0 ;;
+            *)
+                echo "  Invalid action: '$key'"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ── Tuned config picker (sub-screen) ──────────────────────────────────
+pick_tuned_config() {
+    local model_name="$1" vision="$2"
+    _picked_path=""
+    _picked_label="auto"
+    echo ""
+    echo "  ═══ Tuned configs for $model_name ═══"
+    local entries=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && entries+=("$line")
+    done < <(list_tuned_configs "$model_name" "$vision")
+    if (( ${#entries[@]} == 0 )); then
+        echo "    No tuned configs match this model/backend/options."
+        echo "    Run AI tune to create one."
+        sleep 2
         return 0
     fi
-    echo "  [0] Auto / heuristic cache selection"
+    echo "    [0] Auto / heuristic cache selection"
     local i path label pick
     for i in "${!entries[@]}"; do
         path="${entries[$i]%%$'\t'*}"
         label="${entries[$i]#*$'\t'}"
-        printf "  [%d] %s\n" "$(( i + 1 ))" "$label"
-        printf "      %s\n" "$(basename "$path")"
+        printf "    [%d] %s\n" "$(( i + 1 ))" "$label"
+        printf "        %s\n" "$(basename "$path")"
     done
-    read -rp "Select config [0]: " pick
+    read -rp "  Select config [0]: " pick
     pick=${pick:-0}
     if [[ "$pick" == "0" ]]; then
-        selected_tune_cache=""
-        selected_tune_label="auto"
-        echo "  Selected: auto"
+        _picked_path=""
+        _picked_label="auto"
     elif [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#entries[@]} )); then
-        selected_tune_cache="${entries[$(( pick - 1 ))]%%$'\t'*}"
-        selected_tune_label="${entries[$(( pick - 1 ))]#*$'\t'}"
-        echo "  Selected: $selected_tune_label"
-    else
-        echo "  Invalid selection; keeping: $selected_tune_label"
+        _picked_path="${entries[$(( pick - 1 ))]%%$'\t'*}"
+        _picked_label="${entries[$(( pick - 1 ))]#*$'\t'}"
     fi
+}
+
+# ── Pre-launch walkthrough: confirm critical decisions ────────────────
+# Called only on Launch (not Dry / Show-configs). For each critical field
+# it offers the current value as default; Enter accepts, anything else
+# overrides. Skip questions the user has already explicitly addressed
+# from the toggle screen so we don't nag.
+prelaunch_walkthrough() {
+    local model_name; model_name=$(basename "$model_path")
+    echo ""
+    echo "  ─── Pre-launch checklist ───"
+
+    # 1. Context size
+    local ans hint="${ctx:-passthrough}"
+    [[ -n "$fit_ctx" ]] && hint+=", fit=$fit_ctx"
+    [[ -n "$max_ctx" ]] && hint+=", max=$max_ctx"
+    read -rp "    Context (number, 'fit'/'max', Enter=keep) [$hint]: " ans
+    case "${ans,,}" in
+        fit|f) [[ -n "$fit_ctx" ]] && ctx="$fit_ctx" ;;
+        max|m) [[ -n "$max_ctx" ]] && ctx="$max_ctx" ;;
+        "")    : ;;
+        *) [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]] && ctx="$ans" ;;
+    esac
+
+    # 2. Vision (multimodal mmproj). Only ask if not already on.
+    if (( ! opt_vision )); then
+        read -rp "    Multimodal / vision support (auto-detect mmproj)? [y/N]: " ans
+        [[ "${ans,,}" == "y" ]] && opt_vision=1
+    fi
+
+    # 3. AI tune — only ask if no tuned cache exists AND user hasn't picked one
+    #    AND user hasn't already toggled ai-tune on.
+    if [[ -z "$tune_cache" ]] && (( ! opt_aitune )); then
+        local ntuned
+        ntuned=$(count_tuned_configs "$model_name")
+        if (( ntuned == 0 )); then
+            read -rp "    No tuned config exists for this model. Run AI tune now? [y/N]: " ans
+            if [[ "${ans,,}" == "y" ]]; then
+                opt_aitune=1
+                read -rp "    Rounds (1-30, default 8): " ans
+                if [[ "$ans" =~ ^[0-9]+$ ]]; then
+                    opt_rounds=$ans
+                    (( opt_rounds < 1 ))  && opt_rounds=1
+                    (( opt_rounds > 30 )) && opt_rounds=30
+                fi
+            fi
+        fi
+    fi
+
+    # 4. Parallel slots — only ask if user hasn't set it explicitly.
+    if [[ -z "$parallel" ]]; then
+        read -rp "    Parallel slots / users [Enter=4]: " ans
+        [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]] && parallel="$ans"
+    fi
+
+    # 5. KV placement — auto is GPU-first and only prompts in the launcher
+    # when GPU KV is projected to dominate VRAM or significantly reduce GPU
+    # expert layers.
+    if [[ "$kv_place" == "auto" ]]; then
+        read -rp "    KV placement [auto GPU-first / gpu / cpu, Enter=auto]: " ans
+        case "${ans,,}" in
+            gpu|g) kv_place="gpu" ;;
+            cpu|c) kv_place="cpu" ;;
+            ""|auto|a) kv_place="auto" ;;
+        esac
+    fi
+
     echo ""
 }
 
-build_opt_flags() {
+# ── Launch action handler ─────────────────────────────────────────────
+run_action() {
     local action="$1"
-    OPT_FLAGS=()
-    [[ -n "$opt_ctx" ]] && OPT_FLAGS+=(--ctx-size "$opt_ctx")
-    [[ -n "$opt_parallel" ]] && OPT_FLAGS+=(--parallel "$opt_parallel")
-    if [[ -n "$selected_tune_cache" ]]; then
-        OPT_FLAGS+=(--tune-cache "$selected_tune_cache")
+    [[ "$action" == "launch" ]] && prelaunch_walkthrough
+
+    backend_bin_flag
+    local OPT_FLAGS=()
+    [[ -n "$ctx" ]] && OPT_FLAGS+=(--ctx-size "$ctx")
+    [[ -n "$parallel" ]] && OPT_FLAGS+=(--parallel "$parallel")
+    [[ -n "$kv_place" ]] && OPT_FLAGS+=(--kv-placement "$kv_place")
+    if [[ -n "$tune_cache" ]]; then
+        OPT_FLAGS+=(--tune-cache "$tune_cache")
     else
         (( opt_aitune )) && OPT_FLAGS+=(--ai-tune)
-        # Default rounds=8; only pass --rounds if the user changed it.
-        # --placement-tune is no longer needed here — llm-server auto-decides
-        # the tunable scope from model arch + GPU count.
         (( opt_aitune && opt_rounds != 8 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
     fi
-    (( opt_bench )) && OPT_FLAGS+=(--benchmark)
-    (( opt_vision )) && OPT_FLAGS+=(--vision)
+    (( opt_bench ))     && OPT_FLAGS+=(--benchmark)
+    (( opt_vision ))    && OPT_FLAGS+=(--vision)
     (( opt_keepalive )) && OPT_FLAGS+=(--keep-alive)
     case "$action" in
-        dry) OPT_FLAGS+=(--dry-run) ;;
+        dry)     OPT_FLAGS+=(--dry-run) ;;
         configs) OPT_FLAGS+=(--show-configs) ;;
     esac
+    export LLM_SERVER_UPDATE_CHECKED=1
+    if [[ "$action" == "launch" ]]; then
+        echo "  Launching: $(basename "$model_path") ${OPT_FLAGS[*]:-}"
+        echo ""
+        exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path"
+    fi
+    echo ""
+    "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path" || true
+    echo ""
+    read -rp "  [Enter] to return..." _
 }
 
-# Pass env to skip update check (already done in GUI)
-export LLM_SERVER_UPDATE_CHECKED=1
+# ── Main menu rendering ───────────────────────────────────────────────
+hw_summary() {
+    local cpu_cores ram_gb gpu_count gpu_total_gb
+    cpu_cores=$(nproc 2>/dev/null || echo "?")
+    ram_gb=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo "?")
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        gpu_count=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
+        gpu_total_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+            | awk '{s+=$1} END {if (s) printf "%.1f", s/1024; else print "?"}')
+        echo "${gpu_count} GPU(s) ${gpu_total_gb}GB VRAM, ${ram_gb}GB RAM, ${cpu_cores} cores"
+    else
+        echo "${ram_gb}GB RAM, ${cpu_cores} cores (no NVIDIA GPU detected)"
+    fi
+}
 
-while true; do
-    echo "═══ Final Action ═══"
-    echo "  Selected config: $selected_tune_label"
-    echo "  [1] Launch model"
-    echo "  [2] Choose tuned config"
-    echo "  [3] Dry run / show resolved command"
-    echo "  [4] Show configs for this model"
-    echo "  [q] Quit"
-    read -rp "Action [1]: " final_action
-    final_action=${final_action:-1}
+settings_path() {
+    "$LAUNCHER" config path 2>/dev/null || echo "$CONFIG_FILE"
+}
+
+render_main() {
+    clear 2>/dev/null || printf '\033c'
+    local version
+    version=$("$LAUNCHER" --version 2>/dev/null | head -1 || echo "llm-server")
+    echo "═══ $version ═══"
+    echo "  Backend:  $PREFERRED_BACKEND"
+    echo "  Hardware: $(hw_summary)"
+    echo "  Models:   $MODEL_DIR  ($MODEL_COUNT model$( (( MODEL_COUNT == 1 )) || echo s))"
+    echo "  Settings: $(settings_path)"
     echo ""
-    case "$final_action" in
-        1)
-            build_opt_flags launch
-            echo "Launching: $(basename "$SELECTED") ${OPT_FLAGS[*]:-}"
-            echo ""
-            exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$SELECTED"
-            ;;
-        2)
-            choose_tuned_config
-            ;;
-        3)
-            build_opt_flags dry
-            echo "Dry run: $(basename "$SELECTED") ${OPT_FLAGS[*]:-}"
-            echo ""
-            "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$SELECTED"
-            echo ""
-            ;;
-        4)
-            build_opt_flags configs
-            "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$SELECTED"
-            echo ""
-            ;;
-        q|Q)
-            exit 0
-            ;;
-        *)
-            echo "Invalid action."
-            echo ""
-            ;;
+    if (( MODEL_COUNT == 0 )); then
+        echo "  (no GGUF models found — use [d] to download or [m] to point at an existing dir)"
+    else
+        echo "  Models:"
+        local i
+        for i in $(seq 0 $(( MODEL_COUNT - 1 ))); do
+            local tuned_marker=""
+            local nconfigs
+            nconfigs=$(count_tuned_configs "$(basename "${MODEL_PATHS[$i]}")")
+            (( nconfigs > 0 )) && tuned_marker="  [tuned: $nconfigs]"
+            printf "    %2d. %s%s\n" "$(( i + 1 ))" "${MODEL_DISPLAY[$i]}" "$tuned_marker"
+        done
+    fi
+    echo ""
+    echo "  [1-${MODEL_COUNT}] configure & launch model"
+    echo "  [s]  Settings           [d]  Download model"
+    echo "  [b]  Backend            [m]  Model directory"
+    echo "  [u]  Check updates      [q]  Quit"
+    echo ""
+}
+
+# ── First-run safety: trigger model setup before main loop ────────────
+refresh_models
+while (( MODEL_COUNT == 0 )); do
+    clear 2>/dev/null || printf '\033c'
+    echo "═══ llm-server First Run ═══"
+    echo "  No runnable GGUF models found in: $MODEL_DIR"
+    echo ""
+    echo "  [d] Download a model from Hugging Face"
+    echo "  [m] Point at an existing model directory"
+    echo "  [q] Quit"
+    echo ""
+    read -rp "  Choice [d]: " first
+    case "${first:-d}" in
+        d|D) cmd_download ;;
+        m|M) cmd_model_dir ;;
+        q|Q) exit 0 ;;
+        *)   echo "  Invalid choice."; sleep 1 ;;
+    esac
+done
+
+run_update_check 0   # background-friendly auto-check (respects dismiss)
+
+# ── Main loop ─────────────────────────────────────────────────────────
+while true; do
+    render_main
+    read -rp "  Action: " action
+    if [[ "$action" =~ ^[0-9]+$ ]] && (( action >= 1 && action <= MODEL_COUNT )); then
+        configure_model "${MODEL_PATHS[$(( action - 1 ))]}"
+        continue
+    fi
+    case "$action" in
+        s|S) echo ""; cmd_settings;     read -rp "  [Enter] to return..." _ ;;
+        d|D) echo ""; cmd_download;     read -rp "  [Enter] to return..." _ ;;
+        b|B) echo ""; cmd_backend;      read -rp "  [Enter] to return..." _ ;;
+        m|M) echo ""; cmd_model_dir;    read -rp "  [Enter] to return..." _ ;;
+        u|U) echo ""; run_update_check 1; read -rp "  [Enter] to return..." _ ;;
+        q|Q|"") exit 0 ;;
+        *)   echo "  Invalid action: '$action'"; sleep 1 ;;
     esac
 done

@@ -18,6 +18,7 @@
 #   llm-server <model.gguf> --backend llama   # force llama.cpp
 #   llm-server <model.gguf> --backend ik_llama # force ik_llama.cpp
 #   llm-server <model.gguf> --kv-quality high  # KV cache: high(f16), mid(q8_0), low(q4_0)
+#   llm-server <model.gguf> --kv-placement cpu # KV placement: auto, gpu, cpu
 #   llm-server <model.gguf> --gpus 0,1         # Use only GPU 0 and 1
 #   llm-server <model.gguf> --ram-budget 60G   # Cap RAM usage at 60GB
 #   llm-server --update                         # Update llm-server + ik_llama.cpp + llama.cpp
@@ -77,11 +78,46 @@ LLM_APP_HOME="$(_discover_app_home 2>/dev/null || true)"
 # (defaults to ~/.config/llm-server/config). Same syntax as env vars — anything
 # settable on the command line (LLAMA_SERVER, LLM_RAM_BUDGET, LLM_DEFAULT_CTX, …)
 # can be persisted there. Loaded before defaults so explicit env still wins.
-if [[ -z "${LLM_CONFIG:-}" && -n "$LLM_APP_HOME" && -f "$LLM_APP_HOME/config/config.sh" ]]; then
-    LLM_CONFIG="$LLM_APP_HOME/config/config.sh"
+if [[ -z "${LLM_CONFIG:-}" && -n "$LLM_APP_HOME" && ( -f "$LLM_APP_HOME/config/config" || -f "$LLM_APP_HOME/config/config.sh" ) ]]; then
+    LLM_CONFIG="$LLM_APP_HOME/config/config"
+    [[ -f "$LLM_CONFIG" ]] || LLM_CONFIG="$LLM_APP_HOME/config/config.sh"
 else
     LLM_CONFIG="${LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-server/config}"
 fi
+
+# Migration: collapse legacy `config.sh` into the canonical `config`. Two
+# files predate this change and they sourced in different orders depending
+# on entrypoint, which led to backend/binary settings disagreeing between
+# CLI and GUI launches. After this runs once, only the canonical file is
+# read going forward.
+_migrate_legacy_config_sh() {
+    local canonical="$1"
+    local legacy="${canonical}.sh"
+    [[ "$canonical" == *.sh ]] && return 0   # already pointing at legacy; nothing to do
+    [[ -f "$legacy" ]] || return 0
+    if [[ ! -f "$canonical" ]]; then
+        mv "$legacy" "$canonical" 2>/dev/null && \
+            echo "Note: migrated $legacy -> $canonical" >&2
+        return 0
+    fi
+    # Both exist. Merge: the legacy file's values historically won under
+    # the old dual-source scheme, so they take precedence here too.
+    local merged tmp
+    tmp="$(mktemp "${canonical}.merge.XXXX")" || return 1
+    {
+        echo "# llm-server settings (merged from config + config.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+        awk -F= '
+            /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+            { key = $1; sub(/^[[:space:]]*/, "", key); sub(/[[:space:]]*$/, "", key);
+              val = $0; sub(/^[^=]*=/, "", val); kv[key] = val }
+            END { for (k in kv) print k "=" kv[k] }
+        ' "$canonical" "$legacy"
+    } > "$tmp" && mv "$tmp" "$canonical" || { rm -f "$tmp"; return 1; }
+    local backup="$legacy.bak.$(date +%s)"
+    mv "$legacy" "$backup" 2>/dev/null && \
+        echo "Note: merged $legacy into $canonical (legacy archived at $backup)" >&2
+}
+_migrate_legacy_config_sh "$LLM_CONFIG"
 [[ -f "$LLM_CONFIG" ]] && source "$LLM_CONFIG"
 
 # RUNNING_PID tracks the in-flight health-check / pre-launch server so a fatal
@@ -139,11 +175,12 @@ trap _cleanup_orphan_server EXIT
 
 VERSION="2.2.0"
 
-# Persistent Configuration — source early so env vars (LLM_PORT, etc.) are available
+# Persistent Configuration — already loaded above via $LLM_CONFIG (after the
+# config.sh -> config migration). CONFIG_DIR/CONFIG_FILE retained for legacy
+# helpers that still reference them.
 CONFIG_DIR="${LLM_CONFIG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/config}}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/llm-server}"
-CONFIG_FILE="$CONFIG_DIR/config.sh"
-[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+CONFIG_FILE="$LLM_CONFIG"
 
 PORT="${LLM_PORT:-8081}"
 HOST="0.0.0.0"
@@ -210,6 +247,9 @@ EXTRA_LLAMA_FLAGS=()   # unknown flags forwarded verbatim to llama-server
 TUNE_USER_LOCKED_KEYS=() # normalized llama flags the user explicitly chose; AI-tune must not override them
 KV_QUALITY="low"  # high (f16), mid (q8_0), low (q4_0, default)
 KV_QUALITY_EXPLICIT=0  # set to 1 when user passes --kv-quality — locks KV against AI-tune downgrades
+KV_PLACEMENT="${LLM_KV_PLACEMENT:-auto}"  # auto (GPU first), gpu, cpu
+KV_PLACEMENT_EXPLICIT=0  # CLI --kv-placement or env/settings LLM_KV_PLACEMENT
+[[ -n "${LLM_KV_PLACEMENT:-}" ]] && KV_PLACEMENT_EXPLICIT=1
 PARALLEL_SLOTS=""      # --parallel N passthrough, empty = llama-server default (4)
 GPUS_FILTER=""
 RAM_BUDGET_MB=0
@@ -347,6 +387,144 @@ find_server_binary() {
     echo ""
 }
 
+# ─────────────────────────────────────────────────────────────────
+# Settings subcommand: `llm-server config <show|edit|path|reset>`
+# Centralized access to the persistent config file. The file itself is the
+# same one the rest of the script already sources at startup; this just
+# gives users (and the GUI) a discoverable surface to view and edit it.
+# ─────────────────────────────────────────────────────────────────
+_settings_file_path() {
+    # Mirror the same precedence the rest of the script uses (lines 80-85
+    # and 143-146): explicit LLM_CONFIG, then portable mode, then XDG.
+    if [[ -n "${LLM_CONFIG:-}" ]]; then
+        echo "$LLM_CONFIG"
+    elif [[ -n "${LLM_APP_HOME:-}" && -d "$LLM_APP_HOME/config" ]]; then
+        echo "$LLM_APP_HOME/config/config.sh"
+    else
+        echo "${XDG_CONFIG_HOME:-$HOME/.config}/llm-server/config"
+    fi
+}
+
+_settings_write_template() {
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    cat > "$file" <<'TEMPLATE'
+# llm-server settings
+#
+# This file is sourced as bash. Each setting below is commented out with
+# its built-in default. Uncomment a line and change the value to override.
+#
+# Precedence at runtime (highest wins):
+#   1. CLI flag         e.g. --port 9000
+#   2. Environment var  e.g. LLM_PORT=9000 llm-server …
+#   3. This file
+#   4. Built-in default
+#
+# Edit with:  llm-server config edit
+# View with:  llm-server config show
+# Reset with: llm-server config reset
+
+# ── Server ────────────────────────────────────────────────────────────
+# LLM_PORT=8081                  # OpenAI-compatible API port
+# LLM_CTX_SIZE=65536             # default context size (tokens)
+# LLM_MAX_RESTARTS=5             # give-up threshold for repeated startup fails
+# LLM_KEEP_ALIVE=0                # 1 = restart forever (overrides MAX_RESTARTS)
+# LLM_HEALTH_TIMEOUT=600         # seconds to wait for server to become healthy
+
+# ── Paths ─────────────────────────────────────────────────────────────
+# LLM_MODEL_DIR="$HOME/ai_models"      # default search path for model files
+# LLM_CACHE_DIR="$HOME/.cache/llm-server"
+# LLM_LOG_DIR="$HOME/.cache/llm-server/logs"
+
+# ── Resource limits ───────────────────────────────────────────────────
+# LLM_RAM_BUDGET=                # cap RAM use (MB). Empty = use all available.
+# LLM_KV_PLACEMENT=auto          # auto|gpu|cpu. auto reserves GPU KV first.
+
+# ── UI ────────────────────────────────────────────────────────────────
+# LLM_ASSUME_YES=0               # 1 = auto-accept all interactive prompts
+
+# ── Backend selection (advanced) ──────────────────────────────────────
+# LLAMA_SERVER=                  # path to a specific llama-server binary
+# LLM_APP_HOME=                  # portable mode: self-contained install dir
+TEMPLATE
+}
+
+_settings_show() {
+    local file
+    file="$(_settings_file_path)"
+    echo "Settings file: $file"
+    if [[ -f "$file" ]]; then
+        echo "Status: exists"
+    else
+        echo "Status: not yet created (built-in defaults in effect)"
+    fi
+    echo ""
+    echo "Effective values (source: file/env/default):"
+    # Source the file in a subshell to read what it would set without
+    # affecting our own state, then compare with current env to label.
+    local k v src env_v file_v
+    declare -A FILE_VALS=()
+    if [[ -f "$file" ]]; then
+        # shellcheck disable=SC1090
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# || -z "$line" ]] && continue
+            [[ "$line" =~ ^([A-Z_]+)= ]] || continue
+            FILE_VALS["${BASH_REMATCH[1]}"]=1
+        done < "$file"
+    fi
+    for k in LLM_PORT LLM_CTX_SIZE LLM_MAX_RESTARTS LLM_KEEP_ALIVE \
+             LLM_HEALTH_TIMEOUT LLM_MODEL_DIR LLM_CACHE_DIR LLM_LOG_DIR \
+             LLM_RAM_BUDGET LLM_KV_PLACEMENT LLM_ASSUME_YES LLAMA_SERVER LLM_APP_HOME; do
+        env_v="${!k:-}"
+        if [[ -n "$env_v" ]]; then
+            if [[ -n "${FILE_VALS[$k]:-}" ]]; then
+                src="env+file"
+            else
+                src="env"
+            fi
+        elif [[ -n "${FILE_VALS[$k]:-}" ]]; then
+            src="file"
+        else
+            src="default"
+        fi
+        printf '  %-22s = %-30s [%s]\n' "$k" "${env_v:-<unset>}" "$src"
+    done
+}
+
+if [[ "${1:-}" == "config" ]]; then
+    shift
+    sub="${1:-show}"
+    file="$(_settings_file_path)"
+    case "$sub" in
+        show|"")
+            _settings_show
+            ;;
+        path)
+            echo "$file"
+            ;;
+        edit)
+            [[ -f "$file" ]] || _settings_write_template "$file"
+            editor="${EDITOR:-${VISUAL:-nano}}"
+            command -v "$editor" >/dev/null 2>&1 || editor="vi"
+            "$editor" "$file"
+            echo "Saved: $file"
+            ;;
+        reset)
+            if [[ -f "$file" ]]; then
+                cp "$file" "$file.bak.$(date +%s)" && rm -f "$file"
+                echo "Removed $file (backup kept). Built-in defaults will be used."
+            else
+                echo "No settings file to reset."
+            fi
+            ;;
+        *)
+            echo "Usage: llm-server config [show|edit|path|reset]" >&2
+            exit 2
+            ;;
+    esac
+    exit 0
+fi
+
 # Parse arguments
 # ─────────────────────────────────────────────────────────────────
 # Create a copy of args to allow re-parsing if needed, though we unify here
@@ -366,6 +544,13 @@ while [[ $# -gt 0 ]]; do
         --kv-quality)
             case "${2:-}" in high|mid|low) ;; *) echo "Error: --kv-quality must be one of: high, mid, low"; exit 1 ;; esac
             KV_QUALITY="$2"; KV_QUALITY_EXPLICIT=1; shift 2 ;;
+        --kv-placement)
+            case "${2:-}" in auto|gpu|cpu) ;; *) echo "Error: --kv-placement must be one of: auto, gpu, cpu"; exit 1 ;; esac
+            KV_PLACEMENT="$2"; KV_PLACEMENT_EXPLICIT=1; shift 2 ;;
+        --no-kv-offload|-nkvo)
+            KV_PLACEMENT="cpu"; KV_PLACEMENT_EXPLICIT=1; shift ;;
+        --kv-offload|-kvo)
+            KV_PLACEMENT="gpu"; KV_PLACEMENT_EXPLICIT=1; shift ;;
         --gpus)      GPUS_FILTER="$2"; shift 2 ;;
         --ram-budget) RAM_BUDGET_MB="$2"; shift 2 ;;
         --mmproj)      MMPROJ_PATH="$2"; shift 2 ;;
@@ -434,6 +619,7 @@ normalize_tune_key() {
         --parallel|-np) echo "--parallel" ;;
         --flash-attn|-fa) echo "--flash-attn" ;;
         --reasoning|-rea) echo "--reasoning" ;;
+        --kv-offload|-kvo|--no-kv-offload|-nkvo) echo "--kv-offload" ;;
         *) echo "$1" ;;
     esac
 }
@@ -459,6 +645,10 @@ record_user_tune_locks() {
         add_tune_lock_key "--cache-type-k"
         add_tune_lock_key "--cache-type-v"
     fi
+    if (( KV_PLACEMENT_EXPLICIT )); then
+        add_tune_lock_key "--kv-offload"
+        add_tune_lock_key "--no-kv-offload"
+    fi
     (( CTX_EXPLICIT )) && add_tune_lock_key "--ctx-size"
     if [[ -n "$GPUS_FILTER" ]]; then
         add_tune_lock_key "--device"
@@ -474,6 +664,11 @@ record_user_tune_locks() {
     fi
 }
 record_user_tune_locks
+
+case "$KV_PLACEMENT" in
+    auto|gpu|cpu) ;;
+    *) echo "Error: LLM_KV_PLACEMENT must be one of: auto, gpu, cpu"; exit 1 ;;
+esac
 
 # Now find the binary (BACKEND is now set from args)
 LLAMA_SERVER="$(find_server_binary)"
@@ -1035,9 +1230,13 @@ if (( DO_UPDATE )); then
         # Deep smoke: load smallest real model in a dedicated process on a
         # free port; accept any of several version-robust "ready" markers.
         local test_model
-        test_model=$(ls -S ~/ai_models/*.gguf 2>/dev/null \
-            | grep -viE 'mmproj|projector' \
-            | tail -1)
+        test_model=$(
+            find "$HOME/ai_models" -maxdepth 1 -type f -name '*.gguf' -printf '%s\t%p\n' 2>/dev/null \
+                | grep -viE 'mmproj|projector' \
+                | sort -n \
+                | tail -1 \
+                | cut -f2-
+        )
         if [[ -z "$test_model" ]]; then
             echo "  Skipping model launch test (no GGUF models found)"
             return 0
@@ -1446,6 +1645,7 @@ placement_cache_key_input() {
         "bytes=$TOTAL_SIZE_BYTES"
         "ctx=$CTX_SIZE"
         "kv=$KV_QUALITY"
+        "kv_placement=$KV_PLACEMENT"
         "backend=$BACKEND_TAG"
         "llama_server=$LLAMA_SERVER"
         "gpu_filter=${GPUS_FILTER:-all}"
@@ -1916,6 +2116,46 @@ COMMON_FLAGS=(
     --threads-batch "$THREADS_BATCH"
 )
 
+_apply_kv_placement_flag() {
+    local placement="$1"
+    local -a filtered=()
+    for f in "${COMMON_FLAGS[@]}"; do
+        case "$f" in
+            --kv-offload|-kvo|--no-kv-offload|-nkvo) continue ;;
+        esac
+        filtered+=("$f")
+    done
+    COMMON_FLAGS=("${filtered[@]}")
+    case "$placement" in
+        cpu)
+            COMMON_FLAGS+=(--no-kv-offload)
+            KV_PLACEMENT_EFFECTIVE="cpu"
+            ;;
+        gpu)
+            COMMON_FLAGS+=(--kv-offload)
+            KV_PLACEMENT_EFFECTIVE="gpu"
+            ;;
+        auto|"")
+            KV_PLACEMENT_EFFECTIVE="gpu"
+            ;;
+    esac
+}
+
+KV_PLACEMENT_EFFECTIVE="gpu"
+case "$KV_PLACEMENT" in
+    cpu)
+        _apply_kv_placement_flag cpu
+        echo "  KV placement: CPU (--no-kv-offload from settings/CLI)"
+        ;;
+    gpu)
+        _apply_kv_placement_flag gpu
+        echo "  KV placement: GPU (--kv-offload from settings/CLI)"
+        ;;
+    auto)
+        echo "  KV placement: auto (GPU first; reserves KV before MoE layers)"
+        ;;
+esac
+
 USER_REASONING_EXPLICIT=0
 for _f in "${EXTRA_LLAMA_FLAGS[@]:-}"; do
     [[ "$_f" == "--reasoning" || "$_f" == "-rea" ]] && USER_REASONING_EXPLICIT=1
@@ -1941,14 +2181,17 @@ if [[ "$IS_IK_LLAMA" == "1" ]]; then
     [[ -n "$CONTEXT_SHIFT_FLAG" ]] && COMMON_FLAGS+=("$CONTEXT_SHIFT_FLAG")
     COMMON_FLAGS+=(--defrag-thold 0.1)
 
-    # MoE-specific optimizations
-    if (( IS_MOE == 1 )); then
+    # MoE-specific optimizations. -muge / -ger / -mqkv are ik_llama-only
+    # flags; mainline llama.cpp rejects them with "invalid argument" and
+    # exits before loading the model. Gate on IS_IK_LLAMA (set in Section 4
+    # by parsing the binary's --help output).
+    if (( IS_MOE == 1 && IS_IK_LLAMA == 1 )); then
         COMMON_FLAGS+=(-muge)           # merge up/gate expert tensors
         COMMON_FLAGS+=(-ger)            # grouped expert routing
         echo "  MoE model → -muge -ger enabled"
     fi
 
-    if (( GPU_COUNT > 0 )); then
+    if (( GPU_COUNT > 0 && IS_IK_LLAMA == 1 )); then
         COMMON_FLAGS+=(-mqkv)
     fi
 
@@ -2398,9 +2641,12 @@ echo "Strategy: $STRATEGY"
 # Args: pairs of "CUDA_INDEX LAYER_START LAYER_COUNT" followed by end marker
 build_ot_string() {
     local parts=()
-    # Support both fused (gate_up/up_gate) and unfused (gate|up|down) expert tensor names
+    # Support fused/unfused routed experts plus shared experts. Kimi/DeepSeek-
+    # class MoE models expose shared experts as ffn_{gate,up,down}_shexp; the
+    # placement math counts those bytes as expert bytes, so -ot must route them
+    # with the same layer assignment instead of leaving them to backend defaults.
     # Longer alternatives first so regex engine matches them before shorter prefixes
-    local expert_pattern="ffn_(gate_up|up_gate|gate|up|down)_exps"
+    local expert_pattern="ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)"
 
     while [[ $# -ge 3 ]]; do
         local cuda_idx=$1 layer_start=$2 layer_count=$3
@@ -2550,9 +2796,19 @@ _strip_ik_only_flags() {
         if (( skip )); then skip=0; continue; fi
         f="${_arr[$i]}"
         case "$f" in
-            --run-time-repack|-rtr|--no-context-shift|-khad|-mqkv|-muge|-ger)
-                echo "  Removing ik-only flag: $f" ;;
-            -cram|--defrag-thold|--ctx-checkpoints)
+            --run-time-repack|-rtr|--no-context-shift|-khad|\
+-mqkv|--merge-qkv|-muge|--merge-up-gate-exps|-ger|--grouped-expert-routing)
+                echo "  Removing ik-only flag: $f"
+                # These take a value when set as long-form (--merge-qkv true|false).
+                # Look ahead: if the next arg is not a flag, drop it too.
+                local _next_val="${_arr[$((i+1))]:-}"
+                if [[ -n "$_next_val" && "$_next_val" != -* ]]; then
+                    case "$f" in
+                        --merge-qkv|--merge-up-gate-exps|--grouped-expert-routing|-mqkv|-muge|-ger|--run-time-repack)
+                            skip=1 ;;
+                    esac
+                fi ;;
+            -cram|--cache-ram|--defrag-thold|--ctx-checkpoints)
                 echo "  Removing ik-only flag: $f"
                 skip=1 ;;
             --split-mode)
@@ -4239,6 +4495,13 @@ for kind, value in records:
                 (( dominated )) || deduped+=("$cflag")
             done
             COMMON_FLAGS=("${deduped[@]}" "${tuned_extras[@]}")
+            # If we are running against mainline llama.cpp, drop any
+            # ik_llama-only flags that came in via the tuned config (older
+            # tune caches sometimes embed --merge-qkv etc.). Without this
+            # the binary aborts with "invalid argument".
+            if (( ! IS_IK_LLAMA )); then
+                _strip_ik_only_flags COMMON_FLAGS
+            fi
             TUNE_CACHE="$tune_cache" python3 -c "
 import json, os
 d = json.load(open(os.environ['TUNE_CACHE']))
@@ -4657,7 +4920,44 @@ else
     echo "Expert size per layer: ~${EXPERT_PER_LAYER_MB}MB (estimated 90%, no tensor data)"
 fi
 
-# KV_TOTAL_MB already set in Section 4 after KV type selection
+# KV_TOTAL_MB already set in Section 4 after KV type selection. For GPU KV,
+# reserve the backend's projected KV buffers before assigning MoE experts.
+# llama.cpp allocates KV independently from -ot expert placement; treating KV
+# as a per-expert-layer cost can overpack GPU0 and fail at context creation.
+KV_PER_LAYER_MB=$(( KV_TOTAL_MB / LAYER_COUNT ))
+(( KV_PER_LAYER_MB < 1 && KV_TOTAL_MB > 0 )) && KV_PER_LAYER_MB=1
+declare -a GPU_KV_RESERVE_MB
+GPU_KV_RESERVED_TOTAL_MB=0
+GPU_KV_MAX_PCT=0
+
+_compute_gpu_kv_reserves() {
+    local mode="$1" total_free=0 i gi share pct
+    GPU_KV_RESERVED_TOTAL_MB=0
+    GPU_KV_MAX_PCT=0
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        GPU_KV_RESERVE_MB[$gi]=0
+        total_free=$(( total_free + GPU_VRAM_FREE[$gi] ))
+    done
+    [[ "$mode" == "cpu" || "$mode" == "off" ]] && return 0
+    (( KV_TOTAL_MB > 0 && total_free > 0 && GPU_COUNT > 0 )) || return 0
+
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        share=$(( (KV_TOTAL_MB * GPU_VRAM_FREE[$gi] + total_free - 1) / total_free ))
+        if (( KV_PER_LAYER_MB > 0 )); then
+            share=$(( ((share + KV_PER_LAYER_MB - 1) / KV_PER_LAYER_MB) * KV_PER_LAYER_MB ))
+        fi
+        GPU_KV_RESERVE_MB[$gi]=$share
+        GPU_KV_RESERVED_TOTAL_MB=$(( GPU_KV_RESERVED_TOTAL_MB + share ))
+        pct=0
+        (( GPU_VRAM_TOTAL[$gi] > 0 )) && pct=$(( share * 100 / GPU_VRAM_TOTAL[$gi] ))
+        (( pct > GPU_KV_MAX_PCT )) && GPU_KV_MAX_PCT=$pct
+    done
+    return 0
+}
+
+_compute_gpu_kv_reserves "$KV_PLACEMENT_EFFECTIVE"
 
 # Check cached config
 if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
@@ -4711,13 +5011,15 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_GPU_ASSIGNMENTS:-}" ]
     for assignment in $CACHED_GPU_ASSIGNMENTS; do
         IFS=: read -r ci cs cc <<< "$assignment"
         OT_ARGS+=("$ci" "$cs" "$cc")
-        # Check this GPU has enough VRAM for assigned layers + its share of KV cache
+        # Check this GPU has enough VRAM for assigned layers after reserving
+        # the backend's projected KV buffer first. KV is not proportional to
+        # the -ot expert layer count under kv_unified.
         layer_mb=$(( cc * EXPERT_PER_LAYER_MB ))
-        kv_share_mb=$(( KV_TOTAL_MB * cc / LAYER_COUNT + COMPUTE_PER_GPU_MB ))  # proportional KV + compute
-        needed=$(( layer_mb + kv_share_mb ))
         # Find free VRAM for this CUDA index
         for gi in $(seq 0 $(( GPU_COUNT - 1 ))); do
             if [[ "${GPU_INDEX[$gi]}" == "$ci" ]]; then
+                kv_share_mb=$(( ${GPU_KV_RESERVE_MB[$gi]:-0} + COMPUTE_PER_GPU_MB ))
+                needed=$(( layer_mb + kv_share_mb ))
                 if (( needed > GPU_VRAM_FREE[$gi] )); then
                     echo "  WARNING: GPU${ci} needs ${needed}MB but only ${GPU_VRAM_FREE[$gi]}MB free"
                     CACHE_VALID=0
@@ -4941,7 +5243,28 @@ load_probe_cache() {
             *) return 1 ;;
         esac
     done < "$file"
-    [[ -n "${PROBED_COMPUTE_BUF_MB}" && -n "${PROBED_KV_PER_LAYER_MB}" ]]
+    [[ -n "${PROBED_COMPUTE_BUF_MB}" && -n "${PROBED_KV_PER_LAYER_MB}" ]] || return 1
+
+    # Sanity-check: the parser sometimes catches a transient prompt-processing
+    # buffer instead of steady-state KV (observed: 13392 MB/layer at 196k ctx
+    # on Minimax — physically impossible for a 94 GB model). Reject probe
+    # values whose implied total KV size exceeds the total system memory
+    # (free VRAM + available RAM). That bound is physical: the launch
+    # would have OOM'd before completing if the value were real.
+    local _total_sys_mem=0
+    if [[ -n "${TOTAL_VRAM_MB:-}" && -n "${RAM_AVAIL_MB:-}" ]]; then
+        _total_sys_mem=$(( TOTAL_VRAM_MB + RAM_AVAIL_MB ))
+    fi
+    if (( _total_sys_mem > 0 && LAYER_COUNT > 0 )); then
+        local _kv_total=$(( PROBED_KV_PER_LAYER_MB * LAYER_COUNT ))
+        if (( _kv_total > _total_sys_mem )); then
+            echo "  Note: probe reports KV ${PROBED_KV_PER_LAYER_MB}MB/layer × ${LAYER_COUNT} layers = ${_kv_total}MB > total system memory ${_total_sys_mem}MB — rejecting as corrupted, using cold-start math."
+            PROBED_COMPUTE_BUF_MB=""
+            PROBED_KV_PER_LAYER_MB=""
+            return 1
+        fi
+    fi
+    return 0
 }
 
 # Parse llama-server's own buffer-size lines from SERVER_LOG and write the
@@ -5002,8 +5325,6 @@ EOF
 declare -a LAYERS_PER_GPU
 NEXT_LAYER=0
 TOTAL_GPU_LAYERS=0
-KV_PER_LAYER_MB=$(( KV_TOTAL_MB / LAYER_COUNT ))
-(( KV_PER_LAYER_MB < 1 && KV_TOTAL_MB > 0 )) && KV_PER_LAYER_MB=1
 NON_EXPERT_RAM_MB=${NON_EXPERT_TOTAL_MB:-$(( TOTAL_SIZE_MB - EXPERT_TOTAL_MB ))}
 NON_EXPERT_PER_LAYER_MB=$(( NON_EXPERT_RAM_MB / LAYER_COUNT ))
 # Globals (embeddings + output head) live on the primary GPU only. The exact
@@ -5048,17 +5369,20 @@ load_probe_cache && PROBE_HIT=1
 if (( PROBE_HIT )); then
     PLACEMENT_LABEL="probe-hit"
     DET_FIXED_PER_GPU=$(( SYS_CUDA_OVERHEAD_MB + PROBED_COMPUTE_BUF_MB ))
-    COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB + PROBED_KV_PER_LAYER_MB ))
+    COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB ))
     echo "  Per-GPU reserve: ${SYS_CUDA_OVERHEAD_MB}MB cuda_overhead (measured) + ${PROBED_COMPUTE_BUF_MB}MB compute (probed) = ${DET_FIXED_PER_GPU}MB"
-    echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm + ${PROBED_KV_PER_LAYER_MB}MB KV (probed) = ${COST_PER_LAYER_MB}MB"
+    echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm = ${COST_PER_LAYER_MB}MB"
 else
     DET_FIXED_PER_GPU=$(( SYS_CUDA_OVERHEAD_MB + COMPUTE_FLOOR_MB ))
-    COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + KV_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB ))
+    COST_PER_LAYER_MB=$(( EXPERT_PER_LAYER_MB + NON_EXPERT_PER_LAYER_MB ))
     if (( SYS_PROBE_FIRST_RUN )); then
         echo "  Note: first launch on this system — using cited 1024MB compute floor for safety. Subsequent launches will use measured cuda_overhead."
     fi
     echo "  Per-GPU reserve: ${SYS_CUDA_OVERHEAD_MB}MB cuda_overhead (measured) + ${COMPUTE_FLOOR_MB}MB compute floor (cited llama.cpp) = ${DET_FIXED_PER_GPU}MB"
-    echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm + ${KV_PER_LAYER_MB}MB KV = ${COST_PER_LAYER_MB}MB"
+    echo "  Per-layer cost: ${EXPERT_PER_LAYER_MB}MB experts + ${NON_EXPERT_PER_LAYER_MB}MB attn/norm = ${COST_PER_LAYER_MB}MB"
+fi
+if [[ "$KV_PLACEMENT_EFFECTIVE" == "gpu" && "$KV_PLACEMENT" != "cpu" ]] && (( GPU_KV_RESERVED_TOTAL_MB > 0 )); then
+    echo "  GPU KV reserve first: ${GPU_KV_RESERVED_TOTAL_MB}MB total (${KV_TYPE}, max ${GPU_KV_MAX_PCT}% of a GPU)"
 fi
 
 # ── Hard ceilings: data-driven feasibility check ──────────────────────────────
@@ -5069,20 +5393,25 @@ fi
 # accounting; if strict says no-fit and user did not pass --no-mmap, fall back
 # to the mmap-aware ceiling (page-cache elastic) before declaring "does not fit".
 declare -a MAX_GPU_LAYERS_PER
-MAX_GPU_LAYERS=0
-for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
-    gi=${GPU_ORDER[$i]}
-    _ceil_overhead=$DET_FIXED_PER_GPU
-    (( i == 0 )) && _ceil_overhead=$(( DET_FIXED_PER_GPU + MAIN_GPU_GLOBALS_MB ))
-    _ceil_usable=$(( GPU_VRAM_FREE[$gi] - _ceil_overhead ))
-    (( _ceil_usable < 0 )) && _ceil_usable=0
-    _ceil_cap=0
-    (( COST_PER_LAYER_MB > 0 )) && _ceil_cap=$(( _ceil_usable / COST_PER_LAYER_MB ))
-    (( _ceil_cap > LAYER_COUNT )) && _ceil_cap=$LAYER_COUNT
-    MAX_GPU_LAYERS_PER[$gi]=$_ceil_cap
-    MAX_GPU_LAYERS=$(( MAX_GPU_LAYERS + _ceil_cap ))
-done
-(( MAX_GPU_LAYERS > LAYER_COUNT )) && MAX_GPU_LAYERS=$LAYER_COUNT
+_recompute_gpu_layer_caps() {
+    local i gi overhead usable cap
+    MAX_GPU_LAYERS=0
+    for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+        gi=${GPU_ORDER[$i]}
+        overhead=$(( DET_FIXED_PER_GPU + ${GPU_KV_RESERVE_MB[$gi]:-0} ))
+        (( i == 0 )) && overhead=$(( overhead + MAIN_GPU_GLOBALS_MB ))
+        usable=$(( GPU_VRAM_FREE[$gi] - overhead ))
+        (( usable < 0 )) && usable=0
+        cap=0
+        (( COST_PER_LAYER_MB > 0 )) && cap=$(( usable / COST_PER_LAYER_MB ))
+        (( cap > LAYER_COUNT )) && cap=$LAYER_COUNT
+        MAX_GPU_LAYERS_PER[$gi]=$cap
+        MAX_GPU_LAYERS=$(( MAX_GPU_LAYERS + cap ))
+    done
+    (( MAX_GPU_LAYERS > LAYER_COUNT )) && MAX_GPU_LAYERS=$LAYER_COUNT
+    return 0
+}
+_recompute_gpu_layer_caps
 
 # RAM overhead components are independent of layer placement; precompute now
 # so we can build the CPU ceiling before any launch attempt. These mirror the
@@ -5105,36 +5434,94 @@ else
 fi
 RAM_OVERHEAD_PRE_MB=$(( _PRE_CUDA_HOST_MB + _PRE_GRAPH_SCRATCH_MB + _PRE_MMAP_PT_MB + _PRE_CPU_ACT_MB ))
 
-# Strict ceiling (--no-mmap path): every CPU expert byte is resident in RAM.
-_CPU_BUDGET_STRICT=$(( RAM_AVAIL_MB - RAM_OVERHEAD_PRE_MB ))
-(( _CPU_BUDGET_STRICT < 0 )) && _CPU_BUDGET_STRICT=0
-MAX_CPU_LAYERS_STRICT=0
-(( EXPERT_PER_LAYER_MB > 0 )) && MAX_CPU_LAYERS_STRICT=$(( _CPU_BUDGET_STRICT / EXPERT_PER_LAYER_MB ))
-(( MAX_CPU_LAYERS_STRICT > LAYER_COUNT )) && MAX_CPU_LAYERS_STRICT=$LAYER_COUNT
+_recompute_cpu_layer_caps() {
+    local cpu_kv_ram_mb=0
+    [[ "$KV_PLACEMENT_EFFECTIVE" == "cpu" ]] && cpu_kv_ram_mb=$KV_TOTAL_MB
 
-# mmap-aware ceiling: only the working set (overhead + ~8 hot layers) needs to
-# fit; remaining experts page in/out of the file-backed mapping. Cap is the
-# whole layer count if the working-set floor fits in available RAM.
-_PRE_WORKING_SET_FLOOR=$(( RAM_OVERHEAD_PRE_MB + 8 * EXPERT_PER_LAYER_MB ))
-MAX_CPU_LAYERS_MMAP=0
-(( RAM_AVAIL_MB >= _PRE_WORKING_SET_FLOOR )) && MAX_CPU_LAYERS_MMAP=$LAYER_COUNT
+    # Strict ceiling (--no-mmap path): every CPU expert byte is resident in RAM.
+    _CPU_BUDGET_STRICT=$(( RAM_AVAIL_MB - RAM_OVERHEAD_PRE_MB - cpu_kv_ram_mb ))
+    (( _CPU_BUDGET_STRICT < 0 )) && _CPU_BUDGET_STRICT=0
+    MAX_CPU_LAYERS_STRICT=0
+    (( EXPERT_PER_LAYER_MB > 0 )) && MAX_CPU_LAYERS_STRICT=$(( _CPU_BUDGET_STRICT / EXPERT_PER_LAYER_MB ))
+    (( MAX_CPU_LAYERS_STRICT > LAYER_COUNT )) && MAX_CPU_LAYERS_STRICT=$LAYER_COUNT
 
-# Pick active CPU ceiling (option c): strict by default; mmap fallback only if
-# strict doesn't cover the gap and user has not forced --no-mmap.
-MAX_CPU_LAYERS=$MAX_CPU_LAYERS_STRICT
-CEIL_CPU_LABEL="strict --no-mmap"
-if (( MAX_GPU_LAYERS + MAX_CPU_LAYERS_STRICT < LAYER_COUNT )) \
-   && (( USER_NO_MMAP == 0 )) \
-   && (( MAX_CPU_LAYERS_MMAP > MAX_CPU_LAYERS_STRICT )); then
-    MAX_CPU_LAYERS=$MAX_CPU_LAYERS_MMAP
-    CEIL_CPU_LABEL="mmap (page-cache)"
+    # mmap-aware ceiling: only the working set (overhead + ~8 hot layers) needs
+    # to fit; CPU KV remains resident RAM when --no-kv-offload is selected.
+    _PRE_WORKING_SET_FLOOR=$(( RAM_OVERHEAD_PRE_MB + cpu_kv_ram_mb + 8 * EXPERT_PER_LAYER_MB ))
+    MAX_CPU_LAYERS_MMAP=0
+    (( RAM_AVAIL_MB >= _PRE_WORKING_SET_FLOOR )) && MAX_CPU_LAYERS_MMAP=$LAYER_COUNT
+
+    MAX_CPU_LAYERS=$MAX_CPU_LAYERS_STRICT
+    CEIL_CPU_LABEL="strict --no-mmap"
+    if (( MAX_GPU_LAYERS + MAX_CPU_LAYERS_STRICT < LAYER_COUNT )) \
+       && (( USER_NO_MMAP == 0 )) \
+       && (( MAX_CPU_LAYERS_MMAP > MAX_CPU_LAYERS_STRICT )); then
+        MAX_CPU_LAYERS=$MAX_CPU_LAYERS_MMAP
+        CEIL_CPU_LABEL="mmap (page-cache)"
+    fi
+    return 0
+}
+_recompute_cpu_layer_caps
+
+MAX_GPU_LAYERS_NO_GPU_KV=0
+for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
+    gi=${GPU_ORDER[$i]}
+    _no_kv_overhead=$DET_FIXED_PER_GPU
+    (( i == 0 )) && _no_kv_overhead=$(( _no_kv_overhead + MAIN_GPU_GLOBALS_MB ))
+    _no_kv_usable=$(( GPU_VRAM_FREE[$gi] - _no_kv_overhead ))
+    (( _no_kv_usable < 0 )) && _no_kv_usable=0
+    _no_kv_cap=0
+    (( COST_PER_LAYER_MB > 0 )) && _no_kv_cap=$(( _no_kv_usable / COST_PER_LAYER_MB ))
+    (( _no_kv_cap > LAYER_COUNT )) && _no_kv_cap=$LAYER_COUNT
+    MAX_GPU_LAYERS_NO_GPU_KV=$(( MAX_GPU_LAYERS_NO_GPU_KV + _no_kv_cap ))
+done
+(( MAX_GPU_LAYERS_NO_GPU_KV > LAYER_COUNT )) && MAX_GPU_LAYERS_NO_GPU_KV=$LAYER_COUNT
+GPU_KV_LAYER_LOSS=$(( MAX_GPU_LAYERS_NO_GPU_KV - MAX_GPU_LAYERS ))
+(( GPU_KV_LAYER_LOSS < 0 )) && GPU_KV_LAYER_LOSS=0
+
+if [[ "$KV_PLACEMENT" == "auto" && "$KV_PLACEMENT_EFFECTIVE" == "gpu" ]] && (( GPU_KV_RESERVED_TOTAL_MB > 0 )); then
+    _kv_prompt_reason=""
+    if (( MAX_GPU_LAYERS + MAX_CPU_LAYERS < LAYER_COUNT )); then
+        _kv_prompt_reason="GPU KV does not fit with available CPU/GPU layer capacity"
+    elif (( GPU_KV_MAX_PCT >= 80 )); then
+        _kv_prompt_reason="GPU KV would consume ${GPU_KV_MAX_PCT}% of one GPU"
+    elif (( GPU_KV_LAYER_LOSS >= 8 )); then
+        _kv_prompt_reason="GPU KV reduces expert layers on GPU by ${GPU_KV_LAYER_LOSS} (from ${MAX_GPU_LAYERS_NO_GPU_KV} to ${MAX_GPU_LAYERS})"
+    fi
+    if [[ -n "$_kv_prompt_reason" ]]; then
+        echo ""
+        echo "KV placement decision:"
+        echo "  $_kv_prompt_reason."
+        echo "  [g] GPU KV: faster long-context attention, fewer expert layers on GPU."
+        echo "  [c] CPU KV: same ${KV_TYPE} KV quality, frees VRAM for experts, slower long-context attention."
+        if [[ -t 0 && "${LLM_ASSUME_YES:-0}" != "1" && "$DRY_RUN" == "0" ]]; then
+            read -r -p "  Choose KV placement [G/c]: " _kv_answer
+            case "${_kv_answer,,}" in
+                c|cpu)
+                    KV_PLACEMENT_EFFECTIVE="cpu"
+                    _apply_kv_placement_flag cpu
+                    _compute_gpu_kv_reserves cpu
+                    _recompute_gpu_layer_caps
+                    _recompute_cpu_layer_caps
+                    echo "  Selected CPU KV (--no-kv-offload)."
+                    ;;
+                *)
+                    echo "  Selected GPU KV."
+                    ;;
+            esac
+        else
+            echo "  Non-interactive mode: keeping default GPU KV. Use --kv-placement cpu to move KV to RAM."
+        fi
+    fi
 fi
 
 echo ""
 echo "Hard ceilings (measured, no margins):"
 for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
     gi=${GPU_ORDER[$i]}
-    echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): up to ${MAX_GPU_LAYERS_PER[$gi]} layers (${GPU_VRAM_FREE[$gi]}MB free)"
+    _kv_note=""
+    (( ${GPU_KV_RESERVE_MB[$gi]:-0} > 0 )) && _kv_note=", KV reserve ${GPU_KV_RESERVE_MB[$gi]}MB"
+    echo "  GPU${GPU_INDEX[$gi]} (${GPU_NAME[$gi]}): up to ${MAX_GPU_LAYERS_PER[$gi]} layers (${GPU_VRAM_FREE[$gi]}MB free${_kv_note})"
 done
 echo "  GPU total:      ${MAX_GPU_LAYERS} layers"
 echo "  CPU [${CEIL_CPU_LABEL}]: ${MAX_CPU_LAYERS} layers (avail ${RAM_AVAIL_MB}MB − overhead ${RAM_OVERHEAD_PRE_MB}MB, expert ${EXPERT_PER_LAYER_MB}MB/layer)"
@@ -5165,8 +5552,9 @@ fi
 REDIST_BUMPS=()  # Phase 1 redistribution disabled: cold-start is already deterministic.
 for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
     gi=${GPU_ORDER[$i]}
-    local_overhead=$DET_FIXED_PER_GPU
+    local_overhead=$(( DET_FIXED_PER_GPU + ${GPU_KV_RESERVE_MB[$gi]:-0} ))
     (( i == 0 )) && local_overhead=$(( DET_FIXED_PER_GPU + MAIN_GPU_GLOBALS_MB ))
+    (( i == 0 )) && local_overhead=$(( local_overhead + ${GPU_KV_RESERVE_MB[$gi]:-0} ))
     usable_mb=$(( GPU_VRAM_FREE[$gi] - local_overhead ))
     (( usable_mb < 0 )) && usable_mb=0
     layers=0
@@ -5212,7 +5600,9 @@ else
     CPU_ACT_MB=512   # fallback when arch metadata is missing
 fi
 RAM_OVERHEAD_MB=$(( CUDA_HOST_MB + GRAPH_SCRATCH_MB + MMAP_PT_MB + CPU_ACT_MB ))
-RAM_NEEDED=$(( CPU_EXPERT_MB + RAM_OVERHEAD_MB ))
+CPU_KV_MB=0
+[[ "$KV_PLACEMENT_EFFECTIVE" == "cpu" ]] && CPU_KV_MB=$KV_TOTAL_MB
+RAM_NEEDED=$(( CPU_EXPERT_MB + CPU_KV_MB + RAM_OVERHEAD_MB ))
 
 # Phase 1: If CPU layers would OOM, push layers to GPUs one at a time (least disruption)
 if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
@@ -5252,7 +5642,7 @@ if (( RAM_NEEDED > RAM_AVAIL_MB && LAYERS_CPU > 0 && GPU_COUNT > 0 )); then
         done
         LAYERS_CPU=$(( LAYER_COUNT - TOTAL_GPU_LAYERS ))
         CPU_EXPERT_MB=$(( LAYERS_CPU * EXPERT_PER_LAYER_MB ))
-        RAM_NEEDED=$(( CPU_EXPERT_MB + RAM_OVERHEAD_MB ))
+        RAM_NEEDED=$(( CPU_EXPERT_MB + CPU_KV_MB + RAM_OVERHEAD_MB ))
         if (( RAM_NEEDED <= RAM_AVAIL_MB )); then
             echo "  Adjusted GPU budget to ${bump}% — ${LAYERS_CPU} CPU layers (${RAM_NEEDED}MB RAM)"
             break
@@ -5300,14 +5690,14 @@ if (( RAM_NEEDED > RAM_AVAIL_MB )); then
     # Working-set floor: compute buffers + ~8 hot expert layers + KV overhead.
     # This is what actually needs to be resident during inference on the mmap
     # path — most layers sit in the page cache and are paged in on demand.
-    WORKING_SET_FLOOR=$(( RAM_OVERHEAD_MB + 8 * EXPERT_PER_LAYER_MB ))
+    WORKING_SET_FLOOR=$(( RAM_OVERHEAD_MB + CPU_KV_MB + 8 * EXPERT_PER_LAYER_MB ))
     SHORTFALL=$(( RAM_NEEDED - RAM_AVAIL_MB ))
     echo ""
     if (( USER_NO_MMAP )); then
         # User opted out of mmap → full resident footprint is mandatory.
         echo "ERROR: --no-mmap requested, but full resident size exceeds available RAM."
         echo "  With --no-mmap every CPU expert byte must stay pinned in RAM."
-        echo "  Full resident size:    ${RAM_NEEDED}MB  (CPU experts + overhead)"
+        echo "  Full resident size:    ${RAM_NEEDED}MB  (CPU experts + CPU KV + overhead)"
         echo "  RAM available:         ${RAM_AVAIL_MB}MB"
         echo "  Shortfall:             ${SHORTFALL}MB"
         echo "  Remove --no-mmap to let the kernel page experts on demand,"
@@ -5320,6 +5710,7 @@ if (( RAM_NEEDED > RAM_AVAIL_MB )); then
     echo ""
     echo "  Breakdown:"
     echo "    CPU expert layers:     ${LAYERS_CPU} layers (${CPU_EXPERT_MB}MB)"
+    (( CPU_KV_MB > 0 )) && echo "    CPU KV cache:          ${CPU_KV_MB}MB (${KV_TYPE})"
     echo "    ggml compute scratch:  ${GRAPH_SCRATCH_MB}MB"
     echo "    CUDA host buffers:     ${CUDA_HOST_MB}MB"
     echo "    mmap page tables:      ${MMAP_PT_MB}MB  (~0.2% of model size)"
@@ -5755,6 +6146,9 @@ else
     # it leaves 80% of VRAM unused. We start at the optimum and only raise N
     # when llama-server's own log gives us an exact reason and amount.
     RECOVERED=0
+    boundary_hit=0   # initialised here so the does-not-fit branch below
+                     # can read it even when NCPUMOE_SUPPORTED=0 (mainline
+                     # llama.cpp without --n-cpu-moe).
     if (( NCPUMOE_SUPPORTED )); then
         # Strip incompatible flags from COMMON_FLAGS (we're replacing placement)
         RECOVERY_COMMON=()
@@ -5937,6 +6331,41 @@ CEOF
     fi
 
     if (( ! RECOVERED )); then
+        # Before blaming placement, check whether the binary itself rejected
+        # one of our flags. That is a config error, not a fit error — the
+        # measured ceilings would say the model fits, but the launch never
+        # got past argument parsing. Common cause: tune cache from one
+        # backend applied against a binary from the other backend.
+        # NOTE: this branch runs at script scope, not inside a function, so
+        # `local` is not legal here. Use plain assignments.
+        _rejected_flag=""
+        if [[ -f "$SERVER_LOG" ]]; then
+            _rejected_flag=$(grep -oE "error: invalid argument: [^[:space:]]+" "$SERVER_LOG" 2>/dev/null \
+                | tail -1 | sed 's/^error: invalid argument: //')
+        fi
+        if [[ -n "$_rejected_flag" ]]; then
+            echo ""
+            echo "═══ Launch failed: binary rejected a flag ═══"
+            echo "  Flag rejected: ${_rejected_flag}"
+            echo "  Backend:       $( (( IS_IK_LLAMA )) && echo 'ik_llama.cpp' || echo 'llama.cpp (mainline)' )"
+            echo "  Binary:        $LLAMA_SERVER"
+            echo ""
+            echo "  This is a configuration mismatch, not a memory-fit problem. The"
+            echo "  measured ceilings show the model fits — but the launch never got"
+            echo "  past argument parsing because the binary doesn't recognize this flag."
+            echo ""
+            echo "  Likely cause: a tuned config (or default flag set) for one backend"
+            echo "  was applied against the other backend's binary."
+            echo ""
+            echo "  Fixes:"
+            echo "    1. Switch backend with --server-bin <correct binary>, OR"
+            echo "    2. Re-tune for the current backend: --ai-tune --retune"
+            if [[ "$_rejected_flag" =~ merge-qkv|merge-up-gate|grouped-expert|run-time-repack|cache-ram|defrag-thold|ctx-checkpoints ]]; then
+                echo "    3. The rejected flag is ik_llama-only — switch to ik_llama.cpp"
+                echo "       or remove the offending flag from your tune cache JSON."
+            fi
+            exit 1
+        fi
         echo ""
         echo "FAILED: Bidirectional recovery exhausted."
         echo "Check $SERVER_LOG for the last load attempt."

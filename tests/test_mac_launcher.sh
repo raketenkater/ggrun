@@ -160,7 +160,8 @@ fi
 echo "Test: mac startup fallback"
 out=$(LLM_SERVER_STARTUP_TIMEOUT=1 LLM_SERVER_TEST_STOP_AFTER_MAC_FALLBACK=1 "$ROOT/llm-server-mac" "$TMP/model.gguf" 2>&1)
 assert_contains "$out" "Startup fallback: lowering Metal batch sizes." "applies first startup fallback"
-assert_contains "$out" "-b 512 -ub 256" "fallback lowers batch sizes"
+assert_contains "$out" "-b 512" "fallback lowers batch size"
+assert_contains "$out" "-ub 256" "fallback lowers ubatch size"
 
 echo "Test: mac cpu dry-run"
 out=$("$ROOT/llm-server-mac" --dry-run --cpu "$TMP/model.gguf" 2>&1)
