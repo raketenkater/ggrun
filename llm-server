@@ -360,11 +360,14 @@ find_server_binary() {
     fi
     
     local candidates=()
-    
+    local explicit_backend=0
+
     # Respect --backend flag
     if [[ "$BACKEND" == "ik_llama" ]]; then
+        explicit_backend=1
         candidates+=("$HOME/ik_llama.cpp/build/bin/llama-server")
     elif [[ "$BACKEND" == "llama" ]]; then
+        explicit_backend=1
         candidates+=("$SCRIPT_DIR/llama-server")
         candidates+=("$HOME/.local/bin/llama-server")
         candidates+=("$HOME/llama.cpp/build/bin/llama-server")
@@ -377,10 +380,14 @@ find_server_binary() {
             "$HOME/llama.cpp/build/bin/llama-server"
         )
     fi
-    
-    # Also check PATH
-    candidates+=("$(command -v llama-server 2>/dev/null || true)")
-    
+
+    # PATH fallback only when backend was NOT explicitly requested.
+    # Otherwise we'd silently substitute (e.g. PATH llama.cpp when user asked
+    # for ik_llama), which is the bug behind issue #14.
+    if (( ! explicit_backend )); then
+        candidates+=("$(command -v llama-server 2>/dev/null || true)")
+    fi
+
     for bin in "${candidates[@]}"; do
         [[ -n "$bin" && -x "$bin" ]] && echo "$bin" && return
     done
@@ -1344,8 +1351,18 @@ if [[ -n "$USER_SERVER_BIN" ]]; then
 fi
 
 if [[ -z "$LLAMA_SERVER" ]]; then
-    echo "Error: llama-server binary not found."
-    echo "Set LLAMA_SERVER env var, use --server-bin, or install ik_llama.cpp / llama.cpp."
+    if [[ "$BACKEND" == "ik_llama" ]]; then
+        echo "Error: --backend ik_llama requested but ik_llama.cpp binary was not found."
+        echo "Expected at: \$HOME/ik_llama.cpp/build/bin/llama-server"
+        echo "Build/install ik_llama.cpp, point LLAMA_SERVER at its binary, or omit --backend to auto-detect."
+    elif [[ "$BACKEND" == "llama" ]]; then
+        echo "Error: --backend llama requested but no mainline llama.cpp binary was found."
+        echo "Searched: \$SCRIPT_DIR, \$HOME/.local/bin, \$HOME/llama.cpp/build/bin"
+        echo "Install llama.cpp, point LLAMA_SERVER at its binary, or omit --backend to auto-detect."
+    else
+        echo "Error: llama-server binary not found."
+        echo "Set LLAMA_SERVER env var, use --server-bin, or install ik_llama.cpp / llama.cpp."
+    fi
     exit 1
 fi
 
