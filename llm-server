@@ -118,7 +118,71 @@ _migrate_legacy_config_sh() {
         echo "Note: merged $legacy into $canonical (legacy archived at $backup)" >&2
 }
 _migrate_legacy_config_sh "$LLM_CONFIG"
+
+# ─────────────────────────────────────────────────────────────────
+# Single source of truth for user-tunable defaults.
+#
+# Precedence at runtime (highest wins):
+#   1. CLI flag          (e.g. --port 9000)
+#   2. Environment var   (LLM_PORT=9000 llm-server …)
+#   3. User config file  ($LLM_CONFIG, generated from this table)
+#   4. Built-in default  (this DEFAULTS table)
+#
+# Adding a key here makes it a first-class persistent setting:
+#   • appears in `config edit` template
+#   • appears in `config show`
+#   • read by the GUI's settings pane
+#   • can be overridden by env or the file
+# Keep the value an empty string when "no default" is the right behavior
+# (e.g. RAM budget = use everything available).
+# ─────────────────────────────────────────────────────────────────
+declare -A LLM_DEFAULTS=(
+    [LLM_PORT]=8081
+    [LLM_CTX_SIZE]=65536
+    [LLM_MAX_RESTARTS]=5
+    [LLM_KEEP_ALIVE]=0
+    [LLM_HEALTH_TIMEOUT]=
+    [LLM_MODEL_DIR]="$HOME/ai_models"
+    [LLM_CACHE_DIR]="$HOME/.cache/llm-server"
+    [LLM_LOG_DIR]=
+    [LLM_RAM_BUDGET]=
+    [LLM_KV_PLACEMENT]=auto
+    [LLM_ASSUME_YES]=0
+    [LLM_BACKEND]=
+    [LLAMA_SERVER]=
+    [LLM_APP_HOME]=
+)
+# Stable display order for `config show` / template generation.
+LLM_DEFAULTS_ORDER=(
+    LLM_PORT LLM_CTX_SIZE LLM_MAX_RESTARTS LLM_KEEP_ALIVE LLM_HEALTH_TIMEOUT
+    LLM_MODEL_DIR LLM_CACHE_DIR LLM_LOG_DIR
+    LLM_RAM_BUDGET LLM_KV_PLACEMENT
+    LLM_ASSUME_YES
+    LLM_BACKEND LLAMA_SERVER LLM_APP_HOME
+)
+
+# Snapshot env-set values BEFORE sourcing the user config, so plain
+# `KEY=value` lines in the file can't override an explicit env var.
+declare -A _LLM_ENV_SNAPSHOT=()
+for _k in "${LLM_DEFAULTS_ORDER[@]}"; do
+    [[ -n "${!_k+x}" ]] && _LLM_ENV_SNAPSHOT[$_k]="${!_k}"
+done
+unset _k
+
 [[ -f "$LLM_CONFIG" ]] && source "$LLM_CONFIG"
+
+# Re-apply env snapshot so env wins over file.
+for _k in "${!_LLM_ENV_SNAPSHOT[@]}"; do
+    printf -v "$_k" '%s' "${_LLM_ENV_SNAPSHOT[$_k]}"
+done
+unset _k
+
+# Fill remaining unset keys from the DEFAULTS table.
+for _k in "${LLM_DEFAULTS_ORDER[@]}"; do
+    [[ -z "${!_k+x}" ]] && printf -v "$_k" '%s' "${LLM_DEFAULTS[$_k]}"
+done
+unset _k
+# _LLM_ENV_SNAPSHOT is preserved for `config show` source attribution.
 
 # RUNNING_PID tracks the in-flight health-check / pre-launch server so a fatal
 # script exit (set -e landmine, SIGINT, SIGTERM) doesn't leak a 100GB+ ik_llama
@@ -412,14 +476,49 @@ _settings_file_path() {
     fi
 }
 
+_settings_describe() {
+    # One-line per-key human description used as a trailing comment in the
+    # generated template. Keep keys in sync with LLM_DEFAULTS.
+    case "$1" in
+        LLM_PORT)           echo "OpenAI-compatible API port" ;;
+        LLM_CTX_SIZE)       echo "default context size (tokens)" ;;
+        LLM_MAX_RESTARTS)   echo "give-up threshold for repeated startup fails" ;;
+        LLM_KEEP_ALIVE)     echo "1 = restart forever (overrides MAX_RESTARTS)" ;;
+        LLM_HEALTH_TIMEOUT) echo "seconds to wait for server health (empty = auto-size by model)" ;;
+        LLM_MODEL_DIR)      echo "default search path for model files" ;;
+        LLM_CACHE_DIR)      echo "cache directory" ;;
+        LLM_LOG_DIR)        echo "log directory (empty = /tmp)" ;;
+        LLM_RAM_BUDGET)     echo "cap RAM use (MB or 60G/4096M). Empty = use all available." ;;
+        LLM_KV_PLACEMENT)   echo "auto|gpu|cpu. auto reserves GPU KV first." ;;
+        LLM_ASSUME_YES)     echo "1 = auto-accept all interactive prompts" ;;
+        LLM_BACKEND)        echo "ik_llama|llama. Empty = auto-detect." ;;
+        LLAMA_SERVER)       echo "path to a specific llama-server binary (overrides --backend)" ;;
+        LLM_APP_HOME)       echo "portable mode: self-contained install directory" ;;
+        *)                  echo "" ;;
+    esac
+}
+
+_settings_section_for() {
+    case "$1" in
+        LLM_PORT|LLM_CTX_SIZE|LLM_MAX_RESTARTS|LLM_KEEP_ALIVE|LLM_HEALTH_TIMEOUT) echo "Server" ;;
+        LLM_MODEL_DIR|LLM_CACHE_DIR|LLM_LOG_DIR) echo "Paths" ;;
+        LLM_RAM_BUDGET|LLM_KV_PLACEMENT) echo "Resource limits" ;;
+        LLM_ASSUME_YES) echo "UI" ;;
+        LLM_BACKEND|LLAMA_SERVER|LLM_APP_HOME) echo "Backend selection (advanced)" ;;
+        *) echo "Other" ;;
+    esac
+}
+
 _settings_write_template() {
     local file="$1"
     mkdir -p "$(dirname "$file")"
-    cat > "$file" <<'TEMPLATE'
+    {
+        cat <<'HEAD'
 # llm-server settings
 #
-# This file is sourced as bash. Each setting below is commented out with
-# its built-in default. Uncomment a line and change the value to override.
+# This file is sourced as bash. Every supported setting is listed below,
+# pre-filled with its built-in default. Edit values directly — they take
+# effect on the next launch.
 #
 # Precedence at runtime (highest wins):
 #   1. CLI flag         e.g. --port 9000
@@ -430,30 +529,25 @@ _settings_write_template() {
 # Edit with:  llm-server config edit
 # View with:  llm-server config show
 # Reset with: llm-server config reset
-
-# ── Server ────────────────────────────────────────────────────────────
-# LLM_PORT=8081                  # OpenAI-compatible API port
-# LLM_CTX_SIZE=65536             # default context size (tokens)
-# LLM_MAX_RESTARTS=5             # give-up threshold for repeated startup fails
-# LLM_KEEP_ALIVE=0                # 1 = restart forever (overrides MAX_RESTARTS)
-# LLM_HEALTH_TIMEOUT=600         # seconds to wait for server to become healthy
-
-# ── Paths ─────────────────────────────────────────────────────────────
-# LLM_MODEL_DIR="$HOME/ai_models"      # default search path for model files
-# LLM_CACHE_DIR="$HOME/.cache/llm-server"
-# LLM_LOG_DIR="$HOME/.cache/llm-server/logs"
-
-# ── Resource limits ───────────────────────────────────────────────────
-# LLM_RAM_BUDGET=                # cap RAM use (MB). Empty = use all available.
-# LLM_KV_PLACEMENT=auto          # auto|gpu|cpu. auto reserves GPU KV first.
-
-# ── UI ────────────────────────────────────────────────────────────────
-# LLM_ASSUME_YES=0               # 1 = auto-accept all interactive prompts
-
-# ── Backend selection (advanced) ──────────────────────────────────────
-# LLAMA_SERVER=                  # path to a specific llama-server binary
-# LLM_APP_HOME=                  # portable mode: self-contained install dir
-TEMPLATE
+HEAD
+        local last_section="" section desc val k
+        for k in "${LLM_DEFAULTS_ORDER[@]}"; do
+            section="$(_settings_section_for "$k")"
+            if [[ "$section" != "$last_section" ]]; then
+                printf '\n# ── %s ' "$section"
+                printf '─%.0s' {1..50}
+                printf '\n'
+                last_section="$section"
+            fi
+            desc="$(_settings_describe "$k")"
+            val="${LLM_DEFAULTS[$k]}"
+            if [[ -n "$desc" ]]; then
+                printf '%s=%s    # %s\n' "$k" "$val" "$desc"
+            else
+                printf '%s=%s\n' "$k" "$val"
+            fi
+        done
+    } > "$file"
 }
 
 _settings_show() {
@@ -479,22 +573,23 @@ _settings_show() {
             FILE_VALS["${BASH_REMATCH[1]}"]=1
         done < "$file"
     fi
-    for k in LLM_PORT LLM_CTX_SIZE LLM_MAX_RESTARTS LLM_KEEP_ALIVE \
-             LLM_HEALTH_TIMEOUT LLM_MODEL_DIR LLM_CACHE_DIR LLM_LOG_DIR \
-             LLM_RAM_BUDGET LLM_KV_PLACEMENT LLM_ASSUME_YES LLAMA_SERVER LLM_APP_HOME; do
+    for k in "${LLM_DEFAULTS_ORDER[@]}"; do
+        # Was this key set in the caller's env (snapshotted before sourcing the file)?
+        local was_env=0
+        [[ -n "${_LLM_ENV_SNAPSHOT[$k]+x}" ]] && was_env=1
+        local in_file=0
+        [[ -n "${FILE_VALS[$k]:-}" ]] && in_file=1
         env_v="${!k:-}"
-        if [[ -n "$env_v" ]]; then
-            if [[ -n "${FILE_VALS[$k]:-}" ]]; then
-                src="env+file"
-            else
-                src="env"
-            fi
-        elif [[ -n "${FILE_VALS[$k]:-}" ]]; then
+        if (( was_env )); then
+            if (( in_file )); then src="env+file"; else src="env"; fi
+        elif (( in_file )); then
             src="file"
         else
             src="default"
         fi
-        printf '  %-22s = %-30s [%s]\n' "$k" "${env_v:-<unset>}" "$src"
+        local display="$env_v"
+        [[ -z "$display" ]] && display="<unset>"
+        printf '  %-22s = %-30s [%s]\n' "$k" "$display" "$src"
     done
 }
 
@@ -612,6 +707,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# CLI --backend wins; fall back to LLM_BACKEND from env/config; else auto-detect.
+if [[ -z "$BACKEND" && -n "${LLM_BACKEND:-}" ]]; then
+    case "$LLM_BACKEND" in
+        ik_llama|llama) BACKEND="$LLM_BACKEND" ;;
+        ""|auto) ;;  # auto-detect
+        *) echo "Error: LLM_BACKEND must be one of: ik_llama, llama (got: $LLM_BACKEND)"; exit 1 ;;
+    esac
+fi
 
 normalize_tune_key() {
     case "$1" in
