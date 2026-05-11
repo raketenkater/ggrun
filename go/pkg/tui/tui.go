@@ -79,6 +79,8 @@ type ModelItem struct {
 	Name    string
 	Path    string
 	Tuned   int
+	SizeGB  float64
+	Arch    string
 }
 
 type ModelsLoadedMsg []ModelItem
@@ -117,7 +119,7 @@ func InitialModel() Model {
 func newMainList(models []ModelItem) list.Model {
 	items := []list.Item{}
 	for i, m := range models {
-		desc := m.Path
+		desc := fmt.Sprintf("%.1fGB, %s", m.SizeGB, m.Arch)
 		if m.Tuned > 0 {
 			desc += fmt.Sprintf("  [tuned: %d]", m.Tuned)
 		}
@@ -569,30 +571,81 @@ func boolLabel(v bool) string {
 
 func discoverModels(dir string) []ModelItem {
 	var items []ModelItem
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return items
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			// Check for .gguf files inside
-			subItems, _ := os.ReadDir(filepath.Join(dir, entry.Name()))
-			for _, sub := range subItems {
-				if !sub.IsDir() && strings.HasSuffix(sub.Name(), ".gguf") {
-					items = append(items, ModelItem{
-						Name: entry.Name(),
-						Path: filepath.Join(dir, entry.Name(), sub.Name()),
-					})
-					break
+	seen := make(map[string]bool)
+
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".gguf") {
+			return nil
+		}
+		// Filter out mmproj and draft files
+		lower := strings.ToLower(name)
+		if strings.Contains(lower, "mmproj") || strings.Contains(lower, "dflash-draft") {
+			return nil
+		}
+
+		// Handle multi-part models: only list -00001-of-NNNNN.gguf
+		isMultiPart := false
+		baseName := name
+		if re := strings.Index(name, "-00001-of-"); re > 0 {
+			baseName = name[:re] + ".gguf"
+			isMultiPart = true
+		} else if strings.Contains(name, "-of-") {
+			// Skip non-first parts of multi-part models
+			return nil
+		}
+
+		if seen[baseName] {
+			return nil
+		}
+		seen[baseName] = true
+
+		// Sum sizes for multi-part models
+		dirPath := filepath.Dir(path)
+		var totalBytes int64
+		if isMultiPart {
+			pattern := baseName[:len(baseName)-5] + "*" // remove .gguf
+			matches, _ := filepath.Glob(filepath.Join(dirPath, pattern+"*.gguf"))
+			for _, m := range matches {
+				st, err := os.Stat(m)
+				if err == nil {
+					totalBytes += st.Size()
 				}
 			}
-		} else if strings.HasSuffix(entry.Name(), ".gguf") {
-			items = append(items, ModelItem{
-				Name: entry.Name(),
-				Path: filepath.Join(dir, entry.Name()),
-			})
+		} else {
+			totalBytes = info.Size()
 		}
-	}
+
+		sizeGB := float64(totalBytes) / (1024 * 1024 * 1024)
+		arch := "dense"
+		if match := strings.Contains(name, "A") && strings.Contains(name, "B"); match {
+			// Check A[0-9]+B pattern for MoE detection
+			for i := 0; i < len(name)-1; i++ {
+				if name[i] == 'A' || name[i] == 'a' {
+					j := i + 1
+					for j < len(name) && name[j] >= '0' && name[j] <= '9' {
+						j++
+					}
+					if j < len(name) && (name[j] == 'B' || name[j] == 'b') {
+						arch = "MoE"
+						break
+					}
+				}
+			}
+		}
+
+		items = append(items, ModelItem{
+			Name:   baseName,
+			Path:   path,
+			SizeGB: sizeGB,
+			Arch:   arch,
+		})
+		return nil
+	})
+
 	return items
 }
 
