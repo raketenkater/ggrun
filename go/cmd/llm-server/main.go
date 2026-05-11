@@ -21,8 +21,8 @@ const version = "v3.0.0-go"
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		cmdGUI()
+		return
 	}
 
 	switch os.Args[1] {
@@ -38,7 +38,7 @@ func main() {
 		cmdDaemon(os.Args[2:])
 	case "dry-run":
 		cmdDryRun(os.Args[2:])
-	case "gui":
+	case "gui", "tui":
 		cmdGUI()
 	default:
 		usage()
@@ -47,7 +47,9 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: llm-server <command> [args]
+	fmt.Fprintf(os.Stderr, `Usage: llm-server [command] [args]
+
+With no command, launches the interactive TUI (same as llm-server-gui).
 
 Commands:
   version              Show version
@@ -56,7 +58,7 @@ Commands:
   benchmark <model>    Benchmark a running server
   daemon               Start persistent daemon
   dry-run <model.gguf> Print computed flags without launching
-  gui                  Interactive TUI (model picker, settings, launch)
+  gui, tui             Interactive TUI (model picker, settings, launch)
 
 Launch flags:
   -port int            Server port (default 8081)
