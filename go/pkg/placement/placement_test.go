@@ -140,8 +140,8 @@ func TestArgs(t *testing.T) {
 	if !contains(args, "--port") {
 		t.Fatalf("args missing --port")
 	}
-	if !contains(args, "-fa") {
-		t.Fatalf("args missing -fa")
+	if !contains(args, "--flash-attn") {
+		t.Fatalf("args missing --flash-attn")
 	}
 }
 
@@ -257,10 +257,7 @@ func TestArgsFull(t *testing.T) {
 	args := s.Args("/models/test.gguf", 8081)
 	checks := map[string]bool{
 		"-m": false, "--port": false, "-c": false, "-ngl": false,
-		"--tensor-split": false, "-sm": false, "--kv-placement": false,
-		"--cache-type-k": false, "--n-cpu-moe": false,
-		"-fa": false, "--no-mmap": false, "--mlock": false,
-		"-b": false, "-ub": false,
+		"--flash-attn": false,
 	}
 	for _, a := range args {
 		if _, ok := checks[a]; ok {

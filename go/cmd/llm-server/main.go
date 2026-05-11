@@ -14,6 +14,7 @@ import (
 	"github.com/raketenkater/llm-server/pkg/detect"
 	"github.com/raketenkater/llm-server/pkg/placement"
 	"github.com/raketenkater/llm-server/pkg/server"
+	"github.com/raketenkater/llm-server/pkg/tui"
 )
 
 const version = "v3.0.0-go"
@@ -37,6 +38,8 @@ func main() {
 		cmdDaemon(os.Args[2:])
 	case "dry-run":
 		cmdDryRun(os.Args[2:])
+	case "gui":
+		cmdGUI()
 	default:
 		usage()
 		os.Exit(2)
@@ -53,6 +56,7 @@ Commands:
   benchmark <model>    Benchmark a running server
   daemon               Start persistent daemon
   dry-run <model.gguf> Print computed flags without launching
+  gui                  Interactive TUI (model picker, settings, launch)
 
 Launch flags:
   -port int            Server port (default 8081)
@@ -147,6 +151,13 @@ func cmdLaunch(args []string) {
 
 	// Block until interrupted
 	select {}
+}
+
+func cmdGUI() {
+	if err := tui.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func cmdDryRun(args []string) {
