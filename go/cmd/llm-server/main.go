@@ -347,5 +347,21 @@ func findBackend(caps *detect.Capabilities) string {
 			return b.Path
 		}
 	}
+	// Fallback: search common build paths
+	home := os.Getenv("HOME")
+	paths := []string{
+		os.Getenv("LLAMA_SERVER"),
+		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"),
+		"/usr/local/bin/llama-server",
+		"/usr/bin/llama-server",
+	}
+	for _, p := range paths {
+		if p != "" {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
 	return ""
 }

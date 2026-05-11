@@ -301,12 +301,10 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	}
 
 	if s.FlashAttention {
-		args = append(args, "-fa")
+		args = append(args, "--flash-attn", "on")
 	}
 
-	if s.MMap {
-		args = append(args, "--mmap")
-	} else {
+	if !s.MMap {
 		args = append(args, "--no-mmap")
 	}
 
