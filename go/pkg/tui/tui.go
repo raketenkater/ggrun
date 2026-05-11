@@ -23,6 +23,8 @@ var (
 	highlightStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
 	warningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFAA00"))
 	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	recommendStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00AAFF")).Bold(true)
+	mutedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
 )
 
 // Screen represents the current TUI screen.
@@ -30,6 +32,7 @@ type Screen int
 
 const (
 	ScreenMain Screen = iota
+	ScreenQuickLaunch
 	ScreenModelConfig
 	ScreenSettings
 	ScreenDownload
@@ -53,8 +56,11 @@ type Model struct {
 	// Main menu list
 	mainList    list.Model
 
-	// Model config
+	// Quick launch / smart predictions
 	selectedModel int
+	recommendation *LaunchRecommendation
+
+	// Advanced config
 	ctxSize       string
 	ctxMode       string
 	kvPlacement   string
@@ -83,8 +89,19 @@ type ModelItem struct {
 	Arch    string
 }
 
-type ModelsLoadedMsg []ModelItem
-type CapabilitiesMsg *detect.Capabilities
+// LaunchRecommendation holds smart-predicted settings.
+type LaunchRecommendation struct {
+	ContextSize    int
+	GPULayers      int
+	UseGPU         bool
+	TensorSplit    bool
+	KVPlacement    string
+	FlashAttention bool
+	ParallelSlots  int
+	Benchmark      bool
+	Reason         string
+	Warning        string
+}
 
 func InitialModel() Model {
 	m := Model{
@@ -130,13 +147,9 @@ func newMainList(models []ModelItem) list.Model {
 			isModel:  true,
 		})
 	}
-	// Add action items
-	items = append(items, mainItem{title: "c. Advanced configure", desc: "Configure model settings", isAction: true, action: "configure"})
-	items = append(items, mainItem{title: "s. Settings", desc: "Edit configuration file", isAction: true, action: "settings"})
-	items = append(items, mainItem{title: "d. Download model", desc: "Download from Hugging Face", isAction: true, action: "download"})
-	items = append(items, mainItem{title: "b. Backend", desc: "Select backend (llama/ik_llama)", isAction: true, action: "backend"})
-	items = append(items, mainItem{title: "m. Model directory", desc: "Change model search path", isAction: true, action: "modeldir"})
-	items = append(items, mainItem{title: "u. Check updates", desc: "Check for llm-server updates", isAction: true, action: "update"})
+	// Minimal action items
+	items = append(items, mainItem{title: "d. Download model", desc: "Get from Hugging Face", isAction: true, action: "download"})
+	items = append(items, mainItem{title: "m. Model directory", desc: "Change search path", isAction: true, action: "modeldir"})
 	items = append(items, mainItem{title: "q. Quit", desc: "Exit", isAction: true, action: "quit"})
 
 	l := list.New(items, mainItemDelegate{}, 40, 20)
@@ -208,6 +221,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case ScreenMain:
 		return m.updateMain(msg)
+	case ScreenQuickLaunch:
+		return m.updateQuickLaunch(msg)
 	case ScreenModelConfig:
 		return m.updateModelConfig(msg)
 	case ScreenFirstRun:
@@ -227,32 +242,16 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
 					m.selectedModel = item.index
-					m.screen = ScreenModelConfig
+					m.recommendation = computeRecommendation(m.caps, m.models[m.selectedModel])
+					m.screen = ScreenQuickLaunch
 					return m, nil
 				}
 				switch item.action {
-				case "configure":
-					if len(m.models) > 0 {
-						m.selectedModel = 0
-						m.screen = ScreenModelConfig
-					}
-				case "settings":
-					m.screen = ScreenSettings
-					m.inputMode = "settings"
-					m.input.SetValue("")
-					m.input.Placeholder = "Press Enter to open in $EDITOR"
-					m.input.Focus()
 				case "download":
 					m.screen = ScreenDownload
 					m.inputMode = "download"
 					m.input.SetValue("")
 					m.input.Placeholder = "Hugging Face repo (e.g. unsloth/Llama-3.2-1B-Instruct)"
-					m.input.Focus()
-				case "backend":
-					m.screen = ScreenBackend
-					m.inputMode = "backend"
-					m.input.SetValue(m.backend)
-					m.input.Placeholder = "llama or ik_llama"
 					m.input.Focus()
 				case "modeldir":
 					m.screen = ScreenBackend
@@ -260,13 +259,24 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.SetValue(m.modelDir)
 					m.input.Placeholder = "Path to model directory"
 					m.input.Focus()
-				case "update":
-					m.message = "Update check not yet implemented in Go TUI"
-					m.messageType = "info"
 				case "quit":
 					return m, tea.Quit
 				}
 			}
+		case "s", "S":
+			// Hidden settings shortcut
+			m.screen = ScreenSettings
+			m.inputMode = "settings"
+			m.input.SetValue("")
+			m.input.Placeholder = "Press Enter to open in $EDITOR"
+			m.input.Focus()
+		case "b", "B":
+			// Hidden backend shortcut
+			m.screen = ScreenBackend
+			m.inputMode = "backend"
+			m.input.SetValue(m.backend)
+			m.input.Placeholder = "llama or ik_llama"
+			m.input.Focus()
 		}
 	}
 
@@ -275,12 +285,31 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateQuickLaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			m.message = fmt.Sprintf("Launching %s...", m.models[m.selectedModel].Name)
+			m.messageType = "info"
+			// TODO: actually launch
+		case "d", "D":
+			m.message = fmt.Sprintf("Dry run %s...", m.models[m.selectedModel].Name)
+			m.messageType = "info"
+			// TODO: show dry run output
+		case "c", "C":
+			m.screen = ScreenModelConfig
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
 func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if len(m.models) == 0 {
 		m.screen = ScreenMain
 		return m, nil
 	}
-	model := m.models[m.selectedModel]
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -317,10 +346,10 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "v", "V":
 			m.vision = !m.vision
 		case "l", "L":
-			m.message = fmt.Sprintf("Launch %s (not yet implemented)", model.Name)
+			m.message = fmt.Sprintf("Launch %s (not yet implemented)", m.models[m.selectedModel].Name)
 			m.messageType = "info"
 		case "d", "D":
-			m.message = fmt.Sprintf("Dry run %s (not yet implemented)", model.Name)
+			m.message = fmt.Sprintf("Dry run %s (not yet implemented)", m.models[m.selectedModel].Name)
 			m.messageType = "info"
 		}
 	}
@@ -422,6 +451,8 @@ func (m Model) View() string {
 	switch m.screen {
 	case ScreenFirstRun:
 		return m.viewFirstRun()
+	case ScreenQuickLaunch:
+		return m.viewQuickLaunch()
 	case ScreenModelConfig:
 		return m.viewModelConfig()
 	case ScreenSettings, ScreenDownload, ScreenBackend:
@@ -438,7 +469,6 @@ func (m Model) viewMain() string {
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
 	b.WriteString(fmt.Sprintf("  Models:   %s (%d)\n", m.modelDir, len(m.models)))
-	b.WriteString(fmt.Sprintf("  Settings: %s\n", m.settingsPath))
 	b.WriteString("\n")
 
 	if len(m.models) == 0 {
@@ -446,6 +476,9 @@ func (m Model) viewMain() string {
 	}
 
 	b.WriteString(m.mainList.View())
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("  [s] Settings  [b] Backend"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -470,6 +503,54 @@ func (m Model) viewFirstRun() string {
 	b.WriteString("  [d] Download a model from Hugging Face\n")
 	b.WriteString("  [m] Point at an existing model directory\n")
 	b.WriteString("  [q] Quit\n")
+	return b.String()
+}
+
+func (m Model) viewQuickLaunch() string {
+	if len(m.models) == 0 || m.recommendation == nil {
+		return "No model selected"
+	}
+	model := m.models[m.selectedModel]
+	rec := m.recommendation
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ %s ═══", model.Name)) + "\n")
+	b.WriteString(fmt.Sprintf("  Size: %.1fGB  Arch: %s\n", model.SizeGB, model.Arch))
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString("\n")
+
+	b.WriteString(recommendStyle.Render("  Recommended settings:\n"))
+	b.WriteString(fmt.Sprintf("    Context:  %d tokens\n", rec.ContextSize))
+	b.WriteString(fmt.Sprintf("    GPU layers: %d/%s\n", rec.GPULayers, func() string {
+		if rec.UseGPU {
+			return "all on GPU"
+		}
+		return "CPU only"
+	}()))
+	if rec.TensorSplit {
+		b.WriteString("    Multi-GPU: tensor split enabled\n")
+	}
+	b.WriteString(fmt.Sprintf("    KV placement: %s\n", rec.KVPlacement))
+	b.WriteString(fmt.Sprintf("    Flash attention: %s\n", boolLabel(rec.FlashAttention)))
+	b.WriteString(fmt.Sprintf("    Parallel slots: %d\n", rec.ParallelSlots))
+	if rec.Benchmark {
+		b.WriteString("    Benchmark: enabled (quick model test)\n")
+	}
+	b.WriteString("\n")
+
+	if rec.Warning != "" {
+		b.WriteString(warningStyle.Render("  ⚠ "+rec.Warning) + "\n\n")
+	}
+
+	b.WriteString(highlightStyle.Render("  [Enter] Launch with recommendations"))
+	b.WriteString("\n")
+	b.WriteString("  [d] Dry run    [c] Advanced config    [Esc] Back\n")
+
+	if m.message != "" {
+		b.WriteString("\n")
+		b.WriteString(highlightStyle.Render(m.message))
+	}
+
 	return b.String()
 }
 
@@ -509,7 +590,7 @@ func (m Model) viewModelConfig() string {
 	b.WriteString(fmt.Sprintf("  [b] Benchmark mode     %s\n", boolLabel(m.benchmark)))
 	b.WriteString(fmt.Sprintf("  [k] Keep-alive restart %s\n", boolLabel(m.keepalive)))
 	b.WriteString("\n")
-	b.WriteString("  [L] Launch    [D] Dry run    [<] Back (Esc)\n")
+	b.WriteString("  [L] Launch    [D] Dry run    [Esc] Back\n")
 
 	if m.inputMode != "" {
 		b.WriteString("\n")
@@ -569,6 +650,154 @@ func boolLabel(v bool) string {
 	return "off"
 }
 
+// computeRecommendation generates smart launch settings based on model + hardware.
+func computeRecommendation(caps *detect.Capabilities, model ModelItem) *LaunchRecommendation {
+	rec := &LaunchRecommendation{
+		ContextSize:    4096,
+		GPULayers:      0,
+		UseGPU:         false,
+		KVPlacement:    "auto",
+		FlashAttention: true,
+		ParallelSlots:  1,
+		Benchmark:      false,
+	}
+
+	if caps == nil {
+		rec.Reason = "No hardware detected, using safe defaults"
+		rec.ContextSize = 4096
+		return rec
+	}
+
+	totalVRAM := caps.TotalVRAM()
+	totalVRAMGB := float64(totalVRAM) / 1024
+	modelSizeMB := int(model.SizeGB * 1024)
+
+	// Determine GPU availability
+	numGPUs := len(caps.GPUs)
+	hasGPU := numGPUs > 0
+
+	if !hasGPU {
+		rec.UseGPU = false
+		rec.GPULayers = 0
+		rec.ContextSize = min(4096, int(float64(caps.RAM.TotalMB)*0.25/2)) // rough: 0.5MB per 1K ctx
+		if rec.ContextSize < 2048 {
+			rec.ContextSize = 2048
+		}
+		rec.Reason = "No GPU detected — CPU-only mode"
+		return rec
+	}
+
+	// Calculate if model fits on single GPU
+	largestGPUVRAM := 0
+	for _, g := range caps.GPUs {
+		if g.VRAMTotalMB > largestGPUVRAM {
+			largestGPUVRAM = g.VRAMTotalMB
+		}
+	}
+
+	// Heuristic overhead: KV cache + CUDA context (~1-2GB)
+	overheadMB := 2048
+	if model.Arch == "MoE" {
+		overheadMB = 4096 // MoE needs more overhead
+	}
+
+	fitsSingle := modelSizeMB+overheadMB <= largestGPUVRAM
+	fitsAll := modelSizeMB+overheadMB <= totalVRAM
+
+	if fitsSingle {
+		// Model fits on one GPU — optimal case
+		rec.UseGPU = true
+		rec.GPULayers = -1 // all layers
+		rec.ContextSize = min(32768, modelNumLayers(model)*1024/4) // rough heuristic
+		if rec.ContextSize < 4096 {
+			rec.ContextSize = 4096
+		}
+		rec.KVPlacement = "gpu"
+		rec.ParallelSlots = 4
+		rec.Benchmark = model.SizeGB < 10 // small models get benchmark by default
+		if model.Arch == "MoE" {
+			rec.Reason = fmt.Sprintf("Fits on %s — full GPU offload with active-experts scheduling", caps.GPUs[0].Name)
+		} else {
+			rec.Reason = fmt.Sprintf("Fits on %s — full GPU offload, max performance", caps.GPUs[0].Name)
+		}
+	} else if fitsAll && numGPUs > 1 {
+		// Fits across multiple GPUs
+		rec.UseGPU = true
+		rec.GPULayers = -1
+		rec.TensorSplit = true
+		rec.ContextSize = 32768
+		rec.KVPlacement = "gpu"
+		rec.ParallelSlots = 4
+		rec.Reason = fmt.Sprintf("Spans %d GPUs with tensor split — all layers on GPU", numGPUs)
+	} else if model.Arch == "MoE" && totalVRAMGB > 20 {
+		// Large MoE with reasonable VRAM — GPU attention, CPU experts
+		rec.UseGPU = true
+		rec.GPULayers = -1
+		rec.KVPlacement = "cpu"
+		rec.ContextSize = 16384
+		rec.ParallelSlots = 2
+		rec.Warning = "MoE model requires CPU expert offloading — expect lower short-chat tok/s"
+		rec.Reason = "MoE model — GPU attention layers, CPU routing experts"
+	} else {
+		// Partial offload or CPU
+		vramAvailable := totalVRAM - overheadMB
+		if vramAvailable > modelSizeMB/2 {
+			// Can fit at least half on GPU
+			rec.UseGPU = true
+			rec.GPULayers = -1 // let llama-server figure it out with --fit
+			rec.ContextSize = 8192
+			rec.KVPlacement = "auto"
+			rec.Warning = "Model exceeds total VRAM — partial GPU offload recommended"
+			rec.Reason = "Partial GPU offload — attention on GPU, rest on CPU"
+		} else {
+			rec.UseGPU = false
+			rec.GPULayers = 0
+			rec.ContextSize = 4096
+			rec.KVPlacement = "cpu"
+			rec.Warning = "Model too large for available VRAM — CPU-only mode"
+			rec.Reason = "CPU-only — safe but slower"
+		}
+	}
+
+	return rec
+}
+
+// min returns the smaller of a and b.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// modelNumLayers and hidden size heuristics from filename/size.
+func modelNumLayers(model ModelItem) int {
+	name := strings.ToLower(model.Name)
+	switch {
+	case strings.Contains(name, "0.6b"):
+		return 28
+	case strings.Contains(name, "1b") || strings.Contains(name, "1.5b"):
+		return 24
+	case strings.Contains(name, "3b") || strings.Contains(name, "4b"):
+		return 36
+	case strings.Contains(name, "7b") || strings.Contains(name, "8b"):
+		return 32
+	case strings.Contains(name, "14b") || strings.Contains(name, "15b"):
+		return 48
+	case strings.Contains(name, "27b") || strings.Contains(name, "30b"):
+		return 64
+	case strings.Contains(name, "32b"):
+		return 64
+	case strings.Contains(name, "70b") || strings.Contains(name, "72b"):
+		return 80
+	case strings.Contains(name, "122b"):
+		return 80
+	default:
+		// Estimate from size: ~100MB per layer for Q4
+		return int(model.SizeGB * 1024 / 100)
+	}
+}
+
 func discoverModels(dir string) []ModelItem {
 	var items []ModelItem
 	seen := make(map[string]bool)
@@ -609,8 +838,8 @@ func discoverModels(dir string) []ModelItem {
 		if isMultiPart {
 			pattern := baseName[:len(baseName)-5] + "*" // remove .gguf
 			matches, _ := filepath.Glob(filepath.Join(dirPath, pattern+"*.gguf"))
-			for _, m := range matches {
-				st, err := os.Stat(m)
+			for _, match := range matches {
+				st, err := os.Stat(match)
 				if err == nil {
 					totalBytes += st.Size()
 				}
