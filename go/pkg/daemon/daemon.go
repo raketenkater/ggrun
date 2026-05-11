@@ -1,0 +1,128 @@
+package daemon
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/raketenkater/llm-server/pkg/server"
+)
+
+// Daemon holds a persistent llama-server process and exposes a control API.
+type Daemon struct {
+	addr    string
+	process *server.Process
+	config  Config
+}
+
+// Config holds daemon settings.
+type Config struct {
+	ModelPath   string   `json:"model_path"`
+	ServerArgs  []string `json:"server_args"`
+	Port        int      `json:"port"`
+	ControlPort int      `json:"control_port"`
+}
+
+// New creates a new daemon instance.
+func New(cfg Config) *Daemon {
+	if cfg.ControlPort == 0 {
+		cfg.ControlPort = 9090
+	}
+	return &Daemon{
+		addr:   fmt.Sprintf(":%d", cfg.ControlPort),
+		config: cfg,
+	}
+}
+
+// Start launches the control API server.
+func (d *Daemon) Start() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", d.handleStatus)
+	mux.HandleFunc("/start", d.handleStart)
+	mux.HandleFunc("/stop", d.handleStop)
+	mux.HandleFunc("/reload", d.handleReload)
+	mux.HandleFunc("/config", d.handleConfig)
+
+	srv := &http.Server{Addr: d.addr, Handler: mux}
+	fmt.Printf("[daemon] control API on %s\n", d.addr)
+	return srv.ListenAndServe()
+}
+
+func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+	status := map[string]interface{}{
+		"running":      d.process != nil && d.process.IsRunning(),
+		"config":       d.config,
+		"server_port":  d.config.Port,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
+	if d.process != nil && d.process.IsRunning() {
+		http.Error(w, `{"error":"already running"}`, http.StatusConflict)
+		return
+	}
+	p, err := server.Start(d.config.ServerArgs, d.config.Port)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	d.process = p
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
+}
+
+func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
+	if d.process == nil {
+		http.Error(w, `{"error":"not running"}`, http.StatusConflict)
+		return
+	}
+	if err := d.process.Stop(); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	d.process = nil
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+}
+
+func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
+	var newCfg Config
+	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if newCfg.ModelPath != "" {
+		d.config.ModelPath = newCfg.ModelPath
+	}
+	if len(newCfg.ServerArgs) > 0 {
+		d.config.ServerArgs = newCfg.ServerArgs
+	}
+	if newCfg.Port > 0 {
+		d.config.Port = newCfg.Port
+	}
+
+	// Restart if running
+	wasRunning := d.process != nil && d.process.IsRunning()
+	if wasRunning {
+		d.process.Stop()
+		// Small delay to free ports
+		time.Sleep(500 * time.Millisecond)
+		p, err := server.Start(d.config.ServerArgs, d.config.Port)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		d.process = p
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "reloaded"})
+}
+
+func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(d.config)
+}
