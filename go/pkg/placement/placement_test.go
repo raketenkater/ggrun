@@ -168,6 +168,34 @@ func TestNormalizeSplit(t *testing.T) {
 	}
 }
 
+func TestBuildOTString(t *testing.T) {
+	gpus := []detect.GPU{
+		{Index: 0},
+		{Index: 1},
+	}
+	gpuOrder := []int{0, 1}
+
+	// Single layer on GPU0
+	ot := buildOTString([]int{1, 0}, gpus, gpuOrder)
+	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU` {
+		t.Fatalf("single-layer OT mismatch: %s", ot)
+	}
+
+	// Multiple layers on GPU0
+	ot = buildOTString([]int{5, 0}, gpus, gpuOrder)
+	expected := `blk\.(0|1|2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU`
+	if ot != expected {
+		t.Fatalf("multi-layer OT mismatch:\n  got:      %s\n  expected: %s", ot, expected)
+	}
+
+	// Layers on both GPUs
+	ot = buildOTString([]int{2, 3}, gpus, gpuOrder)
+	expected = `blk\.(0|1)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`
+	if ot != expected {
+		t.Fatalf("two-gpu OT mismatch:\n  got:      %s\n  expected: %s", ot, expected)
+	}
+}
+
 func TestDefaultContextSize(t *testing.T) {
 	caps := &detect.Capabilities{
 		RAM: detect.RAMInfo{TotalMB: 65536},
