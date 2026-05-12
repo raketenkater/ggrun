@@ -109,7 +109,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		IsMoE:          model.IsMoE,
 		GPULayers:      999,
 		FlashAttention: true,
-		ReasoningOff:   true,
+		ReasoningOff:   false,
 	}
 
 	if s.ContextSize <= 0 {

@@ -25,6 +25,7 @@ import (
 	"github.com/raketenkater/llm-server/pkg/server"
 	"github.com/raketenkater/llm-server/pkg/tune"
 	"github.com/raketenkater/llm-server/pkg/tui"
+	"github.com/raketenkater/llm-server/pkg/update"
 )
 
 const version = "v3.0.0-go"
@@ -56,6 +57,10 @@ func main() {
 		cmdTune(os.Args[2:])
 	case "gui", "tui":
 		cmdGUI()
+	case "config":
+		cmdConfig(os.Args[2:])
+	case "update":
+		cmdUpdate()
 	default:
 		usage()
 		os.Exit(2)
@@ -77,6 +82,8 @@ Commands:
   dry-run <model.gguf> Print computed flags without launching
   download <repo/name> Download from HuggingFace
   tune <model.gguf>    AI-tune model for best performance
+  config [show|edit|path|reset]  Manage settings
+  update               Update llm-server and backends
   gui, tui             Interactive TUI (model picker, settings, launch)
 
 Launch flags:
@@ -519,6 +526,63 @@ func cmdDaemon(args []string) {
 	if err := d.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func cmdConfig(args []string) {
+	sub := "show"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "show", "":
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(cfg.Show())
+	case "path":
+		fmt.Println(config.Path())
+	case "edit":
+		if err := config.Edit(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Saved.")
+	case "reset":
+		if err := config.Reset(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Config reset. Built-in defaults will be used.")
+	default:
+		fmt.Fprintln(os.Stderr, "Usage: llm-server config [show|edit|path|reset]")
+		os.Exit(2)
+	}
+}
+
+func cmdUpdate() {
+	// Self-update llm-server
+	if err := update.SelfUpdate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Self-update: %v\n", err)
+	}
+	// Update backends
+	if err := update.UpdateBackends(); err != nil {
+		fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
+	}
+
+	// Check for newer version on GitHub
+	res, err := update.Check()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Version check: %v\n", err)
+		return
+	}
+	if res.HasUpdate {
+		fmt.Printf("\nA newer version is available: %s (current: %s)\n", res.Latest, res.Current)
+		fmt.Printf("Release page: %s\n", res.URL)
+	} else {
+		fmt.Printf("\nYou are on the latest version: %s\n", res.Current)
 	}
 }
 
