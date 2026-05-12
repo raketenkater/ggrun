@@ -294,7 +294,7 @@ func cmdDryRun(args []string) {
 		strategy.BackendTag = be.Tag
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...
+	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
 	fmt.Println(strings.Join(serverArgs, " "))
 }
 
