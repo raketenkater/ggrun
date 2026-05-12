@@ -14,6 +14,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/llm-server/pkg/probe"
+	"github.com/raketenkater/llm-server/pkg/tune"
 )
 
 var (
@@ -34,6 +36,8 @@ const (
 	ScreenMain Screen = iota
 	ScreenLaunchPrompt
 	ScreenModelConfig
+	ScreenPrelaunch
+	ScreenTunedPicker
 	ScreenSettings
 	ScreenDownload
 	ScreenBackend
@@ -52,6 +56,7 @@ type Model struct {
 	backend     string
 	modelDir    string
 	settingsPath string
+	cacheDir    string
 
 	// Main menu list
 	mainList    list.Model
@@ -70,6 +75,11 @@ type Model struct {
 	benchmark     bool
 	vision        bool
 	keepalive     bool
+
+	// Tuned config
+	tunedConfigs  []tune.ConfigEntry
+	tunedIndex    int  // -1 = auto, 0+ = selected
+	tunePath      string
 
 	// Inputs
 	input         textinput.Model
@@ -90,6 +100,8 @@ type ModelItem struct {
 	Tuned   int
 	SizeGB  float64
 	Arch    string
+	MaxCtx  int // trained max context from GGUF
+	FitCtx  int // empirically proven fit context from probes
 }
 
 // LaunchRecommendation holds smart-predicted settings.
@@ -112,6 +124,7 @@ func InitialModel() Model {
 		backend:      "ik_llama",
 		modelDir:     os.Getenv("HOME") + "/ai_models",
 		settingsPath: os.Getenv("HOME") + "/.config/llm-server/config",
+		cacheDir:     os.Getenv("HOME") + "/.cache/llm-server",
 		ctxSize:      "fit",
 		ctxMode:      "fit",
 		kvPlacement:  "auto",
@@ -124,6 +137,18 @@ func InitialModel() Model {
 
 	// Discover models
 	m.models = discoverModels(m.modelDir)
+
+	// Populate context estimates and tuned counts
+	for i := range m.models {
+		m.models[i].MaxCtx = probe.DetectMaxCtx(m.models[i].Path)
+		m.models[i].FitCtx = probe.EstimateFitCtx(m.models[i].Path, m.cacheDir)
+		backendTag := "llama"
+		if m.backend == "ik_llama" {
+			backendTag = "ik"
+		}
+		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, backendTag)
+	}
+
 	if len(m.models) == 0 {
 		m.screen = ScreenFirstRun
 	}
@@ -228,6 +253,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateLaunchPrompt(msg)
 	case ScreenModelConfig:
 		return m.updateModelConfig(msg)
+	case ScreenPrelaunch:
+		return m.updatePrelaunch(msg)
+	case ScreenTunedPicker:
+		return m.updateTunedPicker(msg)
 	case ScreenFirstRun:
 		return m.updateFirstRun(msg)
 	case ScreenSettings, ScreenDownload, ScreenBackend:
@@ -293,8 +322,8 @@ func (m Model) updateLaunchPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter":
-			m.launchRequest = m.buildLaunchRequest()
-			return m, tea.Quit
+			m.screen = ScreenPrelaunch
+			return m, nil
 		case "d", "D":
 			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
 			m.messageType = "info"
@@ -347,11 +376,16 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "v", "V":
 			m.vision = !m.vision
 		case "l", "L":
-			m.launchRequest = m.buildLaunchRequest()
-			return m, tea.Quit
+			m.screen = ScreenPrelaunch
+			return m, nil
 		case "d", "D":
 			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
 			m.messageType = "info"
+		case "t", "T":
+			m.tunedConfigs = tune.ListTunedConfigs(m.cacheDir, m.models[m.selectedModel].Name, m.backendTag(), false)
+			m.tunedIndex = -1
+			m.screen = ScreenTunedPicker
+			return m, nil
 		}
 	}
 
@@ -456,6 +490,10 @@ func (m Model) View() string {
 		return m.viewQuickLaunch()
 	case ScreenModelConfig:
 		return m.viewModelConfig()
+	case ScreenPrelaunch:
+		return m.viewPrelaunch()
+	case ScreenTunedPicker:
+		return m.viewTunedPicker()
 	case ScreenSettings, ScreenDownload, ScreenBackend:
 		return m.viewInputScreen()
 	default:
@@ -470,6 +508,7 @@ func (m Model) viewMain() string {
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
 	b.WriteString(fmt.Sprintf("  Models:   %s (%d)\n", m.modelDir, len(m.models)))
+	b.WriteString(fmt.Sprintf("  Settings: %s\n", m.settingsPath))
 	b.WriteString("\n")
 
 	if len(m.models) == 0 {
@@ -568,7 +607,21 @@ func (m Model) viewModelConfig() string {
 	if m.ctxMode == "fit" {
 		ctxLabel = "fit"
 	}
-	b.WriteString(fmt.Sprintf("  [c] Context size       %s\n", ctxLabel))
+	var ctxHint string
+	if model.FitCtx > 0 || model.MaxCtx > 0 {
+		ctxHint = " ("
+		if model.FitCtx > 0 {
+			ctxHint += fmt.Sprintf("fits ~%d", model.FitCtx)
+		}
+		if model.FitCtx > 0 && model.MaxCtx > 0 {
+			ctxHint += ", "
+		}
+		if model.MaxCtx > 0 {
+			ctxHint += fmt.Sprintf("train max %d", model.MaxCtx)
+		}
+		ctxHint += ")"
+	}
+	b.WriteString(fmt.Sprintf("  [c] Context size       %s%s\n", ctxLabel, ctxHint))
 	b.WriteString(fmt.Sprintf("  [p] Parallel slots     %s\n", func() string {
 		if m.parallel == "" {
 			return "default (4)"
@@ -583,6 +636,11 @@ func (m Model) viewModelConfig() string {
 		kvLabel = "cpu (more GPU experts for short chat)"
 	}
 	b.WriteString(fmt.Sprintf("  [K] KV placement       %s\n", kvLabel))
+	tuneLabel := "auto"
+	if m.tunePath != "" {
+		tuneLabel = filepath.Base(m.tunePath)
+	}
+	b.WriteString(fmt.Sprintf("  [t] Tuned config       %s\n", tuneLabel))
 	b.WriteString(fmt.Sprintf("  [a] AI tune            %s\n", boolLabel(m.aitune)))
 	if m.aitune {
 		b.WriteString(fmt.Sprintf("  [r] AI tune rounds     %d\n", m.aituneRounds))
@@ -603,6 +661,125 @@ func (m Model) viewModelConfig() string {
 		b.WriteString(highlightStyle.Render(m.message))
 	}
 
+	return b.String()
+}
+
+func (m Model) updatePrelaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if len(m.models) == 0 {
+		m.screen = ScreenMain
+		return m, nil
+	}
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			m.launchRequest = m.buildLaunchRequest()
+			return m, tea.Quit
+		case "esc":
+			m.screen = ScreenModelConfig
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m Model) viewPrelaunch() string {
+	if len(m.models) == 0 {
+		return "No model selected"
+	}
+	model := m.models[m.selectedModel]
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ Pre-launch: %s ═══", model.Name)) + "\n\n")
+
+	ctx := m.ctxSize
+	if m.ctxMode == "fit" {
+		ctx = "fit"
+	}
+	b.WriteString(fmt.Sprintf("  Context:        %s\n", ctx))
+	if model.FitCtx > 0 {
+		b.WriteString(fmt.Sprintf("  Fit estimate:   ~%d tokens\n", model.FitCtx))
+	}
+	if model.MaxCtx > 0 {
+		b.WriteString(fmt.Sprintf("  Train max:      %d tokens\n", model.MaxCtx))
+	}
+	b.WriteString(fmt.Sprintf("  Parallel:       %s\n", func() string {
+		if m.parallel == "" {
+			return "4 (default)"
+		}
+		return m.parallel
+	}()))
+	b.WriteString(fmt.Sprintf("  KV placement:   %s\n", m.kvPlacement))
+	b.WriteString(fmt.Sprintf("  AI tune:        %s\n", boolLabel(m.aitune)))
+	if m.aitune {
+		b.WriteString(fmt.Sprintf("  AI tune rounds: %d\n", m.aituneRounds))
+	}
+	b.WriteString(fmt.Sprintf("  Vision:         %s\n", boolLabel(m.vision)))
+	b.WriteString(fmt.Sprintf("  Benchmark:      %s\n", boolLabel(m.benchmark)))
+	b.WriteString(fmt.Sprintf("  Keep-alive:     %s\n", boolLabel(m.keepalive)))
+	if m.tunePath != "" {
+		b.WriteString(fmt.Sprintf("  Tuned config:   %s\n", filepath.Base(m.tunePath)))
+	}
+	b.WriteString("\n")
+	b.WriteString(highlightStyle.Render("  [Enter] Confirm and launch"))
+	b.WriteString("\n")
+	b.WriteString("  [Esc] Back to config\n")
+	return b.String()
+}
+
+func (m Model) updateTunedPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			m.screen = ScreenModelConfig
+			return m, nil
+		case "enter":
+			if m.tunedIndex >= 0 && m.tunedIndex < len(m.tunedConfigs) {
+				m.tunePath = m.tunedConfigs[m.tunedIndex].Path
+			} else {
+				m.tunePath = ""
+			}
+			m.screen = ScreenModelConfig
+			return m, nil
+		case "up", "k":
+			m.tunedIndex--
+			if m.tunedIndex < -1 {
+				m.tunedIndex = len(m.tunedConfigs) - 1
+			}
+		case "down", "j":
+			m.tunedIndex++
+			if m.tunedIndex >= len(m.tunedConfigs) {
+				m.tunedIndex = -1
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) viewTunedPicker() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("═══ Tuned Configs ═══") + "\n\n")
+	if len(m.tunedConfigs) == 0 {
+		b.WriteString("  No tuned configs match this model/backend.\n")
+		b.WriteString("  Run AI tune to create one.\n")
+	} else {
+		if m.tunedIndex == -1 {
+			b.WriteString(selectedStyle.Render("▸ [0] Auto / heuristic cache selection") + "\n")
+		} else {
+			b.WriteString("  [0] Auto / heuristic cache selection\n")
+		}
+		for i, entry := range m.tunedConfigs {
+			if i == m.tunedIndex {
+				b.WriteString(selectedStyle.Render(fmt.Sprintf("▸ [%d] %s", i+1, entry.Label)) + "\n")
+				b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s", filepath.Base(entry.Path))) + "\n")
+			} else {
+				b.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, entry.Label))
+				b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s", filepath.Base(entry.Path))) + "\n")
+			}
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString("  [Enter] Select  [Esc] Cancel  [↑/↓] Navigate\n")
 	return b.String()
 }
 
@@ -879,6 +1056,13 @@ func discoverModels(dir string) []ModelItem {
 	return items
 }
 
+func (m Model) backendTag() string {
+	if m.backend == "ik_llama" {
+		return "ik"
+	}
+	return "llama"
+}
+
 func (m Model) buildLaunchRequest() *LaunchRequest {
 	if len(m.models) == 0 || m.selectedModel < 0 || m.selectedModel >= len(m.models) {
 		return nil
@@ -906,16 +1090,21 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		}
 	}
 	return &LaunchRequest{
-		ModelPath:   model.Path,
-		Port:        8081,
-		CtxSize:     ctx,
-		KVPlacement: m.kvPlacement,
-		KVQuality:   "mid",
-		GPULayers:   gpuLayers,
-		FlashAttn:   true,
-		Parallel:    parallel,
-		Vision:      m.vision,
-		Backend:     m.backend,
+		ModelPath:    model.Path,
+		Port:         8081,
+		CtxSize:      ctx,
+		KVPlacement:  m.kvPlacement,
+		KVQuality:    "mid",
+		GPULayers:    gpuLayers,
+		FlashAttn:    true,
+		Parallel:     parallel,
+		Vision:       m.vision,
+		Backend:      m.backend,
+		TuneCache:    m.tunePath,
+		AITune:       m.aitune,
+		AITuneRounds: m.aituneRounds,
+		Benchmark:    m.benchmark,
+		KeepAlive:    m.keepalive,
 	}
 }
 
@@ -959,6 +1148,11 @@ type LaunchRequest struct {
 	Parallel    int
 	Vision      bool
 	Backend     string
+	TuneCache   string
+	AITune      bool
+	AITuneRounds int
+	Benchmark   bool
+	KeepAlive   bool
 }
 
 // Run starts the TUI and returns a launch request if the user chose to launch.

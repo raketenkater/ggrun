@@ -221,6 +221,11 @@ func cmdGUI() {
 		ContextSize: req.CtxSize,
 		KVPlacement: req.KVPlacement,
 		KVQuality:   req.KVQuality,
+		BackendTag:  req.Backend,
+		Parallel:    req.Parallel,
+	}
+	if req.TuneCache != "" {
+		opts.CacheFile = req.TuneCache
 	}
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {

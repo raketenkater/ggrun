@@ -93,6 +93,7 @@ type Options struct {
 	BackendTag  string // "llama" or "ik_llama"
 	NoMMap      bool
 	Parallel    int
+	CacheFile   string // path to placement cache for MoE recovery
 }
 
 // Compute builds a Strategy from hardware capabilities and model profile.
@@ -156,6 +157,34 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	} else {
 		s.BatchSize = 2048
 		s.UBatchSize = 512
+	}
+
+	// Try cached placement first (MoE only)
+	if opts.CacheFile != "" && model.IsMoE {
+		cache, err := LoadPlacementCache(opts.CacheFile, caps, kvTotalMB)
+		if err == nil && cache != nil {
+			// Build strategy from cache
+			s.Type = MoEOffload
+			s.BatchSize = cache.BatchSize
+			s.UBatchSize = cache.UBatchSize
+			s.Parallel = cache.Parallel
+			s.NCPUMoE = cache.NCPUMoE
+			s.MMap = !opts.NoMMap
+			if cache.MMap {
+				s.MMap = true
+			}
+			if cache.KVUnified {
+				s.KVPlacement = "gpu"
+			}
+			// Build OT string from cached assignments
+			if len(cache.GPUAssignments) > 0 {
+				otString := buildOTStringFromAssignments(cache.GPUAssignments, caps.GPUs, model.NumLayers)
+				if otString != "" {
+					s.OTString = otString
+				}
+			}
+			return s, nil
+		}
 	}
 
 	// Strategy selection
@@ -510,6 +539,29 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 
 // buildOTString builds the -ot override-tensor string for MoE.
 // Matches bash build_ot_string() exactly: explicit layer list with escaped dots.
+func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU, numLayers int) string {
+	var parts []string
+	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
+
+	nextLayer := 0
+	for _, assign := range assignments {
+		if assign.Count <= 0 {
+			continue
+		}
+		start := assign.Start
+		last := start + assign.Count - 1
+		var layerParts []string
+		for l := start; l <= last; l++ {
+			layerParts = append(layerParts, fmt.Sprintf("%d", l))
+		}
+		layerRange := stringsJoin(layerParts, "|")
+		parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=CUDA%d`, layerRange, expertPattern, assign.CUDAIndex))
+		nextLayer += assign.Count
+	}
+	parts = append(parts, "exps=CPU")
+	return stringsJoin(parts, ",")
+}
+
 func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int) string {
 	var parts []string
 	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
