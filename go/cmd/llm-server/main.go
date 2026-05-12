@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/raketenkater/llm-server/pkg/benchmark"
 	"github.com/raketenkater/llm-server/pkg/config"
@@ -147,17 +149,39 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 
-	// Find backend binary
-	binPath := findBackend(caps)
-	if binPath == "" {
+	// Find backend binary and detect type
+	be := findBackend(caps)
+	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
+	// Memory warning before launch
+	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
+	if len(caps.GPUs) > 0 {
+		totalVRAM := int64(0)
+		for _, g := range caps.GPUs {
+			totalVRAM += int64(g.VRAMTotalMB) * 1024 * 1024
+		}
+		if model.SizeBytes > totalVRAM {
+			fmt.Fprintf(os.Stderr, "[warning] Model (%.1f GB) exceeds total GPU VRAM (%.1f GB). Expect partial offload or CPU fallback.\n",
+				float64(model.SizeBytes)/(1024*1024*1024), float64(totalVRAM)/(1024*1024*1024))
+		}
+	}
+
+	serverArgs := append([]string{be.Path}, strategy.Args(modelPath, *port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
 
-	p, err := server.Start(serverArgs, *port)
+	// Dynamic health timeout: 240 + size/1700 seconds, min 60s
+	timeoutSec := 240.0 + totalSizeMB/1700.0
+	if timeoutSec < 60 {
+		timeoutSec = 60
+	}
+	if model.IsMoE && totalSizeMB > 100*1024 {
+		timeoutSec = 900 // Large MoE needs more time
+	}
+
+	p, err := server.StartWithTimeout(serverArgs, *port, time.Duration(timeoutSec)*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
@@ -203,13 +227,13 @@ func cmdGUI() {
 		os.Exit(1)
 	}
 
-	binPath := findBackend(caps)
-	if binPath == "" {
+	be := findBackend(caps)
+	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
 
 	p, err := server.Start(serverArgs, req.Port)
@@ -261,9 +285,10 @@ func cmdDryRun(args []string) {
 		os.Exit(1)
 	}
 
-	binPath := findBackend(caps)
-	if binPath == "" {
-		binPath = "llama-server"
+	be := findBackend(caps)
+	binPath := "llama-server"
+	if be != nil {
+		binPath = be.Path
 	}
 
 	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
@@ -335,13 +360,13 @@ func cmdTune(args []string) {
 		os.Exit(1)
 	}
 
-	binPath := findBackend(caps)
-	if binPath == "" {
+	be := findBackend(caps)
+	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
+	serverArgs := append([]string{be.Path}, strategy.Args(modelPath, *port)...)
 
 	cfg := config.Defaults()
 	if f, err := config.Load(); err == nil {
@@ -419,13 +444,13 @@ func cmdDaemon(args []string) {
 		os.Exit(1)
 	}
 
-	binPath := findBackend(caps)
-	if binPath == "" {
+	be := findBackend(caps)
+	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(*modelPath, *port)...)
+	serverArgs := append([]string{be.Path}, strategy.Args(*modelPath, *port)...)
 
 	d := daemon.New(daemon.Config{
 		ModelPath:   *modelPath,
@@ -456,86 +481,88 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 	}
 }
 
-// parseModel calls parse_gguf.py to extract model metadata.
+// parseModel calls parse_gguf.py to extract real model metadata.
+// For multi-part models, it sums all shard files for total size.
 func parseModel(path string) (*placement.ModelProfile, error) {
-	scriptDir := os.Getenv("LLM_SCRIPT_DIR")
-	if scriptDir == "" {
-		// Try to find parse_gguf.py relative to binary or in PATH
-		exe, _ := os.Executable()
-		scriptDir = filepath.Join(filepath.Dir(exe), "..", "..")
-	}
-	parseScript := filepath.Join(scriptDir, "parse_gguf.py")
-	if _, err := os.Stat(parseScript); os.IsNotExist(err) {
-		// Fallback: try repo root next to go/
-		cwd, _ := os.Getwd()
-		parseScript = filepath.Join(cwd, "..", "parse_gguf.py")
-	}
-	if _, err := os.Stat(parseScript); os.IsNotExist(err) {
-		// Last resort: look in PATH
-		parseScript = "parse_gguf.py"
-	}
-
-	out, err := os.ReadFile(path)
+	info, err := gguf.Parse(path)
 	if err != nil {
-		return nil, err
-	}
-	_ = out // We could call parse_gguf.py here, but for now use heuristics
-
-	// Fallback: derive from file size and name
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse_gguf.py failed: %w", err)
 	}
 
-	profile := &placement.ModelProfile{
-		Path:      path,
-		SizeBytes: info.Size(),
-	}
+	profile := infoToProfile(info, path)
 
-	// Heuristic from filename
-	name := strings.ToLower(filepath.Base(path))
-	if strings.Contains(name, "moe") || strings.Contains(name, "mixtral") || strings.Contains(name, "minimax") || strings.Contains(name, "qwen3.6") {
-		profile.IsMoE = true
-		profile.NumExperts = 64
-	}
-	if strings.Contains(name, "70b") || strings.Contains(name, "72b") {
-		profile.NumParams = 70_000_000_000
-		profile.NumLayers = 80
-		profile.HiddenSize = 8192
-	} else if strings.Contains(name, "32b") || strings.Contains(name, "30b") {
-		profile.NumParams = 32_000_000_000
-		profile.NumLayers = 64
-		profile.HiddenSize = 5120
-	} else if strings.Contains(name, "14b") || strings.Contains(name, "15b") {
-		profile.NumParams = 14_000_000_000
-		profile.NumLayers = 48
-		profile.HiddenSize = 5120
-	} else if strings.Contains(name, "8b") || strings.Contains(name, "7b") {
-		profile.NumParams = 8_000_000_000
-		profile.NumLayers = 32
-		profile.HiddenSize = 4096
-	} else {
-		// Default
-		profile.NumParams = 7_000_000_000
-		profile.NumLayers = 32
-		profile.HiddenSize = 4096
-	}
-
-	// Size-based override for MoE
-	if info.Size() > 50*1024*1024*1024 {
-		profile.IsMoE = true
-		profile.NumExperts = 64
-		profile.NumLayers = 64
-		profile.HiddenSize = 6144
-	}
+	// Handle multi-part models: sum all shard files
+	profile.SizeBytes = totalModelSize(path)
 
 	return profile, nil
 }
 
-func findBackend(caps *detect.Capabilities) string {
+// totalModelSize returns the total bytes of a model, including all shards.
+func totalModelSize(path string) int64 {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	// Check if this is a shard (e.g., model-00001-of-00003.gguf)
+	if !strings.Contains(base, "-of-") {
+		info, err := os.Stat(path)
+		if err == nil {
+			return info.Size()
+		}
+		return 0
+	}
+
+	// Find the prefix before the shard number
+	// e.g., "model-00001-of-00003.gguf" -> prefix "model-"
+	idx := strings.Index(base, "-000")
+	if idx < 0 {
+		info, err := os.Stat(path)
+		if err == nil {
+			return info.Size()
+		}
+		return 0
+	}
+	prefix := base[:idx]
+	ext := filepath.Ext(base)
+
+	var total int64
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		info, err := os.Stat(path)
+		if err == nil {
+			return info.Size()
+		}
+		return 0
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ext) && strings.Contains(name, "-of-") {
+			fi, err := entry.Info()
+			if err == nil {
+				total += fi.Size()
+			}
+		}
+	}
+	if total == 0 {
+		info, err := os.Stat(path)
+		if err == nil {
+			return info.Size()
+		}
+	}
+	return total
+}
+
+type backendInfo struct {
+	Path    string
+	IsIK    bool
+	SupportsReasoning bool
+	Tag     string
+}
+
+func findBackend(caps *detect.Capabilities) *backendInfo {
+	// Try detected backends first
 	for _, b := range caps.Backends {
 		if b.Name == "llama-server" || b.Name == "ik_llama" || b.Name == "ik_llama-server" {
-			return b.Path
+			return detectBackend(b.Path)
 		}
 	}
 	// Fallback: search common build paths
@@ -550,9 +577,27 @@ func findBackend(caps *detect.Capabilities) string {
 	for _, p := range paths {
 		if p != "" {
 			if _, err := os.Stat(p); err == nil {
-				return p
+				return detectBackend(p)
 			}
 		}
 	}
-	return ""
+	return nil
+}
+
+// detectBackend runs --help to determine if this is ik_llama.cpp fork.
+func detectBackend(path string) *backendInfo {
+	info := &backendInfo{Path: path, Tag: "llama"}
+	out, err := exec.Command(path, "--help").Output()
+	if err != nil {
+		return info
+	}
+	help := string(out)
+	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
+		info.IsIK = true
+		info.Tag = "ik_llama"
+	}
+	if strings.Contains(help, "--reasoning") {
+		info.SupportsReasoning = true
+	}
+	return info
 }

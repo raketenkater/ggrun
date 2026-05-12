@@ -20,6 +20,11 @@ type Process struct {
 
 // Start launches llama-server with the given args and waits for it to be ready.
 func Start(args []string, port int) (*Process, error) {
+	return StartWithTimeout(args, port, 60*time.Second)
+}
+
+// StartWithTimeout launches llama-server with a custom readiness timeout.
+func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -32,7 +37,7 @@ func Start(args []string, port int) (*Process, error) {
 	}
 
 	p := &Process{Cmd: cmd, Port: port, cancel: cancel}
-	if err := p.waitReady(60 * time.Second); err != nil {
+	if err := p.waitReady(timeout); err != nil {
 		p.Stop()
 		return nil, fmt.Errorf("server not ready: %w", err)
 	}
