@@ -10,10 +10,15 @@ import (
 	"strings"
 
 	"github.com/raketenkater/llm-server/pkg/benchmark"
+	"github.com/raketenkater/llm-server/pkg/config"
 	"github.com/raketenkater/llm-server/pkg/daemon"
 	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/llm-server/pkg/download"
+	"github.com/raketenkater/llm-server/pkg/gguf"
 	"github.com/raketenkater/llm-server/pkg/placement"
+	"github.com/raketenkater/llm-server/pkg/probe"
 	"github.com/raketenkater/llm-server/pkg/server"
+	"github.com/raketenkater/llm-server/pkg/tune"
 	"github.com/raketenkater/llm-server/pkg/tui"
 )
 
@@ -38,6 +43,12 @@ func main() {
 		cmdDaemon(os.Args[2:])
 	case "dry-run":
 		cmdDryRun(os.Args[2:])
+	case "probe":
+		cmdProbe()
+	case "download":
+		cmdDownload(os.Args[2:])
+	case "tune":
+		cmdTune(os.Args[2:])
 	case "gui", "tui":
 		cmdGUI()
 	default:
@@ -54,10 +65,13 @@ With no command, launches the interactive TUI (same as llm-server-gui).
 Commands:
   version              Show version
   detect               Detect hardware capabilities
+  probe                Check free GPU/RAM memory
   launch <model.gguf>  Launch model with auto-placement
   benchmark <model>    Benchmark a running server
   daemon               Start persistent daemon
   dry-run <model.gguf> Print computed flags without launching
+  download <repo/name> Download from HuggingFace
+  tune <model.gguf>    AI-tune model for best performance
   gui, tui             Interactive TUI (model picker, settings, launch)
 
 Launch flags:
@@ -67,6 +81,7 @@ Launch flags:
   -kv-quality string   KV quality: high|mid|low (default mid)
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
+  -vision              Enable vision (auto-detect mmproj)
 `)
 }
 
@@ -209,6 +224,106 @@ func cmdDryRun(args []string) {
 	fmt.Println(strings.Join(serverArgs, " "))
 }
 
+func cmdProbe() {
+	mem, err := probe.Probe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mem.String())
+}
+
+func cmdDownload(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: llm-server download <repo/name>")
+		os.Exit(2)
+	}
+	repo := args[0]
+
+	caps, err := detect.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg := config.Defaults()
+	if f, err := config.Load(); err == nil {
+		cfg = f
+	}
+
+	d := download.New(cfg.ModelDir, cfg.CacheDir)
+	if err := d.Run(repo, caps); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdTune(args []string) {
+	fs := flag.NewFlagSet("tune", flag.ExitOnError)
+	port := fs.Int("port", 8081, "Server port")
+	rounds := fs.Int("rounds", 3, "AI-tune rounds")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: llm-server tune <model.gguf>")
+		os.Exit(2)
+	}
+	modelPath := fs.Arg(0)
+
+	caps, err := detect.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		os.Exit(1)
+	}
+
+	info, err := gguf.Parse(modelPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
+		os.Exit(1)
+	}
+
+	model := infoToProfile(info, modelPath)
+	strategy, err := placement.Compute(caps, model, placement.Options{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		os.Exit(1)
+	}
+
+	binPath := findBackend(caps)
+	if binPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
+	}
+
+	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
+
+	cfg := config.Defaults()
+	if f, err := config.Load(); err == nil {
+		cfg = f
+	}
+
+	cache := tune.NewCache(cfg.CacheDir)
+
+	engine := &tune.Engine{
+		BaseURL: fmt.Sprintf("http://localhost:%d", *port),
+		Model:   filepath.Base(modelPath),
+		Rounds:  *rounds,
+		Cache:   cache,
+		Caps:    caps,
+		OnProgress: func(msg string) {
+			fmt.Println("[tune]", msg)
+		},
+	}
+
+	entry, err := engine.Run(modelPath, serverArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
+}
+
 func cmdBenchmark(args []string) {
 	fs := flag.NewFlagSet("benchmark", flag.ExitOnError)
 	port := fs.Int("port", 8081, "Server port")
@@ -275,6 +390,23 @@ func cmdDaemon(args []string) {
 	if err := d.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// infoToProfile converts gguf.Info to placement.ModelProfile.
+func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
+	return &placement.ModelProfile{
+		Path:        path,
+		SizeBytes:   info.NonExpertBytes + info.ExpertBytes,
+		NumLayers:   info.BlockCount,
+		NumParams:   info.EstimateParams(),
+		IsMoE:       info.IsMoE,
+		NumExperts:  int(info.Fused),
+		ContextSize: info.ContextLength,
+		HiddenSize:  info.EmbeddingLength,
+		HeadCount:   info.HeadCountKV,
+		VocabSize:   info.VocabSize,
+		QuantType:   "", // not parsed from gguf.py output
 	}
 }
 
