@@ -32,7 +32,7 @@ type Screen int
 
 const (
 	ScreenMain Screen = iota
-	ScreenQuickLaunch
+	ScreenLaunchPrompt
 	ScreenModelConfig
 	ScreenSettings
 	ScreenDownload
@@ -221,8 +221,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case ScreenMain:
 		return m.updateMain(msg)
-	case ScreenQuickLaunch:
-		return m.updateQuickLaunch(msg)
+	case ScreenLaunchPrompt:
+		return m.updateLaunchPrompt(msg)
 	case ScreenModelConfig:
 		return m.updateModelConfig(msg)
 	case ScreenFirstRun:
@@ -243,7 +243,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if item.isModel {
 					m.selectedModel = item.index
 					m.recommendation = computeRecommendation(m.caps, m.models[m.selectedModel])
-					m.screen = ScreenQuickLaunch
+					m.screen = ScreenLaunchPrompt
 					return m, nil
 				}
 				switch item.action {
@@ -285,7 +285,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updateQuickLaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) updateLaunchPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -451,7 +451,7 @@ func (m Model) View() string {
 	switch m.screen {
 	case ScreenFirstRun:
 		return m.viewFirstRun()
-	case ScreenQuickLaunch:
+	case ScreenLaunchPrompt:
 		return m.viewQuickLaunch()
 	case ScreenModelConfig:
 		return m.viewModelConfig()
