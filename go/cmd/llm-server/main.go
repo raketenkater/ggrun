@@ -155,6 +155,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+	strategy.BackendTag = be.Tag
 
 	// Memory warning before launch
 	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
@@ -232,6 +233,7 @@ func cmdGUI() {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+	strategy.BackendTag = be.Tag
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
@@ -289,9 +291,10 @@ func cmdDryRun(args []string) {
 	binPath := "llama-server"
 	if be != nil {
 		binPath = be.Path
+		strategy.BackendTag = be.Tag
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
+	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...
 	fmt.Println(strings.Join(serverArgs, " "))
 }
 
@@ -365,6 +368,7 @@ func cmdTune(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+	strategy.BackendTag = be.Tag
 
 	serverArgs := append([]string{be.Path}, strategy.Args(modelPath, *port)...)
 
@@ -449,6 +453,7 @@ func cmdDaemon(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+	strategy.BackendTag = be.Tag
 
 	serverArgs := append([]string{be.Path}, strategy.Args(*modelPath, *port)...)
 

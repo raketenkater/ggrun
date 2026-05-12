@@ -23,6 +23,8 @@ type Strategy struct {
 	Threads        int      `json:"threads"`
 	BatchSize      int      `json:"batch_size"`
 	UBatchSize     int      `json:"ubatch_size"`
+	BackendTag     string   `json:"backend_tag,omitempty"` // "llama" or "ik_llama"
+	IsMoE          bool     `json:"is_moe"`
 }
 
 // ModelProfile describes the GGUF model.
@@ -49,6 +51,8 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		MMap:        true,
 		MLock:       false,
 		Threads:     caps.CPU.Cores,
+		BackendTag:  opts.BackendTag,
+		IsMoE:       model.IsMoE,
 	}
 
 	if s.ContextSize <= 0 {
@@ -80,6 +84,7 @@ type Options struct {
 	GPUs        []int // restrict to specific GPUs
 	CPUMode     bool
 	RamBudgetMB int
+	BackendTag  string // "llama" or "ik_llama"
 }
 
 func computeDense(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalVRAM, modelSizeMB int, opts Options) (*Strategy, error) {
@@ -317,6 +322,27 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	}
 	if s.UBatchSize > 0 {
 		args = append(args, "-ub", fmt.Sprintf("%d", s.UBatchSize))
+	}
+
+	// ik_llama.cpp fork specific flags
+	if s.BackendTag == "ik_llama" {
+		args = append(args, "--run-time-repack")
+		args = append(args, "-khad")
+		args = append(args, "--defrag-thold", "0.1")
+
+		// MoE-specific optimizations
+		if s.IsMoE {
+			args = append(args, "-muge")
+			args = append(args, "-ger")
+			args = append(args, "-mqkv")
+		}
+
+		// Prompt cache placement
+		if len(s.TensorSplit) > 0 {
+			args = append(args, "-cram", "vram")
+		} else {
+			args = append(args, "-cram", "ram")
+		}
 	}
 
 	return args
