@@ -171,10 +171,56 @@ func cmdLaunch(args []string) {
 }
 
 func cmdGUI() {
-	if err := tui.Run(); err != nil {
+	req, err := tui.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	if req == nil {
+		return
+	}
+
+	caps, err := detect.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		os.Exit(1)
+	}
+
+	model, err := parseModel(req.ModelPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
+		os.Exit(1)
+	}
+
+	opts := placement.Options{
+		ContextSize: req.CtxSize,
+		KVPlacement: req.KVPlacement,
+		KVQuality:   req.KVQuality,
+	}
+	strategy, err := placement.Compute(caps, model, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		os.Exit(1)
+	}
+
+	binPath := findBackend(caps)
+	if binPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
+	}
+
+	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
+	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
+
+	p, err := server.Start(serverArgs, req.Port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
+	fmt.Println("[launch] Press Ctrl+C to stop")
+	select {}
 }
 
 func cmdDryRun(args []string) {

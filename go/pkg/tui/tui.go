@@ -75,6 +75,9 @@ type Model struct {
 	input         textinput.Model
 	inputMode     string
 
+	// Launch request (set when user chooses to launch)
+	launchRequest *LaunchRequest
+
 	// Messages
 	message       string
 	messageType   string // info, warning, error
@@ -290,13 +293,11 @@ func (m Model) updateLaunchPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter":
-			m.message = fmt.Sprintf("Launching %s...", m.models[m.selectedModel].Name)
-			m.messageType = "info"
-			// TODO: actually launch
+			m.launchRequest = m.buildLaunchRequest()
+			return m, tea.Quit
 		case "d", "D":
-			m.message = fmt.Sprintf("Dry run %s...", m.models[m.selectedModel].Name)
+			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
 			m.messageType = "info"
-			// TODO: show dry run output
 		case "c", "C":
 			m.screen = ScreenModelConfig
 			return m, nil
@@ -346,10 +347,10 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "v", "V":
 			m.vision = !m.vision
 		case "l", "L":
-			m.message = fmt.Sprintf("Launch %s (not yet implemented)", m.models[m.selectedModel].Name)
-			m.messageType = "info"
+			m.launchRequest = m.buildLaunchRequest()
+			return m, tea.Quit
 		case "d", "D":
-			m.message = fmt.Sprintf("Dry run %s (not yet implemented)", m.models[m.selectedModel].Name)
+			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
 			m.messageType = "info"
 		}
 	}
@@ -878,9 +879,97 @@ func discoverModels(dir string) []ModelItem {
 	return items
 }
 
-// Run starts the TUI.
-func Run() error {
+func (m Model) buildLaunchRequest() *LaunchRequest {
+	if len(m.models) == 0 || m.selectedModel < 0 || m.selectedModel >= len(m.models) {
+		return nil
+	}
+	model := m.models[m.selectedModel]
+	ctx := 32768
+	if m.recommendation != nil && m.recommendation.ContextSize > 0 {
+		ctx = m.recommendation.ContextSize
+	}
+	if m.ctxMode == "max" {
+		ctx = 131072
+	} else if m.ctxMode == "manual" && m.ctxSize != "" {
+		if n, err := strconv.Atoi(m.ctxSize); err == nil {
+			ctx = n
+		}
+	}
+	gpuLayers := 999
+	if m.recommendation != nil {
+		gpuLayers = m.recommendation.GPULayers
+	}
+	parallel := 4
+	if m.parallel != "" {
+		if n, err := strconv.Atoi(m.parallel); err == nil {
+			parallel = n
+		}
+	}
+	return &LaunchRequest{
+		ModelPath:   model.Path,
+		Port:        8081,
+		CtxSize:     ctx,
+		KVPlacement: m.kvPlacement,
+		KVQuality:   "mid",
+		GPULayers:   gpuLayers,
+		FlashAttn:   true,
+		Parallel:    parallel,
+		Vision:      m.vision,
+		Backend:     m.backend,
+	}
+}
+
+func (m Model) buildArgs() []string {
+	req := m.buildLaunchRequest()
+	if req == nil {
+		return nil
+	}
+	args := []string{
+		"-m", req.ModelPath,
+		"--port", strconv.Itoa(req.Port),
+		"-c", strconv.Itoa(req.CtxSize),
+		"-ngl", strconv.Itoa(req.GPULayers),
+	}
+	if req.KVPlacement != "" && req.KVPlacement != "auto" {
+		args = append(args, "--kv-placement", req.KVPlacement)
+	}
+	if req.KVQuality == "high" {
+		args = append(args, "--cache-type-k", "f16", "--cache-type-v", "f16")
+	} else if req.KVQuality == "mid" {
+		args = append(args, "--cache-type-k", "q8_0", "--cache-type-v", "q8_0")
+	}
+	if req.FlashAttn {
+		args = append(args, "--flash-attn", "on")
+	}
+	if req.Parallel > 1 {
+		args = append(args, "-np", strconv.Itoa(req.Parallel))
+	}
+	return args
+}
+
+// LaunchRequest is returned when the user chooses to launch a model.
+type LaunchRequest struct {
+	ModelPath   string
+	Port        int
+	CtxSize     int
+	KVPlacement string
+	KVQuality   string
+	GPULayers   int
+	FlashAttn   bool
+	Parallel    int
+	Vision      bool
+	Backend     string
+}
+
+// Run starts the TUI and returns a launch request if the user chose to launch.
+func Run() (*LaunchRequest, error) {
 	p := tea.NewProgram(InitialModel(), tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	m, err := p.Run()
+	if err != nil {
+		return nil, err
+	}
+	if model, ok := m.(Model); ok && model.launchRequest != nil {
+		return model.launchRequest, nil
+	}
+	return nil, nil
 }
