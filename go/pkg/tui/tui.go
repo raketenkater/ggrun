@@ -847,7 +847,6 @@ func computeRecommendation(caps *detect.Capabilities, model ModelItem) *LaunchRe
 	}
 
 	totalVRAM := caps.TotalVRAM()
-	totalVRAMGB := float64(totalVRAM) / 1024
 	modelSizeMB := int(model.SizeGB * 1024)
 
 	// Determine GPU availability
@@ -907,22 +906,29 @@ func computeRecommendation(caps *detect.Capabilities, model ModelItem) *LaunchRe
 		rec.KVPlacement = "gpu"
 		rec.ParallelSlots = 4
 		rec.Reason = fmt.Sprintf("Spans %d GPUs with tensor split — all layers on GPU", numGPUs)
-	} else if model.Arch == "MoE" && totalVRAMGB > 20 {
-		// Large MoE with reasonable VRAM — GPU attention, CPU experts
+	} else if model.Arch == "MoE" || (numGPUs > 0 && modelSizeMB > totalVRAM) {
+		// Large model that doesn't fit in VRAM — GPU attention, CPU spill
 		rec.UseGPU = true
 		rec.GPULayers = -1
-		rec.KVPlacement = "cpu"
-		rec.ContextSize = 16384
-		rec.ParallelSlots = 2
-		rec.Warning = "MoE model requires CPU expert offloading — expect lower short-chat tok/s"
-		rec.Reason = "MoE model — GPU attention layers, CPU routing experts"
+		if model.Arch == "MoE" {
+			rec.KVPlacement = "cpu"
+			rec.ContextSize = 16384
+			rec.ParallelSlots = 2
+			rec.Warning = "MoE model requires CPU expert offloading — expect lower short-chat tok/s"
+			rec.Reason = "MoE model — GPU attention layers, CPU routing experts"
+		} else {
+			rec.KVPlacement = "auto"
+			rec.ContextSize = 8192
+			rec.ParallelSlots = 2
+			rec.Warning = "Model exceeds total VRAM — partial GPU offload recommended"
+			rec.Reason = "Partial GPU offload — attention on GPU, rest on CPU"
+		}
 	} else {
-		// Partial offload or CPU
+		// Fallback: small model that might fit partially
 		vramAvailable := totalVRAM - overheadMB
 		if vramAvailable > modelSizeMB/2 {
-			// Can fit at least half on GPU
 			rec.UseGPU = true
-			rec.GPULayers = -1 // let llama-server figure it out with --fit
+			rec.GPULayers = -1
 			rec.ContextSize = 8192
 			rec.KVPlacement = "auto"
 			rec.Warning = "Model exceeds total VRAM — partial GPU offload recommended"

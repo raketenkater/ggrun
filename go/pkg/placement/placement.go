@@ -191,18 +191,30 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	strategy := chooseStrategy(caps, model, totalSizeMB, kvTotalMB, opts)
 	s.Type = strategy
 
+	var err error
 	switch strategy {
 	case CPUOnly:
-		return buildCPUOnly(s, caps, model, opts)
+		s, err = buildCPUOnly(s, caps, model, opts)
 	case SingleGPU:
-		return buildSingleGPU(s, caps, model, opts)
+		s, err = buildSingleGPU(s, caps, model, opts)
 	case MultiGPUDense:
-		return buildMultiGPUDense(s, caps, model, totalSizeMB, kvTotalMB, opts)
+		s, err = buildMultiGPUDense(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	case DenseCPUOffload:
-		return buildDenseCPUOffload(s, caps, model, opts)
+		s, err = buildDenseCPUOffload(s, caps, model, opts)
 	case MoEOffload:
-		return buildMoEOffload(s, caps, model, totalSizeMB, kvTotalMB, opts)
+		s, err = buildMoEOffload(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	// OOM guard: refuse if model+KV+compute don't fit
+	if err := checkMemoryOrDie(caps, model, s, totalSizeMB, kvTotalMB); err != nil {
+		return nil, err
+	}
+
+	// Compute CRAM (prompt cache)
+	s.CRAM, s.MaxCheckpoints = computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
 
 	return s, nil
 }
@@ -720,6 +732,73 @@ func normalizeSplit(split []float64) []float64 {
 		split[i] = math.Round(split[i]/total*100) / 100
 	}
 	return split
+}
+
+// checkMemoryOrDie refuses to launch if model absolutely cannot fit anywhere.
+// With mmap, the working set is much smaller than the full model size.
+func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int) error {
+	totalSystemMB := caps.TotalVRAM() + caps.RAM.TotalMB
+	// With mmap, only ~30% of model needs to be resident
+	minWorkingSetMB := totalSizeMB*30/100 + kvTotalMB + 2048
+
+	if minWorkingSetMB > totalSystemMB {
+		return fmt.Errorf("OOM guard: model+%dMB context needs ~%dMB working set but total system memory is %dMB",
+			s.ContextSize, minWorkingSetMB, totalSystemMB)
+	}
+	return nil
+}
+
+// computeCRAM calculates prompt cache size from remaining memory after load.
+func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int) (int, int) {
+	var ramAfterLoad int
+
+	switch s.Type {
+	case CPUOnly:
+		// With mmap, working set is much smaller than full model
+		ramAfterLoad = caps.RAM.FreeMB - totalSizeMB/5 - kvTotalMB
+	case SingleGPU:
+		// Model on GPU, only compute buffers in RAM
+		ramAfterLoad = caps.RAM.FreeMB - 2048
+	case MultiGPUDense, DenseCPUOffload:
+		// Some model parts on CPU
+		cpuModelMB := totalSizeMB * 20 / 100
+		ramAfterLoad = caps.RAM.FreeMB - cpuModelMB - kvTotalMB - 2048
+	case MoEOffload:
+		// MoE: CPU layers + overhead
+		cpuModelMB := totalSizeMB * 30 / 100
+		ramAfterLoad = caps.RAM.FreeMB - cpuModelMB - kvTotalMB - 2048
+	}
+
+	if ramAfterLoad < 512 {
+		ramAfterLoad = 512
+	}
+
+	cram := ramAfterLoad / 10
+	if cram < 512 {
+		cram = 512
+	}
+	if cram > 16384 {
+		cram = 16384
+	}
+
+	// For multi-GPU, use ctx-checkpoints instead
+	maxCheckpoints := 0
+	if len(caps.GPUs) > 1 && s.Type != CPUOnly {
+		// VRAM-based CRAM for multi-GPU
+		vramAfterLoad := caps.TotalVRAMFree() - totalSizeMB*110/100 - kvTotalMB
+		if vramAfterLoad > 0 {
+			cram = vramAfterLoad / 10
+			if cram < 512 {
+				cram = 512
+			}
+			if cram > 16384 {
+				cram = 16384
+			}
+		}
+		maxCheckpoints = len(caps.GPUs)
+	}
+
+	return cram, maxCheckpoints
 }
 
 func defaultContextSize(model *ModelProfile, caps *detect.Capabilities) int {

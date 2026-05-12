@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,8 +18,10 @@ import (
 	"github.com/raketenkater/llm-server/pkg/detect"
 	"github.com/raketenkater/llm-server/pkg/download"
 	"github.com/raketenkater/llm-server/pkg/gguf"
+	"github.com/raketenkater/llm-server/pkg/libhub"
 	"github.com/raketenkater/llm-server/pkg/placement"
 	"github.com/raketenkater/llm-server/pkg/probe"
+	"github.com/raketenkater/llm-server/pkg/recovery"
 	"github.com/raketenkater/llm-server/pkg/server"
 	"github.com/raketenkater/llm-server/pkg/tune"
 	"github.com/raketenkater/llm-server/pkg/tui"
@@ -243,15 +246,60 @@ func cmdGUI() {
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
 
-	p, err := server.Start(serverArgs, req.Port)
+	// Setup lib hub for non-system binaries
+	hubDir, ok, err := libhub.Setup(be.Path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "[warning] lib hub: %v\n", err)
+	}
+	if ok {
+		os.Setenv("LLM_SERVER_LIB_HUB", hubDir)
+		defer libhub.Cleanup(hubDir)
 	}
 
-	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
+	// Dynamic health timeout: 240 + size/1700 seconds
+	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
+	timeoutSec := 240.0 + totalSizeMB/1700.0
+	if timeoutSec < 60 {
+		timeoutSec = 60
+	}
+	if model.IsMoE && totalSizeMB > 100*1024 {
+		timeoutSec = 900
+	}
+
+	// Use recovery launcher with keep-alive
+	launcher := recovery.DefaultLauncher(be.Path, serverArgs[1:])
+	launcher.HealthTimeout = time.Duration(timeoutSec) * time.Second
+	launcher.KeepAlive = true
+	launcher.OnFailure = func(ft recovery.FailureType, msg string) {
+		fmt.Fprintf(os.Stderr, "[launch] failure: %s: %s\n", ft, msg)
+	}
+	launcher.OnRestart = func(n int, backoff time.Duration) {
+		fmt.Printf("[launch] restart %d in %v...\n", n, backoff)
+	}
+	launcher.OnFallback = func(path string) {
+		fmt.Printf("[launch] falling back to mainline: %s\n", path)
+	}
+
+	// Find fallback binary (mainline llama-server)
+	if be.IsIK {
+		for _, b := range caps.Backends {
+			if b.Name == "llama-server" && b.Path != be.Path {
+				launcher.FallbackPath = b.Path
+				break
+			}
+		}
+	}
+
+	fmt.Printf("[launch] Server starting on port %d (health timeout %.0fs)\n", req.Port, timeoutSec)
 	fmt.Println("[launch] Press Ctrl+C to stop")
-	select {}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := launcher.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func cmdDryRun(args []string) {
