@@ -3617,7 +3617,11 @@ query_llm_chat() {
     local response
     # chat_template_kwargs.enable_thinking=false suppresses <think> blocks for
     # Qwen3/3.5/3.6 (the tune conversation doesn't need chain-of-thought; it
+<<<<<<< Updated upstream
     # otherwise eats the whole token budget). Ignored by non-Qwen templates.
+=======
+    # eats the whole token budget). Ignored by non-Qwen templates.
+>>>>>>> Stashed changes
     response=$(curl -sf "$url/v1/chat/completions" \
         -H "Content-Type: application/json" \
         --max-time 1800 \

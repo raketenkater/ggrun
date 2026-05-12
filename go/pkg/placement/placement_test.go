@@ -54,8 +54,12 @@ func TestComputeDenseTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compute failed: %v", err)
 	}
-	if strat.GPULayers >= model.NumLayers {
-		t.Fatalf("expected partial offload for large model on small GPU")
+	// 40GB model on 24GB GPU -> dense_cpu_offload
+	if strat.Type != DenseCPUOffload {
+		t.Fatalf("expected dense_cpu_offload strategy, got %s", strat.Type)
+	}
+	if strat.GPULayers != 999 {
+		t.Fatalf("expected GPULayers=999, got %d", strat.GPULayers)
 	}
 }
 
@@ -204,8 +208,8 @@ func TestComputeDenseMultiGPU(t *testing.T) {
 	if len(strat.TensorSplit) != 2 {
 		t.Fatalf("expected tensor split for multi-GPU, got %v", strat.TensorSplit)
 	}
-	if strat.SplitMode != "layer" {
-		t.Fatalf("expected layer split mode, got %s", strat.SplitMode)
+	if strat.SplitMode != "row" {
+		t.Fatalf("expected split-mode row for mainline multi-GPU, got %s", strat.SplitMode)
 	}
 }
 
@@ -232,8 +236,9 @@ func TestComputeMoEMultiGPU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compute failed: %v", err)
 	}
-	if len(strat.TensorSplit) != 2 {
-		t.Fatalf("expected tensor split for multi-GPU MoE")
+	// MoE uses NCPUMoE for CPU expert offload
+	if strat.NCPUMoE == 0 {
+		t.Fatalf("expected MoE CPU expert offload")
 	}
 }
 
@@ -256,7 +261,7 @@ func TestArgsFull(t *testing.T) {
 	}
 	args := s.Args("/models/test.gguf", 8081)
 	checks := map[string]bool{
-		"-m": false, "--port": false, "-c": false, "-ngl": false,
+		"-m": false, "--port": false, "--ctx-size": false, "-ngl": false,
 		"--flash-attn": false,
 	}
 	for _, a := range args {
