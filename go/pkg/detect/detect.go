@@ -216,11 +216,29 @@ func detectBackends() []Backend {
 	return backends
 }
 
-// TotalVRAM returns the sum of VRAM across all detected GPUs.
+// VRAMFreeMB returns free VRAM for this GPU.
+func (g GPU) VRAMFreeMB() int {
+	free := g.VRAMTotalMB - g.VRAMUsedMB
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
+// TotalVRAM returns the sum of total VRAM across all detected GPUs.
 func (c *Capabilities) TotalVRAM() int {
 	total := 0
 	for _, g := range c.GPUs {
 		total += g.VRAMTotalMB
+	}
+	return total
+}
+
+// TotalVRAMFree returns the sum of free VRAM across all detected GPUs.
+func (c *Capabilities) TotalVRAMFree() int {
+	total := 0
+	for _, g := range c.GPUs {
+		total += g.VRAMFreeMB()
 	}
 	return total
 }

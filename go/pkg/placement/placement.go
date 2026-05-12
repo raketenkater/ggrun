@@ -365,7 +365,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 // buildMoEOffload computes per-GPU layer caps and builds -ot flags.
 func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	numGPUs := len(caps.GPUs)
-	gpuOrder := orderGPUsByVRAM(caps.GPUs)
+	gpuOrder := orderGPUsByFreeVRAM(caps.GPUs)
 
 	// Per-layer costs
 	expertTotalMB := int(model.ExpertBytes / 1024 / 1024)
@@ -411,13 +411,13 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	gpuKVReserveMB := make([]int, numGPUs)
 	totalFreeVRAM := 0
 	for _, g := range caps.GPUs {
-		totalFreeVRAM += g.VRAMTotalMB
+		totalFreeVRAM += g.VRAMFreeMB()
 	}
 
 	if s.KVPlacement != "cpu" && kvTotalMB > 0 && totalFreeVRAM > 0 && numGPUs > 0 {
 		for i := 0; i < numGPUs; i++ {
 			gi := gpuOrder[i]
-			share := (kvTotalMB * caps.GPUs[gi].VRAMTotalMB) / totalFreeVRAM
+			share := (kvTotalMB * caps.GPUs[gi].VRAMFreeMB()) / totalFreeVRAM
 			if kvPerLayerMB > 0 {
 				share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
 			}
@@ -436,7 +436,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		if i == 0 {
 			localOverhead += mainGPUGlobalsMB
 		}
-		usableMB := caps.GPUs[gi].VRAMTotalMB - localOverhead
+		usableMB := caps.GPUs[gi].VRAMFreeMB() - localOverhead
 		if usableMB < 0 {
 			usableMB = 0
 		}
@@ -480,7 +480,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 				if i == 0 {
 					localOverhead += mainGPUGlobalsMB
 				}
-				availableMB := caps.GPUs[gi].VRAMTotalMB - localOverhead
+				availableMB := caps.GPUs[gi].VRAMFreeMB() - localOverhead
 				if availableMB < 0 {
 					availableMB = 0
 				}
@@ -684,6 +684,22 @@ func orderGPUsByVRAM(gpus []detect.GPU) []int {
 	sort.Slice(indices, func(i, j int) bool {
 		vi := gpus[indices[i]].VRAMTotalMB
 		vj := gpus[indices[j]].VRAMTotalMB
+		if vi == vj {
+			return gpus[indices[i]].Index < gpus[indices[j]].Index
+		}
+		return vi > vj
+	})
+	return indices
+}
+
+func orderGPUsByFreeVRAM(gpus []detect.GPU) []int {
+	indices := make([]int, len(gpus))
+	for i := range gpus {
+		indices[i] = i
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		vi := gpus[indices[i]].VRAMFreeMB()
+		vj := gpus[indices[j]].VRAMFreeMB()
 		if vi == vj {
 			return gpus[indices[i]].Index < gpus[indices[j]].Index
 		}
