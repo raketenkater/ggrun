@@ -35,9 +35,11 @@ func TestComputeDenseFits(t *testing.T) {
 }
 
 func TestComputeDenseTooLarge(t *testing.T) {
+	// 40GB model on 8GB GPU with 128GB RAM -> dense_cpu_offload
+	// Total system memory must exceed model overhead (40GB * 130% = 52GB)
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 8192}},
-		RAM:  detect.RAMInfo{TotalMB: 32768},
+		RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
 		CPU:  detect.CPUInfo{Cores: 8},
 	}
 	model := &ModelProfile{
@@ -54,7 +56,6 @@ func TestComputeDenseTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compute failed: %v", err)
 	}
-	// 40GB model on 24GB GPU -> dense_cpu_offload
 	if strat.Type != DenseCPUOffload {
 		t.Fatalf("expected dense_cpu_offload strategy, got %s", strat.Type)
 	}
@@ -64,20 +65,21 @@ func TestComputeDenseTooLarge(t *testing.T) {
 }
 
 func TestComputeMoE(t *testing.T) {
+	// 40GB MoE on 24GB GPU with 128GB RAM
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
-		RAM:  detect.RAMInfo{TotalMB: 65536},
+		RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
 		CPU:  detect.CPUInfo{Cores: 16},
 	}
 	model := &ModelProfile{
 		Path:        "moe.gguf",
-		SizeBytes:   100 * 1024 * 1024 * 1024, // 100GB
+		SizeBytes:   40 * 1024 * 1024 * 1024, // 40GB
 		NumLayers:   64,
-		NumParams:   200_000_000_000,
+		NumParams:   70_000_000_000,
 		IsMoE:       true,
 		NumExperts:  64,
 		ContextSize: 32768,
-		HiddenSize:  6144,
+		HiddenSize:  4096,
 	}
 	opts := Options{KVPlacement: "auto", KVQuality: "mid"}
 	strat, err := Compute(caps, model, opts)
@@ -95,7 +97,7 @@ func TestComputeMoE(t *testing.T) {
 func TestComputeCPUOnly(t *testing.T) {
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{},
-		RAM:  detect.RAMInfo{TotalMB: 65536},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
 		CPU:  detect.CPUInfo{Cores: 16},
 	}
 	model := &ModelProfile{
@@ -242,23 +244,24 @@ func TestComputeDenseMultiGPU(t *testing.T) {
 }
 
 func TestComputeMoEMultiGPU(t *testing.T) {
+	// 60GB MoE on two 24GB GPUs with 128GB RAM
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{
 			{Index: 0, VRAMTotalMB: 24576},
 			{Index: 1, VRAMTotalMB: 24576},
 		},
-		RAM: detect.RAMInfo{TotalMB: 65536},
+		RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
 		CPU: detect.CPUInfo{Cores: 16},
 	}
 	model := &ModelProfile{
 		Path:        "moe.gguf",
-		SizeBytes:   100 * 1024 * 1024 * 1024,
+		SizeBytes:   60 * 1024 * 1024 * 1024,
 		NumLayers:   64,
-		NumParams:   200_000_000_000,
+		NumParams:   120_000_000_000,
 		IsMoE:       true,
 		NumExperts:  64,
 		ContextSize: 32768,
-		HiddenSize:  6144,
+		HiddenSize:  4096,
 	}
 	strat, err := Compute(caps, model, Options{})
 	if err != nil {
