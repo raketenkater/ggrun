@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/raketenkater/llm-server/pkg/detect"
 )
@@ -134,7 +135,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		s.KVPlacement = "auto"
 	}
 	if opts.KVQuality == "" {
-		s.KVQuality = "mid"
+		s.KVQuality = "low" // match bash default: q4_0, minimum VRAM
 	}
 	if opts.Parallel > 0 {
 		s.Parallel = opts.Parallel
@@ -1282,4 +1283,72 @@ type systemProbe struct {
 type probeCache struct {
 	ComputeBufMB int
 	KVPerLayerMB int
+}
+
+// WriteProbeCache writes measured compute buffer and KV per layer to cache.
+// Mirrors bash write_probe_cache() (lines 5398-5437).
+func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int) error {
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "llm-server", "probes")
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	// Sanitize model name for filename
+	safeName := strings.ReplaceAll(modelName, "/", "_")
+	path := filepath.Join(cacheDir, safeName+".probe")
+	content := fmt.Sprintf(
+		"# Probe cache for %s\n"+
+		"# Generated: %s\n"+
+		"PROBED_COMPUTE_BUF_MB=%d\n"+
+		"PROBED_KV_PER_LAYER_MB=%d\n",
+		modelName, time.Now().Format(time.RFC3339), computeBufMB, kvPerLayerMB,
+	)
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// ParseLogForProbe extracts compute_buf and kv_per_layer from server log output.
+// Looks for lines like: "CUDA0 compute buffer size = 1410.12 MiB"
+func ParseLogForProbe(logData string) (computeBufMB, kvPerLayerMB int) {
+	lines := strings.Split(logData, "\n")
+
+	// Find largest compute buffer across CUDA devices
+	var maxComputeBuf float64
+	for _, line := range lines {
+		// Pattern: "CUDA0 compute buffer size = 1410.12 MiB"
+		if idx := strings.Index(line, "compute buffer size ="); idx >= 0 {
+			rest := line[idx+len("compute buffer size ="):]
+			rest = strings.TrimSpace(rest)
+			rest = strings.TrimSuffix(rest, " MiB")
+			if v, err := strconv.ParseFloat(rest, 64); err == nil && v > maxComputeBuf {
+				maxComputeBuf = v
+			}
+		}
+	}
+
+	// Sum KV buffer sizes across CUDA devices
+	var totalKVBuf float64
+	var kvCount int
+	for _, line := range lines {
+		if idx := strings.Index(line, "KV buffer size ="); idx >= 0 {
+			rest := line[idx+len("KV buffer size ="):]
+			rest = strings.TrimSpace(rest)
+			rest = strings.TrimSuffix(rest, " MiB")
+			if v, err := strconv.ParseFloat(rest, 64); err == nil {
+				totalKVBuf += v
+				kvCount++
+			}
+		}
+	}
+
+	if maxComputeBuf > 0 {
+		computeBufMB = int(maxComputeBuf + 0.5)
+	}
+	if totalKVBuf > 0 && kvCount > 0 {
+		// Bash divides by GPU layer count; we approximate with kvCount (devices with KV)
+		kvPerLayerMB = int(totalKVBuf/float64(kvCount) + 0.5)
+	}
+
+	return
 }

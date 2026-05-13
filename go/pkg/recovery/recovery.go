@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/raketenkater/llm-server/pkg/placement"
 )
 
 // FailureType classifies how a server load failed.
@@ -155,13 +158,15 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		if resp, err := doHTTPGet(healthURL); err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				// Server is healthy! Now wait for it to exit
+				// Server is healthy! Write probe cache then wait for exit.
+				l.writeProbeCache(logPath)
 				return cmd.Wait()
 			}
 		}
 		if resp, err := doHTTPGet(modelsURL); err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
+				l.writeProbeCache(logPath)
 				return cmd.Wait()
 			}
 		}
@@ -251,6 +256,35 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 	}
 
 	return FailureUnknown, ""
+}
+
+// writeProbeCache parses the launch log and writes measured probe values.
+func (l *Launcher) writeProbeCache(logPath string) {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return
+	}
+	computeBuf, kvPerLayer := placement.ParseLogForProbe(string(data))
+	if computeBuf <= 0 && kvPerLayer <= 0 {
+		return
+	}
+	modelName := l.extractModelName()
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	if err := placement.WriteProbeCache("", modelName, computeBuf, kvPerLayer); err != nil {
+		// Silently ignore — probe cache is best-effort
+		return
+	}
+}
+
+func (l *Launcher) extractModelName() string {
+	for i, a := range l.Args {
+		if a == "-m" && i+1 < len(l.Args) {
+			return filepath.Base(l.Args[i+1])
+		}
+	}
+	return ""
 }
 
 func doHTTPGet(url string) (*http.Response, error) {
