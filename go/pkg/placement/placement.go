@@ -140,13 +140,20 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		s.Parallel = opts.Parallel
 	}
 
-	// KV cache type selection
-	s.KVType = kvTypeFromQuality(s.KVQuality)
-
 	// Total size MB
 	totalSizeMB := model.TotalSizeMB
 	if totalSizeMB <= 0 {
 		totalSizeMB = int(model.SizeBytes / 1024 / 1024)
+	}
+
+	// KV cache type selection — try compact types first for large models
+	s.KVType = kvTypeFromQuality(s.KVQuality)
+
+	// Auto-fit context size when not explicitly set
+	if opts.ContextSize <= 0 {
+		ctx, kvType := computeAutoContextSize(caps, model, totalSizeMB, s.KVType)
+		s.ContextSize = ctx
+		s.KVType = kvType
 	}
 
 	// Compute KV cache size
@@ -1007,6 +1014,78 @@ func defaultContextSize(model *ModelProfile, caps *detect.Capabilities) int {
 		return model.ContextSize
 	}
 	return 32768
+}
+
+// computeAutoContextSize computes the largest context that fits in available
+// memory, mirroring bash max-context-fit suggestion (lines 2135-2189).
+// It tries KV types in order of compactness and returns the best fit.
+func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, preferredKVType string) (int, string) {
+	// Total hardware memory
+	totalVRAM := 0
+	for _, g := range caps.GPUs {
+		totalVRAM += g.VRAMTotalMB
+	}
+	totalHWMB := totalVRAM + caps.RAM.FreeMB
+
+	// Fixed overhead: model weights + 8GB for activations/compute/OS
+	fixedOverheadMB := totalSizeMB + 8192
+
+	// If even the model alone doesn't fit, fall back to small default
+	if totalHWMB <= fixedOverheadMB {
+		return 32768, preferredKVType
+	}
+
+	// Try KV types in order: preferred, then q8_0, then q4_0
+	kvTypes := []string{preferredKVType, "q8_0", "q4_0"}
+	seen := make(map[string]bool)
+	var orderedTypes []string
+	for _, t := range kvTypes {
+		if !seen[t] {
+			seen[t] = true
+			orderedTypes = append(orderedTypes, t)
+		}
+	}
+
+	for _, kvType := range orderedTypes {
+		// Compute KV bytes per token at a reference context (32768)
+		refCtx := 32768
+		refKVTotalMB := computeKVTotalMB(model, refCtx, kvType)
+		if refKVTotalMB <= 0 {
+			continue
+		}
+		kvBytesPerToken := float64(refKVTotalMB) * 1048576.0 / float64(refCtx)
+
+		// KV budget after model + overhead
+		kvBudgetMB := totalHWMB - fixedOverheadMB
+		if kvBudgetMB <= 0 {
+			continue
+		}
+
+		// Max raw context
+		maxCtxRaw := int(float64(kvBudgetMB) * 1048576.0 / kvBytesPerToken)
+
+		// Cap at model's trained context length
+		hwCapCtx := maxCtxRaw
+		if model.CTXTrain > 0 && model.CTXTrain < hwCapCtx {
+			hwCapCtx = model.CTXTrain
+		}
+
+		// Snap to nearest power-of-two at or below the cap
+		powerOfTwoValues := []int{32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304}
+		suggestedCtx := 32768
+		for _, c := range powerOfTwoValues {
+			if c <= hwCapCtx {
+				suggestedCtx = c
+			}
+		}
+
+		if suggestedCtx >= 32768 {
+			return suggestedCtx, kvType
+		}
+	}
+
+	// Nothing fits well — return minimum with most compact type
+	return 32768, "q4_0"
 }
 
 // Args converts a Strategy into llama-server command-line arguments.

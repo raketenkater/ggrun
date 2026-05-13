@@ -30,6 +30,10 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Ensure CUDA device enumeration matches nvidia-smi PCI bus order.
+	// Without this, llama-server may enumerate GPUs differently from our
+	// detection, causing -ot override-tensor flags to target wrong devices.
+	cmd.Env = append(os.Environ(), "CUDA_DEVICE_ORDER=PCI_BUS_ID")
 
 	if err := cmd.Start(); err != nil {
 		cancel()
