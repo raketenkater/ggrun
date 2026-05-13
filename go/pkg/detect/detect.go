@@ -22,11 +22,14 @@ type Capabilities struct {
 
 // GPU represents a single GPU device.
 type GPU struct {
-	Index      int    `json:"index"`
-	Name       string `json:"name"`
-	VRAMTotalMB int   `json:"vram_total_mb"`
-	VRAMUsedMB  int   `json:"vram_used_mb,omitempty"`
-	Driver     string `json:"driver,omitempty"`
+	Index        int    `json:"index"`
+	Name         string `json:"name"`
+	VRAMTotalMB  int    `json:"vram_total_mb"`
+	VRAMUsedMB   int    `json:"vram_used_mb,omitempty"`
+	Driver       string `json:"driver,omitempty"`
+	PCIGen       int    `json:"pci_gen,omitempty"`
+	PCILanes     int    `json:"pci_lanes,omitempty"`
+	BandwidthMBps int   `json:"bandwidth_mbps,omitempty"`
 }
 
 // RAMInfo represents system memory.
@@ -78,8 +81,14 @@ func detectNVIDIA() []GPU {
 	if err != nil {
 		return nil
 	}
+	// Query PCIe bandwidth separately
+	pcieOut, _ := exec.Command("nvidia-smi",
+		"--query-gpu=pci.link_gen.current,pci.link_width.current",
+		"--format=csv,noheader,nounits").Output()
+	pcieLines := strings.Split(strings.TrimSpace(string(pcieOut)), "\n")
+
 	var gpus []GPU
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(line, ", ")
 		if len(parts) < 4 {
 			continue
@@ -91,15 +100,44 @@ func detectNVIDIA() []GPU {
 		if len(parts) >= 5 {
 			driver = strings.TrimSpace(parts[4])
 		}
-		gpus = append(gpus, GPU{
+		gpu := GPU{
 			Index:       idx,
 			Name:        strings.TrimSpace(parts[1]),
 			VRAMTotalMB: vramTotal,
 			VRAMUsedMB:  vramUsed,
 			Driver:      driver,
-		})
+		}
+		// Parse PCIe bandwidth
+		if i < len(pcieLines) {
+			pcieParts := strings.Split(pcieLines[i], ",")
+			if len(pcieParts) >= 2 {
+				gen, _ := strconv.Atoi(strings.TrimSpace(pcieParts[0]))
+				lanes, _ := strconv.Atoi(strings.TrimSpace(pcieParts[1]))
+				gpu.PCIGen = gen
+				gpu.PCILanes = lanes
+				gpu.BandwidthMBps = pcieBandwidth(gen, lanes)
+			}
+		}
+		gpus = append(gpus, gpu)
 	}
 	return gpus
+}
+
+// pcieBandwidth computes PCIe bandwidth in MB/s from generation and lane count.
+func pcieBandwidth(gen, lanes int) int {
+	// Per-lane bandwidth in MB/s (unidirectional)
+	perLane := map[int]int{
+		1: 250,
+		2: 500,
+		3: 985,  // ~984.6 MB/s
+		4: 1969, // ~1969.0 MB/s
+		5: 3938, // ~3938.0 MB/s
+	}
+	bw, ok := perLane[gen]
+	if !ok {
+		bw = 985 // default to gen3
+	}
+	return bw * lanes
 }
 
 func detectROCm() []GPU {

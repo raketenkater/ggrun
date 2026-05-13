@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"crypto/md5"
 	"fmt"
 	"math"
 	"os"
@@ -95,6 +96,9 @@ type ModelProfile struct {
 	HasShexp           int    `json:"has_shexp"`
 	CTXTrain           int    `json:"ctx_train"`
 	ModelArch          string `json:"model_arch"`
+	ExpertUsedCount    int    `json:"expert_used_count,omitempty"`
+	ExpertFF           int    `json:"expert_ff,omitempty"`
+	ExpertSharedFF     int    `json:"expert_shared_ff,omitempty"`
 }
 
 // Options allows user overrides.
@@ -297,7 +301,7 @@ func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, o
 }
 
 func buildSingleGPU(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
-	gpuOrder := orderGPUsByVRAM(caps.GPUs)
+	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
 	mainIdx := 0
 	if len(gpuOrder) > 0 {
 		mainIdx = gpuOrder[0]
@@ -393,7 +397,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	}
 
 	// Load system probe (lines 5476-5485)
-	sysProbe := loadSystemProbe(opts.CacheDir)
+	sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
 	sysCUDAOverheadMB := 0
 	if sysProbe != nil {
 		sysCUDAOverheadMB = sysProbe.CUDAOverheadMB
@@ -404,7 +408,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	placementLabel := "cold-start"
 	var probedComputeBufMB int
 
-	pc := loadProbeCache(opts.CacheDir, filepath.Base(model.Path))
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
 	if pc != nil {
 		probeHit = true
 		placementLabel = "probe-hit"
@@ -569,19 +573,20 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	graphScratchMB := 2048
 	mmapPTMB := totalSizeMB / 500
 
-	// CPU activation memory
+	// CPU activation memory (lines 5547-5559)
+	// Uses exact GGUF metadata: EXPERT_USED_COUNT * EXPERT_FF + EXPERT_SHARED_FF
 	var actFFN int
-	if model.NumExperts > 0 && model.FeedForwardLength > 0 {
-		// MoE: use feed_forward_length as proxy for expert_ff
-		actFFN = model.FeedForwardLength
-		if model.KVLoraRank > 0 {
-			actFFN += model.KVLoraRank + model.QLoraRank
+	if model.NumExperts > 0 && model.ExpertUsedCount > 0 && model.ExpertFF > 0 {
+		// MoE: use exact expert_ff from GGUF metadata
+		actFFN = model.ExpertUsedCount * model.ExpertFF
+		if model.ExpertSharedFF > 0 {
+			actFFN += model.ExpertSharedFF
 		}
 	} else {
 		actFFN = model.FeedForwardLength
-		if model.KVLoraRank > 0 {
-			actFFN += model.KVLoraRank + model.QLoraRank
-		}
+	}
+	if model.KVLoraRank > 0 {
+		actFFN += model.KVLoraRank + model.QLoraRank
 	}
 	cpuActMB := s.UBatchSize * (model.EmbeddingLength + actFFN) * 4 * 2 / 1048576
 	if cpuActMB < 64 {
@@ -817,18 +822,24 @@ func kvTypeFromQuality(quality string) string {
 	}
 }
 
-func orderGPUsByVRAM(gpus []detect.GPU) []int {
+func orderGPUsByBandwidth(gpus []detect.GPU) []int {
 	indices := make([]int, len(gpus))
 	for i := range gpus {
 		indices[i] = i
 	}
 	sort.Slice(indices, func(i, j int) bool {
-		vi := gpus[indices[i]].VRAMTotalMB
-		vj := gpus[indices[j]].VRAMTotalMB
-		if vi == vj {
-			return gpus[indices[i]].Index < gpus[indices[j]].Index
+		gi := gpus[indices[i]]
+		gj := gpus[indices[j]]
+		// Primary: bandwidth DESC
+		if gi.BandwidthMBps != gj.BandwidthMBps {
+			return gi.BandwidthMBps > gj.BandwidthMBps
 		}
-		return vi > vj
+		// Secondary: VRAM total DESC
+		if gi.VRAMTotalMB != gj.VRAMTotalMB {
+			return gi.VRAMTotalMB > gj.VRAMTotalMB
+		}
+		// Tertiary: PCI index ASC (lower index = closer to CPU)
+		return gi.Index < gj.Index
 	})
 	return indices
 }
@@ -1186,12 +1197,15 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 }
 
 // loadSystemProbe tries to load measured CUDA overhead from cache.
-func loadSystemProbe(cacheDir string) *systemProbe {
+// Uses GPU signature hash matching bash system_probe cache (lines 5216-5228).
+func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
 		cacheDir = filepath.Join(home, ".cache", "llm-server")
 	}
-	path := filepath.Join(cacheDir, "system.probe")
+	// Compute GPU signature hash: sort(names+drivers), MD5, take first 12 chars
+	gpuSig := gpuSignatureHash(gpus)
+	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -1221,58 +1235,76 @@ func loadSystemProbe(cacheDir string) *systemProbe {
 	return sp
 }
 
+// gpuSignatureHash computes MD5 hash of sorted GPU name+driver pairs.
+// Matches bash: nvidia-smi --query-gpu=name,driver_version | sort | md5sum | cut -c1-12
+func gpuSignatureHash(gpus []detect.GPU) string {
+	var parts []string
+	for _, g := range gpus {
+		parts = append(parts, fmt.Sprintf("%s, %s", g.Name, g.Driver))
+	}
+	sort.Strings(parts)
+	input := strings.Join(parts, "\n") + "\n"
+	h := md5.New()
+	h.Write([]byte(input))
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
 // loadProbeCache tries to load per-model probe data.
-func loadProbeCache(cacheDir, modelName string) *probeCache {
+// Uses MD5 hash key matching bash probe_cache_file() (lines 5193-5207).
+func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality string) *probeCache {
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
 		cacheDir = filepath.Join(home, ".cache", "llm-server", "probes")
 	}
-	entries, err := os.ReadDir(cacheDir)
+	// Compute MD5 hash key matching bash: model_name:layers:experts:embd:ff:ctx:ubatch:kv_quality
+	modelName := filepath.Base(model.Path)
+	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s",
+		modelName, model.NumLayers, model.NumExperts,
+		model.EmbeddingLength, model.FeedForwardLength,
+		ctxSize, ubatch, kvQuality)
+	hash := md5Hash12(key)
+	path := filepath.Join(cacheDir, hash+".probe")
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".probe") {
+	content := string(data)
+	pc := &probeCache{}
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		path := filepath.Join(cacheDir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
 			continue
 		}
-		content := string(data)
-		if !strings.Contains(content, modelName) {
-			continue
-		}
-		pc := &probeCache{}
-		lines := strings.Split(content, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
+		k := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(strings.Trim(parts[1], `"`))
+		switch k {
+		case "PROBED_COMPUTE_BUF_MB":
+			if v, err := strconv.Atoi(val); err == nil && v >= 0 {
+				pc.ComputeBufMB = v
 			}
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
+		case "PROBED_KV_PER_LAYER_MB":
+			if v, err := strconv.Atoi(val); err == nil && v >= 0 {
+				pc.KVPerLayerMB = v
 			}
-			key := strings.TrimSpace(parts[0])
-			val := strings.TrimSpace(strings.Trim(parts[1], `"`))
-			switch key {
-			case "PROBED_COMPUTE_BUF_MB":
-				if v, err := strconv.Atoi(val); err == nil && v >= 0 {
-					pc.ComputeBufMB = v
-				}
-			case "PROBED_KV_PER_LAYER_MB":
-				if v, err := strconv.Atoi(val); err == nil && v >= 0 {
-					pc.KVPerLayerMB = v
-				}
-			}
-		}
-		if pc.ComputeBufMB > 0 || pc.KVPerLayerMB > 0 {
-			return pc
 		}
 	}
+	if pc.ComputeBufMB > 0 || pc.KVPerLayerMB > 0 {
+		return pc
+	}
 	return nil
+}
+
+// md5Hash12 computes first 12 chars of MD5 hash of input string.
+func md5Hash12(input string) string {
+	h := md5.New()
+	h.Write([]byte(input))
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
 }
 
 // internal types for probe loading
