@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -22,14 +23,16 @@ type Capabilities struct {
 
 // GPU represents a single GPU device.
 type GPU struct {
-	Index        int    `json:"index"`
-	Name         string `json:"name"`
-	VRAMTotalMB  int    `json:"vram_total_mb"`
-	VRAMUsedMB   int    `json:"vram_used_mb,omitempty"`
-	Driver       string `json:"driver,omitempty"`
-	PCIGen       int    `json:"pci_gen,omitempty"`
-	PCILanes     int    `json:"pci_lanes,omitempty"`
-	BandwidthMBps int   `json:"bandwidth_mbps,omitempty"`
+	Index         int    `json:"index"`
+	Name          string `json:"name"`
+	VRAMTotalMB   int    `json:"vram_total_mb"`
+	VRAMUsedMB    int    `json:"vram_used_mb,omitempty"`
+	Driver        string `json:"driver,omitempty"`
+	PCIGen        int    `json:"pci_gen,omitempty"`
+	PCILanes      int    `json:"pci_lanes,omitempty"`
+	BandwidthMBps int    `json:"bandwidth_mbps,omitempty"`
+	PCIBusID      string `json:"pci_bus_id,omitempty"`
+	ComputeCap    string `json:"compute_cap,omitempty"`
 }
 
 // RAMInfo represents system memory.
@@ -76,7 +79,7 @@ func Detect() (*Capabilities, error) {
 
 func detectNVIDIA() []GPU {
 	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=index,name,memory.total,memory.used,driver_version",
+		"--query-gpu=index,pci.bus_id,name,memory.total,memory.used,driver_version,compute_cap",
 		"--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil
@@ -90,22 +93,29 @@ func detectNVIDIA() []GPU {
 	var gpus []GPU
 	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(line, ", ")
-		if len(parts) < 4 {
+		if len(parts) < 6 {
 			continue
 		}
 		idx, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-		vramTotal, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
-		vramUsed, _ := strconv.Atoi(strings.TrimSpace(parts[3]))
+		pciBusID := strings.TrimSpace(parts[1])
+		vramTotal, _ := strconv.Atoi(strings.TrimSpace(parts[3]))
+		vramUsed, _ := strconv.Atoi(strings.TrimSpace(parts[4]))
 		driver := ""
-		if len(parts) >= 5 {
-			driver = strings.TrimSpace(parts[4])
+		if len(parts) >= 6 {
+			driver = strings.TrimSpace(parts[5])
+		}
+		computeCap := ""
+		if len(parts) >= 7 {
+			computeCap = strings.TrimSpace(parts[6])
 		}
 		gpu := GPU{
 			Index:       idx,
-			Name:        strings.TrimSpace(parts[1]),
+			Name:        strings.TrimSpace(parts[2]),
 			VRAMTotalMB: vramTotal,
 			VRAMUsedMB:  vramUsed,
 			Driver:      driver,
+			PCIBusID:    pciBusID,
+			ComputeCap:  computeCap,
 		}
 		// Parse PCIe bandwidth
 		if i < len(pcieLines) {
@@ -120,7 +130,29 @@ func detectNVIDIA() []GPU {
 		}
 		gpus = append(gpus, gpu)
 	}
+
+	// Sort GPUs by PCI bus ID ascending to match CUDA_DEVICE_ORDER=PCI_BUS_ID.
+	// The Go server sets this env var when launching llama-server, so CUDA
+	// assigns device 0 to the lowest PCI bus ID. Re-index 0..N-1.
+	sort.Slice(gpus, func(i, j int) bool {
+		return gpus[i].PCIBusID < gpus[j].PCIBusID
+	})
+	for i := range gpus {
+		gpus[i].Index = i
+	}
+
 	return gpus
+}
+
+// parseComputeCap parses "8.9" → 809, "8.6" → 806 for comparison.
+func parseComputeCap(cc string) int {
+	parts := strings.SplitN(cc, ".", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	major, _ := strconv.Atoi(parts[0])
+	minor, _ := strconv.Atoi(parts[1])
+	return major*100 + minor
 }
 
 // pcieBandwidth computes PCIe bandwidth in MB/s from generation and lane count.
@@ -205,29 +237,55 @@ func detectRAMDarwin() RAMInfo {
 }
 
 func detectCPU() CPUInfo {
-	cores := runtime.NumCPU()
+	threads := runtime.NumCPU()
+	cores := threads // fallback: assume no HT
 	model := "unknown"
 	flags := ""
 
 	if runtime.GOOS == "linux" {
 		data, _ := os.ReadFile("/proc/cpuinfo")
+		// Detect physical cores by counting unique physical_id+core_id pairs
+		physCores := make(map[string]bool)
 		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "model name") {
 				parts := strings.SplitN(line, ":", 2)
 				if len(parts) == 2 {
 					model = strings.TrimSpace(parts[1])
-					break
 				}
 			}
-		}
-		for _, line := range strings.Split(string(data), "\n") {
 			if strings.HasPrefix(line, "flags") {
 				parts := strings.SplitN(line, ":", 2)
 				if len(parts) == 2 {
 					flags = strings.TrimSpace(parts[1])
 				}
-				break
 			}
+			// Parse physical id and core id for unique core counting
+			if strings.HasPrefix(line, "physical id") || strings.HasPrefix(line, "core id") {
+				// We'll use a simpler approach: count unique pairs
+			}
+		}
+		// Better approach: use core_ids seen in the file
+		var curPhysID, curCoreID string
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "physical id") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					curPhysID = strings.TrimSpace(parts[1])
+				}
+			}
+			if strings.HasPrefix(line, "core id") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					curCoreID = strings.TrimSpace(parts[1])
+					key := curPhysID + ":" + curCoreID
+					physCores[key] = true
+				}
+			}
+		}
+		if len(physCores) > 0 {
+			cores = len(physCores)
 		}
 	} else if runtime.GOOS == "darwin" {
 		out, _ := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output()
@@ -237,7 +295,7 @@ func detectCPU() CPUInfo {
 	return CPUInfo{
 		Model:   model,
 		Cores:   cores,
-		Threads: cores,
+		Threads: threads,
 		Flags:   flags,
 	}
 }

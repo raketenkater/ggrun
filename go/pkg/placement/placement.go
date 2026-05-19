@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -18,7 +19,7 @@ import (
 const (
 	vramOverheadPercent = 130  // model size * this / 100 = estimated VRAM needed
 	computePerGPUMB     = 512  // legacy; non-MoE single-GPU sizing only
-	computeFloorMB      = 1024 // cited from llama.cpp common/common.cpp
+	computeFloorMB      = 1024 // cited llama.cpp compute floor; CUDA overhead measured separately
 	minCramMB           = 512
 	systemHeadroomMB    = 5120
 	singleGPUHeadroomMB = 4096 // extra VRAM headroom for single-GPU mode
@@ -57,10 +58,13 @@ type Strategy struct {
 	BackendTag     string       `json:"backend_tag,omitempty"` // "llama" or "ik_llama"
 	IsMoE          bool         `json:"is_moe"`
 	ReasoningOff   bool         `json:"reasoning_off"`         // default off for OpenAI compat
+	ThreadsBatch   int          `json:"threads_batch"`         // batch threads (logical cores)
 	Parallel       int          `json:"parallel,omitempty"`
 	CRAM           int          `json:"cram,omitempty"`        // prompt cache MB
 	MaxCheckpoints int          `json:"max_checkpoints,omitempty"`
 	UseCUDAGraphs  bool         `json:"use_cuda_graphs,omitempty"`
+	Host           string       `json:"host,omitempty"`        // listen address
+	HasSSM         bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
 }
 
 // ModelProfile describes the GGUF model.
@@ -114,6 +118,7 @@ type Options struct {
 	Parallel    int
 	CacheFile   string // path to placement cache for MoE recovery
 	CacheDir    string // path to llm-server cache dir (for probes)
+	Host        string // listen address (default 0.0.0.0)
 }
 
 // Compute builds a Strategy from hardware capabilities and model profile.
@@ -124,12 +129,15 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		KVQuality:      opts.KVQuality,
 		MMap:           !opts.NoMMap,
 		MLock:          false,
-		Threads:        caps.CPU.Cores,
+		Threads:        caps.CPU.Cores,   // physical cores (bash uses physical)
+		ThreadsBatch:   caps.CPU.Cores,   // physical cores (bash uses physical for both)
 		BackendTag:     opts.BackendTag,
 		IsMoE:          model.IsMoE,
 		GPULayers:      999,
 		FlashAttention: true,
-		ReasoningOff:   false,
+		ReasoningOff:   true, // match bash: --reasoning off
+		HasSSM:         model.HasSSM == 1,
+		Host:           opts.Host,
 	}
 
 	if s.ContextSize <= 0 {
@@ -154,11 +162,46 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// KV cache type selection — try compact types first for large models
 	s.KVType = kvTypeFromQuality(s.KVQuality)
 
-	// Auto-fit context size when not explicitly set
+	// Auto-fit context: prefer single GPU (faster), only go multi-GPU if model doesn't fit
 	if opts.ContextSize <= 0 {
-		ctx, kvType := computeAutoContextSize(caps, model, totalSizeMB, s.KVType)
-		s.ContextSize = ctx
-		s.KVType = kvType
+		// Try single-GPU first: compute context using only the best GPU's VRAM
+		singleCtx, singleKVType := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
+		singleKVTotal := computeKVTotalMB(model, singleCtx, singleKVType)
+
+		// Check if model actually fits on single GPU at this context
+		// Use VRAMFreeMB (not total) — desktop/compositor uses some VRAM
+		bestFreeVRAM := 0
+		for _, g := range caps.GPUs {
+			if g.VRAMFreeMB() > bestFreeVRAM {
+				bestFreeVRAM = g.VRAMFreeMB()
+			}
+		}
+
+		// Load overhead for single-GPU check (measured, not guessed)
+		sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+		cudaOverheadMB := 600
+		if sysProbe != nil {
+			cudaOverheadMB = sysProbe.CUDAOverheadMB
+		}
+		computeBufMB := computeFloorMB
+		pc := loadProbeCache(opts.CacheDir, model, singleCtx, 512, singleKVType)
+		if pc != nil {
+			computeBufMB = pc.ComputeBufMB
+		}
+
+		singleGPUNeeded := totalSizeMB + cudaOverheadMB + computeBufMB + singleKVTotal
+		singleGPUUsable := bestFreeVRAM - 1024
+
+		if singleGPUNeeded <= singleGPUUsable && singleCtx >= 32768 {
+			// Model fits on single GPU — use it (faster, simpler)
+			s.ContextSize = singleCtx
+			s.KVType = singleKVType
+		} else {
+			// Doesn't fit on single GPU — try multi-GPU
+			multiCtx, multiKVType := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
+			s.ContextSize = multiCtx
+			s.KVType = multiKVType
+		}
 	}
 
 	// Compute KV cache size
@@ -233,13 +276,20 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	// OOM guard: refuse if model+KV+compute don't fit (non-MoE only)
 	if strategy != MoEOffload {
-		if err := checkMemoryOrDie(caps, model, s, totalSizeMB, kvTotalMB); err != nil {
+		if err := checkMemoryOrDie(caps, model, s, totalSizeMB, kvTotalMB, opts); err != nil {
 			return nil, err
 		}
 	}
 
-	// Compute CRAM (prompt cache)
-	s.CRAM, s.MaxCheckpoints = computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
+	// Compute CRAM (prompt cache) — matches bash CRAM logic
+	cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
+	s.CRAM = cram
+	s.MaxCheckpoints = maxCheckpoints
+
+	// Default host
+	if s.Host == "" {
+		s.Host = "0.0.0.0"
+	}
 
 	return s, nil
 }
@@ -252,21 +302,36 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 		return CPUOnly
 	}
 
+	// Load system probe for CUDA overhead (measured, not guessed)
+	sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+	cudaOverheadMB := 0
+	if sysProbe != nil {
+		cudaOverheadMB = sysProbe.CUDAOverheadMB
+	} else if numGPUs > 0 {
+		cudaOverheadMB = 600 // conservative estimate per GPU
+	}
+
+	// Load model probe for compute buffer
+	computeBufMB := computeFloorMB // 1024 default
+	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality)
+	if pc != nil {
+		computeBufMB = pc.ComputeBufMB
+	}
+
 	// Single GPU: model + overhead fits in best GPU
-	// Use TOTAL VRAM (minus 1GB safety), not FREE — pre-launch free VRAM dips
-	// from desktop/compositor would spuriously reject single-GPU.
-	bestVRAM := 0
+	// Use FREE VRAM (desktop/compositor uses some VRAM)
+	bestFreeVRAM := 0
 	for _, g := range caps.GPUs {
-		if g.VRAMTotalMB > bestVRAM {
-			bestVRAM = g.VRAMTotalMB
+		if g.VRAMFreeMB() > bestFreeVRAM {
+			bestFreeVRAM = g.VRAMFreeMB()
 		}
 	}
-	singleGPUUsable := bestVRAM - 1024
+	singleGPUUsable := bestFreeVRAM - 1024
 	if singleGPUUsable < 0 {
 		singleGPUUsable = 0
 	}
-	// Tighter estimate (110%) for single GPU
-	singleGPUNeeded := totalSizeMB*110/100 + kvTotalMB + computePerGPUMB
+	// Use measured overhead: model weights + CUDA overhead + compute buffer + KV
+	singleGPUNeeded := totalSizeMB + cudaOverheadMB + computeBufMB + kvTotalMB
 	if singleGPUNeeded <= singleGPUUsable {
 		return SingleGPU
 	}
@@ -277,7 +342,8 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 		for _, g := range caps.GPUs {
 			totalFreeVRAM += g.VRAMFreeMB()
 		}
-		vramNeeded := totalSizeMB*vramOverheadPercent/100 + kvTotalMB + computePerGPUMB
+		// Use measured overhead per GPU: model + (cudaOverhead + computeBuf) * numGPUs + KV
+		vramNeeded := totalSizeMB + (cudaOverheadMB+computeBufMB)*numGPUs + kvTotalMB
 		if vramNeeded <= totalFreeVRAM {
 			return MultiGPUDense
 		}
@@ -313,25 +379,128 @@ func buildSingleGPU(s *Strategy, caps *detect.Capabilities, model *ModelProfile,
 func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	numGPUs := len(caps.GPUs)
 
-	// Tensor split across ALL GPUs proportional to VRAM
-	split := make([]float64, numGPUs)
-	totalVRAM := 0
-	for _, g := range caps.GPUs {
-		totalVRAM += g.VRAMTotalMB
+	// Load system probe for CUDA overhead (same as MoE path)
+	sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+	cudaOverheadMB := 0
+	if sysProbe != nil {
+		cudaOverheadMB = sysProbe.CUDAOverheadMB
+	} else if numGPUs > 0 {
+		cudaOverheadMB = 600 // conservative estimate per GPU
 	}
-	for i, g := range caps.GPUs {
-		if totalVRAM > 0 {
-			split[i] = float64(g.VRAMTotalMB) / float64(totalVRAM)
+
+	// Load model probe for compute buffer (same as MoE path)
+	probeHit := false
+	computeBufMB := computeFloorMB // 1024 default
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
+	if pc != nil {
+		probeHit = true
+		computeBufMB = pc.ComputeBufMB
+	}
+
+	// Per-layer costs
+	weightPerLayerMB := totalSizeMB / model.NumLayers
+	if weightPerLayerMB <= 0 {
+		weightPerLayerMB = 1
+	}
+	kvPerLayerMB := kvTotalMB / model.NumLayers
+	if kvPerLayerMB < 1 && kvTotalMB > 0 {
+		kvPerLayerMB = 1
+	}
+
+	// KV-first GPU reserve (proportional to free VRAM)
+	gpuKVReserveMB := make([]int, numGPUs)
+	totalFreeVRAM := 0
+	for _, g := range caps.GPUs {
+		totalFreeVRAM += g.VRAMFreeMB()
+	}
+	if s.KVPlacement != "cpu" && kvTotalMB > 0 && totalFreeVRAM > 0 {
+		for i := 0; i < numGPUs; i++ {
+			share := (kvTotalMB*caps.GPUs[i].VRAMFreeMB() + totalFreeVRAM - 1) / totalFreeVRAM
+			if kvPerLayerMB > 0 {
+				share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
+			}
+			gpuKVReserveMB[i] = share
+		}
+	}
+
+	// Calculate effective free VRAM per GPU for model weights
+	// effectiveFree = freeVRAM - cudaOverhead - computeBuf - kvReserve
+	// Tensor-split proportional to effectiveFree * bandwidth (matches bash VRAM_FREE * BANDWIDTH)
+	split := make([]float64, numGPUs)
+	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
+	totalWeighted := 0.0
+	for idx := 0; idx < numGPUs; idx++ {
+		gi := gpuOrder[idx]
+		g := caps.GPUs[gi]
+		overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
+		effective := g.VRAMFreeMB() - overhead
+		if effective < 0 {
+			effective = 0
+		}
+		bw := float64(g.BandwidthMBps)
+		if bw <= 0 {
+			bw = 1.0 // fallback for unknown bandwidth
+		}
+		totalWeighted += float64(effective) * bw
+	}
+	for idx := 0; idx < numGPUs; idx++ {
+		gi := gpuOrder[idx]
+		g := caps.GPUs[gi]
+		overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
+		effective := g.VRAMFreeMB() - overhead
+		if effective < 0 {
+			effective = 0
+		}
+		bw := float64(g.BandwidthMBps)
+		if bw <= 0 {
+			bw = 1.0
+		}
+		if totalWeighted > 0 {
+			split[gi] = float64(effective) * bw / totalWeighted
 		}
 	}
 	s.TensorSplit = normalizeSplit(split)
 
-	// Prefer graph split for ik_llama, layer for mainline
+	// Find smallest GPU subset that fits the model
+	// Use effective capacity (free - overhead) not just total VRAM
+	gpuOrderBW := orderGPUsByBandwidth(caps.GPUs)
+	bestGPUCount := numGPUs
+	for n := 2; n <= numGPUs; n++ {
+		subsetCapacity := 0
+		for j := 0; j < n; j++ {
+			gi := gpuOrderBW[j]
+			g := caps.GPUs[gi]
+			overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
+			effective := g.VRAMFreeMB() - overhead
+			if effective < 0 {
+				effective = 0
+			}
+			subsetCapacity += effective
+		}
+		modelWeightMB := totalSizeMB + kvTotalMB/2 // model weights + partial KV overhead
+		if modelWeightMB <= subsetCapacity {
+			bestGPUCount = n
+			break
+		}
+	}
+
+	// Zero out GPUs not in the selected subset
+	if bestGPUCount < numGPUs {
+		for idx := bestGPUCount; idx < numGPUs; idx++ {
+			gi := gpuOrderBW[idx]
+			split[gi] = 0
+		}
+		s.TensorSplit = normalizeSplit(split)
+	}
+
+	// Prefer graph split for ik_llama, row for mainline
 	if opts.BackendTag == "ik_llama" {
 		s.SplitMode = "graph"
 	} else {
 		s.SplitMode = "row"
 	}
+
+	_ = probeHit // used for logging/debugging
 
 	return s, nil
 }
@@ -339,23 +508,85 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	numGPUs := len(caps.GPUs)
 	if numGPUs > 1 {
+		// Load system probe for CUDA overhead
+		sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+		cudaOverheadMB := 0
+		if sysProbe != nil {
+			cudaOverheadMB = sysProbe.CUDAOverheadMB
+		} else {
+			cudaOverheadMB = 600
+		}
+
+		// Load model probe for compute buffer
+		computeBufMB := computeFloorMB
+		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
+		if pc != nil {
+			computeBufMB = pc.ComputeBufMB
+		}
+
+		// KV per layer for reserve
+		kvPerLayerMB := kvTotalMB / model.NumLayers
+		if kvPerLayerMB < 1 && kvTotalMB > 0 {
+			kvPerLayerMB = 1
+		}
+
+		// KV-first GPU reserve
+		gpuKVReserveMB := make([]int, numGPUs)
+		totalFreeVRAM := 0
+		for _, g := range caps.GPUs {
+			totalFreeVRAM += g.VRAMFreeMB()
+		}
+		if s.KVPlacement != "cpu" && kvTotalMB > 0 && totalFreeVRAM > 0 {
+			for i := 0; i < numGPUs; i++ {
+				share := (kvTotalMB*caps.GPUs[i].VRAMFreeMB() + totalFreeVRAM - 1) / totalFreeVRAM
+				if kvPerLayerMB > 0 {
+					share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
+				}
+				gpuKVReserveMB[i] = share
+			}
+		}
+
+		// Tensor split proportional to effective free VRAM * bandwidth
+		split := make([]float64, numGPUs)
+		gpuOrder := orderGPUsByBandwidth(caps.GPUs)
+		totalWeighted := 0.0
+		for idx := 0; idx < numGPUs; idx++ {
+			gi := gpuOrder[idx]
+			g := caps.GPUs[gi]
+			overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
+			effective := g.VRAMFreeMB() - overhead
+			if effective < 0 {
+				effective = 0
+			}
+			bw := float64(g.BandwidthMBps)
+			if bw <= 0 {
+				bw = 1.0
+			}
+			totalWeighted += float64(effective) * bw
+		}
+		for idx := 0; idx < numGPUs; idx++ {
+			gi := gpuOrder[idx]
+			g := caps.GPUs[gi]
+			overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
+			effective := g.VRAMFreeMB() - overhead
+			if effective < 0 {
+				effective = 0
+			}
+			bw := float64(g.BandwidthMBps)
+			if bw <= 0 {
+				bw = 1.0
+			}
+			if totalWeighted > 0 {
+				split[gi] = float64(effective) * bw / totalWeighted
+			}
+		}
+		s.TensorSplit = normalizeSplit(split)
+
 		if opts.BackendTag == "ik_llama" {
 			s.SplitMode = "graph"
 		} else {
 			s.SplitMode = "row"
 		}
-		// Tensor split across all GPUs
-		split := make([]float64, numGPUs)
-		totalVRAM := 0
-		for _, g := range caps.GPUs {
-			totalVRAM += g.VRAMTotalMB
-		}
-		for i, g := range caps.GPUs {
-			if totalVRAM > 0 {
-				split[i] = float64(g.VRAMTotalMB) / float64(totalVRAM)
-			}
-		}
-		s.TensorSplit = normalizeSplit(split)
 	}
 	s.MMap = false
 	return s, nil
@@ -401,6 +632,11 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	sysCUDAOverheadMB := 0
 	if sysProbe != nil {
 		sysCUDAOverheadMB = sysProbe.CUDAOverheadMB
+	} else if len(caps.GPUs) > 0 {
+		// Fallback: estimate CUDA context overhead when no measured cache exists.
+		// Typical per-GPU overhead is 500-800 MB. Use 600 MB as conservative estimate.
+		// This prevents OOM on first launch before the post-launch probe creates a cache.
+		sysCUDAOverheadMB = 600
 	}
 
 	// Load probe cache (lines 5487-5508)
@@ -876,9 +1112,33 @@ func normalizeSplit(split []float64) []float64 {
 
 // checkMemoryOrDie mirrors bash check_memory_or_die() (lines 2620-2654).
 // OOM guard: refuse to launch if model+KV+compute don't fit.
-func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int) error {
-	modelOverheadMB := totalSizeMB * vramOverheadPercent / 100
-	neededMB := modelOverheadMB + kvTotalMB + computePerGPUMB
+func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int, opts Options) error {
+	numGPUs := len(caps.GPUs)
+
+	// Load system probe for CUDA overhead (measured, not guessed)
+	sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+	cudaOverheadMB := 0
+	if sysProbe != nil {
+		cudaOverheadMB = sysProbe.CUDAOverheadMB
+	} else if numGPUs > 0 {
+		cudaOverheadMB = 600 // conservative estimate per GPU
+	}
+
+	// Load model probe for compute buffer
+	computeBufMB := computeFloorMB // 1024 default
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
+	if pc != nil {
+		computeBufMB = pc.ComputeBufMB
+	}
+
+	// Model weights + per-GPU overhead (CUDA context + compute buffer)
+	// For single GPU, only count 1 GPU's overhead
+	overheadGPUs := numGPUs
+	if s.Type == SingleGPU {
+		overheadGPUs = 1
+	}
+	modelOverheadMB := totalSizeMB + (cudaOverheadMB+computeBufMB)*overheadGPUs
+	neededMB := modelOverheadMB + kvTotalMB
 
 	var poolMB int
 	var poolLabel string
@@ -914,7 +1174,7 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 	if neededMB > poolMB {
 		// Back-solve max safe context
-		maxKVMB := poolMB - modelOverheadMB - computePerGPUMB
+		maxKVMB := poolMB - modelOverheadMB
 		if maxKVMB < 0 {
 			maxKVMB = 0
 		}
@@ -925,14 +1185,16 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 		msg := fmt.Sprintf(
 			"ERROR: Model does not fit in %s.\n"+
-				"  Model (with overhead): %dMB\n"+
-				"  KV cache (ctx=%d):     %dMB\n"+
-				"  Compute buffers:       %dMB\n"+
+				"  Model weights:          %dMB\n"+
+				"  CUDA overhead (%d GPU): %dMB\n"+
+				"  Compute buffers (%d):   %dMB\n"+
+				"  KV cache (ctx=%d):      %dMB\n"+
 				"  -----------------------------\n"+
 				"  Total needed:          %dMB\n"+
 				"  Available (%s):        %dMB\n"+
 				"  Shortfall:             %dMB\n",
-			poolLabel, modelOverheadMB, s.ContextSize, kvTotalMB, computePerGPUMB,
+			poolLabel, totalSizeMB, numGPUs, cudaOverheadMB*numGPUs,
+			numGPUs, computeBufMB*numGPUs, s.ContextSize, kvTotalMB,
 			neededMB, poolLabel, poolMB, neededMB-poolMB)
 
 		if maxCtx > 0 {
@@ -1028,22 +1290,98 @@ func defaultContextSize(model *ModelProfile, caps *detect.Capabilities) int {
 	return 32768
 }
 
+// computeAutoContextSizeSingleGPU computes the largest context that fits on
+// a SINGLE GPU (the best one). Used to prefer single-GPU mode (faster).
+// Matches bash max_context_fit() (lines 2186-2265).
+func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, preferredKVType string, opts Options) (int, string) {
+	// Find best single GPU by total VRAM
+	bestVRAM := 0
+	for _, g := range caps.GPUs {
+		if g.VRAMTotalMB > bestVRAM {
+			bestVRAM = g.VRAMTotalMB
+		}
+	}
+
+	// Total hardware = best GPU VRAM + free RAM (matches bash)
+	totalHWMB := bestVRAM + caps.RAM.FreeMB
+
+	// Fixed overhead: model weights + 8GB headroom (bash: TOTAL_SIZE_MB + 8192)
+	fixedOverheadMB := totalSizeMB + 8192
+
+	// If model doesn't fit at all, return minimum
+	if totalHWMB <= fixedOverheadMB {
+		return 32768, preferredKVType
+	}
+
+	// KV budget = total hardware - model - headroom
+	kvBudgetMB := totalHWMB - fixedOverheadMB
+	if kvBudgetMB <= 0 {
+		return 32768, preferredKVType
+	}
+
+	// Try KV types in order
+	kvTypes := []string{preferredKVType, "q8_0", "q4_0"}
+	seen := make(map[string]bool)
+	var orderedTypes []string
+	for _, t := range kvTypes {
+		if !seen[t] {
+			seen[t] = true
+			orderedTypes = append(orderedTypes, t)
+		}
+	}
+
+	for _, kvType := range orderedTypes {
+		refCtx := 32768
+		refKVTotalMB := computeKVTotalMB(model, refCtx, kvType)
+		if refKVTotalMB <= 0 {
+			continue
+		}
+		kvBytesPerToken := float64(refKVTotalMB) * 1048576.0 / float64(refCtx)
+		maxCtxRaw := int(float64(kvBudgetMB) * 1048576.0 / kvBytesPerToken)
+
+		hwCapCtx := maxCtxRaw
+		if model.CTXTrain > 0 && model.CTXTrain < hwCapCtx {
+			hwCapCtx = model.CTXTrain
+		}
+
+		powerOfTwoValues := []int{32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304}
+		suggestedCtx := 32768
+		for _, c := range powerOfTwoValues {
+			if c <= hwCapCtx {
+				suggestedCtx = c
+			}
+		}
+
+		if suggestedCtx >= 32768 {
+			return suggestedCtx, kvType
+		}
+	}
+
+	return 32768, "q4_0"
+}
+
 // computeAutoContextSize computes the largest context that fits in available
-// memory, mirroring bash max-context-fit suggestion (lines 2135-2189).
-// It tries KV types in order of compactness and returns the best fit.
-func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, preferredKVType string) (int, string) {
-	// Total hardware memory
+// hardware memory, mirroring bash max_context_fit() (lines 2186-2265).
+// Uses TOTAL_VRAM + RAM_AVAIL (matches bash exactly).
+func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, preferredKVType string, opts Options) (int, string) {
+	// Total hardware = all GPU VRAM + free RAM
 	totalVRAM := 0
 	for _, g := range caps.GPUs {
 		totalVRAM += g.VRAMTotalMB
 	}
 	totalHWMB := totalVRAM + caps.RAM.FreeMB
 
-	// Fixed overhead: model weights + 8GB for activations/compute/OS
+	// Fixed overhead: model weights + 8GB headroom (bash: TOTAL_SIZE_MB + 8192)
 	fixedOverheadMB := totalSizeMB + 8192
 
-	// If even the model alone doesn't fit, fall back to small default
+	// If model doesn't fit at all, return minimum
 	if totalHWMB <= fixedOverheadMB {
+		return 32768, preferredKVType
+	}
+
+	// KV budget = total hardware - model - headroom
+	kvBudgetMB := totalHWMB - fixedOverheadMB
+	if kvBudgetMB <= 0 {
 		return 32768, preferredKVType
 	}
 
@@ -1059,30 +1397,19 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 	}
 
 	for _, kvType := range orderedTypes {
-		// Compute KV bytes per token at a reference context (32768)
 		refCtx := 32768
 		refKVTotalMB := computeKVTotalMB(model, refCtx, kvType)
 		if refKVTotalMB <= 0 {
 			continue
 		}
 		kvBytesPerToken := float64(refKVTotalMB) * 1048576.0 / float64(refCtx)
-
-		// KV budget after model + overhead
-		kvBudgetMB := totalHWMB - fixedOverheadMB
-		if kvBudgetMB <= 0 {
-			continue
-		}
-
-		// Max raw context
 		maxCtxRaw := int(float64(kvBudgetMB) * 1048576.0 / kvBytesPerToken)
 
-		// Cap at model's trained context length
 		hwCapCtx := maxCtxRaw
 		if model.CTXTrain > 0 && model.CTXTrain < hwCapCtx {
 			hwCapCtx = model.CTXTrain
 		}
 
-		// Snap to nearest power-of-two at or below the cap
 		powerOfTwoValues := []int{32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304}
 		suggestedCtx := 32768
 		for _, c := range powerOfTwoValues {
@@ -1102,9 +1429,13 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 
 // Args converts a Strategy into llama-server command-line arguments.
 func (s *Strategy) Args(modelPath string, port int) []string {
+	host := s.Host
+	if host == "" {
+		host = "0.0.0.0"
+	}
 	args := []string{
 		"-m", modelPath,
-		"--host", "127.0.0.1",
+		"--host", host,
 		"--port", fmt.Sprintf("%d", port),
 		"--ctx-size", fmt.Sprintf("%d", s.ContextSize),
 		"--flash-attn", "on",
@@ -1114,7 +1445,7 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		"--cache-type-v", s.KVType,
 		"--jinja",
 		"--threads", fmt.Sprintf("%d", s.Threads),
-		"--threads-batch", fmt.Sprintf("%d", s.Threads),
+		"--threads-batch", fmt.Sprintf("%d", s.ThreadsBatch),
 	}
 
 	if s.KVPlacement == "cpu" {
@@ -1125,6 +1456,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 	if s.ReasoningOff {
 		args = append(args, "--reasoning", "off")
+	}
+
+	// SSM/Mamba models need --no-context-shift (bash line 2029-2033)
+	if s.HasSSM {
+		args = append(args, "--no-context-shift")
 	}
 
 	if s.Parallel > 0 {
@@ -1247,6 +1583,148 @@ func gpuSignatureHash(gpus []detect.GPU) string {
 	h := md5.New()
 	h.Write([]byte(input))
 	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
+// RunPostLaunchProbe measures actual CUDA overhead after a successful server launch.
+// It reads current VRAM usage from nvidia-smi, parses buffer sizes from the
+// server's captured stderr log, and caches the result for future launches.
+// Matches bash post-launch probe (lines 6174-6228).
+func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string) {
+	if len(gpus) == 0 || serverLog == "" {
+		return
+	}
+	// Only write if no cached value exists
+	sp := loadSystemProbe(cacheDir, gpus)
+	if sp != nil && sp.CUDAOverheadMB > 0 {
+		return
+	}
+
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "llm-server")
+	}
+
+	// Use primary GPU (first in list, sorted by PCI bus ID)
+	primary := gpus[0]
+
+	// Get current VRAM used on primary GPU via nvidia-smi
+	primaryUsedMB := queryVRAMUsed(primary.Index)
+	if primaryUsedMB <= 0 {
+		return
+	}
+
+	// Parse buffer sizes from server log
+	modelBufMB, kvBufMB, computeBufMB := parseBuffersFromLog(serverLog, primary.Index)
+	accounted := modelBufMB + kvBufMB + computeBufMB
+
+	cudaOverhead := primaryUsedMB - accounted
+	if cudaOverhead <= 0 || cudaOverhead >= primaryUsedMB {
+		return
+	}
+
+	// Write system probe cache
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return
+	}
+	gpuSig := gpuSignatureHash(gpus)
+	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
+	driver := gpus[0].Driver
+	if driver == "" {
+		driver = "unknown"
+	}
+	content := fmt.Sprintf(
+		"# System probe (post-launch measurement) for %s\n"+
+			"# Driver: %s\n"+
+			"# Generated: %s\n"+
+			"# Measurements: VRAM_used=%dMB model_buf=%dMB kv_buf=%dMB compute_buf=%dMB\n"+
+			"SYS_CUDA_OVERHEAD_MB=%d\n",
+		primary.Name, driver, time.Now().Format(time.RFC3339),
+		primaryUsedMB, modelBufMB, kvBufMB, computeBufMB, cudaOverhead,
+	)
+	if err := os.WriteFile(path, []byte(content), 0644); err == nil {
+		fmt.Fprintf(os.Stderr, "  System probe written: cuda_overhead=%dMB (measured from launch)\n", cudaOverhead)
+	}
+}
+
+// queryVRAMUsed returns current nvidia-smi memory.used for a given GPU index.
+func queryVRAMUsed(gpuIndex int) int {
+	out, err := exec.Command("nvidia-smi",
+		"--query-gpu=memory.used", "--format=csv,noheader,nounits",
+		"-i", fmt.Sprintf("%d", gpuIndex),
+	).Output()
+	if err != nil {
+		return 0
+	}
+	s := strings.TrimSpace(string(out))
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// parseBuffersFromLog parses llama-server log for CUDA buffer sizes on a specific GPU.
+// Returns modelBufMB, kvBufMB, computeBufMB.
+// Handles both mainline ("CUDAN model buffer size = X MiB") and
+// ik_llama ("CUDAN buffer size = X MiB") formats.
+func parseBuffersFromLog(log string, gpuIndex int) (modelBufMB, kvBufMB, computeBufMB int) {
+	cudaTag := fmt.Sprintf("CUDA%d", gpuIndex)
+
+	var maxModelBuf, maxComputeBuf float64
+	var totalKVBuf float64
+	var kvCount int
+
+	lines := strings.Split(log, "\n")
+	for _, line := range lines {
+		if !strings.Contains(line, cudaTag) {
+			continue
+		}
+
+		// Model buffer: "CUDA0 model buffer size = X MiB" or "CUDA0 buffer size = X MiB"
+		if strings.Contains(line, "buffer size =") && !strings.Contains(line, "KV") && !strings.Contains(line, "compute") {
+			if v := parseMiB(line); v > maxModelBuf {
+				maxModelBuf = v
+			}
+		}
+
+		// KV buffer: "CUDA0 KV buffer size = X MiB"
+		if strings.Contains(line, "KV buffer size =") {
+			if v := parseMiB(line); v > 0 {
+				totalKVBuf += v
+				kvCount++
+			}
+		}
+
+		// Compute buffer: "CUDA0 compute buffer size = X MiB"
+		if strings.Contains(line, "compute buffer size =") {
+			if v := parseMiB(line); v > maxComputeBuf {
+				maxComputeBuf = v
+			}
+		}
+	}
+
+	modelBufMB = int(maxModelBuf + 0.5)
+	computeBufMB = int(maxComputeBuf + 0.5)
+	if totalKVBuf > 0 && kvCount > 0 {
+		kvBufMB = int(totalKVBuf/float64(kvCount) + 0.5)
+	}
+	return
+}
+
+// parseMiB extracts a floating-point MiB value from a log line containing "X MiB".
+func parseMiB(line string) float64 {
+	idx := strings.LastIndex(line, "=")
+	if idx < 0 {
+		return 0
+	}
+	rest := strings.TrimSpace(line[idx+1:])
+	rest = strings.TrimSuffix(rest, " MiB")
+	rest = strings.TrimSpace(rest)
+	v, err := strconv.ParseFloat(rest, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // loadProbeCache tries to load per-model probe data.

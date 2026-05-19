@@ -67,7 +67,7 @@ func Defaults() *Config {
 		TuneRounds:    5,
 		Vision:        false,
 		Parallel:      1,
-		Host:          "127.0.0.1",
+		Host:          "0.0.0.0",
 	}
 }
 

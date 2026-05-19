@@ -1,12 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -16,6 +19,25 @@ type Process struct {
 	Cmd    *exec.Cmd
 	Port   int
 	cancel context.CancelFunc
+	LogBuf *threadSafeBuffer // captured stderr for post-launch probe
+}
+
+// threadSafeBuffer is a bytes.Buffer protected by a mutex for concurrent writes.
+type threadSafeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *threadSafeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *threadSafeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // Start launches llama-server with the given args and waits for it to be ready.
@@ -29,18 +51,33 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+
+	// Tee stderr: output to terminal AND capture in buffer for post-launch probe.
+	logBuf := &threadSafeBuffer{}
+	cmd.Stderr = io.MultiWriter(os.Stderr, logBuf)
+
 	// Ensure CUDA device enumeration matches nvidia-smi PCI bus order.
 	// Without this, llama-server may enumerate GPUs differently from our
-	// detection, causing -ot override-tensor flags to target wrong devices.
-	cmd.Env = append(os.Environ(), "CUDA_DEVICE_ORDER=PCI_BUS_ID")
+	// detection, causing -ot / --tensor-split flags to target wrong devices.
+	//
+	// We filter out any existing CUDA_DEVICE_ORDER before adding ours,
+	// because appending a duplicate key has undefined behaviour in CUDA.
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CUDA_DEVICE_ORDER=") {
+			filtered = append(filtered, e)
+		}
+	}
+	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
+	cmd.Env = filtered
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	p := &Process{Cmd: cmd, Port: port, cancel: cancel}
+	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf}
 	if err := p.waitReady(timeout); err != nil {
 		p.Stop()
 		return nil, fmt.Errorf("server not ready: %w", err)

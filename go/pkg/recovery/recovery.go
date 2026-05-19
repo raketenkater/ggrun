@@ -125,15 +125,38 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = logFile
 
-	// Set LD_LIBRARY_PATH from lib hub if available
-	if hub := os.Getenv("LLM_SERVER_LIB_HUB"); hub != "" {
-		old := os.Getenv("LD_LIBRARY_PATH")
-		if old == "" {
-			cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+hub)
-		} else {
-			cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+hub+":"+old)
+	// Build a clean environment with our required CUDA ordering.
+	// Filter out any existing CUDA_DEVICE_ORDER before adding ours,
+	// because duplicates have undefined behaviour in the CUDA runtime.
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+2)
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CUDA_DEVICE_ORDER=") {
+			filtered = append(filtered, e)
 		}
 	}
+	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
+
+	// Prepend lib hub to LD_LIBRARY_PATH if available
+	if hub := os.Getenv("LLM_SERVER_LIB_HUB"); hub != "" {
+		old := os.Getenv("LD_LIBRARY_PATH")
+		for i, e := range filtered {
+			if strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
+				if old == "" {
+					filtered[i] = "LD_LIBRARY_PATH=" + hub
+				} else {
+					filtered[i] = "LD_LIBRARY_PATH=" + hub + ":" + old
+				}
+				old = "" // marker: already handled
+				break
+			}
+		}
+		if old != "" {
+			// No LD_LIBRARY_PATH in env yet — add it
+			filtered = append(filtered, "LD_LIBRARY_PATH="+hub)
+		}
+	}
+	cmd.Env = filtered
 
 	if err := cmd.Start(); err != nil {
 		return err

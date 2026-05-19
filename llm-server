@@ -1760,6 +1760,8 @@ else
 fi
 
 placement_cache_key_input() {
+    local ram_total_bucket
+    ram_total_bucket=$(( (RAM_TOTAL_MB / 8192) * 8192 ))
     local parts=(
         "version=$VERSION"
         "model=$MODEL_NAME"
@@ -1770,7 +1772,7 @@ placement_cache_key_input() {
         "backend=$BACKEND_TAG"
         "llama_server=$LLAMA_SERVER"
         "gpu_filter=${GPUS_FILTER:-all}"
-        "ram_avail=$RAM_AVAIL_MB"
+        "ram_total_bucket=$ram_total_bucket"
         "ram_budget=$RAM_BUDGET_MB"
         "gpu_count=$GPU_COUNT"
     )
@@ -3617,11 +3619,7 @@ query_llm_chat() {
     local response
     # chat_template_kwargs.enable_thinking=false suppresses <think> blocks for
     # Qwen3/3.5/3.6 (the tune conversation doesn't need chain-of-thought; it
-<<<<<<< Updated upstream
     # otherwise eats the whole token budget). Ignored by non-Qwen templates.
-=======
-    # eats the whole token budget). Ignored by non-Qwen templates.
->>>>>>> Stashed changes
     response=$(curl -sf "$url/v1/chat/completions" \
         -H "Content-Type: application/json" \
         --max-time 1800 \
@@ -4991,6 +4989,7 @@ mkdir -p "$CACHE_DIR"
 CACHE_KEY_INPUT="$(placement_cache_key_input)"
 CACHE_KEY=$(printf '%s\n' "$CACHE_KEY_INPUT" | md5sum | awk '{print $1}')
 CACHE_FILE="$CACHE_DIR/${CACHE_KEY}.conf"
+CACHE_FILE_IS_FALLBACK=0
 
 load_placement_cache_file() {
     local file="$1" line key value
@@ -5030,6 +5029,28 @@ load_placement_cache_file() {
                 return 1 ;;
         esac
     done < "$file"
+}
+
+find_compatible_placement_cache_file() {
+    local file newest="" newest_mtime=0 mtime
+    shopt -s nullglob
+    for file in "$CACHE_DIR"/*.conf; do
+        [[ "$file" == "$CACHE_FILE" ]] && continue
+        if ! grep -Fxq "# Auto-tuned config for $MODEL_NAME" "$file" \
+           && ! grep -Fxq "# Auto-tuned config for $MODEL_NAME (recovered via --n-cpu-moe)" "$file"; then
+            continue
+        fi
+        if ! ( load_placement_cache_file "$file" ); then
+            continue
+        fi
+        mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+        if (( mtime > newest_mtime )); then
+            newest_mtime=$mtime
+            newest="$file"
+        fi
+    done
+    shopt -u nullglob
+    [[ -n "$newest" ]] && printf '%s\n' "$newest"
 }
 
 # Per-layer expert size from GGUF tensor data (fallback: estimate 90%)
@@ -5083,6 +5104,53 @@ _compute_gpu_kv_reserves() {
 }
 
 _compute_gpu_kv_reserves "$KV_PLACEMENT_EFFECTIVE"
+
+estimate_moe_ram_overhead_mb() {
+    local act_ffn cpu_act_mb
+    if (( EMBEDDING_LENGTH > 0 )); then
+        if (( EXPERT_COUNT > 0 && EXPERT_USED_COUNT > 0 && EXPERT_FF > 0 )); then
+            act_ffn=$(( EXPERT_USED_COUNT * EXPERT_FF ))
+            (( EXPERT_SHARED_FF > 0 )) && act_ffn=$(( act_ffn + EXPERT_SHARED_FF ))
+        else
+            act_ffn=$FEED_FORWARD_LENGTH
+        fi
+        (( KV_LORA_RANK > 0 )) && act_ffn=$(( act_ffn + KV_LORA_RANK + Q_LORA_RANK ))
+        cpu_act_mb=$(( UBATCH * (EMBEDDING_LENGTH + act_ffn) * 4 * 2 / 1048576 ))
+        (( cpu_act_mb < 64 )) && cpu_act_mb=64
+    else
+        cpu_act_mb=512
+    fi
+    printf '%d\n' $(( 1024 + 2048 + TOTAL_SIZE_MB / 500 + cpu_act_mb ))
+}
+
+cached_cpu_ram_fits() {
+    local cpu_layers="$1" mmap_path="$2" label="$3"
+    local ram_overhead_mb cpu_kv_mb=0 needed
+    ram_overhead_mb=$(estimate_moe_ram_overhead_mb)
+    [[ "$KV_PLACEMENT_EFFECTIVE" == "cpu" ]] && cpu_kv_mb=$KV_TOTAL_MB
+
+    if (( mmap_path )); then
+        needed=$(( ram_overhead_mb + cpu_kv_mb + 8 * EXPERT_PER_LAYER_MB ))
+    else
+        needed=$(( cpu_layers * EXPERT_PER_LAYER_MB + cpu_kv_mb + ram_overhead_mb ))
+    fi
+
+    if (( needed > RAM_AVAIL_MB )); then
+        echo "  WARNING: cached ${label} needs ~${needed}MB RAM but only ${RAM_AVAIL_MB}MB is available"
+        return 1
+    fi
+    return 0
+}
+
+if [[ ! -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then
+    compatible_cache="$(find_compatible_placement_cache_file)"
+    if [[ -n "$compatible_cache" ]]; then
+        CACHE_FILE="$compatible_cache"
+        CACHE_FILE_IS_FALLBACK=1
+        echo ""
+        echo "Using compatible cached config: $CACHE_FILE"
+    fi
+fi
 
 # Check cached config
 if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" ]]; then

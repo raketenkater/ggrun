@@ -119,6 +119,7 @@ func cmdLaunch(args []string) {
 	kvQuality := fs.String("kv-quality", "mid", "KV quality")
 	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
 	gpusFlag := fs.String("gpus", "", "Comma-separated GPU indices")
+	hostFlag := fs.String("host", "", "Listen address (default from config or 0.0.0.0)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -126,6 +127,12 @@ func cmdLaunch(args []string) {
 		os.Exit(2)
 	}
 	modelPath := fs.Arg(0)
+
+	// Load config for CacheDir, Host, etc.
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
 
 	caps, err := detect.Detect()
 	if err != nil {
@@ -140,11 +147,27 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 
+	host := cfg.Host
+	if *hostFlag != "" {
+		host = *hostFlag
+	}
+
+	// Find backend binary and detect type BEFORE computing placement,
+	// so split-mode and ik_llama flags are decided correctly.
+	be := findBackend(caps)
+	if be == nil {
+		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
+	}
+
 	opts := placement.Options{
 		ContextSize: *ctxSize,
 		KVPlacement: *kvPlacement,
 		KVQuality:   *kvQuality,
 		CPUMode:     *cpuMode,
+		CacheDir:    cfg.CacheDir,
+		Host:        host,
+		BackendTag:  be.Tag,
 	}
 	if *gpusFlag != "" {
 		for _, s := range strings.Split(*gpusFlag, ",") {
@@ -158,14 +181,6 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Find backend binary and detect type
-	be := findBackend(caps)
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
-		os.Exit(1)
-	}
-	strategy.BackendTag = be.Tag
 
 	// Memory warning before launch
 	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
@@ -199,6 +214,13 @@ func cmdLaunch(args []string) {
 	}
 
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", *port, p.Cmd.Process.Pid)
+
+	// Post-launch system probe: measure CUDA overhead from actual VRAM usage
+	// and buffer sizes reported by llama-server. Caches result for next launch.
+	if model.IsMoE && len(caps.GPUs) > 0 && p.LogBuf != nil {
+		go placement.RunPostLaunchProbe(opts.CacheDir, caps.GPUs, p.LogBuf.String())
+	}
+
 	fmt.Println("[launch] Press Ctrl+C to stop")
 
 	// Block until interrupted
@@ -221,6 +243,15 @@ func cmdGUI() {
 		os.Exit(1)
 	}
 
+	// Load config for cache directory
+	cfg, _ := config.Load()
+
+	be := findBackend(caps)
+	if be == nil {
+		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
+	}
+
 	model, err := parseModel(req.ModelPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
@@ -231,8 +262,10 @@ func cmdGUI() {
 		ContextSize: req.CtxSize,
 		KVPlacement: req.KVPlacement,
 		KVQuality:   req.KVQuality,
-		BackendTag:  req.Backend,
+		BackendTag:  be.Tag,
 		Parallel:    req.Parallel,
+		CacheDir:    cfg.CacheDir,
+		Host:        cfg.Host,
 	}
 	if req.TuneCache != "" {
 		opts.CacheFile = req.TuneCache
@@ -242,13 +275,6 @@ func cmdGUI() {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
-
-	be := findBackend(caps)
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
-		os.Exit(1)
-	}
-	strategy.BackendTag = be.Tag
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
@@ -336,22 +362,32 @@ func cmdDryRun(args []string) {
 		os.Exit(1)
 	}
 
+	// Detect backend BEFORE computing placement (affects split-mode, MoE flags, etc.)
+	be := findBackend(caps)
+	backendTag := "llama"
+	binPath := "llama-server"
+	if be != nil {
+		binPath = be.Path
+		backendTag = be.Tag
+	}
+
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+
 	strategy, err := placement.Compute(caps, model, placement.Options{
 		ContextSize: *ctxSize,
 		KVPlacement: *kvPlacement,
 		KVQuality:   *kvQuality,
 		CPUMode:     *cpuMode,
+		CacheDir:    cfg.CacheDir,
+		Host:        cfg.Host,
+		BackendTag:  backendTag,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
-	}
-
-	be := findBackend(caps)
-	binPath := "llama-server"
-	if be != nil {
-		binPath = be.Path
-		strategy.BackendTag = be.Tag
 	}
 
 	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
@@ -588,18 +624,56 @@ func cmdUpdate() {
 
 // infoToProfile converts gguf.Info to placement.ModelProfile.
 func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
+	numExperts := info.Experts
+	if numExperts == 0 {
+		numExperts = info.Fused
+	}
+
+	// Compute attention head count: embd / key_length
+	// (GGUF only exposes KV head count; total heads = embd / head_dim where head_dim = kl)
+	headCount := 0
+	if info.KeyLength > 0 {
+		headCount = info.EmbeddingLength / info.KeyLength
+	}
+
+	totalBytes := info.NonExpertBytes + info.ExpertBytes
+	totalSizeMB := int(totalBytes / 1024 / 1024)
+
 	return &placement.ModelProfile{
-		Path:        path,
-		SizeBytes:   info.NonExpertBytes + info.ExpertBytes,
-		NumLayers:   info.BlockCount,
-		NumParams:   info.EstimateParams(),
-		IsMoE:       info.IsMoE,
-		NumExperts:  int(info.Fused),
-		ContextSize: info.ContextLength,
-		HiddenSize:  info.EmbeddingLength,
-		HeadCount:   info.HeadCountKV,
-		VocabSize:   info.VocabSize,
-		QuantType:   "", // not parsed from gguf.py output
+		Path:               path,
+		SizeBytes:          totalBytes,
+		TotalSizeMB:        totalSizeMB,
+		NumLayers:          info.BlockCount,
+		NumParams:          info.EstimateParams(),
+		IsMoE:              info.IsMoE,
+		NumExperts:         numExperts,
+		ContextSize:        info.ContextLength,
+		HiddenSize:         info.EmbeddingLength,
+		HeadCount:          headCount,
+		HeadCountKV:        info.HeadCountKV,
+		KeyLength:          info.KeyLength,
+		ValueLength:        info.ValueLength,
+		VocabSize:          info.VocabSize,
+		QuantType:          "", // not parsed from gguf.py output
+		ExpertBytes:        info.ExpertBytes,
+		NonExpertBytes:     info.NonExpertBytes,
+		Fused:              info.Fused,
+		EmbeddingLength:    info.EmbeddingLength,
+		FeedForwardLength:  info.FeedForwardLength,
+		ExpertUsedCount:    info.ExpertUsed,
+		ExpertFF:           info.ExpFF,
+		ExpertSharedFF:     info.ExpSharedFF,
+		RopeDim:            info.NRot,
+		HasSSM:             info.SSM,
+		FullAttnInterval:   info.FullAttnInterval,
+		SlidingWindow:      info.SlidingWindow,
+		HasShexp:           info.HasShexp,
+		KVLoraRank:         info.KVLoraRank,
+		QLoraRank:          info.QLoraRank,
+		KeyLengthMLA:       info.KeyLengthMLA,
+		ValueLengthMLA:     info.ValueLengthMLA,
+		CTXTrain:           info.ContextLength,
+		ModelArch:          info.Architecture,
 	}
 }
 
@@ -707,12 +781,10 @@ func findBackend(caps *detect.Capabilities) *backendInfo {
 }
 
 // detectBackend runs --help to determine if this is ik_llama.cpp fork.
+// llama-server --help returns exit code 1, so we check the output regardless of error.
 func detectBackend(path string) *backendInfo {
 	info := &backendInfo{Path: path, Tag: "llama"}
-	out, err := exec.Command(path, "--help").Output()
-	if err != nil {
-		return info
-	}
+	out, _ := exec.Command(path, "--help").Output()
 	help := string(out)
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
 		info.IsIK = true

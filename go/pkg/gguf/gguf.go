@@ -25,6 +25,20 @@ type Info struct {
 	ExpertBytes       int64  `json:"expert_bytes"`
 	NonExpertBytes    int64  `json:"non_expert_bytes"`
 	Fused             int    `json:"fused"`
+	Experts           int    `json:"experts"`          // total number of experts (MoE)
+	ExpertUsed        int    `json:"exp_used"`         // experts used per token
+	ExpFF             int    `json:"exp_ff"`           // expert feed-forward size
+	ExpSharedFF       int    `json:"exp_shared_ff"`    // expert shared feed-forward size
+	NRot              int    `json:"n_rot"`            // rope dimension
+	SSM               int    `json:"ssm"`              // 1 if model uses SSM layers
+	FullAttnInterval  int    `json:"full_interval"`    // full attention every N layers (hybrid SSM/SWA)
+	SlidingWindow     int    `json:"swa"`              // sliding window size (0 = no SWA)
+	LeadingDense      int    `json:"leading_dense"`    // leading dense block count (MoE models)
+	KVLoraRank        int    `json:"kv_lora"`          // MLA KV lora rank
+	QLoraRank         int    `json:"q_lora"`           // MLA Q lora rank
+	KeyLengthMLA      int    `json:"kl_mla"`           // MLA key length
+	ValueLengthMLA    int    `json:"vl_mla"`           // MLA value length
+	HasShexp          int    `json:"has_shexp"`        // shared experts present
 	IsMoE             bool   `json:"is_moe"`
 }
 
