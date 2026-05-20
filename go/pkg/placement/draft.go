@@ -61,12 +61,18 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 	candidate := findDraftCandidate(target, modelDir)
 
 	if candidate != "" {
-		cfg.Type = DraftModel
-		cfg.Path = candidate
-
-		// Parse draft model for its metadata
+		// Parse draft model for metadata and check architecture compatibility.
+		// Some formats (e.g., dflash-draft) may not be supported by all builds.
 		draftInfo, err := gguf.Parse(candidate)
-		if err == nil && draftInfo != nil {
+		archOk := err == nil && draftInfo != nil &&
+			draftInfo.Architecture != "" &&
+			draftInfo.Architecture != "unknown" &&
+			draftInfo.Architecture != "dflash-draft" // not universally supported by ik_llama
+
+		if archOk {
+			cfg.Type = DraftModel
+			cfg.Path = candidate
+
 			// Draft context = min(target context, draft model's trained context)
 			draftCTX := target.ContextSize
 			if draftCTX <= 0 {
@@ -80,7 +86,7 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 			// Calculate draft model VRAM requirement
 			draftSizeMB := int(draftInfo.ExpertBytes+draftInfo.NonExpertBytes) / (1024 * 1024)
 			if draftSizeMB <= 0 {
-				draftSizeMB = 1024 // tiny models, safe floor
+				draftSizeMB = 1024
 			}
 
 			// KV cache for draft model
@@ -96,31 +102,24 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 				FullAttnInterval: draftInfo.FullAttnInterval,
 			}, draftCTX, cfg.KVTypeDraft)
 
-			// Find best GPU for draft model
 			cfg.DraftGPU = findDraftGPU(caps, target, draftSizeMB+draftKVMB+computeFloorMB)
-		} else {
-			// Parse failed — use safe defaults
-			cfg.CTXSizeDraft = target.ContextSize
-			cfg.DraftGPU = 0
-		}
 
-		// Threads for draft: use 2 physical cores (draft doesn't need many)
-		if caps.CPU.Cores >= 4 {
-			cfg.ThreadsDraft = 2
-		} else {
-			cfg.ThreadsDraft = caps.CPU.Cores
+			if caps.CPU.Cores >= 4 {
+				cfg.ThreadsDraft = 2
+			} else {
+				cfg.ThreadsDraft = caps.CPU.Cores
+			}
+			cfg.KVTypeDraft = computeDraftKVType(caps, draftInfo)
 		}
+		// If arch not ok, fall through to ngram below
+	}
 
-		// KV type: match target's choice (q4_0 = low overhead, q8_0 = more)
-		cfg.KVTypeDraft = computeDraftKVType(caps, draftInfo)
-	} else {
-		// No matching draft model — use ngram speculation as fallback
+	// No compatible draft model — use ngram speculation as fallback
+	if cfg.Type == DraftNone {
 		cfg.Type = DraftNgram
-		cfg.SpecType = "ngram - cache"
 		cfg.NgramN = 12
 		cfg.NgramM = 48
 		cfg.NgramMinHits = 1
-		cfg.SpecAutoTune = true
 	}
 
 	return cfg

@@ -498,9 +498,10 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 		s.TensorSplit = normalizeSplit(split)
 	}
 
-	// Prefer graph split for ik_llama, row for mainline
+	// Prefer layer split for ik_llama (avoids NCCL P2P which fails
+	// on mixed GPU architectures like Ampere+Ada), row for mainline
 	if opts.BackendTag == "ik_llama" {
-		s.SplitMode = "graph"
+		s.SplitMode = "layer"
 	} else {
 		s.SplitMode = "row"
 	}
