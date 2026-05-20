@@ -22,6 +22,20 @@ type Config struct {
 	ServerArgs  []string `json:"server_args"`
 	Port        int      `json:"port"`
 	ControlPort int      `json:"control_port"`
+
+	// StartupTimeoutSecs caps how long handleStart/handleReload waits for
+	// the underlying llama-server to become healthy. Cold-cache loads of
+	// big MoE models (e.g. MiniMax M2.7 @ 94 GB) routinely take 2-3 min.
+	// Zero falls back to the daemon default (300s).
+	StartupTimeoutSecs int `json:"startup_timeout_secs,omitempty"`
+}
+
+// startupTimeout returns the configured wait or the daemon default.
+func (c Config) startupTimeout() time.Duration {
+	if c.StartupTimeoutSecs > 0 {
+		return time.Duration(c.StartupTimeoutSecs) * time.Second
+	}
+	return 300 * time.Second
 }
 
 // New creates a new daemon instance.
@@ -64,7 +78,7 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"already running"}`, http.StatusConflict)
 		return
 	}
-	p, err := server.Start(d.config.ServerArgs, d.config.Port)
+	p, err := server.StartWithTimeout(d.config.ServerArgs, d.config.Port, d.config.startupTimeout())
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -103,6 +117,9 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	if newCfg.Port > 0 {
 		d.config.Port = newCfg.Port
 	}
+	if newCfg.StartupTimeoutSecs > 0 {
+		d.config.StartupTimeoutSecs = newCfg.StartupTimeoutSecs
+	}
 
 	// Restart if running
 	wasRunning := d.process != nil && d.process.IsRunning()
@@ -110,7 +127,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		d.process.Stop()
 		// Small delay to free ports
 		time.Sleep(500 * time.Millisecond)
-		p, err := server.Start(d.config.ServerArgs, d.config.Port)
+		p, err := server.StartWithTimeout(d.config.ServerArgs, d.config.Port, d.config.startupTimeout())
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 			return

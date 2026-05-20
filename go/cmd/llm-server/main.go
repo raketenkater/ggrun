@@ -519,6 +519,7 @@ func cmdDaemon(args []string) {
 	modelPath := fs.String("model", "", "Model path")
 	port := fs.Int("port", 8081, "Server port")
 	controlPort := fs.Int("control-port", 9090, "Control API port")
+	startupTimeoutSecs := fs.Int("startup-timeout-secs", 300, "Max seconds to wait for llama-server to become healthy after start/reload")
 	fs.Parse(args)
 
 	if *modelPath == "" {
@@ -554,10 +555,11 @@ func cmdDaemon(args []string) {
 	serverArgs := append([]string{be.Path}, strategy.Args(*modelPath, *port)...)
 
 	d := daemon.New(daemon.Config{
-		ModelPath:   *modelPath,
-		ServerArgs:  serverArgs,
-		Port:        *port,
-		ControlPort: *controlPort,
+		ModelPath:          *modelPath,
+		ServerArgs:         serverArgs,
+		Port:               *port,
+		ControlPort:        *controlPort,
+		StartupTimeoutSecs: *startupTimeoutSecs,
 	})
 	if err := d.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
