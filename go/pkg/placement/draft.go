@@ -26,7 +26,6 @@ type DraftConfig struct {
 	Type          DraftType `json:"type"`
 	Path          string    `json:"path,omitempty"`          // draft model GGUF path
 	DraftGPU      int       `json:"draft_gpu,omitempty"`     // CUDA device index for draft
-	NGld          int       `json:"ngld,omitempty"`          // GPU layers for draft (always 999)
 	CTXSizeDraft  int       `json:"ctx_size_draft,omitempty"` // context size for draft
 	KVTypeDraft   string    `json:"kv_type_draft,omitempty"`  // KV type for draft
 	ThreadsDraft  int       `json:"threads_draft,omitempty"`  // threads for draft generation
@@ -34,7 +33,9 @@ type DraftConfig struct {
 	// Draft model params (calculated, not guessed)
 	DraftMax      int       `json:"draft_max,omitempty"`      // max draft tokens per batch
 	DraftMin      int       `json:"draft_min,omitempty"`      // min draft tokens per batch
+	PSplit        float64   `json:"p_split,omitempty"`        // speculative split probability
 	// Ngram params (fallback when no matching draft model exists)
+	SpecType      string    `json:"spec_type,omitempty"`      // ngram - cache, ngram - simple, etc.
 	NgramN        int       `json:"ngram_n,omitempty"`
 	NgramM        int       `json:"ngram_m,omitempty"`
 	NgramMinHits  int       `json:"ngram_min_hits,omitempty"`
@@ -47,6 +48,8 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 	cfg := &DraftConfig{
 		Type:         DraftNone,
 		SpecAutoTune: true, // always preferred — llama.cpp measures at runtime
+		DraftMax:     16,   // llama.cpp default
+		PSplit:       0.1,  // llama.cpp default
 	}
 
 	if len(caps.GPUs) == 0 {
@@ -60,7 +63,6 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 	if candidate != "" {
 		cfg.Type = DraftModel
 		cfg.Path = candidate
-		cfg.NGld = 999 // all layers on GPU — draft must be fast
 
 		// Parse draft model for its metadata
 		draftInfo, err := gguf.Parse(candidate)
@@ -114,6 +116,7 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 	} else {
 		// No matching draft model — use ngram speculation as fallback
 		cfg.Type = DraftNgram
+		cfg.SpecType = "ngram - cache"
 		cfg.NgramN = 12
 		cfg.NgramM = 48
 		cfg.NgramMinHits = 1
@@ -279,9 +282,6 @@ func DraftFlags(cfg *DraftConfig) []string {
 		if cfg.Path != "" {
 			flags = append(flags, "--model-draft", cfg.Path)
 		}
-		if cfg.NGld > 0 {
-			flags = append(flags, "--ngld", fmt.Sprintf("%d", cfg.NGld))
-		}
 		if cfg.DraftGPU >= 0 && cfg.Path != "" {
 			flags = append(flags, "--device-draft", fmt.Sprintf("CUDA%d", cfg.DraftGPU))
 		}
@@ -295,11 +295,20 @@ func DraftFlags(cfg *DraftConfig) []string {
 		if cfg.ThreadsDraft > 0 {
 			flags = append(flags, "--threads-draft", fmt.Sprintf("%d", cfg.ThreadsDraft))
 		}
+		if cfg.DraftMax > 0 {
+			flags = append(flags, "--draft-max", fmt.Sprintf("%d", cfg.DraftMax))
+		}
+		if cfg.PSplit > 0 {
+			flags = append(flags, "--p-split", fmt.Sprintf("%.2f", cfg.PSplit))
+		}
 		if cfg.SpecAutoTune {
 			flags = append(flags, "--spec-autotune")
 		}
 
 	case DraftNgram:
+		if cfg.SpecType != "" {
+			flags = append(flags, "--spec-type", cfg.SpecType)
+		}
 		if cfg.NgramN > 0 {
 			flags = append(flags, "--spec-ngram-size-n", fmt.Sprintf("%d", cfg.NgramN))
 		}
@@ -325,8 +334,8 @@ func DraftSummary(cfg *DraftConfig) string {
 	switch cfg.Type {
 	case DraftModel:
 		name := filepath.Base(cfg.Path)
-		return fmt.Sprintf("speculative decoding: draft model %s (GPU%d, ngld=%d, ctx=%d)",
-			name, cfg.DraftGPU, cfg.NGld, cfg.CTXSizeDraft)
+		return fmt.Sprintf("speculative decoding: draft model %s (GPU%d, ctx=%d)",
+			name, cfg.DraftGPU, cfg.CTXSizeDraft)
 	case DraftNgram:
 		return fmt.Sprintf("speculative decoding: ngram (n=%d, m=%d, autotune)",
 			cfg.NgramN, cfg.NgramM)
