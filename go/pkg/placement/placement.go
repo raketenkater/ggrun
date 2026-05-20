@@ -65,6 +65,7 @@ type Strategy struct {
 	UseCUDAGraphs  bool         `json:"use_cuda_graphs,omitempty"`
 	Host           string       `json:"host,omitempty"`        // listen address
 	HasSSM         bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
+	Draft          *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
 }
 
 // ModelProfile describes the GGUF model.
@@ -161,6 +162,10 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	// KV cache type selection — try compact types first for large models
 	s.KVType = kvTypeFromQuality(s.KVQuality)
+
+	// Speculative decoding: detect matching draft model or fall back to ngram.
+	// Must run early — before strategy dispatch — so all paths (dense, MoE, CPU) get it.
+	s.Draft = ComputeDraft(model, caps, opts)
 
 	// Auto-fit context: prefer single GPU (faster), only go multi-GPU if model doesn't fit
 	if opts.ContextSize <= 0 {
@@ -1527,6 +1532,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 			args = append(args, "-mqkv")
 		}
+	}
+
+	// Speculative decoding flags (draft model or ngram)
+	if s.Draft != nil && s.Draft.Type != DraftNone {
+		args = append(args, DraftFlags(s.Draft)...)
 	}
 
 	return args

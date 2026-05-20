@@ -197,6 +197,9 @@ func cmdLaunch(args []string) {
 
 	serverArgs := append([]string{be.Path}, strategy.Args(modelPath, *port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
+	if s := placement.DraftSummary(strategy.Draft); s != "" {
+		fmt.Printf("[spec]   %s\n", s)
+	}
 
 	// Dynamic health timeout: 240 + size/1700 seconds, min 60s
 	timeoutSec := 240.0 + totalSizeMB/1700.0
@@ -278,6 +281,9 @@ func cmdGUI() {
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
+	if s := placement.DraftSummary(strategy.Draft); s != "" {
+		fmt.Printf("[spec]   %s\n", s)
+	}
 
 	// Setup lib hub for non-system binaries
 	hubDir, ok, err := libhub.Setup(be.Path)
@@ -392,6 +398,9 @@ func cmdDryRun(args []string) {
 
 	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
 	fmt.Println(strings.Join(serverArgs, " "))
+	if s := placement.DraftSummary(strategy.Draft); s != "" {
+		fmt.Printf("[spec] %s\n", s)
+	}
 }
 
 func cmdProbe() {
