@@ -408,21 +408,8 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 		kvPerLayerMB = 1
 	}
 
-	// KV-first GPU reserve (proportional to free VRAM)
-	gpuKVReserveMB := make([]int, numGPUs)
-	totalFreeVRAM := 0
-	for _, g := range caps.GPUs {
-		totalFreeVRAM += g.VRAMFreeMB()
-	}
-	if s.KVPlacement != "cpu" && kvTotalMB > 0 && totalFreeVRAM > 0 {
-		for i := 0; i < numGPUs; i++ {
-			share := (kvTotalMB*caps.GPUs[i].VRAMFreeMB() + totalFreeVRAM - 1) / totalFreeVRAM
-			if kvPerLayerMB > 0 {
-				share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
-			}
-			gpuKVReserveMB[i] = share
-		}
-	}
+	// KV-first GPU reserve: weighted by free VRAM * PCIe bandwidth
+	gpuKVReserveMB := kvReserveByBandwidth(kvTotalMB, caps.GPUs, seqRange(numGPUs), kvPerLayerMB)
 
 	// Calculate effective free VRAM per GPU for model weights
 	// effectiveFree = freeVRAM - cudaOverhead - computeBuf - kvReserve
@@ -532,21 +519,8 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 			kvPerLayerMB = 1
 		}
 
-		// KV-first GPU reserve
-		gpuKVReserveMB := make([]int, numGPUs)
-		totalFreeVRAM := 0
-		for _, g := range caps.GPUs {
-			totalFreeVRAM += g.VRAMFreeMB()
-		}
-		if s.KVPlacement != "cpu" && kvTotalMB > 0 && totalFreeVRAM > 0 {
-			for i := 0; i < numGPUs; i++ {
-				share := (kvTotalMB*caps.GPUs[i].VRAMFreeMB() + totalFreeVRAM - 1) / totalFreeVRAM
-				if kvPerLayerMB > 0 {
-					share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
-				}
-				gpuKVReserveMB[i] = share
-			}
-		}
+		// KV-first GPU reserve: weighted by VRAM * PCIe bandwidth
+		gpuKVReserveMB := kvReserveByBandwidth(kvTotalMB, caps.GPUs, nil, kvPerLayerMB)
 
 		// Tensor split proportional to effective free VRAM * bandwidth
 		split := make([]float64, numGPUs)
@@ -667,25 +641,8 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		kvPerLayerMB = 1
 	}
 
-	// Compute per-GPU KV reserves proportional to free VRAM (lines 5058-5083)
-	gpuKVReserveMB := make([]int, numGPUs)
-	totalFreeVRAM := 0
-	for _, g := range caps.GPUs {
-		totalFreeVRAM += g.VRAMFreeMB()
-	}
-
-	if s.KVPlacement != "cpu" && kvTotalMB > 0 && totalFreeVRAM > 0 && numGPUs > 0 {
-		for i := 0; i < numGPUs; i++ {
-			gi := gpuOrder[i]
-			// share = (KV_TOTAL_MB * GPU_VRAM_FREE[gi] + total_free - 1) / total_free
-			share := (kvTotalMB*caps.GPUs[gi].VRAMFreeMB() + totalFreeVRAM - 1) / totalFreeVRAM
-			// Round up to KV_PER_LAYER_MB multiples
-			if kvPerLayerMB > 0 {
-				share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
-			}
-			gpuKVReserveMB[gi] = share
-		}
-	}
+	// KV-first GPU reserve: weighted by VRAM * PCIe bandwidth (bash lines 5058-5083)
+	gpuKVReserveMB := kvReserveByBandwidth(kvTotalMB, caps.GPUs, gpuOrder, kvPerLayerMB)
 
 	// Hard ceilings: _recompute_gpu_layer_caps (lines 5521-5538)
 	maxGPULayersPer := make([]int, numGPUs)
@@ -1080,6 +1037,42 @@ func orderGPUsByBandwidth(gpus []detect.GPU) []int {
 		return gi.Index < gj.Index
 	})
 	return indices
+}
+
+// kvReserveByBandwidth distributes total KV cache across GPUs weighted by
+// free VRAM * PCIe bandwidth. Faster GPUs get more KV cache (matches bash).
+func kvReserveByBandwidth(kvTotalMB int, gpus []detect.GPU, order []int, kvPerLayerMB int) []int {
+	reserve := make([]int, len(gpus))
+	var totalWeighted int64
+	for _, g := range gpus {
+		bw := g.BandwidthMBps
+		if bw <= 0 { bw = 1 }
+		totalWeighted += int64(g.VRAMFreeMB()) * int64(bw)
+	}
+	if kvTotalMB <= 0 || totalWeighted <= 0 {
+		return reserve
+	}
+	useOrder := order
+	if len(useOrder) == 0 {
+		useOrder = seqRange(len(gpus))
+	}
+	for _, gi := range useOrder {
+		bw := gpus[gi].BandwidthMBps
+		if bw <= 0 { bw = 1 }
+		w := int64(gpus[gi].VRAMFreeMB()) * int64(bw)
+		share := int((int64(kvTotalMB)*w + totalWeighted - 1) / totalWeighted)
+		if kvPerLayerMB > 0 {
+			share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
+		}
+		reserve[gi] = share
+	}
+	return reserve
+}
+
+func seqRange(n int) []int {
+	r := make([]int, n)
+	for i := range r { r[i] = i }
+	return r
 }
 
 func orderGPUsByFreeVRAM(gpus []detect.GPU) []int {
