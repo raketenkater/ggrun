@@ -28,6 +28,12 @@ type Config struct {
 	// big MoE models (e.g. MiniMax M2.7 @ 94 GB) routinely take 2-3 min.
 	// Zero falls back to the daemon default (300s).
 	StartupTimeoutSecs int `json:"startup_timeout_secs,omitempty"`
+
+	// ComputeArgs, if set, rebuilds the full llama-server argv from a model
+	// path. /reload calls it when handed a model_path with no explicit
+	// server_args, so swaps get the same auto-placement as the initial
+	// launch. Not serialized — injected by the daemon's owner.
+	ComputeArgs func(modelPath string, port int) ([]string, error) `json:"-"`
 }
 
 // startupTimeout returns the configured wait or the daemon default.
@@ -111,14 +117,23 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	if newCfg.ModelPath != "" {
 		d.config.ModelPath = newCfg.ModelPath
 	}
-	if len(newCfg.ServerArgs) > 0 {
-		d.config.ServerArgs = newCfg.ServerArgs
-	}
 	if newCfg.Port > 0 {
 		d.config.Port = newCfg.Port
 	}
 	if newCfg.StartupTimeoutSecs > 0 {
 		d.config.StartupTimeoutSecs = newCfg.StartupTimeoutSecs
+	}
+	if len(newCfg.ServerArgs) > 0 {
+		// Caller supplied explicit args — trust them verbatim.
+		d.config.ServerArgs = newCfg.ServerArgs
+	} else if newCfg.ModelPath != "" && d.config.ComputeArgs != nil {
+		// Bare model swap — let llm-server compute placement for it.
+		args, err := d.config.ComputeArgs(d.config.ModelPath, d.config.Port)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"compute placement: %s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		d.config.ServerArgs = args
 	}
 
 	// Restart if running
