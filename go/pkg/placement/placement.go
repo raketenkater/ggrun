@@ -1297,8 +1297,9 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 		}
 	}
 
-	// Total hardware = best GPU VRAM + free RAM (matches bash)
-	totalHWMB := bestVRAM + caps.RAM.FreeMB
+	// Total hardware for single GPU: best GPU VRAM + up to 4GB RAM (not entire system)
+	// Single GPU context shouldn't use entire system RAM — the model must fit on ONE GPU.
+	totalHWMB := bestVRAM + 4096
 
 	// Fixed overhead: model weights + 8GB headroom (bash: TOTAL_SIZE_MB + 8192)
 	fixedOverheadMB := totalSizeMB + 8192
