@@ -163,10 +163,6 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// KV cache type selection — try compact types first for large models
 	s.KVType = kvTypeFromQuality(s.KVQuality)
 
-	// Speculative decoding: detect matching draft model or fall back to ngram.
-	// Must run early — before strategy dispatch — so all paths (dense, MoE, CPU) get it.
-	s.Draft = ComputeDraft(model, caps, opts)
-
 	// Auto-fit context: prefer single GPU (faster), only go multi-GPU if model doesn't fit
 	if opts.ContextSize <= 0 {
 		// Try single-GPU first: compute context using only the best GPU's VRAM

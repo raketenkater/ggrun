@@ -523,6 +523,31 @@ func cmdBenchmark(args []string) {
 	fmt.Println(string(data))
 }
 
+// computeServerArgs runs hardware detection + placement for a model and
+// returns the full llama-server argv (backend path first). This is the
+// single source of truth for "how should this model be launched on this
+// box" — used for both the daemon's initial model and any /reload swap.
+func computeServerArgs(modelPath string, port int) ([]string, error) {
+	caps, err := detect.Detect()
+	if err != nil {
+		return nil, fmt.Errorf("detect hardware: %w", err)
+	}
+	model, err := parseModel(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("parse model: %w", err)
+	}
+	strategy, err := placement.Compute(caps, model, placement.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("compute placement: %w", err)
+	}
+	be := findBackend(caps)
+	if be == nil {
+		return nil, fmt.Errorf("no llama-server binary found")
+	}
+	strategy.BackendTag = be.Tag
+	return append([]string{be.Path}, strategy.Args(modelPath, port)...), nil
+}
+
 func cmdDaemon(args []string) {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	modelPath := fs.String("model", "", "Model path")
@@ -536,32 +561,11 @@ func cmdDaemon(args []string) {
 		os.Exit(2)
 	}
 
-	caps, err := detect.Detect()
+	serverArgs, err := computeServerArgs(*modelPath, *port)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	model, err := parseModel(*modelPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
-		os.Exit(1)
-	}
-
-	strategy, err := placement.Compute(caps, model, placement.Options{})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
-		os.Exit(1)
-	}
-
-	be := findBackend(caps)
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
-		os.Exit(1)
-	}
-	strategy.BackendTag = be.Tag
-
-	serverArgs := append([]string{be.Path}, strategy.Args(*modelPath, *port)...)
 
 	d := daemon.New(daemon.Config{
 		ModelPath:          *modelPath,
@@ -569,6 +573,9 @@ func cmdDaemon(args []string) {
 		Port:               *port,
 		ControlPort:        *controlPort,
 		StartupTimeoutSecs: *startupTimeoutSecs,
+		// Let /reload recompute placement when handed a bare model path,
+		// so model swaps get the same auto-placement as the initial launch.
+		ComputeArgs: computeServerArgs,
 	})
 	if err := d.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

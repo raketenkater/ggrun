@@ -328,7 +328,7 @@ func DraftFlags(cfg *DraftConfig) []string {
 // DraftSummary returns a human-readable summary of the draft strategy.
 func DraftSummary(cfg *DraftConfig) string {
 	if cfg == nil || cfg.Type == DraftNone {
-		return "speculative decoding: off (no compatible draft model, no GPU available)"
+		return ""
 	}
 	switch cfg.Type {
 	case DraftModel:
