@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/raketenkater/llm-server/pkg/benchmark"
@@ -226,8 +228,14 @@ func cmdLaunch(args []string) {
 
 	fmt.Println("[launch] Press Ctrl+C to stop")
 
-	// Block until interrupted
-	select {}
+	// Wait for shutdown signal, then clean up the child process group.
+	// Without this, Ctrl+C kills only the Go binary — llama-server
+	// becomes an orphan, leaking VRAM and leaving zombie processes.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
+	p.Stop()
 }
 
 func cmdGUI() {
@@ -334,6 +342,15 @@ func cmdGUI() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Cancel context on SIGINT/SIGTERM so the launcher cleans up the child
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
+		cancel()
+	}()
 
 	if err := launcher.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

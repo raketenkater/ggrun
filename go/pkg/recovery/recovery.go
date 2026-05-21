@@ -162,6 +162,17 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		return err
 	}
 
+	// Ensure the full process group is killed on any exit path
+	// (context cancellation, health timeout, crash, etc.).
+	defer func() {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			time.Sleep(500 * time.Millisecond)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			cmd.Wait()
+		}
+	}()
+
 	// Wait for health check or process death
 	port := l.extractPort()
 	healthURL := fmt.Sprintf("http://127.0.0.1:%s/health", port)
