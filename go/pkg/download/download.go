@@ -32,16 +32,34 @@ func findScript() string {
 		filepath.Join("..", "download_any_gguf.py"),
 		filepath.Join("..", "..", "download_any_gguf.py"),
 	}
-	// Try relative to binary
+	// Check LLM_SERVER_HOME env var (repo root)
+	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
+		candidates = append(candidates, filepath.Join(home, "download_any_gguf.py"))
+	}
+	// Try relative to binary (installed alongside llm-server)
 	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
-			filepath.Join(filepath.Dir(exe), "..", "..", "download_any_gguf.py"),
-			filepath.Join(filepath.Dir(exe), "download_any_gguf.py"),
+			filepath.Join(exeDir, "download_any_gguf.py"),
+			filepath.Join(exeDir, "..", "download_any_gguf.py"),
+			filepath.Join(exeDir, "..", "..", "download_any_gguf.py"),
+			filepath.Join(exeDir, "..", "..", "..", "download_any_gguf.py"),
 		)
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c
+		}
+	}
+	// Fallback: try common install locations
+	for _, dir := range []string{
+		"/home/mik/llm-server",
+		os.ExpandEnv("$HOME/llm-server"),
+		"/opt/llm-server",
+	} {
+		p := filepath.Join(dir, "download_any_gguf.py")
+		if _, err := os.Stat(p); err == nil {
+			return p
 		}
 	}
 	return "download_any_gguf.py"
