@@ -174,45 +174,56 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// KV cache type selection — try compact types first for large models
 	s.KVType = kvTypeFromQuality(s.KVQuality)
 
-	// Auto-fit context: prefer single GPU (faster), only go multi-GPU if model doesn't fit
+	// Auto-fit context: compute both single-GPU and multi-GPU, pick the larger.
+	// Single GPU is faster but may give less context. Multi-GPU gives more context
+	// at the cost of extra GPU communication overhead.
 	if opts.ContextSize <= 0 {
-		// Try single-GPU first: compute context using only the best GPU's VRAM
-		singleCtx, singleKVType := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
-		singleKVTotal := computeKVTotalMB(model, singleCtx, singleKVType)
-
-		// Check if model actually fits on single GPU at this context
-		// Use VRAMFreeMB (not total) — desktop/compositor uses some VRAM
-		bestFreeVRAM := 0
-		for _, g := range caps.GPUs {
-			if g.VRAMFreeMB() > bestFreeVRAM {
-				bestFreeVRAM = g.VRAMFreeMB()
-			}
-		}
-
-		// Load overhead for single-GPU check (measured, not guessed)
+		// Load overhead constants (measured, not guessed)
 		sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
 		cudaOverheadMB := 600
 		if sysProbe != nil {
 			cudaOverheadMB = sysProbe.CUDAOverheadMB
 		}
 		computeBufMB := computeFloorMB
-		pc := loadProbeCache(opts.CacheDir, model, singleCtx, 512, singleKVType)
-		if pc != nil {
-			computeBufMB = pc.ComputeBufMB
+
+		// --- Single GPU estimate ---
+		bestFreeVRAM := 0
+		for _, g := range caps.GPUs {
+			if g.VRAMFreeMB() > bestFreeVRAM {
+				bestFreeVRAM = g.VRAMFreeMB()
+			}
 		}
+		singleCtx, singleKVType := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
+		singleKVTotal := computeKVTotalMB(model, singleCtx, singleKVType)
+		singleNeeded := totalSizeMB + cudaOverheadMB + computeBufMB + singleKVTotal
+		singleUsable := bestFreeVRAM - 1024
+		singleFits := singleNeeded <= singleUsable && singleCtx >= 32768
 
-		singleGPUNeeded := totalSizeMB + cudaOverheadMB + computeBufMB + singleKVTotal
-		singleGPUUsable := bestFreeVRAM - 1024
+		// --- Multi-GPU estimate ---
+		multiCtx, multiKVType := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
+		multiKVTotal := computeKVTotalMB(model, multiCtx, multiKVType)
+		multiNeeded := totalSizeMB + (cudaOverheadMB+computeBufMB)*len(caps.GPUs) + multiKVTotal
+		multiFree := 0
+		for _, g := range caps.GPUs { multiFree += g.VRAMFreeMB() }
+		multiFits := multiNeeded <= multiFree && multiCtx >= 32768
 
-		if singleGPUNeeded <= singleGPUUsable && singleCtx >= 32768 {
-			// Model fits on single GPU — use it (faster, simpler)
-			s.ContextSize = singleCtx
-			s.KVType = singleKVType
-		} else {
-			// Doesn't fit on single GPU — try multi-GPU
-			multiCtx, multiKVType := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
+		// Pick best: prefer multi-GPU if it gives more context and fits,
+		// fall back to single GPU otherwise.
+		// Pick best: prefer multi-GPU if it gives more context and fits,
+		// fall back to single GPU otherwise.
+		if multiFits && multiCtx > singleCtx {
 			s.ContextSize = multiCtx
 			s.KVType = multiKVType
+		} else if singleFits {
+			s.ContextSize = singleCtx
+			s.KVType = singleKVType
+		} else if multiFits {
+			s.ContextSize = multiCtx
+			s.KVType = multiKVType
+		} else {
+			// Neither fits — use smallest safe value
+			s.ContextSize = 32768
+			s.KVType = "q4_0"
 		}
 	}
 
@@ -268,6 +279,20 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// Strategy selection (matches bash choose_strategy() exactly)
 	strategy := chooseStrategy(caps, model, totalSizeMB, kvTotalMB, opts)
 	s.Type = strategy
+
+	// Sanity check: if single GPU was chosen but the auto-fit context
+	// requires more VRAM than a single GPU has, force multi-GPU.
+	if strategy == SingleGPU && len(caps.GPUs) > 1 {
+		bestFree := 0
+		for _, g := range caps.GPUs {
+			if g.VRAMFreeMB() > bestFree { bestFree = g.VRAMFreeMB() }
+		}
+		singleNeeded := totalSizeMB*110/100 + kvTotalMB + computeFloorMB + 1024
+		if singleNeeded > bestFree {
+			strategy = MultiGPUDense
+			s.Type = MultiGPUDense
+		}
+	}
 
 	var err error
 	switch strategy {
@@ -385,6 +410,13 @@ func buildSingleGPU(s *Strategy, caps *detect.Capabilities, model *ModelProfile,
 		mainIdx = gpuOrder[0]
 	}
 	s.MainGPU = caps.GPUs[mainIdx].Index
+
+	// Lock tensor-split to single GPU so llama-server doesn't spread layers
+	if len(caps.GPUs) > 1 {
+		split := make([]float64, len(caps.GPUs))
+		split[mainIdx] = 1.0
+		s.TensorSplit = split
+	}
 	return s, nil
 }
 
