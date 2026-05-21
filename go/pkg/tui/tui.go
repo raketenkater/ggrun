@@ -704,7 +704,7 @@ func (m Model) viewPrelaunch() string {
 	}
 	b.WriteString(fmt.Sprintf("  Parallel:       %s\n", func() string {
 		if m.parallel == "" {
-			return "4 (default)"
+			return "1 (default)"
 		}
 		return m.parallel
 	}()))
