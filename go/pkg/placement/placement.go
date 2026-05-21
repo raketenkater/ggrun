@@ -1461,6 +1461,8 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 	if s.Parallel > 0 {
 		args = append(args, "--parallel", fmt.Sprintf("%d", s.Parallel))
+	} else {
+		args = append(args, "--parallel", "1")
 	}
 
 	// GPU offloading: ALWAYS -ngl 999
