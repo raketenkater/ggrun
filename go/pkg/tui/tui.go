@@ -1074,7 +1074,8 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		return nil
 	}
 	model := m.models[m.selectedModel]
-	ctx := 32768
+	// Default: 0 = auto-fit (Compute() finds max context that fits hardware)
+	ctx := 0
 	if m.recommendation != nil && m.recommendation.ContextSize > 0 {
 		ctx = m.recommendation.ContextSize
 	}
@@ -1084,6 +1085,8 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		if n, err := strconv.Atoi(m.ctxSize); err == nil {
 			ctx = n
 		}
+	} else if m.ctxMode == "fit" {
+		ctx = 0 // auto-fit
 	}
 	gpuLayers := 999
 	if m.recommendation != nil {
