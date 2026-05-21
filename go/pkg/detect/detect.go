@@ -86,7 +86,7 @@ func detectNVIDIA() []GPU {
 	}
 	// Query PCIe bandwidth separately
 	pcieOut, _ := exec.Command("nvidia-smi",
-		"--query-gpu=pci.link_gen.current,pci.link_width.current",
+		"--query-gpu=pcie.link.gen.gpucurrent,pcie.link.width.current",
 		"--format=csv,noheader,nounits").Output()
 	pcieLines := strings.Split(strings.TrimSpace(string(pcieOut)), "\n")
 
@@ -126,6 +126,10 @@ func detectNVIDIA() []GPU {
 				gpu.PCIGen = gen
 				gpu.PCILanes = lanes
 				gpu.BandwidthMBps = pcieBandwidth(gen, lanes)
+			// Fallback: if nvidia-smi returned 0 (GPU under load), try sysfs
+			if gpu.BandwidthMBps <= 0 && gpu.PCIBusID != "" {
+				gpu.BandwidthMBps = pcieBandwidthFromSysfs(gpu.PCIBusID)
+			}
 			}
 		}
 		gpus = append(gpus, gpu)
@@ -170,6 +174,44 @@ func pcieBandwidth(gen, lanes int) int {
 		bw = 985 // default to gen3
 	}
 	return bw * lanes
+}
+
+// pcieBandwidthFromSysfs tries to read max PCIe link from sysfs.
+// Used as fallback when nvidia-smi returns 0 (GPU under load).
+func pcieBandwidthFromSysfs(busID string) int {
+	if busID == "" {
+		return 0
+	}
+	// busID is like "00000000:01:00.0"
+	// sysfs path: /sys/bus/pci/devices/0000:01:00.0/
+	dev := strings.TrimPrefix(busID, "0000")
+	if dev == busID {
+		dev = busID
+	}
+	sysPath := "/sys/bus/pci/devices/0000" + dev
+
+	// Read max link speed (1=2.5GT/s, 2=5GT/s, 3=8GT/s, 4=16GT/s)
+	speedBytes, err := os.ReadFile(sysPath + "/max_link_speed")
+	if err != nil {
+		return 0
+	}
+	speedStr := strings.TrimSpace(string(speedBytes))
+	// Format: "8.0 GT/s PCIe" or just "8"
+	speedStr = strings.TrimSuffix(speedStr, " GT/s")
+	speedStr = strings.TrimSuffix(speedStr, " GT/s PCIe")
+	speedStr = strings.TrimSpace(speedStr)
+	speed, _ := strconv.ParseFloat(speedStr, 64)
+	gen := int(speed / 2.5) // 2.5GT/s = Gen1, 5=Gen2, 8=Gen3, 16=Gen4
+
+	// Read max link width
+	widthBytes, err := os.ReadFile(sysPath + "/max_link_width")
+	if err != nil {
+		return 0
+	}
+	widthStr := strings.TrimSpace(string(widthBytes))
+	lanes, _ := strconv.Atoi(widthStr)
+
+	return pcieBandwidth(gen, lanes)
 }
 
 func detectROCm() []GPU {
