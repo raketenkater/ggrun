@@ -175,55 +175,35 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	s.KVType = kvTypeFromQuality(s.KVQuality)
 
 	// Auto-fit context: compute both single-GPU and multi-GPU, pick the larger.
-	// Single GPU is faster but may give less context. Multi-GPU gives more context
-	// at the cost of extra GPU communication overhead.
 	if opts.ContextSize <= 0 {
-		// Load overhead constants (measured, not guessed)
 		sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
-		cudaOverheadMB := 600
-		if sysProbe != nil {
-			cudaOverheadMB = sysProbe.CUDAOverheadMB
-		}
-		computeBufMB := computeFloorMB
+		cudaOH := 600
+		if sysProbe != nil { cudaOH = sysProbe.CUDAOverheadMB }
+		cbuf := computeFloorMB
 
-		// --- Single GPU estimate ---
-		bestFreeVRAM := 0
-		for _, g := range caps.GPUs {
-			if g.VRAMFreeMB() > bestFreeVRAM {
-				bestFreeVRAM = g.VRAMFreeMB()
-			}
-		}
-		singleCtx, singleKVType := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
-		singleKVTotal := computeKVTotalMB(model, singleCtx, singleKVType)
-		singleNeeded := totalSizeMB + cudaOverheadMB + computeBufMB + singleKVTotal
-		singleUsable := bestFreeVRAM - 1024
-		singleFits := singleNeeded <= singleUsable && singleCtx >= 32768
+		bestFree := 0
+		for _, g := range caps.GPUs { if g.VRAMFreeMB() > bestFree { bestFree = g.VRAMFreeMB() } }
 
-		// --- Multi-GPU estimate ---
-		multiCtx, multiKVType := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
-		multiKVTotal := computeKVTotalMB(model, multiCtx, multiKVType)
-		multiNeeded := totalSizeMB + (cudaOverheadMB+computeBufMB)*len(caps.GPUs) + multiKVTotal
+		// Single-GPU estimate
+		singleCtx, singleKV := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
+		singleKVM := computeKVTotalMB(model, singleCtx, singleKV)
+		singleFits := (totalSizeMB+cudaOH+cbuf+singleKVM) <= (bestFree-1024) && singleCtx >= 32768
+
+		// Multi-GPU estimate
+		multiCtx, multiKV := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
+		multiKVM := computeKVTotalMB(model, multiCtx, multiKV)
 		multiFree := 0
 		for _, g := range caps.GPUs { multiFree += g.VRAMFreeMB() }
-		multiFits := multiNeeded <= multiFree && multiCtx >= 32768
+		multiFits := (totalSizeMB+(cudaOH+cbuf)*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
 
-		// Pick best: prefer multi-GPU if it gives more context and fits,
-		// fall back to single GPU otherwise.
-		// Pick best: prefer multi-GPU if it gives more context and fits,
-		// fall back to single GPU otherwise.
 		if multiFits && multiCtx > singleCtx {
-			s.ContextSize = multiCtx
-			s.KVType = multiKVType
+			s.ContextSize, s.KVType = multiCtx, multiKV
 		} else if singleFits {
-			s.ContextSize = singleCtx
-			s.KVType = singleKVType
+			s.ContextSize, s.KVType = singleCtx, singleKV
 		} else if multiFits {
-			s.ContextSize = multiCtx
-			s.KVType = multiKVType
+			s.ContextSize, s.KVType = multiCtx, multiKV
 		} else {
-			// Neither fits — use smallest safe value
-			s.ContextSize = 32768
-			s.KVType = "q4_0"
+			s.ContextSize, s.KVType = 32768, "q4_0"
 		}
 	}
 
@@ -279,20 +259,6 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// Strategy selection (matches bash choose_strategy() exactly)
 	strategy := chooseStrategy(caps, model, totalSizeMB, kvTotalMB, opts)
 	s.Type = strategy
-
-	// Sanity check: if single GPU was chosen but the auto-fit context
-	// requires more VRAM than a single GPU has, force multi-GPU.
-	if strategy == SingleGPU && len(caps.GPUs) > 1 {
-		bestFree := 0
-		for _, g := range caps.GPUs {
-			if g.VRAMFreeMB() > bestFree { bestFree = g.VRAMFreeMB() }
-		}
-		singleNeeded := totalSizeMB*110/100 + kvTotalMB + computeFloorMB + 1024
-		if singleNeeded > bestFree {
-			strategy = MultiGPUDense
-			s.Type = MultiGPUDense
-		}
-	}
 
 	var err error
 	switch strategy {
@@ -410,13 +376,6 @@ func buildSingleGPU(s *Strategy, caps *detect.Capabilities, model *ModelProfile,
 		mainIdx = gpuOrder[0]
 	}
 	s.MainGPU = caps.GPUs[mainIdx].Index
-
-	// Lock tensor-split to single GPU so llama-server doesn't spread layers
-	if len(caps.GPUs) > 1 {
-		split := make([]float64, len(caps.GPUs))
-		split[mainIdx] = 1.0
-		s.TensorSplit = split
-	}
 	return s, nil
 }
 
@@ -451,44 +410,26 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 		kvPerLayerMB = 1
 	}
 
-	// KV-first GPU reserve: weighted by free VRAM * PCIe bandwidth
+	// KV-first GPU reserve: VRAM-proportional (KV reads are VRAM-local)
 	gpuKVReserveMB := kvReserveByBandwidth(kvTotalMB, caps.GPUs, seqRange(numGPUs), kvPerLayerMB)
 
-	// Calculate effective free VRAM per GPU for model weights
-	// effectiveFree = freeVRAM - cudaOverhead - computeBuf - kvReserve
-	// Tensor-split proportional to effectiveFree * bandwidth (matches bash VRAM_FREE * BANDWIDTH)
-	split := make([]float64, numGPUs)
+	// Tensor-split: proportional to effective free VRAM only (no PCIe weighting).
+	// llama-server uses tensor-split for BOTH model weights AND KV cache.
+	// Bandwidth weighting would put too much on the fast GPU, causing KV OOM.
+	// Instead: sort GPUs by bandwidth (fastest first), split by available space.
 	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
-	totalWeighted := 0.0
-	for idx := 0; idx < numGPUs; idx++ {
-		gi := gpuOrder[idx]
+	split := make([]float64, numGPUs)
+	totalEffective := 0.0
+	for _, gi := range gpuOrder {
 		g := caps.GPUs[gi]
 		overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
-		effective := g.VRAMFreeMB() - overhead
-		if effective < 0 {
-			effective = 0
-		}
-		bw := float64(g.BandwidthMBps)
-		if bw <= 0 {
-			bw = 1.0 // fallback for unknown bandwidth
-		}
-		totalWeighted += float64(effective) * bw
+		effective := float64(g.VRAMFreeMB() - overhead)
+		if effective < 0 { effective = 0 }
+		split[gi] = effective
+		totalEffective += effective
 	}
-	for idx := 0; idx < numGPUs; idx++ {
-		gi := gpuOrder[idx]
-		g := caps.GPUs[gi]
-		overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
-		effective := g.VRAMFreeMB() - overhead
-		if effective < 0 {
-			effective = 0
-		}
-		bw := float64(g.BandwidthMBps)
-		if bw <= 0 {
-			bw = 1.0
-		}
-		if totalWeighted > 0 {
-			split[gi] = float64(effective) * bw / totalWeighted
-		}
+	if totalEffective > 0 {
+		for i := range split { split[i] /= totalEffective }
 	}
 	s.TensorSplit = normalizeSplit(split)
 
@@ -1082,31 +1023,18 @@ func orderGPUsByBandwidth(gpus []detect.GPU) []int {
 	return indices
 }
 
-// kvReserveByBandwidth distributes total KV cache across GPUs weighted by
-// free VRAM * PCIe bandwidth. Faster GPUs get more KV cache (matches bash).
+// kvReserveByBandwidth distributes KV cache proportionally to free VRAM.
+// KV reads are VRAM-local — PCIe bandwidth does not affect KV access speed.
 func kvReserveByBandwidth(kvTotalMB int, gpus []detect.GPU, order []int, kvPerLayerMB int) []int {
 	reserve := make([]int, len(gpus))
-	var totalWeighted int64
-	for _, g := range gpus {
-		bw := g.BandwidthMBps
-		if bw <= 0 { bw = 1 }
-		totalWeighted += int64(g.VRAMFreeMB()) * int64(bw)
-	}
-	if kvTotalMB <= 0 || totalWeighted <= 0 {
-		return reserve
-	}
+	totalFree := 0
+	for _, g := range gpus { totalFree += g.VRAMFreeMB() }
+	if kvTotalMB <= 0 || totalFree <= 0 { return reserve }
 	useOrder := order
-	if len(useOrder) == 0 {
-		useOrder = seqRange(len(gpus))
-	}
+	if len(useOrder) == 0 { useOrder = seqRange(len(gpus)) }
 	for _, gi := range useOrder {
-		bw := gpus[gi].BandwidthMBps
-		if bw <= 0 { bw = 1 }
-		w := int64(gpus[gi].VRAMFreeMB()) * int64(bw)
-		share := int((int64(kvTotalMB)*w + totalWeighted - 1) / totalWeighted)
-		if kvPerLayerMB > 0 {
-			share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
-		}
+		share := (kvTotalMB*gpus[gi].VRAMFreeMB() + totalFree - 1) / totalFree
+		if kvPerLayerMB > 0 { share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB }
 		reserve[gi] = share
 	}
 	return reserve
