@@ -122,6 +122,7 @@ func cmdLaunch(args []string) {
 	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
 	gpusFlag := fs.String("gpus", "", "Comma-separated GPU indices")
 	hostFlag := fs.String("host", "", "Listen address (default from config or 0.0.0.0)")
+	visionAuto := fs.Bool("vision", false, "Enable vision (auto-detect/download mmproj)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -170,6 +171,7 @@ func cmdLaunch(args []string) {
 		CacheDir:    cfg.CacheDir,
 		Host:        host,
 		BackendTag:  be.Tag,
+		VisionAuto:  *visionAuto,
 	}
 	if *gpusFlag != "" {
 		for _, s := range strings.Split(*gpusFlag, ",") {
@@ -292,6 +294,7 @@ func cmdGUI() {
 		Parallel:    req.Parallel,
 		CacheDir:    cfg.CacheDir,
 		Host:        cfg.Host,
+		VisionAuto:  req.Vision,
 	}
 	if req.TuneCache != "" {
 		opts.CacheFile = req.TuneCache
@@ -380,6 +383,7 @@ func cmdDryRun(args []string) {
 	kvPlacement := fs.String("kv", "auto", "KV placement")
 	kvQuality := fs.String("kv-quality", "mid", "KV quality")
 	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
+	visionAuto := fs.Bool("vision", false, "Enable vision (auto-detect/download mmproj)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -422,6 +426,7 @@ func cmdDryRun(args []string) {
 		CacheDir:    cfg.CacheDir,
 		Host:        cfg.Host,
 		BackendTag:  backendTag,
+		VisionAuto:  *visionAuto,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
@@ -568,13 +573,27 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse model: %w", err)
 	}
-	strategy, err := placement.Compute(caps, model, placement.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("compute placement: %w", err)
-	}
+	// Find the backend FIRST so its tag feeds placement — otherwise the
+	// split-mode/flag selection can't tell ik_llama from mainline and emits
+	// flags the backend rejects (e.g. `--split-mode row`, unsupported by ik).
 	be := findBackend(caps)
 	if be == nil {
 		return nil, fmt.Errorf("no llama-server binary found")
+	}
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+	opts := placement.Options{
+		KVPlacement: "auto",
+		KVQuality:   "mid",
+		CacheDir:    cfg.CacheDir,
+		Host:        cfg.Host,
+		BackendTag:  be.Tag,
+	}
+	strategy, err := placement.Compute(caps, model, opts)
+	if err != nil {
+		return nil, fmt.Errorf("compute placement: %w", err)
 	}
 	strategy.BackendTag = be.Tag
 	return append([]string{be.Path}, strategy.Args(modelPath, port)...), nil

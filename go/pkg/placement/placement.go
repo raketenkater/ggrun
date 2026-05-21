@@ -66,6 +66,7 @@ type Strategy struct {
 	Host           string       `json:"host,omitempty"`        // listen address
 	HasSSM         bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
 	Draft          *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
+	MMProjPath     string       `json:"mmproj_path,omitempty"`  // vision projector GGUF
 }
 
 // ModelProfile describes the GGUF model.
@@ -120,6 +121,7 @@ type Options struct {
 	CacheFile   string // path to placement cache for MoE recovery
 	CacheDir    string // path to llm-server cache dir (for probes)
 	Host        string // listen address (default 0.0.0.0)
+	VisionAuto bool   // auto-detect mmproj for vision
 }
 
 // Compute builds a Strategy from hardware capabilities and model profile.
@@ -152,6 +154,15 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	}
 	if opts.Parallel > 0 {
 		s.Parallel = opts.Parallel
+	}
+
+	// Vision: auto-detect mmproj if --vision flag is set
+	if opts.VisionAuto && model.Path != "" {
+		if path, err := findOrDownloadMMProj(model.Path, opts.CacheDir); err == nil {
+			s.MMProjPath = path
+		} else {
+			fmt.Fprintf(os.Stderr, "[vision] %v\n", err)
+		}
 	}
 
 	// Total size MB
@@ -1463,6 +1474,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--parallel", fmt.Sprintf("%d", s.Parallel))
 	} else {
 		args = append(args, "--parallel", "1")
+	}
+
+	// Vision support: auto-detected mmproj
+	if s.MMProjPath != "" {
+		args = append(args, "--mmproj", s.MMProjPath)
 	}
 
 	// GPU offloading: ALWAYS -ngl 999
