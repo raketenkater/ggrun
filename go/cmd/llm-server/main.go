@@ -235,7 +235,22 @@ func cmdLaunch(args []string) {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
-	p.Stop()
+
+	// Stop with a hard deadline — second Ctrl+C will force-exit.
+	done := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-sigCh:
+		fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
+		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGKILL)
+	case <-time.After(30 * time.Second):
+		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
+		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGKILL)
+	}
 }
 
 func cmdGUI() {

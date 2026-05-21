@@ -113,12 +113,19 @@ func (p *Process) waitReady(timeout time.Duration) error {
 func (p *Process) Stop() error {
 	p.cancel()
 	if p.Cmd.Process != nil {
-		// Try graceful kill of process group
 		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGTERM)
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
 		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGKILL)
 	}
-	return p.Cmd.Wait()
+	// Wait with timeout — don't block forever if process hangs during cleanup.
+	done := make(chan error, 1)
+	go func() { done <- p.Cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("process did not exit within 15s")
+	}
 }
 
 // IsRunning returns true if the process is still alive.
