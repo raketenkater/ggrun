@@ -559,7 +559,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 		s.TensorSplit = normalizeSplit(split)
 
 		if opts.BackendTag == "ik_llama" {
-			s.SplitMode = "graph"
+			s.SplitMode = "layer"
 		} else {
 			s.SplitMode = "row"
 		}
