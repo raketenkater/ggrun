@@ -352,7 +352,7 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p", "P":
 			m.inputMode = "parallel"
 			m.input.SetValue(m.parallel)
-			m.input.Placeholder = "Parallel slots (default 1)"
+			m.input.Placeholder = "Parallel slots (blank = let placement decide)"
 			m.input.Focus()
 		case "k", "K":
 			if m.kvPlacement == "auto" {
@@ -1092,7 +1092,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 	if m.recommendation != nil {
 		gpuLayers = m.recommendation.GPULayers
 	}
-	parallel := 1
+	parallel := 0
 	if m.parallel != "" {
 		if n, err := strconv.Atoi(m.parallel); err == nil {
 			parallel = n
