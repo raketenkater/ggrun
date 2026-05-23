@@ -1092,7 +1092,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 	if m.recommendation != nil {
 		gpuLayers = m.recommendation.GPULayers
 	}
-	parallel := 0
+	parallel := 1
 	if m.parallel != "" {
 		if n, err := strconv.Atoi(m.parallel); err == nil {
 			parallel = n
