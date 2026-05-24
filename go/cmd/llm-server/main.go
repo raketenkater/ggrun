@@ -116,7 +116,7 @@ func cmdDetect() {
 func cmdLaunch(args []string) {
 	fs := flag.NewFlagSet("launch", flag.ExitOnError)
 	port := fs.Int("port", 8081, "Server port")
-	ctxSize := fs.Int("ctx", 0, "Context size")
+	ctxFlag := fs.String("ctx", "", "Context size: fit, max, or number")
 	kvPlacement := fs.String("kv", "auto", "KV placement")
 	kvQuality := fs.String("kv-quality", "mid", "KV quality")
 	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
@@ -164,7 +164,7 @@ func cmdLaunch(args []string) {
 	}
 
 	opts := placement.Options{
-		ContextSize: *ctxSize,
+		ContextSize: resolveCtxFlag(*ctxFlag, model.CTXTrain),
 		KVPlacement: *kvPlacement,
 		KVQuality:   *kvQuality,
 		CPUMode:     *cpuMode,
@@ -379,7 +379,7 @@ func cmdGUI() {
 func cmdDryRun(args []string) {
 	fs := flag.NewFlagSet("dry-run", flag.ExitOnError)
 	port := fs.Int("port", 8081, "Server port")
-	ctxSize := fs.Int("ctx", 0, "Context size")
+	ctxFlag := fs.String("ctx", "", "Context size: fit, max, or number")
 	kvPlacement := fs.String("kv", "auto", "KV placement")
 	kvQuality := fs.String("kv-quality", "mid", "KV quality")
 	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
@@ -419,7 +419,7 @@ func cmdDryRun(args []string) {
 	}
 
 	strategy, err := placement.Compute(caps, model, placement.Options{
-		ContextSize: *ctxSize,
+		ContextSize: resolveCtxFlag(*ctxFlag, model.CTXTrain),
 		KVPlacement: *kvPlacement,
 		KVQuality:   *kvQuality,
 		CPUMode:     *cpuMode,
@@ -821,6 +821,18 @@ type backendInfo struct {
 	IsIK    bool
 	SupportsReasoning bool
 	Tag     string
+}
+
+// resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
+func resolveCtxFlag(s string, nativeCtx int) int {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "fit" || s == "auto" { return 0 }
+	if s == "max" || s == "native" {
+		if nativeCtx > 0 { return nativeCtx }
+		return 65536
+	}
+	if n, err := strconv.Atoi(s); err == nil && n > 0 { return n }
+	return 0
 }
 
 func findBackend(caps *detect.Capabilities) *backendInfo {

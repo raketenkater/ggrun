@@ -6,11 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/raketenkater/llm-server/pkg/gguf"
 )
 
 // findOrDownloadMMProj finds a vision projector locally, or downloads from HuggingFace.
-// Tries standard mmproj filename patterns in the model directory, then falls back
-// to download_any_gguf.py for automated HF download.
+// Validates GGUF metadata for compatibility with the text model.
 func findOrDownloadMMProj(modelPath, cacheDir string) (string, error) {
 	modelDir := filepath.Dir(modelPath)
 
@@ -24,6 +25,10 @@ func findOrDownloadMMProj(modelPath, cacheDir string) (string, error) {
 
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
+			if err := validateMMProj(c); err != nil {
+				fmt.Fprintf(os.Stderr, "[vision] rejecting %s: %v\n", filepath.Base(c), err)
+				continue
+			}
 			return c, nil
 		}
 	}
@@ -35,7 +40,12 @@ func findOrDownloadMMProj(modelPath, cacheDir string) (string, error) {
 			name := strings.ToLower(e.Name())
 			if !e.IsDir() && strings.HasSuffix(name, ".gguf") &&
 				(strings.Contains(name, "mmproj") || strings.Contains(name, "projector")) {
-				return filepath.Join(modelDir, e.Name()), nil
+				c := filepath.Join(modelDir, e.Name())
+				if err := validateMMProj(c); err != nil {
+					fmt.Fprintf(os.Stderr, "[vision] rejecting %s: %v\n", e.Name(), err)
+					continue
+				}
+				return c, nil
 			}
 		}
 	}
@@ -54,7 +64,6 @@ func findOrDownloadMMProj(modelPath, cacheDir string) (string, error) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err == nil {
-			// Re-check after download
 			for _, c := range candidates {
 				if _, err := os.Stat(c); err == nil {
 					return c, nil
@@ -64,6 +73,25 @@ func findOrDownloadMMProj(modelPath, cacheDir string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no mmproj found — place mmproj-F16.gguf in %s or use --mmproj <path>", modelDir)
+}
+
+// validateMMProj checks that an mmproj GGUF file is valid (not corrupt, has expected metadata).
+func validateMMProj(path string) error {
+	info, err := gguf.Parse(path)
+	if err != nil {
+		return fmt.Errorf("parse failed: %w", err)
+	}
+	if info == nil {
+		return fmt.Errorf("empty metadata")
+	}
+	if info.Architecture == "" || info.Architecture == "unknown" {
+		return fmt.Errorf("unknown architecture")
+	}
+	// Reject files that look like full models, not projectors
+	if info.BlockCount > 32 {
+		return fmt.Errorf("looks like a full model (%d layers), not a projector", info.BlockCount)
+	}
+	return nil
 }
 
 func findDownloadScript() string {
