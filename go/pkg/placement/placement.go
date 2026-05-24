@@ -67,6 +67,7 @@ type Strategy struct {
 	HasSSM         bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
 	Draft          *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
 	MMProjPath     string       `json:"mmproj_path,omitempty"`  // vision projector GGUF
+	MMProjSizeMB   int          `json:"-"`                       // mmproj VRAM on primary GPU
 }
 
 // ModelProfile describes the GGUF model.
@@ -160,13 +161,16 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	if opts.VisionAuto && model.Path != "" {
 		if path, err := findOrDownloadMMProj(model.Path, opts.CacheDir); err == nil {
 			s.MMProjPath = path
+			if fi, err := os.Stat(path); err == nil {
+				s.MMProjSizeMB = int(fi.Size() / 1024 / 1024)
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[vision] %v\n", err)
 		}
 	}
 
-	// Total size MB
-	totalSizeMB := model.TotalSizeMB
+	// Total size MB (model + mmproj if vision)
+	totalSizeMB := model.TotalSizeMB + s.MMProjSizeMB
 	if totalSizeMB <= 0 {
 		totalSizeMB = int(model.SizeBytes / 1024 / 1024)
 	}
@@ -259,6 +263,12 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// Strategy selection (matches bash choose_strategy() exactly)
 	strategy := chooseStrategy(caps, model, totalSizeMB, kvTotalMB, opts)
 	s.Type = strategy
+
+	// Vision override: mmproj needs extra VRAM — force multi-GPU (bash line 2746)
+	if s.MMProjPath != "" && strategy == SingleGPU && len(caps.GPUs) > 1 {
+		if model.IsMoE { strategy = MoEOffload; s.Type = MoEOffload
+		} else { strategy = MultiGPUDense; s.Type = MultiGPUDense }
+	}
 
 	var err error
 	switch strategy {
@@ -423,7 +433,12 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	for _, g := range caps.GPUs { totalFree += float64(g.VRAMFreeMB()) }
 	if totalFree > 0 {
 		for _, gi := range gpuOrder {
-			split[gi] = float64(caps.GPUs[gi].VRAMFreeMB()) / totalFree
+			free := float64(caps.GPUs[gi].VRAMFreeMB())
+			if gi == gpuOrder[0] && s.MMProjSizeMB > 0 {
+				free -= float64(s.MMProjSizeMB)
+				if free < 0 { free = 0 }
+			}
+			split[gi] = free / totalFree
 		}
 	}
 	s.TensorSplit = normalizeSplit(split)

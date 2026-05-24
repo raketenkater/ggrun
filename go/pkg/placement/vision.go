@@ -14,8 +14,29 @@ import (
 // Validates GGUF metadata for compatibility with the text model.
 func findOrDownloadMMProj(modelPath, cacheDir string) (string, error) {
 	modelDir := filepath.Dir(modelPath)
+	baseName := strings.TrimSuffix(filepath.Base(modelPath), ".gguf")
+	// Strip common quant suffixes (Q4_K_M, Q5_K_M, Q8_0, F16, etc.)
+	baseNoQuant := baseName
+	for _, suffix := range []string{"Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L", "Q4_K_S", "Q4_K_M", "Q4_K_L", "Q5_K_S", "Q5_K_M", "Q5_K_L", "Q6_K", "Q8_0", "F16", "F32", "BF16", "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_S", "IQ3_M", "IQ4_XS", "IQ4_NL"} {
+		if strings.HasSuffix(baseNoQuant, "-"+suffix) {
+			baseNoQuant = strings.TrimSuffix(baseNoQuant, "-"+suffix)
+			break
+		}
+	}
 
-	// 1. Check local standard locations
+	// 1. Check model-specific mmproj first
+	for _, ftype := range []string{"F16", "BF16", "F32"} {
+		for _, name := range []string{baseName, baseNoQuant} {
+			c := filepath.Join(modelDir, fmt.Sprintf("mmproj-%s-%s.gguf", name, ftype))
+			if _, err := os.Stat(c); err == nil {
+				if err := validateMMProj(c); err == nil {
+					return c, nil
+				}
+			}
+		}
+	}
+
+	// 2. Check generic mmproj files
 	candidates := []string{
 		filepath.Join(modelDir, "mmproj-F16.gguf"),
 		filepath.Join(modelDir, "mmproj-BF16.gguf"),
