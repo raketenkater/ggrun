@@ -413,23 +413,18 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	// KV-first GPU reserve: VRAM-proportional (KV reads are VRAM-local)
 	gpuKVReserveMB := kvReserveByBandwidth(kvTotalMB, caps.GPUs, seqRange(numGPUs), kvPerLayerMB)
 
-	// Tensor-split: proportional to effective free VRAM only (no PCIe weighting).
-	// llama-server uses tensor-split for BOTH model weights AND KV cache.
-	// Bandwidth weighting would put too much on the fast GPU, causing KV OOM.
-	// Instead: sort GPUs by bandwidth (fastest first), split by available space.
+	// Tensor-split: proportional to free VRAM only.
+	// llama-server distributes BOTH model weights AND KV cache by this ratio.
+	// Using effective free (subtracting KV reserve) causes OOM because
+	// llama-server puts KV back proportionally to the split anyway.
 	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
 	split := make([]float64, numGPUs)
-	totalEffective := 0.0
-	for _, gi := range gpuOrder {
-		g := caps.GPUs[gi]
-		overhead := cudaOverheadMB + computeBufMB + gpuKVReserveMB[gi]
-		effective := float64(g.VRAMFreeMB() - overhead)
-		if effective < 0 { effective = 0 }
-		split[gi] = effective
-		totalEffective += effective
-	}
-	if totalEffective > 0 {
-		for i := range split { split[i] /= totalEffective }
+	totalFree := 0.0
+	for _, g := range caps.GPUs { totalFree += float64(g.VRAMFreeMB()) }
+	if totalFree > 0 {
+		for _, gi := range gpuOrder {
+			split[gi] = float64(caps.GPUs[gi].VRAMFreeMB()) / totalFree
+		}
 	}
 	s.TensorSplit = normalizeSplit(split)
 
