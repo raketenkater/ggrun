@@ -62,6 +62,9 @@ func Detect() (*Capabilities, error) {
 	if len(gpus) == 0 {
 		gpus = detectROCm()
 	}
+	if len(gpus) == 0 {
+		gpus = detectVulkanGPUs()
+	}
 
 	ram := detectRAM()
 	cpu := detectCPU()
