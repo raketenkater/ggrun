@@ -31,9 +31,13 @@ func detectPhysicalCores() int {
 			line = strings.TrimSpace(line)
 			switch {
 			case strings.HasPrefix(line, "physical id"):
-				physID = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					physID = strings.TrimSpace(parts[1])
+				}
 			case strings.HasPrefix(line, "core id"):
-				coreID = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					coreID = strings.TrimSpace(parts[1])
+				}
 				if physID != "" && coreID != "" {
 					seen[physID+":"+coreID] = true
 					physID = ""

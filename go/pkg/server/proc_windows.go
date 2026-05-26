@@ -29,9 +29,11 @@ func killProcessTree(pid int) {
 
 // isProcessAlive checks if a Windows process is still running.
 func isProcessAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
+	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return p.Signal(os.Kill) != nil // non-nil = process is dead/not found
+	// os.FindProcess does not verify liveness on Windows. Avoid sending a
+	// signal as a probe because os.Kill would terminate a healthy process.
+	return proc != nil
 }

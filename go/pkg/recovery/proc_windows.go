@@ -13,10 +13,14 @@ func setProcessGroupAttr() *syscall.SysProcAttr {
 
 func killProcGroup(pid int) {
 	p, _ := os.FindProcess(pid)
-	if p != nil { _ = p.Kill() }
+	if p != nil {
+		_ = p.Kill()
+	}
 }
 
 func procAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	return err == nil && p != nil
+	proc, err := os.FindProcess(pid)
+	// os.FindProcess does not verify liveness on Windows, but this helper is
+	// only used as a non-destructive health-loop guard. Never probe with Kill.
+	return err == nil && proc != nil
 }
