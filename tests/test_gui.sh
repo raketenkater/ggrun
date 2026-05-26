@@ -21,7 +21,7 @@ chmod +x "$TMP/llama-server"
 
 python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$TMP/model.gguf" \
     --arch llama --name Gui-Direct-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
-    --embd 64 --ff 128 --ctx-train 2048
+    --embd 64 --ff 128 --ctx-train 131072
 
 PASS=0
 FAIL=0
@@ -81,11 +81,14 @@ chmod +x "$TMP/home/ik_llama.cpp/build/bin/llama-server" "$TMP/home/llama.cpp/bu
 printf 'LLM_BACKEND="ik_llama"\n' >"$TMP/home/.config/llm-server/config.sh"
 cp "$TMP/model.gguf" "$TMP/models/model.gguf"
 
-# Main menu: pick model 1 → configure screen: press D for dry-run → Enter
+# Main menu: pick model 1 → quick boot screen: press D for dry-run → Enter
 # to return → < to go back to main → q to quit.
 out=$(printf '1\nD\n\n<\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
     LLM_MODEL_DIR="$TMP/models" LLM_SERVER_REPO="$TMP/no-repo" "$ROOT/llm-server-gui" 2>&1)
 assert_contains "$out" "Backend:  ik_llama" "main menu shows saved backend"
+assert_contains "$out" "Boot: model.gguf" "model number opens quick boot"
+assert_contains "$out" "fit (launcher calculates)" "quick boot keeps fit as a mode"
+assert_contains "$out" "--ctx-size 131072" "quick boot fit expands past standard context"
 assert_contains "$out" "Binary: $TMP/home/ik_llama.cpp/build/bin/llama-server" "dry run uses saved backend binary"
 
 echo "Test: interactive flow preserves explicit context passthrough"
@@ -96,9 +99,10 @@ assert_contains "$out" "--ctx-size 1024" "dry run keeps explicit passthrough con
 assert_not_contains "$out" "--ctx-size 65536" "dry run does not add GUI default context"
 
 echo "Test: interactive flow exposes KV placement"
-out=$(printf '1\nK\nc\nD\n\n<\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
+out=$(printf 'c\nK\nc\nD\n\n<\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
     LLM_MODEL_DIR="$TMP/models" LLM_SERVER_REPO="$TMP/no-repo" \
     "$ROOT/llm-server-gui" 2>&1)
+assert_contains "$out" "Advanced: model.gguf" "advanced configure opens explicitly"
 assert_contains "$out" "--no-kv-offload" "dry run applies chosen CPU KV placement"
 
 echo "Test: interactive flow launches chosen tuned config"
@@ -120,9 +124,9 @@ cat >"$TMP/home/.cache/llm-server/tune_model.gguf_test_ik.json" <<'JSON'
 }
 JSON
 
-# Pick model 1 → configure: press t (tuned config picker) → 1 (pick first
+# Open advanced configure → press t (tuned config picker) → 1 (pick first
 # tuned cache) → D (dry-run) → Enter → < → q.
-out=$(printf '1\nt\n1\nD\n\n<\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
+out=$(printf 'c\nt\n1\nD\n\n<\nq\n' | HOME="$TMP/home" LLM_ASSUME_YES=1 \
     LLM_MODEL_DIR="$TMP/models" LLM_SERVER_REPO="$TMP/no-repo" "$ROOT/llm-server-gui" 2>&1)
 assert_contains "$out" "Tuned configs for model.gguf" "config chooser opens from configure screen"
 assert_contains "$out" "12.00 tok/s" "config chooser shows measured performance"

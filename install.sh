@@ -96,6 +96,24 @@ detect_backend() {
 [[ "$BACKEND_CHOICE" == "auto" ]] && BACKEND_CHOICE="$(detect_backend)"
 ok "Detected backend: $BACKEND_CHOICE"
 
+# ── amd-smi check for Vulkan on Linux ──────────────────────────────────────
+# amd-smi (Radeon Software / ROCm tools) provides GPU memory metrics needed
+# for VRAM-aware model selection and autotune on AMD hardware.
+if [[ "$BACKEND_CHOICE" == "vulkan" && "$OS" == "Linux" ]]; then
+    if command -v amd-smi &>/dev/null; then
+        ok "amd-smi found (AMD GPU memory monitoring available)"
+    else
+        err "amd-smi not found — required for Vulkan on AMD hardware."
+        say  "Install it via your distribution's package manager:"
+        say  "  Ubuntu/Debian: sudo apt install radeonsi-tools  (provides amd-smi)"
+        say  "  Fedora:        sudo dnf install radeonsi-tools"
+        say  "  Arch:          sudo pacman -S radeonsi-tools"
+        say  ""
+        say  "Or install ROCm tools: https://rocm.docs.amd.com/"
+        exit 1
+    fi
+fi
+
 platform_slug() {
     local arch slug_os slug_arch
     arch="$(uname -m)"

@@ -35,6 +35,48 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" \
     --out "$TMP/mmproj-partial.gguf" --arch clip --name 'Safety-Test' --basename 'Safety-Test' \
     --layers 2 --embd 128 --ff 256 --tensor 'clip.blk.0.weight:1024,1024:0'
 
+mkdir -p "$TMP/qwen"
+python3 "$ROOT/tests/build_synthetic_gguf.py" \
+    --out "$TMP/qwen/Qwen3-0.6B-Q8_0.gguf" --arch qwen3 --name 'Qwen3 0.6B Instruct' --basename 'Qwen3' \
+    --layers 2 --hkv 1 --kl 32 --vl 32 --embd 128 --ff 256 --ctx-train 512
+
+python3 "$ROOT/tests/build_synthetic_gguf.py" \
+    --out "$TMP/remote-mmproj-F32.gguf" --arch clip --name 'Qwen3' --basename 'Qwen3' \
+    --layers 2 --embd 128 --ff 256
+
+python3 "$ROOT/tests/build_synthetic_gguf.py" \
+    --out "$TMP/mtp-draft.gguf" --arch mtp --name 'Safety-MTP-Draft' --basename 'Safety-MTP-Draft' \
+    --layers 2 --hkv 1 --kl 32 --vl 32 --embd 128 --ff 256 --ctx-train 512
+
+cat >"$TMP/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="${@: -1}"
+if [[ "$url" == "https://huggingface.co/api/models/unsloth/Qwen3-0.6B-GGUF/tree/main?recursive=1" ]]; then
+    printf '[{"path":"mmproj-F32.gguf"}]\n'
+    exit 0
+fi
+if [[ "$url" == https://huggingface.co/api/models/*/tree/main?recursive=1 ]]; then
+    printf '[]\n'
+    exit 0
+fi
+if [[ " $* " == *" --head "* ]]; then
+    [[ "$url" == "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/mmproj-F32.gguf" ]]
+    exit
+fi
+out=""
+while (($#)); do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[[ -n "$out" && "$url" == "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/mmproj-F32.gguf" ]]
+cp "$REMOTE_MMPROJ" "$out"
+EOF
+chmod +x "$TMP/curl"
+
 python3 - "$TMP/port" <<'PY' &
 import socket
 import sys
@@ -90,6 +132,21 @@ fi
 
 echo "Safety regression: matching local mmproj accepted"
 
+out=$(REMOTE_MMPROJ="$TMP/remote-mmproj-F32.gguf" PATH="$TMP:$PATH" \
+    "$ROOT/llm-server" --cpu --dry-run --vision "$TMP/qwen/Qwen3-0.6B-Q8_0.gguf" 2>&1)
+if [[ "$out" != *"https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/mmproj-F32.gguf"* ]]; then
+    echo "expected Qwen3 downloader to derive the specific Hugging Face repo from filename/model name"
+    echo "$out"
+    exit 1
+fi
+if [[ "$out" != *"--mmproj $TMP/qwen/mmproj-Qwen3-0.6B-F32.gguf"* ]]; then
+    echo "expected downloaded Qwen3 mmproj to be passed to backend"
+    echo "$out"
+    exit 1
+fi
+
+echo "Safety regression: Qwen3 mmproj resolver derives model-specific repo"
+
 if out=$("$ROOT/llm-server" --cpu --dry-run --mmproj "$TMP/mmproj-other.gguf" "$TMP/model.gguf" 2>&1); then
     echo "expected mismatched explicit mmproj to fail"
     echo "$out"
@@ -124,3 +181,24 @@ if [[ "$out" == *"Run AI Tune before launching"* ]]; then
 fi
 
 echo "Safety regression: first-run AI tune prompt suppressed for dry-run"
+
+if out=$("$ROOT/llm-server" --cpu --dry-run "$TMP/mtp-draft.gguf" 2>&1); then
+    echo "expected direct MTP draft launch to fail"
+    echo "$out"
+    exit 1
+fi
+if [[ "$out" != *"draft-only GGUF"* || "$out" != *"MTP draft architecture"* ]]; then
+    echo "expected clear draft-only error for MTP model"
+    echo "$out"
+    exit 1
+fi
+
+echo "Safety regression: direct MTP draft launch rejected before health timeout"
+
+if grep -Eq '\(\([[:space:]]*TOTAL_EXTRA[[:space:]]*\+=' "$ROOT/llm-server"; then
+    echo "found set -e-unsafe TOTAL_EXTRA arithmetic command"
+    exit 1
+fi
+bash -c 'set -euo pipefail; TOTAL_EXTRA=0; extra=0; TOTAL_EXTRA=$(( TOTAL_EXTRA + extra ))'
+
+echo "Safety regression: VRAM headroom arithmetic survives zero extra layers"

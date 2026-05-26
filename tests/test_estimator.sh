@@ -126,6 +126,14 @@ else
     ((PASS++))
 fi
 
+# ── Test 8: explicit context modes ──────────────────────────────────────
+echo "Test: context_modes"
+out=$(run_dry --ctx-size max "$TMP/dense.gguf")
+assert_contains "$out" "--ctx-size 8192" "--ctx-size max resolves to train context"
+
+out=$( ( export LLM_CTX_SIZE=1024; run_dry "$TMP/dense.gguf" ) 2>&1)
+assert_contains "$out" "--ctx-size 1024" "numeric LLM_CTX_SIZE stays authoritative"
+
 # ── Summary ──────────────────────────────────────────────────────────────
 echo ""
 echo "Estimator regression: $PASS passed, $FAIL failed"
