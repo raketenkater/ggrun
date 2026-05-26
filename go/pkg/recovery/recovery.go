@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/raketenkater/llm-server/pkg/placement"
@@ -111,7 +110,7 @@ func (l *Launcher) Run(ctx context.Context) error {
 }
 
 func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount int) error {
-	logPath := fmt.Sprintf("/tmp/llm-server-launch-%d.log", time.Now().Unix())
+	logPath := filepath.Join(os.TempDir(), fmt.Sprintf("llm-server-launch-%d.log", time.Now().Unix()))
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return err
@@ -119,7 +118,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	defer logFile.Close()
 
 	cmd := exec.CommandContext(ctx, binaryPath, l.Args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = setProcessGroupAttr()
 
 	// Tee stdout/stderr to both terminal and log file
 	cmd.Stdout = os.Stdout
@@ -166,9 +165,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	// (context cancellation, health timeout, crash, etc.).
 	defer func() {
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			time.Sleep(500 * time.Millisecond)
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killProcGroup(cmd.Process.Pid)
 			cmd.Wait()
 		}
 	}()
@@ -182,7 +179,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	for time.Now().Before(deadline) {
 		// Check if process died
 		if cmd.Process != nil {
-			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+			if !procAlive(cmd.Process.Pid) {
 				// Process died before health check
 				return fmt.Errorf("process died during startup")
 			}
@@ -209,9 +206,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 
 	// Health timeout — kill process
 	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		time.Sleep(1 * time.Second)
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		killProcGroup(cmd.Process.Pid)
 	}
 	return fmt.Errorf("health timeout")
 }
@@ -229,7 +224,7 @@ func (l *Launcher) extractPort() string {
 // parseLoadFailure reads the latest log for known error patterns.
 func (l *Launcher) parseLoadFailure() (FailureType, string) {
 	// Find most recent log file
-	entries, err := os.ReadDir("/tmp")
+	entries, err := os.ReadDir(os.TempDir())
 	if err != nil {
 		return FailureUnknown, ""
 	}
@@ -240,7 +235,7 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 			info, _ := e.Info()
 			if info.ModTime().After(latestTime) {
 				latestTime = info.ModTime()
-				latest = "/tmp/" + e.Name()
+				latest = filepath.Join(os.TempDir(), e.Name())
 			}
 		}
 	}

@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -49,7 +48,7 @@ func Start(args []string, port int) (*Process, error) {
 func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setSysProcAttr(cmd)
 	cmd.Stdout = os.Stdout
 
 	// Tee stderr: output to terminal AND capture in buffer for post-launch probe.
@@ -113,9 +112,7 @@ func (p *Process) waitReady(timeout time.Duration) error {
 func (p *Process) Stop() error {
 	p.cancel()
 	if p.Cmd.Process != nil {
-		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGTERM)
-		time.Sleep(2 * time.Second)
-		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGKILL)
+		killProcessTree(p.Cmd.Process.Pid)
 	}
 	// Wait with timeout — don't block forever if process hangs during cleanup.
 	done := make(chan error, 1)
@@ -133,7 +130,7 @@ func (p *Process) IsRunning() bool {
 	if p == nil || p.Cmd == nil || p.Cmd.Process == nil {
 		return false
 	}
-	return p.Cmd.Process.Signal(syscall.Signal(0)) == nil
+	return isProcessAlive(p.Cmd.Process.Pid) && p.Cmd.ProcessState == nil
 }
 
 // QueryModels returns the models endpoint response.

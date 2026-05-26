@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/raketenkater/llm-server/pkg/benchmark"
@@ -234,7 +233,7 @@ func cmdLaunch(args []string) {
 	// Without this, Ctrl+C kills only the Go binary — llama-server
 	// becomes an orphan, leaking VRAM and leaving zombie processes.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, shutdownSignals()...)
 	<-sigCh
 	fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
 
@@ -248,10 +247,10 @@ func cmdLaunch(args []string) {
 	case <-done:
 	case <-sigCh:
 		fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
-		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGKILL)
+		if p.Cmd.Process != nil { p.Cmd.Process.Kill() }
 	case <-time.After(30 * time.Second):
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
-		_ = syscall.Kill(-p.Cmd.Process.Pid, syscall.SIGKILL)
+		if p.Cmd.Process != nil { p.Cmd.Process.Kill() }
 	}
 }
 
@@ -363,7 +362,7 @@ func cmdGUI() {
 
 	// Cancel context on SIGINT/SIGTERM so the launcher cleans up the child
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, shutdownSignals()...)
 	go func() {
 		<-sigCh
 		fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")

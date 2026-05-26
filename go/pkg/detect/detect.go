@@ -251,22 +251,21 @@ func detectRAM() RAMInfo {
 }
 
 func detectRAMLinux() RAMInfo {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return RAMInfo{}
-	}
-	var totalKB, freeKB int
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "MemTotal:") {
-			fmt.Sscanf(line, "MemTotal: %d kB", &totalKB)
-		} else if strings.HasPrefix(line, "MemAvailable:") {
-			fmt.Sscanf(line, "MemAvailable: %d kB", &freeKB)
+	freeMB := detectRAMFreeMB()
+	totalMB := freeMB
+	// Try to get total from /proc/meminfo on Linux
+	if runtime.GOOS == "linux" {
+		data, _ := os.ReadFile("/proc/meminfo")
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "MemTotal:") {
+				var kb int
+				fmt.Sscanf(line, "MemTotal: %d kB", &kb)
+				totalMB = kb / 1024
+				break
+			}
 		}
 	}
-	return RAMInfo{
-		TotalMB: totalKB / 1024,
-		FreeMB:  freeKB / 1024,
-	}
+	return RAMInfo{TotalMB: totalMB, FreeMB: freeMB}
 }
 
 func detectRAMDarwin() RAMInfo {
@@ -280,54 +279,23 @@ func detectRAMDarwin() RAMInfo {
 
 func detectCPU() CPUInfo {
 	threads := runtime.NumCPU()
-	cores := threads // fallback: assume no HT
+	cores := detectPhysicalCores()
 	model := "unknown"
 	flags := ""
 
 	if runtime.GOOS == "linux" {
 		data, _ := os.ReadFile("/proc/cpuinfo")
-		// Detect physical cores by counting unique physical_id+core_id pairs
-		physCores := make(map[string]bool)
 		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "model name") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
 					model = strings.TrimSpace(parts[1])
 				}
 			}
 			if strings.HasPrefix(line, "flags") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
 					flags = strings.TrimSpace(parts[1])
 				}
 			}
-			// Parse physical id and core id for unique core counting
-			if strings.HasPrefix(line, "physical id") || strings.HasPrefix(line, "core id") {
-				// We'll use a simpler approach: count unique pairs
-			}
-		}
-		// Better approach: use core_ids seen in the file
-		var curPhysID, curCoreID string
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "physical id") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					curPhysID = strings.TrimSpace(parts[1])
-				}
-			}
-			if strings.HasPrefix(line, "core id") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					curCoreID = strings.TrimSpace(parts[1])
-					key := curPhysID + ":" + curCoreID
-					physCores[key] = true
-				}
-			}
-		}
-		if len(physCores) > 0 {
-			cores = len(physCores)
 		}
 	} else if runtime.GOOS == "darwin" {
 		out, _ := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output()
