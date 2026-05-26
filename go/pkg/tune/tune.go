@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -137,3 +138,76 @@ func hashStrings(ss []string) uint32 {
 
 // Now returns the current Unix timestamp.
 func Now() int64 { return time.Now().Unix() }
+
+// LoadBashCache reads bash-format .conf files from the cache directory.
+// Converts CACHED_GPU_ASSIGNMENTS, CACHED_MMAP, etc. into Go Entry format
+// for backward compatibility with existing bash-tuned configs.
+func (c *Cache) LoadBashCache() ([]Entry, error) {
+	dir := filepath.Dir(c.path)
+	pattern := filepath.Join(dir, "*.conf")
+	files, err := filepath.Glob(pattern)
+	if err != nil || len(files) == 0 {
+		return nil, fmt.Errorf("no bash config files in %s", dir)
+	}
+
+	var entries []Entry
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil { continue }
+
+		e := parseConfFile(string(data))
+		if e != nil {
+			entries = append(entries, *e)
+		}
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no valid bash tunes found")
+	}
+	return entries, nil
+}
+
+func parseConfFile(content string) *Entry {
+	e := &Entry{
+		Flags:   make(map[string]string),
+		Best:    true,
+		Round:   1,
+	}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# Generated:") {
+			parts := strings.Split(line, ": ")
+			if len(parts) >= 2 {
+				if t, err := time.Parse("Mon Jan  2 03:04:05 PM MST 2006", parts[1]); err == nil {
+					e.Timestamp = t.Unix()
+				}
+			}
+		}
+		if !strings.HasPrefix(line, "CACHED_") { continue }
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 { continue }
+		key := strings.TrimSpace(parts[0])
+		val := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		switch key {
+		case "CACHED_GPU_ASSIGNMENTS":
+			e.Flags["gpu_assignments"] = val
+		case "CACHED_MMAP":
+			e.Flags["mmap"] = val
+		case "CACHED_BATCH":
+			e.Flags["batch"] = val
+		case "CACHED_UBATCH":
+			e.Flags["ubatch"] = val
+		case "CACHED_PARALLEL":
+			e.Flags["parallel"] = val
+		case "CACHED_NCPUMOE":
+			e.Flags["n_cpu_moe"] = val
+		case "CACHED_KVUNIFIED":
+			e.Flags["kv_unified"] = val
+		case "CACHED_NO_PINNED":
+			e.Flags["no_pinned"] = val
+		default:
+			e.Flags[strings.TrimPrefix(key, "CACHED_")] = val
+		}
+	}
+	if len(e.Flags) == 0 { return nil }
+	return e
+}
