@@ -203,7 +203,7 @@ def scan_models(model_dir: Path, cache_dir: Path) -> dict[str, Any]:
             "mmproj": mmproj_candidates(path, model_dir),
             "tune_configs": tune_configs(cache_dir, path.name),
         }
-        model["role"] = "draft" if draft_backend_requirements(model) else "model"
+        model["role"] = "draft" if is_draft_model(model) else "model"
         if downloads.get(str(path)):
             model["download"] = downloads[str(path)]
         models.append(model)
@@ -225,25 +225,47 @@ def update_download(model_dir: Path, cache_dir: Path, repo: str, quant: str, fil
     return data
 
 
-def draft_backend_requirements(model: dict[str, Any]) -> dict[str, Any]:
+def is_draft_model(model: dict[str, Any]) -> bool:
+    """Check if a model is actually a draft-only model (not a main model).
+    Only checks architecture and name — folder path is NOT used here,
+    because a main model may live in an MTP/DFlash-named folder."""
     arch = str(model.get("architecture") or "").lower()
     name = f"{model.get('file') or ''} {model.get('name') or ''} {model.get('basename') or ''}".lower()
-    if arch == "dflash-draft" or "dflash" in name:
+    return arch == "dflash-draft" or "dflash" in name or arch == "mtp" or "mtp" in name
+
+
+def draft_backend_requirements(model: dict[str, Any]) -> dict[str, Any]:
+    """Return draft backend requirements for a model.
+    Uses folder path as a fallback for suggestion purposes, but role
+    assignment uses is_draft_model() which only checks architecture/name."""
+    arch = str(model.get("architecture") or "").lower()
+    name = f"{model.get('file') or ''} {model.get('name') or ''} {model.get('basename') or ''}".lower()
+    # Also check relative_path — models may live in MTP/DFlash-named folders
+    rel_path = f"{model.get('relative_path') or ''}".lower()
+    if arch == "dflash-draft" or "dflash" in name or "dflash" in rel_path:
         return {
             "backend": "buun-llama-cpp",
             "capability": "dflash",
             "flags": ["--spec-type", "dflash"],
             "reason": "requires buun-llama-cpp DFlash backend",
         }
+    if arch == "mtp" or "mtp" in name or "mtp" in rel_path:
+        return {
+            "capability": "mtp",
+            "flags": ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"],
+            "reason": "requires MTP-capable backend",
+        }
     return {}
 
 
-def backend_satisfies_requirements(requirements: dict[str, Any], backend: str, supports_dflash: bool) -> bool:
+def backend_satisfies_requirements(requirements: dict[str, Any], backend: str, supports_dflash: bool, supports_mtp: bool) -> bool:
     if not requirements:
         return True
     capability = requirements.get("capability")
     required_backend = requirements.get("backend")
     if capability == "dflash" and (supports_dflash or backend == required_backend):
+        return True
+    if capability == "mtp" and supports_mtp:
         return True
     return False
 
@@ -254,6 +276,7 @@ def suggest_drafts(
     *,
     backend: str = "generic",
     supports_dflash: bool = False,
+    supports_mtp: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     target_size = int(target.get("size_bytes", 0) or 0)
@@ -299,7 +322,7 @@ def suggest_drafts(
             reasons.append("draft is dense")
 
         requirements = draft_backend_requirements(model)
-        requirements_met = backend_satisfies_requirements(requirements, backend, supports_dflash)
+        requirements_met = backend_satisfies_requirements(requirements, backend, supports_dflash, supports_mtp)
         if requirements:
             reasons.append(requirements["reason"])
             flags = " ".join(requirements.get("flags") or [])
@@ -328,6 +351,8 @@ def suggest_drafts(
 
 def gui_rows(data: dict[str, Any]) -> None:
     for model in data.get("models", []):
+        # Draft models (DFlash, MTP architecture) are draft-only — skip them
+        # Main models in MTP-named folders are role=model, so they show up
         if model.get("role") == "draft":
             continue
         arch = "MoE" if model.get("moe") else (model.get("architecture") or "dense")
@@ -361,6 +386,7 @@ def main() -> int:
     sug.add_argument("--target", required=True)
     sug.add_argument("--backend", choices=("generic", "llama", "ik_llama", "buun-llama-cpp"), default="generic")
     sug.add_argument("--supports-dflash", action="store_true")
+    sug.add_argument("--supports-mtp", action="store_true")
     sug.add_argument("--format", choices=("json", "text"), default="text")
     args = parser.parse_args()
 
@@ -390,7 +416,7 @@ def main() -> int:
         if target is None:
             print(f"target not found in model index: {args.target}", file=sys.stderr)
             return 1
-        rows = suggest_drafts(data, target, backend=args.backend, supports_dflash=args.supports_dflash)
+        rows = suggest_drafts(data, target, backend=args.backend, supports_dflash=args.supports_dflash, supports_mtp=args.supports_mtp)
         if args.format == "json":
             print(json.dumps(rows, indent=2, sort_keys=True))
         elif not rows:

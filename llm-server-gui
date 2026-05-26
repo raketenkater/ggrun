@@ -279,11 +279,24 @@ refresh_models() {
 # ── Persistence helpers ───────────────────────────────────────────────
 save_kv() {
     local key="$1" value="$2"
+    # Escape special sed characters in value (& | \ /)
+    local escaped_value
+    escaped_value="${value//\\/\\\\}"      # \ → \\
+    escaped_value="${escaped_value//&/\\&}"  # & → \&
+    escaped_value="${escaped_value//|/\\|}"  # | → \|
+    escaped_value="${escaped_value//\//\\/}"  # / → \/
     if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
+        sed -i "s|^${key}=.*|${key}=\"${escaped_value}\"|" "$CONFIG_FILE"
     else
         echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
     fi
+}
+
+load_kv() {
+    local key="$1" default="${2:-}"
+    local val
+    val=$(grep "^${key}=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed "s|^${key}=\"||; s|\"$||")
+    [[ -n "$val" ]] && echo "$val" || echo "$default"
 }
 
 # ── Action: backend selection ─────────────────────────────────────────
@@ -546,9 +559,40 @@ configure_model() {
     local parallel=""
     local kv_place="${LLM_KV_PLACEMENT:-auto}"
     case "$kv_place" in auto|gpu|cpu) ;; *) kv_place="auto" ;; esac
-    local opt_aitune=0 opt_bench=0 opt_vision=0 opt_keepalive=0
-    local opt_rounds=8
-    local tune_cache="" tune_label="auto"
+    local opt_aitune=0 opt_bench=0 opt_vision=0 opt_keepalive=0 opt_verbose=0 opt_converge=0
+    local opt_rounds=12
+    local opt_spec=0   # 0=off, 1=draft-mtp, 2=draft-simple, 3=draft-eagle3, 4=ngram-simple
+    local opt_spec_depth=2  # --spec-draft-n-max (1-10, default 2)
+    local tune_cache="" tune_label="none"
+
+    # Sanitize model name for use as a bash variable key (no dots/dashes)
+    local model_key; model_key=$(printf '%s' "$model_name" | tr '.-' '__')
+
+    # Load per-model saved settings
+    local saved_ctx; saved_ctx=$(load_kv "ctx_${model_key}" "")
+    [[ -n "$saved_ctx" ]] && ctx="$saved_ctx"
+    local saved_parallel; saved_parallel=$(load_kv "parallel_${model_key}" "")
+    [[ -n "$saved_parallel" ]] && parallel="$saved_parallel"
+    local saved_kv; saved_kv=$(load_kv "kv_${model_key}" "auto")
+    case "$saved_kv" in auto|gpu|cpu) kv_place="$saved_kv" ;; esac
+    local saved_aitune; saved_aitune=$(load_kv "aitune_${model_key}" "0")
+    opt_aitune=$saved_aitune
+    local saved_rounds; saved_rounds=$(load_kv "rounds_${model_key}" "8")
+    opt_rounds=$saved_rounds
+    local saved_vision; saved_vision=$(load_kv "vision_${model_key}" "0")
+    opt_vision=$saved_vision
+    local saved_bench; saved_bench=$(load_kv "bench_${model_key}" "0")
+    opt_bench=$saved_bench
+    local saved_spec; saved_spec=$(load_kv "spec_${model_key}" "0")
+    opt_spec=$saved_spec
+    local saved_spec_depth; saved_spec_depth=$(load_kv "spec_depth_${model_key}" "2")
+    opt_spec_depth=$saved_spec_depth
+    local saved_keepalive; saved_keepalive=$(load_kv "keepalive_${model_key}" "0")
+    opt_keepalive=$saved_keepalive
+    local saved_verbose; saved_verbose=$(load_kv "verbose_${model_key}" "0")
+    opt_verbose=$saved_verbose
+    local saved_converge; saved_converge=$(load_kv "converge_${model_key}" "0")
+    opt_converge=$saved_converge
 
     while true; do
         clear 2>/dev/null || printf '\033c'
@@ -571,6 +615,20 @@ configure_model() {
         fi
         printf "  [v] Vision (mmproj)    %s\n" "$( (( opt_vision )) && echo on || echo off)"
         printf "  [b] Benchmark mode     %s\n" "$( (( opt_bench )) && echo on || echo off)"
+        printf "  [V] Verbose (AI Tune)  %s\n" "$( (( opt_verbose )) && echo on || echo off)"
+        printf "  [C] Converge mode      %s\n" "$( (( opt_converge )) && echo on || echo off)"
+        # Speculative decoding
+        local spec_label="off"
+        case "$opt_spec" in
+            1) spec_label="draft-mtp" ;;
+            2) spec_label="draft-simple" ;;
+            3) spec_label="draft-eagle3" ;;
+            4) spec_label="ngram-simple" ;;
+        esac
+        printf "  [s] Speculative dec    %s\n" "$spec_label"
+        if (( opt_spec == 1 )); then
+            printf "  [d] Draft depth        %s\n" "$opt_spec_depth"
+        fi
         printf "  [k] Keep-alive restart %s\n" "$( (( opt_keepalive )) && echo on || echo off)"
         echo ""
         echo "  [L] Launch              [D] Dry run"
@@ -579,7 +637,7 @@ configure_model() {
         local key
         read -rp "  Action: " key
         case "$key" in
-            c|C)
+            c)
                 local ans hint="${ctx:-passthrough}"
                 [[ -n "$fit_ctx" ]] && hint+=", fit=$fit_ctx"
                 [[ -n "$max_ctx" ]] && hint+=", max=$max_ctx"
@@ -598,11 +656,13 @@ configure_model() {
                         fi
                         ;;
                 esac
+                save_kv "ctx_${model_key}" "${ctx:-passthrough}"
                 ;;
-            p|P)
+            p)
                 local ans
                 read -rp "    Parallel slots (Enter=default 4): " ans
                 parallel="$ans"
+                save_kv "parallel_${model_key}" "$parallel"
                 ;;
             K)
                 local ans
@@ -613,9 +673,10 @@ configure_model() {
                     c|cpu)  kv_place="cpu" ;;
                     "")     : ;;
                 esac
+                save_kv "kv_${model_key}" "$kv_place"
                 ;;
-            a|A) (( opt_aitune = !opt_aitune )) || true ;;
-            r|R)
+            a) (( opt_aitune = !opt_aitune )) || true; save_kv "aitune_${model_key}" "$opt_aitune" ;;
+            r)
                 if (( opt_aitune )); then
                     local ans
                     read -rp "    AI tune rounds (1-30, default 8): " ans
@@ -624,15 +685,40 @@ configure_model() {
                         (( opt_rounds < 1 )) && opt_rounds=1
                         (( opt_rounds > 30 )) && opt_rounds=30
                     fi
+                    save_kv "rounds_${model_key}" "$opt_rounds"
                 fi
                 ;;
-            v|V) (( opt_vision = !opt_vision )) || true ;;
-            b|B) (( opt_bench = !opt_bench )) || true ;;
-            k) (( opt_keepalive = !opt_keepalive )) || true ;;
-            t|T)
+            v) (( opt_vision = !opt_vision )) || true; save_kv "vision_${model_key}" "$opt_vision" ;;
+            b) (( opt_bench = !opt_bench )) || true; save_kv "bench_${model_key}" "$opt_bench" ;;
+            s)
+                # Cycle: off → draft-mtp → draft-simple → draft-eagle3 → ngram-simple → off
+                (( opt_spec = (opt_spec + 1) % 6 )) || true
+                # Reset depth when switching away from draft-mtp
+                (( opt_spec != 1 )) && opt_spec_depth=2
+                save_kv "spec_${model_key}" "$opt_spec"
+                save_kv "spec_depth_${model_key}" "$opt_spec_depth"
+                ;;
+            d)
+                # Draft depth — only available when draft-mtp is selected
+                if (( opt_spec == 1 )); then
+                    local ans
+                    read -rp "    Draft depth --spec-draft-n-max (1-10, default 2): " ans
+                    if [[ "$ans" =~ ^[0-9]+$ ]]; then
+                        opt_spec_depth=$ans
+                        (( opt_spec_depth < 1 )) && opt_spec_depth=1
+                        (( opt_spec_depth > 10 )) && opt_spec_depth=10
+                    fi
+                    save_kv "spec_depth_${model_key}" "$opt_spec_depth"
+                fi
+                ;;
+            k) (( opt_keepalive = !opt_keepalive )) || true; save_kv "keepalive_${model_key}" "$opt_keepalive" ;;
+            V) (( opt_verbose = !opt_verbose )) || true; save_kv "verbose_${model_key}" "$opt_verbose" ;;
+            C) (( opt_converge = !opt_converge )) || true; save_kv "converge_${model_key}" "$opt_converge" ;;
+            t)
                 pick_tuned_config "$model_name" "$opt_vision"
                 tune_cache="$_picked_path"
                 tune_label="$_picked_label"
+                save_kv "tune_${model_key}" "$tune_label"
                 ;;
             L)
                 run_action launch ;;
@@ -654,7 +740,7 @@ configure_model() {
 pick_tuned_config() {
     local model_name="$1" vision="$2"
     _picked_path=""
-    _picked_label="auto"
+    _picked_label="none"
     echo ""
     echo "  ═══ Tuned configs for $model_name ═══"
     local entries=()
@@ -667,7 +753,7 @@ pick_tuned_config() {
         sleep 2
         return 0
     fi
-    echo "    [0] Auto / heuristic cache selection"
+    echo "    [0] None (heuristic only, no tuned config)"
     local i path label pick
     for i in "${!entries[@]}"; do
         path="${entries[$i]%%$'\t'*}"
@@ -679,7 +765,7 @@ pick_tuned_config() {
     pick=${pick:-0}
     if [[ "$pick" == "0" ]]; then
         _picked_path=""
-        _picked_label="auto"
+        _picked_label="none"
     elif [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#entries[@]} )); then
         _picked_path="${entries[$(( pick - 1 ))]%%$'\t'*}"
         _picked_label="${entries[$(( pick - 1 ))]#*$'\t'}"
@@ -761,6 +847,7 @@ run_action() {
 
     backend_bin_flag
     local OPT_FLAGS=()
+    local launcher_verbose=0
     [[ -n "$ctx" ]] && OPT_FLAGS+=(--ctx-size "$ctx")
     [[ -n "$parallel" ]] && OPT_FLAGS+=(--parallel "$parallel")
     [[ -n "$kv_place" ]] && OPT_FLAGS+=(--kv-placement "$kv_place")
@@ -773,6 +860,19 @@ run_action() {
     (( opt_bench ))     && OPT_FLAGS+=(--benchmark)
     (( opt_vision ))    && OPT_FLAGS+=(--vision)
     (( opt_keepalive )) && OPT_FLAGS+=(--keep-alive)
+    if (( opt_verbose )); then
+        launcher_verbose=1
+        OPT_FLAGS+=(--verbose)
+    fi
+    (( opt_converge ))  && OPT_FLAGS+=(--converge)
+    # Speculative decoding
+    case "$opt_spec" in
+        1) OPT_FLAGS+=(--spec-type draft-mtp)
+           (( opt_spec_depth != 2 )) && OPT_FLAGS+=(--spec-draft-n-max "$opt_spec_depth") ;;
+        2) OPT_FLAGS+=(--spec-type draft-simple) ;;
+        3) OPT_FLAGS+=(--spec-type draft-eagle3) ;;
+        4) OPT_FLAGS+=(--spec-type ngram-simple) ;;
+    esac
     case "$action" in
         dry)     OPT_FLAGS+=(--dry-run) ;;
         configs) OPT_FLAGS+=(--show-configs) ;;
@@ -781,10 +881,10 @@ run_action() {
     if [[ "$action" == "launch" ]]; then
         echo "  Launching: $(basename "$model_path") ${OPT_FLAGS[*]:-}"
         echo ""
-        exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path"
+        VERBOSE="$launcher_verbose" exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path"
     fi
     echo ""
-    "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path" || true
+    VERBOSE="$launcher_verbose" "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path" || true
     echo ""
     read -rp "  [Enter] to return..." _
 }

@@ -27,6 +27,11 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/Test-DFlash-Draf
     --tokenizer-model gpt2 --tokenizer-pre qwen35 --vocab-size 16 \
     --layers 2 --hkv 1 --kl 16 --vl 16 --embd 32 --ff 64 --ctx-train 4096
 
+python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/Test-MTP-Draft-Q4_K_M.gguf" \
+    --arch mtp --name Test-MTP-Draft --basename Test-MTP-Draft \
+    --tokenizer-model gpt2 --tokenizer-pre qwen35 --vocab-size 16 \
+    --layers 2 --hkv 1 --kl 16 --vl 16 --embd 32 --ff 64 --ctx-train 4096
+
 python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$MODEL_DIR/mmproj-F16.gguf" \
     --arch clip --name Test-A3B --basename Test-A3B \
     --layers 1 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 --ctx-train 4096
@@ -55,7 +60,7 @@ python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 models = data.get("models") or []
-assert len(models) == 3, models
+assert len(models) == 4, models
 m = next(row for row in models if row["file"] == "Test-A3B-Q4_K_M.gguf")
 assert m["file"] == "Test-A3B-Q4_K_M.gguf", m
 assert m["moe"] is True, m
@@ -88,10 +93,22 @@ drafts=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$C
 [[ "$drafts" == *$'requires-backend'* ]]
 [[ "$drafts" == *"Test-DFlash-Draft-Q4_K_M.gguf"* ]]
 [[ "$drafts" == *"requires buun-llama-cpp DFlash backend"* ]]
+[[ "$drafts" == *"Test-MTP-Draft-Q4_K_M.gguf"* ]]
+[[ "$drafts" == *"requires MTP-capable backend"* ]]
 
 dflash=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
     suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf" --backend buun-llama-cpp)
 [[ "$dflash" == *$'safe\t70\t'"$MODEL_DIR/Test-DFlash-Draft-Q4_K_M.gguf"* ]]
+
+# MTP: auto-enabled when --supports-mtp is passed
+mtp=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+    suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf" --supports-mtp)
+[[ "$mtp" == *$'safe\t70\t'"$MODEL_DIR/Test-MTP-Draft-Q4_K_M.gguf"* ]]
+
+# MTP: blocked when --supports-mtp is NOT passed
+mtp_blocked=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+    suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf")
+[[ "$mtp_blocked" == *$'blocked\t70\t'"$MODEL_DIR/Test-MTP-Draft-Q4_K_M.gguf"* ]]
 
 echo "Test: model index GUI rows"
 gui=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui)
