@@ -122,6 +122,7 @@ func cmdLaunch(args []string) {
 	gpusFlag := fs.String("gpus", "", "Comma-separated GPU indices")
 	hostFlag := fs.String("host", "", "Listen address (default from config or 0.0.0.0)")
 	visionAuto := fs.Bool("vision", false, "Enable vision (auto-detect/download mmproj)")
+	serverBin := fs.String("server-bin", "", "Override llama-server binary path")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -157,6 +158,13 @@ func cmdLaunch(args []string) {
 	// Find backend binary and detect type BEFORE computing placement,
 	// so split-mode and ik_llama flags are decided correctly.
 	be := findBackend(caps)
+	if *serverBin != "" {
+		if _, err := os.Stat(*serverBin); err == nil {
+			be = detectBackend(*serverBin)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", *serverBin)
+		}
+	}
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
@@ -383,6 +391,7 @@ func cmdDryRun(args []string) {
 	kvQuality := fs.String("kv-quality", "mid", "KV quality")
 	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
 	visionAuto := fs.Bool("vision", false, "Enable vision (auto-detect/download mmproj)")
+	serverBin := fs.String("server-bin", "", "Override llama-server binary path")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -405,6 +414,10 @@ func cmdDryRun(args []string) {
 
 	// Detect backend BEFORE computing placement (affects split-mode, MoE flags, etc.)
 	be := findBackend(caps)
+	if *serverBin != "" {
+		if _, err := os.Stat(*serverBin); err == nil { be = detectBackend(*serverBin)
+		} else { fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", *serverBin) }
+	}
 	backendTag := "llama"
 	binPath := "llama-server"
 	if be != nil {
