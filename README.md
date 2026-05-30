@@ -17,7 +17,7 @@ llm-server-gui             # interactive TUI picker
 
 ## Install
 
-Recommended self-contained setup:
+Recommended v3 self-contained setup. This installs the Go `llm-server` as the primary command, downloads or builds the matching llama.cpp backend, and writes a local app-home config:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
@@ -56,7 +56,7 @@ Legacy one-line install to `~/.local/bin`:
 curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/install.sh | bash
 ```
 
-Detects your GPU, installs scripts to `~/.local/bin`, tries a matching prebuilt release bundle, then falls back to building the right backend from source (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU). CUDA currently uses source builds unless a CUDA bundle was manually attached to the release. See [Requirements](#requirements) for what gets installed.
+Detects your GPU, installs the Go launcher to `~/.local/bin/llm-server`, keeps the legacy Bash launcher as `llm-server-bash` when present, tries a matching prebuilt release bundle, then falls back to building the right backend from source (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU). CUDA currently uses source builds unless a CUDA bundle was manually attached to the release. See [Requirements](#requirements) for what gets installed.
 
 Prefer the manual path? `git clone … && cd llm-server && ./install.sh` works identically.
 
@@ -67,6 +67,7 @@ LLM_INSTALL_MODE=release ./install.sh      # require a prebuilt bundle
 LLM_INSTALL_MODE=build ./install.sh        # force source build
 LLM_INSTALL_BACKEND=skip ./install.sh      # install scripts only
 LLM_INSTALL_PY_DEPS=skip ./install.sh      # skip downloader Python deps
+LLM_INSTALL_MAIN=bash ./install.sh          # keep legacy Bash as primary
 LLM_INSTALL_PREFIX=/usr/local/bin ./install.sh
 ```
 

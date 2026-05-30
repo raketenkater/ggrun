@@ -7,7 +7,8 @@
 # Usage (local):
 #   ./install.sh                  # from a cloned repo
 #
-# Installs scripts to ~/.local/bin. Optionally clones + builds a llama.cpp
+# Installs the Go llm-server launcher, keeps the legacy Bash launcher as
+# llm-server-bash when present, and optionally installs or builds a llama.cpp
 # backend (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU).
 #
 # Flags (env vars):
@@ -19,6 +20,7 @@
 #   LLM_INSTALL_MODEL_DIR=<dir>                           default: ~/ai_models
 #   LLM_INSTALL_BACKEND_ROOT=<dir>                         default: ~
 #   LLM_INSTALL_PY_DEPS=auto|install|skip                  default: auto
+#   LLM_INSTALL_MAIN=go|bash                               default: go
 #   LLM_INSTALL_NONINTERACTIVE=1                          skip prompts
 
 set -euo pipefail
@@ -35,7 +37,13 @@ INSTALL_RELEASE="${LLM_INSTALL_RELEASE:-latest}"
 INSTALL_RELEASE_DIR="${LLM_INSTALL_RELEASE_DIR:-}"
 PY_DEPS_MODE="${LLM_INSTALL_PY_DEPS:-auto}"
 NONINTERACTIVE="${LLM_INSTALL_NONINTERACTIVE:-0}"
+MAIN_IMPL="${LLM_INSTALL_MAIN:-go}"
 [[ ! -t 0 ]] && NONINTERACTIVE=1   # piped via curl | bash → no stdin
+
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+fi
 
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -57,12 +65,19 @@ case "$PY_DEPS_MODE" in
     auto|install|skip) ;;
     *) err "unknown python dependency mode: $PY_DEPS_MODE"; exit 1 ;;
 esac
+case "$MAIN_IMPL" in
+    go|bash) ;;
+    *) err "unknown main implementation: $MAIN_IMPL"; exit 1 ;;
+esac
 
 say "═══ llm-server installer ═══"
 
 # ── Stage 1: use local repo if present; clone only if source fallback needs it ──
 SRC_DIR=""
-if [[ -f "./llm-server" && -f "./llm-server-gui" ]]; then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/llm-server" && -f "$SCRIPT_DIR/llm-server-gui" ]]; then
+    SRC_DIR="$SCRIPT_DIR"
+    ok "Using local repo at $SRC_DIR"
+elif [[ -f "./llm-server" && -f "./llm-server-gui" ]]; then
     SRC_DIR="$(pwd)"
     ok "Using local repo at $SRC_DIR"
 fi
@@ -148,6 +163,31 @@ install_payload_file() {
     install -m "$mode" "$src" "$dst"
 }
 
+install_go_as_main() {
+    local go_bin="$1"
+    [[ "$MAIN_IMPL" == "go" && -x "$go_bin" ]] || return 1
+    if [[ -x "$INSTALL_DIR/llm-server" && ! -e "$INSTALL_DIR/llm-server-bash" ]]; then
+        cp "$INSTALL_DIR/llm-server" "$INSTALL_DIR/llm-server-bash" 2>/dev/null || true
+        chmod 0755 "$INSTALL_DIR/llm-server-bash" 2>/dev/null || true
+    fi
+    install -m 0755 "$go_bin" "$INSTALL_DIR/llm-server"
+    ok "Installed Go llm-server as primary command"
+}
+
+build_go_binary() {
+    local out="$1"
+    [[ -n "$SRC_DIR" && -f "$SRC_DIR/go/go.mod" ]] || return 1
+    command -v go >/dev/null 2>&1 || return 1
+    (cd "$SRC_DIR/go" && go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/llm-server)
+}
+
+link_backend_binary() {
+    local server="$1"
+    [[ -x "$server" ]] || return 1
+    ln -sf "$server" "$INSTALL_DIR/llama-server"
+    ok "Linked llama-server backend into $INSTALL_DIR"
+}
+
 install_release_bundle() {
     local platform asset url tmp archive payload_root found_backend=0
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
@@ -178,7 +218,7 @@ install_release_bundle() {
     payload_root="$(find "$tmp/payload" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     [[ -n "$payload_root" ]] || payload_root="$tmp/payload"
 
-    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-mac llm-server-gui parse_gguf.py model_index.py download_any_gguf.py; do
+    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-bash llm-server-mac llm-server-gui llm-server-go parse_gguf.py model_index.py download_any_gguf.py; do
         if install_payload_file "$payload_root/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         elif install_payload_file "$payload_root/bin/$f" "$INSTALL_DIR/$f"; then
@@ -188,6 +228,9 @@ install_release_bundle() {
     if [[ "$OS" == "Darwin" && -f "$INSTALL_DIR/llm-server-mac" ]]; then
         ln -sf "$INSTALL_DIR/llm-server-mac" "$INSTALL_DIR/llm-server"
         ok "Symlinked llm-server → llm-server-mac"
+    fi
+    if [[ -x "$INSTALL_DIR/llm-server-go" ]]; then
+        install_go_as_main "$INSTALL_DIR/llm-server-go" || true
     fi
 
     for candidate in "$payload_root/llama-server" "$payload_root/bin/llama-server"; do
@@ -255,6 +298,23 @@ else
         install -m 0755 "$SRC_DIR/download_any_gguf.py" "$MODEL_DIR/download_any_gguf.py"
         ok "Installed downloader to $MODEL_DIR"
     fi
+    if [[ -f "$SRC_DIR/go/go.mod" && "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]]; then
+        say "── Building Go llm-server ──"
+        if build_go_binary "$INSTALL_DIR/llm-server-go"; then
+            ok "Built llm-server-go"
+            install_go_as_main "$INSTALL_DIR/llm-server-go" || true
+        elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
+            install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
+            ok "Installed existing llm-server-go"
+            install_go_as_main "$INSTALL_DIR/llm-server-go" || true
+        else
+            warn "Could not build Go llm-server; install Go or use a release bundle. Falling back to Bash launcher."
+        fi
+    elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
+        install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
+        ok "Installed llm-server-go"
+        install_go_as_main "$INSTALL_DIR/llm-server-go" || true
+    fi
     if [[ -f "$SRC_DIR/model_index.py" && ! -f "$MODEL_DIR/model_index.py" ]]; then
         install -m 0755 "$SRC_DIR/model_index.py" "$MODEL_DIR/model_index.py"
         ok "Installed model indexer to $MODEL_DIR"
@@ -317,6 +377,7 @@ if [[ -n "$BACKEND_REPO" ]]; then
         ok "Using bundled backend at $INSTALL_DIR/llama-server"
     elif [[ -x "$BACKEND_BUILD/bin/llama-server" ]]; then
         ok "Backend already built at $BACKEND_BUILD"
+        link_backend_binary "$BACKEND_BUILD/bin/llama-server" || true
     elif [[ "$INSTALL_MODE" == "scripts" ]]; then
         warn "Scripts-only mode selected. Run with LLM_INSTALL_MODE=build to build a backend."
     elif [[ "$INSTALL_MODE" == "release" ]]; then
@@ -338,6 +399,7 @@ if [[ -n "$BACKEND_REPO" ]]; then
             cmake -S "$BACKEND_DIR" -B "$BACKEND_BUILD" -DCMAKE_BUILD_TYPE=Release "${BACKEND_CMAKE[@]}" \
                 && cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-server \
                 && ok "Built llama-server at $BACKEND_BUILD/bin/llama-server" \
+                && link_backend_binary "$BACKEND_BUILD/bin/llama-server" \
                 || warn "Build failed — run 'llm-server --update' later or build manually"
         fi
     else
