@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,8 +25,8 @@ import (
 	"github.com/raketenkater/llm-server/pkg/probe"
 	"github.com/raketenkater/llm-server/pkg/recovery"
 	"github.com/raketenkater/llm-server/pkg/server"
-	"github.com/raketenkater/llm-server/pkg/tune"
 	"github.com/raketenkater/llm-server/pkg/tui"
+	"github.com/raketenkater/llm-server/pkg/tune"
 	"github.com/raketenkater/llm-server/pkg/update"
 )
 
@@ -37,29 +38,34 @@ func main() {
 		return
 	}
 
-	switch os.Args[1] {
+	args := os.Args[1:]
+	if dispatchCompat(args) {
+		return
+	}
+
+	switch args[0] {
 	case "version", "--version", "-v":
 		fmt.Println("llm-server", version)
 	case "detect":
 		cmdDetect()
 	case "launch":
-		cmdLaunch(os.Args[2:])
+		cmdLaunch(args[1:])
 	case "benchmark":
-		cmdBenchmark(os.Args[2:])
+		cmdBenchmark(args[1:])
 	case "daemon":
-		cmdDaemon(os.Args[2:])
+		cmdDaemon(args[1:])
 	case "dry-run":
-		cmdDryRun(os.Args[2:])
+		cmdDryRun(args[1:])
 	case "probe":
 		cmdProbe()
 	case "download":
-		cmdDownload(os.Args[2:])
+		cmdDownload(args[1:])
 	case "tune":
-		cmdTune(os.Args[2:])
+		cmdTune(args[1:])
 	case "gui", "tui":
 		cmdGUI()
 	case "config":
-		cmdConfig(os.Args[2:])
+		cmdConfig(args[1:])
 	case "update":
 		cmdUpdate()
 	default:
@@ -98,6 +104,118 @@ Launch flags:
 `)
 }
 
+func knownCommand(cmd string) bool {
+	switch cmd {
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "download", "tune", "gui", "tui", "config", "update":
+		return true
+	default:
+		return false
+	}
+}
+
+func dispatchCompat(args []string) bool {
+	if len(args) == 0 || knownCommand(args[0]) {
+		return false
+	}
+	if hasArg(args, "--show-configs") {
+		cmdShowConfigs(args)
+		return true
+	}
+	if hasArg(args, "--download") {
+		model := firstPositional(args)
+		if model == "" {
+			fmt.Fprintln(os.Stderr, "Usage: llm-server <repo/name> --download")
+			os.Exit(2)
+		}
+		cmdDownload([]string{model})
+		return true
+	}
+	if hasArg(args, "--ai-tune") {
+		cmdTune(args)
+		return true
+	}
+	if hasArg(args, "--benchmark") {
+		if firstPositional(args) != "" {
+			cmdLaunch(args)
+		} else {
+			cmdBenchmark(benchmarkCompatArgs(args))
+		}
+		return true
+	}
+	if hasArg(args, "--dry-run") {
+		cmdDryRun(args)
+		return true
+	}
+	if strings.HasPrefix(args[0], "-") && firstPositional(args) == "" {
+		return false
+	}
+	cmdLaunch(args)
+	return true
+}
+
+func hasArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func benchmarkCompatArgs(args []string) []string {
+	out := []string{}
+	if model := firstPositional(args); model != "" {
+		out = append(out, "--model", filepath.Base(model))
+	}
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--model" || args[i] == "-m" {
+			if i+1 < len(args) {
+				out = append(out, "--model", filepath.Base(args[i+1]))
+				i++
+			}
+			continue
+		}
+		if args[i] == "--port" || args[i] == "-port" {
+			if i+1 < len(args) {
+				out = append(out, "--port", args[i+1])
+				i++
+			}
+			continue
+		}
+		if key, val, ok := strings.Cut(args[i], "="); ok {
+			switch key {
+			case "--port", "-port":
+				out = append(out, "--port", val)
+			case "--model", "-m":
+				out = append(out, "--model", filepath.Base(val))
+			}
+		}
+	}
+	return out
+}
+
+func firstPositional(args []string) string {
+	skip := false
+	for _, a := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		if a == "--" {
+			return ""
+		}
+		if strings.HasPrefix(a, "-") {
+			switch a {
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "--kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--spec", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
+				skip = true
+			}
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
 func cmdDetect() {
 	caps, err := detect.Detect()
 	if err != nil {
@@ -112,26 +230,360 @@ func cmdDetect() {
 	fmt.Println(string(data))
 }
 
-func cmdLaunch(args []string) {
-	fs := flag.NewFlagSet("launch", flag.ExitOnError)
-	port := fs.Int("port", 8081, "Server port")
-	ctxFlag := fs.String("ctx", "", "Context size: fit, max, or number")
-	kvPlacement := fs.String("kv", "auto", "KV placement")
-	kvQuality := fs.String("kv-quality", "mid", "KV quality")
-	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
-	gpusFlag := fs.String("gpus", "", "Comma-separated GPU indices")
-	hostFlag := fs.String("host", "", "Listen address (default from config or 0.0.0.0)")
-	visionAuto := fs.Bool("vision", false, "Enable vision (auto-detect/download mmproj)")
-	serverBin := fs.String("server-bin", "", "Override llama-server binary path")
-	fs.Parse(args)
+type launchRequest struct {
+	ModelPath    string
+	Port         int
+	CtxFlag      string
+	KVPlacement  string
+	KVQuality    string
+	CPUMode      bool
+	GPUsFlag     string
+	Host         string
+	VisionAuto   bool
+	MMProjPath   string
+	ServerBin    string
+	Backend      string
+	TuneCache    string
+	SpecMode     string
+	ForceSpecMoE bool
+	RamBudgetMB  int
+	Parallel     int
+	Benchmark    bool
+	ExtraArgs    []string
+}
 
-	if fs.NArg() < 1 {
+func parseLaunchArgs(args []string) (*launchRequest, error) {
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+	req := &launchRequest{
+		Port:        cfg.Port,
+		CtxFlag:     cfg.CtxValue(),
+		KVPlacement: cfg.KVPlacement,
+		KVQuality:   cfg.KVQuality,
+		Host:        cfg.Host,
+		VisionAuto:  cfg.Vision,
+		ServerBin:   cfg.LlamaServer,
+		Backend:     cfg.Backend,
+		SpecMode:    cfg.Spec,
+		Parallel:    cfg.Parallel,
+	}
+	if req.Port == 0 {
+		req.Port = 8081
+	}
+	if req.KVPlacement == "" {
+		req.KVPlacement = "auto"
+	}
+	if req.KVQuality == "" {
+		req.KVQuality = "low"
+	}
+	if req.Host == "" {
+		req.Host = "0.0.0.0"
+	}
+	if req.SpecMode == "" {
+		req.SpecMode = "off"
+	}
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if key, val, ok := strings.Cut(a, "="); ok && strings.HasPrefix(key, "-") {
+			switch key {
+			case "--model", "-m":
+				req.ModelPath = val
+				continue
+			case "--port", "-port":
+				req.Port, _ = strconv.Atoi(val)
+				continue
+			case "--ctx", "-ctx", "--ctx-size", "-c":
+				req.CtxFlag = val
+				continue
+			case "--kv", "-kv", "--kv-placement":
+				req.KVPlacement = val
+				continue
+			case "--kv-quality":
+				req.KVQuality = val
+				continue
+			case "--gpus":
+				req.GPUsFlag = val
+				continue
+			case "--host":
+				req.Host = val
+				continue
+			case "--mmproj":
+				if val == "auto" {
+					req.VisionAuto = true
+				} else {
+					req.MMProjPath = val
+				}
+				continue
+			case "--server-bin":
+				req.ServerBin = val
+				continue
+			case "--backend":
+				req.Backend = val
+				continue
+			case "--tune-cache":
+				req.TuneCache = val
+				continue
+			case "--rounds":
+				continue
+			case "--ram-budget":
+				req.RamBudgetMB = parseBudgetMB(val)
+				continue
+			case "--spec":
+				req.SpecMode = val
+				continue
+			case "--parallel":
+				req.Parallel, _ = strconv.Atoi(val)
+				continue
+			}
+		}
+		next := func() (string, error) {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("%s requires a value", a)
+			}
+			i++
+			return args[i], nil
+		}
+		switch a {
+		case "--benchmark":
+			req.Benchmark = true
+			continue
+		case "--dry-run", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
+			continue
+		case "--model", "-m":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.ModelPath = v
+		case "--port", "-port":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.Port, _ = strconv.Atoi(v)
+		case "--ctx", "-ctx", "--ctx-size", "-c":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.CtxFlag = v
+		case "--kv", "-kv", "--kv-placement":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.KVPlacement = v
+		case "--kv-quality":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.KVQuality = v
+		case "--cpu":
+			req.CPUMode = true
+		case "--gpus":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.GPUsFlag = v
+		case "--host":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.Host = v
+		case "--vision":
+			req.VisionAuto = true
+		case "--mmproj":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			if v == "auto" {
+				req.VisionAuto = true
+			} else {
+				req.MMProjPath = v
+			}
+		case "--server-bin":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.ServerBin = v
+		case "--backend":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.Backend = v
+		case "--tune-cache":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.TuneCache = v
+		case "--rounds":
+			_, err := next()
+			if err != nil {
+				return nil, err
+			}
+		case "--ram-budget":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.RamBudgetMB = parseBudgetMB(v)
+		case "--spec":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.SpecMode = v
+		case "--parallel":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.Parallel, _ = strconv.Atoi(v)
+		case "--force-spec-moe":
+			req.ForceSpecMoE = true
+		case "--":
+			req.ExtraArgs = append(req.ExtraArgs, args[i+1:]...)
+			i = len(args)
+		default:
+			if strings.HasPrefix(a, "-") {
+				req.ExtraArgs = append(req.ExtraArgs, a)
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					i++
+					req.ExtraArgs = append(req.ExtraArgs, args[i])
+				}
+				continue
+			}
+			if req.ModelPath == "" {
+				req.ModelPath = a
+			} else {
+				req.ExtraArgs = append(req.ExtraArgs, a)
+			}
+		}
+	}
+	return req, nil
+}
+
+func resolveModelPath(path, modelDir string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	if modelDir == "" {
+		return path
+	}
+	candidate := filepath.Join(modelDir, path)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	return path
+}
+
+func parseBudgetMB(s string) int {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	mult := 1
+	if strings.HasSuffix(s, "G") || strings.HasSuffix(s, "GB") {
+		mult = 1024
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "G")
+	} else if strings.HasSuffix(s, "M") || strings.HasSuffix(s, "MB") {
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "MB"), "M")
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(s))
+	return n * mult
+}
+
+func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
+	if req.ServerBin != "" {
+		if _, err := os.Stat(req.ServerBin); err == nil {
+			return detectBackend(req.ServerBin)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", req.ServerBin)
+	}
+	want := strings.TrimSpace(req.Backend)
+	if want != "" && want != "auto" {
+		for _, b := range caps.Backends {
+			info := detectBackend(b.Path)
+			if backendMatches(info, b.Name, want) {
+				return info
+			}
+		}
+		for _, p := range backendSearchPaths() {
+			if p == "" {
+				continue
+			}
+			if _, err := os.Stat(p); err == nil {
+				info := detectBackend(p)
+				if backendMatches(info, filepath.Base(p), want) {
+					return info
+				}
+			}
+		}
+	}
+	return findBackend(caps)
+}
+
+func backendMatches(info *backendInfo, name, want string) bool {
+	want = strings.TrimSpace(strings.ToLower(want))
+	if want == "" || want == "auto" {
+		return true
+	}
+	name = strings.ToLower(name)
+	tag := strings.ToLower(info.Tag)
+	return tag == want || name == want ||
+		(want == "ik" && tag == "ik_llama") ||
+		(want == "llama" && tag == "llama") ||
+		(want == "vulkan" && (tag == "vulkan" || strings.Contains(strings.ToLower(info.Path), "vulkan"))) ||
+		(want == "llama-vk" && tag == "vulkan")
+}
+
+func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfile, be *backendInfo, cacheDir string) placement.Options {
+	opts := placement.Options{
+		ContextSize:  resolveCtxFlag(req.CtxFlag, model.CTXTrain),
+		KVPlacement:  req.KVPlacement,
+		KVQuality:    req.KVQuality,
+		CPUMode:      req.CPUMode,
+		RamBudgetMB:  req.RamBudgetMB,
+		CacheDir:     cacheDir,
+		Host:         req.Host,
+		BackendTag:   be.Tag,
+		VisionAuto:   req.VisionAuto,
+		MMProjPath:   req.MMProjPath,
+		SpecMode:     req.SpecMode,
+		ForceSpecMoE: req.ForceSpecMoE,
+		CacheFile:    req.TuneCache,
+		Parallel:     req.Parallel,
+	}
+	if req.GPUsFlag != "" {
+		for _, s := range strings.Split(req.GPUsFlag, ",") {
+			idx, _ := strconv.Atoi(strings.TrimSpace(s))
+			opts.GPUs = append(opts.GPUs, idx)
+		}
+	}
+	return opts
+}
+
+func cmdLaunch(args []string) {
+	req, err := parseLaunchArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: llm-server launch <model.gguf>")
 		os.Exit(2)
 	}
-	modelPath := fs.Arg(0)
 
-	// Load config for CacheDir, Host, etc.
 	cfg := config.Defaults()
 	if c, err := config.Load(); err == nil {
 		cfg = c
@@ -143,57 +595,26 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 
-	// Parse model profile from GGUF (use parse_gguf.py for now)
-	model, err := parseModel(modelPath)
+	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
+
+	model, err := parseModel(req.ModelPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
 
-	host := cfg.Host
-	if *hostFlag != "" {
-		host = *hostFlag
-	}
-
-	// Find backend binary and detect type BEFORE computing placement,
-	// so split-mode and ik_llama flags are decided correctly.
-	be := findBackend(caps)
-	if *serverBin != "" {
-		if _, err := os.Stat(*serverBin); err == nil {
-			be = detectBackend(*serverBin)
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", *serverBin)
-		}
-	}
+	be := selectBackend(caps, req)
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
 
-	opts := placement.Options{
-		ContextSize: resolveCtxFlag(*ctxFlag, model.CTXTrain),
-		KVPlacement: *kvPlacement,
-		KVQuality:   *kvQuality,
-		CPUMode:     *cpuMode,
-		CacheDir:    cfg.CacheDir,
-		Host:        host,
-		BackendTag:  be.Tag,
-		VisionAuto:  *visionAuto,
-	}
-	if *gpusFlag != "" {
-		for _, s := range strings.Split(*gpusFlag, ",") {
-			idx, _ := strconv.Atoi(strings.TrimSpace(s))
-			opts.GPUs = append(opts.GPUs, idx)
-		}
-	}
-
-	strategy, err := placement.Compute(caps, model, opts)
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Memory warning before launch
 	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
 	if len(caps.GPUs) > 0 {
 		totalVRAM := int64(0)
@@ -206,46 +627,56 @@ func cmdLaunch(args []string) {
 		}
 	}
 
-	serverArgs := append([]string{be.Path}, strategy.Args(modelPath, *port)...)
+	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = append(serverArgs, req.ExtraArgs...)
+	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
 	}
 
-	// Dynamic health timeout: 240 + size/1700 seconds, min 60s
+	hubDir, ok, err := libhub.Setup(be.Path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] lib hub: %v\n", err)
+	}
+	if ok {
+		os.Setenv("LLM_SERVER_LIB_HUB", hubDir)
+		defer libhub.Cleanup(hubDir)
+	}
+
 	timeoutSec := 240.0 + totalSizeMB/1700.0
 	if timeoutSec < 60 {
 		timeoutSec = 60
 	}
 	if model.IsMoE && totalSizeMB > 100*1024 {
-		timeoutSec = 900 // Large MoE needs more time
+		timeoutSec = 900
 	}
 
-	p, err := server.StartWithTimeout(serverArgs, *port, time.Duration(timeoutSec)*time.Second)
+	p, err := server.StartWithTimeout(serverArgs, req.Port, time.Duration(timeoutSec)*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("[launch] Server running on port %d (PID %d)\n", *port, p.Cmd.Process.Pid)
-
-	// Post-launch system probe: measure CUDA overhead from actual VRAM usage
-	// and buffer sizes reported by llama-server. Caches result for next launch.
+	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 	if model.IsMoE && len(caps.GPUs) > 0 && p.LogBuf != nil {
-		go placement.RunPostLaunchProbe(opts.CacheDir, caps.GPUs, p.LogBuf.String())
+		go placement.RunPostLaunchProbe(cfg.CacheDir, caps.GPUs, p.LogBuf.String())
+	}
+
+	if req.Benchmark {
+		runOneShotBenchmark(req.Port, filepath.Base(req.ModelPath))
+		if err := p.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "[launch] stop after benchmark: %v\n", err)
+		}
+		return
 	}
 
 	fmt.Println("[launch] Press Ctrl+C to stop")
-
-	// Wait for shutdown signal, then clean up the child process group.
-	// Without this, Ctrl+C kills only the Go binary — llama-server
-	// becomes an orphan, leaking VRAM and leaving zombie processes.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
 	<-sigCh
 	fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
 
-	// Stop with a hard deadline — second Ctrl+C will force-exit.
 	done := make(chan struct{})
 	go func() {
 		p.Stop()
@@ -255,10 +686,14 @@ func cmdLaunch(args []string) {
 	case <-done:
 	case <-sigCh:
 		fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
-		if p.Cmd.Process != nil { p.Cmd.Process.Kill() }
+		if p.Cmd.Process != nil {
+			p.Cmd.Process.Kill()
+		}
 	case <-time.After(30 * time.Second):
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
-		if p.Cmd.Process != nil { p.Cmd.Process.Kill() }
+		if p.Cmd.Process != nil {
+			p.Cmd.Process.Kill()
+		}
 	}
 }
 
@@ -383,22 +818,91 @@ func cmdGUI() {
 	}
 }
 
-func cmdDryRun(args []string) {
-	fs := flag.NewFlagSet("dry-run", flag.ExitOnError)
-	port := fs.Int("port", 8081, "Server port")
-	ctxFlag := fs.String("ctx", "", "Context size: fit, max, or number")
-	kvPlacement := fs.String("kv", "auto", "KV placement")
-	kvQuality := fs.String("kv-quality", "mid", "KV quality")
-	cpuMode := fs.Bool("cpu", false, "Force CPU-only")
-	visionAuto := fs.Bool("vision", false, "Enable vision (auto-detect/download mmproj)")
-	serverBin := fs.String("server-bin", "", "Override llama-server binary path")
-	fs.Parse(args)
+func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTag string, vision bool, caps *detect.Capabilities) []string {
+	if req == nil {
+		return serverArgs
+	}
+	if req.TuneCache != "" {
+		return applySelectedTuneCache(req, serverArgs)
+	}
+	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, tuneHardwareHash(caps))
+	if path == "" {
+		return serverArgs
+	}
+	autoReq := *req
+	autoReq.TuneCache = path
+	fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
+	return applySelectedTuneCache(&autoReq, serverArgs)
+}
 
-	if fs.NArg() < 1 {
+func bestTuneCachePath(cacheDir, modelName, backendTag string, vision bool, hardwareHash string) string {
+	if cacheDir == "" || modelName == "" {
+		return ""
+	}
+	rows := tune.ListTunedConfigs(cacheDir, modelName, tuneCacheBackendTag(backendTag), vision)
+	for _, row := range rows {
+		if hardwareHash == "" || strings.Contains(filepath.Base(row.Path), "_hw"+hardwareHash+"_") {
+			return row.Path
+		}
+	}
+	return ""
+}
+
+func tuneHardwareHash(caps *detect.Capabilities) string {
+	if caps == nil {
+		return ""
+	}
+	names := make([]string, 0, len(caps.GPUs))
+	for _, gpu := range caps.GPUs {
+		names = append(names, gpu.Name)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return tune.BashHardwareHash(names)
+}
+
+func tuneCacheBackendTag(backendTag string) string {
+	b := strings.ToLower(strings.TrimSpace(backendTag))
+	switch {
+	case strings.Contains(b, "vulkan"):
+		return "vulkan"
+	case strings.Contains(b, "ik"):
+		return "ik"
+	default:
+		return "llama"
+	}
+}
+
+func applySelectedTuneCache(req *launchRequest, serverArgs []string) []string {
+	if req == nil || req.TuneCache == "" {
+		return serverArgs
+	}
+	summary, err := tune.LoadTuneFile(req.TuneCache, filepath.Base(req.ModelPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid --tune-cache: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("[tune] Using selected AI-tuned config: %s\n", filepath.Base(req.TuneCache))
+	if summary.BaselineWins || len(summary.Flags) == 0 {
+		fmt.Println("[tune] Baseline was best; no override flags applied")
+		return serverArgs
+	}
+	serverArgs = tune.ApplyOverrides(serverArgs, summary.Flags, tune.DefaultProtectedFlags())
+	fmt.Printf("[tune] Config: %s (expected %.2f tok/s)\n", summary.Name, summary.GenTPS)
+	return serverArgs
+}
+
+func cmdDryRun(args []string) {
+	req, err := parseLaunchArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: llm-server dry-run <model.gguf>")
 		os.Exit(2)
 	}
-	modelPath := fs.Arg(0)
 
 	caps, err := detect.Detect()
 	if err != nil {
@@ -406,49 +910,81 @@ func cmdDryRun(args []string) {
 		os.Exit(1)
 	}
 
-	model, err := parseModel(modelPath)
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
+
+	model, err := parseModel(req.ModelPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Detect backend BEFORE computing placement (affects split-mode, MoE flags, etc.)
-	be := findBackend(caps)
-	if *serverBin != "" {
-		if _, err := os.Stat(*serverBin); err == nil { be = detectBackend(*serverBin)
-		} else { fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", *serverBin) }
-	}
+	be := selectBackend(caps, req)
 	backendTag := "llama"
 	binPath := "llama-server"
 	if be != nil {
 		binPath = be.Path
 		backendTag = be.Tag
+	} else {
+		be = &backendInfo{Path: binPath, Tag: backendTag}
 	}
 
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
-	}
-
-	strategy, err := placement.Compute(caps, model, placement.Options{
-		ContextSize: resolveCtxFlag(*ctxFlag, model.CTXTrain),
-		KVPlacement: *kvPlacement,
-		KVQuality:   *kvQuality,
-		CPUMode:     *cpuMode,
-		CacheDir:    cfg.CacheDir,
-		Host:        cfg.Host,
-		BackendTag:  backendTag,
-		VisionAuto:  *visionAuto,
-	})
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
 
-	serverArgs := append([]string{binPath}, strategy.Args(modelPath, *port)...)
+	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = append(serverArgs, req.ExtraArgs...)
+	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	fmt.Println(strings.Join(serverArgs, " "))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
+	}
+}
+
+func cmdShowConfigs(args []string) {
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+	modelName := ""
+	for _, a := range args {
+		if a == "--show-configs" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		modelName = filepath.Base(a)
+		break
+	}
+	if modelName != "" {
+		var rows []tune.ConfigEntry
+		for _, backend := range []string{"llama", "ik", "ik_llama", "vulkan"} {
+			rows = append(rows, tune.ListTunedConfigs(cfg.CacheDir, modelName, backend, false)...)
+			rows = append(rows, tune.ListTunedConfigs(cfg.CacheDir, modelName, backend, true)...)
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].GenTPS > rows[j].GenTPS })
+		if len(rows) == 0 {
+			fmt.Printf("No tuned configs found for %s in %s\n", modelName, cfg.CacheDir)
+			return
+		}
+		for _, row := range rows {
+			fmt.Printf("%s\n  %s\n", row.Label, row.Path)
+		}
+		return
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(cfg.CacheDir, "tune_*.json"))
+	sort.Strings(matches)
+	if len(matches) == 0 {
+		fmt.Printf("No tuned configs found in %s\n", cfg.CacheDir)
+		return
+	}
+	for _, path := range matches {
+		fmt.Println(path)
 	}
 }
 
@@ -479,24 +1015,50 @@ func cmdDownload(args []string) {
 		cfg = f
 	}
 
-	d := download.New(cfg.ModelDir, cfg.CacheDir)
+	d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
 	if err := d.Run(repo, caps); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func cmdTune(args []string) {
-	fs := flag.NewFlagSet("tune", flag.ExitOnError)
-	port := fs.Int("port", 8081, "Server port")
-	rounds := fs.Int("rounds", 3, "AI-tune rounds")
-	fs.Parse(args)
+func tuneRoundsFromArgs(args []string, fallback int) int {
+	if fallback <= 0 {
+		fallback = 3
+	}
+	for i := 0; i < len(args); i++ {
+		if key, val, ok := strings.Cut(args[i], "="); ok && (key == "--rounds" || key == "-rounds") {
+			if n, err := strconv.Atoi(val); err == nil && n > 0 {
+				return n
+			}
+		}
+		if args[i] == "--rounds" || args[i] == "-rounds" {
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+					return n
+				}
+			}
+		}
+	}
+	return fallback
+}
 
-	if fs.NArg() < 1 {
+func cmdTune(args []string) {
+	req, err := parseLaunchArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: llm-server tune <model.gguf>")
 		os.Exit(2)
 	}
-	modelPath := fs.Arg(0)
+
+	cfg := config.Defaults()
+	if f, err := config.Load(); err == nil {
+		cfg = f
+	}
+	rounds := tuneRoundsFromArgs(args, cfg.TuneRounds)
 
 	caps, err := detect.Detect()
 	if err != nil {
@@ -504,47 +1066,61 @@ func cmdTune(args []string) {
 		os.Exit(1)
 	}
 
-	info, err := gguf.Parse(modelPath)
+	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
+
+	model, err := parseModel(req.ModelPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
 
-	model := infoToProfile(info, modelPath)
-	strategy, err := placement.Compute(caps, model, placement.Options{})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
-		os.Exit(1)
-	}
-
-	be := findBackend(caps)
+	be := selectBackend(caps, req)
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		os.Exit(1)
+	}
 	strategy.BackendTag = be.Tag
 
-	serverArgs := append([]string{be.Path}, strategy.Args(modelPath, *port)...)
+	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = append(serverArgs, req.ExtraArgs...)
 
-	cfg := config.Defaults()
-	if f, err := config.Load(); err == nil {
-		cfg = f
+	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
+	timeoutSec := 240.0 + totalSizeMB/1700.0
+	if timeoutSec < 60 {
+		timeoutSec = 60
+	}
+	if model.IsMoE && totalSizeMB > 100*1024 {
+		timeoutSec = 900
 	}
 
 	cache := tune.NewCache(cfg.CacheDir)
-
 	engine := &tune.Engine{
-		BaseURL: fmt.Sprintf("http://localhost:%d", *port),
-		Model:   filepath.Base(modelPath),
-		Rounds:  *rounds,
+		BaseURL: fmt.Sprintf("http://localhost:%d", req.Port),
+		Model:   filepath.Base(req.ModelPath),
+		Rounds:  rounds,
 		Cache:   cache,
 		Caps:    caps,
+		Backend: be.Tag,
+		Vision:  strategy.MMProjPath != "",
 		OnProgress: func(msg string) {
 			fmt.Println("[tune]", msg)
 		},
+		StartServer: func(flags []string) (func(), error) {
+			p, err := server.StartWithTimeout(flags, req.Port, time.Duration(timeoutSec)*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			return func() { _ = p.Stop() }, nil
+		},
 	}
 
-	entry, err := engine.Run(modelPath, serverArgs)
+	entry, err := engine.Run(req.ModelPath, serverArgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -558,10 +1134,13 @@ func cmdBenchmark(args []string) {
 	port := fs.Int("port", 8081, "Server port")
 	model := fs.String("model", "default", "Model name")
 	fs.Parse(args)
+	runOneShotBenchmark(*port, *model)
+}
 
+func runOneShotBenchmark(port int, model string) {
 	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://localhost:%d", *port),
-		Model:   *model,
+		BaseURL: fmt.Sprintf("http://localhost:%d", port),
+		Model:   model,
 	}
 	res, err := runner.Run()
 	if err != nil {
@@ -597,11 +1176,14 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		cfg = c
 	}
 	opts := placement.Options{
-		KVPlacement: "auto",
-		KVQuality:   "mid",
+		ContextSize: resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
+		KVPlacement: cfg.KVPlacement,
+		KVQuality:   cfg.KVQuality,
 		CacheDir:    cfg.CacheDir,
 		Host:        cfg.Host,
 		BackendTag:  be.Tag,
+		VisionAuto:  cfg.Vision,
+		SpecMode:    cfg.Spec,
 	}
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
@@ -721,40 +1303,43 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 	totalSizeMB := int(totalBytes / 1024 / 1024)
 
 	return &placement.ModelProfile{
-		Path:               path,
-		SizeBytes:          totalBytes,
-		TotalSizeMB:        totalSizeMB,
-		NumLayers:          info.BlockCount,
-		NumParams:          info.EstimateParams(),
-		IsMoE:              info.IsMoE,
-		NumExperts:         numExperts,
-		ContextSize:        info.ContextLength,
-		HiddenSize:         info.EmbeddingLength,
-		HeadCount:          headCount,
-		HeadCountKV:        info.HeadCountKV,
-		KeyLength:          info.KeyLength,
-		ValueLength:        info.ValueLength,
-		VocabSize:          info.VocabSize,
-		QuantType:          "", // not parsed from gguf.py output
-		ExpertBytes:        info.ExpertBytes,
-		NonExpertBytes:     info.NonExpertBytes,
-		Fused:              info.Fused,
-		EmbeddingLength:    info.EmbeddingLength,
-		FeedForwardLength:  info.FeedForwardLength,
-		ExpertUsedCount:    info.ExpertUsed,
-		ExpertFF:           info.ExpFF,
-		ExpertSharedFF:     info.ExpSharedFF,
-		RopeDim:            info.NRot,
-		HasSSM:             info.SSM,
-		FullAttnInterval:   info.FullAttnInterval,
-		SlidingWindow:      info.SlidingWindow,
-		HasShexp:           info.HasShexp,
-		KVLoraRank:         info.KVLoraRank,
-		QLoraRank:          info.QLoraRank,
-		KeyLengthMLA:       info.KeyLengthMLA,
-		ValueLengthMLA:     info.ValueLengthMLA,
-		CTXTrain:           info.ContextLength,
-		ModelArch:          info.Architecture,
+		Path:              path,
+		Name:              info.Name,
+		Basename:          info.Basename,
+		QuantizedBy:       info.QuantizedBy,
+		SizeBytes:         totalBytes,
+		TotalSizeMB:       totalSizeMB,
+		NumLayers:         info.BlockCount,
+		NumParams:         info.EstimateParams(),
+		IsMoE:             info.IsMoE,
+		NumExperts:        numExperts,
+		ContextSize:       info.ContextLength,
+		HiddenSize:        info.EmbeddingLength,
+		HeadCount:         headCount,
+		HeadCountKV:       info.HeadCountKV,
+		KeyLength:         info.KeyLength,
+		ValueLength:       info.ValueLength,
+		VocabSize:         info.VocabSize,
+		QuantType:         "", // not parsed from gguf.py output
+		ExpertBytes:       info.ExpertBytes,
+		NonExpertBytes:    info.NonExpertBytes,
+		Fused:             info.Fused,
+		EmbeddingLength:   info.EmbeddingLength,
+		FeedForwardLength: info.FeedForwardLength,
+		ExpertUsedCount:   info.ExpertUsed,
+		ExpertFF:          info.ExpFF,
+		ExpertSharedFF:    info.ExpSharedFF,
+		RopeDim:           info.NRot,
+		HasSSM:            info.SSM,
+		FullAttnInterval:  info.FullAttnInterval,
+		SlidingWindow:     info.SlidingWindow,
+		HasShexp:          info.HasShexp,
+		KVLoraRank:        info.KVLoraRank,
+		QLoraRank:         info.QLoraRank,
+		KeyLengthMLA:      info.KeyLengthMLA,
+		ValueLengthMLA:    info.ValueLengthMLA,
+		CTXTrain:          info.ContextLength,
+		ModelArch:         info.Architecture,
 	}
 }
 
@@ -829,21 +1414,27 @@ func totalModelSize(path string) int64 {
 }
 
 type backendInfo struct {
-	Path    string
-	IsIK    bool
+	Path              string
+	IsIK              bool
 	SupportsReasoning bool
-	Tag     string
+	Tag               string
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
 func resolveCtxFlag(s string, nativeCtx int) int {
 	s = strings.TrimSpace(s)
-	if s == "" || s == "fit" || s == "auto" { return 0 }
+	if s == "" || s == "fit" || s == "auto" {
+		return 0
+	}
 	if s == "max" || s == "native" {
-		if nativeCtx > 0 { return nativeCtx }
+		if nativeCtx > 0 {
+			return nativeCtx
+		}
 		return 65536
 	}
-	if n, err := strconv.Atoi(s); err == nil && n > 0 { return n }
+	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return n
+	}
 	return 0
 }
 
@@ -854,16 +1445,7 @@ func findBackend(caps *detect.Capabilities) *backendInfo {
 			return detectBackend(b.Path)
 		}
 	}
-	// Fallback: search common build paths
-	home := os.Getenv("HOME")
-	paths := []string{
-		os.Getenv("LLAMA_SERVER"),
-		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server"),
-		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"),
-		"/usr/local/bin/llama-server",
-		"/usr/bin/llama-server",
-	}
-	for _, p := range paths {
+	for _, p := range backendSearchPaths() {
 		if p != "" {
 			if _, err := os.Stat(p); err == nil {
 				return detectBackend(p)
@@ -873,15 +1455,31 @@ func findBackend(caps *detect.Capabilities) *backendInfo {
 	return nil
 }
 
+func backendSearchPaths() []string {
+	home := os.Getenv("HOME")
+	return []string{
+		os.Getenv("LLAMA_SERVER"),
+		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server"),
+		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"),
+		"/usr/local/bin/llama-server",
+		"/usr/bin/llama-server",
+	}
+}
+
 // detectBackend runs --help to determine if this is ik_llama.cpp fork.
 // llama-server --help returns exit code 1, so we check the output regardless of error.
 func detectBackend(path string) *backendInfo {
 	info := &backendInfo{Path: path, Tag: "llama"}
 	out, _ := exec.Command(path, "--help").Output()
 	help := string(out)
+	lowerHelp := strings.ToLower(help)
+	lowerPath := strings.ToLower(path)
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
 		info.IsIK = true
 		info.Tag = "ik_llama"
+	} else if strings.Contains(lowerHelp, "vulkan") || strings.Contains(lowerPath, "build-vulkan") || strings.Contains(lowerPath, "vulkan") {
+		info.Tag = "vulkan"
 	}
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true

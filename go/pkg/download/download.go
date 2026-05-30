@@ -18,15 +18,16 @@ type Downloader struct {
 }
 
 // New creates a Downloader with auto-discovered script path.
-func New(modelDir, cacheDir string) *Downloader {
+// appHome is the configured APP_HOME or repo root (may be empty).
+func New(modelDir, cacheDir, appHome string) *Downloader {
 	return &Downloader{
-		ScriptPath: findScript(),
+		ScriptPath: findScript(appHome),
 		ModelDir:   modelDir,
 		CacheDir:   cacheDir,
 	}
 }
 
-func findScript() string {
+func findScript(appHome string) string {
 	candidates := []string{
 		"download_any_gguf.py",
 		filepath.Join("..", "download_any_gguf.py"),
@@ -35,6 +36,10 @@ func findScript() string {
 	// Check LLM_SERVER_HOME env var (repo root)
 	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
 		candidates = append(candidates, filepath.Join(home, "download_any_gguf.py"))
+	}
+	// Check configured app home
+	if appHome != "" {
+		candidates = append(candidates, filepath.Join(appHome, "download_any_gguf.py"))
 	}
 	// Try relative to binary (installed alongside llm-server)
 	if exe, err := os.Executable(); err == nil {
@@ -51,22 +56,14 @@ func findScript() string {
 			return c
 		}
 	}
-	// Fallback: try common install locations
-	for _, dir := range []string{
-		"/home/mik/llm-server",
-		os.ExpandEnv("$HOME/llm-server"),
-		"/opt/llm-server",
-	} {
-		p := filepath.Join(dir, "download_any_gguf.py")
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return "download_any_gguf.py"
+	return ""
 }
 
 // Run executes the downloader for the given repo.
 func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
+	if d.ScriptPath == "" {
+		return fmt.Errorf("download_any_gguf.py not found — set LLM_SERVER_HOME or APP_HOME to the llm-server repo root")
+	}
 	if _, err := os.Stat(d.ScriptPath); os.IsNotExist(err) {
 		return fmt.Errorf("downloader script not found: %s", d.ScriptPath)
 	}

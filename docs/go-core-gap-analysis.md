@@ -10,7 +10,8 @@ should intentionally improve instead of copying Bash behavior exactly.
 - Bash entrypoints still exist: `llm-server`, `llm-server-gui`, `llm-server-mac`.
 - Go implementation exists under `go/` with packages for config, detection,
   placement, daemon, recovery, TUI, tuning, update, probe, download, and vision.
-- The Go binary is not yet wired as the default installed `llm-server`.
+- The Go binary is now wired into CI/release as `llm-server-go` while Bash remains
+  the installed compatibility entrypoint.
 - Local environment note: `go` was not on PATH during this review, so Go tests
   could not be run here.
 
@@ -45,15 +46,14 @@ Bash:
 
 Go:
 - Main command exists at `go/cmd/llm-server/main.go`.
-- No verified install path makes the Go binary the default `llm-server`.
-- No wrapper decision is documented: Go primary with Bash fallback, or Bash
-  primary with opt-in Go.
+- CI/release packaging now builds and ships the Go binary as `llm-server-go`.
+- Bash remains the default installed `llm-server` until real hardware parity is
+  proven.
 
 Needed:
-- Add build target, install target, and release artifact plan.
-- Decide binary name during transition, for example `llm-server-go` first, then
-  promote to `llm-server`.
-- Keep a `--use-bash` or fallback path until Go parity is proven.
+- Promote `llm-server-go` to `llm-server` only after parity tests and real GPU
+  validation pass.
+- Keep Bash fallback until macOS, vision, tune, and large MoE coverage are proven.
 
 ### CLI Compatibility
 
@@ -66,7 +66,15 @@ Bash supports many existing flags and positional flows:
 - `--ai-tune`, `--retune`, `--rounds`, `--tune-cache`
 - `--show-configs`, `config show/edit/path/reset`
 
-Go currently uses subcommands:
+Go supports both subcommands and the common Bash positional compatibility flow:
+- `llm-server <model.gguf>`
+- `llm-server <model.gguf> --dry-run`
+- `llm-server <repo/name> --download`
+- `llm-server <model.gguf> --ai-tune`
+- `llm-server <model.gguf> --benchmark`
+- `llm-server <model.gguf> --show-configs`
+
+Go also uses subcommands:
 - `launch <model.gguf>`
 - `dry-run <model.gguf>`
 - `download <repo/name>`
@@ -74,15 +82,13 @@ Go currently uses subcommands:
 - `daemon`, `probe`, `detect`, `config`, `update`, `gui`
 
 Gap:
-- Existing scripts and user muscle memory expect the Bash positional CLI.
-- Go needs a compatibility parser or a wrapper that maps old forms to new
-  subcommands.
+- The most common Bash positional flows are now parsed by Go, including equals
+  forms such as `--ctx-size=max`.
+- Full Bash-vs-Go golden dry-run comparisons are still needed for long-tail flags.
 
 Needed:
-- Support `llm-server model.gguf` as an alias for `launch`.
-- Support `llm-server model.gguf --dry-run` as an alias for `dry-run`.
-- Support old flag spelling in addition to Go short names.
 - Add tests that compare Bash and Go command outputs for common invocations.
+- Decide deprecation warnings for old spellings after v3 is stable.
 
 ### Config Format Compatibility
 
@@ -100,13 +106,11 @@ Go:
   `LLM_*` environment names.
 
 Gap:
-- Existing user config files use `LLM_PORT`, `LLM_CTX_SIZE`,
-  `LLM_KV_PLACEMENT`, etc. Go must load those exact keys reliably.
-- Config show/edit should generate the same canonical keys users already have.
+- Go now accepts both legacy unprefixed keys and canonical `LLM_*` keys, and
+  writes canonical `LLM_*` keys.
+- More migration tests are still needed for `config.sh` edge cases.
 
 Needed:
-- Accept both legacy unprefixed keys and current `LLM_*` keys.
-- Write only canonical `LLM_*` keys going forward.
 - Add tests for env-over-file precedence and `config.sh` migration.
 
 ### Context Size Semantics
@@ -125,15 +129,12 @@ Go:
 - CLI config currently models context as an integer.
 
 Gap:
-- Go needs first-class context mode, not only an integer.
-- `fit`, `auto`, and `max` need to survive config parsing, TUI selection, and
-  CLI compatibility.
+- Go config/CLI now carries context intent as `fit`, `max`, or manual numeric
+  values.
+- TUI parity and Bash-vs-Go dry-run goldens still need broader coverage.
 
 Needed:
-- Add a context mode enum: `fit`, `max`, `manual`.
-- Preserve exact user intent in config and launch args.
-- Add tests for `--ctx-size fit`, `--ctx-size max`, numeric env/config values,
-  and non-interactive dry runs.
+- Add tests for non-interactive dry runs and TUI context selection.
 
 ### Vision / mmproj Safety
 
@@ -241,18 +242,16 @@ Bash:
 Go:
 - Has `placement/draft.go`.
 - Can detect draft model candidates.
-- Falls back to ngram speculative flags.
-- Recent branch history shows changes around disabling auto spec when it has no
-  GPU-model speedup, then using ngram defaults.
+- Keeps speculative decoding off by default.
+- Supports explicit `--spec ngram` and gated draft-model auto mode.
 
 Gap:
-- Need a policy decision: speculative decoding should be opt-in, auto, or
-  hardware/model gated.
-- Need benchmark proof that default ngram helps before enabling it by default.
+- Policy is now conservative: `off` by default, `ngram` explicit, and draft-model
+  auto only when a compatible local draft is present.
+- Need benchmark proof before enabling any speculative mode by default.
 
 Needed:
-- Add a config/CLI option such as `--spec off|ngram|draft|auto`.
-- Record spec mode in dry-run output and tune cache keys.
+- Record spec mode in tune cache keys.
 - Only enable auto-spec when a measured benchmark proves positive gain.
 
 ### Daemon / Reload Behavior
@@ -420,11 +419,11 @@ The daemon can become a real management layer:
 
 - [ ] Install or expose Go on the development machine.
 - [ ] Run `go test ./...` in `go/`.
-- [ ] Add old CLI compatibility mode to Go.
-- [ ] Make Go config read/write canonical `LLM_*` keys.
-- [ ] Add `fit|max|manual` context mode to Go config and CLI.
+- [x] Add old CLI compatibility mode to Go for common launch/download/dry-run/tune/show-configs/benchmark flows.
+- [x] Make Go config read/write canonical `LLM_*` keys.
+- [x] Add `fit|max|manual` context mode to Go config and CLI.
 - [ ] Add mmproj metadata validation in Go.
 - [ ] Add Bash-vs-Go dry-run golden tests.
-- [ ] Decide default speculative decoding policy.
+- [x] Decide default speculative decoding policy: off by default, explicit ngram/draft modes only.
 - [ ] Validate V100/SM70 tuning behavior against issue #16.
 - [ ] Decide when Go replaces Bash as the default entrypoint.

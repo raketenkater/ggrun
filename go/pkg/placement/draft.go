@@ -15,48 +15,61 @@ import (
 type DraftType string
 
 const (
-	DraftNone       DraftType = "none"
-	DraftModel      DraftType = "draft_model"
-	DraftNgram      DraftType = "ngram"
+	DraftNone  DraftType = "none"
+	DraftModel DraftType = "draft_model"
+	DraftNgram DraftType = "ngram"
 )
 
 // DraftConfig holds computed speculative decoding parameters.
 // All values are calculated from hardware + model metadata — nothing is guessed.
 type DraftConfig struct {
-	Type          DraftType `json:"type"`
-	Path          string    `json:"path,omitempty"`          // draft model GGUF path
-	DraftGPU      int       `json:"draft_gpu,omitempty"`     // CUDA device index for draft
-	CTXSizeDraft  int       `json:"ctx_size_draft,omitempty"` // context size for draft
-	KVTypeDraft   string    `json:"kv_type_draft,omitempty"`  // KV type for draft
-	ThreadsDraft  int       `json:"threads_draft,omitempty"`  // threads for draft generation
-	SpecAutoTune  bool      `json:"spec_autotune"`            // let llama.cpp auto-tune params
+	Type         DraftType `json:"type"`
+	Path         string    `json:"path,omitempty"`           // draft model GGUF path
+	DraftGPU     int       `json:"draft_gpu,omitempty"`      // CUDA device index for draft
+	CTXSizeDraft int       `json:"ctx_size_draft,omitempty"` // context size for draft
+	KVTypeDraft  string    `json:"kv_type_draft,omitempty"`  // KV type for draft
+	ThreadsDraft int       `json:"threads_draft,omitempty"`  // threads for draft generation
+	SpecAutoTune bool      `json:"spec_autotune"`            // let llama.cpp auto-tune params
 	// Draft model params (calculated, not guessed)
-	DraftMax      int       `json:"draft_max,omitempty"`      // max draft tokens per batch
-	DraftMin      int       `json:"draft_min,omitempty"`      // min draft tokens per batch
-	PSplit        float64   `json:"p_split,omitempty"`        // speculative split probability
+	DraftMax int     `json:"draft_max,omitempty"` // max draft tokens per batch
+	DraftMin int     `json:"draft_min,omitempty"` // min draft tokens per batch
+	PSplit   float64 `json:"p_split,omitempty"`   // speculative split probability
 	// Ngram params (fallback when no matching draft model exists)
-	SpecType      string    `json:"spec_type,omitempty"`      // ngram - cache, ngram - simple, etc.
-	NgramN        int       `json:"ngram_n,omitempty"`
-	NgramM        int       `json:"ngram_m,omitempty"`
-	NgramMinHits  int       `json:"ngram_min_hits,omitempty"`
+	SpecType     string `json:"spec_type,omitempty"` // ngram - cache, ngram - simple, etc.
+	NgramN       int    `json:"ngram_n,omitempty"`
+	NgramM       int    `json:"ngram_m,omitempty"`
+	NgramMinHits int    `json:"ngram_min_hits,omitempty"`
 }
 
 // ComputeDraft decides the speculative decoding strategy for a target model.
-// It detects matching draft models, calculates GPU placement, and falls back
-// to ngram speculation when no compatible draft exists.
+// It only enables draft-model speculation when a compatible local draft exists;
+// ngram speculation is explicit because it needs workload-specific proof.
 func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options) *DraftConfig {
 	cfg := &DraftConfig{
 		Type:         DraftNone,
-		SpecAutoTune: true, // always preferred — llama.cpp measures at runtime
-		DraftMax:     16,   // llama.cpp default
-		PSplit:       0.1,  // llama.cpp default
+		SpecAutoTune: true, // llama.cpp measures speculative params at runtime
+		DraftMax:     16,
+		PSplit:       0.1,
 	}
 
-	if len(caps.GPUs) == 0 {
+	mode := strings.ToLower(strings.TrimSpace(opts.SpecMode))
+	if mode == "" || mode == "off" || len(caps.GPUs) == 0 {
+		return cfg
+	}
+	if target.IsMoE && !opts.ForceSpecMoE {
+		return cfg
+	}
+	if mode == "ngram" {
+		cfg.Type = DraftNgram
+		cfg.NgramN = 12
+		cfg.NgramM = 48
+		cfg.NgramMinHits = 1
 		return cfg
 	}
 
-	// Scan for matching draft model in the same directory as target
+	// Scan for matching draft model in the same directory as target. Auto mode
+	// only enables draft-model speculation when a compatible local draft exists;
+	// ngram speculation is explicit because it needs workload-specific proof.
 	modelDir := filepath.Dir(target.Path)
 	candidate := findDraftCandidate(target, modelDir)
 
@@ -112,14 +125,6 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 			cfg.KVTypeDraft = computeDraftKVType(caps, draftInfo)
 		}
 		// If arch not ok, fall through to ngram below
-	}
-
-	// No compatible draft model — use ngram speculation as fallback
-	if cfg.Type == DraftNone {
-		cfg.Type = DraftNgram
-		cfg.NgramN = 12
-		cfg.NgramM = 48
-		cfg.NgramMinHits = 1
 	}
 
 	return cfg

@@ -14,6 +14,7 @@ type Info struct {
 	Architecture      string `json:"arch"`
 	Name              string `json:"name"`
 	Basename          string `json:"basename"`
+	QuantizedBy       string `json:"quantized_by"`
 	BlockCount        int    `json:"layers"`
 	ContextLength     int    `json:"ctx_train"`
 	EmbeddingLength   int    `json:"embd"`

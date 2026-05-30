@@ -40,15 +40,15 @@ const (
 type Strategy struct {
 	Type           StrategyType `json:"type"`
 	ContextSize    int          `json:"context_size"`
-	GPULayers      int          `json:"gpu_layers"`      // always 999; llama-server decides
+	GPULayers      int          `json:"gpu_layers"` // always 999; llama-server decides
 	TensorSplit    []float64    `json:"tensor_split,omitempty"`
 	SplitMode      string       `json:"split_mode,omitempty"` // graph, layer, row
 	MainGPU        int          `json:"main_gpu,omitempty"`
-	KVPlacement    string       `json:"kv_placement"`         // gpu, cpu, auto
-	KVQuality      string       `json:"kv_quality"`           // high, mid, low
-	KVType         string       `json:"kv_type"`              // f16, q8_0, q4_0
-	NCPUMoE        int          `json:"n_cpu_moe,omitempty"`    // for MoE offload
-	OTString       string       `json:"ot_string,omitempty"`    // -ot override-tensor flags
+	KVPlacement    string       `json:"kv_placement"`        // gpu, cpu, auto
+	KVQuality      string       `json:"kv_quality"`          // high, mid, low
+	KVType         string       `json:"kv_type"`             // f16, q8_0, q4_0
+	NCPUMoE        int          `json:"n_cpu_moe,omitempty"` // for MoE offload
+	OTString       string       `json:"ot_string,omitempty"` // -ot override-tensor flags
 	MMap           bool         `json:"mmap"`
 	MLock          bool         `json:"mlock"`
 	FlashAttention bool         `json:"flash_attention"`
@@ -57,84 +57,99 @@ type Strategy struct {
 	UBatchSize     int          `json:"ubatch_size"`
 	BackendTag     string       `json:"backend_tag,omitempty"` // "llama" or "ik_llama"
 	IsMoE          bool         `json:"is_moe"`
-	ReasoningOff   bool         `json:"reasoning_off"`         // default off for OpenAI compat
-	ThreadsBatch   int          `json:"threads_batch"`         // batch threads (logical cores)
+	ReasoningOff   bool         `json:"reasoning_off"` // default off for OpenAI compat
+	ThreadsBatch   int          `json:"threads_batch"` // batch threads (logical cores)
 	Parallel       int          `json:"parallel,omitempty"`
-	CRAM           int          `json:"cram,omitempty"`        // prompt cache MB
+	CRAM           int          `json:"cram,omitempty"` // prompt cache MB
 	MaxCheckpoints int          `json:"max_checkpoints,omitempty"`
 	UseCUDAGraphs  bool         `json:"use_cuda_graphs,omitempty"`
 	Host           string       `json:"host,omitempty"`        // listen address
 	HasSSM         bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
 	Draft          *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
-	MMProjPath     string       `json:"mmproj_path,omitempty"`  // vision projector GGUF
-	MMProjSizeMB   int          `json:"-"`                       // mmproj VRAM on primary GPU
+	MMProjPath     string       `json:"mmproj_path,omitempty"` // vision projector GGUF
+	MMProjSizeMB   int          `json:"-"`                     // mmproj VRAM on primary GPU
 }
 
 // ModelProfile describes the GGUF model.
 type ModelProfile struct {
-	Path               string `json:"path"`
-	SizeBytes          int64  `json:"size_bytes"`
-	TotalSizeMB        int    `json:"total_size_mb"`     // includes multi-part shards
-	NumLayers          int    `json:"num_layers"`
-	NumParams          int64  `json:"num_params"`
-	IsMoE              bool   `json:"is_moe"`
-	NumExperts         int    `json:"num_experts,omitempty"`
-	ContextSize        int    `json:"context_size"`
-	HiddenSize         int    `json:"hidden_size"`
-	HeadCount          int    `json:"head_count"`
-	HeadCountKV        int    `json:"head_count_kv"`
-	KeyLength          int    `json:"key_length"`
-	ValueLength        int    `json:"value_length"`
-	VocabSize          int    `json:"vocab_size"`
-	QuantType          string `json:"quant_type"`
-	ExpertBytes        int64  `json:"expert_bytes"`
-	NonExpertBytes     int64  `json:"non_expert_bytes"`
-	Fused              int    `json:"fused"`
-	EmbeddingLength    int    `json:"embedding_length"`
-	FeedForwardLength  int    `json:"feed_forward_length"`
-	KVLoraRank         int    `json:"kv_lora_rank"`
-	QLoraRank          int    `json:"q_lora_rank"`
-	RopeDim            int    `json:"rope_dim"`
-	KeyLengthMLA       int    `json:"key_length_mla"`
-	ValueLengthMLA     int    `json:"value_length_mla"`
-	HasSSM             int    `json:"has_ssm"`
-	SlidingWindow      int    `json:"sliding_window"`
-	FullAttnInterval   int    `json:"full_attn_interval"`
-	HasShexp           int    `json:"has_shexp"`
-	CTXTrain           int    `json:"ctx_train"`
-	ModelArch          string `json:"model_arch"`
-	ExpertUsedCount    int    `json:"expert_used_count,omitempty"`
-	ExpertFF           int    `json:"expert_ff,omitempty"`
-	ExpertSharedFF     int    `json:"expert_shared_ff,omitempty"`
+	Path              string `json:"path"`
+	Name              string `json:"name,omitempty"`         // GGUF metadata: model name
+	Basename          string `json:"basename,omitempty"`     // GGUF metadata: model basename
+	QuantizedBy       string `json:"quantized_by,omitempty"` // GGUF metadata: quantizer (e.g. "unsloth")
+	SizeBytes         int64  `json:"size_bytes"`
+	TotalSizeMB       int    `json:"total_size_mb"` // includes multi-part shards
+	NumLayers         int    `json:"num_layers"`
+	NumParams         int64  `json:"num_params"`
+	IsMoE             bool   `json:"is_moe"`
+	NumExperts        int    `json:"num_experts,omitempty"`
+	ContextSize       int    `json:"context_size"`
+	HiddenSize        int    `json:"hidden_size"`
+	HeadCount         int    `json:"head_count"`
+	HeadCountKV       int    `json:"head_count_kv"`
+	KeyLength         int    `json:"key_length"`
+	ValueLength       int    `json:"value_length"`
+	VocabSize         int    `json:"vocab_size"`
+	QuantType         string `json:"quant_type"`
+	ExpertBytes       int64  `json:"expert_bytes"`
+	NonExpertBytes    int64  `json:"non_expert_bytes"`
+	Fused             int    `json:"fused"`
+	EmbeddingLength   int    `json:"embedding_length"`
+	FeedForwardLength int    `json:"feed_forward_length"`
+	KVLoraRank        int    `json:"kv_lora_rank"`
+	QLoraRank         int    `json:"q_lora_rank"`
+	RopeDim           int    `json:"rope_dim"`
+	KeyLengthMLA      int    `json:"key_length_mla"`
+	ValueLengthMLA    int    `json:"value_length_mla"`
+	HasSSM            int    `json:"has_ssm"`
+	SlidingWindow     int    `json:"sliding_window"`
+	FullAttnInterval  int    `json:"full_attn_interval"`
+	HasShexp          int    `json:"has_shexp"`
+	CTXTrain          int    `json:"ctx_train"`
+	ModelArch         string `json:"model_arch"`
+	ExpertUsedCount   int    `json:"expert_used_count,omitempty"`
+	ExpertFF          int    `json:"expert_ff,omitempty"`
+	ExpertSharedFF    int    `json:"expert_shared_ff,omitempty"`
 }
 
 // Options allows user overrides.
 type Options struct {
-	ContextSize int
-	KVPlacement string // auto, gpu, cpu
-	KVQuality   string // high, mid, low
-	GPUs        []int  // restrict to specific GPUs
-	CPUMode     bool
-	RamBudgetMB int
-	BackendTag  string // "llama" or "ik_llama"
-	NoMMap      bool
-	Parallel    int
-	CacheFile   string // path to placement cache for MoE recovery
-	CacheDir    string // path to llm-server cache dir (for probes)
-	Host        string // listen address (default 0.0.0.0)
-	VisionAuto bool   // auto-detect mmproj for vision
+	ContextSize  int
+	KVPlacement  string // auto, gpu, cpu
+	KVQuality    string // high, mid, low
+	GPUs         []int  // restrict to specific GPUs
+	CPUMode      bool
+	RamBudgetMB  int
+	BackendTag   string // "llama" or "ik_llama"
+	NoMMap       bool
+	Parallel     int
+	CacheFile    string // path to placement cache for MoE recovery
+	CacheDir     string // path to llm-server cache dir (for probes)
+	Host         string // listen address (default 0.0.0.0)
+	VisionAuto   bool   // auto-detect mmproj for vision
+	MMProjPath   string // explicit vision projector GGUF
+	SpecMode     string // off, auto, draft, ngram
+	ForceSpecMoE bool   // allow speculative decoding on MoE despite default gate
 }
 
 // Compute builds a Strategy from hardware capabilities and model profile.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+	if opts.RamBudgetMB > 0 && caps != nil && opts.RamBudgetMB < caps.RAM.FreeMB {
+		capped := *caps
+		capped.RAM.FreeMB = opts.RamBudgetMB
+		if capped.RAM.TotalMB == 0 || capped.RAM.TotalMB > opts.RamBudgetMB {
+			capped.RAM.TotalMB = opts.RamBudgetMB
+		}
+		caps = &capped
+	}
+
 	s := &Strategy{
 		ContextSize:    opts.ContextSize,
 		KVPlacement:    opts.KVPlacement,
 		KVQuality:      opts.KVQuality,
 		MMap:           !opts.NoMMap,
 		MLock:          false,
-		Threads:        caps.CPU.Cores,   // physical cores (bash uses physical)
-		ThreadsBatch:   caps.CPU.Cores,   // physical cores (bash uses physical for both)
+		Threads:        caps.CPU.Cores, // physical cores (bash uses physical)
+		ThreadsBatch:   caps.CPU.Cores, // physical cores (bash uses physical for both)
 		BackendTag:     opts.BackendTag,
 		IsMoE:          model.IsMoE,
 		GPULayers:      999,
@@ -157,9 +172,14 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		s.Parallel = opts.Parallel
 	}
 
-	// Vision: auto-detect mmproj if --vision flag is set
-	if opts.VisionAuto && model.Path != "" {
-		if path, err := findOrDownloadMMProj(model.Path, opts.CacheDir); err == nil {
+	// Vision: use an explicit projector, or auto-detect one when --vision is set.
+	if opts.MMProjPath != "" {
+		s.MMProjPath = opts.MMProjPath
+		if fi, err := os.Stat(opts.MMProjPath); err == nil {
+			s.MMProjSizeMB = int(fi.Size() / 1024 / 1024)
+		}
+	} else if opts.VisionAuto && model.Path != "" {
+		if path, err := findOrDownloadMMProj(model.Path, opts.CacheDir, model.Name, model.Basename, model.QuantizedBy); err == nil {
 			s.MMProjPath = path
 			if fi, err := os.Stat(path); err == nil {
 				s.MMProjSizeMB = int(fi.Size() / 1024 / 1024)
@@ -182,11 +202,17 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	if opts.ContextSize <= 0 {
 		sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
 		cudaOH := 600
-		if sysProbe != nil { cudaOH = sysProbe.CUDAOverheadMB }
+		if sysProbe != nil {
+			cudaOH = sysProbe.CUDAOverheadMB
+		}
 		cbuf := computeFloorMB
 
 		bestFree := 0
-		for _, g := range caps.GPUs { if g.VRAMFreeMB() > bestFree { bestFree = g.VRAMFreeMB() } }
+		for _, g := range caps.GPUs {
+			if g.VRAMFreeMB() > bestFree {
+				bestFree = g.VRAMFreeMB()
+			}
+		}
 
 		// Single-GPU estimate
 		singleCtx, singleKV := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
@@ -197,7 +223,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		multiCtx, multiKV := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
 		multiKVM := computeKVTotalMB(model, multiCtx, multiKV)
 		multiFree := 0
-		for _, g := range caps.GPUs { multiFree += g.VRAMFreeMB() }
+		for _, g := range caps.GPUs {
+			multiFree += g.VRAMFreeMB()
+		}
 		multiFits := (totalSizeMB+(cudaOH+cbuf)*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
 
 		if multiFits && multiCtx > singleCtx {
@@ -251,7 +279,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				s.KVPlacement = "gpu"
 			}
 			if len(cache.GPUAssignments) > 0 {
-				otString := buildOTStringFromAssignments(cache.GPUAssignments, caps.GPUs, model.NumLayers)
+				otString := buildOTStringFromAssignments(cache.GPUAssignments, caps.GPUs, model.NumLayers, opts.BackendTag)
 				if otString != "" {
 					s.OTString = otString
 				}
@@ -266,8 +294,13 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	// Vision override: mmproj needs extra VRAM — force multi-GPU (bash line 2746)
 	if s.MMProjPath != "" && strategy == SingleGPU && len(caps.GPUs) > 1 {
-		if model.IsMoE { strategy = MoEOffload; s.Type = MoEOffload
-		} else { strategy = MultiGPUDense; s.Type = MultiGPUDense }
+		if model.IsMoE {
+			strategy = MoEOffload
+			s.Type = MoEOffload
+		} else {
+			strategy = MultiGPUDense
+			s.Type = MultiGPUDense
+		}
 	}
 
 	var err error
@@ -292,6 +325,10 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		if err := checkMemoryOrDie(caps, model, s, totalSizeMB, kvTotalMB, opts); err != nil {
 			return nil, err
 		}
+	}
+
+	if opts.SpecMode != "" && opts.SpecMode != "off" {
+		s.Draft = ComputeDraft(model, caps, opts)
 	}
 
 	// Compute CRAM (prompt cache) — matches bash CRAM logic
@@ -430,13 +467,17 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
 	split := make([]float64, numGPUs)
 	totalFree := 0.0
-	for _, g := range caps.GPUs { totalFree += float64(g.VRAMFreeMB()) }
+	for _, g := range caps.GPUs {
+		totalFree += float64(g.VRAMFreeMB())
+	}
 	if totalFree > 0 {
 		for _, gi := range gpuOrder {
 			free := float64(caps.GPUs[gi].VRAMFreeMB())
 			if gi == gpuOrder[0] && s.MMProjSizeMB > 0 {
 				free -= float64(s.MMProjSizeMB)
-				if free < 0 { free = 0 }
+				if free < 0 {
+					free = 0
+				}
 			}
 			split[gi] = free / totalFree
 		}
@@ -854,7 +895,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 
 	// Build -ot string (lines 5876-5891)
 	if totalGPULayers > 0 {
-		otString := buildOTString(layersPerGPU, caps.GPUs, gpuOrder)
+		otString := buildOTString(layersPerGPU, caps.GPUs, gpuOrder, opts.BackendTag)
 		if otString != "" {
 			s.OTString = otString
 		}
@@ -874,7 +915,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 
 // buildOTString builds the -ot override-tensor string for MoE.
 // Matches bash build_ot_string() exactly: explicit layer list with escaped dots.
-func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int) string {
+func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, backendTag string) string {
 	var parts []string
 	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
 
@@ -891,7 +932,7 @@ func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int) string
 				layerParts = append(layerParts, fmt.Sprintf("%d", l))
 			}
 			layerRange := stringsJoin(layerParts, "|")
-			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=CUDA%d`, layerRange, expertPattern, cudaIdx))
+			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, layerRange, expertPattern, deviceName(backendTag, cudaIdx)))
 			nextLayer += count
 		}
 	}
@@ -900,7 +941,7 @@ func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int) string
 	return stringsJoin(parts, ",")
 }
 
-func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU, numLayers int) string {
+func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU, numLayers int, backendTag string) string {
 	var parts []string
 	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
 
@@ -916,11 +957,18 @@ func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU
 			layerParts = append(layerParts, fmt.Sprintf("%d", l))
 		}
 		layerRange := stringsJoin(layerParts, "|")
-		parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=CUDA%d`, layerRange, expertPattern, assign.CUDAIndex))
+		parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, layerRange, expertPattern, deviceName(backendTag, assign.CUDAIndex)))
 		nextLayer += assign.Count
 	}
 	parts = append(parts, "exps=CPU")
 	return stringsJoin(parts, ",")
+}
+
+func deviceName(backendTag string, index int) string {
+	if strings.EqualFold(backendTag, "vulkan") {
+		return fmt.Sprintf("Vulkan%d", index)
+	}
+	return fmt.Sprintf("CUDA%d", index)
 }
 
 func stringsJoin(parts []string, sep string) string {
@@ -1038,13 +1086,21 @@ func orderGPUsByBandwidth(gpus []detect.GPU) []int {
 func kvReserveByBandwidth(kvTotalMB int, gpus []detect.GPU, order []int, kvPerLayerMB int) []int {
 	reserve := make([]int, len(gpus))
 	totalFree := 0
-	for _, g := range gpus { totalFree += g.VRAMFreeMB() }
-	if kvTotalMB <= 0 || totalFree <= 0 { return reserve }
+	for _, g := range gpus {
+		totalFree += g.VRAMFreeMB()
+	}
+	if kvTotalMB <= 0 || totalFree <= 0 {
+		return reserve
+	}
 	useOrder := order
-	if len(useOrder) == 0 { useOrder = seqRange(len(gpus)) }
+	if len(useOrder) == 0 {
+		useOrder = seqRange(len(gpus))
+	}
 	for _, gi := range useOrder {
 		share := (kvTotalMB*gpus[gi].VRAMFreeMB() + totalFree - 1) / totalFree
-		if kvPerLayerMB > 0 { share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB }
+		if kvPerLayerMB > 0 {
+			share = ((share + kvPerLayerMB - 1) / kvPerLayerMB) * kvPerLayerMB
+		}
 		reserve[gi] = share
 	}
 	return reserve
@@ -1052,7 +1108,9 @@ func kvReserveByBandwidth(kvTotalMB int, gpus []detect.GPU, order []int, kvPerLa
 
 func seqRange(n int) []int {
 	r := make([]int, n)
-	for i := range r { r[i] = i }
+	for i := range r {
+		r[i] = i
+	}
 	return r
 }
 
@@ -1451,11 +1509,17 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--mmproj", s.MMProjPath)
 	}
 
-	// GPU offloading: ALWAYS -ngl 999
-	if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
+	// GPU offloading: match Bash dry-run semantics exactly. CPU-only still
+	// prints -ngl 0 so compatibility tests and user scripts can see the mode.
+	if s.Type == CPUOnly {
+		args = append(args, "-ngl", "0")
+	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
 		if s.MainGPU >= 0 && len(s.TensorSplit) == 0 {
 			args = append(args, "-mg", fmt.Sprintf("%d", s.MainGPU))
+			if s.Type == SingleGPU {
+				args = append(args, "--device", deviceName(s.BackendTag, s.MainGPU))
+			}
 		}
 	}
 
@@ -1799,9 +1863,9 @@ func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int)
 	path := filepath.Join(cacheDir, safeName+".probe")
 	content := fmt.Sprintf(
 		"# Probe cache for %s\n"+
-		"# Generated: %s\n"+
-		"PROBED_COMPUTE_BUF_MB=%d\n"+
-		"PROBED_KV_PER_LAYER_MB=%d\n",
+			"# Generated: %s\n"+
+			"PROBED_COMPUTE_BUF_MB=%d\n"+
+			"PROBED_KV_PER_LAYER_MB=%d\n",
 		modelName, time.Now().Format(time.RFC3339), computeBufMB, kvPerLayerMB,
 	)
 	return os.WriteFile(path, []byte(content), 0644)

@@ -26,6 +26,15 @@ type Result struct {
 type Runner struct {
 	BaseURL string
 	Model   string
+	Timeout time.Duration // per-request timeout (default 5 minutes)
+}
+
+func (r *Runner) client() *http.Client {
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	return &http.Client{Timeout: timeout}
 }
 
 // Run performs a warm-up + measurement prompt and returns metrics.
@@ -33,20 +42,17 @@ func (r *Runner) Run() (*Result, error) {
 	warmUp := `Explain quantum computing in one sentence.`
 	measurePrompt := `Write a short story about a robot learning to paint. Include a beginning, middle, and end.`
 
-	// Warm-up
 	if _, err := r.chat(warmUp, 32); err != nil {
 		return nil, fmt.Errorf("warm-up: %w", err)
 	}
 
-	// Measurement: prefill
 	start := time.Now()
-	_, err := r.chat(measurePrompt, 1)
+	prefillResp, err := r.chat(measurePrompt, 1)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
 	prefillTime := time.Since(start).Seconds()
 
-	// Measurement: generation
 	start = time.Now()
 	genResp, err := r.chat(measurePrompt, 128)
 	if err != nil {
@@ -54,20 +60,45 @@ func (r *Runner) Run() (*Result, error) {
 	}
 	genTime := time.Since(start).Seconds()
 
-	res := &Result{
-		Model:        r.Model,
-		PromptTokens: estimateTokens(measurePrompt),
-		PromptTimeS:  prefillTime,
-		PromptTPS:    float64(estimateTokens(measurePrompt)) / prefillTime,
-		GenTokens:    estimateTokens(genResp),
-		GenTimeS:     genTime,
-		GenTPS:       float64(estimateTokens(genResp)) / genTime,
-		Timestamp:    time.Now().Unix(),
+	promptTokens := prefillResp.PromptTokens
+	if promptTokens <= 0 {
+		promptTokens = estimateTokens(measurePrompt)
 	}
-	return res, nil
+	promptTPS := prefillResp.PromptTPS
+	if promptTPS <= 0 && prefillTime > 0 {
+		promptTPS = float64(promptTokens) / prefillTime
+	}
+
+	genTokens := genResp.CompletionTokens
+	if genTokens <= 0 {
+		genTokens = estimateTokens(genResp.Content)
+	}
+	genTPS := genResp.GenTPS
+	if genTPS <= 0 && genTime > 0 {
+		genTPS = float64(genTokens) / genTime
+	}
+
+	return &Result{
+		Model:        r.Model,
+		PromptTokens: promptTokens,
+		PromptTimeS:  prefillTime,
+		PromptTPS:    promptTPS,
+		GenTokens:    genTokens,
+		GenTimeS:     genTime,
+		GenTPS:       genTPS,
+		Timestamp:    time.Now().Unix(),
+	}, nil
 }
 
-func (r *Runner) chat(prompt string, maxTokens int) (string, error) {
+type chatResult struct {
+	Content          string
+	PromptTokens     int
+	CompletionTokens int
+	PromptTPS        float64
+	GenTPS           float64
+}
+
+func (r *Runner) chat(prompt string, maxTokens int) (*chatResult, error) {
 	body := map[string]interface{}{
 		"model": r.Model,
 		"messages": []map[string]string{
@@ -76,13 +107,13 @@ func (r *Runner) chat(prompt string, maxTokens int) (string, error) {
 		"max_tokens": maxTokens,
 	}
 	data, _ := json.Marshal(body)
-	resp, err := http.Post(r.BaseURL+"/v1/chat/completions", "application/json", bytes.NewReader(data))
+	resp, err := r.client().Post(r.BaseURL+"/v1/chat/completions", "application/json", bytes.NewReader(data))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var out struct {
 		Choices []struct {
@@ -90,14 +121,28 @@ func (r *Runner) chat(prompt string, maxTokens int) (string, error) {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+		Timings struct {
+			PromptPerSecond    float64 `json:"prompt_per_second"`
+			PredictedPerSecond float64 `json:"predicted_per_second"`
+		} `json:"timings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("no choices")
+		return nil, fmt.Errorf("no choices")
 	}
-	return out.Choices[0].Message.Content, nil
+	return &chatResult{
+		Content:          out.Choices[0].Message.Content,
+		PromptTokens:     out.Usage.PromptTokens,
+		CompletionTokens: out.Usage.CompletionTokens,
+		PromptTPS:        out.Timings.PromptPerSecond,
+		GenTPS:           out.Timings.PredictedPerSecond,
+	}, nil
 }
 
 func estimateTokens(text string) int {
