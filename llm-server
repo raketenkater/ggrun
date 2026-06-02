@@ -39,7 +39,7 @@
 #   LLAMA_SERVER    Path to llama-server binary (auto-detected if not set)
 #   LLM_MODEL_DIR   Default model directory (default: ~/ai_models)
 #   LLM_PORT        Server port (default: 8081)
-#   LLM_CTX_SIZE    Context size: fit, max, or token count (default: fit)
+#   LLM_CTX_SIZE    Context size (default: 65536)
 
 set -euo pipefail
 
@@ -138,19 +138,19 @@ _migrate_legacy_config_sh "$LLM_CONFIG"
 # ─────────────────────────────────────────────────────────────────
 declare -A LLM_DEFAULTS=(
     [LLM_PORT]=8081
-    [LLM_CTX_SIZE]=fit
+    [LLM_CTX_SIZE]=65536
     [LLM_MAX_RESTARTS]=5
     [LLM_KEEP_ALIVE]=0
-    [LLM_HEALTH_TIMEOUT]=""
+    [LLM_HEALTH_TIMEOUT]=
     [LLM_MODEL_DIR]="$HOME/ai_models"
     [LLM_CACHE_DIR]="$HOME/.cache/llm-server"
-    [LLM_LOG_DIR]=""
-    [LLM_RAM_BUDGET]=""
+    [LLM_LOG_DIR]=
+    [LLM_RAM_BUDGET]=
     [LLM_KV_PLACEMENT]=auto
     [LLM_ASSUME_YES]=0
-    [LLM_BACKEND]=""
-    [LLAMA_SERVER]=""
-    [LLM_APP_HOME]=""
+    [LLM_BACKEND]=
+    [LLAMA_SERVER]=
+    [LLM_APP_HOME]=
 )
 # Stable display order for `config show` / template generation.
 LLM_DEFAULTS_ORDER=(
@@ -168,15 +168,6 @@ for _k in "${LLM_DEFAULTS_ORDER[@]}"; do
     [[ -n "${!_k+x}" ]] && _LLM_ENV_SNAPSHOT[$_k]="${!_k}"
 done
 unset _k
-
-declare -A _LLM_FILE_SNAPSHOT=()
-if [[ -f "$LLM_CONFIG" ]]; then
-    while IFS='=' read -r _k _v; do
-        _k="${_k%%[[:space:]]*}"
-        [[ "$_k" =~ ^LLM_|^LLAMA_SERVER$ ]] && _LLM_FILE_SNAPSHOT[$_k]=1
-    done < <(grep -E '^[[:space:]]*(LLM_[A-Z0-9_]+|LLAMA_SERVER)=' "$LLM_CONFIG" 2>/dev/null || true)
-fi
-unset _k _v
 
 [[ -f "$LLM_CONFIG" ]] && source "$LLM_CONFIG"
 
@@ -257,42 +248,11 @@ CONFIG_FILE="$LLM_CONFIG"
 
 PORT="${LLM_PORT:-8081}"
 HOST="0.0.0.0"
-CTX_SIZE=65536
-CTX_MODE="fit"          # fit|manual|max
-CTX_SETTING="${LLM_CTX_SIZE:-fit}"
-# Set to 1 only for numeric/max context choices from CLI/env/config. The
-# built-in "fit" default must not make context look explicit.
+CTX_SIZE="${LLM_CTX_SIZE:-65536}"
+# Set to 1 when the user explicitly passes --ctx-size or LLM_CTX_SIZE so the
+# max-context-fit suggestion stays out of their way.
 CTX_EXPLICIT=0
-_apply_ctx_setting() {
-    local value="${1:-fit}" explicit="${2:-0}" source="${3:-context}"
-    case "${value,,}" in
-        fit|auto|"")
-            CTX_MODE="fit"
-            CTX_SIZE=65536
-            CTX_EXPLICIT=0
-            ;;
-        max)
-            CTX_MODE="max"
-            CTX_SIZE=65536
-            CTX_EXPLICIT="$explicit"
-            ;;
-        *)
-            if [[ "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]]; then
-                CTX_MODE="manual"
-                CTX_SIZE="$value"
-                CTX_EXPLICIT="$explicit"
-            else
-                echo "Error: $source must be a positive number, fit, auto, or max (got: $value)"
-                exit 1
-            fi
-            ;;
-    esac
-    CTX_SETTING="$value"
-}
-_ctx_setting_explicit=0
-[[ -n "${_LLM_ENV_SNAPSHOT[LLM_CTX_SIZE]+x}" || -n "${_LLM_FILE_SNAPSHOT[LLM_CTX_SIZE]+x}" ]] && _ctx_setting_explicit=1
-_apply_ctx_setting "$CTX_SETTING" "$_ctx_setting_explicit" "LLM_CTX_SIZE"
-unset _ctx_setting_explicit
+[[ -n "${LLM_CTX_SIZE:-}" ]] && CTX_EXPLICIT=1
 
 # Tuning constants
 # MAX_RESTARTS: give-up threshold for repeated startup failures.
@@ -332,10 +292,8 @@ LOG_DIR="${LLM_LOG_DIR:-${LLM_APP_HOME:+$LLM_APP_HOME/logs}}"
 LOG_DIR="${LOG_DIR:-/tmp}"
 mkdir -p "$CACHE_DIR" "$LOG_DIR"
 SERVER_LOG="$LOG_DIR/llm-server.log"
-BENCHMARK_LOG="$LOG_DIR/llm-bench.log"
 # Guard against stale directory at log path
 [[ -d "$SERVER_LOG" ]] && rm -rf "$SERVER_LOG" 2>/dev/null || SERVER_LOG="/tmp/llm-server-$$.log"
-[[ -d "$BENCHMARK_LOG" ]] && rm -rf "$BENCHMARK_LOG" 2>/dev/null || BENCHMARK_LOG="/tmp/llm-bench-$$.log"
 LIB_HUB_DIR=""
 
 RETUNE=0
@@ -357,8 +315,6 @@ KV_PLACEMENT="${LLM_KV_PLACEMENT:-auto}"  # auto (GPU first), gpu, cpu
 KV_PLACEMENT_EXPLICIT=0  # CLI --kv-placement or env/settings LLM_KV_PLACEMENT
 [[ -n "${LLM_KV_PLACEMENT:-}" ]] && KV_PLACEMENT_EXPLICIT=1
 PARALLEL_SLOTS=""      # --parallel N passthrough, empty = llama-server default (4)
-SPEC_TYPE=""             # --spec-type for speculative decoding (draft-mtp, draft-simple, etc.)
-SPEC_DRAFT_N_MAX=""      # --spec-draft-n-max for speculative decoding (default: 2)
 GPUS_FILTER=""
 RAM_BUDGET_MB=0
 MMPROJ_PATH=""
@@ -366,7 +322,6 @@ DO_UPDATE=0
 SHOW_CONFIGS=0
 DO_AI_TUNE=0
 DO_UNLIMITED=0
-DO_CONVERGE=0
 BACKEND=""  # "llama" or "ik_llama" - empty = auto-detect
 
 # Ensure ~/.local/bin (where install.sh puts our scripts) is on PATH so any
@@ -467,7 +422,7 @@ find_server_binary() {
         echo "$LLAMA_SERVER"
         return
     fi
-
+    
     local candidates=()
     local explicit_backend=0
 
@@ -526,7 +481,7 @@ _settings_describe() {
     # generated template. Keep keys in sync with LLM_DEFAULTS.
     case "$1" in
         LLM_PORT)           echo "OpenAI-compatible API port" ;;
-        LLM_CTX_SIZE)       echo "fit|auto|max or a token count. fit = largest safe context." ;;
+        LLM_CTX_SIZE)       echo "default context size (tokens)" ;;
         LLM_MAX_RESTARTS)   echo "give-up threshold for repeated startup fails" ;;
         LLM_KEEP_ALIVE)     echo "1 = restart forever (overrides MAX_RESTARTS)" ;;
         LLM_HEALTH_TIMEOUT) echo "seconds to wait for server health (empty = auto-size by model)" ;;
@@ -685,7 +640,7 @@ while [[ $# -gt 0 ]]; do
         --cpu)       CPU_ONLY=1; shift ;;
         --model-dir) MODEL_DIR="$2"; shift 2 ;;
         --port)      PORT="$2"; shift 2 ;;
-        --ctx-size)  _apply_ctx_setting "$2" 1 "--ctx-size"; shift 2 ;;
+        --ctx-size)  CTX_SIZE="$2"; CTX_EXPLICIT=1; shift 2 ;;
         --server-bin) USER_SERVER_BIN="$2"; shift 2 ;;
         --lib-path)   USER_LIB_PATH="$2"; shift 2 ;;
         --kv-quality)
@@ -706,7 +661,6 @@ while [[ $# -gt 0 ]]; do
         --update)    DO_UPDATE=1; shift ;;
         --show-configs) SHOW_CONFIGS=1; shift ;;
         --ai-tune)   DO_AI_TUNE=1; shift ;;
-        --converge)  DO_CONVERGE=1; shift ;;
         --tune-cache) EXPLICIT_TUNE_CACHE="$2"; shift 2 ;;
         --unlimited|--placement-tune|--full-auto-tune)
             # Deprecated: AI-tune now decides the unlock set automatically
@@ -719,10 +673,6 @@ while [[ $# -gt 0 ]]; do
         --tune-long-timeout) TUNE_LONG_TIMEOUT=1; shift ;;
         --rounds)    USER_TUNE_ROUNDS="$2"; shift 2 ;;
         --parallel)  PARALLEL_SLOTS="$2"; shift 2 ;;
-        --spec-type)
-            case "${2:-}" in draft-mtp|draft-simple|draft-eagle3|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod|ngram-cache|none) ;; *) echo "Error: --spec-type must be one of: draft-mtp, draft-simple, draft-eagle3, ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod, ngram-cache, none"; exit 1 ;; esac
-            SPEC_TYPE="$2"; shift 2 ;;
-        --spec-draft-n-max) SPEC_DRAFT_N_MAX="$2"; shift 2 ;;
         --keep-alive) KEEP_ALIVE=1; shift ;;
         --backend)   BACKEND="$2"; shift 2 ;;
         --version)     echo "llm-server v$VERSION"; exit 0 ;;
@@ -810,7 +760,7 @@ record_user_tune_locks() {
         add_tune_lock_key "--kv-offload"
         add_tune_lock_key "--no-kv-offload"
     fi
-    [[ "$CTX_EXPLICIT" -eq 1 ]] && add_tune_lock_key "--ctx-size"
+    (( CTX_EXPLICIT )) && add_tune_lock_key "--ctx-size"
     if [[ -n "$GPUS_FILTER" ]]; then
         add_tune_lock_key "--device"
         add_tune_lock_key "--tensor-split"
@@ -823,8 +773,6 @@ record_user_tune_locks() {
     if [[ -n "$MMPROJ_PATH" ]]; then
         add_tune_lock_key "--mmproj"
     fi
-    if [[ -n "$SPEC_TYPE" ]]; then add_tune_lock_key "--spec-type"; fi
-    # --spec-draft-n-max is intentionally NOT locked — AI-tune should explore 1-4
 }
 record_user_tune_locks
 
@@ -862,7 +810,7 @@ fi
 
 # Validate --ctx-size
 if ! [[ "$CTX_SIZE" =~ ^[0-9]+$ ]] || (( CTX_SIZE < 1 )); then
-    echo "Error: --ctx-size must be a positive number, fit, auto, or max (got: $CTX_SETTING)"
+    echo "Error: --ctx-size must be a positive number (got: $CTX_SIZE)"
     exit 1
 fi
 
@@ -965,7 +913,7 @@ try:
         age = int(dt.timestamp())
     except Exception:
         age = int(os.path.getmtime("$f"))
-    print(f"{model}\t{tps:.1f}\t{gain:+.2f}\t{rounds}\t{age}")
+    print(f"{model}\t{tps:.1f}\t{gain:+.1f}\t{rounds}\t{age}")
 except Exception as e:
     sys.exit(1)
 PY
@@ -1066,7 +1014,7 @@ tps = best.get("gen_tps") or 0
 gain = ((tps-base)/base*100) if (base>0 and tps>0) else 0
 print(f"  Config:     {best.get('name','?')}")
 print(f"  Baseline:   {base:.2f} tok/s gen, {d.get('baseline_pp_tps',0):.2f} tok/s pp")
-print(f"  Best:       {tps:.2f} tok/s gen, {best.get('pp_tps',0):.2f} tok/s pp  ({gain:+.2f}%)")
+print(f"  Best:       {tps:.2f} tok/s gen, {best.get('pp_tps',0):.2f} tok/s pp  ({gain:+.1f}%)")
 print(f"  Rounds:     {d.get('rounds', 0)}")
 print(f"  Tuned at:   {d.get('tuned_at','?')}")
 flags = best.get("flags", {})
@@ -1105,11 +1053,6 @@ if (( DOWNLOAD )); then
         # awk gets empty input and prints nothing; without the guard the whole
         # `var=$(pipeline)` silently kills the script under set -euo pipefail.
         TOTAL_VRAM_MB=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | awk '{s+=$1} END {print s+0}' || echo 0)
-    elif command -v amd-smi &>/dev/null; then
-        # AMD-SMI fallback: sum FREE_GTT across all GPUs.
-        # GTT is the unified memory pool on AMD APUs (e.g. Strix Halo).
-        # || echo 0 guards pipefail under set -euo pipefail.
-        TOTAL_VRAM_MB=$(amd-smi metric --mem 2>/dev/null | grep 'FREE_GTT:' | awk '{s+=$2} END {print s+0}' || echo 0)
     fi
     RAM_AVAIL_MB=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print int($2/1024)}' || echo 0)
     # Try finding the downloader in several places
@@ -1117,7 +1060,7 @@ if (( DOWNLOAD )); then
     if [[ ! -f "$DOWNLOADER" ]]; then
         DOWNLOADER="$MODEL_DIR/download_any_gguf.py"
     fi
-
+    
     if [[ ! -f "$DOWNLOADER" ]]; then
         echo "Error: Downloader script (download_any_gguf.py) not found."
         echo "Please ensure it exists in /home/mik/ai_models/ or the script directory."
@@ -1127,9 +1070,9 @@ if (( DOWNLOAD )); then
     echo "Launching GGUF Downloader for: $MODEL_ARG"
     echo "Wait for the interactive session..."
     echo ""
-
+    
     python3 "$DOWNLOADER" --repo "$MODEL_ARG" --dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" --vram "$TOTAL_VRAM_MB" --ram "$RAM_AVAIL_MB"
-
+    
     echo ""
     echo "Download step complete."
     echo "To launch your new model, run: llm-server <path_to_downloaded_file>"
@@ -1156,7 +1099,7 @@ if (( DO_UPDATE )); then
             if [[ "$old_hash" != "$new_hash" ]]; then
                 echo "  Updated: $(git log --oneline "${old_hash}..${new_hash}" | wc -l) new commits"
                 git log --oneline "${old_hash}..${new_hash}" | head -5 | sed 's/^/    /'
-
+                
                 # Re-install updated scripts
                 if [[ -x "./install.sh" ]]; then
                     echo "  Re-installing..."
@@ -1755,219 +1698,6 @@ elif command -v nvidia-smi &>/dev/null; then
         GPU_COUNT=$(( GPU_COUNT + 1 ))
     done < <(nvidia-smi --query-gpu=index,name,memory.total,memory.free,pcie.link.width.current,pcie.link.gen.current,compute_cap --format=csv,noheader,nounits 2>/dev/null)
 fi
-# Track GPU backend: CUDA (nvidia-smi) or Vulkan (fallback)
-GPU_BACKEND="cuda"
-
-# AMD-SMI GPU detection (ROCm / radeonsi-tools on Linux)
-# Provides GTT metrics for AMD GPUs including unified-memory APUs (e.g. Strix Halo).
-# Uses TOTAL_GTT / FREE_GTT as the effective VRAM pool — the full addressable
-# memory space accessible by the GPU via the Graphics Translation Table.
-if (( GPU_COUNT == 0 )) && ! (( CPU_ONLY )); then
-    if command -v amd-smi &>/dev/null; then
-        # amd-smi metric --mem outputs one block per GPU:
-        #   GPU: 0
-        #       MEM_USAGE:
-        #           TOTAL_VRAM: 1024 MB
-        #           USED_VRAM: 983 MB
-        #           FREE_VRAM: 41 MB
-        #           TOTAL_VISIBLE_VRAM: 1024 MB
-        #           USED_VISIBLE_VRAM: 983 MB
-        #           FREE_VISIBLE_VRAM: 41 MB
-        #           TOTAL_GTT: 131072 MB
-        #           USED_GTT: 42226 MB
-        #           FREE_GTT: 88846 MB
-        # We use TOTAL_GTT → GPU_VRAM_TOTAL, FREE_GTT → GPU_VRAM_FREE.
-        # For unified-memory APUs, GTT is the full unified pool accessible by the GPU.
-        # The GPU name comes from the amd-smi table output, not metric --mem.
-        # Parse both: first get names from the table, then metrics.
-        amd_names_output=$(amd-smi 2>/dev/null || true)
-        declare -A amd_gpu_names
-        if [[ -n "$amd_names_output" ]]; then
-            # Parse the amd-smi table for GPU names.
-            # Format:
-            #   | 0000:c6:00.0  Radeon 8060S Graphics | N/A ...
-            #   |   0       0     N/A             N/A | N/A ...
-            # Match GPU index row (starts with | then digit), grab name from row above.
-            prev_line=""
-            while IFS= read -r cur_line; do
-                if [[ "$cur_line" == "|"* ]] && [[ "$cur_line" =~ ^\|[[:space:]]*([0-9]+)[[:space:]] ]]; then
-                    idx="${BASH_REMATCH[1]}"
-                    if [[ "$prev_line" == "|"* ]]; then
-                        # Strip leading | and space, then extract name after BDF
-                        stripped="${prev_line#|}"
-                        stripped="${stripped# }"
-                        if [[ "$stripped" =~ ^[0-9a-fA-F]+:[0-9a-fA-F]+:[0-9a-fA-F]+\.[0-9]+[[:space:]]+([^|]+) ]]; then
-                            name="${BASH_REMATCH[1]}"
-                            name="$(echo "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                            amd_gpu_names["$idx"]="$name"
-                        fi
-                    fi
-                fi
-                prev_line="$cur_line"
-            done <<< "$amd_names_output"
-        fi
-
-        amd_output=$(amd-smi metric --mem 2>/dev/null || true)
-        if [[ -n "$amd_output" ]]; then
-            current_gpu=""
-            current_total_gtt=0
-            current_free_gtt=0
-            current_gpu_name="Unknown AMD GPU"
-
-            while IFS= read -r line; do
-                # Match "GPU: 0" or "GPU:\t0" etc.
-                if [[ "$line" =~ ^[[:space:]]*GPU:[[:space:]]*([0-9]+) ]]; then
-                    # Flush previous GPU if valid
-                    if [[ -n "$current_gpu" ]] && (( current_free_gtt >= 500 )); then
-                        GPU_INDEX+=("$current_gpu")
-                        GPU_NAME+=("$current_gpu_name")
-                        GPU_VRAM_TOTAL+=("$current_total_gtt")
-                        GPU_VRAM_FREE+=("$current_free_gtt")
-                        GPU_PCIE_WIDTH+=(0)
-                        GPU_PCIE_GEN+=(0)
-                        GPU_COMPUTE_CAP+=(0.0)
-                        GPU_BANDWIDTH+=(0)
-                        GPU_COUNT=$(( GPU_COUNT + 1 ))
-                        GPU_BACKEND="Vulkan"
-                        log "  GPU ${current_gpu}: ${current_gpu_name} — ${current_total_gtt}MB GTT total, ${current_free_gtt}MB free"
-                    fi
-                    current_gpu="${BASH_REMATCH[1]}"
-                    current_total_gtt=0
-                    current_free_gtt=0
-                    # Look up name from table output
-                    if [[ -n "${amd_gpu_names[$current_gpu]:-}" ]]; then
-                        current_gpu_name="${amd_gpu_names[$current_gpu]}"
-                    else
-                        current_gpu_name="Unknown AMD GPU"
-                    fi
-                elif [[ "$line" =~ TOTAL_GTT:[[:space:]]*([0-9]+) ]]; then
-                    current_total_gtt=${BASH_REMATCH[1]}
-                elif [[ "$line" =~ FREE_GTT:[[:space:]]*([0-9]+) ]]; then
-                    current_free_gtt=${BASH_REMATCH[1]}
-                fi
-            done <<< "$amd_output"
-
-            # Flush last GPU
-            if [[ -n "$current_gpu" ]] && (( current_free_gtt >= 500 )); then
-                GPU_INDEX+=("$current_gpu")
-                GPU_NAME+=("$current_gpu_name")
-                GPU_VRAM_TOTAL+=("$current_total_gtt")
-                GPU_VRAM_FREE+=("$current_free_gtt")
-                GPU_PCIE_WIDTH+=(0)
-                GPU_PCIE_GEN+=(0)
-                GPU_COMPUTE_CAP+=(0.0)
-                GPU_BANDWIDTH+=(0)
-                GPU_COUNT=$(( GPU_COUNT + 1 ))
-                GPU_BACKEND="Vulkan"
-                log "  GPU ${current_gpu}: ${current_gpu_name} — ${current_total_gtt}MB GTT total, ${current_free_gtt}MB free"
-            fi
-            unset amd_gpu_names
-        fi
-    fi
-fi
-
-# Fallback: detect Vulkan/AMD/Intel GPUs when nvidia-smi and amd-smi are unavailable
-if (( GPU_COUNT == 0 )) && ! (( CPU_ONLY )); then
-    if command -v vulkaninfo &>/dev/null; then
-        vulkan_out=$(vulkaninfo 2>&1)
-        # Parse GPU0 section: deviceName and memory heaps.
-        # For AMD/Intel APUs with unified memory (e.g. Strix Halo), the GPU can
-        # access BOTH the shared heap (system RAM) and the device-local heap
-        # (dedicated VRAM). We sum all heaps to get the full unified pool.
-        gpu_name=""
-        gpu_vram_mb=0
-        in_gpu0=0
-        pending_size=0
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^GPU0: ]]; then
-                in_gpu0=1
-                continue
-            fi
-            if (( in_gpu0 )) && [[ "$line" =~ ^GPU[1-9] ]]; then
-                break
-            fi
-            if (( in_gpu0 )); then
-                if [[ "$line" =~ deviceName[[:space:]]*=[[:space:]]*(.*) ]]; then
-                    gpu_name="${BASH_REMATCH[1]}"
-                fi
-                # New heap starts — reset state
-                if [[ "$line" =~ memoryHeaps\[ ]]; then
-                    pending_size=0
-                fi
-                # Capture size (appears before the flags line in vulkaninfo output)
-                if [[ "$line" =~ size[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
-                    pending_size=${BASH_REMATCH[1]}
-                fi
-                # Flag appears after size — for unified-memory APUs, sum ALL heaps
-                # (both shared and device-local). For discrete GPUs, only device-local
-                # matters, but summing all is safe since shared heaps are 0 on those.
-                if [[ "$line" =~ MEMORY_HEAP_DEVICE_LOCAL_BIT ]] && (( pending_size > 0 )); then
-                    gpu_vram_mb=$(( gpu_vram_mb + pending_size / 1024 / 1024 ))
-                    pending_size=0
-                fi
-                # Also count shared heaps (no flags) for unified-memory APUs.
-                # A heap with no flags line after its size is a shared/system heap.
-                # We detect this by checking if the next non-empty line after size
-                # is NOT a flag line — but simpler: just sum all heap sizes that
-                # have a MEMORY_HEAP_DEVICE_LOCAL_BIT OR have no flags at all.
-                # The awk fallback below handles the full sum more reliably.
-            fi
-        done <<< "$vulkan_out"
-
-         # Extract VRAM from memoryHeaps (GPU0 section).
-        # For AMD/Intel APUs with unified memory (e.g. Strix Halo), the GPU can
-        # access BOTH the shared heap (system RAM) and the device-local heap
-        # (dedicated VRAM). We sum ALL heaps as the unified pool.
-        # For discrete GPUs, only device-local matters, but summing all is safe
-        # since shared heaps are 0 on those.
-        # This awk is the authoritative source — it handles both shared and
-        # device-local heaps correctly. The while-loop above is a fast path
-        # for device-local-only, but we always prefer the awk result when it
-        # detects a shared heap (indicated by a non-zero total that includes
-        # a heap without DEVICE_LOCAL_BIT).
-        awk_total=$(echo "$vulkan_out" | awk '
-            /^GPU0:/ { in_gpu0=1 }
-            /^GPU[1-9]/ { in_gpu0=0 }
-            !in_gpu0 { next }
-            /memoryHeaps\[/ { in_heap=1; pending_size=0; has_device_local=0; next }
-            /size[[:space:]]*=/ && in_heap {
-                gsub(/[^0-9]/, "", $3)
-                pending_size = $3 / 1024 / 1024
-            }
-            /MEMORY_HEAP_DEVICE_LOCAL_BIT/ && in_heap && pending_size > 0 {
-                has_device_local = 1
-                total += pending_size
-                pending_size = 0
-            }
-            # Detect shared heaps: a heap with size but no DEVICE_LOCAL_BIT flag.
-            # On Strix Halo APUs, heap[0] is shared system RAM (no flags).
-            /flags:/ && in_heap { in_flags=1; next }
-            /None/ && in_flags && pending_size > 0 {
-                total += pending_size
-                pending_size = 0
-            }
-            /MEMORY_HEAP_/ && in_flags { in_flags=0 }
-            END { print total+0 }
-        ')
-        # Always use awk_total — it correctly sums all heaps for unified-memory APUs.
-        # The while-loop result is only valid for discrete GPUs with no shared heap.
-        gpu_vram_mb=$awk_total
-
-        if [[ -n "$gpu_name" ]] && (( gpu_vram_mb > 500 )); then
-            GPU_INDEX+=(0)
-            GPU_NAME+=("$gpu_name")
-            GPU_VRAM_TOTAL+=("$gpu_vram_mb")
-            GPU_VRAM_FREE+=("$gpu_vram_mb")
-            GPU_PCIE_WIDTH+=(0)
-            GPU_PCIE_GEN+=(0)
-            GPU_BANDWIDTH+=(0)
-            GPU_COMPUTE_CAP+=(0.0)
-            GPU_COUNT=$(( GPU_COUNT + 1 ))
-            GPU_BACKEND="Vulkan"
-            echo "GPUs: $GPU_COUNT detected (Vulkan fallback: $gpu_name, ${gpu_vram_mb}MB)"
-        fi
-    fi
-fi
 
 # Apply --gpus filter (restrict to specified CUDA indices)
 if [[ -n "$GPUS_FILTER" && $GPU_COUNT -gt 0 ]]; then
@@ -2135,17 +1865,6 @@ GGUF_BASENAME="${GGUF_BASENAME:-}"
 GGUF_QUANTIZED_BY="${GGUF_QUANTIZED_BY:-}"
 [[ "$LAYER_COUNT" == "0" ]] && LAYER_COUNT=48 && echo "Warning: Could not detect layer count, using default (48)"
 
-if [[ "$CTX_MODE" == "max" ]]; then
-    if (( CTX_TRAIN > 0 )); then
-        CTX_SIZE=$CTX_TRAIN
-        echo "Context: max (${CTX_SIZE} tokens, model train limit)"
-    else
-        echo "Warning: --ctx-size max requested but model train context is unknown; using 65536." >&2
-    fi
-elif [[ "$CTX_MODE" == "fit" ]] && (( CTX_TRAIN > 0 && CTX_SIZE > CTX_TRAIN )); then
-    CTX_SIZE=$CTX_TRAIN
-fi
-
 # Properly-tagged DeepSeek V4 GGUFs use arch=deepseek4 (added in PR #22378 +
 # the antirez fork). Stock llama.cpp master doesn't recognize this arch yet,
 # so a non-fork binary will fail to load. Just warn — if the user pointed
@@ -2171,36 +1890,6 @@ Warning: this GGUF looks like DeepSeek V4 Flash mistagged as deepseek2.
          Point LLAMA_SERVER at the fork's llama-server binary if you haven't.
 EOF
 fi
-
-# MTP/DFlash GGUFs are draft-only artifacts, not standalone chat models. If a
-# user launches one directly, llama-server may never become healthy and the
-# later health timeout hides the real problem. Fail before launch with the
-# actionable correction.
-_draft_arch_lc=${MODEL_ARCH,,}
-_draft_name_lc=${GGUF_MODEL_NAME,,}
-_draft_base_lc=${GGUF_BASENAME,,}
-_draft_file_lc=${MODEL_NAME,,}
-_draft_only_reason=""
-case "$_draft_arch_lc" in
-    mtp) _draft_only_reason="MTP draft architecture" ;;
-    dflash-draft) _draft_only_reason="DFlash draft architecture" ;;
-esac
-if [[ -z "$_draft_only_reason" ]]; then
-    if [[ ( "$_draft_name_lc" == *draft* || "$_draft_base_lc" == *draft* || "$_draft_file_lc" == *draft* ) &&           ( "$_draft_name_lc" == *mtp* || "$_draft_base_lc" == *mtp* || "$_draft_file_lc" == *mtp* ||             "$_draft_name_lc" == *dflash* || "$_draft_base_lc" == *dflash* || "$_draft_file_lc" == *dflash* ) ]]; then
-        _draft_only_reason="draft-only model name"
-    fi
-fi
-if [[ -n "$_draft_only_reason" ]]; then
-    cat >&2 <<EOF
-Error: $MODEL_NAME appears to be a draft-only GGUF ($_draft_only_reason).
-
-Draft/MTP GGUFs cannot be launched as the primary model. Launch the matching
-base chat model instead, then enable speculative decoding with --spec-type
-when using a backend that supports that draft format.
-EOF
-    exit 1
-fi
-unset _draft_arch_lc _draft_name_lc _draft_base_lc _draft_file_lc _draft_only_reason
 
 IS_MOE=0
 (( EXPERT_COUNT > 1 )) && IS_MOE=1
@@ -2445,14 +2134,14 @@ case "$KV_TYPE" in
     q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
 esac
 
-# ── Max-context-fit selection / suggestion ──
+# ── Max-context-fit suggestion ──
 # KV is (near-)linear in ctx for all four families (standard/MLA/SSM, and ISWA
 # once ctx exceeds SLIDING_WINDOW). Use the bytes-per-token we just computed
 # for the current KV type to solve for the largest ctx that still leaves
-# headroom. `LLM_CTX_SIZE=fit` / `--ctx-size fit` applies it directly.
-# Numeric context remains authoritative. The legacy prompt is kept only for
-# interactive runs that did not explicitly choose a context mode.
-if (( KV_TOTAL_MB > 0 )) && [[ "$CTX_MODE" != "manual" && "$CTX_MODE" != "max" ]]; then
+# headroom, then offer it if it's meaningfully bigger than the user's value.
+# Skipped when --ctx-size is explicit, non-interactive, or LLM_ASSUME_YES is
+# set — no surprises in scripts.
+if (( ! CTX_EXPLICIT )) && (( KV_TOTAL_MB > 0 )) && [[ -t 0 ]] && (( ${LLM_ASSUME_YES:-0} == 0 )); then
     _kv_bpt_b=$(( KV_TOTAL_MB * 1048576 / CTX_SIZE ))
     if (( _kv_bpt_b > 0 )); then
         # Budget for KV ≈ all hardware memory, minus the weights (full virtual
@@ -2475,16 +2164,15 @@ if (( KV_TOTAL_MB > 0 )) && [[ "$CTX_MODE" != "manual" && "$CTX_MODE" != "max" ]
             for _c in 32768 65536 131072 262144 524288 1048576 2097152 4194304; do
                 (( _c <= _hw_cap_ctx )) && _suggested_ctx=$_c
             done
-            if (( CTX_TRAIN > 0 && CTX_TRAIN <= _hw_cap_ctx && CTX_TRAIN > _suggested_ctx )); then
-                _suggested_ctx=$CTX_TRAIN
-            fi
             if (( _suggested_ctx >= CTX_SIZE * 2 )); then
                 _new_kv_mb=$(( _kv_bpt_b * _suggested_ctx / 1048576 ))
-                if [[ "$CTX_MODE" == "fit" ]]; then
-                    echo ""
-                    echo "  Context fit selected:"
-                    echo "    Base:       ${CTX_SIZE} tokens → ${KV_TOTAL_MB}MB KV (${KV_TYPE})"
-                    echo "    Fit:        ${_suggested_ctx} tokens → ${_new_kv_mb}MB KV"
+                echo ""
+                echo "  Context headroom available:"
+                echo "    Requested:  ${CTX_SIZE} tokens → ${KV_TOTAL_MB}MB KV (${KV_TYPE})"
+                echo "    Max fit:    ${_suggested_ctx} tokens → ${_new_kv_mb}MB KV"
+                read -r -t 20 -p "  Use max context ${_suggested_ctx}? [y/N] " _ctx_ans || _ctx_ans="n"
+                _ctx_ans="${_ctx_ans:-n}"
+                if [[ "$_ctx_ans" =~ ^[Yy] ]]; then
                     # Linear rescale — exact for standard/MLA/SSM, slight
                     # overestimate for ISWA past the swa window (safe side).
                     _num=$_suggested_ctx
@@ -2498,28 +2186,7 @@ if (( KV_TOTAL_MB > 0 )) && [[ "$CTX_MODE" != "manual" && "$CTX_MODE" != "max" ]
                         q8_0)  KV_TOTAL_MB=$KV_Q8_MB ;;
                         q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
                     esac
-                    echo "  Context set to ${CTX_SIZE} — KV now ${KV_TOTAL_MB}MB"
-                elif (( ! CTX_EXPLICIT )) && [[ -t 0 ]] && (( ${LLM_ASSUME_YES:-0} == 0 )); then
-                    echo ""
-                    echo "  Context headroom available:"
-                    echo "    Requested:  ${CTX_SIZE} tokens → ${KV_TOTAL_MB}MB KV (${KV_TYPE})"
-                    echo "    Max fit:    ${_suggested_ctx} tokens → ${_new_kv_mb}MB KV"
-                    read -r -t 20 -p "  Use max context ${_suggested_ctx}? [y/N] " _ctx_ans || _ctx_ans="n"
-                    _ctx_ans="${_ctx_ans:-n}"
-                    if [[ "$_ctx_ans" =~ ^[Yy] ]]; then
-                        _num=$_suggested_ctx
-                        _den=$CTX_SIZE
-                        CTX_SIZE=$_suggested_ctx
-                        KV_Q4_MB=$(( KV_Q4_MB * _num / _den ))
-                        KV_Q8_MB=$(( KV_Q8_MB * _num / _den ))
-                        KV_F16_MB=$(( KV_F16_MB * _num / _den ))
-                        case "$KV_TYPE" in
-                            f16)   KV_TOTAL_MB=$KV_F16_MB ;;
-                            q8_0)  KV_TOTAL_MB=$KV_Q8_MB ;;
-                            q4_0)  KV_TOTAL_MB=$KV_Q4_MB ;;
-                        esac
-                        echo "  Context bumped to ${CTX_SIZE} — KV now ${KV_TOTAL_MB}MB"
-                    fi
+                    echo "  Context bumped to ${CTX_SIZE} — KV now ${KV_TOTAL_MB}MB"
                 fi
             fi
         fi
@@ -2553,15 +2220,6 @@ THREADS_BATCH=$PHYSICAL_CORES
 echo "  Threads: gen=$THREADS_GEN batch=$THREADS_BATCH (${PHYSICAL_CORES} physical cores)"
 
 # ── Build the flags array ──
-# BASE_FLAGS = neutral llama.cpp defaults (Phase 1 benchmark baseline)
-BASE_FLAGS=(
-    -m "$MODEL_PATH"
-    --host "$HOST"
-    --port "$PORT"
-    --ctx-size "$CTX_SIZE"
-)
-
-# COMMON_FLAGS = heuristic optimizations (Phase 2 benchmark + normal launches)
 COMMON_FLAGS=(
     -m "$MODEL_PATH"
     --host "$HOST"
@@ -2695,13 +2353,6 @@ if (( GPU_COUNT > 0 )); then
     COMMON_FLAGS+=(-ngl 999 -mg "${GPU_INDEX[${GPU_ORDER[0]}]}")
 fi
 
-# Speculative decoding
-if [[ -n "$SPEC_TYPE" && "$SPEC_TYPE" != "none" ]]; then
-    COMMON_FLAGS+=(--spec-type "$SPEC_TYPE")
-    echo "  Speculative decoding: type=$SPEC_TYPE"
-    [[ -n "$SPEC_DRAFT_N_MAX" ]] && COMMON_FLAGS+=(--spec-draft-n-max "$SPEC_DRAFT_N_MAX")
-fi
-
 # Multimodal projector (vision support)
 # --mmproj auto (or --vision): auto-detect locally or download from HuggingFace
 # --mmproj <path>: use specific file
@@ -2743,13 +2394,6 @@ import sys
 def norm(value):
     return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
 
-def qwen_family(value):
-    value = (value or "").lower()
-    match = re.search(r"qwen\s*3(?:[-_\s]*vl|(?:\.[0-9]+)?)", value)
-    if not match:
-        return ""
-    return norm(match.group(0))
-
 try:
     meta = json.loads(os.environ["MMPROJ_META"])
 except Exception:
@@ -2767,78 +2411,13 @@ if expected_bytes > 0:
     if actual_bytes < expected_bytes:
         sys.exit(1)
 
-text_raw = {os.environ.get("TEXT_MODEL_NAME"), os.environ.get("TEXT_MODEL_BASENAME")}
-proj_raw = {meta.get("name"), meta.get("basename")}
-text_ids = {norm(value) for value in text_raw}
-proj_ids = {norm(value) for value in proj_raw}
+text_ids = {norm(os.environ.get("TEXT_MODEL_NAME")), norm(os.environ.get("TEXT_MODEL_BASENAME"))}
+proj_ids = {norm(meta.get("name")), norm(meta.get("basename"))}
 text_ids.discard("")
 proj_ids.discard("")
 
-text_families = {qwen_family(value) for value in text_raw}
-proj_families = {qwen_family(value) for value in proj_raw}
-text_families.discard("")
-proj_families.discard("")
-
-if not text_ids or not proj_ids:
+if not text_ids or not proj_ids or text_ids.isdisjoint(proj_ids):
     sys.exit(1)
-if text_ids.isdisjoint(proj_ids) and text_families.isdisjoint(proj_families):
-    sys.exit(1)
-'
-}
-
-mmproj_repo_bases() {
-    MODEL_FILE_NAME="$MODEL_NAME" TEXT_MODEL_NAME="${GGUF_MODEL_NAME:-}" TEXT_MODEL_BASENAME="${GGUF_BASENAME:-}" python3 -c '
-import os
-import re
-
-def add(items, seen, value):
-    value = clean(value)
-    if value and value.lower() not in seen:
-        seen.add(value.lower())
-        items.append(value)
-
-def clean(value):
-    value = (value or "").strip()
-    if not value:
-        return ""
-    value = os.path.basename(value)
-    value = re.sub(r"\.gguf$", "", value, flags=re.I)
-    value = re.sub(r"-\d{5}-of-\d{5}$", "", value, flags=re.I)
-    value = re.sub(r"\s+", "-", value)
-    value = re.sub(r"-+", "-", value)
-    return value.strip("-_. ")
-
-def variants(value):
-    value = clean(value)
-    if not value:
-        return []
-    quant_stripped = re.sub(
-        r"-(?:UD-)?(?:Q[0-9](?:_[A-Z0-9]+)+|IQ[0-9](?:_[A-Z0-9]+)+|TQ[0-9](?:_[A-Z0-9]+)+|BF16|F16|F32|FP16|FP32)$",
-        "",
-        value,
-        flags=re.I,
-    )
-    bases = [quant_stripped, value] if quant_stripped != value else [value]
-    out = []
-    for base in bases:
-        descriptor_stripped = re.sub(r"-(?:Instruct|Base|Chat)$", "", base, flags=re.I)
-        if descriptor_stripped != base:
-            out.append(descriptor_stripped)
-        out.append(base)
-    return out
-
-items = []
-seen = set()
-for source in (
-    os.environ.get("MODEL_FILE_NAME"),
-    os.environ.get("TEXT_MODEL_NAME"),
-    os.environ.get("TEXT_MODEL_BASENAME"),
-):
-    for value in variants(source):
-        add(items, seen, value)
-
-for item in items:
-    print(item)
 '
 }
 
@@ -2936,45 +2515,26 @@ download_mmproj() {
     # Try to download mmproj from HuggingFace based on model metadata
     local basename="${GGUF_BASENAME:-$GGUF_MODEL_NAME}"
     local quantizer="${GGUF_QUANTIZED_BY:-}"
-    local repo_bases=()
-    local base
-
-    while IFS= read -r base; do
-        [[ -n "$base" ]] || continue
-        repo_bases+=("$base")
-    done < <(mmproj_repo_bases)
-    [[ ${#repo_bases[@]} -eq 0 ]] && return 1
+    [[ -z "$basename" ]] && return 1
 
     # Build candidate HuggingFace repo names
-    # Common pattern: {owner}/{model-id}-GGUF (e.g. unsloth/gemma-4-31B-it-GGUF)
+    # Common pattern: {quantizer}/{basename}-GGUF (e.g. unsloth/gemma-4-31B-it-GGUF)
     local candidates=()
-    local seen_candidates=()
-    local owner repo seen already_seen
-    add_candidate_repo() {
-        repo="$1"
-        already_seen=0
-        for seen in "${seen_candidates[@]}"; do
-            [[ "${seen,,}" == "${repo,,}" ]] && already_seen=1 && break
-        done
-        (( already_seen )) && return
-        seen_candidates+=("$repo")
-        candidates+=("$repo")
-    }
-
     if [[ -n "$quantizer" ]]; then
-        for base in "${repo_bases[@]}"; do
-            add_candidate_repo "${quantizer}/${base}-GGUF"
-        done
+        # Unsloth/bartowski/etc style: quantizer/BaseName-GGUF
+        candidates+=("${quantizer}/${basename}-GGUF")
+        # Also try with model name (sometimes differs from basename)
+        [[ -n "$GGUF_MODEL_NAME" && "$GGUF_MODEL_NAME" != "$basename" ]] && \
+            candidates+=("${quantizer}/${GGUF_MODEL_NAME}-GGUF")
     fi
-    # Also try common publishers. Some GGUFs omit general.quantized_by.
-    for owner in unsloth bartowski lmstudio-community Qwen; do
-        for base in "${repo_bases[@]}"; do
-            add_candidate_repo "${owner}/${base}-GGUF"
-        done
+    # Also try common quantizers
+    for q in unsloth bartowski lmstudio-community; do
+        [[ "$q" == "$quantizer" ]] && continue
+        candidates+=("${q}/${basename}-GGUF")
     done
 
     local safe_basename
-    safe_basename=$(printf '%s' "${repo_bases[0]:-$basename}" | tr -cs 'A-Za-z0-9._+-' '_' | sed 's/^_*//; s/_*$//')
+    safe_basename=$(printf '%s' "$basename" | tr -cs 'A-Za-z0-9._+-' '_' | sed 's/^_*//; s/_*$//')
     [[ -z "$safe_basename" ]] && safe_basename="model"
 
     for repo in "${candidates[@]}"; do
@@ -3315,7 +2875,7 @@ wait_for_ready() {
 # detects the shared-pgid case and refuses pgid-kill there.
 #
 # Modes: "tee" (tee to log + stdout), "tee_filter" (tee + filter known
-#        noisy ik_llama spam), "log_only" (append to log file only).
+#        noisy ik_llama spam).
 # Side effects: sets RUNNING_PID, LAUNCH_LOG_OFFSET. Prints pid to stdout.
 launch_backend() {
     local mode="$1"; shift
@@ -3334,9 +2894,6 @@ launch_backend() {
         tee_filter)
             "${launcher[@]}" "${env_prefix[@]}" "$LLAMA_SERVER" "$@" \
                 > >(tee -a "$SERVER_LOG" | grep -v --line-buffered "record AND rewind is invalid") 2>&1 &
-            ;;
-        log_only)
-            "${launcher[@]}" "${env_prefix[@]}" "$LLAMA_SERVER" "$@" >> "$SERVER_LOG" 2>&1 &
             ;;
         tee|*)
             "${launcher[@]}" "${env_prefix[@]}" "$LLAMA_SERVER" "$@" > >(tee -a "$SERVER_LOG") 2>&1 &
@@ -3446,9 +3003,8 @@ _parse_load_failure() {
     [[ -n "$recent" ]] || { echo "unknown"; return; }
 
     local oom_line size_mb device
-    # Backend-agnostic OOM detection: CUDA and Vulkan OOM patterns.
     oom_line=$(printf '%s\n' "$recent" \
-        | grep -E "cudaMalloc.*out of memory|vkAllocateMemory.*failed|VK_ERROR_OUT_OF_DEVICE_MEMORY" \
+        | grep -E "cudaMalloc failed: out of memory" \
         | tail -1 || true)
     if [[ -n "$oom_line" ]]; then
         size_mb=$(printf '%s' "$oom_line" \
@@ -3466,7 +3022,6 @@ _parse_load_failure() {
     # cudaHostAlloc failure: distinguish "RLIMIT_MEMLOCK / pinned cap" from
     # "raw out-of-memory" using the surrounding error wording. mlock /
     # locked-memory wording → cap; otherwise generic pinned_fail.
-    # Vulkan doesn't use pinned host allocation, so this branch is CUDA-only.
     if printf '%s\n' "$recent" | grep -qE "cudaHostAlloc.*(failed|out of memory)|pinned.*alloc.*(failed|out of memory)"; then
         if printf '%s\n' "$recent" | grep -qiE "RLIMIT_MEMLOCK|locked.memory|ulimit.*memlock|cannot allocate locked|operation not permitted"; then
             echo "pinned_cap_exceeded"
@@ -3487,9 +3042,9 @@ _parse_load_failure() {
         echo "ram_oom"
         return
     fi
-    # "Cannot allocate memory" outside a CUDA/Vulkan-host context = host malloc fail.
+    # "Cannot allocate memory" outside a CUDA-host context = host malloc fail.
     if printf '%s\n' "$recent" | grep -qE "Cannot allocate memory|posix_memalign.*failed|mmap.*Cannot allocate"; then
-        if ! printf '%s\n' "$recent" | tail -20 | grep -qE "cudaHostAlloc|CUDA_Host|vkAllocateMemory"; then
+        if ! printf '%s\n' "$recent" | tail -20 | grep -qE "cudaHostAlloc|CUDA_Host"; then
             echo "ram_oom"
             return
         fi
@@ -3543,7 +3098,7 @@ _free_vram_for_device() {
 try_start() {
     local extra_flags=("$@")
     RUNNING_PID=""
-    local mode="${TRY_START_MODE:-tee}"
+    local mode="tee"
     local launch_flags=("${COMMON_FLAGS[@]}" "${extra_flags[@]}")
     launch_backend "$mode" "${launch_flags[@]}"
     local pid="$RUNNING_PID"
@@ -3593,22 +3148,10 @@ print_cmd() {
 }
 
 # Run benchmark: send a prompt, measure tok/s
-# Args: $1 = label (e.g. "True Baseline", "Heuristic Config"), $2..N = flags
 run_benchmark() {
-    local label="$1"; shift
     local url="http://127.0.0.1:${PORT}"
-    local bench_log="$BENCHMARK_LOG"
-
-    # Save current stdout/stderr so we can restore after curl
-    exec 3>&1 4>&2
-
-    # Redirect all output (including server logs during curl) to the log file
-    exec >> "$bench_log" 2>&1
-
-    # These echo statements go to the log file only
     echo ""
-    echo "═══ Benchmark: ${label} ═══"
-    echo "  Flags: $*"
+    echo "═══ Benchmark ═══"
 
     # Prompt processing benchmark (short prompt)
     local pp_prompt="Explain the theory of relativity in simple terms. Cover special and general relativity, time dilation, and gravitational effects."
@@ -3617,11 +3160,8 @@ run_benchmark() {
         -H "Content-Type: application/json" \
         -d "{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"$pp_prompt\"}],\"max_tokens\":200,\"temperature\":0.1}" 2>/dev/null)
 
-    # Restore stdout/stderr before processing and printing results
-    exec 1>&3 2>&4 3>&- 4>&-
-
     if [[ -z "$result" ]]; then
-        echo "Benchmark failed — server not responding" >&2
+        echo "Benchmark failed — server not responding"
         return 1
     fi
 
@@ -3643,17 +3183,17 @@ except Exception:
     if [[ -n "$response_rates" ]]; then
         pp_rate="${response_rates%%$'\t'*}"
         tg_rate="${response_rates#*$'\t'}"
-        echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s" >&2
-        echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s" >&2
+        echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
+        echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
     else
         # Use /slots as a fallback for older backends.
         local timings
         timings=$(curl -sf "$url/slots" 2>/dev/null)
         if [[ -n "$timings" ]]; then
         pp_rate=$(echo "$timings" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-s=d[0] if isinstance(d,list) else d
+	import sys,json
+	d=json.load(sys.stdin)
+	s=d[0] if isinstance(d,list) else d
 t_pp = s.get('t_prompt_processing', 0)
 n_pp = s.get('n_prompt_tokens_processed', 1)
 if t_pp > 0: print(f\"{n_pp / (t_pp / 1000):.1f}\")
@@ -3666,97 +3206,21 @@ s=d[0] if isinstance(d,list) else d
 t_gen = s.get('t_token_generation', 0)
 n_gen = s.get('n_decoded', 1)
 if t_gen > 0: print(f\"{n_gen / (t_gen / 1000):.1f}\")
-else: print('?')
-" 2>/dev/null)
-            echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s" >&2
-            echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s" >&2
-        else
-            echo "  Prompt tokens: ${pp_tokens:-?}" >&2
-            echo "  Generated tokens: ${tg_tokens:-?}" >&2
-            echo "  (Backend did not expose detailed timing)" >&2
-        fi
-    fi
-
-    {
-        echo ""
-        echo "═══ Benchmark: ${label} ═══"
-        echo "  Flags: $*"
-        if [[ -n "$tg_rate" && -n "$pp_rate" ]]; then
+	else: print('?')
+	" 2>/dev/null)
             echo "  Prompt processing: ${pp_tokens:-?} tokens @ ${pp_rate:-?} tok/s"
             echo "  Generation:        ${tg_tokens:-?} tokens @ ${tg_rate:-?} tok/s"
-        fi
-    } >> "$bench_log" 2>&1
-
-    # Output clean parseable data to stdout for capture
-    echo "${tg_rate:-0} ${pp_rate:-0}"
-}
-
-# Run two-phase benchmark: true baseline first, then heuristic config
-run_two_phase_benchmark() {
-    local p1_gen="" p1_pp="" p2_gen="" p2_pp="" p3_gen="" p3_pp=""
-
-    # Phase 1: True neutral baseline — no conditionals, no optimizations
-    echo ""
-    echo "═══ Phase 1: True Baseline (llama.cpp defaults) ═══"
-    echo "  Running with BASE_FLAGS only — no optimizations applied."
-    kill_server ""
-    if ! TRY_START_MODE=log_only try_start "${BASE_FLAGS[@]}"; then
-        echo "  Phase 1 failed — server could not start with base flags"
-    else
-        local result; result=$(run_benchmark "True Baseline" "${BASE_FLAGS[@]}")
-        p1_gen=$(echo "$result" | awk '{print $1}')
-        p1_pp=$(echo "$result" | awk '{print $2}')
-        kill_server "$RUNNING_PID"
-    fi
-
-    # Phase 2: Heuristic config — the pre-tuned COMMON_FLAGS (no spec)
-    echo ""
-    echo "═══ Phase 2: Heuristic Config (llm-server optimized) ═══"
-    echo "  Running with COMMON_FLAGS — GPU placement, flash-attn, KV quantization, etc."
-    if ! TRY_START_MODE=log_only try_start; then
-        echo "  Phase 2 failed — server could not start with heuristic flags"
-    else
-        local result; result=$(run_benchmark "Heuristic Config" "${COMMON_FLAGS[@]}")
-        p2_gen=$(echo "$result" | awk '{print $1}')
-        p2_pp=$(echo "$result" | awk '{print $2}')
-        kill_server "$RUNNING_PID"
-    fi
-
-    # Phase 3: Heuristic config + speculative decoding (if enabled)
-    if [[ -n "$SPEC_TYPE" && "$SPEC_TYPE" != "none" ]]; then
-        echo ""
-        echo "═══ Phase 3: Heuristic Config + Speculative Decoding ═══"
-        echo "  Running with COMMON_FLAGS + --spec-type $SPEC_TYPE${SPEC_DRAFT_N_MAX:+ --spec-draft-n-max $SPEC_DRAFT_N_MAX}"
-        local spec_flags=("${COMMON_FLAGS[@]}")
-        spec_flags+=(--spec-type "$SPEC_TYPE")
-        [[ -n "$SPEC_DRAFT_N_MAX" ]] && spec_flags+=(--spec-draft-n-max "$SPEC_DRAFT_N_MAX")
-        if ! TRY_START_MODE=log_only try_start "${spec_flags[@]}"; then
-            echo "  Phase 3 failed — server could not start with speculative decoding flags"
         else
-            local result; result=$(run_benchmark "Heuristic + Spec ($SPEC_TYPE)" "${spec_flags[@]}")
-            p3_gen=$(echo "$result" | awk '{print $1}')
-            p3_pp=$(echo "$result" | awk '{print $2}')
-            kill_server "$RUNNING_PID"
+            echo "  Prompt tokens: ${pp_tokens:-?}"
+            echo "  Generated tokens: ${tg_tokens:-?}"
+            echo "  (Backend did not expose detailed timing)"
         fi
     fi
-
-    # Print benchmark summary
     echo ""
-    echo "═══ Benchmark Summary ═══"
-    if [[ -n "$p1_gen" ]]; then
-        echo "  Phase 1 (Baseline):       gen=${p1_gen} tok/s  pp=${p1_pp} tok/s"
-    fi
-    if [[ -n "$p2_gen" ]]; then
-        local p2_gain; p2_gain=$(python3 -c "g=${p1_gen:-0}; print(f'{(${p2_gen:-0}-g)/g*100:.2f}%' if g>0 else 'N/A')" 2>/dev/null || echo "N/A")
-        echo "  Phase 2 (Heuristic):      gen=${p2_gen} tok/s  pp=${p2_pp} tok/s  (${p2_gain} vs baseline)"
-    fi
-    if [[ -n "$p3_gen" ]]; then
-        local p3_gain; p3_gain=$(python3 -c "g=${p1_gen:-0}; print(f'{(${p3_gen:-0}-g)/g*100:.2f}%' if g>0 else 'N/A')" 2>/dev/null || echo "N/A")
-        echo "  Phase 3 (Heuristic+Spec): gen=${p3_gen} tok/s  pp=${p3_pp} tok/s  (${p3_gain} vs baseline)"
-    fi
-    echo "  Detailed logs: $BENCHMARK_LOG"
-    echo ""
-    return 0
+    # Auto-exit after benchmark to prevent "hanging"
+    echo "Benchmark complete. Shutting down server..."
+    kill_server ""
+    exit 0
 }
 
 # Suggest alternatives when model doesn't fit
@@ -3812,6 +3276,10 @@ run_with_restart() {
 
         if (( healthy )); then
             echo "Server healthy."
+            if (( BENCHMARK )); then
+                run_benchmark
+                BENCHMARK=0  # only run once
+            fi
 
             restarts=0  # reset counter on successful start
 
@@ -3822,18 +3290,10 @@ run_with_restart() {
                 sleep 5
                 local new_log
                 new_log=$(tail -c +"$log_pos" "$SERVER_LOG" 2>/dev/null) || new_log=""
-                # CUDA/Vulkan errors — instant kill
-                local backend_err_tag
-                if [[ "$GPU_BACKEND" == "cuda" ]]; then
-                    backend_err_tag="CUDA"
-                elif [[ "$GPU_BACKEND" == "Vulkan" ]]; then
-                    backend_err_tag="Vulkan"
-                else
-                    backend_err_tag="GPU"
-                fi
-                if echo "$new_log" | grep -qE "CUDA error|Vulkan error|VK_ERROR_DEVICE_LOST|VK_ERROR_OUT_OF_DEVICE_MEMORY"; then
+                # CUDA errors — instant kill
+                if echo "$new_log" | grep -q "CUDA error"; then
                     echo ""
-                    echo "═══ ${backend_err_tag} error detected — server is braindead, killing ═══"
+                    echo "═══ CUDA error detected — server is braindead, killing ═══"
                     tail -5 "$SERVER_LOG" 2>/dev/null
                     kill -9 "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
                     cuda_killed=1
@@ -3862,12 +3322,8 @@ run_with_restart() {
                 local gpu_wait=0
                 echo "Waiting for GPU memory to be released..."
                 while (( gpu_wait < 60 )); do
-                    local gpu_procs=0
-                    if [[ "$GPU_BACKEND" == "cuda" ]] && command -v nvidia-smi &>/dev/null; then
-                        gpu_procs=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]') || gpu_procs=0
-                    elif [[ "$GPU_BACKEND" == "Vulkan" ]] && command -v amd-smi &>/dev/null; then
-                        gpu_procs=$(amd-smi process 2>/dev/null | tail -n +2 | grep -cv "No running" || true)
-                    fi
+                    local gpu_procs
+                    gpu_procs=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]') || gpu_procs=0
                     if (( gpu_procs == 0 )); then
                         echo "GPU memory free after ${gpu_wait}s"
                         break
@@ -3892,22 +3348,17 @@ run_with_restart() {
         # Server exited — decide whether to restart
         local uptime=$(( $(date +%s) - last_start ))
 
-        # Clean exit (signal 0 or SIGTERM) only counts if server crashed before becoming healthy
+        # Clean exit (signal 0 or SIGTERM)
         if (( exit_code == 0 || exit_code == 143 )); then
-            if (( ! healthy )); then
-                echo "Server exited cleanly (code $exit_code) before becoming healthy. Not restarting."
-                exit 0
-            else
-                echo "Server exited cleanly (code $exit_code) after running. Restarting..."
-                restarts=$(( restarts + 1 ))
-            fi
-        else
-            restarts=$(( restarts + 1 ))
-            echo ""
-            echo "═══ Server crashed (exit code $exit_code, uptime ${uptime}s) ═══"
-            tail -5 "$SERVER_LOG" 2>/dev/null
-            echo ""
+            echo "Server exited cleanly (code $exit_code). Not restarting."
+            exit 0
         fi
+
+        restarts=$(( restarts + 1 ))
+        echo ""
+        echo "═══ Server crashed (exit code $exit_code, uptime ${uptime}s) ═══"
+        tail -5 "$SERVER_LOG" 2>/dev/null
+        echo ""
 
         if (( restarts > MAX_RESTARTS )); then
             if (( KEEP_ALIVE )); then
@@ -3959,7 +3410,7 @@ if (( DO_UNLIMITED )); then
     AI_TUNE_ROUNDS="${USER_TUNE_ROUNDS:-20}"
     TUNE_LONG_TIMEOUT=1
 else
-    AI_TUNE_ROUNDS="${USER_TUNE_ROUNDS:-12}"
+    AI_TUNE_ROUNDS="${USER_TUNE_ROUNDS:-8}"
 fi
 AI_TUNE_MAX_CRASHES=4  # free crash retries (don't count toward rounds)
 TUNE_HISTORY_FILE="$CACHE_DIR/tune_history.jsonl"
@@ -4127,78 +3578,35 @@ MPEOF
 # Prints the tok/s to stdout
 bench_gen_tps() {
     local url="http://127.0.0.1:${PORT}"
-    # Long, demanding prompt that stresses different config aspects:
-    # - Large token budget (1500) exposes batch/threading differences
-    # - Complex reasoning forces sustained computation
-    # - Multiple requests let batch size, KV cache, threading variance show
-    local prompt="You are an expert systems architect and software engineer.
-Provide a comprehensive technical analysis covering these topics in detail:
+    # Send a completion and extract timings directly from the response
+    local result
+    result=$(curl -sf "$url/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        --max-time 180 \
+        -d '{"model":"test","messages":[{"role":"system","content":"You are a helpful assistant. /no_think"},{"role":"user","content":"Explain quantum computing in detail, covering qubits, superposition, entanglement, and error correction."}],"max_tokens":500,"temperature":0.1}' \
+        2>/dev/null)
 
-1. Distributed system architecture patterns: explain eventual consistency, CAP theorem, consensus algorithms (Raft, Paxos), and when to use each. Discuss trade-offs.
+    if [[ -z "$result" ]]; then
+        echo "0 0"
+        return
+    fi
 
-2. Performance optimization techniques: describe CPU cache hierarchies (L1/L2/L3), memory bandwidth optimization, branch prediction, SIMD vectorization, and practical code examples.
-
-3. Database design: compare OLTP vs OLAP, explain index structures (B-trees, hash tables, skip lists), discuss query optimization and execution plans.
-
-4. Concurrency primitives: explain mutexes, semaphores, condition variables, lock-free data structures, and memory ordering semantics (acquire-release, sequential consistency).
-
-5. Network protocols: detail TCP/IP stack layers, congestion control (TCP Reno, CUBIC), load balancing strategies, and edge cases that break naive implementations.
-
-For each topic, provide real-world examples, performance characteristics, and common pitfalls to avoid."
-
-    # Run multiple requests to get sustained throughput (batch size variance shows here)
-    local total_gen=0 total_pp=0 request_count=0
-    local request
-    for request in 1 2 3; do
-        local result
-        result=$(curl -sf "$url/v1/chat/completions" \
-            -H "Content-Type: application/json" \
-            --max-time 180 \
-            -d "{\"model\":\"test\",\"messages\":[{\"role\":\"system\",\"content\":\"You are a helpful assistant. /no_think\"},{\"role\":\"user\",\"content\":$(printf '%s' "$prompt" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")}],\"max_tokens\":1500,\"temperature\":0.3}" \
-            2>/dev/null)
-
-        if [[ -z "$result" ]]; then
-            continue
-        fi
-
-        # Extract timings from response
-        local gen pp
-        gen=$(python3 -c "
+    # Try timings from response (llama.cpp includes these)
+    python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     t = d.get('timings', {})
     gen = t.get('predicted_per_second', 0)
-    print(f'{gen:.2f}' if gen > 0 else '0')
-except: print('0')
-" <<< "$result" 2>/dev/null || echo "0")
-
-        pp=$(python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    t = d.get('timings', {})
     pp = t.get('prompt_per_second', 0)
-    print(f'{pp:.2f}' if pp > 0 else '0')
-except: print('0')
-" <<< "$result" 2>/dev/null || echo "0")
-
-        if [[ "$gen" != "0" && "$pp" != "0" ]]; then
-            total_gen=$(python3 -c "print(f'{float('$total_gen') + float('$gen'):.2f}')" 2>/dev/null || echo "0")
-            total_pp=$(python3 -c "print(f'{float('$total_pp') + float('$pp'):.2f}')" 2>/dev/null || echo "0")
-            (( ++request_count ))
-        fi
-    done
-
-    if (( request_count > 0 )); then
-        # Average the results across requests
-        local avg_gen avg_pp
-        avg_gen=$(python3 -c "print(f'{float('$total_gen') / $request_count:.2f}')" 2>/dev/null || echo "0")
-        avg_pp=$(python3 -c "print(f'{float('$total_pp') / $request_count:.2f}')" 2>/dev/null || echo "0")
-        echo "$avg_gen $avg_pp"
-    else
-        echo "0 0"
-    fi
+    if gen > 0:
+        print(f'{gen:.2f} {pp:.2f}')
+    else:
+        # Fallback: calculate from usage
+        u = d.get('usage', {})
+        print(f'0 0')
+except: print('0 0')
+" <<< "$result" 2>/dev/null || echo "0 0"
 }
 
 # Query /v1/chat/completions with a message array (conversation history)
@@ -4211,7 +3619,7 @@ query_llm_chat() {
     local response
     # chat_template_kwargs.enable_thinking=false suppresses <think> blocks for
     # Qwen3/3.5/3.6 (the tune conversation doesn't need chain-of-thought; it
-    # eats the whole token budget). Ignored by non-Qwen templates.
+    # otherwise eats the whole token budget). Ignored by non-Qwen templates.
     response=$(curl -sf "$url/v1/chat/completions" \
         -H "Content-Type: application/json" \
         --max-time 1800 \
@@ -4316,8 +3724,7 @@ try_start_with_overrides() {
         done
         (( dominated )) || deduped+=("$flag")
     done
-    local mode="${TRY_START_MODE:-tee}"
-    launch_backend "$mode" "${deduped[@]}" "${TUNE_OVERRIDE_FLAGS[@]}"
+    launch_backend "tee" "${deduped[@]}" "${TUNE_OVERRIDE_FLAGS[@]}"
     local pid="$RUNNING_PID"
     wait_for_ready "$pid"
 }
@@ -4326,12 +3733,13 @@ parse_tune_overrides() {
     TUNE_OVERRIDE_FLAGS=()
     TUNE_OVERRIDE_KEYS=()
     local kv_locked="$KV_QUALITY_EXPLICIT"
-    local spec_enabled=0
-    if [[ -n "$SPEC_TYPE" && "$SPEC_TYPE" != "none" ]]; then
-        spec_enabled=1
-    fi
     local locked_keys_env
     locked_keys_env=$(printf '%s\n' "${TUNE_USER_LOCKED_KEYS[@]:-}")
+    while IFS= read -r -d '' item; do
+        case "$item" in
+            F$'\t'*) TUNE_OVERRIDE_FLAGS+=("${item#F$'\t'}") ;;
+            K$'\t'*) TUNE_OVERRIDE_KEYS+=("${item#K$'\t'}") ;;
+        esac
     # Architecture-aware tuning scope (replaces the legacy DO_UNLIMITED toggle):
     #   - User-supplied flags (TUNE_USER_LOCKED_KEYS) are ALWAYS protected.
     #     They come from add_tune_lock_key() — anything explicit on the CLI,
@@ -4349,15 +3757,10 @@ parse_tune_overrides() {
     local moe_detected=0 multi_gpu=0
     (( EXPERT_COUNT > 0 )) && moe_detected=1
     (( GPU_COUNT >= 2 )) && multi_gpu=1
-    while IFS= read -r -d '' item; do
-        case "$item" in
-            F$'\t'*) TUNE_OVERRIDE_FLAGS+=("${item#F$'\t'}") ;;
-            K$'\t'*) TUNE_OVERRIDE_KEYS+=("${item#K$'\t'}") ;;
-        esac
-    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" SPEC_ENABLED="$spec_enabled" \
+    done < <(KV_LOCKED="$kv_locked" WSL2="$IS_WSL2" \
              MOE_DETECTED="$moe_detected" MULTI_GPU="$multi_gpu" \
              TUNE_USER_LOCKED_KEYS="$locked_keys_env" python3 -c "
-import json, os, sys
+	import json, os, sys
 try:
     overrides = json.loads(sys.stdin.read())
 except json.JSONDecodeError:
@@ -4378,8 +3781,6 @@ if os.environ.get('KV_LOCKED') == '1':
     protected |= {'--cache-type-k', '--cache-type-v'}
 if os.environ.get('WSL2') == '1':
     protected |= {'--mlock', '-mlk'}
-if os.environ.get('SPEC_ENABLED') != '1':
-    protected |= {'--spec-type', '--spec-draft-n-max'}
 # Normalize common aliases the LLM hallucinates
 aliases = {
     '--mg': '-mg', '--main-gpu': '-mg',
@@ -4430,10 +3831,8 @@ _tune_fmt_duration() {
 
 _tune_progress_line() {
     # Args: rounds_done total_rounds start_ts best_gen best_name baseline_gen
-    #       (additional args are intentionally ignored; detailed comparison is
-    #        printed by diff_flags/show_comparison in the main loop)
+    # rounds_done counts baseline as round 0, so total_done = arg1 + 1.
     local done="$1" total="$2" start="$3" bgen="$4" bname="$5" base="$6"
-
     local now elapsed avg_per eta_rem remain improvement color reset dim
     now=$(date +%s)
     elapsed=$(( now - start ))
@@ -4449,26 +3848,11 @@ _tune_progress_line() {
 
     improvement=""
     if [[ -n "$base" && "$base" != "0" && "$base" != "0.00" ]]; then
-        improvement=$(python3 -c "b=float('$base'); g=float('$bgen'); print(f'{(g-b)/b*100:+.2f}%')" 2>/dev/null || echo "")
+        improvement=$(python3 -c "b=float('$base'); g=float('$bgen'); print(f'{(g-b)/b*100:+.1f}%')" 2>/dev/null || echo "")
     fi
 
-    # Color policy:
-    # - Respect NO_COLOR and TERM=dumb.
-    # - Enable color when stdout/stderr is a TTY.
-    # - In quiet GUI mode, stdout/stderr may be redirected, but we still render
-    #   to /dev/tty below, so allow color when /dev/tty is writable.
-    # - FORCE_COLOR/CLICOLOR_FORCE can always force colors on.
-    local use_color=0
-    if [[ -z "${NO_COLOR:-}" ]]; then
-        if [[ -n "${FORCE_COLOR:-}" || -n "${CLICOLOR_FORCE:-}" ]]; then
-            use_color=1
-        elif [[ -t 1 || -t 2 ]]; then
-            use_color=1
-        elif [[ -w /dev/tty && "${TERM:-}" != "dumb" ]]; then
-            use_color=1
-        fi
-    fi
-    if (( use_color )); then
+    # Use color if stdout OR stderr is a TTY (GUI may pipe one but not the other)
+    if [[ -t 1 || -t 2 ]]; then
         color=$'\033[1;36m'; dim=$'\033[2m'; reset=$'\033[0m'
     else
         color=""; dim=""; reset=""
@@ -4487,128 +3871,18 @@ _tune_progress_line() {
     for ((i=0; i<filled; i++)); do bar+="#"; done
     for ((i=0; i<empty;  i++)); do bar+="-"; done
 
+    # Build the block once, then write it to stdout AND /dev/tty (if it exists).
+    # /dev/tty fallback guarantees visibility even when stdout is piped/redirected
+    # by the GUI or a wrapping terminal.
     local block
-    block=$(printf '\n%s================ AI Tune progress ================%s\n\r' "$color" "$reset")
-    block+=$(printf '%s  round %d/%d  [%s]  %d%%%s\n\r' "$color" "$done" "$total" "$bar" "$pct" "$reset")
-    block+=$(printf '%s  elapsed %s | ETA %s | best: %s @ %s tok/s %s%s%s\n\r' \
-        "$color" "$el_s" "$eta_s" "$bname" "$bgen" "$dim" "$improvement" "$reset")
-    block+=$(printf '%s==================================================%s\n\r' "$color" "$reset")
-
-    printf '%s' "$block"
-    # Also mirror to /dev/tty so the user sees it even if stdout was captured.
-    { printf '%s' "$block" > /dev/tty; } 2>/dev/null || true
-}
-
-# ── Flag diff helper: compare two JSON flag objects ──────────────────────
-# Usage: diff_flags <prev_json> <curr_json> <prev_gen> <prev_pp>
-# Prints aligned diff lines to stdout:
-#   - changed flags: [old] → [new]
-#   - added flags: + new --flag: value
-#   - removed flags: - --flag (was value)
-diff_flags() {
-    local prev_json="$1" curr_json="$2" prev_gen="$3" prev_pp="$4"
-    python3 -c "
-import json, sys
-
-def fmt_val(v):
-    if v is True: return 'true'
-    if v is False: return 'false'
-    return str(v)
-
-try:
-    prev = json.loads(sys.argv[1]) if sys.argv[1] else {}
-except (json.JSONDecodeError, IndexError):
-    prev = {}
-
-try:
-    curr = json.loads(sys.argv[2]) if sys.argv[2] else {}
-except (json.JSONDecodeError, IndexError):
-    curr = {}
-
-all_keys = sorted(set(list(prev.keys()) + list(curr.keys())))
-
-changed = []
-added   = []
-removed = []
-
-for k in all_keys:
-    in_prev = k in prev
-    in_curr = k in curr
-    if in_prev and in_curr:
-        if str(prev[k]) != str(curr[k]):
-            changed.append((k, prev[k], curr[k]))
-    elif in_curr and not in_prev:
-        added.append((k, curr[k]))
-    elif in_prev and not in_curr:
-        removed.append((k, prev[k]))
-
-max_key_len = max((len(k) for k in all_keys), default=0)
-max_val_len  = 10
-
-for flag, old_v, new_v in changed:
-    ov = f'[{fmt_val(old_v)}]'
-    nv = f'[{fmt_val(new_v)}]'
-    ov = ov.ljust(max_val_len)
-    nv = nv.ljust(max_val_len)
-    print(f'    - {flag}: {ov} → {nv}')
-
-for flag, val in added:
-    print(f'    + {flag}: [new] [{fmt_val(val)}]')
-
-for flag, val in removed:
-    print(f'    - {flag}: [{fmt_val(val)}] → [removed]')
-" "$prev_json" "$curr_json" 2>/dev/null || true
-}
-
-# ── Comparison output helper ─────────────────────────────────────────────
-show_comparison() {
-    local round_gen="$1" round_pp="$2" prev_gen="$3" prev_pp="$4"
-    local best_gen="$5" best_pp="$6" best_name="$7" best_round="$8"
-    python3 -c "
-import sys
-
-def tps(v):
-    try: return f'{float(v):.2f}'
-    except: return '0.00'
-
-rg = float('$round_gen') if '$round_gen' else 0.0
-rp = float('$round_pp')  if '$round_pp'  else 0.0
-pg = float('$prev_gen')  if '$prev_gen'  else None
-pp = float('$prev_pp')   if '$prev_pp'   else None
-bg = float('$best_gen')  if '$best_gen'  else None
-bp = float('$best_pp')   if '$best_pp'   else None
-bname = '$best_name'
-br    = int('$best_round') if '$best_round' else 0
-
-has_prev = pg is not None and pg > 0
-has_best = bg is not None and bg > 0
-
-if has_prev:
-    print('  Δ Config → Baseline Comparison:')
-    print(f'    Baseline (prev round):  {tps(pg)} gen tok/s  (pp: {tps(pp)})')
-    print(f'    This config:            {tps(rg)} gen tok/s  (pp: {tps(rp)})')
-    dg = rg - pg
-    dp = rp - pp
-    pg_pct = dg / pg * 100 if pg > 0 else 0.0
-    pp_pct = dp / pp * 100 if pp > 0 else 0.0
-    dgs = f'{dg:+.2f}' if dg >= 0 else f'{dg:.2f}'
-    dps = f'{dp:+.2f}' if dp >= 0 else f'{dp:.2f}'
-    pgs = f'{pg_pct:+.2f}' if pg_pct >= 0 else f'{pg_pct:.2f}'
-    pps = f'{pp_pct:+.2f}' if pp_pct >= 0 else f'{pp_pct:.2f}'
-    print(f'    Δ: {dgs} gen tok/s ({pgs}%) | PP: {dps} tok/s ({pps}%)')
-
-if has_best and br > 0:
-    print(f'  Best so far: {bname} @ {tps(bg)} gen tok/s (round {br}, pp: {tps(bp)})')
-    if rg > 0:
-        dg2 = rg - bg
-        pg2 = dg2 / bg * 100 if bg > 0 else 0.0
-        dgs2 = f'{dg2:+.2f}' if dg2 >= 0 else f'{dg2:.2f}'
-        pg2s = f'{pg2:+.2f}' if pg2 >= 0 else f'{pg2:.2f}'
-        if rg >= bg:
-            print(f'    Δ vs Best: {dgs2} gen tok/s ({pg2s}%) — NEW BEST!')
-        else:
-            print(f'    Δ vs Best: {dgs2} gen tok/s ({pg2s}%)')
-" 2>/dev/null || true
+    block=$(printf '\n%s================ AI Tune progress ================%s\n' "$color" "$reset"
+            printf '%s  round %d/%d  [%s]  %d%%%s\n' "$color" "$done" "$total" "$bar" "$pct" "$reset"
+            printf '%s  elapsed %s | ETA %s | best: %s @ %s tok/s %s%s%s\n' \
+                "$color" "$el_s" "$eta_s" "$bname" "$bgen" "$dim" "$improvement" "$reset"
+            printf '%s==================================================%s\n' "$color" "$reset")
+    printf '%s\n' "$block"
+    # Also mirror to /dev/tty so the user sees it even if stdout was captured
+    { printf '%s\n' "$block" > /dev/tty; } 2>/dev/null || true
 }
 
 ai_tune() {
@@ -4620,9 +3894,8 @@ ai_tune() {
     (( DO_UNLIMITED )) && tune_cache_suffix="_unlimited"
     local tune_cache="$CACHE_DIR/tune_${tune_cache_key}${tune_cache_suffix}.json"
 
-    # Check existing cache (unless --retune or user explicitly requested --ai-tune)
-    # When DO_AI_TUNE=1, the user explicitly requested AI tune, so treat it as a retune
-    if [[ -f "$tune_cache" && "$RETUNE" == "0" && "$DO_AI_TUNE" == "0" ]]; then
+    # Check existing cache (unless --retune)
+    if [[ -f "$tune_cache" && "$RETUNE" == "0" ]]; then
         echo ""
         echo "═══ AI Tune: cached result found ═══"
         python3 -c "
@@ -4699,10 +3972,6 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
         trap '{ exec 1>&7 2>&8; exec 7>&- 8>&-; } 2>/dev/null; trap - RETURN' RETURN
         exec >> "$SERVER_LOG" 2>&1
     fi
-    local tune_launch_mode="tee"
-    if (( ! VERBOSE )); then
-        tune_launch_mode="log_only"
-    fi
 
     # Hardware hash for history tracking
     local hw_hash
@@ -4737,7 +4006,7 @@ print(f'  Tuned: {d.get(\"tuned_at\", \"?\")}')" 2>/dev/null
     tune_start_ts=$(date +%s)
     echo "Round 0/${AI_TUNE_ROUNDS}: Benchmarking baseline (heuristic config)..."
     kill_server ""
-    if ! TRY_START_MODE="$tune_launch_mode" try_start; then
+    if ! try_start; then
         echo "ERROR: Baseline config failed to start"
         return 1
     fi
@@ -4795,8 +4064,6 @@ Speed is the primary metric. Quality must not be sacrificed for marginal speed g
 - OOM = reduce batch, increase KV quantization, or spread across more GPUs
 - Immediate crash = you used an unsupported or invalid flag — remove it
 - Never repeat a config that crashed. Build on what worked instead.
-# Speculative decoding flags (if present in baseline)
-- --spec-draft-n-max: valid range 1-4 (0 disables speculative decoding). Only tune this if --spec-type is already set. Start at 4 working backward, explore higher for speed, lower for stability.
 {unlimited_section}
 # Rules
 1. The baseline config flags are ALREADY applied. You only propose CHANGES.
@@ -4867,7 +4134,6 @@ Benchmark: gen=${baseline_gen} tok/s, pp=${baseline_pp} tok/s
 - threads for gen = physical CPU cores, hyperthreads don't help
 - --no-mmap when model is split across GPU + system RAM
 - Quantized KV (q4_0/q8_0) REQUIRES --flash-attn — crashes without it
-- --spec-draft-n-max: valid range 1-4 (0 disables speculative decoding). Only tune this if --spec-type is already set. Start at 4, working backward to 1, explore higher for speed, lower for stability.
 - ONLY use flags from the --help output above. Unknown flags crash the server.
 - Check the "backend" field in Model info to know which server binary you're tuning.
 
@@ -4898,16 +4164,9 @@ print(json.dumps(msgs))
     local best_pp="$baseline_pp"
     local best_name="baseline"
     local best_flags_json="{}"
-    local best_round=0
-
-    # Track previous round's flags for diffing against the next round
-    local prev_flags_json="{}"
-    local prev_gen_tps="$baseline_gen"
-    local prev_pp_tps="$baseline_pp"
 
     # ── Iterative tuning rounds ──
     local round=0 crash_retries=0
-    local consecutive_no_improve=0  # convergence tracking
     while (( round < AI_TUNE_ROUNDS )); do
         (( ++round ))
         echo ""
@@ -4924,73 +4183,40 @@ print(json.dumps(msgs))
 
         # Parse the config from LLM response
         local parsed
-        parsed=$(python3 - "$llm_response" <<'PY'
-import json, re, sys
+        parsed=$(python3 -c "
+import json, sys, re
 
-text = sys.argv[1].strip() if len(sys.argv) > 1 else ''
+text = sys.stdin.read()
 
-def try_obj(candidate):
-    try:
-        obj = json.loads(candidate)
-    except Exception:
-        return None
-    return obj if isinstance(obj, dict) else None
-
-def emit(obj):
-    print(json.dumps(obj))
-    sys.exit(0)
-
-if not text:
+# Find JSON object in response
+# Try to find {...} pattern
+matches = list(re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL))
+if not matches:
     print('PARSE_ERROR')
     sys.exit(0)
 
-obj = try_obj(text)
-if obj and 'flags' in obj:
-    emit(obj)
-
-for block in re.findall(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE):
-    obj = try_obj(block.strip())
-    if obj and 'flags' in obj:
-        emit(obj)
-
-decoder = json.JSONDecoder()
-for start, ch in enumerate(text):
-    if ch != '{':
-        continue
+# Find the one that has 'flags' key
+for m in matches:
     try:
-        obj, end = decoder.raw_decode(text[start:])
-    except Exception:
+        obj = json.loads(m.group())
+        if 'flags' in obj:
+            print(json.dumps(obj))
+            sys.exit(0)
+    except json.JSONDecodeError:
         continue
-    if isinstance(obj, dict) and 'flags' in obj:
-        emit(obj)
 
-for block in re.findall(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE):
-    try:
-        obj = try_obj(block.strip())
-        if obj:
-            emit(obj)
-    except Exception:
-        pass
-
-for start, ch in enumerate(text):
-    if ch != '{':
-        continue
-    try:
-        obj, end = decoder.raw_decode(text[start:])
-    except Exception:
-        continue
-    if isinstance(obj, dict):
-        emit(obj)
-
-print('PARSE_ERROR')
-PY
-)
+# Fallback: try last match
+try:
+    obj = json.loads(matches[-1].group())
+    print(json.dumps(obj))
+except:
+    print('PARSE_ERROR')
+" <<< "$llm_response")
 
         if [[ "$parsed" == "PARSE_ERROR" || -z "$parsed" ]]; then
             echo "  WARNING: Could not parse config from response, skipping"
             # Add to conversation so LLM knows it failed
             echo "$llm_response" > "$tune_msg_dir/resp_${round}.txt"
-            echo "  Raw response saved to: $tune_msg_dir/resp_${round}.txt"
             messages=$(python3 -c "
 import json, sys
 msgs = json.loads(sys.stdin.read())
@@ -5013,30 +4239,6 @@ print(json.dumps(msgs))
 
         # Parse LLM overrides into flag array
         parse_tune_overrides "$config_flags_json"
-
-        # Strip --spec-draft-n-max if --spec-type is not set — no point tuning
-        # draft depth when speculative decoding itself is disabled.
-        if [[ -z "$SPEC_TYPE" || "$SPEC_TYPE" == "none" ]]; then
-            local stripped=()
-            local skip_next=0
-            for (( i=0; i<${#TUNE_OVERRIDE_FLAGS[@]}; i++ )); do
-                if (( skip_next )); then skip_next=0; continue; fi
-                if [[ "${TUNE_OVERRIDE_FLAGS[$i]}" == "--spec-draft-n-max" ]]; then
-                    skip_next=1
-                    continue
-                fi
-                stripped+=("${TUNE_OVERRIDE_FLAGS[$i]}")
-            done
-            TUNE_OVERRIDE_FLAGS=("${stripped[@]:-}")
-            # Also strip from keys
-            local stripped_keys=()
-            for key in "${TUNE_OVERRIDE_KEYS[@]:-}"; do
-                [[ "$key" == "--spec-draft-n-max" ]] && continue
-                stripped_keys+=("$key")
-            done
-            TUNE_OVERRIDE_KEYS=("${stripped_keys[@]:-}")
-        fi
-
         echo "  Overrides: ${TUNE_OVERRIDE_FLAGS[*]:-none}"
 
         # Add assistant response to conversation
@@ -5108,7 +4310,7 @@ print(json.dumps(msgs))
 
         local round_gen="0" round_pp="0" round_status="ok"
 
-        if ! TRY_START_MODE="$tune_launch_mode" try_start_with_overrides; then
+        if ! try_start_with_overrides; then
             echo "  CRASHED — config failed to start"
             kill_server ""
             round_status="crashed"
@@ -5122,7 +4324,7 @@ print(json.dumps(msgs))
 
             # Restart with baseline to query for next round
             echo "  Restarting baseline for next query..."
-            TRY_START_MODE="$tune_launch_mode" try_start || { echo "ERROR: Can't restart baseline"; break; }
+            try_start || { echo "ERROR: Can't restart baseline"; break; }
         else
             # Benchmark this config
             echo "  Benchmarking..."
@@ -5132,34 +4334,23 @@ print(json.dumps(msgs))
 
             local delta improvement
             delta=$(python3 -c "print(f'{${round_gen:-0} - ${baseline_gen:-0}:.2f}')" 2>/dev/null || echo "0.00")
-            improvement=$(python3 -c "g=${baseline_gen:-0}; print(f'{(${round_gen:-0}-g)/g*100:.2f}' if g>0 else '0')" 2>/dev/null || echo "0")
-
-            # ── Detailed output: flag diffs + comparisons ──
-            local detail_block
-            detail_block=$(printf '  Δ Config Changes:\n\r')
-            detail_block+=$(diff_flags "$prev_flags_json" "$config_flags_json" "$prev_gen_tps" "$prev_pp_tps")
-            detail_block+=$(printf '\n\r')
-            detail_block+=$(show_comparison "$round_gen" "$round_pp" "$prev_gen_tps" "$prev_pp_tps" "$best_gen" "$best_pp" "$best_name" "$best_round")
+            improvement=$(python3 -c "g=${baseline_gen:-0}; print(f'{(${round_gen:-0}-g)/g*100:.1f}' if g>0 else '0')" 2>/dev/null || echo "0")
 
             if python3 -c "exit(0 if ${round_gen} > ${best_gen} else 1)"; then
-                detail_block+=$(printf '  ★ NEW BEST: gen=%s tok/s (%s%%)  pp=%s tok/s\n' "$round_gen" "$improvement" "$round_pp")
+                echo "  ★ NEW BEST: gen=${round_gen} tok/s (+${improvement}%)  pp=${round_pp} tok/s"
                 best_gen="$round_gen"
                 best_pp="$round_pp"
                 best_name="$config_name"
                 best_flags_json="$config_flags_json"
-                best_round=$round
             else
-                detail_block+=$(printf '  Result: gen=%s tok/s (%s%%)  pp=%s tok/s\n' "$round_gen" "$improvement" "$round_pp")
+                echo "  Result: gen=${round_gen} tok/s (${improvement}%)  pp=${round_pp} tok/s"
             fi
-
-            printf '%s\n\r' "$detail_block"
-            { printf '%s\n\r' "$detail_block" > /dev/tty; } 2>/dev/null || true
 
             # Kill tested config, restart baseline for next query
             kill_server "$RUNNING_PID"
             sleep 1
             echo "  Restarting baseline for next query..."
-            TRY_START_MODE="$tune_launch_mode" try_start || { echo "ERROR: Can't restart baseline after benchmark"; break; }
+            try_start || { echo "ERROR: Can't restart baseline after benchmark"; break; }
         fi
 
         # Record result (local + persistent history)
@@ -5185,32 +4376,8 @@ print(json.dumps(results))
         # Append to persistent history
         append_tune_history "$round" "$round_gen" "$round_pp" "$round_status" "$config_flags_json" "$config_name"
 
-        # Progress: elapsed + ETA + best-so-far + detailed config comparison
-        _tune_progress_line "$round" "$AI_TUNE_ROUNDS" "$tune_start_ts" "$best_gen" "$best_name" "$baseline_gen" \
-            "$config_name" "$round_gen" "$round_pp" "$prev_gen_tps" "$prev_pp_tps" "$prev_flags_json" "$config_flags_json"
-
-        # Update previous-round tracking for the next round's comparison
-        if [[ "$round_status" == "ok" ]]; then
-            prev_flags_json="$config_flags_json"
-            prev_gen_tps="$round_gen"
-            prev_pp_tps="$round_pp"
-        fi
-
-        # Convergence check: stop if no improvement for 2 consecutive rounds
-        if (( DO_CONVERGE )); then
-            if python3 -c "exit(0 if ${round_gen:-0} <= ${best_gen} else 1)" 2>/dev/null; then
-                (( ++consecutive_no_improve ))
-                echo "  No improvement (consecutive: ${consecutive_no_improve}/2)"
-                if (( consecutive_no_improve >= 2 )); then
-                    echo ""
-                    echo "  ★ Convergence reached — no improvement for 2 rounds. Stopping."
-                    echo "  Best: ${best_name} @ ${best_gen} tok/s"
-                    break
-                fi
-            else
-                consecutive_no_improve=0
-            fi
-        fi
+        # Progress: elapsed + ETA + best-so-far
+        _tune_progress_line "$round" "$AI_TUNE_ROUNDS" "$tune_start_ts" "$best_gen" "$best_name" "$baseline_gen"
 
         # Feed result back to LLM for next round
         local feedback
@@ -5278,7 +4445,7 @@ print(f'  Saved marker to: ${tune_cache}')
 " <<< "$all_results"
     else
         local total_improvement
-        total_improvement=$(python3 -c "g=${baseline_gen}; print(f'{(${best_gen}-g)/g*100:.2f}' if g>0 else '0')")
+        total_improvement=$(python3 -c "g=${baseline_gen}; print(f'{(${best_gen}-g)/g*100:.1f}' if g>0 else '0')")
         echo "  AI Tune complete: ${best_name} wins!"
         echo "  Baseline: ${baseline_gen} tok/s → Best: ${best_gen} tok/s (+${total_improvement}%)"
         echo "  Total time: $(_tune_fmt_duration "$tune_total_elapsed")"
@@ -5557,11 +4724,7 @@ kill_server ""
 # strategy so device/split flags are added after the tuned overrides.
 if (( TUNE_LOADED && TUNE_CACHE_HAS_PLACEMENT )) && [[ "$STRATEGY" != "moe_offload" ]]; then
     if (( DRY_RUN )); then
-        if (( BENCHMARK )); then
-            print_cmd "${BASE_FLAGS[@]}"
-        else
-            print_cmd "${COMMON_FLAGS[@]}"
-        fi
+        print_cmd "${COMMON_FLAGS[@]}"
         exit 0
     fi
     run_with_restart "${COMMON_FLAGS[@]}"
@@ -5579,27 +4742,20 @@ case "$STRATEGY" in
         LAUNCH_FLAGS=(
             -m "$MODEL_PATH" --host "$HOST" --port "$PORT"
             --ctx-size "$CTX_SIZE" --flash-attn on
-            -b 512 -ub 256 -ngl 0
+            -b 512 -ub 256 -ngl 0 --no-mmap
             --cache-type-k "$KV_TYPE" --cache-type-v "$KV_TYPE"
             --jinja --threads "$THREADS_GEN" --threads-batch "$THREADS_BATCH"
         )
 	        if (( SUPPORTS_REASONING_FLAG && ! USER_REASONING_EXPLICIT )); then
 	            LAUNCH_FLAGS+=(--reasoning off)
 	        fi
-	        # WSL2 guard: --mlock can freeze the Windows host
+	        # Skip --mlock on WSL2 — pinning can freeze the Windows host
 	        (( ! IS_WSL2 )) && LAUNCH_FLAGS+=(--mlock)
-            [[ -n "$CONTEXT_SHIFT_FLAG" ]] && LAUNCH_FLAGS+=("$CONTEXT_SHIFT_FLAG")
+	        [[ -n "$CONTEXT_SHIFT_FLAG" ]] && LAUNCH_FLAGS+=("$CONTEXT_SHIFT_FLAG")
 	        [[ -n "$MMPROJ_PATH" ]] && LAUNCH_FLAGS+=(--mmproj "$MMPROJ_PATH")
-	        # Benchmark dry run: use BASE_FLAGS (Phase 1 neutral baseline)
-	        (( DRY_RUN && BENCHMARK )) && LAUNCH_FLAGS=("${BASE_FLAGS[@]}")
 	        if (( DRY_RUN )); then
 	            print_cmd "${LAUNCH_FLAGS[@]}"
 	            exit 0
-        fi
-        # Benchmark first (before AI Tune) so baseline is measured on a cold system
-        if (( BENCHMARK )); then
-            run_two_phase_benchmark
-            BENCHMARK=0
         fi
         if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
             run_with_restart "${COMMON_FLAGS[@]}"
@@ -5610,17 +4766,10 @@ case "$STRATEGY" in
     single_gpu)
         local_best=${GPU_ORDER[0]}
         echo "Model fits on GPU${GPU_INDEX[$local_best]} (${GPU_NAME[$local_best]})"
-        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --device "${GPU_BACKEND}${GPU_INDEX[$local_best]}")
-        # Benchmark dry run: use BASE_FLAGS (Phase 1 neutral baseline)
-        (( DRY_RUN && BENCHMARK )) && LAUNCH_FLAGS=("${BASE_FLAGS[@]}")
+        LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --device "CUDA${GPU_INDEX[$local_best]}")
         if (( DRY_RUN )); then
             print_cmd "${LAUNCH_FLAGS[@]}"
             exit 0
-        fi
-        # Benchmark first (before AI Tune) so baseline is measured on a cold system
-        if (( BENCHMARK )); then
-            run_two_phase_benchmark
-            BENCHMARK=0
         fi
         if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
             run_with_restart "${COMMON_FLAGS[@]}"
@@ -5686,18 +4835,17 @@ case "$STRATEGY" in
 
         # Prefer graph split for both backends if more than 1 GPU
         GRAPH_EXTRA=(--split-mode graph --tensor-split "$TS")
-
+        
         if (( IS_IK_LLAMA )); then
             LAYER_EXTRA=(--split-mode layer --tensor-split "$TS")
             if (( DRY_RUN )); then
-                if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; fi
+                print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
                 exit 0
             fi
             echo "Trying graph split (fastest)..."
             if try_start "${GRAPH_EXTRA[@]}"; then
                 echo "  Graph split works — restarting with crash recovery..."
                 kill_server "$RUNNING_PID"
-                if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
                 if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
                     run_with_restart "${COMMON_FLAGS[@]}"
                 fi
@@ -5709,7 +4857,6 @@ case "$STRATEGY" in
                 if try_start "${GRAPH_EXTRA[@]}"; then
                     echo "  Graph split works with P2P disabled — restarting with crash recovery..."
                     kill_server "$RUNNING_PID"
-                    if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
                     if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
                         run_with_restart "${COMMON_FLAGS[@]}"
                     fi
@@ -5718,7 +4865,6 @@ case "$STRATEGY" in
                     echo "  Graph split unavailable — falling back to layer split"
                     kill_server ""
                     unset NCCL_P2P_DISABLE
-                    if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
                     if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${LAYER_EXTRA[@]}"; then
                         run_with_restart "${COMMON_FLAGS[@]}"
                     fi
@@ -5730,11 +4876,10 @@ case "$STRATEGY" in
             # Test if mainline supports graph mode
             if timeout 5 "$LLAMA_SERVER" --help 2>&1 | grep -q "graph" 2>/dev/null; then
                 if (( DRY_RUN )); then
-                    if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; fi
+                    print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
                     exit 0
                 fi
                 echo "Mainline supports graph mode — attempting launch..."
-                if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
                 if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
                     run_with_restart "${COMMON_FLAGS[@]}"
                 fi
@@ -5743,10 +4888,9 @@ case "$STRATEGY" in
                 # Fallback to row split (classic mainline multi-GPU)
                 LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --split-mode row --tensor-split "$TS")
                 if (( DRY_RUN )); then
-                    if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${LAUNCH_FLAGS[@]}"; fi
+                    print_cmd "${LAUNCH_FLAGS[@]}"
                     exit 0
                 fi
-                if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
                 if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
                     run_with_restart "${COMMON_FLAGS[@]}"
                 fi
@@ -5762,8 +4906,7 @@ case "$STRATEGY" in
             GRAPH_EXTRA=(--split-mode graph --no-mmap)
             if (( IS_IK_LLAMA )); then
                 # (ik_llama specific graph logic already handled above or can be simplified here)
-                if (( DRY_RUN )); then if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; fi; exit 0; fi
-                if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
+                if (( DRY_RUN )); then print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; exit 0; fi
                 if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
                     run_with_restart "${COMMON_FLAGS[@]}"
                 fi
@@ -5771,16 +4914,14 @@ case "$STRATEGY" in
             else
                 # Mainline
                 if timeout 5 "$LLAMA_SERVER" --help 2>&1 | grep -q "graph" 2>/dev/null; then
-                    if (( DRY_RUN )); then if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; fi; exit 0; fi
-                    if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
+                    if (( DRY_RUN )); then print_cmd "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; exit 0; fi
                     if maybe_ai_tune_launch_flags "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"; then
                         run_with_restart "${COMMON_FLAGS[@]}"
                     fi
                     run_with_restart "${COMMON_FLAGS[@]}" "${GRAPH_EXTRA[@]}"
                 else
                     LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --no-mmap)
-                    if (( DRY_RUN )); then if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${LAUNCH_FLAGS[@]}"; fi; exit 0; fi
-                    if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
+                    if (( DRY_RUN )); then print_cmd "${LAUNCH_FLAGS[@]}"; exit 0; fi
                     if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
                         run_with_restart "${COMMON_FLAGS[@]}"
                     fi
@@ -5790,10 +4931,9 @@ case "$STRATEGY" in
         else
             LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" --no-mmap)
             if (( DRY_RUN )); then
-                if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${LAUNCH_FLAGS[@]}"; fi
+                print_cmd "${LAUNCH_FLAGS[@]}"
                 exit 0
             fi
-            if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
             if maybe_ai_tune_launch_flags "${LAUNCH_FLAGS[@]}"; then
                 run_with_restart "${COMMON_FLAGS[@]}"
             fi
@@ -5835,10 +4975,9 @@ if [[ -n "$USER_NCPUMOE" ]]; then
     echo "User-supplied --n-cpu-moe ${USER_NCPUMOE} detected — skipping MoE placement."
     echo "  Launching directly with your flag (expert-layer tuning is your responsibility)."
     if (( DRY_RUN )); then
-        if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}"; fi
+        print_cmd "${COMMON_FLAGS[@]}"
         exit 0
     fi
-    if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
     if (( DO_AI_TUNE )); then
         TUNE_EXTRA_FIXED=()
         ai_tune
@@ -6046,14 +5185,13 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_NCPUMOE:-}" ]]; then
     COMMON_FLAGS=("${FILTERED[@]}" -b "${CACHED_BATCH:-1024}" -ub "${CACHED_UBATCH:-512}" --parallel "${CACHED_PARALLEL:-2}" --n-cpu-moe "$CACHED_NCPUMOE")
     [[ "${CACHED_KVUNIFIED:-0}" == "1" ]] && COMMON_FLAGS+=(--kv-unified)
     if [[ "${CACHED_NO_PINNED:-0}" == "1" ]]; then
-        # Vulkan doesn't use CUDA pinned host buffers — only apply for CUDA.
-        if [[ "$GPU_BACKEND" != "Vulkan" ]] && [[ ! " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]]; then
+        if [[ ! " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]]; then
             LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
             echo "  Cached: GGML_CUDA_NO_PINNED=1 (recovered previously due to pinned-host alloc)"
         fi
     fi
     if (( DRY_RUN )); then
-        if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}"; fi
+        print_cmd "${COMMON_FLAGS[@]}"
         exit 0
     fi
     run_with_restart "${COMMON_FLAGS[@]}"
@@ -6097,10 +5235,9 @@ if [[ -f "$CACHE_FILE" && "$RETUNE" == "0" && -n "${CACHED_GPU_ASSIGNMENTS:-}" ]
         OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
         LAUNCH_FLAGS=("${COMMON_FLAGS[@]}" "${CACHED_MMAP_FLAGS[@]}" -ot "$OT_STRING")
         if (( DRY_RUN )); then
-            if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${LAUNCH_FLAGS[@]}"; fi
+            print_cmd "${LAUNCH_FLAGS[@]}"
             exit 0
         fi
-        if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
         # AI Tune with cached MoE placement locked
         if (( DO_AI_TUNE )); then
             echo ""
@@ -6139,36 +5276,6 @@ probe_cache_key() {
 
 probe_cache_file() { echo "$PROBE_CACHE_DIR/$(probe_cache_key).probe"; }
 
-# ── Driver version detection (CUDA + Vulkan/AMD) ──
-# Returns the GPU driver version string, or empty if unavailable.
-# Used for system probe cache keys and diagnostic output.
-get_gpu_driver_version() {
-    if [[ "$GPU_BACKEND" == "cuda" ]] && command -v nvidia-smi &>/dev/null; then
-        nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d ' '
-        return
-    fi
-    if [[ "$GPU_BACKEND" == "Vulkan" ]] && command -v amd-smi &>/dev/null; then
-        # amd-smi version output:
-        #   AMDSMI Tool: 26.2.1+unknown
-        #   amdgpu version: Linux version 7.0.9-070009-generic
-        # Try amdgpu kernel version first (most stable driver identifier).
-        local ver
-        ver=$(amd-smi version 2>/dev/null | grep -oE 'amdgpu version:[^0-9]*([0-9]+\.[0-9]+\.[0-9]+)' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        if [[ -n "$ver" ]]; then
-            echo "$ver"
-            return
-        fi
-        # Fallback: AMDSMI tool version
-        ver=$(amd-smi version 2>/dev/null | grep -oE 'AMDSMI Tool: *[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        if [[ -n "$ver" ]]; then
-            echo "amdsmi-$ver"
-            return
-        fi
-    fi
-    # Generic Vulkan (no amd-smi / no nvidia-smi) — no version available
-    echo ""
-}
-
 # ── System probe: measures actual per-GPU CUDA overhead ──
 # Cached by GPU model + driver version so it's reused across all models.
 # The measured value replaces the previously-guessed CUDA_CTX + cuBLAS
@@ -6181,7 +5288,7 @@ system_probe_signature() {
         sig+="${GPU_NAME[$i]}|"
     done
     local drv
-    drv=$(get_gpu_driver_version)
+    drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
     sig+="drv=${drv:-unknown}"
     printf '%s' "$sig" | md5sum | awk '{print $1}'
 }
@@ -6214,49 +5321,20 @@ load_system_probe() {
 # Returns 0 on success (SYS_CUDA_OVERHEAD_MB set), 1 on failure.
 run_system_probe() {
     [[ "$GPU_COUNT" -gt 0 ]] || return 1
-
-    # Backend-aware: need nvidia-smi for CUDA, amd-smi for Vulkan/AMD
-    if [[ "$GPU_BACKEND" == "cuda" ]]; then
-        command -v nvidia-smi >/dev/null 2>&1 || return 1
-    elif [[ "$GPU_BACKEND" == "Vulkan" ]]; then
-        command -v amd-smi >/dev/null 2>&1 || return 1
-    else
-        return 1
-    fi
+    command -v nvidia-smi >/dev/null 2>&1 || return 1
 
     local primary=${GPU_INDEX[${GPU_ORDER[0]}]}
     local probe_port="${LLM_PROBE_PORT:-18181}"
     local probe_log="${LOG_DIR}/llm-server-probe-$$.log"
     : > "$probe_log"
 
-    # Baseline GPU memory use BEFORE probe (subtracts existing tenants like compositor).
+    # Baseline VRAM use BEFORE probe (subtracts existing tenants like compositor).
     local baseline_used
-    if [[ "$GPU_BACKEND" == "cuda" ]]; then
-        baseline_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$primary" 2>/dev/null | tr -d ' ')
-    elif [[ "$GPU_BACKEND" == "Vulkan" ]]; then
-        baseline_used=$(amd-smi metric --mem 2>/dev/null | awk -v target="GPU: $primary" '
-            BEGIN { found=0 }
-            /GPU:/ {
-                if (index($0, target)) found=1
-                else found=0
-            }
-            found && /USED_GTT/ {
-                match($0, /[0-9]+/)
-                if (RSTART > 0) print substr($0, RSTART, RLENGTH)
-                exit
-            }
-        ')
-    fi
+    baseline_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$primary" 2>/dev/null | tr -d ' ')
     [[ "$baseline_used" =~ ^[0-9]+$ ]] || return 1
 
-    local probe_msg
-    if [[ "$GPU_BACKEND" == "cuda" ]]; then
-        probe_msg="measuring CUDA overhead (~30s, runs once per system)"
-    else
-        probe_msg="measuring Vulkan/AMD overhead (~30s, runs once per system)"
-    fi
     echo ""
-    echo "  System probe: $probe_msg..."
+    echo "  System probe: measuring CUDA overhead (~30s, runs once per system)..."
 
     # Minimal launch: 1 layer on primary GPU, tiny context+batch, no warmup.
     # Stays alive until we see "compute buffer size" in the log → init complete.
@@ -6281,29 +5359,13 @@ run_system_probe() {
         waited=$(( waited + 1 ))
     done
 
-    # Read GPU memory after compute buffer allocated.
-    # nvidia-smi may need a beat to settle; amd-smi snapshots are instant.
-    # Sample a few times and take max.
+    # Read VRAM after compute buffer allocated. nvidia-smi snapshot may take a
+    # beat to settle on huge mmap'd models — sample a few times and take max.
     local probe_used max_used="$baseline_used"
     if (( saw_compute )); then
         local s
         for s in 1 2 3; do
-            if [[ "$GPU_BACKEND" == "cuda" ]]; then
-                probe_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$primary" 2>/dev/null | tr -d ' ')
-            elif [[ "$GPU_BACKEND" == "Vulkan" ]]; then
-                probe_used=$(amd-smi metric --mem 2>/dev/null | awk -v target="GPU: $primary" '
-                    BEGIN { found=0 }
-                    /GPU:/ {
-                        if (index($0, target)) found=1
-                        else found=0
-                    }
-                    found && /USED_GTT/ {
-                        match($0, /[0-9]+/)
-                        if (RSTART > 0) print substr($0, RSTART, RLENGTH)
-                        exit
-                    }
-                ')
-            fi
+            probe_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$primary" 2>/dev/null | tr -d ' ')
             [[ "$probe_used" =~ ^[0-9]+$ ]] && (( probe_used > max_used )) && max_used="$probe_used"
             sleep 1
         done
@@ -6329,36 +5391,27 @@ run_system_probe() {
     compute_buf=$({ grep -oE "CUDA[0-9]+ compute buffer size = *[0-9.]+ MiB" "$probe_log" 2>/dev/null \
         | grep -oE "[0-9]+\.[0-9]+|[0-9]+" | awk '{sum+=$1} END {if (NR>0) printf "%.0f", sum; else print 0}'; } || true)
 
-    # overhead = (actual GPU memory used) - (model bytes) - (KV bytes) - (compute bytes)
+    # cuda_overhead = (actual VRAM used) - (model bytes) - (KV bytes) - (compute bytes)
     # Everything on right side is measured/parsed; nothing is assumed.
     local delta=$(( max_used - baseline_used ))
     local accounted=$(( model_buf + kv_buf + compute_buf ))
-    local overhead=$(( delta - accounted ))
-    (( overhead < 0 )) && overhead=0  # measurement noise floor
+    local cuda_overhead=$(( delta - accounted ))
+    (( cuda_overhead < 0 )) && cuda_overhead=0  # measurement noise floor
 
     rm -f "$probe_log"
 
     # Persist for next launch (no probe needed again on this system)
     mkdir -p "$PROBE_CACHE_DIR" 2>/dev/null || true
-    local gpu_model_str
-    if [[ "$GPU_BACKEND" == "cuda" ]]; then
-        gpu_model_str=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$primary" 2>/dev/null | head -1)
-    else
-        gpu_model_str=$(amd-smi top --gpu-list "$primary" 2>/dev/null | grep -oE 'GPU[0-9]+: .*' | head -1 | sed 's/GPU[0-9]*: //' || echo "$primary")
-    fi
-    local drv_version
-    drv_version=$(get_gpu_driver_version)
     cat > "$(system_probe_file)" <<EOF
-# System probe for ${gpu_model_str:-GPU $primary}
-# Driver: ${drv_version}
-# Backend: $GPU_BACKEND
+# System probe for $(nvidia-smi --query-gpu=name --format=csv,noheader -i "$primary" 2>/dev/null | head -1)
+# Driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 # Generated: $(date)
-# Measurements: mem_baseline=${baseline_used}MB used_after_probe=${max_used}MB
+# Measurements: VRAM_baseline=${baseline_used}MB used_after_probe=${max_used}MB
 #   delta=${delta}MB model_buf=${model_buf}MB kv_buf=${kv_buf}MB compute_buf=${compute_buf}MB
-SYS_CUDA_OVERHEAD_MB=$overhead
+SYS_CUDA_OVERHEAD_MB=$cuda_overhead
 EOF
-    SYS_CUDA_OVERHEAD_MB=$overhead
-    echo "  System probe done: overhead=${overhead}MB per GPU (measured, not guessed)"
+    SYS_CUDA_OVERHEAD_MB=$cuda_overhead
+    echo "  System probe done: cuda_overhead=${cuda_overhead}MB per GPU (measured, not guessed)"
     return 0
 }
 
@@ -6625,6 +5678,8 @@ if [[ "$KV_PLACEMENT" == "auto" && "$KV_PLACEMENT_EFFECTIVE" == "gpu" ]] && (( G
         _kv_prompt_reason="GPU KV does not fit with available CPU/GPU layer capacity"
     elif (( GPU_KV_MAX_PCT >= 80 )); then
         _kv_prompt_reason="GPU KV would consume ${GPU_KV_MAX_PCT}% of one GPU"
+    elif (( GPU_KV_LAYER_LOSS >= 8 )); then
+        _kv_prompt_reason="GPU KV reduces expert layers on GPU by ${GPU_KV_LAYER_LOSS} (from ${MAX_GPU_LAYERS_NO_GPU_KV} to ${MAX_GPU_LAYERS})"
     fi
     if [[ -n "$_kv_prompt_reason" ]]; then
         echo ""
@@ -6904,11 +5959,9 @@ echo "  CPU (RAM): ${LAYERS_CPU} layers (~${CPU_EXPERT_MB}MB)"
 OT_STRING=$(build_ot_string "${OT_ARGS[@]}")
 
 if (( DRY_RUN )); then
-    if (( BENCHMARK )); then print_cmd "${BASE_FLAGS[@]}"; else print_cmd "${COMMON_FLAGS[@]}" "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; fi
+    print_cmd "${COMMON_FLAGS[@]}" "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"
     exit 0
 fi
-
-if (( BENCHMARK )); then run_two_phase_benchmark; BENCHMARK=0; fi
 
 # ── Auto-tuning loop ──
 echo ""
@@ -6946,34 +5999,18 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
 
     # ── Stress probe: measure PEAK VRAM under real generation load ──
     # The buffer sizes llama.cpp prints during init are steady-state allocations.
-    # Prompt processing transient allocations (per-stream compute workspace,
+    # Prompt processing transient allocations (per-stream cuBLAS workspace,
     # ggml graph scratch peaks) can briefly push VRAM above that. We sample
-    # at 100ms while running an actual generation request so the peak is
-    # REAL data, not an estimated multiplier.
+    # nvidia-smi at 100ms while running an actual generation request so the
+    # peak is REAL data, not an estimated multiplier.
     declare -a PEAK_USED
-    SAMPLE_FILE=$(mktemp)
     if (( GPU_COUNT > 0 )) && command -v nvidia-smi >/dev/null 2>&1; then
         echo "  Stress probe: measuring peak VRAM during generation..."
+        SAMPLE_FILE=$(mktemp)
         (
             while true; do
                 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
                     | tr -d ' ' >> "$SAMPLE_FILE"
-                sleep 0.1
-            done
-        ) &
-        SAMPLER_PID=$!
-    elif (( GPU_COUNT > 0 )) && command -v amd-smi &>/dev/null; then
-        echo "  Stress probe: measuring peak GTT memory during generation..."
-        (
-            while true; do
-                # amd-smi metric --mem output for each GPU block:
-                #   GPU: 0
-                #       ... USED_GTT: 12345 MB ...
-                # We extract the GPU index and USED_GTT per iteration.
-                amd-smi metric --mem 2>/dev/null | awk '
-                    /^[[:space:]]*GPU:/ { gsub(/[^0-9]/,"",$NF); idx=$NF }
-                    /USED_GTT:/ { gsub(/[^0-9]/,"",$3); print idx "," $3 }
-                ' >> "$SAMPLE_FILE"
                 sleep 0.1
             done
         ) &
@@ -7005,14 +6042,6 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
             echo "    GPU${idx} (${GPU_NAME[$gi]}): ${PEAK_USED[$gi]}MB peak / ${GPU_VRAM_TOTAL[$gi]}MB total"
         done
         rm -f "$SAMPLE_FILE"
-    elif (( GPU_COUNT > 0 )); then
-        echo "  Stress probe: using pre-cached estimates (no nvidia-smi or amd-smi)"
-        # When neither tool is available, estimate peak from the model's own
-        # buffer measurements — this is the existing fallback path.
-        for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
-            gi=${GPU_ORDER[$i]}
-            PEAK_USED[$gi]=0
-        done
     fi
 
     # Measure actual VRAM after load (server is already healthy, VRAM is settled)
@@ -7021,40 +6050,20 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
     declare -a ACTUAL_USED
     for i in $(seq 0 $(( GPU_COUNT - 1 ))); do
         gi=${GPU_ORDER[$i]}
-        raw_free=""
-        raw_used=""
-        if command -v nvidia-smi &>/dev/null; then
-            # CRITICAL: trailing `|| true` is required under `set -euo pipefail`.
-            # Without it, a transient nvidia-smi failure (common on cloud/datacenter
-            # rigs right after loading a huge model — driver is still settling)
-            # causes the whole pipeline to return non-zero via pipefail, which makes
-            # the `var=$(...)` assignment silently abort the script — no error, no
-            # cleanup, orphaned server. See issue #11 and #7.
-            raw_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ' || true)
-            raw_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ' || true)
-        elif command -v amd-smi &>/dev/null; then
-            # AMD-SMI: read FREE_GTT / USED_GTT for unified-memory APUs (e.g. Strix Halo).
-            # GTT is the Graphics Translation Table — the full addressable memory pool
-            # accessible by the GPU. On discrete AMD GPUs with dedicated VRAM, GTT
-            # still represents the complete addressable space and is the correct metric.
-            amd_line=$(amd-smi metric --mem 2>/dev/null | awk -v target="GPU: ${GPU_INDEX[$gi]}" 'BEGIN{found=0} /^[[:space:]]*GPU:/{if(found)exit; gsub(/[^0-9]/,"",$NF); if($NF+0==target+0)found=1} found && /FREE_GTT:/{gsub(/[^0-9]/,"",$3); print $3} END{if(!found)print ""}')
-            raw_free="$amd_line"
-            amd_used_line=$(amd-smi metric --mem 2>/dev/null | awk -v target="GPU: ${GPU_INDEX[$gi]}" 'BEGIN{found=0} /^[[:space:]]*GPU:/{if(found)exit; gsub(/[^0-9]/,"",$NF); if($NF+0==target+0)found=1} found && /USED_GTT:/{gsub(/[^0-9]/,"",$3); print $3} END{if(!found)print ""}')
-            raw_used="$amd_used_line"
-        fi
+        # CRITICAL: trailing `|| true` is required under `set -euo pipefail`.
+        # Without it, a transient nvidia-smi failure (common on cloud/datacenter
+        # rigs right after loading a huge model — driver is still settling)
+        # causes the whole pipeline to return non-zero via pipefail, which makes
+        # the `var=$(...)` assignment silently abort the script — no error, no
+        # cleanup, orphaned server. See issue #11 and #7.
+        raw_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ' || true)
         # Fall back to pre-launch free minus an estimate of what we just loaded
         # so the script doesn't blow up on empty-string arithmetic under nounset.
         if [[ ! "$raw_free" =~ ^[0-9]+$ ]]; then
             estimated_used=$(( LAYERS_PER_GPU[$gi] * COST_PER_LAYER_MB ))
             raw_free=$(( GPU_VRAM_FREE[$gi] - estimated_used ))
             (( raw_free < 0 )) && raw_free=0
-            if command -v nvidia-smi &>/dev/null; then
-                log "  GPU${GPU_INDEX[$gi]}: nvidia-smi free readback failed, estimating ${raw_free}MB"
-            elif command -v amd-smi &>/dev/null; then
-                log "  GPU${GPU_INDEX[$gi]}: amd-smi GTT readback failed, estimating ${raw_free}MB"
-            else
-                log "  GPU${GPU_INDEX[$gi]}: no GPU metrics tool available, estimating ${raw_free}MB"
-            fi
+            log "  GPU${GPU_INDEX[$gi]}: nvidia-smi free readback failed, estimating ${raw_free}MB"
         fi
         # Prefer the PEAK measurement from the stress probe over current free
         # VRAM. Peak is what we need to plan around — placement that fits at
@@ -7065,15 +6074,11 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
             (( ACTUAL_FREE[$gi] < 0 )) && ACTUAL_FREE[$gi]=0
         else
             ACTUAL_FREE[$gi]=$raw_free
+            raw_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "${GPU_INDEX[$gi]}" 2>/dev/null | tr -d ' ' || true)
             [[ "$raw_used" =~ ^[0-9]+$ ]] || raw_used=0
             ACTUAL_USED[$gi]=$raw_used
         fi
-        # Determine which tool was used for logging
-        if command -v amd-smi &>/dev/null; then
-            log "  GPU${GPU_INDEX[$gi]}: ${ACTUAL_FREE[$gi]}MB free / ${ACTUAL_USED[$gi]}MB used (${GPU_VRAM_TOTAL[$gi]}MB GTT total, peak under load)"
-        else
-            log "  GPU${GPU_INDEX[$gi]}: ${ACTUAL_FREE[$gi]}MB free / ${ACTUAL_USED[$gi]}MB used (peak under load)"
-        fi
+        log "  GPU${GPU_INDEX[$gi]}: ${ACTUAL_FREE[$gi]}MB free / ${ACTUAL_USED[$gi]}MB used (peak under load)"
     done
 
     # Derive cuda_overhead from this launch's measurements: used - reported buffers.
@@ -7119,14 +6124,11 @@ if try_start "${MOE_MMAP_FLAGS[@]}" -ot "$OT_STRING"; then
             measured_overhead=$(( primary_used - accounted ))
             if (( measured_overhead > 0 && measured_overhead < primary_used )); then
                 mkdir -p "$PROBE_CACHE_DIR" 2>/dev/null || true
-                drv_version=$(get_gpu_driver_version)
-                gpu_model_str="${GPU_NAME[$primary_gi]}"
                 cat > "$(system_probe_file)" <<EOF
-# System probe (post-launch measurement) for ${gpu_model_str}
-# Driver: ${drv_version}
-# Backend: $GPU_BACKEND
+# System probe (post-launch measurement) for ${GPU_NAME[$primary_gi]}
+# Driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 # Generated: $(date)
-# Source: GPU memory.used (${primary_used}MB) minus llama-server log
+# Source: nvidia-smi memory.used (${primary_used}MB) minus llama-server log
 #         buffers (model=${mb_model} kv=${mb_kv} compute=${mb_compute})
 SYS_CUDA_OVERHEAD_MB=$measured_overhead
 EOF
@@ -7365,8 +6367,7 @@ else
         ot_failure_mode=$(_parse_load_failure)
         case "$ot_failure_mode" in
             pinned_hang|pinned_fail)
-                # Vulkan doesn't use CUDA pinned host buffers — skip NO_PINNED.
-                if [[ "$GPU_BACKEND" != "Vulkan" ]] && [[ ! " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]]; then
+                if [[ ! " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]]; then
                     echo "  -ot failure was pinned-host alloc — disabling pinned buffers (GGML_CUDA_NO_PINNED=1)"
                     LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
                 fi
@@ -7401,8 +6402,6 @@ else
 
         no_pinned_tried=0
         [[ " ${LAUNCH_ENV_PREFIX[*]:-} " =~ " GGML_CUDA_NO_PINNED=1 " ]] && no_pinned_tried=1
-        # Vulkan doesn't use pinned buffers — skip NO_PINNED path entirely.
-        [[ "$GPU_BACKEND" == "Vulkan" ]] && no_pinned_tried=1
 
         # Track sweep direction across attempts. Flipping direction (e.g. UP
         # then DOWN) means we've crossed the boundary in both senses — the
@@ -7412,7 +6411,7 @@ else
 
         while (( attempts < max_attempts )); do
             attempts=$(( attempts + 1 ))
-            echo "  Recovery attempt $attempts: --n-cpu-moe $N (range [$MIN_N..$MAX_N], b=1024 ub=512 parallel=2$( (( KVUNIFIED_SUPPORTED )) && echo ' kv-unified')$( (( no_pinned_tried )) && [[ "$GPU_BACKEND" != "Vulkan" ]] && echo ' no-pinned'))"
+            echo "  Recovery attempt $attempts: --n-cpu-moe $N (range [$MIN_N..$MAX_N], b=1024 ub=512 parallel=2$( (( KVUNIFIED_SUPPORTED )) && echo ' kv-unified')$( (( no_pinned_tried )) && echo ' no-pinned'))"
             if try_start --n-cpu-moe "$N"; then
                 RECOVERED=1
                 echo "  Server healthy with --n-cpu-moe $N (attempts: $attempts)"
@@ -7473,14 +6472,11 @@ CEOF
                     last_direction="up"
                     ;;
                 pinned_fail|pinned_cap_exceeded|pinned_hang)
-                    # Host-side pinned alloc failure. Vulkan doesn't use CUDA
-                    # pinned buffers — treat as generic failure and step DOWN.
-                    # CUDA: first try disabling pinned buffers (cheap fix).
-                    if [[ "$GPU_BACKEND" == "Vulkan" ]]; then
-                        echo "  Pinned alloc failure on Vulkan — skipping NO_PINNED, stepping DOWN"
-                        N=$(( N - 1 ))
-                        last_direction="down"
-                    elif (( ! no_pinned_tried )); then
+                    # Host-side pinned alloc failure. First try disabling
+                    # pinned buffers (cheap fix) at the same N. If that's
+                    # already been tried, step DOWN — fewer CPU layers means
+                    # less host-pinned working set.
+                    if (( ! no_pinned_tried )); then
                         echo "  Host pinned alloc failure (${mode}) — setting GGML_CUDA_NO_PINNED=1, retrying same N"
                         LAUNCH_ENV_PREFIX+=(GGML_CUDA_NO_PINNED=1)
                         no_pinned_tried=1

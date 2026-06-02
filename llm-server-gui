@@ -279,24 +279,11 @@ refresh_models() {
 # ── Persistence helpers ───────────────────────────────────────────────
 save_kv() {
     local key="$1" value="$2"
-    # Escape special sed characters in value (& | \ /)
-    local escaped_value
-    escaped_value="${value//\\/\\\\}"      # \ → \\
-    escaped_value="${escaped_value//&/\\&}"  # & → \&
-    escaped_value="${escaped_value//|/\\|}"  # | → \|
-    escaped_value="${escaped_value//\//\\/}"  # / → \/
     if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=\"${escaped_value}\"|" "$CONFIG_FILE"
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
     else
         echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
     fi
-}
-
-load_kv() {
-    local key="$1" default="${2:-}"
-    local val
-    val=$(grep "^${key}=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed "s|^${key}=\"||; s|\"$||")
-    [[ -n "$val" ]] && echo "$val" || echo "$default"
 }
 
 # ── Action: backend selection ─────────────────────────────────────────
@@ -538,226 +525,45 @@ count_tuned_configs() {
     list_tuned_configs "$model_name" 2>/dev/null | grep -c . || true
 }
 
-init_context_defaults() {
-    local configured_ctx="${LLM_CTX_SIZE:-fit}"
-    ctx=""
-    ctx_mode="fit"
-    if (( ctx_passthrough )); then
-        ctx=""
-        ctx_mode="passthrough"
-        return 0
-    fi
-    case "${configured_ctx,,}" in
-        fit|auto|"")
-            ctx_mode="fit"
-            ctx="fit"
-            ;;
-        max)
-            ctx_mode="max"
-            ctx="${max_ctx:-65536}"
-            ;;
-        *)
-            if [[ "$configured_ctx" =~ ^[0-9]+$ && "$configured_ctx" -gt 0 ]]; then
-                ctx_mode="manual"
-                ctx="$configured_ctx"
-                if [[ -n "$fit_ctx" ]] && (( ctx > fit_ctx )); then
-                    ctx="$fit_ctx"
-                    ctx_mode="fit"
-                fi
-            else
-                ctx_mode="fit"
-                ctx="${fit_ctx:-65536}"
-            fi
-            ;;
-    esac
-}
-
-context_label() {
-    local label="${ctx:-passthrough}"
-    case "$ctx_mode" in
-        fit)        label="fit (launcher calculates)" ;;
-        max)        label="${label} (train max)" ;;
-        manual)     label="${label} (manual)" ;;
-        passthrough) label="passthrough" ;;
-    esac
-    echo "$label"
-}
-
-context_hint() {
-    local hint=""
-    if [[ -n "$max_ctx" || -n "$fit_ctx" ]]; then
-        hint=" ("
-        [[ -n "$fit_ctx" ]] && hint+="last proven $fit_ctx"
-        [[ -n "$fit_ctx" && -n "$max_ctx" ]] && hint+=", "
-        [[ -n "$max_ctx" ]] && hint+="train max $max_ctx"
-        hint+=")"
-    fi
-    echo "$hint"
-}
-
-context_flag_value() {
-    case "$ctx_mode" in
-        passthrough)
-            return 1
-            ;;
-        fit)
-            echo "fit"
-            ;;
-        max)
-            if [[ -n "$ctx" ]]; then
-                echo "$ctx"
-            else
-                echo "max"
-            fi
-            ;;
-        *)
-            [[ -n "$ctx" ]] || return 1
-            echo "$ctx"
-            ;;
-    esac
-}
-
-quick_boot_model() {
-    local model_path="$1"
-    local model_name; model_name=$(basename "$model_path")
-    local max_ctx; max_ctx=$(detect_max_ctx "$model_path")
-    local fit_ctx; fit_ctx=$(estimate_fit_ctx "$model_path")
-    local ctx ctx_mode
-    init_context_defaults
-
-    local parallel=""
-    local kv_place="${LLM_KV_PLACEMENT:-auto}"
-    case "$kv_place" in auto|gpu|cpu) ;; *) kv_place="auto" ;; esac
-    local opt_aitune=0 opt_bench=0 opt_vision=0 opt_keepalive=0 opt_verbose=0 opt_converge=0 opt_rounds=12
-    local opt_spec=0 opt_spec_depth=2
-    local tune_cache="" tune_label="auto"
-
-    while true; do
-        clear 2>/dev/null || printf '\033c'
-        echo "═══ Boot: $model_name ═══"
-        echo ""
-        echo "  Context profile"
-        printf "    [1] Fit safely%s\n" "$( [[ -n "$fit_ctx" ]] && echo " (last proven $fit_ctx; launcher recalculates)" || echo " (launcher calculates)" )"
-        echo "    [2] Standard chat (65536)"
-        if [[ -n "$max_ctx" ]]; then
-            printf "    [3] Train max (%s, may be slower or fail)\n" "$max_ctx"
-        else
-            echo "    [3] Train max (unknown)"
-        fi
-        echo "    [4] Custom number"
-        echo ""
-        printf "  Current:      %s%s\n" "$(context_label)" "$(context_hint)"
-        printf "  KV placement: %s\n" "$kv_place"
-        echo "  KV auto keeps GPU KV by default and asks only if KV is huge or infeasible."
-        echo ""
-        echo "  [Enter] Boot now    [D] Dry run    [A] Advanced    [<] Back"
-        echo ""
-        local key
-        read -rp "  Choice [1]: " key
-        case "${key,,}" in
-            ""|l|launch|boot)
-                run_action launch
-                ;;
-            1|fit|f)
-                ctx_mode="fit"
-                ctx="fit"
-                ;;
-            2|standard|std|s)
-                ctx_mode="manual"
-                ctx=65536
-                ;;
-            3|max|m)
-                if [[ -n "$max_ctx" ]]; then
-                    ctx_mode="max"
-                    ctx="$max_ctx"
-                fi
-                ;;
-            4|custom)
-                local ans
-                read -rp "    Context tokens: " ans
-                if [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]]; then
-                    ctx_mode="manual"
-                    ctx="$ans"
-                    if [[ -n "$fit_ctx" ]] && (( ans > fit_ctx )); then
-                        echo "    Note: $ans > fit estimate ($fit_ctx) — launch may fail."
-                        sleep 1
-                    fi
-                fi
-                ;;
-            d|dry)
-                run_action dry
-                ;;
-            a|advanced|c|config)
-                configure_model "$model_path"
-                return 0
-                ;;
-            "<"|q|back)
-                return 0
-                ;;
-            *)
-                echo "  Invalid choice: '$key'"
-                sleep 1
-                ;;
-        esac
-    done
-}
-
 # ── Per-model configure & launch screen ───────────────────────────────
 configure_model() {
     local model_path="$1"
     local model_name; model_name=$(basename "$model_path")
     local max_ctx; max_ctx=$(detect_max_ctx "$model_path")
     local fit_ctx; fit_ctx=$(estimate_fit_ctx "$model_path")
-    local ctx ctx_mode
-    init_context_defaults
+
+    local default_ctx="${LLM_CTX_SIZE:-65536}"
+    [[ "$default_ctx" =~ ^[0-9]+$ ]] || default_ctx=65536
+    # If the requested default exceeds what fits, start at the fit estimate
+    # so the user's first impulse (Enter at every prompt) doesn't trigger
+    # the does-not-fit safety exit.
+    local ctx="$default_ctx"
+    if (( ctx_passthrough )); then
+        ctx=""
+    elif [[ -n "$fit_ctx" ]] && (( ctx > fit_ctx )); then
+        ctx=$fit_ctx
+    fi
     local parallel=""
     local kv_place="${LLM_KV_PLACEMENT:-auto}"
     case "$kv_place" in auto|gpu|cpu) ;; *) kv_place="auto" ;; esac
-    local opt_aitune=0 opt_bench=0 opt_vision=0 opt_keepalive=0 opt_verbose=0 opt_converge=0
-    local opt_rounds=12
-    local opt_spec=0   # 0=off, 1=draft-mtp, 2=draft-simple, 3=draft-eagle3, 4=ngram-simple
-    local opt_spec_depth=2  # --spec-draft-n-max (1-10, default 2)
-    local tune_cache="" tune_label="none"
-
-    # Sanitize model name for use as a bash variable key (no dots/dashes)
-    local model_key; model_key=$(printf '%s' "$model_name" | tr '.-' '__')
-
-    # Load per-model saved settings
-    local saved_ctx; saved_ctx=$(load_kv "ctx_${model_key}" "")
-    [[ -n "$saved_ctx" ]] && ctx="$saved_ctx"
-    local saved_parallel; saved_parallel=$(load_kv "parallel_${model_key}" "")
-    [[ -n "$saved_parallel" ]] && parallel="$saved_parallel"
-    local saved_kv; saved_kv=$(load_kv "kv_${model_key}" "auto")
-    case "$saved_kv" in auto|gpu|cpu) kv_place="$saved_kv" ;; esac
-    local saved_aitune; saved_aitune=$(load_kv "aitune_${model_key}" "0")
-    opt_aitune=$saved_aitune
-    local saved_rounds; saved_rounds=$(load_kv "rounds_${model_key}" "8")
-    opt_rounds=$saved_rounds
-    local saved_vision; saved_vision=$(load_kv "vision_${model_key}" "0")
-    opt_vision=$saved_vision
-    local saved_bench; saved_bench=$(load_kv "bench_${model_key}" "0")
-    opt_bench=$saved_bench
-    local saved_spec; saved_spec=$(load_kv "spec_${model_key}" "0")
-    opt_spec=$saved_spec
-    local saved_spec_depth; saved_spec_depth=$(load_kv "spec_depth_${model_key}" "2")
-    opt_spec_depth=$saved_spec_depth
-    local saved_keepalive; saved_keepalive=$(load_kv "keepalive_${model_key}" "0")
-    opt_keepalive=$saved_keepalive
-    local saved_verbose; saved_verbose=$(load_kv "verbose_${model_key}" "0")
-    opt_verbose=$saved_verbose
-    local saved_converge; saved_converge=$(load_kv "converge_${model_key}" "0")
-    opt_converge=$saved_converge
+    local opt_aitune=0 opt_bench=0 opt_vision=0 opt_keepalive=0
+    local opt_rounds=8
+    local tune_cache="" tune_label="auto"
 
     while true; do
         clear 2>/dev/null || printf '\033c'
-        echo "═══ Advanced: $model_name ═══"
-        printf "  [c] Context size       %s%s\n" "$(context_label)" "$(context_hint)"
+        echo "═══ Configure: $model_name ═══"
+        local ctx_hint=""
+        if [[ -n "$max_ctx" || -n "$fit_ctx" ]]; then
+            ctx_hint=" ("
+            [[ -n "$fit_ctx" ]] && ctx_hint+="fits ~$fit_ctx"
+            [[ -n "$fit_ctx" && -n "$max_ctx" ]] && ctx_hint+=", "
+            [[ -n "$max_ctx" ]] && ctx_hint+="train max $max_ctx"
+            ctx_hint+=")"
+        fi
+        printf "  [c] Context size       %s%s\n" "${ctx:-passthrough}" "$ctx_hint"
         printf "  [p] Parallel slots     %s\n" "${parallel:-default (4)}"
-        case "$kv_place" in
-            auto) printf "  [K] KV placement       auto (GPU KV first; asks only if huge or infeasible)\n" ;;
-            gpu)  printf "  [K] KV placement       gpu (best long-context decode)\n" ;;
-            cpu)  printf "  [K] KV placement       cpu (more GPU experts for short chat)\n" ;;
-        esac
+        printf "  [K] KV placement       %s\n" "$kv_place"
         printf "  [t] Tuned config       %s\n" "$tune_label"
         printf "  [a] AI tune            %s\n" "$( (( opt_aitune )) && echo on || echo off)"
         if (( opt_aitune )); then
@@ -765,20 +571,6 @@ configure_model() {
         fi
         printf "  [v] Vision (mmproj)    %s\n" "$( (( opt_vision )) && echo on || echo off)"
         printf "  [b] Benchmark mode     %s\n" "$( (( opt_bench )) && echo on || echo off)"
-        printf "  [V] Verbose (AI Tune)  %s\n" "$( (( opt_verbose )) && echo on || echo off)"
-        printf "  [C] Converge mode      %s\n" "$( (( opt_converge )) && echo on || echo off)"
-        # Speculative decoding
-        local spec_label="off"
-        case "$opt_spec" in
-            1) spec_label="draft-mtp" ;;
-            2) spec_label="draft-simple" ;;
-            3) spec_label="draft-eagle3" ;;
-            4) spec_label="ngram-simple" ;;
-        esac
-        printf "  [s] Speculative dec    %s\n" "$spec_label"
-        if (( opt_spec == 1 )); then
-            printf "  [d] Draft depth        %s\n" "$opt_spec_depth"
-        fi
         printf "  [k] Keep-alive restart %s\n" "$( (( opt_keepalive )) && echo on || echo off)"
         echo ""
         echo "  [L] Launch              [D] Dry run"
@@ -787,31 +579,18 @@ configure_model() {
         local key
         read -rp "  Action: " key
         case "$key" in
-            c)
+            c|C)
                 local ans hint="${ctx:-passthrough}"
                 [[ -n "$fit_ctx" ]] && hint+=", fit=$fit_ctx"
                 [[ -n "$max_ctx" ]] && hint+=", max=$max_ctx"
-                read -rp "    Context: number, fit, max, or Enter=keep [$hint]: " ans
+                read -rp "    Context (number, 'fit'=largest that fits, 'max'=train max) [$hint]: " ans
                 case "${ans,,}" in
-                    fit|f)
-                        ctx_mode="fit"
-                        ctx="fit"
-                        ;;
-                    max|m)
-                        if [[ -n "$max_ctx" ]]; then
-                            ctx_mode="max"
-                            ctx="$max_ctx"
-                            if [[ -n "$fit_ctx" ]] && (( max_ctx > fit_ctx )); then
-                                echo "    Warning: train max exceeds proven fit ($fit_ctx). Launch may fail."
-                                sleep 1
-                            fi
-                        fi
-                        ;;
+                    fit|f) [[ -n "$fit_ctx" ]] && ctx="$fit_ctx" ;;
+                    max|m) [[ -n "$max_ctx" ]] && ctx="$max_ctx" ;;
                     "")    : ;;
                     *)
                         if [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]]; then
                             ctx="$ans"
-                            ctx_mode="manual"
                             if [[ -n "$fit_ctx" ]] && (( ans > fit_ctx )); then
                                 echo "    Note: $ans > fit estimate ($fit_ctx) — may trigger does-not-fit."
                                 sleep 1
@@ -819,72 +598,41 @@ configure_model() {
                         fi
                         ;;
                 esac
-                save_kv "ctx_${model_key}" "${ctx:-passthrough}"
                 ;;
-            p)
+            p|P)
                 local ans
                 read -rp "    Parallel slots (Enter=default 4): " ans
                 parallel="$ans"
-                save_kv "parallel_${model_key}" "$parallel"
                 ;;
             K)
                 local ans
-                echo "    auto: GPU KV first; asks only if KV is huge or infeasible."
-                echo "    gpu:  best for long active context / long-context decode."
-                echo "    cpu:  keeps KV in RAM; usually faster for short chat on MoE."
-                read -rp "    KV placement [auto/gpu/cpu, Enter=keep $kv_place]: " ans
+                read -rp "    KV placement: [a]uto GPU-first, [g]pu, [c]pu [$kv_place]: " ans
                 case "${ans,,}" in
                     a|auto) kv_place="auto" ;;
                     g|gpu)  kv_place="gpu" ;;
                     c|cpu)  kv_place="cpu" ;;
                     "")     : ;;
                 esac
-                save_kv "kv_${model_key}" "$kv_place"
                 ;;
-            a) (( opt_aitune = !opt_aitune )) || true; save_kv "aitune_${model_key}" "$opt_aitune" ;;
-            r)
+            a|A) (( opt_aitune = !opt_aitune )) || true ;;
+            r|R)
                 if (( opt_aitune )); then
                     local ans
-                    read -rp "    AI tune rounds (1-30, default 12): " ans
+                    read -rp "    AI tune rounds (1-30, default 8): " ans
                     if [[ "$ans" =~ ^[0-9]+$ ]]; then
                         opt_rounds=$ans
                         (( opt_rounds < 1 )) && opt_rounds=1
                         (( opt_rounds > 30 )) && opt_rounds=30
                     fi
-                    save_kv "rounds_${model_key}" "$opt_rounds"
                 fi
                 ;;
-            v) (( opt_vision = !opt_vision )) || true; save_kv "vision_${model_key}" "$opt_vision" ;;
-            b) (( opt_bench = !opt_bench )) || true; save_kv "bench_${model_key}" "$opt_bench" ;;
-            s)
-                # Cycle: off → draft-mtp → draft-simple → draft-eagle3 → ngram-simple → off
-                (( opt_spec = (opt_spec + 1) % 5 )) || true
-                # Reset depth when switching away from draft-mtp
-                (( opt_spec != 1 )) && opt_spec_depth=2
-                save_kv "spec_${model_key}" "$opt_spec"
-                save_kv "spec_depth_${model_key}" "$opt_spec_depth"
-                ;;
-            d)
-                # Draft depth — only available when draft-mtp is selected
-                if (( opt_spec == 1 )); then
-                    local ans
-                    read -rp "    Draft depth --spec-draft-n-max (1-10, default 2): " ans
-                    if [[ "$ans" =~ ^[0-9]+$ ]]; then
-                        opt_spec_depth=$ans
-                        (( opt_spec_depth < 1 )) && opt_spec_depth=1
-                        (( opt_spec_depth > 10 )) && opt_spec_depth=10
-                    fi
-                    save_kv "spec_depth_${model_key}" "$opt_spec_depth"
-                fi
-                ;;
-            k) (( opt_keepalive = !opt_keepalive )) || true; save_kv "keepalive_${model_key}" "$opt_keepalive" ;;
-            V) (( opt_verbose = !opt_verbose )) || true; save_kv "verbose_${model_key}" "$opt_verbose" ;;
-            C) (( opt_converge = !opt_converge )) || true; save_kv "converge_${model_key}" "$opt_converge" ;;
-            t)
+            v|V) (( opt_vision = !opt_vision )) || true ;;
+            b|B) (( opt_bench = !opt_bench )) || true ;;
+            k) (( opt_keepalive = !opt_keepalive )) || true ;;
+            t|T)
                 pick_tuned_config "$model_name" "$opt_vision"
                 tune_cache="$_picked_path"
                 tune_label="$_picked_label"
-                save_kv "tune_${model_key}" "$tune_label"
                 ;;
             L)
                 run_action launch ;;
@@ -906,7 +654,7 @@ configure_model() {
 pick_tuned_config() {
     local model_name="$1" vision="$2"
     _picked_path=""
-    _picked_label="none"
+    _picked_label="auto"
     echo ""
     echo "  ═══ Tuned configs for $model_name ═══"
     local entries=()
@@ -919,7 +667,7 @@ pick_tuned_config() {
         sleep 2
         return 0
     fi
-    echo "    [0] None (heuristic only, no tuned config)"
+    echo "    [0] Auto / heuristic cache selection"
     local i path label pick
     for i in "${!entries[@]}"; do
         path="${entries[$i]%%$'\t'*}"
@@ -931,7 +679,7 @@ pick_tuned_config() {
     pick=${pick:-0}
     if [[ "$pick" == "0" ]]; then
         _picked_path=""
-        _picked_label="none"
+        _picked_label="auto"
     elif [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#entries[@]} )); then
         _picked_path="${entries[$(( pick - 1 ))]%%$'\t'*}"
         _picked_label="${entries[$(( pick - 1 ))]#*$'\t'}"
@@ -946,62 +694,85 @@ pick_tuned_config() {
 prelaunch_walkthrough() {
     local model_name; model_name=$(basename "$model_path")
     echo ""
-    echo "  ─── Launch summary ───"
-    printf "    Model:        %s\n" "$model_name"
-    printf "    Context:      %s%s\n" "${ctx:-passthrough}" "$( [[ "$ctx_mode" != "manual" && "$ctx_mode" != "passthrough" ]] && echo " ($ctx_mode)" )"
-    printf "    KV placement: %s\n" "$kv_place"
-    printf "    Parallel:     %s\n" "${parallel:-default (4)}"
-    printf "    Vision:       %s\n" "$( (( opt_vision )) && echo on || echo off)"
-    if [[ -n "$tune_cache" ]]; then
-        printf "    Tuning:       selected config\n"
-    else
-        printf "    AI tune:      %s\n" "$( (( opt_aitune )) && echo "on (${opt_rounds} rounds)" || echo off)"
+    echo "  ─── Pre-launch checklist ───"
+
+    # 1. Context size
+    local ans hint="${ctx:-passthrough}"
+    [[ -n "$fit_ctx" ]] && hint+=", fit=$fit_ctx"
+    [[ -n "$max_ctx" ]] && hint+=", max=$max_ctx"
+    read -rp "    Context (number, 'fit'/'max', Enter=keep) [$hint]: " ans
+    case "${ans,,}" in
+        fit|f) [[ -n "$fit_ctx" ]] && ctx="$fit_ctx" ;;
+        max|m) [[ -n "$max_ctx" ]] && ctx="$max_ctx" ;;
+        "")    : ;;
+        *) [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]] && ctx="$ans" ;;
+    esac
+
+    # 2. Vision (multimodal mmproj). Only ask if not already on.
+    if (( ! opt_vision )); then
+        read -rp "    Multimodal / vision support (auto-detect mmproj)? [y/N]: " ans
+        [[ "${ans,,}" == "y" ]] && opt_vision=1
     fi
+
+    # 3. AI tune — only ask if no tuned cache exists AND user hasn't picked one
+    #    AND user hasn't already toggled ai-tune on.
+    if [[ -z "$tune_cache" ]] && (( ! opt_aitune )); then
+        local ntuned
+        ntuned=$(count_tuned_configs "$model_name")
+        if (( ntuned == 0 )); then
+            read -rp "    No tuned config exists for this model. Run AI tune now? [y/N]: " ans
+            if [[ "${ans,,}" == "y" ]]; then
+                opt_aitune=1
+                read -rp "    Rounds (1-30, default 8): " ans
+                if [[ "$ans" =~ ^[0-9]+$ ]]; then
+                    opt_rounds=$ans
+                    (( opt_rounds < 1 ))  && opt_rounds=1
+                    (( opt_rounds > 30 )) && opt_rounds=30
+                fi
+            fi
+        fi
+    fi
+
+    # 4. Parallel slots — only ask if user hasn't set it explicitly.
+    if [[ -z "$parallel" ]]; then
+        read -rp "    Parallel slots / users [Enter=4]: " ans
+        [[ "$ans" =~ ^[0-9]+$ && "$ans" -gt 0 ]] && parallel="$ans"
+    fi
+
+    # 5. KV placement — auto is GPU-first and only prompts in the launcher
+    # when GPU KV is projected to dominate VRAM or significantly reduce GPU
+    # expert layers.
+    if [[ "$kv_place" == "auto" ]]; then
+        read -rp "    KV placement [auto GPU-first / gpu / cpu, Enter=auto]: " ans
+        case "${ans,,}" in
+            gpu|g) kv_place="gpu" ;;
+            cpu|c) kv_place="cpu" ;;
+            ""|auto|a) kv_place="auto" ;;
+        esac
+    fi
+
     echo ""
-    local ans
-    read -rp "  Launch now? [Y/n] " ans
-    [[ "${ans,,}" == "n" ]] && return 1
-    return 0
 }
 
 # ── Launch action handler ─────────────────────────────────────────────
 run_action() {
     local action="$1"
-    if [[ "$action" == "launch" ]]; then
-        prelaunch_walkthrough || return 0
-    fi
+    [[ "$action" == "launch" ]] && prelaunch_walkthrough
 
     backend_bin_flag
     local OPT_FLAGS=()
-    local launcher_verbose=0
-    local ctx_flag
-    if ctx_flag=$(context_flag_value); then
-        OPT_FLAGS+=(--ctx-size "$ctx_flag")
-    fi
+    [[ -n "$ctx" ]] && OPT_FLAGS+=(--ctx-size "$ctx")
     [[ -n "$parallel" ]] && OPT_FLAGS+=(--parallel "$parallel")
     [[ -n "$kv_place" ]] && OPT_FLAGS+=(--kv-placement "$kv_place")
     if [[ -n "$tune_cache" ]]; then
         OPT_FLAGS+=(--tune-cache "$tune_cache")
     else
         (( opt_aitune )) && OPT_FLAGS+=(--ai-tune)
-        (( opt_aitune && opt_rounds != 12 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
+        (( opt_aitune && opt_rounds != 8 )) && OPT_FLAGS+=(--rounds "$opt_rounds")
     fi
     (( opt_bench ))     && OPT_FLAGS+=(--benchmark)
     (( opt_vision ))    && OPT_FLAGS+=(--vision)
     (( opt_keepalive )) && OPT_FLAGS+=(--keep-alive)
-    if (( opt_verbose )); then
-        launcher_verbose=1
-        OPT_FLAGS+=(--verbose)
-    fi
-    (( opt_converge ))  && OPT_FLAGS+=(--converge)
-    # Speculative decoding
-    case "$opt_spec" in
-        1) OPT_FLAGS+=(--spec-type draft-mtp)
-           (( opt_spec_depth != 2 )) && OPT_FLAGS+=(--spec-draft-n-max "$opt_spec_depth") ;;
-        2) OPT_FLAGS+=(--spec-type draft-simple) ;;
-        3) OPT_FLAGS+=(--spec-type draft-eagle3) ;;
-        4) OPT_FLAGS+=(--spec-type ngram-simple) ;;
-    esac
     case "$action" in
         dry)     OPT_FLAGS+=(--dry-run) ;;
         configs) OPT_FLAGS+=(--show-configs) ;;
@@ -1010,10 +781,10 @@ run_action() {
     if [[ "$action" == "launch" ]]; then
         echo "  Launching: $(basename "$model_path") ${OPT_FLAGS[*]:-}"
         echo ""
-        VERBOSE="$launcher_verbose" exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path"
+        exec "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path"
     fi
     echo ""
-    VERBOSE="$launcher_verbose" "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path" || true
+    "$LAUNCHER" "${SERVER_BIN_FLAG[@]}" "${PASSTHROUGH_ARGS[@]}" "${OPT_FLAGS[@]+"${OPT_FLAGS[@]}"}" "$model_path" || true
     echo ""
     read -rp "  [Enter] to return..." _
 }
@@ -1061,8 +832,7 @@ render_main() {
         done
     fi
     echo ""
-    echo "  [1-${MODEL_COUNT}] quick boot model"
-    echo "  [c]  Advanced configure"
+    echo "  [1-${MODEL_COUNT}] configure & launch model"
     echo "  [s]  Settings           [d]  Download model"
     echo "  [b]  Backend            [m]  Model directory"
     echo "  [u]  Check updates      [q]  Quit"
@@ -1096,22 +866,10 @@ while true; do
     render_main
     read -rp "  Action: " action
     if [[ "$action" =~ ^[0-9]+$ ]] && (( action >= 1 && action <= MODEL_COUNT )); then
-        quick_boot_model "${MODEL_PATHS[$(( action - 1 ))]}"
+        configure_model "${MODEL_PATHS[$(( action - 1 ))]}"
         continue
     fi
     case "$action" in
-        c|C)
-            echo ""
-            if (( MODEL_COUNT == 1 )); then
-                configure_model "${MODEL_PATHS[0]}"
-            else
-                local_pick=""
-                read -rp "  Model number for advanced configure: " local_pick
-                if [[ "$local_pick" =~ ^[0-9]+$ ]] && (( local_pick >= 1 && local_pick <= MODEL_COUNT )); then
-                    configure_model "${MODEL_PATHS[$(( local_pick - 1 ))]}"
-                fi
-            fi
-            ;;
         s|S) echo ""; cmd_settings;     read -rp "  [Enter] to return..." _ ;;
         d|D) echo ""; cmd_download;     read -rp "  [Enter] to return..." _ ;;
         b|B) echo ""; cmd_backend;      read -rp "  [Enter] to return..." _ ;;
