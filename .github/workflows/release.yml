@@ -24,6 +24,9 @@ jobs:
           - os: ubuntu-latest
             asset: llm-server-linux-x86_64-cpu.tar.gz
             cmake_flags: -DGGML_NATIVE=OFF
+          - os: ubuntu-latest
+            asset: llm-server-linux-x86_64-vulkan.tar.gz
+            cmake_flags: -DGGML_VULKAN=ON -DGGML_NATIVE=OFF
           - os: macos-14
             asset: llm-server-macos-arm64-metal.tar.gz
             cmake_flags: -DGGML_METAL=ON -DGGML_NATIVE=OFF
@@ -31,9 +34,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
       - name: Install build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libvulkan-dev glslang-tools vulkan-tools
 
       - name: Clone llama.cpp
         run: git clone --depth=1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
@@ -45,6 +52,10 @@ jobs:
 
       - name: Smoke-test backend binary
         run: /tmp/llama.cpp/build/bin/llama-server --version
+
+      - name: Build Go llm-server
+        working-directory: go
+        run: go build -trimpath -ldflags="-s -w" -o llm-server ./cmd/llm-server
 
       - name: Package
         run: scripts/package-release.sh "${{ matrix.asset }}" /tmp/llama.cpp/build/bin/llama-server dist
@@ -66,7 +77,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+
       - name: Attach assets to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

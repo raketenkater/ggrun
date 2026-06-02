@@ -94,6 +94,7 @@ def _read_kv(f, r, kv_count):
             if key.endswith('.full_attention_interval') or key.endswith('.attention.full_attention_interval'):
                 r['full_interval'] = val
             if key.endswith('.context_length'): r['ctx_train'] = val
+            if key.endswith('.nextn_predict_layers'): r['nextn_predict_layers'] = val
         elif vt == 8:  # string
             sl = struct.unpack('<Q', f.read(8))[0]
             val = f.read(sl).decode('utf-8', errors='replace')
@@ -230,6 +231,7 @@ SHELL_KEY_MAP = [
     ('full_interval',     'FULL_ATTN_INTERVAL',  0),
     ('has_shexp',         'HAS_SHEXP',           0),
     ('ctx_train',         'CTX_TRAIN',           0),
+    ('nextn_predict_layers', 'NEXTN_PREDICT_LAYERS', 0),
     ('name',              'GGUF_MODEL_NAME',     ''),
     ('basename',          'GGUF_BASENAME',       ''),
     ('quantized_by',      'GGUF_QUANTIZED_BY',   ''),

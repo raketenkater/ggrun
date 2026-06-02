@@ -22,7 +22,10 @@ test -x "$APP_HOME/bin/llm-server-gui"
 test -x "$APP_HOME/bin/download_any_gguf.py"
 test -x "$APP_HOME/bin/model_index.py"
 test -f "$APP_HOME/env.sh"
+test -f "$APP_HOME/config/config"
 test -f "$APP_HOME/config/config.sh"
+test -x "$APP_HOME/run"
+test -x "$APP_HOME/gui"
 test -d "$APP_HOME/models"
 test -d "$APP_HOME/cache"
 test -d "$APP_HOME/logs"
@@ -42,8 +45,8 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$APP_HOME/models/setup-mode
     --arch llama --name Setup-Home-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
     --embd 64 --ff 128 --ctx-train 2048
 
-out=$(HOME="$TMP/home" LLM_ASSUME_YES=1 LLAMA_SERVER="$TMP/llama-server" \
-    "$APP_HOME/bin/llm-server" --dry-run --cpu setup-model.gguf 2>&1)
+out=$(HOME="$TMP/home" LLM_ASSUME_YES=1 \
+    "$APP_HOME/run" --dry-run --cpu setup-model.gguf 2>&1)
 
 if [[ "$out" != *"$APP_HOME/models/setup-model.gguf"* ]]; then
     echo "  ✗ app-home model directory was not used"
@@ -51,7 +54,7 @@ if [[ "$out" != *"$APP_HOME/models/setup-model.gguf"* ]]; then
     exit 1
 fi
 
-if [[ "$out" != *"Running on CPU only"* ]]; then
+if [[ "$out" != *"Running on CPU only"* && "$out" != *"-ngl 0"* ]]; then
     echo "  ✗ installed launcher did not run dry-run path"
     echo "$out" | tail -40 | sed 's/^/    /'
     exit 1

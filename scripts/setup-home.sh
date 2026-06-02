@@ -50,28 +50,81 @@ LLM_INSTALL_MODE="$INSTALL_MODE" \
 LLM_INSTALL_BACKEND="$BACKEND" \
 LLM_INSTALL_PY_DEPS="$PY_DEPS" \
 LLM_INSTALL_NONINTERACTIVE="$NONINTERACTIVE" \
+LLM_INSTALL_MAIN=go \
 "$ROOT/install.sh"
 
+backend_bin=""
+if [[ -x "$APP_HOME/bin/llama-server" ]]; then
+    backend_bin="$APP_HOME/bin/llama-server"
+elif [[ -x "$APP_HOME/src/ik_llama.cpp/build/bin/llama-server" ]]; then
+    backend_bin="$APP_HOME/src/ik_llama.cpp/build/bin/llama-server"
+elif [[ -x "$APP_HOME/src/llama.cpp/build-vulkan/bin/llama-server" ]]; then
+    backend_bin="$APP_HOME/src/llama.cpp/build-vulkan/bin/llama-server"
+elif [[ -x "$APP_HOME/src/llama.cpp/build/bin/llama-server" ]]; then
+    backend_bin="$APP_HOME/src/llama.cpp/build/bin/llama-server"
+fi
+
+backend_config="$BACKEND"
+if [[ "$backend_config" == "auto" ]]; then
+    if [[ "$backend_bin" == *ik_llama.cpp* ]]; then
+        backend_config="ik_llama"
+    elif [[ "$backend_bin" == *vulkan* ]]; then
+        backend_config="vulkan"
+    elif [[ "$PLATFORM" == "mac" ]]; then
+        backend_config="llama"
+    else
+        backend_config="llama"
+    fi
+elif [[ "$backend_config" == "cuda" ]]; then
+    backend_config="ik_llama"
+elif [[ "$backend_config" == "cpu" || "$backend_config" == "metal" ]]; then
+    backend_config="llama"
+fi
+
+cat >"$APP_HOME/config/config" <<EOF
+# $APP_NAME Go config. Loaded when LLM_APP_HOME points at this app home.
+LLM_APP_HOME="$APP_HOME"
+LLM_MODEL_DIR="$APP_HOME/models"
+LLM_CACHE_DIR="$APP_HOME/cache"
+LLM_LOG_DIR="$APP_HOME/logs"
+LLM_BACKEND="$backend_config"
+EOF
+if [[ -n "$backend_bin" ]]; then
+    printf 'LLAMA_SERVER="%s"\n' "$backend_bin" >>"$APP_HOME/config/config"
+fi
+
 cat >"$APP_HOME/config/config.sh" <<EOF
-# $APP_NAME local config. This file is loaded automatically by launchers in $APP_HOME/bin.
+# $APP_NAME shell config. Sourced by env.sh and wrapper commands.
 export LLM_APP_HOME="$APP_HOME"
 export LLM_MODEL_DIR="$APP_HOME/models"
 export LLM_CACHE_DIR="$APP_HOME/cache"
 export LLM_LOG_DIR="$APP_HOME/logs"
+export LLM_BACKEND="$backend_config"
 EOF
+if [[ -n "$backend_bin" ]]; then
+    printf 'export LLAMA_SERVER="%s"\n' "$backend_bin" >>"$APP_HOME/config/config.sh"
+fi
 
 cat >"$APP_HOME/env.sh" <<EOF
 # Source this to use $APP_NAME from any shell:
 #   source "$APP_HOME/env.sh"
-export LLM_APP_HOME="$APP_HOME"
-export LLM_MODEL_DIR="$APP_HOME/models"
-export LLM_CACHE_DIR="$APP_HOME/cache"
-export LLM_LOG_DIR="$APP_HOME/logs"
+source "$APP_HOME/config/config.sh"
 export PATH="$APP_HOME/bin:\$PATH"
 EOF
 
-ln -sf "$APP_HOME/bin/llm-server" "$APP_HOME/run"
-ln -sf "$APP_HOME/bin/llm-server-gui" "$APP_HOME/gui"
+cat >"$APP_HOME/run" <<EOF
+#!/usr/bin/env bash
+source "$APP_HOME/env.sh"
+exec "$APP_HOME/bin/llm-server" "\$@"
+EOF
+chmod 0755 "$APP_HOME/run"
+
+cat >"$APP_HOME/gui" <<EOF
+#!/usr/bin/env bash
+source "$APP_HOME/env.sh"
+exec "$APP_HOME/bin/llm-server-gui" "\$@"
+EOF
+chmod 0755 "$APP_HOME/gui"
 
 say ""
 say "Done."

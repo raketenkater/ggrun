@@ -37,11 +37,18 @@ for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-mac llm-serv
     [[ -f "$ROOT_DIR/$f" ]] || continue
     install -m 0644 "$ROOT_DIR/$f" "$PAYLOAD/$f"
 done
+if [[ -f "$ROOT_DIR/llm-server" ]]; then
+    install -m 0755 "$ROOT_DIR/llm-server" "$PAYLOAD/llm-server-bash"
+fi
 chmod 0755 "$PAYLOAD/llm-server" "$PAYLOAD/llm-server-mac" "$PAYLOAD/llm-server-gui" \
     "$PAYLOAD/setup.sh" "$PAYLOAD/setup-linux.sh" "$PAYLOAD/setup-mac.sh" \
     "$PAYLOAD/parse_gguf.py" "$PAYLOAD/model_index.py" "$PAYLOAD/download_any_gguf.py" 2>/dev/null || true
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
+if [[ -x "$ROOT_DIR/go/llm-server" ]]; then
+    install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/bin/llm-server-go"
+    install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/llm-server"
+fi
 
 BIN_DIR="$(cd "$(dirname "$SERVER_BIN")" && pwd)"
 while IFS= read -r lib; do

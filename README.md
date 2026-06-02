@@ -17,7 +17,7 @@ llm-server-gui             # interactive TUI picker
 
 ## Install
 
-Recommended self-contained setup:
+Recommended v3 self-contained setup. This installs the Go `llm-server` as the primary command, downloads or builds the matching llama.cpp backend, and writes a local app-home config:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
@@ -56,7 +56,7 @@ Legacy one-line install to `~/.local/bin`:
 curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/install.sh | bash
 ```
 
-Detects your GPU, installs scripts to `~/.local/bin`, tries a matching prebuilt release bundle, then falls back to building the right backend from source (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU). CUDA currently uses source builds unless a CUDA bundle was manually attached to the release. See [Requirements](#requirements) for what gets installed.
+Detects your GPU, installs the Go launcher to `~/.local/bin/llm-server`, keeps the legacy Bash launcher as `llm-server-bash` when present, tries a matching prebuilt release bundle, then falls back to building the right backend from source (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU). CUDA currently uses source builds unless a CUDA bundle was manually attached to the release. See [Requirements](#requirements) for what gets installed.
 
 Prefer the manual path? `git clone … && cd llm-server && ./install.sh` works identically.
 
@@ -67,6 +67,7 @@ LLM_INSTALL_MODE=release ./install.sh      # require a prebuilt bundle
 LLM_INSTALL_MODE=build ./install.sh        # force source build
 LLM_INSTALL_BACKEND=skip ./install.sh      # install scripts only
 LLM_INSTALL_PY_DEPS=skip ./install.sh      # skip downloader Python deps
+LLM_INSTALL_MAIN=bash ./install.sh          # keep legacy Bash as primary
 LLM_INSTALL_PREFIX=/usr/local/bin ./install.sh
 ```
 
@@ -79,7 +80,8 @@ LLM_INSTALL_PREFIX=/usr/local/bin ./install.sh
 - [Usage](#usage)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
-- [Roadmap](ROADMAP.md)
+- [v3 performance roadmap](docs/v3-performance-roadmap.md)
+- [Release checklist](docs/releasing.md)
 - [Changelog](CHANGELOG.md)
 
 ## Quick start
@@ -153,6 +155,7 @@ llm-server model.gguf
 - **Auto-fallback** — if ik_llama can't load a model, strips ik-specific flags and retries on mainline llama.cpp mid-launch.
 - **Built-in downloader** — `--download` with any HuggingFace repo; recommends the best quant for your VRAM+RAM budget.
 - **Vision (multimodal)** — `--vision` auto-detects and downloads the matching `mmproj` from HuggingFace.
+- **Speculative decoding** — `--spec auto|ngram|ngram-mod|ngram-k4v|mtp` with backend-aware flag dialects. Off by default; `auto` prefers a validated draft model, then falls back to supported self-speculation.
 - **Terminal GUI** — `llm-server-gui` for interactive model picking with option toggles.
 
 ## AI self-tuning (`--ai-tune`)
@@ -222,6 +225,12 @@ llm-server --update
 
 # Quick tok/s benchmark then exit
 llm-server --benchmark model.gguf
+
+# Speculative decoding
+llm-server model.gguf --spec auto       # validated draft model, then safe ngram fallback
+llm-server model.gguf --spec ngram      # conservative ngram map-k
+llm-server model.gguf --spec ngram-mod  # newer llama.cpp self-speculation when supported
+llm-server model.gguf --spec mtp        # IK MTP, or mainline draft-mtp when advertised
 ```
 
 Any flag llm-server doesn't recognize is forwarded to `llama-server`, so every upstream option works without wrapping.
