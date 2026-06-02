@@ -77,7 +77,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+
       - name: Attach assets to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

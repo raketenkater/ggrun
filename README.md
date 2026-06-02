@@ -80,7 +80,8 @@ LLM_INSTALL_PREFIX=/usr/local/bin ./install.sh
 - [Usage](#usage)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
-- [Roadmap](ROADMAP.md)
+- [v3 performance roadmap](docs/v3-performance-roadmap.md)
+- [Release checklist](docs/releasing.md)
 - [Changelog](CHANGELOG.md)
 
 ## Quick start
@@ -154,6 +155,7 @@ llm-server model.gguf
 - **Auto-fallback** — if ik_llama can't load a model, strips ik-specific flags and retries on mainline llama.cpp mid-launch.
 - **Built-in downloader** — `--download` with any HuggingFace repo; recommends the best quant for your VRAM+RAM budget.
 - **Vision (multimodal)** — `--vision` auto-detects and downloads the matching `mmproj` from HuggingFace.
+- **Speculative decoding** — `--spec auto|ngram|ngram-mod|ngram-k4v|mtp` with backend-aware flag dialects. Off by default; `auto` prefers a validated draft model, then falls back to supported self-speculation.
 - **Terminal GUI** — `llm-server-gui` for interactive model picking with option toggles.
 
 ## AI self-tuning (`--ai-tune`)
@@ -223,6 +225,12 @@ llm-server --update
 
 # Quick tok/s benchmark then exit
 llm-server --benchmark model.gguf
+
+# Speculative decoding
+llm-server model.gguf --spec auto       # validated draft model, then safe ngram fallback
+llm-server model.gguf --spec ngram      # conservative ngram map-k
+llm-server model.gguf --spec ngram-mod  # newer llama.cpp self-speculation when supported
+llm-server model.gguf --spec mtp        # IK MTP, or mainline draft-mtp when advertised
 ```
 
 Any flag llm-server doesn't recognize is forwarded to `llama-server`, so every upstream option works without wrapping.

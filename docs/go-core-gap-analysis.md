@@ -241,18 +241,27 @@ Bash:
 
 Go:
 - Has `placement/draft.go`.
-- Can detect draft model candidates.
 - Keeps speculative decoding off by default.
-- Supports explicit `--spec ngram` and gated draft-model auto mode.
+- Supports `--spec auto`, `draft`, `ngram`, `ngram-mod`, `ngram-k4v`, and `mtp`.
+- `auto` prefers a validated draft model and falls back to a backend-supported
+  ngram self-speculation mode.
+- Spec flags are selected from the backend dialect and `llama-server --help`
+  where available, so newer flags are not emitted against older binaries.
+- MTP uses IK flags for ik_llama.cpp and mainline `draft-mtp` only when the
+  backend advertises it.
 
 Gap:
-- Policy is now conservative: `off` by default, `ngram` explicit, and draft-model
-  auto only when a compatible local draft is present.
-- Need benchmark proof before enabling any speculative mode by default.
+- Speculative decoding is wired and dry-run tested, but still needs real
+  throughput and acceptance-rate measurements on each release backend.
+- Draft-model auto-download is intentionally conservative and may find no match
+  for newer families until compatible draft GGUFs are published.
 
 Needed:
 - Record spec mode in tune cache keys.
-- Only enable auto-spec when a measured benchmark proves positive gain.
+- Include accepted speculative token statistics in benchmark output when the
+  backend logs them.
+- Only recommend auto-spec as a default after measured benchmark gains are
+  stable across representative prompts.
 
 ### Daemon / Reload Behavior
 

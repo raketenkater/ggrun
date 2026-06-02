@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, go-core]
   pull_request:
-    branches: [main]
+    branches: [main, go-core]
 
 jobs:
   shellcheck:
@@ -32,6 +32,9 @@ jobs:
       - name: Run Go package tests
         working-directory: go
         run: go test ./...
+      - name: Vet Go packages
+        working-directory: go
+        run: go vet ./...
 
   go-cross-build:
     runs-on: ubuntu-latest

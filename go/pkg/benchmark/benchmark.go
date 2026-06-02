@@ -10,16 +10,19 @@ import (
 
 // Result holds benchmark metrics.
 type Result struct {
-	Model        string  `json:"model"`
-	PromptTokens int     `json:"prompt_tokens"`
-	PromptTimeS  float64 `json:"prompt_time_s"`
-	PromptTPS    float64 `json:"prompt_tps"`
-	GenTokens    int     `json:"gen_tokens"`
-	GenTimeS     float64 `json:"gen_time_s"`
-	GenTPS       float64 `json:"gen_tps"`
-	PeakVRAMMB   int     `json:"peak_vram_mb,omitempty"`
-	LoadTimeS    float64 `json:"load_time_s,omitempty"`
-	Timestamp    int64   `json:"timestamp"`
+	Model           string  `json:"model"`
+	PromptTokens    int     `json:"prompt_tokens"`
+	PromptTimeS     float64 `json:"prompt_time_s"`
+	PromptTPS       float64 `json:"prompt_tps"`
+	GenTokens       int     `json:"gen_tokens"`
+	GenTimeS        float64 `json:"gen_time_s"`
+	GenTPS          float64 `json:"gen_tps"`
+	DraftTokens     int     `json:"draft_tokens,omitempty"`
+	DraftAccepted   int     `json:"draft_accepted,omitempty"`
+	DraftAcceptRate float64 `json:"draft_accept_rate,omitempty"`
+	PeakVRAMMB      int     `json:"peak_vram_mb,omitempty"`
+	LoadTimeS       float64 `json:"load_time_s,omitempty"`
+	Timestamp       int64   `json:"timestamp"`
 }
 
 // Runner executes a benchmark against a running server.
@@ -40,7 +43,7 @@ func (r *Runner) client() *http.Client {
 // Run performs a warm-up + measurement prompt and returns metrics.
 func (r *Runner) Run() (*Result, error) {
 	warmUp := `Explain quantum computing in one sentence.`
-	measurePrompt := `Write a short story about a robot learning to paint. Include a beginning, middle, and end.`
+	measurePrompt := `Write a practical local LLM inference runbook for an engineer tuning llama.cpp serving. Cover request batching, KV cache size, GPU layer placement, split mode, speculative decoding, and output quality checks. Use numbered sections and continue until the runbook is complete.`
 
 	if _, err := r.chat(warmUp, 32); err != nil {
 		return nil, fmt.Errorf("warm-up: %w", err)
@@ -54,7 +57,7 @@ func (r *Runner) Run() (*Result, error) {
 	prefillTime := time.Since(start).Seconds()
 
 	start = time.Now()
-	genResp, err := r.chat(measurePrompt, 128)
+	genResp, err := r.chat(measurePrompt, 256)
 	if err != nil {
 		return nil, fmt.Errorf("generation: %w", err)
 	}
@@ -79,14 +82,17 @@ func (r *Runner) Run() (*Result, error) {
 	}
 
 	return &Result{
-		Model:        r.Model,
-		PromptTokens: promptTokens,
-		PromptTimeS:  prefillTime,
-		PromptTPS:    promptTPS,
-		GenTokens:    genTokens,
-		GenTimeS:     genTime,
-		GenTPS:       genTPS,
-		Timestamp:    time.Now().Unix(),
+		Model:           r.Model,
+		PromptTokens:    promptTokens,
+		PromptTimeS:     prefillTime,
+		PromptTPS:       promptTPS,
+		GenTokens:       genTokens,
+		GenTimeS:        genTime,
+		GenTPS:          genTPS,
+		DraftTokens:     genResp.DraftTokens,
+		DraftAccepted:   genResp.DraftAccepted,
+		DraftAcceptRate: draftAcceptRate(genResp.DraftTokens, genResp.DraftAccepted),
+		Timestamp:       time.Now().Unix(),
 	}, nil
 }
 
@@ -96,6 +102,8 @@ type chatResult struct {
 	CompletionTokens int
 	PromptTPS        float64
 	GenTPS           float64
+	DraftTokens      int
+	DraftAccepted    int
 }
 
 func (r *Runner) chat(prompt string, maxTokens int) (*chatResult, error) {
@@ -128,6 +136,8 @@ func (r *Runner) chat(prompt string, maxTokens int) (*chatResult, error) {
 		Timings struct {
 			PromptPerSecond    float64 `json:"prompt_per_second"`
 			PredictedPerSecond float64 `json:"predicted_per_second"`
+			DraftTokens        int     `json:"draft_n"`
+			DraftAccepted      int     `json:"draft_n_accepted"`
 		} `json:"timings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -142,7 +152,16 @@ func (r *Runner) chat(prompt string, maxTokens int) (*chatResult, error) {
 		CompletionTokens: out.Usage.CompletionTokens,
 		PromptTPS:        out.Timings.PromptPerSecond,
 		GenTPS:           out.Timings.PredictedPerSecond,
+		DraftTokens:      out.Timings.DraftTokens,
+		DraftAccepted:    out.Timings.DraftAccepted,
 	}, nil
+}
+
+func draftAcceptRate(drafted, accepted int) float64 {
+	if drafted <= 0 || accepted <= 0 {
+		return 0
+	}
+	return float64(accepted) / float64(drafted)
 }
 
 func estimateTokens(text string) int {

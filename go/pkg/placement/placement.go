@@ -72,43 +72,44 @@ type Strategy struct {
 
 // ModelProfile describes the GGUF model.
 type ModelProfile struct {
-	Path              string `json:"path"`
-	Name              string `json:"name,omitempty"`         // GGUF metadata: model name
-	Basename          string `json:"basename,omitempty"`     // GGUF metadata: model basename
-	QuantizedBy       string `json:"quantized_by,omitempty"` // GGUF metadata: quantizer (e.g. "unsloth")
-	SizeBytes         int64  `json:"size_bytes"`
-	TotalSizeMB       int    `json:"total_size_mb"` // includes multi-part shards
-	NumLayers         int    `json:"num_layers"`
-	NumParams         int64  `json:"num_params"`
-	IsMoE             bool   `json:"is_moe"`
-	NumExperts        int    `json:"num_experts,omitempty"`
-	ContextSize       int    `json:"context_size"`
-	HiddenSize        int    `json:"hidden_size"`
-	HeadCount         int    `json:"head_count"`
-	HeadCountKV       int    `json:"head_count_kv"`
-	KeyLength         int    `json:"key_length"`
-	ValueLength       int    `json:"value_length"`
-	VocabSize         int    `json:"vocab_size"`
-	QuantType         string `json:"quant_type"`
-	ExpertBytes       int64  `json:"expert_bytes"`
-	NonExpertBytes    int64  `json:"non_expert_bytes"`
-	Fused             int    `json:"fused"`
-	EmbeddingLength   int    `json:"embedding_length"`
-	FeedForwardLength int    `json:"feed_forward_length"`
-	KVLoraRank        int    `json:"kv_lora_rank"`
-	QLoraRank         int    `json:"q_lora_rank"`
-	RopeDim           int    `json:"rope_dim"`
-	KeyLengthMLA      int    `json:"key_length_mla"`
-	ValueLengthMLA    int    `json:"value_length_mla"`
-	HasSSM            int    `json:"has_ssm"`
-	SlidingWindow     int    `json:"sliding_window"`
-	FullAttnInterval  int    `json:"full_attn_interval"`
-	HasShexp          int    `json:"has_shexp"`
-	CTXTrain          int    `json:"ctx_train"`
-	ModelArch         string `json:"model_arch"`
-	ExpertUsedCount   int    `json:"expert_used_count,omitempty"`
-	ExpertFF          int    `json:"expert_ff,omitempty"`
-	ExpertSharedFF    int    `json:"expert_shared_ff,omitempty"`
+	Path               string `json:"path"`
+	Name               string `json:"name,omitempty"`         // GGUF metadata: model name
+	Basename           string `json:"basename,omitempty"`     // GGUF metadata: model basename
+	QuantizedBy        string `json:"quantized_by,omitempty"` // GGUF metadata: quantizer (e.g. "unsloth")
+	SizeBytes          int64  `json:"size_bytes"`
+	TotalSizeMB        int    `json:"total_size_mb"` // includes multi-part shards
+	NumLayers          int    `json:"num_layers"`
+	NumParams          int64  `json:"num_params"`
+	IsMoE              bool   `json:"is_moe"`
+	NumExperts         int    `json:"num_experts,omitempty"`
+	ContextSize        int    `json:"context_size"`
+	HiddenSize         int    `json:"hidden_size"`
+	HeadCount          int    `json:"head_count"`
+	HeadCountKV        int    `json:"head_count_kv"`
+	KeyLength          int    `json:"key_length"`
+	ValueLength        int    `json:"value_length"`
+	VocabSize          int    `json:"vocab_size"`
+	QuantType          string `json:"quant_type"`
+	ExpertBytes        int64  `json:"expert_bytes"`
+	NonExpertBytes     int64  `json:"non_expert_bytes"`
+	Fused              int    `json:"fused"`
+	EmbeddingLength    int    `json:"embedding_length"`
+	FeedForwardLength  int    `json:"feed_forward_length"`
+	KVLoraRank         int    `json:"kv_lora_rank"`
+	QLoraRank          int    `json:"q_lora_rank"`
+	RopeDim            int    `json:"rope_dim"`
+	KeyLengthMLA       int    `json:"key_length_mla"`
+	ValueLengthMLA     int    `json:"value_length_mla"`
+	HasSSM             int    `json:"has_ssm"`
+	SlidingWindow      int    `json:"sliding_window"`
+	FullAttnInterval   int    `json:"full_attn_interval"`
+	HasShexp           int    `json:"has_shexp"`
+	CTXTrain           int    `json:"ctx_train"`
+	ModelArch          string `json:"model_arch"`
+	ExpertUsedCount    int    `json:"expert_used_count,omitempty"`
+	ExpertFF           int    `json:"expert_ff,omitempty"`
+	ExpertSharedFF     int    `json:"expert_shared_ff,omitempty"`
+	NextNPredictLayers int    `json:"nextn_predict_layers,omitempty"`
 }
 
 // Options allows user overrides.
@@ -127,7 +128,8 @@ type Options struct {
 	Host         string // listen address (default 0.0.0.0)
 	VisionAuto   bool   // auto-detect mmproj for vision
 	MMProjPath   string // explicit vision projector GGUF
-	SpecMode     string // off, auto, draft, ngram
+	SpecMode     string // off, auto, draft, ngram, ngram-mod, ngram-k4v, mtp
+	BackendHelp  string // llama-server --help output for dialect-specific flags
 	ForceSpecMoE bool   // allow speculative decoding on MoE despite default gate
 }
 

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/raketenkater/llm-server/pkg/benchmark"
 	"github.com/raketenkater/llm-server/pkg/config"
@@ -101,6 +102,7 @@ Launch flags:
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
   -vision              Enable vision (auto-detect mmproj)
+  --spec string       Speculative decoding: off|auto|draft|ngram|ngram-mod|ngram-k4v|mtp
 `)
 }
 
@@ -151,6 +153,36 @@ func dispatchCompat(args []string) bool {
 	}
 	cmdLaunch(args)
 	return true
+}
+
+func formatCommand(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range arg {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
+		}
+		switch r {
+		case '@', '%', '_', '+', '=', ':', ',', '.', '/', '-':
+			continue
+		default:
+			safe = false
+		}
+	}
+	if safe {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 func hasArg(args []string, want string) bool {
@@ -231,25 +263,27 @@ func cmdDetect() {
 }
 
 type launchRequest struct {
-	ModelPath    string
-	Port         int
-	CtxFlag      string
-	KVPlacement  string
-	KVQuality    string
-	CPUMode      bool
-	GPUsFlag     string
-	Host         string
-	VisionAuto   bool
-	MMProjPath   string
-	ServerBin    string
-	Backend      string
-	TuneCache    string
-	SpecMode     string
-	ForceSpecMoE bool
-	RamBudgetMB  int
-	Parallel     int
-	Benchmark    bool
-	ExtraArgs    []string
+	ModelPath         string
+	Port              int
+	CtxFlag           string
+	KVPlacement       string
+	KVQuality         string
+	CPUMode           bool
+	GPUsFlag          string
+	Host              string
+	VisionAuto        bool
+	MMProjPath        string
+	ServerBin         string
+	ServerBinExplicit bool
+	Backend           string
+	BackendExplicit   bool
+	TuneCache         string
+	SpecMode          string
+	ForceSpecMoE      bool
+	RamBudgetMB       int
+	Parallel          int
+	Benchmark         bool
+	ExtraArgs         []string
 }
 
 func parseLaunchArgs(args []string) (*launchRequest, error) {
@@ -319,9 +353,11 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--server-bin":
 				req.ServerBin = val
+				req.ServerBinExplicit = true
 				continue
 			case "--backend":
 				req.Backend = val
+				req.BackendExplicit = true
 				continue
 			case "--tune-cache":
 				req.TuneCache = val
@@ -414,12 +450,14 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.ServerBin = v
+			req.ServerBinExplicit = true
 		case "--backend":
 			v, err := next()
 			if err != nil {
 				return nil, err
 			}
 			req.Backend = v
+			req.BackendExplicit = true
 		case "--tune-cache":
 			v, err := next()
 			if err != nil {
@@ -504,13 +542,14 @@ func parseBudgetMB(s string) int {
 }
 
 func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
-	if req.ServerBin != "" {
+	want := strings.TrimSpace(req.Backend)
+	useExplicitServerBin := req.ServerBin != "" && (req.ServerBinExplicit || !req.BackendExplicit || want == "" || want == "auto")
+	if useExplicitServerBin {
 		if _, err := os.Stat(req.ServerBin); err == nil {
 			return detectBackend(req.ServerBin)
 		}
 		fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", req.ServerBin)
 	}
-	want := strings.TrimSpace(req.Backend)
 	if want != "" && want != "auto" {
 		for _, b := range caps.Backends {
 			info := detectBackend(b.Path)
@@ -529,6 +568,12 @@ func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
 				}
 			}
 		}
+	}
+	if req.ServerBin != "" && !useExplicitServerBin {
+		if _, err := os.Stat(req.ServerBin); err == nil {
+			return detectBackend(req.ServerBin)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", req.ServerBin)
 	}
 	return findBackend(caps)
 }
@@ -561,6 +606,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		MMProjPath:   req.MMProjPath,
 		SpecMode:     req.SpecMode,
 		ForceSpecMoE: req.ForceSpecMoE,
+		BackendHelp:  be.Help,
 		CacheFile:    req.TuneCache,
 		Parallel:     req.Parallel,
 	}
@@ -630,7 +676,7 @@ func cmdLaunch(args []string) {
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
-	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
+	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
 	}
@@ -737,6 +783,8 @@ func cmdGUI() {
 		CacheDir:    cfg.CacheDir,
 		Host:        cfg.Host,
 		VisionAuto:  req.Vision,
+		SpecMode:    cfg.Spec,
+		BackendHelp: be.Help,
 	}
 	if req.TuneCache != "" {
 		opts.CacheFile = req.TuneCache
@@ -748,7 +796,7 @@ func cmdGUI() {
 	}
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
-	fmt.Printf("[launch] %s\n", strings.Join(serverArgs, " "))
+	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
 	}
@@ -823,7 +871,7 @@ func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTa
 		return serverArgs
 	}
 	if req.TuneCache != "" {
-		return applySelectedTuneCache(req, serverArgs)
+		return applySelectedTuneCache(req, serverArgs, caps)
 	}
 	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, tuneHardwareHash(caps))
 	if path == "" {
@@ -832,7 +880,7 @@ func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTa
 	autoReq := *req
 	autoReq.TuneCache = path
 	fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
-	return applySelectedTuneCache(&autoReq, serverArgs)
+	return applySelectedTuneCache(&autoReq, serverArgs, caps)
 }
 
 func bestTuneCachePath(cacheDir, modelName, backendTag string, vision bool, hardwareHash string) string {
@@ -874,7 +922,7 @@ func tuneCacheBackendTag(backendTag string) string {
 	}
 }
 
-func applySelectedTuneCache(req *launchRequest, serverArgs []string) []string {
+func applySelectedTuneCache(req *launchRequest, serverArgs []string, caps *detect.Capabilities) []string {
 	if req == nil || req.TuneCache == "" {
 		return serverArgs
 	}
@@ -888,9 +936,243 @@ func applySelectedTuneCache(req *launchRequest, serverArgs []string) []string {
 		fmt.Println("[tune] Baseline was best; no override flags applied")
 		return serverArgs
 	}
+	if reason := tuneCacheVRAMGuard(serverArgs, summary.Flags, caps); reason != "" {
+		fmt.Printf("[tune] Skipping cached config %s: %s\n", summary.Name, reason)
+		return serverArgs
+	}
 	serverArgs = tune.ApplyOverrides(serverArgs, summary.Flags, tune.DefaultProtectedFlags())
 	fmt.Printf("[tune] Config: %s (expected %.2f tok/s)\n", summary.Name, summary.GenTPS)
 	return serverArgs
+}
+
+func canonicalLaunchFlagName(flag string) string {
+	if idx := strings.Index(flag, "="); idx > 0 {
+		flag = flag[:idx]
+	}
+	switch flag {
+	case "-b", "--batch-size":
+		return "-b"
+	case "-ub", "--ubatch-size":
+		return "-ub"
+	case "-np", "--parallel":
+		return "--parallel"
+	case "-fa", "--flash-attn":
+		return "--flash-attn"
+	case "--mg", "--main-gpu":
+		return "-mg"
+	case "-ot", "--override-tensor":
+		return "-ot"
+	case "--dev", "-dev", "--device":
+		return "--device"
+	default:
+		return flag
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func tuneCacheVRAMGuard(baseArgs []string, overrides map[string]interface{}, caps *detect.Capabilities) string {
+	if caps == nil || len(caps.GPUs) == 0 || !tuneOverridesIncreaseVRAM(baseArgs, overrides) {
+		return ""
+	}
+	selected := tuneSelectedGPUIndices(baseArgs, caps)
+	if len(selected) == 0 {
+		return ""
+	}
+	minFree := 0
+	minTotal := 0
+	for i, idx := range selected {
+		if idx < 0 || idx >= len(caps.GPUs) {
+			continue
+		}
+		gpu := caps.GPUs[idx]
+		free := gpu.VRAMFreeMB()
+		if i == 0 || free < minFree {
+			minFree = free
+			minTotal = gpu.VRAMTotalMB
+		}
+	}
+	if minFree <= 0 || minTotal <= 0 {
+		return ""
+	}
+	needed := tuneRuntimeHeadroomMB(minTotal)
+	if minFree < needed {
+		return fmt.Sprintf("runtime VRAM headroom is low on selected GPU(s): min free %d MiB < guard %d MiB for memory-expanding flags", minFree, needed)
+	}
+	return ""
+}
+
+func tuneRuntimeHeadroomMB(gpuTotalMB int) int {
+	guard := gpuTotalMB / 5
+	if guard < 4096 {
+		guard = 4096
+	}
+	if guard > 8192 {
+		guard = 8192
+	}
+	return guard
+}
+
+func tuneOverridesIncreaseVRAM(baseArgs []string, overrides map[string]interface{}) bool {
+	base := argMap(baseArgs)
+	if tuneIntOverrideGreater(overrides, base, "-b", 2048) || tuneIntOverrideGreater(overrides, base, "-ub", 512) || tuneIntOverrideGreater(overrides, base, "--parallel", 1) {
+		return true
+	}
+	for _, key := range []string{"--cache-type-k", "--cache-type-v"} {
+		if val, ok := tuneOverrideString(overrides, key); ok && kvCacheRank(val) > kvCacheRank(base[key]) {
+			return true
+		}
+	}
+	if val, ok := tuneOverrideString(overrides, "--flash-attn"); ok && strings.EqualFold(val, "off") && !strings.EqualFold(base["--flash-attn"], "off") {
+		return true
+	}
+	if _, ok := tuneOverrideString(overrides, "--spec-type"); ok && base["--spec-type"] == "" {
+		return true
+	}
+	for _, key := range []string{"--spec-draft-n-max", "--draft-max", "--spec-ngram-mod-n-max"} {
+		if tuneIntOverrideGreater(overrides, base, key, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func tuneIntOverrideGreater(overrides map[string]interface{}, base map[string]string, key string, fallback int) bool {
+	val, ok := tuneOverrideString(overrides, key)
+	if !ok {
+		return false
+	}
+	next, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil {
+		return false
+	}
+	cur := fallback
+	if raw := strings.TrimSpace(base[key]); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			cur = n
+		}
+	}
+	return next > cur
+}
+
+func tuneOverrideString(overrides map[string]interface{}, key string) (string, bool) {
+	for k, v := range overrides {
+		if canonicalLaunchFlagName(k) == key {
+			return strings.TrimSpace(fmt.Sprint(v)), true
+		}
+	}
+	return "", false
+}
+
+func kvCacheRank(kind string) int {
+	s := strings.ToLower(strings.TrimSpace(kind))
+	s = strings.TrimPrefix(s, "ggml_")
+	switch s {
+	case "", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1":
+		return 1
+	case "q8_0", "q8_1", "bf16":
+		return 2
+	case "f16", "fp16", "f32", "fp32":
+		return 3
+	default:
+		return 1
+	}
+}
+
+func argMap(args []string) map[string]string {
+	out := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		key := canonicalLaunchFlagName(args[i])
+		if key == "" || !strings.HasPrefix(key, "-") {
+			continue
+		}
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			out[key] = args[i+1]
+			i++
+		} else {
+			out[key] = "true"
+		}
+	}
+	return out
+}
+
+func tuneSelectedGPUIndices(args []string, caps *detect.Capabilities) []int {
+	seen := map[int]bool{}
+	add := func(idx int) {
+		if idx >= 0 && idx < len(caps.GPUs) {
+			seen[idx] = true
+		}
+	}
+	values := argMap(args)
+	for _, key := range []string{"--device", "-dev", "--dev"} {
+		for _, idx := range indicesFromDeviceList(values[key]) {
+			add(idx)
+		}
+	}
+	for _, idx := range indicesFromTensorSplit(values["--tensor-split"]) {
+		add(idx)
+	}
+	for _, idx := range indicesFromDeviceList(values["-ot"]) {
+		add(idx)
+	}
+	if len(seen) == 0 {
+		for _, key := range []string{"-mg", "--main-gpu"} {
+			if n, err := strconv.Atoi(strings.TrimSpace(values[key])); err == nil {
+				add(n)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		for i := range caps.GPUs {
+			add(i)
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for idx := range seen {
+		out = append(out, idx)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func indicesFromTensorSplit(value string) []int {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := []int{}
+	for i, part := range parts {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err == nil && f > 0 {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func indicesFromDeviceList(value string) []int {
+	out := []int{}
+	for i := 0; i < len(value); i++ {
+		if !unicode.IsDigit(rune(value[i])) {
+			continue
+		}
+		j := i + 1
+		for j < len(value) && unicode.IsDigit(rune(value[j])) {
+			j++
+		}
+		prefix := strings.ToLower(value[maxInt(0, i-8):i])
+		if strings.Contains(prefix, "cuda") || strings.Contains(prefix, "vulkan") || strings.Contains(prefix, "gpu") {
+			if n, err := strconv.Atoi(value[i:j]); err == nil {
+				out = append(out, n)
+			}
+		}
+		i = j - 1
+	}
+	return out
 }
 
 func cmdDryRun(args []string) {
@@ -941,7 +1223,7 @@ func cmdDryRun(args []string) {
 	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
-	fmt.Println(strings.Join(serverArgs, " "))
+	fmt.Println(formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
 	}
@@ -1098,16 +1380,24 @@ func cmdTune(args []string) {
 	if model.IsMoE && totalSizeMB > 100*1024 {
 		timeoutSec = 900
 	}
+	benchTimeout := 2 * time.Minute
+	if strategy.Type == placement.CPUOnly {
+		benchTimeout = 5 * time.Minute
+	} else if strategy.Type == placement.MoEOffload {
+		benchTimeout = 90 * time.Second
+	}
 
 	cache := tune.NewCache(cfg.CacheDir)
 	engine := &tune.Engine{
-		BaseURL: fmt.Sprintf("http://localhost:%d", req.Port),
-		Model:   filepath.Base(req.ModelPath),
-		Rounds:  rounds,
-		Cache:   cache,
-		Caps:    caps,
-		Backend: be.Tag,
-		Vision:  strategy.MMProjPath != "",
+		BaseURL:          fmt.Sprintf("http://localhost:%d", req.Port),
+		Model:            filepath.Base(req.ModelPath),
+		Rounds:           rounds,
+		Cache:            cache,
+		Caps:             caps,
+		Backend:          be.Tag,
+		Vision:           strategy.MMProjPath != "",
+		BenchmarkTimeout: benchTimeout,
+		BackendHelp:      be.Help,
 		OnProgress: func(msg string) {
 			fmt.Println("[tune]", msg)
 		},
@@ -1303,43 +1593,44 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 	totalSizeMB := int(totalBytes / 1024 / 1024)
 
 	return &placement.ModelProfile{
-		Path:              path,
-		Name:              info.Name,
-		Basename:          info.Basename,
-		QuantizedBy:       info.QuantizedBy,
-		SizeBytes:         totalBytes,
-		TotalSizeMB:       totalSizeMB,
-		NumLayers:         info.BlockCount,
-		NumParams:         info.EstimateParams(),
-		IsMoE:             info.IsMoE,
-		NumExperts:        numExperts,
-		ContextSize:       info.ContextLength,
-		HiddenSize:        info.EmbeddingLength,
-		HeadCount:         headCount,
-		HeadCountKV:       info.HeadCountKV,
-		KeyLength:         info.KeyLength,
-		ValueLength:       info.ValueLength,
-		VocabSize:         info.VocabSize,
-		QuantType:         "", // not parsed from gguf.py output
-		ExpertBytes:       info.ExpertBytes,
-		NonExpertBytes:    info.NonExpertBytes,
-		Fused:             info.Fused,
-		EmbeddingLength:   info.EmbeddingLength,
-		FeedForwardLength: info.FeedForwardLength,
-		ExpertUsedCount:   info.ExpertUsed,
-		ExpertFF:          info.ExpFF,
-		ExpertSharedFF:    info.ExpSharedFF,
-		RopeDim:           info.NRot,
-		HasSSM:            info.SSM,
-		FullAttnInterval:  info.FullAttnInterval,
-		SlidingWindow:     info.SlidingWindow,
-		HasShexp:          info.HasShexp,
-		KVLoraRank:        info.KVLoraRank,
-		QLoraRank:         info.QLoraRank,
-		KeyLengthMLA:      info.KeyLengthMLA,
-		ValueLengthMLA:    info.ValueLengthMLA,
-		CTXTrain:          info.ContextLength,
-		ModelArch:         info.Architecture,
+		Path:               path,
+		Name:               info.Name,
+		Basename:           info.Basename,
+		QuantizedBy:        info.QuantizedBy,
+		SizeBytes:          totalBytes,
+		TotalSizeMB:        totalSizeMB,
+		NumLayers:          info.BlockCount,
+		NumParams:          info.EstimateParams(),
+		IsMoE:              info.IsMoE,
+		NumExperts:         numExperts,
+		ContextSize:        info.ContextLength,
+		HiddenSize:         info.EmbeddingLength,
+		HeadCount:          headCount,
+		HeadCountKV:        info.HeadCountKV,
+		KeyLength:          info.KeyLength,
+		ValueLength:        info.ValueLength,
+		VocabSize:          info.VocabSize,
+		QuantType:          "", // not parsed from gguf.py output
+		ExpertBytes:        info.ExpertBytes,
+		NonExpertBytes:     info.NonExpertBytes,
+		Fused:              info.Fused,
+		EmbeddingLength:    info.EmbeddingLength,
+		FeedForwardLength:  info.FeedForwardLength,
+		ExpertUsedCount:    info.ExpertUsed,
+		ExpertFF:           info.ExpFF,
+		ExpertSharedFF:     info.ExpSharedFF,
+		RopeDim:            info.NRot,
+		HasSSM:             info.SSM,
+		FullAttnInterval:   info.FullAttnInterval,
+		SlidingWindow:      info.SlidingWindow,
+		HasShexp:           info.HasShexp,
+		KVLoraRank:         info.KVLoraRank,
+		QLoraRank:          info.QLoraRank,
+		KeyLengthMLA:       info.KeyLengthMLA,
+		ValueLengthMLA:     info.ValueLengthMLA,
+		CTXTrain:           info.ContextLength,
+		ModelArch:          info.Architecture,
+		NextNPredictLayers: info.NextNPredictLayers,
 	}
 }
 
@@ -1418,6 +1709,7 @@ type backendInfo struct {
 	IsIK              bool
 	SupportsReasoning bool
 	Tag               string
+	Help              string
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
@@ -1471,8 +1763,9 @@ func backendSearchPaths() []string {
 // llama-server --help returns exit code 1, so we check the output regardless of error.
 func detectBackend(path string) *backendInfo {
 	info := &backendInfo{Path: path, Tag: "llama"}
-	out, _ := exec.Command(path, "--help").Output()
+	out, _ := exec.Command(path, "--help").CombinedOutput()
 	help := string(out)
+	info.Help = help
 	lowerHelp := strings.ToLower(help)
 	lowerPath := strings.ToLower(path)
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {

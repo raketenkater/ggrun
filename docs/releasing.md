@@ -8,10 +8,12 @@ packages are intentionally not produced.
 Pushing a `v*` tag runs `.github/workflows/release.yml` and publishes:
 
 - `llm-server-linux-x86_64-cpu.tar.gz`
+- `llm-server-linux-x86_64-vulkan.tar.gz`
 - `llm-server-macos-arm64-metal.tar.gz`
+- `SHA256SUMS`
 
 The installer looks for a matching release asset first, then falls back to a
-source build.
+source build. Checksums are published with each tagged release.
 
 ## CUDA assets
 
@@ -36,3 +38,58 @@ scripts/package-release.sh \
 Attach `dist/llm-server-linux-x86_64-cuda.tar.gz` to the GitHub release if you
 want CUDA installs to use a prebuilt bundle. Without that asset, the installer
 builds ik_llama.cpp from source.
+
+
+## Public release gate
+
+Before calling a tag stable, run the Go launcher against this matrix. A release
+candidate can ship with fewer machines, but the public notes must say exactly
+which rows have passed.
+
+| Target | Required checks |
+|---|---|
+| Linux CPU-only | install, `detect`, dry-run, one short benchmark |
+| Linux NVIDIA CUDA / ik_llama.cpp | install/build, `--spec mtp`, `--spec ngram`, `--ai-tune`, one benchmark |
+| Linux Vulkan NVIDIA | install/build, `--spec auto`, `--spec ngram`, one benchmark |
+| Linux Vulkan AMD or Intel | install/build, dry-run, one benchmark, no CUDA assumptions |
+| macOS arm64 Metal | install/build, dry-run, one benchmark |
+| WSL2 NVIDIA | install, backend detection, dry-run, one benchmark |
+| No supported GPU | installer falls back cleanly to CPU bundle or source build |
+| Missing backend tools | installer prints the missing package/tool and exits without partial config corruption |
+
+For speculative decoding, verify these commands before release notes claim
+support:
+
+```bash
+llm-server model.gguf --dry-run --spec off
+llm-server model.gguf --dry-run --spec auto
+llm-server model.gguf --dry-run --spec ngram
+llm-server model.gguf --dry-run --spec ngram-mod
+llm-server model.gguf --dry-run --spec ngram-k4v
+llm-server model.gguf --dry-run --spec mtp
+```
+
+Expected policy:
+
+- `off` emits no speculative flags.
+- `auto` prefers a validated draft model, then falls back to a backend-supported
+  ngram mode.
+- `ngram` uses the broadly compatible ngram map-k dialect.
+- `ngram-mod` and `ngram-k4v` only emit when the selected backend advertises the
+  matching flags in `llama-server --help`; otherwise they fall back safely.
+- `mtp` emits IK flags for ik_llama.cpp, emits mainline `draft-mtp` only when the
+  backend advertises it, and otherwise skips with a warning.
+
+## Performance evidence for release notes
+
+Release notes should include raw numbers, not only percentages. For every tested
+model/backend row, record:
+
+- model path or HuggingFace repo, quant, and file size
+- CPU, RAM, GPU model, VRAM, driver, backend commit/version
+- backend mode: CUDA/IK, Vulkan/mainline, Metal, or CPU
+- context size, batch, ubatch, KV types, parallel slots, spec mode
+- prompt-processing tok/s, generation tok/s, accepted speculative tokens when
+  available, and output sanity check result
+- baseline raw llama-server command, llm-server heuristic command, and AI Tune
+  winner

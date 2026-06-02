@@ -30,11 +30,14 @@ type Entry struct {
 
 // BenchmarkResult mirrors benchmark.Result.
 type BenchmarkResult struct {
-	PromptTokens int     `json:"prompt_tokens"`
-	PromptTPS    float64 `json:"prompt_tps"`
-	GenTokens    int     `json:"gen_tokens"`
-	GenTPS       float64 `json:"gen_tps"`
-	PeakVRAMMB   int     `json:"peak_vram_mb"`
+	PromptTokens    int     `json:"prompt_tokens"`
+	PromptTPS       float64 `json:"prompt_tps"`
+	GenTokens       int     `json:"gen_tokens"`
+	GenTPS          float64 `json:"gen_tps"`
+	DraftTokens     int     `json:"draft_tokens,omitempty"`
+	DraftAccepted   int     `json:"draft_accepted,omitempty"`
+	DraftAcceptRate float64 `json:"draft_accept_rate,omitempty"`
+	PeakVRAMMB      int     `json:"peak_vram_mb"`
 }
 
 // Cache provides tune result persistence.
@@ -195,6 +198,13 @@ func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int
 		})
 	}
 
+	completedRounds := 0
+	for _, e := range entries {
+		if e.Round > completedRounds {
+			completedRounds = e.Round
+		}
+	}
+
 	doc := map[string]interface{}{
 		"model":               filepath.Base(modelPath),
 		"tuned_at":            time.Now().UTC().Format(time.RFC3339),
@@ -204,6 +214,8 @@ func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int
 		"baseline_pp_tps":     baseline.Result.PromptTPS,
 		"baseline_wins":       baselineWins,
 		"min_improvement_pct": minImprovementPct,
+		"completed_rounds":    completedRounds,
+		"complete":            completedRounds >= rounds,
 		"best_config": map[string]interface{}{
 			"name":    bestName,
 			"flags":   bestFlags,

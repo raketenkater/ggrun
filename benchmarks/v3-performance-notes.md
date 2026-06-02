@@ -2,6 +2,57 @@
 
 Hardware: RTX 3090 Ti 24GB + RTX 3060 12GB + RTX 4070 12GB. Context: 32768. CUDA/IK backend: `/home/mik/ik_llama.cpp/build/bin/llama-server` build 4485. Vulkan backend: `/home/mik/llama.cpp/build-vulkan/bin/llama-server` build b9123/927dada6c.
 
+## Fresh long-profile release matrix, 2026-06-02
+
+All runs below were taken with idle GPUs on branch `go-core`, using the rebuilt Go binary at `go/llm-server`. Dense comparison runs use prompt profile `long` with 256 generated tokens. Throughput/spec runs use the OpenAI-compatible HTTP harness.
+
+### Dense raw/Bash/Go comparison
+
+| Model | Backend | Raw tok/s | Bash tok/s | Go tok/s | Notes |
+|---|---|---:|---:|---:|---|
+| Qwen3.5 4B Q4_K_M | IK/CUDA | 11.89 | 156.35 | 159.66 | Go parity/slightly ahead |
+| Qwen3.5 4B Q4_K_M | Vulkan | 47.04 | failed | 155.21 | Bash emits `CUDA0`; Go emits `Vulkan0` |
+| Qwen3.6 27B Q5_K_M | IK/CUDA | 1.86 | 38.02 | 38.11 | Go parity |
+| Qwen3.6 27B Q5_K_M | Vulkan | 17.33 | failed | 37.54 | Bash emits `CUDA0`; Go emits `Vulkan0` |
+
+Artifacts: `benchmarks/final-4b-ik-comparison-long`, `benchmarks/final-4b-vulkan-comparison-long`, `benchmarks/final-27b-ik-comparison-long`, `benchmarks/final-27b-vulkan-comparison-long`.
+
+### 4B Vulkan speculative decoding, longer continuation profile
+
+Profile `spec`, 8 requests x 512 generated tokens, 4096 completion tokens total.
+
+| Mode | Completion tok/s | Total tok/s | Draft accepted | Avg latency | Gain vs off |
+|---|---:|---:|---:|---:|---:|
+| `--spec off` | 149.81 | 679.12 | 0/0 (0.0%) | 3.42s | baseline |
+| `--spec ngram` | 157.93 | 715.92 | 2240/2803 (79.9%) | 3.24s | +5.4% |
+| `--spec ngram-mod` | 213.21 | 966.51 | 3494/6859 (50.9%) | 2.40s | +42.3% |
+| `--spec ngram-k4v` | 154.64 | 700.99 | 1968/2907 (67.7%) | 3.31s | +3.2% |
+
+Artifacts: `benchmarks/final-4b-vulkan-spec-*-r8-512`.
+
+### 4B Vulkan serving throughput
+
+Profile `long`, `parallel=4`, `concurrency=4`, fixed per-slot context 32768, 16 requests x 256 generated tokens.
+
+| Mode | Completion tok/s | Total tok/s | Draft accepted | Avg latency | Result |
+|---|---:|---:|---:|---:|---|
+| `--spec off` | 279.33 | 363.76 | 0/0 (0.0%) | 3.67s | best for normal long-form serving |
+| `--spec ngram-mod` | 241.37 | 314.32 | 237/680 (34.9%) | 4.17s | -13.6%; do not enable blindly for throughput |
+
+Artifacts: `benchmarks/final-4b-vulkan-throughput-p4-long-*`.
+
+### MiniMax-M2.7 MoE
+
+Go IK long-profile run, 2 requests x 128 generated tokens, `ctx=32768`, baseline cached config, 56.56 GiB pinned host memory.
+
+| Model | Backend | Completion tok/s | Total tok/s | Avg latency | Notes |
+|---|---|---:|---:|---:|---|
+| MiniMax-M2.7 UD-Q3_K_XL | IK/CUDA | 9.58 | 17.28 | 13.37s | 94.9 GiB model, expert CPU fallback + GPU layer placement |
+
+Artifact: `benchmarks/final-minimax-moe-ik-go-long-r2`.
+
+Read: Go v3's strongest measured gains are not from generic AI-tune magic. They are from reliable typed placement, Vulkan device correctness, and serving parallelism. Speculative decoding can be a major win on repetitive/code/continuation workloads, but it hurts normal long-form parallel serving in this test.
+
 ## Qwen3.5 4B Q4_K_M
 
 CUDA/IK baseline 3-round harness: `benchmarks/qwen35-4b-ik-baseline-r3/summary.md`
@@ -66,7 +117,18 @@ Go Vulkan baseline: `benchmarks/minimax-m2.7-ud-q3-vulkan-go-r1/summary.md`
 |---|---:|---:|---|
 | Go Vulkan | 2.44 | 7.98 | Works, but not competitive for this MoE on this box |
 
-AI-tune IK one-round: `benchmarks/minimax-m2.7-ud-q3-ik-ai-tune-r1/summary.md`. Baseline was 11.40 tok/s. The first fallback candidate tried q8 KV and crashed with CUDA OOM, so baseline wins. The fallback logic now skips q8 KV upgrades for MoE/offload layouts and will test batch/ubatch first. Current Go dry-run auto-selects the total-shard-size IK tune cache (`101939873056` bytes), not the stale first-shard artifact.
+AI-tune IK one-round: `benchmarks/minimax-m2.7-ud-q3-ik-ai-tune-r1/summary.md`. Baseline was 11.40 tok/s. The old first fallback tried q8 KV and crashed with CUDA OOM, so baseline won.
+
+Fresh Go v3 MoE partial retune at `--ctx 32768` confirmed the same direction:
+
+| Candidate | Flags | Decode tok/s | Prompt tok/s | Result |
+|---|---|---:|---:|---|
+| baseline | current IK MoE placement | 11.40 | 26.49 | best |
+| larger-batch | `-b 4096` | 11.34 | 26.57 | slower |
+| smaller-moe-batch | `-b 1024` | 11.37 | 26.18 | slower |
+| larger-ubatch | `-ub 1024` | n/a | n/a | CUDA OOM/hung backend |
+
+Conclusion: the current MoE baseline is already the best measured single-stream config on this machine. AI-tune now skips MoE KV upgrades and memory-expanding ubatch probes, persists partial tune files after each round, and uses a shorter post-start benchmark timeout so OOM candidates are cleaned up instead of stalling the full sweep. Current Go dry-run auto-selects the total-shard-size IK tune cache (`101939873056` bytes), not the stale first-shard artifact.
 
 ## Serving throughput
 
@@ -80,6 +142,19 @@ Short 4B Vulkan throughput runs show why v3 needs a serving benchmark in additio
 | fixed per-slot ctx | 131072 | 32768 | 4 | 4 | 267.61 | 1.43s |
 
 Important correction: llama.cpp divides `--ctx-size` across `--parallel` slots. The first `parallel=4`/`parallel=8` runs were fixed-total-context tests, not fixed-per-request-context tests. The harness now supports `--ctx-per-slot` to keep per-slot context constant. On this 4B Vulkan workload, `parallel=4` is still the current sweet spot with fair 32768-token slots.
+
+## Speculative decoding, longer continuation profile
+
+The earlier 32-token smoke prompt was too short to exercise self-speculation and reported `0/0` draft tokens. The stronger 2026-06-02 run uses profile `spec` with 8 requests x 512 generated tokens and 4096 completion tokens total. Artifacts: `benchmarks/final-4b-vulkan-spec-*-r8-512`.
+
+| Mode | Completion tok/s | Total tok/s | Draft accepted | Avg latency | Gain vs off |
+|---|---:|---:|---:|---:|---:|
+| `--spec off` | 149.81 | 679.12 | 0/0 (0.0%) | 3.42s | baseline |
+| `--spec ngram` | 157.93 | 715.92 | 2240/2803 (79.9%) | 3.24s | +5.4% |
+| `--spec ngram-mod` | 213.21 | 966.51 | 3494/6859 (50.9%) | 2.40s | +42.3% |
+| `--spec ngram-k4v` | 154.64 | 700.99 | 1968/2907 (67.7%) | 3.31s | +3.2% |
+
+Conclusion: speculation is real but workload-dependent. On repetitive/code-like continuations, `ngram-mod` is currently the fastest measured Vulkan self-spec mode. On normal long-form parallel serving, `ngram-mod` measured 241.37 tok/s versus 279.33 tok/s with spec off, so it should be gated by workload profile and measured draft acceptance, not enabled blindly.
 
 ## AI-tune correctness
 

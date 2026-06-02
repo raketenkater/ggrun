@@ -327,8 +327,61 @@ func TestComputeDraftNgramOptIn(t *testing.T) {
 		t.Fatalf("expected ngram draft, got %s", draft.Type)
 	}
 	args := DraftFlags(draft)
-	if !contains(args, "--spec-ngram-size-n") || !contains(args, "--spec-autotune") {
+	if !contains(args, "--spec-ngram-map-k-size-n") {
 		t.Fatalf("ngram flags missing expected values: %v", args)
+	}
+}
+
+func TestComputeDraftSpecAutoTuneRequiresSupport(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false}
+
+	plain := ComputeDraft(model, caps, Options{SpecMode: "ngram", BackendTag: "vulkan", BackendHelp: "--spec-type [ngram-map-k]"})
+	if contains(DraftFlags(plain), "--spec-autotune") {
+		t.Fatalf("did not expect spec-autotune without backend support: %v", DraftFlags(plain))
+	}
+	supported := ComputeDraft(model, caps, Options{SpecMode: "ngram", BackendTag: "vulkan", BackendHelp: "--spec-type [ngram-map-k] --spec-autotune"})
+	if !contains(DraftFlags(supported), "--spec-autotune") {
+		t.Fatalf("expected spec-autotune when backend advertises it: %v", DraftFlags(supported))
+	}
+}
+
+func TestComputeDraftMTPIKOnly(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "moe.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: true, NextNPredictLayers: 1}
+
+	blocked := ComputeDraft(model, caps, Options{SpecMode: "mtp", BackendTag: "llama"})
+	if blocked.Type != DraftNone {
+		t.Fatalf("expected mainline MTP to be skipped, got %s", blocked.Type)
+	}
+	mtp := ComputeDraft(model, caps, Options{SpecMode: "mtp", BackendTag: "ik_llama"})
+	if mtp.Type != DraftMTP {
+		t.Fatalf("expected ik MTP, got %s", mtp.Type)
+	}
+	args := DraftFlags(mtp)
+	if !contains(args, "--multi-token-prediction") || !contains(args, "--spec-type") {
+		t.Fatalf("MTP flags missing expected values: %v", args)
+	}
+}
+
+func TestComputeDraftMTPSkipsWithoutNextNLayers(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false}
+	draft := ComputeDraft(model, caps, Options{SpecMode: "mtp", BackendTag: "ik_llama"})
+	if draft.Type != DraftNone {
+		t.Fatalf("expected MTP to skip without NextN layers, got %s", draft.Type)
 	}
 }
 
@@ -348,6 +401,91 @@ func TestComputeDraftMoERequiresExplicitOverride(t *testing.T) {
 	if forced.Type != DraftNgram {
 		t.Fatalf("expected force override to enable ngram, got %s", forced.Type)
 	}
+}
+
+func TestComputeDraftAutoFallsBackToNgramMod(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: t.TempDir() + "/model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false}
+	help := "--spec-type [none|draft-simple|draft-mtp|ngram-cache|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod] --spec-ngram-mod-n-match --spec-ngram-mod-n-min --spec-ngram-mod-n-max"
+
+	draft := ComputeDraft(model, caps, Options{SpecMode: "auto", BackendTag: "vulkan", BackendHelp: help})
+	if draft.Type != DraftNgram || draft.SpecType != "ngram-mod" {
+		t.Fatalf("expected auto ngram-mod fallback, got type=%s spec=%s", draft.Type, draft.SpecType)
+	}
+	args := DraftFlags(draft)
+	if !contains(args, "--spec-ngram-mod-n-match") || contains(args, "--spec-ngram-map-k-size-n") {
+		t.Fatalf("ngram-mod flags missing expected values: %v", args)
+	}
+}
+
+func TestComputeDraftDraftDoesNotFallbackToNgram(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: t.TempDir() + "/model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false}
+	help := "--spec-type [none|ngram-map-k|ngram-mod] --spec-ngram-mod-n-match"
+
+	draft := ComputeDraft(model, caps, Options{SpecMode: "draft", BackendTag: "llama", BackendHelp: help})
+	if draft.Type != DraftNone {
+		t.Fatalf("expected explicit draft mode to skip without compatible draft model, got %s", draft.Type)
+	}
+}
+
+func TestComputeDraftNgramK4VFlags(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false}
+	help := "--spec-type [none|ngram-map-k|ngram-map-k4v] --spec-ngram-map-k4v-size-n --spec-ngram-map-k4v-size-m --spec-ngram-map-k4v-min-hits"
+
+	draft := ComputeDraft(model, caps, Options{SpecMode: "ngram-k4v", BackendTag: "vulkan", BackendHelp: help})
+	if draft.Type != DraftNgram || draft.SpecType != "ngram-map-k4v" {
+		t.Fatalf("expected ngram-map-k4v, got type=%s spec=%s", draft.Type, draft.SpecType)
+	}
+	args := DraftFlags(draft)
+	if !contains(args, "--spec-ngram-map-k4v-size-n") || !contains(args, "--spec-draft-n-max") {
+		t.Fatalf("ngram-map-k4v flags missing expected values: %v", args)
+	}
+}
+
+func TestComputeDraftMainlineMTPWhenAdvertised(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false, NextNPredictLayers: 1}
+	help := "--spec-type [none|draft-simple|draft-mtp|ngram-map-k]"
+
+	draft := ComputeDraft(model, caps, Options{SpecMode: "mtp", BackendTag: "llama", BackendHelp: help})
+	if draft.Type != DraftMTP || draft.SpecType != "draft-mtp" {
+		t.Fatalf("expected mainline draft-mtp, got type=%s spec=%s", draft.Type, draft.SpecType)
+	}
+	args := DraftFlags(draft)
+	if contains(args, "--multi-token-prediction") {
+		t.Fatalf("mainline draft-mtp should not get ik MTP flag: %v", args)
+	}
+}
+
+func TestDraftDeviceUsesVulkanDialect(t *testing.T) {
+	cfg := &DraftConfig{Type: DraftModel, BackendTag: "vulkan", Path: "draft.gguf", DraftGPU: 1, DraftMax: 3}
+	args := DraftFlags(cfg)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--device-draft" && args[i+1] == "Vulkan1" {
+			return
+		}
+	}
+	t.Fatalf("expected Vulkan draft device flag, got %v", args)
 }
 
 func TestArgsCPUOnlyIncludesZeroGPULayers(t *testing.T) {

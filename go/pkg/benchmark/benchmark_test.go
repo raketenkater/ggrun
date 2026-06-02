@@ -34,7 +34,7 @@ func TestChatParsesUsageAndTimings(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"choices":[{"message":{"content":"hello world"}}],
 			"usage":{"prompt_tokens":12,"completion_tokens":5},
-			"timings":{"prompt_per_second":123.5,"predicted_per_second":45.5}
+			"timings":{"prompt_per_second":123.5,"predicted_per_second":45.5,"draft_n":40,"draft_n_accepted":18}
 		}`))
 	}))
 	defer srv.Close()
@@ -49,5 +49,17 @@ func TestChatParsesUsageAndTimings(t *testing.T) {
 	}
 	if res.PromptTPS != 123.5 || res.GenTPS != 45.5 {
 		t.Fatalf("timings mismatch: %#v", res)
+	}
+	if res.DraftTokens != 40 || res.DraftAccepted != 18 {
+		t.Fatalf("draft timings mismatch: %#v", res)
+	}
+}
+
+func TestDraftAcceptRate(t *testing.T) {
+	if got := draftAcceptRate(40, 10); got != 0.25 {
+		t.Fatalf("expected 0.25, got %f", got)
+	}
+	if got := draftAcceptRate(0, 10); got != 0 {
+		t.Fatalf("expected 0 for no draft tokens, got %f", got)
 	}
 }
