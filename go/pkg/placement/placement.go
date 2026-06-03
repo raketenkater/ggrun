@@ -176,6 +176,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	// Vision: use an explicit projector, or auto-detect one when --vision is set.
 	if opts.MMProjPath != "" {
+		if err := validateMMProj(opts.MMProjPath, model.Name, model.Basename); err != nil {
+			return nil, err
+		}
 		s.MMProjPath = opts.MMProjPath
 		if fi, err := os.Stat(opts.MMProjPath); err == nil {
 			s.MMProjSizeMB = int(fi.Size() / 1024 / 1024)

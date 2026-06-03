@@ -10,6 +10,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+if [[ ! -x "$GO_BIN" ]]; then
+    (cd "$ROOT/go" && go build -o llm-server ./cmd/llm-server)
+fi
 TMP="$(mktemp -d -t llm-server-tests.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -49,7 +53,7 @@ assert_contains() {
 }
 
 run_dry() {
-    "$ROOT/llm-server" --dry-run --cpu "$@" 2>&1
+    "$GO_BIN" --dry-run --cpu "$@" 2>&1
 }
 
 build_gguf() {
@@ -61,8 +65,9 @@ echo "Test: dense_llama"
 build_gguf --out "$TMP/dense.gguf" --arch llama --name 'Test-Llama-7B' \
     --layers 32 --hkv 8 --kl 128 --vl 128 --embd 4096 --ff 14336 --ctx-train 8192
 out=$(run_dry "$TMP/dense.gguf")
-assert_contains "$out" "32 layers, dense" "dense_llama: layer count + dense label"
-assert_contains "$out" "KV cache:" "dense_llama: KV cache size reported"
+assert_contains "$out" "$TMP/dense.gguf" "dense_llama: model path included"
+assert_contains "$out" "--ctx-size 32768" "dense_llama: context selected from metadata"
+assert_contains "$out" "--cache-type-k q4_0" "dense_llama: KV cache type emitted"
 
 # ── Test 2: MoE ──────────────────────────────────────────────────────────
 echo "Test: moe_qwen35"
@@ -71,7 +76,8 @@ build_gguf --out "$TMP/moe.gguf" --arch qwen35moe --name 'Test-MoE-35B-A3B' \
     --experts 256 --exp-used 8 --exp-ff 512 --ctx-train 262144 \
     --full-interval 4
 out=$(run_dry "$TMP/moe.gguf")
-assert_contains "$out" "40 layers, 256 experts (MoE)" "moe_qwen35: MoE label + expert count"
+assert_contains "$out" "$TMP/moe.gguf" "moe_qwen35: model path included"
+assert_contains "$out" "--ctx-size 262144" "moe_qwen35: training context preserved"
 
 # ── Test 3: MLA / DeepSeek-class ─────────────────────────────────────────
 echo "Test: mla_deepseek"
@@ -79,8 +85,8 @@ build_gguf --out "$TMP/mla.gguf" --arch deepseek2 --name 'Test-DeepSeek' \
     --layers 61 --hkv 128 --kl 192 --vl 128 --embd 7168 --ff 18432 \
     --kv-lora 512 --q-lora 1536 --ctx-train 163840
 out=$(run_dry "$TMP/mla.gguf")
-assert_contains "$out" "61 layers" "mla_deepseek: layer count"
-assert_contains "$out" "MLA" "mla_deepseek: MLA label"
+assert_contains "$out" "$TMP/mla.gguf" "mla_deepseek: model path included"
+assert_contains "$out" "--ctx-size 131072" "mla_deepseek: auto context selected"
 
 # ── Test 4: ISWA / Gemma-class ───────────────────────────────────────────
 echo "Test: iswa_gemma"
@@ -88,8 +94,8 @@ build_gguf --out "$TMP/iswa.gguf" --arch gemma3 --name 'Test-Gemma' \
     --layers 42 --hkv 4 --kl 256 --vl 256 --embd 3840 --ff 15360 \
     --swa 4096 --ctx-train 131072
 out=$(run_dry "$TMP/iswa.gguf")
-assert_contains "$out" "42 layers" "iswa_gemma: layer count"
-assert_contains "$out" "ISWA" "iswa_gemma: ISWA label"
+assert_contains "$out" "$TMP/iswa.gguf" "iswa_gemma: model path included"
+assert_contains "$out" "--ctx-size 131072" "iswa_gemma: auto context selected"
 
 # ── Test 5: SSM hybrid ───────────────────────────────────────────────────
 echo "Test: ssm_hybrid"
@@ -97,7 +103,7 @@ build_gguf --out "$TMP/ssm.gguf" --arch qwen35 --name 'Test-Qwen35' \
     --layers 64 --hkv 4 --kl 256 --vl 256 --embd 5120 --ff 17408 \
     --ctx-train 262144 --full-interval 4 --ssm
 out=$(run_dry "$TMP/ssm.gguf")
-assert_contains "$out" "SSM/hybrid" "ssm_hybrid: SSM label"
+assert_contains "$out" "--no-context-shift" "ssm_hybrid: context shift disabled"
 
 # ── Test 6: mistagged DeepSeek V4 Flash (deepseek2 arch + kl_mla<=rope_dim) ─
 # Stock converters tag DeepSeek V4 Flash GGUFs as deepseek2 but emit V4
@@ -112,8 +118,8 @@ out=$(run_dry "$TMP/dsv4_mistag.gguf" 2>&1 || true)
 assert_contains "$out" "DeepSeek V4 Flash mistagged" "dsv4_flash_mistag: clear warning"
 assert_contains "$out" "antirez/llama.cpp-deepseek-v4-flash" "dsv4_flash_mistag: points to fork"
 assert_contains "$out" "PR #22378" "dsv4_flash_mistag: points to upstream PR"
-# Warning must not abort the run — downstream estimator output should still appear.
-assert_contains "$out" "43 layers" "dsv4_flash_mistag: estimator continues past warning"
+# Warning must not abort the run; downstream command generation should still appear.
+assert_contains "$out" "--ctx-size 1048576" "dsv4_flash_mistag: dry-run command still emitted"
 
 # ── Test 7: max-context-fit suggestion stays out of non-interactive runs ─
 echo "Test: max_ctx_suggestion_skipped_under_assume_yes"

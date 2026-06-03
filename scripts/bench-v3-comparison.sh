@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Produce reproducible v3 launch/benchmark artifacts for release posts.
-# Compares raw llama-server, Bash llm-server, and Go llm-server on one model.
+# Compares raw llama-server and Go v3 llm-server. Optionally includes a v2 Bash launcher when provided.
 
 set -euo pipefail
 
@@ -9,6 +9,7 @@ MODEL="${1:-}"
 shift || true
 
 GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+BASH_BIN="${LLM_SERVER_BASH_BIN:-}"
 SERVER_BIN="${LLAMA_SERVER:-}"
 OUT_DIR="${BENCH_OUT_DIR:-$ROOT/benchmarks/v3-$(date -u +%Y%m%dT%H%M%SZ)}"
 PORT_BASE=18081
@@ -26,6 +27,7 @@ Usage: scripts/bench-v3-comparison.sh <model.gguf> [options]
 
 Options:
   --go-bin <path>        Go llm-server binary (default: ./go/llm-server)
+  --bash-bin <path>      Optional legacy v2 Bash llm-server for before/after numbers
   --server-bin <path>    llama-server binary for raw baseline and wrappers
   --out-dir <dir>        Output directory (default: benchmarks/v3-<utc>)
   --port-base <n>        First port to use (default: 18081)
@@ -39,6 +41,7 @@ Options:
 
 Examples:
   scripts/bench-v3-comparison.sh ~/ai_models/qwen.gguf --server-bin ~/llama.cpp/build/bin/llama-server
+  scripts/bench-v3-comparison.sh model.gguf --server-bin ~/llama.cpp/build/bin/llama-server --bash-bin ~/.local/bin/llm-server-bash
   LLM_SERVER_GO_BIN=go/llm-server scripts/bench-v3-comparison.sh model.gguf --backend vulkan --ctx-size 32768
 EOF
     exit 2
@@ -48,6 +51,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --go-bin) GO_BIN="$2"; shift 2 ;;
+        --bash-bin) BASH_BIN="$2"; shift 2 ;;
         --server-bin) SERVER_BIN="$2"; shift 2 ;;
         --out-dir) OUT_DIR="$2"; shift 2 ;;
         --port-base) PORT_BASE="$2"; shift 2 ;;
@@ -65,6 +69,10 @@ done
 
 [[ -f "$MODEL" ]] || { echo "model not found: $MODEL" >&2; exit 2; }
 [[ -x "$GO_BIN" ]] || { echo "Go binary not executable: $GO_BIN" >&2; exit 2; }
+if [[ -n "$BASH_BIN" && ! -x "$BASH_BIN" ]]; then
+    echo "legacy Bash binary not executable: $BASH_BIN" >&2
+    exit 2
+fi
 if [[ -z "$SERVER_BIN" ]]; then
     if command -v llama-server >/dev/null 2>&1; then
         SERVER_BIN="$(command -v llama-server)"
@@ -83,6 +91,10 @@ mkdir -p "$OUT_DIR"
 MODEL_ABS="$(cd "$(dirname "$MODEL")" && pwd)/$(basename "$MODEL")"
 SERVER_ABS="$(cd "$(dirname "$SERVER_BIN")" && pwd)/$(basename "$SERVER_BIN")"
 GO_ABS="$(cd "$(dirname "$GO_BIN")" && pwd)/$(basename "$GO_BIN")"
+BASH_ABS=""
+if [[ -n "$BASH_BIN" ]]; then
+    BASH_ABS="$(cd "$(dirname "$BASH_BIN")" && pwd)/$(basename "$BASH_BIN")"
+fi
 
 wait_health() {
     local port="$1" pid="${2:-}" deadline=$((SECONDS + 900))
@@ -326,6 +338,7 @@ cat >"$OUT_DIR/metadata.txt" <<EOF
 model=$MODEL_ABS
 server_bin=$SERVER_ABS
 go_bin=$GO_ABS
+bash_bin=${BASH_ABS:-}
 ctx_size=$CTX_SIZE
 backend=$BACKEND
 rounds=$ROUNDS
@@ -337,8 +350,10 @@ EOF
 for round in $(seq 1 "$ROUNDS"); do
     base=$((PORT_BASE + (round - 1) * 10))
     run_raw_once "$round" "$base" || true
-    run_wrapper_once bash "$ROOT/llm-server" "$round" "$((base + 1))" || true
-    run_wrapper_once go "$GO_ABS" "$round" "$((base + 2))" || true
+    if [[ -n "$BASH_ABS" ]]; then
+        run_wrapper_once v2-bash "$BASH_ABS" "$round" "$((base + 1))" || true
+    fi
+    run_wrapper_once v3-go "$GO_ABS" "$round" "$((base + 2))" || true
 done
 
 summary="$OUT_DIR/summary.md"
@@ -348,12 +363,16 @@ summary="$OUT_DIR/summary.md"
     echo "Model: \`$MODEL_ABS\`"
     echo "Backend: \`$SERVER_ABS\`"
     echo "Go binary: \`$GO_ABS\`"
+    [[ -n "$BASH_ABS" ]] && echo "Legacy Bash binary: \`$BASH_ABS\`"
     echo "Prompt profile: \`$PROMPT_PROFILE\`; max tokens: \`$MAX_TOKENS\`"
     echo
     echo "| Target | Round | Decode tok/s | Draft accepted | Output |"
     echo "|---|---:|---:|---:|---|"
     for round in $(seq 1 "$ROUNDS"); do
-        for target in raw bash go; do
+        targets=(raw)
+        [[ -n "$BASH_ABS" ]] && targets+=(v2-bash)
+        targets+=(v3-go)
+        for target in "${targets[@]}"; do
             file="$OUT_DIR/$target-$round.json"
             [[ -f "$file" ]] || { echo "| $target | $round | failed | - | $(basename "$file") |"; continue; }
             tps="$(extract_gen_tps "$file")"

@@ -44,7 +44,7 @@ type Info struct {
 	IsMoE              bool   `json:"is_moe"`
 }
 
-// Parse calls parse_gguf.py to extract model metadata.
+// Parse calls the bundled GGUF metadata helper.
 func Parse(path string) (*Info, error) {
 	script := findParseScript()
 	if script == "" {
@@ -80,39 +80,55 @@ func Parse(path string) (*Info, error) {
 }
 
 func findParseScript() string {
-	// Check env var
+	candidates := []string{}
 	if p := os.Getenv("LLM_SCRIPT_DIR"); p != "" {
-		candidate := filepath.Join(p, "parse_gguf.py")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+		candidates = append(candidates,
+			filepath.Join(p, "parse_gguf.py"),
+			filepath.Join(p, "tools", "gguf", "parse_gguf.py"),
+		)
 	}
-
-	// Check PATH
-	if p, err := exec.LookPath("parse_gguf.py"); err == nil {
-		return p
+	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, "tools", "gguf", "parse_gguf.py"),
+			filepath.Join(home, "parse_gguf.py"),
+		)
 	}
-
-	// Check repo root (where go/ is a subdirectory)
+	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
+		candidates = append(candidates,
+			filepath.Join(appHome, "bin", "parse_gguf.py"),
+			filepath.Join(appHome, "parse_gguf.py"),
+		)
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "parse_gguf.py"),
+			filepath.Join(exeDir, "..", "tools", "gguf", "parse_gguf.py"),
+			filepath.Join(exeDir, "..", "..", "tools", "gguf", "parse_gguf.py"),
+		)
+	}
 	wd, _ := os.Getwd()
-	candidate := filepath.Join(wd, "..", "parse_gguf.py")
-	if _, err := os.Stat(candidate); err == nil {
-		abs, _ := filepath.Abs(candidate)
-		return abs
+	candidates = append(candidates,
+		filepath.Join(wd, "tools", "gguf", "parse_gguf.py"),
+		filepath.Join(wd, "..", "tools", "gguf", "parse_gguf.py"),
+		filepath.Join(wd, "parse_gguf.py"),
+		filepath.Join(wd, "..", "parse_gguf.py"),
+	)
+	if p, err := exec.LookPath("parse_gguf.py"); err == nil {
+		candidates = append(candidates, p)
 	}
-
-	// Check home directory
 	home, _ := os.UserHomeDir()
-	paths := []string{
-		filepath.Join(home, "llm-server", "parse_gguf.py"),
+	candidates = append(candidates,
+		filepath.Join(home, "llm-server", "bin", "parse_gguf.py"),
+		filepath.Join(home, "llm-server", "tools", "gguf", "parse_gguf.py"),
 		filepath.Join(home, "parse_gguf.py"),
-	}
-	for _, p := range paths {
+	)
+	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
-			return p
+			abs, _ := filepath.Abs(p)
+			return abs
 		}
 	}
-
 	return ""
 }
 

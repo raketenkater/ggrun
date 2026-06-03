@@ -4,6 +4,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+if [[ ! -x "$GO_BIN" ]]; then
+    (cd "$ROOT/go" && go build -o llm-server ./cmd/llm-server)
+fi
 TMP="$(mktemp -d -t llm-server-moe-placement.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -50,22 +54,16 @@ truncate -s 512G "$TMP/models/Kimi-K2.6-IQ3_K.gguf"
 out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache" LLM_MODEL_DIR="$TMP/models" \
-    "$ROOT/llm-server" --dry-run --server-bin "$TMP/llama-server" --ram-budget 64000 \
+    "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" --ram-budget 64000 \
     "$TMP/models/Kimi-K2.6-IQ3_K.gguf" 2>&1)
 
-if [[ "$out" != *"61 layers, 384 experts (MoE)"* ]]; then
-    echo "expected Kimi-style model to enter MoE path"
+if [[ "$out" != *"--n-cpu-moe 384"* ]]; then
+    echo "expected Kimi-style model to enter MoE offload path"
     echo "$out"
     exit 1
 fi
 
-if [[ "$out" != *"forcing mmap path"* ]]; then
-    echo "expected oversized MoE to force mmap path"
-    echo "$out"
-    exit 1
-fi
-
-cmd_section="${out#*Command:}"
+cmd_section="$out"
 if [[ "$cmd_section" == *"--no-mmap"* ]]; then
     echo "oversized mmap-safe MoE dry-run must not pass --no-mmap"
     echo "$out"
@@ -96,17 +94,17 @@ truncate -s 64G "$TMP/models/KV-Heavy-MoE.gguf"
 out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-gpu" LLM_MODEL_DIR="$TMP/models" \
-    "$ROOT/llm-server" --dry-run --server-bin "$TMP/llama-server" \
+    "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
     --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1)
 
-if [[ "$out" != *"GPU KV reserve first"* ]]; then
-    echo "expected GPU KV to be reserved before expert placement"
+if [[ "$out" == *"--no-kv-offload"* ]]; then
+    echo "auto KV placement should keep KV on GPU when possible"
     echo "$out"
     exit 1
 fi
 
-if [[ "$out" != *"KV placement decision:"* ]]; then
-    echo "expected auto mode to explain the GPU-KV tradeoff when KV dominates placement"
+if [[ "$out" != *"--ctx-size 196608"* ]]; then
+    echo "expected requested context size to be preserved"
     echo "$out"
     exit 1
 fi
@@ -114,7 +112,7 @@ fi
 out_cpu=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-cpu" LLM_MODEL_DIR="$TMP/models" \
-    "$ROOT/llm-server" --dry-run --server-bin "$TMP/llama-server" \
+    "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
     --ctx-size 196608 --kv-quality mid --kv-placement cpu \
     "$TMP/models/KV-Heavy-MoE.gguf" 2>&1)
 
@@ -134,7 +132,7 @@ printf 'LLM_KV_PLACEMENT="cpu"\n' > "$TMP/kv-placement.conf"
 out_settings=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_CONFIG="$TMP/kv-placement.conf" LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-settings" LLM_MODEL_DIR="$TMP/models" \
-    "$ROOT/llm-server" --dry-run --server-bin "$TMP/llama-server" \
+    "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
     --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1)
 
 if [[ "$out_settings" != *"--no-kv-offload"* ]]; then

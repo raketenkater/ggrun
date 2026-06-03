@@ -208,7 +208,7 @@ func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int
 	doc := map[string]interface{}{
 		"model":               filepath.Base(modelPath),
 		"tuned_at":            time.Now().UTC().Format(time.RFC3339),
-		"provider":            "go-core",
+		"provider":            "v3-go",
 		"backend":             backendTagForFile(backend),
 		"baseline_gen_tps":    baseline.Result.GenTPS,
 		"baseline_pp_tps":     baseline.Result.PromptTPS,

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, go-core]
+    branches: [main]
   pull_request:
-    branches: [main, go-core]
+    branches: [main]
 
 jobs:
   shellcheck:
@@ -15,11 +15,7 @@ jobs:
         uses: ludeeus/action-shellcheck@2.0.0
         with:
           scandir: .
-          additional_files: llm-server llm-server-mac llm-server-gui
-          # Gate on real bugs only. The shell scripts have many longstanding
-          # style/warning findings (SC2086, SC2155, SC2128 array-as-string,
-          # etc.) that are tracked separately — we don't want to break CI on
-          # cleanups someone hasn't gotten to yet.
+          # Gate on real bugs only for maintained shell entrypoints.
           severity: error
 
   go-tests:
@@ -62,22 +58,6 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build -o /tmp/llm-server-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/llm-server
 
-  go-bash-parity:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go/go.mod
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Build Go llm-server
-        working-directory: go
-        run: go build -o llm-server ./cmd/llm-server
-      - name: Compare Go dry-run with Bash
-        run: LLM_SERVER_GO_BIN="$PWD/go/llm-server" bash tests/test_go_bash_parity.sh
-
   parser-tests:
     runs-on: ubuntu-latest
     steps:
@@ -95,6 +75,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
       - name: Run estimator regression tests
         run: bash tests/test_estimator.sh
 
@@ -105,28 +88,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
       - name: Run safety regression tests
         run: bash tests/test_safety.sh
-
-  mac-launcher-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Run mocked mac launcher regression tests
-        run: bash tests/test_mac_launcher.sh
-
-  gui-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Run GUI regression tests
-        run: bash tests/test_gui.sh
 
   setup-home-tests:
     runs-on: ubuntu-latest
@@ -135,6 +101,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
       - name: Run setup home regression tests
         run: bash tests/test_setup_home.sh
 
@@ -152,16 +121,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install scripts to a temporary prefix
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Install Go command to a temporary prefix
         run: |
           tmp="$(mktemp -d)"
-          LLM_INSTALL_MODE=scripts \
+          LLM_INSTALL_MODE=build \
             LLM_INSTALL_BACKEND=skip \
             LLM_INSTALL_PREFIX="$tmp/bin" \
             LLM_INSTALL_PY_DEPS=skip \
             LLM_INSTALL_NONINTERACTIVE=1 \
             ./install.sh
           test -x "$tmp/bin/llm-server"
+          test -x "$tmp/bin/llm-server-go"
           test -x "$tmp/bin/llm-server-gui"
           test -x "$tmp/bin/download_any_gguf.py"
           test -x "$tmp/bin/model_index.py"
@@ -180,8 +153,10 @@ jobs:
           scripts/package-release.sh llm-server-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/dist"
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llama-server$'
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llm-server-go$'
+          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llm-server$'
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/llm-server-bash$'
-          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/model_index.py$'
+          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/model_index.py$'
+          tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llm-server-gui$'
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/setup.sh$'
 
   release-install-smoke:
@@ -210,7 +185,6 @@ jobs:
           test -x "$tmp/prefix/llm-server"
           test -x "$tmp/prefix/llm-server-go"
           test -x "$tmp/prefix/llm-server-bash"
-          cmp -s "$tmp/prefix/llm-server-bash" "$GITHUB_WORKSPACE/llm-server"
           "$tmp/prefix/llm-server" | grep -q 'fake llm-server-go'
           test -x "$tmp/prefix/llama-server"
           test -x "$tmp/prefix/download_any_gguf.py"

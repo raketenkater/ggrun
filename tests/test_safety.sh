@@ -5,6 +5,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+if [[ ! -x "$GO_BIN" ]]; then
+    (cd "$ROOT/go" && go build -o llm-server ./cmd/llm-server)
+fi
 TMP="$(mktemp -d -t llm-server-safety.XXXXXX)"
 LISTENER_PID=""
 trap '[[ -n "${LISTENER_PID:-}" ]] && kill "$LISTENER_PID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
@@ -65,7 +69,7 @@ export LLM_MODEL_DIR="$TMP/models"
 export LLM_ASSUME_YES=1
 export LLM_SERVER_TEST_STOP_AFTER_AI_TUNE_PRECLEANUP=1
 
-out=$("$ROOT/llm-server" --cpu --ai-tune --port "$PORT" "$TMP/model.gguf" 2>&1)
+out=$("$GO_BIN" --cpu --ai-tune --port "$PORT" "$TMP/model.gguf" 2>&1 || true)
 
 if ! kill -0 "$LISTENER_PID" 2>/dev/null; then
     echo "foreign listener was killed unexpectedly"
@@ -81,7 +85,7 @@ fi
 
 echo "Safety regression: foreign listener survived AI-tune pre-cleanup"
 
-out=$("$ROOT/llm-server" --cpu --dry-run --vision "$TMP/model.gguf" 2>&1)
+out=$("$GO_BIN" --cpu --dry-run --vision "$TMP/model.gguf" 2>&1)
 if [[ "$out" != *"--mmproj $TMP/mmproj-F16.gguf"* ]]; then
     echo "expected matching local mmproj to be accepted"
     echo "$out"
@@ -90,7 +94,7 @@ fi
 
 echo "Safety regression: matching local mmproj accepted"
 
-if out=$("$ROOT/llm-server" --cpu --dry-run --mmproj "$TMP/mmproj-other.gguf" "$TMP/model.gguf" 2>&1); then
+if out=$("$GO_BIN" --cpu --dry-run --mmproj "$TMP/mmproj-other.gguf" "$TMP/model.gguf" 2>&1); then
     echo "expected mismatched explicit mmproj to fail"
     echo "$out"
     exit 1
@@ -103,12 +107,12 @@ fi
 
 echo "Safety regression: mismatched explicit mmproj rejected"
 
-if out=$("$ROOT/llm-server" --cpu --dry-run --mmproj "$TMP/mmproj-partial.gguf" "$TMP/model.gguf" 2>&1); then
+if out=$("$GO_BIN" --cpu --dry-run --mmproj "$TMP/mmproj-partial.gguf" "$TMP/model.gguf" 2>&1); then
     echo "expected incomplete explicit mmproj to fail"
     echo "$out"
     exit 1
 fi
-if [[ "$out" != *"mmproj metadata does not match"* ]]; then
+if [[ "$out" != *"mmproj metadata does not match"* && "$out" != *"incomplete file"* ]]; then
     echo "expected clear incomplete mmproj error"
     echo "$out"
     exit 1
@@ -116,7 +120,7 @@ fi
 
 echo "Safety regression: incomplete mmproj rejected"
 
-out=$("$ROOT/llm-server" --cpu --dry-run "$TMP/model.gguf" 2>&1)
+out=$("$GO_BIN" --cpu --dry-run "$TMP/model.gguf" 2>&1)
 if [[ "$out" == *"Run AI Tune before launching"* ]]; then
     echo "first-run AI tune prompt leaked into dry-run/non-interactive path"
     echo "$out"

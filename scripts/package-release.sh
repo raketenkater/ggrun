@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#
 # Build a self-contained release archive for install.sh.
 #
 # Usage:
@@ -33,22 +32,40 @@ trap cleanup EXIT
 
 mkdir -p "$PAYLOAD/bin"
 
-for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-mac llm-server-gui parse_gguf.py model_index.py download_any_gguf.py LICENSE README.md CHANGELOG.md; do
-    [[ -f "$ROOT_DIR/$f" ]] || continue
-    install -m 0644 "$ROOT_DIR/$f" "$PAYLOAD/$f"
+for f in LICENSE README.md CHANGELOG.md; do
+    [[ -f "$ROOT_DIR/$f" ]] && install -m 0644 "$ROOT_DIR/$f" "$PAYLOAD/$f"
 done
-if [[ -f "$ROOT_DIR/llm-server" ]]; then
-    install -m 0755 "$ROOT_DIR/llm-server" "$PAYLOAD/llm-server-bash"
-fi
-chmod 0755 "$PAYLOAD/llm-server" "$PAYLOAD/llm-server-mac" "$PAYLOAD/llm-server-gui" \
-    "$PAYLOAD/setup.sh" "$PAYLOAD/setup-linux.sh" "$PAYLOAD/setup-mac.sh" \
-    "$PAYLOAD/parse_gguf.py" "$PAYLOAD/model_index.py" "$PAYLOAD/download_any_gguf.py" 2>/dev/null || true
+for f in setup.sh setup-linux.sh setup-mac.sh; do
+    [[ -f "$ROOT_DIR/$f" ]] && install -m 0755 "$ROOT_DIR/$f" "$PAYLOAD/$f"
+done
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
+
 if [[ -x "$ROOT_DIR/go/llm-server" ]]; then
     install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/bin/llm-server-go"
+    install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/bin/llm-server"
     install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/llm-server"
 fi
+if [[ -f "$ROOT_DIR/legacy/bash/llm-server" ]]; then
+    install -m 0755 "$ROOT_DIR/legacy/bash/llm-server" "$PAYLOAD/llm-server-bash"
+fi
+
+for spec in \
+    "tools/gguf/parse_gguf.py:parse_gguf.py" \
+    "tools/models/model_index.py:model_index.py" \
+    "tools/download/download_any_gguf.py:download_any_gguf.py"; do
+    src="${spec%%:*}"
+    dst="${spec##*:}"
+    [[ -f "$ROOT_DIR/$src" ]] && install -m 0755 "$ROOT_DIR/$src" "$PAYLOAD/bin/$dst"
+done
+
+cat >"$PAYLOAD/bin/llm-server-gui" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+exec "$DIR/llm-server" gui "$@"
+EOF
+chmod 0755 "$PAYLOAD/bin/llm-server-gui"
 
 BIN_DIR="$(cd "$(dirname "$SERVER_BIN")" && pwd)"
 while IFS= read -r lib; do

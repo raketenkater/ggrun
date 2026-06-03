@@ -48,7 +48,7 @@ cat >"$CACHE_DIR/tune_Test-A3B-Q4_K_M.gguf_hw12345678_llama.json" <<'JSON'
 JSON
 
 echo "Test: model index scan"
-python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan >/tmp/llm-server-model-index.json
+python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan >/tmp/llm-server-model-index.json
 test -f "$MODEL_DIR/.llm-server/models.json"
 
 python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
@@ -68,7 +68,7 @@ assert m["tune_configs"][0]["gen_tps"] == 12.5, m
 PY
 
 echo "Test: model index download metadata"
-python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
     update-download --repo test/repo-GGUF --quant Q4_K_M --file Test-A3B-Q4_K_M.gguf >/tmp/llm-server-model-index-update.json
 
 python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
@@ -80,7 +80,7 @@ assert m["download"]["quant"] == "Q4_K_M", m
 PY
 
 echo "Test: model index draft suggestions"
-drafts=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+drafts=$(python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
     suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf")
 [[ "$drafts" == safe* ]]
 [[ "$drafts" == *"Test-Draft-Q8_0.gguf"* ]]
@@ -89,12 +89,12 @@ drafts=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$C
 [[ "$drafts" == *"Test-DFlash-Draft-Q4_K_M.gguf"* ]]
 [[ "$drafts" == *"requires buun-llama-cpp DFlash backend"* ]]
 
-dflash=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
+dflash=$(python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
     suggest-drafts --target "$MODEL_DIR/Test-A3B-Q4_K_M.gguf" --backend buun-llama-cpp)
 [[ "$dflash" == *$'safe\t70\t'"$MODEL_DIR/Test-DFlash-Draft-Q4_K_M.gguf"* ]]
 
 echo "Test: model index GUI rows"
-gui=$(python3 "$ROOT/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui)
+gui=$(python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan --format gui)
 [[ "$gui" == *"Test-A3B-Q4_K_M.gguf"* ]]
 [[ "$gui" != *"Test-DFlash-Draft-Q4_K_M.gguf"* ]]
 [[ "$gui" == *"vision"* ]]

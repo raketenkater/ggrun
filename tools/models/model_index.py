@@ -16,6 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+for _helper_dir in (
+    Path(__file__).resolve().parent,
+    Path(__file__).resolve().parent.parent / "gguf",
+):
+    _helper = str(_helper_dir)
+    if _helper not in sys.path:
+        sys.path.insert(0, _helper)
+
 try:
     from parse_gguf import parse as parse_gguf
 except Exception:  # pragma: no cover - exercised by shell fallback behavior

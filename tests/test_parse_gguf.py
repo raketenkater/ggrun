@@ -17,7 +17,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILDER = os.path.join(ROOT, 'tests', 'build_synthetic_gguf.py')
-PARSER = os.path.join(ROOT, 'parse_gguf.py')
+PARSER = os.path.join(ROOT, 'tools', 'gguf', 'parse_gguf.py')
 
 
 def build(out, **kwargs):
@@ -183,7 +183,7 @@ def test_unknown_ttype_falls_back_to_4bpw():
 def test_known_quant_table_has_ik_llama_ids():
     """Direct check that the parser's GGUF_TYPE_SIZE table covers the ik_llama
     custom quants we expect. Catches accidental deletion of these entries."""
-    sys.path.insert(0, ROOT)
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'gguf'))
     import parse_gguf  # noqa: E402
     sys.path.pop(0)
     required = [137, 138, 139, 140, 141]  # IQ2_K..IQ6_K

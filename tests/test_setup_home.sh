@@ -11,7 +11,7 @@ APP_HOME="$TMP/llm-server"
 
 echo "Test: setup-linux creates an isolated app home"
 LLM_APP_HOME="$APP_HOME" \
-LLM_SETUP_MODE=scripts \
+LLM_SETUP_MODE=build \
 LLM_SETUP_BACKEND=skip \
 LLM_SETUP_PY_DEPS=skip \
 LLM_SETUP_NONINTERACTIVE=1 \
@@ -66,7 +66,7 @@ echo "  ✓ installed launcher uses app-home models"
 echo "Test: setup.sh auto-detects local Linux setup"
 APP_HOME2="$TMP/auto-setup"
 LLM_APP_HOME="$APP_HOME2" \
-LLM_SETUP_MODE=scripts \
+LLM_SETUP_MODE=build \
 LLM_SETUP_BACKEND=skip \
 LLM_SETUP_PY_DEPS=skip \
 LLM_SETUP_NONINTERACTIVE=1 \

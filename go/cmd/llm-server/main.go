@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -650,6 +651,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
+	warnModelCompatibility(model)
 
 	be := selectBackend(caps, req)
 	if be == nil {
@@ -775,6 +777,7 @@ func cmdGUI() {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
+	warnModelCompatibility(model)
 
 	opts := placement.Options{
 		ContextSize: req.CtxSize,
@@ -1205,6 +1208,7 @@ func cmdDryRun(args []string) {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
+	warnModelCompatibility(model)
 
 	be := selectBackend(caps, req)
 	backendTag := "llama"
@@ -1357,6 +1361,7 @@ func cmdTune(args []string) {
 		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
 		os.Exit(1)
 	}
+	warnModelCompatibility(model)
 
 	be := selectBackend(caps, req)
 	if be == nil {
@@ -1373,6 +1378,10 @@ func cmdTune(args []string) {
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
+	if err := guardTunePort(req.Port); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
 	timeoutSec := 240.0 + totalSizeMB/1700.0
@@ -1419,6 +1428,16 @@ func cmdTune(args []string) {
 	}
 
 	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
+}
+
+func guardTunePort(port int) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return nil
+	}
+	_ = conn.Close()
+	return fmt.Errorf("refusing to kill process on port %d; choose a free --port for AI Tune", port)
 }
 
 func cmdBenchmark(args []string) {
@@ -1575,6 +1594,26 @@ func cmdUpdate() {
 	} else {
 		fmt.Printf("\nYou are on the latest version: %s\n", res.Current)
 	}
+}
+
+func warnModelCompatibility(model *placement.ModelProfile) {
+	if isDeepSeekV4FlashMistag(model) {
+		fmt.Fprintln(os.Stderr, "[warning] DeepSeek V4 Flash mistagged as deepseek2. Stock llama.cpp builds may reject this GGUF; use antirez/llama.cpp-deepseek-v4-flash or a build with PR #22378 support.")
+	}
+}
+
+func isDeepSeekV4FlashMistag(model *placement.ModelProfile) bool {
+	if model == nil {
+		return false
+	}
+	name := strings.ToLower(model.Name + " " + model.Basename + " " + filepath.Base(model.Path))
+	if !strings.Contains(name, "deepseek") || !strings.Contains(name, "v4") || !strings.Contains(name, "flash") {
+		return false
+	}
+	if strings.ToLower(model.ModelArch) != "deepseek2" {
+		return false
+	}
+	return model.KeyLengthMLA > 0 && model.RopeDim > 0 && model.KeyLengthMLA <= model.RopeDim
 }
 
 // infoToProfile converts gguf.Info to placement.ModelProfile.

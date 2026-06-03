@@ -30,16 +30,25 @@ func New(modelDir, cacheDir, appHome string) *Downloader {
 func findScript(appHome string) string {
 	candidates := []string{
 		"download_any_gguf.py",
+		filepath.Join("tools", "download", "download_any_gguf.py"),
 		filepath.Join("..", "download_any_gguf.py"),
+		filepath.Join("..", "tools", "download", "download_any_gguf.py"),
 		filepath.Join("..", "..", "download_any_gguf.py"),
+		filepath.Join("..", "..", "tools", "download", "download_any_gguf.py"),
 	}
 	// Check LLM_SERVER_HOME env var (repo root)
 	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
-		candidates = append(candidates, filepath.Join(home, "download_any_gguf.py"))
+		candidates = append(candidates,
+			filepath.Join(home, "download_any_gguf.py"),
+			filepath.Join(home, "tools", "download", "download_any_gguf.py"),
+		)
 	}
 	// Check configured app home
 	if appHome != "" {
-		candidates = append(candidates, filepath.Join(appHome, "download_any_gguf.py"))
+		candidates = append(candidates,
+			filepath.Join(appHome, "bin", "download_any_gguf.py"),
+			filepath.Join(appHome, "download_any_gguf.py"),
+		)
 	}
 	// Try relative to binary (installed alongside llm-server)
 	if exe, err := os.Executable(); err == nil {
@@ -47,7 +56,9 @@ func findScript(appHome string) string {
 		candidates = append(candidates,
 			filepath.Join(exeDir, "download_any_gguf.py"),
 			filepath.Join(exeDir, "..", "download_any_gguf.py"),
+			filepath.Join(exeDir, "..", "tools", "download", "download_any_gguf.py"),
 			filepath.Join(exeDir, "..", "..", "download_any_gguf.py"),
+			filepath.Join(exeDir, "..", "..", "tools", "download", "download_any_gguf.py"),
 			filepath.Join(exeDir, "..", "..", "..", "download_any_gguf.py"),
 		)
 	}
@@ -62,7 +73,7 @@ func findScript(appHome string) string {
 // Run executes the downloader for the given repo.
 func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
 	if d.ScriptPath == "" {
-		return fmt.Errorf("download_any_gguf.py not found — set LLM_SERVER_HOME or APP_HOME to the llm-server repo root")
+		return fmt.Errorf("download_any_gguf.py not found; set LLM_SERVER_HOME to the repo root or install the bundled tools")
 	}
 	if _, err := os.Stat(d.ScriptPath); os.IsNotExist(err) {
 		return fmt.Errorf("downloader script not found: %s", d.ScriptPath)

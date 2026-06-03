@@ -7,9 +7,9 @@
 # Usage (local):
 #   ./install.sh                  # from a cloned repo
 #
-# Installs the Go llm-server launcher, keeps the legacy Bash launcher as
-# llm-server-bash when present, and optionally installs or builds a llama.cpp
-# backend (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU).
+# Installs the Go llm-server launcher and optionally installs or builds a
+# llama.cpp backend (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU).
+# A small legacy Bash shim is installed as llm-server-bash only for migration.
 #
 # Flags (env vars):
 #   LLM_INSTALL_BACKEND=auto|cuda|vulkan|metal|cpu|skip   default: auto
@@ -74,10 +74,10 @@ say "═══ llm-server installer ═══"
 
 # ── Stage 1: use local repo if present; clone only if source fallback needs it ──
 SRC_DIR=""
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/llm-server" && -f "$SCRIPT_DIR/llm-server-gui" ]]; then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/go/go.mod" && -f "$SCRIPT_DIR/scripts/setup-home.sh" ]]; then
     SRC_DIR="$SCRIPT_DIR"
     ok "Using local repo at $SRC_DIR"
-elif [[ -f "./llm-server" && -f "./llm-server-gui" ]]; then
+elif [[ -f "./go/go.mod" && -f "./scripts/setup-home.sh" ]]; then
     SRC_DIR="$(pwd)"
     ok "Using local repo at $SRC_DIR"
 fi
@@ -188,6 +188,35 @@ link_backend_binary() {
     ok "Linked llama-server backend into $INSTALL_DIR"
 }
 
+install_source_file() {
+    local rel="$1" name="${2:-$(basename "$1")}" mode="${3:-0755}"
+    [[ -n "$SRC_DIR" && -f "$SRC_DIR/$rel" ]] || return 1
+    install -m "$mode" "$SRC_DIR/$rel" "$INSTALL_DIR/$name"
+    ok "Installed $name"
+}
+
+install_legacy_bash_shim() {
+    [[ -n "$SRC_DIR" && -f "$SRC_DIR/legacy/bash/llm-server" ]] || return 0
+    install -m 0755 "$SRC_DIR/legacy/bash/llm-server" "$INSTALL_DIR/llm-server-bash"
+    ok "Installed llm-server-bash migration shim"
+    if [[ "$MAIN_IMPL" == "bash" ]]; then
+        install -m 0755 "$SRC_DIR/legacy/bash/llm-server" "$INSTALL_DIR/llm-server"
+        ok "Installed legacy migration shim as primary command"
+    fi
+}
+
+install_gui_wrapper() {
+    [[ -x "$INSTALL_DIR/llm-server" ]] || return 0
+    cat >"$INSTALL_DIR/llm-server-gui" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+exec "$DIR/llm-server" gui "$@"
+EOF
+    chmod 0755 "$INSTALL_DIR/llm-server-gui"
+    ok "Installed llm-server-gui wrapper"
+}
+
 install_release_bundle() {
     local platform asset url tmp archive payload_root found_backend=0
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
@@ -218,17 +247,13 @@ install_release_bundle() {
     payload_root="$(find "$tmp/payload" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     [[ -n "$payload_root" ]] || payload_root="$tmp/payload"
 
-    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-bash llm-server-mac llm-server-gui llm-server-go parse_gguf.py model_index.py download_any_gguf.py; do
+    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-bash llm-server-go llm-server-gui parse_gguf.py model_index.py download_any_gguf.py; do
         if install_payload_file "$payload_root/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         elif install_payload_file "$payload_root/bin/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         fi
     done
-    if [[ "$OS" == "Darwin" && -f "$INSTALL_DIR/llm-server-mac" ]]; then
-        ln -sf "$INSTALL_DIR/llm-server-mac" "$INSTALL_DIR/llm-server"
-        ok "Symlinked llm-server → llm-server-mac"
-    fi
     if [[ -x "$INSTALL_DIR/llm-server-go" ]]; then
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
     fi
@@ -275,27 +300,19 @@ say "── Installing scripts to $INSTALL_DIR ──"
 
 if (( RELEASE_INSTALLED )); then
     ok "Scripts installed from release bundle"
+    install_gui_wrapper
 else
     ensure_source_repo
-    if [[ "$OS" == "Darwin" ]]; then
-        FILES=("setup.sh" "setup-mac.sh" "llm-server-mac" "llm-server-gui" "parse_gguf.py" "model_index.py" "download_any_gguf.py")
-    else
-        FILES=("setup.sh" "setup-linux.sh" "llm-server" "llm-server-gui" "parse_gguf.py" "model_index.py" "download_any_gguf.py")
-    fi
+    FILES=("setup.sh" "setup-linux.sh" "setup-mac.sh")
     for f in "${FILES[@]}"; do
-        if [[ -f "$SRC_DIR/$f" ]]; then
-            install -m 0755 "$SRC_DIR/$f" "$INSTALL_DIR/$f"
-            ok "Installed $f"
-        else
-            warn "$f not found in source; skipping"
-        fi
+        install_source_file "$f" "$f" 0755 || warn "$f not found in source; skipping"
     done
-    if [[ "$OS" == "Darwin" && -f "$INSTALL_DIR/llm-server-mac" ]]; then
-        ln -sf "$INSTALL_DIR/llm-server-mac" "$INSTALL_DIR/llm-server"
-        ok "Symlinked llm-server → llm-server-mac"
-    fi
-    if [[ -f "$SRC_DIR/download_any_gguf.py" && ! -f "$MODEL_DIR/download_any_gguf.py" ]]; then
-        install -m 0755 "$SRC_DIR/download_any_gguf.py" "$MODEL_DIR/download_any_gguf.py"
+    install_source_file "tools/gguf/parse_gguf.py" "parse_gguf.py" 0755 || warn "parse_gguf.py not found in source; skipping"
+    install_source_file "tools/models/model_index.py" "model_index.py" 0755 || warn "model_index.py not found in source; skipping"
+    install_source_file "tools/download/download_any_gguf.py" "download_any_gguf.py" 0755 || warn "download_any_gguf.py not found in source; skipping"
+    install_legacy_bash_shim
+    if [[ -f "$SRC_DIR/tools/download/download_any_gguf.py" && ! -f "$MODEL_DIR/download_any_gguf.py" ]]; then
+        install -m 0755 "$SRC_DIR/tools/download/download_any_gguf.py" "$MODEL_DIR/download_any_gguf.py"
         ok "Installed downloader to $MODEL_DIR"
     fi
     if [[ -f "$SRC_DIR/go/go.mod" && "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]]; then
@@ -308,17 +325,18 @@ else
             ok "Installed existing llm-server-go"
             install_go_as_main "$INSTALL_DIR/llm-server-go" || true
         else
-            warn "Could not build Go llm-server; install Go or use a release bundle. Falling back to Bash launcher."
+            warn "Could not build Go llm-server; install Go or use a release bundle, then rerun the installer."
         fi
     elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
         install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
         ok "Installed llm-server-go"
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
     fi
-    if [[ -f "$SRC_DIR/model_index.py" && ! -f "$MODEL_DIR/model_index.py" ]]; then
-        install -m 0755 "$SRC_DIR/model_index.py" "$MODEL_DIR/model_index.py"
+    if [[ -f "$SRC_DIR/tools/models/model_index.py" && ! -f "$MODEL_DIR/model_index.py" ]]; then
+        install -m 0755 "$SRC_DIR/tools/models/model_index.py" "$MODEL_DIR/model_index.py"
         ok "Installed model indexer to $MODEL_DIR"
     fi
+    install_gui_wrapper
 fi
 
 # ── Stage 4: python deps (for downloader) ──────────────────────────────────

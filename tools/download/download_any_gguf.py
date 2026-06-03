@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Universal GGUF Model Downloader
-Download any GGUF model from HuggingFace with flexible options
+GGUF model downloader
+Download GGUF model files from Hugging Face repositories.
 """
 
 import os
@@ -9,11 +9,6 @@ import sys
 import subprocess
 from pathlib import Path
 from huggingface_hub import hf_hub_download, list_repo_files, HfApi
-
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
-
 
 def clear_screen():
     """Clear terminal screen"""
@@ -23,13 +18,13 @@ def clear_screen():
 def print_header():
     """Print application header"""
     print("\n" + "=" * 70)
-    print(" " * 25 + "🦥 Universal GGUF Downloader")
+    print(" " * 25 + "GGUF Downloader")
     print("=" * 70 + "\n")
 
 
 def get_hf_repo():
-    """Get HuggingFace repository from user"""
-    print("\n📦 Enter HuggingFace model repository")
+    """Get Hugging Face repository from user"""
+    print("\nEnter Hugging Face model repository")
     print("   Format: username/model-name")
     print("   Examples:")
     print("     - unsloth/Qwen3.5-35B-A3B-GGUF")
@@ -41,7 +36,7 @@ def get_hf_repo():
         repo = input("Repository: ").strip()
         if repo:
             return repo
-        print("❌ Repository cannot be empty.\n")
+        print("Repository cannot be empty.\n")
 
 
 def list_available_quantizations(repo):
@@ -122,7 +117,7 @@ def get_download_directory(default_path=None):
     else:
         default_dir = Path.home() / "ai_models"
 
-    print(f"\n📁 Download directory: {default_dir}")
+    print(f"\nDownload directory: {default_dir}")
 
     if default_path:
         # If passed from llm-server, just use it without asking
@@ -137,7 +132,7 @@ def get_download_directory(default_path=None):
             if custom_dir:
                 return Path(custom_dir)
         else:
-            print("❌ Invalid choice.\n")
+            print("Invalid choice.\n")
 
 
 def show_progress(progress_bytes, total_bytes, filename):
@@ -147,14 +142,14 @@ def show_progress(progress_bytes, total_bytes, filename):
     percent = (progress_bytes / total_bytes) * 100
     bar_length = 40
     filled = int(bar_length * progress_bytes / total_bytes)
-    bar = "█" * filled + "░" * (bar_length - filled)
+    bar = "#" * filled + "." * (bar_length - filled)
     speed_mb = progress_bytes / (1024 * 1024)
     print(f"\r   [{bar}] {percent:5.1f}% | {speed_mb:8.2f} MB", end="", flush=True)
 
 
 def download_files(repo, files_to_download, output_dir):
     """Download model files with progress tracking"""
-    print(f"\n🚀 Downloading from: {repo}")
+    print(f"\nDownloading from: {repo}")
     print(f"   Files to download: {len(files_to_download)}")
     print(f"   Output: {output_dir}\n")
 
@@ -162,7 +157,7 @@ def download_files(repo, files_to_download, output_dir):
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        print("⬇️  Downloading files...")
+        print("Downloading files...")
         downloaded = []
         failed = []
 
@@ -182,14 +177,14 @@ def download_files(repo, files_to_download, output_dir):
                 )
 
                 size_gb = Path(filepath).stat().st_size / (1024**3)
-                print(f"   ✓ {filename} ({size_gb:.2f} GB)")
+                print(f"   ok: {filename} ({size_gb:.2f} GB)")
                 downloaded.append((filename, filepath))
             except Exception as e:
-                print(f"\n   ✗ Failed to download {filename}: {e}")
+                print(f"\n   failed: {filename}: {e}")
                 failed.append(filename)
 
         print()  # New line after progress bars
-        print(f"\n✅ Download complete!")
+        print("\nDownload complete.")
         print(f"   Successful: {len(downloaded)} file(s)")
         if failed:
             print(f"   Failed: {len(failed)} file(s)")
@@ -197,14 +192,16 @@ def download_files(repo, files_to_download, output_dir):
         return downloaded, failed
 
     except Exception as e:
-        print(f"\n❌ Error during download: {e}")
+        print(f"\nError during download: {e}")
         return [], []
 
 
 def update_model_index(repo, selected_quantization, output_dir, downloaded, cache_dir=None):
     """Record downloaded models in the llm-server model index when available."""
+    here = Path(__file__).resolve()
     candidates = [
-        Path(__file__).resolve().with_name("model_index.py"),
+        here.with_name("model_index.py"),
+        here.parent.parent / "models" / "model_index.py",
         output_dir / "model_index.py",
     ]
     indexer = next((p for p in candidates if p.is_file()), None)
@@ -227,9 +224,9 @@ def update_model_index(repo, selected_quantization, output_dir, downloaded, cach
         cmd.extend(["--file", Path(filepath).name])
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"   ✓ Updated model index: {output_dir / '.llm-server' / 'models.json'}")
+        print(f"   Updated model index: {output_dir / '.llm-server' / 'models.json'}")
     except Exception:
-        print("   ⚠️  Model index update failed; models are still downloaded.")
+        print("   Model index update failed; models are still downloaded.")
 
 
 def list_files_in_directory(directory, extension=".gguf"):
@@ -240,33 +237,33 @@ def list_files_in_directory(directory, extension=".gguf"):
 def print_usage_instructions(repo, output_dir):
     """Print how to use the downloaded model"""
     print("\n" + "=" * 70)
-    print("📖 How to use this model:")
+    print("How to use this model:")
     print("=" * 70)
 
     # Get the model files
     gguf_files = list_files_in_directory(output_dir, ".gguf")
 
     if not gguf_files:
-        print("\n⚠️  No GGUF files found in download directory!")
+        print("\nNo GGUF files found in download directory.")
         return
 
-    print(f"\n📁 Model directory: {output_dir}")
-    print("\n📦 Available model files:")
+    print(f"\nModel directory: {output_dir}")
+    print("\nAvailable model files:")
     for f in gguf_files:
         size_gb = f.stat().st_size / (1024**3)
-        print(f"   • {f.name} ({size_gb:.2f} GB)")
+        print(f"   - {f.name} ({size_gb:.2f} GB)")
 
     # Check for mmproj files
     mmproj_files = [f for f in output_dir.glob("mmproj*")]
 
     if mmproj_files:
-        print("\n📦 Available mmproj (vision) files:")
+        print("\nAvailable mmproj (vision) files:")
         for f in mmproj_files:
             size_mb = f.stat().st_size / (1024**2)
-            print(f"   • {f.name} ({size_mb:.2f} MB)")
+            print(f"   - {f.name} ({size_mb:.2f} MB)")
 
     print("\n" + "-" * 70)
-    print("🔧 Using llama.cpp (server mode):")
+    print("Using llama.cpp (server mode):")
     print("-" * 70)
     if mmproj_files:
         print("""
@@ -287,7 +284,7 @@ def print_usage_instructions(repo, output_dir):
         """)
 
     print("\n" + "-" * 70)
-    print("🐍 Using Python (OpenAI compatible):")
+    print("Using Python (OpenAI compatible):")
     print("-" * 70)
     print("""
     from openai import OpenAI
@@ -306,7 +303,7 @@ def print_usage_instructions(repo, output_dir):
     """)
 
     print("\n" + "-" * 70)
-    print("📋 Using llama.cpp (CLI):")
+    print("Using llama.cpp (CLI):")
     print("-" * 70)
     if mmproj_files:
         print("""
@@ -334,7 +331,7 @@ def print_usage_instructions(repo, output_dir):
 def print_quick_examples():
     """Print example repositories"""
     print("\n" + "=" * 70)
-    print("📚 Example repositories to try:")
+    print("Example repositories to try:")
     print("=" * 70)
 
     examples = [
@@ -348,7 +345,7 @@ def print_quick_examples():
     ]
 
     for name, repo in examples:
-        print(f"  • {name}: {repo}")
+        print(f"  - {name}: {repo}")
 
     print()
 
@@ -357,8 +354,8 @@ import argparse
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Universal GGUF Downloader")
-    parser.add_argument("--repo", type=str, help="HuggingFace repository")
+    parser = argparse.ArgumentParser(description="GGUF model downloader")
+    parser.add_argument("--repo", type=str, help="Hugging Face repository")
     parser.add_argument("--dir", type=str, help="Download directory")
     parser.add_argument("--vram", type=int, default=0, help="Available VRAM in MB")
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
@@ -368,7 +365,7 @@ def get_args():
 
 def _detect_moe_active_params(repo):
     """Look for an A##B suffix in the repo name (Qwen3.6-35B-A3B, Kimi-K2-A32B,
-    DeepSeek-V3-A37B…) — that's the active-parameter count and a strong MoE
+    DeepSeek-V3-A37B...) - that's the active-parameter count and a strong MoE
     signal. Returns active-params-in-billions or 0 for dense models."""
     import re
     m = re.search(r'A(\d+(?:\.\d+)?)B(?:[-_]|$)', repo or "", re.IGNORECASE)
@@ -411,10 +408,10 @@ def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
     is_moe = active_b > 0
 
     print(
-        f"\n🖥️  Hardware detected: {vram_mb / 1024:.1f}GB VRAM | {ram_mb / 1024:.1f}GB System RAM"
+        f"\nHardware detected: {vram_mb / 1024:.1f}GB VRAM | {ram_mb / 1024:.1f}GB system RAM"
     )
     if is_moe:
-        print(f"   Detected MoE model (~{active_b:g}B active params) — experts can spill to RAM via offload.")
+        print(f"   Detected MoE model (~{active_b:g}B active params); experts can spill to RAM via offload.")
     print(f"   Total memory budget: {total_mb / 1024:.1f}GB (model + KV cache + compute buffers)")
 
     best = None
@@ -428,21 +425,21 @@ def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
             elif is_moe:
                 reason = f"Fits in VRAM+RAM via expert offload ({size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead, {total_mb / 1024:.1f}GB available)"
             else:
-                reason = f"Fits in VRAM+RAM (dense model — slower than full VRAM; {size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead)"
+                reason = f"Fits in VRAM+RAM (dense model; slower than full VRAM; {size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead)"
             best = (quant_name, reason)
             break
 
     if not best:
         quant_name, size_bytes = quant_list[0]
         size_mb = size_bytes / (1024 * 1024)
-        best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB) — may not fit, consider a smaller model")
+        best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB); may not fit, consider a smaller model")
 
     return best
 
 
 def select_quantization(repo, vram_mb=0, ram_mb=0):
     """Let user select quantization"""
-    print("\n🔍 Scanning repository for available quantizations...")
+    print("\nScanning repository for available quantizations...")
 
     try:
         files = list_repo_files(repo)
@@ -450,7 +447,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
         has_ggufs = any(f.endswith(".gguf") for f in files)
 
         if has_safetensors and not has_ggufs:
-            print(f"\n⚠️  NOTICE: This repository contains Safetensors, not GGUF files.")
+            print("\nNotice: this repository contains Safetensors, not GGUF files.")
             print(f"   Inference via llama.cpp/ik_llama requires GGUF format.")
             print(f"   Search suggestion: {repo}-GGUF")
             return None
@@ -468,16 +465,16 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
     if vram_mb > 0:
         rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb, repo)
         if rec_q:
-            print(f"\n🌟 RECOMMENDED: {rec_q}")
+            print(f"\nRecommended: {rec_q}")
             print(f"   {rec_reason}")
 
     print(f"\nAvailable quantizations:")
     for i, (q, size_bytes) in enumerate(quant_list, 1):
         size_gb = size_bytes / (1024**3)
-        star = " ★" if q == rec_q else ""
+        star = " recommended" if q == rec_q else ""
         print(f"  {i}) {q:15s} {size_gb:6.1f} GB{star}")
 
-    print("\nPress Enter to use the ★ recommendation (if available) or download all")
+    print("\nPress Enter to use the recommendation when available, or download all")
     print()
 
     while True:
@@ -493,7 +490,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
         except ValueError:
             pass
 
-        print("❌ Invalid selection. Please try again.\n")
+        print("Invalid selection. Please try again.\n")
 
 
 def main():
@@ -510,14 +507,14 @@ def main():
         files_to_download = get_model_files(repo, selected_quantization)
 
         if not files_to_download:
-            print("\n❌ No files found to download!")
+            print("\nNo files found to download.")
             return
 
-        print(f"\n📦 Will download {len(files_to_download)} file(s):")
+        print(f"\nWill download {len(files_to_download)} file(s):")
         for f in files_to_download[:5]:  # Show first 5
-            print(f"   • {f}")
+            print(f"   - {f}")
         if len(files_to_download) > 5:
-            print(f"   • ... and {len(files_to_download) - 5} more")
+            print(f"   - ... and {len(files_to_download) - 5} more")
 
         # Get download directory
         output_dir = get_download_directory(args.dir)
@@ -525,7 +522,7 @@ def main():
 
         # Confirm
         print("\n" + "=" * 70)
-        print("📋 Summary:")
+        print("Summary:")
         print("=" * 70)
         print(f"Repository: {repo}")
         if selected_quantization:
@@ -537,7 +534,7 @@ def main():
 
         confirm = input("\nStart download? (y/n): ").strip().lower()
         if confirm != "y":
-            print("❌ Download cancelled.")
+            print("Download cancelled.")
             return
 
         # Download
@@ -546,15 +543,15 @@ def main():
         if downloaded:
             update_model_index(repo, selected_quantization, output_dir, downloaded, args.cache_dir)
             print_usage_instructions(repo, output_dir)
-            print("\n🎉 Download complete!")
+            print("\nDownload complete.")
         else:
-            print("\n⚠️  No files were downloaded successfully.")
+            print("\nNo files were downloaded successfully.")
 
     except KeyboardInterrupt:
-        print("\n\n⚠️  Download interrupted by user.")
+        print("\n\nDownload interrupted by user.")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\nUnexpected error: {e}")
         import traceback
 
         traceback.print_exc()

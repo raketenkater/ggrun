@@ -5,3 +5,24 @@ __pycache__/
 unsloth_compiled_cache/
 ROADMAP.md
 gpt_fixes.md
+
+# Local model and benchmark artifacts
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.bin
+*.tmp
+*.prof
+*.trace
+benchmarks/v3-*/
+benchmarks/tmp-*/
+dist/
+
+# Local binaries
+/go/llm-server
+/llm-server
+/llm-server-go
+/llm-server-bash
+/llama-server
