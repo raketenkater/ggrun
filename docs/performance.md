@@ -23,7 +23,7 @@ Throughput serving benchmark:
 scripts/bench-v3-throughput.sh model.gguf   --server-bin /path/to/llama-server   --parallel 4   --concurrency 8   --requests 24
 ```
 
-Generated benchmark directories under `benchmarks/` are ignored. Commit only
+Generated benchmark directories under `.benchmarks/` are ignored. Commit only
 curated summaries that include the exact command and hardware description.
 
 ## Required Fields
@@ -54,7 +54,7 @@ and 512 generated tokens per request:
 Artifact directory from that run:
 
 ```text
-benchmarks/spec-live-warm-20260603T094706Z/
+.benchmarks/spec-live-warm-20260603T094706Z/
 ```
 
 The result is important for product policy: speculative decoding must be

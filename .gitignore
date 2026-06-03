@@ -16,8 +16,7 @@ gpt_fixes.md
 *.tmp
 *.prof
 *.trace
-benchmarks/v3-*/
-benchmarks/tmp-*/
+.benchmarks/
 dist/
 
 # Local binaries

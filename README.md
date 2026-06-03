@@ -208,7 +208,7 @@ Optional historical comparison against an installed Bash v2 launcher:
 scripts/bench-v3-comparison.sh model.gguf   --server-bin /path/to/llama-server   --bash-bin ~/.local/bin/llm-server-bash
 ```
 
-The script writes JSON logs and a Markdown summary under `benchmarks/`. Generated
+The script writes JSON logs and a Markdown summary under `.benchmarks/`. Generated
 benchmark runs are ignored by Git; commit only curated summaries.
 
 ## Backends

@@ -11,7 +11,7 @@ shift || true
 GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
 BASH_BIN="${LLM_SERVER_BASH_BIN:-}"
 SERVER_BIN="${LLAMA_SERVER:-}"
-OUT_DIR="${BENCH_OUT_DIR:-$ROOT/benchmarks/v3-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUT_DIR="${BENCH_OUT_DIR:-$ROOT/.benchmarks/v3-$(date -u +%Y%m%dT%H%M%SZ)}"
 PORT_BASE=18081
 CTX_SIZE="fit"
 BACKEND="auto"
@@ -29,7 +29,7 @@ Options:
   --go-bin <path>        Go llm-server binary (default: ./go/llm-server)
   --bash-bin <path>      Optional legacy v2 Bash llm-server for before/after numbers
   --server-bin <path>    llama-server binary for raw baseline and wrappers
-  --out-dir <dir>        Output directory (default: benchmarks/v3-<utc>)
+  --out-dir <dir>        Output directory (default: .benchmarks/v3-<utc>)
   --port-base <n>        First port to use (default: 18081)
   --ctx-size <value>     fit|max|number passed to wrappers (default: fit)
   --backend <name>       auto|llama|ik_llama|vulkan passed to wrappers

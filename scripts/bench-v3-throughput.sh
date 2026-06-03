@@ -9,7 +9,7 @@ shift || true
 
 GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
 SERVER_BIN="${LLAMA_SERVER:-}"
-OUT_DIR="${BENCH_OUT_DIR:-$ROOT/benchmarks/throughput-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUT_DIR="${BENCH_OUT_DIR:-$ROOT/.benchmarks/throughput-$(date -u +%Y%m%dT%H%M%SZ)}"
 PORT=18200
 CTX_SIZE=32768
 CTX_PER_SLOT=""
@@ -28,7 +28,7 @@ Usage: scripts/bench-v3-throughput.sh <model.gguf> [options]
 Options:
   --go-bin <path>        Go llm-server binary (default: ./go/llm-server)
   --server-bin <path>    llama-server binary used by Go launcher
-  --out-dir <dir>        Output directory (default: benchmarks/throughput-<utc>)
+  --out-dir <dir>        Output directory (default: .benchmarks/throughput-<utc>)
   --port <n>             Port to use (default: 18200)
   --ctx-size <value>     Total context passed to Go launcher (default: 32768)
   --ctx-per-slot <n>     Keep per-slot context fixed; total ctx = n * parallel
