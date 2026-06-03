@@ -684,29 +684,7 @@ func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabili
 		})
 	}
 
-	if currentSpec == "" && !isMoEOffload {
-		if isIK {
-			add("spec-ik-ngram",
-				map[string]interface{}{"--spec-type": "ngram - map - k", "--spec-ngram-size-n": "12", "--spec-ngram-size-m": "48", "--spec-ngram-min-hits": "1", "--spec-autotune": true},
-				"test IK ngram self-speculation with backend autotuning")
-		} else {
-			if tuneBackendHelpSupports(backendHelp, "ngram-mod") {
-				add("spec-ngram-mod",
-					map[string]interface{}{"--spec-type": "ngram-mod", "--spec-ngram-mod-n-match": "24", "--spec-ngram-mod-n-min": "48", "--spec-ngram-mod-n-max": "64", "--spec-autotune": true},
-					"test newer llama.cpp ngram-mod self-speculation")
-			}
-			if tuneBackendHelpSupports(backendHelp, "ngram-map-k4v") {
-				add("spec-ngram-k4v",
-					map[string]interface{}{"--spec-type": "ngram-map-k4v", "--spec-ngram-map-k4v-size-n": "8", "--spec-ngram-map-k4v-size-m": "8", "--spec-ngram-map-k4v-min-hits": "2", "--spec-draft-n-max": "64", "--spec-autotune": true},
-					"test newer llama.cpp ngram k4v self-speculation")
-			}
-			if backendHelp == "" || tuneBackendHelpSupports(backendHelp, "ngram-map-k") {
-				add("spec-ngram-map-k",
-					map[string]interface{}{"--spec-type": "ngram-map-k", "--spec-ngram-map-k-size-n": "12", "--spec-ngram-map-k-size-m": "48", "--spec-ngram-map-k-min-hits": "1", "--spec-autotune": true},
-					"test broadly compatible ngram map-k self-speculation")
-			}
-		}
-	} else if currentSpec == "ngram-mod" {
+	if currentSpec == "ngram-mod" {
 		add("spec-ngram-mod-lower-depth",
 			map[string]interface{}{"--spec-ngram-mod-n-min": "16", "--spec-ngram-mod-n-max": "48", "--spec-autotune": true},
 			"test lower ngram-mod draft depth for latency-sensitive prompts")
@@ -738,7 +716,12 @@ func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabili
 	if isMoEOffload && batch > 1024 {
 		add("smaller-moe-batch",
 			map[string]interface{}{"-b": fmt.Sprintf("%d", maxInt(batch/2, 1024))},
-			"test lower batch pressure for CPU/GPU expert handoff")
+			"test lower batch pressure for CPU/GPU expert handoff without changing context")
+		if batch > 1536 {
+			add("moe-batch-1536",
+				map[string]interface{}{"-b": "1536"},
+				"test a middle MoE batch size to reduce expert handoff pressure while preserving prefill")
+		}
 	}
 	if !isMoEOffload && ubatch > 0 && ubatch < 2048 {
 		limit := 2048
@@ -747,6 +730,11 @@ func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabili
 				map[string]interface{}{"-ub": fmt.Sprintf("%d", minInt(ubatch*2, limit))},
 				"test a larger microbatch for GPU occupancy")
 		}
+	}
+	if isMoEOffload && ubatch > 384 {
+		add("moe-ubatch-384",
+			map[string]interface{}{"-ub": "384"},
+			"test a moderate MoE microbatch to smooth CPU/GPU expert traffic")
 	}
 	if ubatch > 256 {
 		add("smaller-ubatch",
@@ -764,6 +752,24 @@ func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabili
 			add("threads-batch-logical",
 				map[string]interface{}{"--threads-batch": fmt.Sprintf("%d", caps.CPU.Threads)},
 				"test logical CPU threads for prompt processing")
+		}
+	}
+
+	if isMoEOffload {
+		if !flagPresent(base, "--defer-experts") && tuneMoEFlagSupported(base, backendHelp, isIK, "--defer-experts") {
+			add("moe-defer-experts",
+				map[string]interface{}{"--defer-experts": true},
+				"test deferred expert residency to reduce startup and host memory pressure")
+		}
+		if flagPresent(base, "--no-mmap") {
+			add("moe-mmap-pagecache",
+				map[string]interface{}{"--no-mmap": false},
+				"test mmap page-cache expert loading for large MoE stability")
+		}
+		if !flagPresent(base, "--cont-batching") && tuneMoEFlagSupported(base, backendHelp, isIK, "--cont-batching") {
+			add("moe-cont-batching",
+				map[string]interface{}{"--cont-batching": true},
+				"test continuous batching for MoE serving throughput without changing context")
 		}
 	}
 
@@ -813,21 +819,27 @@ func guardRiskyMoEOverrides(overrides map[string]interface{}, baseFlags []string
 	currentV := base["--cache-type-v"]
 	for key, val := range overrides {
 		canon := canonicalFlagName(key)
-		switch canon {
-		case "-ub":
+		switch {
+		case canon == "--parallel" || canon == "--ctx-size":
+			continue
+		case canon == "--spec-type" || strings.HasPrefix(canon, "--spec-") || canon == "--multi-token-prediction":
+			continue
+		case canon == "--flash-attn" && strings.EqualFold(fmt.Sprint(val), "off"):
+			continue
+		case canon == "-ub":
 			if atoiFlagValue(val, currentUBatch) > currentUBatch {
 				continue
 			}
-		case "-b":
+		case canon == "-b":
 			next := atoiFlagValue(val, currentBatch)
 			if next > maxInt(currentBatch, 4096) {
 				continue
 			}
-		case "--cache-type-k":
+		case canon == "--cache-type-k":
 			if currentK != "" && fmt.Sprint(val) != currentK {
 				continue
 			}
-		case "--cache-type-v":
+		case canon == "--cache-type-v":
 			if currentV != "" && fmt.Sprint(val) != currentV {
 				continue
 			}
@@ -877,6 +889,23 @@ func suggestionKey(values map[string]interface{}) string {
 
 func isMoEOffloadFlags(flags map[string]string) bool {
 	return flags["--n-cpu-moe"] != "" || flags["-ot"] != ""
+}
+
+func flagPresent(flags map[string]string, flag string) bool {
+	_, ok := flags[canonicalFlagName(flag)]
+	return ok
+}
+
+func tuneMoEFlagSupported(base map[string]string, backendHelp string, isIK bool, flags ...string) bool {
+	if isIK {
+		return true
+	}
+	for _, flag := range flags {
+		if flagPresent(base, flag) || tuneBackendHelpSupports(backendHelp, strings.TrimLeft(flag, "-")) {
+			return true
+		}
+	}
+	return false
 }
 
 func tuneBackendHelpSupports(help, token string) bool {

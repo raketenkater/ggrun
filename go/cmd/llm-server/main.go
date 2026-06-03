@@ -35,6 +35,7 @@ const version = "v3.0.0-go"
 
 func main() {
 	if len(os.Args) < 2 {
+		update.PromptOnStartup()
 		cmdGUI()
 		return
 	}
@@ -64,10 +65,11 @@ func main() {
 	case "tune":
 		cmdTune(args[1:])
 	case "gui", "tui":
+		update.PromptOnStartup()
 		cmdGUI()
 	case "config":
 		cmdConfig(args[1:])
-	case "update":
+	case "update", "--update":
 		cmdUpdate()
 	default:
 		usage()
@@ -91,7 +93,7 @@ Commands:
   download <repo/name> Download from HuggingFace
   tune <model.gguf>    AI-tune model for best performance
   config [show|edit|path|reset]  Manage settings
-  update               Update llm-server and backends
+  update, --update     Update llm-server and backends
   gui, tui             Interactive TUI (model picker, settings, launch)
 
 Launch flags:
@@ -102,13 +104,13 @@ Launch flags:
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
   -vision              Enable vision (auto-detect mmproj)
-  --spec string       Speculative decoding: off|auto|draft|ngram|ngram-mod|ngram-k4v|mtp
+  --spec string       Speculative decoding: off|auto|mtp|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
 }
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "download", "tune", "gui", "tui", "config", "update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "download", "tune", "gui", "tui", "config", "update", "--update":
 		return true
 	default:
 		return false

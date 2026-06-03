@@ -1,6 +1,11 @@
 package placement
 
 import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/raketenkater/llm-server/pkg/detect"
@@ -403,7 +408,118 @@ func TestComputeDraftMoERequiresExplicitOverride(t *testing.T) {
 	}
 }
 
-func TestComputeDraftAutoFallsBackToNgramMod(t *testing.T) {
+func TestFindOrDownloadDraftIgnoresInvalidLocalWhenDownloadsSkipped(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "draft-model.gguf")
+	if err := os.WriteFile(bad, []byte("not gguf"), 0644); err != nil {
+		t.Fatalf("write bad draft: %v", err)
+	}
+	model := &ModelProfile{Path: filepath.Join(dir, "target.gguf"), TotalSizeMB: 1024, VocabSize: 1}
+	if got := findOrDownloadDraftCandidate(model, dir, "ik_llama"); got != "" {
+		t.Fatalf("expected invalid local draft to be ignored, got %s", got)
+	}
+}
+
+func TestDraftCandidateFiltersNonTextArtifacts(t *testing.T) {
+	for _, name := range []string{"mmproj-F16.gguf", "vision-projector.gguf", "clip-model.gguf", "Qwen_Qwen3.6-35B-A3B-imatrix.gguf"} {
+		if !isNonTextDraftGGUFName(name) {
+			t.Fatalf("expected %s to be rejected as non-text draft", name)
+		}
+		if draftFilenameLooksRelevantForKind(name, "draft") {
+			t.Fatalf("did not expect projector %s to be relevant", name)
+		}
+	}
+	if isNonTextDraftGGUFName("Qwen3.5-0.8B-Q4_K_M.gguf") {
+		t.Fatal("text draft model was incorrectly rejected")
+	}
+}
+
+func TestDraftValidationRepoWideMismatch(t *testing.T) {
+	if !draftValidationRepoWideMismatch(fmt.Errorf("vocab mismatch: draft=1 target=2")) {
+		t.Fatal("expected vocab mismatch to stop repo")
+	}
+	if !draftValidationRepoWideMismatch(fmt.Errorf("architecture mismatch draft=llama target=qwen")) {
+		t.Fatal("expected architecture mismatch to stop repo")
+	}
+	if draftValidationRepoWideMismatch(fmt.Errorf("incomplete file")) {
+		t.Fatal("did not expect incomplete file to stop repo")
+	}
+}
+
+func TestDraftCandidateRankPrefersQ4Draft(t *testing.T) {
+	q4 := draftCandidateRank("Qwen3.5-0.8B-Q4_K_M.gguf", "draft")
+	bf16 := draftCandidateRank("Qwen3.5-0.8B-BF16.gguf", "draft")
+	iq2 := draftCandidateRank("Qwen3.5-0.8B-IQ2_M.gguf", "draft")
+	if !(q4 < bf16 && q4 < iq2) {
+		t.Fatalf("expected Q4 draft rank to win, got q4=%d bf16=%d iq2=%d", q4, bf16, iq2)
+	}
+}
+
+func TestHFSpecSearchQueriesForQwenDraft(t *testing.T) {
+	model := &ModelProfile{Path: "Qwen3.6-27B-Q5_K_M.gguf", Basename: "Qwen3.6-27B", ModelArch: "qwen35"}
+	queries := hfSpecSearchQueries(model, "draft")
+	joined := strings.ToLower(strings.Join(queries, "\n"))
+	for _, want := range []string{"qwen3.6 27b draft gguf", "qwen3.6 0.8b gguf", "qwen3.5 0.8b gguf"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected query %q in %#v", want, queries)
+		}
+	}
+}
+
+func TestHFRepoLooksRelevantForSmallDraft(t *testing.T) {
+	model := &ModelProfile{Path: "Qwen3.6-27B-Q5_K_M.gguf", Basename: "Qwen3.6-27B", ModelArch: "qwen35"}
+	if !hfRepoLooksRelevant("bartowski/Qwen3.6-0.8B-GGUF", model, "draft") {
+		t.Fatal("expected small same-family repo to be considered as draft candidate")
+	}
+	if !hfRepoLooksRelevant("unsloth/Qwen3.5-0.8B-GGUF", model, "draft") {
+		t.Fatal("expected qwen3.5 architecture-compatible repo to be considered as draft candidate")
+	}
+	if hfRepoLooksRelevant("unsloth/Qwen3.6-27B-GGUF", model, "draft") {
+		t.Fatal("did not expect full-size target repo to be considered as draft candidate")
+	}
+	if hfRepoLooksRelevant("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", model, "draft") {
+		t.Fatal("did not expect 35B/A3B full MoE repo to be considered as draft candidate")
+	}
+	if repoLooksLikeDraftRepo("bartowski/qwen_qwen3.6-35b-a3b-gguf") {
+		t.Fatal("35B/A3B should not match the small 3B draft heuristic")
+	}
+	if !hfRepoLooksRelevant("Ex0bit/Qwen3.6-27B-PRISM-EAGLE3", model, "eagle3") {
+		t.Fatal("expected target EAGLE repo to be considered relevant")
+	}
+}
+
+func TestHFCandidateSizeOK(t *testing.T) {
+	model := &ModelProfile{TotalSizeMB: 1000}
+	if !hfCandidateSizeOK(&http.Response{ContentLength: 250 * 1024 * 1024}, model) {
+		t.Fatal("expected small candidate to pass")
+	}
+	if hfCandidateSizeOK(&http.Response{ContentLength: 500 * 1024 * 1024}, model) {
+		t.Fatal("expected oversized candidate to be rejected")
+	}
+}
+
+func TestHFResolveURLKeepsPathSeparators(t *testing.T) {
+	got := hfResolveURL("org/repo", "folder/a b.gguf")
+	want := "https://huggingface.co/org/repo/resolve/main/folder/a%20b.gguf"
+	if got != want {
+		t.Fatalf("resolve URL mismatch: %s", got)
+	}
+}
+
+func TestSameDraftArchitecture(t *testing.T) {
+	if !sameDraftArchitecture("qwen2", "qwen2") {
+		t.Fatal("expected matching architecture to pass")
+	}
+	if sameDraftArchitecture("qwen2", "llama") {
+		t.Fatal("expected mismatched architecture to fail")
+	}
+	if !sameDraftArchitecture("", "llama") {
+		t.Fatal("missing target metadata should not reject a draft")
+	}
+}
+
+func TestComputeDraftAutoDoesNotFallbackToNgram(t *testing.T) {
 	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
@@ -414,12 +530,30 @@ func TestComputeDraftAutoFallsBackToNgramMod(t *testing.T) {
 	help := "--spec-type [none|draft-simple|draft-mtp|ngram-cache|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod] --spec-ngram-mod-n-match --spec-ngram-mod-n-min --spec-ngram-mod-n-max"
 
 	draft := ComputeDraft(model, caps, Options{SpecMode: "auto", BackendTag: "vulkan", BackendHelp: help})
-	if draft.Type != DraftNgram || draft.SpecType != "ngram-mod" {
-		t.Fatalf("expected auto ngram-mod fallback, got type=%s spec=%s", draft.Type, draft.SpecType)
+	if draft.Type != DraftNone {
+		t.Fatalf("expected auto to stay off without MTP/EAGLE/draft, got type=%s spec=%s", draft.Type, draft.SpecType)
 	}
-	args := DraftFlags(draft)
-	if !contains(args, "--spec-ngram-mod-n-match") || contains(args, "--spec-ngram-map-k-size-n") {
-		t.Fatalf("ngram-mod flags missing expected values: %v", args)
+}
+
+func TestComputeDraftAutoPrefersMTPWhenAvailable(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false, NextNPredictLayers: 1}
+
+	draft := ComputeDraft(model, caps, Options{SpecMode: "auto", BackendTag: "ik_llama"})
+	if draft.Type != DraftMTP || draft.SpecType != "mtp" {
+		t.Fatalf("expected auto MTP, got type=%s spec=%s", draft.Type, draft.SpecType)
+	}
+}
+
+func TestDraftFlagsEagle3(t *testing.T) {
+	cfg := &DraftConfig{Type: DraftEagle3, BackendTag: "vulkan", Path: "eagle.gguf", DraftGPU: 0, CTXSizeDraft: 8192, KVTypeDraft: "q8_0", ThreadsDraft: 2, DraftMax: 8}
+	args := DraftFlags(cfg)
+	if !contains(args, "--spec-type") || !contains(args, "eagle3") || !contains(args, "--model-draft") {
+		t.Fatalf("EAGLE-3 flags missing expected values: %v", args)
 	}
 }
 

@@ -1,8 +1,11 @@
 package update
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,10 +16,211 @@ import (
 )
 
 const (
-	githubRepo     = "raketenkater/llm-server"
-	githubAPIURL   = "https://api.github.com/repos/%s/releases/latest"
-	defaultVersion = "v3.0.0-go"
+	githubRepo        = "raketenkater/llm-server"
+	githubAPIURL      = "https://api.github.com/repos/%s/releases/latest"
+	rawInstallURL     = "https://raw.githubusercontent.com/%s/%s/install.sh"
+	defaultVersion    = "v3.0.0-go"
+	updateDismissDays = 7
 )
+
+// PromptOnStartup checks local repos for updates and asks interactive users
+// whether to run the updater. It intentionally skips non-interactive shells so
+// scripts and CI never block on network or stdin.
+func PromptOnStartup() {
+	if os.Getenv("LLM_SERVER_UPDATE_CHECKED") != "" || os.Getenv("LLM_SERVER_NO_UPDATE_CHECK") != "" {
+		return
+	}
+	if !isTerminal(os.Stdin) && !isTerminal(os.Stdout) {
+		return
+	}
+	cacheDir := updateCacheDir()
+	if !shouldCheckStartupUpdates(cacheDir, time.Now()) {
+		return
+	}
+	_ = os.Setenv("LLM_SERVER_UPDATE_CHECKED", "1")
+
+	updates := CheckStartupUpdates()
+	if len(updates) == 0 {
+		return
+	}
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+
+	fmt.Fprintf(tty, "\nUpdates available: %s\n", strings.Join(updates, ", "))
+	fmt.Fprintf(tty, "Update now? [y/N/d=dismiss %d days] ", updateDismissDays)
+	answer := strings.ToLower(strings.TrimSpace(readAnswerWithTimeout(tty, 20*time.Second)))
+	switch answer {
+	case "y", "yes":
+		fmt.Fprintln(tty, "Running --update...")
+		if err := SelfUpdate(); err != nil {
+			fmt.Fprintf(os.Stderr, "Self-update: %v\n", err)
+		}
+		if err := UpdateBackends(); err != nil {
+			fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
+		}
+	case "d", "dismiss":
+		if err := dismissStartupUpdates(cacheDir, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "Update dismiss: %v\n", err)
+			return
+		}
+		fmt.Fprintf(tty, "Dismissed for %d days.\n", updateDismissDays)
+	default:
+		fmt.Fprintln(tty, "Skipped.")
+	}
+}
+
+// CheckStartupUpdates returns both source-checkout and latest-release updates.
+func CheckStartupUpdates() []string {
+	updates := CheckRepoUpdates()
+	if hasUpdateLabel(updates, "llm-server") {
+		return updates
+	}
+	res, err := Check()
+	if err == nil && res.HasUpdate {
+		updates = append(updates, "llm-server "+res.Latest)
+	}
+	return updates
+}
+
+func hasUpdateLabel(updates []string, label string) bool {
+	for _, u := range updates {
+		if u == label || strings.HasPrefix(u, label+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckRepoUpdates returns local git repos that are behind their upstreams.
+func CheckRepoUpdates() []string {
+	updates := []string{}
+	for _, repo := range updateRepoCandidates() {
+		if repoBehind(repo.Dir) {
+			updates = append(updates, repo.Label)
+		}
+	}
+	return updates
+}
+
+type repoCandidate struct {
+	Label string
+	Dir   string
+}
+
+func updateRepoCandidates() []repoCandidate {
+	home := os.Getenv("HOME")
+	seen := map[string]bool{}
+	candidates := []repoCandidate{}
+	add := func(label, dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || seen[label+"\x00"+dir] {
+			return
+		}
+		seen[label+"\x00"+dir] = true
+		candidates = append(candidates, repoCandidate{Label: label, Dir: dir})
+	}
+
+	repoDir := os.Getenv("LLM_SERVER_REPO")
+	if repoDir == "" && home != "" {
+		repoDir = filepath.Join(home, "llm-server")
+	}
+	add("llm-server", repoDir)
+
+	if server := os.Getenv("LLAMA_SERVER"); server != "" {
+		root := filepath.Dir(filepath.Dir(filepath.Dir(server)))
+		base := filepath.Base(root)
+		if strings.Contains(base, "ik_llama") {
+			add("ik_llama.cpp", root)
+		} else if strings.Contains(base, "llama.cpp") {
+			add("llama.cpp", root)
+		}
+	}
+	if home != "" {
+		add("ik_llama.cpp", filepath.Join(home, "ik_llama.cpp"))
+		add("llama.cpp", filepath.Join(home, "llama.cpp"))
+	}
+	return candidates
+}
+
+func repoBehind(repoDir string) bool {
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "git", "-C", repoDir, "remote", "update", "--prune").Run(); err != nil {
+		return false
+	}
+	localHead, err := gitRevParse(repoDir, "HEAD")
+	if err != nil || localHead == "" {
+		return false
+	}
+	remoteHead, err := gitRevParse(repoDir, "@{u}")
+	if err != nil || remoteHead == "" {
+		return false
+	}
+	return localHead != remoteHead
+}
+
+func readAnswerWithTimeout(tty *os.File, timeout time.Duration) string {
+	answers := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(tty).ReadString('\n')
+		answers <- line
+	}()
+	select {
+	case answer := <-answers:
+		return answer
+	case <-time.After(timeout):
+		fmt.Fprintln(tty)
+		return ""
+	}
+}
+
+func shouldCheckStartupUpdates(cacheDir string, now time.Time) bool {
+	data, err := os.ReadFile(updateDismissPath(cacheDir))
+	if err != nil {
+		return true
+	}
+	dismissedAt, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return true
+	}
+	return now.Sub(time.Unix(dismissedAt, 0)) >= time.Duration(updateDismissDays)*24*time.Hour
+}
+
+func dismissStartupUpdates(cacheDir string, now time.Time) error {
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(updateDismissPath(cacheDir), []byte(strconv.FormatInt(now.Unix(), 10)+"\n"), 0644)
+}
+
+func updateDismissPath(cacheDir string) string {
+	return filepath.Join(cacheDir, "update_dismissed")
+}
+
+func updateCacheDir() string {
+	if dir := os.Getenv("LLM_CACHE_DIR"); dir != "" {
+		return dir
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".cache", "llm-server")
+	}
+	return filepath.Join(os.TempDir(), "llm-server")
+}
+
+func isTerminal(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
+}
 
 // Release holds GitHub release info.
 type Release struct {
@@ -76,7 +280,8 @@ func SelfUpdate() error {
 	}
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
-		return fmt.Errorf("llm-server repo not found at %s — skipping self-update", repoDir)
+		fmt.Printf("llm-server repo not found at %s; using latest release installer.\n", repoDir)
+		return SelfUpdateFromReleaseInstaller()
 	}
 
 	fmt.Println("═══ Updating llm-server ═══")
@@ -85,10 +290,7 @@ func SelfUpdate() error {
 		oldHash = "unknown"
 	}
 
-	scriptPath, _ := exec.LookPath("llm-server")
-	if scriptPath == "" {
-		scriptPath = filepath.Join(os.Getenv("HOME"), ".local", "bin", "llm-server")
-	}
+	scriptPath := installedLLMServerPath()
 	var backupPath string
 	if _, err := os.Stat(scriptPath); err == nil {
 		backupPath = scriptPath + ".bak"
@@ -163,6 +365,100 @@ func SelfUpdate() error {
 	}
 	fmt.Println("  ✓ llm-server updated and verified. Restart to use the new version.")
 	return nil
+}
+
+// SelfUpdateFromReleaseInstaller updates release-bundle installs that do not have a
+// local llm-server git checkout. It downloads the latest tagged install.sh and lets
+// the installer select the right platform/backend bundle or source fallback.
+func SelfUpdateFromReleaseInstaller() error {
+	fmt.Println("═══ Updating llm-server from latest release installer ═══")
+	scriptPath := installedLLMServerPath()
+	backupPath := ""
+	if scriptPath != "" {
+		if _, err := os.Stat(scriptPath); err == nil {
+			backupPath = scriptPath + ".bak"
+			_ = cp(scriptPath, backupPath)
+		}
+	}
+
+	installerURL := rawInstallerURL("main")
+	if res, err := Check(); err == nil && res.Latest != "" {
+		installerURL = rawInstallerURL(res.Latest)
+	}
+	tmpDir, err := os.MkdirTemp("", "llm-server-update-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	installerPath := filepath.Join(tmpDir, "install.sh")
+	if err := downloadFile(installerURL, installerPath, 0755); err != nil {
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return fmt.Errorf("download installer: %w", err)
+	}
+
+	cmd := exec.Command("bash", installerPath)
+	cmd.Env = append(os.Environ(), "LLM_INSTALL_MODE=auto", "LLM_INSTALL_NONINTERACTIVE=1")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if backupPath != "" && scriptPath != "" {
+			_ = cp(backupPath, scriptPath)
+			_ = os.Remove(backupPath)
+		}
+		return fmt.Errorf("release installer failed: %w", err)
+	}
+
+	if scriptPath != "" {
+		if err := exec.Command(scriptPath, "--version").Run(); err != nil {
+			if backupPath != "" {
+				_ = cp(backupPath, scriptPath)
+				_ = os.Remove(backupPath)
+			}
+			return fmt.Errorf("self-check failed after release installer")
+		}
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	fmt.Println("  ✓ llm-server release installer completed and verified. Restart to use the new version.")
+	return nil
+}
+
+func rawInstallerURL(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "main"
+	}
+	return fmt.Sprintf(rawInstallURL, githubRepo, ref)
+}
+
+func installedLLMServerPath() string {
+	if path, _ := exec.LookPath("llm-server"); path != "" {
+		return path
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".local", "bin", "llm-server")
+	}
+	return ""
+}
+
+func downloadFile(url, dst string, mode os.FileMode) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("%s", resp.Status)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, mode)
 }
 
 // UpdateBackend updates a backend repo (ik_llama.cpp or llama.cpp).

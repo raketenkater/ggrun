@@ -56,6 +56,7 @@ which rows have passed.
 | WSL2 NVIDIA | install, backend detection, dry-run, one benchmark |
 | No supported GPU | installer falls back cleanly to CPU bundle or source build |
 | Missing backend tools | installer prints the missing package/tool and exits without partial config corruption |
+| Go updater / latest release | `llm-server --update`, `llm-server update`, latest-release check, backend rebuild, smoke test, rollback path |
 
 For speculative decoding, verify these commands before release notes claim
 support:
@@ -63,6 +64,9 @@ support:
 ```bash
 llm-server model.gguf --dry-run --spec off
 llm-server model.gguf --dry-run --spec auto
+llm-server model.gguf --dry-run --spec mtp
+llm-server model.gguf --dry-run --spec eagle3
+llm-server model.gguf --dry-run --spec draft
 llm-server model.gguf --dry-run --spec ngram
 llm-server model.gguf --dry-run --spec ngram-mod
 llm-server model.gguf --dry-run --spec ngram-k4v
@@ -72,9 +76,12 @@ llm-server model.gguf --dry-run --spec mtp
 Expected policy:
 
 - `off` emits no speculative flags.
-- `auto` prefers a validated draft model, then falls back to a backend-supported
-  ngram mode.
-- `ngram` uses the broadly compatible ngram map-k dialect.
+- `auto` prefers MTP when the model has NextN/MTP layers, then EAGLE-3 or a
+  validated draft model, and otherwise emits no speculative flags.
+- `eagle3` only emits when the backend advertises EAGLE-3 and a matching
+  speculator is available.
+- `draft` only emits when a validated compatible draft model is available locally or from Hugging Face GGUF drafter search.
+- `ngram` uses the broadly compatible ngram map-k dialect and is explicit only.
 - `ngram-mod` and `ngram-k4v` only emit when the selected backend advertises the
   matching flags in `llama-server --help`; otherwise they fall back safely.
 - `mtp` emits IK flags for ik_llama.cpp, emits mainline `draft-mtp` only when the

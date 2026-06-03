@@ -128,7 +128,7 @@ type Options struct {
 	Host         string // listen address (default 0.0.0.0)
 	VisionAuto   bool   // auto-detect mmproj for vision
 	MMProjPath   string // explicit vision projector GGUF
-	SpecMode     string // off, auto, draft, ngram, ngram-mod, ngram-k4v, mtp
+	SpecMode     string // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
 	BackendHelp  string // llama-server --help output for dialect-specific flags
 	ForceSpecMoE bool   // allow speculative decoding on MoE despite default gate
 }
@@ -1579,7 +1579,7 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		}
 	}
 
-	// Speculative decoding flags (draft model or ngram)
+	// Speculative decoding flags (MTP, EAGLE-3, draft model, or explicit ngram)
 	if s.Draft != nil && s.Draft.Type != DraftNone {
 		args = append(args, DraftFlags(s.Draft)...)
 	}

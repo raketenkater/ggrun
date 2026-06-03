@@ -35,7 +35,7 @@ type Config struct {
 	Vision        bool   `json:"vision"`
 	Parallel      int    `json:"parallel"`
 	Host          string `json:"host"`
-	Spec          string `json:"spec"` // off, auto, draft, ngram, ngram-mod, ngram-k4v, mtp
+	Spec          string `json:"spec"` // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
 }
 
 // DefaultKeys is the stable display order for config show / template generation.

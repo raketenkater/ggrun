@@ -80,11 +80,12 @@ Current measured policy from local data:
 The next MoE speed gains are likely in scheduling and memory movement, not in
 blind batch increases. Work items:
 
-- Benchmark MoE serving with `parallel=2/4` and fixed per-slot context, not just
-  single-stream decode.
+- Benchmark MoE serving with `parallel=2/4` only when total context preserves
+  the same per-slot context. Lowering effective context is not an optimization.
 - Add MoE-specific AI-tune candidates for `--n-cpu-moe`, `--defer-experts`,
   pinned memory on/off, `--no-mmap`, smaller batch/ubatch, and expert/layer
-  placement variants.
+  placement variants. Automatic MoE tune candidates must not change context or
+  speculative decoding mode.
 - Record host pinned-memory allocation time, GPU split, CPU expert count, and
   prompt/decode separately.
 - Prefer candidates that reduce CPU/GPU expert traffic or improve concurrent
@@ -118,16 +119,13 @@ Primary references:
 
 1. Backend-aware speculative decoding
 
-   Keep `--spec off` as the default. Make `--spec auto` useful by selecting the
-   best supported no-draft fallback after draft validation fails. The current
-   priority is:
+   Keep `--spec off` as the default. Make `--spec auto` useful only when there
+   is a real learned/spec-head path. The current priority is:
 
-   - validated local/downloaded draft model
-   - mainline `ngram-mod` when advertised
-   - mainline `ngram-map-k4v` when advertised
-   - mainline `ngram-map-k`
-   - IK `ngram - map - k`
-   - MTP only for IK or mainline backends that advertise `draft-mtp`
+   - MTP when the model has NextN/MTP layers and the backend supports it
+   - EAGLE-3 when a matching speculator is available and the backend advertises it
+   - validated local/downloaded draft model found by same-folder lookup or Hugging Face GGUF drafter search
+   - off; do not fall back to ngram in auto mode
 
 2. Benchmark speculative acceptance, not just tok/s
 
@@ -147,10 +145,10 @@ Primary references:
    JSON from the model. Candidate sets should include:
 
    - baseline no spec
-   - `ngram-map-k` conservative
-   - `ngram-mod` for repeated/code workloads when supported
-   - `ngram-map-k4v` for newer mainline builds when supported
-   - MTP for IK/MTP-capable models
+   - MTP for MTP-capable models
+   - EAGLE-3 when a matching speculator is available
+   - validated draft model
+   - explicit `ngram-map-k` / `ngram-mod` / `ngram-map-k4v` only for repeated/code workloads
 
 4. MoE-specific path
 

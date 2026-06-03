@@ -155,7 +155,7 @@ llm-server model.gguf
 - **Auto-fallback** — if ik_llama can't load a model, strips ik-specific flags and retries on mainline llama.cpp mid-launch.
 - **Built-in downloader** — `--download` with any HuggingFace repo; recommends the best quant for your VRAM+RAM budget.
 - **Vision (multimodal)** — `--vision` auto-detects and downloads the matching `mmproj` from HuggingFace.
-- **Speculative decoding** — `--spec auto|ngram|ngram-mod|ngram-k4v|mtp` with backend-aware flag dialects. Off by default; `auto` prefers a validated draft model, then falls back to supported self-speculation.
+- **Speculative decoding** — `--spec auto|mtp|eagle3|draft|ngram|ngram-mod|ngram-k4v` with backend-aware flag dialects. Off by default; `auto` prefers MTP when the model has NextN/MTP layers, then EAGLE-3 or a validated draft model, including Hugging Face GGUF drafter search when local candidates are missing, and otherwise stays off. Ngram modes are explicit/profile-gated only.
 - **Terminal GUI** — `llm-server-gui` for interactive model picking with option toggles.
 
 ## AI self-tuning (`--ai-tune`)
@@ -227,9 +227,11 @@ llm-server --update
 llm-server --benchmark model.gguf
 
 # Speculative decoding
-llm-server model.gguf --spec auto       # validated draft model, then safe ngram fallback
+llm-server model.gguf --spec auto       # MTP/EAGLE/draft when real, otherwise off
 llm-server model.gguf --spec ngram      # conservative ngram map-k
-llm-server model.gguf --spec ngram-mod  # newer llama.cpp self-speculation when supported
+llm-server model.gguf --spec mtp        # use MTP/NextN when the model and backend support it
+llm-server model.gguf --spec eagle3     # use a matching EAGLE-3 speculator when available
+llm-server model.gguf --spec ngram-mod  # explicit repetition/code self-speculation when supported
 llm-server model.gguf --spec mtp        # IK MTP, or mainline draft-mtp when advertised
 ```
 
@@ -256,7 +258,7 @@ Downloaded and locally discovered GGUFs are indexed in `<model-dir>/.llm-server/
 With `--vision`, llm-server checks for an existing `mmproj`, verifies it matches the loaded model, and downloads the correct `mmproj-F16.gguf` from HuggingFace if missing. The correct repo is inferred from GGUF metadata (`general.basename` + `general.quantized_by`).
 
 ### Auto-update
-`llm-server --update` pulls llm-server, ik_llama.cpp, and llama.cpp; backs up each working binary; rebuilds with the existing cmake config; smoke-tests; and rolls back to the previous commit if anything fails. Update fearlessly.
+`llm-server --update` or `llm-server update` pulls llm-server, ik_llama.cpp, and llama.cpp; backs up each working binary; rebuilds with the existing cmake config; smoke-tests; and rolls back to the previous commit if anything fails. On interactive Go startup, llm-server checks whether the local repos are behind upstream or a newer GitHub release exists and asks before updating; release-bundle installs fall back to the latest tagged installer. Choose `d` to dismiss the prompt for 7 days or set `LLM_SERVER_NO_UPDATE_CHECK=1` to disable the startup check.
 
 ### Auto-fallback
 If ik_llama.cpp can't load a model (unsupported architecture), llm-server detects the load failure, switches to mainline llama.cpp, strips ik-specific flags, and retries — no manual intervention.

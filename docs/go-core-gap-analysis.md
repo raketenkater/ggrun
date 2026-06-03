@@ -242,7 +242,7 @@ Bash:
 Go:
 - Has `placement/draft.go`.
 - Keeps speculative decoding off by default.
-- Supports `--spec auto`, `draft`, `ngram`, `ngram-mod`, `ngram-k4v`, and `mtp`.
+- Supports `--spec auto`, `mtp`, `eagle3`, `draft`, `ngram`, `ngram-mod`, and `ngram-k4v`.
 - `auto` prefers a validated draft model and falls back to a backend-supported
   ngram self-speculation mode.
 - Spec flags are selected from the backend dialect and `llama-server --help`
@@ -434,5 +434,6 @@ The daemon can become a real management layer:
 - [ ] Add mmproj metadata validation in Go.
 - [ ] Add Bash-vs-Go dry-run golden tests.
 - [x] Decide default speculative decoding policy: off by default, explicit ngram/draft modes only.
+- [ ] Release-critical: validate Go `llm-server --update`/`llm-server update` end-to-end against the latest GitHub release, including self-update, backend rebuild, smoke test, and rollback.
 - [ ] Validate V100/SM70 tuning behavior against issue #16.
 - [ ] Decide when Go replaces Bash as the default entrypoint.

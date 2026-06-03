@@ -78,6 +78,15 @@ func TestBenchmarkCompatArgs(t *testing.T) {
 	}
 }
 
+func TestKnownCommandAcceptsUpdateAlias(t *testing.T) {
+	if !knownCommand("update") {
+		t.Fatal("expected update command to be known")
+	}
+	if !knownCommand("--update") {
+		t.Fatal("expected legacy --update alias to be known")
+	}
+}
+
 func TestResolveCtxFlag(t *testing.T) {
 	if got := resolveCtxFlag("fit", 131072); got != 0 {
 		t.Fatalf("fit should resolve to auto 0, got %d", got)

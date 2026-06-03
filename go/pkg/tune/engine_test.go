@@ -228,29 +228,81 @@ func TestGuardRiskyMoEOverridesDropsMemoryExpandingSuggestions(t *testing.T) {
 	}
 }
 
-func TestDeterministicPlanIncludesSpecCandidatesForMainline(t *testing.T) {
-	base := []string{"-b", "4096", "-ub", "512"}
-	help := "--spec-type [none|ngram-map-k|ngram-map-k4v|ngram-mod] --spec-ngram-mod-n-match"
+func TestDeterministicPlanIncludesMoEMemoryMovementCandidates(t *testing.T) {
+	base := []string{
+		"--cache-type-k", "q4_0",
+		"--cache-type-v", "q4_0",
+		"--n-cpu-moe", "256",
+		"-ot", "exps=CPU",
+		"-b", "2048",
+		"-ub", "512",
+		"--no-mmap",
+	}
+	help := "--defer-experts --cont-batching"
 	plan := deterministicPlan(base, "vulkan", nil, help)
 	names := map[string]bool{}
 	for _, c := range plan {
 		names[c.Name] = true
+		if _, ok := c.FlagValues["--parallel"]; ok {
+			t.Fatalf("MoE plan must not change parallel without fixed per-slot context scheduling: %#v", c)
+		}
+		if _, ok := c.FlagValues["--ctx-size"]; ok {
+			t.Fatalf("MoE plan must not change context size: %#v", c)
+		}
 	}
-	for _, want := range []string{"spec-ngram-mod", "spec-ngram-k4v", "spec-ngram-map-k"} {
+	for _, want := range []string{"moe-batch-1536", "moe-ubatch-384", "moe-defer-experts", "moe-mmap-pagecache", "moe-cont-batching"} {
 		if !names[want] {
-			t.Fatalf("expected %s in spec-aware plan, got %#v", want, names)
+			t.Fatalf("expected %s in MoE memory-movement plan, got %#v", want, names)
 		}
 	}
 }
 
-func TestDeterministicPlanIncludesIKSpecCandidate(t *testing.T) {
-	base := []string{"-b", "4096", "-ub", "512", "--run-time-repack"}
-	plan := deterministicPlan(base, "ik_llama", nil, "")
-	if len(plan) == 0 || plan[0].Name != "spec-ik-ngram" {
-		t.Fatalf("expected first IK dense tune candidate to test ngram spec, got %#v", plan)
+func TestGuardRiskyMoEOverridesKeepsContextAndSpecStable(t *testing.T) {
+	base := []string{
+		"--cache-type-k", "q4_0",
+		"--cache-type-v", "q4_0",
+		"--flash-attn", "on",
+		"--parallel", "1",
+		"--n-cpu-moe", "256",
+		"-ot", "exps=CPU",
+		"-b", "2048",
+		"-ub", "512",
+		"--no-mmap",
 	}
-	if plan[0].FlagValues["--spec-type"] != "ngram - map - k" {
-		t.Fatalf("expected IK ngram dialect, got %#v", plan[0].FlagValues)
+	overrides := guardRiskyMoEOverrides(map[string]interface{}{
+		"--parallel":         "2",
+		"--spec-type":        "ngram-mod",
+		"--spec-draft-n-max": "64",
+		"--flash-attn":       "off",
+		"--no-mmap":          false,
+		"--defer-experts":    true,
+	}, base)
+	for _, key := range []string{"--parallel", "--spec-type", "--spec-draft-n-max", "--flash-attn"} {
+		if _, ok := overrides[key]; ok {
+			t.Fatalf("expected %s to be dropped for MoE stability, got %#v", key, overrides)
+		}
+	}
+	if overrides["--no-mmap"] != false || overrides["--defer-experts"] != true {
+		t.Fatalf("expected safe memory-movement flags to remain, got %#v", overrides)
+	}
+}
+
+func TestDeterministicPlanDoesNotSuggestNgramByDefault(t *testing.T) {
+	base := []string{"-b", "4096", "-ub", "512"}
+	help := "--spec-type [none|ngram-map-k|ngram-map-k4v|ngram-mod] --spec-ngram-mod-n-match"
+	plan := deterministicPlan(base, "vulkan", nil, help)
+	for _, c := range plan {
+		if _, ok := c.FlagValues["--spec-type"]; ok {
+			t.Fatalf("default AI-tune should not propose ngram speculation, got %#v", c)
+		}
+	}
+}
+
+func TestDeterministicPlanTunesExplicitNgramMode(t *testing.T) {
+	base := []string{"-b", "4096", "-ub", "512", "--spec-type", "ngram-mod"}
+	plan := deterministicPlan(base, "vulkan", nil, "--spec-autotune")
+	if len(plan) == 0 || plan[0].Name != "spec-ngram-mod-lower-depth" {
+		t.Fatalf("expected explicit ngram mode to get depth tuning, got %#v", plan)
 	}
 }
 
