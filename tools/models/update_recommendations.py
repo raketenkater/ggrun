@@ -19,6 +19,17 @@ from pathlib import Path
 from typing import Any
 
 API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
+FAMILY_PREFIXES = {
+    "llama",
+    "qwen",
+    "mistral",
+    "mixtral",
+    "phi",
+    "gemma",
+    "deepseek",
+    "kimi",
+    "minimax",
+}
 
 
 def utc_now() -> str:
@@ -32,6 +43,23 @@ def norm(text: str) -> str:
 def tokens(text: str) -> set[str]:
     stop = {"instruct", "chat", "reasoning", "non", "max", "effort", "preview"}
     return {t for t in norm(text).split() if t and t not in stop}
+
+
+def family_match(query_tokens: set[str], hay_tokens: set[str]) -> bool:
+    for family in FAMILY_PREFIXES:
+        if any(t.startswith(family) for t in query_tokens) and any(t.startswith(family) for t in hay_tokens):
+            return True
+    return False
+
+
+def model_size_tokens(query_tokens: set[str]) -> set[str]:
+    return {t for t in query_tokens if re.fullmatch(r"a?\d+(?:b|m)", t)}
+
+
+def clear_aa_fields(candidate: dict[str, Any]) -> None:
+    for key in list(candidate):
+        if key.startswith("aa_"):
+            candidate.pop(key, None)
 
 
 def fetch_models(api_key: str) -> list[dict[str, Any]]:
@@ -95,16 +123,17 @@ def match_row(candidate: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str
     for row in rows:
         hay = row_name(row)
         hay_tokens = tokens(hay)
+        if not family_match(query_tokens, hay_tokens):
+            continue
+        required_size = model_size_tokens(query_tokens)
+        if required_size and not (required_size & hay_tokens):
+            continue
         overlap = len(query_tokens & hay_tokens)
         if overlap == 0:
             continue
-        # Require family/name overlap and at least one size-ish token when present.
-        size_tokens = {t for t in query_tokens if re.fullmatch(r"\d+b|a\d+b|\d+", t)}
-        if size_tokens and not (size_tokens & hay_tokens):
-            continue
-        score = overlap * 10 + intelligence(row)
+        score = overlap * 100 + intelligence(row)
         if score > best[0] + best[1]:
-            best = (overlap * 10, intelligence(row), row)
+            best = (overlap * 100, intelligence(row), row)
     return best[2]
 
 
@@ -115,6 +144,7 @@ def refresh_catalog(catalog: dict[str, Any], rows: list[dict[str, Any]]) -> dict
             continue
         row = match_row(cand, rows)
         if not row:
+            clear_aa_fields(cand)
             continue
         idx = intelligence(row)
         tps = output_tps(row)
