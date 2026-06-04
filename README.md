@@ -103,6 +103,7 @@ llm-server model.gguf
 - MoE-aware expert placement with `-ot` / `--n-cpu-moe` fallback paths.
 - AI Tune: benchmarks candidate flag sets and caches the fastest valid result.
 - Model downloader for Hugging Face GGUF repos with hardware-aware quant choice.
+- GUI recommended-download fast path ranked by local hardware fit and cached leaderboard signals.
 - Vision projector lookup and validation for multimodal GGUF models.
 - Speculative decoding modes for MTP, EAGLE-3, validated draft models, and
   explicit ngram modes.
@@ -242,7 +243,9 @@ Windows:
 
 - [Architecture](docs/architecture.md)
 - [Performance](docs/performance.md)
+- [Launch performance tables](docs/launch-performance.md)
 - [Speculative decoding](docs/speculative-decoding.md)
+- [Model recommendations](docs/model-recommendations.md)
 - [Release checklist](docs/releasing.md)
 - [Repository hygiene](docs/repo-hygiene.md)
 - [Changelog](CHANGELOG.md)

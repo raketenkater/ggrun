@@ -1,0 +1,44 @@
+name: Update model recommendations
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: refresh Artificial Analysis catalog
+    runs-on: ubuntu-latest
+    if: github.repository == 'raketenkater/llm-server'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Refresh recommendation catalog
+        env:
+          ARTIFICIAL_ANALYSIS_API_KEY: ${{ secrets.ARTIFICIAL_ANALYSIS_API_KEY }}
+        run: python3 tools/models/update_recommendations.py --allow-missing-key
+
+      - name: Show catalog diff
+        run: git diff -- go/pkg/recommend/catalog.json
+
+      - name: Open update PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: Update model recommendation catalog
+          title: Update model recommendation catalog
+          body: |
+            Refreshes the checked-in local model recommendation catalog from Artificial Analysis.
+
+            The API key is read from the repository secret `ARTIFICIAL_ANALYSIS_API_KEY` and is not written to the repo.
+          branch: automation/update-model-recommendations
+          delete-branch: true
+          add-paths: go/pkg/recommend/catalog.json

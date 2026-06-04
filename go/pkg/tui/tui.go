@@ -15,18 +15,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/raketenkater/llm-server/pkg/detect"
 	"github.com/raketenkater/llm-server/pkg/probe"
+	"github.com/raketenkater/llm-server/pkg/recommend"
 	"github.com/raketenkater/llm-server/pkg/tune"
 )
 
 var (
-	titleStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
-	subtitleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0"))
-	selectedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4")).Bold(true)
-	highlightStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	warningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFAA00"))
-	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
-	recommendStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00AAFF")).Bold(true)
-	mutedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+	subtitleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0"))
+	selectedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4")).Bold(true)
+	highlightStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
+	warningStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFAA00"))
+	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	recommendStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00AAFF")).Bold(true)
+	mutedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
 )
 
 // Screen represents the current TUI screen.
@@ -42,66 +43,69 @@ const (
 	ScreenDownload
 	ScreenBackend
 	ScreenFirstRun
+	ScreenRecommended
 )
 
 // Model is the Bubble Tea model.
 type Model struct {
-	screen      Screen
-	width       int
-	height      int
+	screen Screen
+	width  int
+	height int
 
 	// Data
-	caps        *detect.Capabilities
-	models      []ModelItem
-	backend     string
-	modelDir    string
-	settingsPath string
-	cacheDir    string
+	caps                   *detect.Capabilities
+	models                 []ModelItem
+	backend                string
+	modelDir               string
+	settingsPath           string
+	cacheDir               string
+	recommendations        []recommend.Recommendation
+	selectedRecommendation int
 
 	// Main menu list
-	mainList    list.Model
+	mainList list.Model
 
 	// Quick launch / smart predictions
-	selectedModel int
+	selectedModel  int
 	recommendation *LaunchRecommendation
 
 	// Advanced config
-	ctxSize       string
-	ctxMode       string
-	kvPlacement   string
-	parallel      string
-	aitune        bool
-	aituneRounds  int
-	benchmark     bool
-	vision        bool
-	keepalive     bool
+	ctxSize      string
+	ctxMode      string
+	kvPlacement  string
+	parallel     string
+	aitune       bool
+	aituneRounds int
+	benchmark    bool
+	vision       bool
+	keepalive    bool
 
 	// Tuned config
-	tunedConfigs  []tune.ConfigEntry
-	tunedIndex    int  // -1 = auto, 0+ = selected
-	tunePath      string
+	tunedConfigs []tune.ConfigEntry
+	tunedIndex   int // -1 = auto, 0+ = selected
+	tunePath     string
 
 	// Inputs
-	input         textinput.Model
-	inputMode     string
+	input     textinput.Model
+	inputMode string
 
 	// Launch request (set when user chooses to launch)
 	launchRequest *LaunchRequest
 
 	// Messages
-	message       string
-	messageType   string // info, warning, error
+	message     string
+	messageType string // info, warning, error
 }
 
 // ModelItem represents a discovered GGUF model.
 type ModelItem struct {
-	Name    string
-	Path    string
-	Tuned   int
-	SizeGB  float64
-	Arch    string
-	MaxCtx  int // trained max context from GGUF
-	FitCtx  int // empirically proven fit context from probes
+	Name   string
+	Path   string
+	Tuned  int
+	SizeGB float64
+	Arch   string
+	MaxCtx int // trained max context from GGUF
+	FitCtx int // empirically proven fit context from probes
 }
 
 // LaunchRecommendation holds smart-predicted settings.
@@ -149,30 +153,33 @@ func InitialModel() Model {
 		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, backendTag)
 	}
 
-	if len(m.models) == 0 {
-		m.screen = ScreenFirstRun
-	}
-
 	// Detect hardware
 	caps, _ := detect.Detect()
 	m.caps = caps
+	m.recommendations = recommend.Top(caps, 3)
+
+	if len(m.models) == 0 {
+		m.screen = ScreenFirstRun
+	}
 
 	m.mainList = newMainList(m.models)
 	return m
 }
 
 func newMainList(models []ModelItem) list.Model {
-	items := []list.Item{}
+	items := []list.Item{
+		mainItem{title: "r. Recommended downloads", desc: "Top models that fit this machine; Vulkan fallback aware", isAction: true, action: "recommend"},
+	}
 	for i, m := range models {
 		desc := fmt.Sprintf("%.1fGB, %s", m.SizeGB, m.Arch)
 		if m.Tuned > 0 {
 			desc += fmt.Sprintf("  [tuned: %d]", m.Tuned)
 		}
 		items = append(items, mainItem{
-			title:    fmt.Sprintf("%d. %s", i+1, m.Name),
-			desc:     desc,
-			index:    i,
-			isModel:  true,
+			title:   fmt.Sprintf("%d. %s", i+1, m.Name),
+			desc:    desc,
+			index:   i,
+			isModel: true,
 		})
 	}
 	// Minimal action items
@@ -259,6 +266,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateTunedPicker(msg)
 	case ScreenFirstRun:
 		return m.updateFirstRun(msg)
+	case ScreenRecommended:
+		return m.updateRecommended(msg)
 	case ScreenSettings, ScreenDownload, ScreenBackend:
 		return m.updateInputScreen(msg)
 	}
@@ -270,6 +279,10 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "r", "R":
+			m.selectedRecommendation = 0
+			m.screen = ScreenRecommended
+			return m, nil
 		case "enter":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
@@ -279,6 +292,10 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				switch item.action {
+				case "recommend":
+					m.selectedRecommendation = 0
+					m.screen = ScreenRecommended
+					return m, nil
 				case "download":
 					m.screen = ScreenDownload
 					m.inputMode = "download"
@@ -423,7 +440,11 @@ func (m Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "d", "D", "enter":
+		case "enter", "r", "R":
+			m.selectedRecommendation = 0
+			m.screen = ScreenRecommended
+			return m, nil
+		case "d", "D":
 			m.screen = ScreenDownload
 			m.inputMode = "download"
 			m.input.SetValue("")
@@ -459,8 +480,13 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd.Stderr = os.Stderr
 			cmd.Run()
 		case "download":
-			m.message = fmt.Sprintf("Download %s (not yet implemented)", val)
-			m.messageType = "info"
+			val = strings.TrimSpace(val)
+			if val != "" {
+				m.launchRequest = &LaunchRequest{DownloadRepo: val}
+				return m, tea.Quit
+			}
+			m.message = "Enter a Hugging Face GGUF repository"
+			m.messageType = "warning"
 		case "backend":
 			if val == "llama" || val == "ik_llama" {
 				m.backend = val
@@ -494,6 +520,8 @@ func (m Model) View() string {
 		return m.viewPrelaunch()
 	case ScreenTunedPicker:
 		return m.viewTunedPicker()
+	case ScreenRecommended:
+		return m.viewRecommended()
 	case ScreenSettings, ScreenDownload, ScreenBackend:
 		return m.viewInputScreen()
 	default:
@@ -518,7 +546,7 @@ func (m Model) viewMain() string {
 	b.WriteString(m.mainList.View())
 
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  [s] Settings  [b] Backend"))
+	b.WriteString(mutedStyle.Render("  [r] Recommended downloads  [s] Settings  [b] Backend"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -540,7 +568,8 @@ func (m Model) viewFirstRun() string {
 	b.WriteString(titleStyle.Render("═══ llm-server First Run ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
 	b.WriteString("\n")
-	b.WriteString("  [d] Download a model from Hugging Face\n")
+	b.WriteString(highlightStyle.Render("  [Enter] Recommended downloads for this machine") + "\n")
+	b.WriteString("  [d] Manual Hugging Face repository\n")
 	b.WriteString("  [m] Point at an existing model directory\n")
 	b.WriteString("  [q] Quit\n")
 	return b.String()
@@ -783,6 +812,83 @@ func (m Model) viewTunedPicker() string {
 	return b.String()
 }
 
+func (m Model) updateRecommended(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			if len(m.models) == 0 {
+				m.screen = ScreenFirstRun
+			} else {
+				m.screen = ScreenMain
+			}
+			return m, nil
+		case "up", "k":
+			if len(m.recommendations) == 0 {
+				return m, nil
+			}
+			m.selectedRecommendation--
+			if m.selectedRecommendation < 0 {
+				m.selectedRecommendation = len(m.recommendations) - 1
+			}
+		case "down", "j":
+			if len(m.recommendations) == 0 {
+				return m, nil
+			}
+			m.selectedRecommendation++
+			if m.selectedRecommendation >= len(m.recommendations) {
+				m.selectedRecommendation = 0
+			}
+		case "enter":
+			if len(m.recommendations) > 0 && m.selectedRecommendation >= 0 && m.selectedRecommendation < len(m.recommendations) {
+				m.launchRequest = &LaunchRequest{DownloadRepo: m.recommendations[m.selectedRecommendation].Repo}
+				return m, tea.Quit
+			}
+		case "d", "D":
+			m.screen = ScreenDownload
+			m.inputMode = "download"
+			m.input.SetValue("")
+			m.input.Placeholder = "Hugging Face repo"
+			m.input.Focus()
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m Model) viewRecommended() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("═══ Recommended Downloads ═══") + "\n")
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString("  " + recommend.CatalogAttribution() + "\n\n")
+
+	if len(m.recommendations) == 0 {
+		b.WriteString(warningStyle.Render("  No safe recommendation fits the detected RAM/VRAM."))
+		b.WriteString("\n  [d] Manual Hugging Face repository  [Esc] Back\n")
+		return b.String()
+	}
+
+	for i, rec := range m.recommendations {
+		prefix := "  "
+		if i == m.selectedRecommendation {
+			prefix = selectedStyle.Render("▸ ")
+		}
+		line := fmt.Sprintf("%d. %s", i+1, rec.Name)
+		if i == m.selectedRecommendation {
+			b.WriteString(prefix + selectedStyle.Render(line) + "\n")
+		} else {
+			b.WriteString(prefix + line + "\n")
+		}
+		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s | %.1fGB | %s | %s", rec.Repo, rec.SizeGB, rec.Fit, rec.BackendHint)) + "\n")
+		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s; %s", rec.Reason, rec.Notes)) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(highlightStyle.Render("  [Enter] Download selected"))
+	b.WriteString("\n  [d] Manual repo  [Esc] Back  [↑/↓] Navigate\n")
+	return b.String()
+}
+
 func (m Model) viewInputScreen() string {
 	var b strings.Builder
 	var title string
@@ -884,7 +990,7 @@ func computeRecommendation(caps *detect.Capabilities, model ModelItem) *LaunchRe
 	if fitsSingle {
 		// Model fits on one GPU — optimal case
 		rec.UseGPU = true
-		rec.GPULayers = -1 // all layers
+		rec.GPULayers = -1                                         // all layers
 		rec.ContextSize = min(32768, modelNumLayers(model)*1024/4) // rough heuristic
 		if rec.ContextSize < 4096 {
 			rec.ContextSize = 4096
@@ -1147,21 +1253,22 @@ func (m Model) buildArgs() []string {
 
 // LaunchRequest is returned when the user chooses to launch a model.
 type LaunchRequest struct {
-	ModelPath   string
-	Port        int
-	CtxSize     int
-	KVPlacement string
-	KVQuality   string
-	GPULayers   int
-	FlashAttn   bool
-	Parallel    int
-	Vision      bool
-	Backend     string
-	TuneCache   string
-	AITune      bool
+	DownloadRepo string
+	ModelPath    string
+	Port         int
+	CtxSize      int
+	KVPlacement  string
+	KVQuality    string
+	GPULayers    int
+	FlashAttn    bool
+	Parallel     int
+	Vision       bool
+	Backend      string
+	TuneCache    string
+	AITune       bool
 	AITuneRounds int
-	Benchmark   bool
-	KeepAlive   bool
+	Benchmark    bool
+	KeepAlive    bool
 }
 
 // Run starts the TUI and returns a launch request if the user chose to launch.

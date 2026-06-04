@@ -765,6 +765,14 @@ func cmdGUI() {
 
 	// Load config for cache directory
 	cfg, _ := config.Load()
+	if req.DownloadRepo != "" {
+		d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
+		if err := d.Run(req.DownloadRepo, caps); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	be := findBackend(caps)
 	if be == nil {
