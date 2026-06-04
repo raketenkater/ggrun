@@ -26,6 +26,9 @@ scripts/bench-v3-throughput.sh model.gguf   --server-bin /path/to/llama-server  
 Generated benchmark directories under `.benchmarks/` are ignored. Commit only
 curated summaries that include the exact command and hardware description.
 
+For launch-ready 4B, 27B, and MoE tables, see
+[launch-performance.md](launch-performance.md).
+
 ## Required Fields
 
 For each published result, include:

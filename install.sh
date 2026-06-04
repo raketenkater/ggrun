@@ -20,6 +20,9 @@
 #   LLM_INSTALL_MODEL_DIR=<dir>                           default: ~/ai_models
 #   LLM_INSTALL_BACKEND_ROOT=<dir>                         default: ~
 #   LLM_INSTALL_PY_DEPS=auto|install|skip                  default: auto
+#   LLM_INSTALL_GO=auto|system|download|skip                default: auto
+#   LLM_INSTALL_GO_VERSION=<version>                        default: go directive in go/go.mod
+#   LLM_INSTALL_GO_ROOT=<dir>                               default: $LLM_INSTALL_BACKEND_ROOT/.llm-server-go
 #   LLM_INSTALL_MAIN=go|bash                               default: go
 #   LLM_INSTALL_NONINTERACTIVE=1                          skip prompts
 
@@ -32,10 +35,15 @@ INSTALL_DIR="${LLM_INSTALL_PREFIX:-$HOME/.local/bin}"
 MODEL_DIR="${LLM_INSTALL_MODEL_DIR:-$HOME/ai_models}"
 BACKEND_ROOT="${LLM_INSTALL_BACKEND_ROOT:-$HOME}"
 BACKEND_CHOICE="${LLM_INSTALL_BACKEND:-auto}"
+BACKEND_REQUEST="$BACKEND_CHOICE"
 INSTALL_MODE="${LLM_INSTALL_MODE:-auto}"
 INSTALL_RELEASE="${LLM_INSTALL_RELEASE:-latest}"
 INSTALL_RELEASE_DIR="${LLM_INSTALL_RELEASE_DIR:-}"
 PY_DEPS_MODE="${LLM_INSTALL_PY_DEPS:-auto}"
+GO_MODE="${LLM_INSTALL_GO:-auto}"
+GO_VERSION_OVERRIDE="${LLM_INSTALL_GO_VERSION:-}"
+GO_BOOTSTRAP_ROOT="${LLM_INSTALL_GO_ROOT:-$BACKEND_ROOT/.llm-server-go}"
+GO_CMD=""
 NONINTERACTIVE="${LLM_INSTALL_NONINTERACTIVE:-0}"
 MAIN_IMPL="${LLM_INSTALL_MAIN:-go}"
 [[ ! -t 0 ]] && NONINTERACTIVE=1   # piped via curl | bash → no stdin
@@ -64,6 +72,10 @@ esac
 case "$PY_DEPS_MODE" in
     auto|install|skip) ;;
     *) err "unknown python dependency mode: $PY_DEPS_MODE"; exit 1 ;;
+esac
+case "$GO_MODE" in
+    auto|system|download|skip) ;;
+    *) err "unknown Go install mode: $GO_MODE"; exit 1 ;;
 esac
 case "$MAIN_IMPL" in
     go|bash) ;;
@@ -94,6 +106,35 @@ ensure_source_repo() {
 
 # ── Stage 2: detect platform + backend ──────────────────────────────────────
 OS="$(uname -s)"
+
+cuda_nvcc_path() {
+    if command -v nvcc >/dev/null 2>&1; then
+        command -v nvcc
+        return 0
+    fi
+    if [[ -n "${CUDA_PATH:-}" && -x "${CUDA_PATH}/bin/nvcc" ]]; then
+        printf '%s\n' "${CUDA_PATH}/bin/nvcc"
+        return 0
+    fi
+    if [[ -x /usr/local/cuda/bin/nvcc ]]; then
+        printf '%s\n' /usr/local/cuda/bin/nvcc
+        return 0
+    fi
+    return 1
+}
+
+has_cuda_toolkit() {
+    local nvcc
+    nvcc="$(cuda_nvcc_path 2>/dev/null || true)"
+    [[ -n "$nvcc" ]] || return 1
+    "$nvcc" --version >/dev/null 2>&1
+}
+
+vulkan_available() {
+    command -v vulkaninfo >/dev/null 2>&1 || return 1
+    vulkaninfo --summary 2>/dev/null | grep -qi "GPU\|deviceName"
+}
+
 detect_backend() {
     if [[ "$OS" == "Darwin" ]]; then echo metal; return; fi
     if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
@@ -103,7 +144,7 @@ detect_backend() {
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
         echo cuda; return
     fi
-    if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary 2>/dev/null | grep -qi "GPU\|deviceName"; then
+    if vulkan_available; then
         echo vulkan; return
     fi
     echo cpu
@@ -174,11 +215,132 @@ install_go_as_main() {
     ok "Installed Go llm-server as primary command"
 }
 
+go_required_version() {
+    if [[ -n "$GO_VERSION_OVERRIDE" ]]; then
+        printf '%s\n' "${GO_VERSION_OVERRIDE#go}"
+        return
+    fi
+    if [[ -n "$SRC_DIR" && -f "$SRC_DIR/go/go.mod" ]]; then
+        awk '$1 == "go" { print $2; exit }' "$SRC_DIR/go/go.mod"
+        return
+    fi
+    printf '1.24.13\n'
+}
+
+go_version_parts() {
+    local v="${1#go}" a b c
+    v="${v%%[-+ ]*}"
+    IFS=. read -r a b c <<<"$v"
+    printf '%d %d %d\n' "${a:-0}" "${b:-0}" "${c:-0}"
+}
+
+go_version_at_least() {
+    local have="$1" need="$2" ha hb hc na nb nc
+    read -r ha hb hc < <(go_version_parts "$have")
+    read -r na nb nc < <(go_version_parts "$need")
+    (( ha > na )) && return 0
+    (( ha < na )) && return 1
+    (( hb > nb )) && return 0
+    (( hb < nb )) && return 1
+    (( hc >= nc ))
+}
+
+find_system_go() {
+    local cmd have need
+    command -v go >/dev/null 2>&1 || return 1
+    cmd="$(command -v go)"
+    have="$($cmd env GOVERSION 2>/dev/null || true)"
+    if [[ -z "$have" ]]; then
+        have="$($cmd version 2>/dev/null | awk '{ print $3; exit }')"
+    fi
+    [[ -n "$have" ]] || return 1
+    need="$(go_required_version)"
+    if go_version_at_least "$have" "$need"; then
+        GO_CMD="$cmd"
+        ok "Using system Go $have"
+        return 0
+    fi
+    warn "System Go $have is older than required Go $need"
+    return 1
+}
+
+go_download_platform() {
+    local goos goarch arch
+    arch="$(uname -m)"
+    case "$OS" in
+        Linux) goos="linux" ;;
+        Darwin) goos="darwin" ;;
+        *) return 1 ;;
+    esac
+    case "$arch" in
+        x86_64|amd64) goarch="amd64" ;;
+        arm64|aarch64) goarch="arm64" ;;
+        armv6l|armv7l) goarch="armv6l" ;;
+        *) return 1 ;;
+    esac
+    printf '%s-%s\n' "$goos" "$goarch"
+}
+
+download_go_toolchain() {
+    local need platform root url tmp archive extracted_go
+    need="$(go_required_version)"
+    platform="$(go_download_platform)" || { warn "No Go toolchain download for $(uname -s)/$(uname -m)"; return 1; }
+    root="$GO_BOOTSTRAP_ROOT/go$need.$platform"
+    if [[ -x "$root/bin/go" ]] && go_version_at_least "$($root/bin/go env GOVERSION 2>/dev/null || true)" "$need"; then
+        GO_CMD="$root/bin/go"
+        ok "Using bundled Go at $root"
+        return 0
+    fi
+    command -v curl >/dev/null 2>&1 || { warn "curl required to download Go"; return 1; }
+    command -v tar >/dev/null 2>&1 || { warn "tar required to unpack Go"; return 1; }
+
+    url="https://go.dev/dl/go$need.$platform.tar.gz"
+    say "── Installing Go toolchain: go$need ($platform) ──"
+    tmp="$(mktemp -d -t llm-server-go.XXXXXX)"
+    archive="$tmp/go.tar.gz"
+    if ! curl -fL "$url" -o "$archive"; then
+        rm -rf "$tmp"
+        warn "Go download failed: $url"
+        return 1
+    fi
+    if ! tar -xzf "$archive" -C "$tmp"; then
+        rm -rf "$tmp"
+        warn "Go archive unpack failed"
+        return 1
+    fi
+    extracted_go="$tmp/go"
+    [[ -x "$extracted_go/bin/go" ]] || { rm -rf "$tmp"; warn "Downloaded Go archive did not contain bin/go"; return 1; }
+    mkdir -p "$GO_BOOTSTRAP_ROOT"
+    rm -rf "$root"
+    mv "$extracted_go" "$root"
+    rm -rf "$tmp"
+    GO_CMD="$root/bin/go"
+    ok "Installed Go at $root"
+}
+
+ensure_go_toolchain() {
+    [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]] || return 1
+    case "$GO_MODE" in
+        skip)
+            find_system_go || return 1
+            ;;
+        system)
+            find_system_go || { warn "Go is required; install Go or rerun with LLM_INSTALL_GO=auto"; return 1; }
+            ;;
+        download)
+            download_go_toolchain
+            ;;
+        auto)
+            find_system_go || download_go_toolchain
+            ;;
+    esac
+}
+
 build_go_binary() {
     local out="$1"
     [[ -n "$SRC_DIR" && -f "$SRC_DIR/go/go.mod" ]] || return 1
-    command -v go >/dev/null 2>&1 || return 1
-    (cd "$SRC_DIR/go" && go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/llm-server)
+    ensure_go_toolchain || return 1
+    (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="-s -w" -o "$out" ./cmd/llm-server)
 }
 
 link_backend_binary() {
@@ -220,10 +382,8 @@ EOF
 install_release_bundle() {
     local platform asset url tmp archive payload_root found_backend=0
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
-    # CUDA/ik_llama artifacts need a CUDA-capable build host and driver/toolkit
-    # compatibility checks. The default public release workflow intentionally
-    # does not publish CUDA bundles from generic GitHub-hosted runners.
-    [[ "$BACKEND_CHOICE" == "cuda" ]] && return 1
+    # CUDA release bundles are optional manual assets. If none exists, auto mode
+    # can still fall back to Vulkan or CPU before attempting a source build.
     command -v curl >/dev/null 2>&1 || return 1
     command -v tar >/dev/null 2>&1 || return 1
     platform="$(platform_slug)" || return 1
@@ -275,6 +435,19 @@ install_release_bundle() {
     (( found_backend ))
 }
 
+choose_cuda_auto_fallback_backend() {
+    [[ "$BACKEND_REQUEST" == "auto" && "$BACKEND_CHOICE" == "cuda" ]] || return 1
+    has_cuda_toolkit && return 1
+    if vulkan_available; then
+        BACKEND_CHOICE="vulkan"
+        warn "CUDA toolkit not found and no CUDA bundle is available; falling back to Vulkan."
+    else
+        BACKEND_CHOICE="cpu"
+        warn "CUDA toolkit not found and no CUDA bundle is available; falling back to CPU."
+    fi
+    ok "Selected fallback backend: $BACKEND_CHOICE"
+}
+
 # ── Stage 3: install scripts ────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR" "$MODEL_DIR"
 RELEASE_INSTALLED=0
@@ -284,11 +457,13 @@ if [[ "$INSTALL_MODE" == "auto" || "$INSTALL_MODE" == "release" ]]; then
         RELEASE_INSTALLED=1
     elif [[ "$INSTALL_MODE" == "release" ]]; then
         err "No compatible release bundle found for $(platform_slug 2>/dev/null || echo unknown)-$BACKEND_CHOICE"
-        [[ "$BACKEND_CHOICE" == "cuda" ]] && err "CUDA currently uses source builds unless you publish a manually built CUDA bundle."
+        [[ "$BACKEND_CHOICE" == "cuda" ]] && err "CUDA release mode requires a manually attached CUDA bundle for this platform."
         exit 1
     else
-        if [[ "$BACKEND_CHOICE" == "cuda" ]]; then
-            warn "CUDA backend selected; no generic prebuilt CUDA bundle is used. Falling back to ik_llama.cpp source build."
+        if choose_cuda_auto_fallback_backend && install_release_bundle; then
+            RELEASE_INSTALLED=1
+        elif [[ "$BACKEND_CHOICE" == "cuda" ]]; then
+            warn "No compatible CUDA release bundle found; falling back to ik_llama.cpp source build."
         else
             warn "No compatible release bundle found; falling back to local script install + source build."
         fi
@@ -325,7 +500,7 @@ else
             ok "Installed existing llm-server-go"
             install_go_as_main "$INSTALL_DIR/llm-server-go" || true
         else
-            warn "Could not build Go llm-server; install Go or use a release bundle, then rerun the installer."
+            warn "Could not build Go llm-server; rerun with LLM_INSTALL_GO=auto or use a release bundle."
         fi
     elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
         install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
@@ -337,6 +512,11 @@ else
         ok "Installed model indexer to $MODEL_DIR"
     fi
     install_gui_wrapper
+fi
+
+if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR/llm-server" ]]; then
+    err "Go llm-server was not installed. Install Go or rerun with LLM_INSTALL_GO=auto."
+    exit 1
 fi
 
 # ── Stage 4: python deps (for downloader) ──────────────────────────────────
@@ -408,13 +588,18 @@ if [[ -n "$BACKEND_REPO" ]]; then
         if (( ${#missing[@]} )); then
             warn "Missing build dependencies: ${missing[*]}"
             warn "Install them, then rerun: LLM_INSTALL_MODE=build ./install.sh"
-        elif [[ "$OS" == "Linux" && "$BACKEND_CHOICE" == "cuda" && ! -d /usr/local/cuda && ! -n "${CUDA_PATH:-}" ]]; then
-            warn "CUDA toolkit not found. Install CUDA toolkit/nvcc, then rerun: LLM_INSTALL_MODE=build ./install.sh"
+        elif [[ "$OS" == "Linux" && "$BACKEND_CHOICE" == "cuda" ]] && ! has_cuda_toolkit; then
+            warn "CUDA toolkit not found. Install CUDA toolkit/nvcc, attach a CUDA release bundle, or rerun with LLM_INSTALL_BACKEND=vulkan."
         else
             if [[ ! -d "$BACKEND_DIR/.git" ]]; then
                 git clone "$BACKEND_REPO" "$BACKEND_DIR" || { err "clone failed"; exit 1; }
             fi
-            cmake -S "$BACKEND_DIR" -B "$BACKEND_BUILD" -DCMAKE_BUILD_TYPE=Release "${BACKEND_CMAKE[@]}" \
+            cmake_env=()
+            if [[ "$BACKEND_CHOICE" == "cuda" ]]; then
+                nvcc_path="$(cuda_nvcc_path 2>/dev/null || true)"
+                [[ -n "$nvcc_path" ]] && cmake_env=(CUDACXX="$nvcc_path")
+            fi
+            env "${cmake_env[@]}" cmake -S "$BACKEND_DIR" -B "$BACKEND_BUILD" -DCMAKE_BUILD_TYPE=Release "${BACKEND_CMAKE[@]}" \
                 && cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-server \
                 && ok "Built llama-server at $BACKEND_BUILD/bin/llama-server" \
                 && link_backend_binary "$BACKEND_BUILD/bin/llama-server" \

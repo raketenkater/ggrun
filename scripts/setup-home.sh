@@ -53,6 +53,21 @@ LLM_INSTALL_NONINTERACTIVE="$NONINTERACTIVE" \
 LLM_INSTALL_MAIN=go \
 "$ROOT/install.sh"
 
+if [[ ! -x "$APP_HOME/bin/llm-server" ]]; then
+    err "llm-server launcher was not installed. See log: $LOG_FILE"
+    exit 1
+fi
+
+if [[ ! -x "$APP_HOME/bin/llm-server-gui" ]]; then
+    cat >"$APP_HOME/bin/llm-server-gui" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+exec "$DIR/llm-server" gui "$@"
+EOF
+    chmod 0755 "$APP_HOME/bin/llm-server-gui"
+fi
+
 backend_bin=""
 if [[ -x "$APP_HOME/bin/llama-server" ]]; then
     backend_bin="$APP_HOME/bin/llama-server"
@@ -122,7 +137,7 @@ chmod 0755 "$APP_HOME/run"
 cat >"$APP_HOME/gui" <<EOF
 #!/usr/bin/env bash
 source "$APP_HOME/env.sh"
-exec "$APP_HOME/bin/llm-server-gui" "\$@"
+exec "$APP_HOME/bin/llm-server" gui "\$@"
 EOF
 chmod 0755 "$APP_HOME/gui"
 

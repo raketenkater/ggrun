@@ -20,6 +20,7 @@ MAX_TOKENS=256
 PROMPT_PROFILE="${BENCH_PROMPT_PROFILE:-chat}"
 RAW_FLAGS=()
 COMMON_FLAGS=()
+SKIP_RAW=0
 
 usage() {
     cat >&2 <<'EOF'
@@ -38,6 +39,7 @@ Options:
   --profile <name>       Prompt profile: chat|long|repeat|code|spec (default: chat)
   --raw-flag <arg>       Extra raw llama-server arg; repeat for values too
   --flag <arg>           Extra wrapper arg; repeat for values too
+  --skip-raw             Compare wrappers only; useful for v2/v3 or large MoE runs
 
 Examples:
   scripts/bench-v3-comparison.sh ~/ai_models/qwen.gguf --server-bin ~/llama.cpp/build/bin/llama-server
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
         --profile) PROMPT_PROFILE="$2"; shift 2 ;;
         --raw-flag) RAW_FLAGS+=("$2"); shift 2 ;;
         --flag) COMMON_FLAGS+=("$2"); shift 2 ;;
+        --skip-raw) SKIP_RAW=1; shift ;;
         -h|--help) usage ;;
         *) echo "unknown option: $1" >&2; usage ;;
     esac
@@ -95,6 +98,32 @@ BASH_ABS=""
 if [[ -n "$BASH_BIN" ]]; then
     BASH_ABS="$(cd "$(dirname "$BASH_BIN")" && pwd)/$(basename "$BASH_BIN")"
 fi
+
+RUN_PIDS=()
+
+stop_server() {
+    local pid="${1:-}"
+    [[ -n "$pid" ]] || return 0
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        if ! ps -p "$pid" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+cleanup_servers() {
+    local pid
+    for pid in "${RUN_PIDS[@]:-}"; do
+        stop_server "$pid"
+    done
+}
+trap cleanup_servers EXIT
 
 wait_health() {
     local port="$1" pid="${2:-}" deadline=$((SECONDS + 900))
@@ -302,36 +331,44 @@ run_raw_once() {
     if [[ "$CTX_SIZE" =~ ^[0-9]+$ ]]; then
         raw_ctx_args=(--ctx-size "$CTX_SIZE")
     fi
-    "$SERVER_ABS" -m "$MODEL_ABS" --host 127.0.0.1 --port "$port" --jinja "${raw_ctx_args[@]}" "${RAW_FLAGS[@]}" >"$log" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$SERVER_ABS" -m "$MODEL_ABS" --host 127.0.0.1 --port "$port" --jinja "${raw_ctx_args[@]}" "${RAW_FLAGS[@]}" >"$log" 2>&1 &
+    else
+        "$SERVER_ABS" -m "$MODEL_ABS" --host 127.0.0.1 --port "$port" --jinja "${raw_ctx_args[@]}" "${RAW_FLAGS[@]}" >"$log" 2>&1 &
+    fi
     local pid=$!
+    RUN_PIDS+=("$pid")
     if ! wait_health "$port" "$pid"; then
         echo "raw server failed health check; see $log" >&2
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        stop_server "$pid"
         return 1
     fi
     bench_http "$port" "$(basename "$MODEL_ABS")" "$PROMPT_PROFILE" "$MAX_TOKENS" >"$json"
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    stop_server "$pid"
 }
 
 run_wrapper_once() {
     local label="$1" bin="$2" round="$3" port="$4"
     local log="$OUT_DIR/$label-$round.log" json="$OUT_DIR/$label-$round.json"
     echo "[$label] round $round on port $port"
-    LLAMA_SERVER="$SERVER_ABS" "$bin" "$MODEL_ABS" --port "$port" \
-        --ctx-size "$CTX_SIZE" --backend "$BACKEND" --server-bin "$SERVER_ABS" \
-        "${COMMON_FLAGS[@]}" >"$log" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        LLAMA_SERVER="$SERVER_ABS" setsid "$bin" "$MODEL_ABS" --port "$port" \
+            --ctx-size "$CTX_SIZE" --backend "$BACKEND" --server-bin "$SERVER_ABS" \
+            "${COMMON_FLAGS[@]}" >"$log" 2>&1 &
+    else
+        LLAMA_SERVER="$SERVER_ABS" "$bin" "$MODEL_ABS" --port "$port" \
+            --ctx-size "$CTX_SIZE" --backend "$BACKEND" --server-bin "$SERVER_ABS" \
+            "${COMMON_FLAGS[@]}" >"$log" 2>&1 &
+    fi
     local pid=$!
+    RUN_PIDS+=("$pid")
     if ! wait_health "$port" "$pid"; then
         echo "$label server failed health check; see $log" >&2
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        stop_server "$pid"
         return 1
     fi
     bench_http "$port" "$(basename "$MODEL_ABS")" "$PROMPT_PROFILE" "$MAX_TOKENS" >"$json"
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    stop_server "$pid"
 }
 
 cat >"$OUT_DIR/metadata.txt" <<EOF
@@ -344,12 +381,15 @@ backend=$BACKEND
 rounds=$ROUNDS
 max_tokens=$MAX_TOKENS
 prompt_profile=$PROMPT_PROFILE
+skip_raw=$SKIP_RAW
 created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
 for round in $(seq 1 "$ROUNDS"); do
     base=$((PORT_BASE + (round - 1) * 10))
-    run_raw_once "$round" "$base" || true
+    if [[ "$SKIP_RAW" != "1" ]]; then
+        run_raw_once "$round" "$base" || true
+    fi
     if [[ -n "$BASH_ABS" ]]; then
         run_wrapper_once v2-bash "$BASH_ABS" "$round" "$((base + 1))" || true
     fi
@@ -369,7 +409,8 @@ summary="$OUT_DIR/summary.md"
     echo "| Target | Round | Decode tok/s | Draft accepted | Output |"
     echo "|---|---:|---:|---:|---|"
     for round in $(seq 1 "$ROUNDS"); do
-        targets=(raw)
+        targets=()
+        [[ "$SKIP_RAW" != "1" ]] && targets+=(raw)
         [[ -n "$BASH_ABS" ]] && targets+=(v2-bash)
         targets+=(v3-go)
         for target in "${targets[@]}"; do
