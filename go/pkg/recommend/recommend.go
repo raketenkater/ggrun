@@ -14,7 +14,8 @@ import (
 var catalogJSON []byte
 
 // Candidate is a GGUF repository that llm-server can offer as a first-run
-// download. Scores are product signals refreshed from the checked-in catalog.
+// download. Quality is the intelligence-first ranking signal refreshed from
+// the checked-in catalog; speed is display metadata only.
 type Candidate struct {
 	Name           string  `json:"name"`
 	Repo           string  `json:"repo"`
@@ -48,7 +49,7 @@ type catalogDoc struct {
 	Candidates  []Candidate `json:"candidates"`
 }
 
-const Attribution = "Artificial Analysis leaderboard data is used when available; cached locally and filtered by llm-server hardware fit"
+const Attribution = "Artificial Analysis intelligence data is used when available; cached locally and filtered by llm-server hardware fit"
 
 func Shortlist() []Candidate {
 	var doc catalogDoc
@@ -147,15 +148,26 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 		return Recommendation{}, false
 	}
 
-	score := c.Quality*10 + c.Speed + fitTier*80
-	if fitTier <= 2 && c.SizeGB > 20 {
-		score -= 120
-	}
-	if c.MoE && fitTier < 3 {
-		score -= 80
-	}
+	score := intelligenceScore(c)*100 + fitTier
 	rec.Score = score
 	return rec, true
+}
+
+func intelligenceScore(c Candidate) int {
+	if c.Quality > 0 {
+		return c.Quality
+	}
+	if c.AAIntelligence > 0 {
+		score := int(c.AAIntelligence*1.65 + 0.5)
+		if score < 1 {
+			return 1
+		}
+		if score > 100 {
+			return 100
+		}
+		return score
+	}
+	return 0
 }
 
 func backendHint(caps *detect.Capabilities) string {
@@ -186,7 +198,7 @@ func hasBackend(caps *detect.Capabilities, needle string) bool {
 
 func fallbackShortlist() []Candidate {
 	return []Candidate{
-		{Name: "Qwen3.5 4B Instruct", Repo: "unsloth/Qwen3.5-4B-GGUF", Family: "Qwen", SizeGB: 2.8, Quality: 66, Speed: 95, Notes: "small, fast, strong default for first local runs"},
+		{Name: "Qwen3.6 27B Instruct", Repo: "unsloth/Qwen3.6-27B-GGUF", Family: "Qwen", SizeGB: 18.5, Quality: 84, Speed: 48, Notes: "current dense Qwen quality target for capable local machines"},
 		{Name: "Llama 3.2 3B Instruct", Repo: "bartowski/Llama-3.2-3B-Instruct-GGUF", Family: "Llama", SizeGB: 2.2, Quality: 58, Speed: 98, Notes: "very small fallback for laptops and CPU installs"},
 		{Name: "Llama 3.1 8B Instruct", Repo: "MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF", Family: "Llama", SizeGB: 5.0, Quality: 70, Speed: 82, Notes: "balanced quality and speed on 8-12GB GPUs"},
 	}

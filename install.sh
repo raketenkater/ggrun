@@ -29,7 +29,6 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/raketenkater/llm-server.git"
-RAW_URL="https://raw.githubusercontent.com/raketenkater/llm-server/main"
 GITHUB_REPO="raketenkater/llm-server"
 INSTALL_DIR="${LLM_INSTALL_PREFIX:-$HOME/.local/bin}"
 MODEL_DIR="${LLM_INSTALL_MODEL_DIR:-$HOME/ai_models}"
@@ -486,10 +485,6 @@ else
     install_source_file "tools/models/model_index.py" "model_index.py" 0755 || warn "model_index.py not found in source; skipping"
     install_source_file "tools/download/download_any_gguf.py" "download_any_gguf.py" 0755 || warn "download_any_gguf.py not found in source; skipping"
     install_legacy_bash_shim
-    if [[ -f "$SRC_DIR/tools/download/download_any_gguf.py" && ! -f "$MODEL_DIR/download_any_gguf.py" ]]; then
-        install -m 0755 "$SRC_DIR/tools/download/download_any_gguf.py" "$MODEL_DIR/download_any_gguf.py"
-        ok "Installed downloader to $MODEL_DIR"
-    fi
     if [[ -f "$SRC_DIR/go/go.mod" && "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]]; then
         say "── Building Go llm-server ──"
         if build_go_binary "$INSTALL_DIR/llm-server-go"; then
@@ -506,10 +501,6 @@ else
         install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
         ok "Installed llm-server-go"
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
-    fi
-    if [[ -f "$SRC_DIR/tools/models/model_index.py" && ! -f "$MODEL_DIR/model_index.py" ]]; then
-        install -m 0755 "$SRC_DIR/tools/models/model_index.py" "$MODEL_DIR/model_index.py"
-        ok "Installed model indexer to $MODEL_DIR"
     fi
     install_gui_wrapper
 fi

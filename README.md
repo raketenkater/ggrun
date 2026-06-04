@@ -32,23 +32,24 @@ cd llm-server
 ./setup.sh
 ```
 
-This creates an app home under `~/llm-server`:
+This creates a clean app home under `~/llm-server`:
 
 ```text
-bin/      llm-server, llm-server-gui, bundled backend when available
-models/   GGUF models and downloaded vision projectors
-cache/    AI Tune and model index cache
-logs/     setup and server logs
-config/   local config loaded by the launcher
-src/      backend source/build fallback
+llm-server       CLI launcher
+llm-server-gui   terminal GUI launcher
+models/          GGUF models and downloaded vision projectors
+.bin/            Go binary, tools, and bundled backend when available
+.config/         local config loaded by the launcher
+.cache/          AI Tune and model index cache
+.logs/           setup and server logs
+.src/            backend source/build fallback
 ```
 
 Use it with:
 
 ```bash
-source ~/llm-server/env.sh
-llm-server-gui
-llm-server <repo/name> --download
+~/llm-server/llm-server-gui
+~/llm-server/llm-server <repo/name> --download
 ```
 
 Classic install to `~/.local/bin`:
@@ -102,8 +103,8 @@ llm-server model.gguf
 - Multi-GPU placement using VRAM, free memory, and PCIe weighting.
 - MoE-aware expert placement with `-ot` / `--n-cpu-moe` fallback paths.
 - AI Tune: benchmarks candidate flag sets and caches the fastest valid result.
-- Model downloader for Hugging Face GGUF repos with hardware-aware quant choice.
-- GUI recommended-download fast path ranked by local hardware fit and cached leaderboard signals.
+- Model downloader that searches Hugging Face GGUF repos and picks a hardware-aware quant.
+- GUI recommended-download fast path ranked by intelligence signal after hardware fit.
 - Vision projector lookup and validation for multimodal GGUF models.
 - Speculative decoding modes for MTP, EAGLE-3, validated draft models, and
   explicit ngram modes.
@@ -117,7 +118,7 @@ llm-server model.gguf
 llm-server ~/models/model.gguf
 
 # Download a GGUF from Hugging Face, then launch it
-llm-server unsloth/Qwen3.5-27B-GGUF --download
+llm-server unsloth/Qwen3.6-27B-GGUF --download
 
 # Run AI Tune once, then reuse the cached result
 llm-server model.gguf --ai-tune

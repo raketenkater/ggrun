@@ -46,6 +46,7 @@ func findScript(appHome string) string {
 	// Check configured app home
 	if appHome != "" {
 		candidates = append(candidates,
+			filepath.Join(appHome, ".bin", "download_any_gguf.py"),
 			filepath.Join(appHome, "bin", "download_any_gguf.py"),
 			filepath.Join(appHome, "download_any_gguf.py"),
 		)

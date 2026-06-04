@@ -82,6 +82,9 @@ func Path() string {
 		return p
 	}
 	if p := os.Getenv("LLM_APP_HOME"); p != "" {
+		if f := filepath.Join(p, ".config", "config"); fileExists(f) {
+			return f
+		}
 		if f := filepath.Join(p, "config", "config"); fileExists(f) {
 			return f
 		}

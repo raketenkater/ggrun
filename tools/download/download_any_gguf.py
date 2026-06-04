@@ -5,10 +5,30 @@ Download GGUF model files from Hugging Face repositories.
 """
 
 import os
+import re
 import sys
 import subprocess
 from pathlib import Path
 from huggingface_hub import hf_hub_download, list_repo_files, HfApi
+
+TRUSTED_GGUF_OWNERS = {
+    "unsloth": 120,
+    "bartowski": 95,
+    "maziyarpanahi": 80,
+    "prithivmlmods": 70,
+}
+
+FAMILY_PREFIXES = {
+    "qwen",
+    "llama",
+    "mistral",
+    "mixtral",
+    "phi",
+    "gemma",
+    "deepseek",
+    "kimi",
+    "minimax",
+}
 
 def clear_screen():
     """Clear terminal screen"""
@@ -27,7 +47,7 @@ def get_hf_repo():
     print("\nEnter Hugging Face model repository")
     print("   Format: username/model-name")
     print("   Examples:")
-    print("     - unsloth/Qwen3.5-35B-A3B-GGUF")
+    print("     - unsloth/Qwen3.6-35B-A3B-GGUF")
     print("     - bartowski/Llama-3.2-3B-Instruct-GGUF")
     print("     - MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF")
     print()
@@ -38,6 +58,154 @@ def get_hf_repo():
             return repo
         print("Repository cannot be empty.\n")
 
+
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _tokens(text):
+    stop = {"gguf", "instruct", "chat", "base", "model", "models", "quant", "quants", "dynamic"}
+    return {t for t in _norm(text).split() if t and t not in stop}
+
+
+def _version_tuples(text):
+    versions = set()
+    for match in re.finditer(r"(?<!\d)(\d+)[.-](\d+)(?:[.-](\d+))?", (text or "").lower()):
+        versions.add(tuple(part for part in match.groups() if part is not None))
+    return versions
+
+
+def _size_tokens(tokens):
+    return {t for t in tokens if re.fullmatch(r"a?\d+(?:b|m)", t)}
+
+
+def _family_match(left, right):
+    for family in FAMILY_PREFIXES:
+        if any(t.startswith(family) for t in left) and any(t.startswith(family) for t in right):
+            return True
+    return False
+
+
+def _repo_name(repo):
+    return (repo or "").split("/", 1)[-1]
+
+
+def _repo_owner(repo):
+    return (repo or "").split("/", 1)[0].lower() if "/" in (repo or "") else ""
+
+
+def _model_query(repo):
+    name = _repo_name(repo)
+    name = re.sub(r"(?i)(?:-?mtp)?-?gguf.*$", "", name)
+    name = re.sub(r"(?i)-(?:ud-)?(?:iq|q)\d.*$", "", name)
+    return name.replace("_", " ").replace("-", " ").strip()
+
+
+def _repo_relevant(candidate_repo, target_repo):
+    target_query = _model_query(target_repo)
+    target_tokens = _tokens(target_query)
+    candidate_tokens = _tokens(candidate_repo)
+    if not target_tokens or not candidate_tokens:
+        return False
+    if not _family_match(target_tokens, candidate_tokens):
+        return False
+    needed_sizes = _size_tokens(target_tokens)
+    if needed_sizes and not (needed_sizes & candidate_tokens):
+        return False
+    target_versions = _version_tuples(target_query)
+    if target_versions and not (target_versions & _version_tuples(candidate_repo)):
+        return False
+    return True
+
+
+def _quant_fits(quant_list, vram_mb, ram_mb, repo):
+    if not quant_list:
+        return False
+    total_mb = vram_mb + ram_mb
+    if total_mb <= 0:
+        return True
+    active_b = _detect_moe_active_params(repo)
+    is_moe = active_b > 0
+    for _, size_bytes in reversed(quant_list):
+        size_mb = size_bytes / (1024 * 1024)
+        if size_mb + _estimate_overhead_mb(size_mb, is_moe, active_b) <= total_mb:
+            return True
+    return False
+
+
+def _repo_score(candidate_repo, target_repo, quant_list, vram_mb, ram_mb):
+    owner = _repo_owner(candidate_repo)
+    score = TRUSTED_GGUF_OWNERS.get(owner, 25)
+    target_key = _norm(_model_query(target_repo))
+    candidate_key = _norm(_model_query(candidate_repo))
+    if candidate_repo.lower() == target_repo.lower():
+        score += 220
+    if target_key and target_key == candidate_key:
+        score += 160
+    score += 15 * len(_tokens(target_key) & _tokens(candidate_key))
+    if quant_list:
+        score += 80
+    if _quant_fits(quant_list, vram_mb, ram_mb, candidate_repo):
+        score += 40
+    target_has_mtp = "mtp" in target_repo.lower()
+    if "mtp" in candidate_repo.lower() and not target_has_mtp:
+        score -= 60
+    return score
+
+
+def resolve_best_gguf_repo(repo, vram_mb=0, ram_mb=0, search_enabled=True):
+    if not search_enabled:
+        return repo
+    query = _model_query(repo)
+    if not query:
+        return repo
+
+    print(f"\nSearching Hugging Face GGUF repos for: {query}")
+    api = HfApi()
+    candidates = []
+    seen = set()
+
+    def add(candidate):
+        if not candidate:
+            return
+        key = candidate.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    add(repo)
+    try:
+        for model in api.list_models(search=f"{query} GGUF", limit=40):
+            model_id = getattr(model, "modelId", None) or getattr(model, "id", "")
+            if "gguf" not in model_id.lower():
+                continue
+            if _repo_relevant(model_id, repo):
+                add(model_id)
+    except Exception as e:
+        print(f"   HF repo search unavailable: {e}")
+        return repo
+
+    ranked = []
+    for candidate in candidates[:16]:
+        quant_list = list_available_quantizations(candidate)
+        if not quant_list:
+            continue
+        score = _repo_score(candidate, repo, quant_list, vram_mb, ram_mb)
+        ranked.append((score, candidate, quant_list))
+
+    if not ranked:
+        print("   No matching GGUF repo with quant files found; using requested repo.")
+        return repo
+
+    ranked.sort(reverse=True, key=lambda row: row[0])
+    best = ranked[0][1]
+    if best != repo:
+        print(f"   Selected repo: {best} (matched {len(ranked)} GGUF repos)")
+    else:
+        print(f"   Selected repo: {repo} (best match among {len(ranked)} GGUF repos)")
+    return best
 
 def list_available_quantizations(repo):
     """List available quantizations with total file sizes.
@@ -295,7 +463,7 @@ def print_usage_instructions(repo, output_dir):
     )
     
     response = client.chat.completions.create(
-        model="qwen3.5",
+        model="qwen3.6",
         messages=[{"role": "user", "content": "Hello!"}],
     )
     
@@ -335,7 +503,7 @@ def print_quick_examples():
     print("=" * 70)
 
     examples = [
-        ("Qwen3.5-35B-A3B", "unsloth/Qwen3.5-35B-A3B-GGUF"),
+        ("Qwen3.6-35B-A3B", "unsloth/Qwen3.6-35B-A3B-GGUF"),
         ("Qwen3.5-122B-A10B", "unsloth/Qwen3.5-122B-A10B-GGUF"),
         ("Llama 3.3 70B", "bartowski/Llama-3.3-70B-Instruct-GGUF"),
         ("Llama 3.2 3B", "bartowski/Llama-3.2-3B-Instruct-GGUF"),
@@ -360,6 +528,11 @@ def get_args():
     parser.add_argument("--vram", type=int, default=0, help="Available VRAM in MB")
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
     parser.add_argument("--cache-dir", type=str, help="llm-server cache directory")
+    parser.add_argument(
+        "--no-repo-search",
+        action="store_true",
+        help="use the requested repo without searching Hugging Face for matching GGUF repos",
+    )
     return parser.parse_args()
 
 
@@ -414,27 +587,49 @@ def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
         print(f"   Detected MoE model (~{active_b:g}B active params); experts can spill to RAM via offload.")
     print(f"   Total memory budget: {total_mb / 1024:.1f}GB (model + KV cache + compute buffers)")
 
-    best = None
-    for quant_name, size_bytes in reversed(quant_list):
-        size_mb = size_bytes / (1024 * 1024)
-        overhead_mb = _estimate_overhead_mb(size_mb, is_moe, active_b)
-        if size_mb + overhead_mb <= total_mb:
-            fits_vram = size_mb + overhead_mb <= vram_mb
-            if fits_vram:
-                reason = f"Fits entirely in VRAM ({size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead, {vram_mb / 1024:.1f}GB available)"
-            elif is_moe:
-                reason = f"Fits in VRAM+RAM via expert offload ({size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead, {total_mb / 1024:.1f}GB available)"
-            else:
-                reason = f"Fits in VRAM+RAM (dense model; slower than full VRAM; {size_mb / 1024:.1f}GB model + ~{overhead_mb / 1024:.1f}GB overhead)"
-            best = (quant_name, reason)
-            break
+    def largest_under(limit_mb):
+        if limit_mb <= 0:
+            return None
+        for quant_name, size_bytes in reversed(quant_list):
+            size_mb = size_bytes / (1024 * 1024)
+            overhead_mb = _estimate_overhead_mb(size_mb, is_moe, active_b)
+            if size_mb + overhead_mb <= limit_mb:
+                return quant_name, size_mb, overhead_mb
+        return None
 
-    if not best:
-        quant_name, size_bytes = quant_list[0]
-        size_mb = size_bytes / (1024 * 1024)
-        best = (quant_name, f"Smallest available ({size_mb / 1024:.1f}GB); may not fit, consider a smaller model")
+    vram_fit = largest_under(vram_mb)
+    if vram_fit:
+        quant_name, size_mb, overhead_mb = vram_fit
+        reason = (
+            f"Fits entirely in VRAM ({size_mb / 1024:.1f}GB model + "
+            f"~{overhead_mb / 1024:.1f}GB overhead, {vram_mb / 1024:.1f}GB available)"
+        )
+        return quant_name, reason
 
-    return best
+    total_fit = largest_under(total_mb)
+    if total_fit:
+        quant_name, size_mb, overhead_mb = total_fit
+        if is_moe and vram_mb > 0:
+            reason = (
+                f"Fits via MoE expert/RAM offload ({size_mb / 1024:.1f}GB model + "
+                f"~{overhead_mb / 1024:.1f}GB overhead, {total_mb / 1024:.1f}GB available; "
+                "slower than a VRAM-resident quant)"
+            )
+        elif vram_mb > 0:
+            reason = (
+                f"Fits in VRAM+RAM ({size_mb / 1024:.1f}GB model + "
+                f"~{overhead_mb / 1024:.1f}GB overhead; slower than full VRAM)"
+            )
+        else:
+            reason = (
+                f"Fits in system RAM ({size_mb / 1024:.1f}GB model + "
+                f"~{overhead_mb / 1024:.1f}GB overhead, {ram_mb / 1024:.1f}GB available)"
+            )
+        return quant_name, reason
+
+    quant_name, size_bytes = quant_list[0]
+    size_mb = size_bytes / (1024 * 1024)
+    return quant_name, f"Smallest available ({size_mb / 1024:.1f}GB); may not fit, consider a smaller model"
 
 
 def select_quantization(repo, vram_mb=0, ram_mb=0):
@@ -501,6 +696,7 @@ def main():
 
         # Get repository
         repo = args.repo if args.repo else get_hf_repo()
+        repo = resolve_best_gguf_repo(repo, args.vram, args.ram, not args.no_repo_search)
 
         # Select files to download
         selected_quantization = select_quantization(repo, args.vram, args.ram)

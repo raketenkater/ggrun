@@ -53,3 +53,23 @@ func TestCPURecommendationsStaySmall(t *testing.T) {
 		}
 	}
 }
+
+func TestRecommendationScoreIgnoresSpeed(t *testing.T) {
+	caps := &detect.Capabilities{
+		OS:       "linux",
+		RAM:      detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		GPUs:     []detect.GPU{{Name: "Test GPU", VRAMTotalMB: 24576}},
+		Backends: []detect.Backend{{Name: "llama-server", Path: "/bin/llama-server-vulkan"}},
+	}
+	fastButWeak, ok := evaluate(caps, Candidate{Name: "fast", Repo: "repo/fast", SizeGB: 4, Quality: 20, Speed: 100})
+	if !ok {
+		t.Fatal("expected fast candidate to fit")
+	}
+	slowButSmart, ok := evaluate(caps, Candidate{Name: "smart", Repo: "repo/smart", SizeGB: 4, Quality: 80, Speed: 1})
+	if !ok {
+		t.Fatal("expected smart candidate to fit")
+	}
+	if slowButSmart.Score <= fastButWeak.Score {
+		t.Fatalf("expected intelligence score to win regardless of speed: smart=%d fast=%d", slowButSmart.Score, fastButWeak.Score)
+	}
+}

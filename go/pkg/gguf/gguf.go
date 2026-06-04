@@ -95,6 +95,7 @@ func findParseScript() string {
 	}
 	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
 		candidates = append(candidates,
+			filepath.Join(appHome, ".bin", "parse_gguf.py"),
 			filepath.Join(appHome, "bin", "parse_gguf.py"),
 			filepath.Join(appHome, "parse_gguf.py"),
 		)

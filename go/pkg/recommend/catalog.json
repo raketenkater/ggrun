@@ -1,5 +1,5 @@
 {
-  "attribution": "Artificial Analysis leaderboard data cached from https://artificialanalysis.ai/ and filtered by llm-server hardware fit",
+  "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by llm-server hardware fit",
   "candidates": [
     {
       "aa_id": "71e8d48c-1920-4f27-8ea9-1f10becc615a",
@@ -98,36 +98,26 @@
       "speed": 100
     },
     {
-      "aa_id": "169e47f5-3d4d-4ad4-8f8b-ab46f0c73f67",
-      "aa_intelligence_index": 42.1,
-      "aa_output_tps": 83.278,
-      "aa_query": "Qwen3.5 27B",
-      "aa_slug": "qwen3-5-27b",
-      "aa_updated_at": "2026-06-04T10:57:41Z",
+      "aa_query": "Qwen3.6 27B",
       "family": "Qwen",
       "moe": false,
-      "name": "Qwen3.5 27B Instruct",
-      "notes": "strong local quality when 24GB+ VRAM or multi-GPU is available",
-      "quality": 69,
-      "repo": "unsloth/Qwen3.5-27B-GGUF",
+      "name": "Qwen3.6 27B Instruct",
+      "notes": "current dense Qwen local quality target when 24GB+ VRAM or multi-GPU is available",
+      "quality": 90,
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
       "size_gb": 18.5,
-      "speed": 83
+      "speed": 48
     },
     {
-      "aa_id": "46d8315e-1630-463f-ab62-84185fa0faab",
-      "aa_intelligence_index": 37.1,
-      "aa_output_tps": 131.687,
-      "aa_query": "Qwen3.5 35B A3B",
-      "aa_slug": "qwen3-5-35b-a3b",
-      "aa_updated_at": "2026-06-04T10:57:41Z",
+      "aa_query": "Qwen3.6 35B A3B",
       "family": "Qwen MoE",
       "moe": true,
-      "name": "Qwen3.5 35B A3B MoE",
-      "notes": "MoE option when RAM is high and expert offload is acceptable",
-      "quality": 61,
-      "repo": "unsloth/Qwen3.5-35B-A3B-GGUF",
+      "name": "Qwen3.6 35B A3B MoE",
+      "notes": "current Qwen MoE path when RAM is high and expert offload is acceptable",
+      "quality": 92,
+      "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
       "size_gb": 21.0,
-      "speed": 100
+      "speed": 62
     },
     {
       "aa_id": "2236df45-0699-40d1-b5cc-69ee345d2257",
@@ -146,7 +136,7 @@
       "speed": 100
     }
   ],
-  "generated_at": "2026-06-04T10:57:41Z",
-  "source": "Artificial Analysis API refresh; matched 9 known GGUF recommendation rows",
+  "generated_at": "2026-06-04T00:00:00Z",
+  "source": "seeded local catalog; refresh with tools/models/update_recommendations.py and ARTIFICIAL_ANALYSIS_API_KEY",
   "version": 1
 }

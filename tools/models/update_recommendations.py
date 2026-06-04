@@ -108,7 +108,7 @@ def quality_score(index: float, previous: int) -> int:
 def speed_score(tps: float, previous: int) -> int:
     if tps <= 0:
         return previous
-    # Provider output speed is only a ranking signal for local recommendations.
+    # Provider output speed is display metadata only; recommendations rank by intelligence.
     return max(1, min(100, round(tps)))
 
 
@@ -168,7 +168,7 @@ def refresh_catalog(catalog: dict[str, Any], rows: list[dict[str, Any]]) -> dict
         changed += 1
     catalog["generated_at"] = utc_now()
     catalog["source"] = f"Artificial Analysis API refresh; matched {changed} known GGUF recommendation rows"
-    catalog["attribution"] = "Artificial Analysis leaderboard data cached from https://artificialanalysis.ai/ and filtered by llm-server hardware fit"
+    catalog["attribution"] = "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by llm-server hardware fit"
     catalog["candidates"] = sorted(
         [c for c in catalog.get("candidates", []) if isinstance(c, dict)],
         key=lambda c: (str(c.get("family") or ""), float(c.get("size_gb") or 0), str(c.get("name") or "")),

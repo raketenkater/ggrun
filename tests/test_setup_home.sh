@@ -17,19 +17,21 @@ LLM_SETUP_PY_DEPS=skip \
 LLM_SETUP_NONINTERACTIVE=1 \
 "$ROOT/setup-linux.sh" >/tmp/llm-server-setup-test.log 2>&1
 
-test -x "$APP_HOME/bin/llm-server"
-test -x "$APP_HOME/bin/llm-server-gui"
-test -x "$APP_HOME/bin/download_any_gguf.py"
-test -x "$APP_HOME/bin/model_index.py"
-test -f "$APP_HOME/env.sh"
-test -f "$APP_HOME/config/config"
-test -f "$APP_HOME/config/config.sh"
-test -x "$APP_HOME/run"
-test -x "$APP_HOME/gui"
+test -x "$APP_HOME/llm-server"
+test -x "$APP_HOME/llm-server-gui"
+test -x "$APP_HOME/.bin/llm-server"
+test -x "$APP_HOME/.bin/llm-server-gui"
+test -x "$APP_HOME/.bin/download_any_gguf.py"
+test -x "$APP_HOME/.bin/model_index.py"
+test -f "$APP_HOME/.env.sh"
+test -f "$APP_HOME/.config/config"
+test -f "$APP_HOME/.config/config.sh"
 test -d "$APP_HOME/models"
-test -d "$APP_HOME/cache"
-test -d "$APP_HOME/logs"
-test -d "$APP_HOME/src"
+test -d "$APP_HOME/.cache"
+test -d "$APP_HOME/.logs"
+test -d "$APP_HOME/.src"
+test ! -e "$APP_HOME/models/download_any_gguf.py"
+test ! -e "$APP_HOME/models/model_index.py"
 
 cat >"$TMP/llama-server" <<'EOF'
 #!/usr/bin/env bash
@@ -46,7 +48,7 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" --out "$APP_HOME/models/setup-mode
     --embd 64 --ff 128 --ctx-train 2048
 
 out=$(HOME="$TMP/home" LLM_ASSUME_YES=1 \
-    "$APP_HOME/run" --dry-run --cpu setup-model.gguf 2>&1)
+    "$APP_HOME/llm-server" --dry-run --cpu setup-model.gguf 2>&1)
 
 if [[ "$out" != *"$APP_HOME/models/setup-model.gguf"* ]]; then
     echo "  ✗ app-home model directory was not used"
@@ -72,7 +74,7 @@ LLM_SETUP_PY_DEPS=skip \
 LLM_SETUP_NONINTERACTIVE=1 \
 "$ROOT/setup.sh" >/tmp/llm-server-auto-setup-test.log 2>&1
 
-test -x "$APP_HOME2/bin/llm-server"
-test -x "$APP_HOME2/bin/llm-server-gui"
-test -x "$APP_HOME2/bin/model_index.py"
+test -x "$APP_HOME2/llm-server"
+test -x "$APP_HOME2/llm-server-gui"
+test -x "$APP_HOME2/.bin/model_index.py"
 echo "  ✓ setup.sh created app home"
