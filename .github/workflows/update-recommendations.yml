@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   refresh:
@@ -15,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'raketenkater/llm-server'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -29,16 +28,14 @@ jobs:
       - name: Show catalog diff
         run: git diff -- go/pkg/recommend/catalog.json
 
-      - name: Open update PR
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: Update model recommendation catalog
-          title: Update model recommendation catalog
-          body: |
-            Refreshes the checked-in local model recommendation catalog from Artificial Analysis.
-
-            The API key is read from the repository secret `ARTIFICIAL_ANALYSIS_API_KEY` and is not written to the repo.
-          branch: automation/update-model-recommendations
-          delete-branch: true
-          add-paths: go/pkg/recommend/catalog.json
+      - name: Commit catalog update
+        run: |
+          if git diff --quiet -- go/pkg/recommend/catalog.json; then
+            echo "recommendation catalog unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add go/pkg/recommend/catalog.json
+          git commit -m "Update model recommendation catalog"
+          git push
