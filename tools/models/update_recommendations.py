@@ -56,6 +56,13 @@ def model_size_tokens(query_tokens: set[str]) -> set[str]:
     return {t for t in query_tokens if re.fullmatch(r"a?\d+(?:b|m)", t)}
 
 
+def version_tuples(text: str) -> set[tuple[str, ...]]:
+    versions: set[tuple[str, ...]] = set()
+    for match in re.finditer(r"(?<!\d)(\d+)[.-](\d+)(?:[.-](\d+))?", text.lower()):
+        versions.add(tuple(part for part in match.groups() if part is not None))
+    return versions
+
+
 def clear_aa_fields(candidate: dict[str, Any]) -> None:
     for key in list(candidate):
         if key.startswith("aa_"):
@@ -116,12 +123,15 @@ def row_name(row: dict[str, Any]) -> str:
 def match_row(candidate: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     query = str(candidate.get("aa_query") or candidate.get("name") or "")
     query_tokens = tokens(query)
+    query_versions = version_tuples(query)
     if not query_tokens:
         return None
 
     best: tuple[int, float, dict[str, Any] | None] = (-1, 0.0, None)
     for row in rows:
         hay = row_name(row)
+        if query_versions and not (query_versions & version_tuples(hay)):
+            continue
         hay_tokens = tokens(hay)
         if not family_match(query_tokens, hay_tokens):
             continue
