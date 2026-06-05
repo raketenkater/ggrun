@@ -139,6 +139,11 @@ func updateRepoCandidates() []repoCandidate {
 			add("llama.cpp", root)
 		}
 	}
+	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
+		add("llm-server", filepath.Join(appHome, ".src", "llm-server"))
+		add("ik_llama.cpp", filepath.Join(appHome, ".src", "ik_llama.cpp"))
+		add("llama.cpp", filepath.Join(appHome, ".src", "llama.cpp"))
+	}
 	if home != "" {
 		add("ik_llama.cpp", filepath.Join(home, "ik_llama.cpp"))
 		add("llama.cpp", filepath.Join(home, "llama.cpp"))
@@ -280,6 +285,10 @@ func SelfUpdate() error {
 	}
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
+		if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
+			fmt.Printf("llm-server repo not found at %s; refreshing app home from main.\n", repoDir)
+			return SelfUpdateAppHomeInstaller(appHome)
+		}
 		fmt.Printf("llm-server repo not found at %s; using latest release installer.\n", repoDir)
 		return SelfUpdateFromReleaseInstaller()
 	}
@@ -330,6 +339,7 @@ func SelfUpdate() error {
 		fmt.Println("  Re-installing...")
 		cmd := exec.Command("bash", installScript)
 		cmd.Dir = repoDir
+		cmd.Env = selfUpdateInstallEnv(os.Getenv("LLM_APP_HOME"))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			fmt.Println("  Error: Install failed. Rolling back...")
@@ -353,7 +363,9 @@ func SelfUpdate() error {
 				cp(backupPath, scriptPath)
 			}
 			if _, err := os.Stat(installScript); err == nil {
-				exec.Command("bash", installScript).Run()
+				cmd := exec.Command("bash", installScript)
+				cmd.Env = selfUpdateInstallEnv(os.Getenv("LLM_APP_HOME"))
+				_ = cmd.Run()
 			}
 			os.Remove(backupPath)
 			return fmt.Errorf("self-check failed")
@@ -399,7 +411,7 @@ func SelfUpdateFromReleaseInstaller() error {
 	}
 
 	cmd := exec.Command("bash", installerPath)
-	cmd.Env = append(os.Environ(), "LLM_INSTALL_MODE=auto", "LLM_INSTALL_NONINTERACTIVE=1")
+	cmd.Env = selfUpdateInstallEnv(os.Getenv("LLM_APP_HOME"))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -434,7 +446,93 @@ func rawInstallerURL(ref string) string {
 	return fmt.Sprintf(rawInstallURL, githubRepo, ref)
 }
 
+func selfUpdateInstallEnv(appHome string) []string {
+	env := append([]string{}, os.Environ()...)
+	env = append(env, "LLM_INSTALL_NONINTERACTIVE=1", "LLM_INSTALL_MAIN=go")
+	appHome = strings.TrimSpace(appHome)
+	if appHome == "" {
+		return env
+	}
+	return append(env,
+		"LLM_APP_HOME="+appHome,
+		"LLM_INSTALL_PREFIX="+filepath.Join(appHome, ".bin"),
+		"LLM_INSTALL_MODEL_DIR="+filepath.Join(appHome, "models"),
+		"LLM_INSTALL_BACKEND_ROOT="+filepath.Join(appHome, ".src"),
+		"LLM_INSTALL_BACKEND=skip",
+		"LLM_INSTALL_MODE=build",
+	)
+}
+
+// SelfUpdateAppHomeInstaller refreshes app-home installs from the latest main
+// installer while preserving the existing app-home layout. This updates the Go
+// binary and embedded catalog without depending on a local git checkout.
+func SelfUpdateAppHomeInstaller(appHome string) error {
+	appHome = strings.TrimSpace(appHome)
+	if appHome == "" {
+		return fmt.Errorf("LLM_APP_HOME is not set")
+	}
+	fmt.Println("═══ Updating llm-server app home from main ═══")
+	scriptPath := installedLLMServerPath()
+	backupPath := ""
+	if scriptPath != "" {
+		if _, err := os.Stat(scriptPath); err == nil {
+			backupPath = scriptPath + ".bak"
+			_ = cp(scriptPath, backupPath)
+		}
+	}
+
+	tmpDir, err := os.MkdirTemp("", "llm-server-update-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	installerPath := filepath.Join(tmpDir, "install.sh")
+	if err := downloadFile(rawInstallerURL("main"), installerPath, 0755); err != nil {
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return fmt.Errorf("download installer: %w", err)
+	}
+
+	cmd := exec.Command("bash", installerPath)
+	cmd.Env = selfUpdateInstallEnv(appHome)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if backupPath != "" && scriptPath != "" {
+			_ = cp(backupPath, scriptPath)
+			_ = os.Remove(backupPath)
+		}
+		return fmt.Errorf("app-home installer failed: %w", err)
+	}
+
+	if scriptPath != "" {
+		if err := exec.Command(scriptPath, "--version").Run(); err != nil {
+			if backupPath != "" {
+				_ = cp(backupPath, scriptPath)
+				_ = os.Remove(backupPath)
+			}
+			return fmt.Errorf("self-check failed after app-home installer")
+		}
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	fmt.Println("  ✓ llm-server app home updated and verified. Restart to use the new version.")
+	return nil
+}
+
 func installedLLMServerPath() string {
+	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
+		for _, candidate := range []string{
+			filepath.Join(appHome, ".bin", "llm-server"),
+			filepath.Join(appHome, "llm-server"),
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
 	if path, _ := exec.LookPath("llm-server"); path != "" {
 		return path
 	}
@@ -594,26 +692,55 @@ func UpdateBackend(name, repoDir string, walkback int) error {
 
 // UpdateBackends updates both ik_llama.cpp and llama.cpp if present.
 func UpdateBackends() error {
-	home := os.Getenv("HOME")
-	ikDir := filepath.Join(home, "ik_llama.cpp")
-	mainDir := filepath.Join(home, "llama.cpp")
-
-	if _, err := os.Stat(ikDir); err == nil {
-		if err := UpdateBackend("ik_llama.cpp", ikDir, 3); err != nil {
-			fmt.Printf("  ik_llama.cpp update failed: %v\n", err)
+	found := map[string]bool{}
+	for _, repo := range backendUpdateCandidates() {
+		if _, err := os.Stat(repo.Dir); err != nil {
+			continue
 		}
-	} else {
-		fmt.Printf("ik_llama.cpp not found at %s — skipping\n", ikDir)
+		found[repo.Label] = true
+		if err := UpdateBackend(repo.Label, repo.Dir, 3); err != nil {
+			fmt.Printf("  %s update failed: %v\n", repo.Label, err)
+		}
 	}
-
-	if _, err := os.Stat(mainDir); err == nil {
-		if err := UpdateBackend("llama.cpp", mainDir, 3); err != nil {
-			fmt.Printf("  llama.cpp update failed: %v\n", err)
-		}
-	} else {
-		fmt.Printf("llama.cpp not found at %s — skipping\n", mainDir)
+	if !found["ik_llama.cpp"] {
+		fmt.Println("ik_llama.cpp not found — skipping")
+	}
+	if !found["llama.cpp"] {
+		fmt.Println("llama.cpp not found — skipping")
 	}
 	return nil
+}
+
+func backendUpdateCandidates() []repoCandidate {
+	seen := map[string]bool{}
+	candidates := []repoCandidate{}
+	add := func(label, dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || seen[label+"\x00"+dir] {
+			return
+		}
+		seen[label+"\x00"+dir] = true
+		candidates = append(candidates, repoCandidate{Label: label, Dir: dir})
+	}
+
+	if server := os.Getenv("LLAMA_SERVER"); server != "" {
+		root := filepath.Dir(filepath.Dir(filepath.Dir(server)))
+		base := filepath.Base(root)
+		if strings.Contains(base, "ik_llama") {
+			add("ik_llama.cpp", root)
+		} else if strings.Contains(base, "llama.cpp") {
+			add("llama.cpp", root)
+		}
+	}
+	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
+		add("ik_llama.cpp", filepath.Join(appHome, ".src", "ik_llama.cpp"))
+		add("llama.cpp", filepath.Join(appHome, ".src", "llama.cpp"))
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		add("ik_llama.cpp", filepath.Join(home, "ik_llama.cpp"))
+		add("llama.cpp", filepath.Join(home, "llama.cpp"))
+	}
+	return candidates
 }
 
 func buildAndTest(buildDir, binary string) bool {

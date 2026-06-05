@@ -79,3 +79,85 @@ func TestHasUpdateLabel(t *testing.T) {
 		t.Fatal("unexpected llm-server match")
 	}
 }
+
+func envHas(env []string, want string) bool {
+	for _, item := range env {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSelfUpdateInstallEnvPreservesAppHome(t *testing.T) {
+	appHome := filepath.Join(t.TempDir(), "llm-server")
+	env := selfUpdateInstallEnv(appHome)
+	checks := []string{
+		"LLM_APP_HOME=" + appHome,
+		"LLM_INSTALL_PREFIX=" + filepath.Join(appHome, ".bin"),
+		"LLM_INSTALL_MODEL_DIR=" + filepath.Join(appHome, "models"),
+		"LLM_INSTALL_BACKEND_ROOT=" + filepath.Join(appHome, ".src"),
+		"LLM_INSTALL_BACKEND=skip",
+		"LLM_INSTALL_MODE=build",
+		"LLM_INSTALL_MAIN=go",
+		"LLM_INSTALL_NONINTERACTIVE=1",
+	}
+	for _, want := range checks {
+		if !envHas(env, want) {
+			t.Fatalf("missing env %q in %#v", want, env)
+		}
+	}
+}
+
+func TestInstalledPathPrefersAppHomeBinary(t *testing.T) {
+	appHome := t.TempDir()
+	binDir := filepath.Join(appHome, ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(binDir, "llm-server")
+	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_APP_HOME", appHome)
+	if got := installedLLMServerPath(); got != want {
+		t.Fatalf("installed path mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestBackendUpdateCandidatesIncludeAppHomeSource(t *testing.T) {
+	appHome := filepath.Join(t.TempDir(), "llm-server")
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	rows := backendUpdateCandidates()
+	want := map[string]string{
+		"ik_llama.cpp": filepath.Join(appHome, ".src", "ik_llama.cpp"),
+		"llama.cpp":    filepath.Join(appHome, ".src", "llama.cpp"),
+	}
+	for label, dir := range want {
+		found := false
+		for _, row := range rows {
+			if row.Label == label && row.Dir == dir {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing backend candidate %s %s in %#v", label, dir, rows)
+		}
+	}
+}
+
+func TestUpdateRepoCandidatesIncludeAppHomeSource(t *testing.T) {
+	appHome := filepath.Join(t.TempDir(), "llm-server")
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	rows := updateRepoCandidates()
+	want := repoCandidate{Label: "llm-server", Dir: filepath.Join(appHome, ".src", "llm-server")}
+	for _, row := range rows {
+		if row == want {
+			return
+		}
+	}
+	t.Fatalf("missing app-home repo candidate %#v in %#v", want, rows)
+}
