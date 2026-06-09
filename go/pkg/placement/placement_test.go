@@ -377,6 +377,31 @@ func TestComputeDraftMTPIKOnly(t *testing.T) {
 	}
 }
 
+func TestDraftFlagsIKDraftUsesCanonicalSpecType(t *testing.T) {
+	cfg := &DraftConfig{Type: DraftModel, BackendTag: "ik_llama", Path: "draft.gguf", DraftGPU: 0, CTXSizeDraft: 8192, KVTypeDraft: "q8_0", ThreadsDraft: 2, DraftMax: 16, PSplit: 0.10, SpecAutoTune: true}
+	args := DraftFlags(cfg)
+	if !contains(args, "--spec-type") || !contains(args, "draft:n_max=16") {
+		t.Fatalf("expected canonical IK draft spec-type, got %v", args)
+	}
+	if contains(args, "--draft-max") || contains(args, "--spec-draft-n-max") {
+		t.Fatalf("IK draft flags should not use legacy draft max flags: %v", args)
+	}
+	if !contains(args, "--p-split") || !contains(args, "--spec-autotune") {
+		t.Fatalf("IK draft flags missing p-split/autotune: %v", args)
+	}
+}
+
+func TestDraftFlagsIKMTPUsesCanonicalNMax(t *testing.T) {
+	cfg := &DraftConfig{Type: DraftMTP, BackendTag: "ik_llama", SpecType: "mtp", DraftMax: 4, MTPFlag: true}
+	args := DraftFlags(cfg)
+	if !contains(args, "--spec-type") || !contains(args, "mtp:n_max=4") || !contains(args, "--multi-token-prediction") {
+		t.Fatalf("expected canonical IK MTP flags, got %v", args)
+	}
+	if contains(args, "--draft-max") || contains(args, "--spec-draft-n-max") {
+		t.Fatalf("IK MTP flags should not use legacy draft max flags: %v", args)
+	}
+}
+
 func TestComputeDraftMTPSkipsWithoutNextNLayers(t *testing.T) {
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},

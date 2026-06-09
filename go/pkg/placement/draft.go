@@ -462,9 +462,6 @@ func backendSupportsMTP(backendTag string) bool {
 }
 
 func ngramSpecType(backendTag string) string {
-	if backendSupportsMTP(backendTag) {
-		return "ngram - map - k"
-	}
 	return "ngram-map-k"
 }
 
@@ -1016,17 +1013,21 @@ func DraftFlags(cfg *DraftConfig) []string {
 	draftMaxFlag := "--spec-draft-n-max"
 	pSplitFlag := "--spec-draft-p-split"
 	if ikDialect {
-		draftMaxFlag = "--draft-max"
 		pSplitFlag = "--p-split"
 	}
 
 	switch cfg.Type {
 	case DraftModel, DraftEagle3:
-		if cfg.Type == DraftEagle3 {
-			specType := cfg.SpecType
+		specType := cfg.SpecType
+		if cfg.Type == DraftEagle3 && specType == "" {
+			specType = "eagle3"
+		}
+		if cfg.Type == DraftModel && ikDialect {
 			if specType == "" {
-				specType = "eagle3"
+				specType = "draft"
 			}
+			flags = append(flags, "--spec-type", specTypeWithNMax(specType, cfg.DraftMax))
+		} else if specType != "" {
 			flags = append(flags, "--spec-type", specType)
 		}
 		if cfg.Path != "" {
@@ -1045,7 +1046,7 @@ func DraftFlags(cfg *DraftConfig) []string {
 		if cfg.ThreadsDraft > 0 {
 			flags = append(flags, "--threads-draft", fmt.Sprintf("%d", cfg.ThreadsDraft))
 		}
-		if cfg.DraftMax > 0 {
+		if cfg.DraftMax > 0 && !(ikDialect && cfg.Type == DraftModel) {
 			flags = append(flags, draftMaxFlag, fmt.Sprintf("%d", cfg.DraftMax))
 		}
 		if cfg.DraftMin > 0 && !ikDialect {
@@ -1124,11 +1125,15 @@ func DraftFlags(cfg *DraftConfig) []string {
 				specType = "draft-mtp"
 			}
 		}
-		flags = append(flags, "--spec-type", specType)
+		if ikDialect {
+			flags = append(flags, "--spec-type", specTypeWithNMax(specType, cfg.DraftMax))
+		} else {
+			flags = append(flags, "--spec-type", specType)
+		}
 		if ikDialect || cfg.MTPFlag {
 			flags = append(flags, "--multi-token-prediction")
 		}
-		if cfg.DraftMax > 0 {
+		if cfg.DraftMax > 0 && !ikDialect {
 			flags = append(flags, draftMaxFlag, fmt.Sprintf("%d", cfg.DraftMax))
 		}
 		if cfg.SpecAutoTune {
@@ -1137,6 +1142,13 @@ func DraftFlags(cfg *DraftConfig) []string {
 	}
 
 	return flags
+}
+
+func specTypeWithNMax(specType string, nMax int) string {
+	if nMax <= 0 || strings.Contains(specType, ":") {
+		return specType
+	}
+	return fmt.Sprintf("%s:n_max=%d", specType, nMax)
 }
 
 func draftDeviceName(backendTag string, gpu int) string {
