@@ -13,12 +13,14 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
+API_URL = "https://artificialanalysis.ai/api/v2/language/models"
 FAMILY_PREFIXES = {
     "llama",
     "qwen",
@@ -69,14 +71,33 @@ def clear_aa_fields(candidate: dict[str, Any]) -> None:
             candidate.pop(key, None)
 
 
+def fetch_json(api_key: str, url: str) -> dict[str, Any]:
+    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"Artificial Analysis API request failed ({exc.code}) for {url}: {exc.reason}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit("Artificial Analysis API response was not a JSON object")
+    return data
+
+
 def fetch_models(api_key: str) -> list[dict[str, Any]]:
-    req = urllib.request.Request(API_URL, headers={"x-api-key": api_key})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    rows = data.get("data") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        raise SystemExit("Artificial Analysis API response did not contain a data array")
-    return [row for row in rows if isinstance(row, dict)]
+    rows: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        query = urllib.parse.urlencode({"page": page, "page_size": 200})
+        data = fetch_json(api_key, f"{API_URL}?{query}")
+        page_rows = data.get("data")
+        if not isinstance(page_rows, list):
+            raise SystemExit("Artificial Analysis API response did not contain a data array")
+        rows.extend(row for row in page_rows if isinstance(row, dict))
+        pagination = data.get("pagination")
+        if not isinstance(pagination, dict) or not pagination.get("has_more"):
+            break
+        page += 1
+    return rows
 
 
 def intelligence(row: dict[str, Any]) -> float:
@@ -94,8 +115,47 @@ def intelligence(row: dict[str, Any]) -> float:
 
 
 def output_tps(row: dict[str, Any]) -> float:
+    perf = row.get("performance")
+    if isinstance(perf, dict):
+        val = perf.get("median_output_tokens_per_second")
+        if isinstance(val, (int, float)):
+            return float(val)
     val = row.get("median_output_tokens_per_second")
     return float(val) if isinstance(val, (int, float)) else 0.0
+
+
+def open_weights(row: dict[str, Any]) -> bool:
+    licensing = row.get("licensing")
+    if isinstance(licensing, dict) and isinstance(licensing.get("is_open_weights"), bool):
+        return bool(licensing.get("is_open_weights"))
+    if isinstance(row.get("open_weights"), bool):
+        return bool(row.get("open_weights"))
+    # Older/free API shapes may omit licensing. A weights URL is the best safe fallback.
+    return bool(row.get("huggingface_url"))
+
+
+def parameters_summary(row: dict[str, Any]) -> str:
+    params = row.get("parameters")
+    if not isinstance(params, dict):
+        return ""
+    total = params.get("total")
+    active = params.get("active")
+    if isinstance(total, (int, float)) and isinstance(active, (int, float)) and active != total:
+        return f"{total:g}B/{active:g}B"
+    if isinstance(total, (int, float)):
+        return f"{total:g}B"
+    return ""
+
+
+def context_summary(row: dict[str, Any]) -> str:
+    ctx = row.get("context_window_tokens")
+    return str(int(ctx)) if isinstance(ctx, (int, float)) and ctx > 0 else ""
+
+
+def huggingface_repo(row: dict[str, Any]) -> str:
+    url = str(row.get("huggingface_url") or "")
+    prefix = "https://huggingface.co/"
+    return url[len(prefix):] if url.startswith(prefix) else url
 
 
 def quality_score(index: float, previous: int) -> int:
@@ -131,15 +191,21 @@ def display_name(row: dict[str, Any]) -> str:
     return name or str(row.get("slug") or "")
 
 
-def print_top_models(rows: list[dict[str, Any]], limit: int) -> None:
-    ranked = sorted(rows, key=intelligence, reverse=True)[:limit]
-    print(f"Top {len(ranked)} Artificial Analysis models by Intelligence Index")
-    print("| rank | model | slug | intelligence | output tps |")
-    print("|---:|---|---|---:|---:|")
+def print_top_models(rows: list[dict[str, Any]], limit: int, *, open_weights_only: bool = False) -> None:
+    filtered = [row for row in rows if not open_weights_only or open_weights(row)]
+    ranked = sorted(filtered, key=intelligence, reverse=True)[:limit]
+    label = "open-weight " if open_weights_only else ""
+    print(f"Top {len(ranked)} Artificial Analysis {label}models by Intelligence Index")
+    print("| rank | model | slug | params | intelligence | output tps | ctx | hf/model weights |")
+    print("|---:|---|---|---:|---:|---:|---:|---|")
     for i, row in enumerate(ranked, 1):
         name = display_name(row).replace("|", "/")
         slug = str(row.get("slug") or "").replace("|", "/")
-        print(f"| {i} | {name} | {slug} | {intelligence(row):.3f} | {output_tps(row):.3f} |")
+        hf = huggingface_repo(row).replace("|", "/")
+        print(
+            f"| {i} | {name} | {slug} | {parameters_summary(row)} | "
+            f"{intelligence(row):.3f} | {output_tps(row):.3f} | {context_summary(row)} | {hf} |"
+        )
 
 
 def match_row(candidate: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -204,6 +270,7 @@ def main() -> int:
     parser.add_argument("--api-key-env", default="ARTIFICIAL_ANALYSIS_API_KEY")
     parser.add_argument("--allow-missing-key", action="store_true", help="exit 0 without changes when the API key is missing")
     parser.add_argument("--print-top", type=int, default=0, help="print top N API models by intelligence index")
+    parser.add_argument("--print-open-weights-top", type=int, default=0, help="print top N open-weight API models by intelligence index")
     args = parser.parse_args()
 
     catalog_path = Path(args.catalog)
@@ -219,6 +286,8 @@ def main() -> int:
     rows = fetch_models(api_key)
     if args.print_top > 0:
         print_top_models(rows, args.print_top)
+    if args.print_open_weights_top > 0:
+        print_top_models(rows, args.print_open_weights_top, open_weights_only=True)
     catalog = refresh_catalog(catalog, rows)
     tmp = catalog_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
