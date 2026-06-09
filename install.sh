@@ -526,7 +526,10 @@ install_release_bundle() {
 choose_cuda_auto_fallback_backend() {
     [[ "$BACKEND_REQUEST" == "auto" && "$BACKEND_CHOICE" == "cuda" ]] || return 1
     has_cuda_toolkit && return 1
-    if vulkan_available; then
+    if [[ "$OS" == "Linux" ]]; then
+        BACKEND_CHOICE="vulkan"
+        warn "CUDA toolkit not found and no CUDA bundle is available; trying Vulkan before CPU."
+    elif vulkan_available; then
         BACKEND_CHOICE="vulkan"
         warn "CUDA toolkit not found and no CUDA bundle is available; falling back to Vulkan."
     else
@@ -762,18 +765,35 @@ if [[ -n "$BACKEND_REPO" ]]; then
         else
             err "Backend build failed for $BACKEND_CHOICE."
             if [[ "$BACKEND_REQUEST" == "auto" && "$BACKEND_CHOICE" != "cpu" ]]; then
-                warn "Retrying with CPU llama.cpp backend so llm-server works out of the box."
-                BACKEND_CHOICE="cpu"
-                BACKEND_REPO="https://github.com/ggml-org/llama.cpp.git"
-                BACKEND_DIR="$BACKEND_ROOT/llama.cpp"
-                BACKEND_BUILD="$BACKEND_DIR/build"
-                BACKEND_CMAKE=()
-                backend_binary="$(backend_server_path)"
-                if [[ -x "$backend_binary" ]] || build_backend; then
-                    ok "Built CPU llama-server at $backend_binary"
-                    link_backend_binary "$backend_binary" || true
-                else
-                    err "CPU fallback backend build failed. Install build dependencies and rerun setup."
+                fallback_built=0
+                for fallback in vulkan cpu; do
+                    [[ "$fallback" == "$BACKEND_CHOICE" ]] && continue
+                    if [[ "$fallback" == "vulkan" ]]; then
+                        warn "Retrying with Vulkan llama.cpp backend before CPU fallback."
+                        BACKEND_CHOICE="vulkan"
+                        BACKEND_REPO="https://github.com/ggml-org/llama.cpp.git"
+                        BACKEND_DIR="$BACKEND_ROOT/llama.cpp"
+                        BACKEND_BUILD="$BACKEND_DIR/build-vulkan"
+                        BACKEND_CMAKE=(-DGGML_VULKAN=ON)
+                    else
+                        warn "Retrying with CPU llama.cpp backend so llm-server works out of the box."
+                        BACKEND_CHOICE="cpu"
+                        BACKEND_REPO="https://github.com/ggml-org/llama.cpp.git"
+                        BACKEND_DIR="$BACKEND_ROOT/llama.cpp"
+                        BACKEND_BUILD="$BACKEND_DIR/build"
+                        BACKEND_CMAKE=()
+                    fi
+                    backend_binary="$(backend_server_path)"
+                    if [[ -x "$backend_binary" ]] || build_backend; then
+                        ok "Built $BACKEND_CHOICE llama-server at $backend_binary"
+                        link_backend_binary "$backend_binary" || true
+                        fallback_built=1
+                        break
+                    fi
+                    warn "$BACKEND_CHOICE fallback backend failed."
+                done
+                if (( ! fallback_built )); then
+                    err "Fallback backend builds failed. Install build dependencies and rerun setup."
                     exit 1
                 fi
             else
