@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 API_URL = "https://artificialanalysis.ai/api/v2/language/models"
+LEGACY_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 FAMILY_PREFIXES = {
     "llama",
     "qwen",
@@ -71,33 +72,58 @@ def clear_aa_fields(candidate: dict[str, Any]) -> None:
             candidate.pop(key, None)
 
 
+class APIRequestError(RuntimeError):
+    def __init__(self, code: int, url: str, reason: str):
+        super().__init__(f"Artificial Analysis API request failed ({code}) for {url}: {reason}")
+        self.code = code
+        self.url = url
+        self.reason = reason
+
+
 def fetch_json(api_key: str, url: str) -> dict[str, Any]:
     req = urllib.request.Request(url, headers={"x-api-key": api_key})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise SystemExit(f"Artificial Analysis API request failed ({exc.code}) for {url}: {exc.reason}") from exc
+        raise APIRequestError(exc.code, url, exc.reason) from exc
     if not isinstance(data, dict):
         raise SystemExit("Artificial Analysis API response was not a JSON object")
     return data
 
 
-def fetch_models(api_key: str) -> list[dict[str, Any]]:
+def fetch_models_from_url(api_key: str, base_url: str, *, paginated: bool) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     page = 1
     while True:
-        query = urllib.parse.urlencode({"page": page, "page_size": 200})
-        data = fetch_json(api_key, f"{API_URL}?{query}")
+        if paginated:
+            query = urllib.parse.urlencode({"page": page, "page_size": 200})
+            url = f"{base_url}?{query}"
+        else:
+            url = base_url
+        data = fetch_json(api_key, url)
         page_rows = data.get("data")
         if not isinstance(page_rows, list):
             raise SystemExit("Artificial Analysis API response did not contain a data array")
         rows.extend(row for row in page_rows if isinstance(row, dict))
         pagination = data.get("pagination")
-        if not isinstance(pagination, dict) or not pagination.get("has_more"):
+        if not paginated or not isinstance(pagination, dict) or not pagination.get("has_more"):
             break
         page += 1
     return rows
+
+
+def fetch_models(api_key: str) -> list[dict[str, Any]]:
+    try:
+        return fetch_models_from_url(api_key, API_URL, paginated=True)
+    except APIRequestError as exc:
+        if exc.code != 403:
+            raise SystemExit(str(exc)) from exc
+        print(f"{exc}; falling back to legacy Artificial Analysis data endpoint", file=sys.stderr)
+    try:
+        return fetch_models_from_url(api_key, LEGACY_API_URL, paginated=False)
+    except APIRequestError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def intelligence(row: dict[str, Any]) -> float:
