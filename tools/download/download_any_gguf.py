@@ -226,7 +226,7 @@ def list_available_quantizations(repo):
 
         # Comprehensive quantization pattern matching all GGUF formats
         quant_pattern = re.compile(
-            r"(IQ[2-8]_(?:XXS|XS|NL|S|M|L)|Q[2-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4|MXP4|BF16|F16|F32|F8|I4)",
+            r"(IQ[2-8]_(?:XXS|XS|NL|S|M|L)|Q[2-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
             re.IGNORECASE,
         )
 
@@ -528,6 +528,7 @@ def get_args():
     parser.add_argument("--vram", type=int, default=0, help="Available VRAM in MB")
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
     parser.add_argument("--cache-dir", type=str, help="llm-server cache directory")
+    parser.add_argument("--quant", type=str, default="", help="preselect a GGUF quantization")
     parser.add_argument(
         "--no-repo-search",
         action="store_true",
@@ -632,7 +633,7 @@ def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
     return quant_name, f"Smallest available ({size_mb / 1024:.1f}GB); may not fit, consider a smaller model"
 
 
-def select_quantization(repo, vram_mb=0, ram_mb=0):
+def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant=""):
     """Let user select quantization"""
     print("\nScanning repository for available quantizations...")
 
@@ -654,6 +655,13 @@ def select_quantization(repo, vram_mb=0, ram_mb=0):
     if not quant_list:
         print("   No GGUF quantizations found, downloading all .gguf files")
         return None
+
+    if requested_quant:
+        for q, _ in quant_list:
+            if q.lower() == requested_quant.lower():
+                print(f"\nUsing recommended quantization: {q}")
+                return q
+        print(f"\nRequested quantization {requested_quant} was not found; falling back to local selection.")
 
     # Get Recommendation based on actual file sizes
     rec_q = ""
@@ -699,7 +707,7 @@ def main():
         repo = resolve_best_gguf_repo(repo, args.vram, args.ram, not args.no_repo_search)
 
         # Select files to download
-        selected_quantization = select_quantization(repo, args.vram, args.ram)
+        selected_quantization = select_quantization(repo, args.vram, args.ram, args.quant)
         files_to_download = get_model_files(repo, selected_quantization)
 
         if not files_to_download:

@@ -767,7 +767,7 @@ func cmdGUI() {
 	cfg, _ := config.Load()
 	if req.DownloadRepo != "" {
 		d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
-		if err := d.Run(req.DownloadRepo, caps); err != nil {
+		if err := d.RunQuant(req.DownloadRepo, req.DownloadQuant, caps); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

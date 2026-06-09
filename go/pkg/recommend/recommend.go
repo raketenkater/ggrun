@@ -13,32 +13,48 @@ import (
 //go:embed catalog.json
 var catalogJSON []byte
 
+// QuantOption describes one downloadable GGUF quant for a candidate repo.
+// SizeGB is the summed size of all split GGUF files for that quant.
+type QuantOption struct {
+	Name           string  `json:"name"`
+	SizeGB         float64 `json:"size_gb"`
+	SizeBytes      int64   `json:"size_bytes,omitempty"`
+	QualityPenalty float64 `json:"quality_penalty,omitempty"`
+}
+
 // Candidate is a GGUF repository that llm-server can offer as a first-run
 // download. Quality is the intelligence-first ranking signal refreshed from
 // the checked-in catalog; speed is display metadata only.
 type Candidate struct {
-	Name           string  `json:"name"`
-	Repo           string  `json:"repo"`
-	Family         string  `json:"family"`
-	SizeGB         float64 `json:"size_gb"`
-	Quality        int     `json:"quality"`
-	Speed          int     `json:"speed"`
-	MoE            bool    `json:"moe"`
-	Notes          string  `json:"notes"`
-	AAQuery        string  `json:"aa_query,omitempty"`
-	AASlug         string  `json:"aa_slug,omitempty"`
-	AAIntelligence float64 `json:"aa_intelligence_index,omitempty"`
-	AAOutputTPS    float64 `json:"aa_output_tps,omitempty"`
-	AAUpdatedAt    string  `json:"aa_updated_at,omitempty"`
+	Name           string        `json:"name"`
+	Repo           string        `json:"repo"`
+	Family         string        `json:"family"`
+	SizeGB         float64       `json:"size_gb"`
+	Quality        int           `json:"quality"`
+	Speed          int           `json:"speed"`
+	MoE            bool          `json:"moe"`
+	TotalParamsB   float64       `json:"total_params_b,omitempty"`
+	ActiveParamsB  float64       `json:"active_params_b,omitempty"`
+	Quants         []QuantOption `json:"quants,omitempty"`
+	Notes          string        `json:"notes"`
+	AAQuery        string        `json:"aa_query,omitempty"`
+	AASlug         string        `json:"aa_slug,omitempty"`
+	AAIntelligence float64       `json:"aa_intelligence_index,omitempty"`
+	AAOutputTPS    float64       `json:"aa_output_tps,omitempty"`
+	AAUpdatedAt    string        `json:"aa_updated_at,omitempty"`
 }
 
 // Recommendation is a candidate ranked for the current machine.
 type Recommendation struct {
 	Candidate
-	Fit         string
-	BackendHint string
-	Reason      string
-	Score       int
+	Fit                  string
+	BackendHint          string
+	Reason               string
+	Score                int
+	QuantName            string
+	QuantSizeGB          float64
+	MemoryNeedGB         float64
+	AdjustedIntelligence float64
 }
 
 type catalogDoc struct {
@@ -69,7 +85,7 @@ func CatalogAttribution() string {
 
 func Top(caps *detect.Capabilities, limit int) []Recommendation {
 	if limit <= 0 {
-		limit = 3
+		limit = 5
 	}
 	var rows []Recommendation
 	for _, c := range Shortlist() {
@@ -77,80 +93,211 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 			rows = append(rows, rec)
 		}
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Score == rows[j].Score {
-			return rows[i].SizeGB < rows[j].SizeGB
-		}
-		return rows[i].Score > rows[j].Score
-	})
+	sortRecommendations(rows)
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
 	return rows
 }
 
-func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
-	largestVRAM := 0
-	totalVRAM := 0
-	totalRAM := 0
-	freeRAM := 0
-	gpuCount := 0
+func sortRecommendations(rows []Recommendation) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Score == rows[j].Score {
+			if rows[i].AdjustedIntelligence == rows[j].AdjustedIntelligence {
+				return rows[i].QuantSizeGB < rows[j].QuantSizeGB
+			}
+			return rows[i].AdjustedIntelligence > rows[j].AdjustedIntelligence
+		}
+		return rows[i].Score > rows[j].Score
+	})
+}
+
+type hardwareBudget struct {
+	largestVRAM int
+	totalVRAM   int
+	usableRAM   int
+	gpuCount    int
+}
+
+func hardware(caps *detect.Capabilities) hardwareBudget {
+	budget := hardwareBudget{}
+	totalRAM := 8192
+	freeRAM := totalRAM
 	if caps != nil {
-		gpuCount = len(caps.GPUs)
+		budget.gpuCount = len(caps.GPUs)
 		for _, g := range caps.GPUs {
-			totalVRAM += g.VRAMTotalMB
-			if g.VRAMTotalMB > largestVRAM {
-				largestVRAM = g.VRAMTotalMB
+			budget.totalVRAM += g.VRAMTotalMB
+			if g.VRAMTotalMB > budget.largestVRAM {
+				budget.largestVRAM = g.VRAMTotalMB
 			}
 		}
-		totalRAM = caps.RAM.TotalMB
-		freeRAM = caps.RAM.FreeMB
+		if caps.RAM.TotalMB > 0 {
+			totalRAM = caps.RAM.TotalMB
+		}
+		if caps.RAM.FreeMB > 0 && caps.RAM.FreeMB <= totalRAM {
+			freeRAM = caps.RAM.FreeMB
+		} else {
+			freeRAM = totalRAM
+		}
 	}
-	if totalRAM <= 0 {
-		totalRAM = 8192
+	reserve := 4096
+	if totalRAM >= 65536 {
+		reserve = 8192
 	}
-	if freeRAM <= 0 || freeRAM > totalRAM {
-		freeRAM = totalRAM
+	budget.usableRAM = freeRAM - reserve
+	if budget.usableRAM < 0 {
+		budget.usableRAM = 0
 	}
+	return budget
+}
 
-	modelMB := int(c.SizeGB * 1024)
-	overhead := 2048
-	if c.MoE {
-		overhead = 4096
-	}
-	needMB := modelMB + overhead
+func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
+	budget := hardware(caps)
 	backend := backendHint(caps)
-	rec := Recommendation{Candidate: c, BackendHint: backend}
-
-	fitTier := 0
-	switch {
-	case gpuCount > 0 && needMB <= largestVRAM:
-		rec.Fit = "single GPU"
-		rec.Reason = fmt.Sprintf("fits the largest GPU with about %.1fGB model size", c.SizeGB)
-		fitTier = 5
-	case gpuCount > 1 && needMB <= totalVRAM:
-		rec.Fit = "multi-GPU"
-		rec.Reason = fmt.Sprintf("fits across %d GPUs with tensor split", gpuCount)
-		fitTier = 4
-	case c.MoE && gpuCount > 0 && needMB <= totalVRAM+freeRAM:
-		rec.Fit = "MoE CPU expert offload"
-		rec.Reason = "fits with GPU attention and CPU expert fallback"
-		fitTier = 3
-	case gpuCount > 0 && needMB <= totalVRAM+freeRAM && c.SizeGB <= 48:
-		rec.Fit = "GPU plus CPU offload"
-		rec.Reason = "fits with partial GPU offload; slower than full VRAM fit"
-		fitTier = 2
-	case gpuCount == 0 && needMB <= freeRAM/2:
-		rec.Fit = "CPU"
-		rec.Reason = "fits in system RAM for CPU serving"
-		fitTier = 1
-	default:
+	base := modelIntelligence(c)
+	if base <= 0 {
 		return Recommendation{}, false
 	}
 
-	score := intelligenceScore(c)*100 + fitTier
-	rec.Score = score
-	return rec, true
+	quants := quantOptions(c)
+	var best Recommendation
+	ok := false
+	for _, q := range quants {
+		if q.SizeGB <= 0 {
+			continue
+		}
+		fit, reason, fitPenalty, needGB, fits := fitQuant(budget, c, q)
+		if !fits {
+			continue
+		}
+		adjusted := base - quantPenalty(q) - fitPenalty
+		if adjusted <= 0 {
+			continue
+		}
+		rec := Recommendation{
+			Candidate:            c,
+			Fit:                  fit,
+			BackendHint:          backend,
+			Reason:               reason,
+			QuantName:            q.Name,
+			QuantSizeGB:          q.SizeGB,
+			MemoryNeedGB:         needGB,
+			AdjustedIntelligence: adjusted,
+			Score:                int(adjusted * 1000),
+		}
+		if !ok || better(rec, best) {
+			best = rec
+			ok = true
+		}
+	}
+	return best, ok
+}
+
+func better(a, b Recommendation) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	if a.AdjustedIntelligence != b.AdjustedIntelligence {
+		return a.AdjustedIntelligence > b.AdjustedIntelligence
+	}
+	return a.QuantSizeGB > b.QuantSizeGB
+}
+
+func quantOptions(c Candidate) []QuantOption {
+	if len(c.Quants) > 0 {
+		out := append([]QuantOption(nil), c.Quants...)
+		sort.SliceStable(out, func(i, j int) bool { return out[i].SizeGB < out[j].SizeGB })
+		return out
+	}
+	name := "catalog"
+	if c.SizeGB > 0 {
+		name = "auto"
+	}
+	return []QuantOption{{Name: name, SizeGB: c.SizeGB}}
+}
+
+func fitQuant(b hardwareBudget, c Candidate, q QuantOption) (fit, reason string, fitPenalty, needGB float64, ok bool) {
+	modelMB := int(q.SizeGB * 1024)
+	overheadMB := estimateOverheadMB(modelMB, c)
+	needMB := modelMB + overheadMB
+	needGB = float64(needMB) / 1024
+
+	switch {
+	case b.gpuCount > 0 && needMB <= b.largestVRAM:
+		return "single GPU", fmt.Sprintf("%s fits in the largest GPU (%.1fGB model + ~%.1fGB overhead)", q.Name, q.SizeGB, float64(overheadMB)/1024), 0, needGB, true
+	case b.gpuCount > 1 && needMB <= b.totalVRAM:
+		return "multi-GPU", fmt.Sprintf("%s fits across %d GPUs (%.1fGB model + ~%.1fGB overhead)", q.Name, b.gpuCount, q.SizeGB, float64(overheadMB)/1024), 0.25, needGB, true
+	case b.gpuCount > 0 && needMB <= b.totalVRAM+b.usableRAM && c.MoE:
+		return "MoE RAM+VRAM", fmt.Sprintf("%s fits with GPU attention and RAM expert/offload path (%.1fGB model + ~%.1fGB overhead)", q.Name, q.SizeGB, float64(overheadMB)/1024), 1.0, needGB, true
+	case b.gpuCount > 0 && needMB <= b.totalVRAM+b.usableRAM:
+		return "GPU plus RAM", fmt.Sprintf("%s fits with partial GPU offload (%.1fGB model + ~%.1fGB overhead)", q.Name, q.SizeGB, float64(overheadMB)/1024), 2.0, needGB, true
+	case b.gpuCount == 0 && needMB <= b.usableRAM:
+		return "CPU RAM", fmt.Sprintf("%s fits in system RAM (%.1fGB model + ~%.1fGB overhead)", q.Name, q.SizeGB, float64(overheadMB)/1024), 4.0, needGB, true
+	default:
+		return "", "", 0, needGB, false
+	}
+}
+
+func estimateOverheadMB(modelMB int, c Candidate) int {
+	if modelMB <= 0 {
+		return 2048
+	}
+	var overhead int
+	if c.MoE && c.ActiveParamsB > 0 {
+		computeMB := maxInt(2048, int(c.ActiveParamsB*512))
+		kvMB := int(float64(modelMB) * 0.06)
+		overhead = computeMB + kvMB
+	} else if c.MoE {
+		overhead = 4096 + int(float64(modelMB)*0.06)
+	} else {
+		overhead = 2048 + int(float64(modelMB)*0.10)
+	}
+	if overhead < 2048 {
+		return 2048
+	}
+	if overhead > 12288 {
+		return 12288
+	}
+	return overhead
+}
+
+func quantPenalty(q QuantOption) float64 {
+	if q.QualityPenalty > 0 {
+		return q.QualityPenalty
+	}
+	name := strings.ToUpper(q.Name)
+	switch {
+	case strings.Contains(name, "BF16") || strings.Contains(name, "F16") || strings.Contains(name, "F32"):
+		return 0
+	case strings.Contains(name, "Q8"):
+		return 0.4
+	case strings.Contains(name, "Q6") || strings.Contains(name, "IQ6"):
+		return 0.8
+	case strings.Contains(name, "Q5") || strings.Contains(name, "IQ5"):
+		return 1.5
+	case strings.Contains(name, "MXFP4") || strings.Contains(name, "MXP4"):
+		return 2.6
+	case strings.Contains(name, "Q4") || strings.Contains(name, "IQ4") || strings.Contains(name, "I4"):
+		return 3.0
+	case strings.Contains(name, "Q3") || strings.Contains(name, "IQ3"):
+		return 5.0
+	case strings.Contains(name, "Q2") || strings.Contains(name, "IQ2"):
+		return 8.0
+	case strings.Contains(name, "Q1") || strings.Contains(name, "IQ1"):
+		return 12.0
+	default:
+		return 3.5
+	}
+}
+
+func modelIntelligence(c Candidate) float64 {
+	if c.AAIntelligence > 0 {
+		return c.AAIntelligence
+	}
+	if c.Quality > 0 {
+		return float64(c.Quality) / 1.65
+	}
+	return 0
 }
 
 func intelligenceScore(c Candidate) int {
@@ -194,6 +341,13 @@ func hasBackend(caps *detect.Capabilities, needle string) bool {
 		}
 	}
 	return false
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func fallbackShortlist() []Candidate {

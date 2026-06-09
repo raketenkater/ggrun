@@ -31,7 +31,7 @@ func TestTopFiltersByHardwareFit(t *testing.T) {
 		t.Fatalf("expected three recommendations, got %d", len(rows))
 	}
 	for _, row := range rows {
-		if row.Repo == "" || row.Fit == "" || row.BackendHint == "" {
+		if row.Repo == "" || row.Fit == "" || row.BackendHint == "" || row.QuantName == "" {
 			t.Fatalf("incomplete recommendation: %#v", row)
 		}
 	}
@@ -48,8 +48,8 @@ func TestCPURecommendationsStaySmall(t *testing.T) {
 		t.Fatal("expected at least one CPU recommendation")
 	}
 	for _, row := range rows {
-		if row.SizeGB > 10 {
-			t.Fatalf("CPU recommendation is too large: %#v", row)
+		if row.QuantSizeGB > 10 {
+			t.Fatalf("CPU recommendation quant is too large: %#v", row)
 		}
 	}
 }
@@ -71,5 +71,56 @@ func TestRecommendationScoreIgnoresSpeed(t *testing.T) {
 	}
 	if slowButSmart.Score <= fastButWeak.Score {
 		t.Fatalf("expected intelligence score to win regardless of speed: smart=%d fast=%d", slowButSmart.Score, fastButWeak.Score)
+	}
+}
+
+func TestEvaluateChoosesBestFittingQuant(t *testing.T) {
+	caps := &detect.Capabilities{
+		OS:       "linux",
+		RAM:      detect.RAMInfo{TotalMB: 16384, FreeMB: 8192},
+		GPUs:     []detect.GPU{{Name: "Test GPU", VRAMTotalMB: 24576}},
+		Backends: []detect.Backend{{Name: "llama-server", Path: "/bin/llama-server-vulkan"}},
+	}
+	candidate := Candidate{
+		Name:           "quant target",
+		Repo:           "repo/quant-target",
+		AAIntelligence: 50,
+		Quants: []QuantOption{
+			{Name: "Q2_K", SizeGB: 10},
+			{Name: "Q4_K_M", SizeGB: 18},
+			{Name: "Q8_0", SizeGB: 30},
+		},
+	}
+	rec, ok := evaluate(caps, candidate)
+	if !ok {
+		t.Fatal("expected candidate to fit")
+	}
+	if rec.QuantName != "Q4_K_M" || rec.Fit != "single GPU" {
+		t.Fatalf("expected best fitting GPU quant, got %#v", rec)
+	}
+}
+
+func TestEvaluateMoEFitsAcrossRAMAndVRAM(t *testing.T) {
+	caps := &detect.Capabilities{
+		OS:       "linux",
+		RAM:      detect.RAMInfo{TotalMB: 196608, FreeMB: 180224},
+		GPUs:     []detect.GPU{{Name: "Test GPU", VRAMTotalMB: 24576}},
+		Backends: []detect.Backend{{Name: "llama-server", Path: "/bin/llama-server-vulkan"}},
+	}
+	candidate := Candidate{
+		Name:           "moe target",
+		Repo:           "repo/moe-target",
+		AAIntelligence: 50,
+		MoE:            true,
+		TotalParamsB:   230,
+		ActiveParamsB:  10,
+		Quants:         []QuantOption{{Name: "Q4_K_M", SizeGB: 127}},
+	}
+	rec, ok := evaluate(caps, candidate)
+	if !ok {
+		t.Fatal("expected MoE candidate to fit across RAM and VRAM")
+	}
+	if rec.Fit != "MoE RAM+VRAM" {
+		t.Fatalf("expected MoE RAM+VRAM fit, got %#v", rec)
 	}
 }

@@ -156,7 +156,7 @@ func InitialModel() Model {
 	// Detect hardware
 	caps, _ := detect.Detect()
 	m.caps = caps
-	m.recommendations = recommend.Top(caps, 3)
+	m.recommendations = recommend.Top(caps, 5)
 
 	if len(m.models) == 0 {
 		m.screen = ScreenFirstRun
@@ -841,7 +841,8 @@ func (m Model) updateRecommended(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if len(m.recommendations) > 0 && m.selectedRecommendation >= 0 && m.selectedRecommendation < len(m.recommendations) {
-				m.launchRequest = &LaunchRequest{DownloadRepo: m.recommendations[m.selectedRecommendation].Repo}
+				rec := m.recommendations[m.selectedRecommendation]
+				m.launchRequest = &LaunchRequest{DownloadRepo: rec.Repo, DownloadQuant: rec.QuantName}
 				return m, tea.Quit
 			}
 		case "d", "D":
@@ -879,8 +880,12 @@ func (m Model) viewRecommended() string {
 		} else {
 			b.WriteString(prefix + line + "\n")
 		}
-		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s | %.1fGB | %s | %s", rec.Repo, rec.SizeGB, rec.Fit, rec.BackendHint)) + "\n")
-		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s; %s", rec.Reason, rec.Notes)) + "\n")
+		quant := rec.QuantName
+		if quant == "" {
+			quant = "auto"
+		}
+		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s | %s %.1fGB | need %.1fGB | %s | %s", rec.Repo, quant, rec.QuantSizeGB, rec.MemoryNeedGB, rec.Fit, rec.BackendHint)) + "\n")
+		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     score %.1f; %s; %s", rec.AdjustedIntelligence, rec.Reason, rec.Notes)) + "\n")
 	}
 
 	b.WriteString("\n")
@@ -1253,22 +1258,23 @@ func (m Model) buildArgs() []string {
 
 // LaunchRequest is returned when the user chooses to launch a model.
 type LaunchRequest struct {
-	DownloadRepo string
-	ModelPath    string
-	Port         int
-	CtxSize      int
-	KVPlacement  string
-	KVQuality    string
-	GPULayers    int
-	FlashAttn    bool
-	Parallel     int
-	Vision       bool
-	Backend      string
-	TuneCache    string
-	AITune       bool
-	AITuneRounds int
-	Benchmark    bool
-	KeepAlive    bool
+	DownloadRepo  string
+	DownloadQuant string
+	ModelPath     string
+	Port          int
+	CtxSize       int
+	KVPlacement   string
+	KVQuality     string
+	GPULayers     int
+	FlashAttn     bool
+	Parallel      int
+	Vision        bool
+	Backend       string
+	TuneCache     string
+	AITune        bool
+	AITuneRounds  int
+	Benchmark     bool
+	KeepAlive     bool
 }
 
 // Run starts the TUI and returns a launch request if the user chose to launch.

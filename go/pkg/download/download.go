@@ -73,6 +73,11 @@ func findScript(appHome string) string {
 
 // Run executes the downloader for the given repo.
 func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
+	return d.RunQuant(repo, "", caps)
+}
+
+// RunQuant executes the downloader with an optional preselected quant.
+func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabilities) error {
 	if d.ScriptPath == "" {
 		return fmt.Errorf("download_any_gguf.py not found; set LLM_SERVER_HOME to the repo root or install the bundled tools")
 	}
@@ -89,13 +94,18 @@ func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
 		ramMB = caps.RAM.FreeMB
 	}
 
-	cmd := exec.Command("python3", d.ScriptPath,
+	args := []string{
+		d.ScriptPath,
 		"--repo", repo,
 		"--dir", d.ModelDir,
 		"--cache-dir", d.CacheDir,
 		"--vram", strconv.Itoa(vramMB),
 		"--ram", strconv.Itoa(ramMB),
-	)
+	}
+	if quant != "" && quant != "auto" && quant != "catalog" {
+		args = append(args, "--quant", quant)
+	}
+	cmd := exec.Command("python3", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
