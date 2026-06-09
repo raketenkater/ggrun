@@ -101,19 +101,49 @@ fi
 
 RUN_PIDS=()
 
+collect_descendants() {
+    local root="${1:-}"
+    [[ -n "$root" ]] || return 0
+    local child
+    while read -r child; do
+        [[ -n "$child" ]] || continue
+        echo "$child"
+        collect_descendants "$child"
+    done < <(pgrep -P "$root" 2>/dev/null || true)
+}
+
 stop_server() {
     local pid="${1:-}"
     [[ -n "$pid" ]] || return 0
-    kill -TERM -- "-$pid" 2>/dev/null || true
-    kill -TERM "$pid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
-        if ! ps -p "$pid" >/dev/null 2>&1; then
+    local pids=("$pid")
+    local child target state alive
+    while read -r child; do
+        [[ -n "$child" ]] && pids+=("$child")
+    done < <(collect_descendants "$pid")
+
+    for target in "${pids[@]}"; do
+        kill -TERM -- "-$target" 2>/dev/null || true
+        kill -TERM "$target" 2>/dev/null || true
+    done
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        alive=0
+        for target in "${pids[@]}"; do
+            state="$(ps -p "$target" -o stat= 2>/dev/null || true)"
+            state="${state//[[:space:]]/}"
+            if [[ -n "$state" && "$state" != Z* ]]; then
+                alive=1
+                break
+            fi
+        done
+        if [[ "$alive" == "0" ]]; then
             break
         fi
         sleep 0.5
     done
-    kill -KILL -- "-$pid" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
+    for target in "${pids[@]}"; do
+        kill -KILL -- "-$target" 2>/dev/null || true
+        kill -KILL "$target" 2>/dev/null || true
+    done
     wait "$pid" 2>/dev/null || true
 }
 
