@@ -106,12 +106,15 @@ func findParseScript() string {
 			filepath.Join(exeDir, "parse_gguf.py"),
 			filepath.Join(exeDir, "..", "tools", "gguf", "parse_gguf.py"),
 			filepath.Join(exeDir, "..", "..", "tools", "gguf", "parse_gguf.py"),
+			filepath.Join(exeDir, "..", "..", "..", "tools", "gguf", "parse_gguf.py"),
 		)
 	}
 	wd, _ := os.Getwd()
 	candidates = append(candidates,
 		filepath.Join(wd, "tools", "gguf", "parse_gguf.py"),
 		filepath.Join(wd, "..", "tools", "gguf", "parse_gguf.py"),
+		filepath.Join(wd, "..", "..", "tools", "gguf", "parse_gguf.py"),
+		filepath.Join(wd, "..", "..", "..", "tools", "gguf", "parse_gguf.py"),
 		filepath.Join(wd, "parse_gguf.py"),
 		filepath.Join(wd, "..", "parse_gguf.py"),
 	)

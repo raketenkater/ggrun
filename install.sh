@@ -32,6 +32,8 @@ set -euo pipefail
 
 REPO_URL="https://github.com/raketenkater/llm-server.git"
 GITHUB_REPO="raketenkater/llm-server"
+SOURCE_REPO_DIR="${LLM_INSTALL_REPO_DIR:-}"
+SOURCE_REF="${LLM_INSTALL_REF:-main}"
 INSTALL_DIR="${LLM_INSTALL_PREFIX:-$HOME/.local/bin}"
 MODEL_DIR="${LLM_INSTALL_MODEL_DIR:-$HOME/ai_models}"
 BACKEND_ROOT="${LLM_INSTALL_BACKEND_ROOT:-$HOME}"
@@ -100,15 +102,51 @@ elif [[ -f "./go/go.mod" && -f "./scripts/setup-home.sh" ]]; then
     ok "Using local repo at $SRC_DIR"
 fi
 
+prepare_persistent_source_repo() {
+    [[ -n "$SOURCE_REPO_DIR" ]] || return 1
+    command -v git >/dev/null || { warn "git required to keep a source checkout for updates"; return 1; }
+    if [[ -e "$SOURCE_REPO_DIR" && ! -d "$SOURCE_REPO_DIR/.git" ]]; then
+        warn "$SOURCE_REPO_DIR exists but is not a git checkout; using temporary source instead"
+        return 1
+    fi
+    if [[ -d "$SOURCE_REPO_DIR/.git" ]]; then
+        say "── Updating source checkout: $SOURCE_REPO_DIR ($SOURCE_REF) ──"
+        git -C "$SOURCE_REPO_DIR" fetch origin "$SOURCE_REF" --depth=1 >/dev/null 2>&1 || \
+            git -C "$SOURCE_REPO_DIR" fetch origin "$SOURCE_REF" >/dev/null 2>&1 || return 1
+        git -C "$SOURCE_REPO_DIR" checkout -q "$SOURCE_REF" >/dev/null 2>&1 || true
+        git -C "$SOURCE_REPO_DIR" merge --ff-only FETCH_HEAD >/dev/null 2>&1 || \
+            git -C "$SOURCE_REPO_DIR" checkout -q FETCH_HEAD >/dev/null 2>&1 || return 1
+        ok "Source checkout ready at $SOURCE_REPO_DIR"
+    else
+        mkdir -p "$(dirname "$SOURCE_REPO_DIR")"
+        say "── Cloning llm-server source for future updates: $SOURCE_REPO_DIR ($SOURCE_REF) ──"
+        git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SOURCE_REPO_DIR" >/dev/null 2>&1 || return 1
+        ok "Source checkout ready at $SOURCE_REPO_DIR"
+    fi
+    SRC_DIR="$SOURCE_REPO_DIR"
+}
+
 ensure_source_repo() {
     [[ -n "$SRC_DIR" ]] && return 0
+    if prepare_persistent_source_repo; then
+        return 0
+    fi
     command -v git >/dev/null || { err "git required to fetch repo"; exit 1; }
     SRC_DIR="$(mktemp -d -t llm-server-install.XXXXXX)"
     say "── Cloning $REPO_URL ──"
-    git clone --depth=1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 && ok "Cloned to $SRC_DIR" \
-        || { err "git clone failed"; exit 1; }
+    if git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 || \
+        git clone --depth=1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1; then
+        ok "Cloned to $SRC_DIR"
+    else
+        err "git clone failed"
+        exit 1
+    fi
     trap 'rm -rf "$SRC_DIR"' EXIT
 }
+
+if [[ -n "$SOURCE_REPO_DIR" ]]; then
+    prepare_persistent_source_repo || true
+fi
 
 # ── Stage 2: detect platform + backend ──────────────────────────────────────
 OS="$(uname -s)"

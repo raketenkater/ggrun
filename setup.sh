@@ -44,10 +44,10 @@ ROOT="$(local_root || download_root)"
 
 case "$(uname -s)" in
     Linux)
-        exec "$ROOT/scripts/setup-home.sh" linux "$@"
+        LLM_SETUP_REF="$REF" exec "$ROOT/scripts/setup-home.sh" linux "$@"
         ;;
     Darwin)
-        exec "$ROOT/scripts/setup-home.sh" mac "$@"
+        LLM_SETUP_REF="$REF" exec "$ROOT/scripts/setup-home.sh" mac "$@"
         ;;
     MINGW*|MSYS*|CYGWIN*)
         err "Native Windows is not supported. Use WSL2, then run this inside Ubuntu."

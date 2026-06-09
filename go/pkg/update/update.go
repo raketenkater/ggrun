@@ -279,10 +279,7 @@ func Version() string {
 
 // SelfUpdate pulls the latest llm-server from git and re-runs install.sh.
 func SelfUpdate() error {
-	repoDir := os.Getenv("LLM_SERVER_REPO")
-	if repoDir == "" {
-		repoDir = filepath.Join(os.Getenv("HOME"), "llm-server")
-	}
+	repoDir := installedSourceRepoDir()
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
 		if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
@@ -458,6 +455,8 @@ func selfUpdateInstallEnv(appHome string) []string {
 		"LLM_INSTALL_PREFIX="+filepath.Join(appHome, ".bin"),
 		"LLM_INSTALL_MODEL_DIR="+filepath.Join(appHome, "models"),
 		"LLM_INSTALL_BACKEND_ROOT="+filepath.Join(appHome, ".src"),
+		"LLM_INSTALL_REPO_DIR="+filepath.Join(appHome, ".src", "llm-server"),
+		"LLM_INSTALL_REF=main",
 		"LLM_INSTALL_BACKEND=skip",
 		"LLM_INSTALL_MODE=build",
 	)
@@ -520,6 +519,22 @@ func SelfUpdateAppHomeInstaller(appHome string) error {
 	}
 	fmt.Println("  ✓ llm-server app home updated and verified. Restart to use the new version.")
 	return nil
+}
+
+func installedSourceRepoDir() string {
+	if repoDir := strings.TrimSpace(os.Getenv("LLM_SERVER_REPO")); repoDir != "" {
+		return repoDir
+	}
+	if appHome := strings.TrimSpace(os.Getenv("LLM_APP_HOME")); appHome != "" {
+		repoDir := filepath.Join(appHome, ".src", "llm-server")
+		if _, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil {
+			return repoDir
+		}
+	}
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return filepath.Join(home, "llm-server")
+	}
+	return ""
 }
 
 func installedLLMServerPath() string {

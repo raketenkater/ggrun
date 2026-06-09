@@ -97,6 +97,8 @@ func TestSelfUpdateInstallEnvPreservesAppHome(t *testing.T) {
 		"LLM_INSTALL_PREFIX=" + filepath.Join(appHome, ".bin"),
 		"LLM_INSTALL_MODEL_DIR=" + filepath.Join(appHome, "models"),
 		"LLM_INSTALL_BACKEND_ROOT=" + filepath.Join(appHome, ".src"),
+		"LLM_INSTALL_REPO_DIR=" + filepath.Join(appHome, ".src", "llm-server"),
+		"LLM_INSTALL_REF=main",
 		"LLM_INSTALL_BACKEND=skip",
 		"LLM_INSTALL_MODE=build",
 		"LLM_INSTALL_MAIN=go",
@@ -160,4 +162,26 @@ func TestUpdateRepoCandidatesIncludeAppHomeSource(t *testing.T) {
 		}
 	}
 	t.Fatalf("missing app-home repo candidate %#v in %#v", want, rows)
+}
+
+func TestInstalledSourceRepoDirPrefersAppHomeCheckout(t *testing.T) {
+	appHome := filepath.Join(t.TempDir(), "llm-server")
+	repoDir := filepath.Join(appHome, ".src", "llm-server")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	if got := installedSourceRepoDir(); got != repoDir {
+		t.Fatalf("source repo mismatch: got %s want %s", got, repoDir)
+	}
+}
+
+func TestInstalledSourceRepoDirEnvOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "repo")
+	t.Setenv("LLM_SERVER_REPO", want)
+	t.Setenv("LLM_APP_HOME", filepath.Join(t.TempDir(), "app"))
+	if got := installedSourceRepoDir(); got != want {
+		t.Fatalf("source repo override mismatch: got %s want %s", got, want)
+	}
 }
