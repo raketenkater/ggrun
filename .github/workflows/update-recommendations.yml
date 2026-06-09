@@ -23,7 +23,7 @@ jobs:
       - name: Refresh recommendation catalog
         env:
           ARTIFICIAL_ANALYSIS_API_KEY: ${{ secrets.ARTIFICIAL_ANALYSIS_API_KEY || secrets.ARTIFICIALANALYSISAPIKEY }}
-        run: python3 tools/models/update_recommendations.py --allow-missing-key --print-top 100 --print-open-weights-top 100
+        run: python3 tools/models/update_recommendations.py --allow-missing-key --print-top 100 --print-open-weights-top 100 --print-catalog-top 100
 
       - name: Show catalog diff
         run: git diff -- go/pkg/recommend/catalog.json

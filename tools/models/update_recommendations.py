@@ -150,13 +150,22 @@ def output_tps(row: dict[str, Any]) -> float:
     return float(val) if isinstance(val, (int, float)) else 0.0
 
 
+def has_open_weight_metadata(row: dict[str, Any]) -> bool:
+    licensing = row.get("licensing")
+    if isinstance(licensing, dict) and isinstance(licensing.get("is_open_weights"), bool):
+        return True
+    if isinstance(row.get("open_weights"), bool):
+        return True
+    # Older/free API shapes may omit licensing. A weights URL is the best fallback signal.
+    return bool(row.get("huggingface_url"))
+
+
 def open_weights(row: dict[str, Any]) -> bool:
     licensing = row.get("licensing")
     if isinstance(licensing, dict) and isinstance(licensing.get("is_open_weights"), bool):
         return bool(licensing.get("is_open_weights"))
     if isinstance(row.get("open_weights"), bool):
         return bool(row.get("open_weights"))
-    # Older/free API shapes may omit licensing. A weights URL is the best safe fallback.
     return bool(row.get("huggingface_url"))
 
 
@@ -218,6 +227,9 @@ def display_name(row: dict[str, Any]) -> str:
 
 
 def print_top_models(rows: list[dict[str, Any]], limit: int, *, open_weights_only: bool = False) -> None:
+    if open_weights_only and not any(has_open_weight_metadata(row) for row in rows):
+        print("Artificial Analysis open-weight metadata is unavailable for this API tier; skipping API open-weight table")
+        return
     filtered = [row for row in rows if not open_weights_only or open_weights(row)]
     ranked = sorted(filtered, key=intelligence, reverse=True)[:limit]
     label = "open-weight " if open_weights_only else ""
@@ -232,6 +244,26 @@ def print_top_models(rows: list[dict[str, Any]], limit: int, *, open_weights_onl
             f"| {i} | {name} | {slug} | {parameters_summary(row)} | "
             f"{intelligence(row):.3f} | {output_tps(row):.3f} | {context_summary(row)} | {hf} |"
         )
+
+
+def catalog_intelligence(row: dict[str, Any]) -> float:
+    val = row.get("aa_intelligence_index")
+    return float(val) if isinstance(val, (int, float)) else 0.0
+
+
+def print_catalog_models(catalog: dict[str, Any], limit: int) -> None:
+    rows = [row for row in catalog.get("candidates", []) if isinstance(row, dict)]
+    ranked = sorted(rows, key=lambda row: (catalog_intelligence(row), int(row.get("quality") or 0)), reverse=True)[:limit]
+    print(f"Top {len(ranked)} llm-server GGUF candidates by cached Artificial Analysis intelligence")
+    print("| rank | model | repo | size GB | moe | intelligence | output tps |")
+    print("|---:|---|---|---:|---|---:|---:|")
+    for i, row in enumerate(ranked, 1):
+        name = str(row.get("name") or "").replace("|", "/")
+        repo = str(row.get("repo") or "").replace("|", "/")
+        size = float(row.get("size_gb") or 0)
+        moe = "yes" if row.get("moe") else "no"
+        tps = float(row.get("aa_output_tps") or 0)
+        print(f"| {i} | {name} | {repo} | {size:.1f} | {moe} | {catalog_intelligence(row):.3f} | {tps:.3f} |")
 
 
 def match_row(candidate: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -297,6 +329,7 @@ def main() -> int:
     parser.add_argument("--allow-missing-key", action="store_true", help="exit 0 without changes when the API key is missing")
     parser.add_argument("--print-top", type=int, default=0, help="print top N API models by intelligence index")
     parser.add_argument("--print-open-weights-top", type=int, default=0, help="print top N open-weight API models by intelligence index")
+    parser.add_argument("--print-catalog-top", type=int, default=0, help="print top N checked-in GGUF recommendation rows by cached intelligence")
     args = parser.parse_args()
 
     catalog_path = Path(args.catalog)
@@ -315,6 +348,8 @@ def main() -> int:
     if args.print_open_weights_top > 0:
         print_top_models(rows, args.print_open_weights_top, open_weights_only=True)
     catalog = refresh_catalog(catalog, rows)
+    if args.print_catalog_top > 0:
+        print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(catalog_path)
