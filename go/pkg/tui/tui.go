@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/raketenkater/llm-server/pkg/config"
 	"github.com/raketenkater/llm-server/pkg/detect"
 	"github.com/raketenkater/llm-server/pkg/probe"
 	"github.com/raketenkater/llm-server/pkg/recommend"
@@ -123,16 +124,29 @@ type LaunchRecommendation struct {
 }
 
 func InitialModel() Model {
+	cfg, _ := config.Load()
+	settingsPath := config.Path()
+	backend := cfg.Backend
+	if backend == "" {
+		backend = "ik_llama"
+	}
+	rounds := cfg.TuneRounds
+	if rounds <= 0 {
+		rounds = 8
+	}
 	m := Model{
 		screen:       ScreenMain,
-		backend:      "ik_llama",
-		modelDir:     os.Getenv("HOME") + "/ai_models",
-		settingsPath: os.Getenv("HOME") + "/.config/llm-server/config",
-		cacheDir:     os.Getenv("HOME") + "/.cache/llm-server",
+		backend:      backend,
+		modelDir:     cfg.ModelDir,
+		settingsPath: settingsPath,
+		cacheDir:     cfg.CacheDir,
 		ctxSize:      "fit",
 		ctxMode:      "fit",
-		kvPlacement:  "auto",
-		aituneRounds: 8,
+		kvPlacement:  cfg.KVPlacement,
+		aituneRounds: rounds,
+	}
+	if m.kvPlacement == "" {
+		m.kvPlacement = "auto"
 	}
 
 	m.input = textinput.New()

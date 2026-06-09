@@ -774,7 +774,11 @@ func cmdGUI() {
 		return
 	}
 
-	be := findBackend(caps)
+	backendName := req.Backend
+	if backendName == "" {
+		backendName = cfg.Backend
+	}
+	be := selectBackend(caps, &launchRequest{ServerBin: cfg.LlamaServer, Backend: backendName})
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
@@ -1483,16 +1487,16 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse model: %w", err)
 	}
-	// Find the backend FIRST so its tag feeds placement — otherwise the
-	// split-mode/flag selection can't tell ik_llama from mainline and emits
-	// flags the backend rejects (e.g. `--split-mode row`, unsupported by ik).
-	be := findBackend(caps)
-	if be == nil {
-		return nil, fmt.Errorf("no llama-server binary found")
-	}
 	cfg := config.Defaults()
 	if c, err := config.Load(); err == nil {
 		cfg = c
+	}
+	// Find the backend FIRST so its tag feeds placement — otherwise the
+	// split-mode/flag selection can't tell ik_llama from mainline and emits
+	// flags the backend rejects (e.g. `--split-mode row`, unsupported by ik).
+	be := selectBackend(caps, &launchRequest{ServerBin: cfg.LlamaServer, Backend: cfg.Backend})
+	if be == nil {
+		return nil, fmt.Errorf("no llama-server binary found")
 	}
 	opts := placement.Options{
 		ContextSize: resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
@@ -1798,8 +1802,14 @@ func findBackend(caps *detect.Capabilities) *backendInfo {
 
 func backendSearchPaths() []string {
 	home := os.Getenv("HOME")
+	appHome := os.Getenv("LLM_APP_HOME")
 	return []string{
 		os.Getenv("LLAMA_SERVER"),
+		filepath.Join(appHome, ".bin", "llama-server"),
+		filepath.Join(appHome, "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "ik_llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "llama.cpp", "build-vulkan", "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server"),
 		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server"),
 		filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server"),
 		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"),

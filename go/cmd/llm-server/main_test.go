@@ -353,3 +353,16 @@ func hasArgValue(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+func TestBackendSearchPathsIncludeAppHomeBackend(t *testing.T) {
+	appHome := filepath.Join(t.TempDir(), "llm-server")
+	t.Setenv("LLM_APP_HOME", appHome)
+	paths := backendSearchPaths()
+	want := filepath.Join(appHome, ".bin", "llama-server")
+	for _, path := range paths {
+		if path == want {
+			return
+		}
+	}
+	t.Fatalf("missing app-home backend path %s in %#v", want, paths)
+}
