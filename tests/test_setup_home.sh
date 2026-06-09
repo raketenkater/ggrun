@@ -33,6 +33,15 @@ test -d "$APP_HOME/.src"
 test ! -e "$APP_HOME/models/download_any_gguf.py"
 test ! -e "$APP_HOME/models/model_index.py"
 
+mv "$APP_HOME/.config/config.sh" "$APP_HOME/.config/config.sh.bak"
+version_out=$("$APP_HOME/llm-server" version 2>&1)
+if [[ "$version_out" != llm-server* ]]; then
+    echo "  ✗ app-home launcher did not tolerate missing config.sh"
+    echo "$version_out" | tail -20 | sed 's/^/    /'
+    exit 1
+fi
+mv "$APP_HOME/.config/config.sh.bak" "$APP_HOME/.config/config.sh"
+
 cat >"$TMP/llama-server" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in

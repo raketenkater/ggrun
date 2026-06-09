@@ -20,11 +20,13 @@
 #   LLM_INSTALL_MODEL_DIR=<dir>                           default: ~/ai_models
 #   LLM_INSTALL_BACKEND_ROOT=<dir>                         default: ~
 #   LLM_INSTALL_PY_DEPS=auto|install|skip                  default: auto
+#   LLM_INSTALL_DEPS=auto|install|skip                     default: auto
 #   LLM_INSTALL_GO=auto|system|download|skip                default: auto
 #   LLM_INSTALL_GO_VERSION=<version>                        default: go directive in go/go.mod
 #   LLM_INSTALL_GO_ROOT=<dir>                               default: $LLM_INSTALL_BACKEND_ROOT/.llm-server-go
 #   LLM_INSTALL_MAIN=go|bash                               default: go
 #   LLM_INSTALL_NONINTERACTIVE=1                          skip prompts
+#   LLM_INSTALL_PROMPT=0                                  never ask guided setup questions
 
 set -euo pipefail
 
@@ -39,13 +41,14 @@ INSTALL_MODE="${LLM_INSTALL_MODE:-auto}"
 INSTALL_RELEASE="${LLM_INSTALL_RELEASE:-latest}"
 INSTALL_RELEASE_DIR="${LLM_INSTALL_RELEASE_DIR:-}"
 PY_DEPS_MODE="${LLM_INSTALL_PY_DEPS:-auto}"
+DEPS_MODE="${LLM_INSTALL_DEPS:-auto}"
 GO_MODE="${LLM_INSTALL_GO:-auto}"
 GO_VERSION_OVERRIDE="${LLM_INSTALL_GO_VERSION:-}"
 GO_BOOTSTRAP_ROOT="${LLM_INSTALL_GO_ROOT:-$BACKEND_ROOT/.llm-server-go}"
 GO_CMD=""
 NONINTERACTIVE="${LLM_INSTALL_NONINTERACTIVE:-0}"
 MAIN_IMPL="${LLM_INSTALL_MAIN:-go}"
-[[ ! -t 0 ]] && NONINTERACTIVE=1   # piped via curl | bash → no stdin
+[[ ! -t 0 && ! -r /dev/tty ]] && NONINTERACTIVE=1   # piped installs can still ask through /dev/tty
 
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -71,6 +74,10 @@ esac
 case "$PY_DEPS_MODE" in
     auto|install|skip) ;;
     *) err "unknown python dependency mode: $PY_DEPS_MODE"; exit 1 ;;
+esac
+case "$DEPS_MODE" in
+    auto|install|skip) ;;
+    *) err "unknown dependency install mode: $DEPS_MODE"; exit 1 ;;
 esac
 case "$GO_MODE" in
     auto|system|download|skip) ;;
@@ -149,7 +156,51 @@ detect_backend() {
     echo cpu
 }
 [[ "$BACKEND_CHOICE" == "auto" ]] && BACKEND_CHOICE="$(detect_backend)"
-ok "Detected backend: $BACKEND_CHOICE"
+DETECTED_BACKEND="$BACKEND_CHOICE"
+
+if (( ! NONINTERACTIVE )) && [[ "${LLM_INSTALL_PROMPT:-auto}" != "0" && "$BACKEND_REQUEST" == "auto" ]]; then
+    say ""
+    say "Setup choices"
+    say "  Detected backend: $DETECTED_BACKEND"
+    say "  Install location: $INSTALL_DIR"
+    say "  Model directory:  $MODEL_DIR"
+    if ask "Install/build a llama.cpp backend now so llm-server works out of the box? [Y/n]" y; then
+        if ! ask "Use detected backend '$DETECTED_BACKEND'? [Y/n]" y; then
+            read -r -p "Choose backend [cuda/vulkan/cpu/skip]: " reply </dev/tty || reply=""
+            reply="${reply:-$DETECTED_BACKEND}"
+            case "$reply" in
+                cuda|vulkan|cpu|skip) BACKEND_CHOICE="$reply" ;;
+                *) warn "Unknown backend '$reply'; using detected backend '$DETECTED_BACKEND'" ;;
+            esac
+        fi
+        if [[ "$BACKEND_CHOICE" != "skip" && "$DEPS_MODE" == "auto" ]]; then
+            if ask "Install missing system build dependencies if needed? [Y/n]" y; then
+                DEPS_MODE="install"
+            else
+                DEPS_MODE="skip"
+            fi
+        fi
+    else
+        BACKEND_CHOICE="skip"
+        warn "Backend install skipped. Configure LLAMA_SERVER manually before launching models."
+    fi
+    if [[ "$GO_MODE" == "auto" ]]; then
+        if ask "Install a local Go toolchain if system Go is missing or too old? [Y/n]" y; then
+            GO_MODE="auto"
+        else
+            GO_MODE="system"
+        fi
+    fi
+    if [[ "$PY_DEPS_MODE" == "auto" ]]; then
+        if ask "Install Python downloader helpers for HuggingFace model search/download if missing? [Y/n]" y; then
+            PY_DEPS_MODE="install"
+        else
+            PY_DEPS_MODE="skip"
+        fi
+    fi
+fi
+
+ok "Selected backend: $BACKEND_CHOICE"
 
 platform_slug() {
     local arch slug_os slug_arch
@@ -447,6 +498,98 @@ choose_cuda_auto_fallback_backend() {
     ok "Selected fallback backend: $BACKEND_CHOICE"
 }
 
+run_privileged() {
+    if (( EUID == 0 )); then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        return 1
+    fi
+}
+
+install_build_deps() {
+    [[ "$OS" == "Linux" ]] || return 1
+    [[ "$DEPS_MODE" != "skip" ]] || return 1
+
+    say "-- Installing build dependencies --"
+    if command -v apt-get >/dev/null 2>&1; then
+        local pkgs=(git cmake build-essential pkg-config libcurl4-openssl-dev)
+        [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(libvulkan-dev glslang-tools vulkan-tools)
+        run_privileged apt-get update && run_privileged apt-get install -y "${pkgs[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        local pkgs=(git cmake make gcc gcc-c++ pkgconf-pkg-config libcurl-devel)
+        [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-loader-devel vulkan-headers glslang vulkan-tools)
+        run_privileged dnf install -y "${pkgs[@]}"
+    elif command -v yum >/dev/null 2>&1; then
+        local pkgs=(git cmake make gcc gcc-c++ pkgconfig libcurl-devel)
+        [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-loader-devel glslang vulkan-tools)
+        run_privileged yum install -y "${pkgs[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        local pkgs=(git cmake make gcc pkgconf curl)
+        [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-headers glslang vulkan-tools)
+        run_privileged pacman -Sy --needed --noconfirm "${pkgs[@]}"
+    elif command -v zypper >/dev/null 2>&1; then
+        local pkgs=(git cmake make gcc gcc-c++ pkg-config libcurl-devel)
+        [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-devel glslang-tools vulkan-tools)
+        run_privileged zypper install -y "${pkgs[@]}"
+    else
+        return 1
+    fi
+}
+
+missing_build_deps() {
+    local missing=() dep
+    for dep in git cmake make c++; do
+        command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")
+    done
+    printf '%s\n' "${missing[@]}"
+}
+
+ensure_build_deps() {
+    local missing
+    missing="$(missing_build_deps | paste -sd ' ' -)"
+    if [[ -z "$missing" ]]; then
+        return 0
+    fi
+    warn "Missing build dependencies: $missing"
+    if install_build_deps; then
+        missing="$(missing_build_deps | paste -sd ' ' -)"
+        [[ -z "$missing" ]] && { ok "Build dependencies ready"; return 0; }
+    fi
+    err "Backend build dependencies are missing: $missing"
+    say "Install build tools or rerun with LLM_INSTALL_BACKEND=skip for launcher-only install."
+    return 1
+}
+
+backend_server_path() {
+    printf '%s/bin/llama-server\n' "$BACKEND_BUILD"
+}
+
+refresh_backend_repo() {
+    if [[ -d "$BACKEND_DIR/.git" ]]; then
+        git -C "$BACKEND_DIR" pull --ff-only || warn "Could not fast-forward $BACKEND_DIR; using existing checkout"
+    else
+        git clone "$BACKEND_REPO" "$BACKEND_DIR"
+    fi
+}
+
+build_backend() {
+    ensure_build_deps || return 1
+    if [[ "$OS" == "Linux" && "$BACKEND_CHOICE" == "cuda" ]] && ! has_cuda_toolkit; then
+        err "CUDA toolkit/nvcc not found for CUDA backend."
+        return 1
+    fi
+    refresh_backend_repo || return 1
+    cmake_env=()
+    if [[ "$BACKEND_CHOICE" == "cuda" ]]; then
+        nvcc_path="$(cuda_nvcc_path 2>/dev/null || true)"
+        [[ -n "$nvcc_path" ]] && cmake_env=(CUDACXX="$nvcc_path")
+    fi
+    env "${cmake_env[@]}" cmake -S "$BACKEND_DIR" -B "$BACKEND_BUILD" -DCMAKE_BUILD_TYPE=Release "${BACKEND_CMAKE[@]}" \
+        && cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-server
+}
+
 # ── Stage 3: install scripts ────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR" "$MODEL_DIR"
 RELEASE_INSTALLED=0
@@ -562,43 +705,51 @@ esac
 if [[ -n "$BACKEND_REPO" ]]; then
     say ""
     say "── Backend: $BACKEND_CHOICE ──"
+    backend_binary="$(backend_server_path)"
     if (( RELEASE_INSTALLED )); then
         ok "Using bundled backend at $INSTALL_DIR/llama-server"
-    elif [[ -x "$BACKEND_BUILD/bin/llama-server" ]]; then
+    elif [[ -x "$backend_binary" ]]; then
         ok "Backend already built at $BACKEND_BUILD"
-        link_backend_binary "$BACKEND_BUILD/bin/llama-server" || true
+        link_backend_binary "$backend_binary" || true
     elif [[ "$INSTALL_MODE" == "scripts" ]]; then
-        warn "Scripts-only mode selected. Run with LLM_INSTALL_MODE=build to build a backend."
+        err "Scripts-only mode does not install a backend. Rerun without LLM_INSTALL_MODE=scripts or set LLM_INSTALL_BACKEND=skip intentionally."
+        exit 1
     elif [[ "$INSTALL_MODE" == "release" ]]; then
-        warn "Release mode selected but no backend build requested."
-    elif [[ "$INSTALL_MODE" == "build" ]] || ask "Clone + build $BACKEND_DIR now? (needs cmake, compiler toolchain, ~5-20min) [Y/n]" y; then
-        missing=()
-        for dep in git cmake make; do
-            command -v "$dep" >/dev/null || missing+=("$dep")
-        done
-        if (( ${#missing[@]} )); then
-            warn "Missing build dependencies: ${missing[*]}"
-            warn "Install them, then rerun: LLM_INSTALL_MODE=build ./install.sh"
-        elif [[ "$OS" == "Linux" && "$BACKEND_CHOICE" == "cuda" ]] && ! has_cuda_toolkit; then
-            warn "CUDA toolkit not found. Install CUDA toolkit/nvcc, attach a CUDA release bundle, or rerun with LLM_INSTALL_BACKEND=vulkan."
-        else
-            if [[ ! -d "$BACKEND_DIR/.git" ]]; then
-                git clone "$BACKEND_REPO" "$BACKEND_DIR" || { err "clone failed"; exit 1; }
-            fi
-            cmake_env=()
-            if [[ "$BACKEND_CHOICE" == "cuda" ]]; then
-                nvcc_path="$(cuda_nvcc_path 2>/dev/null || true)"
-                [[ -n "$nvcc_path" ]] && cmake_env=(CUDACXX="$nvcc_path")
-            fi
-            env "${cmake_env[@]}" cmake -S "$BACKEND_DIR" -B "$BACKEND_BUILD" -DCMAKE_BUILD_TYPE=Release "${BACKEND_CMAKE[@]}" \
-                && cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-server \
-                && ok "Built llama-server at $BACKEND_BUILD/bin/llama-server" \
-                && link_backend_binary "$BACKEND_BUILD/bin/llama-server" \
-                || warn "Build failed — run 'llm-server --update' later or build manually"
-        fi
+        err "Release mode selected but no compatible backend bundle was installed. Rerun with LLM_INSTALL_MODE=build."
+        exit 1
     else
-        warn "Skipped backend build. Run 'llm-server --update' later, or build $BACKEND_DIR yourself."
+        if build_backend; then
+            ok "Built llama-server at $backend_binary"
+            link_backend_binary "$backend_binary" || true
+        else
+            err "Backend build failed for $BACKEND_CHOICE."
+            if [[ "$BACKEND_REQUEST" == "auto" && "$BACKEND_CHOICE" != "cpu" ]]; then
+                warn "Retrying with CPU llama.cpp backend so llm-server works out of the box."
+                BACKEND_CHOICE="cpu"
+                BACKEND_REPO="https://github.com/ggml-org/llama.cpp.git"
+                BACKEND_DIR="$BACKEND_ROOT/llama.cpp"
+                BACKEND_BUILD="$BACKEND_DIR/build"
+                BACKEND_CMAKE=()
+                backend_binary="$(backend_server_path)"
+                if [[ -x "$backend_binary" ]] || build_backend; then
+                    ok "Built CPU llama-server at $backend_binary"
+                    link_backend_binary "$backend_binary" || true
+                else
+                    err "CPU fallback backend build failed. Install build dependencies and rerun setup."
+                    exit 1
+                fi
+            else
+                err "Install cannot finish without a backend. Rerun with LLM_INSTALL_BACKEND=skip only if you will configure LLAMA_SERVER manually."
+                exit 1
+            fi
+        fi
     fi
+
+    if [[ ! -x "$INSTALL_DIR/llama-server" ]]; then
+        err "No llama-server binary was installed."
+        exit 1
+    fi
+    ok "Backend ready: $INSTALL_DIR/llama-server"
 fi
 
 # ── Stage 6: PATH hint ──────────────────────────────────────────────────────
@@ -612,7 +763,20 @@ if ! echo ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
 fi
 
 say ""
-say "Done. Next:"
-say "  llm-server ~/ai_models/your-model.gguf"
-say "  llm-server-gui                    # pick a model interactively"
-say "  llm-server <hf-repo> --download   # grab a gguf from HuggingFace"
+say "╔════════════════════════════════════════════════════════════╗"
+say "║ llm-server installer finished                             ║"
+say "╚════════════════════════════════════════════════════════════╝"
+say "CLI:       $INSTALL_DIR/llm-server"
+say "GUI:       $INSTALL_DIR/llm-server-gui"
+say "Models:    $MODEL_DIR"
+if [[ -x "$INSTALL_DIR/llama-server" ]]; then
+    say "Backend:   $INSTALL_DIR/llama-server"
+else
+    say "Backend:   not installed (launcher-only mode)"
+fi
+say ""
+say "Next:"
+say "  $INSTALL_DIR/llm-server-gui"
+say "  $INSTALL_DIR/llm-server detect"
+say "  $INSTALL_DIR/llm-server <hf-repo> --download"
+say "  $INSTALL_DIR/llm-server $MODEL_DIR/your-model.gguf"

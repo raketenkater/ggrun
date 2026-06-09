@@ -120,6 +120,28 @@ def row_name(row: dict[str, Any]) -> str:
     return " ".join(str(row.get(k) or "") for k in ("name", "slug")) + " " + creator_name
 
 
+def display_name(row: dict[str, Any]) -> str:
+    name = str(row.get("name") or "").strip()
+    creator = row.get("model_creator")
+    creator_name = ""
+    if isinstance(creator, dict):
+        creator_name = str(creator.get("name") or "").strip()
+    if creator_name and creator_name.lower() not in name.lower():
+        return f"{creator_name} {name}".strip()
+    return name or str(row.get("slug") or "")
+
+
+def print_top_models(rows: list[dict[str, Any]], limit: int) -> None:
+    ranked = sorted(rows, key=intelligence, reverse=True)[:limit]
+    print(f"Top {len(ranked)} Artificial Analysis models by Intelligence Index")
+    print("| rank | model | slug | intelligence | output tps |")
+    print("|---:|---|---|---:|---:|")
+    for i, row in enumerate(ranked, 1):
+        name = display_name(row).replace("|", "/")
+        slug = str(row.get("slug") or "").replace("|", "/")
+        print(f"| {i} | {name} | {slug} | {intelligence(row):.3f} | {output_tps(row):.3f} |")
+
+
 def match_row(candidate: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     query = str(candidate.get("aa_query") or candidate.get("name") or "")
     query_tokens = tokens(query)
@@ -181,6 +203,7 @@ def main() -> int:
     parser.add_argument("--catalog", default="go/pkg/recommend/catalog.json")
     parser.add_argument("--api-key-env", default="ARTIFICIAL_ANALYSIS_API_KEY")
     parser.add_argument("--allow-missing-key", action="store_true", help="exit 0 without changes when the API key is missing")
+    parser.add_argument("--print-top", type=int, default=0, help="print top N API models by intelligence index")
     args = parser.parse_args()
 
     catalog_path = Path(args.catalog)
@@ -194,6 +217,8 @@ def main() -> int:
         raise SystemExit(msg)
 
     rows = fetch_models(api_key)
+    if args.print_top > 0:
+        print_top_models(rows, args.print_top)
     catalog = refresh_catalog(catalog, rows)
     tmp = catalog_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")

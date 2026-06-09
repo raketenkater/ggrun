@@ -17,6 +17,7 @@ APP_ENV="$APP_HOME/.env.sh"
 INSTALL_MODE="${LLM_SETUP_MODE:-${LLM_INSTALL_MODE:-auto}}"
 BACKEND="${LLM_SETUP_BACKEND:-${LLM_INSTALL_BACKEND:-auto}}"
 PY_DEPS="${LLM_SETUP_PY_DEPS:-${LLM_INSTALL_PY_DEPS:-auto}}"
+DEPS="${LLM_SETUP_DEPS:-${LLM_INSTALL_DEPS:-auto}}"
 NONINTERACTIVE="${LLM_SETUP_NONINTERACTIVE:-${LLM_INSTALL_NONINTERACTIVE:-0}}"
 LOG_TS="$(date +%Y%m%d-%H%M%S)"
 
@@ -56,6 +57,7 @@ LLM_INSTALL_BACKEND_ROOT="$APP_SRC" \
 LLM_INSTALL_MODE="$INSTALL_MODE" \
 LLM_INSTALL_BACKEND="$BACKEND" \
 LLM_INSTALL_PY_DEPS="$PY_DEPS" \
+LLM_INSTALL_DEPS="$DEPS" \
 LLM_INSTALL_NONINTERACTIVE="$NONINTERACTIVE" \
 LLM_INSTALL_MAIN=go \
 "$ROOT/install.sh"
@@ -86,11 +88,16 @@ elif [[ -x "$APP_SRC/llama.cpp/build/bin/llama-server" ]]; then
     backend_bin="$APP_SRC/llama.cpp/build/bin/llama-server"
 fi
 
+backend_real="$backend_bin"
+if [[ -n "$backend_bin" ]]; then
+    backend_real="$(readlink -f "$backend_bin" 2>/dev/null || printf '%s' "$backend_bin")"
+fi
+
 backend_config="$BACKEND"
 if [[ "$backend_config" == "auto" ]]; then
-    if [[ "$backend_bin" == *ik_llama.cpp* ]]; then
+    if [[ "$backend_real" == *ik_llama.cpp* ]]; then
         backend_config="ik_llama"
-    elif [[ "$backend_bin" == *vulkan* ]]; then
+    elif [[ "$backend_real" == *vulkan* || "$backend_real" == *build-vulkan* ]]; then
         backend_config="vulkan"
     elif [[ "$PLATFORM" == "mac" ]]; then
         backend_config="llama"
@@ -130,7 +137,16 @@ fi
 cat >"$APP_ENV" <<EOF
 # Source this to use $APP_NAME from any shell:
 #   source "$APP_ENV"
-source "$APP_CONFIG/config.sh"
+if [[ -f "$APP_CONFIG/config.sh" ]]; then
+    source "$APP_CONFIG/config.sh"
+else
+    export LLM_APP_HOME="$APP_HOME"
+    export LLM_MODEL_DIR="$APP_MODELS"
+    export LLM_CACHE_DIR="$APP_CACHE"
+    export LLM_LOG_DIR="$APP_LOGS"
+    export LLM_BACKEND="$backend_config"
+    [[ -x "$APP_BIN/llama-server" ]] && export LLAMA_SERVER="$APP_BIN/llama-server"
+fi
 export PATH="$APP_BIN:\$PATH"
 EOF
 
@@ -149,13 +165,20 @@ EOF
 chmod 0755 "$APP_HOME/llm-server-gui"
 
 say ""
-say "Done."
-say "Use:"
+say "╔════════════════════════════════════════════════════════════╗"
+say "║ llm-server is installed and ready                         ║"
+say "╚════════════════════════════════════════════════════════════╝"
+say "Backend:   ${backend_bin:-not installed}"
+say "CLI:       $APP_HOME/llm-server"
+say "GUI:       $APP_HOME/llm-server-gui"
+say "Models:    $APP_MODELS"
+say "Config:    $APP_CONFIG/config"
+say "Logs:      $APP_LOGS"
+say ""
+say "Try now:"
 say "  \"$APP_HOME/llm-server-gui\""
+say "  \"$APP_HOME/llm-server\" detect"
 say "  \"$APP_HOME/llm-server\" <repo/name> --download"
 say "  \"$APP_HOME/llm-server\" \"$APP_MODELS/your-model.gguf\""
 say ""
-say "App files:"
-say "  launchers: $APP_HOME/llm-server, $APP_HOME/llm-server-gui"
-say "  models:    $APP_MODELS"
-say "  internals: $APP_BIN, $APP_CONFIG, $APP_CACHE, $APP_LOGS, $APP_SRC"
+say "Internals: $APP_BIN, $APP_CACHE, $APP_SRC"
