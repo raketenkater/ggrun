@@ -1,6 +1,7 @@
 package tune
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,45 @@ func TestCacheBestIsScopedByBackendAndVision(t *testing.T) {
 	}
 	if bestByScope["ik_llama/true"] != 1 {
 		t.Fatalf("expected vision IK best to survive, got %d", bestByScope["ik_llama/true"])
+	}
+}
+
+func TestSaveTuneFileMarksFinalRunCompleteWithSkippedRounds(t *testing.T) {
+	tmpDir := t.TempDir()
+	modelPath := filepath.Join(tmpDir, "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	c := NewCache(tmpDir)
+	baseline := &Entry{
+		ModelPath: modelPath,
+		Round:     0,
+		Name:      "baseline",
+		Result:    BenchmarkResult{GenTPS: 37.8, PromptTPS: 247.6},
+	}
+	entries := []Entry{
+		*baseline,
+		{ModelPath: modelPath, Round: 6, Name: "threads", Result: BenchmarkResult{GenTPS: 37.6, PromptTPS: 248}},
+	}
+
+	path, err := c.SaveTuneFile(modelPath, baseline, baseline, 8, "vulkan", false, 1, []string{"GPU"}, entries, true)
+	if err != nil {
+		t.Fatalf("save tune file: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tune file: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal tune file: %v", err)
+	}
+	if doc["complete"] != true {
+		t.Fatalf("expected complete tune file, got %#v", doc["complete"])
+	}
+	if got := doc["completed_rounds"]; got != float64(8) {
+		t.Fatalf("expected completed_rounds 8, got %#v", got)
 	}
 }
 

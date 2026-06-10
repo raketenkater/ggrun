@@ -84,7 +84,7 @@ func (e *Engine) Run(modelPath string, initialFlags []string) (*Entry, error) {
 
 	var baselineCleanup func()
 	startBaseline := func() error {
-		if e.StartServer == nil {
+		if e.StartServer == nil || baselineCleanup != nil {
 			return nil
 		}
 		cleanup, err := e.StartServer(initialFlags)
@@ -132,9 +132,12 @@ func (e *Engine) Run(modelPath string, initialFlags []string) (*Entry, error) {
 			c := plan[round-1]
 			suggestion = &c
 		} else {
-			// Query while the known-good baseline server is alive. If the model cannot
-			// produce valid tuning JSON, fall back to a deterministic safe candidate so
-			// the run still yields measured data.
+			// Query only when deterministic candidates are exhausted. Large MoE models
+			// are expensive to reload, so avoid keeping the baseline alive between
+			// deterministic candidate rounds.
+			if err := startBaseline(); err != nil {
+				return best, fmt.Errorf("restart baseline for round %d query: %w", round, err)
+			}
 			var err error
 			suggestion, err = e.queryLLM(modelPath, best)
 			if err != nil && e.OnProgress != nil {
@@ -209,12 +212,6 @@ func (e *Engine) Run(modelPath string, initialFlags []string) (*Entry, error) {
 			}
 		}
 		e.saveTuneProgress(modelPath, baseline, best, entries, minImprovementPct, false)
-
-		if round < e.Rounds {
-			if err := startBaseline(); err != nil {
-				return best, fmt.Errorf("restart baseline after round %d: %w", round, err)
-			}
-		}
 	}
 
 	if e.OnProgress != nil {
@@ -236,7 +233,7 @@ func (e *Engine) saveTuneProgress(modelPath string, baseline, best *Entry, entri
 	if e.Cache == nil || baseline == nil {
 		return "", nil
 	}
-	path, err := e.Cache.SaveTuneFile(modelPath, baseline, best, e.Rounds, e.Backend, e.Vision, minImprovementPct, gpuNames(e.Caps), entries)
+	path, err := e.Cache.SaveTuneFile(modelPath, baseline, best, e.Rounds, e.Backend, e.Vision, minImprovementPct, gpuNames(e.Caps), entries, final)
 	if err != nil {
 		return path, err
 	}

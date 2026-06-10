@@ -142,7 +142,7 @@ type TuneFileSummary struct {
 }
 
 // SaveTuneFile writes the Bash-compatible tune_<model>_<size>_hw<hash>_<backend>.json file.
-func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int, backend string, vision bool, minImprovementPct float64, gpuNames []string, entries []Entry) (string, error) {
+func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int, backend string, vision bool, minImprovementPct float64, gpuNames []string, entries []Entry, complete bool) (string, error) {
 	if c == nil {
 		return "", nil
 	}
@@ -204,6 +204,9 @@ func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int
 			completedRounds = e.Round
 		}
 	}
+	if complete && completedRounds < rounds {
+		completedRounds = rounds
+	}
 
 	doc := map[string]interface{}{
 		"model":               filepath.Base(modelPath),
@@ -215,7 +218,7 @@ func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int
 		"baseline_wins":       baselineWins,
 		"min_improvement_pct": minImprovementPct,
 		"completed_rounds":    completedRounds,
-		"complete":            completedRounds >= rounds,
+		"complete":            complete,
 		"best_config": map[string]interface{}{
 			"name":    bestName,
 			"flags":   bestFlags,

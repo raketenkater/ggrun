@@ -213,6 +213,38 @@ scripts/bench-v3-comparison.sh model.gguf   --server-bin /path/to/llama-server  
 The script writes JSON logs and a Markdown summary under `.benchmarks/`. Generated
 benchmark runs are ignored by Git; commit only curated summaries.
 
+### v3 release measurements
+
+Measured on 2026-06-10 on Linux with RTX 3090 Ti 24GB, RTX 3060 12GB,
+RTX 4070 12GB, 128GB RAM, and i7-10700K. Context was 32k for every row.
+Dense-model rows use the long prompt profile with 512 generated tokens and the
+median of three rounds. MoE rows use 256 generated tokens because the 95GB split
+model has multi-minute startup/repack time.
+
+| Model | Backend / mode | Decode tok/s | Result |
+|---|---:|---:|---|
+| Qwen3.5 4B Q4_K_M | raw IK CUDA backend | 122.66 | baseline |
+| Qwen3.5 4B Q4_K_M | v3 IK CUDA default | 156.21 | +27% vs raw |
+| Qwen3.5 4B Q4_K_M | v3 IK CUDA AI-tune | 183.85 | +50% vs raw |
+| Qwen3.5 4B Q4_K_M | llama.cpp CPU | 11.26 | CPU fallback |
+| Qwen3.5 4B Q4_K_M | llama.cpp Vulkan default | 158.42 | cross-platform GPU path |
+| Qwen3.5 4B Q4_K_M | llama.cpp Vulkan AI-tune | 169.61 | `-ub 512`, +7% vs Vulkan default |
+| Qwen3.6 27B Q5_K_M | raw IK CUDA backend | failed | OOM on this 24GB primary GPU setup |
+| Qwen3.6 27B Q5_K_M | v3 IK CUDA default | 37.68 | stable 32k context |
+| Qwen3.6 27B Q5_K_M | v3 IK CUDA AI-tune | 37.69 | baseline correctly kept |
+| Qwen3.6 27B Q5_K_M | llama.cpp Vulkan default | 37.72 | stable 32k context |
+| Qwen3.6 27B Q5_K_M | llama.cpp Vulkan AI-tune | 37.67 | baseline correctly kept |
+| Qwen3.6 27B Q5_K_M | IK CUDA speculative auto | 11.16 | not a release default; draft acceptance ~18% |
+| MiniMax M2.7 UD-Q3_K_XL | v3 IK CUDA MoE default | 11.27 | 230B/A10B MoE, 95GB split GGUF |
+| MiniMax M2.7 UD-Q3_K_XL | MoE AI-tune `-b 1024` | 11.29 | below 1% tune threshold |
+| MiniMax M2.7 UD-Q3_K_XL | MoE AI-tune `-b 1536` | 11.30 | below 1% tune threshold |
+
+AI-tune uses a 1% noise floor before replacing the default config. That is why
+small MoE differences are reported but not selected. The MoE path currently
+prioritizes stability, full context, and safe expert placement over chasing tiny
+single-run gains. The next major MoE tuning target is persistent in-process
+candidate testing, because relaunching a 95GB split model dominates tune time.
+
 ## Backends
 
 - CUDA/NVIDIA: ik_llama.cpp source build by default, or a manually published CUDA
