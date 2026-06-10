@@ -19,6 +19,7 @@ type Process struct {
 	Port   int
 	cancel context.CancelFunc
 	LogBuf *threadSafeBuffer // captured stderr for post-launch probe
+	waitCh chan error        // receives cmd.Wait() exactly once
 }
 
 // threadSafeBuffer is a bytes.Buffer protected by a mutex for concurrent writes.
@@ -76,7 +77,8 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf}
+	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, waitCh: make(chan error, 1)}
+	go func() { p.waitCh <- cmd.Wait() }()
 	if err := p.waitReady(timeout); err != nil {
 		p.Stop()
 		return nil, fmt.Errorf("server not ready: %w", err)
@@ -88,6 +90,17 @@ func (p *Process) waitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://localhost:%d/health", p.Port)
 	for time.Now().Before(deadline) {
+		// Fail fast when the process dies during startup instead of polling
+		// the health endpoint until the full (model-size-scaled) timeout.
+		select {
+		case err := <-p.waitCh:
+			p.waitCh <- err // keep available for Stop()
+			if err != nil {
+				return fmt.Errorf("server process exited during startup: %v", err)
+			}
+			return fmt.Errorf("server process exited during startup")
+		default:
+		}
 		resp, err := http.Get(url)
 		if err == nil {
 			resp.Body.Close()
@@ -115,10 +128,9 @@ func (p *Process) Stop() error {
 		killProcessTree(p.Cmd.Process.Pid)
 	}
 	// Wait with timeout — don't block forever if process hangs during cleanup.
-	done := make(chan error, 1)
-	go func() { done <- p.Cmd.Wait() }()
 	select {
-	case err := <-done:
+	case err := <-p.waitCh:
+		p.waitCh <- err // allow repeated Stop() calls
 		return err
 	case <-time.After(15 * time.Second):
 		return fmt.Errorf("process did not exit within 15s")

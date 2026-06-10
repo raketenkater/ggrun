@@ -32,7 +32,9 @@ import (
 	"github.com/raketenkater/llm-server/pkg/update"
 )
 
-const version = "v3.0.0-go"
+// version comes from pkg/update so the binary and the update checker can never
+// disagree; releases override it via -ldflags (see .github/workflows/release.yml).
+var version = update.Version()
 
 func main() {
 	if len(os.Args) < 2 {
@@ -240,8 +242,9 @@ func firstPositional(args []string) string {
 			return ""
 		}
 		if strings.HasPrefix(a, "-") {
+			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "--kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--spec", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--spec", "--parallel", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
 				skip = true
 			}
 			continue
@@ -514,6 +517,43 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	return req, nil
 }
 
+// applyGPUVisibility restricts which devices the backend can enumerate so the
+// computed placement (tensor splits, -ot device names, renumbered indices)
+// matches reality. Returns the env assignment for display, or "" when --gpus
+// was not given.
+func applyGPUVisibility(req *launchRequest, backendTag string) string {
+	if req == nil || req.GPUsFlag == "" {
+		return ""
+	}
+	seen := map[int]bool{}
+	indices := []int{}
+	for _, s := range strings.Split(req.GPUsFlag, ",") {
+		idx, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil || idx < 0 || seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		indices = append(indices, idx)
+	}
+	if len(indices) == 0 {
+		return ""
+	}
+	// Keep PCI ordering so renumbered placement indices line up with the
+	// backend's enumeration of the visible subset.
+	sort.Ints(indices)
+	parts := make([]string, len(indices))
+	for i, idx := range indices {
+		parts[i] = strconv.Itoa(idx)
+	}
+	list := strings.Join(parts, ",")
+	envKey := "CUDA_VISIBLE_DEVICES"
+	if strings.EqualFold(backendTag, "vulkan") {
+		envKey = "GGML_VK_VISIBLE_DEVICES"
+	}
+	os.Setenv(envKey, list)
+	return envKey + "=" + list
+}
+
 func resolveModelPath(path, modelDir string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path
@@ -656,6 +696,13 @@ func cmdLaunch(args []string) {
 	be := selectBackend(caps, req)
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
+	}
+	if env := applyGPUVisibility(req, be.Tag); env != "" {
+		fmt.Printf("[launch] GPU restriction: %s\n", env)
+	}
+	if err := guardPortFree(req.Port, "launch"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -809,6 +856,11 @@ func cmdGUI() {
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := guardPortFree(req.Port, "launch"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -1241,6 +1293,9 @@ func cmdDryRun(args []string) {
 	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
+	if envPrefix := applyGPUVisibility(req, be.Tag); envPrefix != "" {
+		fmt.Print(envPrefix + " ")
+	}
 	fmt.Println(formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
@@ -1380,6 +1435,9 @@ func cmdTune(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+	if env := applyGPUVisibility(req, be.Tag); env != "" {
+		fmt.Printf("[tune] GPU restriction: %s\n", env)
+	}
 
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
@@ -1388,9 +1446,24 @@ func cmdTune(args []string) {
 	}
 	strategy.BackendTag = be.Tag
 
+	// A completed tune for this model/hardware/backend is reused unless the
+	// user explicitly asks for a fresh run with --retune.
+	if !hasArg(args, "--retune") {
+		names := make([]string, 0, len(caps.GPUs))
+		for _, g := range caps.GPUs {
+			names = append(names, g.Name)
+		}
+		cachePath := tune.TuneCachePath(cfg.CacheDir, req.ModelPath, names, strategy.MMProjPath != "", be.Tag)
+		if cachePath != "" && tune.TuneFileComplete(cachePath) {
+			fmt.Printf("[tune] Completed tune cache found: %s\n", cachePath)
+			fmt.Println("[tune] It is applied automatically on launch. Re-run with --retune to tune again.")
+			return
+		}
+	}
+
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
-	if err := guardTunePort(req.Port); err != nil {
+	if err := guardPortFree(req.Port, "AI Tune"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -1442,14 +1515,17 @@ func cmdTune(args []string) {
 	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
 }
 
-func guardTunePort(port int) error {
+// guardPortFree refuses to start when something is already listening on the
+// port. Without this, the health check can hit the EXISTING server and report
+// a dead child process as "running".
+func guardPortFree(port int, context string) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 	if err != nil {
 		return nil
 	}
 	_ = conn.Close()
-	return fmt.Errorf("refusing to kill process on port %d; choose a free --port for AI Tune", port)
+	return fmt.Errorf("port %d is already in use; choose a free --port for %s", port, context)
 }
 
 func cmdBenchmark(args []string) {

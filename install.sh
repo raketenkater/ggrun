@@ -428,7 +428,13 @@ build_go_binary() {
     local out="$1"
     [[ -n "$SRC_DIR" && -f "$SRC_DIR/go/go.mod" ]] || return 1
     ensure_go_toolchain || return 1
-    (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="-s -w" -o "$out" ./cmd/llm-server)
+    # Stamp the version only on exact tag checkouts; branch builds keep the
+    # in-source default so the update checker is not misled.
+    local ldflags="-s -w"
+    local ver
+    ver="$(git -C "$SRC_DIR" describe --tags --exact-match 2>/dev/null || true)"
+    [[ -n "$ver" ]] && ldflags="$ldflags -X github.com/raketenkater/llm-server/pkg/update.currentVersion=$ver"
+    (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="$ldflags" -o "$out" ./cmd/llm-server)
 }
 
 link_backend_binary() {

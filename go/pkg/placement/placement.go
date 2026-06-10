@@ -135,6 +135,12 @@ type Options struct {
 
 // Compute builds a Strategy from hardware capabilities and model profile.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+	var err error
+	caps, err = restrictGPUs(caps, opts.GPUs)
+	if err != nil {
+		return nil, err
+	}
+
 	if opts.RamBudgetMB > 0 && caps != nil && opts.RamBudgetMB < caps.RAM.FreeMB {
 		capped := *caps
 		capped.RAM.FreeMB = opts.RamBudgetMB
@@ -308,7 +314,6 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		}
 	}
 
-	var err error
 	switch strategy {
 	case CPUOnly:
 		s, err = buildCPUOnly(s, caps, model, opts)
@@ -347,6 +352,33 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	}
 
 	return s, nil
+}
+
+// restrictGPUs filters caps.GPUs to the user-selected device indices (--gpus).
+// Devices are renumbered from 0 because the launcher restricts visibility via
+// CUDA_VISIBLE_DEVICES / GGML_VK_VISIBLE_DEVICES, so the backend enumerates
+// only the selected devices starting at index 0.
+func restrictGPUs(caps *detect.Capabilities, want []int) (*detect.Capabilities, error) {
+	if caps == nil || len(want) == 0 || len(caps.GPUs) == 0 {
+		return caps, nil
+	}
+	wanted := make(map[int]bool, len(want))
+	for _, idx := range want {
+		wanted[idx] = true
+	}
+	filtered := *caps
+	filtered.GPUs = nil
+	for _, g := range caps.GPUs {
+		if wanted[g.Index] {
+			gg := g
+			gg.Index = len(filtered.GPUs)
+			filtered.GPUs = append(filtered.GPUs, gg)
+		}
+	}
+	if len(filtered.GPUs) == 0 {
+		return nil, fmt.Errorf("--gpus %v matches no detected GPU (have %d GPUs)", want, len(caps.GPUs))
+	}
+	return &filtered, nil
 }
 
 // chooseStrategy mirrors bash choose_strategy() exactly (lines 2703-2739).

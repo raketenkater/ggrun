@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -40,6 +41,8 @@ type Launcher struct {
 	OnFailure       func(FailureType, string)
 	OnRestart       func(int, time.Duration)
 	OnFallback      func(string)
+
+	lastLogPath string // log written by the most recent runOnce
 }
 
 // DefaultLauncher returns a launcher with sensible defaults.
@@ -110,12 +113,15 @@ func (l *Launcher) Run(ctx context.Context) error {
 }
 
 func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount int) error {
-	logPath := filepath.Join(os.TempDir(), fmt.Sprintf("llm-server-launch-%d.log", time.Now().Unix()))
-	logFile, err := os.Create(logPath)
+	logFile, err := os.CreateTemp("", "llm-server-launch-*.log")
 	if err != nil {
 		return err
 	}
 	defer logFile.Close()
+	logPath := logFile.Name()
+	// Remember our own log so failure parsing never reads a log written by a
+	// concurrently running instance.
+	l.lastLogPath = logPath
 
 	cmd := exec.CommandContext(ctx, binaryPath, l.Args...)
 	cmd.SysProcAttr = setProcessGroupAttr()
@@ -221,29 +227,19 @@ func (l *Launcher) extractPort() string {
 	return "8081"
 }
 
-// parseLoadFailure reads the latest log for known error patterns.
-func (l *Launcher) parseLoadFailure() (FailureType, string) {
-	// Find most recent log file
-	entries, err := os.ReadDir(os.TempDir())
-	if err != nil {
-		return FailureUnknown, ""
-	}
-	var latest string
-	var latestTime time.Time
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "llm-server-launch-") && strings.HasSuffix(e.Name(), ".log") {
-			info, _ := e.Info()
-			if info.ModTime().After(latestTime) {
-				latestTime = info.ModTime()
-				latest = filepath.Join(os.TempDir(), e.Name())
-			}
-		}
-	}
-	if latest == "" {
-		return FailureUnknown, ""
-	}
+// oomPattern matches OOM markers on word boundaries so model names like
+// "Bloom" or words like "room" in log output don't classify as OOM.
+var (
+	oomPattern    = regexp.MustCompile(`(?i)\b(oom|out of memory)\b`)
+	ramOOMPattern = regexp.MustCompile(`(?i)\bram\b.*\boom\b|\boom\b.*\bram\b`)
+)
 
-	f, err := os.Open(latest)
+// parseLoadFailure reads this launcher's own log for known error patterns.
+func (l *Launcher) parseLoadFailure() (FailureType, string) {
+	if l.lastLogPath == "" {
+		return FailureUnknown, ""
+	}
+	f, err := os.Open(l.lastLogPath)
 	if err != nil {
 		return FailureUnknown, ""
 	}
@@ -264,9 +260,6 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 			strings.Contains(low, "unable to load model") {
 			return FailureUnknownModel, line
 		}
-		if strings.Contains(low, "out of memory") || strings.Contains(low, "oom") {
-			return FailureOOM, line
-		}
 		if strings.Contains(low, "pinned memory") && strings.Contains(low, "fail") {
 			return FailurePinnedFail, line
 		}
@@ -276,10 +269,10 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 		if strings.Contains(low, "pinned memory") && strings.Contains(low, "hang") {
 			return FailurePinnedHang, line
 		}
-		if strings.Contains(low, "ram") && strings.Contains(low, "oom") {
+		if ramOOMPattern.MatchString(line) {
 			return FailureRAMOOM, line
 		}
-		if strings.Contains(low, "cuda error") || strings.Contains(low, "cuda out of memory") {
+		if oomPattern.MatchString(line) || strings.Contains(low, "cuda error") {
 			return FailureOOM, line
 		}
 	}

@@ -55,7 +55,17 @@ jobs:
 
       - name: Build Go llm-server
         working-directory: go
-        run: go build -trimpath -ldflags="-s -w" -o llm-server ./cmd/llm-server
+        run: |
+          version="${GITHUB_REF_NAME}"
+          case "$version" in
+            v*) ;;
+            *) version="" ;;  # non-tag builds keep the in-source default
+          esac
+          ldflags="-s -w"
+          if [ -n "$version" ]; then
+            ldflags="$ldflags -X github.com/raketenkater/llm-server/pkg/update.currentVersion=$version"
+          fi
+          go build -trimpath -ldflags="$ldflags" -o llm-server ./cmd/llm-server
 
       - name: Package
         run: scripts/package-release.sh "${{ matrix.asset }}" /tmp/llama.cpp/build/bin/llama-server dist

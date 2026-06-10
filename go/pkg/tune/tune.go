@@ -235,6 +235,22 @@ func (c *Cache) SaveTuneFile(modelPath string, baseline, best *Entry, rounds int
 	return path, os.WriteFile(path, data, 0644)
 }
 
+// TuneFileComplete reports whether the tune file at path exists and recorded a
+// finished run (all rounds executed, not an interrupted progress save).
+func TuneFileComplete(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Complete bool `json:"complete"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return false
+	}
+	return doc.Complete
+}
+
 // TuneCachePath builds the public tune artifact path.
 func TuneCachePath(dir, modelPath string, gpuNames []string, vision bool, backend string) string {
 	if dir == "" {

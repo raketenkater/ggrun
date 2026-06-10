@@ -366,3 +366,42 @@ func TestBackendSearchPathsIncludeAppHomeBackend(t *testing.T) {
 	}
 	t.Fatalf("missing app-home backend path %s in %#v", want, paths)
 }
+
+func TestFirstPositionalSkipsParallelValue(t *testing.T) {
+	// --parallel takes a value; "2" must not be mistaken for the model arg.
+	got := firstPositional([]string{"--parallel", "2", "unsloth/Qwen-GGUF", "--download"})
+	if got != "unsloth/Qwen-GGUF" {
+		t.Fatalf("expected repo positional, got %q", got)
+	}
+	got = firstPositional([]string{"-c", "32768", "model.gguf"})
+	if got != "model.gguf" {
+		t.Fatalf("expected model.gguf, got %q", got)
+	}
+}
+
+func TestApplyGPUVisibilitySetsEnv(t *testing.T) {
+	t.Setenv("CUDA_VISIBLE_DEVICES", "")
+	req := &launchRequest{GPUsFlag: "2,0"}
+	env := applyGPUVisibility(req, "ik_llama")
+	if env != "CUDA_VISIBLE_DEVICES=0,2" {
+		t.Fatalf("unexpected env assignment: %q", env)
+	}
+	if os.Getenv("CUDA_VISIBLE_DEVICES") != "0,2" {
+		t.Fatalf("CUDA_VISIBLE_DEVICES not set: %q", os.Getenv("CUDA_VISIBLE_DEVICES"))
+	}
+
+	t.Setenv("GGML_VK_VISIBLE_DEVICES", "")
+	env = applyGPUVisibility(&launchRequest{GPUsFlag: "1"}, "vulkan")
+	if env != "GGML_VK_VISIBLE_DEVICES=1" {
+		t.Fatalf("unexpected vulkan env assignment: %q", env)
+	}
+}
+
+func TestApplyGPUVisibilityNoFlagNoEnv(t *testing.T) {
+	if env := applyGPUVisibility(&launchRequest{}, "ik_llama"); env != "" {
+		t.Fatalf("expected no env assignment without --gpus, got %q", env)
+	}
+	if env := applyGPUVisibility(&launchRequest{GPUsFlag: "abc"}, "ik_llama"); env != "" {
+		t.Fatalf("expected no env assignment for invalid --gpus, got %q", env)
+	}
+}

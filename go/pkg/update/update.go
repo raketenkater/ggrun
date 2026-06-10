@@ -19,9 +19,12 @@ const (
 	githubRepo        = "raketenkater/llm-server"
 	githubAPIURL      = "https://api.github.com/repos/%s/releases/latest"
 	rawInstallURL     = "https://raw.githubusercontent.com/%s/%s/install.sh"
-	defaultVersion    = "v3.0.0-go"
 	updateDismissDays = 7
 )
+
+// currentVersion is the single source of truth for the binary version.
+// Release builds override it: go build -ldflags "-X github.com/raketenkater/llm-server/pkg/update.currentVersion=vX.Y.Z"
+var currentVersion = "v3.0.0-go"
 
 // PromptOnStartup checks local repos for updates and asks interactive users
 // whether to run the updater. It intentionally skips non-interactive shells so
@@ -274,7 +277,7 @@ func Version() string {
 	if v := os.Getenv("LLM_SERVER_VERSION"); v != "" {
 		return v
 	}
-	return defaultVersion
+	return currentVersion
 }
 
 // SelfUpdate pulls the latest llm-server from git and re-runs install.sh.
@@ -304,11 +307,10 @@ func SelfUpdate() error {
 	}
 
 	if out, err := gitPullFFOnly(repoDir); err != nil {
-		fmt.Printf("  Warning: git pull failed: %v\n", err)
 		if backupPath != "" {
 			os.Remove(backupPath)
 		}
-		return nil
+		return fmt.Errorf("git pull failed: %v\n%s", err, strings.TrimSpace(out))
 	} else {
 		fmt.Println(strings.TrimSpace(out))
 	}

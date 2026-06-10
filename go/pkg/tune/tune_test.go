@@ -196,3 +196,25 @@ func boolString(v bool) string {
 	}
 	return "false"
 }
+
+func TestTuneFileComplete(t *testing.T) {
+	dir := t.TempDir()
+	complete := filepath.Join(dir, "complete.json")
+	os.WriteFile(complete, []byte(`{"complete": true, "model": "m.gguf"}`), 0644)
+	if !TuneFileComplete(complete) {
+		t.Fatal("expected complete tune file to report complete")
+	}
+	partial := filepath.Join(dir, "partial.json")
+	os.WriteFile(partial, []byte(`{"complete": false, "model": "m.gguf"}`), 0644)
+	if TuneFileComplete(partial) {
+		t.Fatal("partial tune file must not report complete")
+	}
+	if TuneFileComplete(filepath.Join(dir, "missing.json")) {
+		t.Fatal("missing tune file must not report complete")
+	}
+	garbage := filepath.Join(dir, "garbage.json")
+	os.WriteFile(garbage, []byte(`not json`), 0644)
+	if TuneFileComplete(garbage) {
+		t.Fatal("unparseable tune file must not report complete")
+	}
+}

@@ -710,3 +710,83 @@ func TestArgsSingleGPUPinsVulkanDevice(t *testing.T) {
 	}
 	t.Fatalf("expected single-GPU args to include --device Vulkan0, got %v", args)
 }
+
+func TestRestrictGPUsFiltersAndRenumbers(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12288},
+			{Index: 1, Name: "RTX 3060", VRAMTotalMB: 12288},
+			{Index: 2, Name: "RTX 3090", VRAMTotalMB: 24576},
+		},
+		RAM: detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	out, err := restrictGPUs(caps, []int{1, 2})
+	if err != nil {
+		t.Fatalf("restrictGPUs failed: %v", err)
+	}
+	if len(out.GPUs) != 2 {
+		t.Fatalf("expected 2 GPUs after restriction, got %d", len(out.GPUs))
+	}
+	if out.GPUs[0].Name != "RTX 3060" || out.GPUs[1].Name != "RTX 3090" {
+		t.Fatalf("wrong GPUs selected: %v", out.GPUs)
+	}
+	// Renumbered from 0 to match CUDA_VISIBLE_DEVICES enumeration.
+	if out.GPUs[0].Index != 0 || out.GPUs[1].Index != 1 {
+		t.Fatalf("expected renumbered indices 0,1; got %d,%d", out.GPUs[0].Index, out.GPUs[1].Index)
+	}
+	// Original caps untouched.
+	if len(caps.GPUs) != 3 || caps.GPUs[1].Index != 1 {
+		t.Fatalf("restrictGPUs mutated input caps")
+	}
+}
+
+func TestRestrictGPUsNoMatchErrors(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 12288}},
+	}
+	if _, err := restrictGPUs(caps, []int{5}); err == nil {
+		t.Fatal("expected error for non-existent GPU index")
+	}
+}
+
+func TestRestrictGPUsEmptyPassthrough(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0}, {Index: 1}},
+	}
+	out, err := restrictGPUs(caps, nil)
+	if err != nil || out != caps {
+		t.Fatalf("expected passthrough for empty restriction, got %v %v", out, err)
+	}
+}
+
+func TestComputeHonorsGPURestriction(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 24576},
+			{Index: 1, VRAMTotalMB: 12288},
+		},
+		RAM: detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{
+		Path:        "model.gguf",
+		SizeBytes:   4 * 1024 * 1024 * 1024,
+		TotalSizeMB: 4 * 1024,
+		NumLayers:   32,
+		ContextSize: 32768,
+		HiddenSize:  4096,
+		HeadCountKV: 8,
+		KeyLength:   128,
+		ValueLength: 128,
+	}
+	strat, err := Compute(caps, model, Options{GPUs: []int{1}, KVPlacement: "auto", KVQuality: "low"})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	// With only GPU 1 visible there is exactly one device, so no tensor split
+	// across two devices may be emitted.
+	if len(strat.TensorSplit) > 1 {
+		t.Fatalf("expected single-GPU placement under restriction, got split %v", strat.TensorSplit)
+	}
+}

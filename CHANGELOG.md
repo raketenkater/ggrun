@@ -1,5 +1,44 @@
 # Changelog
 
+## v3.0.0 (unreleased)
+
+llm-server v3 is a ground-up Go rewrite of the Bash launcher. The Go binary is
+now the primary `llm-server` command; the Bash implementation ships as
+`llm-server-bash` for migration only.
+
+- **Go launcher** — single static binary with `launch`, `dry-run`, `tune`,
+  `download`, `daemon`, `benchmark`, `detect`, `probe`, `config`, `update`, and
+  a Bubble Tea terminal UI (`llm-server-gui`).
+- **Measured v3 performance** — see the README benchmark table; v3 IK CUDA
+  AI-tune reached +50% decode throughput vs raw llama-server defaults on a
+  4B dense model, and stable 32k-context launches where raw defaults OOM.
+- **AI Tune v2** — deterministic candidate plan plus optional LLM-proposed
+  flags, candidate validation against backend help/VRAM headroom, 1% noise
+  floor before replacing the baseline, vision-aware cache files, and resumable
+  progress saves.
+- **Model recommendations** — weekly-refreshed catalog (Artificial Analysis
+  intelligence ratings + Hugging Face GGUF quant search) matched against
+  detected hardware in the GUI download picker.
+- **Speculative decoding policy** — `--spec auto` only enables validated paths
+  (MTP, EAGLE-3, compatible draft GGUF); ngram modes stay explicit.
+- **Fixes in this cycle**
+  - `--gpus` now actually restricts placement and sets
+    `CUDA_VISIBLE_DEVICES`/`GGML_VK_VISIBLE_DEVICES` (it was silently ignored).
+  - `launch`/`gui` refuse to start when the port is already in use — the health
+    check previously hit the existing server and reported a dead child as live.
+  - Startup failures are detected immediately instead of polling the health
+    endpoint until the full model-size-scaled timeout (up to 15 min for MoE).
+  - Crash classification reads this launcher's own log (not the newest file in
+    /tmp) and matches OOM on word boundaries (a model named "Bloom" no longer
+    classifies as out-of-memory).
+  - `--ai-tune` reuses a completed tune cache and says so; `--retune` forces a
+    fresh run (previously accepted but ignored).
+  - `firstPositional` knows all value-taking flags (`--parallel 2 <repo>
+    --download` no longer tries to download "2").
+  - `--update` reports git pull failures instead of claiming success.
+  - Version string is single-sourced in `pkg/update` and stamped by release
+    builds via `-ldflags -X`.
+
 ## Unreleased
 
 - **Pgid-scoped shutdown** — backends now launch under `setsid` and shut down via process-group signal, so spawned helper threads/children get cleaned up. Port-listener cleanup will refuse to `kill -9` foreign processes bound to the same port (warns instead) — the previous lsof-sweep could nuke unrelated services.
