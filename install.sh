@@ -286,6 +286,25 @@ find_release_asset_url() {
         | head -n 1
 }
 
+
+verify_release_checksum() {
+    local tmp="$1" asset="$2" match
+    [[ -f "$tmp/SHA256SUMS" ]] || return 1
+    match="$(grep -F " $asset" "$tmp/SHA256SUMS" || true)"
+    if [[ -z "$match" ]]; then
+        warn "SHA256SUMS did not include $asset"
+        return 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf "%s\n" "$match" | (cd "$tmp" && sha256sum -c - >/dev/null)
+    elif command -v shasum >/dev/null 2>&1; then
+        printf "%s\n" "$match" | (cd "$tmp" && shasum -a 256 -c - >/dev/null)
+    else
+        warn "No SHA256 checker found"
+        return 1
+    fi
+}
+
 install_payload_file() {
     local src="$1" dst="$2" mode="${3:-0755}"
     [[ -f "$src" ]] || return 1
@@ -474,7 +493,7 @@ EOF
 }
 
 install_release_bundle() {
-    local platform asset url tmp archive payload_root found_backend=0
+    local platform asset url sums_url tmp archive payload_root found_backend=0
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
     # CUDA release bundles are optional manual assets. If none exists, auto mode
     # can still fall back to Vulkan or CPU before attempting a source build.
@@ -492,6 +511,22 @@ install_release_bundle() {
     if ! curl -fL "$url" -o "$archive"; then
         rm -rf "$tmp"
         return 1
+    fi
+    sums_url="$(find_release_asset_url "SHA256SUMS" || true)"
+    if [[ -n "$sums_url" ]]; then
+        if ! curl -fL "$sums_url" -o "$tmp/SHA256SUMS"; then
+            rm -rf "$tmp"
+            warn "Checksum download failed"
+            return 1
+        fi
+        if ! verify_release_checksum "$tmp" "$asset"; then
+            rm -rf "$tmp"
+            warn "Checksum verification failed for $asset"
+            return 1
+        fi
+        ok "Verified checksum for $asset"
+    else
+        warn "No SHA256SUMS asset found; skipping checksum verification"
     fi
     mkdir -p "$tmp/payload"
     if ! tar -xzf "$archive" -C "$tmp/payload"; then

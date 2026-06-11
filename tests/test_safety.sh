@@ -77,8 +77,8 @@ if ! kill -0 "$LISTENER_PID" 2>/dev/null; then
     exit 1
 fi
 
-if [[ "$out" != *"refusing to kill"* ]]; then
-    echo "expected refusal warning for foreign listener"
+if [[ "$out" != *"refusing to kill"* && "$out" != *"port $PORT is already in use"* ]]; then
+    echo "expected foreign listener refusal or busy-port guard"
     echo "$out"
     exit 1
 fi

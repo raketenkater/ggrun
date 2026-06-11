@@ -14,9 +14,52 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: preflight tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python test dependencies
+        run: python3 -m pip install pytest huggingface_hub
+
+      - name: Check Go formatting
+        working-directory: go
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run Go package tests
+        working-directory: go
+        run: go test ./...
+
+      - name: Vet Go packages
+        working-directory: go
+        run: go vet ./...
+
+      - name: Run shell and Python regression tests
+        run: |
+          python3 tests/test_parse_gguf.py
+          bash tests/test_estimator.sh
+          bash tests/test_safety.sh
+          bash tests/test_setup_home.sh
+          bash tests/test_model_index.sh
+          bash tests/test_moe_placement.sh
+          python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py
+
   package:
     name: package ${{ matrix.asset }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
+    env:
+      LLAMA_CPP_REF: d2462f8f7ac6d80070a587ffebf6cd73730f4280
+
     strategy:
       fail-fast: false
       matrix:
@@ -42,8 +85,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential libvulkan-dev glslang-tools vulkan-tools
 
-      - name: Clone llama.cpp
-        run: git clone --depth=1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+      - name: Clone pinned llama.cpp
+        run: |
+          git init /tmp/llama.cpp
+          git -C /tmp/llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C /tmp/llama.cpp fetch --depth=1 origin "$LLAMA_CPP_REF"
+          git -C /tmp/llama.cpp checkout --detach FETCH_HEAD
 
       - name: Build llama-server
         run: |

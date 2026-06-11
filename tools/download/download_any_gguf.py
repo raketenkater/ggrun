@@ -30,6 +30,11 @@ FAMILY_PREFIXES = {
     "minimax",
 }
 
+QUANT_PATTERN = re.compile(
+    r"(IQ[1-8]_(?:XXS|XS|NL|S|M|L)|Q[2-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
+    re.IGNORECASE,
+)
+
 def clear_screen():
     """Clear terminal screen"""
     os.system("cls" if os.name == "nt" else "clear")
@@ -222,19 +227,11 @@ def list_available_quantizations(repo):
         if not gguf_files:
             return []
 
-        import re
-
-        # Comprehensive quantization pattern matching all GGUF formats
-        quant_pattern = re.compile(
-            r"(IQ[2-8]_(?:XXS|XS|NL|S|M|L)|Q[2-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
-            re.IGNORECASE,
-        )
-
         # Map each quant to its total size (sum of split files)
         quant_sizes = {}
         for fname, size in gguf_files:
             basename = fname.split("/")[-1]
-            matches = quant_pattern.findall(basename)
+            matches = QUANT_PATTERN.findall(basename)
             for m in matches:
                 if m not in quant_sizes:
                     quant_sizes[m] = 0
@@ -352,7 +349,7 @@ def download_files(repo, files_to_download, output_dir):
                 failed.append(filename)
 
         print()  # New line after progress bars
-        print("\nDownload complete.")
+        print("\nDownload finished.")
         print(f"   Successful: {len(downloaded)} file(s)")
         if failed:
             print(f"   Failed: {len(failed)} file(s)")
@@ -665,7 +662,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant=""):
 
     # Get Recommendation based on actual file sizes
     rec_q = ""
-    if vram_mb > 0:
+    if vram_mb > 0 or ram_mb > 0:
         rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb, repo)
         if rec_q:
             print(f"\nRecommended: {rec_q}")
@@ -744,12 +741,19 @@ def main():
         # Download
         downloaded, failed = download_files(repo, files_to_download, output_dir)
 
-        if downloaded:
-            update_model_index(repo, selected_quantization, output_dir, downloaded, args.cache_dir)
-            print_usage_instructions(repo, output_dir)
-            print("\nDownload complete.")
-        else:
+        if failed:
+            print("\nDownload incomplete; not updating model index.")
+            if downloaded:
+                print("Downloaded files were left in place so the next run can resume.")
+            sys.exit(1)
+
+        if not downloaded:
             print("\nNo files were downloaded successfully.")
+            sys.exit(1)
+
+        update_model_index(repo, selected_quantization, output_dir, downloaded, args.cache_dir)
+        print_usage_instructions(repo, output_dir)
+        print("\nDownload complete.")
 
     except KeyboardInterrupt:
         print("\n\nDownload interrupted by user.")

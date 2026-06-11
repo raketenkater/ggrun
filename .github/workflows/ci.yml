@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, go-core]
+    tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, go-core]
 
 jobs:
   shellcheck:
@@ -25,11 +26,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
-      - name: Run Go package tests
+      - name: Check Go formatting
         working-directory: go
-        run: go test ./...
+        run: test -z "$(gofmt -l .)"
+      - name: Run Go package tests with race detector
+        working-directory: go
+        run: go test -race ./...
       - name: Vet Go packages
         working-directory: go
+        run: go vet ./...
+      - name: Vet Windows code paths
+        working-directory: go
+        env:
+          GOOS: windows
+          GOARCH: amd64
         run: go vet ./...
 
   go-cross-build:
@@ -117,6 +127,31 @@ jobs:
       - name: Run model index regression tests
         run: bash tests/test_model_index.sh
 
+  moe-placement-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Run MoE placement regression tests
+        run: bash tests/test_moe_placement.sh
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python test dependencies
+        run: python3 -m pip install pytest huggingface_hub
+      - name: Run downloader and recommendation pytest suites
+        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py
+
   installer-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -171,6 +206,7 @@ jobs:
           printf '#!/usr/bin/env sh\necho fake llm-server-go\n' > go/llm-server
           chmod +x go/llm-server
           scripts/package-release.sh llm-server-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/release"
+          (cd "$tmp/release" && sha256sum llm-server-linux-x86_64-cpu.tar.gz > SHA256SUMS)
           mkdir -p "$tmp/run"
           (
             cd "$tmp/run"

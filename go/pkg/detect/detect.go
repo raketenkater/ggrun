@@ -43,10 +43,10 @@ type RAMInfo struct {
 
 // CPUInfo represents CPU details.
 type CPUInfo struct {
-	Model      string `json:"model"`
-	Cores      int    `json:"cores"`
-	Threads    int    `json:"threads"`
-	Flags      string `json:"flags,omitempty"`
+	Model   string `json:"model"`
+	Cores   int    `json:"cores"`
+	Threads int    `json:"threads"`
+	Flags   string `json:"flags,omitempty"`
 }
 
 // Backend represents a discovered inference backend binary.
@@ -129,11 +129,11 @@ func detectNVIDIA() []GPU {
 				gpu.PCIGen = gen
 				gpu.PCILanes = lanes
 				gpu.BandwidthMBps = pcieBandwidth(gen, lanes)
-			// Fallback: if nvidia-smi returned 0 (GPU under load), try sysfs
-			if gpu.BandwidthMBps <= 0 && gpu.PCIBusID != "" {
-				gpu.BandwidthMBps = pcieBandwidthFromSysfs(gpu.PCIBusID)
 			}
-			}
+		}
+		// Fallback: if nvidia-smi returned no usable PCIe data, try sysfs.
+		if gpu.BandwidthMBps <= 0 && gpu.PCIBusID != "" {
+			gpu.BandwidthMBps = pcieBandwidthFromSysfs(gpu.PCIBusID)
 		}
 		gpus = append(gpus, gpu)
 	}
@@ -277,7 +277,12 @@ func detectRAMDarwin() RAMInfo {
 		return RAMInfo{}
 	}
 	bytes, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	return RAMInfo{TotalMB: int(bytes / 1024 / 1024)}
+	totalMB := int(bytes / 1024 / 1024)
+	freeMB := detectRAMFreeMB()
+	if freeMB <= 0 {
+		freeMB = totalMB * 80 / 100
+	}
+	return RAMInfo{TotalMB: totalMB, FreeMB: freeMB}
 }
 
 func detectCPU() CPUInfo {

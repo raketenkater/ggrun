@@ -80,3 +80,57 @@ func TestDetectROCm(t *testing.T) {
 	// May or may not have rocm-smi
 	_ = gpus
 }
+
+func TestParseVulkanGPUsKeepsMetadataWithDeviceBlock(t *testing.T) {
+	summary := `GPU0:
+	apiVersion         = 1.3.277
+	driverVersion      = 550.54.14
+	deviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+	deviceName         = NVIDIA GeForce RTX 4070
+GPU1:
+	apiVersion         = 1.3.274
+	driverVersion      = 24.0.0
+	deviceType         = PHYSICAL_DEVICE_TYPE_CPU
+	deviceName         = llvmpipe (LLVM 17.0.6, 256 bits)
+`
+
+	gpus := parseVulkanGPUs(summary)
+	if len(gpus) != 1 {
+		t.Fatalf("expected one non-software GPU, got %d: %#v", len(gpus), gpus)
+	}
+	if gpus[0].Name != "NVIDIA GeForce RTX 4070" {
+		t.Fatalf("unexpected GPU name: %q", gpus[0].Name)
+	}
+	if gpus[0].Driver != "550.54.14" {
+		t.Fatalf("expected discrete GPU driver, got %q", gpus[0].Driver)
+	}
+	if gpus[0].ComputeCap != "1.3.277" {
+		t.Fatalf("expected discrete GPU apiVersion, got %q", gpus[0].ComputeCap)
+	}
+	if gpus[0].VRAMTotalMB != 12288 {
+		t.Fatalf("expected RTX 4070 VRAM estimate, got %d", gpus[0].VRAMTotalMB)
+	}
+}
+
+func TestParseVulkanGPUsUsesConservativeIntegratedBudget(t *testing.T) {
+	summary := `GPU0:
+	apiVersion         = 1.3.250
+	driverVersion      = Mesa 24.0.0
+	deviceType         = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+	deviceName         = Intel(R) Iris(R) Xe Graphics
+`
+
+	gpus := parseVulkanGPUs(summary)
+	if len(gpus) != 1 {
+		t.Fatalf("expected one integrated GPU, got %d: %#v", len(gpus), gpus)
+	}
+	if gpus[0].VRAMTotalMB != 2048 {
+		t.Fatalf("expected conservative integrated budget, got %d", gpus[0].VRAMTotalMB)
+	}
+}
+
+func TestEstimateVRAMFromNameUsesConservativeUnknownDefault(t *testing.T) {
+	if got := estimateVRAMFromName("Unknown Vulkan Device"); got != 4096 {
+		t.Fatalf("expected conservative unknown default, got %d", got)
+	}
+}

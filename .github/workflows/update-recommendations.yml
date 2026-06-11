@@ -20,6 +20,10 @@ jobs:
         with:
           python-version: '3.x'
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
       - name: Refresh recommendation catalog
         env:
           ARTIFICIAL_ANALYSIS_API_KEY: ${{ secrets.ARTIFICIAL_ANALYSIS_API_KEY || secrets.ARTIFICIALANALYSISAPIKEY }}
@@ -27,6 +31,10 @@ jobs:
 
       - name: Show catalog diff
         run: git diff -- go/pkg/recommend/catalog.json
+
+      - name: Validate embedded recommendation catalog
+        working-directory: go
+        run: go test ./pkg/recommend
 
       - name: Commit catalog update
         run: |
@@ -38,4 +46,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add go/pkg/recommend/catalog.json
           git commit -m "Update model recommendation catalog"
+          git pull --rebase
           git push
