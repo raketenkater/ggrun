@@ -83,7 +83,7 @@ jobs:
 
       - name: Install build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libvulkan-dev glslc glslang-tools vulkan-tools
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libvulkan-dev glslc glslang-tools spirv-headers vulkan-tools
 
       - name: Clone pinned llama.cpp
         run: |
