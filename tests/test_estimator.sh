@@ -53,7 +53,7 @@ assert_contains() {
 }
 
 run_dry() {
-    "$GO_BIN" --dry-run --cpu "$@" 2>&1
+    "$GO_BIN" --dry-run --cpu --ram-budget 512000 "$@" 2>&1
 }
 
 build_gguf() {

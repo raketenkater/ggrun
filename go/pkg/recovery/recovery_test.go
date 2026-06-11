@@ -45,9 +45,9 @@ func TestParseLoadFailureRealOOMVariants(t *testing.T) {
 	cases := map[string]FailureType{
 		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024 MiB failed: out of memory": FailureOOM,
 		"kernel: Out of memory: Killed process 1234 (llama-server)":                             FailureOOM,
-		"CUDA error: out of memory":                                                             FailureOOM,
-		"RAM OOM detected while loading experts":                                                FailureRAMOOM,
-		"unknown model architecture: 'qwen9'":                                                   FailureUnknownModel,
+		"CUDA error: out of memory":                             FailureOOM,
+		"RAM OOM detected while loading experts":                FailureRAMOOM,
+		"unknown model architecture: 'qwen9'":                   FailureUnknownModel,
 		"pinned memory capacity exceeded while loading tensors": FailurePinnedCap,
 	}
 	for line, want := range cases {

@@ -71,9 +71,9 @@ func (d *Daemon) Start() error {
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
-		"running":      d.process != nil && d.process.IsRunning(),
-		"config":       d.config,
-		"server_port":  d.config.Port,
+		"running":     d.process != nil && d.process.IsRunning(),
+		"config":      d.config,
+		"server_port": d.config.Port,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)

@@ -26,11 +26,16 @@ chmod +x "$TMP/llama-server"
 cat >"$TMP/bin/nvidia-smi" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-    *"--query-gpu=driver_version"*) echo "580.0"; exit 0 ;;
-    *"--query-gpu=index,name,memory.total,memory.free,pcie.link.width.current,pcie.link.gen.current,compute_cap"*)
-        echo "0, RTX 4090, 24576, 24576, 16, 4, 8.9"
-        echo "1, RTX 4090, 24576, 24576, 16, 4, 8.9"
-        echo "2, RTX 4090, 24576, 24576, 16, 4, 8.9"
+    *"--query-gpu=index,pci.bus_id,name,memory.total,memory.used,driver_version,compute_cap"*)
+        echo "0, 00000000:01:00.0, RTX 4090, 24576, 0, 580.0, 8.9"
+        echo "1, 00000000:02:00.0, RTX 4090, 24576, 0, 580.0, 8.9"
+        echo "2, 00000000:03:00.0, RTX 4090, 24576, 0, 580.0, 8.9"
+        exit 0
+        ;;
+    *"--query-gpu=pcie.link.gen.gpucurrent,pcie.link.width.current"*)
+        echo "4, 16"
+        echo "4, 16"
+        echo "4, 16"
         exit 0
         ;;
     *) exit 0 ;;

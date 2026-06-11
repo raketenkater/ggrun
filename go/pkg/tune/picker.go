@@ -40,14 +40,14 @@ func ListTunedConfigs(cacheDir, modelName, backendTag string, wantVision bool) [
 			continue
 		}
 		var doc struct {
-			Model          string                 `json:"model"`
-			BaselineGenTPS float64                `json:"baseline_gen_tps"`
+			Model          string  `json:"model"`
+			BaselineGenTPS float64 `json:"baseline_gen_tps"`
 			BestConfig     struct {
 				GenTPS float64                `json:"gen_tps"`
 				Flags  map[string]interface{} `json:"flags"`
 			} `json:"best_config"`
-			Rounds   int    `json:"rounds"`
-			TunedAt  string `json:"tuned_at"`
+			Rounds  int    `json:"rounds"`
+			TunedAt string `json:"tuned_at"`
 		}
 		if err := json.Unmarshal(data, &doc); err != nil {
 			continue

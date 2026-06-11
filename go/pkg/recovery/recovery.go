@@ -19,28 +19,28 @@ import (
 type FailureType string
 
 const (
-	FailureOOM           FailureType = "oom"
-	FailurePinnedFail    FailureType = "pinned_fail"
-	FailurePinnedCap     FailureType = "pinned_cap_exceeded"
-	FailurePinnedHang    FailureType = "pinned_hang"
-	FailureRAMOOM        FailureType = "ram_oom"
-	FailureUnknownModel  FailureType = "unknown_model"
-	FailureUnknown       FailureType = "unknown"
+	FailureOOM          FailureType = "oom"
+	FailurePinnedFail   FailureType = "pinned_fail"
+	FailurePinnedCap    FailureType = "pinned_cap_exceeded"
+	FailurePinnedHang   FailureType = "pinned_hang"
+	FailureRAMOOM       FailureType = "ram_oom"
+	FailureUnknownModel FailureType = "unknown_model"
+	FailureUnknown      FailureType = "unknown"
 )
 
 // Launcher wraps server startup with crash recovery and fallback.
 type Launcher struct {
-	BinaryPath      string
-	Args            []string
-	FallbackPath    string // mainline llama-server if ik_llama fails
-	MaxRestarts     int
-	BackoffBase     time.Duration
-	HealthTimeout   time.Duration
-	KeepAlive       bool
-	OnLog           func(string)
-	OnFailure       func(FailureType, string)
-	OnRestart       func(int, time.Duration)
-	OnFallback      func(string)
+	BinaryPath    string
+	Args          []string
+	FallbackPath  string // mainline llama-server if ik_llama fails
+	MaxRestarts   int
+	BackoffBase   time.Duration
+	HealthTimeout time.Duration
+	KeepAlive     bool
+	OnLog         func(string)
+	OnFailure     func(FailureType, string)
+	OnRestart     func(int, time.Duration)
+	OnFallback    func(string)
 
 	lastLogPath string // log written by the most recent runOnce
 }
