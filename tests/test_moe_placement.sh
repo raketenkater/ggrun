@@ -126,7 +126,7 @@ if ! out_cpu=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-cpu" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
-    --ctx-size 196608 --kv-quality mid --kv-placement cpu \
+    --ram-budget 128000 --ctx-size 196608 --kv-quality mid --kv-placement cpu \
     "$TMP/models/KV-Heavy-MoE.gguf" 2>&1); then
     echo "KV-heavy MoE CPU-KV dry-run failed"
     echo "$out_cpu"
@@ -150,7 +150,7 @@ if ! out_settings=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_CONFIG="$TMP/kv-placement.conf" LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-settings" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
-    --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1); then
+    --ram-budget 128000 --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1); then
     echo "KV-heavy MoE settings dry-run failed"
     echo "$out_settings"
     exit 1
