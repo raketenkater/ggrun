@@ -133,6 +133,16 @@ type Options struct {
 	ForceSpecMoE bool   // allow speculative decoding on MoE despite default gate
 }
 
+func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
+	if budgetMB <= 0 || caps == nil {
+		return caps
+	}
+	capped := *caps
+	capped.RAM.FreeMB = budgetMB
+	capped.RAM.TotalMB = budgetMB
+	return &capped
+}
+
 // Compute builds a Strategy from hardware capabilities and model profile.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
 	var err error
@@ -141,14 +151,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		return nil, err
 	}
 
-	if opts.RamBudgetMB > 0 && caps != nil && opts.RamBudgetMB < caps.RAM.FreeMB {
-		capped := *caps
-		capped.RAM.FreeMB = opts.RamBudgetMB
-		if capped.RAM.TotalMB == 0 || capped.RAM.TotalMB > opts.RamBudgetMB {
-			capped.RAM.TotalMB = opts.RamBudgetMB
-		}
-		caps = &capped
-	}
+	caps = applyRAMBudget(caps, opts.RamBudgetMB)
 
 	s := &Strategy{
 		ContextSize:    opts.ContextSize,

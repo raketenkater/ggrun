@@ -790,3 +790,19 @@ func TestComputeHonorsGPURestriction(t *testing.T) {
 		t.Fatalf("expected single-GPU placement under restriction, got split %v", strat.TensorSplit)
 	}
 }
+
+func TestApplyRAMBudgetOverridesDetectedRAM(t *testing.T) {
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 8192, FreeMB: 1024},
+	}
+	out := applyRAMBudget(caps, 65536)
+	if out == caps {
+		t.Fatalf("expected budgeted capabilities copy")
+	}
+	if out.RAM.TotalMB != 65536 || out.RAM.FreeMB != 65536 {
+		t.Fatalf("expected explicit RAM budget to be used, got %+v", out.RAM)
+	}
+	if caps.RAM.TotalMB != 8192 || caps.RAM.FreeMB != 1024 {
+		t.Fatalf("applyRAMBudget mutated input caps: %+v", caps.RAM)
+	}
+}
