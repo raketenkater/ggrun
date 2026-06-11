@@ -56,11 +56,15 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" \
 # This exercises the large-MoE mmap path used by Kimi-class user reports.
 truncate -s 512G "$TMP/models/Kimi-K2.6-IQ3_K.gguf"
 
-out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+if ! out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" --ram-budget 64000 \
-    "$TMP/models/Kimi-K2.6-IQ3_K.gguf" 2>&1)
+    "$TMP/models/Kimi-K2.6-IQ3_K.gguf" 2>&1); then
+    echo "Kimi-style MoE dry-run failed"
+    echo "$out"
+    exit 1
+fi
 
 if [[ "$out" != *"--n-cpu-moe 384"* ]]; then
     echo "expected Kimi-style model to enter MoE offload path"
@@ -96,11 +100,15 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" \
     --tensor 'blk.0.ffn_down_exps.weight:40000000000:138'
 truncate -s 64G "$TMP/models/KV-Heavy-MoE.gguf"
 
-out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+if ! out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-gpu" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
-    --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1)
+    --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1); then
+    echo "KV-heavy MoE dry-run failed"
+    echo "$out"
+    exit 1
+fi
 
 if [[ "$out" == *"--no-kv-offload"* ]]; then
     echo "auto KV placement should keep KV on GPU when possible"
@@ -114,12 +122,16 @@ if [[ "$out" != *"--ctx-size 196608"* ]]; then
     exit 1
 fi
 
-out_cpu=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+if ! out_cpu=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-cpu" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
     --ctx-size 196608 --kv-quality mid --kv-placement cpu \
-    "$TMP/models/KV-Heavy-MoE.gguf" 2>&1)
+    "$TMP/models/KV-Heavy-MoE.gguf" 2>&1); then
+    echo "KV-heavy MoE CPU-KV dry-run failed"
+    echo "$out_cpu"
+    exit 1
+fi
 
 if [[ "$out_cpu" != *"--no-kv-offload"* ]]; then
     echo "expected explicit CPU KV placement to pass --no-kv-offload"
@@ -134,11 +146,15 @@ if [[ "$out_cpu" == *"GPU KV reserve first"* ]]; then
 fi
 
 printf 'LLM_KV_PLACEMENT="cpu"\n' > "$TMP/kv-placement.conf"
-out_settings=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+if ! out_settings=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     LLM_CONFIG="$TMP/kv-placement.conf" LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-settings" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
-    --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1)
+    --ctx-size 196608 --kv-quality mid "$TMP/models/KV-Heavy-MoE.gguf" 2>&1); then
+    echo "KV-heavy MoE settings dry-run failed"
+    echo "$out_settings"
+    exit 1
+fi
 
 if [[ "$out_settings" != *"--no-kv-offload"* ]]; then
     echo "expected LLM_KV_PLACEMENT setting to apply CPU KV placement"

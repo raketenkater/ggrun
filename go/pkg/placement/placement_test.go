@@ -806,3 +806,30 @@ func TestApplyRAMBudgetOverridesDetectedRAM(t *testing.T) {
 		t.Fatalf("applyRAMBudget mutated input caps: %+v", caps.RAM)
 	}
 }
+
+func TestCPUOnlyAutoContextUsesRAMBudget(t *testing.T) {
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 8192, FreeMB: 1495},
+		CPU: detect.CPUInfo{Cores: 2},
+	}
+	model := &ModelProfile{
+		Path:        "moe.gguf",
+		TotalSizeMB: 1024,
+		NumLayers:   40,
+		IsMoE:       true,
+		HeadCountKV: 2,
+		KeyLength:   256,
+		ValueLength: 256,
+		CTXTrain:    262144,
+	}
+	strat, err := Compute(caps, model, Options{CPUMode: true, RamBudgetMB: 512000, KVQuality: "low"})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	if strat.Type != CPUOnly {
+		t.Fatalf("expected CPU-only strategy, got %s", strat.Type)
+	}
+	if strat.ContextSize != 262144 {
+		t.Fatalf("expected RAM-budgeted CPU auto-context 262144, got %d", strat.ContextSize)
+	}
+}

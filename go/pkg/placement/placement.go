@@ -214,42 +214,48 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	// Auto-fit context: compute both single-GPU and multi-GPU, pick the larger.
 	if opts.ContextSize <= 0 {
-		sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
-		cudaOH := 600
-		if sysProbe != nil {
-			cudaOH = sysProbe.CUDAOverheadMB
-		}
-		cbuf := computeFloorMB
-
-		bestFree := 0
-		for _, g := range caps.GPUs {
-			if g.VRAMFreeMB() > bestFree {
-				bestFree = g.VRAMFreeMB()
-			}
-		}
-
-		// Single-GPU estimate
-		singleCtx, singleKV := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
-		singleKVM := computeKVTotalMB(model, singleCtx, singleKV)
-		singleFits := (totalSizeMB+cudaOH+cbuf+singleKVM) <= (bestFree-1024) && singleCtx >= 32768
-
-		// Multi-GPU estimate
-		multiCtx, multiKV := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
-		multiKVM := computeKVTotalMB(model, multiCtx, multiKV)
-		multiFree := 0
-		for _, g := range caps.GPUs {
-			multiFree += g.VRAMFreeMB()
-		}
-		multiFits := (totalSizeMB+(cudaOH+cbuf)*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
-
-		if multiFits && multiCtx > singleCtx {
-			s.ContextSize, s.KVType = multiCtx, multiKV
-		} else if singleFits {
-			s.ContextSize, s.KVType = singleCtx, singleKV
-		} else if multiFits {
-			s.ContextSize, s.KVType = multiCtx, multiKV
+		if opts.CPUMode || len(caps.GPUs) == 0 {
+			cpuCaps := *caps
+			cpuCaps.GPUs = nil
+			s.ContextSize, s.KVType = computeAutoContextSize(&cpuCaps, model, totalSizeMB, s.KVType, opts)
 		} else {
-			s.ContextSize, s.KVType = 32768, "q4_0"
+			sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+			cudaOH := 600
+			if sysProbe != nil {
+				cudaOH = sysProbe.CUDAOverheadMB
+			}
+			cbuf := computeFloorMB
+
+			bestFree := 0
+			for _, g := range caps.GPUs {
+				if g.VRAMFreeMB() > bestFree {
+					bestFree = g.VRAMFreeMB()
+				}
+			}
+
+			// Single-GPU estimate
+			singleCtx, singleKV := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
+			singleKVM := computeKVTotalMB(model, singleCtx, singleKV)
+			singleFits := (totalSizeMB+cudaOH+cbuf+singleKVM) <= (bestFree-1024) && singleCtx >= 32768
+
+			// Multi-GPU estimate
+			multiCtx, multiKV := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
+			multiKVM := computeKVTotalMB(model, multiCtx, multiKV)
+			multiFree := 0
+			for _, g := range caps.GPUs {
+				multiFree += g.VRAMFreeMB()
+			}
+			multiFits := (totalSizeMB+(cudaOH+cbuf)*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
+
+			if multiFits && multiCtx > singleCtx {
+				s.ContextSize, s.KVType = multiCtx, multiKV
+			} else if singleFits {
+				s.ContextSize, s.KVType = singleCtx, singleKV
+			} else if multiFits {
+				s.ContextSize, s.KVType = multiCtx, multiKV
+			} else {
+				s.ContextSize, s.KVType = 32768, "q4_0"
+			}
 		}
 	}
 
