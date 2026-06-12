@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux/WSL2 one-command setup for a self-contained llm-server install home.
+# Linux one-command setup for a self-contained llm-server install home.
 
 set -euo pipefail
 

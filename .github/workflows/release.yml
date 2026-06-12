@@ -1,8 +1,8 @@
 name: Release
 
-# Supported targets: Linux, macOS, and Windows via WSL2. Native Windows assets
-# are intentionally not produced. CUDA/ik_llama.cpp bundles need a CUDA-capable
-# release host; see docs/releasing.md for the manual asset path.
+# Supported targets: Linux, macOS, and native Windows. CUDA/ik_llama.cpp
+# bundles need a CUDA-capable release host; see docs/releasing.md for the
+# manual asset path.
 
 on:
   push:
@@ -123,10 +123,67 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
 
+  package-windows:
+    name: package llm-server-windows-x86_64-cpu.zip
+    needs: preflight
+    runs-on: windows-latest
+    env:
+      LLAMA_CPP_REF: d2462f8f7ac6d80070a587ffebf6cd73730f4280
+      ASSET: llm-server-windows-x86_64-cpu.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - name: Clone pinned llama.cpp
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP 'llama.cpp'
+          git init $src
+          git -C $src remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C $src fetch --depth=1 origin $env:LLAMA_CPP_REF
+          git -C $src checkout --detach FETCH_HEAD
+          "LLAMA_CPP_DIR=$src" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build llama-server
+        shell: pwsh
+        run: |
+          $build = Join-Path $env:LLAMA_CPP_DIR 'build'
+          cmake -S $env:LLAMA_CPP_DIR -B $build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
+          cmake --build $build --config Release --parallel 3 --target llama-server
+          $server = Get-ChildItem -Path $build -Filter llama-server.exe -Recurse | Select-Object -First 1
+          if (!$server) { throw 'llama-server.exe not found after build' }
+          & $server.FullName --version
+          "LLAMA_SERVER_PATH=$($server.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Go llm-server
+        working-directory: go
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME
+          $ldflags = '-s -w'
+          if ($version -like 'v*') {
+            $ldflags = "$ldflags -X github.com/raketenkater/llm-server/pkg/update.currentVersion=$version"
+          }
+          go build -trimpath -ldflags $ldflags -o llm-server.exe ./cmd/llm-server
+
+      - name: Package
+        shell: pwsh
+        run: scripts/package-release.ps1 -AssetName $env:ASSET -ServerBin $env:LLAMA_SERVER_PATH -OutDir dist -LlmServerBin go/llm-server.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
+
   publish:
     name: publish release assets
     if: startsWith(github.ref, 'refs/tags/')
-    needs: package
+    needs: [package, package-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -137,11 +194,12 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS
 
       - name: Attach assets to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/SHA256SUMS

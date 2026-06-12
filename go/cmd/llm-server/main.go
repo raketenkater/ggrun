@@ -945,12 +945,31 @@ func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTa
 	}
 	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, tuneHardwareHash(caps))
 	if path == "" {
-		return serverArgs
+		// No local tune for this model+hardware+backend: try the community
+		// pool. Downloads are sanitized to the tune-flag allow-list and both
+		// hits and misses are cached on disk, so launches stay offline-safe.
+		path = tune.FetchCommunityTune(cacheDir, req.ModelPath, gpuNamesFromCaps(caps), vision, backendTag)
+		if path == "" {
+			return serverArgs
+		}
+		fmt.Printf("[tune] Using community-shared config: %s (LLM_COMMUNITY_TUNES=off to disable)\n", filepath.Base(path))
+	} else {
+		fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
 	}
 	autoReq := *req
 	autoReq.TuneCache = path
-	fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
 	return applySelectedTuneCache(&autoReq, serverArgs, caps)
+}
+
+func gpuNamesFromCaps(caps *detect.Capabilities) []string {
+	if caps == nil {
+		return nil
+	}
+	names := make([]string, 0, len(caps.GPUs))
+	for _, gpu := range caps.GPUs {
+		names = append(names, gpu.Name)
+	}
+	return names
 }
 
 func bestTuneCachePath(cacheDir, modelName, backendTag string, vision bool, hardwareHash string) string {
@@ -1450,11 +1469,7 @@ func cmdTune(args []string) {
 	// A completed tune for this model/hardware/backend is reused unless the
 	// user explicitly asks for a fresh run with --retune.
 	if !hasArg(args, "--retune") {
-		names := make([]string, 0, len(caps.GPUs))
-		for _, g := range caps.GPUs {
-			names = append(names, g.Name)
-		}
-		cachePath := tune.TuneCachePath(cfg.CacheDir, req.ModelPath, names, strategy.MMProjPath != "", be.Tag)
+		cachePath := tune.TuneCachePath(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag)
 		if cachePath != "" && tune.TuneFileComplete(cachePath) {
 			fmt.Printf("[tune] Completed tune cache found: %s\n", cachePath)
 			fmt.Println("[tune] It is applied automatically on launch. Re-run with --retune to tune again.")
@@ -1514,6 +1529,10 @@ func cmdTune(args []string) {
 	}
 
 	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
+	tunePath := tune.TuneCachePath(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag)
+	if hint := tune.ShareHint(tunePath); hint != "" {
+		fmt.Println(hint)
+	}
 }
 
 // guardPortFree refuses to start when something is already listening on the
@@ -1666,9 +1685,13 @@ func cmdUpdate() {
 	if err := update.SelfUpdate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Self-update: %v\n", err)
 	}
-	// Update backends
-	if err := update.UpdateBackends(); err != nil {
-		fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
+	if runtime.GOOS == "windows" {
+		fmt.Println("Backend updates are handled by the native Windows release bundle.")
+	} else {
+		// Update source-built backends
+		if err := update.UpdateBackends(); err != nil {
+			fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
+		}
 	}
 
 	// Check for newer version on GitHub

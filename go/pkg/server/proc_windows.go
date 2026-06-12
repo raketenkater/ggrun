@@ -12,6 +12,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const stillActiveExitCode = 259
+
 // setSysProcAttr configures the child process on Windows.
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -48,5 +50,5 @@ func isProcessAlive(pid int) bool {
 	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
 		return false
 	}
-	return code == windows.STILL_ACTIVE
+	return code == stillActiveExitCode
 }

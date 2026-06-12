@@ -1,7 +1,10 @@
 # Releasing llm-server
 
-llm-server supports Linux, macOS, and Windows through WSL2. Native Windows
-packages are intentionally not produced.
+llm-server supports Linux, macOS, and native Windows. Windows release bundles
+currently ship the Go launcher plus a CPU llama.cpp backend. Native Windows
+NVIDIA CUDA is supported through `install.ps1 -Backend cuda`, which uses an
+optional CUDA release asset when present and otherwise builds llama.cpp CUDA
+locally. Windows Vulkan is not a supported llm-server target.
 
 ## Automated assets
 
@@ -10,6 +13,7 @@ Pushing a `v*` tag runs `.github/workflows/release.yml` and publishes:
 - `llm-server-linux-x86_64-cpu.tar.gz`
 - `llm-server-linux-x86_64-vulkan.tar.gz`
 - `llm-server-macos-arm64-metal.tar.gz`
+- `llm-server-windows-x86_64-cpu.zip`
 - `SHA256SUMS`
 
 The installer looks for a matching release asset first, then falls back to a
@@ -17,9 +21,9 @@ source build. Checksums are published with each tagged release.
 
 ## CUDA assets
 
-CUDA/ik_llama.cpp bundles are not built on generic GitHub-hosted runners. Build
-them on a CUDA-capable Linux host with the target driver/toolkit compatibility
-you want to support:
+CUDA bundles are not built on generic GitHub-hosted runners. Build them on a
+CUDA-capable host with the target OS, driver, and toolkit compatibility you want
+to support. Linux uses ik_llama.cpp by default:
 
 ```bash
 git clone https://github.com/ikawrakow/ik_llama.cpp.git ~/ik_llama.cpp
@@ -36,9 +40,30 @@ scripts/package-release.sh \
 ```
 
 Attach `dist/llm-server-linux-x86_64-cuda.tar.gz` to the GitHub release if you
-want CUDA installs to use a prebuilt bundle. Without that asset, the installer
-builds ik_llama.cpp from source.
+want Linux CUDA installs to use a prebuilt bundle. Without that asset, the
+Linux installer builds ik_llama.cpp from source.
 
+For native Windows NVIDIA CUDA, build a llama.cpp CUDA `llama-server.exe` on a
+CUDA-capable Windows host, then package it with the Windows packaging script:
+
+```powershell
+git clone https://github.com/ggml-org/llama.cpp.git $env:TEMP\llama.cpp
+cmake -S $env:TEMP\llama.cpp -B $env:TEMP\llama.cpp\build-cuda `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DGGML_CUDA=ON `
+  -DGGML_NATIVE=OFF
+cmake --build $env:TEMP\llama.cpp\build-cuda --config Release --target llama-server --parallel
+
+.\scripts\package-release.ps1 `
+  -AssetName llm-server-windows-x86_64-cuda.zip `
+  -ServerBin $env:TEMP\llama.cpp\build-cuda\bin\Release\llama-server.exe `
+  -OutDir dist
+```
+
+Attach `dist/llm-server-windows-x86_64-cuda.zip` to the GitHub release if you
+want Windows CUDA installs to use a prebuilt bundle. Without that asset,
+`install.ps1 -Backend cuda` installs the CPU Windows launcher bundle and builds
+llama.cpp CUDA locally.
 
 ## Public release gate
 
@@ -53,8 +78,9 @@ which rows have passed.
 | Linux Vulkan NVIDIA | install/build, `--spec auto`, `--spec ngram`, one benchmark |
 | Linux Vulkan AMD or Intel | install/build, dry-run, one benchmark, no CUDA assumptions |
 | macOS arm64 Metal | install/build, dry-run, one benchmark |
-| WSL2 NVIDIA | install, backend detection, dry-run, one benchmark |
-| No supported GPU | installer falls back cleanly to CPU bundle or source build |
+| Native Windows x86_64 CPU | `install.ps1`, `detect`, dry-run, one short benchmark |
+| Native Windows NVIDIA CUDA | `install.ps1 -Backend cuda`, `detect`, dry-run, one benchmark on an NVIDIA GPU host |
+| No supported GPU | installer falls back cleanly to CPU bundle or source build where supported |
 | Missing backend tools | installer prints the missing package/tool and exits without partial config corruption |
 | Go updater / latest release | `llm-server --update`, `llm-server update`, latest-release check, backend rebuild, smoke test, rollback path |
 

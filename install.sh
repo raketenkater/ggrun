@@ -182,7 +182,7 @@ vulkan_available() {
 detect_backend() {
     if [[ "$OS" == "Darwin" ]]; then echo metal; return; fi
     if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
-        err "Native Windows is not supported. Use WSL2, then run this installer inside Ubuntu."
+        err "Use install.ps1 for native Windows installs, or run this Bash installer on Linux/macOS."
         exit 1
     fi
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then

@@ -194,6 +194,31 @@ jobs:
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/bin/llm-server-gui$'
           tar -tzf "$tmp/dist/llm-server-linux-x86_64-cpu.tar.gz" | grep -q '/setup.sh$'
 
+  package-windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Build Windows package and install from local release dir
+        shell: pwsh
+        run: |
+          go build -C go -trimpath -o llm-server.exe ./cmd/llm-server
+          $tmp = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          $release = Join-Path $tmp 'release'
+          $app = Join-Path $tmp 'app'
+          New-Item -ItemType Directory -Force -Path $release | Out-Null
+          Copy-Item go/llm-server.exe (Join-Path $tmp 'llama-server.exe')
+          scripts/package-release.ps1 -AssetName llm-server-windows-x86_64-cpu.zip -ServerBin (Join-Path $tmp 'llama-server.exe') -OutDir $release -LlmServerBin go/llm-server.exe
+          Expand-Archive -Path (Join-Path $release 'llm-server-windows-x86_64-cpu.zip') -DestinationPath (Join-Path $tmp 'expanded') -Force
+          if (!(Test-Path (Join-Path $tmp 'expanded/llm-server-windows-x86_64-cpu/bin/llm-server.exe'))) { throw 'packaged llm-server.exe missing' }
+          if (!(Test-Path (Join-Path $tmp 'expanded/llm-server-windows-x86_64-cpu/bin/llama-server.exe'))) { throw 'packaged llama-server.exe missing' }
+          ./install.ps1 -InstallDir $app -ReleaseDir $release -NoPath
+          & (Join-Path $app '.bin/llm-server.exe') --version
+          if (!(Test-Path (Join-Path $app '.bin/llama-server.exe'))) { throw 'installed llama-server.exe missing' }
+          if (!(Test-Path (Join-Path $app 'llm-server.cmd'))) { throw 'installed llm-server.cmd missing' }
+
   release-install-smoke:
     runs-on: ubuntu-latest
     steps:

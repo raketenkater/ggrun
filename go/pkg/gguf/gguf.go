@@ -51,7 +51,7 @@ func Parse(path string) (*Info, error) {
 		return nil, fmt.Errorf("parse_gguf.py not found")
 	}
 
-	cmd := exec.Command("python3", script, path)
+	cmd := exec.Command(pythonCommand(), script, path)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
@@ -77,6 +77,15 @@ func Parse(path string) (*Info, error) {
 	}
 
 	return &info, nil
+}
+
+func pythonCommand() string {
+	for _, name := range []string{"python3", "python", "py"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	return "python3"
 }
 
 func findParseScript() string {

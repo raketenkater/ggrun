@@ -38,8 +38,8 @@ OS="$(uname -s)"
 case "$PLATFORM:$OS" in
     linux:Linux) ;;
     mac:Darwin) ;;
-    linux:Darwin) err "setup-linux.sh is for Linux/WSL2. Use setup-mac.sh on macOS."; exit 1 ;;
-    mac:Linux) err "setup-mac.sh is for macOS. Use setup-linux.sh on Linux/WSL2."; exit 1 ;;
+    linux:Darwin) err "setup-linux.sh is for Linux. Use setup-mac.sh on macOS."; exit 1 ;;
+    mac:Linux) err "setup-mac.sh is for macOS. Use setup-linux.sh on Linux."; exit 1 ;;
     *) err "unsupported OS: $OS"; exit 1 ;;
 esac
 

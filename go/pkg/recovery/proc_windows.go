@@ -11,6 +11,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const stillActiveExitCode = 259
+
 func setProcessGroupAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
@@ -40,5 +42,5 @@ func procAlive(pid int) bool {
 	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
 		return false
 	}
-	return code == windows.STILL_ACTIVE
+	return code == stillActiveExitCode
 }

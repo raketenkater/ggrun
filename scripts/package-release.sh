@@ -38,6 +38,7 @@ done
 for f in setup.sh setup-linux.sh setup-mac.sh; do
     [[ -f "$ROOT_DIR/$f" ]] && install -m 0755 "$ROOT_DIR/$f" "$PAYLOAD/$f"
 done
+[[ -f "$ROOT_DIR/install.ps1" ]] && install -m 0644 "$ROOT_DIR/install.ps1" "$PAYLOAD/install.ps1"
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
 

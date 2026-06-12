@@ -50,7 +50,7 @@ case "$(uname -s)" in
         LLM_SETUP_REF="$REF" exec "$ROOT/scripts/setup-home.sh" mac "$@"
         ;;
     MINGW*|MSYS*|CYGWIN*)
-        err "Native Windows is not supported. Use WSL2, then run this inside Ubuntu."
+        err "Use install.ps1 for native Windows installs, or run this Bash setup on Linux/macOS."
         exit 1
         ;;
     *)

@@ -105,9 +105,18 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 	if quant != "" && quant != "auto" && quant != "catalog" {
 		args = append(args, "--quant", quant)
 	}
-	cmd := exec.Command("python3", args...)
+	cmd := exec.Command(pythonCommand(), args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func pythonCommand() string {
+	for _, name := range []string{"python3", "python", "py"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	return "python3"
 }

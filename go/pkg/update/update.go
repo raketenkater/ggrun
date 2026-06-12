@@ -3,6 +3,7 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ const (
 	githubRepo        = "raketenkater/llm-server"
 	githubAPIURL      = "https://api.github.com/repos/%s/releases/latest"
 	rawInstallURL     = "https://raw.githubusercontent.com/%s/%s/install.sh"
+	rawInstallPSURL   = "https://raw.githubusercontent.com/%s/%s/install.ps1"
 	updateDismissDays = 7
 )
 
@@ -62,8 +65,10 @@ func PromptOnStartup() {
 		if err := SelfUpdate(); err != nil {
 			fmt.Fprintf(os.Stderr, "Self-update: %v\n", err)
 		}
-		if err := UpdateBackends(); err != nil {
-			fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
+		if runtime.GOOS != "windows" {
+			if err := UpdateBackends(); err != nil {
+				fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
+			}
 		}
 	case "d", "dismiss":
 		if err := dismissStartupUpdates(cacheDir, time.Now()); err != nil {
@@ -114,8 +119,16 @@ type repoCandidate struct {
 	Dir   string
 }
 
+func homeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
+
 func updateRepoCandidates() []repoCandidate {
-	home := os.Getenv("HOME")
+	home := homeDir()
 	seen := map[string]bool{}
 	candidates := []repoCandidate{}
 	add := func(label, dir string) {
@@ -216,7 +229,7 @@ func updateCacheDir() string {
 	if dir := os.Getenv("LLM_CACHE_DIR"); dir != "" {
 		return dir
 	}
-	if home := os.Getenv("HOME"); home != "" {
+	if home := homeDir(); home != "" {
 		return filepath.Join(home, ".cache", "llm-server")
 	}
 	return filepath.Join(os.TempDir(), "llm-server")
@@ -282,6 +295,12 @@ func Version() string {
 
 // SelfUpdate pulls the latest llm-server from git and re-runs install.sh.
 func SelfUpdate() error {
+	if runtime.GOOS == "windows" {
+		if appHome := strings.TrimSpace(os.Getenv("LLM_APP_HOME")); appHome != "" {
+			return SelfUpdateAppHomeInstaller(appHome)
+		}
+		return SelfUpdateFromReleaseInstaller()
+	}
 	repoDir := installedSourceRepoDir()
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
@@ -382,6 +401,9 @@ func SelfUpdate() error {
 // local llm-server git checkout. It downloads the latest tagged install.sh and lets
 // the installer select the right platform/backend bundle or source fallback.
 func SelfUpdateFromReleaseInstaller() error {
+	if runtime.GOOS == "windows" {
+		return selfUpdateWindowsInstaller(strings.TrimSpace(os.Getenv("LLM_APP_HOME")))
+	}
 	fmt.Println("═══ Updating llm-server from latest release installer ═══")
 	scriptPath := installedLLMServerPath()
 	backupPath := ""
@@ -445,6 +467,90 @@ func rawInstallerURL(ref string) string {
 	return fmt.Sprintf(rawInstallURL, githubRepo, ref)
 }
 
+func rawInstallerPSURLForRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "main"
+	}
+	return fmt.Sprintf(rawInstallPSURL, githubRepo, ref)
+}
+
+func selfUpdateWindowsInstaller(appHome string) error {
+	fmt.Println("═══ Updating llm-server from latest Windows installer ═══")
+	scriptPath := installedLLMServerPath()
+	backupPath := ""
+	if scriptPath != "" {
+		if _, err := os.Stat(scriptPath); err == nil {
+			backupPath = scriptPath + ".bak"
+			_ = cp(scriptPath, backupPath)
+		}
+	}
+
+	installerURL := rawInstallerPSURLForRef("main")
+	if res, err := Check(); err == nil && res.Latest != "" {
+		installerURL = rawInstallerPSURLForRef(res.Latest)
+	}
+	tmpDir, err := os.MkdirTemp("", "llm-server-update-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	installerPath := filepath.Join(tmpDir, "install.ps1")
+	if err := downloadFile(installerURL, installerPath, 0644); err != nil {
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return fmt.Errorf("download Windows installer: %w", err)
+	}
+
+	cmd, err := powershellInstallCommand(installerPath, appHome)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if backupPath != "" && scriptPath != "" {
+			_ = cp(backupPath, scriptPath)
+			_ = os.Remove(backupPath)
+		}
+		return fmt.Errorf("Windows installer failed: %w", err)
+	}
+
+	if scriptPath != "" {
+		if err := exec.Command(scriptPath, "--version").Run(); err != nil {
+			if backupPath != "" {
+				_ = cp(backupPath, scriptPath)
+				_ = os.Remove(backupPath)
+			}
+			return fmt.Errorf("self-check failed after Windows installer")
+		}
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	fmt.Println("  ✓ llm-server Windows installer completed and verified. Restart to use the new version.")
+	return nil
+}
+
+func powershellInstallCommand(installerPath, appHome string) (*exec.Cmd, error) {
+	shell := ""
+	for _, candidate := range []string{"pwsh", "powershell.exe", "powershell"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			shell = path
+			break
+		}
+	}
+	if shell == "" {
+		return nil, fmt.Errorf("PowerShell not found")
+	}
+	args := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installerPath, "-NoPath"}
+	if appHome != "" {
+		args = append(args, "-InstallDir", appHome)
+	}
+	return exec.Command(shell, args...), nil
+}
+
 func selfUpdateInstallEnv(appHome string) []string {
 	env := append([]string{}, os.Environ()...)
 	env = append(env, "LLM_INSTALL_NONINTERACTIVE=1", "LLM_INSTALL_MAIN=go")
@@ -471,6 +577,9 @@ func SelfUpdateAppHomeInstaller(appHome string) error {
 	appHome = strings.TrimSpace(appHome)
 	if appHome == "" {
 		return fmt.Errorf("LLM_APP_HOME is not set")
+	}
+	if runtime.GOOS == "windows" {
+		return selfUpdateWindowsInstaller(appHome)
 	}
 	fmt.Println("═══ Updating llm-server app home from main ═══")
 	scriptPath := installedLLMServerPath()
@@ -533,7 +642,7 @@ func installedSourceRepoDir() string {
 			return repoDir
 		}
 	}
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+	if home := homeDir(); home != "" {
 		return filepath.Join(home, "llm-server")
 	}
 	return ""
@@ -543,7 +652,11 @@ func installedLLMServerPath() string {
 	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
 		for _, candidate := range []string{
 			filepath.Join(appHome, ".bin", "llm-server"),
+			filepath.Join(appHome, ".bin", "llm-server.exe"),
+			filepath.Join(appHome, "bin", "llm-server"),
+			filepath.Join(appHome, "bin", "llm-server.exe"),
 			filepath.Join(appHome, "llm-server"),
+			filepath.Join(appHome, "llm-server.cmd"),
 		} {
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate
@@ -553,7 +666,10 @@ func installedLLMServerPath() string {
 	if path, _ := exec.LookPath("llm-server"); path != "" {
 		return path
 	}
-	if home := os.Getenv("HOME"); home != "" {
+	if home := homeDir(); home != "" {
+		if runtime.GOOS == "windows" {
+			return filepath.Join(home, "llm-server", ".bin", "llm-server.exe")
+		}
 		return filepath.Join(home, ".local", "bin", "llm-server")
 	}
 	return ""
@@ -580,7 +696,7 @@ func downloadFile(url, dst string, mode os.FileMode) error {
 func UpdateBackend(name, repoDir string, walkback int) error {
 	buildDir := filepath.Join(repoDir, "build")
 	binary := filepath.Join(buildDir, "bin", "llama-server")
-	fallbackDir := filepath.Join(os.Getenv("HOME"), ".cache", "llm-server", "update-fallbacks")
+	fallbackDir := filepath.Join(homeDir(), ".cache", "llm-server", "update-fallbacks")
 	os.MkdirAll(fallbackDir, 0755)
 
 	fmt.Printf("\n═══ Updating %s ═══\n", name)
@@ -753,7 +869,7 @@ func backendUpdateCandidates() []repoCandidate {
 		add("ik_llama.cpp", filepath.Join(appHome, ".src", "ik_llama.cpp"))
 		add("llama.cpp", filepath.Join(appHome, ".src", "llama.cpp"))
 	}
-	if home := os.Getenv("HOME"); home != "" {
+	if home := homeDir(); home != "" {
 		add("ik_llama.cpp", filepath.Join(home, "ik_llama.cpp"))
 		add("llama.cpp", filepath.Join(home, "llama.cpp"))
 	}
@@ -928,15 +1044,16 @@ func gitLogOneline(dir, rangeSpec string) ([]string, error) {
 }
 
 func md5sum(path string) string {
-	out, err := exec.Command("md5sum", path).Output()
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	parts := strings.Fields(string(out))
-	if len(parts) > 0 {
-		return parts[0]
+	defer f.Close()
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
 	}
-	return ""
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func cp(src, dst string) error {

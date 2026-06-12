@@ -37,10 +37,18 @@ Native Windows setup from PowerShell:
 iwr -useb https://raw.githubusercontent.com/raketenkater/llm-server/main/install.ps1 | iex
 ```
 
+Native Windows NVIDIA CUDA setup:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/raketenkater/llm-server/main/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Backend cuda
+```
+
 Since v3.0.0, [prebuilt release bundles](https://github.com/raketenkater/llm-server/releases/latest)
-(Linux CPU/Vulkan, macOS arm64 Metal) are downloaded and verified against the
-published `SHA256SUMS` — no compile needed. CUDA/ik_llama.cpp installs build
-from source for your exact GPU architecture.
+(Linux CPU/Vulkan, macOS arm64 Metal, Windows x86_64 CPU) are downloaded and verified against the
+published `SHA256SUMS` — no compile needed. Linux CUDA/ik_llama.cpp installs build from source
+for your exact GPU architecture. Windows NVIDIA CUDA installs use a native llama.cpp CUDA backend,
+either from an optional `llm-server-windows-x86_64-cuda.zip` release asset or by building it locally.
 
 From a clone:
 
@@ -304,7 +312,7 @@ candidate testing, because relaunching a 95GB split model dominates tune time.
   release bundle.
 - Vulkan: llama.cpp Vulkan build.
 - Metal/macOS: llama.cpp Metal build or release bundle.
-- Windows: native x86_64 CPU release bundle; custom llama.cpp CPU/Vulkan builds can be configured with `LLAMA_SERVER`.
+- Windows: native x86_64 CPU release bundle; NVIDIA CUDA via `install.ps1 -Backend cuda` or a custom `LLAMA_SERVER`.
 - CPU: llama.cpp CPU build or release bundle.
 
 ## Requirements
@@ -326,8 +334,10 @@ Windows:
 
 - Windows 10/11 x86_64
 - PowerShell 5+
-- Python available as `python3` or configured manually for GGUF parsing/downloader helpers
-- Native CPU release bundle is produced automatically; GPU/Vulkan builds can be supplied with `LLAMA_SERVER`
+- Python available as `python3`, `python`, or `py` for GGUF parsing/downloader helpers
+- Native CPU release bundle is produced automatically
+- NVIDIA driver, CUDA Toolkit with `nvcc`, CMake, Git, and Visual Studio C++ Build Tools for `install.ps1 -Backend cuda`
+- Windows Vulkan is not a supported llm-server target
 
 ## Documentation
 
