@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1878,17 +1879,28 @@ func findBackend(caps *detect.Capabilities) *backendInfo {
 
 func backendSearchPaths() []string {
 	home := os.Getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
 	appHome := os.Getenv("LLM_APP_HOME")
 	return []string{
 		os.Getenv("LLAMA_SERVER"),
 		filepath.Join(appHome, ".bin", "llama-server"),
+		filepath.Join(appHome, ".bin", "llama-server.exe"),
 		filepath.Join(appHome, "bin", "llama-server"),
+		filepath.Join(appHome, "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "ik_llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "ik_llama.cpp", "build", "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build-vulkan", "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "llama.cpp", "build-vulkan", "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server.exe"),
 		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server.exe"),
 		filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server"),
+		filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server.exe"),
 		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"),
+		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server.exe"),
 		"/usr/local/bin/llama-server",
 		"/usr/bin/llama-server",
 	}
@@ -1908,6 +1920,10 @@ func detectBackend(path string) *backendInfo {
 		info.Tag = "ik_llama"
 	} else if strings.Contains(lowerHelp, "vulkan") || strings.Contains(lowerPath, "build-vulkan") || strings.Contains(lowerPath, "vulkan") {
 		info.Tag = "vulkan"
+	} else if runtime.GOOS == "darwin" {
+		// macOS llama.cpp builds default to Metal; placement must not emit
+		// CUDA/Vulkan device-routing flags for them.
+		info.Tag = "metal"
 	}
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true

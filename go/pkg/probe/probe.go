@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/raketenkater/llm-server/pkg/detect"
 )
 
 // Memory holds GPU and system memory state.
@@ -44,6 +47,12 @@ func probeGPUFree() []int {
 }
 
 func probeRAMFree() int {
+	if caps, err := detect.Detect(); err == nil && caps.RAM.FreeMB > 0 {
+		return caps.RAM.FreeMB
+	}
+	if runtime.GOOS != "linux" {
+		return 0
+	}
 	data, err := exec.Command("awk", "/MemAvailable:/ {print int($2/1024)}", "/proc/meminfo").Output()
 	if err != nil {
 		return 0

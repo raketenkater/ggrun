@@ -84,3 +84,7 @@ func detectRAMFreeMB() int {
 	}
 	return 4096 // fallback
 }
+
+func detectRAMWindows() RAMInfo {
+	return RAMInfo{}
+}

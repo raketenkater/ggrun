@@ -833,3 +833,62 @@ func TestCPUOnlyAutoContextUsesRAMBudget(t *testing.T) {
 		t.Fatalf("expected RAM-budgeted CPU auto-context 262144, got %d", strat.ContextSize)
 	}
 }
+
+func TestArgsMetalSkipsDeviceRouting(t *testing.T) {
+	s := &Strategy{
+		Type:        SingleGPU,
+		ContextSize: 32768,
+		KVType:      "q8_0",
+		BatchSize:   4096,
+		UBatchSize:  512,
+		Threads:     8,
+		BackendTag:  "metal",
+		MainGPU:     0,
+		GPULayers:   999,
+	}
+	args := s.Args("model.gguf", 8081)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-ngl 999") {
+		t.Fatalf("metal must offload with -ngl 999, got: %s", joined)
+	}
+	for _, banned := range []string{"--device", "-mg", "--run-time-repack"} {
+		for _, a := range args {
+			if a == banned {
+				t.Fatalf("metal args must not contain %s: %s", banned, joined)
+			}
+		}
+	}
+}
+
+func TestComputeAppleSiliconSingleGPU(t *testing.T) {
+	// A 32GB M-series Mac: one synthesized GPU with 24GB working set.
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "Apple M2 Pro", VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 32768, FreeMB: 26214},
+		CPU:  detect.CPUInfo{Cores: 10},
+	}
+	model := &ModelProfile{
+		Path:        "model.gguf",
+		SizeBytes:   4 * 1024 * 1024 * 1024,
+		TotalSizeMB: 4 * 1024,
+		NumLayers:   32,
+		ContextSize: 32768,
+		HiddenSize:  4096,
+		HeadCountKV: 8,
+		KeyLength:   128,
+		ValueLength: 128,
+	}
+	strat, err := Compute(caps, model, Options{KVPlacement: "auto", KVQuality: "low", BackendTag: "metal"})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	if strat.Type == CPUOnly {
+		t.Fatal("Apple Silicon must not fall back to CPU-only placement")
+	}
+	args := strat.Args("model.gguf", 8081)
+	for i, a := range args {
+		if a == "-ngl" && args[i+1] == "0" {
+			t.Fatal("Apple Silicon launch must not disable GPU offload")
+		}
+	}
+}

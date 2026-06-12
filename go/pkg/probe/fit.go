@@ -1,15 +1,13 @@
 package probe
 
 import (
-	"bufio"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/raketenkater/llm-server/pkg/detect"
 	"github.com/raketenkater/llm-server/pkg/gguf"
 )
 
@@ -108,27 +106,9 @@ func EstimateFitCtx(modelPath, cacheDir string) int {
 }
 
 func totalSystemMemoryMB() int {
-	var totalVRAM int
-	out, _ := exec.Command("nvidia-smi",
-		"--query-gpu=memory.total",
-		"--format=csv,noheader,nounits").Output()
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		mb, _ := strconv.Atoi(strings.TrimSpace(line))
-		totalVRAM += mb
+	caps, err := detect.Detect()
+	if err != nil || caps == nil {
+		return 0
 	}
-	var ramMB int
-	f, err := os.Open("/proc/meminfo")
-	if err == nil {
-		defer f.Close()
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			if strings.HasPrefix(sc.Text(), "MemTotal:") {
-				var kb int
-				fmt.Sscanf(sc.Text(), "MemTotal: %d kB", &kb)
-				ramMB = kb / 1024
-				break
-			}
-		}
-	}
-	return totalVRAM + ramMB
+	return caps.TotalVRAM() + caps.RAM.TotalMB
 }

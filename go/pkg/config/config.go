@@ -89,7 +89,11 @@ func Path() string {
 			return f
 		}
 	}
-	return filepath.Join(os.Getenv("HOME"), ".config", "llm-server", "config")
+	home := os.Getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	return filepath.Join(home, ".config", "llm-server", "config")
 }
 
 // Load reads the config file and env vars, returning a merged config.

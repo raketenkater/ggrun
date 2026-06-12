@@ -1561,7 +1561,9 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "-ngl", "0")
 	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
-		if s.MainGPU >= 0 && len(s.TensorSplit) == 0 {
+		// Metal has exactly one logical device — device-routing flags are
+		// CUDA/Vulkan concepts and llama-server rejects unknown device names.
+		if s.MainGPU >= 0 && len(s.TensorSplit) == 0 && !strings.EqualFold(s.BackendTag, "metal") {
 			args = append(args, "-mg", fmt.Sprintf("%d", s.MainGPU))
 			if s.Type == SingleGPU {
 				args = append(args, "--device", deviceName(s.BackendTag, s.MainGPU))

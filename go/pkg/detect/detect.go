@@ -65,6 +65,9 @@ func Detect() (*Capabilities, error) {
 	if len(gpus) == 0 {
 		gpus = detectVulkanGPUs()
 	}
+	if len(gpus) == 0 {
+		gpus = detectAppleSilicon()
+	}
 
 	ram := detectRAM()
 	cpu := detectCPU()
@@ -242,12 +245,54 @@ func detectROCm() []GPU {
 	return gpus
 }
 
+// detectAppleSilicon synthesizes a GPU entry for Apple Silicon unified memory.
+// There is no nvidia-smi/vulkaninfo equivalent on macOS, so without this a Mac
+// reports zero GPUs, placement picks CPUOnly, and the Metal backend is never
+// engaged (-ngl 0). llama.cpp's Metal backend can address roughly 75% of
+// unified memory (Metal's default recommendedMaxWorkingSetSize).
+func detectAppleSilicon() []GPU {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return nil
+	}
+	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	if err != nil {
+		return nil
+	}
+	memBytes, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	name := "Apple Silicon"
+	if out, err := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output(); err == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			name = s
+		}
+	}
+	gpu, ok := appleSiliconGPU(memBytes, name)
+	if !ok {
+		return nil
+	}
+	return []GPU{gpu}
+}
+
+// appleSiliconGPU builds the unified-memory GPU entry. Split out from
+// detectAppleSilicon so the sizing rule is unit-testable off-macOS.
+func appleSiliconGPU(memBytes int64, name string) (GPU, bool) {
+	if memBytes <= 0 {
+		return GPU{}, false
+	}
+	return GPU{
+		Index:       0,
+		Name:        name,
+		VRAMTotalMB: int(memBytes / 1024 / 1024 * 3 / 4),
+	}, true
+}
+
 func detectRAM() RAMInfo {
 	switch runtime.GOOS {
 	case "linux":
 		return detectRAMLinux()
 	case "darwin":
 		return detectRAMDarwin()
+	case "windows":
+		return detectRAMWindows()
 	default:
 		return RAMInfo{}
 	}

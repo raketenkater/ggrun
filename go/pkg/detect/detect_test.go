@@ -134,3 +134,20 @@ func TestEstimateVRAMFromNameUsesConservativeUnknownDefault(t *testing.T) {
 		t.Fatalf("expected conservative unknown default, got %d", got)
 	}
 }
+
+func TestAppleSiliconGPUSizing(t *testing.T) {
+	gpu, ok := appleSiliconGPU(32*1024*1024*1024, "Apple M2 Pro")
+	if !ok {
+		t.Fatal("expected a GPU for 32GB unified memory")
+	}
+	// Metal's default working-set limit is ~75% of unified memory.
+	if gpu.VRAMTotalMB != 24576 {
+		t.Fatalf("expected 24576 MB (75%% of 32GB), got %d", gpu.VRAMTotalMB)
+	}
+	if gpu.Index != 0 || gpu.Name != "Apple M2 Pro" {
+		t.Fatalf("unexpected GPU entry: %+v", gpu)
+	}
+	if _, ok := appleSiliconGPU(0, "x"); ok {
+		t.Fatal("zero memsize must not produce a GPU")
+	}
+}
