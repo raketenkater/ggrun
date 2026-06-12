@@ -1,6 +1,19 @@
 # Changelog
 
-## v3.0.0 (unreleased)
+## Unreleased (v3.0.1 candidates)
+
+- **Apple Silicon: Metal now actually engages.** Hardware detection knew only
+  nvidia-smi/rocm-smi/vulkaninfo, so Macs reported zero GPUs and launched with
+  `-ngl 0` (CPU-only inference despite the Metal bundle). Detection now
+  synthesizes a unified-memory GPU (75% of `hw.memsize`, Metal's default
+  working-set limit), macOS backends are tagged `metal`, and CUDA/Vulkan
+  device-routing flags are no longer emitted for them. Pending validation on
+  real Apple hardware.
+- **Repositioned README and repo metadata** for discoverability: pain-first
+  intro, honest comparison vs raw llama.cpp `--fit` / Ollama / llama-swap,
+  benchmark methodology statement, release-asset install path.
+
+## v3.0.0 — 2026-06-11
 
 llm-server v3 is a ground-up Go rewrite of the Bash launcher. The Go binary is
 now the primary `llm-server` command; the Bash implementation ships as
