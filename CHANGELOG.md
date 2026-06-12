@@ -2,6 +2,17 @@
 
 ## Unreleased (v3.0.1 candidates)
 
+- **Community tune pool.** When a model has no local AI-Tune cache, the
+  launcher now checks a shared pool (one HTTPS GET keyed by
+  model+size+GPU-set+backend, mirroring the local cache file naming) and
+  applies a community-measured config after sanitization. Only flags on the
+  tune allow-list survive (batch/threads/KV-types/flash-attn/spec settings);
+  model paths, ports, devices, and placement flags can never be injected.
+  Hits cache for 7 days, misses for 24 h, lookups time out in 3 s — fully
+  offline-safe. Disable with `LLM_COMMUNITY_TUNES=off`; point elsewhere with
+  `LLM_COMMUNITY_TUNES_URL`. After a successful `--ai-tune`, the launcher
+  prints how to contribute the result back.
+
 - **Apple Silicon: Metal now actually engages.** Hardware detection knew only
   nvidia-smi/rocm-smi/vulkaninfo, so Macs reported zero GPUs and launched with
   `-ngl 0` (CPU-only inference despite the Metal bundle). Detection now

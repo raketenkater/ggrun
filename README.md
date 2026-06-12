@@ -155,6 +155,8 @@ computes those flags. They compose well: point llama-swap entries at
 - Multi-GPU placement using VRAM, free memory, and PCIe weighting.
 - MoE-aware expert placement with `-ot` / `--n-cpu-moe` fallback paths.
 - AI Tune: benchmarks candidate flag sets and caches the fastest valid result.
+- Community tune pool: first launches reuse configs measured by others on the
+  same GPU set, sanitized to safe performance flags (`LLM_COMMUNITY_TUNES=off` to opt out).
 - Model downloader that searches Hugging Face GGUF repos and picks a hardware-aware quant.
 - GUI recommended-download fast path ranked by intelligence signal after hardware fit.
 - Vision projector lookup and validation for multimodal GGUF models.
