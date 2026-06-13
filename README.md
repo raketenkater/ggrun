@@ -114,7 +114,8 @@ llm-server model.gguf
 ### How it compares
 
 **vs raw llama.cpp.** Upstream recently gained `--fit` (auto GPU layers,
-tensor-split, and context targeting ~85-90% VRAM) — if that is all you need,
+tensor-split, context targeting ~85-90% VRAM, and some MoE tensor
+overrides) — if that is all you need,
 raw llama.cpp may be enough. llm-server goes further: it selects the backend
 (ik_llama.cpp is meaningfully faster on CUDA for many models, but its flag
 dialect differs), chooses KV-cache quantization and batch sizes from measured
@@ -139,7 +140,7 @@ computes those flags. They compose well: point llama-swap entries at
 |---|---:|---:|
 | Multi-GPU placement | `--fit` (recent) | automatic, PCIe/bandwidth-weighted |
 | Heterogeneous GPU split | `--fit` (recent) | automatic |
-| MoE expert placement | manual `-ot` | automatic with `--n-cpu-moe` fallback |
+| MoE expert placement | `--fit`/manual `-ot` (recent) | automatic, backend-aware, with `--n-cpu-moe` fallback |
 | Backend selection (ik_llama vs mainline vs Vulkan) | manual | automatic, dialect-aware |
 | KV-cache type / batch sizing | manual | probe-measured |
 | AI Tune (measured flag search) | no | yes, cached per model+hardware |
