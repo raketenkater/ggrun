@@ -1,0 +1,47 @@
+# llm-server + Open WebUI — a complete local chat stack.
+#
+#   cd docker && MODEL=/models/your-model.gguf docker compose up
+#   open http://localhost:3000   (Open WebUI, talks to llm-server's OpenAI API)
+#
+# Defaults to the CUDA image; for CPU/Vulkan swap `dockerfile` and drop the
+# `deploy.resources` GPU block (Vulkan: use `devices: [/dev/dri]` instead).
+
+services:
+  llm-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cuda
+    image: llm-server:cuda
+    # Model path inside the container, or an HF repo plus `--download`.
+    command: ["${MODEL:?set MODEL=/models/<file>.gguf or a HF repo}"]
+    ports:
+      - "8081:8081"
+    volumes:
+      - ${MODELS_DIR:-~/ai_models}:/models
+      - llm-cache:/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    environment:
+      # Point Open WebUI at llm-server's OpenAI-compatible endpoint.
+      - OPENAI_API_BASE_URL=http://llm-server:8081/v1
+      - OPENAI_API_KEY=sk-no-key-required
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      - llm-server
+    restart: unless-stopped
+
+volumes:
+  llm-cache:
+  open-webui:

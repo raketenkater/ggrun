@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1
+#
+# llm-server — Vulkan image (AMD, Intel, or NVIDIA via Vulkan).
+#   docker build -f docker/Dockerfile.vulkan -t llm-server:vulkan .
+#   # AMD/Intel:
+#   docker run --rm --device /dev/dri -p 8081:8081 -v ~/ai_models:/models llm-server:vulkan /models/model.gguf
+#   # NVIDIA via Vulkan (needs NVIDIA Container Toolkit):
+#   docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all -p 8081:8081 -v ~/ai_models:/models llm-server:vulkan /models/model.gguf
+ARG LLAMA_CPP_REF=d2462f8f7ac6d80070a587ffebf6cd73730f4280
+
+# ---- backend: build llama-server with Vulkan ----
+FROM debian:bookworm-slim AS backend
+ARG LLAMA_CPP_REF
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake build-essential ca-certificates \
+        libvulkan-dev glslc glslang-tools \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init llama.cpp \
+    && git -C llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git \
+    && git -C llama.cpp fetch --depth=1 origin "$LLAMA_CPP_REF" \
+    && git -C llama.cpp checkout --detach FETCH_HEAD
+RUN cmake -S llama.cpp -B llama.cpp/build \
+        -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_VULKAN=ON \
+    && cmake --build llama.cpp/build --config Release -j "$(nproc)" -t llama-server
+
+# ---- launcher: build the static Go binary ----
+FROM golang:1.24-bookworm AS gobuild
+ARG LLM_VERSION=
+WORKDIR /src/go
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/llm-server/pkg/update.currentVersion=$LLM_VERSION}" \
+      -o /out/llm-server ./cmd/llm-server
+
+# ---- runtime (Vulkan loader + Mesa drivers for AMD/Intel) ----
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ca-certificates libgomp1 curl \
+        libvulkan1 mesa-vulkan-drivers vulkan-tools \
+    && pip3 install --no-cache-dir --break-system-packages huggingface_hub tqdm \
+    && rm -rf /var/lib/apt/lists/*
+ENV LLM_APP_HOME=/opt/llm-server \
+    LLAMA_SERVER=/opt/llm-server/.bin/llama-server \
+    LLM_BACKEND=vulkan \
+    LLM_MODEL_DIR=/models \
+    LLM_CACHE_DIR=/cache \
+    LLM_HOST=0.0.0.0 \
+    LLM_PORT=8081 \
+    PATH=/opt/llm-server/.bin:$PATH
+COPY --from=gobuild /out/llm-server            /opt/llm-server/.bin/llm-server
+COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/llm-server/.bin/llama-server
+COPY tools/gguf/parse_gguf.py                  /opt/llm-server/.bin/parse_gguf.py
+COPY tools/download/download_any_gguf.py       /opt/llm-server/.bin/download_any_gguf.py
+COPY tools/models/model_index.py               /opt/llm-server/.bin/model_index.py
+RUN mkdir -p /models /cache
+EXPOSE 8081
+ENTRYPOINT ["llm-server"]

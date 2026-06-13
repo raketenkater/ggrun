@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+#
+# llm-server — CPU image. No GPU required.
+#   docker build -f docker/Dockerfile.cpu -t llm-server:cpu .
+#   docker run --rm -p 8081:8081 -v ~/ai_models:/models llm-server:cpu /models/model.gguf
+#
+# Pinned to the same llama.cpp commit as the release bundles for reproducibility.
+ARG LLAMA_CPP_REF=d2462f8f7ac6d80070a587ffebf6cd73730f4280
+
+# ---- backend: build a static llama-server (CPU) ----
+FROM debian:bookworm-slim AS backend
+ARG LLAMA_CPP_REF
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init llama.cpp \
+    && git -C llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git \
+    && git -C llama.cpp fetch --depth=1 origin "$LLAMA_CPP_REF" \
+    && git -C llama.cpp checkout --detach FETCH_HEAD
+RUN cmake -S llama.cpp -B llama.cpp/build \
+        -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build llama.cpp/build --config Release -j "$(nproc)" -t llama-server
+
+# ---- launcher: build the static Go binary ----
+FROM golang:1.24-bookworm AS gobuild
+ARG LLM_VERSION=
+WORKDIR /src/go
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/llm-server/pkg/update.currentVersion=$LLM_VERSION}" \
+      -o /out/llm-server ./cmd/llm-server
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ca-certificates libgomp1 curl \
+    && pip3 install --no-cache-dir --break-system-packages huggingface_hub tqdm \
+    && rm -rf /var/lib/apt/lists/*
+ENV LLM_APP_HOME=/opt/llm-server \
+    LLAMA_SERVER=/opt/llm-server/.bin/llama-server \
+    LLM_MODEL_DIR=/models \
+    LLM_CACHE_DIR=/cache \
+    LLM_HOST=0.0.0.0 \
+    LLM_PORT=8081 \
+    PATH=/opt/llm-server/.bin:$PATH
+COPY --from=gobuild /out/llm-server            /opt/llm-server/.bin/llm-server
+COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/llm-server/.bin/llama-server
+COPY tools/gguf/parse_gguf.py                  /opt/llm-server/.bin/parse_gguf.py
+COPY tools/download/download_any_gguf.py       /opt/llm-server/.bin/download_any_gguf.py
+COPY tools/models/model_index.py               /opt/llm-server/.bin/model_index.py
+RUN mkdir -p /models /cache
+EXPOSE 8081
+# Pass a model path or HF repo as the container command, e.g. `/models/m.gguf` or `repo/name --download`.
+ENTRYPOINT ["llm-server"]

@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# llm-server — NVIDIA CUDA image. Requires the NVIDIA Container Toolkit on the host.
+#   docker build -f docker/Dockerfile.cuda -t llm-server:cuda .
+#   docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models llm-server:cuda /models/model.gguf
+#
+# Uses mainline llama.cpp with CUDA. (ik_llama.cpp is the source-build default on
+# bare metal; the container ships the portable mainline CUDA backend.)
+ARG LLAMA_CPP_REF=d2462f8f7ac6d80070a587ffebf6cd73730f4280
+ARG CUDA_IMAGE=12.4.1
+# Build for common consumer + datacenter archs (Ampere/Ada/Hopper). Override for others.
+ARG CUDA_ARCHITECTURES=75;80;86;89;90
+
+# ---- backend: build llama-server with CUDA ----
+FROM nvidia/cuda:${CUDA_IMAGE}-devel-ubuntu22.04 AS backend
+ARG LLAMA_CPP_REF
+ARG CUDA_ARCHITECTURES
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init llama.cpp \
+    && git -C llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git \
+    && git -C llama.cpp fetch --depth=1 origin "$LLAMA_CPP_REF" \
+    && git -C llama.cpp checkout --detach FETCH_HEAD
+RUN cmake -S llama.cpp -B llama.cpp/build \
+        -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
+    && cmake --build llama.cpp/build --config Release -j "$(nproc)" -t llama-server
+
+# ---- launcher: build the static Go binary ----
+FROM golang:1.24-bookworm AS gobuild
+ARG LLM_VERSION=
+WORKDIR /src/go
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/llm-server/pkg/update.currentVersion=$LLM_VERSION}" \
+      -o /out/llm-server ./cmd/llm-server
+
+# ---- runtime (CUDA runtime libs from the base image) ----
+FROM nvidia/cuda:${CUDA_IMAGE}-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ca-certificates libgomp1 curl \
+    && pip3 install --no-cache-dir huggingface_hub tqdm \
+    && rm -rf /var/lib/apt/lists/*
+ENV LLM_APP_HOME=/opt/llm-server \
+    LLAMA_SERVER=/opt/llm-server/.bin/llama-server \
+    LLM_MODEL_DIR=/models \
+    LLM_CACHE_DIR=/cache \
+    LLM_HOST=0.0.0.0 \
+    LLM_PORT=8081 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    PATH=/opt/llm-server/.bin:$PATH
+COPY --from=gobuild /out/llm-server            /opt/llm-server/.bin/llm-server
+COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/llm-server/.bin/llama-server
+COPY tools/gguf/parse_gguf.py                  /opt/llm-server/.bin/parse_gguf.py
+COPY tools/download/download_any_gguf.py       /opt/llm-server/.bin/download_any_gguf.py
+COPY tools/models/model_index.py               /opt/llm-server/.bin/model_index.py
+RUN mkdir -p /models /cache
+EXPOSE 8081
+ENTRYPOINT ["llm-server"]
