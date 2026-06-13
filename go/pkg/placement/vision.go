@@ -95,7 +95,7 @@ func normalize(s string) string {
 }
 
 // validateMMProj checks that an mmproj GGUF file is valid and compatible with the text model.
-// Matches Bash behavior: checks arch == "clip", file completeness, and name/basename overlap.
+// Validates the projector: arch == "clip", file completeness, and name/basename overlap.
 func validateMMProj(path, textName, textBasename string) error {
 	// Allow bypass for advanced users
 	if os.Getenv("LLM_SERVER_SKIP_MMPROJ_CHECK") == "1" {

@@ -38,7 +38,7 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 	}
 	content := string(data)
 
-	// Parse simple key=value format from bash cache files
+	// Parse the legacy key=value cache format
 	entry := &CacheEntry{
 		BatchSize:  1024,
 		UBatchSize: 512,
