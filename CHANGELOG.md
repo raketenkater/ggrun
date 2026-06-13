@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (v3.0.1 candidates)
+## v3.0.1 — 2026-06-13
 
 - **Community tune pool.** When a model has no local AI-Tune cache, the
   launcher now checks a shared pool (one HTTPS GET keyed by
@@ -20,6 +20,13 @@
   working-set limit), macOS backends are tagged `metal`, and CUDA/Vulkan
   device-routing flags are no longer emitted for them. Pending validation on
   real Apple hardware.
+- **Native Windows** — PowerShell installer (`install.ps1`), Windows process
+  and signal handling, CUDA backend via official llama.cpp prebuilts or a local
+  build.
+- **Benchmarked against llama.cpp `--fit`** — on a 3090 Ti + 4070 + 3060 rig at
+  32k context, v3 default placement beat upstream auto-fit on every model;
+  driving the same master binary the win held, so it is placement, not just
+  backend choice. See `docs/performance.md`.
 - **Repositioned README and repo metadata** for discoverability: pain-first
   intro, honest comparison vs raw llama.cpp `--fit` / Ollama / llama-swap,
   benchmark methodology statement, release-asset install path.
