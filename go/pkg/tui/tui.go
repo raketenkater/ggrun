@@ -45,6 +45,7 @@ const (
 	ScreenBackend
 	ScreenFirstRun
 	ScreenRecommended
+	ScreenChoice
 )
 
 // Model is the Bubble Tea model.
@@ -89,6 +90,20 @@ type Model struct {
 	// Inputs
 	input     textinput.Model
 	inputMode string
+
+	// Settings screen (arrow-navigable list of all config options)
+	settingsCfg    *config.Config
+	settingsCursor int
+
+	// Advanced (per-launch) config screen cursor
+	cfgCursor int
+
+	// Generic arrow-select screen
+	choiceTitle   string
+	choiceOptions []string
+	choiceCursor  int
+	choiceApply   func(*Model, string)
+	choiceReturn  Screen
 
 	// Launch request (set when user chooses to launch)
 	launchRequest *LaunchRequest
@@ -199,6 +214,8 @@ func newMainList(models []ModelItem) list.Model {
 	// Minimal action items
 	items = append(items, mainItem{title: "d. Download model", desc: "Get from Hugging Face", isAction: true, action: "download"})
 	items = append(items, mainItem{title: "m. Model directory", desc: "Change search path", isAction: true, action: "modeldir"})
+	items = append(items, mainItem{title: "b. Backend", desc: "Switch llama / ik_llama", isAction: true, action: "backend"})
+	items = append(items, mainItem{title: "s. Settings", desc: "All options (arrow keys)", isAction: true, action: "settings"})
 	items = append(items, mainItem{title: "q. Quit", desc: "Exit", isAction: true, action: "quit"})
 
 	l := list.New(items, mainItemDelegate{}, 40, 20)
@@ -259,6 +276,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "esc":
+			if m.screen == ScreenChoice {
+				m.screen = m.choiceReturn
+				return m, nil
+			}
+			if m.inputMode == "setting" {
+				m.inputMode = ""
+				return m, nil
+			}
 			if m.screen != ScreenMain {
 				m.screen = ScreenMain
 				m.message = ""
@@ -282,7 +307,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateFirstRun(msg)
 	case ScreenRecommended:
 		return m.updateRecommended(msg)
-	case ScreenSettings, ScreenDownload, ScreenBackend:
+	case ScreenSettings:
+		return m.updateSettings(msg)
+	case ScreenChoice:
+		return m.updateChoice(msg)
+	case ScreenDownload, ScreenBackend:
 		return m.updateInputScreen(msg)
 	}
 
@@ -322,24 +351,18 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.SetValue(m.modelDir)
 					m.input.Placeholder = "Path to model directory"
 					m.input.Focus()
+				case "backend":
+					m.openBackendChoice(ScreenMain)
+				case "settings":
+					m.openSettings()
 				case "quit":
 					return m, tea.Quit
 				}
 			}
 		case "s", "S":
-			// Hidden settings shortcut
-			m.screen = ScreenSettings
-			m.inputMode = "settings"
-			m.input.SetValue("")
-			m.input.Placeholder = "Press Enter to open in $EDITOR"
-			m.input.Focus()
+			m.openSettings()
 		case "b", "B":
-			// Hidden backend shortcut
-			m.screen = ScreenBackend
-			m.inputMode = "backend"
-			m.input.SetValue(m.backend)
-			m.input.Placeholder = "llama or ik_llama"
-			m.input.Focus()
+			m.openBackendChoice(ScreenMain)
 		}
 	}
 
@@ -359,9 +382,105 @@ func (m Model) updateLaunchPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
 			m.messageType = "info"
 		case "c", "C":
+			m.cfgCursor = 0
 			m.screen = ScreenModelConfig
 			return m, nil
 		}
+	}
+	return m, nil
+}
+
+// cfgRows returns the ordered focusable rows of the Advanced config screen.
+func (m Model) cfgRows() []string {
+	rows := []string{"context", "parallel", "kv", "tuned", "aitune"}
+	if m.aitune {
+		rows = append(rows, "rounds")
+	}
+	return append(rows, "vision", "benchmark", "keepalive", "launch", "dryrun")
+}
+
+func (m *Model) openCfgInput(mode, val, placeholder string) {
+	m.inputMode = mode
+	m.input.SetValue(val)
+	m.input.Placeholder = placeholder
+	m.input.Focus()
+}
+
+func (m *Model) setCtx(val string) {
+	val = strings.TrimSpace(val)
+	switch val {
+	case "", "fit":
+		m.ctxMode = "fit"
+		m.ctxSize = "fit"
+	case "max":
+		m.ctxMode = "max"
+		m.ctxSize = "max"
+	default:
+		m.ctxMode = "manual"
+		m.ctxSize = val
+	}
+}
+
+// cycleCfgRow changes the focused Advanced-config row with ←/→ (dir -1/+1).
+func (m *Model) cycleCfgRow(row string, dir int) {
+	switch row {
+	case "kv":
+		order := []string{"auto", "gpu", "cpu"}
+		if dir < 0 {
+			m.kvPlacement = prevOption(order, m.kvPlacement)
+		} else {
+			m.kvPlacement = nextOption(order, m.kvPlacement)
+		}
+	case "context":
+		order := []string{"fit", "max"}
+		cur := "fit"
+		if m.ctxMode == "max" {
+			cur = "max"
+		}
+		if dir < 0 {
+			m.setCtx(prevOption(order, cur))
+		} else {
+			m.setCtx(nextOption(order, cur))
+		}
+	case "aitune":
+		m.aitune = !m.aitune
+	case "vision":
+		m.vision = !m.vision
+	case "benchmark":
+		m.benchmark = !m.benchmark
+	case "keepalive":
+		m.keepalive = !m.keepalive
+	}
+}
+
+// activateCfgRow handles Enter on the focused Advanced-config row.
+func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
+	switch row {
+	case "context":
+		m.openCfgInput("ctx", m.ctxSize, "fit, max, or token count")
+	case "parallel":
+		m.openCfgInput("parallel", m.parallel, "Parallel slots (blank = let placement decide)")
+	case "kv":
+		m.cycleCfgRow("kv", 1)
+	case "tuned":
+		m.tunedConfigs = tune.ListTunedConfigs(m.cacheDir, m.models[m.selectedModel].Name, m.backendTag(), false)
+		m.tunedIndex = -1
+		m.screen = ScreenTunedPicker
+	case "rounds":
+		m.openCfgInput("aitune", strconv.Itoa(m.aituneRounds), "AI tune rounds (1-30, default 8)")
+	case "aitune":
+		m.aitune = !m.aitune
+	case "vision":
+		m.vision = !m.vision
+	case "benchmark":
+		m.benchmark = !m.benchmark
+	case "keepalive":
+		m.keepalive = !m.keepalive
+	case "launch":
+		m.screen = ScreenPrelaunch
+	case "dryrun":
+		m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
+		m.messageType = "info"
 	}
 	return m, nil
 }
@@ -372,54 +491,7 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "c", "C":
-			m.inputMode = "ctx"
-			m.input.SetValue(m.ctxSize)
-			m.input.Placeholder = "fit, max, or token count"
-			m.input.Focus()
-		case "p", "P":
-			m.inputMode = "parallel"
-			m.input.SetValue(m.parallel)
-			m.input.Placeholder = "Parallel slots (blank = let placement decide)"
-			m.input.Focus()
-		case "k", "K":
-			if m.kvPlacement == "auto" {
-				m.kvPlacement = "gpu"
-			} else if m.kvPlacement == "gpu" {
-				m.kvPlacement = "cpu"
-			} else {
-				m.kvPlacement = "auto"
-			}
-		case "a", "A":
-			m.aitune = !m.aitune
-		case "r", "R":
-			if m.aitune {
-				m.inputMode = "aitune"
-				m.input.SetValue(strconv.Itoa(m.aituneRounds))
-				m.input.Placeholder = "AI tune rounds (1-30, default 8)"
-				m.input.Focus()
-			}
-		case "b", "B":
-			m.benchmark = !m.benchmark
-		case "v", "V":
-			m.vision = !m.vision
-		case "l", "L":
-			m.screen = ScreenPrelaunch
-			return m, nil
-		case "d", "D":
-			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
-			m.messageType = "info"
-		case "t", "T":
-			m.tunedConfigs = tune.ListTunedConfigs(m.cacheDir, m.models[m.selectedModel].Name, m.backendTag(), false)
-			m.tunedIndex = -1
-			m.screen = ScreenTunedPicker
-			return m, nil
-		}
-	}
-
+	// Free-text edit mode (context / parallel / AI-tune rounds).
 	if m.inputMode != "" {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -427,18 +499,11 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 			val := m.input.Value()
 			switch m.inputMode {
 			case "ctx":
-				m.ctxSize = val
-				m.ctxMode = "manual"
-				if val == "fit" || val == "" {
-					m.ctxMode = "fit"
-					m.ctxSize = "fit"
-				} else if val == "max" {
-					m.ctxMode = "max"
-				}
+				m.setCtx(val)
 			case "parallel":
-				m.parallel = val
+				m.parallel = strings.TrimSpace(val)
 			case "aitune":
-				if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= 30 {
+				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n >= 1 && n <= 30 {
 					m.aituneRounds = n
 				}
 			}
@@ -447,6 +512,59 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	rows := m.cfgRows()
+	if m.cfgCursor >= len(rows) {
+		m.cfgCursor = len(rows) - 1
+	}
+	switch keyMsg.String() {
+	// Arrow-key navigation (works alongside the letter hotkeys below).
+	case "up":
+		if m.cfgCursor > 0 {
+			m.cfgCursor--
+		}
+	case "down":
+		if m.cfgCursor < len(rows)-1 {
+			m.cfgCursor++
+		}
+	case "left":
+		m.cycleCfgRow(rows[m.cfgCursor], -1)
+	case "right":
+		m.cycleCfgRow(rows[m.cfgCursor], 1)
+	case "enter":
+		return m.activateCfgRow(rows[m.cfgCursor])
+	// Letter hotkeys.
+	case "c", "C":
+		m.openCfgInput("ctx", m.ctxSize, "fit, max, or token count")
+	case "p", "P":
+		m.openCfgInput("parallel", m.parallel, "Parallel slots (blank = let placement decide)")
+	case "K":
+		m.cycleCfgRow("kv", 1)
+	case "a", "A":
+		m.aitune = !m.aitune
+	case "r", "R":
+		if m.aitune {
+			m.openCfgInput("aitune", strconv.Itoa(m.aituneRounds), "AI tune rounds (1-30, default 8)")
+		}
+	case "b", "B":
+		m.benchmark = !m.benchmark
+	case "v", "V":
+		m.vision = !m.vision
+	case "k":
+		m.keepalive = !m.keepalive
+	case "l", "L":
+		m.screen = ScreenPrelaunch
+	case "d", "D":
+		m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
+		m.messageType = "info"
+	case "t", "T":
+		m.tunedConfigs = tune.ListTunedConfigs(m.cacheDir, m.models[m.selectedModel].Name, m.backendTag(), false)
+		m.tunedIndex = -1
+		m.screen = ScreenTunedPicker
+	}
 	return m, nil
 }
 
@@ -483,16 +601,6 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
 		val := m.input.Value()
 		switch m.inputMode {
-		case "settings":
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "nano"
-			}
-			cmd := exec.Command(editor, m.settingsPath)
-			cmd.Stdin = os.Stdin
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Run()
 		case "download":
 			val = strings.TrimSpace(val)
 			if val != "" {
@@ -501,15 +609,19 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.message = "Enter a Hugging Face GGUF repository"
 			m.messageType = "warning"
-		case "backend":
-			if val == "llama" || val == "ik_llama" {
-				m.backend = val
-			}
 		case "modeldir":
+			val = strings.TrimSpace(val)
 			if val != "" {
 				m.modelDir = val
 				m.models = discoverModels(m.modelDir)
-				m.mainList = newMainList(m.models)
+				m.refreshTunedCounts()
+				if err := persistConfig(func(c *config.Config) { c.ModelDir = val }); err != nil {
+					m.message = fmt.Sprintf("Using %s for this session — could not save config: %v", val, err)
+					m.messageType = "warning"
+				} else {
+					m.message = fmt.Sprintf("Model directory saved: %s (%d models)", val, len(m.models))
+					m.messageType = "info"
+				}
 			}
 		}
 		m.inputMode = ""
@@ -536,7 +648,11 @@ func (m Model) View() string {
 		return m.viewTunedPicker()
 	case ScreenRecommended:
 		return m.viewRecommended()
-	case ScreenSettings, ScreenDownload, ScreenBackend:
+	case ScreenSettings:
+		return m.viewSettings()
+	case ScreenChoice:
+		return m.viewChoice()
+	case ScreenDownload, ScreenBackend:
 		return m.viewInputScreen()
 	default:
 		return m.viewMain()
@@ -644,15 +760,28 @@ func (m Model) viewModelConfig() string {
 	model := m.models[m.selectedModel]
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ Advanced: %s ═══", model.Name)) + "\n")
+	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ Advanced: %s ═══", model.Name)) + "\n\n")
+
+	rows := m.cfgRows()
+	focused := ""
+	if m.cfgCursor < len(rows) {
+		focused = rows[m.cfgCursor]
+	}
+	line := func(key, label, value string) {
+		text := fmt.Sprintf("%-24s %s", label, value)
+		if key == focused {
+			b.WriteString(selectedStyle.Render("▸ "+text) + "\n")
+		} else {
+			b.WriteString("  " + text + "\n")
+		}
+	}
 
 	ctxLabel := m.ctxSize
 	if m.ctxMode == "fit" {
 		ctxLabel = "fit"
 	}
-	var ctxHint string
 	if model.FitCtx > 0 || model.MaxCtx > 0 {
-		ctxHint = " ("
+		ctxHint := " ("
 		if model.FitCtx > 0 {
 			ctxHint += fmt.Sprintf("fits ~%d", model.FitCtx)
 		}
@@ -662,15 +791,15 @@ func (m Model) viewModelConfig() string {
 		if model.MaxCtx > 0 {
 			ctxHint += fmt.Sprintf("train max %d", model.MaxCtx)
 		}
-		ctxHint += ")"
+		ctxLabel += ctxHint + ")"
 	}
-	b.WriteString(fmt.Sprintf("  [c] Context size       %s%s\n", ctxLabel, ctxHint))
-	b.WriteString(fmt.Sprintf("  [p] Parallel slots     %s\n", func() string {
-		if m.parallel == "" {
-			return "default (4)"
-		}
-		return m.parallel
-	}()))
+	line("context", "[c] Context size", ctxLabel)
+
+	parallelLabel := m.parallel
+	if parallelLabel == "" {
+		parallelLabel = "default (4)"
+	}
+	line("parallel", "[p] Parallel slots", parallelLabel)
 
 	kvLabel := "auto (GPU KV first)"
 	if m.kvPlacement == "gpu" {
@@ -678,30 +807,38 @@ func (m Model) viewModelConfig() string {
 	} else if m.kvPlacement == "cpu" {
 		kvLabel = "cpu (more GPU experts for short chat)"
 	}
-	b.WriteString(fmt.Sprintf("  [K] KV placement       %s\n", kvLabel))
+	line("kv", "[K] KV placement", kvLabel)
+
 	tuneLabel := "auto"
 	if m.tunePath != "" {
 		tuneLabel = filepath.Base(m.tunePath)
 	}
-	b.WriteString(fmt.Sprintf("  [t] Tuned config       %s\n", tuneLabel))
-	b.WriteString(fmt.Sprintf("  [a] AI tune            %s\n", boolLabel(m.aitune)))
+	line("tuned", "[t] Tuned config", tuneLabel)
+	line("aitune", "[a] AI tune", boolLabel(m.aitune))
 	if m.aitune {
-		b.WriteString(fmt.Sprintf("  [r] AI tune rounds     %d\n", m.aituneRounds))
+		line("rounds", "[r] AI tune rounds", strconv.Itoa(m.aituneRounds))
 	}
-	b.WriteString(fmt.Sprintf("  [v] Vision (mmproj)    %s\n", boolLabel(m.vision)))
-	b.WriteString(fmt.Sprintf("  [b] Benchmark mode     %s\n", boolLabel(m.benchmark)))
-	b.WriteString(fmt.Sprintf("  [k] Keep-alive restart %s\n", boolLabel(m.keepalive)))
+	line("vision", "[v] Vision (mmproj)", boolLabel(m.vision))
+	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
+	line("keepalive", "[k] Keep-alive restart", boolLabel(m.keepalive))
 	b.WriteString("\n")
-	b.WriteString("  [L] Launch    [D] Dry run    [Esc] Back\n")
+	line("launch", "[L] Launch", "")
+	line("dryrun", "[D] Dry run", "")
+	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · ←/→ change · Enter select/launch · Esc back"))
 
 	if m.inputMode != "" {
-		b.WriteString("\n")
-		b.WriteString(m.input.View())
+		b.WriteString("\n\n  " + m.input.View())
 	}
-
 	if m.message != "" {
-		b.WriteString("\n")
-		b.WriteString(highlightStyle.Render(m.message))
+		b.WriteString("\n  ")
+		switch m.messageType {
+		case "error":
+			b.WriteString(errorStyle.Render(m.message))
+		case "warning":
+			b.WriteString(warningStyle.Render(m.message))
+		default:
+			b.WriteString(highlightStyle.Render(m.message))
+		}
 	}
 
 	return b.String()
@@ -912,12 +1049,8 @@ func (m Model) viewInputScreen() string {
 	var b strings.Builder
 	var title string
 	switch m.inputMode {
-	case "settings":
-		title = "Settings"
 	case "download":
 		title = "Download Model"
-	case "backend":
-		title = "Backend Selection"
 	case "modeldir":
 		title = "Model Directory"
 	default:
@@ -926,6 +1059,17 @@ func (m Model) viewInputScreen() string {
 	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ %s ═══", title)) + "\n\n")
 	b.WriteString(m.input.View())
 	b.WriteString("\n\n  Press Enter to confirm, Esc to cancel")
+	if m.message != "" {
+		b.WriteString("\n\n  ")
+		switch m.messageType {
+		case "error":
+			b.WriteString(errorStyle.Render(m.message))
+		case "warning":
+			b.WriteString(warningStyle.Render(m.message))
+		default:
+			b.WriteString(highlightStyle.Render(m.message))
+		}
+	}
 	return b.String()
 }
 
@@ -1192,6 +1336,327 @@ func (m Model) backendTag() string {
 		return "ik"
 	}
 	return "llama"
+}
+
+// persistConfig loads the current config, applies mutate, and writes it back to
+// the canonical config file, preserving all other settings so GUI changes
+// survive across sessions.
+func persistConfig(mutate func(*config.Config)) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	mutate(cfg)
+	return cfg.Save()
+}
+
+// refreshTunedCounts recomputes per-model tuned config counts for the current
+// backend and rebuilds the main list so the counts reflect the active backend.
+func (m *Model) refreshTunedCounts() {
+	tag := m.backendTag()
+	for i := range m.models {
+		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, tag)
+	}
+	m.mainList = newMainList(m.models)
+}
+
+// settingRow describes one editable config setting on the Settings screen.
+// kind is "enum" (pick from options), "bool" (toggle), or "text" (free input).
+type settingRow struct {
+	label   string
+	kind    string
+	options []string
+	get     func(*config.Config) string
+	set     func(*config.Config, string)
+}
+
+// settingRows returns every setting shown on the Settings screen, in order.
+func settingRows() []settingRow {
+	atoiSet := func(assign func(*config.Config, int)) func(*config.Config, string) {
+		return func(c *config.Config, v string) {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				assign(c, n)
+			}
+		}
+	}
+	return []settingRow{
+		{label: "Backend", kind: "enum", options: []string{"ik_llama", "llama"},
+			get: func(c *config.Config) string { return c.Backend },
+			set: func(c *config.Config, v string) { c.Backend = v }},
+		{label: "Model directory", kind: "text",
+			get: func(c *config.Config) string { return c.ModelDir },
+			set: func(c *config.Config, v string) { c.ModelDir = v }},
+		{label: "Context", kind: "enum", options: []string{"fit", "max"},
+			get: func(c *config.Config) string { return c.CtxValue() },
+			set: func(c *config.Config, v string) {
+				if v == "max" {
+					c.CtxMode = "max"
+				} else {
+					c.CtxMode = "fit"
+				}
+				c.CtxSize = 0
+			}},
+		{label: "KV placement", kind: "enum", options: []string{"auto", "gpu", "cpu"},
+			get: func(c *config.Config) string { return c.KVPlacement },
+			set: func(c *config.Config, v string) { c.KVPlacement = v }},
+		{label: "KV quality", kind: "enum", options: []string{"low", "mid", "high"},
+			get: func(c *config.Config) string { return c.KVQuality },
+			set: func(c *config.Config, v string) { c.KVQuality = v }},
+		{label: "Speculative", kind: "enum",
+			options: []string{"off", "auto", "draft", "eagle3", "ngram", "ngram-mod", "ngram-k4v", "mtp"},
+			get:     func(c *config.Config) string { return c.Spec },
+			set:     func(c *config.Config, v string) { c.Spec = v }},
+		{label: "Vision", kind: "bool",
+			get: func(c *config.Config) string { return boolLabel(c.Vision) },
+			set: func(c *config.Config, v string) { c.Vision = v == "on" }},
+		{label: "Port", kind: "text",
+			get: func(c *config.Config) string { return strconv.Itoa(c.Port) },
+			set: atoiSet(func(c *config.Config, n int) { c.Port = n })},
+		{label: "Host", kind: "text",
+			get: func(c *config.Config) string { return c.Host },
+			set: func(c *config.Config, v string) { c.Host = strings.TrimSpace(v) }},
+		{label: "Parallel", kind: "text",
+			get: func(c *config.Config) string { return strconv.Itoa(c.Parallel) },
+			set: atoiSet(func(c *config.Config, n int) { c.Parallel = n })},
+		{label: "AI-tune rounds", kind: "text",
+			get: func(c *config.Config) string { return strconv.Itoa(c.TuneRounds) },
+			set: atoiSet(func(c *config.Config, n int) { c.TuneRounds = n })},
+	}
+}
+
+// applySetting mutates the in-memory config, persists it to disk, and applies
+// any side effects (re-scan models, refresh tuned counts) for the given row.
+func (m *Model) applySetting(row settingRow, val string) {
+	row.set(m.settingsCfg, val)
+	if err := m.settingsCfg.Save(); err != nil {
+		m.message = fmt.Sprintf("%s set to %s for this session — save failed: %v", row.label, val, err)
+		m.messageType = "warning"
+	} else {
+		m.message = fmt.Sprintf("Saved: %s = %s", row.label, val)
+		m.messageType = "info"
+	}
+	switch row.label {
+	case "Backend":
+		m.backend = val
+		m.refreshTunedCounts()
+	case "Model directory":
+		m.modelDir = val
+		m.models = discoverModels(val)
+		m.refreshTunedCounts()
+		if m.messageType != "warning" {
+			m.message = fmt.Sprintf("Saved: Model directory = %s (%d models)", val, len(m.models))
+		}
+	}
+}
+
+// openChoice configures and shows the generic arrow-select screen.
+func (m *Model) openChoice(title string, options []string, current string, ret Screen, apply func(*Model, string)) {
+	m.choiceTitle = title
+	m.choiceOptions = options
+	m.choiceCursor = indexOf(options, current)
+	if m.choiceCursor < 0 {
+		m.choiceCursor = 0
+	}
+	m.choiceApply = apply
+	m.choiceReturn = ret
+	m.screen = ScreenChoice
+}
+
+// openSettings loads the current config and shows the Settings screen.
+func (m *Model) openSettings() {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		cfg = config.Defaults()
+	}
+	m.settingsCfg = cfg
+	m.settingsCursor = 0
+	m.inputMode = ""
+	m.screen = ScreenSettings
+}
+
+// openBackendChoice shows the arrow-select backend chooser, persisting the
+// choice and returning to ret afterwards.
+func (m *Model) openBackendChoice(ret Screen) {
+	m.openChoice("Backend", []string{"ik_llama", "llama"}, m.backend, ret, func(mm *Model, v string) {
+		mm.backend = v
+		if err := persistConfig(func(c *config.Config) { c.Backend = v }); err != nil {
+			mm.message = fmt.Sprintf("Backend set to %s for this session — save failed: %v", v, err)
+			mm.messageType = "warning"
+		} else {
+			mm.message = "Backend saved: " + v
+			mm.messageType = "info"
+		}
+		mm.refreshTunedCounts()
+	})
+}
+
+func indexOf(opts []string, v string) int {
+	for i, o := range opts {
+		if o == v {
+			return i
+		}
+	}
+	return -1
+}
+
+func prevOption(opts []string, v string) string {
+	i := indexOf(opts, v)
+	if i <= 0 {
+		return opts[len(opts)-1]
+	}
+	return opts[i-1]
+}
+
+func nextOption(opts []string, v string) string {
+	i := indexOf(opts, v)
+	if i < 0 || i >= len(opts)-1 {
+		return opts[0]
+	}
+	return opts[i+1]
+}
+
+func (m Model) updateChoice(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "up", "k":
+			if m.choiceCursor > 0 {
+				m.choiceCursor--
+			}
+		case "down", "j":
+			if m.choiceCursor < len(m.choiceOptions)-1 {
+				m.choiceCursor++
+			}
+		case "enter", " ":
+			if m.choiceApply != nil && m.choiceCursor < len(m.choiceOptions) {
+				m.choiceApply(&m, m.choiceOptions[m.choiceCursor])
+			}
+			m.screen = m.choiceReturn
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	rows := settingRows()
+
+	// Free-text edit mode for "text" settings.
+	if m.inputMode == "setting" {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
+			val := strings.TrimSpace(m.input.Value())
+			if val != "" && m.settingsCursor < len(rows) {
+				m.applySetting(rows[m.settingsCursor], val)
+			}
+			m.inputMode = ""
+		}
+		return m, cmd
+	}
+
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	row := rows[m.settingsCursor]
+	switch keyMsg.String() {
+	case "up", "k":
+		if m.settingsCursor > 0 {
+			m.settingsCursor--
+		}
+	case "down", "j":
+		if m.settingsCursor < len(rows)-1 {
+			m.settingsCursor++
+		}
+	case "enter":
+		switch row.kind {
+		case "enum":
+			m.openChoice(row.label, row.options, row.get(m.settingsCfg), ScreenSettings,
+				func(mm *Model, v string) { mm.applySetting(row, v) })
+		case "bool":
+			m.applySetting(row, toggleBool(row.get(m.settingsCfg)))
+		case "text":
+			m.inputMode = "setting"
+			m.input.SetValue(row.get(m.settingsCfg))
+			m.input.Placeholder = row.label
+			m.input.Focus()
+		}
+	case "right", "l":
+		if row.kind == "enum" {
+			m.applySetting(row, nextOption(row.options, row.get(m.settingsCfg)))
+		} else if row.kind == "bool" {
+			m.applySetting(row, toggleBool(row.get(m.settingsCfg)))
+		}
+	case "left", "h":
+		if row.kind == "enum" {
+			m.applySetting(row, prevOption(row.options, row.get(m.settingsCfg)))
+		} else if row.kind == "bool" {
+			m.applySetting(row, toggleBool(row.get(m.settingsCfg)))
+		}
+	case "e", "E":
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			editor = "nano"
+		}
+		c := exec.Command(editor, m.settingsPath)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		c.Run()
+		if cfg, err := config.Load(); err == nil {
+			m.settingsCfg = cfg
+		}
+	}
+	return m, nil
+}
+
+func toggleBool(cur string) string {
+	if cur == "on" {
+		return "off"
+	}
+	return "on"
+}
+
+func (m Model) viewChoice() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ %s ═══", m.choiceTitle)) + "\n\n")
+	for i, opt := range m.choiceOptions {
+		if i == m.choiceCursor {
+			b.WriteString("  " + selectedStyle.Render("> "+opt) + "\n")
+		} else {
+			b.WriteString("    " + opt + "\n")
+		}
+	}
+	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ select · Enter confirm · Esc cancel"))
+	return b.String()
+}
+
+func (m Model) viewSettings() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("═══ Settings ═══") + "\n\n")
+	rows := settingRows()
+	for i, row := range rows {
+		line := fmt.Sprintf("%-17s %s", row.label+":", row.get(m.settingsCfg))
+		if i == m.settingsCursor {
+			b.WriteString("  " + selectedStyle.Render("> "+line) + "\n")
+		} else {
+			b.WriteString("    " + line + "\n")
+		}
+	}
+	if m.inputMode == "setting" {
+		b.WriteString("\n  " + m.input.View() + "\n")
+	}
+	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · Enter/→ change · ←/→ cycle enums · [e] edit file · Esc back"))
+	b.WriteString("\n" + mutedStyle.Render("  config: "+m.settingsPath))
+	if m.message != "" {
+		b.WriteString("\n  ")
+		switch m.messageType {
+		case "error":
+			b.WriteString(errorStyle.Render(m.message))
+		case "warning":
+			b.WriteString(warningStyle.Render(m.message))
+		default:
+			b.WriteString(highlightStyle.Render(m.message))
+		}
+	}
+	return b.String()
 }
 
 func (m Model) buildLaunchRequest() *LaunchRequest {
