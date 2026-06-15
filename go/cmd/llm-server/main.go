@@ -921,18 +921,37 @@ func cmdGUI() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Cancel context on SIGINT/SIGTERM so the launcher cleans up the child
+	// Run the launcher in the background so the main goroutine can react to a
+	// second Ctrl+C (force quit) if graceful shutdown stalls.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
-	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
-		cancel()
-	}()
+	runErr := make(chan error, 1)
+	go func() { runErr <- launcher.Run(ctx) }()
 
-	if err := launcher.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	for {
+		select {
+		case err := <-runErr:
+			// A context-cancellation error is the expected result of shutdown.
+			if err != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case <-sigCh:
+			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
+			cancel()
+			// Escape hatch: don't get stuck if the child won't exit.
+			select {
+			case <-runErr:
+				return
+			case <-sigCh:
+				fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
+				os.Exit(1)
+			case <-time.After(20 * time.Second):
+				fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
+				os.Exit(1)
+			}
+		}
 	}
 }
 

@@ -64,6 +64,12 @@ func (l *Launcher) Run(ctx context.Context) error {
 
 	for {
 		if err := l.runOnce(ctx, binaryPath, restartCount); err != nil {
+			// Shutdown requested: the child was killed by context cancellation,
+			// not a crash. Exit immediately without fallback/restart churn.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			// Check for known failure types from stderr log
 			ft, msg := l.parseLoadFailure()
 			if l.OnFailure != nil {
@@ -183,6 +189,16 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 
 	deadline := time.Now().Add(l.HealthTimeout)
 	for time.Now().Before(deadline) {
+		// Honor shutdown promptly, even while the model is still loading.
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				killProcGroup(cmd.Process.Pid)
+			}
+			return ctx.Err()
+		default:
+		}
+
 		// Check if process died
 		if cmd.Process != nil {
 			if !procAlive(cmd.Process.Pid) {
