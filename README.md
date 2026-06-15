@@ -61,8 +61,7 @@ cd llm-server
 This creates a clean app home under `~/llm-server`:
 
 ```text
-llm-server       CLI launcher
-llm-server-gui   terminal GUI launcher
+llm-server       launcher (no arguments opens the terminal GUI)
 models/          GGUF models and downloaded vision projectors
 .bin/            Go binary, tools, and bundled backend when available
 .config/         local config loaded by the launcher
@@ -74,7 +73,7 @@ models/          GGUF models and downloaded vision projectors
 Use it with:
 
 ```bash
-~/llm-server/llm-server-gui
+~/llm-server/llm-server                       # interactive GUI
 ~/llm-server/llm-server <repo/name> --download
 ```
 
@@ -164,7 +163,7 @@ computes those flags. They compose well: point llama-swap entries at
 - Speculative decoding modes for MTP, EAGLE-3, validated draft models, and
   explicit ngram modes.
 - Startup update checks for interactive users, with rollback on failed updates.
-- Terminal UI via `llm-server-gui` or `llm-server gui`.
+- Terminal UI launched by running `llm-server` with no arguments (or `llm-server gui`).
 
 ## Quick Start
 
@@ -181,8 +180,8 @@ llm-server model.gguf --ai-tune
 # Print the backend command without launching
 llm-server model.gguf --dry-run
 
-# Run the terminal UI
-llm-server-gui
+# Run the terminal UI (no arguments)
+llm-server
 ```
 
 ## Usage

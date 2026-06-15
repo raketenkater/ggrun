@@ -43,9 +43,7 @@ done
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
 
 if [[ -x "$ROOT_DIR/go/llm-server" ]]; then
-    install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/bin/llm-server-go"
     install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/bin/llm-server"
-    install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/llm-server"
 fi
 if [[ -f "$ROOT_DIR/legacy/bash/llm-server" ]]; then
     install -m 0755 "$ROOT_DIR/legacy/bash/llm-server" "$PAYLOAD/llm-server-bash"
@@ -59,14 +57,6 @@ for spec in \
     dst="${spec##*:}"
     [[ -f "$ROOT_DIR/$src" ]] && install -m 0755 "$ROOT_DIR/$src" "$PAYLOAD/bin/$dst"
 done
-
-cat >"$PAYLOAD/bin/llm-server-gui" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-exec "$DIR/llm-server" gui "$@"
-EOF
-chmod 0755 "$PAYLOAD/bin/llm-server-gui"
 
 BIN_DIR="$(cd "$(dirname "$SERVER_BIN")" && pwd)"
 while IFS= read -r lib; do

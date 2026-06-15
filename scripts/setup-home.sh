@@ -74,15 +74,6 @@ if [[ ! -x "$APP_BIN/llm-server" ]]; then
     exit 1
 fi
 
-if [[ ! -x "$APP_BIN/llm-server-gui" ]]; then
-    cat >"$APP_BIN/llm-server-gui" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-exec "$DIR/llm-server" gui "$@"
-EOF
-    chmod 0755 "$APP_BIN/llm-server-gui"
-fi
 
 backend_bin=""
 if [[ -x "$APP_BIN/llama-server" ]]; then
@@ -129,31 +120,15 @@ if [[ -n "$backend_bin" ]]; then
     printf 'LLAMA_SERVER="%s"\n' "$backend_bin" >>"$APP_CONFIG/config"
 fi
 
-cat >"$APP_CONFIG/config.sh" <<EOF
-# $APP_NAME shell config. Sourced by .env.sh and wrapper commands.
-export LLM_APP_HOME="$APP_HOME"
-export LLM_MODEL_DIR="$APP_MODELS"
-export LLM_CACHE_DIR="$APP_CACHE"
-export LLM_LOG_DIR="$APP_LOGS"
-export LLM_BACKEND="$backend_config"
-EOF
-if [[ -n "$backend_bin" ]]; then
-    printf 'export LLAMA_SERVER="%s"\n' "$backend_bin" >>"$APP_CONFIG/config.sh"
-fi
-
 cat >"$APP_ENV" <<EOF
 # Source this to use $APP_NAME from any shell:
 #   source "$APP_ENV"
-if [[ -f "$APP_CONFIG/config.sh" ]]; then
-    source "$APP_CONFIG/config.sh"
-else
-    export LLM_APP_HOME="$APP_HOME"
-    export LLM_MODEL_DIR="$APP_MODELS"
-    export LLM_CACHE_DIR="$APP_CACHE"
-    export LLM_LOG_DIR="$APP_LOGS"
-    export LLM_BACKEND="$backend_config"
-    [[ -x "$APP_BIN/llama-server" ]] && export LLAMA_SERVER="$APP_BIN/llama-server"
-fi
+#
+# Only LLM_APP_HOME and PATH are exported. $APP_NAME reads model dir, backend,
+# cache, logs and the llama-server path from its config file
+# ($APP_CONFIG/config), so CLI/GUI edits take effect instead of being shadowed
+# by stale environment variables.
+export LLM_APP_HOME="$APP_HOME"
 export PATH="$APP_BIN:\$PATH"
 EOF
 
@@ -164,26 +139,19 @@ exec "$APP_BIN/llm-server" "\$@"
 EOF
 chmod 0755 "$APP_HOME/llm-server"
 
-cat >"$APP_HOME/llm-server-gui" <<EOF
-#!/usr/bin/env bash
-source "$APP_ENV"
-exec "$APP_BIN/llm-server" gui "\$@"
-EOF
-chmod 0755 "$APP_HOME/llm-server-gui"
-
 say ""
 say "╔════════════════════════════════════════════════════════════╗"
 say "║ llm-server is installed and ready                         ║"
 say "╚════════════════════════════════════════════════════════════╝"
 say "Backend:   ${backend_bin:-not installed}"
 say "CLI:       $APP_HOME/llm-server"
-say "GUI:       $APP_HOME/llm-server-gui"
+say "GUI:       $APP_HOME/llm-server   (no arguments opens the GUI)"
 say "Models:    $APP_MODELS"
 say "Config:    $APP_CONFIG/config"
 say "Logs:      $APP_LOGS"
 say ""
 say "Try now:"
-say "  \"$APP_HOME/llm-server-gui\""
+say "  \"$APP_HOME/llm-server\"            # interactive GUI"
 say "  \"$APP_HOME/llm-server\" detect"
 say "  \"$APP_HOME/llm-server\" <repo/name> --download"
 say "  \"$APP_HOME/llm-server\" \"$APP_MODELS/your-model.gguf\""

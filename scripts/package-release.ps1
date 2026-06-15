@@ -49,21 +49,13 @@ try {
         Copy-Item $_.FullName (Join-Path $bin $_.Name) -Force
     }
 
+    # Single launcher: `llm-server` with no args opens the GUI, so no separate
+    # llm-server-gui wrapper is shipped.
     Set-Content -Path (Join-Path $payload 'llm-server.cmd') -Encoding ASCII -Value @'
 @echo off
 set "LLM_APP_HOME=%~dp0"
 set "PATH=%~dp0bin;%PATH%"
 "%~dp0bin\llm-server.exe" %*
-'@
-    Set-Content -Path (Join-Path $payload 'llm-server-gui.cmd') -Encoding ASCII -Value @'
-@echo off
-set "LLM_APP_HOME=%~dp0"
-set "PATH=%~dp0bin;%PATH%"
-"%~dp0bin\llm-server.exe" gui %*
-'@
-    Set-Content -Path (Join-Path $bin 'llm-server-gui.cmd') -Encoding ASCII -Value @'
-@echo off
-"%~dp0llm-server.exe" gui %*
 '@
 
     $zip = Join-Path $OutDir $AssetName

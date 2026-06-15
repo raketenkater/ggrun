@@ -480,18 +480,6 @@ install_legacy_bash_shim() {
     fi
 }
 
-install_gui_wrapper() {
-    [[ -x "$INSTALL_DIR/llm-server" ]] || return 0
-    cat >"$INSTALL_DIR/llm-server-gui" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-exec "$DIR/llm-server" gui "$@"
-EOF
-    chmod 0755 "$INSTALL_DIR/llm-server-gui"
-    ok "Installed llm-server-gui wrapper"
-}
-
 install_release_bundle() {
     local platform asset url sums_url tmp archive payload_root found_backend=0
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
@@ -536,14 +524,18 @@ install_release_bundle() {
     payload_root="$(find "$tmp/payload" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     [[ -n "$payload_root" ]] || payload_root="$tmp/payload"
 
-    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-bash llm-server-go llm-server-gui parse_gguf.py model_index.py download_any_gguf.py; do
+    # llm-server-go is listed only for backward compatibility with pre-3.0.1
+    # bundles, which shipped the binary under that name. New bundles ship it as
+    # llm-server directly, and no llm-server-gui wrapper.
+    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-bash llm-server-go parse_gguf.py model_index.py download_any_gguf.py; do
         if install_payload_file "$payload_root/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         elif install_payload_file "$payload_root/bin/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         fi
     done
-    if [[ -x "$INSTALL_DIR/llm-server-go" ]]; then
+    # Old bundles need the -go binary promoted to the primary command.
+    if [[ ! -x "$INSTALL_DIR/llm-server" && -x "$INSTALL_DIR/llm-server-go" ]]; then
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
     fi
 
@@ -699,7 +691,6 @@ say "── Installing scripts to $INSTALL_DIR ──"
 
 if (( RELEASE_INSTALLED )); then
     ok "Scripts installed from release bundle"
-    install_gui_wrapper
 else
     ensure_source_repo
     FILES=("setup.sh" "setup-linux.sh" "setup-mac.sh")
@@ -710,24 +701,23 @@ else
     install_source_file "tools/models/model_index.py" "model_index.py" 0755 || warn "model_index.py not found in source; skipping"
     install_source_file "tools/download/download_any_gguf.py" "download_any_gguf.py" 0755 || warn "download_any_gguf.py not found in source; skipping"
     install_legacy_bash_shim
+    # Build/install the Go binary directly as the single `llm-server` command —
+    # no separate llm-server-go copy. `llm-server` with no args opens the GUI,
+    # so no llm-server-gui wrapper is needed either.
     if [[ -f "$SRC_DIR/go/go.mod" && "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]]; then
         say "── Building Go llm-server ──"
-        if build_go_binary "$INSTALL_DIR/llm-server-go"; then
-            ok "Built llm-server-go"
-            install_go_as_main "$INSTALL_DIR/llm-server-go" || true
-        elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
-            install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
-            ok "Installed existing llm-server-go"
-            install_go_as_main "$INSTALL_DIR/llm-server-go" || true
+        go_build_tmp="$(mktemp -t llm-server-build.XXXXXX)"
+        if build_go_binary "$go_build_tmp" && install_go_as_main "$go_build_tmp"; then
+            :
+        elif [[ -x "$SRC_DIR/go/llm-server" ]] && install_go_as_main "$SRC_DIR/go/llm-server"; then
+            :
         else
             warn "Could not build Go llm-server; rerun with LLM_INSTALL_GO=auto or use a release bundle."
         fi
+        rm -f "$go_build_tmp"
     elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
-        install -m 0755 "$SRC_DIR/go/llm-server" "$INSTALL_DIR/llm-server-go"
-        ok "Installed llm-server-go"
-        install_go_as_main "$INSTALL_DIR/llm-server-go" || true
+        install_go_as_main "$SRC_DIR/go/llm-server" || true
     fi
-    install_gui_wrapper
 fi
 
 if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR/llm-server" ]]; then
@@ -866,7 +856,7 @@ say "╔════════════════════════
 say "║ llm-server installer finished                             ║"
 say "╚════════════════════════════════════════════════════════════╝"
 say "CLI:       $INSTALL_DIR/llm-server"
-say "GUI:       $INSTALL_DIR/llm-server-gui"
+say "GUI:       $INSTALL_DIR/llm-server   (no arguments opens the GUI)"
 say "Models:    $MODEL_DIR"
 if [[ -x "$INSTALL_DIR/llama-server" ]]; then
     say "Backend:   $INSTALL_DIR/llama-server"
@@ -875,7 +865,7 @@ else
 fi
 say ""
 say "Next:"
-say "  $INSTALL_DIR/llm-server-gui"
+say "  $INSTALL_DIR/llm-server            # interactive GUI"
 say "  $INSTALL_DIR/llm-server detect"
 say "  $INSTALL_DIR/llm-server <hf-repo> --download"
 say "  $INSTALL_DIR/llm-server $MODEL_DIR/your-model.gguf"

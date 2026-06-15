@@ -15,7 +15,7 @@ GGUF metadata extraction, and downloading.
 - `go/pkg/tune`: AI Tune benchmarking, candidate validation, and cache handling.
 - `go/pkg/update`: self-update, backend update, rollback, and startup update
   checks for interactive users.
-- `go/pkg/tui`: terminal UI launched by `llm-server gui` or `llm-server-gui`.
+- `go/pkg/tui`: terminal UI launched by running `llm-server` with no arguments (or `llm-server gui`).
 
 ## Tool Layout
 
