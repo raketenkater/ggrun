@@ -76,8 +76,16 @@ fi
 
 
 backend_bin=""
-if [[ -x "$APP_BIN/llama-server" ]]; then
+if [[ -x "$APP_BIN/llama-server-cuda" ]]; then
+    backend_bin="$APP_BIN/llama-server-cuda"
+elif [[ -x "$APP_BIN/ik_llama-server-cuda" ]]; then
+    backend_bin="$APP_BIN/ik_llama-server-cuda"
+elif [[ -x "$APP_BIN/llama-server-vulkan" ]]; then
+    backend_bin="$APP_BIN/llama-server-vulkan"
+elif [[ -x "$APP_BIN/llama-server" ]]; then
     backend_bin="$APP_BIN/llama-server"
+elif [[ -x "$APP_SRC/llama.cpp/build-cuda/bin/llama-server" ]]; then
+    backend_bin="$APP_SRC/llama.cpp/build-cuda/bin/llama-server"
 elif [[ -x "$APP_SRC/ik_llama.cpp/build/bin/llama-server" ]]; then
     backend_bin="$APP_SRC/ik_llama.cpp/build/bin/llama-server"
 elif [[ -x "$APP_SRC/llama.cpp/build-vulkan/bin/llama-server" ]]; then
