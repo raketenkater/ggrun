@@ -1,6 +1,33 @@
 # Changelog
 
-## v3.0.1 — 2026-06-13
+## v3.1.0 — 2026-06-16
+
+- **Exact-ledger multi-GPU MoE placement.** Large MoE models now load reliably
+  on heterogeneous multi-GPU rigs instead of over-committing the smallest card.
+  The launcher emits `--tensor-split` *and* `-ot` from an exact per-GPU VRAM
+  ledger — measured CUDA-context + compute-buffer overhead plus GGUF-exact
+  non-expert, KV, and expert sizes — fills expert layers in GPU-bandwidth
+  order, honors leading dense blocks, and drops GPUs that can't carry their
+  share. No percentage headroom; every term is measured or read from the GGUF.
+  A `cudaMalloc` out-of-memory during load now triggers an adaptive retry that
+  derates the offending GPU and caches the corrected placement.
+- **Interactive GUI overhaul.** The whole TUI is navigable with arrow keys and
+  Enter (letter hotkeys still work). New Settings screen lists every config
+  option with its current value — enums cycle, booleans toggle, no typing —
+  and saves to the config file; backend selection is an arrow-select; the
+  advanced launch screen is fully navigable. Fixes an unreachable keep-alive
+  toggle.
+- **Reliable shutdown.** Ctrl+C now exits promptly; the keep-alive recovery
+  loop no longer treats a requested shutdown as a crash and restarts the server
+  being stopped. The GUI launch path gains a second-Ctrl+C / timeout force-quit.
+- **Config is the single source of truth.** The installer no longer exports
+  per-setting environment variables (model dir, backend, cache, logs) that
+  silently shadowed the config file, so CLI and GUI edits actually take effect.
+  Only `LLM_APP_HOME` and `PATH` are exported.
+- **One launcher binary.** Installs a single `llm-server` (no duplicate
+  `llm-server-go` copy, no `llm-server-gui` wrappers) — `llm-server` with no
+  arguments opens the GUI. The `llm-server-bash` v2 migration shim is retained.
+- **Docker images** for CPU, CUDA, and Vulkan, plus an Open WebUI compose file.
 
 - **Community tune pool.** When a model has no local AI-Tune cache, the
   launcher now checks a shared pool (one HTTPS GET keyed by
