@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +25,7 @@ const (
 	FailurePinnedFail   FailureType = "pinned_fail"
 	FailurePinnedCap    FailureType = "pinned_cap_exceeded"
 	FailurePinnedHang   FailureType = "pinned_hang"
+	FailureCUDAOOM      FailureType = "cuda_oom"
 	FailureRAMOOM       FailureType = "ram_oom"
 	FailureUnknownModel FailureType = "unknown_model"
 	FailureUnknown      FailureType = "unknown"
@@ -41,6 +44,9 @@ type Launcher struct {
 	OnFailure     func(FailureType, string)
 	OnRestart     func(int, time.Duration)
 	OnFallback    func(string)
+	OnCUDAOOM     func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool)
+
+	PlacementCachePath string
 
 	lastLogPath string // log written by the most recent runOnce
 }
@@ -59,6 +65,7 @@ func DefaultLauncher(binaryPath string, args []string) *Launcher {
 // Run starts the server with crash recovery. Blocks until the process exits.
 func (l *Launcher) Run(ctx context.Context) error {
 	restartCount := 0
+	cudaOOMRetries := 0
 	backoff := l.BackoffBase
 	binaryPath := l.BinaryPath
 
@@ -74,6 +81,21 @@ func (l *Launcher) Run(ctx context.Context) error {
 			ft, msg := l.parseLoadFailure()
 			if l.OnFailure != nil {
 				l.OnFailure(ft, msg)
+			}
+
+			if ft == FailureCUDAOOM && cudaOOMRetries < 2 && l.OnCUDAOOM != nil {
+				device, allocMB, ok := parseCUDAOOM(msg)
+				if ok {
+					if newArgs, entry, retry := l.OnCUDAOOM(device, allocMB, append([]string(nil), l.Args...)); retry {
+						l.Args = newArgs
+						if l.PlacementCachePath != "" && entry != nil {
+							_ = placement.SavePlacementCache(l.PlacementCachePath, entry)
+						}
+						cudaOOMRetries++
+						restartCount++
+						continue
+					}
+				}
 			}
 
 			// Try ik_llama -> mainline fallback for unknown model
@@ -246,9 +268,26 @@ func (l *Launcher) extractPort() string {
 // oomPattern matches OOM markers on word boundaries so model names like
 // "Bloom" or words like "room" in log output don't classify as OOM.
 var (
-	oomPattern    = regexp.MustCompile(`(?i)\b(oom|out of memory)\b`)
-	ramOOMPattern = regexp.MustCompile(`(?i)\bram\b.*\boom\b|\boom\b.*\bram\b`)
+	oomPattern     = regexp.MustCompile(`(?i)\b(oom|out of memory)\b`)
+	ramOOMPattern  = regexp.MustCompile(`(?i)\bram\b.*\boom\b|\boom\b.*\bram\b`)
+	cudaOOMPattern = regexp.MustCompile(`(?i)allocating\s+([0-9]+(?:\.[0-9]+)?)\s+MiB\s+on device\s+(\d+):\s+cudaMalloc failed: out of memory`)
 )
+
+func parseCUDAOOM(line string) (device int, allocMB int, ok bool) {
+	m := cudaOOMPattern.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	alloc, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	device, err = strconv.Atoi(m[2])
+	if err != nil {
+		return 0, 0, false
+	}
+	return device, int(math.Ceil(alloc)), true
+}
 
 // parseLoadFailure reads this launcher's own log for known error patterns.
 func (l *Launcher) parseLoadFailure() (FailureType, string) {
@@ -284,6 +323,9 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 		}
 		if strings.Contains(low, "pinned memory") && strings.Contains(low, "hang") {
 			return FailurePinnedHang, line
+		}
+		if _, _, ok := parseCUDAOOM(line); ok {
+			return FailureCUDAOOM, line
 		}
 		if ramOOMPattern.MatchString(line) {
 			return FailureRAMOOM, line

@@ -14,6 +14,8 @@ import (
 // CacheEntry holds a validated placement cache entry for MoE.
 type CacheEntry struct {
 	GPUAssignments []GPUAssignment `json:"gpu_assignments"` // cuda_idx:start:count
+	TensorSplit    []float64       `json:"tensor_split,omitempty"`
+	SplitMode      string          `json:"split_mode,omitempty"`
 	NCPUMoE        int             `json:"n_cpu_moe"`
 	BatchSize      int             `json:"batch_size"`
 	UBatchSize     int             `json:"ubatch_size"`
@@ -59,6 +61,10 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 		switch key {
 		case "CACHED_GPU_ASSIGNMENTS":
 			entry.GPUAssignments = parseGPUAssignments(val)
+		case "CACHED_TENSOR_SPLIT":
+			entry.TensorSplit = parseTensorSplit(val)
+		case "CACHED_SPLIT_MODE":
+			entry.SplitMode = val
 		case "CACHED_NCPUMOE":
 			entry.NCPUMoE, _ = strconv.Atoi(val)
 		case "CACHED_BATCH":
@@ -91,6 +97,12 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 			return nil, fmt.Errorf("cached assignment references unknown GPU %d", assign.CUDAIndex)
 		}
 	}
+	if len(entry.GPUAssignments) == 0 && len(entry.TensorSplit) == 0 {
+		return nil, fmt.Errorf("cache has no MoE placement data")
+	}
+	if len(entry.GPUAssignments) > 0 && len(entry.TensorSplit) == 0 {
+		return nil, fmt.Errorf("cached MoE GPU assignments missing CACHED_TENSOR_SPLIT")
+	}
 
 	return entry, nil
 }
@@ -106,6 +118,16 @@ func SavePlacementCache(cachePath string, entry *CacheEntry) error {
 			assigns = append(assigns, fmt.Sprintf("%d:%d:%d", a.CUDAIndex, a.Start, a.Count))
 		}
 		parts = append(parts, fmt.Sprintf("CACHED_GPU_ASSIGNMENTS=\"%s\"", strings.Join(assigns, " ")))
+	}
+	if len(entry.TensorSplit) > 0 {
+		var split []string
+		for _, v := range entry.TensorSplit {
+			split = append(split, fmt.Sprintf("%.2f", v))
+		}
+		parts = append(parts, fmt.Sprintf("CACHED_TENSOR_SPLIT=\"%s\"", strings.Join(split, ",")))
+	}
+	if entry.SplitMode != "" {
+		parts = append(parts, fmt.Sprintf("CACHED_SPLIT_MODE=\"%s\"", entry.SplitMode))
 	}
 	if entry.NCPUMoE > 0 {
 		parts = append(parts, fmt.Sprintf("CACHED_NCPUMOE=\"%d\"", entry.NCPUMoE))
@@ -123,6 +145,22 @@ func SavePlacementCache(cachePath string, entry *CacheEntry) error {
 		parts = append(parts, "CACHED_MMAP=\"1\"")
 	}
 	return os.WriteFile(cachePath, []byte(strings.Join(parts, "\n")+"\n"), 0644)
+}
+
+func parseTensorSplit(s string) []float64 {
+	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == ':' })
+	out := make([]float64, 0, len(fields))
+	for _, f := range fields {
+		if f == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(f, 64)
+		if err != nil || v < 0 {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 func parseGPUAssignments(s string) []GPUAssignment {

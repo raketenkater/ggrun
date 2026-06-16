@@ -895,8 +895,16 @@ func cmdGUI() {
 	launcher := recovery.DefaultLauncher(be.Path, serverArgs[1:])
 	launcher.HealthTimeout = time.Duration(timeoutSec) * time.Second
 	launcher.KeepAlive = true
+	launcher.PlacementCachePath = req.TuneCache
 	launcher.OnFailure = func(ft recovery.FailureType, msg string) {
 		fmt.Fprintf(os.Stderr, "[launch] failure: %s: %s\n", ft, msg)
+	}
+	launcher.OnCUDAOOM = func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool) {
+		newArgs, entry, ok := placement.DerateCUDAOOMArgs(args, model, caps, device, allocMB)
+		if ok {
+			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; moving expert layer(s) to CPU and retrying\n", device, allocMB)
+		}
+		return newArgs, entry, ok
 	}
 	launcher.OnRestart = func(n int, backoff time.Duration) {
 		fmt.Printf("[launch] restart %d in %v...\n", n, backoff)
@@ -1791,6 +1799,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		ExpertUsedCount:    info.ExpertUsed,
 		ExpertFF:           info.ExpFF,
 		ExpertSharedFF:     info.ExpSharedFF,
+		LeadingDense:       info.LeadingDense,
 		RopeDim:            info.NRot,
 		HasSSM:             info.SSM,
 		FullAttnInterval:   info.FullAttnInterval,
@@ -1925,12 +1934,29 @@ func backendSearchPaths() []string {
 		home, _ = os.UserHomeDir()
 	}
 	appHome := os.Getenv("LLM_APP_HOME")
+	if appHome == "" {
+		if exe, err := os.Executable(); err == nil {
+			exeDir := filepath.Dir(exe)
+			switch filepath.Base(exeDir) {
+			case ".bin", "bin":
+				appHome = filepath.Dir(exeDir)
+			}
+		}
+	}
 	return []string{
 		os.Getenv("LLAMA_SERVER"),
+		filepath.Join(appHome, ".bin", "llama-server-cuda"),
+		filepath.Join(appHome, ".bin", "llama-server-cuda.exe"),
+		filepath.Join(appHome, ".bin", "ik_llama-server-cuda"),
+		filepath.Join(appHome, ".bin", "ik_llama-server-cuda.exe"),
+		filepath.Join(appHome, ".bin", "llama-server-vulkan"),
+		filepath.Join(appHome, ".bin", "llama-server-vulkan.exe"),
 		filepath.Join(appHome, ".bin", "llama-server"),
 		filepath.Join(appHome, ".bin", "llama-server.exe"),
 		filepath.Join(appHome, "bin", "llama-server"),
 		filepath.Join(appHome, "bin", "llama-server.exe"),
+		filepath.Join(appHome, ".src", "llama.cpp", "build-cuda", "bin", "llama-server"),
+		filepath.Join(appHome, ".src", "llama.cpp", "build-cuda", "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "ik_llama.cpp", "build", "bin", "llama-server"),
 		filepath.Join(appHome, ".src", "ik_llama.cpp", "build", "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build-vulkan", "bin", "llama-server"),
@@ -1939,6 +1965,8 @@ func backendSearchPaths() []string {
 		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server.exe"),
 		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server"),
 		filepath.Join(home, "ik_llama.cpp", "build", "bin", "llama-server.exe"),
+		filepath.Join(home, "llama.cpp", "build-cuda", "bin", "llama-server"),
+		filepath.Join(home, "llama.cpp", "build-cuda", "bin", "llama-server.exe"),
 		filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server"),
 		filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server.exe"),
 		filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"),

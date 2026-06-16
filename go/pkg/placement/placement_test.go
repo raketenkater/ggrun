@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -165,6 +167,31 @@ func contains(slice []string, val string) bool {
 	return false
 }
 
+var otDevicePattern = regexp.MustCompile(`blk\\\.\(([^)]*)\).*=(?:CUDA|Vulkan)(\d+)`)
+
+func parseOTLayersByDevice(t *testing.T, ot string) map[int][]int {
+	t.Helper()
+	out := map[int][]int{}
+	for _, part := range strings.Split(ot, ",") {
+		m := otDevicePattern.FindStringSubmatch(part)
+		if m == nil {
+			continue
+		}
+		device, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("parse device from %q: %v", part, err)
+		}
+		for _, raw := range strings.Split(m[1], "|") {
+			layer, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Fatalf("parse layer from %q: %v", part, err)
+			}
+			out[device] = append(out[device], layer)
+		}
+	}
+	return out
+}
+
 func TestNormalizeSplit(t *testing.T) {
 	split := normalizeSplit([]float64{12288, 12288})
 	if len(split) != 2 {
@@ -282,6 +309,216 @@ func TestComputeMoEMultiGPU(t *testing.T) {
 	// MoE uses NCPUMoE for CPU expert offload
 	if strat.NCPUMoE == 0 {
 		t.Fatalf("expected MoE CPU expert offload")
+	}
+}
+
+func TestComputeMoEHeterogeneousMultiGPUExactLedger(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24576, VRAMUsedMB: 822, BandwidthMBps: 31504},
+			{Index: 1, Name: "RTX 3060", VRAMTotalMB: 12288, VRAMUsedMB: 574, BandwidthMBps: 12000},
+			{Index: 2, Name: "RTX 4070", VRAMTotalMB: 12288, VRAMUsedMB: 660, BandwidthMBps: 25203},
+		},
+		RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 78000},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path:            "MiniMax-M3.gguf",
+		TotalSizeMB:     149 * 1024,
+		SizeBytes:       149 * 1024 * 1024 * 1024,
+		NumLayers:       60,
+		IsMoE:           true,
+		NumExperts:      128,
+		LeadingDense:    3,
+		ExpertBytes:     int64(57 * 2500 * 1024 * 1024),
+		NonExpertBytes:  int64(6500 * 1024 * 1024),
+		ContextSize:     32768,
+		EmbeddingLength: 6144,
+		HeadCountKV:     4,
+		KeyLength:       128,
+		ValueLength:     128,
+		ExpertUsedCount: 4,
+		ExpertFF:        3072,
+	}
+
+	strat, err := Compute(caps, model, Options{ContextSize: 32768, KVQuality: "low", CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	if strat.Type != MoEOffload {
+		t.Fatalf("expected MoE offload, got %s", strat.Type)
+	}
+	if len(strat.TensorSplit) != len(caps.GPUs) {
+		t.Fatalf("expected tensor split for every visible GPU, got %v", strat.TensorSplit)
+	}
+	if strat.SplitMode != "layer" {
+		t.Fatalf("expected MoE split-mode layer, got %q", strat.SplitMode)
+	}
+	if !strings.Contains(strat.OTString, "exps=CPU") {
+		t.Fatalf("expected CPU expert catch-all in -ot, got %s", strat.OTString)
+	}
+
+	assignments := parseOTLayersByDevice(t, strat.OTString)
+	for device, layers := range assignments {
+		for _, layer := range layers {
+			if layer < model.LeadingDense {
+				t.Fatalf("device %d pinned leading dense layer %d in %s", device, layer, strat.OTString)
+			}
+		}
+	}
+	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), model.NumLayers-model.LeadingDense)
+	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
+	kvTotalMB := computeKVTotalMB(model, strat.ContextSize, strat.KVType)
+	fixedPerGPU := 600 + computeFloorMB
+	for gi, gpu := range caps.GPUs {
+		usedMB := fixedPerGPU + splitShareMB(nonExpertTotalMB, strat.TensorSplit, gi) + splitShareMB(kvTotalMB, strat.TensorSplit, gi) + len(assignments[gpu.Index])*expertPerLayerMB
+		if usedMB > gpu.VRAMFreeMB() {
+			t.Fatalf("gpu %d over budget: used=%dMB free=%dMB split=%v ot=%s", gpu.Index, usedMB, gpu.VRAMFreeMB(), strat.TensorSplit, strat.OTString)
+		}
+	}
+}
+
+func TestComputeMoEMultiGPUFullyFitsExpertsOnGPU(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "GPU A", VRAMTotalMB: 24576, BandwidthMBps: 20000},
+			{Index: 1, Name: "GPU B", VRAMTotalMB: 24576, BandwidthMBps: 20000},
+		},
+		RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{
+		Path:            "moe.gguf",
+		TotalSizeMB:     32 * 1024,
+		SizeBytes:       32 * 1024 * 1024 * 1024,
+		NumLayers:       32,
+		IsMoE:           true,
+		NumExperts:      64,
+		ExpertBytes:     16 * 1024 * 1024 * 1024,
+		NonExpertBytes:  16 * 1024 * 1024 * 1024,
+		ContextSize:     32768,
+		EmbeddingLength: 4096,
+		HeadCountKV:     8,
+		KeyLength:       128,
+		ValueLength:     128,
+	}
+
+	strat, err := Compute(caps, model, Options{ContextSize: 32768, KVQuality: "low", CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	assignments := parseOTLayersByDevice(t, strat.OTString)
+	totalPinned := 0
+	for _, layers := range assignments {
+		totalPinned += len(layers)
+	}
+	if totalPinned != model.NumLayers {
+		t.Fatalf("expected all %d expert layers on GPU, got %d via %s", model.NumLayers, totalPinned, strat.OTString)
+	}
+	if strat.NCPUMoE != 0 {
+		t.Fatalf("expected no CPU MoE layers when experts fit, got %d", strat.NCPUMoE)
+	}
+}
+
+func TestComputeMoESingleGPUDoesNotEmitTensorSplit(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "RTX", VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{
+		Path:           "moe.gguf",
+		TotalSizeMB:    48 * 1024,
+		SizeBytes:      48 * 1024 * 1024 * 1024,
+		NumLayers:      48,
+		IsMoE:          true,
+		NumExperts:     64,
+		ExpertBytes:    40 * 1024 * 1024 * 1024,
+		NonExpertBytes: 8 * 1024 * 1024 * 1024,
+		ContextSize:    32768,
+		HeadCountKV:    8,
+		KeyLength:      128,
+		ValueLength:    128,
+	}
+	strat, err := Compute(caps, model, Options{ContextSize: 32768, KVQuality: "low", CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	if len(strat.TensorSplit) != 0 {
+		t.Fatalf("single-GPU MoE should not emit tensor split, got %v", strat.TensorSplit)
+	}
+	if !strings.Contains(strat.OTString, "exps=CPU") {
+		t.Fatalf("single-GPU MoE still needs CPU catch-all, got %s", strat.OTString)
+	}
+}
+
+func TestPlacementCacheRequiresTensorSplitForAssignments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.conf")
+	if err := os.WriteFile(path, []byte("CACHED_GPU_ASSIGNMENTS=\"0:0:4\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}}}
+	if _, err := LoadPlacementCache(path, caps, 0); err == nil {
+		t.Fatal("expected old MoE assignment cache without tensor split to be rejected")
+	}
+}
+
+func TestPlacementCacheRoundTripsTensorSplit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.conf")
+	entry := &CacheEntry{
+		GPUAssignments: []GPUAssignment{{CUDAIndex: 0, Start: 3, Count: 4}},
+		TensorSplit:    []float64{0.5, 0.25, 0.25},
+		SplitMode:      "layer",
+		NCPUMoE:        53,
+		BatchSize:      2048,
+		UBatchSize:     512,
+	}
+	if err := SavePlacementCache(path, entry); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}, {Index: 1, VRAMTotalMB: 12288}, {Index: 2, VRAMTotalMB: 12288}}}
+	loaded, err := LoadPlacementCache(path, caps, 0)
+	if err != nil {
+		t.Fatalf("load cache: %v", err)
+	}
+	if loaded.SplitMode != "layer" || len(loaded.TensorSplit) != 3 || loaded.TensorSplit[0] != 0.5 {
+		t.Fatalf("tensor split did not round trip: %+v", loaded)
+	}
+}
+
+func TestDerateCUDAOOMArgsMovesExpertLayersToCPU(t *testing.T) {
+	model := &ModelProfile{
+		NumLayers:    60,
+		LeadingDense: 3,
+		ExpertBytes:  int64(57 * 2500 * 1024 * 1024),
+	}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{
+		{Index: 0, VRAMTotalMB: 24576},
+		{Index: 1, VRAMTotalMB: 12288, VRAMUsedMB: 574},
+	}}
+	args := []string{
+		"--tensor-split", "0.67,0.33",
+		"--split-mode", "layer",
+		"-b", "2048",
+		"-ub", "512",
+		"--parallel", "1",
+		"-ot", `blk\.(3|4|5|6)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(7|8|9|10)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`,
+		"--n-cpu-moe", "49",
+	}
+	newArgs, entry, ok := DerateCUDAOOMArgs(args, model, caps, 1, 11876)
+	if !ok {
+		t.Fatal("expected CUDA OOM args to derate")
+	}
+	newOT := newArgs[argIndex(newArgs, "-ot")+1]
+	assignments := parseOTLayersByDevice(t, newOT)
+	if got := len(assignments[1]); got != 3 {
+		t.Fatalf("expected device 1 to drop one layer, got %d via %s", got, newOT)
+	}
+	if currentNCPUMoE(newArgs) != 50 {
+		t.Fatalf("expected --n-cpu-moe to increment to 50, got args %v", newArgs)
+	}
+	if entry == nil || len(entry.GPUAssignments) != 2 || entry.NCPUMoE != 50 || len(entry.TensorSplit) != 2 {
+		t.Fatalf("unexpected cache entry: %+v", entry)
 	}
 }
 

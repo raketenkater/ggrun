@@ -43,8 +43,9 @@ func TestParseLoadFailureBloomIsNotOOM(t *testing.T) {
 
 func TestParseLoadFailureRealOOMVariants(t *testing.T) {
 	cases := map[string]FailureType{
-		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024 MiB failed: out of memory": FailureOOM,
-		"kernel: Out of memory: Killed process 1234 (llama-server)":                             FailureOOM,
+		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024 MiB failed: out of memory":                             FailureOOM,
+		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 11875.43 MiB on device 1: cudaMalloc failed: out of memory": FailureCUDAOOM,
+		"kernel: Out of memory: Killed process 1234 (llama-server)":                                                         FailureOOM,
 		"CUDA error: out of memory":                             FailureOOM,
 		"RAM OOM detected while loading experts":                FailureRAMOOM,
 		"unknown model architecture: 'qwen9'":                   FailureUnknownModel,
@@ -56,5 +57,12 @@ func TestParseLoadFailureRealOOMVariants(t *testing.T) {
 		if ft, _ := l.parseLoadFailure(); ft != want {
 			t.Fatalf("line %q: expected %s, got %s", line, want, ft)
 		}
+	}
+}
+
+func TestParseCUDAOOMDetails(t *testing.T) {
+	device, allocMB, ok := parseCUDAOOM("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 11875.43 MiB on device 1: cudaMalloc failed: out of memory")
+	if !ok || device != 1 || allocMB != 11876 {
+		t.Fatalf("unexpected CUDA OOM parse: device=%d alloc=%d ok=%v", device, allocMB, ok)
 	}
 }

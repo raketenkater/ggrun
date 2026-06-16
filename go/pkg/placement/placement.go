@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,6 +110,7 @@ type ModelProfile struct {
 	ExpertUsedCount    int    `json:"expert_used_count,omitempty"`
 	ExpertFF           int    `json:"expert_ff,omitempty"`
 	ExpertSharedFF     int    `json:"expert_shared_ff,omitempty"`
+	LeadingDense       int    `json:"leading_dense,omitempty"`
 	NextNPredictLayers int    `json:"nextn_predict_layers,omitempty"`
 }
 
@@ -297,6 +299,13 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			}
 			if cache.KVUnified {
 				s.KVPlacement = "gpu"
+			}
+			if len(cache.TensorSplit) > 0 {
+				s.TensorSplit = normalizeSplit(cache.TensorSplit)
+				s.SplitMode = cache.SplitMode
+				if s.SplitMode == "" {
+					s.SplitMode = "layer"
+				}
 			}
 			if len(cache.GPUAssignments) > 0 {
 				otString := buildOTStringFromAssignments(cache.GPUAssignments, caps.GPUs, model.NumLayers, opts.BackendTag)
@@ -649,39 +658,52 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 	return s, nil
 }
 
-// buildMoEOffload computes per-GPU layer caps and builds -ot flags.
-// Computes per-GPU expert-layer caps and builds the -ot string.
+// buildMoEOffload computes a fully specified multi-GPU MoE plan: tensor split
+// for non-expert/KV tensors plus override-tensor pins for expert tensors.
 func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	numGPUs := len(caps.GPUs)
-	gpuOrder := orderGPUsByFreeVRAM(caps.GPUs)
+	if numGPUs == 0 {
+		return buildCPUOnly(s, caps, model, opts)
+	}
+	if model.NumLayers <= 0 {
+		return nil, fmt.Errorf("MoE placement requires model layer count")
+	}
+
+	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
+	s.MainGPU = caps.GPUs[gpuOrder[0]].Index
+	if numGPUs > 1 {
+		s.SplitMode = "layer"
+	}
+
+	moeStartLayer := model.LeadingDense
+	if moeStartLayer < 0 || moeStartLayer >= model.NumLayers {
+		moeStartLayer = 0
+	}
+	moeLayerCount := model.NumLayers - moeStartLayer
+	if moeLayerCount <= 0 {
+		moeLayerCount = model.NumLayers
+		moeStartLayer = 0
+	}
 
 	// Per-layer costs
-	expertTotalMB := int(model.ExpertBytes / 1024 / 1024)
+	expertTotalMB := bytesToMiBCeil(model.ExpertBytes)
 	if expertTotalMB <= 0 {
 		expertTotalMB = totalSizeMB * 90 / 100
 	}
-	nonExpertTotalMB := int(model.NonExpertBytes / 1024 / 1024)
+	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
 	if nonExpertTotalMB <= 0 {
 		nonExpertTotalMB = totalSizeMB - expertTotalMB
 	}
 	if nonExpertTotalMB < 0 {
 		nonExpertTotalMB = 0
 	}
-
-	expertPerLayerMB := expertTotalMB / model.NumLayers
+	expertPerLayerMB := ceilDivInt(expertTotalMB, moeLayerCount)
 	if expertPerLayerMB <= 0 {
 		expertPerLayerMB = 1
 	}
-	nonExpertPerLayerMB := nonExpertTotalMB / model.NumLayers
+	nonExpertPerLayerMB := ceilDivInt(nonExpertTotalMB, model.NumLayers)
 	if nonExpertPerLayerMB <= 0 {
 		nonExpertPerLayerMB = 1
-	}
-	costPerLayerMB := expertPerLayerMB + nonExpertPerLayerMB
-
-	// Main GPU globals
-	mainGPUGlobalsMB := nonExpertTotalMB - nonExpertPerLayerMB*model.NumLayers/2
-	if mainGPUGlobalsMB < 0 {
-		mainGPUGlobalsMB = 0
 	}
 
 	// Load system probe
@@ -697,59 +719,82 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	}
 
 	// Load probe cache
-	probeHit := false
-	placementLabel := "cold-start"
-	var probedComputeBufMB int
-
+	computeBufMB := computeFloorMB
 	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
-	if pc != nil {
-		probeHit = true
-		placementLabel = "probe-hit"
-		probedComputeBufMB = pc.ComputeBufMB
+	if pc != nil && pc.ComputeBufMB > 0 {
+		computeBufMB = pc.ComputeBufMB
+	}
+	fixedPerGPU := sysCUDAOverheadMB + computeBufMB
+
+	// Use only GPUs that can carry CUDA/compute overhead plus their emitted
+	// tensor-split share of all non-expert weights and KV. The split itself is
+	// free-VRAM proportional over that used set.
+	used := make([]bool, numGPUs)
+	for i, g := range caps.GPUs {
+		used[i] = g.VRAMFreeMB() > fixedPerGPU
+	}
+	var split []float64
+	for {
+		rawSplit := make([]float64, numGPUs)
+		totalFree := 0.0
+		for i, g := range caps.GPUs {
+			if used[i] {
+				totalFree += float64(g.VRAMFreeMB())
+			}
+		}
+		if totalFree <= 0 {
+			return nil, fmt.Errorf("Model does not fit on this system: no GPU has free VRAM after CUDA/compute overhead")
+		}
+		for i, g := range caps.GPUs {
+			if used[i] {
+				rawSplit[i] = float64(g.VRAMFreeMB()) / totalFree
+			}
+		}
+		split = normalizeSplit(rawSplit)
+
+		removed := false
+		for i, g := range caps.GPUs {
+			if !used[i] {
+				continue
+			}
+			nonExpertShareMB := splitShareMB(nonExpertTotalMB, split, i)
+			kvShareMB := splitShareMB(kvTotalMB, split, i)
+			if fixedPerGPU+nonExpertShareMB+kvShareMB > g.VRAMFreeMB() {
+				used[i] = false
+				removed = true
+			}
+		}
+		if !removed {
+			break
+		}
+	}
+	if numGPUs > 1 {
+		s.TensorSplit = split
 	}
 
-	// Fixed per-GPU overhead: CUDA context + compute buffer
-	var detFixedPerGPU int
-	if probeHit {
-		detFixedPerGPU = sysCUDAOverheadMB + probedComputeBufMB
-	} else {
-		detFixedPerGPU = sysCUDAOverheadMB + computeFloorMB
-	}
-
-	// KV per layer (for reserve rounding)
-	kvPerLayerMB := kvTotalMB / model.NumLayers
-	if kvPerLayerMB < 1 && kvTotalMB > 0 {
-		kvPerLayerMB = 1
-	}
-
-	// KV-first GPU reserve: weighted by VRAM * PCIe bandwidth
-	gpuKVReserveMB := kvReserveByBandwidth(kvTotalMB, caps.GPUs, gpuOrder, kvPerLayerMB)
-
-	// Hard ceilings: _recompute_gpu_layer_caps
+	// Per-GPU expert capacity under the exact emitted split.
 	maxGPULayersPer := make([]int, numGPUs)
 	maxGPULayers := 0
-	for i := 0; i < numGPUs; i++ {
-		gi := gpuOrder[i]
-		overhead := detFixedPerGPU + gpuKVReserveMB[gi]
-		if i == 0 {
-			overhead += mainGPUGlobalsMB
+	for _, gi := range gpuOrder {
+		if split[gi] <= 0 {
+			continue
 		}
-		usable := caps.GPUs[gi].VRAMFreeMB() - overhead
-		if usable < 0 {
-			usable = 0
+		g := caps.GPUs[gi]
+		nonExpertShareMB := splitShareMB(nonExpertTotalMB, split, gi)
+		kvShareMB := splitShareMB(kvTotalMB, split, gi)
+		roomMB := g.VRAMFreeMB() - fixedPerGPU - nonExpertShareMB - kvShareMB
+		if roomMB < 0 {
+			roomMB = 0
 		}
-		cap := 0
-		if costPerLayerMB > 0 {
-			cap = usable / costPerLayerMB
+		capLayers := roomMB / expertPerLayerMB
+		if capLayers > moeLayerCount {
+			capLayers = moeLayerCount
 		}
-		if cap > model.NumLayers {
-			cap = model.NumLayers
-		}
-		maxGPULayersPer[gi] = cap
-		maxGPULayers += cap
+		maxGPULayersPer[gi] = capLayers
+		maxGPULayers += capLayers
 	}
-	if maxGPULayers > model.NumLayers {
-		maxGPULayers = model.NumLayers
+	if maxGPULayers > moeLayerCount {
+		maxGPULayers = moeLayerCount
 	}
 
 	// Hard ceilings: _recompute_cpu_layer_caps
@@ -772,20 +817,20 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	if expertPerLayerMB > 0 {
 		maxCPULayersStrict = cpuBudgetStrict / expertPerLayerMB
 	}
-	if maxCPULayersStrict > model.NumLayers {
-		maxCPULayersStrict = model.NumLayers
+	if maxCPULayersStrict > moeLayerCount {
+		maxCPULayersStrict = moeLayerCount
 	}
 
 	// Mmap-aware ceiling
 	preWorkingSetFloor := ramOverheadPreMB + cpuKVRAMMB + 8*expertPerLayerMB
 	maxCPULayersMMap := 0
 	if caps.RAM.FreeMB >= preWorkingSetFloor {
-		maxCPULayersMMap = model.NumLayers
+		maxCPULayersMMap = moeLayerCount
 	}
 
 	maxCPULayers := maxCPULayersStrict
 	ceilCPULabel := "strict --no-mmap"
-	if maxGPULayers+maxCPULayersStrict < model.NumLayers &&
+	if maxGPULayers+maxCPULayersStrict < moeLayerCount &&
 		!opts.NoMMap &&
 		maxCPULayersMMap > maxCPULayersStrict {
 		maxCPULayers = maxCPULayersMMap
@@ -793,13 +838,13 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	}
 
 	// Does-not-fit guard
-	if maxGPULayers+maxCPULayers < model.NumLayers {
-		gap := model.NumLayers - maxGPULayers - maxCPULayers
-		gapVRAMMB := gap * costPerLayerMB
+	if maxGPULayers+maxCPULayers < moeLayerCount {
+		gap := moeLayerCount - maxGPULayers - maxCPULayers
+		gapVRAMMB := gap * expertPerLayerMB
 		gapRAMMB := gap * expertPerLayerMB
 		return nil, fmt.Errorf(
 			"Model does not fit on this system.\n"+
-				"  Required:    %d layers\n"+
+				"  Required:    %d MoE layers\n"+
 				"  GPU cap:     %d layers across %d GPU(s)\n"+
 				"  CPU cap:     %d layers (%s)\n"+
 				"  Gap:         %d layers — need ~%dMB more free VRAM or ~%dMB more RAM\n"+
@@ -807,41 +852,31 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 				"    1. Free VRAM (close other GPU workloads, --gpus to add a card)\n"+
 				"    2. Drop --no-mmap so kernel can page experts on demand\n"+
 				"    3. Use a smaller quantization or smaller model",
-			model.NumLayers, maxGPULayers, numGPUs, maxCPULayers, ceilCPULabel,
+			moeLayerCount, maxGPULayers, numGPUs, maxCPULayers, ceilCPULabel,
 			gap, gapVRAMMB, gapRAMMB)
 	}
 
 	// Initial layer assignment
 	layersPerGPU := make([]int, numGPUs)
-	nextLayer := 0
 	totalGPULayers := 0
+	remainingMoELayers := moeLayerCount
 
-	for i := 0; i < numGPUs; i++ {
-		gi := gpuOrder[i]
-		localOverhead := detFixedPerGPU + gpuKVReserveMB[gi]
-		if i == 0 {
-			localOverhead += mainGPUGlobalsMB
-		}
-		usableMB := caps.GPUs[gi].VRAMFreeMB() - localOverhead
-		if usableMB < 0 {
-			usableMB = 0
-		}
-		layers := 0
-		if costPerLayerMB > 0 {
-			layers = usableMB / costPerLayerMB
-		}
-		remain := model.NumLayers - nextLayer
-		if layers > remain {
-			layers = remain
+	for _, gi := range gpuOrder {
+		layers := maxGPULayersPer[gi]
+		if layers > remainingMoELayers {
+			layers = remainingMoELayers
 		}
 		layersPerGPU[gi] = layers
-		nextLayer += layers
 		totalGPULayers += layers
+		remainingMoELayers -= layers
+		if remainingMoELayers == 0 {
+			break
+		}
 	}
 
-	layersCPU := model.NumLayers - totalGPULayers
+	layersCPU := moeLayerCount - totalGPULayers
 
-	// RAM safety check and Phase 1 redistribution
+	// RAM safety check
 	cpuExpertMB := layersCPU * expertPerLayerMB
 
 	// Exact RAM overhead
@@ -877,58 +912,12 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	ramNeeded := cpuExpertMB + cpuKVMB + ramOverheadMB
 	ramAvailMB := caps.RAM.FreeMB
 
-	// Phase 1: If CPU layers would OOM, push layers to GPUs
-	// Phase 1 redistribution is disabled: cold-start placement is already deterministic
-	// But we keep the logic structure for completeness
-	if ramNeeded > ramAvailMB && layersCPU > 0 && numGPUs > 0 {
-		redistBumps := []int{70, 80, 90, 100}
-		for _, bump := range redistBumps {
-			nextLayer = 0
-			totalGPULayers = 0
-			for i := 0; i < numGPUs; i++ {
-				gi := gpuOrder[i]
-				pct := bump - i*5
-				if pct < 30 {
-					pct = 30
-				}
-				localOverhead := computeFloorMB
-				if i == 0 {
-					localOverhead += mainGPUGlobalsMB
-				}
-				availableMB := caps.GPUs[gi].VRAMFreeMB() - localOverhead
-				if availableMB < 0 {
-					availableMB = 0
-				}
-				budgetMB := availableMB * pct / 100
-				layers := 0
-				if costPerLayerMB > 0 {
-					layers = budgetMB / costPerLayerMB
-					// Hard-max floor: on final bump pass, allow up to raw hard-fit count
-					if layers == 0 && bump == redistBumps[len(redistBumps)-1] {
-						layers = availableMB / costPerLayerMB
-					}
-				}
-				remain := model.NumLayers - nextLayer
-				if layers > remain {
-					layers = remain
-				}
-				layersPerGPU[gi] = layers
-				nextLayer += layers
-				totalGPULayers += layers
-			}
-			layersCPU = model.NumLayers - totalGPULayers
-			cpuExpertMB = layersCPU * expertPerLayerMB
-			ramNeeded = cpuExpertMB + cpuKVMB + ramOverheadMB
-			if ramNeeded <= ramAvailMB {
-				break
-			}
-		}
-	}
-
 	// Mmap decision for MoE
 	// If strict ceiling doesn't fit and user didn't force --no-mmap,
 	// use mmap (page-cache) if working set fits
-	if totalSizeMB > ramAvailMB {
+	if opts.NoMMap {
+		s.MMap = false
+	} else if totalSizeMB > ramAvailMB {
 		s.MMap = true
 	} else if ramNeeded > ramAvailMB {
 		workingSetFloor := ramOverheadMB + cpuKVMB + 8*expertPerLayerMB
@@ -939,33 +928,231 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		s.MMap = false
 	}
 
-	// Build -ot string
-	if totalGPULayers > 0 {
-		otString := buildOTString(layersPerGPU, caps.GPUs, gpuOrder, opts.BackendTag)
-		if otString != "" {
-			s.OTString = otString
-		}
+	// Build -ot string. Always include the exps=CPU catch-all so expert
+	// tensors never follow the backend's default layer split by accident.
+	otString := buildOTStringFromStart(layersPerGPU, caps.GPUs, gpuOrder, moeStartLayer, opts.BackendTag)
+	if otString != "" {
+		s.OTString = otString
 	}
 
-	// NCPUMoE = number of experts to keep on CPU
+	// NCPUMoE is a CPU expert-layer count, not an expert count.
 	if layersCPU > 0 {
-		s.NCPUMoE = model.NumExperts
+		s.NCPUMoE = layersCPU
 	}
 
-	_ = placementLabel //
-	_ = maxGPULayersPer
-	_ = ceilCPULabel
+	_ = nonExpertPerLayerMB
 
 	return s, nil
+}
+
+func bytesToMiBCeil(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	return int((n + 1048576 - 1) / 1048576)
+}
+
+func ceilDivInt(n, d int) int {
+	if n <= 0 || d <= 0 {
+		return 0
+	}
+	return (n + d - 1) / d
+}
+
+func splitShareMB(totalMB int, split []float64, idx int) int {
+	if totalMB <= 0 || idx < 0 || idx >= len(split) || split[idx] <= 0 {
+		return 0
+	}
+	totalSplit := 0.0
+	for _, v := range split {
+		if v > 0 {
+			totalSplit += v
+		}
+	}
+	if totalSplit <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(totalMB) * split[idx] / totalSplit))
+}
+
+// DerateCUDAOOMArgs moves enough expert layers from the failed device back to
+// CPU to cover a cudaMalloc load failure, then returns the rewritten argv.
+func DerateCUDAOOMArgs(args []string, model *ModelProfile, caps *detect.Capabilities, device, allocMB int) ([]string, *CacheEntry, bool) {
+	if model == nil || model.NumLayers <= 0 || allocMB <= 0 {
+		return nil, nil, false
+	}
+	_, moeLayers := moeLayerRange(model)
+	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
+	if expertPerLayerMB <= 0 {
+		return nil, nil, false
+	}
+	overshootMB := allocMB
+	if caps != nil {
+		for _, g := range caps.GPUs {
+			if g.Index == device && allocMB > g.VRAMFreeMB() {
+				overshootMB = allocMB - g.VRAMFreeMB()
+				break
+			}
+		}
+	}
+	dropLayers := ceilDivInt(overshootMB, expertPerLayerMB)
+	if dropLayers <= 0 {
+		dropLayers = 1
+	}
+
+	otIdx := argIndex(args, "-ot", "--override-tensor")
+	if otIdx < 0 || otIdx+1 >= len(args) {
+		return nil, nil, false
+	}
+	assignments := parseOTAssignments(args[otIdx+1])
+	if len(assignments) == 0 {
+		return nil, nil, false
+	}
+	remainingDrop := dropLayers
+	actualDrop := 0
+	for i := range assignments {
+		if assignments[i].CUDAIndex != device || assignments[i].Count <= 0 {
+			continue
+		}
+		drop := remainingDrop
+		if drop > assignments[i].Count {
+			drop = assignments[i].Count
+		}
+		assignments[i].Count -= drop
+		actualDrop += drop
+		remainingDrop -= drop
+		if remainingDrop == 0 {
+			break
+		}
+	}
+	if actualDrop == 0 {
+		return nil, nil, false
+	}
+
+	newArgs := append([]string(nil), args...)
+	newArgs[otIdx+1] = buildOTStringFromAssignments(assignments, nil, model.NumLayers, "")
+	setOrAppendArg(&newArgs, "--n-cpu-moe", strconv.Itoa(currentNCPUMoE(args)+actualDrop))
+
+	entry := cacheEntryFromArgs(newArgs, assignments)
+	return newArgs, entry, true
+}
+
+func moeLayerRange(model *ModelProfile) (int, int) {
+	if model == nil || model.NumLayers <= 0 {
+		return 0, 0
+	}
+	start := model.LeadingDense
+	if start < 0 || start >= model.NumLayers {
+		start = 0
+	}
+	count := model.NumLayers - start
+	if count <= 0 {
+		return 0, model.NumLayers
+	}
+	return start, count
+}
+
+var otAssignmentPattern = regexp.MustCompile(`blk\\\.\(([^)]*)\).*=(?:CUDA|Vulkan)(\d+)`)
+
+func parseOTAssignments(ot string) []GPUAssignment {
+	var out []GPUAssignment
+	for _, part := range strings.Split(ot, ",") {
+		m := otAssignmentPattern.FindStringSubmatch(part)
+		if m == nil {
+			continue
+		}
+		device, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue
+		}
+		layers := strings.Split(m[1], "|")
+		if len(layers) == 0 {
+			continue
+		}
+		start, err := strconv.Atoi(layers[0])
+		if err != nil {
+			continue
+		}
+		out = append(out, GPUAssignment{CUDAIndex: device, Start: start, Count: len(layers)})
+	}
+	return out
+}
+
+func argIndex(args []string, names ...string) int {
+	for i, arg := range args {
+		for _, name := range names {
+			if arg == name {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func setOrAppendArg(args *[]string, name, value string) {
+	if idx := argIndex(*args, name); idx >= 0 {
+		if idx+1 < len(*args) {
+			(*args)[idx+1] = value
+			return
+		}
+	}
+	*args = append(*args, name, value)
+}
+
+func currentNCPUMoE(args []string) int {
+	idx := argIndex(args, "--n-cpu-moe")
+	if idx < 0 || idx+1 >= len(args) {
+		return 0
+	}
+	v, _ := strconv.Atoi(args[idx+1])
+	return v
+}
+
+func cacheEntryFromArgs(args []string, assignments []GPUAssignment) *CacheEntry {
+	entry := &CacheEntry{GPUAssignments: positiveAssignments(assignments)}
+	if idx := argIndex(args, "--tensor-split"); idx >= 0 && idx+1 < len(args) {
+		entry.TensorSplit = parseTensorSplit(args[idx+1])
+	}
+	if idx := argIndex(args, "--split-mode"); idx >= 0 && idx+1 < len(args) {
+		entry.SplitMode = args[idx+1]
+	}
+	if idx := argIndex(args, "--n-cpu-moe"); idx >= 0 && idx+1 < len(args) {
+		entry.NCPUMoE, _ = strconv.Atoi(args[idx+1])
+	}
+	if idx := argIndex(args, "-b", "--batch-size"); idx >= 0 && idx+1 < len(args) {
+		entry.BatchSize, _ = strconv.Atoi(args[idx+1])
+	}
+	if idx := argIndex(args, "-ub", "--ubatch-size"); idx >= 0 && idx+1 < len(args) {
+		entry.UBatchSize, _ = strconv.Atoi(args[idx+1])
+	}
+	if idx := argIndex(args, "--parallel", "-np"); idx >= 0 && idx+1 < len(args) {
+		entry.Parallel, _ = strconv.Atoi(args[idx+1])
+	}
+	entry.MMap = argIndex(args, "--no-mmap") < 0
+	return entry
+}
+
+func positiveAssignments(assignments []GPUAssignment) []GPUAssignment {
+	out := make([]GPUAssignment, 0, len(assignments))
+	for _, a := range assignments {
+		if a.Count > 0 {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // buildOTString builds the -ot override-tensor string for MoE.
 // Builds the -ot override-tensor string: explicit layer list with escaped dots.
 func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, backendTag string) string {
+	return buildOTStringFromStart(layersPerGPU, gpus, gpuOrder, 0, backendTag)
+}
+
+func buildOTStringFromStart(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, startLayer int, backendTag string) string {
 	var parts []string
 	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
 
-	nextLayer := 0
+	nextLayer := startLayer
 	for _, gi := range gpuOrder {
 		count := layersPerGPU[gi]
 		if count > 0 {
