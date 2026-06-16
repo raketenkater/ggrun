@@ -2,1683 +2,18 @@
   "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by llm-server hardware fit; Hugging Face GGUF metadata cached from public model APIs",
   "candidates": [
     {
-      "aa_id": "0de67206-4d36-4d10-b8f6-cf37fa747a03",
-      "aa_intelligence_index": 53.905,
-      "aa_output_tps": 57.9,
-      "aa_query": "Kimi K2.6",
-      "aa_slug": "kimi-k2-6",
-      "aa_updated_at": "2026-06-09T10:14:09Z",
-      "active_params_b": 32.0,
-      "family": "Kimi",
-      "hf_quant_updated_at": "2026-06-09T10:14:09Z",
-      "moe": true,
-      "name": "Kimi K2.6",
-      "notes": "Artificial Analysis open-weight row; 1000B/32B params; license: Modified MIT; GGUF resolved by direct",
-      "quality": 89,
-      "quants": [
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 340477209888,
-          "size_gb": 317.09
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 583710875520,
-          "size_gb": 543.62
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 594544652160,
-          "size_gb": 553.71
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 2053155814880,
-          "size_gb": 1912.15
-        }
-      ],
-      "repo": "unsloth/Kimi-K2.6-GGUF",
-      "size_gb": 543.62,
-      "speed": 58,
-      "total_params_b": 1000.0
-    },
-    {
-      "aa_id": "00f1248e-78e3-4230-8dc8-5e13ba8645e2",
-      "aa_intelligence_index": 53.829,
-      "aa_output_tps": 42.05,
-      "aa_query": "MiMo V2.5 Pro",
-      "aa_slug": "mimo-v2-5-pro",
-      "aa_updated_at": "2026-06-09T10:14:10Z",
-      "active_params_b": 42.0,
-      "family": "Xiaomi",
-      "hf_quant_updated_at": "2026-06-09T10:14:10Z",
-      "moe": true,
-      "name": "Xiaomi MiMo-V2.5-Pro",
-      "notes": "Artificial Analysis open-weight row; 1023B/42B params; license: Mit; GGUF resolved by direct",
-      "quality": 89,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 304091696608,
-          "size_gb": 283.21
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 317152759232,
-          "size_gb": 295.37
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 317269937600,
-          "size_gb": 295.48
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 338409229792,
-          "size_gb": 315.17
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 377893793376,
-          "size_gb": 351.94
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 412660379264,
-          "size_gb": 384.32
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 459667582880,
-          "size_gb": 428.1
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 459894615968,
-          "size_gb": 428.31
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 490697584416,
-          "size_gb": 457.0
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 501267230720,
-          "size_gb": 466.84
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 588542308576,
-          "size_gb": 548.12
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 610512613600,
-          "size_gb": 568.58
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 629612933568,
-          "size_gb": 586.37
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 631047926144,
-          "size_gb": 587.71
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 713189175712,
-          "size_gb": 664.21
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 757996925536,
-          "size_gb": 705.94
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 759280382560,
-          "size_gb": 707.13
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 928470217696,
-          "size_gb": 864.71
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 1087618889024,
-          "size_gb": 1012.92
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 1101459109280,
-          "size_gb": 1025.81
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 2046699256672,
-          "size_gb": 1906.14
-        }
-      ],
-      "repo": "unsloth/MiMo-V2.5-Pro-GGUF",
-      "size_gb": 586.37,
-      "speed": 42,
-      "total_params_b": 1023.0
-    },
-    {
-      "aa_id": "bf220674-68bd-43cc-a1b8-ce5ed4d2f18d",
-      "aa_intelligence_index": 51.509,
-      "aa_output_tps": 60.649,
-      "aa_query": "DeepSeek V4 Pro",
-      "aa_slug": "deepseek-v4-pro",
-      "aa_updated_at": "2026-06-09T10:14:11Z",
-      "active_params_b": 49.0,
-      "family": "DeepSeek",
-      "hf_quant_updated_at": "2026-06-09T10:14:11Z",
-      "moe": true,
-      "name": "DeepSeek V4 Pro (Reasoning, Max Effort)",
-      "notes": "Artificial Analysis open-weight row; 1600B/49B params; license: MIT; GGUF resolved by hf-search",
-      "quality": 85,
-      "quants": [
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 954577741088,
-          "size_gb": 889.02
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 1671820586208,
-          "size_gb": 1557.0
-        }
-      ],
-      "repo": "teamblobfish/DeepSeek-V4-Pro-GGUF",
-      "size_gb": 889.02,
-      "speed": 61,
-      "total_params_b": 1600.0
-    },
-    {
-      "aa_id": "5aa1c578-af76-4b91-8699-cdd43582b3af",
-      "aa_intelligence_index": 51.408,
-      "aa_output_tps": 85.263,
-      "aa_query": "GLM 5.1",
-      "aa_slug": "glm-5-1",
-      "aa_updated_at": "2026-06-09T10:14:12Z",
-      "active_params_b": 40.0,
-      "family": "Z AI",
-      "hf_quant_updated_at": "2026-06-09T10:14:12Z",
-      "moe": true,
-      "name": "Z AI GLM-5.1 (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 744B/40B params; license: Mit; GGUF resolved by direct",
-      "quality": 85,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 205540357824,
-          "size_gb": 191.42
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 220639852224,
-          "size_gb": 205.49
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 236185450176,
-          "size_gb": 219.96
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 252388505376,
-          "size_gb": 235.06
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 268266198880,
-          "size_gb": 249.84
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 279590819648,
-          "size_gb": 260.39
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 313470212000,
-          "size_gb": 291.94
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 338434709472,
-          "size_gb": 315.19
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 340124788736,
-          "size_gb": 316.77
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 361324439648,
-          "size_gb": 336.51
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 368874186816,
-          "size_gb": 343.54
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 433902676096,
-          "size_gb": 404.1
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 450906159424,
-          "size_gb": 419.94
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 464504318304,
-          "size_gb": 432.6
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 465967905120,
-          "size_gb": 433.97
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 525947500928,
-          "size_gb": 489.83
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 558461745696,
-          "size_gb": 520.11
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 560097524288,
-          "size_gb": 521.63
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 684351224672,
-          "size_gb": 637.35
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 801344965472,
-          "size_gb": 746.31
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 810640383072,
-          "size_gb": 754.97
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 1507979370976,
-          "size_gb": 1404.42
-        }
-      ],
-      "repo": "unsloth/GLM-5.1-GGUF",
-      "size_gb": 432.6,
-      "speed": 85,
-      "total_params_b": 744.0
-    },
-    {
-      "aa_id": "4bbceacb-cf47-464b-b60f-e1d1fe016d67",
-      "aa_intelligence_index": 49.615,
-      "aa_output_tps": 58.549,
-      "aa_query": "MiniMax M2.7",
-      "aa_slug": "minimax-m2-7",
-      "aa_updated_at": "2026-06-09T10:14:13Z",
-      "active_params_b": 10.0,
-      "family": "MiniMax",
-      "hf_quant_updated_at": "2026-06-09T10:14:13Z",
-      "moe": true,
-      "name": "MiniMax-M2.7",
-      "notes": "Artificial Analysis open-weight row; 230B/10B params; license: NON-COMMERCIAL LICENSE; GGUF resolved by direct",
-      "quality": 82,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 60700770496,
-          "size_gb": 56.53
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 65381613760,
-          "size_gb": 60.89
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 70139281600,
-          "size_gb": 65.32
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 75284267200,
-          "size_gb": 70.11
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 80103688384,
-          "size_gb": 74.6
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 83614320800,
-          "size_gb": 77.87
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 93637298368,
-          "size_gb": 87.21
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 101243668768,
-          "size_gb": 94.29
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 101939873056,
-          "size_gb": 94.94
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 108413781312,
-          "size_gb": 100.97
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 110754202912,
-          "size_gb": 103.15
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 130959213888,
-          "size_gb": 121.97
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 136175829312,
-          "size_gb": 126.82
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 140169905504,
-          "size_gb": 130.54
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 140781175136,
-          "size_gb": 131.11
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 159042126272,
-          "size_gb": 148.12
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 168828486080,
-          "size_gb": 157.23
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 169441903040,
-          "size_gb": 157.81
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 207445443072,
-          "size_gb": 193.2
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 243136872992,
-          "size_gb": 226.44
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 246575546912,
-          "size_gb": 229.64
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 457487024928,
-          "size_gb": 426.07
-        }
-      ],
-      "repo": "unsloth/MiniMax-M2.7-GGUF",
-      "size_gb": 130.54,
-      "speed": 59,
-      "total_params_b": 230.0
-    },
-    {
-      "aa_id": "22d09131-343b-4adf-8760-533e20a2155f",
-      "aa_intelligence_index": 49.034,
-      "aa_output_tps": 76.302,
-      "aa_query": "MiMo V2.5",
-      "aa_slug": "mimo-v2-5-0424",
-      "aa_updated_at": "2026-06-09T10:14:13Z",
-      "active_params_b": 15.0,
-      "family": "Xiaomi",
-      "hf_quant_updated_at": "2026-06-09T10:14:13Z",
-      "moe": true,
-      "name": "Xiaomi MiMo-V2.5",
-      "notes": "Artificial Analysis open-weight row; 310B/15B params; license: Mit; GGUF resolved by direct",
-      "quality": 81,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 92520742176,
-          "size_gb": 86.17
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 96480165152,
-          "size_gb": 89.85
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 96558284064,
-          "size_gb": 89.93
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 103000735168,
-          "size_gb": 95.93
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 114864627104,
-          "size_gb": 106.98
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 125920812448,
-          "size_gb": 117.27
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 140031442336,
-          "size_gb": 130.41
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 140182797728,
-          "size_gb": 130.56
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 149443820992,
-          "size_gb": 139.18
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 152597937696,
-          "size_gb": 142.12
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 178837503520,
-          "size_gb": 166.56
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 185431309824,
-          "size_gb": 172.7
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 190917099040,
-          "size_gb": 177.81
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 191605325344,
-          "size_gb": 178.45
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 216301387424,
-          "size_gb": 201.45
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 230176145024,
-          "size_gb": 214.37
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 230746570368,
-          "size_gb": 214.9
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 281430540032,
-          "size_gb": 262.1
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 329279160192,
-          "size_gb": 306.67
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 337420697472,
-          "size_gb": 314.25
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 619638702336,
-          "size_gb": 577.08
-        }
-      ],
-      "repo": "unsloth/MiMo-V2.5-GGUF",
-      "size_gb": 177.81,
-      "speed": 76,
-      "total_params_b": 310.0
-    },
-    {
-      "aa_id": "5b52def2-ac9b-4465-ad80-91ea8079e253",
-      "aa_intelligence_index": 47.673,
-      "aa_output_tps": 156.444,
-      "aa_query": "NVIDIA Nemotron 3 Ultra 550B A55B",
-      "aa_slug": "nvidia-nemotron-3-ultra-550b-a55b",
-      "aa_updated_at": "2026-06-09T10:14:13Z",
-      "active_params_b": 55.0,
-      "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:14:13Z",
-      "moe": true,
-      "name": "NVIDIA Nemotron 3 Ultra 550B A55B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 550B/55B params; license: OpenMDW; GGUF resolved by direct",
-      "quality": 79,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 188031516192,
-          "size_gb": 175.12
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 193819655680,
-          "size_gb": 180.51
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 193960558080,
-          "size_gb": 180.64
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 202181394048,
-          "size_gb": 188.3
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 223323569824,
-          "size_gb": 207.99
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 250502659840,
-          "size_gb": 233.3
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 274030739168,
-          "size_gb": 255.21
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 274290786016,
-          "size_gb": 255.45
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 286118723296,
-          "size_gb": 266.47
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 294171787168,
-          "size_gb": 273.97
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 327684276096,
-          "size_gb": 305.18
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 352271286208,
-          "size_gb": 328.08
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 359225442240,
-          "size_gb": 334.55
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 360156577728,
-          "size_gb": 335.42
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 391697744000,
-          "size_gb": 364.8
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 426510467136,
-          "size_gb": 397.22
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 427223498816,
-          "size_gb": 397.88
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 523147231552,
-          "size_gb": 487.22
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 584258241056,
-          "size_gb": 544.13
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 594513314336,
-          "size_gb": 553.68
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 1099040900576,
-          "size_gb": 1023.56
-        }
-      ],
-      "repo": "unsloth/NVIDIA-Nemotron-3-Ultra-550B-A55B-GGUF",
-      "size_gb": 334.55,
-      "speed": 100,
-      "total_params_b": 550.0
-    },
-    {
-      "aa_id": "d8ddb241-b3e4-4c25-a6a3-72eb1b30c541",
-      "aa_intelligence_index": 46.517,
-      "aa_output_tps": 100.23,
-      "aa_query": "DeepSeek V4 Flash",
-      "aa_slug": "deepseek-v4-flash",
-      "aa_updated_at": "2026-06-09T10:14:15Z",
-      "active_params_b": 13.0,
-      "family": "DeepSeek",
-      "hf_quant_updated_at": "2026-06-09T10:14:15Z",
-      "moe": true,
-      "name": "DeepSeek V4 Flash (Reasoning, Max Effort)",
-      "notes": "Artificial Analysis open-weight row; 284B/13B params; license: MIT; GGUF resolved by hf-search",
-      "quality": 77,
-      "quants": [
-        {
-          "name": "IQ1_S",
-          "size_bytes": 61540805344,
-          "size_gb": 57.31
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 78518823680,
-          "size_gb": 73.13
-        },
-        {
-          "name": "IQ2_XS",
-          "size_bytes": 87007832800,
-          "size_gb": 81.03
-        },
-        {
-          "name": "IQ1_M",
-          "size_bytes": 132415608896,
-          "size_gb": 123.32
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 174869720032,
-          "size_gb": 162.86
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 302267624448,
-          "size_gb": 281.51
-        }
-      ],
-      "repo": "teamblobfish/DeepSeek-V4-Flash-GGUF",
-      "size_gb": 162.86,
-      "speed": 100,
-      "total_params_b": 284.0
-    },
-    {
-      "aa_id": "8c29d66d-bf98-4ea3-8572-5409353ecc66",
-      "aa_intelligence_index": 45.823,
-      "aa_output_tps": 60.693,
-      "aa_query": "Qwen3.6 27B",
-      "aa_slug": "qwen3-6-27b",
-      "aa_updated_at": "2026-06-09T10:14:16Z",
-      "active_params_b": 27.8,
-      "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:16Z",
-      "moe": false,
-      "name": "Alibaba Qwen3.6 27B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 27.8B params; license: Apache 2.0; GGUF resolved by direct",
-      "quality": 76,
-      "quants": [
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 9388779744,
-          "size_gb": 8.74
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 10846136544,
-          "size_gb": 10.1
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 11849779424,
-          "size_gb": 11.04
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 11994777824,
-          "size_gb": 11.17
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 12358727904,
-          "size_gb": 11.51
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 13586217184,
-          "size_gb": 12.65
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 14473431264,
-          "size_gb": 13.48
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 15440005344,
-          "size_gb": 14.38
-        },
-        {
-          "name": "Q4_0",
-          "size_bytes": 15791278304,
-          "size_gb": 14.71
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 15856158944,
-          "size_gb": 14.77
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 16071772384,
-          "size_gb": 14.97
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 16817244384,
-          "size_gb": 15.66
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 17612564704,
-          "size_gb": 16.4
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 18958305504,
-          "size_gb": 17.66
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 19509790944,
-          "size_gb": 18.17
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 20038256864,
-          "size_gb": 18.66
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 25636485344,
-          "size_gb": 23.88
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 28595763424,
-          "size_gb": 26.63
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 35325163744,
-          "size_gb": 32.9
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 53808281760,
-          "size_gb": 50.11
-        }
-      ],
-      "repo": "unsloth/Qwen3.6-27B-GGUF",
-      "size_gb": 15.66,
-      "speed": 61,
-      "total_params_b": 27.8
-    },
-    {
-      "aa_id": "0e66bae9-41f1-42fc-9276-ce8cb6f72919",
-      "aa_intelligence_index": 45.047,
-      "aa_output_tps": 52.078,
-      "aa_query": "Qwen3.5 397B A17B",
-      "aa_slug": "qwen3-5-397b-a17b",
-      "aa_updated_at": "2026-06-09T10:14:17Z",
-      "active_params_b": 17.0,
-      "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:17Z",
-      "moe": true,
-      "name": "Alibaba Qwen3.5 397B A17B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 397B/17B params; license: Apache 2.0; GGUF resolved by direct",
-      "quality": 74,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 106819877056,
-          "size_gb": 99.48
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 114872940736,
-          "size_gb": 106.98
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 123053144288,
-          "size_gb": 114.6
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 140333676736,
-          "size_gb": 130.7
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 146373474496,
-          "size_gb": 136.32
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 178739034432,
-          "size_gb": 166.46
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 189735450944,
-          "size_gb": 176.7
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 193761982784,
-          "size_gb": 180.45
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 237353302496,
-          "size_gb": 221.05
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 245272148448,
-          "size_gb": 228.43
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 294865599104,
-          "size_gb": 274.61
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 328646587008,
-          "size_gb": 306.08
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 354819044032,
-          "size_gb": 330.45
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 362328980288,
-          "size_gb": 337.45
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 421507365824,
-          "size_gb": 392.56
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 427726568384,
-          "size_gb": 398.35
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 455975007040,
-          "size_gb": 424.66
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 488187261824,
-          "size_gb": 454.66
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 553104438336,
-          "size_gb": 515.12
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 587329959168,
-          "size_gb": 546.99
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 792961318816,
-          "size_gb": 738.5
-        }
-      ],
-      "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
-      "size_gb": 454.66,
-      "speed": 52,
-      "total_params_b": 397.0
-    },
-    {
-      "aa_id": "8665ca00-c687-44c7-875c-22618cb31c4f",
-      "aa_intelligence_index": 43.494,
-      "aa_output_tps": 179.202,
-      "aa_query": "Qwen3.6 35B A3B",
-      "aa_slug": "qwen3-6-35b-a3b",
-      "aa_updated_at": "2026-06-09T10:14:17Z",
-      "active_params_b": 3.0,
-      "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:17Z",
-      "moe": true,
-      "name": "Alibaba Qwen3.6 35B A3B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 36B/3B params; license: Apache 2.0; GGUF resolved by direct",
-      "quality": 72,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 10047749088,
-          "size_gb": 9.36
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 10756586464,
-          "size_gb": 10.02
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 11522702304,
-          "size_gb": 10.73
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 12290628576,
-          "size_gb": 11.45
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 13211155424,
-          "size_gb": 12.3
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 13676723168,
-          "size_gb": 12.74
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 15359196128,
-          "size_gb": 14.3
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 16600710112,
-          "size_gb": 15.46
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 16845511648,
-          "size_gb": 15.69
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 17730509792,
-          "size_gb": 16.51
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 20893015008,
-          "size_gb": 19.46
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 21706144736,
-          "size_gb": 20.22
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 22134528992,
-          "size_gb": 20.61
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 22360456160,
-          "size_gb": 20.82
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 24942050272,
-          "size_gb": 23.23
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 26456194016,
-          "size_gb": 24.64
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 26592508896,
-          "size_gb": 24.77
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 31843777504,
-          "size_gb": 29.66
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 36903140320,
-          "size_gb": 34.37
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 37541394368,
-          "size_gb": 34.96
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 38451182560,
-          "size_gb": 35.81
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 69376638176,
-          "size_gb": 64.61
-        }
-      ],
-      "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
-      "size_gb": 20.61,
-      "speed": 100,
-      "total_params_b": 36.0
-    },
-    {
-      "aa_id": "6c7b322e-2f35-48ff-9171-fb621a726fc0",
-      "aa_intelligence_index": 42.591,
-      "aa_output_tps": 187.613,
-      "aa_query": "Step 3.7 Flash",
-      "aa_slug": "step-3-7-flash",
-      "aa_updated_at": "2026-06-09T10:14:18Z",
-      "active_params_b": 11.0,
-      "family": "StepFun",
-      "hf_quant_updated_at": "2026-06-09T10:14:18Z",
-      "moe": true,
-      "name": "StepFun Step 3.7 Flash",
-      "notes": "Artificial Analysis open-weight row; 198B/11B params; license: Apache 2.0; GGUF resolved by direct",
-      "quality": 70,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 56750287328,
-          "size_gb": 52.85
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 61704808928,
-          "size_gb": 57.47
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 61821856224,
-          "size_gb": 57.58
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 65785473536,
-          "size_gb": 61.27
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 73591039488,
-          "size_gb": 68.54
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 80031917568,
-          "size_gb": 74.54
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 89262719488,
-          "size_gb": 83.13
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 89390584320,
-          "size_gb": 83.25
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 95336010208,
-          "size_gb": 88.79
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 97317818880,
-          "size_gb": 90.63
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 114163192448,
-          "size_gb": 106.32
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 118254674560,
-          "size_gb": 110.13
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 122090426976,
-          "size_gb": 113.71
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 122218291808,
-          "size_gb": 113.82
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 138072760960,
-          "size_gb": 128.59
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 146495447648,
-          "size_gb": 136.43
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 146495447648,
-          "size_gb": 136.43
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 178699838208,
-          "size_gb": 166.43
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 209417872192,
-          "size_gb": 195.04
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 209618658112,
-          "size_gb": 195.22
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 394017424160,
-          "size_gb": 366.96
-        }
-      ],
-      "repo": "unsloth/Step-3.7-Flash-GGUF",
-      "size_gb": 113.71,
-      "speed": 100,
-      "total_params_b": 198.0
-    },
-    {
-      "aa_id": "2236df45-0699-40d1-b5cc-69ee345d2257",
-      "aa_intelligence_index": 41.602,
-      "aa_output_tps": 137.596,
-      "aa_query": "Qwen3.5 122B A10B",
-      "aa_slug": "qwen3-5-122b-a10b",
-      "aa_updated_at": "2026-06-09T10:14:19Z",
-      "active_params_b": 10.0,
-      "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:19Z",
-      "moe": true,
-      "name": "Alibaba Qwen3.5 122B A10B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 125B/10B params; license: Apache 2.0; GGUF resolved by direct",
-      "quality": 69,
-      "quants": [
-        {
-          "name": "IQ1_M",
-          "size_bytes": 34221749440,
-          "size_gb": 31.87
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 36637668544,
-          "size_gb": 34.12
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 39148942528,
-          "size_gb": 36.46
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 41845347520,
-          "size_gb": 38.97
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 44745020608,
-          "size_gb": 41.67
-        },
-        {
-          "name": "IQ3_S",
-          "size_bytes": 46556959936,
-          "size_gb": 43.36
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 52495013376,
-          "size_gb": 48.89
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 56420881952,
-          "size_gb": 52.55
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 56970536480,
-          "size_gb": 53.06
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 60229510656,
-          "size_gb": 56.09
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 61437470208,
-          "size_gb": 57.22
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 71705126400,
-          "size_gb": 66.78
-        },
-        {
-          "name": "MXFP4_MOE",
-          "size_bytes": 74664408608,
-          "size_gb": 69.54
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 76536964608,
-          "size_gb": 71.28
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 77029996032,
-          "size_gb": 71.74
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 86385391136,
-          "size_gb": 80.45
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 91519219200,
-          "size_gb": 85.23
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 91928163840,
-          "size_gb": 85.61
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 112401249920,
-          "size_gb": 104.68
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 129871935104,
-          "size_gb": 120.95
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 170838161152,
-          "size_gb": 159.11
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 244314011488,
-          "size_gb": 227.54
-        }
-      ],
-      "repo": "unsloth/Qwen3.5-122B-A10B-GGUF",
-      "size_gb": 71.28,
-      "speed": 100,
-      "total_params_b": 125.0
-    },
-    {
-      "aa_id": "1479f50b-d37f-4b55-bb8b-4212a15042eb",
-      "aa_intelligence_index": 41.459,
-      "aa_output_tps": 143.417,
-      "aa_query": "MiMo V2 Flash",
-      "aa_slug": "mimo-v2-0206",
-      "aa_updated_at": "2026-06-09T10:14:20Z",
-      "active_params_b": 15.0,
-      "family": "Xiaomi",
-      "hf_quant_updated_at": "2026-06-09T10:14:20Z",
-      "moe": true,
-      "name": "Xiaomi MiMo-V2-Flash (Feb 2026)",
-      "notes": "Artificial Analysis open-weight row; 309B/15B params; license: MIT; GGUF resolved by direct",
-      "quality": 68,
-      "quants": [
-        {
-          "name": "Q1_0",
-          "size_bytes": 77692674304,
-          "size_gb": 72.36
-        },
-        {
-          "name": "IQ1_S",
-          "size_bytes": 87222133184,
-          "size_gb": 81.23
-        },
-        {
-          "name": "IQ1_M",
-          "size_bytes": 93800366560,
-          "size_gb": 87.36
-        },
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 101554291296,
-          "size_gb": 94.58
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 106654564960,
-          "size_gb": 99.33
-        },
-        {
-          "name": "Q2_K_L",
-          "size_bytes": 112424600128,
-          "size_gb": 104.7
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 116277772864,
-          "size_gb": 108.29
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 127455461952,
-          "size_gb": 118.7
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 133105918528,
-          "size_gb": 123.96
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 137075884608,
-          "size_gb": 127.66
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 147304014400,
-          "size_gb": 137.19
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 164445782752,
-          "size_gb": 153.15
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 174048805600,
-          "size_gb": 162.1
-        },
-        {
-          "name": "Q4_0",
-          "size_bytes": 174701282016,
-          "size_gb": 162.7
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 175378399968,
-          "size_gb": 163.33
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 177654989536,
-          "size_gb": 165.45
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 186798293696,
-          "size_gb": 173.97
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 212539015968,
-          "size_gb": 197.94
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 219118682944,
-          "size_gb": 204.07
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 219789181728,
-          "size_gb": 204.69
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 263347733408,
-          "size_gb": 245.26
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 328229422112,
-          "size_gb": 305.69
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 354179712128,
-          "size_gb": 329.86
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 617662940640,
-          "size_gb": 575.24
-        }
-      ],
-      "repo": "unsloth/MiMo-V2-Flash-GGUF",
-      "size_gb": 173.97,
-      "speed": 100,
-      "total_params_b": 309.0
-    },
-    {
-      "aa_id": "dd059b25-d82a-4ead-82a4-4adceaaec48b",
-      "aa_intelligence_index": 39.226,
-      "aa_output_tps": 146.733,
-      "aa_query": "Mistral Medium 3.5 128B",
-      "aa_slug": "mistral-medium-3-5",
-      "aa_updated_at": "2026-06-09T10:14:21Z",
-      "active_params_b": 128.0,
-      "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:14:21Z",
-      "moe": false,
-      "name": "Mistral Medium 3.5",
-      "notes": "Artificial Analysis open-weight row; 128B params; license: Other; GGUF resolved by direct",
-      "quality": 65,
-      "quants": [
-        {
-          "name": "IQ2_XXS",
-          "size_bytes": 34937742432,
-          "size_gb": 32.54
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 44109112416,
-          "size_gb": 41.08
-        },
-        {
-          "name": "Q2_K_L",
-          "size_bytes": 46968185952,
-          "size_gb": 43.74
-        },
-        {
-          "name": "Q2_K_XL",
-          "size_bytes": 48129746016,
-          "size_gb": 44.82
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 49252770912,
-          "size_gb": 45.87
-        },
-        {
-          "name": "Q3_K_S",
-          "size_bytes": 54366938528,
-          "size_gb": 50.63
-        },
-        {
-          "name": "Q3_K_M",
-          "size_bytes": 60619859360,
-          "size_gb": 56.46
-        },
-        {
-          "name": "Q3_K_XL",
-          "size_bytes": 62499038624,
-          "size_gb": 58.21
-        },
-        {
-          "name": "IQ4_XS",
-          "size_bytes": 67124438432,
-          "size_gb": 62.51
-        },
-        {
-          "name": "IQ4_NL",
-          "size_bytes": 70896166304,
-          "size_gb": 66.03
-        },
-        {
-          "name": "Q4_0",
-          "size_bytes": 70999975328,
-          "size_gb": 66.12
-        },
-        {
-          "name": "Q4_K_S",
-          "size_bytes": 71248487840,
-          "size_gb": 66.36
-        },
-        {
-          "name": "Q4_K_M",
-          "size_bytes": 74897139136,
-          "size_gb": 69.75
-        },
-        {
-          "name": "Q4_K_XL",
-          "size_bytes": 75686323648,
-          "size_gb": 70.49
-        },
-        {
-          "name": "Q5_K_S",
-          "size_bytes": 86184404416,
-          "size_gb": 80.27
-        },
-        {
-          "name": "Q5_K_M",
-          "size_bytes": 88316814752,
-          "size_gb": 82.25
-        },
-        {
-          "name": "Q5_K_XL",
-          "size_bytes": 88382088608,
-          "size_gb": 82.31
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 109157656096,
-          "size_gb": 101.66
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 132854425088,
-          "size_gb": 123.73
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 144745276960,
-          "size_gb": 134.8
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 250064250304,
-          "size_gb": 232.89
-        }
-      ],
-      "repo": "unsloth/Mistral-Medium-3.5-128B-GGUF",
-      "size_gb": 69.75,
-      "speed": 100,
-      "total_params_b": 128.0
-    },
-    {
       "aa_id": "cd26a386-4873-46ff-b853-d239050025a2",
       "aa_intelligence_index": 39.183,
-      "aa_output_tps": 35.254,
+      "aa_output_tps": 35.091,
       "aa_query": "gemma 4 31B it",
       "aa_slug": "gemma-4-31b",
-      "aa_updated_at": "2026-06-09T10:14:21Z",
+      "aa_updated_at": "2026-06-15T15:45:13Z",
       "active_params_b": 30.7,
       "family": "Google",
-      "hf_quant_updated_at": "2026-06-09T10:14:21Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:13Z",
       "moe": false,
       "name": "Google Gemma 4 31B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 30.7B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 30.7B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 65,
       "quants": [
         {
@@ -1795,13 +130,13 @@
     {
       "aa_id": "2e9ff877-fd2c-4ce7-b631-7ca1bdb6d13e",
       "aa_intelligence_index": 37.157,
-      "aa_output_tps": 200.775,
+      "aa_output_tps": 197.558,
       "aa_query": "command a plus 05 2026 bf16",
       "aa_slug": "command-a-plus",
-      "aa_updated_at": "2026-06-09T10:14:23Z",
+      "aa_updated_at": "2026-06-15T15:45:18Z",
       "active_params_b": 25.0,
       "family": "Cohere",
-      "hf_quant_updated_at": "2026-06-09T10:14:23Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:18Z",
       "moe": true,
       "name": "Cohere Command A+",
       "notes": "Artificial Analysis open-weight row; 218B/25B params; license: Apache 2.0; GGUF resolved by hf-search",
@@ -1833,7 +168,7 @@
           "size_gb": 821.89
         }
       ],
-      "repo": "DevQuasar/CohereLabs.command-a-plus-05-2026-bf16-GGUF",
+      "repo": "DevQuasar/CohereLabs.command-a-plus-05-2026-bf16-GGUF-EXPERIMENTAL",
       "size_gb": 123.18,
       "speed": 100,
       "total_params_b": 218.0
@@ -1841,13 +176,13 @@
     {
       "aa_id": "63872e9c-3377-4a6b-b477-7bba244c38e9",
       "aa_intelligence_index": 35.97,
-      "aa_output_tps": 153.749,
+      "aa_output_tps": 146.49,
       "aa_query": "NVIDIA Nemotron 3 Super 120B A12B BF16",
       "aa_slug": "nvidia-nemotron-3-super-120b-a12b",
-      "aa_updated_at": "2026-06-09T10:14:26Z",
+      "aa_updated_at": "2026-06-15T15:45:21Z",
       "active_params_b": 12.7,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:14:26Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:21Z",
       "moe": true,
       "name": "NVIDIA Nemotron 3 Super 120B A12B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; 120.6B/12.7B params; license: Nvidia Nemotron Open Model License; GGUF resolved by hf-search",
@@ -1912,16 +247,16 @@
     {
       "aa_id": "f0083258-8646-45b8-8082-7aaf6c2ea82a",
       "aa_intelligence_index": 33.266,
-      "aa_output_tps": 351.439,
+      "aa_output_tps": 346.371,
       "aa_query": "gpt oss 120b",
       "aa_slug": "gpt-oss-120b",
-      "aa_updated_at": "2026-06-09T10:14:28Z",
+      "aa_updated_at": "2026-06-15T15:45:28Z",
       "active_params_b": 5.1,
       "family": "OpenAI",
-      "hf_quant_updated_at": "2026-06-09T10:14:28Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:28Z",
       "moe": true,
       "name": "OpenAI gpt-oss-120b (high)",
-      "notes": "Artificial Analysis open-weight row; 117B/5.1B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 117B/5.1B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 55,
       "quants": [
         {
@@ -1998,16 +333,16 @@
     {
       "aa_id": "2d28a13a-096e-475a-beb8-26bbd1c7d51c",
       "aa_intelligence_index": 32.426,
-      "aa_output_tps": 65.349,
+      "aa_output_tps": 68.474,
       "aa_query": "Qwen3.5 9B",
       "aa_slug": "qwen3-5-9b",
-      "aa_updated_at": "2026-06-09T10:14:28Z",
+      "aa_updated_at": "2026-06-15T15:45:31Z",
       "active_params_b": 9.65,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:28Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:31Z",
       "moe": false,
       "name": "Alibaba Qwen3.5 9B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 9.65B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 9.65B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 54,
       "quants": [
         {
@@ -2113,7 +448,7 @@
       ],
       "repo": "unsloth/Qwen3.5-9B-GGUF",
       "size_gb": 5.29,
-      "speed": 65,
+      "speed": 68,
       "total_params_b": 9.65
     },
     {
@@ -2122,42 +457,57 @@
       "aa_output_tps": 0,
       "aa_query": "K EXAONE 236B A23B",
       "aa_slug": "k-exaone",
-      "aa_updated_at": "2026-06-09T10:14:31Z",
+      "aa_updated_at": "2026-06-15T15:45:35Z",
       "active_params_b": 23.0,
       "family": "LG AI Research",
-      "hf_quant_updated_at": "2026-06-09T10:14:31Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:35Z",
       "moe": true,
       "name": "LG AI Research K-EXAONE (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 236B/23B params; license: K Exaone; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 236B/23B params; license: K Exaone; GGUF resolved by hf-search",
       "quality": 53,
       "quants": [
         {
+          "name": "Q3_K_S",
+          "size_bytes": 102388269312,
+          "size_gb": 95.36
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 113340662016,
+          "size_gb": 105.56
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 122830536960,
+          "size_gb": 114.39
+        },
+        {
           "name": "IQ4_XS",
-          "size_bytes": 127703023360,
+          "size_bytes": 127703023872,
           "size_gb": 118.93
         },
         {
+          "name": "Q4_K_S",
+          "size_bytes": 134779535616,
+          "size_gb": 125.52
+        },
+        {
           "name": "Q4_K_M",
-          "size_bytes": 143471722240,
+          "size_bytes": 143471722752,
           "size_gb": 133.62
         },
         {
+          "name": "Q5_K_S",
+          "size_bytes": 163262529792,
+          "size_gb": 152.05
+        },
+        {
           "name": "Q5_K_M",
-          "size_bytes": 168271855360,
+          "size_bytes": 168271855872,
           "size_gb": 156.72
-        },
-        {
-          "name": "Q8_0",
-          "size_bytes": 252035464960,
-          "size_gb": 234.73
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 474281148160,
-          "size_gb": 441.71
         }
       ],
-      "repo": "LGAI-EXAONE/K-EXAONE-236B-A23B-GGUF",
+      "repo": "mradermacher/K-EXAONE-236B-A23B-GGUF",
       "size_gb": 133.62,
       "speed": 0,
       "total_params_b": 236.0
@@ -2165,16 +515,16 @@
     {
       "aa_id": "b6d2e43d-3082-43f5-9318-0f4dbcb54163",
       "aa_intelligence_index": 31.871,
-      "aa_output_tps": 207.799,
+      "aa_output_tps": 186.527,
       "aa_query": "Trinity Large Thinking",
       "aa_slug": "trinity-large-thinking",
-      "aa_updated_at": "2026-06-09T10:14:31Z",
+      "aa_updated_at": "2026-06-15T15:45:38Z",
       "active_params_b": 13.0,
       "family": "Arcee AI",
-      "hf_quant_updated_at": "2026-06-09T10:14:31Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:38Z",
       "moe": true,
       "name": "Arcee AI Trinity Large Thinking",
-      "notes": "Artificial Analysis open-weight row; 399B/13B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 399B/13B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 53,
       "quants": [
         {
@@ -2314,13 +664,13 @@
       "aa_output_tps": 0,
       "aa_query": "gemma 4 26B A4B it",
       "aa_slug": "gemma-4-26b-a4b",
-      "aa_updated_at": "2026-06-09T10:14:32Z",
+      "aa_updated_at": "2026-06-15T15:45:41Z",
       "active_params_b": 3.8,
       "family": "Google",
-      "hf_quant_updated_at": "2026-06-09T10:14:32Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:41Z",
       "moe": true,
       "name": "Google Gemma 4 26B A4B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 25.2B/3.8B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 25.2B/3.8B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 52,
       "quants": [
         {
@@ -2437,16 +787,16 @@
     {
       "aa_id": "eebfef01-709e-4ffe-b72f-0db75ef2434b",
       "aa_intelligence_index": 30.685,
-      "aa_output_tps": 180.638,
+      "aa_output_tps": 192.185,
       "aa_query": "Qwen3.5 35B A3B",
       "aa_slug": "qwen3-5-35b-a3b-non-reasoning",
-      "aa_updated_at": "2026-06-09T10:14:33Z",
+      "aa_updated_at": "2026-06-15T15:45:44Z",
       "active_params_b": 3.0,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:33Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:44Z",
       "moe": true,
       "name": "Alibaba Qwen3.5 35B A3B (Non-reasoning)",
-      "notes": "Artificial Analysis open-weight row; 36B/3B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 36B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 51,
       "quants": [
         {
@@ -2576,45 +926,186 @@
       "aa_output_tps": 0,
       "aa_query": "EXAONE 4.5 33B",
       "aa_slug": "exaone-4-5-33b",
-      "aa_updated_at": "2026-06-09T10:14:33Z",
+      "aa_updated_at": "2026-06-15T15:45:47Z",
       "active_params_b": 34.4,
       "family": "LG AI Research",
-      "hf_quant_updated_at": "2026-06-09T10:14:33Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:47Z",
       "moe": false,
       "name": "LG AI Research EXAONE 4.5 33B",
-      "notes": "Artificial Analysis open-weight row; 34.4B params; license: EXAONE AI Model License Agreement 1.2 - NC; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 34.4B params; license: EXAONE AI Model License Agreement 1.2 - NC; GGUF resolved by hf-search",
       "quality": 50,
       "quants": [
         {
+          "name": "Q3_K_S",
+          "size_bytes": 14523319264,
+          "size_gb": 13.53
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 16077044704,
+          "size_gb": 14.97
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 17400708064,
+          "size_gb": 16.21
+        },
+        {
           "name": "IQ4_XS",
-          "size_bytes": 18029955264,
+          "size_bytes": 18029956064,
           "size_gb": 16.79
         },
         {
+          "name": "Q4_K_S",
+          "size_bytes": 18952907744,
+          "size_gb": 17.65
+        },
+        {
           "name": "Q4_K_M",
-          "size_bytes": 20047839424,
+          "size_bytes": 20047840224,
           "size_gb": 18.67
         },
         {
+          "name": "Q5_K_S",
+          "size_bytes": 22844599264,
+          "size_gb": 21.28
+        },
+        {
           "name": "Q5_K_M",
-          "size_bytes": 23482253504,
+          "size_bytes": 23482254304,
           "size_gb": 21.87
         },
         {
           "name": "Q8_0",
-          "size_bytes": 35138742464,
+          "size_bytes": 35138743264,
           "size_gb": 32.73
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 66135222464,
-          "size_gb": 61.59
         }
       ],
-      "repo": "LGAI-EXAONE/EXAONE-4.5-33B-GGUF",
+      "repo": "mradermacher/EXAONE-4.5-33B-GGUF",
       "size_gb": 18.67,
       "speed": 0,
       "total_params_b": 34.4
+    },
+    {
+      "aa_id": "feb02d3b-ff8d-4ed4-b165-13f8d4a7192c",
+      "aa_intelligence_index": 29.174,
+      "aa_output_tps": 119.913,
+      "aa_query": "gemma 4 12B it",
+      "aa_slug": "gemma-4-12b",
+      "aa_updated_at": "2026-06-15T15:45:53Z",
+      "active_params_b": 12.0,
+      "family": "Google",
+      "hf_quant_updated_at": "2026-06-15T15:45:53Z",
+      "moe": false,
+      "name": "Google Gemma 4 12B (Reasoning)",
+      "notes": "Artificial Analysis open-weight row; 12B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 48,
+      "quants": [
+        {
+          "name": "F16",
+          "size_bytes": 861520128,
+          "size_gb": 0.8
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 4213351840,
+          "size_gb": 3.92
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 4639714720,
+          "size_gb": 4.32
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 4661418400,
+          "size_gb": 4.34
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 5135013280,
+          "size_gb": 4.78
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 5693871520,
+          "size_gb": 5.3
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 6022683040,
+          "size_gb": 5.61
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 6375732640,
+          "size_gb": 5.94
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 6716356000,
+          "size_gb": 6.26
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 6738474400,
+          "size_gb": 6.28
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 6764524960,
+          "size_gb": 6.3
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 7121860000,
+          "size_gb": 6.63
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 7366421920,
+          "size_gb": 6.86
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 8204678560,
+          "size_gb": 7.64
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 8413574560,
+          "size_gb": 7.84
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 8606020000,
+          "size_gb": 8.01
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 10685011360,
+          "size_gb": 9.95
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 13134755488,
+          "size_gb": 12.23
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 13637326240,
+          "size_gb": 12.7
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 24693585312,
+          "size_gb": 23.0
+        }
+      ],
+      "repo": "unsloth/gemma-4-12b-it-GGUF",
+      "size_gb": 6.63,
+      "speed": 100,
+      "total_params_b": 12.0
     },
     {
       "aa_id": "9815da7d-70f4-44d6-b539-9ffef0faa152",
@@ -2622,10 +1113,10 @@
       "aa_output_tps": 0,
       "aa_query": "Nemotron Cascade 2 30B A3B",
       "aa_slug": "nemotron-cascade-2-30b-a3b",
-      "aa_updated_at": "2026-06-09T10:14:36Z",
+      "aa_updated_at": "2026-06-15T15:45:56Z",
       "active_params_b": 3.0,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:14:36Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:56Z",
       "moe": true,
       "name": "NVIDIA Nemotron Cascade 2 30B A3B",
       "notes": "Artificial Analysis open-weight row; 31.6B/3B params; license: Nvidia Open Model License; GGUF resolved by hf-search",
@@ -2685,16 +1176,16 @@
     {
       "aa_id": "fc92f822-04b7-420d-9c07-a21af5e9aac7",
       "aa_intelligence_index": 28.277,
-      "aa_output_tps": 107.952,
+      "aa_output_tps": 74.376,
       "aa_query": "Qwen3 Coder Next",
       "aa_slug": "qwen3-coder-next",
-      "aa_updated_at": "2026-06-09T10:14:36Z",
+      "aa_updated_at": "2026-06-15T15:45:58Z",
       "active_params_b": 3.0,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:36Z",
+      "hf_quant_updated_at": "2026-06-15T15:45:58Z",
       "moe": true,
       "name": "Alibaba Qwen3 Coder Next",
-      "notes": "Artificial Analysis open-weight row; 79.7B/3B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 79.7B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 47,
       "quants": [
         {
@@ -2830,22 +1321,22 @@
       ],
       "repo": "unsloth/Qwen3-Coder-Next-GGUF",
       "size_gb": 91.11,
-      "speed": 100,
+      "speed": 74,
       "total_params_b": 79.7
     },
     {
       "aa_id": "3fd96175-4ef1-434c-8795-f873aec2abc1",
       "aa_intelligence_index": 27.803,
-      "aa_output_tps": 177.098,
+      "aa_output_tps": 176.054,
       "aa_query": "Mistral Small 4 119B 2603",
       "aa_slug": "mistral-small-4",
-      "aa_updated_at": "2026-06-09T10:14:37Z",
+      "aa_updated_at": "2026-06-15T15:46:01Z",
       "active_params_b": 6.5,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:14:37Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:01Z",
       "moe": true,
       "name": "Mistral Small 4 (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 119B/6.5B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 119B/6.5B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 46,
       "quants": [
         {
@@ -2965,18 +1456,59 @@
       "total_params_b": 119.0
     },
     {
+      "aa_id": "1e9907e0-ffac-4595-b006-962e4f1da7cf",
+      "aa_intelligence_index": 27.599,
+      "aa_output_tps": 188.118,
+      "aa_query": "Cohere North Mini Code",
+      "aa_slug": "north-mini-code",
+      "aa_updated_at": "2026-06-15T15:46:02Z",
+      "active_params_b": 3.0,
+      "family": "Cohere",
+      "hf_quant_updated_at": "2026-06-15T15:46:02Z",
+      "moe": true,
+      "name": "Cohere North Mini Code",
+      "notes": "Artificial Analysis open-weight row; 30B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 46,
+      "quants": [
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 14761272128,
+          "size_gb": 13.75
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 18593981248,
+          "size_gb": 17.32
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 21727781696,
+          "size_gb": 20.24
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 32437289792,
+          "size_gb": 30.21
+        }
+      ],
+      "repo": "DevQuasar/CohereLabs.North-Mini-Code-1.0-GGUF",
+      "size_gb": 17.32,
+      "speed": 100,
+      "total_params_b": 30.0
+    },
+    {
       "aa_id": "651ef7ae-9a8f-477e-9c8e-460aa156ba02",
       "aa_intelligence_index": 27.076,
-      "aa_output_tps": 201.036,
+      "aa_output_tps": 21.599,
       "aa_query": "Qwen3.5 4B",
       "aa_slug": "qwen3-5-4b",
-      "aa_updated_at": "2026-06-09T10:14:37Z",
+      "aa_updated_at": "2026-06-15T15:46:06Z",
       "active_params_b": 4.66,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:37Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:06Z",
       "moe": false,
       "name": "Alibaba Qwen3.5 4B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 4.66B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 4.66B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 45,
       "quants": [
         {
@@ -3082,22 +1614,22 @@
       ],
       "repo": "unsloth/Qwen3.5-4B-GGUF",
       "size_gb": 2.55,
-      "speed": 100,
+      "speed": 22,
       "total_params_b": 4.66
     },
     {
       "aa_id": "c8a79180-7d16-4474-8701-9a77c0baa56a",
       "aa_intelligence_index": 26.723,
-      "aa_output_tps": 168.759,
+      "aa_output_tps": 176.459,
       "aa_query": "Qwen3 Next 80B A3B Thinking",
       "aa_slug": "qwen3-next-80b-a3b-reasoning",
-      "aa_updated_at": "2026-06-09T10:14:38Z",
+      "aa_updated_at": "2026-06-15T15:46:09Z",
       "active_params_b": 3.0,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:38Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:09Z",
       "moe": true,
       "name": "Alibaba Qwen3 Next 80B A3B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 80B/3B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 80B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 44,
       "quants": [
         {
@@ -3227,10 +1759,10 @@
       "aa_output_tps": 0,
       "aa_query": "Ling 2.6 flash",
       "aa_slug": "ling-2-6-flash",
-      "aa_updated_at": "2026-06-09T10:14:39Z",
+      "aa_updated_at": "2026-06-15T15:46:10Z",
       "active_params_b": 7.4,
       "family": "InclusionAI",
-      "hf_quant_updated_at": "2026-06-09T10:14:39Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:10Z",
       "moe": true,
       "name": "InclusionAI Ling 2.6 Flash",
       "notes": "Artificial Analysis open-weight row; 107B/7.4B params; license: Mit; GGUF resolved by hf-search",
@@ -3260,16 +1792,16 @@
     {
       "aa_id": "36f73aaf-d38a-4b56-a2b3-d04d17186910",
       "aa_intelligence_index": 24.47,
-      "aa_output_tps": 240.105,
+      "aa_output_tps": 219.457,
       "aa_query": "gpt oss 20b",
       "aa_slug": "gpt-oss-20b",
-      "aa_updated_at": "2026-06-09T10:14:40Z",
+      "aa_updated_at": "2026-06-15T15:46:13Z",
       "active_params_b": 3.6,
       "family": "OpenAI",
-      "hf_quant_updated_at": "2026-06-09T10:14:40Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:13Z",
       "moe": true,
       "name": "OpenAI gpt-oss-20B (high)",
-      "notes": "Artificial Analysis open-weight row; 21B/3.6B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 21B/3.6B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 40,
       "quants": [
         {
@@ -3346,13 +1878,13 @@
     {
       "aa_id": "76dcf6ef-39ea-4be0-b693-b88da25b4caf",
       "aa_intelligence_index": 24.272,
-      "aa_output_tps": 149.091,
+      "aa_output_tps": 85.438,
       "aa_query": "NVIDIA Nemotron 3 Nano 30B A3B BF16",
       "aa_slug": "nvidia-nemotron-3-nano-30b-a3b-reasoning",
-      "aa_updated_at": "2026-06-09T10:14:42Z",
+      "aa_updated_at": "2026-06-15T15:46:17Z",
       "active_params_b": 3.6,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:14:42Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:17Z",
       "moe": true,
       "name": "NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; 31.6B/3.6B params; license: Nvidia Nemotron Open Model License; GGUF resolved by hf-search",
@@ -3411,7 +1943,7 @@
       ],
       "repo": "mradermacher/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-GGUF",
       "size_gb": 22.83,
-      "speed": 100,
+      "speed": 85,
       "total_params_b": 31.6
     },
     {
@@ -3420,10 +1952,10 @@
       "aa_output_tps": 0,
       "aa_query": "LongCat Flash Lite",
       "aa_slug": "longcat-flash-lite",
-      "aa_updated_at": "2026-06-09T10:14:43Z",
+      "aa_updated_at": "2026-06-15T15:46:18Z",
       "active_params_b": 3.0,
       "family": "LongCat",
-      "hf_quant_updated_at": "2026-06-09T10:14:43Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:18Z",
       "moe": true,
       "name": "LongCat Flash Lite",
       "notes": "Artificial Analysis open-weight row; 68.5B/3B params; license: MIT; GGUF resolved by hf-search",
@@ -3463,16 +1995,16 @@
     {
       "aa_id": "4928e950-7f37-4475-b0dc-c5bad781a321",
       "aa_intelligence_index": 22.805,
-      "aa_output_tps": 52.366,
+      "aa_output_tps": 56.188,
       "aa_query": "Mistral Large 3 675B Instruct 2512",
       "aa_slug": "mistral-large-3",
-      "aa_updated_at": "2026-06-09T10:14:44Z",
+      "aa_updated_at": "2026-06-15T15:46:21Z",
       "active_params_b": 41.0,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:14:44Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:21Z",
       "moe": true,
       "name": "Mistral Large 3",
-      "notes": "Artificial Analysis open-weight row; 675B/41B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 675B/41B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 38,
       "quants": [
         {
@@ -3598,7 +2130,7 @@
       ],
       "repo": "unsloth/Mistral-Large-3-675B-Instruct-2512-GGUF",
       "size_gb": 379.04,
-      "speed": 52,
+      "speed": 56,
       "total_params_b": 675.0
     },
     {
@@ -3607,10 +2139,10 @@
       "aa_output_tps": 0,
       "aa_query": "INTELLECT 3",
       "aa_slug": "intellect-3",
-      "aa_updated_at": "2026-06-09T10:14:47Z",
+      "aa_updated_at": "2026-06-15T15:46:24Z",
       "active_params_b": 12.0,
       "family": "Prime Intellect",
-      "hf_quant_updated_at": "2026-06-09T10:14:47Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:24Z",
       "moe": true,
       "name": "Prime Intellect INTELLECT-3",
       "notes": "Artificial Analysis open-weight row; 107B/12B params; license: MIT; GGUF resolved by hf-search",
@@ -3740,16 +2272,16 @@
     {
       "aa_id": "09f43999-b67b-4c1b-b050-44df41ed7e62",
       "aa_intelligence_index": 22.042,
-      "aa_output_tps": 60.722,
+      "aa_output_tps": 67.551,
       "aa_query": "Devstral 2 123B Instruct 2512",
       "aa_slug": "devstral-2",
-      "aa_updated_at": "2026-06-09T10:14:47Z",
+      "aa_updated_at": "2026-06-15T15:46:27Z",
       "active_params_b": 125.0,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:14:47Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:27Z",
       "moe": false,
       "name": "Mistral Devstral 2",
-      "notes": "Artificial Analysis open-weight row; 125B params; license: Modified MIT License; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 125B params; license: Modified MIT License; GGUF resolved by hf-search",
       "quality": 36,
       "quants": [
         {
@@ -3870,7 +2402,7 @@
       ],
       "repo": "unsloth/Devstral-2-123B-Instruct-2512-GGUF",
       "size_gb": 69.75,
-      "speed": 61,
+      "speed": 68,
       "total_params_b": 125.0
     },
     {
@@ -3879,10 +2411,10 @@
       "aa_output_tps": 0,
       "aa_query": "Solar Open 100B",
       "aa_slug": "solar-open-100b-reasoning",
-      "aa_updated_at": "2026-06-09T10:14:50Z",
+      "aa_updated_at": "2026-06-15T15:46:30Z",
       "active_params_b": 12.0,
       "family": "Upstage",
-      "hf_quant_updated_at": "2026-06-09T10:14:50Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:30Z",
       "moe": true,
       "name": "Upstage Solar Open 100B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; 102B/12B params; license: Upstage Solar License; GGUF resolved by hf-search",
@@ -3890,51 +2422,56 @@
       "quants": [
         {
           "name": "Q3_K_S",
-          "size_bytes": 44522770592,
+          "size_bytes": 44522770144,
           "size_gb": 41.47
         },
         {
           "name": "Q3_K_M",
-          "size_bytes": 49329705120,
+          "size_bytes": 49329704672,
           "size_gb": 45.94
         },
         {
           "name": "Q3_K_L",
-          "size_bytes": 53359513760,
+          "size_bytes": 53359513312,
           "size_gb": 49.69
         },
         {
-          "name": "IQ4_XS",
-          "size_bytes": 55529476256,
-          "size_gb": 51.72
+          "name": "Q4_0",
+          "size_bytes": 58045861600,
+          "size_gb": 54.06
         },
         {
           "name": "Q4_K_S",
-          "size_bytes": 58555207840,
+          "size_bytes": 58555207392,
           "size_gb": 54.53
         },
         {
           "name": "Q4_K_M",
-          "size_bytes": 62256615584,
+          "size_bytes": 62256615136,
           "size_gb": 57.98
         },
         {
+          "name": "Q5_0",
+          "size_bytes": 70773477088,
+          "size_gb": 65.91
+        },
+        {
           "name": "Q5_K_S",
-          "size_bytes": 70773477536,
+          "size_bytes": 70773477088,
           "size_gb": 65.91
         },
         {
           "name": "Q5_K_M",
-          "size_bytes": 72942653600,
+          "size_bytes": 72942653152,
           "size_gb": 67.93
         },
         {
           "name": "Q8_0",
-          "size_bytes": 109151359136,
+          "size_bytes": 109151358688,
           "size_gb": 101.66
         }
       ],
-      "repo": "mradermacher/Solar-Open-100B-GGUF",
+      "repo": "AaryanK/Solar-Open-100B-GGUF",
       "size_gb": 57.98,
       "speed": 0,
       "total_params_b": 102.0
@@ -3942,13 +2479,13 @@
     {
       "aa_id": "8c748e53-61ae-48b8-af8d-eb8298b1e9db",
       "aa_intelligence_index": 21.425,
-      "aa_output_tps": 295.942,
+      "aa_output_tps": 301.837,
       "aa_query": "Nemotron 3 Nano Omni 30B A3B Reasoning BF16",
       "aa_slug": "nemotron-3-nano-omni-30b-a3b",
-      "aa_updated_at": "2026-06-09T10:14:52Z",
+      "aa_updated_at": "2026-06-15T15:46:32Z",
       "active_params_b": 3.0,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:14:52Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:32Z",
       "moe": true,
       "name": "NVIDIA Nemotron 3 Nano Omni 30B A3B Reasoning",
       "notes": "Artificial Analysis open-weight row; 30B/3B params; license: NVIDIA Open Model License Agreement; GGUF resolved by hf-search",
@@ -4058,16 +2595,16 @@
     {
       "aa_id": "2698f6c6-e436-47ce-a583-dbc25596c571",
       "aa_intelligence_index": 20.106,
-      "aa_output_tps": 149.996,
+      "aa_output_tps": 152.52,
       "aa_query": "Qwen3 Next 80B A3B Instruct",
       "aa_slug": "qwen3-next-80b-a3b-instruct",
-      "aa_updated_at": "2026-06-09T10:14:52Z",
+      "aa_updated_at": "2026-06-15T15:46:36Z",
       "active_params_b": 3.0,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:14:52Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:36Z",
       "moe": true,
       "name": "Alibaba Qwen3 Next 80B A3B Instruct",
-      "notes": "Artificial Analysis open-weight row; 80B/3B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 80B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 33,
       "quants": [
         {
@@ -4194,16 +2731,16 @@
     {
       "aa_id": "ce819310-af7c-49d3-9a02-6845111e1788",
       "aa_intelligence_index": 19.467,
-      "aa_output_tps": 51.078,
+      "aa_output_tps": 72.104,
       "aa_query": "Devstral Small 2 24B Instruct 2512",
       "aa_slug": "devstral-small-2",
-      "aa_updated_at": "2026-06-09T10:14:53Z",
+      "aa_updated_at": "2026-06-15T15:46:39Z",
       "active_params_b": 24.0,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:14:53Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:39Z",
       "moe": false,
       "name": "Mistral Devstral Small 2",
-      "notes": "Artificial Analysis open-weight row; 24B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 24B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 32,
       "quants": [
         {
@@ -4324,7 +2861,7 @@
       ],
       "repo": "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF",
       "size_gb": 13.35,
-      "speed": 51,
+      "speed": 72,
       "total_params_b": 24.0
     },
     {
@@ -4333,15 +2870,20 @@
       "aa_output_tps": 0,
       "aa_query": "gemma 4 E4B it",
       "aa_slug": "gemma-4-e4b",
-      "aa_updated_at": "2026-06-09T10:14:54Z",
+      "aa_updated_at": "2026-06-15T15:46:42Z",
       "active_params_b": 4.5,
       "family": "Google",
-      "hf_quant_updated_at": "2026-06-09T10:14:54Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:42Z",
       "moe": true,
       "name": "Google Gemma 4 E4B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 8B/4.5B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 8B/4.5B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 31,
       "quants": [
+        {
+          "name": "F16",
+          "size_bytes": 171766848,
+          "size_gb": 0.16
+        },
         {
           "name": "IQ2_M",
           "size_bytes": 3545080992,
@@ -4424,8 +2966,8 @@
         },
         {
           "name": "Q8_0",
-          "size_bytes": 8192951456,
-          "size_gb": 7.63
+          "size_bytes": 8291604704,
+          "size_gb": 7.72
         },
         {
           "name": "Q8_K_XL",
@@ -4434,8 +2976,8 @@
         },
         {
           "name": "BF16",
-          "size_bytes": 15053095840,
-          "size_gb": 14.02
+          "size_bytes": 15224862688,
+          "size_gb": 14.18
         }
       ],
       "repo": "unsloth/gemma-4-E4B-it-GGUF",
@@ -4446,16 +2988,16 @@
     {
       "aa_id": "e1cfa926-9e2b-4a0d-8c31-48366a5041c5",
       "aa_intelligence_index": 18.681,
-      "aa_output_tps": 47.93,
+      "aa_output_tps": 47.63,
       "aa_query": "Llama 3 3 Nemotron Super 49B v1 5",
       "aa_slug": "llama-nemotron-super-49b-v1-5-reasoning",
-      "aa_updated_at": "2026-06-09T10:14:54Z",
+      "aa_updated_at": "2026-06-15T15:46:44Z",
       "active_params_b": 49.0,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:14:54Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:44Z",
       "moe": false,
       "name": "NVIDIA Llama Nemotron Super 49B v1.5 (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 49B params; license: NVIDIA Open Model License Agreement; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 49B params; license: NVIDIA Open Model License Agreement; GGUF resolved by hf-search",
       "quality": 31,
       "quants": [
         {
@@ -4582,42 +3124,32 @@
     {
       "aa_id": "922c69c7-9037-43c6-8bcf-a1c555e7f3eb",
       "aa_intelligence_index": 18.365,
-      "aa_output_tps": 111.114,
+      "aa_output_tps": 96.14,
       "aa_query": "Llama 4 Maverick 17B 128E Instruct",
       "aa_slug": "llama-4-maverick",
-      "aa_updated_at": "2026-06-09T10:14:55Z",
+      "aa_updated_at": "2026-06-15T15:46:48Z",
       "active_params_b": 17.0,
       "family": "Meta",
-      "hf_quant_updated_at": "2026-06-09T10:14:55Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:48Z",
       "moe": true,
       "name": "Meta Llama 4 Maverick",
-      "notes": "Artificial Analysis open-weight row; 402B/17B params; license: LLAMA 4 COMMUNITY LICENSE AGREEMENT; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 402B/17B params; license: LLAMA 4 COMMUNITY LICENSE AGREEMENT; GGUF resolved by hf-search",
       "quality": 30,
       "quants": [
         {
-          "name": "Q1_0",
-          "size_bytes": 105711920832,
-          "size_gb": 98.45
-        },
-        {
           "name": "IQ1_S",
-          "size_bytes": 120769472544,
-          "size_gb": 112.48
+          "size_bytes": 119399114784,
+          "size_gb": 111.2
         },
         {
           "name": "IQ1_M",
-          "size_bytes": 127539546144,
-          "size_gb": 118.78
+          "size_bytes": 126239967232,
+          "size_gb": 117.57
         },
         {
           "name": "IQ2_XXS",
-          "size_bytes": 135196116992,
-          "size_gb": 125.91
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 141235914784,
-          "size_gb": 131.54
+          "size_bytes": 134055135232,
+          "size_gb": 124.85
         },
         {
           "name": "Q2_K_L",
@@ -4626,13 +3158,13 @@
         },
         {
           "name": "Q2_K_XL",
-          "size_bytes": 152655890592,
-          "size_gb": 142.17
+          "size_bytes": 151634184320,
+          "size_gb": 141.22
         },
         {
           "name": "IQ3_XXS",
-          "size_bytes": 169314814080,
-          "size_gb": 157.69
+          "size_bytes": 168681080960,
+          "size_gb": 157.1
         },
         {
           "name": "Q3_K_S",
@@ -4641,8 +3173,8 @@
         },
         {
           "name": "Q3_K_XL",
-          "size_bytes": 179554486432,
-          "size_gb": 167.22
+          "size_bytes": 178941724832,
+          "size_gb": 166.65
         },
         {
           "name": "Q3_K_M",
@@ -4650,19 +3182,9 @@
           "size_gb": 177.95
         },
         {
-          "name": "IQ4_XS",
-          "size_bytes": 214324857120,
-          "size_gb": 199.61
-        },
-        {
           "name": "IQ4_NL",
           "size_bytes": 225767442656,
           "size_gb": 210.26
-        },
-        {
-          "name": "Q4_0",
-          "size_bytes": 226766211296,
-          "size_gb": 211.19
         },
         {
           "name": "Q4_K_S",
@@ -4695,6 +3217,11 @@
           "size_gb": 267.3
         },
         {
+          "name": "IQ2_M",
+          "size_bytes": 293827825664,
+          "size_gb": 273.65
+        },
+        {
           "name": "Q6_K_XL",
           "size_bytes": 341078390912,
           "size_gb": 317.65
@@ -4703,6 +3230,11 @@
           "name": "Q8_0",
           "size_bytes": 425817094048,
           "size_gb": 396.57
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 434998624288,
+          "size_gb": 405.12
         },
         {
           "name": "Q8_K_XL",
@@ -4715,9 +3247,9 @@
           "size_gb": 746.43
         }
       ],
-      "repo": "unsloth/Llama-4-Maverick-17B-128E-Instruct-GGUF",
+      "repo": "unsloth/Llama-4-Maverick-17B-128E-Instruct-GGUF-UD",
       "size_gb": 226.09,
-      "speed": 100,
+      "speed": 96,
       "total_params_b": 402.0
     },
     {
@@ -4726,32 +3258,42 @@
       "aa_output_tps": 0,
       "aa_query": "MiniCPM5 1B",
       "aa_slug": "minicpm5-1b",
-      "aa_updated_at": "2026-06-09T10:14:56Z",
+      "aa_updated_at": "2026-06-15T15:46:51Z",
       "active_params_b": 1.0,
       "family": "OpenBMB",
-      "hf_quant_updated_at": "2026-06-09T10:14:56Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:51Z",
       "moe": false,
       "name": "OpenBMB MiniCPM5-1B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 1B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 1B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 30,
       "quants": [
         {
+          "name": "IQ4_XS",
+          "size_bytes": 642245216,
+          "size_gb": 0.6
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 667804256,
+          "size_gb": 0.62
+        },
+        {
           "name": "Q4_K_M",
-          "size_bytes": 688065920,
+          "size_bytes": 688067168,
           "size_gb": 0.64
         },
         {
           "name": "Q8_0",
-          "size_bytes": 1153529216,
+          "size_bytes": 1153530464,
           "size_gb": 1.07
         },
         {
           "name": "F16",
-          "size_bytes": 2166551936,
+          "size_bytes": 2166553184,
           "size_gb": 2.02
         }
       ],
-      "repo": "openbmb/MiniCPM5-1B-GGUF",
+      "repo": "bombman/MiniCPM5-1B-GGUF",
       "size_gb": 0.64,
       "speed": 0,
       "total_params_b": 1.0
@@ -4759,16 +3301,16 @@
     {
       "aa_id": "70152cb0-fb36-4732-a925-89ef40994be1",
       "aa_intelligence_index": 18.159,
-      "aa_output_tps": 108.623,
+      "aa_output_tps": 107.14,
       "aa_query": "Magistral Small 2509",
       "aa_slug": "magistral-small-2509",
-      "aa_updated_at": "2026-06-09T10:14:57Z",
+      "aa_updated_at": "2026-06-15T15:46:53Z",
       "active_params_b": 24.0,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:14:57Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:53Z",
       "moe": false,
       "name": "Mistral Magistral Small 1.2",
-      "notes": "Artificial Analysis open-weight row; 24B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 24B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 30,
       "quants": [
         {
@@ -4885,26 +3427,31 @@
     {
       "aa_id": "45790612-02e3-4c42-b5bd-cd7ed2ea1f2f",
       "aa_intelligence_index": 18.157,
-      "aa_output_tps": 107.478,
+      "aa_output_tps": 110.296,
       "aa_query": "sarvam 105b",
       "aa_slug": "sarvam-105b",
-      "aa_updated_at": "2026-06-09T10:14:57Z",
+      "aa_updated_at": "2026-06-15T15:46:55Z",
       "active_params_b": 10.3,
       "family": "Sarvam",
-      "hf_quant_updated_at": "2026-06-09T10:14:57Z",
+      "hf_quant_updated_at": "2026-06-15T15:46:55Z",
       "moe": true,
       "name": "Sarvam 105B (high)",
-      "notes": "Artificial Analysis open-weight row; 106B/10.3B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 106B/10.3B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 30,
       "quants": [
         {
           "name": "Q4_K_M",
-          "size_bytes": 64202142560,
-          "size_gb": 59.79
+          "size_bytes": 64212541632,
+          "size_gb": 59.8
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 112724452832,
+          "size_gb": 104.98
         }
       ],
-      "repo": "sarvamai/sarvam-105b-GGUF",
-      "size_gb": 59.79,
+      "repo": "limegreenpeper1/sarvam-105B-GGUF",
+      "size_gb": 59.8,
       "speed": 100,
       "total_params_b": 106.0
     },
@@ -4914,42 +3461,62 @@
       "aa_output_tps": 0,
       "aa_query": "EXAONE 4.0 32B",
       "aa_slug": "exaone-4-0-32b-reasoning",
-      "aa_updated_at": "2026-06-09T10:14:59Z",
+      "aa_updated_at": "2026-06-15T15:47:01Z",
       "active_params_b": 32.0,
       "family": "LG AI Research",
-      "hf_quant_updated_at": "2026-06-09T10:14:59Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:01Z",
       "moe": false,
       "name": "LG AI Research EXAONE 4.0 32B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 32B params; license: EXAONE AI Model License Agreement 1.2 - NC; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 32B params; license: EXAONE AI Model License Agreement 1.2 - NC; GGUF resolved by hf-search",
       "quality": 28,
       "quants": [
         {
+          "name": "Q3_K_S",
+          "size_bytes": 13962830272,
+          "size_gb": 13.0
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 15493751232,
+          "size_gb": 14.43
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 16795951552,
+          "size_gb": 15.64
+        },
+        {
           "name": "IQ4_XS",
-          "size_bytes": 17387577120,
+          "size_bytes": 17387577792,
           "size_gb": 16.19
         },
         {
+          "name": "Q4_K_S",
+          "size_bytes": 18286404032,
+          "size_gb": 17.03
+        },
+        {
           "name": "Q4_K_M",
-          "size_bytes": 19343826720,
+          "size_bytes": 19343827392,
           "size_gb": 18.02
         },
         {
+          "name": "Q5_K_S",
+          "size_bytes": 22078316992,
+          "size_gb": 20.56
+        },
+        {
           "name": "Q5_K_M",
-          "size_bytes": 22696648480,
+          "size_bytes": 22696649152,
           "size_gb": 21.14
         },
         {
           "name": "Q8_0",
-          "size_bytes": 34009636640,
+          "size_bytes": 34009637312,
           "size_gb": 31.67
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 64012017632,
-          "size_gb": 59.62
         }
       ],
-      "repo": "LGAI-EXAONE/EXAONE-4.0-32B-GGUF",
+      "repo": "mradermacher/EXAONE-4.0-32B-GGUF",
       "size_gb": 18.02,
       "speed": 0,
       "total_params_b": 32.0
@@ -4957,16 +3524,16 @@
     {
       "aa_id": "5d4acc80-7a88-4e84-bfe7-99071b84e6a4",
       "aa_intelligence_index": 16.291,
-      "aa_output_tps": 0,
+      "aa_output_tps": 17.992,
       "aa_query": "Qwen3.5 2B",
       "aa_slug": "qwen3-5-2b",
-      "aa_updated_at": "2026-06-09T10:15:00Z",
+      "aa_updated_at": "2026-06-15T15:47:04Z",
       "active_params_b": 2.27,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:15:00Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:04Z",
       "moe": false,
       "name": "Alibaba Qwen3.5 2B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 2.27B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 2.27B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 27,
       "quants": [
         {
@@ -5072,7 +3639,7 @@
       ],
       "repo": "unsloth/Qwen3.5-2B-GGUF",
       "size_gb": 1.19,
-      "speed": 0,
+      "speed": 18,
       "total_params_b": 2.27
     },
     {
@@ -5081,10 +3648,10 @@
       "aa_output_tps": 0,
       "aa_query": "Nanbeige4.1 3B",
       "aa_slug": "nanbeige4-1-3b",
-      "aa_updated_at": "2026-06-09T10:15:02Z",
+      "aa_updated_at": "2026-06-15T15:47:06Z",
       "active_params_b": 3.93,
       "family": "Nanbeige",
-      "hf_quant_updated_at": "2026-06-09T10:15:02Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:06Z",
       "moe": false,
       "name": "Nanbeige4.1-3B",
       "notes": "Artificial Analysis open-weight row; 3.93B params; license: Apache 2.0; GGUF resolved by hf-search",
@@ -5149,16 +3716,16 @@
     {
       "aa_id": "713fae11-c75c-4f10-ae2c-8e4074cd58af",
       "aa_intelligence_index": 15.983,
-      "aa_output_tps": 80.561,
+      "aa_output_tps": 101.553,
       "aa_query": "Ministral 3 14B Instruct 2512",
       "aa_slug": "ministral-3-14b",
-      "aa_updated_at": "2026-06-09T10:15:03Z",
+      "aa_updated_at": "2026-06-15T15:47:09Z",
       "active_params_b": 14.0,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:15:03Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:09Z",
       "moe": false,
       "name": "Mistral Ministral 3 14B",
-      "notes": "Artificial Analysis open-weight row; 14B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 14B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 26,
       "quants": [
         {
@@ -5279,7 +3846,7 @@
       ],
       "repo": "unsloth/Ministral-3-14B-Instruct-2512-GGUF",
       "size_gb": 7.67,
-      "speed": 81,
+      "speed": 100,
       "total_params_b": 14.0
     },
     {
@@ -5288,13 +3855,13 @@
       "aa_output_tps": 0,
       "aa_query": "Falcon H1R 7B",
       "aa_slug": "falcon-h1r-7b",
-      "aa_updated_at": "2026-06-09T10:15:03Z",
+      "aa_updated_at": "2026-06-15T15:47:12Z",
       "active_params_b": 7.0,
       "family": "TII UAE",
-      "hf_quant_updated_at": "2026-06-09T10:15:03Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:12Z",
       "moe": false,
       "name": "TII UAE Falcon-H1R-7B",
-      "notes": "Artificial Analysis open-weight row; 7B params; license: Falcon Mamba 7B TII License Version 1.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 7B params; license: Falcon Mamba 7B TII License Version 1.0; GGUF resolved by hf-search",
       "quality": 26,
       "quants": [
         {
@@ -5421,13 +3988,13 @@
     {
       "aa_id": "b97ef678-2d31-4375-9416-67ea97f87204",
       "aa_intelligence_index": 15.624,
-      "aa_output_tps": 85.77,
+      "aa_output_tps": 90.873,
       "aa_query": "Qwen3 Omni 30B A3B Thinking",
       "aa_slug": "qwen3-omni-30b-a3b-reasoning",
-      "aa_updated_at": "2026-06-09T10:15:06Z",
+      "aa_updated_at": "2026-06-15T15:47:15Z",
       "active_params_b": 3.0,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-06-09T10:15:06Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:15Z",
       "moe": true,
       "name": "Alibaba Qwen3 Omni 30B A3B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; 35.3B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
@@ -5451,7 +4018,7 @@
       ],
       "repo": "ggml-org/Qwen3-Omni-30B-A3B-Thinking-GGUF",
       "size_gb": 17.28,
-      "speed": 86,
+      "speed": 91,
       "total_params_b": 35.3
     },
     {
@@ -5460,10 +4027,10 @@
       "aa_output_tps": 0,
       "aa_query": "Step3 VL 10B",
       "aa_slug": "step-3-vl-10b",
-      "aa_updated_at": "2026-06-09T10:15:08Z",
+      "aa_updated_at": "2026-06-15T15:47:18Z",
       "active_params_b": 10.2,
       "family": "StepFun",
-      "hf_quant_updated_at": "2026-06-09T10:15:08Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:18Z",
       "moe": false,
       "name": "StepFun Step3 VL 10B",
       "notes": "Artificial Analysis open-weight row; 10.2B params; license: Apache 2.0; GGUF resolved by hf-search",
@@ -5541,15 +4108,20 @@
       "aa_output_tps": 0,
       "aa_query": "gemma 4 E2B it",
       "aa_slug": "gemma-4-e2b",
-      "aa_updated_at": "2026-06-09T10:15:09Z",
+      "aa_updated_at": "2026-06-15T15:47:20Z",
       "active_params_b": 2.3,
       "family": "Google",
-      "hf_quant_updated_at": "2026-06-09T10:15:09Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:20Z",
       "moe": true,
       "name": "Google Gemma 4 E2B (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 5.1B/2.3B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 5.1B/2.3B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 25,
       "quants": [
+        {
+          "name": "F16",
+          "size_bytes": 170193984,
+          "size_gb": 0.16
+        },
         {
           "name": "IQ2_M",
           "size_bytes": 2290858112,
@@ -5632,8 +4204,8 @@
         },
         {
           "name": "Q8_0",
-          "size_bytes": 5048350848,
-          "size_gb": 4.7
+          "size_bytes": 5146168512,
+          "size_gb": 4.79
         },
         {
           "name": "Q8_K_XL",
@@ -5642,8 +4214,8 @@
         },
         {
           "name": "BF16",
-          "size_bytes": 9311303552,
-          "size_gb": 8.67
+          "size_bytes": 9481497536,
+          "size_gb": 8.83
         }
       ],
       "repo": "unsloth/gemma-4-E2B-it-GGUF",
@@ -5654,130 +4226,135 @@
     {
       "aa_id": "cf095603-72b6-47f8-8ee1-09a42890f92a",
       "aa_intelligence_index": 15.018,
-      "aa_output_tps": 52.132,
+      "aa_output_tps": 51.578,
       "aa_query": "Llama 3 1 Nemotron Ultra 253B v1",
       "aa_slug": "llama-3-1-nemotron-ultra-253b-v1-reasoning",
-      "aa_updated_at": "2026-06-09T10:15:10Z",
+      "aa_updated_at": "2026-06-15T15:47:23Z",
       "active_params_b": 253.0,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:15:10Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:23Z",
       "moe": false,
       "name": "NVIDIA Llama 3.1 Nemotron Ultra 253B v1 (Reasoning)",
-      "notes": "Artificial Analysis open-weight row; 253B params; license: NVIDIA Open Model License Agreement; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 253B params; license: NVIDIA Open Model License Agreement; GGUF resolved by hf-search",
       "quality": 25,
       "quants": [
         {
           "name": "IQ1_S",
-          "size_bytes": 54851007968,
-          "size_gb": 51.08
+          "size_bytes": 53650518976,
+          "size_gb": 49.97
         },
         {
           "name": "IQ1_M",
-          "size_bytes": 59715679712,
-          "size_gb": 55.61
+          "size_bytes": 58823275456,
+          "size_gb": 54.78
         },
         {
           "name": "IQ2_XXS",
-          "size_bytes": 68079711712,
-          "size_gb": 63.4
+          "size_bytes": 67444536256,
+          "size_gb": 62.81
+        },
+        {
+          "name": "IQ2_XS",
+          "size_bytes": 74878415808,
+          "size_gb": 69.74
+        },
+        {
+          "name": "IQ2_S",
+          "size_bytes": 78547579840,
+          "size_gb": 73.15
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 85444588608,
+          "size_gb": 79.58
         },
         {
           "name": "Q2_K_L",
-          "size_bytes": 93887591904,
-          "size_gb": 87.44
+          "size_bytes": 95447184448,
+          "size_gb": 88.89
         },
         {
-          "name": "Q2_K_XL",
-          "size_bytes": 94686377440,
-          "size_gb": 88.18
+          "name": "IQ3_XXS",
+          "size_bytes": 97617835040,
+          "size_gb": 90.91
+        },
+        {
+          "name": "IQ3_XS",
+          "size_bytes": 103320876064,
+          "size_gb": 96.23
         },
         {
           "name": "Q3_K_S",
-          "size_bytes": 109720598112,
+          "size_bytes": 109720597536,
           "size_gb": 102.19
         },
         {
+          "name": "IQ3_M",
+          "size_bytes": 113504678976,
+          "size_gb": 105.71
+        },
+        {
           "name": "Q3_K_M",
-          "size_bytes": 121884309088,
+          "size_bytes": 121884308640,
           "size_gb": 113.51
         },
         {
+          "name": "Q3_K_L",
+          "size_bytes": 132704564384,
+          "size_gb": 123.59
+        },
+        {
           "name": "Q3_K_XL",
-          "size_bytes": 123170584128,
-          "size_gb": 114.71
+          "size_bytes": 134543242400,
+          "size_gb": 125.3
         },
         {
           "name": "IQ4_XS",
-          "size_bytes": 135476442720,
-          "size_gb": 126.17
+          "size_bytes": 135410775200,
+          "size_gb": 126.11
         },
         {
           "name": "IQ4_NL",
-          "size_bytes": 143230269024,
+          "size_bytes": 143230268608,
           "size_gb": 133.39
         },
         {
+          "name": "Q4_0",
+          "size_bytes": 143735944384,
+          "size_gb": 133.86
+        },
+        {
           "name": "Q4_K_S",
-          "size_bytes": 144384226912,
+          "size_bytes": 144384226464,
           "size_gb": 134.47
         },
         {
           "name": "Q4_K_M",
-          "size_bytes": 150936876768,
+          "size_bytes": 150936876160,
           "size_gb": 140.57
         },
         {
-          "name": "Q4_K_XL",
-          "size_bytes": 151847302912,
-          "size_gb": 141.42
+          "name": "Q4_K_L",
+          "size_bytes": 152496469152,
+          "size_gb": 142.02
         },
         {
           "name": "Q5_K_S",
-          "size_bytes": 174508242656,
+          "size_bytes": 174508242176,
           "size_gb": 162.52
         },
         {
           "name": "Q5_K_M",
-          "size_bytes": 178547455712,
+          "size_bytes": 178547455232,
           "size_gb": 166.29
         },
         {
-          "name": "Q5_K_XL",
-          "size_bytes": 179441465056,
-          "size_gb": 167.12
-        },
-        {
-          "name": "IQ2_M",
-          "size_bytes": 192678029920,
-          "size_gb": 179.45
-        },
-        {
-          "name": "IQ3_XXS",
-          "size_bytes": 213735434912,
-          "size_gb": 199.06
-        },
-        {
-          "name": "Q6_K_XL",
-          "size_bytes": 214981146400,
-          "size_gb": 200.22
-        },
-        {
           "name": "Q8_0",
-          "size_bytes": 269253736128,
+          "size_bytes": 269253735648,
           "size_gb": 250.76
-        },
-        {
-          "name": "Q8_K_XL",
-          "size_bytes": 280951912384,
-          "size_gb": 261.66
-        },
-        {
-          "name": "BF16",
-          "size_bytes": 506815183072,
-          "size_gb": 472.01
         }
       ],
-      "repo": "unsloth/Llama-3_1-Nemotron-Ultra-253B-v1-GGUF",
+      "repo": "bartowski/nvidia_Llama-3_1-Nemotron-Ultra-253B-v1-GGUF",
       "size_gb": 140.57,
       "speed": 52,
       "total_params_b": 253.0
@@ -5785,13 +4362,13 @@
     {
       "aa_id": "6e6e02fd-9cbd-417f-9bfc-673df89c313d",
       "aa_intelligence_index": 14.888,
-      "aa_output_tps": 283.379,
+      "aa_output_tps": 293.406,
       "aa_query": "NVIDIA Nemotron Nano 12B v2 VL BF16",
       "aa_slug": "nvidia-nemotron-nano-12b-v2-vl-reasoning",
-      "aa_updated_at": "2026-06-09T10:15:12Z",
+      "aa_updated_at": "2026-06-15T15:47:28Z",
       "active_params_b": 13.2,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:15:12Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:28Z",
       "moe": false,
       "name": "NVIDIA Nemotron Nano 12B v2 VL (Reasoning)",
       "notes": "Artificial Analysis open-weight row; 13.2B params; license: Nvidia Open Model License; GGUF resolved by hf-search",
@@ -5831,16 +4408,16 @@
     {
       "aa_id": "9741f3c2-cbb1-4a3f-99ee-7bd7384d9038",
       "aa_intelligence_index": 14.841,
-      "aa_output_tps": 102.538,
+      "aa_output_tps": 100.221,
       "aa_query": "Ministral 3 8B Instruct 2512",
       "aa_slug": "ministral-3-8b",
-      "aa_updated_at": "2026-06-09T10:15:13Z",
+      "aa_updated_at": "2026-06-15T15:47:31Z",
       "active_params_b": 8.0,
       "family": "Mistral",
-      "hf_quant_updated_at": "2026-06-09T10:15:13Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:31Z",
       "moe": false,
       "name": "Mistral Ministral 3 8B",
-      "notes": "Artificial Analysis open-weight row; 8B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 8B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 24,
       "quants": [
         {
@@ -5967,13 +4544,13 @@
     {
       "aa_id": "f1d52583-9d20-4099-99ac-b5df9430c3b6",
       "aa_intelligence_index": 14.758,
-      "aa_output_tps": 120.922,
+      "aa_output_tps": 82.612,
       "aa_query": "NVIDIA Nemotron Nano 9B v2",
       "aa_slug": "nvidia-nemotron-nano-9b-v2-reasoning",
-      "aa_updated_at": "2026-06-09T10:15:15Z",
+      "aa_updated_at": "2026-06-15T15:47:35Z",
       "active_params_b": 9.0,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:15:15Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:35Z",
       "moe": false,
       "name": "NVIDIA Nemotron Nano 9B V2 (Reasoning)",
       "notes": "Artificial Analysis open-weight row; 9B params; license: NVIDIA Open Model License Agreement; GGUF resolved by hf-search",
@@ -6037,7 +4614,7 @@
       ],
       "repo": "second-state/NVIDIA-Nemotron-Nano-9B-v2-GGUF",
       "size_gb": 6.08,
-      "speed": 100,
+      "speed": 83,
       "total_params_b": 9.0
     },
     {
@@ -6046,13 +4623,13 @@
       "aa_output_tps": 0,
       "aa_query": "granite 4.1 30b",
       "aa_slug": "granite-4-1-30b",
-      "aa_updated_at": "2026-06-09T10:15:16Z",
+      "aa_updated_at": "2026-06-15T15:47:37Z",
       "active_params_b": 30.0,
       "family": "IBM",
-      "hf_quant_updated_at": "2026-06-09T10:15:16Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:37Z",
       "moe": false,
       "name": "IBM Granite 4.1 30B",
-      "notes": "Artificial Analysis open-weight row; 30B params; license: Apache 2.0; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 30B params; license: Apache 2.0; GGUF resolved by hf-search",
       "quality": 24,
       "quants": [
         {
@@ -6167,10 +4744,10 @@
       "aa_output_tps": 0,
       "aa_query": "NVIDIA Nemotron 3 Nano 4B BF16",
       "aa_slug": "nvidia-nemotron-3-nano-4b",
-      "aa_updated_at": "2026-06-09T10:15:19Z",
+      "aa_updated_at": "2026-06-15T15:47:40Z",
       "active_params_b": 3.97,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-06-09T10:15:19Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:40Z",
       "moe": false,
       "name": "NVIDIA Nemotron 3 Nano 4B",
       "notes": "Artificial Analysis open-weight row; 3.97B params; license: Nvidia Nemotron Open Model License; GGUF resolved by hf-search",
@@ -6240,16 +4817,16 @@
     {
       "aa_id": "976cc8ad-7904-4056-83c5-960181f47d5f",
       "aa_intelligence_index": 14.489,
-      "aa_output_tps": 85.322,
+      "aa_output_tps": 90.626,
       "aa_query": "Llama 3.3 70B Instruct",
       "aa_slug": "llama-3-3-instruct-70b",
-      "aa_updated_at": "2026-06-09T10:15:20Z",
+      "aa_updated_at": "2026-06-15T15:47:44Z",
       "active_params_b": 70.0,
       "family": "Meta",
-      "hf_quant_updated_at": "2026-06-09T10:15:20Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:44Z",
       "moe": false,
       "name": "Meta Llama 3.3 Instruct 70B",
-      "notes": "Artificial Analysis open-weight row; 70B params; license: LLAMA 3.3 COMMUNITY LICENSE AGREEMENT; GGUF resolved by direct",
+      "notes": "Artificial Analysis open-weight row; 70B params; license: LLAMA 3.3 COMMUNITY LICENSE AGREEMENT; GGUF resolved by hf-search",
       "quality": 24,
       "quants": [
         {
@@ -6375,7 +4952,7 @@
       ],
       "repo": "unsloth/Llama-3.3-70B-Instruct-GGUF",
       "size_gb": 39.6,
-      "speed": 85,
+      "speed": 91,
       "total_params_b": 70.0
     },
     {
@@ -6384,10 +4961,10 @@
       "aa_output_tps": 0,
       "aa_query": "Kimi Linear 48B A3B Instruct",
       "aa_slug": "kimi-linear-48b-a3b-instruct",
-      "aa_updated_at": "2026-06-09T10:15:22Z",
+      "aa_updated_at": "2026-06-15T15:47:46Z",
       "active_params_b": 3.0,
       "family": "Kimi",
-      "hf_quant_updated_at": "2026-06-09T10:15:22Z",
+      "hf_quant_updated_at": "2026-06-15T15:47:46Z",
       "moe": true,
       "name": "Kimi Linear 48B A3B Instruct",
       "notes": "Artificial Analysis open-weight row; 49.1B/3B params; license: MIT; GGUF resolved by hf-search",
@@ -6443,9 +5020,3467 @@
       "size_gb": 27.66,
       "speed": 0,
       "total_params_b": 49.1
+    },
+    {
+      "aa_id": "e2b664ca-7992-4de6-8839-4867f035c892",
+      "aa_intelligence_index": 14.188,
+      "aa_output_tps": 227.138,
+      "aa_query": "LFM2.5 8B A1B",
+      "aa_slug": "lfm2-5-8b-a1b",
+      "aa_updated_at": "2026-06-15T15:47:49Z",
+      "active_params_b": 0,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:47:49Z",
+      "moe": false,
+      "name": "Liquid AI LFM2.5-8B-A1B",
+      "notes": "Artificial Analysis open-weight row; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 23,
+      "quants": [
+        {
+          "name": "IQ1_M",
+          "size_bytes": 2573872736,
+          "size_gb": 2.4
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 2701274720,
+          "size_gb": 2.52
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 2754588256,
+          "size_gb": 2.57
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 2925768288,
+          "size_gb": 2.72
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 3272339040,
+          "size_gb": 3.05
+        },
+        {
+          "name": "IQ3_S",
+          "size_bytes": 3570921056,
+          "size_gb": 3.33
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 3939626592,
+          "size_gb": 3.67
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 4003114592,
+          "size_gb": 3.73
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 4264996448,
+          "size_gb": 3.97
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 4358844000,
+          "size_gb": 4.06
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 5013941856,
+          "size_gb": 4.67
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 5322223200,
+          "size_gb": 4.96
+        },
+        {
+          "name": "MXFP4_MOE",
+          "size_bytes": 5348437600,
+          "size_gb": 4.98
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 5351583328,
+          "size_gb": 4.98
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 6005894752,
+          "size_gb": 5.59
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 6361886304,
+          "size_gb": 5.92
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 6393081440,
+          "size_gb": 5.95
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 7742467680,
+          "size_gb": 7.21
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 9010196064,
+          "size_gb": 8.39
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 9340497504,
+          "size_gb": 8.7
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 16947260768,
+          "size_gb": 15.78
+        }
+      ],
+      "repo": "unsloth/LFM2.5-8B-A1B-GGUF",
+      "size_gb": 4.96,
+      "speed": 100,
+      "total_params_b": 0
+    },
+    {
+      "aa_id": "47b7df55-5804-40de-ba11-317de786710a",
+      "aa_intelligence_index": 14.017,
+      "aa_output_tps": 0,
+      "aa_query": "Ring flash 2.0",
+      "aa_slug": "ring-flash-2-0",
+      "aa_updated_at": "2026-06-15T15:47:52Z",
+      "active_params_b": 6.1,
+      "family": "InclusionAI",
+      "hf_quant_updated_at": "2026-06-15T15:47:52Z",
+      "moe": true,
+      "name": "InclusionAI Ring-flash-2.0",
+      "notes": "Artificial Analysis open-weight row; 103B/6.1B params; license: MIT; GGUF resolved by hf-search",
+      "quality": 23,
+      "quants": [
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 62422859200,
+          "size_gb": 58.14
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 109423132096,
+          "size_gb": 101.91
+        }
+      ],
+      "repo": "inclusionAI/Ring-flash-2.0-GGUF",
+      "size_gb": 58.14,
+      "speed": 0,
+      "total_params_b": 103.0
+    },
+    {
+      "aa_id": "adf9a85e-abc3-4f28-937b-db6655cc5238",
+      "aa_intelligence_index": 13.518,
+      "aa_output_tps": 107.675,
+      "aa_query": "Llama 4 Scout 17B 16E Instruct",
+      "aa_slug": "llama-4-scout",
+      "aa_updated_at": "2026-06-15T15:47:54Z",
+      "active_params_b": 17.0,
+      "family": "Meta",
+      "hf_quant_updated_at": "2026-06-15T15:47:54Z",
+      "moe": true,
+      "name": "Meta Llama 4 Scout",
+      "notes": "Artificial Analysis open-weight row; 109B/17B params; license: LLAMA 4 COMMUNITY LICENSE AGREEMENT; GGUF resolved by hf-search",
+      "quality": 22,
+      "quants": [
+        {
+          "name": "Q1_0",
+          "size_bytes": 29261483520,
+          "size_gb": 27.25
+        },
+        {
+          "name": "IQ1_S",
+          "size_bytes": 32470126080,
+          "size_gb": 30.24
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 34988428800,
+          "size_gb": 32.59
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 37400972800,
+          "size_gb": 34.83
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 39078694400,
+          "size_gb": 36.39
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 39805775360,
+          "size_gb": 37.07
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 42376957440,
+          "size_gb": 39.47
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 45725847040,
+          "size_gb": 42.59
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 46740372480,
+          "size_gb": 43.53
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 49019031040,
+          "size_gb": 45.65
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 51755187392,
+          "size_gb": 48.2
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 57651883712,
+          "size_gb": 53.69
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 60947033792,
+          "size_gb": 56.76
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 61182963392,
+          "size_gb": 56.98
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 61452971712,
+          "size_gb": 57.23
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 61998108352,
+          "size_gb": 57.74
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 65359900352,
+          "size_gb": 60.87
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 74256944832,
+          "size_gb": 69.16
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 76546444992,
+          "size_gb": 71.29
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 79146503872,
+          "size_gb": 73.71
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 94073216160,
+          "size_gb": 87.61
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 114531589472,
+          "size_gb": 106.67
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 128179256608,
+          "size_gb": 119.38
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 215561682208,
+          "size_gb": 200.76
+        }
+      ],
+      "repo": "unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF",
+      "size_gb": 60.87,
+      "speed": 100,
+      "total_params_b": 109.0
+    },
+    {
+      "aa_id": "3bc32f13-5afa-4e28-bce1-10e57376686b",
+      "aa_intelligence_index": 13.479,
+      "aa_output_tps": 71.476,
+      "aa_query": "c4ai command a 03 2025",
+      "aa_slug": "command-a",
+      "aa_updated_at": "2026-06-15T15:47:57Z",
+      "active_params_b": 111.0,
+      "family": "Cohere",
+      "hf_quant_updated_at": "2026-06-15T15:47:57Z",
+      "moe": false,
+      "name": "Cohere Command A",
+      "notes": "Artificial Analysis open-weight row; 111B params; license: CC-BY-NC 4.0 License with Acceptable Use Addendum; GGUF resolved by hf-search",
+      "quality": 22,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 41306506080,
+          "size_gb": 38.47
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 54433039392,
+          "size_gb": 50.69
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 67135489088,
+          "size_gb": 62.52
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 78762099776,
+          "size_gb": 73.35
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 118011937952,
+          "size_gb": 109.91
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 222127670688,
+          "size_gb": 206.87
+        }
+      ],
+      "repo": "unsloth/c4ai-command-a-03-2025-GGUF",
+      "size_gb": 62.52,
+      "speed": 71,
+      "total_params_b": 111.0
+    },
+    {
+      "aa_id": "7393c56a-ec31-48e9-b804-c04f2d2cb641",
+      "aa_intelligence_index": 13.439,
+      "aa_output_tps": 300.898,
+      "aa_query": "Llama 3.1 Nemotron 70B Instruct HF",
+      "aa_slug": "llama-3-1-nemotron-instruct-70b",
+      "aa_updated_at": "2026-06-15T15:48:00Z",
+      "active_params_b": 70.0,
+      "family": "NVIDIA",
+      "hf_quant_updated_at": "2026-06-15T15:48:00Z",
+      "moe": false,
+      "name": "NVIDIA Llama 3.1 Nemotron Instruct 70B",
+      "notes": "Artificial Analysis open-weight row; 70B params; license: LLAMA 3.1 COMMUNITY LICENSE AGREEMENT; GGUF resolved by hf-search",
+      "quality": 22,
+      "quants": [
+        {
+          "name": "IQ1_M",
+          "size_bytes": 16751201184,
+          "size_gb": 15.6
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 19097389984,
+          "size_gb": 17.79
+        },
+        {
+          "name": "IQ2_XS",
+          "size_bytes": 21142113184,
+          "size_gb": 19.69
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 24119298976,
+          "size_gb": 22.46
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 27401161632,
+          "size_gb": 25.52
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 27469499296,
+          "size_gb": 25.58
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 30912056224,
+          "size_gb": 28.79
+        },
+        {
+          "name": "IQ3_M",
+          "size_bytes": 31937039264,
+          "size_gb": 29.74
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 34267499424,
+          "size_gb": 31.91
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 37140597664,
+          "size_gb": 34.59
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 37902666656,
+          "size_gb": 35.3
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 38059936672,
+          "size_gb": 35.45
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 40116538272,
+          "size_gb": 37.36
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 40347224992,
+          "size_gb": 37.58
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 42520398752,
+          "size_gb": 39.6
+        },
+        {
+          "name": "Q4_K_L",
+          "size_bytes": 43300195232,
+          "size_gb": 40.33
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 48657451936,
+          "size_gb": 45.32
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 49949822016,
+          "size_gb": 46.52
+        },
+        {
+          "name": "Q5_K_L",
+          "size_bytes": 50598284384,
+          "size_gb": 47.12
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 74975054944,
+          "size_gb": 69.83
+        }
+      ],
+      "repo": "bartowski/Llama-3.1-Nemotron-70B-Instruct-HF-GGUF",
+      "size_gb": 39.6,
+      "speed": 100,
+      "total_params_b": 70.0
+    },
+    {
+      "aa_id": "433e410e-5170-4f03-b92f-7927c220b2fe",
+      "aa_intelligence_index": 12.655,
+      "aa_output_tps": 0,
+      "aa_query": "MiniCPM V 4.6",
+      "aa_slug": "minicpm-v4-6-1-3b",
+      "aa_updated_at": "2026-06-15T15:48:04Z",
+      "active_params_b": 1.3,
+      "family": "OpenBMB",
+      "hf_quant_updated_at": "2026-06-15T15:48:04Z",
+      "moe": false,
+      "name": "OpenBMB MiniCPM-V 4.6 1.3B",
+      "notes": "Artificial Analysis open-weight row; 1.3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 21,
+      "quants": [
+        {
+          "name": "Q4_0",
+          "size_bytes": 501256896,
+          "size_gb": 0.47
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 505057984,
+          "size_gb": 0.47
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 529101504,
+          "size_gb": 0.49
+        },
+        {
+          "name": "Q5_0",
+          "size_bytes": 563458752,
+          "size_gb": 0.52
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 563458752,
+          "size_gb": 0.52
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 577802944,
+          "size_gb": 0.54
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 811591616,
+          "size_gb": 0.76
+        },
+        {
+          "name": "F16",
+          "size_bytes": 1516275776,
+          "size_gb": 1.41
+        }
+      ],
+      "repo": "openbmb/MiniCPM-V-4.6-gguf",
+      "size_gb": 0.49,
+      "speed": 0,
+      "total_params_b": 1.3
+    },
+    {
+      "aa_id": "82ed9bd2-c97b-4c35-9312-94bb72001e36",
+      "aa_intelligence_index": 12.381,
+      "aa_output_tps": 118.949,
+      "aa_query": "granite 4.1 8b",
+      "aa_slug": "granite-4-1-8b",
+      "aa_updated_at": "2026-06-15T15:48:07Z",
+      "active_params_b": 8.0,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:48:07Z",
+      "moe": false,
+      "name": "IBM Granite 4.1 8B",
+      "notes": "Artificial Analysis open-weight row; 8B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 20,
+      "quants": [
+        {
+          "name": "IQ2_M",
+          "size_bytes": 3272078720,
+          "size_gb": 3.05
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 3606148480,
+          "size_gb": 3.36
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 3625055616,
+          "size_gb": 3.38
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 3942954368,
+          "size_gb": 3.67
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 4347049344,
+          "size_gb": 4.05
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 4581389696,
+          "size_gb": 4.27
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 4833129856,
+          "size_gb": 4.5
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 5072336256,
+          "size_gb": 4.72
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 5076923776,
+          "size_gb": 4.73
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 5090817408,
+          "size_gb": 4.74
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 5347915136,
+          "size_gb": 4.98
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 5494551936,
+          "size_gb": 5.12
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 6103479680,
+          "size_gb": 5.68
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 6253884800,
+          "size_gb": 5.82
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 6290830720,
+          "size_gb": 5.86
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 7913321856,
+          "size_gb": 7.37
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 9345611136,
+          "size_gb": 8.7
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 11246810496,
+          "size_gb": 10.47
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 17587418240,
+          "size_gb": 16.38
+        }
+      ],
+      "repo": "unsloth/granite-4.1-8b-GGUF",
+      "size_gb": 4.98,
+      "speed": 100,
+      "total_params_b": 8.0
+    },
+    {
+      "aa_id": "764dd095-6ebd-4760-8eb3-cbc40964db2e",
+      "aa_intelligence_index": 12.345,
+      "aa_output_tps": 167.588,
+      "aa_query": "sarvam 30b",
+      "aa_slug": "sarvam-30b",
+      "aa_updated_at": "2026-06-15T15:48:09Z",
+      "active_params_b": 2.4,
+      "family": "Sarvam",
+      "hf_quant_updated_at": "2026-06-15T15:48:09Z",
+      "moe": true,
+      "name": "Sarvam 30B (high)",
+      "notes": "Artificial Analysis open-weight row; 32.2B/2.4B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 20,
+      "quants": [
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 19579101888,
+          "size_gb": 18.23
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 34205409984,
+          "size_gb": 31.86
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 64339518144,
+          "size_gb": 59.92
+        }
+      ],
+      "repo": "Sumitc13/sarvam-30b-GGUF",
+      "size_gb": 18.23,
+      "speed": 100,
+      "total_params_b": 32.2
+    },
+    {
+      "aa_id": "98e3230e-cee1-4c19-b9f8-b6b6a826ca93",
+      "aa_intelligence_index": 11.989,
+      "aa_output_tps": 0,
+      "aa_query": "r1 1776",
+      "aa_slug": "r1-1776",
+      "aa_updated_at": "2026-06-15T15:48:12Z",
+      "active_params_b": 37.0,
+      "family": "Perplexity",
+      "hf_quant_updated_at": "2026-06-15T15:48:12Z",
+      "moe": true,
+      "name": "Perplexity R1 1776",
+      "notes": "Artificial Analysis open-weight row; 671B/37B params; license: MIT; GGUF resolved by hf-search",
+      "quality": 20,
+      "quants": [
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 226601595392,
+          "size_gb": 211.04
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 244245534688,
+          "size_gb": 227.47
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 319198396192,
+          "size_gb": 297.28
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 320818246400,
+          "size_gb": 298.79
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 404430187968,
+          "size_gb": 376.65
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 404876293056,
+          "size_gb": 377.07
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 475396558496,
+          "size_gb": 442.75
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 713286514880,
+          "size_gb": 664.3
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 1342273048672,
+          "size_gb": 1250.09
+        }
+      ],
+      "repo": "unsloth/r1-1776-GGUF",
+      "size_gb": 376.65,
+      "speed": 0,
+      "total_params_b": 671.0
+    },
+    {
+      "aa_id": "66f4ce73-9a9b-4b49-9c6e-bedb9bfdc720",
+      "aa_intelligence_index": 11.239,
+      "aa_output_tps": 165.161,
+      "aa_query": "Ministral 3 3B Instruct 2512",
+      "aa_slug": "ministral-3-3b",
+      "aa_updated_at": "2026-06-15T15:48:18Z",
+      "active_params_b": 3.0,
+      "family": "Mistral",
+      "hf_quant_updated_at": "2026-06-15T15:48:18Z",
+      "moe": false,
+      "name": "Mistral Ministral 3 3B",
+      "notes": "Artificial Analysis open-weight row; 3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 19,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 969159968,
+          "size_gb": 0.9
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 1019196704,
+          "size_gb": 0.95
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 1108948256,
+          "size_gb": 1.03
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 1339888928,
+          "size_gb": 1.25
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 1457804576,
+          "size_gb": 1.36
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 1458959648,
+          "size_gb": 1.36
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 1492333856,
+          "size_gb": 1.39
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 1639150880,
+          "size_gb": 1.53
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 1795552544,
+          "size_gb": 1.67
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 1856083232,
+          "size_gb": 1.73
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 1959277856,
+          "size_gb": 1.82
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 2046375200,
+          "size_gb": 1.91
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 2051290400,
+          "size_gb": 1.91
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 2053256480,
+          "size_gb": 1.91
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 2146497824,
+          "size_gb": 2.0
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 2191963424,
+          "size_gb": 2.04
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 2419340576,
+          "size_gb": 2.25
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 2473653536,
+          "size_gb": 2.3
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 2479158560,
+          "size_gb": 2.31
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 3174757664,
+          "size_gb": 2.96
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 3651679520,
+          "size_gb": 3.4
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 4501026080,
+          "size_gb": 4.19
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 6866220032,
+          "size_gb": 6.39
+        }
+      ],
+      "repo": "unsloth/Ministral-3-3B-Instruct-2512-GGUF",
+      "size_gb": 2.0,
+      "speed": 100,
+      "total_params_b": 3.0
+    },
+    {
+      "aa_id": "78452c64-7303-4192-bca5-2d9ec5c623d4",
+      "aa_intelligence_index": 10.878,
+      "aa_output_tps": 58.906,
+      "aa_query": "AI21 Jamba Large 1.7",
+      "aa_slug": "jamba-1-7-large",
+      "aa_updated_at": "2026-06-15T15:48:21Z",
+      "active_params_b": 94.0,
+      "family": "AI21 Labs",
+      "hf_quant_updated_at": "2026-06-15T15:48:21Z",
+      "moe": true,
+      "name": "AI21 Labs Jamba 1.7 Large",
+      "notes": "Artificial Analysis open-weight row; 398B/94B params; license: Jamba Open Model License Agreement; GGUF resolved by hf-search",
+      "quality": 18,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 81877858272,
+          "size_gb": 76.25
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 85914208192,
+          "size_gb": 80.01
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 96366000064,
+          "size_gb": 89.75
+        },
+        {
+          "name": "IQ2_XS",
+          "size_bytes": 110706833344,
+          "size_gb": 103.1
+        },
+        {
+          "name": "IQ2_S",
+          "size_bytes": 111143565280,
+          "size_gb": 103.51
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 125786388544,
+          "size_gb": 117.15
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 138580125760,
+          "size_gb": 129.06
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 155785132128,
+          "size_gb": 145.09
+        },
+        {
+          "name": "IQ3_XS",
+          "size_bytes": 163083327712,
+          "size_gb": 151.88
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 171774974144,
+          "size_gb": 159.98
+        },
+        {
+          "name": "IQ3_M",
+          "size_bytes": 179619436704,
+          "size_gb": 167.28
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 180500764832,
+          "size_gb": 168.1
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 188455786656,
+          "size_gb": 175.51
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 188925548704,
+          "size_gb": 175.95
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 212126681376,
+          "size_gb": 197.56
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 224542591296,
+          "size_gb": 209.12
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 228153887040,
+          "size_gb": 212.48
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 231920372000,
+          "size_gb": 215.99
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 240436185536,
+          "size_gb": 223.92
+        },
+        {
+          "name": "Q4_K_L",
+          "size_bytes": 240834644416,
+          "size_gb": 224.29
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 274206231104,
+          "size_gb": 255.37
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 282393840160,
+          "size_gb": 263.0
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 423553665600,
+          "size_gb": 394.47
+        }
+      ],
+      "repo": "bartowski/ai21labs_AI21-Jamba-Large-1.7-GGUF",
+      "size_gb": 223.92,
+      "speed": 59,
+      "total_params_b": 398.0
+    },
+    {
+      "aa_id": "5dba8d07-9992-483c-81db-dac97cb15ba8",
+      "aa_intelligence_index": 10.811,
+      "aa_output_tps": 414.963,
+      "aa_query": "granite 4.0 h small",
+      "aa_slug": "granite-4-0-h-small",
+      "aa_updated_at": "2026-06-15T15:48:24Z",
+      "active_params_b": 9.0,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:48:24Z",
+      "moe": true,
+      "name": "IBM Granite 4.0 H Small",
+      "notes": "Artificial Analysis open-weight row; 32B/9B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 18,
+      "quants": [
+        {
+          "name": "Q1_0",
+          "size_bytes": 8710302624,
+          "size_gb": 8.11
+        },
+        {
+          "name": "IQ1_S",
+          "size_bytes": 9587960736,
+          "size_gb": 8.93
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 10075855776,
+          "size_gb": 9.38
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 10927188896,
+          "size_gb": 10.18
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 11569212320,
+          "size_gb": 10.77
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 11995655072,
+          "size_gb": 11.17
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 12383075232,
+          "size_gb": 11.53
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 13696773024,
+          "size_gb": 12.76
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 14218226592,
+          "size_gb": 13.24
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 14634552224,
+          "size_gb": 13.63
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 15490280352,
+          "size_gb": 14.43
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 17432357792,
+          "size_gb": 16.24
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 18401962912,
+          "size_gb": 17.14
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 18472741792,
+          "size_gb": 17.2
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 18545617824,
+          "size_gb": 17.27
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 18756426656,
+          "size_gb": 17.47
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 19571977120,
+          "size_gb": 18.23
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 22347230112,
+          "size_gb": 20.81
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 22949964704,
+          "size_gb": 21.37
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 23121537952,
+          "size_gb": 21.53
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 27871898528,
+          "size_gb": 25.96
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 34264886176,
+          "size_gb": 31.91
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 38071217056,
+          "size_gb": 35.46
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 64446180480,
+          "size_gb": 60.02
+        }
+      ],
+      "repo": "unsloth/granite-4.0-h-small-GGUF",
+      "size_gb": 18.23,
+      "speed": 100,
+      "total_params_b": 32.0
+    },
+    {
+      "aa_id": "0b226b82-1462-4860-bf1a-f8aed7024791",
+      "aa_intelligence_index": 10.676,
+      "aa_output_tps": 95.493,
+      "aa_query": "Qwen3 Omni 30B A3B Instruct",
+      "aa_slug": "qwen3-omni-30b-a3b-instruct",
+      "aa_updated_at": "2026-06-15T15:48:27Z",
+      "active_params_b": 3.0,
+      "family": "Alibaba",
+      "hf_quant_updated_at": "2026-06-15T15:48:27Z",
+      "moe": true,
+      "name": "Alibaba Qwen3 Omni 30B A3B Instruct",
+      "notes": "Artificial Analysis open-weight row; 35.3B/3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 18,
+      "quants": [
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 18557053952,
+          "size_gb": 17.28
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 32484494336,
+          "size_gb": 30.25
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 61096856576,
+          "size_gb": 56.9
+        }
+      ],
+      "repo": "ggml-org/Qwen3-Omni-30B-A3B-Instruct-GGUF",
+      "size_gb": 17.28,
+      "speed": 95,
+      "total_params_b": 35.3
+    },
+    {
+      "aa_id": "a6ea7ec0-0aca-4442-98fb-4296c6d18b31",
+      "aa_intelligence_index": 10.52,
+      "aa_output_tps": 23.29,
+      "aa_query": "Qwen3.5 0.8B",
+      "aa_slug": "qwen3-5-0-8b",
+      "aa_updated_at": "2026-06-15T15:48:30Z",
+      "active_params_b": 0.873,
+      "family": "Alibaba",
+      "hf_quant_updated_at": "2026-06-15T15:48:30Z",
+      "moe": false,
+      "name": "Alibaba Qwen3.5 0.8B (Reasoning)",
+      "notes": "Artificial Analysis open-weight row; 0.873B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 17,
+      "quants": [
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 338227456,
+          "size_gb": 0.31
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 371933440,
+          "size_gb": 0.35
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 398237952,
+          "size_gb": 0.37
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 417718528,
+          "size_gb": 0.39
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 440750336,
+          "size_gb": 0.41
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 470167808,
+          "size_gb": 0.44
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 492216576,
+          "size_gb": 0.46
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 492605696,
+          "size_gb": 0.46
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 506859776,
+          "size_gb": 0.47
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 507154688,
+          "size_gb": 0.47
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 508104960,
+          "size_gb": 0.47
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 532517120,
+          "size_gb": 0.5
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 558772480,
+          "size_gb": 0.52
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 568889600,
+          "size_gb": 0.53
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 590057728,
+          "size_gb": 0.55
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 606585088,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 771092736,
+          "size_gb": 0.72
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 811843840,
+          "size_gb": 0.76
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 1186443520,
+          "size_gb": 1.1
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 1516744736,
+          "size_gb": 1.41
+        }
+      ],
+      "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+      "size_gb": 0.5,
+      "speed": 23,
+      "total_params_b": 0.873
+    },
+    {
+      "aa_id": "fbc58677-e324-4b45-a979-7fd8eec555cd",
+      "aa_intelligence_index": 10.493,
+      "aa_output_tps": 115.385,
+      "aa_query": "LFM2 24B A2B",
+      "aa_slug": "lfm2-24b-a2b",
+      "aa_updated_at": "2026-06-15T15:48:33Z",
+      "active_params_b": 2.3,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:48:33Z",
+      "moe": true,
+      "name": "Liquid AI LFM2 24B A2B",
+      "notes": "Artificial Analysis open-weight row; 23.8B/2.3B params; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 17,
+      "quants": [
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 10319204416,
+          "size_gb": 9.61
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 11354935360,
+          "size_gb": 10.58
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 12317528128,
+          "size_gb": 11.47
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 12828561472,
+          "size_gb": 11.95
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 13549457472,
+          "size_gb": 12.62
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 14415474752,
+          "size_gb": 13.43
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 16430420032,
+          "size_gb": 15.3
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 16918818880,
+          "size_gb": 15.76
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 25351966784,
+          "size_gb": 23.61
+        }
+      ],
+      "repo": "mradermacher/LFM2-24B-A2B-GGUF",
+      "size_gb": 13.43,
+      "speed": 100,
+      "total_params_b": 23.8
+    },
+    {
+      "aa_id": "ee708f92-374e-4123-b900-e22d7b2afc19",
+      "aa_intelligence_index": 10.414,
+      "aa_output_tps": 33.151,
+      "aa_query": "phi 4",
+      "aa_slug": "phi-4",
+      "aa_updated_at": "2026-06-15T15:48:35Z",
+      "active_params_b": 14.0,
+      "family": "Microsoft",
+      "hf_quant_updated_at": "2026-06-15T15:48:35Z",
+      "moe": false,
+      "name": "Microsoft Phi-4",
+      "notes": "Artificial Analysis open-weight row; 14B params; license: MIT; GGUF resolved by hf-search",
+      "quality": 17,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 5729218112,
+          "size_gb": 5.34
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 7190834752,
+          "size_gb": 6.7
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 8890306112,
+          "size_gb": 8.28
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 10412707392,
+          "size_gb": 9.7
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 15580507712,
+          "size_gb": 14.51
+        },
+        {
+          "name": "F16",
+          "size_bytes": 29323406912,
+          "size_gb": 27.31
+        }
+      ],
+      "repo": "unsloth/phi-4-GGUF",
+      "size_gb": 8.28,
+      "speed": 33,
+      "total_params_b": 14.0
+    },
+    {
+      "aa_id": "f78138d6-2e04-4a84-919a-20d177cb6ff1",
+      "aa_intelligence_index": 9.597,
+      "aa_output_tps": 0,
+      "aa_query": "AI21 Jamba Reasoning 3B",
+      "aa_slug": "jamba-reasoning-3b",
+      "aa_updated_at": "2026-06-15T15:48:43Z",
+      "active_params_b": 3.0,
+      "family": "AI21 Labs",
+      "hf_quant_updated_at": "2026-06-15T15:48:43Z",
+      "moe": false,
+      "name": "AI21 Labs Jamba Reasoning 3B",
+      "notes": "Artificial Analysis open-weight row; 3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 16,
+      "quants": [
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 1457270144,
+          "size_gb": 1.36
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 1539789184,
+          "size_gb": 1.43
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 1612206464,
+          "size_gb": 1.5
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 1772278144,
+          "size_gb": 1.65
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 1866957184,
+          "size_gb": 1.74
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 1934789504,
+          "size_gb": 1.8
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 2235945344,
+          "size_gb": 2.08
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 2274982784,
+          "size_gb": 2.12
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 3410043264,
+          "size_gb": 3.18
+        },
+        {
+          "name": "F16",
+          "size_bytes": 6404321664,
+          "size_gb": 5.96
+        }
+      ],
+      "repo": "mradermacher/AI21-Jamba-Reasoning-3B-GGUF",
+      "size_gb": 1.8,
+      "speed": 0,
+      "total_params_b": 3.0
+    },
+    {
+      "aa_id": "dbbcf240-a69e-4078-8f16-7c94c7a8c514",
+      "aa_intelligence_index": 9.523,
+      "aa_output_tps": 0,
+      "aa_query": "reka flash 3",
+      "aa_slug": "reka-flash-3",
+      "aa_updated_at": "2026-06-15T15:48:45Z",
+      "active_params_b": 21.0,
+      "family": "Reka AI",
+      "hf_quant_updated_at": "2026-06-15T15:48:45Z",
+      "moe": false,
+      "name": "Reka AI Reka Flash 3",
+      "notes": "Artificial Analysis open-weight row; 21B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 16,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 8775403104,
+          "size_gb": 8.17
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 10863011424,
+          "size_gb": 10.12
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 13610362464,
+          "size_gb": 12.68
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 15635474016,
+          "size_gb": 14.56
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 22217246304,
+          "size_gb": 20.69
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 41815623264,
+          "size_gb": 38.94
+        }
+      ],
+      "repo": "unsloth/reka-flash-3-GGUF",
+      "size_gb": 12.68,
+      "speed": 0,
+      "total_params_b": 21.0
+    },
+    {
+      "aa_id": "3d64bf83-232e-427e-8590-26b478bae4a8",
+      "aa_intelligence_index": 9.185,
+      "aa_output_tps": 0,
+      "aa_query": "Ling mini 2.0",
+      "aa_slug": "ling-mini-2-0",
+      "aa_updated_at": "2026-06-15T15:48:48Z",
+      "active_params_b": 1.4,
+      "family": "InclusionAI",
+      "hf_quant_updated_at": "2026-06-15T15:48:48Z",
+      "moe": true,
+      "name": "InclusionAI Ling-mini-2.0",
+      "notes": "Artificial Analysis open-weight row; 16.3B/1.4B params; license: MIT; GGUF resolved by hf-search",
+      "quality": 15,
+      "quants": [
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 6396601536,
+          "size_gb": 5.96
+        },
+        {
+          "name": "IQ3_XS",
+          "size_bytes": 6789760192,
+          "size_gb": 6.32
+        },
+        {
+          "name": "IQ3_S",
+          "size_bytes": 7174620352,
+          "size_gb": 6.68
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 7174620352,
+          "size_gb": 6.68
+        },
+        {
+          "name": "IQ3_M",
+          "size_bytes": 7498130624,
+          "size_gb": 6.98
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 7857349824,
+          "size_gb": 7.32
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 8475747520,
+          "size_gb": 7.89
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 8783348928,
+          "size_gb": 8.18
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 9278342336,
+          "size_gb": 8.64
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 9313338560,
+          "size_gb": 8.67
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 9906332864,
+          "size_gb": 9.23
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 11258315968,
+          "size_gb": 10.49
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 11581826240,
+          "size_gb": 10.79
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 17307657408,
+          "size_gb": 16.12
+        }
+      ],
+      "repo": "redponike/Ling-mini-2.0-GGUF-ik",
+      "size_gb": 9.23,
+      "speed": 0,
+      "total_params_b": 16.3
+    },
+    {
+      "aa_id": "5fb47ff6-a30e-4c2c-96f2-55e95a13390f",
+      "aa_intelligence_index": 8.727,
+      "aa_output_tps": 50.515,
+      "aa_query": "Llama 3.2 11B Vision Instruct",
+      "aa_slug": "llama-3-2-instruct-11b-vision",
+      "aa_updated_at": "2026-06-15T15:48:51Z",
+      "active_params_b": 11.0,
+      "family": "Meta",
+      "hf_quant_updated_at": "2026-06-15T15:48:51Z",
+      "moe": false,
+      "name": "Meta Llama 3.2 Instruct 11B (Vision)",
+      "notes": "Artificial Analysis open-weight row; 11B params; license: LLAMA 3.2 COMMUNITY LICENSE AGREEMENT; GGUF resolved by hf-search",
+      "quality": 14,
+      "quants": [
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 5963057216,
+          "size_gb": 5.55
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 10394970176,
+          "size_gb": 9.68
+        },
+        {
+          "name": "F16",
+          "size_bytes": 19558899776,
+          "size_gb": 18.22
+        }
+      ],
+      "repo": "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF",
+      "size_gb": 5.55,
+      "speed": 51,
+      "total_params_b": 11.0
+    },
+    {
+      "aa_id": "91e3b45f-3f52-4511-8c15-8948854bebc5",
+      "aa_intelligence_index": 8.545,
+      "aa_output_tps": 0,
+      "aa_query": "granite 4.1 3b",
+      "aa_slug": "granite-4-1-3b",
+      "aa_updated_at": "2026-06-15T15:48:54Z",
+      "active_params_b": 3.0,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:48:54Z",
+      "moe": false,
+      "name": "IBM Granite 4.1 3B",
+      "notes": "Artificial Analysis open-weight row; 3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 14,
+      "quants": [
+        {
+          "name": "IQ2_M",
+          "size_bytes": 1285053760,
+          "size_gb": 1.2
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 1414548800,
+          "size_gb": 1.32
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 1416576320,
+          "size_gb": 1.32
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 1566817600,
+          "size_gb": 1.46
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 1725578560,
+          "size_gb": 1.61
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 1794667840,
+          "size_gb": 1.67
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 1894497600,
+          "size_gb": 1.76
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 1991163200,
+          "size_gb": 1.85
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 1991163200,
+          "size_gb": 1.85
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 1998372160,
+          "size_gb": 1.86
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 2099502400,
+          "size_gb": 1.96
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 2152381760,
+          "size_gb": 2.0
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 2377825600,
+          "size_gb": 2.21
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 2437012800,
+          "size_gb": 2.27
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 2453939520,
+          "size_gb": 2.29
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 3048299840,
+          "size_gb": 2.84
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 3619691840,
+          "size_gb": 3.37
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 4284472640,
+          "size_gb": 3.99
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 6809656384,
+          "size_gb": 6.34
+        }
+      ],
+      "repo": "unsloth/granite-4.1-3b-GGUF",
+      "size_gb": 1.96,
+      "speed": 0,
+      "total_params_b": 3.0
+    },
+    {
+      "aa_id": "9f873c2f-2c2d-4ccb-9e1b-71bf61b052be",
+      "aa_intelligence_index": 8.39,
+      "aa_output_tps": 21.68,
+      "aa_query": "Phi 4 mini instruct",
+      "aa_slug": "phi-4-mini",
+      "aa_updated_at": "2026-06-15T15:48:56Z",
+      "active_params_b": 3.84,
+      "family": "Microsoft",
+      "hf_quant_updated_at": "2026-06-15T15:48:56Z",
+      "moe": false,
+      "name": "Microsoft Phi-4 Mini Instruct",
+      "notes": "Artificial Analysis open-weight row; 3.84B params; license: MIT; GGUF resolved by hf-search",
+      "quality": 14,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 1682635744,
+          "size_gb": 1.57
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 2117532640,
+          "size_gb": 1.97
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 2491874272,
+          "size_gb": 2.32
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 2848127968,
+          "size_gb": 2.65
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 4084611040,
+          "size_gb": 3.8
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 7680694240,
+          "size_gb": 7.15
+        }
+      ],
+      "repo": "unsloth/Phi-4-mini-instruct-GGUF",
+      "size_gb": 2.32,
+      "speed": 22,
+      "total_params_b": 3.84
+    },
+    {
+      "aa_id": "d734e2ce-5cf8-467f-8148-586d02671333",
+      "aa_intelligence_index": 8.256,
+      "aa_output_tps": 0,
+      "aa_query": "EXAONE 4.0 1.2B",
+      "aa_slug": "exaone-4-0-1-2b-reasoning",
+      "aa_updated_at": "2026-06-15T15:48:59Z",
+      "active_params_b": 1.28,
+      "family": "LG AI Research",
+      "hf_quant_updated_at": "2026-06-15T15:48:59Z",
+      "moe": false,
+      "name": "LG AI Research Exaone 4.0 1.2B (Reasoning)",
+      "notes": "Artificial Analysis open-weight row; 1.28B params; license: EXAONE AI Model License Agreement 1.2 - NC; GGUF resolved by hf-search",
+      "quality": 14,
+      "quants": [
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 636326880,
+          "size_gb": 0.59
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 691950560,
+          "size_gb": 0.64
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 741757920,
+          "size_gb": 0.69
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 753800160,
+          "size_gb": 0.7
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 782046176,
+          "size_gb": 0.73
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 812438496,
+          "size_gb": 0.76
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 912069600,
+          "size_gb": 0.85
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 929616864,
+          "size_gb": 0.87
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1363940320,
+          "size_gb": 1.27
+        },
+        {
+          "name": "F16",
+          "size_bytes": 2563249120,
+          "size_gb": 2.39
+        }
+      ],
+      "repo": "mradermacher/EXAONE-4.0-1.2B-GGUF",
+      "size_gb": 0.76,
+      "speed": 0,
+      "total_params_b": 1.28
+    },
+    {
+      "aa_id": "5a088cde-18e2-4dfa-98dd-d283e1c19654",
+      "aa_intelligence_index": 8.082,
+      "aa_output_tps": 0,
+      "aa_query": "LFM2.5 1.2B Thinking",
+      "aa_slug": "lfm2-5-1-2b-thinking",
+      "aa_updated_at": "2026-06-15T15:49:02Z",
+      "active_params_b": 1.17,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:49:02Z",
+      "moe": false,
+      "name": "Liquid AI LFM2.5-1.2B-Thinking",
+      "notes": "Artificial Analysis open-weight row; 1.17B params; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 483398880,
+          "size_gb": 0.45
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 483398880,
+          "size_gb": 0.45
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 558159072,
+          "size_gb": 0.52
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 600347872,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 600347872,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 695751904,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 700470496,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 730895584,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 730895584,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 825251040,
+          "size_gb": 0.77
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 843355360,
+          "size_gb": 0.79
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 843355360,
+          "size_gb": 0.79
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 995349728,
+          "size_gb": 0.93
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1246254304,
+          "size_gb": 1.16
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 1372083424,
+          "size_gb": 1.28
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 2343326944,
+          "size_gb": 2.18
+        }
+      ],
+      "repo": "unsloth/LFM2.5-1.2B-Thinking-GGUF",
+      "size_gb": 0.68,
+      "speed": 0,
+      "total_params_b": 1.17
+    },
+    {
+      "aa_id": "b4f14013-37dd-4c75-bd8a-378365d9ed77",
+      "aa_intelligence_index": 8.067,
+      "aa_output_tps": 0,
+      "aa_query": "AI21 Jamba Mini 1.7",
+      "aa_slug": "jamba-1-7-mini",
+      "aa_updated_at": "2026-06-15T15:49:05Z",
+      "active_params_b": 12.0,
+      "family": "AI21 Labs",
+      "hf_quant_updated_at": "2026-06-15T15:49:05Z",
+      "moe": true,
+      "name": "AI21 Labs Jamba 1.7 Mini",
+      "notes": "Artificial Analysis open-weight row; 52B/12B params; license: Jamba Open Model License Agreement; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 22289135168,
+          "size_gb": 20.76
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 24547374656,
+          "size_gb": 22.86
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 26428520000,
+          "size_gb": 24.61
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 27810764352,
+          "size_gb": 25.9
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 29353449024,
+          "size_gb": 27.34
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 31162832448,
+          "size_gb": 29.02
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 35513701952,
+          "size_gb": 33.07
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 36575450688,
+          "size_gb": 34.06
+        }
+      ],
+      "repo": "mradermacher/AI21-Jamba-Mini-1.7-GGUF",
+      "size_gb": 29.02,
+      "speed": 0,
+      "total_params_b": 52.0
+    },
+    {
+      "aa_id": "739e531a-eb0a-478f-bb67-5845b79ce65d",
+      "aa_intelligence_index": 8.043,
+      "aa_output_tps": 334.367,
+      "aa_query": "LFM2 2.6B",
+      "aa_slug": "lfm2-2-6b",
+      "aa_updated_at": "2026-06-15T15:49:08Z",
+      "active_params_b": 2.57,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:49:08Z",
+      "moe": false,
+      "name": "Liquid AI LFM2 2.6B",
+      "notes": "Artificial Analysis open-weight row; 2.57B params; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 1159737984,
+          "size_gb": 1.08
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 1256059520,
+          "size_gb": 1.17
+        },
+        {
+          "name": "Q3_K_L",
+          "size_bytes": 1340863104,
+          "size_gb": 1.25
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 1417343616,
+          "size_gb": 1.32
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 1491890816,
+          "size_gb": 1.39
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 1563669120,
+          "size_gb": 1.46
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 1787458176,
+          "size_gb": 1.66
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 1828958848,
+          "size_gb": 1.7
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 2733011584,
+          "size_gb": 2.55
+        },
+        {
+          "name": "F16",
+          "size_bytes": 5141459584,
+          "size_gb": 4.79
+        }
+      ],
+      "repo": "mradermacher/LFM2-2.6B-GGUF",
+      "size_gb": 1.46,
+      "speed": 100,
+      "total_params_b": 2.57
+    },
+    {
+      "aa_id": "48194e0f-8226-4c57-8cb2-2a0fb68a84c9",
+      "aa_intelligence_index": 8.039,
+      "aa_output_tps": 544.814,
+      "aa_query": "LFM2.5 1.2B Instruct",
+      "aa_slug": "lfm2-5-1-2b-instruct",
+      "aa_updated_at": "2026-06-15T15:49:11Z",
+      "active_params_b": 1.17,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:49:11Z",
+      "moe": false,
+      "name": "Liquid AI LFM2.5-1.2B-Instruct",
+      "notes": "Artificial Analysis open-weight row; 1.17B params; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 483398880,
+          "size_gb": 0.45
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 483398880,
+          "size_gb": 0.45
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 558159072,
+          "size_gb": 0.52
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 600347872,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 600347872,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 695751904,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 700470496,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 730895584,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 730895584,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 825251040,
+          "size_gb": 0.77
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 843355360,
+          "size_gb": 0.79
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 843355360,
+          "size_gb": 0.79
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 995349728,
+          "size_gb": 0.93
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1246254304,
+          "size_gb": 1.16
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 1372083424,
+          "size_gb": 1.28
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 2343326944,
+          "size_gb": 2.18
+        }
+      ],
+      "repo": "unsloth/LFM2.5-1.2B-Instruct-GGUF",
+      "size_gb": 0.68,
+      "speed": 100,
+      "total_params_b": 1.17
+    },
+    {
+      "aa_id": "dafbb6d2-4825-43d1-a927-feedcfd2e998",
+      "aa_intelligence_index": 7.986,
+      "aa_output_tps": 0,
+      "aa_query": "granite 4.0 h 1b",
+      "aa_slug": "granite-4-0-h-nano-1b",
+      "aa_updated_at": "2026-06-15T15:49:14Z",
+      "active_params_b": 1.5,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:49:14Z",
+      "moe": false,
+      "name": "IBM Granite 4.0 H 1B",
+      "notes": "Artificial Analysis open-weight row; 1.5B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 384208704,
+          "size_gb": 0.36
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 413160000,
+          "size_gb": 0.38
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 459288384,
+          "size_gb": 0.43
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 543110976,
+          "size_gb": 0.51
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 588929088,
+          "size_gb": 0.55
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 598298688,
+          "size_gb": 0.56
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 617631552,
+          "size_gb": 0.58
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 694789440,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 731653440,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 741809472,
+          "size_gb": 0.69
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 827486784,
+          "size_gb": 0.77
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 868316736,
+          "size_gb": 0.81
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 870282816,
+          "size_gb": 0.81
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 872642112,
+          "size_gb": 0.81
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 901162560,
+          "size_gb": 0.84
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 911791680,
+          "size_gb": 0.85
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 1031636544,
+          "size_gb": 0.96
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 1048557120,
+          "size_gb": 0.98
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 1049675328,
+          "size_gb": 0.98
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 1276778304,
+          "size_gb": 1.19
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1558926912,
+          "size_gb": 1.45
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 1794856512,
+          "size_gb": 1.67
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 2928332384,
+          "size_gb": 2.73
+        }
+      ],
+      "repo": "unsloth/granite-4.0-h-1b-GGUF",
+      "size_gb": 0.84,
+      "speed": 0,
+      "total_params_b": 1.5
+    },
+    {
+      "aa_id": "04781a0e-40f0-4e2a-a4e5-18e389364a79",
+      "aa_intelligence_index": 7.71,
+      "aa_output_tps": 0,
+      "aa_query": "gemma 3 270m",
+      "aa_slug": "gemma-3-270m",
+      "aa_updated_at": "2026-06-15T15:49:17Z",
+      "active_params_b": 0.268,
+      "family": "Google",
+      "hf_quant_updated_at": "2026-06-15T15:49:17Z",
+      "moe": false,
+      "name": "Google Gemma 3 270M",
+      "notes": "Artificial Analysis open-weight row; 0.268B params; license: Gemma license; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 158077824,
+          "size_gb": 0.15
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 188429184,
+          "size_gb": 0.18
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 241410944,
+          "size_gb": 0.22
+        },
+        {
+          "name": "Q5_0",
+          "size_bytes": 253944704,
+          "size_gb": 0.24
+        },
+        {
+          "name": "Q6_K_M",
+          "size_bytes": 282975104,
+          "size_gb": 0.26
+        },
+        {
+          "name": "F16",
+          "size_bytes": 484774528,
+          "size_gb": 0.45
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 1027609856,
+          "size_gb": 0.96
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1261094784,
+          "size_gb": 1.17
+        }
+      ],
+      "repo": "Mungert/gemma-3-270m-it-GGUF",
+      "size_gb": 0.18,
+      "speed": 0,
+      "total_params_b": 0.268
+    },
+    {
+      "aa_id": "49e70a38-4ac1-4659-b490-09b2c7ff21d6",
+      "aa_intelligence_index": 7.701,
+      "aa_output_tps": 0,
+      "aa_query": "Apertus 70B Instruct 2509",
+      "aa_slug": "apertus-70b-instruct",
+      "aa_updated_at": "2026-06-15T15:49:19Z",
+      "active_params_b": 70.0,
+      "family": "Swiss AI Initiative",
+      "hf_quant_updated_at": "2026-06-15T15:49:19Z",
+      "moe": false,
+      "name": "Swiss AI Initiative Apertus 70B Instruct",
+      "notes": "Artificial Analysis open-weight row; 70B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 16599131808,
+          "size_gb": 15.46
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 17799227040,
+          "size_gb": 16.58
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 19908437664,
+          "size_gb": 18.54
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 24825341600,
+          "size_gb": 23.12
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 27523720864,
+          "size_gb": 25.63
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 27932665504,
+          "size_gb": 26.01
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 28167546528,
+          "size_gb": 26.23
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 30768015008,
+          "size_gb": 28.65
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 35535890080,
+          "size_gb": 33.1
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 36622870176,
+          "size_gb": 34.11
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 37967537824,
+          "size_gb": 35.36
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 40085661344,
+          "size_gb": 37.33
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 40221976224,
+          "size_gb": 37.46
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 40446371488,
+          "size_gb": 37.67
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 43721598624,
+          "size_gb": 40.72
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 44208793248,
+          "size_gb": 41.17
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 48692373152,
+          "size_gb": 45.35
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 50608645984,
+          "size_gb": 47.13
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 50966210400,
+          "size_gb": 47.47
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 62119389024,
+          "size_gb": 57.85
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 75024213856,
+          "size_gb": 69.87
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 83517679456,
+          "size_gb": 77.78
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 141210330848,
+          "size_gb": 131.51
+        }
+      ],
+      "repo": "unsloth/Apertus-70B-Instruct-2509-GGUF",
+      "size_gb": 40.72,
+      "speed": 0,
+      "total_params_b": 70.0
+    },
+    {
+      "aa_id": "1fc32894-1060-493b-af94-62bb1068555e",
+      "aa_intelligence_index": 7.673,
+      "aa_output_tps": 0,
+      "aa_query": "granite 4.0 micro",
+      "aa_slug": "granite-4-0-micro",
+      "aa_updated_at": "2026-06-15T15:49:22Z",
+      "active_params_b": 3.0,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:49:22Z",
+      "moe": false,
+      "name": "IBM Granite 4.0 Micro",
+      "notes": "Artificial Analysis open-weight row; 3B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 13,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 882294528,
+          "size_gb": 0.82
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 938655488,
+          "size_gb": 0.87
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 1035525888,
+          "size_gb": 0.96
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 1265680128,
+          "size_gb": 1.18
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 1371438848,
+          "size_gb": 1.28
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 1402363648,
+          "size_gb": 1.31
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 1404083968,
+          "size_gb": 1.31
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 1566818048,
+          "size_gb": 1.46
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 1725579008,
+          "size_gb": 1.61
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 1768689408,
+          "size_gb": 1.65
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 1894498048,
+          "size_gb": 1.76
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 1991163648,
+          "size_gb": 1.85
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 1991163648,
+          "size_gb": 1.85
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 1998372608,
+          "size_gb": 1.86
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 2099502848,
+          "size_gb": 1.96
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 2137308928,
+          "size_gb": 1.99
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 2377826048,
+          "size_gb": 2.21
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 2437013248,
+          "size_gb": 2.27
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 2449813248,
+          "size_gb": 2.28
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 3048300288,
+          "size_gb": 2.84
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 3619692288,
+          "size_gb": 3.37
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 4241465088,
+          "size_gb": 3.95
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 6809656800,
+          "size_gb": 6.34
+        }
+      ],
+      "repo": "unsloth/granite-4.0-micro-GGUF",
+      "size_gb": 1.96,
+      "speed": 0,
+      "total_params_b": 3.0
+    },
+    {
+      "aa_id": "a2c8e7b2-57bf-4d1e-96ea-7944d786d94d",
+      "aa_intelligence_index": 7.339,
+      "aa_output_tps": 0,
+      "aa_query": "granite 4.0 1b",
+      "aa_slug": "granite-4-0-nano-1b",
+      "aa_updated_at": "2026-06-15T15:49:25Z",
+      "active_params_b": 1.6,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:49:25Z",
+      "moe": false,
+      "name": "IBM Granite 4.0 1B",
+      "notes": "Artificial Analysis open-weight row; 1.6B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 12,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 471455840,
+          "size_gb": 0.44
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 494196832,
+          "size_gb": 0.46
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 536385632,
+          "size_gb": 0.5
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 644749408,
+          "size_gb": 0.6
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 700782688,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 701700192,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 714233952,
+          "size_gb": 0.67
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 785586272,
+          "size_gb": 0.73
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 860362848,
+          "size_gb": 0.8
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 880670816,
+          "size_gb": 0.82
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 936974432,
+          "size_gb": 0.87
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 977606752,
+          "size_gb": 0.91
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 980228192,
+          "size_gb": 0.91
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 980752480,
+          "size_gb": 0.91
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 1023645792,
+          "size_gb": 0.95
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 1042454624,
+          "size_gb": 0.97
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 1153243232,
+          "size_gb": 1.07
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 1178310752,
+          "size_gb": 1.1
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 1184905312,
+          "size_gb": 1.1
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 1493997664,
+          "size_gb": 1.39
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1737791584,
+          "size_gb": 1.62
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 2112329824,
+          "size_gb": 1.97
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 3267401568,
+          "size_gb": 3.04
+        }
+      ],
+      "repo": "unsloth/granite-4.0-1b-GGUF",
+      "size_gb": 0.95,
+      "speed": 0,
+      "total_params_b": 1.6
+    },
+    {
+      "aa_id": "686ab020-ee58-4a70-a9ac-24d675a73506",
+      "aa_intelligence_index": 7.027,
+      "aa_output_tps": 0,
+      "aa_query": "LFM2 8B A1B",
+      "aa_slug": "lfm2-8b-a1b",
+      "aa_updated_at": "2026-06-15T15:49:28Z",
+      "active_params_b": 1.5,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:49:28Z",
+      "moe": true,
+      "name": "Liquid AI LFM2 8B A1B",
+      "notes": "Artificial Analysis open-weight row; 8.34B/1.5B params; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 12,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 3079650368,
+          "size_gb": 2.87
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 3120266304,
+          "size_gb": 2.91
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 3644292160,
+          "size_gb": 3.39
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 3676339264,
+          "size_gb": 3.42
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 3997613120,
+          "size_gb": 3.72
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 4733893696,
+          "size_gb": 4.41
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 4743625792,
+          "size_gb": 4.42
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 4752768064,
+          "size_gb": 4.43
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 5044780096,
+          "size_gb": 4.7
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 5759401024,
+          "size_gb": 5.36
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 5919554624,
+          "size_gb": 5.51
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 5919554624,
+          "size_gb": 5.51
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 6881508416,
+          "size_gb": 6.41
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 8868428864,
+          "size_gb": 8.26
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 8994257984,
+          "size_gb": 8.38
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 16685562944,
+          "size_gb": 15.54
+        }
+      ],
+      "repo": "unsloth/LFM2-8B-A1B-GGUF",
+      "size_gb": 4.7,
+      "speed": 0,
+      "total_params_b": 8.34
+    },
+    {
+      "aa_id": "3c5289e5-1c62-434c-bc44-c51c39f640a1",
+      "aa_intelligence_index": 6.179,
+      "aa_output_tps": 486.803,
+      "aa_query": "LFM2.5 VL 1.6B",
+      "aa_slug": "lfm2-5-vl-1-6b",
+      "aa_updated_at": "2026-06-15T15:49:31Z",
+      "active_params_b": 1.6,
+      "family": "Liquid AI",
+      "hf_quant_updated_at": "2026-06-15T15:49:31Z",
+      "moe": false,
+      "name": "Liquid AI LFM2.5-VL-1.6B",
+      "notes": "Artificial Analysis open-weight row; 1.6B params; license: lfm 1.0; GGUF resolved by hf-search",
+      "quality": 10,
+      "quants": [
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 483399264,
+          "size_gb": 0.45
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 483399264,
+          "size_gb": 0.45
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 558159456,
+          "size_gb": 0.52
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 600348256,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 600348256,
+          "size_gb": 0.56
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 695752288,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 700470880,
+          "size_gb": 0.65
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 730895968,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 730895968,
+          "size_gb": 0.68
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 825251424,
+          "size_gb": 0.77
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 843355744,
+          "size_gb": 0.79
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 843355744,
+          "size_gb": 0.79
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 995350112,
+          "size_gb": 0.93
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 1246254688,
+          "size_gb": 1.16
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 1372083808,
+          "size_gb": 1.28
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 2343327328,
+          "size_gb": 2.18
+        }
+      ],
+      "repo": "unsloth/LFM2.5-VL-1.6B-GGUF",
+      "size_gb": 0.68,
+      "speed": 100,
+      "total_params_b": 1.6
+    },
+    {
+      "aa_id": "54c7f3fc-7078-442a-b472-e8691257a88c",
+      "aa_intelligence_index": 6.102,
+      "aa_output_tps": 0,
+      "aa_query": "granite 4.0 350m",
+      "aa_slug": "granite-4-0-350m",
+      "aa_updated_at": "2026-06-15T15:49:33Z",
+      "active_params_b": 0.35,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:49:33Z",
+      "moe": false,
+      "name": "IBM Granite 4.0 350M",
+      "notes": "Artificial Analysis open-weight row; 0.35B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 10,
+      "quants": [
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 172142368,
+          "size_gb": 0.16
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 195325728,
+          "size_gb": 0.18
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 208326432,
+          "size_gb": 0.19
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 213272352,
+          "size_gb": 0.2
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 221818656,
+          "size_gb": 0.21
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 228863776,
+          "size_gb": 0.21
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 229388064,
+          "size_gb": 0.21
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 229388064,
+          "size_gb": 0.21
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 236986144,
+          "size_gb": 0.22
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 240742176,
+          "size_gb": 0.22
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 259665696,
+          "size_gb": 0.24
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 264052512,
+          "size_gb": 0.25
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 265213728,
+          "size_gb": 0.25
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 338521888,
+          "size_gb": 0.32
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 378138400,
+          "size_gb": 0.35
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 516992800,
+          "size_gb": 0.48
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 708439552,
+          "size_gb": 0.66
+        }
+      ],
+      "repo": "unsloth/granite-4.0-350m-GGUF",
+      "size_gb": 0.22,
+      "speed": 0,
+      "total_params_b": 0.35
+    },
+    {
+      "aa_id": "891bcdf2-8dd2-4dc3-829b-d963fde25876",
+      "aa_intelligence_index": 5.877,
+      "aa_output_tps": 0,
+      "aa_query": "Apertus 8B Instruct 2509",
+      "aa_slug": "apertus-8b-instruct",
+      "aa_updated_at": "2026-06-15T15:49:36Z",
+      "active_params_b": 8.0,
+      "family": "Swiss AI Initiative",
+      "hf_quant_updated_at": "2026-06-15T15:49:36Z",
+      "moe": false,
+      "name": "Swiss AI Initiative Apertus 8B Instruct",
+      "notes": "Artificial Analysis open-weight row; 8B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 10,
+      "quants": [
+        {
+          "name": "IQ1_S",
+          "size_bytes": 2230400256,
+          "size_gb": 2.08
+        },
+        {
+          "name": "IQ1_M",
+          "size_bytes": 2348758272,
+          "size_gb": 2.19
+        },
+        {
+          "name": "IQ2_XXS",
+          "size_bytes": 2552247552,
+          "size_gb": 2.38
+        },
+        {
+          "name": "IQ2_M",
+          "size_bytes": 3026105600,
+          "size_gb": 2.82
+        },
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 3356538112,
+          "size_gb": 3.13
+        },
+        {
+          "name": "Q2_K_L",
+          "size_bytes": 3413718272,
+          "size_gb": 3.18
+        },
+        {
+          "name": "Q2_K_XL",
+          "size_bytes": 3501372672,
+          "size_gb": 3.26
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 3679008000,
+          "size_gb": 3.43
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 4165547264,
+          "size_gb": 3.88
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 4347770112,
+          "size_gb": 4.05
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 4480120064,
+          "size_gb": 4.17
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 4694029568,
+          "size_gb": 4.37
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 4699272448,
+          "size_gb": 4.38
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 4723389696,
+          "size_gb": 4.4
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 5057885440,
+          "size_gb": 4.71
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 5135938816,
+          "size_gb": 4.78
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 5616776448,
+          "size_gb": 5.23
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 5812860160,
+          "size_gb": 5.41
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 5823968512,
+          "size_gb": 5.42
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 7390082304,
+          "size_gb": 6.88
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 8565372160,
+          "size_gb": 7.98
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 10621891840,
+          "size_gb": 9.89
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 16115119072,
+          "size_gb": 15.01
+        }
+      ],
+      "repo": "unsloth/Apertus-8B-Instruct-2509-GGUF",
+      "size_gb": 4.71,
+      "speed": 0,
+      "total_params_b": 8.0
+    },
+    {
+      "aa_id": "a68afa0b-7fe2-4e9d-bf3e-741cce3c6aeb",
+      "aa_intelligence_index": 5.443,
+      "aa_output_tps": 0,
+      "aa_query": "granite 4.0 h 350m",
+      "aa_slug": "granite-4-0-h-350m",
+      "aa_updated_at": "2026-06-15T15:49:39Z",
+      "active_params_b": 0.34,
+      "family": "IBM",
+      "hf_quant_updated_at": "2026-06-15T15:49:39Z",
+      "moe": false,
+      "name": "IBM Granite 4.0 H 350M",
+      "notes": "Artificial Analysis open-weight row; 0.34B params; license: Apache 2.0; GGUF resolved by hf-search",
+      "quality": 9,
+      "quants": [
+        {
+          "name": "IQ3_XXS",
+          "size_bytes": 159734944,
+          "size_gb": 0.15
+        },
+        {
+          "name": "Q3_K_S",
+          "size_bytes": 181155232,
+          "size_gb": 0.17
+        },
+        {
+          "name": "Q3_K_M",
+          "size_bytes": 188700064,
+          "size_gb": 0.18
+        },
+        {
+          "name": "Q3_K_XL",
+          "size_bytes": 191239072,
+          "size_gb": 0.18
+        },
+        {
+          "name": "IQ4_XS",
+          "size_bytes": 207857440,
+          "size_gb": 0.19
+        },
+        {
+          "name": "IQ4_NL",
+          "size_bytes": 216073504,
+          "size_gb": 0.2
+        },
+        {
+          "name": "Q4_0",
+          "size_bytes": 216466720,
+          "size_gb": 0.2
+        },
+        {
+          "name": "Q4_K_S",
+          "size_bytes": 216958240,
+          "size_gb": 0.2
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 222662944,
+          "size_gb": 0.21
+        },
+        {
+          "name": "Q4_K_XL",
+          "size_bytes": 225320224,
+          "size_gb": 0.21
+        },
+        {
+          "name": "Q5_K_S",
+          "size_bytes": 248937760,
+          "size_gb": 0.23
+        },
+        {
+          "name": "Q5_K_M",
+          "size_bytes": 252332320,
+          "size_gb": 0.24
+        },
+        {
+          "name": "Q5_K_XL",
+          "size_bytes": 252611872,
+          "size_gb": 0.24
+        },
+        {
+          "name": "Q6_K_XL",
+          "size_bytes": 311092384,
+          "size_gb": 0.29
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 366196000,
+          "size_gb": 0.34
+        },
+        {
+          "name": "Q8_K_XL",
+          "size_bytes": 461305120,
+          "size_gb": 0.43
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 684931296,
+          "size_gb": 0.64
+        }
+      ],
+      "repo": "unsloth/granite-4.0-h-350m-GGUF",
+      "size_gb": 0.21,
+      "speed": 0,
+      "total_params_b": 0.34
+    },
+    {
+      "aa_id": "81444bc8-72f9-4a2d-ad43-27e3f0d2f461",
+      "aa_intelligence_index": 4.736,
+      "aa_output_tps": 0,
+      "aa_query": "tiny aya global",
+      "aa_slug": "tiny-aya-global",
+      "aa_updated_at": "2026-06-15T15:49:42Z",
+      "active_params_b": 3.35,
+      "family": "Cohere",
+      "hf_quant_updated_at": "2026-06-15T15:49:42Z",
+      "moe": false,
+      "name": "Cohere Tiny Aya Global",
+      "notes": "Artificial Analysis open-weight row; 3.35B params; license: Cc By Nc 4.0; GGUF resolved by hf-search",
+      "quality": 8,
+      "quants": [
+        {
+          "name": "Q4_0",
+          "size_bytes": 2034490976,
+          "size_gb": 1.89
+        },
+        {
+          "name": "Q4_K_M",
+          "size_bytes": 2143977056,
+          "size_gb": 2.0
+        },
+        {
+          "name": "Q8_0",
+          "size_bytes": 3570654816,
+          "size_gb": 3.33
+        },
+        {
+          "name": "BF16",
+          "size_bytes": 6710484576,
+          "size_gb": 6.25
+        },
+        {
+          "name": "F16",
+          "size_bytes": 6710484576,
+          "size_gb": 6.25
+        }
+      ],
+      "repo": "CohereLabs/tiny-aya-global-GGUF",
+      "size_gb": 2.0,
+      "speed": 0,
+      "total_params_b": 3.35
     }
   ],
-  "generated_at": "2026-06-09T10:15:56Z",
-  "source": "Artificial Analysis open-weight leaderboard page; resolved 63 GGUF repos with quant sizes; skipped 47 open-weight rows without matching GGUF quants",
+  "generated_at": "2026-06-15T15:49:42Z",
+  "source": "Artificial Analysis open-weight leaderboard page; resolved 88 GGUF repos with quant sizes; skipped 36 open-weight rows without matching GGUF quants",
   "version": 2
 }
