@@ -20,6 +20,10 @@ llm-server                                     # no args → interactive TUI
 
 *Hardware-matched recommendations → one-command launch → benchmark, all from the same tool.*
 
+**Just run `llm-server` with no arguments** to open the full arrow-key TUI — browse and
+download models, adjust settings, and launch, without writing a single flag. Pass a model
+path or flags for one-shot CLI use instead.
+
 ## Benchmarks
 
 Same rig (RTX 3090 Ti 24GB + 4070 12GB + 3060 12GB), same GGUFs, 32k context,
