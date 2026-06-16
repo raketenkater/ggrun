@@ -4,7 +4,39 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestModelConfigArrowNav(t *testing.T) {
+	m := Model{
+		screen:      ScreenModelConfig,
+		models:      []ModelItem{{Name: "test.gguf"}},
+		kvPlacement: "auto",
+		ctxMode:     "fit",
+		ctxSize:     "fit",
+	}
+	m.input = textinput.New()
+
+	// Down through the real Update() path should advance the cursor.
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = nm.(Model)
+	if m.cfgCursor != 1 {
+		t.Fatalf("down: expected cfgCursor 1, got %d", m.cfgCursor)
+	}
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = nm.(Model)
+	if m.cfgCursor != 0 {
+		t.Fatalf("up: expected cfgCursor 0, got %d", m.cfgCursor)
+	}
+	// Right on the context row (cursor 0) cycles fit -> max.
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = nm.(Model)
+	if m.ctxMode != "max" {
+		t.Fatalf("right on context: expected ctxMode max, got %q", m.ctxMode)
+	}
+}
 
 func TestDiscoverModels(t *testing.T) {
 	// Test with a temp dir
