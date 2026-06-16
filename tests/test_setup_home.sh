@@ -18,14 +18,12 @@ LLM_SETUP_NONINTERACTIVE=1 \
 "$ROOT/setup-linux.sh" >/tmp/llm-server-setup-test.log 2>&1
 
 test -x "$APP_HOME/llm-server"
-test -x "$APP_HOME/llm-server-gui"
 test -x "$APP_HOME/.bin/llm-server"
-test -x "$APP_HOME/.bin/llm-server-gui"
 test -x "$APP_HOME/.bin/download_any_gguf.py"
 test -x "$APP_HOME/.bin/model_index.py"
 test -f "$APP_HOME/.env.sh"
 test -f "$APP_HOME/.config/config"
-test -f "$APP_HOME/.config/config.sh"
+test ! -e "$APP_HOME/.config/config.sh"
 test -d "$APP_HOME/models"
 test -d "$APP_HOME/.cache"
 test -d "$APP_HOME/.logs"
@@ -33,14 +31,12 @@ test -d "$APP_HOME/.src"
 test ! -e "$APP_HOME/models/download_any_gguf.py"
 test ! -e "$APP_HOME/models/model_index.py"
 
-mv "$APP_HOME/.config/config.sh" "$APP_HOME/.config/config.sh.bak"
 version_out=$("$APP_HOME/llm-server" version 2>&1)
 if [[ "$version_out" != llm-server* ]]; then
-    echo "  ✗ app-home launcher did not tolerate missing config.sh"
+    echo "  ✗ app-home launcher did not run"
     echo "$version_out" | tail -20 | sed 's/^/    /'
     exit 1
 fi
-mv "$APP_HOME/.config/config.sh.bak" "$APP_HOME/.config/config.sh"
 
 cat >"$TMP/llama-server" <<'EOF'
 #!/usr/bin/env bash
@@ -84,6 +80,5 @@ LLM_SETUP_NONINTERACTIVE=1 \
 "$ROOT/setup.sh" >/tmp/llm-server-auto-setup-test.log 2>&1
 
 test -x "$APP_HOME2/llm-server"
-test -x "$APP_HOME2/llm-server-gui"
 test -x "$APP_HOME2/.bin/model_index.py"
 echo "  ✓ setup.sh created app home"

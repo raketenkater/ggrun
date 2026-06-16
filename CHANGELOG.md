@@ -27,7 +27,7 @@
 - **One launcher binary.** Installs a single `llm-server` (no duplicate
   `llm-server-go` copy, no `llm-server-gui` wrappers) — `llm-server` with no
   arguments opens the GUI. The `llm-server-bash` v2 migration shim is retained.
-- **Docker images** for CPU, CUDA, and Vulkan, plus an Open WebUI compose file.
+- **Dockerfiles** for CPU, CUDA, and Vulkan, plus an Open WebUI compose file (build locally; GHCR publishing is not wired yet).
 
 - **Community tune pool.** When a model has no local AI-Tune cache, the
   launcher now checks a shared pool (one HTTPS GET keyed by

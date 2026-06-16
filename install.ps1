@@ -226,7 +226,6 @@ try {
     Set-Content -Path $cfgPath -Value $cfg -Encoding UTF8
 
     Write-CmdWrapper (Join-Path $InstallDir 'llm-server.cmd') ''
-    Write-CmdWrapper (Join-Path $InstallDir 'llm-server-gui.cmd') 'gui'
 
     if (!$NoPath) {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -241,10 +240,9 @@ try {
     if (!(Test-Path $llamaServer)) { Fail 'llama-server.exe was not installed' }
 
     Ok 'Installed native Windows llm-server'
-    Say "CLI:    $InstallDir\llm-server.cmd"
-    Say "GUI:    $InstallDir\llm-server-gui.cmd"
-    Say "Models: $models"
-    Say "Config: $cfgPath"
+    Say "CLI/GUI: $InstallDir\llm-server.cmd   (no arguments opens the GUI)"
+    Say "Models:  $models"
+    Say "Config:  $cfgPath"
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

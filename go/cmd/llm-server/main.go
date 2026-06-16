@@ -84,7 +84,7 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: llm-server [command] [args]
 
-With no command, launches the interactive TUI (same as llm-server-gui).
+With no command, launches the interactive TUI (same as llm-server gui).
 
 Commands:
   version              Show version

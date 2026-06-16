@@ -27,7 +27,7 @@ const (
 
 // currentVersion is the single source of truth for the binary version.
 // Release builds override it: go build -ldflags "-X github.com/raketenkater/llm-server/pkg/update.currentVersion=vX.Y.Z"
-var currentVersion = "v3.0.0-go"
+var currentVersion = "v3.1.0-go"
 
 // PromptOnStartup checks local repos for updates and asks interactive users
 // whether to run the updater. It intentionally skips non-interactive shells so
