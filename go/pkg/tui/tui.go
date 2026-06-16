@@ -98,6 +98,9 @@ type Model struct {
 	// Advanced (per-launch) config screen cursor
 	cfgCursor int
 
+	// First-run / quick-launch action-menu cursor
+	menuCursor int
+
 	// Generic arrow-select screen
 	choiceTitle   string
 	choiceOptions []string
@@ -331,6 +334,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if item.isModel {
 					m.selectedModel = item.index
 					m.recommendation = computeRecommendation(m.caps, m.models[m.selectedModel])
+					m.menuCursor = 0
 					m.screen = ScreenLaunchPrompt
 					return m, nil
 				}
@@ -371,21 +375,46 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func launchPromptActions() []string { return []string{"launch", "advanced", "dryrun"} }
+
+func (m Model) doLaunchPromptAction(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "launch":
+		m.screen = ScreenPrelaunch
+	case "advanced":
+		m.cfgCursor = 0
+		m.screen = ScreenModelConfig
+	case "dryrun":
+		m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
+		m.messageType = "info"
+	}
+	return m, nil
+}
+
 func (m Model) updateLaunchPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "enter":
-			m.screen = ScreenPrelaunch
-			return m, nil
-		case "d", "D":
-			m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
-			m.messageType = "info"
-		case "c", "C":
-			m.cfgCursor = 0
-			m.screen = ScreenModelConfig
-			return m, nil
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	actions := launchPromptActions()
+	if m.menuCursor >= len(actions) {
+		m.menuCursor = len(actions) - 1
+	}
+	switch keyMsg.String() {
+	case "up":
+		if m.menuCursor > 0 {
+			m.menuCursor--
 		}
+	case "down":
+		if m.menuCursor < len(actions)-1 {
+			m.menuCursor++
+		}
+	case "enter":
+		return m.doLaunchPromptAction(actions[m.menuCursor])
+	case "c", "C":
+		return m.doLaunchPromptAction("advanced")
+	case "d", "D":
+		return m.doLaunchPromptAction("dryrun")
 	}
 	return m, nil
 }
@@ -568,29 +597,59 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func firstRunActions() []string { return []string{"recommend", "download", "modeldir", "quit"} }
+
+func (m Model) doFirstRunAction(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "recommend":
+		m.selectedRecommendation = 0
+		m.screen = ScreenRecommended
+	case "download":
+		m.screen = ScreenDownload
+		m.inputMode = "download"
+		m.input.SetValue("")
+		m.input.Placeholder = "Hugging Face repo"
+		m.input.Focus()
+	case "modeldir":
+		m.screen = ScreenBackend
+		m.inputMode = "modeldir"
+		m.input.SetValue(m.modelDir)
+		m.input.Placeholder = "Path to model directory"
+		m.input.Focus()
+	case "quit":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 func (m Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "enter", "r", "R":
-			m.selectedRecommendation = 0
-			m.screen = ScreenRecommended
-			return m, nil
-		case "d", "D":
-			m.screen = ScreenDownload
-			m.inputMode = "download"
-			m.input.SetValue("")
-			m.input.Placeholder = "Hugging Face repo"
-			m.input.Focus()
-		case "m", "M":
-			m.screen = ScreenBackend
-			m.inputMode = "modeldir"
-			m.input.SetValue(m.modelDir)
-			m.input.Placeholder = "Path to model directory"
-			m.input.Focus()
-		case "q", "Q":
-			return m, tea.Quit
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	actions := firstRunActions()
+	if m.menuCursor >= len(actions) {
+		m.menuCursor = len(actions) - 1
+	}
+	switch keyMsg.String() {
+	case "up":
+		if m.menuCursor > 0 {
+			m.menuCursor--
 		}
+	case "down":
+		if m.menuCursor < len(actions)-1 {
+			m.menuCursor++
+		}
+	case "enter":
+		return m.doFirstRunAction(actions[m.menuCursor])
+	case "r", "R":
+		return m.doFirstRunAction("recommend")
+	case "d", "D":
+		return m.doFirstRunAction("download")
+	case "m", "M":
+		return m.doFirstRunAction("modeldir")
+	case "q", "Q":
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -698,10 +757,22 @@ func (m Model) viewFirstRun() string {
 	b.WriteString(titleStyle.Render("═══ llm-server First Run ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
 	b.WriteString("\n")
-	b.WriteString(highlightStyle.Render("  [Enter] Recommended downloads for this machine") + "\n")
-	b.WriteString("  [d] Manual Hugging Face repository\n")
-	b.WriteString("  [m] Point at an existing model directory\n")
-	b.WriteString("  [q] Quit\n")
+
+	actions := firstRunActions()
+	labels := map[string]string{
+		"recommend": "[r] Recommended downloads for this machine",
+		"download":  "[d] Manual Hugging Face repository",
+		"modeldir":  "[m] Point at an existing model directory",
+		"quit":      "[q] Quit",
+	}
+	for i, a := range actions {
+		if i == m.menuCursor {
+			b.WriteString(selectedStyle.Render("▸ "+labels[a]) + "\n")
+		} else {
+			b.WriteString("  " + labels[a] + "\n")
+		}
+	}
+	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ move · Enter select · q quit"))
 	return b.String()
 }
 
@@ -741,9 +812,20 @@ func (m Model) viewQuickLaunch() string {
 		b.WriteString(warningStyle.Render("  ⚠ "+rec.Warning) + "\n\n")
 	}
 
-	b.WriteString(highlightStyle.Render("  [Enter] Launch with recommendations"))
-	b.WriteString("\n")
-	b.WriteString("  [d] Dry run    [c] Advanced config    [Esc] Back\n")
+	actions := launchPromptActions()
+	labels := map[string]string{
+		"launch":   "Launch with recommendations",
+		"advanced": "[c] Advanced config",
+		"dryrun":   "[d] Dry run",
+	}
+	for i, a := range actions {
+		if i == m.menuCursor {
+			b.WriteString(selectedStyle.Render("▸ "+labels[a]) + "\n")
+		} else {
+			b.WriteString("  " + labels[a] + "\n")
+		}
+	}
+	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ move · Enter select · Esc back"))
 
 	if m.message != "" {
 		b.WriteString("\n")
