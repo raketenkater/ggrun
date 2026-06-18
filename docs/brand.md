@@ -13,14 +13,16 @@ Audience = r/LocalLLaMA / HN / self-hosters. **Looking un-marketed is the market
   brand (no Revv/.ai). Check GitHub/Homebrew/PyPI/npm before locking one in.
 - Rejected names (don't re-propose): Crank, yoke, manifold, stoke, hotrod, clutch, rev/Revv.
 
-## Decision (leaning — revisit before launch, no rush)
+## Decision (LOCKED)
 
-- **Name = `ggrun` (provisional, favored).** Clean on PyPI/npm/Homebrew; no competing
-  CLI; self-documenting to GGUF users (`ggrun = gguf run`). (`span` rejected: two
-  existing `span` CLIs + taken username/registries.)
-- Open gut-check: `gg` can read as gamer slang / slightly string-like. Mitigation if
-  kept: README line 1 spells out "ggrun = gguf run". Not final — fine to reconsider
-  until the rename actually lands.
+- **Name = `ggrun`.** Verified clean: free on PyPI/npm/Homebrew, no competing CLI,
+  no existing product/meaning, only an empty GitHub username. Self-documenting to
+  GGUF users (`ggrun = gguf run`). (`span` rejected: two existing `span` CLIs.)
+- **Pronounce it "g-run"** — state this in README line 1 (kills the "gee-gee-run?"
+  ambiguity and the gamer-"gg" read). Line 1 also spells out "ggrun = gguf run".
+- Ship THIS release as `llm-server`; switch at the big launch as **"ggrun (formerly
+  llm-server)"** — GitHub repo rename auto-redirects, keep an `llm-server` alias one
+  cycle. Do NOT sprinkle "llm-server (ggrun)" everywhere — one clean switch moment.
 - **Rename `llm-server` → `ggrun` BEFORE the big launch post.** Don't spend the
   one-shot launch on the old name and rename after.
 - **Bridge, don't hard-cut** (there are prior llm-server Reddit posts to preserve):
