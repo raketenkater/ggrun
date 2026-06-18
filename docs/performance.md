@@ -65,6 +65,11 @@ measured or workload-gated. A compatible draft model can be a major win for
 predictable structured continuations and a loss for code-like output with low
 acceptance.
 
+> **Current launch numbers** (newer binary; full 4B / 27B / 122B-A10B / MiniMax-M3
+> matrix at 32k) live in [launch-performance.md](launch-performance.md) and the
+> README. The table below is the dated 2026-06-12 `--fit` run that used
+> MiniMax-M2.7 as the MoE model — kept as a methodology record, not the headline.
+
 ## Upstream llama.cpp --fit Comparison (2026-06-12)
 
 Upstream llama.cpp master was built from `70b54e140c90` (`vendor : update cpp-httplib to 0.47.0 (#24395)`) with CUDA (`GGML_CUDA=ON`, CUDA 13.2.51). The benchmark host was the release rig: i7-10700K, 128 GiB RAM, RTX 3090 Ti 24 GiB, RTX 3060 12 GiB, RTX 4070 12 GiB, NVIDIA driver 580.159.03.

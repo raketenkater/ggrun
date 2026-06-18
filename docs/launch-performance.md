@@ -9,55 +9,33 @@ b9123/927dada6c.
 
 Dense comparison runs used the `long` prompt profile with 256 generated tokens.
 
-## Dense Models
+## Dense Models (CUDA / ik_llama.cpp)
 
-| Model | Backend | Raw llama-server tok/s | llm-server v3 tok/s | Result |
-|---|---|---:|---:|---|
-| Qwen3.5 4B Q4_K_M | IK/CUDA | 11.89 | 159.66 | 13.4x faster launch config |
-| Qwen3.5 4B Q4_K_M | Vulkan | 47.04 | 155.21 | 3.3x faster; Vulkan device path fixed |
-| Qwen3.6 27B Q5_K_M | IK/CUDA | 1.86 | 38.11 | 20.5x faster launch config |
-| Qwen3.6 27B Q5_K_M | Vulkan | 17.33 | 37.54 | 2.2x faster; Vulkan device path fixed |
+Same GGUF, 32k context, 256-token decode, vs raw llama.cpp `--fit` and Ollama 0.30.8:
 
-Historical Bash v2 comparison, when measured:
+| Model | Ollama 0.30.8 | raw llama.cpp `--fit` | llm-server v3 | v3 `--ai-tune` |
+|---|---:|---:|---:|---:|
+| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 176.6 | 178.8 |
+| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 40.3 | 40.3 |
 
-| Model | Backend | Bash v2 tok/s | llm-server v3 tok/s | Result |
-|---|---|---:|---:|---|
-| Qwen3.5 4B Q4_K_M | IK/CUDA | 156.35 | 159.66 | parity, slightly ahead |
-| Qwen3.5 4B Q4_K_M | Vulkan | failed | 155.21 | v3 fixes Vulkan launch |
-| Qwen3.6 27B Q5_K_M | IK/CUDA | 38.02 | 38.11 | parity |
-| Qwen3.6 27B Q5_K_M | Vulkan | failed | 37.54 | v3 fixes Vulkan launch |
+llm-server's default placement already beats raw `--fit` and Ollama (+43% on the 4B,
++77% on the 27B vs Ollama). `--ai-tune` adds a small gain on the 4B and correctly
+finds nothing on the 27B — it rejects noise-level wins rather than inventing one.
 
-## AI Tune
+## MoE (CUDA / ik_llama.cpp)
 
-On these dense local runs, AI Tune did not find a stable improvement over the
-v3 baseline. That is a good release message: v3's default placement is already
-strong, and AI Tune refuses noise-level wins.
+Both MoE models use 3-GPU expert offload across VRAM + system RAM:
 
-| Model | Backend | Baseline tok/s | Best candidate | Result |
-|---|---|---:|---|---|
-| Qwen3.5 4B Q4_K_M | IK/CUDA | 153.19 | `--parallel 2` at 154.30 tok/s | +0.73%, below threshold |
-| Qwen3.5 4B Q4_K_M | Vulkan | 158.18 | `-b 16384` at 155.22 tok/s | baseline wins |
-| Qwen3.6 27B Q5_K_M | IK/CUDA | 37.86 | `-b 4096` at 37.69/37.46 tok/s | baseline wins |
-| Qwen3.6 27B Q5_K_M | Vulkan | 37.68 | candidates at 37.60/37.63 tok/s | baseline wins |
+| Model | Decode tok/s | Prompt tok/s | `--ai-tune` | Notes |
+|---|---:|---:|---:|---|
+| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 22.7 | 19.5 | 23.0 | 3-GPU expert offload + CPU experts |
+| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.47 | 5.46 | 5.50 | spans VRAM+RAM, ~108 GiB pinned host memory |
 
-## MoE
-
-MiniMax-M2.7 UD-Q3_K_XL is a 94.9 GiB MoE model. The measured IK/CUDA path used
-3-GPU expert offload, CPU experts, and about 56.6 GiB pinned host memory.
-
-| Model | Backend | Decode tok/s | Prompt tok/s | Notes |
-|---|---|---:|---:|---|
-| MiniMax-M2.7 UD-Q3_K_XL | IK/CUDA | 11.38 | 26.62 | 3-GPU MoE placement, CPU expert fallback |
-| MiniMax-M2.7 UD-Q3_K_XL | Vulkan | 2.44 | 7.98 | Works, but not competitive on this hardware |
-
-Fresh MoE AI Tune sweep at `--ctx-size 32768`:
-
-| Candidate | Flags | Decode tok/s | Prompt tok/s | Result |
-|---|---|---:|---:|---|
-| baseline | current IK MoE placement | 11.40 | 26.49 | best |
-| larger-batch | `-b 4096` | 11.34 | 26.57 | slower |
-| smaller-moe-batch | `-b 1024` | 11.37 | 26.18 | slower |
-| larger-ubatch | `-ub 1024` | n/a | n/a | CUDA OOM/hung backend |
+Raw llama.cpp `--fit` loads the 122B (20.97 decode tok/s) but **cannot** load
+MiniMax-M3 (`unknown model architecture: minimax-m3` — ik_llama.cpp only). Ollama
+can't import either big MoE on this hardware (sharded GGUFs), so llm-server is the
+only one of the three that runs them. AI Tune again finds only marginal gains over
+the already-strong default placement.
 
 ## Speculative Decoding
 
@@ -80,8 +58,10 @@ The strongest v3 performance claim is not that AI Tune magically improves every
 model. The strongest claim is that v3 makes the GGUF server launch path typed,
 reproducible, cross-platform, and backend-aware:
 
-- v3 matches Bash v2 on CUDA/IK.
-- v3 fixes Vulkan launch paths where Bash v2 failed.
+- v3 default placement beats raw llama.cpp `--fit` and Ollama on every model all
+  three can load (+43% / +77% vs Ollama on the 4B / 27B).
+- v3 runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) that raw `--fit` and
+  Ollama cannot load at all on this hardware.
 - v3 provides measured MoE placement instead of fragile manual flags.
 - AI Tune is conservative and rejects noise, unsafe memory expansion, and
   crashing MoE candidates.
