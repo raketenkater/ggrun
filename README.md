@@ -33,12 +33,14 @@ decode tok/s (256-token generation), slowest backend on the left:
 |---|---:|---:|---:|---:|---:|
 | Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 176.6 | **178.8** | **+43%** |
 | Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 40.3 | **40.3** | **+77%** |
-| Qwen3.5-122B-A10B UD-IQ4_XS (MoE) | ✗ won't load | 21.0 | 22.7 | **23.0** | Ollama can't load |
+| Qwen3.5-122B-A10B UD-IQ4_XS (MoE) | 13.5† | 21.0 | 23.6 | **23.6** | **+74%** |
 | MiniMax-M3 UD-IQ3_XXS (MoE) | ✗ won't load | ✗ won't load | 5.47 | **5.50** | Ollama can't load |
 
-Ollama and raw `--fit` can't load the big MoE models at all; llm-server runs them across
-VRAM+RAM. Where every backend loads (4B, 27B), llm-server is 43–77% faster than Ollama.
-Driving the *same* llama.cpp master binary (no ik_llama), llm-server still beat raw
+† Ollama can't import sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
+so the 122B was merged to one file before importing; MiniMax-M3 it can't load at all
+(`minimax-m3` is ik_llama-only). Where models load, llm-server is **43–77% faster than
+Ollama — including +74% on the 122B MoE** at heavy VRAM+RAM offload (60 GB, ~18 GB spilled
+to RAM). Driving the *same* llama.cpp master binary (no ik_llama), llm-server still beat raw
 `--fit` — so the gain is the placement, not just the backend swap. Full methodology,
 exact commands, and artifacts: [docs/performance.md](docs/performance.md). Numbers are
 reproducible with [`scripts/bench-v3-comparison.sh`](scripts/bench-v3-comparison.sh) —
