@@ -727,8 +727,15 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	fixedPerGPU := sysCUDAOverheadMB + computeBufMB
 
 	// Use only GPUs that can carry CUDA/compute overhead plus their emitted
-	// tensor-split share of all non-expert weights and KV. The split itself is
-	// free-VRAM proportional over that used set.
+	// tensor-split share of all non-expert weights and KV. The split is
+	// bandwidth-weighted: under --split-mode layer, the GPU that owns a
+	// layer's non-expert weights also computes that layer — including
+	// streaming its CPU-resident experts over PCIe. Weighting the split by
+	// measured PCIe bandwidth (not just free VRAM) concentrates layer
+	// ownership on the fastest-link GPU, so CPU-expert streaming avoids
+	// bottlenecking on a slow PCIe link (e.g. a card stuck at x1).
+	// When bandwidth is unknown or uniform across GPUs, this degenerates
+	// to free-VRAM-proportional (the previous behaviour).
 	used := make([]bool, numGPUs)
 	for i, g := range caps.GPUs {
 		used[i] = g.VRAMFreeMB() > fixedPerGPU
@@ -736,18 +743,18 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	var split []float64
 	for {
 		rawSplit := make([]float64, numGPUs)
-		totalFree := 0.0
+		totalWeighted := 0.0
 		for i, g := range caps.GPUs {
 			if used[i] {
-				totalFree += float64(g.VRAMFreeMB())
+				totalWeighted += float64(g.VRAMFreeMB()) * gpuSplitWeight(g)
 			}
 		}
-		if totalFree <= 0 {
+		if totalWeighted <= 0 {
 			return nil, fmt.Errorf("Model does not fit on this system: no GPU has free VRAM after CUDA/compute overhead")
 		}
 		for i, g := range caps.GPUs {
 			if used[i] {
-				rawSplit[i] = float64(g.VRAMFreeMB()) / totalFree
+				rawSplit[i] = float64(g.VRAMFreeMB()) * gpuSplitWeight(g) / totalWeighted
 			}
 		}
 		split = normalizeSplit(rawSplit)
@@ -1375,6 +1382,19 @@ func normalizeSplit(split []float64) []float64 {
 		split[i] = math.Round(split[i]/total*100) / 100
 	}
 	return split
+}
+
+// gpuSplitWeight returns the weight applied to a GPU's free VRAM when
+// computing the tensor-split for MoE offload. Under --split-mode layer the
+// GPU that owns a layer's non-expert weights computes that layer, so
+// CPU-resident experts stream over that GPU's PCIe link. Weighting by PCIe
+// bandwidth concentrates ownership on fast-link GPUs. Returns 1.0 when
+// bandwidth is unknown so the split degenerates to free-VRAM-proportional.
+func gpuSplitWeight(g detect.GPU) float64 {
+	if g.BandwidthMBps <= 0 {
+		return 1.0
+	}
+	return float64(g.BandwidthMBps)
 }
 
 // checkMemoryOrDie refuses to launch when model + KV + compute buffers exceed the pool.
