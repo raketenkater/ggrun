@@ -61,6 +61,7 @@ type Model struct {
 	modelDir               string
 	settingsPath           string
 	cacheDir               string
+	recommendationGroups   recommend.Categories
 	recommendations        []recommend.Recommendation
 	selectedRecommendation int
 
@@ -188,7 +189,8 @@ func InitialModel() Model {
 	// Detect hardware
 	caps, _ := detect.Detect()
 	m.caps = caps
-	m.recommendations = recommend.Top(caps, 5)
+	m.recommendationGroups = recommend.TopCategories(caps, 4)
+	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 
 	if len(m.models) == 0 {
 		m.screen = ScreenFirstRun
@@ -196,6 +198,15 @@ func InitialModel() Model {
 
 	m.mainList = newMainList(m.models)
 	return m
+}
+
+func flattenRecommendationCategories(cats recommend.Categories) []recommend.Recommendation {
+	total := len(cats.Balanced) + len(cats.Smartest) + len(cats.Fastest)
+	rows := make([]recommend.Recommendation, 0, total)
+	rows = append(rows, cats.Balanced...)
+	rows = append(rows, cats.Smartest...)
+	rows = append(rows, cats.Fastest...)
+	return rows
 }
 
 func newMainList(models []ModelItem) list.Model {
@@ -1102,26 +1113,44 @@ func (m Model) viewRecommended() string {
 		return b.String()
 	}
 
-	for i, rec := range m.recommendations {
-		prefix := "  "
-		if i == m.selectedRecommendation {
-			prefix = selectedStyle.Render("▸ ")
+	idx := 0
+	writeGroup := func(title string, rows []recommend.Recommendation) {
+		if len(rows) == 0 {
+			return
 		}
-		line := fmt.Sprintf("%d. %s", i+1, rec.Name)
-		if i == m.selectedRecommendation {
-			b.WriteString(prefix + selectedStyle.Render(line) + "\n")
-		} else {
-			b.WriteString(prefix + line + "\n")
+		b.WriteString(recommendStyle.Render("  "+title) + "\n")
+		for _, rec := range rows {
+			prefix := "  "
+			if idx == m.selectedRecommendation {
+				prefix = selectedStyle.Render("▸ ")
+			}
+			quant := rec.QuantName
+			if quant == "" {
+				quant = "auto"
+			}
+			tps := "—"
+			if rec.PredictedTPS > 0 {
+				tps = fmt.Sprintf("%.0f t/s", rec.PredictedTPS)
+			}
+			name := rec.Name
+			if len(name) > 34 {
+				name = name[:33] + "…"
+			}
+			line := fmt.Sprintf("%-34s %-9s %-8s %5.1fG %3.0f%% %7s",
+				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, rec.QualityRetained*100, tps)
+			if idx == m.selectedRecommendation {
+				b.WriteString(prefix + selectedStyle.Render(line) + "\n")
+			} else {
+				b.WriteString(prefix + line + "\n")
+			}
+			idx++
 		}
-		quant := rec.QuantName
-		if quant == "" {
-			quant = "auto"
-		}
-		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s | %s %.1fGB | need %.1fGB | %s | %s", rec.Repo, quant, rec.QuantSizeGB, rec.MemoryNeedGB, rec.Fit, rec.BackendHint)) + "\n")
-		b.WriteString(subtitleStyle.Render(fmt.Sprintf("     score %.1f; %s; %s", rec.AdjustedIntelligence, rec.Reason, rec.Notes)) + "\n")
+		b.WriteString("\n")
 	}
+	writeGroup("Best overall — balanced quality, speed and fit", m.recommendationGroups.Balanced)
+	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
+	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
 
-	b.WriteString("\n")
 	b.WriteString(highlightStyle.Render("  [Enter] Download selected"))
 	b.WriteString("\n  [d] Manual repo  [Esc] Back  [↑/↓] Navigate\n")
 	return b.String()

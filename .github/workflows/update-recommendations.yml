@@ -2,7 +2,12 @@ name: Update model recommendations
 
 on:
   schedule:
-    - cron: "23 5 * * 1"
+    # Every ~3 days to stay well within free-tier limits (GitHub Actions minutes,
+    # Hugging Face API). The job only commits when catalog.json actually changes,
+    # so quiet runs are cheap, and the runtime client refresh (24h TTL) means
+    # users still pick up changes promptly between CI runs. Trigger manually via
+    # workflow_dispatch when a model needs to land sooner.
+    - cron: "23 5 */3 * *"
   workflow_dispatch:
 
 permissions:
@@ -26,8 +31,14 @@ jobs:
 
       - name: Refresh recommendation catalog
         env:
+          # The free Artificial Analysis tier only reaches the legacy endpoint,
+          # which lacks open-weights flags and HF repo links; the Pro endpoint
+          # (v2/language/models) is subscription-only. So the open-weights
+          # leaderboard page-scrape (?weights=open, carries repo links) is the
+          # best free source. The key is still passed so the tool auto-upgrades
+          # to the richer API path if a Pro key is ever provided.
           ARTIFICIAL_ANALYSIS_API_KEY: ${{ secrets.ARTIFICIAL_ANALYSIS_API_KEY || secrets.ARTIFICIALANALYSISAPIKEY }}
-        run: python3 tools/models/update_recommendations.py --allow-missing-key --catalog-limit 100 --hf-search-limit 20 --hf-min-delay 0.4 --hf-429-backoff 45 --print-top 100 --print-open-weights-top 100 --print-catalog-top 100
+        run: python3 tools/models/update_recommendations.py --allow-missing-key --catalog-limit 500 --hf-search-limit 20 --hf-min-delay 0.4 --hf-429-backoff 45 --print-top 100 --print-open-weights-top 100 --print-catalog-top 100
 
       - name: Show catalog diff
         run: git diff -- go/pkg/recommend/catalog.json

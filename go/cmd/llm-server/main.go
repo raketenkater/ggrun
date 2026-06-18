@@ -26,6 +26,7 @@ import (
 	"github.com/raketenkater/llm-server/pkg/libhub"
 	"github.com/raketenkater/llm-server/pkg/placement"
 	"github.com/raketenkater/llm-server/pkg/probe"
+	"github.com/raketenkater/llm-server/pkg/recommend"
 	"github.com/raketenkater/llm-server/pkg/recovery"
 	"github.com/raketenkater/llm-server/pkg/server"
 	"github.com/raketenkater/llm-server/pkg/tui"
@@ -68,6 +69,8 @@ func main() {
 		cmdDownload(args[1:])
 	case "tune":
 		cmdTune(args[1:])
+	case "recommend":
+		cmdRecommend(args[1:])
 	case "gui", "tui":
 		update.PromptOnStartup()
 		cmdGUI()
@@ -96,6 +99,7 @@ Commands:
   dry-run <model.gguf> Print computed flags without launching
   download <repo/name> Download from HuggingFace
   tune <model.gguf>    AI-tune model for best performance
+  recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   config [show|edit|path|reset]  Manage settings
   update, --update     Update llm-server and backends
   gui, tui             Interactive TUI (model picker, settings, launch)
@@ -114,7 +118,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "download", "tune", "gui", "tui", "config", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "download", "tune", "recommend", "gui", "tui", "config", "update", "--update":
 		return true
 	default:
 		return false
@@ -699,6 +703,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
+	preflightBackendArch(model, be, caps)
 	if env := applyGPUVisibility(req, be.Tag); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
@@ -796,6 +801,7 @@ func cmdLaunch(args []string) {
 }
 
 func cmdGUI() {
+	go recommend.MaybeRefresh() // refresh catalog in the background; TUI uses cache-or-embedded
 	req, err := tui.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -838,6 +844,7 @@ func cmdGUI() {
 		os.Exit(1)
 	}
 	warnModelCompatibility(model)
+	preflightBackendArch(model, be, caps)
 
 	opts := placement.Options{
 		ContextSize: req.CtxSize,
@@ -898,6 +905,9 @@ func cmdGUI() {
 	launcher.PlacementCachePath = req.TuneCache
 	launcher.OnFailure = func(ft recovery.FailureType, msg string) {
 		fmt.Fprintf(os.Stderr, "[launch] failure: %s: %s\n", ft, msg)
+		if ft == recovery.FailureUnknownModel {
+			fmt.Fprintf(os.Stderr, "[launch] hint: backend %s could not load architecture %q. If this is a MiniMax / ik-only model, switch to the ik_llama.cpp backend (see LLAMA_SERVER in your config).\n", be.Path, model.ModelArch)
+		}
 	}
 	launcher.OnCUDAOOM = func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool) {
 		newArgs, entry, ok := placement.DerateCUDAOOMArgs(args, model, caps, device, allocMB)
@@ -1426,7 +1436,7 @@ func cmdDownload(args []string) {
 
 func tuneRoundsFromArgs(args []string, fallback int) int {
 	if fallback <= 0 {
-		fallback = 3
+		fallback = 8
 	}
 	for i := 0; i < len(args); i++ {
 		if key, val, ok := strings.Cut(args[i], "="); ok && (key == "--rounds" || key == "-rounds") {
@@ -1443,6 +1453,72 @@ func tuneRoundsFromArgs(args []string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func cmdRecommend(args []string) {
+	limit := 5
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-n", "--limit":
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+					limit = n
+				}
+				i++
+			}
+		default:
+			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "-n")); err == nil && n > 0 {
+				limit = n
+			}
+		}
+	}
+
+	recommend.MaybeRefresh() // pull the latest published catalog (TTL-gated, best-effort)
+
+	caps, err := detect.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		os.Exit(1)
+	}
+
+	gpu := "CPU only"
+	if len(caps.GPUs) > 0 {
+		names := make([]string, 0, len(caps.GPUs))
+		for _, g := range caps.GPUs {
+			names = append(names, fmt.Sprintf("%s %dGB", g.Name, g.VRAMTotalMB/1024))
+		}
+		gpu = strings.Join(names, " + ")
+	}
+	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
+
+	cats := recommend.TopCategories(caps, limit)
+	if len(cats.Balanced) == 0 {
+		fmt.Println("No models in the catalog fit this machine.")
+		return
+	}
+	printRecGroup := func(title string, rows []recommend.Recommendation) {
+		if len(rows) == 0 {
+			return
+		}
+		fmt.Printf("\n%s\n", title)
+		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Speed")
+		for _, r := range rows {
+			name := r.Name
+			if len(name) > 36 {
+				name = name[:35] + "…"
+			}
+			tps := "—"
+			if r.PredictedTPS > 0 {
+				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
+			}
+			fmt.Printf("  %-36s %-10s %-8s %5.1fG %4.0f%% %8s\n",
+				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, r.QualityRetained*100, tps)
+		}
+	}
+	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
+	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
+	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
+	fmt.Printf("\n%s\n", recommend.CatalogAttribution())
 }
 
 func cmdTune(args []string) {
@@ -1733,6 +1809,57 @@ func cmdUpdate() {
 	} else {
 		fmt.Printf("\nYou are on the latest version: %s\n", res.Current)
 	}
+}
+
+// isIKOnlyArch reports whether a model architecture can only be loaded by
+// ik_llama.cpp; mainline llama.cpp rejects these with "unknown model architecture".
+func isIKOnlyArch(arch string) bool {
+	a := strings.ToLower(strings.TrimSpace(arch))
+	return strings.HasPrefix(a, "minimax-m") // minimax-m2, minimax-m3, ...
+}
+
+// availableIKBinary returns the path of a detected ik_llama.cpp server binary, if any.
+func availableIKBinary(caps *detect.Capabilities) string {
+	seen := map[string]bool{}
+	cands := make([]string, 0, len(caps.Backends)+4)
+	for _, b := range caps.Backends {
+		cands = append(cands, b.Path)
+	}
+	cands = append(cands, backendSearchPaths()...)
+	for _, p := range cands {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if detectBackend(p).IsIK {
+			return p
+		}
+	}
+	return ""
+}
+
+// preflightBackendArch fails fast with an actionable message when the model needs
+// ik_llama.cpp but the resolved backend is mainline llama.cpp, instead of letting
+// the backend die later with a cryptic "unknown model architecture" load error.
+func preflightBackendArch(model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) {
+	if model == nil || be == nil || be.IsIK || !isIKOnlyArch(model.ModelArch) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Error: model architecture %q needs the ik_llama.cpp backend, but the selected backend is mainline llama.cpp.\n"+
+			"  backend binary: %s\n", model.ModelArch, be.Path)
+	if ik := availableIKBinary(caps); ik != "" {
+		fmt.Fprintf(os.Stderr,
+			"  fix: set LLAMA_SERVER=%q in your llm-server config (.config/config),\n"+
+				"       or unset LLAMA_SERVER and keep LLM_BACKEND=ik_llama.\n", ik)
+	} else {
+		fmt.Fprintln(os.Stderr,
+			"  fix: no ik_llama.cpp binary found. Build/install ik_llama.cpp and point LLAMA_SERVER at its llama-server.")
+	}
+	os.Exit(1)
 }
 
 func warnModelCompatibility(model *placement.ModelProfile) {

@@ -27,17 +27,19 @@ path or flags for one-shot CLI use instead.
 ## Benchmarks
 
 Same rig (RTX 3090 Ti 24GB + 4070 12GB + 3060 12GB), same GGUFs, 32k context,
-decode tok/s, median of 3:
+decode tok/s (256-token generation), slowest backend on the left:
 
-| Model (quant) | llama.cpp `--fit` | Ollama 0.30.8 | **llm-server v3** |
-|---|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 102.6 | 129.3 | **156.2** _(183.9 w/ `--ai-tune`)_ |
-| Qwen3.6-27B Q5_K_M | 24.1 | 21.5 | **37.7** |
-| MiniMax-M3 UD-IQ3_XXS (149 GB MoE) | ✗ won't load | ✗ won't load | **5.5** |
+| Model (quant) | Ollama 0.30.8 | llama.cpp `--fit` | llm-server v3 | v3 `--ai-tune` | v3 vs Ollama |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 176.6 | **178.8** | **+43%** |
+| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 40.3 | **40.3** | **+77%** |
+| Qwen3.5-122B-A10B UD-IQ4_XS (MoE) | ✗ won't load | 21.0 | 22.7 | **23.0** | Ollama can't load |
+| MiniMax-M3 UD-IQ3_XXS (MoE) | ✗ won't load | ✗ won't load | 5.47 | **5.50** | Ollama can't load |
 
+Ollama and raw `--fit` can't load the big MoE models at all; llm-server runs them across
+VRAM+RAM. Where every backend loads (4B, 27B), llm-server is 43–77% faster than Ollama.
 Driving the *same* llama.cpp master binary (no ik_llama), llm-server still beat raw
-`--fit` — so the gain is the placement, not just the backend swap. `--fit` and Ollama
-can't load `minimax-m3` at all; llm-server runs it across VRAM+RAM. Full methodology,
+`--fit` — so the gain is the placement, not just the backend swap. Full methodology,
 exact commands, and artifacts: [docs/performance.md](docs/performance.md). Numbers are
 reproducible with [`scripts/bench-v3-comparison.sh`](scripts/bench-v3-comparison.sh) —
 regressions against these tables are treated as bugs.

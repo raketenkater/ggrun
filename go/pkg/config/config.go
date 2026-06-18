@@ -68,7 +68,7 @@ func Defaults() *Config {
 		Backend:       "",
 		LlamaServer:   "",
 		AppHome:       "",
-		TuneRounds:    5,
+		TuneRounds:    8,
 		Vision:        false,
 		Parallel:      1,
 		Host:          "0.0.0.0",

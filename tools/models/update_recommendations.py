@@ -559,7 +559,16 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
         fname = str(item.get("rfilename") or "")
         if not fname.lower().endswith(".gguf") or "mmproj" in fname.lower():
             continue
-        size = item.get("size")
+        # For LFS-tracked files (all real GGUF weights) item["size"] is the tiny
+        # pointer-file size; the actual blob size is in item["lfs"]["size"].
+        # Reading the pointer size is what produced phantom quants like
+        # "F16 = 0.9GB" for a 30B model. Prefer the LFS size.
+        size = None
+        lfs = item.get("lfs")
+        if isinstance(lfs, dict) and isinstance(lfs.get("size"), int):
+            size = lfs["size"]
+        elif isinstance(item.get("size"), int):
+            size = item.get("size")
         if not isinstance(size, int) or size <= 0:
             continue
         basename = fname.rsplit("/", 1)[-1]
@@ -575,6 +584,119 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     ]
     HF_QUANT_CACHE[key] = quants
     return quants
+
+
+# GGUF architecture geometry, read from the binary header so the recommender
+# can compute launch overhead with the placement engine's exact formula
+# (go/pkg/placement/placement.go) instead of estimating it. Hugging Face's
+# /api/models endpoint exposes architecture/context_length/total but NOT the
+# layer/expert/KV geometry (embd, exp_ff, hkv, kl, vl, layers, experts,
+# leading_dense, kv_lora) — those live only inside the GGUF KV metadata block.
+# The geometry is identical across every quant of a model, so one range request
+# per repo (on any one GGUF file) is enough; no per-quant fetch.
+GGUF_HEADER_FETCH_BYTES = 16 * 1024 * 1024  # 16 MiB covers KV metadata + tokenizer for current models
+HF_GGUF_ARCH_CACHE: dict[str, dict[str, Any] | None] = {}
+
+
+def _gguf_resolve_url(repo: str, fname: str) -> str:
+    repo_enc = urllib.parse.quote(repo, safe="/")
+    file_enc = urllib.parse.quote(fname, safe="/")
+    return f"https://huggingface.co/{repo_enc}/resolve/main/{file_enc}"
+
+
+def _representative_gguf_file(siblings: list[dict[str, Any]]) -> str | None:
+    # Prefer the first shard of a split model (KV metadata is duplicated across
+    # shards, so shard 1 always carries it). Fall back to any non-mmproj GGUF.
+    candidates: list[tuple[str, int]] = []
+    for item in siblings:
+        if not isinstance(item, dict):
+            continue
+        fname = str(item.get("rfilename") or "")
+        if not fname.lower().endswith(".gguf") or "mmproj" in fname.lower():
+            continue
+        size = 0
+        lfs = item.get("lfs")
+        if isinstance(lfs, dict) and isinstance(lfs.get("size"), int):
+            size = lfs["size"]
+        candidates.append((fname, size))
+    if not candidates:
+        return None
+    # "00001-of" or "-of-00001" (single file) sorts first.
+    candidates.sort(key=lambda fs: (0 if "00001-of" in fs[0] or "-of-0000" not in fs[0] else 1, fs[0]))
+    return candidates[0][0]
+
+
+def fetch_gguf_arch(repo: str) -> dict[str, Any] | None:
+    """Read GGUF KV metadata geometry from one HF range request.
+
+    Returns a dict with the fields the placement engine's overhead formula
+    needs (arch, layers, experts, exp_used, exp_ff, exp_shared_ff, embd, ff,
+    hkv, kl, vl, kv_lora, q_lora, leading_dense, ctx_train), or None when the
+    repo has no GGUF or the header could not be parsed. Best-effort: any
+    failure leaves the caller to fall back to the size-only overhead estimate.
+    """
+    if not repo or "/" not in repo:
+        return None
+    key = repo.lower()
+    if key in HF_GGUF_ARCH_CACHE:
+        return HF_GGUF_ARCH_CACHE[key]
+    data = fetch_hf_model_info(repo)
+    if not data:
+        HF_GGUF_ARCH_CACHE[key] = None
+        return None
+    siblings = data.get("siblings")
+    if not isinstance(siblings, list):
+        HF_GGUF_ARCH_CACHE[key] = None
+        return None
+    fname = _representative_gguf_file(siblings)
+    if not fname:
+        HF_GGUF_ARCH_CACHE[key] = None
+        return None
+    url = _gguf_resolve_url(repo, fname)
+    # parse_gguf._read_kv reads from a file-like object; BytesIO works and lets
+    # us reuse the exact tested parser instead of duplicating the KV walk.
+    import io
+    import struct
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gguf"))
+    from parse_gguf import _read_kv
+
+    req_headers = {"Range": f"bytes=0-{GGUF_HEADER_FETCH_BYTES - 1}", "User-Agent": "llm-server-catalog-refresh"}
+    req_headers.update(hf_auth_headers(url))
+    try:
+        req = urllib.request.Request(url, headers=req_headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read(GGUF_HEADER_FETCH_BYTES)
+    except Exception as exc:
+        warn_hf_error(f"Could not read GGUF header for {repo}/{fname}", exc)
+        HF_GGUF_ARCH_CACHE[key] = None
+        return None
+    buf = io.BytesIO(raw)
+    try:
+        if buf.read(4) != b"GGUF":
+            HF_GGUF_ARCH_CACHE[key] = None
+            return None
+        buf.read(4)  # gguf version
+        struct.unpack("<Q", buf.read(8))[0]  # tensor_count (0 on shard 1 of split models)
+        kv_count = struct.unpack("<Q", buf.read(8))[0]
+        meta: dict[str, Any] = {"fused": 0, "expert_bytes": 0, "non_expert_bytes": 0}
+        _read_kv(buf, meta, kv_count)
+    except Exception as exc:
+        warn_hf_error(f"GGUF header parse failed for {repo}/{fname}", exc)
+        HF_GGUF_ARCH_CACHE[key] = None
+        return None
+    # Project to the fields the recommender/overhead formula consumes.
+    out: dict[str, Any] = {}
+    for field in (
+        "arch", "layers", "experts", "exp_used", "exp_ff", "exp_shared_ff",
+        "embd", "ff", "hkv", "kl", "vl", "kv_lora", "q_lora",
+        "leading_dense", "ctx_train", "ssm", "nextn_predict_layers",
+    ):
+        val = meta.get(field)
+        if val is not None:
+            out[field] = val
+    HF_GGUF_ARCH_CACHE[key] = out or None
+    return out or None
 
 
 def search_hf_models(query: str, limit: int) -> list[dict[str, Any]]:
@@ -815,7 +937,11 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
     moe = total > 0 and active > 0 and active < total * 0.85
     idx = intelligence(row)
     tps = output_tps(row)
-    return {
+    # Read exact GGUF geometry from one HF range request so the recommender can
+    # compute launch overhead with the placement engine's formula, not an
+    # estimate. Best-effort: missing geometry leaves the recommender's fallback.
+    arch = fetch_gguf_arch(repo) or {}
+    cand = {
         "aa_id": row_id(row),
         "aa_intelligence_index": round(idx, 3) if idx else 0,
         "aa_output_tps": round(tps, 3) if tps else 0,
@@ -835,6 +961,17 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "speed": speed_score(tps),
         "total_params_b": round(total, 3) if total else 0,
     }
+    if arch:
+        # Embed only the geometry fields the overhead formula consumes; keep
+        # the catalog lean and the schema explicit.
+        for field in (
+            "arch", "layers", "experts", "exp_used", "exp_ff", "exp_shared_ff",
+            "embd", "ff", "hkv", "kl", "vl", "kv_lora", "q_lora",
+            "leading_dense", "ctx_train",
+        ):
+            if field in arch:
+                cand[field] = arch[field]
+    return cand
 
 
 def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
