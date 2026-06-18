@@ -46,8 +46,13 @@ def ensure_daemon():
 
 def pull():
     log(f"pulling {MODEL} (single-file ~47G; slow at ollama pull speed)")
-    if subprocess.run([OLLAMA, "pull", MODEL]).returncode != 0:
-        raise SystemExit("ollama pull failed")
+    # ollama pull is resumable; retry through transient 504/registry timeouts.
+    for attempt in range(1, 11):
+        if subprocess.run([OLLAMA, "pull", MODEL]).returncode == 0:
+            return
+        log(f"pull attempt {attempt} failed (likely transient); retry in 30s")
+        time.sleep(30)
+    raise SystemExit("ollama pull failed after 10 attempts")
 
 
 def bench_ollama():

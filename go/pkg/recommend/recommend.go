@@ -206,8 +206,13 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	smartest := take(smartPool)
 
 	// Fastest: highest predicted tok/s among models that are still capable
-	// (>= 60% of the best effective intelligence on this machine).
-	floor := 0.60 * maxEff
+	// (>= 40% of the best effective intelligence on this machine). The floor
+	// is lower than Smartest's implicit bar because this category is about
+	// speed — a 158 t/s model at 53% of max intelligence is genuinely useful.
+	// Fastest does NOT dedup against Balanced/Smartest: the fastest models
+	// often also score well in Best overall (speedFactor caps at interactive),
+	// and deduping them out would leave Fastest showing slow leftovers.
+	floor := 0.40 * maxEff
 	fastPool := make([]Recommendation, 0, len(rows))
 	for _, r := range rows {
 		if r.AdjustedIntelligence >= floor && r.PredictedTPS > 0 {
@@ -217,7 +222,13 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sort.SliceStable(fastPool, func(i, j int) bool {
 		return fastPool[i].PredictedTPS > fastPool[j].PredictedTPS
 	})
-	fastest := take(fastPool)
+	fastest := make([]Recommendation, 0, n)
+	for _, r := range fastPool {
+		fastest = append(fastest, r)
+		if len(fastest) == n {
+			break
+		}
+	}
 
 	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
 }
