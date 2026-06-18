@@ -24,12 +24,15 @@ finds nothing on the 27B — it rejects noise-level wins rather than inventing o
 
 ## MoE (CUDA / ik_llama.cpp)
 
-Both MoE models use 3-GPU expert offload across VRAM + system RAM:
+Both MoE models use 3-GPU expert offload across VRAM + system RAM. The tensor-split
+is PCIe-bandwidth-weighted, which concentrates layer ownership on the fastest-link
+GPU and lifts prefill sharply on heterogeneous rigs (a card stuck at x1 no longer
+bottlenecks CPU-expert streaming):
 
-| Model | Decode tok/s | Prompt tok/s | `--ai-tune` | Notes |
+| Model | Decode tok/s | Prefill tok/s | `--ai-tune` | Notes |
 |---|---:|---:|---:|---|
 | Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 22.7 | 19.5 | 23.0 | 3-GPU expert offload + CPU experts |
-| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.47 | 5.46 | 5.50 | spans VRAM+RAM, ~108 GiB pinned host memory |
+| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.50 | 21.4 | 5.50 | spans VRAM+RAM, ~108 GiB pinned; prefill ~3.9× from PCIe-weighted split |
 
 Raw llama.cpp `--fit` loads the 122B (20.97 decode tok/s) but **cannot** load
 MiniMax-M3 (`unknown model architecture: minimax-m3` — ik_llama.cpp only). Ollama
