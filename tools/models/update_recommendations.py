@@ -552,7 +552,7 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     if not isinstance(siblings, list):
         HF_QUANT_CACHE[key] = []
         return []
-    quant_sizes: dict[str, int] = {}
+    quant_sizes: dict[str, dict[str, int | bool]] = {}
     for item in siblings:
         if not isinstance(item, dict):
             continue
@@ -572,15 +572,23 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
         if not isinstance(size, int) or size <= 0:
             continue
         basename = fname.rsplit("/", 1)[-1]
+        # Unsloth dynamic quants carry a "UD-" prefix (e.g. UD-IQ4_XS).
+        # Preserve it so the recommender knows this is an optimized quant
+        # (loss * 0.7) rather than a generic quant of the same type.
+        is_dynamic = "-UD-" in basename or basename.upper().startswith("UD-")
         matches = QUANT_PATTERN.findall(basename)
         if not matches and "/" in fname:
             matches = QUANT_PATTERN.findall(fname.split("/", 1)[0])
         for match in matches:
             quant = normalize_quant(match)
-            quant_sizes[quant] = quant_sizes.get(quant, 0) + size
+            if is_dynamic:
+                quant = "UD-" + quant
+            entry = quant_sizes.setdefault(quant, {"size": 0, "dynamic": is_dynamic})
+            entry["size"] = entry["size"] + size
+            entry["dynamic"] = is_dynamic or entry["dynamic"]
     quants = [
-        {"name": name, "size_gb": round(size / 1073741824, 2), "size_bytes": size}
-        for name, size in sorted(quant_sizes.items(), key=lambda row: row[1])
+        {"name": name, "size_gb": round(info["size"] / 1073741824, 2), "size_bytes": info["size"], "dynamic": info["dynamic"]}
+        for name, info in sorted(quant_sizes.items(), key=lambda row: row[1]["size"])
     ]
     HF_QUANT_CACHE[key] = quants
     return quants
@@ -902,8 +910,10 @@ def representative_size_gb(quants: list[dict[str, Any]]) -> float:
         return 0.0
     by_name = {str(q.get("name") or "").upper(): float(q.get("size_gb") or 0) for q in quants}
     for preferred in ("Q4_K_M", "Q4_K_S", "Q4_K_XL", "IQ4_XS", "IQ4_NL", "MXFP4_MOE", "MXFP4", "Q5_K_M", "Q3_K_M", "Q3_K_XL", "Q8_0"):
-        if by_name.get(preferred, 0) > 0:
-            return by_name[preferred]
+        # Check both UD- (Unsloth dynamic) and plain variants — prefer UD- when present.
+        for name in (f"UD-{preferred}", preferred):
+            if by_name.get(name, 0) > 0:
+                return by_name[name]
     sizes = sorted(float(q.get("size_gb") or 0) for q in quants if float(q.get("size_gb") or 0) > 0)
     return sizes[len(sizes) // 2] if sizes else 0.0
 

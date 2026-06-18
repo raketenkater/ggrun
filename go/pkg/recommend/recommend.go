@@ -20,6 +20,7 @@ type QuantOption struct {
 	SizeGB         float64 `json:"size_gb"`
 	SizeBytes      int64   `json:"size_bytes,omitempty"`
 	QualityPenalty float64 `json:"quality_penalty,omitempty"`
+	Dynamic        bool    `json:"dynamic,omitempty"` // Unsloth UD- quant: loss * 0.7
 }
 
 // Candidate is a GGUF repository that llm-server can offer as a first-run
@@ -286,7 +287,6 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 	}
 
 	quants := quantOptions(c)
-	dynamic := isUnslothRepo(c.Repo)
 	var best Recommendation
 	ok := false
 	for _, q := range quants {
@@ -302,7 +302,7 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 		if !fits {
 			continue
 		}
-		retained := quantQualityRetention(q.Name, c.TotalParamsB, dynamic)
+		retained := quantQualityRetention(q.Name, c.TotalParamsB, q.Dynamic)
 		effIntel := base * retained
 		if effIntel <= 0 {
 			continue
@@ -329,11 +329,6 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 		}
 	}
 	return best, ok
-}
-
-func isUnslothRepo(repo string) bool {
-	r := strings.ToLower(repo)
-	return strings.HasPrefix(r, "unsloth/") || strings.Contains(r, "/unsloth")
 }
 
 func speedReason(fitReason string, tps float64) string {
