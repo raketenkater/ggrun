@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,11 +51,16 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	setSysProcAttr(cmd)
-	cmd.Stdout = os.Stdout
-
-	// Tee stderr: output to terminal AND capture in buffer for post-launch probe.
+	// Capture stdout/stderr to a buffer for the post-launch probe. On a TTY we
+	// keep the screen clean during model load (a spinner owns it) and only begin
+	// streaming the backend's own logs once it is ready; off a TTY we stream from
+	// the start, exactly as before (so piped/benchmark runs are unchanged).
 	logBuf := &threadSafeBuffer{}
-	cmd.Stderr = io.MultiWriter(os.Stderr, logBuf)
+	tty := stdoutIsTTY()
+	live := &atomic.Bool{}
+	live.Store(!tty)
+	cmd.Stdout = &gatedWriter{buf: logBuf, term: os.Stdout, live: live}
+	cmd.Stderr = &gatedWriter{buf: logBuf, term: os.Stderr, live: live}
 
 	// Ensure CUDA device enumeration matches nvidia-smi PCI bus order.
 	// Without this, llama-server may enumerate GPUs differently from our
@@ -79,9 +85,29 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 
 	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, waitCh: make(chan error, 1)}
 	go func() { p.waitCh <- cmd.Wait() }()
-	if err := p.waitReady(timeout); err != nil {
+
+	start := time.Now()
+	var stopSpin chan struct{}
+	if tty {
+		stopSpin = make(chan struct{})
+		go spinUntilReady(stopSpin, logBuf, start)
+	}
+	err := p.waitReady(timeout)
+	if tty {
+		close(stopSpin)
+		fmt.Fprint(os.Stderr, "\r\033[K") // clear the spinner line
+	}
+	if err != nil {
+		if tty {
+			fmt.Fprintln(os.Stderr, "[launch] backend failed to start; last output:")
+			fmt.Fprintln(os.Stderr, tailLines(logBuf.String(), 20))
+		}
 		p.Stop()
 		return nil, fmt.Errorf("server not ready: %w", err)
+	}
+	live.Store(true) // backend is up — stream its logs from here on
+	if tty {
+		fmt.Fprintf(os.Stderr, "✓ model loaded — server ready in %s\n", time.Since(start).Round(time.Second))
 	}
 	return p, nil
 }
@@ -154,4 +180,74 @@ func (p *Process) QueryModels() ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// gatedWriter always captures to buf; it forwards to term only once live is set,
+// so the backend's load-time log spam stays hidden behind the startup spinner
+// until the server is ready (after which subsequent output streams through).
+type gatedWriter struct {
+	buf  *threadSafeBuffer
+	term io.Writer
+	live *atomic.Bool
+}
+
+func (g *gatedWriter) Write(p []byte) (int, error) {
+	if g.buf != nil {
+		g.buf.Write(p)
+	}
+	if g.live.Load() {
+		return g.term.Write(p)
+	}
+	return len(p), nil
+}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// spinUntilReady animates a single status line on stderr while the backend loads,
+// labelling the current phase from the backend's captured log output.
+func spinUntilReady(stop <-chan struct{}, log *threadSafeBuffer, start time.Time) {
+	t := time.NewTicker(120 * time.Millisecond)
+	defer t.Stop()
+	for i := 0; ; i++ {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			fmt.Fprintf(os.Stderr, "\r\033[K%s  %s · %s",
+				spinnerFrames[i%len(spinnerFrames)],
+				startupPhase(log.String()),
+				time.Since(start).Round(time.Second))
+		}
+	}
+}
+
+// startupPhase turns the backend's recent log output into a short status label.
+func startupPhase(logText string) string {
+	l := strings.ToLower(logText)
+	switch {
+	case strings.Contains(l, "server is listening"), strings.Contains(l, "model loaded"):
+		return "finishing startup"
+	case strings.Contains(l, "warming up"):
+		return "warming up the model"
+	case strings.Contains(l, "load_tensors"), strings.Contains(l, "loading model"):
+		return "loading model weights"
+	case strings.Contains(l, "pinned host memory"), strings.Contains(l, "allocating"):
+		return "pinning host memory (large MoE — can take a few minutes)"
+	default:
+		return "starting backend"
+	}
+}
+
+// tailLines returns the last n lines of s (for dumping backend output on failure).
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }

@@ -853,7 +853,8 @@ func (m Model) viewModelConfig() string {
 	model := m.models[m.selectedModel]
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ Advanced: %s ═══", model.Name)) + "\n\n")
+	b.WriteString(titleStyle.Render("⚙  Configure  ·  "+model.Name) + "\n")
+	b.WriteString(mutedStyle.Render("  ↑/↓ move · ←/→ or Enter change · Esc back") + "\n")
 
 	rows := m.cfgRows()
 	focused := ""
@@ -861,12 +862,14 @@ func (m Model) viewModelConfig() string {
 		focused = rows[m.cfgCursor]
 	}
 	line := func(key, label, value string) {
-		text := fmt.Sprintf("%-24s %s", label, value)
 		if key == focused {
-			b.WriteString(selectedStyle.Render("▸ "+text) + "\n")
+			b.WriteString(selectedStyle.Render(fmt.Sprintf("  ▸ %-26s %s", label, value)) + "\n")
 		} else {
-			b.WriteString("  " + text + "\n")
+			b.WriteString(fmt.Sprintf("    %-26s ", label) + subtitleStyle.Render(value) + "\n")
 		}
+	}
+	section := func(title string) {
+		b.WriteString("\n" + recommendStyle.Render("  "+title) + "\n")
 	}
 
 	ctxLabel := m.ctxSize
@@ -886,38 +889,43 @@ func (m Model) viewModelConfig() string {
 		}
 		ctxLabel += ctxHint + ")"
 	}
-	line("context", "[c] Context size", ctxLabel)
-
 	parallelLabel := m.parallel
 	if parallelLabel == "" {
 		parallelLabel = "default (4)"
 	}
-	line("parallel", "[p] Parallel slots", parallelLabel)
-
 	kvLabel := "auto (GPU KV first)"
 	if m.kvPlacement == "gpu" {
 		kvLabel = "gpu (best long-context decode)"
 	} else if m.kvPlacement == "cpu" {
 		kvLabel = "cpu (more GPU experts for short chat)"
 	}
-	line("kv", "[K] KV placement", kvLabel)
-
 	tuneLabel := "auto"
 	if m.tunePath != "" {
 		tuneLabel = filepath.Base(m.tunePath)
 	}
+
+	section("Context & memory")
+	line("context", "[c] Context size", ctxLabel)
+	line("parallel", "[p] Parallel slots", parallelLabel)
+	line("kv", "[K] KV placement", kvLabel)
+
+	section("Tuning")
 	line("tuned", "[t] Tuned config", tuneLabel)
 	line("aitune", "[a] AI tune", boolLabel(m.aitune))
 	if m.aitune {
 		line("rounds", "[r] AI tune rounds", strconv.Itoa(m.aituneRounds))
 	}
+
+	section("Run mode")
 	line("vision", "[v] Vision (mmproj)", boolLabel(m.vision))
 	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
 	line("keepalive", "[k] Keep-alive restart", boolLabel(m.keepalive))
-	b.WriteString("\n")
-	line("launch", "[L] Launch", "")
-	line("dryrun", "[D] Dry run", "")
-	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · ←/→ change · Enter select/launch · Esc back"))
+
+	section("Actions")
+	line("launch", "[L] Launch", "▶ start the server")
+	line("dryrun", "[D] Dry run", "print the command, don't run")
+
+	b.WriteString("\n" + mutedStyle.Render("  Enter on Launch to start · Esc to go back"))
 
 	if m.inputMode != "" {
 		b.WriteString("\n\n  " + m.input.View())
