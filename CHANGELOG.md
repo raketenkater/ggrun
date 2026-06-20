@@ -1,7 +1,22 @@
 # Changelog
 
-## v3.1.0 — 2026-06-16
+## v3.1.0 — 2026-06-20
 
+- **PCIe-bandwidth-weighted MoE tensor-split.** On heterogeneous-PCIe rigs (e.g.
+  a card stuck at x1) the split now concentrates layer ownership on the
+  fastest-link GPU, so CPU-expert streaming isn't bottlenecked — up to **3.4×
+  prefill** on MiniMax-M3 with no decode regression. Symmetric rigs fall back to
+  the previous free-VRAM-proportional split.
+- **Smarter model recommendations.** The download picker ranks by effective
+  intelligence (AA index × quantization quality retained) × predicted speed ×
+  fit, in three categories (best for your machine / smartest that fits / fastest
+  capable), preferring Unsloth dynamic quants; the catalog auto-refreshes.
+- **Clear backend/architecture errors.** Launching an ik_llama-only architecture
+  (e.g. `minimax-m3`) on a mainline llama.cpp backend now fails fast with the fix
+  instead of a cryptic load crash.
+- **Polished launch UX.** An animated startup status replaces the raw backend log
+  spam while a model loads; the TUI config screen is grouped into Context /
+  Tuning / Run mode / Actions sections.
 - **Exact-ledger multi-GPU MoE placement.** Large MoE models now load reliably
   on heterogeneous multi-GPU rigs instead of over-committing the smallest card.
   The launcher emits `--tensor-split` *and* `-ot` from an exact per-GPU VRAM
