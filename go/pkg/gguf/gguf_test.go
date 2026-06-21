@@ -6,9 +6,11 @@ import (
 )
 
 func TestParse(t *testing.T) {
-	// Test with a real model if available
-	paths := []string{
-		"/home/mik/ai_models/Qwen3-0.6B-Q8_0.gguf",
+	// Exercise the parser against a real model if one is provided via
+	// GGUF_TEST_MODEL=/path/to/model.gguf; otherwise the test skips.
+	paths := []string{}
+	if p := os.Getenv("GGUF_TEST_MODEL"); p != "" {
+		paths = append(paths, p)
 	}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {

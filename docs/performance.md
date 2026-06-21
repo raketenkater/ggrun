@@ -78,8 +78,8 @@ Method: `scripts/bench-v3-comparison.sh`, 32k requested context, `long` prompt p
 
 Artifacts:
 
-- upstream fit rows: `/home/mik/llm-server/.benchmarks/fit-master-20260612/`
-- existing llm-server rows: `/home/mik/llm-server/.benchmarks/fresh-20260609/` and `/home/mik/llm-server/.benchmarks/v3-release-20260610/`
+- upstream fit rows: `.benchmarks/fit-master-20260612/`
+- existing llm-server rows: `.benchmarks/fresh-20260609/` and `.benchmarks/v3-release-20260610/`
 
 | Model | Mode | Fitted/requested context | Median decode tok/s | Median prompt tok/s | Placement/result |
 |---|---|---:|---:|---:|---|
@@ -104,8 +104,8 @@ To isolate placement from backend version, llm-server was also run with the same
 
 Artifacts:
 
-- `/home/mik/llm-server/.benchmarks/fit-master-20260612/4b-llmserver-mainline-master/`
-- `/home/mik/llm-server/.benchmarks/fit-master-20260612/27b-llmserver-mainline-master/`
+- `.benchmarks/fit-master-20260612/4b-llmserver-mainline-master/`
+- `.benchmarks/fit-master-20260612/27b-llmserver-mainline-master/`
 
 | Model | Mode | Requested context | Median decode tok/s | Median prompt tok/s | Notes |
 |---|---|---:|---:|---:|---|
@@ -120,12 +120,12 @@ Ollama `0.17.1-rc1` was tested through local Modelfiles using the same GGUF path
 
 Artifacts and exact Modelfiles:
 
-- `/home/mik/llm-server/.benchmarks/ollama-20260613/`
+- `.benchmarks/ollama-20260613/`
 
 | Model | Ollama result | Throughput row |
 |---|---|---:|
 | Qwen3.5 4B Q4_K_M | Imported from the local GGUF, but `/api/generate` failed to load it: `unknown model architecture: qwen35` | not recorded |
-| Qwen3.6 27B Q5_K_M | Import failed while copying the 19GB GGUF into Ollama blobs: `no space left on device` on `/home/mik/.ollama/models` | not recorded |
+| Qwen3.6 27B Q5_K_M | Import failed while copying the 19GB GGUF into Ollama blobs: `no space left on device` on `~/.ollama/models` | not recorded |
 | MiniMax M2.7 UD-Q3_K_XL | Not imported: the filesystem had only 805 MiB free after the 27B import failure, while Ollama would need a blob-store copy of the ~96GB split GGUF | not recorded |
 
 No registry Ollama models were substituted, because that would compare different quantizations/files rather than launcher behavior on the same GGUFs.
