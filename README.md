@@ -1,6 +1,6 @@
 # ggrun
 
-*`ggrun` = "gguf run" (say "g-run"). Formerly **llm-server**.*
+*`ggrun` = "gguf run". Formerly **llm-server**.*
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/raketenkater/ggrun)](https://github.com/raketenkater/ggrun/releases/latest)
@@ -28,7 +28,7 @@ path or flags for one-shot CLI use instead.
 
 ## Benchmarks
 
-Same rig (RTX 3090 Ti 24GB + 4070 12GB + 3060 12GB), same GGUFs, 32k context,
+Same rig (RTX 3090 Ti 24GB + 4070 12GB + 3060 12GB, 125GB RAM), same GGUFs, 32k context,
 decode tok/s (256-token generation), slowest backend on the left:
 
 | Model (quant) | Ollama 0.30.8 | llama.cpp `--fit` | ggrun v3 | v3 `--ai-tune` | v3 vs Ollama |
@@ -148,6 +148,7 @@ via `install.ps1 -Backend cuda`. The backend binary is pluggable via `LLAMA_SERV
 [Usage](docs/usage.md) ·
 [Architecture](docs/architecture.md) ·
 [Performance](docs/performance.md) ·
+[Launch benchmarks](docs/launch-performance.md) ·
 [Speculative decoding](docs/speculative-decoding.md) ·
 [Model recommendations](docs/model-recommendations.md) ·
 [Changelog](CHANGELOG.md)
