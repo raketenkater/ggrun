@@ -195,13 +195,21 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sortRecommendations(balancedPool)
 	balanced := take(balancedPool)
 
-	// Smartest: pure effective intelligence, accepting slower speeds.
+	// Smartest: effective intelligence, lightly usability-weighted so a
+	// marginally-smarter quant that crawls (e.g. a 27B at BF16 @ 3 tok/s) does
+	// not beat a nearly-as-smart, far faster quant of the same model (the same
+	// 27B at Q5 @ 40 tok/s). Genuinely-smartest-but-slow picks (a big MoE at
+	// ~6 tok/s) still surface — the weighting only bites below usableTPS.
 	smartPool := append([]Recommendation(nil), rows...)
+	smartKey := func(r Recommendation) float64 {
+		return r.AdjustedIntelligence * usabilityFactor(r.PredictedTPS)
+	}
 	sort.SliceStable(smartPool, func(i, j int) bool {
-		if smartPool[i].AdjustedIntelligence == smartPool[j].AdjustedIntelligence {
+		ki, kj := smartKey(smartPool[i]), smartKey(smartPool[j])
+		if ki == kj {
 			return smartPool[i].QuantSizeGB < smartPool[j].QuantSizeGB
 		}
-		return smartPool[i].AdjustedIntelligence > smartPool[j].AdjustedIntelligence
+		return ki > kj
 	})
 	smartest := take(smartPool)
 

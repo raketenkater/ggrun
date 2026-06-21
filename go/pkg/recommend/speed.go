@@ -248,6 +248,19 @@ func speedFactor(tps float64) float64 {
 	return clampF(0.30+0.70*(tps/interactiveTPS), 0.30, 1.0)
 }
 
+// usabilityFactor lightly down-weights picks too slow to actually use, so the
+// "Smartest" category does not surface a marginally-smarter quant that crawls
+// (e.g. a 27B at BF16 @ 3 tok/s) when a nearly-as-smart, far faster quant of the
+// same model exists (the same 27B at Q5 @ 40 tok/s). 1.0 at/above usableTPS,
+// ramping to 0.5 at 0 tok/s. Unknown speed (no params) returns 1.0 so it does
+// not penalize models we can't predict.
+func usabilityFactor(tps float64) float64 {
+	if tps <= 0 || tps >= usableTPS {
+		return 1.0
+	}
+	return 0.5 + 0.5*(tps/usableTPS)
+}
+
 // speedTier buckets a predicted tok/s. -1 means "unknown" (no params) so callers
 // can fall back to pure intelligence ordering.
 func speedTier(tps float64) int {
