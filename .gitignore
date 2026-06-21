@@ -21,6 +21,7 @@ dist/
 
 # Local binaries
 /go/ggrun
+/go/llm-server
 /ggrun
 /llm-server-go
 /llm-server-bash

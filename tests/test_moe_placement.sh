@@ -66,7 +66,11 @@ if ! out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     exit 1
 fi
 
-if [[ "$out" != *"--n-cpu-moe 384"* ]]; then
+# Oversized MoE must enter the offload path: --n-cpu-moe with a value plus the
+# exps=CPU catch-all. (Exact count is set by the per-GPU ledger and is not
+# asserted here — the exact-ledger placer fills VRAM with the experts that fit
+# and offloads the rest, rather than dumping all layers to CPU.)
+if [[ "$out" != *"--n-cpu-moe "* || "$out" != *"exps=CPU"* ]]; then
     echo "expected Kimi-style model to enter MoE offload path"
     echo "$out"
     exit 1
