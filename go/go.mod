@@ -1,4 +1,4 @@
-module github.com/raketenkater/llm-server
+module github.com/raketenkater/ggrun
 
 go 1.24.13
 

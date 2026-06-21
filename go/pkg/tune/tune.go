@@ -49,7 +49,7 @@ type Cache struct {
 func NewCache(dir string) *Cache {
 	if dir == "" {
 		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".cache", "llm-server")
+		dir = filepath.Join(home, ".cache", "ggrun")
 	}
 	return &Cache{path: filepath.Join(dir, "cache.json")}
 }
@@ -255,7 +255,7 @@ func TuneFileComplete(path string) bool {
 func TuneCachePath(dir, modelPath string, gpuNames []string, vision bool, backend string) string {
 	if dir == "" {
 		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".cache", "llm-server")
+		dir = filepath.Join(home, ".cache", "ggrun")
 	}
 	size, err := modelCacheSize(modelPath)
 	if err != nil {

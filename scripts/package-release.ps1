@@ -12,14 +12,14 @@ if (!(Test-Path $ServerBin)) { throw "llama-server binary not found: $ServerBin"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Resolve-Path (Join-Path $ScriptDir '..')
 if (!$LlmServerBin) {
-    $candidate = Join-Path $Root 'go\llm-server.exe'
+    $candidate = Join-Path $Root 'go\ggrun.exe'
     if (Test-Path $candidate) { $LlmServerBin = $candidate }
 }
-if (!$LlmServerBin -or !(Test-Path $LlmServerBin)) { throw 'llm-server.exe not found; pass -LlmServerBin' }
+if (!$LlmServerBin -or !(Test-Path $LlmServerBin)) { throw 'ggrun.exe not found; pass -LlmServerBin' }
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
-$work = Join-Path ([IO.Path]::GetTempPath()) ("llm-server-package-" + [guid]::NewGuid().ToString('N'))
+$work = Join-Path ([IO.Path]::GetTempPath()) ("ggrun-package-" + [guid]::NewGuid().ToString('N'))
 $payloadName = $AssetName -replace '\.zip$', ''
 $payload = Join-Path $work $payloadName
 $bin = Join-Path $payload 'bin'
@@ -32,7 +32,7 @@ try {
         if (Test-Path $src) { Copy-Item $src (Join-Path $payload $file) -Force }
     }
 
-    Copy-Item $LlmServerBin (Join-Path $bin 'llm-server.exe') -Force
+    Copy-Item $LlmServerBin (Join-Path $bin 'ggrun.exe') -Force
     Copy-Item $ServerBin (Join-Path $bin 'llama-server.exe') -Force
 
     foreach ($spec in @(
@@ -49,13 +49,13 @@ try {
         Copy-Item $_.FullName (Join-Path $bin $_.Name) -Force
     }
 
-    # Single launcher: `llm-server` with no args opens the GUI, so no separate
-    # llm-server-gui wrapper is shipped.
-    Set-Content -Path (Join-Path $payload 'llm-server.cmd') -Encoding ASCII -Value @'
+    # Single launcher: `ggrun` with no args opens the GUI, so no separate
+    # ggrun-gui wrapper is shipped.
+    Set-Content -Path (Join-Path $payload 'ggrun.cmd') -Encoding ASCII -Value @'
 @echo off
 set "LLM_APP_HOME=%~dp0"
 set "PATH=%~dp0bin;%PATH%"
-"%~dp0bin\llm-server.exe" %*
+"%~dp0bin\ggrun.exe" %*
 '@
 
     $zip = Join-Path $OutDir $AssetName

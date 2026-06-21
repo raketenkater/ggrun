@@ -14,10 +14,10 @@ import (
 // DefaultCommunityBaseURL serves community-shared tune files, named exactly
 // like the local cache files (tune_<model>_<size>_hw<hash>_<backend>.json),
 // so a lookup is a single GET keyed by model+hardware+backend.
-const DefaultCommunityBaseURL = "https://raw.githubusercontent.com/raketenkater/llm-server-tunes/main/tunes"
+const DefaultCommunityBaseURL = "https://raw.githubusercontent.com/raketenkater/ggrun-tunes/main/tunes"
 
 // CommunityRepoURL is where users share their own tuned configs.
-const CommunityRepoURL = "https://github.com/raketenkater/llm-server-tunes"
+const CommunityRepoURL = "https://github.com/raketenkater/ggrun-tunes"
 
 const (
 	communityHitTTL  = 7 * 24 * time.Hour

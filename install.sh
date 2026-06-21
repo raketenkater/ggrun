@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# install.sh — One-command installer for llm-server.
+# install.sh — One-command installer for ggrun.
 #
 # Usage (remote):
-#   curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/install.sh | bash
 # Usage (local):
 #   ./install.sh                  # from a cloned repo
 #
-# Installs the Go llm-server launcher and optionally installs or builds a
+# Installs the Go ggrun launcher and optionally installs or builds a
 # llama.cpp backend (ik_llama.cpp for CUDA, llama.cpp for Vulkan/Metal/CPU).
 # A small legacy Bash shim is installed as llm-server-bash only for migration.
 #
@@ -30,8 +30,8 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/raketenkater/llm-server.git"
-GITHUB_REPO="raketenkater/llm-server"
+REPO_URL="https://github.com/raketenkater/ggrun.git"
+GITHUB_REPO="raketenkater/ggrun"
 SOURCE_REPO_DIR="${LLM_INSTALL_REPO_DIR:-}"
 SOURCE_REF="${LLM_INSTALL_REF:-main}"
 INSTALL_DIR="${LLM_INSTALL_PREFIX:-$HOME/.local/bin}"
@@ -90,7 +90,7 @@ case "$MAIN_IMPL" in
     *) err "unknown main implementation: $MAIN_IMPL"; exit 1 ;;
 esac
 
-say "═══ llm-server installer ═══"
+say "═══ ggrun installer ═══"
 
 # ── Stage 1: use local repo if present; clone only if source fallback needs it ──
 SRC_DIR=""
@@ -119,7 +119,7 @@ prepare_persistent_source_repo() {
         ok "Source checkout ready at $SOURCE_REPO_DIR"
     else
         mkdir -p "$(dirname "$SOURCE_REPO_DIR")"
-        say "── Cloning llm-server source for future updates: $SOURCE_REPO_DIR ($SOURCE_REF) ──"
+        say "── Cloning ggrun source for future updates: $SOURCE_REPO_DIR ($SOURCE_REF) ──"
         git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SOURCE_REPO_DIR" >/dev/null 2>&1 || return 1
         ok "Source checkout ready at $SOURCE_REPO_DIR"
     fi
@@ -132,7 +132,7 @@ ensure_source_repo() {
         return 0
     fi
     command -v git >/dev/null || { err "git required to fetch repo"; exit 1; }
-    SRC_DIR="$(mktemp -d -t llm-server-install.XXXXXX)"
+    SRC_DIR="$(mktemp -d -t ggrun-install.XXXXXX)"
     say "── Cloning $REPO_URL ──"
     if git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 || \
         git clone --depth=1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1; then
@@ -202,7 +202,7 @@ if (( ! NONINTERACTIVE )) && [[ "${LLM_INSTALL_PROMPT:-auto}" != "0" && "$BACKEN
     say "  Detected backend: $DETECTED_BACKEND"
     say "  Install location: $INSTALL_DIR"
     say "  Model directory:  $MODEL_DIR"
-    if ask "Install/build a llama.cpp backend now so llm-server works out of the box? [Y/n]" y; then
+    if ask "Install/build a llama.cpp backend now so ggrun works out of the box? [Y/n]" y; then
         if ! ask "Use detected backend '$DETECTED_BACKEND'? [Y/n]" y; then
             read -r -p "Choose backend [cuda/vulkan/cpu/skip]: " reply </dev/tty || reply=""
             reply="${reply:-$DETECTED_BACKEND}"
@@ -259,7 +259,7 @@ platform_slug() {
 release_asset_name() {
     local platform="$1" backend="$2"
     case "$backend" in
-        cuda|vulkan|metal|cpu) printf 'llm-server-%s-%s.tar.gz\n' "$platform" "$backend" ;;
+        cuda|vulkan|metal|cpu) printf 'ggrun-%s-%s.tar.gz\n' "$platform" "$backend" ;;
         *) return 1 ;;
     esac
 }
@@ -314,12 +314,13 @@ install_payload_file() {
 install_go_as_main() {
     local go_bin="$1"
     [[ "$MAIN_IMPL" == "go" && -x "$go_bin" ]] || return 1
-    if [[ -x "$INSTALL_DIR/llm-server" && ! -e "$INSTALL_DIR/llm-server-bash" ]]; then
-        cp "$INSTALL_DIR/llm-server" "$INSTALL_DIR/llm-server-bash" 2>/dev/null || true
+    if [[ -x "$INSTALL_DIR/ggrun" && ! -e "$INSTALL_DIR/llm-server-bash" ]]; then
+        cp "$INSTALL_DIR/ggrun" "$INSTALL_DIR/llm-server-bash" 2>/dev/null || true
         chmod 0755 "$INSTALL_DIR/llm-server-bash" 2>/dev/null || true
     fi
-    install -m 0755 "$go_bin" "$INSTALL_DIR/llm-server"
-    ok "Installed Go llm-server as primary command"
+    install -m 0755 "$go_bin" "$INSTALL_DIR/ggrun"
+    ln -sf ggrun "$INSTALL_DIR/llm-server" 2>/dev/null || true  # back-compat: old command name
+    ok "Installed Go ggrun as primary command"
 }
 
 go_required_version() {
@@ -452,8 +453,8 @@ build_go_binary() {
     local ldflags="-s -w"
     local ver
     ver="$(git -C "$SRC_DIR" describe --tags --exact-match 2>/dev/null || true)"
-    [[ -n "$ver" ]] && ldflags="$ldflags -X github.com/raketenkater/llm-server/pkg/update.currentVersion=$ver"
-    (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="$ldflags" -o "$out" ./cmd/llm-server)
+    [[ -n "$ver" ]] && ldflags="$ldflags -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$ver"
+    (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="$ldflags" -o "$out" ./cmd/ggrun)
 }
 
 link_backend_binary() {
@@ -471,11 +472,11 @@ install_source_file() {
 }
 
 install_legacy_bash_shim() {
-    [[ -n "$SRC_DIR" && -f "$SRC_DIR/legacy/bash/llm-server" ]] || return 0
-    install -m 0755 "$SRC_DIR/legacy/bash/llm-server" "$INSTALL_DIR/llm-server-bash"
+    [[ -n "$SRC_DIR" && -f "$SRC_DIR/legacy/bash/ggrun" ]] || return 0
+    install -m 0755 "$SRC_DIR/legacy/bash/ggrun" "$INSTALL_DIR/llm-server-bash"
     ok "Installed llm-server-bash migration shim"
     if [[ "$MAIN_IMPL" == "bash" ]]; then
-        install -m 0755 "$SRC_DIR/legacy/bash/llm-server" "$INSTALL_DIR/llm-server"
+        install -m 0755 "$SRC_DIR/legacy/bash/ggrun" "$INSTALL_DIR/ggrun"
         ok "Installed legacy migration shim as primary command"
     fi
 }
@@ -494,7 +495,7 @@ install_release_bundle() {
 
     say ""
     say "── Installing release bundle: $asset ──"
-    tmp="$(mktemp -d -t llm-server-release.XXXXXX)"
+    tmp="$(mktemp -d -t ggrun-release.XXXXXX)"
     archive="$tmp/$asset"
     if ! curl -fL "$url" -o "$archive"; then
         rm -rf "$tmp"
@@ -526,8 +527,8 @@ install_release_bundle() {
 
     # llm-server-go is listed only for backward compatibility with pre-3.0.1
     # bundles, which shipped the binary under that name. New bundles ship it as
-    # llm-server directly, and no llm-server-gui wrapper.
-    for f in setup.sh setup-linux.sh setup-mac.sh llm-server llm-server-bash llm-server-go parse_gguf.py model_index.py download_any_gguf.py; do
+    # ggrun directly, and no ggrun-gui wrapper.
+    for f in setup.sh setup-linux.sh setup-mac.sh ggrun llm-server-bash llm-server-go parse_gguf.py model_index.py download_any_gguf.py; do
         if install_payload_file "$payload_root/$f" "$INSTALL_DIR/$f"; then
             ok "Installed $f"
         elif install_payload_file "$payload_root/bin/$f" "$INSTALL_DIR/$f"; then
@@ -535,7 +536,7 @@ install_release_bundle() {
         fi
     done
     # Old bundles need the -go binary promoted to the primary command.
-    if [[ ! -x "$INSTALL_DIR/llm-server" && -x "$INSTALL_DIR/llm-server-go" ]]; then
+    if [[ ! -x "$INSTALL_DIR/ggrun" && -x "$INSTALL_DIR/llm-server-go" ]]; then
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
     fi
 
@@ -701,27 +702,27 @@ else
     install_source_file "tools/models/model_index.py" "model_index.py" 0755 || warn "model_index.py not found in source; skipping"
     install_source_file "tools/download/download_any_gguf.py" "download_any_gguf.py" 0755 || warn "download_any_gguf.py not found in source; skipping"
     install_legacy_bash_shim
-    # Build/install the Go binary directly as the single `llm-server` command —
-    # no separate llm-server-go copy. `llm-server` with no args opens the GUI,
-    # so no llm-server-gui wrapper is needed either.
+    # Build/install the Go binary directly as the single `ggrun` command —
+    # no separate llm-server-go copy. `ggrun` with no args opens the GUI,
+    # so no ggrun-gui wrapper is needed either.
     if [[ -f "$SRC_DIR/go/go.mod" && "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]]; then
-        say "── Building Go llm-server ──"
-        go_build_tmp="$(mktemp -t llm-server-build.XXXXXX)"
+        say "── Building Go ggrun ──"
+        go_build_tmp="$(mktemp -t ggrun-build.XXXXXX)"
         if build_go_binary "$go_build_tmp" && install_go_as_main "$go_build_tmp"; then
             :
-        elif [[ -x "$SRC_DIR/go/llm-server" ]] && install_go_as_main "$SRC_DIR/go/llm-server"; then
+        elif [[ -x "$SRC_DIR/go/ggrun" ]] && install_go_as_main "$SRC_DIR/go/ggrun"; then
             :
         else
-            warn "Could not build Go llm-server; rerun with LLM_INSTALL_GO=auto or use a release bundle."
+            warn "Could not build Go ggrun; rerun with LLM_INSTALL_GO=auto or use a release bundle."
         fi
         rm -f "$go_build_tmp"
-    elif [[ -x "$SRC_DIR/go/llm-server" ]]; then
-        install_go_as_main "$SRC_DIR/go/llm-server" || true
+    elif [[ -x "$SRC_DIR/go/ggrun" ]]; then
+        install_go_as_main "$SRC_DIR/go/ggrun" || true
     fi
 fi
 
-if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR/llm-server" ]]; then
-    err "Go llm-server was not installed. Install Go or rerun with LLM_INSTALL_GO=auto."
+if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR/ggrun" ]]; then
+    err "Go ggrun was not installed. Install Go or rerun with LLM_INSTALL_GO=auto."
     exit 1
 fi
 
@@ -807,7 +808,7 @@ if [[ -n "$BACKEND_REPO" ]]; then
                         BACKEND_BUILD="$BACKEND_DIR/build-vulkan"
                         BACKEND_CMAKE=(-DGGML_VULKAN=ON)
                     else
-                        warn "Retrying with CPU llama.cpp backend so llm-server works out of the box."
+                        warn "Retrying with CPU llama.cpp backend so ggrun works out of the box."
                         BACKEND_CHOICE="cpu"
                         BACKEND_REPO="https://github.com/ggml-org/llama.cpp.git"
                         BACKEND_DIR="$BACKEND_ROOT/llama.cpp"
@@ -853,10 +854,10 @@ fi
 
 say ""
 say "╔════════════════════════════════════════════════════════════╗"
-say "║ llm-server installer finished                             ║"
+say "║ ggrun installer finished                             ║"
 say "╚════════════════════════════════════════════════════════════╝"
-say "CLI:       $INSTALL_DIR/llm-server"
-say "GUI:       $INSTALL_DIR/llm-server   (no arguments opens the GUI)"
+say "CLI:       $INSTALL_DIR/ggrun"
+say "GUI:       $INSTALL_DIR/ggrun   (no arguments opens the GUI)"
 say "Models:    $MODEL_DIR"
 if [[ -x "$INSTALL_DIR/llama-server" ]]; then
     say "Backend:   $INSTALL_DIR/llama-server"
@@ -865,7 +866,7 @@ else
 fi
 say ""
 say "Next:"
-say "  $INSTALL_DIR/llm-server            # interactive GUI"
-say "  $INSTALL_DIR/llm-server detect"
-say "  $INSTALL_DIR/llm-server <hf-repo> --download"
-say "  $INSTALL_DIR/llm-server $MODEL_DIR/your-model.gguf"
+say "  $INSTALL_DIR/ggrun            # interactive GUI"
+say "  $INSTALL_DIR/ggrun detect"
+say "  $INSTALL_DIR/ggrun <hf-repo> --download"
+say "  $INSTALL_DIR/ggrun $MODEL_DIR/your-model.gguf"

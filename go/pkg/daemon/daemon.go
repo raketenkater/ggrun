@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/raketenkater/llm-server/pkg/server"
+	"github.com/raketenkater/ggrun/pkg/server"
 )
 
 // Daemon holds a persistent llama-server process and exposes a control API.
@@ -127,7 +127,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		// Caller supplied explicit args — trust them verbatim.
 		d.config.ServerArgs = newCfg.ServerArgs
 	} else if newCfg.ModelPath != "" && d.config.ComputeArgs != nil {
-		// Bare model swap — let llm-server compute placement for it.
+		// Bare model swap — let ggrun compute placement for it.
 		args, err := d.config.ComputeArgs(d.config.ModelPath, d.config.Port)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"compute placement: %s"}`, err.Error()), http.StatusInternalServerError)

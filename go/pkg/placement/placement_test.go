@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 func TestComputeDenseFits(t *testing.T) {

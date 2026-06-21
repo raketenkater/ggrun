@@ -61,22 +61,22 @@ func TestUpdateDismissPath(t *testing.T) {
 }
 
 func TestRawInstallerURL(t *testing.T) {
-	want := "https://raw.githubusercontent.com/raketenkater/llm-server/v3.0.1/install.sh"
+	want := "https://raw.githubusercontent.com/raketenkater/ggrun/v3.0.1/install.sh"
 	if got := rawInstallerURL("v3.0.1"); got != want {
 		t.Fatalf("installer URL mismatch: %s", got)
 	}
-	want = "https://raw.githubusercontent.com/raketenkater/llm-server/main/install.sh"
+	want = "https://raw.githubusercontent.com/raketenkater/ggrun/main/install.sh"
 	if got := rawInstallerURL(""); got != want {
 		t.Fatalf("default installer URL mismatch: %s", got)
 	}
 }
 
 func TestHasUpdateLabel(t *testing.T) {
-	if !hasUpdateLabel([]string{"llm-server v3.0.1"}, "llm-server") {
-		t.Fatal("expected prefixed llm-server release label to match")
+	if !hasUpdateLabel([]string{"ggrun v3.0.1"}, "ggrun") {
+		t.Fatal("expected prefixed ggrun release label to match")
 	}
-	if hasUpdateLabel([]string{"llama.cpp"}, "llm-server") {
-		t.Fatal("unexpected llm-server match")
+	if hasUpdateLabel([]string{"llama.cpp"}, "ggrun") {
+		t.Fatal("unexpected ggrun match")
 	}
 }
 
@@ -90,14 +90,14 @@ func envHas(env []string, want string) bool {
 }
 
 func TestSelfUpdateInstallEnvPreservesAppHome(t *testing.T) {
-	appHome := filepath.Join(t.TempDir(), "llm-server")
+	appHome := filepath.Join(t.TempDir(), "ggrun")
 	env := selfUpdateInstallEnv(appHome)
 	checks := []string{
 		"LLM_APP_HOME=" + appHome,
 		"LLM_INSTALL_PREFIX=" + filepath.Join(appHome, ".bin"),
 		"LLM_INSTALL_MODEL_DIR=" + filepath.Join(appHome, "models"),
 		"LLM_INSTALL_BACKEND_ROOT=" + filepath.Join(appHome, ".src"),
-		"LLM_INSTALL_REPO_DIR=" + filepath.Join(appHome, ".src", "llm-server"),
+		"LLM_INSTALL_REPO_DIR=" + filepath.Join(appHome, ".src", "ggrun"),
 		"LLM_INSTALL_REF=main",
 		"LLM_INSTALL_BACKEND=skip",
 		"LLM_INSTALL_MODE=build",
@@ -117,7 +117,7 @@ func TestInstalledPathPrefersAppHomeBinary(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(binDir, "llm-server")
+	want := filepath.Join(binDir, "ggrun")
 	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestInstalledPathPrefersAppHomeBinary(t *testing.T) {
 }
 
 func TestBackendUpdateCandidatesIncludeAppHomeSource(t *testing.T) {
-	appHome := filepath.Join(t.TempDir(), "llm-server")
+	appHome := filepath.Join(t.TempDir(), "ggrun")
 	t.Setenv("LLM_APP_HOME", appHome)
 	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
 	rows := backendUpdateCandidates()
@@ -151,11 +151,11 @@ func TestBackendUpdateCandidatesIncludeAppHomeSource(t *testing.T) {
 }
 
 func TestUpdateRepoCandidatesIncludeAppHomeSource(t *testing.T) {
-	appHome := filepath.Join(t.TempDir(), "llm-server")
+	appHome := filepath.Join(t.TempDir(), "ggrun")
 	t.Setenv("LLM_APP_HOME", appHome)
 	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
 	rows := updateRepoCandidates()
-	want := repoCandidate{Label: "llm-server", Dir: filepath.Join(appHome, ".src", "llm-server")}
+	want := repoCandidate{Label: "ggrun", Dir: filepath.Join(appHome, ".src", "ggrun")}
 	for _, row := range rows {
 		if row == want {
 			return
@@ -165,8 +165,8 @@ func TestUpdateRepoCandidatesIncludeAppHomeSource(t *testing.T) {
 }
 
 func TestInstalledSourceRepoDirPrefersAppHomeCheckout(t *testing.T) {
-	appHome := filepath.Join(t.TempDir(), "llm-server")
-	repoDir := filepath.Join(appHome, ".src", "llm-server")
+	appHome := filepath.Join(t.TempDir(), "ggrun")
+	repoDir := filepath.Join(appHome, ".src", "ggrun")
 	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0755); err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Config holds llm-server settings with precedence:
+// Config holds ggrun settings with precedence:
 // CLI flag > env var > config file > built-in default.
 // This is the single source of truth for all user-tunable settings.
 type Config struct {
@@ -59,7 +59,7 @@ func Defaults() *Config {
 		KeepAlive:     0,
 		HealthTimeout: 0, // auto
 		ModelDir:      filepath.Join(home, "ai_models"),
-		CacheDir:      filepath.Join(home, ".cache", "llm-server"),
+		CacheDir:      filepath.Join(home, ".cache", "ggrun"),
 		LogDir:        "",
 		RamBudget:     "",
 		KVPlacement:   "auto",
@@ -93,7 +93,7 @@ func Path() string {
 	if home == "" {
 		home, _ = os.UserHomeDir()
 	}
-	return filepath.Join(home, ".config", "llm-server", "config")
+	return filepath.Join(home, ".config", "ggrun", "config")
 }
 
 // Load reads the config file and env vars, returning a merged config.
@@ -316,7 +316,7 @@ func (c *Config) Save() error {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "# llm-server configuration\n")
+	fmt.Fprintf(f, "# ggrun configuration\n")
 	fmt.Fprintf(f, "# Precedence: CLI flag > env var > this file > built-in default\n")
 	fmt.Fprintf(f, "LLM_PORT=%d\n", c.Port)
 	fmt.Fprintf(f, "LLM_CTX_SIZE=%q\n", c.CtxValue())
@@ -344,7 +344,7 @@ func (c *Config) Save() error {
 // Show prints the current config with source attribution.
 func (c *Config) Show() string {
 	var b strings.Builder
-	b.WriteString("llm-server configuration\n")
+	b.WriteString("ggrun configuration\n")
 	b.WriteString("═══════════════════════\n\n")
 	for _, k := range DefaultKeys {
 		var val, source string

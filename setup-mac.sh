@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS one-command setup for a self-contained llm-server install home.
+# macOS one-command setup for a self-contained ggrun install home.
 
 set -euo pipefail
 

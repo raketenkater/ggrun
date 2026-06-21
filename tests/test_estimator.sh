@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Regression tests for the llm-server estimator and dry-run output.
+# Regression tests for the ggrun estimator and dry-run output.
 #
-# Builds tiny synthetic GGUFs, points llm-server at a fake llama-server
+# Builds tiny synthetic GGUFs, points ggrun at a fake llama-server
 # binary so it doesn't need a real backend, runs --dry-run --cpu, and asserts
 # the output contains the architecture/layer/KV strings we rely on.
 #
@@ -10,15 +10,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/ggrun}"
 if [[ ! -x "$GO_BIN" ]]; then
-    (cd "$ROOT/go" && go build -o llm-server ./cmd/llm-server)
+    (cd "$ROOT/go" && go build -o ggrun ./cmd/ggrun)
 fi
-TMP="$(mktemp -d -t llm-server-tests.XXXXXX)"
+TMP="$(mktemp -d -t ggrun-tests.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Stand-in llama-server: --help must exit 0 cleanly with no "shared libraries"
-# error so the binary-validity check in llm-server passes. Anything else just
+# error so the binary-validity check in ggrun passes. Anything else just
 # noops — --dry-run never actually invokes the binary.
 cat >"$TMP/llama-server" <<'EOF'
 #!/usr/bin/env bash
@@ -107,7 +107,7 @@ assert_contains "$out" "--no-context-shift" "ssm_hybrid: context shift disabled"
 
 # ── Test 6: mistagged DeepSeek V4 Flash (deepseek2 arch + kl_mla<=rope_dim) ─
 # Stock converters tag DeepSeek V4 Flash GGUFs as deepseek2 but emit V4
-# metadata that crashes stock builds. llm-server should warn (not bail) so
+# metadata that crashes stock builds. ggrun should warn (not bail) so
 # users with a fork-built llama-server can still proceed.
 echo "Test: dsv4_flash_mistag_warns_but_proceeds"
 build_gguf --out "$TMP/dsv4_mistag.gguf" --arch deepseek2 --name 'DeepSeek V4 Flash' \

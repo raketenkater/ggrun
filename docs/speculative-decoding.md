@@ -1,20 +1,20 @@
 # Speculative Decoding
 
 Speculative decoding is useful only when the backend accepts enough proposed
-tokens to pay for the extra draft work. llm-server therefore treats speculation
+tokens to pay for the extra draft work. ggrun therefore treats speculation
 as a validated runtime mode, not a universal default.
 
 ## Modes
 
 ```bash
-llm-server model.gguf --spec off
-llm-server model.gguf --spec auto
-llm-server model.gguf --spec mtp
-llm-server model.gguf --spec eagle3
-llm-server model.gguf --spec draft
-llm-server model.gguf --spec ngram
-llm-server model.gguf --spec ngram-mod
-llm-server model.gguf --spec ngram-k4v
+ggrun model.gguf --spec off
+ggrun model.gguf --spec auto
+ggrun model.gguf --spec mtp
+ggrun model.gguf --spec eagle3
+ggrun model.gguf --spec draft
+ggrun model.gguf --spec ngram
+ggrun model.gguf --spec ngram-mod
+ggrun model.gguf --spec ngram-k4v
 ```
 
 ## Auto Policy
@@ -34,7 +34,7 @@ because they are prompt-shape dependent.
 
 ## Draft Model Search
 
-For `--spec draft`, llm-server searches local files first. If no compatible file
+For `--spec draft`, ggrun searches local files first. If no compatible file
 is found, it searches Hugging Face for a small same-family GGUF drafter and
 validates the candidate before use.
 
@@ -55,7 +55,7 @@ for example `--model-draft`, `--ctx-size-draft`, `--cache-type-k-draft`, and
 MTP is target-model dependent. A separate small model is not enough for MTP mode;
 the served GGUF must expose NextN/MTP prediction-layer metadata or the backend
 must explicitly support the selected MTP dialect. If the target lacks that
-metadata, llm-server skips MTP and reports why.
+metadata, ggrun skips MTP and reports why.
 
 ## Benchmarking
 

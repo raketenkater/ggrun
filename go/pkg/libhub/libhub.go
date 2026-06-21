@@ -35,7 +35,7 @@ func Setup(binaryPath string) (string, bool, error) {
 	}
 
 	// Create temp hub directory
-	hubDir, err := os.MkdirTemp("", "llm-server-lib-hub-*")
+	hubDir, err := os.MkdirTemp("", "ggrun-lib-hub-*")
 	if err != nil {
 		return "", false, fmt.Errorf("create lib hub: %w", err)
 	}

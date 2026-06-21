@@ -1,19 +1,19 @@
-# Releasing llm-server
+# Releasing ggrun
 
-llm-server supports Linux, macOS, and native Windows. Windows release bundles
+ggrun supports Linux, macOS, and native Windows. Windows release bundles
 currently ship the Go launcher plus a CPU llama.cpp backend. Native Windows
 NVIDIA CUDA is supported through `install.ps1 -Backend cuda`, which uses an
 optional CUDA release asset when present and otherwise builds llama.cpp CUDA
-locally. Windows Vulkan is not a supported llm-server target.
+locally. Windows Vulkan is not a supported ggrun target.
 
 ## Automated assets
 
 Pushing a `v*` tag runs `.github/workflows/release.yml` and publishes:
 
-- `llm-server-linux-x86_64-cpu.tar.gz`
-- `llm-server-linux-x86_64-vulkan.tar.gz`
-- `llm-server-macos-arm64-metal.tar.gz`
-- `llm-server-windows-x86_64-cpu.zip`
+- `ggrun-linux-x86_64-cpu.tar.gz`
+- `ggrun-linux-x86_64-vulkan.tar.gz`
+- `ggrun-macos-arm64-metal.tar.gz`
+- `ggrun-windows-x86_64-cpu.zip`
 - `SHA256SUMS`
 
 The installer looks for a matching release asset first, then falls back to a
@@ -34,12 +34,12 @@ cmake -S ~/ik_llama.cpp -B ~/ik_llama.cpp/build \
 cmake --build ~/ik_llama.cpp/build --config Release -j"$(nproc)" -t llama-server
 
 scripts/package-release.sh \
-  llm-server-linux-x86_64-cuda.tar.gz \
+  ggrun-linux-x86_64-cuda.tar.gz \
   ~/ik_llama.cpp/build/bin/llama-server \
   dist
 ```
 
-Attach `dist/llm-server-linux-x86_64-cuda.tar.gz` to the GitHub release if you
+Attach `dist/ggrun-linux-x86_64-cuda.tar.gz` to the GitHub release if you
 want Linux CUDA installs to use a prebuilt bundle. Without that asset, the
 Linux installer builds ik_llama.cpp from source.
 
@@ -55,12 +55,12 @@ cmake -S $env:TEMP\llama.cpp -B $env:TEMP\llama.cpp\build-cuda `
 cmake --build $env:TEMP\llama.cpp\build-cuda --config Release --target llama-server --parallel
 
 .\scripts\package-release.ps1 `
-  -AssetName llm-server-windows-x86_64-cuda.zip `
+  -AssetName ggrun-windows-x86_64-cuda.zip `
   -ServerBin $env:TEMP\llama.cpp\build-cuda\bin\Release\llama-server.exe `
   -OutDir dist
 ```
 
-Attach `dist/llm-server-windows-x86_64-cuda.zip` to the GitHub release if you
+Attach `dist/ggrun-windows-x86_64-cuda.zip` to the GitHub release if you
 want Windows CUDA installs to use a prebuilt bundle. Without that asset,
 `install.ps1 -Backend cuda` installs the CPU Windows launcher bundle and builds
 llama.cpp CUDA locally.
@@ -82,21 +82,21 @@ which rows have passed.
 | Native Windows NVIDIA CUDA | `install.ps1 -Backend cuda`, `detect`, dry-run, one benchmark on an NVIDIA GPU host |
 | No supported GPU | installer falls back cleanly to CPU bundle or source build where supported |
 | Missing backend tools | installer prints the missing package/tool and exits without partial config corruption |
-| Go updater / latest release | `llm-server --update`, `llm-server update`, latest-release check, backend rebuild, smoke test, rollback path |
+| Go updater / latest release | `ggrun --update`, `ggrun update`, latest-release check, backend rebuild, smoke test, rollback path |
 
 For speculative decoding, verify these commands before release notes claim
 support:
 
 ```bash
-llm-server model.gguf --dry-run --spec off
-llm-server model.gguf --dry-run --spec auto
-llm-server model.gguf --dry-run --spec mtp
-llm-server model.gguf --dry-run --spec eagle3
-llm-server model.gguf --dry-run --spec draft
-llm-server model.gguf --dry-run --spec ngram
-llm-server model.gguf --dry-run --spec ngram-mod
-llm-server model.gguf --dry-run --spec ngram-k4v
-llm-server model.gguf --dry-run --spec mtp
+ggrun model.gguf --dry-run --spec off
+ggrun model.gguf --dry-run --spec auto
+ggrun model.gguf --dry-run --spec mtp
+ggrun model.gguf --dry-run --spec eagle3
+ggrun model.gguf --dry-run --spec draft
+ggrun model.gguf --dry-run --spec ngram
+ggrun model.gguf --dry-run --spec ngram-mod
+ggrun model.gguf --dry-run --spec ngram-k4v
+ggrun model.gguf --dry-run --spec mtp
 ```
 
 Expected policy:
@@ -124,5 +124,5 @@ model/backend row, record:
 - context size, batch, ubatch, KV types, parallel slots, spec mode
 - prompt-processing tok/s, generation tok/s, accepted speculative tokens when
   available, and output sanity check result
-- baseline raw llama-server command, llm-server heuristic command, and AI Tune
+- baseline raw llama-server command, ggrun heuristic command, and AI Tune
   winner

@@ -1,6 +1,6 @@
 # Contributing
 
-llm-server is Go-first. Changes should preserve the public product layout and
+ggrun is Go-first. Changes should preserve the public product layout and
 include tests that match the risk of the change.
 
 Before opening a pull request:

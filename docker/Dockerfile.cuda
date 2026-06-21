@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# llm-server — NVIDIA CUDA image. Requires the NVIDIA Container Toolkit on the host.
-#   docker build -f docker/Dockerfile.cuda -t llm-server:cuda .
-#   docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models llm-server:cuda /models/model.gguf
+# ggrun — NVIDIA CUDA image. Requires the NVIDIA Container Toolkit on the host.
+#   docker build -f docker/Dockerfile.cuda -t ggrun:cuda .
+#   docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models ggrun:cuda /models/model.gguf
 #
 # Uses mainline llama.cpp with CUDA. (ik_llama.cpp is the source-build default on
 # bare metal; the container ships the portable mainline CUDA backend.)
@@ -36,8 +36,8 @@ COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
 RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/llm-server/pkg/update.currentVersion=$LLM_VERSION}" \
-      -o /out/llm-server ./cmd/llm-server
+      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/ggrun/pkg/update.currentVersion=$LLM_VERSION}" \
+      -o /out/ggrun ./cmd/ggrun
 
 # ---- runtime (CUDA runtime libs from the base image) ----
 FROM nvidia/cuda:${CUDA_IMAGE}-runtime-ubuntu22.04
@@ -45,20 +45,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip ca-certificates libgomp1 curl \
     && pip3 install --no-cache-dir huggingface_hub tqdm \
     && rm -rf /var/lib/apt/lists/*
-ENV LLM_APP_HOME=/opt/llm-server \
-    LLAMA_SERVER=/opt/llm-server/.bin/llama-server \
+ENV LLM_APP_HOME=/opt/ggrun \
+    LLAMA_SERVER=/opt/ggrun/.bin/llama-server \
     LLM_MODEL_DIR=/models \
     LLM_CACHE_DIR=/cache \
     LLM_HOST=0.0.0.0 \
     LLM_PORT=8081 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    PATH=/opt/llm-server/.bin:$PATH
-COPY --from=gobuild /out/llm-server            /opt/llm-server/.bin/llm-server
-COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/llm-server/.bin/llama-server
-COPY tools/gguf/parse_gguf.py                  /opt/llm-server/.bin/parse_gguf.py
-COPY tools/download/download_any_gguf.py       /opt/llm-server/.bin/download_any_gguf.py
-COPY tools/models/model_index.py               /opt/llm-server/.bin/model_index.py
+    PATH=/opt/ggrun/.bin:$PATH
+COPY --from=gobuild /out/ggrun            /opt/ggrun/.bin/ggrun
+COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/ggrun/.bin/llama-server
+COPY tools/gguf/parse_gguf.py                  /opt/ggrun/.bin/parse_gguf.py
+COPY tools/download/download_any_gguf.py       /opt/ggrun/.bin/download_any_gguf.py
+COPY tools/models/model_index.py               /opt/ggrun/.bin/model_index.py
 RUN mkdir -p /models /cache
 EXPOSE 8081
-ENTRYPOINT ["llm-server"]
+ENTRYPOINT ["ggrun"]

@@ -1,6 +1,6 @@
 # Performance
 
-llm-server performance claims should be reproducible. Record the model, backend,
+ggrun performance claims should be reproducible. Record the model, backend,
 hardware, context, flags, and benchmark artifacts for every public number.
 
 ## Benchmark Scripts
@@ -40,7 +40,7 @@ For each published result, include:
 - prompt-processing tok/s and generation tok/s
 - speculative draft tokens and accepted tokens when spec is enabled
 - output sanity result
-- raw backend command and llm-server command
+- raw backend command and ggrun command
 
 ## Current Local Findings
 
@@ -79,28 +79,28 @@ Method: `scripts/bench-v3-comparison.sh`, 32k requested context, `long` prompt p
 Artifacts:
 
 - upstream fit rows: `.benchmarks/fit-master-20260612/`
-- existing llm-server rows: `.benchmarks/fresh-20260609/` and `.benchmarks/v3-release-20260610/`
+- existing ggrun rows: `.benchmarks/fresh-20260609/` and `.benchmarks/v3-release-20260610/`
 
 | Model | Mode | Fitted/requested context | Median decode tok/s | Median prompt tok/s | Placement/result |
 |---|---|---:|---:|---:|---|
 | Qwen3.5 4B Q4_K_M | llama.cpp master CUDA `--fit` | 32k / 32k | 102.57 | 940.13 | `llama-fit-params`: `-c 32768 -ngl -1` |
-| Qwen3.5 4B Q4_K_M | llm-server v3 IK/CUDA default | 32k / 32k | 156.21 | 2212.63 | cached release row |
-| Qwen3.5 4B Q4_K_M | llm-server v3 IK/CUDA AI-tune | 32k / 32k | 183.85 | 2209.94 | cached release row |
+| Qwen3.5 4B Q4_K_M | ggrun v3 IK/CUDA default | 32k / 32k | 156.21 | 2212.63 | cached release row |
+| Qwen3.5 4B Q4_K_M | ggrun v3 IK/CUDA AI-tune | 32k / 32k | 183.85 | 2209.94 | cached release row |
 | Qwen3.6 27B Q5_K_M | llama.cpp master CUDA `--fit` | 32k / 32k | 24.13 | 269.56 | `llama-fit-params`: `-c 32768 -ngl -1` |
-| Qwen3.6 27B Q5_K_M | llm-server v3 IK/CUDA default | 32k / 32k | 37.68 | 577.79 | cached release row |
-| Qwen3.6 27B Q5_K_M | llm-server v3 IK/CUDA AI-tune | 32k / 32k | 37.69 | 575.85 | cached release row |
+| Qwen3.6 27B Q5_K_M | ggrun v3 IK/CUDA default | 32k / 32k | 37.68 | 577.79 | cached release row |
+| Qwen3.6 27B Q5_K_M | ggrun v3 IK/CUDA AI-tune | 32k / 32k | 37.69 | 575.85 | cached release row |
 | MiniMax M2.7 UD-Q3_K_XL | llama.cpp master CUDA `--fit` | 32k / 32k | 9.69 | 5.09 | `-ngl 63 -ts 6,12,45` plus CPU expert overrides; log warns CPU overrides with mmap may be slower |
-| MiniMax M2.7 UD-Q3_K_XL | llm-server v3 IK/CUDA default | 32k / 32k | 11.25 | 32.95 | cached release row; two clean artifact rounds |
+| MiniMax M2.7 UD-Q3_K_XL | ggrun v3 IK/CUDA default | 32k / 32k | 11.25 | 32.95 | cached release row; two clean artifact rounds |
 
 Findings:
 
 - Upstream `--fit` successfully avoided OOM for the 27B and MoE cases and preserved the requested 32k context in all three models.
-- No upstream `--fit` row beat llm-server v3 default placement on this host, so this run did not produce placement-bug issues under the regressions policy.
+- No upstream `--fit` row beat ggrun v3 default placement on this host, so this run did not produce placement-bug issues under the regressions policy.
 - The largest gap is prompt processing on the MoE row: upstream fit selected many CPU expert overrides while keeping mmap enabled, and the server warned that this combination may be slower.
 
 ### Same-Binary Placement Rows
 
-To isolate placement from backend version, llm-server was also run with the same llama.cpp master CUDA server binary used by the raw `--fit` rows: `/tmp/llama.cpp-fit-master/build-cuda/bin/llama-server` (`70b54e1`). These rows use the same 32k requested context, `long` prompt profile, and 512 generated tokens as the raw fit rows.
+To isolate placement from backend version, ggrun was also run with the same llama.cpp master CUDA server binary used by the raw `--fit` rows: `/tmp/llama.cpp-fit-master/build-cuda/bin/llama-server` (`70b54e1`). These rows use the same 32k requested context, `long` prompt profile, and 512 generated tokens as the raw fit rows.
 
 Artifacts:
 
@@ -110,9 +110,9 @@ Artifacts:
 | Model | Mode | Requested context | Median decode tok/s | Median prompt tok/s | Notes |
 |---|---|---:|---:|---:|---|
 | Qwen3.5 4B Q4_K_M | llama.cpp master CUDA `--fit` | 32k | 102.57 | 940.13 | no explicit placement flags |
-| Qwen3.5 4B Q4_K_M | llm-server + same llama.cpp master binary | 32k | 175.98 | 1768.40 | `--backend llama --server-bin ...`, default placement |
+| Qwen3.5 4B Q4_K_M | ggrun + same llama.cpp master binary | 32k | 175.98 | 1768.40 | `--backend llama --server-bin ...`, default placement |
 | Qwen3.6 27B Q5_K_M | llama.cpp master CUDA `--fit` | 32k | 24.13 | 269.56 | no explicit placement flags |
-| Qwen3.6 27B Q5_K_M | llm-server + same llama.cpp master binary | 32k | 39.01 | 502.63 | cached tune checked; baseline won, no override flags applied |
+| Qwen3.6 27B Q5_K_M | ggrun + same llama.cpp master binary | 32k | 39.01 | 502.63 | cached tune checked; baseline won, no override flags applied |
 
 ### Ollama Same-GGUF Rows
 
@@ -153,7 +153,7 @@ increases. Useful measurements include:
 
 ## KV Cache Direction
 
-llm-server should not claim vLLM-style paged KV behavior until the backend
+ggrun should not claim vLLM-style paged KV behavior until the backend
 supports it. The launcher can still improve product behavior by measuring KV
 budget, selecting `--parallel` conservatively, and reporting prefix/session stats
 when llama.cpp exposes them.

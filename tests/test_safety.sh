@@ -5,11 +5,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/ggrun}"
 if [[ ! -x "$GO_BIN" ]]; then
-    (cd "$ROOT/go" && go build -o llm-server ./cmd/llm-server)
+    (cd "$ROOT/go" && go build -o ggrun ./cmd/ggrun)
 fi
-TMP="$(mktemp -d -t llm-server-safety.XXXXXX)"
+TMP="$(mktemp -d -t ggrun-safety.XXXXXX)"
 LISTENER_PID=""
 trap '[[ -n "${LISTENER_PID:-}" ]] && kill "$LISTENER_PID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 

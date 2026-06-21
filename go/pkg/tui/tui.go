@@ -13,11 +13,11 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/raketenkater/llm-server/pkg/config"
-	"github.com/raketenkater/llm-server/pkg/detect"
-	"github.com/raketenkater/llm-server/pkg/probe"
-	"github.com/raketenkater/llm-server/pkg/recommend"
-	"github.com/raketenkater/llm-server/pkg/tune"
+	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/probe"
+	"github.com/raketenkater/ggrun/pkg/recommend"
+	"github.com/raketenkater/ggrun/pkg/tune"
 )
 
 var (
@@ -732,7 +732,7 @@ func (m Model) View() string {
 func (m Model) viewMain() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("═══ llm-server ═══") + "\n")
+	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
 	b.WriteString(fmt.Sprintf("  Models:   %s (%d)\n", m.modelDir, len(m.models)))
@@ -765,7 +765,7 @@ func (m Model) viewMain() string {
 
 func (m Model) viewFirstRun() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("═══ llm-server First Run ═══") + "\n")
+	b.WriteString(titleStyle.Render("═══ ggrun First Run ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
 	b.WriteString("\n")
 

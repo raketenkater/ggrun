@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	githubRepo        = "raketenkater/llm-server"
+	githubRepo        = "raketenkater/ggrun"
 	githubAPIURL      = "https://api.github.com/repos/%s/releases/latest"
 	rawInstallURL     = "https://raw.githubusercontent.com/%s/%s/install.sh"
 	rawInstallPSURL   = "https://raw.githubusercontent.com/%s/%s/install.ps1"
@@ -26,7 +26,7 @@ const (
 )
 
 // currentVersion is the single source of truth for the binary version.
-// Release builds override it: go build -ldflags "-X github.com/raketenkater/llm-server/pkg/update.currentVersion=vX.Y.Z"
+// Release builds override it: go build -ldflags "-X github.com/raketenkater/ggrun/pkg/update.currentVersion=vX.Y.Z"
 var currentVersion = "v3.1.0-go"
 
 // PromptOnStartup checks local repos for updates and asks interactive users
@@ -84,12 +84,12 @@ func PromptOnStartup() {
 // CheckStartupUpdates returns both source-checkout and latest-release updates.
 func CheckStartupUpdates() []string {
 	updates := CheckRepoUpdates()
-	if hasUpdateLabel(updates, "llm-server") {
+	if hasUpdateLabel(updates, "ggrun") {
 		return updates
 	}
 	res, err := Check()
 	if err == nil && res.HasUpdate {
-		updates = append(updates, "llm-server "+res.Latest)
+		updates = append(updates, "ggrun "+res.Latest)
 	}
 	return updates
 }
@@ -142,9 +142,9 @@ func updateRepoCandidates() []repoCandidate {
 
 	repoDir := os.Getenv("LLM_SERVER_REPO")
 	if repoDir == "" && home != "" {
-		repoDir = filepath.Join(home, "llm-server")
+		repoDir = filepath.Join(home, "ggrun")
 	}
-	add("llm-server", repoDir)
+	add("ggrun", repoDir)
 
 	if server := os.Getenv("LLAMA_SERVER"); server != "" {
 		root := filepath.Dir(filepath.Dir(filepath.Dir(server)))
@@ -156,7 +156,7 @@ func updateRepoCandidates() []repoCandidate {
 		}
 	}
 	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
-		add("llm-server", filepath.Join(appHome, ".src", "llm-server"))
+		add("ggrun", filepath.Join(appHome, ".src", "ggrun"))
 		add("ik_llama.cpp", filepath.Join(appHome, ".src", "ik_llama.cpp"))
 		add("llama.cpp", filepath.Join(appHome, ".src", "llama.cpp"))
 	}
@@ -230,9 +230,9 @@ func updateCacheDir() string {
 		return dir
 	}
 	if home := homeDir(); home != "" {
-		return filepath.Join(home, ".cache", "llm-server")
+		return filepath.Join(home, ".cache", "ggrun")
 	}
-	return filepath.Join(os.TempDir(), "llm-server")
+	return filepath.Join(os.TempDir(), "ggrun")
 }
 
 func isTerminal(f *os.File) bool {
@@ -293,7 +293,7 @@ func Version() string {
 	return currentVersion
 }
 
-// SelfUpdate pulls the latest llm-server from git and re-runs install.sh.
+// SelfUpdate pulls the latest ggrun from git and re-runs install.sh.
 func SelfUpdate() error {
 	if runtime.GOOS == "windows" {
 		if appHome := strings.TrimSpace(os.Getenv("LLM_APP_HOME")); appHome != "" {
@@ -305,14 +305,14 @@ func SelfUpdate() error {
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
 		if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
-			fmt.Printf("llm-server repo not found at %s; refreshing app home from main.\n", repoDir)
+			fmt.Printf("ggrun repo not found at %s; refreshing app home from main.\n", repoDir)
 			return SelfUpdateAppHomeInstaller(appHome)
 		}
-		fmt.Printf("llm-server repo not found at %s; using latest release installer.\n", repoDir)
+		fmt.Printf("ggrun repo not found at %s; using latest release installer.\n", repoDir)
 		return SelfUpdateFromReleaseInstaller()
 	}
 
-	fmt.Println("═══ Updating llm-server ═══")
+	fmt.Println("═══ Updating ggrun ═══")
 	oldHash, err := gitRevParse(repoDir, "HEAD")
 	if err != nil {
 		oldHash = "unknown"
@@ -393,18 +393,18 @@ func SelfUpdate() error {
 	if backupPath != "" {
 		os.Remove(backupPath)
 	}
-	fmt.Println("  ✓ llm-server updated and verified. Restart to use the new version.")
+	fmt.Println("  ✓ ggrun updated and verified. Restart to use the new version.")
 	return nil
 }
 
 // SelfUpdateFromReleaseInstaller updates release-bundle installs that do not have a
-// local llm-server git checkout. It downloads the latest tagged install.sh and lets
+// local ggrun git checkout. It downloads the latest tagged install.sh and lets
 // the installer select the right platform/backend bundle or source fallback.
 func SelfUpdateFromReleaseInstaller() error {
 	if runtime.GOOS == "windows" {
 		return selfUpdateWindowsInstaller(strings.TrimSpace(os.Getenv("LLM_APP_HOME")))
 	}
-	fmt.Println("═══ Updating llm-server from latest release installer ═══")
+	fmt.Println("═══ Updating ggrun from latest release installer ═══")
 	scriptPath := installedLLMServerPath()
 	backupPath := ""
 	if scriptPath != "" {
@@ -418,7 +418,7 @@ func SelfUpdateFromReleaseInstaller() error {
 	if res, err := Check(); err == nil && res.Latest != "" {
 		installerURL = rawInstallerURL(res.Latest)
 	}
-	tmpDir, err := os.MkdirTemp("", "llm-server-update-*")
+	tmpDir, err := os.MkdirTemp("", "ggrun-update-*")
 	if err != nil {
 		return err
 	}
@@ -455,7 +455,7 @@ func SelfUpdateFromReleaseInstaller() error {
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
 	}
-	fmt.Println("  ✓ llm-server release installer completed and verified. Restart to use the new version.")
+	fmt.Println("  ✓ ggrun release installer completed and verified. Restart to use the new version.")
 	return nil
 }
 
@@ -476,7 +476,7 @@ func rawInstallerPSURLForRef(ref string) string {
 }
 
 func selfUpdateWindowsInstaller(appHome string) error {
-	fmt.Println("═══ Updating llm-server from latest Windows installer ═══")
+	fmt.Println("═══ Updating ggrun from latest Windows installer ═══")
 	scriptPath := installedLLMServerPath()
 	backupPath := ""
 	if scriptPath != "" {
@@ -490,7 +490,7 @@ func selfUpdateWindowsInstaller(appHome string) error {
 	if res, err := Check(); err == nil && res.Latest != "" {
 		installerURL = rawInstallerPSURLForRef(res.Latest)
 	}
-	tmpDir, err := os.MkdirTemp("", "llm-server-update-*")
+	tmpDir, err := os.MkdirTemp("", "ggrun-update-*")
 	if err != nil {
 		return err
 	}
@@ -529,7 +529,7 @@ func selfUpdateWindowsInstaller(appHome string) error {
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
 	}
-	fmt.Println("  ✓ llm-server Windows installer completed and verified. Restart to use the new version.")
+	fmt.Println("  ✓ ggrun Windows installer completed and verified. Restart to use the new version.")
 	return nil
 }
 
@@ -563,7 +563,7 @@ func selfUpdateInstallEnv(appHome string) []string {
 		"LLM_INSTALL_PREFIX="+filepath.Join(appHome, ".bin"),
 		"LLM_INSTALL_MODEL_DIR="+filepath.Join(appHome, "models"),
 		"LLM_INSTALL_BACKEND_ROOT="+filepath.Join(appHome, ".src"),
-		"LLM_INSTALL_REPO_DIR="+filepath.Join(appHome, ".src", "llm-server"),
+		"LLM_INSTALL_REPO_DIR="+filepath.Join(appHome, ".src", "ggrun"),
 		"LLM_INSTALL_REF=main",
 		"LLM_INSTALL_BACKEND=skip",
 		"LLM_INSTALL_MODE=build",
@@ -581,7 +581,7 @@ func SelfUpdateAppHomeInstaller(appHome string) error {
 	if runtime.GOOS == "windows" {
 		return selfUpdateWindowsInstaller(appHome)
 	}
-	fmt.Println("═══ Updating llm-server app home from main ═══")
+	fmt.Println("═══ Updating ggrun app home from main ═══")
 	scriptPath := installedLLMServerPath()
 	backupPath := ""
 	if scriptPath != "" {
@@ -591,7 +591,7 @@ func SelfUpdateAppHomeInstaller(appHome string) error {
 		}
 	}
 
-	tmpDir, err := os.MkdirTemp("", "llm-server-update-*")
+	tmpDir, err := os.MkdirTemp("", "ggrun-update-*")
 	if err != nil {
 		return err
 	}
@@ -628,7 +628,7 @@ func SelfUpdateAppHomeInstaller(appHome string) error {
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
 	}
-	fmt.Println("  ✓ llm-server app home updated and verified. Restart to use the new version.")
+	fmt.Println("  ✓ ggrun app home updated and verified. Restart to use the new version.")
 	return nil
 }
 
@@ -637,13 +637,13 @@ func installedSourceRepoDir() string {
 		return repoDir
 	}
 	if appHome := strings.TrimSpace(os.Getenv("LLM_APP_HOME")); appHome != "" {
-		repoDir := filepath.Join(appHome, ".src", "llm-server")
+		repoDir := filepath.Join(appHome, ".src", "ggrun")
 		if _, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil {
 			return repoDir
 		}
 	}
 	if home := homeDir(); home != "" {
-		return filepath.Join(home, "llm-server")
+		return filepath.Join(home, "ggrun")
 	}
 	return ""
 }
@@ -651,26 +651,26 @@ func installedSourceRepoDir() string {
 func installedLLMServerPath() string {
 	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
 		for _, candidate := range []string{
-			filepath.Join(appHome, ".bin", "llm-server"),
-			filepath.Join(appHome, ".bin", "llm-server.exe"),
-			filepath.Join(appHome, "bin", "llm-server"),
-			filepath.Join(appHome, "bin", "llm-server.exe"),
-			filepath.Join(appHome, "llm-server"),
-			filepath.Join(appHome, "llm-server.cmd"),
+			filepath.Join(appHome, ".bin", "ggrun"),
+			filepath.Join(appHome, ".bin", "ggrun.exe"),
+			filepath.Join(appHome, "bin", "ggrun"),
+			filepath.Join(appHome, "bin", "ggrun.exe"),
+			filepath.Join(appHome, "ggrun"),
+			filepath.Join(appHome, "ggrun.cmd"),
 		} {
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate
 			}
 		}
 	}
-	if path, _ := exec.LookPath("llm-server"); path != "" {
+	if path, _ := exec.LookPath("ggrun"); path != "" {
 		return path
 	}
 	if home := homeDir(); home != "" {
 		if runtime.GOOS == "windows" {
-			return filepath.Join(home, "llm-server", ".bin", "llm-server.exe")
+			return filepath.Join(home, "ggrun", ".bin", "ggrun.exe")
 		}
-		return filepath.Join(home, ".local", "bin", "llm-server")
+		return filepath.Join(home, ".local", "bin", "ggrun")
 	}
 	return ""
 }
@@ -696,7 +696,7 @@ func downloadFile(url, dst string, mode os.FileMode) error {
 func UpdateBackend(name, repoDir string, walkback int) error {
 	buildDir := filepath.Join(repoDir, "build")
 	binary := filepath.Join(buildDir, "bin", "llama-server")
-	fallbackDir := filepath.Join(homeDir(), ".cache", "llm-server", "update-fallbacks")
+	fallbackDir := filepath.Join(homeDir(), ".cache", "ggrun", "update-fallbacks")
 	os.MkdirAll(fallbackDir, 0755)
 
 	fmt.Printf("\n═══ Updating %s ═══\n", name)
@@ -718,7 +718,7 @@ func UpdateBackend(name, repoDir string, walkback int) error {
 	fmt.Printf("  Current: %s\n", oldCommit)
 
 	// Backup working binary outside build dir
-	binaryBackup := filepath.Join(repoDir, ".llm-server.llama-server.backup")
+	binaryBackup := filepath.Join(repoDir, ".ggrun.llama-server.backup")
 	if _, err := os.Stat(binary); err == nil {
 		cp(binary, binaryBackup)
 		fmt.Println("  Backed up working binary")

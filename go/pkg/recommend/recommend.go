@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 //go:embed catalog.json
@@ -23,7 +23,7 @@ type QuantOption struct {
 	Dynamic        bool    `json:"dynamic,omitempty"` // Unsloth UD- quant: loss * 0.7
 }
 
-// Candidate is a GGUF repository that llm-server can offer as a first-run
+// Candidate is a GGUF repository that ggrun can offer as a first-run
 // download. Quality is the intelligence-first ranking signal refreshed from
 // the checked-in catalog; speed is display metadata only.
 type Candidate struct {
@@ -92,7 +92,7 @@ type catalogDoc struct {
 	Candidates  []Candidate `json:"candidates"`
 }
 
-const Attribution = "Artificial Analysis intelligence data is used when available; cached locally and filtered by llm-server hardware fit"
+const Attribution = "Artificial Analysis intelligence data is used when available; cached locally and filtered by ggrun hardware fit"
 
 // DisplayFit shortens internal fit-mode labels for display in the CLI and TUI.
 func DisplayFit(fit string) string {

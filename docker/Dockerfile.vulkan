@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# llm-server — Vulkan image (AMD, Intel, or NVIDIA via Vulkan).
-#   docker build -f docker/Dockerfile.vulkan -t llm-server:vulkan .
+# ggrun — Vulkan image (AMD, Intel, or NVIDIA via Vulkan).
+#   docker build -f docker/Dockerfile.vulkan -t ggrun:vulkan .
 #   # AMD/Intel:
-#   docker run --rm --device /dev/dri -p 8081:8081 -v ~/ai_models:/models llm-server:vulkan /models/model.gguf
+#   docker run --rm --device /dev/dri -p 8081:8081 -v ~/ai_models:/models ggrun:vulkan /models/model.gguf
 #   # NVIDIA via Vulkan (needs NVIDIA Container Toolkit):
-#   docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all -p 8081:8081 -v ~/ai_models:/models llm-server:vulkan /models/model.gguf
+#   docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all -p 8081:8081 -v ~/ai_models:/models ggrun:vulkan /models/model.gguf
 ARG LLAMA_CPP_REF=d2462f8f7ac6d80070a587ffebf6cd73730f4280
 
 # ---- backend: build llama-server with Vulkan ----
@@ -33,8 +33,8 @@ COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
 RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/llm-server/pkg/update.currentVersion=$LLM_VERSION}" \
-      -o /out/llm-server ./cmd/llm-server
+      -ldflags="-s -w ${LLM_VERSION:+-X github.com/raketenkater/ggrun/pkg/update.currentVersion=$LLM_VERSION}" \
+      -o /out/ggrun ./cmd/ggrun
 
 # ---- runtime (Vulkan loader + Mesa drivers for AMD/Intel) ----
 FROM debian:bookworm-slim
@@ -43,19 +43,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 mesa-vulkan-drivers vulkan-tools \
     && pip3 install --no-cache-dir --break-system-packages huggingface_hub tqdm \
     && rm -rf /var/lib/apt/lists/*
-ENV LLM_APP_HOME=/opt/llm-server \
-    LLAMA_SERVER=/opt/llm-server/.bin/llama-server \
+ENV LLM_APP_HOME=/opt/ggrun \
+    LLAMA_SERVER=/opt/ggrun/.bin/llama-server \
     LLM_BACKEND=vulkan \
     LLM_MODEL_DIR=/models \
     LLM_CACHE_DIR=/cache \
     LLM_HOST=0.0.0.0 \
     LLM_PORT=8081 \
-    PATH=/opt/llm-server/.bin:$PATH
-COPY --from=gobuild /out/llm-server            /opt/llm-server/.bin/llm-server
-COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/llm-server/.bin/llama-server
-COPY tools/gguf/parse_gguf.py                  /opt/llm-server/.bin/parse_gguf.py
-COPY tools/download/download_any_gguf.py       /opt/llm-server/.bin/download_any_gguf.py
-COPY tools/models/model_index.py               /opt/llm-server/.bin/model_index.py
+    PATH=/opt/ggrun/.bin:$PATH
+COPY --from=gobuild /out/ggrun            /opt/ggrun/.bin/ggrun
+COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/ggrun/.bin/llama-server
+COPY tools/gguf/parse_gguf.py                  /opt/ggrun/.bin/parse_gguf.py
+COPY tools/download/download_any_gguf.py       /opt/ggrun/.bin/download_any_gguf.py
+COPY tools/models/model_index.py               /opt/ggrun/.bin/model_index.py
 RUN mkdir -p /models /cache
 EXPOSE 8081
-ENTRYPOINT ["llm-server"]
+ENTRYPOINT ["ggrun"]

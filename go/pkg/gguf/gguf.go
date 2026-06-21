@@ -132,8 +132,8 @@ func findParseScript() string {
 	}
 	home, _ := os.UserHomeDir()
 	candidates = append(candidates,
-		filepath.Join(home, "llm-server", "bin", "parse_gguf.py"),
-		filepath.Join(home, "llm-server", "tools", "gguf", "parse_gguf.py"),
+		filepath.Join(home, "ggrun", "bin", "parse_gguf.py"),
+		filepath.Join(home, "ggrun", "tools", "gguf", "parse_gguf.py"),
 		filepath.Join(home, "parse_gguf.py"),
 	)
 	for _, p := range candidates {

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/raketenkater/llm-server/pkg/benchmark"
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/benchmark"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // Engine runs the AI-tune optimization loop.

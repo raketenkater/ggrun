@@ -1,26 +1,28 @@
-# llm-server
+# ggrun
+
+*`ggrun` = "gguf run" (say "g-run"). Formerly **llm-server**.*
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/raketenkater/llm-server)](https://github.com/raketenkater/llm-server/releases/latest)
+[![Release](https://img.shields.io/github/v/release/raketenkater/ggrun)](https://github.com/raketenkater/ggrun/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#requirements)
 [![Backends](https://img.shields.io/badge/backends-ik__llama.cpp%20%7C%20llama.cpp-orange)](#backends)
 
-**Stop hand-writing `--tensor-split`, `-ot`, and KV-cache flags.** Point llm-server
+**Stop hand-writing `--tensor-split`, `-ot`, and KV-cache flags.** Point ggrun
 at a GGUF and it measures your GPUs, RAM, and PCIe topology, picks the backend
 (llama.cpp or the faster ik_llama.cpp fork), computes multi-GPU and MoE expert
 placement, and serves an OpenAI-compatible API — one command from file to endpoint.
 
 ```bash
-llm-server model.gguf                          # local GGUF → served
-llm-server unsloth/Qwen3.6-27B-GGUF --download # HF repo → hardware-matched quant → served
-llm-server                                     # no args → interactive TUI
+ggrun model.gguf                          # local GGUF → served
+ggrun unsloth/Qwen3.6-27B-GGUF --download # HF repo → hardware-matched quant → served
+ggrun                                     # no args → interactive TUI
 ```
 
 ![demo](demo.gif)
 
 *Hardware-matched recommendations → one-command launch → benchmark, all from the same tool.*
 
-**Just run `llm-server` with no arguments** to open the full arrow-key TUI — browse and
+**Just run `ggrun` with no arguments** to open the full arrow-key TUI — browse and
 download models, adjust settings, and launch, without writing a single flag. Pass a model
 path or flags for one-shot CLI use instead.
 
@@ -29,7 +31,7 @@ path or flags for one-shot CLI use instead.
 Same rig (RTX 3090 Ti 24GB + 4070 12GB + 3060 12GB), same GGUFs, 32k context,
 decode tok/s (256-token generation), slowest backend on the left:
 
-| Model (quant) | Ollama 0.30.8 | llama.cpp `--fit` | llm-server v3 | v3 `--ai-tune` | v3 vs Ollama |
+| Model (quant) | Ollama 0.30.8 | llama.cpp `--fit` | ggrun v3 | v3 `--ai-tune` | v3 vs Ollama |
 |---|---:|---:|---:|---:|---:|
 | Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 176.6 | **178.8** | **+43%** |
 | Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 40.3 | **40.3** | **+77%** |
@@ -38,9 +40,9 @@ decode tok/s (256-token generation), slowest backend on the left:
 
 † Ollama can't import sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
 so the 122B was merged to one file before importing; MiniMax-M3 it can't load at all
-(`minimax-m3` is ik_llama-only). Where models load, llm-server is **43–77% faster than
+(`minimax-m3` is ik_llama-only). Where models load, ggrun is **43–77% faster than
 Ollama — including +74% on the 122B MoE** at heavy VRAM+RAM offload (60 GB, ~18 GB spilled
-to RAM). Driving the *same* llama.cpp master binary (no ik_llama), llm-server still beat raw
+to RAM). Driving the *same* llama.cpp master binary (no ik_llama), ggrun still beat raw
 `--fit` — so the gain is the placement, not just the backend swap. Full methodology,
 exact commands, and artifacts: [docs/performance.md](docs/performance.md). Numbers are
 reproducible with [`scripts/bench-v3-comparison.sh`](scripts/bench-v3-comparison.sh) —
@@ -48,38 +50,38 @@ regressions against these tables are treated as bugs.
 
 ## Install
 
-Linux / macOS — self-contained app home under `~/llm-server`:
+Linux / macOS — self-contained app home under `~/ggrun`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
 ```
 
 Windows (PowerShell); add `-Backend cuda` for native NVIDIA CUDA:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/raketenkater/llm-server/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1 | iex
 ```
 
 From a clone:
 
 ```bash
-git clone https://github.com/raketenkater/llm-server.git && cd llm-server && ./setup.sh
+git clone https://github.com/raketenkater/ggrun.git && cd ggrun && ./setup.sh
 ```
 
-Since v3, [prebuilt release bundles](https://github.com/raketenkater/llm-server/releases/latest)
+Since v3, [prebuilt release bundles](https://github.com/raketenkater/ggrun/releases/latest)
 (Linux CPU/Vulkan, macOS arm64 Metal, Windows x86_64 CPU) install without compiling,
 verified against `SHA256SUMS`; Linux CUDA/ik_llama.cpp builds from source for your GPU.
-Run `llm-server` with no arguments to open the TUI. Installer options and the app-home
+Run `ggrun` with no arguments to open the TUI. Installer options and the app-home
 layout are in [docs/install.md](docs/install.md).
 
 ## Quick start
 
 ```bash
-llm-server ~/models/model.gguf                 # launch a local model
-llm-server unsloth/Qwen3.6-27B-GGUF --download # download a fitting quant, then launch
-llm-server model.gguf --ai-tune                # benchmark flag sets, cache the fastest
-llm-server model.gguf --dry-run                # print the backend command without running
-llm-server model.gguf --benchmark              # load, measure tok/s, exit
+ggrun ~/models/model.gguf                 # launch a local model
+ggrun unsloth/Qwen3.6-27B-GGUF --download # download a fitting quant, then launch
+ggrun model.gguf --ai-tune                # benchmark flag sets, cache the fastest
+ggrun model.gguf --dry-run                # print the backend command without running
+ggrun model.gguf --benchmark              # load, measure tok/s, exit
 ```
 
 Common flags: `--backend ik_llama|llama|vulkan`, `--gpus 0,1`, `--ctx-size`,
@@ -90,21 +92,21 @@ through to `llama-server`, so nothing upstream is out of reach. Full list:
 ## How it compares
 
 **vs raw llama.cpp.** Upstream `--fit` auto-picks GPU layers, tensor-split, and context.
-If that covers you, raw llama.cpp may be enough. llm-server goes further: it selects the
+If that covers you, raw llama.cpp may be enough. ggrun goes further: it selects the
 backend (ik_llama.cpp is meaningfully faster on CUDA), picks KV-cache type and batch sizes
 from measured probes, benchmarks candidate flag sets (`--ai-tune`), finds/validates vision
 projectors and speculative drafts, and recovers from crashes.
 
 **vs Ollama.** Ollama wins on one-command simplicity and ecosystem on common hardware.
-llm-server targets where Ollama's conservative heuristics leave performance behind:
+ggrun targets where Ollama's conservative heuristics leave performance behind:
 mismatched multi-GPU rigs, MoE models split across VRAM/RAM, ik_llama.cpp speed, and full
 flag access. One GPU and want zero config? Use Ollama.
 
 **vs llama-swap.** llama-swap hot-swaps between model commands you write yourself;
-llm-server computes those commands. They compose — point llama-swap at `llm-server dry-run`
-output, or use `llm-server daemon` for single-model swapping.
+ggrun computes those commands. They compose — point llama-swap at `ggrun dry-run`
+output, or use `ggrun daemon` for single-model swapping.
 
-| Capability | raw llama.cpp | llm-server |
+| Capability | raw llama.cpp | ggrun |
 |---|---:|---:|
 | Multi-GPU / heterogeneous split | `--fit` (recent) | automatic, PCIe/bandwidth-weighted |
 | MoE expert placement | `--fit` / manual `-ot` | exact per-GPU ledger, backend-aware |

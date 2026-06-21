@@ -65,13 +65,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            asset: llm-server-linux-x86_64-cpu.tar.gz
+            asset: ggrun-linux-x86_64-cpu.tar.gz
             cmake_flags: -DGGML_NATIVE=OFF
           - os: ubuntu-latest
-            asset: llm-server-linux-x86_64-vulkan.tar.gz
+            asset: ggrun-linux-x86_64-vulkan.tar.gz
             cmake_flags: -DGGML_VULKAN=ON -DGGML_NATIVE=OFF
           - os: macos-14
-            asset: llm-server-macos-arm64-metal.tar.gz
+            asset: ggrun-macos-arm64-metal.tar.gz
             cmake_flags: -DGGML_METAL=ON -DGGML_NATIVE=OFF
 
     steps:
@@ -100,7 +100,7 @@ jobs:
       - name: Smoke-test backend binary
         run: /tmp/llama.cpp/build/bin/llama-server --version
 
-      - name: Build Go llm-server
+      - name: Build Go ggrun
         working-directory: go
         run: |
           version="${GITHUB_REF_NAME}"
@@ -110,9 +110,9 @@ jobs:
           esac
           ldflags="-s -w"
           if [ -n "$version" ]; then
-            ldflags="$ldflags -X github.com/raketenkater/llm-server/pkg/update.currentVersion=$version"
+            ldflags="$ldflags -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$version"
           fi
-          go build -trimpath -ldflags="$ldflags" -o llm-server ./cmd/llm-server
+          go build -trimpath -ldflags="$ldflags" -o ggrun ./cmd/ggrun
 
       - name: Package
         run: scripts/package-release.sh "${{ matrix.asset }}" /tmp/llama.cpp/build/bin/llama-server dist
@@ -124,12 +124,12 @@ jobs:
           path: dist/${{ matrix.asset }}
 
   package-windows:
-    name: package llm-server-windows-x86_64-cpu.zip
+    name: package ggrun-windows-x86_64-cpu.zip
     needs: preflight
     runs-on: windows-latest
     env:
       LLAMA_CPP_REF: d2462f8f7ac6d80070a587ffebf6cd73730f4280
-      ASSET: llm-server-windows-x86_64-cpu.zip
+      ASSET: ggrun-windows-x86_64-cpu.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -159,20 +159,20 @@ jobs:
           & $server.FullName --version
           "LLAMA_SERVER_PATH=$($server.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build Go llm-server
+      - name: Build Go ggrun
         working-directory: go
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME
           $ldflags = '-s -w'
           if ($version -like 'v*') {
-            $ldflags = "$ldflags -X github.com/raketenkater/llm-server/pkg/update.currentVersion=$version"
+            $ldflags = "$ldflags -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$version"
           }
-          go build -trimpath -ldflags $ldflags -o llm-server.exe ./cmd/llm-server
+          go build -trimpath -ldflags $ldflags -o ggrun.exe ./cmd/ggrun
 
       - name: Package
         shell: pwsh
-        run: scripts/package-release.ps1 -AssetName $env:ASSET -ServerBin $env:LLAMA_SERVER_PATH -OutDir dist -LlmServerBin go/llm-server.exe
+        run: scripts/package-release.ps1 -AssetName $env:ASSET -ServerBin $env:LLAMA_SERVER_PATH -OutDir dist -LlmServerBin go/ggrun.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

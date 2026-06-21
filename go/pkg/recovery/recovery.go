@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/raketenkater/llm-server/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
 // FailureType classifies how a server load failed.
@@ -141,7 +141,7 @@ func (l *Launcher) Run(ctx context.Context) error {
 }
 
 func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount int) error {
-	logFile, err := os.CreateTemp("", "llm-server-launch-*.log")
+	logFile, err := os.CreateTemp("", "ggrun-launch-*.log")
 	if err != nil {
 		return err
 	}

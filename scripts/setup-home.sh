@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Create a self-contained llm-server app home and install into it.
+# Create a self-contained ggrun app home and install into it.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLATFORM="${1:-}"
-APP_NAME="${LLM_SETUP_APP_NAME:-llm-server}"
+APP_NAME="${LLM_SETUP_APP_NAME:-ggrun}"
 APP_HOME="${LLM_APP_HOME:-$HOME/$APP_NAME}"
 APP_BIN="$APP_HOME/.bin"
 APP_MODELS="$APP_HOME/models"
@@ -14,12 +14,21 @@ APP_CACHE="$APP_HOME/.cache"
 APP_CONFIG="$APP_HOME/.config"
 APP_SRC="$APP_HOME/.src"
 APP_ENV="$APP_HOME/.env.sh"
+
+# Migrate a pre-rename install: ggrun was formerly llm-server. If an old
+# ~/llm-server app home exists and ~/ggrun does not, move it over so the user's
+# models, config, cache, and tuned configs carry forward.
+OLD_APP_HOME="$HOME/llm-server"
+if [[ "$APP_HOME" == "$HOME/ggrun" && -d "$OLD_APP_HOME" && ! -e "$APP_HOME" ]]; then
+    printf '==> Migrating existing install: %s -> %s (formerly llm-server)\n' "$OLD_APP_HOME" "$APP_HOME"
+    mv "$OLD_APP_HOME" "$APP_HOME"
+fi
 INSTALL_MODE="${LLM_SETUP_MODE:-${LLM_INSTALL_MODE:-auto}}"
 BACKEND="${LLM_SETUP_BACKEND:-${LLM_INSTALL_BACKEND:-auto}}"
 INSTALL_REF="${LLM_SETUP_REF:-${LLM_INSTALL_REF:-main}}"
 SOURCE_REPO_DIR=""
 if [[ ! -d "$ROOT/.git" ]]; then
-    SOURCE_REPO_DIR="$APP_SRC/llm-server"
+    SOURCE_REPO_DIR="$APP_SRC/ggrun"
 fi
 PY_DEPS="${LLM_SETUP_PY_DEPS:-${LLM_INSTALL_PY_DEPS:-auto}}"
 DEPS="${LLM_SETUP_DEPS:-${LLM_INSTALL_DEPS:-auto}}"
@@ -69,8 +78,8 @@ LLM_INSTALL_NONINTERACTIVE="$NONINTERACTIVE" \
 LLM_INSTALL_MAIN=go \
 "$ROOT/install.sh"
 
-if [[ ! -x "$APP_BIN/llm-server" ]]; then
-    err "llm-server launcher was not installed. See log: $LOG_FILE"
+if [[ ! -x "$APP_BIN/ggrun" ]]; then
+    err "ggrun launcher was not installed. See log: $LOG_FILE"
     exit 1
 fi
 
@@ -140,29 +149,33 @@ export LLM_APP_HOME="$APP_HOME"
 export PATH="$APP_BIN:\$PATH"
 EOF
 
-cat >"$APP_HOME/llm-server" <<EOF
+cat >"$APP_HOME/ggrun" <<EOF
 #!/usr/bin/env bash
 source "$APP_ENV"
-exec "$APP_BIN/llm-server" "\$@"
+exec "$APP_BIN/ggrun" "\$@"
 EOF
-chmod 0755 "$APP_HOME/llm-server"
+chmod 0755 "$APP_HOME/ggrun"
+
+# Backward-compat: keep the old `llm-server` command working for existing users.
+ln -sf ggrun "$APP_BIN/llm-server" 2>/dev/null || true
+ln -sf "$APP_HOME/ggrun" "$APP_HOME/llm-server" 2>/dev/null || true
 
 say ""
 say "╔════════════════════════════════════════════════════════════╗"
-say "║ llm-server is installed and ready                         ║"
+say "║ ggrun is installed and ready                         ║"
 say "╚════════════════════════════════════════════════════════════╝"
 say "Backend:   ${backend_bin:-not installed}"
-say "CLI:       $APP_HOME/llm-server"
-say "GUI:       $APP_HOME/llm-server   (no arguments opens the GUI)"
+say "CLI:       $APP_HOME/ggrun"
+say "GUI:       $APP_HOME/ggrun   (no arguments opens the GUI)"
 say "Models:    $APP_MODELS"
 say "Config:    $APP_CONFIG/config"
 say "Logs:      $APP_LOGS"
 say ""
 say "Try now:"
-say "  \"$APP_HOME/llm-server\"            # interactive GUI"
-say "  \"$APP_HOME/llm-server\" detect"
-say "  \"$APP_HOME/llm-server\" <repo/name> --download"
-say "  \"$APP_HOME/llm-server\" \"$APP_MODELS/your-model.gguf\""
+say "  \"$APP_HOME/ggrun\"            # interactive GUI"
+say "  \"$APP_HOME/ggrun\" detect"
+say "  \"$APP_HOME/ggrun\" <repo/name> --download"
+say "  \"$APP_HOME/ggrun\" \"$APP_MODELS/your-model.gguf\""
 say ""
 if [[ -n "$SOURCE_REPO_DIR" ]]; then
     say "Source:    $SOURCE_REPO_DIR"

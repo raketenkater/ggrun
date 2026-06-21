@@ -4,7 +4,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // This file models the two real axes a recommendation should rank on:

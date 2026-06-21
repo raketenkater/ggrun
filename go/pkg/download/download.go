@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // Downloader wraps the download_any_gguf.py script.
@@ -51,7 +51,7 @@ func findScript(appHome string) string {
 			filepath.Join(appHome, "download_any_gguf.py"),
 		)
 	}
-	// Try relative to binary (installed alongside llm-server)
+	// Try relative to binary (installed alongside ggrun)
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,

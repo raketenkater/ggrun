@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Installs a native Windows llm-server app home from a release bundle.
+Installs a native Windows ggrun app home from a release bundle.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -9,11 +9,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Backend cuda
 
 .EXAMPLE
-iwr -useb https://raw.githubusercontent.com/raketenkater/llm-server/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1 | iex
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:USERPROFILE 'llm-server'),
+    [string]$InstallDir = (Join-Path $env:USERPROFILE 'ggrun'),
     [string]$Release = 'latest',
     [ValidateSet('cpu', 'cuda')]
     [string]$Backend = 'cpu',
@@ -25,9 +25,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Repo = 'raketenkater/llm-server'
-$Asset = "llm-server-windows-x86_64-$Backend.zip"
-$CpuAsset = 'llm-server-windows-x86_64-cpu.zip'
+$Repo = 'raketenkater/ggrun'
+$Asset = "ggrun-windows-x86_64-$Backend.zip"
+$CpuAsset = 'ggrun-windows-x86_64-cpu.zip'
 $ReleaseInfo = $null
 
 function Say($Message) { Write-Host $Message }
@@ -125,7 +125,7 @@ function Write-CmdWrapper([string]$Path, [string]$ArgsLine) {
 @echo off
 set "LLM_APP_HOME=%~dp0"
 set "PATH=%~dp0.bin;%PATH%"
-"%~dp0.bin\llm-server.exe" $ArgsLine %*
+"%~dp0.bin\ggrun.exe" $ArgsLine %*
 "@
     Set-Content -Path $Path -Value $content -Encoding ASCII
 }
@@ -140,7 +140,7 @@ function Build-CudaBackend {
 
     $srcRoot = Join-Path $InstallDir '.src'
     $repoDir = Join-Path $srcRoot 'llama.cpp'
-    $buildDir = Join-Path $repoDir 'build-llm-server-cuda'
+    $buildDir = Join-Path $repoDir 'build-ggrun-cuda'
     New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
 
     if (Test-Path (Join-Path $repoDir '.git')) {
@@ -183,14 +183,14 @@ function Build-CudaBackend {
     Ok "Built native Windows CUDA backend from $($server.FullName)"
 }
 
-Say '=== llm-server native Windows installer ==='
+Say '=== ggrun native Windows installer ==='
 Say "Install dir: $InstallDir"
 Say "Backend:     $Backend"
 if ($Backend -eq 'cuda') {
     Say 'CUDA mode:   native Windows NVIDIA via llama.cpp GGML_CUDA'
 }
 
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("llm-server-install-" + [guid]::NewGuid().ToString('N'))
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ggrun-install-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
     $bin = Join-Path $InstallDir '.bin'
@@ -215,7 +215,7 @@ try {
     $cfgPath = Join-Path $config 'config'
     $llamaServer = Join-Path $bin 'llama-server.exe'
     $cfg = @(
-        '# llm-server Go config. Loaded when LLM_APP_HOME points at this app home.',
+        '# ggrun Go config. Loaded when LLM_APP_HOME points at this app home.',
         "LLM_APP_HOME=`"$InstallDir`"",
         "LLM_MODEL_DIR=`"$models`"",
         "LLM_CACHE_DIR=`"$cache`"",
@@ -225,22 +225,22 @@ try {
     )
     Set-Content -Path $cfgPath -Value $cfg -Encoding UTF8
 
-    Write-CmdWrapper (Join-Path $InstallDir 'llm-server.cmd') ''
+    Write-CmdWrapper (Join-Path $InstallDir 'ggrun.cmd') ''
 
     if (!$NoPath) {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $parts = @($userPath -split ';' | Where-Object { $_ })
         if ($parts -notcontains $InstallDir) {
             [Environment]::SetEnvironmentVariable('Path', (($parts + $InstallDir) -join ';'), 'User')
-            Warn "Added $InstallDir to the user PATH. Open a new terminal to use llm-server.cmd directly."
+            Warn "Added $InstallDir to the user PATH. Open a new terminal to use ggrun.cmd directly."
         }
     }
 
-    if (!(Test-Path (Join-Path $bin 'llm-server.exe'))) { Fail 'llm-server.exe was not installed' }
+    if (!(Test-Path (Join-Path $bin 'ggrun.exe'))) { Fail 'ggrun.exe was not installed' }
     if (!(Test-Path $llamaServer)) { Fail 'llama-server.exe was not installed' }
 
-    Ok 'Installed native Windows llm-server'
-    Say "CLI/GUI: $InstallDir\llm-server.cmd   (no arguments opens the GUI)"
+    Ok 'Installed native Windows ggrun'
+    Say "CLI/GUI: $InstallDir\ggrun.cmd   (no arguments opens the GUI)"
     Say "Models:  $models"
     Say "Config:  $cfgPath"
 } finally {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // CacheEntry holds a validated placement cache entry for MoE.
@@ -111,7 +111,7 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 func SavePlacementCache(cachePath string, entry *CacheEntry) error {
 	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
 	var parts []string
-	parts = append(parts, fmt.Sprintf("# llm-server placement cache (%s)", time.Now().UTC().Format("2006-01-02T15:04:05Z")))
+	parts = append(parts, fmt.Sprintf("# ggrun placement cache (%s)", time.Now().UTC().Format("2006-01-02T15:04:05Z")))
 	if len(entry.GPUAssignments) > 0 {
 		var assigns []string
 		for _, a := range entry.GPUAssignments {

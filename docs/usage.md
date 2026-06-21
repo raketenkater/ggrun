@@ -1,42 +1,42 @@
 # Usage
 
-With no command, `llm-server` opens the interactive TUI. Otherwise it takes a model
+With no command, `ggrun` opens the interactive TUI. Otherwise it takes a model
 (local path or Hugging Face repo) plus flags.
 
 ```bash
 # Backends
-llm-server --backend ik_llama model.gguf
-llm-server --backend llama model.gguf
-llm-server --backend vulkan model.gguf
+ggrun --backend ik_llama model.gguf
+ggrun --backend llama model.gguf
+ggrun --backend vulkan model.gguf
 
 # Placement and memory
-llm-server model.gguf --gpus 0,1
-llm-server model.gguf --ram-budget 90G
-llm-server model.gguf --ctx-size 32768
-llm-server model.gguf --kv-quality mid
-llm-server model.gguf --kv-placement gpu
+ggrun model.gguf --gpus 0,1
+ggrun model.gguf --ram-budget 90G
+ggrun model.gguf --ctx-size 32768
+ggrun model.gguf --kv-quality mid
+ggrun model.gguf --kv-placement gpu
 
 # Vision
-llm-server model.gguf --vision
-llm-server model.gguf --mmproj /path/to/mmproj.gguf
+ggrun model.gguf --vision
+ggrun model.gguf --mmproj /path/to/mmproj.gguf
 
 # Tuning and cached configs
-llm-server model.gguf --ai-tune
-llm-server model.gguf --ai-tune --retune
-llm-server --show-configs
-llm-server model.gguf --tune-cache ~/.cache/llm-server/tune.json
+ggrun model.gguf --ai-tune
+ggrun model.gguf --ai-tune --retune
+ggrun --show-configs
+ggrun model.gguf --tune-cache ~/.cache/ggrun/tune.json
 
 # Speculative decoding
-llm-server model.gguf --spec auto
-llm-server model.gguf --spec mtp
-llm-server model.gguf --spec eagle3
-llm-server model.gguf --spec draft
-llm-server model.gguf --spec ngram-mod
+ggrun model.gguf --spec auto
+ggrun model.gguf --spec mtp
+ggrun model.gguf --spec eagle3
+ggrun model.gguf --spec draft
+ggrun model.gguf --spec ngram-mod
 
 # Maintenance
-llm-server --update
-llm-server model.gguf --benchmark
-llm-server model.gguf --dry-run
+ggrun --update
+ggrun model.gguf --benchmark
+ggrun model.gguf --dry-run
 ```
 
 Unknown flags are passed through to `llama-server`, so upstream options remain available

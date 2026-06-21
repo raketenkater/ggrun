@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure OpenAI-compatible serving throughput for the Go llm-server launcher.
+# Measure OpenAI-compatible serving throughput for the Go ggrun launcher.
 
 set -euo pipefail
 
@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${1:-}"
 shift || true
 
-GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/ggrun}"
 SERVER_BIN="${LLAMA_SERVER:-}"
 OUT_DIR="${BENCH_OUT_DIR:-$ROOT/.benchmarks/throughput-$(date -u +%Y%m%dT%H%M%SZ)}"
 PORT=18200
@@ -26,7 +26,7 @@ usage() {
 Usage: scripts/bench-v3-throughput.sh <model.gguf> [options]
 
 Options:
-  --go-bin <path>        Go llm-server binary (default: ./go/llm-server)
+  --go-bin <path>        Go ggrun binary (default: ./go/ggrun)
   --server-bin <path>    llama-server binary used by Go launcher
   --out-dir <dir>        Output directory (default: .benchmarks/throughput-<utc>)
   --port <n>             Port to use (default: 18200)
@@ -141,7 +141,7 @@ prompt_profile=$PROMPT_PROFILE
 created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
-echo "[launch] Go llm-server on port $PORT, parallel=$PARALLEL, ctx-size=$CTX_SIZE"
+echo "[launch] Go ggrun on port $PORT, parallel=$PARALLEL, ctx-size=$CTX_SIZE"
 LLAMA_SERVER="$SERVER_ABS" "$GO_ABS" "$MODEL_ABS" \
     --port "$PORT" --host 127.0.0.1 --ctx-size "$CTX_SIZE" \
     --backend "$BACKEND" --server-bin "$SERVER_ABS" --parallel "$PARALLEL" \
@@ -295,7 +295,7 @@ import sys
 json_path, summary_path, model, server, go_bin, parallel, concurrency, ctx_size, ctx_per_slot = sys.argv[1:]
 doc = json.load(open(json_path, encoding="utf-8"))
 with open(summary_path, "w", encoding="utf-8") as f:
-    f.write("# llm-server v3 throughput benchmark\n\n")
+    f.write("# ggrun v3 throughput benchmark\n\n")
     f.write(f"Model: `{model}`\n\n")
     f.write(f"Backend: `{server}`\n\n")
     f.write(f"Go binary: `{go_bin}`\n\n")

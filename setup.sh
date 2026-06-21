@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# One-command setup entrypoint for llm-server.
+# One-command setup entrypoint for ggrun.
 #
 # Works from a cloned repo:
 #   ./setup.sh
 #
 # Or remotely:
-#   curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
 
 set -euo pipefail
 
-REPO="raketenkater/llm-server"
+REPO="raketenkater/ggrun"
 REF="${LLM_SETUP_REF:-main}"
 TMP_DIR=""
 
@@ -32,7 +32,7 @@ local_root() {
 download_root() {
     command -v curl >/dev/null 2>&1 || { err "curl is required for remote setup"; exit 1; }
     command -v tar >/dev/null 2>&1 || { err "tar is required for remote setup"; exit 1; }
-    TMP_DIR="$(mktemp -d -t llm-server-setup.XXXXXX)"
+    TMP_DIR="$(mktemp -d -t ggrun-setup.XXXXXX)"
     local archive="$TMP_DIR/source.tar.gz"
     curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$REF" -o "$archive"
     tar -xzf "$archive" -C "$TMP_DIR"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Produce reproducible v3 launch/benchmark artifacts for release posts.
-# Compares raw llama-server and Go v3 llm-server. Optionally includes a v2 Bash launcher when provided.
+# Compares raw llama-server and Go v3 ggrun. Optionally includes a v2 Bash launcher when provided.
 
 set -euo pipefail
 
@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${1:-}"
 shift || true
 
-GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/llm-server}"
+GO_BIN="${LLM_SERVER_GO_BIN:-$ROOT/go/ggrun}"
 BASH_BIN="${LLM_SERVER_BASH_BIN:-}"
 SERVER_BIN="${LLAMA_SERVER:-}"
 OUT_DIR="${BENCH_OUT_DIR:-$ROOT/.benchmarks/v3-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -27,8 +27,8 @@ usage() {
 Usage: scripts/bench-v3-comparison.sh <model.gguf> [options]
 
 Options:
-  --go-bin <path>        Go llm-server binary (default: ./go/llm-server)
-  --bash-bin <path>      Optional legacy v2 Bash llm-server for before/after numbers
+  --go-bin <path>        Go ggrun binary (default: ./go/ggrun)
+  --bash-bin <path>      Optional legacy v2 Bash ggrun for before/after numbers
   --server-bin <path>    llama-server binary for raw baseline and wrappers
   --out-dir <dir>        Output directory (default: .benchmarks/v3-<utc>)
   --port-base <n>        First port to use (default: 18081)
@@ -44,7 +44,7 @@ Options:
 Examples:
   scripts/bench-v3-comparison.sh ~/ai_models/qwen.gguf --server-bin ~/llama.cpp/build/bin/llama-server
   scripts/bench-v3-comparison.sh model.gguf --server-bin ~/llama.cpp/build/bin/llama-server --bash-bin ~/.local/bin/llm-server-bash
-  LLM_SERVER_GO_BIN=go/llm-server scripts/bench-v3-comparison.sh model.gguf --backend vulkan --ctx-size 32768
+  LLM_SERVER_GO_BIN=go/ggrun scripts/bench-v3-comparison.sh model.gguf --backend vulkan --ctx-size 32768
 EOF
     exit 2
 }
@@ -428,7 +428,7 @@ done
 
 summary="$OUT_DIR/summary.md"
 {
-    echo "# llm-server v3 benchmark comparison"
+    echo "# ggrun v3 benchmark comparison"
     echo
     echo "Model: \`$MODEL_ABS\`"
     echo "Backend: \`$SERVER_ABS\`"

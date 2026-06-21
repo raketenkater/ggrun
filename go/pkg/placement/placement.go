@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // VRAM and compute sizing constants
@@ -126,7 +126,7 @@ type Options struct {
 	NoMMap       bool
 	Parallel     int
 	CacheFile    string // path to placement cache for MoE recovery
-	CacheDir     string // path to llm-server cache dir (for probes)
+	CacheDir     string // path to ggrun cache dir (for probes)
 	Host         string // listen address (default 0.0.0.0)
 	VisionAuto   bool   // auto-detect mmproj for vision
 	MMProjPath   string // explicit vision projector GGUF
@@ -1843,7 +1843,7 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "llm-server")
+		cacheDir = filepath.Join(home, ".cache", "ggrun")
 	}
 	// Compute GPU signature hash: sort(names+drivers), MD5, take first 12 chars
 	gpuSig := gpuSignatureHash(gpus)
@@ -1907,7 +1907,7 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string) {
 
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "llm-server")
+		cacheDir = filepath.Join(home, ".cache", "ggrun")
 	}
 
 	// Use primary GPU (first in list, sorted by PCI bus ID)
@@ -2038,7 +2038,7 @@ func parseMiB(line string) float64 {
 func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality string) *probeCache {
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "llm-server", "probes")
+		cacheDir = filepath.Join(home, ".cache", "ggrun", "probes")
 	}
 	// MD5 hash key over model_name:layers:experts:embd:ff:ctx:ubatch:kv_quality
 	modelName := filepath.Base(model.Path)
@@ -2106,7 +2106,7 @@ type probeCache struct {
 func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int) error {
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "llm-server", "probes")
+		cacheDir = filepath.Join(home, ".cache", "ggrun", "probes")
 	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return err

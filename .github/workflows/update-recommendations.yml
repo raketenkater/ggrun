@@ -17,7 +17,7 @@ jobs:
   refresh:
     name: refresh Artificial Analysis catalog
     runs-on: ubuntu-latest
-    if: github.repository == 'raketenkater/llm-server'
+    if: github.repository == 'raketenkater/ggrun'
     steps:
       - uses: actions/checkout@v5
 

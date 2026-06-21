@@ -1,12 +1,12 @@
 # Architecture
 
-llm-server is a Go launcher around upstream GGUF serving backends. The product
-surface is the `llm-server` command; helper scripts exist only for packaging,
+ggrun is a Go launcher around upstream GGUF serving backends. The product
+surface is the `ggrun` command; helper scripts exist only for packaging,
 GGUF metadata extraction, and downloading.
 
 ## Main Components
 
-- `go/cmd/llm-server`: CLI entrypoint and compatibility argument parsing.
+- `go/cmd/ggrun`: CLI entrypoint and compatibility argument parsing.
 - `go/pkg/config`: config loading, environment handling, and app-home support.
 - `go/pkg/detect`: CPU, RAM, CUDA, and Vulkan detection.
 - `go/pkg/gguf`: GGUF metadata parsing through the bundled parser helper.
@@ -15,7 +15,7 @@ GGUF metadata extraction, and downloading.
 - `go/pkg/tune`: AI Tune benchmarking, candidate validation, and cache handling.
 - `go/pkg/update`: self-update, backend update, rollback, and startup update
   checks for interactive users.
-- `go/pkg/tui`: terminal UI launched by running `llm-server` with no arguments (or `llm-server gui`).
+- `go/pkg/tui`: terminal UI launched by running `ggrun` with no arguments (or `ggrun gui`).
 
 ## Tool Layout
 
@@ -39,6 +39,6 @@ Go-first.
 
 ## Backend Contract
 
-llm-server does not fork llama.cpp behavior. It selects flags, starts the
+ggrun does not fork llama.cpp behavior. It selects flags, starts the
 backend, validates health, runs benchmarks, and records cache metadata. Unknown
 launcher flags are forwarded to the backend so upstream options remain usable.

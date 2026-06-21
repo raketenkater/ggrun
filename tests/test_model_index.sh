@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d -t llm-server-model-index.XXXXXX)"
+TMP="$(mktemp -d -t ggrun-model-index.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 MODEL_DIR="$TMP/models"
@@ -48,10 +48,10 @@ cat >"$CACHE_DIR/tune_Test-A3B-Q4_K_M.gguf_hw12345678_llama.json" <<'JSON'
 JSON
 
 echo "Test: model index scan"
-python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan >/tmp/llm-server-model-index.json
-test -f "$MODEL_DIR/.llm-server/models.json"
+python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" scan >/tmp/ggrun-model-index.json
+test -f "$MODEL_DIR/.ggrun/models.json"
 
-python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
+python3 - "$MODEL_DIR/.ggrun/models.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 models = data.get("models") or []
@@ -69,9 +69,9 @@ PY
 
 echo "Test: model index download metadata"
 python3 "$ROOT/tools/models/model_index.py" --model-dir "$MODEL_DIR" --cache-dir "$CACHE_DIR" \
-    update-download --repo test/repo-GGUF --quant Q4_K_M --file Test-A3B-Q4_K_M.gguf >/tmp/llm-server-model-index-update.json
+    update-download --repo test/repo-GGUF --quant Q4_K_M --file Test-A3B-Q4_K_M.gguf >/tmp/ggrun-model-index-update.json
 
-python3 - "$MODEL_DIR/.llm-server/models.json" <<'PY'
+python3 - "$MODEL_DIR/.ggrun/models.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 m = next(row for row in data["models"] if row["file"] == "Test-A3B-Q4_K_M.gguf")

@@ -1,6 +1,6 @@
 # Docker
 
-Container images for llm-server. Each image bundles the Go launcher, the Python
+Container images for ggrun. Each image bundles the Go launcher, the Python
 helper tools, and a `llama-server` backend built from a pinned llama.cpp commit
 (the same one the release bundles use). Build from the repo root so the build
 context includes `go/` and `tools/`.
@@ -15,9 +15,9 @@ context includes `go/` and `tools/`.
 
 ```bash
 # from the repository root
-docker build -f docker/Dockerfile.cpu    -t llm-server:cpu    .
-docker build -f docker/Dockerfile.cuda   -t llm-server:cuda   .
-docker build -f docker/Dockerfile.vulkan -t llm-server:vulkan .
+docker build -f docker/Dockerfile.cpu    -t ggrun:cpu    .
+docker build -f docker/Dockerfile.cuda   -t ggrun:cuda   .
+docker build -f docker/Dockerfile.vulkan -t ggrun:vulkan .
 ```
 
 Build args (optional): `LLAMA_CPP_REF` pins the backend commit; the CUDA image
@@ -27,24 +27,24 @@ also takes `CUDA_IMAGE` (default `12.4.1`) and `CUDA_ARCHITECTURES`
 ## Run
 
 A model path (inside the container) or a Hugging Face repo is passed as the
-command — the same arguments `llm-server` takes on the host.
+command — the same arguments `ggrun` takes on the host.
 
 ```bash
 # CPU, local model
 docker run --rm -p 8081:8081 -v ~/ai_models:/models \
-  llm-server:cpu /models/model.gguf
+  ggrun:cpu /models/model.gguf
 
 # NVIDIA CUDA
 docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models \
-  llm-server:cuda /models/model.gguf
+  ggrun:cuda /models/model.gguf
 
 # Vulkan on AMD/Intel
 docker run --rm --device /dev/dri -p 8081:8081 -v ~/ai_models:/models \
-  llm-server:vulkan /models/model.gguf
+  ggrun:vulkan /models/model.gguf
 
 # Download a quant from Hugging Face into the mounted models volume, then serve
 docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models \
-  llm-server:cuda unsloth/Qwen3.6-27B-GGUF --download
+  ggrun:cuda unsloth/Qwen3.6-27B-GGUF --download
 ```
 
 The OpenAI-compatible API is then on `http://localhost:8081/v1`.
@@ -58,7 +58,7 @@ Volumes:
 ```bash
 cd docker
 MODEL=/models/your-model.gguf docker compose up
-# Open WebUI → http://localhost:3000, wired to llm-server's API
+# Open WebUI → http://localhost:3000, wired to ggrun's API
 ```
 
 ## Notes

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/raketenkater/llm-server/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // Memory holds GPU and system memory state.

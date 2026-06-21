@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/raketenkater/llm-server/pkg/gguf"
+	"github.com/raketenkater/ggrun/pkg/gguf"
 )
 
 // findOrDownloadMMProj finds a vision projector locally, or downloads from HuggingFace.

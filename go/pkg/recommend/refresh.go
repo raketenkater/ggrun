@@ -16,7 +16,7 @@ import (
 // back to the embedded copy offline. This is best-effort and honours the same
 // opt-out as the startup update check.
 const (
-	catalogURL   = "https://raw.githubusercontent.com/raketenkater/llm-server/main/go/pkg/recommend/catalog.json"
+	catalogURL   = "https://raw.githubusercontent.com/raketenkater/ggrun/main/go/pkg/recommend/catalog.json"
 	catalogTTL   = 24 * time.Hour
 	fetchTimeout = 6 * time.Second
 	maxCatalog   = 8 << 20 // 8 MiB sanity cap on the download
@@ -30,10 +30,10 @@ func cachedCatalogPath() string {
 		return filepath.Join(d, "catalog.json")
 	}
 	if home := os.Getenv("LLM_APP_HOME"); home != "" {
-		return filepath.Join(home, ".cache", "llm-server", "catalog.json")
+		return filepath.Join(home, ".cache", "ggrun", "catalog.json")
 	}
 	if d, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(d, "llm-server", "catalog.json")
+		return filepath.Join(d, "ggrun", "catalog.json")
 	}
 	return ""
 }

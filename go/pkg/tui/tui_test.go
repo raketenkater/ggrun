@@ -86,7 +86,7 @@ func TestHWSummary(t *testing.T) {
 }
 
 func TestInitialModelUsesConfigPaths(t *testing.T) {
-	appHome := filepath.Join(t.TempDir(), "llm-server")
+	appHome := filepath.Join(t.TempDir(), "ggrun")
 	cfgDir := filepath.Join(appHome, ".config")
 	modelDir := filepath.Join(appHome, "models")
 	cacheDir := filepath.Join(appHome, ".cache")

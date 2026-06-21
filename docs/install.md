@@ -5,36 +5,36 @@
 Linux / macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
 ```
 
 Native Windows from PowerShell:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/raketenkater/llm-server/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1 | iex
 ```
 
 Native Windows NVIDIA CUDA:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/raketenkater/llm-server/main/install.ps1 -OutFile install.ps1
+iwr -useb https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Backend cuda
 ```
 
 From a clone:
 
 ```bash
-git clone https://github.com/raketenkater/llm-server.git
-cd llm-server
+git clone https://github.com/raketenkater/ggrun.git
+cd ggrun
 ./setup.sh
 ```
 
 ## App home layout
 
-`setup.sh` creates a clean app home under `~/llm-server`:
+`setup.sh` creates a clean app home under `~/ggrun`:
 
 ```text
-llm-server       launcher (no arguments opens the terminal GUI)
+ggrun       launcher (no arguments opens the terminal GUI)
 models/          GGUF models and downloaded vision projectors
 .bin/            Go binary, tools, and bundled backend when available
 .config/         local config loaded by the launcher (single source of truth)
@@ -46,8 +46,8 @@ models/          GGUF models and downloaded vision projectors
 Use it with:
 
 ```bash
-~/llm-server/llm-server                       # interactive GUI
-~/llm-server/llm-server <repo/name> --download
+~/ggrun/ggrun                       # interactive GUI
+~/ggrun/ggrun <repo/name> --download
 ```
 
 Only `LLM_APP_HOME` and `PATH` are exported by the environment; everything else (model
@@ -56,17 +56,17 @@ GUI edits take effect instead of being shadowed by environment variables.
 
 ## Release bundles
 
-Since v3, [prebuilt release bundles](https://github.com/raketenkater/llm-server/releases/latest)
+Since v3, [prebuilt release bundles](https://github.com/raketenkater/ggrun/releases/latest)
 (Linux CPU/Vulkan, macOS arm64 Metal, Windows x86_64 CPU) are downloaded and verified
 against the published `SHA256SUMS` — no compile needed. Linux CUDA/ik_llama.cpp installs
 build from source for your exact GPU architecture. Windows NVIDIA CUDA installs use a
 native llama.cpp CUDA backend, either from an optional
-`llm-server-windows-x86_64-cuda.zip` release asset or by building it locally.
+`ggrun-windows-x86_64-cuda.zip` release asset or by building it locally.
 
 ## Classic install to `~/.local/bin`
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/install.sh | bash
 ```
 
 ## Installer controls
@@ -80,4 +80,4 @@ LLM_INSTALL_PREFIX=/usr/local/bin ./install.sh
 ```
 
 Existing Bash installs are treated as legacy. The installer preserves them as
-`llm-server-bash` when replacing the primary `llm-server` command with the Go binary.
+`llm-server-bash` when replacing the primary `ggrun` command with the Go binary.

@@ -22,7 +22,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
-WORK_DIR="$(mktemp -d -t llm-server-package.XXXXXX)"
+WORK_DIR="$(mktemp -d -t ggrun-package.XXXXXX)"
 PAYLOAD="$WORK_DIR/${ASSET_NAME%.tar.gz}"
 
 cleanup() {
@@ -42,11 +42,11 @@ done
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
 
-if [[ -x "$ROOT_DIR/go/llm-server" ]]; then
-    install -m 0755 "$ROOT_DIR/go/llm-server" "$PAYLOAD/bin/llm-server"
+if [[ -x "$ROOT_DIR/go/ggrun" ]]; then
+    install -m 0755 "$ROOT_DIR/go/ggrun" "$PAYLOAD/bin/ggrun"
 fi
-if [[ -f "$ROOT_DIR/legacy/bash/llm-server" ]]; then
-    install -m 0755 "$ROOT_DIR/legacy/bash/llm-server" "$PAYLOAD/llm-server-bash"
+if [[ -f "$ROOT_DIR/legacy/bash/ggrun" ]]; then
+    install -m 0755 "$ROOT_DIR/legacy/bash/ggrun" "$PAYLOAD/llm-server-bash"
 fi
 
 for spec in \
