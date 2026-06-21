@@ -2,6 +2,10 @@
 
 ## v3.1.0 — 2026-06-20
 
+- **Renamed to `ggrun`** (formerly `llm-server`; pronounced "g-run", from "gguf
+  run"). Existing `~/llm-server` app homes auto-migrate to `~/ggrun` on the next
+  `setup.sh`, and the old `llm-server` command keeps working via a symlink. The
+  GitHub repo redirects, so old install/clone URLs still resolve.
 - **PCIe-bandwidth-weighted MoE tensor-split.** On heterogeneous-PCIe rigs (e.g.
   a card stuck at x1) the split now concentrates layer ownership on the
   fastest-link GPU, so CPU-expert streaming isn't bottlenecked — up to **3.4×
