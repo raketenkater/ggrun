@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Refresh llm-server's local recommendation catalog.
+"""Refresh ggrun's local recommendation catalog.
 
 The catalog is generated from Artificial Analysis open-weight model rankings and
 resolved to Hugging Face GGUF repos with downloadable quant sizes. API access is
 used only by this updater; keys are never written to the catalog or required at
-llm-server runtime.
+ggrun runtime.
 """
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ def throttle_hf(url: str) -> None:
 
 
 def fetch_text(url: str, *, headers: dict[str, str] | None = None, timeout: int = 60) -> str:
-    req_headers = {"User-Agent": "llm-server-catalog-refresh"}
+    req_headers = {"User-Agent": "ggrun-catalog-refresh"}
     req_headers.update(hf_auth_headers(url))
     if headers:
         req_headers.update(headers)
@@ -669,7 +669,7 @@ def fetch_gguf_arch(repo: str) -> dict[str, Any] | None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gguf"))
     from parse_gguf import _read_kv
 
-    req_headers = {"Range": f"bytes=0-{GGUF_HEADER_FETCH_BYTES - 1}", "User-Agent": "llm-server-catalog-refresh"}
+    req_headers = {"Range": f"bytes=0-{GGUF_HEADER_FETCH_BYTES - 1}", "User-Agent": "ggrun-catalog-refresh"}
     req_headers.update(hf_auth_headers(url))
     try:
         req = urllib.request.Request(url, headers=req_headers)
@@ -1019,7 +1019,7 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
         candidates.append(candidate_from_row(row, repo, quants, method))
     candidates = dedupe_candidates(candidates)[:limit]
     return {
-        "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by llm-server hardware fit; Hugging Face GGUF metadata cached from public model APIs",
+        "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by ggrun hardware fit; Hugging Face GGUF metadata cached from public model APIs",
         "candidates": candidates,
         "generated_at": utc_now(),
         "source": f"{source_label}; resolved {len(candidates)} GGUF repos with quant sizes; skipped {skipped} open-weight rows without matching GGUF quants",
@@ -1035,7 +1035,7 @@ def catalog_intelligence(row: dict[str, Any]) -> float:
 def print_catalog_models(catalog: dict[str, Any], limit: int) -> None:
     rows = [row for row in catalog.get("candidates", []) if isinstance(row, dict)]
     ranked = sorted(rows, key=lambda row: (catalog_intelligence(row), int(row.get("quality") or 0)), reverse=True)[:limit]
-    print(f"Top {len(ranked)} llm-server GGUF candidates by cached Artificial Analysis intelligence")
+    print(f"Top {len(ranked)} ggrun GGUF candidates by cached Artificial Analysis intelligence")
     print("| rank | model | repo | q4-ish GB | quants | moe | intelligence | output tps |")
     print("|---:|---|---|---:|---:|---|---:|---:|")
     for i, row in enumerate(ranked, 1):
@@ -1049,7 +1049,7 @@ def print_catalog_models(catalog: dict[str, Any], limit: int) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Refresh llm-server recommendation catalog")
+    parser = argparse.ArgumentParser(description="Refresh ggrun recommendation catalog")
     parser.add_argument("--catalog", default="go/pkg/recommend/catalog.json")
     parser.add_argument("--api-key-env", default="ARTIFICIAL_ANALYSIS_API_KEY")
     parser.add_argument("--allow-missing-key", action="store_true", help="use public leaderboard fallback when the API key is missing")

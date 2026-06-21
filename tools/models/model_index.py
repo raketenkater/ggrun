@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Model index for llm-server model management.
+"""Model index for ggrun model management.
 
-Maintains <model-dir>/.llm-server/models.json from local GGUF files, optional
+Maintains <model-dir>/.ggrun/models.json from local GGUF files, optional
 download metadata, local mmproj files, and AI Tune cache files.
 """
 
@@ -38,7 +38,7 @@ def utc_now() -> str:
 
 
 def index_path(model_dir: Path) -> Path:
-    return model_dir / ".llm-server" / "models.json"
+    return model_dir / ".ggrun" / "models.json"
 
 
 def load_index(model_dir: Path) -> dict[str, Any]:
@@ -355,9 +355,9 @@ def gui_rows(data: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build and inspect llm-server model index")
+    parser = argparse.ArgumentParser(description="Build and inspect ggrun model index")
     parser.add_argument("--model-dir", required=True)
-    parser.add_argument("--cache-dir", default=str(Path.home() / ".cache" / "llm-server"))
+    parser.add_argument("--cache-dir", default=str(Path.home() / ".cache" / "ggrun"))
     sub = parser.add_subparsers(dest="cmd", required=True)
     scan = sub.add_parser("scan")
     scan.add_argument("--format", choices=("json", "gui"), default="json")

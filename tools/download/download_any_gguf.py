@@ -285,7 +285,7 @@ def get_download_directory(default_path=None):
     print(f"\nDownload directory: {default_dir}")
 
     if default_path:
-        # If passed from llm-server, just use it without asking
+        # If passed from ggrun, just use it without asking
         return default_dir
 
     while True:
@@ -362,7 +362,7 @@ def download_files(repo, files_to_download, output_dir):
 
 
 def update_model_index(repo, selected_quantization, output_dir, downloaded, cache_dir=None):
-    """Record downloaded models in the llm-server model index when available."""
+    """Record downloaded models in the ggrun model index when available."""
     here = Path(__file__).resolve()
     candidates = [
         here.with_name("model_index.py"),
@@ -378,7 +378,7 @@ def update_model_index(repo, selected_quantization, output_dir, downloaded, cach
         "--model-dir",
         str(output_dir),
         "--cache-dir",
-        str(cache_dir or Path.home() / ".cache" / "llm-server"),
+        str(cache_dir or Path.home() / ".cache" / "ggrun"),
         "update-download",
         "--repo",
         repo,
@@ -389,7 +389,7 @@ def update_model_index(repo, selected_quantization, output_dir, downloaded, cach
         cmd.extend(["--file", Path(filepath).name])
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"   Updated model index: {output_dir / '.llm-server' / 'models.json'}")
+        print(f"   Updated model index: {output_dir / '.ggrun' / 'models.json'}")
     except Exception:
         print("   Model index update failed; models are still downloaded.")
 
@@ -524,7 +524,7 @@ def get_args():
     parser.add_argument("--dir", type=str, help="Download directory")
     parser.add_argument("--vram", type=int, default=0, help="Available VRAM in MB")
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
-    parser.add_argument("--cache-dir", type=str, help="llm-server cache directory")
+    parser.add_argument("--cache-dir", type=str, help="ggrun cache directory")
     parser.add_argument("--quant", type=str, default="", help="preselect a GGUF quantization")
     parser.add_argument(
         "--no-repo-search",
@@ -551,14 +551,14 @@ def _estimate_overhead_mb(model_size_mb, is_moe, active_b):
 
     We don't know layer counts or head dims yet — that's what parse_gguf.py is
     for, post-download. So this is a deliberately conservative size-derived
-    rule of thumb that matches what llm-server budgets at run time:
+    rule of thumb that matches what ggrun budgets at run time:
       • Dense: ~10% of model_size + 2GB compute, capped between 2GB and 12GB.
       • MoE:   only the active params drive compute, so use active_b * 0.5 GB
                for compute and ~6% of total weights for KV. Same floors apply.
 
     For accurate estimates after download, run:
         ./parse_gguf.py <model.gguf>
-    and feed the result to llm-server's component-based estimator.
+    and feed the result to ggrun's component-based estimator.
     """
     if is_moe and active_b > 0:
         compute_mb = max(2048, int(active_b * 512))

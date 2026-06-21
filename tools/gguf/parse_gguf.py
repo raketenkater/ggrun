@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""GGUF metadata parser for llm-server.
+"""GGUF metadata parser for ggrun.
 
 Extracts architecture, layer counts, expert layout, KV geometry, and tensor
-byte totals. All fields needed by llm-server for placement and RAM estimation.
+byte totals. All fields needed by ggrun for placement and RAM estimation.
 
 Usage:
     parse_gguf.py [--format json|shell] MODEL_PATH
 
 In shell mode, emits `VAR=value` lines safe for `eval "$(parse_gguf.py --format shell ...)"`.
-Variable names match the llm-server bash script's expectations.
+Variable names match the ggrun bash script's expectations.
 
 Importable API:
     from parse_gguf import parse
@@ -255,7 +255,7 @@ def _emit_shell(r: Dict[str, Any]) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description='Parse GGUF metadata for llm-server.')
+    ap = argparse.ArgumentParser(description='Parse GGUF metadata for ggrun.')
     ap.add_argument('path', help='Path to .gguf file (first shard for split models)')
     ap.add_argument('--format', choices=['json', 'shell'], default='json',
                     help='Output format: json (default) or shell VAR=value lines')

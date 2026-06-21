@@ -1,0 +1,19 @@
+[Unit]
+Description=LLM Server (llama.cpp / ik_llama.cpp)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+# Edit these:
+ExecStart=/home/%i/.local/bin/ggrun /home/%i/ai_models/your-model.gguf
+Restart=on-failure
+RestartSec=5
+# Give time for model loading
+TimeoutStartSec=300
+# OOM killer should prefer this process
+OOMScoreAdjust=500
+
+[Install]
+WantedBy=multi-user.target

@@ -12,8 +12,8 @@ models
 !README.md
 !LICENSE
 # Go build artifacts (built inside the image)
-go/llm-server
-go/llm-server.exe
+go/ggrun
+go/ggrun.exe
 # local caches
 **/.cache
 **/__pycache__

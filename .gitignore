@@ -20,8 +20,8 @@ gpt_fixes.md
 dist/
 
 # Local binaries
-/go/llm-server
-/llm-server
+/go/ggrun
+/ggrun
 /llm-server-go
 /llm-server-bash
 /llama-server

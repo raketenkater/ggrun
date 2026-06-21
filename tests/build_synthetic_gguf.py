@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a tiny synthetic GGUF file with chosen metadata, for tests.
 
-The output file is a real GGUF that the GGUF parser and llm-server can both read.
+The output file is a real GGUF that the GGUF parser and ggrun can both read.
 We skip real tensor data — tensor_count is set to whatever the caller passes,
 and tensor headers are emitted but with zero-length data — so the file stays
 under a few KB regardless of the model it represents.

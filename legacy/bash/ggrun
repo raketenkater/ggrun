@@ -6,7 +6,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PREFIX="$(cd "$DIR/../.." 2>/dev/null && pwd -P || pwd)"
 INSTALLER=""
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-server"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ggrun"
 DISMISS_FILE="$CACHE_DIR/bash-v3-migration-dismissed"
 
 find_installer() {
@@ -31,7 +31,7 @@ recently_dismissed() {
 }
 
 run_go_if_available() {
-    for p in "$DIR/llm-server-go" "$DIR/../llm-server-go" "$DIR/../../bin/llm-server-go" "$PREFIX/bin/llm-server-go"; do
+    for p in "$DIR/ggrun-go" "$DIR/../ggrun-go" "$DIR/../../bin/ggrun-go" "$PREFIX/bin/ggrun-go"; do
         if [[ -x "$p" ]]; then
             exec "$p" "$@"
         fi
@@ -42,15 +42,15 @@ run_go_if_available "$@"
 
 if ! is_interactive || recently_dismissed; then
     cat >&2 <<'EOF'
-llm-server v3 is Go-first. This legacy Bash entrypoint no longer serves models.
+ggrun v3 is Go-first. This legacy Bash entrypoint no longer serves models.
 Run the installer to switch this install to Go v3:
-  curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
 EOF
     exit 2
 fi
 
 cat <<'EOF'
-llm-server v3 is now Go-first.
+ggrun v3 is now Go-first.
 
 The Go version is the main release line. It is faster, cross-platform, supports
 Vulkan/Metal/CPU backends, and keeps compatibility with ik_llama.cpp and llama.cpp.
@@ -65,13 +65,13 @@ case "$answer" in
         if [[ -n "$INSTALLER" ]]; then
             LLM_INSTALL_MAIN=go LLM_INSTALL_NONINTERACTIVE=1 bash "$INSTALLER"
         else
-            curl -fsSL https://raw.githubusercontent.com/raketenkater/llm-server/main/setup.sh | env LLM_INSTALL_MAIN=go LLM_INSTALL_NONINTERACTIVE=1 bash
+            curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | env LLM_INSTALL_MAIN=go LLM_INSTALL_NONINTERACTIVE=1 bash
         fi
-        NEW_BIN="$(command -v llm-server || true)"
+        NEW_BIN="$(command -v ggrun || true)"
         if [[ -n "$NEW_BIN" && "$NEW_BIN" != "$0" ]]; then
             exec "$NEW_BIN" "$@"
         fi
-        echo "Go v3 install completed. Open a new shell, then run llm-server again."
+        echo "Go v3 install completed. Open a new shell, then run ggrun again."
         exit 0
         ;;
     *)
