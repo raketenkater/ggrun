@@ -15,6 +15,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.ModelDir == "" {
 		t.Fatalf("model dir should not be empty")
 	}
+	if cfg.Host != "127.0.0.1" {
+		t.Fatalf("expected safe loopback host, got %q", cfg.Host)
+	}
 }
 
 func TestLoadFile(t *testing.T) {

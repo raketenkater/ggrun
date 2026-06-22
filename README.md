@@ -90,10 +90,10 @@ Common flags: `--backend ik_llama|llama|vulkan`, `--gpus 0,1`, `--ctx-size`,
 through to `llama-server`, so nothing upstream is out of reach. Full list:
 [docs/usage.md](docs/usage.md).
 
-> **Security:** ggrun serves on `0.0.0.0` (all interfaces) by default and the
-> OpenAI-compatible API is **unauthenticated**, so on a shared network anyone on
-> your LAN can reach the model. On untrusted networks bind to localhost with
-> `--host 127.0.0.1` (or set `LLM_HOST` / the Host setting in the TUI).
+> **Security:** ggrun binds to `127.0.0.1` by default because the
+> OpenAI-compatible API is **unauthenticated**. To serve trusted LAN clients,
+> opt in with `--host 0.0.0.0` (or set `LLM_HOST` / the Host setting in the
+> TUI) and restrict access with your firewall.
 
 ## How it compares
 

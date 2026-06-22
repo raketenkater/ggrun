@@ -75,7 +75,7 @@ func Defaults() *Config {
 		TuneRounds:    8,
 		Vision:        false,
 		Parallel:      1,
-		Host:          "0.0.0.0",
+		Host:          "127.0.0.1",
 		Spec:          "off",
 	}
 }

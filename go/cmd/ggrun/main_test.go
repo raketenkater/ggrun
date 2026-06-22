@@ -36,6 +36,9 @@ func TestParseLaunchArgsLegacyModelFirst(t *testing.T) {
 	if req.CtxFlag != "fit" || req.KVPlacement != "gpu" || req.KVQuality != "high" {
 		t.Fatalf("placement flags mismatch: %#v", req)
 	}
+	if req.Host != "127.0.0.1" {
+		t.Fatalf("expected safe loopback host, got %q", req.Host)
+	}
 	if req.SpecMode != "ngram" || req.MMProjPath != "/models/mmproj.gguf" || req.RamBudgetMB != 48*1024 {
 		t.Fatalf("advanced flags mismatch: %#v", req)
 	}

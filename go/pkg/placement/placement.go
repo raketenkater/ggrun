@@ -129,7 +129,7 @@ type Options struct {
 	Parallel       int
 	CacheFile      string // path to placement cache for MoE recovery
 	CacheDir       string // path to ggrun cache dir (for probes)
-	Host           string // listen address (default 0.0.0.0)
+	Host           string // listen address (default 127.0.0.1)
 	VisionAuto     bool   // auto-detect mmproj for vision
 	MMProjPath     string // explicit vision projector GGUF
 	SpecMode       string // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
@@ -370,7 +370,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	// Default host
 	if s.Host == "" {
-		s.Host = "0.0.0.0"
+		s.Host = "127.0.0.1"
 	}
 
 	return s, nil
@@ -1721,7 +1721,7 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 func (s *Strategy) Args(modelPath string, port int) []string {
 	host := s.Host
 	if host == "" {
-		host = "0.0.0.0"
+		host = "127.0.0.1"
 	}
 	args := []string{
 		"-m", modelPath,

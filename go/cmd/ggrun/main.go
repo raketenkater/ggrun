@@ -330,7 +330,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		req.KVQuality = "low"
 	}
 	if req.Host == "" {
-		req.Host = "0.0.0.0"
+		req.Host = "127.0.0.1"
 	}
 	if req.SpecMode == "" {
 		req.SpecMode = "off"
