@@ -168,6 +168,23 @@ func TestApplyOverridesCanRemoveBooleanFlags(t *testing.T) {
 	}
 }
 
+func TestDeterministicPlanIncludesIKDenseDefragCandidate(t *testing.T) {
+	base := []string{
+		"--cache-type-k", "q4_0",
+		"--cache-type-v", "q4_0",
+		"-b", "8192",
+		"-ub", "1024",
+		"--defrag-thold", "0.1",
+	}
+	plan := deterministicPlan(base, "ik_llama", nil, "")
+	for _, candidate := range plan {
+		if candidate.Name == "dense-defrag-0.5" && candidate.FlagValues["--defrag-thold"] == "0.5" {
+			return
+		}
+	}
+	t.Fatalf("expected historical dense IK defrag candidate, got %#v", plan)
+}
+
 func TestDeterministicPlanIncludesIKMoEKnobs(t *testing.T) {
 	base := []string{
 		"--cache-type-k", "q4_0",

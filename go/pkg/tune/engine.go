@@ -789,6 +789,11 @@ func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabili
 			map[string]interface{}{"-ub": fmt.Sprintf("%d", maxInt(ubatch/2, 256))},
 			"test a smaller microbatch in case compute buffers are limiting decode")
 	}
+	if isIK && !isMoEOffload && base["--defrag-thold"] != "0.5" {
+		add("dense-defrag-0.5",
+			map[string]interface{}{"--defrag-thold": "0.5"},
+			"retest the historically faster dense-model KV defrag threshold")
+	}
 
 	if caps != nil {
 		if caps.CPU.Cores > 0 && atoiDefault(base["--threads"], 0) != caps.CPU.Cores {
