@@ -4,8 +4,9 @@ These are curated local measurements for release posts. Raw run directories are
 not committed; benchmark scripts write new artifacts under `.benchmarks/`.
 
 Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB. Context: 32768.
-CUDA/IK backend: ik_llama.cpp build 4485. Vulkan backend: llama.cpp Vulkan build
-b9123/927dada6c.
+CUDA/IK backend: ik_llama.cpp build 4641 (`6c00e87a`). Vulkan backend:
+llama.cpp build 9756 (`d0f9d2e5a`). Dense ggrun rows were refreshed on
+2026-06-22 after rebuilding both backends from their upstream heads.
 
 Dense comparison runs used the `long` prompt profile with 256 generated tokens.
 
@@ -15,11 +16,11 @@ Same GGUF, 32k context, 256-token decode, vs raw llama.cpp `--fit` and Ollama 0.
 
 | Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun v3 | v3 `--ai-tune` |
 |---|---:|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 176.6 | 178.8 |
-| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 40.3 | 40.3 |
+| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 150.4 | 154.2 |
+| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.5 | 37.5 |
 
-ggrun's default placement already beats raw `--fit` and Ollama (+43% on the 4B,
-+77% on the 27B vs Ollama). `--ai-tune` adds a small gain on the 4B and correctly
+ggrun's default placement already beats raw `--fit` and Ollama (+24% on the 4B,
++64% on the 27B vs Ollama). `--ai-tune` adds a small gain on the 4B and correctly
 finds nothing on the 27B — it rejects noise-level wins rather than inventing one.
 
 ## MoE (CUDA / ik_llama.cpp)
@@ -32,7 +33,7 @@ bottlenecks CPU-expert streaming):
 | Model | Decode tok/s | Prefill tok/s | `--ai-tune` | Notes |
 |---|---:|---:|---:|---|
 | Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 23.6 | 19.5 | 23.6 | 3-GPU expert offload + CPU experts |
-| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.50 | 21.4 | 5.50 | spans VRAM+RAM, ~108 GiB pinned; prefill ~3.9× from PCIe-weighted split |
+| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.24 | 15.3 | not rerun | one 2026-06-22 validation round; spans VRAM+RAM, ~108 GiB pinned |
 
 Both-run vs Ollama 0.30.8 (same merged GGUF, 32k, 256-token decode):
 
@@ -69,7 +70,7 @@ model. The strongest claim is that v3 makes the GGUF server launch path typed,
 reproducible, cross-platform, and backend-aware:
 
 - v3 default placement beats raw llama.cpp `--fit` and Ollama on every model all
-  three can load (+43% / +77% vs Ollama on the 4B / 27B).
+  three can load (+24% / +64% vs Ollama on the 4B / 27B).
 - v3 runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) that raw `--fit` and
   Ollama cannot load at all on this hardware.
 - v3 provides measured MoE placement instead of fragile manual flags.
