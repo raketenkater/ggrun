@@ -21,7 +21,7 @@ ggrun                                     # no args → interactive TUI
 
 ![demo](demo.gif)
 
-*Hardware-matched recommendations → one-command launch → benchmark, all from the same tool.*
+*No flags: `ggrun` with no arguments opens a TUI that detects your GPUs, lists your models, computes hardware-matched launch settings, and ranks downloads by fit.*
 
 **Just run `ggrun` with no arguments** to open the full arrow-key TUI — browse and
 download models, adjust settings, and launch, without writing a single flag. Pass a model
@@ -86,9 +86,14 @@ ggrun model.gguf --benchmark              # load, measure tok/s, exit
 ```
 
 Common flags: `--backend ik_llama|llama|vulkan`, `--gpus 0,1`, `--ctx-size`,
-`--kv-quality`, `--kv-placement`, `--vision`, `--spec auto`. Unknown flags pass straight
+`--kv-quality`, `--kv-placement`, `--vram-headroom 2G`, `--vision`, `--spec auto`. Unknown flags pass straight
 through to `llama-server`, so nothing upstream is out of reach. Full list:
 [docs/usage.md](docs/usage.md).
+
+> **Security:** ggrun serves on `0.0.0.0` (all interfaces) by default and the
+> OpenAI-compatible API is **unauthenticated**, so on a shared network anyone on
+> your LAN can reach the model. On untrusted networks bind to localhost with
+> `--host 127.0.0.1` (or set `LLM_HOST` / the Host setting in the TUI).
 
 ## How it compares
 
