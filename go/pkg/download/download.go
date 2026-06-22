@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -105,18 +106,37 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 	if quant != "" && quant != "auto" && quant != "catalog" {
 		args = append(args, "--quant", quant)
 	}
-	cmd := exec.Command(pythonCommand(), args...)
+	py, ok := pythonCommand()
+	if !ok {
+		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", pythonInstallHint())
+	}
+	cmd := exec.Command(py, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-func pythonCommand() string {
+// pythonCommand returns the path to a usable Python 3 interpreter and whether
+// one was found. On Windows the launcher "py" resolves the newest Python 3.
+func pythonCommand() (string, bool) {
 	for _, name := range []string{"python3", "python", "py"} {
 		if path, err := exec.LookPath(name); err == nil {
-			return path
+			return path, true
 		}
 	}
-	return "python3"
+	return "", false
+}
+
+// pythonInstallHint returns an OS-appropriate one-liner for installing Python 3.
+func pythonInstallHint() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "Install it with:  winget install -e --id Python.Python.3.12\n" +
+			"  or from https://www.python.org/downloads/ (tick \"Add python.exe to PATH\"), then reopen the terminal."
+	case "darwin":
+		return "Install it with:  brew install python   (or from https://www.python.org/downloads/)."
+	default:
+		return "Install it with your package manager, e.g.:  sudo apt install python3 python3-pip"
+	}
 }

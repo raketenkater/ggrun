@@ -89,6 +89,7 @@ function Save-ReleaseAsset([string]$Name, [bool]$Required) {
     }
 
     $sums = Join-Path $tmp 'SHA256SUMS'
+    $allowUnverified = ($env:LLM_INSTALL_ALLOW_UNVERIFIED -eq '1')
     if (Test-Path $sums) {
         $line = Get-Content $sums | Where-Object { $_ -match "\s$([regex]::Escape($Name))$" } | Select-Object -First 1
         if ($line) {
@@ -96,9 +97,15 @@ function Save-ReleaseAsset([string]$Name, [bool]$Required) {
             $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
             if ($actual -ne $expected) { Fail "Checksum mismatch for $Name" }
             Ok "Verified checksum for $Name"
+        } elseif ($allowUnverified) {
+            Warn "SHA256SUMS did not include $Name; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — continuing"
         } else {
-            Warn "SHA256SUMS did not include $Name"
+            Fail "SHA256SUMS did not include $Name; refusing to install unverified. Set LLM_INSTALL_ALLOW_UNVERIFIED=1 to override."
         }
+    } elseif ($allowUnverified) {
+        Warn "No SHA256SUMS found; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — installing UNVERIFIED bundle"
+    } else {
+        Fail "No SHA256SUMS found; refusing to install an unverified bundle. Set LLM_INSTALL_ALLOW_UNVERIFIED=1 to override."
     }
     return $archive
 }
@@ -183,6 +190,40 @@ function Build-CudaBackend {
     Ok "Built native Windows CUDA backend from $($server.FullName)"
 }
 
+function Resolve-Python {
+    # Returns @{ Exe; Pre } for a usable Python 3, or $null. `py` needs -3.
+    if (Test-Command 'py') { return @{ Exe = 'py'; Pre = @('-3') } }
+    if (Test-Command 'python') { return @{ Exe = 'python'; Pre = @() } }
+    if (Test-Command 'python3') { return @{ Exe = 'python3'; Pre = @() } }
+    return $null
+}
+
+function Ensure-Python {
+    # Model downloads (recommender) shell out to a Python helper that uses
+    # huggingface_hub. ggrun runs local models without Python, so this is
+    # best-effort and never fatal.
+    $py = Resolve-Python
+    if (!$py -and (Test-Command 'winget')) {
+        Say 'Python 3 not found; installing via winget (needed for model downloads)...'
+        try { & winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent } catch { }
+        $py = Resolve-Python
+    }
+    if (!$py) {
+        Warn 'Python 3 not found (needed to download models via the recommender).'
+        Warn 'Install from https://www.python.org/downloads/ (tick "Add python.exe to PATH"), then run:'
+        Warn '  python -m pip install --user huggingface_hub tqdm'
+        return
+    }
+    Say 'Installing Python download dependencies (huggingface_hub, tqdm)...'
+    try {
+        & $py.Exe @($py.Pre) -m pip install --user --upgrade huggingface_hub tqdm
+        if ($LASTEXITCODE -eq 0) { Ok 'Python download dependencies ready' }
+        else { Warn 'Could not install huggingface_hub/tqdm. Run: python -m pip install --user huggingface_hub tqdm' }
+    } catch {
+        Warn 'Could not install huggingface_hub/tqdm. Run: python -m pip install --user huggingface_hub tqdm'
+    }
+}
+
 Say '=== ggrun native Windows installer ==='
 Say "Install dir: $InstallDir"
 Say "Backend:     $Backend"
@@ -235,6 +276,8 @@ try {
             Warn "Added $InstallDir to the user PATH. Open a new terminal to use ggrun.cmd directly."
         }
     }
+
+    Ensure-Python
 
     if (!(Test-Path (Join-Path $bin 'ggrun.exe'))) { Fail 'ggrun.exe was not installed' }
     if (!(Test-Path $llamaServer)) { Fail 'llama-server.exe was not installed' }

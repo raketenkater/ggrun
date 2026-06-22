@@ -514,8 +514,13 @@ install_release_bundle() {
             return 1
         fi
         ok "Verified checksum for $asset"
+    elif [[ "${LLM_INSTALL_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+        warn "No SHA256SUMS asset found; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — installing UNVERIFIED bundle"
     else
-        warn "No SHA256SUMS asset found; skipping checksum verification"
+        rm -rf "$tmp"
+        err "No SHA256SUMS asset found; refusing to install an unverified bundle."
+        err "Set LLM_INSTALL_ALLOW_UNVERIFIED=1 to override (not recommended)."
+        return 1
     fi
     mkdir -p "$tmp/payload"
     if ! tar -xzf "$archive" -C "$tmp/payload"; then
