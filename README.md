@@ -13,8 +13,9 @@ at a GGUF and it measures your GPUs, RAM, and PCIe topology, picks the backend
 placement, and serves an OpenAI-compatible API — one command from file to endpoint.
 
 ```bash
-ggrun model.gguf                          # local GGUF → served
+ggrun recommend                           # rank the best models for YOUR hardware
 ggrun unsloth/Qwen3.6-27B-GGUF --download # HF repo → hardware-matched quant → served
+ggrun model.gguf                          # local GGUF → served
 ggrun                                     # no args → interactive TUI
 ```
 
