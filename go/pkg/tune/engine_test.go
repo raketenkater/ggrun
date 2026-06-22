@@ -2,7 +2,10 @@ package tune
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/benchmark"
 )
 
 func TestApplySuggestion(t *testing.T) {
@@ -313,5 +316,93 @@ func TestDeterministicPlanDoesNotEnableSpecForMoEByDefault(t *testing.T) {
 		if _, ok := c.FlagValues["--spec-type"]; ok {
 			t.Fatalf("MoE plan should not enable speculative decoding by default, got %#v", c)
 		}
+	}
+}
+
+func msgsContain(msgs []string, sub string) bool {
+	for _, m := range msgs {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// A candidate that wins on a single noisy sample but does not reproduce on the
+// confirmation re-measure must be discarded so the cache never holds a config
+// slower than the default.
+func TestRunConfirmationRevertsUnreproducibleWinner(t *testing.T) {
+	initial := []string{"--cache-type-k", "q4_0", "--cache-type-v", "q4_0", "-b", "8192", "-ub", "1024", "--threads", "8"}
+	var lastFlags []string
+	var msgs []string
+	candCalls := 0
+	e := &Engine{
+		Model:   "m.gguf",
+		Rounds:  3,
+		Backend: "ik_llama",
+		StartServer: func(flags []string) (func(), error) {
+			lastFlags = append([]string(nil), flags...)
+			return func() {}, nil
+		},
+		OnProgress: func(m string) { msgs = append(msgs, m) },
+	}
+	e.benchmarkFn = func() (*benchmark.Result, error) {
+		if equalFlags(lastFlags, initial) {
+			return &benchmark.Result{GenTPS: 100, GenTokens: 256, PromptTokens: 10}, nil
+		}
+		candCalls++
+		tps := 100.0
+		if candCalls == 1 { // first candidate noise-wins; it never reproduces afterward
+			tps = 130.0
+		}
+		return &benchmark.Result{GenTPS: tps, GenTokens: 256, PromptTokens: 10}, nil
+	}
+	best, err := e.Run("m.gguf", initial)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !msgsContain(msgs, "keeping baseline") {
+		t.Fatalf("confirmation pass did not run/revert; messages: %v", msgs)
+	}
+	if best.Name != "baseline" || len(best.OverrideFlags) != 0 {
+		t.Fatalf("expected revert to baseline, got name=%q overrides=%v gentps=%.1f", best.Name, best.OverrideFlags, best.Result.GenTPS)
+	}
+}
+
+// A candidate whose win reproduces on the confirmation re-measure must be kept,
+// with the confirmed measurement recorded.
+func TestRunConfirmationKeepsReproducibleWinner(t *testing.T) {
+	initial := []string{"--cache-type-k", "q4_0", "--cache-type-v", "q4_0", "-b", "8192", "-ub", "1024", "--threads", "8"}
+	var lastFlags []string
+	var msgs []string
+	e := &Engine{
+		Model:   "m.gguf",
+		Rounds:  3,
+		Backend: "ik_llama",
+		StartServer: func(flags []string) (func(), error) {
+			lastFlags = append([]string(nil), flags...)
+			return func() {}, nil
+		},
+		OnProgress: func(m string) { msgs = append(msgs, m) },
+	}
+	e.benchmarkFn = func() (*benchmark.Result, error) {
+		tps := 100.0
+		if !equalFlags(lastFlags, initial) { // every candidate (and confirmation) reproduces the win
+			tps = 130.0
+		}
+		return &benchmark.Result{GenTPS: tps, GenTokens: 256, PromptTokens: 10}, nil
+	}
+	best, err := e.Run("m.gguf", initial)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !msgsContain(msgs, "confirmed") {
+		t.Fatalf("expected a confirmed winner message; messages: %v", msgs)
+	}
+	if best.Name == "baseline" || len(best.OverrideFlags) == 0 {
+		t.Fatalf("expected a kept non-baseline winner, got name=%q overrides=%v", best.Name, best.OverrideFlags)
+	}
+	if best.Result.GenTPS != 130 {
+		t.Fatalf("expected confirmed gen tok/s 130, got %.1f", best.Result.GenTPS)
 	}
 }

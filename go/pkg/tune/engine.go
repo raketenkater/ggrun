@@ -29,6 +29,9 @@ type Engine struct {
 	BackendHelp       string
 	OnProgress        func(msg string)
 	StartServer       func(flags []string) (cleanup func(), err error)
+
+	// benchmarkFn, when set, replaces the live HTTP benchmark. Test seam only.
+	benchmarkFn func() (*benchmark.Result, error)
 }
 
 // Suggestion is the JSON format the tuning LLM returns.
@@ -214,6 +217,46 @@ func (e *Engine) Run(modelPath string, initialFlags []string) (*Entry, error) {
 		e.saveTuneProgress(modelPath, baseline, best, entries, minImprovementPct, false)
 	}
 
+	// Confirmation pass. Each candidate is judged on a single benchmark sample, so
+	// a noisy or cold-GPU reading can crown a config that is not actually faster
+	// than the baseline. Before caching a non-baseline winner, re-measure the
+	// baseline and the winner back-to-back (same warm GPU state) and keep the
+	// winner only if it still beats the baseline by the margin. Otherwise fall
+	// back to baseline, so AI-tune never caches — and the launcher never silently
+	// applies — a config that is slower than the default on every future launch.
+	if best != nil && baseline != nil && best != baseline && len(best.OverrideFlags) > 0 {
+		if e.OnProgress != nil {
+			e.OnProgress(fmt.Sprintf("AI-tune: confirming %s against baseline...", best.Name))
+		}
+		stopBaseline()
+		bestFlags := ApplyOverrides(initialFlags, best.OverrideFlags, protected)
+		confBase, errBase := e.round(e.Rounds+1, modelPath, initialFlags)
+		confBest, errBest := e.round(e.Rounds+2, modelPath, bestFlags)
+		switch {
+		case errBase != nil || errBest != nil:
+			if e.OnProgress != nil {
+				e.OnProgress(fmt.Sprintf("AI-tune: confirmation benchmark failed; keeping baseline instead of %s", best.Name))
+			}
+			best.Best = false
+			baseline.Best = true
+			best = baseline
+		case meaningfulImprovement(confBest.Result.GenTPS, confBase.Result.GenTPS, minImprovementPct):
+			// Reproduced under equal conditions: trust the confirmed numbers.
+			baseline.Result = confBase.Result
+			best.Result = confBest.Result
+			if e.OnProgress != nil {
+				e.OnProgress(fmt.Sprintf("AI-tune: confirmed %.1f tok/s vs baseline %.1f", best.Result.GenTPS, baseline.Result.GenTPS))
+			}
+		default:
+			if e.OnProgress != nil {
+				e.OnProgress(fmt.Sprintf("AI-tune: %s did not hold up on re-measure (%.1f vs baseline %.1f); keeping baseline", best.Name, confBest.Result.GenTPS, confBase.Result.GenTPS))
+			}
+			best.Best = false
+			baseline.Best = true
+			best = baseline
+		}
+	}
+
 	if e.OnProgress != nil {
 		e.OnProgress(fmt.Sprintf("AI-tune: done. Best result: %.1f tok/s", best.Result.GenTPS))
 	}
@@ -272,12 +315,20 @@ func (e *Engine) hardwareHash() string {
 }
 
 func (e *Engine) roundRunning(round int, modelPath string, flags []string) (*Entry, error) {
-	runner := &benchmark.Runner{
-		BaseURL: e.BaseURL,
-		Model:   e.Model,
-		Timeout: e.benchmarkTimeout(),
+	var (
+		res *benchmark.Result
+		err error
+	)
+	if e.benchmarkFn != nil {
+		res, err = e.benchmarkFn()
+	} else {
+		runner := &benchmark.Runner{
+			BaseURL: e.BaseURL,
+			Model:   e.Model,
+			Timeout: e.benchmarkTimeout(),
+		}
+		res, err = runner.Run()
 	}
-	res, err := runner.Run()
 	if err != nil {
 		return nil, err
 	}
