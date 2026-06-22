@@ -191,11 +191,31 @@ function Build-CudaBackend {
 }
 
 function Resolve-Python {
-    # Returns @{ Exe; Pre } for a usable Python 3, or $null. `py` needs -3.
-    if (Test-Command 'py') { return @{ Exe = 'py'; Pre = @('-3') } }
-    if (Test-Command 'python') { return @{ Exe = 'python'; Pre = @() } }
-    if (Test-Command 'python3') { return @{ Exe = 'python3'; Pre = @() } }
+    # Returns @{ Exe; Pre } for a verified Python 3, or $null. Checking the
+    # interpreter avoids mistaking the Microsoft Store execution alias for an
+    # installed Python. `py` needs -3 to select Python 3 explicitly.
+    $candidates = @(
+        @{ Exe = 'py'; Pre = @('-3') },
+        @{ Exe = 'python'; Pre = @() },
+        @{ Exe = 'python3'; Pre = @() }
+    )
+    foreach ($candidate in $candidates) {
+        if (!(Test-Command $candidate.Exe)) { continue }
+        try {
+            & $candidate.Exe @($candidate.Pre) -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' 2>$null
+            if ($LASTEXITCODE -eq 0) { return $candidate }
+        } catch { }
+    }
     return $null
+}
+
+function Test-PythonDownloadDeps($Py) {
+    try {
+        & $Py.Exe @($Py.Pre) -c 'import huggingface_hub, tqdm' 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 function Ensure-Python {
@@ -206,6 +226,13 @@ function Ensure-Python {
     if (!$py -and (Test-Command 'winget')) {
         Say 'Python 3 not found; installing via winget (needed for model downloads)...'
         try { & winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent } catch { }
+        # winget updates the persistent PATH, not the current PowerShell
+        # process. Refresh it before looking for the newly installed runtime.
+        $env:Path = @(
+            [Environment]::GetEnvironmentVariable('Path', 'Machine'),
+            [Environment]::GetEnvironmentVariable('Path', 'User'),
+            $env:Path
+        ) -join ';'
         $py = Resolve-Python
     }
     if (!$py) {
@@ -214,11 +241,18 @@ function Ensure-Python {
         Warn '  python -m pip install --user huggingface_hub tqdm'
         return
     }
+    if (Test-PythonDownloadDeps $py) {
+        Ok 'Python download dependencies already installed'
+        return
+    }
     Say 'Installing Python download dependencies (huggingface_hub, tqdm)...'
     try {
         & $py.Exe @($py.Pre) -m pip install --user --upgrade huggingface_hub tqdm
-        if ($LASTEXITCODE -eq 0) { Ok 'Python download dependencies ready' }
-        else { Warn 'Could not install huggingface_hub/tqdm. Run: python -m pip install --user huggingface_hub tqdm' }
+        if ($LASTEXITCODE -eq 0 -and (Test-PythonDownloadDeps $py)) {
+            Ok 'Python download dependencies ready'
+        } else {
+            Warn 'Could not install huggingface_hub/tqdm. Run: python -m pip install --user huggingface_hub tqdm'
+        }
     } catch {
         Warn 'Could not install huggingface_hub/tqdm. Run: python -m pip install --user huggingface_hub tqdm'
     }
