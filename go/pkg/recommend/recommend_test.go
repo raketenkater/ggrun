@@ -178,15 +178,18 @@ func TestTopCategoriesDedupeAndPopulate(t *testing.T) {
 	if len(cats.Balanced) == 0 {
 		t.Fatal("expected balanced recommendations")
 	}
-	// No model should appear in more than one category.
-	seen := map[string]bool{}
+	// Each category dedups within itself (one quant per model); categories MAY
+	// overlap — a model can legitimately be both the best overall blend and the
+	// smartest that fits. (Cross-category dedup used to surface a leftover
+	// low-intelligence pick in Smartest, so it was removed.)
 	for _, group := range [][]Recommendation{cats.Balanced, cats.Smartest, cats.Fastest} {
 		if len(group) > 4 {
 			t.Fatalf("category exceeded requested size: %d", len(group))
 		}
+		seen := map[string]bool{}
 		for _, r := range group {
 			if seen[r.Repo] {
-				t.Fatalf("model %s appears in more than one category", r.Repo)
+				t.Fatalf("model %s appears twice in the same category", r.Repo)
 			}
 			seen[r.Repo] = true
 		}

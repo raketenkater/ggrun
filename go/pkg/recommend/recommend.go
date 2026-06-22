@@ -156,8 +156,10 @@ type Categories struct {
 	Fastest  []Recommendation // fastest while still genuinely capable
 }
 
-// TopCategories returns up to n picks per category, deduped across categories so
-// each bucket surfaces something the ones above it did not.
+// TopCategories returns up to n picks per category. Each category is ranked and
+// deduped independently (one quant per model within a category); a model may
+// appear in more than one category when it genuinely is both, say, the best
+// overall blend and the smartest that fits.
 func TopCategories(caps *detect.Capabilities, n int) Categories {
 	if n <= 0 {
 		n = 4
@@ -174,14 +176,18 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		}
 	}
 
-	used := map[string]bool{}
+	// Each category dedups within itself (one quant per model). Categories do
+	// NOT steal models from each other — cross-category dedup left "Smartest"
+	// showing a leftover low-intelligence pick once "Best overall" had taken the
+	// genuinely smarter models above it.
 	take := func(pool []Recommendation) []Recommendation {
+		seen := map[string]bool{}
 		out := make([]Recommendation, 0, n)
 		for _, r := range pool {
-			if used[r.Repo] {
+			if seen[r.Repo] {
 				continue
 			}
-			used[r.Repo] = true
+			seen[r.Repo] = true
 			out = append(out, r)
 			if len(out) == n {
 				break
@@ -230,13 +236,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sort.SliceStable(fastPool, func(i, j int) bool {
 		return fastPool[i].PredictedTPS > fastPool[j].PredictedTPS
 	})
-	fastest := make([]Recommendation, 0, n)
-	for _, r := range fastPool {
-		fastest = append(fastest, r)
-		if len(fastest) == n {
-			break
-		}
-	}
+	fastest := take(fastPool)
 
 	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
 }
