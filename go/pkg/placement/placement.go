@@ -116,23 +116,24 @@ type ModelProfile struct {
 
 // Options allows user overrides.
 type Options struct {
-	ContextSize  int
-	KVPlacement  string // auto, gpu, cpu
-	KVQuality    string // high, mid, low
-	GPUs         []int  // restrict to specific GPUs
-	CPUMode      bool
-	RamBudgetMB  int
-	BackendTag   string // "llama" or "ik_llama"
-	NoMMap       bool
-	Parallel     int
-	CacheFile    string // path to placement cache for MoE recovery
-	CacheDir     string // path to ggrun cache dir (for probes)
-	Host         string // listen address (default 0.0.0.0)
-	VisionAuto   bool   // auto-detect mmproj for vision
-	MMProjPath   string // explicit vision projector GGUF
-	SpecMode     string // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
-	BackendHelp  string // llama-server --help output for dialect-specific flags
-	ForceSpecMoE bool   // allow speculative decoding on MoE despite default gate
+	ContextSize    int
+	KVPlacement    string // auto, gpu, cpu
+	KVQuality      string // high, mid, low
+	GPUs           []int  // restrict to specific GPUs
+	CPUMode        bool
+	RamBudgetMB    int
+	VRAMHeadroomMB int    // hold back this much total VRAM as a safety margin
+	BackendTag     string // "llama" or "ik_llama"
+	NoMMap         bool
+	Parallel       int
+	CacheFile      string // path to placement cache for MoE recovery
+	CacheDir       string // path to ggrun cache dir (for probes)
+	Host           string // listen address (default 0.0.0.0)
+	VisionAuto     bool   // auto-detect mmproj for vision
+	MMProjPath     string // explicit vision projector GGUF
+	SpecMode       string // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
+	BackendHelp    string // llama-server --help output for dialect-specific flags
+	ForceSpecMoE   bool   // allow speculative decoding on MoE despite default gate
 }
 
 func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
@@ -154,6 +155,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	}
 
 	caps = applyRAMBudget(caps, opts.RamBudgetMB)
+	caps = detect.ApplyVRAMHeadroom(caps, opts.VRAMHeadroomMB)
 
 	s := &Strategy{
 		ContextSize:    opts.ContextSize,

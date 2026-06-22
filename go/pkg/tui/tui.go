@@ -73,15 +73,16 @@ type Model struct {
 	recommendation *LaunchRecommendation
 
 	// Advanced config
-	ctxSize      string
-	ctxMode      string
-	kvPlacement  string
-	parallel     string
-	aitune       bool
-	aituneRounds int
-	benchmark    bool
-	vision       bool
-	keepalive    bool
+	ctxSize        string
+	ctxMode        string
+	kvPlacement    string
+	vramHeadroomMB int
+	parallel       string
+	aitune         bool
+	aituneRounds   int
+	benchmark      bool
+	vision         bool
+	keepalive      bool
 
 	// Tuned config
 	tunedConfigs []tune.ConfigEntry
@@ -189,7 +190,8 @@ func InitialModel() Model {
 	// Detect hardware
 	caps, _ := detect.Detect()
 	m.caps = caps
-	m.recommendationGroups = recommend.TopCategories(caps, 4)
+	m.vramHeadroomMB = config.ParseBudgetMB(cfg.VRAMHeadroom)
+	m.recommendationGroups = recommend.TopCategories(detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB), 4)
 	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 
 	if len(m.models) == 0 {
@@ -344,7 +346,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
 					m.selectedModel = item.index
-					m.recommendation = computeRecommendation(m.caps, m.models[m.selectedModel])
+					m.recommendation = computeRecommendation(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.models[m.selectedModel])
 					m.menuCursor = 0
 					m.screen = ScreenLaunchPrompt
 					return m, nil
@@ -1521,6 +1523,14 @@ func settingRows() []settingRow {
 		{label: "KV quality", kind: "enum", options: []string{"low", "mid", "high"},
 			get: func(c *config.Config) string { return c.KVQuality },
 			set: func(c *config.Config, v string) { c.KVQuality = v }},
+		{label: "VRAM headroom", kind: "text",
+			get: func(c *config.Config) string {
+				if strings.TrimSpace(c.VRAMHeadroom) == "" {
+					return "0 (use all VRAM)"
+				}
+				return c.VRAMHeadroom
+			},
+			set: func(c *config.Config, v string) { c.VRAMHeadroom = strings.TrimSpace(v) }},
 		{label: "Speculative", kind: "enum",
 			options: []string{"off", "auto", "draft", "eagle3", "ngram", "ngram-mod", "ngram-k4v", "mtp"},
 			get:     func(c *config.Config) string { return c.Spec },
@@ -1555,6 +1565,10 @@ func (m *Model) applySetting(row settingRow, val string) {
 		m.messageType = "info"
 	}
 	switch row.label {
+	case "VRAM headroom":
+		m.vramHeadroomMB = config.ParseBudgetMB(val)
+		m.recommendationGroups = recommend.TopCategories(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), 4)
+		m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 	case "Backend":
 		m.backend = val
 		m.refreshTunedCounts()

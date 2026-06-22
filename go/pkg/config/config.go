@@ -25,6 +25,7 @@ type Config struct {
 	CacheDir      string `json:"cache_dir"`
 	LogDir        string `json:"log_dir"`
 	RamBudget     string `json:"ram_budget"`
+	VRAMHeadroom  string `json:"vram_headroom"` // VRAM to hold back, e.g. "2G"
 	KVPlacement   string `json:"kv_placement"`
 	KVQuality     string `json:"kv_quality"`
 	AssumeYes     bool   `json:"assume_yes"`
@@ -42,7 +43,7 @@ type Config struct {
 var DefaultKeys = []string{
 	"PORT", "CTX_SIZE", "MAX_RESTARTS", "KEEP_ALIVE", "HEALTH_TIMEOUT",
 	"MODEL_DIR", "CACHE_DIR", "LOG_DIR",
-	"RAM_BUDGET", "KV_PLACEMENT", "KV_QUALITY",
+	"RAM_BUDGET", "VRAM_HEADROOM", "KV_PLACEMENT", "KV_QUALITY",
 	"ASSUME_YES",
 	"BACKEND", "LLAMA_SERVER", "APP_HOME",
 	"TUNE_ROUNDS", "VISION", "PARALLEL", "HOST", "SPEC",
@@ -62,6 +63,7 @@ func Defaults() *Config {
 		CacheDir:      filepath.Join(home, ".cache", "ggrun"),
 		LogDir:        "",
 		RamBudget:     "",
+		VRAMHeadroom:  "",
 		KVPlacement:   "auto",
 		KVQuality:     "low",
 		AssumeYes:     false,
@@ -74,6 +76,21 @@ func Defaults() *Config {
 		Host:          "0.0.0.0",
 		Spec:          "off",
 	}
+}
+
+// ParseBudgetMB parses a memory budget like "2G", "2048M", or "2048" into MB.
+// Returns 0 for empty or unparseable input.
+func ParseBudgetMB(s string) int {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	mult := 1
+	if strings.HasSuffix(s, "G") || strings.HasSuffix(s, "GB") {
+		mult = 1024
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "G")
+	} else if strings.HasSuffix(s, "M") || strings.HasSuffix(s, "MB") {
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "MB"), "M")
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(s))
+	return n * mult
 }
 
 // Path returns the canonical config file path.
@@ -128,7 +145,7 @@ func snapshotEnv() map[string]string {
 	for _, k := range []string{
 		"LLM_PORT", "LLM_CTX_SIZE", "LLM_MAX_RESTARTS", "LLM_KEEP_ALIVE",
 		"LLM_HEALTH_TIMEOUT", "LLM_MODEL_DIR", "LLM_CACHE_DIR", "LLM_LOG_DIR",
-		"LLM_RAM_BUDGET", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_ASSUME_YES",
+		"LLM_RAM_BUDGET", "LLM_VRAM_HEADROOM", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_ASSUME_YES",
 		"LLM_BACKEND", "LLAMA_SERVER", "LLM_APP_HOME", "LLM_TUNE_ROUNDS",
 		"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC",
 	} {
@@ -166,6 +183,9 @@ func applyEnvSnapshot(cfg *Config, snap map[string]string) {
 	}
 	if v, ok := snap["LLM_RAM_BUDGET"]; ok {
 		cfg.RamBudget = v
+	}
+	if v, ok := snap["LLM_VRAM_HEADROOM"]; ok {
+		cfg.VRAMHeadroom = v
 	}
 	if v, ok := snap["LLM_KV_PLACEMENT"]; ok {
 		cfg.KVPlacement = v
@@ -241,6 +261,8 @@ func loadFile(path string, cfg *Config) error {
 			cfg.LogDir = val
 		case "RAM_BUDGET":
 			cfg.RamBudget = val
+		case "VRAM_HEADROOM":
+			cfg.VRAMHeadroom = val
 		case "KV_PLACEMENT":
 			cfg.KVPlacement = val
 		case "KV_QUALITY":
@@ -327,6 +349,7 @@ func (c *Config) Save() error {
 	fmt.Fprintf(f, "LLM_CACHE_DIR=%q\n", c.CacheDir)
 	fmt.Fprintf(f, "LLM_LOG_DIR=%q\n", c.LogDir)
 	fmt.Fprintf(f, "LLM_RAM_BUDGET=%q\n", c.RamBudget)
+	fmt.Fprintf(f, "LLM_VRAM_HEADROOM=%q\n", c.VRAMHeadroom)
 	fmt.Fprintf(f, "LLM_KV_PLACEMENT=%q\n", c.KVPlacement)
 	fmt.Fprintf(f, "LLM_KV_QUALITY=%q\n", c.KVQuality)
 	fmt.Fprintf(f, "LLM_ASSUME_YES=%v\n", c.AssumeYes)
@@ -367,6 +390,8 @@ func (c *Config) Show() string {
 			val = c.LogDir
 		case "RAM_BUDGET":
 			val = c.RamBudget
+		case "VRAM_HEADROOM":
+			val = c.VRAMHeadroom
 		case "KV_PLACEMENT":
 			val = c.KVPlacement
 		case "KV_QUALITY":

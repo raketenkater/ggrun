@@ -384,6 +384,30 @@ func (g GPU) VRAMFreeMB() int {
 	return free
 }
 
+// ApplyVRAMHeadroom returns a copy of caps with headroomMB of total VRAM held
+// back, distributed across GPUs in proportion to their size, so the recommender
+// and placement leave a hardware safety margin. headroomMB <= 0 is a no-op.
+func ApplyVRAMHeadroom(caps *Capabilities, headroomMB int) *Capabilities {
+	if caps == nil || headroomMB <= 0 || len(caps.GPUs) == 0 {
+		return caps
+	}
+	total := caps.TotalVRAM()
+	if total <= 0 {
+		return caps
+	}
+	out := *caps
+	out.GPUs = make([]GPU, len(caps.GPUs))
+	copy(out.GPUs, caps.GPUs)
+	for i := range out.GPUs {
+		share := headroomMB * out.GPUs[i].VRAMTotalMB / total
+		if share > out.GPUs[i].VRAMTotalMB {
+			share = out.GPUs[i].VRAMTotalMB
+		}
+		out.GPUs[i].VRAMTotalMB -= share
+	}
+	return &out
+}
+
 // TotalVRAM returns the sum of total VRAM across all detected GPUs.
 func (c *Capabilities) TotalVRAM() int {
 	total := 0

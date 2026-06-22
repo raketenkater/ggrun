@@ -108,9 +108,10 @@ Launch flags:
   -port int            Server port (default 8081)
   -ctx int             Context size (default auto)
   -kv string           KV placement: auto|gpu|cpu (default auto)
-  -kv-quality string   KV quality: high|mid|low (default mid)
+  -kv-quality string   KV quality: high|mid|low (default low)
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
+  --vram-headroom str  Reserve VRAM the recommender/placement won't use, e.g. 2G
   -vision              Enable vision (auto-detect mmproj)
   --spec string       Speculative decoding: off|auto|mtp|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
@@ -249,7 +250,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--spec", "--parallel", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--vram-headroom", "--spec", "--parallel", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
 				skip = true
 			}
 			continue
@@ -292,6 +293,7 @@ type launchRequest struct {
 	SpecMode          string
 	ForceSpecMoE      bool
 	RamBudgetMB       int
+	VRAMHeadroomMB    int
 	Parallel          int
 	Benchmark         bool
 	ExtraArgs         []string
@@ -303,16 +305,17 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		cfg = c
 	}
 	req := &launchRequest{
-		Port:        cfg.Port,
-		CtxFlag:     cfg.CtxValue(),
-		KVPlacement: cfg.KVPlacement,
-		KVQuality:   cfg.KVQuality,
-		Host:        cfg.Host,
-		VisionAuto:  cfg.Vision,
-		ServerBin:   cfg.LlamaServer,
-		Backend:     cfg.Backend,
-		SpecMode:    cfg.Spec,
-		Parallel:    cfg.Parallel,
+		Port:           cfg.Port,
+		CtxFlag:        cfg.CtxValue(),
+		KVPlacement:    cfg.KVPlacement,
+		KVQuality:      cfg.KVQuality,
+		Host:           cfg.Host,
+		VisionAuto:     cfg.Vision,
+		ServerBin:      cfg.LlamaServer,
+		Backend:        cfg.Backend,
+		SpecMode:       cfg.Spec,
+		Parallel:       cfg.Parallel,
+		VRAMHeadroomMB: parseBudgetMB(cfg.VRAMHeadroom),
 	}
 	if req.Port == 0 {
 		req.Port = 8081
@@ -377,6 +380,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--ram-budget":
 				req.RamBudgetMB = parseBudgetMB(val)
+				continue
+			case "--vram-headroom":
+				req.VRAMHeadroomMB = parseBudgetMB(val)
 				continue
 			case "--spec":
 				req.SpecMode = val
@@ -486,6 +492,12 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.RamBudgetMB = parseBudgetMB(v)
+		case "--vram-headroom":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.VRAMHeadroomMB = parseBudgetMB(v)
 		case "--spec":
 			v, err := next()
 			if err != nil {
@@ -576,18 +588,7 @@ func resolveModelPath(path, modelDir string) string {
 	return path
 }
 
-func parseBudgetMB(s string) int {
-	s = strings.TrimSpace(strings.ToUpper(s))
-	mult := 1
-	if strings.HasSuffix(s, "G") || strings.HasSuffix(s, "GB") {
-		mult = 1024
-		s = strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "G")
-	} else if strings.HasSuffix(s, "M") || strings.HasSuffix(s, "MB") {
-		s = strings.TrimSuffix(strings.TrimSuffix(s, "MB"), "M")
-	}
-	n, _ := strconv.Atoi(strings.TrimSpace(s))
-	return n * mult
-}
+func parseBudgetMB(s string) int { return config.ParseBudgetMB(s) }
 
 func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
 	want := strings.TrimSpace(req.Backend)
@@ -642,21 +643,22 @@ func backendMatches(info *backendInfo, name, want string) bool {
 
 func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfile, be *backendInfo, cacheDir string) placement.Options {
 	opts := placement.Options{
-		ContextSize:  resolveCtxFlag(req.CtxFlag, model.CTXTrain),
-		KVPlacement:  req.KVPlacement,
-		KVQuality:    req.KVQuality,
-		CPUMode:      req.CPUMode,
-		RamBudgetMB:  req.RamBudgetMB,
-		CacheDir:     cacheDir,
-		Host:         req.Host,
-		BackendTag:   be.Tag,
-		VisionAuto:   req.VisionAuto,
-		MMProjPath:   req.MMProjPath,
-		SpecMode:     req.SpecMode,
-		ForceSpecMoE: req.ForceSpecMoE,
-		BackendHelp:  be.Help,
-		CacheFile:    req.TuneCache,
-		Parallel:     req.Parallel,
+		ContextSize:    resolveCtxFlag(req.CtxFlag, model.CTXTrain),
+		KVPlacement:    req.KVPlacement,
+		KVQuality:      req.KVQuality,
+		CPUMode:        req.CPUMode,
+		RamBudgetMB:    req.RamBudgetMB,
+		VRAMHeadroomMB: req.VRAMHeadroomMB,
+		CacheDir:       cacheDir,
+		Host:           req.Host,
+		BackendTag:     be.Tag,
+		VisionAuto:     req.VisionAuto,
+		MMProjPath:     req.MMProjPath,
+		SpecMode:       req.SpecMode,
+		ForceSpecMoE:   req.ForceSpecMoE,
+		BackendHelp:    be.Help,
+		CacheFile:      req.TuneCache,
+		Parallel:       req.Parallel,
 	}
 	if req.GPUsFlag != "" {
 		for _, s := range strings.Split(req.GPUsFlag, ",") {
@@ -1490,6 +1492,13 @@ func cmdRecommend(args []string) {
 		gpu = strings.Join(names, " + ")
 	}
 	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
+
+	if cfg, err := config.Load(); err == nil {
+		if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
+			fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
+			caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
+		}
+	}
 
 	cats := recommend.TopCategories(caps, limit)
 	if len(cats.Balanced) == 0 {

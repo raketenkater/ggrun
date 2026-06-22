@@ -151,3 +151,35 @@ func TestAppleSiliconGPUSizing(t *testing.T) {
 		t.Fatal("zero memsize must not produce a GPU")
 	}
 }
+
+func TestApplyVRAMHeadroom(t *testing.T) {
+	caps := &Capabilities{GPUs: []GPU{
+		{Index: 0, VRAMTotalMB: 24000},
+		{Index: 1, VRAMTotalMB: 12000},
+		{Index: 2, VRAMTotalMB: 12000},
+	}}
+	// Reserve 4800 MB total across 48000 MB => 10% off each GPU.
+	out := ApplyVRAMHeadroom(caps, 4800)
+	if got := out.TotalVRAM(); got != 48000-4800 {
+		t.Fatalf("expected total %d, got %d", 48000-4800, got)
+	}
+	if out.GPUs[0].VRAMTotalMB != 21600 || out.GPUs[1].VRAMTotalMB != 10800 {
+		t.Fatalf("expected proportional split, got %d / %d", out.GPUs[0].VRAMTotalMB, out.GPUs[1].VRAMTotalMB)
+	}
+	// Original caps must be untouched (returns a copy).
+	if caps.GPUs[0].VRAMTotalMB != 24000 {
+		t.Fatalf("ApplyVRAMHeadroom mutated the input caps")
+	}
+	// Zero/negative headroom is a no-op returning the same pointer.
+	if ApplyVRAMHeadroom(caps, 0) != caps {
+		t.Fatalf("zero headroom should be a no-op")
+	}
+}
+
+func TestParseBudgetMBViaHeadroomCases(t *testing.T) {
+	// Sanity for the shared budget parser used by --vram-headroom and config.
+	caps := &Capabilities{GPUs: []GPU{{VRAMTotalMB: 10000}}}
+	if ApplyVRAMHeadroom(caps, 100000).GPUs[0].VRAMTotalMB != 0 {
+		t.Fatalf("headroom larger than VRAM should floor at 0")
+	}
+}
