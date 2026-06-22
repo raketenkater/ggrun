@@ -63,8 +63,22 @@ while IFS= read -r lib; do
     install -m 0644 "$lib" "$PAYLOAD/bin/$(basename "$lib")"
 done < <(find "$BIN_DIR" -maxdepth 1 -type f \( -name 'lib*.so*' -o -name 'lib*.dylib' -o -name '*.dll' \) 2>/dev/null | sort)
 
+# Shared-library IK builds keep runtime libraries outside build/bin. Copy the
+# project libraries referenced by the server under the names requested by its
+# dynamic dependencies so the archive remains relocatable.
+if command -v ldd >/dev/null 2>&1; then
+    while IFS='|' read -r soname lib; do
+        [[ -n "$soname" && -f "$lib" ]] || continue
+        install -m 0644 "$lib" "$PAYLOAD/bin/$soname"
+    done < <(
+        ldd "$SERVER_BIN" 2>/dev/null |
+            awk '$1 ~ /^lib(ggml|llama|mtmd)/ && $2 == "=>" && $3 ~ "^/" { print $1 "|" $3 }'
+    )
+fi
+
 (
     cd "$WORK_DIR"
+
     tar -czf "$OUT_DIR/$ASSET_NAME" "$(basename "$PAYLOAD")"
 )
 
