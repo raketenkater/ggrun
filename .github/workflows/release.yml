@@ -18,14 +18,14 @@ jobs:
     name: preflight tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go/go.mod
           cache: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -76,9 +76,9 @@ jobs:
             cmake_flags: -DGGML_METAL=ON -DGGML_NATIVE=OFF
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go/go.mod
           cache: false
@@ -134,9 +134,9 @@ jobs:
       ASSET: ggrun-windows-x86_64-cpu.zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go/go.mod
           cache: false

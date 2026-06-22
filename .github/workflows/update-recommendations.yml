@@ -19,13 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'raketenkater/ggrun'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go/go.mod
           cache: false
