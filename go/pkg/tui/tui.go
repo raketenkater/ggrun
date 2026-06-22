@@ -77,6 +77,7 @@ type Model struct {
 	ctxMode        string
 	kvPlacement    string
 	vramHeadroomMB int
+	ramHeadroomMB  int
 	parallel       string
 	aitune         bool
 	aituneRounds   int
@@ -191,7 +192,8 @@ func InitialModel() Model {
 	caps, _ := detect.Detect()
 	m.caps = caps
 	m.vramHeadroomMB = config.ParseBudgetMB(cfg.VRAMHeadroom)
-	m.recommendationGroups = recommend.TopCategories(detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB), 4)
+	m.ramHeadroomMB = config.ParseBudgetMB(cfg.RAMHeadroom)
+	m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
 	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 
 	if len(m.models) == 0 {
@@ -346,7 +348,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
 					m.selectedModel = item.index
-					m.recommendation = computeRecommendation(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.models[m.selectedModel])
+					m.recommendation = computeRecommendation(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), m.models[m.selectedModel])
 					m.menuCursor = 0
 					m.screen = ScreenLaunchPrompt
 					return m, nil
@@ -1531,6 +1533,14 @@ func settingRows() []settingRow {
 				return c.VRAMHeadroom
 			},
 			set: func(c *config.Config, v string) { c.VRAMHeadroom = strings.TrimSpace(v) }},
+		{label: "RAM headroom", kind: "text",
+			get: func(c *config.Config) string {
+				if strings.TrimSpace(c.RAMHeadroom) == "" {
+					return "0 (use all RAM)"
+				}
+				return c.RAMHeadroom
+			},
+			set: func(c *config.Config, v string) { c.RAMHeadroom = strings.TrimSpace(v) }},
 		{label: "Speculative", kind: "enum",
 			options: []string{"off", "auto", "draft", "eagle3", "ngram", "ngram-mod", "ngram-k4v", "mtp"},
 			get:     func(c *config.Config) string { return c.Spec },
@@ -1567,7 +1577,11 @@ func (m *Model) applySetting(row settingRow, val string) {
 	switch row.label {
 	case "VRAM headroom":
 		m.vramHeadroomMB = config.ParseBudgetMB(val)
-		m.recommendationGroups = recommend.TopCategories(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), 4)
+		m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
+		m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
+	case "RAM headroom":
+		m.ramHeadroomMB = config.ParseBudgetMB(val)
+		m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
 		m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 	case "Backend":
 		m.backend = val

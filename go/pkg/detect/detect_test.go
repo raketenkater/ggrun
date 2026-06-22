@@ -183,3 +183,20 @@ func TestParseBudgetMBViaHeadroomCases(t *testing.T) {
 		t.Fatalf("headroom larger than VRAM should floor at 0")
 	}
 }
+
+func TestApplyRAMHeadroom(t *testing.T) {
+	caps := &Capabilities{RAM: RAMInfo{TotalMB: 128000, FreeMB: 100000}}
+	out := ApplyRAMHeadroom(caps, 8000)
+	if out.RAM.TotalMB != 120000 || out.RAM.FreeMB != 92000 {
+		t.Fatalf("expected 120000/92000, got %d/%d", out.RAM.TotalMB, out.RAM.FreeMB)
+	}
+	if caps.RAM.TotalMB != 128000 {
+		t.Fatalf("ApplyRAMHeadroom mutated the input caps")
+	}
+	if ApplyRAMHeadroom(caps, 0) != caps {
+		t.Fatalf("zero headroom should be a no-op")
+	}
+	if ApplyRAMHeadroom(caps, 999999).RAM.FreeMB != 0 {
+		t.Fatalf("headroom larger than RAM should floor at 0")
+	}
+}

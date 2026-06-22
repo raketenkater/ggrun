@@ -123,6 +123,7 @@ type Options struct {
 	CPUMode        bool
 	RamBudgetMB    int
 	VRAMHeadroomMB int    // hold back this much total VRAM as a safety margin
+	RAMHeadroomMB  int    // hold back this much system RAM as a safety margin
 	BackendTag     string // "llama" or "ik_llama"
 	NoMMap         bool
 	Parallel       int
@@ -156,6 +157,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 
 	caps = applyRAMBudget(caps, opts.RamBudgetMB)
 	caps = detect.ApplyVRAMHeadroom(caps, opts.VRAMHeadroomMB)
+	caps = detect.ApplyRAMHeadroom(caps, opts.RAMHeadroomMB)
 
 	s := &Strategy{
 		ContextSize:    opts.ContextSize,

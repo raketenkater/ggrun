@@ -408,6 +408,23 @@ func ApplyVRAMHeadroom(caps *Capabilities, headroomMB int) *Capabilities {
 	return &out
 }
 
+// ApplyRAMHeadroom returns a copy of caps with headroomMB of system RAM held
+// back (total and free), so the recommender and placement leave RAM free for
+// the rest of the system. headroomMB <= 0 is a no-op.
+func ApplyRAMHeadroom(caps *Capabilities, headroomMB int) *Capabilities {
+	if caps == nil || headroomMB <= 0 {
+		return caps
+	}
+	out := *caps
+	if out.RAM.TotalMB -= headroomMB; out.RAM.TotalMB < 0 {
+		out.RAM.TotalMB = 0
+	}
+	if out.RAM.FreeMB -= headroomMB; out.RAM.FreeMB < 0 {
+		out.RAM.FreeMB = 0
+	}
+	return &out
+}
+
 // TotalVRAM returns the sum of total VRAM across all detected GPUs.
 func (c *Capabilities) TotalVRAM() int {
 	total := 0

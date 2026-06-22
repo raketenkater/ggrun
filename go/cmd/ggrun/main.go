@@ -112,6 +112,7 @@ Launch flags:
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
   --vram-headroom str  Reserve VRAM the recommender/placement won't use, e.g. 2G
+  --ram-headroom str   Reserve system RAM the recommender/placement won't use, e.g. 8G
   -vision              Enable vision (auto-detect mmproj)
   --spec string       Speculative decoding: off|auto|mtp|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
@@ -294,6 +295,7 @@ type launchRequest struct {
 	ForceSpecMoE      bool
 	RamBudgetMB       int
 	VRAMHeadroomMB    int
+	RAMHeadroomMB     int
 	Parallel          int
 	Benchmark         bool
 	ExtraArgs         []string
@@ -316,6 +318,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		SpecMode:       cfg.Spec,
 		Parallel:       cfg.Parallel,
 		VRAMHeadroomMB: parseBudgetMB(cfg.VRAMHeadroom),
+		RAMHeadroomMB:  parseBudgetMB(cfg.RAMHeadroom),
 	}
 	if req.Port == 0 {
 		req.Port = 8081
@@ -383,6 +386,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--vram-headroom":
 				req.VRAMHeadroomMB = parseBudgetMB(val)
+				continue
+			case "--ram-headroom":
+				req.RAMHeadroomMB = parseBudgetMB(val)
 				continue
 			case "--spec":
 				req.SpecMode = val
@@ -498,6 +504,12 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.VRAMHeadroomMB = parseBudgetMB(v)
+		case "--ram-headroom":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.RAMHeadroomMB = parseBudgetMB(v)
 		case "--spec":
 			v, err := next()
 			if err != nil {
@@ -649,6 +661,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		CPUMode:        req.CPUMode,
 		RamBudgetMB:    req.RamBudgetMB,
 		VRAMHeadroomMB: req.VRAMHeadroomMB,
+		RAMHeadroomMB:  req.RAMHeadroomMB,
 		CacheDir:       cacheDir,
 		Host:           req.Host,
 		BackendTag:     be.Tag,
@@ -1497,6 +1510,10 @@ func cmdRecommend(args []string) {
 		if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
 			fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
 			caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
+		}
+		if headroomMB := parseBudgetMB(cfg.RAMHeadroom); headroomMB > 0 {
+			fmt.Printf("RAM headroom: %d MB reserved (set via Settings or --ram-headroom)\n", headroomMB)
+			caps = detect.ApplyRAMHeadroom(caps, headroomMB)
 		}
 	}
 

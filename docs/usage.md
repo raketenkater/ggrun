@@ -13,6 +13,7 @@ ggrun --backend vulkan model.gguf
 ggrun model.gguf --gpus 0,1
 ggrun model.gguf --ram-budget 90G
 ggrun model.gguf --vram-headroom 2G   # leave 2 GB of VRAM free for other apps
+ggrun model.gguf --ram-headroom 8G    # leave 8 GB of system RAM free for other apps
 ggrun model.gguf --ctx-size 32768
 ggrun model.gguf --kv-quality mid
 ggrun model.gguf --kv-placement gpu

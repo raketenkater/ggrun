@@ -86,7 +86,7 @@ ggrun model.gguf --benchmark              # load, measure tok/s, exit
 ```
 
 Common flags: `--backend ik_llama|llama|vulkan`, `--gpus 0,1`, `--ctx-size`,
-`--kv-quality`, `--kv-placement`, `--vram-headroom 2G`, `--vision`, `--spec auto`. Unknown flags pass straight
+`--kv-quality`, `--kv-placement`, `--vram-headroom 2G`, `--ram-headroom 8G`, `--vision`, `--spec auto`. Unknown flags pass straight
 through to `llama-server`, so nothing upstream is out of reach. Full list:
 [docs/usage.md](docs/usage.md).
 
