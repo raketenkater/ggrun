@@ -26,6 +26,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Check Go formatting
         working-directory: go
         run: test -z "$(gofmt -l .)"
@@ -61,6 +62,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Cross-build Go ggrun
         working-directory: go
         env:
@@ -88,6 +90,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Run estimator regression tests
         run: bash tests/test_estimator.sh
 
@@ -101,6 +104,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Run safety regression tests
         run: bash tests/test_safety.sh
 
@@ -114,6 +118,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Run setup home regression tests
         run: bash tests/test_setup_home.sh
 
@@ -137,6 +142,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Run MoE placement regression tests
         run: bash tests/test_moe_placement.sh
 
@@ -159,6 +165,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Install Go command to a temporary prefix
         run: |
           tmp="$(mktemp -d)"
@@ -200,6 +207,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go/go.mod
+          cache: false
       - name: Build Windows package and install from local release dir
         shell: pwsh
         run: |
