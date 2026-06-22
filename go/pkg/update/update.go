@@ -106,9 +106,14 @@ func hasUpdateLabel(updates []string, label string) bool {
 // CheckRepoUpdates returns local git repos that are behind their upstreams.
 func CheckRepoUpdates() []string {
 	updates := []string{}
+	seen := map[string]bool{}
 	for _, repo := range updateRepoCandidates() {
+		if seen[repo.Label] {
+			continue // same backend can be checked in several dirs; report it once
+		}
 		if repoBehind(repo.Dir) {
 			updates = append(updates, repo.Label)
+			seen[repo.Label] = true
 		}
 	}
 	return updates
