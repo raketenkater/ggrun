@@ -565,15 +565,12 @@ install_release_bundle() {
 choose_cuda_auto_fallback_backend() {
     [[ "$BACKEND_REQUEST" == "auto" && "$BACKEND_CHOICE" == "cuda" ]] || return 1
     has_cuda_toolkit && return 1
-    if [[ "$OS" == "Linux" ]]; then
-        BACKEND_CHOICE="vulkan"
-        warn "CUDA toolkit not found and no CUDA bundle is available; trying Vulkan before CPU."
-    elif vulkan_available; then
+    if vulkan_available; then
         BACKEND_CHOICE="vulkan"
         warn "CUDA toolkit not found and no CUDA bundle is available; falling back to Vulkan."
     else
         BACKEND_CHOICE="cpu"
-        warn "CUDA toolkit not found and no CUDA bundle is available; falling back to CPU."
+        warn "CUDA toolkit and a usable Vulkan device were not found; falling back to CPU."
     fi
     ok "Selected fallback backend: $BACKEND_CHOICE"
 }
@@ -588,12 +585,59 @@ run_privileged() {
     fi
 }
 
+python3_usable() {
+    command -v python3 >/dev/null 2>&1 \
+        && python3 -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' >/dev/null 2>&1
+}
+
+install_python_runtime() {
+    [[ "$PY_DEPS_MODE" != "skip" ]] || return 1
+    say "-- Installing Python 3 for model downloads --"
+    if [[ "$OS" == "Darwin" ]]; then
+        command -v brew >/dev/null 2>&1 || return 1
+        brew install python
+    elif command -v apt-get >/dev/null 2>&1; then
+        run_privileged apt-get update \
+            && run_privileged apt-get install -y python3 python3-pip python3-venv
+    elif command -v dnf >/dev/null 2>&1; then
+        run_privileged dnf install -y python3 python3-pip
+    elif command -v yum >/dev/null 2>&1; then
+        run_privileged yum install -y python3 python3-pip
+    elif command -v pacman >/dev/null 2>&1; then
+        run_privileged pacman -Sy --needed --noconfirm python python-pip
+    elif command -v zypper >/dev/null 2>&1; then
+        run_privileged zypper install -y python3 python3-pip
+    else
+        return 1
+    fi
+}
+
+ensure_python_pip() {
+    python3 -m pip --version >/dev/null 2>&1 && return 0
+    # CPython normally bundles ensurepip. Distribution builds may omit it, in
+    # which case install_python_runtime above installs the distro's pip package.
+    python3 -m ensurepip --user >/dev/null 2>&1 \
+        && python3 -m pip --version >/dev/null 2>&1
+}
+
+install_python_download_deps() {
+    local args=(--user --quiet --upgrade huggingface_hub tqdm)
+    python3 -m pip install "${args[@]}" >/dev/null 2>&1 \
+        || python3 -m pip install --break-system-packages "${args[@]}" >/dev/null 2>&1
+    python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
+}
+
 install_build_deps() {
-    [[ "$OS" == "Linux" ]] || return 1
     [[ "$DEPS_MODE" != "skip" ]] || return 1
 
     say "-- Installing build dependencies --"
-    if command -v apt-get >/dev/null 2>&1; then
+    if [[ "$OS" == "Darwin" ]]; then
+        if command -v brew >/dev/null 2>&1; then
+            brew install cmake git
+        else
+            return 1
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
         local pkgs=(git cmake build-essential pkg-config libcurl4-openssl-dev)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(libvulkan-dev glslang-tools vulkan-tools)
         run_privileged apt-get update && run_privileged apt-get install -y "${pkgs[@]}"
@@ -638,7 +682,13 @@ ensure_build_deps() {
         [[ -z "$missing" ]] && { ok "Build dependencies ready"; return 0; }
     fi
     err "Backend build dependencies are missing: $missing"
-    say "Install build tools or rerun with LLM_INSTALL_BACKEND=skip for launcher-only install."
+    if [[ "$OS" == "Darwin" ]]; then
+        say "Install Apple's command-line tools with: xcode-select --install"
+        say "If cmake is still missing, install Homebrew and run: brew install cmake"
+    elif [[ "$OS" == "Linux" ]]; then
+        say "Install your distribution's C/C++ build tools, git, and cmake."
+    fi
+    say "Or rerun with LLM_INSTALL_BACKEND=skip for a launcher-only install."
     return 1
 }
 
@@ -736,18 +786,39 @@ say ""
 say "── Python dependencies ──"
 if [[ "$PY_DEPS_MODE" == "skip" ]]; then
     warn "Skipped python dependency install. Downloader needs huggingface_hub + tqdm."
-elif command -v python3 >/dev/null 2>&1; then
-    if python3 -c "import huggingface_hub, tqdm" 2>/dev/null; then
-        ok "huggingface_hub + tqdm already installed"
-    else
-        if [[ "$PY_DEPS_MODE" == "install" ]] || ask "Install huggingface_hub + tqdm via pip --user? [Y/n]" y; then
-            python3 -m pip install --user --quiet huggingface_hub tqdm \
-                && ok "Installed python deps" \
-                || warn "pip install failed — downloader may not work"
+else
+    if ! python3_usable; then
+        warn "A usable Python 3 interpreter was not found."
+        if ! install_python_runtime || ! python3_usable; then
+            if [[ "$OS" == "Darwin" ]]; then
+                err "Python 3 is needed for model search/download. Install Homebrew, then run: brew install python"
+            else
+                err "Python 3 is needed for model search/download. Install python3 and python3-pip with your package manager."
+            fi
+            if [[ "$PY_DEPS_MODE" == "install" ]]; then
+                exit 1
+            fi
+            warn "Local GGUF serving still works; model search/download is unavailable until Python is installed."
         fi
     fi
-else
-    warn "python3 not found — downloader disabled"
+    if python3_usable; then
+        if python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1; then
+            ok "Python download dependencies already installed"
+        elif ! ensure_python_pip; then
+            err "Python 3 is installed, but pip is unavailable. Try: python3 -m ensurepip --user"
+            [[ "$PY_DEPS_MODE" == "install" ]] && exit 1
+            warn "Local GGUF serving still works; model search/download needs pip, huggingface_hub, and tqdm."
+        elif [[ "$PY_DEPS_MODE" == "install" ]] || ask "Install huggingface_hub + tqdm via pip --user? [Y/n]" y; then
+            if install_python_download_deps; then
+                ok "Python download dependencies ready"
+            else
+                err "Could not install or import huggingface_hub and tqdm."
+                say "Try: python3 -m pip install --user huggingface_hub tqdm"
+                [[ "$PY_DEPS_MODE" == "install" ]] && exit 1
+                warn "Local GGUF serving still works; model search/download is unavailable."
+            fi
+        fi
+    fi
 fi
 
 # ── Stage 5: optional backend build ─────────────────────────────────────────

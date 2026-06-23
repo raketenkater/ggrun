@@ -30,12 +30,20 @@ local_root() {
 }
 
 download_root() {
-    command -v curl >/dev/null 2>&1 || { err "curl is required for remote setup"; exit 1; }
-    command -v tar >/dev/null 2>&1 || { err "tar is required for remote setup"; exit 1; }
+    command -v curl >/dev/null 2>&1 || { err "curl is required. Install curl with your OS package manager, then rerun setup."; exit 1; }
+    command -v tar >/dev/null 2>&1 || { err "tar is required. Install tar with your OS package manager, then rerun setup."; exit 1; }
     TMP_DIR="$(mktemp -d -t ggrun-setup.XXXXXX)"
     local archive="$TMP_DIR/source.tar.gz"
-    curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$REF" -o "$archive"
-    tar -xzf "$archive" -C "$TMP_DIR"
+    local url="https://codeload.github.com/$REPO/tar.gz/$REF"
+    if ! curl -fL --retry 3 --connect-timeout 20 "$url" -o "$archive"; then
+        err "could not download ggrun source from $url"
+        err "Check internet/proxy access to github.com, or clone the repository and run ./setup.sh locally."
+        exit 1
+    fi
+    if ! tar -xzf "$archive" -C "$TMP_DIR"; then
+        err "downloaded source archive is invalid or could not be unpacked: $archive"
+        exit 1
+    fi
     find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1
 }
 

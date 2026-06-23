@@ -208,15 +208,19 @@ jobs:
         with:
           go-version-file: go/go.mod
           cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
       - name: Build Windows package and install from local release dir
         shell: pwsh
         run: |
           go build -C go -trimpath -o ggrun.exe ./cmd/ggrun
+          go build -o "$env:RUNNER_TEMP/fake-llama-server.exe" ./tests/fake_llama_server.go
           $tmp = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
           $release = Join-Path $tmp 'release'
           $app = Join-Path $tmp 'app'
           New-Item -ItemType Directory -Force -Path $release | Out-Null
-          Copy-Item go/ggrun.exe (Join-Path $tmp 'llama-server.exe')
+          Copy-Item "$env:RUNNER_TEMP/fake-llama-server.exe" (Join-Path $tmp 'llama-server.exe')
           scripts/package-release.ps1 -AssetName ggrun-windows-x86_64-cpu.zip -ServerBin (Join-Path $tmp 'llama-server.exe') -OutDir $release -LlmServerBin go/ggrun.exe
           Expand-Archive -Path (Join-Path $release 'ggrun-windows-x86_64-cpu.zip') -DestinationPath (Join-Path $tmp 'expanded') -Force
           if (!(Test-Path (Join-Path $tmp 'expanded/ggrun-windows-x86_64-cpu/bin/ggrun.exe'))) { throw 'packaged ggrun.exe missing' }
@@ -232,33 +236,116 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw 'Windows installer did not prepare Python download dependencies' }
 
+          python tests/build_synthetic_gguf.py --out (Join-Path $app 'models/install-smoke.gguf') --arch llama --name Windows-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 --ctx-train 2048
+          $stdout = Join-Path $tmp 'serve.stdout.log'
+          $stderr = Join-Path $tmp 'serve.stderr.log'
+          $env:LLM_COMMUNITY_TUNES = 'off'
+          $proc = Start-Process -FilePath (Join-Path $app '.bin/ggrun.exe') -ArgumentList @((Join-Path $app 'models/install-smoke.gguf'), '--cpu', '--host', '127.0.0.1', '--port', '19132') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:19132/health' -TimeoutSec 1
+                if ($health.status -eq 'ok') { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 500 }
+            }
+            if (!$ready) {
+              Get-Content $stdout -ErrorAction SilentlyContinue
+              Get-Content $stderr -ErrorAction SilentlyContinue
+              throw 'Installed Windows ggrun did not serve a model through its packaged backend'
+            }
+          } finally {
+            if (!$proc.HasExited) { & taskkill /PID $proc.Id /T /F | Out-Null }
+          }
+
   release-install-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
       - name: Install from local release bundle outside repo
         run: |
           tmp="$(mktemp -d)"
-          printf '#!/usr/bin/env sh\necho fake llama-server\n' > "$tmp/llama-server"
-          chmod +x "$tmp/llama-server"
-          printf '#!/usr/bin/env sh\necho fake llm-server-go\n' > go/ggrun
-          chmod +x go/ggrun
+          go build -C go -trimpath -o ggrun ./cmd/ggrun
+          go build -o "$tmp/llama-server" ./tests/fake_llama_server.go
           scripts/package-release.sh ggrun-linux-x86_64-cpu.tar.gz "$tmp/llama-server" "$tmp/release"
           (cd "$tmp/release" && sha256sum ggrun-linux-x86_64-cpu.tar.gz > SHA256SUMS)
-          mkdir -p "$tmp/run"
-          (
-            cd "$tmp/run"
-            LLM_INSTALL_MODE=release \
-              LLM_INSTALL_BACKEND=cpu \
-              LLM_INSTALL_RELEASE_DIR="$tmp/release" \
-              LLM_INSTALL_PREFIX="$tmp/prefix" \
-              LLM_INSTALL_PY_DEPS=skip \
-              LLM_INSTALL_NONINTERACTIVE=1 \
-              "$GITHUB_WORKSPACE/install.sh"
-          )
-          test -x "$tmp/prefix/ggrun"
-          test -x "$tmp/prefix/llm-server-bash"
-          "$tmp/prefix/ggrun" version | grep -q 'fake llm-server-go'
-          test -x "$tmp/prefix/llama-server"
-          test -x "$tmp/prefix/download_any_gguf.py"
-          test -x "$tmp/prefix/model_index.py"
+          LLM_APP_HOME="$tmp/app" \
+            LLM_SETUP_MODE=release \
+            LLM_SETUP_BACKEND=cpu \
+            LLM_INSTALL_RELEASE_DIR="$tmp/release" \
+            LLM_SETUP_PY_DEPS=skip \
+            LLM_SETUP_NONINTERACTIVE=1 \
+            ./setup-linux.sh
+          test -x "$tmp/app/ggrun"
+          test -x "$tmp/app/.bin/llama-server"
+          python3 tests/build_synthetic_gguf.py --out "$tmp/app/models/install-smoke.gguf" \
+            --arch llama --name Linux-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
+            --embd 64 --ff 128 --ctx-train 2048
+          LLM_COMMUNITY_TUNES=off "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
+            --cpu --host 127.0.0.1 --port 19131 >"$tmp/serve.log" 2>&1 &
+          server_pid=$!
+          trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:19131/health | grep -q '"status":"ok"'; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$tmp/serve.log"
+            exit 1
+          fi
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+          trap - EXIT
+
+  release-install-macos-smoke:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Install macOS app home and serve through packaged backend
+        run: |
+          tmp="$(mktemp -d)"
+          go build -C go -trimpath -o ggrun ./cmd/ggrun
+          go build -o "$tmp/llama-server" ./tests/fake_llama_server.go
+          scripts/package-release.sh ggrun-macos-arm64-metal.tar.gz "$tmp/llama-server" "$tmp/release"
+          (cd "$tmp/release" && shasum -a 256 ggrun-macos-arm64-metal.tar.gz > SHA256SUMS)
+          LLM_APP_HOME="$tmp/app" \
+            LLM_SETUP_MODE=release \
+            LLM_SETUP_BACKEND=metal \
+            LLM_INSTALL_RELEASE_DIR="$tmp/release" \
+            LLM_SETUP_PY_DEPS=skip \
+            LLM_SETUP_NONINTERACTIVE=1 \
+            ./setup-mac.sh
+          python3 tests/build_synthetic_gguf.py --out "$tmp/app/models/install-smoke.gguf" \
+            --arch llama --name macOS-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
+            --embd 64 --ff 128 --ctx-train 2048
+          LLM_COMMUNITY_TUNES=off "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
+            --cpu --host 127.0.0.1 --port 19133 >"$tmp/serve.log" 2>&1 &
+          server_pid=$!
+          trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:19133/health | grep -q '"status":"ok"'; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$tmp/serve.log"
+            exit 1
+          fi
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+          trap - EXIT

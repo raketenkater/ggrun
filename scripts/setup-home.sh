@@ -160,6 +160,22 @@ chmod 0755 "$APP_HOME/ggrun"
 ln -sf ggrun "$APP_BIN/llm-server" 2>/dev/null || true
 ln -sf "$APP_HOME/ggrun" "$APP_HOME/llm-server" 2>/dev/null || true
 
+if ! LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" version >/dev/null 2>&1; then
+    err "Installed ggrun failed its version check. See log: $LOG_FILE"
+    exit 1
+fi
+if ! LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" detect >/dev/null 2>&1; then
+    err "Installed ggrun failed hardware detection. See log: $LOG_FILE"
+    exit 1
+fi
+if [[ -n "$backend_bin" ]] && ! "$backend_bin" --version >/dev/null 2>&1; then
+    err "Installed backend could not start: $backend_bin"
+    err "This usually means the bundle is incompatible or a required runtime library is missing. See log: $LOG_FILE"
+    exit 1
+fi
+ok_msg="CLI, hardware detection, and backend startup checks passed"
+say "  ✓ $ok_msg"
+
 say ""
 say "╔════════════════════════════════════════════════════════════╗"
 say "║ ggrun is installed and ready                         ║"

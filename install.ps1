@@ -45,10 +45,14 @@ function Require-Command($Name, $Hint) {
 
 function Get-ReleaseInfo {
     if ($script:ReleaseInfo) { return $script:ReleaseInfo }
-    if ($Release -eq 'latest') {
-        $script:ReleaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
-    } else {
-        $script:ReleaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Release"
+    try {
+        if ($Release -eq 'latest') {
+            $script:ReleaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        } else {
+            $script:ReleaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Release"
+        }
+    } catch {
+        Fail "Could not query GitHub release '$Release'. Check internet/proxy access to api.github.com. Details: $($_.Exception.Message)"
     }
     return $script:ReleaseInfo
 }
@@ -81,10 +85,18 @@ function Save-ReleaseAsset([string]$Name, [bool]$Required) {
             return ''
         }
         Say "Downloading: $Name"
-        Invoke-WebRequest -Uri $url -OutFile $archive
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $archive
+        } catch {
+            Fail "Could not download $Name. Check internet/proxy access to github.com. Details: $($_.Exception.Message)"
+        }
         $sumsUrl = Get-AssetUrl $info 'SHA256SUMS'
         if ($sumsUrl -and !(Test-Path (Join-Path $tmp 'SHA256SUMS'))) {
-            Invoke-WebRequest -Uri $sumsUrl -OutFile (Join-Path $tmp 'SHA256SUMS')
+            try {
+                Invoke-WebRequest -Uri $sumsUrl -OutFile (Join-Path $tmp 'SHA256SUMS')
+            } catch {
+                Fail "Could not download SHA256SUMS; refusing an unverified install. Details: $($_.Exception.Message)"
+            }
         }
     }
 
@@ -115,7 +127,11 @@ function Install-ReleaseBundle([string]$Name, [bool]$Required) {
     if (!$archive) { return $false }
 
     $payload = Join-Path $tmp ("payload-" + [IO.Path]::GetFileNameWithoutExtension($Name))
-    Expand-Archive -Path $archive -DestinationPath $payload -Force
+    try {
+        Expand-Archive -Path $archive -DestinationPath $payload -Force
+    } catch {
+        Fail "Could not unpack release archive $Name. Delete the downloaded file and retry. Details: $($_.Exception.Message)"
+    }
     $root = Get-ChildItem -Path $payload -Directory | Select-Object -First 1
     if (!$root) { Fail 'Release archive did not contain a payload directory' }
 
@@ -174,11 +190,15 @@ function Build-CudaBackend {
 
     Say 'Configuring llama.cpp CUDA backend'
     & cmake @cmakeArgs
-    if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed for llama.cpp CUDA backend' }
+    if ($LASTEXITCODE -ne 0) {
+        Fail 'CMake could not configure the CUDA backend. Install Visual Studio 2022 Build Tools with the Desktop development with C++ workload, CMake tools, and a Windows SDK; then rerun.'
+    }
 
     Say 'Building llama-server CUDA backend'
     & cmake --build $buildDir --config Release --target llama-server --parallel
-    if ($LASTEXITCODE -ne 0) { Fail 'cmake build failed for llama.cpp CUDA backend' }
+    if ($LASTEXITCODE -ne 0) {
+        Fail 'The CUDA backend build failed. Review the CMake output above; verify that the NVIDIA CUDA Toolkit and Visual Studio C++ toolset are compatible.'
+    }
 
     $server = Get-ChildItem -Path $buildDir -Recurse -Filter 'llama-server.exe' | Select-Object -First 1
     if (!$server) { Fail 'llama-server.exe was not produced by the CUDA build' }
@@ -261,6 +281,10 @@ function Ensure-Python {
 Say '=== ggrun native Windows installer ==='
 Say "Install dir: $InstallDir"
 Say "Backend:     $Backend"
+$arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+if ($arch -ne 'X64') {
+    Fail "This installer currently supports Windows x86_64 only; detected architecture: $arch"
+}
 if ($Backend -eq 'cuda') {
     Say 'CUDA mode:   native Windows NVIDIA via llama.cpp GGML_CUDA'
 }
@@ -316,7 +340,23 @@ try {
     if (!(Test-Path (Join-Path $bin 'ggrun.exe'))) { Fail 'ggrun.exe was not installed' }
     if (!(Test-Path $llamaServer)) { Fail 'llama-server.exe was not installed' }
 
+    $oldAppHome = $env:LLM_APP_HOME
+    try {
+        $env:LLM_APP_HOME = $InstallDir
+        & (Join-Path $bin 'ggrun.exe') version | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail 'Installed ggrun failed its version check' }
+        & (Join-Path $bin 'ggrun.exe') detect | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail 'Installed ggrun failed hardware detection' }
+        & $llamaServer --version | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Fail 'Installed llama-server could not start. The bundle may be incompatible or a required Visual C++ runtime/DLL may be missing.'
+        }
+    } finally {
+        $env:LLM_APP_HOME = $oldAppHome
+    }
+
     Ok 'Installed native Windows ggrun'
+    Ok 'CLI, hardware detection, and backend startup checks passed'
     Say "CLI/GUI: $InstallDir\ggrun.cmd   (no arguments opens the GUI)"
     Say "Models:  $models"
     Say "Config:  $cfgPath"
