@@ -130,10 +130,33 @@ func allRecommendations(caps *detect.Capabilities) []Recommendation {
 	return allRecommendationsWithQuantFilter(caps, nil)
 }
 
+// allRecommendationsWithQuantFilter ranks each runnable model at its
+// highest-quality fitting quant (intelligence-first). Used by Smartest and, with
+// a quant filter, by Fastest.
 func allRecommendationsWithQuantFilter(caps *detect.Capabilities, allowQuant func(QuantOption) bool) []Recommendation {
+	return collectRecommendations(caps, allowQuant, better)
+}
+
+// allRecommendationsBalanced selects each model's representative quant by the
+// blended score (effective intelligence * speed) instead of by raw
+// intelligence, so a model surfaces at its best *practical* quant in Best
+// overall — e.g. a 27B dense at Q5 (~40 tok/s) rather than BF16 (~3 tok/s on RAM
+// spill). Smartest keeps the intelligence-first selector so quality-first picks
+// still surface there.
+func allRecommendationsBalanced(caps *detect.Capabilities) []Recommendation {
+	return collectRecommendations(caps, nil, betterByScore)
+}
+
+// collectRecommendations evaluates every runnable catalog model on this machine,
+// choosing one representative quant per model with isBetter. Models whose
+// architecture no bundled backend can load are skipped (see archRunnable).
+func collectRecommendations(caps *detect.Capabilities, allowQuant func(QuantOption) bool, isBetter func(a, b Recommendation) bool) []Recommendation {
 	var rows []Recommendation
 	for _, c := range Shortlist() {
-		if rec, ok := evaluateWithQuantFilter(caps, c, allowQuant); ok {
+		if !archRunnable(c) {
+			continue
+		}
+		if rec, ok := evaluateWithSelector(caps, c, allowQuant, isBetter); ok {
 			rows = append(rows, rec)
 		}
 	}
@@ -200,8 +223,11 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		return out
 	}
 
-	// Balanced: the blended score.
-	balancedPool := append([]Recommendation(nil), rows...)
+	// Balanced: each model at its best *practical* quant (blended score), then
+	// ranked by that score. This uses a separate evaluation pass (betterByScore)
+	// so a fast Q5 represents a model here even though Smartest below still sees
+	// the intelligence-first reps in `rows` (e.g. the same model at BF16).
+	balancedPool := allRecommendationsBalanced(caps)
 	sortRecommendations(balancedPool)
 	balanced := take(balancedPool)
 
@@ -310,6 +336,13 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 }
 
 func evaluateWithQuantFilter(caps *detect.Capabilities, c Candidate, allowQuant func(QuantOption) bool) (Recommendation, bool) {
+	return evaluateWithSelector(caps, c, allowQuant, better)
+}
+
+// evaluateWithSelector picks one representative quant for a candidate. isBetter
+// decides which of two fitting quants wins: better (intelligence-first, the
+// default and Smartest) or betterByScore (blended, Best overall).
+func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant func(QuantOption) bool, isBetter func(a, b Recommendation) bool) (Recommendation, bool) {
 	budget := hardware(caps)
 	backend := backendHint(caps)
 	base := modelIntelligence(c)
@@ -357,7 +390,7 @@ func evaluateWithQuantFilter(caps *detect.Capabilities, c Candidate, allowQuant 
 			SpeedTier:            speedTier(tps),
 			Score:                int(score * 1000),
 		}
-		if !ok || better(rec, best) {
+		if !ok || isBetter(rec, best) {
 			best = rec
 			ok = true
 		}
@@ -403,6 +436,85 @@ func better(a, b Recommendation) bool {
 	}
 	// True tie on capability and speed: prefer the smaller download.
 	return a.QuantSizeGB < b.QuantSizeGB
+}
+
+// betterByScore decides which of two quants of the SAME candidate represents it
+// in Best overall. The key is the blended score (effective intelligence * speed)
+// weighted by fit efficiency. This matters because speedFactor saturates once a
+// quant clears the interactive knee, so every fast-enough quant ties on raw
+// score and the pick collapses to max retention — i.e. a single-GPU Q5 (~26 t/s,
+// 99% quality, leaves two GPUs free) would lose to a multi-GPU Q8 (~17 t/s,
+// 99.8% quality, saturates the box) over a 0.8% quality gap. fitFactor restores
+// the "and fit" half of the category: among near-equal-quality quants the one
+// that leaves the machine usable wins, so Best overall lands on the practical
+// daily-driver quant rather than drifting into Smartest territory. It also lets
+// a fast Q5 beat a BF16 that only fits by spilling to RAM. A scalar key keeps
+// the pairwise selection in evaluateWithSelector a proper (transitive) ordering.
+func betterByScore(a, b Recommendation) bool {
+	ka := float64(a.Score) * fitFactor(a.Fit)
+	kb := float64(b.Score) * fitFactor(b.Fit)
+	if ka != kb {
+		return ka > kb
+	}
+	if a.PredictedTPS != b.PredictedTPS {
+		return a.PredictedTPS > b.PredictedTPS
+	}
+	if a.QuantSizeGB != b.QuantSizeGB {
+		return a.QuantSizeGB < b.QuantSizeGB
+	}
+	return a.AdjustedIntelligence > b.AdjustedIntelligence
+}
+
+// fitFactor gently discounts placements that consume more of the machine, so the
+// Best-overall selector prefers a quant that leaves hardware free when quality
+// and speed are otherwise comparable. Multipliers are mild (>=0.80) so they only
+// break near-ties — a model that can only run via RAM spill still scores on its
+// merits. Applied only in betterByScore (within one model); cross-model ranking
+// and the quality-first selector (better) are unaffected.
+func fitFactor(fit string) float64 {
+	switch fit {
+	case "single GPU":
+		return 1.00
+	case "multi-GPU":
+		return 0.92
+	case "MoE RAM+VRAM":
+		return 0.90
+	case "GPU plus RAM":
+		return 0.85
+	case "CPU RAM":
+		return 0.80
+	default:
+		return 1.00
+	}
+}
+
+// unrunnableArch lists model architectures present in the catalog that no
+// bundled backend (mainline llama.cpp or ik_llama.cpp) can load yet. The
+// recommender must not surface them: the launcher would only fail with
+// "unknown architecture". They stay in catalog.json so a power user pointing
+// LLAMA_SERVER at a custom build can still find them — e.g. deepseek4 (DeepSeek
+// V4 Pro/Flash) loads only on antirez/llama.cpp PR #22378, which ggrun already
+// warns about in warnModelCompatibility.
+//
+// This is a launch-time stopgap. The durable fix stamps a per-candidate
+// `runnable` flag at catalog-build time from the bundled backend's arch table
+// (tools/models/update_recommendations.py) so it can never drift from the
+// shipped binaries; see the data-driven-arch-filter task.
+var unrunnableArch = map[string]bool{
+	"deepseek4":           true, // DeepSeek V4 Pro/Flash — needs antirez/llama.cpp PR #22378
+	"bailingmoe2.5":       true, // InclusionAI Ling 2.6 Flash
+	"longcat-flash-ngram": true, // LongCat Flash Lite
+	"mllama":              true, // Llama 3.2 Vision — not registered in the bundled build
+}
+
+// archRunnable reports whether the bundled backends can load this candidate's
+// architecture. Entries without arch metadata (legacy catalog rows) are kept:
+// the launcher's own preflight still guards them at load time.
+func archRunnable(c Candidate) bool {
+	if c.Arch == "" {
+		return true
+	}
+	return !unrunnableArch[strings.ToLower(c.Arch)]
 }
 
 func quantOptions(c Candidate) []QuantOption {

@@ -151,6 +151,63 @@ func TestFastestQuantCeilingFallsBackToQ4(t *testing.T) {
 	}
 }
 
+func TestBalancedPrefersBlendedQuantOverBF16(t *testing.T) {
+	// 24 GB GPU + 64 GB RAM: a ~27B dense fits at Q4/Q5 entirely in VRAM (fast),
+	// but its BF16 (~55 GB) only fits by spilling to RAM (slow). Smartest/default
+	// should keep the highest-quality BF16; Best overall (betterByScore) should
+	// pick the fast practical quant instead. This is the Qwen3.6-27B bug.
+	caps := &detect.Capabilities{
+		OS:       "linux",
+		RAM:      detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		GPUs:     []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24576}},
+		Backends: []detect.Backend{{Name: "cuda", Path: "/bin/llama-server-cuda"}},
+	}
+	c := Candidate{
+		Name:           "dense 27b",
+		Repo:           "repo/dense-27b",
+		AAIntelligence: 70,
+		TotalParamsB:   27,
+		Quants: []QuantOption{
+			{Name: "Q4_K_M", SizeGB: 16},
+			{Name: "Q5_K_M", SizeGB: 19},
+			{Name: "BF16", SizeGB: 55},
+		},
+	}
+	smart, ok := evaluate(caps, c)
+	if !ok {
+		t.Fatal("expected candidate to fit")
+	}
+	if smart.QuantName != "BF16" {
+		t.Fatalf("Smartest/default should keep highest-quality BF16, got %q", smart.QuantName)
+	}
+	balanced, ok := evaluateWithSelector(caps, c, nil, betterByScore)
+	if !ok {
+		t.Fatal("expected blended candidate to fit")
+	}
+	if balanced.QuantName == "BF16" {
+		t.Fatalf("Best overall should pick a fast practical quant, not BF16 (BF16 @ ~%.0f tok/s)", smart.PredictedTPS)
+	}
+	if balanced.PredictedTPS <= smart.PredictedTPS {
+		t.Fatalf("blended pick should be faster than the BF16 pick: balanced %.1f vs smart %.1f tok/s", balanced.PredictedTPS, smart.PredictedTPS)
+	}
+}
+
+func TestArchRunnableFiltersUnsupported(t *testing.T) {
+	// Architectures no bundled backend can load must be filtered out of
+	// recommendations (the launcher would only fail with "unknown architecture").
+	for _, arch := range []string{"deepseek4", "DeepSeek4", "bailingmoe2.5", "longcat-flash-ngram", "mllama"} {
+		if archRunnable(Candidate{Arch: arch}) {
+			t.Fatalf("arch %q should be filtered (no bundled backend loads it)", arch)
+		}
+	}
+	// Supported arches, and entries without arch metadata, must be kept.
+	for _, arch := range []string{"qwen35", "qwen35moe", "minimax-m3", "gpt-oss", "llama", "deepseek2", ""} {
+		if !archRunnable(Candidate{Arch: arch}) {
+			t.Fatalf("arch %q is runnable and must not be filtered", arch)
+		}
+	}
+}
+
 func TestCatalogPrefersValidCacheOverEmbedded(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LLM_CACHE_DIR", dir)
