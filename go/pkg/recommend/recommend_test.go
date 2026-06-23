@@ -391,3 +391,47 @@ func TestEvaluateMoEFitsAcrossRAMAndVRAM(t *testing.T) {
 		t.Fatalf("expected MoE RAM+VRAM fit, got %#v", rec)
 	}
 }
+
+func TestUnrunnableArchesLoaded(t *testing.T) {
+	// The embedded blocklist must parse and contain exactly the known-bad
+	// arches (lowercased). This guards the data-driven load in init() against
+	// silent regressions in unrunnable_arches.json.
+	loaded, err := loadUnrunnableArches(unrunnableArchesJSON)
+	if err != nil {
+		t.Fatalf("embedded unrunnable_arches.json failed to parse: %v", err)
+	}
+	want := map[string]bool{
+		"deepseek4":           true,
+		"bailingmoe2.5":       true,
+		"longcat-flash-ngram": true,
+		"mllama":              true,
+	}
+	if len(loaded) != len(want) {
+		t.Fatalf("expected %d unrunnable arches, got %d (%v)", len(want), len(loaded), loaded)
+	}
+	for arch := range want {
+		if !loaded[arch] {
+			t.Fatalf("expected unrunnable arch %q in loaded blocklist, got %v", arch, loaded)
+		}
+	}
+	// init() must have populated the package var from the same data.
+	for arch := range want {
+		if !unrunnableArch[arch] {
+			t.Fatalf("unrunnableArch package var missing %q (init did not load it)", arch)
+		}
+	}
+}
+
+func TestUnrunnableArchesFallbackOnBadJSON(t *testing.T) {
+	// A malformed data file must not break the blocklist: loadUnrunnableArches
+	// returns an error and the caller falls back to the hardcoded set.
+	if _, err := loadUnrunnableArches([]byte("{not json")); err == nil {
+		t.Fatal("expected parse error for malformed JSON, got nil")
+	}
+	// The fallback set must still cover the known-bad arches.
+	for _, arch := range []string{"deepseek4", "bailingmoe2.5", "longcat-flash-ngram", "mllama"} {
+		if !fallbackUnrunnableArch[arch] {
+			t.Fatalf("fallback blocklist missing %q", arch)
+		}
+	}
+}

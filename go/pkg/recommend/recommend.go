@@ -13,6 +13,9 @@ import (
 //go:embed catalog.json
 var catalogJSON []byte
 
+//go:embed unrunnable_arches.json
+var unrunnableArchesJSON []byte
+
 // QuantOption describes one downloadable GGUF quant for a candidate repo.
 // SizeGB is the summed size of all split GGUF files for that quant.
 type QuantOption struct {
@@ -496,15 +499,53 @@ func fitFactor(fit string) float64 {
 // V4 Pro/Flash) loads only on antirez/llama.cpp PR #22378, which ggrun already
 // warns about in warnModelCompatibility.
 //
-// This is a launch-time stopgap. The durable fix stamps a per-candidate
-// `runnable` flag at catalog-build time from the bundled backend's arch table
+// The blocklist is data-driven: it is loaded from unrunnable_arches.json (the
+// single source of truth) in init(). This is a blocklist, not an allowlist, so
+// an incomplete list only ever under-filters — it can never accidentally hide a
+// runnable model. The durable fix stamps a per-candidate `runnable` flag at
+// catalog-build time from the bundled backend's arch table
 // (tools/models/update_recommendations.py) so it can never drift from the
 // shipped binaries; see the data-driven-arch-filter task.
-var unrunnableArch = map[string]bool{
+var unrunnableArch = map[string]bool{}
+
+// fallbackUnrunnableArch preserves the exact pre-data-driven blocklist so a
+// malformed or missing unrunnable_arches.json can never break startup: init()
+// falls back to this and the recommender keeps working with the known-bad
+// arches filtered. It is only consulted if the embedded JSON fails to parse.
+var fallbackUnrunnableArch = map[string]bool{
 	"deepseek4":           true, // DeepSeek V4 Pro/Flash — needs antirez/llama.cpp PR #22378
 	"bailingmoe2.5":       true, // InclusionAI Ling 2.6 Flash
 	"longcat-flash-ngram": true, // LongCat Flash Lite
 	"mllama":              true, // Llama 3.2 Vision — not registered in the bundled build
+}
+
+func init() {
+	loaded, err := loadUnrunnableArches(unrunnableArchesJSON)
+	if err != nil || len(loaded) == 0 {
+		// Graceful degradation: never let a bad data file break recommendations.
+		unrunnableArch = fallbackUnrunnableArch
+		return
+	}
+	unrunnableArch = loaded
+}
+
+// loadUnrunnableArches parses the embedded blocklist JSON. Arch keys are
+// lowercased to match archRunnable's lookup.
+func loadUnrunnableArches(data []byte) (map[string]bool, error) {
+	var doc struct {
+		Arches []struct {
+			Arch   string `json:"arch"`
+			Reason string `json:"reason"`
+		} `json:"arches"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(doc.Arches))
+	for _, a := range doc.Arches {
+		out[strings.ToLower(a.Arch)] = true
+	}
+	return out, nil
 }
 
 // archRunnable reports whether the bundled backends can load this candidate's
