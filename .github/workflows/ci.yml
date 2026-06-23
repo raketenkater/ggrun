@@ -232,11 +232,7 @@ jobs:
           & (Join-Path $app '.bin/ggrun.exe') --version
           if (!(Test-Path (Join-Path $app '.bin/llama-server.exe'))) { throw 'installed llama-server.exe missing' }
           if (!(Test-Path (Join-Path $app 'ggrun.cmd'))) { throw 'installed ggrun.cmd missing' }
-          if (Get-Command py -ErrorAction SilentlyContinue) {
-            & py -3 -c 'import huggingface_hub, tqdm'
-          } else {
-            & python -c 'import huggingface_hub, tqdm'
-          }
+          & python -c 'import huggingface_hub, tqdm'
           if ($LASTEXITCODE -ne 0) { throw 'Windows installer did not prepare Python download dependencies' }
 
           python tests/build_synthetic_gguf.py --out (Join-Path $app 'models/install-smoke.gguf') --arch llama --name Windows-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 --ctx-train 2048
