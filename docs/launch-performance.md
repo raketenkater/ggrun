@@ -9,6 +9,7 @@ llama.cpp build 9756 (`d0f9d2e5a`). Dense ggrun rows were refreshed on
 2026-06-22 after rebuilding both backends from their upstream heads.
 
 Dense comparison runs used the `long` prompt profile with 256 generated tokens.
+The current headline matrix comes from `.benchmarks/full-retest-20260622/`.
 
 ## Dense Models (CUDA / ik_llama.cpp)
 
@@ -16,12 +17,12 @@ Same GGUF, 32k context, 256-token decode, vs raw llama.cpp `--fit` and Ollama 0.
 
 | Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun v3 | v3 `--ai-tune` |
 |---|---:|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 150.4 | 154.2 |
-| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.5 | 37.5 |
+| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 151.4 | 185.7 |
+| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.4 | 39.8 |
 
-ggrun's default placement already beats raw `--fit` and Ollama (+24% on the 4B,
-+64% on the 27B vs Ollama). `--ai-tune` adds a small gain on the 4B and correctly
-finds nothing on the 27B — it rejects noise-level wins rather than inventing one.
+ggrun's default placement already beats raw `--fit` and Ollama (+21% on the 4B,
++64% on the 27B vs Ollama). `--ai-tune` raises the headline dense rows to +49%
+on the 4B and +74% on the 27B versus Ollama.
 
 ## MoE (CUDA / ik_llama.cpp)
 
@@ -32,8 +33,8 @@ bottlenecks CPU-expert streaming):
 
 | Model | Decode tok/s | Prefill tok/s | `--ai-tune` | Notes |
 |---|---:|---:|---:|---|
-| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 23.6 | 19.5 | 23.6 | 3-GPU expert offload + CPU experts |
-| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.24 | 15.3 | not rerun | one 2026-06-22 validation round; spans VRAM+RAM, ~108 GiB pinned |
+| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 22.9 | 19.5 | 23.1 | 3-GPU expert offload + CPU experts |
+| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.59 | 15.3 | 5.65 | spans VRAM+RAM, ~108 GiB pinned |
 
 Both-run vs Ollama 0.30.8 (same merged GGUF, 32k, 256-token decode):
 
@@ -70,7 +71,7 @@ model. The strongest claim is that v3 makes the GGUF server launch path typed,
 reproducible, cross-platform, and backend-aware:
 
 - v3 default placement beats raw llama.cpp `--fit` and Ollama on every model all
-  three can load (+24% / +64% vs Ollama on the 4B / 27B).
+  three can load (+21% / +64% vs Ollama on the 4B / 27B).
 - v3 runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) that raw `--fit` and
   Ollama cannot load at all on this hardware.
 - v3 provides measured MoE placement instead of fragile manual flags.
