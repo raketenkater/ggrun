@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Windows: CPU-only bundle no longer crash-loops on NVIDIA systems.** The
+  default CPU bundle used to emit CUDA offload flags its own binary couldn't
+  honor (`unknown buffer type`), which the launcher hid as `failure: unknown:`
+  and retried forever. ggrun now probes the active backend's real device support
+  before placement: a CPU-only build on a GPU machine runs CPU-clean with a note
+  on how to get GPU (`install.ps1 -Backend cuda`). Deterministic load failures
+  now fail fast with the backend's real error instead of an infinite restart loop.
+- **Windows: model-download dependencies install into the right interpreter.**
+  The installer and runtime resolved Python in opposite orders, so
+  `huggingface_hub` could land in a different interpreter than the one ggrun ran
+  — a `ModuleNotFoundError` despite a "successful" install. Both now resolve
+  `python3 → python → py` and validate the interpreter; the downloader prints an
+  actionable message (naming the exact interpreter) instead of a raw traceback.
+- **Recommender only suggests models the bundled backend can run.** Frontier
+  catalog entries whose architecture no shipped backend can load (e.g. DeepSeek
+  V4's `deepseek4`) are no longer recommended — they stay in the catalog for
+  users with a custom backend build. Best-overall now picks each model's best
+  *practical* quant (blended quality, speed, and fit) rather than the
+  highest-quality quant that merely fits, so e.g. a 27B surfaces at a fast
+  single-GPU Q5 instead of a RAM-spilling BF16.
+
 ## v3.1.0 — 2026-06-20
 
 - **Renamed to `ggrun`** (formerly `llm-server`; pronounced "g-run", from "gguf
