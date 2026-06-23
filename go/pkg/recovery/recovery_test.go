@@ -3,6 +3,7 @@ package recovery
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,39 @@ func TestParseLoadFailureBloomIsNotOOM(t *testing.T) {
 	ft, _ := l.parseLoadFailure()
 	if ft == FailureOOM || ft == FailureRAMOOM {
 		t.Fatalf("Bloom/room must not classify as OOM, got %s", ft)
+	}
+}
+
+func TestParseLoadFailureBufferType(t *testing.T) {
+	// CPU-only llama-server told to offload to CUDA0: deterministic capability
+	// mismatch that must not loop, and must surface the real error line.
+	l := &Launcher{}
+	l.lastLogPath = writeLog(t, "load_backend: loaded CPU backend\n"+
+		"error while handling argument \"-ot\": unknown buffer type\n"+
+		"Available buffer types:\n  CPU\n")
+	ft, msg := l.parseLoadFailure()
+	if ft != FailureBackendCapability {
+		t.Fatalf("expected backend_capability, got %s", ft)
+	}
+	if !ft.deterministic() {
+		t.Fatal("buffer-type failure must be deterministic (no restart loop)")
+	}
+	if !strings.Contains(strings.ToLower(msg), "unknown buffer type") {
+		t.Fatalf("expected the actionable error line in msg, got %q", msg)
+	}
+}
+
+func TestParseLoadFailureSurfacesUnknownStderr(t *testing.T) {
+	// An unclassified failure must still surface the backend's real output
+	// instead of the old empty "failure: unknown:" message.
+	l := &Launcher{}
+	l.lastLogPath = writeLog(t, "starting server\nterminate called after throwing an instance of std::runtime_error\n")
+	ft, msg := l.parseLoadFailure()
+	if ft != FailureUnknown {
+		t.Fatalf("expected unknown, got %s", ft)
+	}
+	if msg == "" {
+		t.Fatal("FailureUnknown must surface the real stderr, got empty msg")
 	}
 }
 

@@ -3,10 +3,60 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
+
+func writeFakeBackend(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestBackendGPUCapableProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-backend probe uses a shell script")
+	}
+	cpuBin := writeFakeBackend(t, "cpu-server", "echo 'Available devices:'\n")
+	gpuBin := writeFakeBackend(t, "gpu-server",
+		"echo 'Available devices:'\necho '  CUDA0: NVIDIA GeForce RTX 4070 (11873 MiB, 11710 MiB free)'\n")
+
+	if capable, probed := backendGPUCapable(cpuBin); !probed || capable {
+		t.Fatalf("cpu-only build: want probed=true capable=false, got probed=%v capable=%v", probed, capable)
+	}
+	if capable, probed := backendGPUCapable(gpuBin); !probed || !capable {
+		t.Fatalf("gpu build: want probed=true capable=true, got probed=%v capable=%v", probed, capable)
+	}
+	if _, probed := backendGPUCapable(filepath.Join(t.TempDir(), "nope")); probed {
+		t.Fatal("missing binary must report probed=false so caps stays unchanged")
+	}
+}
+
+func TestGateBackendGPUStripsGPUsForCPUBuild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-backend probe uses a shell script")
+	}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Name: "RTX 4070", VRAMTotalMB: 12288}}}
+
+	cpuBe := &backendInfo{Path: writeFakeBackend(t, "cpu-server", "echo 'Available devices:'\n")}
+	if got := gateBackendGPU(cpuBe, caps); len(got.GPUs) != 0 {
+		t.Fatalf("CPU-only backend: GPUs should be stripped, got %d", len(got.GPUs))
+	}
+	if len(caps.GPUs) != 1 {
+		t.Fatal("gateBackendGPU must not mutate the caller's caps")
+	}
+
+	gpuBe := &backendInfo{Path: writeFakeBackend(t, "gpu-server",
+		"echo 'Available devices:'\necho '  CUDA0: NVIDIA GeForce RTX 4070'\n")}
+	if got := gateBackendGPU(gpuBe, caps); len(got.GPUs) != 1 {
+		t.Fatalf("GPU-capable backend: GPUs must be kept, got %d", len(got.GPUs))
+	}
+}
 
 func isolateConfig(t *testing.T) {
 	t.Helper()

@@ -28,8 +28,21 @@ const (
 	FailureCUDAOOM      FailureType = "cuda_oom"
 	FailureRAMOOM       FailureType = "ram_oom"
 	FailureUnknownModel FailureType = "unknown_model"
-	FailureUnknown      FailureType = "unknown"
+	// FailureBackendCapability is a deterministic mismatch between the launch
+	// args and what the active backend build supports — e.g. a CPU-only
+	// llama-server told to offload to CUDA0 ("unknown buffer type"). Restarting
+	// the identical command can never succeed, so the launcher fails fast.
+	FailureBackendCapability FailureType = "backend_capability"
+	FailureUnknown           FailureType = "unknown"
 )
+
+// deterministic reports whether a failure will recur identically on restart, so
+// the launcher should fail fast instead of burning MaxRestarts with backoff.
+// FailureUnknownModel is deterministic only once any ik->mainline fallback has
+// already been attempted (handled in Run before this check).
+func (ft FailureType) deterministic() bool {
+	return ft == FailureBackendCapability || ft == FailureUnknownModel
+}
 
 // Launcher wraps server startup with crash recovery and fallback.
 type Launcher struct {
@@ -107,6 +120,13 @@ func (l *Launcher) Run(ctx context.Context) error {
 				restartCount = 0
 				backoff = l.BackoffBase
 				continue
+			}
+
+			// Deterministic failures recur identically on every restart. Once any
+			// ik->mainline fallback has been exhausted, fail fast with the real
+			// message instead of burning MaxRestarts with exponential backoff.
+			if ft.deterministic() {
+				return fmt.Errorf("%s: %s", ft, msg)
 			}
 
 			// Check if we should restart
@@ -306,11 +326,31 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 		lines = append(lines, scanner.Text())
 	}
 
-	// Check from the end for error patterns
+	// Check from the end for error patterns. Track the most informative line so
+	// an unclassified failure still surfaces the backend's real stderr instead of
+	// an empty "failure: unknown:" message (the buffer-type crash was fully
+	// diagnosable from llama.cpp's own output, but the launcher used to hide it).
+	var lastErrLine, lastNonEmpty string
 	for i := len(lines) - 1; i >= 0 && i > len(lines)-50; i-- {
 		line := lines[i]
 		low := strings.ToLower(line)
+		if lastNonEmpty == "" && strings.TrimSpace(line) != "" {
+			lastNonEmpty = line
+		}
+		if lastErrLine == "" && (strings.Contains(low, "error") ||
+			strings.Contains(low, "failed") || strings.Contains(low, "abort")) {
+			lastErrLine = line
+		}
 
+		// CPU-only build asked to place tensors on a GPU buffer it wasn't built
+		// with: `error while handling argument "-ot": unknown buffer type`
+		// (followed by `Available buffer types: CPU`). Match the error line, not
+		// the header, so the surfaced message is the actionable one. Deterministic.
+		if strings.Contains(low, "buffer type") &&
+			(strings.Contains(low, "unknown") || strings.Contains(low, "unsupported") ||
+				strings.Contains(low, "invalid") || strings.Contains(low, "no such")) {
+			return FailureBackendCapability, line
+		}
 		if strings.Contains(low, "unknown model architecture") ||
 			strings.Contains(low, "unable to load model") {
 			return FailureUnknownModel, line
@@ -335,7 +375,11 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 		}
 	}
 
-	return FailureUnknown, ""
+	// Unclassified: surface the backend's real stderr rather than nothing.
+	if lastErrLine != "" {
+		return FailureUnknown, lastErrLine
+	}
+	return FailureUnknown, lastNonEmpty
 }
 
 // writeProbeCache parses the launch log and writes measured probe values.

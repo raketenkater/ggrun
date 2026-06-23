@@ -860,6 +860,7 @@ func cmdGUI() {
 	}
 	warnModelCompatibility(model)
 	preflightBackendArch(model, be, caps)
+	caps = gateBackendGPU(be, caps)
 
 	opts := placement.Options{
 		ContextSize: req.CtxSize,
@@ -922,6 +923,9 @@ func cmdGUI() {
 		fmt.Fprintf(os.Stderr, "[launch] failure: %s: %s\n", ft, msg)
 		if ft == recovery.FailureUnknownModel {
 			fmt.Fprintf(os.Stderr, "[launch] hint: backend %s could not load architecture %q. If this is a MiniMax / ik-only model, switch to the ik_llama.cpp backend (see LLAMA_SERVER in your config).\n", be.Path, model.ModelArch)
+		}
+		if ft == recovery.FailureBackendCapability {
+			fmt.Fprintf(os.Stderr, "[launch] hint: backend %s rejected a GPU placement flag — it is a CPU-only build but the launch used GPU offload. Reinstall the GPU backend (Windows: install.ps1 -Backend cuda) or point LLAMA_SERVER at a CUDA-capable llama-server.\n", be.Path)
 		}
 	}
 	launcher.OnCUDAOOM = func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool) {
@@ -1886,6 +1890,58 @@ func preflightBackendArch(model *placement.ModelProfile, be *backendInfo, caps *
 			"  fix: no ik_llama.cpp binary found. Build/install ik_llama.cpp and point LLAMA_SERVER at its llama-server.")
 	}
 	os.Exit(1)
+}
+
+// gateBackendGPU guards against the decoupling of hardware detection and backend
+// capability: ggrun may detect NVIDIA GPUs while the active llama-server is a
+// CPU-only build (e.g. the default Windows bundle), in which case placement
+// would emit -ngl / -ot ...=CUDA0 flags the binary cannot honor — it aborts with
+// "unknown buffer type" and the launcher used to crash-loop on it. When the
+// active backend cannot see any GPU, run CPU-clean and tell the user how to get
+// GPU acceleration. If the backend cannot be probed, caps is left untouched so
+// behavior is unchanged elsewhere (recovery's FailureBackendCapability fast-fail
+// still catches a real mismatch without an infinite restart loop).
+func gateBackendGPU(be *backendInfo, caps *detect.Capabilities) *detect.Capabilities {
+	if caps == nil || be == nil || len(caps.GPUs) == 0 {
+		return caps
+	}
+	capable, probed := backendGPUCapable(be.Path)
+	if !probed || capable {
+		return caps
+	}
+	fmt.Fprintf(os.Stderr, "[launch] notice: %d GPU(s) detected but backend %s is a CPU-only build — running on CPU.\n", len(caps.GPUs), be.Path)
+	fmt.Fprintln(os.Stderr, "[launch] for GPU acceleration reinstall the GPU backend (Windows: install.ps1 -Backend cuda) or set LLAMA_SERVER to a CUDA-capable llama-server.")
+	cpuCaps := *caps
+	cpuCaps.GPUs = nil
+	return &cpuCaps
+}
+
+// backendGPUCapable probes whether the backend binary can see any GPU device by
+// running `llama-server --list-devices` (supported by both mainline llama.cpp
+// and ik_llama.cpp, and independent of whether the GPU backend is statically
+// linked or a dynamic ggml-*.{dll,so}). probed is false when the probe could not
+// run or its output was unrecognized, so the caller falls back to prior behavior.
+func backendGPUCapable(binPath string) (capable, probed bool) {
+	if binPath == "" {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binPath, "--list-devices").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false, false
+	}
+	text := strings.ToLower(string(out))
+	idx := strings.Index(text, "available devices")
+	if idx < 0 {
+		return false, false
+	}
+	for _, kw := range []string{"cuda", "rocm", "hip", "vulkan", "metal", "sycl"} {
+		if strings.Contains(text[idx:], kw) {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 func warnModelCompatibility(model *placement.ModelProfile) {
