@@ -121,7 +121,16 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 // one was found. On Windows the launcher "py" resolves the newest Python 3.
 func pythonCommand() (string, bool) {
 	for _, name := range []string{"python3", "python", "py"} {
-		if path, err := exec.LookPath(name); err == nil {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		// Validate it actually runs as Python 3, skipping Windows Store execution
+		// aliases and dead shims that resolve on PATH but don't run. This mirrors
+		// install.ps1 Resolve-Python so the interpreter that received
+		// huggingface_hub is the one we invoke download_any_gguf.py with.
+		check := exec.Command(path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
+		if check.Run() == nil {
 			return path, true
 		}
 	}

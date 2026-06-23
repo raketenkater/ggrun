@@ -214,10 +214,16 @@ function Resolve-Python {
     # Returns @{ Exe; Pre } for a verified Python 3, or $null. Checking the
     # interpreter avoids mistaking the Microsoft Store execution alias for an
     # installed Python. `py` needs -3 to select Python 3 explicitly.
+    #
+    # Order MUST match the runtime resolver (go/pkg/download.pythonCommand:
+    # python3 -> python -> py) so the deps we pip-install land in the very
+    # interpreter ggrun later runs download_any_gguf.py with. A mismatch silently
+    # installs huggingface_hub into a different interpreter than the one used at
+    # runtime -> ModuleNotFoundError despite a "successful" install.
     $candidates = @(
-        @{ Exe = 'py'; Pre = @('-3') },
+        @{ Exe = 'python3'; Pre = @() },
         @{ Exe = 'python'; Pre = @() },
-        @{ Exe = 'python3'; Pre = @() }
+        @{ Exe = 'py'; Pre = @('-3') }
     )
     foreach ($candidate in $candidates) {
         if (!(Test-Command $candidate.Exe)) { continue }

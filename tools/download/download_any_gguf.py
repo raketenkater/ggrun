@@ -9,7 +9,19 @@ import re
 import sys
 import subprocess
 from pathlib import Path
-from huggingface_hub import hf_hub_download, list_repo_files, HfApi
+
+try:
+    from huggingface_hub import hf_hub_download, list_repo_files, HfApi
+except ImportError:
+    sys.stderr.write(
+        "Error: the 'huggingface_hub' package is required to download models but "
+        "is not installed for this Python.\n"
+        "Install it into THIS interpreter:\n"
+        f"    {sys.executable} -m pip install --user huggingface_hub tqdm\n"
+        "ggrun's installer normally does this; seeing this means the runtime is "
+        "using a different Python than the installer set up.\n"
+    )
+    raise SystemExit(1)
 
 TRUSTED_GGUF_OWNERS = {
     "unsloth": 120,
