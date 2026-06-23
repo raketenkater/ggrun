@@ -222,6 +222,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $release | Out-Null
           Copy-Item "$env:RUNNER_TEMP/fake-llama-server.exe" (Join-Path $tmp 'llama-server.exe')
           scripts/package-release.ps1 -AssetName ggrun-windows-x86_64-cpu.zip -ServerBin (Join-Path $tmp 'llama-server.exe') -OutDir $release -LlmServerBin go/ggrun.exe
+          $asset = Join-Path $release 'ggrun-windows-x86_64-cpu.zip'
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
+          "$hash  ggrun-windows-x86_64-cpu.zip" | Set-Content -Path (Join-Path $release 'SHA256SUMS') -Encoding ASCII
           Expand-Archive -Path (Join-Path $release 'ggrun-windows-x86_64-cpu.zip') -DestinationPath (Join-Path $tmp 'expanded') -Force
           if (!(Test-Path (Join-Path $tmp 'expanded/ggrun-windows-x86_64-cpu/bin/ggrun.exe'))) { throw 'packaged ggrun.exe missing' }
           if (!(Test-Path (Join-Path $tmp 'expanded/ggrun-windows-x86_64-cpu/bin/llama-server.exe'))) { throw 'packaged llama-server.exe missing' }
@@ -302,7 +305,7 @@ jobs:
             exit 1
           fi
           kill -TERM "$server_pid"
-          wait "$server_pid"
+          wait "$server_pid" || true
           trap - EXIT
 
   release-install-macos-smoke:
@@ -347,5 +350,5 @@ jobs:
             exit 1
           fi
           kill -TERM "$server_pid"
-          wait "$server_pid"
+          wait "$server_pid" || true
           trap - EXIT
