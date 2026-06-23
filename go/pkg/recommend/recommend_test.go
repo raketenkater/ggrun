@@ -105,6 +105,52 @@ func TestEvaluateChoosesBestFittingQuant(t *testing.T) {
 	}
 }
 
+func TestFastestQuantCeilingFallsBackToQ4(t *testing.T) {
+	caps := &detect.Capabilities{
+		OS:       "linux",
+		RAM:      detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		GPUs:     []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24576}},
+		Backends: []detect.Backend{{Name: "cuda", Path: "/bin/llama-server-cuda"}},
+	}
+	candidate := Candidate{
+		Name:           "fast small",
+		Repo:           "repo/fast-small",
+		AAIntelligence: 50,
+		TotalParamsB:   4,
+		Quants: []QuantOption{
+			{Name: "Q3_K_M", SizeGB: 2.1},
+			{Name: "Q4_K_M", SizeGB: 2.6},
+			{Name: "Q5_K_M", SizeGB: 2.9},
+			{Name: "Q8_0", SizeGB: 4.2},
+			{Name: "BF16", SizeGB: 7.9},
+		},
+	}
+	best, ok := evaluate(caps, candidate)
+	if !ok {
+		t.Fatal("expected candidate to fit")
+	}
+	if best.QuantName != "BF16" {
+		t.Fatalf("expected normal recommendation to keep highest quality, got %q", best.QuantName)
+	}
+	fast, ok := evaluateWithQuantFilter(caps, candidate, fastestQuantAllowed)
+	if !ok {
+		t.Fatal("expected fastest-path candidate to fit under the Q4 ceiling")
+	}
+	if fast.QuantName != "Q4_K_M" {
+		t.Fatalf("expected fastest path to cap at Q4_K_M, got %q", fast.QuantName)
+	}
+	for _, q := range []QuantOption{{Name: "Q5_K_M"}, {Name: "Q6_K"}, {Name: "Q8_0"}, {Name: "BF16"}, {Name: "F16"}, {Name: "F32"}} {
+		if fastestQuantAllowed(q) {
+			t.Fatalf("%s should not be allowed in Fastest", q.Name)
+		}
+	}
+	for _, q := range []QuantOption{{Name: "Q4_K_M"}, {Name: "IQ4_XS"}, {Name: "MXFP4"}, {Name: "Q3_K_M"}} {
+		if !fastestQuantAllowed(q) {
+			t.Fatalf("%s should be allowed in Fastest", q.Name)
+		}
+	}
+}
+
 func TestCatalogPrefersValidCacheOverEmbedded(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LLM_CACHE_DIR", dir)

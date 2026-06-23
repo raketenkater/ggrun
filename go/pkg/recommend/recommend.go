@@ -127,9 +127,13 @@ func CatalogAttribution() string {
 }
 
 func allRecommendations(caps *detect.Capabilities) []Recommendation {
+	return allRecommendationsWithQuantFilter(caps, nil)
+}
+
+func allRecommendationsWithQuantFilter(caps *detect.Capabilities, allowQuant func(QuantOption) bool) []Recommendation {
 	var rows []Recommendation
 	for _, c := range Shortlist() {
-		if rec, ok := evaluate(caps, c); ok {
+		if rec, ok := evaluateWithQuantFilter(caps, c, allowQuant); ok {
 			rows = append(rows, rec)
 		}
 	}
@@ -223,12 +227,16 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	// (>= 40% of the best effective intelligence on this machine). The floor
 	// is lower than Smartest's implicit bar because this category is about
 	// speed — a 158 t/s model at 53% of max intelligence is genuinely useful.
+	// Use a Q4-class ceiling so Fastest means fast/small by default; Q5/Q6/Q8
+	// and BF16/F16/F32 still belong in Best overall and Smartest when memory
+	// allows.
 	// Fastest does NOT dedup against Balanced/Smartest: the fastest models
 	// often also score well in Best overall (speedFactor caps at interactive),
 	// and deduping them out would leave Fastest showing slow leftovers.
 	floor := 0.40 * maxEff
-	fastPool := make([]Recommendation, 0, len(rows))
-	for _, r := range rows {
+	fastRows := allRecommendationsWithQuantFilter(caps, fastestQuantAllowed)
+	fastPool := make([]Recommendation, 0, len(fastRows))
+	for _, r := range fastRows {
 		if r.AdjustedIntelligence >= floor && r.PredictedTPS > 0 {
 			fastPool = append(fastPool, r)
 		}
@@ -298,6 +306,10 @@ func hardware(caps *detect.Capabilities) hardwareBudget {
 }
 
 func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
+	return evaluateWithQuantFilter(caps, c, nil)
+}
+
+func evaluateWithQuantFilter(caps *detect.Capabilities, c Candidate, allowQuant func(QuantOption) bool) (Recommendation, bool) {
 	budget := hardware(caps)
 	backend := backendHint(caps)
 	base := modelIntelligence(c)
@@ -310,6 +322,9 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 	ok := false
 	for _, q := range quants {
 		if q.SizeGB <= 0 {
+			continue
+		}
+		if allowQuant != nil && !allowQuant(q) {
 			continue
 		}
 		// Reject physically impossible catalog sizes (e.g. a phantom F16 at
@@ -348,6 +363,22 @@ func evaluate(caps *detect.Capabilities, c Candidate) (Recommendation, bool) {
 		}
 	}
 	return best, ok
+}
+
+func fastestQuantAllowed(q QuantOption) bool {
+	name := strings.ToUpper(q.Name)
+	switch {
+	case strings.Contains(name, "F32"), strings.Contains(name, "BF16"), strings.Contains(name, "F16"), strings.Contains(name, "F8"):
+		return false
+	case strings.Contains(name, "Q8"), strings.Contains(name, "Q6"), strings.Contains(name, "IQ6"), strings.Contains(name, "Q5"), strings.Contains(name, "IQ5"):
+		return false
+	case strings.Contains(name, "MXFP4"), strings.Contains(name, "MXP4"), strings.Contains(name, "IQ4"), strings.Contains(name, "Q4"), strings.Contains(name, "I4"):
+		return true
+	case strings.Contains(name, "IQ3"), strings.Contains(name, "Q3"), strings.Contains(name, "IQ2"), strings.Contains(name, "Q2"), strings.Contains(name, "IQ1"), strings.Contains(name, "Q1"):
+		return true
+	default:
+		return false
+	}
 }
 
 func speedReason(fitReason string, tps float64) string {

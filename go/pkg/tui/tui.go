@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -104,6 +105,9 @@ type Model struct {
 	// First-run / quick-launch action-menu cursor
 	menuCursor int
 
+	// Recommended-downloads memory reserve control focus: "", "vram", or "ram".
+	recHeadroomFocus string
+
 	// Generic arrow-select screen
 	choiceTitle   string
 	choiceOptions []string
@@ -193,8 +197,7 @@ func InitialModel() Model {
 	m.caps = caps
 	m.vramHeadroomMB = config.ParseBudgetMB(cfg.VRAMHeadroom)
 	m.ramHeadroomMB = config.ParseBudgetMB(cfg.RAMHeadroom)
-	m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
-	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
+	m.refreshRecommendations()
 
 	if len(m.models) == 0 {
 		m.screen = ScreenFirstRun
@@ -1073,6 +1076,11 @@ func (m Model) updateRecommended(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
+			if m.recHeadroomFocus != "" {
+				m.recHeadroomFocus = ""
+				m.message = ""
+				return m, nil
+			}
 			if len(m.models) == 0 {
 				m.screen = ScreenFirstRun
 			} else {
@@ -1095,7 +1103,21 @@ func (m Model) updateRecommended(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedRecommendation >= len(m.recommendations) {
 				m.selectedRecommendation = 0
 			}
+		case "left", "h":
+			if m.recHeadroomFocus != "" {
+				m.stepRecommendedHeadroom(-1)
+				return m, nil
+			}
+		case "right", "l":
+			if m.recHeadroomFocus != "" {
+				m.stepRecommendedHeadroom(1)
+				return m, nil
+			}
 		case "enter":
+			if m.recHeadroomFocus != "" {
+				m.recHeadroomFocus = ""
+				return m, nil
+			}
 			if len(m.recommendations) > 0 && m.selectedRecommendation >= 0 && m.selectedRecommendation < len(m.recommendations) {
 				rec := m.recommendations[m.selectedRecommendation]
 				m.launchRequest = &LaunchRequest{DownloadRepo: rec.Repo, DownloadQuant: rec.QuantName}
@@ -1108,20 +1130,178 @@ func (m Model) updateRecommended(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Placeholder = "Hugging Face repo"
 			m.input.Focus()
 			return m, nil
+		case "v", "V":
+			m.focusRecommendedHeadroom("vram")
+			return m, nil
+		case "m", "M":
+			m.focusRecommendedHeadroom("ram")
+			return m, nil
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) focusRecommendedHeadroom(kind string) {
+	m.recHeadroomFocus = kind
+	m.message = "Use ←/→ to reserve memory for desktop, browser, IDE, games, or other GPU/CPU work."
+	m.messageType = "info"
+}
+
+func (m *Model) stepRecommendedHeadroom(dir int) {
+	if m.recHeadroomFocus == "vram" {
+		m.setRecommendedHeadroom("vram", stepHeadroomMB(m.vramHeadroomMB, recommendedVRAMHeadroomSteps(m.caps, m.vramHeadroomMB), dir))
+	} else if m.recHeadroomFocus == "ram" {
+		m.setRecommendedHeadroom("ram", stepHeadroomMB(m.ramHeadroomMB, recommendedRAMHeadroomSteps(m.caps, m.ramHeadroomMB), dir))
+	}
+}
+
+func (m *Model) setRecommendedHeadroom(kind string, mb int) {
+	val := ""
+	if mb > 0 {
+		val = formatHeadroomMB(mb)
+	}
+	label := "VRAM reserve"
+	if kind == "ram" {
+		label = "RAM reserve"
+	}
+	if err := persistConfig(func(c *config.Config) {
+		if kind == "vram" {
+			c.VRAMHeadroom = val
+		} else {
+			c.RAMHeadroom = val
+		}
+	}); err != nil {
+		m.message = fmt.Sprintf("%s set for this session — save failed: %v", label, err)
+		m.messageType = "warning"
+	} else {
+		m.message = fmt.Sprintf("Saved: %s = %s", label, formatHeadroomMB(mb))
+		m.messageType = "info"
+	}
+	if kind == "vram" {
+		m.vramHeadroomMB = mb
+	} else {
+		m.ramHeadroomMB = mb
+	}
+	m.refreshRecommendations()
+}
+
+func stepHeadroomMB(current int, steps []int, dir int) int {
+	if len(steps) == 0 {
+		return current
+	}
+	if dir > 0 {
+		for _, step := range steps {
+			if step > current {
+				return step
+			}
+		}
+		return steps[len(steps)-1]
+	}
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i] < current {
+			return steps[i]
+		}
+	}
+	return steps[0]
+}
+
+func recommendedVRAMHeadroomSteps(caps *detect.Capabilities, current int) []int {
+	steps := []int{0, 1024, 2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 36864, 40960}
+	max := 0
+	if caps != nil {
+		max = caps.TotalVRAM()
+	}
+	return smartHeadroomSteps(steps, current, max)
+}
+
+func recommendedRAMHeadroomSteps(caps *detect.Capabilities, current int) []int {
+	steps := []int{0, 4096, 8192, 16384, 32768, 49152, 65536, 98304}
+	max := 0
+	if caps != nil {
+		max = caps.RAM.TotalMB
+	}
+	return smartHeadroomSteps(steps, current, max)
+}
+
+func smartHeadroomSteps(base []int, current, max int) []int {
+	steps := append([]int(nil), base...)
+	if current > 0 {
+		steps = append(steps, current)
+	}
+	if max > 0 {
+		// Leave at least a little memory visible to the recommender; reserving
+		// everything is not useful as a preset.
+		limit := max - min(2048, max/4)
+		filtered := steps[:0]
+		for _, step := range steps {
+			if step <= limit {
+				filtered = append(filtered, step)
+			}
+		}
+		steps = filtered
+	}
+	sort.Ints(steps)
+	uniq := steps[:0]
+	last := -1
+	for _, step := range steps {
+		if step != last {
+			uniq = append(uniq, step)
+			last = step
+		}
+	}
+	return uniq
+}
+
+func formatHeadroomMB(mb int) string {
+	if mb <= 0 {
+		return "0"
+	}
+	if mb%1024 == 0 {
+		return fmt.Sprintf("%dG", mb/1024)
+	}
+	return fmt.Sprintf("%dM", mb)
+}
+
+func (m *Model) refreshRecommendations() {
+	m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
+	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
+	if len(m.recommendations) == 0 {
+		m.selectedRecommendation = 0
+		return
+	}
+	if m.selectedRecommendation < 0 {
+		m.selectedRecommendation = 0
+	}
+	if m.selectedRecommendation >= len(m.recommendations) {
+		m.selectedRecommendation = len(m.recommendations) - 1
+	}
 }
 
 func (m Model) viewRecommended() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ Recommended Downloads ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString("  " + m.recommendedHeadroomControls() + "\n")
 	b.WriteString("  " + recommend.CatalogAttribution() + "\n\n")
 
 	if len(m.recommendations) == 0 {
 		b.WriteString(warningStyle.Render("  No safe recommendation fits the detected RAM/VRAM."))
-		b.WriteString("\n  [d] Manual Hugging Face repository  [Esc] Back\n")
+		b.WriteString("\n  [v] VRAM reserve  [m] RAM reserve  [d] Manual Hugging Face repository  [Esc] Back\n")
+		if m.recHeadroomFocus != "" {
+			b.WriteString("  ←/→ smart reserve steps · Enter/Esc done\n")
+		}
+		if m.message != "" {
+			b.WriteString("\n  ")
+			switch m.messageType {
+			case "error":
+				b.WriteString(errorStyle.Render(m.message))
+			case "warning":
+				b.WriteString(warningStyle.Render(m.message))
+			default:
+				b.WriteString(highlightStyle.Render(m.message))
+			}
+			b.WriteString("\n")
+		}
 		return b.String()
 	}
 
@@ -1164,8 +1344,35 @@ func (m Model) viewRecommended() string {
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
 
 	b.WriteString(highlightStyle.Render("  [Enter] Download selected"))
-	b.WriteString("\n  [d] Manual repo  [Esc] Back  [↑/↓] Navigate\n")
+	b.WriteString("\n  [v] VRAM reserve  [m] RAM reserve  [d] Manual repo  [Esc] Back  [↑/↓] Navigate\n")
+	if m.recHeadroomFocus != "" {
+		b.WriteString("  ←/→ smart reserve steps · Enter/Esc done\n")
+	}
+	if m.message != "" {
+		b.WriteString("\n  ")
+		switch m.messageType {
+		case "error":
+			b.WriteString(errorStyle.Render(m.message))
+		case "warning":
+			b.WriteString(warningStyle.Render(m.message))
+		default:
+			b.WriteString(highlightStyle.Render(m.message))
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
+}
+
+func (m Model) recommendedHeadroomControls() string {
+	vram := fmt.Sprintf("[v] VRAM %s", formatHeadroomMB(m.vramHeadroomMB))
+	ram := fmt.Sprintf("[m] RAM %s", formatHeadroomMB(m.ramHeadroomMB))
+	if m.recHeadroomFocus == "vram" {
+		vram = selectedStyle.Render("▸ " + vram + " ◂")
+	}
+	if m.recHeadroomFocus == "ram" {
+		ram = selectedStyle.Render("▸ " + ram + " ◂")
+	}
+	return fmt.Sprintf("Reserve for other apps: %s   %s", vram, ram)
 }
 
 func (m Model) viewInputScreen() string {
@@ -1577,12 +1784,10 @@ func (m *Model) applySetting(row settingRow, val string) {
 	switch row.label {
 	case "VRAM headroom":
 		m.vramHeadroomMB = config.ParseBudgetMB(val)
-		m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
-		m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
+		m.refreshRecommendations()
 	case "RAM headroom":
 		m.ramHeadroomMB = config.ParseBudgetMB(val)
-		m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
-		m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
+		m.refreshRecommendations()
 	case "Backend":
 		m.backend = val
 		m.refreshTunedCounts()

@@ -244,6 +244,28 @@ def list_available_quantizations(repo):
         return []
 
 
+def normalize_quant_name(quant):
+    """Normalize a quantization label for exact-name comparisons."""
+    return (quant or "").replace(".", "_").strip("_").upper()
+
+
+def quant_name_aliases(quant):
+    """Return exact-match aliases for catalog/download quant labels.
+
+    The recommender catalog preserves Unsloth Dynamic quants with a ``UD-``
+    prefix so it can score them differently. Some Hugging Face repos expose the
+    same files without that prefix (for example ``Q4_K_XL`` instead of
+    ``UD-Q4_K_XL``), so downloader matching needs to accept the bare form too.
+    """
+    normalized = normalize_quant_name(quant)
+    if not normalized:
+        return []
+    aliases = [normalized]
+    if normalized.startswith("UD-"):
+        aliases.append(normalized[3:])
+    return aliases
+
+
 def get_model_files(repo, selected_quantization):
     """Get list of files to download based on selection"""
     try:
@@ -254,7 +276,7 @@ def get_model_files(repo, selected_quantization):
         if selected_quantization:
             # Normalize quantization name for matching
             # Remove trailing dot and underscore prefix for comparison
-            norm_quant = selected_quantization.replace(".", "_").strip("_")
+            quant_aliases = quant_name_aliases(selected_quantization)
 
             # Filter by exact quantization name match
             matching = []
@@ -263,7 +285,7 @@ def get_model_files(repo, selected_quantization):
                     continue
                 basename = f.split("/")[-1]
                 # Check if filename contains the exact quantization pattern
-                if re.search(rf"\b{re.escape(norm_quant)}\b", basename, re.IGNORECASE):
+                if any(re.search(rf"\b{re.escape(alias)}\b", basename, re.IGNORECASE) for alias in quant_aliases):
                     matching.append(f)
         else:
             # Get all gguf files
@@ -654,9 +676,14 @@ def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant=""):
         return None
 
     if requested_quant:
+        requested_aliases = quant_name_aliases(requested_quant)
         for q, _ in quant_list:
-            if q.lower() == requested_quant.lower():
+            if normalize_quant_name(q) == normalize_quant_name(requested_quant):
                 print(f"\nUsing recommended quantization: {q}")
+                return q
+        for q, _ in quant_list:
+            if normalize_quant_name(q) in requested_aliases:
+                print(f"\nUsing recommended quantization: {q} (matched {requested_quant})")
                 return q
         print(f"\nRequested quantization {requested_quant} was not found; falling back to local selection.")
 

@@ -166,3 +166,32 @@ def test_select_quantization_recommends_with_ram_only_budget(monkeypatch):
     )
 
     assert selected == "Q4_K_M"
+
+
+def test_select_quantization_accepts_unsloth_dynamic_catalog_alias(monkeypatch):
+    downloader = load_downloader()
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: ["model-Q4_K_XL.gguf"])
+    monkeypatch.setattr(downloader, "list_available_quantizations", lambda repo: [
+        ("Q4_K_XL", gib(2.7)),
+        ("Q5_K_M", gib(2.9)),
+    ])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": pytest.fail("should not prompt"))
+
+    selected = downloader.select_quantization(
+        "unsloth/Qwen3.5-4B-GGUF",
+        requested_quant="UD-Q4_K_XL",
+    )
+
+    assert selected == "Q4_K_XL"
+
+
+def test_get_model_files_accepts_unsloth_dynamic_catalog_alias(monkeypatch):
+    downloader = load_downloader()
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: [
+        "model-Q4_K_XL.gguf",
+        "model-Q5_K_M.gguf",
+    ])
+
+    files = downloader.get_model_files("unsloth/Qwen3.5-4B-GGUF", "UD-Q4_K_XL")
+
+    assert files == ["model-Q4_K_XL.gguf"]

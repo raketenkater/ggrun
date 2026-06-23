@@ -34,15 +34,15 @@ decode tok/s (256-token generation), slowest backend on the left:
 
 | Model (quant) | Ollama 0.30.8 | llama.cpp `--fit` | ggrun v3 | v3 `--ai-tune` | v3 vs Ollama |
 |---|---:|---:|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 150.4 | **154.2** | **+24%** |
-| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | **37.5** | **37.5** | **+64%** |
-| Qwen3.5-122B-A10B UD-IQ4_XS (MoE) | 13.5† | 21.0 | 23.6 | **23.6** | **+74%** |
-| MiniMax-M3 UD-IQ3_XXS (MoE) | ✗ won't load | ✗ won't load | **5.24** | not rerun | Ollama can't load |
+| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 151.4 | **185.7** | **+49%** |
+| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.4 | **39.8** | **+74%** |
+| Qwen3.5-122B-A10B UD-IQ4_XS (MoE) | 13.5† | 21.0 | 22.9 | **23.1** | **+71%** |
+| MiniMax-M3 UD-IQ3_XXS (MoE) | ✗ won't load | ✗ won't load | 5.59 | **5.65** | Ollama can't load |
 
 † Ollama can't import sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
 so the 122B was merged to one file before importing; MiniMax-M3 it can't load at all
-(`minimax-m3` is ik_llama-only). Where models load, ggrun is **24–74% faster than
-Ollama — including +74% on the 122B MoE** at heavy VRAM+RAM offload (60 GB, ~18 GB spilled
+(`minimax-m3` is ik_llama-only). Where models load, ggrun is **49–74% faster than
+Ollama — including +71% on the 122B MoE** at heavy VRAM+RAM offload (60 GB, ~18 GB spilled
 to RAM). Driving the *same* llama.cpp master binary (no ik_llama), ggrun still beat raw
 `--fit` — so the gain is the placement, not just the backend swap. Full methodology,
 exact commands, and artifacts: [docs/performance.md](docs/performance.md). Numbers are
