@@ -42,8 +42,8 @@ decode tok/s (256-token generation), slowest backend on the left:
 † Ollama can't import sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
 so the 122B was merged to one file before importing; MiniMax-M3 it can't load at all
 (`minimax-m3` is ik_llama-only). Where models load, ggrun is **49–74% faster than
-Ollama — including +71% on the 122B MoE** at heavy VRAM+RAM offload (60 GB, ~18 GB spilled
-to RAM). Driving the *same* llama.cpp master binary (no ik_llama), ggrun still beat raw
+Ollama — ~65% on average — including +71% on the 122B MoE** at heavy VRAM+RAM offload
+(60 GB, ~18 GB spilled to RAM). Driving the *same* llama.cpp master binary (no ik_llama), ggrun still beat raw
 `--fit` — so the gain is the placement, not just the backend swap. Full methodology,
 exact commands, and artifacts: [docs/performance.md](docs/performance.md). Numbers are
 reproducible with [`scripts/bench-v3-comparison.sh`](scripts/bench-v3-comparison.sh) —
