@@ -21,7 +21,8 @@ param(
     [string]$LlamaCppRepo = 'https://github.com/ggml-org/llama.cpp.git',
     [string]$LlamaCppRef = 'master',
     [string]$CudaArchitectures = '',
-    [switch]$NoPath
+    [switch]$NoPath,
+    [switch]$AssumeYes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +42,14 @@ function Test-Command($Name) {
 
 function Require-Command($Name, $Hint) {
     if (!(Test-Command $Name)) { Fail "$Name was not found. $Hint" }
+}
+
+function Confirm-Install([string]$What) {
+    # Consent gate before installing third-party software. Non-interactive when
+    # -AssumeYes or LLM_INSTALL_NONINTERACTIVE=1 (CI / piped installs).
+    if ($AssumeYes -or $env:LLM_INSTALL_NONINTERACTIVE -eq '1') { return $true }
+    $reply = Read-Host "Install $What now? [Y/n]"
+    return ($reply -eq '' -or $reply -match '^(y|yes)$')
 }
 
 function Get-ReleaseInfo {
@@ -210,6 +219,46 @@ function Build-CudaBackend {
     Ok "Built native Windows CUDA backend from $($server.FullName)"
 }
 
+function Install-PrebuiltCudaBackend([string]$BinDir) {
+    # Fetch upstream prebuilt llama.cpp CUDA binaries (server + cudart) so a GPU
+    # backend works with no CUDA Toolkit / MSVC / CMake — the from-source build
+    # (Build-CudaBackend) stays as a fallback.
+    Say 'Fetching prebuilt llama.cpp CUDA backend from ggml-org/llama.cpp releases...'
+    try {
+        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest' -Headers @{ 'User-Agent' = 'ggrun-installer' }
+    } catch {
+        Warn "Could not query llama.cpp releases: $($_.Exception.Message)"
+        return $false
+    }
+    $assets = $rel.assets
+    # Prefer the cuda-12.4 build for broad driver compatibility, else any win-cuda x64.
+    $server = $assets | Where-Object { $_.name -match 'bin-win-cuda-12\.4-x64\.zip$' } | Select-Object -First 1
+    if (-not $server) { $server = $assets | Where-Object { $_.name -match 'bin-win-cuda-.*-x64\.zip$' } | Select-Object -First 1 }
+    if (-not $server) { Warn 'No prebuilt win-cuda asset in the latest llama.cpp release.'; return $false }
+    # Match the cudart redistributable to the server asset's CUDA version.
+    $cudaVer = if ($server.name -match 'cuda-([0-9.]+)-x64') { $Matches[1] } else { '' }
+    $cudart = $assets | Where-Object { $_.name -match "cudart-.*win-cuda-$([regex]::Escape($cudaVer))-x64\.zip$" } | Select-Object -First 1
+    if (-not $cudart) { $cudart = $assets | Where-Object { $_.name -match 'cudart-.*win-cuda-.*-x64\.zip$' } | Select-Object -First 1 }
+    try {
+        foreach ($a in @($server, $cudart)) {
+            if (-not $a) { continue }
+            $zip = Join-Path $tmp $a.name
+            Say "  downloading $($a.name)"
+            Invoke-WebRequest -Uri $a.browser_download_url -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $BinDir -Force
+        }
+    } catch {
+        Warn "Prebuilt CUDA download/extract failed: $($_.Exception.Message)"
+        return $false
+    }
+    if (!(Test-Path (Join-Path $BinDir 'llama-server.exe'))) {
+        Warn 'Prebuilt archive did not contain llama-server.exe.'
+        return $false
+    }
+    Ok "Installed prebuilt CUDA backend (llama.cpp $($rel.tag_name), CUDA $cudaVer)"
+    return $true
+}
+
 function Resolve-Python {
     # Returns @{ Exe; Pre } for a verified Python 3, or $null. Checking the
     # interpreter avoids mistaking the Microsoft Store execution alias for an
@@ -249,8 +298,8 @@ function Ensure-Python {
     # huggingface_hub. ggrun runs local models without Python, so this is
     # best-effort and never fatal.
     $py = Resolve-Python
-    if (!$py -and (Test-Command 'winget')) {
-        Say 'Python 3 not found; installing via winget (needed for model downloads)...'
+    if (!$py -and (Test-Command 'winget') -and (Confirm-Install 'Python 3.12 via winget (needed for model downloads)')) {
+        Say 'Installing Python 3 via winget...'
         try { & winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent } catch { }
         # winget updates the persistent PATH, not the current PowerShell
         # process. Refresh it before looking for the newly installed runtime.
@@ -308,10 +357,16 @@ try {
     if ($Backend -eq 'cuda') {
         $installed = Install-ReleaseBundle $Asset $false
         if (!$installed) {
-            Warn "No native Windows CUDA release asset found: $Asset"
-            Say 'Installing the CPU Windows bundle for the launcher, then building llama.cpp CUDA locally.'
+            Say 'Installing the CPU Windows bundle for the launcher, then adding a CUDA backend.'
             [void](Install-ReleaseBundle $CpuAsset $true)
-            Build-CudaBackend
+            $cudaOk = $false
+            if (Confirm-Install 'prebuilt llama.cpp CUDA backend from ggml-org (no toolchain needed)') {
+                $cudaOk = Install-PrebuiltCudaBackend $bin
+            }
+            if (!$cudaOk) {
+                Warn 'Falling back to building llama.cpp CUDA from source (needs git + cmake + nvcc + MSVC).'
+                Build-CudaBackend
+            }
         }
     } else {
         [void](Install-ReleaseBundle $Asset $true)

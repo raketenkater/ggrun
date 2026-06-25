@@ -567,10 +567,12 @@ choose_cuda_auto_fallback_backend() {
     has_cuda_toolkit && return 1
     if vulkan_available; then
         BACKEND_CHOICE="vulkan"
-        warn "CUDA toolkit not found and no CUDA bundle is available; falling back to Vulkan."
+        say "No CUDA toolkit found — installing the prebuilt Vulkan GPU backend (runs on your"
+        say "GPU, no build needed). For maximum CUDA speed, install the CUDA toolkit and re-run,"
+        say "or attach a ggrun CUDA release bundle."
     else
         BACKEND_CHOICE="cpu"
-        warn "CUDA toolkit and a usable Vulkan device were not found; falling back to CPU."
+        warn "No CUDA toolkit and no usable Vulkan device found; installing the CPU backend."
     fi
     ok "Selected fallback backend: $BACKEND_CHOICE"
 }
