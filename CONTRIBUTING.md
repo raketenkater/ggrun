@@ -15,4 +15,9 @@ For performance changes, include the benchmark command, hardware, model, backend
 context size, and generated artifact path. Do not commit generated benchmark run
 directories or model files.
 
-See `docs/repo-hygiene.md` for repository layout and public documentation rules.
+## Commit messages
+
+Use a `scope: lowercase summary` subject (e.g. `tune: protect KV-cache flags from
+AI-tune`), with an optional body explaining the why. Keep messages human and
+specific — no `Update X` placeholders, and no AI co-author or attribution
+trailers in the public history.

@@ -1,7 +1,6 @@
-# Launch Performance Tables
+# Benchmarks
 
-These are curated local measurements for release posts. Raw run directories are
-not committed; benchmark scripts write new artifacts under `.benchmarks/`.
+Measured on the reference rig below with `scripts/bench-v3-comparison.sh`.
 
 Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB. Context: 32768.
 CUDA/IK backend: ik_llama.cpp build 4641 (`6c00e87a`). Vulkan backend:
@@ -40,11 +39,11 @@ Both-run vs Ollama 0.30.8 (same merged GGUF, 32k, 256-token decode):
 
 | Model | Ollama | ggrun | ggrun advantage |
 |---|---:|---:|---:|
-| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB, ~18 GiB to RAM) | 13.54 | 23.56 | **+74%** |
+| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB, ~18 GiB to RAM) | 13.54 | 23.56 | +74% |
 
 Ollama can't *pull* sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
 so the 122B was merged to a single file and imported with `ollama create`; at that point it
-runs, and ggrun is **+74%** faster on the heavy VRAM+RAM offload path. MiniMax-M3 it
+runs, and ggrun is +74% faster on the heavy VRAM+RAM offload path. MiniMax-M3 it
 can't load at all (`unknown model architecture: minimax-m3` — ik_llama.cpp only); raw
 llama.cpp `--fit` loads the 122B (20.97 decode) but also can't load MiniMax-M3. AI Tune
 finds only marginal gains over the already-strong default placement.
@@ -57,18 +56,18 @@ tokens per request:
 | Mode | Profile | Median generation tok/s | Draft accepted | Result |
 |---|---|---:|---:|---|
 | `--spec off` | structured/spec | 40.31 | 0/0 | baseline |
-| `--spec auto` | structured/spec | 278.06 | 2367/2367 | major win |
+| `--spec auto` | structured/spec | 278.06 | 2367/2367 | faster (best case) |
 | `--spec off` | code | 38.42 | 0/0 | baseline |
 | `--spec auto` | code | 22.71 | 1161/3208 | slower |
 
-Speculative decoding is therefore a measured, workload-gated feature. It should
-not be advertised as always faster.
+Speculative decoding is therefore a measured, workload-gated feature: the 278
+tok/s row is one best-case structured prompt with full draft acceptance, and the
+same setting is slower on code output. It should not be advertised as always faster.
 
 ## Launch Read
 
-The strongest v3 performance claim is not that AI Tune magically improves every
-model. The strongest claim is that v3 makes the GGUF server launch path typed,
-reproducible, cross-platform, and backend-aware:
+v3's main claim isn't that AI Tune improves every model. It's that v3 makes the
+GGUF server launch path measured, reproducible, and backend-aware:
 
 - v3 default placement beats raw llama.cpp `--fit` and Ollama on every model all
   three can load (+21% / +64% vs Ollama on the 4B / 27B).

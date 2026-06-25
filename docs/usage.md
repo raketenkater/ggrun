@@ -47,12 +47,20 @@ without wrapper changes.
 ## AI Tune
 
 `--ai-tune` starts from the launcher heuristic, benchmarks it, tests candidate flag sets,
-and stores the best successful result in the local cache. The served model can propose
-candidate flags, but the launcher validates them against backend help, memory headroom,
-crash behavior, and benchmark results before a cache entry is reused. A 1% noise floor
-guards against replacing a good baseline with single-run noise.
+and stores the best successful result in the local cache. Because it re-measures against
+whatever llama.cpp / ik_llama.cpp build you currently have, it keeps your launch flags in
+step with the backends as they change upstream, instead of you tracking new flags and
+defaults by hand. The served model can propose candidate flags, but the launcher validates
+them against backend help, memory headroom, crash behavior, and benchmark results before a
+cache entry is reused. A 1% noise floor guards against replacing a good baseline with
+single-run noise.
 
-See [performance.md](performance.md) for the benchmark format and artifacts.
+AI Tune only changes performance knobs (batch, microbatch, threads, flash attention,
+mmap/mlock, defrag, speculative decoding). It never changes anything that affects output
+quality — KV-cache quantization, context size, and `--parallel` are user-owned and left
+exactly as you set them, including in cached and community-shared tunes.
+
+See [launch-performance.md](launch-performance.md) for the benchmark tables and method.
 
 ## Speculative decoding
 

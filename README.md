@@ -10,7 +10,9 @@
 **Stop hand-writing `--tensor-split`, `-ot`, and KV-cache flags.** Point ggrun
 at a GGUF and it measures your GPUs, RAM, and PCIe topology, picks the backend
 (llama.cpp or the faster ik_llama.cpp fork), computes multi-GPU and MoE expert
-placement, and serves an OpenAI-compatible API — one command from file to endpoint.
+placement, and serves an OpenAI-compatible API. The placement is exact — read
+from the GGUF and measured VRAM, not guessed — so big MoE models load across
+mismatched GPUs that would run out of memory under other launchers.
 
 ```bash
 ggrun recommend                           # rank the best models for YOUR hardware
@@ -21,11 +23,7 @@ ggrun                                     # no args → interactive TUI
 
 ![demo](demo.gif)
 
-*No flags: `ggrun` with no arguments opens a TUI that detects your GPUs, lists your models, computes hardware-matched launch settings, and ranks downloads by fit.*
-
-**Just run `ggrun` with no arguments** to open the full arrow-key TUI — browse and
-download models, adjust settings, and launch, without writing a single flag. Pass a model
-path or flags for one-shot CLI use instead.
+*No flags: `ggrun` with no arguments opens a TUI that detects your GPUs, lists your models, computes hardware-matched launch settings, and ranks downloads by fit. Pass a model path or flags for one-shot CLI use instead.*
 
 ## Benchmarks
 
@@ -41,13 +39,13 @@ decode tok/s (256-token generation), slowest backend on the left:
 
 † Ollama can't import sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
 so the 122B was merged to one file before importing; MiniMax-M3 it can't load at all
-(`minimax-m3` is ik_llama-only). Where models load, ggrun is **49–74% faster than
-Ollama — ~65% on average — including +71% on the 122B MoE** at heavy VRAM+RAM offload
-(60 GB, ~18 GB spilled to RAM). Driving the *same* llama.cpp master binary (no ik_llama), ggrun still beat raw
-`--fit` — so the gain is the placement, not just the backend swap. Full methodology,
-exact commands, and artifacts: [docs/performance.md](docs/performance.md). Numbers are
-reproducible with [`scripts/bench-v3-comparison.sh`](scripts/bench-v3-comparison.sh) —
-regressions against these tables are treated as bugs.
+(`minimax-m3` is ik_llama-only). Where models load, ggrun is 49–74% faster than
+Ollama on this rig — including +71% on the 122B MoE at heavy VRAM+RAM offload
+(60 GB, ~18 GB spilled to RAM). Driving the *same* llama.cpp master binary (no ik_llama),
+ggrun still beat raw `--fit`, so the gain is the placement, not just the backend swap.
+Measured with [`scripts/bench-v3-comparison.sh`](scripts/bench-v3-comparison.sh) on the
+rig above; full method and backend commits are in
+[docs/launch-performance.md](docs/launch-performance.md).
 
 ## Install
 
@@ -80,14 +78,14 @@ layout are in [docs/install.md](docs/install.md).
 ```bash
 ggrun ~/models/model.gguf                 # launch a local model
 ggrun unsloth/Qwen3.6-27B-GGUF --download # download a fitting quant, then launch
-ggrun model.gguf --ai-tune                # benchmark flag sets, cache the fastest
+ggrun model.gguf --ai-tune                # re-benchmark flags as backends change, cache the fastest
 ggrun model.gguf --dry-run                # print the backend command without running
 ggrun model.gguf --benchmark              # load, measure tok/s, exit
 ```
 
 Common flags: `--backend ik_llama|llama|vulkan`, `--gpus 0,1`, `--ctx-size`,
 `--kv-quality`, `--kv-placement`, `--vram-headroom 2G`, `--ram-headroom 8G`, `--vision`, `--spec auto`. Unknown flags pass straight
-through to `llama-server`, so nothing upstream is out of reach. Full list:
+through to `llama-server`. Full list:
 [docs/usage.md](docs/usage.md).
 
 > **Security:** ggrun binds to `127.0.0.1` by default because the
@@ -119,7 +117,7 @@ output, or use `ggrun daemon` for single-model swapping.
 | Backend selection (ik_llama / llama / Vulkan) | manual | automatic, dialect-aware |
 | KV-cache type / batch sizing | manual | probe-measured |
 | AI Tune (measured flag search) | no | yes, cached per model+hardware |
-| Hardware-matched quant download | no | yes (HF search + intelligence ranking) |
+| Hardware-matched quant download | no | yes (HF search, capability-vs-fit ranked) |
 | Vision projector / speculative decoding | manual | automatic, validated |
 | Crash recovery / backend fallback | no | yes |
 
@@ -128,10 +126,14 @@ output, or use `ggrun daemon` for single-model swapping.
 - One Go binary; Linux, macOS, and native Windows. CUDA / Vulkan / Metal / CPU.
 - Exact-ledger multi-GPU + MoE expert placement (`--tensor-split` + `-ot` from measured
   VRAM and GGUF sizes), with adaptive retry on out-of-memory.
-- **AI Tune** — benchmarks candidate flag sets and caches the fastest valid result per
-  model + hardware; a community tune pool seeds first launches (`LLM_COMMUNITY_TUNES=off`).
-- Hugging Face downloader with hardware-aware quant selection and a GUI recommendation
-  picker ranked by intelligence-per-fit.
+- **AI Tune** — re-benchmarks candidate flag sets as llama.cpp and ik_llama.cpp
+  evolve and caches the fastest valid result per model + hardware, so your launch
+  flags keep up with the backends without hand-tracking upstream. It only changes
+  performance knobs (batch, threads, flash-attn, speculative decoding), never
+  output quality. A community tune pool seeds first launches (`LLM_COMMUNITY_TUNES=off`).
+- Hugging Face downloader with hardware-aware quant selection and a GUI
+  recommendation picker that ranks models by capability against how well each
+  quant fits your VRAM.
 - Speculative decoding (MTP, EAGLE-3, validated draft GGUFs) and vision (`mmproj`) support.
 - OpenAI-compatible server, arrow-key TUI, crash recovery with backend fallback.
 
@@ -139,22 +141,25 @@ output, or use `ggrun daemon` for single-model swapping.
 
 ik_llama.cpp (CUDA, source build) · llama.cpp (Vulkan, Metal, CPU) · native Windows CUDA
 via `install.ps1 -Backend cuda`. The backend binary is pluggable via `LLAMA_SERVER`.
+AMD and Intel GPUs run through Vulkan (no ROCm/HIP path). macOS/Metal builds and
+detects Apple unified memory but is pending validation on real Apple hardware —
+every benchmark here is from NVIDIA CUDA.
 
 ## Requirements
 
 - **Linux:** `curl`, `git`, `python3`; `cmake`/compiler + NVIDIA CUDA toolkit for CUDA
   source builds; `vulkaninfo` for Vulkan detection.
 - **macOS:** Apple Silicon; Xcode command-line tools for source builds.
-- **Windows:** Windows 10/11 x86_64, PowerShell 5+, Python; CUDA Toolkit + VS C++ Build
-  Tools for `-Backend cuda`.
+- **Windows:** Windows 10/11 x86_64, PowerShell 5+, Python. `-Backend cuda` downloads
+  prebuilt llama.cpp CUDA binaries (no toolchain needed); CUDA Toolkit + VS C++ Build
+  Tools are only required for the from-source fallback.
 
 ## Documentation
 
 [Install](docs/install.md) ·
 [Usage](docs/usage.md) ·
 [Architecture](docs/architecture.md) ·
-[Performance](docs/performance.md) ·
-[Launch benchmarks](docs/launch-performance.md) ·
+[Benchmarks](docs/launch-performance.md) ·
 [Speculative decoding](docs/speculative-decoding.md) ·
 [Model recommendations](docs/model-recommendations.md) ·
 [Changelog](CHANGELOG.md)

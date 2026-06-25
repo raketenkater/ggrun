@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Windows GPU without a toolchain.** `install.ps1 -Backend cuda` now downloads
+  prebuilt llama.cpp CUDA binaries (server + cudart) from ggml-org by default; the
+  from-source build (CUDA Toolkit + MSVC + CMake) remains only as a fallback. Third-party
+  installs (the CUDA download, Python via winget) ask for consent first — `-AssumeYes` /
+  `LLM_INSTALL_NONINTERACTIVE=1` keep CI and piped installs non-interactive.
 - **Windows: CPU-only bundle no longer crash-loops on NVIDIA systems.** The
   default CPU bundle used to emit CUDA offload flags its own binary couldn't
   honor (`unknown buffer type`), which the launcher hid as `failure: unknown:`
@@ -27,21 +32,22 @@
 
 - **Renamed to `ggrun`** (formerly `llm-server`; pronounced "g-run", from "gguf
   run"). Existing `~/llm-server` app homes auto-migrate to `~/ggrun` on the next
-  `setup.sh`, and the old `llm-server` command keeps working via a symlink. The
-  GitHub repo redirects, so old install/clone URLs still resolve.
+  `setup.sh`, and the old `llm-server` command keeps working via a symlink.
+  GitHub redirects a renamed repository's old URLs as long as the old name
+  isn't reused.
 - **PCIe-bandwidth-weighted MoE tensor-split.** On heterogeneous-PCIe rigs (e.g.
   a card stuck at x1) the split now concentrates layer ownership on the
-  fastest-link GPU, so CPU-expert streaming isn't bottlenecked — up to **3.4×
-  prefill** on MiniMax-M3 with no decode regression. Symmetric rigs fall back to
+  fastest-link GPU, so CPU-expert streaming isn't bottlenecked — up to 3.4x
+  prefill on MiniMax-M3 with no decode regression. Symmetric rigs fall back to
   the previous free-VRAM-proportional split.
-- **Smarter model recommendations.** The download picker ranks by effective
+- **Model recommendation ranking.** The download picker ranks by effective
   intelligence (AA index × quantization quality retained) × predicted speed ×
   fit, in three categories (best for your machine / smartest that fits / fastest
   capable), preferring Unsloth dynamic quants; the catalog auto-refreshes.
 - **Clear backend/architecture errors.** Launching an ik_llama-only architecture
   (e.g. `minimax-m3`) on a mainline llama.cpp backend now fails fast with the fix
   instead of a cryptic load crash.
-- **Polished launch UX.** An animated startup status replaces the raw backend log
+- **Launch UX.** An animated startup status replaces the raw backend log
   spam while a model loads; the TUI config screen is grouped into Context /
   Tuning / Run mode / Actions sections.
 - **Exact-ledger multi-GPU MoE placement.** Large MoE models now load reliably
@@ -74,9 +80,10 @@
 - **Community tune pool.** When a model has no local AI-Tune cache, the
   launcher now checks a shared pool (one HTTPS GET keyed by
   model+size+GPU-set+backend, mirroring the local cache file naming) and
-  applies a community-measured config after sanitization. Only flags on the
-  tune allow-list survive (batch/threads/KV-types/flash-attn/spec settings);
-  model paths, ports, devices, and placement flags can never be injected.
+  applies a community-measured config after sanitization. Only benign
+  performance flags survive (batch/threads/flash-attn/spec settings); model
+  paths, ports, devices, placement flags, and output-quality flags (KV-cache
+  quantization, parallel slots) can never be injected.
   Hits cache for 7 days, misses for 24 h, lookups time out in 3 s — fully
   offline-safe. Disable with `LLM_COMMUNITY_TUNES=off`; point elsewhere with
   `LLM_COMMUNITY_TUNES_URL`. After a successful `--ai-tune`, the launcher
@@ -95,7 +102,7 @@
 - **Benchmarked against llama.cpp `--fit`** — on a 3090 Ti + 4070 + 3060 rig at
   32k context, v3 default placement beat upstream auto-fit on every model;
   driving the same master binary the win held, so it is placement, not just
-  backend choice. See `docs/performance.md`.
+  backend choice. See `docs/launch-performance.md`.
 - **Repositioned README and repo metadata** for discoverability: pain-first
   intro, honest comparison vs raw llama.cpp `--fit` / Ollama / llama-swap,
   benchmark methodology statement, release-asset install path.
