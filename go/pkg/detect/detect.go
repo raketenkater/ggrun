@@ -60,9 +60,6 @@ type Backend struct {
 func Detect() (*Capabilities, error) {
 	gpus := detectNVIDIA()
 	if len(gpus) == 0 {
-		gpus = detectROCm()
-	}
-	if len(gpus) == 0 {
 		gpus = detectVulkanGPUs()
 	}
 	if len(gpus) == 0 {
@@ -218,31 +215,6 @@ func pcieBandwidthFromSysfs(busID string) int {
 	lanes, _ := strconv.Atoi(widthStr)
 
 	return pcieBandwidth(gen, lanes)
-}
-
-func detectROCm() []GPU {
-	if _, err := exec.LookPath("rocm-smi"); err != nil {
-		return nil
-	}
-	out, err := exec.Command("rocm-smi", "--showproductname", "--showmeminfo", "vram").Output()
-	if err != nil {
-		return nil
-	}
-	// rocm-smi output parsing is less structured; minimal support
-	var gpus []GPU
-	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.Contains(line, "GPU") && strings.Contains(line, ":") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				gpus = append(gpus, GPU{
-					Index:       i,
-					Name:        strings.TrimSpace(parts[1]),
-					VRAMTotalMB: 0, // would need more parsing
-				})
-			}
-		}
-	}
-	return gpus
 }
 
 // detectAppleSilicon synthesizes a GPU entry for Apple Silicon unified memory.

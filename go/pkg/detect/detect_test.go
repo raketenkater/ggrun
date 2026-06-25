@@ -75,12 +75,6 @@ func TestDetectNVIDIA(t *testing.T) {
 	_ = gpus
 }
 
-func TestDetectROCm(t *testing.T) {
-	gpus := detectROCm()
-	// May or may not have rocm-smi
-	_ = gpus
-}
-
 func TestParseVulkanGPUsKeepsMetadataWithDeviceBlock(t *testing.T) {
 	summary := `GPU0:
 	apiVersion         = 1.3.277

@@ -964,8 +964,8 @@ func estimateTargetVRAMUse(target *ModelProfile, caps *detect.Capabilities, gpuI
 		share := float64(caps.GPUs[gpuIndex].VRAMTotalMB) / float64(totalFree)
 		nonExpertShare := float64(target.NonExpertBytes) / (1024 * 1024) * share
 
-		// If we have a known placement from Compute(), use it
-		// For now: proportional estimate is reasonable
+		// Approximate this GPU's non-expert weight by its share of total VRAM;
+		// exact per-tensor placement isn't needed for this estimate.
 		return int(nonExpertShare)
 	}
 

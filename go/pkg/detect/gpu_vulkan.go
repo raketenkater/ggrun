@@ -1,8 +1,11 @@
 package detect
 
 import (
+	"context"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type vulkanDevice struct {
@@ -18,7 +21,28 @@ func detectVulkanGPUs() []GPU {
 	if err != nil {
 		return nil
 	}
-	return parseVulkanGPUs(string(out))
+	gpus := parseVulkanGPUs(string(out))
+	if len(gpus) == 0 {
+		return gpus
+	}
+	// Best-effort: replace the name-heuristic VRAM with the real DEVICE_LOCAL
+	// heap size when full vulkaninfo is available. Keyed by device name, so it
+	// stays correct regardless of how many devices --summary skipped; any parse
+	// failure or unmatched device just leaves the heuristic in place. This path
+	// only runs for non-NVIDIA rigs (NVIDIA is detected via nvidia-smi first).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	full, err := exec.CommandContext(ctx, "vulkaninfo").Output()
+	if err != nil {
+		return gpus
+	}
+	heaps := parseVulkanHeapVRAM(string(full))
+	for i := range gpus {
+		if mb, ok := heaps[gpus[i].Name]; ok && mb > 0 {
+			gpus[i].VRAMTotalMB = mb
+		}
+	}
+	return gpus
 }
 
 func parseVulkanGPUs(summary string) []GPU {
@@ -172,4 +196,69 @@ func estimateVRAMFromName(name string) int {
 	default:
 		return 4096
 	}
+}
+
+// parseVulkanHeapVRAM reads the largest DEVICE_LOCAL memory heap for each
+// discrete GPU from full `vulkaninfo` output, returning device name -> VRAM in
+// MB. It is deliberately conservative: integrated GPUs (whose DEVICE_LOCAL heap
+// is shared system RAM) are skipped, and anything it can't parse cleanly is
+// omitted so the caller falls back to the name heuristic.
+func parseVulkanHeapVRAM(full string) map[string]int {
+	result := map[string]int{}
+	curName, curType := "", ""
+	var heapBytes int64
+	heapHasSize := false
+
+	for _, raw := range strings.Split(full, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "deviceName"):
+			if _, v, ok := splitVulkanKV(line); ok {
+				curName = v
+			}
+		case strings.HasPrefix(line, "deviceType"):
+			if _, v, ok := splitVulkanKV(line); ok {
+				curType = v
+			}
+		case strings.HasPrefix(line, "memoryHeaps["):
+			heapBytes = 0
+			heapHasSize = false
+		case strings.HasPrefix(line, "size") && strings.Contains(line, "="):
+			if b, ok := vulkanHeapSizeBytes(line); ok {
+				heapBytes = b
+				heapHasSize = true
+			}
+		case strings.Contains(line, "DEVICE_LOCAL"):
+			if curName != "" && heapHasSize && heapBytes > 0 &&
+				!strings.Contains(strings.ToUpper(curType), "INTEGRATED") {
+				if mb := int(heapBytes / (1024 * 1024)); mb > result[curName] {
+					result[curName] = mb
+				}
+			}
+			heapHasSize = false
+		}
+	}
+	return result
+}
+
+// vulkanHeapSizeBytes extracts the byte count from a vulkaninfo heap line like
+// "size = 12878610432 (0x2ff800000) (11.99 GiB)".
+func vulkanHeapSizeBytes(line string) (int64, bool) {
+	idx := strings.Index(line, "=")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := strings.TrimSpace(line[idx+1:])
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest[:end], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
