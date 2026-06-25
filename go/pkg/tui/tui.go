@@ -37,7 +37,6 @@ type Screen int
 
 const (
 	ScreenMain Screen = iota
-	ScreenLaunchPrompt
 	ScreenModelConfig
 	ScreenPrelaunch
 	ScreenTunedPicker
@@ -316,8 +315,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case ScreenMain:
 		return m.updateMain(msg)
-	case ScreenLaunchPrompt:
-		return m.updateLaunchPrompt(msg)
 	case ScreenModelConfig:
 		return m.updateModelConfig(msg)
 	case ScreenPrelaunch:
@@ -352,9 +349,10 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if item.isModel {
 					m.selectedModel = item.index
 					m.recommendation = computeRecommendation(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), m.models[m.selectedModel])
-					m.menuCursor = 0
-					m.screen = ScreenLaunchPrompt
-					return m, nil
+					// "It just works": Enter launches now with the recommended
+					// settings. Press c on a model to configure before launching.
+					m.launchRequest = m.buildLaunchRequest()
+					return m, tea.Quit
 				}
 				switch item.action {
 				case "recommend":
@@ -385,56 +383,20 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openSettings()
 		case "b", "B":
 			m.openBackendChoice(ScreenMain)
+		case "c", "C":
+			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
+				m.selectedModel = item.index
+				m.recommendation = computeRecommendation(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), m.models[m.selectedModel])
+				m.cfgCursor = 0
+				m.screen = ScreenModelConfig
+				return m, nil
+			}
 		}
 	}
 
 	var cmd tea.Cmd
 	m.mainList, cmd = m.mainList.Update(msg)
 	return m, cmd
-}
-
-func launchPromptActions() []string { return []string{"launch", "advanced", "dryrun"} }
-
-func (m Model) doLaunchPromptAction(action string) (tea.Model, tea.Cmd) {
-	switch action {
-	case "launch":
-		m.screen = ScreenPrelaunch
-	case "advanced":
-		m.cfgCursor = 0
-		m.screen = ScreenModelConfig
-	case "dryrun":
-		m.message = fmt.Sprintf("Dry run: %s", strings.Join(m.buildArgs(), " "))
-		m.messageType = "info"
-	}
-	return m, nil
-}
-
-func (m Model) updateLaunchPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
-	actions := launchPromptActions()
-	if m.menuCursor >= len(actions) {
-		m.menuCursor = len(actions) - 1
-	}
-	switch keyMsg.String() {
-	case "up":
-		if m.menuCursor > 0 {
-			m.menuCursor--
-		}
-	case "down":
-		if m.menuCursor < len(actions)-1 {
-			m.menuCursor++
-		}
-	case "enter":
-		return m.doLaunchPromptAction(actions[m.menuCursor])
-	case "c", "C":
-		return m.doLaunchPromptAction("advanced")
-	case "d", "D":
-		return m.doLaunchPromptAction("dryrun")
-	}
-	return m, nil
 }
 
 // cfgRows returns the ordered focusable rows of the Advanced config screen.
@@ -715,8 +677,6 @@ func (m Model) View() string {
 	switch m.screen {
 	case ScreenFirstRun:
 		return m.viewFirstRun()
-	case ScreenLaunchPrompt:
-		return m.viewQuickLaunch()
 	case ScreenModelConfig:
 		return m.viewModelConfig()
 	case ScreenPrelaunch:
@@ -753,7 +713,7 @@ func (m Model) viewMain() string {
 	b.WriteString(m.mainList.View())
 
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  [r] Recommended downloads  [s] Settings  [b] Backend"))
+	b.WriteString(mutedStyle.Render("  Enter launch · [c] configure · [r] downloads · [s] settings · [b] backend"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -791,65 +751,6 @@ func (m Model) viewFirstRun() string {
 		}
 	}
 	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ move · Enter select · q quit"))
-	return b.String()
-}
-
-func (m Model) viewQuickLaunch() string {
-	if len(m.models) == 0 || m.recommendation == nil {
-		return "No model selected"
-	}
-	model := m.models[m.selectedModel]
-	rec := m.recommendation
-	var b strings.Builder
-
-	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ %s ═══", model.Name)) + "\n")
-	b.WriteString(fmt.Sprintf("  Size: %.1fGB  Arch: %s\n", model.SizeGB, model.Arch))
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
-	b.WriteString("\n")
-
-	b.WriteString(recommendStyle.Render("  Recommended settings:\n"))
-	b.WriteString(fmt.Sprintf("    Context:  %d tokens\n", rec.ContextSize))
-	b.WriteString(fmt.Sprintf("    GPU layers: %d/%s\n", rec.GPULayers, func() string {
-		if rec.UseGPU {
-			return "all on GPU"
-		}
-		return "CPU only"
-	}()))
-	if rec.TensorSplit {
-		b.WriteString("    Multi-GPU: tensor split enabled\n")
-	}
-	b.WriteString(fmt.Sprintf("    KV placement: %s\n", rec.KVPlacement))
-	b.WriteString(fmt.Sprintf("    Flash attention: %s\n", boolLabel(rec.FlashAttention)))
-	b.WriteString(fmt.Sprintf("    Parallel slots: %d\n", rec.ParallelSlots))
-	if rec.Benchmark {
-		b.WriteString("    Benchmark: enabled (quick model test)\n")
-	}
-	b.WriteString("\n")
-
-	if rec.Warning != "" {
-		b.WriteString(warningStyle.Render("  ⚠ "+rec.Warning) + "\n\n")
-	}
-
-	actions := launchPromptActions()
-	labels := map[string]string{
-		"launch":   "Launch with recommendations",
-		"advanced": "[c] Advanced config",
-		"dryrun":   "[d] Dry run",
-	}
-	for i, a := range actions {
-		if i == m.menuCursor {
-			b.WriteString(selectedStyle.Render("▸ "+labels[a]) + "\n")
-		} else {
-			b.WriteString("  " + labels[a] + "\n")
-		}
-	}
-	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ move · Enter select · Esc back"))
-
-	if m.message != "" {
-		b.WriteString("\n")
-		b.WriteString(highlightStyle.Render(m.message))
-	}
-
 	return b.String()
 }
 

@@ -18,17 +18,6 @@ func TestActionMenuArrowNav(t *testing.T) {
 	if fr.menuCursor != 1 {
 		t.Fatalf("firstrun down: expected menuCursor 1, got %d", fr.menuCursor)
 	}
-
-	// Quick-launch menu: Down to "advanced", Enter opens the advanced screen.
-	lp := Model{screen: ScreenLaunchPrompt, models: []ModelItem{{Name: "x.gguf"}}}
-	lp.input = textinput.New()
-	nm, _ = lp.Update(tea.KeyMsg{Type: tea.KeyDown})
-	lp = nm.(Model)
-	nm, _ = lp.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	lp = nm.(Model)
-	if lp.screen != ScreenModelConfig {
-		t.Fatalf("quicklaunch enter on advanced: expected ScreenModelConfig, got %v", lp.screen)
-	}
 }
 
 func TestModelConfigArrowNav(t *testing.T) {
