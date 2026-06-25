@@ -42,7 +42,8 @@ func TestFetchCommunityTuneHitSanitizesFlags(t *testing.T) {
 		"-m":             "/evil.gguf", // protected: must be stripped
 		"--host":         "0.0.0.0",    // protected: must be stripped
 		"--made-up-fla":  "x",          // unknown: must be stripped
-		"--cache-type-k": "q8_0",       // allowed
+		"--cache-type-k": "q8_0",       // quality-protected: must be stripped
+		"--parallel":     "8",          // quality-protected: must be stripped
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(payload)
@@ -72,10 +73,10 @@ func TestFetchCommunityTuneHitSanitizesFlags(t *testing.T) {
 		t.Fatalf("expected community provenance, got %q", doc.Provenance)
 	}
 	flags := doc.BestConfig.Flags
-	if flags["-b"] != "4096" || flags["--cache-type-k"] != "q8_0" {
-		t.Fatalf("allowed flags missing: %v", flags)
+	if flags["-b"] != "4096" {
+		t.Fatalf("allowed perf flag missing: %v", flags)
 	}
-	for _, banned := range []string{"-m", "--host", "--made-up-fla"} {
+	for _, banned := range []string{"-m", "--host", "--made-up-fla", "--cache-type-k", "--parallel"} {
 		if _, ok := flags[banned]; ok {
 			t.Fatalf("flag %s must be stripped from community config: %v", banned, flags)
 		}

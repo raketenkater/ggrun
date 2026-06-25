@@ -92,9 +92,11 @@ func FetchCommunityTune(cacheDir, modelPath string, gpuNames []string, vision bo
 }
 
 // sanitizeCommunityTune validates a downloaded tune document and strips every
-// flag that is not on the launcher's allow-list. Community configs may only
-// carry the same benign performance flags the AI-tune engine itself is allowed
-// to propose — placement, model, and network flags can never be injected.
+// flag that is not a benign performance knob. Community tunes are fetched and
+// applied automatically (LLM_COMMUNITY_TUNES is on by default), so a remote
+// third-party config must never inject placement, model, network, or
+// output-quality flags: QualityProtectedFlags() drops KV-cache quantization
+// (--cache-type-k/-v) and --parallel alongside the placement/network set.
 func sanitizeCommunityTune(data []byte, modelName string) ([]byte, error) {
 	var doc map[string]interface{}
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -114,7 +116,7 @@ func sanitizeCommunityTune(data []byte, modelName string) ([]byte, error) {
 		return nil, fmt.Errorf("missing gen_tps")
 	}
 	flags, _ := best["flags"].(map[string]interface{})
-	best["flags"] = sanitizeFlagValues(flags, DefaultProtectedFlags())
+	best["flags"] = sanitizeFlagValues(flags, QualityProtectedFlags())
 	doc["provenance"] = "community"
 	// Drop per-round details; only the winning config is needed locally.
 	delete(doc, "all_results")

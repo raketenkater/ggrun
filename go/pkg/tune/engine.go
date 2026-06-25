@@ -121,7 +121,7 @@ func (e *Engine) Run(modelPath string, initialFlags []string) (*Entry, error) {
 	e.addCache(best)
 	entries := []Entry{*best}
 	e.saveTuneProgress(modelPath, baseline, best, entries, minImprovementPct, false)
-	protected := DefaultProtectedFlags()
+	protected := QualityProtectedFlags()
 	plan := deterministicPlan(initialFlags, e.Backend, e.Caps, e.BackendHelp)
 	triedCandidates := map[string]bool{}
 
@@ -439,8 +439,8 @@ Return ONLY a JSON object with this exact format:
 {"name":"short name","flags":{"--flag":"value"},"reasoning":"why"}
 
 Rules:
-- Only suggest flags that affect performance: batch, microbatch, threads, parallel, cache type, flash attention, mmap/mlock, defrag threshold, or ik_llama MoE runtime flags
-- Do not change model path, port, host, context size, mmproj, tensor split, main GPU, device, n-gpu-layers, or override-tensor
+- Only suggest flags that affect performance: batch, microbatch, threads, flash attention, mmap/mlock, defrag threshold, or ik_llama MoE runtime flags
+- Do not change model path, port, host, context size, parallel, mmproj, tensor split, main GPU, device, n-gpu-layers, override-tensor, or cache type. Context size, parallel sequence slots, and KV cache quantization are user-owned and change output quality, not just speed.
 - Keep suggestions conservative (1-2 flag changes per round)
 - Use false for a currently-present boolean flag when you want to test removing it
 - If current performance is already good, say so with empty flags`,
@@ -508,6 +508,22 @@ func DefaultProtectedFlags() map[string]bool {
 	} {
 		protected[canonicalFlagName(key)] = true
 	}
+	return protected
+}
+
+// QualityProtectedFlags extends the placement-protected set with flags that
+// change the model's OUTPUT QUALITY or effective context — knobs AI-tune must
+// never set on the user's behalf, in any path: the autonomous loop, a cached
+// tune file, or a community-shared config. KV cache quantization
+// (--cache-type-k/-v) is a user-owned quality/memory tradeoff, and --parallel
+// divides --ctx-size across sequence slots, shrinking the usable per-request
+// context. The user can still set any of these directly on the command line;
+// the tune machinery just never overrides them.
+func QualityProtectedFlags() map[string]bool {
+	protected := DefaultProtectedFlags()
+	protected[canonicalFlagName("--cache-type-k")] = true
+	protected[canonicalFlagName("--cache-type-v")] = true
+	protected[canonicalFlagName("--parallel")] = true
 	return protected
 }
 
@@ -699,10 +715,6 @@ func deterministicSuggestionFor(round int, baseFlags []string, backend string, c
 
 func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabilities, backendHelp string) []Suggestion {
 	base := flagMap(baseFlags)
-	currentKV := base["--cache-type-k"]
-	if currentKV == "" {
-		currentKV = base["--cache-type-v"]
-	}
 	batch := atoiDefault(base["-b"], 4096)
 	ubatch := atoiDefault(base["-ub"], 512)
 	isMoEOffload := isMoEOffloadFlags(base)
@@ -742,15 +754,6 @@ func deterministicPlan(baseFlags []string, backend string, caps *detect.Capabili
 			"test whether backend speculative autotune overhead hurts this workload")
 	}
 
-	if currentKV == "q4_0" && !isMoEOffload {
-		add("kv-q8-quality",
-			map[string]interface{}{"--cache-type-k": "q8_0", "--cache-type-v": "q8_0"},
-			"test whether q8 KV improves quality/speed while still fitting memory")
-	} else if currentKV == "f16" {
-		add("kv-q8-memory",
-			map[string]interface{}{"--cache-type-k": "q8_0", "--cache-type-v": "q8_0"},
-			"test q8 KV for lower memory pressure with minimal quality loss")
-	}
 	if !isMoEOffload && batch > 0 && batch < 8192 {
 		add("larger-batch",
 			map[string]interface{}{"-b": fmt.Sprintf("%d", minInt(batch*2, 8192))},

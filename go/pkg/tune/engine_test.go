@@ -94,6 +94,33 @@ func TestSuggestionUnmarshalObjectFlags(t *testing.T) {
 	}
 }
 
+// AI-tune (autonomous loop, cached files, and community configs all route
+// through QualityProtectedFlags) must never override output-quality or context
+// knobs: KV-cache quantization and --parallel. The user's own values survive.
+func TestQualityProtectedFlagsBlockQualityKnobs(t *testing.T) {
+	base := []string{"-m", "model.gguf", "-b", "4096", "--cache-type-k", "f16", "--parallel", "4", "--ctx-size", "32768"}
+	overrides := map[string]interface{}{
+		"-b":             8192,   // perf knob: allowed
+		"--cache-type-k": "q4_0", // quality: must be blocked
+		"--cache-type-v": "q4_0", // quality: must be blocked
+		"--parallel":     8,      // context-shrinking: must be blocked
+	}
+	result := ApplyOverrides(base, overrides, QualityProtectedFlags())
+	m := flagMap(result)
+	if m["-b"] != "8192" {
+		t.Fatalf("expected batch override to apply, got %v", result)
+	}
+	if m["--cache-type-k"] != "f16" {
+		t.Fatalf("expected user KV quant f16 preserved, got %q", m["--cache-type-k"])
+	}
+	if _, ok := m["--cache-type-v"]; ok {
+		t.Fatalf("KV cache-type-v must not be injected by a tune, got %q", m["--cache-type-v"])
+	}
+	if m["--parallel"] != "4" {
+		t.Fatalf("expected user --parallel 4 preserved, got %q", m["--parallel"])
+	}
+}
+
 func TestApplyOverridesProtectsPlacement(t *testing.T) {
 	base := []string{"-m", "model.gguf", "--port", "8081", "-b", "4096", "--device", "CUDA0"}
 	overrides := map[string]interface{}{

@@ -1085,7 +1085,7 @@ func applySelectedTuneCache(req *launchRequest, serverArgs []string, caps *detec
 		fmt.Printf("[tune] Skipping cached config %s: %s\n", summary.Name, reason)
 		return serverArgs
 	}
-	serverArgs = tune.ApplyOverrides(serverArgs, summary.Flags, tune.DefaultProtectedFlags())
+	serverArgs = tune.ApplyOverrides(serverArgs, summary.Flags, tune.QualityProtectedFlags())
 	fmt.Printf("[tune] Config: %s (expected %.2f tok/s)\n", summary.Name, summary.GenTPS)
 	return serverArgs
 }
@@ -1936,7 +1936,10 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 	if idx < 0 {
 		return false, false
 	}
-	for _, kw := range []string{"cuda", "rocm", "hip", "vulkan", "metal", "sycl"} {
+	// ggrun's placement supports CUDA, Vulkan, and Metal; AMD/Intel GPUs run
+	// through Vulkan. ROCm/HIP/SYCL backends aren't supported, so they're not
+	// probed here.
+	for _, kw := range []string{"cuda", "vulkan", "metal"} {
 		if strings.Contains(text[idx:], kw) {
 			return true, true
 		}
