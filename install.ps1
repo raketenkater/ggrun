@@ -381,7 +381,13 @@ function Report-InstallFailure($ErrorRecord) {
     $ghAuthed = $false
     if (Get-Command gh -ErrorAction SilentlyContinue) { gh auth status 2>$null | Out-Null; $ghAuthed = ($LASTEXITCODE -eq 0) }
     $interactive = (-not $AssumeYes) -and ($env:LLM_INSTALL_NONINTERACTIVE -ne '1')
-    if ($ghAuthed -and $interactive -and ((Read-Host 'Report this to the maintainers via GitHub now? [y/N]') -match '^(y|yes)$')) {
+    $reply = ''
+    if ($ghAuthed -and $interactive) {
+        # Guard Read-Host: a non-interactive/piped install that failed must still
+        # print the issue URL rather than die at the prompt.
+        try { $reply = Read-Host 'Report this to the maintainers via GitHub now? [y/N]' } catch { $reply = '' }
+    }
+    if ($reply -match '^(y|yes)$') {
         $body | gh issue create --repo $Repo --title $title --body-file -
         return
     }
