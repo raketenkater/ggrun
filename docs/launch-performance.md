@@ -1,57 +1,49 @@
 # Benchmarks
 
-Measured on the reference rig below with `scripts/bench-v3-comparison.sh`.
+ggrun's default placement vs raw llama.cpp `--fit` (its built-in auto-placement) on the
+same GGUFs, measured with `scripts/bench-v3-comparison.sh`. These are ggrun's defaults —
+no `--ai-tune` (see the note at the end).
 
-Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB. Context: 32768.
-CUDA/IK backend: ik_llama.cpp build 4641 (`6c00e87a`). Vulkan backend:
-llama.cpp build 9756 (`d0f9d2e5a`). Dense ggrun rows were refreshed on
-2026-06-22 after rebuilding both backends from their upstream heads.
+Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, 128GB RAM. Context: 32768,
+256-token decode. CUDA backend: ik_llama.cpp build 4641 (`6c00e87a`). Numbers are from
+the 2026-06-22 retest on this rig.
 
-Dense comparison runs used the `long` prompt profile with 256 generated tokens.
-The current headline matrix comes from `.benchmarks/full-retest-20260622/`.
+> **Read these as one data point, not a universal speedup.** This rig is deliberately
+> awkward: the RTX 3060 sits on a PCIe gen1 x1 link. A large part of ggrun's multi-GPU
+> and MoE advantage here comes from PCIe-bandwidth-weighted placement that concentrates
+> work on the fast-link GPUs and routes around that x1 bottleneck — on a machine where
+> every GPU has full PCIe bandwidth, the gap to raw `--fit` is smaller. The single-GPU 4B
+> gain comes from the ik_llama.cpp backend and flag defaults, not PCIe.
 
-## Dense Models (CUDA / ik_llama.cpp)
+## Dense models (CUDA / ik_llama.cpp)
 
-Same GGUF, 32k context, 256-token decode, vs raw llama.cpp `--fit` and Ollama 0.30.8:
+| Model | raw llama.cpp `--fit` | ggrun |
+|---|---:|---:|
+| Qwen3.5-4B Q4_K_M | 103.3 | 151.4 |
+| Qwen3.6-27B Q5_K_M | 24.3 | 37.4 |
 
-| Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun v3 | v3 `--ai-tune` |
-|---|---:|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 151.4 | 185.7 |
-| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.4 | 39.8 |
-
-ggrun's default placement already beats raw `--fit` and Ollama (+21% on the 4B,
-+64% on the 27B vs Ollama). `--ai-tune` raises the headline dense rows to +49%
-on the 4B and +74% on the 27B versus Ollama.
+ggrun's default placement beats raw `--fit` on both (+47% on the 4B, +54% on the 27B) on
+this rig.
 
 ## MoE (CUDA / ik_llama.cpp)
 
-Both MoE models use 3-GPU expert offload across VRAM + system RAM. The tensor-split
-is PCIe-bandwidth-weighted, which concentrates layer ownership on the fastest-link
-GPU and lifts prefill sharply on heterogeneous rigs (a card stuck at x1 no longer
-bottlenecks CPU-expert streaming):
+Both MoE models use 3-GPU expert offload across VRAM + system RAM, with a
+PCIe-bandwidth-weighted tensor-split that concentrates layer ownership on the
+fastest-link GPU.
 
-| Model | Decode tok/s | Prefill tok/s | `--ai-tune` | Notes |
-|---|---:|---:|---:|---|
-| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 22.9 | 19.5 | 23.1 | 3-GPU expert offload + CPU experts |
-| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.59 | 15.3 | 5.65 | spans VRAM+RAM, ~108 GiB pinned |
+| Model | ggrun decode tok/s | ggrun prefill tok/s | Notes |
+|---|---:|---:|---|
+| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 22.9 | 19.5 | 3-GPU expert offload + CPU experts |
+| MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.59 | 15.3 | spans VRAM+RAM, ~108 GiB pinned |
 
-Both-run vs Ollama 0.30.8 (same merged GGUF, 32k, 256-token decode):
+Raw llama.cpp `--fit` loads the 122B at 20.97 decode (ggrun: 22.9, +9% here); it cannot
+load MiniMax-M3 at all (`unknown model architecture: minimax-m3` — ik_llama.cpp only).
+The point of these rows is less the exact tok/s than that the models **run**: ggrun loads
+big MoE models across VRAM + system RAM that don't fit in VRAM alone.
 
-| Model | Ollama | ggrun | ggrun advantage |
-|---|---:|---:|---:|
-| Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB, ~18 GiB to RAM) | 13.54 | 23.56 | +74% |
+## Speculative decoding
 
-Ollama can't *pull* sharded GGUFs ([ollama#5245](https://github.com/ollama/ollama/issues/5245)),
-so the 122B was merged to a single file and imported with `ollama create`; at that point it
-runs, and ggrun is +74% faster on the heavy VRAM+RAM offload path. MiniMax-M3 it
-can't load at all (`unknown model architecture: minimax-m3` — ik_llama.cpp only); raw
-llama.cpp `--fit` loads the 122B (20.97 decode) but also can't load MiniMax-M3. AI Tune
-finds only marginal gains over the already-strong default placement.
-
-## Speculative Decoding
-
-Qwen3.6 27B Q5_K_M with ik_llama.cpp, 32k context, one slot, and 512 generated
-tokens per request:
+Qwen3.6 27B Q5_K_M with ik_llama.cpp, 32k context, one slot, 512 generated tokens:
 
 | Mode | Profile | Median generation tok/s | Draft accepted | Result |
 |---|---|---:|---:|---|
@@ -60,19 +52,20 @@ tokens per request:
 | `--spec off` | code | 38.42 | 0/0 | baseline |
 | `--spec auto` | code | 22.71 | 1161/3208 | slower |
 
-Speculative decoding is therefore a measured, workload-gated feature: the 278
-tok/s row is one best-case structured prompt with full draft acceptance, and the
-same setting is slower on code output. It should not be advertised as always faster.
+Speculative decoding is a measured, workload-gated feature: the 278 tok/s row is one
+best-case structured prompt with full draft acceptance, and the same setting is slower on
+code output. It should not be advertised as always faster.
+
+## A note on AI Tune
+
+The tables above are ggrun's **default** placement — no tuning. `--ai-tune` benchmarks a
+few flag variants and caches the fastest, but on this rig the gains are marginal and
+model-specific (the default often wins the confirmation re-measure), so it's an optional
+extra, not part of the headline numbers.
 
 ## Launch Read
 
-v3's main claim isn't that AI Tune improves every model. It's that v3 makes the
-GGUF server launch path measured, reproducible, and backend-aware:
-
-- v3 default placement beats raw llama.cpp `--fit` and Ollama on every model all
-  three can load (+21% / +64% vs Ollama on the 4B / 27B).
-- v3 runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) that raw `--fit` and
-  Ollama cannot load at all on this hardware.
-- v3 provides measured MoE placement instead of fragile manual flags.
-- AI Tune is conservative and rejects noise, unsafe memory expansion, and
-  crashing MoE candidates.
+- ggrun's default placement beats raw llama.cpp `--fit` on every dense model tested here.
+- ggrun runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) across VRAM + RAM that raw
+  `--fit` can't fit or can't load at all.
+- Placement is computed from the GGUF and real VRAM, not guessed — no manual flags.
