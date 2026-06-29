@@ -39,6 +39,22 @@ ggrun                                     # no arguments → interactive TUI
 Underneath, it picks the backend (llama.cpp, or the faster ik_llama.cpp on CUDA),
 serves an OpenAI-compatible API on `127.0.0.1`, and recovers if a launch crashes.
 
+## Benchmarks
+
+ggrun's default placement vs raw llama.cpp `--fit` on the same GGUFs (RTX 3090 Ti +
+4070 + 3060, 128GB RAM, 32k context, decode tok/s):
+
+| Model | llama.cpp `--fit` | ggrun |
+|---|---:|---:|
+| Qwen3.5-4B Q4_K_M | 103.3 | 151.4 |
+| Qwen3.6-27B Q5_K_M | 24.3 | 37.4 |
+| Qwen3.5-122B-A10B UD-IQ4_XS (MoE) | 20.97 | 22.9 |
+| MiniMax-M3 UD-IQ3_XXS (MoE) | ✗ can't load | 5.59 |
+
+One rig — and its 3060 is on a PCIe x1 link, which amplifies the multi-GPU/MoE gains.
+Full method and caveats: [docs/launch-performance.md](docs/launch-performance.md). These
+are ggrun's defaults, no `--ai-tune`.
+
 ## When you might not need it
 
 If you have a single GPU and a model that fits in its VRAM, plain llama.cpp or
