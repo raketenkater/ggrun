@@ -28,7 +28,7 @@
 #   LLM_INSTALL_NONINTERACTIVE=1                          skip prompts
 #   LLM_INSTALL_PROMPT=0                                  never ask guided setup questions
 
-set -euo pipefail
+set -Eeuo pipefail
 
 REPO_URL="https://github.com/raketenkater/ggrun.git"
 GITHUB_REPO="raketenkater/ggrun"
@@ -60,7 +60,7 @@ fi
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m⚠\033[0m %s\n' "$*"; }
-err()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
+err()  { LAST_ERR_MSG="$*"; printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
 ask()  { # ask "prompt" default_yn
     local p="$1" d="${2:-n}" reply
     if (( NONINTERACTIVE )); then [[ "$d" == "y" ]]; return; fi
@@ -68,6 +68,103 @@ ask()  { # ask "prompt" default_yn
     reply="${reply:-$d}"
     [[ "$reply" =~ ^[Yy] ]]
 }
+
+# ── Failure diagnostics + one-click GitHub issue ────────────────────────────
+# Turn a failed install into "here's everything needed to fix it": on a fatal
+# error, gather a sanitized diagnostic bundle and offer to file it as a
+# pre-filled GitHub issue (one click, no account/token needed) or, if the gh
+# CLI is set up, create it directly. Nothing leaves the machine until the user
+# acts. Set LLM_INSTALL_NO_REPORT=1 to disable.
+SRC_DIR="${SRC_DIR:-}"
+INSTALL_STARTED=0
+LAST_ERR_MSG=""
+LAST_ERR_CMD=""
+LAST_ERR_LINE=""
+REPORT_FILE=""
+
+_redact() { sed -e "s#${HOME}#~#g" 2>/dev/null; }
+
+_ver() { # _ver <bin> <version-args...>
+    if command -v "$1" >/dev/null 2>&1; then "$@" 2>&1 | head -1; else echo 'not found'; fi
+}
+
+collect_diagnostics() {
+    printf '### Environment\n'
+    printf -- '- installer: install.sh (%s)\n' "$GITHUB_REPO"
+    printf -- '- date: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
+    printf -- '- os: %s\n' "$(uname -srm 2>/dev/null)"
+    [[ -r /etc/os-release ]] && printf -- '- distro: %s\n' "$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}" )"
+    printf -- '- shell: bash %s\n' "${BASH_VERSION:-?}"
+    printf -- '- backend: requested=%s chosen=%s | mode=%s release=%s\n' "$BACKEND_REQUEST" "$BACKEND_CHOICE" "$INSTALL_MODE" "$INSTALL_RELEASE"
+    printf '\n### Failure\n'
+    printf -- '- message: %s\n' "${LAST_ERR_MSG:-<none captured>}"
+    [[ -n "$LAST_ERR_CMD" ]] && printf -- '- command: `%s` (line %s)\n' "$LAST_ERR_CMD" "$LAST_ERR_LINE"
+    printf '\n### Hardware\n'
+    printf -- '- gpu: %s\n' "$(nvidia-smi -L 2>/dev/null | paste -sd'; ' - || echo 'nvidia-smi: none')"
+    printf -- '- cpu: %s\n' "$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//' || uname -p 2>/dev/null)"
+    printf -- '- avx: %s\n' "$(grep -m1 -oE 'avx512[a-z]*|avx2|avx' /proc/cpuinfo 2>/dev/null | paste -sd',' - || echo '?')"
+    printf -- '- ram: %s\n' "$(awk '/MemTotal/{printf "%.0f GB", $2/1048576; exit}' /proc/meminfo 2>/dev/null || echo '?')"
+    printf -- '- disk(%s): %s free\n' "$HOME" "$(df -h "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+    printf '\n### Tools\n'
+    printf -- '- cmake: %s\n'   "$(_ver cmake --version)"
+    printf -- '- gcc: %s\n'     "$(_ver gcc --version)"
+    printf -- '- nvcc: %s\n'    "$(_ver nvcc --version)"
+    printf -- '- git: %s\n'     "$(_ver git --version)"
+    printf -- '- python3: %s\n' "$(_ver python3 --version)"
+    printf -- '- go: %s\n'      "$(_ver go version)"
+    printf -- '- glibc: %s\n'   "$(ldd --version 2>/dev/null | head -1 || echo '?')"
+    printf -- '- vulkaninfo: %s\n' "$(command -v vulkaninfo >/dev/null 2>&1 && echo present || echo 'not found')"
+}
+
+urlencode() {
+    local s="$1" o="" i c
+    for ((i=0; i<${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) o+="$c" ;;
+            *) printf -v c '%%%02X' "'$c"; o+="$c" ;;
+        esac
+    done
+    printf '%s' "$o"
+}
+
+report_install_failure() {
+    set +e
+    local diag title body url msg="${LAST_ERR_MSG:-}"
+    diag="$(collect_diagnostics | _redact)"
+    REPORT_FILE="$HOME/ggrun-install-report.txt"
+    printf '%s\n' "$diag" > "$REPORT_FILE" 2>/dev/null || REPORT_FILE=""
+
+    say ""
+    err "Install failed${msg:+: $msg}"
+    [[ -n "$REPORT_FILE" ]] && say "  Saved diagnostics: $REPORT_FILE"
+
+    title="install failed: ${msg:-$(uname -s 2>/dev/null) $BACKEND_CHOICE}"
+    body="$diag
+
+<!-- Add anything else above. Full report saved at: ${REPORT_FILE:-see terminal} -->"
+    url="https://github.com/$GITHUB_REPO/issues/new?labels=install&title=$(urlencode "$title")&body=$(urlencode "$body")"
+
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        if ask "Report this to the maintainers via GitHub now? [y/N]" n; then
+            printf '%s' "$body" | gh issue create --repo "$GITHUB_REPO" --title "$title" --body-file - && return 0
+        fi
+    fi
+    say "  Help us fix it — open a pre-filled issue (nothing is sent until you submit):"
+    say "    $url"
+}
+
+_on_err() { LAST_ERR_CMD="$BASH_COMMAND"; LAST_ERR_LINE="${BASH_LINENO[0]:-?}"; }
+_on_exit() {
+    local rc=$?
+    set +e
+    [[ -n "${SRC_DIR:-}" ]] && rm -rf "$SRC_DIR" 2>/dev/null
+    if (( rc != 0 )) && (( rc != 130 )) && (( INSTALL_STARTED )) && [[ "${LLM_INSTALL_NO_REPORT:-0}" != 1 ]]; then
+        report_install_failure "$rc"
+    fi
+}
+trap '_on_err' ERR
+trap '_on_exit' EXIT
 
 case "$INSTALL_MODE" in
     auto|release|build|scripts) ;;
@@ -91,6 +188,7 @@ case "$MAIN_IMPL" in
 esac
 
 say "═══ ggrun installer ═══"
+INSTALL_STARTED=1
 
 # ── Stage 1: use local repo if present; clone only if source fallback needs it ──
 SRC_DIR=""
@@ -141,7 +239,6 @@ ensure_source_repo() {
         err "git clone failed"
         exit 1
     fi
-    trap 'rm -rf "$SRC_DIR"' EXIT
 }
 
 if [[ -n "$SOURCE_REPO_DIR" ]]; then

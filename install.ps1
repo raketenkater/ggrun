@@ -333,6 +333,62 @@ function Ensure-Python {
     }
 }
 
+function Collect-Diagnostics([string]$ErrorMessage) {
+    # Sanitized diagnostic bundle for an install-failure GitHub issue.
+    $L = [System.Collections.Generic.List[string]]::new()
+    $L.Add('### Environment')
+    $L.Add("- installer: install.ps1 ($Repo)")
+    $L.Add("- date: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))")
+    $L.Add("- os: $([System.Environment]::OSVersion.VersionString) ($([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture))")
+    $L.Add("- powershell: $($PSVersionTable.PSVersion)")
+    $L.Add("- backend: $Backend | release=$Release")
+    $L.Add('')
+    $L.Add('### Failure')
+    $L.Add("- message: $ErrorMessage")
+    $L.Add('')
+    $L.Add('### Hardware')
+    $gpu = (& nvidia-smi -L 2>$null) -join '; '
+    if (-not $gpu) { try { $gpu = ((Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue).Name) -join '; ' } catch {} }
+    $L.Add("- gpu: $gpu")
+    try { $L.Add("- cpu: $((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name)") } catch {}
+    try { $L.Add("- ram: $([math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory/1GB)) GB") } catch {}
+    $L.Add('')
+    $L.Add('### Tools')
+    foreach ($t in 'cmake', 'nvcc', 'git', 'python', 'py', 'go') {
+        $v = 'not found'
+        if (Get-Command $t -ErrorAction SilentlyContinue) {
+            try { if ($t -eq 'go') { $v = (& go version) } else { $v = (& $t --version 2>&1 | Select-Object -First 1) } } catch { $v = 'present (version unknown)' }
+        }
+        $L.Add("- ${t}: $v")
+    }
+    ($L -join "`n")
+}
+
+function Report-InstallFailure($ErrorRecord) {
+    # Mirrors install.sh: gather diagnostics, save a report, and offer a
+    # one-click pre-filled GitHub issue (or gh create). Nothing is sent until
+    # the user acts. Set LLM_INSTALL_NO_REPORT=1 to disable.
+    if ($env:LLM_INSTALL_NO_REPORT -eq '1') { return }
+    $msg = if ($ErrorRecord) { "$ErrorRecord".Trim() } else { 'unknown error' }
+    $diag = Collect-Diagnostics $msg
+    $reportFile = Join-Path $env:USERPROFILE 'ggrun-install-report.txt'
+    try { Set-Content -Path $reportFile -Value $diag -Encoding UTF8 } catch { $reportFile = '' }
+    Warn "Install failed: $msg"
+    if ($reportFile) { Say "  Saved diagnostics: $reportFile" }
+    $title = "install failed: $msg"
+    $body = "$diag`n`n<!-- Add anything else above. Full report: $reportFile -->"
+    $url = "https://github.com/$Repo/issues/new?labels=install&title=$([uri]::EscapeDataString($title))&body=$([uri]::EscapeDataString($body))"
+    $ghAuthed = $false
+    if (Get-Command gh -ErrorAction SilentlyContinue) { gh auth status 2>$null | Out-Null; $ghAuthed = ($LASTEXITCODE -eq 0) }
+    $interactive = (-not $AssumeYes) -and ($env:LLM_INSTALL_NONINTERACTIVE -ne '1')
+    if ($ghAuthed -and $interactive -and ((Read-Host 'Report this to the maintainers via GitHub now? [y/N]') -match '^(y|yes)$')) {
+        $body | gh issue create --repo $Repo --title $title --body-file -
+        return
+    }
+    Say "  Help us fix it - open a pre-filled issue (nothing is sent until you submit):"
+    Say "    $url"
+}
+
 Say '=== ggrun native Windows installer ==='
 Say "Install dir: $InstallDir"
 Say "Backend:     $Backend"
@@ -421,6 +477,9 @@ try {
     Say "CLI/GUI: $InstallDir\ggrun.cmd   (no arguments opens the GUI)"
     Say "Models:  $models"
     Say "Config:  $cfgPath"
+} catch {
+    Report-InstallFailure $_
+    throw
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
