@@ -84,6 +84,7 @@ type Model struct {
 	benchmark      bool
 	vision         bool
 	keepalive      bool
+	claudeCode     bool
 
 	// Tuned config
 	tunedConfigs []tune.ConfigEntry
@@ -564,6 +565,8 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vision = !m.vision
 	case "k":
 		m.keepalive = !m.keepalive
+	case "x", "X":
+		m.claudeCode = !m.claudeCode
 	case "l", "L":
 		m.screen = ScreenPrelaunch
 	case "d", "D":
@@ -762,7 +765,7 @@ func (m Model) viewModelConfig() string {
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("⚙  Configure  ·  "+model.Name) + "\n")
-	b.WriteString(mutedStyle.Render("  ↑/↓ move · ←/→ or Enter change · Esc back") + "\n")
+	b.WriteString(mutedStyle.Render("  ↑/↓ move · ←/→ or Enter change · x Claude Code · Esc back") + "\n")
 
 	rows := m.cfgRows()
 	focused := ""
@@ -905,6 +908,7 @@ func (m Model) viewPrelaunch() string {
 	b.WriteString(fmt.Sprintf("  Vision:         %s\n", boolLabel(m.vision)))
 	b.WriteString(fmt.Sprintf("  Benchmark:      %s\n", boolLabel(m.benchmark)))
 	b.WriteString(fmt.Sprintf("  Keep-alive:     %s\n", boolLabel(m.keepalive)))
+	b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", boolLabel(m.claudeCode)))
 	if m.tunePath != "" {
 		b.WriteString(fmt.Sprintf("  Tuned config:   %s\n", filepath.Base(m.tunePath)))
 	}
@@ -1957,6 +1961,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		AITuneRounds: m.aituneRounds,
 		Benchmark:    m.benchmark,
 		KeepAlive:    m.keepalive,
+		ClaudeCode:   m.claudeCode,
 	}
 }
 
@@ -2007,6 +2012,7 @@ type LaunchRequest struct {
 	AITuneRounds  int
 	Benchmark     bool
 	KeepAlive     bool
+	ClaudeCode    bool
 }
 
 // Run starts the TUI and returns a launch request if the user chose to launch.

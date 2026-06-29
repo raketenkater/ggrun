@@ -73,3 +73,29 @@ See [launch-performance.md](launch-performance.md) for the benchmark tables and 
 
 Ngram modes are explicit because they are workload-sensitive. See
 [speculative-decoding.md](speculative-decoding.md).
+
+## Use with Claude Code
+
+ggrun serves llama.cpp's native Anthropic-compatible `/v1/messages` endpoint (with
+`--jinja` on for tool use), so Claude Code can talk to a local model directly — no
+proxy needed. Launch with `--claude-code` — or in the TUI, press `c` to configure a
+model then `x` to toggle "Claude Code" — and ggrun prints the exact environment:
+
+```bash
+ggrun model.gguf --claude-code
+```
+
+Then, in another terminal:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8081   # ggrun's host:port (root, no path)
+export ANTHROPIC_AUTH_TOKEN=ggrun                 # any non-empty value; ggrun sets no API key
+export ANTHROPIC_MODEL=local                       # ignored by the single-model server
+export ANTHROPIC_SMALL_FAST_MODEL=local            # so background calls also hit the local model
+claude
+```
+
+Agentic quality depends entirely on the local model — pick a tool-capable coding
+model, and keep expectations modest for heavy multi-agent work: one llama-server is
+GPU-bound (it serializes a wide agent fan-out) and local models trail frontier
+models on agentic coding. It shines for single-agent, scoped, or offline/private tasks.

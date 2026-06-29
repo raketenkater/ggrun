@@ -298,6 +298,7 @@ type launchRequest struct {
 	RAMHeadroomMB     int
 	Parallel          int
 	Benchmark         bool
+	ClaudeCode        bool
 	ExtraArgs         []string
 }
 
@@ -457,6 +458,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.Host = v
 		case "--vision":
 			req.VisionAuto = true
+		case "--claude-code":
+			req.ClaudeCode = true
 		case "--mmproj":
 			v, err := next()
 			if err != nil {
@@ -777,6 +780,9 @@ func cmdLaunch(args []string) {
 	}
 
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
+	if req.ClaudeCode {
+		printClaudeCodeRecipe(req.Host, req.Port)
+	}
 	if model.IsMoE && len(caps.GPUs) > 0 && p.LogBuf != nil {
 		go placement.RunPostLaunchProbe(cfg.CacheDir, caps.GPUs, p.LogBuf.String())
 	}
@@ -954,6 +960,9 @@ func cmdGUI() {
 
 	fmt.Printf("[launch] Server starting on port %d (health timeout %.0fs)\n", req.Port, timeoutSec)
 	fmt.Println("[launch] Press Ctrl+C to stop")
+	if req.ClaudeCode {
+		printClaudeCodeRecipe(cfg.Host, req.Port)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1376,6 +1385,27 @@ func cmdDryRun(args []string) {
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
 	}
+	if req.ClaudeCode {
+		printClaudeCodeRecipe(req.Host, req.Port)
+	}
+}
+
+// printClaudeCodeRecipe prints the exact env to point Claude Code at this
+// locally-served model. ggrun serves llama.cpp's native Anthropic /v1/messages
+// endpoint with --jinja already on, so no proxy is needed.
+func printClaudeCodeRecipe(host string, port int) {
+	clientHost := host
+	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
+		clientHost = "127.0.0.1"
+	}
+	fmt.Println()
+	fmt.Println("[claude-code] Use this model from Claude Code (another terminal):")
+	fmt.Printf("  export ANTHROPIC_BASE_URL=http://%s:%d\n", clientHost, port)
+	fmt.Println("  export ANTHROPIC_AUTH_TOKEN=ggrun")
+	fmt.Println("  export ANTHROPIC_MODEL=local")
+	fmt.Println("  export ANTHROPIC_SMALL_FAST_MODEL=local")
+	fmt.Println("  claude")
+	fmt.Println("[claude-code] Agentic quality depends on the local model — pick a tool-capable coder.")
 }
 
 func cmdShowConfigs(args []string) {
