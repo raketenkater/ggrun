@@ -17,10 +17,10 @@ the 2026-06-22 retest on this rig.
 
 ## Dense models (CUDA / ik_llama.cpp)
 
-| Model | raw llama.cpp `--fit` | ggrun |
-|---|---:|---:|
-| Qwen3.5-4B Q4_K_M | 103.3 | 151.4 |
-| Qwen3.6-27B Q5_K_M | 24.3 | 37.4 |
+| Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun |
+|---|---:|---:|---:|
+| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 151.4 |
+| Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.4 |
 
 ggrun's default placement beats raw `--fit` on both (+47% on the 4B, +54% on the 27B) on
 this rig.
