@@ -46,8 +46,17 @@ func Start(args []string, port int) (*Process, error) {
 	return StartWithTimeout(args, port, 60*time.Second)
 }
 
-// StartWithTimeout launches llama-server with a custom readiness timeout.
+// StartWithTimeout launches llama-server with a custom readiness timeout. The
+// backend's ongoing logs stream to the process's own stdout/stderr.
 func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process, error) {
+	return StartWithTimeoutTo(args, port, timeout, os.Stdout, os.Stderr)
+}
+
+// StartWithTimeoutTo is StartWithTimeout but streams the backend's ongoing logs
+// to termOut/termErr instead of os.Stdout/os.Stderr. claude-code mode passes a
+// log file here so the backend's per-request log spam doesn't bleed into Claude
+// Code's terminal UI once ggrun hands the terminal to the `claude` client.
+func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut, termErr io.Writer) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	setSysProcAttr(cmd)
@@ -59,8 +68,8 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 	tty := stdoutIsTTY()
 	live := &atomic.Bool{}
 	live.Store(!tty)
-	cmd.Stdout = &gatedWriter{buf: logBuf, term: os.Stdout, live: live}
-	cmd.Stderr = &gatedWriter{buf: logBuf, term: os.Stderr, live: live}
+	cmd.Stdout = &gatedWriter{buf: logBuf, term: termOut, live: live}
+	cmd.Stderr = &gatedWriter{buf: logBuf, term: termErr, live: live}
 
 	// Ensure CUDA device enumeration matches nvidia-smi PCI bus order.
 	// Without this, llama-server may enumerate GPUs differently from our

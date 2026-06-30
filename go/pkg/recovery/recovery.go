@@ -59,6 +59,11 @@ type Launcher struct {
 	OnFallback    func(string)
 	OnCUDAOOM     func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool)
 
+	// Quiet keeps the backend's stdout out of the terminal (it still goes to the
+	// per-run log file). Used by Claude Code mode, where ggrun hands the terminal
+	// to the `claude` client and backend logs must not bleed into its UI.
+	Quiet bool
+
 	PlacementCachePath string
 
 	lastLogPath string // log written by the most recent runOnce
@@ -174,8 +179,14 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	cmd := exec.CommandContext(ctx, binaryPath, l.Args...)
 	cmd.SysProcAttr = setProcessGroupAttr()
 
-	// Tee stdout/stderr to both terminal and log file
-	cmd.Stdout = os.Stdout
+	// Backend stdout → terminal (so the user sees live logs), stderr → log file.
+	// In Quiet (Claude Code) mode, stdout also goes to the log file so nothing
+	// bleeds into the `claude` client's terminal UI.
+	if l.Quiet {
+		cmd.Stdout = logFile
+	} else {
+		cmd.Stdout = os.Stdout
+	}
 	cmd.Stderr = logFile
 
 	// Build a clean environment with our required CUDA ordering.

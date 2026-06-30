@@ -76,26 +76,47 @@ Ngram modes are explicit because they are workload-sensitive. See
 
 ## Use with Claude Code
 
-ggrun serves llama.cpp's native Anthropic-compatible `/v1/messages` endpoint (with
-`--jinja` on for tool use), so Claude Code can talk to a local model directly — no
-proxy needed. Launch with `--claude-code` — or in the TUI, press `c` to configure a
-model then `x` to toggle "Claude Code" — and ggrun prints the exact environment:
+ggrun serves llama.cpp's native Anthropic `/v1/messages` endpoint (`--jinja` on for
+tool use), so Claude Code talks to a local model directly — no proxy.
 
 ```bash
-ggrun model.gguf --claude-code
+ggrun model.gguf --claude-code   # serve, then launch Claude Code wired to it
 ```
 
-Then, in another terminal:
+If the `claude` CLI is on your PATH, ggrun starts the server and drops you straight
+into Claude Code; on exit it stops the server. (In the TUI: open a model with Enter,
+toggle **[x] Claude Code**, launch.) If `claude` isn't installed, ggrun prints the
+env to run it yourself in another terminal:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8081   # ggrun's host:port (root, no path)
-export ANTHROPIC_AUTH_TOKEN=ggrun                 # any non-empty value; ggrun sets no API key
-export ANTHROPIC_MODEL=local                       # ignored by the single-model server
-export ANTHROPIC_SMALL_FAST_MODEL=local            # so background calls also hit the local model
-claude
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8081 ANTHROPIC_AUTH_TOKEN=ggrun
+export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local
+export API_TIMEOUT_MS=1800000              # let queued fan-out/subagent requests finish, not cancel
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=24  # compact early to fit the real per-slot window (ggrun computes this)
+claude --disallowedTools WebSearch
 ```
 
-Agentic quality depends entirely on the local model — pick a tool-capable coding
-model, and keep expectations modest for heavy multi-agent work: one llama-server is
-GPU-bound (it serializes a wide agent fan-out) and local models trail frontier
-models on agentic coding. It shines for single-agent, scoped, or offline/private tasks.
+All five tiers point at `local` on purpose: Claude Code routes background work and
+the command-safety (auto-permission) classifier through the haiku/sonnet/opus
+aliases, so without the overrides those calls leave for `api.anthropic.com` and fail.
+
+- **Thinking is on** — a normal launch never passes `--reasoning off` (benchmark-only).
+- **Context fits the slot.** `--parallel` splits `--ctx-size` across sequence slots,
+  so each request only sees `ctx ÷ parallel` (e.g. 65k at `--ctx-size 262144 --parallel 4`).
+  Behind a custom base URL Claude Code assumes a 200k window and won't auto-compact in
+  time, overflowing the slot (a hard fail with `--no-context-shift`). ggrun derives
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the real slot so compaction triggers early
+  enough; subagents and workflow agents inherit it. A value you set yourself wins.
+- **Wide fan-out** (subagents, workflows) queues behind the GPU; `API_TIMEOUT_MS` is
+  raised so queued requests wait for a slot instead of cancelling.
+- **Web research:** the built-in WebSearch runs on Anthropic's servers and is hidden
+  on a non-first-party endpoint, so ggrun disables it and auto-wires a no-key
+  DuckDuckGo search MCP (`mcp__ddg-search__search`) when `uvx` is installed —
+  `--claude-code` does this for you. Prefer another provider? Add it with
+  `claude mcp add …` (it runs alongside `ddg-search`), or launch `claude` yourself
+  from the printed recipe and drop/replace the `--mcp-config` line.
+
+Quality depends on the local model: pick a tool-capable coder, and keep one
+llama-server in mind for wide agent fan-out (it serializes). Best for single-agent,
+scoped, or offline/private work.

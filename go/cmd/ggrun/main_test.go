@@ -458,3 +458,68 @@ func TestApplyGPUVisibilityNoFlagNoEnv(t *testing.T) {
 		t.Fatalf("expected no env assignment for invalid --gpus, got %q", env)
 	}
 }
+
+func TestClaudeCodeAutocompactPct(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"parallel4_65k_slot", []string{"--ctx-size", "262144", "--parallel", "4"}, 24},
+		{"parallel8_32k_slot", []string{"--ctx-size", "262144", "--parallel", "8"}, 12},
+		{"parallel1_full_ctx_caps_at_90", []string{"--ctx-size", "262144", "--parallel", "1"}, 90},
+		{"no_parallel_defaults_to_1", []string{"--ctx-size", "65536"}, 24},
+		{"tiny_slot_floors_at_5", []string{"--ctx-size", "8192", "--parallel", "8"}, 5},
+		{"missing_ctx_keeps_legacy_default", []string{"--parallel", "4"}, 25},
+		{"short_ctx_alias", []string{"-c", "131072", "-np", "4"}, 12},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudeCodeAutocompactPct(tc.args); got != tc.want {
+				t.Fatalf("claudeCodeAutocompactPct(%v) = %d, want %d", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestArgIntValue(t *testing.T) {
+	args := []string{"-m", "model.gguf", "--ctx-size", "4096", "--parallel", "4", "--flag"}
+	if got := argIntValue(args, "--ctx-size", "-c"); got != 4096 {
+		t.Fatalf("--ctx-size = %d, want 4096", got)
+	}
+	if got := argIntValue(args, "--parallel", "-np"); got != 4 {
+		t.Fatalf("--parallel = %d, want 4", got)
+	}
+	if got := argIntValue(args, "--missing"); got != -1 {
+		t.Fatalf("--missing = %d, want -1", got)
+	}
+	// trailing flag with no value must not panic or misparse
+	if got := argIntValue(args, "--flag"); got != -1 {
+		t.Fatalf("--flag (no value) = %d, want -1", got)
+	}
+	// last-wins: a user value appended after the strategy's must override it, to
+	// mirror llama.cpp/ik_llama (which honor the final repeated flag).
+	dup := []string{"--ctx-size", "262144", "--parallel", "4", "--ctx-size", "16384"}
+	if got := argIntValue(dup, "--ctx-size", "-c"); got != 16384 {
+		t.Fatalf("last-wins --ctx-size = %d, want 16384", got)
+	}
+	// an unparseable later value is skipped, falling back to the last parseable one
+	if got := argIntValue([]string{"--ctx-size", "8192", "--ctx-size", "max"}, "--ctx-size"); got != 8192 {
+		t.Fatalf("last parseable --ctx-size = %d, want 8192", got)
+	}
+}
+
+func TestClaudeCodeAutocompactPctLastWinsOnUserOverride(t *testing.T) {
+	// strategy emits 262144/4 (pct 24); a user appends --ctx-size 16384 (backend
+	// last-wins → 16384/4 = 4096 slot → pct floors at 5). Must reflect the real slot.
+	args := []string{"--ctx-size", "262144", "--parallel", "4", "--ctx-size", "16384"}
+	if got := claudeCodeAutocompactPct(args); got != 5 {
+		t.Fatalf("autocompact pct with user override = %d, want 5", got)
+	}
+}
+
+func TestClaudeCodeSearchMCPArgsRespectsUserConfig(t *testing.T) {
+	if got := claudeCodeSearchMCPArgs([]string{"--mcp-config", "mine.json"}); got != nil {
+		t.Fatalf("expected nil when user passed --mcp-config, got %v", got)
+	}
+}

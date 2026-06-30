@@ -135,6 +135,7 @@ type Options struct {
 	SpecMode       string // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
 	BackendHelp    string // llama-server --help output for dialect-specific flags
 	ForceSpecMoE   bool   // allow speculative decoding on MoE despite default gate
+	ReasoningOff   bool   // emit `--reasoning off` (benchmark/tune only; normal serving keeps the model's thinking)
 }
 
 func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
@@ -171,7 +172,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		IsMoE:          model.IsMoE,
 		GPULayers:      999,
 		FlashAttention: true,
-		ReasoningOff:   true, // default reasoning off for OpenAI-compatible output
+		// Thinking stays ON for normal serving (backend default `--reasoning auto`);
+		// only benchmark/tune opt in to `--reasoning off` for clean, fast measurement.
+		ReasoningOff: opts.ReasoningOff,
 		HasSSM:         model.HasSSM == 1,
 		Host:           opts.Host,
 	}
@@ -183,7 +186,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		s.KVPlacement = "auto"
 	}
 	if opts.KVQuality == "" {
-		s.KVQuality = "low" // q4_0, minimum VRAM
+		// q8_0 KV cache: near-lossless, preserves model quality. The fitting
+		// logic falls back to q4_0 only when VRAM genuinely can't hold q8_0.
+		s.KVQuality = "mid"
 	}
 	if opts.Parallel > 0 {
 		s.Parallel = opts.Parallel

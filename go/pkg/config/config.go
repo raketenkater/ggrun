@@ -67,7 +67,7 @@ func Defaults() *Config {
 		VRAMHeadroom:  "",
 		RAMHeadroom:   "",
 		KVPlacement:   "auto",
-		KVQuality:     "low",
+		KVQuality:     "mid", // q8_0 KV cache: near-lossless, preserves quality; drops to q4_0 only if VRAM forces it
 		AssumeYes:     false,
 		Backend:       "",
 		LlamaServer:   "",

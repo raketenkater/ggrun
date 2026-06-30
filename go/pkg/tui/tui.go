@@ -348,12 +348,15 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
+					// Open the config screen first so settings (context, KV,
+					// Claude Code, …) are discoverable. The recommended defaults
+					// are pre-filled, so launching is one more keypress: press L
+					// (or Enter on the Launch row) to start.
 					m.selectedModel = item.index
 					m.recommendation = computeRecommendation(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), m.models[m.selectedModel])
-					// "It just works": Enter launches now with the recommended
-					// settings. Press c on a model to configure before launching.
-					m.launchRequest = m.buildLaunchRequest()
-					return m, tea.Quit
+					m.cfgCursor = 0
+					m.screen = ScreenModelConfig
+					return m, nil
 				}
 				switch item.action {
 				case "recommend":
@@ -406,7 +409,7 @@ func (m Model) cfgRows() []string {
 	if m.aitune {
 		rows = append(rows, "rounds")
 	}
-	return append(rows, "vision", "benchmark", "keepalive", "launch", "dryrun")
+	return append(rows, "vision", "claudecode", "benchmark", "keepalive", "launch", "dryrun")
 }
 
 func (m *Model) openCfgInput(mode, val, placeholder string) {
@@ -456,6 +459,8 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 		m.aitune = !m.aitune
 	case "vision":
 		m.vision = !m.vision
+	case "claudecode":
+		m.claudeCode = !m.claudeCode
 	case "benchmark":
 		m.benchmark = !m.benchmark
 	case "keepalive":
@@ -482,6 +487,8 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 		m.aitune = !m.aitune
 	case "vision":
 		m.vision = !m.vision
+	case "claudecode":
+		m.claudeCode = !m.claudeCode
 	case "benchmark":
 		m.benchmark = !m.benchmark
 	case "keepalive":
@@ -716,7 +723,7 @@ func (m Model) viewMain() string {
 	b.WriteString(m.mainList.View())
 
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  Enter launch · [c] configure · [r] downloads · [s] settings · [b] backend"))
+	b.WriteString(mutedStyle.Render("  Enter configure → launch · [r] downloads · [s] settings · [b] backend"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -829,6 +836,11 @@ func (m Model) viewModelConfig() string {
 
 	section("Run mode")
 	line("vision", "[v] Vision (mmproj)", boolLabel(m.vision))
+	ccLabel := boolLabel(m.claudeCode)
+	if m.claudeCode {
+		ccLabel += " — serve + print Claude Code env (thinking on)"
+	}
+	line("claudecode", "[x] Claude Code", ccLabel)
 	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
 	line("keepalive", "[k] Keep-alive restart", boolLabel(m.keepalive))
 
