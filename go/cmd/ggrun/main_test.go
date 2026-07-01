@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
 func writeFakeBackend(t *testing.T, name, body string) string {
@@ -552,4 +553,29 @@ func argIndexOf(args []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func TestClaudeCodeSlotAdjust(t *testing.T) {
+	cases := []struct {
+		name         string
+		ctx, par     int
+		claudeCode   bool
+		wantParallel int
+	}{
+		{"large_ctx_keeps_4", 262144, 4, true, 4},
+		{"fit_32k_drops_to_1", 32768, 4, true, 1},   // the MiniMax-M3 regression: 8k slots
+		{"128k_drops_to_2", 131072, 4, true, 2},     // 65k slots
+		{"tiny_ctx_floors_at_1", 8192, 4, true, 1},
+		{"not_claude_mode_untouched", 32768, 4, false, 4},
+		{"parallel_1_untouched", 32768, 1, true, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &placement.Strategy{ContextSize: tc.ctx, Parallel: tc.par}
+			claudeCodeSlotAdjust(s, tc.claudeCode)
+			if s.Parallel != tc.wantParallel {
+				t.Fatalf("ctx=%d par=%d cc=%v: got parallel %d, want %d", tc.ctx, tc.par, tc.claudeCode, s.Parallel, tc.wantParallel)
+			}
+		})
+	}
 }

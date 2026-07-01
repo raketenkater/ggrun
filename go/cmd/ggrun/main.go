@@ -709,6 +709,41 @@ func claudeCodeParallel(parallel int, claudeCode bool) int {
 	return parallel
 }
 
+// claudeSlotTarget is the per-slot context Claude Code comfortably works in.
+// claudeSlotMin is the floor below which a session can't even hold the system
+// prompt (~15-20k tokens) and requests truncate or fail outright.
+const (
+	claudeSlotTarget = 65536
+	claudeSlotMin    = 24576
+)
+
+// claudeCodeSlotAdjust caps the computed --parallel so each slot keeps a workable
+// context window. claudeCodeParallel floors parallel at 4 BEFORE placement, which
+// is right for large contexts (262144/4 = 65k slots) — but "fit" mode can pick a
+// small total context (e.g. 32768 for a huge MoE on tight VRAM), and 32768/4 = 8k
+// slots can't even hold Claude Code's system prompt. Fewer, bigger slots beat
+// more, broken ones: concurrent requests then queue (API_TIMEOUT_MS covers the
+// wait) and may re-process the prompt on interleave — slow, but functional.
+// Runs after placement.Compute and before Strategy.Args, so the emitted
+// --parallel and the derived CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stay consistent.
+func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode bool) {
+	if !claudeCode || strategy == nil || strategy.ContextSize <= 0 || strategy.Parallel <= 1 {
+		return
+	}
+	p := strategy.ContextSize / claudeSlotTarget
+	if p < 1 {
+		p = 1
+	}
+	if p < strategy.Parallel {
+		fmt.Printf("[claude-code] context %d is too small for %d slots — lowering --parallel to %d (~%dk per slot)\n",
+			strategy.ContextSize, strategy.Parallel, p, strategy.ContextSize/p/1000)
+		strategy.Parallel = p
+	}
+	if slot := strategy.ContextSize / strategy.Parallel; slot < claudeSlotMin {
+		fmt.Printf("[claude-code] warning: only ~%dk context per slot — Claude Code needs ~24k+ just for its system prompt. Use a larger --ctx-size or a smaller model.\n", slot/1000)
+	}
+}
+
 func cmdLaunch(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
@@ -759,6 +794,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode)
 
 	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
 	if len(caps.GPUs) > 0 {
@@ -945,6 +981,7 @@ func cmdGUI() {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode)
 
 	if err := guardPortFree(req.Port, "launch"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1452,6 +1489,7 @@ func cmdDryRun(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode)
 
 	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
