@@ -775,6 +775,7 @@ func cmdLaunch(args []string) {
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
+	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
@@ -951,6 +952,7 @@ func cmdGUI() {
 	}
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
@@ -1454,6 +1456,7 @@ func cmdDryRun(args []string) {
 	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
+	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	if envPrefix := applyGPUVisibility(req, be.Tag); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
@@ -1622,6 +1625,19 @@ func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 	}
 	cfg := `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}`
 	return []string{"--mcp-config", cfg}
+}
+
+// claudeCodeAliasArgs appends `--alias local` so the backend's /v1/models advertises
+// "local", matching the ANTHROPIC_MODEL=local the client uses. Without it llama.cpp/
+// ik_llama advertise the gguf file path as the model id, and Claude Code's interactive
+// model check rejects "local" ("the selected model (local) ... may not exist"). Both
+// backends honor --alias (verified). No-op outside claude-code mode, or if the user
+// already passed an alias.
+func claudeCodeAliasArgs(args []string, claudeCode bool) []string {
+	if !claudeCode || hasArg(args, "--alias") || hasArg(args, "-a") {
+		return args
+	}
+	return append(args, "--alias", "local")
 }
 
 // runClaudeCodeClient launches Claude Code in the foreground wired to the local

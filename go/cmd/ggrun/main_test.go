@@ -523,3 +523,33 @@ func TestClaudeCodeSearchMCPArgsRespectsUserConfig(t *testing.T) {
 		t.Fatalf("expected nil when user passed --mcp-config, got %v", got)
 	}
 }
+
+func TestClaudeCodeAliasArgs(t *testing.T) {
+	base := []string{"-m", "model.gguf", "--port", "8081"}
+	// claude-code mode appends --alias local so /v1/models advertises "local"
+	got := claudeCodeAliasArgs(base, true)
+	if argIndexOf(got, "--alias") < 0 || got[argIndexOf(got, "--alias")+1] != "local" {
+		t.Fatalf("expected --alias local appended, got %v", got)
+	}
+	// non-claude-code mode is a no-op
+	if got := claudeCodeAliasArgs(base, false); len(got) != len(base) {
+		t.Fatalf("expected no change outside claude-code mode, got %v", got)
+	}
+	// a user-set alias is respected (not doubled)
+	user := []string{"-m", "model.gguf", "--alias", "mymodel"}
+	if got := claudeCodeAliasArgs(user, true); len(got) != len(user) {
+		t.Fatalf("expected user --alias preserved without doubling, got %v", got)
+	}
+	if got := claudeCodeAliasArgs([]string{"-a", "x"}, true); len(got) != 2 {
+		t.Fatalf("expected short -a alias respected, got %v", got)
+	}
+}
+
+func argIndexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
