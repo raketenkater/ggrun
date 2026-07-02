@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -200,27 +201,9 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		}
 	}
 	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
-
-	// Prepend lib hub to LD_LIBRARY_PATH if available
-	if hub := os.Getenv("LLM_SERVER_LIB_HUB"); hub != "" {
-		old := os.Getenv("LD_LIBRARY_PATH")
-		for i, e := range filtered {
-			if strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
-				if old == "" {
-					filtered[i] = "LD_LIBRARY_PATH=" + hub
-				} else {
-					filtered[i] = "LD_LIBRARY_PATH=" + hub + ":" + old
-				}
-				old = "" // marker: already handled
-				break
-			}
-		}
-		if old != "" {
-			// No LD_LIBRARY_PATH in env yet — add it
-			filtered = append(filtered, "LD_LIBRARY_PATH="+hub)
-		}
-	}
-	cmd.Env = filtered
+	// A shared-library backend build finds its co-located libs via the hub, not
+	// its build-machine RUNPATH.
+	cmd.Env = libhub.ApplyToChildEnv(filtered)
 
 	if err := cmd.Start(); err != nil {
 		return err

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/raketenkater/ggrun/pkg/libhub"
 )
 
 // Process wraps a running llama-server subprocess.
@@ -85,7 +87,9 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 		}
 	}
 	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
-	cmd.Env = filtered
+	// A shared-library backend build finds its co-located libs via the hub, not
+	// its build-machine RUNPATH.
+	cmd.Env = libhub.ApplyToChildEnv(filtered)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
