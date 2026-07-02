@@ -722,7 +722,20 @@ func UpdateBackend(name, repoDir string, walkback int) error {
 	oldCommit, _ := gitRevParse(repoDir, "HEAD")
 	branch, _ := gitSymbolicRef(repoDir)
 	if branch == "" {
+		// Detached HEAD (e.g. a checkout of a pinned commit): `git pull` refuses
+		// to run, so the backend silently stayed stale. Re-attach to the default
+		// branch first; fall back to master/main if origin/HEAD isn't set.
 		branch = "master"
+		if out, err := exec.Command("git", "-C", repoDir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").Output(); err == nil {
+			if b := strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"); b != "" {
+				branch = b
+			}
+		}
+		fmt.Printf("  Detached HEAD — checking out %s before pull\n", branch)
+		if out, err := exec.Command("git", "-C", repoDir, "checkout", branch).CombinedOutput(); err != nil {
+			fmt.Printf("  FAILED: git checkout %s: %v\n%s\n", branch, err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("git checkout %s failed: %v", branch, err)
+		}
 	}
 
 	oldHash := ""
