@@ -798,7 +798,7 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 
-	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	strategy, err := claudeCodeComputeStrategy(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), req.ClaudeCode, req.CtxFlag == "max")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
@@ -986,7 +986,7 @@ func cmdGUI() {
 	if req.TuneCache != "" {
 		opts.CacheFile = req.TuneCache
 	}
-	strategy, err := placement.Compute(caps, model, opts)
+	strategy, err := claudeCodeComputeStrategy(caps, model, opts, req.ClaudeCode, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
@@ -1495,7 +1495,7 @@ func cmdDryRun(args []string) {
 		be = &backendInfo{Path: binPath, Tag: backendTag}
 	}
 
-	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	strategy, err := claudeCodeComputeStrategy(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), req.ClaudeCode, req.CtxFlag == "max")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
@@ -1675,6 +1675,66 @@ func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 	}
 	cfg := `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}`
 	return []string{"--mcp-config", cfg}
+}
+
+// claudeCodeCtxLadder returns descending context-size targets for context-first
+// placement: the target, then halved until 32768 (Claude Code's practical floor).
+func claudeCodeCtxLadder(target int) []int {
+	if target <= 0 {
+		return nil
+	}
+	if target < 32768 {
+		return []int{target}
+	}
+	var out []int
+	for c := target; c >= 32768; c /= 2 {
+		out = append(out, c)
+	}
+	return out
+}
+
+// claudeCodeComputeStrategy implements context-first placement for Claude Code
+// mode. Default "fit" placement optimizes model layout and settles for a flat
+// 32768 context (defaultContextSize) — but for Claude Code, context is the hard
+// failure dimension (slots too small → truncated system prompt, compaction
+// thrash), while a few expert layers moving to CPU is only a soft slowdown. So
+// here the priority inverts: reserve KV on GPU for the largest workable context
+// and let the model layout adjust around it. The ladder starts at the model's
+// trained context capped at 262144 (`--ctx-size max` lifts the cap to the
+// model's true maximum) and halves until placement fits with KV on GPU; dense
+// models must additionally keep their weights fully offloaded — spilling dense
+// weights for KV would cost every token, which is worse than a smaller context.
+// An explicit numeric --ctx-size bypasses the ladder entirely.
+func claudeCodeComputeStrategy(caps *detect.Capabilities, model *placement.ModelProfile, opts placement.Options, claudeCode, ctxMax bool) (*placement.Strategy, error) {
+	if !claudeCode || (opts.ContextSize > 0 && !ctxMax) {
+		return placement.Compute(caps, model, opts)
+	}
+	target := model.CTXTrain
+	if target <= 0 {
+		target = 262144
+	}
+	if !ctxMax && target > 262144 {
+		target = 262144
+	}
+	for _, ctx := range claudeCodeCtxLadder(target) {
+		o := opts
+		o.ContextSize = ctx
+		s, err := placement.Compute(caps, model, o)
+		if err != nil {
+			continue
+		}
+		if s.KVPlacement == "cpu" || (!model.IsMoE && s.Type == placement.CPUOnly) {
+			continue
+		}
+		if ctx == target {
+			fmt.Printf("[claude-code] context-first placement: ctx %d, KV on GPU (model layout adjusts around it)\n", ctx)
+		} else {
+			fmt.Printf("[claude-code] context-first placement: %d does not fit, using ctx %d (KV on GPU)\n", target, ctx)
+		}
+		return s, nil
+	}
+	// No ladder rung fit with KV on GPU — fall back to the default placement.
+	return placement.Compute(caps, model, opts)
 }
 
 // claudeCodeSamplingArgs appends anti-loop sampling defaults in Claude Code mode.

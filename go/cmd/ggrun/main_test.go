@@ -607,3 +607,27 @@ func TestClaudeCodeSamplingArgs(t *testing.T) {
 		t.Fatalf("expected user presence-penalty kept once + other defaults added, got %v", got)
 	}
 }
+
+func TestClaudeCodeCtxLadder(t *testing.T) {
+	cases := []struct {
+		target int
+		want   []int
+	}{
+		{262144, []int{262144, 131072, 65536, 32768}},
+		{1048576, []int{1048576, 524288, 262144, 131072, 65536, 32768}}, // --ctx-size max on M3
+		{32768, []int{32768}},
+		{20000, []int{20000}}, // small-ctx model: single rung
+		{0, nil},
+	}
+	for _, tc := range cases {
+		got := claudeCodeCtxLadder(tc.target)
+		if len(got) != len(tc.want) {
+			t.Fatalf("ladder(%d) = %v, want %v", tc.target, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("ladder(%d) = %v, want %v", tc.target, got, tc.want)
+			}
+		}
+	}
+}
