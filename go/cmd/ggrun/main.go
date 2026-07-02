@@ -873,6 +873,11 @@ func cmdLaunch(args []string) {
 	if model.IsMoE && len(caps.GPUs) > 0 && p.LogBuf != nil {
 		go placement.RunPostLaunchProbe(cfg.CacheDir, caps.GPUs, p.LogBuf.String())
 	}
+	// Cache the KV cache size llama.cpp actually allocated, so future launches size
+	// context from measured truth instead of the per-arch GGUF formula.
+	if p.LogBuf != nil {
+		go placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, p.LogBuf.String())
+	}
 	if req.ClaudeCode {
 		// Smooth path: one command brings up the model AND drops the user into
 		// Claude Code wired to it. When claude exits, stop the server too.

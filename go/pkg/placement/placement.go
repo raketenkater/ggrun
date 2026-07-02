@@ -108,7 +108,13 @@ type ModelProfile struct {
 	CTXTrain           int    `json:"ctx_train"`
 	ModelArch          string `json:"model_arch"`
 	ExpertUsedCount    int    `json:"expert_used_count,omitempty"`
-	ExpertFF           int    `json:"expert_ff,omitempty"`
+	// MeasuredKVBytesPerTok maps a KV cache type (e.g. "q8_0") to the KV cache
+	// bytes-per-token that llama.cpp ACTUALLY allocated on a previous launch of
+	// this model, read back from the backend log. It is the ground truth for
+	// compressed-attention models (MLA/CSA-HCA/SWA) where the GGUF formula is
+	// unreliable; computeKVTotalMB prefers it over the formula when present.
+	MeasuredKVBytesPerTok map[string]float64 `json:"-"`
+	ExpertFF              int                `json:"expert_ff,omitempty"`
 	ExpertSharedFF     int    `json:"expert_shared_ff,omitempty"`
 	LeadingDense       int    `json:"leading_dense,omitempty"`
 	NextNPredictLayers int    `json:"nextn_predict_layers,omitempty"`
@@ -159,6 +165,14 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	caps = applyRAMBudget(caps, opts.RamBudgetMB)
 	caps = detect.ApplyVRAMHeadroom(caps, opts.VRAMHeadroomMB)
 	caps = detect.ApplyRAMHeadroom(caps, opts.RAMHeadroomMB)
+
+	// Load any KV cache size llama.cpp measured for this model on a prior launch,
+	// so context sizing uses measured truth (exact for compressed attention).
+	if model.MeasuredKVBytesPerTok == nil {
+		if rates := loadMeasuredKVRates(opts.CacheDir, model); rates != nil {
+			model.MeasuredKVBytesPerTok = rates
+		}
+	}
 
 	s := &Strategy{
 		ContextSize:    opts.ContextSize,
@@ -1243,6 +1257,14 @@ func stringsJoin(parts []string, sep string) string {
 
 // computeKVTotalMB calculates exact KV cache size.
 func computeKVTotalMB(model *ModelProfile, ctxSize int, kvType string) int {
+	// Prefer the KV size llama.cpp actually allocated on a previous launch (read
+	// back from its log) — it is exact for every attention scheme, including the
+	// compressed ones (MLA / CSA-HCA / sliding-window) the formula below can't
+	// model. Falls through to the per-arch estimate when we have no measurement.
+	if r, ok := model.MeasuredKVBytesPerTok[strings.ToLower(kvType)]; ok && r > 0 {
+		return int(r*float64(ctxSize)/1048576.0 + 0.5)
+	}
+
 	var kvElemsTotal int
 
 	hasMLA := model.KVLoraRank > 0
@@ -1999,6 +2021,248 @@ func gpuSignatureHash(gpus []detect.GPU) string {
 // It reads current VRAM usage from nvidia-smi, parses buffer sizes from the
 // server's captured stderr log, and caches the result for future launches.
 // Parses the server log after launch to record measured overhead.
+// kvCachePath is the per-model cache of measured KV bytes-per-token. Keyed by
+// model basename + byte size so requantizations/different models never collide.
+func kvCachePath(cacheDir string, model *ModelProfile) string {
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "ggrun")
+	}
+	base := model.Basename
+	if base == "" {
+		base = filepath.Base(model.Path)
+	}
+	return filepath.Join(cacheDir, fmt.Sprintf("kv_%s_%d.cache", base, model.SizeBytes))
+}
+
+// loadMeasuredKVRates reads the per-model KV cache into a kvType→bytes/token map.
+func loadMeasuredKVRates(cacheDir string, model *ModelProfile) map[string]float64 {
+	data, err := os.ReadFile(kvCachePath(cacheDir, model))
+	if err != nil {
+		return nil
+	}
+	out := map[string]float64{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// format: KV_BYTES_PER_TOK_<kvtype>=<float>
+		const pfx = "KV_BYTES_PER_TOK_"
+		if !strings.HasPrefix(line, pfx) {
+			continue
+		}
+		kv := strings.SplitN(strings.TrimPrefix(line, pfx), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		if v, err := strconv.ParseFloat(strings.TrimSpace(kv[1]), 64); err == nil && v > 0 {
+			out[strings.ToLower(strings.TrimSpace(kv[0]))] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseKVBufferTotalMB extracts the model's TOTAL KV cache allocation (MiB) at the
+// launched context from a backend log. llama.cpp's wording varies across versions
+// and backends, so match all known forms: an aggregate "KV self size = X MiB" /
+// "KV cache size = X MiB" line (already the total — take it directly), otherwise
+// SUM the per-device "... KV buffer size = X MiB" lines across CUDA devices + CPU.
+// Returns 0 when the log carries no KV line (caller falls back to the formula or
+// the VRAM-delta probe).
+func parseKVBufferTotalMB(log string) float64 {
+	var aggregate, bufSum float64
+	for _, line := range strings.Split(log, "\n") {
+		low := strings.ToLower(line)
+		if !strings.Contains(low, "=") {
+			continue
+		}
+		switch {
+		case strings.Contains(low, "kv self size"), strings.Contains(low, "kv cache size"):
+			if v := parseMiB(line); v > aggregate {
+				aggregate = v // aggregate line: the total, printed once
+			}
+		case strings.Contains(low, "kv buffer size"):
+			bufSum += parseMiB(line) // per-device: sum across GPUs + CPU
+		}
+	}
+	if aggregate > 0 {
+		return aggregate
+	}
+	return bufSum
+}
+
+// kvBytesPerTokenFromVRAMDelta derives KV bytes-per-token from two launches that
+// differ ONLY in context size. Weights, compute buffers, and CUDA overhead are
+// identical across the two, so the VRAM difference is pure KV cache — exact for
+// every architecture and independent of whether the backend logs its KV size at
+// all. Returns 0 if the samples are unusable.
+func kvBytesPerTokenFromVRAMDelta(ctxA, vramA_MB, ctxB, vramB_MB int) float64 {
+	dCtx := ctxB - ctxA
+	dVRAM := vramB_MB - vramA_MB
+	if dCtx < 0 {
+		dCtx, dVRAM = -dCtx, -dVRAM
+	}
+	if dCtx == 0 || dVRAM <= 0 {
+		return 0
+	}
+	return float64(dVRAM) * 1048576.0 / float64(dCtx)
+}
+
+// setCtxSizeArg returns a copy of args with --ctx-size set to ctx (adding it if
+// absent). Used by the VRAM-delta probe to launch the same placement twice at
+// different contexts.
+func setCtxSizeArg(args []string, ctx int) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i < len(out)-1; i++ {
+		if out[i] == "--ctx-size" || out[i] == "-c" {
+			out[i+1] = strconv.Itoa(ctx)
+			return out
+		}
+	}
+	return append(out, "--ctx-size", strconv.Itoa(ctx))
+}
+
+// measureLoadedVRAM launches backendPath with args, waits for VRAM to plateau
+// (the model + KV finished allocating), returns total VRAM used across gpus (MiB),
+// then kills the process. Log-independent — it reads nvidia-smi, not stderr.
+func measureLoadedVRAM(backendPath string, args []string, gpus []detect.GPU, timeout time.Duration) int {
+	cmd := exec.Command(backendPath, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return 0
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	deadline := time.Now().Add(timeout)
+	prev, stable := -1, 0
+	for time.Now().Before(deadline) {
+		time.Sleep(1500 * time.Millisecond)
+		total := 0
+		for _, g := range gpus {
+			total += queryVRAMUsed(g.Index)
+		}
+		// Plateau = two consecutive readings within 64 MiB, above a floor.
+		if total > 512 && prev > 512 && absInt(total-prev) <= 64 {
+			stable++
+			if stable >= 2 {
+				return total
+			}
+		} else {
+			stable = 0
+		}
+		prev = total
+	}
+	if prev > 512 {
+		return prev
+	}
+	return 0
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// ProbeKVViaVRAMDelta measures a model's KV bytes-per-token by launching the same
+// placement (baseArgs, minus the binary) twice — at a small and a larger context —
+// and attributing the VRAM difference entirely to KV. It is the log-independent
+// fallback for backends that don't print their KV buffer size. Requires roughly
+// idle GPUs for a clean delta. Writes the per-model KV cache and returns true on
+// success. Best-effort: returns false if either launch fails to allocate.
+//
+// NOTE: the two-launch flow needs live validation on real hardware before it is
+// auto-invoked; the arithmetic (kvBytesPerTokenFromVRAMDelta) and cache round-trip
+// are unit-tested.
+func ProbeKVViaVRAMDelta(backendPath string, baseArgs []string, gpus []detect.GPU, cacheDir string, model *ModelProfile, kvType string) bool {
+	if backendPath == "" || model == nil || len(gpus) == 0 {
+		return false
+	}
+	if kvType == "" {
+		kvType = "q8_0"
+	}
+	const ctxA, ctxB = 8192, 65536
+	loadTimeout := 15 * time.Minute
+
+	vramA := measureLoadedVRAM(backendPath, setCtxSizeArg(baseArgs, ctxA), gpus, loadTimeout)
+	if vramA <= 0 {
+		return false
+	}
+	vramB := measureLoadedVRAM(backendPath, setCtxSizeArg(baseArgs, ctxB), gpus, loadTimeout)
+	if vramB <= 0 {
+		return false
+	}
+	rate := kvBytesPerTokenFromVRAMDelta(ctxA, vramA, ctxB, vramB)
+	if rate <= 0 {
+		return false
+	}
+	writeMeasuredKVRate(cacheDir, model, strings.ToLower(kvType), rate,
+		fmt.Sprintf("VRAM-delta probe: ctx %d=%dMB, ctx %d=%dMB", ctxA, vramA, ctxB, vramB))
+	return true
+}
+
+// RunPostLaunchKVProbe reads the KV cache size llama.cpp actually allocated at
+// ctxSize from the backend log and caches it as bytes-per-token for this model +
+// kvType, so future launches size the context from measured truth instead of the
+// per-arch GGUF formula. No-op if the log has no KV line or a value is already
+// cached for this kvType.
+func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvType, serverLog string) {
+	if model == nil || ctxSize <= 0 || serverLog == "" {
+		return
+	}
+	if kvType == "" {
+		kvType = "q8_0"
+	}
+	kvType = strings.ToLower(kvType)
+	if existing := loadMeasuredKVRates(cacheDir, model); existing[kvType] > 0 {
+		return
+	}
+	totalKVMB := parseKVBufferTotalMB(serverLog)
+	if totalKVMB <= 0 {
+		return
+	}
+	bytesPerTok := totalKVMB * 1048576.0 / float64(ctxSize)
+	if bytesPerTok <= 0 {
+		return
+	}
+	writeMeasuredKVRate(cacheDir, model, kvType, bytesPerTok,
+		fmt.Sprintf("launch log: ctx=%d total_kv=%.0fMB", ctxSize, totalKVMB))
+}
+
+// writeMeasuredKVRate records a measured KV bytes-per-token for model+kvType,
+// merging with any rates already cached for other kvTypes.
+func writeMeasuredKVRate(cacheDir string, model *ModelProfile, kvType string, bytesPerTok float64, note string) {
+	kvType = strings.ToLower(kvType)
+	rates := loadMeasuredKVRates(cacheDir, model)
+	if rates == nil {
+		rates = map[string]float64{}
+	}
+	rates[kvType] = bytesPerTok
+
+	path := kvCachePath(cacheDir, model)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Measured KV cache for %s (%s)\n", model.Basename, note)
+	for k, v := range rates {
+		fmt.Fprintf(&b, "KV_BYTES_PER_TOK_%s=%.4f\n", k, v)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0644); err == nil {
+		fmt.Fprintf(os.Stderr, "  KV probe: %s = %.0f bytes/token (%s)\n", kvType, bytesPerTok, note)
+	}
+}
+
 func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string) {
 	if len(gpus) == 0 || serverLog == "" {
 		return
@@ -2127,10 +2391,15 @@ func parseMiB(line string) float64 {
 	if idx < 0 {
 		return 0
 	}
-	rest := strings.TrimSpace(line[idx+1:])
-	rest = strings.TrimSuffix(rest, " MiB")
-	rest = strings.TrimSpace(rest)
-	v, err := strconv.ParseFloat(rest, 64)
+	// Take the number between "=" and the FIRST "MiB" after it, so lines with
+	// trailing detail (e.g. "KV self size = X MiB, K (f16): Y MiB, ...") parse the
+	// aggregate X and not the per-component values.
+	rest := line[idx+1:]
+	mib := strings.Index(rest, "MiB")
+	if mib < 0 {
+		return 0
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(rest[:mib]), 64)
 	if err != nil {
 		return 0
 	}
