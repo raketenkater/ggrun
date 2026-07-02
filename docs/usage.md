@@ -110,6 +110,11 @@ aliases, so without the overrides those calls leave for `api.anthropic.com` and 
   enough; subagents and workflow agents inherit it. A value you set yourself wins.
 - **Wide fan-out** (subagents, workflows) queues behind the GPU; `API_TIMEOUT_MS` is
   raised so queued requests wait for a slot instead of cancelling.
+- **Anti-loop sampling.** The Anthropic API has no repetition-penalty fields and the
+  client only sends temperature, so ggrun sets server-side defaults in claude-code
+  mode (`--presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 20
+  --top-p 0.95 --min-p 0`) — quantized thinking models loop endlessly without them.
+  Pass any of these flags yourself (after `--`) and your value wins.
 - **Web research:** the built-in WebSearch runs on Anthropic's servers and is hidden
   on a non-first-party endpoint, so ggrun disables it and auto-wires a no-key
   DuckDuckGo search MCP (`mcp__ddg-search__search`) when `uvx` is installed —

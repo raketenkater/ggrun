@@ -812,6 +812,7 @@ func cmdLaunch(args []string) {
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
+	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode)
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
@@ -990,6 +991,7 @@ func cmdGUI() {
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
+	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode)
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
@@ -1495,6 +1497,7 @@ func cmdDryRun(args []string) {
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
+	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode)
 	if envPrefix := applyGPUVisibility(req, be.Tag); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
@@ -1663,6 +1666,40 @@ func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 	}
 	cfg := `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}`
 	return []string{"--mcp-config", cfg}
+}
+
+// claudeCodeSamplingArgs appends anti-loop sampling defaults in Claude Code mode.
+// The Anthropic /v1/messages conversion only forwards temperature/top_p/top_k from
+// the client (server-chat.cpp), and the Anthropic API has no penalty fields at all —
+// so repetition control MUST come from server-side defaults, and ik_llama ships with
+// every penalty disabled (repeat 1.0, presence 0.0). Quantized thinking models
+// (Qwen3.x model card explicitly warns) fall into endless repetition without them:
+// the user-visible symptom is repeated phrases and the model re-issuing the same
+// tool call, since the tool-call grammar shapes degenerate output into valid JSON.
+// Values: presence-penalty 1.0 (Qwen recommends up to 2 against repetition; 1.0 is
+// mild enough for code), repeat-penalty 1.05 over the last 512 tokens (targets tight
+// local loops, small enough to leave code idioms alone), top-k 20 / top-p 0.95 /
+// min-p 0 (Qwen thinking-mode recommendation; also softens the client's greedy
+// temperature-0 classifier calls, where penalties still apply to the argmax).
+// Any flag the user already passed (ExtraArgs) wins — we skip it here.
+func claudeCodeSamplingArgs(args []string, claudeCode bool) []string {
+	if !claudeCode {
+		return args
+	}
+	defaults := [][2]string{
+		{"--presence-penalty", "1.0"},
+		{"--repeat-penalty", "1.05"},
+		{"--repeat-last-n", "512"},
+		{"--top-k", "20"},
+		{"--top-p", "0.95"},
+		{"--min-p", "0.0"},
+	}
+	for _, d := range defaults {
+		if !hasArg(args, d[0]) {
+			args = append(args, d[0], d[1])
+		}
+	}
+	return args
 }
 
 // claudeCodeAliasArgs appends `--alias local` so the backend's /v1/models advertises

@@ -579,3 +579,29 @@ func TestClaudeCodeSlotAdjust(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeCodeSamplingArgs(t *testing.T) {
+	base := []string{"-m", "model.gguf"}
+	got := claudeCodeSamplingArgs(base, true)
+	for _, want := range []string{"--presence-penalty", "--repeat-penalty", "--repeat-last-n", "--top-k", "--top-p", "--min-p"} {
+		if !hasArg(got, want) {
+			t.Fatalf("expected %s in claude-code sampling defaults, got %v", want, got)
+		}
+	}
+	// non-claude-code: untouched
+	if got := claudeCodeSamplingArgs(base, false); len(got) != len(base) {
+		t.Fatalf("expected no sampling flags outside claude-code mode, got %v", got)
+	}
+	// user-set flag wins: not doubled, others still added
+	user := []string{"-m", "model.gguf", "--presence-penalty", "1.5"}
+	got = claudeCodeSamplingArgs(user, true)
+	n := 0
+	for _, a := range got {
+		if a == "--presence-penalty" {
+			n++
+		}
+	}
+	if n != 1 || !hasArg(got, "--top-k") {
+		t.Fatalf("expected user presence-penalty kept once + other defaults added, got %v", got)
+	}
+}
