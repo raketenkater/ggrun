@@ -1952,9 +1952,11 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		gpuLayers = m.recommendation.GPULayers
 	}
 	parallel := 1
+	parallelSet := false
 	if m.parallel != "" {
 		if n, err := strconv.Atoi(m.parallel); err == nil {
 			parallel = n
+			parallelSet = true
 		}
 	}
 	return &LaunchRequest{
@@ -1966,6 +1968,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		GPULayers:    gpuLayers,
 		FlashAttn:    true,
 		Parallel:     parallel,
+		ParallelSet:  parallelSet,
 		Vision:       m.vision,
 		Backend:      m.backend,
 		TuneCache:    m.tunePath,
@@ -2017,6 +2020,7 @@ type LaunchRequest struct {
 	GPULayers     int
 	FlashAttn     bool
 	Parallel      int
+	ParallelSet   bool // user typed a parallel value (claude-code mode must not override)
 	Vision        bool
 	Backend       string
 	TuneCache     string

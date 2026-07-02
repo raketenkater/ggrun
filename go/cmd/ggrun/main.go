@@ -298,6 +298,7 @@ type launchRequest struct {
 	VRAMHeadroomMB    int
 	RAMHeadroomMB     int
 	Parallel          int
+	ParallelSet       bool // --parallel given explicitly; claude-code mode must not override it
 	Benchmark         bool
 	ClaudeCode        bool
 	ExtraArgs         []string
@@ -397,6 +398,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--parallel":
 				req.Parallel, _ = strconv.Atoi(val)
+				req.ParallelSet = true
 				continue
 			}
 		}
@@ -526,6 +528,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.Parallel, _ = strconv.Atoi(v)
+			req.ParallelSet = true
 		case "--force-spec-moe":
 			req.ForceSpecMoE = true
 		case "--":
@@ -686,7 +689,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 			opts.GPUs = append(opts.GPUs, idx)
 		}
 	}
-	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode)
+	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
 	return opts
 }
 
@@ -702,8 +705,11 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 // Wide fan-out is handled by a long API_TIMEOUT_MS (queued agents wait for one
 // of the 4 slots and complete) rather than by more slots — a single GPU
 // serializes the work either way. Total KV is unchanged (fixed ctx, just split).
-func claudeCodeParallel(parallel int, claudeCode bool) int {
-	if claudeCode && parallel < 4 {
+// An explicitly passed --parallel always wins: big-MoE tuning (e.g. 2 slots so a
+// background call can't evict the main conversation's expensive prompt cache)
+// needs the user's value to survive claude-code mode.
+func claudeCodeParallel(parallel int, claudeCode, explicit bool) int {
+	if claudeCode && !explicit && parallel < 4 {
 		return 4
 	}
 	return parallel
@@ -726,18 +732,21 @@ const (
 // wait) and may re-process the prompt on interleave — slow, but functional.
 // Runs after placement.Compute and before Strategy.Args, so the emitted
 // --parallel and the derived CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stay consistent.
-func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode bool) {
+func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode, parallelExplicit bool) {
 	if !claudeCode || strategy == nil || strategy.ContextSize <= 0 || strategy.Parallel <= 1 {
 		return
 	}
-	p := strategy.ContextSize / claudeSlotTarget
-	if p < 1 {
-		p = 1
-	}
-	if p < strategy.Parallel {
-		fmt.Printf("[claude-code] context %d is too small for %d slots — lowering --parallel to %d (~%dk per slot)\n",
-			strategy.ContextSize, strategy.Parallel, p, strategy.ContextSize/p/1000)
-		strategy.Parallel = p
+	// A user-chosen --parallel is a deliberate slot layout — keep it, warn below if tight.
+	if !parallelExplicit {
+		p := strategy.ContextSize / claudeSlotTarget
+		if p < 1 {
+			p = 1
+		}
+		if p < strategy.Parallel {
+			fmt.Printf("[claude-code] context %d is too small for %d slots — lowering --parallel to %d (~%dk per slot)\n",
+				strategy.ContextSize, strategy.Parallel, p, strategy.ContextSize/p/1000)
+			strategy.Parallel = p
+		}
 	}
 	if slot := strategy.ContextSize / strategy.Parallel; slot < claudeSlotMin {
 		fmt.Printf("[claude-code] warning: only ~%dk context per slot — Claude Code needs ~24k+ just for its system prompt. Use a larger --ctx-size or a smaller model.\n", slot/1000)
@@ -794,7 +803,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode)
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
 
 	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
 	if len(caps.GPUs) > 0 {
@@ -973,7 +982,7 @@ func cmdGUI() {
 		// AI-tune paths measure think-free.
 		ReasoningOff: req.Benchmark || req.AITune,
 	}
-	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode)
+	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
 	if req.TuneCache != "" {
 		opts.CacheFile = req.TuneCache
 	}
@@ -982,7 +991,7 @@ func cmdGUI() {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode)
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
 
 	if err := guardPortFree(req.Port, "launch"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1491,7 +1500,7 @@ func cmdDryRun(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode)
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
 
 	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
