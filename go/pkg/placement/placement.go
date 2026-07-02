@@ -812,6 +812,15 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		s.TensorSplit = split
 	}
 
+	// Only reserve GPU VRAM for the KV cache when it actually lives on the GPU.
+	// With KV on CPU (big-MoE auto-placement, or --kv-placement cpu) the experts
+	// must be free to fill that VRAM instead — otherwise every GPU sits half-empty
+	// holding room for a KV cache that's in system RAM.
+	gpuKVTotalMB := kvTotalMB
+	if s.KVPlacement == "cpu" {
+		gpuKVTotalMB = 0
+	}
+
 	// Per-GPU expert capacity under the exact emitted split.
 	maxGPULayersPer := make([]int, numGPUs)
 	maxGPULayers := 0
@@ -821,7 +830,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		}
 		g := caps.GPUs[gi]
 		nonExpertShareMB := splitShareMB(nonExpertTotalMB, split, gi)
-		kvShareMB := splitShareMB(kvTotalMB, split, gi)
+		kvShareMB := splitShareMB(gpuKVTotalMB, split, gi)
 		roomMB := g.VRAMFreeMB() - fixedPerGPU - nonExpertShareMB - kvShareMB
 		if roomMB < 0 {
 			roomMB = 0

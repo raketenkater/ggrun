@@ -1138,3 +1138,35 @@ func TestComputeAppleSiliconSingleGPU(t *testing.T) {
 		}
 	}
 }
+
+func TestKVOnCPUFreesVRAMForExperts(t *testing.T) {
+	// A big MoE with KV on CPU must place MORE expert layers on the GPU than the
+	// same model with KV on GPU — because the CPU-KV frees the VRAM that would
+	// otherwise be (wrongly) reserved for a cache that isn't there.
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	mk := func() *ModelProfile {
+		return &ModelProfile{
+			Path: "moe.gguf", SizeBytes: 40 * 1024 * 1024 * 1024,
+			NumLayers: 64, NumParams: 70_000_000_000, IsMoE: true, NumExperts: 64,
+			ContextSize: 32768, HiddenSize: 4096,
+			HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+			ExpertBytes: 36 * 1024 * 1024 * 1024, NonExpertBytes: 4 * 1024 * 1024 * 1024,
+			CTXTrain: 32768,
+		}
+	}
+	gpuKV, err := Compute(caps, mk(), Options{ContextSize: 32768, KVPlacement: "gpu", KVQuality: "mid"})
+	if err != nil {
+		t.Fatalf("gpu-kv compute: %v", err)
+	}
+	cpuKV, err := Compute(caps, mk(), Options{ContextSize: 32768, KVPlacement: "cpu", KVQuality: "mid"})
+	if err != nil {
+		t.Fatalf("cpu-kv compute: %v", err)
+	}
+	if cpuKV.NCPUMoE >= gpuKV.NCPUMoE {
+		t.Fatalf("KV-on-CPU should offload FEWER experts to CPU (more on GPU): cpu-kv NCPUMoE=%d, gpu-kv NCPUMoE=%d", cpuKV.NCPUMoE, gpuKV.NCPUMoE)
+	}
+}
