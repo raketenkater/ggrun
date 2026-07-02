@@ -331,10 +331,19 @@ func SelfUpdate() error {
 	}
 
 	if out, err := gitPullFFOnly(repoDir); err != nil {
-		if backupPath != "" {
-			os.Remove(backupPath)
+		// Local commits on top of origin (a dev checkout) make fast-forward
+		// impossible — rebase them onto the new origin instead of failing,
+		// mirroring the backend-update path.
+		fmt.Println("  Warning: fast-forward pull failed, trying rebase...")
+		if out2, err2 := gitPullRebase(repoDir); err2 != nil {
+			if backupPath != "" {
+				os.Remove(backupPath)
+			}
+			return fmt.Errorf("git pull failed: %v\n%s\nrebase also failed: %v\n%s\nhint: your checkout has local commits that conflict with origin — resolve in %s",
+				err, strings.TrimSpace(out), err2, strings.TrimSpace(out2), repoDir)
+		} else {
+			fmt.Println(strings.TrimSpace(out2))
 		}
-		return fmt.Errorf("git pull failed: %v\n%s", err, strings.TrimSpace(out))
 	} else {
 		fmt.Println(strings.TrimSpace(out))
 	}
