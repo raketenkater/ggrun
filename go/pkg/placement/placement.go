@@ -265,7 +265,17 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			} else if multiFits {
 				s.ContextSize, s.KVType = multiCtx, multiKV
 			} else {
-				s.ContextSize, s.KVType = 32768, "q4_0"
+				// The model doesn't fit wholly in VRAM (a big MoE offloading experts
+				// to CPU). Don't collapse to the 32768/q4_0 floor — size the context
+				// by where its KV will actually live. --kv-placement drives it:
+				// gpu → VRAM-bounded (safe, experts offload); cpu → RAM-bounded
+				// (large window); auto → gpu if it fits, else cpu for a big MoE.
+				placement := s.KVPlacement
+				if placement == "auto" || placement == "" {
+					placement = resolveAutoKVPlacement(caps, model, totalSizeMB)
+				}
+				s.KVPlacement = placement
+				s.ContextSize, s.KVType = computeAutoContextSizeKVPlacement(caps, model, totalSizeMB, s.KVType, placement, opts)
 			}
 		}
 	}
@@ -1652,6 +1662,91 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 		}
 	}
 
+	return 32768, "q4_0"
+}
+
+// resolveAutoKVPlacement decides gpu vs cpu for the KV cache when --kv-placement
+// is "auto". A model that fits in VRAM keeps its KV on GPU (fast, VRAM to spare).
+// A big MoE whose experts must offload to CPU puts KV on CPU instead: that frees
+// VRAM for more expert layers (the decode-bandwidth bottleneck) and unlocks a much
+// larger context. A dense model bigger than VRAM keeps KV on GPU (its only spot).
+func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int) string {
+	freeVRAM := 0
+	for _, g := range caps.GPUs {
+		freeVRAM += g.VRAMFreeMB()
+	}
+	if totalSizeMB+8192 <= freeVRAM {
+		return "gpu"
+	}
+	if model.IsMoE {
+		return "cpu"
+	}
+	return "gpu"
+}
+
+// computeAutoContextSizeKVPlacement computes the largest context whose KV cache
+// fits in the memory implied by placement: VRAM for "gpu", system RAM for "cpu".
+// For a MoE, "gpu" keeps only the non-expert weights on GPU and reserves the rest
+// of VRAM for KV (experts offload to CPU), while "cpu" leaves VRAM for experts and
+// puts the (large) KV in RAM. This is what makes --kv-placement drive the context
+// ceiling instead of a fixed VRAM+RAM budget that can overflow a GPU-pinned KV.
+func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, preferredKVType, placement string, opts Options) (int, string) {
+	freeVRAM := 0
+	for _, g := range caps.GPUs {
+		freeVRAM += g.VRAMFreeMB()
+	}
+	const overheadMB = 8192
+
+	var kvBudgetMB int
+	if placement == "cpu" {
+		// KV lives in RAM, sharing it with the weights that don't fit in VRAM.
+		weightsInRAM := totalSizeMB - freeVRAM
+		if weightsInRAM < 0 {
+			weightsInRAM = 0
+		}
+		kvBudgetMB = caps.RAM.FreeMB - weightsInRAM - overheadMB
+	} else {
+		// KV lives in VRAM alongside the GPU-resident weights. Dense: the whole
+		// model. MoE: only the non-expert weights (experts offload to CPU), so the
+		// rest of VRAM is free for KV.
+		gpuResident := totalSizeMB
+		if model.IsMoE {
+			if ne := bytesToMiBCeil(model.NonExpertBytes); ne > 0 {
+				gpuResident = ne
+			}
+		}
+		kvBudgetMB = freeVRAM - gpuResident - overheadMB
+	}
+	if kvBudgetMB <= 0 {
+		return 32768, preferredKVType
+	}
+
+	seen := map[string]bool{}
+	for _, kvType := range []string{preferredKVType, "q8_0", "q4_0"} {
+		if seen[kvType] {
+			continue
+		}
+		seen[kvType] = true
+		refCtx := 32768
+		refKVMB := computeKVTotalMB(model, refCtx, kvType)
+		if refKVMB <= 0 {
+			continue
+		}
+		kvBytesPerToken := float64(refKVMB) * 1048576.0 / float64(refCtx)
+		maxCtx := int(float64(kvBudgetMB) * 1048576.0 / kvBytesPerToken)
+		if model.CTXTrain > 0 && model.CTXTrain < maxCtx {
+			maxCtx = model.CTXTrain
+		}
+		best := 0
+		for _, c := range []int{32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304} {
+			if c <= maxCtx {
+				best = c
+			}
+		}
+		if best >= 32768 {
+			return best, kvType
+		}
+	}
 	return 32768, "q4_0"
 }
 
