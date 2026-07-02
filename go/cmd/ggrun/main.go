@@ -66,6 +66,8 @@ func main() {
 		cmdDryRun(args[1:])
 	case "probe":
 		cmdProbe()
+	case "kv-probe":
+		cmdKVProbe(args[1:])
 	case "download":
 		cmdDownload(args[1:])
 	case "tune":
@@ -94,6 +96,8 @@ Commands:
   version              Show version
   detect               Detect hardware capabilities
   probe                Check free GPU/RAM memory
+  kv-probe <model>     Measure real KV cache size (2 short launches) and cache it,
+                       so context sizing is exact for compressed-attention models
   launch <model.gguf>  Launch model with auto-placement
   benchmark <model>    Benchmark a running server
   daemon               Start persistent daemon
@@ -121,7 +125,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "download", "tune", "recommend", "gui", "tui", "config", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "kv-probe", "download", "tune", "recommend", "gui", "tui", "config", "update", "--update":
 		return true
 	default:
 		return false
@@ -1466,6 +1470,65 @@ func indicesFromDeviceList(value string) []int {
 		i = j - 1
 	}
 	return out
+}
+
+// cmdKVProbe measures a model's real KV cache size by launching it twice at
+// different contexts and attributing the VRAM difference to KV (see
+// placement.ProbeKVViaVRAMDelta). It caches the result so later launches size the
+// context from measured truth instead of the per-arch formula — the reliable path
+// for compressed-attention models (DeepSeek V4, MiniMax-M3) and for backend builds
+// that don't log their KV size.
+func cmdKVProbe(args []string) {
+	req, err := parseLaunchArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if req.ModelPath == "" {
+		fmt.Fprintln(os.Stderr, "Usage: ggrun kv-probe <model.gguf>")
+		os.Exit(2)
+	}
+	caps, err := detect.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		os.Exit(1)
+	}
+	if len(caps.GPUs) == 0 {
+		fmt.Fprintln(os.Stderr, "kv-probe needs at least one GPU (it measures KV via VRAM delta)")
+		os.Exit(1)
+	}
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
+	model, err := parseModel(req.ModelPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
+		os.Exit(1)
+	}
+	be := selectBackend(caps, req)
+	binPath := "llama-server"
+	if be != nil {
+		binPath = be.Path
+	} else {
+		be = &backendInfo{Path: binPath, Tag: "llama"}
+	}
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		os.Exit(1)
+	}
+	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = append(serverArgs, req.ExtraArgs...)
+
+	fmt.Printf("[kv-probe] Measuring KV for %s at cache-type %s — two short launches; a big model takes a few minutes each.\n", model.Basename, strategy.KVType)
+	if placement.ProbeKVViaVRAMDelta(be.Path, serverArgs[1:], caps.GPUs, cfg.CacheDir, model, strategy.KVType) {
+		fmt.Println("[kv-probe] Done. Future launches size context from the measured KV (frees VRAM the formula over-reserved).")
+	} else {
+		fmt.Fprintln(os.Stderr, "[kv-probe] Could not measure (a load didn't finish, or the VRAM delta was unusable). Launches keep using the formula.")
+		os.Exit(1)
+	}
 }
 
 func cmdDryRun(args []string) {
