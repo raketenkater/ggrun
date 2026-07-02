@@ -195,13 +195,14 @@ func TestBalancedPrefersBlendedQuantOverBF16(t *testing.T) {
 func TestArchRunnableFiltersUnsupported(t *testing.T) {
 	// Architectures no bundled backend can load must be filtered out of
 	// recommendations (the launcher would only fail with "unknown architecture").
-	for _, arch := range []string{"deepseek4", "DeepSeek4", "bailingmoe2.5", "longcat-flash-ngram", "mllama"} {
+	for _, arch := range []string{"bailingmoe2.5", "longcat-flash-ngram", "mllama"} {
 		if archRunnable(Candidate{Arch: arch}) {
 			t.Fatalf("arch %q should be filtered (no bundled backend loads it)", arch)
 		}
 	}
 	// Supported arches, and entries without arch metadata, must be kept.
-	for _, arch := range []string{"qwen35", "qwen35moe", "minimax-m3", "gpt-oss", "llama", "deepseek2", ""} {
+	// deepseek4 is runnable since mainline PR #24162 (2026-06-29).
+	for _, arch := range []string{"qwen35", "qwen35moe", "minimax-m3", "gpt-oss", "llama", "deepseek2", "deepseek4", "DeepSeek4", ""} {
 		if !archRunnable(Candidate{Arch: arch}) {
 			t.Fatalf("arch %q is runnable and must not be filtered", arch)
 		}
@@ -401,7 +402,6 @@ func TestUnrunnableArchesLoaded(t *testing.T) {
 		t.Fatalf("embedded unrunnable_arches.json failed to parse: %v", err)
 	}
 	want := map[string]bool{
-		"deepseek4":           true,
 		"bailingmoe2.5":       true,
 		"longcat-flash-ngram": true,
 		"mllama":              true,
@@ -429,7 +429,7 @@ func TestUnrunnableArchesFallbackOnBadJSON(t *testing.T) {
 		t.Fatal("expected parse error for malformed JSON, got nil")
 	}
 	// The fallback set must still cover the known-bad arches.
-	for _, arch := range []string{"deepseek4", "bailingmoe2.5", "longcat-flash-ngram", "mllama"} {
+	for _, arch := range []string{"bailingmoe2.5", "longcat-flash-ngram", "mllama"} {
 		if !fallbackUnrunnableArch[arch] {
 			t.Fatalf("fallback blocklist missing %q", arch)
 		}

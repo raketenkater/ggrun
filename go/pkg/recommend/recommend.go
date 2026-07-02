@@ -495,9 +495,9 @@ func fitFactor(fit string) float64 {
 // bundled backend (mainline llama.cpp or ik_llama.cpp) can load yet. The
 // recommender must not surface them: the launcher would only fail with
 // "unknown architecture". They stay in catalog.json so a power user pointing
-// LLAMA_SERVER at a custom build can still find them — e.g. deepseek4 (DeepSeek
-// V4 Pro/Flash) loads only on antirez/llama.cpp PR #22378, which ggrun already
-// warns about in warnModelCompatibility.
+// LLAMA_SERVER at a custom build can still find them. (deepseek4 / DeepSeek V4
+// was such a case until mainline PR #24162 merged it on 2026-06-29 — the bundled
+// mainline build now loads it, so it is no longer filtered.)
 //
 // The blocklist is data-driven: it is loaded from unrunnable_arches.json (the
 // single source of truth) in init(). This is a blocklist, not an allowlist, so
@@ -513,7 +513,9 @@ var unrunnableArch = map[string]bool{}
 // falls back to this and the recommender keeps working with the known-bad
 // arches filtered. It is only consulted if the embedded JSON fails to parse.
 var fallbackUnrunnableArch = map[string]bool{
-	"deepseek4":           true, // DeepSeek V4 Pro/Flash — needs antirez/llama.cpp PR #22378
+	// deepseek4 (DeepSeek V4 Pro/Flash) became runnable with mainline PR #24162
+	// (merged 2026-06-29); the bundled mainline build loads it, so it is no longer
+	// blocked here.
 	"bailingmoe2.5":       true, // InclusionAI Ling 2.6 Flash
 	"longcat-flash-ngram": true, // LongCat Flash Lite
 	"mllama":              true, // Llama 3.2 Vision — not registered in the bundled build
