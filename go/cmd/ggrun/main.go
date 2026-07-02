@@ -2591,6 +2591,18 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	// Handle multi-part models: sum all shard files
 	profile.SizeBytes = totalModelSize(path)
 
+	// Anchor the expert/non-expert split to the real bytes on disk. Those two are
+	// summed from a hand-maintained per-ggml-type size table, which mis-sizes some
+	// quants (it over-counted DeepSeek V4 by ~29%: 162GB vs a 125GB file) and then
+	// over-reserves RAM/VRAM, under-packing the GPUs. The file size is exact ground
+	// truth, so keep the table's expert:non-expert RATIO but rescale it to match.
+	if tableTotal := profile.ExpertBytes + profile.NonExpertBytes; tableTotal > 0 && profile.SizeBytes > 0 {
+		if scale := float64(profile.SizeBytes) / float64(tableTotal); scale < 0.95 || scale > 1.05 {
+			profile.ExpertBytes = int64(float64(profile.ExpertBytes) * scale)
+			profile.NonExpertBytes = int64(float64(profile.NonExpertBytes) * scale)
+		}
+	}
+
 	return profile, nil
 }
 
