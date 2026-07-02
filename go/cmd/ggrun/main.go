@@ -1033,6 +1033,14 @@ func cmdGUI() {
 	// Claude Code mode hands the terminal to the `claude` client, so keep the
 	// backend's logs out of it (they still land in the per-run log file).
 	launcher.Quiet = req.ClaudeCode
+	// Always write the backend log to a stable, discoverable location and print
+	// it, so a normal launch is debuggable (not only claude-code mode).
+	if logDir := cfg.LogDir; logDir != "" {
+		if err := os.MkdirAll(logDir, 0o755); err == nil {
+			launcher.LogPath = filepath.Join(logDir, fmt.Sprintf("ggrun-server-%d.log", req.Port))
+			fmt.Printf("[launch] backend log → %s (tail -f to follow)\n", launcher.LogPath)
+		}
+	}
 	launcher.PlacementCachePath = req.TuneCache
 	launcher.OnFailure = func(ft recovery.FailureType, msg string) {
 		fmt.Fprintf(os.Stderr, "[launch] failure: %s: %s\n", ft, msg)

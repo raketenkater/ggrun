@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -64,6 +65,10 @@ type Launcher struct {
 	// per-run log file). Used by Claude Code mode, where ggrun hands the terminal
 	// to the `claude` client and backend logs must not bleed into its UI.
 	Quiet bool
+
+	// LogPath, if set, is where the backend log is written (a stable, discoverable
+	// location like .logs/ggrun-server-<port>.log). Empty falls back to a temp file.
+	LogPath string
 
 	PlacementCachePath string
 
@@ -167,7 +172,13 @@ func (l *Launcher) Run(ctx context.Context) error {
 }
 
 func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount int) error {
-	logFile, err := os.CreateTemp("", "ggrun-launch-*.log")
+	var logFile *os.File
+	var err error
+	if l.LogPath != "" {
+		logFile, err = os.Create(l.LogPath)
+	} else {
+		logFile, err = os.CreateTemp("", "ggrun-launch-*.log")
+	}
 	if err != nil {
 		return err
 	}
@@ -180,15 +191,18 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	cmd := exec.CommandContext(ctx, binaryPath, l.Args...)
 	cmd.SysProcAttr = setProcessGroupAttr()
 
-	// Backend stdout → terminal (so the user sees live logs), stderr → log file.
-	// In Quiet (Claude Code) mode, stdout also goes to the log file so nothing
-	// bleeds into the `claude` client's terminal UI.
+	// llama.cpp writes ~all of its logs (load progress, errors) to STDERR. Tee
+	// both streams to the terminal AND the log file so a normal launch shows live
+	// progress in the shell while staying debuggable afterwards. In Quiet (Claude
+	// Code) mode everything goes to the file only, so nothing corrupts the client's
+	// terminal UI.
 	if l.Quiet {
 		cmd.Stdout = logFile
+		cmd.Stderr = logFile
 	} else {
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+		cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
 	}
-	cmd.Stderr = logFile
 
 	// Build a clean environment with our required CUDA ordering.
 	// Filter out any existing CUDA_DEVICE_ORDER before adding ours,
