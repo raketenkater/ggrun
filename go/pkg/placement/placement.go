@@ -752,7 +752,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	}
 
 	// Load probe cache
-	computeBufMB := computeFloorMB
+	computeBufMB := firstLaunchComputeBufMB(s.UBatchSize)
 	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
 	if pc != nil && pc.ComputeBufMB > 0 {
 		computeBufMB = pc.ComputeBufMB
@@ -1445,6 +1445,25 @@ func gpuSplitWeight(g detect.GPU) float64 {
 		return 1.0
 	}
 	return float64(g.BandwidthMBps)
+}
+
+// firstLaunchComputeBufMB is a conservative compute-buffer reservation used until
+// the post-launch probe measures the real value for this model + settings. The
+// prompt-processing graph scales with ubatch; the old flat 1024 MiB floor
+// under-reserved for large-batch / MoE graphs, so once the expert-packing filled
+// the GPU tightly, llama.cpp's compute-buffer allocation OOM'd ("failed to create
+// context", e.g. V4 needing ~1768 MiB). Reserve ~4 MiB per ubatch token (ub 512 ->
+// 2048 MiB), floored at the base and capped so it never wastes much VRAM. The
+// probe cache overrides this with the measured value after the first launch.
+func firstLaunchComputeBufMB(uBatch int) int {
+	est := uBatch * 4
+	if est < computeFloorMB {
+		est = computeFloorMB
+	}
+	if est > 4096 {
+		est = 4096
+	}
+	return est
 }
 
 // checkMemoryOrDie refuses to launch when model + KV + compute buffers exceed the pool.
