@@ -87,9 +87,14 @@ func detectNVIDIA() []GPU {
 	if err != nil {
 		return nil
 	}
-	// Query PCIe bandwidth separately
+	// Query PCIe bandwidth separately. Use the MAX link gen/width (the real slot
+	// capability), NOT gpucurrent/current — those report the live link, which idles
+	// down to gen1 x1/x4 for power saving. Reading the idle state made every GPU
+	// look like it had a different (tiny) bandwidth and skewed the tensor-split
+	// wildly (e.g. 0.86/0.03/0.11), starving GPUs whose link happened to be idle at
+	// detection time, even though all three negotiate gen3 x16 under load.
 	pcieOut, _ := exec.Command("nvidia-smi",
-		"--query-gpu=pcie.link.gen.gpucurrent,pcie.link.width.current",
+		"--query-gpu=pcie.link.gen.max,pcie.link.width.max",
 		"--format=csv,noheader,nounits").Output()
 	pcieLines := strings.Split(strings.TrimSpace(string(pcieOut)), "\n")
 
