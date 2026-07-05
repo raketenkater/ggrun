@@ -3,6 +3,8 @@ package placement
 import (
 	"strings"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 func TestParseKVBufferTotalMB(t *testing.T) {
@@ -44,6 +46,49 @@ func TestKVProbeRoundTrip(t *testing.T) {
 	rates := loadMeasuredKVRates(dir, model)
 	if rates == nil || rates["q8_0"] < 32700 || rates["q8_0"] > 32800 {
 		t.Fatalf("round-trip rate = %v, want ~32768", rates)
+	}
+}
+
+func TestParseComputeBuffersByGPU(t *testing.T) {
+	log := strings.Join([]string{
+		"llama: CUDA0 compute buffer size = 800.40 MiB",
+		"common_memory_breakdown_print: |   - CUDA0 (RTX 3090 Ti) | 24111 = 23830 + ( 18668 =  16442 +      26 +    2199) +      -18387 |",
+		"common_memory_breakdown_print: |   - CUDA1 (RTX 3060)    | 11909 = 11790 + (  5244 =   5032 +      13 +     197) +       -5125 |",
+		"common_memory_breakdown_print: |   - CUDA2 (RTX 4070)    | 11873 = 11704 + (  6193 =   5875 +      12 +     306) +       -6024 |",
+	}, "\n")
+	got := ParseComputeBuffersByGPU(log)
+	if got[0] != 2199 || got[1] != 197 || got[2] != 306 {
+		t.Fatalf("compute buffers = %#v, want CUDA0=2199 CUDA1=197 CUDA2=306", got)
+	}
+	if max, _ := ParseLogForProbe(log); max != 2199 {
+		t.Fatalf("max compute buffer = %d, want 2199", max)
+	}
+}
+
+func TestProbeCacheRoundTripRuntimeKey(t *testing.T) {
+	dir := t.TempDir()
+	model := &ModelProfile{
+		Path:              "/models/v4.gguf",
+		NumLayers:         43,
+		NumExperts:        256,
+		EmbeddingLength:   4096,
+		FeedForwardLength: 0,
+	}
+	gpus := []detect.GPU{
+		{Index: 0, Name: "RTX 3090 Ti", Driver: "580"},
+		{Index: 1, Name: "RTX 3060", Driver: "580"},
+		{Index: 2, Name: "RTX 4070", Driver: "580"},
+	}
+	compute := map[int]int{0: 2199, 1: 197, 2: 306}
+	if err := WriteProbeCacheForModel(dir, model, 1048576, 512, "mid", "gpu", "v4", gpus, compute, 1024); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	got := loadProbeCache(dir, model, 1048576, 512, "mid", "gpu", "v4", gpus)
+	if got == nil || got.ComputeBufByGPU[0] != 2199 || got.ComputeBufByGPU[1] != 197 || got.ComputeBufByGPU[2] != 306 || got.KVPerLayerMB != 1024 {
+		t.Fatalf("loaded probe = %#v", got)
+	}
+	if wrongPlacement := loadProbeCache(dir, model, 1048576, 512, "mid", "cpu", "v4", gpus); wrongPlacement != nil {
+		t.Fatalf("probe must not cross KV placement: %#v", wrongPlacement)
 	}
 }
 

@@ -4,10 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/raketenkater/ggrun/pkg/backends"
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/tui"
 )
 
 func writeFakeBackend(t *testing.T, name, body string) string {
@@ -17,6 +22,109 @@ func writeFakeBackend(t *testing.T, name, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestTUILaunchArgsOmitDefaultBackendForArchRouting(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Backend = "ik_llama"
+	args := tuiLaunchArgs(&tui.LaunchRequest{
+		ModelPath:   "model.gguf",
+		Port:        8081,
+		KVPlacement: "auto",
+		KVQuality:   "mid",
+		Backend:     "ik_llama",
+		ClaudeCode:  true,
+	}, cfg)
+	for i, arg := range args {
+		if arg == "--backend" || strings.HasPrefix(arg, "--backend=") {
+			t.Fatalf("default backend must stay implicit so route-arch can run; args[%d]=%q all=%v", i, arg, args)
+		}
+	}
+	if !hasAdjacentArg(args, "--ctx-size", "fit") {
+		t.Fatalf("TUI fit context should map to CLI fit args, got %v", args)
+	}
+	if !hasArg(args, "--claude-code") {
+		t.Fatalf("Claude Code toggle not preserved: %v", args)
+	}
+}
+
+func TestTUILaunchArgsPreserveMaxContext(t *testing.T) {
+	cfg := config.Defaults()
+	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", CtxFlag: "max"}, cfg)
+	if !hasAdjacentArg(args, "--ctx-size", "max") {
+		t.Fatalf("TUI max context should pass CLI max, got %v", args)
+	}
+}
+
+func TestTUILaunchArgsPassNonDefaultBackend(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Backend = "ik_llama"
+	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", Backend: "v4"}, cfg)
+	if !hasAdjacentArg(args, "--backend", "v4") {
+		t.Fatalf("non-default backend selection should be explicit, got %v", args)
+	}
+}
+
+func hasAdjacentArg(args []string, key, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == key && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}
+
+func TestParseModelMissingFileReportsModelPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.gguf")
+	_, err := parseModel(path)
+	if err == nil {
+		t.Fatal("expected missing model to fail")
+	}
+	if !strings.Contains(err.Error(), "model file") || !strings.Contains(err.Error(), "missing.gguf") {
+		t.Fatalf("expected model-file path error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "parse_gguf.py failed") {
+		t.Fatalf("missing model should not be reported as parser failure: %v", err)
+	}
+}
+
+func TestShouldPromoteMoEPlacement(t *testing.T) {
+	cur := &placement.Strategy{Type: placement.MoEOffload, NCPUMoE: 37}
+	next := &placement.Strategy{Type: placement.MoEOffload, NCPUMoE: 35}
+	if !shouldPromoteMoEPlacement(cur, next) {
+		t.Fatalf("expected fewer CPU MoE layers to promote")
+	}
+	if shouldPromoteMoEPlacement(cur, &placement.Strategy{Type: placement.MoEOffload, NCPUMoE: 37}) {
+		t.Fatalf("equal CPU MoE layers must not promote")
+	}
+	if shouldPromoteMoEPlacement(&placement.Strategy{Type: placement.SingleGPU}, next) {
+		t.Fatalf("non-MoE-offload current placement must not promote")
+	}
+}
+
+func TestStartupLogCUDAOOM(t *testing.T) {
+	log := "loading\n" +
+		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2206.07 MiB on device 0: cudaMalloc failed: out of memory\n" +
+		"segmentation fault"
+	device, allocMB, ok := startupLogCUDAOOM(log)
+	if !ok || device != 0 || allocMB != 2207 {
+		t.Fatalf("cuda oom parse = device %d alloc %d ok %v", device, allocMB, ok)
+	}
+}
+
+func TestRouteArchBackendKeepsRegisteredTag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-backend probe uses a shell script")
+	}
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	backendPath := writeFakeBackend(t, "v4-server", "echo llama server help\n")
+	if err := backends.Save([]backends.Backend{{Tag: "v4", Path: backendPath, RouteArch: "deepseek4"}}); err != nil {
+		t.Fatalf("save backends: %v", err)
+	}
+	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "deepseek4"}, &launchRequest{})
+	if be == nil || be.Path != backendPath || be.Tag != "v4" {
+		t.Fatalf("expected routed v4 backend tag, got %#v", be)
+	}
 }
 
 func TestBackendGPUCapableProbe(t *testing.T) {
@@ -93,8 +201,44 @@ func TestParseLaunchArgsLegacyModelFirst(t *testing.T) {
 	if req.SpecMode != "ngram" || req.MMProjPath != "/models/mmproj.gguf" || req.RamBudgetMB != 48*1024 {
 		t.Fatalf("advanced flags mismatch: %#v", req)
 	}
-	if len(req.ExtraArgs) != 1 || req.ExtraArgs[0] != "--no-mmap" {
+	if !req.NoMMap {
+		t.Fatalf("--no-mmap must feed placement, got %#v", req)
+	}
+	if len(req.ExtraArgs) != 0 {
 		t.Fatalf("extra args mismatch: %v", req.ExtraArgs)
+	}
+}
+
+func TestParseLaunchArgsNoMMapFeedsPlacement(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--no-mmap", "-kv", "gpu"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !req.NoMMap {
+		t.Fatalf("expected --no-mmap to set launch request")
+	}
+	if len(req.ExtraArgs) != 0 {
+		t.Fatalf("--no-mmap must not remain a raw backend arg: %v", req.ExtraArgs)
+	}
+	opts := placementOptionsFromRequest(req, &placement.ModelProfile{CTXTrain: 32768}, &backendInfo{Tag: "llama"}, t.TempDir())
+	if !opts.NoMMap {
+		t.Fatalf("expected placement options to receive NoMMap")
+	}
+}
+
+func TestParseLaunchArgsNoMMapAfterDelimiterStillFeedsPlacement(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--", "--no-mmap", "--draft-max", "8"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !req.NoMMap {
+		t.Fatalf("expected passthrough --no-mmap to be promoted into placement")
+	}
+	want := []string{"--draft-max", "8"}
+	if len(req.ExtraArgs) != len(want) || req.ExtraArgs[0] != want[0] || req.ExtraArgs[1] != want[1] {
+		t.Fatalf("extra args mismatch: got %v want %v", req.ExtraArgs, want)
 	}
 }
 
@@ -129,6 +273,23 @@ func TestBenchmarkCompatArgs(t *testing.T) {
 	args = benchmarkCompatArgs([]string{"--model", "/models/test.gguf", "--benchmark"})
 	if len(args) != 2 || args[0] != "--model" || args[1] != "test.gguf" {
 		t.Fatalf("unexpected explicit model benchmark args: %v", args)
+	}
+}
+
+func TestAutoStartupTimeoutDoublesHugeMoE(t *testing.T) {
+	model := &placement.ModelProfile{
+		SizeBytes: 146 * 1024 * 1024 * 1024,
+		IsMoE:     true,
+	}
+	if got := autoStartupTimeout(model); got != 30*time.Minute {
+		t.Fatalf("huge MoE timeout mismatch: got %v", got)
+	}
+}
+
+func TestAutoStartupTimeoutDoublesBaseTimeout(t *testing.T) {
+	model := &placement.ModelProfile{SizeBytes: 1024 * 1024}
+	if got := autoStartupTimeout(model); got != 8*time.Minute {
+		t.Fatalf("base timeout mismatch: got %v", got)
 	}
 }
 

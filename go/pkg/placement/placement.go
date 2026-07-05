@@ -23,7 +23,6 @@ const (
 	computeFloorMB      = 1024 // cited llama.cpp compute floor; CUDA overhead measured separately
 	minCramMB           = 512
 	systemHeadroomMB    = 5120
-	singleGPUHeadroomMB = 4096 // extra VRAM headroom for single-GPU mode
 )
 
 // StrategyType selects how the model is placed.
@@ -50,7 +49,16 @@ type Strategy struct {
 	KVType         string       `json:"kv_type"`             // f16, q8_0, q4_0
 	NCPUMoE        int          `json:"n_cpu_moe,omitempty"` // for MoE offload
 	OTString       string       `json:"ot_string,omitempty"` // -ot override-tensor flags
-	MMap           bool         `json:"mmap"`
+	// PlacementCachePath is the keyed file where this exact placement (model +
+	// ctx + ubatch + kv placement + backend + GPU set) is persisted, so a load
+	// that lands right — or is corrected by OOM-recovery — is reused next launch
+	// instead of re-predicted. Runtime-only; not part of the serialized strategy.
+	PlacementCachePath string `json:"-"`
+	// BackendSupportsFit is true when the backend's --help lists -fit/--fit. ggrun
+	// then emits `--fit off` for GPU launches to disable the backend's own memory
+	// auto-fitting (redundant with ggrun's explicit placement; crashes on the V4 fork).
+	BackendSupportsFit bool `json:"-"`
+	MMap               bool `json:"mmap"`
 	MLock          bool         `json:"mlock"`
 	FlashAttention bool         `json:"flash_attention"`
 	Threads        int          `json:"threads"`
@@ -73,41 +81,41 @@ type Strategy struct {
 
 // ModelProfile describes the GGUF model.
 type ModelProfile struct {
-	Path               string `json:"path"`
-	Name               string `json:"name,omitempty"`         // GGUF metadata: model name
-	Basename           string `json:"basename,omitempty"`     // GGUF metadata: model basename
-	QuantizedBy        string `json:"quantized_by,omitempty"` // GGUF metadata: quantizer (e.g. "unsloth")
-	SizeBytes          int64  `json:"size_bytes"`
-	TotalSizeMB        int    `json:"total_size_mb"` // includes multi-part shards
-	NumLayers          int    `json:"num_layers"`
-	NumParams          int64  `json:"num_params"`
-	IsMoE              bool   `json:"is_moe"`
-	NumExperts         int    `json:"num_experts,omitempty"`
-	ContextSize        int    `json:"context_size"`
-	HiddenSize         int    `json:"hidden_size"`
-	HeadCount          int    `json:"head_count"`
-	HeadCountKV        int    `json:"head_count_kv"`
-	KeyLength          int    `json:"key_length"`
-	ValueLength        int    `json:"value_length"`
-	VocabSize          int    `json:"vocab_size"`
-	QuantType          string `json:"quant_type"`
-	ExpertBytes        int64  `json:"expert_bytes"`
-	NonExpertBytes     int64  `json:"non_expert_bytes"`
-	Fused              int    `json:"fused"`
-	EmbeddingLength    int    `json:"embedding_length"`
-	FeedForwardLength  int    `json:"feed_forward_length"`
-	KVLoraRank         int    `json:"kv_lora_rank"`
-	QLoraRank          int    `json:"q_lora_rank"`
-	RopeDim            int    `json:"rope_dim"`
-	KeyLengthMLA       int    `json:"key_length_mla"`
-	ValueLengthMLA     int    `json:"value_length_mla"`
-	HasSSM             int    `json:"has_ssm"`
-	SlidingWindow      int    `json:"sliding_window"`
-	FullAttnInterval   int    `json:"full_attn_interval"`
-	HasShexp           int    `json:"has_shexp"`
-	CTXTrain           int    `json:"ctx_train"`
-	ModelArch          string `json:"model_arch"`
-	ExpertUsedCount    int    `json:"expert_used_count,omitempty"`
+	Path              string `json:"path"`
+	Name              string `json:"name,omitempty"`         // GGUF metadata: model name
+	Basename          string `json:"basename,omitempty"`     // GGUF metadata: model basename
+	QuantizedBy       string `json:"quantized_by,omitempty"` // GGUF metadata: quantizer (e.g. "unsloth")
+	SizeBytes         int64  `json:"size_bytes"`
+	TotalSizeMB       int    `json:"total_size_mb"` // includes multi-part shards
+	NumLayers         int    `json:"num_layers"`
+	NumParams         int64  `json:"num_params"`
+	IsMoE             bool   `json:"is_moe"`
+	NumExperts        int    `json:"num_experts,omitempty"`
+	ContextSize       int    `json:"context_size"`
+	HiddenSize        int    `json:"hidden_size"`
+	HeadCount         int    `json:"head_count"`
+	HeadCountKV       int    `json:"head_count_kv"`
+	KeyLength         int    `json:"key_length"`
+	ValueLength       int    `json:"value_length"`
+	VocabSize         int    `json:"vocab_size"`
+	QuantType         string `json:"quant_type"`
+	ExpertBytes       int64  `json:"expert_bytes"`
+	NonExpertBytes    int64  `json:"non_expert_bytes"`
+	Fused             int    `json:"fused"`
+	EmbeddingLength   int    `json:"embedding_length"`
+	FeedForwardLength int    `json:"feed_forward_length"`
+	KVLoraRank        int    `json:"kv_lora_rank"`
+	QLoraRank         int    `json:"q_lora_rank"`
+	RopeDim           int    `json:"rope_dim"`
+	KeyLengthMLA      int    `json:"key_length_mla"`
+	ValueLengthMLA    int    `json:"value_length_mla"`
+	HasSSM            int    `json:"has_ssm"`
+	SlidingWindow     int    `json:"sliding_window"`
+	FullAttnInterval  int    `json:"full_attn_interval"`
+	HasShexp          int    `json:"has_shexp"`
+	CTXTrain          int    `json:"ctx_train"`
+	ModelArch         string `json:"model_arch"`
+	ExpertUsedCount   int    `json:"expert_used_count,omitempty"`
 	// MeasuredKVBytesPerTok maps a KV cache type (e.g. "q8_0") to the KV cache
 	// bytes-per-token that llama.cpp ACTUALLY allocated on a previous launch of
 	// this model, read back from the backend log. It is the ground truth for
@@ -115,9 +123,9 @@ type ModelProfile struct {
 	// unreliable; computeKVTotalMB prefers it over the formula when present.
 	MeasuredKVBytesPerTok map[string]float64 `json:"-"`
 	ExpertFF              int                `json:"expert_ff,omitempty"`
-	ExpertSharedFF     int    `json:"expert_shared_ff,omitempty"`
-	LeadingDense       int    `json:"leading_dense,omitempty"`
-	NextNPredictLayers int    `json:"nextn_predict_layers,omitempty"`
+	ExpertSharedFF        int                `json:"expert_shared_ff,omitempty"`
+	LeadingDense          int                `json:"leading_dense,omitempty"`
+	NextNPredictLayers    int                `json:"nextn_predict_layers,omitempty"`
 }
 
 // Options allows user overrides.
@@ -142,6 +150,10 @@ type Options struct {
 	BackendHelp    string // llama-server --help output for dialect-specific flags
 	ForceSpecMoE   bool   // allow speculative decoding on MoE despite default gate
 	ReasoningOff   bool   // emit `--reasoning off` (benchmark/tune only; normal serving keeps the model's thinking)
+	// SkipPlacementCache disables loading the keyed .place cache for this Compute.
+	// Set during a corrective OOM re-plan so it derives fresh from the penalized
+	// VRAM instead of reloading the placement that just OOM'd.
+	SkipPlacementCache bool
 }
 
 func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
@@ -189,8 +201,12 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		// Thinking stays ON for normal serving (backend default `--reasoning auto`);
 		// only benchmark/tune opt in to `--reasoning off` for clean, fast measurement.
 		ReasoningOff: opts.ReasoningOff,
-		HasSSM:         model.HasSSM == 1,
-		Host:           opts.Host,
+		HasSSM:       model.HasSSM == 1,
+		Host:         opts.Host,
+		// ggrun sets explicit placement (-ngl/-ot/--tensor-split), so the backend's
+		// own auto memory-fitting (-fit) is redundant — and on the deepseek4 fork it
+		// crashes building the fit graph. Disable it when the backend supports the flag.
+		BackendSupportsFit: backendHelpSupports(opts.BackendHelp, "-fit"),
 	}
 
 	if s.ContextSize <= 0 {
@@ -245,11 +261,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			s.ContextSize, s.KVType = computeAutoContextSize(&cpuCaps, model, totalSizeMB, s.KVType, opts)
 		} else {
 			sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
-			cudaOH := 600
-			if sysProbe != nil {
-				cudaOH = sysProbe.CUDAOverheadMB
-			}
-			cbuf := computeFloorMB
+			// Per-GPU non-weight VRAM overhead, derived per-component (measured
+			// CUDA overhead + compute buffer) — no flat guess, no extra margin.
+			perGPUOH := perGPUVRAMOverheadMB(sysProbe, 0)
 
 			bestFree := 0
 			for _, g := range caps.GPUs {
@@ -261,7 +275,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			// Single-GPU estimate
 			singleCtx, singleKV := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
 			singleKVM := computeKVTotalMB(model, singleCtx, singleKV)
-			singleFits := (totalSizeMB+cudaOH+cbuf+singleKVM) <= (bestFree-1024) && singleCtx >= 32768
+			singleFits := (totalSizeMB+perGPUOH+singleKVM) <= bestFree && singleCtx >= 32768
 
 			// Multi-GPU estimate
 			multiCtx, multiKV := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
@@ -270,7 +284,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			for _, g := range caps.GPUs {
 				multiFree += g.VRAMFreeMB()
 			}
-			multiFits := (totalSizeMB+(cudaOH+cbuf)*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
+			multiFits := (totalSizeMB+perGPUOH*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
 
 			if multiFits && multiCtx > singleCtx {
 				s.ContextSize, s.KVType = multiCtx, multiKV
@@ -286,7 +300,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				// (large window); auto → gpu if it fits, else cpu for a big MoE.
 				placement := s.KVPlacement
 				if placement == "auto" || placement == "" {
-					placement = resolveAutoKVPlacement(caps, model, totalSizeMB)
+					placement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs))
 				}
 				s.KVPlacement = placement
 				s.ContextSize, s.KVType = computeAutoContextSizeKVPlacement(caps, model, totalSizeMB, s.KVType, placement, opts)
@@ -305,21 +319,39 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		}
 	}
 
-	fitsOnGPU := totalSizeMB*110/100 <= bestGPUVRAM
-	if fitsOnGPU && bestGPUVRAM > totalSizeMB+singleGPUHeadroomMB {
-		s.BatchSize = 8192
-		s.UBatchSize = 1024
-	} else if fitsOnGPU {
-		s.BatchSize = 4096
-		s.UBatchSize = 512
-	} else {
-		s.BatchSize = 2048
-		s.UBatchSize = 512
+	// Batch tier by exact fit on the best single GPU: model + measured CUDA
+	// overhead + KV + that tier's actual compute buffer must fit in VRAM. No
+	// percentage guess, no fixed headroom — each tier's compute buffer is the
+	// real cost of running that (u)batch (firstLaunchComputeBufMB).
+	batchBaseMB := totalSizeMB + measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs)) + kvTotalMB
+	switch {
+	case batchBaseMB+firstLaunchComputeBufMB(1024) <= bestGPUVRAM:
+		s.BatchSize, s.UBatchSize = 8192, 1024
+	case batchBaseMB+firstLaunchComputeBufMB(512) <= bestGPUVRAM:
+		s.BatchSize, s.UBatchSize = 4096, 512
+	default:
+		s.BatchSize, s.UBatchSize = 2048, 512
 	}
 
-	// Try cached placement first (MoE only)
-	if opts.CacheFile != "" && model.IsMoE {
-		cache, err := LoadPlacementCache(opts.CacheFile, caps, kvTotalMB)
+	// Persist/reuse this exact placement under a key that includes kv placement,
+	// ctx, ubatch, backend, and the GPU set — computed from the now-resolved
+	// strategy so the launcher (save) and this load agree byte-for-byte.
+	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+
+	// Try cached placement first (MoE only). Prefer the keyed placement cache
+	// (remembers a load that landed right or was OOM-corrected); fall back to a
+	// tune-cache file if one was selected.
+	placeFile := opts.CacheFile
+	if s.PlacementCachePath != "" {
+		if _, statErr := os.Stat(s.PlacementCachePath); statErr == nil {
+			placeFile = s.PlacementCachePath
+		}
+	}
+	if opts.SkipPlacementCache {
+		placeFile = ""
+	}
+	if placeFile != "" && model.IsMoE {
+		cache, err := LoadPlacementCache(placeFile, caps, kvTotalMB)
 		if err == nil && cache != nil {
 			s.Type = MoEOffload
 			s.BatchSize = cache.BatchSize
@@ -340,7 +372,11 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 					s.SplitMode = "layer"
 				}
 			}
-			if len(cache.GPUAssignments) > 0 {
+			// Prefer the exact cached -ot (preserves sub-layer gate+up pins);
+			// fall back to rebuilding from GPU assignments for legacy caches.
+			if cache.OTString != "" {
+				s.OTString = cache.OTString
+			} else if len(cache.GPUAssignments) > 0 {
 				otString := buildOTStringFromAssignments(cache.GPUAssignments, caps.GPUs, model.NumLayers, opts.BackendTag)
 				if otString != "" {
 					s.OTString = otString
@@ -451,7 +487,7 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality)
+	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality, opts.KVPlacement, opts.BackendTag, caps.GPUs)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}
@@ -529,7 +565,7 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	// Load model probe for compute buffer (same as MoE path)
 	probeHit := false
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
 	if pc != nil {
 		probeHit = true
 		computeBufMB = pc.ComputeBufMB
@@ -631,7 +667,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 
 		// Load model probe for compute buffer
 		computeBufMB := computeFloorMB
-		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
+		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
 		if pc != nil {
 			computeBufMB = pc.ComputeBufMB
 		}
@@ -751,13 +787,22 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		sysCUDAOverheadMB = 600
 	}
 
-	// Load probe cache
-	computeBufMB := firstLaunchComputeBufMB(s.UBatchSize)
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
-	if pc != nil && pc.ComputeBufMB > 0 {
-		computeBufMB = pc.ComputeBufMB
+	// Load per-model/runtime probe cache. Until a model has completed one launch
+	// with these settings, use a first-launch fallback that keeps the main GPU
+	// conservative without charging the full prompt graph to every secondary GPU.
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+	fixedPerGPU := make([]int, numGPUs)
+	for i, g := range caps.GPUs {
+		computeBufMB := firstLaunchComputeBufMBForGPU(s.UBatchSize, i, gpuOrder)
+		if pc != nil {
+			if v := pc.ComputeBufByGPU[g.Index]; v > 0 {
+				computeBufMB = v
+			} else if pc.ComputeBufMB > 0 {
+				computeBufMB = pc.ComputeBufMB
+			}
+		}
+		fixedPerGPU[i] = sysCUDAOverheadMB + computeBufMB
 	}
-	fixedPerGPU := sysCUDAOverheadMB + computeBufMB
 
 	// Use only GPUs that can carry CUDA/compute overhead plus their emitted
 	// tensor-split share of all non-expert weights and KV. The split is
@@ -771,7 +816,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// to free-VRAM-proportional (the previous behaviour).
 	used := make([]bool, numGPUs)
 	for i, g := range caps.GPUs {
-		used[i] = g.VRAMFreeMB() > fixedPerGPU
+		used[i] = g.VRAMFreeMB() > fixedPerGPU[i]
 	}
 	var split []float64
 	for {
@@ -799,7 +844,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			}
 			nonExpertShareMB := splitShareMB(nonExpertTotalMB, split, i)
 			kvShareMB := splitShareMB(kvTotalMB, split, i)
-			if fixedPerGPU+nonExpertShareMB+kvShareMB > g.VRAMFreeMB() {
+			if fixedPerGPU[i]+nonExpertShareMB+kvShareMB > g.VRAMFreeMB() {
 				used[i] = false
 				removed = true
 			}
@@ -821,8 +866,11 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		gpuKVTotalMB = 0
 	}
 
-	// Per-GPU expert capacity under the exact emitted split.
+	// Per-GPU expert capacity under the exact emitted split. roomMBPer keeps the
+	// exact VRAM budget for experts on each GPU so sub-layer packing can later
+	// fill the remainder that whole-layer flooring leaves stranded.
 	maxGPULayersPer := make([]int, numGPUs)
+	roomMBPer := make([]int, numGPUs)
 	maxGPULayers := 0
 	for _, gi := range gpuOrder {
 		if split[gi] <= 0 {
@@ -831,10 +879,11 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		g := caps.GPUs[gi]
 		nonExpertShareMB := splitShareMB(nonExpertTotalMB, split, gi)
 		kvShareMB := splitShareMB(gpuKVTotalMB, split, gi)
-		roomMB := g.VRAMFreeMB() - fixedPerGPU - nonExpertShareMB - kvShareMB
+		roomMB := g.VRAMFreeMB() - fixedPerGPU[gi] - nonExpertShareMB - kvShareMB
 		if roomMB < 0 {
 			roomMB = 0
 		}
+		roomMBPer[gi] = roomMB
 		capLayers := roomMB / expertPerLayerMB
 		if capLayers > moeLayerCount {
 			capLayers = moeLayerCount
@@ -925,34 +974,34 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 
 	layersCPU := moeLayerCount - totalGPULayers
 
-	// RAM safety check
-	cpuExpertMB := layersCPU * expertPerLayerMB
-
-	// Exact RAM overhead
-	cudaHostMB := 1024
-	graphScratchMB := 2048
-	mmapPTMB := totalSizeMB / 500
-
-	// CPU activation memory
-	// Uses exact GGUF metadata: EXPERT_USED_COUNT * EXPERT_FF + EXPERT_SHARED_FF
-	var actFFN int
-	if model.NumExperts > 0 && model.ExpertUsedCount > 0 && model.ExpertFF > 0 {
-		// MoE: use exact expert_ff from GGUF metadata
-		actFFN = model.ExpertUsedCount * model.ExpertFF
-		if model.ExpertSharedFF > 0 {
-			actFFN += model.ExpertSharedFF
+	// Sub-layer expert packing (GPU squeeze): whole-layer packing floors each
+	// GPU's capacity, stranding up to ~expertPerLayerMB of VRAM per card. Fill
+	// that remainder with the gate+up projections (2/3 of a layer) of the next
+	// CPU-bound layers — down stays on CPU — so stranded VRAM becomes expert
+	// residency: more experts on GPU (faster) and that weight leaves system RAM
+	// (breathing room). Sizing is exact: gate+up is 2/3 of the file-anchored
+	// per-layer expert bytes.
+	gateUpChunkMB := 2 * expertPerLayerMB / 3
+	remainderMB := make([]int, numGPUs)
+	for gi := range caps.GPUs {
+		r := roomMBPer[gi] - layersPerGPU[gi]*expertPerLayerMB
+		if r < 0 {
+			r = 0
 		}
-	} else {
-		actFFN = model.FeedForwardLength
+		remainderMB[gi] = r
 	}
-	if model.KVLoraRank > 0 {
-		actFFN += model.KVLoraRank + model.QLoraRank
+	subPins, movedOffCPUMB := packGateUpChunks(remainderMB, gpuOrder, gateUpChunkMB, moeStartLayer+totalGPULayers, layersCPU)
+
+	// RAM safety check. Sub-layer pins move gate+up off the CPU, so the resident
+	// CPU expert footprint shrinks by exactly the packed bytes.
+	cpuExpertMB := layersCPU*expertPerLayerMB - movedOffCPUMB
+	if cpuExpertMB < 0 {
+		cpuExpertMB = 0
 	}
-	cpuActMB := s.UBatchSize * (model.EmbeddingLength + actFFN) * 4 * 2 / 1048576
-	if cpuActMB < 64 {
-		cpuActMB = 64
-	}
-	ramOverheadMB := cudaHostMB + graphScratchMB + mmapPTMB + cpuActMB
+
+	// Non-weight RAM overhead, derived per-component (see ramRuntimeOverheadMB):
+	// CUDA host staging + graph scratch + mmap page table + CPU activation.
+	ramOverheadMB := ramRuntimeOverheadMB(model, s.UBatchSize, totalSizeMB)
 
 	cpuKVMB := 0
 	if kvPlacementEffective == "cpu" {
@@ -961,13 +1010,23 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	ramNeeded := cpuExpertMB + cpuKVMB + ramOverheadMB
 	ramAvailMB := caps.RAM.FreeMB
 
-	// Mmap decision for MoE
-	// If strict ceiling doesn't fit and user didn't force --no-mmap,
-	// use mmap (page-cache) if working set fits
+	// Mmap decision for MoE — VRAM-aware, no guessed margin.
+	//
+	// mmap is a question about RAM, not total model size. Expert layers placed
+	// on the GPUs live in VRAM and cost zero system RAM, so what matters is the
+	// CPU-resident footprint only: CPU-side experts + CPU-side KV + activation/
+	// compute overhead (that is exactly ramNeeded). Compare it against the real
+	// available RAM (MemAvailable, already net of any user --ram-headroom) with
+	// no fudge factor — a guessed % or fixed-MB cushion breaks at scale (trivial
+	// on a 1TB box, wasteful as a percentage on a huge model). If the resident
+	// footprint fits, load resident (fast, no SSD paging); otherwise mmap while
+	// the working set fits. A deliberate reserve is the user's --ram-headroom.
+	//
+	// The old test keyed off totalSizeMB, which ignored VRAM entirely: a 146GB
+	// model with ~40GB of experts on the GPUs (leaving ~100GB on CPU, well under
+	// 122GB RAM) was forced onto mmap and paged from SSD for no reason.
 	if opts.NoMMap {
 		s.MMap = false
-	} else if totalSizeMB > ramAvailMB {
-		s.MMap = true
 	} else if ramNeeded > ramAvailMB {
 		workingSetFloor := ramOverheadMB + cpuKVMB + 8*expertPerLayerMB
 		if ramAvailMB >= workingSetFloor {
@@ -979,7 +1038,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 
 	// Build -ot string. Always include the exps=CPU catch-all so expert
 	// tensors never follow the backend's default layer split by accident.
-	otString := buildOTStringFromStart(layersPerGPU, caps.GPUs, gpuOrder, moeStartLayer, opts.BackendTag)
+	otString := buildOTStringWithSubPins(layersPerGPU, subPins, caps.GPUs, gpuOrder, moeStartLayer, opts.BackendTag)
 	if otString != "" {
 		s.OTString = otString
 	}
@@ -1022,6 +1081,36 @@ func splitShareMB(totalMB int, split []float64, idx int) int {
 		return 0
 	}
 	return int(math.Ceil(float64(totalMB) * split[idx] / totalSplit))
+}
+
+// ReplanAfterOOM recomputes the full placement after a cudaMalloc OOM, with the
+// failed device(s) penalized by how much they overshot. Because it re-runs the
+// real packer, the correction is fill-preserving: it refits the failed card
+// tightly (partial gate+up chunks, not whole layers) AND reclaims stranded VRAM
+// on the other cards via the sub-pin squeeze — so experts move off system RAM
+// instead of a blind whole-layer drop that over-corrects and erases the squeeze.
+// penaltyMB is keyed by GPU Index and accumulates across retries. Returns the new
+// strategy, or an error if there's nothing to replan or it no longer fits.
+func ReplanAfterOOM(caps *detect.Capabilities, model *ModelProfile, opts Options, penaltyMB map[int]int) (*Strategy, error) {
+	if caps == nil || model == nil || len(penaltyMB) == 0 {
+		return nil, fmt.Errorf("replan: nothing to do")
+	}
+	c2 := *caps
+	c2.GPUs = append([]detect.GPU(nil), caps.GPUs...)
+	any := false
+	for i := range c2.GPUs {
+		if p := penaltyMB[c2.GPUs[i].Index]; p > 0 {
+			c2.GPUs[i].VRAMUsedMB += p // shrink usable VRAM by the overshoot
+			any = true
+		}
+	}
+	if !any {
+		return nil, fmt.Errorf("replan: no matching device")
+	}
+	o := opts
+	o.SkipPlacementCache = true // derive fresh, don't reload the placement that OOM'd
+	o.CacheFile = ""
+	return Compute(&c2, model, o)
 }
 
 // DerateCUDAOOMArgs moves enough expert layers from the failed device back to
@@ -1220,6 +1309,100 @@ func buildOTStringFromStart(layersPerGPU []int, gpus []detect.GPU, gpuOrder []in
 	}
 	parts = append(parts, "exps=CPU")
 
+	return stringsJoin(parts, ",")
+}
+
+// subExpertPin pins one MoE layer's gate+up expert projections (2/3 of the
+// layer's expert weight) to a specific GPU. The layer's down projection is left
+// unpinned so the exps=CPU catch-all keeps it in system RAM.
+type subExpertPin struct {
+	Layer int // absolute layer index
+	GI    int // position in caps.GPUs
+}
+
+// packGateUpChunks fills the VRAM that whole-layer packing floors away. Whole
+// layers cost ~expertPerLayerMB each, so each GPU strands up to that much VRAM
+// (its remainder). A layer's gate+up projections are 2/3 of its expert weight;
+// pinning them onto a GPU with leftover room — down stays on CPU — turns stranded
+// VRAM into expert residency: more experts on the GPU, that much less in system
+// RAM. Greedy by remainder: each CPU-bound layer goes to the GPU (bandwidth
+// order for ties) with the most room that can still hold a gate+up chunk.
+// remainderMB is indexed by caps.GPUs position; gpuOrder gives the fill order.
+// Returns the pins and the total expert MB moved off the CPU.
+func packGateUpChunks(remainderMB []int, gpuOrder []int, gateUpChunkMB, cpuStartLayer, cpuLayerCount int) ([]subExpertPin, int) {
+	if gateUpChunkMB <= 0 || cpuLayerCount <= 0 {
+		return nil, 0
+	}
+	rem := make([]int, len(remainderMB))
+	copy(rem, remainderMB)
+	var pins []subExpertPin
+	movedMB := 0
+	for i := 0; i < cpuLayerCount; i++ {
+		best := -1
+		for _, gi := range gpuOrder {
+			if gi < 0 || gi >= len(rem) {
+				continue
+			}
+			if rem[gi] >= gateUpChunkMB && (best < 0 || rem[gi] > rem[best]) {
+				best = gi
+			}
+		}
+		if best < 0 {
+			break // no GPU can hold another gate+up chunk
+		}
+		pins = append(pins, subExpertPin{Layer: cpuStartLayer + i, GI: best})
+		rem[best] -= gateUpChunkMB
+		movedMB += gateUpChunkMB
+	}
+	return pins, movedMB
+}
+
+// buildOTStringWithSubPins is buildOTStringFromStart plus optional sub-layer
+// gate+up pins. Whole-layer pins come first, then the gate+up pins, then the
+// exps=CPU catch-all — first-match-wins (see llama.cpp arg.cpp) keeps each
+// partial layer's gate+up on its GPU while down falls through to CPU. With no
+// sub-pins the output is identical to buildOTStringFromStart.
+func buildOTStringWithSubPins(layersPerGPU []int, subPins []subExpertPin, gpus []detect.GPU, gpuOrder []int, startLayer int, backendTag string) string {
+	var parts []string
+	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
+	gateUpPattern := `ffn_(gate_up|up_gate|gate|up)_exps`
+
+	nextLayer := startLayer
+	for _, gi := range gpuOrder {
+		count := layersPerGPU[gi]
+		if count > 0 {
+			start := nextLayer
+			last := start + count - 1
+			var layerParts []string
+			for l := start; l <= last; l++ {
+				layerParts = append(layerParts, fmt.Sprintf("%d", l))
+			}
+			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, stringsJoin(layerParts, "|"), expertPattern, deviceName(backendTag, gpus[gi].Index)))
+			nextLayer += count
+		}
+	}
+
+	// Group sub-pins by GPU, preserving first-seen order, one compact rule per
+	// GPU, emitted before the exps=CPU catch-all.
+	if len(subPins) > 0 {
+		byGPU := map[int][]int{}
+		var order []int
+		for _, p := range subPins {
+			if _, ok := byGPU[p.GI]; !ok {
+				order = append(order, p.GI)
+			}
+			byGPU[p.GI] = append(byGPU[p.GI], p.Layer)
+		}
+		for _, gi := range order {
+			var layerParts []string
+			for _, l := range byGPU[gi] {
+				layerParts = append(layerParts, fmt.Sprintf("%d", l))
+			}
+			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, stringsJoin(layerParts, "|"), gateUpPattern, deviceName(backendTag, gpus[gi].Index)))
+		}
+	}
+
+	parts = append(parts, "exps=CPU")
 	return stringsJoin(parts, ",")
 }
 
@@ -1466,6 +1649,66 @@ func firstLaunchComputeBufMB(uBatch int) int {
 	return est
 }
 
+func firstLaunchComputeBufMBForGPU(uBatch, gpuPos int, order []int) int {
+	primary := len(order) == 0 || order[0] == gpuPos
+	if primary {
+		return firstLaunchComputeBufMB(uBatch)
+	}
+	est := firstLaunchComputeBufMB(uBatch) / 2
+	if est < computeFloorMB {
+		est = computeFloorMB
+	}
+	return est
+}
+
+// perGPUVRAMOverheadMB is the non-weight VRAM a single GPU needs at runtime:
+// the CUDA context/allocator overhead plus the compute buffer. No guessed
+// margin — the CUDA figure is MEASURED by the system probe (cached after the
+// first launch) and the compute buffer is derived from the micro-batch. The
+// 600 is only a pre-measurement first-launch fallback, replaced by the real
+// value once the probe runs.
+func perGPUVRAMOverheadMB(sysProbe *systemProbe, uBatch int) int {
+	return measuredCUDAOverheadMB(sysProbe) + firstLaunchComputeBufMB(uBatch)
+}
+
+// measuredCUDAOverheadMB is the CUDA context/allocator overhead per GPU, from the
+// system probe. The 600 is only a pre-measurement first-launch fallback; once the
+// probe runs, the real value is used.
+func measuredCUDAOverheadMB(sysProbe *systemProbe) int {
+	if sysProbe != nil && sysProbe.CUDAOverheadMB > 0 {
+		return sysProbe.CUDAOverheadMB
+	}
+	return 600
+}
+
+// ramRuntimeOverheadMB is the non-weight system RAM the runtime needs: CUDA host
+// pinned staging, compute-graph scratch, the mmap page table, and CPU activation
+// buffers. Each term is derived from model dims / file size rather than a flat
+// guessed reserve. (mmapPT is exact: a 4KB-page table is fileSize/4096*8B ≈
+// fileSize/512. The host/graph terms are the last constants still pending a
+// measurement probe — kept here as the single place to swap in measured values.)
+func ramRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
+	const cudaHostMB = 1024
+	const graphScratchMB = 2048
+	mmapPTMB := totalSizeMB / 500
+
+	actFFN := model.FeedForwardLength
+	if model.NumExperts > 0 && model.ExpertUsedCount > 0 && model.ExpertFF > 0 {
+		actFFN = model.ExpertUsedCount * model.ExpertFF
+		if model.ExpertSharedFF > 0 {
+			actFFN += model.ExpertSharedFF
+		}
+	}
+	if model.KVLoraRank > 0 {
+		actFFN += model.KVLoraRank + model.QLoraRank
+	}
+	cpuActMB := uBatch * (model.EmbeddingLength + actFFN) * 4 * 2 / 1048576
+	if cpuActMB < 64 {
+		cpuActMB = 64
+	}
+	return cudaHostMB + graphScratchMB + mmapPTMB + cpuActMB
+}
+
 // checkMemoryOrDie refuses to launch when model + KV + compute buffers exceed the pool.
 // OOM guard: refuse to launch if model+KV+compute don't fit.
 func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int, opts Options) error {
@@ -1482,7 +1725,7 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}
@@ -1720,12 +1963,12 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 // A big MoE whose experts must offload to CPU puts KV on CPU instead: that frees
 // VRAM for more expert layers (the decode-bandwidth bottleneck) and unlocks a much
 // larger context. A dense model bigger than VRAM keeps KV on GPU (its only spot).
-func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int) string {
+func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB, vramOverheadMB int) string {
 	freeVRAM := 0
 	for _, g := range caps.GPUs {
 		freeVRAM += g.VRAMFreeMB()
 	}
-	if totalSizeMB+8192 <= freeVRAM {
+	if totalSizeMB+vramOverheadMB <= freeVRAM {
 		return "gpu"
 	}
 	if model.IsMoE {
@@ -1745,7 +1988,10 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 	for _, g := range caps.GPUs {
 		freeVRAM += g.VRAMFreeMB()
 	}
-	const overheadMB = 8192
+	// Overhead is derived per-component, not a flat guess: VRAM side = measured
+	// CUDA overhead + compute buffer per GPU; RAM side = host/graph/mmap/activation.
+	sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+	vramOverheadMB := perGPUVRAMOverheadMB(sysProbe, 0) * len(caps.GPUs)
 
 	var kvBudgetMB int
 	if placement == "cpu" {
@@ -1754,7 +2000,7 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 		if weightsInRAM < 0 {
 			weightsInRAM = 0
 		}
-		kvBudgetMB = caps.RAM.FreeMB - weightsInRAM - overheadMB
+		kvBudgetMB = caps.RAM.FreeMB - weightsInRAM - ramRuntimeOverheadMB(model, 0, totalSizeMB)
 	} else {
 		// KV lives in VRAM alongside the GPU-resident weights. Dense: the whole
 		// model. MoE: only the non-expert weights (experts offload to CPU), so the
@@ -1765,7 +2011,7 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 				gpuResident = ne
 			}
 		}
-		kvBudgetMB = freeVRAM - gpuResident - overheadMB
+		kvBudgetMB = freeVRAM - gpuResident - vramOverheadMB
 	}
 	if kvBudgetMB <= 0 {
 		return 32768, preferredKVType
@@ -1920,6 +2166,12 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "-ngl", "0")
 	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
+		// Disable the backend's own memory auto-fit: ggrun already sets explicit
+		// placement, and the fit pass builds a graph that crashes on the deepseek4
+		// fork (GGML_ASSERT in build_arch_graph). Only when the backend has the flag.
+		if s.BackendSupportsFit {
+			args = append(args, "--fit", "off")
+		}
 		// Metal has exactly one logical device — device-routing flags are
 		// CUDA/Vulkan concepts and llama-server rejects unknown device names.
 		if s.MainGPU >= 0 && len(s.TensorSplit) == 0 && !strings.EqualFold(s.BackendTag, "metal") {
@@ -2267,6 +2519,37 @@ func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvT
 		fmt.Sprintf("launch log: ctx=%d total_kv=%.0fMB", ctxSize, totalKVMB))
 }
 
+// RunPostLaunchModelProbe records measured compute-buffer data for the exact
+// model/runtime placement that just loaded. Future placement can use this instead
+// of the first-launch compute estimate.
+func RunPostLaunchModelProbe(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, serverLog string) bool {
+	if model == nil || ctxSize <= 0 || ubatch <= 0 || serverLog == "" {
+		return false
+	}
+	computeByGPU := ParseComputeBuffersByGPU(serverLog)
+	_, kvPerLayerMB := ParseLogForProbe(serverLog)
+	if len(computeByGPU) == 0 && kvPerLayerMB <= 0 {
+		return false
+	}
+	if err := WriteProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, computeByGPU, kvPerLayerMB); err == nil {
+		if len(computeByGPU) == 0 {
+			return true
+		}
+		parts := make([]string, 0, len(computeByGPU))
+		indices := make([]int, 0, len(computeByGPU))
+		for idx := range computeByGPU {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		for _, idx := range indices {
+			parts = append(parts, fmt.Sprintf("CUDA%d=%dMB", idx, computeByGPU[idx]))
+		}
+		fmt.Fprintf(os.Stderr, "  Model probe written: compute_buf %s\n", strings.Join(parts, ", "))
+		return true
+	}
+	return false
+}
+
 // writeMeasuredKVRate records a measured KV bytes-per-token for model+kvType,
 // merging with any rates already cached for other kvTypes.
 func writeMeasuredKVRate(cacheDir string, model *ModelProfile, kvType string, bytesPerTok float64, note string) {
@@ -2434,28 +2717,20 @@ func parseMiB(line string) float64 {
 	return v
 }
 
-// loadProbeCache tries to load per-model probe data.
-// Keys the probe cache file by an MD5 of the model + runtime signature.
-func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality string) *probeCache {
-	if cacheDir == "" {
-		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "ggrun", "probes")
+// loadProbeCache tries to load per-model/runtime probe data.
+// Keys the probe cache file by an MD5 of the model + placement runtime signature.
+func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) *probeCache {
+	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+	if path == "" {
+		return nil
 	}
-	// MD5 hash key over model_name:layers:experts:embd:ff:ctx:ubatch:kv_quality
-	modelName := filepath.Base(model.Path)
-	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s",
-		modelName, model.NumLayers, model.NumExperts,
-		model.EmbeddingLength, model.FeedForwardLength,
-		ctxSize, ubatch, kvQuality)
-	hash := md5Hash12(key)
-	path := filepath.Join(cacheDir, hash+".probe")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
 	content := string(data)
-	pc := &probeCache{}
+	pc := &probeCache{ComputeBufByGPU: map[int]int{}}
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -2468,21 +2743,87 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 		}
 		k := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(strings.Trim(parts[1], `"`))
-		switch k {
-		case "PROBED_COMPUTE_BUF_MB":
+		switch {
+		case k == "PROBED_COMPUTE_BUF_MB":
 			if v, err := strconv.Atoi(val); err == nil && v >= 0 {
 				pc.ComputeBufMB = v
 			}
-		case "PROBED_KV_PER_LAYER_MB":
+		case strings.HasPrefix(k, "PROBED_COMPUTE_BUF_MB_CUDA"):
+			idxRaw := strings.TrimPrefix(k, "PROBED_COMPUTE_BUF_MB_CUDA")
+			idx, idxErr := strconv.Atoi(idxRaw)
+			v, valErr := strconv.Atoi(val)
+			if idxErr == nil && valErr == nil && idx >= 0 && v >= 0 {
+				pc.ComputeBufByGPU[idx] = v
+			}
+		case k == "PROBED_KV_PER_LAYER_MB":
 			if v, err := strconv.Atoi(val); err == nil && v >= 0 {
 				pc.KVPerLayerMB = v
 			}
 		}
 	}
-	if pc.ComputeBufMB > 0 || pc.KVPerLayerMB > 0 {
+	if pc.ComputeBufMB > 0 || len(pc.ComputeBufByGPU) > 0 || pc.KVPerLayerMB > 0 {
 		return pc
 	}
 	return nil
+}
+
+func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) string {
+	if model == nil {
+		return ""
+	}
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "ggrun", "probes")
+	}
+	if kvPlacement == "" {
+		kvPlacement = "auto"
+	}
+	if kvQuality == "" {
+		kvQuality = "mid"
+	}
+	if backendTag == "" {
+		backendTag = "llama"
+	}
+	// MD5 hash key over model/runtime/placement. Compute buffers can differ when
+	// KV placement, backend fork, or selected GPU set changes, so those are part of
+	// the key instead of treating compute as a system-wide constant.
+	modelName := filepath.Base(model.Path)
+	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s",
+		modelName, model.NumLayers, model.NumExperts,
+		model.EmbeddingLength, model.FeedForwardLength,
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus))
+	hash := md5Hash12(key)
+	return filepath.Join(cacheDir, hash+".probe")
+}
+
+// PlacementCachePathFor returns the keyed file that persists the validated MoE
+// placement for this exact model + runtime + hardware. Keyed identically to the
+// probe cache (kv placement, ctx, ubatch, backend, GPU set all part of the key)
+// so kv=gpu vs kv=cpu — or two context sizes — never share a cache entry. Both
+// the fit (load) and OOM-recovery / success (save) use this same path, so a
+// placement that loads cleanly is remembered instead of re-predicted.
+func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) string {
+	if model == nil {
+		return ""
+	}
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "ggrun")
+	}
+	if kvPlacement == "" {
+		kvPlacement = "auto"
+	}
+	if kvQuality == "" {
+		kvQuality = "mid"
+	}
+	if backendTag == "" {
+		backendTag = "llama"
+	}
+	key := fmt.Sprintf("place:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s",
+		filepath.Base(model.Path), model.NumLayers, model.NumExperts,
+		model.EmbeddingLength, model.FeedForwardLength,
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus))
+	return filepath.Join(cacheDir, md5Hash12(key)+".place")
 }
 
 // md5Hash12 computes first 12 chars of MD5 hash of input string.
@@ -2498,12 +2839,13 @@ type systemProbe struct {
 }
 
 type probeCache struct {
-	ComputeBufMB int
-	KVPerLayerMB int
+	ComputeBufMB    int
+	ComputeBufByGPU map[int]int
+	KVPerLayerMB    int
 }
 
-// WriteProbeCache writes measured compute buffer and KV per layer to cache.
-// Writes measured compute-buffer and KV sizes to the probe cache.
+// WriteProbeCache writes a legacy probe cache. Prefer WriteProbeCacheForModel,
+// which writes to the same runtime-signature key that loadProbeCache reads.
 func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int) error {
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
@@ -2525,28 +2867,63 @@ func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
-// ParseLogForProbe extracts compute_buf and kv_per_layer from server log output.
-// Looks for lines like: "CUDA0 compute buffer size = 1410.12 MiB"
-func ParseLogForProbe(logData string) (computeBufMB, kvPerLayerMB int) {
-	lines := strings.Split(logData, "\n")
+// WriteProbeCacheForModel writes measured compute-buffer and KV sizes to the
+// per-model/runtime cache consumed by placement. computeByGPU is keyed by CUDA
+// device index as emitted in the backend log.
+func WriteProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, computeByGPU map[int]int, kvPerLayerMB int) error {
+	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	maxCompute := 0
+	for _, v := range computeByGPU {
+		if v > maxCompute {
+			maxCompute = v
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Probe cache for %s\n", filepath.Base(model.Path))
+	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus))
+	if maxCompute > 0 {
+		fmt.Fprintf(&b, "PROBED_COMPUTE_BUF_MB=%d\n", maxCompute)
+	}
+	indices := make([]int, 0, len(computeByGPU))
+	for idx := range computeByGPU {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	for _, idx := range indices {
+		if computeByGPU[idx] > 0 {
+			fmt.Fprintf(&b, "PROBED_COMPUTE_BUF_MB_CUDA%d=%d\n", idx, computeByGPU[idx])
+		}
+	}
+	if kvPerLayerMB > 0 {
+		fmt.Fprintf(&b, "PROBED_KV_PER_LAYER_MB=%d\n", kvPerLayerMB)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0644)
+}
 
-	// Find largest compute buffer across CUDA devices
-	var maxComputeBuf float64
-	for _, line := range lines {
-		// Pattern: "CUDA0 compute buffer size = 1410.12 MiB"
-		if idx := strings.Index(line, "compute buffer size ="); idx >= 0 {
-			rest := line[idx+len("compute buffer size ="):]
-			rest = strings.TrimSpace(rest)
-			rest = strings.TrimSuffix(rest, " MiB")
-			if v, err := strconv.ParseFloat(rest, 64); err == nil && v > maxComputeBuf {
-				maxComputeBuf = v
-			}
+var memoryBreakdownComputePattern = regexp.MustCompile(`CUDA([0-9]+).*?\(\s*-?[0-9]+\s*=\s*-?[0-9]+\s*\+\s*-?[0-9]+\s*\+\s*([0-9]+)\s*\)`)
+
+// ParseLogForProbe extracts compute_buf and kv_per_layer from server log output.
+// Looks for lines like: "CUDA0 compute buffer size = 1410.12 MiB" and V4 fit
+// breakdown rows like: "CUDA0 ... ( self = model + context + compute )".
+func ParseLogForProbe(logData string) (computeBufMB, kvPerLayerMB int) {
+	computeByGPU := ParseComputeBuffersByGPU(logData)
+	for _, v := range computeByGPU {
+		if v > computeBufMB {
+			computeBufMB = v
 		}
 	}
 
 	// Sum KV buffer sizes across CUDA devices
 	var totalKVBuf float64
 	var kvCount int
+	lines := strings.Split(logData, "\n")
 	for _, line := range lines {
 		if idx := strings.Index(line, "KV buffer size ="); idx >= 0 {
 			rest := line[idx+len("KV buffer size ="):]
@@ -2559,13 +2936,63 @@ func ParseLogForProbe(logData string) (computeBufMB, kvPerLayerMB int) {
 		}
 	}
 
-	if maxComputeBuf > 0 {
-		computeBufMB = int(maxComputeBuf + 0.5)
-	}
 	if totalKVBuf > 0 && kvCount > 0 {
 		// Approximate per-device KV share by kvCount (devices holding KV)
 		kvPerLayerMB = int(totalKVBuf/float64(kvCount) + 0.5)
 	}
 
 	return
+}
+
+// ParseComputeBuffersByGPU extracts measured/planned compute-buffer MiB by CUDA
+// index. It accepts both final llama.cpp buffer lines and the V4 fork's memory
+// breakdown table printed during fit.
+func ParseComputeBuffersByGPU(logData string) map[int]int {
+	out := map[int]int{}
+	for _, line := range strings.Split(logData, "\n") {
+		if idx := strings.Index(line, "compute buffer size ="); idx >= 0 {
+			cudaIdx := cudaIndexFromLine(line)
+			if cudaIdx < 0 {
+				continue
+			}
+			rest := line[idx+len("compute buffer size ="):]
+			rest = strings.TrimSpace(rest)
+			rest = strings.TrimSuffix(rest, " MiB")
+			if v, err := strconv.ParseFloat(rest, 64); err == nil && v > 0 {
+				mb := int(v + 0.5)
+				if mb > out[cudaIdx] {
+					out[cudaIdx] = mb
+				}
+			}
+			continue
+		}
+		if m := memoryBreakdownComputePattern.FindStringSubmatch(line); m != nil {
+			cudaIdx, idxErr := strconv.Atoi(m[1])
+			mb, mbErr := strconv.Atoi(m[2])
+			if idxErr == nil && mbErr == nil && mb > out[cudaIdx] {
+				out[cudaIdx] = mb
+			}
+		}
+	}
+	return out
+}
+
+func cudaIndexFromLine(line string) int {
+	idx := strings.Index(line, "CUDA")
+	if idx < 0 {
+		return -1
+	}
+	start := idx + len("CUDA")
+	end := start
+	for end < len(line) && line[end] >= '0' && line[end] <= '9' {
+		end++
+	}
+	if end == start {
+		return -1
+	}
+	n, err := strconv.Atoi(line[start:end])
+	if err != nil {
+		return -1
+	}
+	return n
 }

@@ -75,6 +75,30 @@ func TestDetectNVIDIA(t *testing.T) {
 	_ = gpus
 }
 
+func TestNVIDIAPCIeLinkUsesObservedWidthWithMaxGen(t *testing.T) {
+	links := parseNVIDIAPCIeLinks("1, 1, 3, 16\n1, 4, 3, 16\n")
+	if len(links) != 2 {
+		t.Fatalf("expected two parsed links, got %d", len(links))
+	}
+	gpu := GPU{}
+	applyNVIDIAPCIeLink(&gpu, links[0])
+	if gpu.PCIGen != 3 || gpu.PCILanes != 1 || gpu.BandwidthMBps != pcieBandwidth(3, 1) || gpu.BandwidthSource != "observed_width" {
+		t.Fatalf("unexpected observed-width link: %+v", gpu)
+	}
+}
+
+func TestNVIDIAPCIeLinkKeepsMaxWhenWidthMatches(t *testing.T) {
+	links := parseNVIDIAPCIeLinks("1, 16, 3, 16\n")
+	if len(links) != 1 {
+		t.Fatalf("expected one parsed link, got %d", len(links))
+	}
+	gpu := GPU{}
+	applyNVIDIAPCIeLink(&gpu, links[0])
+	if gpu.PCIGen != 3 || gpu.PCILanes != 16 || gpu.BandwidthMBps != pcieBandwidth(3, 16) || gpu.BandwidthSource != "max" {
+		t.Fatalf("unexpected max link: %+v", gpu)
+	}
+}
+
 func TestParseVulkanGPUsKeepsMetadataWithDeviceBlock(t *testing.T) {
 	summary := `GPU0:
 	apiVersion         = 1.3.277

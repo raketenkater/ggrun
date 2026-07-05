@@ -95,7 +95,7 @@ func TestParseLoadFailureRealOOMVariants(t *testing.T) {
 }
 
 func TestParseCUDAOOMDetails(t *testing.T) {
-	device, allocMB, ok := parseCUDAOOM("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 11875.43 MiB on device 1: cudaMalloc failed: out of memory")
+	device, allocMB, ok := ParseCUDAOOM("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 11875.43 MiB on device 1: cudaMalloc failed: out of memory")
 	if !ok || device != 1 || allocMB != 11876 {
 		t.Fatalf("unexpected CUDA OOM parse: device=%d alloc=%d ok=%v", device, allocMB, ok)
 	}

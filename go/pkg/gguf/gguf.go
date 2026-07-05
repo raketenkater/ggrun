@@ -46,6 +46,17 @@ type Info struct {
 
 // Parse calls the bundled GGUF metadata helper.
 func Parse(path string) (*Info, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("model file path is empty")
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("model file %q: %w", path, err)
+	}
+	if fi.IsDir() {
+		return nil, fmt.Errorf("model file %q is a directory", path)
+	}
+
 	script := findParseScript()
 	if script == "" {
 		return nil, fmt.Errorf("parse_gguf.py not found")

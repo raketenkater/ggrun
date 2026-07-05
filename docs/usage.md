@@ -93,7 +93,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8081 ANTHROPIC_AUTH_TOKEN=ggrun
 export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local
 export API_TIMEOUT_MS=1800000              # let queued fan-out/subagent requests finish, not cancel
-export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=24  # compact early to fit the real per-slot window (ggrun computes this)
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90  # compact early to fit the real per-slot window (ggrun computes this)
 claude --disallowedTools WebSearch
 ```
 
@@ -103,7 +103,7 @@ aliases, so without the overrides those calls leave for `api.anthropic.com` and 
 
 - **Thinking is on** — a normal launch never passes `--reasoning off` (benchmark-only).
 - **Context fits the slot.** `--parallel` splits `--ctx-size` across sequence slots,
-  so each request only sees `ctx ÷ parallel` (e.g. 65k at `--ctx-size 262144 --parallel 4`).
+  so each request only sees `ctx ÷ parallel` (e.g. 262k at V4 train max `--ctx-size 1048576 --parallel 4`).
   Behind a custom base URL Claude Code assumes a 200k window and won't auto-compact in
   time, overflowing the slot (a hard fail with `--no-context-shift`). ggrun derives
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the real slot so compaction triggers early

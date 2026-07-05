@@ -3,6 +3,7 @@ package recovery
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,14 +14,19 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
 // FailureType classifies how a server load failed.
 type FailureType string
+
+var errPlacementPromotion = errors.New("placement promotion restart")
 
 const (
 	FailureOOM          FailureType = "oom"
@@ -60,6 +66,7 @@ type Launcher struct {
 	OnRestart     func(int, time.Duration)
 	OnFallback    func(string)
 	OnCUDAOOM     func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool)
+	OnPromote     func(logPath string, args []string) ([]string, bool)
 
 	// Quiet keeps the backend's stdout out of the terminal (it still goes to the
 	// per-run log file). Used by Claude Code mode, where ggrun hands the terminal
@@ -71,6 +78,19 @@ type Launcher struct {
 	LogPath string
 
 	PlacementCachePath string
+	// SuccessEntry, if set, is the computed placement to persist to
+	// PlacementCachePath the first time the server loads healthy — so a launch
+	// that lands right is reused verbatim next time (OOM-recovery overwrites it
+	// with the corrected placement if it has to intervene).
+	SuccessEntry  *placement.CacheEntry
+	ProbeCacheDir string
+	ProbeModel         *placement.ModelProfile
+	ProbeCtxSize       int
+	ProbeUBatchSize    int
+	ProbeKVQuality     string
+	ProbeKVPlacement   string
+	ProbeBackendTag    string
+	ProbeGPUs          []detect.GPU
 
 	lastLogPath string // log written by the most recent runOnce
 }
@@ -95,6 +115,12 @@ func (l *Launcher) Run(ctx context.Context) error {
 
 	for {
 		if err := l.runOnce(ctx, binaryPath, restartCount); err != nil {
+			if errors.Is(err, errPlacementPromotion) {
+				restartCount = 0
+				backoff = l.BackoffBase
+				continue
+			}
+
 			// Shutdown requested: the child was killed by context cancellation,
 			// not a crash. Exit immediately without fallback/restart churn.
 			if ctx.Err() != nil {
@@ -108,7 +134,7 @@ func (l *Launcher) Run(ctx context.Context) error {
 			}
 
 			if ft == FailureCUDAOOM && cudaOOMRetries < 2 && l.OnCUDAOOM != nil {
-				device, allocMB, ok := parseCUDAOOM(msg)
+				device, allocMB, ok := ParseCUDAOOM(msg)
 				if ok {
 					if newArgs, entry, retry := l.OnCUDAOOM(device, allocMB, append([]string(nil), l.Args...)); retry {
 						l.Args = newArgs
@@ -191,14 +217,18 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	cmd := exec.CommandContext(ctx, binaryPath, l.Args...)
 	cmd.SysProcAttr = setProcessGroupAttr()
 
-	// llama.cpp writes ~all of its logs (load progress, errors) to STDERR. Tee
-	// both streams to the terminal AND the log file so a normal launch shows live
-	// progress in the shell while staying debuggable afterwards. In Quiet (Claude
-	// Code) mode everything goes to the file only, so nothing corrupts the client's
-	// terminal UI.
+	// llama.cpp writes ~all of its logs (load progress, errors) to STDERR. During
+	// interactive startup, keep the terminal to a single progress line while still
+	// writing the full backend log to disk. Once healthy, raw backend logs stream
+	// again. Non-TTY runs keep the old tee behavior for scripts and benchmarks.
+	var startupLog *startupLogCapture
 	if l.Quiet {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
+	} else if stderrIsTTY() {
+		startupLog = newStartupLogCapture(logFile)
+		cmd.Stdout = startupLog.writer(os.Stdout)
+		cmd.Stderr = startupLog.writer(os.Stderr)
 	} else {
 		cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
 		cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
@@ -223,6 +253,27 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		return err
 	}
 
+	stopProgress := func() {}
+	if startupLog != nil {
+		stop := make(chan struct{})
+		go spinStartupProgress(stop, startupLog, time.Now(), l.HealthTimeout, cmd.Process.Pid, l.Args)
+		stopProgress = func() {
+			close(stop)
+			fmt.Fprint(os.Stderr, "\r\033[K")
+		}
+	}
+	defer stopProgress()
+
+	probeWritten := false
+	writeFailureProbe := func() {
+		if probeWritten {
+			return
+		}
+		probeWritten = true
+		_ = logFile.Sync()
+		l.writeProbeCache(logPath)
+	}
+
 	// Ensure the full process group is killed on any exit path
 	// (context cancellation, health timeout, crash, etc.).
 	defer func() {
@@ -245,6 +296,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 			if cmd.Process != nil {
 				killProcGroup(cmd.Process.Pid)
 			}
+			writeFailureProbe()
 			return ctx.Err()
 		default:
 		}
@@ -253,6 +305,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		if cmd.Process != nil {
 			if !procAlive(cmd.Process.Pid) {
 				// Process died before health check
+				writeFailureProbe()
 				return fmt.Errorf("process died during startup")
 			}
 		}
@@ -261,15 +314,32 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		if resp, err := doHTTPGet(healthURL); err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				// Server is healthy! Write probe cache then wait for exit.
-				l.writeProbeCache(logPath)
+				stopProgress()
+				stopProgress = func() {}
+				if startupLog != nil {
+					startupLog.setLive(true)
+					fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(startupLog.start).Round(time.Second))
+				}
+				// Server is healthy. Write probe cache, then optionally restart once
+				// with a placement promoted from the measured runtime values.
+				if l.handleHealthy(logPath) {
+					return errPlacementPromotion
+				}
 				return cmd.Wait()
 			}
 		}
 		if resp, err := doHTTPGet(modelsURL); err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				l.writeProbeCache(logPath)
+				stopProgress()
+				stopProgress = func() {}
+				if startupLog != nil {
+					startupLog.setLive(true)
+					fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(startupLog.start).Round(time.Second))
+				}
+				if l.handleHealthy(logPath) {
+					return errPlacementPromotion
+				}
 				return cmd.Wait()
 			}
 		}
@@ -280,7 +350,388 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	if cmd.Process != nil {
 		killProcGroup(cmd.Process.Pid)
 	}
+	writeFailureProbe()
 	return fmt.Errorf("health timeout")
+}
+
+func (l *Launcher) handleHealthy(logPath string) bool {
+	l.writeProbeCache(logPath)
+	// Persist a clean load so the next launch reuses it instead of re-predicting.
+	// Only write if nothing is cached yet — never clobber a placement that
+	// OOM-recovery already validated by derating.
+	if l.PlacementCachePath != "" && l.SuccessEntry != nil {
+		if _, err := os.Stat(l.PlacementCachePath); err != nil {
+			_ = placement.SavePlacementCache(l.PlacementCachePath, l.SuccessEntry)
+		}
+	}
+	if l.OnPromote == nil {
+		return false
+	}
+	newArgs, ok := l.OnPromote(logPath, append([]string(nil), l.Args...))
+	if !ok || len(newArgs) == 0 {
+		return false
+	}
+	l.Args = append([]string(nil), newArgs...)
+	return true
+}
+
+type startupLogCapture struct {
+	mu    sync.Mutex
+	file  io.Writer
+	live  atomic.Bool
+	buf   []byte
+	start time.Time
+}
+
+type startupStreamWriter struct {
+	capture *startupLogCapture
+	term    io.Writer
+}
+
+func newStartupLogCapture(file io.Writer) *startupLogCapture {
+	return &startupLogCapture{file: file, start: time.Now()}
+}
+
+func (c *startupLogCapture) writer(term io.Writer) io.Writer {
+	return startupStreamWriter{capture: c, term: term}
+}
+
+func (c *startupLogCapture) setLive(v bool) {
+	c.live.Store(v)
+}
+
+func (c *startupLogCapture) tail(max int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	data := c.buf
+	if len(data) > max {
+		data = data[len(data)-max:]
+	}
+	return string(data)
+}
+
+func (w startupStreamWriter) Write(p []byte) (int, error) {
+	if w.capture == nil {
+		if w.term != nil {
+			_, _ = w.term.Write(p)
+		}
+		return len(p), nil
+	}
+	w.capture.mu.Lock()
+	if w.capture.file != nil {
+		_, _ = w.capture.file.Write(p)
+	}
+	w.capture.buf = append(w.capture.buf, p...)
+	const maxTail = 64 * 1024
+	if len(w.capture.buf) > maxTail {
+		w.capture.buf = append([]byte(nil), w.capture.buf[len(w.capture.buf)-maxTail:]...)
+	}
+	w.capture.mu.Unlock()
+	if w.capture.live.Load() && w.term != nil {
+		_, _ = w.term.Write(p)
+	}
+	return len(p), nil
+}
+
+var startupSpinnerFrames = []string{"|", "/", "-", "\\"}
+
+func spinStartupProgress(stop <-chan struct{}, log *startupLogCapture, start time.Time, timeout time.Duration, pid int, args []string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	progress := newStartupProgressTracker(pid, args)
+	lastLine := ""
+	for i := 0; ; i++ {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			line := fitStartupStatusLine(fmt.Sprintf("%s  %s",
+				startupSpinnerFrames[i%len(startupSpinnerFrames)],
+				startupProgressStatus(log.tail(64*1024), time.Since(start), timeout, progress.snapshot())))
+			if line != lastLine {
+				fmt.Fprintf(os.Stderr, "\r\033[K%s", line)
+				lastLine = line
+			}
+		}
+	}
+}
+
+func fitStartupStatusLine(line string) string {
+	line = strings.Join(strings.Fields(line), " ")
+	cols := startupTerminalColumns()
+	if cols <= 1 {
+		return ""
+	}
+	max := cols - 1
+	runes := []rune(line)
+	if len(runes) <= max {
+		return line
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func startupTerminalColumns() int {
+	if cols := startupTerminalColumnsOS(); cols > 0 {
+		return cols
+	}
+	if v, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && v > 0 {
+		return v
+	}
+	return 100
+}
+
+type startupProgress struct {
+	done  int64
+	total int64
+}
+
+func startupProgressStatus(logText string, elapsed, timeout time.Duration, progress startupProgress) string {
+	parts := make([]string, 0, 5)
+	if progress.total > 0 {
+		pct := startupProgressPercent(progress)
+		parts = append(parts, fmt.Sprintf("%s %3d%%", startupProgressBar(pct, 20), pct))
+	}
+	parts = append(parts, startupPhase(logText))
+	if timeout > 0 {
+		parts = append(parts, fmt.Sprintf("%s/%s", elapsed.Round(time.Second), timeout.Round(time.Second)))
+	} else {
+		parts = append(parts, elapsed.Round(time.Second).String())
+	}
+	if progress.total > 0 {
+		parts = append(parts, fmt.Sprintf("read %s/%s", formatGiB(progress.done), formatGiB(progress.total)))
+	}
+	if line := latestBackendLine(logText); line != "" {
+		parts = append(parts, truncateStatus(line, 90))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func startupPhase(logText string) string {
+	l := strings.ToLower(logText)
+	switch {
+	case strings.Contains(l, "server is listening"), strings.Contains(l, "model loaded"):
+		return "finishing startup"
+	case strings.Contains(l, "warming up"):
+		return "warming up the model"
+	case strings.Contains(l, "load_tensors"), strings.Contains(l, "loading model"):
+		return "loading model weights"
+	case strings.Contains(l, "pinned host memory"), strings.Contains(l, "allocating"):
+		return "pinning host memory"
+	default:
+		return "starting backend"
+	}
+}
+
+func startupProgressPercent(p startupProgress) int {
+	if p.total <= 0 || p.done <= 0 {
+		return 0
+	}
+	if p.done >= p.total {
+		return 100
+	}
+	return int((p.done * 100) / p.total)
+}
+
+func startupProgressBar(percent, width int) string {
+	if width <= 0 {
+		return "[]"
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := (percent*width + 50) / 100
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
+}
+
+func formatGiB(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	return fmt.Sprintf("%.1fGiB", float64(n)/(1024*1024*1024))
+}
+
+func latestBackendLine(logText string) string {
+	lines := strings.Split(strings.TrimSpace(logText), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		return strings.Join(strings.Fields(line), " ")
+	}
+	return ""
+}
+
+func truncateStatus(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
+type startupProgressTracker struct {
+	pid   int
+	paths map[string]int64
+	total int64
+}
+
+func newStartupProgressTracker(pid int, args []string) *startupProgressTracker {
+	paths, total := startupModelShardPaths(startupModelPathFromArgs(args))
+	return &startupProgressTracker{pid: pid, paths: paths, total: total}
+}
+
+func (t *startupProgressTracker) snapshot() startupProgress {
+	if t == nil || t.pid <= 0 || t.total <= 0 {
+		return startupProgress{}
+	}
+	done := t.fdPositions()
+	if done == 0 {
+		done = procRChar(t.pid)
+	}
+	if done > t.total {
+		done = t.total
+	}
+	return startupProgress{done: done, total: t.total}
+}
+
+func (t *startupProgressTracker) fdPositions() int64 {
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", t.pid))
+	if err != nil {
+		return 0
+	}
+	byPath := map[string]int64{}
+	for _, entry := range entries {
+		fd := entry.Name()
+		target, err := os.Readlink(filepath.Join(fmt.Sprintf("/proc/%d/fd", t.pid), fd))
+		if err != nil {
+			continue
+		}
+		size, ok := t.paths[target]
+		if !ok {
+			continue
+		}
+		pos := fdPosition(t.pid, fd)
+		if pos > size {
+			pos = size
+		}
+		if pos > byPath[target] {
+			byPath[target] = pos
+		}
+	}
+	var done int64
+	for _, pos := range byPath {
+		done += pos
+	}
+	return done
+}
+
+func fdPosition(pid int, fd string) int64 {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/fdinfo/%s", pid, fd))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "pos:") {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "pos:")), 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func procRChar(pid int) int64 {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/io", pid))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "rchar:") {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "rchar:")), 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func startupModelPathFromArgs(args []string) string {
+	for i, arg := range args {
+		if arg == "-m" || arg == "--model" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-m=") {
+			return strings.TrimPrefix(arg, "-m=")
+		}
+		if strings.HasPrefix(arg, "--model=") {
+			return strings.TrimPrefix(arg, "--model=")
+		}
+	}
+	return ""
+}
+
+var startupSplitGGUFName = regexp.MustCompile(`(?i)^(.*)-([0-9]+)-of-([0-9]+)\.gguf$`)
+
+func startupModelShardPaths(modelPath string) (map[string]int64, int64) {
+	paths := map[string]int64{}
+	if modelPath == "" {
+		return paths, 0
+	}
+	dir := filepath.Dir(modelPath)
+	base := filepath.Base(modelPath)
+	match := startupSplitGGUFName.FindStringSubmatch(base)
+	if match != nil {
+		totalParts, err := strconv.Atoi(match[3])
+		if err == nil && totalParts > 0 {
+			var total int64
+			for i := 1; i <= totalParts; i++ {
+				name := fmt.Sprintf("%s-%0*d-of-%s.gguf", match[1], len(match[2]), i, match[3])
+				path := filepath.Join(dir, name)
+				if info, err := os.Stat(path); err == nil && !info.IsDir() {
+					paths[path] = info.Size()
+					total += info.Size()
+				}
+			}
+			if total > 0 {
+				return paths, total
+			}
+		}
+	}
+	if info, err := os.Stat(modelPath); err == nil && !info.IsDir() {
+		paths[modelPath] = info.Size()
+		return paths, info.Size()
+	}
+	return paths, 0
+}
+
+func stderrIsTTY() bool {
+	fi, err := os.Stderr.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 // extractPort finds --port from args.
@@ -301,7 +752,9 @@ var (
 	cudaOOMPattern = regexp.MustCompile(`(?i)allocating\s+([0-9]+(?:\.[0-9]+)?)\s+MiB\s+on device\s+(\d+):\s+cudaMalloc failed: out of memory`)
 )
 
-func parseCUDAOOM(line string) (device int, allocMB int, ok bool) {
+// ParseCUDAOOM extracts the CUDA device and allocation size from a llama.cpp
+// cudaMalloc OOM line.
+func ParseCUDAOOM(line string) (device int, allocMB int, ok bool) {
 	m := cudaOOMPattern.FindStringSubmatch(line)
 	if m == nil {
 		return 0, 0, false
@@ -372,7 +825,7 @@ func (l *Launcher) parseLoadFailure() (FailureType, string) {
 		if strings.Contains(low, "pinned memory") && strings.Contains(low, "hang") {
 			return FailurePinnedHang, line
 		}
-		if _, _, ok := parseCUDAOOM(line); ok {
+		if _, _, ok := ParseCUDAOOM(line); ok {
 			return FailureCUDAOOM, line
 		}
 		if ramOOMPattern.MatchString(line) {
@@ -398,6 +851,11 @@ func (l *Launcher) writeProbeCache(logPath string) {
 	}
 	computeBuf, kvPerLayer := placement.ParseLogForProbe(string(data))
 	if computeBuf <= 0 && kvPerLayer <= 0 {
+		return
+	}
+	if l.ProbeModel != nil {
+		computeByGPU := placement.ParseComputeBuffersByGPU(string(data))
+		_ = placement.WriteProbeCacheForModel(l.ProbeCacheDir, l.ProbeModel, l.ProbeCtxSize, l.ProbeUBatchSize, l.ProbeKVQuality, l.ProbeKVPlacement, l.ProbeBackendTag, l.ProbeGPUs, computeByGPU, kvPerLayer)
 		return
 	}
 	modelName := l.extractModelName()

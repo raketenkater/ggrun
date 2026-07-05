@@ -13,7 +13,8 @@ import (
 
 // CacheEntry holds a validated placement cache entry for MoE.
 type CacheEntry struct {
-	GPUAssignments []GPUAssignment `json:"gpu_assignments"` // cuda_idx:start:count
+	GPUAssignments []GPUAssignment `json:"gpu_assignments"`     // cuda_idx:start:count
+	OTString       string          `json:"ot_string,omitempty"` // exact -ot (preserves sub-layer pins)
 	TensorSplit    []float64       `json:"tensor_split,omitempty"`
 	SplitMode      string          `json:"split_mode,omitempty"`
 	NCPUMoE        int             `json:"n_cpu_moe"`
@@ -46,6 +47,7 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 		UBatchSize: 512,
 		Parallel:   2,
 	}
+	hasMMap := false
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -61,6 +63,8 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 		switch key {
 		case "CACHED_GPU_ASSIGNMENTS":
 			entry.GPUAssignments = parseGPUAssignments(val)
+		case "CACHED_OT_STRING":
+			entry.OTString = val
 		case "CACHED_TENSOR_SPLIT":
 			entry.TensorSplit = parseTensorSplit(val)
 		case "CACHED_SPLIT_MODE":
@@ -78,6 +82,7 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 		case "CACHED_NO_PINNED":
 			entry.NoPinned = val == "1"
 		case "CACHED_MMAP":
+			hasMMap = true
 			entry.MMap = val == "1"
 		}
 	}
@@ -97,14 +102,37 @@ func LoadPlacementCache(cachePath string, caps *detect.Capabilities, kvTotalMB i
 			return nil, fmt.Errorf("cached assignment references unknown GPU %d", assign.CUDAIndex)
 		}
 	}
-	if len(entry.GPUAssignments) == 0 && len(entry.TensorSplit) == 0 {
+	if len(entry.GPUAssignments) == 0 && len(entry.TensorSplit) == 0 && entry.OTString == "" {
 		return nil, fmt.Errorf("cache has no MoE placement data")
+	}
+	if !hasMMap {
+		return nil, fmt.Errorf("cache missing CACHED_MMAP")
 	}
 	if len(entry.GPUAssignments) > 0 && len(entry.TensorSplit) == 0 {
 		return nil, fmt.Errorf("cached MoE GPU assignments missing CACHED_TENSOR_SPLIT")
 	}
 
 	return entry, nil
+}
+
+// StrategyToCacheEntry captures a computed MoE placement as a cache entry so a
+// launch that loaded cleanly can be persisted (via the launcher's success hook)
+// and reused verbatim next time. Stores the exact -ot so sub-layer gate+up pins
+// survive the round-trip.
+func StrategyToCacheEntry(s *Strategy) *CacheEntry {
+	if s == nil {
+		return nil
+	}
+	return &CacheEntry{
+		OTString:    s.OTString,
+		TensorSplit: append([]float64(nil), s.TensorSplit...),
+		SplitMode:   s.SplitMode,
+		NCPUMoE:     s.NCPUMoE,
+		BatchSize:   s.BatchSize,
+		UBatchSize:  s.UBatchSize,
+		Parallel:    s.Parallel,
+		MMap:        s.MMap,
+	}
 }
 
 // SavePlacementCache writes a placement cache file in bash-compatible format.
@@ -118,6 +146,9 @@ func SavePlacementCache(cachePath string, entry *CacheEntry) error {
 			assigns = append(assigns, fmt.Sprintf("%d:%d:%d", a.CUDAIndex, a.Start, a.Count))
 		}
 		parts = append(parts, fmt.Sprintf("CACHED_GPU_ASSIGNMENTS=\"%s\"", strings.Join(assigns, " ")))
+	}
+	if entry.OTString != "" {
+		parts = append(parts, fmt.Sprintf("CACHED_OT_STRING=\"%s\"", entry.OTString))
 	}
 	if len(entry.TensorSplit) > 0 {
 		var split []string
@@ -143,6 +174,8 @@ func SavePlacementCache(cachePath string, entry *CacheEntry) error {
 	}
 	if entry.MMap {
 		parts = append(parts, "CACHED_MMAP=\"1\"")
+	} else {
+		parts = append(parts, "CACHED_MMAP=\"0\"")
 	}
 	return os.WriteFile(cachePath, []byte(strings.Join(parts, "\n")+"\n"), 0644)
 }

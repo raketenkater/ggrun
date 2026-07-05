@@ -23,16 +23,17 @@ type Capabilities struct {
 
 // GPU represents a single GPU device.
 type GPU struct {
-	Index         int    `json:"index"`
-	Name          string `json:"name"`
-	VRAMTotalMB   int    `json:"vram_total_mb"`
-	VRAMUsedMB    int    `json:"vram_used_mb,omitempty"`
-	Driver        string `json:"driver,omitempty"`
-	PCIGen        int    `json:"pci_gen,omitempty"`
-	PCILanes      int    `json:"pci_lanes,omitempty"`
-	BandwidthMBps int    `json:"bandwidth_mbps,omitempty"`
-	PCIBusID      string `json:"pci_bus_id,omitempty"`
-	ComputeCap    string `json:"compute_cap,omitempty"`
+	Index           int    `json:"index"`
+	Name            string `json:"name"`
+	VRAMTotalMB     int    `json:"vram_total_mb"`
+	VRAMUsedMB      int    `json:"vram_used_mb,omitempty"`
+	Driver          string `json:"driver,omitempty"`
+	PCIGen          int    `json:"pci_gen,omitempty"`
+	PCILanes        int    `json:"pci_lanes,omitempty"`
+	BandwidthMBps   int    `json:"bandwidth_mbps,omitempty"`
+	BandwidthSource string `json:"bandwidth_source,omitempty"`
+	PCIBusID        string `json:"pci_bus_id,omitempty"`
+	ComputeCap      string `json:"compute_cap,omitempty"`
 }
 
 // RAMInfo represents system memory.
@@ -87,16 +88,17 @@ func detectNVIDIA() []GPU {
 	if err != nil {
 		return nil
 	}
-	// Query PCIe bandwidth separately. Use the MAX link gen/width (the real slot
-	// capability), NOT gpucurrent/current — those report the live link, which idles
-	// down to gen1 x1/x4 for power saving. Reading the idle state made every GPU
-	// look like it had a different (tiny) bandwidth and skewed the tensor-split
-	// wildly (e.g. 0.86/0.03/0.11), starving GPUs whose link happened to be idle at
-	// detection time, even though all three negotiate gen3 x16 under load.
+	// Query PCIe bandwidth separately. Link speed often idles down to Gen1 when
+	// the GPU is not busy, so current gen is not a stable performance signal.
+	// Lane width is different: on mixed-slot/riser systems a GPU can be physically
+	// limited to x1/x4 even though the card's advertised max width is x16. Use
+	// max gen with observed current width when current width is lower than max;
+	// otherwise keep max gen/width. Non-NVIDIA and unknown platforms leave
+	// bandwidth empty, and placement falls back to neutral free-VRAM weighting.
 	pcieOut, _ := exec.Command("nvidia-smi",
-		"--query-gpu=pcie.link.gen.max,pcie.link.width.max",
+		"--query-gpu=pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max",
 		"--format=csv,noheader,nounits").Output()
-	pcieLines := strings.Split(strings.TrimSpace(string(pcieOut)), "\n")
+	pcieLinks := parseNVIDIAPCIeLinks(string(pcieOut))
 
 	var gpus []GPU
 	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -125,20 +127,16 @@ func detectNVIDIA() []GPU {
 			PCIBusID:    pciBusID,
 			ComputeCap:  computeCap,
 		}
-		// Parse PCIe bandwidth
-		if i < len(pcieLines) {
-			pcieParts := strings.Split(pcieLines[i], ",")
-			if len(pcieParts) >= 2 {
-				gen, _ := strconv.Atoi(strings.TrimSpace(pcieParts[0]))
-				lanes, _ := strconv.Atoi(strings.TrimSpace(pcieParts[1]))
-				gpu.PCIGen = gen
-				gpu.PCILanes = lanes
-				gpu.BandwidthMBps = pcieBandwidth(gen, lanes)
-			}
+		// Parse PCIe bandwidth.
+		if i < len(pcieLinks) {
+			applyNVIDIAPCIeLink(&gpu, pcieLinks[i])
 		}
 		// Fallback: if nvidia-smi returned no usable PCIe data, try sysfs.
 		if gpu.BandwidthMBps <= 0 && gpu.PCIBusID != "" {
 			gpu.BandwidthMBps = pcieBandwidthFromSysfs(gpu.PCIBusID)
+			if gpu.BandwidthMBps > 0 {
+				gpu.BandwidthSource = "sysfs_max"
+			}
 		}
 		gpus = append(gpus, gpu)
 	}
@@ -154,6 +152,68 @@ func detectNVIDIA() []GPU {
 	}
 
 	return gpus
+}
+
+type nvidiaPCIeLink struct {
+	currentGen   int
+	currentWidth int
+	maxGen       int
+	maxWidth     int
+}
+
+func parseNVIDIAPCIeLinks(out string) []nvidiaPCIeLink {
+	var links []nvidiaPCIeLink
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) < 4 {
+			continue
+		}
+		links = append(links, nvidiaPCIeLink{
+			currentGen:   parsePositiveInt(parts[0]),
+			currentWidth: parsePositiveInt(parts[1]),
+			maxGen:       parsePositiveInt(parts[2]),
+			maxWidth:     parsePositiveInt(parts[3]),
+		})
+	}
+	return links
+}
+
+func parsePositiveInt(s string) int {
+	v, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return v
+}
+
+func applyNVIDIAPCIeLink(gpu *GPU, link nvidiaPCIeLink) {
+	if gpu == nil {
+		return
+	}
+	gen, lanes, source := 0, 0, ""
+	if link.maxGen > 0 && link.currentWidth > 0 && link.maxWidth > 0 && link.currentWidth < link.maxWidth {
+		gen = link.maxGen
+		lanes = link.currentWidth
+		source = "observed_width"
+	} else if link.maxGen > 0 && link.maxWidth > 0 {
+		gen = link.maxGen
+		lanes = link.maxWidth
+		source = "max"
+	} else if link.currentGen > 0 && link.currentWidth > 0 {
+		gen = link.currentGen
+		lanes = link.currentWidth
+		source = "current"
+	}
+	if gen <= 0 || lanes <= 0 {
+		return
+	}
+	gpu.PCIGen = gen
+	gpu.PCILanes = lanes
+	gpu.BandwidthMBps = pcieBandwidth(gen, lanes)
+	gpu.BandwidthSource = source
 }
 
 // parseComputeCap parses "8.9" → 809, "8.6" → 806 for comparison.

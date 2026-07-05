@@ -201,6 +201,32 @@ func parseOTLayersByDevice(t *testing.T, ot string) map[int][]int {
 	return out
 }
 
+// otExpertMBByDevice charges each -ot pin its real VRAM: a whole-layer pin (its
+// pattern includes the shared expert, "_shexp") costs the full expertPerLayerMB,
+// while a sub-layer gate+up pin (down stays on CPU) costs 2/3 of it — matching
+// buildOTStringWithSubPins / packGateUpChunks.
+func otExpertMBByDevice(t *testing.T, ot string, expertPerLayerMB int) map[int]int {
+	t.Helper()
+	out := map[int]int{}
+	for _, part := range strings.Split(ot, ",") {
+		m := otDevicePattern.FindStringSubmatch(part)
+		if m == nil {
+			continue
+		}
+		device, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("parse device from %q: %v", part, err)
+		}
+		nLayers := len(strings.Split(m[1], "|"))
+		per := expertPerLayerMB
+		if !strings.Contains(part, "_shexp") { // gate+up-only sub-pin
+			per = 2 * expertPerLayerMB / 3
+		}
+		out[device] += nLayers * per
+	}
+	return out
+}
+
 func TestNormalizeSplit(t *testing.T) {
 	split := normalizeSplit([]float64{12288, 12288})
 	if len(split) != 2 {
@@ -379,8 +405,9 @@ func TestComputeMoEHeterogeneousMultiGPUExactLedger(t *testing.T) {
 	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
 	kvTotalMB := computeKVTotalMB(model, strat.ContextSize, strat.KVType)
 	fixedPerGPU := 600 + computeFloorMB
+	expertMBByDevice := otExpertMBByDevice(t, strat.OTString, expertPerLayerMB)
 	for gi, gpu := range caps.GPUs {
-		usedMB := fixedPerGPU + splitShareMB(nonExpertTotalMB, strat.TensorSplit, gi) + splitShareMB(kvTotalMB, strat.TensorSplit, gi) + len(assignments[gpu.Index])*expertPerLayerMB
+		usedMB := fixedPerGPU + splitShareMB(nonExpertTotalMB, strat.TensorSplit, gi) + splitShareMB(kvTotalMB, strat.TensorSplit, gi) + expertMBByDevice[gpu.Index]
 		if usedMB > gpu.VRAMFreeMB() {
 			t.Fatalf("gpu %d over budget: used=%dMB free=%dMB split=%v ot=%s", gpu.Index, usedMB, gpu.VRAMFreeMB(), strat.TensorSplit, strat.OTString)
 		}
@@ -426,6 +453,21 @@ func TestComputeMoEMultiGPUFullyFitsExpertsOnGPU(t *testing.T) {
 	}
 	if strat.NCPUMoE != 0 {
 		t.Fatalf("expected no CPU MoE layers when experts fit, got %d", strat.NCPUMoE)
+	}
+}
+
+func TestFirstLaunchComputeBufForGPUKeepsPrimaryConservative(t *testing.T) {
+	order := []int{2, 0, 1}
+	primary := firstLaunchComputeBufMBForGPU(512, 2, order)
+	secondary := firstLaunchComputeBufMBForGPU(512, 0, order)
+	if primary != firstLaunchComputeBufMB(512) {
+		t.Fatalf("primary fallback = %d, want %d", primary, firstLaunchComputeBufMB(512))
+	}
+	if secondary >= primary {
+		t.Fatalf("secondary fallback should be lower than primary, got %d >= %d", secondary, primary)
+	}
+	if secondary < computeFloorMB {
+		t.Fatalf("secondary fallback should keep compute floor, got %d < %d", secondary, computeFloorMB)
 	}
 }
 
@@ -1136,6 +1178,54 @@ func TestComputeAppleSiliconSingleGPU(t *testing.T) {
 		if a == "-ngl" && args[i+1] == "0" {
 			t.Fatal("Apple Silicon launch must not disable GPU offload")
 		}
+	}
+}
+
+func TestMmapDecisionIsVRAMAware(t *testing.T) {
+	// mmap is a question about RAM, not total model size. The same big MoE that
+	// exceeds total VRAM should load RESIDENT (no mmap) when the GPUs absorb
+	// enough experts that the CPU remainder fits in RAM — and only fall back to
+	// mmap when little VRAM leaves a CPU remainder that overflows RAM.
+	//
+	// The old decision keyed off totalSizeMB > ramAvail, so BOTH cases below —
+	// identical model, identical RAM — would have been forced onto mmap. The
+	// VRAM-aware decision must flip: big-VRAM => resident, small-VRAM => mmap.
+	mk := func() *ModelProfile {
+		return &ModelProfile{
+			Path: "moe.gguf", SizeBytes: 100 * 1024 * 1024 * 1024,
+			NumLayers: 64, NumParams: 100_000_000_000, IsMoE: true, NumExperts: 64,
+			ContextSize: 32768, HiddenSize: 4096,
+			HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+			ExpertBytes: 92 * 1024 * 1024 * 1024, NonExpertBytes: 8 * 1024 * 1024 * 1024,
+			CTXTrain: 32768,
+		}
+	}
+	// 80GB RAM; 100GB model exceeds total VRAM in both cases below.
+	bigVRAM := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}, {Index: 1, VRAMTotalMB: 24576}, {Index: 2, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 81920, FreeMB: 81920},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	smallVRAM := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 81920, FreeMB: 81920},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	opts := Options{ContextSize: 32768, KVPlacement: "cpu", KVQuality: "mid"}
+
+	big, err := Compute(bigVRAM, mk(), opts)
+	if err != nil {
+		t.Fatalf("big-vram compute: %v", err)
+	}
+	small, err := Compute(smallVRAM, mk(), opts)
+	if err != nil {
+		t.Fatalf("small-vram compute: %v", err)
+	}
+	if big.MMap {
+		t.Errorf("big-VRAM MoE: CPU remainder fits in RAM, expected resident (MMap=false), got MMap=true")
+	}
+	if !small.MMap {
+		t.Errorf("small-VRAM MoE: CPU remainder overflows RAM, expected mmap (MMap=true), got MMap=false")
 	}
 }
 

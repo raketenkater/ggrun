@@ -22,7 +22,9 @@ func TestResolveAutoKVPlacement(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &ModelProfile{IsMoE: tc.isMoE}
-			if got := resolveAutoKVPlacement(caps, m, tc.totalSizeMB); got != tc.want {
+			// derived per-component overhead: 3 GPUs × (600 CUDA + 1024 compute)
+			const vramOverheadMB = 3 * (600 + 1024)
+			if got := resolveAutoKVPlacement(caps, m, tc.totalSizeMB, vramOverheadMB); got != tc.want {
 				t.Fatalf("resolveAutoKVPlacement(%dMB, moe=%v) = %q, want %q", tc.totalSizeMB, tc.isMoE, got, tc.want)
 			}
 		})

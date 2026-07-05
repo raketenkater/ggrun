@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/probe"
@@ -1627,7 +1628,7 @@ func settingRows() []settingRow {
 		}
 	}
 	return []settingRow{
-		{label: "Backend", kind: "enum", options: []string{"ik_llama", "llama"},
+		{label: "Backend", kind: "enum", options: backendOptions(),
 			get: func(c *config.Config) string { return c.Backend },
 			set: func(c *config.Config, v string) { c.Backend = v }},
 		{label: "Model directory", kind: "text",
@@ -1743,10 +1744,18 @@ func (m *Model) openSettings() {
 	m.screen = ScreenSettings
 }
 
+// backendOptions lists the selectable backends: the built-ins plus any
+// registered fork backends (so they show up in the TUI backend picker).
+func backendOptions() []string {
+	opts := []string{"ik_llama", "llama"}
+	opts = append(opts, backends.Tags()...)
+	return opts
+}
+
 // openBackendChoice shows the arrow-select backend chooser, persisting the
 // choice and returning to ret afterwards.
 func (m *Model) openBackendChoice(ret Screen) {
-	m.openChoice("Backend", []string{"ik_llama", "llama"}, m.backend, ret, func(mm *Model, v string) {
+	m.openChoice("Backend", backendOptions(), m.backend, ret, func(mm *Model, v string) {
 		mm.backend = v
 		if err := persistConfig(func(c *config.Config) { c.Backend = v }); err != nil {
 			mm.message = fmt.Sprintf("Backend set to %s for this session — save failed: %v", v, err)
@@ -1934,18 +1943,20 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 	}
 	model := m.models[m.selectedModel]
 	// Default: 0 = auto-fit (Compute() finds max context that fits hardware)
+	// Default to auto-fit (ctx=0): placement.Compute finds the max context that
+	// actually fits — the same path the CLI uses. The old default fed the crude
+	// computeRecommendation heuristic straight to the backend, which produced a
+	// wrong context for big MoE like DeepSeek V4 (and tripped the fork's graph
+	// builder). Only an explicit max/manual choice overrides auto-fit.
 	ctx := 0
-	if m.recommendation != nil && m.recommendation.ContextSize > 0 {
-		ctx = m.recommendation.ContextSize
-	}
+	ctxFlag := "fit"
 	if m.ctxMode == "max" {
-		ctx = 131072
+		ctxFlag = "max"
 	} else if m.ctxMode == "manual" && m.ctxSize != "" {
+		ctxFlag = m.ctxSize
 		if n, err := strconv.Atoi(m.ctxSize); err == nil {
 			ctx = n
 		}
-	} else if m.ctxMode == "fit" {
-		ctx = 0 // auto-fit
 	}
 	gpuLayers := 999
 	if m.recommendation != nil {
@@ -1963,6 +1974,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		ModelPath:    model.Path,
 		Port:         8081,
 		CtxSize:      ctx,
+		CtxFlag:      ctxFlag,
 		KVPlacement:  m.kvPlacement,
 		KVQuality:    "mid",
 		GPULayers:    gpuLayers,
@@ -1985,10 +1997,17 @@ func (m Model) buildArgs() []string {
 	if req == nil {
 		return nil
 	}
+	ctx := req.CtxFlag
+	if ctx == "" {
+		ctx = "fit"
+		if req.CtxSize > 0 {
+			ctx = strconv.Itoa(req.CtxSize)
+		}
+	}
 	args := []string{
 		"-m", req.ModelPath,
 		"--port", strconv.Itoa(req.Port),
-		"-c", strconv.Itoa(req.CtxSize),
+		"-c", ctx,
 		"-ngl", strconv.Itoa(req.GPULayers),
 	}
 	if req.KVPlacement != "" && req.KVPlacement != "auto" {
@@ -2015,6 +2034,7 @@ type LaunchRequest struct {
 	ModelPath     string
 	Port          int
 	CtxSize       int
+	CtxFlag       string
 	KVPlacement   string
 	KVQuality     string
 	GPULayers     int

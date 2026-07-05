@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/benchmark"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/daemon"
@@ -79,6 +80,8 @@ func main() {
 		cmdGUI()
 	case "config":
 		cmdConfig(args[1:])
+	case "backend", "backends":
+		cmdBackend(args[1:])
 	case "update", "--update":
 		cmdUpdate()
 	default:
@@ -106,6 +109,8 @@ Commands:
   tune <model.gguf>    AI-tune model for best performance
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   config [show|edit|path|reset]  Manage settings
+  backend [list|add|register|remove]  Manage llama.cpp fork backends (add a fork,
+                       auto-route a model arch to it, e.g. DeepSeek V4 → V4 fork)
   update, --update     Update ggrun and backends
   gui, tui             Interactive TUI (model picker, settings, launch)
 
@@ -125,7 +130,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "kv-probe", "download", "tune", "recommend", "gui", "tui", "config", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "kv-probe", "download", "tune", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -178,6 +183,21 @@ func formatCommand(args []string) string {
 		quoted[i] = shellQuote(arg)
 	}
 	return strings.Join(quoted, " ")
+}
+
+func autoStartupTimeout(model *placement.ModelProfile) time.Duration {
+	if model == nil {
+		return 2 * time.Minute
+	}
+	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
+	timeoutSec := 240.0 + totalSizeMB/1700.0
+	if timeoutSec < 60 {
+		timeoutSec = 60
+	}
+	if model.IsMoE && totalSizeMB > 100*1024 {
+		timeoutSec = 900
+	}
+	return time.Duration(timeoutSec*2) * time.Second
 }
 
 func shellQuote(arg string) string {
@@ -301,6 +321,7 @@ type launchRequest struct {
 	RamBudgetMB       int
 	VRAMHeadroomMB    int
 	RAMHeadroomMB     int
+	NoMMap            bool
 	Parallel          int
 	ParallelSet       bool // --parallel given explicitly; claude-code mode must not override it
 	Benchmark         bool
@@ -397,6 +418,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			case "--ram-headroom":
 				req.RAMHeadroomMB = parseBudgetMB(val)
 				continue
+			case "--no-mmap":
+				req.NoMMap = val == "" || parseBoolFlag(val)
+				continue
 			case "--spec":
 				req.SpecMode = val
 				continue
@@ -467,6 +491,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.VisionAuto = true
 		case "--claude-code":
 			req.ClaudeCode = true
+		case "--no-mmap":
+			req.NoMMap = true
 		case "--mmproj":
 			v, err := next()
 			if err != nil {
@@ -554,7 +580,37 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 		}
 	}
+	req.ExtraArgs = normalizePlacementAwareExtraArgs(req, req.ExtraArgs)
 	return req, nil
+}
+
+func parseBoolFlag(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []string {
+	if req == nil || len(args) == 0 {
+		return args
+	}
+	out := args[:0]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--no-mmap" {
+			req.NoMMap = true
+			continue
+		}
+		if key, val, ok := strings.Cut(a, "="); ok && key == "--no-mmap" {
+			req.NoMMap = val == "" || parseBoolFlag(val)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // applyGPUVisibility restricts which devices the backend can enumerate so the
@@ -640,6 +696,13 @@ func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
 				}
 			}
 		}
+		// A registered fork backend selected by its manifest tag (--backend <tag>).
+		if cb := backends.ByTag(want); cb != nil {
+			if _, err := os.Stat(cb.Path); err == nil {
+				return detectRegisteredBackend(cb)
+			}
+			fmt.Fprintf(os.Stderr, "Warning: registered backend %q binary not found: %s\n", cb.Tag, cb.Path)
+		}
 	}
 	if req.ServerBin != "" && !useExplicitServerBin {
 		if _, err := os.Stat(req.ServerBin); err == nil {
@@ -648,6 +711,32 @@ func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
 		fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", req.ServerBin)
 	}
 	return findBackend(caps)
+}
+
+// routeArchBackend redirects to a registered fork backend when the model's
+// architecture is registered with a route-arch and the user didn't force
+// --backend. This is what makes fork-only archs (e.g. deepseek4 → the V4 fork)
+// "just work" with no extra flags.
+func routeArchBackend(be *backendInfo, model *placement.ModelProfile, req *launchRequest) *backendInfo {
+	if req.BackendExplicit || model == nil {
+		return be
+	}
+	if cb := backends.ForArch(model.ModelArch); cb != nil {
+		fmt.Printf("[launch] %s runs on fork backend %q — routing to %s\n", model.ModelArch, cb.Tag, cb.Path)
+		return detectRegisteredBackend(cb)
+	}
+	return be
+}
+
+func detectRegisteredBackend(cb *backends.Backend) *backendInfo {
+	if cb == nil {
+		return nil
+	}
+	info := detectBackend(cb.Path)
+	if tag := strings.TrimSpace(cb.Tag); tag != "" {
+		info.Tag = tag
+	}
+	return info
 }
 
 func backendMatches(info *backendInfo, name, want string) bool {
@@ -673,6 +762,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		RamBudgetMB:    req.RamBudgetMB,
 		VRAMHeadroomMB: req.VRAMHeadroomMB,
 		RAMHeadroomMB:  req.RAMHeadroomMB,
+		NoMMap:         req.NoMMap,
 		CacheDir:       cacheDir,
 		Host:           req.Host,
 		BackendTag:     be.Tag,
@@ -706,6 +796,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 //     context shrinks (262144/8 = 32k). A real Claude Code conversation easily
 //     exceeds that, and the backend then FAILS the request ("context shift is
 //     disabled"). 4 slots keep ~65k per slot, which fits normal sessions.
+//
 // Wide fan-out is handled by a long API_TIMEOUT_MS (queued agents wait for one
 // of the 4 slots and complete) rather than by more slots — a single GPU
 // serializes the work either way. Total KV is unchanged (fixed ctx, just split).
@@ -757,6 +848,212 @@ func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode, parallelExpl
 	}
 }
 
+func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy) []string {
+	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = append(serverArgs, req.ExtraArgs...)
+	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
+	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
+	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode)
+	return serverArgs
+}
+
+func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []string, timeout time.Duration) (*server.Process, error) {
+	if req.ClaudeCode {
+		// In Claude Code mode ggrun hands the terminal to the `claude` client, so
+		// the backend's ongoing per-request logs must go to a file instead of
+		// bleeding into Claude Code's UI.
+		logDir := cfg.LogDir
+		if logDir == "" {
+			logDir = os.TempDir()
+		}
+		logPath := filepath.Join(logDir, fmt.Sprintf("ggrun-claude-server-%d.log", req.Port))
+		if lf, ferr := os.Create(logPath); ferr == nil {
+			fmt.Printf("[claude-code] backend logs -> %s\n", logPath)
+			return server.StartWithTimeoutTo(serverArgs, req.Port, timeout, lf, lf)
+		}
+	}
+	return server.StartWithTimeout(serverArgs, req.Port, timeout)
+}
+
+func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string) {
+	if cfg == nil || model == nil || strategy == nil || be == nil || serverLog == "" {
+		return
+	}
+	var gpus []detect.GPU
+	if caps != nil {
+		gpus = caps.GPUs
+	}
+	if model.IsMoE && len(gpus) > 0 {
+		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog)
+	}
+	placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, gpus, serverLog)
+	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog)
+}
+
+func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *backendInfo, caps *detect.Capabilities, model *placement.ModelProfile, current *placement.Strategy, currentArgs []string) (*placement.Strategy, []string, bool) {
+	if req == nil || cfg == nil || be == nil || caps == nil || model == nil || current == nil || !model.IsMoE || len(caps.GPUs) == 0 {
+		return nil, nil, false
+	}
+	// A measured KV probe may have been written after the first load. Force the
+	// recompute to reload it instead of reusing the pre-launch model struct state.
+	model.MeasuredKVBytesPerTok = nil
+	next, err := claudeCodeComputeStrategy(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), req.ClaudeCode, req.CtxFlag == "max")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[launch] calibration: measured placement recompute failed: %v\n", err)
+		return nil, nil, false
+	}
+	claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet)
+	if !shouldPromoteMoEPlacement(current, next) {
+		return nil, nil, false
+	}
+	nextArgs := buildLaunchServerArgs(req, cfg, be, caps, next)
+	if formatCommand(nextArgs) == formatCommand(currentArgs) {
+		return nil, nil, false
+	}
+	return next, nextArgs, true
+}
+
+func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration) (*server.Process, *placement.Strategy, []string, error) {
+	const maxRetries = 2
+	retries := 0
+	oomPenalty := map[int]int{}
+	for {
+		p, err := startLaunchProcess(req, cfg, serverArgs, timeout)
+		if err == nil {
+			// Persist a clean load so the next launch (same model+kv+ctx+GPUs)
+			// reuses it instead of re-predicting or re-deriving after an OOM.
+			if strategy != nil && strategy.Type == placement.MoEOffload && strategy.PlacementCachePath != "" {
+				if _, serr := os.Stat(strategy.PlacementCachePath); serr != nil {
+					_ = placement.SavePlacementCache(strategy.PlacementCachePath, placement.StrategyToCacheEntry(strategy))
+				}
+			}
+			return p, strategy, serverArgs, nil
+		}
+
+		logData := ""
+		if p != nil && p.LogBuf != nil {
+			logData = p.LogBuf.String()
+			recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData)
+		}
+		if retries >= maxRetries {
+			return p, strategy, serverArgs, err
+		}
+		device, allocMB, ok := startupLogCUDAOOM(logData)
+		if !ok {
+			return p, strategy, serverArgs, err
+		}
+
+		// Re-plan with the failed card penalized by its overshoot: the real packer
+		// refits it with partial gate+up chunks and reclaims stranded VRAM on the
+		// other cards via the sub-pin squeeze (experts move off system RAM),
+		// instead of a blind whole-layer drop that over-corrects and erases the
+		// squeeze. Falls back to the whole-layer derate if a re-plan can't fit.
+		oomPenalty[device] += oomOvershoot(caps, device, allocMB)
+		if s, rerr := placement.ReplanAfterOOM(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), oomPenalty); rerr == nil && s != nil && s.OTString != "" {
+			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB, over ~%d MiB); re-planned (n-cpu-moe=%d) and retrying\n", device, allocMB, oomPenalty[device], s.NCPUMoE)
+			serverArgs = patchPlacementArgs(serverArgs, s)
+			strategy = s
+			if s.PlacementCachePath != "" {
+				_ = placement.SavePlacementCache(s.PlacementCachePath, placement.StrategyToCacheEntry(s))
+			}
+		} else {
+			nextArgs, entry, derated := placement.DerateCUDAOOMArgs(serverArgs, model, caps, device, allocMB)
+			if !derated {
+				return p, strategy, serverArgs, err
+			}
+			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; moving expert layer(s) to CPU and retrying\n", device, allocMB)
+			cachePath := req.TuneCache
+			if strategy != nil && strategy.PlacementCachePath != "" {
+				cachePath = strategy.PlacementCachePath
+			}
+			if cachePath != "" && entry != nil {
+				_ = placement.SavePlacementCache(cachePath, entry)
+			}
+			applyDeratedPlacementEntry(strategy, entry)
+			serverArgs = nextArgs
+		}
+		retries++
+		fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
+	}
+}
+
+// oomOvershoot is how much a failed cudaMalloc exceeded the device's free VRAM
+// (min 512 MiB), used to penalize that card on a corrective re-plan.
+func oomOvershoot(caps *detect.Capabilities, device, allocMB int) int {
+	over := allocMB
+	if caps != nil {
+		for _, g := range caps.GPUs {
+			if g.Index == device {
+				if free := g.VRAMFreeMB(); allocMB > free {
+					over = allocMB - free
+				}
+				break
+			}
+		}
+	}
+	if over <= 0 {
+		over = 512
+	}
+	return over
+}
+
+func startupLogCUDAOOM(logData string) (device int, allocMB int, ok bool) {
+	lines := strings.Split(logData, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if device, allocMB, ok := recovery.ParseCUDAOOM(lines[i]); ok {
+			return device, allocMB, true
+		}
+	}
+	return 0, 0, false
+}
+
+func applyDeratedPlacementEntry(strategy *placement.Strategy, entry *placement.CacheEntry) {
+	if strategy == nil || entry == nil {
+		return
+	}
+	if entry.NCPUMoE > 0 {
+		strategy.NCPUMoE = entry.NCPUMoE
+	}
+	if len(entry.TensorSplit) > 0 {
+		strategy.TensorSplit = append([]float64(nil), entry.TensorSplit...)
+	}
+	if entry.SplitMode != "" {
+		strategy.SplitMode = entry.SplitMode
+	}
+	if entry.BatchSize > 0 {
+		strategy.BatchSize = entry.BatchSize
+	}
+	if entry.UBatchSize > 0 {
+		strategy.UBatchSize = entry.UBatchSize
+	}
+	if entry.Parallel > 0 {
+		strategy.Parallel = entry.Parallel
+	}
+	strategy.MMap = entry.MMap
+}
+
+func shouldPromoteMoEPlacement(current, next *placement.Strategy) bool {
+	if current == nil || next == nil || current.Type != placement.MoEOffload {
+		return false
+	}
+	return current.NCPUMoE > 0 && next.NCPUMoE < current.NCPUMoE
+}
+
+// resolveLaunchBackend selects the backend, applies fork-arch routing (e.g.
+// deepseek4 -> the v4 fork), and preflights the arch. This is the exact step
+// that must be identical across every launch path (CLI, TUI, dry-run) — the TUI
+// once skipped the fork routing and couldn't load V4 at all. Returns nil if no
+// backend binary is available.
+func resolveLaunchBackend(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities) *backendInfo {
+	be := selectBackend(caps, req)
+	if be == nil {
+		return nil
+	}
+	be = routeArchBackend(be, model, req)
+	preflightBackendArch(model, be, caps)
+	return be
+}
+
 func cmdLaunch(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
@@ -788,12 +1085,11 @@ func cmdLaunch(args []string) {
 	}
 	warnModelCompatibility(model)
 
-	be := selectBackend(caps, req)
+	be := resolveLaunchBackend(req, model, caps)
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
-	preflightBackendArch(model, be, caps)
 	if env := applyGPUVisibility(req, be.Tag); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
@@ -809,7 +1105,6 @@ func cmdLaunch(args []string) {
 	}
 	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
 
-	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
 	if len(caps.GPUs) > 0 {
 		totalVRAM := int64(0)
 		for _, g := range caps.GPUs {
@@ -821,11 +1116,7 @@ func cmdLaunch(args []string) {
 		}
 	}
 
-	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
-	serverArgs = append(serverArgs, req.ExtraArgs...)
-	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
-	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
-	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode)
+	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, strategy)
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
@@ -840,47 +1131,33 @@ func cmdLaunch(args []string) {
 		defer libhub.Cleanup(hubDir)
 	}
 
-	timeoutSec := 240.0 + totalSizeMB/1700.0
-	if timeoutSec < 60 {
-		timeoutSec = 60
-	}
-	if model.IsMoE && totalSizeMB > 100*1024 {
-		timeoutSec = 900
-	}
+	timeout := autoStartupTimeout(model)
 
-	var p *server.Process
-	if req.ClaudeCode {
-		// In Claude Code mode ggrun hands the terminal to the `claude` client, so
-		// the backend's ongoing per-request logs must go to a file instead of
-		// bleeding into Claude Code's UI.
-		logDir := cfg.LogDir
-		if logDir == "" {
-			logDir = os.TempDir()
-		}
-		logPath := filepath.Join(logDir, fmt.Sprintf("ggrun-claude-server-%d.log", req.Port))
-		if lf, ferr := os.Create(logPath); ferr == nil {
-			defer lf.Close()
-			fmt.Printf("[claude-code] backend logs → %s\n", logPath)
-			p, err = server.StartWithTimeoutTo(serverArgs, req.Port, time.Duration(timeoutSec)*time.Second, lf, lf)
-		} else {
-			p, err = server.StartWithTimeout(serverArgs, req.Port, time.Duration(timeoutSec)*time.Second)
-		}
-	} else {
-		p, err = server.StartWithTimeout(serverArgs, req.Port, time.Duration(timeoutSec)*time.Second)
-	}
+	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, strategy, be, caps, serverArgs, timeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
 	}
 
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
-	if model.IsMoE && len(caps.GPUs) > 0 && p.LogBuf != nil {
-		go placement.RunPostLaunchProbe(cfg.CacheDir, caps.GPUs, p.LogBuf.String())
-	}
-	// Cache the KV cache size llama.cpp actually allocated, so future launches size
-	// context from measured truth instead of the per-arch GGUF formula.
 	if p.LogBuf != nil {
-		go placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, p.LogBuf.String())
+		recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String())
+		if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs); ok {
+			fmt.Printf("[launch] calibration: measured placement fits more GPU experts (%d CPU MoE -> %d); restarting once\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
+			_ = p.Stop()
+			fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
+			p, nextStrategy, nextArgs, err = startLaunchWithCUDAOOMRecovery(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting promoted server: %v\n", err)
+				os.Exit(1)
+			}
+			strategy = nextStrategy
+			serverArgs = nextArgs
+			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
+			if p.LogBuf != nil {
+				go recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String())
+			}
+		}
 	}
 	if req.ClaudeCode {
 		// Smooth path: one command brings up the model AND drops the user into
@@ -925,221 +1202,6 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
 		if p.Cmd.Process != nil {
 			p.Cmd.Process.Kill()
-		}
-	}
-}
-
-func cmdGUI() {
-	go recommend.MaybeRefresh() // refresh catalog in the background; TUI uses cache-or-embedded
-	req, err := tui.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if req == nil {
-		return
-	}
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Load config for cache directory
-	cfg, _ := config.Load()
-	if req.DownloadRepo != "" {
-		d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
-		if err := d.RunQuant(req.DownloadRepo, req.DownloadQuant, caps); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	backendName := req.Backend
-	if backendName == "" {
-		backendName = cfg.Backend
-	}
-	be := selectBackend(caps, &launchRequest{ServerBin: cfg.LlamaServer, Backend: backendName})
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
-		os.Exit(1)
-	}
-
-	model, err := parseModel(req.ModelPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
-		os.Exit(1)
-	}
-	warnModelCompatibility(model)
-	preflightBackendArch(model, be, caps)
-	caps = gateBackendGPU(be, caps)
-
-	opts := placement.Options{
-		ContextSize: req.CtxSize,
-		KVPlacement: req.KVPlacement,
-		KVQuality:   req.KVQuality,
-		BackendTag:  be.Tag,
-		Parallel:    req.Parallel,
-		CacheDir:    cfg.CacheDir,
-		Host:        cfg.Host,
-		VisionAuto:  req.Vision,
-		SpecMode:    cfg.Spec,
-		BackendHelp: be.Help,
-		// Keep the model's thinking on for a real launch; only the benchmark /
-		// AI-tune paths measure think-free.
-		ReasoningOff: req.Benchmark || req.AITune,
-	}
-	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
-	if req.TuneCache != "" {
-		opts.CacheFile = req.TuneCache
-	}
-	strategy, err := claudeCodeComputeStrategy(caps, model, opts, req.ClaudeCode, false)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
-		os.Exit(1)
-	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
-
-	if err := guardPortFree(req.Port, "launch"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
-	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
-	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode)
-	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
-	if s := placement.DraftSummary(strategy.Draft); s != "" {
-		fmt.Printf("[spec]   %s\n", s)
-	}
-
-	// Setup lib hub for non-system binaries
-	hubDir, ok, err := libhub.Setup(be.Path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] lib hub: %v\n", err)
-	}
-	if ok {
-		os.Setenv("LLM_SERVER_LIB_HUB", hubDir)
-		defer libhub.Cleanup(hubDir)
-	}
-
-	// Dynamic health timeout: 240 + size/1700 seconds
-	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
-	timeoutSec := 240.0 + totalSizeMB/1700.0
-	if timeoutSec < 60 {
-		timeoutSec = 60
-	}
-	if model.IsMoE && totalSizeMB > 100*1024 {
-		timeoutSec = 900
-	}
-
-	// Use recovery launcher with keep-alive
-	launcher := recovery.DefaultLauncher(be.Path, serverArgs[1:])
-	launcher.HealthTimeout = time.Duration(timeoutSec) * time.Second
-	launcher.KeepAlive = true
-	// Claude Code mode hands the terminal to the `claude` client, so keep the
-	// backend's logs out of it (they still land in the per-run log file).
-	launcher.Quiet = req.ClaudeCode
-	// Always write the backend log to a stable, discoverable location and print
-	// it, so a normal launch is debuggable (not only claude-code mode).
-	if logDir := cfg.LogDir; logDir != "" {
-		if err := os.MkdirAll(logDir, 0o755); err == nil {
-			launcher.LogPath = filepath.Join(logDir, fmt.Sprintf("ggrun-server-%d.log", req.Port))
-			fmt.Printf("[launch] backend log → %s (tail -f to follow)\n", launcher.LogPath)
-		}
-	}
-	launcher.PlacementCachePath = req.TuneCache
-	launcher.OnFailure = func(ft recovery.FailureType, msg string) {
-		fmt.Fprintf(os.Stderr, "[launch] failure: %s: %s\n", ft, msg)
-		if ft == recovery.FailureUnknownModel {
-			fmt.Fprintf(os.Stderr, "[launch] hint: backend %s could not load architecture %q. If this is a MiniMax / ik-only model, switch to the ik_llama.cpp backend (see LLAMA_SERVER in your config).\n", be.Path, model.ModelArch)
-		}
-		if ft == recovery.FailureBackendCapability {
-			fmt.Fprintf(os.Stderr, "[launch] hint: backend %s rejected a GPU placement flag — it is a CPU-only build but the launch used GPU offload. Reinstall the GPU backend (Windows: install.ps1 -Backend cuda) or point LLAMA_SERVER at a CUDA-capable llama-server.\n", be.Path)
-		}
-	}
-	launcher.OnCUDAOOM = func(device int, allocMB int, args []string) ([]string, *placement.CacheEntry, bool) {
-		newArgs, entry, ok := placement.DerateCUDAOOMArgs(args, model, caps, device, allocMB)
-		if ok {
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; moving expert layer(s) to CPU and retrying\n", device, allocMB)
-		}
-		return newArgs, entry, ok
-	}
-	launcher.OnRestart = func(n int, backoff time.Duration) {
-		fmt.Printf("[launch] restart %d in %v...\n", n, backoff)
-	}
-	launcher.OnFallback = func(path string) {
-		fmt.Printf("[launch] falling back to mainline: %s\n", path)
-	}
-
-	// Find fallback binary (mainline llama-server)
-	if be.IsIK {
-		for _, b := range caps.Backends {
-			if b.Name == "llama-server" && b.Path != be.Path {
-				launcher.FallbackPath = b.Path
-				break
-			}
-		}
-	}
-
-	fmt.Printf("[launch] Server starting on port %d (health timeout %.0fs)\n", req.Port, timeoutSec)
-	fmt.Println("[launch] Press Ctrl+C to stop")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Run the launcher in the background so the main goroutine can react to a
-	// second Ctrl+C (force quit) if graceful shutdown stalls.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, shutdownSignals()...)
-	runErr := make(chan error, 1)
-	go func() { runErr <- launcher.Run(ctx) }()
-
-	if req.ClaudeCode {
-		// Smooth path: wait for the server, then drop into Claude Code wired to
-		// the local model. When claude exits, stop the server and quit.
-		if waitForHealth(cfg.Host, req.Port, time.Duration(timeoutSec)*time.Second) {
-			if code := runClaudeCodeClient(cfg.Host, req.Port, serverArgs, nil); code >= 0 {
-				cancel()
-				select {
-				case <-runErr:
-				case <-time.After(20 * time.Second):
-				}
-				os.Exit(code)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "[claude-code] server did not become healthy in time")
-		}
-		// `claude` not installed or server not ready — show the manual recipe and
-		// keep serving so the user can wire it up from another terminal.
-		printClaudeCodeRecipe(cfg.Host, req.Port, serverArgs)
-	}
-
-	for {
-		select {
-		case err := <-runErr:
-			// A context-cancellation error is the expected result of shutdown.
-			if err != nil && ctx.Err() == nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		case <-sigCh:
-			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
-			cancel()
-			// Escape hatch: don't get stuck if the child won't exit.
-			select {
-			case <-runErr:
-				return
-			case <-sigCh:
-				fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
-				os.Exit(1)
-			case <-time.After(20 * time.Second):
-				fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
-				os.Exit(1)
-			}
 		}
 	}
 }
@@ -1531,6 +1593,84 @@ func cmdKVProbe(args []string) {
 	}
 }
 
+func tuiLaunchArgs(req *tui.LaunchRequest, cfg *config.Config) []string {
+	if req == nil {
+		return nil
+	}
+	args := []string{req.ModelPath}
+	if req.Port > 0 {
+		args = append(args, "--port", strconv.Itoa(req.Port))
+	}
+	if req.CtxFlag != "" {
+		args = append(args, "--ctx-size", req.CtxFlag)
+	} else if req.CtxSize > 0 {
+		args = append(args, "--ctx-size", strconv.Itoa(req.CtxSize))
+	} else {
+		args = append(args, "--ctx-size", "fit")
+	}
+	if req.KVPlacement != "" {
+		args = append(args, "--kv-placement", req.KVPlacement)
+	}
+	if req.KVQuality != "" {
+		args = append(args, "--kv-quality", req.KVQuality)
+	}
+	if req.Vision {
+		args = append(args, "--vision")
+	}
+	// Do not pass the config-default backend as an explicit --backend. Keeping it
+	// implicit lets cmdLaunch apply route-arch fork routing (deepseek4 -> v4 fork),
+	// exactly like a normal CLI launch.
+	if req.Backend != "" && (cfg == nil || req.Backend != cfg.Backend) {
+		args = append(args, "--backend", req.Backend)
+	}
+	if req.TuneCache != "" {
+		args = append(args, "--tune-cache", req.TuneCache)
+	}
+	if req.ParallelSet && req.Parallel > 0 {
+		args = append(args, "--parallel", strconv.Itoa(req.Parallel))
+	}
+	if req.Benchmark {
+		args = append(args, "--benchmark")
+	}
+	if req.ClaudeCode {
+		args = append(args, "--claude-code")
+	}
+	return args
+}
+
+func cmdGUI() {
+	go recommend.MaybeRefresh() // refresh catalog in the background; TUI uses cache-or-embedded
+	req, err := tui.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if req == nil {
+		return
+	}
+
+	cfg := config.Defaults()
+	if c, err := config.Load(); err == nil {
+		cfg = c
+	}
+
+	if req.DownloadRepo != "" {
+		caps, err := detect.Detect()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+			os.Exit(1)
+		}
+		d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
+		if err := d.RunQuant(req.DownloadRepo, req.DownloadQuant, caps); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	cmdLaunch(tuiLaunchArgs(req, cfg))
+}
+
 func cmdDryRun(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
@@ -1562,6 +1702,7 @@ func cmdDryRun(args []string) {
 	warnModelCompatibility(model)
 
 	be := selectBackend(caps, req)
+	be = routeArchBackend(be, model, req)
 	backendTag := "llama"
 	binPath := "llama-server"
 	if be != nil {
@@ -1658,14 +1799,14 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 		// A wide fan-out (subagents / ultracode) queues behind the GPU; without a
 		// long timeout Claude Code cancels the queued requests. 30 min lets them
 		// wait for a slot and complete instead. User-set value wins.
-		"API_TIMEOUT_MS=" + envOr("API_TIMEOUT_MS", "1800000"),
+		"API_TIMEOUT_MS="+envOr("API_TIMEOUT_MS", "1800000"),
 		// Behind a custom base URL Claude Code assumes a 200k window and won't
 		// auto-compact until ~92% of it (~184k tokens) — but each slot only has ctx/parallel,
 		// so the conversation overflows the slot and the backend fails the request
 		// ("context shift is disabled"). Compact early instead, at a percentage
 		// derived from the real slot size so it adapts to --parallel automatically.
 		// A user-set value still wins.
-		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=" + envOr("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", strconv.Itoa(claudeCodeAutocompactPct(serverArgs))),
+		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="+envOr("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", strconv.Itoa(claudeCodeAutocompactPct(serverArgs))),
 	)
 }
 
@@ -1776,20 +1917,51 @@ func claudeCodeCtxLadder(target int) []int {
 // thrash), while a few expert layers moving to CPU is only a soft slowdown. So
 // here the priority inverts: reserve KV on GPU for the largest workable context
 // and let the model layout adjust around it. The ladder starts at the model's
-// trained context capped at 262144 (`--ctx-size max` lifts the cap to the
-// model's true maximum) and halves until placement fits with KV on GPU; dense
+// trained context and halves only when placement cannot fit with KV on GPU; dense
 // models must additionally keep their weights fully offloaded — spilling dense
 // weights for KV would cost every token, which is worse than a smaller context.
 // An explicit numeric --ctx-size bypasses the ladder entirely.
+// patchPlacementArgs replaces only the placement flags (-ot, --n-cpu-moe,
+// --tensor-split, --split-mode) in an existing argv with a re-planned strategy's
+// values, preserving every other flag (extras, warmup, backend dialect, etc.).
+func patchPlacementArgs(args []string, s *placement.Strategy) []string {
+	out := append([]string(nil), args...)
+	set := func(name, val string) {
+		if val == "" {
+			return
+		}
+		for i := 0; i+1 < len(out); i++ {
+			if out[i] == name {
+				out[i+1] = val
+				return
+			}
+		}
+		out = append(out, name, val)
+	}
+	set("-ot", s.OTString)
+	if s.ContextSize > 0 {
+		set("--ctx-size", strconv.Itoa(s.ContextSize))
+	}
+	if s.NCPUMoE > 0 {
+		set("--n-cpu-moe", strconv.Itoa(s.NCPUMoE))
+	}
+	if len(s.TensorSplit) > 0 {
+		parts := make([]string, 0, len(s.TensorSplit))
+		for _, v := range s.TensorSplit {
+			parts = append(parts, fmt.Sprintf("%.2f", v))
+		}
+		set("--tensor-split", strings.Join(parts, ","))
+	}
+	set("--split-mode", s.SplitMode)
+	return out
+}
+
 func claudeCodeComputeStrategy(caps *detect.Capabilities, model *placement.ModelProfile, opts placement.Options, claudeCode, ctxMax bool) (*placement.Strategy, error) {
 	if !claudeCode || (opts.ContextSize > 0 && !ctxMax) {
 		return placement.Compute(caps, model, opts)
 	}
 	target := model.CTXTrain
 	if target <= 0 {
-		target = 262144
-	}
-	if !ctxMax && target > 262144 {
 		target = 262144
 	}
 	for _, ctx := range claudeCodeCtxLadder(target) {
@@ -2168,14 +2340,7 @@ func cmdTune(args []string) {
 		os.Exit(1)
 	}
 
-	totalSizeMB := float64(model.SizeBytes) / (1024 * 1024)
-	timeoutSec := 240.0 + totalSizeMB/1700.0
-	if timeoutSec < 60 {
-		timeoutSec = 60
-	}
-	if model.IsMoE && totalSizeMB > 100*1024 {
-		timeoutSec = 900
-	}
+	timeout := autoStartupTimeout(model)
 	benchTimeout := 2 * time.Minute
 	if strategy.Type == placement.CPUOnly {
 		benchTimeout = 5 * time.Minute
@@ -2198,7 +2363,7 @@ func cmdTune(args []string) {
 			fmt.Println("[tune]", msg)
 		},
 		StartServer: func(flags []string) (func(), error) {
-			p, err := server.StartWithTimeout(flags, req.Port, time.Duration(timeoutSec)*time.Second)
+			p, err := server.StartWithTimeout(flags, req.Port, timeout)
 			if err != nil {
 				return nil, err
 			}
@@ -2583,7 +2748,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 func parseModel(path string) (*placement.ModelProfile, error) {
 	info, err := gguf.Parse(path)
 	if err != nil {
-		return nil, fmt.Errorf("parse_gguf.py failed: %w", err)
+		return nil, err
 	}
 
 	profile := infoToProfile(info, path)
@@ -2591,11 +2756,12 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	// Handle multi-part models: sum all shard files
 	profile.SizeBytes = totalModelSize(path)
 
-	// Anchor the expert/non-expert split to the real bytes on disk. Those two are
-	// summed from a hand-maintained per-ggml-type size table, which mis-sizes some
-	// quants (it over-counted DeepSeek V4 by ~29%: 162GB vs a 125GB file) and then
-	// over-reserves RAM/VRAM, under-packing the GPUs. The file size is exact ground
-	// truth, so keep the table's expert:non-expert RATIO but rescale it to match.
+	// Fallback safety net only. parse_gguf.py now sizes every tensor from its real
+	// on-disk byte span (offset deltas), so expert/non-expert already sum to the
+	// file size and this rescale is a no-op (scale ~= 1.0). It still guards the rare
+	// case where a GGUF's offsets are unusable and the parser falls back to the
+	// per-ggml-type size table (which mis-sizes new quants like MXFP4): then the
+	// sum drifts from the file and we rescale, keeping the expert:non-expert ratio.
 	if tableTotal := profile.ExpertBytes + profile.NonExpertBytes; tableTotal > 0 && profile.SizeBytes > 0 {
 		if scale := float64(profile.SizeBytes) / float64(tableTotal); scale < 0.95 || scale > 1.05 {
 			profile.ExpertBytes = int64(float64(profile.ExpertBytes) * scale)

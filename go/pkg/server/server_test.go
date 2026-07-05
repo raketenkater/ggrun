@@ -1,6 +1,10 @@
 package server
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,5 +23,88 @@ func TestWaitReadyTimeout(t *testing.T) {
 	err := p.waitReady(100 * time.Millisecond)
 	if err == nil {
 		t.Fatalf("expected timeout")
+	}
+}
+
+func TestStartWithTimeoutReturnsCapturedLogOnFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell script")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "backend.sh")
+	content := "#!/bin/sh\necho 'common_memory_breakdown_print: |   - CUDA0 (GPU) | 100 = 90 + ( 80 = 70 + 1 + 9) + 0 |' >&2\nsleep 2\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, err := StartWithTimeout([]string{script}, 59998, 100*time.Millisecond)
+	if err == nil {
+		if p != nil {
+			_ = p.Stop()
+		}
+		t.Fatal("expected startup timeout")
+	}
+	if p == nil || p.LogBuf == nil {
+		t.Fatalf("expected stopped process with captured log, got %#v", p)
+	}
+	if !strings.Contains(p.LogBuf.String(), "common_memory_breakdown_print") {
+		t.Fatalf("captured log missing backend output: %q", p.LogBuf.String())
+	}
+	if p.IsRunning() {
+		t.Fatal("failed startup process should already be stopped")
+	}
+}
+
+func TestModelPathFromArgs(t *testing.T) {
+	args := []string{"llama-server", "--host", "0.0.0.0", "-m", "/models/test.gguf"}
+	if got := modelPathFromArgs(args); got != "/models/test.gguf" {
+		t.Fatalf("model path mismatch: %q", got)
+	}
+
+	args = []string{"llama-server", "--model=/models/other.gguf"}
+	if got := modelPathFromArgs(args); got != "/models/other.gguf" {
+		t.Fatalf("equals model path mismatch: %q", got)
+	}
+}
+
+func TestModelShardPathsSplitGGUF(t *testing.T) {
+	dir := t.TempDir()
+	sizes := []int{100, 200, 300}
+	names := []string{
+		"DeepSeek-V4-Flash-MXFP4-00001-of-00003.gguf",
+		"DeepSeek-V4-Flash-MXFP4-00002-of-00003.gguf",
+		"DeepSeek-V4-Flash-MXFP4-00003-of-00003.gguf",
+	}
+	for i, size := range sizes {
+		path := filepath.Join(dir, names[i])
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	paths, total := modelShardPaths(filepath.Join(dir, "DeepSeek-V4-Flash-MXFP4-00001-of-00003.gguf"))
+	if len(paths) != 3 {
+		t.Fatalf("expected 3 shard paths, got %d", len(paths))
+	}
+	if total != 600 {
+		t.Fatalf("total size mismatch: %d", total)
+	}
+}
+
+func TestStartupStatusIncludesProgressAndLatestLine(t *testing.T) {
+	logText := "main: loading model\nload_tensors: loading model tensors, this can take a while...\n"
+	got := startupStatus(logText, 90*time.Second, 30*time.Minute, loadProgress{
+		Done:  1 << 30,
+		Total: 2 << 30,
+	})
+	for _, want := range []string{
+		"[##########----------]  50%",
+		"loading model weights",
+		"1m30s/30m0s",
+		"read 1.0GiB/2.0GiB",
+		"load_tensors: loading model tensors",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status %q missing %q", got, want)
+		}
 	}
 }

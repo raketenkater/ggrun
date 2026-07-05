@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -8,6 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +45,16 @@ func (b *threadSafeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func (b *threadSafeBuffer) Tail(max int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := b.buf.Bytes()
+	if len(data) > max {
+		data = data[len(data)-max:]
+	}
+	return string(data)
 }
 
 // Start launches llama-server with the given args and waits for it to be ready.
@@ -103,7 +117,7 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 	var stopSpin chan struct{}
 	if tty {
 		stopSpin = make(chan struct{})
-		go spinUntilReady(stopSpin, logBuf, start)
+		go spinUntilReady(stopSpin, logBuf, start, timeout, cmd.Process.Pid, args)
 	}
 	err := p.waitReady(timeout)
 	if tty {
@@ -116,11 +130,11 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 			fmt.Fprintln(os.Stderr, tailLines(logBuf.String(), 20))
 		}
 		p.Stop()
-		return nil, fmt.Errorf("server not ready: %w", err)
+		return p, fmt.Errorf("server not ready: %w", err)
 	}
 	live.Store(true) // backend is up — stream its logs from here on
 	if tty {
-		fmt.Fprintf(os.Stderr, "✓ model loaded — server ready in %s\n", time.Since(start).Round(time.Second))
+		fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(start).Round(time.Second))
 	}
 	return p, nil
 }
@@ -219,24 +233,141 @@ func (g *gatedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+var spinnerFrames = []string{"|", "/", "-", "\\"}
 
-// spinUntilReady animates a single status line on stderr while the backend loads,
-// labelling the current phase from the backend's captured log output.
-func spinUntilReady(stop <-chan struct{}, log *threadSafeBuffer, start time.Time) {
-	t := time.NewTicker(120 * time.Millisecond)
+// spinUntilReady animates a single status line on stderr while the backend loads.
+// It combines backend log phase text with /proc fd offsets, which gives useful
+// progress even when llama.cpp itself does not print a byte counter.
+func spinUntilReady(stop <-chan struct{}, log *threadSafeBuffer, start time.Time, timeout time.Duration, pid int, args []string) {
+	t := time.NewTicker(time.Second)
 	defer t.Stop()
+	progress := newLoadProgressTracker(pid, args)
+	lastLine := ""
 	for i := 0; ; i++ {
 		select {
 		case <-stop:
 			return
 		case <-t.C:
-			fmt.Fprintf(os.Stderr, "\r\033[K%s  %s · %s",
+			logTail := log.Tail(64 * 1024)
+			line := fitStatusLine(fmt.Sprintf("%s  %s",
 				spinnerFrames[i%len(spinnerFrames)],
-				startupPhase(log.String()),
-				time.Since(start).Round(time.Second))
+				startupStatus(logTail, time.Since(start), timeout, progress.Snapshot())))
+			if line != lastLine {
+				fmt.Fprintf(os.Stderr, "\r\033[K%s", line)
+				lastLine = line
+			}
 		}
 	}
+}
+
+func fitStatusLine(line string) string {
+	line = strings.Join(strings.Fields(line), " ")
+	cols := terminalColumns()
+	if cols <= 1 {
+		return ""
+	}
+	max := cols - 1
+	runes := []rune(line)
+	if len(runes) <= max {
+		return line
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func terminalColumns() int {
+	if cols := terminalColumnsOS(); cols > 0 {
+		return cols
+	}
+	if v, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && v > 0 {
+		return v
+	}
+	return 100
+}
+
+type loadProgress struct {
+	Done  int64
+	Total int64
+}
+
+func startupStatus(logText string, elapsed, timeout time.Duration, progress loadProgress) string {
+	parts := make([]string, 0, 5)
+	if progress.Total > 0 {
+		pct := progressPercent(progress)
+		parts = append(parts, fmt.Sprintf("%s %3d%%", progressBar(pct, 20), pct))
+	}
+	parts = append(parts, startupPhase(logText))
+	if timeout > 0 {
+		parts = append(parts, fmt.Sprintf("%s/%s", elapsed.Round(time.Second), timeout.Round(time.Second)))
+	} else {
+		parts = append(parts, elapsed.Round(time.Second).String())
+	}
+	if progress.Total > 0 {
+		parts = append(parts, fmt.Sprintf("read %s/%s", formatGiB(progress.Done), formatGiB(progress.Total)))
+	}
+	if line := latestBackendLine(logText); line != "" {
+		parts = append(parts, truncateStatus(line, 90))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func progressPercent(p loadProgress) int {
+	if p.Total <= 0 || p.Done <= 0 {
+		return 0
+	}
+	if p.Done >= p.Total {
+		return 100
+	}
+	return int((p.Done * 100) / p.Total)
+}
+
+func progressBar(percent, width int) string {
+	if width <= 0 {
+		return "[]"
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := (percent*width + 50) / 100
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
+}
+
+func formatGiB(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	return fmt.Sprintf("%.1fGiB", float64(n)/(1024*1024*1024))
+}
+
+func latestBackendLine(logText string) string {
+	lines := strings.Split(strings.TrimSpace(logText), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		line = strings.Join(strings.Fields(line), " ")
+		return line
+	}
+	return ""
+}
+
+func truncateStatus(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }
 
 // startupPhase turns the backend's recent log output into a short status label.
@@ -250,7 +381,7 @@ func startupPhase(logText string) string {
 	case strings.Contains(l, "load_tensors"), strings.Contains(l, "loading model"):
 		return "loading model weights"
 	case strings.Contains(l, "pinned host memory"), strings.Contains(l, "allocating"):
-		return "pinning host memory (large MoE — can take a few minutes)"
+		return "pinning host memory (large MoE; can take a few minutes)"
 	default:
 		return "starting backend"
 	}
@@ -263,4 +394,155 @@ func tailLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+type loadProgressTracker struct {
+	pid   int
+	paths map[string]int64
+	total int64
+}
+
+func newLoadProgressTracker(pid int, args []string) *loadProgressTracker {
+	paths, total := modelShardPaths(modelPathFromArgs(args))
+	return &loadProgressTracker{pid: pid, paths: paths, total: total}
+}
+
+func (t *loadProgressTracker) Snapshot() loadProgress {
+	if t == nil || t.pid <= 0 || t.total <= 0 {
+		return loadProgress{}
+	}
+	done := t.fdPositions()
+	if done == 0 {
+		done = procRChar(t.pid)
+	}
+	if done > t.total {
+		done = t.total
+	}
+	return loadProgress{Done: done, Total: t.total}
+}
+
+func (t *loadProgressTracker) fdPositions() int64 {
+	dir := fmt.Sprintf("/proc/%d/fd", t.pid)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	byPath := map[string]int64{}
+	for _, entry := range entries {
+		fd := entry.Name()
+		target, err := os.Readlink(filepath.Join(dir, fd))
+		if err != nil {
+			continue
+		}
+		size, ok := t.paths[target]
+		if !ok {
+			continue
+		}
+		pos := fdPosition(t.pid, fd)
+		if pos > size {
+			pos = size
+		}
+		if pos > byPath[target] {
+			byPath[target] = pos
+		}
+	}
+	var done int64
+	for _, pos := range byPath {
+		done += pos
+	}
+	return done
+}
+
+func fdPosition(pid int, fd string) int64 {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/fdinfo/%s", pid, fd))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "pos:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, "pos:"))
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func procRChar(pid int) int64 {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/io", pid))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "rchar:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, "rchar:"))
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func modelPathFromArgs(args []string) string {
+	for i, arg := range args {
+		if arg == "-m" || arg == "--model" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-m=") {
+			return strings.TrimPrefix(arg, "-m=")
+		}
+		if strings.HasPrefix(arg, "--model=") {
+			return strings.TrimPrefix(arg, "--model=")
+		}
+	}
+	return ""
+}
+
+var splitGGUFName = regexp.MustCompile(`(?i)^(.*)-([0-9]+)-of-([0-9]+)\.gguf$`)
+
+func modelShardPaths(modelPath string) (map[string]int64, int64) {
+	paths := map[string]int64{}
+	if modelPath == "" {
+		return paths, 0
+	}
+	dir := filepath.Dir(modelPath)
+	base := filepath.Base(modelPath)
+	match := splitGGUFName.FindStringSubmatch(base)
+	if match != nil {
+		totalParts, err := strconv.Atoi(match[3])
+		if err == nil && totalParts > 0 {
+			var total int64
+			for i := 1; i <= totalParts; i++ {
+				name := fmt.Sprintf("%s-%0*d-of-%s.gguf", match[1], len(match[2]), i, match[3])
+				path := filepath.Join(dir, name)
+				if info, err := os.Stat(path); err == nil && !info.IsDir() {
+					paths[path] = info.Size()
+					total += info.Size()
+				}
+			}
+			if total > 0 {
+				return paths, total
+			}
+		}
+	}
+	if info, err := os.Stat(modelPath); err == nil && !info.IsDir() {
+		paths[modelPath] = info.Size()
+		return paths, info.Size()
+	}
+	return paths, 0
 }

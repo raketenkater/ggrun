@@ -2,8 +2,21 @@ package gguf
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestParseMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.gguf")
+	_, err := Parse(path)
+	if err == nil {
+		t.Fatal("expected missing model file to fail")
+	}
+	if !strings.Contains(err.Error(), "model file") {
+		t.Fatalf("expected model-file error, got %v", err)
+	}
+}
 
 func TestParse(t *testing.T) {
 	// Exercise the parser against a real model if one is provided via
