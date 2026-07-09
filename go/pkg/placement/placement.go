@@ -1148,10 +1148,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// 122GB RAM) was forced onto mmap and paged from SSD for no reason.
 	if opts.NoMMap {
 		s.MMap = false
-	} else if ramNeeded > ramAvailMB || totalSizeMB > ramAvailMB {
-		// If even the CPU footprint fits, check against total model size too:
-		// --no-mmap forces llama.cpp to read() the entire file, and a model
-		// larger than RAM will OOM the host regardless of GPU offload.
+	} else if ramNeeded > ramAvailMB {
 		workingSetFloor := ramOverheadMB + cpuKVMB + layersCPU*expertCPUPerLayerMB
 		if ramAvailMB >= workingSetFloor {
 			s.MMap = true
