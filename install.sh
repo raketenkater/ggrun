@@ -158,7 +158,7 @@ _on_err() { LAST_ERR_CMD="$BASH_COMMAND"; LAST_ERR_LINE="${BASH_LINENO[0]:-?}"; 
 _on_exit() {
     local rc=$?
     set +e
-    [[ -n "${SRC_DIR:-}" ]] && rm -rf "$SRC_DIR" 2>/dev/null
+    [[ -n "${SRC_DIR:-}" ]] && (( ! SRC_DIR_EXTERNAL )) && rm -rf "$SRC_DIR" 2>/dev/null
     if (( rc != 0 )) && (( rc != 130 )) && (( INSTALL_STARTED )) && [[ "${LLM_INSTALL_NO_REPORT:-0}" != 1 ]]; then
         report_install_failure "$rc"
     fi
@@ -192,11 +192,14 @@ INSTALL_STARTED=1
 
 # ── Stage 1: use local repo if present; clone only if source fallback needs it ──
 SRC_DIR=""
+SRC_DIR_EXTERNAL=0
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/go/go.mod" && -f "$SCRIPT_DIR/scripts/setup-home.sh" ]]; then
     SRC_DIR="$SCRIPT_DIR"
+    SRC_DIR_EXTERNAL=1
     ok "Using local repo at $SRC_DIR"
 elif [[ -f "./go/go.mod" && -f "./scripts/setup-home.sh" ]]; then
     SRC_DIR="$(pwd)"
+    SRC_DIR_EXTERNAL=1
     ok "Using local repo at $SRC_DIR"
 fi
 
