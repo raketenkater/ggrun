@@ -875,7 +875,7 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []str
 	return server.StartWithTimeout(serverArgs, req.Port, timeout)
 }
 
-func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string) {
+func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) {
 	if cfg == nil || model == nil || strategy == nil || be == nil || serverLog == "" {
 		return
 	}
@@ -885,6 +885,10 @@ func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfil
 	}
 	if model.IsMoE && len(gpus) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog)
+		// Log-independent VRAM delta probe: works even when the server binary
+		// suppresses LLAMA_LOG_INFO. Captures compute-buffer sizes (the gap
+		// between ggrun's model-weight math and actual nvidia-smi VRAM).
+		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, be.Tag, gpus, baselineVRAMByGPU)
 	}
 	placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, gpus, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog)
@@ -933,7 +937,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		logData := ""
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
-			recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData)
+			recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData, nil)
 		}
 		if retries >= maxRetries {
 			return p, strategy, serverArgs, err
@@ -1133,6 +1137,16 @@ func cmdLaunch(args []string) {
 
 	timeout := autoStartupTimeout(model)
 
+	// Capture VRAM baseline before the server starts so the post-launch probe
+	// can measure the real compute-buffer allocation as: current - baseline -
+	// ggrun-estimated model weights.
+	baselineVRAM := map[int]int{}
+	if model.IsMoE && len(caps.GPUs) > 0 {
+		for _, g := range caps.GPUs {
+			baselineVRAM[g.Index] = placement.QueryVRAMUsed(g.Index)
+		}
+	}
+
 	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, strategy, be, caps, serverArgs, timeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
@@ -1141,7 +1155,7 @@ func cmdLaunch(args []string) {
 
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 	if p.LogBuf != nil {
-		recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String())
+		recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String(), baselineVRAM)
 		if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs); ok {
 			fmt.Printf("[launch] calibration: measured placement fits more GPU experts (%d CPU MoE -> %d); restarting once\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
 			_ = p.Stop()
@@ -1155,7 +1169,7 @@ func cmdLaunch(args []string) {
 			serverArgs = nextArgs
 			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 			if p.LogBuf != nil {
-				go recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String())
+				go recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String(), baselineVRAM)
 			}
 		}
 	}
