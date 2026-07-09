@@ -218,3 +218,76 @@ func TestApplyRAMHeadroom(t *testing.T) {
 		t.Fatalf("headroom larger than RAM should floor at 0")
 	}
 }
+
+func TestParseNVIDIAMemoryUsedMB(t *testing.T) {
+	out := "00000000:01:00.0, 20114\n00000000:03:00.0, 9037\n00000000:04:00.0, 9661\n"
+	got := parseNVIDIAMemoryUsedMB(out)
+	want := map[string]int{"00000000:01:00.0": 20114, "00000000:03:00.0": 9037, "00000000:04:00.0": 9661}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("busID %s: got %d, want %d", k, got[k], v)
+		}
+	}
+	if parseNVIDIAMemoryUsedMB("") != nil {
+		t.Fatalf("empty output should return nil, not an empty map")
+	}
+}
+
+func TestAnyMeaningfulUsage(t *testing.T) {
+	idle := []GPU{{PCIBusID: "a", VRAMUsedMB: 1}, {PCIBusID: "b", VRAMUsedMB: 30}}
+	if anyMeaningfulUsage(idle) {
+		t.Fatalf("all-idle GPUs should not trigger the settle check")
+	}
+	busy := []GPU{{PCIBusID: "a", VRAMUsedMB: 1}, {PCIBusID: "b", VRAMUsedMB: 9000}}
+	if !anyMeaningfulUsage(busy) {
+		t.Fatalf("a GPU with real usage should trigger the settle check")
+	}
+}
+
+// TestApplySettleRoundKeysByPCIBusIDNotIndex guards the exact bug this
+// feature almost shipped with: after detectNVIDIA sorts GPUs by PCI bus ID
+// and reassigns Index to 0..N-1, nvidia-smi's own "index" column is still its
+// raw, un-resorted enumeration. Keying the settle comparison by Index instead
+// of PCIBusID would silently compare the wrong devices on a box (like this
+// one) where PCIe physical position doesn't match nvidia-smi's default CUDA
+// enumeration order.
+func TestApplySettleRoundKeysByPCIBusIDNotIndex(t *testing.T) {
+	// Reassigned Index (0,1,2) deliberately does NOT match PCI bus ID sort
+	// order below, mirroring a box where nvidia-smi's raw enumeration and the
+	// PCI-bus-ID sort disagree.
+	gpus := []GPU{
+		{Index: 0, PCIBusID: "0000:04:00.0", VRAMUsedMB: 100}, // physically last by bus ID
+		{Index: 1, PCIBusID: "0000:01:00.0", VRAMUsedMB: 9000},
+		{Index: 2, PCIBusID: "0000:03:00.0", VRAMUsedMB: 200},
+	}
+	prev := busIDUsageMap(gpus)
+	cur := map[string]int{
+		"0000:04:00.0": 100,  // unchanged
+		"0000:01:00.0": 8990, // still settling, but within threshold
+		"0000:03:00.0": 200,  // unchanged
+	}
+	if !applySettleRound(gpus, prev, cur, 64) {
+		t.Fatalf("expected stable within threshold, deltas were small")
+	}
+	for i, want := range []int{100, 8990, 200} {
+		if gpus[i].VRAMUsedMB != want {
+			t.Fatalf("gpu[%d] (bus %s): got %d, want %d — settle round used the wrong key", i, gpus[i].PCIBusID, gpus[i].VRAMUsedMB, want)
+		}
+	}
+}
+
+func TestApplySettleRoundDetectsInstability(t *testing.T) {
+	gpus := []GPU{{PCIBusID: "a", VRAMUsedMB: 9000}}
+	prev := busIDUsageMap(gpus)
+	// A prior process's VRAM is still being reclaimed: a big drop between rounds.
+	cur := map[string]int{"a": 500}
+	if applySettleRound(gpus, prev, cur, 64) {
+		t.Fatalf("expected instability to be detected (large delta), got stable")
+	}
+	if gpus[0].VRAMUsedMB != 500 {
+		t.Fatalf("expected the GPU reading to still be updated to the latest sample, got %d", gpus[0].VRAMUsedMB)
+	}
+}

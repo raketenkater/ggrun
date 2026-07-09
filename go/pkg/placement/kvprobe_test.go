@@ -90,6 +90,19 @@ func TestProbeCacheRoundTripRuntimeKey(t *testing.T) {
 	if wrongPlacement := loadProbeCache(dir, model, 1048576, 512, "mid", "cpu", "v4", gpus); wrongPlacement != nil {
 		t.Fatalf("probe must not cross KV placement: %#v", wrongPlacement)
 	}
+	if err := RecordRuntimeGraphGrowthFromOOM(dir, model, 1048576, 512, "mid", "gpu", "v4", gpus, 2, 1000); err != nil {
+		t.Fatalf("record runtime growth: %v", err)
+	}
+	if err := RecordRuntimeGraphGrowthFromOOM(dir, model, 1048576, 512, "mid", "gpu", "v4", gpus, 2, 900); err != nil {
+		t.Fatalf("record lower runtime growth: %v", err)
+	}
+	got = loadProbeCache(dir, model, 1048576, 512, "mid", "gpu", "v4", gpus)
+	if got == nil || got.ComputeBufByGPU[0] != 2199 || got.ComputeBufByGPU[2] != 306 || got.RuntimeGraphGrowthByGPU[2] != 1000 || got.KVPerLayerMB != 1024 {
+		t.Fatalf("loaded runtime growth probe = %#v", got)
+	}
+	if growth := RuntimeGraphGrowthByGPU(dir, model, 1048576, 512, "mid", "gpu", "v4", gpus); growth[2] != 1000 {
+		t.Fatalf("runtime growth = %#v, want CUDA2=1000", growth)
+	}
 }
 
 func TestParseKVBufferWordings(t *testing.T) {

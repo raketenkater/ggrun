@@ -374,7 +374,8 @@ func findDraftCandidate(target *ModelProfile, modelDir string) string {
 			continue // skip self
 		}
 
-		info, err := e.Info()
+		// os.Stat follows symlinks; e.Info() would report the link's own size.
+		info, err := os.Stat(candPath)
 		if err != nil {
 			continue
 		}
@@ -436,7 +437,8 @@ func findEagleCandidate(target *ModelProfile, modelDir string) string {
 		if target != nil && candPath == target.Path {
 			continue
 		}
-		info, err := e.Info()
+		// os.Stat follows symlinks; e.Info() would report the link's own size.
+		info, err := os.Stat(candPath)
 		if err != nil {
 			continue
 		}

@@ -3,10 +3,13 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/raketenkater/ggrun/pkg/config"
 )
 
 func TestActionMenuArrowNav(t *testing.T) {
@@ -74,6 +77,71 @@ func TestHWSummary(t *testing.T) {
 	}
 }
 
+func TestBuildLaunchRequestCarriesSelectedBackend(t *testing.T) {
+	m := Model{
+		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
+		selectedModel: 0,
+		backend:       "llama",
+		kvPlacement:   "auto",
+		ctxMode:       "fit",
+	}
+	req := m.buildLaunchRequest()
+	if req == nil {
+		t.Fatal("expected launch request")
+	}
+	if req.Backend != "llama" {
+		t.Fatalf("expected selected backend to be carried into launch request, got %q", req.Backend)
+	}
+}
+
+func TestBuildArgsUsesPlannerDryRunCommand(t *testing.T) {
+	m := Model{
+		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
+		selectedModel: 0,
+		backend:       "llama",
+		kvPlacement:   "cpu",
+		kvQuality:     "high",
+		ctxMode:       "fit",
+	}
+	args := m.buildArgs()
+	joined := strings.Join(args, " ")
+	if len(args) < 2 || args[0] != "ggrun" || args[1] != "dry-run" {
+		t.Fatalf("TUI dry run should call the real planner, got %v", args)
+	}
+	if !strings.Contains(joined, "--backend llama") {
+		t.Fatalf("selected backend must stay explicit, got %q", joined)
+	}
+	if strings.Contains(joined, " -ngl ") {
+		t.Fatalf("TUI dry run must not emit fake low-level placement flags, got %q", joined)
+	}
+}
+
+func TestPrelaunchViewShowsSelectedBackend(t *testing.T) {
+	m := Model{
+		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
+		selectedModel: 0,
+		backend:       "llama",
+		kvPlacement:   "auto",
+		ctxMode:       "fit",
+	}
+	view := m.viewPrelaunch()
+	if !strings.Contains(view, "Backend:") || !strings.Contains(view, "llama") {
+		t.Fatalf("prelaunch view should show selected backend, got %q", view)
+	}
+}
+
+func TestBackendTagUsesRegisteredBackendTag(t *testing.T) {
+	if got := (Model{backend: "v4"}).backendTag(); got != "v4" {
+		t.Fatalf("expected v4 tune tag, got %q", got)
+	}
+	if got := (Model{backend: "ik_llama"}).backendTag(); got != "ik" {
+		t.Fatalf("expected ik tune tag, got %q", got)
+	}
+	if got := (Model{}).backendTag(); got != "llama" {
+		t.Fatalf("empty backend should use llama tune tag, got %q", got)
+	}
+}
+
 func TestInitialModelUsesConfigPaths(t *testing.T) {
 	appHome := filepath.Join(t.TempDir(), "ggrun")
 	cfgDir := filepath.Join(appHome, ".config")
@@ -95,5 +163,54 @@ func TestInitialModelUsesConfigPaths(t *testing.T) {
 	m := InitialModel()
 	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.aituneRounds != 9 {
 		t.Fatalf("initial model did not use config: %#v", m)
+	}
+}
+
+// The launch request must carry the configured KV quality. A hardcoded "mid"
+// here once emitted an explicit --kv-quality mid on every TUI launch, silently
+// overriding the user's saved setting (the Settings screen appeared to save
+// but launches always went out with q8_0 KV).
+func TestBuildLaunchRequestCarriesConfiguredKVQuality(t *testing.T) {
+	m := Model{
+		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
+		selectedModel: 0,
+		backend:       "llama",
+		kvPlacement:   "auto",
+		kvQuality:     "high",
+		ctxMode:       "fit",
+	}
+	req := m.buildLaunchRequest()
+	if req == nil {
+		t.Fatal("expected launch request")
+	}
+	if req.KVQuality != "high" {
+		t.Fatalf("configured KV quality must reach the launch request, got %q", req.KVQuality)
+	}
+}
+
+// Changing KV settings in the Settings screen must apply to the live session,
+// not only to the next TUI start.
+func TestApplySettingSyncsKVIntoLiveSession(t *testing.T) {
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := Model{settingsCfg: config.Defaults(), kvQuality: "mid", kvPlacement: "auto"}
+	var qRow, pRow settingRow
+	for _, r := range settingRows() {
+		switch r.label {
+		case "KV quality":
+			qRow = r
+		case "KV placement":
+			pRow = r
+		}
+	}
+	if qRow.label == "" || pRow.label == "" {
+		t.Fatal("KV settings rows not found")
+	}
+	m.applySetting(qRow, "high")
+	if m.kvQuality != "high" {
+		t.Fatalf("KV quality setting must sync into the session, got %q", m.kvQuality)
+	}
+	m.applySetting(pRow, "cpu")
+	if m.kvPlacement != "cpu" {
+		t.Fatalf("KV placement setting must sync into the session, got %q", m.kvPlacement)
 	}
 }

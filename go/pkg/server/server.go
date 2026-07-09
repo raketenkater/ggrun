@@ -77,13 +77,14 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	setSysProcAttr(cmd)
 	// Capture stdout/stderr to a buffer for the post-launch probe. On a TTY we
-	// keep the screen clean during model load (a spinner owns it) and only begin
-	// streaming the backend's own logs once it is ready; off a TTY we stream from
-	// the start, exactly as before (so piped/benchmark runs are unchanged).
+	// keep the screen clean during model load only when writing directly to the
+	// terminal; a caller-provided log file should receive startup output too.
 	logBuf := &threadSafeBuffer{}
 	tty := stdoutIsTTY()
+	streamFromStart := streamLogsFromStart(tty, termOut, termErr)
+	logStartupEvents := dedicatedLogWriter(termOut, termErr)
 	live := &atomic.Bool{}
-	live.Store(!tty)
+	live.Store(streamFromStart)
 	cmd.Stdout = &gatedWriter{buf: logBuf, term: termOut, live: live}
 	cmd.Stderr = &gatedWriter{buf: logBuf, term: termErr, live: live}
 
@@ -114,6 +115,7 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 	go func() { p.waitCh <- cmd.Wait() }()
 
 	start := time.Now()
+	logStartupEvent(logStartupEvents, termErr, "[launch] health check: polling http://127.0.0.1:%d/health then /v1/models (timeout %s)", port, timeout)
 	var stopSpin chan struct{}
 	if tty {
 		stopSpin = make(chan struct{})
@@ -125,6 +127,7 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 		fmt.Fprint(os.Stderr, "\r\033[K") // clear the spinner line
 	}
 	if err != nil {
+		logStartupEvent(logStartupEvents, termErr, "[launch] health check failed after %s: %v", time.Since(start).Round(time.Second), err)
 		if tty {
 			fmt.Fprintln(os.Stderr, "[launch] backend failed to start; last output:")
 			fmt.Fprintln(os.Stderr, tailLines(logBuf.String(), 20))
@@ -133,6 +136,7 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 		return p, fmt.Errorf("server not ready: %w", err)
 	}
 	live.Store(true) // backend is up — stream its logs from here on
+	logStartupEvent(logStartupEvents, termErr, "[launch] health check OK after %s", time.Since(start).Round(time.Second))
 	if tty {
 		fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(start).Round(time.Second))
 	}
@@ -212,6 +216,29 @@ func (p *Process) QueryModels() ([]byte, error) {
 func stdoutIsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+func streamLogsFromStart(tty bool, termOut, termErr io.Writer) bool {
+	if !tty {
+		return true
+	}
+	return dedicatedLogWriter(termOut, termErr)
+}
+
+func dedicatedLogWriter(termOut, termErr io.Writer) bool {
+	return !sameFileWriter(termOut, os.Stdout) || !sameFileWriter(termErr, os.Stderr)
+}
+
+func logStartupEvent(enabled bool, w io.Writer, format string, args ...any) {
+	if !enabled || w == nil {
+		return
+	}
+	fmt.Fprintf(w, format+"\n", args...)
+}
+
+func sameFileWriter(w io.Writer, f *os.File) bool {
+	of, ok := w.(*os.File)
+	return ok && of == f
 }
 
 // gatedWriter always captures to buf; it forwards to term only once live is set,

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,6 +15,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/server"
 	"github.com/raketenkater/ggrun/pkg/tui"
 )
 
@@ -24,7 +28,35 @@ func writeFakeBackend(t *testing.T, name, body string) string {
 	return path
 }
 
-func TestTUILaunchArgsOmitDefaultBackendForArchRouting(t *testing.T) {
+func TestDeepseek4V4GraphQuirk(t *testing.T) {
+	m := &placement.ModelProfile{ModelArch: "deepseek4"}
+	if !deepseek4V4GraphQuirk(m, "v4") {
+		t.Fatal("deepseek4 on v4 must be limited to single-slot KV-on-CPU graphs (fork graph reserve aborts)")
+	}
+	if deepseek4V4GraphQuirk(m, "llama") {
+		t.Fatal("non-v4 backend must keep the normal ladder")
+	}
+	if deepseek4V4GraphQuirk(&placement.ModelProfile{ModelArch: "qwen3moe"}, "v4") {
+		t.Fatal("non-deepseek4 arch must keep the normal ladder")
+	}
+}
+
+func TestClaudeCodeParallelGatedForDeepseek4V4(t *testing.T) {
+	req := &launchRequest{ClaudeCode: true}
+	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
+	be := &backendInfo{Tag: "v4"}
+	opts := placementOptionsFromRequest(req, model, be, t.TempDir())
+	if opts.Parallel != 1 {
+		t.Fatalf("claude-code on deepseek4/v4 must run a single slot (multi-slot graphs abort), got %d", opts.Parallel)
+	}
+	be = &backendInfo{Tag: "ik_llama"}
+	opts = placementOptionsFromRequest(req, &placement.ModelProfile{ModelArch: "qwen3moe"}, be, t.TempDir())
+	if opts.Parallel != 4 {
+		t.Fatalf("claude-code on other models keeps 4 slots, got %d", opts.Parallel)
+	}
+}
+
+func TestTUILaunchArgsPassSelectedBackend(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Backend = "ik_llama"
 	args := tuiLaunchArgs(&tui.LaunchRequest{
@@ -35,10 +67,8 @@ func TestTUILaunchArgsOmitDefaultBackendForArchRouting(t *testing.T) {
 		Backend:     "ik_llama",
 		ClaudeCode:  true,
 	}, cfg)
-	for i, arg := range args {
-		if arg == "--backend" || strings.HasPrefix(arg, "--backend=") {
-			t.Fatalf("default backend must stay implicit so route-arch can run; args[%d]=%q all=%v", i, arg, args)
-		}
+	if !hasAdjacentArg(args, "--backend", "ik_llama") {
+		t.Fatalf("selected backend should be explicit so route-arch cannot override it, got %v", args)
 	}
 	if !hasAdjacentArg(args, "--ctx-size", "fit") {
 		t.Fatalf("TUI fit context should map to CLI fit args, got %v", args)
@@ -124,6 +154,22 @@ func TestRouteArchBackendKeepsRegisteredTag(t *testing.T) {
 	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "deepseek4"}, &launchRequest{})
 	if be == nil || be.Path != backendPath || be.Tag != "v4" {
 		t.Fatalf("expected routed v4 backend tag, got %#v", be)
+	}
+}
+
+func TestRouteArchBackendKeepsExplicitBackend(t *testing.T) {
+	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "deepseek4"}, &launchRequest{Backend: "llama", BackendExplicit: true})
+	if be == nil || be.Path != "/main/llama-server" || be.Tag != "llama" {
+		t.Fatalf("explicit backend must not be route-arch overridden, got %#v", be)
+	}
+}
+
+func TestConfiguredBackendExplicit(t *testing.T) {
+	if !configuredBackendExplicit("llama") || !configuredBackendExplicit("v4") {
+		t.Fatal("named configured backends must be explicit")
+	}
+	if configuredBackendExplicit("") || configuredBackendExplicit("auto") {
+		t.Fatal("empty/auto backend must stay implicit")
 	}
 }
 
@@ -384,6 +430,17 @@ func TestSelectBackendExplicitServerBinWins(t *testing.T) {
 	be := selectBackend(caps, req)
 	if be == nil || be.Path != ikPath || be.Tag != "ik_llama" {
 		t.Fatalf("expected explicit server bin to win, got %#v", be)
+	}
+}
+
+func TestDetectBackendCUDAHelpMentionVulkanStaysLlama(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-backend probe uses a shell script")
+	}
+	bin := writeFakeBackend(t, "llama-server-cuda", "echo 'Vulkan appears in generic help text'\n")
+	info := detectBackend(bin)
+	if info.Tag != "llama" {
+		t.Fatalf("CUDA/mainline path should stay llama even when help mentions Vulkan, got %#v", info)
 	}
 }
 
@@ -716,6 +773,45 @@ func argIndexOf(args []string, want string) int {
 	return -1
 }
 
+func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "real-key")
+	t.Setenv("API_TIMEOUT_MS", "")
+	t.Setenv("API_FORCE_IDLE_TIMEOUT", "")
+	t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
+	env := claudeCodeEnv("0.0.0.0", 8081, []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"})
+
+	if envHasPrefix(env, "ANTHROPIC_API_KEY=") {
+		t.Fatalf("claude-code env must drop real ANTHROPIC_API_KEY: %v", env)
+	}
+	for _, want := range []string{
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:8081",
+		"API_TIMEOUT_MS=1800000",
+		"API_FORCE_IDLE_TIMEOUT=0",
+	} {
+		if !envContains(env, want) {
+			t.Fatalf("missing %s in claude-code env: %v", want, env)
+		}
+	}
+}
+
+func envContains(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
+}
+
+func envHasPrefix(env []string, prefix string) bool {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClaudeCodeSlotAdjust(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -745,19 +841,19 @@ func TestClaudeCodeSlotAdjust(t *testing.T) {
 
 func TestClaudeCodeSamplingArgs(t *testing.T) {
 	base := []string{"-m", "model.gguf"}
-	got := claudeCodeSamplingArgs(base, true)
+	got := claudeCodeSamplingArgs(base, true, nil)
 	for _, want := range []string{"--presence-penalty", "--repeat-penalty", "--repeat-last-n", "--top-k", "--top-p", "--min-p"} {
 		if !hasArg(got, want) {
 			t.Fatalf("expected %s in claude-code sampling defaults, got %v", want, got)
 		}
 	}
 	// non-claude-code: untouched
-	if got := claudeCodeSamplingArgs(base, false); len(got) != len(base) {
+	if got := claudeCodeSamplingArgs(base, false, nil); len(got) != len(base) {
 		t.Fatalf("expected no sampling flags outside claude-code mode, got %v", got)
 	}
 	// user-set flag wins: not doubled, others still added
 	user := []string{"-m", "model.gguf", "--presence-penalty", "1.5"}
-	got = claudeCodeSamplingArgs(user, true)
+	got = claudeCodeSamplingArgs(user, true, nil)
 	n := 0
 	for _, a := range got {
 		if a == "--presence-penalty" {
@@ -766,6 +862,26 @@ func TestClaudeCodeSamplingArgs(t *testing.T) {
 	}
 	if n != 1 || !hasArg(got, "--top-k") {
 		t.Fatalf("expected user presence-penalty kept once + other defaults added, got %v", got)
+	}
+}
+
+func TestClaudeCodeSamplingArgsDeepSeek4(t *testing.T) {
+	base := []string{"-m", "model.gguf"}
+	model := &placement.ModelProfile{ModelArch: "deepseek4"}
+	got := claudeCodeSamplingArgs(base, true, model)
+	for _, want := range []string{"--temp", "--top-k", "--top-p", "--min-p", "--reasoning-budget"} {
+		if !hasArg(got, want) {
+			t.Fatalf("expected %s in deepseek4 claude-code defaults, got %v", want, got)
+		}
+	}
+	if got[argIndexOf(got, "--top-k")+1] != "40" || got[argIndexOf(got, "--min-p")+1] != "0.05" || got[argIndexOf(got, "--reasoning-budget")+1] != "0" {
+		t.Fatalf("unexpected deepseek4 defaults: %v", got)
+	}
+
+	user := []string{"-m", "model.gguf", "--reasoning-budget", "-1", "--top-k", "10"}
+	got = claudeCodeSamplingArgs(user, true, model)
+	if got[argIndexOf(got, "--reasoning-budget")+1] != "-1" || got[argIndexOf(got, "--top-k")+1] != "10" {
+		t.Fatalf("user deepseek4 sampling overrides should win, got %v", got)
 	}
 }
 
@@ -790,5 +906,126 @@ func TestClaudeCodeCtxLadder(t *testing.T) {
 				t.Fatalf("ladder(%d) = %v, want %v", tc.target, got, tc.want)
 			}
 		}
+	}
+}
+
+// A models dir full of symlinks (e.g. shards linked from another disk) must be
+// sized via the link targets. Summing entry.Info() (lstat) once shrank a 146GB
+// sharded model to 365 bytes; the parseModel drift-rescale then crushed
+// ExpertBytes with it and placement pinned all expert layers onto one GPU.
+func TestTotalModelSizeFollowsSymlinkedShards(t *testing.T) {
+	realDir := t.TempDir()
+	linkDir := t.TempDir()
+	var want int64
+	for i := 1; i <= 3; i++ {
+		name := fmt.Sprintf("big-%05d-of-00003.gguf", i)
+		data := bytes.Repeat([]byte{0xAB}, 1000*i)
+		if err := os.WriteFile(filepath.Join(realDir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(realDir, name), filepath.Join(linkDir, name)); err != nil {
+			t.Fatal(err)
+		}
+		want += int64(len(data))
+	}
+
+	if got := totalModelSize(filepath.Join(linkDir, "big-00001-of-00003.gguf")); got != want {
+		t.Fatalf("symlinked shards: totalModelSize = %d, want %d", got, want)
+	}
+	if got := totalModelSize(filepath.Join(realDir, "big-00001-of-00003.gguf")); got != want {
+		t.Fatalf("real shards: totalModelSize = %d, want %d", got, want)
+	}
+}
+
+func TestShouldPromoteMoEPlacementIncludesSubpinSqueeze(t *testing.T) {
+	current := &placement.Strategy{
+		Type:     placement.MoEOffload,
+		NCPUMoE:  32,
+		OTString: `blk\.(0|1)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU`,
+	}
+	fewerCPULayers := &placement.Strategy{
+		Type:     placement.MoEOffload,
+		NCPUMoE:  31,
+		OTString: current.OTString,
+	}
+	if !shouldPromoteMoEPlacement(current, fewerCPULayers) {
+		t.Fatal("expected fewer CPU MoE layers to promote")
+	}
+
+	subpinSqueeze := &placement.Strategy{
+		Type:     placement.MoEOffload,
+		NCPUMoE:  32,
+		OTString: current.OTString + `,blk\.(2)\.ffn_(gate_up|up_gate|gate|up)_exps.*=CUDA0`,
+	}
+	if !shouldPromoteMoEPlacement(current, subpinSqueeze) {
+		t.Fatal("expected same-NCPUMoE subpin squeeze to promote")
+	}
+
+	same := *current
+	if shouldPromoteMoEPlacement(current, &same) {
+		t.Fatal("unchanged placement must not promote")
+	}
+}
+
+// TestWaitForShutdownOrCrashDetectsProcessDeath guards the exact bug this
+// function fixes: cmdLaunch's "Press Ctrl+C to stop" wait used to block only
+// on the shutdown signal, so a backend that crashed on its own (a real CUDA
+// OOM well after health check, reproduced 2026-07-08/09 on a long request)
+// left the wrapper silently hung forever with no idea its child had died.
+func TestWaitForShutdownOrCrashDetectsProcessDeath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX short-lived process")
+	}
+	cmd := exec.Command("sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake process: %v", err)
+	}
+	// Production always reaps via a background cmd.Wait() (server.go's
+	// StartWithTimeoutTo) — that's what populates Cmd.ProcessState, which
+	// IsRunning() checks. Without it the child would sit as a zombie and
+	// never look "not running", which would silently mask this test.
+	go func() { _ = cmd.Wait() }()
+	p := &server.Process{Cmd: cmd}
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan bool, 1)
+	go func() { done <- waitForShutdownOrCrash(p, sigCh) }()
+
+	select {
+	case crashed := <-done:
+		if !crashed {
+			t.Fatal("expected crashed=true when the process exits on its own")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForShutdownOrCrash did not detect process death in time")
+	}
+}
+
+func TestWaitForShutdownOrCrashRespondsToSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX long-lived process")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	p := &server.Process{Cmd: cmd}
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan bool, 1)
+	go func() { done <- waitForShutdownOrCrash(p, sigCh) }()
+
+	sigCh <- os.Interrupt
+	select {
+	case crashed := <-done:
+		if crashed {
+			t.Fatal("expected crashed=false when a shutdown signal arrives while the process is still running")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForShutdownOrCrash did not respond to the signal in time")
 	}
 }

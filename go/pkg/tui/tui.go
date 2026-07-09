@@ -77,6 +77,7 @@ type Model struct {
 	ctxSize        string
 	ctxMode        string
 	kvPlacement    string
+	kvQuality      string
 	vramHeadroomMB int
 	ramHeadroomMB  int
 	parallel       string
@@ -154,7 +155,7 @@ func InitialModel() Model {
 	settingsPath := config.Path()
 	backend := cfg.Backend
 	if backend == "" {
-		backend = "ik_llama"
+		backend = "llama"
 	}
 	rounds := cfg.TuneRounds
 	if rounds <= 0 {
@@ -169,10 +170,14 @@ func InitialModel() Model {
 		ctxSize:      "fit",
 		ctxMode:      "fit",
 		kvPlacement:  cfg.KVPlacement,
+		kvQuality:    cfg.KVQuality,
 		aituneRounds: rounds,
 	}
 	if m.kvPlacement == "" {
 		m.kvPlacement = "auto"
+	}
+	if m.kvQuality == "" {
+		m.kvQuality = "mid"
 	}
 
 	m.input = textinput.New()
@@ -823,10 +828,18 @@ func (m Model) viewModelConfig() string {
 		tuneLabel = filepath.Base(m.tunePath)
 	}
 
+	kvQualityLabel := map[string]string{
+		"high": "high (f16)", "mid": "mid (q8_0)", "low": "low (q4_0)",
+	}[m.kvQuality]
+	if kvQualityLabel == "" {
+		kvQualityLabel = m.kvQuality
+	}
+
 	section("Context & memory")
 	line("context", "[c] Context size", ctxLabel)
 	line("parallel", "[p] Parallel slots", parallelLabel)
 	line("kv", "[K] KV placement", kvLabel)
+	line("kvq", "KV quality", kvQualityLabel+"  (change in Settings)")
 
 	section("Tuning")
 	line("tuned", "[t] Tuned config", tuneLabel)
@@ -901,6 +914,7 @@ func (m Model) viewPrelaunch() string {
 		ctx = "fit"
 	}
 	b.WriteString(fmt.Sprintf("  Context:        %s\n", ctx))
+	b.WriteString(fmt.Sprintf("  Backend:        %s\n", m.backend))
 	if model.FitCtx > 0 {
 		b.WriteString(fmt.Sprintf("  Fit estimate:   ~%d tokens\n", model.FitCtx))
 	}
@@ -1580,10 +1594,15 @@ func discoverModels(dir string) []ModelItem {
 }
 
 func (m Model) backendTag() string {
-	if m.backend == "ik_llama" {
+	backend := strings.TrimSpace(m.backend)
+	switch backend {
+	case "ik_llama":
 		return "ik"
+	case "":
+		return "llama"
+	default:
+		return backend
 	}
-	return "llama"
 }
 
 // persistConfig loads the current config, applies mutate, and writes it back to
@@ -1700,6 +1719,13 @@ func (m *Model) applySetting(row settingRow, val string) {
 		m.messageType = "info"
 	}
 	switch row.label {
+	case "KV placement":
+		m.kvPlacement = val
+	case "KV quality":
+		// Sync the live session too — otherwise the saved value only applies
+		// after a TUI restart while the current session keeps launching with
+		// the startup-time quality.
+		m.kvQuality = val
 	case "VRAM headroom":
 		m.vramHeadroomMB = config.ParseBudgetMB(val)
 		m.refreshRecommendations()
@@ -1971,12 +1997,15 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		}
 	}
 	return &LaunchRequest{
-		ModelPath:    model.Path,
-		Port:         8081,
-		CtxSize:      ctx,
-		CtxFlag:      ctxFlag,
-		KVPlacement:  m.kvPlacement,
-		KVQuality:    "mid",
+		ModelPath:   model.Path,
+		Port:        8081,
+		CtxSize:     ctx,
+		CtxFlag:     ctxFlag,
+		KVPlacement: m.kvPlacement,
+		// The configured KV quality, not a hardcoded default: passing a fixed
+		// "mid" here overrode the user's saved setting with --kv-quality mid
+		// on every TUI launch (settings appeared to save but never applied).
+		KVQuality:    m.kvQuality,
 		GPULayers:    gpuLayers,
 		FlashAttn:    true,
 		Parallel:     parallel,
@@ -1997,34 +2026,7 @@ func (m Model) buildArgs() []string {
 	if req == nil {
 		return nil
 	}
-	ctx := req.CtxFlag
-	if ctx == "" {
-		ctx = "fit"
-		if req.CtxSize > 0 {
-			ctx = strconv.Itoa(req.CtxSize)
-		}
-	}
-	args := []string{
-		"-m", req.ModelPath,
-		"--port", strconv.Itoa(req.Port),
-		"-c", ctx,
-		"-ngl", strconv.Itoa(req.GPULayers),
-	}
-	if req.KVPlacement != "" && req.KVPlacement != "auto" {
-		args = append(args, "--kv-placement", req.KVPlacement)
-	}
-	if req.KVQuality == "high" {
-		args = append(args, "--cache-type-k", "f16", "--cache-type-v", "f16")
-	} else if req.KVQuality == "mid" {
-		args = append(args, "--cache-type-k", "q8_0", "--cache-type-v", "q8_0")
-	}
-	if req.FlashAttn {
-		args = append(args, "--flash-attn", "on")
-	}
-	if req.Parallel > 1 {
-		args = append(args, "-np", strconv.Itoa(req.Parallel))
-	}
-	return args
+	return append([]string{"ggrun", "dry-run"}, req.LaunchArgs()...)
 }
 
 // LaunchRequest is returned when the user chooses to launch a model.
@@ -2049,6 +2051,48 @@ type LaunchRequest struct {
 	Benchmark     bool
 	KeepAlive     bool
 	ClaudeCode    bool
+}
+
+func (req *LaunchRequest) LaunchArgs() []string {
+	if req == nil {
+		return nil
+	}
+	args := []string{req.ModelPath}
+	if req.Port > 0 {
+		args = append(args, "--port", strconv.Itoa(req.Port))
+	}
+	if req.CtxFlag != "" {
+		args = append(args, "--ctx-size", req.CtxFlag)
+	} else if req.CtxSize > 0 {
+		args = append(args, "--ctx-size", strconv.Itoa(req.CtxSize))
+	} else {
+		args = append(args, "--ctx-size", "fit")
+	}
+	if req.KVPlacement != "" {
+		args = append(args, "--kv-placement", req.KVPlacement)
+	}
+	if req.KVQuality != "" {
+		args = append(args, "--kv-quality", req.KVQuality)
+	}
+	if req.Vision {
+		args = append(args, "--vision")
+	}
+	if req.Backend != "" {
+		args = append(args, "--backend", req.Backend)
+	}
+	if req.TuneCache != "" {
+		args = append(args, "--tune-cache", req.TuneCache)
+	}
+	if req.ParallelSet && req.Parallel > 0 {
+		args = append(args, "--parallel", strconv.Itoa(req.Parallel))
+	}
+	if req.Benchmark {
+		args = append(args, "--benchmark")
+	}
+	if req.ClaudeCode {
+		args = append(args, "--claude-code")
+	}
+	return args
 }
 
 // Run starts the TUI and returns a launch request if the user chose to launch.

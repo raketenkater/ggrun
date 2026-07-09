@@ -38,6 +38,7 @@ GGUF_TYPE_SIZE = {
     20: (18, 32), 21: (110, 256), 22: (82, 256), 23: (136, 256),
     24: (56, 256), 25: (2, 1), 26: (18, 32), 27: (18, 32),
     28: (18, 32), 29: (40, 256), 30: (54, 256), 31: (1, 1),
+    39: (17, 32),   # MXFP4 — 1 scale byte + 16 nibble-packed bytes per 32 elems
     # ik_llama.cpp custom quants
     137: (76, 256),    # IQ2_K   — 2.375 bpw
     138: (110, 256),   # IQ3_K   — 3.44 bpw
@@ -95,6 +96,7 @@ def _read_kv(f, r, kv_count):
                 r['full_interval'] = val
             if key.endswith('.context_length'): r['ctx_train'] = val
             if key.endswith('.nextn_predict_layers'): r['nextn_predict_layers'] = val
+            if key == 'general.alignment': r['_align'] = val
         elif vt == 8:  # string
             sl = struct.unpack('<Q', f.read(8))[0]
             val = f.read(sl).decode('utf-8', errors='replace')
@@ -123,6 +125,11 @@ def _read_kv(f, r, kv_count):
 
 
 def _read_tensors(f, r, tensor_count):
+    """Read the tensor table of one shard. Returns a list of
+    (name, data_offset, type_math_bytes) headers, or a partial list if the
+    table is truncated/corrupt. Byte accounting happens in _account_tensors
+    once real on-disk spans are known."""
+    tensors = []
     for _ in range(tensor_count):
         try:
             tl = struct.unpack('<Q', f.read(8))[0]
@@ -134,7 +141,7 @@ def _read_tensors(f, r, tensor_count):
             n_dims = struct.unpack('<I', f.read(4))[0]
             dims = [struct.unpack('<Q', f.read(8))[0] for _ in range(n_dims)]
             ttype = struct.unpack('<I', f.read(4))[0]
-            f.read(8)  # offset
+            offset = struct.unpack('<Q', f.read(8))[0]
             n_elements = 1
             for d in dims:
                 n_elements *= d
@@ -143,20 +150,71 @@ def _read_tensors(f, r, tensor_count):
                 n_blocks = (n_elements + epb - 1) // epb
                 tbytes = n_blocks * bpb
             else:
-                # Unknown ttype — could be a brand-new ik_llama.cpp quant or a
-                # backend-specific format. Default 0.5 B/elem (~4 bpw) as the
-                # typical quant midpoint. Lifting this to F16 (2 B/elem) was
-                # causing 3-5x expert-bytes over-counts and false "doesn't fit
-                # in RAM" errors. Track unknown types so callers can warn.
+                # Unknown ttype — could be a brand-new quant or a backend-
+                # specific format. Default 0.5 B/elem (~4 bpw) as the typical
+                # quant midpoint; the span sizing below replaces this estimate
+                # with the real on-disk bytes whenever offsets are usable.
+                # Track unknown types so callers can warn.
                 tbytes = n_elements // 2
                 r.setdefault('unknown_ttypes', set()).add(ttype)
-            is_expert = '_exps.' in tname or '_shexp.' in tname or 'experts.' in tname
-            if is_expert:
-                r['expert_bytes'] = r.get('expert_bytes', 0) + tbytes
-            else:
-                r['non_expert_bytes'] = r.get('non_expert_bytes', 0) + tbytes
+            tensors.append((tname, offset, tbytes))
         except Exception:
-            return
+            break
+    return tensors
+
+
+def _account_tensors(r, tensors, header_end, file_size, align):
+    """Accumulate expert/non-expert byte totals for one shard.
+
+    Primary sizing is the tensor's real on-disk span (delta between sorted
+    data offsets; the last tensor runs to end-of-file). This is exact for
+    every quant type — including ones the GGUF_TYPE_SIZE table has never
+    heard of — and includes the inter-tensor alignment padding that actually
+    occupies memory when loaded. Type-math is the fallback when a shard's
+    offsets are unusable (out of order, overlapping, or past end of file).
+    Under-counting here is what once let placement plan one expert layer too
+    many and CUDA-OOM after a 15-minute model load."""
+    if not tensors:
+        return
+    if align <= 0:
+        align = 32
+    data_start = (header_end + align - 1) // align * align
+    data_size = file_size - data_start
+
+    by_offset = sorted(tensors, key=lambda x: x[1])
+    span_ok = data_size > 0 and by_offset[0][1] == 0
+    spans = {}
+    if span_ok:
+        for i, (tname, off, _) in enumerate(by_offset):
+            end = by_offset[i + 1][1] if i + 1 < len(by_offset) else data_size
+            if end <= off:
+                span_ok = False
+                break
+            spans[tname] = end - off
+
+    for tname, _, tbytes in tensors:
+        nbytes = spans[tname] if span_ok else tbytes
+        is_expert = '_exps.' in tname or '_shexp.' in tname or 'experts.' in tname
+        if is_expert:
+            r['expert_bytes'] = r.get('expert_bytes', 0) + nbytes
+            if '_shexp.' in tname:
+                # Shared experts ride with their layer's device: the `exps=CPU`
+                # -ot catch-all does not match "shexp", so CPU-offloaded layers
+                # still keep their shared expert on the owning GPU. Placement
+                # needs this split to budget VRAM and RAM correctly.
+                r['shexp_bytes'] = r.get('shexp_bytes', 0) + nbytes
+        else:
+            r['non_expert_bytes'] = r.get('non_expert_bytes', 0) + nbytes
+            if tname == 'token_embd.weight':
+                # Input embeddings stay in host memory (llama.cpp keeps the
+                # input layer on CPU), so placement must not charge them
+                # against GPU VRAM budgets.
+                r['token_embd_bytes'] = r.get('token_embd_bytes', 0) + nbytes
+            elif tname == 'output.weight':
+                # The output head lands on the device that owns the last
+                # layer slot (llama.cpp splits n_layer+1 slots across the
+                # tensor-split), not pro-rata across all GPUs.
+                r['output_bytes'] = r.get('output_bytes', 0) + nbytes
 
 
 def parse(path: str) -> Dict[str, Any]:
@@ -167,15 +225,27 @@ def parse(path: str) -> Dict[str, Any]:
     index directly.
     """
     r: Dict[str, Any] = {'fused': 0, 'expert_bytes': 0, 'non_expert_bytes': 0}
-    try:
-        with open(path, 'rb') as f:
+
+    def read_shard(sp: str, meta: Dict[str, Any]) -> None:
+        with open(sp, 'rb') as f:
             if f.read(4) != b'GGUF':
-                return r
+                return
             f.read(4)  # version
             tensor_count = struct.unpack('<Q', f.read(8))[0]
             kv_count = struct.unpack('<Q', f.read(8))[0]
-            _read_kv(f, r, kv_count)
-            _read_tensors(f, r, tensor_count)
+            _read_kv(f, meta, kv_count)
+            tensors = _read_tensors(f, r, tensor_count)
+            if len(tensors) < tensor_count:
+                # Truncated tensor table: spans would swallow unread tensors'
+                # bytes. Account what we have via type-math only (file_size 0
+                # makes _account_tensors reject spans).
+                _account_tensors(r, tensors, 0, 0, 32)
+                return
+            _account_tensors(r, tensors, f.tell(), os.path.getsize(sp),
+                             meta.get('_align', 32))
+
+    try:
+        read_shard(path, r)
     except Exception:
         return r
 
@@ -185,22 +255,15 @@ def parse(path: str) -> Dict[str, Any]:
     if m:
         total = int(m.group(2))
         base = path[:m.start()]
-        throwaway: Dict[str, Any] = {}
         for sn in range(2, total + 1):
             sp = f'{base}-{sn:05d}-of-{total:05d}.gguf'
             if not os.path.exists(sp):
                 continue
             try:
-                with open(sp, 'rb') as f:
-                    if f.read(4) != b'GGUF':
-                        continue
-                    f.read(4)
-                    tc = struct.unpack('<Q', f.read(8))[0]
-                    kvc = struct.unpack('<Q', f.read(8))[0]
-                    _read_kv(f, throwaway, kvc)
-                    _read_tensors(f, r, tc)
+                read_shard(sp, {})
             except Exception:
                 continue
+    r.pop('_align', None)
     return r
 
 
@@ -217,6 +280,9 @@ SHELL_KEY_MAP = [
     ('fused',             'HAS_FUSED',           0),
     ('expert_bytes',      'EXPERT_BYTES',        0),
     ('non_expert_bytes',  'NON_EXPERT_BYTES',    0),
+    ('token_embd_bytes',  'TOKEN_EMBD_BYTES',    0),
+    ('output_bytes',      'OUTPUT_BYTES',        0),
+    ('shexp_bytes',       'SHEXP_BYTES',         0),
     ('arch',              'MODEL_ARCH',          'unknown'),
     ('embd',              'EMBEDDING_LENGTH',    0),
     ('ff',                'FEED_FORWARD_LENGTH', 0),

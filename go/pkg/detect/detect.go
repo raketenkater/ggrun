@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Capabilities represents the full hardware and environment profile.
@@ -66,6 +67,7 @@ func Detect() (*Capabilities, error) {
 	if len(gpus) == 0 {
 		gpus = detectAppleSilicon()
 	}
+	settleGPUFreeVRAM(gpus)
 
 	ram := detectRAM()
 	cpu := detectCPU()
@@ -152,6 +154,129 @@ func detectNVIDIA() []GPU {
 	}
 
 	return gpus
+}
+
+// settleGPUFreeVRAM guards against a race where a just-killed process's VRAM
+// hasn't finished being reclaimed by the driver at the moment ggrun samples
+// it. Placement made on that stale reading can wrongly exclude a GPU that is
+// actually free, dumping the whole model onto a different GPU and system RAM
+// instead — reproduced 2026-07-08 twice (tensor-split 0.00,0.00,1.00 and
+// 0.00,1.00,0.00) immediately after killing a prior server. Idle GPUs
+// (already near zero) skip the check entirely — the race only matters when
+// there's real reported usage that might actually be stale. Bounded to a few
+// hundred ms in the common (already-stable) case, up to ~1.6s worst case.
+func settleGPUFreeVRAM(gpus []GPU) {
+	if !anyMeaningfulUsage(gpus) {
+		return
+	}
+	const maxAttempts = 4
+	const settleDelay = 400 * time.Millisecond
+	prev := busIDUsageMap(gpus)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		time.Sleep(settleDelay)
+		cur := queryNVIDIAMemoryUsedMB()
+		if cur == nil {
+			return // nvidia-smi unavailable this round; keep the original reading
+		}
+		if applySettleRound(gpus, prev, cur, settleStableThresholdMB) {
+			return
+		}
+	}
+}
+
+const settleStableThresholdMB = 64
+
+// anyMeaningfulUsage reports whether any GPU shows non-trivial VRAM use. An
+// idle machine (all near zero) can never be mid-teardown, so it skips the
+// settle delay entirely — the race only matters when there's real reported
+// usage that might actually be stale.
+func anyMeaningfulUsage(gpus []GPU) bool {
+	for _, g := range gpus {
+		if g.VRAMUsedMB > settleStableThresholdMB {
+			return true
+		}
+	}
+	return false
+}
+
+// busIDUsageMap snapshots each GPU's VRAMUsedMB keyed by PCI bus ID — the one
+// identifier stable across nvidia-smi's own (un-resorted) enumeration and
+// detectNVIDIA's PCI-bus-ID-sorted GPU list. Using Index instead would
+// silently compare the wrong devices on any box where those two orderings
+// differ (true on this box: PCIe positions don't match nvidia-smi's default
+// CUDA enumeration).
+func busIDUsageMap(gpus []GPU) map[string]int {
+	m := make(map[string]int, len(gpus))
+	for _, g := range gpus {
+		if g.PCIBusID != "" {
+			m[g.PCIBusID] = g.VRAMUsedMB
+		}
+	}
+	return m
+}
+
+// applySettleRound merges one fresh nvidia-smi reading into gpus and prev
+// (both updated in place, keyed by PCI bus ID) and reports whether every GPU's
+// reading moved by no more than thresholdMB since the previous round —
+// "stopped changing" is the signal that any post-kill VRAM reclaim has
+// finished and the reading can be trusted for placement.
+func applySettleRound(gpus []GPU, prev map[string]int, cur map[string]int, thresholdMB int) bool {
+	stable := true
+	for i := range gpus {
+		if gpus[i].PCIBusID == "" {
+			continue
+		}
+		u, ok := cur[gpus[i].PCIBusID]
+		if !ok {
+			continue
+		}
+		delta := u - prev[gpus[i].PCIBusID]
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta > thresholdMB {
+			stable = false
+		}
+		prev[gpus[i].PCIBusID] = u
+		gpus[i].VRAMUsedMB = u
+	}
+	return stable
+}
+
+// queryNVIDIAMemoryUsedMB re-samples just memory.used, keyed by PCI bus ID.
+// Returns nil on any failure so the caller falls back to whatever it already
+// had rather than zeroing GPUs out.
+func queryNVIDIAMemoryUsedMB() map[string]int {
+	out, err := exec.Command("nvidia-smi",
+		"--query-gpu=pci.bus_id,memory.used",
+		"--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil
+	}
+	return parseNVIDIAMemoryUsedMB(string(out))
+}
+
+// parseNVIDIAMemoryUsedMB parses `nvidia-smi --query-gpu=pci.bus_id,memory.used
+// --format=csv,noheader,nounits` output. Split out from queryNVIDIAMemoryUsedMB
+// so the parsing logic is testable without shelling out to nvidia-smi.
+func parseNVIDIAMemoryUsedMB(out string) map[string]int {
+	result := make(map[string]int)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.Split(line, ", ")
+		if len(parts) < 2 {
+			continue
+		}
+		busID := strings.TrimSpace(parts[0])
+		used, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || busID == "" {
+			continue
+		}
+		result[busID] = used
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 type nvidiaPCIeLink struct {

@@ -25,6 +25,9 @@ type Info struct {
 	VocabSize          int    `json:"vocab_size"`
 	ExpertBytes        int64  `json:"expert_bytes"`
 	NonExpertBytes     int64  `json:"non_expert_bytes"`
+	TokenEmbdBytes     int64  `json:"token_embd_bytes"` // input embeddings; stay in host RAM
+	OutputBytes        int64  `json:"output_bytes"`     // output head; lands whole on the last split device
+	ShexpBytes         int64  `json:"shexp_bytes"`      // shared experts; stay on the layer's device even when routed experts offload to CPU
 	Fused              int    `json:"fused"`
 	Experts            int    `json:"experts"`              // total number of experts (MoE)
 	ExpertUsed         int    `json:"exp_used"`             // experts used per token
@@ -75,6 +78,9 @@ func Parse(path string) (*Info, error) {
 	if err := json.Unmarshal(out, &info); err != nil {
 		return nil, fmt.Errorf("parse output: %w", err)
 	}
+	if err := validateParserOutput(script, path, &info); err != nil {
+		return nil, err
+	}
 
 	// Derive MoE from architecture or filename
 	if info.ExpertBytes > 0 || info.Fused > 0 {
@@ -115,6 +121,8 @@ func findParseScript() string {
 	}
 	if appHome := os.Getenv("LLM_APP_HOME"); appHome != "" {
 		candidates = append(candidates,
+			filepath.Join(appHome, ".src", "llm-server", "tools", "gguf", "parse_gguf.py"),
+			filepath.Join(appHome, ".src", "ggrun", "tools", "gguf", "parse_gguf.py"),
 			filepath.Join(appHome, ".bin", "parse_gguf.py"),
 			filepath.Join(appHome, "bin", "parse_gguf.py"),
 			filepath.Join(appHome, "parse_gguf.py"),
@@ -154,6 +162,24 @@ func findParseScript() string {
 		}
 	}
 	return ""
+}
+
+func validateParserOutput(script, modelPath string, info *Info) error {
+	if info == nil {
+		return nil
+	}
+	// VERIFICATION: Big-MoE stable-max placement depends on these file-anchored
+	// byte splits. A stale installed helper can still return expert/non-expert
+	// totals, but without token/output/shared-expert bytes the GPU ledger is not
+	// complete and the no-cache path can overfill GPUs while looking "exact".
+	if strings.EqualFold(info.Architecture, "deepseek4") && info.HasShexp == 1 {
+		if info.TokenEmbdBytes <= 0 || info.OutputBytes <= 0 || info.ShexpBytes <= 0 {
+			return fmt.Errorf(
+				"parse_gguf.py at %s is missing required DeepSeek4 byte splits for %s; reinstall ggrun or set LLM_SCRIPT_DIR to the repo tools/gguf directory",
+				script, filepath.Base(modelPath))
+		}
+	}
+	return nil
 }
 
 // EstimateParams returns a rough parameter count from metadata.

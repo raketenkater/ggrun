@@ -82,15 +82,15 @@ type Launcher struct {
 	// PlacementCachePath the first time the server loads healthy — so a launch
 	// that lands right is reused verbatim next time (OOM-recovery overwrites it
 	// with the corrected placement if it has to intervene).
-	SuccessEntry  *placement.CacheEntry
-	ProbeCacheDir string
-	ProbeModel         *placement.ModelProfile
-	ProbeCtxSize       int
-	ProbeUBatchSize    int
-	ProbeKVQuality     string
-	ProbeKVPlacement   string
-	ProbeBackendTag    string
-	ProbeGPUs          []detect.GPU
+	SuccessEntry     *placement.CacheEntry
+	ProbeCacheDir    string
+	ProbeModel       *placement.ModelProfile
+	ProbeCtxSize     int
+	ProbeUBatchSize  int
+	ProbeKVQuality   string
+	ProbeKVPlacement string
+	ProbeBackendTag  string
+	ProbeGPUs        []detect.GPU
 
 	lastLogPath string // log written by the most recent runOnce
 }
@@ -138,8 +138,11 @@ func (l *Launcher) Run(ctx context.Context) error {
 				if ok {
 					if newArgs, entry, retry := l.OnCUDAOOM(device, allocMB, append([]string(nil), l.Args...)); retry {
 						l.Args = newArgs
-						if l.PlacementCachePath != "" && entry != nil {
-							_ = placement.SavePlacementCache(l.PlacementCachePath, entry)
+						// Don't persist the derated placement yet — it has never
+						// loaded. Make it the success candidate; handleHealthy
+						// persists it only once the relaunch proves itself.
+						if entry != nil {
+							l.SuccessEntry = entry
 						}
 						cudaOOMRetries++
 						restartCount++
@@ -356,13 +359,11 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 
 func (l *Launcher) handleHealthy(logPath string) bool {
 	l.writeProbeCache(logPath)
-	// Persist a clean load so the next launch reuses it instead of re-predicting.
-	// Only write if nothing is cached yet — never clobber a placement that
-	// OOM-recovery already validated by derating.
+	// Persist the placement that is actually serving. Overwrite: SuccessEntry
+	// tracks OOM-recovery derates, and after one the on-disk cache still holds
+	// the plan that failed — reusing it would re-crash the next launch.
 	if l.PlacementCachePath != "" && l.SuccessEntry != nil {
-		if _, err := os.Stat(l.PlacementCachePath); err != nil {
-			_ = placement.SavePlacementCache(l.PlacementCachePath, l.SuccessEntry)
-		}
+		_ = placement.SavePlacementCache(l.PlacementCachePath, l.SuccessEntry)
 	}
 	if l.OnPromote == nil {
 		return false

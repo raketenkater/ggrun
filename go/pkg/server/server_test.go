@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,6 +24,20 @@ func TestWaitReadyTimeout(t *testing.T) {
 	err := p.waitReady(100 * time.Millisecond)
 	if err == nil {
 		t.Fatalf("expected timeout")
+	}
+}
+
+func TestStreamLogsFromStartKeepsTerminalGatedButStreamsFiles(t *testing.T) {
+	if streamLogsFromStart(true, os.Stdout, os.Stderr) {
+		t.Fatal("tty stdout/stderr should stay gated during startup")
+	}
+	if !streamLogsFromStart(false, os.Stdout, os.Stderr) {
+		t.Fatal("non-tty stdout/stderr should stream from startup")
+	}
+	var out bytes.Buffer
+	var err bytes.Buffer
+	if !streamLogsFromStart(true, &out, &err) {
+		t.Fatal("tty launch writing to log writers should stream from startup")
 	}
 }
 
