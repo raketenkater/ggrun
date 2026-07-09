@@ -132,6 +132,7 @@ func StrategyToCacheEntry(s *Strategy) *CacheEntry {
 		UBatchSize:  s.UBatchSize,
 		Parallel:    s.Parallel,
 		MMap:        s.MMap,
+		KVUnified:   s.KVPlacement == "gpu",
 	}
 }
 

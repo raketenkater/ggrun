@@ -259,6 +259,22 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// KV cache type selection — try compact types first for large models
 	s.KVType = kvTypeFromQuality(s.KVQuality)
 
+	// Resolve KV placement "auto" → concrete value up-front. Previously "auto"
+	// only resolved inside the ContextSize<=0 branch (line below), so the pinned
+	// Claude Code path (ContextSize>0) stayed stuck on "auto" forever — leaving
+	// the flash-attention default and the --kv-offload flag to see a non-value
+	// and the deepseek4/v4 protection dead. Resolving here makes both see a real
+	// placement in every code path.
+	if s.KVPlacement == "auto" || s.KVPlacement == "" {
+		if opts.CPUMode || len(caps.GPUs) == 0 {
+			s.KVPlacement = "cpu"
+		} else {
+			sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
+			perGPUOH := perGPUVRAMOverheadMB(sysProbe, 0)
+			s.KVPlacement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs), opts.BackendTag)
+		}
+	}
+
 	// Auto-fit context: compute both single-GPU and multi-GPU, pick the larger.
 	if opts.ContextSize <= 0 {
 		if opts.CPUMode || len(caps.GPUs) == 0 {
@@ -331,9 +347,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// real cost of running that (u)batch (firstLaunchComputeBufMB).
 	batchBaseMB := totalSizeMB + measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs)) + kvTotalMB
 	switch {
-	case batchBaseMB+firstLaunchComputeBufMB(1024) <= bestGPUVRAM:
+	case batchBaseMB+firstLaunchComputeBufMB(model, 1024) <= bestGPUVRAM:
 		s.BatchSize, s.UBatchSize = 8192, 1024
-	case batchBaseMB+firstLaunchComputeBufMB(512) <= bestGPUVRAM:
+	case batchBaseMB+firstLaunchComputeBufMB(model, 512) <= bestGPUVRAM:
 		s.BatchSize, s.UBatchSize = 4096, 512
 	default:
 		s.BatchSize, s.UBatchSize = 2048, 512
@@ -649,11 +665,13 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	}
 
 	// Prefer layer split for ik_llama (avoids NCCL P2P which fails
-	// on mixed GPU architectures like Ampere+Ada), row for mainline
+	// on mixed GPU architectures like Ampere+Ada). For mainline dense
+	// multi-GPU use "tensor": "--split-mode row" triggers a GQA assert
+	// in ggml-cuda.cu and segfaults mid-request on GQA models (audit #7).
 	if opts.BackendTag == "ik_llama" {
 		s.SplitMode = "layer"
 	} else {
-		s.SplitMode = "row"
+		s.SplitMode = "tensor"
 	}
 
 	_ = probeHit // used for logging/debugging
@@ -722,7 +740,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 		if opts.BackendTag == "ik_llama" {
 			s.SplitMode = "layer"
 		} else {
-			s.SplitMode = "row"
+			s.SplitMode = "tensor"
 		}
 	}
 	s.MMap = false
@@ -823,7 +841,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	fixedPerGPU := make([]int, numGPUs)
 	expertOnlyFixedPerGPU := make([]int, numGPUs)
 	for i, g := range caps.GPUs {
-		computeBufMB := firstLaunchComputeBufMBForGPU(s.UBatchSize, i, gpuOrder)
+		computeBufMB := firstLaunchComputeBufMBForGPU(model, s.UBatchSize, i, gpuOrder)
 		runtimeGrowthMB := 0
 		if pc != nil {
 			if v := pc.ComputeBufByGPU[g.Index]; v > 0 {
@@ -899,7 +917,11 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		totalWeighted := 0.0
 		for i, g := range caps.GPUs {
 			if used[i] {
-				totalWeighted += float64(g.VRAMFreeMB()) * gpuSplitWeight(g)
+				// Weight by VRAM available AFTER the fixed per-GPU CUDA/compute
+				// reserve, not raw free VRAM, so high-overhead GPUs are not
+				// over-allocated (audit #4).
+				avail := float64(g.VRAMFreeMB() - fixedPerGPU[i])
+				totalWeighted += avail * gpuSplitWeight(g)
 			}
 		}
 		if totalWeighted <= 0 {
@@ -907,7 +929,8 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		}
 		for i, g := range caps.GPUs {
 			if used[i] {
-				rawSplit[i] = float64(g.VRAMFreeMB()) * gpuSplitWeight(g) / totalWeighted
+				avail := float64(g.VRAMFreeMB() - fixedPerGPU[i])
+				rawSplit[i] = avail * gpuSplitWeight(g) / totalWeighted
 			}
 		}
 		split = normalizeSplit(rawSplit)
@@ -1517,6 +1540,14 @@ func cacheEntryFromArgs(args []string, assignments []GPUAssignment) *CacheEntry 
 		entry.Parallel, _ = strconv.Atoi(args[idx+1])
 	}
 	entry.MMap = argIndex(args, "--no-mmap") < 0
+	// Persist the resolved KV placement so a cache hit re-applies it (audit #3):
+	// without this, no .place cache carries CACHED_KVUNIFIED and the load-side
+	// check at placement.go:397 never fires.
+	if argIndex(args, "--kv-offload") >= 0 {
+		entry.KVUnified = true
+	} else if argIndex(args, "--no-kv-offload") >= 0 {
+		entry.KVUnified = false
+	}
 	return entry
 }
 
@@ -1951,37 +1982,57 @@ func expertOnlySlowGPUs(gpus []detect.GPU, splitFixedPerGPU, expertOnlyFixedPerG
 // floor, because an expert-only GPU does not own regular prompt-processing
 // layer slots or KV.
 func expertOnlyComputeReserveMB(splitOwnerComputeMB int) int {
-	if splitOwnerComputeMB <= 0 || splitOwnerComputeMB > computeFloorMB {
+	if splitOwnerComputeMB <= 0 {
 		return computeFloorMB
 	}
+	// An expert-only GPU still needs the full prompt-graph compute buffer
+	// (the scratch reserve for the forward pass), so do not cap it at the
+	// flat compute floor. Capping under-reserved slow expert-only GPUs and
+	// caused OOM (audit #5).
 	return splitOwnerComputeMB
+}
+
+// modelAwareHeadroom estimates the non-weight VRAM/RAM the runtime needs beyond
+// the model weights (prompt-graph compute buffer + a small runtime-growth
+// margin). Replaces the flat 8 GiB guess previously hard-coded in the auto
+// context-size paths so large models reserve enough and small models don't
+// waste context capacity (audit #8).
+func modelAwareHeadroom(model *ModelProfile) int {
+	return firstLaunchComputeBufMB(model, 512) + 1024
 }
 
 // firstLaunchComputeBufMB is a conservative compute-buffer reservation used until
 // the post-launch probe measures the real value for this model + settings. The
-// prompt-processing graph scales with ubatch; the old flat 1024 MiB floor
-// under-reserved for large-batch / MoE graphs, so once the expert-packing filled
-// the GPU tightly, llama.cpp's compute-buffer allocation OOM'd ("failed to create
-// context", e.g. V4 needing ~1768 MiB). Reserve ~4 MiB per ubatch token (ub 512 ->
-// 2048 MiB), floored at the base and capped so it never wastes much VRAM. The
-// probe cache overrides this with the measured value after the first launch.
-func firstLaunchComputeBufMB(uBatch int) int {
+// prompt-processing graph scales with ubatch AND model shape: activation working
+// set per token is roughly proportional to hidden_size * num_layers. The old flat
+// ~4 MiB/ubatch estimate (ub 512 -> 2048 MiB) under-reserved large MoE graphs by
+// ~4.4x — once expert-packing filled the GPU, llama.cpp's compute-buffer alloc
+// OOM'd ("failed to create context", V4 needs ~9020 MiB at ub 512). We now size
+// from the model: bytes per (token·hidden·layer) ≈ 42, calibrated so V4 reserves
+// ~9412 MiB (covers the measured ~9020). Over-estimating is safe — the probe cache
+// overrides this with the measured value after the first launch; under-estimating
+// is fatal (OOM crash). A nil model falls back to the old per-ubatch heuristic.
+func firstLaunchComputeBufMB(model *ModelProfile, uBatch int) int {
 	est := uBatch * 4
+	if model != nil && model.HiddenSize > 0 && model.NumLayers > 0 {
+		per := float64(model.HiddenSize) * float64(model.NumLayers) * 42.0 / 1e6
+		est = int(float64(uBatch) * per)
+	}
 	if est < computeFloorMB {
 		est = computeFloorMB
 	}
-	if est > 4096 {
-		est = 4096
+	if est > 16384 {
+		est = 16384
 	}
 	return est
 }
 
-func firstLaunchComputeBufMBForGPU(uBatch, gpuPos int, order []int) int {
+func firstLaunchComputeBufMBForGPU(model *ModelProfile, uBatch, gpuPos int, order []int) int {
 	primary := len(order) == 0 || order[0] == gpuPos
 	if primary {
-		return firstLaunchComputeBufMB(uBatch)
+		return firstLaunchComputeBufMB(model, uBatch)
 	}
-	est := firstLaunchComputeBufMB(uBatch) / 2
+	est := firstLaunchComputeBufMB(model, uBatch) / 2
 	if est < computeFloorMB {
 		est = computeFloorMB
 	}
@@ -1993,7 +2044,7 @@ func firstLaunchComputeBufMBForGPU(uBatch, gpuPos int, order []int) int {
 // CUDA probe data is unknown and contributes 0; no static fallback margin is
 // hidden here.
 func perGPUVRAMOverheadMB(sysProbe *systemProbe, uBatch int) int {
-	return measuredCUDAOverheadMB(sysProbe) + firstLaunchComputeBufMB(uBatch)
+	return measuredCUDAOverheadMB(sysProbe) + firstLaunchComputeBufMB(nil, uBatch)
 }
 
 // measuredCUDAOverheadMB is the measured CUDA context/allocator overhead per GPU.
@@ -2251,8 +2302,8 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 	// Single GPU context shouldn't use entire system RAM — the model must fit on ONE GPU.
 	totalHWMB := bestVRAM + 4096
 
-	// Fixed overhead: model weights + 8GB headroom
-	fixedOverheadMB := totalSizeMB + 8192
+	// Fixed overhead: model weights + model-aware headroom (audit #8)
+	fixedOverheadMB := totalSizeMB + modelAwareHeadroom(model)
 
 	// If model doesn't fit at all, return minimum
 	if totalHWMB <= fixedOverheadMB {
@@ -2424,8 +2475,8 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 	}
 	totalHWMB := totalVRAM + caps.RAM.FreeMB
 
-	// Fixed overhead: model weights + 8GB headroom
-	fixedOverheadMB := totalSizeMB + 8192
+	// Fixed overhead: model weights + model-aware headroom (audit #8)
+	fixedOverheadMB := totalSizeMB + modelAwareHeadroom(model)
 
 	// If model doesn't fit at all, return minimum
 	if totalHWMB <= fixedOverheadMB {

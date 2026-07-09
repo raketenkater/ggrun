@@ -280,7 +280,7 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 	perLayerShexp := float64(bytesToMiBCeil(model.ShexpBytes)) / float64(model.NumLayers)
 	expertMBByDevice := otExpertMBByDevice(t, strat.OTString, expertPerLayerMB)
 	for gi, gpu := range caps.GPUs {
-		fixed := firstLaunchComputeBufMBForGPU(strat.UBatchSize, gi, orderGPUsByBandwidth(caps.GPUs))
+		fixed := firstLaunchComputeBufMBForGPU(model, strat.UBatchSize, gi, orderGPUsByBandwidth(caps.GPUs))
 		usedMB := fixed + int(float64(owned[gi])*(perLayerNonExp+perLayerShexp)) + expertMBByDevice[gpu.Index]
 		if gi == outputDev {
 			usedMB += bytesToMiBCeil(model.OutputBytes)
@@ -828,8 +828,8 @@ func TestComputeDenseMultiGPU(t *testing.T) {
 	if len(strat.TensorSplit) != 2 {
 		t.Fatalf("expected tensor split for multi-GPU, got %v", strat.TensorSplit)
 	}
-	if strat.SplitMode != "row" {
-		t.Fatalf("expected split-mode row for mainline multi-GPU, got %s", strat.SplitMode)
+	if strat.SplitMode != "tensor" {
+		t.Fatalf("expected split-mode tensor for mainline dense multi-GPU (row triggers GQA assert segfault, audit #7), got %s", strat.SplitMode)
 	}
 }
 
@@ -974,10 +974,10 @@ func TestComputeMoEMultiGPUFullyFitsExpertsOnGPU(t *testing.T) {
 
 func TestFirstLaunchComputeBufForGPUKeepsPrimaryConservative(t *testing.T) {
 	order := []int{2, 0, 1}
-	primary := firstLaunchComputeBufMBForGPU(512, 2, order)
-	secondary := firstLaunchComputeBufMBForGPU(512, 0, order)
-	if primary != firstLaunchComputeBufMB(512) {
-		t.Fatalf("primary fallback = %d, want %d", primary, firstLaunchComputeBufMB(512))
+	primary := firstLaunchComputeBufMBForGPU(nil, 512, 2, order)
+	secondary := firstLaunchComputeBufMBForGPU(nil, 512, 0, order)
+	if primary != firstLaunchComputeBufMB(nil, 512) {
+		t.Fatalf("primary fallback = %d, want %d", primary, firstLaunchComputeBufMB(nil, 512))
 	}
 	if secondary >= primary {
 		t.Fatalf("secondary fallback should be lower than primary, got %d >= %d", secondary, primary)

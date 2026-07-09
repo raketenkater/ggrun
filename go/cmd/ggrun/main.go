@@ -2062,6 +2062,16 @@ func patchPlacementArgs(args []string, s *placement.Strategy) []string {
 		set("--tensor-split", strings.Join(parts, ","))
 	}
 	set("--split-mode", s.SplitMode)
+	// Re-patch the (u)batch sizes on every call — including the OOM-derate
+	// re-plan path. Without this the launcher keeps launching the original
+	// -ub 512 even after placement derated to a smaller ubatch, so the graph
+	// reserve still OOMs and the server segfaults in a restart loop.
+	if s.UBatchSize > 0 {
+		set("-ub", strconv.Itoa(s.UBatchSize))
+	}
+	if s.BatchSize > 0 {
+		set("-b", strconv.Itoa(s.BatchSize))
+	}
 	return out
 }
 

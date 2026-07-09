@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/raketenkater/ggrun/pkg/backends"
 )
 
 // Config holds ggrun settings with precedence:
@@ -95,22 +97,20 @@ func ParseBudgetMB(s string) int {
 	return n * mult
 }
 
-// Path returns the canonical config file path.
+// Path returns the canonical config file path. It resolves the app home via
+// backends.AppHome() so the config file lives alongside backends.json
+// (AppHome()/.config/) instead of diverging to a separate $HOME/.config/ggrun
+// location (audit #8).
 func Path() string {
 	if p := os.Getenv("LLM_CONFIG"); p != "" {
 		return p
 	}
-	if p := os.Getenv("LLM_APP_HOME"); p != "" {
-		if f := filepath.Join(p, ".config", "config"); fileExists(f) {
-			return f
-		}
-		if f := filepath.Join(p, "config", "config"); fileExists(f) {
-			return f
-		}
+	home := backends.AppHome()
+	if f := filepath.Join(home, ".config", "config"); fileExists(f) {
+		return f
 	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home, _ = os.UserHomeDir()
+	if f := filepath.Join(home, "config", "config"); fileExists(f) {
+		return f
 	}
 	return filepath.Join(home, ".config", "ggrun", "config")
 }
