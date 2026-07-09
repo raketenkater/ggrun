@@ -971,12 +971,29 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		if expertOnlyGPU[gi] {
 			fixedMB = expertOnlyFixedPerGPU[gi]
 		}
-		roomMB := g.VRAMFreeMB() - fixedMB - nonExpertChargeMB(ownedLayers, outputDev, gi) - kvShareMB
+		// Expert-only GPUs carry the non-expert tensors (norms, attention) for
+		// every layer pinned to them via -ot, even though ownedLayers==0. Double
+		// the compute-buffer floor too: expert-only GPUs run the full per-layer
+		// forward pass, so the graph reserve must cover norms, routing, and all
+		// replicated layer tensors for every assigned layer.
+		if expertOnlyGPU[gi] && fixedMB < computeFloorMB*2 {
+			fixedMB = computeFloorMB * 2
+		}
+		nonExpertCharge := nonExpertChargeMB(ownedLayers, outputDev, gi)
+		if expertOnlyGPU[gi] {
+			nonExpertCharge = 0 // zero here; per-layer cost accounts for it below
+		}
+		roomMB := g.VRAMFreeMB() - fixedMB - nonExpertCharge - kvShareMB
 		if roomMB < 0 {
 			roomMB = 0
 		}
 		roomMBPer[gi] = roomMB
-		capLayers := roomMB / expertPerLayerMB
+		perLayerCost := expertPerLayerMB
+		if expertOnlyGPU[gi] {
+			nonExpertPerLayer := float64(nonExpertTotalMB-outputMB) / float64(model.NumLayers)
+			perLayerCost = expertPerLayerMB + int(nonExpertPerLayer+0.5)
+		}
+		capLayers := roomMB / perLayerCost
 		if capLayers > moeLayerCount {
 			capLayers = moeLayerCount
 		}
@@ -2902,7 +2919,7 @@ func measureLoadedVRAM(backendPath string, args []string, gpus []detect.GPU, tim
 		time.Sleep(1500 * time.Millisecond)
 		total := 0
 		for _, g := range gpus {
-			total += queryVRAMUsed(g.Index)
+			total += QueryVRAMUsed(g.Index)
 		}
 		// Plateau = two consecutive readings within 64 MiB, above a floor.
 		if total > 512 && prev > 512 && absInt(total-prev) <= 64 {
@@ -3096,6 +3113,83 @@ func RecordRuntimeGraphGrowthFromOOM(cacheDir string, model *ModelProfile, ctxSi
 	return RecordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, map[int]int{device: allocMB})
 }
 
+// RunPostLaunchModelProbeVRAMDelta writes per-GPU compute-buffer probe cache from
+// nvidia-smi VRAM delta (current - baseline) instead of log parsing. Log-independent;
+// works even when the server binary suppresses LLAMA_LOG_INFO. It estimates model
+// weight per GPU from the placement OT assignments, subtracts that from the VRAM
+// delta, and stores the remainder as the measured compute-buffer value for that GPU.
+func RunPostLaunchModelProbeVRAMDelta(
+	cacheDir string, model *ModelProfile, strategy *Strategy,
+	backendTag string, gpus []detect.GPU, baselineVRAMByGPU map[int]int,
+) bool {
+	if model == nil || strategy == nil || len(gpus) == 0 || len(baselineVRAMByGPU) == 0 {
+		return false
+	}
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "ggrun")
+	}
+
+	// Parse OT assignments to count expert layers per GPU.
+	assignments := parseOTAssignments(strategy.OTString)
+	expertLayersByGPU := map[int]int{}
+	for _, a := range assignments {
+		expertLayersByGPU[a.CUDAIndex] += a.Count
+	}
+
+	moeLayers := model.NumLayers - model.LeadingDense
+	if moeLayers <= 0 {
+		moeLayers = model.NumLayers
+	}
+	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
+	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
+
+	computeByGPU := map[int]int{}
+	for _, g := range gpus {
+		usedMB := QueryVRAMUsed(g.Index)
+		bl := baselineVRAMByGPU[g.Index]
+		if usedMB <= 0 || usedMB <= bl {
+			continue
+		}
+		deltaMB := usedMB - bl
+
+		modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
+		splitShare := 0.0
+		if len(strategy.TensorSplit) > g.Index {
+			splitShare = strategy.TensorSplit[g.Index]
+		}
+		if splitShare > 0 && nonExpertTotalMB > 0 {
+			modelMB += int(splitShare * float64(nonExpertTotalMB))
+		}
+
+		bufMB := deltaMB - modelMB
+		if bufMB < 0 {
+			bufMB = 0
+		}
+		computeByGPU[g.Index] = bufMB
+	}
+
+	if len(computeByGPU) == 0 {
+		return false
+	}
+
+	if err := WriteProbeCacheForModel(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, computeByGPU, 0); err == nil {
+		indices := make([]int, 0, len(computeByGPU))
+		for idx := range computeByGPU {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		parts := make([]string, 0, len(indices))
+		for _, idx := range indices {
+			parts = append(parts, fmt.Sprintf("CUDA%d=%dMB", idx, computeByGPU[idx]))
+		}
+		fmt.Fprintf(os.Stderr, "  VRAM probe: compute_buf %s\n", strings.Join(parts, ", "))
+		return true
+	}
+	return false
+}
+
 func RunPostLaunchModelProbe(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, serverLog string) bool {
 	if model == nil || ctxSize <= 0 || ubatch <= 0 || serverLog == "" {
 		return false
@@ -3166,7 +3260,7 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string) {
 
 	overheadByGPU := map[int]int{}
 	for _, gpu := range gpus {
-		usedMB := queryVRAMUsed(gpu.Index)
+		usedMB := QueryVRAMUsed(gpu.Index)
 		if usedMB <= 0 {
 			continue
 		}
@@ -3215,8 +3309,8 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string) {
 	}
 }
 
-// queryVRAMUsed returns current nvidia-smi memory.used for a given GPU index.
-func queryVRAMUsed(gpuIndex int) int {
+// QueryVRAMUsed returns current nvidia-smi memory.used for a given GPU index.
+func QueryVRAMUsed(gpuIndex int) int {
 	out, err := exec.Command("nvidia-smi",
 		"--query-gpu=memory.used", "--format=csv,noheader,nounits",
 		"-i", fmt.Sprintf("%d", gpuIndex),
