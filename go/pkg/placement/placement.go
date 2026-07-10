@@ -990,7 +990,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		roomMBPer[gi] = roomMB
 		perLayerCost := expertPerLayerMB
 		if expertOnlyGPU[gi] {
-			nonExpertPerLayer := float64(nonExpertTotalMB) / float64(model.NumLayers)
+			nonExpertPerLayer := float64(nonExpertTotalMB-outputMB) / float64(model.NumLayers)
 			perLayerCost = expertPerLayerMB + int(nonExpertPerLayer+0.5)
 		}
 		capLayers := roomMB / perLayerCost
@@ -3162,19 +3162,7 @@ func RunPostLaunchModelProbeVRAMDelta(
 			modelMB += int(splitShare * float64(nonExpertTotalMB))
 		}
 
-		// Subtract KV cache share: if KV is on GPU, each GPU carries its
-		// proportional share according to tensor-split. Excluding KV from
-		// the compute-buffer measurement prevents inflated values from
-		// poisoning future placement recomputes (audit cross-check #2).
-		kvShareMB := 0
-		if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
-			kvTotal := computeKVTotalMB(model, strategy.ContextSize, strategy.KVQuality)
-			if kvTotal > 0 && len(gpus) > 0 {
-				kvShareMB = kvTotal / len(gpus)
-			}
-		}
-
-		bufMB := deltaMB - modelMB - kvShareMB
+		bufMB := deltaMB - modelMB
 		if bufMB < 0 {
 			bufMB = 0
 		}
@@ -3185,17 +3173,8 @@ func RunPostLaunchModelProbeVRAMDelta(
 		return false
 	}
 
-	// Preserve any runtime-growth history from a previous OOM so the probe
-	// cache does not silently erase it (audit cross-check #3).
-	existing := loadProbeCache(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
-		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus)
-	var mergedGrowth map[int]int
-	if existing != nil {
-		mergedGrowth = existing.RuntimeGraphGrowthByGPU
-	}
-
-	if err := writeProbeCacheForModel(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
-		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, computeByGPU, mergedGrowth, 0); err == nil {
+	if err := WriteProbeCacheForModel(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, computeByGPU, 0); err == nil {
 		indices := make([]int, 0, len(computeByGPU))
 		for idx := range computeByGPU {
 			indices = append(indices, idx)
