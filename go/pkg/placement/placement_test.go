@@ -760,29 +760,33 @@ func TestBuildOTString(t *testing.T) {
 	}
 	gpuOrder := []int{0, 1}
 
+	// Patterns include the "(ch|)" chunked-experts marker ahead of "exps"
+	// (added alongside chexps support), e.g. "..._(ch|)exps..." rather than
+	// the older plain "..._exps...".
+
 	// Single layer on GPU0
 	ot := buildOTString([]int{1, 0}, gpus, gpuOrder, "")
-	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU` {
+	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU` {
 		t.Fatalf("single-layer OT mismatch: %s", ot)
 	}
 
 	// Multiple layers on GPU0
 	ot = buildOTString([]int{5, 0}, gpus, gpuOrder, "")
-	expected := `blk\.(0|1|2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU`
+	expected := `blk\.(0|1|2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU`
 	if ot != expected {
 		t.Fatalf("multi-layer OT mismatch:\n  got:      %s\n  expected: %s", ot, expected)
 	}
 
 	// Layers on both GPUs
 	ot = buildOTString([]int{2, 3}, gpus, gpuOrder, "")
-	expected = `blk\.(0|1)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`
+	expected = `blk\.(0|1)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`
 	if ot != expected {
 		t.Fatalf("two-gpu OT mismatch:\n  got:      %s\n  expected: %s", ot, expected)
 	}
 
 	// Vulkan uses Vulkan device names in override tensors.
 	ot = buildOTString([]int{1, 0}, gpus, gpuOrder, "vulkan")
-	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=Vulkan0,exps=CPU` {
+	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=Vulkan0,exps=CPU` {
 		t.Fatalf("vulkan OT mismatch: %s", ot)
 	}
 
@@ -1072,7 +1076,7 @@ func TestDerateCUDAOOMArgsMovesExpertLayersToCPU(t *testing.T) {
 		"-ot", `blk\.(3|4|5|6)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(7|8|9|10)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`,
 		"--n-cpu-moe", "49",
 	}
-	newArgs, entry, ok := DerateCUDAOOMArgs(args, model, caps, 1, 11876)
+	newArgs, entry, ok := DerateCUDAOOMArgs(args, model, caps, 1, 11876, false)
 	if !ok {
 		t.Fatal("expected CUDA OOM args to derate")
 	}
@@ -1086,6 +1090,55 @@ func TestDerateCUDAOOMArgsMovesExpertLayersToCPU(t *testing.T) {
 	}
 	if entry == nil || len(entry.GPUAssignments) != 2 || entry.NCPUMoE != 50 || len(entry.TensorSplit) != 2 {
 		t.Fatalf("unexpected cache entry: %+v", entry)
+	}
+}
+
+func TestDerateCUDAOOMArgsShrinksUBatchForComputeBufferOOM(t *testing.T) {
+	model := &ModelProfile{
+		NumLayers:    60,
+		LeadingDense: 3,
+		ExpertBytes:  int64(57 * 2500 * 1024 * 1024),
+	}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{
+		{Index: 0, VRAMTotalMB: 24576},
+		{Index: 1, VRAMTotalMB: 12288, VRAMUsedMB: 574},
+	}}
+	args := []string{
+		"--tensor-split", "0.67,0.33",
+		"--split-mode", "layer",
+		"-b", "2048",
+		"-ub", "512",
+		"--parallel", "1",
+		"-ot", `blk\.(3|4|5|6)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(7|8|9|10)\.ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`,
+		"--n-cpu-moe", "49",
+	}
+	newArgs, entry, ok := DerateCUDAOOMArgs(args, model, caps, 1, 599, true)
+	if !ok {
+		t.Fatal("expected a compute-buffer OOM to derate by shrinking ubatch")
+	}
+	if got := currentUBatch(newArgs); got != 256 {
+		t.Fatalf("expected -ub to step down to 256, got %d via %v", got, newArgs)
+	}
+	// Expert layout must be untouched — a compute-buffer OOM has nothing to
+	// do with which expert layers are GPU-resident.
+	if currentNCPUMoE(newArgs) != 49 {
+		t.Fatalf("expected --n-cpu-moe to stay at 49, got args %v", newArgs)
+	}
+	if entry == nil || entry.UBatchSize != 256 {
+		t.Fatalf("expected cache entry to carry the new ubatch, got %+v", entry)
+	}
+
+	// Once ubatch is already at the ladder floor, fall back to the layer-drop lever.
+	args[argIndex(args, "-ub")+1] = "64"
+	newArgs, _, ok = DerateCUDAOOMArgs(args, model, caps, 1, 599, true)
+	if !ok {
+		t.Fatal("expected fallback to layer-drop once ubatch is at its floor")
+	}
+	if currentUBatch(newArgs) != 64 {
+		t.Fatalf("expected -ub to stay at the floor, got %v", newArgs)
+	}
+	if currentNCPUMoE(newArgs) != 50 {
+		t.Fatalf("expected the layer-drop fallback to fire, got %v", newArgs)
 	}
 }
 

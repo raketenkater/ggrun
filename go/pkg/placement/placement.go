@@ -1021,8 +1021,12 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		cpuKVRAMMB = kvTotalMB
 	}
 
-	// Strict ceiling (--no-mmap path)
-	ramOverheadPreMB := 1024 + 2048 + totalSizeMB/500 // cuda_host + graph_scratch + mmap_pt (simplified)
+	// Strict ceiling (--no-mmap path). Uses the real measured-overhead
+	// formula (not a hand-copied subset) so this ceiling and the later real
+	// RAM check (checkMemoryOrDie -> ramRuntimeOverheadMB) can't disagree —
+	// a stale copy here was missing the cpuActMB term, letting this ceiling
+	// accept a CPU-layer count the real check would then reject.
+	ramOverheadPreMB := ramRuntimeOverheadMB(model, s.UBatchSize, totalSizeMB)
 	cpuBudgetStrict := caps.RAM.FreeMB - ramOverheadPreMB - cpuKVRAMMB
 	if cpuBudgetStrict < 0 {
 		cpuBudgetStrict = 0
@@ -1410,11 +1414,51 @@ func ReplanAfterOOM(caps *detect.Capabilities, model *ModelProfile, opts Options
 	return Compute(&c2, model, o)
 }
 
-// DerateCUDAOOMArgs moves enough expert layers from the failed device back to
-// CPU to cover a cudaMalloc load failure, then returns the rewritten argv.
-func DerateCUDAOOMArgs(args []string, model *ModelProfile, caps *detect.Capabilities, device, allocMB int) ([]string, *CacheEntry, bool) {
+// currentUBatch reads the launch args' current -ub/--ubatch-size value, or 0
+// if unset/unparseable.
+func currentUBatch(args []string) int {
+	idx := argIndex(args, "-ub", "--ubatch-size")
+	if idx < 0 || idx+1 >= len(args) {
+		return 0
+	}
+	v, _ := strconv.Atoi(args[idx+1])
+	return v
+}
+
+// nextUBatchDown returns the next smaller rung on the same fit ladder
+// maximizeMoEGPUFitByUBatch uses at placement time, or ok=false if current is
+// already at or below the ladder's floor.
+func nextUBatchDown(current int) (int, bool) {
+	for _, rung := range UBatchFitLadder {
+		if rung < current {
+			return rung, true
+		}
+	}
+	return 0, false
+}
+
+// DerateCUDAOOMArgs recovers from a cudaMalloc load failure. isComputeBuffer
+// distinguishes the two failure classes the caller can observe in the
+// backend log: a graph_reserve/gallocr (compute-buffer) OOM scales with
+// ubatch, not expert-layer placement, so shrinking ubatch one rung down the
+// same ladder used at placement time is tried first; a model-weight
+// allocation failure (isComputeBuffer=false) goes straight to moving expert
+// layers from the failed device back to CPU, since ubatch has no bearing on
+// weight tensor size.
+func DerateCUDAOOMArgs(args []string, model *ModelProfile, caps *detect.Capabilities, device, allocMB int, isComputeBuffer bool) ([]string, *CacheEntry, bool) {
 	if model == nil || model.NumLayers <= 0 || allocMB <= 0 {
 		return nil, nil, false
+	}
+	if isComputeBuffer {
+		if next, ok := nextUBatchDown(currentUBatch(args)); ok {
+			newArgs := append([]string(nil), args...)
+			setOrAppendArg(&newArgs, "-ub", strconv.Itoa(next))
+			// Keep the in-memory Strategy's UBatchSize in sync with serverArgs —
+			// applyDeratedPlacementEntry applies this to strategy, which is what
+			// the success path persists to the .place cache. Without it, a cache
+			// hit later would resurrect the OOM'd, too-large ubatch.
+			return newArgs, &CacheEntry{UBatchSize: next}, true
+		}
 	}
 	_, moeLayers := moeLayerRange(model)
 	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
@@ -3150,72 +3194,72 @@ func RunPostLaunchModelProbeVRAMDelta(
 		expertLayersByGPU[a.CUDAIndex] += a.Count
 	}
 
-		moeLayers := model.NumLayers - model.LeadingDense
-		if moeLayers <= 0 {
-			moeLayers = model.NumLayers
-		}
-		expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
-		nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
-		// Token embeddings are CPU-only; subtract them so the per-layer
-		// non-expert estimate is not inflated by non-GPU-resident bytes.
-		tokenEmbdMB := bytesToMiBCeil(model.TokenEmbdBytes)
-		if tokenEmbdMB > 0 && tokenEmbdMB < nonExpertTotalMB {
-			nonExpertTotalMB -= tokenEmbdMB
-		}
+	moeLayers := model.NumLayers - model.LeadingDense
+	if moeLayers <= 0 {
+		moeLayers = model.NumLayers
+	}
+	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
+	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
+	// Token embeddings are CPU-only; subtract them so the per-layer
+	// non-expert estimate is not inflated by non-GPU-resident bytes.
+	tokenEmbdMB := bytesToMiBCeil(model.TokenEmbdBytes)
+	if tokenEmbdMB > 0 && tokenEmbdMB < nonExpertTotalMB {
+		nonExpertTotalMB -= tokenEmbdMB
+	}
 
-		// Reconstruct per-GPU owned layer counts from tensor-split, matching
-		// buildMoEOffload. Using owned layers instead of splitShare × total
-		// prevents over-counting non-expert bytes on split-share GPUs whose
-		// layers have experts on other devices via OT pinning.
-		ownedLayers := make([]int, len(gpus))
-		if len(strategy.TensorSplit) > 0 {
-			totalW := 0.0
-			for _, v := range strategy.TensorSplit {
-				totalW += v
-			}
-			if totalW > 0 {
-				remaining := model.NumLayers
-				for i, s := range strategy.TensorSplit {
-					layers := int(float64(model.NumLayers) * s / totalW)
-					if i == len(strategy.TensorSplit)-1 {
-						layers = remaining
-					}
-					if layers > remaining {
-						layers = remaining
-					}
-					ownedLayers[i] = layers
-					remaining -= layers
+	// Reconstruct per-GPU owned layer counts from tensor-split, matching
+	// buildMoEOffload. Using owned layers instead of splitShare × total
+	// prevents over-counting non-expert bytes on split-share GPUs whose
+	// layers have experts on other devices via OT pinning.
+	ownedLayers := make([]int, len(gpus))
+	if len(strategy.TensorSplit) > 0 {
+		totalW := 0.0
+		for _, v := range strategy.TensorSplit {
+			totalW += v
+		}
+		if totalW > 0 {
+			remaining := model.NumLayers
+			for i, s := range strategy.TensorSplit {
+				layers := int(float64(model.NumLayers) * s / totalW)
+				if i == len(strategy.TensorSplit)-1 {
+					layers = remaining
 				}
-			}
-		}
-		nonExpertPerLayerMB := 0
-		if model.NumLayers > 0 {
-			nonExpertPerLayerMB = nonExpertTotalMB / model.NumLayers
-		}
-
-		computeByGPU := map[int]int{}
-		for _, g := range gpus {
-			usedMB := QueryVRAMUsed(g.Index)
-			bl := baselineVRAMByGPU[g.Index]
-			if usedMB <= 0 || usedMB <= bl {
-				continue
-			}
-			deltaMB := usedMB - bl
-
-			modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
-			if g.Index < len(ownedLayers) && ownedLayers[g.Index] > 0 {
-				modelMB += ownedLayers[g.Index] * nonExpertPerLayerMB
-			}
-
-			kvShareMB := 0
-			if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
-				kvTotal := computeKVTotalMB(model, strategy.ContextSize, strategy.KVQuality)
-				if kvTotal > 0 && len(gpus) > 0 {
-					kvShareMB = kvTotal / len(gpus)
+				if layers > remaining {
+					layers = remaining
 				}
+				ownedLayers[i] = layers
+				remaining -= layers
 			}
+		}
+	}
+	nonExpertPerLayerMB := 0
+	if model.NumLayers > 0 {
+		nonExpertPerLayerMB = nonExpertTotalMB / model.NumLayers
+	}
 
-			bufMB := deltaMB - modelMB - kvShareMB
+	computeByGPU := map[int]int{}
+	for _, g := range gpus {
+		usedMB := QueryVRAMUsed(g.Index)
+		bl := baselineVRAMByGPU[g.Index]
+		if usedMB <= 0 || usedMB <= bl {
+			continue
+		}
+		deltaMB := usedMB - bl
+
+		modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
+		if g.Index < len(ownedLayers) && ownedLayers[g.Index] > 0 {
+			modelMB += ownedLayers[g.Index] * nonExpertPerLayerMB
+		}
+
+		kvShareMB := 0
+		if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
+			kvTotal := computeKVTotalMB(model, strategy.ContextSize, strategy.KVQuality)
+			if kvTotal > 0 && len(gpus) > 0 {
+				kvShareMB = kvTotal / len(gpus)
+			}
+		}
+
+		bufMB := deltaMB - modelMB - kvShareMB
 		if bufMB < 0 {
 			bufMB = 0
 		}

@@ -987,15 +987,22 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 			logData = p.LogBuf.String()
 			recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData, nil)
 		}
+		// Diagnose before checking the retry budget: a clean, parseable OOM on
+		// the very last allowed attempt still deserves its real cause recorded
+		// and reported, instead of surfacing only the process's raw exit error
+		// (e.g. a bare "signal: segmentation fault" with no VRAM context).
+		device, allocMB, isComputeBuffer, ok := startupLogCUDAOOMDetailed(logData)
+		if ok && strategy != nil && caps != nil && be != nil {
+			_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, device, allocMB)
+		}
 		if retries >= maxRetries {
+			if ok {
+				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d allocating %d MiB (retry budget exhausted after %d attempts): %w", device, allocMB, retries, err)
+			}
 			return p, strategy, serverArgs, err
 		}
-		device, allocMB, ok := startupLogCUDAOOM(logData)
 		if !ok {
 			return p, strategy, serverArgs, err
-		}
-		if strategy != nil && caps != nil && be != nil {
-			_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, device, allocMB)
 		}
 
 		// Re-plan with the failed card penalized by its overshoot: the real packer
@@ -1013,7 +1020,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 			serverArgs = patchPlacementArgs(serverArgs, s)
 			strategy = s
 		} else {
-			nextArgs, entry, derated := placement.DerateCUDAOOMArgs(serverArgs, model, caps, device, allocMB)
+			nextArgs, entry, derated := placement.DerateCUDAOOMArgs(serverArgs, model, caps, device, allocMB, isComputeBuffer)
 			if !derated {
 				return p, strategy, serverArgs, err
 			}
@@ -1047,13 +1054,30 @@ func oomOvershoot(caps *detect.Capabilities, device, allocMB int) int {
 }
 
 func startupLogCUDAOOM(logData string) (device int, allocMB int, ok bool) {
+	device, allocMB, _, ok = startupLogCUDAOOMDetailed(logData)
+	return device, allocMB, ok
+}
+
+// startupLogCUDAOOMDetailed additionally reports whether the failed
+// allocation was the compute graph (gallocr/graph_reserve — scales with
+// ubatch) rather than a model-weight tensor (scales with which expert layers
+// are GPU-resident). The two need different derate levers: shrinking ubatch
+// fixes the former, moving expert layers to CPU fixes the latter.
+func startupLogCUDAOOMDetailed(logData string) (device int, allocMB int, isComputeBuffer bool, ok bool) {
 	lines := strings.Split(logData, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if device, allocMB, ok := recovery.ParseCUDAOOM(lines[i]); ok {
-			return device, allocMB, true
+			isComputeBuffer := false
+			for j := i + 1; j < len(lines) && j <= i+3; j++ {
+				if strings.Contains(lines[j], "gallocr") || strings.Contains(lines[j], "graph_reserve") {
+					isComputeBuffer = true
+					break
+				}
+			}
+			return device, allocMB, isComputeBuffer, true
 		}
 	}
-	return 0, 0, false
+	return 0, 0, false, false
 }
 
 func applyDeratedPlacementEntry(strategy *placement.Strategy, entry *placement.CacheEntry) {

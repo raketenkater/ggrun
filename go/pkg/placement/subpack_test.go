@@ -69,14 +69,17 @@ func TestBuildOTStringWithSubPins_EmitsGateUpBeforeCatchAll(t *testing.T) {
 	pins := []subExpertPin{{Layer: 3, GI: 0}, {Layer: 4, GI: 2}}
 	got := buildOTStringWithSubPins(layers, pins, gpus, order, 0, "llama")
 
-	if !strings.Contains(got, `blk\.(3)\.ffn_(gate_up|up_gate|gate|up)_exps.*=CUDA0`) {
+	// Sub-pin patterns include the "(ch|)" chunked-experts marker (added
+	// alongside chexps support) ahead of "exps" — a gate+up pin now reads
+	// "..._(ch|)exps..." rather than the older plain "..._exps...".
+	if !strings.Contains(got, `blk\.(3)\.ffn_(gate_up|up_gate|gate|up)_(ch|)exps.*=CUDA0`) {
 		t.Errorf("missing gate+up pin for layer 3 -> CUDA0 in %q", got)
 	}
-	if !strings.Contains(got, `blk\.(4)\.ffn_(gate_up|up_gate|gate|up)_exps.*=CUDA2`) {
+	if !strings.Contains(got, `blk\.(4)\.ffn_(gate_up|up_gate|gate|up)_(ch|)exps.*=CUDA2`) {
 		t.Errorf("missing gate+up pin for layer 4 -> CUDA2 in %q", got)
 	}
 	// gate+up pins must precede the exps=CPU catch-all (first-match-wins).
-	if i := strings.Index(got, "gate_up|up_gate|gate|up)_exps"); i < 0 || i > strings.LastIndex(got, "exps=CPU") {
+	if i := strings.Index(got, "gate_up|up_gate|gate|up)_(ch|)exps"); i < 0 || i > strings.LastIndex(got, "exps=CPU") {
 		t.Errorf("gate+up pin must come before exps=CPU catch-all: %q", got)
 	}
 	if !strings.HasSuffix(got, "exps=CPU") {
