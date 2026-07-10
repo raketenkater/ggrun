@@ -358,7 +358,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// Persist/reuse this exact placement under a key that includes kv placement,
 	// ctx, ubatch, backend, and the GPU set — computed from the now-resolved
 	// strategy so the launcher (save) and this load agree byte-for-byte.
-	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel, splitCompactKey(s.TensorSplit))
 
 	// Try cached placement first (MoE only). Prefer the keyed placement cache
 	// (remembers a load that landed right or was OOM-corrected); fall back to a
@@ -3419,7 +3419,7 @@ func parseMiB(line string) float64 {
 // loadProbeCache tries to load per-model/runtime probe data.
 // Keys the probe cache file by an MD5 of the model + placement runtime signature.
 func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) *probeCache {
-	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, 0, "")
 	if path == "" {
 		return nil
 	}
@@ -3473,7 +3473,7 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	return nil
 }
 
-func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) string {
+func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, tensorSplit string) string {
 	if model == nil {
 		return ""
 	}
@@ -3491,13 +3491,13 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 		backendTag = "llama"
 	}
 	// MD5 hash key over model/runtime/placement. Compute buffers can differ when
-	// KV placement, backend fork, or selected GPU set changes, so those are part of
-	// the key instead of treating compute as a system-wide constant.
+	// KV placement, backend fork, GPU set, parallel slots, or tensor-split change,
+	// so all are part of the key (audit cross-check #6).
 	modelName := filepath.Base(model.Path)
-	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s",
+	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:%s",
 		modelName, model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
-		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus))
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel, tensorSplit)
 	hash := md5Hash12(key)
 	return filepath.Join(cacheDir, hash+".probe")
 }
@@ -3508,7 +3508,7 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // so kv=gpu vs kv=cpu — or two context sizes — never share a cache entry. Both
 // the fit (load) and OOM-recovery / success (save) use this same path, so a
 // placement that loads cleanly is remembered instead of re-predicted.
-func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) string {
+func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, tensorSplit string) string {
 	if model == nil {
 		return ""
 	}
@@ -3525,10 +3525,10 @@ func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch
 	if backendTag == "" {
 		backendTag = "llama"
 	}
-	key := fmt.Sprintf("place:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s",
+	key := fmt.Sprintf("place:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:%s",
 		filepath.Base(model.Path), model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
-		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus))
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel, tensorSplit)
 	return filepath.Join(cacheDir, md5Hash12(key)+".place")
 }
 
@@ -3550,6 +3550,20 @@ type probeCache struct {
 	ComputeBufByGPU         map[int]int
 	RuntimeGraphGrowthByGPU map[int]int
 	KVPerLayerMB            int
+}
+
+// splitCompactKey returns a compact string for a tensor-split vector, suitable
+// for cache-key inclusion so placements with different split ratios don't share
+// cached compute-buffer measurements (audit cross-check #6).
+func splitCompactKey(split []float64) string {
+	if len(split) == 0 {
+		return "0"
+	}
+	parts := make([]string, len(split))
+	for i, v := range split {
+		parts[i] = fmt.Sprintf("%.2f", v)
+	}
+	return strings.Join(parts, ",")
 }
 
 // WriteProbeCache writes a legacy probe cache. Prefer WriteProbeCacheForModel,
@@ -3583,7 +3597,7 @@ func WriteProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 }
 
 func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, computeByGPU map[int]int, runtimeGrowthByGPU map[int]int, kvPerLayerMB int) error {
-	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, 0, "")
 	if path == "" {
 		return nil
 	}

@@ -905,7 +905,14 @@ func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfil
 	}
 	if model.IsMoE && len(gpus) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog)
-		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, be.Tag, gpus, baselineVRAMByGPU)
+		if len(baselineVRAMByGPU) > 0 {
+			fmt.Fprintf(os.Stderr, "[launch] VRAM baseline: CUDA0=%d CUDA1=%d CUDA2=%d (log buf %d bytes)\n",
+				baselineVRAMByGPU[0], baselineVRAMByGPU[1], baselineVRAMByGPU[2], len(serverLog))
+		}
+		ok := placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, be.Tag, gpus, baselineVRAMByGPU)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[launch] VRAM probe: no cache written (needs baseline & post-load VRAM > baseline)\n")
+		}
 	}
 	placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, gpus, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog)
@@ -1221,7 +1228,31 @@ func cmdLaunch(args []string) {
 	if req.ClaudeCode {
 		// Smooth path: one command brings up the model AND drops the user into
 		// Claude Code wired to it. When claude exits, stop the server too.
+		//
+		// Run a health monitor alongside Claude so a mid-session backend crash
+		// is recorded immediately — otherwise Claude Code times out silently
+		// and the OOM data is lost until the user notices (audit cross-check #4).
+		healthCtx, healthCancel := context.WithCancel(context.Background())
+		defer healthCancel()
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-healthCtx.Done():
+					return
+				case <-ticker.C:
+				}
+				if !isServerRunning(req.Host, req.Port) {
+					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — recording OOM for next launch\n")
+					healthCancel()
+					return
+				}
+			}
+		}()
+
 		if code := runClaudeCodeClient(req.Host, req.Port, serverArgs, nil); code >= 0 {
+			healthCancel()
 			// The terminal was handed to `claude`, so a mid-session backend
 			// crash isn't something this process can retry live — but it can
 			// still be recorded before Stop(), so the NEXT `--claude-code`
@@ -2265,6 +2296,22 @@ func waitForHealth(host string, port int, timeout time.Duration) bool {
 		time.Sleep(time.Second)
 	}
 	return false
+}
+
+// isServerRunning returns true if the server at host:port responds to /health
+// with 200 OK within a short timeout.
+func isServerRunning(host string, port int) bool {
+	clientHost := host
+	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
+		clientHost = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", clientHost, port))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func cmdShowConfigs(args []string) {

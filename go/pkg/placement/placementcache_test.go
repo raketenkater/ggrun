@@ -67,9 +67,9 @@ func TestPlacementCachePathFor_KeyedByKVAndCtx(t *testing.T) {
 	gpus := []detect.GPU{{Index: 0, Name: "3090 Ti"}, {Index: 1, Name: "3060"}}
 	dir := "/tmp/cache"
 
-	gpuKV := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "gpu", "v4", gpus)
-	cpuKV := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "cpu", "v4", gpus)
-	smallCtx := PlacementCachePathFor(dir, m, 131072, 512, "mid", "gpu", "v4", gpus)
+	gpuKV := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "gpu", "v4", gpus, 0, "")
+	cpuKV := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "cpu", "v4", gpus, 0, "")
+	smallCtx := PlacementCachePathFor(dir, m, 131072, 512, "mid", "gpu", "v4", gpus, 0, "")
 
 	if gpuKV == cpuKV {
 		t.Errorf("kv=gpu and kv=cpu must not share a placement cache file:\n  %s", gpuKV)
@@ -78,7 +78,7 @@ func TestPlacementCachePathFor_KeyedByKVAndCtx(t *testing.T) {
 		t.Errorf("different context sizes must not share a placement cache file")
 	}
 	// Deterministic + lands in the cache dir with a .place extension.
-	if again := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "gpu", "v4", gpus); again != gpuKV {
+	if again := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "gpu", "v4", gpus, 0, ""); again != gpuKV {
 		t.Errorf("path must be deterministic: %s != %s", again, gpuKV)
 	}
 	if filepath.Dir(gpuKV) != dir || filepath.Ext(gpuKV) != ".place" {
