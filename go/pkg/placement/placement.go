@@ -823,7 +823,11 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	if expertCPUPerLayerMB <= 0 {
 		expertCPUPerLayerMB = expertPerLayerMB
 	}
-	nonExpertPerLayerMB := ceilDivInt(nonExpertTotalMB, model.NumLayers)
+	nonExpertForGPU := nonExpertTotalMB - bytesToMiBCeil(model.TokenEmbdBytes)
+	if nonExpertForGPU < 0 {
+		nonExpertForGPU = 0
+	}
+	nonExpertPerLayerMB := ceilDivInt(nonExpertForGPU, model.NumLayers)
 	if nonExpertPerLayerMB <= 0 {
 		nonExpertPerLayerMB = 1
 	}
@@ -907,7 +911,10 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 
 	used := make([]bool, numGPUs)
 	for i, g := range caps.GPUs {
-		used[i] = !expertOnlyGPU[i] && g.VRAMFreeMB() > fixedPerGPU[i]
+		free := g.VRAMFreeMB()
+		fixed := fixedPerGPU[i]
+		used[i] = !expertOnlyGPU[i] && free > fixed
+		fmt.Fprintf(os.Stderr, "[launch] GPU%d: free=%d fixed=%d expertOnly=%v used=%v\n", g.Index, free, fixed, expertOnlyGPU[i], used[i])
 	}
 	var split []float64
 	var ownedLayers []int
@@ -3143,44 +3150,72 @@ func RunPostLaunchModelProbeVRAMDelta(
 		expertLayersByGPU[a.CUDAIndex] += a.Count
 	}
 
-	moeLayers := model.NumLayers - model.LeadingDense
-	if moeLayers <= 0 {
-		moeLayers = model.NumLayers
-	}
-	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
-	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
-
-	computeByGPU := map[int]int{}
-	for _, g := range gpus {
-		usedMB := QueryVRAMUsed(g.Index)
-		bl := baselineVRAMByGPU[g.Index]
-		if usedMB <= 0 || usedMB <= bl {
-			continue
+		moeLayers := model.NumLayers - model.LeadingDense
+		if moeLayers <= 0 {
+			moeLayers = model.NumLayers
 		}
-		deltaMB := usedMB - bl
-
-		modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
-		splitShare := 0.0
-		if len(strategy.TensorSplit) > g.Index {
-			splitShare = strategy.TensorSplit[g.Index]
-		}
-		if splitShare > 0 && nonExpertTotalMB > 0 {
-			modelMB += int(splitShare * float64(nonExpertTotalMB))
+		expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
+		nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
+		// Token embeddings are CPU-only; subtract them so the per-layer
+		// non-expert estimate is not inflated by non-GPU-resident bytes.
+		tokenEmbdMB := bytesToMiBCeil(model.TokenEmbdBytes)
+		if tokenEmbdMB > 0 && tokenEmbdMB < nonExpertTotalMB {
+			nonExpertTotalMB -= tokenEmbdMB
 		}
 
-		// Subtract KV cache share: if KV is on GPU, each GPU carries its
-		// proportional share according to tensor-split. Excluding KV from
-		// the compute-buffer measurement prevents inflated values from
-		// poisoning future placement recomputes (audit cross-check #2).
-		kvShareMB := 0
-		if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
-			kvTotal := computeKVTotalMB(model, strategy.ContextSize, strategy.KVQuality)
-			if kvTotal > 0 && len(gpus) > 0 {
-				kvShareMB = kvTotal / len(gpus)
+		// Reconstruct per-GPU owned layer counts from tensor-split, matching
+		// buildMoEOffload. Using owned layers instead of splitShare × total
+		// prevents over-counting non-expert bytes on split-share GPUs whose
+		// layers have experts on other devices via OT pinning.
+		ownedLayers := make([]int, len(gpus))
+		if len(strategy.TensorSplit) > 0 {
+			totalW := 0.0
+			for _, v := range strategy.TensorSplit {
+				totalW += v
+			}
+			if totalW > 0 {
+				remaining := model.NumLayers
+				for i, s := range strategy.TensorSplit {
+					layers := int(float64(model.NumLayers) * s / totalW)
+					if i == len(strategy.TensorSplit)-1 {
+						layers = remaining
+					}
+					if layers > remaining {
+						layers = remaining
+					}
+					ownedLayers[i] = layers
+					remaining -= layers
+				}
 			}
 		}
+		nonExpertPerLayerMB := 0
+		if model.NumLayers > 0 {
+			nonExpertPerLayerMB = nonExpertTotalMB / model.NumLayers
+		}
 
-		bufMB := deltaMB - modelMB - kvShareMB
+		computeByGPU := map[int]int{}
+		for _, g := range gpus {
+			usedMB := QueryVRAMUsed(g.Index)
+			bl := baselineVRAMByGPU[g.Index]
+			if usedMB <= 0 || usedMB <= bl {
+				continue
+			}
+			deltaMB := usedMB - bl
+
+			modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
+			if g.Index < len(ownedLayers) && ownedLayers[g.Index] > 0 {
+				modelMB += ownedLayers[g.Index] * nonExpertPerLayerMB
+			}
+
+			kvShareMB := 0
+			if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
+				kvTotal := computeKVTotalMB(model, strategy.ContextSize, strategy.KVQuality)
+				if kvTotal > 0 && len(gpus) > 0 {
+					kvShareMB = kvTotal / len(gpus)
+				}
+			}
+
+			bufMB := deltaMB - modelMB - kvShareMB
 		if bufMB < 0 {
 			bufMB = 0
 		}

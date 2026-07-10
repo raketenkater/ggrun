@@ -2142,7 +2142,9 @@ func deepseek4V4GraphQuirk(model *placement.ModelProfile, backendTag string) boo
 }
 
 func claudeCodeComputeStrategy(caps *detect.Capabilities, model *placement.ModelProfile, opts placement.Options, claudeCode, ctxMax bool) (*placement.Strategy, error) {
+	fmt.Fprintf(os.Stderr, "[launch] claudeCodeComputeStrategy: claudeCode=%v ctxMax=%v ctx=%d\n", claudeCode, ctxMax, opts.ContextSize)
 	if !claudeCode || (opts.ContextSize > 0 && !ctxMax) {
+		fmt.Fprintf(os.Stderr, "[launch] claudeCodeComputeStrategy: direct path (no ladder)\n")
 		return placement.Compute(caps, model, opts)
 	}
 	if deepseek4V4GraphQuirk(model, opts.BackendTag) {
