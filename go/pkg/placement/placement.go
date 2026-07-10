@@ -1586,7 +1586,7 @@ func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, backen
 
 func buildOTStringFromStart(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, startLayer int, backendTag string) string {
 	var parts []string
-	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
+	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp)`
 
 	nextLayer := startLayer
 	for _, gi := range gpuOrder {
@@ -1662,8 +1662,8 @@ func packGateUpChunks(remainderMB []int, gpuOrder []int, gateUpChunkMB, cpuStart
 // sub-pins the output is identical to buildOTStringFromStart.
 func buildOTStringWithSubPins(layersPerGPU []int, subPins []subExpertPin, gpus []detect.GPU, gpuOrder []int, startLayer int, backendTag string) string {
 	var parts []string
-	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
-	gateUpPattern := `ffn_(gate_up|up_gate|gate|up)_exps`
+	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp)`
+	gateUpPattern := `ffn_(gate_up|up_gate|gate|up)_(ch|)exps`
 
 	nextLayer := startLayer
 	for _, gi := range gpuOrder {
@@ -1706,7 +1706,7 @@ func buildOTStringWithSubPins(layersPerGPU []int, subPins []subExpertPin, gpus [
 
 func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU, numLayers int, backendTag string) string {
 	var parts []string
-	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_exps|(gate_inp|gate|up|down)_shexp)`
+	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp)`
 
 	nextLayer := 0
 	for _, assign := range assignments {
@@ -2688,6 +2688,12 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	if s.Draft != nil && s.Draft.Type != DraftNone {
 		args = append(args, DraftFlags(s.Draft)...)
 	}
+
+	// Server --timeout: the v4 and ik forks default to 600s, which kills
+	// long Claude Code requests mid-stream. Match the client timeout so
+	// queued subagents and large prompt-processing runs don't time out
+	// server-side (Codex audit #5).
+	args = append(args, "--timeout", "1800")
 
 	return args
 }

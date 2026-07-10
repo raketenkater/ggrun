@@ -2013,6 +2013,13 @@ func claudeCodeAutocompactPct(serverArgs []string) int {
 		parallel = 1
 	}
 	slot := ctx / parallel
+	// Upstream pads per-sequence context to 256-token alignment; align
+	// down so auto-compact triggers before the actual slot overflows
+	// (Codex audit #7).
+	slot = slot & ^255
+	if slot < 2048 {
+		slot = 2048
+	}
 	safe := int(float64(slot) * 0.75)
 	pct := safe * 100 / claudeAssumedWindow
 	// Floor so compaction still leaves working room; cap under Claude Code's own
