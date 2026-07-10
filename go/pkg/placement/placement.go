@@ -914,7 +914,6 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		free := g.VRAMFreeMB()
 		fixed := fixedPerGPU[i]
 		used[i] = !expertOnlyGPU[i] && free > fixed
-		fmt.Fprintf(os.Stderr, "[launch] GPU%d: free=%d fixed=%d expertOnly=%v used=%v\n", g.Index, free, fixed, expertOnlyGPU[i], used[i])
 	}
 	var split []float64
 	var ownedLayers []int
@@ -1039,8 +1038,22 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		maxCPULayersStrict = moeLayerCount
 	}
 
-	// Mmap-aware ceiling
-	preWorkingSetFloor := ramOverheadPreMB + cpuKVRAMMB + moeLayerCount*expertCPUPerLayerMB
+	// Mmap-aware ceiling.
+	//
+	// Expert weight bytes live in a read-only, file-backed mmap: the kernel can
+	// always evict those clean pages under memory pressure and re-fault them
+	// from the model file, so they never have to be simultaneously resident.
+	// What CANNOT be reclaimed is the runtime's own anonymous memory — CUDA
+	// host staging, graph scratch, the mmap page-table, CPU activation buffers
+	// (ramOverheadPreMB), and the KV cache (cpuKVRAMMB, continuously
+	// read/written, not file-backed) — if that doesn't fit in free RAM, no
+	// amount of expert-page eviction helps, and mmap would thrash from the
+	// first token. That is the real (measured, not guessed) floor: it replaces
+	// both the old flat "8 layers" floor (too lenient — let a model whose
+	// working set vastly exceeds even non-reclaimable RAM through) and the
+	// "full footprint must fit" floor (too strict — defeated the entire point
+	// of mmap, which is to hold LESS than the full footprint resident).
+	preWorkingSetFloor := ramOverheadPreMB + cpuKVRAMMB
 	maxCPULayersMMap := 0
 	if caps.RAM.FreeMB >= preWorkingSetFloor {
 		maxCPULayersMMap = moeLayerCount
@@ -1160,7 +1173,13 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	if opts.NoMMap {
 		s.MMap = false
 	} else if ramNeeded > ramAvailMB {
-		workingSetFloor := ramOverheadMB + cpuKVMB + layersCPU*expertCPUPerLayerMB
+		// The CPU-resident expert bytes counted in ramNeeded are clean,
+		// file-backed mmap pages — evictable and re-fault-able from the model
+		// file, so they don't have to all be resident at once. What must
+		// actually fit is the runtime's non-reclaimable anonymous memory: KV
+		// cache (continuously read/written) plus compute/activation overhead.
+		// (Same reasoning as preWorkingSetFloor above; keep both in sync.)
+		workingSetFloor := ramOverheadMB + cpuKVMB
 		if ramAvailMB >= workingSetFloor {
 			s.MMap = true
 		}
@@ -1247,8 +1266,13 @@ func maximizeMoEGPUFitByUBatch(base, s *Strategy, err error, caps *detect.Capabi
 		gpus = caps.GPUs
 	}
 	baseExcluded := numGPUsExcluded(s, gpus)
-	if err == nil && s != nil && s.NCPUMoE < moeCount && baseExcluded == 0 {
-		return s, err // some experts fit and every GPU is actually in use — nothing to rescue
+	if err == nil && s != nil && s.NCPUMoE == 0 && baseExcluded == 0 {
+		return s, err // already maximal — every expert layer is on a GPU and every GPU is in use
+	}
+	best, bestErr, bestExcluded := s, err, baseExcluded
+	bestNCPUMoE := moeCount + 1
+	if err == nil && s != nil {
+		bestNCPUMoE = s.NCPUMoE
 	}
 	for _, ub := range UBatchFitLadder {
 		if ub >= base.UBatchSize {
@@ -1260,12 +1284,12 @@ func maximizeMoEGPUFitByUBatch(base, s *Strategy, err error, caps *detect.Capabi
 			cand.BatchSize = ub
 		}
 		next, cerr := buildMoEOffload(&cand, caps, model, totalSizeMB, kvTotalMB, opts)
-		if cerr != nil || next.NCPUMoE >= moeCount {
+		if cerr != nil {
 			continue
 		}
 		nextExcluded := numGPUsExcluded(next, gpus)
-		if baseExcluded > 0 && nextExcluded >= baseExcluded {
-			continue // still strands as many GPUs as before — not an improvement
+		if next.NCPUMoE >= bestNCPUMoE && nextExcluded >= bestExcluded {
+			continue // not an improvement over the best rung found so far
 		}
 		reason := "left no VRAM for MoE experts"
 		if baseExcluded > 0 {
@@ -1274,9 +1298,9 @@ func maximizeMoEGPUFitByUBatch(base, s *Strategy, err error, caps *detect.Capabi
 		fmt.Fprintf(os.Stderr,
 			"[placement] ubatch %d %s at this context/KV type — using ubatch %d instead (%d expert layer(s) on GPU, %d/%d GPUs used)\n",
 			base.UBatchSize, reason, ub, moeCount-next.NCPUMoE, numGPUs-nextExcluded, numGPUs)
-		return next, nil
+		best, bestErr, bestNCPUMoE, bestExcluded = next, nil, next.NCPUMoE, nextExcluded
 	}
-	return s, err
+	return best, bestErr
 }
 
 func bytesToMiBCeil(n int64) int {
@@ -2439,7 +2463,15 @@ func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, tota
 		return "gpu"
 	}
 	if model.IsMoE {
-		if kvGPURequiredForFlashAttention(model, backendTag) {
+		if strings.EqualFold(model.ModelArch, "deepseek4") && !IsDeepSeek4V4Fork(model, backendTag) {
+			// KV on CPU makes llama.cpp auto-disable flash attention, and
+			// deepseek4's non-FA graph materializes score tensors that grow
+			// with real token position (~98 KiB/token measured 2026-07-09) —
+			// no load-time reserve can cover that, so trading expert VRAM for
+			// GPU KV is strictly cheaper. Only applies off the v4 fork: the
+			// v4 fork cannot build KV-on-GPU graphs at all for deepseek4 (see
+			// IsDeepSeek4V4Fork), so it keeps the CPU placement regardless
+			// (its FA is off either way).
 			return "gpu"
 		}
 		return "cpu"
@@ -2447,16 +2479,19 @@ func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, tota
 	return "gpu"
 }
 
-// kvGPURequiredForFlashAttention reports whether this model must keep its KV
-// cache on GPU so flash attention stays enabled. KV on CPU makes llama.cpp
-// auto-disable FA, and deepseek4's non-FA graph materializes score tensors
-// that grow with real token position (~98 KiB/token measured 2026-07-09) —
-// no load-time reserve can cover that, so trading expert VRAM for GPU KV is
-// strictly cheaper. The v4 fork cannot build KV-on-GPU graphs at all for
-// deepseek4, so it keeps the CPU placement (its FA is off either way).
-func kvGPURequiredForFlashAttention(model *ModelProfile, backendTag string) bool {
-	return model != nil && strings.EqualFold(model.ModelArch, "deepseek4") &&
-		!strings.EqualFold(backendTag, "v4")
+// IsDeepSeek4V4Fork reports whether this model/backend can only reserve
+// single-slot, KV-on-CPU graphs. The v4 fork's deepseek4 build_arch_graph
+// aborts with GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2) (ggml.c:3660)
+// when the hybrid-iswa KV cache lives on the GPU (ctx 262144 AND 1048576, FA
+// on AND off, patched AND clean fork builds) and equally with --parallel 4
+// even with KV on CPU — reproduced across five 15-minute loads on 2026-07-07.
+// The ONLY configuration that has ever served this arch here is KV on CPU
+// with a single sequence slot (verified end-to-end at ctx 1048576). Old
+// kv=gpu probe caches are no evidence to the contrary: their compute values
+// came from the fork's fit-table printout, and .place files are also written
+// during OOM re-plans, not only on success.
+func IsDeepSeek4V4Fork(model *ModelProfile, backendTag string) bool {
+	return model != nil && strings.EqualFold(model.ModelArch, "deepseek4") && strings.EqualFold(backendTag, "v4")
 }
 
 // computeAutoContextSizeKVPlacement computes the largest context whose KV cache

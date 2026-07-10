@@ -30,13 +30,13 @@ func writeFakeBackend(t *testing.T, name, body string) string {
 
 func TestDeepseek4V4GraphQuirk(t *testing.T) {
 	m := &placement.ModelProfile{ModelArch: "deepseek4"}
-	if !deepseek4V4GraphQuirk(m, "v4") {
+	if !placement.IsDeepSeek4V4Fork(m, "v4") {
 		t.Fatal("deepseek4 on v4 must be limited to single-slot KV-on-CPU graphs (fork graph reserve aborts)")
 	}
-	if deepseek4V4GraphQuirk(m, "llama") {
+	if placement.IsDeepSeek4V4Fork(m, "llama") {
 		t.Fatal("non-v4 backend must keep the normal ladder")
 	}
-	if deepseek4V4GraphQuirk(&placement.ModelProfile{ModelArch: "qwen3moe"}, "v4") {
+	if placement.IsDeepSeek4V4Fork(&placement.ModelProfile{ModelArch: "qwen3moe"}, "v4") {
 		t.Fatal("non-deepseek4 arch must keep the normal ladder")
 	}
 }

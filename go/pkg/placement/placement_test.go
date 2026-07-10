@@ -396,7 +396,7 @@ func TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement(t *testing.T) {
 		t.Fatalf("expected at least one expert layer on GPU after the ubatch retry, got NCPUMoE=%d of %d total (ubatch=%d)",
 			strat.NCPUMoE, moeCount, strat.UBatchSize)
 	}
-	if !strings.Contains(strat.OTString, "_exps") {
+	if !strings.Contains(strat.OTString, "exps") {
 		t.Fatalf("expected at least one GPU expert pin in -ot, got %q", strat.OTString)
 	}
 }

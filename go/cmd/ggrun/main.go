@@ -798,7 +798,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		}
 	}
 	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
-	if req.ClaudeCode && !req.ParallelSet && opts.Parallel > 1 && deepseek4V4GraphQuirk(model, opts.BackendTag) {
+	if req.ClaudeCode && !req.ParallelSet && opts.Parallel > 1 && placement.IsDeepSeek4V4Fork(model, opts.BackendTag) {
 		// Multi-slot (n_seq > 1) graph reservation is part of the same fork
 		// abort; a single slot keeps the model's full context window anyway.
 		fmt.Println("[claude-code] deepseek4 on the v4 fork aborts multi-slot graph reservation — using --parallel 1 (the single slot keeps the full context)")
@@ -2150,28 +2150,13 @@ func patchPlacementArgs(args []string, s *placement.Strategy) []string {
 	return out
 }
 
-// deepseek4V4GraphQuirk reports whether this model/backend can only reserve
-// single-slot, KV-on-CPU graphs. The v4 fork's deepseek4 build_arch_graph
-// aborts with GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2) (ggml.c:3660)
-// when the hybrid-iswa KV cache lives on the GPU (ctx 262144 AND 1048576, FA
-// on AND off, patched AND clean fork builds) and equally with --parallel 4
-// even with KV on CPU — reproduced across five 15-minute loads on 2026-07-07.
-// The ONLY configuration that has ever served this arch here is KV on CPU
-// with a single sequence slot (verified end-to-end at ctx 1048576). Old
-// kv=gpu probe caches are no evidence to the contrary: their compute values
-// came from the fork's fit-table printout, and .place files are also written
-// during OOM re-plans, not only on success.
-func deepseek4V4GraphQuirk(model *placement.ModelProfile, backendTag string) bool {
-	return model != nil && strings.EqualFold(model.ModelArch, "deepseek4") && strings.EqualFold(backendTag, "v4")
-}
-
 func claudeCodeComputeStrategy(caps *detect.Capabilities, model *placement.ModelProfile, opts placement.Options, claudeCode, ctxMax bool) (*placement.Strategy, error) {
 	fmt.Fprintf(os.Stderr, "[launch] claudeCodeComputeStrategy: claudeCode=%v ctxMax=%v ctx=%d\n", claudeCode, ctxMax, opts.ContextSize)
 	if !claudeCode || (opts.ContextSize > 0 && !ctxMax) {
 		fmt.Fprintf(os.Stderr, "[launch] claudeCodeComputeStrategy: direct path (no ladder)\n")
 		return placement.Compute(caps, model, opts)
 	}
-	if deepseek4V4GraphQuirk(model, opts.BackendTag) {
+	if placement.IsDeepSeek4V4Fork(model, opts.BackendTag) {
 		// The KV-on-GPU ladder would pick a placement the fork cannot build a
 		// graph for. The default placement (KV on CPU, ctx fit → the trained
 		// context) is the verified path; with claude-code's --parallel 4 the
