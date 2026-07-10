@@ -896,6 +896,9 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []str
 }
 
 func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) {
+	baselineLen := len(baselineVRAMByGPU)
+	fmt.Fprintf(os.Stderr, "[launch] recordMeasuredLaunchProbes: log=%d bytes, baseline=%d gpus, cfg=%v model=%v strategy=%v be=%v\n",
+		len(serverLog), baselineLen, cfg != nil, model != nil, strategy != nil, be != nil)
 	if cfg == nil || model == nil || strategy == nil || be == nil || serverLog == "" {
 		return
 	}
