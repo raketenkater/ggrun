@@ -106,10 +106,16 @@ func Path() string {
 		return p
 	}
 	home := backends.AppHome()
-	if f := filepath.Join(home, ".config", "config"); fileExists(f) {
-		return f
+	isGenericHome := home == os.Getenv("HOME")
+	if !isGenericHome {
+		if f := filepath.Join(home, ".config", "config"); fileExists(f) {
+			return f
+		}
+		if f := filepath.Join(home, "config", "config"); fileExists(f) {
+			return f
+		}
 	}
-	if f := filepath.Join(home, "config", "config"); fileExists(f) {
+	if f := filepath.Join(home, ".config", "ggrun", "config"); fileExists(f) {
 		return f
 	}
 	return filepath.Join(home, ".config", "ggrun", "config")
