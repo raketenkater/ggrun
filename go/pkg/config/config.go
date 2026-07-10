@@ -106,16 +106,10 @@ func Path() string {
 		return p
 	}
 	home := backends.AppHome()
-	// When AppHome resolves to $HOME (fallback after .bin parent + exe dir
-	// checks), only probe ggrun-specific paths — never the generic
-	// $HOME/.config/config that other tools own (audit cross-check #7).
-	isGenericHome := home == os.Getenv("HOME")
-	if !isGenericHome {
-		if f := filepath.Join(home, ".config", "config"); fileExists(f) {
-			return f
-		}
+	if f := filepath.Join(home, ".config", "config"); fileExists(f) {
+		return f
 	}
-	if f := filepath.Join(home, ".config", "ggrun", "config"); fileExists(f) {
+	if f := filepath.Join(home, "config", "config"); fileExists(f) {
 		return f
 	}
 	return filepath.Join(home, ".config", "ggrun", "config")
