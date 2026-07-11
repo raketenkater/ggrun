@@ -83,7 +83,7 @@ if [[ "$cmd_section" == *"--no-mmap"* ]]; then
     exit 1
 fi
 
-if [[ "$cmd_section" != *"ffn_(("*"_exps"* ]]; then
+if [[ "$cmd_section" != *"ffn_(("*"_(ch|)exps"* ]]; then
     echo "expected routed expert tensors in -ot regex"
     echo "$out"
     exit 1
@@ -91,6 +91,12 @@ fi
 
 if [[ "$cmd_section" != *"_shexp"* ]]; then
     echo "expected shared expert tensors in -ot regex"
+    echo "$out"
+    exit 1
+fi
+
+if [[ "$cmd_section" != *"gate_tid2eid"* || "$cmd_section" != *"exp_probs_b"* ]]; then
+    echo "expected hash-routing tensors to follow their expert placement"
     echo "$out"
     exit 1
 fi

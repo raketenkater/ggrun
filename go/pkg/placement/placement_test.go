@@ -934,33 +934,32 @@ func TestBuildOTString(t *testing.T) {
 	}
 	gpuOrder := []int{0, 1}
 
-	// Patterns include the "(ch|)" chunked-experts marker ahead of "exps"
-	// (added alongside chexps support), e.g. "..._(ch|)exps..." rather than
-	// the older plain "..._exps...".
+	// Patterns include chunked expert weights plus the routed/hash-gate tensors
+	// needed to dispatch those experts on the assigned device.
 
 	// Single layer on GPU0
 	ot := buildOTString([]int{1, 0}, gpus, gpuOrder, "")
-	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU` {
+	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA0,exps=CPU` {
 		t.Fatalf("single-layer OT mismatch: %s", ot)
 	}
 
 	// Multiple layers on GPU0
 	ot = buildOTString([]int{5, 0}, gpus, gpuOrder, "")
-	expected := `blk\.(0|1|2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,exps=CPU`
+	expected := `blk\.(0|1|2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA0,exps=CPU`
 	if ot != expected {
 		t.Fatalf("multi-layer OT mismatch:\n  got:      %s\n  expected: %s", ot, expected)
 	}
 
 	// Layers on both GPUs
 	ot = buildOTString([]int{2, 3}, gpus, gpuOrder, "")
-	expected = `blk\.(0|1)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA0,blk\.(2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=CUDA1,exps=CPU`
+	expected = `blk\.(0|1)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA0,blk\.(2|3|4)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA1,exps=CPU`
 	if ot != expected {
 		t.Fatalf("two-gpu OT mismatch:\n  got:      %s\n  expected: %s", ot, expected)
 	}
 
 	// Vulkan uses Vulkan device names in override tensors.
 	ot = buildOTString([]int{1, 0}, gpus, gpuOrder, "vulkan")
-	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp).*=Vulkan0,exps=CPU` {
+	if ot != `blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=Vulkan0,exps=CPU` {
 		t.Fatalf("vulkan OT mismatch: %s", ot)
 	}
 

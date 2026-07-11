@@ -1715,9 +1715,10 @@ func buildOTString(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, backen
 	return buildOTStringFromStart(layersPerGPU, gpus, gpuOrder, 0, backendTag)
 }
 
+const expertTensorPattern = `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b)`
+
 func buildOTStringFromStart(layersPerGPU []int, gpus []detect.GPU, gpuOrder []int, startLayer int, backendTag string) string {
 	var parts []string
-	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp)`
 
 	nextLayer := startLayer
 	for _, gi := range gpuOrder {
@@ -1732,7 +1733,7 @@ func buildOTStringFromStart(layersPerGPU []int, gpus []detect.GPU, gpuOrder []in
 				layerParts = append(layerParts, fmt.Sprintf("%d", l))
 			}
 			layerRange := stringsJoin(layerParts, "|")
-			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, layerRange, expertPattern, deviceName(backendTag, cudaIdx)))
+			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, layerRange, expertTensorPattern, deviceName(backendTag, cudaIdx)))
 			nextLayer += count
 		}
 	}
@@ -1793,7 +1794,13 @@ func packGateUpChunks(remainderMB []int, gpuOrder []int, gateUpChunkMB, cpuStart
 // sub-pins the output is identical to buildOTStringFromStart.
 func buildOTStringWithSubPins(layersPerGPU []int, subPins []subExpertPin, gpus []detect.GPU, gpuOrder []int, startLayer int, backendTag string) string {
 	var parts []string
-	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp)`
+	// Match expert weight tensors (routed *_exps, shared *_shexp) AND the
+	// per-layer routing tensors (ffn_gate_inp for routed-gate layers,
+	// ffn_gate_tid2eid + ffn_exp_probs_b for hash-routed early layers). The
+	// routing tensors must ride with their expert weights on the same CUDA
+	// device, otherwise llama.cpp's MoE dispatch cannot send the expert
+	// compute to that GPU and the layer silently falls back to CPU/GPU0 —
+	// leaving the expert GPU idle (e.g. GPU2 at 0% util with 9GB loaded).
 	gateUpPattern := `ffn_(gate_up|up_gate|gate|up)_(ch|)exps`
 
 	nextLayer := startLayer
@@ -1806,7 +1813,7 @@ func buildOTStringWithSubPins(layersPerGPU []int, subPins []subExpertPin, gpus [
 			for l := start; l <= last; l++ {
 				layerParts = append(layerParts, fmt.Sprintf("%d", l))
 			}
-			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, stringsJoin(layerParts, "|"), expertPattern, deviceName(backendTag, gpus[gi].Index)))
+			parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, stringsJoin(layerParts, "|"), expertTensorPattern, deviceName(backendTag, gpus[gi].Index)))
 			nextLayer += count
 		}
 	}
@@ -1837,7 +1844,13 @@ func buildOTStringWithSubPins(layersPerGPU []int, subPins []subExpertPin, gpus [
 
 func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU, numLayers int, backendTag string) string {
 	var parts []string
-	expertPattern := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp)`
+	// Match expert weight tensors (routed *_exps, shared *_shexp) AND the
+	// per-layer routing tensors (ffn_gate_inp for routed-gate layers,
+	// ffn_gate_tid2eid + ffn_exp_probs_b for hash-routed early layers). The
+	// routing tensors must ride with their expert weights on the same CUDA
+	// device, otherwise llama.cpp's MoE dispatch cannot send the expert
+	// compute to that GPU and the layer silently falls back to CPU/GPU0 —
+	// leaving the expert GPU idle (e.g. GPU2 at 0% util with 9GB loaded).
 
 	nextLayer := 0
 	for _, assign := range assignments {
@@ -1851,7 +1864,7 @@ func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU
 			layerParts = append(layerParts, fmt.Sprintf("%d", l))
 		}
 		layerRange := stringsJoin(layerParts, "|")
-		parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, layerRange, expertPattern, deviceName(backendTag, assign.CUDAIndex)))
+		parts = append(parts, fmt.Sprintf(`blk\.(%s)\.%s.*=%s`, layerRange, expertTensorPattern, deviceName(backendTag, assign.CUDAIndex)))
 		nextLayer += assign.Count
 	}
 	parts = append(parts, "exps=CPU")
