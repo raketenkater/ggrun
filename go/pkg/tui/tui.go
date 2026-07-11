@@ -1972,8 +1972,8 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 	// Default to auto-fit (ctx=0): placement.Compute finds the max context that
 	// actually fits — the same path the CLI uses. The old default fed the crude
 	// computeRecommendation heuristic straight to the backend, which produced a
-	// wrong context for big MoE like DeepSeek V4 (and tripped the fork's graph
-	// builder). Only an explicit max/manual choice overrides auto-fit.
+	// wrong context for big MoE models. Only an explicit max/manual choice
+	// overrides auto-fit.
 	ctx := 0
 	ctxFlag := "fit"
 	if m.ctxMode == "max" {

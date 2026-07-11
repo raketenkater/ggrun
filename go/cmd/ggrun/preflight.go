@@ -36,6 +36,16 @@ type preflightDevice struct {
 // TotalMB is the device's planned VRAM demand at load time.
 func (d preflightDevice) TotalMB() int { return d.ModelMB + d.ContextMB + d.ComputeMB }
 
+func preflightContextTotalMB(devs []preflightDevice) int {
+	total := 0
+	for _, d := range devs {
+		if d.ContextMB > 0 {
+			total += d.ContextMB
+		}
+	}
+	return total
+}
+
 // findFitParamsBin locates the llama-fit-params binary belonging to the given
 // server binary: a sibling of the resolved binary (backend build dir), then a
 // sibling of the unresolved path (.bin), then PATH. Empty when unavailable.
@@ -212,11 +222,10 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 		fmt.Fprintf(os.Stderr, "[launch] preflight skipped: %v\n", err)
 		return -1, 0, false
 	}
-	// Feed the measured compute buffers back into placement's probe cache
-	// BEFORE checking fit, regardless of outcome: this is the same real number
-	// buildMoEOffload would otherwise only learn after a successful load, and
-	// a re-plan below (ReplanAfterOOM -> Compute) must see it immediately, not
-	// the first-launch heuristic that produced this (possibly wrong) strategy.
+	// Feed the backend's measured context and compute buffers back into placement
+	// BEFORE checking fit, regardless of outcome. A re-plan below
+	// (ReplanAfterOOM -> Compute) must see these real numbers immediately, not
+	// the first-launch formulas that produced this (possibly wrong) strategy.
 	if model != nil && strategy != nil {
 		computeByGPU := map[int]int{}
 		for _, d := range devs {
@@ -224,12 +233,13 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 				computeByGPU[idx] = d.ComputeMB
 			}
 		}
-		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, computeByGPU)
+		placement.RecordMeasuredContextMB(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, preflightContextTotalMB(devs))
+		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
 	overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
-		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs)
+		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
 	}
 	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
 	if deficit > 0 {
@@ -270,7 +280,7 @@ func measureUBatchLadderCandidates(fitBin string, serverArgs []string, cfg *conf
 				computeByGPU[idx] = d.ComputeMB
 			}
 		}
-		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, computeByGPU)
+		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
 }
 

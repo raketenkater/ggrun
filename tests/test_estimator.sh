@@ -17,6 +17,12 @@ fi
 TMP="$(mktemp -d -t ggrun-tests.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Keep the regression independent of the invoking user's installed config.
+export LLM_APP_HOME="$TMP/app-home"
+export LLM_CACHE_DIR="$TMP/cache"
+export LLM_KV_PLACEMENT=auto
+export LLM_KV_QUALITY=low
+
 # Stand-in llama-server: --help must exit 0 cleanly with no "shared libraries"
 # error so the binary-validity check in ggrun passes. Anything else just
 # noops — --dry-run never actually invokes the binary.
@@ -106,18 +112,18 @@ out=$(run_dry "$TMP/ssm.gguf")
 assert_contains "$out" "--no-context-shift" "ssm_hybrid: context shift disabled"
 
 # ── Test 6: mistagged DeepSeek V4 Flash (deepseek2 arch + kl_mla<=rope_dim) ─
-# Stock converters tag DeepSeek V4 Flash GGUFs as deepseek2 but emit V4
-# metadata that crashes stock builds. ggrun should warn (not bail) so
-# users with a fork-built llama-server can still proceed.
+# Older converters tagged DeepSeek V4 Flash GGUFs as deepseek2. Current
+# mainline llama.cpp supports the native deepseek4 architecture, so ggrun
+# should warn (not bail) and tell users to re-convert the stale GGUF.
 echo "Test: dsv4_flash_mistag_warns_but_proceeds"
 build_gguf --out "$TMP/dsv4_mistag.gguf" --arch deepseek2 --name 'DeepSeek V4 Flash' \
     --layers 43 --hkv 1 --kl 512 --vl 512 --embd 4096 \
     --kv-lora 512 --q-lora 512 --kl-mla 64 --vl-mla 512 --rope-dim 64 \
     --ctx-train 1048576
 out=$(run_dry "$TMP/dsv4_mistag.gguf" 2>&1 || true)
-assert_contains "$out" "DeepSeek V4 Flash mistagged" "dsv4_flash_mistag: clear warning"
-assert_contains "$out" "antirez/llama.cpp-deepseek-v4-flash" "dsv4_flash_mistag: points to fork"
-assert_contains "$out" "PR #22378" "dsv4_flash_mistag: points to upstream PR"
+assert_contains "$out" "DeepSeek V4 Flash is tagged as deepseek2" "dsv4_flash_mistag: clear warning"
+assert_contains "$out" "current mainline llama.cpp" "dsv4_flash_mistag: points to current mainline"
+assert_contains "$out" "Re-convert" "dsv4_flash_mistag: recommends reconversion"
 # Warning must not abort the run; downstream command generation should still appear.
 assert_contains "$out" "--ctx-size 1048576" "dsv4_flash_mistag: dry-run command still emitted"
 

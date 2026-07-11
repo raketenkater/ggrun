@@ -25,23 +25,23 @@ func fmtCustomBackend(b backends.Backend) string {
 func backendUsage() {
 	fmt.Fprint(os.Stderr, `Usage: ggrun backend <subcommand>
 
-  list                              List registered fork backends
-  add <git-url> [flags]             Clone, build, and register a llama.cpp fork
+  list                              List registered custom backends
+  add <git-url> [flags]             Clone, build, and register a custom llama.cpp backend
   register [flags]                  Register an already-built binary
   remove <tag>                      Unregister a backend
 
 add/register flags:
   --tag <name>          Selection name (default: derived from URL)
   --route-arch <arch>   Auto-select this backend for models of this architecture
-                        (e.g. deepseek4), so it "just works" with no --backend
+                        (e.g. custommoe), so it "just works" with no --backend
   --branch <branch>     Git branch to clone (add only; default: default branch)
   --accel cuda|vulkan|cpu   Build accelerator (add only; default: cuda if nvcc present)
   --cuda-arch <list>    CUDA archs, e.g. "86;89" (add only; default: native)
   --path <binary>       Path to a prebuilt llama-server (register only)
 
 Examples:
-  ggrun backend add https://github.com/cchuter/llama.cpp \
-    --branch feat/v4-port-cuda --tag v4 --route-arch deepseek4 --cuda-arch "86;89"
+  ggrun backend add https://github.com/your-org/llama.cpp \
+    --branch feature/custom-arch --tag custom --route-arch custommoe --cuda-arch "86;89"
   ggrun backend list
 `)
 }
@@ -69,10 +69,10 @@ func cmdBackend(args []string) {
 func cmdBackendList() {
 	list := backends.Load()
 	if len(list) == 0 {
-		fmt.Println("No fork backends registered. Add one with: ggrun backend add <git-url>")
+		fmt.Println("No custom backends registered. Add one with: ggrun backend add <git-url>")
 		return
 	}
-	fmt.Printf("Registered fork backends (%s):\n", backends.ManifestPath())
+	fmt.Printf("Registered custom backends (%s):\n", backends.ManifestPath())
 	for _, b := range list {
 		fmt.Println(fmtCustomBackend(b))
 	}

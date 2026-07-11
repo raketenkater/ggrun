@@ -131,8 +131,8 @@ func TestPrelaunchViewShowsSelectedBackend(t *testing.T) {
 }
 
 func TestBackendTagUsesRegisteredBackendTag(t *testing.T) {
-	if got := (Model{backend: "v4"}).backendTag(); got != "v4" {
-		t.Fatalf("expected v4 tune tag, got %q", got)
+	if got := (Model{backend: "custom"}).backendTag(); got != "custom" {
+		t.Fatalf("expected custom tune tag, got %q", got)
 	}
 	if got := (Model{backend: "ik_llama"}).backendTag(); got != "ik" {
 		t.Fatalf("expected ik tune tag, got %q", got)

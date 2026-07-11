@@ -221,7 +221,7 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 		ContextSize: 1048576,
 		KVPlacement: "cpu",
 		KVQuality:   "mid",
-		BackendTag:  "v4",
+		BackendTag:  "llama",
 		Parallel:    1,
 		CacheDir:    t.TempDir(),
 	})
@@ -307,6 +307,113 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 	}
 }
 
+// Regression for the real no-flag DeepSeek-V4 launch on the 3090Ti+3060+4070
+// host. The exact 1M-context KV measurement and CUDA overhead originally lived
+// in ~/.cache/ggrun, while the app later moved to an app-local cache. Falling
+// back to formula charged 16.4 GiB instead of the measured 6.9 GiB; legacy
+// startup-OOM probes then charged compute a second time as runtime growth. The
+// solver rejected a model that fits, before preflight could correct anything.
+func TestComputeDeepSeekV4FullContextMigratesExactMeasurements(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cacheDir := filepath.Join(t.TempDir(), "app-cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "NVIDIA GeForce RTX 3090 Ti", Driver: "580.159.03", VRAMTotalMB: 24564, VRAMUsedMB: 453, BandwidthMBps: 15760},
+			{Index: 1, Name: "NVIDIA GeForce RTX 3060", Driver: "580.159.03", VRAMTotalMB: 12288, VRAMUsedMB: 379, BandwidthMBps: 985},
+			{Index: 2, Name: "NVIDIA GeForce RTX 4070", Driver: "580.159.03", VRAMTotalMB: 12282, VRAMUsedMB: 409, BandwidthMBps: 3940},
+		},
+		RAM: detect.RAMInfo{TotalMB: 128730, FreeMB: 123424},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path:            "/models/UD-IQ4_XS/DeepSeek-V4-Flash-UD-IQ4_XS-00001-of-00004.gguf",
+		Basename:        "Deepseek-V4-Flash",
+		SizeBytes:       137903959808,
+		TotalSizeMB:     131515,
+		NumLayers:       43,
+		IsMoE:           true,
+		NumExperts:      256,
+		ExpertUsedCount: 6,
+		ExpertFF:        2048,
+		ExpertBytes:     131240296448,
+		NonExpertBytes:  6658320448,
+		TokenEmbdBytes:  562626560,
+		OutputBytes:     434380800,
+		ShexpBytes:      1149763584,
+		ContextSize:     1048576,
+		CTXTrain:        1048576,
+		HiddenSize:      4096,
+		EmbeddingLength: 4096,
+		HeadCountKV:     1,
+		KeyLength:       512,
+		ValueLength:     512,
+		RopeDim:         64,
+		SlidingWindow:   128,
+		ModelArch:       "deepseek4",
+	}
+
+	legacyDir := filepath.Join(home, ".cache", "ggrun")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kvCachePath("", model), []byte("KV_BYTES_PER_TOK_f16=6912.2500\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	systemPath := filepath.Join(legacyDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs)))
+	systemData := "SYS_CUDA_OVERHEAD_MB_CUDA0=488\n" +
+		"SYS_CUDA_OVERHEAD_MB_CUDA1=311\n" +
+		"SYS_CUDA_OVERHEAD_MB_CUDA2=367\n" +
+		"SYS_CUDA_OVERHEAD_MB=488\n"
+	if err := os.WriteFile(systemPath, []byte(systemData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// These are the real mainline fit-params measurements. The growth rows are
+	// legacy poison: the same startup allocation rounded up by one MiB.
+	legacyProbes := map[int]string{
+		256: "PROBED_COMPUTE_BUF_MB=33893\nPROBED_COMPUTE_BUF_MB_CUDA0=33893\nPROBED_COMPUTE_BUF_MB_CUDA1=299\nPROBED_COMPUTE_BUF_MB_CUDA2=33697\nPROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA0=33894\n",
+		128: "PROBED_COMPUTE_BUF_MB=17074\nPROBED_COMPUTE_BUF_MB_CUDA0=17074\nPROBED_COMPUTE_BUF_MB_CUDA1=149\nPROBED_COMPUTE_BUF_MB_CUDA2=16976\nPROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA0=17075\n",
+		64:  "PROBED_COMPUTE_BUF_MB=8664\nPROBED_COMPUTE_BUF_MB_CUDA0=8664\nPROBED_COMPUTE_BUF_MB_CUDA1=74\nPROBED_COMPUTE_BUF_MB_CUDA2=8616\nPROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA2=8617\n",
+	}
+	for ubatch, data := range legacyProbes {
+		path := probeCachePath(cacheDir, model, 1048576, ubatch, "high", "gpu", "llama", caps.GPUs, 0)
+		if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	strat, err := Compute(caps, model, Options{
+		KVPlacement: "auto",
+		KVQuality:   "high",
+		BackendTag:  "llama",
+		Parallel:    1,
+		CacheDir:    cacheDir,
+	})
+	if err != nil {
+		t.Fatalf("full-context placement should fit: %v", err)
+	}
+	if strat.ContextSize != 1048576 {
+		t.Fatalf("context was lowered to %d; want the full 1048576", strat.ContextSize)
+	}
+	if strat.KVPlacement != "gpu" || strat.KVType != "f16" {
+		t.Fatalf("mainline DeepSeek4 must keep f16 KV on GPU, got placement=%s type=%s", strat.KVPlacement, strat.KVType)
+	}
+	if got := model.MeasuredKVBytesPerTok["f16"]; got != 6912.25 {
+		t.Fatalf("exact KV measurement was not migrated, got %.2f", got)
+	}
+	if len(strat.TensorSplit) != 3 || strat.TensorSplit[1] != 0 {
+		t.Fatalf("slow CUDA1 must remain expert-only, split=%v", strat.TensorSplit)
+	}
+	if !otStringUsesDevice(strat.OTString, 1) {
+		t.Fatalf("expert-only CUDA1 should still be filled with expert weights: %s", strat.OTString)
+	}
+}
+
 // TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement reproduces the
 // 2026-07-08 "no expert layers landed on GPU" report: DeepSeek-V4 at ctx
 // 1048576 with f16 KV (mainline requires f16 KV for correct dsv4 output —
@@ -369,7 +476,7 @@ func TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement(t *testing.T) {
 		64:  {0: 2470, 1: 2793, 2: 2797},
 	}
 	for ub, byGPU := range measured {
-		if err := writeProbeCacheForModel(cacheDir, model, 1048576, ub, "high", "gpu", "llama", gpus, byGPU, nil, 0); err != nil {
+		if err := writeProbeCacheForModel(cacheDir, model, 1048576, ub, "high", "gpu", "llama", gpus, 4, byGPU, nil, 0); err != nil {
 			t.Fatalf("seed probe cache ubatch=%d: %v", ub, err)
 		}
 	}
@@ -404,9 +511,9 @@ func TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement(t *testing.T) {
 // TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight is the end-to-end
 // version of TestArgsEmitsExplicitZeroCacheAndCheckpoints: runs the real
 // Compute() -> computeCRAM -> Args() pipeline against the exact hardware and
-// model shape that crashed on 2026-07-08 (128GB DeepSeek-V4 MoE, KV on CPU
-// per the v4 fork's only working config, three GPUs with no VRAM to spare
-// once the model is loaded) and asserts the emitted command line explicitly
+// model shape that crashed on 2026-07-08 (128GB DeepSeek-V4 MoE with an
+// explicitly requested CPU KV cache and three GPUs with no VRAM to spare once
+// the model is loaded) and asserts the emitted command line explicitly
 // disables both the prompt cache and context checkpoints, instead of
 // silently falling back to llama-server's defaults that caused the crash.
 func TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight(t *testing.T) {
@@ -442,7 +549,7 @@ func TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight(t *testing.T) {
 		ContextSize: 1048576,
 		KVPlacement: "cpu",
 		KVQuality:   "high",
-		BackendTag:  "v4",
+		BackendTag:  "llama",
 		Parallel:    1,
 		CacheDir:    t.TempDir(),
 	})
@@ -529,7 +636,7 @@ func TestMaximizeMoEGPUFitByUBatchRescuesExcludedGPU(t *testing.T) {
 		64:  {0: 2500, 1: 1300, 2: 500},
 	}
 	for ub, byGPU := range measured {
-		if err := writeProbeCacheForModel(cacheDir, model, 262144, ub, "high", "gpu", "llama", gpus, byGPU, nil, 0); err != nil {
+		if err := writeProbeCacheForModel(cacheDir, model, 262144, ub, "high", "gpu", "llama", gpus, 4, byGPU, nil, 0); err != nil {
 			t.Fatalf("seed probe cache ubatch=%d: %v", ub, err)
 		}
 	}
@@ -611,14 +718,87 @@ func TestExpertOnlySlowGPUUsesExpertReserveNotSplitOwnerReserve(t *testing.T) {
 	}
 	// The slow GPU would fail a normal split-owner reserve, but it can safely
 	// hold whole expert layers after the grounded expert-only reserve is used.
+	// nonExpertPerLayerMB is small so only the bandwidth trigger fires here.
 	splitFixed := []int{2048, 10000, 2048}
 	expertOnlyFixed := []int{2048, 1024, 2048}
-	expertOnly := expertOnlySlowGPUs(gpus, splitFixed, expertOnlyFixed, 3000)
+	expertOnly := expertOnlySlowGPUs(gpus, splitFixed, expertOnlyFixed, 3000, 1)
 	if !expertOnly[1] {
 		t.Fatalf("expected slow x1 GPU to classify expert-only, got %v", expertOnly)
 	}
 	if expertOnly[0] || expertOnly[2] {
 		t.Fatalf("only the slow x1 GPU should classify expert-only, got %v", expertOnly)
+	}
+}
+
+// TestExpertOnlyCapacityTrigger verifies the OR capacity path: a GPU whose
+// PCIe link is fast enough to own dense layers (bandwidth ratio above 0.10)
+// but whose VRAM cannot fit the split-owner compute reserve plus one dense
+// layer's non-expert weight is still classified expert-only.
+func TestExpertOnlyCapacityTrigger(t *testing.T) {
+	gpus := []detect.GPU{
+		{Index: 0, Name: "fast-big", VRAMTotalMB: 24576, BandwidthMBps: 16000},
+		{Index: 1, Name: "fast-small", VRAMTotalMB: 4096, BandwidthMBps: 16000},
+	}
+	// GPU1 has the same fast link as GPU0 (ratio 1.0, above 0.10), so the
+	// bandwidth trigger does NOT fire. But its VRAM after the split-owner
+	// reserve is too small for one dense layer (nonExpertPerLayerMB=2000),
+	// so the capacity trigger must classify it expert-only. Its expert-only
+	// reserve leaves enough room for one expert layer (3000 MB).
+	splitFixed := []int{2048, 3000}
+	expertOnlyFixed := []int{2048, 512}
+	expertOnly := expertOnlySlowGPUs(gpus, splitFixed, expertOnlyFixed, 3000, 2000)
+	if !expertOnly[1] {
+		t.Fatalf("expected small-VRAM GPU to classify expert-only via capacity trigger, got %v", expertOnly)
+	}
+	if expertOnly[0] {
+		t.Fatalf("fast-big GPU should not classify expert-only, got %v", expertOnly)
+	}
+}
+
+// TestExpertOnlyRetrofitAfterSplitElimination verifies the post-split retrofit:
+// a GPU that is NOT classified expert-only by bandwidth or capacity (its link
+// is fast and it fits compute+dense pre-split) but gets eliminated from the
+// tensor split by KV/compute pressure is retrofitted as expert-only so its
+// VRAM is not left idle. This mirrors the DeepSeek-V4 3-GPU rig where GPU2
+// (4070 x4, 12 GB) was stranded at ~400 MB while 37 expert layers streamed
+// from CPU RAM.
+func TestExpertOnlyRetrofitAfterSplitElimination(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+			{Index: 1, Name: "RTX 3060 x1", VRAMTotalMB: 12288, BandwidthMBps: 985},
+			{Index: 2, Name: "RTX 4070 x4", VRAMTotalMB: 12282, BandwidthMBps: 3938},
+		},
+		RAM: detect.RAMInfo{TotalMB: 128512, FreeMB: 120000},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	// Model sized so GPU2 (4070) is NOT bandwidth-expert-only (ratio 0.25 >
+	// 0.10) and fits compute+dense pre-split, but a large KV cache at 1M ctx
+	// eliminates it from the tensor split. The retrofit must then give it
+	// expert layers instead of leaving it idle.
+	model := &ModelProfile{
+		Path:           "retrofit-moe.gguf",
+		TotalSizeMB:    50 * 1024,
+		SizeBytes:      50 * 1024 * 1024 * 1024,
+		NumLayers:      12,
+		IsMoE:          true,
+		NumExperts:     128,
+		ExpertBytes:    int64(12 * 3500 * 1024 * 1024),
+		NonExpertBytes: int64(8 * 1024 * 1024 * 1024),
+		ContextSize:    32768,
+		HeadCountKV:    0,
+	}
+	strat, err := Compute(caps, model, Options{ContextSize: 32768, KVPlacement: "cpu", KVQuality: "low", CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	// GPU2 must not be stranded: either it has a tensor-split share, or it is
+	// expert-only and appears in the -ot string with =CUDA2.
+	if strat.TensorSplit[2] <= 0 && !otStringUsesDevice(strat.OTString, 2) {
+		t.Fatalf("GPU2 stranded: split=%v and not in OT %s", strat.TensorSplit, strat.OTString)
+	}
+	if excluded := numGPUsExcluded(strat, caps.GPUs); excluded != 0 {
+		t.Fatalf("no GPU should be excluded, got excluded=%d split=%v ot=%s", excluded, strat.TensorSplit, strat.OTString)
 	}
 }
 
@@ -632,14 +812,14 @@ func TestRecordMeasuredComputeBuffersMergesNotClobbers(t *testing.T) {
 	model := &ModelProfile{Path: "model.gguf", NumLayers: 43, NumExperts: 256}
 	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 24564}}
 
-	if err := RecordRuntimeGraphGrowth(cacheDir, model, 1048576, 512, "high", "gpu", "llama", gpus, map[int]int{0: 1000}); err != nil {
+	if err := RecordRuntimeGraphGrowth(cacheDir, model, 1048576, 512, "high", "gpu", "llama", gpus, 1, map[int]int{0: 1000}); err != nil {
 		t.Fatalf("seed runtime growth: %v", err)
 	}
-	if err := RecordMeasuredComputeBuffers(cacheDir, model, 1048576, 512, "high", "gpu", "llama", gpus, map[int]int{0: 17970}); err != nil {
+	if err := RecordMeasuredComputeBuffers(cacheDir, model, 1048576, 512, "high", "gpu", "llama", gpus, 1, map[int]int{0: 17970}); err != nil {
 		t.Fatalf("record compute buffers: %v", err)
 	}
 
-	pc := loadProbeCache(cacheDir, model, 1048576, 512, "high", "gpu", "llama", gpus)
+	pc := loadProbeCache(cacheDir, model, 1048576, 512, "high", "gpu", "llama", gpus, 1)
 	if pc == nil {
 		t.Fatal("expected a probe cache entry")
 	}
@@ -667,16 +847,10 @@ func TestArgsOmitFlashAttentionWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestDeepSeek4V4FlashAttentionFollowsKVPlacement(t *testing.T) {
+func TestFlashAttentionFollowsKVPlacement(t *testing.T) {
 	m := &ModelProfile{ModelArch: "deepseek4"}
-	if defaultFlashAttention(m, Options{BackendTag: "v4"}, "cpu") {
-		t.Fatal("deepseek4 on v4 with KV on CPU must leave flash attention at backend default (forcing it was unstable)")
-	}
-	if !defaultFlashAttention(m, Options{BackendTag: "v4"}, "gpu") {
-		t.Fatal("deepseek4 on v4 with KV on GPU must force --flash-attn on (the non-FA graph aborts: ggml.c:3660)")
-	}
 	if defaultFlashAttention(m, Options{BackendTag: "llama"}, "cpu") {
-		t.Fatal("KV on CPU auto-disables flash attention on every backend (fork or mainline) — claiming it's on here would emit a self-contradicting --flash-attn on --no-kv-offload command")
+		t.Fatal("KV on CPU auto-disables flash attention; claiming it is on would emit a self-contradicting --flash-attn on --no-kv-offload command")
 	}
 	if !defaultFlashAttention(m, Options{BackendTag: "llama"}, "gpu") {
 		t.Fatal("mainline deepseek4 with KV on GPU must default flash attention on (bounds the compute buffer; see Task #10)")

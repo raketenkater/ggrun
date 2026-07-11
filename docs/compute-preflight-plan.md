@@ -44,8 +44,8 @@ measured values (plus the separately-probed ~680 MB CUDA context overhead per GP
 `go/cmd/ggrun/preflight.go` + gate in `startLaunchWithCUDAOOMRecovery`:
 
 - `findFitParamsBin`: looks for `llama-fit-params` next to the resolved server binary
-  (backend build dir), then `.bin/`, then PATH. Absent (ik_llama, v4 fork) → gate
-  silently skipped, behavior unchanged.
+  (backend build dir), then `.bin/`, then PATH. If a custom backend does not ship a
+  companion binary, the gate is silently skipped and behavior is unchanged.
 - Before every launch attempt (including OOM re-plans), ggrun runs the fit-print with
   the memory-shaping subset of the real args (`-m/-c/-b/-ub/-ctk/-ctv/-np/-ngl/-ts/
   -sm/-ot/--n-cpu-moe/-fa/-mg`) and `CUDA_DEVICE_ORDER=PCI_BUS_ID` (same device
@@ -73,8 +73,8 @@ The +1000 MiB runtime growth is invisible to the startup reserve. Plan:
   a measured value, not a guessed margin. First-launch (no probe yet) keeps stage-1
   behavior; the canary runs once and upgrades the cache.
 - 2026-07-07 measurement (mainline, V4, 30k-token canary): see
-  `.benchmarks`/session notes — used to validate whether mainline exhibits the fork's
-  runtime growth at all.
+  `.benchmarks`/session notes — used to validate whether current mainline exhibits
+  the same runtime growth.
 
 ## Stage 3 — runtime OOM recovery (planned)
 

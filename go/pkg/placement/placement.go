@@ -59,7 +59,7 @@ type Strategy struct {
 	PlacementCachePath string `json:"-"`
 	// BackendSupportsFit is true when the backend's --help lists -fit/--fit. ggrun
 	// then emits `--fit off` for GPU launches to disable the backend's own memory
-	// auto-fitting (redundant with ggrun's explicit placement; crashes on the V4 fork).
+	// auto-fitting, which is redundant with ggrun's explicit placement.
 	BackendSupportsFit bool         `json:"-"`
 	MMap               bool         `json:"mmap"`
 	MLock              bool         `json:"mlock"`
@@ -210,8 +210,8 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		HasSSM:       model.HasSSM == 1,
 		Host:         opts.Host,
 		// ggrun sets explicit placement (-ngl/-ot/--tensor-split), so the backend's
-		// own auto memory-fitting (-fit) is redundant — and on the deepseek4 fork it
-		// crashes building the fit graph. Disable it when the backend supports the flag.
+		// own auto memory-fitting (-fit) is redundant with this explicit plan.
+		// Disable it when the backend supports the flag.
 		BackendSupportsFit: backendHelpSupports(opts.BackendHelp, "-fit"),
 	}
 
@@ -259,19 +259,15 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// KV cache type selection — try compact types first for large models
 	s.KVType = kvTypeFromQuality(s.KVQuality)
 
-	// Resolve KV placement "auto" → concrete value up-front. Previously "auto"
-	// only resolved inside the ContextSize<=0 branch (line below), so the pinned
-	// Claude Code path (ContextSize>0) stayed stuck on "auto" forever — leaving
-	// the flash-attention default and the --kv-offload flag to see a non-value
-	// and the deepseek4/v4 protection dead. Resolving here makes both see a real
-	// placement in every code path.
+	// Resolve KV placement "auto" → concrete value up-front so every caller and
+	// every explicit-context retry sees the same placement policy.
 	if s.KVPlacement == "auto" || s.KVPlacement == "" {
 		if opts.CPUMode || len(caps.GPUs) == 0 {
 			s.KVPlacement = "cpu"
 		} else {
 			sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
 			perGPUOH := perGPUVRAMOverheadMB(sysProbe, 0)
-			s.KVPlacement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs), opts.BackendTag)
+			s.KVPlacement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs))
 		}
 	}
 
@@ -322,7 +318,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				// (large window); auto → gpu if it fits, else cpu for a big MoE.
 				placement := s.KVPlacement
 				if placement == "auto" || placement == "" {
-					placement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs), opts.BackendTag)
+					placement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs))
 				}
 				s.KVPlacement = placement
 				s.ContextSize, s.KVType = computeAutoContextSizeKVPlacement(caps, model, totalSizeMB, s.KVType, placement, opts)
@@ -519,7 +515,7 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality, opts.KVPlacement, opts.BackendTag, caps.GPUs)
+	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality, opts.KVPlacement, opts.BackendTag, caps.GPUs, opts.Parallel)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}
@@ -589,7 +585,7 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	// Load model probe for compute buffer (same as MoE path)
 	probeHit := false
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
 	if pc != nil {
 		probeHit = true
 		computeBufMB = pc.ComputeBufMB
@@ -687,7 +683,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 
 		// Load model probe for compute buffer
 		computeBufMB := computeFloorMB
-		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
 		if pc != nil {
 			computeBufMB = pc.ComputeBufMB
 		}
@@ -841,16 +837,26 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// Load per-model/runtime probe cache. Until a model has completed one launch
 	// with these settings, use a first-launch fallback that keeps the main GPU
 	// conservative without charging the full prompt graph to every secondary GPU.
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
 	fixedPerGPU := make([]int, numGPUs)
 	expertOnlyFixedPerGPU := make([]int, numGPUs)
 	for i, g := range caps.GPUs {
 		computeBufMB := firstLaunchComputeBufMBForGPU(model, s.UBatchSize, i, gpuOrder)
 		runtimeGrowthMB := 0
 		if pc != nil {
-			if v := pc.ComputeBufByGPU[g.Index]; v > 0 {
-				computeBufMB = v
-			} else if pc.ComputeBufMB > 0 {
+			// Use the aggregate (primary) compute buffer for split-owner cost
+			// accounting. The per-GPU values in the probe cache are measured
+			// for the specific placement that ran (e.g. GPU1 expert-only =
+			// 299 MB, GPU0 split-owner = 33 GB at ub=256). When the placement
+			// changes between measurement and this computation — which is
+			// exactly what a re-plan does — the per-GPU values are wrong: a
+			// GPU that was expert-only (299 MB) might become a split-owner
+			// (needing the full ~33 GB), or vice versa. The aggregate
+			// (primary's compute buffer) is the maximum any split-owner would
+			// need, so using it for all GPUs is conservative but correct.
+			// Expert-only GPUs use expertOnlyComputeReserveMB which caps at
+			// the compute floor, so the aggregate doesn't affect them.
+			if pc.ComputeBufMB > 0 {
 				computeBufMB = pc.ComputeBufMB
 			}
 			// Real long requests can need more than the load-time graph
@@ -869,7 +875,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		fixedPerGPU[i] = sysCUDAOverheadByGPU[g.Index] + computeBufMB + runtimeGrowthMB
 		expertOnlyFixedPerGPU[i] = sysCUDAOverheadByGPU[g.Index] + expertOnlyComputeReserveMB(computeBufMB) + runtimeGrowthMB
 	}
-	expertOnlyGPU := expertOnlySlowGPUs(caps.GPUs, fixedPerGPU, expertOnlyFixedPerGPU, expertPerLayerMB)
+	expertOnlyGPU := expertOnlySlowGPUs(caps.GPUs, fixedPerGPU, expertOnlyFixedPerGPU, expertPerLayerMB, nonExpertPerLayerMB)
 
 	// Use only GPUs that can carry CUDA/compute overhead plus their emitted
 	// tensor-split share of all non-expert weights and KV. The split is
@@ -957,6 +963,26 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			break
 		}
 	}
+	// Post-split retrofit: a GPU eliminated from the split (KV or compute buffer
+	// exceeded its share) but not already classified expert-only can still hold
+	// whole expert layers. Without this, such a GPU sits idle while its VRAM
+	// could offload expert layers from CPU RAM. Reclassify it as expert-only
+	// when it can fit at least one complete expert layer under the expert-only
+	// reserve, so the expert-capacity loop below picks it up. Uses VRAMTotalMB
+	// (not the penalized VRAMFreeMB) because the OOM penalty from a prior hybrid
+	// placement attempt does not apply to an expert-only placement — the deficit
+	// was caused by dense weights + KV, which the expert-only GPU does not carry.
+	for i, g := range caps.GPUs {
+		if expertOnlyGPU[i] || used[i] || split[i] > 0 {
+			continue
+		}
+		if i >= len(expertOnlyFixedPerGPU) {
+			continue
+		}
+		if g.VRAMTotalMB-expertOnlyFixedPerGPU[i] >= expertPerLayerMB {
+			expertOnlyGPU[i] = true
+		}
+	}
 	if numGPUs > 1 {
 		s.TensorSplit = split
 	}
@@ -978,18 +1004,31 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			fixedMB = expertOnlyFixedPerGPU[gi]
 		}
 		// Expert-only GPUs carry the non-expert tensors (norms, attention) for
-		// every layer pinned to them via -ot, even though ownedLayers==0. Double
-		// the compute-buffer floor too: expert-only GPUs run the full per-layer
-		// forward pass, so the graph reserve must cover norms, routing, and all
-		// replicated layer tensors for every assigned layer.
-		if expertOnlyGPU[gi] && fixedMB < computeFloorMB*2 {
-			fixedMB = computeFloorMB * 2
+		// every layer pinned to them via -ot, even though ownedLayers==0. Keep
+		// the compute-buffer floor: expert-only GPUs run the per-layer forward
+		// pass for their pinned layers, so the graph reserve must cover norms,
+		// routing, and replicated layer tensors. The probe data shows the
+		// actual expert-only compute buffer is small (~299 MB for 3 layers on
+		// DeepSeek-V4), well under the 1024 MB floor.
+		if expertOnlyGPU[gi] && fixedMB < computeFloorMB {
+			fixedMB = computeFloorMB
 		}
 		nonExpertCharge := nonExpertChargeMB(ownedLayers, outputDev, gi)
 		if expertOnlyGPU[gi] {
 			nonExpertCharge = 0 // zero here; per-layer cost accounts for it below
 		}
-		roomMB := g.VRAMFreeMB() - fixedMB - nonExpertCharge - kvShareMB
+		var roomMB int
+		if expertOnlyGPU[gi] {
+			// Expert-only GPUs don't own dense layers or KV, so their room is
+			// the full VRAM minus the expert-only fixed costs. Use VRAMTotalMB
+			// to avoid the OOM penalty from a prior hybrid placement attempt —
+			// the penalty was for a different placement type (split-owner with
+			// dense + KV), not for expert-only. The preflight gate validates
+			// the actual fit before the load.
+			roomMB = g.VRAMTotalMB - fixedMB
+		} else {
+			roomMB = g.VRAMFreeMB() - fixedMB - nonExpertCharge - kvShareMB
+		}
 		if roomMB < 0 {
 			roomMB = 0
 		}
@@ -1325,6 +1364,23 @@ func ceilDivInt(n, d int) int {
 // layer (token embeddings) always stays on the CPU and owns no slot.
 func layerOwnership(split []float64, numLayers int) (owned []int, outputDev int) {
 	owned = make([]int, len(split))
+	layerDevices, outputDev := layerDeviceAssignments(split, numLayers)
+	for _, dev := range layerDevices {
+		if dev >= 0 && dev < len(owned) {
+			owned[dev]++
+		}
+	}
+	return owned, outputDev
+}
+
+// layerDeviceAssignments returns the exact device index for every repeating
+// layer plus the output slot. Keeping the per-layer ownership is needed when a
+// cost applies only to the MoE suffix (for example shared experts).
+func layerDeviceAssignments(split []float64, numLayers int) (layerDevices []int, outputDev int) {
+	layerDevices = make([]int, numLayers)
+	for i := range layerDevices {
+		layerDevices[i] = -1
+	}
 	outputDev = -1
 	sum := 0.0
 	for _, v := range split {
@@ -1359,10 +1415,10 @@ func layerOwnership(split []float64, numLayers int) (owned []int, outputDev int)
 		if slot == numLayers {
 			outputDev = dev
 		} else {
-			owned[dev]++
+			layerDevices[slot] = dev
 		}
 	}
-	return
+	return layerDevices, outputDev
 }
 
 // ownedShareMB charges a device its owned-layer fraction of a per-layer total
@@ -2008,12 +2064,17 @@ func gpuSplitWeight(g detect.GPU) float64 {
 	return float64(g.BandwidthMBps)
 }
 
-// expertOnlySlowGPUs classifies very slow PCIe cards as expert-only devices:
-// they must not own regular layer slots, but their VRAM can still hold whole
-// expert layers. The classification uses the normal split-owner reserve to
-// make sure at least one true layer owner remains, and the expert-only reserve
-// to decide whether a slow card can carry at least one complete expert layer.
-func expertOnlySlowGPUs(gpus []detect.GPU, splitFixedPerGPU, expertOnlyFixedPerGPU []int, expertPerLayerMB int) []bool {
+// expertOnlySlowGPUs classifies GPUs as expert-only devices: they must not own
+// regular layer slots, but their VRAM can still hold whole expert layers. A GPU
+// is an expert-only candidate when EITHER (a) its PCIe link is very slow
+// relative to the fastest GPU (bandwidth ratio <= expertOnlyMaxBandwidthRatio),
+// so owning dense layers would bottleneck the layer pipeline, OR (b) it cannot
+// fit the split-owner compute reserve plus one dense layer's non-expert weight
+// (capacity trigger), so a dense split slot would be wasted on it. The
+// classification uses the normal split-owner reserve to make sure at least one
+// true layer owner remains, and the expert-only reserve to decide whether a
+// candidate card can carry at least one complete expert layer.
+func expertOnlySlowGPUs(gpus []detect.GPU, splitFixedPerGPU, expertOnlyFixedPerGPU []int, expertPerLayerMB, nonExpertPerLayerMB int) []bool {
 	expertOnly := make([]bool, len(gpus))
 	if len(gpus) <= 1 || expertPerLayerMB <= 0 {
 		return expertOnly
@@ -2039,7 +2100,9 @@ func expertOnlySlowGPUs(gpus []detect.GPU, splitFixedPerGPU, expertOnlyFixedPerG
 		if i >= len(splitFixedPerGPU) || i >= len(expertOnlyFixedPerGPU) || g.BandwidthMBps <= 0 {
 			continue
 		}
-		if float64(g.BandwidthMBps)/float64(maxBandwidth) > expertOnlyMaxBandwidthRatio {
+		slowLink := float64(g.BandwidthMBps)/float64(maxBandwidth) <= expertOnlyMaxBandwidthRatio
+		cantFitDense := nonExpertPerLayerMB > 0 && g.VRAMFreeMB()-splitFixedPerGPU[i] < nonExpertPerLayerMB
+		if !slowLink && !cantFitDense {
 			continue
 		}
 		if g.VRAMFreeMB()-expertOnlyFixedPerGPU[i] < expertPerLayerMB {
@@ -2072,16 +2135,16 @@ func expertOnlySlowGPUs(gpus []detect.GPU, splitFixedPerGPU, expertOnlyFixedPerG
 // explicitly pinned experts. It keeps measured/recorded CUDA and runtime growth
 // outside this helper and caps the prompt-graph reserve at llama.cpp's compute
 // floor, because an expert-only GPU does not own regular prompt-processing
-// layer slots or KV.
+// layer slots or KV. The probe cache's per-GPU compute buffer is measured for
+// the placement that actually ran (split-owner with dense layers), which is
+// dramatically larger than what an expert-only GPU needs (e.g. DeepSeek-V4:
+// ~9.8 GB split-owner vs ~299 MB expert-only on the same card). Using the
+// split-owner value for an expert-only GPU blocks it from receiving any expert
+// layers at all. Cap at the compute floor: it is a conservative reserve for
+// the small expert-projection graph, and the preflight gate catches any real
+// overflow before the load.
 func expertOnlyComputeReserveMB(splitOwnerComputeMB int) int {
-	if splitOwnerComputeMB <= 0 {
-		return computeFloorMB
-	}
-	// An expert-only GPU still needs the full prompt-graph compute buffer
-	// (the scratch reserve for the forward pass), so do not cap it at the
-	// flat compute floor. Capping under-reserved slow expert-only GPUs and
-	// caused OOM (audit #5).
-	return splitOwnerComputeMB
+	return computeFloorMB
 }
 
 // modelAwareHeadroom estimates the non-weight VRAM/RAM the runtime needs beyond
@@ -2188,7 +2251,7 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}
@@ -2348,22 +2411,12 @@ func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, to
 	return cram, maxCheckpoints
 }
 
-// defaultFlashAttention decides whether ggrun forces `--flash-attn on`. It
-// must be evaluated against the RESOLVED KV placement: for deepseek4 on the
-// v4 fork the two graph paths are asymmetric and both directions failed in
-// production —
-//   - KV on GPU with FA off: graph reservation aborts after the full model
-//     load (GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2), ggml.c:3660;
-//     reproduced at ctx 262144 AND 1048576 on 2026-07-07), while the same
-//     configs served for days with FA forced on.
-//   - KV on CPU with FA forced on: the fork's reservation path was unstable
-//     (2026-07-05); ctx 1048576 with KV on CPU runs verified-clean with FA
-//     left at the backend default.
-//
-// Every other model/backend keeps the long-standing FA-on default.
+// defaultFlashAttention decides whether ggrun forces `--flash-attn on`. The
+// decision must follow the resolved KV placement because the CUDA FA kernel
+// requires GPU-resident KV.
 func defaultFlashAttention(model *ModelProfile, opts Options, kvPlacement string) bool {
 	// llama.cpp auto-disables flash attention whenever the KV cache isn't
-	// GPU-resident, on every backend (fork or mainline) — the FA CUDA kernel
+	// GPU-resident — the FA CUDA kernel
 	// needs its KV tensor on the same device doing the attention compute.
 	// Claiming FlashAttention here when kvPlacement=="cpu" would emit a
 	// self-contradicting `--flash-attn on --no-kv-offload` command; for
@@ -2454,7 +2507,7 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 // A big MoE whose experts must offload to CPU puts KV on CPU instead: that frees
 // VRAM for more expert layers (the decode-bandwidth bottleneck) and unlocks a much
 // larger context. A dense model bigger than VRAM keeps KV on GPU (its only spot).
-func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB, vramOverheadMB int, backendTag string) string {
+func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB, vramOverheadMB int) string {
 	freeVRAM := 0
 	for _, g := range caps.GPUs {
 		freeVRAM += g.VRAMFreeMB()
@@ -2463,35 +2516,17 @@ func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, tota
 		return "gpu"
 	}
 	if model.IsMoE {
-		if strings.EqualFold(model.ModelArch, "deepseek4") && !IsDeepSeek4V4Fork(model, backendTag) {
+		if strings.EqualFold(model.ModelArch, "deepseek4") {
 			// KV on CPU makes llama.cpp auto-disable flash attention, and
 			// deepseek4's non-FA graph materializes score tensors that grow
 			// with real token position (~98 KiB/token measured 2026-07-09) —
-			// no load-time reserve can cover that, so trading expert VRAM for
-			// GPU KV is strictly cheaper. Only applies off the v4 fork: the
-			// v4 fork cannot build KV-on-GPU graphs at all for deepseek4 (see
-			// IsDeepSeek4V4Fork), so it keeps the CPU placement regardless
-			// (its FA is off either way).
+			// no load-time reserve can cover that. Mainline therefore keeps
+			// DeepSeek4 KV on GPU and trades expert VRAM for a bounded FA graph.
 			return "gpu"
 		}
 		return "cpu"
 	}
 	return "gpu"
-}
-
-// IsDeepSeek4V4Fork reports whether this model/backend can only reserve
-// single-slot, KV-on-CPU graphs. The v4 fork's deepseek4 build_arch_graph
-// aborts with GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2) (ggml.c:3660)
-// when the hybrid-iswa KV cache lives on the GPU (ctx 262144 AND 1048576, FA
-// on AND off, patched AND clean fork builds) and equally with --parallel 4
-// even with KV on CPU — reproduced across five 15-minute loads on 2026-07-07.
-// The ONLY configuration that has ever served this arch here is KV on CPU
-// with a single sequence slot (verified end-to-end at ctx 1048576). Old
-// kv=gpu probe caches are no evidence to the contrary: their compute values
-// came from the fork's fit-table printout, and .place files are also written
-// during OOM re-plans, not only on success.
-func IsDeepSeek4V4Fork(model *ModelProfile, backendTag string) bool {
-	return model != nil && strings.EqualFold(model.ModelArch, "deepseek4") && strings.EqualFold(backendTag, "v4")
 }
 
 // computeAutoContextSizeKVPlacement computes the largest context whose KV cache
@@ -2692,8 +2727,8 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
 		// Disable the backend's own memory auto-fit: ggrun already sets explicit
-		// placement, and the fit pass builds a graph that crashes on the deepseek4
-		// fork (GGML_ASSERT in build_arch_graph). Only when the backend has the flag.
+		// placement, so a second fit pass is redundant. Only emit the option when
+		// the selected backend supports it.
 		if s.BackendSupportsFit {
 			args = append(args, "--fit", "off")
 		}
@@ -2775,7 +2810,7 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, DraftFlags(s.Draft)...)
 	}
 
-	// Server --timeout: the v4 and ik forks default to 600s, which kills
+	// Server --timeout: some custom backends default to 600s, which kills
 	// long Claude Code requests mid-stream. Match the client timeout so
 	// queued subagents and large prompt-processing runs don't time out
 	// server-side (Codex audit #5).
@@ -2822,6 +2857,7 @@ func SystemCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
 }
 
 func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
+	explicitCacheDir := cacheDir != ""
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
 		cacheDir = filepath.Join(home, ".cache", "ggrun")
@@ -2830,6 +2866,21 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	gpuSig := gpuSignatureHash(gpus)
 	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
 	data, err := os.ReadFile(path)
+	if err != nil && explicitCacheDir {
+		// App-local installs used to read ~/.cache/ggrun before LLM_APP_HOME
+		// became authoritative. Preserve those measured CUDA values and migrate
+		// them lazily instead of treating the missing new-path file as zero.
+		home, _ := os.UserHomeDir()
+		legacyPath := filepath.Join(home, ".cache", "ggrun", fmt.Sprintf("system_%s.cache", gpuSig))
+		if legacyPath != path {
+			if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+				data, err = legacyData, nil
+				if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr == nil {
+					_ = os.WriteFile(path, legacyData, 0644)
+				}
+			}
+		}
+	}
 	if err != nil {
 		return nil
 	}
@@ -2900,7 +2951,23 @@ func kvCachePath(cacheDir string, model *ModelProfile) string {
 
 // loadMeasuredKVRates reads the per-model KV cache into a kvType→bytes/token map.
 func loadMeasuredKVRates(cacheDir string, model *ModelProfile) map[string]float64 {
-	data, err := os.ReadFile(kvCachePath(cacheDir, model))
+	path := kvCachePath(cacheDir, model)
+	data, err := os.ReadFile(path)
+	if err != nil && cacheDir != "" {
+		// See loadSystemProbe: older installs wrote exact KV measurements to the
+		// user cache even when the current app uses an app-local cache directory.
+		// A compressed-attention model can be overestimated by many GiB without
+		// this value, so migrate the measurement rather than reverting to formula.
+		legacyPath := kvCachePath("", model)
+		if legacyPath != path {
+			if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+				data, err = legacyData, nil
+				if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr == nil {
+					_ = os.WriteFile(path, legacyData, 0644)
+				}
+			}
+		}
+	}
 	if err != nil {
 		return nil
 	}
@@ -3077,8 +3144,8 @@ func ProbeKVViaVRAMDelta(backendPath string, baseArgs []string, gpus []detect.GP
 // RunPostLaunchKVProbe reads the KV cache size llama.cpp actually allocated at
 // ctxSize from the backend log and caches it as bytes-per-token for this model +
 // kvType, so future launches size the context from measured truth instead of the
-// per-arch GGUF formula. No-op if the log has no KV line or a value is already
-// cached for this kvType.
+// per-arch GGUF formula. A successful launch deliberately refreshes a preflight
+// estimate because the final buffer log is the most precise measurement.
 func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvType, serverLog string) {
 	if model == nil || ctxSize <= 0 || serverLog == "" {
 		return
@@ -3087,9 +3154,6 @@ func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvT
 		kvType = "q8_0"
 	}
 	kvType = strings.ToLower(kvType)
-	if existing := loadMeasuredKVRates(cacheDir, model); existing[kvType] > 0 {
-		return
-	}
 	totalKVMB := parseKVBufferTotalMB(serverLog)
 	if totalKVMB <= 0 {
 		return
@@ -3102,6 +3166,28 @@ func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvT
 		fmt.Sprintf("launch log: ctx=%d total_kv=%.0fMB", ctxSize, totalKVMB))
 }
 
+// RecordMeasuredContextMB records the backend-authoritative total context
+// allocation reported by llama-fit-params. For placement purposes this is the
+// exact quantity computeKVTotalMB must reserve: summing every device row keeps
+// GPU-, CPU-, and mixed-KV placements on the same accounting path. The model is
+// updated in memory as well as on disk so an immediate preflight re-plan sees
+// the measurement without waiting for another process or launch.
+func RecordMeasuredContextMB(cacheDir string, model *ModelProfile, ctxSize int, kvType string, totalContextMB int) {
+	if model == nil || ctxSize <= 0 || totalContextMB <= 0 {
+		return
+	}
+	if kvType == "" {
+		kvType = "q8_0"
+	}
+	kvType = strings.ToLower(kvType)
+	bytesPerTok := float64(totalContextMB) * 1048576.0 / float64(ctxSize)
+	if bytesPerTok <= 0 {
+		return
+	}
+	writeMeasuredKVRate(cacheDir, model, kvType, bytesPerTok,
+		fmt.Sprintf("fit-params preflight: ctx=%d total_context=%dMB", ctxSize, totalContextMB))
+}
+
 // RecordMeasuredComputeBuffers records per-GPU compute-buffer MiB measured by
 // the no-alloc fit-params preflight (cmd/ggrun/preflight.go) for the exact
 // ctx/ubatch/KV/backend/GPU-set key, merging with (not clobbering) any
@@ -3110,11 +3196,11 @@ func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvT
 // first-launch heuristic (ubatch*4, clamped 1024-4096) — which measurably
 // under-estimates flash-attention's compute buffer at large context (e.g.
 // ~17-20GB actual vs a 4096MB clamp for DeepSeek-V4 at ctx 1M, f16 KV).
-func RecordMeasuredComputeBuffers(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, computeByGPU map[int]int) error {
+func RecordMeasuredComputeBuffers(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, computeByGPU map[int]int) error {
 	if model == nil || ctxSize <= 0 || ubatch <= 0 || len(computeByGPU) == 0 {
 		return nil
 	}
-	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
 	growth := map[int]int{}
 	kvPerLayerMB := 0
 	if pc != nil {
@@ -3123,7 +3209,7 @@ func RecordMeasuredComputeBuffers(cacheDir string, model *ModelProfile, ctxSize,
 		}
 		kvPerLayerMB = pc.KVPerLayerMB
 	}
-	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, computeByGPU, growth, kvPerLayerMB)
+	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, growth, kvPerLayerMB)
 }
 
 // RunPostLaunchModelProbe records measured compute-buffer data for the exact
@@ -3133,8 +3219,8 @@ func RecordMeasuredComputeBuffers(cacheDir string, model *ModelProfile, ctxSize,
 // device. These values are populated only from observed runtime allocation growth
 // or exact cudaMalloc failures for the same runtime signature; missing means
 // unknown, not zero-margin proof.
-func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) map[int]int {
-	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) map[int]int {
+	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
 	if pc == nil || len(pc.RuntimeGraphGrowthByGPU) == 0 {
 		return nil
 	}
@@ -3153,8 +3239,8 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 // HasRuntimeGraphGrowthProbe reports whether all active GPUs have measured
 // runtime-growth data for this exact runtime signature. This is a verification
 // marker for future agents: no static fallback is hidden behind this predicate.
-func HasRuntimeGraphGrowthProbe(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) bool {
-	growth := RuntimeGraphGrowthByGPU(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+func HasRuntimeGraphGrowthProbe(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) bool {
+	growth := RuntimeGraphGrowthByGPU(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
 	if len(gpus) == 0 || len(growth) == 0 {
 		return false
 	}
@@ -3170,11 +3256,11 @@ func HasRuntimeGraphGrowthProbe(cacheDir string, model *ModelProfile, ctxSize, u
 // current runtime signature. The values must come from measurement: VRAM delta
 // after a canary or an exact cudaMalloc allocation request parsed from backend
 // logs. It intentionally never adds static margins.
-func RecordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, growthByGPU map[int]int) error {
+func RecordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int) error {
 	if model == nil || ctxSize <= 0 || ubatch <= 0 || len(growthByGPU) == 0 {
 		return nil
 	}
-	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus)
+	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
 	computeByGPU := map[int]int{}
 	kvPerLayerMB := 0
 	mergedGrowth := map[int]int{}
@@ -3192,17 +3278,17 @@ func RecordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 			mergedGrowth[idx] = v
 		}
 	}
-	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, computeByGPU, mergedGrowth, kvPerLayerMB)
+	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, mergedGrowth, kvPerLayerMB)
 }
 
 // RecordRuntimeGraphGrowthFromOOM records a runtime graph allocation observed in
 // a cudaMalloc OOM line. allocMB is already the backend-requested size, so using
 // it as growth is measured accounting, not a reserve margin.
-func RecordRuntimeGraphGrowthFromOOM(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, device, allocMB int) error {
+func RecordRuntimeGraphGrowthFromOOM(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel, device, allocMB int) error {
 	if device < 0 || allocMB <= 0 {
 		return nil
 	}
-	return RecordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, map[int]int{device: allocMB})
+	return RecordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, map[int]int{device: allocMB})
 }
 
 // RunPostLaunchModelProbeVRAMDelta writes per-GPU compute-buffer probe cache from
@@ -3210,6 +3296,97 @@ func RecordRuntimeGraphGrowthFromOOM(cacheDir string, model *ModelProfile, ctxSi
 // works even when the server binary suppresses LLAMA_LOG_INFO. It estimates model
 // weight per GPU from the placement OT assignments, subtracts that from the VRAM
 // delta, and stores the remainder as the measured compute-buffer value for that GPU.
+func computeBuffersFromVRAMDelta(
+	model *ModelProfile, strategy *Strategy, gpus []detect.GPU,
+	baselineVRAMByGPU, usedVRAMByGPU, overheadByGPU map[int]int,
+) map[int]int {
+	if model == nil || strategy == nil || model.NumLayers <= 0 || len(gpus) == 0 {
+		return nil
+	}
+	// Partial gate+up pins do not expose their byte size in the OT string. A
+	// guessed model subtraction would turn this fallback into poisoned compute
+	// data, so rely on fit/log probes for those placements.
+	if strings.Contains(strategy.OTString, `ffn_(gate_up|up_gate|gate|up)_(ch|)exps`) {
+		return nil
+	}
+
+	assignments := parseOTAssignments(strategy.OTString)
+	expertLayersByGPU := map[int]int{}
+	for _, a := range assignments {
+		expertLayersByGPU[a.CUDAIndex] += a.Count
+	}
+	moeLayers := model.NumLayers - model.LeadingDense
+	if moeLayers <= 0 {
+		moeLayers = model.NumLayers
+	}
+	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
+
+	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
+	if tokenMB := bytesToMiBCeil(model.TokenEmbdBytes); tokenMB > 0 && tokenMB < nonExpertTotalMB {
+		nonExpertTotalMB -= tokenMB
+	}
+	outputMB := bytesToMiBCeil(model.OutputBytes)
+	if outputMB > 0 && outputMB < nonExpertTotalMB {
+		nonExpertTotalMB -= outputMB
+	} else {
+		outputMB = 0
+	}
+	shexpTotalMB := bytesToMiBCeil(model.ShexpBytes)
+	if shexpTotalMB < 0 || shexpTotalMB >= bytesToMiBCeil(model.ExpertBytes) {
+		shexpTotalMB = 0
+	}
+	owned, outputDev := layerOwnership(strategy.TensorSplit, model.NumLayers)
+	layerDevices, _ := layerDeviceAssignments(strategy.TensorSplit, model.NumLayers)
+	moeOwned := make([]int, len(strategy.TensorSplit))
+	moeStart := model.LeadingDense
+	if moeStart < 0 || moeStart >= model.NumLayers {
+		moeStart = 0
+	}
+	for layer := moeStart; layer < len(layerDevices); layer++ {
+		if dev := layerDevices[layer]; dev >= 0 && dev < len(moeOwned) {
+			moeOwned[dev]++
+		}
+	}
+
+	kvTotalMB := 0
+	if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
+		kvTotalMB = computeKVTotalMB(model, strategy.ContextSize, strategy.KVType)
+	}
+
+	computeByGPU := map[int]int{}
+	for gi, g := range gpus {
+		overheadMB, measured := overheadByGPU[g.Index]
+		if !measured {
+			continue
+		}
+		usedMB := usedVRAMByGPU[g.Index]
+		baselineMB := baselineVRAMByGPU[g.Index]
+		if usedMB <= baselineMB {
+			continue
+		}
+
+		modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
+		if gi < len(owned) && owned[gi] > 0 {
+			modelMB += ownedShareMB(nonExpertTotalMB, owned, model.NumLayers, gi)
+		}
+		if gi < len(moeOwned) && moeOwned[gi] > 0 {
+			modelMB += int(math.Ceil(float64(shexpTotalMB) * float64(moeOwned[gi]) / float64(moeLayers)))
+		}
+		if gi == outputDev {
+			modelMB += outputMB
+		}
+		kvShareMB := ownedShareMB(kvTotalMB, owned, model.NumLayers, gi)
+		bufMB := usedMB - baselineMB - overheadMB - modelMB - kvShareMB
+		if bufMB > 0 {
+			computeByGPU[g.Index] = bufMB
+		}
+	}
+	if len(computeByGPU) == 0 {
+		return nil
+	}
+	return computeByGPU
+}
+
 func RunPostLaunchModelProbeVRAMDelta(
 	cacheDir string, model *ModelProfile, strategy *Strategy,
 	backendTag string, gpus []detect.GPU, baselineVRAMByGPU map[int]int,
@@ -3221,101 +3398,36 @@ func RunPostLaunchModelProbeVRAMDelta(
 		home, _ := os.UserHomeDir()
 		cacheDir = filepath.Join(home, ".cache", "ggrun")
 	}
-
-	// Parse OT assignments to count expert layers per GPU.
-	assignments := parseOTAssignments(strategy.OTString)
-	expertLayersByGPU := map[int]int{}
-	for _, a := range assignments {
-		expertLayersByGPU[a.CUDAIndex] += a.Count
+	// This is strictly a fallback for backends that expose neither fit-params nor
+	// compute-buffer log rows. Never replace an authoritative probe already
+	// recorded by preflight for this exact runtime signature.
+	existing := loadProbeCache(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, strategy.Parallel)
+	if existing != nil && len(existing.ComputeBufByGPU) > 0 {
+		return false
 	}
 
-	moeLayers := model.NumLayers - model.LeadingDense
-	if moeLayers <= 0 {
-		moeLayers = model.NumLayers
-	}
-	expertPerLayerMB := ceilDivInt(bytesToMiBCeil(model.ExpertBytes), moeLayers)
-	nonExpertTotalMB := bytesToMiBCeil(model.NonExpertBytes)
-	// Token embeddings are CPU-only; subtract them so the per-layer
-	// non-expert estimate is not inflated by non-GPU-resident bytes.
-	tokenEmbdMB := bytesToMiBCeil(model.TokenEmbdBytes)
-	if tokenEmbdMB > 0 && tokenEmbdMB < nonExpertTotalMB {
-		nonExpertTotalMB -= tokenEmbdMB
-	}
-
-	// Reconstruct per-GPU owned layer counts from tensor-split, matching
-	// buildMoEOffload. Using owned layers instead of splitShare × total
-	// prevents over-counting non-expert bytes on split-share GPUs whose
-	// layers have experts on other devices via OT pinning.
-	ownedLayers := make([]int, len(gpus))
-	if len(strategy.TensorSplit) > 0 {
-		totalW := 0.0
-		for _, v := range strategy.TensorSplit {
-			totalW += v
-		}
-		if totalW > 0 {
-			remaining := model.NumLayers
-			for i, s := range strategy.TensorSplit {
-				layers := int(float64(model.NumLayers) * s / totalW)
-				if i == len(strategy.TensorSplit)-1 {
-					layers = remaining
-				}
-				if layers > remaining {
-					layers = remaining
-				}
-				ownedLayers[i] = layers
-				remaining -= layers
-			}
-		}
-	}
-	nonExpertPerLayerMB := 0
-	if model.NumLayers > 0 {
-		nonExpertPerLayerMB = nonExpertTotalMB / model.NumLayers
-	}
-
-	computeByGPU := map[int]int{}
+	usedVRAMByGPU := map[int]int{}
 	for _, g := range gpus {
 		usedMB := QueryVRAMUsed(g.Index)
-		bl := baselineVRAMByGPU[g.Index]
-		if usedMB <= 0 || usedMB <= bl {
-			continue
+		if usedMB > 0 {
+			usedVRAMByGPU[g.Index] = usedMB
 		}
-		deltaMB := usedMB - bl
-
-		modelMB := expertLayersByGPU[g.Index] * expertPerLayerMB
-		if g.Index < len(ownedLayers) && ownedLayers[g.Index] > 0 {
-			modelMB += ownedLayers[g.Index] * nonExpertPerLayerMB
-		}
-
-		kvShareMB := 0
-		if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
-			kvTotal := computeKVTotalMB(model, strategy.ContextSize, strategy.KVQuality)
-			if kvTotal > 0 && len(gpus) > 0 {
-				kvShareMB = kvTotal / len(gpus)
-			}
-		}
-
-		bufMB := deltaMB - modelMB - kvShareMB
-		if bufMB < 0 {
-			bufMB = 0
-		}
-		computeByGPU[g.Index] = bufMB
 	}
-
+	computeByGPU := computeBuffersFromVRAMDelta(model, strategy, gpus, baselineVRAMByGPU, usedVRAMByGPU, SystemCUDAOverheadByGPU(cacheDir, gpus))
 	if len(computeByGPU) == 0 {
 		return false
 	}
 
 	// Preserve any runtime-growth history from a previous OOM so the probe
 	// cache does not silently erase it (audit cross-check #3).
-	existing := loadProbeCache(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
-		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus)
 	var mergedGrowth map[int]int
 	if existing != nil {
 		mergedGrowth = existing.RuntimeGraphGrowthByGPU
 	}
 
 	if err := writeProbeCacheForModel(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
-		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, computeByGPU, mergedGrowth, 0); err == nil {
+		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, strategy.Parallel, computeByGPU, mergedGrowth, 0); err == nil {
 		indices := make([]int, 0, len(computeByGPU))
 		for idx := range computeByGPU {
 			indices = append(indices, idx)
@@ -3331,7 +3443,7 @@ func RunPostLaunchModelProbeVRAMDelta(
 	return false
 }
 
-func RunPostLaunchModelProbe(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, serverLog string) bool {
+func RunPostLaunchModelProbe(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, serverLog string) bool {
 	if model == nil || ctxSize <= 0 || ubatch <= 0 || serverLog == "" {
 		return false
 	}
@@ -3340,7 +3452,7 @@ func RunPostLaunchModelProbe(cacheDir string, model *ModelProfile, ctxSize, ubat
 	if len(computeByGPU) == 0 && kvPerLayerMB <= 0 {
 		return false
 	}
-	if err := WriteProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, computeByGPU, kvPerLayerMB); err == nil {
+	if err := writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, nil, kvPerLayerMB); err == nil {
 		if len(computeByGPU) == 0 {
 			return true
 		}
@@ -3367,7 +3479,13 @@ func writeMeasuredKVRate(cacheDir string, model *ModelProfile, kvType string, by
 	if rates == nil {
 		rates = map[string]float64{}
 	}
+	for k, v := range model.MeasuredKVBytesPerTok {
+		if v > 0 && rates[k] <= 0 {
+			rates[k] = v
+		}
+	}
 	rates[kvType] = bytesPerTok
+	model.MeasuredKVBytesPerTok = rates
 
 	path := kvCachePath(cacheDir, model)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -3538,8 +3656,8 @@ func parseMiB(line string) float64 {
 
 // loadProbeCache tries to load per-model/runtime probe data.
 // Keys the probe cache file by an MD5 of the model + placement runtime signature.
-func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU) *probeCache {
-	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, 0, "")
+func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) *probeCache {
+	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, probeParallelKey(parallel))
 	if path == "" {
 		return nil
 	}
@@ -3550,6 +3668,7 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	}
 	content := string(data)
 	pc := &probeCache{ComputeBufByGPU: map[int]int{}, RuntimeGraphGrowthByGPU: map[int]int{}}
+	schemaVersion := 1
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -3563,6 +3682,10 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 		k := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(strings.Trim(parts[1], `"`))
 		switch {
+		case k == "PROBE_CACHE_SCHEMA":
+			if v, err := strconv.Atoi(val); err == nil && v > 0 {
+				schemaVersion = v
+			}
 		case k == "PROBED_COMPUTE_BUF_MB":
 			if v, err := strconv.Atoi(val); err == nil && v >= 0 {
 				pc.ComputeBufMB = v
@@ -3587,13 +3710,26 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 			}
 		}
 	}
+	if schemaVersion < 2 {
+		// Before schema 2, a startup graph-reserve OOM was written once as the
+		// measured compute buffer and again as "runtime growth" from the same
+		// cudaMalloc line (rounding made the second value exactly compute or
+		// compute+1 MiB). Summing both excluded otherwise viable GPUs. Drop only
+		// that unambiguous legacy duplicate; genuine post-health growth is kept.
+		for idx, growth := range pc.RuntimeGraphGrowthByGPU {
+			compute := pc.ComputeBufByGPU[idx]
+			if compute > 0 && growth >= compute && growth <= compute+1 {
+				delete(pc.RuntimeGraphGrowthByGPU, idx)
+			}
+		}
+	}
 	if pc.ComputeBufMB > 0 || len(pc.ComputeBufByGPU) > 0 || len(pc.RuntimeGraphGrowthByGPU) > 0 || pc.KVPerLayerMB > 0 {
 		return pc
 	}
 	return nil
 }
 
-func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, tensorSplit string) string {
+func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) string {
 	if model == nil {
 		return ""
 	}
@@ -3610,14 +3746,16 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	if backendTag == "" {
 		backendTag = "llama"
 	}
-	// MD5 hash key over model/runtime/placement. Compute buffers can differ when
-	// KV placement, backend fork, GPU set, parallel slots, or tensor-split change,
-	// so all are part of the key (audit cross-check #6).
+	// MD5 hash key over model/runtime/placement. Compute buffers differ with KV
+	// placement, backend, GPU set, and parallel slots. Tensor split is derived
+	// after probes are loaded, so it cannot honestly participate in this key.
 	modelName := filepath.Base(model.Path)
-	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:%s",
+	// Keep the historical trailing separator so serial (parallel key 0) cache
+	// paths remain compatible with measurements from before slot isolation.
+	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:",
 		modelName, model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
-		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel, tensorSplit)
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel)
 	hash := md5Hash12(key)
 	return filepath.Join(cacheDir, hash+".probe")
 }
@@ -3672,6 +3810,19 @@ type probeCache struct {
 	KVPerLayerMB            int
 }
 
+const probeCacheSchema = 2
+
+// probeParallelKey preserves the legacy serial key (0) for normal --parallel 1
+// launches while isolating multi-slot graph measurements such as Claude Code's
+// --parallel 4. Graph allocation changes with slot count; sharing those probes
+// was another form of compute-buffer double accounting across launch modes.
+func probeParallelKey(parallel int) int {
+	if parallel <= 1 {
+		return 0
+	}
+	return parallel
+}
+
 // splitCompactKey returns a compact string for a tensor-split vector, suitable
 // for cache-key inclusion so placements with different split ratios don't share
 // cached compute-buffer measurements (audit cross-check #6).
@@ -3713,11 +3864,12 @@ func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int)
 // per-model/runtime cache consumed by placement. computeByGPU is keyed by CUDA
 // device index as emitted in the backend log.
 func WriteProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, computeByGPU map[int]int, kvPerLayerMB int) error {
-	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, computeByGPU, nil, kvPerLayerMB)
+	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, 0, computeByGPU, nil, kvPerLayerMB)
 }
 
-func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, computeByGPU map[int]int, runtimeGrowthByGPU map[int]int, kvPerLayerMB int) error {
-	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, 0, "")
+func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, computeByGPU map[int]int, runtimeGrowthByGPU map[int]int, kvPerLayerMB int) error {
+	parallelKey := probeParallelKey(parallel)
+	path := probeCachePath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallelKey)
 	if path == "" {
 		return nil
 	}
@@ -3733,7 +3885,8 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Probe cache for %s\n", filepath.Base(model.Path))
 	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus))
+	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s parallel=%d\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallelKey)
+	fmt.Fprintf(&b, "PROBE_CACHE_SCHEMA=%d\n", probeCacheSchema)
 	if maxCompute > 0 {
 		fmt.Fprintf(&b, "PROBED_COMPUTE_BUF_MB=%d\n", maxCompute)
 	}
@@ -3766,7 +3919,7 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 var memoryBreakdownComputePattern = regexp.MustCompile(`CUDA([0-9]+).*?\(\s*-?[0-9]+\s*=\s*-?[0-9]+\s*\+\s*-?[0-9]+\s*\+\s*([0-9]+)\s*\)`)
 
 // ParseLogForProbe extracts compute_buf and kv_per_layer from server log output.
-// Looks for lines like: "CUDA0 compute buffer size = 1410.12 MiB" and V4 fit
+// Looks for lines like: "CUDA0 compute buffer size = 1410.12 MiB" and fit
 // breakdown rows like: "CUDA0 ... ( self = model + context + compute )".
 func ParseLogForProbe(logData string) (computeBufMB, kvPerLayerMB int) {
 	computeByGPU := ParseComputeBuffersByGPU(logData)
@@ -3801,8 +3954,8 @@ func ParseLogForProbe(logData string) (computeBufMB, kvPerLayerMB int) {
 }
 
 // ParseComputeBuffersByGPU extracts measured/planned compute-buffer MiB by CUDA
-// index. It accepts both final llama.cpp buffer lines and the V4 fork's memory
-// breakdown table printed during fit.
+// index. It accepts both final llama.cpp buffer lines and the memory breakdown
+// table printed during fit.
 func ParseComputeBuffersByGPU(logData string) map[int]int {
 	out := map[int]int{}
 	for _, line := range strings.Split(logData, "\n") {

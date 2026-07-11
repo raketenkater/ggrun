@@ -116,8 +116,8 @@ Commands:
   tune <model.gguf>    AI-tune model for best performance
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   config [show|edit|path|reset]  Manage settings
-  backend [list|add|register|remove]  Manage llama.cpp fork backends (add a fork,
-                       auto-route a model arch to it, e.g. DeepSeek V4 → V4 fork)
+  backend [list|add|register|remove]  Manage custom llama.cpp backends and
+                       optionally route a model architecture to one
   update, --update     Update ggrun and backends
   gui, tui             Interactive TUI (model picker, settings, launch)
 
@@ -798,12 +798,6 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		}
 	}
 	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
-	if req.ClaudeCode && !req.ParallelSet && opts.Parallel > 1 && placement.IsDeepSeek4V4Fork(model, opts.BackendTag) {
-		// Multi-slot (n_seq > 1) graph reservation is part of the same fork
-		// abort; a single slot keeps the model's full context window anyway.
-		fmt.Println("[claude-code] deepseek4 on the v4 fork aborts multi-slot graph reservation — using --parallel 1 (the single slot keeps the full context)")
-		opts.Parallel = 1
-	}
 	return opts
 }
 
@@ -895,12 +889,9 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []str
 	return server.StartWithTimeout(serverArgs, req.Port, timeout)
 }
 
-func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) {
-	baselineLen := len(baselineVRAMByGPU)
-	fmt.Fprintf(os.Stderr, "[launch] recordMeasuredLaunchProbes: log=%d bytes, baseline=%d gpus, cfg=%v model=%v strategy=%v be=%v\n",
-		len(serverLog), baselineLen, cfg != nil, model != nil, strategy != nil, be != nil)
+func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) map[int]int {
 	if cfg == nil || model == nil || strategy == nil || be == nil || serverLog == "" {
-		return
+		return nil
 	}
 	var gpus []detect.GPU
 	if caps != nil {
@@ -908,17 +899,15 @@ func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfil
 	}
 	if model.IsMoE && len(gpus) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog)
-		if len(baselineVRAMByGPU) > 0 {
-			fmt.Fprintf(os.Stderr, "[launch] VRAM baseline: CUDA0=%d CUDA1=%d CUDA2=%d (log buf %d bytes)\n",
-				baselineVRAMByGPU[0], baselineVRAMByGPU[1], baselineVRAMByGPU[2], len(serverLog))
-		}
-		ok := placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, be.Tag, gpus, baselineVRAMByGPU)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "[launch] VRAM probe: no cache written (needs baseline & post-load VRAM > baseline)\n")
-		}
+		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, be.Tag, gpus, baselineVRAMByGPU)
 	}
-	placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, gpus, serverLog)
+	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
+	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, gpus, strategy.Parallel, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog)
+	if !probeWritten {
+		return nil
+	}
+	return computeByGPU
 }
 
 func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *backendInfo, caps *detect.Capabilities, model *placement.ModelProfile, current *placement.Strategy, currentArgs []string) (*placement.Strategy, []string, bool) {
@@ -928,7 +917,7 @@ func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *b
 	// A measured KV probe may have been written after the first load. Force the
 	// recompute to reload it instead of reusing the pre-launch model struct state.
 	model.MeasuredKVBytesPerTok = nil
-	next, err := claudeCodeComputeStrategy(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), req.ClaudeCode, req.CtxFlag == "max")
+	next, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[launch] calibration: measured placement recompute failed: %v\n", err)
 		return nil, nil, false
@@ -983,18 +972,20 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		}
 
 		logData := ""
+		var measuredComputeByGPU map[int]int
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
-			recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData, nil)
+			measuredComputeByGPU = recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData, nil)
 		}
 		// Diagnose before checking the retry budget: a clean, parseable OOM on
 		// the very last allowed attempt still deserves its real cause recorded
 		// and reported, instead of surfacing only the process's raw exit error
 		// (e.g. a bare "signal: segmentation fault" with no VRAM context).
 		device, allocMB, isComputeBuffer, ok := startupLogCUDAOOMDetailed(logData)
-		if ok && strategy != nil && caps != nil && be != nil {
-			_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, device, allocMB)
-		}
+		// A startup OOM is not runtime growth. recordMeasuredLaunchProbes above
+		// already preserves graph-reserve sizes as compute-buffer measurements;
+		// recording the same cudaMalloc again as post-health growth double-counted
+		// it on the next placement. Only post-health crash paths record growth.
 		if retries >= maxRetries {
 			if ok {
 				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d allocating %d MiB (retry budget exhausted after %d attempts): %w", device, allocMB, retries, err)
@@ -1014,9 +1005,27 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		// loaded. Caches written mid-retry poisoned later launches with plans
 		// that were themselves OOM guesses (e.g. "all experts on one GPU").
 		// The success branch above persists whatever finally worked.
-		oomPenalty[device] += oomOvershoot(caps, device, allocMB)
-		if s, rerr := placement.ReplanAfterOOM(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), oomPenalty); rerr == nil && s != nil && s.OTString != "" {
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB, over ~%d MiB); re-planned (n-cpu-moe=%d) and retrying\n", device, allocMB, oomPenalty[device], s.NCPUMoE)
+		var s *placement.Strategy
+		var rerr error
+		computeMeasuredOnFailedGPU := measuredComputeByGPU[device] > 0
+		if isComputeBuffer && computeMeasuredOnFailedGPU {
+			// The failed graph allocation is now the exact compute-buffer reserve
+			// used by Compute. Penalizing the card by that allocation as well would
+			// charge it twice. Recompute fresh from the measurement alone.
+			opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+			opts.SkipPlacementCache = true
+			opts.CacheFile = ""
+			s, rerr = placement.Compute(caps, model, opts)
+		} else {
+			oomPenalty[device] += oomOvershoot(caps, device, allocMB)
+			s, rerr = placement.ReplanAfterOOM(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), oomPenalty)
+		}
+		if rerr == nil && s != nil && s.OTString != "" {
+			if isComputeBuffer && computeMeasuredOnFailedGPU {
+				fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB); measured compute buffer and re-planned (n-cpu-moe=%d) without a duplicate penalty\n", device, allocMB, s.NCPUMoE)
+			} else {
+				fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB, over ~%d MiB); re-planned (n-cpu-moe=%d) and retrying\n", device, allocMB, oomPenalty[device], s.NCPUMoE)
+			}
 			serverArgs = patchPlacementArgs(serverArgs, s)
 			strategy = s
 		} else {
@@ -1123,11 +1132,9 @@ func shouldPromoteMoEPlacement(current, next *placement.Strategy) bool {
 	return next.NCPUMoE == current.NCPUMoE && next.OTString != "" && next.OTString != current.OTString
 }
 
-// resolveLaunchBackend selects the backend, applies fork-arch routing (e.g.
-// deepseek4 -> the v4 fork), and preflights the arch. This is the exact step
-// that must be identical across every launch path (CLI, TUI, dry-run) — the TUI
-// once skipped the fork routing and couldn't load V4 at all. Returns nil if no
-// backend binary is available.
+// resolveLaunchBackend selects the backend, applies any configured custom
+// architecture routing, and preflights the arch. This step is identical across
+// every launch path (CLI, TUI, dry-run). Returns nil if no backend is available.
 func resolveLaunchBackend(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities) *backendInfo {
 	be := selectBackend(caps, req)
 	if be == nil {
@@ -1182,7 +1189,7 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 
-	strategy, err := claudeCodeComputeStrategy(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), req.ClaudeCode, req.CtxFlag == "max")
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
@@ -1287,7 +1294,7 @@ func cmdLaunch(args []string) {
 			// deficit instead of repeating the same crash blind.
 			if !p.IsRunning() && p.LogBuf != nil {
 				if device, allocMB, ok := startupLogCUDAOOM(p.LogBuf.String()); ok {
-					_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, device, allocMB)
+					_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, allocMB)
 					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA OOM on device %d, %d MiB) — recorded, next launch of this model/context will reserve for it.\n", device, allocMB)
 				}
 			}
@@ -1345,7 +1352,7 @@ func cmdLaunch(args []string) {
 		}
 
 		runtimeOOMRetries++
-		_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, device, allocMB)
+		_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, allocMB)
 		fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA OOM on device %d needing %d MiB more mid-request — recorded, re-planning and relaunching (attempt %d/%d)...\n",
 			device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
 
@@ -1356,7 +1363,7 @@ func cmdLaunch(args []string) {
 		// fresh derivation that actually consults the growth deficit just
 		// recorded above via RecordRuntimeGraphGrowthFromOOM.
 		replanOpts.SkipPlacementCache = true
-		nextStrategy, err := claudeCodeComputeStrategy(caps, model, replanOpts, req.ClaudeCode, req.CtxFlag == "max")
+		nextStrategy, err := placement.Compute(caps, model, replanOpts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
 			os.Exit(1)
@@ -1883,7 +1890,7 @@ func cmdDryRun(args []string) {
 		be = &backendInfo{Path: binPath, Tag: backendTag}
 	}
 
-	strategy, err := claudeCodeComputeStrategy(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), req.ClaudeCode, req.CtxFlag == "max")
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
@@ -2078,33 +2085,6 @@ func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 	return []string{"--mcp-config", cfg}
 }
 
-// claudeCodeCtxLadder returns descending context-size targets for context-first
-// placement: the target, then halved until 32768 (Claude Code's practical floor).
-func claudeCodeCtxLadder(target int) []int {
-	if target <= 0 {
-		return nil
-	}
-	if target < 32768 {
-		return []int{target}
-	}
-	var out []int
-	for c := target; c >= 32768; c /= 2 {
-		out = append(out, c)
-	}
-	return out
-}
-
-// claudeCodeComputeStrategy implements context-first placement for Claude Code
-// mode. Default "fit" placement optimizes model layout and settles for a flat
-// 32768 context (defaultContextSize) — but for Claude Code, context is the hard
-// failure dimension (slots too small → truncated system prompt, compaction
-// thrash), while a few expert layers moving to CPU is only a soft slowdown. So
-// here the priority inverts: reserve KV on GPU for the largest workable context
-// and let the model layout adjust around it. The ladder starts at the model's
-// trained context and halves only when placement cannot fit with KV on GPU; dense
-// models must additionally keep their weights fully offloaded — spilling dense
-// weights for KV would cost every token, which is worse than a smaller context.
-// An explicit numeric --ctx-size bypasses the ladder entirely.
 // patchPlacementArgs replaces only the placement flags (-ot, --n-cpu-moe,
 // --tensor-split, --split-mode) in an existing argv with a re-planned strategy's
 // values, preserving every other flag (extras, warmup, backend dialect, etc.).
@@ -2148,45 +2128,6 @@ func patchPlacementArgs(args []string, s *placement.Strategy) []string {
 		set("-b", strconv.Itoa(s.BatchSize))
 	}
 	return out
-}
-
-func claudeCodeComputeStrategy(caps *detect.Capabilities, model *placement.ModelProfile, opts placement.Options, claudeCode, ctxMax bool) (*placement.Strategy, error) {
-	fmt.Fprintf(os.Stderr, "[launch] claudeCodeComputeStrategy: claudeCode=%v ctxMax=%v ctx=%d\n", claudeCode, ctxMax, opts.ContextSize)
-	if !claudeCode || (opts.ContextSize > 0 && !ctxMax) {
-		fmt.Fprintf(os.Stderr, "[launch] claudeCodeComputeStrategy: direct path (no ladder)\n")
-		return placement.Compute(caps, model, opts)
-	}
-	if placement.IsDeepSeek4V4Fork(model, opts.BackendTag) {
-		// The KV-on-GPU ladder would pick a placement the fork cannot build a
-		// graph for. The default placement (KV on CPU, ctx fit → the trained
-		// context) is the verified path; with claude-code's --parallel 4 the
-		// per-slot window is still ctx/4.
-		fmt.Println("[claude-code] deepseek4 on the v4 fork cannot reserve KV-on-GPU graphs; using the verified KV-on-CPU placement")
-		return placement.Compute(caps, model, opts)
-	}
-	target := model.CTXTrain
-	if target <= 0 {
-		target = 262144
-	}
-	for _, ctx := range claudeCodeCtxLadder(target) {
-		o := opts
-		o.ContextSize = ctx
-		s, err := placement.Compute(caps, model, o)
-		if err != nil {
-			continue
-		}
-		if s.KVPlacement == "cpu" || (!model.IsMoE && s.Type == placement.CPUOnly) {
-			continue
-		}
-		if ctx == target {
-			fmt.Printf("[claude-code] context-first placement: ctx %d, KV on GPU (model layout adjusts around it)\n", ctx)
-		} else {
-			fmt.Printf("[claude-code] context-first placement: %d does not fit, using ctx %d (KV on GPU)\n", target, ctx)
-		}
-		return s, nil
-	}
-	// No ladder rung fit with KV on GPU — fall back to the default placement.
-	return placement.Compute(caps, model, opts)
 }
 
 // claudeCodeSamplingArgs appends anti-loop sampling defaults in Claude Code mode.
@@ -2901,7 +2842,7 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 
 func warnModelCompatibility(model *placement.ModelProfile) {
 	if isDeepSeekV4FlashMistag(model) {
-		fmt.Fprintln(os.Stderr, "[warning] DeepSeek V4 Flash mistagged as deepseek2. Stock llama.cpp builds may reject this GGUF; use antirez/llama.cpp-deepseek-v4-flash or a build with PR #22378 support.")
+		fmt.Fprintln(os.Stderr, "[warning] DeepSeek V4 Flash is tagged as deepseek2. Re-convert it with current mainline llama.cpp so general.architecture=deepseek4; this GGUF may be rejected.")
 	}
 }
 

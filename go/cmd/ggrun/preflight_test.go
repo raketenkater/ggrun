@@ -81,6 +81,19 @@ func TestPreflightWorstDeficit(t *testing.T) {
 	}
 }
 
+func TestPreflightContextTotalIncludesHostAndGPU(t *testing.T) {
+	devs := []preflightDevice{
+		{Name: "CUDA0", ContextMB: 6252},
+		{Name: "CUDA1", ContextMB: 0},
+		{Name: "CUDA2", ContextMB: 649},
+		{Name: "Host", ContextMB: 31},
+		{Name: "ignored-negative", ContextMB: -10},
+	}
+	if got := preflightContextTotalMB(devs); got != 6932 {
+		t.Fatalf("total context = %d MiB, want 6932", got)
+	}
+}
+
 func TestPreflightWorstDeficitIncludesMeasuredRuntimeGrowth(t *testing.T) {
 	devs := []preflightDevice{
 		{Name: "CUDA2", ModelMB: 10248, ContextMB: 351, ComputeMB: 599},

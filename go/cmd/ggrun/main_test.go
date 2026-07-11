@@ -28,26 +28,13 @@ func writeFakeBackend(t *testing.T, name, body string) string {
 	return path
 }
 
-func TestDeepseek4V4GraphQuirk(t *testing.T) {
-	m := &placement.ModelProfile{ModelArch: "deepseek4"}
-	if !placement.IsDeepSeek4V4Fork(m, "v4") {
-		t.Fatal("deepseek4 on v4 must be limited to single-slot KV-on-CPU graphs (fork graph reserve aborts)")
-	}
-	if placement.IsDeepSeek4V4Fork(m, "llama") {
-		t.Fatal("non-v4 backend must keep the normal ladder")
-	}
-	if placement.IsDeepSeek4V4Fork(&placement.ModelProfile{ModelArch: "qwen3moe"}, "v4") {
-		t.Fatal("non-deepseek4 arch must keep the normal ladder")
-	}
-}
-
-func TestClaudeCodeParallelGatedForDeepseek4V4(t *testing.T) {
+func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	req := &launchRequest{ClaudeCode: true}
 	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
-	be := &backendInfo{Tag: "v4"}
+	be := &backendInfo{Tag: "llama"}
 	opts := placementOptionsFromRequest(req, model, be, t.TempDir())
-	if opts.Parallel != 1 {
-		t.Fatalf("claude-code on deepseek4/v4 must run a single slot (multi-slot graphs abort), got %d", opts.Parallel)
+	if opts.Parallel != 4 {
+		t.Fatalf("claude-code should layer four slots over the shared mainline placement, got %d", opts.Parallel)
 	}
 	be = &backendInfo{Tag: "ik_llama"}
 	opts = placementOptionsFromRequest(req, &placement.ModelProfile{ModelArch: "qwen3moe"}, be, t.TempDir())
@@ -89,8 +76,8 @@ func TestTUILaunchArgsPreserveMaxContext(t *testing.T) {
 func TestTUILaunchArgsPassNonDefaultBackend(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Backend = "ik_llama"
-	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", Backend: "v4"}, cfg)
-	if !hasAdjacentArg(args, "--backend", "v4") {
+	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", Backend: "custom"}, cfg)
+	if !hasAdjacentArg(args, "--backend", "custom") {
 		t.Fatalf("non-default backend selection should be explicit, got %v", args)
 	}
 }
@@ -142,18 +129,46 @@ func TestStartupLogCUDAOOM(t *testing.T) {
 	}
 }
 
+func TestStartupComputeMeasurementMustMatchFailedGPU(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.CacheDir = t.TempDir()
+	model := &placement.ModelProfile{Path: "/models/model.gguf", NumLayers: 43, NumExperts: 256}
+	strategy := &placement.Strategy{
+		ContextSize: 1048576,
+		UBatchSize:  64,
+		KVQuality:   "high",
+		KVPlacement: "gpu",
+		KVType:      "f16",
+		Parallel:    1,
+	}
+	be := &backendInfo{Tag: "llama"}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0}, {Index: 1}}}
+	log := "CUDA1 compute buffer size = 100.00 MiB\n" +
+		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 8000.00 MiB on device 0: cudaMalloc failed: out of memory\n" +
+		"ggml_gallocr_reserve_n: graph_reserve failed\n"
+
+	measured := recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, log, nil)
+	device, _, isCompute, ok := startupLogCUDAOOMDetailed(log)
+	if !ok || !isCompute || device != 0 {
+		t.Fatalf("failed allocation parse = device %d compute=%v ok=%v", device, isCompute, ok)
+	}
+	if measured[device] != 0 {
+		t.Fatalf("another GPU's probe must not suppress the failed GPU penalty: %v", measured)
+	}
+}
+
 func TestRouteArchBackendKeepsRegisteredTag(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake-backend probe uses a shell script")
 	}
 	t.Setenv("LLM_APP_HOME", t.TempDir())
-	backendPath := writeFakeBackend(t, "v4-server", "echo llama server help\n")
-	if err := backends.Save([]backends.Backend{{Tag: "v4", Path: backendPath, RouteArch: "deepseek4"}}); err != nil {
+	backendPath := writeFakeBackend(t, "custom-server", "echo llama server help\n")
+	if err := backends.Save([]backends.Backend{{Tag: "custom", Path: backendPath, RouteArch: "custom_moe"}}); err != nil {
 		t.Fatalf("save backends: %v", err)
 	}
-	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "deepseek4"}, &launchRequest{})
-	if be == nil || be.Path != backendPath || be.Tag != "v4" {
-		t.Fatalf("expected routed v4 backend tag, got %#v", be)
+	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "custom_moe"}, &launchRequest{})
+	if be == nil || be.Path != backendPath || be.Tag != "custom" {
+		t.Fatalf("expected routed custom backend tag, got %#v", be)
 	}
 }
 
@@ -165,7 +180,7 @@ func TestRouteArchBackendKeepsExplicitBackend(t *testing.T) {
 }
 
 func TestConfiguredBackendExplicit(t *testing.T) {
-	if !configuredBackendExplicit("llama") || !configuredBackendExplicit("v4") {
+	if !configuredBackendExplicit("llama") || !configuredBackendExplicit("custom") {
 		t.Fatal("named configured backends must be explicit")
 	}
 	if configuredBackendExplicit("") || configuredBackendExplicit("auto") {
@@ -882,30 +897,6 @@ func TestClaudeCodeSamplingArgsDeepSeek4(t *testing.T) {
 	got = claudeCodeSamplingArgs(user, true, model)
 	if got[argIndexOf(got, "--reasoning-budget")+1] != "-1" || got[argIndexOf(got, "--top-k")+1] != "10" {
 		t.Fatalf("user deepseek4 sampling overrides should win, got %v", got)
-	}
-}
-
-func TestClaudeCodeCtxLadder(t *testing.T) {
-	cases := []struct {
-		target int
-		want   []int
-	}{
-		{262144, []int{262144, 131072, 65536, 32768}},
-		{1048576, []int{1048576, 524288, 262144, 131072, 65536, 32768}}, // --ctx-size max on M3
-		{32768, []int{32768}},
-		{20000, []int{20000}}, // small-ctx model: single rung
-		{0, nil},
-	}
-	for _, tc := range cases {
-		got := claudeCodeCtxLadder(tc.target)
-		if len(got) != len(tc.want) {
-			t.Fatalf("ladder(%d) = %v, want %v", tc.target, got, tc.want)
-		}
-		for i := range got {
-			if got[i] != tc.want[i] {
-				t.Fatalf("ladder(%d) = %v, want %v", tc.target, got, tc.want)
-			}
-		}
 	}
 }
 
