@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Claude Code shows live local inference progress.** `--claude-code` now adds a
+  session-only status line showing queued requests, the active slot, prompt progress,
+  token counts, prompt/generation tok/s, and parallel activity. It reads llama-server's
+  slots/metrics plus prompt-progress logs without storing prompt content, preserves an
+  existing custom Claude status line, and can be disabled with
+  `GGRUN_CLAUDE_PROGRESS=off`.
 - **Large-MoE placement is topology-aware and load-tested at 1M context.** Slow-link
   GPUs are used as whole-expert storage while dense ownership stays on the fast GPU;
   routing tensors follow their experts, every owner receives measured graph reserve,

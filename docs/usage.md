@@ -126,6 +126,13 @@ aliases, so without the overrides those calls leave for `api.anthropic.com` and 
   permission prompt — `--claude-code` does this for you. Prefer another provider? Add it with
   `claude mcp add …` (it runs alongside `ddg-search`), or launch `claude` yourself
   from the printed recipe and drop/replace the `--mcp-config` line.
+- **Live local progress:** while a local request is queued, ingesting its prompt, or
+  generating, ggrun adds a session-only Claude status line with the active slot,
+  prompt progress bar, token counts, tok/s, active requests, and queue depth. It uses
+  llama-server's structured slot/metrics endpoints and exact prompt-progress logs;
+  prompt contents are never stored. Existing custom Claude status lines are preserved,
+  with progress shown in the terminal title instead. Set `GGRUN_CLAUDE_PROGRESS=off`
+  to disable the display.
 
 Quality depends on the local model: pick a tool-capable coder, and keep one
 llama-server in mind for wide agent fan-out (it serializes). Best for single-agent,

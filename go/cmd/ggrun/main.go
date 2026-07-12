@@ -70,6 +70,8 @@ func main() {
 		cmdBenchmark(args[1:])
 	case "daemon":
 		cmdDaemon(args[1:])
+	case "claude-status":
+		cmdClaudeStatus(args[1:])
 	case "dry-run":
 		cmdDryRun(args[1:])
 	case "probe":
@@ -137,7 +139,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "dry-run", "probe", "kv-probe", "download", "tune", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "dry-run", "probe", "kv-probe", "download", "tune", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -879,6 +881,7 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
+	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	return serverArgs
 }
 
@@ -1296,7 +1299,22 @@ func cmdLaunch(args []string) {
 			}
 		}()
 
-		if code := runClaudeCodeClient(req.Host, req.Port, serverArgs, nil); code >= 0 {
+		clientArgs, statusLineEnabled := claudeCodeProgressClientArgs(nil, req.Port)
+		progressEnabled := !progressDisabled()
+		progressStop := func() {}
+		if progressEnabled {
+			progressStop = startClaudeProgressMonitor(req.Host, req.Port, p.LogBuf, !statusLineEnabled)
+		}
+		defer progressStop()
+		if !progressEnabled {
+			fmt.Println("[claude-code] Live request progress disabled by GGRUN_CLAUDE_PROGRESS.")
+		} else if statusLineEnabled {
+			fmt.Println("[claude-code] Live request progress enabled in Claude's status line.")
+		} else {
+			fmt.Println("[claude-code] Live request progress enabled in the terminal title (existing Claude status line preserved).")
+		}
+		if code := runClaudeCodeClient(req.Host, req.Port, serverArgs, clientArgs); code >= 0 {
+			progressStop()
 			healthCancel()
 			// The terminal was handed to `claude`, so a mid-session backend
 			// crash isn't something this process can retry live — but it can
@@ -1913,6 +1931,7 @@ func cmdDryRun(args []string) {
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
+	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	if envPrefix := applyGPUVisibility(req, be.Tag); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
@@ -1955,10 +1974,16 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Println("  export API_TIMEOUT_MS=14400000  # let queued fan-out/subagent requests finish, not cancel")
 	fmt.Println("  export API_FORCE_IDLE_TIMEOUT=0  # local models can spend >5 min prompt-processing before streaming")
 	fmt.Printf("  export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", pct, slot)
+	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
+	claudeArgs = append(claudeArgs, "--disallowedTools", "WebSearch")
 	if _, err := exec.LookPath("uvx"); err == nil {
-		fmt.Println(`  claude --disallowedTools WebSearch --allowedTools mcp__ddg-search__search,mcp__ddg-search__fetch_content --mcp-config '{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}'`)
+		claudeArgs = append(claudeArgs,
+			"--allowedTools", "mcp__ddg-search__search,mcp__ddg-search__fetch_content",
+			"--mcp-config", `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}`,
+		)
+		fmt.Printf("  %s\n", formatCommand(append([]string{"claude"}, claudeArgs...)))
 	} else {
-		fmt.Println("  claude --disallowedTools WebSearch   # add a search MCP (e.g. uvx duckduckgo-mcp-server) for web research")
+		fmt.Printf("  %s   # add a search MCP (e.g. uvx duckduckgo-mcp-server) for web research\n", formatCommand(append([]string{"claude"}, claudeArgs...)))
 	}
 }
 
