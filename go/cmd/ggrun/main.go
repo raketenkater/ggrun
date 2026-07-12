@@ -1952,7 +1952,7 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Printf("  export ANTHROPIC_BASE_URL=http://%s:%d ANTHROPIC_AUTH_TOKEN=ggrun\n", clientHost, port)
 	fmt.Println("  export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local")
 	fmt.Println("  export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local")
-	fmt.Println("  export API_TIMEOUT_MS=1800000   # let queued fan-out/subagent requests finish, not cancel")
+	fmt.Println("  export API_TIMEOUT_MS=14400000  # let queued fan-out/subagent requests finish, not cancel")
 	fmt.Println("  export API_FORCE_IDLE_TIMEOUT=0  # local models can spend >5 min prompt-processing before streaming")
 	fmt.Printf("  export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", pct, slot)
 	if _, err := exec.LookPath("uvx"); err == nil {
@@ -1987,9 +1987,10 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 		"ANTHROPIC_DEFAULT_SONNET_MODEL=local",
 		"ANTHROPIC_DEFAULT_OPUS_MODEL=local",
 		// A wide fan-out (subagents / ultracode) queues behind the GPU; without a
-		// long timeout Claude Code cancels the queued requests. 30 min lets them
-		// wait for a slot and complete instead. User-set value wins.
-		"API_TIMEOUT_MS="+envOr("API_TIMEOUT_MS", "1800000"),
+		// long timeout Claude Code cancels the queued requests. A 60k-token,
+		// four-slot DeepSeek-V4 stress run took almost 40 minutes, so use four
+		// hours to leave headroom for larger prompts. User-set value wins.
+		"API_TIMEOUT_MS="+envOr("API_TIMEOUT_MS", "14400000"),
 		// The request timeout above is not enough for local giant models: Claude Code
 		// also has a stream-idle watchdog, and llama.cpp may spend >5 minutes in
 		// prompt processing before emitting the first byte. Disable that watchdog for

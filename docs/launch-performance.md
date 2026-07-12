@@ -42,6 +42,16 @@ load MiniMax-M3 at all (`unknown model architecture: minimax-m3` — ik_llama.cp
 The point of these rows is less the exact tok/s than that the models **run**: ggrun loads
 big MoE models across VRAM + system RAM that don't fit in VRAM alone.
 
+### DeepSeek-V4 long-context service stress
+
+The same 1M-context, parallel-4 placement completed a four-request stress run with one
+60,020-token prompt and three concurrent prompts of 4,115, 4,243, and 4,371 tokens. Every
+request returned 16 non-empty output tokens; wall time was 2,377.10s. The main prompt
+processed at 29.05 tok/s, crossed the 8k/16k checkpoint boundaries, and completed without
+an OOM, restart, truncation, or health failure. Post-run VRAM was 23,962 / 9,329 / 9,363
+MiB on the 3090 Ti / 3060 / 4070. Reproduce against a running server with
+`scripts/loadtest-moe.py`; its default shape is this exact 60k + 3-worker test.
+
 ## Speculative decoding
 
 Qwen3.6 27B Q5_K_M with ik_llama.cpp, 32k context, one slot, 512 generated tokens:

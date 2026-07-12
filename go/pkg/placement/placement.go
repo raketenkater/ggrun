@@ -2866,10 +2866,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	}
 
 	// Server --timeout: some custom backends default to 600s, which kills
-	// long Claude Code requests mid-stream. Match the client timeout so
-	// queued subagents and large prompt-processing runs don't time out
-	// server-side (Codex audit #5).
-	args = append(args, "--timeout", "1800")
+	// long Claude Code requests mid-stream. A measured 60k-token request with
+	// four occupied slots took 2,377s on DeepSeek-V4, already longer than the
+	// former 1,800s default. Match Claude Code's four-hour client timeout so
+	// queued subagents and large prompt-processing runs survive server-side.
+	args = append(args, "--timeout", "14400")
 
 	return args
 }

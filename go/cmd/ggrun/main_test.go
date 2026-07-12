@@ -829,7 +829,7 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:8081",
-		"API_TIMEOUT_MS=1800000",
+		"API_TIMEOUT_MS=14400000",
 		"API_FORCE_IDLE_TIMEOUT=0",
 	} {
 		if !envContains(env, want) {

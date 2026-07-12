@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Large-MoE placement is topology-aware and load-tested at 1M context.** Slow-link
+  GPUs are used as whole-expert storage while dense ownership stays on the fast GPU;
+  routing tensors follow their experts, every owner receives measured graph reserve,
+  expert placement respects live free VRAM/OOM penalties, and generic huge-KV MoEs can
+  move KV to CPU. The DeepSeek-V4 reference plan completed a 60,020-token request plus
+  three concurrent workers without OOM or restart. Server and Claude Code request
+  timeouts now default to four hours so valid long-context fan-out is not cancelled.
+
 - **Windows GPU without a toolchain.** `install.ps1 -Backend cuda` now downloads
   prebuilt llama.cpp CUDA binaries (server + cudart) from ggml-org by default; the
   from-source build (CUDA Toolkit + MSVC + CMake) remains only as a fallback. Third-party

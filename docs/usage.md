@@ -92,7 +92,7 @@ env to run it yourself in another terminal:
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8081 ANTHROPIC_AUTH_TOKEN=ggrun
 export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local
-export API_TIMEOUT_MS=1800000              # let queued fan-out/subagent requests finish, not cancel
+export API_TIMEOUT_MS=14400000             # let queued fan-out/subagent requests finish, not cancel
 export API_FORCE_IDLE_TIMEOUT=0            # local PP can exceed Claude Code's stream-idle watchdog
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90  # compact early to fit the real per-slot window (ggrun computes this)
 claude --disallowedTools WebSearch
@@ -110,7 +110,8 @@ aliases, so without the overrides those calls leave for `api.anthropic.com` and 
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the real slot so compaction triggers early
   enough; subagents and workflow agents inherit it. A value you set yourself wins.
 - **Wide fan-out** (subagents, workflows) queues behind the GPU; `API_TIMEOUT_MS` is
-  raised so queued requests wait for a slot instead of cancelling. `API_FORCE_IDLE_TIMEOUT=0`
+  raised to four hours so queued requests wait for a slot instead of cancelling. The
+  matching llama-server `--timeout` is also four hours. `API_FORCE_IDLE_TIMEOUT=0`
   disables Claude Code's separate stream-idle watchdog, which can fire while llama.cpp is
   still prompt-processing a very large request and has not streamed a first token yet.
 - **Anti-loop sampling.** The Anthropic API has no repetition-penalty fields and the
