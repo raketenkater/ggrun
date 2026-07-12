@@ -88,23 +88,7 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 	cmd.Stdout = &gatedWriter{buf: logBuf, term: termOut, live: live}
 	cmd.Stderr = &gatedWriter{buf: logBuf, term: termErr, live: live}
 
-	// Ensure CUDA device enumeration matches nvidia-smi PCI bus order.
-	// Without this, llama-server may enumerate GPUs differently from our
-	// detection, causing -ot / --tensor-split flags to target wrong devices.
-	//
-	// We filter out any existing CUDA_DEVICE_ORDER before adding ours,
-	// because appending a duplicate key has undefined behaviour in CUDA.
-	env := os.Environ()
-	filtered := make([]string, 0, len(env)+1)
-	for _, e := range env {
-		if !strings.HasPrefix(e, "CUDA_DEVICE_ORDER=") {
-			filtered = append(filtered, e)
-		}
-	}
-	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
-	// A shared-library backend build finds its co-located libs via the hub, not
-	// its build-machine RUNPATH.
-	cmd.Env = libhub.ApplyToChildEnv(filtered)
+	cmd.Env = ChildEnv(os.Environ(), args)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -141,6 +125,39 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 		fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(start).Round(time.Second))
 	}
 	return p, nil
+}
+
+// ChildEnv applies the process environment shared by initial and recovery
+// launches. PCI ordering keeps detected indices aligned with CUDA. For an
+// explicit multi-GPU split, llama.cpp documents larger CUDA launch queues as a
+// pipeline optimization; the measured parallel-4 MoE aggregate improved 2.3%.
+// A user-provided value always wins.
+func ChildEnv(env, args []string) []string {
+	filtered := make([]string, 0, len(env)+2)
+	hasQueueOverride := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "CUDA_DEVICE_ORDER=") {
+			continue
+		}
+		if strings.HasPrefix(e, "CUDA_SCALE_LAUNCH_QUEUES=") {
+			hasQueueOverride = true
+		}
+		filtered = append(filtered, e)
+	}
+	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
+	if !hasQueueOverride && hasMultiGPUSplit(args) {
+		filtered = append(filtered, "CUDA_SCALE_LAUNCH_QUEUES=4x")
+	}
+	return libhub.ApplyToChildEnv(filtered)
+}
+
+func hasMultiGPUSplit(args []string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if (args[i] == "--tensor-split" || args[i] == "-ts") && strings.Contains(args[i+1], ",") {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Process) waitReady(timeout time.Duration) error {

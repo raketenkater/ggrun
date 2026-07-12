@@ -120,8 +120,9 @@ aliases, so without the overrides those calls leave for `api.anthropic.com` and 
   Pass any of these flags yourself (after `--`) and your value wins.
 - **Web research:** the built-in WebSearch runs on Anthropic's servers and is hidden
   on a non-first-party endpoint, so ggrun disables it and auto-wires a no-key
-  DuckDuckGo search MCP (`mcp__ddg-search__search`) when `uvx` is installed —
-  `--claude-code` does this for you. Prefer another provider? Add it with
+  DuckDuckGo MCP when `uvx` is installed. Its `search` and `fetch_content` tools
+  are pre-authorized so agents can locate and read current sources without a
+  permission prompt — `--claude-code` does this for you. Prefer another provider? Add it with
   `claude mcp add …` (it runs alongside `ddg-search`), or launch `claude` yourself
   from the printed recipe and drop/replace the `--mcp-config` line.
 

@@ -27,14 +27,15 @@ this rig.
 
 ## MoE (CUDA / ik_llama.cpp)
 
-Both MoE models use 3-GPU expert offload across VRAM + system RAM, with a
-PCIe-bandwidth-weighted tensor-split that concentrates layer ownership on the
-fastest-link GPU.
+The MoE models use expert offload across VRAM + system RAM. On asymmetric PCIe
+topologies, dense-layer ownership stays on the fast link while cards at one-third
+or less of that bandwidth become whole-expert storage.
 
 | Model | ggrun decode tok/s | ggrun prefill tok/s | Notes |
 |---|---:|---:|---|
 | Qwen3.5-122B-A10B UD-IQ4_XS (~60 GiB) | 22.9 | 19.5 | 3-GPU expert offload + CPU experts |
 | MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.59 | 15.3 | spans VRAM+RAM, ~108 GiB pinned |
+| DeepSeek-V4-Flash UD-IQ4_XS (~128 GiB) | 5.88 | 32.24 | ctx 1M, parallel 4; x1/x4 GPUs store 3 complete expert layers each |
 
 Raw llama.cpp `--fit` loads the 122B at 20.97 decode (ggrun: 22.9, +9% here); it cannot
 load MiniMax-M3 at all (`unknown model architecture: minimax-m3` — ik_llama.cpp only).

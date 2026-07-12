@@ -12,6 +12,7 @@ TMP="$(mktemp -d -t ggrun-moe-placement.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/bin" "$TMP/models" "$TMP/cache"
+: >"$TMP/empty.conf"
 
 cat >"$TMP/llama-server" <<'EOF'
 #!/usr/bin/env bash
@@ -32,10 +33,10 @@ case "$*" in
         echo "2, 00000000:03:00.0, RTX 4090, 24576, 0, 580.0, 8.9"
         exit 0
         ;;
-    *"--query-gpu=pcie.link.gen.gpucurrent,pcie.link.width.current"*)
-        echo "4, 16"
-        echo "4, 16"
-        echo "4, 16"
+    *"--query-gpu=pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max"*)
+        echo "4, 16, 4, 16"
+        echo "4, 16, 4, 16"
+        echo "4, 16, 4, 16"
         exit 0
         ;;
     *) exit 0 ;;
@@ -57,6 +58,7 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" \
 truncate -s 512G "$TMP/models/Kimi-K2.6-IQ3_K.gguf"
 
 if ! out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+    LLM_CONFIG="$TMP/empty.conf" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" --ram-budget 64000 \
@@ -111,6 +113,7 @@ python3 "$ROOT/tests/build_synthetic_gguf.py" \
 truncate -s 64G "$TMP/models/KV-Heavy-MoE.gguf"
 
 if ! out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+    LLM_CONFIG="$TMP/empty.conf" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-gpu" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
@@ -120,10 +123,10 @@ if ! out=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
     exit 1
 fi
 
-if [[ "$out" == *"--no-kv-offload"* ]]; then
-    echo "auto KV placement should keep KV on GPU when possible"
-    echo "$out"
-    exit 1
+if [[ "$out" != *"--no-kv-offload"* ]]; then
+	echo "generic oversized MoE should move an enormous KV cache to CPU"
+	echo "$out"
+	exit 1
 fi
 
 if [[ "$out" != *"--ctx-size 196608"* ]]; then
@@ -132,7 +135,32 @@ if [[ "$out" != *"--ctx-size 196608"* ]]; then
     exit 1
 fi
 
+python3 "$ROOT/tests/build_synthetic_gguf.py" \
+    --out "$TMP/models/DeepSeek4-KV-MoE.gguf" \
+    --arch deepseek4 --name 'DeepSeek4-KV-MoE' \
+    --layers 20 --hkv 1 --kl 512 --vl 512 --embd 3072 --ff 1536 \
+    --experts 64 --exp-used 8 --exp-ff 1536 --ctx-train 196608 \
+    --tokenizer-pre deepseek-v3 \
+    --tensor 'blk.0.ffn_down_exps.weight:40000000000:138'
+truncate -s 64G "$TMP/models/DeepSeek4-KV-MoE.gguf"
+
+if ! out_dsv4=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+    LLM_CONFIG="$TMP/empty.conf" LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
+    LLM_CACHE_DIR="$TMP/cache-kv-dsv4" LLM_MODEL_DIR="$TMP/models" \
+    "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \
+    --ctx-size 196608 --kv-quality mid "$TMP/models/DeepSeek4-KV-MoE.gguf" 2>&1); then
+    echo "DeepSeek4 GPU-KV dry-run failed"
+    echo "$out_dsv4"
+    exit 1
+fi
+if [[ "$out_dsv4" == *"--no-kv-offload"* ]]; then
+    echo "DeepSeek4 must keep KV on GPU so Flash Attention remains available"
+    echo "$out_dsv4"
+    exit 1
+fi
+
 if ! out_cpu=$(PATH="$TMP/bin:$PATH" LLAMA_SERVER="$TMP/llama-server" \
+    LLM_CONFIG="$TMP/empty.conf" \
     LLM_ASSUME_YES=1 LLM_SERVER_UPDATE_CHECKED=1 \
     LLM_CACHE_DIR="$TMP/cache-kv-cpu" LLM_MODEL_DIR="$TMP/models" \
     "$GO_BIN" --dry-run --server-bin "$TMP/llama-server" \

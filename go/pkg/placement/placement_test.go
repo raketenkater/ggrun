@@ -171,10 +171,9 @@ func TestArgs(t *testing.T) {
 // parser once under-sized MXFP4 tensors (unknown ggml type 39 → 0.5 B/elem
 // guess instead of 17 B / 32 elems), so expertPerLayerMB came out 3098 instead
 // of the real 3290 and placement pinned 5 expert layers on GPU0 — a guaranteed
-// CUDA OOM discovered only after a 15-minute model load. With exact bytes
-// (spans anchored to the file), 5 layers can never fit: 5×3290 + non-expert
-// share + CUDA/compute overhead > 24564. The fix must still fill the GPUs:
-// at least 9 whole layers across the three cards.
+// CUDA OOM discovered only after a 15-minute model load. With exact bytes and
+// the cold-cache MoE graph reserve, the first plan must remain within every
+// device ledger while still using an expert-storage GPU.
 func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 	// Real PCIe links on this box: 3090Ti gen3 x16, 3060 gen3 x1 (!), 4070
 	// gen3 x4. The x1 card is slow enough that it must be expert-only, not
@@ -273,14 +272,17 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 	nonExpertPoolMB := bytesToMiBCeil(model.NonExpertBytes) -
 		bytesToMiBCeil(model.TokenEmbdBytes) - bytesToMiBCeil(model.OutputBytes)
 	owned, outputDev := layerOwnership(strat.TensorSplit, model.NumLayers)
-	if outputDev != 2 {
-		t.Fatalf("expected output head on the last device (CUDA2), got %d (split %v)", outputDev, strat.TensorSplit)
+	if outputDev != 0 {
+		t.Fatalf("expected output head on the sole dense-layer owner (CUDA0), got %d (split %v)", outputDev, strat.TensorSplit)
 	}
 	perLayerNonExp := float64(nonExpertPoolMB) / float64(model.NumLayers)
 	perLayerShexp := float64(bytesToMiBCeil(model.ShexpBytes)) / float64(model.NumLayers)
 	expertMBByDevice := otExpertMBByDevice(t, strat.OTString, expertPerLayerMB)
 	for gi, gpu := range caps.GPUs {
 		fixed := firstLaunchComputeBufMBForGPU(model, strat.UBatchSize, gi, orderGPUsByBandwidth(caps.GPUs))
+		if strat.TensorSplit[gi] == 0 && otStringUsesDevice(strat.OTString, gpu.Index) {
+			fixed = computeFloorMB // expert-only graph reserve
+		}
 		usedMB := fixed + int(float64(owned[gi])*(perLayerNonExp+perLayerShexp)) + expertMBByDevice[gpu.Index]
 		if gi == outputDev {
 			usedMB += bytesToMiBCeil(model.OutputBytes)
@@ -291,10 +293,10 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 		}
 	}
 
-	// Max-fill: the three cards must carry at least 9 whole expert layers
-	// (4+3+2 fit with real sizes); an over-derated plan wastes VRAM.
-	if totalWholeLayers < 9 {
-		t.Fatalf("expected >=9 whole expert layers on GPU (max fill), got %d: %s",
+	// The cold plan is intentionally conservative until fit-params measures this
+	// exact graph. It must still offload at least one complete expert layer.
+	if totalWholeLayers < 1 {
+		t.Fatalf("expected at least one whole expert layer on GPU, got %d: %s",
 			totalWholeLayers, strat.OTString)
 	}
 	for _, part := range strings.Split(strat.OTString, ",") {
@@ -412,6 +414,67 @@ func TestComputeDeepSeekV4FullContextMigratesExactMeasurements(t *testing.T) {
 	if !otStringUsesDevice(strat.OTString, 1) {
 		t.Fatalf("expert-only CUDA1 should still be filled with expert weights: %s", strat.OTString)
 	}
+	for _, part := range strings.Split(strat.OTString, ",") {
+		if otDevicePattern.MatchString(part) && !strings.Contains(part, "_shexp") {
+			t.Fatalf("automatic planner must emit complete expert layers only: %s", strat.OTString)
+		}
+	}
+}
+
+func TestComputeDeepSeekV4Parallel4UsesMeasuredStableWholeLayerPlan(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+			{Index: 1, Name: "RTX 3060 x1", VRAMTotalMB: 12288, BandwidthMBps: 985},
+			{Index: 2, Name: "RTX 4070 x4", VRAMTotalMB: 12282, BandwidthMBps: 3938},
+		},
+		RAM: detect.RAMInfo{TotalMB: 128730, FreeMB: 123424},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path:      "/models/DeepSeek-V4-Flash-UD-IQ4_XS-00001-of-00004.gguf",
+		SizeBytes: 137903959808, TotalSizeMB: 131515,
+		NumLayers: 43, IsMoE: true, NumExperts: 256, ExpertUsedCount: 6, ExpertFF: 2048,
+		ExpertBytes: 131240296448, NonExpertBytes: 6658320448,
+		TokenEmbdBytes: 562626560, OutputBytes: 434380800, ShexpBytes: 1149763584,
+		ContextSize: 1048576, CTXTrain: 1048576, HiddenSize: 4096, EmbeddingLength: 4096,
+		HeadCountKV: 1, KeyLength: 512, ValueLength: 512, ModelArch: "deepseek4",
+		MeasuredKVBytesPerTok: map[string]float64{"f16": 7012},
+	}
+	cacheDir := t.TempDir()
+	systemData := "SYS_CUDA_OVERHEAD_MB_CUDA0=488\n" +
+		"SYS_CUDA_OVERHEAD_MB_CUDA1=311\n" +
+		"SYS_CUDA_OVERHEAD_MB_CUDA2=367\n" +
+		"SYS_CUDA_OVERHEAD_MB=488\n"
+	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs))), []byte(systemData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	strat, err := Compute(caps, model, Options{
+		ContextSize: 1048576, KVPlacement: "gpu", KVQuality: "high",
+		BackendTag: "llama", Parallel: 4, CacheDir: cacheDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strat.UBatchSize != 256 {
+		t.Fatalf("ubatch=%d, want largest stable rung 256", strat.UBatchSize)
+	}
+	if len(strat.TensorSplit) != 3 || strat.TensorSplit[0] != 1 || strat.TensorSplit[1] != 0 || strat.TensorSplit[2] != 0 {
+		t.Fatalf("dense split=%v, want 1,0,0", strat.TensorSplit)
+	}
+	layers := parseOTLayersByDevice(t, strat.OTString)
+	if len(layers[0]) != 0 || len(layers[1]) != 3 || len(layers[2]) != 3 {
+		t.Fatalf("expert layers by device=%v, want CUDA0=0 CUDA1=3 CUDA2=3 (OT=%s)", layers, strat.OTString)
+	}
+	if strat.NCPUMoE != 37 {
+		t.Fatalf("n-cpu-moe=%d, want 37", strat.NCPUMoE)
+	}
+	for _, part := range strings.Split(strat.OTString, ",") {
+		if otDevicePattern.MatchString(part) && !strings.Contains(part, "_shexp") {
+			t.Fatalf("stable plan must not contain partial expert pins: %s", strat.OTString)
+		}
+	}
 }
 
 // TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement reproduces the
@@ -495,8 +558,8 @@ func TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement(t *testing.T) {
 	if strat.Type != MoEOffload {
 		t.Fatalf("expected MoE offload, got %s", strat.Type)
 	}
-	if strat.UBatchSize >= 512 {
-		t.Fatalf("expected the ladder to drop below the default ubatch that starves experts, got %d", strat.UBatchSize)
+	if strat.UBatchSize != 64 {
+		t.Fatalf("expected the fixture's largest usable ubatch 64, got %d", strat.UBatchSize)
 	}
 	_, moeCount := moeLayerRange(model)
 	if strat.NCPUMoE >= moeCount {
@@ -700,6 +763,9 @@ func TestComputeMoEUsesSlowPCIeGPUAsExpertOnly(t *testing.T) {
 	if !otStringUsesDevice(strat.OTString, 1) {
 		t.Fatalf("expected x1 GPU to still receive whole expert pins, got OT %s", strat.OTString)
 	}
+	if strat.TensorSplit[2] != 0 || !otStringUsesDevice(strat.OTString, 2) {
+		t.Fatalf("expected x4 GPU to be whole-expert storage too, split=%v OT=%s", strat.TensorSplit, strat.OTString)
+	}
 	if excluded := numGPUsExcluded(strat, caps.GPUs); excluded != 0 {
 		t.Fatalf("expert-only GPU must count as used, got excluded=%d split=%v ot=%s", excluded, strat.TensorSplit, strat.OTString)
 	}
@@ -714,7 +780,7 @@ func TestExpertOnlySlowGPUUsesExpertReserveNotSplitOwnerReserve(t *testing.T) {
 	gpus := []detect.GPU{
 		{Index: 0, Name: "fast", VRAMTotalMB: 24576, BandwidthMBps: 16000},
 		{Index: 1, Name: "slow-x1", VRAMTotalMB: 12288, BandwidthMBps: 900},
-		{Index: 2, Name: "medium", VRAMTotalMB: 12288, BandwidthMBps: 4000},
+		{Index: 2, Name: "medium-x8", VRAMTotalMB: 12288, BandwidthMBps: 8000},
 	}
 	// The slow GPU would fail a normal split-owner reserve, but it can safely
 	// hold whole expert layers after the grounded expert-only reserve is used.
@@ -730,8 +796,19 @@ func TestExpertOnlySlowGPUUsesExpertReserveNotSplitOwnerReserve(t *testing.T) {
 	}
 }
 
+func TestExpertOnlyCapacityRespectsCurrentFreeVRAM(t *testing.T) {
+	gpus := []detect.GPU{
+		{Index: 0, VRAMTotalMB: 24576, VRAMUsedMB: 0, BandwidthMBps: 16000},
+		{Index: 1, VRAMTotalMB: 12288, VRAMUsedMB: 10500, BandwidthMBps: 1000},
+	}
+	expertOnly := expertOnlySlowGPUs(gpus, []int{2000, 2000}, []int{1000, 1000}, 3000, 200)
+	if expertOnly[1] {
+		t.Fatalf("slow GPU with only %d MiB free must not be classified as able to store a 3000 MiB expert layer", gpus[1].VRAMFreeMB())
+	}
+}
+
 // TestExpertOnlyCapacityTrigger verifies the OR capacity path: a GPU whose
-// PCIe link is fast enough to own dense layers (bandwidth ratio above 0.10)
+// PCIe link is fast enough to own dense layers (bandwidth ratio above 0.33)
 // but whose VRAM cannot fit the split-owner compute reserve plus one dense
 // layer's non-expert weight is still classified expert-only.
 func TestExpertOnlyCapacityTrigger(t *testing.T) {
@@ -739,7 +816,7 @@ func TestExpertOnlyCapacityTrigger(t *testing.T) {
 		{Index: 0, Name: "fast-big", VRAMTotalMB: 24576, BandwidthMBps: 16000},
 		{Index: 1, Name: "fast-small", VRAMTotalMB: 4096, BandwidthMBps: 16000},
 	}
-	// GPU1 has the same fast link as GPU0 (ratio 1.0, above 0.10), so the
+	// GPU1 has the same fast link as GPU0 (ratio 1.0, above 0.33), so the
 	// bandwidth trigger does NOT fire. But its VRAM after the split-owner
 	// reserve is too small for one dense layer (nonExpertPerLayerMB=2000),
 	// so the capacity trigger must classify it expert-only. Its expert-only
@@ -759,21 +836,19 @@ func TestExpertOnlyCapacityTrigger(t *testing.T) {
 // a GPU that is NOT classified expert-only by bandwidth or capacity (its link
 // is fast and it fits compute+dense pre-split) but gets eliminated from the
 // tensor split by KV/compute pressure is retrofitted as expert-only so its
-// VRAM is not left idle. This mirrors the DeepSeek-V4 3-GPU rig where GPU2
-// (4070 x4, 12 GB) was stranded at ~400 MB while 37 expert layers streamed
-// from CPU RAM.
+// VRAM is not left idle.
 func TestExpertOnlyRetrofitAfterSplitElimination(t *testing.T) {
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{
 			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, BandwidthMBps: 15754},
 			{Index: 1, Name: "RTX 3060 x1", VRAMTotalMB: 12288, BandwidthMBps: 985},
-			{Index: 2, Name: "RTX 4070 x4", VRAMTotalMB: 12282, BandwidthMBps: 3938},
+			{Index: 2, Name: "RTX 4070 x8", VRAMTotalMB: 12282, BandwidthMBps: 8000},
 		},
 		RAM: detect.RAMInfo{TotalMB: 128512, FreeMB: 120000},
 		CPU: detect.CPUInfo{Cores: 8},
 	}
-	// Model sized so GPU2 (4070) is NOT bandwidth-expert-only (ratio 0.25 >
-	// 0.10) and fits compute+dense pre-split, but a large KV cache at 1M ctx
+	// Model sized so GPU2 is NOT bandwidth-expert-only (ratio ~0.51 > 0.33)
+	// and fits compute+dense pre-split, but a large KV cache at 1M ctx
 	// eliminates it from the tensor split. The retrofit must then give it
 	// expert layers instead of leaving it idle.
 	model := &ModelProfile{
@@ -1149,18 +1224,32 @@ func TestComputeMoEMultiGPUFullyFitsExpertsOnGPU(t *testing.T) {
 	}
 }
 
-func TestFirstLaunchComputeBufForGPUKeepsPrimaryConservative(t *testing.T) {
+func TestFirstLaunchComputeBufForGPUKeepsEverySplitOwnerConservative(t *testing.T) {
 	order := []int{2, 0, 1}
 	primary := firstLaunchComputeBufMBForGPU(nil, 512, 2, order)
 	secondary := firstLaunchComputeBufMBForGPU(nil, 512, 0, order)
 	if primary != firstLaunchComputeBufMB(nil, 512) {
 		t.Fatalf("primary fallback = %d, want %d", primary, firstLaunchComputeBufMB(nil, 512))
 	}
-	if secondary >= primary {
-		t.Fatalf("secondary fallback should be lower than primary, got %d >= %d", secondary, primary)
+	if secondary != primary {
+		t.Fatalf("secondary split-owner fallback = %d, want full graph reserve %d", secondary, primary)
 	}
-	if secondary < computeFloorMB {
-		t.Fatalf("secondary fallback should keep compute floor, got %d < %d", secondary, computeFloorMB)
+}
+
+func TestFirstLaunchComputeBufMoEScalesWithFanoutAndParallel(t *testing.T) {
+	model := &ModelProfile{
+		IsMoE: true, ModelArch: "deepseek4", HiddenSize: 4096, NumLayers: 44, ExpertUsedCount: 6,
+	}
+	serial := firstLaunchComputeBufMBParallel(model, 256, 1)
+	parallel4 := firstLaunchComputeBufMBParallel(model, 256, 4)
+	if serial < 33000 || serial > 37000 {
+		t.Fatalf("serial MoE graph reserve = %d MiB, want measured-scale ~34 GiB", serial)
+	}
+	if parallel4 < 8500 || parallel4 > 9500 {
+		t.Fatalf("parallel-4 MoE graph reserve = %d MiB, want measured-scale ~8.9 GiB", parallel4)
+	}
+	if serial < parallel4*3 || serial > parallel4*5 {
+		t.Fatalf("parallel scaling inconsistent: serial=%d parallel4=%d", serial, parallel4)
 	}
 }
 

@@ -768,8 +768,19 @@ func backendMatches(info *backendInfo, name, want string) bool {
 }
 
 func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfile, be *backendInfo, cacheDir string) placement.Options {
+	ctxSize := resolveCtxFlag(req.CtxFlag, model.CTXTrain)
+	if req.ClaudeCode && ctxSize <= 0 {
+		// Claude Code needs a large shared window for its main conversation plus
+		// background work. In auto/fit mode use the model's native window, capped
+		// at 1M so the four default slots each retain about 262k tokens. Explicit
+		// numeric/max context choices are resolved above and remain user overrides.
+		ctxSize = model.CTXTrain
+		if ctxSize <= 0 || ctxSize > 1048576 {
+			ctxSize = 1048576
+		}
+	}
 	opts := placement.Options{
-		ContextSize:    resolveCtxFlag(req.CtxFlag, model.CTXTrain),
+		ContextSize:    ctxSize,
 		KVPlacement:    req.KVPlacement,
 		KVQuality:      req.KVQuality,
 		CPUMode:        req.CPUMode,
@@ -1945,7 +1956,7 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Println("  export API_FORCE_IDLE_TIMEOUT=0  # local models can spend >5 min prompt-processing before streaming")
 	fmt.Printf("  export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", pct, slot)
 	if _, err := exec.LookPath("uvx"); err == nil {
-		fmt.Println(`  claude --disallowedTools WebSearch --mcp-config '{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}'`)
+		fmt.Println(`  claude --disallowedTools WebSearch --allowedTools mcp__ddg-search__search,mcp__ddg-search__fetch_content --mcp-config '{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}'`)
 	} else {
 		fmt.Println("  claude --disallowedTools WebSearch   # add a search MCP (e.g. uvx duckduckgo-mcp-server) for web research")
 	}
@@ -2071,7 +2082,8 @@ func claudeCodeAutocompactPct(serverArgs []string) int {
 // search MCP into Claude Code, replacing the Anthropic-only WebSearch tool that
 // can't run against a local endpoint. Returns nil if the user already passed their
 // own --mcp-config or no MCP runner (uvx) is installed. The exposed tool surfaces to
-// agents and workflows as mcp__ddg-search__search.
+// agents and workflows as mcp__ddg-search__search and
+// mcp__ddg-search__fetch_content.
 func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 	if hasArg(extraArgs, "--mcp-config") {
 		return nil
@@ -2082,7 +2094,11 @@ func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 		return nil
 	}
 	cfg := `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}`
-	return []string{"--mcp-config", cfg}
+	args := []string{"--mcp-config", cfg}
+	if !hasArg(extraArgs, "--allowedTools") && !hasArg(extraArgs, "--allowed-tools") {
+		args = append(args, "--allowedTools", "mcp__ddg-search__search,mcp__ddg-search__fetch_content")
+	}
+	return args
 }
 
 // patchPlacementArgs replaces only the placement flags (-ot, --n-cpu-moe,
@@ -2216,7 +2232,7 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string) 
 	}
 	if mcp := claudeCodeSearchMCPArgs(extraArgs); mcp != nil {
 		args = append(mcp, args...)
-		fmt.Println("[claude-code] WebSearch disabled (Anthropic-only); DuckDuckGo search MCP wired in (mcp__ddg-search__search).")
+		fmt.Println("[claude-code] Online research enabled through DuckDuckGo MCP (search + fetch_content).")
 	} else {
 		fmt.Println("[claude-code] WebSearch disabled (Anthropic-only); install uvx or add a search MCP for web research.")
 	}
@@ -2950,6 +2966,13 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 			profile.OutputBytes = int64(float64(profile.OutputBytes) * scale)
 			profile.ShexpBytes = int64(float64(profile.ShexpBytes) * scale)
 		}
+	}
+	// SizeBytes is authoritative after multi-shard discovery/rescaling. Keep the
+	// MiB summary in sync: auto KV placement and strategy selection consume
+	// TotalSizeMB, and a stale parser-table value can make an oversized MoE look
+	// as though it fits wholly in VRAM.
+	if profile.SizeBytes > 0 {
+		profile.TotalSizeMB = int((profile.SizeBytes + 1048576 - 1) / 1048576)
 	}
 
 	return profile, nil

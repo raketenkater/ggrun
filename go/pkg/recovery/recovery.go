@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
-	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/server"
 )
 
 // FailureType classifies how a server load failed.
@@ -237,20 +237,7 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 		cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
 	}
 
-	// Build a clean environment with our required CUDA ordering.
-	// Filter out any existing CUDA_DEVICE_ORDER before adding ours,
-	// because duplicates have undefined behaviour in the CUDA runtime.
-	env := os.Environ()
-	filtered := make([]string, 0, len(env)+2)
-	for _, e := range env {
-		if !strings.HasPrefix(e, "CUDA_DEVICE_ORDER=") {
-			filtered = append(filtered, e)
-		}
-	}
-	filtered = append(filtered, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
-	// A shared-library backend build finds its co-located libs via the hub, not
-	// its build-machine RUNPATH.
-	cmd.Env = libhub.ApplyToChildEnv(filtered)
+	cmd.Env = server.ChildEnv(os.Environ(), l.Args)
 
 	if err := cmd.Start(); err != nil {
 		return err

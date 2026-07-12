@@ -158,6 +158,29 @@ func TestLoadProbeCacheDropsLegacyStartupOOMDoubleCount(t *testing.T) {
 	}
 }
 
+func TestProbeCacheKeepsMaximumAcrossPlacementVariants(t *testing.T) {
+	dir := t.TempDir()
+	model := &ModelProfile{Path: "/models/moe.gguf", NumLayers: 43, NumExperts: 256, EmbeddingLength: 4096}
+	gpus := []detect.GPU{{Index: 0}, {Index: 1}}
+	if err := RecordMeasuredComputeBuffers(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4,
+		map[int]int{0: 2423, 1: 74}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordMeasuredComputeBuffers(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4,
+		map[int]int{0: 8927, 1: 299}); err != nil {
+		t.Fatal(err)
+	}
+	// A later smaller placement must not erase the larger graph reserve.
+	if err := RecordMeasuredComputeBuffers(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4,
+		map[int]int{0: 1000, 1: 50}); err != nil {
+		t.Fatal(err)
+	}
+	got := loadProbeCache(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4)
+	if got == nil || got.ComputeBufByGPU[0] != 8927 || got.ComputeBufByGPU[1] != 299 || got.ComputeBufMB != 8927 {
+		t.Fatalf("maximum placement-dependent graph reserve was not preserved: %#v", got)
+	}
+}
+
 func TestParseComputeBuffersByGPU(t *testing.T) {
 	log := strings.Join([]string{
 		"llama: CUDA0 compute buffer size = 800.40 MiB",

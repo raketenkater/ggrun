@@ -36,6 +36,13 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	if opts.Parallel != 4 {
 		t.Fatalf("claude-code should layer four slots over the shared mainline placement, got %d", opts.Parallel)
 	}
+	if opts.ContextSize != 1048576 {
+		t.Fatalf("claude-code auto context should use the 1M native window, got %d", opts.ContextSize)
+	}
+	explicit := &launchRequest{ClaudeCode: true, CtxFlag: "262144"}
+	if got := placementOptionsFromRequest(explicit, model, be, t.TempDir()).ContextSize; got != 262144 {
+		t.Fatalf("explicit Claude Code context must win, got %d", got)
+	}
 	be = &backendInfo{Tag: "ik_llama"}
 	opts = placementOptionsFromRequest(req, &placement.ModelProfile{ModelArch: "qwen3moe"}, be, t.TempDir())
 	if opts.Parallel != 4 {
@@ -755,6 +762,28 @@ func TestClaudeCodeAutocompactPctLastWinsOnUserOverride(t *testing.T) {
 func TestClaudeCodeSearchMCPArgsRespectsUserConfig(t *testing.T) {
 	if got := claudeCodeSearchMCPArgs([]string{"--mcp-config", "mine.json"}); got != nil {
 		t.Fatalf("expected nil when user passed --mcp-config, got %v", got)
+	}
+}
+
+func TestClaudeCodeSearchMCPArgsEnablesResearchTools(t *testing.T) {
+	binDir := t.TempDir()
+	uvx := filepath.Join(binDir, "uvx")
+	if err := os.WriteFile(uvx, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	got := claudeCodeSearchMCPArgs(nil)
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"--mcp-config", "duckduckgo-mcp-server", "--allowedTools", "mcp__ddg-search__search", "mcp__ddg-search__fetch_content"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in research MCP args: %v", want, got)
+		}
+	}
+
+	got = claudeCodeSearchMCPArgs([]string{"--allowed-tools", "mine"})
+	if hasArg(got, "--allowedTools") || hasArg(got, "--allowed-tools") {
+		t.Fatalf("user allowed-tools must not be overridden, got %v", got)
 	}
 }
 

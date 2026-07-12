@@ -19,6 +19,23 @@ func TestProcessIsRunning(t *testing.T) {
 	}
 }
 
+func TestChildEnvEnablesScaledQueuesOnlyForMultiGPU(t *testing.T) {
+	got := ChildEnv([]string{"PATH=/bin", "CUDA_DEVICE_ORDER=FASTEST_FIRST"}, []string{"llama-server", "--tensor-split", "1,0,0"})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "CUDA_DEVICE_ORDER=PCI_BUS_ID") || !strings.Contains(joined, "CUDA_SCALE_LAUNCH_QUEUES=4x") {
+		t.Fatalf("missing multi-GPU CUDA defaults: %v", got)
+	}
+	got = ChildEnv([]string{"CUDA_SCALE_LAUNCH_QUEUES=2x"}, []string{"llama-server", "-ts", "1,1"})
+	joined = strings.Join(got, "\n")
+	if !strings.Contains(joined, "CUDA_SCALE_LAUNCH_QUEUES=2x") || strings.Contains(joined, "CUDA_SCALE_LAUNCH_QUEUES=4x") {
+		t.Fatalf("user queue override was not preserved: %v", got)
+	}
+	got = ChildEnv(nil, []string{"llama-server", "--parallel", "4"})
+	if strings.Contains(strings.Join(got, "\n"), "CUDA_SCALE_LAUNCH_QUEUES=") {
+		t.Fatalf("single-GPU launch should not receive scaled queues: %v", got)
+	}
+}
+
 func TestWaitReadyTimeout(t *testing.T) {
 	p := &Process{Port: 59999} // no server here
 	err := p.waitReady(100 * time.Millisecond)

@@ -1,10 +1,12 @@
-# Compute preflight: stable max-fill placement without paying for failed loads
+# Compute preflight: fastest stable placement without paying for failed loads
 
 Status: stage 1 (no-alloc launch preflight) implemented 2026-07-07. Stages 2-3 planned.
 
 ## Why
 
-ggrun's goal is to fill GPUs to the stable maximum for big MoE serving. Two failure
+ggrun's goal is to find the fastest stable whole-layer plan for big MoE serving.
+Maximum VRAM fill is not the objective when it reduces prefill or parallel throughput.
+Two failure
 classes broke that promise (DeepSeek-V4-Flash 146GB, 3×GPU, 2026-07-06/07):
 
 1. **Load-time CUDA OOM.** ggrun's Go-side placement math disagreed with the backend's
@@ -89,7 +91,8 @@ Startup OOM recovery exists; post-health crashes currently just kill the server.
 
 ## Non-goals
 
-- No hand-derived per-arch memory formulas in Go for new architectures (DeepSeek4
-  compressed/hybrid KV etc.) — the backend's own accounting is the oracle.
+- No unverified per-arch memory formulas as final authority. Cold-cache estimates
+  may use measured architecture fallbacks, but the backend preflight remains the
+  oracle and replaces them with exact rows before load.
 - No fixed safety margins. Every reserve must trace to a probe, a fit-print row, or a
   parsed backend log line.

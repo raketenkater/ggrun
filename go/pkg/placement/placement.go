@@ -25,7 +25,11 @@ const (
 	// Cards below this fraction of the fastest PCIe link are too slow to own
 	// regular layer slots in MoE layer-split mode, but can still be useful as
 	// expert-only VRAM when one or more whole expert layers fit.
-	expertOnlyMaxBandwidthRatio = 0.10
+	// Cards at one-third or less of the fastest link are better used as whole-
+	// expert storage. On the measured x16/x4/x1 host, letting the x4 card own a
+	// tiny dense split consumed an 8.7 GiB graph and left no complete-expert
+	// capacity; expert-only placement produced the fastest stable service.
+	expertOnlyMaxBandwidthRatio = 0.33
 )
 
 // StrategyType selects how the model is placed.
@@ -267,7 +271,8 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		} else {
 			sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
 			perGPUOH := perGPUVRAMOverheadMB(sysProbe, 0)
-			s.KVPlacement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs))
+			kvNeedMB := computeKVTotalMB(model, s.ContextSize, s.KVType)
+			s.KVPlacement = resolveAutoKVPlacement(caps, model, totalSizeMB, kvNeedMB, perGPUOH*len(caps.GPUs))
 		}
 	}
 
@@ -318,7 +323,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				// (large window); auto → gpu if it fits, else cpu for a big MoE.
 				placement := s.KVPlacement
 				if placement == "auto" || placement == "" {
-					placement = resolveAutoKVPlacement(caps, model, totalSizeMB, perGPUOH*len(caps.GPUs))
+					placement = resolveAutoKVPlacement(caps, model, totalSizeMB, computeKVTotalMB(model, s.ContextSize, s.KVType), perGPUOH*len(caps.GPUs))
 				}
 				s.KVPlacement = placement
 				s.ContextSize, s.KVType = computeAutoContextSizeKVPlacement(caps, model, totalSizeMB, s.KVType, placement, opts)
@@ -841,7 +846,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	fixedPerGPU := make([]int, numGPUs)
 	expertOnlyFixedPerGPU := make([]int, numGPUs)
 	for i, g := range caps.GPUs {
-		computeBufMB := firstLaunchComputeBufMBForGPU(model, s.UBatchSize, i, gpuOrder)
+		computeBufMB := firstLaunchComputeBufMBForGPUParallel(model, s.UBatchSize, s.Parallel, i, gpuOrder)
 		runtimeGrowthMB := 0
 		if pc != nil {
 			// Use the aggregate (primary) compute buffer for split-owner cost
@@ -968,10 +973,9 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// whole expert layers. Without this, such a GPU sits idle while its VRAM
 	// could offload expert layers from CPU RAM. Reclassify it as expert-only
 	// when it can fit at least one complete expert layer under the expert-only
-	// reserve, so the expert-capacity loop below picks it up. Uses VRAMTotalMB
-	// (not the penalized VRAMFreeMB) because the OOM penalty from a prior hybrid
-	// placement attempt does not apply to an expert-only placement — the deficit
-	// was caused by dense weights + KV, which the expert-only GPU does not carry.
+	// reserve, so the expert-capacity loop below picks it up. Capacity always uses
+	// current free VRAM: existing workloads and accumulated OOM penalties remain
+	// real even if the card changes from split-owner to expert-only.
 	for i, g := range caps.GPUs {
 		if expertOnlyGPU[i] || used[i] || split[i] > 0 {
 			continue
@@ -979,7 +983,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		if i >= len(expertOnlyFixedPerGPU) {
 			continue
 		}
-		if g.VRAMTotalMB-expertOnlyFixedPerGPU[i] >= expertPerLayerMB {
+		if g.VRAMFreeMB()-expertOnlyFixedPerGPU[i] >= expertPerLayerMB {
 			expertOnlyGPU[i] = true
 		}
 	}
@@ -1019,13 +1023,9 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		}
 		var roomMB int
 		if expertOnlyGPU[gi] {
-			// Expert-only GPUs don't own dense layers or KV, so their room is
-			// the full VRAM minus the expert-only fixed costs. Use VRAMTotalMB
-			// to avoid the OOM penalty from a prior hybrid placement attempt —
-			// the penalty was for a different placement type (split-owner with
-			// dense + KV), not for expert-only. The preflight gate validates
-			// the actual fit before the load.
-			roomMB = g.VRAMTotalMB - fixedMB
+			// Expert-only GPUs don't own dense layers or KV, but other processes,
+			// CUDA overhead, and any observed OOM penalty still consume real VRAM.
+			roomMB = g.VRAMFreeMB() - fixedMB
 		} else {
 			roomMB = g.VRAMFreeMB() - fixedMB - nonExpertCharge - kvShareMB
 		}
@@ -1171,7 +1171,8 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	}
 	var subPins []subExpertPin
 	movedOffCPUMB := 0
-	if hasMeasuredCUDAOverheadForActiveGPUs(sysCUDAOverheadByGPU, caps.GPUs, split) {
+	if enableAutomaticSubLayerExpertPins &&
+		hasMeasuredCUDAOverheadForActiveGPUs(sysCUDAOverheadByGPU, caps.GPUs, split) {
 		subPins, movedOffCPUMB = packGateUpChunks(remainderMB, gpuOrder, gateUpChunkMB, moeStartLayer+totalGPULayers, layersCPU)
 	}
 
@@ -1256,6 +1257,14 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 // heuristic for ubatch values that were never actually measured.
 var UBatchFitLadder = []int{256, 128, 64}
 
+// Automatic partial expert projection pins are intentionally disabled. Live
+// parallel-4 benchmarks showed that gate+up-only packing raised serial decode
+// 2.4% but reduced prompt-heavy aggregate throughput 17-19% because every
+// partial layer adds a CPU/GPU boundary. Keep the parser/cache support for
+// explicit or legacy plans, but the general planner emits complete expert
+// layers only until a topology-aware benchmark can prove partial pins faster.
+const enableAutomaticSubLayerExpertPins = false
+
 // numGPUsExcluded counts GPUs that got no tensor-split share and no explicit
 // expert pins in a multi-GPU MoE placement. A zero split is acceptable for a
 // deliberately expert-only slow PCIe GPU; it is only broken when the GPU is
@@ -1305,8 +1314,12 @@ func maximizeMoEGPUFitByUBatch(base, s *Strategy, err error, caps *detect.Capabi
 		gpus = caps.GPUs
 	}
 	baseExcluded := numGPUsExcluded(s, gpus)
-	if err == nil && s != nil && s.NCPUMoE == 0 && baseExcluded == 0 {
-		return s, err // already maximal — every expert layer is on a GPU and every GPU is in use
+	if err == nil && s != nil && s.NCPUMoE < moeCount && baseExcluded == 0 {
+		// The largest ubatch already has a usable whole-layer plan. More GPU
+		// experts do not automatically mean a faster service: live MoE tests
+		// showed the smaller ubatch/denser placement can lose prompt and parallel
+		// throughput. Preserve the largest proven-fit prefill batch.
+		return s, nil
 	}
 	best, bestErr, bestExcluded := s, err, baseExcluded
 	bestNCPUMoE := moeCount + 1
@@ -1327,6 +1340,12 @@ func maximizeMoEGPUFitByUBatch(base, s *Strategy, err error, caps *detect.Capabi
 			continue
 		}
 		nextExcluded := numGPUsExcluded(next, gpus)
+		if next.NCPUMoE < moeCount && nextExcluded == 0 {
+			fmt.Fprintf(os.Stderr,
+				"[placement] ubatch %d did not yield a usable whole-layer MoE plan — using ubatch %d instead (%d expert layer(s) on GPU, %d/%d GPUs used)\n",
+				base.UBatchSize, ub, moeCount-next.NCPUMoE, numGPUs, numGPUs)
+			return next, nil
+		}
 		if next.NCPUMoE >= bestNCPUMoE && nextExcluded >= bestExcluded {
 			continue // not an improvement over the best rung found so far
 		}
@@ -2181,30 +2200,53 @@ func modelAwareHeadroom(model *ModelProfile) int {
 // overrides this with the measured value after the first launch; under-estimating
 // is fatal (OOM crash). A nil model falls back to the old per-ubatch heuristic.
 func firstLaunchComputeBufMB(model *ModelProfile, uBatch int) int {
+	return firstLaunchComputeBufMBParallel(model, uBatch, 1)
+}
+
+// firstLaunchComputeBufMBParallel estimates the graph reserve for a cold-cache
+// launch. MoE routed-expert activation grows with experts selected per token;
+// parallel slots divide the physical ubatch graph approximately evenly. The
+// 128-byte fan-out coefficient is calibrated against llama-fit-params for
+// DeepSeek-V4 (6 active experts: 33.9 GiB at ub256/parallel1 and 8.9 GiB at
+// ub256/parallel4). Dense/unknown models keep the prior 42-byte coefficient.
+func firstLaunchComputeBufMBParallel(model *ModelProfile, uBatch, parallel int) int {
 	est := uBatch * 4
 	if model != nil && model.HiddenSize > 0 && model.NumLayers > 0 {
-		per := float64(model.HiddenSize) * float64(model.NumLayers) * 42.0 / 1e6
+		coefficient := 42.0
+		// DeepSeek4's routed MLA graph is substantially larger than a generic
+		// MoE graph. Do not project that architecture-specific coefficient onto
+		// Kimi/Mixtral/etc.; their exact backend preflight will calibrate them.
+		if strings.EqualFold(model.ModelArch, "deepseek4") && model.ExpertUsedCount > 0 {
+			moeCoefficient := float64(model.ExpertUsedCount) * 128.0
+			if moeCoefficient > coefficient {
+				coefficient = moeCoefficient
+			}
+		}
+		per := float64(model.HiddenSize) * float64(model.NumLayers) * coefficient / 1e6
 		est = int(float64(uBatch) * per)
+		if parallel > 1 {
+			est = ceilDivInt(est, parallel)
+		}
 	}
 	if est < computeFloorMB {
 		est = computeFloorMB
-	}
-	if est > 16384 {
-		est = 16384
 	}
 	return est
 }
 
 func firstLaunchComputeBufMBForGPU(model *ModelProfile, uBatch, gpuPos int, order []int) int {
-	primary := len(order) == 0 || order[0] == gpuPos
-	if primary {
-		return firstLaunchComputeBufMB(model, uBatch)
-	}
-	est := firstLaunchComputeBufMB(model, uBatch) / 2
-	if est < computeFloorMB {
-		est = computeFloorMB
-	}
-	return est
+	return firstLaunchComputeBufMBForGPUParallel(model, uBatch, 1, gpuPos, order)
+}
+
+func firstLaunchComputeBufMBForGPUParallel(model *ModelProfile, uBatch, parallel, gpuPos int, order []int) int {
+	// Every device that owns regular split layers may need the full graph.
+	// llama-fit-params measured 8.9 GiB on CUDA0 and 8.7 GiB on CUDA2 for the
+	// same DeepSeek-V4 ub256/parallel4 plan. Discounting secondary owners by 50%
+	// overcommitted 12 GiB cards. Expert-only devices are capped separately by
+	// expertOnlyComputeReserveMB after their classification is known.
+	_ = gpuPos
+	_ = order
+	return firstLaunchComputeBufMBParallel(model, uBatch, parallel)
 }
 
 // perGPUVRAMOverheadMB is the non-weight VRAM a single GPU needs at runtime:
@@ -2520,12 +2562,12 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 // A big MoE whose experts must offload to CPU puts KV on CPU instead: that frees
 // VRAM for more expert layers (the decode-bandwidth bottleneck) and unlocks a much
 // larger context. A dense model bigger than VRAM keeps KV on GPU (its only spot).
-func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB, vramOverheadMB int) string {
+func resolveAutoKVPlacement(caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB, vramOverheadMB int) string {
 	freeVRAM := 0
 	for _, g := range caps.GPUs {
 		freeVRAM += g.VRAMFreeMB()
 	}
-	if totalSizeMB+vramOverheadMB <= freeVRAM {
+	if totalSizeMB+kvTotalMB+vramOverheadMB <= freeVRAM {
 		return "gpu"
 	}
 	if model.IsMoE {
@@ -3765,8 +3807,8 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	modelName := filepath.Base(model.Path)
 	// Keep the historical trailing separator so serial (parallel key 0) cache
 	// paths remain compatible with measurements from before slot isolation.
-	key := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:",
-		modelName, model.NumLayers, model.NumExperts,
+	key := fmt.Sprintf("probe:v%d:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:",
+		placementPlannerCacheVersion, modelName, model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
 		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel)
 	hash := md5Hash12(key)
@@ -3779,6 +3821,11 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // so kv=gpu vs kv=cpu — or two context sizes — never share a cache entry. Both
 // the fit (load) and OOM-recovery / success (save) use this same path, so a
 // placement that loads cleanly is remembered instead of re-predicted.
+// Increment this when planner semantics or emitted tensor override patterns
+// change. A validated placement is only reusable under the exact semantics that
+// produced it; otherwise an old .place file can silently restore stale routing.
+const placementPlannerCacheVersion = 2
+
 func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, tensorSplit string) string {
 	if model == nil {
 		return ""
@@ -3796,8 +3843,8 @@ func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch
 	if backendTag == "" {
 		backendTag = "llama"
 	}
-	key := fmt.Sprintf("place:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:%s",
-		filepath.Base(model.Path), model.NumLayers, model.NumExperts,
+	key := fmt.Sprintf("place:v%d:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:%s",
+		placementPlannerCacheVersion, filepath.Base(model.Path), model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
 		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel, tensorSplit)
 	return filepath.Join(cacheDir, md5Hash12(key)+".place")
@@ -3889,8 +3936,35 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
+	// One runtime signature can produce several tensor placements while the
+	// preflight/recovery loop converges. Graph sizes are placement-dependent, so
+	// retain the maximum ever observed per device instead of letting a later,
+	// smaller graph erase the reserve that another valid placement required.
+	mergedCompute := map[int]int{}
+	for idx, v := range computeByGPU {
+		mergedCompute[idx] = v
+	}
+	mergedGrowth := map[int]int{}
+	for idx, v := range runtimeGrowthByGPU {
+		mergedGrowth[idx] = v
+	}
+	if existing := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallelKey); existing != nil {
+		for idx, v := range existing.ComputeBufByGPU {
+			if v > mergedCompute[idx] {
+				mergedCompute[idx] = v
+			}
+		}
+		for idx, v := range existing.RuntimeGraphGrowthByGPU {
+			if v > mergedGrowth[idx] {
+				mergedGrowth[idx] = v
+			}
+		}
+		if kvPerLayerMB <= 0 {
+			kvPerLayerMB = existing.KVPerLayerMB
+		}
+	}
 	maxCompute := 0
-	for _, v := range computeByGPU {
+	for _, v := range mergedCompute {
 		if v > maxCompute {
 			maxCompute = v
 		}
@@ -3903,24 +3977,24 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	if maxCompute > 0 {
 		fmt.Fprintf(&b, "PROBED_COMPUTE_BUF_MB=%d\n", maxCompute)
 	}
-	indices := make([]int, 0, len(computeByGPU))
-	for idx := range computeByGPU {
+	indices := make([]int, 0, len(mergedCompute))
+	for idx := range mergedCompute {
 		indices = append(indices, idx)
 	}
 	sort.Ints(indices)
 	for _, idx := range indices {
-		if computeByGPU[idx] > 0 {
-			fmt.Fprintf(&b, "PROBED_COMPUTE_BUF_MB_CUDA%d=%d\n", idx, computeByGPU[idx])
+		if mergedCompute[idx] > 0 {
+			fmt.Fprintf(&b, "PROBED_COMPUTE_BUF_MB_CUDA%d=%d\n", idx, mergedCompute[idx])
 		}
 	}
-	growthIndices := make([]int, 0, len(runtimeGrowthByGPU))
-	for idx := range runtimeGrowthByGPU {
+	growthIndices := make([]int, 0, len(mergedGrowth))
+	for idx := range mergedGrowth {
 		growthIndices = append(growthIndices, idx)
 	}
 	sort.Ints(growthIndices)
 	for _, idx := range growthIndices {
-		if runtimeGrowthByGPU[idx] > 0 {
-			fmt.Fprintf(&b, "PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA%d=%d\n", idx, runtimeGrowthByGPU[idx])
+		if mergedGrowth[idx] > 0 {
+			fmt.Fprintf(&b, "PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA%d=%d\n", idx, mergedGrowth[idx])
 		}
 	}
 	if kvPerLayerMB > 0 {
