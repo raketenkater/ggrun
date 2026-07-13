@@ -77,7 +77,8 @@ Ngram modes are explicit because they are workload-sensitive. See
 ## Use with Claude Code
 
 ggrun serves llama.cpp's native Anthropic `/v1/messages` endpoint (`--jinja` on for
-tool use), so Claude Code talks to a local model directly — no proxy.
+tool use). In Auto mode a loopback-only ggrun router sends normal coding turns to
+the selected model and hidden permission reviews to a small local reviewer.
 
 ```bash
 ggrun model.gguf --claude-code   # serve, then launch Claude Code wired to it
@@ -95,7 +96,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local 
 export API_TIMEOUT_MS=14400000             # let queued fan-out/subagent requests finish, not cancel
 export API_FORCE_IDLE_TIMEOUT=0            # local PP can exceed Claude Code's stream-idle watchdog
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90  # compact early to fit the real per-slot window (ggrun computes this)
-claude --permission-mode acceptEdits --disallowedTools WebSearch
+claude --permission-mode auto --disallowedTools WebSearch
 ```
 
 All five inference tiers point at `local` on purpose, so foreground and background
@@ -125,14 +126,15 @@ model calls cannot leave for `api.anthropic.com`.
   permission prompt — `--claude-code` does this for you. Prefer another provider? Add it with
   `claude mcp add …` (it runs alongside `ddg-search`), or launch `claude` yourself
   from the printed recipe and drop/replace the `--mcp-config` line.
-- **Permissions remain available locally.** Claude Code Auto mode relies on a separate
-  supported Anthropic safety-classifier path. With a custom local API endpoint, a
-  classifier outage rejects Workflow, MCP, WebFetch, and Bash calls before they run.
-  ggrun therefore starts local sessions in `acceptEdits`: edits and common local file
-  operations proceed, consequential shell calls still ask, and the two exact research
-  MCP tools above are pre-approved. This is not `bypassPermissions`. Set
-  `GGRUN_CLAUDE_PERMISSION_MODE=auto` to test Auto anyway, or `inherit` to preserve
-  your global Claude setting. See Claude Code's
+- **Auto works locally and remains fail-closed.** Claude Code sends hidden permission
+  reviews to the same model ID as coding turns. ggrun detects those exact
+  security-monitor requests and routes them to a pinned Qwen3.5-2B reviewer running
+  locally; all other traffic stays on the selected coding model. The reviewer starts
+  before placement, so its measured VRAM use is included when ggrun places the main
+  model. This is Auto, not `bypassPermissions`. The first launch downloads and verifies
+  the pinned ~1.3 GiB GGUF. Override it with `GGRUN_CLAUDE_REVIEWER_MODEL=/path/model.gguf`,
+  choose another permission mode with `GGRUN_CLAUDE_PERMISSION_MODE=acceptEdits`, or
+  use `inherit` to preserve your global Claude setting. See Claude Code's
   [permission-mode requirements](https://code.claude.com/docs/en/permission-modes#eliminate-prompts-with-auto-mode).
 - **Live local progress:** while a local request is queued, ingesting its prompt, or
   generating, ggrun adds a session-only Claude status line with the active slot,

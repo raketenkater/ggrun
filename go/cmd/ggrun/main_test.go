@@ -787,11 +787,11 @@ func TestClaudeCodeSearchMCPArgsEnablesResearchTools(t *testing.T) {
 	}
 }
 
-func TestClaudeCodePermissionArgsDefaultsToSupportedLocalMode(t *testing.T) {
+func TestClaudeCodePermissionArgsDefaultsToLocalAuto(t *testing.T) {
 	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
 	got := claudeCodePermissionArgs(nil)
-	if len(got) != 2 || got[0] != "--permission-mode" || got[1] != "acceptEdits" {
-		t.Fatalf("local Claude launch must avoid unsupported Auto default, got %v", got)
+	if len(got) != 2 || got[0] != "--permission-mode" || got[1] != "auto" {
+		t.Fatalf("local Claude launch must use the routed Auto reviewer, got %v", got)
 	}
 }
 
@@ -811,8 +811,8 @@ func TestClaudeCodePermissionArgsRespectsOverrides(t *testing.T) {
 		t.Fatalf("inherit must preserve settings.json mode, got %v", got)
 	}
 	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "not-a-mode")
-	if got := claudeCodePermissionArgs(nil); len(got) != 2 || got[1] != "acceptEdits" {
-		t.Fatalf("invalid override must fail safe to acceptEdits, got %v", got)
+	if got := claudeCodePermissionArgs(nil); len(got) != 2 || got[1] != "auto" {
+		t.Fatalf("invalid override must fail safe to routed Auto, got %v", got)
 	}
 }
 

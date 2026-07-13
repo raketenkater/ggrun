@@ -32,21 +32,22 @@ Source: `5e91131f/24`, retargeted by the user on 2026-07-12.
 
 The launcher, native `/v1/messages`, local aliases for every Claude tier, parallel-4,
 1M total context, per-slot compaction, four-hour timeouts, anti-loop sampling and
-DuckDuckGo MCP wiring are implemented. Live acceptance established that Claude Auto's
-separate classifier is not a supported/reliable custom-endpoint path: once it reports
-`local is temporarily unavailable`, it rejects Workflow, MCP, WebFetch and Bash before
-execution. Local launches now use the non-bypass `acceptEdits` mode by default, with an
-explicit Auto/inherit override and exact research-tool pre-approval.
+DuckDuckGo MCP wiring are implemented. Claude Auto's hidden classifier requests are
+now routed to a pinned local Qwen3.5-2B reviewer while coding stays on the selected
+model. The reviewer starts before placement so its measured VRAM is in the main-model
+ledger. Default local launches use fail-closed Auto, never bypass mode.
 
 - [ ] Run one complete acceptance workflow against a running ggrun model: file edits,
   commands/tests, four workflow agents, tool results, queueing, combined response and
   context compaction.
 - [ ] In that workflow, verify MCP `search` plus `fetch_content`, including a failed
   lookup/retry from a subagent.
-- [x] Verify Auto permission behavior and document the upstream boundary. A controlled
-  Claude 2.1.207 run proved the exact DuckDuckGo allowlist works while the classifier is
-  healthy; the latest real session proved classifier failure globally blocks unmatched
-  tools. ggrun now selects `acceptEdits`, never bypass mode, for local launches.
+- [x] Implement and verify local Auto permissions. Claude 2.1.207 sends a distinctive
+  two-stage security-monitor request (about 25k prompt tokens) to the same model ID.
+  ggrun's loopback router sends only that structured system request to the local 2B
+  reviewer. Safe Bash completed end to end with zero permission denials; invalid
+  reviewer output was also verified to fail closed. The pinned reviewer cold-prefilled
+  the captured prompt in 2.4–5.8 seconds depending on GPU and warm reviews took ~0.18s.
 - [ ] Turn the repeatable parts into a Claude acceptance harness for `/v1/messages`,
   tool-use/tool-result blocks, aliases, MCP, malformed tool recovery and timeouts.
 - [x] **Add live local-request progress to Claude Code launches:** queued/prefill/

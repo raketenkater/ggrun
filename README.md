@@ -88,6 +88,11 @@ ggrun model.gguf --benchmark   # load, measure tok/s, exit
 ggrun model.gguf --claude-code # serve + launch Claude Code wired to this model
 ```
 
+Claude Code launches in autonomous Auto permission mode by default. ggrun runs a
+small pinned local safety reviewer beside the coding model, routes only Claude's
+hidden permission checks to it, and accounts for its real VRAM use before placing
+the main model. Workflows and research stay local; this is not bypass mode.
+
 Unknown flags pass straight through to `llama-server`. Full list in
 [docs/usage.md](docs/usage.md).
 

@@ -1203,8 +1203,28 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 
+	// Claude Code's Auto permission checks must not run on the giant coding
+	// model: one tool call can otherwise trigger ten extra ~25k-token turns.
+	// Start the dedicated reviewer first, then sample hardware again so normal
+	// placement accounts for its real measured VRAM use.
+	claudeAuto, err := startClaudeAutoReviewer(req, cfg, caps)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if claudeAuto != nil {
+		refreshed, detectErr := detect.Detect()
+		if detectErr != nil {
+			claudeAuto.stop()
+			fmt.Fprintf(os.Stderr, "Error re-detecting hardware after Auto reviewer load: %v\n", detectErr)
+			os.Exit(1)
+		}
+		caps = refreshed
+	}
+
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
+		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
@@ -1249,6 +1269,7 @@ func cmdLaunch(args []string) {
 
 	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, strategy, be, caps, serverArgs, timeout)
 	if err != nil {
+		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 		os.Exit(1)
 	}
@@ -1262,6 +1283,7 @@ func cmdLaunch(args []string) {
 			fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
 			p, nextStrategy, nextArgs, err = startLaunchWithCUDAOOMRecovery(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout)
 			if err != nil {
+				claudeAuto.stop()
 				fmt.Fprintf(os.Stderr, "Error starting promoted server: %v\n", err)
 				os.Exit(1)
 			}
@@ -1272,6 +1294,16 @@ func cmdLaunch(args []string) {
 				go recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String(), baselineVRAM)
 			}
 		}
+	}
+	claudeClientPort := req.Port
+	if claudeAuto != nil {
+		if err := claudeAuto.startRouter(req.Host, req.Port); err != nil {
+			_ = p.Stop()
+			claudeAuto.stop()
+			fmt.Fprintf(os.Stderr, "Error starting Claude Auto router: %v\n", err)
+			os.Exit(1)
+		}
+		claudeClientPort = claudeAuto.clientPort(req.Port)
 	}
 	if req.ClaudeCode {
 		// Smooth path: one command brings up the model AND drops the user into
@@ -1313,7 +1345,11 @@ func cmdLaunch(args []string) {
 		} else {
 			fmt.Println("[claude-code] Live request progress enabled in the terminal title (existing Claude status line preserved).")
 		}
-		if code := runClaudeCodeClient(req.Host, req.Port, serverArgs, clientArgs); code >= 0 {
+		clientHost := req.Host
+		if claudeAuto != nil {
+			clientHost = "127.0.0.1"
+		}
+		if code := runClaudeCodeClient(clientHost, claudeClientPort, serverArgs, clientArgs); code >= 0 {
 			progressStop()
 			healthCancel()
 			// The terminal was handed to `claude`, so a mid-session backend
@@ -1330,10 +1366,11 @@ func cmdLaunch(args []string) {
 			if err := p.Stop(); err != nil {
 				fmt.Fprintf(os.Stderr, "[launch] stop after claude: %v\n", err)
 			}
+			claudeAuto.stop()
 			os.Exit(code)
 		}
 		// `claude` isn't installed — fall back to the copy-paste recipe.
-		printClaudeCodeRecipe(req.Host, req.Port, serverArgs)
+		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs)
 	}
 
 	if req.Benchmark {
@@ -1341,6 +1378,7 @@ func cmdLaunch(args []string) {
 		if err := p.Stop(); err != nil {
 			fmt.Fprintf(os.Stderr, "[launch] stop after benchmark: %v\n", err)
 		}
+		claudeAuto.stop()
 		return
 	}
 
@@ -1372,6 +1410,7 @@ func cmdLaunch(args []string) {
 		}
 		device, allocMB, ok := startupLogCUDAOOM(logData)
 		if !ok || runtimeOOMRetries >= maxRuntimeOOMRetries {
+			claudeAuto.stop()
 			if ok {
 				fmt.Fprintf(os.Stderr, "[launch] server crashed (CUDA OOM on device %d, %d MiB) after %d recovery attempt(s) — giving up. Try again; the deficit already recorded should reduce it next time.\n", device, allocMB, runtimeOOMRetries)
 			} else {
@@ -1394,6 +1433,7 @@ func cmdLaunch(args []string) {
 		replanOpts.SkipPlacementCache = true
 		nextStrategy, err := placement.Compute(caps, model, replanOpts)
 		if err != nil {
+			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -1402,6 +1442,7 @@ func cmdLaunch(args []string) {
 		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
 		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout)
 		if err != nil {
+			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] relaunch after runtime OOM failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -1428,6 +1469,7 @@ func cmdLaunch(args []string) {
 			p.Cmd.Process.Kill()
 		}
 	}
+	claudeAuto.stop()
 }
 
 // waitForShutdownOrCrash blocks until either a shutdown signal arrives
@@ -1940,13 +1982,14 @@ func cmdDryRun(args []string) {
 		fmt.Printf("[spec] %s\n", s)
 	}
 	if req.ClaudeCode {
-		printClaudeCodeRecipe(req.Host, req.Port, serverArgs)
+		fmt.Println("[claude-code] A real launch also starts the local Auto reviewer/router and then opens Claude Code.")
 	}
 }
 
 // printClaudeCodeRecipe prints the exact env to point Claude Code at this
-// locally-served model. ggrun serves llama.cpp's native Anthropic /v1/messages
-// endpoint with --jinja already on, so no proxy is needed.
+// local ggrun endpoint. In Auto mode the port belongs to ggrun's loopback
+// router; normal turns stream to the main llama-server and hidden safety turns
+// go to the dedicated reviewer.
 func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	clientHost := host
 	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
@@ -2040,13 +2083,10 @@ func envOr(key, def string) string {
 	return def
 }
 
-// claudeCodePermissionArgs keeps a local Claude Code launch off Auto mode unless
-// the user explicitly opts back in. Auto uses a separate safety-classifier model;
-// with a custom ANTHROPIC_BASE_URL that reviewer is not a supported/reliable local
-// path. A classifier failure rejects otherwise valid Workflow, MCP, WebFetch and
-// Bash calls before they execute. acceptEdits retains Claude Code's permission
-// system (shell and other consequential calls still ask) while exact --allowedTools
-// rules such as ggrun's two research tools continue to run without a prompt.
+// claudeCodePermissionArgs defaults local Claude Code to Auto. ggrun supplies
+// Auto's otherwise-missing classifier with a dedicated local reviewer and routes
+// only the hidden safety-monitor calls to it; Workflow, MCP, WebFetch, and Bash can
+// therefore run autonomously without bypassing Claude Code's safety rules.
 //
 // GGRUN_CLAUDE_PERMISSION_MODE can select another current Claude CLI mode. Set it
 // to "inherit" to preserve the user's settings.json default. An explicit
@@ -2059,7 +2099,7 @@ func claudeCodePermissionArgs(extraArgs []string) []string {
 	}
 	mode := strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_PERMISSION_MODE"))
 	if mode == "" {
-		mode = "acceptEdits"
+		mode = "auto"
 	}
 	if strings.EqualFold(mode, "inherit") {
 		return nil
@@ -2081,7 +2121,7 @@ func claudeCodePermissionArgs(extraArgs []string) []string {
 	case "plan":
 		mode = "plan"
 	default:
-		mode = "acceptEdits"
+		mode = "auto"
 	}
 	return []string{"--permission-mode", mode}
 }
@@ -2298,8 +2338,10 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string) 
 	args := extraArgs
 	if permissionArgs := claudeCodePermissionArgs(extraArgs); permissionArgs != nil {
 		args = append(permissionArgs, args...)
-		if len(permissionArgs) == 2 && permissionArgs[1] == "acceptEdits" {
-			fmt.Println("[claude-code] Permission mode: acceptEdits (local Auto classifier is not reliable; shell actions still ask).")
+		if len(permissionArgs) == 2 && permissionArgs[1] == "auto" {
+			fmt.Println("[claude-code] Permission mode: Auto (dedicated local safety reviewer; fail-closed).")
+		} else if len(permissionArgs) == 2 && permissionArgs[1] == "acceptEdits" {
+			fmt.Println("[claude-code] Permission mode: acceptEdits (explicit override; shell actions still ask).")
 		}
 	}
 	// Built-in WebSearch is an Anthropic server-side tool; on a local endpoint it
