@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
@@ -26,6 +28,8 @@ func backendUsage() {
 	fmt.Fprint(os.Stderr, `Usage: ggrun backend <subcommand>
 
   list                              List registered custom backends
+  recipes                           List reviewed reproducible fork recipes
+  install <recipe> [flags]          Build/register a reviewed recipe (for example hy3)
   add <git-url> [flags]             Clone, build, and register a custom llama.cpp backend
   register [flags]                  Register an already-built binary
   remove <tag>                      Unregister a backend
@@ -35,6 +39,7 @@ add/register flags:
   --route-arch <arch>   Auto-select this backend for models of this architecture
                         (e.g. custommoe), so it "just works" with no --backend
   --branch <branch>     Git branch to clone (add only; default: default branch)
+  --commit <sha>        Pin the exact source commit (add only; recipes always pin)
   --accel cuda|vulkan|cpu   Build accelerator (add only; default: cuda if nvcc present)
   --cuda-arch <list>    CUDA archs, e.g. "86;89" (add only; default: native)
   --path <binary>       Path to a prebuilt llama-server (register only)
@@ -42,6 +47,7 @@ add/register flags:
 Examples:
   ggrun backend add https://github.com/your-org/llama.cpp \
     --branch feature/custom-arch --tag custom --route-arch custommoe --cuda-arch "86;89"
+  ggrun backend install hy3 --cuda-arch "86;89"
   ggrun backend list
 `)
 }
@@ -54,6 +60,10 @@ func cmdBackend(args []string) {
 	switch args[0] {
 	case "list", "ls":
 		cmdBackendList()
+	case "recipes":
+		cmdBackendRecipes()
+	case "install":
+		cmdBackendInstall(args[1:])
 	case "add":
 		cmdBackendAdd(args[1:])
 	case "register":
@@ -64,6 +74,39 @@ func cmdBackend(args []string) {
 		backendUsage()
 		os.Exit(2)
 	}
+}
+
+func cmdBackendRecipes() {
+	for _, recipe := range backends.Recipes() {
+		fmt.Printf("  %-10s arch=%-12s %s\n    %s @ %s (%s)\n", recipe.Name, recipe.RouteArch, recipe.Description, recipe.GitURL, recipe.Commit, recipe.Branch)
+	}
+}
+
+func cmdBackendInstall(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "install needs a recipe name; available recipes:")
+		cmdBackendRecipes()
+		os.Exit(2)
+	}
+	recipe := backends.RecipeByName(args[0])
+	if recipe == nil {
+		fmt.Fprintf(os.Stderr, "unknown backend recipe %q; available recipes:\n", args[0])
+		cmdBackendRecipes()
+		os.Exit(2)
+	}
+	generated := []string{
+		recipe.GitURL,
+		"--tag", recipe.Tag,
+		"--branch", recipe.Branch,
+		"--commit", recipe.Commit,
+		"--route-arch", recipe.RouteArch,
+	}
+	if recipe.Accel != "" {
+		generated = append(generated, "--accel", recipe.Accel)
+	}
+	// User build-only overrides such as --cuda-arch come last.
+	generated = append(generated, args[1:]...)
+	cmdBackendAdd(generated)
 }
 
 func cmdBackendList() {
@@ -157,6 +200,7 @@ func cmdBackendAdd(args []string) {
 		os.Exit(2)
 	}
 	branch := f["branch"]
+	commit := f["commit"]
 	tag := f["tag"]
 	if tag == "" {
 		tag = deriveBackendTag(url, branch)
@@ -183,6 +227,10 @@ func cmdBackendAdd(args []string) {
 	} else {
 		fmt.Printf("[backend] reusing existing checkout %s\n", srcDir)
 	}
+	if err := prepareForkCheckout(srcDir, branch, commit); err != nil {
+		fmt.Fprintf(os.Stderr, "source checkout failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Printf("[backend] building (%s)… this can take 30–60 min\n", accel)
 	bin, err := buildLlamaFork(srcDir, accel, f["cuda-arch"])
@@ -191,13 +239,14 @@ func cmdBackendAdd(args []string) {
 		os.Exit(1)
 	}
 
-	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch}
+	actualCommit, _ := gitOutput(srcDir, "rev-parse", "HEAD")
+	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit)}
 	if err := backends.Upsert(be); err != nil {
 		fmt.Fprintf(os.Stderr, "register failed: %v\n", err)
 		os.Exit(1)
 	}
 	// Symlink into .bin so it also shows up in the normal backend search paths.
-	link := filepath.Join(backends.AppHome(), ".bin", tag+"-server-cuda")
+	link := filepath.Join(backends.AppHome(), ".bin", tag+"-server-"+accel)
 	_ = os.Remove(link)
 	if err := os.Symlink(bin, link); err == nil {
 		fmt.Printf("[backend] linked %s\n", link)
@@ -206,6 +255,57 @@ func cmdBackendAdd(args []string) {
 	if be.RouteArch != "" {
 		fmt.Printf("Models with arch %q will now use this backend automatically.\n", be.RouteArch)
 	}
+}
+
+// prepareForkCheckout updates a ggrun-owned fork checkout without trampling
+// local edits. A commit pin wins; otherwise the requested branch (or remote
+// default HEAD) advances to its latest fetched revision.
+func prepareForkCheckout(srcDir, branch, commit string) error {
+	dirty, err := gitOutput(srcDir, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return fmt.Errorf("%s has local changes; commit/stash them or use a different recipe tag", srcDir)
+	}
+	ref := commit
+	if ref == "" {
+		ref = "HEAD"
+		if branch != "" {
+			ref = branch
+		}
+	}
+	fetchArgs := []string{"fetch", "--depth", "1", "origin", ref}
+	if err := runStreamed(srcDir, "git", fetchArgs...); err != nil {
+		return fmt.Errorf("git fetch %s: %w", ref, err)
+	}
+	checkout := "FETCH_HEAD"
+	if commit != "" {
+		checkout = commit
+	}
+	if err := runStreamed(srcDir, "git", "checkout", "--detach", checkout); err != nil {
+		return fmt.Errorf("git checkout %s: %w", checkout, err)
+	}
+	if commit != "" {
+		actual, err := gitOutput(srcDir, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(commit)) {
+			return fmt.Errorf("commit verification failed: got %s, want %s", strings.TrimSpace(actual), commit)
+		}
+	}
+	return nil
+}
+
+func gitOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return string(out), nil
 }
 
 // deriveBackendTag builds a stable name from a git URL (+branch).
@@ -271,7 +371,8 @@ func buildLlamaFork(srcDir, accel, cudaArch string) (string, error) {
 	if err := runStreamed(srcDir, "cmake", cfg...); err != nil {
 		return "", fmt.Errorf("cmake configure: %w", err)
 	}
-	if err := runStreamed(srcDir, "cmake", "--build", buildDir, "--config", "Release", "-j", "--target", "llama-server"); err != nil {
+	jobs := backendBuildJobs(accel, runtime.NumCPU())
+	if err := runStreamed(srcDir, "cmake", "--build", buildDir, "--config", "Release", "--parallel", strconv.Itoa(jobs), "--target", "llama-server"); err != nil {
 		return "", fmt.Errorf("cmake build: %w", err)
 	}
 	bin := filepath.Join(buildDir, "bin", "llama-server")
@@ -279,6 +380,22 @@ func buildLlamaFork(srcDir, accel, cudaArch string) (string, error) {
 		return "", fmt.Errorf("build produced no binary at %s", bin)
 	}
 	return bin, nil
+}
+
+func backendBuildJobs(accel string, cpuCount int) int {
+	if cpuCount < 1 {
+		cpuCount = 1
+	}
+	limit := 16
+	if accel == "cuda" {
+		// NVCC fans each translation unit into several memory-heavy processes;
+		// an unbounded `cmake -j` can create hundreds of them on large hosts.
+		limit = 8
+	}
+	if cpuCount > limit {
+		return limit
+	}
+	return cpuCount
 }
 
 // runStreamed runs a command in dir with CUDA on PATH, streaming its output.

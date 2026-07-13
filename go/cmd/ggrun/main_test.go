@@ -179,6 +179,43 @@ func TestRouteArchBackendKeepsRegisteredTag(t *testing.T) {
 	}
 }
 
+func TestRouteArchBackendPreservesIKDialectBehindRecipeTag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-backend probe uses a shell script")
+	}
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	backendPath := writeFakeBackend(t, "hy3-server", "echo 'ikawrakow split-mode-graph'\n")
+	if err := backends.Save([]backends.Backend{{Tag: "hy3", Path: backendPath, RouteArch: "hy_v3"}}); err != nil {
+		t.Fatalf("save backends: %v", err)
+	}
+	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "hy_v3"}, &launchRequest{})
+	if be == nil || be.Tag != "hy3" || backendDialect(be) != "ik_llama" || !be.IsIK {
+		t.Fatalf("expected HY3 identity with IK dialect, got %#v", be)
+	}
+	opts := placementOptionsFromRequest(&launchRequest{}, &placement.ModelProfile{}, be, t.TempDir())
+	if opts.BackendTag != "ik_llama" {
+		t.Fatalf("placement got recipe tag instead of IK dialect: %#v", opts)
+	}
+	if opts.BackendCacheTag != "hy3" {
+		t.Fatalf("placement probes are not isolated to the HY3 fork: %#v", opts)
+	}
+}
+
+func TestBackendBuildJobsCapsHeavyCompilers(t *testing.T) {
+	if got := backendBuildJobs("cuda", 256); got != 8 {
+		t.Fatalf("CUDA build jobs = %d, want 8", got)
+	}
+	if got := backendBuildJobs("cpu", 256); got != 16 {
+		t.Fatalf("CPU build jobs = %d, want 16", got)
+	}
+	if got := backendBuildJobs("cuda", 4); got != 4 {
+		t.Fatalf("small host CUDA build jobs = %d, want 4", got)
+	}
+	if got := backendBuildJobs("cuda", 0); got != 1 {
+		t.Fatalf("invalid CPU count build jobs = %d, want 1", got)
+	}
+}
+
 func TestRouteArchBackendKeepsExplicitBackend(t *testing.T) {
 	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "deepseek4"}, &launchRequest{Backend: "llama", BackendExplicit: true})
 	if be == nil || be.Path != "/main/llama-server" || be.Tag != "llama" {

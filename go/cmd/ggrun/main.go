@@ -133,7 +133,7 @@ Launch flags:
   --vram-headroom str  Reserve VRAM the recommender/placement won't use, e.g. 2G
   --ram-headroom str   Reserve system RAM the recommender/placement won't use, e.g. 8G
   -vision              Enable vision (auto-detect mmproj)
-  --spec string       Speculative decoding: off|auto|mtp|eagle3|draft|ngram|ngram-mod|ngram-k4v
+  --spec string       Speculative decoding: off|auto|mtp|dflash|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
 }
 
@@ -749,10 +749,21 @@ func detectRegisteredBackend(cb *backends.Backend) *backendInfo {
 		return nil
 	}
 	info := detectBackend(cb.Path)
-	if tag := strings.TrimSpace(cb.Tag); tag != "" {
-		info.Tag = tag
-	}
+	// Keep recipe identity for selection/tune-cache isolation while retaining
+	// the probed flag dialect separately. A recipe name such as "hy3" must not
+	// make an IK fork receive mainline split/spec flags.
+	info.Tag = cb.Tag
 	return info
+}
+
+func backendDialect(be *backendInfo) string {
+	if be == nil {
+		return "llama"
+	}
+	if be.Dialect != "" {
+		return be.Dialect
+	}
+	return be.Tag
 }
 
 func backendMatches(info *backendInfo, name, want string) bool {
@@ -782,24 +793,26 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		}
 	}
 	opts := placement.Options{
-		ContextSize:    ctxSize,
-		KVPlacement:    req.KVPlacement,
-		KVQuality:      req.KVQuality,
-		CPUMode:        req.CPUMode,
-		RamBudgetMB:    req.RamBudgetMB,
-		VRAMHeadroomMB: req.VRAMHeadroomMB,
-		RAMHeadroomMB:  req.RAMHeadroomMB,
-		NoMMap:         req.NoMMap,
-		CacheDir:       cacheDir,
-		Host:           req.Host,
-		BackendTag:     be.Tag,
-		VisionAuto:     req.VisionAuto,
-		MMProjPath:     req.MMProjPath,
-		SpecMode:       req.SpecMode,
-		ForceSpecMoE:   req.ForceSpecMoE,
-		BackendHelp:    be.Help,
-		CacheFile:      req.TuneCache,
-		Parallel:       req.Parallel,
+		ContextSize:            ctxSize,
+		KVPlacement:            req.KVPlacement,
+		KVQuality:              req.KVQuality,
+		CPUMode:                req.CPUMode,
+		RamBudgetMB:            req.RamBudgetMB,
+		VRAMHeadroomMB:         req.VRAMHeadroomMB,
+		RAMHeadroomMB:          req.RAMHeadroomMB,
+		NoMMap:                 req.NoMMap,
+		CacheDir:               cacheDir,
+		Host:                   req.Host,
+		BackendTag:             backendDialect(be),
+		BackendCacheTag:        be.Tag,
+		VisionAuto:             req.VisionAuto,
+		MMProjPath:             req.MMProjPath,
+		SpecMode:               req.SpecMode,
+		ForceSpecMoE:           req.ForceSpecMoE,
+		BackendHelp:            be.Help,
+		SpecCandidateValidator: backendSpecCandidateValidator(be),
+		CacheFile:              req.TuneCache,
+		Parallel:               req.Parallel,
 		// Disable the model's thinking only when measuring (`--benchmark`); a
 		// normal launch keeps reasoning on so tools like Claude Code can think.
 		ReasoningOff: req.Benchmark,
@@ -952,6 +965,14 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 	retries := 0
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
+	specDisabled := false
+	placementOpts := func() placement.Options {
+		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+		if specDisabled {
+			opts.SpecMode = "off"
+		}
+		return opts
+	}
 	for {
 		// Ask the backend's no-alloc accounting whether this placement can even
 		// load (~1s) before committing to a real load (15+ min for a big MoE).
@@ -959,10 +980,27 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		// without paying for the load to learn it. Re-planned args loop back
 		// here, so every retry is re-gated too.
 		if preflightReplans < 3 && strategy != nil {
-			if dev, deficit, bad := preflightPlacement(be, &configForPreflight{CacheDir: cfg.CacheDir}, caps, model, strategy, serverArgs); bad {
+			dev, deficit, bad, companionRejected := preflightPlacement(be, &configForPreflight{CacheDir: cfg.CacheDir}, caps, model, strategy, serverArgs)
+			if companionRejected {
+				specDisabled = true
+				opts := placementOpts()
+				opts.SkipPlacementCache = false
+				next, rerr := placement.Compute(caps, model, opts)
+				if rerr != nil || next == nil {
+					if rerr != nil {
+						return nil, strategy, serverArgs, fmt.Errorf("selected backend rejected speculative companion and target-only re-plan failed: %w", rerr)
+					}
+					return nil, strategy, serverArgs, fmt.Errorf("selected backend rejected speculative companion and target-only re-plan returned no strategy")
+				}
+				strategy = next
+				serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, next)
+				fmt.Fprintln(os.Stderr, "[launch] continuing with stable target-only serving")
+				continue
+			}
+			if bad {
 				preflightReplans++
 				oomPenalty[dev] += deficit
-				if s, rerr := placement.ReplanAfterOOM(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), oomPenalty); rerr == nil && s != nil && s.OTString != "" {
+				if s, rerr := placement.ReplanAfterOOM(caps, model, placementOpts(), oomPenalty); rerr == nil && s != nil && s.OTString != "" {
 					fmt.Fprintf(os.Stderr, "[launch] preflight re-plan (n-cpu-moe=%d)\n", s.NCPUMoE)
 					serverArgs = patchPlacementArgs(serverArgs, s)
 					strategy = s
@@ -1026,13 +1064,13 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 			// The failed graph allocation is now the exact compute-buffer reserve
 			// used by Compute. Penalizing the card by that allocation as well would
 			// charge it twice. Recompute fresh from the measurement alone.
-			opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+			opts := placementOpts()
 			opts.SkipPlacementCache = true
 			opts.CacheFile = ""
 			s, rerr = placement.Compute(caps, model, opts)
 		} else {
 			oomPenalty[device] += oomOvershoot(caps, device, allocMB)
-			s, rerr = placement.ReplanAfterOOM(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), oomPenalty)
+			s, rerr = placement.ReplanAfterOOM(caps, model, placementOpts(), oomPenalty)
 		}
 		if rerr == nil && s != nil && s.OTString != "" {
 			if isComputeBuffer && computeMeasuredOnFailedGPU {
@@ -1195,7 +1233,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
-	if env := applyGPUVisibility(req, be.Tag); env != "" {
+	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
 	if err := guardPortFree(req.Port, "launch"); err != nil {
@@ -1956,7 +1994,7 @@ func cmdDryRun(args []string) {
 	binPath := "llama-server"
 	if be != nil {
 		binPath = be.Path
-		backendTag = be.Tag
+		backendTag = backendDialect(be)
 	} else {
 		be = &backendInfo{Path: binPath, Tag: backendTag}
 	}
@@ -1974,7 +2012,7 @@ func cmdDryRun(args []string) {
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
-	if envPrefix := applyGPUVisibility(req, be.Tag); envPrefix != "" {
+	if envPrefix := applyGPUVisibility(req, backendDialect(be)); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
 	fmt.Println(formatCommand(serverArgs))
@@ -2623,7 +2661,7 @@ func cmdTune(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
 		os.Exit(1)
 	}
-	if env := applyGPUVisibility(req, be.Tag); env != "" {
+	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[tune] GPU restriction: %s\n", env)
 	}
 
@@ -2634,7 +2672,7 @@ func cmdTune(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
 		os.Exit(1)
 	}
-	strategy.BackendTag = be.Tag
+	strategy.BackendTag = backendDialect(be)
 
 	// A completed tune for this model/hardware/backend is reused unless the
 	// user explicitly asks for a fresh run with --retune.
@@ -2758,20 +2796,21 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		return nil, fmt.Errorf("no llama-server binary found")
 	}
 	opts := placement.Options{
-		ContextSize: resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
-		KVPlacement: cfg.KVPlacement,
-		KVQuality:   cfg.KVQuality,
-		CacheDir:    cfg.CacheDir,
-		Host:        cfg.Host,
-		BackendTag:  be.Tag,
-		VisionAuto:  cfg.Vision,
-		SpecMode:    cfg.Spec,
+		ContextSize:     resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
+		KVPlacement:     cfg.KVPlacement,
+		KVQuality:       cfg.KVQuality,
+		CacheDir:        cfg.CacheDir,
+		Host:            cfg.Host,
+		BackendTag:      backendDialect(be),
+		BackendCacheTag: be.Tag,
+		VisionAuto:      cfg.Vision,
+		SpecMode:        cfg.Spec,
 	}
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
 		return nil, fmt.Errorf("compute placement: %w", err)
 	}
-	strategy.BackendTag = be.Tag
+	strategy.BackendTag = backendDialect(be)
 	return append([]string{be.Path}, strategy.Args(modelPath, port)...), nil
 }
 
@@ -3032,6 +3071,8 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		KeyLength:          info.KeyLength,
 		ValueLength:        info.ValueLength,
 		VocabSize:          info.VocabSize,
+		TokenizerModel:     info.TokenizerModel,
+		TokenizerPre:       info.TokenizerPre,
 		QuantType:          "", // not parsed from gguf.py output
 		ExpertBytes:        info.ExpertBytes,
 		NonExpertBytes:     info.NonExpertBytes,
@@ -3163,6 +3204,7 @@ type backendInfo struct {
 	IsIK              bool
 	SupportsReasoning bool
 	Tag               string
+	Dialect           string // placement/flag family: llama, ik_llama, vulkan, metal
 	Help              string
 }
 
@@ -3252,8 +3294,13 @@ func backendSearchPaths() []string {
 // detectBackend runs --help to determine if this is ik_llama.cpp fork.
 // llama-server --help returns exit code 1, so we check the output regardless of error.
 func detectBackend(path string) *backendInfo {
-	info := &backendInfo{Path: path, Tag: "llama"}
-	out, _ := exec.Command(path, "--help").CombinedOutput()
+	info := &backendInfo{Path: path, Tag: "llama", Dialect: "llama"}
+	cmd := exec.Command(path, "--help")
+	if hubDir, ok, _ := libhub.Setup(path); ok {
+		defer libhub.Cleanup(hubDir)
+		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
+	}
+	out, _ := cmd.CombinedOutput()
 	help := string(out)
 	info.Help = help
 	lowerBase := strings.ToLower(filepath.Base(path))
@@ -3261,12 +3308,15 @@ func detectBackend(path string) *backendInfo {
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
 		info.IsIK = true
 		info.Tag = "ik_llama"
+		info.Dialect = "ik_llama"
 	} else if strings.Contains(lowerBase, "vulkan") || strings.Contains(lowerDir, "build-vulkan") {
 		info.Tag = "vulkan"
+		info.Dialect = "vulkan"
 	} else if runtime.GOOS == "darwin" {
 		// macOS llama.cpp builds default to Metal; placement must not emit
 		// CUDA/Vulkan device-routing flags for them.
 		info.Tag = "metal"
+		info.Dialect = "metal"
 	}
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true

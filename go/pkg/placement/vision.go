@@ -243,7 +243,7 @@ func downloadMMProj(modelDir, textName, textBasename, quantizedBy string) (strin
 
 			tmpDest := dest + ".tmp"
 			if err := downloadFile(client, dlURL, tmpDest); err != nil {
-				os.Remove(tmpDest)
+				fmt.Fprintf(os.Stderr, "[vision] download interrupted; partial file kept for resume: %s\n", tmpDest)
 				continue
 			}
 
@@ -344,15 +344,40 @@ func fallbackMMProjPaths() []string {
 }
 
 func downloadFile(client *http.Client, url, dest string) error {
-	resp, err := client.Get(url)
+	offset := int64(0)
+	if fi, err := os.Stat(dest); err == nil && !fi.IsDir() {
+		offset = fi.Size()
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if resp.StatusCode == http.StatusPartialContent && offset > 0 {
+		wantPrefix := fmt.Sprintf("bytes %d-", offset)
+		if !strings.HasPrefix(resp.Header.Get("Content-Range"), wantPrefix) {
+			return fmt.Errorf("invalid resume Content-Range %q, expected %q", resp.Header.Get("Content-Range"), wantPrefix+"...")
+		}
+		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	} else if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
+		if strings.TrimSpace(resp.Header.Get("Content-Range")) == fmt.Sprintf("bytes */%d", offset) {
+			return nil
+		}
+		return fmt.Errorf("HTTP %d resuming at byte %d", resp.StatusCode, offset)
+	} else if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	f, err := os.Create(dest)
+	// A server that ignores Range returns 200. Truncate and restart rather than
+	// appending a second copy and silently corrupting the GGUF.
+	f, err := os.OpenFile(dest, flags, 0644)
 	if err != nil {
 		return err
 	}

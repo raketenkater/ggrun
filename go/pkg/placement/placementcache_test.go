@@ -86,6 +86,48 @@ func TestPlacementCachePathFor_KeyedByKVAndCtx(t *testing.T) {
 	}
 }
 
+func TestPlacementCachePathIsolatedBySpecMode(t *testing.T) {
+	base := "/tmp/model.place"
+	if got := placementCachePathForSpecMode(base, "off"); got != base {
+		t.Fatalf("spec-off path changed: %s", got)
+	}
+	auto := placementCachePathForSpecMode(base, "auto")
+	dflash := placementCachePathForSpecMode(base, "dflash")
+	if auto == base || dflash == base || auto == dflash {
+		t.Fatalf("spec placements are not isolated: base=%s auto=%s dflash=%s", base, auto, dflash)
+	}
+}
+
+func TestPlacementCacheHitStillResolvesSpeculativeMode(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{
+		Path: "cached-moe.gguf", TotalSizeMB: 32768, SizeBytes: 32768 * 1024 * 1024,
+		NumLayers: 32, IsMoE: true, NumExperts: 64, ContextSize: 32768,
+		ExpertBytes: 28 * 1024 * 1024 * 1024, NonExpertBytes: 4 * 1024 * 1024 * 1024,
+	}
+	opts := Options{ContextSize: 32768, KVQuality: "low", KVPlacement: "cpu", CacheDir: t.TempDir()}
+	base, err := Compute(caps, model, opts)
+	if err != nil || base.PlacementCachePath == "" {
+		t.Fatalf("base placement: strategy=%#v err=%v", base, err)
+	}
+	if err := SavePlacementCache(base.PlacementCachePath, StrategyToCacheEntry(base)); err != nil {
+		t.Fatalf("save placement: %v", err)
+	}
+	opts.SpecMode = "ngram"
+	opts.ForceSpecMoE = true
+	cached, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("cached placement: %v", err)
+	}
+	if cached.Draft == nil || cached.Draft.Type != DraftNgram {
+		t.Fatalf("cache hit silently dropped speculative mode: %#v", cached.Draft)
+	}
+}
+
 func TestPlacementCacheRejectsLegacyMissingMMap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.place")
 	content := `CACHED_OT_STRING="exps=CPU"

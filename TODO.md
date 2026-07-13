@@ -4,29 +4,64 @@ Audited against `main` on 2026-07-12. This replaces the stale Claude Code task
 statuses with only the work that remains. Source references use
 `<Claude task-list>/<task-number>`.
 
-## P0 — finish DeepSeek-V4 MTP
+## P0 — finish generic MTP/DFlash performance validation
 
 The generic foundation already exists: ggrun parses NextN metadata, supports the
 llama.cpp/ik_llama MTP dialects, validates draft GGUFs, searches/downloads generic
 draft and EAGLE models from Hugging Face, selects a draft GPU and emits draft flags.
 
-- [ ] Determine the actual DeepSeek-V4 MTP arrangement supported by the installed
-  mainline backend: built-in NextN tensors, a separate MTP GGUF, or unsupported.
-- [ ] Resolve the exact compatible Hugging Face artifact by model identity,
-  architecture, revision, tokenizer/vocabulary and prediction depth—not filename
-  similarity alone.
-- [ ] Extend the existing draft resolver/downloader only where DeepSeek-V4 MTP needs
-  a separate companion; reuse resume, validation, cache and offline behavior.
-- [ ] Include any separate MTP model in the exact placement/preflight ledger instead
+- [x] Determine the actual DeepSeek-V4 arrangement. The official/current GGUF has
+  no NextN layers and no compatible MTP-only head. Published DSpark/DFlash
+  companions currently target separate DS4/Lucebox runtimes, not a llama-server
+  backend that can load both the target and drafter.
+- [x] Audit the apparent Hugging Face match by immutable revision, checksum,
+  metadata and a real backend no-allocation load. It is intentionally blocked:
+  mainline rejects its private GGML type 101, and the public DS4 branch that knows
+  that type has no DeepSeek4 target/draft model loader.
+- [x] Extend the resolver generically for embedded MTP, MTP-only companions and
+  target-specific DFlash companions. Downloads are revision-pinned where known,
+  resume partial files and retain offline/local behavior.
+- [x] Include separate speculative models in the exact placement/preflight ledger instead
   of the older approximate draft-GPU calculation.
-- [ ] Fall back to non-speculative serving with one clear reason when no compatible
+- [x] Fall back to non-speculative serving with one clear reason when no compatible
   MTP artifact exists.
-- [ ] Add resolver/compatibility/offline/corruption tests and live A/B measurements:
-  output correctness, accepted drafts, serial decode, parallel-4 throughput,
-  VRAM/RAM and long-run stability.
+- [x] Require the selected backend's own loader to accept local/downloaded MTP and
+  DFlash companions; never borrow `llama-fit-params` from a different fork. A
+  later full-context companion failure disables speculation and recomputes a
+  clean target-only placement.
+- [ ] Account for an embedded MTP head's additional model context/KV allocation
+  before enabling it near the VRAM limit. Mainline `llama-fit-params` does not
+  accept `--spec-type`, while `llama-server` adds the MTP context to its own fit
+  ledger; use a selected-backend estimate or a conservative metadata-derived
+  bound and keep Auto off when that reservation cannot be proven.
+- [ ] Build the repeatable MTP harness around llama.cpp's merged nine-prompt
+  benchmark: same GGUF off/on, warmups and repeated rounds, draft ceilings 1-4,
+  deterministic plus model-recommended sampling, thinking on/off, TTFT/prompt
+  speed/decode/wall-time/acceptance/mean-length, short plus 60k context, serial
+  plus parallel-4, output checks, VRAM/RAM and long-run stability. Cache results
+  by model hash/backend commit/GPU set/context/sampling/parallelism and enable
+  Auto only when the matching profile has a reproducible win above noise.
+- [ ] Re-test DeepSeek V4 DFlash only when one reproducible llama-server commit can
+  load both the official target and a published drafter; until then Auto stays off.
 - [ ] Repeat the live test on one other MTP-capable MoE to prove the path is generic.
 
 Source: `5e91131f/24`, retargeted by the user on 2026-07-12.
+
+## P0 — HY3 through a reusable fork recipe
+
+- [x] Add reviewed, immutable fork recipes plus `ggrun backend install <recipe>`;
+  safely refresh clean checkouts, record the built commit and auto-route by GGUF
+  architecture without losing the backend's real IK/mainline flag dialect.
+- [x] Add the verified HY3 recipe: `noonr48/ik_llama-hy3`, branch `hy3-support`,
+  pinned commit `f46c95ee90d8c8200b0147c646b883405020b482`, route `hy_v3`.
+- [x] Build the pinned recipe on the test host and verify its commit, shared
+  libraries, IK dialect, `hy_v3` loader code and automatic architecture route.
+- [ ] Parse and load a real HY3 GGUF, then complete correctness/load, serial MTP
+  and parallel-4 non-speculative benchmarks before calling it stable. The pinned
+  fork deliberately removes MTP above one slot; re-test combined MTP +
+  parallel-4 only after its server lifts that guard.
+- [ ] Add recipe update/rollback UX and CI smoke builds so future model forks are
+  one declarative entry rather than bespoke installer code.
 
 ## P1 — finish Claude Code integration
 
@@ -79,6 +114,19 @@ Sources: `db3f32cc/1`, `db3f32cc/2`, `db3f32cc/3`, user request 2026-07-12.
   Source: `ebffa9bc/9`.
 
 ## P2 — performance and installation
+
+- [ ] **Ship a small local AI-doc advisor with ggrun:** package a compact model
+  plus a signed, versioned knowledge bundle covering llama.cpp/fork flags, GGUF
+  architectures, artifact provenance, known backend failures and ggrun's test
+  methods. Feed it live model metadata, backend help/version, hardware, placement,
+  acceptance/timing logs and cached A/B evidence so it can explain cases such as
+  "MTP exists but ceiling 16 is slower", propose the next bounded experiment and
+  generate a test matrix. Keep all final launch decisions deterministic and
+  verifier-gated; the advisor may recommend but cannot bless a model/fork/artifact
+  or change serving flags without loader, correctness, memory and performance
+  checks. It should work offline from the shipped bundle, optionally refresh only
+  from allowlisted primary sources with citations, and run in leftover CPU/GPU
+  capacity without reducing the served model's SLA.
 
 - [ ] **Small-model decode ablation:** settle the historical ~184 versus current
   151.4 tok/s result by testing minimal versus generated flags, f16 versus q4_0 KV,

@@ -64,6 +64,23 @@ func TestSetupResolvesSymlinkToColocatedLibs(t *testing.T) {
 	}
 }
 
+func TestSetupFindsScatteredLibrariesInNamedBuildDir(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "src", "build-cuda", "bin", "llama-server")
+	lib := filepath.Join(root, "src", "build-cuda", "common", "libmtmd.so")
+	touch(t, bin)
+	touch(t, lib)
+
+	hub, ok, err := Setup(bin)
+	if err != nil || !ok {
+		t.Fatalf("named build directory: ok=%v err=%v", ok, err)
+	}
+	defer Cleanup(hub)
+	if _, err := os.Stat(filepath.Join(hub, "libmtmd.so")); err != nil {
+		t.Fatalf("hub missing scattered libmtmd.so: %v", err)
+	}
+}
+
 // A static binary (no libraries anywhere) needs no hub.
 func TestSetupStaticBinaryNoHub(t *testing.T) {
 	dir := t.TempDir()
@@ -98,5 +115,12 @@ func TestApplyToChildEnv(t *testing.T) {
 	in := []string{"FOO=1"}
 	if got := ApplyToChildEnv(in); len(got) != 1 || got[0] != "FOO=1" {
 		t.Fatalf("no-hub case altered env: %v", got)
+	}
+}
+
+func TestApplyHubToChildEnv(t *testing.T) {
+	got := ApplyHubToChildEnv([]string{"LD_LIBRARY_PATH=/system", "FOO=1"}, "/probe")
+	if got[0] != "LD_LIBRARY_PATH=/probe:/system" {
+		t.Fatalf("explicit hub: %v", got)
 	}
 }

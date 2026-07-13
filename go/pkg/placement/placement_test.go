@@ -1,8 +1,11 @@
 package placement
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +15,55 @@ import (
 
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
+
+// writeSpecGGUF writes the metadata surface the speculative resolver uses.
+// It intentionally has no tensors: these tests exercise identity/compatibility,
+// while gguf's own package tests cover tensor-span accounting.
+func writeSpecGGUF(t *testing.T, path, arch, tokenizerModel, tokenizerPre string, embd, ctx, vocab, nextN int) {
+	t.Helper()
+	type kv struct {
+		key    string
+		typeID uint32
+		str    string
+		u32    uint32
+		array  int
+	}
+	kvs := []kv{
+		{key: "general.architecture", typeID: 8, str: arch},
+		{key: arch + ".embedding_length", typeID: 4, u32: uint32(embd)},
+		{key: arch + ".context_length", typeID: 4, u32: uint32(ctx)},
+		{key: arch + ".nextn_predict_layers", typeID: 4, u32: uint32(nextN)},
+		{key: "tokenizer.ggml.model", typeID: 8, str: tokenizerModel},
+		{key: "tokenizer.ggml.pre", typeID: 8, str: tokenizerPre},
+		{key: "tokenizer.ggml.tokens", typeID: 9, array: vocab},
+	}
+	buf := new(bytes.Buffer)
+	buf.WriteString("GGUF")
+	_ = binary.Write(buf, binary.LittleEndian, uint32(3))
+	_ = binary.Write(buf, binary.LittleEndian, uint64(0))
+	_ = binary.Write(buf, binary.LittleEndian, uint64(len(kvs)))
+	writeString := func(s string) {
+		_ = binary.Write(buf, binary.LittleEndian, uint64(len(s)))
+		buf.WriteString(s)
+	}
+	for _, item := range kvs {
+		writeString(item.key)
+		_ = binary.Write(buf, binary.LittleEndian, item.typeID)
+		switch item.typeID {
+		case 4:
+			_ = binary.Write(buf, binary.LittleEndian, item.u32)
+		case 8:
+			writeString(item.str)
+		case 9:
+			_ = binary.Write(buf, binary.LittleEndian, uint32(0)) // array<uint8>
+			_ = binary.Write(buf, binary.LittleEndian, uint64(item.array))
+			buf.Write(make([]byte, item.array))
+		}
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatalf("write spec GGUF: %v", err)
+	}
+}
 
 func TestComputeDenseFits(t *testing.T) {
 	caps := &detect.Capabilities{
@@ -1650,11 +1702,95 @@ func TestHFCandidateSizeOK(t *testing.T) {
 	}
 }
 
+func TestDownloadFileResumesPartialContent(t *testing.T) {
+	payload := []byte("GGUF" + strings.Repeat("spec-data-", 100))
+	partial := 137
+	rangeSeen := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rangeSeen = r.Header.Get("Range")
+		if rangeSeen != fmt.Sprintf("bytes=%d-", partial) {
+			t.Errorf("unexpected Range header %q", rangeSeen)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", partial, len(payload)-1, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[partial:])
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "draft.gguf.tmp")
+	if err := os.WriteFile(dest, payload[:partial], 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := downloadFile(srv.Client(), srv.URL, dest); err != nil {
+		t.Fatalf("resume download: %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("resumed file mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+func TestDownloadFileRestartsWhenServerIgnoresRange(t *testing.T) {
+	payload := []byte("GGUF-complete")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+	dest := filepath.Join(t.TempDir(), "draft.gguf.tmp")
+	if err := os.WriteFile(dest, []byte("GGUF-partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := downloadFile(srv.Client(), srv.URL, dest); err != nil {
+		t.Fatalf("restart download: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("server ignored Range but destination was not safely replaced: %q", got)
+	}
+}
+
+func TestVerifyFileSHA256(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact.gguf")
+	payload := []byte("GGUF-pinned-artifact")
+	if err := os.WriteFile(path, payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	const sum = "0f5a7057cb6f53b9d50ff176006243f55c321b35b7e92944a2f9b4f05f81f898"
+	if err := verifyFileSHA256(path, int64(len(payload)), sum); err != nil {
+		t.Fatalf("valid pinned artifact rejected: %v", err)
+	}
+	if err := verifyFileSHA256(path, int64(len(payload)+1), sum); err == nil || !strings.Contains(err.Error(), "size=") {
+		t.Fatalf("expected size mismatch, got %v", err)
+	}
+	if err := verifyFileSHA256(path, int64(len(payload)), strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "sha256=") {
+		t.Fatalf("expected SHA mismatch, got %v", err)
+	}
+}
+
 func TestHFResolveURLKeepsPathSeparators(t *testing.T) {
 	got := hfResolveURL("org/repo", "folder/a b.gguf")
 	want := "https://huggingface.co/org/repo/resolve/main/folder/a%20b.gguf"
 	if got != want {
 		t.Fatalf("resolve URL mismatch: %s", got)
+	}
+}
+
+func TestKnownDFlashDownloadIsRevisionPinned(t *testing.T) {
+	repo := "Lucebox/DeepSeek-V4-Flash-DSpark-Drafter-GGUF"
+	revision := knownSpecializedRepoRevision(repo)
+	if revision == "" || revision == "main" {
+		t.Fatalf("known DFlash repository must be immutable, got revision %q", revision)
+	}
+	got := hfResolveURLAt(repo, "folder/a b.gguf", revision)
+	want := "https://huggingface.co/" + repo + "/resolve/" + revision + "/folder/a%20b.gguf"
+	if got != want {
+		t.Fatalf("pinned resolve URL mismatch: %s", got)
 	}
 }
 
@@ -1759,6 +1895,172 @@ func TestComputeDraftMainlineMTPWhenAdvertised(t *testing.T) {
 	args := DraftFlags(draft)
 	if contains(args, "--multi-token-prediction") {
 		t.Fatalf("mainline draft-mtp should not get ik MTP flag: %v", args)
+	}
+	foundDraftMax := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--spec-draft-n-max" {
+			foundDraftMax = true
+			if args[i+1] != "2" {
+				t.Fatalf("MTP must use the conservative two-token default, got %v", args)
+			}
+		}
+	}
+	if !foundDraftMax {
+		t.Fatalf("MTP must emit the conservative two-token draft ceiling, got %v", args)
+	}
+}
+
+func TestComputeDraftParallelMTPRespectsBackendCapability(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, NextNPredictLayers: 1}
+
+	ik := ComputeDraft(model, caps, Options{SpecMode: "mtp", BackendTag: "ik_llama", Parallel: 4})
+	if ik.Type != DraftNone {
+		t.Fatalf("ik_llama server does not support speculative parallel slots, got %s", ik.Type)
+	}
+
+	mainline := ComputeDraft(model, caps, Options{
+		SpecMode: "mtp", BackendTag: "llama", BackendHelp: "--spec-type draft-mtp", Parallel: 4,
+	})
+	if mainline.Type != DraftMTP {
+		t.Fatalf("mainline parallel MTP should remain available, got %s", mainline.Type)
+	}
+}
+
+func TestComputeDraftFindsLocalMTPOnlyCompanion(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	dir := t.TempDir()
+	companion := filepath.Join(dir, "Qwen3.5-9B-MTP-ONLY-Q4_K_M.gguf")
+	writeSpecGGUF(t, companion, "qwen35", "gpt2", "qwen35", 4096, 262144, 64, 1)
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	target := &ModelProfile{
+		Path: filepath.Join(dir, "Qwen3.5-9B-Q4_K_M.gguf"), TotalSizeMB: 6000,
+		ModelArch: "qwen35", EmbeddingLength: 4096, ContextSize: 262144,
+		VocabSize: 64, TokenizerModel: "gpt2", TokenizerPre: "qwen35",
+	}
+	draft := ComputeDraft(target, caps, Options{SpecMode: "mtp", BackendTag: "llama", BackendHelp: "--spec-type draft-mtp --spec-draft-model"})
+	if draft.Type != DraftMTP || draft.Path != companion || draft.SpecType != "draft-mtp" {
+		t.Fatalf("expected local MTP-only companion, got %#v", draft)
+	}
+	args := DraftFlags(draft)
+	for _, want := range []string{"--model-draft", companion, "--spec-draft-ngl", "all"} {
+		if !contains(args, want) {
+			t.Fatalf("MTP companion flags missing %q: %v", want, args)
+		}
+	}
+	if contains(args, "--ctx-size-draft") {
+		t.Fatalf("current mainline removed --ctx-size-draft; inherited context must not emit it: %v", args)
+	}
+}
+
+func TestMTPCompanionRejectsTokenizerMismatch(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	dir := t.TempDir()
+	companion := filepath.Join(dir, "model-MTP-ONLY.gguf")
+	writeSpecGGUF(t, companion, "qwen35", "gpt2", "wrong-pre", 4096, 262144, 64, 1)
+	target := &ModelProfile{
+		Path: filepath.Join(dir, "model.gguf"), TotalSizeMB: 6000,
+		ModelArch: "qwen35", EmbeddingLength: 4096, VocabSize: 64,
+		TokenizerModel: "gpt2", TokenizerPre: "qwen35",
+	}
+	if got := findSpecializedCandidate(target, dir, Options{BackendTag: "llama"}, "mtp"); got != "" {
+		t.Fatalf("expected tokenizer-mismatched MTP head to be rejected, got %s", got)
+	}
+}
+
+func TestComputeDraftAutoUsesDFlashForDeepSeekV4MoE(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	dir := t.TempDir()
+	drafter := filepath.Join(dir, "DeepSeek-V4-Flash-DSpark-draft-Q4.gguf")
+	writeSpecGGUF(t, drafter, "deepseek4-dflash-draft", "gpt2", "joyai-llm", 4096, 1048576, 64, 0)
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, Name: "RTX"}},
+		RAM:  detect.RAMInfo{TotalMB: 196608, FreeMB: 196608},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	target := &ModelProfile{
+		Path: filepath.Join(dir, "DeepSeek-V4-Flash-Q4.gguf"), TotalSizeMB: 137000,
+		Name: "DeepSeek V4 Flash", ModelArch: "deepseek4", IsMoE: true,
+		EmbeddingLength: 4096, ContextSize: 1048576, VocabSize: 64,
+		TokenizerModel: "gpt2", TokenizerPre: "joyai-llm",
+	}
+	help := "--spec-type none,draft-mtp,draft-dflash --spec-draft-model"
+	draft := ComputeDraft(target, caps, Options{SpecMode: "auto", BackendTag: "llama", BackendHelp: help})
+	if draft.Type != DraftDFlash || draft.Path != drafter || draft.SpecType != "draft-dflash" {
+		t.Fatalf("expected DFlash before the generic MoE gate, got %#v", draft)
+	}
+	args := DraftFlags(draft)
+	if !contains(args, "draft-dflash") || !contains(args, "--model-draft") {
+		t.Fatalf("DFlash flags missing: %v", args)
+	}
+
+	mtp := ComputeDraft(target, caps, Options{SpecMode: "mtp", BackendTag: "llama", BackendHelp: help})
+	if mtp.Type != DraftNone {
+		t.Fatalf("DeepSeek V4 DFlash must not be mislabeled as MTP: %#v", mtp)
+	}
+}
+
+func TestSpecializedHFDiscovery(t *testing.T) {
+	qwen := &ModelProfile{Path: "Qwen3.5-9B-Q4_K_M.gguf", Basename: "Qwen3.5-9B", ModelArch: "qwen35"}
+	mtpQueries := strings.ToLower(strings.Join(hfSpecSearchQueries(qwen, "mtp"), "\n"))
+	if !strings.Contains(mtpQueries, "qwen3.5 9b mtp only gguf") {
+		t.Fatalf("MTP-only query missing: %s", mtpQueries)
+	}
+	if !hfRepoLooksRelevant("a4lg/Qwen3.5-9B-MTP-ONLY-GGUF", qwen, "mtp") {
+		t.Fatal("expected same-target MTP-only repo to be relevant")
+	}
+	deepseek := &ModelProfile{Path: "DeepSeek-V4-Flash-Q4.gguf", Name: "DeepSeek V4 Flash", Basename: "DeepSeek-V4-Flash", ModelArch: "deepseek4"}
+	known := knownSpecializedRepos(deepseek, "dflash")
+	if len(known) != 0 {
+		t.Fatalf("unverified DeepSeek V4 DFlash repo must not be auto-selected: %v", known)
+	}
+	if reason := unsupportedSpecializedRepo(deepSeekV4DFlashRepo, "dflash"); reason == "" {
+		t.Fatal("verified-incompatible DeepSeek V4 drafter must be blocked")
+	}
+}
+
+func TestBackendValidatorRejectsMetadataCompatibleDFlash(t *testing.T) {
+	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
+	dir := t.TempDir()
+	drafter := filepath.Join(dir, "generic-dflash-draft.gguf")
+	writeSpecGGUF(t, drafter, "deepseek4-dflash-draft", "gpt2", "joyai-llm", 4096, 1048576, 64, 0)
+	target := &ModelProfile{
+		Path: filepath.Join(dir, "DeepSeek-V4-Flash.gguf"), TotalSizeMB: 137000,
+		ModelArch: "deepseek4", IsMoE: true, EmbeddingLength: 4096,
+		VocabSize: 64, TokenizerModel: "gpt2", TokenizerPre: "joyai-llm",
+	}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}}, CPU: detect.CPUInfo{Cores: 16}}
+	draft := ComputeDraft(target, caps, Options{
+		SpecMode: "auto", BackendTag: "llama", BackendHelp: "--spec-type draft-dflash",
+		SpecCandidateValidator: func(string) error { return fmt.Errorf("invalid ggml type 101") },
+	})
+	if draft.Type != DraftNone {
+		t.Fatalf("backend-rejected DFlash must fall back to off, got %#v", draft)
+	}
+}
+
+func TestSpecializedArchitectureFilterRunsBeforeDownload(t *testing.T) {
+	deepseek := &ModelProfile{ModelArch: "deepseek4"}
+	if specializedArchitectureCompatible(deepseek, "mtp", "qwen35") {
+		t.Fatal("a Qwen MTP model named after DeepSeek must be rejected before download")
+	}
+	if !specializedArchitectureCompatible(deepseek, "dflash", "deepseek4-dflash-draft") {
+		t.Fatal("expected same-family DeepSeek DFlash architecture to pass")
+	}
+	if specializedArchitectureCompatible(deepseek, "dflash", "qwen35-dflash-draft") {
+		t.Fatal("cross-family DFlash architecture must be rejected")
+	}
+	qwen := &ModelProfile{ModelArch: "qwen35"}
+	if !specializedArchitectureCompatible(qwen, "mtp", "qwen35") {
+		t.Fatal("same-family Qwen MTP-only architecture should pass")
 	}
 }
 

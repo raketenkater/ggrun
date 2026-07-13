@@ -31,6 +31,7 @@ ggrun model.gguf --tune-cache ~/.cache/ggrun/tune.json
 # Speculative decoding
 ggrun model.gguf --spec auto
 ggrun model.gguf --spec mtp
+ggrun model.gguf --spec dflash
 ggrun model.gguf --spec eagle3
 ggrun model.gguf --spec draft
 ggrun model.gguf --spec ngram-mod
@@ -66,10 +67,11 @@ See [launch-performance.md](launch-performance.md) for the benchmark tables and 
 
 `--spec auto` only enables a validated path:
 
-1. MTP when the target GGUF has NextN/MTP metadata and the backend supports it.
-2. EAGLE-3 when a matching speculator is available and the backend advertises it.
-3. A compatible draft GGUF found locally or through Hugging Face search.
-4. Off when no validated path exists.
+1. Embedded NextN/MTP or a validated same-architecture MTP-only companion.
+2. A validated target-specific DFlash companion.
+3. EAGLE-3 when a matching speculator is available and the backend advertises it.
+4. A compatible draft GGUF found locally or through Hugging Face search.
+5. Off when no validated path exists.
 
 Ngram modes are explicit because they are workload-sensitive. See
 [speculative-decoding.md](speculative-decoding.md).

@@ -22,6 +22,50 @@ type Backend struct {
 	Commit    string `json:"commit,omitempty"`
 }
 
+// Recipe is a reviewed, reproducible fork integration. Recipes keep new-model
+// support declarative: the CLI owns clone/build/register/routing once, while a
+// model-specific entry supplies only source identity and architecture.
+type Recipe struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Tag         string `json:"tag"`
+	GitURL      string `json:"git_url"`
+	Branch      string `json:"branch"`
+	Commit      string `json:"commit"`
+	RouteArch   string `json:"route_arch"`
+	Accel       string `json:"accel,omitempty"`
+}
+
+var builtinRecipes = []Recipe{
+	{
+		Name:        "hy3",
+		Description: "Tencent Hy3 / hy_v3 support with built-in MTP",
+		Tag:         "hy3",
+		GitURL:      "https://github.com/noonr48/ik_llama-hy3.git",
+		Branch:      "hy3-support",
+		Commit:      "f46c95ee90d8c8200b0147c646b883405020b482",
+		RouteArch:   "hy_v3",
+		Accel:       "",
+	},
+}
+
+// Recipes returns a copy of the reviewed built-in recipe catalog.
+func Recipes() []Recipe {
+	return append([]Recipe(nil), builtinRecipes...)
+}
+
+// RecipeByName resolves a recipe by name or tag, case-insensitively.
+func RecipeByName(name string) *Recipe {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, recipe := range builtinRecipes {
+		if strings.ToLower(recipe.Name) == name || strings.ToLower(recipe.Tag) == name {
+			copy := recipe
+			return &copy
+		}
+	}
+	return nil
+}
+
 // AppHome resolves the ggrun app home (holds .bin, .src, .config): LLM_APP_HOME
 // wins, else the parent of the .bin/bin dir the running binary lives in.
 func AppHome() string {

@@ -107,11 +107,16 @@ Windows CUDA. The backend binary is pluggable via `LLAMA_SERVER`. AMD and Intel
 GPUs run through Vulkan (no ROCm/HIP). macOS/Metal builds and detects unified
 memory but isn't yet validated on Apple hardware.
 
+For brand-new architectures, reviewed fork recipes keep builds isolated and
+auto-route only matching GGUFs. For example, `ggrun backend install hy3` installs
+the pinned `hy_v3` backend. See [fork backends](docs/fork-backends.md).
+
 ## Documentation
 
 [Install](docs/install.md) ·
 [Usage](docs/usage.md) ·
 [Architecture](docs/architecture.md) ·
+[Fork backends](docs/fork-backends.md) ·
 [Benchmarks](docs/launch-performance.md) ·
 [Model recommendations](docs/model-recommendations.md) ·
 [Changelog](CHANGELOG.md)

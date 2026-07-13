@@ -66,9 +66,11 @@ func Setup(binaryPath string) (string, bool, error) {
 		searchRoot = binDir
 	default:
 		// Dev checkout: libraries scattered across the build/ tree. Walk up to
-		// the build directory and search the whole tree.
-		buildDir := filepath.Dir(binDir) // e.g. build/ when binary is build/bin/x
-		if filepath.Base(buildDir) != "build" {
+		// the build directory and search the whole tree. ggrun names these
+		// directories build-cuda/build-vulkan, while some upstream checkouts use
+		// plain build.
+		buildDir := filepath.Dir(binDir) // e.g. build-cuda/ for build-cuda/bin/x
+		if filepath.Base(binDir) != "bin" || !strings.HasPrefix(filepath.Base(buildDir), "build") {
 			if parent := filepath.Dir(buildDir); filepath.Base(parent) == "build" {
 				buildDir = parent
 			} else {
@@ -138,6 +140,13 @@ func Env(hubDir string) string {
 // binary's baked RUNPATH. No-op when no hub is configured.
 func ApplyToChildEnv(env []string) []string {
 	hub := os.Getenv("LLM_SERVER_LIB_HUB")
+	return ApplyHubToChildEnv(env, hub)
+}
+
+// ApplyHubToChildEnv prepends an explicit library hub without changing global
+// process state. Backend capability probes use this before the launch path has
+// exported LLM_SERVER_LIB_HUB.
+func ApplyHubToChildEnv(env []string, hub string) []string {
 	if hub == "" {
 		return env
 	}

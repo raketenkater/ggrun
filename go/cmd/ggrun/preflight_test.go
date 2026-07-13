@@ -1,12 +1,32 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/placement"
 )
+
+func TestFindFitParamsDoesNotCrossCustomForksViaPATH(t *testing.T) {
+	dir := t.TempDir()
+	pathBin := filepath.Join(dir, "path-bin")
+	if err := os.MkdirAll(pathBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fit := filepath.Join(pathBin, "llama-fit-params")
+	if err := os.WriteFile(fit, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathBin)
+	customServer := filepath.Join(dir, "custom-fork", "bin", "llama-server")
+	if got := findFitParamsBin(customServer); got != "" {
+		t.Fatalf("custom fork must not use unrelated PATH fit-params: %s", got)
+	}
+}
 
 func TestPreflightArgsKeepsOnlyMemoryShapingFlags(t *testing.T) {
 	serverArgs := []string{
@@ -45,6 +65,46 @@ func TestPreflightArgsKeepsOnlyMemoryShapingFlags(t *testing.T) {
 	}
 	if got := preflightArgs(serverArgs); !reflect.DeepEqual(got, want) {
 		t.Fatalf("preflightArgs:\n got  %q\n want %q", got, want)
+	}
+}
+
+func TestDraftPreflightServerArgs(t *testing.T) {
+	strategy := &placement.Strategy{
+		BackendTag: "llama", ContextSize: 1048576, BatchSize: 2048, UBatchSize: 256,
+		Parallel: 4, FlashAttention: true,
+		Draft: &placement.DraftConfig{
+			Type: placement.DraftDFlash, Path: "dspark.gguf", DraftGPU: 2,
+			CTXSizeDraft: 1048576, KVTypeDraft: "q8_0", GPULayersDraft: "all",
+		},
+	}
+	want := []string{
+		"llama-fit-draft", "-m", "dspark.gguf", "-c", "1048576",
+		"-b", "2048", "-ub", "256", "-ctk", "q8_0", "-ctv", "q8_0",
+		"-np", "4", "-ngl", "all", "--device", "CUDA2", "--flash-attn", "on",
+	}
+	if got := draftPreflightServerArgs(strategy); !reflect.DeepEqual(got, want) {
+		t.Fatalf("draft preflight args:\n got  %q\n want %q", got, want)
+	}
+}
+
+func TestMergePreflightDevicesAddsCompanionMemory(t *testing.T) {
+	target := []preflightDevice{
+		{Name: "CUDA0", ModelMB: 15000, ContextMB: 3000, ComputeMB: 2000},
+		{Name: "CUDA1", ModelMB: 9000, ContextMB: 200, ComputeMB: 600},
+		{Name: "Host", ModelMB: 110000, ComputeMB: 20},
+	}
+	draft := []preflightDevice{
+		{Name: "CUDA1", ModelMB: 11000, ContextMB: 400, ComputeMB: 900},
+		{Name: "Host", ModelMB: 50, ContextMB: 10, ComputeMB: 5},
+	}
+	got := mergePreflightDevices(target, draft)
+	want := []preflightDevice{
+		{Name: "CUDA0", ModelMB: 15000, ContextMB: 3000, ComputeMB: 2000},
+		{Name: "CUDA1", ModelMB: 20000, ContextMB: 600, ComputeMB: 1500},
+		{Name: "Host", ModelMB: 110050, ContextMB: 10, ComputeMB: 25},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged preflight rows:\n got  %#v\n want %#v", got, want)
 	}
 }
 

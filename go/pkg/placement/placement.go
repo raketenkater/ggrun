@@ -105,6 +105,8 @@ type ModelProfile struct {
 	KeyLength         int    `json:"key_length"`
 	ValueLength       int    `json:"value_length"`
 	VocabSize         int    `json:"vocab_size"`
+	TokenizerModel    string `json:"tokenizer_model,omitempty"`
+	TokenizerPre      string `json:"tokenizer_pre,omitempty"`
 	QuantType         string `json:"quant_type"`
 	ExpertBytes       int64  `json:"expert_bytes"`
 	NonExpertBytes    int64  `json:"non_expert_bytes"`
@@ -140,30 +142,43 @@ type ModelProfile struct {
 
 // Options allows user overrides.
 type Options struct {
-	ContextSize    int
-	KVPlacement    string // auto, gpu, cpu
-	KVQuality      string // high, mid, low
-	GPUs           []int  // restrict to specific GPUs
-	CPUMode        bool
-	RamBudgetMB    int
-	VRAMHeadroomMB int    // hold back this much total VRAM as a safety margin
-	RAMHeadroomMB  int    // hold back this much system RAM as a safety margin
-	BackendTag     string // "llama" or "ik_llama"
-	NoMMap         bool
-	Parallel       int
-	CacheFile      string // path to placement cache for MoE recovery
-	CacheDir       string // path to ggrun cache dir (for probes)
-	Host           string // listen address (default 127.0.0.1)
-	VisionAuto     bool   // auto-detect mmproj for vision
-	MMProjPath     string // explicit vision projector GGUF
-	SpecMode       string // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
-	BackendHelp    string // llama-server --help output for dialect-specific flags
-	ForceSpecMoE   bool   // allow speculative decoding on MoE despite default gate
-	ReasoningOff   bool   // emit `--reasoning off` (benchmark/tune only; normal serving keeps the model's thinking)
+	ContextSize     int
+	KVPlacement     string // auto, gpu, cpu
+	KVQuality       string // high, mid, low
+	GPUs            []int  // restrict to specific GPUs
+	CPUMode         bool
+	RamBudgetMB     int
+	VRAMHeadroomMB  int    // hold back this much total VRAM as a safety margin
+	RAMHeadroomMB   int    // hold back this much system RAM as a safety margin
+	BackendTag      string // "llama" or "ik_llama"
+	BackendCacheTag string // backend identity for probe/cache isolation; defaults to BackendTag
+	NoMMap          bool
+	Parallel        int
+	CacheFile       string // path to placement cache for MoE recovery
+	CacheDir        string // path to ggrun cache dir (for probes)
+	Host            string // listen address (default 127.0.0.1)
+	VisionAuto      bool   // auto-detect mmproj for vision
+	MMProjPath      string // explicit vision projector GGUF
+	SpecMode        string // off, auto, draft, eagle3, dflash, ngram, ngram-mod, ngram-k4v, mtp
+	BackendHelp     string // llama-server --help output for dialect-specific flags
+	// SpecCandidateValidator asks the selected backend to load a proposed
+	// companion without allocating model buffers. GGUF metadata establishes
+	// target compatibility; this hook establishes runtime compatibility for
+	// backend-specific architectures and quant types before ggrun serves them.
+	SpecCandidateValidator func(path string) error
+	ForceSpecMoE           bool // allow speculative decoding on MoE despite default gate
+	ReasoningOff           bool // emit `--reasoning off` (benchmark/tune only; normal serving keeps the model's thinking)
 	// SkipPlacementCache disables loading the keyed .place cache for this Compute.
 	// Set during a corrective OOM re-plan so it derives fresh from the penalized
 	// VRAM instead of reloading the placement that just OOM'd.
 	SkipPlacementCache bool
+}
+
+func backendCacheTag(opts Options) string {
+	if tag := strings.TrimSpace(opts.BackendCacheTag); tag != "" {
+		return tag
+	}
+	return opts.BackendTag
 }
 
 func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
@@ -359,7 +374,8 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// Persist/reuse this exact placement under a key that includes kv placement,
 	// ctx, ubatch, backend, and the GPU set — computed from the now-resolved
 	// strategy so the launcher (save) and this load agree byte-for-byte.
-	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel, splitCompactKey(s.TensorSplit))
+	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, splitCompactKey(s.TensorSplit))
+	s.PlacementCachePath = placementCachePathForSpecMode(s.PlacementCachePath, opts.SpecMode)
 
 	// Try cached placement first (MoE only). Prefer the keyed placement cache
 	// (remembers a load that landed right or was OOM-corrected); fall back to a
@@ -416,6 +432,12 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				}
 			}
 			s.FlashAttention = defaultFlashAttention(model, opts, s.KVPlacement)
+			// A placement cache stores only target-model placement. Speculative
+			// mode is a launch choice and its companion may have appeared since
+			// the target cache was written, so resolve it on cache hits too.
+			if opts.SpecMode != "" && opts.SpecMode != "off" {
+				s.Draft = ComputeDraft(model, caps, opts)
+			}
 			return s, nil
 		}
 	}
@@ -479,6 +501,20 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	return s, nil
 }
 
+// Target placement differs when a separate speculative model reserves VRAM.
+// Keep those successful placements away from the faster spec-off cache (and
+// vice versa); otherwise launching DFlash once could permanently CPU-offload
+// extra target experts even on later non-speculative launches.
+func placementCachePathForSpecMode(path, mode string) string {
+	mode = normalizeSpecMode(mode)
+	if path == "" || mode == "off" {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	return base + "-spec-" + sanitizeFilename(mode) + ext
+}
+
 // restrictGPUs filters caps.GPUs to the user-selected device indices (--gpus).
 // Devices are renumbered from 0 because the launcher restricts visibility via
 // CUDA_VISIBLE_DEVICES / GGML_VK_VISIBLE_DEVICES, so the backend enumerates
@@ -520,7 +556,7 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality, opts.KVPlacement, opts.BackendTag, caps.GPUs, opts.Parallel)
+	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality, opts.KVPlacement, backendCacheTag(opts), caps.GPUs, opts.Parallel)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}
@@ -590,7 +626,7 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	// Load model probe for compute buffer (same as MoE path)
 	probeHit := false
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel)
 	if pc != nil {
 		probeHit = true
 		computeBufMB = pc.ComputeBufMB
@@ -688,7 +724,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 
 		// Load model probe for compute buffer
 		computeBufMB := computeFloorMB
-		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
+		pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel)
 		if pc != nil {
 			computeBufMB = pc.ComputeBufMB
 		}
@@ -842,7 +878,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// Load per-model/runtime probe cache. Until a model has completed one launch
 	// with these settings, use a first-launch fallback that keeps the main GPU
 	// conservative without charging the full prompt graph to every secondary GPU.
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel)
 	fixedPerGPU := make([]int, numGPUs)
 	expertOnlyFixedPerGPU := make([]int, numGPUs)
 	for i, g := range caps.GPUs {
@@ -2306,7 +2342,7 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, opts.BackendTag, caps.GPUs, s.Parallel)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}

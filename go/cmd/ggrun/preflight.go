@@ -63,8 +63,13 @@ func findFitParamsBin(serverBin string) string {
 			return c
 		}
 	}
-	if p, err := exec.LookPath("llama-fit-params"); err == nil {
-		return p
+	// A PATH fallback is safe only when the server was itself selected by name.
+	// For an absolute/custom fork path it could pair a fork with mainline's
+	// fit-params and produce false compatibility or memory results.
+	if filepath.Base(serverBin) == serverBin {
+		if p, err := exec.LookPath("llama-fit-params"); err == nil {
+			return p
+		}
 	}
 	return ""
 }
@@ -88,6 +93,7 @@ var preflightArgValueFlags = map[string]bool{
 	"-ncmoe": true, "--n-cpu-moe": true,
 	"-fa": true, "--flash-attn": true,
 	"-mg": true, "--main-gpu": true,
+	"-dev": true, "--device": true,
 }
 
 // preflightArgs filters real launch args down to the memory-shaping subset.
@@ -139,6 +145,17 @@ func runFitPreflight(fitBin string, serverArgs []string) ([]preflightDevice, err
 		return nil, fmt.Errorf("fit-params preflight timed out")
 	}
 	if err != nil {
+		detail := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			detail = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		if detail != "" {
+			const maxDetail = 600
+			if len(detail) > maxDetail {
+				detail = detail[len(detail)-maxDetail:]
+			}
+			return nil, fmt.Errorf("fit-params preflight failed: %w: %s", err, detail)
+		}
 		return nil, fmt.Errorf("fit-params preflight failed: %w", err)
 	}
 
@@ -160,6 +177,104 @@ func runFitPreflight(fitBin string, serverArgs []string) ([]preflightDevice, err
 		return nil, fmt.Errorf("fit-params preflight produced no device rows")
 	}
 	return devs, nil
+}
+
+// backendSpecCandidateValidator returns a cached, no-allocation load probe for
+// the selected backend. It catches private GGML tensor types and draft
+// architectures that look compatible in metadata but the binary cannot load.
+func backendSpecCandidateValidator(be *backendInfo) func(string) error {
+	if be == nil {
+		return nil
+	}
+	fitBin := findFitParamsBin(be.Path)
+	if fitBin == "" {
+		return nil
+	}
+	results := map[string]error{}
+	return func(path string) error {
+		if err, ok := results[path]; ok {
+			return err
+		}
+		_, err := runFitPreflight(fitBin, []string{
+			"llama-fit-candidate", "-m", path,
+			"-c", "512", "-b", "128", "-ub", "64", "-ngl", "all",
+		})
+		results[path] = err
+		return err
+	}
+}
+
+// draftPreflightServerArgs maps the server's separate draft configuration back
+// to the ordinary model/context flags understood by llama-fit-params. Running
+// the no-allocation oracle once for the target and once for the companion gives
+// us backend-measured model/KV/graph bytes for both without loading either.
+func draftPreflightServerArgs(strategy *placement.Strategy) []string {
+	if strategy == nil || strategy.Draft == nil || strategy.Draft.Path == "" {
+		return nil
+	}
+	draft := strategy.Draft
+	args := []string{"llama-fit-draft", "-m", draft.Path}
+	draftCTX := strategy.ContextSize
+	if draft.SupportsDraftCTX && draft.CTXSizeDraft > 0 {
+		draftCTX = draft.CTXSizeDraft
+	}
+	if draftCTX > 0 {
+		args = append(args, "-c", strconv.Itoa(draftCTX))
+	}
+	if strategy.BatchSize > 0 {
+		args = append(args, "-b", strconv.Itoa(strategy.BatchSize))
+	}
+	if strategy.UBatchSize > 0 {
+		args = append(args, "-ub", strconv.Itoa(strategy.UBatchSize))
+	}
+	if draft.KVTypeDraft != "" {
+		args = append(args, "-ctk", draft.KVTypeDraft, "-ctv", draft.KVTypeDraft)
+	}
+	if strategy.Parallel > 0 {
+		args = append(args, "-np", strconv.Itoa(strategy.Parallel))
+	}
+	ngl := draft.GPULayersDraft
+	if ngl == "" {
+		ngl = "all"
+	}
+	args = append(args, "-ngl", ngl)
+	if draft.DraftGPU >= 0 {
+		args = append(args, "--device", draftDeviceForPreflight(strategy.BackendTag, draft.DraftGPU))
+	}
+	if strategy.FlashAttention {
+		args = append(args, "--flash-attn", "on")
+	}
+	return args
+}
+
+func draftDeviceForPreflight(backendTag string, gpu int) string {
+	if strings.Contains(strings.ToLower(backendTag), "vulkan") {
+		return fmt.Sprintf("Vulkan%d", gpu)
+	}
+	return fmt.Sprintf("CUDA%d", gpu)
+}
+
+func mergePreflightDevices(groups ...[]preflightDevice) []preflightDevice {
+	order := []string{}
+	byName := map[string]preflightDevice{}
+	for _, group := range groups {
+		for _, d := range group {
+			if _, ok := byName[d.Name]; !ok {
+				order = append(order, d.Name)
+			}
+			merged := byName[d.Name]
+			merged.Name = d.Name
+			merged.ModelMB += d.ModelMB
+			merged.ContextMB += d.ContextMB
+			merged.ComputeMB += d.ComputeMB
+			byName[d.Name] = merged
+		}
+	}
+	out := make([]preflightDevice, 0, len(order))
+	for _, name := range order {
+		out = append(out, byName[name])
+	}
+	return out
 }
 
 // preflightWorstDeficit compares the backend's planned per-GPU demand against
@@ -204,23 +319,36 @@ func preflightWorstDeficit(devs []preflightDevice, gpus []detect.GPU, overheadBy
 }
 
 // preflightPlacement runs the fit-params gate for one launch attempt. It
-// returns (device, deficitMB, true) when the placement provably cannot load —
+// returns (device, deficitMB, doesNotFit, companionRejected). A rejected
+// companion is distinct from a memory deficit: the caller disables speculation
+// and recomputes the target-only placement instead of launching a known-bad pair.
 // the caller feeds the deficit into the re-planner instead of paying a real
 // load to learn the same thing. Any infrastructure failure (no binary,
 // unsupported arch, parse error) skips the gate: the preflight must never
 // block a launch the backend could have served.
-func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy, serverArgs []string) (int, int, bool) {
+func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy, serverArgs []string) (int, int, bool, bool) {
 	if be == nil || caps == nil || len(caps.GPUs) == 0 {
-		return -1, 0, false
+		return -1, 0, false, false
 	}
 	fitBin := findFitParamsBin(be.Path)
 	if fitBin == "" {
-		return -1, 0, false
+		return -1, 0, false, false
 	}
-	devs, err := runFitPreflight(fitBin, serverArgs)
+	targetDevs, err := runFitPreflight(fitBin, serverArgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[launch] preflight skipped: %v\n", err)
-		return -1, 0, false
+		return -1, 0, false, false
+	}
+	devs := targetDevs
+	companionRejected := false
+	if draftArgs := draftPreflightServerArgs(strategy); len(draftArgs) > 0 {
+		draftDevs, draftErr := runFitPreflight(fitBin, draftArgs)
+		if draftErr != nil {
+			fmt.Fprintf(os.Stderr, "[launch] companion rejected by selected backend; disabling speculation: %v\n", draftErr)
+			companionRejected = true
+		} else {
+			devs = mergePreflightDevices(targetDevs, draftDevs)
+		}
 	}
 	// Feed the backend's measured context and compute buffers back into placement
 	// BEFORE checking fit, regardless of outcome. A re-plan below
@@ -228,12 +356,12 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 	// the first-launch formulas that produced this (possibly wrong) strategy.
 	if model != nil && strategy != nil {
 		computeByGPU := map[int]int{}
-		for _, d := range devs {
+		for _, d := range targetDevs {
 			if idx, ok := cudaDeviceIndex(d.Name); ok {
 				computeByGPU[idx] = d.ComputeMB
 			}
 		}
-		placement.RecordMeasuredContextMB(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, preflightContextTotalMB(devs))
+		placement.RecordMeasuredContextMB(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, preflightContextTotalMB(targetDevs))
 		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
 	overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
@@ -252,10 +380,10 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 			// deficit in the first place, just at a different ubatch.
 			measureUBatchLadderCandidates(fitBin, serverArgs, cfg, caps, model, strategy, be.Tag)
 		}
-		return dev, deficit, true
+		return dev, deficit, true, companionRejected
 	}
 	fmt.Printf("[launch] preflight: placement fits (%s)\n", summary)
-	return -1, 0, false
+	return -1, 0, false, companionRejected
 }
 
 // measureUBatchLadderCandidates runs the no-alloc preflight for every
