@@ -104,16 +104,33 @@ func claudeCodeProgressServerArgs(args []string, enabled bool, backendHelp strin
 }
 
 func claudeCodeProgressClientArgs(extraArgs []string, port int) ([]string, bool) {
-	if progressDisabled() || hasSettingsArg(extraArgs) || claudeHasCustomStatusLine() {
+	if hasSettingsArg(extraArgs) {
 		return append([]string(nil), extraArgs...), false
 	}
 	settings := map[string]interface{}{
-		"statusLine": map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "Workflow",
+					"hooks": []interface{}{
+						map[string]interface{}{
+							"type":    "command",
+							"command": fmt.Sprintf("%s claude-workflow-hook", claudeProgressCommand()),
+							"timeout": 5,
+						},
+					},
+				},
+			},
+		},
+	}
+	statusLineEnabled := !progressDisabled() && !claudeHasCustomStatusLine()
+	if statusLineEnabled {
+		settings["statusLine"] = map[string]interface{}{
 			"type":            "command",
 			"command":         fmt.Sprintf("%s claude-status --port %d", claudeProgressCommand(), port),
 			"refreshInterval": 2,
 			"padding":         0,
-		},
+		}
 	}
 	data, err := json.Marshal(settings)
 	if err != nil {
@@ -121,7 +138,7 @@ func claudeCodeProgressClientArgs(extraArgs []string, port int) ([]string, bool)
 	}
 	out := []string{"--settings", string(data)}
 	out = append(out, extraArgs...)
-	return out, true
+	return out, statusLineEnabled
 }
 
 func claudeProgressCommand() string {
@@ -594,12 +611,12 @@ func formatClaudeProgress(state claudeProgressState) string {
 		if state.Queued > 0 {
 			status := fmt.Sprintf("ggrun · %d queued", state.Queued)
 			if state.StatusDelayed {
-				status += " · status delayed"
+				status += " · log estimate"
 			}
 			return status
 		}
 		if state.StatusDelayed {
-			return "ggrun · local online · status delayed"
+			return "ggrun · local online · log estimate"
 		}
 		if state.TotalSlots > 0 {
 			return fmt.Sprintf("ggrun · local ready · %d slots", state.TotalSlots)
@@ -641,7 +658,10 @@ func formatClaudeProgress(state claudeProgressState) string {
 		parts = append(parts, fmt.Sprintf("%d queued", state.Queued))
 	}
 	if state.StatusDelayed {
-		parts = append(parts, "status delayed")
+		// The backend is healthy; only its scheduler-backed /slots endpoint is
+		// busy. "log estimate" describes the passive source without sounding
+		// like the server or request itself is late or unhealthy.
+		parts = append(parts, "log estimate")
 	}
 	return strings.Join(parts, " · ")
 }

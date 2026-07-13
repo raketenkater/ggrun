@@ -735,9 +735,10 @@ func (l *Launcher) extractPort() string {
 // oomPattern matches OOM markers on word boundaries so model names like
 // "Bloom" or words like "room" in log output don't classify as OOM.
 var (
-	oomPattern     = regexp.MustCompile(`(?i)\b(oom|out of memory)\b`)
-	ramOOMPattern  = regexp.MustCompile(`(?i)\bram\b.*\boom\b|\boom\b.*\bram\b`)
-	cudaOOMPattern = regexp.MustCompile(`(?i)allocating\s+([0-9]+(?:\.[0-9]+)?)\s+MiB\s+on device\s+(\d+):\s+cudaMalloc failed: out of memory`)
+	oomPattern        = regexp.MustCompile(`(?i)\b(oom|out of memory)\b`)
+	ramOOMPattern     = regexp.MustCompile(`(?i)\bram\b.*\boom\b|\boom\b.*\bram\b`)
+	cudaOOMPattern    = regexp.MustCompile(`(?i)allocating\s+([0-9]+(?:\.[0-9]+)?)\s+MiB\s+on device\s+(\d+):\s+cudaMalloc failed: out of memory`)
+	cudaDevicePattern = regexp.MustCompile(`(?i)\bcurrent device:\s*(\d+)\b`)
 )
 
 // ParseCUDAOOM extracts the CUDA device and allocation size from a llama.cpp
@@ -756,6 +757,22 @@ func ParseCUDAOOM(line string) (device int, allocMB int, ok bool) {
 		return 0, 0, false
 	}
 	return device, int(math.Ceil(alloc)), true
+}
+
+// ParseCUDADevice extracts the device from the diagnostic emitted by newer
+// llama.cpp CUDA VMM allocation failures. Those failures abort in cuMemCreate
+// and report "current device" on a separate line, but omit the requested byte
+// count, so ParseCUDAOOM cannot recognize them.
+func ParseCUDADevice(line string) (device int, ok bool) {
+	m := cudaDevicePattern.FindStringSubmatch(line)
+	if m == nil {
+		return 0, false
+	}
+	device, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return device, true
 }
 
 // parseLoadFailure reads this launcher's own log for known error patterns.

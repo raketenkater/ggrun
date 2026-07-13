@@ -100,3 +100,13 @@ func TestParseCUDAOOMDetails(t *testing.T) {
 		t.Fatalf("unexpected CUDA OOM parse: device=%d alloc=%d ok=%v", device, allocMB, ok)
 	}
 }
+
+func TestParseCUDADeviceFromVMMOOM(t *testing.T) {
+	device, ok := ParseCUDADevice("120.54 E   current device: 0, in function alloc at ggml-cuda.cu:529")
+	if !ok || device != 0 {
+		t.Fatalf("unexpected CUDA device parse: device=%d ok=%v", device, ok)
+	}
+	if _, ok := ParseCUDADevice("CUDA error: out of memory"); ok {
+		t.Fatal("OOM marker without a current-device diagnostic must not invent a device")
+	}
+}

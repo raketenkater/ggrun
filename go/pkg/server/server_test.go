@@ -36,6 +36,17 @@ func TestChildEnvEnablesScaledQueuesOnlyForMultiGPU(t *testing.T) {
 	}
 }
 
+func TestOverrideEnvReplacesInheritedGPUVisibility(t *testing.T) {
+	got := OverrideEnv(
+		[]string{"PATH=/bin", "CUDA_VISIBLE_DEVICES=0,1", "OTHER=value"},
+		[]string{"CUDA_VISIBLE_DEVICES=2"},
+	)
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, "CUDA_VISIBLE_DEVICES=0,1") || !strings.Contains(joined, "CUDA_VISIBLE_DEVICES=2") {
+		t.Fatalf("GPU visibility override not applied exactly once: %v", got)
+	}
+}
+
 func TestWaitReadyTimeout(t *testing.T) {
 	p := &Process{Port: 59999} // no server here
 	err := p.waitReady(100 * time.Millisecond)

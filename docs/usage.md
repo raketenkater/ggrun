@@ -95,8 +95,9 @@ env to run it yourself in another terminal:
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8081 ANTHROPIC_AUTH_TOKEN=ggrun
 export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local
-export API_TIMEOUT_MS=14400000             # let queued fan-out/subagent requests finish, not cancel
-export API_FORCE_IDLE_TIMEOUT=0            # local PP can exceed Claude Code's stream-idle watchdog
+export API_TIMEOUT_MS=2147483647            # maximum safe timer; no practical inference deadline
+export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=2147483647
+export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90  # compact early to fit the real per-slot window (ggrun computes this)
 claude --permission-mode auto --disallowedTools WebSearch
 ```
@@ -106,20 +107,25 @@ model calls cannot leave for `api.anthropic.com`.
 
 - **Thinking is on** — a normal launch never passes `--reasoning off` (benchmark-only).
 - **Context fits the slot.** `--parallel` splits `--ctx-size` across sequence slots,
-  so each request only sees `ctx ÷ parallel` (e.g. 262k at V4 train max `--ctx-size 1048576 --parallel 4`).
+  so each request only sees `ctx ÷ parallel`. Claude mode defaults to two main-model
+  slots: a native 1M model gets about 512k per slot; a model advertising 128k gets
+  about 64k per slot. Unknown model metadata uses the portable 128k-total fallback.
+  Explicit `--ctx-size` and `--parallel` values always win.
   Behind a custom base URL Claude Code assumes a 200k window and won't auto-compact in
   time, overflowing the slot (a hard fail with `--no-context-shift`). ggrun derives
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the real slot so compaction triggers early
   enough; subagents and workflow agents inherit it. A value you set yourself wins.
-- **Wide fan-out** (subagents, workflows) queues behind the GPU; `API_TIMEOUT_MS` is
-  raised to four hours so queued requests wait for a slot instead of cancelling. The
-  matching llama-server `--timeout` is also four hours. `API_FORCE_IDLE_TIMEOUT=0`
-  disables Claude Code's separate stream-idle watchdog, which can fire while llama.cpp is
-  still prompt-processing a very large request and has not streamed a first token yet.
+- **Wide fan-out** (subagents, workflows) queues behind the two main-model slots.
+  ggrun sets the maximum safe Claude request/background-agent timers, disables both
+  stream-idle watchdogs, and gives llama-server no practical socket deadline. Claude's
+  Workflow tool has a separate 180-second `stallMs`; a session-only PreToolUse hook
+  deterministically rewrites every `agent()` call to the maximum safe value before it
+  runs. Startup, process-health, and shell-command guards remain active so a real crash
+  or hung command is still visible.
 - **Anti-loop sampling.** The Anthropic API has no repetition-penalty fields and the
   client only sends temperature, so ggrun sets server-side defaults in claude-code
-  mode (`--presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 20
-  --top-p 0.95 --min-p 0`) — quantized thinking models loop endlessly without them.
+  mode (`--presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 40
+  --top-p 0.95 --min-p 0.05`) — quantized thinking models loop endlessly without them.
   Pass any of these flags yourself (after `--`) and your value wins.
 - **Web research:** the built-in WebSearch runs on Anthropic's servers and is hidden
   on a non-first-party endpoint, so ggrun disables it and auto-wires a no-key
@@ -134,7 +140,9 @@ model calls cannot leave for `api.anthropic.com`.
   locally; all other traffic stays on the selected coding model. The reviewer starts
   before placement, so its measured VRAM use is included when ggrun places the main
   model. This is Auto, not `bypassPermissions`. The first launch downloads and verifies
-  the pinned ~1.3 GiB GGUF. Override it with `GGRUN_CLAUDE_REVIEWER_MODEL=/path/model.gguf`,
+  the pinned ~1.3 GiB GGUF and serves it with one independent 64k slot. GPU visibility
+  is isolated to its selected physical device; if it does not fit any selected GPU,
+  ggrun falls back to CPU. Override it with `GGRUN_CLAUDE_REVIEWER_MODEL=/path/model.gguf`,
   choose another permission mode with `GGRUN_CLAUDE_PERMISSION_MODE=acceptEdits`, or
   use `inherit` to preserve your global Claude setting. See Claude Code's
   [permission-mode requirements](https://code.claude.com/docs/en/permission-modes#eliminate-prompts-with-auto-mode).

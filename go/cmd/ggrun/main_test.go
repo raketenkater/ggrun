@@ -33,8 +33,8 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
 	be := &backendInfo{Tag: "llama"}
 	opts := placementOptionsFromRequest(req, model, be, t.TempDir())
-	if opts.Parallel != 4 {
-		t.Fatalf("claude-code should layer four slots over the shared mainline placement, got %d", opts.Parallel)
+	if opts.Parallel != 2 {
+		t.Fatalf("claude-code should layer two slots over the shared mainline placement, got %d", opts.Parallel)
 	}
 	if opts.ContextSize != 1048576 {
 		t.Fatalf("claude-code auto context should use the 1M native window, got %d", opts.ContextSize)
@@ -45,8 +45,11 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	}
 	be = &backendInfo{Tag: "ik_llama"}
 	opts = placementOptionsFromRequest(req, &placement.ModelProfile{ModelArch: "qwen3moe"}, be, t.TempDir())
-	if opts.Parallel != 4 {
-		t.Fatalf("claude-code on other models keeps 4 slots, got %d", opts.Parallel)
+	if opts.Parallel != 2 {
+		t.Fatalf("claude-code on other models keeps 2 slots, got %d", opts.Parallel)
+	}
+	if opts.ContextSize != 131072 {
+		t.Fatalf("unknown model context should use the portable 2x64k baseline, got %d", opts.ContextSize)
 	}
 }
 
@@ -133,6 +136,47 @@ func TestStartupLogCUDAOOM(t *testing.T) {
 	device, allocMB, ok := startupLogCUDAOOM(log)
 	if !ok || device != 0 || allocMB != 2207 {
 		t.Fatalf("cuda oom parse = device %d alloc %d ok %v", device, allocMB, ok)
+	}
+}
+
+func TestRuntimeLogCUDAOOMRecognizesVMMFormat(t *testing.T) {
+	log := strings.Join([]string{
+		"[launch] health check OK after 5m1s",
+		"CUDA error: out of memory",
+		"  current device: 0, in function alloc at ggml-cuda.cu:529",
+		"  cuMemCreate(&handle, reserve_size, &prop, 0)",
+	}, "\n")
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24564}}}
+	device, reserveMB, estimated, ok := runtimeLogCUDAOOM(log, caps, nil)
+	if !ok || !estimated || device != 0 || reserveMB != 2457 {
+		t.Fatalf("VMM OOM = device %d reserve %d estimated=%v ok=%v", device, reserveMB, estimated, ok)
+	}
+	_, repeatedReserve, _, ok := runtimeLogCUDAOOM(log, caps, map[int]int{0: reserveMB})
+	if !ok || repeatedReserve != 4914 {
+		t.Fatalf("repeated VMM OOM reserve = %d ok=%v, want 4914", repeatedReserve, ok)
+	}
+}
+
+func TestRuntimeLogCUDAOOMPrefersExactAllocation(t *testing.T) {
+	log := "allocating 1679.00 MiB on device 2: cudaMalloc failed: out of memory"
+	device, reserveMB, estimated, ok := runtimeLogCUDAOOM(log, nil, nil)
+	if !ok || estimated || device != 2 || reserveMB != 1679 {
+		t.Fatalf("exact OOM = device %d reserve %d estimated=%v ok=%v", device, reserveMB, estimated, ok)
+	}
+}
+
+func TestPreviousClaudeLogMatchesRuntimeShape(t *testing.T) {
+	model := &placement.ModelProfile{Path: "/models/DeepSeek-V4-00001-of-00004.gguf"}
+	strategy := &placement.Strategy{ContextSize: 1048576, Parallel: 4}
+	log := "loading model '/models/DeepSeek-V4-00001-of-00004.gguf'\n" +
+		"initializing, n_slots = 4, n_ctx_slot = 262144, kv_unified = 'false'\n" +
+		"[launch] health check OK after 5m1s\n"
+	if !previousClaudeLogMatches(log, model, strategy) {
+		t.Fatal("matching previous Claude runtime log was rejected")
+	}
+	strategy.Parallel = 8
+	if previousClaudeLogMatches(log, model, strategy) {
+		t.Fatal("log from a different parallel/context shape must not be recovered")
 	}
 }
 
@@ -887,6 +931,9 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "real-key")
 	t.Setenv("API_TIMEOUT_MS", "")
 	t.Setenv("API_FORCE_IDLE_TIMEOUT", "")
+	t.Setenv("CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS", "")
+	t.Setenv("CLAUDE_ENABLE_BYTE_WATCHDOG", "")
+	t.Setenv("CLAUDE_ENABLE_STREAM_WATCHDOG", "")
 	t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
 	env := claudeCodeEnv("0.0.0.0", 8081, []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"})
 
@@ -895,8 +942,11 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:8081",
-		"API_TIMEOUT_MS=14400000",
+		"API_TIMEOUT_MS=2147483647",
 		"API_FORCE_IDLE_TIMEOUT=0",
+		"CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=2147483647",
+		"CLAUDE_ENABLE_BYTE_WATCHDOG=0",
+		"CLAUDE_ENABLE_STREAM_WATCHDOG=0",
 	} {
 		if !envContains(env, want) {
 			t.Fatalf("missing %s in claude-code env: %v", want, env)

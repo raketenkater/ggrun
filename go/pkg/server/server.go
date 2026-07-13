@@ -73,6 +73,14 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 // log file here so the backend's per-request log spam doesn't bleed into Claude
 // Code's terminal UI once ggrun hands the terminal to the `claude` client.
 func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut, termErr io.Writer) (*Process, error) {
+	return StartWithTimeoutToEnv(args, port, timeout, termOut, termErr, nil)
+}
+
+// StartWithTimeoutToEnv is StartWithTimeoutTo with explicit child-environment
+// overrides. It is used for truly isolating a helper model to one physical GPU:
+// llama.cpp's --device controls tensor placement but still initializes CUDA
+// contexts on every visible device.
+func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termOut, termErr io.Writer, envOverrides []string) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	setSysProcAttr(cmd)
@@ -88,7 +96,7 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 	cmd.Stdout = &gatedWriter{buf: logBuf, term: termOut, live: live}
 	cmd.Stderr = &gatedWriter{buf: logBuf, term: termErr, live: live}
 
-	cmd.Env = ChildEnv(os.Environ(), args)
+	cmd.Env = OverrideEnv(ChildEnv(os.Environ(), args), envOverrides)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -125,6 +133,30 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 		fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(start).Round(time.Second))
 	}
 	return p, nil
+}
+
+// OverrideEnv applies KEY=value entries with last-writer-wins semantics while
+// removing inherited duplicates. os/exec accepts duplicate keys, but libc and
+// platform behavior differ over which occurrence getenv returns.
+func OverrideEnv(env, overrides []string) []string {
+	if len(overrides) == 0 {
+		return env
+	}
+	keys := map[string]bool{}
+	for _, item := range overrides {
+		if key, _, ok := strings.Cut(item, "="); ok && key != "" {
+			keys[key] = true
+		}
+	}
+	out := make([]string, 0, len(env)+len(overrides))
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if ok && keys[key] {
+			continue
+		}
+		out = append(out, item)
+	}
+	return append(out, overrides...)
 }
 
 // ChildEnv applies the process environment shared by initial and recovery

@@ -74,8 +74,14 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 
 	var lastErr error
 	for _, gpu := range claudeReviewerGPUCandidates(caps, req) {
-		args := claudeReviewerArgs(be.Path, modelPath, port, gpu, be.Help)
-		p, err := server.StartWithTimeoutTo(args, port, 5*time.Minute, logWriter, logWriter)
+		// CUDA_VISIBLE_DEVICES is required in addition to --device. Without it,
+		// llama.cpp initializes contexts on every GPU even though all reviewer
+		// tensors live on the selected device (observed: +262 MiB on the main
+		// CUDA0 during a DeepSeek-V4 run). The isolated physical GPU is CUDA0
+		// inside the child process.
+		args := claudeReviewerArgs(be.Path, modelPath, port, 0, be.Help)
+		env := []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)}
+		p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, env)
 		if err == nil {
 			fmt.Printf("[claude-code] Auto reviewer ready on GPU %d (PID %d, Qwen3.5-2B, ctx 64k)\n", gpu, p.Cmd.Process.Pid)
 			return &claudeAutoRuntime{reviewer: p, reviewerLog: logCloser, reviewerPort: port, reviewerGPU: gpu}, nil
@@ -163,18 +169,21 @@ func claudeReviewerGPUCandidates(caps *detect.Capabilities, req *launchRequest) 
 		return nil
 	}
 	if req != nil && strings.TrimSpace(req.GPUsFlag) != "" {
-		// CUDA_VISIBLE_DEVICES renumbers the selected subset. Try each visible
-		// device in that local order; placement later maps actual physical usage.
+		// CUDA_VISIBLE_DEVICES takes physical device IDs here. Preserve the user's
+		// selected order, reject nonexistent devices, and never silently substitute
+		// CUDA0 for a sparse selection such as --gpus 1,2.
 		parts := strings.Split(req.GPUsFlag, ",")
-		physical := map[int]bool{}
-		for _, part := range parts {
-			if idx, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && idx >= 0 {
-				physical[idx] = true
-			}
+		available := map[int]bool{}
+		for _, gpu := range caps.GPUs {
+			available[gpu.Index] = true
 		}
-		out := make([]int, 0, len(physical))
-		for i := 0; i < len(physical); i++ {
-			out = append(out, i)
+		seen := map[int]bool{}
+		out := make([]int, 0, len(parts))
+		for _, part := range parts {
+			if idx, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && available[idx] && !seen[idx] {
+				seen[idx] = true
+				out = append(out, idx)
+			}
 		}
 		return out
 	}

@@ -139,7 +139,7 @@ slot print_timing: id  3 | task 401 | prompt processing, n_tokens =   6144, prog
 		t.Fatalf("expected healthy passive fallback, got ok=%v state=%+v", structuredOK, state)
 	}
 	status := formatClaudeProgress(state)
-	for _, want := range []string{"16%", "S3 prefill 6,144/~38,400", "26.1 tok/s", "status delayed"} {
+	for _, want := range []string{"16%", "S3 prefill 6,144/~38,400", "26.1 tok/s", "log estimate"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("passive status %q missing %q", status, want)
 		}
@@ -222,6 +222,9 @@ func TestClaudeCodeProgressArgs(t *testing.T) {
 	if !strings.Contains(command, "claude-status --port 8123") || status["refreshInterval"] != float64(2) {
 		t.Fatalf("unexpected status settings: %v", status)
 	}
+	if !strings.Contains(args[1], `"matcher":"Workflow"`) || !strings.Contains(args[1], "claude-workflow-hook") {
+		t.Fatalf("Workflow no-timeout hook missing from session settings: %s", args[1])
+	}
 
 	args, ok = claudeCodeProgressClientArgs([]string{"--settings", "mine.json"}, 8123)
 	if ok || len(args) != 2 {
@@ -238,8 +241,12 @@ func TestClaudeCodeProgressArgs(t *testing.T) {
 	}
 
 	t.Setenv("GGRUN_CLAUDE_PROGRESS", "off")
-	if _, ok := claudeCodeProgressClientArgs(nil, 8123); ok {
+	args, ok = claudeCodeProgressClientArgs(nil, 8123)
+	if ok {
 		t.Fatal("progress status line should not be injected when explicitly disabled")
+	}
+	if len(args) < 2 || !strings.Contains(args[1], "claude-workflow-hook") || strings.Contains(args[1], "statusLine") {
+		t.Fatalf("disabling progress must keep the Workflow hook only: %v", args)
 	}
 }
 

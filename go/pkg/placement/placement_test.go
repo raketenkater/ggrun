@@ -236,8 +236,8 @@ func TestArgs(t *testing.T) {
 	if host != "127.0.0.1" {
 		t.Fatalf("expected loopback host, got %q in args %v", host, args)
 	}
-	if timeout != "14400" {
-		t.Fatalf("expected four-hour request timeout, got %q in args %v", timeout, args)
+	if timeout != "2147483647" {
+		t.Fatalf("expected no practical server request timeout, got %q in args %v", timeout, args)
 	}
 	if !contains(args, "--flash-attn") {
 		t.Fatalf("args missing --flash-attn")

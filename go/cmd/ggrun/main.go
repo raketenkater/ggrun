@@ -73,6 +73,8 @@ func main() {
 		cmdDaemon(args[1:])
 	case "claude-status":
 		cmdClaudeStatus(args[1:])
+	case "claude-workflow-hook":
+		cmdClaudeWorkflowHook(args[1:])
 	case "dry-run":
 		cmdDryRun(args[1:])
 	case "probe":
@@ -143,7 +145,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -790,11 +792,16 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 	if req.ClaudeCode && ctxSize <= 0 {
 		// Claude Code needs a large shared window for its main conversation plus
 		// background work. In auto/fit mode use the model's native window, capped
-		// at 1M so the four default slots each retain about 262k tokens. Explicit
+		// at 1M so the two default slots each retain about 512k tokens. Explicit
 		// numeric/max context choices are resolved above and remain user overrides.
 		ctxSize = model.CTXTrain
-		if ctxSize <= 0 || ctxSize > 1048576 {
+		if ctxSize > 1048576 {
 			ctxSize = 1048576
+		} else if ctxSize <= 0 {
+			// Unknown metadata must not make a small/old model allocate a speculative
+			// 1M KV cache. Two 64k slots are a portable Claude Code baseline; models
+			// that advertise a larger native window still get it automatically.
+			ctxSize = 131072
 		}
 	}
 	opts := placement.Options{
@@ -851,25 +858,25 @@ func requestSamplingProfile(req *launchRequest, model *placement.ModelProfile) s
 	return fmt.Sprintf("custom-%x", sum[:8])
 }
 
-// claudeCodeParallel floors --parallel at 4 in Claude Code mode. There are two
-// opposing pressures and 4 is the balance point:
+// claudeCodeParallel floors --parallel at 2 in Claude Code mode. There are two
+// opposing pressures and 2 is the stable big-model balance point:
 //   - Too few slots (1): the main turn, the command-safety classifier and
 //     background/subagent calls thrash a single slot's KV cache → requests get
 //     cancelled and every turn re-processes the whole prompt.
 //   - Too many slots: --ctx-size is split evenly across slots, so each slot's
-//     context shrinks (262144/8 = 32k). A real Claude Code conversation easily
-//     exceeds that, and the backend then FAILS the request ("context shift is
-//     disabled"). 4 slots keep ~65k per slot, which fits normal sessions.
+//     context shrinks while concurrent decode competes for the same memory
+//     bandwidth. Two slots keep the foreground turn responsive while one worker
+//     runs, and wide Workflow fan-out queues without multiplying KV pressure.
 //
-// Wide fan-out is handled by a long API_TIMEOUT_MS (queued agents wait for one
-// of the 4 slots and complete) rather than by more slots — a single GPU
-// serializes the work either way. Total KV is unchanged (fixed ctx, just split).
+// Wide fan-out is handled by no practical inference deadline (queued agents wait
+// for one of the 2 slots and complete) rather than by more slots — a bandwidth-
+// bound big MoE serializes most of the work either way. Total KV is unchanged.
 // An explicitly passed --parallel always wins: big-MoE tuning (e.g. 2 slots so a
 // background call can't evict the main conversation's expensive prompt cache)
 // needs the user's value to survive claude-code mode.
 func claudeCodeParallel(parallel int, claudeCode, explicit bool) int {
-	if claudeCode && !explicit && parallel < 4 {
-		return 4
+	if claudeCode && !explicit && parallel < 2 {
+		return 2
 	}
 	return parallel
 }
@@ -883,8 +890,8 @@ const (
 )
 
 // claudeCodeSlotAdjust caps the computed --parallel so each slot keeps a workable
-// context window. claudeCodeParallel floors parallel at 4 BEFORE placement, which
-// is right for large contexts (262144/4 = 65k slots) — but "fit" mode can pick a
+// context window. claudeCodeParallel floors parallel at 2 BEFORE placement, which
+// is right for large contexts (131072/2 = 65k slots) — but "fit" mode can pick a
 // small total context (e.g. 32768 for a huge MoE on tight VRAM), and 32768/4 = 8k
 // slots can't even hold Claude Code's system prompt. Fewer, bigger slots beat
 // more, broken ones: concurrent requests then queue (API_TIMEOUT_MS covers the
@@ -948,17 +955,25 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []str
 		// In Claude Code mode ggrun hands the terminal to the `claude` client, so
 		// the backend's ongoing per-request logs must go to a file instead of
 		// bleeding into Claude Code's UI.
-		logDir := cfg.LogDir
-		if logDir == "" {
-			logDir = os.TempDir()
-		}
-		logPath := filepath.Join(logDir, fmt.Sprintf("ggrun-claude-server-%d.log", req.Port))
+		logPath := claudeServerLogPath(cfg, req.Port)
 		if lf, ferr := os.Create(logPath); ferr == nil {
+			_, _ = fmt.Fprintf(lf, "[ggrun] launch: %s\n", formatCommand(serverArgs))
 			fmt.Printf("[claude-code] backend logs -> %s\n", logPath)
 			return server.StartWithTimeoutTo(serverArgs, req.Port, timeout, lf, lf)
 		}
 	}
 	return server.StartWithTimeout(serverArgs, req.Port, timeout)
+}
+
+func claudeServerLogPath(cfg *config.Config, port int) string {
+	logDir := ""
+	if cfg != nil {
+		logDir = cfg.LogDir
+	}
+	if logDir == "" {
+		logDir = os.TempDir()
+	}
+	return filepath.Join(logDir, fmt.Sprintf("ggrun-claude-server-%d.log", port))
 }
 
 func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) map[int]int {
@@ -1203,6 +1218,131 @@ func startupLogCUDAOOMDetailed(logData string) (device int, allocMB int, isCompu
 	return 0, 0, false, false
 }
 
+const unknownRuntimeCUDAOOMReserveMinMB = 2048
+
+// runtimeLogCUDAOOM also recognizes CUDA VMM failures that only report
+// "current device" after cuMemCreate aborts. llama.cpp omits reserve_size from
+// that diagnostic, so after a real post-health crash we conservatively reserve
+// 10% of that device (at least 2 GiB). A repeat adds another such block. This is
+// learned only for the exact runtime probe key; normal first launches retain
+// measured, margin-free packing.
+func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, prior map[int]int) (device int, reserveMB int, estimated bool, ok bool) {
+	lines := strings.Split(logData, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if device, allocMB, ok := recovery.ParseCUDAOOM(lines[i]); ok {
+			return device, allocMB, false, true
+		}
+		device, ok = recovery.ParseCUDADevice(lines[i])
+		if !ok {
+			continue
+		}
+		isOOM := false
+		for j := i - 1; j >= 0 && j >= i-3; j-- {
+			if strings.Contains(strings.ToLower(lines[j]), "cuda error: out of memory") {
+				isOOM = true
+				break
+			}
+		}
+		if !isOOM {
+			continue
+		}
+		reserveMB = unknownRuntimeCUDAOOMReserveMinMB
+		if caps != nil {
+			for _, gpu := range caps.GPUs {
+				if gpu.Index == device {
+					if scaled := (gpu.VRAMTotalMB + 9) / 10; scaled > reserveMB {
+						reserveMB = scaled
+					}
+					break
+				}
+			}
+		}
+		if prior[device] >= reserveMB {
+			reserveMB += prior[device]
+		}
+		return device, reserveMB, true, true
+	}
+	return 0, 0, false, false
+}
+
+func oomLogFingerprint(logData string) string {
+	sum := sha256.Sum256([]byte(logData))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+// recordRuntimeOOMLog records either the exact failed allocation or the
+// bounded VMM fallback above. markerPath prevents a Claude crash recorded on
+// exit from being counted again when its previous log is recovered next run.
+func recordRuntimeOOMLog(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string) (device, reserveMB int, estimated, changed, ok bool, err error) {
+	if cfg == nil || model == nil || strategy == nil || be == nil || caps == nil {
+		return 0, 0, false, false, false, nil
+	}
+	fingerprint := oomLogFingerprint(logData)
+	if markerPath != "" {
+		if data, readErr := os.ReadFile(markerPath); readErr == nil && strings.TrimSpace(string(data)) == fingerprint {
+			return 0, 0, false, false, false, nil
+		}
+	}
+	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
+	device, reserveMB, estimated, ok = runtimeLogCUDAOOM(logData, caps, prior)
+	if !ok {
+		return 0, 0, false, false, false, nil
+	}
+	if err = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, reserveMB); err != nil {
+		return device, reserveMB, estimated, false, true, err
+	}
+	changed = reserveMB > prior[device]
+	if markerPath != "" {
+		if err = os.WriteFile(markerPath, []byte(fingerprint+"\n"), 0600); err != nil {
+			return device, reserveMB, estimated, changed, true, err
+		}
+	}
+	return device, reserveMB, estimated, changed, true, nil
+}
+
+func previousClaudeLogMatches(logData string, model *placement.ModelProfile, strategy *placement.Strategy) bool {
+	if model == nil || strategy == nil || strategy.Parallel < 1 || strategy.ContextSize < 1 {
+		return false
+	}
+	if !strings.Contains(logData, "health check OK") || !strings.Contains(logData, filepath.Base(model.Path)) {
+		return false
+	}
+	wantSlots := fmt.Sprintf("n_slots = %d, n_ctx_slot = %d", strategy.Parallel, strategy.ContextSize/strategy.Parallel)
+	return strings.Contains(logData, wantSlots)
+}
+
+func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities) (*placement.Strategy, error) {
+	if req == nil || !req.ClaudeCode {
+		return strategy, nil
+	}
+	logPath := claudeServerLogPath(cfg, req.Port)
+	logData, err := os.ReadFile(logPath)
+	if err != nil || !previousClaudeLogMatches(string(logData), model, strategy) {
+		return strategy, nil
+	}
+	markerPath := logPath + ".oom-recorded"
+	device, reserveMB, estimated, changed, ok, err := recordRuntimeOOMLog(cfg, model, strategy, be, caps, string(logData), markerPath)
+	if err != nil {
+		return nil, fmt.Errorf("recover previous Claude runtime OOM: %w", err)
+	}
+	if !ok || !changed {
+		return strategy, nil
+	}
+	if estimated {
+		fmt.Printf("[launch] recovered previous CUDA VMM OOM on device %d; llama.cpp omitted its allocation size, reserving %d MiB runtime headroom and re-planning\n", device, reserveMB)
+	} else {
+		fmt.Printf("[launch] recovered previous CUDA OOM on device %d; reserving the measured %d MiB allocation and re-planning\n", device, reserveMB)
+	}
+	opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	opts.SkipPlacementCache = true
+	next, err := placement.Compute(caps, model, opts)
+	if err != nil {
+		return nil, err
+	}
+	claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet)
+	return next, nil
+}
+
 func applyDeratedPlacementEntry(strategy *placement.Strategy, entry *placement.CacheEntry) {
 	if strategy == nil || entry == nil {
 		return
@@ -1329,6 +1469,12 @@ func cmdLaunch(args []string) {
 		os.Exit(1)
 	}
 	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
+	strategy, err = recoverPreviousClaudeRuntimeOOM(req, cfg, model, strategy, be, caps)
+	if err != nil {
+		claudeAuto.stop()
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	if len(caps.GPUs) > 0 {
 		totalVRAM := int64(0)
@@ -1458,9 +1604,14 @@ func cmdLaunch(args []string) {
 			// launch of this exact model/context reserves the measured
 			// deficit instead of repeating the same crash blind.
 			if !p.IsRunning() && p.LogBuf != nil {
-				if device, allocMB, ok := startupLogCUDAOOM(p.LogBuf.String()); ok {
-					_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, allocMB)
-					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA OOM on device %d, %d MiB) — recorded, next launch of this model/context will reserve for it.\n", device, allocMB)
+				markerPath := claudeServerLogPath(cfg, req.Port) + ".oom-recorded"
+				device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
+				if recordErr != nil {
+					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM: %v\n", recordErr)
+				} else if ok && estimated {
+					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA VMM OOM on device %d; allocation size omitted) — recorded %d MiB runtime reserve for the next launch.\n", device, reserveMB)
+				} else if ok {
+					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA OOM on device %d, %d MiB) — recorded, next launch of this model/context will reserve for it.\n", device, reserveMB)
 				}
 			}
 			if err := p.Stop(); err != nil {
@@ -1508,7 +1659,8 @@ func cmdLaunch(args []string) {
 		if p.LogBuf != nil {
 			logData = p.LogBuf.String()
 		}
-		device, allocMB, ok := startupLogCUDAOOM(logData)
+		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
+		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, prior)
 		if !ok || runtimeOOMRetries >= maxRuntimeOOMRetries {
 			claudeAuto.stop()
 			if ok {
@@ -1521,8 +1673,13 @@ func cmdLaunch(args []string) {
 
 		runtimeOOMRetries++
 		_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, allocMB)
-		fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA OOM on device %d needing %d MiB more mid-request — recorded, re-planning and relaunching (attempt %d/%d)...\n",
-			device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
+		if estimated {
+			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA VMM OOM on device %d omitted its allocation size — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
+				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
+		} else {
+			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA OOM on device %d needing %d MiB more mid-request — recorded, re-planning and relaunching (attempt %d/%d)...\n",
+				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
+		}
 
 		replanOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
 		// Without this, Compute() prefers the .place cache written when the
@@ -2114,10 +2271,12 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Printf("  export ANTHROPIC_BASE_URL=http://%s:%d ANTHROPIC_AUTH_TOKEN=ggrun\n", clientHost, port)
 	fmt.Println("  export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local")
 	fmt.Println("  export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local")
-	fmt.Println("  export API_TIMEOUT_MS=14400000  # let queued fan-out/subagent requests finish, not cancel")
-	fmt.Println("  export API_FORCE_IDLE_TIMEOUT=0  # local models can spend >5 min prompt-processing before streaming")
+	fmt.Printf("  export API_TIMEOUT_MS=%d  # maximum safe timer: no practical local-inference deadline\n", claudeNoTimeoutMS)
+	fmt.Printf("  export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=%d  # background agents may be quiet during local prefill\n", claudeNoTimeoutMS)
+	fmt.Println("  export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0")
 	fmt.Printf("  export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", pct, slot)
 	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
+	claudeArgs = claudeCodeWorkflowPromptArgs(claudeArgs)
 	claudeArgs = append(claudeCodePermissionArgs(claudeArgs), claudeArgs...)
 	claudeArgs = append(claudeArgs, "--disallowedTools", "WebSearch")
 	if _, err := exec.LookPath("uvx"); err == nil {
@@ -2142,7 +2301,14 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 	}
 	var env []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+			"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+			"API_TIMEOUT_MS", "API_FORCE_IDLE_TIMEOUT", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS",
+			"CLAUDE_ENABLE_BYTE_WATCHDOG", "CLAUDE_ENABLE_STREAM_WATCHDOG",
+			"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":
 			continue
 		}
 		env = append(env, kv)
@@ -2155,16 +2321,16 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL=local",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL=local",
 		"ANTHROPIC_DEFAULT_OPUS_MODEL=local",
-		// A wide fan-out (subagents / ultracode) queues behind the GPU; without a
-		// long timeout Claude Code cancels the queued requests. A 60k-token,
-		// four-slot DeepSeek-V4 stress run took almost 40 minutes, so use four
-		// hours to leave headroom for larger prompts. User-set value wins.
-		"API_TIMEOUT_MS="+envOr("API_TIMEOUT_MS", "14400000"),
-		// The request timeout above is not enough for local giant models: Claude Code
-		// also has a stream-idle watchdog, and llama.cpp may spend >5 minutes in
-		// prompt processing before emitting the first byte. Disable that watchdog for
-		// local backend launches unless the user explicitly overrides it.
-		"API_FORCE_IDLE_TIMEOUT="+envOr("API_FORCE_IDLE_TIMEOUT", "0"),
+		// JavaScript's maximum safe timer value is effectively no deadline for a
+		// local session. It covers foreground requests and queued Workflow fan-out.
+		fmt.Sprintf("API_TIMEOUT_MS=%d", claudeNoTimeoutMS),
+		// Background agents and streaming each have independent watchdogs. A giant
+		// local MoE can spend minutes in prompt processing without producing an event.
+		fmt.Sprintf("CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=%d", claudeNoTimeoutMS),
+		"CLAUDE_ENABLE_BYTE_WATCHDOG=0",
+		"CLAUDE_ENABLE_STREAM_WATCHDOG=0",
+		// Compatibility with Claude Code versions that predate the named watchdogs.
+		"API_FORCE_IDLE_TIMEOUT=0",
 		// Behind a custom base URL Claude Code assumes a 200k window and won't
 		// auto-compact until ~92% of it (~184k tokens) — but each slot only has ctx/parallel,
 		// so the conversation overflows the slot and the backend fails the request
@@ -2435,7 +2601,7 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string) 
 		clientHost = "127.0.0.1"
 	}
 	fmt.Printf("[claude-code] Claude Code → http://%s:%d\n", clientHost, port)
-	args := extraArgs
+	args := claudeCodeWorkflowPromptArgs(extraArgs)
 	if permissionArgs := claudeCodePermissionArgs(extraArgs); permissionArgs != nil {
 		args = append(permissionArgs, args...)
 		if len(permissionArgs) == 2 && permissionArgs[1] == "auto" {

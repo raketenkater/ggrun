@@ -2908,12 +2908,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, DraftFlags(s.Draft)...)
 	}
 
-	// Server --timeout: some custom backends default to 600s, which kills
-	// long Claude Code requests mid-stream. A measured 60k-token request with
-	// four occupied slots took 2,377s on DeepSeek-V4, already longer than the
-	// former 1,800s default. Match Claude Code's four-hour client timeout so
-	// queued subagents and large prompt-processing runs survive server-side.
-	args = append(args, "--timeout", "14400")
+	// Server --timeout: slow local models and queued Workflow agents must not be
+	// killed by a backend's 600s/3600s socket default. Backends do not agree that
+	// zero means disabled, so use the largest signed 32-bit seconds value instead
+	// (about 68 years). Process health and client disconnects still stop real work.
+	args = append(args, "--timeout", "2147483647")
 
 	return args
 }
