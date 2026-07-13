@@ -107,6 +107,7 @@ type ModelProfile struct {
 	VocabSize         int    `json:"vocab_size"`
 	TokenizerModel    string `json:"tokenizer_model,omitempty"`
 	TokenizerPre      string `json:"tokenizer_pre,omitempty"`
+	TokenizerHash     string `json:"tokenizer_hash,omitempty"`
 	QuantType         string `json:"quant_type"`
 	ExpertBytes       int64  `json:"expert_bytes"`
 	NonExpertBytes    int64  `json:"non_expert_bytes"`
@@ -152,6 +153,8 @@ type Options struct {
 	RAMHeadroomMB   int    // hold back this much system RAM as a safety margin
 	BackendTag      string // "llama" or "ik_llama"
 	BackendCacheTag string // backend identity for probe/cache isolation; defaults to BackendTag
+	BackendIdentity string // exact backend build/commit identity for speculative performance profiles
+	SamplingProfile string // default, greedy, recommended, or a hash of explicit sampling overrides
 	NoMMap          bool
 	Parallel        int
 	CacheFile       string // path to placement cache for MoE recovery
@@ -436,7 +439,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			// mode is a launch choice and its companion may have appeared since
 			// the target cache was written, so resolve it on cache hits too.
 			if opts.SpecMode != "" && opts.SpecMode != "off" {
-				s.Draft = ComputeDraft(model, caps, opts)
+				draftOpts := opts
+				draftOpts.ContextSize = s.ContextSize
+				s.Draft = ComputeDraft(model, caps, draftOpts)
 			}
 			return s, nil
 		}
@@ -483,7 +488,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	}
 
 	if opts.SpecMode != "" && opts.SpecMode != "off" {
-		s.Draft = ComputeDraft(model, caps, opts)
+		draftOpts := opts
+		draftOpts.ContextSize = s.ContextSize
+		s.Draft = ComputeDraft(model, caps, draftOpts)
 	}
 
 	// Compute CRAM (prompt cache)

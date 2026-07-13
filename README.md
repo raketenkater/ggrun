@@ -86,6 +86,7 @@ ggrun model.gguf --dry-run     # print the llama-server command without running 
 ggrun model.gguf --ai-tune     # benchmark a few flag sets, cache the fastest
 ggrun model.gguf --benchmark   # load, measure tok/s, exit
 ggrun model.gguf --claude-code # serve + launch Claude Code wired to this model
+ggrun spec-test model.gguf --ctx 1048576 --parallel 4 # prove MTP ceilings before Auto
 ```
 
 Claude Code launches in autonomous Auto permission mode by default. ggrun runs a

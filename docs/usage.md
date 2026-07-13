@@ -141,8 +141,11 @@ model calls cannot leave for `api.anthropic.com`.
 - **Live local progress:** while a local request is queued, ingesting its prompt, or
   generating, ggrun adds a session-only Claude status line with the active slot,
   prompt progress bar, token counts, tok/s, active requests, and queue depth. It uses
-  llama-server's structured slot/metrics endpoints and exact prompt-progress logs;
-  prompt contents are never stored. Existing custom Claude status lines are preserved,
+  llama-server's structured slot/metrics endpoints and exact prompt-progress logs.
+  If structured telemetry stalls during a long prefill, the backend health check
+  and passive log lifecycle remain authoritative, the last request stays visible as
+  `status delayed`, and endpoint polling backs off instead of creating cancellation
+  pressure. Prompt contents are never stored. Existing custom Claude status lines are preserved,
   with progress shown in the terminal title instead. Set `GGRUN_CLAUDE_PROGRESS=off`
   to disable the display.
 

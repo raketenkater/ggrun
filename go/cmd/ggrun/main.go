@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -82,6 +83,8 @@ func main() {
 		cmdDownload(args[1:])
 	case "tune":
 		cmdTune(args[1:])
+	case "spec-test":
+		cmdSpecTest(args[1:])
 	case "recommend":
 		cmdRecommend(args[1:])
 	case "gui", "tui":
@@ -116,6 +119,7 @@ Commands:
   dry-run <model.gguf> Print computed flags without launching
   download <repo/name> Download from HuggingFace
   tune <model.gguf>    AI-tune model for best performance
+  spec-test <model>    Verify MTP ceilings 1-4 against a target-only baseline
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   config [show|edit|path|reset]  Manage settings
   backend [list|add|register|remove]  Manage custom llama.cpp backends and
@@ -139,7 +143,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "dry-run", "probe", "kv-probe", "download", "tune", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -335,6 +339,7 @@ type launchRequest struct {
 	ParallelSet       bool // --parallel given explicitly; claude-code mode must not override it
 	Benchmark         bool
 	ClaudeCode        bool
+	SpecDraftMax      int // internal spec-test ceiling; not a public launch override
 	ExtraArgs         []string
 }
 
@@ -805,6 +810,8 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		Host:                   req.Host,
 		BackendTag:             backendDialect(be),
 		BackendCacheTag:        be.Tag,
+		BackendIdentity:        be.Identity,
+		SamplingProfile:        requestSamplingProfile(req, model),
 		VisionAuto:             req.VisionAuto,
 		MMProjPath:             req.MMProjPath,
 		SpecMode:               req.SpecMode,
@@ -825,6 +832,23 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 	}
 	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
 	return opts
+}
+
+func requestSamplingProfile(req *launchRequest, model *placement.ModelProfile) string {
+	if req == nil {
+		return "default"
+	}
+	// Include every explicit backend override: unknown fork flags can affect
+	// sampling or throughput too. Then add ggrun's effective Claude defaults so
+	// a Claude profile cannot be reused by an ordinary OpenAI-compatible launch.
+	values := append([]string(nil), req.ExtraArgs...)
+	values = claudeCodeSamplingArgs(values, req.ClaudeCode, model)
+	if len(values) == 0 && !req.ClaudeCode {
+		return "default"
+	}
+	values = append(values, fmt.Sprintf("claude-code=%t", req.ClaudeCode))
+	sum := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return fmt.Sprintf("custom-%x", sum[:8])
 }
 
 // claudeCodeParallel floors --parallel at 4 in Claude Code mode. There are two
@@ -889,6 +913,9 @@ func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode, parallelExpl
 }
 
 func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendInfo, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy) []string {
+	if req.SpecDraftMax > 0 && strategy != nil && strategy.Draft != nil && strategy.Draft.Type != placement.DraftNone {
+		strategy.Draft.DraftMax = req.SpecDraftMax
+	}
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
@@ -896,6 +923,24 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	return serverArgs
+}
+
+// specLaunchIdentity fingerprints the final runtime argv after tune caches,
+// automatic Claude sampling and recovery placement have all been applied. Port
+// and bind host are excluded because they do not affect model performance.
+func specLaunchIdentity(args []string) string {
+	canonical := make([]string, 0, len(args))
+	for i := 1; i < len(args); i++ { // backend binary has its own scope identity
+		arg := args[i]
+		if arg == "--port" || arg == "--host" {
+			i++
+			continue
+		}
+		canonical = append(canonical, arg)
+	}
+	data, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:16])
 }
 
 func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []string, timeout time.Duration) (*server.Process, error) {
@@ -974,6 +1019,23 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		return opts
 	}
 	for {
+		if !specDisabled && strings.EqualFold(strings.TrimSpace(req.SpecMode), "auto") && strategy != nil && strategy.Draft != nil && strategy.Draft.Type != placement.DraftNone {
+			verified := strategy.Draft.VerifiedLaunchIdentity
+			if verified == "" || verified != specLaunchIdentity(serverArgs) {
+				fmt.Fprintln(os.Stderr, "[spec] final launch flags differ from the verified profile; disabling speculation")
+				specDisabled = true
+				next, rerr := placement.Compute(caps, model, placementOpts())
+				if rerr != nil || next == nil {
+					if rerr != nil {
+						return nil, strategy, serverArgs, fmt.Errorf("speculative profile mismatch and target-only re-plan failed: %w", rerr)
+					}
+					return nil, strategy, serverArgs, fmt.Errorf("speculative profile mismatch and target-only re-plan returned no strategy")
+				}
+				strategy = next
+				serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, next)
+				continue
+			}
+		}
 		// Ask the backend's no-alloc accounting whether this placement can even
 		// load (~1s) before committing to a real load (15+ min for a big MoE).
 		// A measured deficit re-plans exactly like a startup CUDA OOM would —
@@ -3073,6 +3135,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		VocabSize:          info.VocabSize,
 		TokenizerModel:     info.TokenizerModel,
 		TokenizerPre:       info.TokenizerPre,
+		TokenizerHash:      info.TokenizerHash,
 		QuantType:          "", // not parsed from gguf.py output
 		ExpertBytes:        info.ExpertBytes,
 		NonExpertBytes:     info.NonExpertBytes,
@@ -3206,6 +3269,7 @@ type backendInfo struct {
 	Tag               string
 	Dialect           string // placement/flag family: llama, ik_llama, vulkan, metal
 	Help              string
+	Identity          string // version/build hash; invalidates speculative performance profiles
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
@@ -3303,6 +3367,7 @@ func detectBackend(path string) *backendInfo {
 	out, _ := cmd.CombinedOutput()
 	help := string(out)
 	info.Help = help
+	info.Identity = backendBuildIdentity(path)
 	lowerBase := strings.ToLower(filepath.Base(path))
 	lowerDir := strings.ToLower(filepath.Dir(path))
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
@@ -3322,4 +3387,22 @@ func detectBackend(path string) *backendInfo {
 		info.SupportsReasoning = true
 	}
 	return info
+}
+
+func backendBuildIdentity(path string) string {
+	cmd := exec.Command(path, "--version")
+	if hubDir, ok, _ := libhub.Setup(path); ok {
+		defer libhub.Cleanup(hubDir)
+		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
+	}
+	out, _ := cmd.CombinedOutput()
+	material := strings.TrimSpace(string(out))
+	if fi, err := os.Stat(path); err == nil {
+		material += fmt.Sprintf("\n%s\n%d\n%d", filepath.Base(path), fi.Size(), fi.ModTime().UnixNano())
+	}
+	if material == "" {
+		material = path
+	}
+	sum := sha256.Sum256([]byte(material))
+	return fmt.Sprintf("%s-%x", filepath.Base(path), sum[:12])
 }

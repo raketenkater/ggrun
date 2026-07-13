@@ -108,6 +108,44 @@ func TestMergePreflightDevicesAddsCompanionMemory(t *testing.T) {
 	}
 }
 
+func TestEmbeddedMTPPreflightReservationIsConservativePerGPU(t *testing.T) {
+	model := &placement.ModelProfile{
+		NumLayers: 33, NextNPredictLayers: 1, HasSSM: 1, FullAttnInterval: 4,
+		HeadCountKV: 4, KeyLength: 256, ValueLength: 256,
+	}
+	strategy := &placement.Strategy{
+		ContextSize: 262144, KVPlacement: "gpu",
+		Draft: &placement.DraftConfig{Type: placement.DraftMTP, SpecType: "draft-mtp"},
+	}
+	target := []preflightDevice{
+		{Name: "CUDA0", ComputeMB: 1600},
+		{Name: "CUDA1", ComputeMB: 600},
+		{Name: "Host", ComputeMB: 10},
+	}
+	got, err := embeddedMTPPreflightReservation(model, strategy, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []preflightDevice{
+		{Name: "CUDA0", ContextMB: 1024, ComputeMB: 1600},
+		{Name: "CUDA1", ContextMB: 1024, ComputeMB: 1024},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("embedded MTP reservation:\n got  %#v\n want %#v", got, want)
+	}
+}
+
+func TestEmbeddedMTPPreflightRejectsUnprovenCPUKV(t *testing.T) {
+	model := &placement.ModelProfile{NextNPredictLayers: 1, HeadCountKV: 4, KeyLength: 128, ValueLength: 128}
+	strategy := &placement.Strategy{
+		ContextSize: 32768, KVPlacement: "cpu",
+		Draft: &placement.DraftConfig{Type: placement.DraftMTP, SpecType: "draft-mtp"},
+	}
+	if _, err := embeddedMTPPreflightReservation(model, strategy, []preflightDevice{{Name: "CUDA0", ComputeMB: 1000}}); err == nil {
+		t.Fatal("embedded MTP with unmeasured CPU KV must fail closed")
+	}
+}
+
 func TestPreflightWorstDeficit(t *testing.T) {
 	// Real shape from the 2026-07-07 DeepSeek-V4 launch: 3090Ti + 3060 + 4070,
 	// fit-print rows in MiB (model, context, compute).

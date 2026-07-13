@@ -15,6 +15,7 @@ Importable API:
     metadata = parse('/path/to/model.gguf')
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -114,8 +115,18 @@ def _read_kv(f, r, kv_count):
             if at in _KV_FIXED:
                 f.read(al * _KV_FIXED[at])
             elif at == 8:
+                token_hash = hashlib.sha256() if key == 'tokenizer.ggml.tokens' else None
                 for _ in range(al):
-                    f.read(struct.unpack('<Q', f.read(8))[0])
+                    length_raw = f.read(8)
+                    length = struct.unpack('<Q', length_raw)[0]
+                    value = f.read(length)
+                    if token_hash is not None:
+                        # Length framing prevents ambiguous concatenations such
+                        # as ["ab", "c"] and ["a", "bc"] from colliding.
+                        token_hash.update(length_raw)
+                        token_hash.update(value)
+                if token_hash is not None:
+                    r['tokenizer_hash'] = token_hash.hexdigest()
             else:
                 return  # nested or unknown — we've already captured what we need
         elif vt in _KV_FIXED:
@@ -303,6 +314,7 @@ SHELL_KEY_MAP = [
     ('quantized_by',      'GGUF_QUANTIZED_BY',   ''),
     ('tokenizer_model',   'GGUF_TOKENIZER_MODEL', ''),
     ('tokenizer_pre',     'GGUF_TOKENIZER_PRE',  ''),
+    ('tokenizer_hash',    'GGUF_TOKENIZER_HASH', ''),
     ('vocab_size',        'GGUF_VOCAB_SIZE',     0),
 ]
 

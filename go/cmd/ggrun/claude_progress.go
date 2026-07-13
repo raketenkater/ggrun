@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,10 @@ const (
 	// monitoring tasks into llama-server every second during slow multi-slot decode.
 	claudeProgressPollInterval = 2 * time.Second
 	claudeProgressStaleAfter   = 10 * time.Second
+	// A timed-out /slots request is itself queued in llama-server's scheduler. Do
+	// not immediately submit another one while a long prefill owns the scheduler;
+	// passive log progress remains available during this backoff.
+	claudeProgressBusyBackoff = 30 * time.Second
 )
 
 type claudeProgressLog interface {
@@ -57,13 +62,14 @@ type claudeRequestProgress struct {
 }
 
 type claudeProgressState struct {
-	UpdatedAt  time.Time               `json:"updated_at"`
-	TotalSlots int                     `json:"total_slots"`
-	Active     int                     `json:"active"`
-	Queued     int                     `json:"queued"`
-	Requests   []claudeRequestProgress `json:"requests,omitempty"`
-	Event      string                  `json:"event,omitempty"`
-	Error      string                  `json:"error,omitempty"`
+	UpdatedAt     time.Time               `json:"updated_at"`
+	TotalSlots    int                     `json:"total_slots"`
+	Active        int                     `json:"active"`
+	Queued        int                     `json:"queued"`
+	Requests      []claudeRequestProgress `json:"requests,omitempty"`
+	Event         string                  `json:"event,omitempty"`
+	StatusDelayed bool                    `json:"status_delayed,omitempty"`
+	Error         string                  `json:"error,omitempty"`
 }
 
 type claudeProgressTracker struct {
@@ -83,6 +89,10 @@ type promptLogProgress struct {
 }
 
 var promptProgressRE = regexp.MustCompile(`slot print_timing: id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\|\s+prompt processing, n_tokens =\s*(\d+), progress =\s*([0-9.]+), t =\s*[0-9.]+\s*s /\s*([0-9.]+) tokens per second`)
+
+var slotLaunchRE = regexp.MustCompile(`slot launch_slot_:\s+id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\|\s+processing task`)
+
+var slotReleaseRE = regexp.MustCompile(`slot\s+release:\s+id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\|\s+stop processing`)
 
 var metricLineRE = regexp.MustCompile(`(?m)^llamacpp:(requests_deferred|prompt_tokens_seconds|predicted_tokens_seconds)\s+([0-9.eE+-]+)\s*$`)
 
@@ -211,10 +221,19 @@ func startClaudeProgressMonitor(host string, port int, log claudeProgressLog, te
 		client := &http.Client{Timeout: 3 * time.Second}
 		ticker := time.NewTicker(claudeProgressPollInterval)
 		defer ticker.Stop()
+		var previous claudeProgressState
+		var structuredRetryAt time.Time
 		for {
-			state := pollClaudeProgress(client, host, port, log)
+			tryStructured := !time.Now().Before(structuredRetryAt)
+			state, structuredOK := pollClaudeProgressResilient(client, host, port, log, previous, tryStructured)
+			if structuredOK {
+				structuredRetryAt = time.Time{}
+			} else if state.StatusDelayed && tryStructured {
+				structuredRetryAt = time.Now().Add(claudeProgressBusyBackoff)
+			}
 			tracker.enrich(&state)
 			_ = writeClaudeProgressState(port, state)
+			previous = state
 			if terminalTitle {
 				fmt.Fprintf(os.Stderr, "\033]0;%s\007", formatClaudeProgress(state))
 			}
@@ -226,6 +245,135 @@ func startClaudeProgressMonitor(host string, port int, log claudeProgressLog, te
 		}
 	}()
 	return stop
+}
+
+// pollClaudeProgressResilient prefers structured slot and metric data, but a
+// long llama.cpp prefill can delay those scheduler-backed endpoints for many
+// seconds while /health remains responsive. In that case, retain the last known
+// request and advance it from passive server logs rather than reporting a dead
+// backend or continuously injecting more monitoring tasks.
+func pollClaudeProgressResilient(client *http.Client, host string, port int, log claudeProgressLog, previous claudeProgressState, tryStructured bool) (claudeProgressState, bool) {
+	if tryStructured {
+		state := pollClaudeProgress(client, host, port, log)
+		if state.Error == "" {
+			return state, true
+		}
+	}
+
+	if err := pollClaudeHealth(client, host, port); err != nil {
+		return claudeProgressState{UpdatedAt: time.Now(), Error: err.Error()}, false
+	}
+	state := passiveClaudeProgress(log, previous)
+	state.UpdatedAt = time.Now()
+	state.StatusDelayed = true
+	state.Error = ""
+	return state, false
+}
+
+func pollClaudeHealth(client *http.Client, host string, port int) error {
+	baseURL := "http://" + net.JoinHostPort(normalizeClaudeProgressHost(host), strconv.Itoa(port))
+	resp, err := client.Get(baseURL + "/health")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health endpoint returned %s", resp.Status)
+	}
+	return nil
+}
+
+type claudeLogSnapshot struct {
+	TotalSlots int
+	Active     map[int]claudeRequestProgress
+	Released   map[int]bool
+}
+
+func passiveClaudeProgress(log claudeProgressLog, previous claudeProgressState) claudeProgressState {
+	state := claudeProgressState{TotalSlots: previous.TotalSlots, Queued: previous.Queued}
+	if log == nil {
+		state.Requests = append(state.Requests, previous.Requests...)
+		state.Active = len(state.Requests)
+		return state
+	}
+
+	snapshot := parseClaudeLogSnapshot(log.Tail(256 << 10))
+	if snapshot.TotalSlots > state.TotalSlots {
+		state.TotalSlots = snapshot.TotalSlots
+	}
+	for _, req := range snapshot.Active {
+		state.Requests = append(state.Requests, req)
+	}
+	// If the launch record has rotated out of the tail, retain a previously
+	// observed request unless the log explicitly records its release.
+	for _, req := range previous.Requests {
+		if _, active := snapshot.Active[req.Task]; active || snapshot.Released[req.Task] {
+			continue
+		}
+		state.Requests = append(state.Requests, req)
+	}
+	sort.Slice(state.Requests, func(i, j int) bool {
+		if state.Requests[i].Slot != state.Requests[j].Slot {
+			return state.Requests[i].Slot < state.Requests[j].Slot
+		}
+		return state.Requests[i].Task < state.Requests[j].Task
+	})
+	state.Active = len(state.Requests)
+	return state
+}
+
+func parseClaudeLogSnapshot(text string) claudeLogSnapshot {
+	snapshot := claudeLogSnapshot{
+		Active:   map[int]claudeRequestProgress{},
+		Released: map[int]bool{},
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if match := slotLaunchRE.FindStringSubmatch(line); len(match) == 3 {
+			slot, errSlot := strconv.Atoi(match[1])
+			task, errTask := strconv.Atoi(match[2])
+			if errSlot == nil && errTask == nil {
+				snapshot.Active[task] = claudeRequestProgress{Slot: slot, Task: task, Stage: "working"}
+				delete(snapshot.Released, task)
+				if slot+1 > snapshot.TotalSlots {
+					snapshot.TotalSlots = slot + 1
+				}
+			}
+			continue
+		}
+		if match := promptProgressRE.FindStringSubmatch(line); len(match) == 6 {
+			slot, errSlot := strconv.Atoi(match[1])
+			task, errTask := strconv.Atoi(match[2])
+			processed, errProcessed := strconv.Atoi(match[3])
+			fraction, errFraction := strconv.ParseFloat(match[4], 64)
+			rate, errRate := strconv.ParseFloat(match[5], 64)
+			if errSlot == nil && errTask == nil && errProcessed == nil && errFraction == nil && errRate == nil {
+				total := 0
+				if fraction > 0 {
+					total = int(float64(processed)/fraction + 0.5)
+				}
+				snapshot.Active[task] = claudeRequestProgress{
+					Slot: slot, Task: task, Stage: "prefill", PromptProcessed: processed,
+					PromptTotal: total, PromptFraction: fraction, TokensPerSecond: rate,
+				}
+				if slot+1 > snapshot.TotalSlots {
+					snapshot.TotalSlots = slot + 1
+				}
+			}
+			continue
+		}
+		if match := slotReleaseRE.FindStringSubmatch(line); len(match) == 3 {
+			slot, errSlot := strconv.Atoi(match[1])
+			task, errTask := strconv.Atoi(match[2])
+			if errSlot == nil && errTask == nil {
+				delete(snapshot.Active, task)
+				snapshot.Released[task] = true
+				if slot+1 > snapshot.TotalSlots {
+					snapshot.TotalSlots = slot + 1
+				}
+			}
+		}
+	}
+	return snapshot
 }
 
 func newClaudeProgressTracker() *claudeProgressTracker {
@@ -444,7 +592,14 @@ func formatClaudeProgress(state claudeProgressState) string {
 	}
 	if state.Active == 0 {
 		if state.Queued > 0 {
-			return fmt.Sprintf("ggrun · %d queued", state.Queued)
+			status := fmt.Sprintf("ggrun · %d queued", state.Queued)
+			if state.StatusDelayed {
+				status += " · status delayed"
+			}
+			return status
+		}
+		if state.StatusDelayed {
+			return "ggrun · local online · status delayed"
 		}
 		if state.TotalSlots > 0 {
 			return fmt.Sprintf("ggrun · local ready · %d slots", state.TotalSlots)
@@ -484,6 +639,9 @@ func formatClaudeProgress(state claudeProgressState) string {
 	}
 	if state.Queued > 0 {
 		parts = append(parts, fmt.Sprintf("%d queued", state.Queued))
+	}
+	if state.StatusDelayed {
+		parts = append(parts, "status delayed")
 	}
 	return strings.Join(parts, " · ")
 }

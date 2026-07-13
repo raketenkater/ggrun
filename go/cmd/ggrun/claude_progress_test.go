@@ -37,6 +37,22 @@ slot print_timing: id  0 | task 4 | prompt processing, n_tokens = 32769, progres
 	}
 }
 
+func TestParseClaudeLogSnapshotTracksLifecycle(t *testing.T) {
+	log := `
+slot launch_slot_: id  3 | task 196 | processing task, is_child = 0
+slot print_timing: id  3 | task 196 | prompt processing, n_tokens =   6144, progress = 0.16, t = 235.14 s / 26.13 tokens per second
+slot      release: id  3 | task 196 | stop processing: n_tokens = 8192, truncated = 0
+slot launch_slot_: id  3 | task 401 | processing task, is_child = 0
+`
+	snapshot := parseClaudeLogSnapshot(log)
+	if len(snapshot.Active) != 1 || snapshot.Active[401].Stage != "working" || !snapshot.Released[196] {
+		t.Fatalf("unexpected lifecycle snapshot: %+v", snapshot)
+	}
+	if snapshot.TotalSlots != 4 {
+		t.Fatalf("total slots=%d, want 4", snapshot.TotalSlots)
+	}
+}
+
 func TestPollAndFormatClaudeProgress(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/slots", func(w http.ResponseWriter, _ *http.Request) {
@@ -91,6 +107,70 @@ func TestFormatClaudeProgressGenerationAndReady(t *testing.T) {
 	}
 	if got := formatClaudeProgress(claudeProgressState{Event: "request completed"}); got != "ggrun · request completed" {
 		t.Fatalf("completion status = %q", got)
+	}
+}
+
+func TestClaudeProgressFallsBackToPassiveLogsWhenSlotsBusy(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slots", func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`[]`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 20 * time.Millisecond}
+	log := testProgressLog(`
+slot launch_slot_: id  3 | task 401 | processing task, is_child = 0
+slot print_timing: id  3 | task 401 | prompt processing, n_tokens =   6144, progress = 0.16, t = 235.14 s / 26.13 tokens per second
+`)
+	state, structuredOK := pollClaudeProgressResilient(client, u.Hostname(), port, log, claudeProgressState{TotalSlots: 4}, true)
+	if structuredOK || state.Error != "" || !state.StatusDelayed || state.Active != 1 {
+		t.Fatalf("expected healthy passive fallback, got ok=%v state=%+v", structuredOK, state)
+	}
+	status := formatClaudeProgress(state)
+	for _, want := range []string{"16%", "S3 prefill 6,144/~38,400", "26.1 tok/s", "status delayed"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("passive status %q missing %q", status, want)
+		}
+	}
+}
+
+func TestClaudeProgressPassiveFallbackPreservesLastKnownRequest(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := claudeProgressState{
+		TotalSlots: 4,
+		Active:     1,
+		Requests: []claudeRequestProgress{{
+			Slot: 1, Task: 77, Stage: "generating", Generated: 23, TokensPerSecond: 5.5,
+		}},
+	}
+	state, structuredOK := pollClaudeProgressResilient(srv.Client(), u.Hostname(), port, testProgressLog(""), previous, false)
+	if structuredOK || !state.StatusDelayed || state.Active != 1 || state.Requests[0].Task != 77 {
+		t.Fatalf("last known request was not retained: ok=%v state=%+v", structuredOK, state)
 	}
 }
 

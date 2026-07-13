@@ -25,6 +25,7 @@ type Info struct {
 	VocabSize          int    `json:"vocab_size"`
 	TokenizerModel     string `json:"tokenizer_model"`
 	TokenizerPre       string `json:"tokenizer_pre"`
+	TokenizerHash      string `json:"tokenizer_hash"`
 	ExpertBytes        int64  `json:"expert_bytes"`
 	NonExpertBytes     int64  `json:"non_expert_bytes"`
 	TokenEmbdBytes     int64  `json:"token_embd_bytes"` // input embeddings; stay in host RAM

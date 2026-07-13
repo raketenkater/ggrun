@@ -110,6 +110,25 @@ def test_ssm_hybrid():
     print('  ✓ ssm_hybrid')
 
 
+def test_tokenizer_hash_is_stable_and_vocab_sensitive():
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as first, \
+            tempfile.NamedTemporaryFile(suffix='.gguf') as same, \
+            tempfile.NamedTemporaryFile(suffix='.gguf') as different:
+        build(first.name, arch='qwen35', tokenizer_model='gpt2',
+              tokenizer_pre='qwen35', vocab_size=64)
+        build(same.name, arch='qwen35', tokenizer_model='gpt2',
+              tokenizer_pre='qwen35', vocab_size=64)
+        build(different.name, arch='qwen35', tokenizer_model='gpt2',
+              tokenizer_pre='qwen35', vocab_size=65)
+        first_hash = parse(first.name)['tokenizer_hash']
+        same_hash = parse(same.name)['tokenizer_hash']
+        different_hash = parse(different.name)['tokenizer_hash']
+    assert len(first_hash) == 64, first_hash
+    assert first_hash == same_hash, (first_hash, same_hash)
+    assert first_hash != different_hash, (first_hash, different_hash)
+    print('  ✓ tokenizer_hash_is_stable_and_vocab_sensitive')
+
+
 def test_corrupted_gguf():
     """Non-GGUF input → empty dict, never crashes."""
     with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
@@ -138,6 +157,7 @@ def test_shell_format_emits_all_keys():
         'LEADING_DENSE', 'SLIDING_WINDOW', 'FULL_ATTN_INTERVAL', 'HAS_SHEXP',
         'CTX_TRAIN', 'GGUF_MODEL_NAME', 'GGUF_BASENAME', 'GGUF_QUANTIZED_BY',
         'GGUF_TOKENIZER_MODEL', 'GGUF_TOKENIZER_PRE', 'GGUF_VOCAB_SIZE',
+        'GGUF_TOKENIZER_HASH',
     }
     emitted = {ln.split('=', 1)[0] for ln in out.splitlines() if '=' in ln}
     missing = expected_vars - emitted
@@ -202,6 +222,7 @@ def main():
     test_mla_deepseek()
     test_iswa_gemma()
     test_ssm_hybrid()
+    test_tokenizer_hash_is_stable_and_vocab_sensitive()
     test_corrupted_gguf()
     test_shell_format_emits_all_keys()
     test_ik_llama_iq3_k_tensor_bytes()

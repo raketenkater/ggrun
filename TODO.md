@@ -29,18 +29,28 @@ draft and EAGLE models from Hugging Face, selects a draft GPU and emits draft fl
   DFlash companions; never borrow `llama-fit-params` from a different fork. A
   later full-context companion failure disables speculation and recomputes a
   clean target-only placement.
-- [ ] Account for an embedded MTP head's additional model context/KV allocation
+- [x] Account for an embedded MTP head's additional model context/KV allocation
   before enabling it near the VRAM limit. Mainline `llama-fit-params` does not
   accept `--spec-type`, while `llama-server` adds the MTP context to its own fit
   ledger; use a selected-backend estimate or a conservative metadata-derived
-  bound and keep Auto off when that reservation cannot be proven.
-- [ ] Build the repeatable MTP harness around llama.cpp's merged nine-prompt
-  benchmark: same GGUF off/on, warmups and repeated rounds, draft ceilings 1-4,
-  deterministic plus model-recommended sampling, thinking on/off, TTFT/prompt
-  speed/decode/wall-time/acceptance/mean-length, short plus 60k context, serial
-  plus parallel-4, output checks, VRAM/RAM and long-run stability. Cache results
-  by model hash/backend commit/GPU set/context/sampling/parallelism and enable
-  Auto only when the matching profile has a reproducible win above noise.
+  bound and keep Auto off when that reservation cannot be proven. The selected
+  backend's target ledger is augmented with a metadata-derived MTP KV bound and
+  conservative per-GPU compute reserve; an unprovable CPU-KV/oracle case fails
+  back to the already-proven target-only placement.
+- [x] Add the repeatable core MTP harness: `ggrun spec-test` compares the same
+  GGUF off/on after warmup, runs nine checked prompt types for repeated rounds,
+  sweeps draft ceilings 1-4, includes a real 60k request when each slot can hold
+  it, and records prompt/decode/wall/acceptance data. Profiles are scoped by all
+  GGUF shard identities, backend build, hardware/driver, selected GPU set,
+  context, sampling and parallelism. Auto requires correctness/stability,
+  parallel and 60k proofs where applicable, at least 2% decode and wall-time
+  gains, no more than 5% prompt regression, output-length parity and an exact
+  post-tuning launch-argument identity.
+- [ ] Extend `ggrun spec-test` with the remaining full matrix: deterministic plus
+  model-recommended sampling, thinking on/off, explicit TTFT/mean accepted length,
+  serial plus parallel-4 in one invocation, peak VRAM/RAM capture and a long-run
+  soak. Run the live baseline/ceilings matrix once the active serving session can
+  be stopped; code/unit safety validation alone is not a performance result.
 - [ ] Re-test DeepSeek V4 DFlash only when one reproducible llama-server commit can
   load both the official target and a published drafter; until then Auto stays off.
 - [ ] Repeat the live test on one other MTP-capable MoE to prove the path is generic.

@@ -59,20 +59,16 @@ type DraftConfig struct {
 	NgramN       int    `json:"ngram_n,omitempty"`
 	NgramM       int    `json:"ngram_m,omitempty"`
 	NgramMinHits int    `json:"ngram_min_hits,omitempty"`
+	// VerifiedLaunchIdentity is copied from the exact performance profile and
+	// checked after all tune-cache/runtime flags have been applied.
+	VerifiedLaunchIdentity string `json:"-"`
 }
 
 // ComputeDraft decides the speculative decoding strategy for a target model.
 // It only enables draft-model speculation when a compatible local draft exists;
 // ngram speculation is explicit because it needs workload-specific proof.
 func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options) *DraftConfig {
-	cfg := &DraftConfig{
-		Type:             DraftNone,
-		BackendTag:       opts.BackendTag,
-		SpecAutoTune:     specAutoTuneSupported(opts.BackendTag, opts.BackendHelp),
-		SupportsDraftCTX: backendSupportsMTP(opts.BackendTag) || backendHelpSupports(opts.BackendHelp, "ctx-size-draft"),
-		DraftMax:         16,
-		PSplit:           0.1,
-	}
+	cfg := newDraftConfig(opts)
 
 	mode := normalizeSpecMode(opts.SpecMode)
 	if mode == "off" || caps == nil || len(caps.GPUs) == 0 || target == nil {
@@ -116,7 +112,7 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 			return cfg
 		}
 		if target.IsMoE && !opts.ForceSpecMoE {
-			fmt.Fprintf(os.Stderr, "[spec] auto found no compatible MTP/DFlash path; generic MoE speculation remains gated\n")
+			fmt.Fprintf(os.Stderr, "[spec] auto found no proven MTP/DFlash performance profile; generic MoE speculation remains gated\n")
 			return cfg
 		}
 		if configureEagle3Draft(cfg, target, caps, opts, modelDir, false) {
@@ -147,6 +143,17 @@ func ComputeDraft(target *ModelProfile, caps *detect.Capabilities, opts Options)
 	return cfg
 }
 
+func newDraftConfig(opts Options) *DraftConfig {
+	return &DraftConfig{
+		Type:             DraftNone,
+		BackendTag:       opts.BackendTag,
+		SpecAutoTune:     specAutoTuneSupported(opts.BackendTag, opts.BackendHelp),
+		SupportsDraftCTX: backendSupportsMTP(opts.BackendTag) || backendHelpSupports(opts.BackendHelp, "ctx-size-draft"),
+		DraftMax:         16,
+		PSplit:           0.1,
+	}
+}
+
 func configureMTPDraft(cfg *DraftConfig, target *ModelProfile, caps *detect.Capabilities, opts Options, modelDir string, verbose bool) bool {
 	if modelSupportsMTP(target) {
 		if backendSupportsMTP(opts.BackendTag) {
@@ -154,13 +161,19 @@ func configureMTPDraft(cfg *DraftConfig, target *ModelProfile, caps *detect.Capa
 			cfg.SpecType = "mtp"
 			cfg.MTPFlag = true
 			cfg.DraftMax = defaultMTPDraftMax
-			return true
+			if authorizeAutoSpecProfile(cfg, target, caps, opts, "mtp") {
+				return true
+			}
+			*cfg = *newDraftConfig(opts)
 		}
 		if backendHelpSupports(opts.BackendHelp, "draft-mtp") {
 			cfg.Type = DraftMTP
 			cfg.SpecType = "draft-mtp"
 			cfg.DraftMax = defaultMTPDraftMax
-			return true
+			if authorizeAutoSpecProfile(cfg, target, caps, opts, "mtp") {
+				return true
+			}
+			*cfg = *newDraftConfig(opts)
 		}
 	}
 
@@ -171,7 +184,10 @@ func configureMTPDraft(cfg *DraftConfig, target *ModelProfile, caps *detect.Capa
 		candidate := findOrDownloadSpecializedCandidate(target, modelDir, opts, "mtp")
 		if configureValidatedSpecializedModel(cfg, target, caps, opts, candidate, DraftMTP, "draft-mtp", "mtp") {
 			cfg.DraftMax = defaultMTPDraftMax
-			return true
+			if authorizeAutoSpecProfile(cfg, target, caps, opts, "mtp") {
+				return true
+			}
+			*cfg = *newDraftConfig(opts)
 		}
 	}
 	if verbose {
@@ -193,12 +209,35 @@ func configureDFlashDraft(cfg *DraftConfig, target *ModelProfile, caps *detect.C
 	}
 	candidate := findOrDownloadSpecializedCandidate(target, modelDir, opts, "dflash")
 	if configureValidatedSpecializedModel(cfg, target, caps, opts, candidate, DraftDFlash, "draft-dflash", "dflash") {
-		return true
+		if authorizeAutoSpecProfile(cfg, target, caps, opts, "dflash") {
+			return true
+		}
+		*cfg = *newDraftConfig(opts)
 	}
 	if verbose {
 		fmt.Fprintf(os.Stderr, "[spec] no compatible DFlash/DSpark drafter was found; skipping\n")
 	}
 	return false
+}
+
+func authorizeAutoSpecProfile(cfg *DraftConfig, target *ModelProfile, caps *detect.Capabilities, opts Options, kind string) bool {
+	if normalizeSpecMode(opts.SpecMode) != "auto" {
+		return true
+	}
+	scope := NewSpecProfileScope(target, caps, opts, kind, cfg.Path)
+	profile, err := LoadSpecPerformanceProfile(opts.CacheDir, scope)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[spec] Auto leaving %s off: no matching verified performance profile (%s)\n", strings.ToUpper(kind), scope.Key())
+		return false
+	}
+	if ok, reason := profile.AutoEligible(); !ok {
+		fmt.Fprintf(os.Stderr, "[spec] Auto leaving %s off: %s\n", strings.ToUpper(kind), reason)
+		return false
+	}
+	cfg.DraftMax = profile.DraftMax
+	cfg.VerifiedLaunchIdentity = profile.LaunchIdentity
+	fmt.Fprintf(os.Stderr, "[spec] Auto using proven %s profile %s: ceiling=%d, %.1f%% faster\n", strings.ToUpper(kind), profile.ScopeKey, profile.DraftMax, profile.ImprovementPct)
+	return true
 }
 
 func configureEagle3Draft(cfg *DraftConfig, target *ModelProfile, caps *detect.Capabilities, opts Options, modelDir string, verbose bool) bool {
@@ -256,9 +295,30 @@ func configureValidatedSpecializedModel(cfg *DraftConfig, target *ModelProfile, 
 
 func validateSpecCandidateBackend(path string, opts Options) error {
 	if opts.SpecCandidateValidator == nil {
+		if normalizeSpecMode(opts.SpecMode) == "auto" {
+			return fmt.Errorf("selected backend has no no-allocation companion loader; Auto requires loader verification")
+		}
 		return nil
 	}
 	return opts.SpecCandidateValidator(path)
+}
+
+// EmbeddedMTPContextMB returns the metadata-derived KV reservation for the
+// additional MTP context created against an embedded NextN head. Target-model
+// KV measurements cannot be reused: they describe the full trunk, while this
+// context executes only the appended NextN blocks. Hybrid Qwen MTP blocks use
+// dense attention, so SSM/SWA traits are deliberately cleared.
+func EmbeddedMTPContextMB(model *ModelProfile, ctxSize int, kvType string) int {
+	if model == nil || model.NextNPredictLayers <= 0 || ctxSize <= 0 {
+		return 0
+	}
+	mtp := *model
+	mtp.NumLayers = model.NextNPredictLayers
+	mtp.HasSSM = 0
+	mtp.SlidingWindow = 0
+	mtp.FullAttnInterval = 0
+	mtp.MeasuredKVBytesPerTok = nil
+	return computeKVTotalMB(&mtp, ctxSize, kvType)
 }
 
 func applyParsedDraftModel(cfg *DraftConfig, target *ModelProfile, caps *detect.Capabilities, opts Options, candidate string, draftInfo *gguf.Info, draftType DraftType, specType string) bool {
@@ -710,18 +770,15 @@ func validateSpecCandidate(path string, target *ModelProfile, backendTag, kind s
 		if info.NextNPredictLayers <= 0 {
 			return nil, fmt.Errorf("GGUF has no NextN/MTP prediction layers")
 		}
-		if target != nil && !sameDraftArchitecture(target.ModelArch, info.Architecture) {
-			return nil, fmt.Errorf("architecture mismatch: draft=%s target=%s", info.Architecture, target.ModelArch)
+		if err := validateSpecializedCompatibilityIdentity(target, info, kind, backendTag); err != nil {
+			return nil, err
 		}
 	case "dflash":
 		if !strings.Contains(arch, "dflash") {
 			return nil, fmt.Errorf("architecture %s is not a DFlash drafter", info.Architecture)
 		}
-		if target != nil {
-			targetArch := strings.ToLower(strings.TrimSpace(target.ModelArch))
-			if targetArch != "" && targetArch != "unknown" && arch != targetArch && !strings.HasPrefix(arch, targetArch+"-") {
-				return nil, fmt.Errorf("architecture family mismatch: draft=%s target=%s", info.Architecture, target.ModelArch)
-			}
+		if err := validateSpecializedCompatibilityIdentity(target, info, kind, backendTag); err != nil {
+			return nil, err
 		}
 	}
 	expectedBytes := info.NonExpertBytes + info.ExpertBytes
@@ -741,6 +798,43 @@ func validateSpecCandidate(path string, target *ModelProfile, backendTag, kind s
 		}
 	}
 	return info, nil
+}
+
+func validateSpecializedCompatibilityIdentity(target *ModelProfile, info *gguf.Info, kind, backendTag string) error {
+	if target == nil || info == nil {
+		return fmt.Errorf("cannot prove %s target/companion identity", strings.ToUpper(kind))
+	}
+	targetArch := strings.ToLower(strings.TrimSpace(target.ModelArch))
+	companionArch := strings.ToLower(strings.TrimSpace(info.Architecture))
+	if targetArch == "" || targetArch == "unknown" {
+		return fmt.Errorf("target architecture is missing; refusing unproven %s companion", strings.ToUpper(kind))
+	}
+	if !specializedArchitectureCompatibleForBackend(target, kind, companionArch, backendTag) {
+		return fmt.Errorf("architecture mismatch: companion=%s target=%s backend=%s", info.Architecture, target.ModelArch, backendTag)
+	}
+	if target.EmbeddingLength <= 0 || info.EmbeddingLength <= 0 || target.EmbeddingLength != info.EmbeddingLength {
+		return fmt.Errorf("embedding identity mismatch: companion=%d target=%d", info.EmbeddingLength, target.EmbeddingLength)
+	}
+	if target.VocabSize <= 0 || info.VocabSize <= 0 || target.VocabSize != info.VocabSize {
+		return fmt.Errorf("vocab identity mismatch: companion=%d target=%d", info.VocabSize, target.VocabSize)
+	}
+	if target.TokenizerHash != "" || info.TokenizerHash != "" {
+		if target.TokenizerHash == "" || info.TokenizerHash == "" {
+			return fmt.Errorf("tokenizer hash missing on one side; refusing unproven %s companion", strings.ToUpper(kind))
+		}
+		if !strings.EqualFold(target.TokenizerHash, info.TokenizerHash) {
+			return fmt.Errorf("tokenizer hash mismatch")
+		}
+		return nil
+	}
+	if target.TokenizerModel == "" || info.TokenizerModel == "" ||
+		target.TokenizerPre == "" || info.TokenizerPre == "" {
+		return fmt.Errorf("tokenizer identity metadata is incomplete; refusing unproven %s companion", strings.ToUpper(kind))
+	}
+	if !strings.EqualFold(target.TokenizerModel, info.TokenizerModel) || !strings.EqualFold(target.TokenizerPre, info.TokenizerPre) {
+		return fmt.Errorf("tokenizer identity mismatch: companion=%s/%s target=%s/%s", info.TokenizerModel, info.TokenizerPre, target.TokenizerModel, target.TokenizerPre)
+	}
+	return nil
 }
 
 func downloadDraftCandidate(target *ModelProfile, modelDir, backendTag string) (string, error) {
@@ -776,7 +870,12 @@ func downloadSpecCandidate(target *ModelProfile, modelDir string, opts Options, 
 		}
 		repoCandidates = append(repoCandidates, repo)
 	}
-	if target.QuantizedBy != "" {
+	// Auto never promotes a mutable search result directly into a launch. It may
+	// use a local, fully validated companion or a reviewed immutable manifest.
+	// Explicit --spec requests retain discovery so users can deliberately test a
+	// new artifact; metadata, backend-loader and memory gates still apply.
+	reviewedOnly := !openSpecializedDiscoveryAllowed(opts, kind)
+	if !reviewedOnly && target.QuantizedBy != "" {
 		addRepo(target.QuantizedBy + "/" + basename + "-GGUF")
 		if target.Name != "" && target.Name != basename {
 			addRepo(target.QuantizedBy + "/" + target.Name + "-GGUF")
@@ -785,14 +884,16 @@ func downloadSpecCandidate(target *ModelProfile, modelDir string, opts Options, 
 	for _, repo := range knownSpecializedRepos(target, kind) {
 		addRepo(repo)
 	}
-	for _, q := range []string{"unsloth", "bartowski", "lmstudio-community"} {
-		if q == target.QuantizedBy {
-			continue
+	if !reviewedOnly {
+		for _, q := range []string{"unsloth", "bartowski", "lmstudio-community"} {
+			if q == target.QuantizedBy {
+				continue
+			}
+			addRepo(q + "/" + basename + "-GGUF")
 		}
-		addRepo(q + "/" + basename + "-GGUF")
-	}
-	for _, repo := range searchHFDraftRepos(client, target, kind) {
-		addRepo(repo)
+		for _, repo := range searchHFDraftRepos(client, target, kind) {
+			addRepo(repo)
+		}
 	}
 
 	safeBasename := sanitizeFilename(basename)
@@ -804,7 +905,7 @@ func downloadSpecCandidate(target *ModelProfile, modelDir string, opts Options, 
 			fmt.Fprintf(os.Stderr, "[spec] skipping %s: %s\n", repo, reason)
 			continue
 		}
-		if (kind == "mtp" || kind == "dflash") && !hfRepoGGUFArchitectureCompatible(client, repo, target, kind) {
+		if (kind == "mtp" || kind == "dflash") && !hfRepoGGUFArchitectureCompatible(client, repo, target, kind, opts.BackendTag) {
 			continue
 		}
 		paths := listRepoDraftCandidates(client, repo, kind)
@@ -881,7 +982,19 @@ func downloadSpecCandidate(target *ModelProfile, modelDir string, opts Options, 
 	return "", fmt.Errorf("no compatible draft model found on HuggingFace")
 }
 
-func hfRepoGGUFArchitectureCompatible(client *http.Client, repo string, target *ModelProfile, kind string) bool {
+func openSpecializedDiscoveryAllowed(opts Options, kind string) bool {
+	if normalizeSpecMode(opts.SpecMode) != "auto" {
+		return true
+	}
+	switch kind {
+	case "mtp", "dflash", "eagle3":
+		return false
+	default:
+		return true
+	}
+}
+
+func hfRepoGGUFArchitectureCompatible(client *http.Client, repo string, target *ModelProfile, kind, backendTag string) bool {
 	if client == nil || repo == "" {
 		return false
 	}
@@ -905,10 +1018,14 @@ func hfRepoGGUFArchitectureCompatible(client *http.Client, repo string, target *
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		return false
 	}
-	return specializedArchitectureCompatible(target, kind, metadata.GGUF.Architecture)
+	return specializedArchitectureCompatibleForBackend(target, kind, metadata.GGUF.Architecture, backendTag)
 }
 
 func specializedArchitectureCompatible(target *ModelProfile, kind, candidateArch string) bool {
+	return specializedArchitectureCompatibleForBackend(target, kind, candidateArch, "")
+}
+
+func specializedArchitectureCompatibleForBackend(target *ModelProfile, kind, candidateArch, backendTag string) bool {
 	candidateArch = strings.ToLower(strings.TrimSpace(candidateArch))
 	if candidateArch == "" || candidateArch == "unknown" || target == nil {
 		return false
@@ -916,7 +1033,10 @@ func specializedArchitectureCompatible(target *ModelProfile, kind, candidateArch
 	targetArch := strings.ToLower(strings.TrimSpace(target.ModelArch))
 	switch kind {
 	case "mtp":
-		return sameDraftArchitecture(targetArch, candidateArch)
+		if targetArch != "" && targetArch != "unknown" && targetArch == candidateArch {
+			return true
+		}
+		return reviewedSpecializedArchitecturePair(kind, targetArch, candidateArch, backendTag)
 	case "dflash":
 		if !strings.Contains(candidateArch, "dflash") {
 			return false
@@ -928,16 +1048,23 @@ func specializedArchitectureCompatible(target *ModelProfile, kind, candidateArch
 }
 
 func knownSpecializedRepos(target *ModelProfile, kind string) []string {
-	// Deliberately empty until an artifact has passed a real backend load and
-	// correctness benchmark. Name/architecture matches alone are not enough:
-	// the first published DeepSeek V4 DSpark GGUF uses private GGML types and a
-	// separate Lucebox runtime, not mainline llama-server.
-	return nil
+	var repos []string
+	seen := map[string]bool{}
+	for _, manifest := range reviewedSpecializedArtifacts {
+		if !manifest.AutoApproved || manifest.Kind != kind || !manifestTargetMatches(manifest, target) || seen[manifest.Repo] {
+			continue
+		}
+		seen[manifest.Repo] = true
+		repos = append(repos, manifest.Repo)
+	}
+	return repos
 }
 
 func unsupportedSpecializedRepo(repo, kind string) string {
-	if kind == "dflash" && strings.EqualFold(strings.Trim(repo, "/"), deepSeekV4DFlashRepo) {
-		return "the published DeepSeek V4 drafter requires a separate Lucebox/DS4 runtime and cannot be loaded by a compatible llama-server backend"
+	for _, manifest := range reviewedSpecializedArtifacts {
+		if manifest.Kind == kind && strings.EqualFold(strings.Trim(repo, "/"), manifest.Repo) && manifest.UnsupportedReason != "" {
+			return manifest.UnsupportedReason
+		}
 	}
 	return ""
 }
@@ -948,11 +1075,103 @@ const (
 	deepSeekV4DFlashRevision = "7c74cca4d266f084b5e14dc68c77e922cfed17ea"
 	deepSeekV4DFlashSHA256   = "48883d35b8a67ecfd2858a90e12a47d04cb5ac581acef868ca0f58544816f746"
 	deepSeekV4DFlashSize     = int64(11304737056)
+
+	deepSeekV4MTPRepo     = "antirez/deepseek-v4-gguf"
+	deepSeekV4MTPFile     = "DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf"
+	deepSeekV4MTPRevision = "9170bf42beb77f38006e016503ecace31f2bd9a0"
+	deepSeekV4MTPSHA256   = "afd481ee689dce9037f70f39085fcdae5a5b096d521cdad43b19fa52bf8f4083"
+	deepSeekV4MTPSize     = int64(3807602400)
 )
 
+type specializedArtifactManifest struct {
+	Kind          string
+	Repo          string
+	Revision      string
+	File          string
+	SHA256        string
+	Size          int64
+	TargetArch    string
+	CompanionArch string
+	BackendTags   []string
+	// CompatibilityApproved permits deliberate explicit testing of a reviewed
+	// cross-architecture pair. AutoApproved is separate and additionally
+	// requires the repeatable performance/correctness path.
+	CompatibilityApproved bool
+	AutoApproved          bool
+	UnsupportedReason     string
+}
+
+// These entries are executable policy, not recommendations. An artifact only
+// becomes AutoApproved after the exact target/companion pair passes the selected
+// backend loader, correctness checks, memory preflight and repeatable performance
+// harness. Known-incompatible entries remain pinned here so mutable HF names or
+// mirrors cannot make ggrun rediscover and download them as if they were new.
+var reviewedSpecializedArtifacts = []specializedArtifactManifest{
+	{
+		Kind: "dflash", Repo: deepSeekV4DFlashRepo, Revision: deepSeekV4DFlashRevision,
+		File: deepSeekV4DFlashFile, SHA256: deepSeekV4DFlashSHA256, Size: deepSeekV4DFlashSize,
+		TargetArch: "deepseek4", CompanionArch: "deepseek4-dflash-draft",
+		UnsupportedReason: "the published DeepSeek V4 drafter requires a separate Lucebox/DS4 runtime and cannot be loaded by a compatible llama-server backend",
+	},
+	{
+		Kind: "mtp", Repo: deepSeekV4MTPRepo, Revision: deepSeekV4MTPRevision,
+		File: deepSeekV4MTPFile, SHA256: deepSeekV4MTPSHA256, Size: deepSeekV4MTPSize,
+		TargetArch: "deepseek4", CompanionArch: "deepseek4_mtp_support", BackendTags: []string{"ds4"},
+		UnsupportedReason: "the reviewed DeepSeek V4 MTP companion requires the DS4-specific deepseek4_mtp_support loader; installed llama-server backends cannot load the target/companion pair",
+	},
+}
+
+func manifestTargetMatches(manifest specializedArtifactManifest, target *ModelProfile) bool {
+	if target == nil || manifest.TargetArch == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(target.ModelArch), manifest.TargetArch)
+}
+
+func manifestBackendMatches(manifest specializedArtifactManifest, backendTag string) bool {
+	backendTag = strings.ToLower(strings.TrimSpace(backendTag))
+	for _, allowed := range manifest.BackendTags {
+		allowed = strings.ToLower(strings.TrimSpace(allowed))
+		if backendTag == allowed || strings.Contains(backendTag, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewedSpecializedArchitecturePair(kind, targetArch, companionArch, backendTag string) bool {
+	for _, manifest := range reviewedSpecializedArtifacts {
+		if !manifest.CompatibilityApproved || manifest.Kind != kind ||
+			!strings.EqualFold(manifest.TargetArch, targetArch) ||
+			!strings.EqualFold(manifest.CompanionArch, companionArch) ||
+			!manifestBackendMatches(manifest, backendTag) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func specializedArtifactFor(repo, remotePath string) (specializedArtifactManifest, bool) {
+	repo = strings.Trim(repo, "/")
+	file := filepath.Base(remotePath)
+	for _, manifest := range reviewedSpecializedArtifacts {
+		if strings.EqualFold(repo, manifest.Repo) && strings.EqualFold(file, manifest.File) {
+			return manifest, true
+		}
+	}
+	return specializedArtifactManifest{}, false
+}
+
 func verifyKnownLocalSpecArtifact(path string, target *ModelProfile, kind string) error {
-	if kind == "dflash" && isDeepSeekV4FlashTarget(target) && strings.HasSuffix(strings.ToLower(filepath.Base(path)), strings.ToLower(sanitizeFilename(deepSeekV4DFlashFile))) {
-		return fmt.Errorf("known incompatible artifact: %s", unsupportedSpecializedRepo(deepSeekV4DFlashRepo, kind))
+	if !isDeepSeekV4FlashTarget(target) {
+		return nil
+	}
+	name := strings.ToLower(filepath.Base(path))
+	for _, manifest := range reviewedSpecializedArtifacts {
+		if manifest.Kind == kind && manifest.UnsupportedReason != "" && strings.HasSuffix(name, strings.ToLower(sanitizeFilename(manifest.File))) {
+			return fmt.Errorf("known incompatible artifact: %s", manifest.UnsupportedReason)
+		}
 	}
 	return nil
 }
@@ -966,8 +1185,8 @@ func isDeepSeekV4FlashTarget(target *ModelProfile) bool {
 }
 
 func verifyKnownSpecArtifact(path, repo, remotePath string) error {
-	if strings.EqualFold(strings.Trim(repo, "/"), strings.ToLower(deepSeekV4DFlashRepo)) && filepath.Base(remotePath) == deepSeekV4DFlashFile {
-		return verifyFileSHA256(path, deepSeekV4DFlashSize, deepSeekV4DFlashSHA256)
+	if manifest, ok := specializedArtifactFor(repo, remotePath); ok {
+		return verifyFileSHA256(path, manifest.Size, manifest.SHA256)
 	}
 	return nil
 }
@@ -997,15 +1216,12 @@ func verifyFileSHA256(path string, expectedSize int64, expectedSHA string) error
 }
 
 func knownSpecializedRepoRevision(repo string) string {
-	switch strings.ToLower(strings.Trim(repo, "/")) {
-	case strings.ToLower(deepSeekV4DFlashRepo):
-		// Hugging Face model revision verified 2026-07-13. Pinning prevents a
-		// mutable main branch from changing the 11 GB artifact under a stable
-		// ggrun configuration; GGUF metadata is still validated after download.
-		return deepSeekV4DFlashRevision
-	default:
-		return "main"
+	for _, manifest := range reviewedSpecializedArtifacts {
+		if strings.EqualFold(strings.Trim(repo, "/"), manifest.Repo) {
+			return manifest.Revision
+		}
 	}
+	return "main"
 }
 
 func searchHFDraftRepos(client *http.Client, target *ModelProfile, kind string) []string {

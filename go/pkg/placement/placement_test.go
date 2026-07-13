@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/gguf"
 )
 
 // writeSpecGGUF writes the metadata surface the speculative resolver uses.
@@ -62,6 +63,23 @@ func writeSpecGGUF(t *testing.T, path, arch, tokenizerModel, tokenizerPre string
 	}
 	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
 		t.Fatalf("write spec GGUF: %v", err)
+	}
+}
+
+func saveEligibleSpecProfile(t *testing.T, target *ModelProfile, caps *detect.Capabilities, opts Options, kind, companion string, draftMax int) {
+	t.Helper()
+	scope := NewSpecProfileScope(target, caps, opts, kind, companion)
+	maxPrompt := 4096
+	if scope.ContextSize >= 60000 {
+		maxPrompt = 60000
+	}
+	_, err := SaveSpecPerformanceProfile(opts.CacheDir, SpecPerformanceProfile{
+		Scope: scope, LaunchIdentity: "test-launch", DraftMax: draftMax, BaselineTPS: 100, SpeculativeTPS: 110, ImprovementPct: 10, WallImprovementPct: 8,
+		PromptCases: 9, RepeatedRounds: 3, MaxPromptTokens: maxPrompt,
+		CorrectnessPassed: true, StabilityPassed: true, ParallelLoadPassed: true, Complete: true,
+	})
+	if err != nil {
+		t.Fatalf("save speculative profile: %v", err)
 	}
 }
 
@@ -1828,11 +1846,19 @@ func TestComputeDraftAutoPrefersMTPWhenAvailable(t *testing.T) {
 		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
 		CPU:  detect.CPUInfo{Cores: 16},
 	}
-	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: false, NextNPredictLayers: 1}
+	model := &ModelProfile{Path: "model.gguf", TotalSizeMB: 1024, NumLayers: 32, ContextSize: 32768, IsMoE: true, NextNPredictLayers: 1}
 
-	draft := ComputeDraft(model, caps, Options{SpecMode: "auto", BackendTag: "ik_llama"})
+	opts := Options{SpecMode: "auto", BackendTag: "ik_llama", BackendIdentity: "ik-build-a", CacheDir: t.TempDir(), ContextSize: 32768}
+	if draft := ComputeDraft(model, caps, opts); draft.Type != DraftNone {
+		t.Fatalf("Auto must stay off without a performance profile, got type=%s", draft.Type)
+	}
+	saveEligibleSpecProfile(t, model, caps, opts, "mtp", "", 3)
+	draft := ComputeDraft(model, caps, opts)
 	if draft.Type != DraftMTP || draft.SpecType != "mtp" {
 		t.Fatalf("expected auto MTP, got type=%s spec=%s", draft.Type, draft.SpecType)
+	}
+	if draft.DraftMax != 3 {
+		t.Fatalf("profile ceiling not applied: %d", draft.DraftMax)
 	}
 }
 
@@ -1993,7 +2019,12 @@ func TestComputeDraftAutoUsesDFlashForDeepSeekV4MoE(t *testing.T) {
 		TokenizerModel: "gpt2", TokenizerPre: "joyai-llm",
 	}
 	help := "--spec-type none,draft-mtp,draft-dflash --spec-draft-model"
-	draft := ComputeDraft(target, caps, Options{SpecMode: "auto", BackendTag: "llama", BackendHelp: help})
+	opts := Options{
+		SpecMode: "auto", BackendTag: "llama", BackendHelp: help,
+		SpecCandidateValidator: func(string) error { return nil }, CacheDir: dir,
+	}
+	saveEligibleSpecProfile(t, target, caps, opts, "dflash", drafter, 2)
+	draft := ComputeDraft(target, caps, opts)
 	if draft.Type != DraftDFlash || draft.Path != drafter || draft.SpecType != "draft-dflash" {
 		t.Fatalf("expected DFlash before the generic MoE gate, got %#v", draft)
 	}
@@ -2061,6 +2092,89 @@ func TestSpecializedArchitectureFilterRunsBeforeDownload(t *testing.T) {
 	qwen := &ModelProfile{ModelArch: "qwen35"}
 	if !specializedArchitectureCompatible(qwen, "mtp", "qwen35") {
 		t.Fatal("same-family Qwen MTP-only architecture should pass")
+	}
+}
+
+func TestSpecializedIdentityUsesTokenizerHashAndFailsClosed(t *testing.T) {
+	target := &ModelProfile{
+		ModelArch: "qwen35", EmbeddingLength: 4096, VocabSize: 64,
+		TokenizerModel: "gpt2", TokenizerPre: "qwen35", TokenizerHash: strings.Repeat("a", 64),
+	}
+	matching := &gguf.Info{
+		Architecture: "qwen35", EmbeddingLength: 4096, VocabSize: 64,
+		TokenizerModel: "gpt2", TokenizerPre: "qwen35", TokenizerHash: strings.Repeat("a", 64),
+	}
+	if err := validateSpecializedCompatibilityIdentity(target, matching, "mtp", "llama"); err != nil {
+		t.Fatalf("exact identity rejected: %v", err)
+	}
+	mismatched := *matching
+	mismatched.TokenizerHash = strings.Repeat("b", 64)
+	if err := validateSpecializedCompatibilityIdentity(target, &mismatched, "mtp", "llama"); err == nil || !strings.Contains(err.Error(), "tokenizer hash mismatch") {
+		t.Fatalf("tokenizer hash mismatch was not rejected: %v", err)
+	}
+	missing := *matching
+	missing.TokenizerHash = ""
+	if err := validateSpecializedCompatibilityIdentity(target, &missing, "mtp", "llama"); err == nil || !strings.Contains(err.Error(), "missing on one side") {
+		t.Fatalf("missing tokenizer hash was not rejected: %v", err)
+	}
+}
+
+func TestReviewedDeepSeekV4MTPManifestStaysBlockedForLlama(t *testing.T) {
+	target := &ModelProfile{ModelArch: "deepseek4"}
+	if specializedArchitectureCompatibleForBackend(target, "mtp", "deepseek4_mtp_support", "llama") {
+		t.Fatal("DS4-specific MTP architecture must not be authorized for llama-server")
+	}
+	if specializedArchitectureCompatibleForBackend(target, "mtp", "deepseek4_mtp_support", "ds4") {
+		t.Fatal("a known artifact must remain blocked until its manifest is AutoApproved")
+	}
+	if reason := unsupportedSpecializedRepo(deepSeekV4MTPRepo, "mtp"); !strings.Contains(reason, "DS4-specific") {
+		t.Fatalf("reviewed MTP artifact missing deterministic rejection reason: %q", reason)
+	}
+	if revision := knownSpecializedRepoRevision(deepSeekV4MTPRepo); revision != deepSeekV4MTPRevision {
+		t.Fatalf("MTP manifest revision=%q, want %q", revision, deepSeekV4MTPRevision)
+	}
+	manifest, ok := specializedArtifactFor(deepSeekV4MTPRepo, deepSeekV4MTPFile)
+	if !ok || manifest.Size != deepSeekV4MTPSize || manifest.SHA256 != deepSeekV4MTPSHA256 {
+		t.Fatalf("MTP provenance manifest incomplete: ok=%v manifest=%+v", ok, manifest)
+	}
+}
+
+func TestAutoSpecializedDiscoveryRequiresReviewedManifest(t *testing.T) {
+	if openSpecializedDiscoveryAllowed(Options{SpecMode: "auto"}, "mtp") {
+		t.Fatal("Auto must not promote mutable MTP search results")
+	}
+	if openSpecializedDiscoveryAllowed(Options{SpecMode: "auto"}, "dflash") {
+		t.Fatal("Auto must not promote mutable DFlash search results")
+	}
+	if !openSpecializedDiscoveryAllowed(Options{SpecMode: "mtp"}, "mtp") {
+		t.Fatal("explicit MTP testing should retain discovery behind validation gates")
+	}
+	if !openSpecializedDiscoveryAllowed(Options{SpecMode: "auto"}, "draft") {
+		t.Fatal("generic draft discovery policy should remain unchanged")
+	}
+}
+
+func TestEmbeddedMTPContextReservationUsesOnlyNextNLayers(t *testing.T) {
+	model := &ModelProfile{
+		NumLayers: 33, NextNPredictLayers: 1, HasSSM: 1, FullAttnInterval: 4,
+		HeadCountKV: 4, KeyLength: 256, ValueLength: 256,
+	}
+	if got := EmbeddedMTPContextMB(model, 262144, "f16"); got != 1024 {
+		t.Fatalf("embedded MTP context=%d MiB, want 1024", got)
+	}
+	if got := EmbeddedMTPContextMB(model, 262144, "q8_0"); got != 544 {
+		t.Fatalf("quantized embedded MTP context=%d MiB, want 544", got)
+	}
+}
+
+func TestAutoCompanionRequiresSelectedBackendLoader(t *testing.T) {
+	opts := Options{SpecMode: "auto"}
+	if err := validateSpecCandidateBackend("mtp.gguf", opts); err == nil || !strings.Contains(err.Error(), "no-allocation") {
+		t.Fatalf("Auto accepted an unverified companion: %v", err)
+	}
+	opts.SpecMode = "mtp"
+	if err := validateSpecCandidateBackend("mtp.gguf", opts); err != nil {
+		t.Fatalf("explicit testing should remain possible: %v", err)
 	}
 }
 

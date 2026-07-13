@@ -277,6 +277,51 @@ func mergePreflightDevices(groups ...[]preflightDevice) []preflightDevice {
 	return out
 }
 
+func isEmbeddedMainlineMTP(strategy *placement.Strategy) bool {
+	return strategy != nil && strategy.Draft != nil &&
+		strategy.Draft.Type == placement.DraftMTP && strategy.Draft.Path == "" &&
+		strings.EqualFold(strategy.Draft.SpecType, "draft-mtp")
+}
+
+// embeddedMTPPreflightReservation supplies the context+compute rows that the
+// standalone fit-params frontend cannot request. llama-server creates a second
+// LLAMA_CONTEXT_TYPE_MTP against the target model, so weights are already in the
+// target rows but KV and graph buffers are not. The exact MTP layer KV formula is
+// metadata-derived; charging that full amount plus at least one full target graph
+// reserve to every active CUDA device is intentionally conservative near a limit.
+func embeddedMTPPreflightReservation(model *placement.ModelProfile, strategy *placement.Strategy, target []preflightDevice) ([]preflightDevice, error) {
+	if !isEmbeddedMainlineMTP(strategy) || model == nil {
+		return nil, nil
+	}
+	if !strings.EqualFold(strategy.KVPlacement, "gpu") {
+		return nil, fmt.Errorf("embedded MTP Auto requires verified GPU KV placement")
+	}
+	kvType := strategy.Draft.KVTypeDraft
+	if kvType == "" {
+		kvType = "f16" // llama.cpp's draft-context default
+	}
+	contextMB := placement.EmbeddedMTPContextMB(model, strategy.ContextSize, kvType)
+	if contextMB <= 0 {
+		return nil, fmt.Errorf("embedded MTP context cannot be derived from GGUF metadata")
+	}
+	const computeFloorMB = 1024
+	rows := make([]preflightDevice, 0, len(target))
+	for _, d := range target {
+		if _, ok := cudaDeviceIndex(d.Name); !ok {
+			continue
+		}
+		computeMB := d.ComputeMB
+		if computeMB < computeFloorMB {
+			computeMB = computeFloorMB
+		}
+		rows = append(rows, preflightDevice{Name: d.Name, ContextMB: contextMB, ComputeMB: computeMB})
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("embedded MTP has no measured CUDA device rows")
+	}
+	return rows, nil
+}
+
 // preflightWorstDeficit compares the backend's planned per-GPU demand against
 // free VRAM. The only extra terms are measured per-device CUDA context overhead
 // and measured runtime graph growth for the exact runtime signature. Missing
@@ -332,10 +377,18 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 	}
 	fitBin := findFitParamsBin(be.Path)
 	if fitBin == "" {
+		if isEmbeddedMainlineMTP(strategy) {
+			fmt.Fprintln(os.Stderr, "[launch] embedded MTP has no selected-backend memory oracle; disabling speculation")
+			return -1, 0, false, true
+		}
 		return -1, 0, false, false
 	}
 	targetDevs, err := runFitPreflight(fitBin, serverArgs)
 	if err != nil {
+		if isEmbeddedMainlineMTP(strategy) {
+			fmt.Fprintf(os.Stderr, "[launch] embedded MTP target preflight failed; disabling speculation: %v\n", err)
+			return -1, 0, false, true
+		}
 		fmt.Fprintf(os.Stderr, "[launch] preflight skipped: %v\n", err)
 		return -1, 0, false, false
 	}
@@ -349,6 +402,14 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 		} else {
 			devs = mergePreflightDevices(targetDevs, draftDevs)
 		}
+	}
+	if isEmbeddedMainlineMTP(strategy) {
+		reservation, reserveErr := embeddedMTPPreflightReservation(model, strategy, targetDevs)
+		if reserveErr != nil {
+			fmt.Fprintf(os.Stderr, "[launch] embedded MTP memory cannot be proven; disabling speculation: %v\n", reserveErr)
+			return -1, 0, false, true
+		}
+		devs = mergePreflightDevices(devs, reservation)
 	}
 	// Feed the backend's measured context and compute buffers back into placement
 	// BEFORE checking fit, regardless of outcome. A re-plan below
@@ -370,6 +431,13 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
 	}
 	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
+	if isEmbeddedMainlineMTP(strategy) && deficit > 0 {
+		_, targetDeficit, _ := preflightWorstDeficit(targetDevs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
+		if targetDeficit == 0 {
+			fmt.Fprintf(os.Stderr, "[launch] embedded MTP reservation does not fit (%s); disabling speculation and keeping the proven target placement\n", summary)
+			return -1, 0, false, true
+		}
+	}
 	if deficit > 0 {
 		fmt.Fprintf(os.Stderr, "[launch] preflight: placement does not fit (%s) - re-planning before load\n", summary)
 		if model != nil && model.IsMoE && strategy != nil {
