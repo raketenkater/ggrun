@@ -127,6 +127,12 @@ model calls cannot leave for `api.anthropic.com`.
   mode (`--presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 40
   --top-p 0.95 --min-p 0.05`) — quantized thinking models loop endlessly without them.
   Pass any of these flags yourself (after `--`) and your value wins.
+- **Compaction reuses moved prompt chunks.** When the backend supports it, Claude mode
+  enables `--cache-reuse 256`. This complements ordinary common-prefix caching by
+  shifting repeated system, tool and workflow chunks after old results are removed.
+  A controlled production-cache test reduced a compacted 4,506-token prefill from
+  45.1 seconds to one processed token in 0.15 seconds. Pass `--cache-reuse 0` or
+  `--no-cache-prompt` explicitly to opt out.
 - **Web research:** the built-in WebSearch runs on Anthropic's servers and is hidden
   on a non-first-party endpoint, so ggrun disables it and auto-wires a no-key
   DuckDuckGo MCP when `uvx` is installed. Its `search` and `fetch_content` tools
@@ -140,7 +146,8 @@ model calls cannot leave for `api.anthropic.com`.
   locally; all other traffic stays on the selected coding model. The reviewer starts
   before placement, so its measured VRAM use is included when ggrun places the main
   model. This is Auto, not `bypassPermissions`. The first launch downloads and verifies
-  the pinned ~1.3 GiB GGUF and serves it with one independent 64k slot. GPU visibility
+  the pinned ~1.3 GiB Q4_K_M GGUF and serves it with one independent 64k slot and Q8
+  KV cache. GPU visibility
   is isolated to its selected physical device; if it does not fit any selected GPU,
   ggrun falls back to CPU. Override it with `GGRUN_CLAUDE_REVIEWER_MODEL=/path/model.gguf`,
   choose another permission mode with `GGRUN_CLAUDE_PERMISSION_MODE=acceptEdits`, or

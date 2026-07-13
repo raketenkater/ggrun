@@ -918,6 +918,30 @@ func TestClaudeCodeAliasArgs(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeCacheArgs(t *testing.T) {
+	base := []string{"llama-server", "-m", "model.gguf"}
+	got := claudeCodeCacheArgs(base, true, "--cache-prompt --cache-reuse N")
+	if !hasArgValue(got, "--cache-reuse", "256") {
+		t.Fatalf("expected Claude cache reuse default, got %v", got)
+	}
+	if got := claudeCodeCacheArgs(base, false, "--cache-reuse N"); len(got) != len(base) {
+		t.Fatalf("expected no cache change outside Claude mode, got %v", got)
+	}
+	if got := claudeCodeCacheArgs(base, true, "--cache-prompt"); len(got) != len(base) {
+		t.Fatalf("expected unsupported backend to remain unchanged, got %v", got)
+	}
+	for _, user := range [][]string{
+		{"llama-server", "--cache-reuse", "0"},
+		{"llama-server", "--cache-reuse=0"},
+		{"llama-server", "--no-cache-prompt"},
+	} {
+		got := claudeCodeCacheArgs(user, true, "--cache-reuse N")
+		if len(got) != len(user) {
+			t.Fatalf("expected user cache override preserved, input %v got %v", user, got)
+		}
+	}
+}
+
 func argIndexOf(args []string, want string) int {
 	for i, a := range args {
 		if a == want {

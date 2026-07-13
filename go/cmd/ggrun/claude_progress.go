@@ -28,7 +28,11 @@ const (
 	// A timed-out /slots request is itself queued in llama-server's scheduler. Do
 	// not immediately submit another one while a long prefill owns the scheduler;
 	// passive log progress remains available during this backoff.
-	claudeProgressBusyBackoff = 30 * time.Second
+	// A CPU-offloaded MoE can spend minutes inside one prefill. Scheduler-backed
+	// slots and metrics requests time out during that period and add cancellation
+	// noise. Passive log progress remains current, so retry structured telemetry
+	// sparingly until the scheduler becomes responsive again.
+	claudeProgressBusyBackoff = 2 * time.Minute
 )
 
 type claudeProgressLog interface {

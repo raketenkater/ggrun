@@ -31,10 +31,11 @@ const (
 	// not leave the main coding model.
 	ClassifierMarker = "You are a security monitor for autonomous AI coding agents."
 
-	DefaultReviewerFile = "Qwen_Qwen3.5-2B-Q4_K_M.gguf"
-	DefaultReviewerSize = int64(1396198496)
-	DefaultReviewerSHA  = "57a1085840f497d764a7fc5d346922dbde961efb54cc792ea81d694fd846a1d8"
-	DefaultReviewerURL  = "https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF/resolve/7d26695454df6de5fbcce2e58681e62dae06ce43/" + DefaultReviewerFile
+	DefaultReviewerDisplayName = "Qwen3.5-2B"
+	DefaultReviewerFile        = "Qwen_Qwen3.5-2B-Q4_K_M.gguf"
+	DefaultReviewerSize        = int64(1396198496)
+	DefaultReviewerSHA         = "57a1085840f497d764a7fc5d346922dbde961efb54cc792ea81d694fd846a1d8"
+	DefaultReviewerURL         = "https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF/resolve/7d26695454df6de5fbcce2e58681e62dae06ce43/" + DefaultReviewerFile
 
 	maxRoutedRequestBytes = 16 << 20
 )

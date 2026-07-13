@@ -34,10 +34,33 @@ func TestClaudeReviewerGPUCandidatesKeepSparsePhysicalSelection(t *testing.T) {
 }
 
 func TestClaudeReviewerArgsUsesIsolatedDeviceAsLocalMain(t *testing.T) {
-	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, 0, "--reasoning ARG")
-	for _, want := range []string{"--device", "CUDA0", "-mg", "0", "--reasoning", "off", "--ctx-size", "65536"} {
+	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, 0, "--reasoning ARG --cache-type-k TYPE --cache-type-v TYPE")
+	for _, want := range []string{"--device", "CUDA0", "-mg", "0", "--reasoning", "off", "--ctx-size", "65536", "--cache-type-k", "q8_0", "--cache-type-v"} {
 		if !hasArg(args, want) {
 			t.Fatalf("missing %q in %v", want, args)
+		}
+	}
+	for _, flag := range []string{"--cache-type-k", "--cache-type-v"} {
+		if !hasArgValue(args, flag, "q8_0") {
+			t.Fatalf("expected %s q8_0 in %v", flag, args)
+		}
+	}
+}
+
+func TestClaudeReviewerArgsKeepsOlderBackendCompatibility(t *testing.T) {
+	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, -1, "--reasoning ARG")
+	for _, unsupported := range []string{"--cache-type-k", "--cache-type-v"} {
+		if hasArg(args, unsupported) {
+			t.Fatalf("unexpected unsupported %q in %v", unsupported, args)
+		}
+	}
+}
+
+func TestClaudeReviewerCPUFallbackHidesAccelerators(t *testing.T) {
+	got := claudeReviewerCPUEnv()
+	for _, want := range []string{"CUDA_VISIBLE_DEVICES=-1", "HIP_VISIBLE_DEVICES=-1", "ROCR_VISIBLE_DEVICES=-1"} {
+		if !hasArg(got, want) {
+			t.Fatalf("missing %q in %v", want, got)
 		}
 	}
 }

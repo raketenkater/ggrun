@@ -928,6 +928,7 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
+	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	return serverArgs
 }
@@ -2230,6 +2231,7 @@ func cmdDryRun(args []string) {
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
+	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	if envPrefix := applyGPUVisibility(req, backendDialect(be)); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
@@ -2586,6 +2588,30 @@ func claudeCodeAliasArgs(args []string, claudeCode bool) []string {
 		return args
 	}
 	return append(args, "--alias", "local")
+}
+
+// claudeCodeCacheArgs enables chunk-level KV reuse for repeated system, tool,
+// and workflow blocks that move after new conversation content is inserted.
+// Ordinary prompt caching only reuses a common prefix; cache-reuse can shift a
+// later matching chunk into its new position. The value 256 is the conservative
+// llama.cpp coding preset. Users can disable it explicitly, and older backends
+// remain compatible because support is checked before adding the flag.
+func claudeCodeCacheArgs(args []string, claudeCode bool, backendHelp string) []string {
+	if !claudeCode || !strings.Contains(backendHelp, "--cache-reuse") {
+		return args
+	}
+	hasFlag := func(flag string) bool {
+		for _, arg := range args {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") {
+				return true
+			}
+		}
+		return false
+	}
+	if hasFlag("--cache-reuse") || hasFlag("--no-cache-prompt") {
+		return args
+	}
+	return append(args, "--cache-reuse", "256")
 }
 
 // runClaudeCodeClient launches Claude Code in the foreground wired to the local

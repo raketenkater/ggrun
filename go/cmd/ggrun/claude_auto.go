@@ -64,7 +64,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 	}
 	be := findClaudeReviewerBackend(caps)
 	if be == nil {
-		return nil, fmt.Errorf("local Auto needs a current mainline llama-server (Qwen3.5 support); none was found")
+		return nil, fmt.Errorf("local Auto needs a current mainline llama-server; none was found")
 	}
 	port, err := freeLoopbackPort()
 	if err != nil {
@@ -83,7 +83,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 		env := []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)}
 		p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, env)
 		if err == nil {
-			fmt.Printf("[claude-code] Auto reviewer ready on GPU %d (PID %d, Qwen3.5-2B, ctx 64k)\n", gpu, p.Cmd.Process.Pid)
+			fmt.Printf("[claude-code] Auto reviewer ready on GPU %d (PID %d, %s, ctx 64k)\n", gpu, p.Cmd.Process.Pid, claudeauto.DefaultReviewerDisplayName)
 			return &claudeAutoRuntime{reviewer: p, reviewerLog: logCloser, reviewerPort: port, reviewerGPU: gpu}, nil
 		}
 		lastErr = err
@@ -93,7 +93,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 	// CPU is slower, but it preserves autonomous/fail-closed behavior on systems
 	// whose GPUs are already full. It is also the normal path on CPU-only hosts.
 	args := claudeReviewerArgs(be.Path, modelPath, port, -1, be.Help)
-	p, err := server.StartWithTimeoutTo(args, port, 5*time.Minute, logWriter, logWriter)
+	p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, claudeReviewerCPUEnv())
 	if err != nil {
 		if logCloser != nil {
 			_ = logCloser.Close()
@@ -103,7 +103,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 		}
 		return nil, fmt.Errorf("start local Auto reviewer: %w", err)
 	}
-	fmt.Printf("[claude-code] Auto reviewer ready on CPU (PID %d, Qwen3.5-2B, ctx 64k)\n", p.Cmd.Process.Pid)
+	fmt.Printf("[claude-code] Auto reviewer ready on CPU (PID %d, %s, ctx 64k)\n", p.Cmd.Process.Pid, claudeauto.DefaultReviewerDisplayName)
 	return &claudeAutoRuntime{reviewer: p, reviewerLog: logCloser, reviewerPort: port, reviewerGPU: -1}, nil
 }
 
@@ -118,6 +118,13 @@ func claudeReviewerArgs(binary, modelPath string, port, gpu int, help string) []
 	if strings.Contains(help, "--reasoning") {
 		args = append(args, "--reasoning", "off")
 	}
+	// The classifier carries a large policy prompt, so its KV cache is a
+	// meaningful part of the reviewer footprint. Q8 halves that cache versus
+	// F16 while retaining substantially more precision than Q4. Keep the
+	// compatibility guard for older user-provided llama-server binaries.
+	if strings.Contains(help, "--cache-type-k") && strings.Contains(help, "--cache-type-v") {
+		args = append(args, "--cache-type-k", "q8_0", "--cache-type-v", "q8_0")
+	}
 	if gpu >= 0 {
 		// --device exposes one device to this model, renumbered locally to 0.
 		args = append(args, "--device", fmt.Sprintf("CUDA%d", gpu), "--split-mode", "none", "-ngl", "999", "-mg", "0", "--fit", "off")
@@ -125,6 +132,17 @@ func claudeReviewerArgs(binary, modelPath string, port, gpu int, help string) []
 		args = append(args, "-ngl", "0")
 	}
 	return args
+}
+
+func claudeReviewerCPUEnv() []string {
+	// GPU-enabled llama-server binaries initialize their accelerator backend even
+	// with -ngl 0. Hide accelerators so a CPU fallback still starts when every
+	// device is full, which is precisely when this path is needed.
+	return []string{
+		"CUDA_VISIBLE_DEVICES=-1",
+		"HIP_VISIBLE_DEVICES=-1",
+		"ROCR_VISIBLE_DEVICES=-1",
+	}
 }
 
 func findClaudeReviewerBackend(caps *detect.Capabilities) *backendInfo {

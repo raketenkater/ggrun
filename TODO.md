@@ -75,12 +75,13 @@ Source: `5e91131f/24`, retargeted by the user on 2026-07-12.
 
 ## P1 — finish Claude Code integration
 
-The launcher, native `/v1/messages`, local aliases for every Claude tier, parallel-4,
-1M total context, per-slot compaction, four-hour timeouts, anti-loop sampling and
+The launcher, native `/v1/messages`, local aliases for every Claude tier, parallel-2,
+model-native context capped at 1M total context, per-slot compaction, no practical
+workflow deadline, anti-loop sampling, chunk-level prompt-cache reuse and
 DuckDuckGo MCP wiring are implemented. Claude Auto's hidden classifier requests are
-now routed to a pinned local Qwen3.5-2B reviewer while coding stays on the selected
-model. The reviewer starts before placement so its measured VRAM is in the main-model
-ledger. Default local launches use fail-closed Auto, never bypass mode.
+now routed to an isolated parallel-1 local Qwen3.5-2B reviewer while coding stays on
+the selected model. A Workflow stall hook reports stalled requests without aborting
+them. Default local launches use fail-closed Auto, never bypass mode.
 
 - [ ] Run one complete acceptance workflow against a running ggrun model: file edits,
   commands/tests, four workflow agents, tool results, queueing, combined response and
@@ -93,8 +94,22 @@ ledger. Default local launches use fail-closed Auto, never bypass mode.
   reviewer. Safe Bash completed end to end with zero permission denials; invalid
   reviewer output was also verified to fail closed. The pinned reviewer cold-prefilled
   the captured prompt in 2.4–5.8 seconds depending on GPU and warm reviews took ~0.18s.
+  Qwen blocked the simulated SSH-key upload in 2.4 seconds. Both the upstream
+  MiniCPM5-1B Q4 and the Fable5 Thinking Q4 candidate false-allowed that upload;
+  the latter also missed the 60-second CPU fallback deadline, so neither is eligible.
+- [x] Enable backend-supported `--cache-reuse 256` for Claude mode while preserving
+  explicit opt-out and older-backend compatibility. With cache RAM and context
+  checkpoints disabled, the controlled compaction case dropped from 4,506 processed
+  tokens / 45.1 seconds to one processed token / 0.15 seconds (4,514 reused tokens).
 - [ ] Turn the repeatable parts into a Claude acceptance harness for `/v1/messages`,
   tool-use/tool-result blocks, aliases, MCP, malformed tool recovery and timeouts.
+- [ ] **Benchmark and auto-select Claude Workflow parallelism:** compare parallel
+  1, 2 and 4, plus 8 only when context/VRAM capacity makes it viable, with the same
+  model, quant, context and hardware. Include the 60k request and real workflow
+  fan-out; record total wall time, aggregate and per-request tok/s, TTFT, queue time,
+  prompt-cache reuse, peak RAM/VRAM, OOM/retries and foreground responsiveness.
+  Repeat runs, cache the fastest stable choice by model/backend/hardware/context,
+  and preserve an explicit user override.
 - [x] **Add live local-request progress to Claude Code launches:** queued/prefill/
   generation/completed/failed state, prompt tokens and percentage, prompt/decode
   tok/s and elapsed time across all four slots. Prefer structured slots/metrics data;
