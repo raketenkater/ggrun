@@ -95,12 +95,11 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local 
 export API_TIMEOUT_MS=14400000             # let queued fan-out/subagent requests finish, not cancel
 export API_FORCE_IDLE_TIMEOUT=0            # local PP can exceed Claude Code's stream-idle watchdog
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90  # compact early to fit the real per-slot window (ggrun computes this)
-claude --disallowedTools WebSearch
+claude --permission-mode acceptEdits --disallowedTools WebSearch
 ```
 
-All five tiers point at `local` on purpose: Claude Code routes background work and
-the command-safety (auto-permission) classifier through the haiku/sonnet/opus
-aliases, so without the overrides those calls leave for `api.anthropic.com` and fail.
+All five inference tiers point at `local` on purpose, so foreground and background
+model calls cannot leave for `api.anthropic.com`.
 
 - **Thinking is on** — a normal launch never passes `--reasoning off` (benchmark-only).
 - **Context fits the slot.** `--parallel` splits `--ctx-size` across sequence slots,
@@ -126,6 +125,15 @@ aliases, so without the overrides those calls leave for `api.anthropic.com` and 
   permission prompt — `--claude-code` does this for you. Prefer another provider? Add it with
   `claude mcp add …` (it runs alongside `ddg-search`), or launch `claude` yourself
   from the printed recipe and drop/replace the `--mcp-config` line.
+- **Permissions remain available locally.** Claude Code Auto mode relies on a separate
+  supported Anthropic safety-classifier path. With a custom local API endpoint, a
+  classifier outage rejects Workflow, MCP, WebFetch, and Bash calls before they run.
+  ggrun therefore starts local sessions in `acceptEdits`: edits and common local file
+  operations proceed, consequential shell calls still ask, and the two exact research
+  MCP tools above are pre-approved. This is not `bypassPermissions`. Set
+  `GGRUN_CLAUDE_PERMISSION_MODE=auto` to test Auto anyway, or `inherit` to preserve
+  your global Claude setting. See Claude Code's
+  [permission-mode requirements](https://code.claude.com/docs/en/permission-modes#eliminate-prompts-with-auto-mode).
 - **Live local progress:** while a local request is queued, ingesting its prompt, or
   generating, ggrun adds a session-only Claude status line with the active slot,
   prompt progress bar, token counts, tok/s, active requests, and queue depth. It uses

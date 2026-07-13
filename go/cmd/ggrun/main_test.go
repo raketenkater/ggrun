@@ -787,6 +787,35 @@ func TestClaudeCodeSearchMCPArgsEnablesResearchTools(t *testing.T) {
 	}
 }
 
+func TestClaudeCodePermissionArgsDefaultsToSupportedLocalMode(t *testing.T) {
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
+	got := claudeCodePermissionArgs(nil)
+	if len(got) != 2 || got[0] != "--permission-mode" || got[1] != "acceptEdits" {
+		t.Fatalf("local Claude launch must avoid unsupported Auto default, got %v", got)
+	}
+}
+
+func TestClaudeCodePermissionArgsRespectsOverrides(t *testing.T) {
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "auto")
+	if got := claudeCodePermissionArgs(nil); len(got) != 2 || got[1] != "auto" {
+		t.Fatalf("environment override not respected: %v", got)
+	}
+	if got := claudeCodePermissionArgs([]string{"--permission-mode", "plan"}); got != nil {
+		t.Fatalf("explicit CLI mode must win, got %v", got)
+	}
+	if got := claudeCodePermissionArgs([]string{"--permission-mode=manual"}); got != nil {
+		t.Fatalf("explicit equals-form CLI mode must win, got %v", got)
+	}
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "inherit")
+	if got := claudeCodePermissionArgs(nil); got != nil {
+		t.Fatalf("inherit must preserve settings.json mode, got %v", got)
+	}
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "not-a-mode")
+	if got := claudeCodePermissionArgs(nil); len(got) != 2 || got[1] != "acceptEdits" {
+		t.Fatalf("invalid override must fail safe to acceptEdits, got %v", got)
+	}
+}
+
 func TestClaudeCodeAliasArgs(t *testing.T) {
 	base := []string{"-m", "model.gguf", "--port", "8081"}
 	// claude-code mode appends --alias local so /v1/models advertises "local"

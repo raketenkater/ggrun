@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Local Claude Code research no longer dies with `local is temporarily unavailable`.**
+  Claude's Auto permission mode depends on a separate supported classifier path and can
+  reject Workflow, MCP, WebFetch, and Bash calls before execution on a custom local
+  endpoint. ggrun now launches local sessions in non-bypass `acceptEdits` mode, keeps
+  the exact DuckDuckGo search/fetch tools pre-approved, and supports an explicit
+  `GGRUN_CLAUDE_PERMISSION_MODE=auto|inherit` override.
 - **Claude Code shows live local inference progress.** `--claude-code` now adds a
   session-only status line showing queued requests, the active slot, prompt progress,
   token counts, prompt/generation tok/s, and parallel activity. It reads llama-server's

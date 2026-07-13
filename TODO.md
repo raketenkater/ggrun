@@ -32,19 +32,21 @@ Source: `5e91131f/24`, retargeted by the user on 2026-07-12.
 
 The launcher, native `/v1/messages`, local aliases for every Claude tier, parallel-4,
 1M total context, per-slot compaction, four-hour timeouts, anti-loop sampling and
-DuckDuckGo MCP wiring are implemented. Claude's Auto classifier is also selecting the
-`local` alias rather than a cloud model; old transcripts show `local is temporarily
-unavailable` when the ggrun server is absent.
+DuckDuckGo MCP wiring are implemented. Live acceptance established that Claude Auto's
+separate classifier is not a supported/reliable custom-endpoint path: once it reports
+`local is temporarily unavailable`, it rejects Workflow, MCP, WebFetch and Bash before
+execution. Local launches now use the non-bypass `acceptEdits` mode by default, with an
+explicit Auto/inherit override and exact research-tool pre-approval.
 
 - [ ] Run one complete acceptance workflow against a running ggrun model: file edits,
   commands/tests, four workflow agents, tool results, queueing, combined response and
   context compaction.
 - [ ] In that workflow, verify MCP `search` plus `fetch_content`, including a failed
   lookup/retry from a subagent.
-- [ ] Verify Auto permission mode while the local model is healthy: safe action,
-  blocked action and classifier failure behavior. If a remaining proprietary Claude
-  reviewer call cannot use a custom endpoint, document the exact upstream boundary;
-  do not bypass the permission system.
+- [x] Verify Auto permission behavior and document the upstream boundary. A controlled
+  Claude 2.1.207 run proved the exact DuckDuckGo allowlist works while the classifier is
+  healthy; the latest real session proved classifier failure globally blocks unmatched
+  tools. ggrun now selects `acceptEdits`, never bypass mode, for local launches.
 - [ ] Turn the repeatable parts into a Claude acceptance harness for `/v1/messages`,
   tool-use/tool-result blocks, aliases, MCP, malformed tool recovery and timeouts.
 - [x] **Add live local-request progress to Claude Code launches:** queued/prefill/

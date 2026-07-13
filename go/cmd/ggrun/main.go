@@ -1961,8 +1961,8 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 		}
 		slot = fmt.Sprintf(" (~%dk per slot at --parallel %d)", ctx/par/1000, par)
 	}
-	// Every tier maps to local so background work and the command-safety
-	// classifier hit the local server too, not api.anthropic.com.
+	// Every inference tier maps to local so foreground and background model work
+	// stays on this server rather than leaking to api.anthropic.com.
 	fmt.Println()
 	fmt.Println("[claude-code] In another terminal:")
 	// Match claudeCodeEnv: drop any real key so the dummy token + local base URL win,
@@ -1975,6 +1975,7 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Println("  export API_FORCE_IDLE_TIMEOUT=0  # local models can spend >5 min prompt-processing before streaming")
 	fmt.Printf("  export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", pct, slot)
 	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
+	claudeArgs = append(claudeCodePermissionArgs(claudeArgs), claudeArgs...)
 	claudeArgs = append(claudeArgs, "--disallowedTools", "WebSearch")
 	if _, err := exec.LookPath("uvx"); err == nil {
 		claudeArgs = append(claudeArgs,
@@ -1988,9 +1989,9 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 }
 
 // claudeCodeEnv returns the child environment that points Claude Code at the
-// locally-served model. Every model tier maps to "local" so background work and
-// the command-safety classifier hit the local server too; ANTHROPIC_API_KEY is
-// dropped so the dummy auth token + base URL take effect.
+// locally-served model. Every inference tier maps to "local" so background work
+// stays on the local server; ANTHROPIC_API_KEY is dropped so the dummy auth token
+// + base URL take effect.
 func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 	clientHost := host
 	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
@@ -2037,6 +2038,52 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// claudeCodePermissionArgs keeps a local Claude Code launch off Auto mode unless
+// the user explicitly opts back in. Auto uses a separate safety-classifier model;
+// with a custom ANTHROPIC_BASE_URL that reviewer is not a supported/reliable local
+// path. A classifier failure rejects otherwise valid Workflow, MCP, WebFetch and
+// Bash calls before they execute. acceptEdits retains Claude Code's permission
+// system (shell and other consequential calls still ask) while exact --allowedTools
+// rules such as ggrun's two research tools continue to run without a prompt.
+//
+// GGRUN_CLAUDE_PERMISSION_MODE can select another current Claude CLI mode. Set it
+// to "inherit" to preserve the user's settings.json default. An explicit
+// --permission-mode in extraArgs always wins.
+func claudeCodePermissionArgs(extraArgs []string) []string {
+	for _, arg := range extraArgs {
+		if arg == "--permission-mode" || strings.HasPrefix(arg, "--permission-mode=") {
+			return nil
+		}
+	}
+	mode := strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_PERMISSION_MODE"))
+	if mode == "" {
+		mode = "acceptEdits"
+	}
+	if strings.EqualFold(mode, "inherit") {
+		return nil
+	}
+	// Keep invalid environment values from making Claude fail at startup. These
+	// choices match the current CLI; "default" is the docs/settings spelling of
+	// the CLI's "manual" mode.
+	switch strings.ToLower(mode) {
+	case "acceptedits":
+		mode = "acceptEdits"
+	case "auto":
+		mode = "auto"
+	case "bypasspermissions":
+		mode = "bypassPermissions"
+	case "manual", "default":
+		mode = "manual"
+	case "dontask":
+		mode = "dontAsk"
+	case "plan":
+		mode = "plan"
+	default:
+		mode = "acceptEdits"
+	}
+	return []string{"--permission-mode", mode}
 }
 
 // argIntValue returns the integer value following the LAST parseable occurrence of
@@ -2249,6 +2296,12 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string) 
 	}
 	fmt.Printf("[claude-code] Claude Code → http://%s:%d\n", clientHost, port)
 	args := extraArgs
+	if permissionArgs := claudeCodePermissionArgs(extraArgs); permissionArgs != nil {
+		args = append(permissionArgs, args...)
+		if len(permissionArgs) == 2 && permissionArgs[1] == "acceptEdits" {
+			fmt.Println("[claude-code] Permission mode: acceptEdits (local Auto classifier is not reliable; shell actions still ask).")
+		}
+	}
 	// Built-in WebSearch is an Anthropic server-side tool; on a local endpoint it
 	// can't run, and the model loops on it while the auto-permission classifier
 	// fails. Disable it and wire a no-key DuckDuckGo MCP in its place so agents and
