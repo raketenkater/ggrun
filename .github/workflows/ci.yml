@@ -348,3 +348,31 @@ jobs:
           kill -TERM "$server_pid"
           wait "$server_pid" || true
           trap - EXIT
+
+  windows-release-install:
+    # Exercises the REAL install path (download from the published GitHub
+    # release, verify SHA256SUMS, extract, configure, launch the bundled
+    # backend) on a clean Windows runner. The package-windows-smoke job only
+    # tests a locally-built zip, so this is the only job that catches general
+    # breakage in the remote download / backend-launch flow (e.g. issue #18).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse-check install.ps1 (pwsh 7 + Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $errs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$errs)
+          if ($errs.Count) { Write-Error "install.ps1 fails to parse under pwsh 7: $($errs[0].Message)"; exit 1 }
+          # The documented install command is `powershell` (5.1); guard against
+          # regressions that only surface under Windows PowerShell 5.1.
+          powershell -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1",[ref]$null,[ref]$e); if($e.Count){Write-Error ("5.1 parse error at line "+$e[0].Extent.StartLineNumber+": "+$e[0].Message); exit 1}'
+      - name: Install ggrun from published release (documented powershell 5.1 command)
+        shell: cmd
+        run: powershell -ExecutionPolicy Bypass -File install.ps1 -Backend cpu -NoPath -AssumeYes
+      - name: Smoke test installed ggrun
+        shell: pwsh
+        run: |
+          $env:LLM_APP_HOME = "$env:USERPROFILE\ggrun"
+          & "$env:USERPROFILE\ggrun\.bin\ggrun.exe" version
+          & "$env:USERPROFILE\ggrun\.bin\llama-server.exe" --version

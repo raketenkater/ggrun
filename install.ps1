@@ -112,19 +112,21 @@ function Save-ReleaseAsset([string]$Name, [bool]$Required) {
     $sums = Join-Path $tmp 'SHA256SUMS'
     $allowUnverified = ($env:LLM_INSTALL_ALLOW_UNVERIFIED -eq '1')
     if (Test-Path $sums) {
-        $line = Get-Content $sums | Where-Object { $_ -match "\s$([regex]::Escape($Name))$" } | Select-Object -First 1
+        $escapedName = [regex]::Escape($Name)
+        $pattern = '\s' + $escapedName + '$'
+        $line = Get-Content $sums | Where-Object { $_ -match $pattern } | Select-Object -First 1
         if ($line) {
             $expected = ($line -split '\s+')[0].ToLowerInvariant()
             $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
             if ($actual -ne $expected) { Fail "Checksum mismatch for $Name" }
             Ok "Verified checksum for $Name"
         } elseif ($allowUnverified) {
-            Warn "SHA256SUMS did not include $Name; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — continuing"
+            Warn "SHA256SUMS did not include $Name; LLM_INSTALL_ALLOW_UNVERIFIED=1 set - continuing"
         } else {
             Fail "SHA256SUMS did not include $Name; refusing to install unverified. Set LLM_INSTALL_ALLOW_UNVERIFIED=1 to override."
         }
     } elseif ($allowUnverified) {
-        Warn "No SHA256SUMS found; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — installing UNVERIFIED bundle"
+        Warn "No SHA256SUMS found; LLM_INSTALL_ALLOW_UNVERIFIED=1 set - installing UNVERIFIED bundle"
     } else {
         Fail "No SHA256SUMS found; refusing to install an unverified bundle. Set LLM_INSTALL_ALLOW_UNVERIFIED=1 to override."
     }
@@ -221,7 +223,7 @@ function Build-CudaBackend {
 
 function Install-PrebuiltCudaBackend([string]$BinDir) {
     # Fetch upstream prebuilt llama.cpp CUDA binaries (server + cudart) so a GPU
-    # backend works with no CUDA Toolkit / MSVC / CMake — the from-source build
+    # backend works with no CUDA Toolkit / MSVC / CMake - the from-source build
     # (Build-CudaBackend) stays as a fallback.
     Say 'Fetching prebuilt llama.cpp CUDA backend from ggml-org/llama.cpp releases...'
     try {
@@ -237,7 +239,9 @@ function Install-PrebuiltCudaBackend([string]$BinDir) {
     if (-not $server) { Warn 'No prebuilt win-cuda asset in the latest llama.cpp release.'; return $false }
     # Match the cudart redistributable to the server asset's CUDA version.
     $cudaVer = if ($server.name -match 'cuda-([0-9.]+)-x64') { $Matches[1] } else { '' }
-    $cudart = $assets | Where-Object { $_.name -match "cudart-.*win-cuda-$([regex]::Escape($cudaVer))-x64\.zip$" } | Select-Object -First 1
+        $escapedCuda = [regex]::Escape($cudaVer)
+        $pattern = 'cudart-.*win-cuda-' + $escapedCuda + '-x64\.zip$'
+        $cudart = $assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
     if (-not $cudart) { $cudart = $assets | Where-Object { $_.name -match 'cudart-.*win-cuda-.*-x64\.zip$' } | Select-Object -First 1 }
     try {
         foreach ($a in @($server, $cudart)) {
@@ -257,6 +261,132 @@ function Install-PrebuiltCudaBackend([string]$BinDir) {
     }
     Ok "Installed prebuilt CUDA backend (llama.cpp $($rel.tag_name), CUDA $cudaVer)"
     return $true
+}
+
+# --- Windows dependency provisioning (issue #18) -------------------------
+# On a clean Windows machine the bundled llama-server.exe often fails to start
+# because the Visual C++ runtime or OpenSSL 3.x DLLs are missing. These helpers
+# detect and, where possible, auto-provision those dependencies so the install
+# does not silently break. They are written to stay compatible with the
+# default Windows PowerShell 5.1 (`powershell`) that the documented install
+# command uses.
+
+function Find-SystemDll([string]$Name) {
+    # Search common locations for a DLL and return the first full path found.
+    $roots = @(
+        (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin'),
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\OneDrive'),
+        $env:SystemRoot
+    )
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py) { $roots += (Split-Path $py.Path) }
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) { $roots += (Split-Path $git.Path) }
+    foreach ($root in $roots) {
+        if (!$root -or !(Test-Path $root)) { continue }
+        $direct = Join-Path $root $Name
+        if (Test-Path $direct) { return $direct }
+        $binDir = Join-Path $root 'bin'
+        if (Test-Path $binDir) {
+            $inBin = Join-Path $binDir $Name
+            if (Test-Path $inBin) { return $inBin }
+        }
+    }
+    return ''
+}
+
+function Test-VCppRedist {
+    # True when the Visual C++ 2015-2022 x64 runtime is installed.
+    $keys = @(
+        'HKLM:\Software\Microsoft\VisualStudio\14.0\VC\Runtimes\x64',
+        'HKLM:\Software\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
+    )
+    foreach ($key in $keys) {
+        try {
+            $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+            if ($props -and $props.Installed -eq 1) { return $true }
+        } catch { }
+    }
+    return $false
+}
+
+function Ensure-VCppRuntime {
+    # Ensure the Visual C++ 2015-2022 x64 runtime is present. Returns $true if
+    # it is already installed or was installed successfully.
+    if (Test-VCppRedist) {
+        Ok 'Visual C++ runtime already present'
+        return $true
+    }
+    Say 'Visual C++ 2015-2022 runtime is missing; downloading the official redistributable...'
+    $url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
+    $dest = Join-Path $tmp 'vc_redist.x64.exe'
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $dest -ErrorAction Stop
+    } catch {
+        Warn "Could not download the Visual C++ redistributable: $($_.Exception.Message)"
+        return $false
+    }
+    Say 'Installing Visual C++ runtime (requires administrator privileges)...'
+    $proc = Start-Process -FilePath $dest -ArgumentList @('/install', '/quiet', '/norestart') -Wait -PassThru
+    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+        Ok 'Visual C++ runtime installed'
+        return $true
+    }
+    Warn "Visual C++ redistributable installer exited with code $($proc.ExitCode). Run $url manually as administrator."
+    return $false
+}
+
+function Ensure-OpenSSL {
+    # Locate OpenSSL 3.x DLLs and copy them next to llama-server.exe. Falls back
+    # to GGGRUN_OPENSSL_ZIP_URL when set. Returns $true if all DLLs are present.
+    $dlls = @('libcrypto-3-x64.dll', 'libssl-3-x64.dll')
+    $allFound = $true
+    foreach ($dll in $dlls) {
+        $existing = Join-Path $bin $dll
+        if (Test-Path $existing) { continue }
+        $src = Find-SystemDll $dll
+        if ($src) {
+            Copy-Item $src $bin -Force
+            Ok "Bundled OpenSSL DLL: $dll (from $src)"
+        } else {
+            $allFound = $false
+        }
+    }
+    if ($allFound) { return $true }
+    if ($env:GGGRUN_OPENSSL_ZIP_URL) {
+        Say 'Downloading OpenSSL DLL bundle from GGGRUN_OPENSSL_ZIP_URL...'
+        $zip = Join-Path $tmp 'openssl.zip'
+        try {
+            Invoke-WebRequest -Uri $env:GGGRUN_OPENSSL_ZIP_URL -OutFile $zip -ErrorAction Stop
+            $out = Join-Path $tmp 'openssl'
+            Expand-Archive -Path $zip -DestinationPath $out -Force
+            foreach ($dll in $dlls) {
+                $hit = Get-ChildItem -Path $out -Filter $dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($hit) {
+                    Copy-Item $hit.FullName $bin -Force
+                    Ok "Bundled OpenSSL DLL: $dll"
+                }
+            }
+            return $true
+        } catch {
+            Warn "Could not fetch OpenSSL bundle: $($_.Exception.Message)"
+        }
+    }
+    Warn 'OpenSSL 3.x DLLs (libcrypto-3-x64.dll, libssl-3-x64.dll) were not found on this system.'
+    Warn 'Install OpenSSL 3.x for Windows (Win64 edition) from https://slproweb.com/products/Win32OpenSSL.html and re-run this installer.'
+    return $false
+}
+
+function Find-MissingBackendDll([string]$Server) {
+    # Best-effort: run the backend and collect any reported missing .dll names.
+    $output = & $Server --version 2>&1
+    $missing = @()
+    foreach ($line in $output) {
+        if ($line -match '([\w\-]+\.dll)') { $missing += $Matches[1] }
+    }
+    return $missing
 }
 
 function Resolve-Python {
@@ -338,9 +468,13 @@ function Collect-Diagnostics([string]$ErrorMessage) {
     $L = [System.Collections.Generic.List[string]]::new()
     $L.Add('### Environment')
     $L.Add("- installer: install.ps1 ($Repo)")
-    $L.Add("- date: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))")
-    $L.Add("- os: $([System.Environment]::OSVersion.VersionString) ($([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture))")
-    $L.Add("- powershell: $($PSVersionTable.PSVersion)")
+    $dateStr = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $L.Add("- date: $dateStr")
+    $osVer = [System.Environment]::OSVersion.VersionString
+    $osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    $L.Add("- os: $osVer ($osArch)")
+    $psVer = $PSVersionTable.PSVersion
+    $L.Add("- powershell: $psVer")
     $L.Add("- backend: $Backend | release=$Release")
     $L.Add('')
     $L.Add('### Failure')
@@ -350,8 +484,8 @@ function Collect-Diagnostics([string]$ErrorMessage) {
     $gpu = (& nvidia-smi -L 2>$null) -join '; '
     if (-not $gpu) { try { $gpu = ((Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue).Name) -join '; ' } catch {} }
     $L.Add("- gpu: $gpu")
-    try { $L.Add("- cpu: $((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name)") } catch {}
-    try { $L.Add("- ram: $([math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory/1GB)) GB") } catch {}
+    try { $cpuName = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name; $L.Add("- cpu: $cpuName") } catch {}
+    try { $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory/1GB); $L.Add("- ram: $ramGb GB") } catch {}
     $L.Add('')
     $L.Add('### Tools')
     foreach ($t in 'cmake', 'nvcc', 'git', 'python', 'py', 'go') {
@@ -377,7 +511,9 @@ function Report-InstallFailure($ErrorRecord) {
     if ($reportFile) { Say "  Saved diagnostics: $reportFile" }
     $title = "install failed: $msg"
     $body = "$diag`n`n<!-- Add anything else above. Full report: $reportFile -->"
-    $url = "https://github.com/$Repo/issues/new?labels=install&title=$([uri]::EscapeDataString($title))&body=$([uri]::EscapeDataString($body))"
+    $titleEsc = [uri]::EscapeDataString($title)
+    $bodyEsc = [uri]::EscapeDataString($body)
+    $url = "https://github.com/$Repo/issues/new?labels=install&title=$titleEsc&body=$bodyEsc"
     $ghAuthed = $false
     if (Get-Command gh -ErrorAction SilentlyContinue) { gh auth status 2>$null | Out-Null; $ghAuthed = ($LASTEXITCODE -eq 0) }
     $interactive = (-not $AssumeYes) -and ($env:LLM_INSTALL_NONINTERACTIVE -ne '1')
@@ -472,7 +608,23 @@ try {
         if ($LASTEXITCODE -ne 0) { Fail 'Installed ggrun failed hardware detection' }
         & $llamaServer --version | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Fail 'Installed llama-server could not start. The bundle may be incompatible or a required Visual C++ runtime/DLL may be missing.'
+            # On a clean Windows machine the usual cause is a missing Visual C++
+            # runtime or OpenSSL DLL. Try to provision both, then re-test once.
+            $missing = Find-MissingBackendDll $llamaServer
+            $didProvision = $false
+            if (Ensure-VCppRuntime) { $didProvision = $true }
+            if (Ensure-OpenSSL) { $didProvision = $true }
+            if ($didProvision) {
+                & $llamaServer --version | Out-Null
+            }
+            if ($LASTEXITCODE -ne 0) {
+                $msg = 'Installed llama-server could not start.'
+                if ($missing.Count -gt 0) {
+                    $msg += ' Missing DLL(s): ' + ($missing -join ', ') + '.'
+                }
+                $msg += ' A required Visual C++ runtime or OpenSSL DLL is missing. Install the Visual C++ 2015-2022 Redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe) and OpenSSL 3.x for Windows (https://slproweb.com/products/Win32OpenSSL.html), then re-run this installer.'
+                Fail $msg
+            }
         }
     } finally {
         $env:LLM_APP_HOME = $oldAppHome
