@@ -13,7 +13,7 @@ func TestClaudeReviewerGPUCandidatesPreservesLargestGPU(t *testing.T) {
 		{Index: 2, VRAMTotalMB: 12282, BandwidthMBps: 3938},
 	}}
 	got := claudeReviewerGPUCandidates(caps, &launchRequest{})
-	want := []int{2, 1, 0}
+	want := []int{1, 2, 0}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

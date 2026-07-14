@@ -26,10 +26,11 @@ const (
 	interactiveTPS = 15.0 // smooth interactive use
 	usableTPS      = 6.0  // tolerable, but not snappy
 
-	ramBandwidthGBps  = 60.0 // dual-channel DDR4/DDR5 ballpark; the offload bottleneck
-	decodeEfficiency  = 0.70 // fraction of peak bandwidth llama.cpp realises at decode
-	maxPredictedTPS   = 400.0
-	defaultVRAMBWGBps = 350.0
+	ramBandwidthGBps    = 60.0 // dual-channel DDR4/DDR5 ballpark; the offload bottleneck
+	decodeEfficiency    = 0.70 // multi-GPU/large-dense fraction of peak bandwidth
+	moeDecodeEfficiency = 0.50 // routing, expert dispatch, and mixed RAM/VRAM traffic
+	maxPredictedTPS     = 400.0
+	defaultVRAMBWGBps   = 350.0
 )
 
 // bytesPerWeight is the effective on-disk/in-memory bytes per parameter for a
@@ -199,6 +200,33 @@ func weightedVRAMBandwidth(caps *detect.Capabilities) float64 {
 	return num / den
 }
 
+// denseSingleGPUBandwidth returns the fastest GPU that can hold this quant with
+// the same conservative capacity factor used by the recommender. Dense models
+// that fit one card are launched on one card, so averaging in slower unused GPUs
+// badly under-predicts them (Qwen3.6-27B measured 40.15 t/s on the 3090 Ti while
+// the old three-card average predicted 26 t/s).
+func denseSingleGPUBandwidth(caps *detect.Capabilities, sizeGB float64) (float64, bool) {
+	if caps == nil || sizeGB <= 0 {
+		return 0, false
+	}
+	best := 0.0
+	for _, g := range caps.GPUs {
+		usableGB := float64(g.VRAMTotalMB) / 1024.0 * 0.88
+		if sizeGB <= usableGB {
+			best = math.Max(best, vramBandwidthGBps(g.Name))
+		}
+	}
+	return best, best > 0
+}
+
+// Small dense models are increasingly kernel/launch-bound rather than pure
+// bandwidth-bound. Scale toward the measured large-matmul efficiency as active
+// size grows: this keeps Qwen3.5-4B near its measured 180 t/s while Qwen3.6-27B
+// lands near its measured 40 t/s on the same 3090 Ti.
+func denseSingleGPUEfficiency(activeB float64) float64 {
+	return 0.35 + 0.35*clampF(activeB/20.0, 0, 1)
+}
+
 // predictDecodeTPS estimates decode tok/s for a candidate+quant on this machine.
 // Returns 0 when params are unknown (callers then skip speed gating).
 func predictDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption) float64 {
@@ -215,6 +243,13 @@ func predictDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption)
 	}
 
 	vramBW := weightedVRAMBandwidth(caps)
+	singleDense := false
+	if !c.MoE {
+		if bw, ok := denseSingleGPUBandwidth(caps, quant.SizeGB); ok {
+			vramBW = bw
+			singleDense = true
+		}
+	}
 	budget := hardware(caps)
 	usableVRAMGB := float64(budget.totalVRAM) / 1024.0 * 0.88
 	// fraction of the model's weights resident in VRAM
@@ -227,7 +262,18 @@ func predictDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption)
 	if secPerGB <= 0 {
 		return 0
 	}
-	tps := decodeEfficiency / (perTokenGB * secPerGB)
+	efficiency := decodeEfficiency
+	if singleDense {
+		efficiency = denseSingleGPUEfficiency(activeB)
+	} else if c.MoE {
+		// Active-parameter bandwidth alone overstates MoE throughput: each token
+		// also pays router/dispatch synchronization and small expert kernels,
+		// especially when experts span RAM and several GPUs. Calibrated against
+		// real llama.cpp offload runs; keep dense efficiency separate because its
+		// large contiguous matmuls get much closer to the bandwidth ceiling.
+		efficiency = moeDecodeEfficiency
+	}
+	tps := efficiency / (perTokenGB * secPerGB)
 	return clampF(tps, 0, maxPredictedTPS)
 }
 

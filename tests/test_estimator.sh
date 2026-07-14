@@ -110,6 +110,7 @@ build_gguf --out "$TMP/ssm.gguf" --arch qwen35 --name 'Test-Qwen35' \
     --ctx-train 262144 --full-interval 4 --ssm
 out=$(run_dry "$TMP/ssm.gguf")
 assert_contains "$out" "--no-context-shift" "ssm_hybrid: context shift disabled"
+assert_contains "$out" "--ctx-checkpoints 1" "ssm_hybrid: bounded recurrent checkpoint enabled"
 
 # ── Test 6: mistagged DeepSeek V4 Flash (deepseek2 arch + kl_mla<=rope_dim) ─
 # Older converters tagged DeepSeek V4 Flash GGUFs as deepseek2. Current

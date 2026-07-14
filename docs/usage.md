@@ -3,6 +3,11 @@
 With no command, `ggrun` opens the interactive TUI. Otherwise it takes a model
 (local path or Hugging Face repo) plus flags.
 
+The TUI starts without a network prompt, detects each GGUF architecture from
+metadata, and uses the same placement planner as the CLI. Use `/` to search a
+large model directory and `u` when you explicitly want to update ggrun and its
+backends.
+
 ```bash
 # Backends
 ggrun --backend ik_llama model.gguf
@@ -105,7 +110,8 @@ claude --permission-mode auto --disallowedTools WebSearch
 All five inference tiers point at `local` on purpose, so foreground and background
 model calls cannot leave for `api.anthropic.com`.
 
-- **Thinking is on** — a normal launch never passes `--reasoning off` (benchmark-only).
+- **Thinking is on** — a normal launch never passes `--reasoning off` (measurement-only:
+  benchmark and the deterministic core `spec-test` matrix).
 - **Context fits the slot.** `--parallel` splits `--ctx-size` across sequence slots,
   so each request only sees `ctx ÷ parallel`. Claude mode defaults to two main-model
   slots: a native 1M model gets about 512k per slot; a model advertising 128k gets
@@ -127,12 +133,21 @@ model calls cannot leave for `api.anthropic.com`.
   mode (`--presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 40
   --top-p 0.95 --min-p 0.05`) — quantized thinking models loop endlessly without them.
   Pass any of these flags yourself (after `--`) and your value wins.
-- **Compaction reuses moved prompt chunks.** When the backend supports it, Claude mode
-  enables `--cache-reuse 256`. This complements ordinary common-prefix caching by
+- **Compaction reuses moved prompt chunks.** On shiftable transformer contexts, when
+  the backend supports it, Claude mode enables `--cache-reuse 256`. This complements
+  ordinary common-prefix caching by
   shifting repeated system, tool and workflow chunks after old results are removed.
   A controlled production-cache test reduced a compacted 4,506-token prefill from
   45.1 seconds to one processed token in 0.15 seconds. Pass `--cache-reuse 0` or
-  `--no-cache-prompt` explicitly to opt out.
+  `--no-cache-prompt` explicitly to opt out. Hybrid/recurrent contexts such as native
+  DeepSeek V4 cannot shift their state, so ggrun does not emit the unsupported flag;
+  it instead keeps one rolling context checkpoint per slot when at least 512 MiB of
+  host headroom per slot remains. This lets llama.cpp restore append-only agent turns
+  without exposing the unsafe 32-checkpoint backend default.
+- **Hybrid slot fairness.** Claude mode caps the logical prompt batch at 128 tokens on
+  hybrid/recurrent models. Physical ubatch remains placement-derived. This prevents a
+  long prefill batch from withholding decode work from the other active slot for more
+  than a minute; explicit backend arguments still win.
 - **Web research:** the built-in WebSearch runs on Anthropic's servers and is hidden
   on a non-first-party endpoint, so ggrun disables it and auto-wires a no-key
   DuckDuckGo MCP when `uvx` is installed. Its `search` and `fetch_content` tools

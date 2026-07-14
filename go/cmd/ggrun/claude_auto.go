@@ -179,8 +179,10 @@ func findClaudeReviewerBackend(caps *detect.Capabilities) *backendInfo {
 	return nil
 }
 
-// claudeReviewerGPUCandidates preserves the largest GPU for the main model,
-// then prefers bandwidth among equal-sized devices. A failed real load moves
+// claudeReviewerGPUCandidates preserves the largest GPU for the main model and
+// tries the least valuable remaining accelerator first. The reviewer is small
+// and bursty, while a large model benefits continuously from keeping its faster
+// secondary GPU available for expert or dense tensors. A failed real load moves
 // to the next candidate; no estimated memory cushion is used.
 func claudeReviewerGPUCandidates(caps *detect.Capabilities, req *launchRequest) []int {
 	if caps == nil || len(caps.GPUs) == 0 || (req != nil && req.CPUMode) {
@@ -206,15 +208,25 @@ func claudeReviewerGPUCandidates(caps *detect.Capabilities, req *launchRequest) 
 		return out
 	}
 	gpus := append([]detect.GPU(nil), caps.GPUs...)
+	reserved := 0
+	for i := 1; i < len(gpus); i++ {
+		if gpus[i].VRAMTotalMB > gpus[reserved].VRAMTotalMB ||
+			(gpus[i].VRAMTotalMB == gpus[reserved].VRAMTotalMB && gpus[i].BandwidthMBps > gpus[reserved].BandwidthMBps) {
+			reserved = i
+		}
+	}
+	mainGPU := gpus[reserved]
+	gpus = append(gpus[:reserved], gpus[reserved+1:]...)
 	sort.SliceStable(gpus, func(i, j int) bool {
+		if gpus[i].BandwidthMBps != gpus[j].BandwidthMBps {
+			return gpus[i].BandwidthMBps < gpus[j].BandwidthMBps
+		}
 		if gpus[i].VRAMTotalMB != gpus[j].VRAMTotalMB {
 			return gpus[i].VRAMTotalMB < gpus[j].VRAMTotalMB
 		}
-		if gpus[i].BandwidthMBps != gpus[j].BandwidthMBps {
-			return gpus[i].BandwidthMBps > gpus[j].BandwidthMBps
-		}
 		return gpus[i].Index < gpus[j].Index
 	})
+	gpus = append(gpus, mainGPU)
 	out := make([]int, 0, len(gpus))
 	for _, gpu := range gpus {
 		out = append(out, gpu.Index)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/config"
@@ -93,11 +94,25 @@ func runSpecTest(args []string) error {
 		MeasuredAt: time.Now().UTC().Format(time.RFC3339), Rounds: rounds,
 	}
 
-	baselineReq := *req
+	// The core matrix is deterministic and compares target-only against MTP,
+	// not the model's variable-length thinking budget. Reasoning models can spend
+	// the entire short answer budget in reasoning_content and never emit the
+	// verification marker, making a healthy baseline look broken. The extended
+	// matrix tracks thinking on/off separately; keep this first proof explicit.
+	testReq := *req
+	testReq.Benchmark = true
+	fmt.Println("[spec-test] deterministic matrix: reasoning off")
+	baselineReq := testReq
 	baselineReq.SpecMode = "off"
 	baseline, baselineStrategy, err := runSpecConfiguration(&baselineReq, cfg, caps, model, be, rounds, 0)
 	if err != nil {
-		return fmt.Errorf("baseline: %w", err)
+		report.Configurations = append(report.Configurations, baseline)
+		reportPath, saveErr := saveSpecTestReport(cfg.CacheDir, report)
+		if saveErr != nil {
+			return fmt.Errorf("baseline: %w (also failed to save raw report: %v)", err, saveErr)
+		}
+		fmt.Printf("[spec-test] baseline failures: %s\n", specFailureSummary(baseline.Result))
+		return fmt.Errorf("baseline: %w; raw report: %s", err, reportPath)
 	}
 	report.Configurations = append(report.Configurations, baseline)
 	fmt.Printf("[spec-test] baseline: %.2f tok/s, %.2fs mean wall, %.2f prompt tok/s\n",
@@ -108,7 +123,7 @@ func runSpecTest(args []string) error {
 	bestStableIndex := -1
 	bestStableWallGain := -1e9
 	for ceiling := 1; ceiling <= 4; ceiling++ {
-		mtpReq := *req
+		mtpReq := testReq
 		mtpReq.SpecMode = "mtp"
 		mtpReq.SpecDraftMax = ceiling
 		result, strategy, runErr := runSpecConfiguration(&mtpReq, cfg, caps, model, be, rounds, ceiling)
@@ -156,7 +171,7 @@ func runSpecTest(args []string) error {
 	}
 
 	best := report.Configurations[bestIndex]
-	opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	opts := placementOptionsFromRequest(&testReq, model, be, cfg.CacheDir)
 	opts.ContextSize = best.Context
 	opts.Parallel = best.Parallel
 	scope := placement.NewSpecProfileScope(model, caps, opts, "mtp", best.DraftPath)
@@ -183,6 +198,27 @@ func runSpecTest(args []string) error {
 	}
 	fmt.Printf("[spec-test] profile: %s\n", profilePath)
 	return nil
+}
+
+func specFailureSummary(result specbench.Result) string {
+	failures := make([]string, 0)
+	for _, sample := range result.Samples {
+		if sample.Correct {
+			continue
+		}
+		reason := sample.Error
+		if reason == "" {
+			reason = "verification failed"
+		}
+		failures = append(failures, sample.Prompt+": "+reason)
+		if len(failures) == 5 {
+			break
+		}
+	}
+	if len(failures) == 0 {
+		return "stability proof incomplete"
+	}
+	return strings.Join(failures, "; ")
 }
 
 func runSpecConfiguration(req *launchRequest, cfg *config.Config, caps *detect.Capabilities, model *placement.ModelProfile, be *backendInfo, rounds, ceiling int) (specTestConfiguration, *placement.Strategy, error) {

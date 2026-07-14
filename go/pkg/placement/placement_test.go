@@ -141,6 +141,82 @@ func TestComputeDenseTooLarge(t *testing.T) {
 	}
 }
 
+func TestComputeSingleGPUChoosesFastestDeviceThatActuallyFits(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 8192, BandwidthMBps: 32000},
+			{Index: 1, VRAMTotalMB: 24576, BandwidthMBps: 8000},
+		},
+		RAM: detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "model.gguf", SizeBytes: 14 * 1024 * 1024 * 1024,
+		NumLayers: 40, ContextSize: 4096, HiddenSize: 2048,
+	}
+	strat, err := Compute(caps, model, Options{ContextSize: 4096, KVPlacement: "gpu", KVQuality: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strat.Type != SingleGPU || strat.MainGPU != 1 {
+		t.Fatalf("expected the fitting CUDA1, got type=%s main=%d", strat.Type, strat.MainGPU)
+	}
+}
+
+func TestComputeBatchTierUsesFreeNotTotalVRAM(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, VRAMUsedMB: 8192}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "dense.gguf", SizeBytes: 10 * 1024 * 1024 * 1024,
+		NumLayers: 40, ContextSize: 4096, HiddenSize: 4096,
+	}
+	strategy, err := Compute(caps, model, Options{ContextSize: 4096, KVPlacement: "gpu", KVQuality: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategy.Type != SingleGPU {
+		t.Fatalf("expected single GPU, got %s", strategy.Type)
+	}
+	if strategy.UBatchSize != 512 || strategy.BatchSize != 4096 {
+		t.Fatalf("batch tier ignored occupied VRAM: batch=%d ubatch=%d", strategy.BatchSize, strategy.UBatchSize)
+	}
+}
+
+func TestDenseCPUOffloadLetsBackendFitExactLayers(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 8192, BandwidthMBps: 8000}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "model.gguf", SizeBytes: 20 * 1024 * 1024 * 1024,
+		NumLayers: 40, ContextSize: 4096, HiddenSize: 2048,
+	}
+	strat, err := Compute(caps, model, Options{
+		ContextSize: 4096, KVPlacement: "cpu", KVQuality: "low",
+		BackendHelp: "-fit, --fit [on|off]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strat.Type != DenseCPUOffload {
+		t.Fatalf("expected dense CPU offload, got %s", strat.Type)
+	}
+	args := strat.Args(model.Path, 8081)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--fit on") {
+		t.Fatalf("dense CPU offload must enable backend fit: %s", joined)
+	}
+	for _, forbidden := range []string{"-ngl", "--tensor-split", "--split-mode"} {
+		if contains(args, forbidden) {
+			t.Fatalf("dense CPU offload must leave %s unset for backend fit: %s", forbidden, joined)
+		}
+	}
+}
+
 func TestComputeMoE(t *testing.T) {
 	// 40GB MoE on 24GB GPU with 128GB RAM
 	caps := &detect.Capabilities{
@@ -193,6 +269,65 @@ func TestComputeCPUOnly(t *testing.T) {
 	}
 	if strat.GPULayers != 0 {
 		t.Fatalf("expected CPU-only mode")
+	}
+}
+
+func TestComputeCPUOnlyPreservesNoMMap(t *testing.T) {
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "model.gguf", SizeBytes: 8 * 1024 * 1024 * 1024,
+		NumLayers: 32, ContextSize: 4096, HiddenSize: 4096,
+	}
+	strategy, err := Compute(caps, model, Options{CPUMode: true, NoMMap: true, ContextSize: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategy.MMap {
+		t.Fatal("CPU-only placement discarded explicit no-mmap")
+	}
+	if args := strategy.Args(model.Path, 8081); !contains(args, "--no-mmap") {
+		t.Fatalf("CPU-only no-mmap was not emitted: %v", args)
+	}
+}
+
+func TestComputeCPUOnlyReservesHostRuntimeMemory(t *testing.T) {
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 12288, FreeMB: 12288},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "model.gguf", SizeBytes: 10 * 1024 * 1024 * 1024,
+		NumLayers: 40, ContextSize: 4096, HiddenSize: 4096,
+	}
+	_, err := Compute(caps, model, Options{CPUMode: true, ContextSize: 4096, KVPlacement: "cpu", KVQuality: "low"})
+	if err == nil || !strings.Contains(err.Error(), "Host runtime buffers") {
+		t.Fatalf("expected host runtime memory refusal, got %v", err)
+	}
+}
+
+func TestComputeCPUOnlyDoesNotChargeDetectedGPUOverhead(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 24576},
+			{Index: 1, VRAMTotalMB: 12288},
+			{Index: 2, VRAMTotalMB: 12288},
+		},
+		RAM: detect.RAMInfo{TotalMB: 4096, FreeMB: 4096},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "tiny.gguf", SizeBytes: 1 * 1024 * 1024,
+		NumLayers: 2, ContextSize: 512, HiddenSize: 128,
+	}
+	strategy, err := Compute(caps, model, Options{CPUMode: true, ContextSize: 512, KVPlacement: "cpu", KVQuality: "low"})
+	if err != nil {
+		t.Fatalf("CPU-only placement charged unused GPU overhead: %v", err)
+	}
+	if strategy.Type != CPUOnly {
+		t.Fatalf("expected CPU-only strategy, got %s", strategy.Type)
 	}
 }
 
@@ -648,15 +783,13 @@ func TestMaximizeMoEGPUFitByUBatchRescuesZeroExpertPlacement(t *testing.T) {
 	}
 }
 
-// TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight is the end-to-end
-// version of TestArgsEmitsExplicitZeroCacheAndCheckpoints: runs the real
+// TestComputeDeepSeekV4KeepsOneRecurrentCheckpoint is the end-to-end
+// version of the bounded hybrid policy: runs the real
 // Compute() -> computeCRAM -> Args() pipeline against the exact hardware and
-// model shape that crashed on 2026-07-08 (128GB DeepSeek-V4 MoE with an
-// explicitly requested CPU KV cache and three GPUs with no VRAM to spare once
-// the model is loaded) and asserts the emitted command line explicitly
-// disables both the prompt cache and context checkpoints, instead of
-// silently falling back to llama-server's defaults that caused the crash.
-func TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight(t *testing.T) {
+// model shape used for 128GB DeepSeek-V4. VRAM is too tight for host prompt
+// CRAM, but the machine has ample host headroom for one recurrent-state
+// checkpoint. The default of 32 remains forbidden.
+func TestComputeDeepSeekV4KeepsOneRecurrentCheckpoint(t *testing.T) {
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{
 			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, BandwidthMBps: 15754},
@@ -699,8 +832,8 @@ func TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight(t *testing.T) {
 	if strat.CRAM != 0 {
 		t.Fatalf("expected computeCRAM to disable the prompt cache under tight VRAM, got CRAM=%d", strat.CRAM)
 	}
-	if strat.MaxCheckpoints != 0 {
-		t.Fatalf("expected computeCRAM to disable checkpoints under tight VRAM, got MaxCheckpoints=%d", strat.MaxCheckpoints)
+	if strat.MaxCheckpoints != 1 {
+		t.Fatalf("expected one bounded recurrent checkpoint, got MaxCheckpoints=%d", strat.MaxCheckpoints)
 	}
 	if strat.TensorSplit[1] != 0 {
 		t.Fatalf("expected x1 GPU to be expert-only with zero tensor split, got %v", strat.TensorSplit)
@@ -712,8 +845,11 @@ func TestComputeDeepSeekV4DisablesCheckpointsWhenVRAMIsTight(t *testing.T) {
 	if !hasAdjacentArgPlacement(args, "-cram", "0") {
 		t.Fatalf("expected explicit '-cram 0' in emitted args, got %v", args)
 	}
-	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "0") {
-		t.Fatalf("expected explicit '--ctx-checkpoints 0' in emitted args, got %v", args)
+	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "1") {
+		t.Fatalf("expected explicit '--ctx-checkpoints 1' in emitted args, got %v", args)
+	}
+	if !contains(args, "--no-context-shift") {
+		t.Fatalf("expected DeepSeek4 recurrent context shifting to be disabled, got %v", args)
 	}
 }
 
@@ -1157,8 +1293,8 @@ func TestComputeDenseMultiGPU(t *testing.T) {
 	if len(strat.TensorSplit) != 2 {
 		t.Fatalf("expected tensor split for multi-GPU, got %v", strat.TensorSplit)
 	}
-	if strat.SplitMode != "tensor" {
-		t.Fatalf("expected split-mode tensor for mainline dense multi-GPU (row triggers GQA assert segfault, audit #7), got %s", strat.SplitMode)
+	if strat.SplitMode != "layer" {
+		t.Fatalf("expected portable split-mode layer for heterogeneous dense multi-GPU, got %s", strat.SplitMode)
 	}
 }
 
@@ -1393,6 +1529,42 @@ func TestPlacementCacheRoundTripsTensorSplit(t *testing.T) {
 	}
 	if loaded.SplitMode != "layer" || len(loaded.TensorSplit) != 3 || loaded.TensorSplit[0] != 0.5 {
 		t.Fatalf("tensor split did not round trip: %+v", loaded)
+	}
+}
+
+func TestCachedHybridPlacementRecomputesRuntimeCheckpointPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hybrid-cache.conf")
+	if err := SavePlacementCache(path, &CacheEntry{
+		TensorSplit: []float64{0.67, 0.33}, SplitMode: "layer", NCPUMoE: 30,
+		BatchSize: 2048, UBatchSize: 128, Parallel: 2, MMap: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 24576},
+			{Index: 1, VRAMTotalMB: 12288},
+		},
+		RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "hybrid-moe.gguf", TotalSizeMB: 65536, NumLayers: 40,
+		IsMoE: true, NumExperts: 64, HasSSM: 1, ContextSize: 131072,
+		HiddenSize: 4096, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+	}
+	strategy, err := Compute(caps, model, Options{
+		ContextSize: 131072, Parallel: 2, CacheFile: path,
+		KVPlacement: "gpu", KVQuality: "mid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategy.MaxCheckpoints != 1 {
+		t.Fatalf("cached hybrid placement checkpoints=%d, want one", strategy.MaxCheckpoints)
+	}
+	if args := strategy.Args(model.Path, 8081); !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "1") {
+		t.Fatalf("cached hybrid placement did not emit checkpoint policy: %v", args)
 	}
 }
 
@@ -2218,6 +2390,41 @@ func TestArgsEmitsExplicitZeroCacheAndCheckpoints(t *testing.T) {
 	}
 	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "0") {
 		t.Fatalf("expected explicit '--ctx-checkpoints 0' when computeCRAM decided checkpoints are unsafe, got %v", args)
+	}
+}
+
+func TestHybridPromptCacheKeepsOneBoundedCheckpoint(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 8192, FreeMB: 8192},
+	}
+	s := &Strategy{Type: SingleGPU, HasSSM: true, Parallel: 2}
+	cram, checkpoints := computeCRAM(caps, &ModelProfile{HasSSM: 1}, s, 4096, 256)
+	if checkpoints != 1 {
+		t.Fatalf("hybrid model checkpoints=%d, want one rolling checkpoint; cram=%d", checkpoints, cram)
+	}
+	s.CRAM = cram
+	s.MaxCheckpoints = checkpoints
+	s.ContextSize = 131072
+	s.KVType = "q8_0"
+	s.Threads = 8
+	s.ThreadsBatch = 8
+	s.BatchSize = 512
+	s.UBatchSize = 128
+	if args := s.Args("model.gguf", 8081); !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "1") {
+		t.Fatalf("hybrid strategy did not emit its bounded checkpoint: %v", args)
+	}
+}
+
+func TestHybridPromptCacheDisablesCheckpointWithoutHostHeadroom(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 768, FreeMB: 768},
+	}
+	s := &Strategy{Type: SingleGPU, HasSSM: true, Parallel: 2}
+	_, checkpoints := computeCRAM(caps, &ModelProfile{HasSSM: 1}, s, 4096, 256)
+	if checkpoints != 0 {
+		t.Fatalf("memory-constrained hybrid model checkpoints=%d, want disabled", checkpoints)
 	}
 }
 

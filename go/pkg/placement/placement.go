@@ -22,6 +22,12 @@ const (
 	computePerGPUMB     = 512  // legacy; non-MoE single-GPU sizing only
 	computeFloorMB      = 1024 // cited llama.cpp compute floor; CUDA overhead measured separately
 	minCramMB           = 512
+	// Hybrid and recurrent prompt restoration needs a context checkpoint because
+	// its state cannot be shifted like an ordinary transformer KV cache. Keep the
+	// policy bounded to one checkpoint per slot and require generous host headroom;
+	// measured checkpoints were about 63 MiB for Qwen3.5 and 107 MiB for DeepSeek
+	// V4, so 512 MiB per slot leaves room for architecture and allocator variance.
+	hybridCheckpointHeadroomPerSlotMB = 512
 	// Cards below this fraction of the fastest PCIe link are too slow to own
 	// regular layer slots in MoE layer-split mode, but can still be useful as
 	// expert-only VRAM when one or more whole expert layers fit.
@@ -229,8 +235,11 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		// Thinking stays ON for normal serving (backend default `--reasoning auto`);
 		// only benchmark/tune opt in to `--reasoning off` for clean, fast measurement.
 		ReasoningOff: opts.ReasoningOff,
-		HasSSM:       model.HasSSM == 1,
-		Host:         opts.Host,
+		// DeepSeek4 uses non-shiftable recurrent memory even though current GGUFs
+		// do not expose the generic SSM metadata bit. Treat it like other hybrid
+		// models for context shifting and checkpoint restoration.
+		HasSSM: model.HasSSM == 1 || strings.EqualFold(model.ModelArch, "deepseek4"),
+		Host:   opts.Host,
 		// ggrun sets explicit placement (-ngl/-ot/--tensor-split), so the backend's
 		// own auto memory-fitting (-fit) is redundant with this explicit plan.
 		// Disable it when the backend supports the flag.
@@ -353,10 +362,10 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	kvTotalMB := computeKVTotalMB(model, s.ContextSize, s.KVType)
 
 	// Batch sizes based on fit
-	bestGPUVRAM := 0
+	bestGPUFree := 0
 	for _, g := range caps.GPUs {
-		if g.VRAMTotalMB > bestGPUVRAM {
-			bestGPUVRAM = g.VRAMTotalMB
+		if g.VRAMFreeMB() > bestGPUFree {
+			bestGPUFree = g.VRAMFreeMB()
 		}
 	}
 
@@ -366,9 +375,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// real cost of running that (u)batch (firstLaunchComputeBufMB).
 	batchBaseMB := totalSizeMB + measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs)) + kvTotalMB
 	switch {
-	case batchBaseMB+firstLaunchComputeBufMB(model, 1024) <= bestGPUVRAM:
+	case batchBaseMB+firstLaunchComputeBufMB(model, 1024) <= bestGPUFree:
 		s.BatchSize, s.UBatchSize = 8192, 1024
-	case batchBaseMB+firstLaunchComputeBufMB(model, 512) <= bestGPUVRAM:
+	case batchBaseMB+firstLaunchComputeBufMB(model, 512) <= bestGPUFree:
 		s.BatchSize, s.UBatchSize = 4096, 512
 	default:
 		s.BatchSize, s.UBatchSize = 2048, 512
@@ -443,12 +452,20 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				draftOpts.ContextSize = s.ContextSize
 				s.Draft = ComputeDraft(model, caps, draftOpts)
 			}
+			// Placement caches intentionally persist only weight placement. Runtime
+			// cache policy depends on current free RAM, slot count, and architecture,
+			// so recompute it on every launch instead of inheriting the zero-value
+			// checkpoint policy from the early cache-hit return.
+			s.CRAM, s.MaxCheckpoints = computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
+			if s.Host == "" {
+				s.Host = "127.0.0.1"
+			}
 			return s, nil
 		}
 	}
 
 	// Strategy selection
-	strategy := chooseStrategy(caps, model, totalSizeMB, kvTotalMB, opts)
+	strategy := chooseStrategy(caps, model, s, totalSizeMB, kvTotalMB, opts)
 	s.Type = strategy
 
 	// Vision override: mmproj needs extra VRAM — force multi-GPU
@@ -550,7 +567,7 @@ func restrictGPUs(caps *detect.Capabilities, want []int) (*detect.Capabilities, 
 }
 
 // chooseStrategy selects the placement strategy from hardware and model size.
-func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) StrategyType {
+func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int, opts Options) StrategyType {
 	numGPUs := len(caps.GPUs)
 
 	if opts.CPUMode || numGPUs == 0 {
@@ -563,7 +580,7 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
-	pc := loadProbeCache(opts.CacheDir, model, opts.ContextSize, 512, opts.KVQuality, opts.KVPlacement, backendCacheTag(opts), caps.GPUs, opts.Parallel)
+	pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel)
 	if pc != nil {
 		computeBufMB = pc.ComputeBufMB
 	}
@@ -608,7 +625,7 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, totalSizeMB,
 
 func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
 	s.GPULayers = 0
-	s.MMap = true
+	s.MMap = !opts.NoMMap
 	s.BatchSize = 512
 	s.UBatchSize = 256
 	return s, nil
@@ -616,12 +633,23 @@ func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, o
 
 func buildSingleGPU(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	gpuOrder := orderGPUsByBandwidth(caps.GPUs)
-	mainIdx := 0
-	if len(gpuOrder) > 0 {
-		mainIdx = gpuOrder[0]
+	if len(gpuOrder) == 0 {
+		return nil, fmt.Errorf("single-GPU strategy requires a GPU")
 	}
-	s.MainGPU = caps.GPUs[mainIdx].Index
-	return s, nil
+
+	cudaOverheadMB := measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs))
+	computeBufMB := computeFloorMB
+	if pc := loadProbeCache(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel); pc != nil {
+		computeBufMB = pc.ComputeBufMB
+	}
+	neededMB := totalSizeMB + cudaOverheadMB + computeBufMB + kvTotalMB
+	for _, mainIdx := range gpuOrder {
+		if caps.GPUs[mainIdx].VRAMFreeMB() >= neededMB {
+			s.MainGPU = caps.GPUs[mainIdx].Index
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("single-GPU strategy no longer fits any selected GPU (need %d MiB)", neededMB)
 }
 
 func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
@@ -708,15 +736,13 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 		s.TensorSplit = normalizeSplit(split)
 	}
 
-	// Prefer layer split for ik_llama (avoids NCCL P2P which fails
-	// on mixed GPU architectures like Ampere+Ada). For mainline dense
-	// multi-GPU use "tensor": "--split-mode row" triggers a GQA assert
-	// in ggml-cuda.cu and segfaults mid-request on GQA models (audit #7).
-	if opts.BackendTag == "ik_llama" {
-		s.SplitMode = "layer"
-	} else {
-		s.SplitMode = "tensor"
-	}
+	// Layer split is the portable default for heterogeneous GPUs. The tensor
+	// split path uses NCCL collectives during graph construction and can abort
+	// before health on systems without working peer access (observed with an
+	// Ampere PCIe x1 + Ada PCIe x4 pair). Row split is also unsafe for some GQA
+	// models. Layer split avoids both failure modes and is supported by mainline,
+	// ik_llama, and the registered forks.
+	s.SplitMode = "layer"
 
 	_ = probeHit // used for logging/debugging
 
@@ -724,6 +750,18 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 }
 
 func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
+	if s.BackendSupportsFit {
+		// Unlike the wholly resident paths, dense CPU offload does not have an
+		// explicit layer plan. Leave n_gpu_layers and tensor_split unset so
+		// llama.cpp can measure real tensor sizes and place the maximum safe
+		// number of layers. Supplying -ngl 999 or a tensor split makes its fit
+		// pass abort and then OOM during the real load.
+		s.TensorSplit = nil
+		s.SplitMode = ""
+		s.MMap = false
+		return s, nil
+	}
+
 	numGPUs := len(caps.GPUs)
 	if numGPUs > 1 {
 		// Load measured CUDA overhead. Missing probe data is unknown and contributes 0.
@@ -781,11 +819,10 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 		}
 		s.TensorSplit = normalizeSplit(split)
 
-		if opts.BackendTag == "ik_llama" {
-			s.SplitMode = "layer"
-		} else {
-			s.SplitMode = "tensor"
-		}
+		// Keep the same portable heterogeneous-GPU policy as the fully resident
+		// dense path. Tensor/row splits can require peer collectives that are not
+		// available on many consumer multi-GPU topologies.
+		s.SplitMode = "layer"
 	}
 	s.MMap = false
 	return s, nil
@@ -2357,11 +2394,18 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 	// Model weights + per-GPU overhead (CUDA context + compute buffer)
 	// For single GPU, only count 1 GPU's overhead
 	overheadGPUs := numGPUs
-	if s.Type == SingleGPU {
+	if s.Type == CPUOnly {
+		overheadGPUs = 0
+	} else if s.Type == SingleGPU {
 		overheadGPUs = 1
 	}
 	modelOverheadMB := totalSizeMB + (cudaOverheadMB+computeBufMB)*overheadGPUs
 	neededMB := modelOverheadMB + kvTotalMB
+	ramOverheadMB := 0
+	if s.Type == CPUOnly || s.Type == DenseCPUOffload {
+		ramOverheadMB = ramRuntimeOverheadMB(model, s.UBatchSize, totalSizeMB)
+		neededMB += ramOverheadMB
+	}
 
 	var poolMB int
 	var poolLabel string
@@ -2397,7 +2441,7 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 	if neededMB > poolMB {
 		// Back-solve max safe context
-		maxKVMB := poolMB - modelOverheadMB
+		maxKVMB := poolMB - modelOverheadMB - ramOverheadMB
 		if maxKVMB < 0 {
 			maxKVMB = 0
 		}
@@ -2412,18 +2456,21 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 				"  CUDA overhead (%d GPU): %dMB\n"+
 				"  Compute buffers (%d):   %dMB\n"+
 				"  KV cache (ctx=%d):      %dMB\n"+
+				"  Host runtime buffers:   %dMB\n"+
 				"  -----------------------------\n"+
 				"  Total needed:          %dMB\n"+
 				"  Available (%s):        %dMB\n"+
 				"  Shortfall:             %dMB\n",
-			poolLabel, totalSizeMB, numGPUs, cudaOverheadMB*numGPUs,
-			numGPUs, computeBufMB*numGPUs, s.ContextSize, kvTotalMB,
-			neededMB, poolLabel, poolMB, neededMB-poolMB)
+			poolLabel, totalSizeMB, overheadGPUs, cudaOverheadMB*overheadGPUs,
+			overheadGPUs, computeBufMB*overheadGPUs, s.ContextSize, kvTotalMB,
+			ramOverheadMB, neededMB, poolLabel, poolMB, neededMB-poolMB)
 
 		if maxCtx > 0 {
 			msg += fmt.Sprintf("\n  Max safe context at this memory: --ctx-size %d", maxCtx)
-		} else {
+		} else if totalSizeMB > poolMB {
 			msg += "\n  Model weights alone exceed available memory."
+		} else {
+			msg += "\n  Fixed runtime buffers leave no safe space for the requested KV cache."
 		}
 		msg += "\n  Or use a smaller quantization / model."
 		return fmt.Errorf("%s", msg)
@@ -2504,6 +2551,23 @@ func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, to
 			}
 		}
 		cram = cacheRAMMB
+	}
+
+	// A zero checkpoint policy makes every append-only agent turn re-evaluate the
+	// complete prompt on hybrid or recurrent models. Unlike host prompt CRAM,
+	// context checkpoints are the minimum state needed to restore the recurrent
+	// prefix. One rolling checkpoint is sufficient with current llama.cpp, which
+	// saves at user-message boundaries, and avoids the unsafe backend default of 32.
+	if s.HasSSM {
+		slots := s.Parallel
+		if slots < 1 {
+			slots = 1
+		}
+		if ramAfterLoad >= slots*hybridCheckpointHeadroomPerSlotMB {
+			maxCheckpoints = 1
+		} else {
+			maxCheckpoints = 0
+		}
 	}
 
 	return cram, maxCheckpoints
@@ -2822,6 +2886,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	// prints -ngl 0 so compatibility tests and user scripts can see the mode.
 	if s.Type == CPUOnly {
 		args = append(args, "-ngl", "0")
+	} else if s.Type == DenseCPUOffload && s.BackendSupportsFit {
+		// Keep n_gpu_layers and tensor_split unset. Backend fit uses exact GGUF
+		// tensor sizes to choose a safe GPU/CPU layer boundary at the requested
+		// context. Explicit values make llama.cpp fit abort without changing them.
+		args = append(args, "--fit", "on")
 	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
 		// Disable the backend's own memory auto-fit: ggrun already sets explicit

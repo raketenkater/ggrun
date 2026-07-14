@@ -43,7 +43,6 @@ var version = update.Version()
 
 func main() {
 	if len(os.Args) < 2 {
-		update.PromptOnStartup()
 		cmdGUI()
 		return
 	}
@@ -90,7 +89,6 @@ func main() {
 	case "recommend":
 		cmdRecommend(args[1:])
 	case "gui", "tui":
-		update.PromptOnStartup()
 		cmdGUI()
 	case "config":
 		cmdConfig(args[1:])
@@ -131,15 +129,18 @@ Commands:
 
 Launch flags:
   -port int            Server port (default 8081)
-  -ctx int             Context size (default auto)
+  -ctx string          Context size: fit|max|token count (default fit)
   -kv string           KV placement: auto|gpu|cpu (default auto)
-  -kv-quality string   KV quality: high|mid|low (default low)
+  -kv-quality string   KV quality: high|mid|low (default mid)
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
+  --backend string     auto|llama|ik_llama|registered backend tag
+  --parallel int       Concurrent sequence slots
   --vram-headroom str  Reserve VRAM the recommender/placement won't use, e.g. 2G
   --ram-headroom str   Reserve system RAM the recommender/placement won't use, e.g. 8G
   -vision              Enable vision (auto-detect mmproj)
-  --spec string       Speculative decoding: off|auto|mtp|dflash|eagle3|draft|ngram|ngram-mod|ngram-k4v
+  --claude-code        Serve locally and launch Claude Code with workflows/research
+  --spec string        Speculative decoding: off|auto|mtp|dflash|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
 }
 
@@ -668,6 +669,65 @@ func applyGPUVisibility(req *launchRequest, backendTag string) string {
 	return envKey + "=" + list
 }
 
+// runtimeGPUCapabilities mirrors the device renumbering performed by
+// CUDA_VISIBLE_DEVICES/GGML_VK_VISIBLE_DEVICES. Placement.Compute accepts the
+// physical --gpus indices and restricts internally, but launch-time preflight,
+// probe recording, and OOM recovery observe the backend's visible CUDA indices.
+// Keeping this mapping explicit prevents a visible CUDA0 (for --gpus 2) from
+// being charged against physical GPU0's memory budget.
+func runtimeGPUCapabilities(caps *detect.Capabilities, req *launchRequest) (*detect.Capabilities, map[int]int) {
+	visibleToPhysical := map[int]int{}
+	if caps == nil {
+		return caps, visibleToPhysical
+	}
+	if req == nil || strings.TrimSpace(req.GPUsFlag) == "" {
+		for _, gpu := range caps.GPUs {
+			visibleToPhysical[gpu.Index] = gpu.Index
+		}
+		return caps, visibleToPhysical
+	}
+
+	available := map[int]detect.GPU{}
+	for _, gpu := range caps.GPUs {
+		available[gpu.Index] = gpu
+	}
+	seen := map[int]bool{}
+	physical := []int{}
+	for _, raw := range strings.Split(req.GPUsFlag, ",") {
+		idx, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || seen[idx] {
+			continue
+		}
+		if _, ok := available[idx]; !ok {
+			continue
+		}
+		seen[idx] = true
+		physical = append(physical, idx)
+	}
+	// applyGPUVisibility sorts the physical IDs before exporting them.
+	sort.Ints(physical)
+	if len(physical) == 0 {
+		return caps, visibleToPhysical
+	}
+
+	filtered := *caps
+	filtered.GPUs = make([]detect.GPU, 0, len(physical))
+	for visible, idx := range physical {
+		gpu := available[idx]
+		gpu.Index = visible
+		filtered.GPUs = append(filtered.GPUs, gpu)
+		visibleToPhysical[visible] = idx
+	}
+	return &filtered, visibleToPhysical
+}
+
+func physicalGPUIndex(visible int, visibleToPhysical map[int]int) int {
+	if physical, ok := visibleToPhysical[visible]; ok {
+		return physical
+	}
+	return visible
+}
+
 func resolveModelPath(path, modelDir string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path
@@ -887,6 +947,12 @@ func claudeCodeParallel(parallel int, claudeCode, explicit bool) int {
 const (
 	claudeSlotTarget = 65536
 	claudeSlotMin    = 24576
+	// Live parallel-2 testing on an offloaded DeepSeek V4 showed a 512-token
+	// prompt chunk holding the scheduler for about 22 seconds and reducing a
+	// concurrent worker to 0.05-0.15 tok/s. Match the proven 128-token microbatch
+	// so another Claude slot gets a scheduling opportunity roughly four times as
+	// often. Explicit extra backend arguments still override this value.
+	claudeHybridBatch = 128
 )
 
 // claudeCodeSlotAdjust caps the computed --parallel so each slot keeps a workable
@@ -899,7 +965,15 @@ const (
 // Runs after placement.Compute and before Strategy.Args, so the emitted
 // --parallel and the derived CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stay consistent.
 func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode, parallelExplicit bool) {
-	if !claudeCode || strategy == nil || strategy.ContextSize <= 0 || strategy.Parallel <= 1 {
+	if !claudeCode || strategy == nil {
+		return
+	}
+	if strategy.HasSSM && strategy.BatchSize > claudeHybridBatch {
+		fmt.Printf("[claude-code] hybrid recurrent model: lowering --batch-size from %d to %d so prompt prefill does not starve another active slot\n",
+			strategy.BatchSize, claudeHybridBatch)
+		strategy.BatchSize = claudeHybridBatch
+	}
+	if strategy.ContextSize <= 0 || strategy.Parallel <= 1 {
 		return
 	}
 	// A user-chosen --parallel is a deliberate slot layout — keep it, warn below if tight.
@@ -928,7 +1002,7 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
-	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help)
+	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, strategy == nil || !strategy.HasSSM)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	return serverArgs
 }
@@ -998,14 +1072,25 @@ func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfil
 	return computeByGPU
 }
 
+func measuredPromotionOptions(req *launchRequest, model *placement.ModelProfile, be *backendInfo, cacheDir string) placement.Options {
+	opts := placementOptionsFromRequest(req, model, be, cacheDir)
+	opts.SkipPlacementCache = true
+	return opts
+}
+
 func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *backendInfo, caps *detect.Capabilities, model *placement.ModelProfile, current *placement.Strategy, currentArgs []string) (*placement.Strategy, []string, bool) {
 	if req == nil || cfg == nil || be == nil || caps == nil || model == nil || current == nil || !model.IsMoE || len(caps.GPUs) == 0 {
 		return nil, nil, false
 	}
 	// A measured KV probe may have been written after the first load. Force the
 	// recompute to reload it instead of reusing the pre-launch model struct state.
+	// Also bypass the placement cache: reloading the placement that just launched
+	// made this calibration pass incapable of filling newly proven free VRAM.
+	// This was especially visible when the Claude reviewer changed the baseline:
+	// a safe but sparse five-block cache kept winning even when six blocks fit.
 	model.MeasuredKVBytesPerTok = nil
-	next, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	opts := measuredPromotionOptions(req, model, be, cfg.CacheDir)
+	next, err := placement.Compute(caps, model, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[launch] calibration: measured placement recompute failed: %v\n", err)
 		return nil, nil, false
@@ -1027,6 +1112,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
 	specDisabled := false
+	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
 	placementOpts := func() placement.Options {
 		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
 		if specDisabled {
@@ -1058,7 +1144,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		// without paying for the load to learn it. Re-planned args loop back
 		// here, so every retry is re-gated too.
 		if preflightReplans < 3 && strategy != nil {
-			dev, deficit, bad, companionRejected := preflightPlacement(be, &configForPreflight{CacheDir: cfg.CacheDir}, caps, model, strategy, serverArgs)
+			dev, deficit, bad, companionRejected := preflightPlacement(be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
 			if companionRejected {
 				specDisabled = true
 				opts := placementOpts()
@@ -1077,7 +1163,8 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 			}
 			if bad {
 				preflightReplans++
-				oomPenalty[dev] += deficit
+				physicalDev := physicalGPUIndex(dev, visibleToPhysical)
+				oomPenalty[physicalDev] += deficit
 				if s, rerr := placement.ReplanAfterOOM(caps, model, placementOpts(), oomPenalty); rerr == nil && s != nil && s.OTString != "" {
 					fmt.Fprintf(os.Stderr, "[launch] preflight re-plan (n-cpu-moe=%d)\n", s.NCPUMoE)
 					serverArgs = patchPlacementArgs(serverArgs, s)
@@ -1105,7 +1192,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		var measuredComputeByGPU map[int]int
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
-			measuredComputeByGPU = recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, logData, nil)
+			measuredComputeByGPU = recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, logData, nil)
 		}
 		// Diagnose before checking the retry budget: a clean, parseable OOM on
 		// the very last allowed attempt still deserves its real cause recorded
@@ -1138,6 +1225,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		var s *placement.Strategy
 		var rerr error
 		computeMeasuredOnFailedGPU := measuredComputeByGPU[device] > 0
+		physicalDevice := physicalGPUIndex(device, visibleToPhysical)
 		if isComputeBuffer && computeMeasuredOnFailedGPU {
 			// The failed graph allocation is now the exact compute-buffer reserve
 			// used by Compute. Penalizing the card by that allocation as well would
@@ -1147,7 +1235,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 			opts.CacheFile = ""
 			s, rerr = placement.Compute(caps, model, opts)
 		} else {
-			oomPenalty[device] += oomOvershoot(caps, device, allocMB)
+			oomPenalty[physicalDevice] += oomOvershoot(caps, physicalDevice, allocMB)
 			s, rerr = placement.ReplanAfterOOM(caps, model, placementOpts(), oomPenalty)
 		}
 		if rerr == nil && s != nil && s.OTString != "" {
@@ -1159,7 +1247,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 			serverArgs = patchPlacementArgs(serverArgs, s)
 			strategy = s
 		} else {
-			nextArgs, entry, derated := placement.DerateCUDAOOMArgs(serverArgs, model, caps, device, allocMB, isComputeBuffer)
+			nextArgs, entry, derated := placement.DerateCUDAOOMArgs(serverArgs, model, runtimeCaps, device, allocMB, isComputeBuffer)
 			if !derated {
 				return p, strategy, serverArgs, err
 			}
@@ -1507,10 +1595,11 @@ func cmdLaunch(args []string) {
 
 	// Capture VRAM baseline before the server starts so the post-launch probe
 	// can measure the real compute-buffer allocation.
+	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
 	baselineVRAM := map[int]int{}
-	if model.IsMoE && len(caps.GPUs) > 0 {
-		for _, g := range caps.GPUs {
-			baselineVRAM[g.Index] = placement.QueryVRAMUsed(g.Index)
+	if model.IsMoE && runtimeCaps != nil && len(runtimeCaps.GPUs) > 0 {
+		for _, g := range runtimeCaps.GPUs {
+			baselineVRAM[g.Index] = placement.QueryVRAMUsed(physicalGPUIndex(g.Index, visibleToPhysical))
 		}
 	}
 
@@ -1523,7 +1612,7 @@ func cmdLaunch(args []string) {
 
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 	if p.LogBuf != nil {
-		recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String(), baselineVRAM)
+		recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
 		if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs); ok {
 			fmt.Printf("[launch] calibration: measured placement fits more GPU experts (%d CPU MoE -> %d); restarting once\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
 			_ = p.Stop()
@@ -1538,7 +1627,7 @@ func cmdLaunch(args []string) {
 			serverArgs = nextArgs
 			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 			if p.LogBuf != nil {
-				go recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, p.LogBuf.String(), baselineVRAM)
+				go recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
 			}
 		}
 	}
@@ -1572,6 +1661,17 @@ func cmdLaunch(args []string) {
 				}
 				if !isServerRunning(req.Host, req.Port) {
 					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — recording OOM for next launch\n")
+					if p.LogBuf != nil {
+						markerPath := claudeServerLogPath(cfg, req.Port) + ".oom-recorded"
+						device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
+						if recordErr != nil {
+							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
+						} else if ok && estimated {
+							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
+						} else if ok {
+							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
+						}
+					}
 					healthCancel()
 					return
 				}
@@ -2155,6 +2255,10 @@ func cmdGUI() {
 	if req == nil {
 		return
 	}
+	if req.Update {
+		cmdUpdate()
+		return
+	}
 
 	cfg := config.Defaults()
 	if c, err := config.Load(); err == nil {
@@ -2175,7 +2279,12 @@ func cmdGUI() {
 		return
 	}
 
-	cmdLaunch(tuiLaunchArgs(req, cfg))
+	launchArgs := tuiLaunchArgs(req, cfg)
+	if req.AITune {
+		cmdTune(launchArgs)
+		return
+	}
+	cmdLaunch(launchArgs)
 }
 
 func cmdDryRun(args []string) {
@@ -2231,7 +2340,7 @@ func cmdDryRun(args []string) {
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
-	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help)
+	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, strategy == nil || !strategy.HasSSM)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	if envPrefix := applyGPUVisibility(req, backendDialect(be)); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
@@ -2596,8 +2705,8 @@ func claudeCodeAliasArgs(args []string, claudeCode bool) []string {
 // later matching chunk into its new position. The value 256 is the conservative
 // llama.cpp coding preset. Users can disable it explicitly, and older backends
 // remain compatible because support is checked before adding the flag.
-func claudeCodeCacheArgs(args []string, claudeCode bool, backendHelp string) []string {
-	if !claudeCode || !strings.Contains(backendHelp, "--cache-reuse") {
+func claudeCodeCacheArgs(args []string, claudeCode bool, backendHelp string, shiftableContext bool) []string {
+	if !claudeCode || !shiftableContext || !strings.Contains(backendHelp, "--cache-reuse") {
 		return args
 	}
 	hasFlag := func(flag string) bool {
@@ -2858,7 +2967,7 @@ func cmdRecommend(args []string) {
 			return
 		}
 		fmt.Printf("\n%s\n", title)
-		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Speed")
+		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Est.speed")
 		for _, r := range rows {
 			name := r.Name
 			if len(name) > 36 {
@@ -2875,6 +2984,8 @@ func cmdRecommend(args []string) {
 	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
 	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
+	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
+	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
 	fmt.Printf("\n%s\n", recommend.CatalogAttribution())
 }
 
@@ -3097,9 +3208,24 @@ func cmdDaemon(args []string) {
 		// so model swaps get the same auto-placement as the initial launch.
 		ComputeArgs: computeServerArgs,
 	})
-	if err := d.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Start() }()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, shutdownSignals()...)
+	defer signal.Stop(sigCh)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case sig := <-sigCh:
+		fmt.Printf("\n[daemon] received %s; stopping managed server\n", sig)
+		if err := d.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error during daemon shutdown: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 

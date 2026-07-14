@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
 func TestActionMenuArrowNav(t *testing.T) {
@@ -20,6 +21,16 @@ func TestActionMenuArrowNav(t *testing.T) {
 	fr = nm.(Model)
 	if fr.menuCursor != 1 {
 		t.Fatalf("firstrun down: expected menuCursor 1, got %d", fr.menuCursor)
+	}
+}
+
+func TestFirstRunUpdateIsExplicitAndNonBlocking(t *testing.T) {
+	m := Model{screen: ScreenFirstRun, modelDir: "/tmp"}
+	m.input = textinput.New()
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = nm.(Model)
+	if m.launchRequest == nil || !m.launchRequest.Update {
+		t.Fatal("first-run update shortcut must return an explicit update request")
 	}
 }
 
@@ -60,12 +71,46 @@ func TestDiscoverModels(t *testing.T) {
 	}
 }
 
+func TestDiscoverModelsKeepsSameBasenameInDifferentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"repo-a", "repo-b"} {
+		modelDir := filepath.Join(dir, sub)
+		if err := os.MkdirAll(modelDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(modelDir, "model-Q4.gguf"), []byte("GGUF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(discoverModels(dir)); got != 2 {
+		t.Fatalf("same basename in two repositories should produce two choices, got %d", got)
+	}
+}
+
 func TestBoolLabel(t *testing.T) {
 	if boolLabel(true) != "on" {
 		t.Fatalf("expected 'on' for true")
 	}
 	if boolLabel(false) != "off" {
 		t.Fatalf("expected 'off' for false")
+	}
+}
+
+func TestRecommendedViewLabelsPredictedSpeedAsEstimate(t *testing.T) {
+	rec := recommend.Recommendation{
+		Candidate:    recommend.Candidate{Name: "Test model"},
+		Fit:          "single GPU",
+		QuantName:    "Q4_K_M",
+		QuantSizeGB:  4,
+		PredictedTPS: 6,
+	}
+	m := Model{
+		recommendationGroups: recommend.Categories{Balanced: []recommend.Recommendation{rec}},
+		recommendations:      []recommend.Recommendation{rec},
+	}
+	view := m.viewRecommended()
+	if !strings.Contains(view, "~6 t/s") || !strings.Contains(view, "Speeds are estimates") {
+		t.Fatalf("recommended speed must be clearly estimated, got %q", view)
 	}
 }
 
@@ -116,6 +161,39 @@ func TestBuildArgsUsesPlannerDryRunCommand(t *testing.T) {
 	}
 }
 
+func TestLaunchArgsAutoBackendDoesNotDisableArchitectureRouting(t *testing.T) {
+	req := &LaunchRequest{ModelPath: "/models/hy3.gguf", Backend: "auto", CtxFlag: "fit"}
+	joined := strings.Join(req.LaunchArgs(), " ")
+	if strings.Contains(joined, "--backend") {
+		t.Fatalf("automatic backend must remain implicit so architecture routes can select a fork: %q", joined)
+	}
+}
+
+func TestLaunchArgsCarriesAITuneRounds(t *testing.T) {
+	req := &LaunchRequest{ModelPath: "/models/test.gguf", AITune: true, AITuneRounds: 11}
+	joined := strings.Join(req.LaunchArgs(), " ")
+	if !strings.Contains(joined, "--rounds 11") {
+		t.Fatalf("TUI AI tune rounds must reach cmdTune: %q", joined)
+	}
+}
+
+func TestRunModesAreMutuallyExclusive(t *testing.T) {
+	m := Model{screen: ScreenModelConfig, models: []ModelItem{{Name: "test.gguf"}}, kvPlacement: "auto", ctxMode: "fit", ctxSize: "fit"}
+	m.input = textinput.New()
+	m.cfgCursor = 4 // AI tune
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	if !m.aitune || m.benchmark {
+		t.Fatal("AI tune should enable itself and disable benchmark")
+	}
+	m.cfgCursor = 8 // benchmark after AI tune adds the rounds row
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	if !m.benchmark || m.aitune {
+		t.Fatal("benchmark should enable itself and disable AI tune")
+	}
+}
+
 func TestPrelaunchViewShowsSelectedBackend(t *testing.T) {
 	m := Model{
 		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
@@ -154,15 +232,18 @@ func TestInitialModelUsesConfigPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(cfgDir, "config")
-	doc := "MODEL_DIR=\"" + modelDir + "\"\nCACHE_DIR=\"" + cacheDir + "\"\nBACKEND=\"vulkan\"\nKV_PLACEMENT=\"gpu\"\nTUNE_ROUNDS=\"9\"\n"
+	doc := "MODEL_DIR=\"" + modelDir + "\"\nCACHE_DIR=\"" + cacheDir + "\"\nBACKEND=\"vulkan\"\nKV_PLACEMENT=\"gpu\"\nCTX_SIZE=\"max\"\nPARALLEL=\"3\"\nPORT=\"9091\"\nVISION=\"1\"\nTUNE_ROUNDS=\"9\"\n"
 	if err := os.WriteFile(cfgPath, []byte(doc), 0644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LLM_CONFIG", cfgPath)
 	t.Setenv("LLM_APP_HOME", appHome)
 	m := InitialModel()
-	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.aituneRounds != 9 {
-		t.Fatalf("initial model did not use config: %#v", m)
+	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.aituneRounds != 9 || m.ctxMode != "max" || m.parallel != "3" || m.port != 9091 || !m.vision {
+		t.Fatalf("config not restored: modelDir=%q cacheDir=%q backend=%q kv=%q rounds=%d ctx=%q parallel=%q port=%d vision=%v", m.modelDir, m.cacheDir, m.backend, m.kvPlacement, m.aituneRounds, m.ctxMode, m.parallel, m.port, m.vision)
+	}
+	if m.parallelSet {
+		t.Fatal("a config parallel value is policy input, not an explicit per-launch override")
 	}
 }
 
@@ -212,5 +293,49 @@ func TestApplySettingSyncsKVIntoLiveSession(t *testing.T) {
 	m.applySetting(pRow, "cpu")
 	if m.kvPlacement != "cpu" {
 		t.Fatalf("KV placement setting must sync into the session, got %q", m.kvPlacement)
+	}
+}
+
+func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := Model{settingsCfg: config.Defaults(), ctxMode: "fit", ctxSize: "fit", port: 8081, parallel: "1", aituneRounds: 8}
+	rows := map[string]settingRow{}
+	for _, row := range settingRows() {
+		rows[row.label] = row
+	}
+	for _, label := range []string{"Context", "Vision", "Port", "Parallel", "AI-tune rounds"} {
+		if rows[label].label == "" {
+			t.Fatalf("settings row %q not found", label)
+		}
+	}
+	m.applySetting(rows["Context"], "max")
+	m.applySetting(rows["Vision"], "on")
+	m.applySetting(rows["Port"], "9099")
+	m.applySetting(rows["Parallel"], "3")
+	m.applySetting(rows["AI-tune rounds"], "12")
+	if m.ctxMode != "max" || !m.vision || m.port != 9099 || m.parallel != "3" || m.aituneRounds != 12 {
+		t.Fatalf("launch settings not synced: ctx=%q vision=%v port=%d parallel=%q rounds=%d", m.ctxMode, m.vision, m.port, m.parallel, m.aituneRounds)
+	}
+	if m.parallelSet {
+		t.Fatal("Settings parallel value must still allow Claude mode to apply its minimum slot policy")
+	}
+}
+
+func TestPerModelParallelEntryIsExplicit(t *testing.T) {
+	m := Model{
+		screen:    ScreenModelConfig,
+		models:    []ModelItem{{Name: "test.gguf", Path: "/models/test.gguf"}},
+		inputMode: "parallel",
+	}
+	m.input = textinput.New()
+	m.input.SetValue("1")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.parallel != "1" || !m.parallelSet {
+		t.Fatalf("per-model parallel must be explicit: value=%q set=%v", m.parallel, m.parallelSet)
+	}
+	req := m.buildLaunchRequest()
+	if req == nil || !req.ParallelSet || req.Parallel != 1 {
+		t.Fatalf("explicit parallel did not reach launch request: %#v", req)
 	}
 }

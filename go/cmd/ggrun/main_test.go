@@ -129,6 +129,18 @@ func TestShouldPromoteMoEPlacement(t *testing.T) {
 	}
 }
 
+func TestMeasuredPromotionBypassesPlacementCache(t *testing.T) {
+	opts := measuredPromotionOptions(
+		&launchRequest{CtxFlag: "32768"},
+		&placement.ModelProfile{ModelArch: "qwen3moe", CTXTrain: 32768},
+		&backendInfo{Tag: "llama"},
+		t.TempDir(),
+	)
+	if !opts.SkipPlacementCache {
+		t.Fatal("measured promotion must recompute instead of reloading the sparse placement it is meant to improve")
+	}
+}
+
 func TestStartupLogCUDAOOM(t *testing.T) {
 	log := "loading\n" +
 		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2206.07 MiB on device 0: cudaMalloc failed: out of memory\n" +
@@ -781,6 +793,24 @@ func TestApplyGPUVisibilityNoFlagNoEnv(t *testing.T) {
 	}
 }
 
+func TestRuntimeGPUCapabilitiesMatchesVisibilityRenumbering(t *testing.T) {
+	caps := &detect.Capabilities{GPUs: []detect.GPU{
+		{Index: 0, Name: "large", VRAMTotalMB: 24576},
+		{Index: 1, Name: "slow", VRAMTotalMB: 12288},
+		{Index: 2, Name: "fast", VRAMTotalMB: 12282},
+	}}
+	runtime, mapping := runtimeGPUCapabilities(caps, &launchRequest{GPUsFlag: "2,1"})
+	if runtime == nil || len(runtime.GPUs) != 2 {
+		t.Fatalf("runtime GPU filter mismatch: %#v", runtime)
+	}
+	if runtime.GPUs[0].Name != "slow" || runtime.GPUs[0].Index != 0 || runtime.GPUs[1].Name != "fast" || runtime.GPUs[1].Index != 1 {
+		t.Fatalf("visible GPU order/renumber mismatch: %#v", runtime.GPUs)
+	}
+	if mapping[0] != 1 || mapping[1] != 2 || physicalGPUIndex(1, mapping) != 2 {
+		t.Fatalf("visible-to-physical mapping mismatch: %#v", mapping)
+	}
+}
+
 func TestClaudeCodeAutocompactPct(t *testing.T) {
 	cases := []struct {
 		name string
@@ -920,22 +950,25 @@ func TestClaudeCodeAliasArgs(t *testing.T) {
 
 func TestClaudeCodeCacheArgs(t *testing.T) {
 	base := []string{"llama-server", "-m", "model.gguf"}
-	got := claudeCodeCacheArgs(base, true, "--cache-prompt --cache-reuse N")
+	got := claudeCodeCacheArgs(base, true, "--cache-prompt --cache-reuse N", true)
 	if !hasArgValue(got, "--cache-reuse", "256") {
 		t.Fatalf("expected Claude cache reuse default, got %v", got)
 	}
-	if got := claudeCodeCacheArgs(base, false, "--cache-reuse N"); len(got) != len(base) {
+	if got := claudeCodeCacheArgs(base, false, "--cache-reuse N", true); len(got) != len(base) {
 		t.Fatalf("expected no cache change outside Claude mode, got %v", got)
 	}
-	if got := claudeCodeCacheArgs(base, true, "--cache-prompt"); len(got) != len(base) {
+	if got := claudeCodeCacheArgs(base, true, "--cache-prompt", true); len(got) != len(base) {
 		t.Fatalf("expected unsupported backend to remain unchanged, got %v", got)
+	}
+	if got := claudeCodeCacheArgs(base, true, "--cache-reuse N", false); len(got) != len(base) {
+		t.Fatalf("expected recurrent context to skip unsupported cache shifting, got %v", got)
 	}
 	for _, user := range [][]string{
 		{"llama-server", "--cache-reuse", "0"},
 		{"llama-server", "--cache-reuse=0"},
 		{"llama-server", "--no-cache-prompt"},
 	} {
-		got := claudeCodeCacheArgs(user, true, "--cache-reuse N")
+		got := claudeCodeCacheArgs(user, true, "--cache-reuse N", true)
 		if len(got) != len(user) {
 			t.Fatalf("expected user cache override preserved, input %v got %v", user, got)
 		}
@@ -1020,6 +1053,20 @@ func TestClaudeCodeSlotAdjust(t *testing.T) {
 				t.Fatalf("ctx=%d par=%d cc=%v: got parallel %d, want %d", tc.ctx, tc.par, tc.claudeCode, s.Parallel, tc.wantParallel)
 			}
 		})
+	}
+}
+
+func TestClaudeCodeHybridUsesFairPromptBatch(t *testing.T) {
+	s := &placement.Strategy{ContextSize: 1048576, Parallel: 2, BatchSize: 2048, HasSSM: true}
+	claudeCodeSlotAdjust(s, true, false)
+	if s.BatchSize != claudeHybridBatch {
+		t.Fatalf("hybrid Claude batch=%d, want %d", s.BatchSize, claudeHybridBatch)
+	}
+
+	nonClaude := &placement.Strategy{ContextSize: 1048576, Parallel: 2, BatchSize: 2048, HasSSM: true}
+	claudeCodeSlotAdjust(nonClaude, false, false)
+	if nonClaude.BatchSize != 2048 {
+		t.Fatalf("non-Claude batch was changed: %d", nonClaude.BatchSize)
 	}
 }
 

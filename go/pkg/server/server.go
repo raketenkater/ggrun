@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -237,6 +238,13 @@ func (p *Process) Stop() error {
 	select {
 	case err := <-p.waitCh:
 		p.waitCh <- err // allow repeated Stop() calls
+		// We just terminated the process tree ourselves, so a signal-derived
+		// ExitError is the expected successful shutdown result. Propagating it
+		// made daemon /stop return HTTP 500 even though the model was gone.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil
+		}
 		return err
 	case <-time.After(15 * time.Second):
 		return fmt.Errorf("process did not exit within 15s")
@@ -370,7 +378,7 @@ type loadProgress struct {
 
 func startupStatus(logText string, elapsed, timeout time.Duration, progress loadProgress) string {
 	parts := make([]string, 0, 5)
-	if progress.Total > 0 {
+	if progress.Total > 0 && progress.Done > 0 {
 		pct := progressPercent(progress)
 		parts = append(parts, fmt.Sprintf("%s %3d%%", progressBar(pct, 20), pct))
 	}
@@ -380,7 +388,7 @@ func startupStatus(logText string, elapsed, timeout time.Duration, progress load
 	} else {
 		parts = append(parts, elapsed.Round(time.Second).String())
 	}
-	if progress.Total > 0 {
+	if progress.Total > 0 && progress.Done > 0 {
 		parts = append(parts, fmt.Sprintf("read %s/%s", formatGiB(progress.Done), formatGiB(progress.Total)))
 	}
 	if line := latestBackendLine(logText); line != "" {
@@ -476,6 +484,9 @@ type loadProgressTracker struct {
 	pid   int
 	paths map[string]int64
 	total int64
+	// Backend initialization may reopen or seek the same shard, so the current
+	// fd offsets can move backwards. Never regress the user-visible progress.
+	maxDone int64
 }
 
 func newLoadProgressTracker(pid int, args []string) *loadProgressTracker {
@@ -493,6 +504,11 @@ func (t *loadProgressTracker) Snapshot() loadProgress {
 	}
 	if done > t.total {
 		done = t.total
+	}
+	if done < t.maxDone {
+		done = t.maxDone
+	} else {
+		t.maxDone = done
 	}
 	return loadProgress{Done: done, Total: t.total}
 }

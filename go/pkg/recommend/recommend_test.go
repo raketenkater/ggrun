@@ -393,6 +393,49 @@ func TestEvaluateMoEFitsAcrossRAMAndVRAM(t *testing.T) {
 	}
 }
 
+func TestMoESpeedEstimateIncludesDispatchCost(t *testing.T) {
+	// Measured DeepSeek V4 Flash IQ4 on this heterogeneous 48 GiB setup decodes
+	// at about 6 tok/s. The estimator should remain useful for ranking instead
+	// of reporting the active-parameter bandwidth ceiling (about 9 tok/s).
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 128000, FreeMB: 120000},
+		GPUs: []detect.GPU{
+			{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24576},
+			{Name: "NVIDIA GeForce RTX 3060", VRAMTotalMB: 12288},
+			{Name: "NVIDIA GeForce RTX 4070", VRAMTotalMB: 12288},
+		},
+	}
+	c := Candidate{MoE: true, TotalParamsB: 284, ActiveParamsB: 13}
+	got := predictDecodeTPS(caps, c, QuantOption{Name: "UD-IQ4_XS", SizeGB: 128.43})
+	if got < 5.0 || got > 7.5 {
+		t.Fatalf("DeepSeek V4-class MoE estimate %.1f tok/s is outside the measured useful range", got)
+	}
+}
+
+func TestPredictDecodeTPSDenseSingleGPUUsesFastestFittingCard(t *testing.T) {
+	caps := &detect.Capabilities{GPUs: []detect.GPU{
+		{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24564},
+		{Name: "NVIDIA GeForce RTX 3060", VRAMTotalMB: 12288},
+		{Name: "NVIDIA GeForce RTX 4070", VRAMTotalMB: 12282},
+	}}
+	candidate := Candidate{TotalParamsB: 27}
+	quant := QuantOption{Name: "Q5_K_M", SizeGB: 18.2}
+	got := predictDecodeTPS(caps, candidate, quant)
+	if got < 36 || got > 43 {
+		t.Fatalf("dense single-GPU prediction = %.2f t/s, want near measured 40.15", got)
+	}
+}
+
+func TestPredictDecodeTPSSmallDenseIncludesKernelBoundScaling(t *testing.T) {
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24564}}}
+	candidate := Candidate{TotalParamsB: 4}
+	quant := QuantOption{Name: "Q4_K_M", SizeGB: 2.6}
+	got := predictDecodeTPS(caps, candidate, quant)
+	if got < 165 || got > 205 {
+		t.Fatalf("small dense prediction = %.2f t/s, want near measured 180", got)
+	}
+}
+
 func TestUnrunnableArchesLoaded(t *testing.T) {
 	// The embedded blocklist must parse and contain exactly the known-bad
 	// arches (lowercased). This guards the data-driven load in init() against

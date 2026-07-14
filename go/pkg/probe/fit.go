@@ -34,6 +34,16 @@ func EstimateFitCtx(modelPath, cacheDir string) int {
 	if err != nil {
 		return 0
 	}
+	return EstimateFitCtxForInfo(modelPath, cacheDir, info, totalSystemMemoryMB())
+}
+
+// EstimateFitCtxForInfo is the metadata-aware form used by model browsers.
+// Callers that already parsed a GGUF and detected hardware can avoid launching
+// the parser and hardware probes again for every model in the directory.
+func EstimateFitCtxForInfo(modelPath, cacheDir string, info *gguf.Info, totalSysMemMB int) int {
+	if info == nil {
+		return 0
+	}
 	layerCount := info.BlockCount
 	if layerCount <= 0 {
 		return 0
@@ -50,9 +60,6 @@ func EstimateFitCtx(modelPath, cacheDir string) int {
 	if idx := strings.Index(modelName, "-00001-of-"); idx > 0 {
 		modelName = modelName[:idx] + ".gguf"
 	}
-
-	// System memory ceiling for rejecting corrupted probes
-	totalSysMemMB := totalSystemMemoryMB()
 
 	maxValidCtx := 0
 	ctxRe := regexp.MustCompile(`ctx=(\d+)`)

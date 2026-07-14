@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/server"
@@ -12,8 +15,10 @@ import (
 // Daemon holds a persistent llama-server process and exposes a control API.
 type Daemon struct {
 	addr    string
+	mu      sync.Mutex
 	process *server.Process
 	config  Config
+	http    *http.Server
 }
 
 // Config holds daemon settings.
@@ -50,7 +55,9 @@ func New(cfg Config) *Daemon {
 		cfg.ControlPort = 9090
 	}
 	return &Daemon{
-		addr:   fmt.Sprintf(":%d", cfg.ControlPort),
+		// The control API has mutating start/stop/reload methods and no
+		// authentication. Never expose it to the LAN.
+		addr:   net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", cfg.ControlPort)),
 		config: cfg,
 	}
 }
@@ -65,11 +72,44 @@ func (d *Daemon) Start() error {
 	mux.HandleFunc("/config", d.handleConfig)
 
 	srv := &http.Server{Addr: d.addr, Handler: mux}
+	d.mu.Lock()
+	d.http = srv
+	d.mu.Unlock()
 	fmt.Printf("[daemon] control API on %s\n", d.addr)
-	return srv.ListenAndServe()
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// Close stops the managed model process and closes the control API. It is safe
+// to call during signal-driven shutdown even if no model has been started.
+func (d *Daemon) Close() error {
+	d.mu.Lock()
+	var processErr error
+	if d.process != nil {
+		processErr = d.process.Stop()
+		d.process = nil
+	}
+	srv := d.http
+	d.http = nil
+	d.mu.Unlock()
+
+	var httpErr error
+	if srv != nil {
+		httpErr = srv.Close()
+	}
+	return errors.Join(processErr, httpErr)
 }
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	status := map[string]interface{}{
 		"running":     d.process != nil && d.process.IsRunning(),
 		"config":      d.config,
@@ -80,6 +120,12 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.process != nil && d.process.IsRunning() {
 		http.Error(w, `{"error":"already running"}`, http.StatusConflict)
 		return
@@ -95,6 +141,12 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.process == nil {
 		http.Error(w, `{"error":"not running"}`, http.StatusConflict)
 		return
@@ -109,52 +161,70 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	var newCfg Config
 	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
+	next := d.config
 	if newCfg.ModelPath != "" {
-		d.config.ModelPath = newCfg.ModelPath
+		next.ModelPath = newCfg.ModelPath
 	}
 	if newCfg.Port > 0 {
-		d.config.Port = newCfg.Port
+		next.Port = newCfg.Port
 	}
 	if newCfg.StartupTimeoutSecs > 0 {
-		d.config.StartupTimeoutSecs = newCfg.StartupTimeoutSecs
+		next.StartupTimeoutSecs = newCfg.StartupTimeoutSecs
 	}
 	if len(newCfg.ServerArgs) > 0 {
 		// Caller supplied explicit args — trust them verbatim.
-		d.config.ServerArgs = newCfg.ServerArgs
-	} else if newCfg.ModelPath != "" && d.config.ComputeArgs != nil {
+		next.ServerArgs = newCfg.ServerArgs
+	} else if newCfg.ModelPath != "" && next.ComputeArgs != nil {
 		// Bare model swap — let ggrun compute placement for it.
-		args, err := d.config.ComputeArgs(d.config.ModelPath, d.config.Port)
+		args, err := next.ComputeArgs(next.ModelPath, next.Port)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"compute placement: %s"}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
-		d.config.ServerArgs = args
+		next.ServerArgs = args
 	}
 
 	// Restart if running
 	wasRunning := d.process != nil && d.process.IsRunning()
 	if wasRunning {
-		d.process.Stop()
+		if err := d.process.Stop(); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"stop old model: %s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		d.process = nil
 		// Small delay to free ports
 		time.Sleep(500 * time.Millisecond)
-		p, err := server.StartWithTimeout(d.config.ServerArgs, d.config.Port, d.config.startupTimeout())
+		p, err := server.StartWithTimeout(next.ServerArgs, next.Port, next.startupTimeout())
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
 		d.process = p
 	}
+	d.config = next
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "reloaded"})
 }
 
 func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(d.config)
 }

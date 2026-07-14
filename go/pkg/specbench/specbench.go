@@ -68,7 +68,7 @@ func Prompts(include60K bool) []Prompt {
 	}
 	if include60K {
 		last := &prompts[len(prompts)-1]
-		last.Text = longReviewPrompt() + "\nEnd your answer with the exact marker " + last.Expected + "."
+		last.Text = longReviewPrompt() + "\nBegin your answer with the exact marker " + last.Expected + "."
 		prompts[len(prompts)-1].MaxTokens = 128
 	}
 	return prompts
@@ -76,7 +76,12 @@ func Prompts(include60K bool) []Prompt {
 
 func verifiedPrompt(name, text string, maxTokens int) Prompt {
 	marker := "GGRUN-" + strings.ToUpper(name) + "-OK"
-	return Prompt{Name: name, Text: text + " Keep the answer concise and end it with the exact marker " + marker + ".", MaxTokens: maxTokens, Expected: marker}
+	// Put the verification token first. Small or reasoning-oriented models can
+	// legitimately fill max_tokens before reaching an end marker, which made the
+	// target-only baseline fail despite non-empty, stable responses. An exact
+	// prefix marker still proves that each response corresponds to its prompt and
+	// survives the target-versus-draft correctness comparison.
+	return Prompt{Name: name, Text: "Begin your answer with the exact marker " + marker + ". " + text + " Keep the answer concise.", MaxTokens: maxTokens, Expected: marker}
 }
 
 func longReviewPrompt() string {

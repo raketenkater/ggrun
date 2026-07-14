@@ -478,7 +478,7 @@ type startupProgress struct {
 
 func startupProgressStatus(logText string, elapsed, timeout time.Duration, progress startupProgress) string {
 	parts := make([]string, 0, 5)
-	if progress.total > 0 {
+	if progress.total > 0 && progress.done > 0 {
 		pct := startupProgressPercent(progress)
 		parts = append(parts, fmt.Sprintf("%s %3d%%", startupProgressBar(pct, 20), pct))
 	}
@@ -488,7 +488,7 @@ func startupProgressStatus(logText string, elapsed, timeout time.Duration, progr
 	} else {
 		parts = append(parts, elapsed.Round(time.Second).String())
 	}
-	if progress.total > 0 {
+	if progress.total > 0 && progress.done > 0 {
 		parts = append(parts, fmt.Sprintf("read %s/%s", formatGiB(progress.done), formatGiB(progress.total)))
 	}
 	if line := latestBackendLine(logText); line != "" {
@@ -573,6 +573,9 @@ type startupProgressTracker struct {
 	pid   int
 	paths map[string]int64
 	total int64
+	// Backend initialization may reopen or seek the same shard, so the current
+	// fd offsets can move backwards. Never regress the user-visible progress.
+	maxDone int64
 }
 
 func newStartupProgressTracker(pid int, args []string) *startupProgressTracker {
@@ -590,6 +593,11 @@ func (t *startupProgressTracker) snapshot() startupProgress {
 	}
 	if done > t.total {
 		done = t.total
+	}
+	if done < t.maxDone {
+		done = t.maxDone
+	} else {
+		t.maxDone = done
 	}
 	return startupProgress{done: done, total: t.total}
 }

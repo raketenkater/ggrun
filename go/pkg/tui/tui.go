@@ -17,6 +17,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/gguf"
 	"github.com/raketenkater/ggrun/pkg/probe"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 	"github.com/raketenkater/ggrun/pkg/tune"
@@ -62,6 +63,7 @@ type Model struct {
 	modelDir               string
 	settingsPath           string
 	cacheDir               string
+	port                   int
 	recommendationGroups   recommend.Categories
 	recommendations        []recommend.Recommendation
 	selectedRecommendation int
@@ -70,8 +72,7 @@ type Model struct {
 	mainList list.Model
 
 	// Quick launch / smart predictions
-	selectedModel  int
-	recommendation *LaunchRecommendation
+	selectedModel int
 
 	// Advanced config
 	ctxSize        string
@@ -81,11 +82,11 @@ type Model struct {
 	vramHeadroomMB int
 	ramHeadroomMB  int
 	parallel       string
+	parallelSet    bool
 	aitune         bool
 	aituneRounds   int
 	benchmark      bool
 	vision         bool
-	keepalive      bool
 	claudeCode     bool
 
 	// Tuned config
@@ -127,39 +128,42 @@ type Model struct {
 
 // ModelItem represents a discovered GGUF model.
 type ModelItem struct {
-	Name   string
-	Path   string
-	Tuned  int
-	SizeGB float64
-	Arch   string
-	MaxCtx int // trained max context from GGUF
-	FitCtx int // empirically proven fit context from probes
-}
-
-// LaunchRecommendation holds smart-predicted settings.
-type LaunchRecommendation struct {
-	ContextSize    int
-	GPULayers      int
-	UseGPU         bool
-	TensorSplit    bool
-	KVPlacement    string
-	FlashAttention bool
-	ParallelSlots  int
-	Benchmark      bool
-	Reason         string
-	Warning        string
+	Name        string
+	Path        string
+	Tuned       int
+	SizeGB      float64
+	Arch        string
+	IsMoE       bool
+	AutoBackend string // registered architecture route used when backend=auto
+	MaxCtx      int    // trained max context from GGUF
+	FitCtx      int    // empirically proven fit context from probes
 }
 
 func InitialModel() Model {
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		cfg = config.Defaults()
+	}
 	settingsPath := config.Path()
 	backend := cfg.Backend
 	if backend == "" {
-		backend = "llama"
+		backend = "auto"
 	}
 	rounds := cfg.TuneRounds
 	if rounds <= 0 {
 		rounds = 8
+	}
+	ctxValue := cfg.CtxValue()
+	ctxMode := "fit"
+	switch cfg.CtxMode {
+	case "max", "native":
+		ctxMode = "max"
+	case "manual":
+		ctxMode = "manual"
+	}
+	parallel := ""
+	if cfg.Parallel > 0 {
+		parallel = strconv.Itoa(cfg.Parallel)
 	}
 	m := Model{
 		screen:       ScreenMain,
@@ -167,11 +171,20 @@ func InitialModel() Model {
 		modelDir:     cfg.ModelDir,
 		settingsPath: settingsPath,
 		cacheDir:     cfg.CacheDir,
-		ctxSize:      "fit",
-		ctxMode:      "fit",
+		port:         cfg.Port,
+		ctxSize:      ctxValue,
+		ctxMode:      ctxMode,
 		kvPlacement:  cfg.KVPlacement,
 		kvQuality:    cfg.KVQuality,
+		parallel:     parallel,
+		vision:       cfg.Vision,
 		aituneRounds: rounds,
+	}
+	if m.port <= 0 {
+		m.port = 8081
+	}
+	if m.ctxSize == "" {
+		m.ctxSize = "fit"
 	}
 	if m.kvPlacement == "" {
 		m.kvPlacement = "auto"
@@ -184,23 +197,11 @@ func InitialModel() Model {
 	m.input.Placeholder = ""
 	m.input.Focus()
 
-	// Discover models
-	m.models = discoverModels(m.modelDir)
-
-	// Populate context estimates and tuned counts
-	for i := range m.models {
-		m.models[i].MaxCtx = probe.DetectMaxCtx(m.models[i].Path)
-		m.models[i].FitCtx = probe.EstimateFitCtx(m.models[i].Path, m.cacheDir)
-		backendTag := "llama"
-		if m.backend == "ik_llama" {
-			backendTag = "ik"
-		}
-		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, backendTag)
-	}
-
-	// Detect hardware
+	// Detect once, then reuse that result while enriching every discovered GGUF.
 	caps, _ := detect.Detect()
 	m.caps = caps
+	m.models = loadModels(m.modelDir, m.cacheDir, m.backend, m.caps)
+
 	m.vramHeadroomMB = config.ParseBudgetMB(cfg.VRAMHeadroom)
 	m.ramHeadroomMB = config.ParseBudgetMB(cfg.RAMHeadroom)
 	m.refreshRecommendations()
@@ -224,7 +225,7 @@ func flattenRecommendationCategories(cats recommend.Categories) []recommend.Reco
 
 func newMainList(models []ModelItem) list.Model {
 	items := []list.Item{
-		mainItem{title: "r. Recommended downloads", desc: "Top models that fit this machine; Vulkan fallback aware", isAction: true, action: "recommend"},
+		mainItem{title: "r. Recommended downloads", desc: "Best models and quants that fit this computer", isAction: true, action: "recommend"},
 	}
 	for i, m := range models {
 		desc := fmt.Sprintf("%.1fGB, %s", m.SizeGB, m.Arch)
@@ -241,14 +242,15 @@ func newMainList(models []ModelItem) list.Model {
 	// Minimal action items
 	items = append(items, mainItem{title: "d. Download model", desc: "Get from Hugging Face", isAction: true, action: "download"})
 	items = append(items, mainItem{title: "m. Model directory", desc: "Change search path", isAction: true, action: "modeldir"})
-	items = append(items, mainItem{title: "b. Backend", desc: "Switch llama / ik_llama", isAction: true, action: "backend"})
+	items = append(items, mainItem{title: "b. Backend", desc: "Auto-select or choose an installed backend", isAction: true, action: "backend"})
 	items = append(items, mainItem{title: "s. Settings", desc: "All options (arrow keys)", isAction: true, action: "settings"})
+	items = append(items, mainItem{title: "u. Update", desc: "Update ggrun and installed backends", isAction: true, action: "update"})
 	items = append(items, mainItem{title: "q. Quit", desc: "Exit", isAction: true, action: "quit"})
 
 	l := list.New(items, mainItemDelegate{}, 40, 20)
 	l.Title = ""
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
+	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
 	return l
 }
@@ -264,7 +266,7 @@ type mainItem struct {
 
 func (i mainItem) Title() string       { return i.title }
 func (i mainItem) Description() string { return i.desc }
-func (i mainItem) FilterValue() string { return i.title }
+func (i mainItem) FilterValue() string { return i.title + " " + i.desc }
 
 type mainItemDelegate struct{}
 
@@ -298,9 +300,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q":
 			if m.screen == ScreenMain {
-				return m, tea.Quit
+				if m.mainList.FilterState() != list.Filtering {
+					return m, tea.Quit
+				}
 			}
 		case "esc":
 			if m.screen == ScreenChoice {
@@ -344,6 +350,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// While the search box is active, every printable key belongs to the filter;
+	// do not let shortcuts such as r/s/b steal letters from the query.
+	if m.mainList.FilterState() == list.Filtering {
+		var cmd tea.Cmd
+		m.mainList, cmd = m.mainList.Update(msg)
+		return m, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -359,7 +372,6 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// are pre-filled, so launching is one more keypress: press L
 					// (or Enter on the Launch row) to start.
 					m.selectedModel = item.index
-					m.recommendation = computeRecommendation(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), m.models[m.selectedModel])
 					m.cfgCursor = 0
 					m.screen = ScreenModelConfig
 					return m, nil
@@ -385,18 +397,23 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.openBackendChoice(ScreenMain)
 				case "settings":
 					m.openSettings()
+				case "update":
+					m.launchRequest = &LaunchRequest{Update: true}
+					return m, tea.Quit
 				case "quit":
 					return m, tea.Quit
 				}
 			}
 		case "s", "S":
 			m.openSettings()
+		case "u", "U":
+			m.launchRequest = &LaunchRequest{Update: true}
+			return m, tea.Quit
 		case "b", "B":
 			m.openBackendChoice(ScreenMain)
 		case "c", "C":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
 				m.selectedModel = item.index
-				m.recommendation = computeRecommendation(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), m.models[m.selectedModel])
 				m.cfgCursor = 0
 				m.screen = ScreenModelConfig
 				return m, nil
@@ -415,7 +432,7 @@ func (m Model) cfgRows() []string {
 	if m.aitune {
 		rows = append(rows, "rounds")
 	}
-	return append(rows, "vision", "claudecode", "benchmark", "keepalive", "launch", "dryrun")
+	return append(rows, "vision", "claudecode", "benchmark", "launch", "dryrun")
 }
 
 func (m *Model) openCfgInput(mode, val, placeholder string) {
@@ -463,14 +480,18 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 		}
 	case "aitune":
 		m.aitune = !m.aitune
+		if m.aitune {
+			m.benchmark = false
+		}
 	case "vision":
 		m.vision = !m.vision
 	case "claudecode":
 		m.claudeCode = !m.claudeCode
 	case "benchmark":
 		m.benchmark = !m.benchmark
-	case "keepalive":
-		m.keepalive = !m.keepalive
+		if m.benchmark {
+			m.aitune = false
+		}
 	}
 }
 
@@ -491,14 +512,18 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 		m.openCfgInput("aitune", strconv.Itoa(m.aituneRounds), "AI tune rounds (1-30, default 8)")
 	case "aitune":
 		m.aitune = !m.aitune
+		if m.aitune {
+			m.benchmark = false
+		}
 	case "vision":
 		m.vision = !m.vision
 	case "claudecode":
 		m.claudeCode = !m.claudeCode
 	case "benchmark":
 		m.benchmark = !m.benchmark
-	case "keepalive":
-		m.keepalive = !m.keepalive
+		if m.benchmark {
+			m.aitune = false
+		}
 	case "launch":
 		m.screen = ScreenPrelaunch
 	case "dryrun":
@@ -525,6 +550,7 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setCtx(val)
 			case "parallel":
 				m.parallel = strings.TrimSpace(val)
+				m.parallelSet = m.parallel != ""
 			case "aitune":
 				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n >= 1 && n <= 30 {
 					m.aituneRounds = n
@@ -568,16 +594,20 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cycleCfgRow("kv", 1)
 	case "a", "A":
 		m.aitune = !m.aitune
+		if m.aitune {
+			m.benchmark = false
+		}
 	case "r", "R":
 		if m.aitune {
 			m.openCfgInput("aitune", strconv.Itoa(m.aituneRounds), "AI tune rounds (1-30, default 8)")
 		}
 	case "b", "B":
 		m.benchmark = !m.benchmark
+		if m.benchmark {
+			m.aitune = false
+		}
 	case "v", "V":
 		m.vision = !m.vision
-	case "k":
-		m.keepalive = !m.keepalive
 	case "x", "X":
 		m.claudeCode = !m.claudeCode
 	case "l", "L":
@@ -593,7 +623,9 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func firstRunActions() []string { return []string{"recommend", "download", "modeldir", "quit"} }
+func firstRunActions() []string {
+	return []string{"recommend", "download", "modeldir", "update", "quit"}
+}
 
 func (m Model) doFirstRunAction(action string) (tea.Model, tea.Cmd) {
 	switch action {
@@ -612,6 +644,9 @@ func (m Model) doFirstRunAction(action string) (tea.Model, tea.Cmd) {
 		m.input.SetValue(m.modelDir)
 		m.input.Placeholder = "Path to model directory"
 		m.input.Focus()
+	case "update":
+		m.launchRequest = &LaunchRequest{Update: true}
+		return m, tea.Quit
 	case "quit":
 		return m, tea.Quit
 	}
@@ -644,6 +679,8 @@ func (m Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.doFirstRunAction("download")
 	case "m", "M":
 		return m.doFirstRunAction("modeldir")
+	case "u", "U":
+		return m.doFirstRunAction("update")
 	case "q", "Q":
 		return m, tea.Quit
 	}
@@ -668,8 +705,8 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 			val = strings.TrimSpace(val)
 			if val != "" {
 				m.modelDir = val
-				m.models = discoverModels(m.modelDir)
-				m.refreshTunedCounts()
+				m.models = loadModels(m.modelDir, m.cacheDir, m.backend, m.caps)
+				m.mainList = newMainList(m.models)
 				if err := persistConfig(func(c *config.Config) { c.ModelDir = val }); err != nil {
 					m.message = fmt.Sprintf("Using %s for this session — could not save config: %v", val, err)
 					m.messageType = "warning"
@@ -729,7 +766,7 @@ func (m Model) viewMain() string {
 	b.WriteString(m.mainList.View())
 
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("  Enter configure → launch · [r] downloads · [s] settings · [b] backend"))
+	b.WriteString(mutedStyle.Render("  Enter configure · / search · r downloads · s settings · u update"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -749,7 +786,9 @@ func (m Model) viewMain() string {
 func (m Model) viewFirstRun() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ ggrun First Run ═══") + "\n")
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
+	b.WriteString("  Start with Recommended; ggrun will choose a model and quant that fit.\n")
 	b.WriteString("\n")
 
 	actions := firstRunActions()
@@ -757,6 +796,7 @@ func (m Model) viewFirstRun() string {
 		"recommend": "[r] Recommended downloads for this machine",
 		"download":  "[d] Manual Hugging Face repository",
 		"modeldir":  "[m] Point at an existing model directory",
+		"update":    "[u] Update ggrun and backends",
 		"quit":      "[q] Quit",
 	}
 	for i, a := range actions {
@@ -814,8 +854,8 @@ func (m Model) viewModelConfig() string {
 		ctxLabel += ctxHint + ")"
 	}
 	parallelLabel := m.parallel
-	if parallelLabel == "" {
-		parallelLabel = "default (4)"
+	if !m.parallelSet && (parallelLabel == "" || parallelLabel == "1") {
+		parallelLabel = "automatic (1 normally; 2 for Claude Code)"
 	}
 	kvLabel := "auto (GPU KV first)"
 	if m.kvPlacement == "gpu" {
@@ -856,7 +896,6 @@ func (m Model) viewModelConfig() string {
 	}
 	line("claudecode", "[x] Claude Code", ccLabel)
 	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
-	line("keepalive", "[k] Keep-alive restart", boolLabel(m.keepalive))
 
 	section("Actions")
 	line("launch", "[L] Launch", "▶ start the server")
@@ -922,8 +961,11 @@ func (m Model) viewPrelaunch() string {
 		b.WriteString(fmt.Sprintf("  Train max:      %d tokens\n", model.MaxCtx))
 	}
 	b.WriteString(fmt.Sprintf("  Parallel:       %s\n", func() string {
-		if m.parallel == "" {
-			return "1 (default)"
+		if !m.parallelSet && (m.parallel == "" || m.parallel == "1") {
+			if m.claudeCode {
+				return "automatic (2 for Claude Code)"
+			}
+			return "automatic (1)"
 		}
 		return m.parallel
 	}()))
@@ -934,7 +976,6 @@ func (m Model) viewPrelaunch() string {
 	}
 	b.WriteString(fmt.Sprintf("  Vision:         %s\n", boolLabel(m.vision)))
 	b.WriteString(fmt.Sprintf("  Benchmark:      %s\n", boolLabel(m.benchmark)))
-	b.WriteString(fmt.Sprintf("  Keep-alive:     %s\n", boolLabel(m.keepalive)))
 	b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", boolLabel(m.claudeCode)))
 	if m.tunePath != "" {
 		b.WriteString(fmt.Sprintf("  Tuned config:   %s\n", filepath.Base(m.tunePath)))
@@ -1254,7 +1295,7 @@ func (m Model) viewRecommended() string {
 			}
 			tps := "—"
 			if rec.PredictedTPS > 0 {
-				tps = fmt.Sprintf("%.0f t/s", rec.PredictedTPS)
+				tps = fmt.Sprintf("~%.0f t/s", rec.PredictedTPS)
 			}
 			name := rec.Name
 			if len(name) > 34 {
@@ -1274,6 +1315,8 @@ func (m Model) viewRecommended() string {
 	writeGroup("Best overall — balanced quality, speed and fit", m.recommendationGroups.Balanced)
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
+	b.WriteString(mutedStyle.Render("  Speeds are estimates; Benchmark measures this exact machine.") + "\n")
+	b.WriteString(mutedStyle.Render("  Fit uses installed capacity; launch rechecks memory currently free.") + "\n\n")
 
 	b.WriteString(highlightStyle.Render("  [Enter] Download selected"))
 	b.WriteString("\n  [v] VRAM reserve  [m] RAM reserve  [d] Manual repo  [Esc] Back  [↑/↓] Navigate\n")
@@ -1343,13 +1386,12 @@ func hwSummary(caps *detect.Capabilities) string {
 	if len(caps.GPUs) == 0 {
 		return fmt.Sprintf("%dGB RAM, %d cores (no GPU)", ramGB, caps.CPU.Cores)
 	}
-	var vramTotal int
+	parts := make([]string, 0, len(caps.GPUs))
 	for _, g := range caps.GPUs {
-		vramTotal += g.VRAMTotalMB
+		name := strings.TrimPrefix(g.Name, "NVIDIA GeForce ")
+		parts = append(parts, fmt.Sprintf("%s %.0fG", name, float64(g.VRAMTotalMB)/1024))
 	}
-	vramGB := float64(vramTotal) / 1024
-	return fmt.Sprintf("%d GPU(s) %.1fGB VRAM, %dGB RAM, %d cores",
-		len(caps.GPUs), vramGB, ramGB, caps.CPU.Cores)
+	return fmt.Sprintf("%s · %dGB RAM · %d cores", strings.Join(parts, " + "), ramGB, caps.CPU.Cores)
 }
 
 func boolLabel(v bool) string {
@@ -1357,160 +1399,6 @@ func boolLabel(v bool) string {
 		return "on"
 	}
 	return "off"
-}
-
-// computeRecommendation generates smart launch settings based on model + hardware.
-func computeRecommendation(caps *detect.Capabilities, model ModelItem) *LaunchRecommendation {
-	rec := &LaunchRecommendation{
-		ContextSize:    4096,
-		GPULayers:      0,
-		UseGPU:         false,
-		KVPlacement:    "auto",
-		FlashAttention: true,
-		ParallelSlots:  1,
-		Benchmark:      false,
-	}
-
-	if caps == nil {
-		rec.Reason = "No hardware detected, using safe defaults"
-		rec.ContextSize = 4096
-		return rec
-	}
-
-	totalVRAM := caps.TotalVRAM()
-	modelSizeMB := int(model.SizeGB * 1024)
-
-	// Determine GPU availability
-	numGPUs := len(caps.GPUs)
-	hasGPU := numGPUs > 0
-
-	if !hasGPU {
-		rec.UseGPU = false
-		rec.GPULayers = 0
-		rec.ContextSize = min(4096, int(float64(caps.RAM.TotalMB)*0.25/2)) // rough: 0.5MB per 1K ctx
-		if rec.ContextSize < 2048 {
-			rec.ContextSize = 2048
-		}
-		rec.Reason = "No GPU detected — CPU-only mode"
-		return rec
-	}
-
-	// Calculate if model fits on single GPU
-	largestGPUVRAM := 0
-	for _, g := range caps.GPUs {
-		if g.VRAMTotalMB > largestGPUVRAM {
-			largestGPUVRAM = g.VRAMTotalMB
-		}
-	}
-
-	// Heuristic overhead: KV cache + CUDA context (~1-2GB)
-	overheadMB := 2048
-	if model.Arch == "MoE" {
-		overheadMB = 4096 // MoE needs more overhead
-	}
-
-	fitsSingle := modelSizeMB+overheadMB <= largestGPUVRAM
-	fitsAll := modelSizeMB+overheadMB <= totalVRAM
-
-	if fitsSingle {
-		// Model fits on one GPU — optimal case
-		rec.UseGPU = true
-		rec.GPULayers = -1                                         // all layers
-		rec.ContextSize = min(32768, modelNumLayers(model)*1024/4) // rough heuristic
-		if rec.ContextSize < 4096 {
-			rec.ContextSize = 4096
-		}
-		rec.KVPlacement = "gpu"
-		rec.ParallelSlots = 4
-		rec.Benchmark = model.SizeGB < 10 // small models get benchmark by default
-		if model.Arch == "MoE" {
-			rec.Reason = fmt.Sprintf("Fits on %s — full GPU offload with active-experts scheduling", caps.GPUs[0].Name)
-		} else {
-			rec.Reason = fmt.Sprintf("Fits on %s — full GPU offload, max performance", caps.GPUs[0].Name)
-		}
-	} else if fitsAll && numGPUs > 1 {
-		// Fits across multiple GPUs
-		rec.UseGPU = true
-		rec.GPULayers = -1
-		rec.TensorSplit = true
-		rec.ContextSize = 32768
-		rec.KVPlacement = "gpu"
-		rec.ParallelSlots = 4
-		rec.Reason = fmt.Sprintf("Spans %d GPUs with tensor split — all layers on GPU", numGPUs)
-	} else if model.Arch == "MoE" || (numGPUs > 0 && modelSizeMB > totalVRAM) {
-		// Large model that doesn't fit in VRAM — GPU attention, CPU spill
-		rec.UseGPU = true
-		rec.GPULayers = -1
-		if model.Arch == "MoE" {
-			rec.KVPlacement = "cpu"
-			rec.ContextSize = 16384
-			rec.ParallelSlots = 2
-			rec.Warning = "MoE model requires CPU expert offloading — expect lower short-chat tok/s"
-			rec.Reason = "MoE model — GPU attention layers, CPU routing experts"
-		} else {
-			rec.KVPlacement = "auto"
-			rec.ContextSize = 8192
-			rec.ParallelSlots = 2
-			rec.Warning = "Model exceeds total VRAM — partial GPU offload recommended"
-			rec.Reason = "Partial GPU offload — attention on GPU, rest on CPU"
-		}
-	} else {
-		// Fallback: small model that might fit partially
-		vramAvailable := totalVRAM - overheadMB
-		if vramAvailable > modelSizeMB/2 {
-			rec.UseGPU = true
-			rec.GPULayers = -1
-			rec.ContextSize = 8192
-			rec.KVPlacement = "auto"
-			rec.Warning = "Model exceeds total VRAM — partial GPU offload recommended"
-			rec.Reason = "Partial GPU offload — attention on GPU, rest on CPU"
-		} else {
-			rec.UseGPU = false
-			rec.GPULayers = 0
-			rec.ContextSize = 4096
-			rec.KVPlacement = "cpu"
-			rec.Warning = "Model too large for available VRAM — CPU-only mode"
-			rec.Reason = "CPU-only — safe but slower"
-		}
-	}
-
-	return rec
-}
-
-// min returns the smaller of a and b.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// modelNumLayers and hidden size heuristics from filename/size.
-func modelNumLayers(model ModelItem) int {
-	name := strings.ToLower(model.Name)
-	switch {
-	case strings.Contains(name, "0.6b"):
-		return 28
-	case strings.Contains(name, "1b") || strings.Contains(name, "1.5b"):
-		return 24
-	case strings.Contains(name, "3b") || strings.Contains(name, "4b"):
-		return 36
-	case strings.Contains(name, "7b") || strings.Contains(name, "8b"):
-		return 32
-	case strings.Contains(name, "14b") || strings.Contains(name, "15b"):
-		return 48
-	case strings.Contains(name, "27b") || strings.Contains(name, "30b"):
-		return 64
-	case strings.Contains(name, "32b"):
-		return 64
-	case strings.Contains(name, "70b") || strings.Contains(name, "72b"):
-		return 80
-	case strings.Contains(name, "122b"):
-		return 80
-	default:
-		// Estimate from size: ~100MB per layer for Q4
-		return int(model.SizeGB * 1024 / 100)
-	}
 }
 
 func discoverModels(dir string) []ModelItem {
@@ -1542,10 +1430,11 @@ func discoverModels(dir string) []ModelItem {
 			return nil
 		}
 
-		if seen[baseName] {
+		modelKey := filepath.Join(filepath.Dir(path), baseName)
+		if seen[modelKey] {
 			return nil
 		}
-		seen[baseName] = true
+		seen[modelKey] = true
 
 		// Sum sizes for multi-part models
 		dirPath := filepath.Dir(path)
@@ -1593,12 +1482,51 @@ func discoverModels(dir string) []ModelItem {
 	return items
 }
 
+func loadModels(dir, cacheDir, backend string, caps *detect.Capabilities) []ModelItem {
+	models := discoverModels(dir)
+	totalSysMemMB := 0
+	if caps != nil {
+		totalSysMemMB = caps.TotalVRAM() + caps.RAM.TotalMB
+	}
+	backendTag := strings.TrimSpace(backend)
+	switch backendTag {
+	case "", "auto", "llama":
+		backendTag = "llama"
+	case "ik_llama":
+		backendTag = "ik"
+	}
+	for i := range models {
+		modelBackendTag := backendTag
+		if info, err := gguf.Parse(models[i].Path); err == nil {
+			models[i].MaxCtx = info.ContextLength
+			models[i].IsMoE = info.IsMoE
+			if info.Architecture != "" {
+				models[i].Arch = info.Architecture
+			}
+			if info.IsMoE {
+				models[i].Arch += " · MoE"
+			}
+			if (backend == "" || backend == "auto") && info.Architecture != "" {
+				if routed := backends.ForArch(info.Architecture); routed != nil {
+					modelBackendTag = routed.Tag
+					models[i].AutoBackend = routed.Tag
+				}
+			}
+			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)
+		}
+		models[i].Tuned = tune.CountTunedConfigs(cacheDir, models[i].Name, modelBackendTag)
+	}
+	return models
+}
+
 func (m Model) backendTag() string {
 	backend := strings.TrimSpace(m.backend)
 	switch backend {
 	case "ik_llama":
 		return "ik"
 	case "":
+		return "llama"
+	case "auto":
 		return "llama"
 	default:
 		return backend
@@ -1622,7 +1550,11 @@ func persistConfig(mutate func(*config.Config)) error {
 func (m *Model) refreshTunedCounts() {
 	tag := m.backendTag()
 	for i := range m.models {
-		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, tag)
+		modelTag := tag
+		if (m.backend == "" || m.backend == "auto") && m.models[i].AutoBackend != "" {
+			modelTag = m.models[i].AutoBackend
+		}
+		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, modelTag)
 	}
 	m.mainList = newMainList(m.models)
 }
@@ -1672,7 +1604,7 @@ func settingRows() []settingRow {
 		{label: "VRAM headroom", kind: "text",
 			get: func(c *config.Config) string {
 				if strings.TrimSpace(c.VRAMHeadroom) == "" {
-					return "0 (use all VRAM)"
+					return "0"
 				}
 				return c.VRAMHeadroom
 			},
@@ -1680,7 +1612,7 @@ func settingRows() []settingRow {
 		{label: "RAM headroom", kind: "text",
 			get: func(c *config.Config) string {
 				if strings.TrimSpace(c.RAMHeadroom) == "" {
-					return "0 (use all RAM)"
+					return "0"
 				}
 				return c.RAMHeadroom
 			},
@@ -1719,6 +1651,8 @@ func (m *Model) applySetting(row settingRow, val string) {
 		m.messageType = "info"
 	}
 	switch row.label {
+	case "Context":
+		m.setCtx(m.settingsCfg.CtxValue())
 	case "KV placement":
 		m.kvPlacement = val
 	case "KV quality":
@@ -1737,11 +1671,23 @@ func (m *Model) applySetting(row settingRow, val string) {
 		m.refreshTunedCounts()
 	case "Model directory":
 		m.modelDir = val
-		m.models = discoverModels(val)
-		m.refreshTunedCounts()
+		m.models = loadModels(val, m.cacheDir, m.backend, m.caps)
+		m.mainList = newMainList(m.models)
 		if m.messageType != "warning" {
 			m.message = fmt.Sprintf("Saved: Model directory = %s (%d models)", val, len(m.models))
 		}
+	case "Vision":
+		m.vision = m.settingsCfg.Vision
+	case "Port":
+		m.port = m.settingsCfg.Port
+	case "Parallel":
+		m.parallel = ""
+		m.parallelSet = false
+		if m.settingsCfg.Parallel > 0 {
+			m.parallel = strconv.Itoa(m.settingsCfg.Parallel)
+		}
+	case "AI-tune rounds":
+		m.aituneRounds = m.settingsCfg.TuneRounds
 	}
 }
 
@@ -1773,7 +1719,7 @@ func (m *Model) openSettings() {
 // backendOptions lists the selectable backends: the built-ins plus any
 // registered fork backends (so they show up in the TUI backend picker).
 func backendOptions() []string {
-	opts := []string{"ik_llama", "llama"}
+	opts := []string{"auto", "llama", "ik_llama"}
 	opts = append(opts, backends.Tags()...)
 	return opts
 }
@@ -1984,21 +1930,16 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 			ctx = n
 		}
 	}
-	gpuLayers := 999
-	if m.recommendation != nil {
-		gpuLayers = m.recommendation.GPULayers
-	}
 	parallel := 1
-	parallelSet := false
+	parallelSet := m.parallelSet
 	if m.parallel != "" {
 		if n, err := strconv.Atoi(m.parallel); err == nil {
 			parallel = n
-			parallelSet = true
 		}
 	}
 	return &LaunchRequest{
 		ModelPath:   model.Path,
-		Port:        8081,
+		Port:        m.port,
 		CtxSize:     ctx,
 		CtxFlag:     ctxFlag,
 		KVPlacement: m.kvPlacement,
@@ -2006,7 +1947,6 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		// "mid" here overrode the user's saved setting with --kv-quality mid
 		// on every TUI launch (settings appeared to save but never applied).
 		KVQuality:    m.kvQuality,
-		GPULayers:    gpuLayers,
 		FlashAttn:    true,
 		Parallel:     parallel,
 		ParallelSet:  parallelSet,
@@ -2016,7 +1956,6 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		AITune:       m.aitune,
 		AITuneRounds: m.aituneRounds,
 		Benchmark:    m.benchmark,
-		KeepAlive:    m.keepalive,
 		ClaudeCode:   m.claudeCode,
 	}
 }
@@ -2031,6 +1970,7 @@ func (m Model) buildArgs() []string {
 
 // LaunchRequest is returned when the user chooses to launch a model.
 type LaunchRequest struct {
+	Update        bool
 	DownloadRepo  string
 	DownloadQuant string
 	ModelPath     string
@@ -2039,7 +1979,6 @@ type LaunchRequest struct {
 	CtxFlag       string
 	KVPlacement   string
 	KVQuality     string
-	GPULayers     int
 	FlashAttn     bool
 	Parallel      int
 	ParallelSet   bool // user typed a parallel value (claude-code mode must not override)
@@ -2049,7 +1988,6 @@ type LaunchRequest struct {
 	AITune        bool
 	AITuneRounds  int
 	Benchmark     bool
-	KeepAlive     bool
 	ClaudeCode    bool
 }
 
@@ -2077,11 +2015,14 @@ func (req *LaunchRequest) LaunchArgs() []string {
 	if req.Vision {
 		args = append(args, "--vision")
 	}
-	if req.Backend != "" {
+	if req.Backend != "" && req.Backend != "auto" {
 		args = append(args, "--backend", req.Backend)
 	}
 	if req.TuneCache != "" {
 		args = append(args, "--tune-cache", req.TuneCache)
+	}
+	if req.AITune && req.AITuneRounds > 0 {
+		args = append(args, "--rounds", strconv.Itoa(req.AITuneRounds))
 	}
 	if req.ParallelSet && req.Parallel > 0 {
 		args = append(args, "--parallel", strconv.Itoa(req.Parallel))

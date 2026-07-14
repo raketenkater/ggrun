@@ -1,6 +1,6 @@
 # ggrun backlog
 
-Audited against `main` on 2026-07-12. This replaces the stale Claude Code task
+Audited against `main` on 2026-07-14. This replaces the stale Claude Code task
 statuses with only the work that remains. Source references use
 `<Claude task-list>/<task-number>`.
 
@@ -49,8 +49,11 @@ draft and EAGLE models from Hugging Face, selects a draft GPU and emits draft fl
 - [ ] Extend `ggrun spec-test` with the remaining full matrix: deterministic plus
   model-recommended sampling, thinking on/off, explicit TTFT/mean accepted length,
   serial plus parallel-4 in one invocation, peak VRAM/RAM capture and a long-run
-  soak. Run the live baseline/ceilings matrix once the active serving session can
-  be stopped; code/unit safety validation alone is not a performance result.
+  soak. The deterministic reasoning-off serial matrix now ran live on the embedded
+  Qwen3.5-4B MTP GGUF: baseline 183.93 t/s; ceilings 1/2/3/4 were
+  200.55/203.25/179.59/161.53 t/s. Ceiling 2 improved mean wall time 12.4% with
+  54.2% draft acceptance, but regressed prompt processing 15.6%, so the verifier
+  correctly kept Auto off. The broader matrix in this item is still required.
 - [ ] Re-test DeepSeek V4 DFlash only when one reproducible llama-server commit can
   load both the official target and a published drafter; until then Auto stays off.
 - [ ] Repeat the live test on one other MTP-capable MoE to prove the path is generic.
@@ -98,9 +101,21 @@ them. Default local launches use fail-closed Auto, never bypass mode.
   MiniCPM5-1B Q4 and the Fable5 Thinking Q4 candidate false-allowed that upload;
   the latter also missed the 60-second CPU fallback deadline, so neither is eligible.
 - [x] Enable backend-supported `--cache-reuse 256` for Claude mode while preserving
-  explicit opt-out and older-backend compatibility. With cache RAM and context
-  checkpoints disabled, the controlled compaction case dropped from 4,506 processed
-  tokens / 45.1 seconds to one processed token / 0.15 seconds (4,514 reused tokens).
+  explicit opt-out and older-backend compatibility on shiftable contexts. With cache
+  RAM and context checkpoints disabled, the controlled transformer compaction case
+  dropped from 4,506 processed tokens / 45.1 seconds to one processed token / 0.15
+  seconds (4,514 reused tokens). Hybrid/recurrent contexts now skip this unsupported
+  flag and use one bounded rolling checkpoint when host headroom permits.
+- [ ] Validate the new DeepSeek-V4 recurrent policy live: `--ctx-checkpoints 1`, no
+  unsupported cache-reuse flag, Claude logical batch 128 and parallel 2. Repeat an
+  append-only 60k turn and prove that only the new tail is evaluated; record checkpoint
+  size, TTFT, foreground responsiveness, peak RAM/VRAM and a long-run OOM result.
+  Partial 2026-07-14 evidence: parallel-2 completed 60,020 prompt tokens without
+  OOM at 22.87 prompt / 5.34 decode t/s; an identical-prefix append evaluated only
+  147 new tokens and finished in 11.4s. The reviewer-conditioned five-expert,
+  logical-batch-128 run also stayed within 23.25/8.41/9.22 GiB and completed an
+  8,212-token concurrent smoke at 23.91 prompt / 5.44 decode t/s. A complete real
+  Claude workflow and long soak remain open.
 - [ ] Turn the repeatable parts into a Claude acceptance harness for `/v1/messages`,
   tool-use/tool-result blocks, aliases, MCP, malformed tool recovery and timeouts.
 - [ ] **Benchmark and auto-select Claude Workflow parallelism:** compare parallel
@@ -139,6 +154,23 @@ Sources: `db3f32cc/1`, `db3f32cc/2`, `db3f32cc/3`, user request 2026-07-12.
   Source: `ebffa9bc/9`.
 
 ## P2 — performance and installation
+
+- [ ] **Generic first-run serving calibration:** after deterministic memory preflight,
+  benchmark only safe candidates for dense single-GPU, dense multi-GPU, CPU/RAM
+  offload and MoE. Compare GPU subsets, supported stable split modes, batch/ubatch,
+  KV placement and mmap policy with short prefill/decode plus a context-boundary
+  stability request. Cache the fastest stable result by model shards, backend build,
+  driver, hardware topology, context, parallelism and sampling profile; explicit user
+  flags always win. Until this exists, default placement is a safe measured heuristic,
+  not a universal proof of maximum speed.
+- [x] **Live serving-path matrix on the reference host:** Qwen3.5-4B Q4 measured
+  180.06 t/s on one GPU and 10.90 t/s CPU-only. Qwen3.6-27B Q5 measured 40.15 t/s
+  on GPU0, 18.64 t/s with the stable layer split on GPUs 1+2, and 2.91 t/s with
+  forced RAM offload on physical GPU2. DeepSeek-V4 IQ4 completed the 60k parallel-2
+  load and append proof above; with the reviewer resident, the fresh planner put
+  three expert blocks on GPU2 and two on GPU1 and passed exact preflight. All paths
+  loaded, generated, and shut down cleanly; restricted-GPU preflight now reports
+  the renumbered CUDA device's real 12 GiB capacity rather than physical GPU0's 24.
 
 - [ ] **Ship a small local AI-doc advisor with ggrun:** package a compact model
   plus a signed, versioned knowledge bundle covering llama.cpp/fork flags, GGUF
@@ -179,8 +211,10 @@ Sources: `db3f32cc/1`, `db3f32cc/2`, `db3f32cc/3`, user request 2026-07-12.
 
 ## Confirmed complete or obsolete Claude TODOs
 
-- [x] DeepSeek-V4 stable first-launch placement, full-layer expert storage, OOM
-  recovery and 60k parallel load test. Source: `fb9a268c/2`.
+- [x] DeepSeek-V4 baseline first-launch placement, full-layer expert storage, startup
+  OOM recovery and the historical 60k parallel load test. A later parallel-4 runtime
+  OOM reopened long-session validation; the safer parallel-2 recurrent-checkpoint
+  acceptance run remains explicitly open above. Source: `fb9a268c/2`.
 - [x] Mainline DeepSeek-V4 backend; old antirez/cchuter fork registration is obsolete.
   Sources: `5e91131f/19`, `ebffa9bc/10`.
 - [x] DeepSeek-V4 recommender inclusion. Source: `5e91131f/20`.

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,23 @@ func TestProcessIsRunning(t *testing.T) {
 	p := &Process{Port: 99999}
 	if p.IsRunning() {
 		t.Fatalf("expected not running for nil process")
+	}
+}
+
+func TestStopTreatsOwnSignalExitAsSuccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses the POSIX sleep command")
+	}
+	cmd := exec.Command("sleep", "60")
+	setSysProcAttr(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	p := &Process{Cmd: cmd, cancel: func() {}, waitCh: waitCh}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop() = %v, want successful requested termination", err)
 	}
 }
 
@@ -149,5 +167,15 @@ func TestStartupStatusIncludesProgressAndLatestLine(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status %q missing %q", got, want)
 		}
+	}
+}
+
+func TestStartupStatusHidesUnknownZeroProgress(t *testing.T) {
+	got := startupStatus("load_tensors: loading model", 5*time.Second, 30*time.Minute, loadProgress{Total: 128 << 30})
+	if strings.Contains(got, "0%") || strings.Contains(got, "read 0.0GiB") {
+		t.Fatalf("zero fd activity is unknown progress, not a truthful 0%% completion: %q", got)
+	}
+	if !strings.Contains(got, "loading model weights") {
+		t.Fatalf("phase should remain visible without byte progress: %q", got)
 	}
 }
