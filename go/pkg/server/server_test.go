@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,12 +30,50 @@ func TestStopTreatsOwnSignalExitAsSuccess(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
-	p := &Process{Cmd: cmd, cancel: func() {}, waitCh: waitCh}
+	p := processForTest(cmd)
 	if err := p.Stop(); err != nil {
 		t.Fatalf("Stop() = %v, want successful requested termination", err)
 	}
+}
+
+func TestStopIsSafeForConcurrentCallers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses the POSIX sleep command")
+	}
+	cmd := exec.Command("sleep", "60")
+	setSysProcAttr(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	p := processForTest(cmd)
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- p.Stop()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Stop() = %v, want nil", err)
+		}
+	}
+}
+
+func processForTest(cmd *exec.Cmd) *Process {
+	p := &Process{Cmd: cmd, cancel: func() {}, done: make(chan struct{}), stopDone: make(chan struct{})}
+	go func() {
+		err := cmd.Wait()
+		p.waitMu.Lock()
+		p.waitErr = err
+		p.waitMu.Unlock()
+		close(p.done)
+	}()
+	return p
 }
 
 func TestChildEnvEnablesScaledQueuesOnlyForMultiGPU(t *testing.T) {

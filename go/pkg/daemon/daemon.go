@@ -14,11 +14,12 @@ import (
 
 // Daemon holds a persistent llama-server process and exposes a control API.
 type Daemon struct {
-	addr    string
-	mu      sync.Mutex
-	process *server.Process
-	config  Config
-	http    *http.Server
+	addr        string
+	mu          sync.Mutex
+	process     *server.Process
+	config      Config
+	http        *http.Server
+	startServer func([]string, int, time.Duration) (*server.Process, error)
 }
 
 // Config holds daemon settings.
@@ -57,8 +58,9 @@ func New(cfg Config) *Daemon {
 	return &Daemon{
 		// The control API has mutating start/stop/reload methods and no
 		// authentication. Never expose it to the LAN.
-		addr:   net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", cfg.ControlPort)),
-		config: cfg,
+		addr:        net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", cfg.ControlPort)),
+		config:      cfg,
+		startServer: server.StartWithTimeout,
 	}
 }
 
@@ -130,7 +132,7 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"already running"}`, http.StatusConflict)
 		return
 	}
-	p, err := server.StartWithTimeout(d.config.ServerArgs, d.config.Port, d.config.startupTimeout())
+	p, err := d.start(d.config.ServerArgs, d.config.Port, d.config.startupTimeout())
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -195,7 +197,8 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		next.ServerArgs = args
 	}
 
-	// Restart if running
+	// A reload is an apply-and-run operation. When the daemon is idle this starts
+	// the newly selected model; when it is already serving, it replaces it.
 	wasRunning := d.process != nil && d.process.IsRunning()
 	if wasRunning {
 		if err := d.process.Stop(); err != nil {
@@ -205,17 +208,24 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		d.process = nil
 		// Small delay to free ports
 		time.Sleep(500 * time.Millisecond)
-		p, err := server.StartWithTimeout(next.ServerArgs, next.Port, next.startupTimeout())
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		d.process = p
 	}
+	p, err := d.start(next.ServerArgs, next.Port, next.startupTimeout())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	d.process = p
 	d.config = next
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "reloaded"})
+}
+
+func (d *Daemon) start(args []string, port int, timeout time.Duration) (*server.Process, error) {
+	if d.startServer != nil {
+		return d.startServer(args, port, timeout)
+	}
+	return server.StartWithTimeout(args, port, timeout)
 }
 
 func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {

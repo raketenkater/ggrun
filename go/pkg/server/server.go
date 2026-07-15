@@ -27,7 +27,18 @@ type Process struct {
 	Port   int
 	cancel context.CancelFunc
 	LogBuf *threadSafeBuffer // captured stderr for post-launch probe
-	waitCh chan error        // receives cmd.Wait() exactly once
+
+	// done closes exactly once after cmd.Wait records its result. Keeping the
+	// result separately avoids the old receive-and-reinsert channel pattern,
+	// which made concurrent readiness checks and Stop calls unnecessarily
+	// interdependent.
+	done    chan struct{}
+	waitMu  sync.RWMutex
+	waitErr error
+
+	stopOnce sync.Once
+	stopDone chan struct{}
+	stopErr  error
 }
 
 // threadSafeBuffer is a bytes.Buffer protected by a mutex for concurrent writes.
@@ -104,8 +115,14 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, waitCh: make(chan error, 1)}
-	go func() { p.waitCh <- cmd.Wait() }()
+	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{})}
+	go func() {
+		err := cmd.Wait()
+		p.waitMu.Lock()
+		p.waitErr = err
+		p.waitMu.Unlock()
+		close(p.done)
+	}()
 
 	start := time.Now()
 	logStartupEvent(logStartupEvents, termErr, "[launch] health check: polling http://127.0.0.1:%d/health then /v1/models (timeout %s)", port, timeout)
@@ -200,8 +217,8 @@ func (p *Process) waitReady(timeout time.Duration) error {
 		// Fail fast when the process dies during startup instead of polling
 		// the health endpoint until the full (model-size-scaled) timeout.
 		select {
-		case err := <-p.waitCh:
-			p.waitCh <- err // keep available for Stop()
+		case <-p.done:
+			err := p.waitResult()
 			if err != nil {
 				return fmt.Errorf("server process exited during startup: %v", err)
 			}
@@ -230,25 +247,42 @@ func (p *Process) waitReady(timeout time.Duration) error {
 
 // Stop terminates the server process gracefully then forcefully.
 func (p *Process) Stop() error {
-	p.cancel()
-	if p.Cmd.Process != nil {
-		killProcessTree(p.Cmd.Process.Pid)
+	if p == nil {
+		return nil
 	}
-	// Wait with timeout — don't block forever if process hangs during cleanup.
-	select {
-	case err := <-p.waitCh:
-		p.waitCh <- err // allow repeated Stop() calls
-		// We just terminated the process tree ourselves, so a signal-derived
-		// ExitError is the expected successful shutdown result. Propagating it
-		// made daemon /stop return HTTP 500 even though the model was gone.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil
+	p.stopOnce.Do(func() {
+		defer close(p.stopDone)
+		if p.cancel != nil {
+			p.cancel()
 		}
-		return err
-	case <-time.After(15 * time.Second):
-		return fmt.Errorf("process did not exit within 15s")
-	}
+		if p.Cmd != nil && p.Cmd.Process != nil {
+			killProcessTree(p.Cmd.Process.Pid)
+		}
+		// Wait with timeout — don't block forever if process hangs during cleanup.
+		select {
+		case <-p.done:
+			err := p.waitResult()
+			// We just terminated the process tree ourselves, so a signal-derived
+			// ExitError is the expected successful shutdown result. Propagating it
+			// made daemon /stop return HTTP 500 even though the model was gone.
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				p.stopErr = nil
+				return
+			}
+			p.stopErr = err
+		case <-time.After(15 * time.Second):
+			p.stopErr = fmt.Errorf("process did not exit within 15s")
+		}
+	})
+	<-p.stopDone
+	return p.stopErr
+}
+
+func (p *Process) waitResult() error {
+	p.waitMu.RLock()
+	defer p.waitMu.RUnlock()
+	return p.waitErr
 }
 
 // IsRunning returns true if the process is still alive.
@@ -256,7 +290,12 @@ func (p *Process) IsRunning() bool {
 	if p == nil || p.Cmd == nil || p.Cmd.Process == nil {
 		return false
 	}
-	return isProcessAlive(p.Cmd.Process.Pid) && p.Cmd.ProcessState == nil
+	select {
+	case <-p.done:
+		return false
+	default:
+	}
+	return isProcessAlive(p.Cmd.Process.Pid)
 }
 
 // QueryModels returns the models endpoint response.

@@ -18,8 +18,7 @@ import (
 // This is the single source of truth for all user-tunable settings.
 type Config struct {
 	Port          int    `json:"port"`
-	CtxSize       int    `json:"ctx_size"`
-	CtxMode       string `json:"ctx_mode"` // fit, max, manual
+	Ctx           string `json:"ctx_size"` // fit, max, or a positive token count
 	MaxRestarts   int    `json:"max_restarts"`
 	KeepAlive     int    `json:"keep_alive"`
 	HealthTimeout int    `json:"health_timeout"`
@@ -40,6 +39,11 @@ type Config struct {
 	Parallel      int    `json:"parallel"`
 	Host          string `json:"host"`
 	Spec          string `json:"spec"` // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
+
+	// sources is populated by Load and intentionally not serialized. Keeping
+	// provenance next to the merged value lets `config show` report the source
+	// of each individual setting rather than guessing from file/env existence.
+	sources map[string]string
 }
 
 // DefaultKeys is the stable display order for config show / template generation.
@@ -57,8 +61,7 @@ func Defaults() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
 		Port:          8081,
-		CtxSize:       0,
-		CtxMode:       "fit",
+		Ctx:           "fit",
 		MaxRestarts:   5,
 		KeepAlive:     0,
 		HealthTimeout: 0, // auto
@@ -79,13 +82,28 @@ func Defaults() *Config {
 		Parallel:      1,
 		Host:          "127.0.0.1",
 		Spec:          "off",
+		sources:       defaultSources(),
 	}
 }
 
 // ParseBudgetMB parses a memory budget like "2G", "2048M", or "2048" into MB.
 // Returns 0 for empty or unparseable input.
 func ParseBudgetMB(s string) int {
+	mb, err := ParseBudgetMBStrict(s)
+	if err != nil {
+		return 0
+	}
+	return mb
+}
+
+// ParseBudgetMBStrict parses a non-negative memory budget like "2G", "2048M",
+// or "2048" into MB. Empty means no reservation. It rejects malformed and
+// negative values so launch-time safety reservations cannot disappear silently.
+func ParseBudgetMBStrict(s string) (int, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0, nil
+	}
 	mult := 1
 	if strings.HasSuffix(s, "G") || strings.HasSuffix(s, "GB") {
 		mult = 1024
@@ -93,8 +111,31 @@ func ParseBudgetMB(s string) int {
 	} else if strings.HasSuffix(s, "M") || strings.HasSuffix(s, "MB") {
 		s = strings.TrimSuffix(strings.TrimSuffix(s, "MB"), "M")
 	}
-	n, _ := strconv.Atoi(strings.TrimSpace(s))
-	return n * mult
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("must be a non-negative memory amount such as 2G or 2048M")
+	}
+	if n > int(^uint(0)>>1)/mult {
+		return 0, fmt.Errorf("memory amount is too large")
+	}
+	return n * mult, nil
+}
+
+// ParsePort validates a TCP port used by the local serving/control endpoints.
+func ParsePort(s string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("must be an integer from 1 to 65535")
+	}
+	return n, nil
+}
+
+func defaultSources() map[string]string {
+	sources := make(map[string]string, len(DefaultKeys))
+	for _, key := range DefaultKeys {
+		sources[key] = "default"
+	}
+	return sources
 }
 
 // Path returns the canonical config file path. It resolves the app home via
@@ -132,7 +173,7 @@ func Load() (*Config, error) {
 	// Migrate legacy config.sh if needed
 	cfgPath := Path()
 	if err := migrateLegacyConfig(cfgPath); err != nil {
-		// non-fatal
+		return nil, fmt.Errorf("migrate config: %w", err)
 	}
 
 	if fileExists(cfgPath) {
@@ -142,7 +183,9 @@ func Load() (*Config, error) {
 	}
 
 	// Re-apply env snapshot so env wins over file
-	applyEnvSnapshot(cfg, envSnapshot)
+	if err := applyEnvSnapshot(cfg, envSnapshot); err != nil {
+		return nil, fmt.Errorf("read environment: %w", err)
+	}
 
 	// Fill remaining unset keys from defaults (already in cfg)
 	return cfg, nil
@@ -164,73 +207,13 @@ func snapshotEnv() map[string]string {
 	return m
 }
 
-func applyEnvSnapshot(cfg *Config, snap map[string]string) {
-	if v, ok := snap["LLM_PORT"]; ok {
-		cfg.Port, _ = strconv.Atoi(v)
+func applyEnvSnapshot(cfg *Config, snap map[string]string) error {
+	for key, val := range snap {
+		if err := setConfigValue(cfg, key, val, "env"); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
 	}
-	if v, ok := snap["LLM_CTX_SIZE"]; ok {
-		applyCtxValue(cfg, v)
-	}
-	if v, ok := snap["LLM_MAX_RESTARTS"]; ok {
-		cfg.MaxRestarts, _ = strconv.Atoi(v)
-	}
-	if v, ok := snap["LLM_KEEP_ALIVE"]; ok {
-		cfg.KeepAlive, _ = strconv.Atoi(v)
-	}
-	if v, ok := snap["LLM_HEALTH_TIMEOUT"]; ok {
-		cfg.HealthTimeout, _ = strconv.Atoi(v)
-	}
-	if v, ok := snap["LLM_MODEL_DIR"]; ok {
-		cfg.ModelDir = v
-	}
-	if v, ok := snap["LLM_CACHE_DIR"]; ok {
-		cfg.CacheDir = v
-	}
-	if v, ok := snap["LLM_LOG_DIR"]; ok {
-		cfg.LogDir = v
-	}
-	if v, ok := snap["LLM_RAM_BUDGET"]; ok {
-		cfg.RamBudget = v
-	}
-	if v, ok := snap["LLM_VRAM_HEADROOM"]; ok {
-		cfg.VRAMHeadroom = v
-	}
-	if v, ok := snap["LLM_RAM_HEADROOM"]; ok {
-		cfg.RAMHeadroom = v
-	}
-	if v, ok := snap["LLM_KV_PLACEMENT"]; ok {
-		cfg.KVPlacement = v
-	}
-	if v, ok := snap["LLM_KV_QUALITY"]; ok {
-		cfg.KVQuality = v
-	}
-	if v, ok := snap["LLM_ASSUME_YES"]; ok {
-		cfg.AssumeYes = parseBool(v)
-	}
-	if v, ok := snap["LLM_BACKEND"]; ok {
-		cfg.Backend = v
-	}
-	if v, ok := snap["LLAMA_SERVER"]; ok {
-		cfg.LlamaServer = v
-	}
-	if v, ok := snap["LLM_APP_HOME"]; ok {
-		cfg.AppHome = v
-	}
-	if v, ok := snap["LLM_TUNE_ROUNDS"]; ok {
-		cfg.TuneRounds, _ = strconv.Atoi(v)
-	}
-	if v, ok := snap["LLM_VISION"]; ok {
-		cfg.Vision = parseBool(v)
-	}
-	if v, ok := snap["LLM_PARALLEL"]; ok {
-		cfg.Parallel, _ = strconv.Atoi(v)
-	}
-	if v, ok := snap["LLM_HOST"]; ok {
-		cfg.Host = v
-	}
-	if v, ok := snap["LLM_SPEC"]; ok {
-		cfg.Spec = v
-	}
+	return nil
 }
 
 func loadFile(path string, cfg *Config) error {
@@ -251,86 +234,162 @@ func loadFile(path string, cfg *Config) error {
 			continue
 		}
 		key := strings.TrimSpace(parts[0])
-		val := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
-
-		switch strings.TrimPrefix(key, "LLM_") {
-		case "PORT":
-			cfg.Port, _ = strconv.Atoi(val)
-		case "CTX_SIZE":
-			applyCtxValue(cfg, val)
-		case "MAX_RESTARTS":
-			cfg.MaxRestarts, _ = strconv.Atoi(val)
-		case "KEEP_ALIVE":
-			cfg.KeepAlive, _ = strconv.Atoi(val)
-		case "HEALTH_TIMEOUT":
-			cfg.HealthTimeout, _ = strconv.Atoi(val)
-		case "MODEL_DIR":
-			cfg.ModelDir = val
-		case "CACHE_DIR":
-			cfg.CacheDir = val
-		case "LOG_DIR":
-			cfg.LogDir = val
-		case "RAM_BUDGET":
-			cfg.RamBudget = val
-		case "VRAM_HEADROOM":
-			cfg.VRAMHeadroom = val
-		case "RAM_HEADROOM":
-			cfg.RAMHeadroom = val
-		case "KV_PLACEMENT":
-			cfg.KVPlacement = val
-		case "KV_QUALITY":
-			cfg.KVQuality = val
-		case "ASSUME_YES":
-			cfg.AssumeYes = parseBool(val)
-		case "BACKEND":
-			cfg.Backend = val
-		case "LLAMA_SERVER":
-			cfg.LlamaServer = val
-		case "APP_HOME":
-			cfg.AppHome = val
-		case "TUNE_ROUNDS":
-			cfg.TuneRounds, _ = strconv.Atoi(val)
-		case "VISION":
-			cfg.Vision = parseBool(val)
-		case "PARALLEL":
-			cfg.Parallel, _ = strconv.Atoi(val)
-		case "HOST":
-			cfg.Host = val
-		case "SPEC":
-			cfg.Spec = val
+		if err := setConfigValue(cfg, key, parts[1], "file"); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
 		}
 	}
 	return scanner.Err()
 }
 
-func applyCtxValue(cfg *Config, val string) {
-	val = strings.TrimSpace(strings.Trim(val, `"'`))
-	switch strings.ToLower(val) {
-	case "", "fit", "auto":
-		cfg.CtxMode = "fit"
-		cfg.CtxSize = 0
-	case "max", "native":
-		cfg.CtxMode = "max"
-		cfg.CtxSize = 0
-	default:
-		if n, err := strconv.Atoi(val); err == nil && n > 0 {
-			cfg.CtxMode = "manual"
-			cfg.CtxSize = n
-		}
+func setConfigValue(cfg *Config, key, raw, source string) error {
+	key = strings.TrimPrefix(strings.TrimSpace(key), "LLM_")
+	val := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if cfg.sources == nil {
+		cfg.sources = defaultSources()
 	}
+	mark := func() { cfg.sources[key] = source }
+	switch key {
+	case "PORT":
+		n, err := ParsePort(val)
+		if err != nil {
+			return err
+		}
+		cfg.Port = n
+	case "CTX_SIZE":
+		if err := cfg.SetCtxValue(val); err != nil {
+			return err
+		}
+	case "MAX_RESTARTS":
+		n, err := parseNonNegativeInt(val)
+		if err != nil {
+			return err
+		}
+		cfg.MaxRestarts = n
+	case "KEEP_ALIVE":
+		n, err := parseNonNegativeInt(val)
+		if err != nil {
+			return err
+		}
+		cfg.KeepAlive = n
+	case "HEALTH_TIMEOUT":
+		n, err := parseNonNegativeInt(val)
+		if err != nil {
+			return err
+		}
+		cfg.HealthTimeout = n
+	case "MODEL_DIR":
+		cfg.ModelDir = val
+	case "CACHE_DIR":
+		cfg.CacheDir = val
+	case "LOG_DIR":
+		cfg.LogDir = val
+	case "RAM_BUDGET":
+		if _, err := ParseBudgetMBStrict(val); err != nil {
+			return err
+		}
+		cfg.RamBudget = val
+	case "VRAM_HEADROOM":
+		if _, err := ParseBudgetMBStrict(val); err != nil {
+			return err
+		}
+		cfg.VRAMHeadroom = val
+	case "RAM_HEADROOM":
+		if _, err := ParseBudgetMBStrict(val); err != nil {
+			return err
+		}
+		cfg.RAMHeadroom = val
+	case "KV_PLACEMENT":
+		cfg.KVPlacement = val
+	case "KV_QUALITY":
+		cfg.KVQuality = val
+	case "ASSUME_YES":
+		cfg.AssumeYes = parseBool(val)
+	case "BACKEND":
+		cfg.Backend = val
+	case "LLAMA_SERVER":
+		cfg.LlamaServer = val
+	case "APP_HOME":
+		cfg.AppHome = val
+	case "TUNE_ROUNDS":
+		n, err := parseNonNegativeInt(val)
+		if err != nil {
+			return err
+		}
+		cfg.TuneRounds = n
+	case "VISION":
+		cfg.Vision = parseBool(val)
+	case "PARALLEL":
+		n, err := parseNonNegativeInt(val)
+		if err != nil {
+			return err
+		}
+		cfg.Parallel = n
+	case "HOST":
+		cfg.Host = val
+	case "SPEC":
+		cfg.Spec = val
+	default:
+		return nil
+	}
+	mark()
+	return nil
+}
+
+func parseNonNegativeInt(val string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("must be a non-negative integer")
+	}
+	return n, nil
+}
+
+// SetCtxValue updates the one canonical context representation.
+func (c *Config) SetCtxValue(val string) error {
+	normalized, err := normalizeCtxValue(val)
+	if err != nil {
+		return err
+	}
+	c.Ctx = normalized
+	return nil
 }
 
 func (c *Config) CtxValue() string {
-	switch c.CtxMode {
-	case "fit", "auto":
+	if c == nil {
 		return "fit"
-	case "max", "native":
+	}
+	value, err := normalizeCtxValue(c.Ctx)
+	if err != nil {
+		return "fit"
+	}
+	return value
+}
+
+// CtxMode derives the UI mode from the canonical context value.
+func (c *Config) CtxMode() string {
+	switch c.CtxValue() {
+	case "fit":
+		return "fit"
+	case "max":
 		return "max"
+	default:
+		return "manual"
 	}
-	if c.CtxSize > 0 {
-		return strconv.Itoa(c.CtxSize)
+}
+
+func normalizeCtxValue(val string) (string, error) {
+	val = strings.TrimSpace(strings.Trim(val, `"'`))
+	switch strings.ToLower(val) {
+	case "", "fit", "auto":
+		return "fit", nil
+	case "max", "native":
+		return "max", nil
+	default:
+		n, err := strconv.Atoi(val)
+		if err != nil || n <= 0 {
+			return "", fmt.Errorf("context must be fit, max, or a positive token count")
+		}
+		return strconv.Itoa(n), nil
 	}
-	return "fit"
 }
 
 func parseBool(v string) bool {
@@ -340,6 +399,37 @@ func parseBool(v string) bool {
 
 // Save writes the config to the canonical config file.
 func (c *Config) Save() error {
+	if _, err := ParsePort(strconv.Itoa(c.Port)); err != nil {
+		return fmt.Errorf("PORT: %w", err)
+	}
+	ctx, err := normalizeCtxValue(c.Ctx)
+	if err != nil {
+		return fmt.Errorf("CTX_SIZE: %w", err)
+	}
+	c.Ctx = ctx
+	for _, budget := range []struct {
+		key, value string
+	}{
+		{"RAM_BUDGET", c.RamBudget},
+		{"VRAM_HEADROOM", c.VRAMHeadroom},
+		{"RAM_HEADROOM", c.RAMHeadroom},
+	} {
+		if _, err := ParseBudgetMBStrict(budget.value); err != nil {
+			return fmt.Errorf("%s: %w", budget.key, err)
+		}
+	}
+	for _, numeric := range []struct {
+		key string
+		val int
+	}{
+		{"MAX_RESTARTS", c.MaxRestarts}, {"KEEP_ALIVE", c.KeepAlive},
+		{"HEALTH_TIMEOUT", c.HealthTimeout}, {"TUNE_ROUNDS", c.TuneRounds},
+		{"PARALLEL", c.Parallel},
+	} {
+		if numeric.val < 0 {
+			return fmt.Errorf("%s: must be a non-negative integer", numeric.key)
+		}
+	}
 	path := Path()
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -384,7 +474,7 @@ func (c *Config) Show() string {
 	b.WriteString("ggrun configuration\n")
 	b.WriteString("═══════════════════════\n\n")
 	for _, k := range DefaultKeys {
-		var val, source string
+		var val string
 		switch k {
 		case "PORT":
 			val = strconv.Itoa(c.Port)
@@ -434,12 +524,9 @@ func (c *Config) Show() string {
 		if val == "" {
 			val = "(empty)"
 		}
-		if os.Getenv("LLM_"+k) != "" || os.Getenv(k) != "" {
-			source = "env"
-		} else if fileExists(Path()) {
-			source = "file"
-		} else {
-			source = "default"
+		source := "default"
+		if c.sources != nil && c.sources[k] != "" {
+			source = c.sources[k]
 		}
 		b.WriteString(fmt.Sprintf("  %-18s %-20s (%s)\n", k+":", val, source))
 	}
@@ -470,7 +557,13 @@ func Edit() error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if _, err := Load(); err != nil {
+		return fmt.Errorf("configuration saved but is invalid: %w", err)
+	}
+	return nil
 }
 
 // Reset removes the config file (with backup).
@@ -500,8 +593,12 @@ func migrateLegacyConfig(canonical string) error {
 	}
 	// Both exist: merge (legacy values historically won)
 	cfg := Defaults()
-	loadFile(canonical, cfg)
-	loadFile(legacy, cfg) // legacy wins
+	if err := loadFile(canonical, cfg); err != nil {
+		return fmt.Errorf("read canonical config: %w", err)
+	}
+	if err := loadFile(legacy, cfg); err != nil {
+		return fmt.Errorf("read legacy config: %w", err)
+	}
 	if err := cfg.Save(); err != nil {
 		return err
 	}

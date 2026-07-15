@@ -321,6 +321,22 @@ func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	}
 }
 
+func TestApplySettingRejectsInvalidSafetyValues(t *testing.T) {
+	m := Model{settingsCfg: config.Defaults(), port: 8081, parallel: "1"}
+	rows := map[string]settingRow{}
+	for _, row := range settingRows() {
+		rows[row.label] = row
+	}
+	m.applySetting(rows["Port"], "not-a-port")
+	if m.settingsCfg.Port != 8081 || m.port != 8081 || m.messageType != "warning" {
+		t.Fatalf("invalid port changed settings: cfg=%d live=%d message=%q", m.settingsCfg.Port, m.port, m.message)
+	}
+	m.applySetting(rows["VRAM headroom"], "two gigabytes")
+	if m.settingsCfg.VRAMHeadroom != "" || m.messageType != "warning" {
+		t.Fatalf("invalid headroom changed settings: %q", m.settingsCfg.VRAMHeadroom)
+	}
+}
+
 func TestPerModelParallelEntryIsExplicit(t *testing.T) {
 	m := Model{
 		screen:    ScreenModelConfig,
@@ -337,5 +353,21 @@ func TestPerModelParallelEntryIsExplicit(t *testing.T) {
 	req := m.buildLaunchRequest()
 	if req == nil || !req.ParallelSet || req.Parallel != 1 {
 		t.Fatalf("explicit parallel did not reach launch request: %#v", req)
+	}
+}
+
+func TestPerModelParallelEntryRejectsInvalidValue(t *testing.T) {
+	m := Model{
+		screen:    ScreenModelConfig,
+		models:    []ModelItem{{Name: "test.gguf", Path: "/models/test.gguf"}},
+		inputMode: "parallel",
+		parallel:  "4",
+	}
+	m.input = textinput.New()
+	m.input.SetValue("many")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.parallel != "4" || m.parallelSet || m.messageType != "warning" {
+		t.Fatalf("invalid parallel changed launch settings: value=%q explicit=%v message=%q", m.parallel, m.parallelSet, m.message)
 	}
 }

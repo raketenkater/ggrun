@@ -764,6 +764,43 @@ func TestFirstPositionalSkipsParallelValue(t *testing.T) {
 	if got != "model.gguf" {
 		t.Fatalf("expected model.gguf, got %q", got)
 	}
+	got = firstPositional([]string{"--ram-headroom", "2G", "org/model-GGUF", "--download"})
+	if got != "org/model-GGUF" {
+		t.Fatalf("--ram-headroom value was treated as positional: got %q", got)
+	}
+}
+
+func TestParseLaunchArgsRejectsInvalidSafetyFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"port text", []string{"model.gguf", "--port", "abc"}},
+		{"port zero", []string{"model.gguf", "--port=0"}},
+		{"parallel text", []string{"model.gguf", "--parallel", "many"}},
+		{"parallel zero", []string{"model.gguf", "--parallel=0"}},
+		{"vram headroom text", []string{"model.gguf", "--vram-headroom", "two-gig"}},
+		{"ram headroom negative", []string{"model.gguf", "--ram-headroom=-2G"}},
+		{"gpu token", []string{"model.gguf", "--gpus", "0,fast"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateConfig(t)
+			if _, err := parseLaunchArgs(tc.args); err == nil {
+				t.Fatalf("parseLaunchArgs(%v) accepted invalid input", tc.args)
+			}
+		})
+	}
+}
+
+func TestPlacementOptionsNeverMapsInvalidGPUToZero(t *testing.T) {
+	opts := placementOptionsFromRequest(
+		&launchRequest{GPUsFlag: "not-a-gpu"},
+		&placement.ModelProfile{}, &backendInfo{Tag: "llama"}, t.TempDir(),
+	)
+	if len(opts.GPUs) != 0 {
+		t.Fatalf("invalid GPU input became placement GPUs %v", opts.GPUs)
+	}
 }
 
 func TestApplyGPUVisibilitySetsEnv(t *testing.T) {

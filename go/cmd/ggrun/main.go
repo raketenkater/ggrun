@@ -247,6 +247,15 @@ func hasArg(args []string, want string) bool {
 	return false
 }
 
+func loadConfigOrExit() *config.Config {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(2)
+	}
+	return cfg
+}
+
 func benchmarkCompatArgs(args []string) []string {
 	out := []string{}
 	if model := firstPositional(args); model != "" {
@@ -292,7 +301,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--vram-headroom", "--spec", "--parallel", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
 				skip = true
 			}
 			continue
@@ -347,9 +356,9 @@ type launchRequest struct {
 }
 
 func parseLaunchArgs(args []string) (*launchRequest, error) {
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 	backendExplicit := configuredBackendExplicit(cfg.Backend)
 	req := &launchRequest{
@@ -391,7 +400,11 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.ModelPath = val
 				continue
 			case "--port", "-port":
-				req.Port, _ = strconv.Atoi(val)
+				port, err := config.ParsePort(val)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", key, err)
+				}
+				req.Port = port
 				continue
 			case "--ctx", "-ctx", "--ctx-size", "-c":
 				req.CtxFlag = val
@@ -429,13 +442,25 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			case "--rounds":
 				continue
 			case "--ram-budget":
-				req.RamBudgetMB = parseBudgetMB(val)
+				budget, err := parseBudgetFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.RamBudgetMB = budget
 				continue
 			case "--vram-headroom":
-				req.VRAMHeadroomMB = parseBudgetMB(val)
+				budget, err := parseBudgetFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.VRAMHeadroomMB = budget
 				continue
 			case "--ram-headroom":
-				req.RAMHeadroomMB = parseBudgetMB(val)
+				budget, err := parseBudgetFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.RAMHeadroomMB = budget
 				continue
 			case "--no-mmap":
 				req.NoMMap = val == "" || parseBoolFlag(val)
@@ -444,7 +469,11 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.SpecMode = val
 				continue
 			case "--parallel":
-				req.Parallel, _ = strconv.Atoi(val)
+				parallel, err := parsePositiveFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.Parallel = parallel
 				req.ParallelSet = true
 				continue
 			}
@@ -473,7 +502,11 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if err != nil {
 				return nil, err
 			}
-			req.Port, _ = strconv.Atoi(v)
+			port, err := config.ParsePort(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", a, err)
+			}
+			req.Port = port
 		case "--ctx", "-ctx", "--ctx-size", "-c":
 			v, err := next()
 			if err != nil {
@@ -552,19 +585,31 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if err != nil {
 				return nil, err
 			}
-			req.RamBudgetMB = parseBudgetMB(v)
+			budget, err := parseBudgetFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.RamBudgetMB = budget
 		case "--vram-headroom":
 			v, err := next()
 			if err != nil {
 				return nil, err
 			}
-			req.VRAMHeadroomMB = parseBudgetMB(v)
+			budget, err := parseBudgetFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.VRAMHeadroomMB = budget
 		case "--ram-headroom":
 			v, err := next()
 			if err != nil {
 				return nil, err
 			}
-			req.RAMHeadroomMB = parseBudgetMB(v)
+			budget, err := parseBudgetFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.RAMHeadroomMB = budget
 		case "--spec":
 			v, err := next()
 			if err != nil {
@@ -576,7 +621,11 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if err != nil {
 				return nil, err
 			}
-			req.Parallel, _ = strconv.Atoi(v)
+			parallel, err := parsePositiveFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.Parallel = parallel
 			req.ParallelSet = true
 		case "--force-spec-moe":
 			req.ForceSpecMoE = true
@@ -599,8 +648,27 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 		}
 	}
+	if _, err := parseGPUIndices(req.GPUsFlag); err != nil {
+		return nil, fmt.Errorf("--gpus: %w", err)
+	}
 	req.ExtraArgs = normalizePlacementAwareExtraArgs(req, req.ExtraArgs)
 	return req, nil
+}
+
+func parsePositiveFlag(name, value string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s: must be a positive integer", name)
+	}
+	return n, nil
+}
+
+func parseBudgetFlag(name, value string) (int, error) {
+	mb, err := config.ParseBudgetMBStrict(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return mb, nil
 }
 
 func parseBoolFlag(raw string) bool {
@@ -640,22 +708,15 @@ func applyGPUVisibility(req *launchRequest, backendTag string) string {
 	if req == nil || req.GPUsFlag == "" {
 		return ""
 	}
-	seen := map[int]bool{}
-	indices := []int{}
-	for _, s := range strings.Split(req.GPUsFlag, ",") {
-		idx, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil || idx < 0 || seen[idx] {
-			continue
-		}
-		seen[idx] = true
-		indices = append(indices, idx)
+	indices, err := parseGPUIndices(req.GPUsFlag)
+	if err != nil {
+		return ""
 	}
 	if len(indices) == 0 {
 		return ""
 	}
 	// Keep PCI ordering so renumbered placement indices line up with the
 	// backend's enumeration of the visible subset.
-	sort.Ints(indices)
 	parts := make([]string, len(indices))
 	for i, idx := range indices {
 		parts[i] = strconv.Itoa(idx)
@@ -667,6 +728,31 @@ func applyGPUVisibility(req *launchRequest, backendTag string) string {
 	}
 	os.Setenv(envKey, list)
 	return envKey + "=" + list
+}
+
+// parseGPUIndices is shared by parsing, placement and visibility setup so an
+// invalid token can never be converted by strconv.Atoi's zero value into GPU 0.
+func parseGPUIndices(raw string) ([]int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	seen := map[int]bool{}
+	indices := make([]int, 0, strings.Count(raw, ",")+1)
+	for _, token := range strings.Split(raw, ",") {
+		token = strings.TrimSpace(token)
+		idx, err := strconv.Atoi(token)
+		if err != nil || idx < 0 {
+			return nil, fmt.Errorf("%q is not a non-negative GPU index", token)
+		}
+		if seen[idx] {
+			return nil, fmt.Errorf("GPU %d is listed more than once", idx)
+		}
+		seen[idx] = true
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	return indices, nil
 }
 
 // runtimeGPUCapabilities mirrors the device renumbering performed by
@@ -691,21 +777,17 @@ func runtimeGPUCapabilities(caps *detect.Capabilities, req *launchRequest) (*det
 	for _, gpu := range caps.GPUs {
 		available[gpu.Index] = gpu
 	}
-	seen := map[int]bool{}
+	requested, err := parseGPUIndices(req.GPUsFlag)
+	if err != nil {
+		return caps, visibleToPhysical
+	}
 	physical := []int{}
-	for _, raw := range strings.Split(req.GPUsFlag, ",") {
-		idx, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil || seen[idx] {
-			continue
-		}
+	for _, idx := range requested {
 		if _, ok := available[idx]; !ok {
 			continue
 		}
-		seen[idx] = true
 		physical = append(physical, idx)
 	}
-	// applyGPUVisibility sorts the physical IDs before exporting them.
-	sort.Ints(physical)
 	if len(physical) == 0 {
 		return caps, visibleToPhysical
 	}
@@ -852,7 +934,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 	if req.ClaudeCode && ctxSize <= 0 {
 		// Claude Code needs a large shared window for its main conversation plus
 		// background work. In auto/fit mode use the model's native window, capped
-		// at 1M so the two default slots each retain about 512k tokens. Explicit
+		// at 1M so the four default slots each retain about 256k tokens. Explicit
 		// numeric/max context choices are resolved above and remain user overrides.
 		ctxSize = model.CTXTrain
 		if ctxSize > 1048576 {
@@ -892,9 +974,8 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		ReasoningOff: req.Benchmark,
 	}
 	if req.GPUsFlag != "" {
-		for _, s := range strings.Split(req.GPUsFlag, ",") {
-			idx, _ := strconv.Atoi(strings.TrimSpace(s))
-			opts.GPUs = append(opts.GPUs, idx)
+		if indices, err := parseGPUIndices(req.GPUsFlag); err == nil {
+			opts.GPUs = indices
 		}
 	}
 	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
@@ -1491,10 +1572,7 @@ func cmdLaunch(args []string) {
 		os.Exit(2)
 	}
 
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
-	}
+	cfg := loadConfigOrExit()
 
 	caps, err := detect.Detect()
 	if err != nil {
@@ -2195,10 +2273,7 @@ func cmdKVProbe(args []string) {
 		fmt.Fprintln(os.Stderr, "kv-probe needs at least one GPU (it measures KV via VRAM delta)")
 		os.Exit(1)
 	}
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
-	}
+	cfg := loadConfigOrExit()
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 	model, err := parseModel(req.ModelPath)
 	if err != nil {
@@ -2252,10 +2327,7 @@ func cmdGUI() {
 		return
 	}
 
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
-	}
+	cfg := loadConfigOrExit()
 
 	if req.DownloadRepo != "" {
 		caps, err := detect.Detect()
@@ -2296,10 +2368,7 @@ func cmdDryRun(args []string) {
 		os.Exit(1)
 	}
 
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
-	}
+	cfg := loadConfigOrExit()
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 
 	model, err := parseModel(req.ModelPath)
@@ -2807,10 +2876,7 @@ func isServerRunning(host string, port int) bool {
 }
 
 func cmdShowConfigs(args []string) {
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
-	}
+	cfg := loadConfigOrExit()
 	modelName := ""
 	for _, a := range args {
 		if a == "--show-configs" || strings.HasPrefix(a, "-") {
@@ -2869,10 +2935,7 @@ func cmdDownload(args []string) {
 		os.Exit(1)
 	}
 
-	cfg := config.Defaults()
-	if f, err := config.Load(); err == nil {
-		cfg = f
-	}
+	cfg := loadConfigOrExit()
 
 	d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
 	if err := d.Run(repo, caps); err != nil {
@@ -2881,25 +2944,30 @@ func cmdDownload(args []string) {
 	}
 }
 
-func tuneRoundsFromArgs(args []string, fallback int) int {
+func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
 	if fallback <= 0 {
 		fallback = 8
 	}
 	for i := 0; i < len(args); i++ {
 		if key, val, ok := strings.Cut(args[i], "="); ok && (key == "--rounds" || key == "-rounds") {
-			if n, err := strconv.Atoi(val); err == nil && n > 0 {
-				return n
+			n, err := parsePositiveFlag(key, val)
+			if err != nil {
+				return 0, err
 			}
+			return n, nil
 		}
 		if args[i] == "--rounds" || args[i] == "-rounds" {
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
-					return n
-				}
+			if i+1 >= len(args) {
+				return 0, fmt.Errorf("%s requires a value", args[i])
 			}
+			n, err := parsePositiveFlag(args[i], args[i+1])
+			if err != nil {
+				return 0, err
+			}
+			return n, nil
 		}
 	}
-	return fallback
+	return fallback, nil
 }
 
 func cmdRecommend(args []string) {
@@ -2938,15 +3006,14 @@ func cmdRecommend(args []string) {
 	}
 	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
 
-	if cfg, err := config.Load(); err == nil {
-		if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
-			fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
-			caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
-		}
-		if headroomMB := parseBudgetMB(cfg.RAMHeadroom); headroomMB > 0 {
-			fmt.Printf("RAM headroom: %d MB reserved (set via Settings or --ram-headroom)\n", headroomMB)
-			caps = detect.ApplyRAMHeadroom(caps, headroomMB)
-		}
+	cfg := loadConfigOrExit()
+	if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
+		fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
+		caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
+	}
+	if headroomMB := parseBudgetMB(cfg.RAMHeadroom); headroomMB > 0 {
+		fmt.Printf("RAM headroom: %d MB reserved (set via Settings or --ram-headroom)\n", headroomMB)
+		caps = detect.ApplyRAMHeadroom(caps, headroomMB)
 	}
 
 	cats := recommend.TopCategories(caps, limit)
@@ -2992,11 +3059,12 @@ func cmdTune(args []string) {
 		os.Exit(2)
 	}
 
-	cfg := config.Defaults()
-	if f, err := config.Load(); err == nil {
-		cfg = f
+	cfg := loadConfigOrExit()
+	rounds, err := tuneRoundsFromArgs(args, cfg.TuneRounds)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
 	}
-	rounds := tuneRoundsFromArgs(args, cfg.TuneRounds)
 
 	caps, err := detect.Detect()
 	if err != nil {
@@ -3111,6 +3179,10 @@ func cmdBenchmark(args []string) {
 	port := fs.Int("port", 8081, "Server port")
 	model := fs.String("model", "default", "Model name")
 	fs.Parse(args)
+	if _, err := config.ParsePort(strconv.Itoa(*port)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --port %v\n", err)
+		os.Exit(2)
+	}
 	runOneShotBenchmark(*port, *model)
 }
 
@@ -3141,9 +3213,9 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse model: %w", err)
 	}
-	cfg := config.Defaults()
-	if c, err := config.Load(); err == nil {
-		cfg = c
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 	// Find the backend FIRST so its tag feeds placement — otherwise the
 	// split-mode/flag selection can't tell ik_llama from mainline and emits
@@ -3178,6 +3250,18 @@ func cmdDaemon(args []string) {
 	controlPort := fs.Int("control-port", 9090, "Control API port")
 	startupTimeoutSecs := fs.Int("startup-timeout-secs", 300, "Max seconds to wait for llama-server to become healthy after start/reload")
 	fs.Parse(args)
+	if _, err := config.ParsePort(strconv.Itoa(*port)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --port %v\n", err)
+		os.Exit(2)
+	}
+	if _, err := config.ParsePort(strconv.Itoa(*controlPort)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --control-port %v\n", err)
+		os.Exit(2)
+	}
+	if *startupTimeoutSecs < 1 {
+		fmt.Fprintln(os.Stderr, "Error: --startup-timeout-secs must be a positive integer")
+		os.Exit(2)
+	}
 
 	if *modelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun daemon --model <model.gguf>")

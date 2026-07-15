@@ -58,11 +58,14 @@ func runSpecTest(args []string) error {
 		return err
 	}
 
-	cfg := config.Defaults()
-	if loaded, loadErr := config.Load(); loadErr == nil {
-		cfg = loaded
+	cfg, loadErr := config.Load()
+	if loadErr != nil {
+		return fmt.Errorf("load config: %w", loadErr)
 	}
-	rounds := tuneRoundsFromArgs(args, 2)
+	rounds, err := tuneRoundsFromArgs(args, 2)
+	if err != nil {
+		return err
+	}
 	if rounds < 2 {
 		return fmt.Errorf("spec-test requires at least 2 rounds")
 	}

@@ -110,12 +110,17 @@ func DefaultLauncher(binaryPath string, args []string) *Launcher {
 func (l *Launcher) Run(ctx context.Context) error {
 	restartCount := 0
 	cudaOOMRetries := 0
+	promotionRestarts := 0
 	backoff := l.BackoffBase
 	binaryPath := l.BinaryPath
 
 	for {
 		if err := l.runOnce(ctx, binaryPath, restartCount); err != nil {
 			if errors.Is(err, errPlacementPromotion) {
+				if promotionRestarts >= 1 {
+					return fmt.Errorf("placement promotion did not converge after %d restart", promotionRestarts)
+				}
+				promotionRestarts++
 				restartCount = 0
 				backoff = l.BackoffBase
 				continue

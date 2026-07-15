@@ -42,8 +42,8 @@ VISION=true
 	if cfg.Port != 9090 {
 		t.Fatalf("expected port 9090, got %d", cfg.Port)
 	}
-	if cfg.CtxSize != 8192 {
-		t.Fatalf("expected ctx 8192, got %d", cfg.CtxSize)
+	if cfg.CtxValue() != "8192" {
+		t.Fatalf("expected ctx 8192, got %s", cfg.CtxValue())
 	}
 	if cfg.ModelDir != "/models" {
 		t.Fatalf("expected /models, got %s", cfg.ModelDir)
@@ -67,8 +67,7 @@ func TestSaveAndLoad(t *testing.T) {
 
 	cfg := &Config{
 		Port:        9090,
-		CtxSize:     4096,
-		CtxMode:     "manual",
+		Ctx:         "4096",
 		ModelDir:    "/test/models",
 		CacheDir:    "/test/cache",
 		Backend:     "llama",
@@ -141,8 +140,8 @@ LLM_HOST="127.0.0.1"
 	if cfg.Port != 9091 {
 		t.Fatalf("expected port 9091, got %d", cfg.Port)
 	}
-	if cfg.CtxValue() != "fit" || cfg.CtxSize != 0 {
-		t.Fatalf("expected fit context, got mode=%s size=%d", cfg.CtxMode, cfg.CtxSize)
+	if cfg.CtxValue() != "fit" || cfg.Ctx != "fit" {
+		t.Fatalf("expected fit context, got %q", cfg.Ctx)
 	}
 	if cfg.ModelDir != "/models-v3" {
 		t.Fatalf("expected canonical model dir, got %s", cfg.ModelDir)
@@ -157,8 +156,69 @@ LLM_HOST="127.0.0.1"
 
 func TestApplyCtxValueMax(t *testing.T) {
 	cfg := Defaults()
-	applyCtxValue(cfg, "max")
-	if cfg.CtxValue() != "max" || cfg.CtxSize != 0 {
-		t.Fatalf("expected max context, got mode=%s size=%d", cfg.CtxMode, cfg.CtxSize)
+	if err := cfg.SetCtxValue("max"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CtxValue() != "max" || cfg.Ctx != "max" {
+		t.Fatalf("expected max context, got %q", cfg.Ctx)
+	}
+}
+
+func TestLoadFileRejectsInvalidSafetyValues(t *testing.T) {
+	for name, content := range map[string]string{
+		"port":       "LLM_PORT=abc\n",
+		"context":    "LLM_CTX_SIZE=lots\n",
+		"headroom":   "LLM_VRAM_HEADROOM=two gigabytes\n",
+		"parallel":   "LLM_PARALLEL=-1\n",
+		"keep_alive": "LLM_KEEP_ALIVE=never\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := loadFile(path, Defaults()); err == nil {
+				t.Fatalf("loadFile(%q) accepted invalid value", content)
+			}
+		})
+	}
+}
+
+func TestShowReportsEachSettingSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(path, []byte("LLM_PORT=9090\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_CONFIG", path)
+	t.Setenv("LLM_MODEL_DIR", "/from-env")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.sources["PORT"]; got != "file" {
+		t.Fatalf("PORT source = %q, want file", got)
+	}
+	if got := cfg.sources["MODEL_DIR"]; got != "env" {
+		t.Fatalf("MODEL_DIR source = %q, want env", got)
+	}
+	if got := cfg.sources["CACHE_DIR"]; got != "default" {
+		t.Fatalf("CACHE_DIR source = %q, want default", got)
+	}
+	show := cfg.Show()
+	for _, want := range []string{"9090                 (file)", "/from-env            (env)", "(default)"} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("show missing %q:\n%s", want, show)
+		}
+	}
+}
+
+func TestBudgetParserRejectsMalformedValues(t *testing.T) {
+	for _, raw := range []string{"-1G", "twoG", "2.5G"} {
+		if _, err := ParseBudgetMBStrict(raw); err == nil {
+			t.Fatalf("ParseBudgetMBStrict(%q) succeeded", raw)
+		}
+	}
+	if got, err := ParseBudgetMBStrict("2G"); err != nil || got != 2048 {
+		t.Fatalf("ParseBudgetMBStrict(2G) = %d, %v; want 2048, nil", got, err)
 	}
 }

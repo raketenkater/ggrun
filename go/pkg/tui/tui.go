@@ -141,6 +141,7 @@ type ModelItem struct {
 
 func InitialModel() Model {
 	cfg, err := config.Load()
+	configErr := err
 	if err != nil || cfg == nil {
 		cfg = config.Defaults()
 	}
@@ -154,13 +155,7 @@ func InitialModel() Model {
 		rounds = 8
 	}
 	ctxValue := cfg.CtxValue()
-	ctxMode := "fit"
-	switch cfg.CtxMode {
-	case "max", "native":
-		ctxMode = "max"
-	case "manual":
-		ctxMode = "manual"
-	}
+	ctxMode := cfg.CtxMode()
 	parallel := ""
 	if cfg.Parallel > 0 {
 		parallel = strconv.Itoa(cfg.Parallel)
@@ -211,6 +206,10 @@ func InitialModel() Model {
 	}
 
 	m.mainList = newMainList(m.models)
+	if configErr != nil {
+		m.message = fmt.Sprintf("Configuration error: %v. Fix it with ggrun config edit or reset before launching.", configErr)
+		m.messageType = "warning"
+	}
 	return m
 }
 
@@ -452,8 +451,14 @@ func (m *Model) setCtx(val string) {
 		m.ctxMode = "max"
 		m.ctxSize = "max"
 	default:
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 1 {
+			m.message = "Context must be fit, max, or a positive token count"
+			m.messageType = "warning"
+			return
+		}
 		m.ctxMode = "manual"
-		m.ctxSize = val
+		m.ctxSize = strconv.Itoa(n)
 	}
 }
 
@@ -549,8 +554,17 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctx":
 				m.setCtx(val)
 			case "parallel":
-				m.parallel = strings.TrimSpace(val)
-				m.parallelSet = m.parallel != ""
+				val = strings.TrimSpace(val)
+				if val == "" {
+					m.parallel = ""
+					m.parallelSet = false
+				} else if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					m.parallel = strconv.Itoa(n)
+					m.parallelSet = true
+				} else {
+					m.message = "Parallel must be a positive integer"
+					m.messageType = "warning"
+				}
 			case "aitune":
 				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n >= 1 && n <= 30 {
 					m.aituneRounds = n
@@ -1588,12 +1602,7 @@ func settingRows() []settingRow {
 		{label: "Context", kind: "enum", options: []string{"fit", "max"},
 			get: func(c *config.Config) string { return c.CtxValue() },
 			set: func(c *config.Config, v string) {
-				if v == "max" {
-					c.CtxMode = "max"
-				} else {
-					c.CtxMode = "fit"
-				}
-				c.CtxSize = 0
+				_ = c.SetCtxValue(v)
 			}},
 		{label: "KV placement", kind: "enum", options: []string{"auto", "gpu", "cpu"},
 			get: func(c *config.Config) string { return c.KVPlacement },
@@ -1642,6 +1651,11 @@ func settingRows() []settingRow {
 // applySetting mutates the in-memory config, persists it to disk, and applies
 // any side effects (re-scan models, refresh tuned counts) for the given row.
 func (m *Model) applySetting(row settingRow, val string) {
+	if err := validateSettingValue(row.label, val); err != nil {
+		m.message = fmt.Sprintf("%s was not changed: %v", row.label, err)
+		m.messageType = "warning"
+		return
+	}
 	row.set(m.settingsCfg, val)
 	if err := m.settingsCfg.Save(); err != nil {
 		m.message = fmt.Sprintf("%s set to %s for this session — save failed: %v", row.label, val, err)
@@ -1689,6 +1703,23 @@ func (m *Model) applySetting(row settingRow, val string) {
 	case "AI-tune rounds":
 		m.aituneRounds = m.settingsCfg.TuneRounds
 	}
+}
+
+func validateSettingValue(label, val string) error {
+	switch label {
+	case "Port":
+		_, err := config.ParsePort(val)
+		return err
+	case "Parallel", "AI-tune rounds":
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil || n < 0 {
+			return fmt.Errorf("must be a non-negative integer")
+		}
+	case "VRAM headroom", "RAM headroom":
+		_, err := config.ParseBudgetMBStrict(val)
+		return err
+	}
+	return nil
 }
 
 // openChoice configures and shows the generic arrow-select screen.
