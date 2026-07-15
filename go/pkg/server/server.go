@@ -382,7 +382,11 @@ func startupStatus(logText string, elapsed, timeout time.Duration, progress load
 		pct := progressPercent(progress)
 		parts = append(parts, fmt.Sprintf("%s %3d%%", progressBar(pct, 20), pct))
 	}
-	parts = append(parts, startupPhase(logText))
+	phase := startupPhase(logText)
+	if progress.Total > 0 && progress.Done >= progress.Total {
+		phase = "initializing model (weights read)"
+	}
+	parts = append(parts, phase)
 	if timeout > 0 {
 		parts = append(parts, fmt.Sprintf("%s/%s", elapsed.Round(time.Second), timeout.Round(time.Second)))
 	} else {
@@ -402,7 +406,10 @@ func progressPercent(p loadProgress) int {
 		return 0
 	}
 	if p.Done >= p.Total {
-		return 100
+		// This status line exists only while the health endpoint is not ready.
+		// Reading every model byte is followed by tensor upload, allocation and
+		// graph initialization, so 100% here would be a false completion claim.
+		return 99
 	}
 	return int((p.Done * 100) / p.Total)
 }
@@ -481,9 +488,10 @@ func tailLines(s string, n int) string {
 }
 
 type loadProgressTracker struct {
-	pid   int
-	paths map[string]int64
-	total int64
+	pid      int
+	paths    map[string]int64
+	total    int64
+	observed map[string]int64
 	// Backend initialization may reopen or seek the same shard, so the current
 	// fd offsets can move backwards. Never regress the user-visible progress.
 	maxDone int64
@@ -491,7 +499,7 @@ type loadProgressTracker struct {
 
 func newLoadProgressTracker(pid int, args []string) *loadProgressTracker {
 	paths, total := modelShardPaths(modelPathFromArgs(args))
-	return &loadProgressTracker{pid: pid, paths: paths, total: total}
+	return &loadProgressTracker{pid: pid, paths: paths, total: total, observed: map[string]int64{}}
 }
 
 func (t *loadProgressTracker) Snapshot() loadProgress {
@@ -538,8 +546,30 @@ func (t *loadProgressTracker) fdPositions() int64 {
 			byPath[target] = pos
 		}
 	}
+	return t.recordPositions(byPath)
+}
+
+// recordPositions retains the maximum observed offset for every shard. llama.cpp
+// may close shard N before opening shard N+1; summing only currently open file
+// descriptors made progress fall backwards and then freeze for all later shards.
+func (t *loadProgressTracker) recordPositions(current map[string]int64) int64 {
+	if t.observed == nil {
+		t.observed = map[string]int64{}
+	}
+	for path, pos := range current {
+		size, ok := t.paths[path]
+		if !ok {
+			continue
+		}
+		if pos > size {
+			pos = size
+		}
+		if pos > t.observed[path] {
+			t.observed[path] = pos
+		}
+	}
 	var done int64
-	for _, pos := range byPath {
+	for _, pos := range t.observed {
 		done += pos
 	}
 	return done

@@ -179,3 +179,28 @@ func TestStartupStatusHidesUnknownZeroProgress(t *testing.T) {
 		t.Fatalf("phase should remain visible without byte progress: %q", got)
 	}
 }
+
+func TestStartupStatusDoesNotClaimReadyWhenWeightsAreOnlyRead(t *testing.T) {
+	got := startupStatus("load_tensors: loading model", time.Minute, 30*time.Minute, loadProgress{
+		Done: 2 << 30, Total: 2 << 30,
+	})
+	if !strings.Contains(got, " 99%") || !strings.Contains(got, "initializing model (weights read)") {
+		t.Fatalf("completed reads should show truthful initialization state: %q", got)
+	}
+}
+
+func TestLoadProgressRetainsClosedShardOffsets(t *testing.T) {
+	tracker := &loadProgressTracker{
+		paths: map[string]int64{"shard-1": 100, "shard-2": 200},
+	}
+	if got := tracker.recordPositions(map[string]int64{"shard-1": 100}); got != 100 {
+		t.Fatalf("first shard progress = %d, want 100", got)
+	}
+	// shard-1 is now closed and absent. Its completed 100 bytes must remain.
+	if got := tracker.recordPositions(map[string]int64{"shard-2": 25}); got != 125 {
+		t.Fatalf("cross-shard progress = %d, want 125", got)
+	}
+	if got := tracker.recordPositions(map[string]int64{"shard-2": 200}); got != 300 {
+		t.Fatalf("completed split progress = %d, want 300", got)
+	}
+}
