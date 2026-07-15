@@ -340,7 +340,7 @@ function Ensure-VCppRuntime {
 
 function Ensure-OpenSSL {
     # Locate OpenSSL 3.x DLLs and copy them next to llama-server.exe. Falls back
-    # to GGGRUN_OPENSSL_ZIP_URL when set. Returns $true if all DLLs are present.
+    # to GGRUN_OPENSSL_ZIP_URL when set. Returns $true if all DLLs are present.
     $dlls = @('libcrypto-3-x64.dll', 'libssl-3-x64.dll')
     $allFound = $true
     foreach ($dll in $dlls) {
@@ -355,11 +355,11 @@ function Ensure-OpenSSL {
         }
     }
     if ($allFound) { return $true }
-    if ($env:GGGRUN_OPENSSL_ZIP_URL) {
-        Say 'Downloading OpenSSL DLL bundle from GGGRUN_OPENSSL_ZIP_URL...'
+    if ($env:GGRUN_OPENSSL_ZIP_URL) {
+        Say 'Downloading OpenSSL DLL bundle from GGRUN_OPENSSL_ZIP_URL...'
         $zip = Join-Path $tmp 'openssl.zip'
         try {
-            Invoke-WebRequest -Uri $env:GGGRUN_OPENSSL_ZIP_URL -OutFile $zip -ErrorAction Stop
+            Invoke-WebRequest -Uri $env:GGRUN_OPENSSL_ZIP_URL -OutFile $zip -ErrorAction Stop
             $out = Join-Path $tmp 'openssl'
             Expand-Archive -Path $zip -DestinationPath $out -Force
             foreach ($dll in $dlls) {
