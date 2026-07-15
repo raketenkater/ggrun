@@ -2794,3 +2794,41 @@ func TestKVOnCPUFreesVRAMForExperts(t *testing.T) {
 		t.Fatalf("KV-on-CPU should offload FEWER experts to CPU (more on GPU): cpu-kv NCPUMoE=%d, gpu-kv NCPUMoE=%d", cpuKV.NCPUMoE, gpuKV.NCPUMoE)
 	}
 }
+
+func TestExactKVTypesAreSizedAndPreserved(t *testing.T) {
+	model := &ModelProfile{
+		NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+	}
+	q5 := computeKVTotalMB(model, 1048576, "q5_1")
+	q8 := computeKVTotalMB(model, 1048576, "q8_0")
+	if q5 != 49152 {
+		t.Fatalf("q5_1 KV size = %d MiB, want 49152 MiB", q5)
+	}
+	if q8 != 69632 {
+		t.Fatalf("q8_0 KV size = %d MiB, want 69632 MiB", q8)
+	}
+	if q5 >= q8 {
+		t.Fatalf("q5_1 must use less memory than q8_0: q5=%d q8=%d", q5, q8)
+	}
+
+	if got := kvTypesForAutoContext("q5_1", "q5_1"); len(got) != 1 || got[0] != "q5_1" {
+		t.Fatalf("explicit cache type must not silently fall back: %v", got)
+	}
+	if got := fallbackKVType("q5_1", "q5_1"); got != "q5_1" {
+		t.Fatalf("exact cache type fallback = %q, want q5_1", got)
+	}
+}
+
+func TestNormalizeKVType(t *testing.T) {
+	for input, want := range map[string]string{
+		"high": "f16", "mid": "q8_0", "low": "q4_0", "Q5_1": "q5_1", "fp32": "f32",
+	} {
+		got, err := NormalizeKVType(input)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeKVType(%q) = %q, %v; want %q, nil", input, got, err, want)
+		}
+	}
+	if _, err := NormalizeKVType("q6_k"); err == nil {
+		t.Fatal("unsupported cache type must be rejected before placement")
+	}
+}

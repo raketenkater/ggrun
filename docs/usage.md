@@ -21,6 +21,7 @@ ggrun model.gguf --vram-headroom 2G   # leave 2 GB of VRAM free for other apps
 ggrun model.gguf --ram-headroom 8G    # leave 8 GB of system RAM free for other apps
 ggrun model.gguf --ctx-size 32768
 ggrun model.gguf --kv-quality mid
+ggrun model.gguf --kv-quality q5_1
 ggrun model.gguf --kv-placement gpu
 
 # Vision
@@ -48,6 +49,7 @@ ggrun model.gguf --dry-run
 
 # Model storage
 ggrun models list
+ggrun models browse              # hardware-matched curated downloads
 ggrun models path
 ggrun models rm model.gguf
 ggrun models rm model.gguf --yes
@@ -56,10 +58,28 @@ ggrun models rm model.gguf --yes
 Unknown flags are passed through to `llama-server`, so upstream options remain available
 without wrapper changes.
 
+### KV cache types
+
+`--kv-quality` accepts the friendly `low` (`q4_0`), `mid` (`q8_0`), and
+`high` (`f16`) presets, or an exact supported llama.cpp type: `f32`, `f16`,
+`bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, or `q5_1`.
+
+Use an exact type when the memory/quality trade-off matters, for example
+`--kv-quality q5_1`. ggrun uses that same type for its memory plan and emits it
+for both K and V caches. The equivalent upstream spelling is accepted too:
+
+```bash
+ggrun model.gguf --cache-type-k q5_1 --cache-type-v q5_1
+```
+
+K and V must currently use the same type. ggrun rejects a mixed pair instead
+of producing a placement plan with the wrong KV-memory estimate.
+
 ## Model storage
 
 `ggrun models list` shows GGUF files under the configured model directory and
-groups split GGUFs as one model. `ggrun models path` prints that directory.
+groups split GGUFs as one model. `ggrun models browse` opens the same curated,
+hardware-aware download list as `ggrun recommend`. `ggrun models path` prints that directory.
 Use `ggrun models rm <model.gguf>` to remove a listed model; it asks before
 deleting and only operates inside the configured model directory. Add `--yes`
 for scripts or set `LLM_ASSUME_YES=true` in a non-interactive environment.

@@ -75,6 +75,48 @@ func TestTUILaunchArgsPassSelectedBackend(t *testing.T) {
 	}
 }
 
+func TestParseLaunchArgsPlansDirectKVTypeOnce(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	req, err := parseLaunchArgs([]string{
+		"model.gguf", "--cache-type-k", "q5_1", "--cache-type-v=q5_1",
+	})
+	if err != nil {
+		t.Fatalf("parse direct KV cache type: %v", err)
+	}
+	if req.KVQuality != "q5_1" || len(req.ExtraArgs) != 0 {
+		t.Fatalf("direct KV flags must become the planned type, got quality=%q extra=%v", req.KVQuality, req.ExtraArgs)
+	}
+
+	strategy, err := placement.Compute(&detect.Capabilities{
+		CPU: detect.CPUInfo{Cores: 4}, RAM: detect.RAMInfo{TotalMB: 16384, FreeMB: 16384},
+	}, &placement.ModelProfile{
+		SizeBytes: 1, NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+	}, placement.Options{CPUMode: true, ContextSize: 32768, KVQuality: req.KVQuality})
+	if err != nil {
+		t.Fatalf("plan direct KV cache type: %v", err)
+	}
+	if strategy.KVType != "q5_1" {
+		t.Fatalf("strategy KV type = %q, want q5_1", strategy.KVType)
+	}
+	args := strategy.Args("model.gguf", 8081)
+	if !hasAdjacentArg(args, "--cache-type-k", "q5_1") || !hasAdjacentArg(args, "--cache-type-v", "q5_1") {
+		t.Fatalf("strategy did not emit q5_1 K/V flags: %v", args)
+	}
+	if got := strings.Count(strings.Join(args, " "), "--cache-type-k"); got != 1 {
+		t.Fatalf("cache type K flag emitted %d times, want once: %v", got, args)
+	}
+}
+
+func TestParseLaunchArgsRejectsMixedKVTypes(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	_, err := parseLaunchArgs([]string{
+		"model.gguf", "--cache-type-k", "q8_0", "--cache-type-v", "q5_1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "mixed") {
+		t.Fatalf("mixed cache types must fail before an unsafe placement, got %v", err)
+	}
+}
+
 func TestTUILaunchArgsPreserveMaxContext(t *testing.T) {
 	cfg := config.Defaults()
 	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", CtxFlag: "max"}, cfg)

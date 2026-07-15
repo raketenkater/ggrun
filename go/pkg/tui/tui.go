@@ -884,6 +884,8 @@ func (m Model) viewModelConfig() string {
 
 	kvQualityLabel := map[string]string{
 		"high": "high (f16)", "mid": "mid (q8_0)", "low": "low (q4_0)",
+		"q4_1": "q4_1", "iq4_nl": "iq4_nl", "q5_0": "q5_0", "q5_1": "q5_1",
+		"bf16": "bf16", "f16": "f16", "f32": "f32",
 	}[m.kvQuality]
 	if kvQualityLabel == "" {
 		kvQualityLabel = m.kvQuality
@@ -1607,7 +1609,7 @@ func settingRows() []settingRow {
 		{label: "KV placement", kind: "enum", options: []string{"auto", "gpu", "cpu"},
 			get: func(c *config.Config) string { return c.KVPlacement },
 			set: func(c *config.Config, v string) { c.KVPlacement = v }},
-		{label: "KV quality", kind: "enum", options: []string{"low", "mid", "high"},
+		{label: "KV quality", kind: "enum", options: []string{"low", "q4_1", "iq4_nl", "q5_0", "q5_1", "mid", "bf16", "high", "f32"},
 			get: func(c *config.Config) string { return c.KVQuality },
 			set: func(c *config.Config, v string) { c.KVQuality = v }},
 		{label: "VRAM headroom", kind: "text",

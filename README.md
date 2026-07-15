@@ -119,6 +119,7 @@ ggrun model.gguf --spec auto     # use only a validated speculative profile
 ggrun spec-test model.gguf --ctx 1048576 --parallel 4
 ggrun recommend                  # rank models for this machine and backend
 ggrun models list                # show local GGUFs and grouped split models
+ggrun models browse              # browse curated downloads that fit this machine
 ggrun models rm model.gguf       # safely remove a downloaded model
 ```
 

@@ -287,8 +287,16 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		totalSizeMB = int(model.SizeBytes / 1024 / 1024)
 	}
 
-	// KV cache type selection — try compact types first for large models
-	s.KVType = kvTypeFromQuality(s.KVQuality)
+	// KV cache type selection. Besides the friendly high/mid/low presets,
+	// users can select one of llama.cpp's supported cache types directly (for
+	// example q5_1). That exact type must drive both the memory plan and the
+	// emitted server flags; treating it as q8_0 here can make a plan needlessly
+	// small, while treating an unknown type optimistically can cause an OOM.
+	var kvErr error
+	s.KVType, kvErr = NormalizeKVType(s.KVQuality)
+	if kvErr != nil {
+		return nil, fmt.Errorf("KV cache type: %w", kvErr)
+	}
 
 	// Resolve KV placement "auto" → concrete value up-front so every caller and
 	// every explicit-context retry sees the same placement policy.
@@ -2050,31 +2058,102 @@ func computeKVTotalMB(model *ModelProfile, ctxSize int, kvType string) int {
 		kvElemsTotal = model.NumLayers * ctxSize * kvBytesPerLayerPerToken
 	}
 
-	var bytesPerElem float64
-	switch kvType {
-	case "q4_0":
-		bytesPerElem = 0.5625
-	case "q8_0":
+	bytesPerElem, ok := kvTypeBytesPerElement(kvType)
+	if !ok {
+		// Compute normally receives a validated type. Preserve the old
+		// conservative q8_0 fallback for direct package callers.
 		bytesPerElem = 1.0625
-	case "f16":
-		bytesPerElem = 2.0
-	default:
-		bytesPerElem = 1.0625 // q8_0 default
 	}
 
 	return int(float64(kvElemsTotal) * bytesPerElem / 1024 / 1024)
 }
 
-func kvTypeFromQuality(quality string) string {
-	switch quality {
+// NormalizeKVType resolves ggrun's quality presets and the cache types accepted
+// by llama.cpp's --cache-type-k/--cache-type-v flags. The returned spelling is
+// safe to pass straight to llama-server and to use as the probe/cache key.
+func NormalizeKVType(value string) (string, error) {
+	typeName := strings.ToLower(strings.TrimSpace(value))
+	typeName = strings.TrimPrefix(typeName, "ggml_")
+	switch typeName {
+	case "", "mid":
+		return "q8_0", nil
 	case "high":
-		return "f16"
-	case "mid":
-		return "q8_0"
+		return "f16", nil
 	case "low":
-		return "q4_0"
+		return "q4_0", nil
+	case "fp16":
+		return "f16", nil
+	case "fp32":
+		return "f32", nil
+	case "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1":
+		return typeName, nil
 	default:
+		return "", fmt.Errorf("unsupported type %q (use high, mid, low, f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, or q5_1)", value)
+	}
+}
+
+func kvTypeFromQuality(quality string) string {
+	typeName, err := NormalizeKVType(quality)
+	if err != nil {
 		return "q8_0"
+	}
+	return typeName
+}
+
+func exactKVTypeRequested(quality string) bool {
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "", "high", "mid", "low":
+		return false
+	default:
+		return true
+	}
+}
+
+func kvTypesForAutoContext(preferred, quality string) []string {
+	values := []string{preferred}
+	if !exactKVTypeRequested(quality) {
+		values = append(values, "q8_0", "q4_0")
+	}
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func fallbackKVType(preferred, quality string) string {
+	if exactKVTypeRequested(quality) {
+		return preferred
+	}
+	return "q4_0"
+}
+
+func kvTypeBytesPerElement(kvType string) (float64, bool) {
+	typeName, err := NormalizeKVType(kvType)
+	if err != nil {
+		return 0, false
+	}
+	switch typeName {
+	case "f32":
+		return 4, true
+	case "f16", "bf16":
+		return 2, true
+	case "q8_0":
+		return 1.0625, true // 34-byte block / 32 values
+	case "q5_1":
+		return 0.75, true // 24-byte block / 32 values
+	case "q5_0":
+		return 0.6875, true // 22-byte block / 32 values
+	case "q4_1":
+		return 0.625, true // 20-byte block / 32 values
+	case "q4_0", "iq4_nl":
+		return 0.5625, true // 18-byte block / 32 values
+	default:
+		return 0, false
 	}
 }
 
@@ -2623,16 +2702,7 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 		return 32768, preferredKVType
 	}
 
-	// Try KV types in order
-	kvTypes := []string{preferredKVType, "q8_0", "q4_0"}
-	seen := make(map[string]bool)
-	var orderedTypes []string
-	for _, t := range kvTypes {
-		if !seen[t] {
-			seen[t] = true
-			orderedTypes = append(orderedTypes, t)
-		}
-	}
+	orderedTypes := kvTypesForAutoContext(preferredKVType, opts.KVQuality)
 
 	for _, kvType := range orderedTypes {
 		refCtx := 32768
@@ -2661,7 +2731,7 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 		}
 	}
 
-	return 32768, "q4_0"
+	return 32768, fallbackKVType(preferredKVType, opts.KVQuality)
 }
 
 // resolveAutoKVPlacement decides gpu vs cpu for the KV cache when --kv-placement
@@ -2735,12 +2805,7 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 		return 32768, preferredKVType
 	}
 
-	seen := map[string]bool{}
-	for _, kvType := range []string{preferredKVType, "q8_0", "q4_0"} {
-		if seen[kvType] {
-			continue
-		}
-		seen[kvType] = true
+	for _, kvType := range kvTypesForAutoContext(preferredKVType, opts.KVQuality) {
 		refCtx := 32768
 		refKVMB := computeKVTotalMB(model, refCtx, kvType)
 		if refKVMB <= 0 {
@@ -2761,7 +2826,7 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 			return best, kvType
 		}
 	}
-	return 32768, "q4_0"
+	return 32768, fallbackKVType(preferredKVType, opts.KVQuality)
 }
 
 // computeAutoContextSize computes the largest context that fits in available
@@ -2789,16 +2854,7 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 		return 32768, preferredKVType
 	}
 
-	// Try KV types in order: preferred, then q8_0, then q4_0
-	kvTypes := []string{preferredKVType, "q8_0", "q4_0"}
-	seen := make(map[string]bool)
-	var orderedTypes []string
-	for _, t := range kvTypes {
-		if !seen[t] {
-			seen[t] = true
-			orderedTypes = append(orderedTypes, t)
-		}
-	}
+	orderedTypes := kvTypesForAutoContext(preferredKVType, opts.KVQuality)
 
 	for _, kvType := range orderedTypes {
 		refCtx := 32768
@@ -2827,8 +2883,9 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 		}
 	}
 
-	// Nothing fits well — return minimum with most compact type
-	return 32768, "q4_0"
+	// Preset qualities may fall back to the compact type. An exact llama.cpp
+	// type is user-owned, so preserve it and lower context instead.
+	return 32768, fallbackKVType(preferredKVType, opts.KVQuality)
 }
 
 // Args converts a Strategy into llama-server command-line arguments.

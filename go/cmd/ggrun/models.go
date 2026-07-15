@@ -18,11 +18,15 @@ func cmdModels(args []string) {
 	cfg := loadConfigOrExit()
 
 	switch subcommand {
+	case "help", "--help", "-h":
+		modelsHelp()
 	case "list", "ls":
 		if len(args) != 0 {
 			modelsUsage()
 		}
 		listModels(cfg.ModelDir)
+	case "browse", "recommend":
+		cmdRecommend(args)
 	case "path":
 		if len(args) != 0 {
 			modelsUsage()
@@ -135,6 +139,10 @@ func formatModelBytes(bytes int64) string {
 }
 
 func modelsUsage() {
-	fmt.Fprintln(os.Stderr, "Usage: ggrun models [list|path|rm <model.gguf> [--yes]]")
+	modelsHelp()
 	os.Exit(2)
+}
+
+func modelsHelp() {
+	fmt.Fprintln(os.Stderr, "Usage: ggrun models [list|browse|path|rm <model.gguf> [--yes]]")
 }

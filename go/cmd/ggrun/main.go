@@ -53,6 +53,8 @@ func main() {
 	}
 
 	switch args[0] {
+	case "help", "--help", "-h":
+		usage()
 	case "version", "--version", "-v":
 		fmt.Println("ggrun", version)
 	case "detect":
@@ -123,7 +125,7 @@ Commands:
   tune <model.gguf>    AI-tune model for best performance
   spec-test <model>    Verify MTP ceilings 1-4 against a target-only baseline
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
-  models [list|path|rm] List, locate, or safely remove downloaded GGUF models
+  models [list|browse|path|rm] List, browse, locate, or safely remove GGUF models
   config [show|edit|path|reset]  Manage settings
   backend [list|add|register|remove]  Manage custom llama.cpp backends and
                        optionally route a model architecture to one
@@ -134,7 +136,7 @@ Launch flags:
   -port int            Server port (default 8081)
   -ctx string          Context size: fit|max|token count (default fit)
   -kv string           KV placement: auto|gpu|cpu (default auto)
-  -kv-quality string   KV quality: high|mid|low (default mid)
+  -kv-quality string   KV quality: high|mid|low or an exact llama.cpp type such as q5_1 (default mid)
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
   --backend string     auto|llama|ik_llama|registered backend tag
@@ -149,7 +151,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -334,6 +336,8 @@ type launchRequest struct {
 	CtxFlag           string
 	KVPlacement       string
 	KVQuality         string
+	KVTypeK           string // explicit llama.cpp --cache-type-k override
+	KVTypeV           string // explicit llama.cpp --cache-type-v override
 	CPUMode           bool
 	GPUsFlag          string
 	Host              string
@@ -417,6 +421,12 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--kv-quality":
 				req.KVQuality = val
+				continue
+			case "--cache-type-k", "-ctk":
+				req.KVTypeK = val
+				continue
+			case "--cache-type-v", "-ctv":
+				req.KVTypeV = val
 				continue
 			case "--gpus":
 				req.GPUsFlag = val
@@ -528,6 +538,18 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.KVQuality = v
+		case "--cache-type-k", "-ctk":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.KVTypeK = v
+		case "--cache-type-v", "-ctv":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.KVTypeV = v
 		case "--cpu":
 			req.CPUMode = true
 		case "--gpus":
@@ -654,8 +676,43 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	if _, err := parseGPUIndices(req.GPUsFlag); err != nil {
 		return nil, fmt.Errorf("--gpus: %w", err)
 	}
+	if err := resolveKVCacheTypeFlags(req); err != nil {
+		return nil, err
+	}
 	req.ExtraArgs = normalizePlacementAwareExtraArgs(req, req.ExtraArgs)
 	return req, nil
+}
+
+// resolveKVCacheTypeFlags turns llama.cpp's direct K/V flags into one planned
+// cache type. ggrun currently owns K and V as a pair, which means it can size
+// the cache, preserve the selected type through context fitting, and emit the
+// flags exactly once. A mixed K/V pair remains an upstream-only setting until
+// placement can estimate each side independently.
+func resolveKVCacheTypeFlags(req *launchRequest) error {
+	if req == nil {
+		return nil
+	}
+	if req.KVTypeK != "" || req.KVTypeV != "" {
+		if req.KVTypeK == "" || req.KVTypeV == "" {
+			return fmt.Errorf("set both --cache-type-k and --cache-type-v, or use --kv-quality <type> for a matching K/V cache")
+		}
+		keyType, err := placement.NormalizeKVType(req.KVTypeK)
+		if err != nil {
+			return fmt.Errorf("--cache-type-k: %w", err)
+		}
+		valueType, err := placement.NormalizeKVType(req.KVTypeV)
+		if err != nil {
+			return fmt.Errorf("--cache-type-v: %w", err)
+		}
+		if keyType != valueType {
+			return fmt.Errorf("mixed --cache-type-k/--cache-type-v values are not planned safely yet; use the same type for both or --kv-quality <type>")
+		}
+		req.KVQuality = keyType
+	}
+	if _, err := placement.NormalizeKVType(req.KVQuality); err != nil {
+		return fmt.Errorf("--kv-quality: %w", err)
+	}
+	return nil
 }
 
 func parsePositiveFlag(name, value string) (int, error) {
