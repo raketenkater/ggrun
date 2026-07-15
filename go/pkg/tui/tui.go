@@ -855,7 +855,7 @@ func (m Model) viewModelConfig() string {
 	}
 	parallelLabel := m.parallel
 	if !m.parallelSet && (parallelLabel == "" || parallelLabel == "1") {
-		parallelLabel = "automatic (1 normally; 2 for Claude Code)"
+		parallelLabel = "automatic (1 normally; up to 4 for Claude Code)"
 	}
 	kvLabel := "auto (GPU KV first)"
 	if m.kvPlacement == "gpu" {

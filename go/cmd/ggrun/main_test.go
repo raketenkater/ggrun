@@ -33,8 +33,8 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
 	be := &backendInfo{Tag: "llama"}
 	opts := placementOptionsFromRequest(req, model, be, t.TempDir())
-	if opts.Parallel != 2 {
-		t.Fatalf("claude-code should layer two slots over the shared mainline placement, got %d", opts.Parallel)
+	if opts.Parallel != 4 {
+		t.Fatalf("claude-code should request four slots over the shared mainline placement, got %d", opts.Parallel)
 	}
 	if opts.ContextSize != 1048576 {
 		t.Fatalf("claude-code auto context should use the 1M native window, got %d", opts.ContextSize)
@@ -45,8 +45,8 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	}
 	be = &backendInfo{Tag: "ik_llama"}
 	opts = placementOptionsFromRequest(req, &placement.ModelProfile{ModelArch: "qwen3moe"}, be, t.TempDir())
-	if opts.Parallel != 2 {
-		t.Fatalf("claude-code on other models keeps 2 slots, got %d", opts.Parallel)
+	if opts.Parallel != 4 {
+		t.Fatalf("claude-code on other models initially requests 4 slots, got %d", opts.Parallel)
 	}
 	if opts.ContextSize != 131072 {
 		t.Fatalf("unknown model context should use the portable 2x64k baseline, got %d", opts.ContextSize)

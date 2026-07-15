@@ -918,25 +918,18 @@ func requestSamplingProfile(req *launchRequest, model *placement.ModelProfile) s
 	return fmt.Sprintf("custom-%x", sum[:8])
 }
 
-// claudeCodeParallel floors --parallel at 2 in Claude Code mode. There are two
-// opposing pressures and 2 is the stable big-model balance point:
-//   - Too few slots (1): the main turn, the command-safety classifier and
-//     background/subagent calls thrash a single slot's KV cache → requests get
-//     cancelled and every turn re-processes the whole prompt.
-//   - Too many slots: --ctx-size is split evenly across slots, so each slot's
-//     context shrinks while concurrent decode competes for the same memory
-//     bandwidth. Two slots keep the foreground turn responsive while one worker
-//     runs, and wide Workflow fan-out queues without multiplying KV pressure.
+// claudeCodeParallel requests four sequence slots in Claude Code mode so the main
+// turn and a small Workflow fan-out can make progress concurrently. Four is a
+// concurrency default, not a claim of 4x inference throughput: active requests on
+// a bandwidth-bound big MoE still share the same memory bandwidth.
 //
-// Wide fan-out is handled by no practical inference deadline (queued agents wait
-// for one of the 2 slots and complete) rather than by more slots — a bandwidth-
-// bound big MoE serializes most of the work either way. Total KV is unchanged.
-// An explicitly passed --parallel always wins: big-MoE tuning (e.g. 2 slots so a
-// background call can't evict the main conversation's expensive prompt cache)
-// needs the user's value to survive claude-code mode.
+// claudeCodeSlotAdjust runs after placement and lowers this automatic value when
+// the selected total context cannot preserve a useful per-slot window. An explicit
+// --parallel always wins, including --parallel 2 for a tighter big-MoE setup or 8
+// for hardware that has been proven stable under wider fan-out.
 func claudeCodeParallel(parallel int, claudeCode, explicit bool) int {
-	if claudeCode && !explicit && parallel < 2 {
-		return 2
+	if claudeCode && !explicit && parallel < 4 {
+		return 4
 	}
 	return parallel
 }
@@ -956,10 +949,9 @@ const (
 )
 
 // claudeCodeSlotAdjust caps the computed --parallel so each slot keeps a workable
-// context window. claudeCodeParallel floors parallel at 2 BEFORE placement, which
-// is right for large contexts (131072/2 = 65k slots) — but "fit" mode can pick a
-// small total context (e.g. 32768 for a huge MoE on tight VRAM), and 32768/4 = 8k
-// slots can't even hold Claude Code's system prompt. Fewer, bigger slots beat
+// context window. claudeCodeParallel floors parallel at 4 BEFORE placement, which
+// is right for large contexts, but 131072/4 is only 32k and "fit" mode can select
+// even less (e.g. 32768/4 = 8k). Fewer, bigger slots beat undersized slots:
 // more, broken ones: concurrent requests then queue (API_TIMEOUT_MS covers the
 // wait) and may re-process the prompt on interleave — slow, but functional.
 // Runs after placement.Compute and before Strategy.Args, so the emitted

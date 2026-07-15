@@ -113,15 +113,17 @@ model calls cannot leave for `api.anthropic.com`.
 - **Thinking is on** — a normal launch never passes `--reasoning off` (measurement-only:
   benchmark and the deterministic core `spec-test` matrix).
 - **Context fits the slot.** `--parallel` splits `--ctx-size` across sequence slots,
-  so each request only sees `ctx ÷ parallel`. Claude mode defaults to two main-model
-  slots: a native 1M model gets about 512k per slot; a model advertising 128k gets
-  about 64k per slot. Unknown model metadata uses the portable 128k-total fallback.
-  Explicit `--ctx-size` and `--parallel` values always win.
+  so each request only sees `ctx ÷ parallel`. Claude mode requests four main-model
+  slots: a native 1M model gets about 256k per slot. ggrun automatically lowers the
+  slot count if the selected total context would provide less than about 64k per
+  slot, so the portable 128k-total fallback uses two slots. Explicit `--ctx-size`
+  and `--parallel` values always win.
   Behind a custom base URL Claude Code assumes a 200k window and won't auto-compact in
   time, overflowing the slot (a hard fail with `--no-context-shift`). ggrun derives
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the real slot so compaction triggers early
   enough; subagents and workflow agents inherit it. A value you set yourself wins.
-- **Wide fan-out** (subagents, workflows) queues behind the two main-model slots.
+- **Wide fan-out** (subagents, workflows) runs up to four main-model requests at once
+  and queues additional work behind those slots.
   ggrun sets the maximum safe Claude request/background-agent timers, disables both
   stream-idle watchdogs, and gives llama-server no practical socket deadline. Claude's
   Workflow tool has a separate 180-second `stallMs`; a session-only PreToolUse hook

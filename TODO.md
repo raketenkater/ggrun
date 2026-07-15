@@ -78,7 +78,8 @@ Source: `5e91131f/24`, retargeted by the user on 2026-07-12.
 
 ## P1 — finish Claude Code integration
 
-The launcher, native `/v1/messages`, local aliases for every Claude tier, parallel-2,
+The launcher, native `/v1/messages`, local aliases for every Claude tier, parallel-4
+by default when the context can preserve useful slots,
 model-native context capped at 1M total context, per-slot compaction, no practical
 workflow deadline, anti-loop sampling, chunk-level prompt-cache reuse and
 DuckDuckGo MCP wiring are implemented. Claude Auto's hidden classifier requests are
@@ -107,7 +108,8 @@ them. Default local launches use fail-closed Auto, never bypass mode.
   seconds (4,514 reused tokens). Hybrid/recurrent contexts now skip this unsupported
   flag and use one bounded rolling checkpoint when host headroom permits.
 - [ ] Validate the new DeepSeek-V4 recurrent policy live: `--ctx-checkpoints 1`, no
-  unsupported cache-reuse flag, Claude logical batch 128 and parallel 2. Repeat an
+  unsupported cache-reuse flag, Claude logical batch 128 and the new parallel-4
+  default. Repeat an
   append-only 60k turn and prove that only the new tail is evaluated; record checkpoint
   size, TTFT, foreground responsiveness, peak RAM/VRAM and a long-run OOM result.
   Partial 2026-07-14 evidence: parallel-2 completed 60,020 prompt tokens without
