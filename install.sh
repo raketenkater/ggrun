@@ -584,8 +584,9 @@ install_legacy_bash_shim() {
 install_release_bundle() {
     local platform asset url sums_url tmp archive payload_root found_backend=0
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
-    # CUDA release bundles are optional manual assets. If none exists, auto mode
-    # can still fall back to Vulkan or CPU before attempting a source build.
+    # CUDA release bundles are published for supported Linux x86_64 hosts. If a
+    # matching bundle is unavailable, auto mode can still fall back to Vulkan or
+    # CPU before attempting a source build.
     command -v curl >/dev/null 2>&1 || return 1
     command -v tar >/dev/null 2>&1 || return 1
     platform="$(platform_slug)" || return 1
@@ -831,7 +832,7 @@ if [[ "$INSTALL_MODE" == "auto" || "$INSTALL_MODE" == "release" ]]; then
         RELEASE_INSTALLED=1
     elif [[ "$INSTALL_MODE" == "release" ]]; then
         err "No compatible release bundle found for $(platform_slug 2>/dev/null || echo unknown)-$BACKEND_CHOICE"
-        [[ "$BACKEND_CHOICE" == "cuda" ]] && err "CUDA release mode requires a manually attached CUDA bundle for this platform."
+        [[ "$BACKEND_CHOICE" == "cuda" ]] && err "CUDA release mode requires a matching CUDA bundle for this platform."
         exit 1
     else
         if choose_cuda_auto_fallback_backend && install_release_bundle; then

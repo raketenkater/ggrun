@@ -10,8 +10,9 @@ The project is mainly about three things:
 1. running big MoE models that do not fit neatly into VRAM;
 2. finding a fast configuration that also stays stable at the context and load I
    actually want to use;
-3. making the served model useful for local coding-agent workflows, including
-   Claude Code.
+3. making Claude Code's Ultracode workflows actually usable with a local model:
+   parallel agents, tools, long contexts, research, and no cloud inference for
+   the model calls.
 
 ggrun is not an inference engine. It reads the GGUF and the machine, builds a
 launch plan for the selected backend, checks that the plan fits, starts the
@@ -46,51 +47,29 @@ ggrun
 
 ![ggrun TUI demo](demo.gif)
 
-## What works now
+## What it does
 
-- **Large-MoE placement.** ggrun reads exact tensor sizes from the GGUF and uses
-  the available VRAM, RAM, GPU bandwidth, and backend capabilities to compute
-  `--tensor-split`, layer ownership, and whole-expert storage. On mixed rigs it
-  can keep dense work on the fast GPU while slower cards store experts.
-- **Memory checks before launch.** Model tensors, KV cache, compute buffers,
-  speculative models, and safety headroom are included in the plan. Failed
-  placements can be recovered and corrected instead of restarting forever.
-- **Normal serving paths.** Dense single-GPU, dense multi-GPU, CPU-only, RAM
-  offload, and large-MoE paths all use the same planner. CUDA, Vulkan, Metal,
-  CPU, and native Windows CUDA backends are supported.
-- **Measured tuning.** `--ai-tune` tests safe performance flags against the
-  installed backend, confirms the result, and caches the fastest successful
-  configuration. Context size, parallelism, and quality-affecting settings stay
-  under user control.
-- **Speculative decoding with a brake pedal.** ggrun can resolve embedded MTP,
-  compatible companion models, DFlash, EAGLE-3, and draft GGUFs. Auto mode only
-  uses a speculative path when a matching measured profile passed its checks;
-  otherwise it stays off.
-- **Model and vision setup.** The recommender filters by hardware and backend
-  support, downloads a fitting quant from Hugging Face, and finds and validates
-  the matching vision projector when one is needed.
-- **A TUI for the whole loop.** Running `ggrun` without arguments opens the
-  detect -> recommend -> download -> configure -> launch flow. The generated
-  plan is still inspectable, so the TUI is not hiding what gets executed.
+- Plans large-MoE placement from the GGUF, available VRAM and RAM, GPU
+  bandwidth, and backend capabilities.
+- Checks model, KV-cache, and safety-headroom memory before it starts a server.
+- Supports dense and MoE models across single GPU, multi-GPU, CPU, and RAM
+  offload configurations.
+- Measures a bounded set of safe performance options with `--ai-tune` and
+  preserves the winning configuration for the same setup.
+- Keeps model downloads, recommendations, launches, and the generated command
+  in one inspectable TUI flow.
 
-## Local Claude Code workflows
+## Local Claude Code and Ultracode workflows
 
 ```bash
 ggrun model.gguf --claude-code
 ```
 
-This starts the model, points all Claude Code model aliases at the local
+This starts the model, points Claude Code model aliases at the local
 Anthropic-compatible endpoint, and launches the `claude` CLI when it is
-installed. ggrun also sets up the parts that became necessary once I tried
-running actual agent workflows instead of a short chat:
-
-- four local model slots by default when the total context is large enough;
-- per-slot compaction and prompt-cache reuse where the model architecture allows it;
-- long-running request handling without a small cloud-style inference timeout;
-- live request progress for queued, prompt-processing, and generation states;
-- local web search and page fetching through a DuckDuckGo MCP when `uvx` is available;
-- fail-closed Claude Auto permission reviews through a separate local Qwen3.5-2B
-  reviewer, instead of spending the main model's context on every hidden review.
+installed. The point is to make Claude Code's Ultracode workflows usable with a
+local model: parallel agents, tools, long contexts, research, and no cloud
+inference for the model calls.
 
 Context is shared between slots: `1M` total context with `--parallel 4` is about
 `256k` per request. ggrun lowers the default parallelism when that split would
@@ -125,11 +104,9 @@ parallel 4 completed a 60,020-token request plus three concurrent requests at
 memory, and load-test details are in the benchmark document.
 
 The goal is the fastest **stable** plan for the requested workload, not maximum
-VRAM fill or one lucky short benchmark. Today the default is a conservative,
-measured placement heuristic and `--ai-tune` explores a bounded set of flags.
-Generic first-run calibration across every model and hardware combination is
-still work in progress, so I do not claim that ggrun already proves the global
-fastest configuration everywhere.
+VRAM fill or one lucky short benchmark. The default is a conservative, measured
+placement heuristic, and `--ai-tune` explores a bounded set of flags for the
+installed backend.
 
 ## Useful commands
 
@@ -141,6 +118,8 @@ ggrun model.gguf --claude-code   # launch a local Claude Code workflow
 ggrun model.gguf --spec auto     # use only a validated speculative profile
 ggrun spec-test model.gguf --ctx 1048576 --parallel 4
 ggrun recommend                  # rank models for this machine and backend
+ggrun models list                # show local GGUFs and grouped split models
+ggrun models rm model.gguf       # safely remove a downloaded model
 ```
 
 Placement and memory can be constrained explicitly:
@@ -158,44 +137,19 @@ ggrun does not own are forwarded unchanged.
 ## Backends
 
 - **Linux NVIDIA:** ik_llama.cpp CUDA is the most tested and fastest path on my
-  machine. The installer currently builds it for the local GPU architecture.
+  machine. Matching releases ship a portable CUDA bundle; source build is the fallback.
 - **Linux AMD / Intel:** mainline llama.cpp through Vulkan.
 - **macOS:** mainline llama.cpp with Metal and unified-memory detection.
 - **Windows:** CPU bundles and native NVIDIA CUDA support.
 - **Custom binaries:** select one with `--server-bin` or `LLAMA_SERVER`.
 
-New architectures often land in a fork before upstream. ggrun can install a
-pinned fork recipe or register any already-built `llama-server`, keep it isolated,
-and route only matching GGUF architectures to it:
-
-```bash
-ggrun backend recipes
-ggrun backend install hy3
-ggrun backend register --tag new-model --path /path/to/llama-server \
-  --route-arch new_model_arch
-```
-
-The HY3 recipe build and routing are verified, but real HY3 GGUF serving is still
-experimental until its load, output, and parallel tests are complete. See
-[docs/fork-backends.md](docs/fork-backends.md).
-
-## Project status
-
-This is an active personal project. The Linux CUDA path on mixed NVIDIA hardware
-has received the deepest live testing because that is the machine I built it for.
-The other serving paths have load/generation tests and CI coverage, but they do
-not all have the same amount of performance data yet.
-
-The remaining work is tracked in [TODO.md](TODO.md). The main open items are the
-broader MTP performance matrix, real HY3 validation, a complete four-agent Claude
-Code acceptance run, and generic first-run speed calibration.
-
 ## Documentation
 
 [Install](docs/install.md) ·
+[Getting started](docs/getting-started.md) ·
+[Troubleshooting](docs/troubleshooting.md) ·
 [Usage](docs/usage.md) ·
 [Architecture](docs/architecture.md) ·
-[Fork backends](docs/fork-backends.md) ·
 [Benchmarks](docs/launch-performance.md) ·
 [Speculative decoding](docs/speculative-decoding.md) ·
 [Model recommendations](docs/model-recommendations.md) ·

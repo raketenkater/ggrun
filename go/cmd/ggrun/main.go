@@ -88,6 +88,8 @@ func main() {
 		cmdSpecTest(args[1:])
 	case "recommend":
 		cmdRecommend(args[1:])
+	case "models":
+		cmdModels(args[1:])
 	case "gui", "tui":
 		cmdGUI()
 	case "config":
@@ -121,6 +123,7 @@ Commands:
   tune <model.gguf>    AI-tune model for best performance
   spec-test <model>    Verify MTP ceilings 1-4 against a target-only baseline
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
+  models [list|path|rm] List, locate, or safely remove downloaded GGUF models
   config [show|edit|path|reset]  Manage settings
   backend [list|add|register|remove]  Manage custom llama.cpp backends and
                        optionally route a model architecture to one
@@ -146,7 +149,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -2610,8 +2613,7 @@ func claudeCodeAutocompactPct(serverArgs []string) int {
 	}
 	slot := ctx / parallel
 	// Upstream pads per-sequence context to 256-token alignment; align
-	// down so auto-compact triggers before the actual slot overflows
-	// (Codex audit #7).
+	// down so auto-compact triggers before the actual slot overflows.
 	slot = slot & ^255
 	if slot < 2048 {
 		slot = 2048

@@ -141,7 +141,7 @@ func defaultSources() map[string]string {
 // Path returns the canonical config file path. It resolves the app home via
 // backends.AppHome() so the config file lives alongside backends.json
 // (AppHome()/.config/) instead of diverging to a separate $HOME/.config/ggrun
-// location (audit #8).
+// location.
 func Path() string {
 	if p := os.Getenv("LLM_CONFIG"); p != "" {
 		return p

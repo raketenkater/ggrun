@@ -1016,7 +1016,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			if used[i] {
 				// Weight by VRAM available AFTER the fixed per-GPU CUDA/compute
 				// reserve, not raw free VRAM, so high-overhead GPUs are not
-				// over-allocated (audit #4).
+				// over-allocated.
 				avail := float64(g.VRAMFreeMB() - fixedPerGPU[i])
 				totalWeighted += avail * gpuSplitWeight(g)
 			}
@@ -1787,7 +1787,7 @@ func cacheEntryFromArgs(args []string, assignments []GPUAssignment) *CacheEntry 
 		entry.Parallel, _ = strconv.Atoi(args[idx+1])
 	}
 	entry.MMap = argIndex(args, "--no-mmap") < 0
-	// Persist the resolved KV placement so a cache hit re-applies it (audit #3):
+	// Persist the resolved KV placement so a cache hit re-applies it:
 	// without this, no .place cache carries CACHED_KVUNIFIED and the load-side
 	// check at placement.go:397 never fires.
 	if argIndex(args, "--kv-offload") >= 0 {
@@ -2263,7 +2263,7 @@ func expertOnlyComputeReserveMB(splitOwnerComputeMB int) int {
 // the model weights (prompt-graph compute buffer + a small runtime-growth
 // margin). Replaces the flat 8 GiB guess previously hard-coded in the auto
 // context-size paths so large models reserve enough and small models don't
-// waste context capacity (audit #8).
+// waste context capacity.
 func modelAwareHeadroom(model *ModelProfile) int {
 	return firstLaunchComputeBufMB(model, 512) + 1024
 }
@@ -2609,7 +2609,7 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 	// Single GPU context shouldn't use entire system RAM — the model must fit on ONE GPU.
 	totalHWMB := bestVRAM + 4096
 
-	// Fixed overhead: model weights + model-aware headroom (audit #8)
+	// Fixed overhead: model weights + model-aware headroom.
 	fixedOverheadMB := totalSizeMB + modelAwareHeadroom(model)
 
 	// If model doesn't fit at all, return minimum
@@ -2775,7 +2775,7 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 	}
 	totalHWMB := totalVRAM + caps.RAM.FreeMB
 
-	// Fixed overhead: model weights + model-aware headroom (audit #8)
+	// Fixed overhead: model weights + model-aware headroom.
 	fixedOverheadMB := totalSizeMB + modelAwareHeadroom(model)
 
 	// If model doesn't fit at all, return minimum

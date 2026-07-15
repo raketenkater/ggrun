@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a focused improvement to ggrun
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Concrete workflows are more useful than a list of desired flags.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What are you trying to run, and where does ggrun get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Hardware, model, and backend context
+      description: Include this when the request is about placement, speed, or model support.

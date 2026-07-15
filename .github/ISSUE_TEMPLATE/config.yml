@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Getting started and troubleshooting
+    url: https://github.com/raketenkater/ggrun/tree/main/docs
+    about: Start here before opening an issue.

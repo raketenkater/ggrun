@@ -45,10 +45,24 @@ ggrun model.gguf --spec ngram-mod
 ggrun --update
 ggrun model.gguf --benchmark
 ggrun model.gguf --dry-run
+
+# Model storage
+ggrun models list
+ggrun models path
+ggrun models rm model.gguf
+ggrun models rm model.gguf --yes
 ```
 
 Unknown flags are passed through to `llama-server`, so upstream options remain available
 without wrapper changes.
+
+## Model storage
+
+`ggrun models list` shows GGUF files under the configured model directory and
+groups split GGUFs as one model. `ggrun models path` prints that directory.
+Use `ggrun models rm <model.gguf>` to remove a listed model; it asks before
+deleting and only operates inside the configured model directory. Add `--yes`
+for scripts or set `LLM_ASSUME_YES=true` in a non-interactive environment.
 
 ## AI Tune
 

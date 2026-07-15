@@ -1,8 +1,6 @@
 name: Release
 
-# Supported targets: Linux, macOS, and native Windows. CUDA/ik_llama.cpp
-# bundles need a CUDA-capable release host; see docs/releasing.md for the
-# manual asset path.
+# Release bundles cover Linux CPU/Vulkan/CUDA, macOS Metal, and Windows CPU.
 
 on:
   push:
@@ -12,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   preflight:
@@ -244,10 +243,45 @@ jobs:
           name: ${{ env.ASSET }}
           path: dist/${{ env.ASSET }}
 
+  package-cuda:
+    name: package ggrun-linux-x86_64-cuda.tar.gz
+    needs: preflight
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.8.1-devel-ubuntu22.04
+    env:
+      IK_LLAMA_REF: 1fddd12ba861c4815a8633f14d9c5670692099cc
+      ASSET: ggrun-linux-x86_64-cuda.tar.gz
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      - name: Install CUDA build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl git libcurl4-openssl-dev libgomp1
+
+      - name: Build pinned ik_llama CUDA bundle
+        run: OUT_DIR=dist scripts/build-linux-cuda-bundle.sh
+
+      - name: Smoke-test backend binary
+        run: tar -xzf dist/${{ env.ASSET }} -C /tmp && /tmp/ggrun-linux-x86_64-cuda/bin/llama-server --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
+
   publish:
     name: publish release assets
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [package, package-windows]
+    needs: [package, package-windows, package-cuda]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -260,6 +294,12 @@ jobs:
           cd dist
           find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release checksums
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.bundle dist/SHA256SUMS
+
       - name: Attach assets to release
         uses: softprops/action-gh-release@v2
         with:
@@ -267,3 +307,4 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/SHA256SUMS
+            dist/SHA256SUMS.bundle

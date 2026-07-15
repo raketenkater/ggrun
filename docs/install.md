@@ -58,10 +58,12 @@ GUI edits take effect instead of being shadowed by environment variables.
 
 Since v3, [prebuilt release bundles](https://github.com/raketenkater/ggrun/releases/latest)
 (Linux CPU/Vulkan, macOS arm64 Metal, Windows x86_64 CPU) are downloaded and verified
-against the published `SHA256SUMS` — no compile needed. Linux CUDA/ik_llama.cpp installs
-build from source for your exact GPU architecture. Windows NVIDIA CUDA installs use a
+against the published SHA256SUMS — no compile needed. Tagged releases built by the
+current pipeline also publish Linux CUDA with the pinned ik_llama.cpp backend as a
+portable x86_64 bundle; source build remains the fallback for an unsupported
+platform, an older release, or an intentionally local build. Windows NVIDIA CUDA installs use a
 native llama.cpp CUDA backend, either from an optional
-`ggrun-windows-x86_64-cuda.zip` release asset or by building it locally.
+ggrun-windows-x86_64-cuda.zip release asset or by building it locally.
 
 ## Classic install to `~/.local/bin`
 

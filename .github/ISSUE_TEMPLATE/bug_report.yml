@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible ggrun problem
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please remove private paths, tokens,
+        prompts, and model files before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: ggrun version
+      description: Output of ggrun version.
+      placeholder: ggrun v3.x.x
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and backend
+      description: Paste the relevant, redacted output of ggrun detect.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and quant
+      description: Filename and quant only; do not attach the GGUF.
+      placeholder: Qwen...Q4_K_M.gguf
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Reproduction command
+      description: Include --ctx-size, --parallel, backend, and GPU flags. Redact private paths.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and relevant logs
+      description: Include the error and the --dry-run output if possible. Do not include prompt contents.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed private paths, credentials, prompts, and model files.
+          required: true
+        - label: I checked the troubleshooting guide.
+          required: true

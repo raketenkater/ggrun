@@ -3,6 +3,14 @@
 ggrun is Go-first. Changes should preserve the public product layout and
 include tests that match the risk of the change.
 
+## Reporting bugs and proposing changes
+
+Use the GitHub issue forms for reproducible bugs and focused feature requests.
+For launch or performance reports, include ggrun version, redacted ggrun
+detect output, model/quant, backend, context, parallelism, and the relevant
+--dry-run output. Never attach model files, credentials, private paths, or
+prompt contents.
+
 Before opening a pull request:
 
 ```bash
