@@ -106,7 +106,7 @@ func cmdBackendInstall(args []string) {
 	}
 	// User build-only overrides such as --cuda-arch come last.
 	generated = append(generated, args[1:]...)
-	cmdBackendAdd(generated)
+	cmdBackendAddRecipe(generated, recipe)
 }
 
 func cmdBackendList() {
@@ -190,6 +190,10 @@ func cmdBackendRemove(args []string) {
 }
 
 func cmdBackendAdd(args []string) {
+	cmdBackendAddRecipe(args, nil)
+}
+
+func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 	url, f := parseBackendFlags(args)
 	if url == "" {
 		url = f["url"]
@@ -227,7 +231,7 @@ func cmdBackendAdd(args []string) {
 	} else {
 		fmt.Printf("[backend] reusing existing checkout %s\n", srcDir)
 	}
-	if err := prepareForkCheckout(srcDir, branch, commit); err != nil {
+	if err := prepareForkCheckoutRecipe(srcDir, branch, commit, recipe); err != nil {
 		fmt.Fprintf(os.Stderr, "source checkout failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -241,6 +245,9 @@ func cmdBackendAdd(args []string) {
 
 	actualCommit, _ := gitOutput(srcDir, "rev-parse", "HEAD")
 	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit)}
+	if recipe != nil {
+		be.AppliedPatches = recipe.PatchNames()
+	}
 	if err := backends.Upsert(be); err != nil {
 		fmt.Fprintf(os.Stderr, "register failed: %v\n", err)
 		os.Exit(1)
@@ -261,9 +268,24 @@ func cmdBackendAdd(args []string) {
 // local edits. A commit pin wins; otherwise the requested branch (or remote
 // default HEAD) advances to its latest fetched revision.
 func prepareForkCheckout(srcDir, branch, commit string) error {
+	return prepareForkCheckoutRecipe(srcDir, branch, commit, nil)
+}
+
+func prepareForkCheckoutRecipe(srcDir, branch, commit string, recipe *backends.Recipe) error {
 	dirty, err := gitOutput(srcDir, "status", "--porcelain")
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(dirty) != "" {
+		if recipe != nil {
+			if err := recipe.RevertPatches(srcDir); err != nil {
+				return fmt.Errorf("%s has local changes (%w)", srcDir, err)
+			}
+			dirty, err = gitOutput(srcDir, "status", "--porcelain")
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if strings.TrimSpace(dirty) != "" {
 		return fmt.Errorf("%s has local changes; commit/stash them or use a different recipe tag", srcDir)
@@ -293,6 +315,11 @@ func prepareForkCheckout(srcDir, branch, commit string) error {
 		}
 		if !strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(commit)) {
 			return fmt.Errorf("commit verification failed: got %s, want %s", strings.TrimSpace(actual), commit)
+		}
+	}
+	if recipe != nil {
+		if err := recipe.ApplyPatches(srcDir); err != nil {
+			return err
 		}
 	}
 	return nil

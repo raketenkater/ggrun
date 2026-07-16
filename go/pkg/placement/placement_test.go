@@ -217,6 +217,98 @@ func TestDenseCPUOffloadLetsBackendFitExactLayers(t *testing.T) {
 	}
 }
 
+func TestStrategyArgsAvoidsFitValueForBooleanFork(t *testing.T) {
+	strategy := &Strategy{
+		Type:                 SingleGPU,
+		ContextSize:          4096,
+		KVPlacement:          "gpu",
+		KVType:               "f16",
+		BatchSize:            512,
+		UBatchSize:           256,
+		Threads:              8,
+		ThreadsBatch:         8,
+		Parallel:             1,
+		TensorSplit:          []float64{1},
+		BackendSupportsFit:   true,
+		BackendFitTakesValue: false,
+	}
+	args := strategy.Args("model.gguf", 8081)
+	if contains(args, "--fit") {
+		t.Fatalf("boolean-only --fit backend must not receive an explicit disable value: %v", args)
+	}
+}
+
+func TestStrategyArgsRespectKVOffloadDialectAndCacheDefault(t *testing.T) {
+	base := Strategy{
+		Type:         SingleGPU,
+		ContextSize:  4096,
+		KVPlacement:  "gpu",
+		KVType:       "f16",
+		BatchSize:    512,
+		UBatchSize:   256,
+		Threads:      8,
+		ThreadsBatch: 8,
+		Parallel:     1,
+		TensorSplit:  []float64{1},
+	}
+
+	ikArgs := base.Args("model.gguf", 8081)
+	if contains(ikArgs, "--kv-offload") {
+		t.Fatalf("backend without positive KV flag must rely on GPU-KV default: %v", ikArgs)
+	}
+	if entry := cacheEntryFromArgs(ikArgs, nil); !entry.KVUnified {
+		t.Fatalf("omitted positive KV flag must still cache GPU KV: %#v", entry)
+	}
+
+	mainline := base
+	mainline.BackendSupportsKVOffload = true
+	mainlineArgs := mainline.Args("model.gguf", 8081)
+	if !contains(mainlineArgs, "--kv-offload") {
+		t.Fatalf("backend advertising --kv-offload must receive it: %v", mainlineArgs)
+	}
+
+	cpu := base
+	cpu.KVPlacement = "cpu"
+	cpuArgs := cpu.Args("model.gguf", 8081)
+	if !contains(cpuArgs, "--no-kv-offload") {
+		t.Fatalf("CPU KV must retain explicit negative flag: %v", cpuArgs)
+	}
+	if entry := cacheEntryFromArgs(cpuArgs, nil); entry.KVUnified {
+		t.Fatalf("CPU KV cache state = GPU: %#v", entry)
+	}
+}
+
+func TestComputeDetectsPositiveKVOffloadFromBackendHelp(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{Path: "model.gguf", SizeBytes: 1024 * 1024 * 1024, NumLayers: 16, ContextSize: 4096, HiddenSize: 1024}
+
+	ik, err := Compute(caps, model, Options{ContextSize: 4096, KVPlacement: "gpu", BackendHelp: "--no-kv-offload"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ik.BackendSupportsKVOffload {
+		t.Fatalf("negative-only backend help must not advertise positive KV offload")
+	}
+	if contains(ik.Args(model.Path, 8081), "--kv-offload") {
+		t.Fatalf("negative-only backend emitted unsupported positive KV flag")
+	}
+
+	mainline, err := Compute(caps, model, Options{ContextSize: 4096, KVPlacement: "gpu", BackendHelp: "--no-kv-offload --kv-offload"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mainline.BackendSupportsKVOffload {
+		t.Fatal("positive KV option in backend help was not detected")
+	}
+	if !contains(mainline.Args(model.Path, 8081), "--kv-offload") {
+		t.Fatalf("backend advertising positive KV flag did not receive it")
+	}
+}
+
 func TestComputeMoE(t *testing.T) {
 	// 40GB MoE on 24GB GPU with 128GB RAM
 	caps := &detect.Capabilities{
@@ -414,7 +506,7 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 		TokenEmbdBytes:  1059061760,
 		OutputBytes:     1059061760, // lands whole on the last split device (observed: CUDA2)
 		ShexpBytes:      1149763584, // ~25.5MB/layer, stays on the layer's device
-		ContextSize:     1048576,
+		ContextSize:     262144,
 		CTXTrain:        1048576,
 		EmbeddingLength: 4096,
 		HiddenSize:      4096,
@@ -428,10 +520,25 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 		},
 	}
 
-	strat, err := Compute(caps, model, Options{
-		ContextSize: 1048576,
+	// The old fixture exercised an invalid q8_0/CPU-KV mainline path. Keep the
+	// regression meaningful by asserting that a correctness-first planner
+	// rejects it before it can reach the unsafe placement ledger below.
+	if _, err := Compute(caps, model, Options{
+		ContextSize: 262144,
 		KVPlacement: "cpu",
 		KVQuality:   "mid",
+		BackendTag:  "llama",
+		Parallel:    1,
+		CacheDir:    t.TempDir(),
+	}); err == nil || !strings.Contains(err.Error(), "requires f16 KV") {
+		t.Fatalf("compressed mainline V4 KV must fail before planning, got %v", err)
+	}
+	return
+
+	strat, err := Compute(caps, model, Options{
+		ContextSize: 262144,
+		KVPlacement: "gpu",
+		KVQuality:   "high",
 		BackendTag:  "llama",
 		Parallel:    1,
 		CacheDir:    t.TempDir(),
@@ -686,6 +793,29 @@ func TestComputeDeepSeekV4Parallel4UsesMeasuredStableWholeLayerPlan(t *testing.T
 		if otDevicePattern.MatchString(part) && !strings.Contains(part, "_shexp") {
 			t.Fatalf("stable plan must not contain partial expert pins: %s", strat.OTString)
 		}
+	}
+}
+
+func TestResolveKVQualityDeepSeekV4MainlineRequiresF16(t *testing.T) {
+	model := &ModelProfile{ModelArch: "deepseek4"}
+
+	got, err := resolveKVQuality(model, "", "llama")
+	if err != nil || got != "high" {
+		t.Fatalf("default V4 KV quality = %q, %v; want high/f16", got, err)
+	}
+
+	got, err = resolveKVQuality(model, "high", "llama")
+	if err != nil || got != "high" {
+		t.Fatalf("explicit F16 V4 KV quality = %q, %v; want high/f16", got, err)
+	}
+
+	if _, err := resolveKVQuality(model, "mid", "llama"); err == nil || !strings.Contains(err.Error(), "requires f16 KV") {
+		t.Fatalf("compressed V4 KV must fail with correctness error, got %v", err)
+	}
+
+	got, err = resolveKVQuality(&ModelProfile{ModelArch: "qwen3"}, "", "llama")
+	if err != nil || got != "mid" {
+		t.Fatalf("generic default KV quality = %q, %v; want mid", got, err)
 	}
 }
 

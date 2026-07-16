@@ -67,29 +67,35 @@ type Strategy struct {
 	// that lands right — or is corrected by OOM-recovery — is reused next launch
 	// instead of re-predicted. Runtime-only; not part of the serialized strategy.
 	PlacementCachePath string `json:"-"`
-	// BackendSupportsFit is true when the backend's --help lists -fit/--fit. ggrun
-	// then emits `--fit off` for GPU launches to disable the backend's own memory
-	// auto-fitting, which is redundant with ggrun's explicit placement.
-	BackendSupportsFit bool         `json:"-"`
-	MMap               bool         `json:"mmap"`
-	MLock              bool         `json:"mlock"`
-	FlashAttention     bool         `json:"flash_attention"`
-	Threads            int          `json:"threads"`
-	BatchSize          int          `json:"batch_size"`
-	UBatchSize         int          `json:"ubatch_size"`
-	BackendTag         string       `json:"backend_tag,omitempty"` // "llama" or "ik_llama"
-	IsMoE              bool         `json:"is_moe"`
-	ReasoningOff       bool         `json:"reasoning_off"` // default off for OpenAI compat
-	ThreadsBatch       int          `json:"threads_batch"` // batch threads (logical cores)
-	Parallel           int          `json:"parallel,omitempty"`
-	CRAM               int          `json:"cram,omitempty"` // prompt cache MB
-	MaxCheckpoints     int          `json:"max_checkpoints,omitempty"`
-	UseCUDAGraphs      bool         `json:"use_cuda_graphs,omitempty"`
-	Host               string       `json:"host,omitempty"`        // listen address
-	HasSSM             bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
-	Draft              *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
-	MMProjPath         string       `json:"mmproj_path,omitempty"` // vision projector GGUF
-	MMProjSizeMB       int          `json:"-"`                     // mmproj VRAM on primary GPU
+	// BackendSupportsFit is true when the backend's --help lists -fit/--fit.
+	// Some backends accept an explicit on/off value while older compatible forks
+	// expose a simple boolean --fit. Keep the dialect separate: sending
+	// "--fit off" to a boolean-only fork makes it reject the whole launch.
+	BackendSupportsFit   bool `json:"-"`
+	BackendFitTakesValue bool `json:"-"`
+	// BackendSupportsKVOffload reports whether the backend accepts the positive
+	// --kv-offload switch. GPU KV is the backend default, so a backend which
+	// only exposes --no-kv-offload must receive no positive flag at all.
+	BackendSupportsKVOffload bool         `json:"-"`
+	MMap                     bool         `json:"mmap"`
+	MLock                    bool         `json:"mlock"`
+	FlashAttention           bool         `json:"flash_attention"`
+	Threads                  int          `json:"threads"`
+	BatchSize                int          `json:"batch_size"`
+	UBatchSize               int          `json:"ubatch_size"`
+	BackendTag               string       `json:"backend_tag,omitempty"` // "llama" or "ik_llama"
+	IsMoE                    bool         `json:"is_moe"`
+	ReasoningOff             bool         `json:"reasoning_off"` // default off for OpenAI compat
+	ThreadsBatch             int          `json:"threads_batch"` // batch threads (logical cores)
+	Parallel                 int          `json:"parallel,omitempty"`
+	CRAM                     int          `json:"cram,omitempty"` // prompt cache MB
+	MaxCheckpoints           int          `json:"max_checkpoints,omitempty"`
+	UseCUDAGraphs            bool         `json:"use_cuda_graphs,omitempty"`
+	Host                     string       `json:"host,omitempty"`        // listen address
+	HasSSM                   bool         `json:"has_ssm,omitempty"`     // SSM/Mamba hybrid flag
+	Draft                    *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
+	MMProjPath               string       `json:"mmproj_path,omitempty"` // vision projector GGUF
+	MMProjSizeMB             int          `json:"-"`                     // mmproj VRAM on primary GPU
 }
 
 // ModelProfile describes the GGUF model.
@@ -140,11 +146,14 @@ type ModelProfile struct {
 	// this model, read back from the backend log. It is the ground truth for
 	// compressed-attention models (MLA/CSA-HCA/SWA) where the GGUF formula is
 	// unreliable; computeKVTotalMB prefers it over the formula when present.
-	MeasuredKVBytesPerTok map[string]float64 `json:"-"`
-	ExpertFF              int                `json:"expert_ff,omitempty"`
-	ExpertSharedFF        int                `json:"expert_shared_ff,omitempty"`
-	LeadingDense          int                `json:"leading_dense,omitempty"`
-	NextNPredictLayers    int                `json:"nextn_predict_layers,omitempty"`
+	MeasuredKVBytesPerTok     map[string]float64 `json:"-"`
+	ExpertFF                  int                `json:"expert_ff,omitempty"`
+	ExpertSharedFF            int                `json:"expert_shared_ff,omitempty"`
+	ExpertSharedCount         int                `json:"expert_shared_count,omitempty"`
+	ExpertSharedCountInferred bool               `json:"expert_shared_count_inferred,omitempty"`
+	LeadingDense              int                `json:"leading_dense,omitempty"`
+	LeadingDenseInferred      bool               `json:"leading_dense_inferred,omitempty"`
+	NextNPredictLayers        int                `json:"nextn_predict_layers,omitempty"`
 }
 
 // Options allows user overrides.
@@ -190,6 +199,16 @@ func backendCacheTag(opts Options) string {
 	return opts.BackendTag
 }
 
+// backendFitTakesValue distinguishes current mainline's "--fit [on|off]"
+// dialect from forks that expose --fit as a boolean. The latter must not receive
+// a value: argparse-style parsing treats "off" as an unknown positional option.
+func backendFitTakesValue(help string) bool {
+	help = strings.ToLower(help)
+	return strings.Contains(help, "--fit [on|off]") ||
+		strings.Contains(help, "--fit (on|off)") ||
+		strings.Contains(help, "--fit <on|off>")
+}
+
 func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
 	if budgetMB <= 0 || caps == nil {
 		return caps
@@ -220,10 +239,15 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		}
 	}
 
+	resolvedKVQuality, err := resolveKVQuality(model, opts.KVQuality, opts.BackendTag)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Strategy{
 		ContextSize:    opts.ContextSize,
 		KVPlacement:    opts.KVPlacement,
-		KVQuality:      opts.KVQuality,
+		KVQuality:      resolvedKVQuality,
 		MMap:           !opts.NoMMap,
 		MLock:          false,
 		Threads:        caps.CPU.Cores, // physical cores
@@ -242,8 +266,11 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		Host:   opts.Host,
 		// ggrun sets explicit placement (-ngl/-ot/--tensor-split), so the backend's
 		// own auto memory-fitting (-fit) is redundant with this explicit plan.
-		// Disable it when the backend supports the flag.
-		BackendSupportsFit: backendHelpSupports(opts.BackendHelp, "-fit"),
+		// Only value-taking dialects need an explicit "off"; boolean backends are
+		// already disabled when the flag is absent.
+		BackendSupportsFit:       backendHelpSupports(opts.BackendHelp, "-fit"),
+		BackendFitTakesValue:     backendFitTakesValue(opts.BackendHelp),
+		BackendSupportsKVOffload: backendHelpSupports(opts.BackendHelp, "--kv-offload"),
 	}
 
 	if s.ContextSize <= 0 {
@@ -251,11 +278,6 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	}
 	if opts.KVPlacement == "" {
 		s.KVPlacement = "auto"
-	}
-	if opts.KVQuality == "" {
-		// q8_0 KV cache: near-lossless, preserves model quality. The fitting
-		// logic falls back to q4_0 only when VRAM genuinely can't hold q8_0.
-		s.KVQuality = "mid"
 	}
 	if opts.Parallel > 0 {
 		s.Parallel = opts.Parallel
@@ -531,6 +553,33 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	s.FlashAttention = defaultFlashAttention(model, opts, s.KVPlacement)
 
 	return s, nil
+}
+
+// resolveKVQuality applies architecture/backend correctness rules before the
+// generic memory-quality policy. DeepSeek-V4's current mainline llama.cpp path
+// produces incorrect output with compressed KV; a configuration that fits but
+// returns garbage must fail before placement or launch.
+func resolveKVQuality(model *ModelProfile, requested, backendTag string) (string, error) {
+	if model != nil && strings.EqualFold(model.ModelArch, "deepseek4") &&
+		(backendTag == "" || strings.EqualFold(backendTag, "llama")) {
+		if requested != "" {
+			kvType, err := NormalizeKVType(requested)
+			if err != nil {
+				return "", fmt.Errorf("KV cache type: %w", err)
+			}
+			if kvType != "f16" {
+				return "", fmt.Errorf("DeepSeek-V4 on mainline llama.cpp requires f16 KV for correct output; %s is unsupported", kvType)
+			}
+		}
+		return "high", nil
+	}
+	if requested == "" {
+		// q8_0 KV cache: near-lossless for architectures without a stricter
+		// correctness rule. The fitting logic falls back to q4_0 only when VRAM
+		// genuinely cannot hold q8_0.
+		return "mid", nil
+	}
+	return requested, nil
 }
 
 // Target placement differs when a separate speculative model reserves VRAM.
@@ -1798,11 +1847,11 @@ func cacheEntryFromArgs(args []string, assignments []GPUAssignment) *CacheEntry 
 	// Persist the resolved KV placement so a cache hit re-applies it:
 	// without this, no .place cache carries CACHED_KVUNIFIED and the load-side
 	// check at placement.go:397 never fires.
-	if argIndex(args, "--kv-offload") >= 0 {
-		entry.KVUnified = true
-	} else if argIndex(args, "--no-kv-offload") >= 0 {
-		entry.KVUnified = false
-	}
+	// GPU KV is the server default. Some compatible backends do not expose the
+	// positive --kv-offload flag, so absence means GPU rather than "unknown".
+	// This keeps a derated placement cache correct for ik_llama as well as
+	// mainline llama.cpp.
+	entry.KVUnified = argIndex(args, "--no-kv-offload") < 0
 	return entry
 }
 
@@ -2915,7 +2964,7 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 	if s.KVPlacement == "cpu" {
 		args = append(args, "--no-kv-offload")
-	} else if s.KVPlacement == "gpu" {
+	} else if s.KVPlacement == "gpu" && s.BackendSupportsKVOffload {
 		args = append(args, "--kv-offload")
 	}
 
@@ -2947,13 +2996,16 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		// Keep n_gpu_layers and tensor_split unset. Backend fit uses exact GGUF
 		// tensor sizes to choose a safe GPU/CPU layer boundary at the requested
 		// context. Explicit values make llama.cpp fit abort without changing them.
-		args = append(args, "--fit", "on")
+		args = append(args, "--fit")
+		if s.BackendFitTakesValue {
+			args = append(args, "on")
+		}
 	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
 		// Disable the backend's own memory auto-fit: ggrun already sets explicit
 		// placement, so a second fit pass is redundant. Only emit the option when
 		// the selected backend supports it.
-		if s.BackendSupportsFit {
+		if s.BackendSupportsFit && s.BackendFitTakesValue {
 			args = append(args, "--fit", "off")
 		}
 		// Metal has exactly one logical device — device-routing flags are

@@ -127,7 +127,7 @@ func claudeReviewerArgs(binary, modelPath string, port, gpu int, help string) []
 	}
 	if gpu >= 0 {
 		// --device exposes one device to this model, renumbered locally to 0.
-		args = append(args, "--device", fmt.Sprintf("CUDA%d", gpu), "--split-mode", "none", "-ngl", "999", "-mg", "0", "--fit", "off")
+		args = append(args, "--device", fmt.Sprintf("CUDA%d", gpu), "--split-mode", "none", "-ngl", "999", "-mg", "0")
 	} else {
 		args = append(args, "-ngl", "0")
 	}

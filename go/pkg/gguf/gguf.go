@@ -11,43 +11,46 @@ import (
 
 // Info holds parsed GGUF metadata.
 type Info struct {
-	Architecture       string `json:"arch"`
-	Name               string `json:"name"`
-	Basename           string `json:"basename"`
-	QuantizedBy        string `json:"quantized_by"`
-	BlockCount         int    `json:"layers"`
-	ContextLength      int    `json:"ctx_train"`
-	EmbeddingLength    int    `json:"embd"`
-	FeedForwardLength  int    `json:"ff"`
-	HeadCountKV        int    `json:"hkv"`
-	KeyLength          int    `json:"kl"`
-	ValueLength        int    `json:"vl"`
-	VocabSize          int    `json:"vocab_size"`
-	TokenizerModel     string `json:"tokenizer_model"`
-	TokenizerPre       string `json:"tokenizer_pre"`
-	TokenizerHash      string `json:"tokenizer_hash"`
-	ExpertBytes        int64  `json:"expert_bytes"`
-	NonExpertBytes     int64  `json:"non_expert_bytes"`
-	TokenEmbdBytes     int64  `json:"token_embd_bytes"` // input embeddings; stay in host RAM
-	OutputBytes        int64  `json:"output_bytes"`     // output head; lands whole on the last split device
-	ShexpBytes         int64  `json:"shexp_bytes"`      // shared experts; stay on the layer's device even when routed experts offload to CPU
-	Fused              int    `json:"fused"`
-	Experts            int    `json:"experts"`              // total number of experts (MoE)
-	ExpertUsed         int    `json:"exp_used"`             // experts used per token
-	ExpFF              int    `json:"exp_ff"`               // expert feed-forward size
-	ExpSharedFF        int    `json:"exp_shared_ff"`        // expert shared feed-forward size
-	NRot               int    `json:"n_rot"`                // rope dimension
-	SSM                int    `json:"ssm"`                  // 1 if model uses SSM layers
-	FullAttnInterval   int    `json:"full_interval"`        // full attention every N layers (hybrid SSM/SWA)
-	SlidingWindow      int    `json:"swa"`                  // sliding window size (0 = no SWA)
-	LeadingDense       int    `json:"leading_dense"`        // leading dense block count (MoE models)
-	KVLoraRank         int    `json:"kv_lora"`              // MLA KV lora rank
-	QLoraRank          int    `json:"q_lora"`               // MLA Q lora rank
-	KeyLengthMLA       int    `json:"kl_mla"`               // MLA key length
-	ValueLengthMLA     int    `json:"vl_mla"`               // MLA value length
-	HasShexp           int    `json:"has_shexp"`            // shared experts present
-	NextNPredictLayers int    `json:"nextn_predict_layers"` // MTP/NextN prediction layers
-	IsMoE              bool   `json:"is_moe"`
+	Architecture              string `json:"arch"`
+	Name                      string `json:"name"`
+	Basename                  string `json:"basename"`
+	QuantizedBy               string `json:"quantized_by"`
+	BlockCount                int    `json:"layers"`
+	ContextLength             int    `json:"ctx_train"`
+	EmbeddingLength           int    `json:"embd"`
+	FeedForwardLength         int    `json:"ff"`
+	HeadCountKV               int    `json:"hkv"`
+	KeyLength                 int    `json:"kl"`
+	ValueLength               int    `json:"vl"`
+	VocabSize                 int    `json:"vocab_size"`
+	TokenizerModel            string `json:"tokenizer_model"`
+	TokenizerPre              string `json:"tokenizer_pre"`
+	TokenizerHash             string `json:"tokenizer_hash"`
+	ExpertBytes               int64  `json:"expert_bytes"`
+	NonExpertBytes            int64  `json:"non_expert_bytes"`
+	TokenEmbdBytes            int64  `json:"token_embd_bytes"` // input embeddings; stay in host RAM
+	OutputBytes               int64  `json:"output_bytes"`     // output head; lands whole on the last split device
+	ShexpBytes                int64  `json:"shexp_bytes"`      // shared experts; stay on the layer's device even when routed experts offload to CPU
+	Fused                     int    `json:"fused"`
+	Experts                   int    `json:"experts"`                      // total number of experts (MoE)
+	ExpertUsed                int    `json:"exp_used"`                     // experts used per token
+	ExpFF                     int    `json:"exp_ff"`                       // expert feed-forward size
+	ExpSharedFF               int    `json:"exp_shared_ff"`                // expert shared feed-forward size
+	NRot                      int    `json:"n_rot"`                        // rope dimension
+	SSM                       int    `json:"ssm"`                          // 1 if model uses SSM layers
+	FullAttnInterval          int    `json:"full_interval"`                // full attention every N layers (hybrid SSM/SWA)
+	SlidingWindow             int    `json:"swa"`                          // sliding window size (0 = no SWA)
+	LeadingDense              int    `json:"leading_dense"`                // leading dense block count (MoE models)
+	LeadingDenseInferred      int    `json:"leading_dense_inferred"`       // derived from tensor layout
+	ExpertSharedCount         int    `json:"expert_shared_count"`          // shared experts per routed layer
+	ExpertSharedCountInferred int    `json:"expert_shared_count_inferred"` // derived from tensor layout
+	KVLoraRank                int    `json:"kv_lora"`                      // MLA KV lora rank
+	QLoraRank                 int    `json:"q_lora"`                       // MLA Q lora rank
+	KeyLengthMLA              int    `json:"kl_mla"`                       // MLA key length
+	ValueLengthMLA            int    `json:"vl_mla"`                       // MLA value length
+	HasShexp                  int    `json:"has_shexp"`                    // shared experts present
+	NextNPredictLayers        int    `json:"nextn_predict_layers"`         // MTP/NextN prediction layers
+	IsMoE                     bool   `json:"is_moe"`
 }
 
 // Parse calls the bundled GGUF metadata helper.
@@ -133,6 +136,18 @@ func findParseScript() string {
 	}
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
+		// A development or source-install binary commonly lives in
+		// <app-home>/.bin while its authoritative scripts live in the adjacent
+		// source checkout. Prefer that checkout just as an explicit
+		// LLM_APP_HOME does; a release-only install simply falls through to the
+		// bundled parser below.
+		if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
+			appHome := filepath.Dir(exeDir)
+			candidates = append(candidates,
+				filepath.Join(appHome, ".src", "llm-server", "tools", "gguf", "parse_gguf.py"),
+				filepath.Join(appHome, ".src", "ggrun", "tools", "gguf", "parse_gguf.py"),
+			)
+		}
 		candidates = append(candidates,
 			filepath.Join(exeDir, "parse_gguf.py"),
 			filepath.Join(exeDir, "..", "tools", "gguf", "parse_gguf.py"),

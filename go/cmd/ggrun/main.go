@@ -1131,6 +1131,8 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 		strategy.Draft.DraftMax = req.SpecDraftMax
 	}
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
+	serverArgs = append(serverArgs, hy3CompatibilityArgs(req.ExtraArgs, model, be)...)
+	serverArgs = append(serverArgs, hy3TemplateArgs(req.ExtraArgs, be)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
@@ -1138,6 +1140,66 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, strategy == nil || !strategy.HasSSM)
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	return serverArgs
+}
+
+// hy3CompatibilityArgs supplies only the metadata omitted by the known HY3
+// GGUF layout. The values are derived from tensors by parse_gguf.py, restricted
+// to ggrun's reviewed HY3 recipe, and appear before user extra arguments so a
+// deliberate override remains authoritative.
+func hy3CompatibilityArgs(extra []string, model *placement.ModelProfile, be *backendInfo) []string {
+	if model == nil || be == nil || !strings.EqualFold(model.ModelArch, "hy_v3") || !strings.EqualFold(be.Tag, "hy3") {
+		return nil
+	}
+	args := make([]string, 0, 4)
+	if model.ExpertSharedCountInferred && model.ExpertSharedCount > 0 && !hasKVOverride(extra, "hy_v3.expert_shared_count") {
+		args = append(args, "--override-kv", fmt.Sprintf("hy_v3.expert_shared_count=int:%d", model.ExpertSharedCount))
+	}
+	if model.LeadingDenseInferred && model.LeadingDense >= 0 && !hasKVOverride(extra, "hy_v3.leading_dense_block_count") {
+		args = append(args, "--override-kv", fmt.Sprintf("hy_v3.leading_dense_block_count=int:%d", model.LeadingDense))
+	}
+	return args
+}
+
+func hasKVOverride(args []string, key string) bool {
+	for i := 0; i < len(args); i++ {
+		value := ""
+		if args[i] == "--override-kv" && i+1 < len(args) {
+			value = args[i+1]
+			i++
+		} else if strings.HasPrefix(args[i], "--override-kv=") {
+			value = strings.TrimPrefix(args[i], "--override-kv=")
+		}
+		if strings.HasPrefix(value, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// hy3TemplateArgs replaces the GGUF's Python-specific .format() template with
+// the equivalent minja-compatible template shipped by the reviewed HY3 fork.
+// It is deliberately recipe-scoped and never overrides a user's explicit chat
+// template choice.
+func hy3TemplateArgs(extra []string, be *backendInfo) []string {
+	if be == nil || !strings.EqualFold(be.Tag, "hy3") || hasChatTemplateOverride(extra) {
+		return nil
+	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(be.Path)))
+	template := filepath.Join(root, "models", "templates", "Hy3.jinja")
+	if info, err := os.Stat(template); err != nil || info.IsDir() {
+		return nil
+	}
+	return []string{"--chat-template-file", template}
+}
+
+func hasChatTemplateOverride(args []string) bool {
+	for _, arg := range args {
+		if arg == "--chat-template" || arg == "--chat-template-file" ||
+			strings.HasPrefix(arg, "--chat-template=") || strings.HasPrefix(arg, "--chat-template-file=") {
+			return true
+		}
+	}
+	return false
 }
 
 // specLaunchIdentity fingerprints the final runtime argv after tune caches,
@@ -2438,15 +2500,10 @@ func cmdDryRun(args []string) {
 	}
 	warnModelCompatibility(model)
 
-	be := selectBackend(caps, req)
-	be = routeArchBackend(be, model, req)
-	backendTag := "llama"
-	binPath := "llama-server"
-	if be != nil {
-		binPath = be.Path
-		backendTag = backendDialect(be)
-	} else {
-		be = &backendInfo{Path: binPath, Tag: backendTag}
+	be := resolveLaunchBackend(req, model, caps)
+	if be == nil {
+		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
 	}
 
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
@@ -2456,13 +2513,7 @@ func cmdDryRun(args []string) {
 	}
 	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
 
-	serverArgs := append([]string{binPath}, strategy.Args(req.ModelPath, req.Port)...)
-	serverArgs = append(serverArgs, req.ExtraArgs...)
-	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
-	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
-	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
-	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, strategy == nil || !strategy.HasSSM)
-	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
+	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 	if envPrefix := applyGPUVisibility(req, backendDialect(be)); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
@@ -3569,51 +3620,54 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 	totalSizeMB := int(totalBytes / 1024 / 1024)
 
 	return &placement.ModelProfile{
-		Path:               path,
-		Name:               info.Name,
-		Basename:           info.Basename,
-		QuantizedBy:        info.QuantizedBy,
-		SizeBytes:          totalBytes,
-		TotalSizeMB:        totalSizeMB,
-		NumLayers:          info.BlockCount,
-		NumParams:          info.EstimateParams(),
-		IsMoE:              info.IsMoE,
-		NumExperts:         numExperts,
-		ContextSize:        info.ContextLength,
-		HiddenSize:         info.EmbeddingLength,
-		HeadCount:          headCount,
-		HeadCountKV:        info.HeadCountKV,
-		KeyLength:          info.KeyLength,
-		ValueLength:        info.ValueLength,
-		VocabSize:          info.VocabSize,
-		TokenizerModel:     info.TokenizerModel,
-		TokenizerPre:       info.TokenizerPre,
-		TokenizerHash:      info.TokenizerHash,
-		QuantType:          "", // not parsed from gguf.py output
-		ExpertBytes:        info.ExpertBytes,
-		NonExpertBytes:     info.NonExpertBytes,
-		TokenEmbdBytes:     info.TokenEmbdBytes,
-		OutputBytes:        info.OutputBytes,
-		ShexpBytes:         info.ShexpBytes,
-		Fused:              info.Fused,
-		EmbeddingLength:    info.EmbeddingLength,
-		FeedForwardLength:  info.FeedForwardLength,
-		ExpertUsedCount:    info.ExpertUsed,
-		ExpertFF:           info.ExpFF,
-		ExpertSharedFF:     info.ExpSharedFF,
-		LeadingDense:       info.LeadingDense,
-		RopeDim:            info.NRot,
-		HasSSM:             info.SSM,
-		FullAttnInterval:   info.FullAttnInterval,
-		SlidingWindow:      info.SlidingWindow,
-		HasShexp:           info.HasShexp,
-		KVLoraRank:         info.KVLoraRank,
-		QLoraRank:          info.QLoraRank,
-		KeyLengthMLA:       info.KeyLengthMLA,
-		ValueLengthMLA:     info.ValueLengthMLA,
-		CTXTrain:           info.ContextLength,
-		ModelArch:          info.Architecture,
-		NextNPredictLayers: info.NextNPredictLayers,
+		Path:                      path,
+		Name:                      info.Name,
+		Basename:                  info.Basename,
+		QuantizedBy:               info.QuantizedBy,
+		SizeBytes:                 totalBytes,
+		TotalSizeMB:               totalSizeMB,
+		NumLayers:                 info.BlockCount,
+		NumParams:                 info.EstimateParams(),
+		IsMoE:                     info.IsMoE,
+		NumExperts:                numExperts,
+		ContextSize:               info.ContextLength,
+		HiddenSize:                info.EmbeddingLength,
+		HeadCount:                 headCount,
+		HeadCountKV:               info.HeadCountKV,
+		KeyLength:                 info.KeyLength,
+		ValueLength:               info.ValueLength,
+		VocabSize:                 info.VocabSize,
+		TokenizerModel:            info.TokenizerModel,
+		TokenizerPre:              info.TokenizerPre,
+		TokenizerHash:             info.TokenizerHash,
+		QuantType:                 "", // not parsed from gguf.py output
+		ExpertBytes:               info.ExpertBytes,
+		NonExpertBytes:            info.NonExpertBytes,
+		TokenEmbdBytes:            info.TokenEmbdBytes,
+		OutputBytes:               info.OutputBytes,
+		ShexpBytes:                info.ShexpBytes,
+		Fused:                     info.Fused,
+		EmbeddingLength:           info.EmbeddingLength,
+		FeedForwardLength:         info.FeedForwardLength,
+		ExpertUsedCount:           info.ExpertUsed,
+		ExpertFF:                  info.ExpFF,
+		ExpertSharedFF:            info.ExpSharedFF,
+		ExpertSharedCount:         info.ExpertSharedCount,
+		ExpertSharedCountInferred: info.ExpertSharedCountInferred != 0,
+		LeadingDense:              info.LeadingDense,
+		LeadingDenseInferred:      info.LeadingDenseInferred != 0,
+		RopeDim:                   info.NRot,
+		HasSSM:                    info.SSM,
+		FullAttnInterval:          info.FullAttnInterval,
+		SlidingWindow:             info.SlidingWindow,
+		HasShexp:                  info.HasShexp,
+		KVLoraRank:                info.KVLoraRank,
+		QLoraRank:                 info.QLoraRank,
+		KeyLengthMLA:              info.KeyLengthMLA,
+		ValueLengthMLA:            info.ValueLengthMLA,
+		CTXTrain:                  info.ContextLength,
+		ModelArch:                 info.Architecture,
+		NextNPredictLayers:        info.NextNPredictLayers,
 	}
 }
 

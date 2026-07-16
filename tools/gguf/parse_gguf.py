@@ -88,10 +88,13 @@ def _read_kv(f, r, kv_count):
             if key.endswith('.feed_forward_length'): r['ff'] = val
             if key.endswith('.expert_feed_forward_length'): r['exp_ff'] = val
             if key.endswith('.expert_shared_feed_forward_length'): r['exp_shared_ff'] = val
+            if key.endswith('.expert_shared_count'): r['expert_shared_count'] = val
             if key.endswith('.attention.kv_lora_rank'): r['kv_lora'] = val
             if key.endswith('.attention.q_lora_rank'): r['q_lora'] = val
             if key.endswith('.rope.dimension_count'): r['n_rot'] = val
-            if key.endswith('.leading_dense_block_count'): r['leading_dense'] = val
+            if key.endswith('.leading_dense_block_count'):
+                r['leading_dense'] = val
+                r['_leading_dense_metadata'] = 1
             if key.endswith('.attention.sliding_window'): r['swa'] = val
             if key.endswith('.full_attention_interval') or key.endswith('.attention.full_attention_interval'):
                 r['full_interval'] = val
@@ -151,6 +154,20 @@ def _read_tensors(f, r, tensor_count):
                 r['has_shexp'] = 1
             n_dims = struct.unpack('<I', f.read(4))[0]
             dims = [struct.unpack('<Q', f.read(8))[0] for _ in range(n_dims)]
+            # Some HY3 GGUFs omit metadata that the current reviewed fork
+            # requires. The tensor layout is authoritative: routed layers have
+            # ffn_gate_inp, and the shared projection's FF axis is an exact
+            # multiple of one routed expert's FF size.
+            moe_layer = re.match(r'^blk\.(\d+)\.ffn_gate_inp\.weight$', tname)
+            if moe_layer:
+                layer = int(moe_layer.group(1))
+                r['_first_moe_layer'] = min(r.get('_first_moe_layer', layer), layer)
+            if (tname.endswith('.ffn_gate_shexp.weight') and
+                    'expert_shared_count' not in r and r.get('exp_ff', 0) > 0 and
+                    len(dims) >= 2 and dims[1] % r['exp_ff'] == 0):
+                count = dims[1] // r['exp_ff']
+                if count > 0:
+                    r['_inferred_expert_shared_count'] = count
             ttype = struct.unpack('<I', f.read(4))[0]
             offset = struct.unpack('<Q', f.read(8))[0]
             n_elements = 1
@@ -274,7 +291,17 @@ def parse(path: str) -> Dict[str, Any]:
                 read_shard(sp, {})
             except Exception:
                 continue
+    if 'leading_dense' not in r and '_first_moe_layer' in r:
+        r['leading_dense'] = r['_first_moe_layer']
+        r['leading_dense_inferred'] = 1
+    if 'expert_shared_count' not in r and '_inferred_expert_shared_count' in r:
+        r['expert_shared_count'] = r['_inferred_expert_shared_count']
+        r['expert_shared_count_inferred'] = 1
     r.pop('_align', None)
+    # Private parser bookkeeping is not part of the public JSON contract.
+    r.pop('_first_moe_layer', None)
+    r.pop('_inferred_expert_shared_count', None)
+    r.pop('_leading_dense_metadata', None)
     return r
 
 

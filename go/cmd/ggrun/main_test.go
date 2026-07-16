@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -296,6 +297,55 @@ func TestRouteArchBackendPreservesIKDialectBehindRecipeTag(t *testing.T) {
 	}
 	if opts.BackendCacheTag != "hy3" {
 		t.Fatalf("placement probes are not isolated to the HY3 fork: %#v", opts)
+	}
+}
+
+func TestHY3CompatibilityArgsUseOnlyDerivedMetadata(t *testing.T) {
+	model := &placement.ModelProfile{
+		ModelArch:                 "hy_v3",
+		ExpertSharedCount:         1,
+		ExpertSharedCountInferred: true,
+		LeadingDense:              1,
+		LeadingDenseInferred:      true,
+	}
+	got := hy3CompatibilityArgs(nil, model, &backendInfo{Tag: "hy3"})
+	want := []string{
+		"--override-kv", "hy_v3.expert_shared_count=int:1",
+		"--override-kv", "hy_v3.leading_dense_block_count=int:1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("HY3 derived args = %#v, want %#v", got, want)
+	}
+
+	got = hy3CompatibilityArgs([]string{"--override-kv", "hy_v3.expert_shared_count=int:2"}, model, &backendInfo{Tag: "hy3"})
+	if !reflect.DeepEqual(got, []string{"--override-kv", "hy_v3.leading_dense_block_count=int:1"}) {
+		t.Fatalf("explicit expert override must win, got %#v", got)
+	}
+	if got := hy3CompatibilityArgs(nil, model, &backendInfo{Tag: "llama"}); got != nil {
+		t.Fatalf("non-HY3 backend must not receive compatibility args: %#v", got)
+	}
+}
+
+func TestHY3TemplateArgsUseBundledTemplateWithoutOverridingUser(t *testing.T) {
+	root := t.TempDir()
+	template := filepath.Join(root, "models", "templates", "Hy3.jinja")
+	if err := os.MkdirAll(filepath.Dir(template), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(template, []byte("template"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "build-cuda", "bin", "llama-server")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := hy3TemplateArgs(nil, &backendInfo{Tag: "hy3", Path: bin})
+	want := []string{"--chat-template-file", template}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("HY3 template args = %#v, want %#v", got, want)
+	}
+	if got := hy3TemplateArgs([]string{"--chat-template", "chatml"}, &backendInfo{Tag: "hy3", Path: bin}); got != nil {
+		t.Fatalf("explicit user chat template must win: %#v", got)
 	}
 }
 
