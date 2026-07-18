@@ -150,6 +150,8 @@ Launch flags:
   -vision              Enable vision (auto-detect mmproj)
   --claude-code        Serve locally and launch Claude Code with workflows/research
   --claude-profile str Claude Code scheduling (requires --claude-code): agent-interactive|agent-parallel
+  --calibrate str      First-launch placement calibration: auto|on|off (default auto;
+                       measures alternative placements once per model/hardware/workload)
   --spec string        Speculative decoding: off|auto|mtp|dflash|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
 }
@@ -466,6 +468,7 @@ type launchRequest struct {
 	Benchmark          bool
 	ClaudeCode         bool
 	ClaudeProfile      string // agent-interactive avoids the automatic parallel-4 floor
+	Calibrate          string // "auto" (default: calibrate unproven small models), "on" (force), "off"
 	EmitServerArgvJSON bool   // dry-run machine interface for reproducible benchmark harnesses
 	SpecDraftMax       int    // internal spec-test ceiling; not a public launch override
 	ExtraArgs          []string
@@ -641,6 +644,17 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		switch a {
 		case "--benchmark":
 			req.Benchmark = true
+			continue
+		case "--calibrate":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			mode, err := parseCalibrateMode(v)
+			if err != nil {
+				return nil, err
+			}
+			req.Calibrate = mode
 			continue
 		case "--dry-run", "--emit-server-argv-json", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
 			if a == "--emit-server-argv-json" {
@@ -869,6 +883,22 @@ func parseClaudeProfile(flag, value string) (string, error) {
 		return profile, nil
 	default:
 		return "", fmt.Errorf("%s must be %q or %q, got %q", flag, claudeProfileInteractive, claudeProfileParallel, value)
+	}
+}
+
+const (
+	calibrateAuto = "auto"
+	calibrateOn   = "on"
+	calibrateOff  = "off"
+)
+
+func parseCalibrateMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	switch mode {
+	case calibrateAuto, calibrateOn, calibrateOff:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("--calibrate must be %q, %q, or %q, got %q", calibrateAuto, calibrateOn, calibrateOff, value)
 	}
 }
 
@@ -2051,6 +2081,9 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
 		os.Exit(1)
 	}
+	// A prior calibration for this exact model/hardware/workload scope already
+	// measured the fastest placement; apply it instead of the estimate.
+	strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
 
 	// Start the reviewer on the GPU the planner chose (CPU when it placed -1).
 	claudeAuto, err := startClaudeAutoReviewer(req, cfg, caps, strategy.CompanionPlacements)
@@ -2125,6 +2158,21 @@ func cmdLaunch(args []string) {
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 	if p.LogBuf != nil {
 		recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
+	}
+	// First-launch calibration: measure alternative placements for this exact
+	// model/hardware/workload scope and switch to the fastest, then never pay
+	// the restart cost again. Runs before the MoE promote-restart so the
+	// promoted strategy is itself the calibrated winner.
+	if len(calibrationPlan(req, cfg, model, be, caps, strategy)) >= 2 {
+		p, strategy, serverArgs = runCalibration(req, cfg, model, be, caps, strategy, serverArgs, timeout, p)
+		if p == nil {
+			claudeAuto.stop()
+			fmt.Fprintf(os.Stderr, "Error: calibration left no running server\n")
+			os.Exit(1)
+		}
+		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
+	}
+	if p.LogBuf != nil {
 		if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs); ok {
 			fmt.Printf("[launch] calibration: measured placement fits more GPU experts (%d CPU MoE -> %d); restarting once\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
 			_ = p.Stop()

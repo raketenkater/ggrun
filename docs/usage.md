@@ -24,6 +24,11 @@ ggrun model.gguf --kv-quality auto
 ggrun model.gguf --kv-quality q5_1
 ggrun model.gguf --kv-placement gpu
 
+# First-launch placement calibration
+ggrun model.gguf --calibrate auto   # default: measure alternatives once for small models
+ggrun model.gguf --calibrate on     # force calibration even on a large MoE
+ggrun model.gguf --calibrate off    # never calibrate; always serve the estimated placement
+
 # Vision
 ggrun model.gguf --vision
 ggrun model.gguf --mmproj /path/to/mmproj.gguf
@@ -79,6 +84,30 @@ ggrun model.gguf --cache-type-k q5_1 --cache-type-v q5_1
 
 K and V must currently use the same type. ggrun rejects a mixed pair instead
 of producing a placement plan with the wrong KV-memory estimate.
+
+## First-launch placement calibration
+
+ggrun's placement planner computes where a model's weights, experts, and KV
+cache live from the GGUF and real measured VRAM — but on a multi-GPU host more
+than one placement usually *fits*, and the estimate can only guess which is
+*fastest* on your exact topology. First-launch calibration closes that gap:
+on the first launch of a model + hardware + workload shape, ggrun measures the
+real decode throughput of each alternative placement (for a MoE, KV-on-GPU vs
+KV-on-CPU with the freed VRAM going to more GPU experts; for multi-GPU dense,
+the inverted split), keeps the fastest, and caches the decision.
+
+Later launches with the same scope apply the cached winner directly — no
+re-measurement, no restart. Change the model, backend build, GPU set, context,
+slot count, or workload profile and the scope key changes, so a decision is
+never applied to a launch it didn't measure.
+
+Calibration restarts the server once per candidate, so `auto` (the default)
+only runs it for models small enough to restart cheaply (under ~40 GB). Force
+it on a large MoE with `--calibrate on`, or disable it entirely with
+`--calibrate off`. A candidate that fails to start or OOMs is skipped; if no
+alternative beats the estimated default by a meaningful margin, the default
+stands — calibration can never leave you on a slower placement than the one
+the planner chose.
 
 ## Model storage
 
