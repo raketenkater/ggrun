@@ -86,6 +86,36 @@ func TestPlacementCachePathFor_KeyedByKVAndCtx(t *testing.T) {
 	}
 }
 
+func TestWorkloadProfileScopesPlacementAndProbeCacheIdentity(t *testing.T) {
+	model := &ModelProfile{Path: "model.gguf", NumLayers: 43, NumExperts: 256, EmbeddingLength: 4096}
+	gpus := []detect.GPU{{Index: 0, Name: "3090 Ti"}}
+	dir := t.TempDir()
+	legacyTag := ScopedBackendCacheTag("llama", "")
+	interactiveTag := ScopedBackendCacheTag("llama", "claude-agent-interactive-v1:custom-test")
+	parallelTag := ScopedBackendCacheTag("llama", "claude-agent-parallel-v1:custom-test")
+	if legacyTag != "llama" {
+		t.Fatalf("legacy generic tag changed unexpectedly: %q", legacyTag)
+	}
+	if interactiveTag == legacyTag || parallelTag == legacyTag || interactiveTag == parallelTag {
+		t.Fatalf("workload tags are not isolated: legacy=%q interactive=%q parallel=%q", legacyTag, interactiveTag, parallelTag)
+	}
+	legacyPlace := PlacementCachePathFor(dir, model, 65536, 512, "high", "gpu", legacyTag, gpus, 1, "")
+	interactivePlace := PlacementCachePathFor(dir, model, 65536, 512, "high", "gpu", interactiveTag, gpus, 1, "")
+	parallelPlace := PlacementCachePathFor(dir, model, 65536, 512, "high", "gpu", parallelTag, gpus, 4, "")
+	if legacyPlace == interactivePlace || legacyPlace == parallelPlace || interactivePlace == parallelPlace {
+		t.Fatalf("placement cache paths are not workload-scoped: %q %q %q", legacyPlace, interactivePlace, parallelPlace)
+	}
+	legacyProbe := probeCachePath(dir, model, 65536, 512, "high", "gpu", legacyTag, gpus, 1)
+	interactiveProbe := probeCachePath(dir, model, 65536, 512, "high", "gpu", interactiveTag, gpus, 1)
+	parallelProbe := probeCachePath(dir, model, 65536, 512, "high", "gpu", parallelTag, gpus, 4)
+	if legacyProbe == interactiveProbe || legacyProbe == parallelProbe || interactiveProbe == parallelProbe {
+		t.Fatalf("probe cache paths are not workload-scoped: %q %q %q", legacyProbe, interactiveProbe, parallelProbe)
+	}
+	if got := backendCacheTag(Options{BackendCacheTag: "llama", WorkloadProfile: "claude-agent-interactive-v1:custom-test"}); got != interactiveTag {
+		t.Fatalf("options workload tag=%q, want %q", got, interactiveTag)
+	}
+}
+
 func TestPlacementCachePathIsolatedBySpecMode(t *testing.T) {
 	base := "/tmp/model.place"
 	if got := placementCachePathForSpecMode(base, "off"); got != base {

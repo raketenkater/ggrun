@@ -16,6 +16,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/claudeauto"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/server"
 )
 
@@ -80,7 +81,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 		// CUDA0 during a DeepSeek-V4 run). The isolated physical GPU is CUDA0
 		// inside the child process.
 		args := claudeReviewerArgs(be.Path, modelPath, port, 0, be.Help)
-		env := []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)}
+		env := claudeReviewerBackendEnv(be.Path, []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)})
 		p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, env)
 		if err == nil {
 			fmt.Printf("[claude-code] Auto reviewer ready on GPU %d (PID %d, %s, ctx 64k)\n", gpu, p.Cmd.Process.Pid, claudeauto.DefaultReviewerDisplayName)
@@ -93,7 +94,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 	// CPU is slower, but it preserves autonomous/fail-closed behavior on systems
 	// whose GPUs are already full. It is also the normal path on CPU-only hosts.
 	args := claudeReviewerArgs(be.Path, modelPath, port, -1, be.Help)
-	p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, claudeReviewerCPUEnv())
+	p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, claudeReviewerBackendEnv(be.Path, claudeReviewerCPUEnv()))
 	if err != nil {
 		if logCloser != nil {
 			_ = logCloser.Close()
@@ -143,6 +144,13 @@ func claudeReviewerCPUEnv() []string {
 		"HIP_VISIBLE_DEVICES=-1",
 		"ROCR_VISIBLE_DEVICES=-1",
 	}
+}
+
+func claudeReviewerBackendEnv(binary string, env []string) []string {
+	if libPath, ok := libhub.StableLibraryPath(binary); ok {
+		return libhub.ApplyHubToChildEnv(env, libPath)
+	}
+	return env
 }
 
 func findClaudeReviewerBackend(caps *detect.Capabilities) *backendInfo {

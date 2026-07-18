@@ -88,6 +88,9 @@ type Model struct {
 	benchmark      bool
 	vision         bool
 	claudeCode     bool
+	// claudeProfile is deliberately per-launch: an empty value preserves the
+	// CLI default instead of writing a scheduling policy into user config.
+	claudeProfile string
 
 	// Tuned config
 	tunedConfigs []tune.ConfigEntry
@@ -185,7 +188,7 @@ func InitialModel() Model {
 		m.kvPlacement = "auto"
 	}
 	if m.kvQuality == "" {
-		m.kvQuality = "mid"
+		m.kvQuality = "auto"
 	}
 
 	m.input = textinput.New()
@@ -431,7 +434,11 @@ func (m Model) cfgRows() []string {
 	if m.aitune {
 		rows = append(rows, "rounds")
 	}
-	return append(rows, "vision", "claudecode", "benchmark", "launch", "dryrun")
+	rows = append(rows, "vision", "claudecode")
+	if m.claudeCode {
+		rows = append(rows, "claudeprofile")
+	}
+	return append(rows, "benchmark", "launch", "dryrun")
 }
 
 func (m *Model) openCfgInput(mode, val, placeholder string) {
@@ -492,6 +499,13 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 		m.vision = !m.vision
 	case "claudecode":
 		m.claudeCode = !m.claudeCode
+	case "claudeprofile":
+		profiles := []string{"", "agent-interactive", "agent-parallel"}
+		if dir < 0 {
+			m.claudeProfile = prevOption(profiles, m.claudeProfile)
+		} else {
+			m.claudeProfile = nextOption(profiles, m.claudeProfile)
+		}
 	case "benchmark":
 		m.benchmark = !m.benchmark
 		if m.benchmark {
@@ -524,6 +538,8 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 		m.vision = !m.vision
 	case "claudecode":
 		m.claudeCode = !m.claudeCode
+	case "claudeprofile":
+		m.cycleCfgRow("claudeprofile", 1)
 	case "benchmark":
 		m.benchmark = !m.benchmark
 		if m.benchmark {
@@ -911,6 +927,9 @@ func (m Model) viewModelConfig() string {
 		ccLabel += " — serve + print Claude Code env (thinking on)"
 	}
 	line("claudecode", "[x] Claude Code", ccLabel)
+	if m.claudeCode {
+		line("claudeprofile", "Claude profile", claudeProfileLabel(m.claudeProfile))
+	}
 	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
 
 	section("Actions")
@@ -976,15 +995,7 @@ func (m Model) viewPrelaunch() string {
 	if model.MaxCtx > 0 {
 		b.WriteString(fmt.Sprintf("  Train max:      %d tokens\n", model.MaxCtx))
 	}
-	b.WriteString(fmt.Sprintf("  Parallel:       %s\n", func() string {
-		if !m.parallelSet && (m.parallel == "" || m.parallel == "1") {
-			if m.claudeCode {
-				return "automatic (2 for Claude Code)"
-			}
-			return "automatic (1)"
-		}
-		return m.parallel
-	}()))
+	b.WriteString(fmt.Sprintf("  Parallel:       %s\n", m.prelaunchParallelLabel()))
 	b.WriteString(fmt.Sprintf("  KV placement:   %s\n", m.kvPlacement))
 	b.WriteString(fmt.Sprintf("  AI tune:        %s\n", boolLabel(m.aitune)))
 	if m.aitune {
@@ -993,6 +1004,9 @@ func (m Model) viewPrelaunch() string {
 	b.WriteString(fmt.Sprintf("  Vision:         %s\n", boolLabel(m.vision)))
 	b.WriteString(fmt.Sprintf("  Benchmark:      %s\n", boolLabel(m.benchmark)))
 	b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", boolLabel(m.claudeCode)))
+	if m.claudeCode {
+		b.WriteString(fmt.Sprintf("  Claude profile: %s\n", claudeProfileLabel(m.claudeProfile)))
+	}
 	if m.tunePath != "" {
 		b.WriteString(fmt.Sprintf("  Tuned config:   %s\n", filepath.Base(m.tunePath)))
 	}
@@ -1609,7 +1623,7 @@ func settingRows() []settingRow {
 		{label: "KV placement", kind: "enum", options: []string{"auto", "gpu", "cpu"},
 			get: func(c *config.Config) string { return c.KVPlacement },
 			set: func(c *config.Config, v string) { c.KVPlacement = v }},
-		{label: "KV quality", kind: "enum", options: []string{"low", "q4_1", "iq4_nl", "q5_0", "q5_1", "mid", "bf16", "high", "f32"},
+		{label: "KV quality", kind: "enum", options: []string{"auto", "high", "bf16", "mid", "q8_0", "q5_1", "q5_0", "q4_1", "low", "q4_0", "iq4_nl", "f32"},
 			get: func(c *config.Config) string { return c.KVQuality },
 			set: func(c *config.Config, v string) { c.KVQuality = v }},
 		{label: "VRAM headroom", kind: "text",
@@ -1979,17 +1993,18 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		// The configured KV quality, not a hardcoded default: passing a fixed
 		// "mid" here overrode the user's saved setting with --kv-quality mid
 		// on every TUI launch (settings appeared to save but never applied).
-		KVQuality:    m.kvQuality,
-		FlashAttn:    true,
-		Parallel:     parallel,
-		ParallelSet:  parallelSet,
-		Vision:       m.vision,
-		Backend:      m.backend,
-		TuneCache:    m.tunePath,
-		AITune:       m.aitune,
-		AITuneRounds: m.aituneRounds,
-		Benchmark:    m.benchmark,
-		ClaudeCode:   m.claudeCode,
+		KVQuality:     m.kvQuality,
+		FlashAttn:     true,
+		Parallel:      parallel,
+		ParallelSet:   parallelSet,
+		Vision:        m.vision,
+		Backend:       m.backend,
+		TuneCache:     m.tunePath,
+		AITune:        m.aitune,
+		AITuneRounds:  m.aituneRounds,
+		Benchmark:     m.benchmark,
+		ClaudeCode:    m.claudeCode,
+		ClaudeProfile: m.claudeProfile,
 	}
 }
 
@@ -2022,6 +2037,7 @@ type LaunchRequest struct {
 	AITuneRounds  int
 	Benchmark     bool
 	ClaudeCode    bool
+	ClaudeProfile string
 }
 
 func (req *LaunchRequest) LaunchArgs() []string {
@@ -2065,8 +2081,49 @@ func (req *LaunchRequest) LaunchArgs() []string {
 	}
 	if req.ClaudeCode {
 		args = append(args, "--claude-code")
+		if req.ClaudeProfile != "" {
+			args = append(args, "--claude-profile", req.ClaudeProfile)
+		}
 	}
 	return args
+}
+
+// claudeProfileLabel describes the selector value without converting its empty
+// default into an explicit launch flag.
+func claudeProfileLabel(profile string) string {
+	switch profile {
+	case "agent-interactive":
+		return "agent-interactive (1 foreground agent)"
+	case "agent-parallel":
+		return "agent-parallel (4 workflow slots)"
+	default:
+		return "default (automatic)"
+	}
+}
+
+// prelaunchParallelLabel mirrors the Claude scheduling policy closely enough
+// for the confirmation screen. Context fitting may still reduce an automatic
+// slot count; explicit --parallel remains authoritative.
+func (m Model) prelaunchParallelLabel() string {
+	if m.parallelSet && m.parallel != "" {
+		return m.parallel + " (explicit)"
+	}
+	if m.claudeCode {
+		switch m.claudeProfile {
+		case "agent-interactive":
+			return "agent-interactive (1 foreground slot)"
+		case "agent-parallel":
+			return "agent-parallel (4 workflow slots)"
+		default:
+			if m.parallel == "" || m.parallel == "1" {
+				return "automatic (Claude Code policy; target 4 slots)"
+			}
+		}
+	}
+	if !m.parallelSet && (m.parallel == "" || m.parallel == "1") {
+		return "automatic (1)"
+	}
+	return m.parallel
 }
 
 // Run starts the TUI and returns a launch request if the user chose to launch.

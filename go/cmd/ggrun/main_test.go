@@ -54,6 +54,220 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeProfilesSelectExpectedAutomaticParallelism(t *testing.T) {
+	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
+	be := &backendInfo{Tag: "llama"}
+	for _, tc := range []struct {
+		name string
+		req  *launchRequest
+		want int
+	}{
+		{"default_preserves_parallel_workflow", &launchRequest{ClaudeCode: true, Parallel: 1}, 4},
+		{"default_preserves_higher_configured_parallel", &launchRequest{ClaudeCode: true, Parallel: 8}, 8},
+		{"parallel_profile_preserves_parallel_workflow", &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileParallel}, 4},
+		{"parallel_profile_overrides_stale_configured_parallel", &launchRequest{ClaudeCode: true, Parallel: 8, ClaudeProfile: claudeProfileParallel}, 4},
+		{"interactive_keeps_single_foreground_slot", &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileInteractive}, 1},
+		{"interactive_overrides_stale_configured_parallel", &launchRequest{ClaudeCode: true, Parallel: 8, ClaudeProfile: claudeProfileInteractive}, 1},
+		{"interactive_keeps_explicit_parallel", &launchRequest{ClaudeCode: true, Parallel: 2, ParallelSet: true, ClaudeProfile: claudeProfileInteractive}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := placementOptionsFromRequest(tc.req, model, be, t.TempDir()).Parallel; got != tc.want {
+				t.Fatalf("parallel=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeWorkloadProfileScopesCacheEvidence(t *testing.T) {
+	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
+	be := &backendInfo{Tag: "llama"}
+	parallelDefault := &launchRequest{ClaudeCode: true, Parallel: 1}
+	parallelExplicit := &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileParallel}
+	interactive := &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileInteractive}
+
+	parallelScope := requestWorkloadProfile(parallelDefault, model)
+	if parallelScope == "" {
+		t.Fatal("Claude Code default must have a non-empty workload cache scope")
+	}
+	if got := requestWorkloadProfile(parallelExplicit, model); got != parallelScope {
+		t.Fatalf("default and explicit agent-parallel should share behavior scope: got %q, want %q", got, parallelScope)
+	}
+	interactiveScope := requestWorkloadProfile(interactive, model)
+	if interactiveScope == parallelScope {
+		t.Fatalf("interactive and parallel profiles shared workload scope %q", interactiveScope)
+	}
+	if got := scopedProbeBackendTag(interactive, model, be); got == be.Tag {
+		t.Fatalf("interactive profile reused the unscoped backend tag %q", got)
+	}
+	if got := placementOptionsFromRequest(interactive, model, be, t.TempDir()).WorkloadProfile; got != interactiveScope {
+		t.Fatalf("placement workload scope=%q, want %q", got, interactiveScope)
+	}
+}
+
+func TestPlacementEvidenceUsesExactBackendBuildIdentity(t *testing.T) {
+	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
+	req := &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileInteractive}
+	buildA := &backendInfo{Tag: "llama", Identity: "llama-server-cuda-build-a"}
+	buildB := &backendInfo{Tag: "llama", Identity: "llama-server-cuda-build-b"}
+
+	tagA := evidenceBackendCacheTag(buildA)
+	tagB := evidenceBackendCacheTag(buildB)
+	if tagA == tagB || tagA == buildA.Tag || tagB == buildB.Tag {
+		t.Fatalf("backend evidence tags must isolate builds: A=%q B=%q", tagA, tagB)
+	}
+	if got := scopedProbeBackendTag(req, model, buildA); got == scopedProbeBackendTag(req, model, buildB) {
+		t.Fatalf("probe scope reused evidence across backend builds: %q", got)
+	}
+	if got := placementOptionsFromRequest(req, model, buildA, t.TempDir()).BackendCacheTag; got != tagA {
+		t.Fatalf("placement cache tag=%q, want build-scoped %q", got, tagA)
+	}
+}
+
+func TestClaudeServerLogScopeTracksProfileBuildAndFinalArgs(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.LogDir = t.TempDir()
+	model := &placement.ModelProfile{Path: "model.gguf", ModelArch: "deepseek4", CTXTrain: 65536}
+	interactive := &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileInteractive, Port: 8081}
+	parallel := &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileParallel, Port: 8081}
+	buildA := &backendInfo{Tag: "llama", Identity: "build-a"}
+	buildB := &backendInfo{Tag: "llama", Identity: "build-b"}
+	argsA := []string{"/tmp/llama-server", "-m", "model.gguf", "-b", "512", "--port", "8081"}
+	argsB := []string{"/tmp/llama-server", "-m", "model.gguf", "-b", "128", "--port", "8081"}
+
+	scopeA := claudeLaunchLogScope(interactive, model, buildA, argsA)
+	pathA := claudeServerLogPath(cfg, interactive.Port, scopeA)
+	if pathA == claudeServerLogPath(cfg, parallel.Port, claudeLaunchLogScope(parallel, model, buildA, argsA)) {
+		t.Fatal("interactive and parallel profiles shared a recoverable Claude log")
+	}
+	if pathA == claudeServerLogPath(cfg, interactive.Port, claudeLaunchLogScope(interactive, model, buildB, argsA)) {
+		t.Fatal("different backend builds shared a recoverable Claude log")
+	}
+	if pathA == claudeServerLogPath(cfg, interactive.Port, claudeLaunchLogScope(interactive, model, buildA, argsB)) {
+		t.Fatal("different final launch args shared a recoverable Claude log")
+	}
+
+	strategy := &placement.Strategy{Parallel: 1, ContextSize: 65536}
+	log := "[ggrun] launch-scope: " + scopeA + "\n" +
+		"health check OK model.gguf\n" +
+		"n_slots = 1, n_ctx_slot = 65536\n"
+	if !previousClaudeLogMatches(log, model, strategy, scopeA) {
+		t.Fatal("scoped current log should be recoverable")
+	}
+	if previousClaudeLogMatches(log, model, strategy, "other-scope") {
+		t.Fatal("log from another final launch scope was accepted for recovery")
+	}
+}
+
+func TestHybridMoECalibrationDoesNotPromoteSplitOwnerAfterHealthCheck(t *testing.T) {
+	req := &launchRequest{ClaudeCode: true, Parallel: 1, ClaudeProfile: claudeProfileInteractive}
+	model := &placement.ModelProfile{ModelArch: "deepseek4", IsMoE: true}
+	current := &placement.Strategy{Type: placement.MoEOffload}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 24576}}}
+	next, args, ok := maybePromoteMeasuredPlacement(req, &config.Config{}, &backendInfo{Tag: "llama", Identity: "build"}, caps, model, current, []string{"llama-server"})
+	if ok || next != nil || args != nil {
+		t.Fatalf("hybrid MoE must not auto-promote from load-time evidence: next=%v args=%v ok=%v", next, args, ok)
+	}
+}
+
+func TestClaudeCodeInteractiveProfileKeepsSSMPrefillBatch(t *testing.T) {
+	req := &launchRequest{
+		ClaudeCode:    true,
+		Parallel:      1,
+		ClaudeProfile: claudeProfileInteractive,
+	}
+	opts := placementOptionsFromRequest(req, &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}, &backendInfo{Tag: "llama"}, t.TempDir())
+	s := &placement.Strategy{ContextSize: opts.ContextSize, Parallel: opts.Parallel, BatchSize: 2048, HasSSM: true}
+	claudeCodeSlotAdjust(s, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
+	if s.Parallel != 1 || s.BatchSize != 2048 {
+		t.Fatalf("interactive Claude profile changed foreground prefill setup: parallel=%d batch=%d", s.Parallel, s.BatchSize)
+	}
+}
+
+func TestParseClaudeProfile(t *testing.T) {
+	isolateConfig(t)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"model.gguf", "--claude-code", "--claude-profile", "agent-interactive"}, claudeProfileInteractive},
+		{[]string{"model.gguf", "--claude-code", "--claude-profile=AGENT-PARALLEL"}, claudeProfileParallel},
+	} {
+		req, err := parseLaunchArgs(tc.args)
+		if err != nil {
+			t.Fatalf("parse %v: %v", tc.args, err)
+		}
+		if req.ClaudeProfile != tc.want {
+			t.Fatalf("profile=%q, want %q for %v", req.ClaudeProfile, tc.want, tc.args)
+		}
+	}
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--claude-profile", "fastest"}); err == nil {
+		t.Fatal("invalid Claude profile was accepted")
+	}
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--claude-profile", claudeProfileInteractive}); err == nil {
+		t.Fatal("Claude profile without --claude-code was accepted")
+	}
+}
+
+func TestParseEmitServerArgvJSON(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--emit-server-argv-json"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !req.EmitServerArgvJSON {
+		t.Fatal("--emit-server-argv-json was not retained for dry-run planning")
+	}
+}
+
+func TestLaunchPlanEnvironmentMatchesServerChildCUDAContract(t *testing.T) {
+	t.Setenv("CUDA_DEVICE_ORDER", "FASTEST_FIRST")
+	oldQueue, hadQueue := os.LookupEnv("CUDA_SCALE_LAUNCH_QUEUES")
+	if err := os.Unsetenv("CUDA_SCALE_LAUNCH_QUEUES"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadQueue {
+			_ = os.Setenv("CUDA_SCALE_LAUNCH_QUEUES", oldQueue)
+		} else {
+			_ = os.Unsetenv("CUDA_SCALE_LAUNCH_QUEUES")
+		}
+	})
+	env := launchPlanEnvironment(
+		[]string{"llama-server", "--tensor-split", "1,0,0"},
+		"CUDA_VISIBLE_DEVICES=2,0",
+	)
+	if got := env["CUDA_DEVICE_ORDER"]; got != "PCI_BUS_ID" {
+		t.Fatalf("CUDA_DEVICE_ORDER=%q, want PCI_BUS_ID", got)
+	}
+	if got := env["CUDA_SCALE_LAUNCH_QUEUES"]; got != "4x" {
+		t.Fatalf("CUDA_SCALE_LAUNCH_QUEUES=%q, want 4x", got)
+	}
+	if got := env["CUDA_VISIBLE_DEVICES"]; got != "2,0" {
+		t.Fatalf("CUDA_VISIBLE_DEVICES=%q, want 2,0", got)
+	}
+}
+
+func TestLaunchPlanEnvironmentIncludesStableBackendLibraries(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "")
+	t.Setenv("LLM_SERVER_LIB_HUB", "")
+	binDir := filepath.Join(t.TempDir(), "build-cuda", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backend := filepath.Join(binDir, "llama-server")
+	if err := os.WriteFile(backend, []byte("backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "libllama.so"), []byte("library"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := launchPlanEnvironment([]string{backend}, "", backend)
+	if got := env["LD_LIBRARY_PATH"]; got != binDir {
+		t.Fatalf("LD_LIBRARY_PATH=%q, want stable backend directory %q", got, binDir)
+	}
+}
+
 func TestTUILaunchArgsPassSelectedBackend(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Backend = "ik_llama"
@@ -223,14 +437,16 @@ func TestRuntimeLogCUDAOOMPrefersExactAllocation(t *testing.T) {
 func TestPreviousClaudeLogMatchesRuntimeShape(t *testing.T) {
 	model := &placement.ModelProfile{Path: "/models/DeepSeek-V4-00001-of-00004.gguf"}
 	strategy := &placement.Strategy{ContextSize: 1048576, Parallel: 4}
-	log := "loading model '/models/DeepSeek-V4-00001-of-00004.gguf'\n" +
+	const scope = "exact-final-launch-scope"
+	log := "[ggrun] launch-scope: " + scope + "\n" +
+		"loading model '/models/DeepSeek-V4-00001-of-00004.gguf'\n" +
 		"initializing, n_slots = 4, n_ctx_slot = 262144, kv_unified = 'false'\n" +
 		"[launch] health check OK after 5m1s\n"
-	if !previousClaudeLogMatches(log, model, strategy) {
+	if !previousClaudeLogMatches(log, model, strategy, scope) {
 		t.Fatal("matching previous Claude runtime log was rejected")
 	}
 	strategy.Parallel = 8
-	if previousClaudeLogMatches(log, model, strategy) {
+	if previousClaudeLogMatches(log, model, strategy, scope) {
 		t.Fatal("log from a different parallel/context shape must not be recovered")
 	}
 }
@@ -253,7 +469,7 @@ func TestStartupComputeMeasurementMustMatchFailedGPU(t *testing.T) {
 		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 8000.00 MiB on device 0: cudaMalloc failed: out of memory\n" +
 		"ggml_gallocr_reserve_n: graph_reserve failed\n"
 
-	measured := recordMeasuredLaunchProbes(cfg, model, strategy, be, caps, log, nil)
+	measured := recordMeasuredLaunchProbes(nil, cfg, model, strategy, be, caps, log, nil)
 	device, _, isCompute, ok := startupLogCUDAOOMDetailed(log)
 	if !ok || !isCompute || device != 0 {
 		t.Fatalf("failed allocation parse = device %d compute=%v ok=%v", device, isCompute, ok)
@@ -295,8 +511,8 @@ func TestRouteArchBackendPreservesIKDialectBehindRecipeTag(t *testing.T) {
 	if opts.BackendTag != "ik_llama" {
 		t.Fatalf("placement got recipe tag instead of IK dialect: %#v", opts)
 	}
-	if opts.BackendCacheTag != "hy3" {
-		t.Fatalf("placement probes are not isolated to the HY3 fork: %#v", opts)
+	if want := evidenceBackendCacheTag(be); opts.BackendCacheTag != want {
+		t.Fatalf("placement probes are not isolated to the exact HY3 fork build: got=%q want=%q opts=%#v", opts.BackendCacheTag, want, opts)
 	}
 }
 
@@ -462,6 +678,17 @@ func TestParseLaunchArgsLegacyModelFirst(t *testing.T) {
 	}
 }
 
+func TestParseLaunchArgsDefaultKVQualityIsAuto(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"/models/test.gguf"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.KVQuality != "auto" {
+		t.Fatalf("default KV quality must remain model-aware auto, got %q", req.KVQuality)
+	}
+}
+
 func TestParseLaunchArgsNoMMapFeedsPlacement(t *testing.T) {
 	isolateConfig(t)
 	req, err := parseLaunchArgs([]string{"model.gguf", "--no-mmap", "-kv", "gpu"})
@@ -509,6 +736,25 @@ func TestParseLaunchArgsEqualsForms(t *testing.T) {
 	}
 	if req.GPUsFlag != "1,3" || req.Host != "127.0.0.1" || req.SpecMode != "draft" || req.Parallel != 4 {
 		t.Fatalf("equals placement mismatch: %#v", req)
+	}
+}
+
+func TestExplicitBatchFlagsFeedPlacementInsteadOfExtraArgs(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{
+		"model.gguf", "--batch-size=512", "-ub", "256",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !req.BatchSizeSet || req.BatchSize != 512 || !req.UBatchSizeSet || req.UBatchSize != 256 {
+		t.Fatalf("explicit batch flags were not retained: %#v", req)
+	}
+	if len(req.ExtraArgs) != 0 {
+		t.Fatalf("explicit placement flags must not remain late extra args: %v", req.ExtraArgs)
+	}
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--batch-size", "128", "--ubatch-size", "256"}); err == nil {
+		t.Fatal("batch smaller than microbatch was accepted")
 	}
 }
 
@@ -824,6 +1070,35 @@ func TestBestTuneCachePathFiltersHardwareHash(t *testing.T) {
 	}
 }
 
+func TestApplyTuneCacheSkipsAutomaticGenericTuneForClaudeCode(t *testing.T) {
+	cacheDir := t.TempDir()
+	modelPath := filepath.Join(t.TempDir(), "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hwdeadbeef_vulkan.json")
+	doc := `{
+		"model": "model.gguf",
+		"baseline_gen_tps": 100.0,
+		"baseline_wins": false,
+		"best_config": {"name": "threads12", "flags": {"--threads": "12"}, "gen_tps": 120.0, "pp_tps": 300.0},
+		"rounds": 1,
+		"tuned_at": "2026-05-28T00:00:00Z"
+	}`
+	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
+		t.Fatalf("write generic tune cache: %v", err)
+	}
+	base := []string{"llama-server", "--threads", "8"}
+	got := applyTuneCache(&launchRequest{ModelPath: modelPath, ClaudeCode: true}, base, cacheDir, "vulkan", false, nil)
+	if !hasArgValue(got, "--threads", "8") {
+		t.Fatalf("automatic generic tune changed Claude Code args: %v", got)
+	}
+	got = applyTuneCache(&launchRequest{ModelPath: modelPath, ClaudeCode: true, TuneCache: cachePath}, base, cacheDir, "vulkan", false, nil)
+	if !hasArgValue(got, "--threads", "12") {
+		t.Fatalf("explicit Claude Code tune was not honored: %v", got)
+	}
+}
+
 func hasArgValue(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && args[i+1] == value {
@@ -860,6 +1135,10 @@ func TestFirstPositionalSkipsParallelValue(t *testing.T) {
 	if got != "org/model-GGUF" {
 		t.Fatalf("--ram-headroom value was treated as positional: got %q", got)
 	}
+	got = firstPositional([]string{"--claude-profile", "agent-interactive", "org/model-GGUF", "--download"})
+	if got != "org/model-GGUF" {
+		t.Fatalf("--claude-profile value was treated as positional: got %q", got)
+	}
 }
 
 func TestParseLaunchArgsRejectsInvalidSafetyFlags(t *testing.T) {
@@ -882,6 +1161,24 @@ func TestParseLaunchArgsRejectsInvalidSafetyFlags(t *testing.T) {
 				t.Fatalf("parseLaunchArgs(%v) accepted invalid input", tc.args)
 			}
 		})
+	}
+}
+
+func TestParseLongContextValidationArgsStripsRecorderFlags(t *testing.T) {
+	tokens, gpuUsed, launchArgs, err := parseLongContextValidationArgs([]string{
+		"model.gguf", "--prompt-tokens", "60000", "--gpu-used", "0:16224,1:9059", "--parallel", "4",
+	})
+	if err != nil {
+		t.Fatalf("parse validation args: %v", err)
+	}
+	if tokens != 60000 {
+		t.Fatalf("tokens=%d, want 60000", tokens)
+	}
+	if gpuUsed[0] != 16224 || gpuUsed[1] != 9059 {
+		t.Fatalf("gpu-used=%v", gpuUsed)
+	}
+	if strings.Join(launchArgs, " ") != "model.gguf --parallel 4" {
+		t.Fatalf("launch args leaked recorder flags: %v", launchArgs)
 	}
 }
 
@@ -1121,6 +1418,7 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 	t.Setenv("CLAUDE_ENABLE_BYTE_WATCHDOG", "")
 	t.Setenv("CLAUDE_ENABLE_STREAM_WATCHDOG", "")
 	t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
+	t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "")
 	env := claudeCodeEnv("0.0.0.0", 8081, []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"})
 
 	if envHasPrefix(env, "ANTHROPIC_API_KEY=") {
@@ -1133,10 +1431,17 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 		"CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=2147483647",
 		"CLAUDE_ENABLE_BYTE_WATCHDOG=0",
 		"CLAUDE_ENABLE_STREAM_WATCHDOG=0",
+		"CLAUDE_CODE_EFFORT_LEVEL=xhigh",
 	} {
 		if !envContains(env, want) {
 			t.Fatalf("missing %s in claude-code env: %v", want, env)
 		}
+	}
+
+	t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+	overridden := claudeCodeEnv("127.0.0.1", 8081, nil)
+	if !envContains(overridden, "CLAUDE_CODE_EFFORT_LEVEL=max") {
+		t.Fatalf("explicit Claude effort override was not preserved: %v", overridden)
 	}
 }
 
@@ -1177,7 +1482,7 @@ func TestClaudeCodeSlotAdjust(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &placement.Strategy{ContextSize: tc.ctx, Parallel: tc.par}
-			claudeCodeSlotAdjust(s, tc.claudeCode, tc.explicit)
+			claudeCodeSlotAdjust(s, tc.claudeCode, tc.explicit, false)
 			if s.Parallel != tc.wantParallel {
 				t.Fatalf("ctx=%d par=%d cc=%v: got parallel %d, want %d", tc.ctx, tc.par, tc.claudeCode, s.Parallel, tc.wantParallel)
 			}
@@ -1187,15 +1492,47 @@ func TestClaudeCodeSlotAdjust(t *testing.T) {
 
 func TestClaudeCodeHybridUsesFairPromptBatch(t *testing.T) {
 	s := &placement.Strategy{ContextSize: 1048576, Parallel: 2, BatchSize: 2048, HasSSM: true}
-	claudeCodeSlotAdjust(s, true, false)
+	claudeCodeSlotAdjust(s, true, false, false)
 	if s.BatchSize != claudeHybridBatch {
 		t.Fatalf("hybrid Claude batch=%d, want %d", s.BatchSize, claudeHybridBatch)
 	}
 
 	nonClaude := &placement.Strategy{ContextSize: 1048576, Parallel: 2, BatchSize: 2048, HasSSM: true}
-	claudeCodeSlotAdjust(nonClaude, false, false)
+	claudeCodeSlotAdjust(nonClaude, false, false, false)
 	if nonClaude.BatchSize != 2048 {
 		t.Fatalf("non-Claude batch was changed: %d", nonClaude.BatchSize)
+	}
+}
+
+func TestClaudeCodeHybridExplicitBatchOverridesFairnessCap(t *testing.T) {
+	s := &placement.Strategy{ContextSize: 65536, Parallel: 4, BatchSize: 512, HasSSM: true}
+	claudeCodeSlotAdjust(s, true, true, true)
+	if s.BatchSize != 512 {
+		t.Fatalf("explicit hybrid Claude batch=%d, want 512", s.BatchSize)
+	}
+}
+
+func TestClaudeCodeHybridSingleSlotKeepsPlacementBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		ctx, parallel int
+		explicit      bool
+	}{
+		{"single_slot", 1048576, 1, false},
+		// The automatic 4-slot default becomes one slot at this context. Verify
+		// batch fairness is evaluated after that normalization.
+		{"auto_reduced_to_single_slot", 32768, 4, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &placement.Strategy{ContextSize: tc.ctx, Parallel: tc.parallel, BatchSize: 2048, HasSSM: true}
+			claudeCodeSlotAdjust(s, true, tc.explicit, false)
+			if s.Parallel != 1 {
+				t.Fatalf("parallel=%d, want final single slot", s.Parallel)
+			}
+			if s.BatchSize != 2048 {
+				t.Fatalf("single-slot hybrid batch=%d, want placement-selected 2048", s.BatchSize)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -111,6 +112,51 @@ func Setup(binaryPath string) (string, bool, error) {
 		return "", false, nil
 	}
 	return hubDir, true, nil
+}
+
+// StableLibraryPath returns persistent directories containing the backend's
+// shared libraries. Unlike Setup's temporary symlink hub, this value is safe
+// to serialize in a dry-run launch plan and consume after ggrun exits.
+func StableLibraryPath(binaryPath string) (string, bool) {
+	resolved := binaryPath
+	if r, err := filepath.EvalSymlinks(binaryPath); err == nil {
+		resolved = r
+	}
+	binDir := filepath.Dir(resolved)
+	for _, sp := range []string{"/usr/bin", "/usr/local/bin", "/bin", "/sbin", "/usr/sbin", "/usr/lib", "/usr/lib64"} {
+		if binDir == sp || strings.HasPrefix(binDir, sp+"/") {
+			return "", false
+		}
+	}
+	if dirHasLibs(binDir) {
+		return binDir, true
+	}
+
+	buildDir := filepath.Dir(binDir)
+	if filepath.Base(binDir) != "bin" || !strings.HasPrefix(filepath.Base(buildDir), "build") {
+		if parent := filepath.Dir(buildDir); filepath.Base(parent) == "build" {
+			buildDir = parent
+		} else {
+			return "", false
+		}
+	}
+
+	dirs := map[string]bool{}
+	_ = filepath.Walk(buildDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && isLib(info.Name()) {
+			dirs[filepath.Dir(path)] = true
+		}
+		return nil
+	})
+	if len(dirs) == 0 {
+		return "", false
+	}
+	ordered := make([]string, 0, len(dirs))
+	for dir := range dirs {
+		ordered = append(ordered, dir)
+	}
+	sort.Strings(ordered)
+	return strings.Join(ordered, ":"), true
 }
 
 // Cleanup removes the lib hub directory. Safe because Setup only ever returns a

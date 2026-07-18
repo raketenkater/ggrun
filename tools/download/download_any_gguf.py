@@ -561,6 +561,11 @@ def get_args():
     parser.add_argument("--cache-dir", type=str, help="ggrun cache directory")
     parser.add_argument("--quant", type=str, default="", help="preselect a GGUF quantization")
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="accept the final download confirmation (for detached/resumable jobs)",
+    )
+    parser.add_argument(
         "--no-repo-search",
         action="store_true",
         help="use the requested repo without searching Hugging Face for matching GGUF repos",
@@ -772,7 +777,9 @@ def main():
         print(f"Output directory: {output_dir}")
         print("=" * 70)
 
-        confirm = input("\nStart download? (y/n): ").strip().lower()
+        confirm = "y" if args.yes else input("\nStart download? (y/n): ").strip().lower()
+        if args.yes:
+            print("\nStart download? yes (--yes)")
         if confirm != "y":
             print("Download cancelled.")
             return

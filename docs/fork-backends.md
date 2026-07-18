@@ -9,6 +9,7 @@ only the matching GGUF architecture to them.
 ```bash
 ggrun backend recipes
 ggrun backend install hy3
+ggrun backend install minimax-m3
 ```
 
 A recipe contains a Git repository, branch, immutable commit, backend tag and
@@ -30,6 +31,12 @@ name architectures explicitly:
 ```bash
 ggrun backend install hy3 --cuda-arch "86;89"
 ```
+
+The MiniMax-M3 recipe pins the open preliminary-support branch revision that
+includes its dedicated structured tool-call parser. Its architecture route is
+`minimax-m3`. Sparse attention is not implemented in that revision, so it uses
+the mathematically correct dense fallback and remains an experimental backend
+until the 60k agent/workflow farm passes on the target machine.
 
 ## Any other fork
 

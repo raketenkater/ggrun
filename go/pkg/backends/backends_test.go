@@ -33,6 +33,30 @@ func TestHY3RecipeIsPinnedAndRouted(t *testing.T) {
 	}
 }
 
+func TestMiniMaxM3RecipeIsPinnedAndRouted(t *testing.T) {
+	recipe := RecipeByName("minimax-m3")
+	if recipe == nil {
+		t.Fatal("MiniMax-M3 recipe missing")
+	}
+	if recipe.RouteArch != "minimax-m3" {
+		t.Fatalf("MiniMax-M3 route arch = %q, want minimax-m3", recipe.RouteArch)
+	}
+	if recipe.Branch != "minimax-m3" || len(recipe.Commit) != 40 {
+		t.Fatalf("MiniMax-M3 source is not reproducibly pinned: %#v", recipe)
+	}
+	if recipe.GitURL != "https://github.com/danielhanchen/llama.cpp.git" {
+		t.Fatalf("unexpected MiniMax-M3 fork: %s", recipe.GitURL)
+	}
+	if got := recipe.PatchNames(); len(got) != 0 {
+		t.Fatalf("MiniMax-M3 recipe unexpectedly carries patches: %#v", got)
+	}
+
+	byTag := RecipeByName("MiniMax-M3")
+	if byTag == nil || byTag.Commit != recipe.Commit {
+		t.Fatal("MiniMax-M3 tag lookup did not resolve the pinned recipe")
+	}
+}
+
 func TestHY3RecipePatchAppliesAndRevertsCleanly(t *testing.T) {
 	recipe := RecipeByName("hy3")
 	if recipe == nil {

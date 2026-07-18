@@ -111,6 +111,25 @@ func TestComputeDenseFits(t *testing.T) {
 	}
 }
 
+func TestComputeHonorsExplicitBatchBeforeLaunch(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{
+		Path: "model.gguf", SizeBytes: 15 * 1024 * 1024 * 1024,
+		NumLayers: 64, NumParams: 32_000_000_000, ContextSize: 32768, HiddenSize: 4096,
+	}
+	strategy, err := Compute(caps, model, Options{ContextSize: 32768, BatchSize: 512, UBatchSize: 256})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if strategy.BatchSize != 512 || strategy.UBatchSize != 256 {
+		t.Fatalf("explicit batch was not planned: batch=%d ubatch=%d", strategy.BatchSize, strategy.UBatchSize)
+	}
+}
+
 func TestComputeDenseTooLarge(t *testing.T) {
 	// 40GB model on 8GB GPU with 128GB RAM -> dense_cpu_offload
 	// Total system memory must exceed model overhead (40GB * 130% = 52GB)
@@ -520,20 +539,21 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 		},
 	}
 
-	// The old fixture exercised an invalid q8_0/CPU-KV mainline path. Keep the
-	// regression meaningful by asserting that a correctness-first planner
-	// rejects it before it can reach the unsafe placement ledger below.
+	// The old fixture exercised an invalid exact q8_0/CPU-KV mainline path. Keep
+	// the regression meaningful by asserting that a correctness-first planner
+	// rejects it before it can reach the unsafe placement ledger below. The legacy
+	// "mid" preset is intentionally upgraded to F16 on V4; exact q8_0 remains an
+	// explicit compressed-KV request and must fail.
 	if _, err := Compute(caps, model, Options{
 		ContextSize: 262144,
 		KVPlacement: "cpu",
-		KVQuality:   "mid",
+		KVQuality:   "q8_0",
 		BackendTag:  "llama",
 		Parallel:    1,
 		CacheDir:    t.TempDir(),
 	}); err == nil || !strings.Contains(err.Error(), "requires f16 KV") {
 		t.Fatalf("compressed mainline V4 KV must fail before planning, got %v", err)
 	}
-	return
 
 	strat, err := Compute(caps, model, Options{
 		ContextSize: 262144,
@@ -598,7 +618,9 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 	perLayerShexp := float64(bytesToMiBCeil(model.ShexpBytes)) / float64(model.NumLayers)
 	expertMBByDevice := otExpertMBByDevice(t, strat.OTString, expertPerLayerMB)
 	for gi, gpu := range caps.GPUs {
-		fixed := firstLaunchComputeBufMBForGPU(model, strat.UBatchSize, gi, orderGPUsByBandwidth(caps.GPUs))
+		fixed := firstLaunchComputeBufMBForGPUParallelAtContext(
+			model, strat.UBatchSize, strat.Parallel, strat.ContextSize, gi, orderGPUsByBandwidth(caps.GPUs),
+		)
 		if strat.TensorSplit[gi] == 0 && otStringUsesDevice(strat.OTString, gpu.Index) {
 			fixed = computeFloorMB // expert-only graph reserve
 		}
@@ -623,8 +645,8 @@ func TestComputeDeepSeekV4FlashFirstLaunchExactBudget(t *testing.T) {
 			t.Fatalf("cold-cache placement must not use sub-layer squeeze without measured CUDA overhead: %s", strat.OTString)
 		}
 	}
-	if strat.KVPlacement != "cpu" {
-		t.Fatalf("expected KV on CPU, got %q", strat.KVPlacement)
+	if strat.KVPlacement != "gpu" {
+		t.Fatalf("expected correctness-first f16 KV on GPU, got %q", strat.KVPlacement)
 	}
 }
 
@@ -796,6 +818,160 @@ func TestComputeDeepSeekV4Parallel4UsesMeasuredStableWholeLayerPlan(t *testing.T
 	}
 }
 
+// A DeepSeek4 split owner must stay expert-free until ggrun has durable
+// long-context evidence. The known stable layout keeps CUDA0 dense/KV-only and
+// uses the x4/x1 cards as storage. A startup compute-buffer probe is not proof
+// that the deferred graph state exercised by a long request fits.
+func TestComputeDeepSeekV4SplitOwnerStaysExpertFreeAfterStartupProbe(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+			{Index: 1, Name: "RTX 3060 x1", VRAMTotalMB: 12288, BandwidthMBps: 985},
+			{Index: 2, Name: "RTX 4070 x4", VRAMTotalMB: 12282, BandwidthMBps: 3938},
+		},
+		RAM: detect.RAMInfo{TotalMB: 128730, FreeMB: 123424},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path:      "/models/DeepSeek-V4-Flash-UD-IQ4_XS-00001-of-00004.gguf",
+		SizeBytes: 137903959808, TotalSizeMB: 131515,
+		NumLayers: 43, IsMoE: true, NumExperts: 256, ExpertUsedCount: 6, ExpertFF: 2048,
+		ExpertBytes: 131240296448, NonExpertBytes: 6658320448,
+		TokenEmbdBytes: 562626560, OutputBytes: 434380800, ShexpBytes: 1149763584,
+		ContextSize: 65536, CTXTrain: 1048576, HiddenSize: 4096, EmbeddingLength: 4096,
+		HeadCountKV: 1, KeyLength: 512, ValueLength: 512, ModelArch: "deepseek4",
+		MeasuredKVBytesPerTok: map[string]float64{"f16": 6912.25},
+	}
+	cacheDir := t.TempDir()
+	opts := Options{
+		ContextSize: 65536, KVPlacement: "gpu", KVQuality: "high",
+		BackendTag: "llama", Parallel: 1, CacheDir: cacheDir,
+	}
+
+	cold, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("cold placement: %v", err)
+	}
+	coldLayers := parseOTLayersByDevice(t, cold.OTString)
+	if got := len(coldLayers[0]); got != 0 {
+		t.Fatalf("cold V4 plan pinned %d CUDA0 expert layer(s), want none: %s", got, cold.OTString)
+	}
+	if len(coldLayers[1])+len(coldLayers[2]) == 0 {
+		t.Fatalf("cold V4 plan failed to use secondary expert storage: %s", cold.OTString)
+	}
+
+	// A measurement for another parallel shape is deliberately not evidence for
+	// this foreground/P1 launch.
+	if err := writeProbeCacheForModel(cacheDir, model, 65536, 512, "high", "gpu", "llama", caps.GPUs, 4,
+		map[int]int{0: 2048, 1: 128, 2: 128}, nil, 0); err != nil {
+		t.Fatalf("write mismatched probe: %v", err)
+	}
+	wrongShape, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("placement with mismatched probe: %v", err)
+	}
+	if got := len(parseOTLayersByDevice(t, wrongShape.OTString)[0]); got != 0 {
+		t.Fatalf("parallel-4 probe incorrectly promoted CUDA0 for parallel-1: %s", wrongShape.OTString)
+	}
+
+	// Even an exact startup probe does not remove the gate: it measures loading,
+	// not a 60k-token request with the final runtime graph shape.
+	if err := writeProbeCacheForModel(cacheDir, model, 65536, 512, "high", "gpu", "llama", caps.GPUs, 1,
+		map[int]int{0: 2048, 1: 128, 2: 128}, nil, 0); err != nil {
+		t.Fatalf("write exact probe: %v", err)
+	}
+	stillConservative, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("placement with exact probe: %v", err)
+	}
+	if got := len(parseOTLayersByDevice(t, stillConservative.OTString)[0]); got != 0 {
+		t.Fatalf("startup CUDA0 probe incorrectly promoted split-owner experts: %s", stillConservative.OTString)
+	}
+
+	if err := RecordLongContextValidation(cacheDir, model, 65536, 512, "high", "gpu", "llama", caps.GPUs, 1, 60000, map[int]int{0: 18000, 1: 9000, 2: 9000}); err != nil {
+		t.Fatalf("record long-context validation: %v", err)
+	}
+	validated, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("placement with long-context validation: %v", err)
+	}
+	if got := len(parseOTLayersByDevice(t, validated.OTString)[0]); got == 0 {
+		t.Fatalf("long-context validation did not unlock measured split-owner packing: %s", validated.OTString)
+	}
+}
+
+func TestLongContextValidationIsScopedByParallel(t *testing.T) {
+	gpus := []detect.GPU{{Index: 0, Name: "RTX", VRAMTotalMB: 24576}}
+	model := &ModelProfile{Path: "DeepSeek-V4.gguf", NumLayers: 43, NumExperts: 256, EmbeddingLength: 4096}
+	dir := t.TempDir()
+	if err := RecordLongContextValidation(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4, 60000, map[int]int{0: 18000}); err != nil {
+		t.Fatalf("record validation: %v", err)
+	}
+	if !HasLongContextValidation(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4, 60000) {
+		t.Fatal("expected exact parallel-4 validation hit")
+	}
+	if HasLongContextValidation(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 1, 60000) {
+		t.Fatal("parallel-4 validation must not validate a serial launch")
+	}
+	if HasLongContextValidation(dir, model, 1048576, 256, "high", "gpu", "llama", gpus, 4, 70000) {
+		t.Fatal("60k validation must not satisfy a higher prompt-token floor")
+	}
+}
+
+func TestComputeHybridMoEProtectsEverySplitOwner(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "GPU A", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+			{Index: 1, Name: "GPU B", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+		},
+		RAM: detect.RAMInfo{TotalMB: 262144, FreeMB: 250000},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	const gib = int64(1024 * 1024 * 1024)
+	model := &ModelProfile{
+		Path: "hybrid-two-split-owners.gguf", SizeBytes: 104 * gib, TotalSizeMB: 104 * 1024,
+		NumLayers: 32, IsMoE: true, NumExperts: 64, ExpertUsedCount: 4, ExpertFF: 2048,
+		ExpertBytes: 96 * gib, NonExpertBytes: 8 * gib,
+		TokenEmbdBytes: 512 * 1024 * 1024, OutputBytes: 512 * 1024 * 1024,
+		ContextSize: 65536, CTXTrain: 65536, HiddenSize: 4096, EmbeddingLength: 4096,
+		HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+		ModelArch: "deepseek4", MeasuredKVBytesPerTok: map[string]float64{"f16": 4096},
+	}
+	if !RequiresConservativeSplitOwnerProtection(model) {
+		t.Fatal("hybrid test model must exercise split-owner protection")
+	}
+	cacheDir := t.TempDir()
+	opts := Options{
+		ContextSize: 65536, KVPlacement: "gpu", KVQuality: "high",
+		BackendTag: "llama", Parallel: 1, CacheDir: cacheDir,
+	}
+
+	strategy, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("cold placement: %v", err)
+	}
+	if len(strategy.TensorSplit) != 2 || strategy.TensorSplit[0] <= 0 || strategy.TensorSplit[1] <= 0 {
+		t.Fatalf("expected two regular split owners, got split=%v", strategy.TensorSplit)
+	}
+	layers := parseOTLayersByDevice(t, strategy.OTString)
+	if len(layers[0]) != 0 || len(layers[1]) != 0 {
+		t.Fatalf("cold hybrid plan pinned experts on split owners: %s", strategy.OTString)
+	}
+
+	if err := writeProbeCacheForModel(cacheDir, model, 65536, 512, "high", "gpu", "llama", caps.GPUs, 1,
+		map[int]int{0: 1024, 1: 1024}, nil, 0); err != nil {
+		t.Fatalf("write startup probe: %v", err)
+	}
+	strategy, err = Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("placement with startup probe: %v", err)
+	}
+	layers = parseOTLayersByDevice(t, strategy.OTString)
+	if len(layers[0]) != 0 || len(layers[1]) != 0 {
+		t.Fatalf("startup probe promoted one of two split owners: %s", strategy.OTString)
+	}
+}
+
 func TestResolveKVQualityDeepSeekV4MainlineRequiresF16(t *testing.T) {
 	model := &ModelProfile{ModelArch: "deepseek4"}
 
@@ -804,18 +980,32 @@ func TestResolveKVQualityDeepSeekV4MainlineRequiresF16(t *testing.T) {
 		t.Fatalf("default V4 KV quality = %q, %v; want high/f16", got, err)
 	}
 
+	got, err = resolveKVQuality(model, "auto", "llama")
+	if err != nil || got != "high" {
+		t.Fatalf("auto V4 KV quality = %q, %v; want high/f16", got, err)
+	}
+
 	got, err = resolveKVQuality(model, "high", "llama")
 	if err != nil || got != "high" {
 		t.Fatalf("explicit F16 V4 KV quality = %q, %v; want high/f16", got, err)
 	}
 
-	if _, err := resolveKVQuality(model, "mid", "llama"); err == nil || !strings.Contains(err.Error(), "requires f16 KV") {
-		t.Fatalf("compressed V4 KV must fail with correctness error, got %v", err)
+	got, err = resolveKVQuality(model, "mid", "llama")
+	if err != nil || got != "high" {
+		t.Fatalf("legacy/default mid V4 KV quality = %q, %v; want safe high/f16", got, err)
+	}
+
+	if _, err := resolveKVQuality(model, "q8_0", "llama"); err == nil || !strings.Contains(err.Error(), "requires f16 KV") {
+		t.Fatalf("exact compressed V4 KV must fail with correctness error, got %v", err)
 	}
 
 	got, err = resolveKVQuality(&ModelProfile{ModelArch: "qwen3"}, "", "llama")
 	if err != nil || got != "mid" {
 		t.Fatalf("generic default KV quality = %q, %v; want mid", got, err)
+	}
+	got, err = resolveKVQuality(&ModelProfile{ModelArch: "qwen3"}, "auto", "llama")
+	if err != nil || got != "mid" {
+		t.Fatalf("generic auto KV quality = %q, %v; want mid", got, err)
 	}
 }
 
@@ -1593,6 +1783,24 @@ func TestFirstLaunchComputeBufMoEScalesWithFanoutAndParallel(t *testing.T) {
 	}
 	if serial < parallel4*3 || serial > parallel4*5 {
 		t.Fatalf("parallel scaling inconsistent: serial=%d parallel4=%d", serial, parallel4)
+	}
+}
+
+func TestFirstLaunchComputeBufDeepSeek4ScalesDownAt65KContext(t *testing.T) {
+	model := &ModelProfile{
+		IsMoE: true, ModelArch: "deepseek4", HiddenSize: 4096, NumLayers: 44, ExpertUsedCount: 6,
+	}
+	order := []int{0, 1, 2}
+	at1M := firstLaunchComputeBufMBForGPUParallelAtContext(model, 256, 1, 1048576, 0, order)
+	at65K := firstLaunchComputeBufMBForGPUParallelAtContext(model, 256, 1, 65536, 0, order)
+	if at1M < 33000 || at1M > 37000 {
+		t.Fatalf("1M graph reserve = %d MiB, want measured-scale ~34 GiB", at1M)
+	}
+	if at65K < 2800 || at65K > 3400 {
+		t.Fatalf("65k graph reserve = %d MiB, want conservative scale near 3 GiB", at65K)
+	}
+	if at65K >= at1M/4 {
+		t.Fatalf("65k context did not materially reduce graph reserve: 65k=%d 1M=%d", at65K, at1M)
 	}
 }
 
@@ -2951,7 +3159,7 @@ func TestExactKVTypesAreSizedAndPreserved(t *testing.T) {
 
 func TestNormalizeKVType(t *testing.T) {
 	for input, want := range map[string]string{
-		"high": "f16", "mid": "q8_0", "low": "q4_0", "Q5_1": "q5_1", "fp32": "f32",
+		"auto": "q8_0", "high": "f16", "mid": "q8_0", "low": "q4_0", "Q5_1": "q5_1", "fp32": "f32",
 	} {
 		got, err := NormalizeKVType(input)
 		if err != nil || got != want {

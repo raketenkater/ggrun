@@ -234,7 +234,7 @@ func runSpecConfiguration(req *launchRequest, cfg *config.Config, caps *detect.C
 	if err != nil {
 		return specTestConfiguration{Name: name, DraftMax: ceiling}, nil, err
 	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 	if ceiling > 0 && (strategy.Draft == nil || strategy.Draft.Type != placement.DraftMTP) {
 		return specTestConfiguration{Name: name, DraftMax: ceiling}, strategy, fmt.Errorf("no compatible MTP path for selected backend")
 	}

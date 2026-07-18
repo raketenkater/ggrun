@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -62,6 +65,37 @@ func TestClaudeReviewerCPUFallbackHidesAccelerators(t *testing.T) {
 		if !hasArg(got, want) {
 			t.Fatalf("missing %q in %v", want, got)
 		}
+	}
+}
+
+func TestClaudeReviewerBackendEnvAddsResolvedLibraryPath(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "build-cuda", "bin")
+	linkDir := filepath.Join(root, ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(linkDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(binDir, "llama-server")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "libllama-server-impl.so"), []byte("lib"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(linkDir, "llama-server-cuda")
+	if err := os.Symlink(binary, link); err != nil {
+		t.Fatal(err)
+	}
+	got := claudeReviewerBackendEnv(link, []string{"CUDA_VISIBLE_DEVICES=2"})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "CUDA_VISIBLE_DEVICES=2") {
+		t.Fatalf("reviewer env lost GPU isolation: %v", got)
+	}
+	if !strings.Contains(joined, "LD_LIBRARY_PATH="+binDir) {
+		t.Fatalf("reviewer env missing resolved backend lib dir %q: %v", binDir, got)
 	}
 }
 

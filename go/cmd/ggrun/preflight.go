@@ -371,10 +371,11 @@ func preflightWorstDeficit(devs []preflightDevice, gpus []detect.GPU, overheadBy
 // load to learn the same thing. Any infrastructure failure (no binary,
 // unsupported arch, parse error) skips the gate: the preflight must never
 // block a launch the backend could have served.
-func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy, serverArgs []string) (int, int, bool, bool) {
+func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy, serverArgs []string) (int, int, bool, bool) {
 	if be == nil || caps == nil || len(caps.GPUs) == 0 {
 		return -1, 0, false, false
 	}
+	cacheBackendTag := scopedProbeBackendTag(req, model, be)
 	fitBin := findFitParamsBin(be.Path)
 	if fitBin == "" {
 		if isEmbeddedMainlineMTP(strategy) {
@@ -423,12 +424,12 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 			}
 		}
 		placement.RecordMeasuredContextMB(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, preflightContextTotalMB(targetDevs))
-		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, computeByGPU)
+		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
 	overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
-		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
+		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
 	}
 	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
 	if isEmbeddedMainlineMTP(strategy) && deficit > 0 {
@@ -446,7 +447,7 @@ func preflightPlacement(be *backendInfo, cfg *configForPreflight, caps *detect.C
 			// that was never measured here falls back to the first-launch
 			// heuristic — the same wrong-by-4x estimate that produced this
 			// deficit in the first place, just at a different ubatch.
-			measureUBatchLadderCandidates(fitBin, serverArgs, cfg, caps, model, strategy, be.Tag)
+			measureUBatchLadderCandidates(fitBin, serverArgs, cfg, caps, model, strategy, cacheBackendTag)
 		}
 		return dev, deficit, true, companionRejected
 	}

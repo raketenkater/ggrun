@@ -82,6 +82,8 @@ func main() {
 		cmdProbe()
 	case "kv-probe":
 		cmdKVProbe(args[1:])
+	case "record-longctx-validation":
+		cmdRecordLongContextValidation(args[1:])
 	case "download":
 		cmdDownload(args[1:])
 	case "tune":
@@ -117,6 +119,8 @@ Commands:
   probe                Check free GPU/RAM memory
   kv-probe <model>     Measure real KV cache size (2 short launches) and cache it,
                        so context sizing is exact for compressed-attention models
+  record-longctx-validation <model> --prompt-tokens N
+                       Record a passed long-context validation for placement promotion
   launch <model.gguf>  Launch model with auto-placement
   benchmark <model>    Benchmark a running server
   daemon               Start persistent daemon
@@ -136,7 +140,7 @@ Launch flags:
   -port int            Server port (default 8081)
   -ctx string          Context size: fit|max|token count (default fit)
   -kv string           KV placement: auto|gpu|cpu (default auto)
-  -kv-quality string   KV quality: high|mid|low or an exact llama.cpp type such as q5_1 (default mid)
+  -kv-quality string   KV quality: auto|high|mid|low or an exact llama.cpp type such as q5_1 (default auto)
   -cpu                 Force CPU-only mode
   -gpus string         Comma-separated GPU indices
   --backend string     auto|llama|ik_llama|registered backend tag
@@ -145,13 +149,14 @@ Launch flags:
   --ram-headroom str   Reserve system RAM the recommender/placement won't use, e.g. 8G
   -vision              Enable vision (auto-detect mmproj)
   --claude-code        Serve locally and launch Claude Code with workflows/research
+  --claude-profile str Claude Code scheduling (requires --claude-code): agent-interactive|agent-parallel
   --spec string        Speculative decoding: off|auto|mtp|dflash|eagle3|draft|ngram|ngram-mod|ngram-k4v
 `)
 }
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "record-longctx-validation", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -261,6 +266,104 @@ func loadConfigOrExit() *config.Config {
 	return cfg
 }
 
+func placementErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Model does not fit") {
+		return msg
+	}
+	if hint := activeLlamaServerMemoryHint(); hint != "" {
+		msg += "\n\n" + hint
+	}
+	return msg
+}
+
+type activeLlamaServerProcess struct {
+	pid   int
+	rssMB int
+	cmd   string
+}
+
+func activeLlamaServerMemoryHint() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return ""
+	}
+	self := os.Getpid()
+	procs := make([]activeLlamaServerProcess, 0, 4)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || len(cmdline) == 0 {
+			continue
+		}
+		cmd := strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " "))
+		if cmd == "" || !strings.Contains(strings.ToLower(cmd), "llama-server") {
+			continue
+		}
+		procs = append(procs, activeLlamaServerProcess{pid: pid, rssMB: procRSSMB(pid), cmd: compactProcessCommand(cmd, 180)})
+	}
+	if len(procs) == 0 {
+		return ""
+	}
+	sort.Slice(procs, func(i, j int) bool { return procs[i].rssMB > procs[j].rssMB })
+	if len(procs) > 3 {
+		procs = procs[:3]
+	}
+	var b strings.Builder
+	b.WriteString("Active llama-server process(es) are currently consuming memory; if you are switching models, stop the current server and retry:\n")
+	for _, p := range procs {
+		if p.rssMB > 0 {
+			fmt.Fprintf(&b, "  PID %d: %d MiB RSS — %s\n", p.pid, p.rssMB, p.cmd)
+		} else {
+			fmt.Fprintf(&b, "  PID %d: %s\n", p.pid, p.cmd)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func procRSSMB(pid int) int {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0
+		}
+		kb, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return 0
+		}
+		return (kb + 1023) / 1024
+	}
+	return 0
+}
+
+func compactProcessCommand(cmd string, limit int) string {
+	cmd = strings.Join(strings.Fields(cmd), " ")
+	if limit <= 0 || len(cmd) <= limit {
+		return cmd
+	}
+	if limit <= 3 {
+		return cmd[:limit]
+	}
+	return cmd[:limit-3] + "..."
+}
+
 func benchmarkCompatArgs(args []string) []string {
 	out := []string{}
 	if model := firstPositional(args); model != "" {
@@ -306,7 +409,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
 				skip = true
 			}
 			continue
@@ -331,36 +434,47 @@ func cmdDetect() {
 }
 
 type launchRequest struct {
-	ModelPath         string
-	Port              int
-	CtxFlag           string
-	KVPlacement       string
-	KVQuality         string
-	KVTypeK           string // explicit llama.cpp --cache-type-k override
-	KVTypeV           string // explicit llama.cpp --cache-type-v override
-	CPUMode           bool
-	GPUsFlag          string
-	Host              string
-	VisionAuto        bool
-	MMProjPath        string
-	ServerBin         string
-	ServerBinExplicit bool
-	Backend           string
-	BackendExplicit   bool
-	TuneCache         string
-	SpecMode          string
-	ForceSpecMoE      bool
-	RamBudgetMB       int
-	VRAMHeadroomMB    int
-	RAMHeadroomMB     int
-	NoMMap            bool
-	Parallel          int
-	ParallelSet       bool // --parallel given explicitly; claude-code mode must not override it
-	Benchmark         bool
-	ClaudeCode        bool
-	SpecDraftMax      int // internal spec-test ceiling; not a public launch override
-	ExtraArgs         []string
+	ModelPath          string
+	Port               int
+	CtxFlag            string
+	KVPlacement        string
+	KVQuality          string
+	KVTypeK            string // explicit llama.cpp --cache-type-k override
+	KVTypeV            string // explicit llama.cpp --cache-type-v override
+	CPUMode            bool
+	GPUsFlag           string
+	Host               string
+	VisionAuto         bool
+	MMProjPath         string
+	ServerBin          string
+	ServerBinExplicit  bool
+	Backend            string
+	BackendExplicit    bool
+	TuneCache          string
+	SpecMode           string
+	ForceSpecMoE       bool
+	RamBudgetMB        int
+	VRAMHeadroomMB     int
+	RAMHeadroomMB      int
+	NoMMap             bool
+	Parallel           int
+	ParallelSet        bool // --parallel given explicitly; claude-code mode must not override it
+	BatchSize          int
+	BatchSizeSet       bool
+	UBatchSize         int
+	UBatchSizeSet      bool
+	Benchmark          bool
+	ClaudeCode         bool
+	ClaudeProfile      string // agent-interactive avoids the automatic parallel-4 floor
+	EmitServerArgvJSON bool   // dry-run machine interface for reproducible benchmark harnesses
+	SpecDraftMax       int    // internal spec-test ceiling; not a public launch override
+	ExtraArgs          []string
 }
+
+const (
+	claudeProfileInteractive = "agent-interactive"
+	claudeProfileParallel    = "agent-parallel"
+)
 
 func parseLaunchArgs(args []string) (*launchRequest, error) {
 	cfg, err := config.Load()
@@ -390,7 +504,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		req.KVPlacement = "auto"
 	}
 	if req.KVQuality == "" {
-		req.KVQuality = "low"
+		req.KVQuality = "auto"
 	}
 	if req.Host == "" {
 		req.Host = "127.0.0.1"
@@ -489,6 +603,27 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.Parallel = parallel
 				req.ParallelSet = true
 				continue
+			case "--batch-size", "-b":
+				batch, err := parsePositiveFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.BatchSize, req.BatchSizeSet = batch, true
+				continue
+			case "--ubatch-size", "-ub":
+				ubatch, err := parsePositiveFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.UBatchSize, req.UBatchSizeSet = ubatch, true
+				continue
+			case "--claude-profile":
+				profile, err := parseClaudeProfile(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.ClaudeProfile = profile
+				continue
 			}
 		}
 		next := func() (string, error) {
@@ -502,7 +637,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		case "--benchmark":
 			req.Benchmark = true
 			continue
-		case "--dry-run", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
+		case "--dry-run", "--emit-server-argv-json", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
+			if a == "--emit-server-argv-json" {
+				req.EmitServerArgvJSON = true
+			}
 			continue
 		case "--model", "-m":
 			v, err := next()
@@ -568,6 +706,16 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.VisionAuto = true
 		case "--claude-code":
 			req.ClaudeCode = true
+		case "--claude-profile":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			profile, err := parseClaudeProfile(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.ClaudeProfile = profile
 		case "--no-mmap":
 			req.NoMMap = true
 		case "--mmproj":
@@ -652,6 +800,26 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 			req.Parallel = parallel
 			req.ParallelSet = true
+		case "--batch-size", "-b":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			batch, err := parsePositiveFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.BatchSize, req.BatchSizeSet = batch, true
+		case "--ubatch-size", "-ub":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			ubatch, err := parsePositiveFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.UBatchSize, req.UBatchSizeSet = ubatch, true
 		case "--force-spec-moe":
 			req.ForceSpecMoE = true
 		case "--":
@@ -676,11 +844,74 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	if _, err := parseGPUIndices(req.GPUsFlag); err != nil {
 		return nil, fmt.Errorf("--gpus: %w", err)
 	}
+	if req.ClaudeProfile != "" && !req.ClaudeCode {
+		return nil, fmt.Errorf("--claude-profile requires --claude-code")
+	}
 	if err := resolveKVCacheTypeFlags(req); err != nil {
 		return nil, err
 	}
+	if req.BatchSizeSet && req.UBatchSizeSet && req.BatchSize < req.UBatchSize {
+		return nil, fmt.Errorf("--batch-size (%d) must be at least --ubatch-size (%d)", req.BatchSize, req.UBatchSize)
+	}
 	req.ExtraArgs = normalizePlacementAwareExtraArgs(req, req.ExtraArgs)
 	return req, nil
+}
+
+func parseClaudeProfile(flag, value string) (string, error) {
+	profile := strings.ToLower(strings.TrimSpace(value))
+	switch profile {
+	case claudeProfileInteractive, claudeProfileParallel:
+		return profile, nil
+	default:
+		return "", fmt.Errorf("%s must be %q or %q, got %q", flag, claudeProfileInteractive, claudeProfileParallel, value)
+	}
+}
+
+// effectiveClaudeProfile turns the omitted profile into an explicit runtime
+// policy. Keeping this separate from parsing makes the default and an explicit
+// --claude-profile agent-parallel share placement/probe evidence: their
+// scheduling behavior is identical.
+func effectiveClaudeProfile(req *launchRequest) string {
+	if req == nil || !req.ClaudeCode {
+		return ""
+	}
+	if req.ClaudeProfile == claudeProfileInteractive {
+		return claudeProfileInteractive
+	}
+	return claudeProfileParallel
+}
+
+// requestWorkloadProfile scopes placement/probe evidence to a versioned Claude
+// scheduling profile. A non-empty value deliberately does not match legacy
+// generic cache entries, which were never validation for an agent workload.
+func requestWorkloadProfile(req *launchRequest, model *placement.ModelProfile) string {
+	profile := effectiveClaudeProfile(req)
+	if profile == "" && (req == nil || (!req.BatchSizeSet && !req.UBatchSizeSet)) {
+		return ""
+	}
+	if profile == "" {
+		profile = "explicit-batch"
+	}
+	return fmt.Sprintf("claude-%s-v1:%s", profile, requestSamplingProfile(req, model))
+}
+
+// evidenceBackendCacheTag gives placement/probe evidence an exact backend-build
+// namespace. Backend tags identify a flag dialect, not a binary: a rebuilt
+// mainline server or a fork under the same "llama" tag can have different graph
+// allocation behavior and must never inherit old fit/OOM evidence.
+func evidenceBackendCacheTag(be *backendInfo) string {
+	tag := "llama"
+	if be != nil && strings.TrimSpace(be.Tag) != "" {
+		tag = strings.TrimSpace(be.Tag)
+	}
+	if be != nil && strings.TrimSpace(be.Identity) != "" {
+		return tag + "@" + strings.TrimSpace(be.Identity)
+	}
+	return tag
+}
+
+func scopedProbeBackendTag(req *launchRequest, model *placement.ModelProfile, be *backendInfo) string {
+	return placement.ScopedBackendCacheTag(evidenceBackendCacheTag(be), requestWorkloadProfile(req, model))
 }
 
 // resolveKVCacheTypeFlags turns llama.cpp's direct K/V flags into one planned
@@ -1006,6 +1237,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 			ctxSize = 131072
 		}
 	}
+	samplingProfile := requestSamplingProfile(req, model)
 	opts := placement.Options{
 		ContextSize:            ctxSize,
 		KVPlacement:            req.KVPlacement,
@@ -1018,9 +1250,10 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		CacheDir:               cacheDir,
 		Host:                   req.Host,
 		BackendTag:             backendDialect(be),
-		BackendCacheTag:        be.Tag,
+		BackendCacheTag:        evidenceBackendCacheTag(be),
 		BackendIdentity:        be.Identity,
-		SamplingProfile:        requestSamplingProfile(req, model),
+		SamplingProfile:        samplingProfile,
+		WorkloadProfile:        requestWorkloadProfile(req, model),
 		VisionAuto:             req.VisionAuto,
 		MMProjPath:             req.MMProjPath,
 		SpecMode:               req.SpecMode,
@@ -1029,6 +1262,8 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		SpecCandidateValidator: backendSpecCandidateValidator(be),
 		CacheFile:              req.TuneCache,
 		Parallel:               req.Parallel,
+		BatchSize:              req.BatchSize,
+		UBatchSize:             req.UBatchSize,
 		// Disable the model's thinking only when measuring (`--benchmark`); a
 		// normal launch keeps reasoning on so tools like Claude Code can think.
 		ReasoningOff: req.Benchmark,
@@ -1038,7 +1273,7 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 			opts.GPUs = indices
 		}
 	}
-	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet)
+	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet, req.ClaudeProfile)
 	return opts
 }
 
@@ -1050,11 +1285,22 @@ func requestSamplingProfile(req *launchRequest, model *placement.ModelProfile) s
 	// sampling or throughput too. Then add ggrun's effective Claude defaults so
 	// a Claude profile cannot be reused by an ordinary OpenAI-compatible launch.
 	values := append([]string(nil), req.ExtraArgs...)
+	if req.BatchSizeSet {
+		values = append(values, fmt.Sprintf("batch-size=%d", req.BatchSize))
+	}
+	if req.UBatchSizeSet {
+		values = append(values, fmt.Sprintf("ubatch-size=%d", req.UBatchSize))
+	}
 	values = claudeCodeSamplingArgs(values, req.ClaudeCode, model)
 	if len(values) == 0 && !req.ClaudeCode {
 		return "default"
 	}
 	values = append(values, fmt.Sprintf("claude-code=%t", req.ClaudeCode))
+	if profile := effectiveClaudeProfile(req); profile != "" {
+		// The omitted profile and explicit agent-parallel have the same behavior;
+		// identify them identically while keeping interactive separate.
+		values = append(values, "claude-profile="+profile)
+	}
 	sum := sha256.Sum256([]byte(strings.Join(values, "\x00")))
 	return fmt.Sprintf("custom-%x", sum[:8])
 }
@@ -1062,15 +1308,29 @@ func requestSamplingProfile(req *launchRequest, model *placement.ModelProfile) s
 // claudeCodeParallel requests four sequence slots in Claude Code mode so the main
 // turn and a small Workflow fan-out can make progress concurrently. Four is a
 // concurrency default, not a claim of 4x inference throughput: active requests on
-// a bandwidth-bound big MoE still share the same memory bandwidth.
+// a bandwidth-bound big MoE still share the same memory bandwidth. The explicit
+// agent-interactive profile keeps the configured single foreground slot instead.
 //
 // claudeCodeSlotAdjust runs after placement and lowers this automatic value when
 // the selected total context cannot preserve a useful per-slot window. An explicit
 // --parallel always wins, including --parallel 2 for a tighter big-MoE setup or 8
 // for hardware that has been proven stable under wider fan-out.
-func claudeCodeParallel(parallel int, claudeCode, explicit bool) int {
-	if claudeCode && !explicit && parallel < 4 {
+func claudeCodeParallel(parallel int, claudeCode, explicit bool, profile string) int {
+	if !claudeCode || explicit {
+		return parallel
+	}
+	switch profile {
+	case claudeProfileInteractive:
+		// A selected interactive profile is a preset, not merely a refusal to
+		// raise the configured count. This keeps a stale LLM_PARALLEL=4 from
+		// silently defeating the promised one foreground-agent lane.
+		return 1
+	case claudeProfileParallel:
 		return 4
+	default:
+		if parallel < 4 {
+			return 4
+		}
 	}
 	return parallel
 }
@@ -1083,9 +1343,11 @@ const (
 	claudeSlotMin    = 24576
 	// Live parallel-2 testing on an offloaded DeepSeek V4 showed a 512-token
 	// prompt chunk holding the scheduler for about 22 seconds and reducing a
-	// concurrent worker to 0.05-0.15 tok/s. Match the proven 128-token microbatch
-	// so another Claude slot gets a scheduling opportunity roughly four times as
-	// often. Explicit extra backend arguments still override this value.
+	// concurrent worker to 0.05-0.15 tok/s. Keep concurrent hybrid workloads at
+	// 128 so another Claude slot gets a scheduling opportunity roughly four times
+	// as often. A single foreground slot has no fairness contention, so it keeps
+	// the placement-selected batch size for efficient MoE prefill. Explicit extra
+	// backend arguments still override this value.
 	claudeHybridBatch = 128
 )
 
@@ -1097,32 +1359,35 @@ const (
 // wait) and may re-process the prompt on interleave — slow, but functional.
 // Runs after placement.Compute and before Strategy.Args, so the emitted
 // --parallel and the derived CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stay consistent.
-func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode, parallelExplicit bool) {
+func claudeCodeSlotAdjust(strategy *placement.Strategy, claudeCode, parallelExplicit, batchExplicit bool) {
 	if !claudeCode || strategy == nil {
 		return
 	}
-	if strategy.HasSSM && strategy.BatchSize > claudeHybridBatch {
+	if strategy.ContextSize > 0 && strategy.Parallel > 1 {
+		// A user-chosen --parallel is a deliberate slot layout — keep it, warn below if tight.
+		if !parallelExplicit {
+			p := strategy.ContextSize / claudeSlotTarget
+			if p < 1 {
+				p = 1
+			}
+			if p < strategy.Parallel {
+				fmt.Printf("[claude-code] context %d is too small for %d slots — lowering --parallel to %d (~%dk per slot)\n",
+					strategy.ContextSize, strategy.Parallel, p, strategy.ContextSize/p/1000)
+				strategy.Parallel = p
+			}
+		}
+		if slot := strategy.ContextSize / strategy.Parallel; slot < claudeSlotMin {
+			fmt.Printf("[claude-code] warning: only ~%dk context per slot — Claude Code needs ~24k+ just for its system prompt. Use a larger --ctx-size or a smaller model.\n", slot/1000)
+		}
+	}
+	// Normalize the slot count before applying the fairness policy: an automatic
+	// 4-slot request can legitimately become one slot at a smaller context size.
+	// Capping that final single foreground slot to 128 would sacrifice long-prompt
+	// MoE efficiency without protecting any competing decode.
+	if strategy.HasSSM && strategy.Parallel > 1 && strategy.BatchSize > claudeHybridBatch && !batchExplicit {
 		fmt.Printf("[claude-code] hybrid recurrent model: lowering --batch-size from %d to %d so prompt prefill does not starve another active slot\n",
 			strategy.BatchSize, claudeHybridBatch)
 		strategy.BatchSize = claudeHybridBatch
-	}
-	if strategy.ContextSize <= 0 || strategy.Parallel <= 1 {
-		return
-	}
-	// A user-chosen --parallel is a deliberate slot layout — keep it, warn below if tight.
-	if !parallelExplicit {
-		p := strategy.ContextSize / claudeSlotTarget
-		if p < 1 {
-			p = 1
-		}
-		if p < strategy.Parallel {
-			fmt.Printf("[claude-code] context %d is too small for %d slots — lowering --parallel to %d (~%dk per slot)\n",
-				strategy.ContextSize, strategy.Parallel, p, strategy.ContextSize/p/1000)
-			strategy.Parallel = p
-		}
-	}
-	if slot := strategy.ContextSize / strategy.Parallel; slot < claudeSlotMin {
-		fmt.Printf("[claude-code] warning: only ~%dk context per slot — Claude Code needs ~24k+ just for its system prompt. Use a larger --ctx-size or a smaller model.\n", slot/1000)
 	}
 }
 
@@ -1220,13 +1485,30 @@ func specLaunchIdentity(args []string) string {
 	return fmt.Sprintf("%x", sum[:16])
 }
 
-func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []string, timeout time.Duration) (*server.Process, error) {
+// claudeLaunchLogScope ties a recoverable Claude server log to the effective
+// workload profile, exact backend build, and final canonical launch argv. A
+// port-only filename let an old interactive/parallel run donate (or suppress)
+// OOM evidence for a different runtime shape.
+func claudeLaunchLogScope(req *launchRequest, model *placement.ModelProfile, be *backendInfo, serverArgs []string) string {
+	material := strings.Join([]string{
+		"claude-server-log-v2",
+		requestWorkloadProfile(req, model),
+		evidenceBackendCacheTag(be),
+		specLaunchIdentity(serverArgs),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(material))
+	return fmt.Sprintf("%x", sum[:12])
+}
+
+func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, serverArgs []string, timeout time.Duration) (*server.Process, error) {
 	if req.ClaudeCode {
 		// In Claude Code mode ggrun hands the terminal to the `claude` client, so
 		// the backend's ongoing per-request logs must go to a file instead of
 		// bleeding into Claude Code's UI.
-		logPath := claudeServerLogPath(cfg, req.Port)
+		scope := claudeLaunchLogScope(req, model, be, serverArgs)
+		logPath := claudeServerLogPath(cfg, req.Port, scope)
 		if lf, ferr := os.Create(logPath); ferr == nil {
+			_, _ = fmt.Fprintf(lf, "[ggrun] launch-scope: %s\n", scope)
 			_, _ = fmt.Fprintf(lf, "[ggrun] launch: %s\n", formatCommand(serverArgs))
 			fmt.Printf("[claude-code] backend logs -> %s\n", logPath)
 			return server.StartWithTimeoutTo(serverArgs, req.Port, timeout, lf, lf)
@@ -1235,7 +1517,7 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, serverArgs []str
 	return server.StartWithTimeout(serverArgs, req.Port, timeout)
 }
 
-func claudeServerLogPath(cfg *config.Config, port int) string {
+func claudeServerLogPath(cfg *config.Config, port int, scope string) string {
 	logDir := ""
 	if cfg != nil {
 		logDir = cfg.LogDir
@@ -1243,23 +1525,32 @@ func claudeServerLogPath(cfg *config.Config, port int) string {
 	if logDir == "" {
 		logDir = os.TempDir()
 	}
-	return filepath.Join(logDir, fmt.Sprintf("ggrun-claude-server-%d.log", port))
+	return filepath.Join(logDir, fmt.Sprintf("ggrun-claude-server-v2-%d-%s.log", port, scope))
 }
 
-func recordMeasuredLaunchProbes(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) map[int]int {
+func claudeOOMMarkerPath(cfg *config.Config, req *launchRequest, model *placement.ModelProfile, be *backendInfo, serverArgs []string) string {
+	if req == nil {
+		return ""
+	}
+	scope := claudeLaunchLogScope(req, model, be, serverArgs)
+	return claudeServerLogPath(cfg, req.Port, scope) + ".oom-recorded"
+}
+
+func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string, baselineVRAMByGPU map[int]int) map[int]int {
 	if cfg == nil || model == nil || strategy == nil || be == nil || serverLog == "" {
 		return nil
 	}
+	cacheBackendTag := scopedProbeBackendTag(req, model, be)
 	var gpus []detect.GPU
 	if caps != nil {
 		gpus = caps.GPUs
 	}
 	if model.IsMoE && len(gpus) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog)
-		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, be.Tag, gpus, baselineVRAMByGPU)
+		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU)
 	}
 	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
-	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, gpus, strategy.Parallel, serverLog)
+	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog)
 	if !probeWritten {
 		return nil
@@ -1277,6 +1568,13 @@ func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *b
 	if req == nil || cfg == nil || be == nil || caps == nil || model == nil || current == nil || !model.IsMoE || len(caps.GPUs) == 0 {
 		return nil, nil, false
 	}
+	if placement.RequiresConservativeSplitOwnerProtection(model) && !placement.HasLongContextValidation(cfg.CacheDir, model, current.ContextSize, current.UBatchSize, current.KVQuality, current.KVPlacement, scopedProbeBackendTag(req, model, be), caps.GPUs, current.Parallel, placement.LongContextValidationMinTokens) {
+		// A load-time probe and health check do not validate the deferred graph
+		// allocations exercised by a long hybrid-MoE request. Keep this automatic
+		// calibration from undoing the conservative split-owner placement until a
+		// durable, scoped long-context validation record exists.
+		return nil, nil, false
+	}
 	// A measured KV probe may have been written after the first load. Force the
 	// recompute to reload it instead of reusing the pre-launch model struct state.
 	// Also bypass the placement cache: reloading the placement that just launched
@@ -1290,7 +1588,7 @@ func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *b
 		fmt.Fprintf(os.Stderr, "[launch] calibration: measured placement recompute failed: %v\n", err)
 		return nil, nil, false
 	}
-	claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet)
+	claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 	if !shouldPromoteMoEPlacement(current, next) {
 		return nil, nil, false
 	}
@@ -1339,7 +1637,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		// without paying for the load to learn it. Re-planned args loop back
 		// here, so every retry is re-gated too.
 		if preflightReplans < 3 && strategy != nil {
-			dev, deficit, bad, companionRejected := preflightPlacement(be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
+			dev, deficit, bad, companionRejected := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
 			if companionRejected {
 				specDisabled = true
 				opts := placementOpts()
@@ -1372,7 +1670,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 				// recovery below still applies.
 			}
 		}
-		p, err := startLaunchProcess(req, cfg, serverArgs, timeout)
+		p, err := startLaunchProcess(req, cfg, model, be, serverArgs, timeout)
 		if err == nil {
 			// Persist the placement that actually loaded and passed the health
 			// check — and only that. Overwrite unconditionally: after an OOM
@@ -1387,7 +1685,7 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		var measuredComputeByGPU map[int]int
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
-			measuredComputeByGPU = recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, logData, nil)
+			measuredComputeByGPU = recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, logData, nil)
 		}
 		// Diagnose before checking the retry budget: a clean, parseable OOM on
 		// the very last allowed attempt still deserves its real cause recorded
@@ -1557,7 +1855,7 @@ func oomLogFingerprint(logData string) string {
 // recordRuntimeOOMLog records either the exact failed allocation or the
 // bounded VMM fallback above. markerPath prevents a Claude crash recorded on
 // exit from being counted again when its previous log is recovered next run.
-func recordRuntimeOOMLog(cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string) (device, reserveMB int, estimated, changed, ok bool, err error) {
+func recordRuntimeOOMLog(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string) (device, reserveMB int, estimated, changed, ok bool, err error) {
 	if cfg == nil || model == nil || strategy == nil || be == nil || caps == nil {
 		return 0, 0, false, false, false, nil
 	}
@@ -1567,12 +1865,13 @@ func recordRuntimeOOMLog(cfg *config.Config, model *placement.ModelProfile, stra
 			return 0, 0, false, false, false, nil
 		}
 	}
-	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
+	cacheBackendTag := scopedProbeBackendTag(req, model, be)
+	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
 	device, reserveMB, estimated, ok = runtimeLogCUDAOOM(logData, caps, prior)
 	if !ok {
 		return 0, 0, false, false, false, nil
 	}
-	if err = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, reserveMB); err != nil {
+	if err = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, reserveMB); err != nil {
 		return device, reserveMB, estimated, false, true, err
 	}
 	changed = reserveMB > prior[device]
@@ -1584,8 +1883,11 @@ func recordRuntimeOOMLog(cfg *config.Config, model *placement.ModelProfile, stra
 	return device, reserveMB, estimated, changed, true, nil
 }
 
-func previousClaudeLogMatches(logData string, model *placement.ModelProfile, strategy *placement.Strategy) bool {
+func previousClaudeLogMatches(logData string, model *placement.ModelProfile, strategy *placement.Strategy, scope string) bool {
 	if model == nil || strategy == nil || strategy.Parallel < 1 || strategy.ContextSize < 1 {
+		return false
+	}
+	if scope == "" || !strings.Contains(logData, "[ggrun] launch-scope: "+scope) {
 		return false
 	}
 	if !strings.Contains(logData, "health check OK") || !strings.Contains(logData, filepath.Base(model.Path)) {
@@ -1595,17 +1897,18 @@ func previousClaudeLogMatches(logData string, model *placement.ModelProfile, str
 	return strings.Contains(logData, wantSlots)
 }
 
-func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities) (*placement.Strategy, error) {
+func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string) (*placement.Strategy, error) {
 	if req == nil || !req.ClaudeCode {
 		return strategy, nil
 	}
-	logPath := claudeServerLogPath(cfg, req.Port)
+	scope := claudeLaunchLogScope(req, model, be, serverArgs)
+	logPath := claudeServerLogPath(cfg, req.Port, scope)
 	logData, err := os.ReadFile(logPath)
-	if err != nil || !previousClaudeLogMatches(string(logData), model, strategy) {
+	if err != nil || !previousClaudeLogMatches(string(logData), model, strategy, scope) {
 		return strategy, nil
 	}
 	markerPath := logPath + ".oom-recorded"
-	device, reserveMB, estimated, changed, ok, err := recordRuntimeOOMLog(cfg, model, strategy, be, caps, string(logData), markerPath)
+	device, reserveMB, estimated, changed, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, string(logData), markerPath)
 	if err != nil {
 		return nil, fmt.Errorf("recover previous Claude runtime OOM: %w", err)
 	}
@@ -1623,7 +1926,7 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 	if err != nil {
 		return nil, err
 	}
-	claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet)
+	claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 	return next, nil
 }
 
@@ -1746,15 +2049,24 @@ func cmdLaunch(args []string) {
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
 		claudeAuto.stop()
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
 		os.Exit(1)
 	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
-	strategy, err = recoverPreviousClaudeRuntimeOOM(req, cfg, model, strategy, be, caps)
-	if err != nil {
-		claudeAuto.stop()
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
+	var preRecoveryStrategy *placement.Strategy
+	var serverArgs []string
+	if req.ClaudeCode {
+		// Recovery must use the exact final launch identity. Build once before
+		// looking for a previous scoped log, then rebuild after a recovered OOM
+		// may have changed the placement.
+		preRecoveryStrategy = strategy
+		serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
+		strategy, err = recoverPreviousClaudeRuntimeOOM(req, cfg, model, strategy, be, caps, serverArgs)
+		if err != nil {
+			claudeAuto.stop()
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	if len(caps.GPUs) > 0 {
@@ -1768,7 +2080,9 @@ func cmdLaunch(args []string) {
 		}
 	}
 
-	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
+	if serverArgs == nil || strategy != preRecoveryStrategy {
+		serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
+	}
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
@@ -1804,7 +2118,7 @@ func cmdLaunch(args []string) {
 
 	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 	if p.LogBuf != nil {
-		recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
+		recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
 		if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs); ok {
 			fmt.Printf("[launch] calibration: measured placement fits more GPU experts (%d CPU MoE -> %d); restarting once\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
 			_ = p.Stop()
@@ -1819,7 +2133,7 @@ func cmdLaunch(args []string) {
 			serverArgs = nextArgs
 			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 			if p.LogBuf != nil {
-				go recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
+				go recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
 			}
 		}
 	}
@@ -1854,8 +2168,8 @@ func cmdLaunch(args []string) {
 				if !isServerRunning(req.Host, req.Port) {
 					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — recording OOM for next launch\n")
 					if p.LogBuf != nil {
-						markerPath := claudeServerLogPath(cfg, req.Port) + ".oom-recorded"
-						device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
+						markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
+						device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
 						if recordErr != nil {
 							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
 						} else if ok && estimated {
@@ -1897,8 +2211,8 @@ func cmdLaunch(args []string) {
 			// launch of this exact model/context reserves the measured
 			// deficit instead of repeating the same crash blind.
 			if !p.IsRunning() && p.LogBuf != nil {
-				markerPath := claudeServerLogPath(cfg, req.Port) + ".oom-recorded"
-				device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
+				markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
+				device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
 				if recordErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM: %v\n", recordErr)
 				} else if ok && estimated {
@@ -1952,7 +2266,8 @@ func cmdLaunch(args []string) {
 		if p.LogBuf != nil {
 			logData = p.LogBuf.String()
 		}
-		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
+		cacheBackendTag := scopedProbeBackendTag(req, model, be)
+		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
 		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, prior)
 		if !ok || runtimeOOMRetries >= maxRuntimeOOMRetries {
 			claudeAuto.stop()
@@ -1965,7 +2280,7 @@ func cmdLaunch(args []string) {
 		}
 
 		runtimeOOMRetries++
-		_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, allocMB)
+		_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, allocMB)
 		if estimated {
 			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA VMM OOM on device %d omitted its allocation size — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
 				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
@@ -1987,7 +2302,7 @@ func cmdLaunch(args []string) {
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
 			os.Exit(1)
 		}
-		claudeCodeSlotAdjust(nextStrategy, req.ClaudeCode, req.ParallelSet)
+		claudeCodeSlotAdjust(nextStrategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 		nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, nextStrategy)
 		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
 		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout)
@@ -2048,6 +2363,14 @@ func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTa
 	}
 	if req.TuneCache != "" {
 		return applySelectedTuneCache(req, serverArgs, caps)
+	}
+	if req.ClaudeCode {
+		// Generic and community throughput tunes do not encode the agent
+		// scheduler, context, cache, or semantic-validation workload. They may
+		// override -b/-ub after Claude's fairness adjustment, so fail closed until
+		// the validation registry can select profile-scoped evidence.
+		fmt.Println("[tune] Skipping automatic generic/community tune for Claude Code; use an explicit --tune-cache after workload validation.")
+		return serverArgs
 	}
 	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, tuneHardwareHash(caps))
 	if path == "" {
@@ -2411,7 +2734,7 @@ func cmdKVProbe(args []string) {
 	}
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
 		os.Exit(1)
 	}
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
@@ -2508,13 +2831,38 @@ func cmdDryRun(args []string) {
 
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
 		os.Exit(1)
 	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 
 	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
-	if envPrefix := applyGPUVisibility(req, backendDialect(be)); envPrefix != "" {
+	envPrefix := applyGPUVisibility(req, backendDialect(be))
+	if req.EmitServerArgvJSON {
+		plan := struct {
+			Schema        string            `json:"schema"`
+			ModelPath     string            `json:"model_path"`
+			BackendTag    string            `json:"backend_tag"`
+			BackendID     string            `json:"backend_identity"`
+			ClaudeProfile string            `json:"claude_profile,omitempty"`
+			Environment   map[string]string `json:"environment"`
+			ServerArgv    []string          `json:"server_argv"`
+		}{
+			Schema:        "ggrun-server-plan-v1",
+			ModelPath:     req.ModelPath,
+			BackendTag:    be.Tag,
+			BackendID:     be.Identity,
+			ClaudeProfile: effectiveClaudeProfile(req),
+			Environment:   launchPlanEnvironment(serverArgs, envPrefix, be.Path),
+			ServerArgv:    serverArgs,
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(plan); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing launch plan: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
 	fmt.Println(formatCommand(serverArgs))
@@ -2524,6 +2872,169 @@ func cmdDryRun(args []string) {
 	if req.ClaudeCode {
 		fmt.Println("[claude-code] A real launch also starts the local Auto reviewer/router and then opens Claude Code.")
 	}
+}
+
+func cmdRecordLongContextValidation(args []string) {
+	promptTokens, gpuUsed, launchArgs, err := parseLongContextValidationArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if promptTokens <= 0 {
+		fmt.Fprintln(os.Stderr, "Usage: ggrun record-longctx-validation <model.gguf> --prompt-tokens N [launch flags]")
+		os.Exit(2)
+	}
+	req, err := parseLaunchArgs(launchArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if req.ModelPath == "" {
+		fmt.Fprintln(os.Stderr, "Usage: ggrun record-longctx-validation <model.gguf> --prompt-tokens N [launch flags]")
+		os.Exit(2)
+	}
+	caps, err := detect.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+		os.Exit(1)
+	}
+	cfg := loadConfigOrExit()
+	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
+	model, err := parseModel(req.ModelPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
+		os.Exit(1)
+	}
+	be := resolveLaunchBackend(req, model, caps)
+	if be == nil {
+		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
+		os.Exit(1)
+	}
+	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
+		os.Exit(1)
+	}
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
+	if len(gpuUsed) == 0 {
+		gpuUsed = map[int]int{}
+		for _, g := range caps.GPUs {
+			if used := placement.QueryVRAMUsed(g.Index); used > 0 {
+				gpuUsed[g.Index] = used
+			}
+		}
+	}
+	cacheBackendTag := scopedProbeBackendTag(req, model, be)
+	if err := placement.RecordLongContextValidation(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, promptTokens, gpuUsed); err != nil {
+		fmt.Fprintf(os.Stderr, "Error recording validation: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("[validation] recorded long-context placement validation: tokens=%d ctx=%d ubatch=%d parallel=%d\n", promptTokens, strategy.ContextSize, strategy.UBatchSize, strategy.Parallel)
+}
+
+func parseLongContextValidationArgs(args []string) (int, map[int]int, []string, error) {
+	promptTokens := 0
+	gpuUsed := map[int]int{}
+	launchArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--prompt-tokens" {
+			if i+1 >= len(args) {
+				return 0, nil, nil, fmt.Errorf("--prompt-tokens needs a value")
+			}
+			v, err := strconv.Atoi(args[i+1])
+			if err != nil || v <= 0 {
+				return 0, nil, nil, fmt.Errorf("--prompt-tokens must be positive")
+			}
+			promptTokens = v
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--prompt-tokens=") {
+			v, err := strconv.Atoi(strings.TrimPrefix(a, "--prompt-tokens="))
+			if err != nil || v <= 0 {
+				return 0, nil, nil, fmt.Errorf("--prompt-tokens must be positive")
+			}
+			promptTokens = v
+			continue
+		}
+		if a == "--gpu-used" {
+			if i+1 >= len(args) {
+				return 0, nil, nil, fmt.Errorf("--gpu-used needs a value")
+			}
+			parsed, err := parseGPUUsedMB(args[i+1])
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			gpuUsed = parsed
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--gpu-used=") {
+			parsed, err := parseGPUUsedMB(strings.TrimPrefix(a, "--gpu-used="))
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			gpuUsed = parsed
+			continue
+		}
+		launchArgs = append(launchArgs, a)
+	}
+	return promptTokens, gpuUsed, launchArgs, nil
+}
+
+func parseGPUUsedMB(value string) (map[int]int, error) {
+	out := map[int]int{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		fields := strings.SplitN(part, ":", 2)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("--gpu-used entries must be CUDA_INDEX:USED_MB")
+		}
+		idx, idxErr := strconv.Atoi(strings.TrimSpace(fields[0]))
+		used, usedErr := strconv.Atoi(strings.TrimSpace(fields[1]))
+		if idxErr != nil || usedErr != nil || idx < 0 || used <= 0 {
+			return nil, fmt.Errorf("--gpu-used entries must be CUDA_INDEX:USED_MB")
+		}
+		out[idx] = used
+	}
+	return out, nil
+}
+
+// launchPlanEnvironment exports the process settings that ggrun's real server
+// launcher applies implicitly. A machine-readable argv without these settings
+// is not an equivalent launch: in particular, CUDA1/CUDA2 tensor overrides can
+// address different physical cards unless CUDA_DEVICE_ORDER=PCI_BUS_ID is
+// preserved. Keep the allowlist narrow so a plan never serializes unrelated or
+// secret parent-process environment variables.
+func launchPlanEnvironment(serverArgs []string, envPrefix string, backendPath ...string) map[string]string {
+	allowed := map[string]bool{
+		"CUDA_DEVICE_ORDER":        true,
+		"CUDA_SCALE_LAUNCH_QUEUES": true,
+		"LD_LIBRARY_PATH":          true,
+	}
+	result := map[string]string{}
+	for _, item := range server.ChildEnv(os.Environ(), serverArgs) {
+		key, value, ok := strings.Cut(item, "=")
+		if ok && allowed[key] {
+			result[key] = value
+		}
+	}
+	if key, value, ok := strings.Cut(envPrefix, "="); ok && key != "" {
+		result[key] = value
+	}
+	if len(backendPath) > 0 {
+		if stable, ok := libhub.StableLibraryPath(backendPath[0]); ok {
+			if inherited := result["LD_LIBRARY_PATH"]; inherited != "" {
+				stable += ":" + inherited
+			}
+			result["LD_LIBRARY_PATH"] = stable
+		}
+	}
+	return result
 }
 
 // printClaudeCodeRecipe prints the exact env to point Claude Code at this
@@ -2554,6 +3065,7 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Printf("  export ANTHROPIC_BASE_URL=http://%s:%d ANTHROPIC_AUTH_TOKEN=ggrun\n", clientHost, port)
 	fmt.Println("  export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local")
 	fmt.Println("  export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local")
+	fmt.Printf("  export CLAUDE_CODE_EFFORT_LEVEL=%s  # xhigh is the agentic default; set max for one demanding session\n", envOr("CLAUDE_CODE_EFFORT_LEVEL", "xhigh"))
 	fmt.Printf("  export API_TIMEOUT_MS=%d  # maximum safe timer: no practical local-inference deadline\n", claudeNoTimeoutMS)
 	fmt.Printf("  export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=%d  # background agents may be quiet during local prefill\n", claudeNoTimeoutMS)
 	fmt.Println("  export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0")
@@ -2589,6 +3101,7 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 		case "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
 			"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
 			"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+			"CLAUDE_CODE_EFFORT_LEVEL",
 			"API_TIMEOUT_MS", "API_FORCE_IDLE_TIMEOUT", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS",
 			"CLAUDE_ENABLE_BYTE_WATCHDOG", "CLAUDE_ENABLE_STREAM_WATCHDOG",
 			"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":
@@ -2604,6 +3117,10 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL=local",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL=local",
 		"ANTHROPIC_DEFAULT_OPUS_MODEL=local",
+		// xhigh is Claude Code's recommended balance for coding and agentic work.
+		// The official environment variable also accepts auto/max and lets an
+		// explicit user choice override this local-workflow default.
+		"CLAUDE_CODE_EFFORT_LEVEL="+envOr("CLAUDE_CODE_EFFORT_LEVEL", "xhigh"),
 		// JavaScript's maximum safe timer value is effectively no deadline for a
 		// local session. It covers foreground requests and queued Workflow fan-out.
 		fmt.Sprintf("API_TIMEOUT_MS=%d", claudeNoTimeoutMS),
@@ -3204,10 +3721,14 @@ func cmdTune(args []string) {
 	tuneOpts.ReasoningOff = true // tuning measures throughput, so think-free like benchmarks
 	strategy, err := placement.Compute(caps, model, tuneOpts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
 		os.Exit(1)
 	}
 	strategy.BackendTag = backendDialect(be)
+	// Tune the same slot/batch policy that a real Claude launch uses. Without
+	// this, an agent-parallel tune can benchmark an uncapped hybrid prefill and
+	// later override the fairness policy it was meant to improve.
+	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 
 	// A completed tune for this model/hardware/backend is reused unless the
 	// user explicitly asks for a fresh run with --retune.
@@ -3341,7 +3862,8 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		CacheDir:        cfg.CacheDir,
 		Host:            cfg.Host,
 		BackendTag:      backendDialect(be),
-		BackendCacheTag: be.Tag,
+		BackendCacheTag: evidenceBackendCacheTag(be),
+		BackendIdentity: be.Identity,
 		VisionAuto:      cfg.Vision,
 		SpecMode:        cfg.Spec,
 	}

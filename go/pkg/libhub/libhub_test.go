@@ -124,3 +124,27 @@ func TestApplyHubToChildEnv(t *testing.T) {
 		t.Fatalf("explicit hub: %v", got)
 	}
 }
+
+func TestStableLibraryPathResolvesBackendSymlink(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "build-cuda", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backend := filepath.Join(binDir, "llama-server")
+	if err := os.WriteFile(backend, []byte("backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "libllama.so"), []byte("library"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "llama-server-cuda")
+	if err := os.Symlink(backend, link); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := StableLibraryPath(link)
+	if !ok || got != binDir {
+		t.Fatalf("StableLibraryPath() = %q, %v; want %q, true", got, ok, binDir)
+	}
+}

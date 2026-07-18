@@ -28,6 +28,11 @@ const (
 	// measured checkpoints were about 63 MiB for Qwen3.5 and 107 MiB for DeepSeek
 	// V4, so 512 MiB per slot leaves room for architecture and allocator variance.
 	hybridCheckpointHeadroomPerSlotMB = 512
+	// Hybrid MoE split-owner promotion requires a real long-context pass, not a
+	// load probe. 60k prompt tokens is the current agent-workload floor: it
+	// exercises the deferred graph/checkpoint path that previously OOM'd after a
+	// clean health check, while staying below a 65k per-slot Claude baseline.
+	LongContextValidationMinTokens = 60000
 	// Cards below this fraction of the fastest PCIe link are too slow to own
 	// regular layer slots in MoE layer-split mode, but can still be useful as
 	// expert-only VRAM when one or more whole expert layers fit.
@@ -170,15 +175,25 @@ type Options struct {
 	BackendCacheTag string // backend identity for probe/cache isolation; defaults to BackendTag
 	BackendIdentity string // exact backend build/commit identity for speculative performance profiles
 	SamplingProfile string // default, greedy, recommended, or a hash of explicit sampling overrides
+	// WorkloadProfile scopes placement and probe evidence to scheduler semantics
+	// that can change the effective slot, batch, or cache behavior. An empty
+	// value preserves the legacy generic-serving cache namespace; callers that
+	// select an agent/workflow profile must provide a stable non-empty value.
+	WorkloadProfile string
 	NoMMap          bool
 	Parallel        int
-	CacheFile       string // path to placement cache for MoE recovery
-	CacheDir        string // path to ggrun cache dir (for probes)
-	Host            string // listen address (default 127.0.0.1)
-	VisionAuto      bool   // auto-detect mmproj for vision
-	MMProjPath      string // explicit vision projector GGUF
-	SpecMode        string // off, auto, draft, eagle3, dflash, ngram, ngram-mod, ngram-k4v, mtp
-	BackendHelp     string // llama-server --help output for dialect-specific flags
+	// BatchSize and UBatchSize are explicit launcher requests. A positive value
+	// must be accounted for before placement is chosen; treating it as a late
+	// backend override can make the emitted server graph exceed the plan.
+	BatchSize   int
+	UBatchSize  int
+	CacheFile   string // path to placement cache for MoE recovery
+	CacheDir    string // path to ggrun cache dir (for probes)
+	Host        string // listen address (default 127.0.0.1)
+	VisionAuto  bool   // auto-detect mmproj for vision
+	MMProjPath  string // explicit vision projector GGUF
+	SpecMode    string // off, auto, draft, eagle3, dflash, ngram, ngram-mod, ngram-k4v, mtp
+	BackendHelp string // llama-server --help output for dialect-specific flags
 	// SpecCandidateValidator asks the selected backend to load a proposed
 	// companion without allocating model buffers. GGUF metadata establishes
 	// target compatibility; this hook establishes runtime compatibility for
@@ -192,11 +207,32 @@ type Options struct {
 	SkipPlacementCache bool
 }
 
-func backendCacheTag(opts Options) string {
-	if tag := strings.TrimSpace(opts.BackendCacheTag); tag != "" {
-		return tag
+// ScopedBackendCacheTag returns the cache/probe namespace for a backend and
+// workload. The workload is intentionally part of the opaque hashed cache key:
+// a successful generic or parallel-serving launch is not proof that a different
+// agent scheduler (with different slots or prefill batching) is safe.
+//
+// Keep an empty workload unscoped for backward-compatible generic serving. New
+// workload-aware callers must pass a non-empty, versioned profile so old cache
+// files are never mistaken for validation of the new workload.
+func ScopedBackendCacheTag(backendTag, workloadProfile string) string {
+	backendTag = strings.TrimSpace(backendTag)
+	if backendTag == "" {
+		backendTag = "llama"
 	}
-	return opts.BackendTag
+	workloadProfile = strings.TrimSpace(workloadProfile)
+	if workloadProfile == "" {
+		return backendTag
+	}
+	return backendTag + "|workload=" + workloadProfile
+}
+
+func backendCacheTag(opts Options) string {
+	tag := strings.TrimSpace(opts.BackendCacheTag)
+	if tag == "" {
+		tag = opts.BackendTag
+	}
+	return ScopedBackendCacheTag(tag, opts.WorkloadProfile)
 }
 
 // backendFitTakesValue distinguishes current mainline's "--fit [on|off]"
@@ -412,11 +448,29 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	default:
 		s.BatchSize, s.UBatchSize = 2048, 512
 	}
+	// Apply caller-selected values before deriving the placement-cache identity
+	// and before sizing MoE buffers. This is intentionally earlier than server
+	// argument generation: an explicit -ub changes graph allocation and cannot
+	// safely be appended as an unplanned override.
+	if opts.BatchSize > 0 {
+		s.BatchSize = opts.BatchSize
+	}
+	if opts.UBatchSize > 0 {
+		s.UBatchSize = opts.UBatchSize
+	}
 
 	// Persist/reuse this exact placement under a key that includes kv placement,
 	// ctx, ubatch, backend, and the GPU set — computed from the now-resolved
 	// strategy so the launcher (save) and this load agree byte-for-byte.
-	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, splitCompactKey(s.TensorSplit))
+	cacheSplitKey := splitCompactKey(s.TensorSplit)
+	if RequiresConservativeSplitOwnerProtection(model) {
+		if HasLongContextValidation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, LongContextValidationMinTokens) {
+			cacheSplitKey += ":longctx"
+		} else {
+			cacheSplitKey += ":cold"
+		}
+	}
+	s.PlacementCachePath = PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, cacheSplitKey)
 	s.PlacementCachePath = placementCachePathForSpecMode(s.PlacementCachePath, opts.SpecMode)
 
 	// Try cached placement first (MoE only). Prefer the keyed placement cache
@@ -445,6 +499,12 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			// mode down to a single slot.
 			if opts.Parallel > 0 && opts.Parallel != cache.Parallel {
 				s.Parallel = opts.Parallel
+			}
+			if opts.BatchSize > 0 {
+				s.BatchSize = opts.BatchSize
+			}
+			if opts.UBatchSize > 0 {
+				s.UBatchSize = opts.UBatchSize
 			}
 			s.NCPUMoE = cache.NCPUMoE
 			// Restore the cached mmap decision, don't reset it: the entry was
@@ -522,6 +582,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		preUBatch := *s // buildMoEOffload returns (nil, err) on hard failure, losing s.UBatchSize
 		s, err = buildMoEOffload(s, caps, model, totalSizeMB, kvTotalMB, opts)
 		s, err = maximizeMoEGPUFitByUBatch(&preUBatch, s, err, caps, model, totalSizeMB, kvTotalMB, opts)
+		if err != nil && opts.ContextSize <= 0 {
+			s, kvTotalMB, err = retryMoEWithLowerAutoContext(&preUBatch, err, caps, model, totalSizeMB, opts)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -560,9 +623,10 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 // produces incorrect output with compressed KV; a configuration that fits but
 // returns garbage must fail before placement or launch.
 func resolveKVQuality(model *ModelProfile, requested, backendTag string) (string, error) {
+	requested = strings.TrimSpace(requested)
 	if model != nil && strings.EqualFold(model.ModelArch, "deepseek4") &&
 		(backendTag == "" || strings.EqualFold(backendTag, "llama")) {
-		if requested != "" {
+		if requested != "" && !strings.EqualFold(requested, "auto") && !strings.EqualFold(requested, "mid") {
 			kvType, err := NormalizeKVType(requested)
 			if err != nil {
 				return "", fmt.Errorf("KV cache type: %w", err)
@@ -573,7 +637,7 @@ func resolveKVQuality(model *ModelProfile, requested, backendTag string) (string
 		}
 		return "high", nil
 	}
-	if requested == "" {
+	if requested == "" || strings.EqualFold(requested, "auto") {
 		// q8_0 KV cache: near-lossless for architectures without a stricter
 		// correctness rule. The fitting logic falls back to q4_0 only when VRAM
 		// genuinely cannot hold q8_0.
@@ -983,7 +1047,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	fixedPerGPU := make([]int, numGPUs)
 	expertOnlyFixedPerGPU := make([]int, numGPUs)
 	for i, g := range caps.GPUs {
-		computeBufMB := firstLaunchComputeBufMBForGPUParallel(model, s.UBatchSize, s.Parallel, i, gpuOrder)
+		computeBufMB := firstLaunchComputeBufMBForGPUParallelAtContext(model, s.UBatchSize, s.Parallel, s.ContextSize, i, gpuOrder)
 		runtimeGrowthMB := 0
 		if pc != nil {
 			// Use the aggregate (primary) compute buffer for split-owner cost
@@ -1128,6 +1192,28 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		s.TensorSplit = split
 	}
 
+	// DeepSeek4 and other MoE-hybrid graphs can allocate substantial deferred
+	// state on every GPU that owns regular layer slots. A startup compute-buffer
+	// value, a fit-params result, and a clean health check only prove load-time
+	// allocation; none is proof that a long prompt will not allocate additional
+	// recurrent/graph state. Until ggrun has durable, exact long-context evidence
+	// for this runtime shape, keep *all* split owners expert-free. The remaining
+	// expert-only GPUs are still packed normally, so this preserves the proven
+	// dense-owner / expert-storage layout without treating a load probe as a
+	// semantic or long-context validation result.
+	//
+	// This is intentionally limited to hybrid MoEs. Dense and ordinary MoE
+	// placements do not share DeepSeek4's deferred recurrent-state behavior.
+	unprovenSplitOwners := map[int]bool{}
+	if RequiresConservativeSplitOwnerProtection(model) && !HasLongContextValidation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, LongContextValidationMinTokens) {
+		for _, gi := range gpuOrder {
+			if gi < 0 || gi >= len(split) || split[gi] <= 0 || expertOnlyGPU[gi] {
+				continue
+			}
+			unprovenSplitOwners[gi] = true
+		}
+	}
+
 	// Per-GPU expert capacity under the exact emitted split. roomMBPer keeps the
 	// exact VRAM budget for experts on each GPU so sub-layer packing can later
 	// fill the remainder that whole-layer flooring leaves stranded.
@@ -1167,6 +1253,13 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			roomMB = g.VRAMFreeMB() - fixedMB - nonExpertCharge - kvShareMB
 		}
 		if roomMB < 0 {
+			roomMB = 0
+		}
+		if unprovenSplitOwners[gi] {
+			// Do not turn residual VRAM on a hybrid split owner into static expert
+			// pins. Leave it available for the backend's deferred graph allocation.
+			// A future long-context validation registry may narrow this gate, but a
+			// startup probe must never do so.
 			roomMB = 0
 		}
 		roomMBPer[gi] = roomMB
@@ -1496,6 +1589,53 @@ func maximizeMoEGPUFitByUBatch(base, s *Strategy, err error, caps *detect.Capabi
 		best, bestErr, bestNCPUMoE, bestExcluded = next, nil, next.NCPUMoE, nextExcluded
 	}
 	return best, bestErr
+}
+
+func retryMoEWithLowerAutoContext(base *Strategy, originalErr error, caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, opts Options) (*Strategy, int, error) {
+	if base == nil || model == nil || base.ContextSize <= 32768 {
+		return nil, 0, originalErr
+	}
+	for _, ctx := range lowerContextRungs(base.ContextSize) {
+		cand := *base
+		cand.ContextSize = ctx
+		kvTotalMB := computeKVTotalMB(model, cand.ContextSize, cand.KVType)
+		cand.PlacementCachePath = placementCachePathForStrategy(&cand, caps, model, opts)
+		preUBatch := cand
+		next, err := buildMoEOffload(&cand, caps, model, totalSizeMB, kvTotalMB, opts)
+		next, err = maximizeMoEGPUFitByUBatch(&preUBatch, next, err, caps, model, totalSizeMB, kvTotalMB, opts)
+		if err == nil && next != nil {
+			fmt.Fprintf(os.Stderr, "[placement] auto context lowered to %d after larger context did not fit\n", ctx)
+			return next, kvTotalMB, nil
+		}
+	}
+	return nil, 0, originalErr
+}
+
+func lowerContextRungs(ctx int) []int {
+	rungs := []int{4194304, 2097152, 1048576, 524288, 262144, 131072, 65536, 32768}
+	out := make([]int, 0, len(rungs))
+	for _, rung := range rungs {
+		if rung < ctx {
+			out = append(out, rung)
+		}
+	}
+	return out
+}
+
+func placementCachePathForStrategy(s *Strategy, caps *detect.Capabilities, model *ModelProfile, opts Options) string {
+	if s == nil || model == nil || caps == nil {
+		return ""
+	}
+	cacheSplitKey := splitCompactKey(s.TensorSplit)
+	if RequiresConservativeSplitOwnerProtection(model) {
+		if HasLongContextValidation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, LongContextValidationMinTokens) {
+			cacheSplitKey += ":longctx"
+		} else {
+			cacheSplitKey += ":cold"
+		}
+	}
+	path := PlacementCachePathFor(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, backendCacheTag(opts), caps.GPUs, s.Parallel, cacheSplitKey)
+	return placementCachePathForSpecMode(path, opts.SpecMode)
 }
 
 func bytesToMiBCeil(n int64) int {
@@ -2124,7 +2264,7 @@ func NormalizeKVType(value string) (string, error) {
 	typeName := strings.ToLower(strings.TrimSpace(value))
 	typeName = strings.TrimPrefix(typeName, "ggml_")
 	switch typeName {
-	case "", "mid":
+	case "", "auto", "mid":
 		return "q8_0", nil
 	case "high":
 		return "f16", nil
@@ -2137,7 +2277,7 @@ func NormalizeKVType(value string) (string, error) {
 	case "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1":
 		return typeName, nil
 	default:
-		return "", fmt.Errorf("unsupported type %q (use high, mid, low, f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, or q5_1)", value)
+		return "", fmt.Errorf("unsupported type %q (use auto, high, mid, low, f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, or q5_1)", value)
 	}
 }
 
@@ -2387,6 +2527,19 @@ func expertOnlyComputeReserveMB(splitOwnerComputeMB int) int {
 	return computeFloorMB
 }
 
+// RequiresConservativeSplitOwnerProtection identifies the MoE-hybrid
+// architectures whose regular split owners can grow a deferred graph after
+// static tensor placement. A load-time probe is not a long-context proof, so
+// callers keep split owners expert-free until a durable validation mechanism
+// exists. Keep the predicate narrow so ordinary MoE placement retains its
+// normal fastest-GPU packing behavior.
+func RequiresConservativeSplitOwnerProtection(model *ModelProfile) bool {
+	if model == nil || !model.IsMoE {
+		return false
+	}
+	return strings.EqualFold(model.ModelArch, "deepseek4") || model.HasSSM != 0
+}
+
 // modelAwareHeadroom estimates the non-weight VRAM/RAM the runtime needs beyond
 // the model weights (prompt-graph compute buffer + a small runtime-growth
 // margin). Replaces the flat 8 GiB guess previously hard-coded in the auto
@@ -2455,6 +2608,35 @@ func firstLaunchComputeBufMBForGPUParallel(model *ModelProfile, uBatch, parallel
 	_ = gpuPos
 	_ = order
 	return firstLaunchComputeBufMBParallel(model, uBatch, parallel)
+}
+
+// firstLaunchComputeBufMBForGPUParallelAtContext applies DeepSeek4's measured
+// context scaling to the conservative 1M-context graph estimate. The original
+// fan-out calibration came from ctx=1,048,576 and was previously charged
+// unchanged at ctx=65,536. That predicted 33.9 GiB for ubatch 256 even though
+// llama-fit-params measures 2,429 MiB for the exact p1/65k placement. Keep a
+// 1 GiB graph floor and scale only the remainder; this predicts about 3 GiB at
+// 65k, deliberately above the backend measurement while no longer rejecting a
+// configuration already proven through a 60k request.
+func firstLaunchComputeBufMBForGPUParallelAtContext(model *ModelProfile, uBatch, parallel, contextSize, gpuPos int, order []int) int {
+	est := firstLaunchComputeBufMBForGPUParallel(model, uBatch, parallel, gpuPos, order)
+	if model == nil || !strings.EqualFold(model.ModelArch, "deepseek4") || contextSize <= 0 {
+		return est
+	}
+	const referenceContext = 1048576
+	if est <= computeFloorMB {
+		return est
+	}
+	scaledRemainder := int64(est-computeFloorMB) * int64(contextSize) / referenceContext
+	scaled := int64(computeFloorMB) + scaledRemainder
+	if scaled < computeFloorMB {
+		return computeFloorMB
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if scaled > maxInt {
+		return int(maxInt)
+	}
+	return int(scaled)
 }
 
 // perGPUVRAMOverheadMB is the non-weight VRAM a single GPU needs at runtime:
@@ -3528,6 +3710,95 @@ func HasRuntimeGraphGrowthProbe(cacheDir string, model *ModelProfile, ctxSize, u
 	return true
 }
 
+// RecordLongContextValidation marks a model/runtime/GPU shape as having passed
+// a real long-context request. This is stronger evidence than a load probe: it
+// is the signal that hybrid-MoE split owners may be repacked by normal VRAM math
+// instead of remaining expert-free forever.
+func RecordLongContextValidation(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel, promptTokens int, usedVRAMByGPU map[int]int) error {
+	if model == nil || ctxSize <= 0 || ubatch <= 0 || promptTokens <= 0 {
+		return nil
+	}
+	path := longContextValidationPath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Long-context validation for %s\n", filepath.Base(model.Path))
+	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "VALIDATED_PROMPT_TOKENS=%d\n", promptTokens)
+	fmt.Fprintf(&b, "VALIDATED_CONTEXT_SIZE=%d\n", ctxSize)
+	fmt.Fprintf(&b, "VALIDATED_UBATCH=%d\n", ubatch)
+	fmt.Fprintf(&b, "VALIDATED_PARALLEL=%d\n", probeParallelKey(parallel))
+	indices := make([]int, 0, len(usedVRAMByGPU))
+	for idx := range usedVRAMByGPU {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	for _, idx := range indices {
+		if usedVRAMByGPU[idx] > 0 {
+			fmt.Fprintf(&b, "VALIDATED_VRAM_USED_MB_CUDA%d=%d\n", idx, usedVRAMByGPU[idx])
+		}
+	}
+	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
+// HasLongContextValidation reports whether the exact runtime signature has a
+// long-context pass at or above minPromptTokens. A missing marker means
+// unmeasured, not unsafe; callers decide how conservative to be on a miss.
+func HasLongContextValidation(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel, minPromptTokens int) bool {
+	path := longContextValidationPath(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	promptTokens := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) != "VALIDATED_PROMPT_TOKENS" {
+			continue
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(strings.Trim(parts[1], `"`)))
+		if err == nil {
+			promptTokens = v
+		}
+	}
+	return promptTokens >= minPromptTokens
+}
+
+func longContextValidationPath(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) string {
+	if model == nil {
+		return ""
+	}
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		cacheDir = filepath.Join(home, ".cache", "ggrun")
+	}
+	if kvPlacement == "" {
+		kvPlacement = "auto"
+	}
+	if kvQuality == "" {
+		kvQuality = "mid"
+	}
+	if backendTag == "" {
+		backendTag = "llama"
+	}
+	key := fmt.Sprintf("longctx:v%d:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d",
+		placementPlannerCacheVersion, filepath.Base(model.Path), model.NumLayers, model.NumExperts,
+		model.EmbeddingLength, model.FeedForwardLength,
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), probeParallelKey(parallel))
+	return filepath.Join(cacheDir, "validations", md5Hash12(key)+".longctx")
+}
+
 // RecordRuntimeGraphGrowth stores exact per-device runtime graph growth for the
 // current runtime signature. The values must come from measurement: VRAM delta
 // after a canary or an exact cudaMalloc allocation request parsed from backend
@@ -4045,7 +4316,10 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // Increment this when planner semantics or emitted tensor override patterns
 // change. A validated placement is only reusable under the exact semantics that
 // produced it; otherwise an old .place file can silently restore stale routing.
-const placementPlannerCacheVersion = 2
+// Bump whenever placement semantics can change the emitted expert residency.
+// Version 3 invalidates v2 entries that could pin experts on hybrid split owners
+// before the conservative long-context safety gate existed.
+const placementPlannerCacheVersion = 3
 
 func PlacementCachePathFor(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, tensorSplit string) string {
 	if model == nil {

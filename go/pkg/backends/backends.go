@@ -70,6 +70,16 @@ var builtinRecipes = []Recipe{
 			contents: hy3RouterTensorNamePatch,
 		}},
 	},
+	{
+		Name:        "minimax-m3",
+		Description: "Preliminary MiniMax-M3 support with native structured tool-call parsing",
+		Tag:         "minimax-m3",
+		GitURL:      "https://github.com/danielhanchen/llama.cpp.git",
+		Branch:      "minimax-m3",
+		Commit:      "66f43aa655a07999c7746fe9ff5ede94835e921e",
+		RouteArch:   "minimax-m3",
+		Accel:       "",
+	},
 }
 
 // Recipes returns a copy of the reviewed built-in recipe catalog.

@@ -177,6 +177,46 @@ func TestLaunchArgsCarriesAITuneRounds(t *testing.T) {
 	}
 }
 
+func TestClaudeProfileSelectorCyclesPerLaunchOptions(t *testing.T) {
+	m := Model{}
+	if indexOf(m.cfgRows(), "claudeprofile") >= 0 {
+		t.Fatal("Claude profile must stay hidden until Claude Code is enabled")
+	}
+
+	m.claudeCode = true
+	if indexOf(m.cfgRows(), "claudeprofile") < 0 {
+		t.Fatal("Claude profile selector missing while Claude Code is enabled")
+	}
+	for _, want := range []string{"agent-interactive", "agent-parallel", ""} {
+		m.cycleCfgRow("claudeprofile", 1)
+		if m.claudeProfile != want {
+			t.Fatalf("profile=%q, want %q", m.claudeProfile, want)
+		}
+	}
+}
+
+func TestLaunchArgsCarriesClaudeProfileOnlyForClaudeCode(t *testing.T) {
+	interactive := &LaunchRequest{
+		ModelPath:     "/models/test.gguf",
+		ClaudeCode:    true,
+		ClaudeProfile: "agent-interactive",
+	}
+	joined := strings.Join(interactive.LaunchArgs(), " ")
+	if !strings.Contains(joined, "--claude-code --claude-profile agent-interactive") {
+		t.Fatalf("selected Claude profile must reach the CLI with Claude Code: %q", joined)
+	}
+
+	defaultProfile := &LaunchRequest{ModelPath: "/models/test.gguf", ClaudeCode: true}
+	if joined := strings.Join(defaultProfile.LaunchArgs(), " "); strings.Contains(joined, "--claude-profile") {
+		t.Fatalf("empty selector must preserve the CLI default, got %q", joined)
+	}
+
+	nonClaude := &LaunchRequest{ModelPath: "/models/test.gguf", ClaudeProfile: "agent-interactive"}
+	if joined := strings.Join(nonClaude.LaunchArgs(), " "); strings.Contains(joined, "--claude-profile") {
+		t.Fatalf("profile cannot be emitted without --claude-code, got %q", joined)
+	}
+}
+
 func TestRunModesAreMutuallyExclusive(t *testing.T) {
 	m := Model{screen: ScreenModelConfig, models: []ModelItem{{Name: "test.gguf"}}, kvPlacement: "auto", ctxMode: "fit", ctxSize: "fit"}
 	m.input = textinput.New()
@@ -205,6 +245,36 @@ func TestPrelaunchViewShowsSelectedBackend(t *testing.T) {
 	view := m.viewPrelaunch()
 	if !strings.Contains(view, "Backend:") || !strings.Contains(view, "llama") {
 		t.Fatalf("prelaunch view should show selected backend, got %q", view)
+	}
+}
+
+func TestPrelaunchClaudeSlotWordingMatchesProfilePolicy(t *testing.T) {
+	base := Model{
+		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
+		selectedModel: 0,
+		backend:       "llama",
+		kvPlacement:   "auto",
+		ctxMode:       "fit",
+		claudeCode:    true,
+		parallel:      "8", // a stale configured value, not an explicit launch override
+	}
+
+	interactive := base
+	interactive.claudeProfile = "agent-interactive"
+	view := interactive.viewPrelaunch()
+	if !strings.Contains(view, "Parallel:       agent-interactive (1 foreground slot)") ||
+		!strings.Contains(view, "Claude profile: agent-interactive (1 foreground agent)") {
+		t.Fatalf("interactive prelaunch policy missing or inaccurate: %q", view)
+	}
+	if strings.Contains(view, "2 for Claude Code") {
+		t.Fatalf("prelaunch still shows the obsolete two-slot Claude wording: %q", view)
+	}
+
+	parallel := base
+	parallel.claudeProfile = "agent-parallel"
+	view = parallel.viewPrelaunch()
+	if !strings.Contains(view, "Parallel:       agent-parallel (4 workflow slots)") {
+		t.Fatalf("parallel prelaunch policy missing or inaccurate: %q", view)
 	}
 }
 
@@ -266,6 +336,15 @@ func TestBuildLaunchRequestCarriesConfiguredKVQuality(t *testing.T) {
 	}
 	if req.KVQuality != "high" {
 		t.Fatalf("configured KV quality must reach the launch request, got %q", req.KVQuality)
+	}
+}
+
+func TestInitialModelDefaultsKVQualityToAuto(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := InitialModel()
+	if m.kvQuality != "auto" {
+		t.Fatalf("TUI default KV quality must be model-aware auto, got %q", m.kvQuality)
 	}
 }
 

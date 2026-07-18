@@ -20,7 +20,7 @@ ggrun model.gguf --ram-budget 90G
 ggrun model.gguf --vram-headroom 2G   # leave 2 GB of VRAM free for other apps
 ggrun model.gguf --ram-headroom 8G    # leave 8 GB of system RAM free for other apps
 ggrun model.gguf --ctx-size 32768
-ggrun model.gguf --kv-quality mid
+ggrun model.gguf --kv-quality auto
 ggrun model.gguf --kv-quality q5_1
 ggrun model.gguf --kv-placement gpu
 
@@ -60,7 +60,12 @@ without wrapper changes.
 
 ### KV cache types
 
-`--kv-quality` accepts the friendly `low` (`q4_0`), `mid` (`q8_0`), and
+`--kv-quality auto` is the default and lets ggrun choose a model-aware safe
+cache type. For ordinary models it currently starts from the `mid`/`q8_0`
+quality tier; for architectures with known correctness constraints, ggrun may
+force a safer type such as `f16`.
+
+`--kv-quality` also accepts friendly `low` (`q4_0`), `mid` (`q8_0`), and
 `high` (`f16`) presets, or an exact supported llama.cpp type: `f32`, `f16`,
 `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, or `q5_1`.
 
@@ -134,6 +139,7 @@ env to run it yourself in another terminal:
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8081 ANTHROPIC_AUTH_TOKEN=ggrun
 export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=local ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local
+export CLAUDE_CODE_EFFORT_LEVEL=xhigh       # agentic default; use max for one demanding session
 export API_TIMEOUT_MS=2147483647            # maximum safe timer; no practical inference deadline
 export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=2147483647
 export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0
