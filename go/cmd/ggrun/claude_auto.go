@@ -17,6 +17,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/libhub"
+	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/server"
 )
 
@@ -48,7 +49,45 @@ func disabledEnv(key string) bool {
 	}
 }
 
-func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detect.Capabilities) (*claudeAutoRuntime, error) {
+// claudeReviewerCompanionName is the placement-ledger name of the Auto reviewer
+// reservation and its resolved seat.
+const claudeReviewerCompanionName = "claude-auto-reviewer"
+
+// claudeReviewerReservationVRAMMB is the reviewer's on-device footprint reserved
+// in the placement ledger: ~1.4 GB Q4_K_M weights + 64k Q8 KV + CUDA context and
+// compute. The planner only needs a conservative bound — after a real launch the
+// reviewer's actual usage is visible in the normal probe paths, and the seat is
+// re-planned on every launch anyway.
+const claudeReviewerReservationVRAMMB = 2600
+
+// claudeReviewerReservation builds the placement companion for the Auto reviewer
+// when the launch needs one. The GPU preference mirrors the legacy walk —
+// least-valuable (slowest-link, smallest) first, main GPU last — but expressed
+// as data so the planner owns the final seat and the main model packs around it.
+// CPU fallback stays allowed: a full-GPU host must keep fail-closed Auto working.
+func claudeReviewerReservation(req *launchRequest, caps *detect.Capabilities) *placement.CompanionReservation {
+	if req == nil || !req.ClaudeCode || !claudeAutoReviewerNeeded(nil) || req.CPUMode {
+		return nil
+	}
+	if caps == nil || len(caps.GPUs) == 0 {
+		return nil
+	}
+	return &placement.CompanionReservation{
+		Name:          claudeReviewerCompanionName,
+		VRAMMB:        claudeReviewerReservationVRAMMB,
+		GPUPreference: claudeReviewerGPUCandidates(caps, req),
+		AllowCPU:      true,
+	}
+}
+
+// startClaudeAutoReviewer launches the pinned Auto reviewer on the seat the
+// placement planner returned in companionPlacements. When the planner ran, its
+// single decision is authoritative: a GPU seat is tried once (no fallback walk
+// that could land the reviewer on the GPU the plan deliberately kept free), a
+// CPU seat (-1) goes straight to the CPU path. Without a plan (reviewer needed
+// but no companion reservation supplied) it falls back to the legacy
+// least-valuable-GPU-first walk.
+func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detect.Capabilities, companionPlacements []placement.CompanionPlacement) (*claudeAutoRuntime, error) {
 	if req == nil || !req.ClaudeCode || !claudeAutoReviewerNeeded(nil) {
 		return nil, nil
 	}
@@ -73,8 +112,21 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 	}
 	logWriter, logCloser := claudeReviewerLog(cfg, port)
 
+	candidates := claudeReviewerGPUCandidates(caps, req)
+	planned := false
+	for _, cp := range companionPlacements {
+		if cp.Name == claudeReviewerCompanionName {
+			planned = true
+			if cp.GPU >= 0 {
+				candidates = []int{cp.GPU}
+			} else {
+				candidates = nil
+			}
+		}
+	}
+
 	var lastErr error
-	for _, gpu := range claudeReviewerGPUCandidates(caps, req) {
+	for _, gpu := range candidates {
 		// CUDA_VISIBLE_DEVICES is required in addition to --device. Without it,
 		// llama.cpp initializes contexts on every GPU even though all reviewer
 		// tensors live on the selected device (observed: +262 MiB on the main
@@ -88,6 +140,15 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 			return &claudeAutoRuntime{reviewer: p, reviewerLog: logCloser, reviewerPort: port, reviewerGPU: gpu}, nil
 		}
 		lastErr = err
+		if planned {
+			// The planner already accounted for this GPU's free VRAM; a failed
+			// load means the plan's data was stale, so report it instead of
+			// silently moving onto a GPU the plan reserved for the model.
+			if logCloser != nil {
+				_ = logCloser.Close()
+			}
+			return nil, fmt.Errorf("start local Auto reviewer on planned GPU %d: %w", gpu, err)
+		}
 		fmt.Fprintf(os.Stderr, "[claude-code] Auto reviewer did not fit GPU %d; trying the next device.\n", gpu)
 	}
 

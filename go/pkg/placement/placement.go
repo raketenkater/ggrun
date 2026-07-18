@@ -101,6 +101,16 @@ type Strategy struct {
 	Draft                    *DraftConfig `json:"draft,omitempty"`       // speculative decoding config
 	MMProjPath               string       `json:"mmproj_path,omitempty"` // vision projector GGUF
 	MMProjSizeMB             int          `json:"-"`                     // mmproj VRAM on primary GPU
+	// CompanionPlacements records where each Options.Companions reservation was
+	// placed: GPU index, or -1 for CPU. Runtime-only; the launcher starts the
+	// helper on the device the planner chose.
+	CompanionPlacements []CompanionPlacement `json:"-"`
+}
+
+// CompanionPlacement is the resolved seat for one CompanionReservation.
+type CompanionPlacement struct {
+	Name string `json:"name"`
+	GPU  int    `json:"gpu"` // physical GPU index, or -1 for CPU
 }
 
 // ModelProfile describes the GGUF model.
@@ -161,12 +171,35 @@ type ModelProfile struct {
 	NextNPredictLayers        int                `json:"nextn_predict_layers,omitempty"`
 }
 
+// CompanionReservation reserves VRAM on one GPU for a co-launched helper model
+// (e.g. the Claude Auto safety reviewer) inside the same placement ledger as the
+// main model, instead of placing the helper with a separate heuristic and
+// re-detecting hardware afterwards. VRAMMB is the helper's total on-device
+// footprint (weights + KV + compute), measured after its first real launch and
+// conservative before that.
+type CompanionReservation struct {
+	Name   string // cache/scope key component, e.g. "claude-auto-reviewer"
+	VRAMMB int    // total on-device footprint to reserve; <=0 disables the reservation
+	// GPUPreference orders candidate GPUs by physical device index, most-preferred
+	// first (e.g. slowest-link first, main GPU last). Empty means the planner
+	// chooses: it tries the least-bandwidth GPU that still fits, keeping the main
+	// GPU free for the model.
+	GPUPreference []int
+	// AllowCPU permits placing the companion on CPU when no GPU fits. When false,
+	// a companion that fits nowhere is an error, not a silent CPU fallback.
+	AllowCPU bool
+}
+
 // Options allows user overrides.
 type Options struct {
 	ContextSize     int
 	KVPlacement     string // auto, gpu, cpu
 	KVQuality       string // high, mid, low
 	GPUs            []int  // restrict to specific GPUs
+	// Companions reserves VRAM for co-launched helper models before the main
+	// model's split is computed, so the main plan packs around real helper
+	// footprints instead of discovering them after launch.
+	Companions      []CompanionReservation
 	CPUMode         bool
 	RamBudgetMB     int
 	VRAMHeadroomMB  int    // hold back this much total VRAM as a safety margin
@@ -243,6 +276,88 @@ func backendFitTakesValue(help string) bool {
 	return strings.Contains(help, "--fit [on|off]") ||
 		strings.Contains(help, "--fit (on|off)") ||
 		strings.Contains(help, "--fit <on|off>")
+}
+
+// applyCompanionReservations seats each companion helper on one GPU (or CPU when
+// allowed and no GPU fits) and returns a capabilities copy whose chosen GPUs show
+// the reservation as already-used VRAM. The main model's split is then computed
+// against the remaining capacity, so helpers stop being invisible competitors
+// discovered only after launch. The input slice is left untouched; callers keep
+// their original caps for hardware display while placement sees the reserved view.
+func applyCompanionReservations(caps *detect.Capabilities, comps []CompanionReservation) (*detect.Capabilities, []CompanionPlacement, error) {
+	if caps == nil {
+		return caps, nil, nil
+	}
+	reserved := *caps
+	reserved.GPUs = append([]detect.GPU(nil), caps.GPUs...)
+	placements := make([]CompanionPlacement, 0, len(comps))
+	for _, comp := range comps {
+		if comp.VRAMMB <= 0 {
+			continue
+		}
+		name := comp.Name
+		if name == "" {
+			name = "companion"
+		}
+		gpu := chooseCompanionGPU(reserved.GPUs, comp)
+		if gpu < 0 && !comp.AllowCPU {
+			return nil, nil, fmt.Errorf("companion %s needs %d MB VRAM but no GPU has room", name, comp.VRAMMB)
+		}
+		if gpu >= 0 {
+			for i := range reserved.GPUs {
+				if reserved.GPUs[i].Index == gpu {
+					reserved.GPUs[i].VRAMUsedMB += comp.VRAMMB
+					break
+				}
+			}
+		}
+		placements = append(placements, CompanionPlacement{Name: name, GPU: gpu})
+	}
+	return &reserved, placements, nil
+}
+
+// chooseCompanionGPU picks the seat for one helper. An explicit GPUPreference
+// order wins. Otherwise it takes the least-bandwidth GPU that still fits the
+// reservation, keeping fast-link and main GPUs free for the model's weights and
+// expert traffic. Returns the physical GPU index, or -1 when none fits.
+func chooseCompanionGPU(gpus []detect.GPU, comp CompanionReservation) int {
+	if len(gpus) == 0 {
+		return -1
+	}
+	fits := func(idx int) bool {
+		for _, g := range gpus {
+			if g.Index == idx {
+				return g.VRAMFreeMB() >= comp.VRAMMB
+			}
+		}
+		return false
+	}
+	seen := map[int]bool{}
+	for _, idx := range comp.GPUPreference {
+		seen[idx] = true
+		if fits(idx) {
+			return idx
+		}
+	}
+	if len(comp.GPUPreference) > 0 {
+		return -1
+	}
+	candidates := append([]detect.GPU(nil), gpus...)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].BandwidthMBps != candidates[j].BandwidthMBps {
+			return candidates[i].BandwidthMBps < candidates[j].BandwidthMBps
+		}
+		if candidates[i].VRAMTotalMB != candidates[j].VRAMTotalMB {
+			return candidates[i].VRAMTotalMB < candidates[j].VRAMTotalMB
+		}
+		return candidates[i].Index < candidates[j].Index
+	})
+	for _, g := range candidates {
+		if g.VRAMFreeMB() >= comp.VRAMMB {
+			return g.Index
+		}
+	}
+	return -1
 }
 
 func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilities {
@@ -551,6 +666,18 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 				s.Host = "127.0.0.1"
 			}
 			return s, nil
+		}
+	}
+
+	// Companion reservations seat co-launched helper models inside this same
+	// ledger. The main model's split is computed against the VRAM that remains
+	// after each helper is placed, so the helpers stop being invisible
+	// competitors discovered only after launch.
+	if len(opts.Companions) > 0 {
+		var compErr error
+		caps, s.CompanionPlacements, compErr = applyCompanionReservations(caps, opts.Companions)
+		if compErr != nil {
+			return nil, compErr
 		}
 	}
 

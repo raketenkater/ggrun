@@ -469,6 +469,11 @@ type launchRequest struct {
 	EmitServerArgvJSON bool   // dry-run machine interface for reproducible benchmark harnesses
 	SpecDraftMax       int    // internal spec-test ceiling; not a public launch override
 	ExtraArgs          []string
+	// ReviewerReservation holds the Claude Auto reviewer's placement companion
+	// for the whole launch. placementOptionsFromRequest attaches it to every
+	// Compute — including OOM/preflight/spec re-plans — so the reviewer's VRAM
+	// stays reserved no matter which path recomputes the strategy.
+	ReviewerReservation *placement.CompanionReservation
 }
 
 const (
@@ -1273,6 +1278,11 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 			opts.GPUs = indices
 		}
 	}
+	// Attach the reviewer companion on every Compute path — first plan and every
+	// re-plan alike — so a corrective recompute never forgets the reviewer's VRAM.
+	if req.ReviewerReservation != nil {
+		opts.Companions = []placement.CompanionReservation{*req.ReviewerReservation}
+	}
 	opts.Parallel = claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet, req.ClaudeProfile)
 	return opts
 }
@@ -2029,27 +2039,23 @@ func cmdLaunch(args []string) {
 
 	// Claude Code's Auto permission checks must not run on the giant coding
 	// model: one tool call can otherwise trigger ten extra ~25k-token turns.
-	// Start the dedicated reviewer first, then sample hardware again so normal
-	// placement accounts for its real measured VRAM use.
-	claudeAuto, err := startClaudeAutoReviewer(req, cfg, caps)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if claudeAuto != nil {
-		refreshed, detectErr := detect.Detect()
-		if detectErr != nil {
-			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "Error re-detecting hardware after Auto reviewer load: %v\n", detectErr)
-			os.Exit(1)
-		}
-		caps = refreshed
-	}
+	// The dedicated reviewer is a placement companion: its VRAM is reserved in
+	// the same ledger before the main model's split is computed, and the planner
+	// returns the GPU the reviewer should occupy. The reservation lives on the
+	// request so every placement.Compute path — first plan and every re-plan —
+	// keeps the reviewer's VRAM accounted.
+	req.ReviewerReservation = claudeReviewerReservation(req, caps)
 
 	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 	if err != nil {
-		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
+		os.Exit(1)
+	}
+
+	// Start the reviewer on the GPU the planner chose (CPU when it placed -1).
+	claudeAuto, err := startClaudeAutoReviewer(req, cfg, caps, strategy.CompanionPlacements)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)

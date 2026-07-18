@@ -182,6 +182,110 @@ func TestComputeSingleGPUChoosesFastestDeviceThatActuallyFits(t *testing.T) {
 	}
 }
 
+func TestApplyCompanionReservationsSeatsAndReserves(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 24576, BandwidthMBps: 32000},
+			{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 8000},
+			{Index: 2, VRAMTotalMB: 12288, BandwidthMBps: 1000},
+		},
+	}
+	reserved, placements, err := applyCompanionReservations(caps, []CompanionReservation{
+		{Name: "claude-auto-reviewer", VRAMMB: 2600, AllowCPU: true},
+	})
+	if err != nil {
+		t.Fatalf("applyCompanionReservations: %v", err)
+	}
+	if len(placements) != 1 || placements[0].GPU != 2 {
+		t.Fatalf("expected the slowest-link GPU 2, got %+v", placements)
+	}
+	// The reservation shows as used VRAM on the chosen GPU in the returned copy.
+	for _, g := range reserved.GPUs {
+		if g.Index == 2 && g.VRAMUsedMB != 2600 {
+			t.Fatalf("GPU2 used = %d, want 2600", g.VRAMUsedMB)
+		}
+	}
+	// The caller's original caps are untouched.
+	for _, g := range caps.GPUs {
+		if g.VRAMUsedMB != 0 {
+			t.Fatalf("input caps mutated: GPU%d used = %d", g.Index, g.VRAMUsedMB)
+		}
+	}
+}
+
+func TestApplyCompanionReservationsHonorsPreference(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 24576, BandwidthMBps: 32000},
+			{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 8000},
+		},
+	}
+	_, placements, err := applyCompanionReservations(caps, []CompanionReservation{
+		{Name: "reviewer", VRAMMB: 2600, GPUPreference: []int{1, 0}, AllowCPU: true},
+	})
+	if err != nil {
+		t.Fatalf("applyCompanionReservations: %v", err)
+	}
+	if len(placements) != 1 || placements[0].GPU != 1 {
+		t.Fatalf("explicit preference [1,0] should seat GPU 1, got %+v", placements)
+	}
+}
+
+func TestApplyCompanionReservationsCPUFallbackAndError(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 2048, VRAMUsedMB: 1024}},
+	}
+	// Fits nowhere on GPU: AllowCPU seats it at -1.
+	_, placements, err := applyCompanionReservations(caps, []CompanionReservation{
+		{Name: "reviewer", VRAMMB: 2600, AllowCPU: true},
+	})
+	if err != nil {
+		t.Fatalf("CPU-allowed reservation should not error: %v", err)
+	}
+	if len(placements) != 1 || placements[0].GPU != -1 {
+		t.Fatalf("expected CPU seat (-1), got %+v", placements)
+	}
+	// Disallowing CPU turns a no-fit into an explicit error, not a silent fallback.
+	if _, _, err := applyCompanionReservations(caps, []CompanionReservation{
+		{Name: "reviewer", VRAMMB: 2600, AllowCPU: false},
+	}); err == nil {
+		t.Fatal("expected an error when no GPU fits and CPU is disallowed")
+	}
+}
+
+func TestComputeReservesCompanionBeforeSplit(t *testing.T) {
+	// Reserving the reviewer's footprint in the ledger must produce a resolved
+	// seat on the strategy, and — on a multi-GPU host — must seat the reviewer
+	// on the slowest-link GPU, keeping the fast GPU free for the model.
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 24576, BandwidthMBps: 32000},
+			{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 1000},
+		},
+		RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	model := &ModelProfile{
+		Path: "model.gguf", SizeBytes: 20 * 1024 * 1024 * 1024,
+		NumLayers: 48, ContextSize: 32768, HiddenSize: 4096,
+	}
+	companion := []CompanionReservation{{Name: "claude-auto-reviewer", VRAMMB: 2600, AllowCPU: true}}
+	strat, err := Compute(caps, model, Options{ContextSize: 32768, KVPlacement: "gpu", KVQuality: "low", Companions: companion})
+	if err != nil {
+		t.Fatalf("compute with companion: %v", err)
+	}
+	if len(strat.CompanionPlacements) != 1 {
+		t.Fatalf("expected one companion placement, got %+v", strat.CompanionPlacements)
+	}
+	if strat.CompanionPlacements[0].Name != "claude-auto-reviewer" {
+		t.Fatalf("companion name lost: %+v", strat.CompanionPlacements[0])
+	}
+	// Slowest-link GPU 1 must be the seat — the 24GB fast GPU stays free.
+	if strat.CompanionPlacements[0].GPU != 1 {
+		t.Fatalf("reviewer should sit on slow GPU 1, got %d", strat.CompanionPlacements[0].GPU)
+	}
+}
+
 func TestComputeBatchTierUsesFreeNotTotalVRAM(t *testing.T) {
 	caps := &detect.Capabilities{
 		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576, VRAMUsedMB: 8192}},

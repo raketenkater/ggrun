@@ -110,3 +110,44 @@ func TestClaudeAutoReviewerNeededDefaultsOnForAuto(t *testing.T) {
 		t.Fatal("non-Auto permission mode should not spend memory on a reviewer")
 	}
 }
+
+func TestClaudeReviewerReservationBuildsCompanion(t *testing.T) {
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
+	t.Setenv("GGRUN_CLAUDE_AUTO_REVIEWER", "")
+	caps := &detect.Capabilities{GPUs: []detect.GPU{
+		{Index: 0, VRAMTotalMB: 24564, BandwidthMBps: 15754},
+		{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 985},
+	}}
+	res := claudeReviewerReservation(&launchRequest{ClaudeCode: true}, caps)
+	if res == nil {
+		t.Fatal("Claude Code launch with GPUs must reserve the reviewer")
+	}
+	if res.Name != claudeReviewerCompanionName {
+		t.Fatalf("companion name = %q, want %q", res.Name, claudeReviewerCompanionName)
+	}
+	if res.VRAMMB <= 0 {
+		t.Fatalf("reservation must carry a positive VRAM footprint, got %d", res.VRAMMB)
+	}
+	if !res.AllowCPU {
+		t.Fatal("a full-GPU host must keep fail-closed Auto working via CPU")
+	}
+	// Preference order mirrors the legacy walk: slow GPU first, main last.
+	if len(res.GPUPreference) != 2 || res.GPUPreference[0] != 1 || res.GPUPreference[1] != 0 {
+		t.Fatalf("GPU preference = %v, want [1 0]", res.GPUPreference)
+	}
+}
+
+func TestClaudeReviewerReservationSkipsNonClaudeAndCPU(t *testing.T) {
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
+	t.Setenv("GGRUN_CLAUDE_AUTO_REVIEWER", "")
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24564}}}
+	if res := claudeReviewerReservation(&launchRequest{}, caps); res != nil {
+		t.Fatal("non-Claude launch must not reserve a reviewer")
+	}
+	if res := claudeReviewerReservation(&launchRequest{ClaudeCode: true, CPUMode: true}, caps); res != nil {
+		t.Fatal("CPU-mode launch must not reserve GPU VRAM for the reviewer")
+	}
+	if res := claudeReviewerReservation(&launchRequest{ClaudeCode: true}, &detect.Capabilities{}); res != nil {
+		t.Fatal("GPU-less host must not reserve GPU VRAM for the reviewer")
+	}
+}
