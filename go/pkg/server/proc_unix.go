@@ -10,7 +10,9 @@ import (
 
 // setSysProcAttr configures the child process to run in its own group.
 func setSysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	attr := &syscall.SysProcAttr{Setpgid: true}
+	setParentDeathSignal(attr)
+	cmd.SysProcAttr = attr
 }
 
 // killProcessTree sends SIGTERM then SIGKILL to the process group.

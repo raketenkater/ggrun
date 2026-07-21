@@ -87,6 +87,35 @@ func TestDiscoverModelsKeepsSameBasenameInDifferentDirectories(t *testing.T) {
 	}
 }
 
+func TestDiscoverModelsHidesAuxiliaryArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"target-Q4_K_M.gguf",
+		"target-mmproj.gguf",
+		"target-DFlash-BF16.gguf",
+		"target-MTP-Q8_0.gguf",
+		"target-draft.gguf",
+		"target-speculator.gguf",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("GGUF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	models := discoverModels(dir)
+	if len(models) != 1 || models[0].Name != "target-Q4_K_M.gguf" {
+		t.Fatalf("expected only target model, got %#v", models)
+	}
+}
+
+func TestAuxiliaryArchitectureIsHiddenWithNeutralFilename(t *testing.T) {
+	if !isAuxiliaryModel("small-helper.gguf", "dflash") {
+		t.Fatal("dflash architecture must be hidden even without a filename marker")
+	}
+	if isAuxiliaryModel("target-Q4_K_M.gguf", "laguna") {
+		t.Fatal("target model must stay visible")
+	}
+}
+
 func TestBoolLabel(t *testing.T) {
 	if boolLabel(true) != "on" {
 		t.Fatalf("expected 'on' for true")
@@ -413,6 +442,10 @@ func TestApplySettingRejectsInvalidSafetyValues(t *testing.T) {
 	m.applySetting(rows["VRAM headroom"], "two gigabytes")
 	if m.settingsCfg.VRAMHeadroom != "" || m.messageType != "warning" {
 		t.Fatalf("invalid headroom changed settings: %q", m.settingsCfg.VRAMHeadroom)
+	}
+	m.applySetting(rows["RAM limit percent"], "101")
+	if m.settingsCfg.RAMLimitPercent != 95 || m.messageType != "warning" {
+		t.Fatalf("invalid RAM limit percent changed settings: %d", m.settingsCfg.RAMLimitPercent)
 	}
 }
 

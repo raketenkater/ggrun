@@ -18,6 +18,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Host != "127.0.0.1" {
 		t.Fatalf("expected safe loopback host, got %q", cfg.Host)
 	}
+	if cfg.RAMLimitPercent != 95 {
+		t.Fatalf("expected default RAM limit 95%%, got %d", cfg.RAMLimitPercent)
+	}
 }
 
 func TestLoadFile(t *testing.T) {
@@ -66,19 +69,20 @@ func TestSaveAndLoad(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	cfg := &Config{
-		Port:        9090,
-		Ctx:         "4096",
-		ModelDir:    "/test/models",
-		CacheDir:    "/test/cache",
-		Backend:     "llama",
-		KVPlacement: "cpu",
-		KVQuality:   "high",
-		TuneRounds:  3,
-		Vision:      true,
-		Parallel:    2,
-		KeepAlive:   30,
-		Host:        "0.0.0.0",
-		Spec:        "ngram",
+		Port:            9090,
+		Ctx:             "4096",
+		ModelDir:        "/test/models",
+		CacheDir:        "/test/cache",
+		Backend:         "llama",
+		KVPlacement:     "cpu",
+		KVQuality:       "high",
+		TuneRounds:      3,
+		Vision:          true,
+		Parallel:        2,
+		KeepAlive:       30,
+		Host:            "0.0.0.0",
+		Spec:            "ngram",
+		RAMLimitPercent: 87,
 	}
 
 	if err := cfg.Save(); err != nil {
@@ -105,12 +109,15 @@ func TestSaveAndLoad(t *testing.T) {
 	if loaded.Spec != "ngram" {
 		t.Fatalf("spec mismatch: %s", loaded.Spec)
 	}
+	if loaded.RAMLimitPercent != 87 {
+		t.Fatalf("RAM limit percent mismatch: %d", loaded.RAMLimitPercent)
+	}
 
 	data, err := os.ReadFile(Path())
 	if err != nil {
 		t.Fatalf("read saved config: %v", err)
 	}
-	for _, want := range []string{"LLM_PORT=", "LLM_CTX_SIZE=", "LLM_KV_QUALITY=", "LLM_SPEC="} {
+	for _, want := range []string{"LLM_PORT=", "LLM_CTX_SIZE=", "LLM_KV_QUALITY=", "LLM_RAM_LIMIT_PERCENT=87", "LLM_SPEC="} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("saved config missing %s:\n%s", want, string(data))
 		}
@@ -166,11 +173,12 @@ func TestApplyCtxValueMax(t *testing.T) {
 
 func TestLoadFileRejectsInvalidSafetyValues(t *testing.T) {
 	for name, content := range map[string]string{
-		"port":       "LLM_PORT=abc\n",
-		"context":    "LLM_CTX_SIZE=lots\n",
-		"headroom":   "LLM_VRAM_HEADROOM=two gigabytes\n",
-		"parallel":   "LLM_PARALLEL=-1\n",
-		"keep_alive": "LLM_KEEP_ALIVE=never\n",
+		"port":        "LLM_PORT=abc\n",
+		"context":     "LLM_CTX_SIZE=lots\n",
+		"headroom":    "LLM_VRAM_HEADROOM=two gigabytes\n",
+		"parallel":    "LLM_PARALLEL=-1\n",
+		"keep_alive":  "LLM_KEEP_ALIVE=never\n",
+		"ram_percent": "LLM_RAM_LIMIT_PERCENT=101\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config")

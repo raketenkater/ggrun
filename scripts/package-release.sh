@@ -32,6 +32,13 @@ trap cleanup EXIT
 
 mkdir -p "$PAYLOAD/bin"
 
+MEMGUARD_LIB=""
+if [[ "$(uname -s)" == "Linux" && -d "$ROOT_DIR/native/memguard" ]]; then
+    command -v cc >/dev/null 2>&1 || { echo "Error: 'cc' is required to build the Linux allocation firewall" >&2; exit 1; }
+    make -C "$ROOT_DIR/native/memguard" libggrun-memguard.so
+    MEMGUARD_LIB="$ROOT_DIR/native/memguard/libggrun-memguard.so"
+fi
+
 for f in LICENSE README.md CHANGELOG.md; do
     [[ -f "$ROOT_DIR/$f" ]] && install -m 0644 "$ROOT_DIR/$f" "$PAYLOAD/$f"
 done
@@ -44,6 +51,9 @@ install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
 
 if [[ -x "$ROOT_DIR/go/ggrun" ]]; then
     install -m 0755 "$ROOT_DIR/go/ggrun" "$PAYLOAD/bin/ggrun"
+fi
+if [[ -n "$MEMGUARD_LIB" ]]; then
+    install -m 0644 "$MEMGUARD_LIB" "$PAYLOAD/bin/libggrun-memguard.so"
 fi
 if [[ -f "$ROOT_DIR/legacy/bash/ggrun" ]]; then
     install -m 0755 "$ROOT_DIR/legacy/bash/ggrun" "$PAYLOAD/llm-server-bash"

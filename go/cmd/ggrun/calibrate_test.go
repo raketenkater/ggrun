@@ -46,7 +46,7 @@ func TestCalibrationPlanForcedOnIgnoresSizeGate(t *testing.T) {
 }
 
 func TestCalibrationPlanSkipsSingleGPU(t *testing.T) {
-	req, cfg, model, be, caps := calibrateTestSetup(8 * 1024)
+	req, cfg, model, be, caps := calibrateTestSetup(39 * 1024)
 	caps.GPUs = caps.GPUs[:1] // one GPU only
 	strategy := &placement.Strategy{Type: placement.MoEOffload, KVPlacement: "cpu", NCPUMoE: 40}
 	if got := calibrationPlan(req, cfg, model, be, caps, strategy); got != nil {
@@ -55,11 +55,11 @@ func TestCalibrationPlanSkipsSingleGPU(t *testing.T) {
 }
 
 func TestCalibrationPlanSkipsWhenDecisionCached(t *testing.T) {
-	req, cfg, model, be, caps := calibrateTestSetup(8 * 1024)
+	req, cfg, model, be, caps := calibrateTestSetup(39 * 1024)
 	cfg.CacheDir = t.TempDir()
 	strategy := &placement.Strategy{Type: placement.MoEOffload, KVPlacement: "cpu", NCPUMoE: 40}
 	// Seed a prior decision for this exact scope.
-	scopeKey := calibrationScopeKey(req, model, be, caps)
+	scopeKey := calibrationScopeKey(req, model, be, caps, strategy)
 	if _, err := placement.SaveCalibrationDecision(cfg.CacheDir, placement.CalibrationDecision{
 		ScopeKey: scopeKey, Winner: "kv-alternate", DefaultTPS: 20, WinnerTPS: 24,
 	}); err != nil {
@@ -71,7 +71,7 @@ func TestCalibrationPlanSkipsWhenDecisionCached(t *testing.T) {
 }
 
 func TestCalibrationPlanSmallMoEOffered(t *testing.T) {
-	req, cfg, model, be, caps := calibrateTestSetup(8 * 1024)
+	req, cfg, model, be, caps := calibrateTestSetup(39 * 1024)
 	strategy := &placement.Strategy{Type: placement.MoEOffload, KVPlacement: "cpu", NCPUMoE: 40}
 	got := calibrationPlan(req, cfg, model, be, caps, strategy)
 	if len(got) < 2 {
@@ -83,10 +83,10 @@ func TestCalibrationPlanSmallMoEOffered(t *testing.T) {
 }
 
 func TestApplyCalibrationDecisionRestoresWinner(t *testing.T) {
-	req, cfg, model, be, caps := calibrateTestSetup(8 * 1024)
+	req, cfg, model, be, caps := calibrateTestSetup(39 * 1024)
 	cfg.CacheDir = t.TempDir()
 	base := &placement.Strategy{Type: placement.MoEOffload, KVPlacement: "cpu", NCPUMoE: 40}
-	scopeKey := calibrationScopeKey(req, model, be, caps)
+	scopeKey := calibrationScopeKey(req, model, be, caps, base)
 	if _, err := placement.SaveCalibrationDecision(cfg.CacheDir, placement.CalibrationDecision{
 		ScopeKey: scopeKey, Winner: "kv-alternate", DefaultTPS: 20, WinnerTPS: 24.5,
 	}); err != nil {
@@ -106,10 +106,10 @@ func TestApplyCalibrationDecisionRestoresWinner(t *testing.T) {
 }
 
 func TestApplyCalibrationDecisionIgnoresDefaultWinner(t *testing.T) {
-	req, cfg, model, be, caps := calibrateTestSetup(8 * 1024)
+	req, cfg, model, be, caps := calibrateTestSetup(39 * 1024)
 	cfg.CacheDir = t.TempDir()
 	base := &placement.Strategy{Type: placement.MoEOffload, KVPlacement: "cpu", NCPUMoE: 40}
-	scopeKey := calibrationScopeKey(req, model, be, caps)
+	scopeKey := calibrationScopeKey(req, model, be, caps, base)
 	if _, err := placement.SaveCalibrationDecision(cfg.CacheDir, placement.CalibrationDecision{
 		ScopeKey: scopeKey, Winner: "default", DefaultTPS: 22, WinnerTPS: 22,
 	}); err != nil {

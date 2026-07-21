@@ -220,19 +220,44 @@ def _account_tensors(r, tensors, header_end, file_size, align):
                 break
             spans[tname] = end - off
 
+    def add_layer_bytes(key, layer, nbytes):
+        if layer is None:
+            return
+        values = r.setdefault(key, {})
+        values[layer] = values.get(layer, 0) + nbytes
+
     for tname, _, tbytes in tensors:
         nbytes = spans[tname] if span_ok else tbytes
-        is_expert = '_exps.' in tname or '_shexp.' in tname or 'experts.' in tname
+        layer_match = re.match(r'^blk\.(\d+)\.', tname)
+        layer = int(layer_match.group(1)) if layer_match else None
+        is_shared_expert = '_shexp.' in tname or '_chexp.' in tname
+        is_routed_expert = '_exps.' in tname or '_chexps.' in tname or '.experts.' in tname
+        is_expert = is_routed_expert or is_shared_expert
+        is_expert_aux = bool(re.search(
+            r'\.ffn_(gate_inp|gate_tid2eid|exp_probs_b)(?:\.|$)', tname))
         if is_expert:
             r['expert_bytes'] = r.get('expert_bytes', 0) + nbytes
-            if '_shexp.' in tname:
+            add_layer_bytes('_expert_layer_bytes', layer, nbytes)
+            if is_shared_expert:
                 # Shared experts ride with their layer's device: the `exps=CPU`
                 # -ot catch-all does not match "shexp", so CPU-offloaded layers
                 # still keep their shared expert on the owning GPU. Placement
                 # needs this split to budget VRAM and RAM correctly.
                 r['shexp_bytes'] = r.get('shexp_bytes', 0) + nbytes
+                add_layer_bytes('_shexp_layer_bytes', layer, nbytes)
+            else:
+                add_layer_bytes('_routed_expert_layer_bytes', layer, nbytes)
         else:
             r['non_expert_bytes'] = r.get('non_expert_bytes', 0) + nbytes
+            if is_expert_aux:
+                # Routing metadata follows a whole expert-layer -ot pin. Keep
+                # it in non_expert_bytes for the global file-size identity,
+                # but expose the per-layer split so placement charges it to
+                # the destination rather than both source and destination.
+                r['expert_aux_bytes'] = r.get('expert_aux_bytes', 0) + nbytes
+                add_layer_bytes('_expert_aux_layer_bytes', layer, nbytes)
+            else:
+                add_layer_bytes('_non_expert_layer_bytes', layer, nbytes)
             if tname == 'token_embd.weight':
                 # Input embeddings stay in host memory (llama.cpp keeps the
                 # input layer on CPU), so placement must not charge them
@@ -297,6 +322,19 @@ def parse(path: str) -> Dict[str, Any]:
     if 'expert_shared_count' not in r and '_inferred_expert_shared_count' in r:
         r['expert_shared_count'] = r['_inferred_expert_shared_count']
         r['expert_shared_count_inferred'] = 1
+    layer_keys = (
+        ('_expert_layer_bytes', 'expert_layer_bytes'),
+        ('_routed_expert_layer_bytes', 'routed_expert_layer_bytes'),
+        ('_shexp_layer_bytes', 'shexp_layer_bytes'),
+        ('_expert_aux_layer_bytes', 'expert_aux_layer_bytes'),
+        ('_non_expert_layer_bytes', 'non_expert_layer_bytes'),
+    )
+    layer_count = r.get('layers', 0)
+    for private_key, public_key in layer_keys:
+        values = r.pop(private_key, {})
+        if values:
+            count = max(layer_count, max(values) + 1)
+            r[public_key] = [values.get(i, 0) for i in range(count)]
     r.pop('_align', None)
     # Private parser bookkeeping is not part of the public JSON contract.
     r.pop('_first_moe_layer', None)
@@ -321,6 +359,7 @@ SHELL_KEY_MAP = [
     ('token_embd_bytes',  'TOKEN_EMBD_BYTES',    0),
     ('output_bytes',      'OUTPUT_BYTES',        0),
     ('shexp_bytes',       'SHEXP_BYTES',         0),
+    ('expert_aux_bytes',  'EXPERT_AUX_BYTES',    0),
     ('arch',              'MODEL_ARCH',          'unknown'),
     ('embd',              'EMBEDDING_LENGTH',    0),
     ('ff',                'FEED_FORWARD_LENGTH', 0),

@@ -26,4 +26,6 @@ dist/
 /llm-server-go
 /llm-server-bash
 /llama-server
+native/memguard/*.so
+native/memguard/test-target
 docs/brand.md

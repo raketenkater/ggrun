@@ -1,11 +1,17 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +34,15 @@ type Config struct {
 	ServerArgs  []string `json:"server_args"`
 	Port        int      `json:"port"`
 	ControlPort int      `json:"control_port"`
+	MemoryMaxMB int      `json:"memory_max_mb,omitempty"`
+
+	// ControlToken authenticates every control route. New generates one when it
+	// is empty, so browser-originated localhost POSTs cannot mutate the daemon.
+	ControlToken string `json:"-"`
+
+	// AllowExplicitServerArgs keeps trusted tests/owners able to provide argv
+	// directly. The public control API defaults to model-path reloads only.
+	AllowExplicitServerArgs bool `json:"-"`
 
 	// StartupTimeoutSecs caps how long handleStart/handleReload waits for
 	// the underlying llama-server to become healthy. Cold-cache loads of
@@ -55,12 +70,14 @@ func New(cfg Config) *Daemon {
 	if cfg.ControlPort == 0 {
 		cfg.ControlPort = 9090
 	}
+	if cfg.ControlToken == "" {
+		cfg.ControlToken = generateControlToken()
+	}
 	return &Daemon{
-		// The control API has mutating start/stop/reload methods and no
-		// authentication. Never expose it to the LAN.
-		addr:        net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", cfg.ControlPort)),
-		config:      cfg,
-		startServer: server.StartWithTimeout,
+		// The control API is still loopback-only even though every route also
+		// requires a bearer token. Defense in depth matters for localhost pivots.
+		addr:   net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", cfg.ControlPort)),
+		config: cfg,
 	}
 }
 
@@ -76,8 +93,10 @@ func (d *Daemon) Start() error {
 	srv := &http.Server{Addr: d.addr, Handler: mux}
 	d.mu.Lock()
 	d.http = srv
+	token := d.config.ControlToken
 	d.mu.Unlock()
 	fmt.Printf("[daemon] control API on %s\n", d.addr)
+	fmt.Printf("[daemon] control token: %s\n", token)
 	err := srv.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -106,6 +125,9 @@ func (d *Daemon) Close() error {
 }
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !d.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
 		return
@@ -114,7 +136,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	defer d.mu.Unlock()
 	status := map[string]interface{}{
 		"running":     d.process != nil && d.process.IsRunning(),
-		"config":      d.config,
+		"config":      d.safeConfigLocked(),
 		"server_port": d.config.Port,
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -122,6 +144,9 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
+	if !d.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
 		return
@@ -143,6 +168,9 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
+	if !d.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
 		return
@@ -163,6 +191,9 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
+	if !d.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
 		return
@@ -170,7 +201,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	var newCfg Config
-	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxControlBodyBytes)).Decode(&newCfg); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
@@ -185,7 +216,10 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		next.StartupTimeoutSecs = newCfg.StartupTimeoutSecs
 	}
 	if len(newCfg.ServerArgs) > 0 {
-		// Caller supplied explicit args — trust them verbatim.
+		if !d.config.AllowExplicitServerArgs {
+			http.Error(w, `{"error":"server_args reload is disabled; send model_path to recompute placement"}`, http.StatusBadRequest)
+			return
+		}
 		next.ServerArgs = newCfg.ServerArgs
 	} else if newCfg.ModelPath != "" && next.ComputeArgs != nil {
 		// Bare model swap — let ggrun compute placement for it.
@@ -225,10 +259,20 @@ func (d *Daemon) start(args []string, port int, timeout time.Duration) (*server.
 	if d.startServer != nil {
 		return d.startServer(args, port, timeout)
 	}
-	return server.StartWithTimeout(args, port, timeout)
+	return server.StartWithTimeoutToOptions(
+		args,
+		port,
+		timeout,
+		os.Stdout,
+		os.Stderr,
+		server.StartOptions{MemoryMaxMB: d.config.MemoryMaxMB},
+	)
 }
 
 func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if !d.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
 		return
@@ -236,5 +280,51 @@ func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(d.config)
+	json.NewEncoder(w).Encode(d.safeConfigLocked())
+}
+
+const maxControlBodyBytes = 1 << 20
+
+func generateControlToken() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("generate daemon control token: %v", err))
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func (d *Daemon) authorize(w http.ResponseWriter, r *http.Request) bool {
+	d.mu.Lock()
+	token := d.config.ControlToken
+	d.mu.Unlock()
+	if token == "" {
+		http.Error(w, `{"error":"daemon control token is not configured"}`, http.StatusUnauthorized)
+		return false
+	}
+	got := r.Header.Get("X-GGRUN-Daemon-Token")
+	if got == "" {
+		got = bearerToken(r.Header.Get("Authorization"))
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func bearerToken(header string) string {
+	if len(header) < len("Bearer ") || !strings.EqualFold(header[:len("Bearer ")], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(header[len("Bearer "):])
+}
+
+func (d *Daemon) safeConfigLocked() map[string]interface{} {
+	return map[string]interface{}{
+		"model_path":           d.config.ModelPath,
+		"port":                 d.config.Port,
+		"control_port":         d.config.ControlPort,
+		"memory_max_mb":        d.config.MemoryMaxMB,
+		"startup_timeout_secs": d.config.StartupTimeoutSecs,
+	}
 }

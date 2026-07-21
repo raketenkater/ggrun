@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -16,8 +17,9 @@ const claudeNoTimeoutMS = 2147483647
 const claudeWorkflowSystemPrompt = `You are using a slow local model through ggrun. Never abort a model request or agent merely because it is quiet while processing a prompt. For every Workflow tool script, set stallMs: 2147483647 in every agent() options object. This is required even for foreground agents and retries.`
 
 type claudeWorkflowHookInput struct {
-	ToolName  string                 `json:"tool_name"`
-	ToolInput map[string]interface{} `json:"tool_input"`
+	ToolName       string                 `json:"tool_name"`
+	ToolInput      map[string]interface{} `json:"tool_input"`
+	TranscriptPath string                 `json:"transcript_path"`
 }
 
 // cmdClaudeWorkflowHook is invoked by Claude Code's PreToolUse hook. Workflow
@@ -36,8 +38,16 @@ func cmdClaudeWorkflowHook(_ []string) {
 		fmt.Println(`{}`)
 		return
 	}
-	if script, ok := input.ToolInput["script"].(string); ok {
-		input.ToolInput["script"] = claudeWorkflowNoTimeoutScript(script)
+	if err := claudeWorkflowPatchInput(input.ToolInput, input.TranscriptPath); err != nil {
+		output := map[string]interface{}{
+			"hookSpecificOutput": map[string]interface{}{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       "deny",
+				"permissionDecisionReason": err.Error(),
+			},
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(output)
+		return
 	}
 	output := map[string]interface{}{
 		"hookSpecificOutput": map[string]interface{}{
@@ -48,6 +58,87 @@ func cmdClaudeWorkflowHook(_ []string) {
 		},
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(output)
+}
+
+// claudeWorkflowPatchInput applies the timeout policy to every Workflow input
+// shape Claude Code exposes. Named workflows are materialized outside the tool
+// input, so resolve a prior materialization and convert the call to scriptPath.
+func claudeWorkflowPatchInput(toolInput map[string]interface{}, transcriptPath string) error {
+	if script, ok := toolInput["script"].(string); ok {
+		toolInput["script"] = claudeWorkflowNoTimeoutScript(script)
+		return nil
+	}
+
+	path, _ := toolInput["scriptPath"].(string)
+	if path == "" {
+		name, _ := toolInput["name"].(string)
+		if name == "" {
+			return fmt.Errorf("ggrun Workflow policy: missing script, scriptPath, or name")
+		}
+		var err error
+		path, err = claudeWorkflowResolveNamedScript(transcriptPath, name)
+		if err != nil {
+			return err
+		}
+		delete(toolInput, "name")
+	}
+
+	patchedPath, err := claudeWorkflowPatchedScriptFile(path)
+	if err != nil {
+		return fmt.Errorf("ggrun Workflow policy: %w", err)
+	}
+	toolInput["scriptPath"] = patchedPath
+	return nil
+}
+
+func claudeWorkflowPatchedScriptFile(path string) (string, error) {
+	script, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	patched := claudeWorkflowNoTimeoutScript(string(script))
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	patchedPath := base + ".ggrun" + ext
+	if err := os.WriteFile(patchedPath, []byte(patched), 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", patchedPath, err)
+	}
+	return patchedPath, nil
+}
+
+func claudeWorkflowResolveNamedScript(transcriptPath, name string) (string, error) {
+	if transcriptPath == "" {
+		return "", fmt.Errorf("ggrun Workflow policy: cannot safely run named workflow %q without transcript path; invoke it with script or scriptPath", name)
+	}
+	projectDir := filepath.Dir(transcriptPath)
+	patterns := []string{
+		filepath.Join(strings.TrimSuffix(transcriptPath, filepath.Ext(transcriptPath)), "workflows", "scripts", "*.js"),
+		filepath.Join(projectDir, "*", "workflows", "scripts", "*.js"),
+	}
+	var candidates []string
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		candidates = append(candidates, matches...)
+	}
+	var newest string
+	var newestMod int64
+	for _, candidate := range candidates {
+		if strings.Contains(candidate, ".ggrun.js") {
+			continue
+		}
+		body, err := os.ReadFile(candidate)
+		if err != nil || (!strings.Contains(string(body), "name: '"+name+"'") && !strings.Contains(string(body), `name: "`+name+`"`)) {
+			continue
+		}
+		info, err := os.Stat(candidate)
+		if err == nil && (newest == "" || info.ModTime().UnixNano() > newestMod) {
+			newest, newestMod = candidate, info.ModTime().UnixNano()
+		}
+	}
+	if newest == "" {
+		return "", fmt.Errorf("ggrun Workflow policy: named workflow %q has no materialized script to patch; invoke it once as inline script or pass scriptPath", name)
+	}
+	return newest, nil
 }
 
 type workflowScriptEdit struct {

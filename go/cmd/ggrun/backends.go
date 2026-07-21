@@ -381,7 +381,12 @@ func defaultAccel() string {
 // accelerator. Returns the built binary path.
 func buildLlamaFork(srcDir, accel, cudaArch string) (string, error) {
 	buildDir := filepath.Join(srcDir, "build-"+accel)
-	cfg := []string{"-B", buildDir, "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_CURL=OFF"}
+	cfg := []string{
+		"-B", buildDir,
+		"-DCMAKE_BUILD_TYPE=Release",
+		"-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON",
+		"-DLLAMA_CURL=OFF",
+	}
 	switch accel {
 	case "cuda":
 		if cudaArch == "" {

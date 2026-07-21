@@ -32,13 +32,94 @@ type Process struct {
 	// result separately avoids the old receive-and-reinsert channel pattern,
 	// which made concurrent readiness checks and Stop calls unnecessarily
 	// interdependent.
-	done    chan struct{}
-	waitMu  sync.RWMutex
-	waitErr error
+	done               chan struct{}
+	waitMu             sync.RWMutex
+	waitErr            error
+	scopeUnit          string
+	statsMu            sync.Mutex
+	memoryPeakBytes    uint64
+	memoryOOMKillCount uint64
+	memoryPeakValid    bool
+	memoryOOMKillValid bool
 
 	stopOnce sync.Once
 	stopDone chan struct{}
 	stopErr  error
+}
+
+// MemoryPeakBytes returns the kernel-recorded peak for the backend's transient
+// cgroup. Call it before Stop removes the scope.
+func (p *Process) MemoryPeakBytes() (uint64, error) {
+	if p == nil || p.scopeUnit == "" {
+		return 0, fmt.Errorf("backend has no memory scope")
+	}
+	p.captureMemoryStats()
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	if !p.memoryPeakValid {
+		return 0, fmt.Errorf("backend memory scope statistics are unavailable")
+	}
+	return p.memoryPeakBytes, nil
+}
+
+func (p *Process) MemoryOOMKillCount() (uint64, error) {
+	if p == nil || p.scopeUnit == "" {
+		return 0, fmt.Errorf("backend has no memory scope")
+	}
+	p.captureMemoryStats()
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	if !p.memoryOOMKillValid {
+		return 0, fmt.Errorf("backend memory scope statistics are unavailable")
+	}
+	return p.memoryOOMKillCount, nil
+}
+
+func (p *Process) captureMemoryStats() {
+	if p.scopeUnit == "" {
+		return
+	}
+	peak, oomKills, peakErr, oomErr := scopeMemoryStats(p.scopeUnit)
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	if peakErr == nil {
+		if peak > p.memoryPeakBytes {
+			p.memoryPeakBytes = peak
+		}
+		p.memoryPeakValid = true
+	}
+	if oomErr == nil {
+		if oomKills > p.memoryOOMKillCount {
+			p.memoryOOMKillCount = oomKills
+		}
+		p.memoryOOMKillValid = true
+	}
+}
+
+func (p *Process) monitorMemoryStats() {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		p.captureMemoryStats()
+		select {
+		case <-p.done:
+			p.captureMemoryStats()
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// StartOptions controls process-launch behavior outside the backend argv.
+type StartOptions struct {
+	EnvOverrides []string
+	// MemoryHighMB is the cgroup reclaim/throttle boundary. It must never exceed
+	// MemoryMaxMB. A zero value leaves the soft boundary unset.
+	MemoryHighMB int
+	// MemoryMaxMB, when positive, asks the platform launcher to put the backend
+	// in a hard host-memory scope. This is intentionally not a llama-server flag:
+	// if the backend or CUDA runtime overruns the plan, only that scope is killed.
+	MemoryMaxMB int
 }
 
 // threadSafeBuffer is a bytes.Buffer protected by a mutex for concurrent writes.
@@ -85,7 +166,7 @@ func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process,
 // log file here so the backend's per-request log spam doesn't bleed into Claude
 // Code's terminal UI once ggrun hands the terminal to the `claude` client.
 func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut, termErr io.Writer) (*Process, error) {
-	return StartWithTimeoutToEnv(args, port, timeout, termOut, termErr, nil)
+	return StartWithTimeoutToOptions(args, port, timeout, termOut, termErr, StartOptions{})
 }
 
 // StartWithTimeoutToEnv is StartWithTimeoutTo with explicit child-environment
@@ -93,8 +174,30 @@ func StartWithTimeoutTo(args []string, port int, timeout time.Duration, termOut,
 // llama.cpp's --device controls tensor placement but still initializes CUDA
 // contexts on every visible device.
 func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termOut, termErr io.Writer, envOverrides []string) (*Process, error) {
+	return StartWithTimeoutToOptions(args, port, timeout, termOut, termErr, StartOptions{EnvOverrides: envOverrides})
+}
+
+// StartWithTimeoutToOptions is StartWithTimeoutTo with explicit launch options.
+func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, termOut, termErr io.Writer, opts StartOptions) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	scopeUnit := ""
+	launchArgs := args
+	outerEnvOverrides := opts.EnvOverrides
+	if opts.MemoryMaxMB > 0 {
+		scopeUnit = nextScopeUnitName()
+		// systemd's transient service does not have to inherit the invoking
+		// client's environment. Put launch-only overrides inside the scope so
+		// CUDA visibility, LD_PRELOAD guards, and backend library paths apply to
+		// the backend rather than to systemd-run itself.
+		launchArgs = commandWithEnvironment(args, opts.EnvOverrides)
+		outerEnvOverrides = nil
+	}
+	cmdArgs, err := scopedCommandArgsWithLimits(launchArgs, opts.MemoryHighMB, opts.MemoryMaxMB, scopeUnit)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 	setSysProcAttr(cmd)
 	// Capture stdout/stderr to a buffer for the post-launch probe. On a TTY we
 	// keep the screen clean during model load only when writing directly to the
@@ -108,14 +211,17 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 	cmd.Stdout = &gatedWriter{buf: logBuf, term: termOut, live: live}
 	cmd.Stderr = &gatedWriter{buf: logBuf, term: termErr, live: live}
 
-	cmd.Env = OverrideEnv(ChildEnv(os.Environ(), args), envOverrides)
+	cmd.Env = OverrideEnv(ChildEnv(os.Environ(), args), outerEnvOverrides)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{})}
+	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit}
+	if scopeUnit != "" {
+		go p.monitorMemoryStats()
+	}
 	go func() {
 		err := cmd.Wait()
 		p.waitMu.Lock()
@@ -131,7 +237,7 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 		stopSpin = make(chan struct{})
 		go spinUntilReady(stopSpin, logBuf, start, timeout, cmd.Process.Pid, args)
 	}
-	err := p.waitReady(timeout)
+	err = p.waitReady(timeout)
 	if tty {
 		close(stopSpin)
 		fmt.Fprint(os.Stderr, "\r\033[K") // clear the spinner line
@@ -151,6 +257,16 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 		fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(start).Round(time.Second))
 	}
 	return p, nil
+}
+
+func commandWithEnvironment(args, overrides []string) []string {
+	if len(args) == 0 || len(overrides) == 0 {
+		return args
+	}
+	out := make([]string, 0, 1+len(overrides)+len(args))
+	out = append(out, "/usr/bin/env")
+	out = append(out, overrides...)
+	return append(out, args...)
 }
 
 // OverrideEnv applies KEY=value entries with last-writer-wins semantics while
@@ -252,6 +368,11 @@ func (p *Process) Stop() error {
 	}
 	p.stopOnce.Do(func() {
 		defer close(p.stopDone)
+		p.captureMemoryStats()
+		var scopeErr error
+		if p.scopeUnit != "" {
+			scopeErr = stopScopeUnit(p.scopeUnit)
+		}
 		if p.cancel != nil {
 			p.cancel()
 		}
@@ -268,15 +389,53 @@ func (p *Process) Stop() error {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
 				p.stopErr = nil
-				return
+			} else {
+				p.stopErr = err
 			}
-			p.stopErr = err
 		case <-time.After(15 * time.Second):
 			p.stopErr = fmt.Errorf("process did not exit within 15s")
+		}
+		if p.scopeUnit != "" {
+			if err := stopScopeUnit(p.scopeUnit); err != nil && scopeErr == nil {
+				scopeErr = err
+			}
+			if err := waitScopeUnitStopped(p.scopeUnit, 15*time.Second); err != nil && scopeErr == nil {
+				scopeErr = err
+			}
+			// Failed transient scopes retain MemoryPeak/Result after their cgroup
+			// disappears. Clear that retained unit only after captureMemoryStats.
+			_ = resetFailedScopeUnit(p.scopeUnit)
+		}
+		if p.stopErr == nil && scopeErr != nil {
+			p.stopErr = scopeErr
 		}
 	})
 	<-p.stopDone
 	return p.stopErr
+}
+
+// Kill forcefully tears down the backend and any platform scope. It is used
+// when the user asks to force-quit while a graceful Stop is already in flight.
+func (p *Process) Kill() {
+	if p == nil {
+		return
+	}
+	if p.scopeUnit != "" {
+		_ = stopScopeUnit(p.scopeUnit)
+		_ = waitScopeUnitStopped(p.scopeUnit, 5*time.Second)
+	}
+	if p.cancel != nil {
+		p.cancel()
+	}
+	if p.Cmd != nil && p.Cmd.Process != nil {
+		killProcessTree(p.Cmd.Process.Pid)
+	}
+}
+
+var scopeCounter atomic.Uint64
+
+func nextScopeUnitName() string {
+	return fmt.Sprintf("ggrun-backend-%d-%d.scope", os.Getpid(), scopeCounter.Add(1))
 }
 
 func (p *Process) waitResult() error {
@@ -417,19 +576,22 @@ type loadProgress struct {
 
 func startupStatus(logText string, elapsed, timeout time.Duration, progress loadProgress) string {
 	parts := make([]string, 0, 5)
+	pct := 0
 	if progress.Total > 0 && progress.Done > 0 {
-		pct := progressPercent(progress)
+		pct = progressPercent(progress)
 		parts = append(parts, fmt.Sprintf("%s %3d%%", progressBar(pct, 20), pct))
 	}
 	phase := startupPhase(logText)
 	if progress.Total > 0 && progress.Done >= progress.Total {
 		phase = "initializing model (weights read)"
+	} else if pct >= 95 && phase == "loading model weights" {
+		phase = "finalizing model load (most weights read)"
 	}
 	parts = append(parts, phase)
 	if timeout > 0 {
-		parts = append(parts, fmt.Sprintf("%s/%s", elapsed.Round(time.Second), timeout.Round(time.Second)))
+		parts = append(parts, fmt.Sprintf("elapsed %s (limit %s)", elapsed.Round(time.Second), timeout.Round(time.Second)))
 	} else {
-		parts = append(parts, elapsed.Round(time.Second).String())
+		parts = append(parts, fmt.Sprintf("elapsed %s", elapsed.Round(time.Second)))
 	}
 	if progress.Total > 0 && progress.Done > 0 {
 		parts = append(parts, fmt.Sprintf("read %s/%s", formatGiB(progress.Done), formatGiB(progress.Total)))
@@ -545,9 +707,14 @@ func (t *loadProgressTracker) Snapshot() loadProgress {
 	if t == nil || t.pid <= 0 || t.total <= 0 {
 		return loadProgress{}
 	}
-	done := t.fdPositions()
+	pids := processFamilyPIDs(t.pid)
+	done := t.fdPositions(pids)
 	if done == 0 {
-		done = procRChar(t.pid)
+		for _, pid := range pids {
+			if v := procRChar(pid); v > done {
+				done = v
+			}
+		}
 	}
 	if done > t.total {
 		done = t.total
@@ -560,32 +727,95 @@ func (t *loadProgressTracker) Snapshot() loadProgress {
 	return loadProgress{Done: done, Total: t.total}
 }
 
-func (t *loadProgressTracker) fdPositions() int64 {
-	dir := fmt.Sprintf("/proc/%d/fd", t.pid)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
+func (t *loadProgressTracker) fdPositions(pids []int) int64 {
 	byPath := map[string]int64{}
-	for _, entry := range entries {
-		fd := entry.Name()
-		target, err := os.Readlink(filepath.Join(dir, fd))
+	for _, pid := range pids {
+		dir := fmt.Sprintf("/proc/%d/fd", pid)
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		size, ok := t.paths[target]
-		if !ok {
-			continue
-		}
-		pos := fdPosition(t.pid, fd)
-		if pos > size {
-			pos = size
-		}
-		if pos > byPath[target] {
-			byPath[target] = pos
+		for _, entry := range entries {
+			fd := entry.Name()
+			target, err := os.Readlink(filepath.Join(dir, fd))
+			if err != nil {
+				continue
+			}
+			size, ok := t.paths[target]
+			if !ok {
+				continue
+			}
+			pos := fdPosition(pid, fd)
+			if pos > size {
+				pos = size
+			}
+			if pos > byPath[target] {
+				byPath[target] = pos
+			}
 		}
 	}
 	return t.recordPositions(byPath)
+}
+
+func processFamilyPIDs(root int) []int {
+	if root <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return []int{root}
+	}
+	children := map[int][]int{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		ppid := procPPid(pid)
+		if ppid > 0 {
+			children[ppid] = append(children[ppid], pid)
+		}
+	}
+	seen := map[int]bool{root: true}
+	out := []int{root}
+	queue := []int{root}
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		for _, child := range children[pid] {
+			if seen[child] {
+				continue
+			}
+			seen[child] = true
+			out = append(out, child)
+			queue = append(queue, child)
+		}
+	}
+	return out
+}
+
+func procPPid(pid int) int {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "PPid:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, "PPid:"))
+		ppid, err := strconv.Atoi(v)
+		if err == nil {
+			return ppid
+		}
+	}
+	return 0
 }
 
 // recordPositions retains the maximum observed offset for every shard. llama.cpp

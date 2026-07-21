@@ -47,13 +47,13 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 	if mode == calibrateAuto && model.TotalSizeMB >= calibrateSizeGateMB {
 		return nil
 	}
-	candidates := placement.CalibrationCandidates(caps, model, strategy)
+	candidates := calibrationCandidates(req, cfg, model, be, caps, strategy)
 	if len(candidates) < 2 {
 		return nil
 	}
 	// One decision per scope: once any candidate has won, later launches apply
 	// it directly instead of re-measuring.
-	scopeKey := calibrationScopeKey(req, model, be, caps)
+	scopeKey := calibrationScopeKey(req, model, be, caps, strategy)
 	if _, err := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey); err == nil {
 		return nil
 	}
@@ -74,12 +74,12 @@ func applyCalibrationDecision(req *launchRequest, cfg *config.Config, model *pla
 	if req.Calibrate == calibrateOff {
 		return strategy
 	}
-	scopeKey := calibrationScopeKey(req, model, be, caps)
+	scopeKey := calibrationScopeKey(req, model, be, caps, strategy)
 	decision, err := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
 	if err != nil || decision.Winner == "" || decision.Winner == "default" {
 		return strategy
 	}
-	for _, cand := range placement.CalibrationCandidates(caps, model, strategy) {
+	for _, cand := range calibrationCandidates(req, cfg, model, be, caps, strategy) {
 		if cand.Name == decision.Winner {
 			fmt.Printf("[calibrate] applying cached winner %s (%.1f vs default %.1f tok/s)\n", decision.Winner, decision.WinnerTPS, decision.DefaultTPS)
 			return cand.Strategy
@@ -92,9 +92,31 @@ func applyCalibrationDecision(req *launchRequest, cfg *config.Config, model *pla
 // mirrors placement.NewCalibrationScopeKey on the request's resolved options so
 // a decision is valid only for the exact model + backend + hardware + workload
 // + runtime knobs it was measured under.
-func calibrationScopeKey(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
+func calibrationCandidates(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy) []placement.CalibrationCandidate {
+	cacheDir := ""
+	if cfg != nil {
+		cacheDir = cfg.CacheDir
+	}
+	opts := placementOptionsFromRequest(req, model, be, cacheDir)
+	candidates := placement.CalibrationCandidates(caps, model, strategy, opts)
+	if req == nil || req.ForceMMap || len(candidates) < 2 {
+		return candidates
+	}
+	// Do not stop a resident server and then ask for a new disk-paging policy
+	// halfway through calibration. An mmap-dependent alternate is eligible only
+	// when the user approved mmap on the original command line or launch prompt.
+	out := candidates[:1]
+	for _, cand := range candidates[1:] {
+		if cand.Strategy != nil && !cand.Strategy.MMapRequired {
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
+func calibrationScopeKey(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy) string {
 	opts := placementOptionsFromRequest(req, model, be, "")
-	key := placement.NewCalibrationScopeKey(model, caps, opts)
+	key := placement.NewCalibrationScopeKey(model, caps, opts, strategy)
 	return key.String()
 }
 
@@ -112,7 +134,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	if len(candidates) < 2 {
 		return p, strategy, serverArgs
 	}
-	scopeKey := calibrationScopeKey(req, model, be, caps)
+	scopeKey := calibrationScopeKey(req, model, be, caps, strategy)
 	fmt.Printf("[calibrate] first launch of this model/hardware/workload: measuring %d placements\n", len(candidates))
 
 	baseURL := fmt.Sprintf("http://localhost:%d", req.Port)
@@ -179,7 +201,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	decision := placement.CalibrationDecision{
 		ScopeKey: scopeKey, Winner: bestName,
-		DefaultTPS:  defaultTPS, WinnerTPS: bestTPS,
+		DefaultTPS: defaultTPS, WinnerTPS: bestTPS,
 		Improvement: (bestTPS - defaultTPS) / defaultTPS * 100.0,
 	}
 	if path, serr := placement.SaveCalibrationDecision(cfg.CacheDir, decision); serr != nil {

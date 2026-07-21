@@ -17,28 +17,29 @@ import (
 // CLI flag > env var > config file > built-in default.
 // This is the single source of truth for all user-tunable settings.
 type Config struct {
-	Port          int    `json:"port"`
-	Ctx           string `json:"ctx_size"` // fit, max, or a positive token count
-	MaxRestarts   int    `json:"max_restarts"`
-	KeepAlive     int    `json:"keep_alive"`
-	HealthTimeout int    `json:"health_timeout"`
-	ModelDir      string `json:"model_dir"`
-	CacheDir      string `json:"cache_dir"`
-	LogDir        string `json:"log_dir"`
-	RamBudget     string `json:"ram_budget"`
-	VRAMHeadroom  string `json:"vram_headroom"` // VRAM to hold back, e.g. "2G"
-	RAMHeadroom   string `json:"ram_headroom"`  // system RAM to hold back, e.g. "8G"
-	KVPlacement   string `json:"kv_placement"`
-	KVQuality     string `json:"kv_quality"`
-	AssumeYes     bool   `json:"assume_yes"`
-	Backend       string `json:"backend"`
-	LlamaServer   string `json:"llama_server"`
-	AppHome       string `json:"app_home"`
-	TuneRounds    int    `json:"tune_rounds"`
-	Vision        bool   `json:"vision"`
-	Parallel      int    `json:"parallel"`
-	Host          string `json:"host"`
-	Spec          string `json:"spec"` // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
+	Port            int    `json:"port"`
+	Ctx             string `json:"ctx_size"` // fit, max, or a positive token count
+	MaxRestarts     int    `json:"max_restarts"`
+	KeepAlive       int    `json:"keep_alive"`
+	HealthTimeout   int    `json:"health_timeout"`
+	ModelDir        string `json:"model_dir"`
+	CacheDir        string `json:"cache_dir"`
+	LogDir          string `json:"log_dir"`
+	RamBudget       string `json:"ram_budget"`
+	RAMLimitPercent int    `json:"ram_limit_percent"` // maximum whole-host RAM use, 1-100
+	VRAMHeadroom    string `json:"vram_headroom"`     // VRAM to hold back, e.g. "2G"
+	RAMHeadroom     string `json:"ram_headroom"`      // system RAM to hold back, e.g. "8G"
+	KVPlacement     string `json:"kv_placement"`
+	KVQuality       string `json:"kv_quality"`
+	AssumeYes       bool   `json:"assume_yes"`
+	Backend         string `json:"backend"`
+	LlamaServer     string `json:"llama_server"`
+	AppHome         string `json:"app_home"`
+	TuneRounds      int    `json:"tune_rounds"`
+	Vision          bool   `json:"vision"`
+	Parallel        int    `json:"parallel"`
+	Host            string `json:"host"`
+	Spec            string `json:"spec"` // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
 
 	// sources is populated by Load and intentionally not serialized. Keeping
 	// provenance next to the merged value lets `config show` report the source
@@ -50,7 +51,7 @@ type Config struct {
 var DefaultKeys = []string{
 	"PORT", "CTX_SIZE", "MAX_RESTARTS", "KEEP_ALIVE", "HEALTH_TIMEOUT",
 	"MODEL_DIR", "CACHE_DIR", "LOG_DIR",
-	"RAM_BUDGET", "VRAM_HEADROOM", "RAM_HEADROOM", "KV_PLACEMENT", "KV_QUALITY",
+	"RAM_BUDGET", "RAM_LIMIT_PERCENT", "VRAM_HEADROOM", "RAM_HEADROOM", "KV_PLACEMENT", "KV_QUALITY",
 	"ASSUME_YES",
 	"BACKEND", "LLAMA_SERVER", "APP_HOME",
 	"TUNE_ROUNDS", "VISION", "PARALLEL", "HOST", "SPEC",
@@ -60,29 +61,30 @@ var DefaultKeys = []string{
 func Defaults() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		Port:          8081,
-		Ctx:           "fit",
-		MaxRestarts:   5,
-		KeepAlive:     0,
-		HealthTimeout: 0, // auto
-		ModelDir:      filepath.Join(home, "ai_models"),
-		CacheDir:      filepath.Join(home, ".cache", "ggrun"),
-		LogDir:        "",
-		RamBudget:     "",
-		VRAMHeadroom:  "",
-		RAMHeadroom:   "",
-		KVPlacement:   "auto",
-		KVQuality:     "auto", // model-aware default: generic models use q8_0; stricter architectures may require f16
-		AssumeYes:     false,
-		Backend:       "",
-		LlamaServer:   "",
-		AppHome:       "",
-		TuneRounds:    8,
-		Vision:        false,
-		Parallel:      1,
-		Host:          "127.0.0.1",
-		Spec:          "off",
-		sources:       defaultSources(),
+		Port:            8081,
+		Ctx:             "fit",
+		MaxRestarts:     5,
+		KeepAlive:       0,
+		HealthTimeout:   0, // auto
+		ModelDir:        filepath.Join(home, "ai_models"),
+		CacheDir:        filepath.Join(home, ".cache", "ggrun"),
+		LogDir:          "",
+		RamBudget:       "",
+		RAMLimitPercent: 95,
+		VRAMHeadroom:    "",
+		RAMHeadroom:     "",
+		KVPlacement:     "auto",
+		KVQuality:       "auto", // model-aware default: generic models use q8_0; stricter architectures may require f16
+		AssumeYes:       false,
+		Backend:         "",
+		LlamaServer:     "",
+		AppHome:         "",
+		TuneRounds:      8,
+		Vision:          false,
+		Parallel:        1,
+		Host:            "127.0.0.1",
+		Spec:            "off",
+		sources:         defaultSources(),
 	}
 }
 
@@ -126,6 +128,15 @@ func ParsePort(s string) (int, error) {
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || n < 1 || n > 65535 {
 		return 0, fmt.Errorf("must be an integer from 1 to 65535")
+	}
+	return n, nil
+}
+
+// ParseRAMLimitPercent validates the maximum whole-host RAM utilisation.
+func ParseRAMLimitPercent(s string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 1 || n > 100 {
+		return 0, fmt.Errorf("must be an integer from 1 to 100")
 	}
 	return n, nil
 }
@@ -196,7 +207,7 @@ func snapshotEnv() map[string]string {
 	for _, k := range []string{
 		"LLM_PORT", "LLM_CTX_SIZE", "LLM_MAX_RESTARTS", "LLM_KEEP_ALIVE",
 		"LLM_HEALTH_TIMEOUT", "LLM_MODEL_DIR", "LLM_CACHE_DIR", "LLM_LOG_DIR",
-		"LLM_RAM_BUDGET", "LLM_VRAM_HEADROOM", "LLM_RAM_HEADROOM", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_ASSUME_YES",
+		"LLM_RAM_BUDGET", "LLM_RAM_LIMIT_PERCENT", "LLM_VRAM_HEADROOM", "LLM_RAM_HEADROOM", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_ASSUME_YES",
 		"LLM_BACKEND", "LLAMA_SERVER", "LLM_APP_HOME", "LLM_TUNE_ROUNDS",
 		"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC",
 	} {
@@ -288,6 +299,12 @@ func setConfigValue(cfg *Config, key, raw, source string) error {
 			return err
 		}
 		cfg.RamBudget = val
+	case "RAM_LIMIT_PERCENT":
+		n, err := ParseRAMLimitPercent(val)
+		if err != nil {
+			return err
+		}
+		cfg.RAMLimitPercent = n
 	case "VRAM_HEADROOM":
 		if _, err := ParseBudgetMBStrict(val); err != nil {
 			return err
@@ -430,6 +447,9 @@ func (c *Config) Save() error {
 			return fmt.Errorf("%s: must be a non-negative integer", numeric.key)
 		}
 	}
+	if _, err := ParseRAMLimitPercent(strconv.Itoa(c.RAMLimitPercent)); err != nil {
+		return fmt.Errorf("RAM_LIMIT_PERCENT: %w", err)
+	}
 	path := Path()
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -452,6 +472,7 @@ func (c *Config) Save() error {
 	fmt.Fprintf(f, "LLM_CACHE_DIR=%q\n", c.CacheDir)
 	fmt.Fprintf(f, "LLM_LOG_DIR=%q\n", c.LogDir)
 	fmt.Fprintf(f, "LLM_RAM_BUDGET=%q\n", c.RamBudget)
+	fmt.Fprintf(f, "LLM_RAM_LIMIT_PERCENT=%d\n", c.RAMLimitPercent)
 	fmt.Fprintf(f, "LLM_VRAM_HEADROOM=%q\n", c.VRAMHeadroom)
 	fmt.Fprintf(f, "LLM_RAM_HEADROOM=%q\n", c.RAMHeadroom)
 	fmt.Fprintf(f, "LLM_KV_PLACEMENT=%q\n", c.KVPlacement)
@@ -494,6 +515,8 @@ func (c *Config) Show() string {
 			val = c.LogDir
 		case "RAM_BUDGET":
 			val = c.RamBudget
+		case "RAM_LIMIT_PERCENT":
+			val = strconv.Itoa(c.RAMLimitPercent)
 		case "VRAM_HEADROOM":
 			val = c.VRAMHeadroom
 		case "RAM_HEADROOM":

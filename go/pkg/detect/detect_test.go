@@ -219,19 +219,37 @@ func TestApplyRAMHeadroom(t *testing.T) {
 	}
 }
 
-func TestParseNVIDIAMemoryUsedMB(t *testing.T) {
-	out := "00000000:01:00.0, 20114\n00000000:03:00.0, 9037\n00000000:04:00.0, 9661\n"
-	got := parseNVIDIAMemoryUsedMB(out)
-	want := map[string]int{"00000000:01:00.0": 20114, "00000000:03:00.0": 9037, "00000000:04:00.0": 9661}
+func TestRAMLimitPercentSubtractsCurrentHostUsage(t *testing.T) {
+	caps := &Capabilities{RAM: RAMInfo{TotalMB: 128727, FreeMB: 125239}}
+	if got := RAMLimitMB(caps.RAM, 90); got != 112366 {
+		t.Fatalf("90%% backend limit = %d MiB, want 112366", got)
+	}
+	out := ApplyRAMLimitPercent(caps, 90)
+	if out.RAM.TotalMB != 112366 || out.RAM.FreeMB != 112366 {
+		t.Fatalf("percent-limited RAM = %+v", out.RAM)
+	}
+	if caps.RAM.TotalMB != 128727 {
+		t.Fatal("ApplyRAMLimitPercent mutated input")
+	}
+}
+
+func TestParseNVIDIAMemory(t *testing.T) {
+	out := "00000000:01:00.0, 20114, 3998\n00000000:03:00.0, 9037, 2872\n00000000:04:00.0, 9661, 2212\n"
+	got := parseNVIDIAMemory(out)
+	want := map[string]nvidiaMemorySample{
+		"00000000:01:00.0": {UsedMB: 20114, FreeMB: 3998},
+		"00000000:03:00.0": {UsedMB: 9037, FreeMB: 2872},
+		"00000000:04:00.0": {UsedMB: 9661, FreeMB: 2212},
+	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	for k, v := range want {
 		if got[k] != v {
-			t.Fatalf("busID %s: got %d, want %d", k, got[k], v)
+			t.Fatalf("busID %s: got %+v, want %+v", k, got[k], v)
 		}
 	}
-	if parseNVIDIAMemoryUsedMB("") != nil {
+	if parseNVIDIAMemory("") != nil {
 		t.Fatalf("empty output should return nil, not an empty map")
 	}
 }
@@ -264,10 +282,10 @@ func TestApplySettleRoundKeysByPCIBusIDNotIndex(t *testing.T) {
 		{Index: 2, PCIBusID: "0000:03:00.0", VRAMUsedMB: 200},
 	}
 	prev := busIDUsageMap(gpus)
-	cur := map[string]int{
-		"0000:04:00.0": 100,  // unchanged
-		"0000:01:00.0": 8990, // still settling, but within threshold
-		"0000:03:00.0": 200,  // unchanged
+	cur := map[string]nvidiaMemorySample{
+		"0000:04:00.0": {UsedMB: 100, FreeMB: 11400},
+		"0000:01:00.0": {UsedMB: 8990, FreeMB: 2510},
+		"0000:03:00.0": {UsedMB: 200, FreeMB: 11300},
 	}
 	if !applySettleRound(gpus, prev, cur, 64) {
 		t.Fatalf("expected stable within threshold, deltas were small")
@@ -283,11 +301,18 @@ func TestApplySettleRoundDetectsInstability(t *testing.T) {
 	gpus := []GPU{{PCIBusID: "a", VRAMUsedMB: 9000}}
 	prev := busIDUsageMap(gpus)
 	// A prior process's VRAM is still being reclaimed: a big drop between rounds.
-	cur := map[string]int{"a": 500}
+	cur := map[string]nvidiaMemorySample{"a": {UsedMB: 500, FreeMB: 11000}}
 	if applySettleRound(gpus, prev, cur, 64) {
 		t.Fatalf("expected instability to be detected (large delta), got stable")
 	}
 	if gpus[0].VRAMUsedMB != 500 {
 		t.Fatalf("expected the GPU reading to still be updated to the latest sample, got %d", gpus[0].VRAMUsedMB)
+	}
+}
+
+func TestVRAMFreeUsesNVIDIAReservedMemory(t *testing.T) {
+	gpu := GPU{VRAMTotalMB: 12282, VRAMUsedMB: 1, VRAMReservedMB: 408}
+	if got := gpu.VRAMFreeMB(); got != 11873 {
+		t.Fatalf("free VRAM = %d MiB, want NVIDIA-reported 11873 MiB", got)
 	}
 }

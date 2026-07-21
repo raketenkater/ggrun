@@ -28,6 +28,7 @@ type GPU struct {
 	Name            string `json:"name"`
 	VRAMTotalMB     int    `json:"vram_total_mb"`
 	VRAMUsedMB      int    `json:"vram_used_mb,omitempty"`
+	VRAMReservedMB  int    `json:"vram_reserved_mb,omitempty"`
 	Driver          string `json:"driver,omitempty"`
 	PCIGen          int    `json:"pci_gen,omitempty"`
 	PCILanes        int    `json:"pci_lanes,omitempty"`
@@ -85,7 +86,7 @@ func Detect() (*Capabilities, error) {
 
 func detectNVIDIA() []GPU {
 	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=index,pci.bus_id,name,memory.total,memory.used,driver_version,compute_cap",
+		"--query-gpu=index,pci.bus_id,name,memory.total,memory.used,memory.free,driver_version,compute_cap",
 		"--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil
@@ -105,29 +106,35 @@ func detectNVIDIA() []GPU {
 	var gpus []GPU
 	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(line, ", ")
-		if len(parts) < 6 {
+		if len(parts) < 7 {
 			continue
 		}
 		idx, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
 		pciBusID := strings.TrimSpace(parts[1])
 		vramTotal, _ := strconv.Atoi(strings.TrimSpace(parts[3]))
 		vramUsed, _ := strconv.Atoi(strings.TrimSpace(parts[4]))
+		vramFree, _ := strconv.Atoi(strings.TrimSpace(parts[5]))
+		vramReserved := vramTotal - vramUsed - vramFree
+		if vramReserved < 0 {
+			vramReserved = 0
+		}
 		driver := ""
-		if len(parts) >= 6 {
-			driver = strings.TrimSpace(parts[5])
+		if len(parts) >= 7 {
+			driver = strings.TrimSpace(parts[6])
 		}
 		computeCap := ""
-		if len(parts) >= 7 {
-			computeCap = strings.TrimSpace(parts[6])
+		if len(parts) >= 8 {
+			computeCap = strings.TrimSpace(parts[7])
 		}
 		gpu := GPU{
-			Index:       idx,
-			Name:        strings.TrimSpace(parts[2]),
-			VRAMTotalMB: vramTotal,
-			VRAMUsedMB:  vramUsed,
-			Driver:      driver,
-			PCIBusID:    pciBusID,
-			ComputeCap:  computeCap,
+			Index:          idx,
+			Name:           strings.TrimSpace(parts[2]),
+			VRAMTotalMB:    vramTotal,
+			VRAMUsedMB:     vramUsed,
+			VRAMReservedMB: vramReserved,
+			Driver:         driver,
+			PCIBusID:       pciBusID,
+			ComputeCap:     computeCap,
 		}
 		// Parse PCIe bandwidth.
 		if i < len(pcieLinks) {
@@ -174,7 +181,7 @@ func settleGPUFreeVRAM(gpus []GPU) {
 	prev := busIDUsageMap(gpus)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		time.Sleep(settleDelay)
-		cur := queryNVIDIAMemoryUsedMB()
+		cur := queryNVIDIAMemory()
 		if cur == nil {
 			return // nvidia-smi unavailable this round; keep the original reading
 		}
@@ -220,16 +227,17 @@ func busIDUsageMap(gpus []GPU) map[string]int {
 // reading moved by no more than thresholdMB since the previous round —
 // "stopped changing" is the signal that any post-kill VRAM reclaim has
 // finished and the reading can be trusted for placement.
-func applySettleRound(gpus []GPU, prev map[string]int, cur map[string]int, thresholdMB int) bool {
+func applySettleRound(gpus []GPU, prev map[string]int, cur map[string]nvidiaMemorySample, thresholdMB int) bool {
 	stable := true
 	for i := range gpus {
 		if gpus[i].PCIBusID == "" {
 			continue
 		}
-		u, ok := cur[gpus[i].PCIBusID]
+		sample, ok := cur[gpus[i].PCIBusID]
 		if !ok {
 			continue
 		}
+		u := sample.UsedMB
 		delta := u - prev[gpus[i].PCIBusID]
 		if delta < 0 {
 			delta = -delta
@@ -239,39 +247,50 @@ func applySettleRound(gpus []GPU, prev map[string]int, cur map[string]int, thres
 		}
 		prev[gpus[i].PCIBusID] = u
 		gpus[i].VRAMUsedMB = u
+		reserved := gpus[i].VRAMTotalMB - sample.UsedMB - sample.FreeMB
+		if reserved < 0 {
+			reserved = 0
+		}
+		gpus[i].VRAMReservedMB = reserved
 	}
 	return stable
 }
 
-// queryNVIDIAMemoryUsedMB re-samples just memory.used, keyed by PCI bus ID.
+type nvidiaMemorySample struct {
+	UsedMB int
+	FreeMB int
+}
+
+// queryNVIDIAMemory re-samples memory.used and memory.free, keyed by PCI bus ID.
 // Returns nil on any failure so the caller falls back to whatever it already
 // had rather than zeroing GPUs out.
-func queryNVIDIAMemoryUsedMB() map[string]int {
+func queryNVIDIAMemory() map[string]nvidiaMemorySample {
 	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=pci.bus_id,memory.used",
+		"--query-gpu=pci.bus_id,memory.used,memory.free",
 		"--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil
 	}
-	return parseNVIDIAMemoryUsedMB(string(out))
+	return parseNVIDIAMemory(string(out))
 }
 
-// parseNVIDIAMemoryUsedMB parses `nvidia-smi --query-gpu=pci.bus_id,memory.used
-// --format=csv,noheader,nounits` output. Split out from queryNVIDIAMemoryUsedMB
+// parseNVIDIAMemory parses `nvidia-smi --query-gpu=pci.bus_id,memory.used,memory.free
+// --format=csv,noheader,nounits` output. Split out from queryNVIDIAMemory
 // so the parsing logic is testable without shelling out to nvidia-smi.
-func parseNVIDIAMemoryUsedMB(out string) map[string]int {
-	result := make(map[string]int)
+func parseNVIDIAMemory(out string) map[string]nvidiaMemorySample {
+	result := make(map[string]nvidiaMemorySample)
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		parts := strings.Split(line, ", ")
-		if len(parts) < 2 {
+		if len(parts) < 3 {
 			continue
 		}
 		busID := strings.TrimSpace(parts[0])
 		used, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if err != nil || busID == "" {
+		free, freeErr := strconv.Atoi(strings.TrimSpace(parts[2]))
+		if err != nil || freeErr != nil || busID == "" {
 			continue
 		}
-		result[busID] = used
+		result[busID] = nvidiaMemorySample{UsedMB: used, FreeMB: free}
 	}
 	if len(result) == 0 {
 		return nil
@@ -539,7 +558,7 @@ func detectBackends() []Backend {
 
 // VRAMFreeMB returns free VRAM for this GPU.
 func (g GPU) VRAMFreeMB() int {
-	free := g.VRAMTotalMB - g.VRAMUsedMB
+	free := g.VRAMTotalMB - g.VRAMUsedMB - g.VRAMReservedMB
 	if free < 0 {
 		return 0
 	}
@@ -584,6 +603,43 @@ func ApplyRAMHeadroom(caps *Capabilities, headroomMB int) *Capabilities {
 	if out.RAM.FreeMB -= headroomMB; out.RAM.FreeMB < 0 {
 		out.RAM.FreeMB = 0
 	}
+	return &out
+}
+
+// RAMLimitMB returns the memory one backend may consume while keeping total
+// whole-host use at or below percent of physical RAM at the current baseline.
+func RAMLimitMB(ram RAMInfo, percent int) int {
+	if percent < 1 || percent > 100 || ram.TotalMB <= 0 || ram.FreeMB <= 0 {
+		return 0
+	}
+	usedMB := ram.TotalMB - ram.FreeMB
+	if usedMB < 0 {
+		usedMB = 0
+	}
+	targetUsedMB := ram.TotalMB * percent / 100
+	limitMB := targetUsedMB - usedMB
+	if limitMB < 0 {
+		return 0
+	}
+	if limitMB > ram.FreeMB {
+		return ram.FreeMB
+	}
+	return limitMB
+}
+
+// ApplyRAMLimitPercent converts a whole-host utilisation target into the
+// current process budget consumed by placement calculations.
+func ApplyRAMLimitPercent(caps *Capabilities, percent int) *Capabilities {
+	if caps == nil {
+		return nil
+	}
+	limitMB := RAMLimitMB(caps.RAM, percent)
+	if limitMB <= 0 {
+		return caps
+	}
+	out := *caps
+	out.RAM.TotalMB = limitMB
+	out.RAM.FreeMB = limitMB
 	return &out
 }
 

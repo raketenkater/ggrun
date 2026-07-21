@@ -1,6 +1,6 @@
 # Compute preflight: fastest stable placement without paying for failed loads
 
-Status: stage 1 (no-alloc launch preflight) implemented 2026-07-07. Stages 2-3 planned.
+Status: backend-neutral contained allocation measurement implemented 2026-07-21.
 
 ## Why
 
@@ -46,8 +46,8 @@ measured values (plus the separately-probed ~680 MB CUDA context overhead per GP
 `go/cmd/ggrun/preflight.go` + gate in `startLaunchWithCUDAOOMRecovery`:
 
 - `findFitParamsBin`: looks for `llama-fit-params` next to the resolved server binary
-  (backend build dir), then `.bin/`, then PATH. If a custom backend does not ship a
-  companion binary, the gate is silently skipped and behavior is unchanged.
+  (backend build dir), then `.bin/`, then PATH. It never pairs a custom fork with an
+  unrelated mainline oracle from PATH.
 - Before every launch attempt (including OOM re-plans), ggrun runs the fit-print with
   the memory-shaping subset of the real args (`-m/-c/-b/-ub/-ctk/-ctv/-np/-ngl/-ts/
   -sm/-ot/--n-cpu-moe/-fa/-mg`) and `CUDA_DEVICE_ORDER=PCI_BUS_ID` (same device
@@ -56,7 +56,8 @@ measured values (plus the separately-probed ~680 MB CUDA context overhead per GP
 - Per CUDA device: `model+context+compute + measured CUDA overhead` vs free VRAM.
   A deficit feeds `ReplanAfterOOM` with the exact measured overshoot — same machinery
   as startup OOM recovery, but at ~1s instead of a full load. Capped at 3 preflight
-  re-plans; infrastructure failures never block the launch.
+  re-plans. Oracle failure falls back to the contained generic probe; it never silently
+  skips the memory gate.
 - Placement caches (`.place`) are now written **only after a healthy load** (main.go
   success branch, recovery.handleHealthy), and overwritten on success after a derate.
   Previously OOM re-plans persisted never-loaded plans, which poisoned later launches.
@@ -88,6 +89,34 @@ Startup OOM recovery exists; post-health crashes currently just kill the server.
   `ReplanAfterOOM` (measured penalty), invalidate the `.place` cache, relaunch once.
 - This is the safety net for shapes the canary didn't exercise (bigger parallel
   fan-out, vision, speculative decoding).
+
+## Backend-neutral allocation firewall — implemented
+
+Backends without a matching fit oracle are measured without modifying the fork:
+
+- `native/memguard/libggrun-memguard.so` is injected with `LD_PRELOAD` and
+  intercepts CUDA runtime/driver device, managed, async, VMM, pinned-host, and
+  `mlock` allocation paths. Per-visible-device limits come from current free VRAM
+  minus separately measured CUDA context overhead.
+- Every event is JSONL. The authoritative device total is the allocator peak;
+  backend log labels are optional and any difference is retained as
+  `unaccounted_bytes`, never discarded.
+- The backend runs in a fresh systemd cgroup v2 scope with `MemoryHigh`,
+  `MemoryMax`, no swap, `memory.oom.group=1`, and process-group cleanup. The
+  kernel's `memory.peak` and `oom_kill` counters are read before scope removal.
+- A denied CUDA allocation returns CUDA OOM to the backend process and feeds
+  `active + requested - limit` into the existing re-planner. A host cgroup OOM
+  fails closed and is not retried with a larger implicit allowance.
+- Verified plans are keyed by backend build, model identity, hardware, and exact
+  memory-shaping argv under `memory-probes/`. Incomplete coverage is not cached.
+- Production placement sets `RequireMeasuredBuffers`: cold compute/host buffer
+  formulas no longer decide fit. The contained probe measures the candidate,
+  records exact evidence, and the existing bounded loop recomputes until argv is
+  stable before a serving launch is allowed.
+
+Use `ggrun memory-probe <model> --json` to run this loop and stop before serving.
+Backends without an advertised allocation-only dry-run require interactive consent,
+or `--allow-live-memory-probe` for unattended use.
 
 ## Non-goals
 

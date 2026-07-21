@@ -10,6 +10,7 @@ only the matching GGUF architecture to them.
 ggrun backend recipes
 ggrun backend install hy3
 ggrun backend install minimax-m3
+ggrun backend install laguna
 ```
 
 A recipe contains a Git repository, branch, immutable commit, backend tag and
@@ -37,6 +38,11 @@ includes its dedicated structured tool-call parser. Its architecture route is
 `minimax-m3`. Sparse attention is not implemented in that revision, so it uses
 the mathematically correct dense fallback and remains an experimental backend
 until the 60k agent/workflow farm passes on the target machine.
+
+The Laguna recipe pins Poolside's open upstream `llama.cpp` PR revision and
+routes GGUFs with `general.architecture=laguna` to that isolated build. Mainline
+does not support Laguna until that PR lands. DFlash GGUFs are companion
+speculators rather than standalone target models and are not offered in the TUI.
 
 ## Any other fork
 

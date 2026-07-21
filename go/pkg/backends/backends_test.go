@@ -57,6 +57,19 @@ func TestMiniMaxM3RecipeIsPinnedAndRouted(t *testing.T) {
 	}
 }
 
+func TestLagunaRecipeIsPinnedAndRouted(t *testing.T) {
+	recipe := RecipeByName("laguna")
+	if recipe == nil {
+		t.Fatal("Laguna recipe missing")
+	}
+	if recipe.RouteArch != "laguna" || recipe.Branch != "add-laguna" {
+		t.Fatalf("unexpected Laguna route/branch: %#v", recipe)
+	}
+	if recipe.GitURL != "https://github.com/joerowell/llama.cpp.git" || len(recipe.Commit) != 40 {
+		t.Fatalf("Laguna source is not reproducibly pinned: %#v", recipe)
+	}
+}
+
 func TestHY3RecipePatchAppliesAndRevertsCleanly(t *testing.T) {
 	recipe := RecipeByName("hy3")
 	if recipe == nil {

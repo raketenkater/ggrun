@@ -13,7 +13,7 @@ import (
 // CalibrationSchemaVersion bumps whenever the candidate set or scoring changes,
 // so a decision measured under older semantics is never applied after an
 // upgrade changes what "fastest" means.
-const CalibrationSchemaVersion = 1
+const CalibrationSchemaVersion = 2
 
 // CalibrationDecision records which candidate won a measured first-launch
 // calibration for one scope, with the numbers that decided it. The winner is
@@ -108,7 +108,7 @@ type CalibrationCandidate struct {
 // The launcher measures each candidate with the same micro-probe and keeps the
 // fastest under the scope key; the default is always candidate 0 so a failed or
 // inconclusive calibration degrades to today's behavior.
-func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base *Strategy) []CalibrationCandidate {
+func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options) []CalibrationCandidate {
 	if caps == nil || model == nil || base == nil {
 		return nil
 	}
@@ -120,18 +120,35 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 	switch base.Type {
 	case MoEOffload:
 		// KV-alternate: move the KV cache between GPU and CPU while keeping the
-		// expert split. On a big MoE, KV-on-CPU frees VRAM for more GPU experts;
-		// KV-on-GPU avoids a per-token host round trip. The estimate picks one;
-		// only a measurement tells which is actually faster on this topology.
-		if alt := cloneStrategy(base); alt != nil {
-			if base.KVPlacement == "cpu" {
-				alt.KVPlacement = "gpu"
-			} else {
-				alt.KVPlacement = "cpu"
-			}
-			if alt.KVPlacement != base.KVPlacement {
-				out = append(out, CalibrationCandidate{Name: "kv-alternate", Strategy: alt})
-			}
+		// expert policy. Changing KV placement changes both VRAM expert capacity
+		// and host RAM, so this must be a fresh Compute pass. Flipping the field on
+		// a cloned strategy produced candidates that had never passed either
+		// memory ledger.
+		altKV := "cpu"
+		if base.KVPlacement == "cpu" {
+			altKV = "gpu"
+		}
+		altOpts := opts
+		altOpts.KVPlacement = altKV
+		altOpts.SkipPlacementCache = true
+		altOpts.CacheFile = ""
+		if base.ContextSize > 0 {
+			altOpts.ContextSize = base.ContextSize
+		}
+		if base.Parallel > 0 {
+			altOpts.Parallel = base.Parallel
+		}
+		if base.BatchSize > 0 {
+			altOpts.BatchSize = base.BatchSize
+		}
+		if base.UBatchSize > 0 {
+			altOpts.UBatchSize = base.UBatchSize
+		}
+		if base.KVQuality != "" {
+			altOpts.KVQuality = base.KVQuality
+		}
+		if alt, err := Compute(caps, model, altOpts); err == nil && alt != nil && alt.Type == MoEOffload && alt.KVPlacement == altKV {
+			out = append(out, CalibrationCandidate{Name: "kv-alternate", Strategy: alt})
 		}
 	case MultiGPUDense:
 		// Dense on multiple GPUs has exactly one real choice: which GPU owns the
@@ -214,24 +231,64 @@ type CalibrationScopeKey struct {
 	WorkloadProfile string
 	ContextSize     int
 	Parallel        int
+	BatchSize       int
 	UBatchSize      int
 	KVQuality       string
+	KVType          string
+	GPUSet          string
+	BasePlacement   string
+	MemoryPolicy    string
 }
 
 // NewCalibrationScopeKey builds the key from the same identity sources the
 // speculative performance profile uses, so a calibration decision and a spec
 // decision for the same launch can never disagree about what launch they
 // describe.
-func NewCalibrationScopeKey(model *ModelProfile, caps *detect.Capabilities, opts Options) CalibrationScopeKey {
+func NewCalibrationScopeKey(model *ModelProfile, caps *detect.Capabilities, opts Options, base *Strategy) CalibrationScopeKey {
+	contextSize := opts.ContextSize
+	parallel := opts.Parallel
+	batchSize := opts.BatchSize
+	ubatchSize := opts.UBatchSize
+	kvQuality := opts.KVQuality
+	kvType := ""
+	basePlacement := ""
+	if base != nil {
+		if base.ContextSize > 0 {
+			contextSize = base.ContextSize
+		}
+		if base.Parallel > 0 {
+			parallel = base.Parallel
+		}
+		if base.BatchSize > 0 {
+			batchSize = base.BatchSize
+		}
+		if base.UBatchSize > 0 {
+			ubatchSize = base.UBatchSize
+		}
+		if base.KVQuality != "" {
+			kvQuality = base.KVQuality
+		}
+		kvType = base.KVType
+		basePlacement = specHash(
+			string(base.Type), base.KVPlacement, fmt.Sprintf("%t", base.MMap),
+			fmt.Sprintf("%d", base.NCPUMoE), splitCompactKey(base.TensorSplit), base.OTString,
+		)
+	}
 	return CalibrationScopeKey{
 		ModelIdentity:   SpecTargetIdentity(model),
 		BackendIdentity: opts.BackendIdentity,
 		HardwareID:      SpecHardwareIdentity(caps),
 		WorkloadProfile: opts.WorkloadProfile,
-		ContextSize:     opts.ContextSize,
-		Parallel:        opts.Parallel,
-		UBatchSize:      opts.UBatchSize,
-		KVQuality:       opts.KVQuality,
+		ContextSize:     contextSize,
+		Parallel:        parallel,
+		BatchSize:       batchSize,
+		UBatchSize:      ubatchSize,
+		KVQuality:       kvQuality,
+		KVType:          kvType,
+		GPUSet:          specGPUSet(opts.GPUs),
+		BasePlacement:   basePlacement,
+		MemoryPolicy: fmt.Sprintf("ram=%d,pct=%d,ram-head=%d,vram-head=%d,no-mmap=%t,force-mmap=%t,measured-buffers=%t",
+			opts.RamBudgetMB, opts.RAMLimitPercent, opts.RAMHeadroomMB, opts.VRAMHeadroomMB, opts.NoMMap, opts.ForceMMap, opts.RequireMeasuredBuffers),
 	}
 }
 
@@ -240,6 +297,7 @@ func (k CalibrationScopeKey) String() string {
 	return specHash(
 		k.ModelIdentity, k.BackendIdentity, k.HardwareID, k.WorkloadProfile,
 		fmt.Sprintf("%d", k.ContextSize), fmt.Sprintf("%d", k.Parallel),
-		fmt.Sprintf("%d", k.UBatchSize), k.KVQuality,
+		fmt.Sprintf("%d", k.BatchSize), fmt.Sprintf("%d", k.UBatchSize),
+		k.KVQuality, k.KVType, k.GPUSet, k.BasePlacement, k.MemoryPolicy,
 	)
 }

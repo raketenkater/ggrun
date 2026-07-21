@@ -483,15 +483,22 @@ type startupProgress struct {
 
 func startupProgressStatus(logText string, elapsed, timeout time.Duration, progress startupProgress) string {
 	parts := make([]string, 0, 5)
+	pct := 0
 	if progress.total > 0 && progress.done > 0 {
-		pct := startupProgressPercent(progress)
+		pct = startupProgressPercent(progress)
 		parts = append(parts, fmt.Sprintf("%s %3d%%", startupProgressBar(pct, 20), pct))
 	}
-	parts = append(parts, startupPhase(logText))
+	phase := startupPhase(logText)
+	if progress.total > 0 && progress.done >= progress.total {
+		phase = "initializing model (weights read)"
+	} else if pct >= 95 && phase == "loading model weights" {
+		phase = "finalizing model load (most weights read)"
+	}
+	parts = append(parts, phase)
 	if timeout > 0 {
-		parts = append(parts, fmt.Sprintf("%s/%s", elapsed.Round(time.Second), timeout.Round(time.Second)))
+		parts = append(parts, fmt.Sprintf("elapsed %s (limit %s)", elapsed.Round(time.Second), timeout.Round(time.Second)))
 	} else {
-		parts = append(parts, elapsed.Round(time.Second).String())
+		parts = append(parts, fmt.Sprintf("elapsed %s", elapsed.Round(time.Second)))
 	}
 	if progress.total > 0 && progress.done > 0 {
 		parts = append(parts, fmt.Sprintf("read %s/%s", formatGiB(progress.done), formatGiB(progress.total)))
@@ -523,7 +530,9 @@ func startupProgressPercent(p startupProgress) int {
 		return 0
 	}
 	if p.done >= p.total {
-		return 100
+		// Health is still not ready while this status is shown. Reading every
+		// model byte is followed by tensor upload, allocation and graph setup.
+		return 99
 	}
 	return int((p.done * 100) / p.total)
 }

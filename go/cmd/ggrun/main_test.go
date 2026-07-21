@@ -29,11 +29,149 @@ func writeFakeBackend(t *testing.T, name, body string) string {
 	return path
 }
 
+func TestParseLaunchArgsMMapPolicy(t *testing.T) {
+	req, err := parseLaunchArgs([]string{"model.gguf", "--mmap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !req.ForceMMap || req.NoMMap {
+		t.Fatalf("--mmap policy not preserved: %#v", req)
+	}
+	req, err = parseLaunchArgs([]string{"model.gguf", "--mmap", "--no-mmap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !req.NoMMap || req.ForceMMap {
+		t.Fatalf("last mmap policy must win: %#v", req)
+	}
+}
+
+func TestConfirmRequiredMMap(t *testing.T) {
+	strategy := &placement.Strategy{MMap: true, MMapRequired: true}
+	req := &launchRequest{}
+	var output bytes.Buffer
+	if err := confirmRequiredMMap(req, strategy, strings.NewReader("yes\n"), &output, true); err != nil {
+		t.Fatal(err)
+	}
+	if !req.ForceMMap || !strings.Contains(output.String(), "Use mmap?") {
+		t.Fatalf("confirmation did not approve mmap: req=%#v output=%q", req, output.String())
+	}
+	if err := confirmRequiredMMap(&launchRequest{}, strategy, strings.NewReader(""), &output, false); err == nil || !strings.Contains(err.Error(), "--mmap") {
+		t.Fatalf("non-interactive launch must require explicit --mmap, got %v", err)
+	}
+}
+
+func TestConfirmLiveMemoryProbeRequiresExplicitNonInteractiveConsent(t *testing.T) {
+	var output bytes.Buffer
+	req := &launchRequest{}
+	if err := confirmLiveMemoryProbe(req, "full load required", strings.NewReader("yes\n"), &output, true); err != nil {
+		t.Fatal(err)
+	}
+	if !req.AllowLiveMemoryProbe || !strings.Contains(output.String(), "contained live memory probe") {
+		t.Fatalf("interactive consent was not retained: req=%#v output=%q", req, output.String())
+	}
+	if err := confirmLiveMemoryProbe(&launchRequest{}, "full load required", strings.NewReader(""), &output, false); err == nil || !strings.Contains(err.Error(), "--allow-live-memory-probe") {
+		t.Fatalf("non-interactive probe must require an explicit flag, got %v", err)
+	}
+}
+
+func TestIsLlamaServerExecutableIgnoresArguments(t *testing.T) {
+	if !isLlamaServerExecutable("/opt/bin/llama-server-cuda") || !isLlamaServerExecutable("/opt/bin/ik_llama-server") {
+		t.Fatal("known server executable was not recognized")
+	}
+	if isLlamaServerExecutable("/usr/bin/rtk") || isLlamaServerExecutable("/tmp/ggrun") {
+		t.Fatal("wrapper containing a --server-bin argument must not be recognized")
+	}
+}
+
+func TestBackendMemoryMaxUsesDetectedBudgetAndHeadroom(t *testing.T) {
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 128000, FreeMB: 120000}}
+	if runtime.GOOS != "linux" {
+		if got := backendMemoryMaxMB(&launchRequest{}, caps); got != 0 {
+			t.Fatalf("non-Linux launch cap = %d, want disabled", got)
+		}
+		return
+	}
+	if got := backendMemoryMaxMB(&launchRequest{}, caps); got != 120000 {
+		t.Fatalf("detected free RAM cap = %d, want 120000", got)
+	}
+	if got := backendMemoryMaxMB(&launchRequest{RamBudgetMB: 96000}, caps); got != 96000 {
+		t.Fatalf("RAM budget cap = %d, want 96000", got)
+	}
+	percentCaps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 128727, FreeMB: 125239}}
+	if got := backendMemoryMaxMB(&launchRequest{RAMLimitPercent: 90}, percentCaps); got != 112366 {
+		t.Fatalf("90%% whole-host cap = %d, want 112366", got)
+	}
+	if got := backendMemoryMaxMB(&launchRequest{RAMHeadroomMB: 8192}, caps); got != 111808 {
+		t.Fatalf("headroom-adjusted cap = %d, want 111808", got)
+	}
+	if got := backendMemoryMaxMB(&launchRequest{RamBudgetMB: 64000, RAMHeadroomMB: 4096}, caps); got != 59904 {
+		t.Fatalf("budget/headroom cap = %d, want 59904", got)
+	}
+	if got := backendMemoryMaxMB(&launchRequest{RAMHeadroomMB: 200000}, caps); got != 0 {
+		t.Fatalf("non-positive cap = %d, want disabled", got)
+	}
+}
+
+func TestBackendStartOptionsArePlacementStrategyIndependent(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("backend memory scopes are Linux-only")
+	}
+	req := &launchRequest{RAMHeadroomMB: 8192}
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{FreeMB: 120000}}
+	single := &placement.Strategy{Type: placement.SingleGPU}
+	multi := &placement.Strategy{Type: placement.MultiGPUDense}
+
+	singleOpts := backendStartOptions(req, caps, nil)
+	multiOpts := backendStartOptions(req, caps, nil)
+
+	if single.Type != placement.SingleGPU || multi.Type != placement.MultiGPUDense {
+		t.Fatalf("test setup broken: single=%s multi=%s", single.Type, multi.Type)
+	}
+	if singleOpts.MemoryMaxMB != 111808 || multiOpts.MemoryMaxMB != 111808 {
+		t.Fatalf("dense strategy memory scopes differ or use wrong cap: single=%d multi=%d", singleOpts.MemoryMaxMB, multiOpts.MemoryMaxMB)
+	}
+}
+
+func TestHostMemoryPlacementRequiresExplicitContainmentBudget(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("host-memory containment is Linux-only")
+	}
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 128000, FreeMB: 120000}}
+	hostStrategies := []*placement.Strategy{
+		{Type: placement.CPUOnly},
+		{Type: placement.DenseCPUOffload},
+		{Type: placement.MoEOffload},
+	}
+	for _, strategy := range hostStrategies {
+		if err := validateHostMemoryContainment(&launchRequest{}, caps, strategy); err == nil {
+			t.Fatalf("%s placement accepted without an explicit RAM safety limit", strategy.Type)
+		}
+		if err := validateHostMemoryContainment(&launchRequest{RamBudgetMB: 96000}, caps, strategy); err != nil {
+			t.Fatalf("%s placement rejected explicit RAM budget: %v", strategy.Type, err)
+		}
+		if err := validateHostMemoryContainment(&launchRequest{RAMHeadroomMB: 8192}, caps, strategy); err != nil {
+			t.Fatalf("%s placement rejected explicit RAM headroom: %v", strategy.Type, err)
+		}
+		if err := validateHostMemoryContainment(&launchRequest{RAMLimitPercent: 90}, caps, strategy); err != nil {
+			t.Fatalf("%s placement rejected RAM limit percent: %v", strategy.Type, err)
+		}
+	}
+	for _, strategy := range []*placement.Strategy{{Type: placement.SingleGPU}, {Type: placement.MultiGPUDense}} {
+		if err := validateHostMemoryContainment(&launchRequest{}, caps, strategy); err != nil {
+			t.Fatalf("fully GPU-resident %s placement unexpectedly rejected: %v", strategy.Type, err)
+		}
+	}
+}
+
 func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	req := &launchRequest{ClaudeCode: true}
 	model := &placement.ModelProfile{ModelArch: "deepseek4", CTXTrain: 1048576}
 	be := &backendInfo{Tag: "llama"}
 	opts := placementOptionsFromRequest(req, model, be, t.TempDir())
+	if !opts.RequireMeasuredBuffers {
+		t.Fatal("production placement must require measured buffer evidence")
+	}
 	if opts.Parallel != 4 {
 		t.Fatalf("claude-code should request four slots over the shared mainline placement, got %d", opts.Parallel)
 	}
@@ -726,7 +864,8 @@ func TestParseLaunchArgsEqualsForms(t *testing.T) {
 	isolateConfig(t)
 	req, err := parseLaunchArgs([]string{
 		"--port=9090", "--ctx-size=max", "--backend=ik_llama",
-		"--gpus=1,3", "--host=127.0.0.1", "--spec=draft", "--parallel=4", "model.gguf",
+		"--gpus=1,3", "--host=127.0.0.1", "--spec=draft", "--parallel=4",
+		"--ram-limit-percent=88", "--allow-live-memory-probe=true", "model.gguf",
 	})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -736,6 +875,12 @@ func TestParseLaunchArgsEqualsForms(t *testing.T) {
 	}
 	if req.GPUsFlag != "1,3" || req.Host != "127.0.0.1" || req.SpecMode != "draft" || req.Parallel != 4 {
 		t.Fatalf("equals placement mismatch: %#v", req)
+	}
+	if req.RAMLimitPercent != 88 {
+		t.Fatalf("RAM limit percent = %d, want 88", req.RAMLimitPercent)
+	}
+	if !req.AllowLiveMemoryProbe {
+		t.Fatal("equals-form live memory probe consent was not retained")
 	}
 }
 
@@ -1135,6 +1280,10 @@ func TestFirstPositionalSkipsParallelValue(t *testing.T) {
 	if got != "org/model-GGUF" {
 		t.Fatalf("--ram-headroom value was treated as positional: got %q", got)
 	}
+	got = firstPositional([]string{"--ram-limit-percent", "90", "org/model-GGUF", "--download"})
+	if got != "org/model-GGUF" {
+		t.Fatalf("--ram-limit-percent value was treated as positional: got %q", got)
+	}
 	got = firstPositional([]string{"--claude-profile", "agent-interactive", "org/model-GGUF", "--download"})
 	if got != "org/model-GGUF" {
 		t.Fatalf("--claude-profile value was treated as positional: got %q", got)
@@ -1152,6 +1301,8 @@ func TestParseLaunchArgsRejectsInvalidSafetyFlags(t *testing.T) {
 		{"parallel zero", []string{"model.gguf", "--parallel=0"}},
 		{"vram headroom text", []string{"model.gguf", "--vram-headroom", "two-gig"}},
 		{"ram headroom negative", []string{"model.gguf", "--ram-headroom=-2G"}},
+		{"ram percent zero", []string{"model.gguf", "--ram-limit-percent=0"}},
+		{"ram percent high", []string{"model.gguf", "--ram-limit-percent", "101"}},
 		{"gpu token", []string{"model.gguf", "--gpus", "0,fast"}},
 	}
 	for _, tc := range cases {

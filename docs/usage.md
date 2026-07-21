@@ -19,6 +19,7 @@ ggrun model.gguf --gpus 0,1
 ggrun model.gguf --ram-budget 90G
 ggrun model.gguf --vram-headroom 2G   # leave 2 GB of VRAM free for other apps
 ggrun model.gguf --ram-headroom 8G    # leave 8 GB of system RAM free for other apps
+ggrun memory-probe model.gguf --json  # measure the selected backend, then stop
 ggrun model.gguf --ctx-size 32768
 ggrun model.gguf --kv-quality auto
 ggrun model.gguf --kv-quality q5_1
@@ -62,6 +63,24 @@ ggrun models rm model.gguf --yes
 
 Unknown flags are passed through to `llama-server`, so upstream options remain available
 without wrapper changes.
+
+## Contained memory probes
+
+`ggrun memory-probe <model> --json` runs the same bounded memory fixed-point
+used before serving, prints the final per-device model/context/compute and
+unaccounted allocator bytes, and stops. A matching `llama-fit-params` is used
+when the selected backend ships one. Other llama.cpp-style forks are measured
+through ggrun's Linux CUDA allocation firewall inside a cgroup v2 scope.
+
+If the backend does not advertise an allocation-only `--dry-run`, ggrun asks
+before performing a contained full-load probe. Non-interactive use must pass
+`--allow-live-memory-probe`. Incomplete guard coverage can be used only for that
+explicitly approved run and is never written as reusable verified evidence.
+
+The configured `ram_limit_percent` (95 by default), `--ram-budget`, and
+`--ram-headroom` determine the backend cgroup's `MemoryHigh`/`MemoryMax` limit.
+CUDA pinned host allocations are disabled during probes. A host-memory breach
+kills the backend scope, not the rest of the server.
 
 ### KV cache types
 

@@ -102,8 +102,9 @@ type Model struct {
 	inputMode string
 
 	// Settings screen (arrow-navigable list of all config options)
-	settingsCfg    *config.Config
-	settingsCursor int
+	settingsCfg     *config.Config
+	settingsCursor  int
+	ramLimitPercent int
 
 	// Advanced (per-launch) config screen cursor
 	cfgCursor int
@@ -164,19 +165,20 @@ func InitialModel() Model {
 		parallel = strconv.Itoa(cfg.Parallel)
 	}
 	m := Model{
-		screen:       ScreenMain,
-		backend:      backend,
-		modelDir:     cfg.ModelDir,
-		settingsPath: settingsPath,
-		cacheDir:     cfg.CacheDir,
-		port:         cfg.Port,
-		ctxSize:      ctxValue,
-		ctxMode:      ctxMode,
-		kvPlacement:  cfg.KVPlacement,
-		kvQuality:    cfg.KVQuality,
-		parallel:     parallel,
-		vision:       cfg.Vision,
-		aituneRounds: rounds,
+		screen:          ScreenMain,
+		backend:         backend,
+		modelDir:        cfg.ModelDir,
+		settingsPath:    settingsPath,
+		cacheDir:        cfg.CacheDir,
+		port:            cfg.Port,
+		ctxSize:         ctxValue,
+		ctxMode:         ctxMode,
+		kvPlacement:     cfg.KVPlacement,
+		kvQuality:       cfg.KVQuality,
+		parallel:        parallel,
+		vision:          cfg.Vision,
+		aituneRounds:    rounds,
+		ramLimitPercent: cfg.RAMLimitPercent,
 	}
 	if m.port <= 0 {
 		m.port = 8081
@@ -1266,7 +1268,10 @@ func formatHeadroomMB(mb int) string {
 }
 
 func (m *Model) refreshRecommendations() {
-	m.recommendationGroups = recommend.TopCategories(detect.ApplyRAMHeadroom(detect.ApplyVRAMHeadroom(m.caps, m.vramHeadroomMB), m.ramHeadroomMB), 4)
+	caps := detect.ApplyRAMLimitPercent(m.caps, m.ramLimitPercent)
+	caps = detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB)
+	caps = detect.ApplyRAMHeadroom(caps, m.ramHeadroomMB)
+	m.recommendationGroups = recommend.TopCategories(caps, 4)
 	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 	if len(m.recommendations) == 0 {
 		m.selectedRecommendation = 0
@@ -1431,6 +1436,21 @@ func boolLabel(v bool) string {
 	return "off"
 }
 
+func isAuxiliaryModel(name, arch string) bool {
+	if strings.EqualFold(strings.TrimSpace(arch), "dflash") {
+		return true
+	}
+	for _, token := range strings.FieldsFunc(strings.ToLower(filepath.Base(name)), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	}) {
+		switch token {
+		case "dflash", "draft", "mtp", "speculator":
+			return true
+		}
+	}
+	return false
+}
+
 func discoverModels(dir string) []ModelItem {
 	var items []ModelItem
 	seen := make(map[string]bool)
@@ -1443,9 +1463,9 @@ func discoverModels(dir string) []ModelItem {
 		if !strings.HasSuffix(strings.ToLower(name), ".gguf") {
 			return nil
 		}
-		// Filter out mmproj and draft files
+		// Companion artifacts are inputs to a target model, not runnable targets.
 		lower := strings.ToLower(name)
-		if strings.Contains(lower, "mmproj") || strings.Contains(lower, "dflash-draft") {
+		if strings.Contains(lower, "mmproj") || isAuxiliaryModel(name, "") {
 			return nil
 		}
 
@@ -1514,6 +1534,7 @@ func discoverModels(dir string) []ModelItem {
 
 func loadModels(dir, cacheDir, backend string, caps *detect.Capabilities) []ModelItem {
 	models := discoverModels(dir)
+	visible := models[:0]
 	totalSysMemMB := 0
 	if caps != nil {
 		totalSysMemMB = caps.TotalVRAM() + caps.RAM.TotalMB
@@ -1528,6 +1549,9 @@ func loadModels(dir, cacheDir, backend string, caps *detect.Capabilities) []Mode
 	for i := range models {
 		modelBackendTag := backendTag
 		if info, err := gguf.Parse(models[i].Path); err == nil {
+			if isAuxiliaryModel(models[i].Name, info.Architecture) {
+				continue
+			}
 			models[i].MaxCtx = info.ContextLength
 			models[i].IsMoE = info.IsMoE
 			if info.Architecture != "" {
@@ -1545,8 +1569,9 @@ func loadModels(dir, cacheDir, backend string, caps *detect.Capabilities) []Mode
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)
 		}
 		models[i].Tuned = tune.CountTunedConfigs(cacheDir, models[i].Name, modelBackendTag)
+		visible = append(visible, models[i])
 	}
-	return models
+	return visible
 }
 
 func (m Model) backendTag() string {
@@ -1642,6 +1667,9 @@ func settingRows() []settingRow {
 				return c.RAMHeadroom
 			},
 			set: func(c *config.Config, v string) { c.RAMHeadroom = strings.TrimSpace(v) }},
+		{label: "RAM limit percent", kind: "text",
+			get: func(c *config.Config) string { return strconv.Itoa(c.RAMLimitPercent) },
+			set: atoiSet(func(c *config.Config, n int) { c.RAMLimitPercent = n })},
 		{label: "Speculative", kind: "enum",
 			options: []string{"off", "auto", "draft", "eagle3", "ngram", "ngram-mod", "ngram-k4v", "mtp"},
 			get:     func(c *config.Config) string { return c.Spec },
@@ -1696,6 +1724,9 @@ func (m *Model) applySetting(row settingRow, val string) {
 	case "RAM headroom":
 		m.ramHeadroomMB = config.ParseBudgetMB(val)
 		m.refreshRecommendations()
+	case "RAM limit percent":
+		m.ramLimitPercent = m.settingsCfg.RAMLimitPercent
+		m.refreshRecommendations()
 	case "Backend":
 		m.backend = val
 		m.refreshTunedCounts()
@@ -1733,6 +1764,9 @@ func validateSettingValue(label, val string) error {
 		}
 	case "VRAM headroom", "RAM headroom":
 		_, err := config.ParseBudgetMBStrict(val)
+		return err
+	case "RAM limit percent":
+		_, err := config.ParseRAMLimitPercent(val)
 		return err
 	}
 	return nil

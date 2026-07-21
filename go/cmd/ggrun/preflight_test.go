@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/memprobe"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -25,6 +26,48 @@ func TestFindFitParamsDoesNotCrossCustomForksViaPATH(t *testing.T) {
 	customServer := filepath.Join(dir, "custom-fork", "bin", "llama-server")
 	if got := findFitParamsBin(customServer); got != "" {
 		t.Fatalf("custom fork must not use unrelated PATH fit-params: %s", got)
+	}
+}
+
+func TestRunFitPreflightAddsSiblingLibraryDirectory(t *testing.T) {
+	dir := t.TempDir()
+	fit := filepath.Join(dir, "llama-fit-params")
+	script := "#!/bin/sh\ncase \"$LD_LIBRARY_PATH\" in\n  \"" + dir + "\"*) echo 'CUDA0 100 20 30' ;;\n  *) exit 42 ;;\nesac\n"
+	if err := os.WriteFile(fit, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	devs, err := runFitPreflight(fit, []string{"llama-server", "-m", "model.gguf"})
+	if err != nil {
+		t.Fatalf("fit preflight did not receive sibling LD_LIBRARY_PATH: %v", err)
+	}
+	want := []preflightDevice{{Name: "CUDA0", ModelMB: 100, ContextMB: 20, ComputeMB: 30}}
+	if !reflect.DeepEqual(devs, want) {
+		t.Fatalf("fit rows = %#v, want %#v", devs, want)
+	}
+}
+
+func TestFitPreflightLibraryPathResolvesSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "backend", "bin")
+	linkDir := filepath.Join(root, "app", ".bin")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(realDir, "llama-fit-params")
+	if err := os.WriteFile(realBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkBin := filepath.Join(linkDir, "llama-fit-params")
+	if err := os.Symlink(realBin, linkBin); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(fitPreflightLibraryPath(linkBin), string(os.PathListSeparator))
+	want := []string{realDir, linkDir}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("library path = %#v, want %#v", got, want)
 	}
 }
 
@@ -189,6 +232,77 @@ func TestPreflightContextTotalIncludesHostAndGPU(t *testing.T) {
 	}
 	if got := preflightContextTotalMB(devs); got != 6932 {
 		t.Fatalf("total context = %d MiB, want 6932", got)
+	}
+}
+
+func TestParseIKAllocationDevicesSeparatesModelContextAndCompute(t *testing.T) {
+	logData := `llm_load_tensors:      CUDA0 buffer size =  9285.25 MiB
+llm_load_tensors:      CUDA1 buffer size = 10053.19 MiB
+llm_load_tensors: CUDA_Host buffer size = 99957.50 MiB
+llama_kv_cache_init:      CUDA0 KV buffer size =   962.25 MiB
+llama_context:      CUDA0 compute buffer size =  7926.50 MiB
+llama_context:      CUDA1 compute buffer size =   298.20 MiB`
+	got := parseIKAllocationDevices(logData)
+	want := []preflightDevice{
+		{Name: "CUDA0", ModelMB: 9286, ContextMB: 963, ComputeMB: 7927},
+		{Name: "CUDA1", ModelMB: 10054, ComputeMB: 299},
+		{Name: "Host", ModelMB: 99958},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ik memory rows:\n got  %#v\n want %#v", got, want)
+	}
+}
+
+func TestGuardPeakAddsOnlyUnaccountedAllocatorBytes(t *testing.T) {
+	parsed := []preflightDevice{{Name: "CUDA0", ModelMB: 100, ContextMB: 20, ComputeMB: 30}}
+	summary := memprobe.Summary{Devices: map[int]memprobe.DeviceMemory{
+		0: {ID: "CUDA0", PeakBytes: 175 * 1024 * 1024},
+		3: {ID: "CUDA3", PeakBytes: 64 * 1024 * 1024},
+	}}
+	got := reconcileGuardedDevices(parsed, summary)
+	want := []preflightDevice{
+		{Name: "CUDA0", ModelMB: 100, ContextMB: 20, ComputeMB: 30, UnaccountedMB: 25},
+		{Name: "CUDA3", UnaccountedMB: 64},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("guard reconciliation = %#v, want %#v", got, want)
+	}
+}
+
+func TestBackendAllocationDryRunMustBeAdvertisedExactly(t *testing.T) {
+	if !backendSupportsAllocationDryRun(&backendInfo{Help: "  --dry-run   validate allocations"}) {
+		t.Fatal("advertised --dry-run was not detected")
+	}
+	if backendSupportsAllocationDryRun(&backendInfo{Help: "--dry-run-mode experimental"}) {
+		t.Fatal("a similarly named option must not authorize an automatic probe")
+	}
+}
+
+func TestMemoryEvidenceKeyIncludesHostAllocationFlags(t *testing.T) {
+	be := &backendInfo{Identity: "ik-build-a"}
+	model := &placement.ModelProfile{Path: "model.gguf", SizeBytes: 1234}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 24576}}}
+	resident := memoryEvidenceKey(be, model, caps, []string{"llama-server", "-m", "model.gguf", "--no-mmap"})
+	mapped := memoryEvidenceKey(be, model, caps, []string{"llama-server", "-m", "model.gguf", "--mmap"})
+	if resident == mapped {
+		t.Fatal("resident and mmap launches shared allocation evidence key")
+	}
+}
+
+func TestMemoryEvidenceCacheRejectsOtherScope(t *testing.T) {
+	dir := t.TempDir()
+	evidence := memoryPlanEvidence{
+		Level: memoryEvidenceAllocated, Backend: "ik_llama",
+		Devices: []preflightDevice{{Name: "CUDA0", ModelMB: 1000, ComputeMB: 200}},
+	}
+	if err := saveMemoryEvidence(dir, "scope-a", evidence); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := loadMemoryEvidence(dir, "scope-a"); !ok || got.Level != evidence.Level || got.Backend != evidence.Backend || !reflect.DeepEqual(got.Devices, evidence.Devices) || !got.Coverage.Complete {
+		t.Fatalf("saved evidence did not round-trip as complete evidence: ok=%v got=%#v", ok, got)
+	}
+	if _, ok := loadMemoryEvidence(dir, "scope-b"); ok {
+		t.Fatal("memory evidence crossed launch scopes")
 	}
 }
 

@@ -2,10 +2,13 @@ package server
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -104,6 +107,141 @@ func TestOverrideEnvReplacesInheritedGPUVisibility(t *testing.T) {
 	}
 }
 
+func TestScopedCommandArgsWrapsMemoryMax(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-run memory scopes are Linux-only")
+	}
+	systemdRun, err := exec.LookPath("systemd-run")
+	if err != nil {
+		t.Skip("systemd-run not installed")
+	}
+	got, err := scopedCommandArgs([]string{"llama-server", "-m", "model.gguf"}, 64000)
+	if err != nil {
+		t.Fatalf("scopedCommandArgs: %v", err)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{systemdRun, "--user", "--scope", "MemoryAccounting=yes", "MemoryMax=64000M", "MemorySwapMax=0", "OOMPolicy=kill", "KillMode=control-group", "llama-server"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("scoped argv %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(strings.Join(got, " "), "--collect") {
+		t.Fatal("memory scope must remain inspectable until OOM counters are captured")
+	}
+}
+
+func TestScopedCommandArgsClampsMemoryHighToMax(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-run memory scopes are Linux-only")
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run not installed")
+	}
+	got, err := scopedCommandArgsWithLimits([]string{"llama-server"}, 70000, 64000, "test.scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "MemoryHigh=64000M") || strings.Contains(joined, "MemoryHigh=70000M") {
+		t.Fatalf("MemoryHigh was not clamped to MemoryMax: %s", joined)
+	}
+}
+
+func TestCommandWithEnvironmentKeepsOverridesInsideScope(t *testing.T) {
+	got := commandWithEnvironment([]string{"llama-server", "-m", "model.gguf"}, []string{"LD_PRELOAD=/guard.so", "CUDA_VISIBLE_DEVICES=2"})
+	want := []string{"/usr/bin/env", "LD_PRELOAD=/guard.so", "CUDA_VISIBLE_DEVICES=2", "llama-server", "-m", "model.gguf"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("commandWithEnvironment = %q, want %q", got, want)
+	}
+}
+
+func TestStartWithMemoryScopeStopsScopedChildOnFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-run memory scopes are Linux-only")
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run not installed")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "backend.pid")
+	script := filepath.Join(dir, "backend.sh")
+	content := "#!/bin/sh\necho $$ > '" + pidFile + "'\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	p, err := StartWithTimeoutToOptions([]string{script}, 59997, 100*time.Millisecond, &out, &out, StartOptions{MemoryMaxMB: 64})
+	if err == nil {
+		if p != nil {
+			_ = p.Stop()
+		}
+		t.Fatal("expected startup timeout")
+	}
+	data, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("backend did not record its pid: %v", readErr)
+	}
+	pidText := strings.TrimSpace(string(data))
+	pid, convErr := strconv.Atoi(pidText)
+	if convErr != nil {
+		t.Fatalf("bad backend pid %q: %v", pidText, convErr)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isProcessAlive(pid) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("scoped backend child pid %d survived failed startup cleanup", pid)
+}
+
+func TestMemoryScopeOOMHelper(t *testing.T) {
+	if os.Getenv("GGRUN_TEST_MEMORY_SCOPE_OOM") != "1" {
+		return
+	}
+	buf := make([]byte, 128<<20)
+	for i := 0; i < len(buf); i += 4096 {
+		buf[i] = 1
+	}
+	runtime.KeepAlive(buf)
+	select {}
+}
+
+func TestStartWithMemoryScopeCapturesOOMCounters(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-run memory scopes are Linux-only")
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run not installed")
+	}
+	p, err := StartWithTimeoutToOptions(
+		[]string{os.Args[0], "-test.run=^TestMemoryScopeOOMHelper$"},
+		59996,
+		10*time.Second,
+		io.Discard,
+		io.Discard,
+		StartOptions{EnvOverrides: []string{"GGRUN_TEST_MEMORY_SCOPE_OOM=1"}, MemoryMaxMB: 32},
+	)
+	if err == nil {
+		if p != nil {
+			_ = p.Stop()
+		}
+		t.Fatal("expected contained helper to exceed MemoryMax")
+	}
+	if p == nil {
+		t.Fatal("failed startup did not return process evidence")
+	}
+	oomKills, oomErr := p.MemoryOOMKillCount()
+	if oomErr != nil || oomKills == 0 {
+		t.Fatalf("oom_kill=%d, err=%v", oomKills, oomErr)
+	}
+	peak, peakErr := p.MemoryPeakBytes()
+	if peakErr != nil || peak == 0 {
+		t.Fatalf("memory.peak=%d, err=%v", peak, peakErr)
+	}
+}
+
 func TestWaitReadyTimeout(t *testing.T) {
 	p := &Process{Port: 59999} // no server here
 	err := p.waitReady(100 * time.Millisecond)
@@ -199,7 +337,7 @@ func TestStartupStatusIncludesProgressAndLatestLine(t *testing.T) {
 	for _, want := range []string{
 		"[##########----------]  50%",
 		"loading model weights",
-		"1m30s/30m0s",
+		"elapsed 1m30s (limit 30m0s)",
 		"read 1.0GiB/2.0GiB",
 		"load_tensors: loading model tensors",
 	} {
@@ -216,6 +354,21 @@ func TestStartupStatusHidesUnknownZeroProgress(t *testing.T) {
 	}
 	if !strings.Contains(got, "loading model weights") {
 		t.Fatalf("phase should remain visible without byte progress: %q", got)
+	}
+}
+
+func TestStartupStatusShowsFinalizingWhenNearlyAllWeightsRead(t *testing.T) {
+	got := startupStatus("load_tensors: loading model tensors", 4*time.Minute, 30*time.Minute, loadProgress{
+		Done: 96 << 30, Total: 100 << 30,
+	})
+	if !strings.Contains(got, " 96%") {
+		t.Fatalf("near-complete reads should retain byte progress: %q", got)
+	}
+	if !strings.Contains(got, "finalizing model load (most weights read)") {
+		t.Fatalf("near-complete reads should not look like ordinary tensor loading: %q", got)
+	}
+	if !strings.Contains(got, "elapsed 4m0s (limit 30m0s)") {
+		t.Fatalf("startup timeout must not look like an ETA: %q", got)
 	}
 }
 

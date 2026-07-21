@@ -1,6 +1,7 @@
 package update
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -183,5 +184,117 @@ func TestInstalledSourceRepoDirEnvOverride(t *testing.T) {
 	t.Setenv("LLM_APP_HOME", filepath.Join(t.TempDir(), "app"))
 	if got := installedSourceRepoDir(); got != want {
 		t.Fatalf("source repo override mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestCMakeConfigureArgsPinsSourceAndStagingBuild(t *testing.T) {
+	got := cmakeConfigureArgs("/backend/repo", "/backend/build.ggrun-update", []string{"-DGGML_CUDA=ON"})
+	want := []string{"-S", "/backend/repo", "-B", "/backend/build.ggrun-update", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON", "-DGGML_CUDA=ON"}
+	if len(got) != len(want) {
+		t.Fatalf("configure args = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("configure arg %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCollectCMakeFlagsPreservesAccelerator(t *testing.T) {
+	buildDir := t.TempDir()
+	cache := "GGML_CUDA:BOOL=ON\nGGML_CUDA_NCCL:BOOL=ON\nGGML_VULKAN:BOOL=ON\nGGML_METAL:BOOL=ON\n"
+	if err := os.WriteFile(filepath.Join(buildDir, "CMakeCache.txt"), []byte(cache), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := collectCMakeFlags(buildDir)
+	for _, want := range []string{"-DGGML_CUDA=ON", "-DGGML_CUDA_NCCL=ON", "-DGGML_VULKAN=ON", "-DGGML_METAL=ON"} {
+		found := false
+		for _, flag := range got {
+			if flag == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q in %#v", want, got)
+		}
+	}
+}
+
+func TestPromoteBackendBuildReplacesWholeDirectory(t *testing.T) {
+	root := t.TempDir()
+	buildDir := filepath.Join(root, "build")
+	stagingDir := buildDir + ".ggrun-update"
+	if err := os.MkdirAll(filepath.Join(buildDir, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(buildDir, "bin", "llama-server"), []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stagingDir, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "bin", "llama-server"), []byte("new"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := promoteBackendBuild(buildDir, stagingDir, nil); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(buildDir, "bin", "llama-server"))
+	if err != nil || string(data) != "new" {
+		t.Fatalf("active binary = %q, err=%v", data, err)
+	}
+	if _, err := os.Stat(buildDir + ".ggrun-backup"); !os.IsNotExist(err) {
+		t.Fatalf("backup was not cleaned: %v", err)
+	}
+}
+
+func TestPromoteBackendBuildRecoversInterruptedBackup(t *testing.T) {
+	root := t.TempDir()
+	buildDir := filepath.Join(root, "build")
+	backupDir := buildDir + ".ggrun-backup"
+	stagingDir := buildDir + ".ggrun-update"
+	for _, dir := range []string{backupDir, stagingDir} {
+		if err := os.MkdirAll(filepath.Join(dir, "bin"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(backupDir, "bin", "llama-server"), []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "bin", "llama-server"), []byte("new"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := promoteBackendBuild(buildDir, stagingDir, nil); err != nil {
+		t.Fatalf("recover and promote: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(buildDir, "bin", "llama-server"))
+	if err != nil || string(data) != "new" {
+		t.Fatalf("active binary = %q, err=%v", data, err)
+	}
+}
+
+func TestPromoteBackendBuildRollsBackFailedValidation(t *testing.T) {
+	root := t.TempDir()
+	buildDir := filepath.Join(root, "build")
+	stagingDir := buildDir + ".ggrun-update"
+	for _, dir := range []string{buildDir, stagingDir} {
+		if err := os.MkdirAll(filepath.Join(dir, "bin"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(buildDir, "bin", "llama-server"), []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "bin", "llama-server"), []byte("new"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("invalid backend")
+	if err := promoteBackendBuild(buildDir, stagingDir, func(string) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("promote error = %v, want %v", err, wantErr)
+	}
+	data, err := os.ReadFile(filepath.Join(buildDir, "bin", "llama-server"))
+	if err != nil || string(data) != "old" {
+		t.Fatalf("rollback binary = %q, err=%v", data, err)
 	}
 }

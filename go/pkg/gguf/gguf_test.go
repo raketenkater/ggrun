@@ -94,6 +94,38 @@ func TestParseSizesTensorsByDiskSpan(t *testing.T) {
 	}
 }
 
+func TestParseReportsPerLayerExpertTransferBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "layer-bytes.gguf")
+	writeGGUFFixture(t, path, []fixtureTensor{
+		{name: "token_embd.weight", elems: 64, ttype: 39, offset: 0},
+		{name: "blk.0.ffn_gate_exps.weight", elems: 64, ttype: 39, offset: 64},
+		{name: "blk.0.ffn_gate_shexp.weight", elems: 64, ttype: 39, offset: 128},
+		{name: "blk.0.ffn_gate_inp.weight", elems: 64, ttype: 39, offset: 192},
+		{name: "output.weight", elems: 64, ttype: 39, offset: 256},
+	}, 32, 320)
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(info.RoutedExpertLayerBytes) != 1 || info.RoutedExpertLayerBytes[0] != 64 {
+		t.Fatalf("routed layer bytes = %v, want [64]", info.RoutedExpertLayerBytes)
+	}
+	if len(info.ShexpLayerBytes) != 1 || info.ShexpLayerBytes[0] != 64 {
+		t.Fatalf("shared layer bytes = %v, want [64]", info.ShexpLayerBytes)
+	}
+	if len(info.ExpertAuxLayerBytes) != 1 || info.ExpertAuxLayerBytes[0] != 64 {
+		t.Fatalf("routing layer bytes = %v, want [64]", info.ExpertAuxLayerBytes)
+	}
+	if info.ExpertAuxBytes != 64 {
+		t.Fatalf("routing total = %d, want 64", info.ExpertAuxBytes)
+	}
+	if len(info.NonExpertLayerBytes) != 0 {
+		t.Fatalf("router must not remain in base layer bytes: %v", info.NonExpertLayerBytes)
+	}
+}
+
 // Split model where the first shard is metadata-only (0 tensors) — the
 // DeepSeek-V4-Flash layout. Totals must come from the sibling shards.
 func TestParseSplitShardsMetadataOnlyFirst(t *testing.T) {

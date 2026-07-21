@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -80,6 +82,8 @@ func main() {
 		cmdDryRun(args[1:])
 	case "probe":
 		cmdProbe()
+	case "memory-probe":
+		cmdMemoryProbe(args[1:])
 	case "kv-probe":
 		cmdKVProbe(args[1:])
 	case "record-longctx-validation":
@@ -117,6 +121,7 @@ Commands:
   version              Show version
   detect               Detect hardware capabilities
   probe                Check free GPU/RAM memory
+  memory-probe <model> Measure a contained backend memory plan and stop (--json supported)
   kv-probe <model>     Measure real KV cache size (2 short launches) and cache it,
                        so context sizing is exact for compressed-attention models
   record-longctx-validation <model> --prompt-tokens N
@@ -145,8 +150,12 @@ Launch flags:
   -gpus string         Comma-separated GPU indices
   --backend string     auto|llama|ik_llama|registered backend tag
   --parallel int       Concurrent sequence slots
+  --mmap               Explicitly approve file-backed mmap when placement needs it
+  --no-mmap            Require fully resident model weights
+  --ram-limit-percent int  Maximum whole-host RAM utilisation (default 95)
   --vram-headroom str  Reserve VRAM the recommender/placement won't use, e.g. 2G
   --ram-headroom str   Reserve system RAM the recommender/placement won't use, e.g. 8G
+  --allow-live-memory-probe  Approve a contained full-load probe when no complete dry-run is available
   -vision              Enable vision (auto-detect mmproj)
   --claude-code        Serve locally and launch Claude Code with workflows/research
   --claude-profile str Claude Code scheduling (requires --claude-code): agent-interactive|agent-parallel
@@ -158,7 +167,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "record-longctx-validation", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "memory-probe", "kv-probe", "record-longctx-validation", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
 		return true
 	default:
 		return false
@@ -307,8 +316,16 @@ func activeLlamaServerMemoryHint() string {
 		if err != nil || len(cmdline) == 0 {
 			continue
 		}
+		exe, _ := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		argv0 := string(cmdline)
+		if end := strings.IndexByte(argv0, 0); end >= 0 {
+			argv0 = argv0[:end]
+		}
+		if !isLlamaServerExecutable(exe) && !isLlamaServerExecutable(argv0) {
+			continue
+		}
 		cmd := strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " "))
-		if cmd == "" || !strings.Contains(strings.ToLower(cmd), "llama-server") {
+		if cmd == "" {
 			continue
 		}
 		procs = append(procs, activeLlamaServerProcess{pid: pid, rssMB: procRSSMB(pid), cmd: compactProcessCommand(cmd, 180)})
@@ -330,6 +347,11 @@ func activeLlamaServerMemoryHint() string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func isLlamaServerExecutable(path string) bool {
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
+	return strings.Contains(name, "llama-server") || strings.Contains(name, "ik_llama-server")
 }
 
 func procRSSMB(pid int) int {
@@ -411,7 +433,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--batch-size", "-b", "--ubatch-size", "-ub":
 				skip = true
 			}
 			continue
@@ -436,42 +458,45 @@ func cmdDetect() {
 }
 
 type launchRequest struct {
-	ModelPath          string
-	Port               int
-	CtxFlag            string
-	KVPlacement        string
-	KVQuality          string
-	KVTypeK            string // explicit llama.cpp --cache-type-k override
-	KVTypeV            string // explicit llama.cpp --cache-type-v override
-	CPUMode            bool
-	GPUsFlag           string
-	Host               string
-	VisionAuto         bool
-	MMProjPath         string
-	ServerBin          string
-	ServerBinExplicit  bool
-	Backend            string
-	BackendExplicit    bool
-	TuneCache          string
-	SpecMode           string
-	ForceSpecMoE       bool
-	RamBudgetMB        int
-	VRAMHeadroomMB     int
-	RAMHeadroomMB      int
-	NoMMap             bool
-	Parallel           int
-	ParallelSet        bool // --parallel given explicitly; claude-code mode must not override it
-	BatchSize          int
-	BatchSizeSet       bool
-	UBatchSize         int
-	UBatchSizeSet      bool
-	Benchmark          bool
-	ClaudeCode         bool
-	ClaudeProfile      string // agent-interactive avoids the automatic parallel-4 floor
-	Calibrate          string // "auto" (default: calibrate unproven small models), "on" (force), "off"
-	EmitServerArgvJSON bool   // dry-run machine interface for reproducible benchmark harnesses
-	SpecDraftMax       int    // internal spec-test ceiling; not a public launch override
-	ExtraArgs          []string
+	ModelPath            string
+	Port                 int
+	CtxFlag              string
+	KVPlacement          string
+	KVQuality            string
+	KVTypeK              string // explicit llama.cpp --cache-type-k override
+	KVTypeV              string // explicit llama.cpp --cache-type-v override
+	CPUMode              bool
+	GPUsFlag             string
+	Host                 string
+	VisionAuto           bool
+	MMProjPath           string
+	ServerBin            string
+	ServerBinExplicit    bool
+	Backend              string
+	BackendExplicit      bool
+	TuneCache            string
+	SpecMode             string
+	ForceSpecMoE         bool
+	RamBudgetMB          int
+	RAMLimitPercent      int
+	VRAMHeadroomMB       int
+	RAMHeadroomMB        int
+	AllowLiveMemoryProbe bool
+	NoMMap               bool
+	ForceMMap            bool
+	Parallel             int
+	ParallelSet          bool // --parallel given explicitly; claude-code mode must not override it
+	BatchSize            int
+	BatchSizeSet         bool
+	UBatchSize           int
+	UBatchSizeSet        bool
+	Benchmark            bool
+	ClaudeCode           bool
+	ClaudeProfile        string // agent-interactive avoids the automatic parallel-4 floor
+	Calibrate            string // "auto" (default: calibrate unproven small models), "on" (force), "off"
+	EmitServerArgvJSON   bool   // dry-run machine interface for reproducible benchmark harnesses
+	SpecDraftMax         int    // internal spec-test ceiling; not a public launch override
+	ExtraArgs            []string
 	// ReviewerReservation holds the Claude Auto reviewer's placement companion
 	// for the whole launch. placementOptionsFromRequest attaches it to every
 	// Compute — including OOM/preflight/spec re-plans — so the reviewer's VRAM
@@ -502,6 +527,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		BackendExplicit: backendExplicit,
 		SpecMode:        cfg.Spec,
 		Parallel:        cfg.Parallel,
+		RamBudgetMB:     parseBudgetMB(cfg.RamBudget),
+		RAMLimitPercent: cfg.RAMLimitPercent,
 		VRAMHeadroomMB:  parseBudgetMB(cfg.VRAMHeadroom),
 		RAMHeadroomMB:   parseBudgetMB(cfg.RAMHeadroom),
 	}
@@ -525,6 +552,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		a := args[i]
 		if key, val, ok := strings.Cut(a, "="); ok && strings.HasPrefix(key, "-") {
 			switch key {
+			case "--allow-live-memory-probe":
+				req.AllowLiveMemoryProbe = val == "" || parseBoolFlag(val)
+				continue
 			case "--model", "-m":
 				req.ModelPath = val
 				continue
@@ -583,6 +613,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				}
 				req.RamBudgetMB = budget
 				continue
+			case "--ram-limit-percent":
+				percent, err := config.ParseRAMLimitPercent(val)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", key, err)
+				}
+				req.RAMLimitPercent = percent
+				continue
 			case "--vram-headroom":
 				budget, err := parseBudgetFlag(key, val)
 				if err != nil {
@@ -599,6 +636,15 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--no-mmap":
 				req.NoMMap = val == "" || parseBoolFlag(val)
+				if req.NoMMap {
+					req.ForceMMap = false
+				}
+				continue
+			case "--mmap":
+				req.ForceMMap = val == "" || parseBoolFlag(val)
+				if req.ForceMMap {
+					req.NoMMap = false
+				}
 				continue
 			case "--spec":
 				req.SpecMode = val
@@ -642,6 +688,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			return args[i], nil
 		}
 		switch a {
+		case "--allow-live-memory-probe":
+			req.AllowLiveMemoryProbe = true
+			continue
 		case "--benchmark":
 			req.Benchmark = true
 			continue
@@ -737,6 +786,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.ClaudeProfile = profile
 		case "--no-mmap":
 			req.NoMMap = true
+			req.ForceMMap = false
+		case "--mmap":
+			req.ForceMMap = true
+			req.NoMMap = false
 		case "--mmproj":
 			v, err := next()
 			if err != nil {
@@ -782,6 +835,16 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.RamBudgetMB = budget
+		case "--ram-limit-percent":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			percent, err := config.ParseRAMLimitPercent(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", a, err)
+			}
+			req.RAMLimitPercent = percent
 		case "--vram-headroom":
 			v, err := next()
 			if err != nil {
@@ -1015,10 +1078,23 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 		a := args[i]
 		if a == "--no-mmap" {
 			req.NoMMap = true
+			req.ForceMMap = false
 			continue
 		}
 		if key, val, ok := strings.Cut(a, "="); ok && key == "--no-mmap" {
 			req.NoMMap = val == "" || parseBoolFlag(val)
+			continue
+		}
+		if a == "--mmap" {
+			req.ForceMMap = true
+			req.NoMMap = false
+			continue
+		}
+		if key, val, ok := strings.Cut(a, "="); ok && key == "--mmap" {
+			req.ForceMMap = val == "" || parseBoolFlag(val)
+			if req.ForceMMap {
+				req.NoMMap = false
+			}
 			continue
 		}
 		out = append(out, a)
@@ -1279,9 +1355,12 @@ func placementOptionsFromRequest(req *launchRequest, model *placement.ModelProfi
 		KVQuality:              req.KVQuality,
 		CPUMode:                req.CPUMode,
 		RamBudgetMB:            req.RamBudgetMB,
+		RAMLimitPercent:        req.RAMLimitPercent,
 		VRAMHeadroomMB:         req.VRAMHeadroomMB,
 		RAMHeadroomMB:          req.RAMHeadroomMB,
+		RequireMeasuredBuffers: true,
 		NoMMap:                 req.NoMMap,
+		ForceMMap:              req.ForceMMap,
 		CacheDir:               cacheDir,
 		Host:                   req.Host,
 		BackendTag:             backendDialect(be),
@@ -1540,7 +1619,110 @@ func claudeLaunchLogScope(req *launchRequest, model *placement.ModelProfile, be 
 	return fmt.Sprintf("%x", sum[:12])
 }
 
-func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, serverArgs []string, timeout time.Duration) (*server.Process, error) {
+func backendMemoryMaxMB(req *launchRequest, caps *detect.Capabilities) int {
+	if req == nil || caps == nil {
+		return 0
+	}
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	limit := caps.RAM.FreeMB
+	if req.RamBudgetMB > 0 && (limit <= 0 || req.RamBudgetMB < limit) {
+		limit = req.RamBudgetMB
+	} else if req.RamBudgetMB <= 0 && req.RAMLimitPercent > 0 {
+		if percentLimit := detect.RAMLimitMB(caps.RAM, req.RAMLimitPercent); percentLimit < limit {
+			limit = percentLimit
+		}
+	}
+	if req.RAMHeadroomMB > 0 {
+		limit -= req.RAMHeadroomMB
+	}
+	if limit <= 0 {
+		return 0
+	}
+	return limit
+}
+
+func validateHostMemoryContainment(req *launchRequest, caps *detect.Capabilities, strategy *placement.Strategy) error {
+	if runtime.GOOS != "linux" || req == nil || caps == nil || strategy == nil {
+		return nil
+	}
+	hostMemoryPlacement := strategy.Type == placement.CPUOnly ||
+		strategy.Type == placement.DenseCPUOffload ||
+		strategy.Type == placement.MoEOffload
+	if !hostMemoryPlacement {
+		return nil
+	}
+	if req.RamBudgetMB <= 0 && req.RAMHeadroomMB <= 0 && req.RAMLimitPercent <= 0 {
+		return fmt.Errorf(
+			"%s placement uses host RAM and requires --ram-limit-percent, --ram-budget, or --ram-headroom",
+			strategy.Type,
+		)
+	}
+	if backendMemoryMaxMB(req, caps) <= 0 {
+		return fmt.Errorf("host-memory containment limit is not positive")
+	}
+	return nil
+}
+
+func confirmRequiredMMap(req *launchRequest, strategy *placement.Strategy, input io.Reader, output io.Writer, interactive bool) error {
+	if req == nil || strategy == nil || !strategy.MMapRequired || req.ForceMMap {
+		return nil
+	}
+	if !interactive {
+		return fmt.Errorf("placement requires file-backed mmap; rerun with --mmap to approve it explicitly")
+	}
+	fmt.Fprint(output, "Placement requires file-backed mmap and may page model weights from disk. Use mmap? [y/N] ")
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return fmt.Errorf("read mmap confirmation: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		req.ForceMMap = true
+		req.NoMMap = false
+		return nil
+	default:
+		return fmt.Errorf("mmap declined; use --no-mmap with a placement that fits resident RAM")
+	}
+}
+
+func confirmLiveMemoryProbe(req *launchRequest, reason string, input io.Reader, output io.Writer, interactive bool) error {
+	if req == nil {
+		return fmt.Errorf("live memory probe approval requires a launch request")
+	}
+	if req.AllowLiveMemoryProbe {
+		return nil
+	}
+	if !interactive {
+		return fmt.Errorf("%s; rerun with --allow-live-memory-probe", reason)
+	}
+	fmt.Fprintf(output, "%s. Run one contained live memory probe? This can take as long as loading the model. [y/N] ", reason)
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return fmt.Errorf("read live memory probe confirmation: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		req.AllowLiveMemoryProbe = true
+		return nil
+	default:
+		return fmt.Errorf("live memory probe declined")
+	}
+}
+
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func backendStartOptions(req *launchRequest, caps *detect.Capabilities, envOverrides []string) server.StartOptions {
+	memoryMaxMB := backendMemoryMaxMB(req, caps)
+	return server.StartOptions{EnvOverrides: envOverrides, MemoryHighMB: memoryMaxMB, MemoryMaxMB: memoryMaxMB}
+}
+
+func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration) (*server.Process, error) {
+	startOpts := backendStartOptions(req, caps, nil)
 	if req.ClaudeCode {
 		// In Claude Code mode ggrun hands the terminal to the `claude` client, so
 		// the backend's ongoing per-request logs must go to a file instead of
@@ -1551,10 +1733,10 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement
 			_, _ = fmt.Fprintf(lf, "[ggrun] launch-scope: %s\n", scope)
 			_, _ = fmt.Fprintf(lf, "[ggrun] launch: %s\n", formatCommand(serverArgs))
 			fmt.Printf("[claude-code] backend logs -> %s\n", logPath)
-			return server.StartWithTimeoutTo(serverArgs, req.Port, timeout, lf, lf)
+			return server.StartWithTimeoutToOptions(serverArgs, req.Port, timeout, lf, lf, startOpts)
 		}
 	}
-	return server.StartWithTimeout(serverArgs, req.Port, timeout)
+	return server.StartWithTimeoutToOptions(serverArgs, req.Port, timeout, os.Stdout, os.Stderr, startOpts)
 }
 
 func claudeServerLogPath(cfg *config.Config, port int, scope string) string {
@@ -1641,10 +1823,12 @@ func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *b
 
 func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration) (*server.Process, *placement.Strategy, []string, error) {
 	const maxRetries = 2
+	const maxPreflightReplans = 5
 	retries := 0
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
 	specDisabled := false
+	measuredProductionArgs := ""
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
 	placementOpts := func() placement.Options {
 		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
@@ -1676,9 +1860,18 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 		// A measured deficit re-plans exactly like a startup CUDA OOM would —
 		// without paying for the load to learn it. Re-planned args loop back
 		// here, so every retry is re-gated too.
-		if preflightReplans < 3 && strategy != nil {
-			dev, deficit, bad, companionRejected := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
-			if companionRejected {
+		if strategy != nil {
+			preflight := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
+			if preflight.Err != nil {
+				if consent, ok := preflight.Err.(*liveMemoryProbeConsentError); ok {
+					if err := confirmLiveMemoryProbe(req, consent.Reason, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+						return nil, strategy, serverArgs, err
+					}
+					continue
+				}
+				return nil, strategy, serverArgs, fmt.Errorf("memory preflight failed closed: %w", preflight.Err)
+			}
+			if preflight.CompanionRejected {
 				specDisabled = true
 				opts := placementOpts()
 				opts.SkipPlacementCache = false
@@ -1694,24 +1887,74 @@ func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, mode
 				fmt.Fprintln(os.Stderr, "[launch] continuing with stable target-only serving")
 				continue
 			}
-			if bad {
-				preflightReplans++
-				physicalDev := physicalGPUIndex(dev, visibleToPhysical)
-				oomPenalty[physicalDev] += deficit
-				if s, rerr := placement.ReplanAfterOOM(caps, model, placementOpts(), oomPenalty); rerr == nil && s != nil && s.OTString != "" {
-					fmt.Fprintf(os.Stderr, "[launch] preflight re-plan (n-cpu-moe=%d)\n", s.NCPUMoE)
-					serverArgs = patchPlacementArgs(serverArgs, s)
-					strategy = s
-					continue
+			if preflight.DoesNotFit {
+				if preflightReplans >= maxPreflightReplans {
+					return nil, strategy, serverArgs, fmt.Errorf("memory preflight did not converge after %d re-plans; refusing a real model load", maxPreflightReplans)
 				}
-				// No re-plan available (dense model, or packer can't shift
-				// further): fall through to the real launch — the preflight
-				// gate must never block a launch outright, and startup OOM
-				// recovery below still applies.
+				preflightReplans++
+				next, nextArgs, method, rerr := recoverPreflightOOM(
+					req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
+					strategy, serverArgs, oomPenalty, preflight,
+				)
+				if rerr != nil {
+					return nil, strategy, serverArgs, fmt.Errorf("memory preflight recovery failed closed: %w", rerr)
+				}
+				strategy, serverArgs = next, nextArgs
+				fmt.Fprintf(os.Stderr,
+					"[launch] preflight %s after CUDA%d allocation %d MiB (deficit %d MiB, n-cpu-moe=%d, ubatch=%d)\n",
+					method, preflight.Device, preflight.AllocMB, preflight.DeficitMB, strategy.NCPUMoE, strategy.UBatchSize,
+				)
+				continue
+			}
+			if preflight.Evidence.Level != memoryEvidenceNone {
+				opts := placementOpts()
+				opts.SkipPlacementCache = true
+				next, rerr := placement.Compute(caps, model, opts)
+				if rerr != nil || next == nil {
+					if rerr != nil {
+						return nil, strategy, serverArgs, fmt.Errorf("backend-measured placement recompute failed: %w", rerr)
+					}
+					return nil, strategy, serverArgs, fmt.Errorf("backend-measured placement recompute returned no strategy")
+				}
+				claudeCodeSlotAdjust(next, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
+				nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, next)
+				if formatCommand(nextArgs) != formatCommand(serverArgs) {
+					strategy = next
+					serverArgs = nextArgs
+					if preflight.Evidence.Level == memoryEvidenceAllocated {
+						// The disposable live probe has already been stopped. Its
+						// complete allocator evidence is enough to choose the measured
+						// plan; start that plan once as the contained production server
+						// instead of paying for another disposable full model load.
+						fmt.Fprintln(os.Stderr, "[launch] allocation probe complete; starting a fresh server with the backend-measured configuration")
+						measuredProductionArgs = formatCommand(serverArgs)
+					} else {
+						if preflightReplans >= maxPreflightReplans {
+							return nil, strategy, serverArgs, fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)
+						}
+						preflightReplans++
+						fmt.Fprintf(os.Stderr, "[launch] backend-measured memory re-plan %d/%d; verifying the new placement\n", preflightReplans, maxPreflightReplans)
+						continue
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "[launch] memory plan stable at %s evidence\n", preflight.Evidence.Level)
+				}
 			}
 		}
-		p, err := startLaunchProcess(req, cfg, model, be, serverArgs, timeout)
+		if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+			return nil, strategy, serverArgs, err
+		}
+		// A preflight or OOM recovery can move additional expert layers to CPU
+		// after the initial launch confirmation. Re-check here so no re-plan can
+		// silently introduce disk-backed mmap before a real backend start.
+		if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+			return nil, strategy, serverArgs, err
+		}
+		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, timeout)
 		if err == nil {
+			if measuredProductionArgs != "" && measuredProductionArgs == formatCommand(serverArgs) {
+				fmt.Fprintln(os.Stderr, "[launch] backend-measured configuration loaded and passed health check")
+			}
 			// Persist the placement that actually loaded and passed the health
 			// check — and only that. Overwrite unconditionally: after an OOM
 			// re-plan the file on disk still holds the plan that just failed.
@@ -2084,6 +2327,14 @@ func cmdLaunch(args []string) {
 	// A prior calibration for this exact model/hardware/workload scope already
 	// measured the fastest placement; apply it instead of the estimate.
 	strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
+	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Start the reviewer on the GPU the planner chose (CPU when it placed -1).
 	claudeAuto, err := startClaudeAutoReviewer(req, cfg, caps, strategy.CompanionPlacements)
@@ -2123,6 +2374,9 @@ func cmdLaunch(args []string) {
 		serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 	}
 	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
+	if memMax := backendMemoryMaxMB(req, caps); memMax > 0 {
+		fmt.Printf("[launch] backend memory scope: MemoryMax=%d MiB\n", memMax)
+	}
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec]   %s\n", s)
 	}
@@ -2190,6 +2444,18 @@ func cmdLaunch(args []string) {
 				go recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
 			}
 		}
+	}
+	// A benchmarked Claude profile measures the exact Claude placement policy
+	// (reviewer reservation, slots, batch, sampling) without opening the
+	// interactive Claude client. This keeps calibration runs unattended and
+	// guarantees the measured server is stopped when the one-shot probe ends.
+	if req.Benchmark {
+		runOneShotBenchmark(req.Port, filepath.Base(req.ModelPath))
+		if err := p.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "[launch] stop after benchmark: %v\n", err)
+		}
+		claudeAuto.stop()
+		return
 	}
 	claudeClientPort := req.Port
 	if claudeAuto != nil {
@@ -2285,15 +2551,6 @@ func cmdLaunch(args []string) {
 		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs)
 	}
 
-	if req.Benchmark {
-		runOneShotBenchmark(req.Port, filepath.Base(req.ModelPath))
-		if err := p.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "[launch] stop after benchmark: %v\n", err)
-		}
-		claudeAuto.stop()
-		return
-	}
-
 	fmt.Println("[launch] Press Ctrl+C to stop")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
@@ -2379,14 +2636,10 @@ func cmdLaunch(args []string) {
 	case <-done:
 	case <-sigCh:
 		fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
-		if p.Cmd.Process != nil {
-			p.Cmd.Process.Kill()
-		}
+		p.Kill()
 	case <-time.After(30 * time.Second):
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
-		if p.Cmd.Process != nil {
-			p.Cmd.Process.Kill()
-		}
+		p.Kill()
 	}
 	claudeAuto.stop()
 }
@@ -2791,6 +3044,14 @@ func cmdKVProbe(args []string) {
 		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
 		os.Exit(1)
 	}
+	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 
@@ -2899,6 +3160,7 @@ func cmdDryRun(args []string) {
 			BackendTag    string            `json:"backend_tag"`
 			BackendID     string            `json:"backend_identity"`
 			ClaudeProfile string            `json:"claude_profile,omitempty"`
+			MemoryMaxMB   int               `json:"memory_max_mb,omitempty"`
 			Environment   map[string]string `json:"environment"`
 			ServerArgv    []string          `json:"server_argv"`
 		}{
@@ -2907,6 +3169,7 @@ func cmdDryRun(args []string) {
 			BackendTag:    be.Tag,
 			BackendID:     be.Identity,
 			ClaudeProfile: effectiveClaudeProfile(req),
+			MemoryMaxMB:   backendMemoryMaxMB(req, caps),
 			Environment:   launchPlanEnvironment(serverArgs, envPrefix, be.Path),
 			ServerArgv:    serverArgs,
 		}
@@ -3688,6 +3951,10 @@ func cmdRecommend(args []string) {
 	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
 
 	cfg := loadConfigOrExit()
+	if cfg.RAMLimitPercent > 0 {
+		fmt.Printf("RAM limit: %d%% whole-host utilisation\n", cfg.RAMLimitPercent)
+		caps = detect.ApplyRAMLimitPercent(caps, cfg.RAMLimitPercent)
+	}
 	if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
 		fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
 		caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
@@ -3794,9 +4061,20 @@ func cmdTune(args []string) {
 			return
 		}
 	}
+	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
+	if memMax := backendMemoryMaxMB(req, caps); memMax > 0 {
+		fmt.Printf("[tune] backend memory scope: MemoryMax=%d MiB\n", memMax)
+	}
 	if err := guardPortFree(req.Port, "AI Tune"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -3825,7 +4103,7 @@ func cmdTune(args []string) {
 			fmt.Println("[tune]", msg)
 		},
 		StartServer: func(flags []string) (func(), error) {
-			p, err := server.StartWithTimeout(flags, req.Port, timeout)
+			p, err := server.StartWithTimeoutToOptions(flags, req.Port, timeout, os.Stdout, os.Stderr, backendStartOptions(req, caps, nil))
 			if err != nil {
 				return nil, err
 			}
@@ -3913,6 +4191,10 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		ContextSize:     resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
 		KVPlacement:     cfg.KVPlacement,
 		KVQuality:       cfg.KVQuality,
+		RamBudgetMB:     parseBudgetMB(cfg.RamBudget),
+		RAMLimitPercent: cfg.RAMLimitPercent,
+		VRAMHeadroomMB:  parseBudgetMB(cfg.VRAMHeadroom),
+		RAMHeadroomMB:   parseBudgetMB(cfg.RAMHeadroom),
 		CacheDir:        cfg.CacheDir,
 		Host:            cfg.Host,
 		BackendTag:      backendDialect(be),
@@ -3935,6 +4217,8 @@ func cmdDaemon(args []string) {
 	port := fs.Int("port", 8081, "Server port")
 	controlPort := fs.Int("control-port", 9090, "Control API port")
 	startupTimeoutSecs := fs.Int("startup-timeout-secs", 300, "Max seconds to wait for llama-server to become healthy after start/reload")
+	memoryMaxMB := fs.Int("memory-max-mb", 0, "Required hard host-memory ceiling for the managed backend")
+	ramLimitPercent := fs.Int("ram-limit-percent", 0, "Override the configured whole-host RAM utilisation limit")
 	fs.Parse(args)
 	if _, err := config.ParsePort(strconv.Itoa(*port)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: --port %v\n", err)
@@ -3948,10 +4232,41 @@ func cmdDaemon(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: --startup-timeout-secs must be a positive integer")
 		os.Exit(2)
 	}
+	if *memoryMaxMB < 0 {
+		fmt.Fprintln(os.Stderr, "Error: --memory-max-mb must be non-negative")
+		os.Exit(2)
+	}
+	if *ramLimitPercent != 0 {
+		if _, err := config.ParseRAMLimitPercent(strconv.Itoa(*ramLimitPercent)); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --ram-limit-percent %v\n", err)
+			os.Exit(2)
+		}
+	}
 
 	if *modelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun daemon --model <model.gguf>")
 		os.Exit(2)
+	}
+	if *memoryMaxMB == 0 {
+		cfg := loadConfigOrExit()
+		caps, err := detect.Detect()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
+			os.Exit(1)
+		}
+		percent := cfg.RAMLimitPercent
+		if *ramLimitPercent != 0 {
+			percent = *ramLimitPercent
+		}
+		*memoryMaxMB = backendMemoryMaxMB(&launchRequest{
+			RamBudgetMB:     parseBudgetMB(cfg.RamBudget),
+			RAMLimitPercent: percent,
+			RAMHeadroomMB:   parseBudgetMB(cfg.RAMHeadroom),
+		}, caps)
+		if *memoryMaxMB <= 0 {
+			fmt.Fprintln(os.Stderr, "Error: configured RAM limit leaves no memory for the daemon backend")
+			os.Exit(1)
+		}
 	}
 
 	serverArgs, err := computeServerArgs(*modelPath, *port)
@@ -3965,6 +4280,7 @@ func cmdDaemon(args []string) {
 		ServerArgs:         serverArgs,
 		Port:               *port,
 		ControlPort:        *controlPort,
+		MemoryMaxMB:        *memoryMaxMB,
 		StartupTimeoutSecs: *startupTimeoutSecs,
 		// Let /reload recompute placement when handed a bare model path,
 		// so model swaps get the same auto-placement as the initial launch.
@@ -4222,6 +4538,12 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		TokenEmbdBytes:            info.TokenEmbdBytes,
 		OutputBytes:               info.OutputBytes,
 		ShexpBytes:                info.ShexpBytes,
+		ExpertAuxBytes:            info.ExpertAuxBytes,
+		ExpertLayerBytes:          append([]int64(nil), info.ExpertLayerBytes...),
+		RoutedExpertLayerBytes:    append([]int64(nil), info.RoutedExpertLayerBytes...),
+		ShexpLayerBytes:           append([]int64(nil), info.ShexpLayerBytes...),
+		ExpertAuxLayerBytes:       append([]int64(nil), info.ExpertAuxLayerBytes...),
+		NonExpertLayerBytes:       append([]int64(nil), info.NonExpertLayerBytes...),
 		Fused:                     info.Fused,
 		EmbeddingLength:           info.EmbeddingLength,
 		FeedForwardLength:         info.FeedForwardLength,
@@ -4273,6 +4595,12 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 			profile.TokenEmbdBytes = int64(float64(profile.TokenEmbdBytes) * scale)
 			profile.OutputBytes = int64(float64(profile.OutputBytes) * scale)
 			profile.ShexpBytes = int64(float64(profile.ShexpBytes) * scale)
+			profile.ExpertAuxBytes = int64(float64(profile.ExpertAuxBytes) * scale)
+			scaleLayerBytes(profile.ExpertLayerBytes, scale)
+			scaleLayerBytes(profile.RoutedExpertLayerBytes, scale)
+			scaleLayerBytes(profile.ShexpLayerBytes, scale)
+			scaleLayerBytes(profile.ExpertAuxLayerBytes, scale)
+			scaleLayerBytes(profile.NonExpertLayerBytes, scale)
 		}
 	}
 	// SizeBytes is authoritative after multi-shard discovery/rescaling. Keep the
@@ -4284,6 +4612,12 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	}
 
 	return profile, nil
+}
+
+func scaleLayerBytes(values []int64, scale float64) {
+	for i := range values {
+		values[i] = int64(float64(values[i]) * scale)
+	}
 }
 
 // totalModelSize returns the total bytes of a model, including all shards.

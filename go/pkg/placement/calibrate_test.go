@@ -11,7 +11,7 @@ func TestCalibrationCandidatesSingleGPUIsNoOp(t *testing.T) {
 	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}}}
 	model := &ModelProfile{Path: "m.gguf", IsMoE: true}
 	base := &Strategy{Type: MoEOffload, KVPlacement: "cpu"}
-	got := CalibrationCandidates(caps, model, base)
+	got := CalibrationCandidates(caps, model, base, Options{})
 	if len(got) != 1 || got[0].Name != "default" {
 		t.Fatalf("single GPU must not produce alternatives, got %+v", got)
 	}
@@ -22,7 +22,7 @@ func TestCalibrationCandidatesCPUOnlyIsNoOp(t *testing.T) {
 		{Index: 0, VRAMTotalMB: 24576}, {Index: 1, VRAMTotalMB: 12288},
 	}}
 	base := &Strategy{Type: CPUOnly}
-	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf"}, base)
+	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf"}, base, Options{})
 	if len(got) != 1 {
 		t.Fatalf("CPU-only must not produce alternatives, got %+v", got)
 	}
@@ -33,9 +33,14 @@ func TestCalibrationCandidatesMoEAddsKVAlternate(t *testing.T) {
 		{Index: 0, VRAMTotalMB: 24576, BandwidthMBps: 32000},
 		{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 8000},
 	}}
-	model := &ModelProfile{Path: "m.gguf", IsMoE: true}
+	model := &ModelProfile{
+		Path: "m.gguf", IsMoE: true, TotalSizeMB: 64 * 1024, NumLayers: 60, NumExperts: 128,
+		ExpertBytes: 56 * 1024 * 1024 * 1024, NonExpertBytes: 8 * 1024 * 1024 * 1024,
+	}
+	caps.RAM = detect.RAMInfo{TotalMB: 131072, FreeMB: 131072}
+	caps.CPU = detect.CPUInfo{Cores: 16}
 	base := &Strategy{Type: MoEOffload, KVPlacement: "cpu", NCPUMoE: 40, OTString: "blk.ffn=CPU"}
-	got := CalibrationCandidates(caps, model, base)
+	got := CalibrationCandidates(caps, model, base, Options{ContextSize: 8192, KVPlacement: "cpu"})
 	if len(got) != 2 {
 		t.Fatalf("MoE multi-GPU should offer a KV alternate, got %d candidates", len(got))
 	}
@@ -59,8 +64,14 @@ func TestCalibrationCandidatesMoEKVGPUFlipsToCPU(t *testing.T) {
 	caps := &detect.Capabilities{GPUs: []detect.GPU{
 		{Index: 0, VRAMTotalMB: 24576}, {Index: 1, VRAMTotalMB: 12288},
 	}}
+	caps.RAM = detect.RAMInfo{TotalMB: 131072, FreeMB: 131072}
+	caps.CPU = detect.CPUInfo{Cores: 16}
 	base := &Strategy{Type: MoEOffload, KVPlacement: "gpu"}
-	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf", IsMoE: true}, base)
+	model := &ModelProfile{
+		Path: "m.gguf", IsMoE: true, TotalSizeMB: 64 * 1024, NumLayers: 60, NumExperts: 128,
+		ExpertBytes: 56 * 1024 * 1024 * 1024, NonExpertBytes: 8 * 1024 * 1024 * 1024,
+	}
+	got := CalibrationCandidates(caps, model, base, Options{ContextSize: 8192, KVPlacement: "gpu"})
 	if len(got) != 2 || got[1].Strategy.KVPlacement != "cpu" {
 		t.Fatalf("KV=gpu should alternate to cpu, got %+v", got)
 	}
@@ -72,7 +83,7 @@ func TestCalibrationCandidatesDenseSplitInversion(t *testing.T) {
 		{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 8000},
 	}}
 	base := &Strategy{Type: MultiGPUDense, TensorSplit: []float64{0.75, 0.25}, MainGPU: 0}
-	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf"}, base)
+	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf"}, base, Options{})
 	if len(got) != 2 || got[1].Name != "split-inverted" {
 		t.Fatalf("dense multi-GPU should offer a split inversion, got %+v", got)
 	}
@@ -94,7 +105,7 @@ func TestCalibrationCandidatesDenseSymmetricSplitSkipped(t *testing.T) {
 		{Index: 0, VRAMTotalMB: 24576}, {Index: 1, VRAMTotalMB: 24576},
 	}}
 	base := &Strategy{Type: MultiGPUDense, TensorSplit: []float64{0.5, 0.5}, MainGPU: 0}
-	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf"}, base)
+	got := CalibrationCandidates(caps, &ModelProfile{Path: "m.gguf"}, base, Options{})
 	if len(got) != 1 {
 		t.Fatalf("a symmetric split inverts to itself and must be skipped, got %+v", got)
 	}

@@ -1581,7 +1581,7 @@ func estimateTargetVRAMUse(target *ModelProfile, caps *detect.Capabilities, gpuI
 	// For dense: proportional tensor-split based on VRAM free values
 	totalFree := 0
 	for _, g := range caps.GPUs {
-		free := g.VRAMTotalMB - g.VRAMUsedMB
+		free := g.VRAMFreeMB()
 		if free > 0 {
 			totalFree += free
 		}
@@ -1589,7 +1589,7 @@ func estimateTargetVRAMUse(target *ModelProfile, caps *detect.Capabilities, gpuI
 	if totalFree <= 0 {
 		return 0
 	}
-	share := float64(caps.GPUs[gpuIndex].VRAMTotalMB-caps.GPUs[gpuIndex].VRAMUsedMB) / float64(totalFree)
+	share := float64(caps.GPUs[gpuIndex].VRAMFreeMB()) / float64(totalFree)
 	return int(float64(target.TotalSizeMB) * vramOverheadPercent / 100 * share)
 }
 
@@ -1604,7 +1604,7 @@ func computeDraftKVType(caps *detect.Capabilities, draftInfo *gguf.Info) string 
 	// For draft models (typically < 2GB), q8_0 KV cache is fine
 	// on any GPU with > 4GB free. Use q4_0 on smaller GPUs.
 	for _, g := range caps.GPUs {
-		if g.VRAMTotalMB-g.VRAMUsedMB > 4096 {
+		if g.VRAMFreeMB() > 4096 {
 			return "q8_0"
 		}
 	}

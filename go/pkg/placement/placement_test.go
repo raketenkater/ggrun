@@ -1444,6 +1444,25 @@ func TestExpertOnlyCapacityRespectsCurrentFreeVRAM(t *testing.T) {
 	}
 }
 
+func TestRequireMeasuredBuffersRemovesColdGuessButUsesRecordedCompute(t *testing.T) {
+	cacheDir := t.TempDir()
+	gpus := []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 8192}}
+	caps := &detect.Capabilities{GPUs: gpus}
+	model := &ModelProfile{Path: "model.gguf", SizeBytes: 7000 * 1024 * 1024, TotalSizeMB: 7000, NumLayers: 32}
+	strategy := &Strategy{ContextSize: 32768, UBatchSize: 512, KVQuality: "mid", KVPlacement: "gpu"}
+	opts := Options{CacheDir: cacheDir, BackendTag: "llama", RequireMeasuredBuffers: true}
+
+	if got := chooseStrategy(caps, model, strategy, 7000, 500, opts); got != SingleGPU {
+		t.Fatalf("cold measured-only strategy = %s, want %s", got, SingleGPU)
+	}
+	if err := RecordMeasuredComputeBuffers(cacheDir, model, 32768, 512, "mid", "gpu", "llama", gpus, 0, map[int]int{0: 1200}); err != nil {
+		t.Fatal(err)
+	}
+	if got := chooseStrategy(caps, model, strategy, 7000, 500, opts); got != DenseCPUOffload {
+		t.Fatalf("recorded 1200 MiB compute was ignored: got %s", got)
+	}
+}
+
 // TestExpertOnlyCapacityTrigger verifies the OR capacity path: a GPU whose
 // PCIe link is fast enough to own dense layers (bandwidth ratio above 0.33)
 // but whose VRAM cannot fit the split-owner compute reserve plus one dense
@@ -1816,6 +1835,44 @@ func TestComputeMoEHeterogeneousMultiGPUExactLedger(t *testing.T) {
 		if usedMB > gpu.VRAMFreeMB() {
 			t.Fatalf("gpu %d over budget: used=%dMB free=%dMB split=%v ot=%s", gpu.Index, usedMB, gpu.VRAMFreeMB(), strat.TensorSplit, strat.OTString)
 		}
+	}
+}
+
+func TestComputeMoEExactLayerLedgerDoesNotDoubleChargeMovedTensors(t *testing.T) {
+	const mib64 = int64(1024 * 1024)
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 15360}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "exact-moe.gguf", NumLayers: 2, IsMoE: true, NumExperts: 8,
+		ContextSize: 4096, HiddenSize: 512, HeadCountKV: 1, KeyLength: 64, ValueLength: 64,
+		TokenEmbdBytes:         4 * 1024 * mib64,
+		ExpertBytes:            10 * 1024 * mib64,
+		NonExpertBytes:         (4*1024 + 2*1024 + 200) * mib64,
+		ShexpBytes:             2 * 1024 * mib64,
+		ExpertAuxBytes:         200 * mib64,
+		RoutedExpertLayerBytes: []int64{4 * 1024 * mib64, 4 * 1024 * mib64},
+		ShexpLayerBytes:        []int64{1024 * mib64, 1024 * mib64},
+		ExpertAuxLayerBytes:    []int64{100 * mib64, 100 * mib64},
+		NonExpertLayerBytes:    []int64{1024 * mib64, 1024 * mib64},
+	}
+	model.SizeBytes = model.ExpertBytes + model.NonExpertBytes
+	model.TotalSizeMB = bytesToMiBCeil(model.SizeBytes)
+
+	strat, err := Compute(caps, model, Options{
+		ContextSize: 4096, UBatchSize: 64, KVPlacement: "cpu", CacheDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("compute failed: %v", err)
+	}
+	if strat.NCPUMoE != 0 {
+		t.Fatalf("exact ledger should fit both routed layers without double-charging shared/router tensors; n-cpu-moe=%d, ot=%s", strat.NCPUMoE, strat.OTString)
+	}
+	layers := parseOTLayersByDevice(t, strat.OTString)[0]
+	if len(layers) != 2 {
+		t.Fatalf("expected both expert layers on GPU0, got %v in %s", layers, strat.OTString)
 	}
 }
 
@@ -3071,6 +3128,18 @@ func TestApplyRAMBudgetOverridesDetectedRAM(t *testing.T) {
 	}
 }
 
+func TestRAMBudgetOverridesPercentLimit(t *testing.T) {
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 128727, FreeMB: 125239},
+	}
+	if got := applyRAMPolicy(caps, Options{RAMLimitPercent: 90}).RAM.FreeMB; got != 112366 {
+		t.Fatalf("percent policy free RAM = %d, want 112366", got)
+	}
+	if got := applyRAMPolicy(caps, Options{RamBudgetMB: 64000, RAMLimitPercent: 90}).RAM.FreeMB; got != 64000 {
+		t.Fatalf("explicit RAM budget = %d, want 64000", got)
+	}
+}
+
 func TestCPUOnlyAutoContextUsesRAMBudget(t *testing.T) {
 	caps := &detect.Capabilities{
 		RAM: detect.RAMInfo{TotalMB: 8192, FreeMB: 1495},
@@ -3202,6 +3271,40 @@ func TestMmapDecisionIsVRAMAware(t *testing.T) {
 	}
 	if !small.MMap {
 		t.Errorf("small-VRAM MoE: CPU remainder overflows RAM, expected mmap (MMap=true), got MMap=false")
+	}
+}
+
+func TestIKLlamaCPUExpertsCannotUseMMapAsRAMCapacity(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, VRAMUsedMB: 1, VRAMReservedMB: 452, BandwidthMBps: 15760},
+			{Index: 1, Name: "RTX 3060", VRAMTotalMB: 12288, VRAMUsedMB: 1, VRAMReservedMB: 378, BandwidthMBps: 985},
+			{Index: 2, Name: "RTX 4070", VRAMTotalMB: 12282, VRAMUsedMB: 1, VRAMReservedMB: 408, BandwidthMBps: 3940},
+		},
+		RAM: detect.RAMInfo{TotalMB: 112160, FreeMB: 112160},
+		CPU: detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: "/models/MiniMax-M3.gguf", SizeBytes: 159407162624, TotalSizeMB: 152022,
+		NumLayers: 60, IsMoE: true, NumExperts: 128, ExpertUsedCount: 4, ExpertFF: 3072,
+		LeadingDense: 3, ExpertBytes: 151315808256, NonExpertBytes: 8083051008,
+		TokenEmbdBytes: 1008322560, OutputBytes: 1008322560, ShexpBytes: 2661285888,
+		ContextSize: 65536, CTXTrain: 1048576, HiddenSize: 6144, EmbeddingLength: 6144,
+		HeadCountKV: 4, KeyLength: 128, ValueLength: 128, ModelArch: "minimax-m3",
+	}
+	opts := Options{ContextSize: 65536, KVPlacement: "cpu", KVQuality: "high", UBatchSize: 512, BackendTag: "ik_llama", CacheDir: t.TempDir()}
+	_, err := Compute(caps, model, opts)
+	if err == nil || !strings.Contains(err.Error(), "anonymous CUDA-host memory") {
+		t.Fatalf("ik_llama mmap must not bypass resident RAM: %v", err)
+	}
+
+	opts.BackendTag = "llama"
+	strategy, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("file-backed backend should retain the mmap option: %v", err)
+	}
+	if !strategy.MMap || !strategy.MMapRequired {
+		t.Fatalf("expected explicit mmap confirmation marker, got mmap=%v required=%v", strategy.MMap, strategy.MMapRequired)
 	}
 }
 

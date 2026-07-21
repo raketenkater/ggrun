@@ -877,6 +877,15 @@ else
     elif [[ -x "$SRC_DIR/go/ggrun" ]]; then
         install_go_as_main "$SRC_DIR/go/ggrun" || true
     fi
+
+    if [[ "$OS" == "Linux" && "$BACKEND_CHOICE" == "cuda" && "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]]; then
+        [[ -d "$SRC_DIR/native/memguard" ]] || { err "CUDA source install is missing native/memguard"; exit 1; }
+        command -v make >/dev/null 2>&1 || { err "make is required to build the CUDA allocation firewall"; exit 1; }
+        command -v cc >/dev/null 2>&1 || { err "a C compiler is required to build the CUDA allocation firewall"; exit 1; }
+        make -C "$SRC_DIR/native/memguard" libggrun-memguard.so
+        install -m 0644 "$SRC_DIR/native/memguard/libggrun-memguard.so" "$INSTALL_DIR/libggrun-memguard.so"
+        ok "Installed CUDA allocation firewall"
+    fi
 fi
 
 if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR/ggrun" ]]; then

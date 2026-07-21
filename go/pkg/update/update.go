@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -802,7 +803,7 @@ func UpdateBackend(name, repoDir string, walkback int) error {
 			fmt.Printf("\n  ── Attempt %d/%d: walking back to %s ──\n", attempt+1, walkback, targetCommit)
 			gitCheckoutQuiet(repoDir, targetCommit)
 		}
-		if buildAndTest(buildDir, binary) {
+		if buildAndTest(repoDir, buildDir) {
 			successCommit = targetCommit
 			break
 		}
@@ -853,6 +854,7 @@ func UpdateBackend(name, repoDir string, walkback int) error {
 // UpdateBackends updates both ik_llama.cpp and llama.cpp if present.
 func UpdateBackends() error {
 	found := map[string]bool{}
+	var updateErrs []error
 	for _, repo := range backendUpdateCandidates() {
 		if _, err := os.Stat(repo.Dir); err != nil {
 			continue
@@ -860,6 +862,7 @@ func UpdateBackends() error {
 		found[repo.Label] = true
 		if err := UpdateBackend(repo.Label, repo.Dir, 3); err != nil {
 			fmt.Printf("  %s update failed: %v\n", repo.Label, err)
+			updateErrs = append(updateErrs, fmt.Errorf("%s: %w", repo.Label, err))
 		}
 	}
 	if !found["ik_llama.cpp"] {
@@ -868,7 +871,7 @@ func UpdateBackends() error {
 	if !found["llama.cpp"] {
 		fmt.Println("llama.cpp not found — skipping")
 	}
-	return nil
+	return errors.Join(updateErrs...)
 }
 
 func backendUpdateCandidates() []repoCandidate {
@@ -903,58 +906,125 @@ func backendUpdateCandidates() []repoCandidate {
 	return candidates
 }
 
-func buildAndTest(buildDir, binary string) bool {
+func buildAndTest(repoDir, buildDir string) bool {
 	nproc := 8
 	if out, err := exec.Command("nproc").Output(); err == nil {
 		nproc, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 		if nproc < 1 {
+			nproc = 1
+		} else if nproc > 8 {
 			nproc = 8
 		}
 	}
 
-	fmt.Println("  Building...")
-	cmd := exec.Command("cmake", "--build", buildDir, "--config", "Release", "-j", strconv.Itoa(nproc))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Println("  Build failed — trying clean reconfigure...")
-		cmakeFlags := collectCMakeFlags(buildDir)
-		os.RemoveAll(buildDir)
-		cmd1 := exec.Command("cmake", append([]string{"-B", buildDir, "-DCMAKE_BUILD_TYPE=Release"}, cmakeFlags...)...)
-		out1, err1 := cmd1.CombinedOutput()
-		if err1 != nil {
-			fmt.Printf("  Configure failed: %s\n", string(out1))
-			return false
-		}
-		cmd2 := exec.Command("cmake", "--build", buildDir, "--config", "Release", "-j", strconv.Itoa(nproc))
-		out2, err2 := cmd2.CombinedOutput()
-		if err2 != nil {
-			fmt.Printf("  Build failed at this commit.\n")
-			_ = out2
-			return false
-		}
-		_ = out
-		fmt.Println("  Clean rebuild succeeded")
-	} else {
-		lines := strings.Split(string(out), "\n")
-		for i := len(lines) - 5; i < len(lines); i++ {
-			if i >= 0 {
-				fmt.Println("  " + lines[i])
-			}
-		}
+	stagingDir := buildDir + ".ggrun-update"
+	if err := os.RemoveAll(stagingDir); err != nil {
+		fmt.Printf("  Cannot clean staging build: %v\n", err)
+		return false
 	}
+	defer os.RemoveAll(stagingDir)
 
-	if _, err := os.Stat(binary); err != nil {
-		fmt.Println("  Binary missing after build.")
+	fmt.Println("  Configuring isolated update build...")
+	if _, err := os.Stat(filepath.Join(buildDir, "CMakeCache.txt")); err != nil {
+		fmt.Printf("  Refusing to guess missing backend build configuration: %s\n", buildDir)
+		return false
+	}
+	cmakeFlags := collectCMakeFlags(buildDir)
+	configure := exec.Command("cmake", cmakeConfigureArgs(repoDir, stagingDir, cmakeFlags)...)
+	if out, err := configure.CombinedOutput(); err != nil {
+		fmt.Printf("  Configure failed: %s\n", tailLines(string(out), 8))
 		return false
 	}
 
-	// Shallow smoke: --version exits 0
-	cmd = exec.Command(binary, "--version")
-	if err := cmd.Run(); err != nil {
+	fmt.Println("  Building isolated update...")
+	build := exec.Command("cmake", "--build", stagingDir, "--config", "Release", "--parallel", strconv.Itoa(nproc), "--target", "llama-server")
+	if out, err := build.CombinedOutput(); err != nil {
+		fmt.Printf("  Build failed at this commit: %s\n", tailLines(string(out), 8))
+		return false
+	}
+
+	stagingBinary := filepath.Join(stagingDir, "bin", "llama-server")
+	if err := smokeBackend(stagingBinary); err != nil {
 		fmt.Println("  Binary crashes on --version at this commit.")
 		return false
 	}
+	validateActive := func(activeDir string) error {
+		return smokeBackend(filepath.Join(activeDir, "bin", "llama-server"))
+	}
+	if err := promoteBackendBuild(buildDir, stagingDir, validateActive); err != nil {
+		fmt.Printf("  Could not activate validated build: %v\n", err)
+		return false
+	}
+	fmt.Println("  Isolated build succeeded and was activated")
 	return true
+}
+
+func cmakeConfigureArgs(repoDir, buildDir string, flags []string) []string {
+	args := []string{"-S", repoDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON"}
+	return append(args, flags...)
+}
+
+func smokeBackend(binary string) error {
+	if info, err := os.Stat(binary); err != nil || info.IsDir() {
+		return fmt.Errorf("backend binary missing: %s", binary)
+	}
+	if err := exec.Command(binary, "--version").Run(); err != nil {
+		return fmt.Errorf("%s --version: %w", binary, err)
+	}
+	return nil
+}
+
+func promoteBackendBuild(buildDir, stagingDir string, validate func(string) error) error {
+	backupDir := buildDir + ".ggrun-backup"
+	if _, err := os.Stat(backupDir); err == nil {
+		if _, currentErr := os.Stat(buildDir); os.IsNotExist(currentErr) {
+			if err := os.Rename(backupDir, buildDir); err != nil {
+				return fmt.Errorf("recover interrupted promotion: %w", err)
+			}
+		} else {
+			return fmt.Errorf("stale backup requires inspection: %s", backupDir)
+		}
+	}
+
+	hadCurrent := false
+	if _, err := os.Stat(buildDir); err == nil {
+		hadCurrent = true
+		if err := os.Rename(buildDir, backupDir); err != nil {
+			return fmt.Errorf("preserve current build: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect current build: %w", err)
+	}
+
+	if err := os.Rename(stagingDir, buildDir); err != nil {
+		if hadCurrent {
+			_ = os.Rename(backupDir, buildDir)
+		}
+		return fmt.Errorf("activate staging build: %w", err)
+	}
+	if validate != nil {
+		if err := validate(buildDir); err != nil {
+			_ = os.Rename(buildDir, stagingDir)
+			if hadCurrent {
+				_ = os.Rename(backupDir, buildDir)
+			}
+			return fmt.Errorf("validate activated build: %w", err)
+		}
+	}
+	if hadCurrent {
+		if err := os.RemoveAll(backupDir); err != nil {
+			return fmt.Errorf("remove previous build backup: %w", err)
+		}
+	}
+	return nil
+}
+
+func tailLines(value string, count int) string {
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	if len(lines) > count {
+		lines = lines[len(lines)-count:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func collectCMakeFlags(buildDir string) []string {
@@ -974,6 +1044,12 @@ func collectCMakeFlags(buildDir string) []string {
 		}
 		if strings.HasPrefix(line, "GGML_CUDA_NCCL:BOOL=ON") {
 			flags = append(flags, "-DGGML_CUDA_NCCL=ON")
+		}
+		if strings.HasPrefix(line, "GGML_VULKAN:BOOL=ON") {
+			flags = append(flags, "-DGGML_VULKAN=ON")
+		}
+		if strings.HasPrefix(line, "GGML_METAL:BOOL=ON") {
+			flags = append(flags, "-DGGML_METAL=ON")
 		}
 		if strings.HasPrefix(line, "CMAKE_CUDA_ARCHITECTURES:") {
 			parts := strings.SplitN(line, "=", 2)

@@ -80,6 +80,16 @@ var builtinRecipes = []Recipe{
 		RouteArch:   "minimax-m3",
 		Accel:       "",
 	},
+	{
+		Name:        "laguna",
+		Description: "Poolside Laguna support from the open upstream llama.cpp PR",
+		Tag:         "laguna",
+		GitURL:      "https://github.com/joerowell/llama.cpp.git",
+		Branch:      "add-laguna",
+		Commit:      "54f214a09b8c4e709357ae661a77925edb154f13",
+		RouteArch:   "laguna",
+		Accel:       "",
+	},
 }
 
 // Recipes returns a copy of the reviewed built-in recipe catalog.
