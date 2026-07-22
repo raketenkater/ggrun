@@ -38,6 +38,8 @@ const (
 	DefaultReviewerURL         = "https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF/resolve/7d26695454df6de5fbcce2e58681e62dae06ce43/" + DefaultReviewerFile
 
 	maxRoutedRequestBytes = 16 << 20
+
+	textOnlyImagePlaceholder = "[Image omitted by ggrun: this local model was launched without an mmproj. Use a text extraction/OCR tool or relaunch with --vision.]"
 )
 
 // ModelSpec pins a reviewer artifact so an upstream branch update cannot
@@ -245,8 +247,9 @@ type Router struct {
 }
 
 // StartRouter starts the local request router on an automatically selected
-// loopback port.
-func StartRouter(mainBaseURL, reviewerBaseURL string) (*Router, error) {
+// loopback port. Text-only routes replace Anthropic image blocks with a text
+// notice so one image-producing tool result cannot poison every later turn.
+func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool) (*Router, error) {
 	mainURL, err := url.Parse(mainBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse main model URL: %w", err)
@@ -276,6 +279,11 @@ func StartRouter(mainBaseURL, reviewerBaseURL string) (*Router, error) {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
+		if !supportsVision {
+			body = sanitizeTextOnlyImages(body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		}
 		if IsClassifierRequest(body) {
 			reviewerProxy.ServeHTTP(w, r)
 			return
@@ -292,6 +300,61 @@ func StartRouter(mainBaseURL, reviewerBaseURL string) (*Router, error) {
 		_ = router.server.Serve(ln)
 	}()
 	return router, nil
+}
+
+// sanitizeTextOnlyImages replaces only Anthropic message image blocks. It
+// handles both direct user images and images nested in tool_result content,
+// which is how Claude Code returns Read results for GIF/PNG/JPEG files.
+// Unrelated JSON objects (including tool schemas) are deliberately untouched.
+func sanitizeTextOnlyImages(body []byte) []byte {
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return body
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return body
+	}
+	replaced := 0
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := message["content"].([]any)
+		if !ok {
+			continue
+		}
+		message["content"], replaced = sanitizeContentBlocks(content, replaced)
+	}
+	if replaced == 0 {
+		return body
+	}
+	sanitized, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return sanitized
+}
+
+func sanitizeContentBlocks(blocks []any, replaced int) ([]any, int) {
+	for i, rawBlock := range blocks {
+		block, ok := rawBlock.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName, _ := block["type"].(string)
+		switch typeName {
+		case "image":
+			blocks[i] = map[string]any{"type": "text", "text": textOnlyImagePlaceholder}
+			replaced++
+		case "tool_result":
+			if nested, ok := block["content"].([]any); ok {
+				block["content"], replaced = sanitizeContentBlocks(nested, replaced)
+			}
+		}
+	}
+	return blocks, replaced
 }
 
 func proxyError(w http.ResponseWriter, _ *http.Request, err error) {

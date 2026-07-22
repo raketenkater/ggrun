@@ -2459,7 +2459,7 @@ func cmdLaunch(args []string) {
 	}
 	claudeClientPort := req.Port
 	if claudeAuto != nil {
-		if err := claudeAuto.startRouter(req.Host, req.Port); err != nil {
+		if err := claudeAuto.startRouter(req.Host, req.Port, hasArg(serverArgs, "--mmproj")); err != nil {
 			_ = p.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "Error starting Claude Auto router: %v\n", err)
@@ -3363,6 +3363,7 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
 		clientHost = "127.0.0.1"
 	}
+	window := claudeCodeAutocompactWindow(serverArgs)
 	pct := claudeCodeAutocompactPct(serverArgs)
 	slot := ""
 	if ctx := argIntValue(serverArgs, "--ctx-size", "-c", "--ctx"); ctx > 0 {
@@ -3386,7 +3387,7 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 	fmt.Printf("  export API_TIMEOUT_MS=%d  # maximum safe timer: no practical local-inference deadline\n", claudeNoTimeoutMS)
 	fmt.Printf("  export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=%d  # background agents may be quiet during local prefill\n", claudeNoTimeoutMS)
 	fmt.Println("  export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0")
-	fmt.Printf("  export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", pct, slot)
+	fmt.Printf("  export CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", window, pct, slot)
 	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
 	claudeArgs = claudeCodeWorkflowPromptArgs(claudeArgs)
 	claudeArgs = append(claudeCodePermissionArgs(claudeArgs), claudeArgs...)
@@ -3421,7 +3422,7 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 			"CLAUDE_CODE_EFFORT_LEVEL",
 			"API_TIMEOUT_MS", "API_FORCE_IDLE_TIMEOUT", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS",
 			"CLAUDE_ENABLE_BYTE_WATCHDOG", "CLAUDE_ENABLE_STREAM_WATCHDOG",
-			"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":
+			"CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":
 			continue
 		}
 		env = append(env, kv)
@@ -3448,12 +3449,10 @@ func claudeCodeEnv(host string, port int, serverArgs []string) []string {
 		"CLAUDE_ENABLE_STREAM_WATCHDOG=0",
 		// Compatibility with Claude Code versions that predate the named watchdogs.
 		"API_FORCE_IDLE_TIMEOUT=0",
-		// Behind a custom base URL Claude Code assumes a 200k window and won't
-		// auto-compact until ~92% of it (~184k tokens) — but each slot only has ctx/parallel,
-		// so the conversation overflows the slot and the backend fails the request
-		// ("context shift is disabled"). Compact early instead, at a percentage
-		// derived from the real slot size so it adapts to --parallel automatically.
-		// A user-set value still wins.
+		// Claude Code's assumed window has changed across releases and model aliases.
+		// Give it the backend's real per-slot capacity directly, then compact at 75%
+		// so an in-flight reply and tool output cannot overflow the slot. User values win.
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW="+envOr("CLAUDE_CODE_AUTO_COMPACT_WINDOW", strconv.Itoa(claudeCodeAutocompactWindow(serverArgs))),
 		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="+envOr("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", strconv.Itoa(claudeCodeAutocompactPct(serverArgs))),
 	)
 }
@@ -3529,48 +3528,31 @@ func argIntValue(args []string, names ...string) int {
 	return result
 }
 
-// claudeCodeAutocompactPct derives the CLAUDE_AUTOCOMPACT_PCT_OVERRIDE value from
-// the backend's real per-slot context budget. llama.cpp/ik_llama split --ctx-size
-// across --parallel sequence slots, so each request's usable window is
-// ctx-size/parallel — far smaller than the 200k Claude Code assumes behind a custom
-// base URL. Without an override Claude Code won't auto-compact until ~92% of that
-// imagined 200k, long after the real slot has overflowed (and with --no-context-shift
-// the backend then hard-fails the request). We compute the percentage of the assumed
-// 200k window that lands at 75% of the real slot, leaving a quarter of the slot as
-// headroom for the in-flight reply, tool results, and jinja/template overhead the
-// proxied token count can't see. The same env var is inherited by subagents and
-// workflow agents, so their conversations get the same slot-safe trigger.
-//
-// Examples (ctx 262144): --parallel 4 → 65536/slot → 24; --parallel 8 → 32768 → 12.
-const claudeAssumedWindow = 200000
-
-func claudeCodeAutocompactPct(serverArgs []string) int {
+// claudeCodeAutocompactWindow returns the backend's actual per-sequence capacity.
+// llama.cpp/ik_llama divide --ctx-size across --parallel slots. Passing this value
+// explicitly avoids depending on Claude Code's changing assumed window for custom
+// model aliases. The 256-token alignment mirrors the backend's slot allocation.
+func claudeCodeAutocompactWindow(serverArgs []string) int {
 	ctx := argIntValue(serverArgs, "--ctx-size", "-c", "--ctx")
 	if ctx <= 0 {
-		return 25 // unknown ctx: keep the historical default
+		return 200000
 	}
 	parallel := argIntValue(serverArgs, "--parallel", "-np")
 	if parallel < 1 {
 		parallel = 1
 	}
-	slot := ctx / parallel
-	// Upstream pads per-sequence context to 256-token alignment; align
-	// down so auto-compact triggers before the actual slot overflows.
-	slot = slot & ^255
+	slot := (ctx / parallel) & ^255
 	if slot < 2048 {
-		slot = 2048
+		return 2048
 	}
-	safe := int(float64(slot) * 0.75)
-	pct := safe * 100 / claudeAssumedWindow
-	// Floor so compaction still leaves working room; cap under Claude Code's own
-	// ~92% native trigger so the override never relaxes the default.
-	if pct < 5 {
-		pct = 5
+	return slot
+}
+
+func claudeCodeAutocompactPct(serverArgs []string) int {
+	if argIntValue(serverArgs, "--ctx-size", "-c", "--ctx") <= 0 {
+		return 25 // unknown ctx: preserve the historical ~50k fallback
 	}
-	if pct > 90 {
-		pct = 90
-	}
-	return pct
+	return 75
 }
 
 // claudeCodeSearchMCPArgs returns --mcp-config args that wire a no-key DuckDuckGo

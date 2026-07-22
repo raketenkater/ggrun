@@ -1388,26 +1388,34 @@ func TestRuntimeGPUCapabilitiesMatchesVisibilityRenumbering(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeAutocompactPct(t *testing.T) {
+func TestClaudeCodeAutocompactWindow(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
 		want int
 	}{
-		{"parallel4_65k_slot", []string{"--ctx-size", "262144", "--parallel", "4"}, 24},
-		{"parallel8_32k_slot", []string{"--ctx-size", "262144", "--parallel", "8"}, 12},
-		{"parallel1_full_ctx_caps_at_90", []string{"--ctx-size", "262144", "--parallel", "1"}, 90},
-		{"no_parallel_defaults_to_1", []string{"--ctx-size", "65536"}, 24},
-		{"tiny_slot_floors_at_5", []string{"--ctx-size", "8192", "--parallel", "8"}, 5},
-		{"missing_ctx_keeps_legacy_default", []string{"--parallel", "4"}, 25},
-		{"short_ctx_alias", []string{"-c", "131072", "-np", "4"}, 12},
+		{"parallel4_65k_slot", []string{"--ctx-size", "262144", "--parallel", "4"}, 65536},
+		{"parallel8_32k_slot", []string{"--ctx-size", "262144", "--parallel", "8"}, 32768},
+		{"no_parallel_defaults_to_1", []string{"--ctx-size", "65536"}, 65536},
+		{"tiny_slot_floors_at_2k", []string{"--ctx-size", "8192", "--parallel", "8"}, 2048},
+		{"missing_ctx_keeps_legacy_window", []string{"--parallel", "4"}, 200000},
+		{"short_ctx_alias", []string{"-c", "131072", "-np", "4"}, 32768},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := claudeCodeAutocompactPct(tc.args); got != tc.want {
-				t.Fatalf("claudeCodeAutocompactPct(%v) = %d, want %d", tc.args, got, tc.want)
+			if got := claudeCodeAutocompactWindow(tc.args); got != tc.want {
+				t.Fatalf("claudeCodeAutocompactWindow(%v) = %d, want %d", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestClaudeCodeAutocompactPct(t *testing.T) {
+	if got := claudeCodeAutocompactPct([]string{"--ctx-size", "262144", "--parallel", "4"}); got != 75 {
+		t.Fatalf("known-window autocompact pct = %d, want 75", got)
+	}
+	if got := claudeCodeAutocompactPct([]string{"--parallel", "4"}); got != 25 {
+		t.Fatalf("unknown-window autocompact pct = %d, want 25", got)
 	}
 }
 
@@ -1438,12 +1446,11 @@ func TestArgIntValue(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeAutocompactPctLastWinsOnUserOverride(t *testing.T) {
-	// strategy emits 262144/4 (pct 24); a user appends --ctx-size 16384 (backend
-	// last-wins → 16384/4 = 4096 slot → pct floors at 5). Must reflect the real slot.
+func TestClaudeCodeAutocompactWindowLastWinsOnUserOverride(t *testing.T) {
+	// The backend honors the final context value, so the explicit window must too.
 	args := []string{"--ctx-size", "262144", "--parallel", "4", "--ctx-size", "16384"}
-	if got := claudeCodeAutocompactPct(args); got != 5 {
-		t.Fatalf("autocompact pct with user override = %d, want 5", got)
+	if got := claudeCodeAutocompactWindow(args); got != 4096 {
+		t.Fatalf("autocompact window with user override = %d, want 4096", got)
 	}
 }
 
@@ -1568,6 +1575,7 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 	t.Setenv("CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS", "")
 	t.Setenv("CLAUDE_ENABLE_BYTE_WATCHDOG", "")
 	t.Setenv("CLAUDE_ENABLE_STREAM_WATCHDOG", "")
+	t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
 	t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
 	t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "")
 	env := claudeCodeEnv("0.0.0.0", 8081, []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"})
@@ -1583,6 +1591,8 @@ func TestClaudeCodeEnvDisablesIdleTimeoutForLocalBackend(t *testing.T) {
 		"CLAUDE_ENABLE_BYTE_WATCHDOG=0",
 		"CLAUDE_ENABLE_STREAM_WATCHDOG=0",
 		"CLAUDE_CODE_EFFORT_LEVEL=xhigh",
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW=262144",
+		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75",
 	} {
 		if !envContains(env, want) {
 			t.Fatalf("missing %s in claude-code env: %v", want, env)

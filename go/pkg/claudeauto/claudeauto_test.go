@@ -39,7 +39,7 @@ func TestRouterSeparatesClassifierAndMainTraffic(t *testing.T) {
 	reviewer := backend("reviewer")
 	defer reviewer.Close()
 
-	router, err := StartRouter(main.URL, reviewer.URL)
+	router, err := StartRouter(main.URL, reviewer.URL, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +61,66 @@ func TestRouterSeparatesClassifierAndMainTraffic(t *testing.T) {
 		if resp.Header.Get("X-Backend") != tc.want || !strings.HasPrefix(string(got), tc.want+":") {
 			t.Fatalf("%s routed to %q body=%q, want %q", tc.path, resp.Header.Get("X-Backend"), got, tc.want)
 		}
+	}
+}
+
+func TestRouterSanitizesImagesForTextOnlyModel(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(body)
+	}))
+	defer backend.Close()
+
+	router, err := StartRouter(backend.URL, backend.URL, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"keep me"},{"type":"image","source":{"type":"base64","data":"DIRECT_SECRET"}},{"type":"tool_result","tool_use_id":"read-1","content":[{"type":"image","source":{"type":"base64","data":"TOOL_SECRET"}},{"type":"text","text":"also keep me"}]}]}],"tools":[{"input_schema":{"type":"image"}}]}`
+	resp, err := http.Post(router.URL()+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	text := string(got)
+	if strings.Contains(text, "DIRECT_SECRET") || strings.Contains(text, "TOOL_SECRET") {
+		t.Fatalf("text-only route forwarded image data: %s", text)
+	}
+	if strings.Count(text, textOnlyImagePlaceholder) != 2 {
+		t.Fatalf("got %d image notices, want 2: %s", strings.Count(text, textOnlyImagePlaceholder), text)
+	}
+	for _, want := range []string{"keep me", "also keep me", `"input_schema":{"type":"image"}`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("sanitizer removed unrelated content %q: %s", want, text)
+		}
+	}
+}
+
+func TestRouterPreservesImagesForVisionModel(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(body)
+	}))
+	defer backend.Close()
+
+	router, err := StartRouter(backend.URL, backend.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+
+	body := `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"VISION_DATA"}}]}]}`
+	resp, err := http.Post(router.URL()+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != body {
+		t.Fatalf("vision route changed request body: got %s, want %s", got, body)
 	}
 }
 

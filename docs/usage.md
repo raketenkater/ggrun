@@ -191,7 +191,7 @@ export CLAUDE_CODE_EFFORT_LEVEL=xhigh       # agentic default; use max for one d
 export API_TIMEOUT_MS=2147483647            # maximum safe timer; no practical inference deadline
 export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=2147483647
 export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0
-export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90  # compact early to fit the real per-slot window (ggrun computes this)
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW=262144 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75
 claude --permission-mode auto --disallowedTools WebSearch
 ```
 
@@ -206,10 +206,11 @@ model calls cannot leave for `api.anthropic.com`.
   slot count if the selected total context would provide less than about 64k per
   slot, so the portable 128k-total fallback uses two slots. Explicit `--ctx-size`
   and `--parallel` values always win.
-  Behind a custom base URL Claude Code assumes a 200k window and won't auto-compact in
-  time, overflowing the slot (a hard fail with `--no-context-shift`). ggrun derives
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the real slot so compaction triggers early
-  enough; subagents and workflow agents inherit it. A value you set yourself wins.
+  Claude Code's assumed context has changed across releases and model aliases, which
+  can make percentage-only overrides miss the real backend limit. ggrun exports the
+  actual per-slot capacity as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and compacts at 75%,
+  leaving room for a reply and tool output. Subagents and workflow agents inherit
+  both values; values you set yourself win.
 - **Wide fan-out** (subagents, workflows) runs up to four main-model requests at once
   and queues additional work behind those slots.
   ggrun sets the maximum safe Claude request/background-agent timers, disables both

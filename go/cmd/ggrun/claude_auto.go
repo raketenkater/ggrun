@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -127,13 +128,25 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 
 	var lastErr error
 	for _, gpu := range candidates {
+		env := claudeReviewerBackendEnv(be.Path, []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)})
+		device, probeErr := claudeReviewerGPUDevice(be.Path, env)
+		if probeErr != nil {
+			lastErr = probeErr
+			if planned {
+				if logCloser != nil {
+					_ = logCloser.Close()
+				}
+				return nil, fmt.Errorf("select local Auto reviewer device on planned GPU %d: %w", gpu, probeErr)
+			}
+			fmt.Fprintf(os.Stderr, "[claude-code] Auto reviewer backend cannot use GPU %d: %v\n", gpu, probeErr)
+			continue
+		}
 		// CUDA_VISIBLE_DEVICES is required in addition to --device. Without it,
 		// llama.cpp initializes contexts on every GPU even though all reviewer
 		// tensors live on the selected device (observed: +262 MiB on the main
-		// CUDA0 during a DeepSeek-V4 run). The isolated physical GPU is CUDA0
-		// inside the child process.
-		args := claudeReviewerArgs(be.Path, modelPath, port, 0, be.Help)
-		env := claudeReviewerBackendEnv(be.Path, []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)})
+		// CUDA0 during a DeepSeek-V4 run). Ask the backend for the device name it
+		// exposes after isolation instead of assuming every fork uses CUDA0.
+		args := claudeReviewerArgs(be.Path, modelPath, port, device, be.Help)
 		p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, env)
 		if err == nil {
 			fmt.Printf("[claude-code] Auto reviewer ready on GPU %d (PID %d, %s, ctx 64k)\n", gpu, p.Cmd.Process.Pid, claudeauto.DefaultReviewerDisplayName)
@@ -154,7 +167,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 
 	// CPU is slower, but it preserves autonomous/fail-closed behavior on systems
 	// whose GPUs are already full. It is also the normal path on CPU-only hosts.
-	args := claudeReviewerArgs(be.Path, modelPath, port, -1, be.Help)
+	args := claudeReviewerArgs(be.Path, modelPath, port, "", be.Help)
 	p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, claudeReviewerBackendEnv(be.Path, claudeReviewerCPUEnv()))
 	if err != nil {
 		if logCloser != nil {
@@ -169,7 +182,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 	return &claudeAutoRuntime{reviewer: p, reviewerLog: logCloser, reviewerPort: port, reviewerGPU: -1}, nil
 }
 
-func claudeReviewerArgs(binary, modelPath string, port, gpu int, help string) []string {
+func claudeReviewerArgs(binary, modelPath string, port int, device, help string) []string {
 	args := []string{
 		binary, "-m", modelPath,
 		"--host", "127.0.0.1", "--port", strconv.Itoa(port),
@@ -187,13 +200,33 @@ func claudeReviewerArgs(binary, modelPath string, port, gpu int, help string) []
 	if strings.Contains(help, "--cache-type-k") && strings.Contains(help, "--cache-type-v") {
 		args = append(args, "--cache-type-k", "q8_0", "--cache-type-v", "q8_0")
 	}
-	if gpu >= 0 {
-		// --device exposes one device to this model, renumbered locally to 0.
-		args = append(args, "--device", fmt.Sprintf("CUDA%d", gpu), "--split-mode", "none", "-ngl", "999", "-mg", "0")
+	if device != "" {
+		args = append(args, "--device", device, "--split-mode", "none", "-ngl", "999", "-mg", "0")
 	} else {
 		args = append(args, "-ngl", "0")
 	}
 	return args
+}
+
+func claudeReviewerGPUDevice(binary string, env []string) (string, error) {
+	args := []string{binary, "--list-devices"}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = server.OverrideEnv(server.ChildEnv(os.Environ(), args), env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("probe %s --list-devices: %w: %s", binary, err, strings.TrimSpace(string(out)))
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.TrimSuffix(fields[0], ":")
+		if strings.HasPrefix(name, "CUDA") {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("backend %s advertises no CUDA device after GPU isolation: %s", binary, strings.TrimSpace(string(out)))
 }
 
 func claudeReviewerCPUEnv() []string {
@@ -232,6 +265,7 @@ func findClaudeReviewerBackend(caps *detect.Capabilities) *backendInfo {
 		}
 	}
 	candidates = append(candidates, backendSearchPaths()...)
+	var fallback *backendInfo
 	for _, path := range candidates {
 		if path == "" || seen[path] {
 			continue
@@ -242,10 +276,18 @@ func findClaudeReviewerBackend(caps *detect.Capabilities) *backendInfo {
 		}
 		be := detectBackend(path)
 		if !be.IsIK && strings.Contains(be.Help, "--reasoning") {
-			return be
+			if fallback == nil {
+				fallback = be
+			}
+			env := claudeReviewerBackendEnv(be.Path, nil)
+			if _, err := claudeReviewerGPUDevice(be.Path, env); err == nil {
+				return be
+			}
 		}
 	}
-	return nil
+	// A CPU-only or Vulkan mainline backend can still run the reviewer via the
+	// CPU fallback when no CUDA-capable mainline backend is installed.
+	return fallback
 }
 
 // claudeReviewerGPUCandidates preserves the largest GPU for the main model and
@@ -329,7 +371,7 @@ func claudeReviewerLog(cfg *config.Config, port int) (io.Writer, io.Closer) {
 	return f, f
 }
 
-func (r *claudeAutoRuntime) startRouter(mainHost string, mainPort int) error {
+func (r *claudeAutoRuntime) startRouter(mainHost string, mainPort int, supportsVision bool) error {
 	if r == nil {
 		return nil
 	}
@@ -340,6 +382,7 @@ func (r *claudeAutoRuntime) startRouter(mainHost string, mainPort int) error {
 	router, err := claudeauto.StartRouter(
 		fmt.Sprintf("http://%s:%d", host, mainPort),
 		fmt.Sprintf("http://127.0.0.1:%d", r.reviewerPort),
+		supportsVision,
 	)
 	if err != nil {
 		return err

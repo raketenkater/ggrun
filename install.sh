@@ -69,6 +69,22 @@ ask()  { # ask "prompt" default_yn
     [[ "$reply" =~ ^[Yy] ]]
 }
 
+show_help() {
+    sed -n '2,/^set -Eeuo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d'
+}
+
+case "${1:-}" in
+    -h|--help)
+        show_help
+        exit 0
+        ;;
+    "") ;;
+    *)
+        printf 'Unknown argument: %s\nRun %s --help for usage.\n' "$1" "$0" >&2
+        exit 2
+        ;;
+esac
+
 # ── Failure diagnostics + one-click GitHub issue ────────────────────────────
 # Turn a failed install into "here's everything needed to fix it": on a fatal
 # error, gather a sanitized diagnostic bundle and offer to file it as a

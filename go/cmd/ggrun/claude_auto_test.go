@@ -37,8 +37,8 @@ func TestClaudeReviewerGPUCandidatesKeepSparsePhysicalSelection(t *testing.T) {
 }
 
 func TestClaudeReviewerArgsUsesIsolatedDeviceAsLocalMain(t *testing.T) {
-	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, 0, "--reasoning ARG --cache-type-k TYPE --cache-type-v TYPE")
-	for _, want := range []string{"--device", "CUDA0", "-mg", "0", "--reasoning", "off", "--ctx-size", "65536", "--cache-type-k", "q8_0", "--cache-type-v"} {
+	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, "CUDA7", "--reasoning ARG --cache-type-k TYPE --cache-type-v TYPE")
+	for _, want := range []string{"--device", "CUDA7", "-mg", "0", "--reasoning", "off", "--ctx-size", "65536", "--cache-type-k", "q8_0", "--cache-type-v"} {
 		if !hasArg(args, want) {
 			t.Fatalf("missing %q in %v", want, args)
 		}
@@ -51,11 +51,65 @@ func TestClaudeReviewerArgsUsesIsolatedDeviceAsLocalMain(t *testing.T) {
 }
 
 func TestClaudeReviewerArgsKeepsOlderBackendCompatibility(t *testing.T) {
-	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, -1, "--reasoning ARG")
+	args := claudeReviewerArgs("server", "reviewer.gguf", 1234, "", "--reasoning ARG")
 	for _, unsupported := range []string{"--cache-type-k", "--cache-type-v"} {
 		if hasArg(args, unsupported) {
 			t.Fatalf("unexpected unsupported %q in %v", unsupported, args)
 		}
+	}
+}
+
+func TestClaudeReviewerGPUDeviceUsesAdvertisedName(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "llama-server")
+	script := "#!/bin/sh\nprintf 'Available devices:\\n  CUDA3: Test GPU\\n'\n"
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := claudeReviewerGPUDevice(binary, []string{"CUDA_VISIBLE_DEVICES=2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "CUDA3" {
+		t.Fatalf("got %q, want backend-advertised CUDA3", got)
+	}
+}
+
+func TestClaudeReviewerGPUDeviceRejectsBackendWithoutCUDA(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "llama-server")
+	script := "#!/bin/sh\nprintf 'Available devices:\\n  Vulkan0: Test GPU\\n'\n"
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claudeReviewerGPUDevice(binary, nil); err == nil || !strings.Contains(err.Error(), "no CUDA device") {
+		t.Fatalf("expected clear missing-CUDA error, got %v", err)
+	}
+}
+
+func TestFindClaudeReviewerBackendSkipsVulkanForCUDA(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LLM_APP_HOME", "")
+	for _, tc := range []struct {
+		path    string
+		devices string
+	}{
+		{filepath.Join(home, "llama.cpp", "build-vulkan", "bin", "llama-server"), "Vulkan0: Test GPU"},
+		{filepath.Join(home, "llama.cpp", "build", "bin", "llama-server"), "CUDA0: Test GPU"},
+	} {
+		if err := os.MkdirAll(filepath.Dir(tc.path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		script := "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '--reasoning ARG'; else printf 'Available devices:\\n  %s\\n' '" + tc.devices + "'; fi\n"
+		if err := os.WriteFile(tc.path, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := findClaudeReviewerBackend(nil)
+	want := filepath.Join(home, "llama.cpp", "build", "bin", "llama-server")
+	if got == nil || got.Path != want {
+		t.Fatalf("got %#v, want CUDA backend %q", got, want)
 	}
 }
 
