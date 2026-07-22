@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -241,15 +242,19 @@ func IsClassifierRequest(body []byte) bool {
 // Router exposes a loopback-only endpoint and sends classifier requests to the
 // reviewer while transparently streaming all normal traffic to the main model.
 type Router struct {
-	server *http.Server
-	ln     net.Listener
-	port   int
+	server        *http.Server
+	ln            net.Listener
+	port          int
+	mainSlots     chan struct{}
+	maxMainActive int
+	mainActive    atomic.Int64
+	mainQueued    atomic.Int64
 }
 
 // StartRouter starts the local request router on an automatically selected
 // loopback port. Text-only routes replace Anthropic image blocks with a text
 // notice so one image-producing tool result cannot poison every later turn.
-func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool) (*Router, error) {
+func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMainActive int) (*Router, error) {
 	mainURL, err := url.Parse(mainBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse main model URL: %w", err)
@@ -262,8 +267,21 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool) (*Rou
 	reviewerProxy := httputil.NewSingleHostReverseProxy(reviewerURL)
 	mainProxy.ErrorHandler = proxyError
 	reviewerProxy.ErrorHandler = proxyError
+	router := &Router{maxMainActive: maxMainActive}
+	if maxMainActive > 0 {
+		router.mainSlots = make(chan struct{}, maxMainActive)
+	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ggrun/router" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]int64{
+				"active": router.mainActive.Load(),
+				"queued": router.mainQueued.Load(),
+				"limit":  int64(router.maxMainActive),
+			})
+			return
+		}
 		if r.URL.Path != "/v1/messages" {
 			mainProxy.ServeHTTP(w, r)
 			return
@@ -288,18 +306,40 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool) (*Rou
 			reviewerProxy.ServeHTTP(w, r)
 			return
 		}
-		mainProxy.ServeHTTP(w, r)
+		router.serveMain(w, r, mainProxy)
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen for Claude Auto router: %w", err)
 	}
-	router := &Router{ln: ln, port: ln.Addr().(*net.TCPAddr).Port}
+	router.ln = ln
+	router.port = ln.Addr().(*net.TCPAddr).Port
 	router.server = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		_ = router.server.Serve(ln)
 	}()
 	return router, nil
+}
+
+func (r *Router) serveMain(w http.ResponseWriter, req *http.Request, proxy *httputil.ReverseProxy) {
+	if r == nil || r.mainSlots == nil {
+		proxy.ServeHTTP(w, req)
+		return
+	}
+	r.mainQueued.Add(1)
+	select {
+	case r.mainSlots <- struct{}{}:
+		r.mainQueued.Add(-1)
+	case <-req.Context().Done():
+		r.mainQueued.Add(-1)
+		return
+	}
+	r.mainActive.Add(1)
+	defer func() {
+		r.mainActive.Add(-1)
+		<-r.mainSlots
+	}()
+	proxy.ServeHTTP(w, req)
 }
 
 // sanitizeTextOnlyImages replaces only Anthropic message image blocks. It

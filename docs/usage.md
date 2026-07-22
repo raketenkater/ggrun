@@ -211,8 +211,12 @@ model calls cannot leave for `api.anthropic.com`.
   actual per-slot capacity as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and compacts at 75%,
   leaving room for a reply and tool output. Subagents and workflow agents inherit
   both values; values you set yourself win.
-- **Wide fan-out** (subagents, workflows) runs up to four main-model requests at once
-  and queues additional work behind those slots.
+- **Wide fan-out** (subagents, workflows) retains up to four independent main-model
+  slots, so each agent keeps its own reusable context. GPU-resident models can run
+  those requests concurrently. For host-offloaded MoE or dense models, ggrun admits
+  one generation at a time and queues the other agents at its loopback gateway:
+  interleaving several CPU-offloaded decode graphs can reduce aggregate throughput by
+  an order of magnitude. The status line includes both backend and gateway queue depth.
   ggrun sets the maximum safe Claude request/background-agent timers, disables both
   stream-idle watchdogs, and gives llama-server no practical socket deadline. Claude's
   Workflow tool has a separate 180-second `stallMs`; a session-only PreToolUse hook
@@ -230,8 +234,9 @@ model calls cannot leave for `api.anthropic.com`.
   shifting repeated system, tool and workflow chunks after old results are removed.
   A controlled production-cache test reduced a compacted 4,506-token prefill from
   45.1 seconds to one processed token in 0.15 seconds. Pass `--cache-reuse 0` or
-  `--no-cache-prompt` explicitly to opt out. Hybrid/recurrent contexts such as native
-  DeepSeek V4 cannot shift their state, so ggrun does not emit the unsupported flag;
+  `--no-cache-prompt` explicitly to opt out. Hybrid/recurrent, multimodal, and
+  multi-position-RoPE contexts such as native DeepSeek V4 and Laguna cannot shift
+  their state, so ggrun does not emit the unsupported flag;
   it instead keeps one rolling context checkpoint per slot when at least 512 MiB of
   host headroom per slot remains. This lets llama.cpp restore append-only agent turns
   without exposing the unsafe 32-checkpoint backend default.

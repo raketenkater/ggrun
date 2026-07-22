@@ -65,6 +65,9 @@ func TestPollAndFormatClaudeProgress(t *testing.T) {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("llamacpp:prompt_tokens_seconds 29.42\nllamacpp:predicted_tokens_seconds 5.88\nllamacpp:requests_deferred 3\n"))
 	})
+	mux.HandleFunc("/ggrun/router", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"active":1,"queued":2,"limit":1}`))
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	u, err := url.Parse(srv.URL)
@@ -77,11 +80,11 @@ func TestPollAndFormatClaudeProgress(t *testing.T) {
 	}
 	log := testProgressLog("slot print_timing: id  0 | task 4 | prompt processing, n_tokens = 32769, progress = 0.55, t = 1113.88 s / 29.42 tokens per second\n")
 	state := pollClaudeProgress(srv.Client(), u.Hostname(), port, log)
-	if state.Active != 1 || state.Queued != 3 || state.TotalSlots != 2 || len(state.Requests) != 1 {
+	if state.Active != 1 || state.Queued != 5 || state.TotalSlots != 2 || len(state.Requests) != 1 {
 		t.Fatalf("unexpected state: %+v", state)
 	}
 	got := formatClaudeProgress(state)
-	for _, want := range []string{"██████░░░░", "55%", "S0 prefill 32,769/~59,580", "29.4 tok/s", "3 queued"} {
+	for _, want := range []string{"██████░░░░", "55%", "S0 prefill 32,769/~59,580", "29.4 tok/s", "5 queued"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status %q missing %q", got, want)
 		}

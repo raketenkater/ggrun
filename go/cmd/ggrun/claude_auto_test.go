@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
 func TestClaudeReviewerGPUCandidatesPreservesLargestGPU(t *testing.T) {
@@ -23,6 +24,31 @@ func TestClaudeReviewerGPUCandidatesPreservesLargestGPU(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestClaudeMainMaxActiveSerializesHostOffload(t *testing.T) {
+	req := &launchRequest{ClaudeCode: true}
+	for _, strategyType := range []placement.StrategyType{placement.MoEOffload, placement.DenseCPUOffload} {
+		strategy := &placement.Strategy{Type: strategyType, Parallel: 4}
+		if got := claudeMainMaxActive(req, strategy); got != 1 {
+			t.Fatalf("strategy %s max active=%d, want 1", strategyType, got)
+		}
+	}
+}
+
+func TestClaudeMainMaxActiveLeavesGPUResidentParallel(t *testing.T) {
+	for _, tc := range []struct {
+		req      *launchRequest
+		strategy *placement.Strategy
+	}{
+		{&launchRequest{ClaudeCode: true}, &placement.Strategy{Type: placement.MultiGPUDense, Parallel: 4}},
+		{&launchRequest{ClaudeCode: true}, &placement.Strategy{Type: placement.MoEOffload, Parallel: 1}},
+		{&launchRequest{}, &placement.Strategy{Type: placement.MoEOffload, Parallel: 4}},
+	} {
+		if got := claudeMainMaxActive(tc.req, tc.strategy); got != 0 {
+			t.Fatalf("unexpected admission cap %d for req=%+v strategy=%+v", got, tc.req, tc.strategy)
 		}
 	}
 }

@@ -1559,6 +1559,21 @@ func TestClaudeCodeCacheArgs(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeShiftableContext(t *testing.T) {
+	if claudeCodeShiftableContext(&placement.ModelProfile{ModelArch: "laguna"}, &placement.Strategy{}) {
+		t.Fatal("Laguna multi-position RoPE must not enable cache shifting")
+	}
+	if claudeCodeShiftableContext(&placement.ModelProfile{ModelArch: "qwen35"}, &placement.Strategy{HasSSM: true}) {
+		t.Fatal("recurrent context must not enable cache shifting")
+	}
+	if claudeCodeShiftableContext(&placement.ModelProfile{ModelArch: "qwen35"}, &placement.Strategy{MMProjPath: "/models/mmproj.gguf"}) {
+		t.Fatal("multimodal context must not enable cache shifting")
+	}
+	if !claudeCodeShiftableContext(&placement.ModelProfile{ModelArch: "qwen35"}, &placement.Strategy{}) {
+		t.Fatal("ordinary transformer context should enable cache shifting")
+	}
+}
+
 func argIndexOf(args []string, want string) int {
 	for i, a := range args {
 		if a == want {

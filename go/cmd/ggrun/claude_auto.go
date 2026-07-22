@@ -371,7 +371,7 @@ func claudeReviewerLog(cfg *config.Config, port int) (io.Writer, io.Closer) {
 	return f, f
 }
 
-func (r *claudeAutoRuntime) startRouter(mainHost string, mainPort int, supportsVision bool) error {
+func (r *claudeAutoRuntime) startRouter(mainHost string, mainPort int, supportsVision bool, maxMainActive int) error {
 	if r == nil {
 		return nil
 	}
@@ -379,17 +379,40 @@ func (r *claudeAutoRuntime) startRouter(mainHost string, mainPort int, supportsV
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
+	mainBaseURL := fmt.Sprintf("http://%s:%d", host, mainPort)
+	reviewerBaseURL := mainBaseURL
+	if r.reviewerPort > 0 {
+		reviewerBaseURL = fmt.Sprintf("http://127.0.0.1:%d", r.reviewerPort)
+	}
 	router, err := claudeauto.StartRouter(
-		fmt.Sprintf("http://%s:%d", host, mainPort),
-		fmt.Sprintf("http://127.0.0.1:%d", r.reviewerPort),
+		mainBaseURL,
+		reviewerBaseURL,
 		supportsVision,
+		maxMainActive,
 	)
 	if err != nil {
 		return err
 	}
 	r.router = router
-	fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, safety -> local reviewer)\n", router.URL())
+	if r.reviewerPort > 0 {
+		fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, safety -> local reviewer)\n", router.URL())
+	} else {
+		fmt.Printf("[claude-code] agent gateway ready on %s\n", router.URL())
+	}
+	if maxMainActive > 0 {
+		fmt.Printf("[claude-code] agent admission: %d active main-model request(s); additional agents queue without timing out\n", maxMainActive)
+	}
 	return nil
+}
+
+func claudeMainMaxActive(req *launchRequest, strategy *placement.Strategy) int {
+	if req == nil || !req.ClaudeCode || strategy == nil || strategy.Parallel <= 1 {
+		return 0
+	}
+	if strategy.Type == placement.MoEOffload || strategy.Type == placement.DenseCPUOffload {
+		return 1
+	}
+	return 0
 }
 
 func (r *claudeAutoRuntime) clientPort(fallback int) int {

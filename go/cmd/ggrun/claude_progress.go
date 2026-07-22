@@ -467,7 +467,7 @@ func pollClaudeProgress(client *http.Client, host string, port int, log claudePr
 		}
 	}
 	promptRate, generationRate, queued := pollClaudeMetrics(client, baseURL)
-	state.Queued = queued
+	state.Queued = queued + pollClaudeRouterQueued(client, baseURL)
 	for _, slot := range slots {
 		if !slot.IsProcessing {
 			continue
@@ -498,6 +498,24 @@ func pollClaudeProgress(client *http.Client, host string, port int, log claudePr
 		state.Requests = append(state.Requests, req)
 	}
 	return state
+}
+
+func pollClaudeRouterQueued(client *http.Client, baseURL string) int {
+	resp, err := client.Get(baseURL + "/ggrun/router")
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+	var status struct {
+		Queued int `json:"queued"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&status) != nil {
+		return 0
+	}
+	return status.Queued
 }
 
 func parsePromptLogProgress(text string) []promptLogProgress {

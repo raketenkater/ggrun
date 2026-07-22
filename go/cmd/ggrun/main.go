@@ -1521,7 +1521,7 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
-	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, strategy == nil || !strategy.HasSSM)
+	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, claudeCodeShiftableContext(model, strategy))
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	return serverArgs
 }
@@ -2342,6 +2342,12 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	// The gateway also owns model-aware agent admission. Keep it available when
+	// the user selected a non-Auto Claude permission mode and no reviewer is
+	// needed, so host-offloaded models still avoid destructive decode interleave.
+	if req.ClaudeCode && claudeAuto == nil {
+		claudeAuto = &claudeAutoRuntime{reviewerGPU: -1}
+	}
 	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet)
 	var preRecoveryStrategy *placement.Strategy
 	var serverArgs []string
@@ -2459,7 +2465,7 @@ func cmdLaunch(args []string) {
 	}
 	claudeClientPort := req.Port
 	if claudeAuto != nil {
-		if err := claudeAuto.startRouter(req.Host, req.Port, hasArg(serverArgs, "--mmproj")); err != nil {
+		if err := claudeAuto.startRouter(req.Host, req.Port, hasArg(serverArgs, "--mmproj"), claudeMainMaxActive(req, strategy)); err != nil {
 			_ = p.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "Error starting Claude Auto router: %v\n", err)
@@ -2504,11 +2510,15 @@ func cmdLaunch(args []string) {
 			}
 		}()
 
-		clientArgs, statusLineEnabled := claudeCodeProgressClientArgs(nil, req.Port)
+		clientHost := req.Host
+		if claudeAuto != nil {
+			clientHost = "127.0.0.1"
+		}
+		clientArgs, statusLineEnabled := claudeCodeProgressClientArgs(nil, claudeClientPort)
 		progressEnabled := !progressDisabled()
 		progressStop := func() {}
 		if progressEnabled {
-			progressStop = startClaudeProgressMonitor(req.Host, req.Port, p.LogBuf, !statusLineEnabled)
+			progressStop = startClaudeProgressMonitor(clientHost, claudeClientPort, p.LogBuf, !statusLineEnabled)
 		}
 		defer progressStop()
 		if !progressEnabled {
@@ -2517,10 +2527,6 @@ func cmdLaunch(args []string) {
 			fmt.Println("[claude-code] Live request progress enabled in Claude's status line.")
 		} else {
 			fmt.Println("[claude-code] Live request progress enabled in the terminal title (existing Claude status line preserved).")
-		}
-		clientHost := req.Host
-		if claudeAuto != nil {
-			clientHost = "127.0.0.1"
 		}
 		if code := runClaudeCodeClient(clientHost, claudeClientPort, serverArgs, clientArgs); code >= 0 {
 			progressStop()
@@ -3712,6 +3718,18 @@ func claudeCodeCacheArgs(args []string, claudeCode bool, backendHelp string, shi
 		return args
 	}
 	return append(args, "--cache-reuse", "256")
+}
+
+func claudeCodeShiftableContext(model *placement.ModelProfile, strategy *placement.Strategy) bool {
+	if strategy != nil && (strategy.HasSSM || strategy.MMProjPath != "") {
+		return false
+	}
+	if model == nil {
+		return true
+	}
+	// Laguna uses multi-position RoPE. llama.cpp's KV shift requires one
+	// position per embedding and disables cache_reuse after model load.
+	return !strings.EqualFold(strings.TrimSpace(model.ModelArch), "laguna")
 }
 
 // runClaudeCodeClient launches Claude Code in the foreground wired to the local

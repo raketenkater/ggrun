@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestIsClassifierRequestIsNarrow(t *testing.T) {
@@ -39,7 +42,7 @@ func TestRouterSeparatesClassifierAndMainTraffic(t *testing.T) {
 	reviewer := backend("reviewer")
 	defer reviewer.Close()
 
-	router, err := StartRouter(main.URL, reviewer.URL, false)
+	router, err := StartRouter(main.URL, reviewer.URL, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +74,7 @@ func TestRouterSanitizesImagesForTextOnlyModel(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	router, err := StartRouter(backend.URL, backend.URL, false)
+	router, err := StartRouter(backend.URL, backend.URL, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +109,7 @@ func TestRouterPreservesImagesForVisionModel(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	router, err := StartRouter(backend.URL, backend.URL, true)
+	router, err := StartRouter(backend.URL, backend.URL, true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +124,67 @@ func TestRouterPreservesImagesForVisionModel(t *testing.T) {
 	resp.Body.Close()
 	if string(got) != body {
 		t.Fatalf("vision route changed request body: got %s, want %s", got, body)
+	}
+}
+
+func TestRouterLimitsConcurrentMainRequests(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	var active atomic.Int64
+	var peak atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		if current > peak.Load() {
+			peak.Store(current)
+		}
+		started <- struct{}{}
+		<-release
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+	router, err := StartRouter(backend.URL, backend.URL, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.Close()
+
+	done := make(chan error, 2)
+	request := func() {
+		resp, err := http.Post(router.URL()+"/v1/messages", "application/json", strings.NewReader(`{"messages":[]}`))
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}
+	go request()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not reach backend")
+	}
+	go request()
+	time.Sleep(50 * time.Millisecond)
+	resp, err := http.Get(router.URL() + "/ggrun/router")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct{ Active, Queued, Limit int }
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if status.Active != 1 || status.Queued != 1 || status.Limit != 1 {
+		t.Fatalf("unexpected router status: %+v", status)
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if peak.Load() != 1 {
+		t.Fatalf("peak backend concurrency=%d, want 1", peak.Load())
 	}
 }
 
