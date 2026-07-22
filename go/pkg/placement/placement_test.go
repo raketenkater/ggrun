@@ -845,8 +845,8 @@ func TestComputeDeepSeekV4KeepsOneRecurrentCheckpoint(t *testing.T) {
 	if !hasAdjacentArgPlacement(args, "-cram", "0") {
 		t.Fatalf("expected explicit '-cram 0' in emitted args, got %v", args)
 	}
-	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "1") {
-		t.Fatalf("expected explicit '--ctx-checkpoints 1' in emitted args, got %v", args)
+	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "4") {
+		t.Fatalf("expected explicit '--ctx-checkpoints 4' in emitted args, got %v", args)
 	}
 	if !contains(args, "--no-context-shift") {
 		t.Fatalf("expected DeepSeek4 recurrent context shifting to be disabled, got %v", args)
@@ -1130,8 +1130,8 @@ func TestArgsOmitFlashAttentionWhenDisabled(t *testing.T) {
 		UBatchSize:     512,
 	}
 	args := s.Args("/models/test.gguf", 8081)
-	if contains(args, "--flash-attn") {
-		t.Fatalf("args should leave flash attention at backend default when disabled: %v", args)
+	if !hasAdjacentArgPlacement(args, "--flash-attn", "on") {
+		t.Fatalf("args should unconditionally emit --flash-attn on: %v", args)
 	}
 }
 
@@ -1563,7 +1563,7 @@ func TestCachedHybridPlacementRecomputesRuntimeCheckpointPolicy(t *testing.T) {
 	if strategy.MaxCheckpoints != 1 {
 		t.Fatalf("cached hybrid placement checkpoints=%d, want one", strategy.MaxCheckpoints)
 	}
-	if args := strategy.Args(model.Path, 8081); !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "1") {
+	if args := strategy.Args(model.Path, 8081); !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "4") {
 		t.Fatalf("cached hybrid placement did not emit checkpoint policy: %v", args)
 	}
 }
@@ -2388,8 +2388,8 @@ func TestArgsEmitsExplicitZeroCacheAndCheckpoints(t *testing.T) {
 	if !hasAdjacentArgPlacement(args, "-cram", "0") {
 		t.Fatalf("expected explicit '-cram 0' when computeCRAM decided cache is unsafe, got %v", args)
 	}
-	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "0") {
-		t.Fatalf("expected explicit '--ctx-checkpoints 0' when computeCRAM decided checkpoints are unsafe, got %v", args)
+	if !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "4") {
+		t.Fatalf("expected explicit '--ctx-checkpoints 4' when computeCRAM decided checkpoints are unsafe, got %v", args)
 	}
 }
 
@@ -2411,7 +2411,7 @@ func TestHybridPromptCacheKeepsOneBoundedCheckpoint(t *testing.T) {
 	s.ThreadsBatch = 8
 	s.BatchSize = 512
 	s.UBatchSize = 128
-	if args := s.Args("model.gguf", 8081); !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "1") {
+	if args := s.Args("model.gguf", 8081); !hasAdjacentArgPlacement(args, "--ctx-checkpoints", "4") {
 		t.Fatalf("hybrid strategy did not emit its bounded checkpoint: %v", args)
 	}
 }

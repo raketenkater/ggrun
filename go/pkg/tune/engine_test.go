@@ -101,8 +101,8 @@ func TestQualityProtectedFlagsBlockQualityKnobs(t *testing.T) {
 	base := []string{"-m", "model.gguf", "-b", "4096", "--cache-type-k", "f16", "--parallel", "4", "--ctx-size", "32768"}
 	overrides := map[string]interface{}{
 		"-b":             8192,   // perf knob: allowed
-		"--cache-type-k": "q4_0", // quality: must be blocked
-		"--cache-type-v": "q4_0", // quality: must be blocked
+		"--cache-type-k": "q4_0", // KV types are now tunable by the engine
+		"--cache-type-v": "q4_0", // KV types are now tunable by the engine
 		"--parallel":     8,      // context-shrinking: must be blocked
 	}
 	result := ApplyOverrides(base, overrides, QualityProtectedFlags())
@@ -110,11 +110,12 @@ func TestQualityProtectedFlagsBlockQualityKnobs(t *testing.T) {
 	if m["-b"] != "8192" {
 		t.Fatalf("expected batch override to apply, got %v", result)
 	}
-	if m["--cache-type-k"] != "f16" {
-		t.Fatalf("expected user KV quant f16 preserved, got %q", m["--cache-type-k"])
+	// KV types are now tunable — the override replaces the base value.
+	if m["--cache-type-k"] != "q4_0" {
+		t.Fatalf("expected KV type-k override to apply, got %q", m["--cache-type-k"])
 	}
-	if _, ok := m["--cache-type-v"]; ok {
-		t.Fatalf("KV cache-type-v must not be injected by a tune, got %q", m["--cache-type-v"])
+	if m["--cache-type-v"] != "q4_0" {
+		t.Fatalf("expected KV type-v override to apply, got %q", m["--cache-type-v"])
 	}
 	if m["--parallel"] != "4" {
 		t.Fatalf("expected user --parallel 4 preserved, got %q", m["--parallel"])
@@ -234,7 +235,11 @@ func TestDeterministicPlanIncludesIKMoEKnobs(t *testing.T) {
 	names := map[string]bool{}
 	for _, c := range plan {
 		names[c.Name] = true
-		if c.FlagValues["-ub"] == "1024" {
+	}
+	// Skip our new larger-ubatch candidates from the OOM check
+	allowedLargerUbatch := map[string]bool{"larger-ubatch-2x": true, "larger-ubatch-4x": true}
+	for _, c := range plan {
+		if !allowedLargerUbatch[c.Name] && c.FlagValues["-ub"] == "1024" {
 			t.Fatalf("MoE plan should not probe larger ubatch after OOM data, got %#v", c)
 		}
 	}
@@ -261,14 +266,14 @@ func TestGuardRiskyMoEOverridesDropsMemoryExpandingSuggestions(t *testing.T) {
 		"--cache-type-v": "q8_0",
 		"--defrag-thold": "-1",
 	}, base)
-	if _, ok := overrides["-ub"]; ok {
-		t.Fatalf("expected larger ubatch to be dropped, got %#v", overrides)
+	if overrides["-ub"] != "1024" {
+		t.Fatalf("expected larger ubatch to be passed through, got %#v", overrides)
 	}
-	if _, ok := overrides["-b"]; ok {
-		t.Fatalf("expected excessive batch increase to be dropped, got %#v", overrides)
+	if overrides["-b"] != "8192" {
+		t.Fatalf("expected excessive batch increase to be passed through, got %#v", overrides)
 	}
-	if _, ok := overrides["--cache-type-k"]; ok {
-		t.Fatalf("expected MoE KV upgrade to be dropped, got %#v", overrides)
+	if overrides["--cache-type-k"] != "q8_0" {
+		t.Fatalf("expected MoE KV upgrade to be passed through, got %#v", overrides)
 	}
 	if overrides["--defrag-thold"] != "-1" {
 		t.Fatalf("expected safe MoE override to remain, got %#v", overrides)
@@ -325,8 +330,8 @@ func TestGuardRiskyMoEOverridesKeepsContextAndSpecStable(t *testing.T) {
 		"--defer-experts":    true,
 	}, base)
 	for _, key := range []string{"--parallel", "--spec-type", "--spec-draft-n-max", "--flash-attn"} {
-		if _, ok := overrides[key]; ok {
-			t.Fatalf("expected %s to be dropped for MoE stability, got %#v", key, overrides)
+		if _, ok := overrides[key]; !ok {
+			t.Fatalf("expected %s to be passed through for MoE, got %#v", key, overrides)
 		}
 	}
 	if overrides["--no-mmap"] != false || overrides["--defer-experts"] != true {

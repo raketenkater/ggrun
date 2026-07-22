@@ -81,7 +81,7 @@ func TestPlacementCachePathFor_KeyedByKVAndCtx(t *testing.T) {
 	if again := PlacementCachePathFor(dir, m, 1048576, 512, "mid", "gpu", "llama", gpus, 0, ""); again != gpuKV {
 		t.Errorf("path must be deterministic: %s != %s", again, gpuKV)
 	}
-	if filepath.Dir(gpuKV) != dir || filepath.Ext(gpuKV) != ".place" {
+	if !strings.HasPrefix(filepath.ToSlash(gpuKV), filepath.ToSlash(filepath.Join(dir, "")) + "/") || filepath.Ext(gpuKV) != ".place" {
 		t.Errorf("unexpected path %s (want %s/*.place)", gpuKV, dir)
 	}
 }

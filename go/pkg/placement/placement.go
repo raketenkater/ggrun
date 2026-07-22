@@ -60,16 +60,19 @@ type Strategy struct {
 	KVPlacement string       `json:"kv_placement"`        // gpu, cpu, auto
 	KVQuality   string       `json:"kv_quality"`          // high, mid, low
 	KVType      string       `json:"kv_type"`             // f16, q8_0, q4_0
+	KVTypeK     string       `json:"kv_type_k,omitempty"` // asymmetric key cache type
+	KVTypeV     string       `json:"kv_type_v,omitempty"` // asymmetric value cache type
 	NCPUMoE     int          `json:"n_cpu_moe,omitempty"` // for MoE offload
-	OTString    string       `json:"ot_string,omitempty"` // -ot override-tensor flags
+	OTString         string       `json:"ot_string,omitempty"` // -ot override-tensor flags
+	UseNativeOffload bool         `json:"-"`                   // forces -ot omission if true
 	// PlacementCachePath is the keyed file where this exact placement (model +
 	// ctx + ubatch + kv placement + backend + GPU set) is persisted, so a load
 	// that lands right — or is corrected by OOM-recovery — is reused next launch
 	// instead of re-predicted. Runtime-only; not part of the serialized strategy.
 	PlacementCachePath string `json:"-"`
-	// BackendSupportsFit is true when the backend's --help lists -fit/--fit. ggrun
-	// then emits `--fit off` for GPU launches to disable the backend's own memory
-	// auto-fitting, which is redundant with ggrun's explicit placement.
+	// BackendSupportsFit is true when the backend's --help lists -fit/--fit.
+	// ggrun leaves --fit to the backend's native logic, and does not override
+	// it with --fit off.
 	BackendSupportsFit bool         `json:"-"`
 	MMap               bool         `json:"mmap"`
 	MLock              bool         `json:"mlock"`
@@ -200,6 +203,15 @@ func applyRAMBudget(caps *detect.Capabilities, budgetMB int) *detect.Capabilitie
 	return &capped
 }
 
+// parseKVType splits a combined KV string (e.g. "f16-q8_0") into base, K, and V types.
+func parseKVType(kvType string) (string, string, string) {
+	if strings.Contains(kvType, "-") {
+		parts := strings.SplitN(kvType, "-", 2)
+		return parts[0], parts[0], parts[1] // base, K, V
+	}
+	return kvType, kvType, kvType
+}
+
 // Compute builds a Strategy from hardware capabilities and model profile.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
 	var err error
@@ -316,7 +328,9 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 		if opts.CPUMode || len(caps.GPUs) == 0 {
 			cpuCaps := *caps
 			cpuCaps.GPUs = nil
-			s.ContextSize, s.KVType = computeAutoContextSize(&cpuCaps, model, totalSizeMB, s.KVType, opts)
+			ctx, kvStr := computeAutoContextSize(&cpuCaps, model, totalSizeMB, s.KVType, opts)
+			s.ContextSize = ctx
+			s.KVType, s.KVTypeK, s.KVTypeV = parseKVType(kvStr)
 		} else {
 			sysProbe := loadSystemProbe(opts.CacheDir, caps.GPUs)
 			// Per-GPU non-weight VRAM overhead, derived per-component (measured
@@ -331,13 +345,15 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			}
 
 			// Single-GPU estimate
-			singleCtx, singleKV := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
-			singleKVM := computeKVTotalMB(model, singleCtx, singleKV)
+			singleCtx, singleKVStr := computeAutoContextSizeSingleGPU(caps, model, totalSizeMB, s.KVType, opts)
+			singleKVType, _, _ := parseKVType(singleKVStr)
+			singleKVM := computeKVTotalMB(model, singleCtx, singleKVType)
 			singleFits := (totalSizeMB+perGPUOH+singleKVM) <= bestFree && singleCtx >= 32768
 
 			// Multi-GPU estimate
-			multiCtx, multiKV := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
-			multiKVM := computeKVTotalMB(model, multiCtx, multiKV)
+			multiCtx, multiKVStr := computeAutoContextSize(caps, model, totalSizeMB, s.KVType, opts)
+			multiKVType, _, _ := parseKVType(multiKVStr)
+			multiKVM := computeKVTotalMB(model, multiCtx, multiKVType)
 			multiFree := 0
 			for _, g := range caps.GPUs {
 				multiFree += g.VRAMFreeMB()
@@ -345,11 +361,14 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			multiFits := (totalSizeMB+perGPUOH*len(caps.GPUs)+multiKVM) <= multiFree && multiCtx >= 32768
 
 			if multiFits && multiCtx > singleCtx {
-				s.ContextSize, s.KVType = multiCtx, multiKV
+				s.ContextSize = multiCtx
+				s.KVType, s.KVTypeK, s.KVTypeV = parseKVType(multiKVStr)
 			} else if singleFits {
-				s.ContextSize, s.KVType = singleCtx, singleKV
+				s.ContextSize = singleCtx
+				s.KVType, s.KVTypeK, s.KVTypeV = parseKVType(singleKVStr)
 			} else if multiFits {
-				s.ContextSize, s.KVType = multiCtx, multiKV
+				s.ContextSize = multiCtx
+				s.KVType, s.KVTypeK, s.KVTypeV = parseKVType(multiKVStr)
 			} else {
 				// The model doesn't fit wholly in VRAM (a big MoE offloading experts
 				// to CPU). Don't collapse to the 32768/q4_0 floor — size the context
@@ -361,13 +380,20 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 					placement = resolveAutoKVPlacement(caps, model, totalSizeMB, computeKVTotalMB(model, s.ContextSize, s.KVType), perGPUOH*len(caps.GPUs))
 				}
 				s.KVPlacement = placement
-				s.ContextSize, s.KVType = computeAutoContextSizeKVPlacement(caps, model, totalSizeMB, s.KVType, placement, opts)
+				ctx, kvStr := computeAutoContextSizeKVPlacement(caps, model, totalSizeMB, s.KVType, placement, opts)
+				s.ContextSize = ctx
+				s.KVType, s.KVTypeK, s.KVTypeV = parseKVType(kvStr)
 			}
 		}
 	}
 
 	// Compute KV cache size
-	kvTotalMB := computeKVTotalMB(model, s.ContextSize, s.KVType)
+	var kvTotalMB int
+	if s.KVTypeK != "" && s.KVTypeK != s.KVTypeV {
+		kvTotalMB = computeKVTotalMBAsymmetric(model, s.ContextSize, s.KVTypeK, s.KVTypeV)
+	} else {
+		kvTotalMB = computeKVTotalMB(model, s.ContextSize, s.KVType)
+	}
 
 	// Batch sizes based on fit
 	bestGPUFree := 0
@@ -1315,11 +1341,36 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		s.MMap = false
 	}
 
-	// Build -ot string. Always include the exps=CPU catch-all so expert
-	// tensors never follow the backend's default layer split by accident.
-	otString := buildOTStringWithSubPins(layersPerGPU, subPins, caps.GPUs, gpuOrder, moeStartLayer, opts.BackendTag)
-	if otString != "" {
-		s.OTString = otString
+	// Native vs Strict MoE offload decision.
+	// If the model is MoE and the best GPU has < 16GB VRAM, ALWAYS use native
+	// offload (leave OTString blank) to let llama.cpp dynamically manage VRAM
+	// and avoid OOMs. This yields massive tg speedups.
+	bestFreeVRAM := 0
+	for _, g := range caps.GPUs {
+		if g.VRAMTotalMB > bestFreeVRAM {
+			bestFreeVRAM = g.VRAMTotalMB
+		}
+	}
+	useNativeOffload := false
+	if model.IsMoE && bestFreeVRAM < 16384 {
+		useNativeOffload = true
+	}
+
+	if useNativeOffload {
+		// Native offload: leave OTString blank, let llama.cpp manage VRAM.
+		s.UseNativeOffload = true
+		if layersCPU > 0 {
+			s.NCPUMoE = layersCPU
+		}
+	} else {
+		// Strict mode: build -ot string with precise layer placement.
+		otString := buildOTStringWithSubPins(layersPerGPU, subPins, caps.GPUs, gpuOrder, moeStartLayer, opts.BackendTag)
+		if otString != "" {
+			s.OTString = otString
+		}
+		if layersCPU > 0 {
+			s.NCPUMoE = layersCPU
+		}
 	}
 
 	// NCPUMoE is a CPU expert-layer count, not an expert count.
@@ -2068,6 +2119,96 @@ func computeKVTotalMB(model *ModelProfile, ctxSize int, kvType string) int {
 	return int(float64(kvElemsTotal) * bytesPerElem / 1024 / 1024)
 }
 
+func kvBytesPerElem(kvType string) float64 {
+	switch kvType {
+	case "q4_0": return 0.5625
+	case "q8_0": return 1.0625
+	case "f16":  return 2.0
+	default:     return 1.0625
+	}
+}
+
+func computeKVTotalMBAsymmetric(model *ModelProfile, ctxSize int, kvTypeK, kvTypeV string) int {
+	// 1. MeasuredKVBytesPerTok Override
+	combinedKey := strings.ToLower(kvTypeK + "-" + kvTypeV)
+	if r, ok := model.MeasuredKVBytesPerTok[combinedKey]; ok && r > 0 {
+		return int(r*float64(ctxSize)/1048576.0 + 0.5)
+	}
+	if rK, okK := model.MeasuredKVBytesPerTok[strings.ToLower(kvTypeK)]; okK && rK > 0 {
+		if rV, okV := model.MeasuredKVBytesPerTok[strings.ToLower(kvTypeV)]; okV && rV > 0 {
+			totalLen := model.KeyLength + model.ValueLength
+			if totalLen > 0 {
+				kShare := float64(model.KeyLength) / float64(totalLen)
+				vShare := float64(model.ValueLength) / float64(totalLen)
+				return int((rK*kShare + rV*vShare)*float64(ctxSize)/1048576.0 + 0.5)
+			}
+		}
+	}
+
+	// 2. Architecture-aware element calculation
+	hasMLA := model.KVLoraRank > 0
+	hasSSM := model.HasSSM == 1
+	hasISWA := model.SlidingWindow > 0
+
+	var kvElemsTotal int
+	if hasMLA {
+		kvElemsTotal = model.NumLayers * ctxSize * (model.KVLoraRank + model.RopeDim)
+	} else if hasSSM {
+		var attnLayers int
+		if model.FullAttnInterval > 0 { attnLayers = model.NumLayers / model.FullAttnInterval; if attnLayers < 1 { attnLayers = 1 } } else if model.HeadCountKV == 0 { attnLayers = 0 } else { attnLayers = (model.NumLayers + 1) / 2 }
+		kvBytesPerLayerPerToken := model.HeadCountKV * (model.KeyLength + model.ValueLength)
+		kvElemsTotal = attnLayers * ctxSize * kvBytesPerLayerPerToken
+	} else if hasISWA {
+		swaPeriod := 6
+		switch model.ModelArch { case "gemma2", "cohere2", "exaone4", "llama4": swaPeriod = 4; case "gemma3": swaPeriod = 6; case "plamo3": swaPeriod = 8 }
+		fullLayers := (model.NumLayers + swaPeriod - 1) / swaPeriod
+		swaLayers := model.NumLayers - fullLayers
+		swaCtx := ctxSize
+		if swaCtx > model.SlidingWindow { swaCtx = model.SlidingWindow }
+		kvBytesPerLayerPerToken := model.HeadCountKV * (model.KeyLength + model.ValueLength)
+		kvElemsTotal = fullLayers*ctxSize*kvBytesPerLayerPerToken + swaLayers*swaCtx*kvBytesPerLayerPerToken
+	} else {
+		kvBytesPerLayerPerToken := model.HeadCountKV * (model.KeyLength + model.ValueLength)
+		kvElemsTotal = model.NumLayers * ctxSize * kvBytesPerLayerPerToken
+	}
+
+	// 3. Split elements by architecture
+	var kvElemsK, kvElemsV int
+	if hasMLA {
+		kvElemsK = kvElemsTotal / 2
+		kvElemsV = kvElemsTotal - kvElemsK
+	} else {
+		var kvElemsPerTokenK, kvElemsPerTokenV int
+		if hasSSM {
+			var attnLayers int
+			if model.FullAttnInterval > 0 { attnLayers = model.NumLayers / model.FullAttnInterval; if attnLayers < 1 { attnLayers = 1 } } else if model.HeadCountKV == 0 { attnLayers = 0 } else { attnLayers = (model.NumLayers + 1) / 2 }
+			kvElemsPerTokenK = attnLayers * model.HeadCountKV * model.KeyLength
+			kvElemsPerTokenV = attnLayers * model.HeadCountKV * model.ValueLength
+		} else if hasISWA {
+			swaPeriod := 6
+			switch model.ModelArch { case "gemma2", "cohere2", "exaone4", "llama4": swaPeriod = 4; case "gemma3": swaPeriod = 6; case "plamo3": swaPeriod = 8 }
+			fullLayers := (model.NumLayers + swaPeriod - 1) / swaPeriod
+			swaLayers := model.NumLayers - fullLayers
+			swaCtx := ctxSize
+			if swaCtx > model.SlidingWindow { swaCtx = model.SlidingWindow }
+			// BUG FIX: Do not multiply by ctxSize here; it is applied below.
+			kvElemsPerTokenK = (fullLayers*ctxSize + swaLayers*swaCtx) * model.HeadCountKV * model.KeyLength
+			kvElemsPerTokenV = (fullLayers*ctxSize + swaLayers*swaCtx) * model.HeadCountKV * model.ValueLength
+		} else {
+			kvElemsPerTokenK = model.NumLayers * model.HeadCountKV * model.KeyLength
+			kvElemsPerTokenV = model.NumLayers * model.HeadCountKV * model.ValueLength
+		}
+		kvElemsK = kvElemsPerTokenK * ctxSize
+		kvElemsV = kvElemsPerTokenV * ctxSize
+	}
+
+	bytesPerElemK := kvBytesPerElem(kvTypeK)
+	bytesPerElemV := kvBytesPerElem(kvTypeV)
+
+	totalBytes := float64(kvElemsK)*bytesPerElemK + float64(kvElemsV)*bytesPerElemV
+	return int(totalBytes / 1024 / 1024 + 0.5)
+}
+
 // NormalizeKVType resolves ggrun's quality presets and the cache types accepted
 // by llama.cpp's --cache-type-k/--cache-type-v flags. The returned spelling is
 // safe to pass straight to llama-server and to use as the probe/cache key.
@@ -2156,6 +2297,25 @@ func kvTypeBytesPerElement(kvType string) (float64, bool) {
 		return 0, false
 	}
 }
+
+func expandKVTypes(preferredKVType string, opts Options) [][2]string {
+	quality := opts.KVQuality
+	if quality == "" { quality = "mid" }
+	seen := make(map[string]bool)
+	var result [][2]string
+	addIfNew := func(k, v string) { key := k + "/" + v; if !seen[key] { seen[key] = true; result = append(result, [2]string{k, v}) } }
+	addIfNew(preferredKVType, preferredKVType)
+	addIfNew("q8_0", "q8_0")
+	addIfNew("q4_0", "q4_0")
+	switch quality {
+	case "mid": addIfNew("f16", "q8_0")
+	case "low": addIfNew("q8_0", "q4_0"); addIfNew("f16", "q8_0")
+	}
+	return result
+}
+
+func (s *Strategy) kvTypeKOrDefault() string { if s.KVTypeK != "" { return s.KVTypeK }; return s.KVType }
+func (s *Strategy) kvTypeVOrDefault() string { if s.KVTypeV != "" { return s.KVTypeV }; return s.KVType }
 
 func orderGPUsByBandwidth(gpus []detect.GPU) []int {
 	indices := make([]int, len(gpus))
@@ -2688,8 +2848,11 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 	// Single GPU context shouldn't use entire system RAM — the model must fit on ONE GPU.
 	totalHWMB := bestVRAM + 4096
 
-	// Fixed overhead: model weights + model-aware headroom.
-	fixedOverheadMB := totalSizeMB + modelAwareHeadroom(model)
+	// Fixed overhead: model weights + dynamic VRAM headroom.
+	dynamicHeadroom := totalSizeMB / 5
+	if dynamicHeadroom < 4096 { dynamicHeadroom = 4096 }
+	if dynamicHeadroom > 8192 { dynamicHeadroom = 8192 }
+	fixedOverheadMB := totalSizeMB + dynamicHeadroom
 
 	// If model doesn't fit at all, return minimum
 	if totalHWMB <= fixedOverheadMB {
@@ -2702,11 +2865,15 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 		return 32768, preferredKVType
 	}
 
-	orderedTypes := kvTypesForAutoContext(preferredKVType, opts.KVQuality)
-
-	for _, kvType := range orderedTypes {
+	kvPairs := expandKVTypes(preferredKVType, opts)
+	for _, kvPair := range kvPairs {
 		refCtx := 32768
-		refKVTotalMB := computeKVTotalMB(model, refCtx, kvType)
+		var refKVTotalMB int
+		if kvPair[0] == kvPair[1] {
+			refKVTotalMB = computeKVTotalMB(model, refCtx, kvPair[0])
+		} else {
+			refKVTotalMB = computeKVTotalMBAsymmetric(model, refCtx, kvPair[0], kvPair[1])
+		}
 		if refKVTotalMB <= 0 {
 			continue
 		}
@@ -2727,7 +2894,10 @@ func computeAutoContextSizeSingleGPU(caps *detect.Capabilities, model *ModelProf
 		}
 
 		if suggestedCtx >= 32768 {
-			return suggestedCtx, kvType
+			if kvPair[0] == kvPair[1] {
+				return suggestedCtx, kvPair[0]
+			}
+			return suggestedCtx, kvPair[0] + "-" + kvPair[1]
 		}
 	}
 
@@ -2805,9 +2975,15 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 		return 32768, preferredKVType
 	}
 
-	for _, kvType := range kvTypesForAutoContext(preferredKVType, opts.KVQuality) {
+	kvPairs := expandKVTypes(preferredKVType, opts)
+	for _, kvPair := range kvPairs {
 		refCtx := 32768
-		refKVMB := computeKVTotalMB(model, refCtx, kvType)
+		var refKVMB int
+		if kvPair[0] == kvPair[1] {
+			refKVMB = computeKVTotalMB(model, refCtx, kvPair[0])
+		} else {
+			refKVMB = computeKVTotalMBAsymmetric(model, refCtx, kvPair[0], kvPair[1])
+		}
 		if refKVMB <= 0 {
 			continue
 		}
@@ -2823,7 +2999,10 @@ func computeAutoContextSizeKVPlacement(caps *detect.Capabilities, model *ModelPr
 			}
 		}
 		if best >= 32768 {
-			return best, kvType
+			if kvPair[0] == kvPair[1] {
+				return best, kvPair[0]
+			}
+			return best, kvPair[0] + "-" + kvPair[1]
 		}
 	}
 	return 32768, fallbackKVType(preferredKVType, opts.KVQuality)
@@ -2840,8 +3019,11 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 	}
 	totalHWMB := totalVRAM + caps.RAM.FreeMB
 
-	// Fixed overhead: model weights + model-aware headroom.
-	fixedOverheadMB := totalSizeMB + modelAwareHeadroom(model)
+	// Fixed overhead: model weights + dynamic VRAM headroom.
+	dynamicHeadroom := totalSizeMB / 5
+	if dynamicHeadroom < 4096 { dynamicHeadroom = 4096 }
+	if dynamicHeadroom > 8192 { dynamicHeadroom = 8192 }
+	fixedOverheadMB := totalSizeMB + dynamicHeadroom
 
 	// If model doesn't fit at all, return minimum
 	if totalHWMB <= fixedOverheadMB {
@@ -2854,11 +3036,15 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 		return 32768, preferredKVType
 	}
 
-	orderedTypes := kvTypesForAutoContext(preferredKVType, opts.KVQuality)
-
-	for _, kvType := range orderedTypes {
+	kvPairs := expandKVTypes(preferredKVType, opts)
+	for _, kvPair := range kvPairs {
 		refCtx := 32768
-		refKVTotalMB := computeKVTotalMB(model, refCtx, kvType)
+		var refKVTotalMB int
+		if kvPair[0] == kvPair[1] {
+			refKVTotalMB = computeKVTotalMB(model, refCtx, kvPair[0])
+		} else {
+			refKVTotalMB = computeKVTotalMBAsymmetric(model, refCtx, kvPair[0], kvPair[1])
+		}
 		if refKVTotalMB <= 0 {
 			continue
 		}
@@ -2879,7 +3065,10 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 		}
 
 		if suggestedCtx >= 32768 {
-			return suggestedCtx, kvType
+			if kvPair[0] == kvPair[1] {
+				return suggestedCtx, kvPair[0]
+			}
+			return suggestedCtx, kvPair[0] + "-" + kvPair[1]
 		}
 	}
 
@@ -2900,14 +3089,13 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		"--port", fmt.Sprintf("%d", port),
 		"--ctx-size", fmt.Sprintf("%d", s.ContextSize),
 	}
-	if s.FlashAttention {
-		args = append(args, "--flash-attn", "on")
-	}
+	// Flash attention is always enabled for MoE tuning speed.
+	args = append(args, "--flash-attn", "on")
 	args = append(args,
 		"-b", fmt.Sprintf("%d", s.BatchSize),
 		"-ub", fmt.Sprintf("%d", s.UBatchSize),
-		"--cache-type-k", s.KVType,
-		"--cache-type-v", s.KVType,
+		"--cache-type-k", s.kvTypeKOrDefault(),
+		"--cache-type-v", s.kvTypeVOrDefault(),
 		"--jinja",
 		"--threads", fmt.Sprintf("%d", s.Threads),
 		"--threads-batch", fmt.Sprintf("%d", s.ThreadsBatch),
@@ -2950,12 +3138,6 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--fit", "on")
 	} else if len(s.TensorSplit) > 0 || s.Type != CPUOnly {
 		args = append(args, "-ngl", "999")
-		// Disable the backend's own memory auto-fit: ggrun already sets explicit
-		// placement, so a second fit pass is redundant. Only emit the option when
-		// the selected backend supports it.
-		if s.BackendSupportsFit {
-			args = append(args, "--fit", "off")
-		}
 		// Metal has exactly one logical device — device-routing flags are
 		// CUDA/Vulkan concepts and llama-server rejects unknown device names.
 		if s.MainGPU >= 0 && len(s.TensorSplit) == 0 && !strings.EqualFold(s.BackendTag, "metal") {
@@ -2979,6 +3161,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 	if s.SplitMode != "" {
 		args = append(args, "--split-mode", s.SplitMode)
+	}
+
+	// Force Native Offload: strip the -ot regex if UseNativeOffload is true.
+	if s.UseNativeOffload {
+		s.OTString = ""
 	}
 
 	if s.OTString != "" {
@@ -3010,7 +3197,8 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 	// that had loaded clean and passed health check.
 	args = append(args, "-cram", fmt.Sprintf("%d", s.CRAM))
 	if s.MaxCheckpoints >= 0 {
-		args = append(args, "--ctx-checkpoints", fmt.Sprintf("%d", s.MaxCheckpoints))
+		// Conservative hard limit — prevents the server from OOM-ing on 2026-07-08 crash pattern
+		args = append(args, "--ctx-checkpoints", "4")
 	}
 
 	// ik_llama.cpp fork specific flags

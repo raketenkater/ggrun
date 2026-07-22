@@ -91,6 +91,7 @@ func TestRecordMeasuredContextMBUpdatesImmediatePlacementState(t *testing.T) {
 func TestLegacyMeasuredCachesMigrateToAppCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows os.UserHomeDir() uses USERPROFILE
 	appCache := filepath.Join(t.TempDir(), "app-cache")
 	model := &ModelProfile{
 		Basename:  "Deepseek-V4-Flash",

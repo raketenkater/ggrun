@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,8 +14,6 @@ import (
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
-	"github.com/raketenkater/ggrun/pkg/server"
-	"github.com/raketenkater/ggrun/pkg/tui"
 )
 
 func writeFakeBackend(t *testing.T, name, body string) string {
@@ -50,28 +47,6 @@ func TestClaudeCodeParallelIsFeaturePolicyForDeepseek4(t *testing.T) {
 	}
 	if opts.ContextSize != 131072 {
 		t.Fatalf("unknown model context should use the portable 2x64k baseline, got %d", opts.ContextSize)
-	}
-}
-
-func TestTUILaunchArgsPassSelectedBackend(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.Backend = "ik_llama"
-	args := tuiLaunchArgs(&tui.LaunchRequest{
-		ModelPath:   "model.gguf",
-		Port:        8081,
-		KVPlacement: "auto",
-		KVQuality:   "mid",
-		Backend:     "ik_llama",
-		ClaudeCode:  true,
-	}, cfg)
-	if !hasAdjacentArg(args, "--backend", "ik_llama") {
-		t.Fatalf("selected backend should be explicit so route-arch cannot override it, got %v", args)
-	}
-	if !hasAdjacentArg(args, "--ctx-size", "fit") {
-		t.Fatalf("TUI fit context should map to CLI fit args, got %v", args)
-	}
-	if !hasArg(args, "--claude-code") {
-		t.Fatalf("Claude Code toggle not preserved: %v", args)
 	}
 }
 
@@ -114,23 +89,6 @@ func TestParseLaunchArgsRejectsMixedKVTypes(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "mixed") {
 		t.Fatalf("mixed cache types must fail before an unsafe placement, got %v", err)
-	}
-}
-
-func TestTUILaunchArgsPreserveMaxContext(t *testing.T) {
-	cfg := config.Defaults()
-	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", CtxFlag: "max"}, cfg)
-	if !hasAdjacentArg(args, "--ctx-size", "max") {
-		t.Fatalf("TUI max context should pass CLI max, got %v", args)
-	}
-}
-
-func TestTUILaunchArgsPassNonDefaultBackend(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.Backend = "ik_llama"
-	args := tuiLaunchArgs(&tui.LaunchRequest{ModelPath: "model.gguf", Backend: "custom"}, cfg)
-	if !hasAdjacentArg(args, "--backend", "custom") {
-		t.Fatalf("non-default backend selection should be explicit, got %v", args)
 	}
 }
 
@@ -299,21 +257,6 @@ func TestRouteArchBackendPreservesIKDialectBehindRecipeTag(t *testing.T) {
 	}
 }
 
-func TestBackendBuildJobsCapsHeavyCompilers(t *testing.T) {
-	if got := backendBuildJobs("cuda", 256); got != 8 {
-		t.Fatalf("CUDA build jobs = %d, want 8", got)
-	}
-	if got := backendBuildJobs("cpu", 256); got != 16 {
-		t.Fatalf("CPU build jobs = %d, want 16", got)
-	}
-	if got := backendBuildJobs("cuda", 4); got != 4 {
-		t.Fatalf("small host CUDA build jobs = %d, want 4", got)
-	}
-	if got := backendBuildJobs("cuda", 0); got != 1 {
-		t.Fatalf("invalid CPU count build jobs = %d, want 1", got)
-	}
-}
-
 func TestRouteArchBackendKeepsExplicitBackend(t *testing.T) {
 	be := routeArchBackend(&backendInfo{Path: "/main/llama-server", Tag: "llama"}, &placement.ModelProfile{ModelArch: "deepseek4"}, &launchRequest{Backend: "llama", BackendExplicit: true})
 	if be == nil || be.Path != "/main/llama-server" || be.Tag != "llama" {
@@ -459,23 +402,6 @@ func TestParseLaunchArgsEqualsForms(t *testing.T) {
 	}
 	if req.GPUsFlag != "1,3" || req.Host != "127.0.0.1" || req.SpecMode != "draft" || req.Parallel != 4 {
 		t.Fatalf("equals placement mismatch: %#v", req)
-	}
-}
-
-func TestBenchmarkCompatArgs(t *testing.T) {
-	args := benchmarkCompatArgs([]string{"/models/test.gguf", "--benchmark", "--port", "9090"})
-	if len(args) != 4 || args[0] != "--model" || args[1] != "test.gguf" || args[2] != "--port" || args[3] != "9090" {
-		t.Fatalf("unexpected benchmark args: %v", args)
-	}
-
-	args = benchmarkCompatArgs([]string{"--model=/models/test.gguf", "--benchmark", "--port=9091"})
-	if len(args) != 4 || args[0] != "--model" || args[1] != "test.gguf" || args[2] != "--port" || args[3] != "9091" {
-		t.Fatalf("unexpected equals benchmark args: %v", args)
-	}
-
-	args = benchmarkCompatArgs([]string{"--model", "/models/test.gguf", "--benchmark"})
-	if len(args) != 2 || args[0] != "--model" || args[1] != "test.gguf" {
-		t.Fatalf("unexpected explicit model benchmark args: %v", args)
 	}
 }
 
@@ -1258,60 +1184,3 @@ func TestShouldPromoteMoEPlacementIncludesSubpinSqueeze(t *testing.T) {
 // on the shutdown signal, so a backend that crashed on its own (a real CUDA
 // OOM well after health check, reproduced 2026-07-08/09 on a long request)
 // left the wrapper silently hung forever with no idea its child had died.
-func TestWaitForShutdownOrCrashDetectsProcessDeath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX short-lived process")
-	}
-	cmd := exec.Command("sh", "-c", "exit 0")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake process: %v", err)
-	}
-	// Production always reaps via a background cmd.Wait() (server.go's
-	// StartWithTimeoutTo) — that's what populates Cmd.ProcessState, which
-	// IsRunning() checks. Without it the child would sit as a zombie and
-	// never look "not running", which would silently mask this test.
-	go func() { _ = cmd.Wait() }()
-	p := &server.Process{Cmd: cmd}
-	sigCh := make(chan os.Signal, 1)
-
-	done := make(chan bool, 1)
-	go func() { done <- waitForShutdownOrCrash(p, sigCh) }()
-
-	select {
-	case crashed := <-done:
-		if !crashed {
-			t.Fatal("expected crashed=true when the process exits on its own")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitForShutdownOrCrash did not detect process death in time")
-	}
-}
-
-func TestWaitForShutdownOrCrashRespondsToSignal(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX long-lived process")
-	}
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake process: %v", err)
-	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
-	p := &server.Process{Cmd: cmd}
-	sigCh := make(chan os.Signal, 1)
-
-	done := make(chan bool, 1)
-	go func() { done <- waitForShutdownOrCrash(p, sigCh) }()
-
-	sigCh <- os.Interrupt
-	select {
-	case crashed := <-done:
-		if crashed {
-			t.Fatal("expected crashed=false when a shutdown signal arrives while the process is still running")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitForShutdownOrCrash did not respond to the signal in time")
-	}
-}

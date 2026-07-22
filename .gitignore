@@ -27,3 +27,11 @@ dist/
 /llm-server-bash
 /llama-server
 docs/brand.md
+.aider*
+
+# Ignore build outputs and temp files
+tmp/
+go/bin/
+go/cmd/ggrun/dryrun_
+go/cmd/ggrun/tune_
+

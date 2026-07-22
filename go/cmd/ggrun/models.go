@@ -25,8 +25,6 @@ func cmdModels(args []string) {
 			modelsUsage()
 		}
 		listModels(cfg.ModelDir)
-	case "browse", "recommend":
-		cmdRecommend(args)
 	case "path":
 		if len(args) != 0 {
 			modelsUsage()
@@ -53,7 +51,7 @@ func listModels(root string) {
 	fmt.Printf("Models in %s\n", root)
 	if len(list) == 0 {
 		fmt.Println("  No GGUF models found.")
-		fmt.Println("  Try: ggrun recommend")
+		fmt.Println("  Add GGUF models to that directory to use them with ggrun tune/dry-run.")
 		return
 	}
 	for _, model := range list {
@@ -144,5 +142,5 @@ func modelsUsage() {
 }
 
 func modelsHelp() {
-	fmt.Fprintln(os.Stderr, "Usage: ggrun models [list|browse|path|rm <model.gguf> [--yes]]")
+	fmt.Fprintln(os.Stderr, "Usage: ggrun models [list|path|rm <model.gguf> [--yes]]")
 }

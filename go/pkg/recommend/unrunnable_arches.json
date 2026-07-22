@@ -1,8 +1,0 @@
-{
-  "_comment": "Architectures present in catalog.json that no bundled backend (mainline llama.cpp or ik_llama.cpp) can load yet. The recommender filters these out so the launcher never surfaces a model it can only fail to load with 'unknown architecture'. They stay in catalog.json so a power user pointing LLAMA_SERVER at a custom build can still find them. This is a blocklist (not an allowlist): only explicitly-listed arches are excluded, so an incomplete list never over-filters. The durable fix stamps a per-candidate 'runnable' flag at catalog-build time from the bundled backend's arch table (tools/models/update_recommendations.py); until that lands this file is the single source of truth for the blocklist.",
-  "arches": [
-    {"arch": "bailingmoe2.5", "reason": "InclusionAI Ling 2.6 Flash"},
-    {"arch": "longcat-flash-ngram", "reason": "LongCat Flash Lite"},
-    {"arch": "mllama", "reason": "Llama 3.2 Vision — not registered in the bundled build"}
-  ]
-}

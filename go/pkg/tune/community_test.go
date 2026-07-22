@@ -76,7 +76,7 @@ func TestFetchCommunityTuneHitSanitizesFlags(t *testing.T) {
 	if flags["-b"] != "4096" {
 		t.Fatalf("allowed perf flag missing: %v", flags)
 	}
-	for _, banned := range []string{"-m", "--host", "--made-up-fla", "--cache-type-k", "--parallel"} {
+	for _, banned := range []string{"-m", "--host", "--made-up-fla", "--parallel"} {
 		if _, ok := flags[banned]; ok {
 			t.Fatalf("flag %s must be stripped from community config: %v", banned, flags)
 		}

@@ -4,13 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -20,31 +19,24 @@ import (
 	"unicode"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
-	"github.com/raketenkater/ggrun/pkg/benchmark"
 	"github.com/raketenkater/ggrun/pkg/config"
-	"github.com/raketenkater/ggrun/pkg/daemon"
 	"github.com/raketenkater/ggrun/pkg/detect"
-	"github.com/raketenkater/ggrun/pkg/download"
 	"github.com/raketenkater/ggrun/pkg/gguf"
 	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/probe"
-	"github.com/raketenkater/ggrun/pkg/recommend"
 	"github.com/raketenkater/ggrun/pkg/recovery"
 	"github.com/raketenkater/ggrun/pkg/server"
-	"github.com/raketenkater/ggrun/pkg/tui"
 	"github.com/raketenkater/ggrun/pkg/tune"
-	"github.com/raketenkater/ggrun/pkg/update"
 )
 
-// version comes from pkg/update so the binary and the update checker can never
-// disagree; releases override it via -ldflags (see .github/workflows/release.yml).
-var version = update.Version()
+// version is the build version; release builds override it via -ldflags.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		cmdGUI()
-		return
+		usage()
+		os.Exit(2)
 	}
 
 	args := os.Args[1:]
@@ -59,19 +51,6 @@ func main() {
 		fmt.Println("ggrun", version)
 	case "detect":
 		cmdDetect()
-	case "launch":
-		// `launch --dry-run` must never start a server. Without this reroute the
-		// flag was silently swallowed by parseLaunchArgs and the "dry run" did
-		// real launch attempts (and wrote OOM-replan placement caches).
-		if hasArg(args[1:], "--dry-run") {
-			cmdDryRun(args[1:])
-		} else {
-			cmdLaunch(args[1:])
-		}
-	case "benchmark":
-		cmdBenchmark(args[1:])
-	case "daemon":
-		cmdDaemon(args[1:])
 	case "claude-status":
 		cmdClaudeStatus(args[1:])
 	case "claude-workflow-hook":
@@ -82,24 +61,12 @@ func main() {
 		cmdProbe()
 	case "kv-probe":
 		cmdKVProbe(args[1:])
-	case "download":
-		cmdDownload(args[1:])
 	case "tune":
 		cmdTune(args[1:])
 	case "spec-test":
 		cmdSpecTest(args[1:])
-	case "recommend":
-		cmdRecommend(args[1:])
 	case "models":
 		cmdModels(args[1:])
-	case "gui", "tui":
-		cmdGUI()
-	case "config":
-		cmdConfig(args[1:])
-	case "backend", "backends":
-		cmdBackend(args[1:])
-	case "update", "--update":
-		cmdUpdate()
 	default:
 		usage()
 		os.Exit(2)
@@ -109,28 +76,16 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: ggrun [command] [args]
 
-With no command, launches the interactive TUI (same as ggrun gui).
-
 Commands:
   version              Show version
   detect               Detect hardware capabilities
   probe                Check free GPU/RAM memory
   kv-probe <model>     Measure real KV cache size (2 short launches) and cache it,
                        so context sizing is exact for compressed-attention models
-  launch <model.gguf>  Launch model with auto-placement
-  benchmark <model>    Benchmark a running server
-  daemon               Start persistent daemon
   dry-run <model.gguf> Print computed flags without launching
-  download <repo/name> Download from HuggingFace
   tune <model.gguf>    AI-tune model for best performance
   spec-test <model>    Verify MTP ceilings 1-4 against a target-only baseline
-  recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   models [list|browse|path|rm] List, browse, locate, or safely remove GGUF models
-  config [show|edit|path|reset]  Manage settings
-  backend [list|add|register|remove]  Manage custom llama.cpp backends and
-                       optionally route a model architecture to one
-  update, --update     Update ggrun and backends
-  gui, tui             Interactive TUI (model picker, settings, launch)
 
 Launch flags:
   -port int            Server port (default 8081)
@@ -151,7 +106,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "daemon", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "download", "tune", "spec-test", "recommend", "models", "gui", "tui", "config", "backend", "backends", "update", "--update":
+	case "help", "--help", "-h", "version", "--version", "-v", "detect", "claude-status", "claude-workflow-hook", "dry-run", "probe", "kv-probe", "tune", "spec-test", "models":
 		return true
 	default:
 		return false
@@ -166,36 +121,15 @@ func dispatchCompat(args []string) bool {
 		cmdShowConfigs(args)
 		return true
 	}
-	if hasArg(args, "--download") {
-		model := firstPositional(args)
-		if model == "" {
-			fmt.Fprintln(os.Stderr, "Usage: ggrun <repo/name> --download")
-			os.Exit(2)
-		}
-		cmdDownload([]string{model})
-		return true
-	}
 	if hasArg(args, "--ai-tune") {
 		cmdTune(args)
-		return true
-	}
-	if hasArg(args, "--benchmark") {
-		if firstPositional(args) != "" {
-			cmdLaunch(args)
-		} else {
-			cmdBenchmark(benchmarkCompatArgs(args))
-		}
 		return true
 	}
 	if hasArg(args, "--dry-run") {
 		cmdDryRun(args)
 		return true
 	}
-	if strings.HasPrefix(args[0], "-") && firstPositional(args) == "" {
-		return false
-	}
-	cmdLaunch(args)
-	return true
+	return false
 }
 
 func formatCommand(args []string) string {
@@ -259,38 +193,6 @@ func loadConfigOrExit() *config.Config {
 		os.Exit(2)
 	}
 	return cfg
-}
-
-func benchmarkCompatArgs(args []string) []string {
-	out := []string{}
-	if model := firstPositional(args); model != "" {
-		out = append(out, "--model", filepath.Base(model))
-	}
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--model" || args[i] == "-m" {
-			if i+1 < len(args) {
-				out = append(out, "--model", filepath.Base(args[i+1]))
-				i++
-			}
-			continue
-		}
-		if args[i] == "--port" || args[i] == "-port" {
-			if i+1 < len(args) {
-				out = append(out, "--port", args[i+1])
-				i++
-			}
-			continue
-		}
-		if key, val, ok := strings.Cut(args[i], "="); ok {
-			switch key {
-			case "--port", "-port":
-				out = append(out, "--port", val)
-			case "--model", "-m":
-				out = append(out, "--model", filepath.Base(val))
-			}
-		}
-	}
-	return out
 }
 
 func firstPositional(args []string) string {
@@ -1621,365 +1523,6 @@ func resolveLaunchBackend(req *launchRequest, model *placement.ModelProfile, cap
 	return be
 }
 
-func cmdLaunch(args []string) {
-	req, err := parseLaunchArgs(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(2)
-	}
-	if req.ModelPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun launch <model.gguf>")
-		os.Exit(2)
-	}
-
-	cfg := loadConfigOrExit()
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
-
-	model, err := parseModel(req.ModelPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
-		os.Exit(1)
-	}
-	warnModelCompatibility(model)
-
-	be := resolveLaunchBackend(req, model, caps)
-	if be == nil {
-		fmt.Fprintln(os.Stderr, "Error: no llama-server binary found")
-		os.Exit(1)
-	}
-	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
-		fmt.Printf("[launch] GPU restriction: %s\n", env)
-	}
-	if err := guardPortFree(req.Port, "launch"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Claude Code's Auto permission checks must not run on the giant coding
-	// model: one tool call can otherwise trigger ten extra ~25k-token turns.
-	// Start the dedicated reviewer first, then sample hardware again so normal
-	// placement accounts for its real measured VRAM use.
-	claudeAuto, err := startClaudeAutoReviewer(req, cfg, caps)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if claudeAuto != nil {
-		refreshed, detectErr := detect.Detect()
-		if detectErr != nil {
-			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "Error re-detecting hardware after Auto reviewer load: %v\n", detectErr)
-			os.Exit(1)
-		}
-		caps = refreshed
-	}
-
-	strategy, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
-	if err != nil {
-		claudeAuto.stop()
-		fmt.Fprintf(os.Stderr, "Error computing placement: %v\n", err)
-		os.Exit(1)
-	}
-	claudeCodeSlotAdjust(strategy, req.ClaudeCode, req.ParallelSet)
-	strategy, err = recoverPreviousClaudeRuntimeOOM(req, cfg, model, strategy, be, caps)
-	if err != nil {
-		claudeAuto.stop()
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(caps.GPUs) > 0 {
-		totalVRAM := int64(0)
-		for _, g := range caps.GPUs {
-			totalVRAM += int64(g.VRAMTotalMB) * 1024 * 1024
-		}
-		if model.SizeBytes > totalVRAM {
-			fmt.Fprintf(os.Stderr, "[warning] Model (%.1f GB) exceeds total GPU VRAM (%.1f GB). Expect partial offload or CPU fallback.\n",
-				float64(model.SizeBytes)/(1024*1024*1024), float64(totalVRAM)/(1024*1024*1024))
-		}
-	}
-
-	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
-	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
-	if s := placement.DraftSummary(strategy.Draft); s != "" {
-		fmt.Printf("[spec]   %s\n", s)
-	}
-
-	hubDir, ok, err := libhub.Setup(be.Path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] lib hub: %v\n", err)
-	}
-	if ok {
-		os.Setenv("LLM_SERVER_LIB_HUB", hubDir)
-		defer libhub.Cleanup(hubDir)
-	}
-
-	timeout := autoStartupTimeout(model)
-
-	// Capture VRAM baseline before the server starts so the post-launch probe
-	// can measure the real compute-buffer allocation.
-	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
-	baselineVRAM := map[int]int{}
-	if model.IsMoE && runtimeCaps != nil && len(runtimeCaps.GPUs) > 0 {
-		for _, g := range runtimeCaps.GPUs {
-			baselineVRAM[g.Index] = placement.QueryVRAMUsed(physicalGPUIndex(g.Index, visibleToPhysical))
-		}
-	}
-
-	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, strategy, be, caps, serverArgs, timeout)
-	if err != nil {
-		claudeAuto.stop()
-		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
-	if p.LogBuf != nil {
-		recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
-		if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs); ok {
-			fmt.Printf("[launch] calibration: measured placement fits more GPU experts (%d CPU MoE -> %d); restarting once\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
-			_ = p.Stop()
-			fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
-			p, nextStrategy, nextArgs, err = startLaunchWithCUDAOOMRecovery(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout)
-			if err != nil {
-				claudeAuto.stop()
-				fmt.Fprintf(os.Stderr, "Error starting promoted server: %v\n", err)
-				os.Exit(1)
-			}
-			strategy = nextStrategy
-			serverArgs = nextArgs
-			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
-			if p.LogBuf != nil {
-				go recordMeasuredLaunchProbes(cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM)
-			}
-		}
-	}
-	claudeClientPort := req.Port
-	if claudeAuto != nil {
-		if err := claudeAuto.startRouter(req.Host, req.Port); err != nil {
-			_ = p.Stop()
-			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "Error starting Claude Auto router: %v\n", err)
-			os.Exit(1)
-		}
-		claudeClientPort = claudeAuto.clientPort(req.Port)
-	}
-	if req.ClaudeCode {
-		// Smooth path: one command brings up the model AND drops the user into
-		// Claude Code wired to it. When claude exits, stop the server too.
-		//
-		// Run a health monitor alongside Claude so a mid-session backend crash
-		// is recorded immediately — otherwise Claude Code times out silently
-		// and the OOM data is lost until the user notices (audit cross-check #4).
-		healthCtx, healthCancel := context.WithCancel(context.Background())
-		defer healthCancel()
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-healthCtx.Done():
-					return
-				case <-ticker.C:
-				}
-				if !isServerRunning(req.Host, req.Port) {
-					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — recording OOM for next launch\n")
-					if p.LogBuf != nil {
-						markerPath := claudeServerLogPath(cfg, req.Port) + ".oom-recorded"
-						device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
-						if recordErr != nil {
-							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
-						} else if ok && estimated {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
-						} else if ok {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
-						}
-					}
-					healthCancel()
-					return
-				}
-			}
-		}()
-
-		clientArgs, statusLineEnabled := claudeCodeProgressClientArgs(nil, req.Port)
-		progressEnabled := !progressDisabled()
-		progressStop := func() {}
-		if progressEnabled {
-			progressStop = startClaudeProgressMonitor(req.Host, req.Port, p.LogBuf, !statusLineEnabled)
-		}
-		defer progressStop()
-		if !progressEnabled {
-			fmt.Println("[claude-code] Live request progress disabled by GGRUN_CLAUDE_PROGRESS.")
-		} else if statusLineEnabled {
-			fmt.Println("[claude-code] Live request progress enabled in Claude's status line.")
-		} else {
-			fmt.Println("[claude-code] Live request progress enabled in the terminal title (existing Claude status line preserved).")
-		}
-		clientHost := req.Host
-		if claudeAuto != nil {
-			clientHost = "127.0.0.1"
-		}
-		if code := runClaudeCodeClient(clientHost, claudeClientPort, serverArgs, clientArgs); code >= 0 {
-			progressStop()
-			healthCancel()
-			// The terminal was handed to `claude`, so a mid-session backend
-			// crash isn't something this process can retry live — but it can
-			// still be recorded before Stop(), so the NEXT `--claude-code`
-			// launch of this exact model/context reserves the measured
-			// deficit instead of repeating the same crash blind.
-			if !p.IsRunning() && p.LogBuf != nil {
-				markerPath := claudeServerLogPath(cfg, req.Port) + ".oom-recorded"
-				device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(cfg, model, strategy, be, caps, p.LogBuf.String(), markerPath)
-				if recordErr != nil {
-					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM: %v\n", recordErr)
-				} else if ok && estimated {
-					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA VMM OOM on device %d; allocation size omitted) — recorded %d MiB runtime reserve for the next launch.\n", device, reserveMB)
-				} else if ok {
-					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA OOM on device %d, %d MiB) — recorded, next launch of this model/context will reserve for it.\n", device, reserveMB)
-				}
-			}
-			if err := p.Stop(); err != nil {
-				fmt.Fprintf(os.Stderr, "[launch] stop after claude: %v\n", err)
-			}
-			claudeAuto.stop()
-			os.Exit(code)
-		}
-		// `claude` isn't installed — fall back to the copy-paste recipe.
-		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs)
-	}
-
-	if req.Benchmark {
-		runOneShotBenchmark(req.Port, filepath.Base(req.ModelPath))
-		if err := p.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "[launch] stop after benchmark: %v\n", err)
-		}
-		claudeAuto.stop()
-		return
-	}
-
-	fmt.Println("[launch] Press Ctrl+C to stop")
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, shutdownSignals()...)
-
-	// The loop below owns the entire remaining lifecycle: it blocks until
-	// either the user asks to stop, or the backend dies on its own. A crash
-	// AFTER health check (not covered by startLaunchWithCUDAOOMRecovery,
-	// which only wraps startup) used to leave this process silently blocked
-	// forever on <-sigCh with no idea its child had already exited — "Press
-	// Ctrl+C to stop" claiming to serve a model that was actually gone.
-	// Reproduced 2026-07-08/09: DeepSeek-V4 crashed with a real CUDA OOM
-	// during a long request (see maximizeMoEGPUFitByUBatch's runtime-growth
-	// comment in placement.go) well after loading clean and passing health.
-	const maxRuntimeOOMRetries = 2
-	runtimeOOMRetries := 0
-	for {
-		crashed := waitForShutdownOrCrash(p, sigCh)
-		if !crashed {
-			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
-			break
-		}
-
-		logData := ""
-		if p.LogBuf != nil {
-			logData = p.LogBuf.String()
-		}
-		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel)
-		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, prior)
-		if !ok || runtimeOOMRetries >= maxRuntimeOOMRetries {
-			claudeAuto.stop()
-			if ok {
-				fmt.Fprintf(os.Stderr, "[launch] server crashed (CUDA OOM on device %d, %d MiB) after %d recovery attempt(s) — giving up. Try again; the deficit already recorded should reduce it next time.\n", device, allocMB, runtimeOOMRetries)
-			} else {
-				fmt.Fprintln(os.Stderr, "[launch] server exited unexpectedly (not a recognized CUDA OOM) — see the log for details.")
-			}
-			os.Exit(1)
-		}
-
-		runtimeOOMRetries++
-		_ = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, be.Tag, caps.GPUs, strategy.Parallel, device, allocMB)
-		if estimated {
-			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA VMM OOM on device %d omitted its allocation size — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
-				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
-		} else {
-			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA OOM on device %d needing %d MiB more mid-request — recorded, re-planning and relaunching (attempt %d/%d)...\n",
-				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
-		}
-
-		replanOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-		// Without this, Compute() prefers the .place cache written when the
-		// prior instance loaded cleanly and passed health — which is exactly
-		// the placement that just OOM'd mid-request. Skipping it forces a
-		// fresh derivation that actually consults the growth deficit just
-		// recorded above via RecordRuntimeGraphGrowthFromOOM.
-		replanOpts.SkipPlacementCache = true
-		nextStrategy, err := placement.Compute(caps, model, replanOpts)
-		if err != nil {
-			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
-			os.Exit(1)
-		}
-		claudeCodeSlotAdjust(nextStrategy, req.ClaudeCode, req.ParallelSet)
-		nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, nextStrategy)
-		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
-		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout)
-		if err != nil {
-			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "[launch] relaunch after runtime OOM failed: %v\n", err)
-			os.Exit(1)
-		}
-		p, strategy, serverArgs = newP, newStrategy, newArgs
-		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
-		fmt.Println("[launch] Press Ctrl+C to stop")
-	}
-
-	done := make(chan struct{})
-	go func() {
-		p.Stop()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-sigCh:
-		fmt.Fprintln(os.Stderr, "[launch] Force quitting...")
-		if p.Cmd.Process != nil {
-			p.Cmd.Process.Kill()
-		}
-	case <-time.After(30 * time.Second):
-		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
-		if p.Cmd.Process != nil {
-			p.Cmd.Process.Kill()
-		}
-	}
-	claudeAuto.stop()
-}
-
-// waitForShutdownOrCrash blocks until either a shutdown signal arrives
-// (returns false) or the backend process exits on its own (returns true).
-// Polls IsRunning rather than needing a dedicated exit channel from the
-// server package, since a crash mid-request is not otherwise observable from
-// here — cmd.Wait() already returned inside server.Process's own goroutine.
-func waitForShutdownOrCrash(p *server.Process, sigCh <-chan os.Signal) bool {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-sigCh:
-			return false
-		case <-ticker.C:
-			if !p.IsRunning() {
-				return true
-			}
-		}
-	}
-}
-
 func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTag string, vision bool, caps *detect.Capabilities) []string {
 	if req == nil {
 		return serverArgs
@@ -2364,53 +1907,6 @@ func cmdKVProbe(args []string) {
 	}
 }
 
-func tuiLaunchArgs(req *tui.LaunchRequest, cfg *config.Config) []string {
-	if req == nil {
-		return nil
-	}
-	_ = cfg
-	return req.LaunchArgs()
-}
-
-func cmdGUI() {
-	go recommend.MaybeRefresh() // refresh catalog in the background; TUI uses cache-or-embedded
-	req, err := tui.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if req == nil {
-		return
-	}
-	if req.Update {
-		cmdUpdate()
-		return
-	}
-
-	cfg := loadConfigOrExit()
-
-	if req.DownloadRepo != "" {
-		caps, err := detect.Detect()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-			os.Exit(1)
-		}
-		d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
-		if err := d.RunQuant(req.DownloadRepo, req.DownloadQuant, caps); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	launchArgs := tuiLaunchArgs(req, cfg)
-	if req.AITune {
-		cmdTune(launchArgs)
-		return
-	}
-	cmdLaunch(launchArgs)
-}
-
 func cmdDryRun(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
@@ -2466,7 +1962,23 @@ func cmdDryRun(args []string) {
 	if envPrefix := applyGPUVisibility(req, backendDialect(be)); envPrefix != "" {
 		fmt.Print(envPrefix + " ")
 	}
-	fmt.Println(formatCommand(serverArgs))
+	fmt.Println()
+	fmt.Println("[ggrun] Dry Run: Copy-pasteable command")
+	fmt.Println()
+	binName := filepath.Base(be.Path)
+	cmdArgs := serverArgs[1:] // skip the binary path
+	fmt.Printf("%s ", binName)
+	for i, arg := range cmdArgs {
+		if strings.HasPrefix(arg, "-") && i > 0 {
+			fmt.Println(" `")
+			fmt.Print("  ")
+		}
+		fmt.Print(arg)
+		if i < len(cmdArgs)-1 && !strings.HasPrefix(cmdArgs[i+1], "-") {
+			fmt.Print(" ")
+		}
+	}
+	fmt.Println()
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
 	}
@@ -2981,28 +2493,6 @@ func cmdProbe() {
 	fmt.Println(mem.String())
 }
 
-func cmdDownload(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun download <repo/name>")
-		os.Exit(2)
-	}
-	repo := args[0]
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	cfg := loadConfigOrExit()
-
-	d := download.New(cfg.ModelDir, cfg.CacheDir, cfg.AppHome)
-	if err := d.Run(repo, caps); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
 func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
 	if fallback <= 0 {
 		fallback = 8
@@ -3027,84 +2517,6 @@ func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
 		}
 	}
 	return fallback, nil
-}
-
-func cmdRecommend(args []string) {
-	limit := 5
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-n", "--limit":
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
-					limit = n
-				}
-				i++
-			}
-		default:
-			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "-n")); err == nil && n > 0 {
-				limit = n
-			}
-		}
-	}
-
-	recommend.MaybeRefresh() // pull the latest published catalog (TTL-gated, best-effort)
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	gpu := "CPU only"
-	if len(caps.GPUs) > 0 {
-		names := make([]string, 0, len(caps.GPUs))
-		for _, g := range caps.GPUs {
-			names = append(names, fmt.Sprintf("%s %dGB", g.Name, g.VRAMTotalMB/1024))
-		}
-		gpu = strings.Join(names, " + ")
-	}
-	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
-
-	cfg := loadConfigOrExit()
-	if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
-		fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
-		caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
-	}
-	if headroomMB := parseBudgetMB(cfg.RAMHeadroom); headroomMB > 0 {
-		fmt.Printf("RAM headroom: %d MB reserved (set via Settings or --ram-headroom)\n", headroomMB)
-		caps = detect.ApplyRAMHeadroom(caps, headroomMB)
-	}
-
-	cats := recommend.TopCategories(caps, limit)
-	if len(cats.Balanced) == 0 {
-		fmt.Println("No models in the catalog fit this machine.")
-		return
-	}
-	printRecGroup := func(title string, rows []recommend.Recommendation) {
-		if len(rows) == 0 {
-			return
-		}
-		fmt.Printf("\n%s\n", title)
-		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Est.speed")
-		for _, r := range rows {
-			name := r.Name
-			if len(name) > 36 {
-				name = name[:35] + "…"
-			}
-			tps := "—"
-			if r.PredictedTPS > 0 {
-				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
-			}
-			fmt.Printf("  %-36s %-10s %-8s %5.1fG %4.0f%% %8s\n",
-				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, r.QualityRetained*100, tps)
-		}
-	}
-	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
-	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
-	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
-	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
-	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
-	fmt.Printf("\n%s\n", recommend.CatalogAttribution())
 }
 
 func cmdTune(args []string) {
@@ -3199,24 +2611,36 @@ func cmdTune(args []string) {
 			fmt.Println("[tune]", msg)
 		},
 		StartServer: func(flags []string) (func(), error) {
-			p, err := server.StartWithTimeout(flags, req.Port, timeout)
+			proc, err := server.StartWithTimeoutTo(flags, req.Port, timeout, io.Discard, io.Discard)
 			if err != nil {
 				return nil, err
 			}
-			return func() { _ = p.Stop() }, nil
+			return func() { _ = proc.Stop() }, nil
 		},
 	}
 
-	entry, err := engine.Run(req.ModelPath, serverArgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	var entry *tune.Entry
+	var runErr error
+	done := make(chan struct{})
+
+	go func() {
+		entry, runErr = engine.Run(req.ModelPath, serverArgs)
+		close(done)
+	}()
+
+	<-done
+	fmt.Fprintln(os.Stderr) // finish the \r line
+
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
 		os.Exit(1)
 	}
 
-	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
+	// Print final results to stderr so they don't mess up the terminal
+	fmt.Fprintf(os.Stderr, "[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
 	tunePath := tune.TuneCachePath(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag)
 	if hint := tune.ShareHint(tunePath); hint != "" {
-		fmt.Println(hint)
+		fmt.Fprintln(os.Stderr, hint)
 	}
 }
 
@@ -3233,197 +2657,6 @@ func guardPortFree(port int, context string) error {
 	return fmt.Errorf("port %d is already in use; choose a free --port for %s", port, context)
 }
 
-func cmdBenchmark(args []string) {
-	fs := flag.NewFlagSet("benchmark", flag.ExitOnError)
-	port := fs.Int("port", 8081, "Server port")
-	model := fs.String("model", "default", "Model name")
-	fs.Parse(args)
-	if _, err := config.ParsePort(strconv.Itoa(*port)); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: --port %v\n", err)
-		os.Exit(2)
-	}
-	runOneShotBenchmark(*port, *model)
-}
-
-func runOneShotBenchmark(port int, model string) {
-	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://localhost:%d", port),
-		Model:   model,
-	}
-	res, err := runner.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	data, _ := json.MarshalIndent(res, "", "  ")
-	fmt.Println(string(data))
-}
-
-// computeServerArgs runs hardware detection + placement for a model and
-// returns the full llama-server argv (backend path first). This is the
-// single source of truth for "how should this model be launched on this
-// box" — used for both the daemon's initial model and any /reload swap.
-func computeServerArgs(modelPath string, port int) ([]string, error) {
-	caps, err := detect.Detect()
-	if err != nil {
-		return nil, fmt.Errorf("detect hardware: %w", err)
-	}
-	model, err := parseModel(modelPath)
-	if err != nil {
-		return nil, fmt.Errorf("parse model: %w", err)
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
-	}
-	// Find the backend FIRST so its tag feeds placement — otherwise the
-	// split-mode/flag selection can't tell ik_llama from mainline and emits
-	// flags the backend rejects (e.g. `--split-mode row`, unsupported by ik).
-	be := selectBackend(caps, &launchRequest{ServerBin: cfg.LlamaServer, Backend: cfg.Backend})
-	if be == nil {
-		return nil, fmt.Errorf("no llama-server binary found")
-	}
-	opts := placement.Options{
-		ContextSize:     resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
-		KVPlacement:     cfg.KVPlacement,
-		KVQuality:       cfg.KVQuality,
-		CacheDir:        cfg.CacheDir,
-		Host:            cfg.Host,
-		BackendTag:      backendDialect(be),
-		BackendCacheTag: be.Tag,
-		VisionAuto:      cfg.Vision,
-		SpecMode:        cfg.Spec,
-	}
-	strategy, err := placement.Compute(caps, model, opts)
-	if err != nil {
-		return nil, fmt.Errorf("compute placement: %w", err)
-	}
-	strategy.BackendTag = backendDialect(be)
-	return append([]string{be.Path}, strategy.Args(modelPath, port)...), nil
-}
-
-func cmdDaemon(args []string) {
-	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-	modelPath := fs.String("model", "", "Model path")
-	port := fs.Int("port", 8081, "Server port")
-	controlPort := fs.Int("control-port", 9090, "Control API port")
-	startupTimeoutSecs := fs.Int("startup-timeout-secs", 300, "Max seconds to wait for llama-server to become healthy after start/reload")
-	fs.Parse(args)
-	if _, err := config.ParsePort(strconv.Itoa(*port)); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: --port %v\n", err)
-		os.Exit(2)
-	}
-	if _, err := config.ParsePort(strconv.Itoa(*controlPort)); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: --control-port %v\n", err)
-		os.Exit(2)
-	}
-	if *startupTimeoutSecs < 1 {
-		fmt.Fprintln(os.Stderr, "Error: --startup-timeout-secs must be a positive integer")
-		os.Exit(2)
-	}
-
-	if *modelPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun daemon --model <model.gguf>")
-		os.Exit(2)
-	}
-
-	serverArgs, err := computeServerArgs(*modelPath, *port)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	d := daemon.New(daemon.Config{
-		ModelPath:          *modelPath,
-		ServerArgs:         serverArgs,
-		Port:               *port,
-		ControlPort:        *controlPort,
-		StartupTimeoutSecs: *startupTimeoutSecs,
-		// Let /reload recompute placement when handed a bare model path,
-		// so model swaps get the same auto-placement as the initial launch.
-		ComputeArgs: computeServerArgs,
-	})
-	errCh := make(chan error, 1)
-	go func() { errCh <- d.Start() }()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, shutdownSignals()...)
-	defer signal.Stop(sigCh)
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-	case sig := <-sigCh:
-		fmt.Printf("\n[daemon] received %s; stopping managed server\n", sig)
-		if err := d.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error during daemon shutdown: %v\n", err)
-			os.Exit(1)
-		}
-	}
-}
-
-func cmdConfig(args []string) {
-	sub := "show"
-	if len(args) > 0 {
-		sub = args[0]
-	}
-	switch sub {
-	case "show", "":
-		cfg, err := config.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(cfg.Show())
-	case "path":
-		fmt.Println(config.Path())
-	case "edit":
-		if err := config.Edit(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Saved.")
-	case "reset":
-		if err := config.Reset(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Config reset. Built-in defaults will be used.")
-	default:
-		fmt.Fprintln(os.Stderr, "Usage: ggrun config [show|edit|path|reset]")
-		os.Exit(2)
-	}
-}
-
-func cmdUpdate() {
-	// Self-update ggrun
-	if err := update.SelfUpdate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Self-update: %v\n", err)
-	}
-	if runtime.GOOS == "windows" {
-		fmt.Println("Backend updates are handled by the native Windows release bundle.")
-	} else {
-		// Update source-built backends
-		if err := update.UpdateBackends(); err != nil {
-			fmt.Fprintf(os.Stderr, "Backend update: %v\n", err)
-		}
-	}
-
-	// Check for newer version on GitHub
-	res, err := update.Check()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Version check: %v\n", err)
-		return
-	}
-	if res.HasUpdate {
-		fmt.Printf("\nA newer version is available: %s (current: %s)\n", res.Latest, res.Current)
-		fmt.Printf("Release page: %s\n", res.URL)
-	} else {
-		fmt.Printf("\nYou are on the latest version: %s\n", res.Current)
-	}
-}
 
 // isIKOnlyArch reports whether a model architecture can only be loaded by
 // ik_llama.cpp; mainline llama.cpp rejects these with "unknown model architecture".

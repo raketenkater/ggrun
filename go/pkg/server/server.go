@@ -129,7 +129,7 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 	var stopSpin chan struct{}
 	if tty {
 		stopSpin = make(chan struct{})
-		go spinUntilReady(stopSpin, logBuf, start, timeout, cmd.Process.Pid, args)
+		go spinUntilReady(stopSpin, logBuf, start, timeout, cmd.Process.Pid, args, termErr)
 	}
 	err := p.waitReady(timeout)
 	if tty {
@@ -358,10 +358,10 @@ func (g *gatedWriter) Write(p []byte) (int, error) {
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
 
-// spinUntilReady animates a single status line on stderr while the backend loads.
-// It combines backend log phase text with /proc fd offsets, which gives useful
-// progress even when llama.cpp itself does not print a byte counter.
-func spinUntilReady(stop <-chan struct{}, log *threadSafeBuffer, start time.Time, timeout time.Duration, pid int, args []string) {
+// spinUntilReady animates a single status line on the provided writer while the
+// backend loads. It combines backend log phase text with /proc fd offsets, which
+// gives useful progress even when llama.cpp itself does not print a byte counter.
+func spinUntilReady(stop <-chan struct{}, log *threadSafeBuffer, start time.Time, timeout time.Duration, pid int, args []string, w io.Writer) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	progress := newLoadProgressTracker(pid, args)
@@ -376,7 +376,7 @@ func spinUntilReady(stop <-chan struct{}, log *threadSafeBuffer, start time.Time
 				spinnerFrames[i%len(spinnerFrames)],
 				startupStatus(logTail, time.Since(start), timeout, progress.Snapshot())))
 			if line != lastLine {
-				fmt.Fprintf(os.Stderr, "\r\033[K%s", line)
+				fmt.Fprintf(w, "\r\033[K%s", line)
 				lastLine = line
 			}
 		}
