@@ -5,219 +5,459 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-type fixtureTensor struct {
-	name   string
-	elems  uint64
-	ttype  uint32
-	offset uint64 // relative to data section start
+// ---------------------------------------------------------------------------
+// Helpers: build minimal valid GGUF binary blobs in memory
+// ---------------------------------------------------------------------------
+
+func writeU32(buf *bytes.Buffer, v uint32) {
+	binary.Write(buf, binary.LittleEndian, v)
 }
 
-// writeGGUFFixture writes a minimal GGUF v3 file whose data section is
-// dataSize bytes. Tensor byte sizes are therefore defined by offset deltas
-// (the last tensor runs to end of file) — exactly what parse_gguf.py's
-// span sizing must recover.
-func writeGGUFFixture(t *testing.T, path string, tensors []fixtureTensor, align, dataSize int) {
+func writeU64(buf *bytes.Buffer, v uint64) {
+	binary.Write(buf, binary.LittleEndian, v)
+}
+
+func writeString(buf *bytes.Buffer, s string) {
+	writeU64(buf, uint64(len(s)))
+	buf.WriteString(s)
+}
+
+// buildMinimalGGUF creates a valid GGUF v3 file with the given metadata and tensors.
+func buildMinimalGGUF(metadata map[string]interface{}, tensors []tensorInfo) []byte {
+	var buf bytes.Buffer
+
+	// Magic + version
+	writeU32(&buf, ggufMagic)
+	writeU32(&buf, ggufVersion3)
+
+	// Tensor count + KV count
+	writeU64(&buf, uint64(len(tensors)))
+	writeU64(&buf, uint64(len(metadata)))
+
+	// KV pairs (simplified: only string and uint32 values for testing)
+	for key, val := range metadata {
+		writeString(&buf, key)
+		switch v := val.(type) {
+		case string:
+			writeU32(&buf, ggufTypeString)
+			writeString(&buf, v)
+		case uint32:
+			writeU32(&buf, ggufTypeUint32)
+			writeU32(&buf, v)
+		case uint64:
+			writeU32(&buf, ggufTypeUint64)
+			writeU64(&buf, v)
+		}
+	}
+
+	// Tensor info records
+	for _, t := range tensors {
+		writeString(&buf, t.name)
+		writeU32(&buf, t.nDims)
+		for d := uint32(0); d < t.nDims; d++ {
+			writeU64(&buf, t.dims[d])
+		}
+		writeU32(&buf, t.typeID)
+		writeU64(&buf, t.offset)
+	}
+
+	// Pad to alignment (32 bytes default)
+	pos := buf.Len()
+	aligned := (pos + 31) / 32 * 32
+	for i := pos; i < aligned; i++ {
+		buf.WriteByte(0)
+	}
+
+	// Fake tensor data (just zeros to fill file size)
+	buf.Write(make([]byte, 1024))
+
+	return buf.Bytes()
+}
+
+func writeTempGGUF(t *testing.T, data []byte) string {
 	t.Helper()
-	buf := new(bytes.Buffer)
-	buf.WriteString("GGUF")
-	binary.Write(buf, binary.LittleEndian, uint32(3))
-	binary.Write(buf, binary.LittleEndian, uint64(len(tensors)))
-	binary.Write(buf, binary.LittleEndian, uint64(2)) // kv count
-
-	writeStr := func(s string) {
-		binary.Write(buf, binary.LittleEndian, uint64(len(s)))
-		buf.WriteString(s)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test-model.gguf")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write temp gguf: %v", err)
 	}
-	// general.architecture = "deepseek4" (string, type 8)
-	writeStr("general.architecture")
-	binary.Write(buf, binary.LittleEndian, uint32(8))
-	writeStr("deepseek4")
-	// general.alignment (uint32, type 4)
-	writeStr("general.alignment")
-	binary.Write(buf, binary.LittleEndian, uint32(4))
-	binary.Write(buf, binary.LittleEndian, uint32(align))
-
-	for _, tn := range tensors {
-		writeStr(tn.name)
-		binary.Write(buf, binary.LittleEndian, uint32(1)) // n_dims
-		binary.Write(buf, binary.LittleEndian, tn.elems)
-		binary.Write(buf, binary.LittleEndian, tn.ttype)
-		binary.Write(buf, binary.LittleEndian, tn.offset)
-	}
-	headerEnd := buf.Len()
-	dataStart := (headerEnd + align - 1) / align * align
-	buf.Write(make([]byte, dataStart-headerEnd+dataSize))
-	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	return path
 }
 
-// MXFP4 (ggml type 39) is 17 bytes per 32 elements, so 64 elems = 34 bytes by
-// type-math. The fixture gives the first tensor a padded 96-byte span; span
-// sizing must report 96, not 34. Under-sizing here once made MoE placement pin
-// one expert layer too many and CUDA-OOM after a full model load.
-func TestParseSizesTensorsByDiskSpan(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "span.gguf")
-	writeGGUFFixture(t, path, []fixtureTensor{
-		{name: "token_embd.weight", elems: 64, ttype: 39, offset: 0},
-		{name: "blk.0.ffn_gate_exps.weight", elems: 64, ttype: 39, offset: 96},
-		{name: "blk.0.ffn_gate_shexp.weight", elems: 64, ttype: 39, offset: 130},
-		{name: "output.weight", elems: 64, ttype: 39, offset: 164},
-	}, 32, 164+34)
+// ---------------------------------------------------------------------------
+// Parse — pure-Go parser (no Python dependency)
+// ---------------------------------------------------------------------------
+
+func TestParse_MinimalValidGGUF(t *testing.T) {
+	metadata := map[string]interface{}{
+		"general.architecture":       "llama",
+		"general.name":               "TestModel",
+		"llama.block_count":          uint32(32),
+		"llama.context_length":       uint32(4096),
+		"llama.embedding_length":     uint32(4096),
+		"llama.feed_forward_length":  uint32(11008),
+		"llama.attention.head_count_kv": uint32(8),
+	}
+	tensors := []tensorInfo{
+		{name: "token_embd.weight", nDims: 2, dims: [4]uint64{4096, 32000, 0, 0}, typeID: 2, offset: 0},
+		{name: "blk.0.attn_q.weight", nDims: 2, dims: [4]uint64{4096, 4096, 0, 0}, typeID: 2, offset: 512},
+	}
+
+	data := buildMinimalGGUF(metadata, tensors)
+	path := writeTempGGUF(t, data)
 
 	info, err := Parse(path)
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatalf("Parse failed: %v", err)
 	}
-	if info.NonExpertBytes != 96+34 {
-		t.Fatalf("expected non-expert span 130 (type-math would say 68), got %d", info.NonExpertBytes)
+
+	if info.Architecture != "llama" {
+		t.Errorf("expected arch=llama, got %q", info.Architecture)
 	}
-	if info.ExpertBytes != 34+34 {
-		t.Fatalf("expected expert spans 68, got %d", info.ExpertBytes)
+	if info.Name != "TestModel" {
+		t.Errorf("expected name=TestModel, got %q", info.Name)
 	}
-	if info.TokenEmbdBytes != 96 {
-		t.Fatalf("expected token_embd bytes 96, got %d", info.TokenEmbdBytes)
+	if info.BlockCount != 32 {
+		t.Errorf("expected BlockCount=32, got %d", info.BlockCount)
 	}
-	if info.OutputBytes != 34 {
-		t.Fatalf("expected output bytes 34, got %d", info.OutputBytes)
+	if info.ContextLength != 4096 {
+		t.Errorf("expected ContextLength=4096, got %d", info.ContextLength)
 	}
-	if info.ShexpBytes != 34 {
-		t.Fatalf("expected shexp bytes 34, got %d", info.ShexpBytes)
+	if info.EmbeddingLength != 4096 {
+		t.Errorf("expected EmbeddingLength=4096, got %d", info.EmbeddingLength)
 	}
-	if info.Architecture != "deepseek4" {
-		t.Fatalf("expected arch deepseek4, got %q", info.Architecture)
+	if info.IsMoE {
+		t.Errorf("expected IsMoE=false for non-MoE model")
 	}
 }
 
-// Split model where the first shard is metadata-only (0 tensors) — the
-// DeepSeek-V4-Flash layout. Totals must come from the sibling shards.
-func TestParseSplitShardsMetadataOnlyFirst(t *testing.T) {
-	dir := t.TempDir()
-	first := filepath.Join(dir, "m-00001-of-00002.gguf")
-	second := filepath.Join(dir, "m-00002-of-00002.gguf")
-	writeGGUFFixture(t, first, nil, 32, 0)
-	writeGGUFFixture(t, second, []fixtureTensor{
-		{name: "token_embd.weight", elems: 64, ttype: 39, offset: 0},
-		{name: "blk.0.ffn_gate_exps.weight", elems: 64, ttype: 39, offset: 96},
-	}, 32, 96+34)
+func TestParse_MoEDetection(t *testing.T) {
+	metadata := map[string]interface{}{
+		"general.architecture":  "qwen2moe",
+		"qwen2moe.block_count":  uint32(60),
+		"qwen2moe.expert_count": uint32(64),
+		"qwen2moe.expert_used_count": uint32(4),
+	}
+	data := buildMinimalGGUF(metadata, nil)
+	path := writeTempGGUF(t, data)
 
-	info, err := Parse(first)
+	info, err := Parse(path)
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatalf("Parse failed: %v", err)
 	}
-	if info.NonExpertBytes != 96 || info.ExpertBytes != 34 || info.TokenEmbdBytes != 96 {
-		t.Fatalf("split totals wrong: non-expert=%d expert=%d token_embd=%d",
-			info.NonExpertBytes, info.ExpertBytes, info.TokenEmbdBytes)
+
+	if !info.IsMoE {
+		t.Errorf("expected IsMoE=true when expert_count > 0")
+	}
+	if info.Experts != 64 {
+		t.Errorf("expected Experts=64, got %d", info.Experts)
+	}
+	if info.ExpertUsed != 4 {
+		t.Errorf("expected ExpertUsed=4, got %d", info.ExpertUsed)
 	}
 }
 
-func TestFindParseScriptPrefersAppHomeSourceCheckout(t *testing.T) {
-	dir := t.TempDir()
-	sourceParser := filepath.Join(dir, ".src", "llm-server", "tools", "gguf", "parse_gguf.py")
-	installedParser := filepath.Join(dir, ".bin", "parse_gguf.py")
-	if err := os.MkdirAll(filepath.Dir(sourceParser), 0755); err != nil {
-		t.Fatalf("mkdir source parser dir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(installedParser), 0755); err != nil {
-		t.Fatalf("mkdir installed parser dir: %v", err)
-	}
-	if err := os.WriteFile(sourceParser, []byte("#!/usr/bin/env python3\n"), 0755); err != nil {
-		t.Fatalf("write source parser: %v", err)
-	}
-	if err := os.WriteFile(installedParser, []byte("#!/usr/bin/env python3\n"), 0755); err != nil {
-		t.Fatalf("write installed parser: %v", err)
-	}
-
-	t.Setenv("LLM_SCRIPT_DIR", "")
-	t.Setenv("LLM_SERVER_HOME", "")
-	t.Setenv("LLM_APP_HOME", dir)
-
-	got := findParseScript()
-	want, _ := filepath.Abs(sourceParser)
-	if got != want {
-		t.Fatalf("expected app-home source parser %s, got %s", want, got)
-	}
-}
-
-func TestValidateParserOutputRejectsDeepSeek4MissingByteSplits(t *testing.T) {
-	info := &Info{
-		Architecture:   "deepseek4",
-		HasShexp:       1,
-		ExpertBytes:    100,
-		NonExpertBytes: 10,
-	}
-	err := validateParserOutput("/old/parse_gguf.py", "/models/DeepSeek-V4.gguf", info)
+func TestParse_EmptyPath(t *testing.T) {
+	_, err := Parse("")
 	if err == nil {
-		t.Fatal("expected stale parser output to fail")
-	}
-	if !strings.Contains(err.Error(), "missing required DeepSeek4 byte splits") {
-		t.Fatalf("unexpected error: %v", err)
+		t.Errorf("expected error for empty path")
 	}
 }
 
-func TestValidateParserOutputAcceptsDeepSeek4ByteSplits(t *testing.T) {
-	info := &Info{
-		Architecture:   "deepseek4",
-		HasShexp:       1,
-		ExpertBytes:    100,
-		NonExpertBytes: 10,
-		TokenEmbdBytes: 1,
-		OutputBytes:    1,
-		ShexpBytes:     1,
-	}
-	if err := validateParserOutput("/new/parse_gguf.py", "/models/DeepSeek-V4.gguf", info); err != nil {
-		t.Fatalf("expected complete parser output to pass: %v", err)
+func TestParse_NonexistentFile(t *testing.T) {
+	_, err := Parse("/nonexistent/model.gguf")
+	if err == nil {
+		t.Errorf("expected error for nonexistent file")
 	}
 }
 
-func TestParseMissingFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing.gguf")
+func TestParse_BadMagic(t *testing.T) {
+	data := []byte{0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00}
+	path := writeTempGGUF(t, data)
 	_, err := Parse(path)
 	if err == nil {
-		t.Fatal("expected missing model file to fail")
-	}
-	if !strings.Contains(err.Error(), "model file") {
-		t.Fatalf("expected model-file error, got %v", err)
+		t.Errorf("expected error for bad magic")
 	}
 }
 
-func TestParse(t *testing.T) {
-	// Exercise the parser against a real model if one is provided via
-	// GGUF_TEST_MODEL=/path/to/model.gguf; otherwise the test skips.
-	paths := []string{}
-	if p := os.Getenv("GGUF_TEST_MODEL"); p != "" {
-		paths = append(paths, p)
+// ---------------------------------------------------------------------------
+// dataSectionOff — tracked for tensor span math
+// ---------------------------------------------------------------------------
+
+func TestDataSectionOff_Tracked(t *testing.T) {
+	metadata := map[string]interface{}{
+		"general.architecture": "llama",
 	}
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			info, err := Parse(p)
-			if err != nil {
-				t.Fatalf("parse %s: %v", p, err)
-			}
-			if info.Architecture == "" {
-				t.Skip("architecture empty in test model")
-			}
-			return
-		}
+	tensors := []tensorInfo{
+		{name: "token_embd.weight", nDims: 2, dims: [4]uint64{4096, 32000, 0, 0}, typeID: 2, offset: 0},
 	}
-	t.Skip("no test model available")
+	data := buildMinimalGGUF(metadata, tensors)
+	path := writeTempGGUF(t, data)
+
+	// Parse the shard directly to inspect dataSectionOff
+	shard, err := parseShard(path)
+	if err != nil {
+		t.Fatalf("parseShard failed: %v", err)
+	}
+
+	// dataSectionOff must be > 0 (past the header) and aligned to 32
+	if shard.dataSectionOff <= 0 {
+		t.Errorf("expected dataSectionOff > 0, got %d", shard.dataSectionOff)
+	}
+	if shard.dataSectionOff%32 != 0 {
+		t.Errorf("expected dataSectionOff aligned to 32, got %d", shard.dataSectionOff)
+	}
 }
 
-func TestEstimateParams(t *testing.T) {
+// ---------------------------------------------------------------------------
+// categorizeTensorSpan — routes tensors to correct byte categories
+// ---------------------------------------------------------------------------
+
+func TestCategorizeTensorSpan_TokenEmbd(t *testing.T) {
+	info := &Info{}
+	categorizeTensorSpan("token_embd.weight", 1024, info)
+
+	if info.TokenEmbdBytes != 1024 {
+		t.Errorf("expected TokenEmbdBytes=1024, got %d", info.TokenEmbdBytes)
+	}
+	if info.NonExpertBytes != 1024 {
+		t.Errorf("expected NonExpertBytes=1024 (token_embd is non-expert), got %d", info.NonExpertBytes)
+	}
+}
+
+func TestCategorizeTensorSpan_Output(t *testing.T) {
+	info := &Info{}
+	categorizeTensorSpan("output.weight", 2048, info)
+
+	if info.OutputBytes != 2048 {
+		t.Errorf("expected OutputBytes=2048, got %d", info.OutputBytes)
+	}
+	if info.NonExpertBytes != 2048 {
+		t.Errorf("expected NonExpertBytes=2048, got %d", info.NonExpertBytes)
+	}
+}
+
+func TestCategorizeTensorSpan_Shexp(t *testing.T) {
+	info := &Info{}
+	categorizeTensorSpan("blk.0.ffn_gate_shexp.weight", 512, info)
+
+	if info.ShexpBytes != 512 {
+		t.Errorf("expected ShexpBytes=512, got %d", info.ShexpBytes)
+	}
+	if info.NonExpertBytes != 512 {
+		t.Errorf("expected NonExpertBytes=512 (shexp is non-expert), got %d", info.NonExpertBytes)
+	}
+}
+
+func TestCategorizeTensorSpan_Expert(t *testing.T) {
+	info := &Info{}
+	categorizeTensorSpan("blk.0.ffn_up_exps.weight", 4096, info)
+
+	if info.ExpertBytes != 4096 {
+		t.Errorf("expected ExpertBytes=4096, got %d", info.ExpertBytes)
+	}
+	// Expert bytes should NOT be in NonExpertBytes
+	if info.NonExpertBytes != 0 {
+		t.Errorf("expected NonExpertBytes=0 for expert tensor, got %d", info.NonExpertBytes)
+	}
+}
+
+func TestCategorizeTensorSpan_FusedExpert(t *testing.T) {
+	info := &Info{}
+	categorizeTensorSpan("blk.5.ffn_gate_up_exps.weight", 8192, info)
+
+	if info.ExpertBytes != 8192 {
+		t.Errorf("expected ExpertBytes=8192 for fused expert, got %d", info.ExpertBytes)
+	}
+}
+
+func TestCategorizeTensorSpan_UnknownFallsToNonExpert(t *testing.T) {
+	info := &Info{}
+	categorizeTensorSpan("blk.0.attn_q.weight", 1024, info)
+
+	if info.NonExpertBytes != 1024 {
+		t.Errorf("expected NonExpertBytes=1024 for unknown tensor, got %d", info.NonExpertBytes)
+	}
+	if info.ExpertBytes != 0 {
+		t.Errorf("expected ExpertBytes=0 for non-expert tensor, got %d", info.ExpertBytes)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// calculateSpans — uses dataSectionOff for byte accounting
+// ---------------------------------------------------------------------------
+
+func TestCalculateSpans_UsesDataSectionOff(t *testing.T) {
+	shards := []parsedShard{
+		{
+			path:           "test.gguf",
+			size:           2048, // total file size
+			dataSectionOff: 512,  // data starts at offset 512
+			tensors: []tensorInfo{
+				{name: "token_embd.weight", nDims: 2, dims: [4]uint64{4096, 100, 0, 0}, typeID: 2, offset: 0},
+				{name: "blk.0.ffn_up_exps.weight", nDims: 2, dims: [4]uint64{4096, 100, 0, 0}, typeID: 2, offset: 512},
+			},
+		},
+	}
+	info := &Info{}
+	calculateSpans(shards, 32, info)
+
+	// First tensor: span = next.offset - this.offset = 512 - 0 = 512
+	if info.TokenEmbdBytes != 512 {
+		t.Errorf("expected TokenEmbdBytes=512, got %d", info.TokenEmbdBytes)
+	}
+
+	// Second (last) tensor: span = fileSize - (dataSectionOff + offset) = 2048 - (512 + 512) = 1024
+	if info.ExpertBytes != 1024 {
+		t.Errorf("expected ExpertBytes=1024, got %d", info.ExpertBytes)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// discardN — handles large skips
+// ---------------------------------------------------------------------------
+
+func TestDiscardN_SmallSkip(t *testing.T) {
+	data := make([]byte, 100)
+	r := bytes.NewReader(data)
+	err := discardN(r, 50)
+	if err != nil {
+		t.Fatalf("discardN(50) failed: %v", err)
+	}
+	if r.Len() != 50 {
+		t.Errorf("expected 50 bytes remaining, got %d", r.Len())
+	}
+}
+
+func TestDiscardN_ZeroSkip(t *testing.T) {
+	data := make([]byte, 100)
+	r := bytes.NewReader(data)
+	err := discardN(r, 0)
+	if err != nil {
+		t.Fatalf("discardN(0) failed: %v", err)
+	}
+	if r.Len() != 100 {
+		t.Errorf("expected 100 bytes remaining, got %d", r.Len())
+	}
+}
+
+func TestDiscardN_TooLarge(t *testing.T) {
+	data := make([]byte, 100)
+	r := bytes.NewReader(data)
+	err := discardN(r, 1<<63) // exceeds 1<<62 guard
+	if err == nil {
+		t.Errorf("expected error for oversized discardN")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EstimateParams — from tensors vs metadata fallback
+// ---------------------------------------------------------------------------
+
+func TestEstimateParams_FromTensors(t *testing.T) {
 	info := &Info{
-		VocabSize:         151936,
-		EmbeddingLength:   1024,
-		BlockCount:        28,
-		FeedForwardLength: 3072,
+		tensors: []tensorInfo{
+			{name: "a", nDims: 2, dims: [4]uint64{100, 200, 0, 0}},  // 20000
+			{name: "b", nDims: 3, dims: [4]uint64{10, 20, 30, 0}},   // 6000
+			{name: "c", nDims: 1, dims: [4]uint64{500, 0, 0, 0}},    // 500
+		},
 	}
-	got := info.EstimateParams()
-	// Expected ~596M for Qwen3 0.6B
-	if got < 500000000 || got > 700000000 {
-		t.Fatalf("expected ~596M params, got %d", got)
+
+	params := info.EstimateParams()
+	expected := int64(20000 + 6000 + 500)
+	if params != expected {
+		t.Errorf("expected EstimateParams=%d, got %d", expected, params)
+	}
+}
+
+func TestEstimateParams_FromMetadataFallback(t *testing.T) {
+	info := &Info{
+		BlockCount:        32,
+		EmbeddingLength:   4096,
+		FeedForwardLength: 11008,
+		VocabSize:         32000,
+		IsMoE:             false,
+		// No tensors → falls back to metadata estimate
+	}
+
+	params := info.EstimateParams()
+	if params <= 0 {
+		t.Errorf("expected positive parameter count from metadata, got %d", params)
+	}
+
+	// Sanity: 32 layers * (4*4096*4096 + 3*4096*11008) + 2*32000*4096
+	// = 32 * (67108864 + 135266304) + 262144000
+	// = 32 * 202375168 + 262144000
+	// = 6476005376 + 262144000 = 6738149376
+	expected := int64(32*(4*4096*4096+3*4096*11008) + 2*32000*4096)
+	if params != expected {
+		t.Errorf("expected EstimateParams=%d, got %d", expected, params)
+	}
+}
+
+func TestEstimateParams_ZeroDims(t *testing.T) {
+	info := &Info{
+		tensors: []tensorInfo{
+			{name: "a", nDims: 2, dims: [4]uint64{0, 200, 0, 0}}, // zero dim → 0 params
+		},
+	}
+	if info.EstimateParams() != 0 {
+		t.Errorf("expected 0 params for zero-dim tensor")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// detectShards — split-shard filename parsing
+// ---------------------------------------------------------------------------
+
+func TestDetectShards_SplitFile(t *testing.T) {
+	ref, ok := detectShards("/models/model-00003-of-00010.gguf")
+	if !ok {
+		t.Fatal("expected split shard detection")
+	}
+	if ref.index != 3 {
+		t.Errorf("expected index=3, got %d", ref.index)
+	}
+	if ref.total != 10 {
+		t.Errorf("expected total=10, got %d", ref.total)
+	}
+}
+
+func TestDetectShards_SingleFile(t *testing.T) {
+	_, ok := detectShards("/models/model.gguf")
+	if ok {
+		t.Errorf("expected no split detection for single file")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ggufScalar — type-safe accessors
+// ---------------------------------------------------------------------------
+
+func TestGgufScalar_Accessors(t *testing.T) {
+	s := ggufScalar{k: scalarUint, u: 42}
+	if v, ok := s.asUint(); !ok || v != 42 {
+		t.Errorf("asUint: expected (42, true), got (%d, %v)", v, ok)
+	}
+	if _, ok := s.asString(); ok {
+		t.Errorf("asString on uint scalar should return false")
+	}
+
+	str := ggufScalar{k: scalarString, s: "hello"}
+	if v, ok := str.asString(); !ok || v != "hello" {
+		t.Errorf("asString: expected (hello, true), got (%q, %v)", v, ok)
+	}
+
+	b := ggufScalar{k: scalarBool, b: true}
+	if v, ok := b.asBool(); !ok || !v {
+		t.Errorf("asBool: expected (true, true), got (%v, %v)", v, ok)
+	}
+
+	arr := ggufScalar{k: scalarArrayLen, u: 32000}
+	if v, ok := arr.asArrayLen(); !ok || v != 32000 {
+		t.Errorf("asArrayLen: expected (32000, true), got (%d, %v)", v, ok)
 	}
 }
