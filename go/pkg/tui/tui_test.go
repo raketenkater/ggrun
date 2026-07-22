@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 )
@@ -31,6 +32,59 @@ func TestFirstRunUpdateIsExplicitAndNonBlocking(t *testing.T) {
 	m = nm.(Model)
 	if m.launchRequest == nil || !m.launchRequest.Update {
 		t.Fatal("first-run update shortcut must return an explicit update request")
+	}
+}
+
+func TestBackendManagerListsRecipesAndInstalledForks(t *testing.T) {
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	if err := backends.Save([]backends.Backend{{Tag: "laguna", Path: "/tmp/laguna-server"}}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(backendManagerOptions(), "\n")
+	for _, want := range []string{
+		"Install reviewed: hy3",
+		"Install reviewed: minimax-m3",
+		"Install reviewed: laguna",
+		"Add custom fork from Git URL",
+		"Register an existing llama-server binary",
+		"Remove installed: laguna",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("backend manager missing %q in %q", want, joined)
+		}
+	}
+}
+
+func TestBackendManagerRecipeReturnsCLIRequest(t *testing.T) {
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := Model{}
+	m.input = textinput.New()
+	m.openBackendManager(ScreenMain)
+	for i, option := range m.choiceOptions {
+		if option == "Install reviewed: laguna" {
+			m.choiceCursor = i
+			break
+		}
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.launchRequest == nil || strings.Join(m.launchRequest.BackendArgs, " ") != "install laguna" {
+		t.Fatalf("unexpected backend request: %#v", m.launchRequest)
+	}
+	if cmd == nil {
+		t.Fatal("backend action must quit the TUI so the CLI handler can run")
+	}
+}
+
+func TestFirstRunExposesBackendManager(t *testing.T) {
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := Model{screen: ScreenFirstRun}
+	m.input = textinput.New()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m = next.(Model)
+	if m.screen != ScreenChoice || m.choiceTitle != "Backend forks" {
+		t.Fatalf("first-run backend shortcut did not open manager: screen=%v title=%q", m.screen, m.choiceTitle)
 	}
 }
 

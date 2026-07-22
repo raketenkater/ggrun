@@ -247,6 +247,7 @@ func newMainList(models []ModelItem) list.Model {
 	items = append(items, mainItem{title: "d. Download model", desc: "Get from Hugging Face", isAction: true, action: "download"})
 	items = append(items, mainItem{title: "m. Model directory", desc: "Change search path", isAction: true, action: "modeldir"})
 	items = append(items, mainItem{title: "b. Backend", desc: "Auto-select or choose an installed backend", isAction: true, action: "backend"})
+	items = append(items, mainItem{title: "f. Backend forks", desc: "Install or manage llama.cpp-compatible forks", isAction: true, action: "backend-forks"})
 	items = append(items, mainItem{title: "s. Settings", desc: "All options (arrow keys)", isAction: true, action: "settings"})
 	items = append(items, mainItem{title: "u. Update", desc: "Update ggrun and installed backends", isAction: true, action: "update"})
 	items = append(items, mainItem{title: "q. Quit", desc: "Exit", isAction: true, action: "quit"})
@@ -399,6 +400,8 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.Focus()
 				case "backend":
 					m.openBackendChoice(ScreenMain)
+				case "backend-forks":
+					m.openBackendManager(ScreenMain)
 				case "settings":
 					m.openSettings()
 				case "update":
@@ -415,6 +418,8 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "b", "B":
 			m.openBackendChoice(ScreenMain)
+		case "f", "F":
+			m.openBackendManager(ScreenMain)
 		case "c", "C":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
 				m.selectedModel = item.index
@@ -656,7 +661,7 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func firstRunActions() []string {
-	return []string{"recommend", "download", "modeldir", "update", "quit"}
+	return []string{"recommend", "download", "modeldir", "backends", "update", "quit"}
 }
 
 func (m Model) doFirstRunAction(action string) (tea.Model, tea.Cmd) {
@@ -676,6 +681,8 @@ func (m Model) doFirstRunAction(action string) (tea.Model, tea.Cmd) {
 		m.input.SetValue(m.modelDir)
 		m.input.Placeholder = "Path to model directory"
 		m.input.Focus()
+	case "backends":
+		m.openBackendManager(ScreenFirstRun)
 	case "update":
 		m.launchRequest = &LaunchRequest{Update: true}
 		return m, tea.Quit
@@ -711,6 +718,8 @@ func (m Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.doFirstRunAction("download")
 	case "m", "M":
 		return m.doFirstRunAction("modeldir")
+	case "f", "F":
+		return m.doFirstRunAction("backends")
 	case "u", "U":
 		return m.doFirstRunAction("update")
 	case "q", "Q":
@@ -747,6 +756,35 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messageType = "info"
 				}
 			}
+		case "backend-add":
+			fields := strings.Fields(val)
+			if len(fields) == 0 {
+				m.message = "Enter a Git repository URL"
+				m.messageType = "warning"
+				return m, cmd
+			}
+			args := []string{"add", fields[0]}
+			if len(fields) > 1 {
+				args = append(args, "--tag", fields[1])
+			}
+			if len(fields) > 2 {
+				args = append(args, "--route-arch", fields[2])
+			}
+			m.launchRequest = &LaunchRequest{BackendArgs: args}
+			return m, tea.Quit
+		case "backend-register":
+			fields := strings.Fields(val)
+			if len(fields) < 2 {
+				m.message = "Enter a tag and llama-server binary path"
+				m.messageType = "warning"
+				return m, cmd
+			}
+			args := []string{"register", "--tag", fields[0], "--path", fields[1]}
+			if len(fields) > 2 {
+				args = append(args, "--route-arch", fields[2])
+			}
+			m.launchRequest = &LaunchRequest{BackendArgs: args}
+			return m, tea.Quit
 		}
 		m.inputMode = ""
 		m.screen = ScreenMain
@@ -828,6 +866,7 @@ func (m Model) viewFirstRun() string {
 		"recommend": "[r] Recommended downloads for this machine",
 		"download":  "[d] Manual Hugging Face repository",
 		"modeldir":  "[m] Point at an existing model directory",
+		"backends":  "[f] Install or manage backend forks",
 		"update":    "[u] Update ggrun and backends",
 		"quit":      "[q] Quit",
 	}
@@ -1393,6 +1432,10 @@ func (m Model) viewInputScreen() string {
 		title = "Download Model"
 	case "modeldir":
 		title = "Model Directory"
+	case "backend-add":
+		title = "Add llama.cpp Fork"
+	case "backend-register":
+		title = "Register Built Backend"
 	default:
 		title = "Input"
 	}
@@ -1821,6 +1864,43 @@ func (m *Model) openBackendChoice(ret Screen) {
 	})
 }
 
+func backendManagerOptions() []string {
+	opts := make([]string, 0, len(backends.Recipes())+2+len(backends.Load()))
+	for _, recipe := range backends.Recipes() {
+		opts = append(opts, "Install reviewed: "+recipe.Name)
+	}
+	opts = append(opts, "Add custom fork from Git URL", "Register an existing llama-server binary")
+	for _, backend := range backends.Load() {
+		opts = append(opts, "Remove installed: "+backend.Tag)
+	}
+	return opts
+}
+
+func (m *Model) openBackendManager(ret Screen) {
+	m.openChoice("Backend forks", backendManagerOptions(), "", ret, func(mm *Model, value string) {
+		switch {
+		case strings.HasPrefix(value, "Install reviewed: "):
+			name := strings.TrimSpace(strings.TrimPrefix(value, "Install reviewed: "))
+			mm.launchRequest = &LaunchRequest{BackendArgs: []string{"install", name}}
+		case value == "Add custom fork from Git URL":
+			mm.screen = ScreenBackend
+			mm.inputMode = "backend-add"
+			mm.input.SetValue("")
+			mm.input.Placeholder = "Git URL [tag] [model architecture]"
+			mm.input.Focus()
+		case value == "Register an existing llama-server binary":
+			mm.screen = ScreenBackend
+			mm.inputMode = "backend-register"
+			mm.input.SetValue("")
+			mm.input.Placeholder = "tag /path/to/llama-server [model architecture]"
+			mm.input.Focus()
+		case strings.HasPrefix(value, "Remove installed: "):
+			tag := strings.TrimSpace(strings.TrimPrefix(value, "Remove installed: "))
+			mm.launchRequest = &LaunchRequest{BackendArgs: []string{"remove", tag}}
+		}
+	})
+}
+
 func indexOf(opts []string, v string) int {
 	for i, o := range opts {
 		if o == v {
@@ -1859,9 +1939,12 @@ func (m Model) updateChoice(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter", " ":
 			if m.choiceApply != nil && m.choiceCursor < len(m.choiceOptions) {
+				m.screen = m.choiceReturn
 				m.choiceApply(&m, m.choiceOptions[m.choiceCursor])
 			}
-			m.screen = m.choiceReturn
+			if m.launchRequest != nil && len(m.launchRequest.BackendArgs) > 0 {
+				return m, tea.Quit
+			}
 		}
 	}
 	return m, nil
@@ -2053,6 +2136,7 @@ func (m Model) buildArgs() []string {
 // LaunchRequest is returned when the user chooses to launch a model.
 type LaunchRequest struct {
 	Update        bool
+	BackendArgs   []string
 	DownloadRepo  string
 	DownloadQuant string
 	ModelPath     string

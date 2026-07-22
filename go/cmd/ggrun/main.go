@@ -3086,6 +3086,10 @@ func cmdGUI() {
 		cmdUpdate()
 		return
 	}
+	if len(req.BackendArgs) > 0 {
+		cmdBackend(req.BackendArgs)
+		return
+	}
 
 	cfg := loadConfigOrExit()
 
