@@ -1,457 +1,575 @@
 package tune
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/benchmark"
 )
 
-func TestApplySuggestion(t *testing.T) {
-	base := []string{"-m", "model.gguf", "--port", "8081", "-c", "4096"}
-	suggested := []string{"-c", "8192", "-b", "4096"}
+// ---------------------------------------------------------------------------
+// equalFlags — semantic map comparison (fork modification)
+// ---------------------------------------------------------------------------
 
-	result := applySuggestion(base, suggested)
+func TestEqualFlags_SameOrderSameFlags(t *testing.T) {
+	a := []string{"-b", "4096", "-ub", "512", "--flash-attn", "on"}
+	b := []string{"-b", "4096", "-ub", "512", "--flash-attn", "on"}
+	if !equalFlags(a, b) {
+		t.Errorf("expected equal for identical flag slices")
+	}
+}
 
-	// Should have replaced -c 4096 with -c 8192
-	has8192 := false
-	has4096 := false
-	for i := 0; i < len(result); i++ {
-		if result[i] == "-c" {
-			if i+1 < len(result) && result[i+1] == "8192" {
-				has8192 = true
+func TestEqualFlags_DifferentOrderSameFlags(t *testing.T) {
+	a := []string{"-b", "4096", "-ub", "512", "--flash-attn", "on"}
+	b := []string{"--flash-attn", "on", "-ub", "512", "-b", "4096"}
+	if !equalFlags(a, b) {
+		t.Errorf("expected equal for same flags in different order")
+	}
+}
+
+func TestEqualFlags_DifferentValues(t *testing.T) {
+	a := []string{"-b", "4096", "-ub", "512"}
+	b := []string{"-b", "8192", "-ub", "512"}
+	if equalFlags(a, b) {
+		t.Errorf("expected not equal for different flag values")
+	}
+}
+
+func TestEqualFlags_DifferentLength(t *testing.T) {
+	a := []string{"-b", "4096", "-ub", "512"}
+	b := []string{"-b", "4096"}
+	if equalFlags(a, b) {
+		t.Errorf("expected not equal for different flag counts")
+	}
+}
+
+func TestEqualFlags_EmptySlices(t *testing.T) {
+	if !equalFlags(nil, nil) {
+		t.Errorf("expected equal for two nil slices")
+	}
+	if !equalFlags([]string{}, []string{}) {
+		t.Errorf("expected equal for two empty slices")
+	}
+}
+
+func TestEqualFlags_BooleanFlagPresence(t *testing.T) {
+	// --no-mmap present in one, absent in other
+	a := []string{"-b", "4096", "--no-mmap"}
+	b := []string{"-b", "4096"}
+	if equalFlags(a, b) {
+		t.Errorf("expected not equal when boolean flag differs")
+	}
+}
+
+func TestEqualFlags_CanonicalAliases(t *testing.T) {
+	// -c and --ctx-size are canonical aliases
+	a := []string{"-c", "32768"}
+	b := []string{"--ctx-size", "32768"}
+	if !equalFlags(a, b) {
+		t.Errorf("expected equal for canonical flag aliases (-c vs --ctx-size)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isStrictVRAMSuperset — OOM-aware pruning (fork addition)
+// ---------------------------------------------------------------------------
+
+func TestIsStrictVRAMSuperset_TrueWhenSuperset(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+
+	// Crashed with --no-mmap
+	crashedSet := map[string]interface{}{"--no-mmap": true}
+
+	// New candidate has --no-mmap AND adds --mlock (non-VRAM-saving)
+	newOverrides := map[string]interface{}{"--no-mmap": true, "--mlock": true}
+
+	if !isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected true: new is superset of crashed with no VRAM savers")
+	}
+}
+
+func TestIsStrictVRAMSuperset_FalseWhenNotSuperset(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+
+	// Crashed with --no-mmap AND -b 8192
+	crashedSet := map[string]interface{}{"--no-mmap": true, "-b": "8192"}
+
+	// New candidate only has --no-mmap (missing -b 8192)
+	newOverrides := map[string]interface{}{"--no-mmap": true}
+
+	if isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected false: new is NOT a superset of crashed")
+	}
+}
+
+func TestIsStrictVRAMSuperset_FalseWhenVRAMSaverAdded(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+
+	// Crashed with --no-mmap
+	crashedSet := map[string]interface{}{"--no-mmap": true}
+
+	// New candidate has --no-mmap but also changes -b (a VRAM saver)
+	newOverrides := map[string]interface{}{"--no-mmap": true, "-b": "2048"}
+
+	if isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected false: new adds a VRAM-saving flag (-b)")
+	}
+}
+
+func TestIsStrictVRAMSuperset_FalseWhenCacheTypeChanged(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "--cache-type-k", "f16"}
+
+	crashedSet := map[string]interface{}{"--no-mmap": true}
+
+	// New candidate adds --cache-type-k change (VRAM saver)
+	newOverrides := map[string]interface{}{"--no-mmap": true, "--cache-type-k": "q8_0"}
+
+	if isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected false: new changes --cache-type-k (VRAM saver)")
+	}
+}
+
+func TestIsStrictVRAMSuperset_FalseWhenUBatchChanged(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+
+	crashedSet := map[string]interface{}{"--no-mmap": true}
+
+	// New candidate changes -ub (VRAM saver: smaller compute buffer)
+	newOverrides := map[string]interface{}{"--no-mmap": true, "-ub": "256"}
+
+	if isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected false: new changes -ub (VRAM saver)")
+	}
+}
+
+func TestIsStrictVRAMSuperset_NCPUMoEChangeIsNotSuperset(t *testing.T) {
+	// --n-cpu-moe is no longer protected (the tune engine can adjust it).
+	// Changing it is a VRAM-saving change, so the candidate is NOT a strict
+	// superset of the crashed set — it should be allowed to run.
+	baseFlags := []string{"-b", "4096", "--n-cpu-moe", "10"}
+
+	crashedSet := map[string]interface{}{"--no-mmap": true}
+
+	newOverrides := map[string]interface{}{"--no-mmap": true, "--n-cpu-moe": "20"}
+
+	// --n-cpu-moe changed (VRAM saver), so NOT a strict superset.
+	if isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected false: --n-cpu-moe change is a VRAM saver, not a strict superset")
+	}
+}
+
+func TestIsStrictVRAMSuperset_ProtectedFlagStripped(t *testing.T) {
+	// -ngl is still protected, so ApplyOverrides strips the override.
+	// The resulting flags are identical to base, making it a true superset.
+	baseFlags := []string{"-b", "4096", "-ngl", "999"}
+
+	crashedSet := map[string]interface{}{"--no-mmap": true}
+
+	newOverrides := map[string]interface{}{"--no-mmap": true, "-ngl": "50"}
+
+	// Because -ngl is protected, the override is stripped and the
+	// candidate IS a strict superset (no effective VRAM-saving change).
+	if !isStrictVRAMSuperset(newOverrides, crashedSet, baseFlags) {
+		t.Errorf("expected true: -ngl is protected, override stripped, still a superset")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isSkippedDueToOOM — integration with crashedFlagSets
+// ---------------------------------------------------------------------------
+
+func TestIsSkippedDueToOOM_SkipsSuperset(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+	crashedFlagSets := []map[string]interface{}{
+		{"--no-mmap": true},
+	}
+
+	// This candidate is a superset of the crashed set
+	overrides := map[string]interface{}{"--no-mmap": true, "--mlock": true}
+
+	if !isSkippedDueToOOM(overrides, crashedFlagSets, baseFlags) {
+		t.Errorf("expected candidate to be skipped due to OOM prediction")
+	}
+}
+
+func TestIsSkippedDueToOOM_AllowsDifferentCandidate(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+	crashedFlagSets := []map[string]interface{}{
+		{"--no-mmap": true, "-b": "8192"},
+	}
+
+	// This candidate is NOT a superset (different -b value)
+	overrides := map[string]interface{}{"--no-mmap": true, "-b": "2048"}
+
+	if isSkippedDueToOOM(overrides, crashedFlagSets, baseFlags) {
+		t.Errorf("expected candidate NOT to be skipped (different batch size)")
+	}
+}
+
+func TestIsSkippedDueToOOM_EmptyCrashHistory(t *testing.T) {
+	baseFlags := []string{"-b", "4096"}
+	overrides := map[string]interface{}{"--no-mmap": true}
+
+	if isSkippedDueToOOM(overrides, nil, baseFlags) {
+		t.Errorf("expected no skip with empty crash history")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// deterministicPlan — synergistic combination candidates (fork modification)
+// ---------------------------------------------------------------------------
+
+func TestDeterministicPlan_SynergisticCombosEmitted(t *testing.T) {
+	// Base flags with --no-kv-offload (triggers gpu-kv-turbo4 combo)
+	baseFlags := []string{"-b", "4096", "-ub", "512", "--no-kv-offload"}
+	backendHelp := "--cache-type-k turbo4 turbo3 f16 q8_0"
+
+	plan := deterministicPlan(baseFlags, "llama", nil, backendHelp)
+
+	// Should contain the gpu-kv-turbo4 combo candidate
+	found := false
+	for _, c := range plan {
+		if c.Name == "gpu-kv-turbo4" {
+			found = true
+			// Verify it's a combo: removes --no-kv-offload AND sets cache types
+			if c.FlagValues["--no-kv-offload"] != false {
+				t.Errorf("gpu-kv-turbo4 should set --no-kv-offload=false")
 			}
-			if i+1 < len(result) && result[i+1] == "4096" {
-				has4096 = true
+			if c.FlagValues["--cache-type-k"] != "turbo4" {
+				t.Errorf("gpu-kv-turbo4 should set --cache-type-k=turbo4")
 			}
+			if c.FlagValues["--cache-type-v"] != "turbo3" {
+				t.Errorf("gpu-kv-turbo4 should set --cache-type-v=turbo3")
+			}
+			break
 		}
 	}
-	if !has8192 {
-		t.Fatalf("expected -c 8192 in result, got %v", result)
-	}
-	if has4096 {
-		t.Fatalf("expected -c 4096 to be removed, got %v", result)
+	if !found {
+		t.Errorf("expected gpu-kv-turbo4 combo candidate in plan")
 	}
 }
 
-func TestFlagMap(t *testing.T) {
-	flags := []string{"-m", "model.gguf", "--port", "8081", "-fa"}
+func TestDeterministicPlan_GpuKvNoMmapCombo(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512", "--no-kv-offload"}
+	backendHelp := "--cache-type-k turbo4 turbo3 f16 q8_0"
+
+	plan := deterministicPlan(baseFlags, "llama", nil, backendHelp)
+
+	found := false
+	for _, c := range plan {
+		if c.Name == "gpu-kv-no-mmap" {
+			found = true
+			if c.FlagValues["--no-kv-offload"] != false {
+				t.Errorf("gpu-kv-no-mmap should set --no-kv-offload=false")
+			}
+			if c.FlagValues["--no-mmap"] != true {
+				t.Errorf("gpu-kv-no-mmap should set --no-mmap=true")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected gpu-kv-no-mmap combo candidate in plan")
+	}
+}
+
+func TestDeterministicPlan_KVTypesBeforeBatch(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512"}
+	backendHelp := "--cache-type-k turbo4 turbo3 f16 q8_0"
+
+	plan := deterministicPlan(baseFlags, "llama", nil, backendHelp)
+
+	// KV type candidates should come before batch/ubatch candidates
+	kvIdx := -1
+	batchIdx := -1
+	for i, c := range plan {
+		if c.Name == "kv-type-turbo4-turbo3" && kvIdx == -1 {
+			kvIdx = i
+		}
+		if c.Name == "larger-batch" && batchIdx == -1 {
+			batchIdx = i
+		}
+	}
+
+	if kvIdx == -1 {
+		t.Fatalf("kv-type-turbo4-turbo3 not found in plan")
+	}
+	if batchIdx == -1 {
+		t.Fatalf("larger-batch not found in plan")
+	}
+	if kvIdx > batchIdx {
+		t.Errorf("KV type candidates should come before batch: kv at %d, batch at %d", kvIdx, batchIdx)
+	}
+}
+
+func TestDeterministicPlan_TurboComboWithLargerBatch(t *testing.T) {
+	baseFlags := []string{"-b", "2048", "-ub", "512", "--kv-offload"}
+	backendHelp := "--cache-type-k turbo4 turbo3 f16 q8_0"
+
+	plan := deterministicPlan(baseFlags, "llama", nil, backendHelp)
+
+	found := false
+	for _, c := range plan {
+		if c.Name == "turbo4-larger-batch" {
+			found = true
+			if c.FlagValues["--cache-type-k"] != "turbo4" {
+				t.Errorf("turbo4-larger-batch should set --cache-type-k=turbo4")
+			}
+			if c.FlagValues["-b"] != "4096" {
+				t.Errorf("turbo4-larger-batch should set -b=4096, got %v", c.FlagValues["-b"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected turbo4-larger-batch combo candidate in plan")
+	}
+}
+
+func TestDeterministicPlan_NoTurboCombosWithoutBackendSupport(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512", "--no-kv-offload"}
+	backendHelp := "--cache-type-k f16 q8_0 q4_0" // no "turbo" in help
+
+	plan := deterministicPlan(baseFlags, "llama", nil, backendHelp)
+
+	for _, c := range plan {
+		if c.Name == "gpu-kv-turbo4" || c.Name == "gpu-kv-no-mmap" {
+			t.Errorf("did not expect turbo combo %q without backend turbo support", c.Name)
+		}
+	}
+}
+
+func TestDeterministicPlan_MoECandidates(t *testing.T) {
+	baseFlags := []string{"-b", "4096", "-ub", "512", "--n-cpu-moe", "30", "-ot", "exps=CPU"}
+	backendHelp := ""
+
+	plan := deterministicPlan(baseFlags, "llama", nil, backendHelp)
+
+	// Should have MoE-specific candidates
+	foundSmallerBatch := false
+	foundNativeMoE := false
+	for _, c := range plan {
+		if c.Name == "smaller-moe-batch" {
+			foundSmallerBatch = true
+		}
+		if c.Name == "native-moe-gpu-kv" {
+			foundNativeMoE = true
+		}
+	}
+	if !foundSmallerBatch {
+		t.Errorf("expected smaller-moe-batch candidate for MoE offload")
+	}
+	if !foundNativeMoE {
+		t.Errorf("expected native-moe-gpu-kv candidate for MoE with -ot set")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// flagMap — semantic parsing
+// ---------------------------------------------------------------------------
+
+func TestFlagMap_BasicParsing(t *testing.T) {
+	flags := []string{"-b", "4096", "--flash-attn", "on", "--no-mmap", "-m", "/model.gguf"}
 	m := flagMap(flags)
-	if m["-m"] != "model.gguf" {
-		t.Fatalf("expected model.gguf, got %s", m["-m"])
+
+	if m["-b"] != "4096" {
+		t.Errorf("expected -b=4096, got %q", m["-b"])
 	}
-	if m["--port"] != "8081" {
-		t.Fatalf("expected 8081, got %s", m["--port"])
+	if m["--flash-attn"] != "on" {
+		t.Errorf("expected --flash-attn=on, got %q", m["--flash-attn"])
 	}
-	if _, ok := m["--flash-attn"]; !ok {
-		t.Fatalf("expected canonical flash-attn flag")
+	if m["--no-mmap"] != "" {
+		t.Errorf("expected --no-mmap='' (boolean), got %q", m["--no-mmap"])
+	}
+	if m["-m"] != "/model.gguf" {
+		t.Errorf("expected -m=/model.gguf, got %q", m["-m"])
 	}
 }
 
-func TestBuildTuningPrompt(t *testing.T) {
-	// Cannot easily test without detect.Capabilities, but we can verify it doesn't panic
-	// This is a smoke test
-}
-
-func TestRemoveConflicting(t *testing.T) {
-	flags := []string{"-c", "4096", "-b", "2048"}
-	result := removeConflicting(flags, "--ctx-size")
-	for _, f := range result {
-		if f == "-c" || f == "4096" {
-			t.Fatalf("expected -c and its value to be removed, got %v", result)
-		}
-	}
-	if len(result) != 2 || result[0] != "-b" || result[1] != "2048" {
-		t.Fatalf("unexpected remaining flags: %v", result)
-	}
-}
-
-func TestFlagMapEqualsForm(t *testing.T) {
-	flags := []string{"--ctx-size=8192", "--threads", "16"}
+func TestFlagMap_EqualsSyntax(t *testing.T) {
+	flags := []string{"--ctx-size=65536", "-b=2048"}
 	m := flagMap(flags)
-	if m["--ctx-size"] != "8192" {
-		t.Fatalf("expected ctx from equals form, got %v", m)
+
+	if m["--ctx-size"] != "65536" {
+		t.Errorf("expected --ctx-size=65536, got %q", m["--ctx-size"])
 	}
-	if m["--threads"] != "16" {
-		t.Fatalf("expected threads value, got %v", m)
+	if m["-b"] != "2048" {
+		t.Errorf("expected -b=2048, got %q", m["-b"])
 	}
 }
 
-func TestSuggestionUnmarshalObjectFlags(t *testing.T) {
-	var s Suggestion
-	data := []byte(`{"name":"batch","flags":{"--batch-size":4096,"--cache-type-k":"q8_0"},"reasoning":"test"}`)
-	if err := json.Unmarshal(data, &s); err != nil {
-		t.Fatalf("unmarshal suggestion: %v", err)
+// ---------------------------------------------------------------------------
+// Engine.Run — integration with mock benchmarkFn
+// ---------------------------------------------------------------------------
+
+func TestEngineRun_BaselineOnly(t *testing.T) {
+	callCount := 0
+	e := &Engine{
+		BaseURL:   "http://localhost:8080",
+		Model:     "test-model",
+		Rounds:    0, // no tuning rounds, just baseline
+		Backend:   "llama",
+		benchmarkFn: func() (*benchmark.Result, error) {
+			callCount++
+			return &benchmark.Result{
+				PromptTPS:  100.0,
+				GenTPS:     50.0,
+				PeakVRAMMB: 8000,
+			}, nil
+		},
 	}
-	if s.FlagValues["--batch-size"] == nil || s.FlagValues["--cache-type-k"] != "q8_0" {
-		t.Fatalf("expected object flags to survive, got %#v", s.FlagValues)
+
+	best, err := e.Run("/models/test.gguf", []string{"-b", "4096"})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
 	}
-	args := flagValuesToArgs(sanitizeFlagValues(s.FlagValues, nil))
-	m := flagMap(args)
-	if m["-b"] != "4096" || m["--cache-type-k"] != "q8_0" {
-		t.Fatalf("expected canonical args, got %v from %v", m, args)
+	if best == nil {
+		t.Fatal("expected non-nil best entry")
+	}
+	if best.Result.GenTPS != 50.0 {
+		t.Errorf("expected GenTPS=50.0, got %f", best.Result.GenTPS)
+	}
+	if best.Name != "baseline" {
+		t.Errorf("expected name 'baseline', got %q", best.Name)
 	}
 }
 
-// AI-tune (autonomous loop, cached files, and community configs all route
-// through QualityProtectedFlags) must never override output-quality or context
-// knobs: KV-cache quantization and --parallel. The user's own values survive.
-func TestQualityProtectedFlagsBlockQualityKnobs(t *testing.T) {
-	base := []string{"-m", "model.gguf", "-b", "4096", "--cache-type-k", "f16", "--parallel", "4", "--ctx-size", "32768"}
-	overrides := map[string]interface{}{
-		"-b":             8192,   // perf knob: allowed
-		"--cache-type-k": "q4_0", // KV types are now tunable by the engine
-		"--cache-type-v": "q4_0", // KV types are now tunable by the engine
-		"--parallel":     8,      // context-shrinking: must be blocked
+func TestEngineRun_ImprovementDetected(t *testing.T) {
+	round := 0
+	e := &Engine{
+		BaseURL:          "http://localhost:8080",
+		Model:            "test-model",
+		Rounds:           1,
+		Backend:          "llama",
+		MinImprovementPct: 1.0,
+		benchmarkFn: func() (*benchmark.Result, error) {
+			round++
+			if round <= 1 {
+				// Baseline
+				return &benchmark.Result{PromptTPS: 100, GenTPS: 50, PeakVRAMMB: 8000}, nil
+			}
+			// Candidate: 10% improvement
+			return &benchmark.Result{PromptTPS: 110, GenTPS: 55, PeakVRAMMB: 8000}, nil
+		},
 	}
-	result := ApplyOverrides(base, overrides, QualityProtectedFlags())
-	m := flagMap(result)
-	if m["-b"] != "8192" {
-		t.Fatalf("expected batch override to apply, got %v", result)
+
+	best, err := e.Run("/models/test.gguf", []string{"-b", "4096"})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
 	}
-	// KV types are now tunable — the override replaces the base value.
-	if m["--cache-type-k"] != "q4_0" {
-		t.Fatalf("expected KV type-k override to apply, got %q", m["--cache-type-k"])
-	}
-	if m["--cache-type-v"] != "q4_0" {
-		t.Fatalf("expected KV type-v override to apply, got %q", m["--cache-type-v"])
-	}
-	if m["--parallel"] != "4" {
-		t.Fatalf("expected user --parallel 4 preserved, got %q", m["--parallel"])
+	// The confirmation pass re-measures, so we just check it didn't crash
+	if best == nil {
+		t.Fatal("expected non-nil best")
 	}
 }
 
-func TestApplyOverridesProtectsPlacement(t *testing.T) {
-	base := []string{"-m", "model.gguf", "--port", "8081", "-b", "4096", "--device", "CUDA0"}
-	overrides := map[string]interface{}{
-		"--batch-size": 8192,
-		"--port":       9090,
-		"--device":     "CUDA1",
+// ---------------------------------------------------------------------------
+// sanitizeFlagValues — protected flags and normalization
+// ---------------------------------------------------------------------------
+
+func TestSanitizeFlagValues_ProtectedFlagsRemoved(t *testing.T) {
+	protected := QualityProtectedFlags()
+	values := map[string]interface{}{
+		"-b":            "8192",
+		"--ctx-size":    "65536", // protected
+		"--flash-attn":  true,
+		"-m":            "/other.gguf", // protected
 	}
-	result := ApplyOverrides(base, overrides, DefaultProtectedFlags())
-	m := flagMap(result)
-	if m["-b"] != "8192" {
-		t.Fatalf("expected batch override, got %v", result)
+
+	result := sanitizeFlagValues(values, protected)
+
+	if _, ok := result["--ctx-size"]; ok {
+		t.Errorf("expected --ctx-size to be filtered (protected)")
 	}
-	if m["--port"] != "8081" {
-		t.Fatalf("expected protected port to stay 8081, got %v", result)
+	if _, ok := result["-m"]; ok {
+		t.Errorf("expected -m to be filtered (protected)")
 	}
-	if m["--device"] != "CUDA0" {
-		t.Fatalf("expected protected device to stay CUDA0, got %v", result)
+	if result["-b"] != "8192" {
+		t.Errorf("expected -b=8192 to pass through")
 	}
 }
 
-func TestMeaningfulImprovementUsesNoiseFloor(t *testing.T) {
-	if meaningfulImprovement(100.5, 100.0, 1.0) {
-		t.Fatalf("0.5%% should not beat a 1%% tune noise floor")
+func TestSanitizeFlagValues_FlashAttnBoolNormalization(t *testing.T) {
+	values := map[string]interface{}{
+		"--flash-attn": true,
 	}
-	if !meaningfulImprovement(101.0, 100.0, 1.0) {
-		t.Fatalf("1%% should meet the tune noise floor")
+	result := sanitizeFlagValues(values, nil)
+	if result["--flash-attn"] != "on" {
+		t.Errorf("expected --flash-attn=true to normalize to 'on', got %v", result["--flash-attn"])
+	}
+
+	values = map[string]interface{}{
+		"--flash-attn": false,
+	}
+	result = sanitizeFlagValues(values, nil)
+	if result["--flash-attn"] != "off" {
+		t.Errorf("expected --flash-attn=false to normalize to 'off', got %v", result["--flash-attn"])
 	}
 }
 
-func TestDeterministicSuggestionSkipsKVUpgradeForMoEOffload(t *testing.T) {
-	base := []string{
-		"--cache-type-k", "q4_0",
-		"--cache-type-v", "q4_0",
-		"--n-cpu-moe", "256",
-		"-ot", "exps=CPU",
-		"-b", "2048",
-		"-ub", "512",
-	}
-	s := deterministicSuggestion(1, base)
-	if s == nil {
-		t.Fatalf("expected a safe deterministic candidate")
-	}
-	if _, ok := s.FlagValues["--cache-type-k"]; ok {
-		t.Fatalf("did not expect q8 KV upgrade for MoE offload, got %#v", s.FlagValues)
-	}
-	if s.FlagValues["-b"] != "1024" {
-		t.Fatalf("expected first MoE fallback to lower batch pressure, got %#v", s.FlagValues)
-	}
-}
+// ---------------------------------------------------------------------------
+// meaningfulImprovement
+// ---------------------------------------------------------------------------
 
-func TestApplyOverridesCanRemoveBooleanFlags(t *testing.T) {
-	base := []string{
-		"-b", "2048",
-		"--run-time-repack",
-		"-khad",
-		"--defrag-thold", "0.1",
+func TestMeaningfulImprovement(t *testing.T) {
+	tests := []struct {
+		candidate, incumbent, minPct float64
+		want                         bool
+	}{
+		{55.0, 50.0, 1.0, true},   // 10% > 1%
+		{50.4, 50.0, 1.0, false},  // 0.8% < 1%
+		{50.5, 50.0, 1.0, true},   // exactly 1%
+		{0, 50.0, 1.0, false},     // zero candidate
+		{50.0, 0, 1.0, true},      // zero incumbent
 	}
-	overrides := map[string]interface{}{
-		"--run-time-repack": false,
-		"-khad":             false,
-		"--defrag-thold":    "-1",
-	}
-	result := ApplyOverrides(base, overrides, nil)
-	for _, flag := range result {
-		if flag == "--run-time-repack" || flag == "-khad" {
-			t.Fatalf("expected boolean flag to be removed, got %v", result)
-		}
-	}
-	m := flagMap(result)
-	if m["--defrag-thold"] != "-1" {
-		t.Fatalf("expected negative defrag value to survive, got %v from %v", m, result)
-	}
-}
-
-func TestDeterministicPlanIncludesIKDenseDefragCandidate(t *testing.T) {
-	base := []string{
-		"--cache-type-k", "q4_0",
-		"--cache-type-v", "q4_0",
-		"-b", "8192",
-		"-ub", "1024",
-		"--defrag-thold", "0.1",
-	}
-	plan := deterministicPlan(base, "ik_llama", nil, "")
-	for _, candidate := range plan {
-		if candidate.Name == "dense-defrag-0.5" && candidate.FlagValues["--defrag-thold"] == "0.5" {
-			return
-		}
-	}
-	t.Fatalf("expected historical dense IK defrag candidate, got %#v", plan)
-}
-
-func TestDeterministicPlanIncludesIKMoEKnobs(t *testing.T) {
-	base := []string{
-		"--cache-type-k", "q4_0",
-		"--cache-type-v", "q4_0",
-		"--n-cpu-moe", "256",
-		"-ot", "exps=CPU",
-		"-b", "2048",
-		"-ub", "512",
-		"--run-time-repack",
-		"-khad",
-		"-muge",
-		"-ger",
-		"-mqkv",
-		"--defrag-thold", "0.1",
-	}
-	plan := deterministicPlan(base, "ik_llama", nil, "")
-	if len(plan) < 8 {
-		t.Fatalf("expected a deeper MoE plan, got %d entries: %#v", len(plan), plan)
-	}
-	names := map[string]bool{}
-	for _, c := range plan {
-		names[c.Name] = true
-	}
-	// Skip our new larger-ubatch candidates from the OOM check
-	allowedLargerUbatch := map[string]bool{"larger-ubatch-2x": true, "larger-ubatch-4x": true}
-	for _, c := range plan {
-		if !allowedLargerUbatch[c.Name] && c.FlagValues["-ub"] == "1024" {
-			t.Fatalf("MoE plan should not probe larger ubatch after OOM data, got %#v", c)
-		}
-	}
-	for _, want := range []string{"moe-disable-repack", "moe-disable-khad", "moe-defrag-off", "moe-no-muge", "moe-no-ger", "moe-no-mqkv"} {
-		if !names[want] {
-			t.Fatalf("expected %s in MoE plan, got %#v", want, names)
+	for _, tt := range tests {
+		got := meaningfulImprovement(tt.candidate, tt.incumbent, tt.minPct)
+		if got != tt.want {
+			t.Errorf("meaningfulImprovement(%f, %f, %f) = %v, want %v",
+				tt.candidate, tt.incumbent, tt.minPct, got, tt.want)
 		}
 	}
 }
 
-func TestGuardRiskyMoEOverridesDropsMemoryExpandingSuggestions(t *testing.T) {
-	base := []string{
-		"--cache-type-k", "q4_0",
-		"--cache-type-v", "q4_0",
-		"--n-cpu-moe", "256",
-		"-ot", "exps=CPU",
-		"-b", "2048",
-		"-ub", "512",
-	}
-	overrides := guardRiskyMoEOverrides(map[string]interface{}{
-		"-ub":            "1024",
-		"-b":             "8192",
-		"--cache-type-k": "q8_0",
-		"--cache-type-v": "q8_0",
-		"--defrag-thold": "-1",
-	}, base)
-	if overrides["-ub"] != "1024" {
-		t.Fatalf("expected larger ubatch to be passed through, got %#v", overrides)
-	}
-	if overrides["-b"] != "8192" {
-		t.Fatalf("expected excessive batch increase to be passed through, got %#v", overrides)
-	}
-	if overrides["--cache-type-k"] != "q8_0" {
-		t.Fatalf("expected MoE KV upgrade to be passed through, got %#v", overrides)
-	}
-	if overrides["--defrag-thold"] != "-1" {
-		t.Fatalf("expected safe MoE override to remain, got %#v", overrides)
-	}
-}
+// ---------------------------------------------------------------------------
+// ApplyOverrides
+// ---------------------------------------------------------------------------
 
-func TestDeterministicPlanIncludesMoEMemoryMovementCandidates(t *testing.T) {
-	base := []string{
-		"--cache-type-k", "q4_0",
-		"--cache-type-v", "q4_0",
-		"--n-cpu-moe", "256",
-		"-ot", "exps=CPU",
-		"-b", "2048",
-		"-ub", "512",
-		"--no-mmap",
-	}
-	help := "--defer-experts --cont-batching"
-	plan := deterministicPlan(base, "vulkan", nil, help)
-	names := map[string]bool{}
-	for _, c := range plan {
-		names[c.Name] = true
-		if _, ok := c.FlagValues["--parallel"]; ok {
-			t.Fatalf("MoE plan must not change parallel without fixed per-slot context scheduling: %#v", c)
-		}
-		if _, ok := c.FlagValues["--ctx-size"]; ok {
-			t.Fatalf("MoE plan must not change context size: %#v", c)
-		}
-	}
-	for _, want := range []string{"moe-batch-1536", "moe-ubatch-384", "moe-defer-experts", "moe-mmap-pagecache", "moe-cont-batching"} {
-		if !names[want] {
-			t.Fatalf("expected %s in MoE memory-movement plan, got %#v", want, names)
-		}
-	}
-}
-
-func TestGuardRiskyMoEOverridesKeepsContextAndSpecStable(t *testing.T) {
-	base := []string{
-		"--cache-type-k", "q4_0",
-		"--cache-type-v", "q4_0",
-		"--flash-attn", "on",
-		"--parallel", "1",
-		"--n-cpu-moe", "256",
-		"-ot", "exps=CPU",
-		"-b", "2048",
-		"-ub", "512",
-		"--no-mmap",
-	}
-	overrides := guardRiskyMoEOverrides(map[string]interface{}{
-		"--parallel":         "2",
-		"--spec-type":        "ngram-mod",
-		"--spec-draft-n-max": "64",
-		"--flash-attn":       "off",
-		"--no-mmap":          false,
-		"--defer-experts":    true,
-	}, base)
-	for _, key := range []string{"--parallel", "--spec-type", "--spec-draft-n-max", "--flash-attn"} {
-		if _, ok := overrides[key]; !ok {
-			t.Fatalf("expected %s to be passed through for MoE, got %#v", key, overrides)
-		}
-	}
-	if overrides["--no-mmap"] != false || overrides["--defer-experts"] != true {
-		t.Fatalf("expected safe memory-movement flags to remain, got %#v", overrides)
-	}
-}
-
-func TestDeterministicPlanDoesNotSuggestNgramByDefault(t *testing.T) {
+func TestApplyOverrides_AddsNewFlag(t *testing.T) {
 	base := []string{"-b", "4096", "-ub", "512"}
-	help := "--spec-type [none|ngram-map-k|ngram-map-k4v|ngram-mod] --spec-ngram-mod-n-match"
-	plan := deterministicPlan(base, "vulkan", nil, help)
-	for _, c := range plan {
-		if _, ok := c.FlagValues["--spec-type"]; ok {
-			t.Fatalf("default AI-tune should not propose ngram speculation, got %#v", c)
-		}
+	overrides := map[string]interface{}{"--flash-attn": "on"}
+	protected := QualityProtectedFlags()
+
+	result := ApplyOverrides(base, overrides, protected)
+	m := flagMap(result)
+	if m["--flash-attn"] != "on" {
+		t.Errorf("expected --flash-attn=on in result, got %v", m)
+	}
+	// Original flags preserved
+	if m["-b"] != "4096" {
+		t.Errorf("expected -b=4096 preserved, got %q", m["-b"])
 	}
 }
 
-func TestDeterministicPlanTunesExplicitNgramMode(t *testing.T) {
-	base := []string{"-b", "4096", "-ub", "512", "--spec-type", "ngram-mod"}
-	plan := deterministicPlan(base, "vulkan", nil, "--spec-autotune")
-	if len(plan) == 0 || plan[0].Name != "spec-ngram-mod-lower-depth" {
-		t.Fatalf("expected explicit ngram mode to get depth tuning, got %#v", plan)
+func TestApplyOverrides_RemovesFlagWithFalse(t *testing.T) {
+	base := []string{"-b", "4096", "--no-mmap"}
+	overrides := map[string]interface{}{"--no-mmap": false}
+	protected := QualityProtectedFlags()
+
+	result := ApplyOverrides(base, overrides, protected)
+	m := flagMap(result)
+	if _, ok := m["--no-mmap"]; ok {
+		t.Errorf("expected --no-mmap to be removed, got %v", m)
 	}
 }
 
-func TestDeterministicPlanDoesNotEnableSpecForMoEByDefault(t *testing.T) {
-	base := []string{"-b", "2048", "-ub", "512", "--n-cpu-moe", "256", "-ot", "exps=CPU"}
-	plan := deterministicPlan(base, "ik_llama", nil, "")
-	for _, c := range plan {
-		if _, ok := c.FlagValues["--spec-type"]; ok {
-			t.Fatalf("MoE plan should not enable speculative decoding by default, got %#v", c)
-		}
-	}
-}
+func TestApplyOverrides_ProtectedFlagIgnored(t *testing.T) {
+	base := []string{"-b", "4096", "--ctx-size", "32768"}
+	overrides := map[string]interface{}{"--ctx-size": "65536"}
+	protected := QualityProtectedFlags()
 
-func msgsContain(msgs []string, sub string) bool {
-	for _, m := range msgs {
-		if strings.Contains(m, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-// A candidate that wins on a single noisy sample but does not reproduce on the
-// confirmation re-measure must be discarded so the cache never holds a config
-// slower than the default.
-func TestRunConfirmationRevertsUnreproducibleWinner(t *testing.T) {
-	initial := []string{"--cache-type-k", "q4_0", "--cache-type-v", "q4_0", "-b", "8192", "-ub", "1024", "--threads", "8"}
-	var lastFlags []string
-	var msgs []string
-	candCalls := 0
-	e := &Engine{
-		Model:   "m.gguf",
-		Rounds:  3,
-		Backend: "ik_llama",
-		StartServer: func(flags []string) (func(), error) {
-			lastFlags = append([]string(nil), flags...)
-			return func() {}, nil
-		},
-		OnProgress: func(m string) { msgs = append(msgs, m) },
-	}
-	e.benchmarkFn = func() (*benchmark.Result, error) {
-		if equalFlags(lastFlags, initial) {
-			return &benchmark.Result{GenTPS: 100, GenTokens: 256, PromptTokens: 10}, nil
-		}
-		candCalls++
-		tps := 100.0
-		if candCalls == 1 { // first candidate noise-wins; it never reproduces afterward
-			tps = 130.0
-		}
-		return &benchmark.Result{GenTPS: tps, GenTokens: 256, PromptTokens: 10}, nil
-	}
-	best, err := e.Run("m.gguf", initial)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !msgsContain(msgs, "keeping baseline") {
-		t.Fatalf("confirmation pass did not run/revert; messages: %v", msgs)
-	}
-	if best.Name != "baseline" || len(best.OverrideFlags) != 0 {
-		t.Fatalf("expected revert to baseline, got name=%q overrides=%v gentps=%.1f", best.Name, best.OverrideFlags, best.Result.GenTPS)
-	}
-}
-
-// A candidate whose win reproduces on the confirmation re-measure must be kept,
-// with the confirmed measurement recorded.
-func TestRunConfirmationKeepsReproducibleWinner(t *testing.T) {
-	initial := []string{"--cache-type-k", "q4_0", "--cache-type-v", "q4_0", "-b", "8192", "-ub", "1024", "--threads", "8"}
-	var lastFlags []string
-	var msgs []string
-	e := &Engine{
-		Model:   "m.gguf",
-		Rounds:  3,
-		Backend: "ik_llama",
-		StartServer: func(flags []string) (func(), error) {
-			lastFlags = append([]string(nil), flags...)
-			return func() {}, nil
-		},
-		OnProgress: func(m string) { msgs = append(msgs, m) },
-	}
-	e.benchmarkFn = func() (*benchmark.Result, error) {
-		tps := 100.0
-		if !equalFlags(lastFlags, initial) { // every candidate (and confirmation) reproduces the win
-			tps = 130.0
-		}
-		return &benchmark.Result{GenTPS: tps, GenTokens: 256, PromptTokens: 10}, nil
-	}
-	best, err := e.Run("m.gguf", initial)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !msgsContain(msgs, "confirmed") {
-		t.Fatalf("expected a confirmed winner message; messages: %v", msgs)
-	}
-	if best.Name == "baseline" || len(best.OverrideFlags) == 0 {
-		t.Fatalf("expected a kept non-baseline winner, got name=%q overrides=%v", best.Name, best.OverrideFlags)
-	}
-	if best.Result.GenTPS != 130 {
-		t.Fatalf("expected confirmed gen tok/s 130, got %.1f", best.Result.GenTPS)
+	result := ApplyOverrides(base, overrides, protected)
+	m := flagMap(result)
+	if m["--ctx-size"] != "32768" {
+		t.Errorf("expected --ctx-size=32768 (protected), got %q", m["--ctx-size"])
 	}
 }

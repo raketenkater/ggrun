@@ -29,6 +29,13 @@ func TestResolveAutoKVPlacement(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &ModelProfile{IsMoE: tc.isMoE, ModelArch: tc.arch}
+			// Set realistic NonExpertBytes so the MoE KV placement check
+			// uses real data instead of the 10% fallback. A 116 GB MoE
+			// with 45 GB non-expert (attention, norms, embeddings) cannot
+			// fit non-expert + KV in 49 GB VRAM → KV goes to CPU.
+			if tc.isMoE && tc.totalSizeMB > 50000 {
+				m.NonExpertBytes = int64(tc.totalSizeMB) * 1024 * 1024 * 39 / 100
+			}
 			// derived per-component overhead: no CUDA probe data here, so only compute buffer is charged
 			const vramOverheadMB = 3 * computeFloorMB
 			if got := resolveAutoKVPlacement(caps, m, tc.totalSizeMB, tc.kvTotalMB, vramOverheadMB); got != tc.want {
