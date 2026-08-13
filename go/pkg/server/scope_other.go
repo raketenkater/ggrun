@@ -30,6 +30,12 @@ func resetFailedScopeUnit(string) error { return nil }
 
 func waitScopeUnitStopped(string, time.Duration) error { return nil }
 
+func scopeUnitActive(string) bool { return false }
+
+func scopeControlGroup(string) (string, error) {
+	return "", fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
+}
+
 func scopeMemoryPeakBytes(string) (uint64, error) {
 	return 0, fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
@@ -48,5 +54,13 @@ func scopeNonReclaimableMB(string) (int, error) {
 }
 
 func setScopeMemoryMaxMB(string, int) error {
+	return fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
+}
+
+func (p *Process) ScopeNonReclaimableMB() (int, error) {
+	return 0, fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
+}
+
+func (p *Process) SetMemoryMaxMB(int) error {
 	return fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
