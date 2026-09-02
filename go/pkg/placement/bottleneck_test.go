@@ -42,6 +42,25 @@ func TestDiagnoseAgentBottleneckFindsPhaseTopologyImbalance(t *testing.T) {
 	}
 }
 
+func TestDiagnoseAgentBottleneckKeepsTightFitAndDiagnosesMeasuredPhase(t *testing.T) {
+	strategy := &Strategy{
+		Residency: ResidencyTight, Type: MoEOffload, TensorSplit: []float64{0.5, 0.5},
+		ResourceLedger: &ResourceLedger{Exact: true, Fits: true, Devices: []DeviceResourceLedger{
+			{GPU: 0, Active: true, SlackMB: 384}, {GPU: 1, Active: true, SlackMB: 512},
+		}},
+	}
+	result := &benchmark.Result{PhaseUtilization: []benchmark.PhaseUtilization{{
+		Phase: benchmark.AgentPhasePrefill, DurationS: 2, Observations: 4,
+		GPUUtilization: []benchmark.GPUUtilization{
+			{GPU: 0, SMPercent: 91}, {GPU: 1, SMPercent: 4},
+		},
+	}}}
+	got := DiagnoseAgentBottleneck(nil, nil, strategy, result)
+	if got.Primary != BottleneckGPUTopology || strategy.Residency != ResidencyTight {
+		t.Fatalf("fit/performance stages were conflated: diagnosis=%+v residency=%q", got, strategy.Residency)
+	}
+}
+
 func TestDiagnoseAgentBottleneckKeepsCPUExpertPathComposite(t *testing.T) {
 	strategy := &Strategy{
 		Residency: ResidencyRoomy, Type: MoEOffload, IsMoE: true, NCPUMoE: 20,
@@ -180,6 +199,24 @@ func TestSelectBottleneckFinalistTargetsMoreResidentExperts(t *testing.T) {
 	got, ok := SelectBottleneckFinalist(candidates, WorkloadBottleneck{Primary: BottleneckHostExpertPath})
 	if !ok || got.Name != "experts-denser" {
 		t.Fatalf("expert-directed finalist=(%+v,%t)", got, ok)
+	}
+}
+
+func TestSelectBottleneckFinalistPrefersMeasuredHotCacheCoordinateForHostExpertPath(t *testing.T) {
+	base := diagnosticCandidateStrategy()
+	base.IsMoE, base.Type, base.NCPUMoE = true, MoEOffload, 20
+	denser := diagnosticCandidateStrategy()
+	denser.IsMoE, denser.Type, denser.NCPUMoE = true, MoEOffload, 12
+	hot := diagnosticCandidateStrategy()
+	hot.IsMoE, hot.Type, hot.NCPUMoE, hot.HotExpertCacheSlots = true, MoEOffload, 20, 8
+	candidates := []CalibrationCandidate{
+		{Name: "default", Strategy: base, Estimate: CandidateEstimate{Feasible: true, AgentCost: 10}},
+		{Name: "experts-denser", Strategy: denser, Estimate: CandidateEstimate{Feasible: true, AgentCost: 2}},
+		{Name: "hot-experts-8", Strategy: hot, Estimate: CandidateEstimate{Feasible: true, AgentCost: 9}},
+	}
+	got, ok := SelectBottleneckFinalist(candidates, WorkloadBottleneck{Primary: BottleneckHostExpertPath})
+	if !ok || got.Name != "hot-experts-8" {
+		t.Fatalf("host-expert finalist=(%+v,%t)", got, ok)
 	}
 }
 

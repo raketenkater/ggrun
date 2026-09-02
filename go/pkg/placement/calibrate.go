@@ -16,7 +16,7 @@ import (
 // CalibrationSchemaVersion bumps whenever the candidate set or scoring changes,
 // so a decision measured under older semantics is never applied after an
 // upgrade changes what "fastest" means.
-const CalibrationSchemaVersion = 19
+const CalibrationSchemaVersion = 23
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 
@@ -43,11 +43,11 @@ const (
 	// not make one cold standard launch unbounded.
 	CalibrationValidationWorkflow = "agent-workflow-v1"
 	// CalibrationValidationAdmission means the baseline passed its full launch
-	// lifecycle, but every bounded challenger failed exact admission before a
-	// comparative workload could run. It is negative feasibility evidence, not
-	// performance evidence: automatic launch may use it to avoid repeating the
-	// same destructive stop/reload loop, but it must never advertise the default
-	// as a measured fastest configuration.
+	// lifecycle, but the bounded finalist was deterministically unavailable at
+	// exact admission or a feature-specific post-start/lifecycle gate. It is
+	// negative feasibility/compatibility evidence, not performance evidence:
+	// automatic launch may avoid repeating the same destructive stop/reload loop,
+	// but it must never advertise the default as a measured fastest configuration.
 	CalibrationValidationAdmission = "admission-only-v1"
 )
 
@@ -67,41 +67,93 @@ type CalibrationDecision struct {
 	// this explicit marker. Old decisions without the field stay valid for
 	// loading (scope-key validation is unchanged); they just cannot be matched
 	// for clearing.
-	ModelBasename          string                `json:"model_basename,omitempty"`
-	Winner                 string                `json:"winner"` // candidate Name, e.g. "default" or "kv-alternate"
-	ValidationLevel        string                `json:"validation_level"`
-	DefaultTPS             float64               `json:"default_tps"`
-	DefaultPromptTPS       float64               `json:"default_prompt_tps"`
-	DefaultMixedTPS        float64               `json:"default_mixed_tps,omitempty"`
-	DefaultTurnTimeS       float64               `json:"default_turn_time_s,omitempty"`
-	DefaultTurnMaxS        float64               `json:"default_turn_max_s,omitempty"`
-	DefaultAgentSamples    int                   `json:"default_agent_samples,omitempty"`
-	DefaultWorkloadLanes   int                   `json:"default_workload_lanes,omitempty"`
-	DefaultCachedTokens    int                   `json:"default_cached_tokens,omitempty"`
-	DefaultNewPromptTokens int                   `json:"default_new_prompt_tokens,omitempty"`
-	AgentPromptBytes       int                   `json:"agent_prompt_bytes,omitempty"`
-	DefaultScore           float64               `json:"default_score"`
-	WinnerTPS              float64               `json:"winner_tps"`
-	WinnerPromptTPS        float64               `json:"winner_prompt_tps"`
-	WinnerMixedTPS         float64               `json:"winner_mixed_tps,omitempty"`
-	WinnerTurnTimeS        float64               `json:"winner_turn_time_s,omitempty"`
-	WinnerTurnMaxS         float64               `json:"winner_turn_max_s,omitempty"`
-	WinnerAgentSamples     int                   `json:"winner_agent_samples,omitempty"`
-	WinnerWorkloadLanes    int                   `json:"winner_workload_lanes,omitempty"`
-	WinnerCachedTokens     int                   `json:"winner_cached_tokens,omitempty"`
-	WinnerNewPromptTokens  int                   `json:"winner_new_prompt_tokens,omitempty"`
-	WinnerScore            float64               `json:"winner_score"`
-	Improvement            float64               `json:"improvement_pct"`
-	BaselineResidency      ResidencyClass        `json:"baseline_residency,omitempty"`
-	BaselineBottleneck     string                `json:"baseline_bottleneck,omitempty"`
-	Finalist               string                `json:"finalist,omitempty"`
-	FinalistOutcome        string                `json:"finalist_outcome,omitempty"`
-	FinalistFailureClass   string                `json:"finalist_failure_class,omitempty"`
-	FinalistFailureReason  string                `json:"finalist_failure_reason,omitempty"`
-	FinalistEstimatedCost  float64               `json:"finalist_estimated_agent_cost,omitempty"`
-	FinalistConfidence     string                `json:"finalist_estimate_confidence,omitempty"`
-	ExploredBoundary       *OptimizationBoundary `json:"explored_boundary,omitempty"`
-	MeasuredAt             string                `json:"measured_at"`
+	ModelBasename            string                 `json:"model_basename,omitempty"`
+	Winner                   string                 `json:"winner"` // candidate Name, e.g. "default" or "kv-alternate"
+	ValidationLevel          string                 `json:"validation_level"`
+	DefaultTPS               float64                `json:"default_tps"`
+	DefaultPromptTPS         float64                `json:"default_prompt_tps"`
+	DefaultMixedTPS          float64                `json:"default_mixed_tps,omitempty"`
+	DefaultTurnTimeS         float64                `json:"default_turn_time_s,omitempty"`
+	DefaultTurnMaxS          float64                `json:"default_turn_max_s,omitempty"`
+	DefaultAgentSamples      int                    `json:"default_agent_samples,omitempty"`
+	DefaultWorkloadLanes     int                    `json:"default_workload_lanes,omitempty"`
+	DefaultCachedTokens      int                    `json:"default_cached_tokens,omitempty"`
+	DefaultNewPromptTokens   int                    `json:"default_new_prompt_tokens,omitempty"`
+	AgentPromptBytes         int                    `json:"agent_prompt_bytes,omitempty"`
+	DefaultScore             float64                `json:"default_score"`
+	WinnerTPS                float64                `json:"winner_tps"`
+	WinnerPromptTPS          float64                `json:"winner_prompt_tps"`
+	WinnerMixedTPS           float64                `json:"winner_mixed_tps,omitempty"`
+	WinnerTurnTimeS          float64                `json:"winner_turn_time_s,omitempty"`
+	WinnerTurnMaxS           float64                `json:"winner_turn_max_s,omitempty"`
+	WinnerAgentSamples       int                    `json:"winner_agent_samples,omitempty"`
+	WinnerWorkloadLanes      int                    `json:"winner_workload_lanes,omitempty"`
+	WinnerCachedTokens       int                    `json:"winner_cached_tokens,omitempty"`
+	WinnerNewPromptTokens    int                    `json:"winner_new_prompt_tokens,omitempty"`
+	WinnerScore              float64                `json:"winner_score"`
+	Improvement              float64                `json:"improvement_pct"`
+	BaselineResidency        ResidencyClass         `json:"baseline_residency,omitempty"`
+	BaselineBottleneck       string                 `json:"baseline_bottleneck,omitempty"`
+	Finalist                 string                 `json:"finalist,omitempty"`
+	FinalistOutcome          string                 `json:"finalist_outcome,omitempty"`
+	FinalistFailureClass     string                 `json:"finalist_failure_class,omitempty"`
+	FinalistFailureReason    string                 `json:"finalist_failure_reason,omitempty"`
+	FinalistEstimatedCost    float64                `json:"finalist_estimated_agent_cost,omitempty"`
+	FinalistConfidence       string                 `json:"finalist_estimate_confidence,omitempty"`
+	FinalistHotExpertSteps   uint64                 `json:"finalist_hot_expert_steps,omitempty"`
+	FinalistHotExpertHits    uint64                 `json:"finalist_hot_expert_hits,omitempty"`
+	FinalistHotExpertMisses  uint64                 `json:"finalist_hot_expert_misses,omitempty"`
+	FinalistHotExpertHitRate float64                `json:"finalist_hot_expert_hit_rate,omitempty"`
+	RejectedFinalists        []CalibrationRejection `json:"rejected_finalists,omitempty"`
+	ExploredBoundary         *OptimizationBoundary  `json:"explored_boundary,omitempty"`
+	MeasuredAt               string                 `json:"measured_at"`
+}
+
+// CalibrationRejection is durable, coordinate-local negative evidence. Keeping
+// the bounded set beside the scope decision lets automatic optimization advance
+// through the frontier without forgetting an earlier exact admission failure.
+type CalibrationRejection struct {
+	Finalist      string `json:"finalist"`
+	FailureClass  string `json:"failure_class"`
+	FailureReason string `json:"failure_reason"`
+}
+
+const maxCalibrationRejections = 32
+
+// RecordAdmissionRejection merges one stable failure by candidate name. The
+// newest explanation replaces an older one and the bounded tail prevents a
+// malformed/foreign cache from growing without limit.
+func (d *CalibrationDecision) RecordAdmissionRejection(finalist, failureClass, failureReason string) {
+	if d == nil || finalist == "" || failureClass == "" || failureReason == "" {
+		return
+	}
+	for i := range d.RejectedFinalists {
+		if d.RejectedFinalists[i].Finalist == finalist {
+			d.RejectedFinalists[i].FailureClass = failureClass
+			d.RejectedFinalists[i].FailureReason = failureReason
+			return
+		}
+	}
+	d.RejectedFinalists = append(d.RejectedFinalists, CalibrationRejection{
+		Finalist: finalist, FailureClass: failureClass, FailureReason: failureReason,
+	})
+	if len(d.RejectedFinalists) > maxCalibrationRejections {
+		d.RejectedFinalists = append([]CalibrationRejection(nil), d.RejectedFinalists[len(d.RejectedFinalists)-maxCalibrationRejections:]...)
+	}
+}
+
+// MergeAdmissionRejections preserves earlier scoped negatives when a later
+// coordinate also fails. The current decision fields remain the latest event.
+func (d *CalibrationDecision) MergeAdmissionRejections(previous *CalibrationDecision) {
+	if d == nil || previous == nil {
+		return
+	}
+	if previous.ValidationLevel == CalibrationValidationAdmission {
+		d.RecordAdmissionRejection(previous.Finalist, previous.FinalistFailureClass, previous.FinalistFailureReason)
+	}
+	for _, rejection := range previous.RejectedFinalists {
+		d.RecordAdmissionRejection(rejection.Finalist, rejection.FailureClass, rejection.FailureReason)
+	}
 }
 
 // CalibrationPath returns the cache file for one calibration scope.
@@ -152,20 +204,29 @@ func (d *CalibrationDecision) AutomaticEligible() bool {
 }
 
 // SuppressesAutomaticAdmissionRetry reports whether this decision proves that
-// the exact deterministic finalist could not be admitted. It deliberately does
-// not make the decision AutomaticEligible: no challenger workload completed,
-// so there is no performance winner to apply. The calibration scope and schema
-// bind the negative result to the same model/backend/hardware/workload policy;
-// either changing retires it automatically.
+// the exact deterministic finalist was unavailable. It deliberately does not
+// make the decision AutomaticEligible: negative feasibility or compatibility
+// evidence is not a performance winner. The calibration scope and schema bind
+// the result to the same model/backend/hardware/workload policy; either changing
+// retires it automatically.
 func (d *CalibrationDecision) SuppressesAutomaticAdmissionRetry(finalist string) bool {
-	return d != nil &&
-		d.ValidationLevel == CalibrationValidationAdmission &&
-		d.Winner == "default" &&
+	if d == nil || d.ValidationLevel != CalibrationValidationAdmission || finalist == "" {
+		return false
+	}
+	if d.Winner == "default" &&
 		d.FinalistOutcome == "unavailable" &&
 		d.FinalistFailureClass != "" &&
 		d.FinalistFailureReason != "" &&
 		d.Finalist != "" &&
-		d.Finalist == finalist
+		d.Finalist == finalist {
+		return true
+	}
+	for _, rejection := range d.RejectedFinalists {
+		if rejection.Finalist == finalist && rejection.FailureClass != "" && rejection.FailureReason != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadCalibrationDecision reads a prior calibration for the scope, rejecting
@@ -344,7 +405,17 @@ func FormatCalibrationStatus(d *CalibrationDecision) string {
 			outcome = "promoted"
 		}
 	}
-	line := fmt.Sprintf("%s, %s %s", residency, outcome, d.Winner)
+	line := ""
+	if outcome == "unavailable" && d.Winner == "default" {
+		line = fmt.Sprintf("%s, default retained", residency)
+		if d.Finalist != "" {
+			line += fmt.Sprintf("; finalist %s unavailable", d.Finalist)
+		} else {
+			line += "; finalist unavailable"
+		}
+	} else {
+		line = fmt.Sprintf("%s, %s %s", residency, outcome, d.Winner)
+	}
 	if d.MeasuredAt != "" {
 		line += ", measured " + d.MeasuredAt
 	}
@@ -393,6 +464,20 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 	out := []CalibrationCandidate{{Name: "default", Strategy: base}}
 	if base.Type == CPUOnly {
 		return out
+	}
+
+	// A backend-provided hot-expert cache is a decode optimization and the
+	// first challenger. Auto prefers leftover VRAM on the packed baseline; if
+	// that cannot hold a useful cache, the challenger demotes GPU expert layers
+	// until it can. The packed cache-free layout remains candidate 0. The live
+	// agent workload still decides whether locality beats those extra CPU layers.
+	if candidate, hotErr := hotExpertCacheCandidate(caps, model, base, opts); candidate != nil {
+		out = append(out, CalibrationCandidate{
+			Name:     fmt.Sprintf("hot-experts-%d", candidate.HotExpertCacheSlots),
+			Strategy: candidate,
+		})
+	} else if hotErr != nil && hotExpertOptimizerRequested(opts) {
+		base.OptimizationExclusions = append(base.OptimizationExclusions, "hot-experts: "+hotErr.Error())
 	}
 
 	// Recurrent parallel-agent serving is governed by two independent limits:
@@ -558,6 +643,8 @@ func calibrationStrategyIdentity(strategy *Strategy) string {
 		fmt.Sprintf("%d", strategy.Parallel), fmt.Sprintf("%d", strategy.BatchSize),
 		fmt.Sprintf("%d", strategy.UBatchSize), strategy.KVPlacement, strategy.KVType,
 		fmt.Sprintf("%t", strategy.MMapRequired), fmt.Sprintf("%d", strategy.NCPUMoE),
+		fmt.Sprintf("%d", strategy.HotExpertCacheSlots),
+		fmt.Sprintf("%d", strategy.HotExpertCacheInserts),
 		splitCompactKey(strategy.TensorSplit), strategy.OTString, strategy.PlacementPolicy,
 	)
 }
@@ -800,6 +887,11 @@ func cloneStrategy(s *Strategy) *Strategy {
 	if s.CompanionPlacements != nil {
 		c.CompanionPlacements = append([]CompanionPlacement(nil), s.CompanionPlacements...)
 	}
+	if s.VRAMLedger != nil {
+		c.VRAMLedger = append([]GPULedgerEntry(nil), s.VRAMLedger...)
+	}
+	c.HotExpertCacheVRAMByGPU = cloneIntMap(s.HotExpertCacheVRAMByGPU)
+	c.HotExpertCacheLayersByGPU = cloneIntMap(s.HotExpertCacheLayersByGPU)
 	c.ResourceLedger = nil
 	c.Residency = ""
 	c.OptimizationBottleneck = ""
@@ -1135,6 +1227,7 @@ type CalibrationScopeKey struct {
 	SamplingProfile     string
 	CompanionPolicy     string
 	SpecPolicy          string
+	HotExpertPolicy     string
 	BackendCapabilities string
 	// SWAFull is part of the scope because it changes the KV allocation without
 	// changing anything else the key already carries (see placement.go:6640-6643):
@@ -1193,6 +1286,8 @@ func NewCalibrationScopeKey(model *ModelProfile, caps *detect.Capabilities, opts
 		basePlacement = specHash(
 			string(base.Type), base.KVPlacement, fmt.Sprintf("%t", base.MMap),
 			fmt.Sprintf("%d", base.NCPUMoE), splitCompactKey(base.TensorSplit), base.OTString,
+			fmt.Sprintf("%d", base.HotExpertCacheSlots),
+			fmt.Sprintf("%d", base.HotExpertCacheInserts),
 		)
 		if base.Draft != nil {
 			draftPolicy = specHash(
@@ -1232,6 +1327,10 @@ func NewCalibrationScopeKey(model *ModelProfile, caps *detect.Capabilities, opts
 		SamplingProfile: opts.SamplingProfile,
 		CompanionPolicy: calibrationCompanionPolicy(opts.Companions),
 		SpecPolicy:      specHash(opts.SpecMode, fmt.Sprintf("%t", opts.ForceSpecMoE), draftPolicy),
+		HotExpertPolicy: specHash(
+			strings.ToLower(strings.TrimSpace(opts.HotExperts)),
+			fmt.Sprintf("%d", opts.HotExpertCacheSlots),
+		),
 		BackendCapabilities: specHash(
 			opts.BackendHelp,
 			string(effectiveCPUExpertMMapCapability(opts)),
@@ -1272,7 +1371,7 @@ func (k CalibrationScopeKey) String() string {
 		fmt.Sprintf("%t", k.ParallelExplicit),
 		fmt.Sprintf("%t", k.BatchExplicit), fmt.Sprintf("%t", k.UBatchExplicit),
 		k.KVQuality, k.KVQualityV, k.KVType, k.GPUSet, k.BasePlacement, k.MemoryPolicy,
-		k.SamplingProfile, k.CompanionPolicy, k.SpecPolicy, k.BackendCapabilities,
+		k.SamplingProfile, k.CompanionPolicy, k.SpecPolicy, k.HotExpertPolicy, k.BackendCapabilities,
 		fmt.Sprintf("%t", k.SWAFull), k.ChatTemplate,
 	)
 }

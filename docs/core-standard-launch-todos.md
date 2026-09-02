@@ -46,19 +46,58 @@ evidence.
 | KVFIT-8 | Synthetic coverage exists for selected/current-free GPUs, companion reservations, CPU-only, dense/MoE/recurrent shapes, explicit quality/max, and odd KV geometry | Finish the named public matrix and no-fit-oracle fixtures |
 | KVFIT-9 | Boundary evidence is persisted and verified-config reuse is scoped | Capture load, cache, agent, and adjacent-rejection evidence on real hardware |
 | PERF-1, PERF-3, PERF-5, PERF-9, UX-3 | Implemented: standard launch owns bounded search; candidates are complete placements; scope includes policy/capabilities; batch pairs preserve explicit intent | Commit and multi-hardware proof |
-| PERF-2, PERF-6, PERF-7 | Implemented as baseline plus one calculated finalist, with a measured prefill pilot, identical budget-scaled cold+append scenarios, two samples, concurrent generation, mixed foreground traffic, lifecycle gates, delayed promotion, and a reusable baseline-won result | Add longer branch/replay and long-context hardware acceptance; quantify noise on public hardware |
+| PERF-2, PERF-6, PERF-7 | Implemented as baseline plus one calculated finalist per launch, with a measured prefill pilot, identical budget-scaled cold+append scenarios, two samples, concurrent generation, mixed foreground traffic, lifecycle gates, delayed promotion, and a reusable baseline-won result. Stable coordinate-local failures now accumulate and advance the bounded frontier instead of freezing it. | Add longer branch/replay and long-context hardware acceptance; quantify noise on public hardware |
 | PERF-10 | Automatic legal slot neighbors use complete re-placement and useful per-agent context. Agent-parallel declares at least two runnable turns; automatic challengers wider than declared demand are dominated and skipped, while explicit maintenance orders the p1/p2/p4/p8 curve. Phase-aware router admission now separates allocated slots from active compute: long cold host-expert prefills serialize, while bounded small/cache-hot requests may overlap only after the first generated SSE delta. Reviewer stop-sequence-contract handling and enforceable Workflow-timeout fixes remove the observed false fallback/deadline paths; ambiguous Workflow source inputs fail early, materialized scripts are verified, and queue/service cancellations plus 60s/600s signatures are recorded. | Relaunch the new binary and complete controlled p1/p2 decode+decode, cold-prefill+decode, and cache-hot A/Bs plus capability-specific unified/partitioned KV A/B; tune the cold/append boundary only from matched public-hardware evidence. |
 | PERF-4, PERF-8, PERF-12, UX-2 | Not complete | Implement measured headroom continuation, broader optional knobs, and bounded control UX |
 | PERF-11 | Partially implemented in the working tree: MoE topology candidates include each feasible sole-backbone owner as a performance-only full recompute; ranking prices the serial backbone and routed GPU/CPU experts instead of prioritizing owner names | Finish exact-argv guard tests, run the intentional roomy hardware comparison, then add only capability-proven row/peer candidates |
 | UX-1 | Implemented for launch, dry-run, dry-run JSON, TUI config screen, and `ggrun status` | Support-expert status remains the NanoBeige controller; launch inspect is `ggrun status` |
-| ROOMY-1, ROOMY-2, ROOMY-3, ROOMY-4, ROOMY-6 | Implemented in source: exact residual slack classifies roomy; tight live-tests only the proven shape; topology ranking prefers a fitting fastest single GPU; batch/ubatch/slots are full recomputes; winner/baseline-won/boundary persist | Commit plus live roomy dense/MoE/recurrent proof |
-| ROOMY-5 | Implemented in source: PCI-keyed SM plus NVIDIA PCIe RX/TX and Linux process-tree CPU/RSS/I/O sampling span each separate agent phase. Link saturation is claimed only against a known measured/detected ceiling; low traffic leaves DDR/synchronization unresolved. Only imbalance between ordinary-layer owners is actionable, and telemetry cannot select a predicted-slower topology. | Capture a matched live DeepSeek-class baseline/finalist comparison and verify phase transfer samples against the external `nvidia-smi dmon` trace; add peer counters only if they change finalist selection. |
+| ROOMY-1, ROOMY-2, ROOMY-3, ROOMY-4, ROOMY-6 | Implemented in source: exact residual slack classifies roomy; tight launch remains the fit baseline but measured imbalance may authorize one same-workload topology that does not increase CPU expert offload; batch/ubatch/slots are full recomputes; winner/baseline-won/boundary and bounded rejection history persist | Commit plus live roomy dense/MoE/recurrent proof |
+| ROOMY-5 | Implemented in source: PCI-keyed SM plus NVIDIA PCIe RX/TX and Linux process-tree CPU/RSS/I/O sampling span each separate agent phase. Link saturation is claimed only against a known measured/detected ceiling; low traffic leaves DDR/synchronization unresolved. Only imbalance between ordinary-layer owners is actionable. Measured imbalance may select one predicted-equal/slower topology for contained A/B because the static prior cannot veto its own correction; live workflow evidence still decides promotion. | Capture a matched live Qwen3.8 baseline/finalist comparison and verify phase transfer samples against the external `nvidia-smi dmon` trace; add peer counters only if they change finalist selection. |
 | Exact-argv admission and long-load UX | Implemented in the working tree: a recomputed argv must receive its own allocation evidence, guarded peaks carry a placement identity, known challenger rewrite/recovery paths fail closed, lateral MoE split churn retains the exact proven placement, and 64+ GiB models warn before loading | Commit, then repeat the live MoE case after the current server is intentionally stopped |
 | MMAP-1, MMAP-2, MMAP-4 | Implemented: production/preflight/recovery/daemon share capability-aware reclaim policy; unknown/anonymous loaders fail closed; mmap remains last-resort and consent-gated | Commit plus live resident/mmap/anonymous cases |
 | MMAP-3 | Host ledger now separates exact reclaimable expert bytes from non-reclaimable runtime, KV, embeddings, and checkpoint reserve | Audit remaining backend-reported buffers/page tables/companions against live cgroup data |
 | MMAP-5 through MMAP-7 | Not complete | Requires the storage/workload and real too-large-model acceptance window |
-| HOT-1 through HOT-6 | Planned, backend-gated resident-MoE performance lane. A 2026-08-28 draft llama.cpp implementation is measured on Qwen3.8-Flash-Next but is not upstream-ready | Isolated fork audit, exact VRAM accounting, correctness and same-workload A/B on this three-GPU Q3 launch; then architecture matrix |
+| HOT-1, HOT-2 | Implemented in source: immutable capability-only recipe, exact flag probing, static eligibility, cache-scoped allocation evidence, and per-device GGUF slot ledger | Build the pinned CUDA backend and preserve a real allocation/activation trace |
+| HOT-3 | Partially implemented: aggregate decode steps/hits/misses/hit rate are required after a deterministic candidate-only canary and retained with calibration/verified evidence | Add backend per-layer uploads/evictions/warmup telemetry; collect drift evidence |
+| HOT-4, HOT-5 | Integrated into the ordinary bounded optimizer: one calculated challenger, identical agent A/B, separate material decode gain, lifecycle gates, exact-argv admission, typed negative evidence, and cache-free fallback/invalidation | Run correctness and same-workload A/B on the three-GPU Q3 launch; repeat clean reuse and forced failure |
+| HOT-6 | Not complete; automatic eligibility remains narrow (resident, p1, layer-split, separate gate/up, non-speculative MoE) | Public architecture/topology matrix before broadening support or claiming a default |
 | PIN/P3 | Deliberately not started | Blocked on appropriate hardware/model artifacts as specified below |
+
+### 2026-09-01 Qwen3.8 three-GPU saturation finding
+
+- The live cache-free baseline served at about 118 prompt tok/s and 15 decode
+  tok/s. Phase evidence recorded GPU 0 at 73% SM while GPU 2 reached only 3%; an
+  external decode sample showed the 3090 Ti at roughly 21–26% SM, the 4070 at
+  7–15%, and the 3060 at 4–10%, with host traffic concentrated on the 3090 Ti.
+- This is not proof that every GPU should show 100%. Layer split is a serial
+  pipeline for one sequence; cards used mainly for resident expert storage may
+  wait. The objective remains cold prefill, cached append, decode, foreground
+  latency, and complete agent makespan—not cosmetic aggregate utilization.
+- The old controller detected the imbalance but refused a topology experiment
+  because the allocation was labelled `tight-resident`. Fit and phase diagnosis
+  are now separated: an exact tight baseline may measure one topology that does
+  not increase CPU expert offload, and the candidate must still pass contained
+  exact admission and the normal live regression gates.
+- `hot-experts=auto` did not activate in this run. The model exposes 512 experts,
+  routes 10 per token, and leaves 31 complete routed-expert layers on host. The
+  exact residual ledger appears capable of a low-20s-slot candidate, but the
+  estimator ranked an oversized ubatch first; that candidate failed CUDA0
+  admission. Scoped negative evidence now advances rather than freezing the
+  frontier, and hot-expert exclusion reasons are retained in optimizer status.
+- 2026-09-01 Qwen3.8-Flash-Next q4_0 p1 relaunch generated a leftover cache-on
+  candidate (no leftover-VRAM exclusion; 3090 slack 531 MiB) but spent the one
+  live A/B on `kv-alternate`, which fail-closed CUDA0 1158 MiB. Schema 22 now
+  keeps a feasible `hot-experts-*` candidate as the measured auto finalist so
+  KV/topology estimates cannot consume that slot. Schema 23 applies leftover or
+  demoted cache-on from exact packed evidence onto the launch strategy itself
+  so `--moe-expert-cache` is present when auto can plan it; packed stays the
+  fail-closed fallback. Live cache-on vs packed remains unproven until that
+  relaunch.
+- Full convergence across winning topology, hot cache, batch, and slot settings
+  is still open. A named winner must become the next safe baseline and continue
+  bounded coordinate descent in a later launch/idle window until a complete
+  baseline-won decision closes the scope; do not claim fullest hardware use
+  before this exists and passes live multi-model acceptance.
 
 ### 2026-08-30 phase-aware hardening update
 
@@ -117,6 +156,264 @@ evidence.
   HOT below; neither is silently enabled from a theory-only estimate.
 
 ## Live evidence: stable serving versus proven optimization
+
+### Failed TUI Claude p4 start, 2026-09-01 15:33–15:35 UTC (inventory)
+
+User launched from the TUI after the 14:16 canonical binary
+`/home/mik/go/bin/ggrun` sha256
+`400896a2bdda39623df48c4e2baba544fae3e042bede5b46168f25688f368230`.
+Saved request: `.cache/latest-tui-launch.json` at 15:33:59Z. Handoff was
+`Backend=auto`, `ParallelSet=false`, `CtxFlag=fit`, Claude Code on, reviewer
+`qwen2b`. KV was **not** fully automatic: `KVQuality=q4_0` with
+`KVQualitySet=true`, `KVPlacement=gpu`. SWA full was true with
+`SWAFullSet=false`. Disk config still has `LLM_CTX_SIZE=131072`,
+`LLM_KV_QUALITY=bf16`, `LLM_SWA_FULL=true`.
+
+The core did **not** replay the 14:12 verified p1/q8_0/`n-cpu-moe 18` config.
+Observed live argv before death: 262144 total context, **parallel 4** (65536
+per slot), q4_0 KV, `-b 128 -ub 64`, `n-cpu-moe=19`, same hot-experts fork.
+Reviewer Qwen3.5-2B came up on `:44175` in 2s
+(`.logs/ggrun-claude-reviewer-44175.log`) and is now gone with the controller.
+
+Failure artifact:
+`.cache/memory-probes/failed-a052bb96276efe01f81a408414209d30.log` (15:35).
+Companion probe cache `.cache/0c3f1082a782.probe` (15:34:37Z) records
+`parallel=4`, `ubatch=64`, `kv_quality=q4_0`, and
+`PROBED_FREE_VRAM="0:11873 1:24112 2:8067"`. At load, CUDA2 (3060) had only
+7957 MiB free. Model buffers were 9620 / 20569 / 7182 MiB; KV+indexer+RS+compute
+on CUDA2 added another ~0.8 GiB after that. Warmup `llama_decode` aborted:
+
+```text
+ggml-cuda.cu:107: CUDA error
+CUDA error: out of memory
+current device: 2
+cuMemCreate(&handle, reserve_size, &prop, 0)
+Aborted (core dumped)
+```
+
+No `:8081` scope log was written for this start. At 15:37 UTC no ggrun or
+llama-server remains; nvidia-smi shows ~1 MiB used on all three GPUs.
+
+What this does **not** prove: that p4 is a legal automatic width for this
+model, that q4 KV was chosen by the optimizer rather than the saved/TUI
+quality row, or that the 14:12 p1 result is invalid. It does prove a
+Claude-mode TUI launch with automatic parallel and explicit q4 KV reached
+n_seq_max=4, packed CUDA2 past the VMM pool, and failed closed on device 2
+during warmup rather than serving.
+
+A second TUI launch at 15:42:24Z used the same request (q4_0 set, parallel
+unset, Claude + qwen2b). Reviewer `:36093` became healthy in 2s. The main
+load rewrote the same failed-probe path at 15:43 with identical shape
+(`n_seq_max=4`, 128/64, CUDA2 model 7182 MiB) and the same device-2
+`cuMemCreate` OOM during warmup. Controller pid 3497321 exited; GPUs idle.
+No `:8081` scope log. The 14:12 p1 plan was still not reused.
+
+### TUI Claude p1/q8 serving, 2026-09-01 15:44–15:46 UTC (inventory)
+
+Third TUI attempt after the two p4 OOMs. Request
+`.cache/latest-tui-launch.json` 15:45:15Z changed two constraints:
+`KVQuality=auto` (`KVQualitySet=true`) and **`Parallel=1` with
+`ParallelSet=true`**. Backend still `auto`, `CtxFlag=fit`, Claude + qwen2b.
+Binary still `400896a2…368230`. Controller pid 3502040 started 15:44:33.
+
+Contained loads on `:42099` then `:37295`, then serving pid 3505909 on
+`:8081`. Health ok after 22s. Scope
+`.logs/ggrun-claude-server-v2-8081-d68ded82b43cbb9e084cc767.log`. Reviewer
+Qwen3.5-2B healthy on `:46309` (`--device CUDA0`).
+
+Exact serving argv: ctx 262144, **`--parallel 1`**, `-b 2048 -ub 256`, **K/V
+q8_0**, `--kv-offload`, `--fit off`, `--n-cpu-moe 21`, split
+`0.29,0.62,0.10`, expert layers 0–14 CUDA1 / 15–21 CUDA0 / 22–26 CUDA2 /
+rest CPU, CRAM 13312, 16 checkpoints. **No `--moe-expert-cache`.** Slot idle
+at 15:46:24; nvidia-smi 8831 / 19726 / 10065 MiB used, 0% SM.
+
+This is not a replay of the 14:12 verified `n-cpu-moe 18` plan (this run
+keeps 21 CPU experts). `ggrun status` still showed the stale 11:35
+admission-only 15/118 tok/s decision at sample time. Hot-expert cache still
+unproven. The p4/q4 OOM path was avoided because parallel was pinned to 1
+and KV quality was auto (resolved q8_0), not because p4 became legal.
+
+Follow-up 15:50–15:51 UTC: after a short 8081 canary (task 232: 19-token
+prefill 56.57 tok/s, 64-token decode 21.19 tok/s; six cached prompts), the
+controller stopped `:8081`, ran a contained reload of the **same** argv on
+localhost, then clean-relaunched pid 3517482 on `:8081`. Health returned ok.
+Reviewer `:46309` stayed up. No CUDA error. Same p1/q8/`n-cpu-moe 21` shape;
+still no `--moe-expert-cache`. During the new 6924-token canary prefill,
+nvidia-smi showed 4070 SM 95% / 3090 5% / 3060 0%. This is the ordinary
+lifecycle/canary path, not a crash.
+
+Follow-up 16:10 UTC (inventory): same pid 3517482 still serving, health ok,
+no `--moe-expert-cache`. `ggrun status` now has a **this-launch** decision
+at 2026-09-01T15:52:18Z, schema 20, roomy-resident, winner `default`,
+validation still `admission-only-v1`. Baseline 17.77 decode / 152.54 prompt
+/ 18.97 mixed tok/s, 94.0 s turn. Finalist `ubatch-2048` unavailable/memory
+(CUDA0 6617 MiB deficit); probes
+`.cache/memory-probes/failed-bfc857a62bd7a4503cf1febfdb069244.log` (ubatch
+2048, cudaMalloc 6616 MiB device 0) and
+`failed-7b377248c15da43ea6baa943fcf441d2.log` /
+`failed-8aa6ab8083f9a1d1ba9c632b65e529a3.log` (ubatch 1024, 3308 MiB device
+0) match that fail-closed admission. Hot-experts excluded three times:
+`residual per-device VRAM cannot hold the minimum 10 useful slots` (device
+slack 697/186/572 MiB). Explored topologies include owner-0/1/2; none
+became the served argv. Parallel stayed 1–1 (TUI `ParallelSet=true`). Live
+Claude task 4367: 93099 prompt tokens, 90954 cached, 1271 processed at
+120.28 tok/s, 1072 generated at 12.14 tok/s (`tg_3s` ~12.1). Cumulative
+metrics 95854 uncached prompt / 552910 cached. nvidia-smi dmon during
+decode: 4070 12–19% SM / 11.2 GB, 3090 29–31% / 24.0 GB, 3060 9–10% /
+11.4 GB. This proves exact ubatch refusal and typed hot-expert skip; it
+does not prove a cache-on run or a topology win.
+
+Follow-up 17:24 UTC after the Grok working-tree rebuild: the same explicit-p1
+TUI scope remained healthy and recorded schema 22 evidence at 18.25 decode,
+153.20 prompt, 19.59 mixed tok/s, and a 94.78 s two-lane turn. The calculated
+`ubatch-2048` finalist again failed exact admission, now with a 7109 MiB CUDA0
+deficit, so the measured default was retained. This is negative feasibility
+evidence, not proof that the default is fastest. Review found that the new
+priority hot-expert candidate derived extra VRAM slack by demoting GPU expert
+layers while leaving the cache-free allocation marked exact and without moving
+the bytes into the host ledger. The ledger now conserves those bytes, labels the
+changed placement derived/non-exact, and requires contained backend admission
+to restore exact authority. The full Go and race suites pass after correction.
+
+### Full-auto TUI/core-path acceptance, 2026-09-01 14:02–14:15 UTC
+
+Canonical test binary was `/home/mik/go/bin/ggrun` (also resolved through
+`/home/mik/.local/bin/ggrun`), sha256
+`43b37899049ea2c981bba5ea97d8173e0c31a2955fe3f66ef07862a895291085`
+for the two live trials. The post-replay-fix canonical binary installed at
+14:15 UTC has sha256
+`400896a2bdda39623df48c4e2baba544fae3e042bede5b46168f25688f368230`.
+The TUI regression gate proves that an automatic backend remains `auto` in its
+`LaunchRequest`/argv while the UI may preview the installed architecture route
+and hot-expert overlay; serialized `PARALLEL=1` remains policy-auto instead of
+becoming an explicit `--parallel 1`. Explicit per-model values and the
+unsupported-route continue-once action remain authoritative.
+
+The controlled command used the active three-GPU hardware and deliberately
+neutralized old saved preferences without pinning backend, parallel, topology,
+batch, ubatch, or hot-expert slots:
+
+```text
+LLM_SERVER_NO_UPDATE_CHECK=1 LLM_CTX_SIZE=fit LLM_KV_PLACEMENT=auto \
+LLM_KV_QUALITY=auto LLM_SWA_FULL=false LLM_BACKEND=auto \
+/home/mik/go/bin/ggrun launch \
+/home/mik/ggrun-project/ggrun/models/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf \
+--worker-benchmark --support-expert off --allow-live-memory-probe
+```
+
+The core automatically routed `qwen4exp` to
+`qwen3-8-flash-next-hot-experts`, selected ctx 262144, GPU q8_0 KV, batch
+2048/ubatch 256, and p1. The cold estimate started at `--n-cpu-moe 17`. Exact
+preflight found CUDA1 compute allocation 1032 MiB short by 5 MiB, then CUDA0
+allocation 1160 MiB short by 64 MiB. Four rejected measured configurations
+were retained; monotonic expert derating converged at `--n-cpu-moe 18` and the
+final exact placement loaded in about 21 seconds. The early lateral repacks did
+not reduce total attempts and remain an optimizer-sequencing target; this run
+does not justify a guessed static margin.
+
+Persisted evidence:
+
+- `.cache/system_f10a43e9645f.cache`, system-probe schema 3: CUDA overhead
+  274/445/191 MiB and host overhead 572 MiB.
+- `.cache/memory-probes/probe-0b2d3d1a5c93bcc636cdf40167bcb0d5.json`, exact
+  guarded allocation and argv for n-cpu-moe 18.
+- `.cache/profiles/profile-18386e04f623bfc8a3873f8bf7fef7a1.json`, active
+  lifecycle with allocation, health, functional, cache, performance, and
+  active gates passed.
+- `.cache/verified-configs/verified-75d8452c6b87.json` and
+  `.cache/0a591f573712.place`, direct-start config and exact placement.
+
+The final backend allocation was model buffers CUDA0/1/2 =
+8547.97/19336.13/9488.03 MiB; the two KV regions plus recurrent state summed
+to 1156.64/2686.59/757.35 MiB; compute was 1159.25/1031.30/1024.09 MiB. Host
+model buffers were 27465.95 MiB CPU + 20969.14 MiB CUDA-host, with 937.31 MiB
+host compute. This is the first live proof that recurrent/indexer KV regions
+must be summed rather than averaged.
+
+First-run cache canary measured 6888-token cold prefill at 176.87 tok/s;
+the 64-token throughput probe measured 77.34 prompt tok/s and 23.24 decode
+tok/s. Worker cases passed 4/4 at 84.80 aggregate prompt tok/s and 23.87 decode
+tok/s. An identical second command reported verified direct reuse and measured
+176.06 tok/s cold prefill, 76.70 prompt tok/s, 24.19 decode tok/s, and 4/4
+worker cases at 84.33/23.64 tok/s. Compared with the earlier bf16/n-cpu-moe31
+baseline (~118 prompt, ~15 decode), this is a large end-to-end gain, but it is
+a combined KV-quality plus expert-residency change and does not isolate either
+factor. No `--moe-expert-cache` flags were active, so it is not evidence of a
+hot-expert-cache speedup.
+
+The repeat also exposed semantic drift in verified replay: its reconstructed
+argv omitted `--kv-offload` and `--fit off`. Backend defaults happened to keep
+GPU KV and its fit pass aborted without changing explicit placement, so the
+measured result remained equivalent, but exact replay must not depend on those
+defaults. Source now re-derives fit/KV dialect capabilities from the current
+exact backend on every verified hit; a regression asserts both flags. After
+that correction, 1,025 focused normal/race tests, 1,529 full tests, and `go
+vet ./...` pass. The post-fix canonical binary's argv-only automatic dry run
+emitted both `--kv-offload` and `--fit off`; it did not load the 84 GiB model a
+third time. The already-live allocation/canary result plus exact-argv unit gate
+cover the correction, while a later ordinary relaunch can close redundant live
+replay acceptance without spending another load solely for this boolean-field
+change.
+
+### Live Qwen3.8-Flash-Next Q3 restart, 2026-09-01 11:34–11:46 UTC (inventory)
+
+Restart after the 11:24 canonical binary
+`/home/mik/go/bin/ggrun` sha256
+`afa3f4d8679613f998c276ab5b500b6ee3072f40bde32c6e7cfc8e3950e4b7b8`.
+Controller pid 3076621 started 11:28:21 UTC from that path (cwd was
+`/home/mik/v0-leaderboard`; this does not change the serving argv). Main
+server pid 3090292 started 11:34:40 UTC, health ok, scope
+`.logs/ggrun-claude-server-v2-8081-b2f892035b9ade136376d20e.log`. Backend
+binary is
+`.src/fork-qwen3-8-flash-next-hot-experts/build-cuda/bin/llama-server`
+(`qwen3-8-flash-next-hot-experts@llama-server-4736964f7fc4b06766ff64a0`).
+Reviewer Qwen3.5-2B Q4_K_M on `:43587` (`--device CUDA0`) is healthy.
+
+Exact serving argv (0.0.0.0:8081): ctx 262144, `--parallel 1`, `-b 2048 -ub
+256`, K/V bf16, `--flash-attn on`, `--kv-offload`, `--no-mmap`, `--n-cpu-moe
+31`, split `0.29,0.61,0.10`, expert `-ot` layers 0–8 CUDA1 / 9–12 CUDA0 /
+13–16 CUDA2 / remaining `exps=CPU`, CRAM 12288, 16 checkpoints min spacing
+512. **No `--moe-expert-cache` / `--moe-expert-cache-inserts`.** The backend
+`--help` exposes both flags; they are not on this process.
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID as seen by this build (do not reuse the older
+3090-first mapping):
+
+- CUDA0 = RTX 4070 12GB (nvidia-smi bus `17:00.0`)
+- CUDA1 = RTX 3090 Ti 24GB (bus `65:00.0`)
+- CUDA2 = RTX 3060 12GB (bus `B3:00.0`)
+
+CPU at load: Intel i9-10940X, 28 threads, host ~212 GiB free in the backend
+report.
+
+`ggrun status` at 11:45 UTC (schema 20, scope
+`839ef2d103b531c08d1d7d4216e6e4d6dab255b72ff9a333a4682f82368fe951`):
+tight-resident, winner `default`, validation `admission-only-v1`, measured
+2026-09-01T11:35:06Z. Baseline 14.996 decode tok/s, 118.195 prompt tok/s,
+16.177 mixed tok/s, 99.076 s agent-turn mean (2 samples, 2 lanes). Bottleneck
+string: GPU 0 saturated (74% SM) while GPU 2 idle (4% SM). Finalists
+`ubatch-1024` and `ubatch-2048` both `unavailable` / `memory` on CUDA0 (3285
+MiB and 6569 MiB deficits); recovery ladder refused. Explored topologies
+include `moe_offload:owner-1:gpu-1`; none became the served argv. Exclusion:
+`hot-experts: exact cache-free allocation evidence is unavailable`. Device
+slack estimate 980/1355/729 MiB.
+
+Live 11:45–11:46 UTC sample (do not treat as a completed A/B):
+
+- Slot 0 task 557: cold 130,302-token Claude prompt, `n_keep=0`, cache empty.
+  Prefill progress 20,480 / 130,302 (~16%) at 117.36 tok/s after 174.51 s
+  (chunk timings 126.02 → 117.36 tok/s from 2,048 through 20,480 tokens).
+- `/metrics` still zero prompt/predicted totals; `n_decode_total` 8;
+  `requests_processing` 1; `n_tokens_max` 16384.
+- nvidia-smi dmon 3s: GPU0 4070 SM 87–95% / 9007 MiB / ~60 W / rxpci up to
+  ~11.7 GB/s; GPU1 3090 Ti SM 5–10% / 20274 MiB / 118–128 W; GPU2 3060 SM
+  0–32% / 10637 MiB / ~40–46 W.
+
+What this does **not** prove: a topology win, a hot-expert cache-on run, or
+that the 11:24 optimizer changes selected a new finalist. This 8081 argv is
+the previous default placement. Prefill ~118 tok/s matches the stored
+baseline; decode is not in this sample yet. Hot-expert capability is present
+in the fork binary and absent from the served command.
 
 ### Live Qwen3.8-Flash-Next qwen4exp cache review, 2026-08-27 22:47–23:25 UTC
 
@@ -585,8 +882,11 @@ again without a scope change, reset, or maintenance request.
   agent turns, foreground progress, long-context stability, clean relaunch, and
   exact identity. OOM/canary failure revokes the winner.
 - [ ] **PERF-8 — reuse and continue.** Start immediately from a valid winner.
-  Otherwise start the safe estimate and bound launch-time work; continue deeper
-  search only in an explicit maintenance/idle window.
+  Otherwise start the safe estimate and bound launch-time work. A promoted
+  coordinate becomes the next safe baseline; continue topology → residency/hot
+  experts → batch/ubatch → useful slots in later launches or an explicit idle
+  window until a baseline-won comparison proves convergence. Prevent cycles by
+  retaining scoped measured edges and accumulated typed rejections.
 
 ### Candidate dimensions
 
@@ -650,27 +950,64 @@ numbers establish a candidate, not a ggrun default: the PR is draft, currently
 wires only a separate gate/up SiLU layout, and bypasses multi-token decode and
 prefill.
 
-- [ ] **HOT-1 — isolated capability.** Audit and pin a reviewed upstream commit
+- [x] **HOT-1 — isolated capability.** Audit and pin a reviewed upstream commit
   in a separate backend fork. Detect the exact cache flags, CUDA/model layout,
   decode shape, and disabled-path identity. Unsupported models/backends produce
-  no candidate.
-- [ ] **HOT-2 — exact cache ledger.** Derive bytes per expert slot and per
+  no candidate. Implemented as the non-routed `hot-experts` recipe pinned to
+  `csantiago78/llama.cpp@bccbacdb8945680f1cfc7e6bffd1e59014705750`;
+  install/update/rollback all re-probe both required flags. The same reviewed
+  commit is embedded as a source-feature overlay: the TUI can compose it onto
+  an exact pinned llama.cpp-derived architecture fork in a separate checkout,
+  retain base-patch order, validate the composite, and reuse it by exact base
+  identity. Patch conflicts and binary-only/divergent forks fail closed rather
+  than attempting an unsafe automatic merge.
+- [x] **HOT-2 — exact cache ledger.** Derive bytes per expert slot and per
   host-expert layer from GGUF/backend evidence. Reserve KV, graphs, checkpoints,
   prompt cache, companions, allocator growth, and device headroom before
   calculating any slot count; never copy the reference value 48 into policy.
+  The slot ceiling is the tightest physical router GPU after an exact
+  cache-free allocation, includes the backend's dummy slice/device table and
+  alignment guard, and is capped by the model's expert count.
 - [ ] **HOT-3 — temporal evidence.** Record per-layer cache hits, misses,
   uploads, evictions, warmup, and drift separately for prefill/decode and p1/p2.
   Do not persist or promote a global static hot list merely because one corpus
-  was skewed.
+  was skewed. Aggregate steps/hits/misses/hit rate are now mandatory after a
+  256-token deterministic decode canary and persist with the finalist; the
+  reference fork does not yet expose the remaining per-layer/upload/eviction
+  counters, and p2 is therefore still ineligible.
+  - [ ] Add a second reviewed ggrun overlay patch after the pinned upstream
+    cache commit which emits bounded structured heat epochs: per layer/expert
+    access count, hit/miss, upload/eviction, and reuse-distance/window data.
+    Never log prompts or token contents.
+  - [ ] Merge epochs atomically under an exact model fingerprint plus workload
+    class. Keep recent windows and a decayed EWMA instead of one immortal
+    cumulative count, while retaining total observations and run count for
+    confidence. Backend build, quant/layout, and expert-count mismatches fail
+    closed; hardware placement remains a consumer, not part of expert identity.
+  - [ ] Feed the heat profile into candidate generation only. It may seed LRU
+    warmup and rank selective expert-range mmap/mlock/pinning candidates, but
+    each candidate must still pass exact byte/page accounting and the ordinary
+    agent-workload A/B. Static top-N frequency is not promotion evidence.
 - [ ] **HOT-4 — one bounded A/B.** Compare cache-off with one calculated slot
   budget on identical cold-prefill, cached append, decode, mixed foreground,
   and workflow makespan. Require coherent output, no missing/double-counted
   expert contribution, clean relaunch, and material decode plus end-to-end gain
-  without a prefill/cache regression.
+  without a prefill/cache regression. The source path now enforces this through
+  the standard two-sample agent screen, a 3% workflow and separate 3% decode
+  margin, 5% phase-regression ceiling, and normal functional/cache/relaunch
+  gates; live hardware acceptance remains open.
 - [ ] **HOT-5 — self-disable.** Cache allocation failure, unsupported graph,
   low hit rate, upload/synchronization regression, OOM, multi-token/speculative
   incompatibility, or correctness drift falls back to the exact stock argv.
-  Failed evidence is scoped and finite.
+  Failed evidence is scoped and finite. Source now rejects p2/spec/mmap/fused
+  and unproven layouts, validates the backend's exact startup allocation, and
+  records completed-canary telemetry failures as typed negative evidence.
+  Runtime activation or functional/cache lifecycle failure erases both the
+  verified config and its original cache-free calibration decision, restores
+  the identical cache-free strategy, and records a scoped negative only after
+  that baseline itself reaches `StateActive`. Clean-relaunch recovery returns
+  its actual strategy/argv, so a stripped cache cannot be mislabeled as the
+  measured cache-on winner.
 - [ ] **HOT-6 — public generalization.** Validate this three-GPU
   Qwen3.8-Flash-Next Q3 case first, then separate gate/up, fused gate-up,
   heterogeneous CUDA, single GPU, p2, and at least one non-Qwen architecture.
@@ -686,6 +1023,12 @@ batch/placement path until a backend exposes a proven prefill mechanism.
 This is the existing file-backed CPU-expert path when non-reclaimable working
 state fits but resident CPU expert bytes do not. It follows every normal
 resident plan and precedes selective pinning.
+
+The bounded per-layer/per-expert heat epochs from HOT-3 are shared evidence for
+the later selective mmap/mlock lane. They can identify expert tensor slices
+worth retaining in RAM or VRAM, but page alignment, tensor contiguity, transfer
+bandwidth, temporal reuse, and measured tail latency remain mandatory: an
+all-time popularity ranking alone must never decide residency.
 
 - [ ] **MMAP-1 — re-audit current main.** Production, preflight, daemon, and
   recovery must share `memory.high` reclaim and whole-host `memory.max` rules.

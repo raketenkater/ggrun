@@ -31,6 +31,10 @@ ggrun model.gguf --calibrate auto   # default: bounded search on a cold scope, d
 ggrun model.gguf --calibrate on     # wider explicit screen; its result stays explicit-only
 ggrun model.gguf --calibrate off    # serve the stable planner estimate without performance search
 
+# Experimental resident-MoE hot-expert cache
+ggrun backend feature install hot-experts --base my-model-fork
+ggrun model.gguf --hot-experts auto
+
 # Vision
 ggrun model.gguf --vision
 ggrun model.gguf --mmproj /path/to/mmproj.gguf
@@ -82,6 +86,72 @@ The configured `ram_limit_percent` (95 by default), `--ram-budget`, and
 `--ram-headroom` determine the backend cgroup's `MemoryHigh`/`MemoryMax` limit.
 CUDA pinned host allocations are disabled during probes. A host-memory breach
 kills the backend scope, not the rest of the server.
+
+## Experimental hot-expert cache
+
+The reviewed `hot-experts` source feature is an isolated build of the draft
+llama.cpp GPU LRU cache for routed experts that otherwise execute from host
+memory. It is a performance experiment, not a new model architecture. From the
+TUI Settings or model config screen, set `Hot experts` to `auto` for an
+opportunistic measured candidate, or `on` to require an optimizer-sized cache-on
+launch. Only `auto` may restore the stable cache-free baseline after rejection.
+A positive integer still requests that exact count from the CLI. On the first
+confirmed launch of an MoE, ggrun offers a cancel-first, one-time build for
+the model's installed architecture fork. Later launches reuse the validated
+composite automatically.
+
+The same flow is available directly:
+
+```bash
+ggrun backend feature install hot-experts --base glm5next
+ggrun model.gguf --hot-experts auto
+```
+
+For a stock/mainline-compatible model the TUI can install the standalone
+`hot-experts` recipe. For a source-built fork it creates a helper-only composite
+such as `glm5next-hot-experts`, preserving the exact base loader and route.
+The active base checkout/binary is never modified. Patch conflict, compile
+failure, missing CUDA capability, missing model architecture, or absent cache
+flags refuses the composite and leaves the base available. A binary-only or
+substantially divergent fork cannot be made compatible mechanically; it needs a
+reviewed family-specific adapter. See [fork backend composition](fork-backends.md).
+
+`auto` turns the cache on as a first-class coordinate. The packed GPU-expert
+layout stays the cache-free baseline. After that exact baseline has allocation
+evidence, the optimizer calculates one useful cache size — from leftover VRAM
+if it is enough, otherwise by demoting GPU expert layers until a useful cache
+fits — and compares that complete challenger with the same two-sample agent
+workload. The cache wins only with material pure-decode and end-to-end
+workflow gains, no material prefill/mixed regression, non-zero consistent
+backend hit telemetry, and the normal functional, prompt-cache, lifecycle,
+and clean-relaunch gates. A baseline win is remembered, so ggrun does not
+reload the model to repeat the same unsuccessful experiment every launch.
+
+Automatic eligibility is intentionally narrow: a resident CPU-offloaded MoE,
+one server slot, layer split, complete separate gate/up/down expert tensors,
+no speculative companion, and no mmap last-resort placement. The reference
+backend has additional graph-time restrictions; runtime hit telemetry plus the
+identical A/B is the authority when GGUF metadata cannot prove them statically.
+Prefill continues on the normal batch/ubatch/placement path because this cache
+is decode-only. The current reference cache also bypasses multi-token decode,
+so ggrun evaluates native MTP/speculation and hot experts as separate candidates
+rather than claiming both benefits at once.
+
+`--hot-experts off` disables the lane. `--hot-experts on` requires cache-on but
+lets the optimizer choose its size. A positive integer requests that exact
+number of cache slots per eligible layer and fails closed unless an exact
+cache-free allocation proves it fits; it cannot exceed the model's expert
+count. The native `--moe-expert-cache` spelling before `--` is accepted as an
+alias, but raw cache flags after `--` are rejected because they would bypass
+the per-device VRAM ledger. Insertions remain fixed at two per decode step so
+the first measured integration changes only one dimension.
+
+This remains experimental until the public model/hardware matrix in
+[the core optimizer tracker](core-standard-launch-todos.md#hot--dynamic-vram-expert-cache-for-resident-cpu-offloaded-moes)
+is complete. On activation, telemetry, correctness, or memory failure, automatic
+mode invalidates the cache-on evidence and restores the exact cache-free plan.
+A deterministic failure is remembered only after that cache-free plan passes
+the same lifecycle, preventing both false attribution and repeated long reloads.
 
 ### KV cache types
 

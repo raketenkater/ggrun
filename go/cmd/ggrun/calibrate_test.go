@@ -34,6 +34,50 @@ func calibrateTestSetup(sizeMB int) (*launchRequest, *config.Config, *placement.
 	return req, cfg, model, be, caps
 }
 
+func TestHotExpertFailureCanRecoverOriginalCalibrationScope(t *testing.T) {
+	req, _, model, be, caps := calibrateTestSetup(64000)
+	req.HotExperts = "auto"
+	base := &placement.Strategy{
+		Type: placement.MoEOffload, ContextSize: 32768, Parallel: 1,
+		BatchSize: 2048, UBatchSize: 256, KVPlacement: "gpu", KVQuality: "high",
+		TensorSplit: []float64{0.5, 0.5}, OTString: "exps=CPU", NCPUMoE: 20,
+	}
+	hot := *base
+	hot.TensorSplit = append([]float64(nil), base.TensorSplit...)
+	hot.HotExpertCacheSlots = 8
+	hot.HotExpertCacheInserts = 2
+	hot.HotExpertCacheLayers = 20
+	hot.HotExpertCacheVRAMByGPU = map[int]int{0: 1024, 1: 512}
+
+	baseKey := calibrationScopeKey(req, model, be, caps, base)
+	hotKey := calibrationScopeKey(req, model, be, caps, &hot)
+	if baseKey == hotKey {
+		t.Fatal("cache-on winner shared the cache-free calibration scope")
+	}
+	recovered := placement.WithoutHotExpertCache(&hot)
+	if got := calibrationScopeKey(req, model, be, caps, recovered); got != baseKey {
+		t.Fatalf("derived fallback scope=%s, want original %s", got, baseKey)
+	}
+}
+
+func TestOptimizationDecisionRetainsHotExpertFinalistTelemetry(t *testing.T) {
+	base := &placement.Strategy{Residency: placement.ResidencyRoomy}
+	hot := &placement.Strategy{
+		HotExpertCacheSlots: 8, HotExpertCacheSteps: 1024,
+		HotExpertCacheHits: 75, HotExpertCacheMisses: 25, HotExpertCacheHitRate: 75,
+	}
+	decision := &placement.CalibrationDecision{Winner: "default"}
+	annotateOptimizationDecision(decision,
+		[]placement.CalibrationCandidate{{Name: "default", Strategy: base}, {Name: "hot-experts-8", Strategy: hot}},
+		[]calibrationMeasurement{{Name: "default", Strategy: base}, {Name: "hot-experts-8", Strategy: hot}},
+	)
+	if decision.FinalistOutcome != "baseline-won" || decision.FinalistHotExpertSteps != 1024 ||
+		decision.FinalistHotExpertHits != 75 || decision.FinalistHotExpertMisses != 25 ||
+		decision.FinalistHotExpertHitRate != 75 {
+		t.Fatalf("decision lost hot-expert evidence: %+v", decision)
+	}
+}
+
 func TestCalibrationAutoOwnsBoundedStandardLaunchSearch(t *testing.T) {
 	req, cfg, model, be, caps := calibrateTestSetup(60 * 1024) // 60 GB MoE
 	strategy := &placement.Strategy{Type: placement.MoEOffload, KVPlacement: "cpu", NCPUMoE: 40}
@@ -123,6 +167,83 @@ func TestAutomaticCalibrationUsesRankedCostNotCandidateName(t *testing.T) {
 	}
 }
 
+func TestAutomaticCalibrationPrefersHotExpertsOverCheaperKVAlternate(t *testing.T) {
+	base := &placement.Strategy{Type: placement.MoEOffload, NCPUMoE: 20}
+	hot := &placement.Strategy{Type: placement.MoEOffload, NCPUMoE: 20, HotExpertCacheSlots: 12}
+	kv := &placement.Strategy{Type: placement.MoEOffload, NCPUMoE: 16, KVPlacement: "cpu"}
+	got := selectAutomaticCalibrationFinalist([]placement.CalibrationCandidate{
+		{Name: "default", Strategy: base, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 1.0}},
+		{Name: "kv-alternate", Strategy: kv, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 0.4}},
+		{Name: "hot-experts-12", Strategy: hot, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 0.99}},
+	}, func(strategy *placement.Strategy) bool { return strategy == kv })
+	if len(got) != 2 || got[1].Name != "hot-experts-12" {
+		t.Fatalf("auto hot-experts lost the live A/B slot: %+v", got)
+	}
+
+	plan := selectAutomaticCalibrationAdmissionPlan([]placement.CalibrationCandidate{
+		{Name: "default", Strategy: base, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 1.0}},
+		{Name: "kv-alternate", Strategy: kv, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 0.4}},
+		{Name: "ubatch-2048", Strategy: &placement.Strategy{Type: placement.MoEOffload, UBatchSize: 2048}, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 0.5}},
+		{Name: "hot-experts-12", Strategy: hot, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 0.99}},
+	}, func(strategy *placement.Strategy) bool { return strategy == kv }, calibrationAutoMaxCandidates)
+	if len(plan) < 2 || plan[1].Name != "hot-experts-12" {
+		t.Fatalf("admission plan did not measure hot-experts first: %+v", plan)
+	}
+
+	infeasible := selectAutomaticCalibrationFinalist([]placement.CalibrationCandidate{
+		{Name: "default", Strategy: base, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 1.0}},
+		{Name: "ubatch-2048", Strategy: &placement.Strategy{Type: placement.MoEOffload, UBatchSize: 2048}, Estimate: placement.CandidateEstimate{Feasible: true, AgentCost: 0.4}},
+		{Name: "hot-experts-12", Strategy: hot, Estimate: placement.CandidateEstimate{Feasible: false, AgentCost: 0.99}},
+	}, nil)
+	if len(infeasible) != 2 || infeasible[1].Name != "hot-experts-12" {
+		t.Fatalf("infeasible estimate dropped the requested cache-on finalist: %+v", infeasible)
+	}
+}
+
+func TestAdmittedHotExpertsWinsOverFasterPackedBaseline(t *testing.T) {
+	packed := calibrationMeasurement{
+		Name: "default", Strategy: &placement.Strategy{},
+		Result: &benchmark.Result{
+			GenTPS: 20, PromptTPS: 150, GenTokens: 64, PromptTokens: 128, GenTimeS: 3,
+		},
+		Score: 1,
+	}
+	hot := calibrationMeasurement{
+		Name:     "hot-experts-12",
+		Strategy: &placement.Strategy{HotExpertCacheSlots: 12},
+		Result: &benchmark.Result{
+			GenTPS: 19, PromptTPS: 148, GenTokens: 64, PromptTokens: 128, GenTimeS: 3.2,
+		},
+		Score: 0.94,
+	}
+	if !calibrationCandidateBetter(hot, packed) {
+		t.Fatal("admitted cache-on lost to packed GPU experts on token rate")
+	}
+	hot.Result.GenTPS = 10
+	if calibrationCandidateBetter(hot, packed) {
+		t.Fatal("phase-regressed cache-on was promoted")
+	}
+}
+
+func TestKeepHotExpertAutoFinalistBlocksKVReplacement(t *testing.T) {
+	candidates := []placement.CalibrationCandidate{
+		{Name: "default"},
+		{Name: "hot-experts-12"},
+		{Name: "kv-alternate"},
+	}
+	if !keepHotExpertAutoFinalist(candidates, placement.CalibrationCandidate{Name: "kv-alternate"}) {
+		t.Fatal("kv-alternate was allowed to replace the hot-expert auto finalist")
+	}
+	if keepHotExpertAutoFinalist(candidates, placement.CalibrationCandidate{Name: "hot-experts-24"}) {
+		t.Fatal("a hotter cache-on candidate was blocked")
+	}
+	if keepHotExpertAutoFinalist([]placement.CalibrationCandidate{
+		{Name: "default"}, {Name: "kv-alternate"},
+	}, placement.CalibrationCandidate{Name: "moe-owner-1"}) {
+		t.Fatal("non-hot-expert finalist was frozen")
+	}
+}
+
 func TestCalibrationCandidateFilterKeepsBaselineAndDropsRejectedArgv(t *testing.T) {
 	base := &placement.Strategy{BatchSize: 128}
 	rejected := &placement.Strategy{BatchSize: 256}
@@ -137,14 +258,14 @@ func TestCalibrationCandidateFilterKeepsBaselineAndDropsRejectedArgv(t *testing.
 	}
 }
 
-func TestTelemetryDirectedFinalistCannotReclassifyTightLaunch(t *testing.T) {
+func TestTelemetryDirectedFinalistRequiresCompleteInputsAndDoesNotMutateTightLaunch(t *testing.T) {
 	strategy := &placement.Strategy{
 		Type: placement.MoEOffload, Residency: placement.ResidencyTight,
 		ResourceLedger: &placement.ResourceLedger{Exact: true, Fits: true},
 	}
 	signal := placement.DeviceBalanceSignal{Observed: true, Imbalanced: true, BusyGPU: 0, IdleGPU: 1, BusySM: 98, IdleSM: 1}
 	if candidate, ok := telemetryDirectedCalibrationFinalist(nil, nil, nil, nil, nil, strategy, signal, nil); ok {
-		t.Fatalf("tight launch escaped its proven topology boundary: %+v", candidate)
+		t.Fatalf("incomplete telemetry request produced a candidate: %+v", candidate)
 	}
 	if strategy.Residency != placement.ResidencyTight {
 		t.Fatalf("telemetry mutated residency to %q", strategy.Residency)
@@ -348,6 +469,22 @@ func TestCalibrationScoreUsesSerialRequestWallTime(t *testing.T) {
 	invalid := &benchmark.Result{GenTPS: 100, PromptTPS: 0, GenTokens: 256, PromptTokens: 100, GenTimeS: 1}
 	if got := calibrationScore(invalid, baseline); got != 0 {
 		t.Fatalf("incomplete candidate received score %v", got)
+	}
+}
+
+func TestHotExpertCandidateNeedsMaterialDecodeAndWorkflowGain(t *testing.T) {
+	baseStrategy := &placement.Strategy{}
+	hotStrategy := &placement.Strategy{HotExpertCacheSlots: 8}
+	baseline := &benchmark.Result{GenTPS: 100, PromptTPS: 100, MixedGenTPS: 100}
+	candidate := &benchmark.Result{GenTPS: 102, PromptTPS: 100, MixedGenTPS: 100}
+	current := calibrationMeasurement{Strategy: baseStrategy, Result: baseline, Score: 1}
+	challenger := calibrationMeasurement{Strategy: hotStrategy, Result: candidate, Score: 1.10}
+	if calibrationCandidateBetter(challenger, current) {
+		t.Fatal("decode-only cache was promoted from workflow gain without material decode gain")
+	}
+	candidate.GenTPS = 104
+	if !calibrationCandidateBetter(challenger, current) {
+		t.Fatal("hot-expert candidate with material decode and workflow gains was rejected")
 	}
 }
 
@@ -591,7 +728,11 @@ func TestCalibrationPlanCachesUnavailableAdmissionWithoutPerformancePromotion(t 
 	if _, err := placement.SaveCalibrationDecision(cfg.CacheDir, decision); err != nil {
 		t.Fatal(err)
 	}
-	if got := calibrationPlan(req, cfg, model, be, caps, strategy); len(got) != 0 {
+	got := calibrationPlan(req, cfg, model, be, caps, strategy)
+	if len(got) < 2 {
+		t.Fatalf("one failed coordinate froze the remaining bounded frontier: %+v", got)
+	}
+	if got[1].Name == first[1].Name {
 		t.Fatalf("identical failed admission was scheduled again: %+v", got)
 	}
 	applied := applyCalibrationDecision(req, cfg, model, be, caps, strategy)

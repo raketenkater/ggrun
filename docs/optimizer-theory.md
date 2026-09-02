@@ -367,6 +367,36 @@ finishing this optimizer lane.
 
 ## Hardware evidence available now
 
+### Failed TUI Claude p4 start, 2026-09-01 15:33–15:35 UTC (inventory)
+
+TUI launch of Qwen3.8-Flash-Next Q3 with binary `400896a2…368230`. Request
+kept `Backend=auto` and unset parallel, but pinned GPU `q4_0` KV. Core chose
+p4 / 262k / 128/64 / `n-cpu-moe 19` instead of replaying the 14:12 verified
+p1 q8_0 `n-cpu-moe 18` plan. CUDA2 (3060) had only ~8 GiB free at probe;
+warmup OOM on device 2 (`cuMemCreate`, core dumped). Reviewer `:44175`
+started then died with the controller. GPUs idle afterward. Artifact:
+`.cache/memory-probes/failed-a052bb96276efe01f81a408414209d30.log`. Not a
+p4 acceptance; the 14:12 p1 auto path remains the last healthy measured
+config.
+
+### Live Qwen3.8-Flash-Next Q3 restart, 2026-09-01 11:34–11:46 UTC (inventory)
+
+Post-restart serving on `:8081` after binary
+`afa3f4d8679613f998c276ab5b500b6ee3072f40bde32c6e7cfc8e3950e4b7b8` (installed
+11:24 UTC). Scope
+`.logs/ggrun-claude-server-v2-8081-b2f892035b9ade136376d20e.log`. Model
+`Qwen3.8-Flash-Next-UD-Q3_K_XL`, backend
+`fork-qwen3-8-flash-next-hot-experts` (flags exist in `--help`; **not**
+enabled on argv). Ctx 262144, p1, `2048/256`, bf16 KV, 31 CPU MoE, split
+`0.29,0.61,0.10`, expert layers 0–8 CUDA1 / 9–12 CUDA0 / 13–16 CUDA2.
+
+This build’s PCI_BUS_ID map is CUDA0=4070, CUDA1=3090 Ti, CUDA2=3060.
+Status remains `admission-only-v1` default: 15.0 decode / 118.2 prefill /
+99.1 s turn. ubatch 1024/2048 refused on CUDA0; hot-experts excluded for
+missing cache-free allocation evidence. Live task 557 is a cold 130k-token
+prefill at ~117–126 tok/s with 4070 SM 87–95% and 3090 Ti 5–10%. Inventory
+only — no topology or cache-on promotion.
+
 ### Live Qwen3.8-Flash-Next qwen4exp cache review, 2026-08-27 22:47–23:25 UTC
 
 The afternoon qwen4exp placement failure is resolved and that launch is the
@@ -524,6 +554,18 @@ Do not turn the first utilization sample into any of those claims.
    correctness gates before ggrun can generate a candidate.
 
 ## Ordered next work
+
+### 2026-09-01 Grok handoff verification
+
+The hot-expert priority challenger may trade some packed GPU expert layers for
+a temporal expert cache, but this changes residency. It must therefore transfer
+the demoted tensor bytes from each device ledger into the host ledger and lose
+`Exact` authority until contained admission observes the new allocation. The
+reviewed working tree now enforces that conservation rule and tests that later
+frontier analysis cannot reuse cache-free allocation authority. The live p1
+TUI run retained its healthy baseline after `ubatch-2048` failed exact CUDA0
+admission; no hot-expert cache was activated, so that run is not cache efficacy
+evidence.
 
 ### P0 — make the correction safe to hand off
 

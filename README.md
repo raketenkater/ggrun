@@ -70,19 +70,14 @@ when the profile is absent, stale, incomplete, or corrupt.
   bandwidth, and backend capabilities.
 - Can measure each NVIDIA GPU's pinned host-to-device bandwidth and use the
   hardware-matched result for MoE placement and recommendation speed estimates.
-- Checks model, KV-cache, and safety-headroom memory before it starts a server.
+- Checks that the plan fits the VRAM and RAM actually available, minus any
+  headroom you set, before it starts a server.
 - Supports dense and MoE models across single GPU, multi-GPU, CPU, and RAM
   offload configurations.
-- Measures a bounded set of safe performance options with `--ai-tune` and
-  preserves the winning configuration for the same setup.
-- Makes the ordinary TUI/direct launch converge from a stable placement estimate
-  toward a faster measured whole configuration for its agent workload. The
-  automatic path computes the complete safe neighbor set, then live-compares
-  only the baseline and one highest-confidence finalist; the wider sweep stays
-  an explicit maintenance operation. It measures repeated cache-backed turns
-  plus mixed prefill/decode and promotes only after contained admission,
-  branch/replay, lifecycle, and clean-relaunch gates. Exact evidence—including
-  a measured result where the stable baseline won—is reused on the next launch.
+- On an ordinary TUI or CLI launch, first finds a configuration that fits,
+  then measures whether one faster complete configuration is better for the
+  agent workload. It keeps that result only when the faster plan stays stable,
+  and reuses it on the next launch of the same setup.
 - Prints an informational warning before the first load of a very large model,
   including the startup bound and the possibility of a bounded measured retry.
 - Keeps model downloads, recommendations, launches, and the generated command
@@ -133,7 +128,7 @@ decode results from the dated, reproducible runs in
 [docs/launch-performance.md](docs/launch-performance.md), not a promise that
 every machine gets the same speedup.
 
-Default placement, 32k context, without `--ai-tune`:
+Default placement, 32k context, 2026-06-22 retest:
 
 | Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun |
 |---|---:|---:|---:|
@@ -142,23 +137,23 @@ Default placement, 32k context, without `--ai-tune`:
 | Qwen3.5-122B-A10B UD-IQ4_XS | 13.5 | 20.97 | 22.9 tok/s |
 | MiniMax-M3 UD-IQ3_XXS | could not load | could not load | 5.59 tok/s |
 
-The interesting result for me is not only the percentage: MiniMax-M3 spans VRAM
-and RAM and actually runs. A separate DeepSeek-V4-Flash test at 1M context and
-parallel 4 completed a 60,020-token request plus three concurrent requests at
-5.88 decode tok/s without an OOM or restart. Full model, quant, backend, prefill,
-memory, and load-test details are in the benchmark document.
+On that run, MiniMax-M3 spanned VRAM and RAM and actually loaded. A separate
+DeepSeek-V4-Flash test at 1M context and parallel 4 completed a 60,020-token
+request plus three concurrent requests at 5.88 decode tok/s without an OOM or
+restart. Full model, quant, backend, prefill, memory, and load-test details are
+in the benchmark document.
 
 The goal is the fastest **stable** plan for the requested workload, not maximum
-VRAM fill or one lucky short benchmark. The default is a conservative, measured
-placement heuristic, and `--ai-tune` explores a bounded set of flags for the
-installed backend.
+VRAM fill or one lucky short benchmark. The default launch does that measurement
+itself.
 
 ## Useful commands
 
 ```bash
 ggrun model.gguf --dry-run       # print the backend command, do not launch
 ggrun model.gguf --benchmark     # load, measure, and exit
-ggrun model.gguf --ai-tune       # measure safe flag variants and cache the winner
+ggrun model.gguf --calibrate off # serve the stable plan without extra measurement
+ggrun model.gguf --ai-tune       # optional extra flag variants, not the default optimizer
 ggrun model.gguf --claude-code   # launch a local Claude Code workflow
 ggrun model.gguf --spec auto     # use only a validated speculative profile
 ggrun spec-test model.gguf --ctx 1048576 --parallel 4

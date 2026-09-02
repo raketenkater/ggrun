@@ -916,6 +916,31 @@ func TestBuildLaunchRequestAutoSelectsInstalledModelRoute(t *testing.T) {
 	}
 }
 
+func TestBuildLaunchRequestKeepsAutomaticBackendInCoreLauncher(t *testing.T) {
+	m := Model{
+		models: []ModelItem{{
+			Name:         "MiniMax-M3.gguf",
+			Path:         "/models/minimax.gguf",
+			Architecture: "minimax-m3",
+			AutoBackend:  "minimax-m3",
+		}},
+		selectedModel: 0,
+		backend:       "auto",
+		kvPlacement:   "auto",
+		ctxMode:       "fit",
+	}
+	if got := m.effectiveBackend(); got != "minimax-m3" {
+		t.Fatalf("automatic preview backend=%q, want minimax-m3", got)
+	}
+	req := m.buildLaunchRequest()
+	if req == nil || req.Backend != "auto" {
+		t.Fatalf("automatic TUI launch pinned the preview backend: %#v", req)
+	}
+	if joined := strings.Join(req.LaunchArgs(), " "); strings.Contains(joined, "--backend") {
+		t.Fatalf("automatic TUI launch emitted an explicit backend: %q", joined)
+	}
+}
+
 func TestMissingModelBackendRecipeConfirmsInstallAndCarriesLaunch(t *testing.T) {
 	m := Model{
 		screen: ScreenModelConfig,
@@ -1019,6 +1044,110 @@ func TestMissingIKOnlyRecipeBypassOverridesAutoBackend(t *testing.T) {
 	}
 }
 
+func TestHotExpertsTUIOffersIsolatedFeatureBuildForRoutedMoE(t *testing.T) {
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	basePath := filepath.Join(appHome, "glm-server")
+	if err := os.WriteFile(basePath, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := backends.Backend{
+		Tag: "glm5next", Path: basePath, RouteArch: "glm5next",
+		GitURL: "https://github.com/eauchs/llama.cpp.git", Branch: "glm5next/add-glm-5.3-flash",
+		Commit: strings.Repeat("a", 40),
+	}
+	if err := backends.Save([]backends.Backend{base}); err != nil {
+		t.Fatal(err)
+	}
+	m := Model{
+		screen: ScreenPrelaunch, hotExperts: "auto", backend: "auto", ctxMode: "fit", kvPlacement: "auto",
+		models: []ModelItem{{
+			Name: "GLM.gguf", Path: "/models/glm.gguf", Architecture: "glm5next", IsMoE: true, AutoBackend: base.Tag,
+		}},
+		selectedModel: 0,
+	}
+	m.input = textinput.New()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil || m.screen != ScreenChoice || m.choiceCursor != 0 {
+		t.Fatalf("hot-experts provisioning must stop at cancel-first choice: screen=%v cursor=%d cmd=%v", m.screen, m.choiceCursor, cmd)
+	}
+	if got := strings.Join(m.choiceOptions, "\n"); !strings.Contains(got, "Build isolated hot-experts backend once") {
+		t.Fatalf("feature build choice missing: %q", got)
+	}
+	m.choiceCursor = 1
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd == nil || m.launchRequest == nil {
+		t.Fatalf("confirmed feature build must quit to the backend CLI: req=%#v cmd=%v", m.launchRequest, cmd)
+	}
+	wantArgs := "feature install hot-experts --base glm5next"
+	if got := strings.Join(m.launchRequest.BackendArgs, " "); got != wantArgs {
+		t.Fatalf("feature install args=%q, want %q", got, wantArgs)
+	}
+	if m.launchRequest.Backend != "glm5next-hot-experts" || m.launchRequest.ModelPath != "/models/glm.gguf" {
+		t.Fatalf("post-install request lost backend/model identity: %#v", m.launchRequest)
+	}
+}
+
+func TestHotExpertsTUIReusesExactInstalledComposite(t *testing.T) {
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	basePath := filepath.Join(appHome, "base-server")
+	featurePath := filepath.Join(appHome, "feature-server")
+	for _, path := range []string{basePath, featurePath} {
+		if err := os.WriteFile(path, []byte("binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := backends.Backend{Tag: "glm5next", Path: basePath, RouteArch: "glm5next", GitURL: "https://example.test/llama.cpp.git", Commit: strings.Repeat("b", 40)}
+	feature := backends.Backend{Tag: "glm5next-hot-experts", Path: featurePath, RouteArch: base.RouteArch, HelperOnly: true, BaseTag: base.Tag, Features: []string{"hot-experts"}}
+	if err := backends.Save([]backends.Backend{base, feature}); err != nil {
+		t.Fatal(err)
+	}
+	m := Model{
+		hotExperts: "auto", backend: "auto", selectedModel: 0,
+		models: []ModelItem{{Name: "GLM.gguf", Path: "/models/glm.gguf", IsMoE: true, AutoBackend: base.Tag}},
+	}
+	if got := m.effectiveBackend(); got != feature.Tag {
+		t.Fatalf("effective backend=%q, want installed exact composite %q", got, feature.Tag)
+	}
+	if req := m.buildLaunchRequest(); req == nil || req.Backend != "auto" || strings.Contains(strings.Join(req.LaunchArgs(), " "), "--backend") {
+		t.Fatalf("automatic hot-expert preview must remain core-selected at launch: %#v", req)
+	}
+	if m.openHotExpertFeatureInstall() {
+		t.Fatal("installed composite must be reused without another build prompt")
+	}
+
+	m.models[0].IsMoE = false
+	if got := m.effectiveBackend(); got != base.Tag {
+		t.Fatalf("dense model incorrectly selected MoE feature backend %q", got)
+	}
+}
+
+func TestInitialModelTreatsSerializedParallelOneAsAutomatic(t *testing.T) {
+	appHome := filepath.Join(t.TempDir(), "ggrun")
+	cfgDir := filepath.Join(appHome, ".config")
+	modelDir := filepath.Join(appHome, "models")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config")
+	doc := "MODEL_DIR=\"" + modelDir + "\"\nBACKEND=auto\nPARALLEL=1\n"
+	if err := os.WriteFile(cfgPath, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_CONFIG", cfgPath)
+	t.Setenv("LLM_APP_HOME", appHome)
+	m := InitialModel()
+	if m.parallel != "1" || m.parallelSet {
+		t.Fatalf("serialized policy default must remain automatic: value=%q explicit=%v", m.parallel, m.parallelSet)
+	}
+}
+
 func TestBuildArgsUsesPlannerDryRunCommand(t *testing.T) {
 	m := Model{
 		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
@@ -1087,6 +1216,61 @@ func TestLaunchArgsCarriesExactSupportPolicy(t *testing.T) {
 	joined = strings.Join(req.LaunchArgs(), " ")
 	if !strings.Contains(joined, "--no-support-online") || strings.Contains(joined, " --support-online") {
 		t.Fatalf("disabled online policy was not emitted exactly: %q", joined)
+	}
+}
+
+func TestLaunchArgsCarriesHotExpertsPolicy(t *testing.T) {
+	req := &LaunchRequest{ModelPath: "/models/moe.gguf", HotExperts: "auto"}
+	if joined := strings.Join(req.LaunchArgs(), " "); !strings.Contains(joined, "--hot-experts auto") {
+		t.Fatalf("TUI auto hot experts must reach the launcher: %q", joined)
+	}
+	req.HotExperts = "on"
+	if joined := strings.Join(req.LaunchArgs(), " "); !strings.Contains(joined, "--hot-experts on") {
+		t.Fatalf("TUI required hot experts must reach the launcher: %q", joined)
+	}
+	req.HotExperts = "off"
+	if joined := strings.Join(req.LaunchArgs(), " "); !strings.Contains(joined, "--hot-experts off") {
+		t.Fatalf("TUI off hot experts must reach the launcher: %q", joined)
+	}
+}
+
+func TestModelConfigCyclesHotExperts(t *testing.T) {
+	m := Model{
+		screen:     ScreenModelConfig,
+		models:     []ModelItem{{Name: "moe.gguf", Path: "/models/moe.gguf", IsMoE: true}},
+		hotExperts: "auto",
+		cfgCursor:  0,
+	}
+	m.cycleCfgRow("hotexperts", 1)
+	if m.hotExperts != "on" {
+		t.Fatalf("hot experts cycle auto→on, got %q", m.hotExperts)
+	}
+	m.cycleCfgRow("hotexperts", 1)
+	if m.hotExperts != "off" {
+		t.Fatalf("hot experts cycle on→off, got %q", m.hotExperts)
+	}
+	m.cycleCfgRow("hotexperts", 1)
+	if m.hotExperts != "auto" {
+		t.Fatalf("hot experts cycle off→auto, got %q", m.hotExperts)
+	}
+	req := m.buildLaunchRequest()
+	if req == nil || req.HotExperts != "auto" {
+		t.Fatalf("cycled hot experts did not reach launch request: %+v", req)
+	}
+}
+
+func TestModelConfigOpensCompleteHotExpertsPicker(t *testing.T) {
+	m := Model{screen: ScreenModelConfig, hotExperts: "on"}
+	next, cmd := m.activateCfgRow("hotexperts")
+	got := next.(Model)
+	if cmd != nil || got.screen != ScreenChoice || got.choiceTitle != "Hot experts" {
+		t.Fatalf("hot-expert row did not open its picker: screen=%v title=%q cmd=%v", got.screen, got.choiceTitle, cmd)
+	}
+	if options := strings.Join(got.choiceOptions, ","); options != "auto,on,off" {
+		t.Fatalf("hot-expert picker options=%q, want auto,on,off", options)
+	}
+	if got.choiceCursor != 1 {
+		t.Fatalf("hot-expert picker did not select current on policy: cursor=%d", got.choiceCursor)
 	}
 }
 
@@ -1668,6 +1852,62 @@ func TestInitialModelDefaultsKVQualityToAuto(t *testing.T) {
 
 // Changing KV settings in the Settings screen must apply to the live session,
 // not only to the next TUI start.
+func TestSettingsGroupStandardLaunchBeforeExpertOverrides(t *testing.T) {
+	var sawAuto, sawExpert bool
+	for _, row := range settingRows() {
+		switch row.group {
+		case "auto":
+			if sawExpert {
+				t.Fatal("standard auto settings must appear before expert overrides")
+			}
+			sawAuto = true
+		case "expert":
+			sawExpert = true
+		default:
+			t.Fatalf("setting %q missing auto/expert group", row.label)
+		}
+	}
+	if !sawAuto || !sawExpert {
+		t.Fatal("settings must include both standard auto and expert groups")
+	}
+}
+
+func TestResetStandardLaunchToAuto(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := Model{
+		settingsCfg: config.Defaults(),
+		backend:     "ik_llama",
+		ctxMode:     "max",
+		ctxSize:     "max",
+		kvPlacement: "gpu",
+		kvQuality:   "bf16",
+		hotExperts:  "off",
+		port:        9099,
+	}
+	m.settingsCfg.Backend = "ik_llama"
+	_ = m.settingsCfg.SetCtxValue("131072")
+	m.settingsCfg.KVPlacement = "gpu"
+	m.settingsCfg.KVQuality = "bf16"
+	m.settingsCfg.HotExperts = "off"
+	m.settingsCfg.Port = 9099
+	m.resetStandardLaunchToAuto()
+	if m.settingsCfg.Backend != "auto" || m.settingsCfg.CtxValue() != "fit" ||
+		m.settingsCfg.KVPlacement != "auto" || m.settingsCfg.KVQuality != "auto" ||
+		m.settingsCfg.HotExperts != "auto" {
+		t.Fatalf("standard launch was not reset: backend=%q ctx=%q kv=%q/%q hot=%q",
+			m.settingsCfg.Backend, m.settingsCfg.CtxValue(), m.settingsCfg.KVPlacement, m.settingsCfg.KVQuality, m.settingsCfg.HotExperts)
+	}
+	if m.backend != "auto" || m.ctxMode != "fit" || m.kvPlacement != "auto" ||
+		m.kvQuality != "auto" || m.hotExperts != "auto" {
+		t.Fatalf("live session was not reset: backend=%q ctx=%q kv=%q/%q hot=%q",
+			m.backend, m.ctxMode, m.kvPlacement, m.kvQuality, m.hotExperts)
+	}
+	if m.settingsCfg.Port != 9099 {
+		t.Fatalf("expert override port was reset: %d", m.settingsCfg.Port)
+	}
+}
+
 func TestApplySettingSyncsKVIntoLiveSession(t *testing.T) {
 	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
 	t.Setenv("LLM_APP_HOME", t.TempDir())
@@ -1702,21 +1942,22 @@ func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	for _, row := range settingRows() {
 		rows[row.label] = row
 	}
-	for _, label := range []string{"Context", "Full SWA cache", "Support expert / optimizer", "Support online research", "Vision", "Port", "Parallel", "AI-tune rounds"} {
+	for _, label := range []string{"Context", "Full SWA cache", "Hot experts", "Support expert / optimizer", "Support online research", "Vision", "Port", "Parallel", "AI-tune rounds"} {
 		if rows[label].label == "" {
 			t.Fatalf("settings row %q not found", label)
 		}
 	}
 	m.applySetting(rows["Context"], "max")
 	m.applySetting(rows["Full SWA cache"], "on")
+	m.applySetting(rows["Hot experts"], "off")
 	m.applySetting(rows["Support expert / optimizer"], "on")
 	m.applySetting(rows["Support online research"], "on")
 	m.applySetting(rows["Vision"], "on")
 	m.applySetting(rows["Port"], "9099")
 	m.applySetting(rows["Parallel"], "3")
 	m.applySetting(rows["AI-tune rounds"], "12")
-	if m.ctxMode != "max" || !m.swaFull || m.supportExpert != "on" || !m.supportOnline || !m.vision || m.port != 9099 || m.parallel != "3" || m.aituneRounds != 12 {
-		t.Fatalf("launch settings not synced: ctx=%q swa=%v support=%q online=%v vision=%v port=%d parallel=%q rounds=%d", m.ctxMode, m.swaFull, m.supportExpert, m.supportOnline, m.vision, m.port, m.parallel, m.aituneRounds)
+	if m.ctxMode != "max" || !m.swaFull || m.hotExperts != "off" || m.supportExpert != "on" || !m.supportOnline || !m.vision || m.port != 9099 || m.parallel != "3" || m.aituneRounds != 12 {
+		t.Fatalf("launch settings not synced: ctx=%q swa=%v hot=%q support=%q online=%v vision=%v port=%d parallel=%q rounds=%d", m.ctxMode, m.swaFull, m.hotExperts, m.supportExpert, m.supportOnline, m.vision, m.port, m.parallel, m.aituneRounds)
 	}
 	if !m.parallelSet {
 		t.Fatal("a parallel value explicitly entered in Settings must remain authoritative")

@@ -58,7 +58,13 @@ func DiagnoseAgentBottleneck(caps *detect.Capabilities, model *ModelProfile, str
 	if strategy == nil {
 		return unknownWorkloadBottleneck("no resolved launch strategy")
 	}
-	if strategy.Residency != "" && strategy.Residency != ResidencyRoomy {
+	// Fit classification and performance diagnosis are separate stages. A tight
+	// allocation constrains which challenger may be admitted, but it must not
+	// erase measured phase evidence: an exactly admitted MoE can still have a
+	// serial GPU topology or host-expert bottleneck worth one contained A/B.
+	// Preserve the capacity-only answer when no phase sampler produced evidence.
+	if strategy.Residency != "" && strategy.Residency != ResidencyRoomy &&
+		(result == nil || len(result.PhaseUtilization) == 0) {
 		summary := fmt.Sprintf("%s launch is bounded by memory capacity", strategy.Residency)
 		if slack, ok := minimumResourceSlack(strategy.ResourceLedger); ok {
 			summary = fmt.Sprintf("%s launch is bounded by memory capacity (minimum device slack %d MiB)", strategy.Residency, slack)
@@ -143,6 +149,13 @@ func bottleneckFinalistScore(base, candidate *Strategy, diagnosis WorkloadBottle
 	}
 	switch diagnosis.Primary {
 	case BottleneckHostExpertPath:
+		if candidate.HotExpertCacheSlots > base.HotExpertCacheSlots {
+			// This is the only bounded coordinate that attacks host expert
+			// traffic without disturbing the proven tensor topology. Rank it
+			// ahead of a whole-layer reshuffle; the live workload still rejects
+			// low-locality or upload-bound caches.
+			return 200 + float64(candidate.HotExpertCacheSlots-base.HotExpertCacheSlots)
+		}
 		if base.NCPUMoE <= 0 || candidate.NCPUMoE >= base.NCPUMoE {
 			return 0
 		}

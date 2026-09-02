@@ -7,6 +7,7 @@ package backends
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,11 @@ type Backend struct {
 	GitURL     string `json:"git_url,omitempty"`
 	Branch     string `json:"branch,omitempty"`
 	Commit     string `json:"commit,omitempty"`
+	// BaseTag and Features identify a composed backend. The base backend remains
+	// registered and untouched; this record points at a separate checkout/build
+	// containing the ordered, reviewed source-feature overlays.
+	BaseTag  string   `json:"base_tag,omitempty"`
+	Features []string `json:"features,omitempty"`
 	// AppliedPatches identifies reviewed source fixes applied while building the
 	// backend. It makes a recipe-built binary auditable from backends.json.
 	AppliedPatches []string `json:"applied_patches,omitempty"`
@@ -44,6 +50,8 @@ type Backend struct {
 type BackendVersion struct {
 	Path           string   `json:"path"`
 	Commit         string   `json:"commit,omitempty"`
+	BaseTag        string   `json:"base_tag,omitempty"`
+	Features       []string `json:"features,omitempty"`
 	AppliedPatches []string `json:"applied_patches,omitempty"`
 	ReplacedAt     string   `json:"replaced_at,omitempty"`
 }
@@ -60,16 +68,36 @@ type RecipePatch struct {
 // support declarative: the CLI owns clone/build/register/routing once, while a
 // model-specific entry supplies only source identity and architecture.
 type Recipe struct {
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
-	Tag         string        `json:"tag"`
-	GitURL      string        `json:"git_url"`
-	Branch      string        `json:"branch"`
-	Commit      string        `json:"commit"`
-	RouteArch   string        `json:"route_arch"`
-	HelperOnly  bool          `json:"helper_only,omitempty"`
-	Accel       string        `json:"accel,omitempty"`
-	Patches     []RecipePatch `json:"-"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Tag         string `json:"tag"`
+	GitURL      string `json:"git_url"`
+	Branch      string `json:"branch"`
+	Commit      string `json:"commit"`
+	RouteArch   string `json:"route_arch"`
+	HelperOnly  bool   `json:"helper_only,omitempty"`
+	Accel       string `json:"accel,omitempty"`
+	// BaseTag and Features are set for a composed recipe. They are persisted in
+	// the backend manifest so update/rollback can reconstruct the same ordered
+	// source transformation rather than rebuilding an unpatched base fork.
+	BaseTag  string   `json:"base_tag,omitempty"`
+	Features []string `json:"features,omitempty"`
+	// RequiredFlags are the exact server options which make this recipe useful.
+	// Architecture conformance alone cannot prove an optimization backend still
+	// exposes its advertised capability after a source update.
+	RequiredFlags []string      `json:"-"`
+	Patches       []RecipePatch `json:"-"`
+}
+
+// Feature is a reviewed source overlay which can be composed onto a pinned
+// llama.cpp-derived backend. A feature is not an architecture route by itself:
+// the composed backend inherits its base's loader, route and exact commit.
+type Feature struct {
+	Name          string
+	Description   string
+	Accel         string
+	RequiredFlags []string
+	Patches       []RecipePatch
 }
 
 //go:embed patches/hy3/0001-fix-router-tensor-name.patch
@@ -91,7 +119,46 @@ var nanbeige42LoopCountPatch []byte
 //go:embed patches/laguna/0001-include-cmath-for-isfinite.patch
 var lagunaCmathPatch []byte
 
+// Hot experts is maintained upstream as a one-commit draft. Embedding the
+// exact reviewed commit as a patch lets ggrun apply it to a compatible pinned
+// architecture fork (for example glm5next) without replacing that fork with a
+// different loader. The original author/commit metadata is retained inside the
+// format-patch artifact.
+//
+//go:embed patches/features/hot-experts/0001-MoE-expert-cache-GPU-resident-LRU-cache-for-host-off.patch
+var hotExpertsFeaturePatch []byte
+
+var builtinFeatures = []Feature{
+	{
+		Name:          "hot-experts",
+		Description:   "GPU LRU cache for host-resident separate gate/up/down MoE experts",
+		Accel:         "cuda",
+		RequiredFlags: []string{"--moe-expert-cache", "--moe-expert-cache-inserts"},
+		Patches: []RecipePatch{{
+			Name:     "features/hot-experts/bccbacdb8945",
+			contents: hotExpertsFeaturePatch,
+		}},
+	},
+}
+
 var builtinRecipes = []Recipe{
+	{
+		// Experimental backend capability, deliberately not architecture-routed.
+		// The optimizer may use it for any compatible separate-gate/up routed MoE,
+		// but only after the user selects/installs this isolated backend and a live
+		// cache-on candidate beats the cache-free baseline. Pin the exact reviewed
+		// draft commit; moving a performance patch while retaining measurements
+		// would make those measurements describe a different implementation.
+		Name:          "hot-experts",
+		Description:   "Experimental llama.cpp GPU LRU cache for host-resident routed experts",
+		Tag:           "hot-experts",
+		GitURL:        "https://github.com/csantiago78/llama.cpp.git",
+		Branch:        "moe-expert-cache",
+		Commit:        "bccbacdb8945680f1cfc7e6bffd1e59014705750",
+		RouteArch:     "",
+		Accel:         "cuda",
+		RequiredFlags: []string{"--moe-expert-cache", "--moe-expert-cache-inserts"},
+	},
 	{
 		// NanoBeige support is upstream llama.cpp, not a permanent fork. Pin the
 		// first reviewed merge commit so `ggrun support install --with-backend`
@@ -193,6 +260,198 @@ func RecipeByName(name string) *Recipe {
 		}
 	}
 	return nil
+}
+
+// Features returns the reviewed source-feature catalog. The nested slices are
+// copied so callers cannot mutate the process-wide definitions.
+func Features() []Feature {
+	out := make([]Feature, len(builtinFeatures))
+	for i := range builtinFeatures {
+		out[i] = builtinFeatures[i]
+		out[i].RequiredFlags = append([]string(nil), builtinFeatures[i].RequiredFlags...)
+		out[i].Patches = append([]RecipePatch(nil), builtinFeatures[i].Patches...)
+	}
+	return out
+}
+
+// FeatureByName resolves a reviewed source feature case-insensitively.
+func FeatureByName(name string) *Feature {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, feature := range builtinFeatures {
+		if strings.ToLower(feature.Name) != name {
+			continue
+		}
+		copy := feature
+		copy.RequiredFlags = append([]string(nil), feature.RequiredFlags...)
+		copy.Patches = append([]RecipePatch(nil), feature.Patches...)
+		return &copy
+	}
+	return nil
+}
+
+func normalizedFeatureNames(names []string) ([]string, error) {
+	out := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, raw := range names {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" || seen[name] {
+			continue
+		}
+		if FeatureByName(name) == nil {
+			return nil, fmt.Errorf("unknown backend feature %q", raw)
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one backend feature is required")
+	}
+	return out, nil
+}
+
+// BackendHasFeature reports manifest-proven composition. Runtime capability is
+// still checked from the binary's exact --help before the build is registered.
+func BackendHasFeature(backend Backend, feature string) bool {
+	feature = strings.ToLower(strings.TrimSpace(feature))
+	for _, installed := range backend.Features {
+		if strings.EqualFold(strings.TrimSpace(installed), feature) {
+			return true
+		}
+	}
+	return false
+}
+
+// CompositeTag is stable across launches and updates of the same base tag. A
+// short digest prevents two unusually long base tags from collapsing onto the
+// same truncated filesystem/manifest name.
+func CompositeTag(baseTag string, featureNames ...string) string {
+	parts := make([]string, 0, len(featureNames)+1)
+	parts = append(parts, strings.ToLower(strings.TrimSpace(baseTag)))
+	for _, feature := range featureNames {
+		if feature = strings.ToLower(strings.TrimSpace(feature)); feature != "" {
+			parts = append(parts, feature)
+		}
+	}
+	raw := strings.Join(parts, "-")
+	clean := strings.NewReplacer("/", "-", "\\", "-", " ", "-", "_", "-", "+", "-").Replace(raw)
+	for strings.Contains(clean, "--") {
+		clean = strings.ReplaceAll(clean, "--", "-")
+	}
+	clean = strings.Trim(clean, "-")
+	if len(clean) <= 56 {
+		return clean
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return strings.Trim(clean[:47], "-") + fmt.Sprintf("-%x", sum[:4])
+}
+
+// ComposeRecipe creates a separate, reproducible build recipe for a base fork
+// plus ordered reviewed feature overlays. It never edits or replaces the base
+// backend. Unknown custom patches fail closed because their bytes are not
+// available to reproduce in the new checkout.
+func ComposeRecipe(base Backend, featureNames ...string) (*Recipe, error) {
+	if strings.TrimSpace(base.Tag) == "" {
+		return nil, fmt.Errorf("base backend has no tag")
+	}
+	if strings.TrimSpace(base.GitURL) == "" || strings.TrimSpace(base.Commit) == "" {
+		return nil, fmt.Errorf("backend %q has no reproducible source URL and commit", base.Tag)
+	}
+	names, err := normalizedFeatureNames(featureNames)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		if BackendHasFeature(base, name) {
+			return nil, fmt.Errorf("backend %q already includes feature %q", base.Tag, name)
+		}
+	}
+
+	var patches []RecipePatch
+	var required []string
+	helperOnly := true // composites are selected by feature policy, never global arch routing
+	if baseRecipe := RecipeByName(base.Tag); baseRecipe != nil {
+		patches = append(patches, baseRecipe.Patches...)
+		required = append(required, baseRecipe.RequiredFlags...)
+	} else if len(base.AppliedPatches) > 0 {
+		return nil, fmt.Errorf("backend %q carries unregistered source patches and cannot be reproduced as a feature base", base.Tag)
+	}
+
+	accel := ""
+	for _, name := range names {
+		feature := FeatureByName(name)
+		if feature == nil {
+			return nil, fmt.Errorf("unknown backend feature %q", name)
+		}
+		if feature.Accel != "" {
+			if accel != "" && !strings.EqualFold(accel, feature.Accel) {
+				return nil, fmt.Errorf("backend features require conflicting accelerators %q and %q", accel, feature.Accel)
+			}
+			accel = feature.Accel
+		}
+		patches = append(patches, feature.Patches...)
+		required = append(required, feature.RequiredFlags...)
+	}
+
+	tag := CompositeTag(base.Tag, names...)
+	return &Recipe{
+		Name:          tag,
+		Description:   fmt.Sprintf("%s with %s", base.Tag, strings.Join(names, "+")),
+		Tag:           tag,
+		GitURL:        base.GitURL,
+		Branch:        base.Branch,
+		Commit:        base.Commit,
+		RouteArch:     base.RouteArch,
+		HelperOnly:    helperOnly,
+		Accel:         accel,
+		BaseTag:       base.Tag,
+		Features:      names,
+		RequiredFlags: required,
+		Patches:       patches,
+	}, nil
+}
+
+// RecipeForBackend returns the catalog recipe or reconstructs a composed
+// backend recipe from manifest provenance. Updates therefore reapply the exact
+// feature patch instead of silently rebuilding a cache-free base fork.
+func RecipeForBackend(backend Backend) (*Recipe, error) {
+	if len(backend.Features) == 0 {
+		return RecipeByName(backend.Tag), nil
+	}
+	base := Backend{
+		Tag:       backend.BaseTag,
+		GitURL:    backend.GitURL,
+		Branch:    backend.Branch,
+		Commit:    backend.Commit,
+		RouteArch: backend.RouteArch,
+	}
+	if strings.TrimSpace(base.Tag) == "" {
+		return nil, fmt.Errorf("composed backend %q has no base tag", backend.Tag)
+	}
+	if installed := ByTag(base.Tag); installed != nil {
+		base.AppliedPatches = append([]string(nil), installed.AppliedPatches...)
+	}
+	recipe, err := ComposeRecipe(base, backend.Features...)
+	if err != nil {
+		return nil, err
+	}
+	recipe.Tag = backend.Tag
+	recipe.Name = backend.Tag
+	if len(backend.AppliedPatches) > 0 && !sameStringSetOrdered(recipe.PatchNames(), backend.AppliedPatches) {
+		return nil, fmt.Errorf("composed backend %q patch manifest differs from reviewed recipe", backend.Tag)
+	}
+	return recipe, nil
+}
+
+func sameStringSetOrdered(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // PatchNames returns stable IDs for the reviewed patches included by a recipe.
@@ -541,6 +800,28 @@ func ByTag(tag string) *Backend {
 	for i := range list {
 		if strings.ToLower(list[i].Tag) == tag {
 			return &list[i]
+		}
+	}
+	return nil
+}
+
+// FeatureBackend returns the installed composite for one exact base tag and
+// feature. It deliberately ignores architecture-only matches: two forks can
+// load the same architecture while carrying different graph semantics, and a
+// feature validated for one must never shadow the other.
+func FeatureBackend(baseTag, feature string) *Backend {
+	baseTag = strings.TrimSpace(baseTag)
+	feature = strings.TrimSpace(feature)
+	if baseTag == "" || feature == "" {
+		return nil
+	}
+	for _, backend := range Load() {
+		if !strings.EqualFold(strings.TrimSpace(backend.BaseTag), baseTag) || !BackendHasFeature(backend, feature) {
+			continue
+		}
+		if _, err := os.Stat(backend.Path); err == nil {
+			copy := backend
+			return &copy
 		}
 	}
 	return nil

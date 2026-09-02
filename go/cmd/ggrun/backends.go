@@ -26,7 +26,11 @@ func fmtCustomBackend(b backends.Backend) string {
 	if b.HelperOnly {
 		status += ", helper-only"
 	}
-	return fmt.Sprintf("  %-12s [%s] %s\n    route-arch: %s   src: %s @ %s", b.Tag, status, b.Path, route, b.GitURL, b.Branch)
+	composition := ""
+	if len(b.Features) > 0 {
+		composition = fmt.Sprintf("\n    base: %s   features: %s", b.BaseTag, strings.Join(b.Features, ","))
+	}
+	return fmt.Sprintf("  %-12s [%s] %s\n    route-arch: %s   src: %s @ %s%s", b.Tag, status, b.Path, route, b.GitURL, b.Branch, composition)
 }
 
 func backendUsage() {
@@ -35,6 +39,8 @@ func backendUsage() {
   list                              List registered custom backends
   recipes                           List reviewed reproducible fork recipes
   install <recipe> [flags]          Build/register a reviewed recipe (for example hy3)
+  feature install <name> --base <tag>
+                                    Compose a reviewed source feature onto an installed fork
   add <git-url> [flags]             Clone, build, and register a custom llama.cpp backend
   register [flags]                  Register an already-built binary
   remove <tag>                      Unregister a backend
@@ -54,6 +60,7 @@ Examples:
   ggrun backend add https://github.com/your-org/llama.cpp \
     --branch feature/custom-arch --tag custom --route-arch custommoe --cuda-arch "86;89"
   ggrun backend install hy3 --cuda-arch "86;89"
+  ggrun backend feature install hot-experts --base hy3 --cuda-arch "86;89"
   ggrun backend update laguna
   ggrun backend rollback laguna
   ggrun backend list
@@ -78,6 +85,8 @@ func cmdBackend(args []string) {
 		cmdBackendRecipes()
 	case "install":
 		cmdBackendInstall(args[1:])
+	case "feature":
+		cmdBackendFeature(args[1:])
 	case "add":
 		cmdBackendAdd(args[1:])
 	case "register":
@@ -98,6 +107,73 @@ func cmdBackendRecipes() {
 	for _, recipe := range backends.Recipes() {
 		fmt.Printf("  %-10s arch=%-12s %s\n    %s @ %s (%s)\n", recipe.Name, recipe.RouteArch, recipe.Description, recipe.GitURL, recipe.Commit, recipe.Branch)
 	}
+	if features := backends.Features(); len(features) > 0 {
+		fmt.Println("  source features (compose onto an installed, reproducibly pinned fork):")
+		for _, feature := range features {
+			fmt.Printf("    %-14s accel=%-7s %s\n", feature.Name, feature.Accel, feature.Description)
+		}
+	}
+}
+
+func cmdBackendFeature(args []string) {
+	if len(args) < 2 || args[0] != "install" {
+		fmt.Fprintln(os.Stderr, "usage: ggrun backend feature install <feature> --base <installed-tag> [--cuda-arch <list>]")
+		os.Exit(2)
+	}
+	featureName := strings.TrimSpace(args[1])
+	_, flags := parseBackendFlags(args[2:])
+	baseTag := strings.TrimSpace(flags["base"])
+	if baseTag == "" {
+		fmt.Fprintln(os.Stderr, "feature install needs --base <installed-tag>")
+		os.Exit(2)
+	}
+	base := backends.ByTag(baseTag)
+	if base == nil {
+		fmt.Fprintf(os.Stderr, "base backend %q is not registered; install/register the architecture fork first\n", baseTag)
+		os.Exit(2)
+	}
+	recipe, err := backends.ComposeRecipe(*base, featureName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot compose feature %q onto %q: %v\n", featureName, baseTag, err)
+		os.Exit(1)
+	}
+	if existing := backends.ByTag(recipe.Tag); existing != nil {
+		if !strings.EqualFold(existing.BaseTag, recipe.BaseTag) || !sameStrings(existing.Features, recipe.Features) {
+			fmt.Fprintf(os.Stderr, "cannot install composed backend %q: that tag belongs to a different backend\n", recipe.Tag)
+			os.Exit(1)
+		}
+		if existing.Commit == recipe.Commit {
+			if err := validateBackendCandidateForRecipe(existing.Path, existing.RouteArch, recipe.Accel, recipe); err == nil {
+				fmt.Printf("[backend] composed backend %q already exists and passes conformance; reusing %s\n", existing.Tag, existing.Path)
+				return
+			}
+		}
+		// Never rebuild over the only working composed binary. The normal update
+		// path stages, validates and atomically promotes a candidate while retaining
+		// the prior tree for rollback.
+		if err := updateRegisteredBackend(existing.Tag); err != nil {
+			fmt.Fprintf(os.Stderr, "cannot refresh composed backend %q: %v\n", existing.Tag, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	generated := []string{
+		recipe.GitURL,
+		"--tag", recipe.Tag,
+		"--checkout-name", recipe.Tag,
+		"--branch", recipe.Branch,
+		"--commit", recipe.Commit,
+		"--route-arch", recipe.RouteArch,
+		"--helper-only",
+	}
+	if recipe.Accel != "" {
+		generated = append(generated, "--accel", recipe.Accel)
+	}
+	if cudaArch := strings.TrimSpace(flags["cuda-arch"]); cudaArch != "" {
+		generated = append(generated, "--cuda-arch", cudaArch)
+	}
+	cmdBackendAddRecipe(generated, recipe)
 }
 
 func cmdBackendInstall(args []string) {
@@ -282,6 +358,10 @@ func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 		fmt.Fprintf(os.Stderr, "backend conformance failed; refusing registration: %v\n", err)
 		os.Exit(1)
 	}
+	if err := validateBackendRecipeCandidate(bin, recipe); err != nil {
+		fmt.Fprintf(os.Stderr, "backend recipe capability failed; refusing registration: %v\n", err)
+		os.Exit(1)
+	}
 	if arch := strings.TrimSpace(f["route-arch"]); arch != "" {
 		fmt.Printf("[backend] verified architecture %q in the new fork binary\n", arch)
 	}
@@ -290,6 +370,8 @@ func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit), HelperOnly: strings.EqualFold(f["helper-only"], "true")}
 	if recipe != nil {
 		be.AppliedPatches = recipe.PatchNames()
+		be.BaseTag = recipe.BaseTag
+		be.Features = append([]string(nil), recipe.Features...)
 	}
 	if err := backends.Upsert(be); err != nil {
 		fmt.Fprintf(os.Stderr, "register failed: %v\n", err)
@@ -591,6 +673,28 @@ func validateBackendCandidate(binary, routeArch, accel string) error {
 		}
 		if !capable {
 			return fmt.Errorf("requested %s build reports no supported GPU devices", accel)
+		}
+	}
+	return nil
+}
+
+func validateBackendRecipeCandidate(binary string, recipe *backends.Recipe) error {
+	if recipe == nil || len(recipe.RequiredFlags) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("--help timed out while checking recipe capability")
+	}
+	if err != nil {
+		return fmt.Errorf("--help failed while checking recipe capability: %w", err)
+	}
+	help := string(out)
+	for _, required := range recipe.RequiredFlags {
+		if !helpHasExactFlag(help, required) {
+			return fmt.Errorf("--help does not expose required recipe option %s", required)
 		}
 	}
 	return nil

@@ -1,8 +1,10 @@
 package placement
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -112,6 +114,95 @@ func TestPostLaunchContextObservationPreservesMatchingGuardedBreakdown(t *testin
 		strategy.KVQuality, strategy.KVPlacement, "test", gpus, strategy.Parallel)
 	if !ok || loaded.ContextTotalMB != 120 || loaded.ModelByGPU[0] != 5000 || loaded.UnaccountedByGPU[1] != 200 || loaded.PlacementIdentity != identity {
 		t.Fatalf("sparse post-launch observation erased guarded breakdown: ok=%t loaded=%+v", ok, loaded)
+	}
+}
+
+func TestRealQwenRecurrentLogPromotesCompleteLiveAllocation(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "qwen3.8-flash.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := &ModelProfile{
+		Path: modelPath, TotalSizeMB: 85800, SizeBytes: 85800 * 1024 * 1024,
+		NumLayers: 48, NumExperts: 128, IsMoE: true,
+	}
+	gpus := []detect.GPU{
+		{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282},
+		{Index: 1, Name: "RTX 3090 Ti", VRAMTotalMB: 24564},
+		{Index: 2, Name: "RTX 3060", VRAMTotalMB: 12288},
+	}
+	systemPath := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
+	system := fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) +
+		"SYS_CUDA_OVERHEAD_MB_CUDA0=500\n" +
+		"SYS_CUDA_OVERHEAD_MB_CUDA1=600\n" +
+		"SYS_CUDA_OVERHEAD_MB_CUDA2=400\n" +
+		"SYS_CUDA_OVERHEAD_MB=600\nSYS_HOST_OVERHEAD_MB=750\n"
+	if err := os.WriteFile(systemPath, []byte(system), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	strategy := &Strategy{
+		Type: MoEOffload, TensorSplit: []float64{0.29, 0.61, 0.10},
+		ContextSize: 262144, Parallel: 1, BatchSize: 2048, UBatchSize: 256,
+		KVPlacement: "gpu", KVQuality: "high", KVType: "q8_0", NCPUMoE: 31,
+	}
+	logData := strings.Join([]string{
+		"load_tensors:          CPU model buffer size = 27465.95 MiB",
+		"load_tensors:        CUDA0 model buffer size =  5403.70 MiB",
+		"load_tensors:        CUDA1 model buffer size = 13118.31 MiB",
+		"load_tensors:        CUDA2 model buffer size =  5037.61 MiB",
+		"load_tensors:    CUDA_Host model buffer size = 34781.64 MiB",
+		"llama_context:  CUDA_Host  output buffer size =     0.95 MiB",
+		"llama_kv_cache:      CUDA0 KV buffer size =  1536.00 MiB",
+		"llama_kv_cache:      CUDA1 KV buffer size =  4096.00 MiB",
+		"llama_kv_cache:      CUDA2 KV buffer size =   512.00 MiB",
+		"llama_kv_cache:      CUDA0 KV buffer size =   576.00 MiB",
+		"llama_kv_cache:      CUDA1 KV buffer size =  1536.00 MiB",
+		"llama_kv_cache:      CUDA2 KV buffer size =   192.00 MiB",
+		"sched_reserve:      CUDA0 compute buffer size =  1159.25 MiB",
+		"sched_reserve:      CUDA1 compute buffer size =  1029.85 MiB",
+		"sched_reserve:      CUDA2 compute buffer size =   822.00 MiB",
+		"sched_reserve:  CUDA_Host compute buffer size =   937.05 MiB",
+	}, "\n")
+
+	if !RecordPostLaunchContextAllocation(dir, model, strategy, "qwen", gpus, logData) {
+		t.Fatal("real log was not recorded")
+	}
+	allocation, ok := LoadMeasuredAllocation(dir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, "qwen", gpus, strategy.Parallel)
+	if !ok || allocation.Evidence != "live-allocated" {
+		t.Fatalf("live allocation did not become authoritative: ok=%t allocation=%+v", ok, allocation)
+	}
+	if allocation.ContextTotalMB != 8448 ||
+		allocation.ContextByGPU[0] != 2112 || allocation.ContextByGPU[1] != 5632 || allocation.ContextByGPU[2] != 704 {
+		t.Fatalf("recurrent KV regions were not summed per device: %+v", allocation)
+	}
+	if allocation.ModelByGPU[0] != 5404 || allocation.ModelByGPU[1] != 13118 || allocation.ModelByGPU[2] != 5038 {
+		t.Fatalf("model distribution was not parsed: %+v", allocation.ModelByGPU)
+	}
+	if allocation.ModelHostMB != 62248 {
+		t.Fatalf("CPU and CUDA_Host model buffers = %d, want 62248", allocation.ModelHostMB)
+	}
+	ledger := BuildResourceLedger(&detect.Capabilities{
+		GPUs: gpus, RAM: detect.RAMInfo{TotalMB: 262144, FreeMB: 196608},
+	}, model, strategy, Options{CacheDir: dir, BackendCacheTag: "qwen"})
+	if !ledger.Exact || !ledger.Fits || ledger.Evidence != "live-allocated" {
+		t.Fatalf("real live allocation did not unlock an exact fitting ledger: %+v", ledger)
+	}
+
+	// A later fit run for this key is only a prediction and must not demote the
+	// healthy live ledger that topology and hot-expert search depend on.
+	if err := RecordMeasuredAllocation(dir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, "qwen", gpus, strategy.Parallel, MeasuredAllocation{
+			Evidence: "oracle-planned", PlacementIdentity: AllocationPlacementIdentity(strategy),
+			ContextTotalMB: 8448, ContextByGPU: map[int]int{0: 2112, 1: 5632, 2: 704},
+		}); err != nil {
+		t.Fatal(err)
+	}
+	afterOracle, ok := LoadMeasuredAllocation(dir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, "qwen", gpus, strategy.Parallel)
+	if !ok || afterOracle.Evidence != "live-allocated" || afterOracle.ModelByGPU[1] != 13118 {
+		t.Fatalf("oracle demoted live allocation: ok=%t allocation=%+v", ok, afterOracle)
 	}
 }
 
@@ -583,6 +674,32 @@ func TestSelectDeviceBalanceFinalistPreservesTightMoEResidency(t *testing.T) {
 	signal := AnalyzeDeviceBalance(base, []GPUUtilSample{{GPU: 0, SMPercent: 90}, {GPU: 1, SMPercent: 4}})
 	if got, ok := SelectDeviceBalanceFinalist(frontier, signal); ok {
 		t.Fatalf("less-resident topology became a finalist: %+v", got)
+	}
+}
+
+func TestSelectDeviceBalanceFinalistMeasuresReliefEvenWhenStaticPriorIsUncertain(t *testing.T) {
+	strategy := func(split []float64, cpuMoE int) *Strategy {
+		return &Strategy{
+			Type: MoEOffload, Residency: ResidencyTight, ContextSize: 32768, Parallel: 1,
+			BatchSize: 256, UBatchSize: 128, KVPlacement: "gpu", KVQuality: "mid", KVType: "q8_0",
+			NCPUMoE: cpuMoE, TensorSplit: split,
+			ResourceLedger: &ResourceLedger{Exact: true, Fits: true, Devices: []DeviceResourceLedger{
+				{GPU: 0, ModelMB: 7000, Active: true}, {GPU: 1, ModelMB: 3000, Active: true},
+			}},
+		}
+	}
+	base := strategy([]float64{0.7, 0.3}, 30)
+	challenger := strategy([]float64{0.3, 0.7}, 30)
+	frontier := []CalibrationCandidate{
+		{Name: "default", Strategy: base, Estimate: CandidateEstimate{Feasible: true, AgentCost: 1}},
+		// Static prediction is slightly worse; measured imbalance is precisely why
+		// one live A/B is still necessary.
+		{Name: "moe-owner-1", Strategy: challenger, Estimate: CandidateEstimate{Feasible: true, AgentCost: 1.05}},
+	}
+	signal := AnalyzeDeviceBalance(base, []GPUUtilSample{{GPU: 0, SMPercent: 95}, {GPU: 1, SMPercent: 3}})
+	got, ok := SelectDeviceBalanceFinalist(frontier, signal)
+	if !ok || got.Name != "moe-owner-1" {
+		t.Fatalf("measured imbalance did not authorize bounded challenger: got=%+v ok=%t", got, ok)
 	}
 }
 

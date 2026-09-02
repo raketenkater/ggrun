@@ -103,6 +103,7 @@ type Model struct {
 	ramHeadroomMB  int
 	parallel       string
 	parallelSet    bool
+	hotExperts     string
 	aitune         bool
 	aituneRounds   int
 	benchmark      bool
@@ -192,6 +193,10 @@ type Model struct {
 	// runtime state and is never persisted.
 	backendRouteBypass        bool
 	backendRouteBypassBackend string
+	// hotExpertsBuildBypass is set only when the user declines the optional
+	// one-time overlay build for this launch. It prevents a second identical
+	// prompt when they return to the pre-launch screen and confirm again.
+	hotExpertsBuildBypass bool
 
 	// Messages
 	message        string
@@ -273,20 +278,25 @@ func sessionModel() Model {
 	spin.Spinner = spinner.MiniDot
 	spin.Style = titleStyle
 	m := Model{
-		screen:          ScreenMain,
-		cfgMemo:         &configMemo{},
-		backend:         backend,
-		modelDir:        cfg.ModelDir,
-		settingsPath:    settingsPath,
-		cacheDir:        cfg.CacheDir,
-		port:            cfg.Port,
-		ctxSize:         ctxValue,
-		ctxMode:         ctxMode,
-		kvPlacement:     cfg.KVPlacement,
-		kvQuality:       cfg.KVQuality,
-		swaFull:         cfg.SWAFull,
-		parallel:        parallel,
-		parallelSet:     cfg.Parallel > 0 && cfg.IsExplicit("PARALLEL"),
+		screen:       ScreenMain,
+		cfgMemo:      &configMemo{},
+		backend:      backend,
+		modelDir:     cfg.ModelDir,
+		settingsPath: settingsPath,
+		cacheDir:     cfg.CacheDir,
+		port:         cfg.Port,
+		ctxSize:      ctxValue,
+		ctxMode:      ctxMode,
+		kvPlacement:  cfg.KVPlacement,
+		kvQuality:    cfg.KVQuality,
+		swaFull:      cfg.SWAFull,
+		parallel:     parallel,
+		// PARALLEL=1 is also the serialized built-in policy default. Treat it as
+		// automatic on TUI startup so a generated config file cannot turn the
+		// optimizer's baseline into an explicit --parallel 1 lock. A user can
+		// still pin one slot from the per-model editor or Settings screen.
+		parallelSet:     cfg.Parallel > 1 && cfg.IsExplicit("PARALLEL"),
+		hotExperts:      cfg.HotExperts,
 		vision:          cfg.Vision,
 		supportExpert:   cfg.SupportExpert,
 		supportOnline:   cfg.SupportOnline,
@@ -307,6 +317,9 @@ func sessionModel() Model {
 	}
 	if m.kvQuality == "" {
 		m.kvQuality = "auto"
+	}
+	if m.hotExperts == "" {
+		m.hotExperts = "auto"
 	}
 
 	m.input = textinput.New()
@@ -963,6 +976,9 @@ func (m *Model) applyLaunchRequestFields(req *LaunchRequest) {
 	if req.ParallelSet && req.Parallel > 0 {
 		m.parallel = strconv.Itoa(req.Parallel)
 	}
+	if req.HotExperts != "" {
+		m.hotExperts = req.HotExperts
+	}
 	m.vision = req.Vision
 	m.tunePath = req.TuneCache
 	m.aitune = req.AITune
@@ -987,7 +1003,7 @@ func (m Model) cfgRows() []string {
 	if m.selectedBackendRecipe() != nil {
 		rows = append(rows, "backend-install")
 	}
-	rows = append(rows, "context", "parallel", "kv", "kvq", "swa", "tuned", "aitune")
+	rows = append(rows, "context", "parallel", "kv", "kvq", "swa", "hotexperts", "tuned", "aitune")
 	if m.aitune {
 		rows = append(rows, "rounds")
 	}
@@ -1020,12 +1036,150 @@ func (m Model) effectiveBackend() string {
 			return fallback
 		}
 	}
+	// A backend explicitly selected by the feature-install return path must win
+	// over the model's ordinary route. Composed backends are helper-only on
+	// purpose, so AutoBackend continues to name their untouched base.
+	if selected := backends.ByTag(m.backend); selected != nil &&
+		(backends.BackendHasFeature(*selected, "hot-experts") || strings.EqualFold(selected.Tag, "hot-experts")) {
+		return selected.Tag
+	}
+	base := strings.TrimSpace(m.backend)
 	if m.selectedModel >= 0 && m.selectedModel < len(m.models) {
 		if routed := strings.TrimSpace(m.models[m.selectedModel].AutoBackend); routed != "" {
-			return routed
+			base = routed
 		}
 	}
-	return m.backend
+	modelUsesExperts := m.selectedModel >= 0 && m.selectedModel < len(m.models) && m.models[m.selectedModel].IsMoE
+	if m.hotExpertsEnabled() && modelUsesExperts {
+		if composite := backends.FeatureBackend(base, "hot-experts"); composite != nil {
+			return composite.Tag
+		}
+	}
+	return base
+}
+
+// launchBackend preserves the distinction between an automatic backend route
+// and a user override. effectiveBackend is a preview used by the TUI (and by
+// the feature installer) to disclose what auto currently resolves to. Sending
+// that preview as --backend made the CLI treat it as inviolable, bypassing the
+// core route/feature selection and its recovery ladder. The default TUI Enter
+// path must therefore carry "auto" into the standard launcher and let the core
+// optimizer resolve the same candidate itself.
+func (m Model) launchBackend() string {
+	if m.backendRouteBypass {
+		return m.effectiveBackend()
+	}
+	backend := strings.TrimSpace(m.backend)
+	if backend == "" || strings.EqualFold(backend, "auto") {
+		return "auto"
+	}
+	return m.effectiveBackend()
+}
+
+func (m Model) hotExpertsEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(m.hotExperts), "off")
+}
+
+// hotExpertBaseBackend returns the reproducible fork which the selected model
+// would ordinarily use. The overlay is tied to this exact base tag rather than
+// an architecture-wide match, because two forks can load the same GGUF while
+// carrying different graph implementations.
+func (m Model) hotExpertBaseBackend() *backends.Backend {
+	if m.selectedModel >= 0 && m.selectedModel < len(m.models) {
+		if tag := strings.TrimSpace(m.models[m.selectedModel].AutoBackend); tag != "" {
+			return backends.ByTag(tag)
+		}
+	}
+	return backends.ByTag(m.backend)
+}
+
+// openHotExpertFeatureInstall provisions the source capability behind the
+// Hot-experts policy. Runtime slot selection remains the optimizer's job; this
+// only ensures the selected backend can expose the two cache flags. The base
+// checkout/binary is never modified: a failed patch or build leaves it usable.
+func (m *Model) openHotExpertFeatureInstall() bool {
+	if m.hotExpertsBuildBypass || !m.hotExpertsEnabled() || m.selectedModel < 0 || m.selectedModel >= len(m.models) {
+		return false
+	}
+	model := m.models[m.selectedModel]
+	if !model.IsMoE {
+		return false
+	}
+	if selected := backends.ByTag(m.effectiveBackend()); selected != nil &&
+		(backends.BackendHasFeature(*selected, "hot-experts") || strings.EqualFold(selected.Tag, "hot-experts")) {
+		return false
+	}
+
+	base := m.hotExpertBaseBackend()
+	installArgs := []string(nil)
+	backendTag := ""
+	baseLabel := "mainline llama.cpp"
+	if base != nil {
+		if existing := backends.FeatureBackend(base.Tag, "hot-experts"); existing != nil {
+			m.backend = existing.Tag
+			return false
+		}
+		recipe, err := backends.ComposeRecipe(*base, "hot-experts")
+		if err != nil {
+			m.message = "Hot experts unavailable for " + base.Tag + ": " + err.Error()
+			m.messageType = "warning"
+			m.hotExpertsBuildBypass = true
+			return false
+		}
+		backendTag = recipe.Tag
+		baseLabel = base.Tag
+		installArgs = []string{"feature", "install", "hot-experts", "--base", base.Tag}
+	} else {
+		configured := strings.ToLower(strings.TrimSpace(m.backend))
+		if configured != "" && configured != "auto" && configured != "llama" {
+			m.message = "Hot experts needs a reproducibly pinned llama.cpp-derived backend; " + m.backend + " has no composable source record"
+			m.messageType = "warning"
+			m.hotExpertsBuildBypass = true
+			return false
+		}
+		backendTag = "hot-experts"
+		if installed := backends.ByTag(backendTag); installed != nil {
+			arch := strings.TrimSpace(model.Architecture)
+			if arch == "" {
+				arch = strings.TrimSpace(model.Arch)
+			}
+			if supported, probed := backends.BackendSupportsArch(installed.Path, arch); !probed || supported {
+				m.backend = installed.Tag
+				return false
+			}
+			m.message = "Installed hot-experts backend does not support " + arch + "; continuing with the normal backend"
+			m.messageType = "warning"
+			m.hotExpertsBuildBypass = true
+			return false
+		}
+		installArgs = []string{"install", "hot-experts"}
+	}
+
+	buildLabel := "Build isolated hot-experts backend once (30–60 min)"
+	continueLabel := "Continue once without hot experts"
+	m.openChoice(
+		"Enable hot experts for "+baseLabel,
+		[]string{"Cancel", buildLabel, continueLabel},
+		"Cancel",
+		ScreenPrelaunch,
+		func(mm *Model, value string) {
+			switch value {
+			case buildLabel:
+				req := mm.buildLaunchRequest()
+				if req == nil {
+					return
+				}
+				req.Backend = backendTag
+				req.BackendArgs = append([]string(nil), installArgs...)
+				mm.launchRequest = req
+			case continueLabel:
+				mm.hotExpertsBuildBypass = true
+				mm.message = "Continuing once without a hot-experts-capable backend"
+				mm.messageType = "warning"
+			}
+		},
+	)
+	return true
 }
 
 // openSelectedBackendInstall asks before the network clone/build. Confirming
@@ -1174,6 +1328,17 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 		// stays in config, where ggrun still applies it but may withdraw it on a
 		// memory failure.
 		m.swaFullTouched = true
+	case "hotexperts":
+		order := []string{"auto", "on", "off"}
+		cur := strings.TrimSpace(m.hotExperts)
+		if cur != "on" && cur != "off" {
+			cur = "auto"
+		}
+		if dir < 0 {
+			m.hotExperts = prevOption(order, cur)
+		} else {
+			m.hotExperts = nextOption(order, cur)
+		}
 	case "context":
 		order := []string{"fit", "max"}
 		cur := "fit"
@@ -1245,6 +1410,16 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 		m.cycleCfgRow("kvq", 1)
 	case "swa":
 		m.cycleCfgRow("swa", 1)
+	case "hotexperts":
+		current := strings.ToLower(strings.TrimSpace(m.hotExperts))
+		if current != "auto" && current != "on" && current != "off" {
+			current = "auto"
+		}
+		m.openChoice("Hot experts", []string{"auto", "on", "off"}, current, ScreenModelConfig,
+			func(mm *Model, value string) {
+				mm.hotExperts = value
+				mm.hotExpertsBuildBypass = false
+			})
 	case "tuned":
 		m.openTunedPicker()
 	case "rounds":
@@ -1356,6 +1531,8 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cycleCfgRow("kvq", 1)
 	case "w", "W":
 		m.cycleCfgRow("swa", 1)
+	case "h", "H":
+		m.cycleCfgRow("hotexperts", 1)
 	case "a", "A":
 		m.aitune = !m.aitune
 		if m.aitune {
@@ -1784,7 +1961,12 @@ func (m Model) viewModelConfig() string {
 	section("Backend, context & memory")
 	switch {
 	case model.AutoBackend != "":
-		statline("Backend", model.AutoBackend+" (auto-selected for "+model.Architecture+")")
+		effective := m.effectiveBackend()
+		if !strings.EqualFold(effective, model.AutoBackend) {
+			statline("Backend", effective+" (hot-experts overlay on "+model.AutoBackend+")")
+		} else {
+			statline("Backend", model.AutoBackend+" (auto-selected for "+model.Architecture+")")
+		}
 	case m.selectedBackendRecipe() != nil:
 		line("backend-install", "[i] Backend", "install "+model.BackendRecipe+" for "+model.Architecture)
 	case m.backendRouteBypass && model.BackendRecipe != "":
@@ -1798,6 +1980,11 @@ func (m Model) viewModelConfig() string {
 	line("kvq", "[k] KV quality", kvQualityLabel)
 	swaLabel := m.swaLabel(model)
 	line("swa", "[w] Full SWA cache", swaLabel)
+	hotLabel := "auto (optimizer builds around it)"
+	if strings.EqualFold(strings.TrimSpace(m.hotExperts), "off") {
+		hotLabel = "off"
+	}
+	line("hotexperts", "[h] Hot experts", hotLabel)
 
 	section("Tuning")
 	line("tuned", "[t] Tuned config", tuneLabel)
@@ -1834,6 +2021,11 @@ func (m Model) viewModelConfig() string {
 		nocacheLabel = "on (derive fresh, ignore cached config)"
 	}
 	statline("[g] Launch without cached config", nocacheLabel)
+	hotStat := "auto (optimizer builds around a useful GPU cache)"
+	if strings.EqualFold(strings.TrimSpace(m.hotExperts), "off") {
+		hotStat = "off"
+	}
+	statline("Hot experts", hotStat)
 	statline("[y] Clear caches", "drop cached placement/calibration for this model (keep GGUF)")
 	line("launch", "[L] Launch", "▶ start the server")
 	line("dryrun", "[D] Dry run", "print the command, don't run")
@@ -1877,6 +2069,9 @@ func (m Model) updatePrelaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
 				req.BackendArgs = append([]string(nil), m.replayRequest.BackendArgs...)
 				m.launchRequest = &req
 			} else {
+				if m.openHotExpertFeatureInstall() {
+					return m, nil
+				}
 				m.launchRequest = m.buildLaunchRequest()
 			}
 			return m, tea.Quit
@@ -1896,6 +2091,9 @@ func (m Model) updatePrelaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// session; otherwise fall through to no-op rather than launching
 			// something the footer did not offer.
 			if m.claudeCode && m.resumeSession != "" {
+				if m.openHotExpertFeatureInstall() {
+					return m, nil
+				}
 				req := m.buildLaunchRequest()
 				if req != nil {
 					req.ResumeSession = m.resumeSession
@@ -2049,6 +2247,7 @@ func (m Model) viewPrelaunch() string {
 	b.WriteString(fmt.Sprintf("  KV placement:   %s\n", m.kvPlacement))
 	b.WriteString(fmt.Sprintf("  KV quality:     %s\n", kvQualityLabel(m.kvQuality)))
 	b.WriteString(fmt.Sprintf("  Full SWA cache: %s\n", m.swaLabel(model)))
+	b.WriteString(fmt.Sprintf("  Hot experts:    %s\n", m.hotExperts))
 	if m.aitune {
 		b.WriteString(fmt.Sprintf("  AI tune:        %s (%d rounds)\n", boolLabel(m.aitune), m.aituneRounds))
 	} else {
@@ -3192,7 +3391,9 @@ func (m *Model) refreshTunedCounts() {
 
 // settingRow describes one editable config setting on the Settings screen.
 // kind is "enum" (pick from options), "bool" (toggle), or "text" (free input).
+// group is "auto" (standard launch path) or "expert" (manual overrides).
 type settingRow struct {
+	group   string
 	label   string
 	kind    string
 	options []string
@@ -3210,36 +3411,48 @@ func settingRows() []settingRow {
 		}
 	}
 	return []settingRow{
-		{label: "Backend", kind: "enum", options: backendOptions(),
+		{group: "auto", label: "Backend", kind: "enum", options: backendOptions(),
 			get: func(c *config.Config) string { return c.Backend },
 			set: func(c *config.Config, v string) { c.Backend = v }},
-		{label: "Model directory", kind: "text",
-			get: func(c *config.Config) string { return c.ModelDir },
-			set: func(c *config.Config, v string) { c.ModelDir = v }},
-		{label: "Context", kind: "enum", options: []string{"fit", "max"},
+		{group: "auto", label: "Context", kind: "enum", options: []string{"fit", "max"},
 			get: func(c *config.Config) string { return c.CtxValue() },
 			set: func(c *config.Config, v string) {
 				_ = c.SetCtxValue(v)
 			}},
-		{label: "KV placement", kind: "enum", options: []string{"auto", "gpu", "cpu"},
+		{group: "auto", label: "KV placement", kind: "enum", options: []string{"auto", "gpu", "cpu"},
 			get: func(c *config.Config) string { return c.KVPlacement },
 			set: func(c *config.Config, v string) { c.KVPlacement = v }},
-		{label: "KV quality", kind: "enum", options: kvQualityOptions(),
+		{group: "auto", label: "KV quality", kind: "enum", options: kvQualityOptions(),
 			get: func(c *config.Config) string { return c.KVQuality },
 			set: func(c *config.Config, v string) { c.KVQuality = v }},
-		{label: "Full SWA cache", kind: "bool",
+		{group: "auto", label: "Hot experts", kind: "enum", options: []string{"auto", "on", "off"},
+			get: func(c *config.Config) string {
+				if normalized, err := config.NormalizeHotExperts(c.HotExperts); err == nil {
+					return normalized
+				}
+				return c.HotExperts
+			},
+			set: func(c *config.Config, v string) {
+				if normalized, err := config.NormalizeHotExperts(v); err == nil {
+					c.HotExperts = normalized
+				}
+			}},
+		{group: "expert", label: "Model directory", kind: "text",
+			get: func(c *config.Config) string { return c.ModelDir },
+			set: func(c *config.Config, v string) { c.ModelDir = v }},
+		{group: "expert", label: "Full SWA cache", kind: "bool",
 			get: func(c *config.Config) string { return boolLabel(c.SWAFull) },
 			set: func(c *config.Config, v string) { c.SWAFull = v == "on" }},
-		{label: "Remember live probes", kind: "bool",
+		{group: "expert", label: "Remember live probes", kind: "bool",
 			get: func(c *config.Config) string { return boolLabel(c.AllowLiveMemoryProbe) },
 			set: func(c *config.Config, v string) { c.AllowLiveMemoryProbe = v == "on" }},
-		{label: "Support expert / optimizer", kind: "enum", options: []string{"auto", "on", "off"},
+		{group: "expert", label: "Support expert / optimizer", kind: "enum", options: []string{"auto", "on", "off"},
 			get: func(c *config.Config) string { return c.SupportExpert },
 			set: func(c *config.Config, v string) { c.SupportExpert = v }},
-		{label: "Support online research", kind: "bool",
+		{group: "expert", label: "Support online research", kind: "bool",
 			get: func(c *config.Config) string { return boolLabel(c.SupportOnline) },
 			set: func(c *config.Config, v string) { c.SupportOnline = v == "on" }},
-		{label: "VRAM headroom", kind: "text",
+		{group: "expert", label: "VRAM headroom", kind: "text",
 			get: func(c *config.Config) string {
 				if strings.TrimSpace(c.VRAMHeadroom) == "" {
 					return "0"
@@ -3247,7 +3460,7 @@ func settingRows() []settingRow {
 				return c.VRAMHeadroom
 			},
 			set: func(c *config.Config, v string) { c.VRAMHeadroom = strings.TrimSpace(v) }},
-		{label: "RAM headroom", kind: "text",
+		{group: "expert", label: "RAM headroom", kind: "text",
 			get: func(c *config.Config) string {
 				if strings.TrimSpace(c.RAMHeadroom) == "" {
 					return "0"
@@ -3255,26 +3468,26 @@ func settingRows() []settingRow {
 				return c.RAMHeadroom
 			},
 			set: func(c *config.Config, v string) { c.RAMHeadroom = strings.TrimSpace(v) }},
-		{label: "RAM limit percent", kind: "text",
+		{group: "expert", label: "RAM limit percent", kind: "text",
 			get: func(c *config.Config) string { return strconv.Itoa(c.RAMLimitPercent) },
 			set: atoiSet(func(c *config.Config, n int) { c.RAMLimitPercent = n })},
-		{label: "Speculative", kind: "enum",
+		{group: "expert", label: "Speculative", kind: "enum",
 			options: []string{"off", "auto", "draft", "eagle3", "ngram", "ngram-mod", "ngram-k4v", "mtp"},
 			get:     func(c *config.Config) string { return c.Spec },
 			set:     func(c *config.Config, v string) { c.Spec = v }},
-		{label: "Vision", kind: "bool",
+		{group: "expert", label: "Vision", kind: "bool",
 			get: func(c *config.Config) string { return boolLabel(c.Vision) },
 			set: func(c *config.Config, v string) { c.Vision = v == "on" }},
-		{label: "Port", kind: "text",
+		{group: "expert", label: "Port", kind: "text",
 			get: func(c *config.Config) string { return strconv.Itoa(c.Port) },
 			set: atoiSet(func(c *config.Config, n int) { c.Port = n })},
-		{label: "Host", kind: "text",
+		{group: "expert", label: "Host", kind: "text",
 			get: func(c *config.Config) string { return c.Host },
 			set: func(c *config.Config, v string) { c.Host = strings.TrimSpace(v) }},
-		{label: "Parallel", kind: "text",
+		{group: "expert", label: "Parallel", kind: "text",
 			get: func(c *config.Config) string { return strconv.Itoa(c.Parallel) },
 			set: atoiSet(func(c *config.Config, n int) { c.Parallel = n })},
-		{label: "AI-tune rounds", kind: "text",
+		{group: "expert", label: "AI-tune rounds", kind: "text",
 			get: func(c *config.Config) string { return strconv.Itoa(c.TuneRounds) },
 			set: atoiSet(func(c *config.Config, n int) { c.TuneRounds = n })},
 	}
@@ -3308,6 +3521,9 @@ func (m *Model) applySetting(row settingRow, val string) {
 		m.kvQuality = val
 	case "Full SWA cache":
 		m.swaFull = m.settingsCfg.SWAFull
+	case "Hot experts":
+		m.hotExperts = m.settingsCfg.HotExperts
+		m.hotExpertsBuildBypass = false
 	case "Support expert / optimizer":
 		m.supportExpert = m.settingsCfg.SupportExpert
 	case "Support online research":
@@ -3346,6 +3562,34 @@ func (m *Model) applySetting(row settingRow, val string) {
 	}
 }
 
+// resetStandardLaunchToAuto restores the default auto launch path. Expert
+// overrides (paths, port, headroom, pinned parallel, SWA, speculation) stay.
+func (m *Model) resetStandardLaunchToAuto() {
+	if m.settingsCfg == nil {
+		m.settingsCfg = config.Defaults()
+	}
+	m.settingsCfg.Backend = "auto"
+	_ = m.settingsCfg.SetCtxValue("fit")
+	m.settingsCfg.KVPlacement = "auto"
+	m.settingsCfg.KVQuality = "auto"
+	m.settingsCfg.HotExperts = "auto"
+	if err := m.settingsCfg.Save(); err != nil {
+		m.message = fmt.Sprintf("Warning: standard launch was not reset — save failed: %v", err)
+		m.messageType = "warning"
+		return
+	}
+	m.backend = "auto"
+	m.setCtx("fit")
+	m.kvPlacement = "auto"
+	m.kvQuality = "auto"
+	m.kvQualityTouched = false
+	m.hotExperts = "auto"
+	m.hotExpertsBuildBypass = false
+	m.refreshTunedCounts()
+	m.message = "Standard launch reset to auto (context, KV, hot experts, backend)"
+	m.messageType = "info"
+}
+
 func validateSettingValue(label, val string) error {
 	switch label {
 	case "Port":
@@ -3356,6 +3600,9 @@ func validateSettingValue(label, val string) error {
 		if err != nil || n < 0 {
 			return fmt.Errorf("must be a non-negative integer")
 		}
+	case "Hot experts":
+		_, err := config.NormalizeHotExperts(val)
+		return err
 	case "VRAM headroom", "RAM headroom":
 		_, err := config.ParseBudgetMBStrict(val)
 		return err
@@ -3734,6 +3981,8 @@ func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if row.kind == "bool" {
 			m.applySetting(row, toggleBool(row.get(m.settingsCfg)))
 		}
+	case "r", "R":
+		m.resetStandardLaunchToAuto()
 	case "e", "E":
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
@@ -3774,9 +4023,20 @@ func (m Model) viewChoice() string {
 
 func (m Model) viewSettings() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("═══ Settings ═══") + "\n\n")
+	b.WriteString(titleStyle.Render("═══ Settings ═══") + "\n")
+	b.WriteString(mutedStyle.Render("  Standard launch stays on auto. Anything you change below that is an expert override.") + "\n")
 	rows := settingRows()
+	lastGroup := ""
 	for i, row := range rows {
+		if row.group != lastGroup {
+			switch row.group {
+			case "auto":
+				b.WriteString("\n" + recommendStyle.Render("  Standard launch (auto)") + "\n")
+			case "expert":
+				b.WriteString("\n" + recommendStyle.Render("  Expert overrides") + "\n")
+			}
+			lastGroup = row.group
+		}
 		val := row.get(m.settingsCfg)
 		if row.label == "KV quality" {
 			val = kvQualityLabel(val)
@@ -3791,7 +4051,10 @@ func (m Model) viewSettings() string {
 	if m.inputMode == "setting" {
 		b.WriteString("\n  " + m.input.View() + "\n")
 	}
-	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · Enter/→ change · ←/→ cycle enums · [e] edit file · Esc back"))
+	if m.settingsCursor >= 0 && m.settingsCursor < len(rows) && rows[m.settingsCursor].label == "Hot experts" {
+		b.WriteString("\n" + mutedStyle.Render("  auto = turn the cache on and let the optimizer rebuild around it; off = disabled"))
+	}
+	b.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · Enter/→ change · ←/→ cycle enums · [r] reset auto path · [e] edit file · Esc back"))
 	b.WriteString("\n" + mutedStyle.Render("  config: "+m.settingsPath))
 	if m.message != "" {
 		b.WriteString("\n  ")
@@ -3861,8 +4124,9 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		FlashAttn:     true,
 		Parallel:      parallel,
 		ParallelSet:   parallelSet,
+		HotExperts:    m.hotExperts,
 		Vision:        m.vision,
-		Backend:       m.effectiveBackend(),
+		Backend:       m.launchBackend(),
 		TuneCache:     m.tunePath,
 		AITune:        m.aitune,
 		AITuneRounds:  m.aituneRounds,
@@ -3899,19 +4163,22 @@ type LaunchRequest struct {
 	// have to land on a different disk than the default one, and making the
 	// user repoint ModelDir and then remember to put it back is both tedious
 	// and easy to get wrong.
-	DownloadDir   string
-	ModelPath     string
-	Port          int
-	CtxSize       int
-	CtxFlag       string
-	KVPlacement   string
-	KVQuality     string
-	KVQualitySet  bool // TUI explicitly cycled KV quality; emit an explicit override
-	SWAFull       bool
-	SWAFullSet    bool // TUI explicitly selected on/off; emit an override either way
-	FlashAttn     bool
-	Parallel      int
-	ParallelSet   bool // user typed a parallel value (claude-code mode must not override)
+	DownloadDir  string
+	ModelPath    string
+	Port         int
+	CtxSize      int
+	CtxFlag      string
+	KVPlacement  string
+	KVQuality    string
+	KVQualitySet bool // TUI explicitly cycled KV quality; emit an explicit override
+	SWAFull      bool
+	SWAFullSet   bool // TUI explicitly selected on/off; emit an override either way
+	FlashAttn    bool
+	Parallel     int
+	ParallelSet  bool // user typed a parallel value (claude-code mode must not override)
+	// HotExperts is off, auto, on, or a positive slot count. Auto may fall back
+	// cache-free; on requires an optimizer-sized cache-on launch.
+	HotExperts    string
 	Vision        bool
 	Backend       string
 	TuneCache     string
@@ -3986,6 +4253,9 @@ func (req *LaunchRequest) LaunchArgs() []string {
 	}
 	if req.ParallelSet && req.Parallel > 0 {
 		args = append(args, "--parallel", strconv.Itoa(req.Parallel))
+	}
+	if v := strings.TrimSpace(req.HotExperts); v != "" {
+		args = append(args, "--hot-experts", v)
 	}
 	if req.Benchmark {
 		args = append(args, "--benchmark")

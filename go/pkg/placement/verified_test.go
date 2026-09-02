@@ -104,6 +104,39 @@ func TestVerifiedConfigRequiresCurrentPerformanceEvidence(t *testing.T) {
 	}
 }
 
+func TestVerifiedConfigRoundTripsHotExpertShapeAndRuntimeEvidence(t *testing.T) {
+	strategy := &Strategy{
+		Type: MoEOffload, ContextSize: 32768, BatchSize: 2048, UBatchSize: 256,
+		Parallel: 1, NCPUMoE: 20, OTString: "exps=CPU", BackendTag: "llama",
+		HotExpertCacheSlots: 8, HotExpertCacheInserts: 2, HotExpertCacheLayers: 20,
+		HotExpertCacheVRAMByGPU:   map[int]int{0: 1024, 2: 768},
+		HotExpertCacheLayersByGPU: map[int]int{0: 12, 2: 8},
+		HotExpertCacheEvidence:    "exact allocation; measured telemetry",
+		HotExpertCacheSteps:       1024, HotExpertCacheHits: 75,
+		HotExpertCacheMisses: 25, HotExpertCacheHitRate: 75,
+	}
+	record := VerifiedConfigToRecord("scope", "moe.gguf", strategy, "backend", "/server", "", "")
+	restored := VerifiedToStrategy(&record, Options{
+		BackendHelp: "--moe-expert-cache N\n--moe-expert-cache-inserts N",
+	}, nil)
+	if restored.HotExpertCacheSlots != 8 || restored.HotExpertCacheInserts != 2 ||
+		restored.HotExpertCacheLayers != 20 || restored.HotExpertCacheVRAMByGPU[2] != 768 ||
+		restored.HotExpertCacheLayersByGPU[0] != 12 || restored.HotExpertCacheSteps != 1024 ||
+		restored.HotExpertCacheHits != 75 || restored.HotExpertCacheMisses != 25 ||
+		restored.HotExpertCacheHitRate != 75 || !restored.BackendSupportsHotExpertCache {
+		t.Fatalf("hot-expert verified evidence was not restored: %+v", restored)
+	}
+	restored.HotExpertCacheVRAMByGPU[0] = 1
+	if record.HotExpertCacheVRAMByGPU[0] != 1024 {
+		t.Fatal("verified hot-expert VRAM map aliases the runtime strategy")
+	}
+
+	unsupported := VerifiedToStrategy(&record, Options{BackendHelp: "--moe-expert-cache N"}, nil)
+	if strings.Contains(strings.Join(unsupported.Args("m.gguf", 8081), " "), "--moe-expert-cache") {
+		t.Fatal("verified cache shape emitted flags on a backend missing the exact capability pair")
+	}
+}
+
 func TestVerifiedConfigRecomputesCurrentCPUAffinityCapabilities(t *testing.T) {
 	vc := &VerifiedConfig{
 		StrategyType: MoEOffload, ContextSize: 8192, BatchSize: 512, UBatchSize: 256,
@@ -441,12 +474,16 @@ func TestVerifiedConfigToStrategyRestoresRequestOwnedKnobs(t *testing.T) {
 		t.Fatalf("model semantics must restore verbatim: %+v", s)
 	}
 	// The saved values are used when the caller did not request overrides.
-	opts2 := Options{}
+	opts2 := Options{BackendHelp: "--fit [on|off]\n--kv-offload\n"}
 	s2 := VerifiedToStrategy(vc, opts2, caps)
 	if s2.BatchSize != 1024 || s2.UBatchSize != 256 || s2.Parallel != 2 {
 		t.Fatalf("saved knobs must apply when caller has no override: %+v", s2)
 	}
 	if len(s2.TensorSplit) != 2 || s2.TensorSplit[0] != 0.6 {
 		t.Fatalf("tensor split not restored: %v", s2.TensorSplit)
+	}
+	args := strings.Join(s2.Args("model.gguf", 8081), " ")
+	if !strings.Contains(args, "--kv-offload") || !strings.Contains(args, "--fit off") {
+		t.Fatalf("verified replay dropped current-backend placement semantics: %q", args)
 	}
 }

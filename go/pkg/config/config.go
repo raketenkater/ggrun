@@ -50,10 +50,15 @@ type Config struct {
 	Vision               bool   `json:"vision"`
 	Parallel             int    `json:"parallel"`
 	Host                 string `json:"host"`
-	Spec                 string `json:"spec"`           // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
-	SupportExpert        string `json:"support_expert"` // off, auto (installed-only), on
-	SupportOnline        bool   `json:"support_online"` // official llama.cpp research only
-	SupportModel         string `json:"support_model"`  // optional verified local artifact override
+	Spec                 string `json:"spec"` // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
+	// HotExperts controls the optional backend-provided GPU cache for
+	// host-resident routed experts. "auto" lets the core optimizer compare a
+	// cache-on candidate with the stable baseline, "off" disables it, and a
+	// positive integer requests that exact number of slots per eligible layer.
+	HotExperts    string `json:"hot_experts"`
+	SupportExpert string `json:"support_expert"` // off, auto (installed-only), on
+	SupportOnline bool   `json:"support_online"` // official llama.cpp research only
+	SupportModel  string `json:"support_model"`  // optional verified local artifact override
 
 	// sources is populated by Load and intentionally not serialized. Keeping
 	// provenance next to the merged value lets `config show` report the source
@@ -68,7 +73,7 @@ var DefaultKeys = []string{
 	"RAM_BUDGET", "RAM_LIMIT_PERCENT", "VRAM_HEADROOM", "RAM_HEADROOM", "CGROUP_HEADROOM_MB", "KV_PLACEMENT", "KV_QUALITY", "SWA_FULL",
 	"ASSUME_YES", "ALLOW_LIVE_MEMORY_PROBE",
 	"BACKEND", "LLAMA_SERVER", "APP_HOME",
-	"TUNE_ROUNDS", "VISION", "PARALLEL", "HOST", "SPEC",
+	"TUNE_ROUNDS", "VISION", "PARALLEL", "HOST", "SPEC", "HOT_EXPERTS",
 	"SUPPORT_EXPERT", "SUPPORT_ONLINE", "SUPPORT_MODEL",
 }
 
@@ -107,6 +112,7 @@ func Defaults() *Config {
 		Parallel:             1,
 		Host:                 "127.0.0.1",
 		Spec:                 "off",
+		HotExperts:           "auto",
 		SupportExpert:        "auto",
 		SupportOnline:        false,
 		SupportModel:         "",
@@ -265,7 +271,7 @@ func snapshotEnv() map[string]string {
 		"LLM_HEALTH_TIMEOUT", "LLM_MODEL_DIR", "LLM_CACHE_DIR", "LLM_LOG_DIR",
 		"LLM_RAM_BUDGET", "LLM_RAM_LIMIT_PERCENT", "LLM_VRAM_HEADROOM", "LLM_RAM_HEADROOM", "LLM_CGROUP_HEADROOM_MB", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_SWA_FULL", "LLM_ASSUME_YES", "LLM_ALLOW_LIVE_MEMORY_PROBE",
 		"LLM_BACKEND", "LLAMA_SERVER", "LLM_APP_HOME", "LLM_TUNE_ROUNDS",
-		"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC",
+		"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC", "LLM_HOT_EXPERTS",
 		"LLM_SUPPORT_EXPERT", "LLM_SUPPORT_ONLINE", "LLM_SUPPORT_MODEL",
 	} {
 		if v := os.Getenv(k); v != "" {
@@ -412,6 +418,12 @@ func setConfigValue(cfg *Config, key, raw, source string) error {
 		cfg.Host = val
 	case "SPEC":
 		cfg.Spec = val
+	case "HOT_EXPERTS":
+		mode, err := NormalizeHotExperts(val)
+		if err != nil {
+			return err
+		}
+		cfg.HotExperts = mode
 	case "SUPPORT_EXPERT":
 		mode, err := NormalizeSupportExpert(val)
 		if err != nil {
@@ -435,6 +447,26 @@ func parseNonNegativeInt(val string) (int, error) {
 		return 0, fmt.Errorf("must be a non-negative integer")
 	}
 	return n, nil
+}
+
+// NormalizeHotExperts validates the standard-launch hot-expert policy.
+// "auto" makes the cache an opportunistic optimizer coordinate and may restore
+// the cache-free baseline after a failed admission. "on" lets the optimizer
+// choose the slot count but requires the resulting launch to remain cache-on.
+// A positive integer requests that exact slot count.
+func NormalizeHotExperts(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode == "auto" || mode == "on" || mode == "off" {
+		return mode, nil
+	}
+	n, err := strconv.Atoi(mode)
+	if err != nil || n <= 0 {
+		return "", fmt.Errorf("must be off, auto, on, or a positive expert-slot count")
+	}
+	return strconv.Itoa(n), nil
 }
 
 // SetCtxValue updates the one canonical context representation.
@@ -553,6 +585,11 @@ func (c *Config) Save() error {
 		return fmt.Errorf("SUPPORT_EXPERT: %w", err)
 	}
 	c.SupportExpert = supportMode
+	hotExperts, err := NormalizeHotExperts(c.HotExperts)
+	if err != nil {
+		return fmt.Errorf("HOT_EXPERTS: %w", err)
+	}
+	c.HotExperts = hotExperts
 	path := Path()
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -592,6 +629,7 @@ func (c *Config) Save() error {
 	fmt.Fprintf(f, "LLM_PARALLEL=%d\n", c.Parallel)
 	fmt.Fprintf(f, "LLM_HOST=%q\n", c.Host)
 	fmt.Fprintf(f, "LLM_SPEC=%q\n", c.Spec)
+	fmt.Fprintf(f, "LLM_HOT_EXPERTS=%q\n", c.HotExperts)
 	fmt.Fprintf(f, "LLM_SUPPORT_EXPERT=%q\n", c.SupportExpert)
 	fmt.Fprintf(f, "LLM_SUPPORT_ONLINE=%v\n", c.SupportOnline)
 	fmt.Fprintf(f, "LLM_SUPPORT_MODEL=%q\n", c.SupportModel)
@@ -658,6 +696,8 @@ func (c *Config) Show() string {
 			val = c.Host
 		case "SPEC":
 			val = c.Spec
+		case "HOT_EXPERTS":
+			val = c.HotExperts
 		case "SUPPORT_EXPERT":
 			val = c.SupportExpert
 		case "SUPPORT_ONLINE":

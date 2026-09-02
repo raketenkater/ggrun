@@ -202,6 +202,78 @@ func TestValidateBackendCandidateChecksServerSurfaceAndAccelerator(t *testing.T)
 	}
 }
 
+func TestValidateBackendRecipeCandidateRequiresExactCapabilityFlags(t *testing.T) {
+	recipe := backends.RecipeByName("hot-experts")
+	if recipe == nil {
+		t.Fatal("hot-experts recipe missing")
+	}
+	write := func(name, help string) string {
+		path := filepath.Join(t.TempDir(), name)
+		body := "#!/bin/sh\nif [ \"$1\" = --help ]; then echo '" + help + "'; exit 0; fi\nexit 1\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	good := write("good-hot-server", "--moe-expert-cache N --moe-expert-cache-inserts N")
+	if err := validateBackendRecipeCandidate(good, recipe); err != nil {
+		t.Fatalf("exact recipe capability rejected: %v", err)
+	}
+	near := write("near-hot-server", "--moe-expert-cache-extra N --moe-expert-cache-inserts-extra N")
+	if err := validateBackendRecipeCandidate(near, recipe); err == nil {
+		t.Fatal("prefix-only recipe flags were accepted")
+	}
+	missing := write("missing-hot-server", "--moe-expert-cache N")
+	if err := validateBackendRecipeCandidate(missing, recipe); err == nil || !strings.Contains(err.Error(), "--moe-expert-cache-inserts") {
+		t.Fatalf("missing insertion capability was accepted: %v", err)
+	}
+}
+
+func TestDesiredBackendRecipeFollowsCurrentInstalledBase(t *testing.T) {
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	basePath := filepath.Join(appHome, "base-server")
+	featurePath := filepath.Join(appHome, "feature-server")
+	for _, path := range []string{basePath, featurePath} {
+		if err := os.WriteFile(path, []byte("binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := backends.Backend{
+		Tag: "glm5next", Path: basePath, GitURL: "https://example.test/llama.cpp.git",
+		Branch: "glm", Commit: strings.Repeat("b", 40), RouteArch: "glm5next",
+	}
+	composite := backends.Backend{
+		Tag: "glm5next-hot-experts", Path: featurePath, GitURL: base.GitURL,
+		Branch: base.Branch, Commit: strings.Repeat("a", 40), RouteArch: base.RouteArch,
+		BaseTag: base.Tag, Features: []string{"hot-experts"}, HelperOnly: true,
+	}
+	if err := backends.Save([]backends.Backend{base, composite}); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := desiredBackendRecipe(composite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recipe.Tag != composite.Tag || recipe.Commit != base.Commit || recipe.BaseTag != base.Tag ||
+		len(recipe.Features) != 1 || recipe.Features[0] != "hot-experts" {
+		t.Fatalf("desired composite recipe did not follow exact current base: %#v", recipe)
+	}
+	if names := recipe.PatchNames(); len(names) != 1 || !strings.HasPrefix(names[0], "features/hot-experts/") {
+		t.Fatalf("desired composite lost reviewed feature patch: %v", names)
+	}
+}
+
+func TestDesiredBackendRecipeFailsClosedWithoutCompositeBase(t *testing.T) {
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	_, err := desiredBackendRecipe(backends.Backend{
+		Tag: "orphan-hot", BaseTag: "gone", Features: []string{"hot-experts"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing its base backend") {
+		t.Fatalf("orphan composite was accepted: %v", err)
+	}
+}
+
 func TestRollbackKeepsCanonicalLayoutForNextUpdate(t *testing.T) {
 	appHome := t.TempDir()
 	t.Setenv("LLM_APP_HOME", appHome)

@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **The TUI can provision hot experts for a model's actual architecture fork.**
+  `Hot experts = auto` now offers a one-time isolated composite build on the
+  first confirmed MoE launch, then reuses that exact base+feature backend from
+  the standard launch resolver. The reviewed patch is applied after any base
+  recipe patches and must pass architecture, CUDA, server, and exact flag
+  conformance. Source conflicts, binary-only forks, and divergent fork families
+  fail closed without modifying the working base backend; repeated installs use
+  staged update/rollback rather than rebuilding over the active binary.
+- **Hot experts `auto` is a first-class optimizer coordinate.** The packed
+  GPU-expert layout remains the cache-free baseline. If leftover VRAM cannot
+  hold a useful cache (at least as many slots as experts used per token), the
+  first challenger demotes GPU expert layers until it can. The live A/B still
+  decides. Automatic launch now keeps that cache-on candidate as the measured
+  finalist: the relative cost model does not price cache hits, so a cheaper-
+  looking KV or topology neighbor cannot consume the single live A/B slot.
+  Auto also applies leftover or demoted cache-on from exact cache-free
+  evidence so `--moe-expert-cache` is on the first serve when it can be
+  planned; packed GPU experts remain the fail-closed fallback. A completed
+  cache-on measurement is the requested coordinate unless it regresses a
+  phase. Calibration schema 23 invalidates older default-won records that
+  measured the wrong challenger. TUI Settings and the model config screen expose
+  `Hot experts` as `auto`/`on`/`off`: `auto` may restore the cache-free baseline,
+  while `on` requires an optimizer-sized cache-on launch. A numeric slot count
+  remains a CLI exact request. Settings now group the standard auto
+  launch path above expert overrides, with `[r]` resetting context/KV/hot
+  experts/backend to auto.
+- **Standard launch can measure an experimental GPU cache for host-resident
+  MoE experts.** The capability-only `hot-experts` recipe is pinned to an
+  immutable reviewed fork revision and is never architecture-routed. Automatic
+  mode derives one per-layer slot count only from exact residual per-device
+  VRAM, validates the backend's allocation acknowledgement, then requires a
+  deterministic decode canary with consistent non-zero hit telemetry plus
+  material pure-decode and end-to-end agent gains. p2, speculative, mmap,
+  fused, row-split, and unaccounted layouts fail closed. Activation or runtime
+  evidence failure invalidates the cache-on records and restores the exact
+  cache-free placement; public hardware/model acceptance remains experimental.
 - **Agent transport hardening now fails early and records truthful phases.**
   Workflow calls with competing `name`, `script`, or `scriptPath` sources are
   rejected instead of silently following tool precedence; materialized scripts

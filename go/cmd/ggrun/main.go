@@ -172,8 +172,8 @@ Commands:
   support              Native optional support expert / optimizer (status, install, doctor)
   models [list|browse|path|rm] List, browse, locate, or safely remove GGUF models
   config [show|edit|path|reset]  Manage settings
-  backend [list|add|register|remove]  Manage custom llama.cpp backends and
-                       optionally route a model architecture to one
+  backend [list|install|feature|add|register|remove]  Manage isolated llama.cpp
+                       backends, routes, and reviewed source-feature overlays
   update, --update     Update ggrun and backends
   claude [list|resume] List recorded Claude Code sessions, or relaunch the recorded
                        backend shape and resume one (default: newest in this directory)
@@ -235,6 +235,9 @@ Launch flags:
   --claude-resume-force  Resume even though the backend shape changed (unsafe)
   --calibrate str      Core launch optimization: auto|on|off (default auto; auto runs/replays
                        a bounded agent-workload search, on widens an explicit screen)
+  --hot-experts str    GPU cache for host-resident MoE experts: off|auto|on|slot-count
+                       (auto may fall back cache-free; on requires optimizer-sized
+                       cache-on; TUI can provision a compatible backend overlay)
   --worker-benchmark   Load once, measure throughput plus typed support/reviewer decisions,
                        print JSON, and stop
   --support-expert str Optional native expert/optimizer: off|auto|on (default auto)
@@ -669,11 +672,21 @@ type launchRequest struct {
 	BackendExplicit   bool
 	TuneCache         string
 	SpecMode          string
-	ForceSpecMoE      bool
-	RamBudgetMB       int
-	RAMLimitPercent   int
-	VRAMHeadroomMB    int
-	RAMHeadroomMB     int
+	HotExperts        string // off, auto, on, or a positive cache-slot count per eligible layer
+	HotExpertsSet     bool   // --hot-experts was supplied explicitly
+	// HotExpertsRuntimeDisabled is set only after a requested cache failed its
+	// post-load capability check. Re-plans in the same lifecycle must return to
+	// the cache-free baseline instead of reapplying a stale measured winner.
+	HotExpertsRuntimeDisabled bool
+	// HotExpertPendingNegative carries deterministic cache-on failure evidence
+	// until the restored cache-free baseline reaches StateActive. It is runtime
+	// controller state only and never changes the requested launch identity.
+	HotExpertPendingNegative *placement.CalibrationDecision
+	ForceSpecMoE             bool
+	RamBudgetMB              int
+	RAMLimitPercent          int
+	VRAMHeadroomMB           int
+	RAMHeadroomMB            int
 	// CgroupHeadroomMB is the headroom the post-launch measured-footprint sizing
 	// keeps between the backend's measured non-reclaimable footprint and its hard
 	// MemoryMax. 0 keeps the pre-launch plan-derived ceiling (auto re-size off).
@@ -805,6 +818,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		Backend:              cfg.Backend,
 		BackendExplicit:      backendExplicit,
 		SpecMode:             cfg.Spec,
+		HotExperts:           cfg.HotExperts,
 		Parallel:             cfg.Parallel,
 		RamBudgetMB:          parseBudgetMB(cfg.RamBudget),
 		RAMLimitPercent:      cfg.RAMLimitPercent,
@@ -834,6 +848,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	if req.SpecMode == "" {
 		req.SpecMode = "off"
 	}
+	if req.HotExperts == "" {
+		req.HotExperts = "auto"
+	}
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -848,6 +865,18 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 					return nil, fmt.Errorf("%s: %w", key, err)
 				}
 				req.SupportExpert = mode
+				continue
+			case "--hot-experts", "--moe-expert-cache":
+				mode, err := config.NormalizeHotExperts(val)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", key, err)
+				}
+				req.HotExperts, req.HotExpertsSet = mode, true
+				continue
+			case "--moe-expert-cache-inserts":
+				if strings.TrimSpace(val) != "2" {
+					return nil, fmt.Errorf("%s is managed by ggrun and currently fixed at 2 for one-dimensional calibration", key)
+				}
 				continue
 			case "--support-online":
 				req.SupportOnline = val == "" || parseBoolFlag(val)
@@ -1077,6 +1106,26 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.Calibrate = mode
+			continue
+		case "--hot-experts", "--moe-expert-cache":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			mode, err := config.NormalizeHotExperts(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", a, err)
+			}
+			req.HotExperts, req.HotExpertsSet = mode, true
+			continue
+		case "--moe-expert-cache-inserts":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(v) != "2" {
+				return nil, fmt.Errorf("%s is managed by ggrun and currently fixed at 2 for one-dimensional calibration", a)
+			}
 			continue
 		case "--dry-run", "--emit-server-argv-json", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
 			if a == "--emit-server-argv-json" {
@@ -1399,6 +1448,12 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	if req.BatchSizeSet && req.UBatchSizeSet && req.BatchSize < req.UBatchSize {
 		return nil, fmt.Errorf("--batch-size (%d) must be at least --ubatch-size (%d)", req.BatchSize, req.UBatchSize)
 	}
+	for _, arg := range req.ExtraArgs {
+		if arg == "--moe-expert-cache" || strings.HasPrefix(arg, "--moe-expert-cache=") ||
+			arg == "--moe-expert-cache-inserts" || strings.HasPrefix(arg, "--moe-expert-cache-inserts=") {
+			return nil, fmt.Errorf("raw %s after -- bypasses ggrun's VRAM ledger; use --hot-experts instead", strings.SplitN(arg, "=", 2)[0])
+		}
+	}
 	req.ExtraArgs = normalizePlacementAwareExtraArgs(req, req.ExtraArgs)
 	return req, nil
 }
@@ -1527,7 +1582,13 @@ func evidenceBackendCacheTag(be *backendInfo) string {
 
 func scopedProbeBackendTag(req *launchRequest, model *placement.ModelProfile, be *backendInfo) string {
 	tag := placement.ScopedBackendCacheTag(evidenceBackendCacheTag(be), requestWorkloadProfile(req, model))
-	return placement.ScopedBackendFeatureTag(tag, req != nil && hasArg(req.ExtraArgs, "--swa-full"))
+	hotSlots := 0
+	if req != nil && !req.HotExpertsRuntimeDisabled {
+		hotSlots, _ = strconv.Atoi(strings.TrimSpace(req.HotExperts))
+	}
+	return placement.ScopedBackendRuntimeFeatureTag(
+		tag, req != nil && hasArg(req.ExtraArgs, "--swa-full"), hotSlots, 2,
+	)
 }
 
 func scopedProbeBackendTagForStrategy(req *launchRequest, model *placement.ModelProfile, be *backendInfo, strategy *placement.Strategy) string {
@@ -1540,7 +1601,12 @@ func scopedProbeBackendTagForStrategy(req *launchRequest, model *placement.Model
 	if strategy != nil {
 		swaFull = strategy.SWAFull
 	}
-	return placement.ScopedBackendFeatureTag(tag, swaFull)
+	hotSlots, hotInserts := 0, 0
+	if strategy != nil {
+		hotSlots = strategy.HotExpertCacheSlots
+		hotInserts = strategy.HotExpertCacheInserts
+	}
+	return placement.ScopedBackendRuntimeFeatureTag(tag, swaFull, hotSlots, hotInserts)
 }
 
 // resolveKVCacheTypeFlags turns llama.cpp's direct K/V flags into one planned
@@ -2669,6 +2735,19 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		}
 	}
 	samplingProfile := requestSamplingProfile(req, model)
+	hotExperts := req.HotExperts
+	if req.HotExpertsRuntimeDisabled {
+		hotExperts = "off"
+	}
+	hotSlots := 0
+	if parsed, err := strconv.Atoi(strings.TrimSpace(hotExperts)); err == nil && parsed > 0 {
+		hotSlots = parsed
+	}
+	if req.DisabledBackendFlags != nil {
+		if _, disabled := req.DisabledBackendFlags["--moe-expert-cache"]; disabled {
+			hotExperts, hotSlots = "off", 0
+		}
+	}
 	opts := placement.Options{
 		ContextSize:             ctxSize,
 		AutoContextMax:          autoContextMax,
@@ -2698,6 +2777,8 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		SpecMode:                req.SpecMode,
 		ForceSpecMoE:            req.ForceSpecMoE,
 		BackendHelp:             be.Help,
+		HotExperts:              hotExperts,
+		HotExpertCacheSlots:     hotSlots,
 		SpecCandidateValidator:  backendSpecCandidateValidator(be, model.ModelArch),
 		CacheFile:               req.TuneCache,
 		Parallel:                req.Parallel,
@@ -3329,6 +3410,7 @@ var planDerivedLaunchFlags = map[string]bool{
 	"--n-cpu-moe": true, "--tensor-split": true, "--split-mode": true,
 	"-ngl": true, "--n-gpu-layers": true, "--gpu-layers": true,
 	"-cram": true, "--cache-ram": true, "--ctx-checkpoints": true,
+	"--moe-expert-cache": true, "--moe-expert-cache-inserts": true,
 }
 
 // recoveryLaunchIdentity identifies the launch *shape* -- model, context, slots,
@@ -4260,7 +4342,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	}
 	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
 	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
-	placement.RecordPostLaunchContextAllocation(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, serverLog)
+	placement.RecordPostLaunchContextAllocation(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, serverLog, serverPID)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog, strategy.Parallel)
 	if !probeWritten {
 		return nil
@@ -4381,12 +4463,13 @@ func startLaunchExactAdmission(req *launchRequest, cfg *config.Config, model *pl
 type exactAdmissionClass string
 
 const (
-	exactAdmissionSpec      exactAdmissionClass = "speculation"
-	exactAdmissionCompat    exactAdmissionClass = "compatibility"
-	exactAdmissionCompanion exactAdmissionClass = "companion"
-	exactAdmissionMemory    exactAdmissionClass = "memory"
-	exactAdmissionMMap      exactAdmissionClass = "mmap"
-	exactAdmissionCUDAOOM   exactAdmissionClass = "cuda-oom"
+	exactAdmissionSpec       exactAdmissionClass = "speculation"
+	exactAdmissionCompat     exactAdmissionClass = "compatibility"
+	exactAdmissionCompanion  exactAdmissionClass = "companion"
+	exactAdmissionMemory     exactAdmissionClass = "memory"
+	exactAdmissionMMap       exactAdmissionClass = "mmap"
+	exactAdmissionHotExperts exactAdmissionClass = "hot-experts"
+	exactAdmissionCUDAOOM    exactAdmissionClass = "cuda-oom"
 )
 
 // exactAdmissionFailure distinguishes a deterministic refusal to run the
@@ -4434,12 +4517,111 @@ func exactAdmissionError(class exactAdmissionClass, detail string, cause error) 
 		message = fmt.Sprintf("exact candidate failed memory admission%s; refusing recovery ladder", detail)
 	case exactAdmissionMMap:
 		message = "exact candidate contradicted mmap pageability; refusing a resident argv rewrite"
+	case exactAdmissionHotExperts:
+		message = fmt.Sprintf("exact candidate did not activate its hot-expert cache%s; refusing to benchmark a cache-free fallback", detail)
 	case exactAdmissionCUDAOOM:
 		message = fmt.Sprintf("exact candidate CUDA OOM%s; refusing recovery ladder", detail)
 	default:
 		message = fmt.Sprintf("exact candidate required an argv rewrite (%s); refusing recovery ladder", class)
 	}
 	return &exactAdmissionFailure{class: class, message: message, cause: cause}
+}
+
+func automaticHotExpertFallbackAllowed(req *launchRequest, strategy *placement.Strategy) bool {
+	return req != nil && strategy != nil && strategy.HotExpertCacheSlots > 0 &&
+		strings.EqualFold(strings.TrimSpace(req.HotExperts), "auto")
+}
+
+func hotExpertFailureDecisionSource(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
+	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy,
+	pending *placement.CalibrationDecision,
+) *placement.CalibrationDecision {
+	var applied *placement.CalibrationDecision
+	if req != nil {
+		applied = req.AppliedCalibration
+	}
+	for _, decision := range []*placement.CalibrationDecision{pending, applied} {
+		if decision != nil && decision.ScopeKey != "" {
+			copy := *decision
+			return &copy
+		}
+	}
+	if cfg == nil {
+		return nil
+	}
+	cacheFree := placement.WithoutHotExpertCache(strategy)
+	if cacheFree == nil {
+		return nil
+	}
+	key := calibrationScopeKey(req, model, be, caps, cacheFree)
+	decision, err := placement.LoadCalibrationDecision(cfg.CacheDir, key)
+	if err != nil {
+		return nil
+	}
+	return decision
+}
+
+func invalidateAutomaticHotExpertEvidence(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
+	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy,
+) error {
+	if req == nil {
+		return nil
+	}
+	cacheDir := ""
+	if cfg != nil {
+		cacheDir = cfg.CacheDir
+	}
+	var failures []error
+	if key := verifiedConfigScopeKey(req, model, be, caps); key != "" {
+		if err := placement.DeleteVerifiedConfig(cacheDir, key); err != nil {
+			failures = append(failures, fmt.Errorf("delete cache-on verified config: %w", err))
+		}
+	}
+	calibrationKeys := map[string]bool{}
+	if cacheFree := placement.WithoutHotExpertCache(strategy); cacheFree != nil {
+		if key := calibrationScopeKey(req, model, be, caps, cacheFree); key != "" {
+			calibrationKeys[key] = true
+		}
+	}
+	if req.AppliedCalibration != nil && req.AppliedCalibration.ScopeKey != "" {
+		calibrationKeys[req.AppliedCalibration.ScopeKey] = true
+	}
+	for key := range calibrationKeys {
+		if err := placement.DeleteCalibrationDecision(cacheDir, key); err != nil {
+			failures = append(failures, fmt.Errorf("delete cache-on calibration decision: %w", err))
+		}
+	}
+	req.AppliedCalibration = nil
+	req.HotExpertsRuntimeDisabled = true
+	return errors.Join(failures...)
+}
+
+func hotExpertUnavailableDecision(source *placement.CalibrationDecision, strategy *placement.Strategy, reason string) *placement.CalibrationDecision {
+	if source == nil || source.ScopeKey == "" {
+		return nil
+	}
+	decision := *source
+	decision.Winner = "default"
+	decision.ValidationLevel = placement.CalibrationValidationAdmission
+	decision.WinnerTPS = decision.DefaultTPS
+	decision.WinnerPromptTPS = decision.DefaultPromptTPS
+	decision.WinnerMixedTPS = decision.DefaultMixedTPS
+	decision.WinnerTurnTimeS = decision.DefaultTurnTimeS
+	decision.WinnerTurnMaxS = decision.DefaultTurnMaxS
+	decision.WinnerAgentSamples = decision.DefaultAgentSamples
+	decision.WinnerWorkloadLanes = decision.DefaultWorkloadLanes
+	decision.WinnerCachedTokens = decision.DefaultCachedTokens
+	decision.WinnerNewPromptTokens = decision.DefaultNewPromptTokens
+	decision.WinnerScore = decision.DefaultScore
+	decision.Improvement = 0
+	decision.FinalistOutcome = "unavailable"
+	decision.FinalistFailureClass = "hot-expert-lifecycle"
+	decision.FinalistFailureReason = reason
+	decision.MeasuredAt = ""
+	if decision.Finalist == "" && strategy != nil && strategy.HotExpertCacheSlots > 0 {
+		decision.Finalist = fmt.Sprintf("hot-experts-%d", strategy.HotExpertCacheSlots)
+	}
+	return &decision
 }
 
 // validateExactAdmissionArgv is the backstop for every challenger admission
@@ -4936,6 +5118,54 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 				fmt.Fprintln(os.Stderr, "[mmap] exact backend contradicted file-backed loading; recomputing under resident anonymous-memory accounting")
 				continue
+			}
+			if strategy != nil && strategy.HotExpertCacheSlots > 0 {
+				logData := ""
+				if p != nil && p.LogBuf != nil {
+					logData = p.LogBuf.String()
+				}
+				if hotErr := placement.ValidateHotExpertCacheObservation(strategy, logData); hotErr != nil {
+					memoryRecovery.reject(serverArgs)
+					_ = p.Stop()
+					if exactAdmission {
+						return nil, strategy, serverArgs, exactAdmissionError(
+							exactAdmissionHotExperts, "", hotErr,
+						)
+					}
+					// Only automatic policy may restore cache-free. Numeric policy is an
+					// exact user/config request; any unexpected stale/off state also fails
+					// closed instead of silently changing the requested launch.
+					if !automaticHotExpertFallbackAllowed(req, strategy) {
+						return nil, strategy, serverArgs, fmt.Errorf("hot-expert activation failed: %w", hotErr)
+					}
+					negativeSource := hotExpertFailureDecisionSource(req, cfg, model, be, caps, strategy, nil)
+					// An automatic cached winner may fall back in this lifecycle, but
+					// erase the evidence which claimed the cache-on process was valid.
+					if invalidateErr := invalidateAutomaticHotExpertEvidence(req, cfg, model, be, caps, strategy); invalidateErr != nil {
+						fmt.Fprintf(os.Stderr, "[hot-experts] warning: failed to invalidate all cache-on evidence: %v\n", invalidateErr)
+					}
+					req.HotExpertPendingNegative = hotExpertUnavailableDecision(
+						negativeSource, strategy, "cache-on activation failed before the exact cache-free baseline was restored: "+hotErr.Error(),
+					)
+					// A hot-cache candidate changes no tensor/KV/batch coordinate. Strip
+					// only that feature from the exact candidate rather than recomputing
+					// under a potentially different free-VRAM snapshot.
+					next := placement.WithoutHotExpertCache(strategy)
+					if next == nil {
+						return nil, strategy, serverArgs, fmt.Errorf("%w; cache-free fallback returned no strategy", hotErr)
+					}
+					next.PerformanceTuned = false
+					next.VerifiedConfigReused = false
+					strategy = next
+					claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
+					serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
+					fmt.Fprintf(os.Stderr, "[hot-experts] %v; invalidated cache-on evidence and restoring the stable cache-free placement\n", hotErr)
+					continue
+				}
+				fmt.Fprintf(os.Stderr,
+					"[hot-experts] activated %d slots across %d host expert layers (%s)\n",
+					strategy.HotExpertCacheSlots, strategy.HotExpertCacheLayers, strategy.HotExpertCacheEvidence,
+				)
 			}
 			if measuredProductionArgs != "" && measuredProductionArgs == formatCommand(serverArgs) {
 				fmt.Fprintln(os.Stderr, "[launch] backend-measured configuration loaded and passed health check")
@@ -5465,9 +5695,35 @@ func resolveLaunchBackend(req *launchRequest, model *placement.ModelProfile, cap
 	if be == nil {
 		return nil
 	}
+	be = preferHotExpertFeatureBackend(req, model, be)
 	applyBackendFeatureCompatibility(req, model, be)
 	preflightBackendArch(model, be, caps, req.AppHome)
 	return be
+}
+
+// preferHotExpertFeatureBackend selects an already-built feature overlay for
+// the exact backend ggrun chose. It does not route by architecture and it does
+// not build during a non-interactive launch: provisioning is explicit in the
+// TUI/backend command, while every later launch can reuse the validated binary.
+func preferHotExpertFeatureBackend(req *launchRequest, model *placement.ModelProfile, selected *backendInfo) *backendInfo {
+	if req == nil || model == nil || selected == nil || !model.IsMoE || req.ServerBinExplicit ||
+		req.HotExpertsRuntimeDisabled || strings.EqualFold(strings.TrimSpace(req.HotExperts), "off") {
+		return selected
+	}
+	if placement.BackendSupportsHotExpertCache(selected.Help) {
+		return selected
+	}
+	composite := backends.FeatureBackend(selected.Tag, "hot-experts")
+	if composite == nil {
+		return selected
+	}
+	candidate := detectRegisteredBackend(composite)
+	if candidate == nil || !placement.BackendSupportsHotExpertCache(candidate.Help) {
+		fmt.Fprintf(os.Stderr, "Warning: installed hot-experts overlay %q no longer exposes its required cache flags; using base backend %q\n", composite.Tag, selected.Tag)
+		return selected
+	}
+	fmt.Printf("[launch] hot experts enabled: selecting validated overlay %q for base backend %q\n", composite.Tag, selected.Tag)
+	return candidate
 }
 
 func applyBackendFeatureCompatibility(req *launchRequest, model *placement.ModelProfile, be *backendInfo) {
@@ -5653,6 +5909,9 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 		_, _ = store.Transition(scope, profile.ID, controller.StateDegraded, reason, "cache-canary", metrics...)
 		fmt.Fprintf(os.Stderr, "[verify] degraded profile: %s; placement will not be promoted and the support expert may analyze it during a maintenance window\n", reason)
+		if strategy != nil && strategy.HotExpertCacheSlots > 0 {
+			return fmt.Errorf("hot-expert candidate failed cache verification: %s", reason)
+		}
 		return nil
 	}
 	if _, err = store.Transition(scope, profile.ID, controller.StateCacheVerified,
@@ -5778,7 +6037,7 @@ func saveVerifiedConfigForLaunch(cfg *config.Config, req *launchRequest, model *
 // bandwidth-aware dense splits, VRAM-budgeted context fit, and granular context
 // maximisation all changed what a good plan looks like, and records written
 // before them would otherwise replay the old answer indefinitely.
-const planLogicVersion = "5"
+const planLogicVersion = "6"
 
 func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
 	if req == nil || model == nil || be == nil {
@@ -5814,6 +6073,8 @@ func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelPro
 		"mmproj=" + req.MMProjPath,
 		"tune=" + req.TuneCache,
 		"spec=" + req.SpecMode,
+		"hot-experts=" + req.HotExperts,
+		"hot-experts-explicit=" + strconv.FormatBool(req.HotExpertsSet),
 		"force-spec-moe=" + strconv.FormatBool(req.ForceSpecMoE),
 		"ram-budget=" + strconv.Itoa(req.RamBudgetMB),
 		"ram-limit=" + strconv.Itoa(req.RAMLimitPercent),
@@ -6249,6 +6510,14 @@ func cmdLaunch(args []string) {
 		strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, false)
 		printOptimizationSummary("optimize", strategy, false)
 	}
+	if req.HotExpertPendingNegative != nil {
+		// Activation fallback can happen inside a calibration restart or on a
+		// direct verified-config start. In both cases its negative result outranks
+		// any stale provisional winner and is persisted only after the baseline
+		// passes the common lifecycle below.
+		pendingCalibration = req.HotExpertPendingNegative
+		req.HotExpertPendingNegative = nil
+	}
 	req.CalibrationPending = pendingCalibration != nil
 	// A Claude profile is not verified by llama's OpenAI endpoint alone. Bring
 	// up the actual Anthropic gateway first, including admission and chat-role
@@ -6271,10 +6540,61 @@ func cmdLaunch(args []string) {
 			claudeRouterURL = claudeAuto.router.URL()
 		}
 	}
-	if err := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL); err != nil {
+	verificationErr := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+	if verificationErr != nil && automaticHotExpertFallbackAllowed(req, strategy) {
+		hotVerificationErr := verificationErr
+		failedHotStrategy := strategy
+		negativeSource := hotExpertFailureDecisionSource(req, cfg, model, be, caps, strategy, pendingCalibration)
+		fmt.Fprintf(os.Stderr, "[hot-experts] cache-on lifecycle verification failed (%v); verifying the exact cache-free baseline before attributing the failure\n", verificationErr)
+		if !stopCalibrationProcessAndWait(p, "failed hot-expert lifecycle verification", resourceBaseline, 30*time.Second) {
+			verificationErr = fmt.Errorf("%w; cache-on process did not release cleanly", verificationErr)
+		} else {
+			if invalidateErr := invalidateAutomaticHotExpertEvidence(req, cfg, model, be, caps, strategy); invalidateErr != nil {
+				fmt.Fprintf(os.Stderr, "[hot-experts] warning: failed to invalidate all cache-on evidence: %v\n", invalidateErr)
+			}
+			pendingCalibration = hotExpertUnavailableDecision(negativeSource, failedHotStrategy,
+				"cache-on lifecycle failed while the exact cache-free baseline was awaiting verification: "+hotVerificationErr.Error(),
+			)
+			req.CalibrationPending = pendingCalibration != nil
+			fallback := placement.WithoutHotExpertCache(strategy)
+			if fallback == nil {
+				verificationErr = fmt.Errorf("%w; cache-free fallback returned no strategy", verificationErr)
+			} else {
+				fallback.PerformanceTuned = false
+				fallback.VerifiedConfigReused = false
+				claudeCodeSlotAdjust(fallback, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
+				fallbackArgs := buildLaunchServerArgs(req, cfg, be, caps, model, fallback)
+				fallbackP, fallbackStrategy, actualFallbackArgs, fallbackErr := restoreLaunchWithCUDAOOMRecoveryState(
+					req, cfg, model, fallback, be, caps, fallbackArgs, timeout, launchRecovery,
+				)
+				if fallbackErr != nil || fallbackP == nil {
+					if fallbackErr == nil {
+						fallbackErr = errors.New("cache-free fallback returned no process")
+					}
+					verificationErr = fmt.Errorf("%w; cache-free fallback failed to start: %v", verificationErr, fallbackErr)
+				} else if !exactCalibrationCandidate(fallbackArgs, actualFallbackArgs) {
+					_ = fallbackP.Stop()
+					verificationErr = fmt.Errorf("%w; cache-free fallback required a different recovery argv", verificationErr)
+				} else if fallbackVerifyErr := verifyAndActivateLaunch(
+					req, cfg, model, be, runtimeCaps, fallbackStrategy, actualFallbackArgs, claudeRouterURL,
+				); fallbackVerifyErr != nil {
+					_ = fallbackP.Stop()
+					verificationErr = fmt.Errorf("%w; cache-free baseline also failed verification: %v", verificationErr, fallbackVerifyErr)
+				} else {
+					p, strategy, serverArgs = fallbackP, fallbackStrategy, actualFallbackArgs
+					verificationErr = nil
+					if pendingCalibration != nil {
+						pendingCalibration.FinalistFailureReason = "cache-on lifecycle failed while the exact cache-free baseline passed: " + hotVerificationErr.Error()
+					}
+					req.CalibrationPending = pendingCalibration != nil
+				}
+			}
+		}
+	}
+	if verificationErr != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
-		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", verificationErr)
 		os.Exit(1)
 	}
 	checkpointPlanChanged := false
@@ -6311,6 +6631,14 @@ func cmdLaunch(args []string) {
 					pendingCalibration.ValidationLevel = placement.CalibrationValidationWorkflow
 				} else if admissionEvidence {
 					pendingCalibration.ValidationLevel = placement.CalibrationValidationAdmission
+					pendingCalibration.RecordAdmissionRejection(
+						pendingCalibration.Finalist,
+						pendingCalibration.FinalistFailureClass,
+						pendingCalibration.FinalistFailureReason,
+					)
+					if previous, loadErr := placement.LoadCalibrationDecision(cfg.CacheDir, pendingCalibration.ScopeKey); loadErr == nil {
+						pendingCalibration.MergeAdmissionRejections(previous)
+					}
 				}
 				path, saveErr := placement.SaveCalibrationDecision(cfg.CacheDir, *pendingCalibration)
 				if saveErr != nil {
@@ -6332,7 +6660,7 @@ func cmdLaunch(args []string) {
 						fmt.Printf("[optimize] workflow winner %s passed clean relaunch, agent, cache, and lifecycle gates; cached at %s\n",
 							pendingCalibration.Winner, path)
 					} else {
-						fmt.Printf("[optimize] exact finalist %s was unavailable; cached admission-only evidence so identical launches keep the verified baseline without another reload (%s)\n",
+						fmt.Printf("[optimize] exact finalist %s was unavailable; cached scoped negative evidence so identical launches keep the verified baseline without another reload (%s)\n",
 							pendingCalibration.Finalist, path)
 					}
 				} else {
@@ -8465,6 +8793,7 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		VRAMHeadroomMB:  parseBudgetMB(cfg.VRAMHeadroom),
 		KVPlacement:     cfg.KVPlacement,
 		KVQuality:       cfg.KVQuality,
+		HotExperts:      cfg.HotExperts,
 		Host:            cfg.Host,
 	}
 	if cfg.SWAFull {
@@ -8495,6 +8824,10 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		BackendHelp:             be.Help,
 		VisionAuto:              cfg.Vision,
 		SpecMode:                cfg.Spec,
+		HotExperts:              cfg.HotExperts,
+	}
+	if slots, parseErr := strconv.Atoi(strings.TrimSpace(cfg.HotExperts)); parseErr == nil && slots > 0 {
+		opts.HotExpertCacheSlots = slots
 	}
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
@@ -8725,7 +9058,7 @@ func printUpdateScope() {
 	}
 	fmt.Println("\nRegistered fork backends:")
 	forks := backends.Load()
-	sort.Slice(forks, func(i, j int) bool { return strings.ToLower(forks[i].Tag) < strings.ToLower(forks[j].Tag) })
+	sortRegisteredBackendsForUpdate(forks)
 	if len(forks) == 0 {
 		fmt.Println("  (none registered)")
 	}
@@ -8742,7 +9075,7 @@ func updateAllBackends() error {
 	}
 
 	forks := backends.Load()
-	sort.Slice(forks, func(i, j int) bool { return strings.ToLower(forks[i].Tag) < strings.ToLower(forks[j].Tag) })
+	sortRegisteredBackendsForUpdate(forks)
 	if len(forks) == 0 {
 		fmt.Println("\nNo registered fork backends found.")
 		return errors.Join(updateErrs...)
@@ -8750,6 +9083,20 @@ func updateAllBackends() error {
 	fmt.Println("\nRegistered fork update summary:")
 	updateErrs = append(updateErrs, updateRegisteredBackendList(forks, updateRegisteredBackend)...)
 	return errors.Join(updateErrs...)
+}
+
+// sortRegisteredBackendsForUpdate keeps ordinary/base forks ahead of composed
+// overlays. desiredBackendRecipe intentionally follows the base's installed
+// pin, so update-all must advance the base before rebuilding its derivative.
+func sortRegisteredBackendsForUpdate(forks []backends.Backend) {
+	sort.SliceStable(forks, func(i, j int) bool {
+		iComposed := len(forks[i].Features) > 0
+		jComposed := len(forks[j].Features) > 0
+		if iComposed != jComposed {
+			return !iComposed
+		}
+		return strings.ToLower(forks[i].Tag) < strings.ToLower(forks[j].Tag)
+	})
 }
 
 func updateRegisteredBackendList(forks []backends.Backend, updater func(string) error) []error {

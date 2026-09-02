@@ -35,6 +35,51 @@ func writeFakeBackend(t *testing.T, name, body string) string {
 	return path
 }
 
+func TestPreferHotExpertFeatureBackendUsesExactInstalledOverlay(t *testing.T) {
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	featurePath := writeFakeBackend(t, "llama-server-hot", "echo '--moe-expert-cache N --moe-expert-cache-inserts N'\n")
+	if err := backends.Save([]backends.Backend{{
+		Tag: "glm5next-hot-experts", Path: featurePath, BaseTag: "glm5next",
+		Features: []string{"hot-experts"}, HelperOnly: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	base := &backendInfo{Tag: "glm5next", Path: "/base/llama-server", Help: "--parallel N"}
+	req := &launchRequest{HotExperts: "auto"}
+	model := &placement.ModelProfile{IsMoE: true}
+	got := preferHotExpertFeatureBackend(req, model, base)
+	if got == nil || got.Tag != "glm5next-hot-experts" || got.Path != featurePath {
+		t.Fatalf("selected backend=%#v, want exact hot-experts overlay", got)
+	}
+}
+
+func TestPreferHotExpertFeatureBackendHonorsOffDenseAndExplicitBinary(t *testing.T) {
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	featurePath := writeFakeBackend(t, "llama-server-hot", "echo '--moe-expert-cache N --moe-expert-cache-inserts N'\n")
+	if err := backends.Save([]backends.Backend{{Tag: "base-hot-experts", Path: featurePath, BaseTag: "base", Features: []string{"hot-experts"}}}); err != nil {
+		t.Fatal(err)
+	}
+	base := &backendInfo{Tag: "base", Path: "/base/server"}
+	cases := []struct {
+		name  string
+		req   *launchRequest
+		model *placement.ModelProfile
+	}{
+		{name: "off", req: &launchRequest{HotExperts: "off"}, model: &placement.ModelProfile{IsMoE: true}},
+		{name: "dense", req: &launchRequest{HotExperts: "auto"}, model: &placement.ModelProfile{IsMoE: false}},
+		{name: "explicit server binary", req: &launchRequest{HotExperts: "auto", ServerBinExplicit: true}, model: &placement.ModelProfile{IsMoE: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preferHotExpertFeatureBackend(tc.req, tc.model, base); got != base {
+				t.Fatalf("policy unexpectedly replaced base backend: %#v", got)
+			}
+		})
+	}
+}
+
 func TestParseLaunchArgsMMapPolicy(t *testing.T) {
 	req, err := parseLaunchArgs([]string{"model.gguf", "--mmap"})
 	if err != nil {
@@ -1384,6 +1429,20 @@ func TestUpdateRegisteredBackendListContinuesAfterForkFailure(t *testing.T) {
 	}
 }
 
+func TestRegisteredBackendUpdateOrderPutsCompositesAfterBases(t *testing.T) {
+	forks := []backends.Backend{
+		{Tag: "a-hot", BaseTag: "z-base", Features: []string{"hot-experts"}},
+		{Tag: "z-base"},
+		{Tag: "b-base"},
+	}
+	sortRegisteredBackendsForUpdate(forks)
+	got := []string{forks[0].Tag, forks[1].Tag, forks[2].Tag}
+	want := []string{"b-base", "z-base", "a-hot"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backend update order=%v, want bases before composite %v", got, want)
+	}
+}
+
 func TestBackendGPUCapableProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake-backend probe uses a shell script")
@@ -1429,11 +1488,91 @@ func isolateConfig(t *testing.T) {
 	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "missing-config"))
 	for _, k := range []string{
 		"LLM_PORT", "LLM_CTX_SIZE", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY",
-		"LLM_SWA_FULL",
+		"LLM_SWA_FULL", "LLM_HOT_EXPERTS",
 		"LLM_BACKEND", "LLAMA_SERVER", "LLM_HOST", "LLM_SPEC", "LLM_VISION",
 		"LLM_APP_HOME",
 	} {
 		t.Setenv(k, "")
+	}
+}
+
+func TestParseLaunchArgsHotExpertsIsLedgerManaged(t *testing.T) {
+	isolateConfig(t)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"model.gguf", "--hot-experts", "auto"}, "auto"},
+		{[]string{"model.gguf", "--hot-experts", "on"}, "on"},
+		{[]string{"model.gguf", "--hot-experts=8"}, "8"},
+		{[]string{"model.gguf", "--moe-expert-cache", "7"}, "7"},
+		{[]string{"model.gguf", "--moe-expert-cache=6", "--moe-expert-cache-inserts=2"}, "6"},
+	} {
+		req, err := parseLaunchArgs(tc.args)
+		if err != nil {
+			t.Fatalf("parseLaunchArgs(%v): %v", tc.args, err)
+		}
+		if req.HotExperts != tc.want || !req.HotExpertsSet {
+			t.Fatalf("parseLaunchArgs(%v) policy=%q explicit=%t", tc.args, req.HotExperts, req.HotExpertsSet)
+		}
+		if strings.Contains(strings.Join(req.ExtraArgs, " "), "moe-expert-cache") {
+			t.Fatalf("managed cache flag leaked into raw backend args: %v", req.ExtraArgs)
+		}
+	}
+	for _, args := range [][]string{
+		{"model.gguf", "--hot-experts", "0"},
+		{"model.gguf", "--moe-expert-cache-inserts", "3"},
+		{"model.gguf", "--", "--moe-expert-cache", "8"},
+		{"model.gguf", "--", "--moe-expert-cache-inserts=2"},
+	} {
+		if _, err := parseLaunchArgs(args); err == nil {
+			t.Fatalf("unsafe/unbounded hot-expert argv was accepted: %v", args)
+		}
+	}
+}
+
+func TestAutomaticHotExpertFallbackRequiresAutoPolicy(t *testing.T) {
+	strategy := &placement.Strategy{HotExpertCacheSlots: 8}
+	if !automaticHotExpertFallbackAllowed(&launchRequest{HotExperts: "auto"}, strategy) {
+		t.Fatal("automatic cache winner could not restore its cache-free baseline")
+	}
+	for _, policy := range []string{"off", "on", "8", ""} {
+		if automaticHotExpertFallbackAllowed(&launchRequest{HotExperts: policy}, strategy) {
+			t.Fatalf("policy %q silently allowed cache-free fallback", policy)
+		}
+	}
+	if automaticHotExpertFallbackAllowed(&launchRequest{HotExperts: "auto"}, &placement.Strategy{}) {
+		t.Fatal("cache-free strategy entered the hot-expert fallback path")
+	}
+}
+
+func TestHotExpertUnavailableDecisionBecomesScopedNegativeEvidence(t *testing.T) {
+	source := &placement.CalibrationDecision{
+		ScopeKey: "scope", Winner: "hot-experts-8",
+		ValidationLevel:        placement.CalibrationValidationWorkflow,
+		DefaultTPS:             10,
+		DefaultPromptTPS:       20,
+		DefaultMixedTPS:        9,
+		DefaultTurnTimeS:       12,
+		DefaultTurnMaxS:        13,
+		DefaultAgentSamples:    2,
+		DefaultWorkloadLanes:   2,
+		DefaultCachedTokens:    100,
+		DefaultNewPromptTokens: 10,
+		DefaultScore:           1,
+	}
+	negative := hotExpertUnavailableDecision(source, &placement.Strategy{HotExpertCacheSlots: 8}, "baseline passed")
+	if negative == nil || negative.Winner != "default" ||
+		negative.ValidationLevel != placement.CalibrationValidationAdmission ||
+		negative.Finalist != "hot-experts-8" || negative.FinalistOutcome != "unavailable" ||
+		negative.FinalistFailureClass != "hot-expert-lifecycle" ||
+		negative.WinnerTPS != source.DefaultTPS || negative.WinnerTurnTimeS != source.DefaultTurnTimeS ||
+		negative.WinnerAgentSamples != source.DefaultAgentSamples || negative.Improvement != 0 ||
+		!negative.SuppressesAutomaticAdmissionRetry("hot-experts-8") {
+		t.Fatalf("negative decision=%+v", negative)
+	}
+	if source.Winner != "hot-experts-8" || source.ValidationLevel != placement.CalibrationValidationWorkflow {
+		t.Fatalf("source decision was mutated: %+v", source)
 	}
 }
 

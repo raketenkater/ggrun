@@ -37,6 +37,36 @@ type backendBuildLayout struct {
 	accel    string
 }
 
+func validateBackendCandidateForRecipe(binary, routeArch, accel string, recipe *backends.Recipe) error {
+	if err := validateBackendCandidate(binary, routeArch, accel); err != nil {
+		return err
+	}
+	return validateBackendRecipeCandidate(binary, recipe)
+}
+
+// desiredBackendRecipe returns the reviewed recipe an update should build. A
+// composed backend follows its installed base backend's current source pin, so
+// updating the base and then the overlay advances both without ever attempting
+// an unsafe merge into the active checkout.
+func desiredBackendRecipe(be backends.Backend) (*backends.Recipe, error) {
+	if len(be.Features) == 0 {
+		return backends.RecipeForBackend(be)
+	}
+	base := backends.ByTag(be.BaseTag)
+	if base == nil {
+		return nil, fmt.Errorf("composed backend %q is missing its base backend %q", be.Tag, be.BaseTag)
+	}
+	recipe, err := backends.ComposeRecipe(*base, be.Features...)
+	if err != nil {
+		return nil, err
+	}
+	// The installed composite owns a stable public tag even if the tag-shaping
+	// scheme changes in a later ggrun version.
+	recipe.Tag = be.Tag
+	recipe.Name = be.Tag
+	return recipe, nil
+}
+
 func backendLayoutFor(be backends.Backend) (backendBuildLayout, error) {
 	if be.Path == "" {
 		return backendBuildLayout{}, fmt.Errorf("backend %q has no binary path", be.Tag)
@@ -136,14 +166,17 @@ func updateRegisteredBackend(tag string) error {
 	// A recipe is the authority on where a backend should be: it carries the
 	// reviewed commit pin and the patches. Falling back to the record's own
 	// branch keeps hand-added forks updatable too.
-	recipe := backends.RecipeByName(tag)
+	recipe, err := desiredBackendRecipe(*be)
+	if err != nil {
+		return fmt.Errorf("resolve reviewed recipe: %w", err)
+	}
 	branch, commit := be.Branch, be.Commit
 	forceRebuild := false
 	if recipe != nil {
 		branch, commit = recipe.Branch, recipe.Commit
 		if commit != "" && strings.EqualFold(commit, be.Commit) &&
 			sameStrings(recipe.PatchNames(), be.AppliedPatches) {
-			if validateErr := validateBackendCandidate(be.Path, be.RouteArch, layout.accel); validateErr == nil {
+			if validateErr := validateBackendCandidateForRecipe(be.Path, be.RouteArch, layout.accel, recipe); validateErr == nil {
 				// Persist catalog policy even when no source rebuild is needed.
 				// This migrates manifests written before helper_only existed.
 				*be = backends.ApplyBuiltinPolicy(*be)
@@ -161,7 +194,7 @@ func updateRegisteredBackend(tag string) error {
 		// A hand-pinned backend has nothing to advance to. Tracking the branch
 		// instead would silently discard the pin the user chose. It may still
 		// need a same-commit rebuild when its active binary is damaged.
-		if validateErr := validateBackendCandidate(be.Path, be.RouteArch, layout.accel); validateErr == nil {
+		if validateErr := validateBackendCandidateForRecipe(be.Path, be.RouteArch, layout.accel, recipe); validateErr == nil {
 			fmt.Printf("[backend] %s is pinned to commit %s with no recipe to advance it and passes conformance.\n", tag, shortCommit(commit))
 			fmt.Println("[backend] re-add it with a new --commit to move the pin.")
 			return nil
@@ -211,7 +244,7 @@ func updateRegisteredBackend(tag string) error {
 		restoreSource("build failed")
 		return fmt.Errorf("build failed: %w", err)
 	}
-	if err := validateBackendCandidate(candidateBin, be.RouteArch, layout.accel); err != nil {
+	if err := validateBackendCandidateForRecipe(candidateBin, be.RouteArch, layout.accel, recipe); err != nil {
 		restoreSource("candidate conformance failed")
 		return fmt.Errorf("candidate conformance failed; active backend unchanged: %w", err)
 	}
@@ -235,7 +268,7 @@ func updateRegisteredBackend(tag string) error {
 	}
 	promoted = true
 	bin := filepath.Join(layout.buildDir, "bin", filepath.Base(be.Path))
-	if err := validateBackendCandidate(bin, be.RouteArch, layout.accel); err != nil {
+	if err := validateBackendCandidateForRecipe(bin, be.RouteArch, layout.accel, recipe); err != nil {
 		failed := layout.buildDir + "-candidate-invalid-" + shortCommit(newCommit)
 		_ = os.Rename(layout.buildDir, failed)
 		if archived != "" {
@@ -247,6 +280,8 @@ func updateRegisteredBackend(tag string) error {
 	prev := &backends.BackendVersion{
 		Path:           filepath.Join(archived, "bin", filepath.Base(be.Path)),
 		Commit:         be.Commit,
+		BaseTag:        be.BaseTag,
+		Features:       append([]string(nil), be.Features...),
 		AppliedPatches: be.AppliedPatches,
 		ReplacedAt:     time.Now().UTC().Format(time.RFC3339),
 	}
@@ -258,6 +293,8 @@ func updateRegisteredBackend(tag string) error {
 	updated.Commit = newCommit
 	updated.Previous = prev
 	if recipe != nil {
+		updated.BaseTag = recipe.BaseTag
+		updated.Features = append([]string(nil), recipe.Features...)
 		updated.AppliedPatches = recipe.PatchNames()
 		updated.HelperOnly = recipe.HelperOnly
 		updated.RouteArch = recipe.RouteArch
@@ -364,19 +401,33 @@ func rollbackRegisteredBackend(tag string) (backends.Backend, error) {
 
 	canonicalBin := filepath.Join(layout.buildDir, "bin", filepath.Base(be.Path))
 	archivedBin := filepath.Join(previousBuildDir, "bin", filepath.Base(be.Path))
-	if err := validateBackendCandidate(canonicalBin, be.RouteArch, layout.accel); err != nil {
+	previousIdentity := *be
+	previousIdentity.Commit = be.Previous.Commit
+	previousIdentity.BaseTag = be.Previous.BaseTag
+	previousIdentity.Features = append([]string(nil), be.Previous.Features...)
+	previousIdentity.AppliedPatches = append([]string(nil), be.Previous.AppliedPatches...)
+	previousRecipe, recipeErr := backends.RecipeForBackend(previousIdentity)
+	if recipeErr != nil {
+		revert()
+		return backends.Backend{}, fmt.Errorf("restore recipe cannot be reconstructed; active build put back: %w", recipeErr)
+	}
+	if err := validateBackendCandidateForRecipe(canonicalBin, be.RouteArch, layout.accel, previousRecipe); err != nil {
 		revert()
 		return backends.Backend{}, fmt.Errorf("restored build failed conformance; active build put back: %w", err)
 	}
 	current := &backends.BackendVersion{
 		Path:           archivedBin,
 		Commit:         be.Commit,
+		BaseTag:        be.BaseTag,
+		Features:       append([]string(nil), be.Features...),
 		AppliedPatches: be.AppliedPatches,
 		ReplacedAt:     time.Now().UTC().Format(time.RFC3339),
 	}
 	restored := *be
 	restored.Path = canonicalBin
 	restored.Commit = be.Previous.Commit
+	restored.BaseTag = be.Previous.BaseTag
+	restored.Features = append([]string(nil), be.Previous.Features...)
 	restored.AppliedPatches = be.Previous.AppliedPatches
 	restored.Previous = current
 	if err := backends.Upsert(restored); err != nil {

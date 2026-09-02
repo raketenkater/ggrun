@@ -30,6 +30,25 @@ func TestDefaults(t *testing.T) {
 	if cfg.AllowLiveMemoryProbe {
 		t.Fatal("live memory probe approval must default off")
 	}
+	if cfg.HotExperts != "auto" {
+		t.Fatalf("hot experts should default to measured auto mode, got %q", cfg.HotExperts)
+	}
+}
+
+func TestNormalizeHotExperts(t *testing.T) {
+	for input, want := range map[string]string{
+		"": "auto", " AUTO ": "auto", "On": "on", "Off": "off", "01": "1", "64": "64",
+	} {
+		got, err := NormalizeHotExperts(input)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeHotExperts(%q) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"0", "-1", "1.5", "unbounded"} {
+		if got, err := NormalizeHotExperts(input); err == nil || got != "" {
+			t.Fatalf("NormalizeHotExperts(%q) accepted as %q", input, got)
+		}
+	}
 }
 
 func TestLoadFile(t *testing.T) {
@@ -43,6 +62,7 @@ KV_PLACEMENT=gpu
 SWA_FULL=true
 ALLOW_LIVE_MEMORY_PROBE=true
 VISION=true
+LLM_HOT_EXPERTS=7
 `
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -77,6 +97,9 @@ VISION=true
 	if !cfg.Vision {
 		t.Fatalf("expected vision true")
 	}
+	if cfg.HotExperts != "7" {
+		t.Fatalf("expected 7 hot-expert slots, got %q", cfg.HotExperts)
+	}
 }
 
 func TestSaveAndLoad(t *testing.T) {
@@ -101,6 +124,7 @@ func TestSaveAndLoad(t *testing.T) {
 		KeepAlive:            30,
 		Host:                 "0.0.0.0",
 		Spec:                 "ngram",
+		HotExperts:           "6",
 		RAMLimitPercent:      87,
 		CgroupHeadroomMB:     2048,
 	}
@@ -141,12 +165,15 @@ func TestSaveAndLoad(t *testing.T) {
 	if !loaded.AllowLiveMemoryProbe {
 		t.Fatal("live memory probe approval mismatch")
 	}
+	if loaded.HotExperts != "6" {
+		t.Fatalf("hot-expert policy mismatch: %q", loaded.HotExperts)
+	}
 
 	data, err := os.ReadFile(Path())
 	if err != nil {
 		t.Fatalf("read saved config: %v", err)
 	}
-	for _, want := range []string{"LLM_PORT=", "LLM_CTX_SIZE=", "LLM_KV_QUALITY=", "LLM_SWA_FULL=true", "LLM_ALLOW_LIVE_MEMORY_PROBE=true", "LLM_RAM_LIMIT_PERCENT=87", "LLM_SPEC="} {
+	for _, want := range []string{"LLM_PORT=", "LLM_CTX_SIZE=", "LLM_KV_QUALITY=", "LLM_SWA_FULL=true", "LLM_ALLOW_LIVE_MEMORY_PROBE=true", "LLM_RAM_LIMIT_PERCENT=87", "LLM_SPEC=", "LLM_HOT_EXPERTS=\"6\""} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("saved config missing %s:\n%s", want, string(data))
 		}

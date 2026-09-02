@@ -11,12 +11,41 @@ ggrun backend recipes
 ggrun backend install hy3
 ggrun backend install minimax-m3
 ggrun backend install laguna
+ggrun backend install hot-experts
 ```
 
 A recipe contains a Git repository, branch, immutable commit, backend tag and
-GGUF `general.architecture`. ggrun clones it under `.src/fork-*`, builds only
-`llama-server`, registers the resulting binary and records the exact commit in
-`.config/backends.json`. Later launches of a matching model route automatically.
+optionally a GGUF `general.architecture` route or an exact capability contract.
+ggrun clones it under `.src/fork-*`, builds only `llama-server`, registers the
+resulting binary and records the exact commit in `.config/backends.json`.
+Architecture recipes route matching models automatically; capability-only
+performance recipes remain explicit backend choices.
+
+The experimental `hot-experts` implementation is also available as a reviewed
+source feature. A standalone recipe pins `csantiago78/llama.cpp` commit
+`bccbacdb8945680f1cfc7e6bffd1e59014705750`; for a newer architecture fork,
+ggrun can instead apply that exact reviewed change on top of the fork's exact
+pinned source revision:
+
+```bash
+ggrun backend feature install hot-experts --base glm5next
+```
+
+The result is a separate `glm5next-hot-experts` checkout, build, and manifest
+entry. The original `glm5next` checkout and binary remain untouched. ggrun
+applies the base recipe's reviewed patches first and then the feature patch,
+requires the exact `--moe-expert-cache` and `--moe-expert-cache-inserts` help
+surface, and registers the composite only after architecture, accelerator, and
+server conformance pass. Repeating the command reuses a conformant build or
+uses the staged update/rollback path.
+
+This is deterministic source composition, not a promise that a patch can merge
+into literally every repository called a llama.cpp fork. The base must have a
+recorded Git URL and immutable commit. A compatible llama.cpp-derived graph
+usually applies directly; a divergent source family such as ik_llama.cpp needs
+a separately reviewed adapter patch. A patch conflict fails before compilation
+and leaves the base usable. See
+[the eligibility and fallback contract](usage.md#experimental-hot-expert-cache).
 
 The HY3 recipe currently maps `hy_v3` to the reviewed `noonr48/ik_llama-hy3`
 `hy3-support` revision. Because this is an IK fork, ggrun preserves the IK flag
@@ -81,6 +110,17 @@ ggrun backend add https://github.com/example/llama.cpp \
 `--commit` is strongly recommended for reproducibility. Without it, re-running
 the command fetches the latest requested branch. ggrun refuses to refresh a fork
 checkout with local changes, so experimental edits are never silently erased.
+
+Once a source-built fork has a commit pin, reviewed features can be composed on
+top without changing its architecture route:
+
+```bash
+ggrun backend feature install hot-experts --base new-model
+```
+
+Backends registered only from a binary have no source tree that ggrun can
+reproduce, so they cannot be feature bases. Re-add the fork from Git with
+`--commit` if source composition is required.
 
 An already-built binary can be registered without cloning:
 

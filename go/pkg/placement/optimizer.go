@@ -24,18 +24,19 @@ const (
 // components are useful for screening; an Exact ledger is populated only when
 // the backend reported the allocation for this exact runtime signature.
 type DeviceResourceLedger struct {
-	GPU           int    `json:"gpu"`
-	Role          string `json:"role,omitempty"`
-	FreeMB        int    `json:"free_mb"`
-	ModelMB       int    `json:"model_mb,omitempty"`
-	ContextMB     int    `json:"context_mb,omitempty"`
-	GraphMB       int    `json:"graph_mb,omitempty"`
-	RuntimeMB     int    `json:"runtime_growth_mb,omitempty"`
-	RequiredMB    int    `json:"required_mb"`
-	SlackMB       int    `json:"slack_mb"`
-	Active        bool   `json:"active"`
-	Evidence      string `json:"evidence,omitempty"`
-	BandwidthMBps int    `json:"bandwidth_mbps,omitempty"`
+	GPU              int    `json:"gpu"`
+	Role             string `json:"role,omitempty"`
+	FreeMB           int    `json:"free_mb"`
+	ModelMB          int    `json:"model_mb,omitempty"`
+	ContextMB        int    `json:"context_mb,omitempty"`
+	GraphMB          int    `json:"graph_mb,omitempty"`
+	RuntimeMB        int    `json:"runtime_growth_mb,omitempty"`
+	HotExpertCacheMB int    `json:"hot_expert_cache_mb,omitempty"`
+	RequiredMB       int    `json:"required_mb"`
+	SlackMB          int    `json:"slack_mb"`
+	Active           bool   `json:"active"`
+	Evidence         string `json:"evidence,omitempty"`
+	BandwidthMBps    int    `json:"bandwidth_mbps,omitempty"`
 }
 
 // HostResourceLedger is the host half of the same placement account.
@@ -95,6 +96,7 @@ type OptimizationBoundary struct {
 	MinParallel    int         `json:"min_parallel,omitempty"`
 	MaxParallel    int         `json:"max_parallel,omitempty"`
 	Topologies     []string    `json:"topologies,omitempty"`
+	Exclusions     []string    `json:"exclusions,omitempty"`
 	DeviceSlackMB  map[int]int `json:"device_slack_mb,omitempty"`
 	HostSlackMB    int         `json:"host_slack_mb"`
 	Evidence       string      `json:"evidence,omitempty"`
@@ -107,6 +109,13 @@ func AnalyzeStrategy(caps *detect.Capabilities, model *ModelProfile, s *Strategy
 	if s == nil {
 		return CandidateEstimate{Confidence: "unknown", Bottleneck: "no strategy"}
 	}
+	if ledger, ok := hotExpertDerivedPlanningLedger(s); ok {
+		estimate := EstimateStrategyCost(caps, model, s, opts, ledger)
+		s.EstimatedAgentCost = estimate.AgentCost
+		s.EstimateConfidence = estimate.Confidence
+		s.OptimizationBottleneck = estimate.Bottleneck
+		return estimate
+	}
 	ledger := BuildResourceLedger(caps, model, s, opts)
 	s.ResourceLedger = &ledger
 	estimate := EstimateStrategyCost(caps, model, s, opts, ledger)
@@ -114,6 +123,17 @@ func AnalyzeStrategy(caps *detect.Capabilities, model *ModelProfile, s *Strategy
 	s.EstimateConfidence = estimate.Confidence
 	s.OptimizationBottleneck = estimate.Bottleneck
 	return estimate
+}
+
+func hotExpertDerivedPlanningLedger(s *Strategy) (ResourceLedger, bool) {
+	if s == nil || s.HotExpertCacheSlots <= 0 || s.ResourceLedger == nil {
+		return ResourceLedger{}, false
+	}
+	ledger := *s.ResourceLedger
+	if ledger.Exact || !ledger.Fits || !strings.Contains(ledger.Evidence, "derived-expert-demotion") {
+		return ResourceLedger{}, false
+	}
+	return ledger, true
 }
 
 // BuildResourceLedger prices one exact resolved launch. When the backend has
@@ -191,6 +211,9 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 			if ledger.Host.SlackMB < 0 && !s.MMapRequired {
 				ledger.Fits = false
 			}
+			allocationIncludesHotCache := opts.HotExpertCacheSlots > 0 &&
+				opts.HotExpertCacheSlots == s.HotExpertCacheSlots
+			applyHotExpertCacheLedger(&ledger, s, allocationIncludesHotCache)
 			return ledger
 		}
 	}
@@ -256,6 +279,7 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	if ledger.Host.SlackMB < 0 && !s.MMapRequired {
 		ledger.Fits = false
 	}
+	applyHotExpertCacheLedger(&ledger, s, false)
 	return ledger
 }
 
@@ -873,6 +897,9 @@ func materialHeadroomChange(base, candidate *Strategy) bool {
 	if candidate.Parallel > base.Parallel {
 		return true
 	}
+	if candidate.HotExpertCacheSlots > base.HotExpertCacheSlots {
+		return true
+	}
 	if base.KVPlacement == "cpu" && candidate.KVPlacement == "gpu" {
 		return true
 	}
@@ -934,7 +961,10 @@ func gpuExpertLayers(s *Strategy) int {
 }
 
 func tightLiveEligible(base, candidate *Strategy) bool {
-	return sameProvenShape(base, candidate) || denserGPUExpertPack(base, candidate)
+	if sameProvenShape(base, candidate) || denserGPUExpertPack(base, candidate) {
+		return true
+	}
+	return candidate != nil && base != nil && candidate.HotExpertCacheSlots > base.HotExpertCacheSlots
 }
 
 // TightLiveCandidates keeps the baseline plus same-shape neighbors and any
@@ -950,7 +980,8 @@ func TightLiveCandidates(candidates []CalibrationCandidate) []CalibrationCandida
 	out := []CalibrationCandidate{candidates[0]}
 	base := candidates[0].Strategy
 	for _, candidate := range candidates[1:] {
-		if candidate.Estimate.Feasible && tightLiveEligible(base, candidate.Strategy) {
+		if tightLiveEligible(base, candidate.Strategy) &&
+			(candidate.Estimate.Feasible || (candidate.Strategy != nil && candidate.Strategy.HotExpertCacheSlots > base.HotExpertCacheSlots)) {
 			out = append(out, candidate)
 		}
 	}
@@ -1040,7 +1071,6 @@ func SelectDeviceBalanceFinalist(candidates []CalibrationCandidate, signal Devic
 	}
 	baseIdle := deviceModelFraction(base, signal.IdleGPU)
 	baseIdleBackbone := deviceBackboneFraction(base, signal.IdleGPU)
-	baseCost := candidates[0].Estimate.AgentCost
 	bestIndex := -1
 	bestCost := math.Inf(1)
 	bestRelief := 0.0
@@ -1054,14 +1084,11 @@ func SelectDeviceBalanceFinalist(candidates []CalibrationCandidate, signal Devic
 		if candidateCost <= 0 || math.IsNaN(candidateCost) || math.IsInf(candidateCost, 1) {
 			continue
 		}
-		// Utilization identifies why the baseline is worth challenging; it does
-		// not make an otherwise slower topology useful. In particular, a fastest
-		// sole backbone owner being busy while expert-storage cards wait is the
-		// expected optimum, not a reason to move attention onto a slower GPU.
-		if baseCost > 0 && !math.IsNaN(baseCost) && !math.IsInf(baseCost, 1) &&
-			candidateCost >= baseCost*0.98 {
-			continue
-		}
+		// Measured imbalance is permission to compare one bounded topology, not
+		// proof that it wins. Do not require the static cost prior to predict a
+		// gain over the baseline: that made the model veto the very experiment
+		// needed to correct it. Cost still ranks multiple relieving candidates;
+		// exact admission and the identical live workload remain the authorities.
 		busy := deviceModelFraction(candidate.Strategy, signal.BusyGPU)
 		modelRelief := baseBusy - busy
 		backboneRelief := baseBackbone - deviceBackboneFraction(candidate.Strategy, signal.BusyGPU)
@@ -1265,6 +1292,7 @@ func SummarizeCandidateFrontier(candidates []CalibrationCandidate) *Optimization
 	sort.Strings(boundary.Topologies)
 	base := candidates[0].Strategy
 	if base != nil && base.ResourceLedger != nil {
+		boundary.Exclusions = append([]string(nil), base.OptimizationExclusions...)
 		boundary.DeviceSlackMB = make(map[int]int, len(base.ResourceLedger.Devices))
 		for _, device := range base.ResourceLedger.Devices {
 			boundary.DeviceSlackMB[device.GPU] = device.SlackMB

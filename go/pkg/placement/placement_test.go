@@ -5124,7 +5124,7 @@ func TestLoadSystemProbeDropsCurrentSchemaOutliers(t *testing.T) {
 	// Schema 2 still latched a 4230 MiB "overhead" on CUDA1 after a DeepSeek
 	// load. That is graph/KV, not CUDA context; charging it on the next launch
 	// moved four expert layers onto the CPU.
-	body := "SYS_PROBE_SCHEMA=2\nSYS_CUDA_OVERHEAD_MB_CUDA0=1614\n" +
+	body := fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) + "SYS_CUDA_OVERHEAD_MB_CUDA0=1614\n" +
 		"SYS_CUDA_OVERHEAD_MB_CUDA1=4230\nSYS_CUDA_OVERHEAD_MB_CUDA2=568\nSYS_CUDA_OVERHEAD_MB=4230\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -5138,6 +5138,19 @@ func TestLoadSystemProbeDropsCurrentSchemaOutliers(t *testing.T) {
 	}
 	if sp.CUDAOverheadByGPU[0] != 1614 || sp.CUDAOverheadByGPU[2] != 568 {
 		t.Fatalf("peer overheads were discarded: %+v", sp.CUDAOverheadByGPU)
+	}
+}
+
+func TestLoadSystemProbeRejectsPreRecurrentKVSchema(t *testing.T) {
+	dir := t.TempDir()
+	gpus := []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 24564}}
+	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
+	old := fmt.Sprintf("SYS_PROBE_SCHEMA=%d\nSYS_CUDA_OVERHEAD_MB_CUDA0=4008\nSYS_CUDA_OVERHEAD_MB=4008\n", systemProbeSchema-1)
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSystemProbe(dir, gpus); got != nil {
+		t.Fatalf("pre-fix recurrent-KV overhead remained trusted: %+v", got)
 	}
 }
 
@@ -5172,7 +5185,7 @@ func TestHostOverheadProbeDoesNotRemeasureAlreadyMeasuredCards(t *testing.T) {
 		{Index: 2, Name: "RTX 4070", VRAMTotalMB: 12282},
 	}
 	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
-	good := "SYS_PROBE_SCHEMA=2\nSYS_CUDA_OVERHEAD_MB_CUDA0=1327\n" +
+	good := fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) + "SYS_CUDA_OVERHEAD_MB_CUDA0=1327\n" +
 		"SYS_CUDA_OVERHEAD_MB_CUDA1=301\nSYS_CUDA_OVERHEAD_MB_CUDA2=359\nSYS_CUDA_OVERHEAD_MB=1327\n"
 	if err := os.WriteFile(path, []byte(good), 0o644); err != nil {
 		t.Fatal(err)

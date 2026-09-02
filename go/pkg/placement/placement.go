@@ -149,9 +149,13 @@ type Strategy struct {
 	// names; emitting mainline's spelling to ik makes the server exit in argument
 	// parsing before the memory preflight can even begin.
 	BackendCheckpointMinStepFlag string `json:"-"`
-	MMap                         bool   `json:"mmap"`
-	MMapRequired                 bool   `json:"mmap_required,omitempty"`
-	MLock                        bool   `json:"mlock"`
+	// BackendSupportsHotExpertCache is true only when the exact selected
+	// backend advertises both parts of ggrun's hot-expert capability contract.
+	// The feature is never inferred from a fork tag or model name.
+	BackendSupportsHotExpertCache bool `json:"-"`
+	MMap                          bool `json:"mmap"`
+	MMapRequired                  bool `json:"mmap_required,omitempty"`
+	MLock                         bool `json:"mlock"`
 	// CPUExpertMMapCapability records whether the exact selected backend loader
 	// keeps CPU-offloaded expert tensors file-backed. MMapRequired is safe only
 	// with the file-backed capability; an anonymous/unknown loader must satisfy
@@ -190,6 +194,24 @@ type Strategy struct {
 	// direct-start winner does not immediately re-enter candidate search.
 	PerformanceTuned bool   `json:"-"`
 	BackendTag       string `json:"backend_tag,omitempty"` // "llama" or "ik_llama"
+	// HotExpertCache* describes a backend-provided GPU LRU cache for routed
+	// expert slices which otherwise remain host-resident. Slots is uniform per
+	// eligible layer because that is the backend contract. The maps are exact
+	// controller-side charges by physical GPU and are persisted only in the
+	// whole verified config, never in the weight-placement cache.
+	HotExpertCacheSlots       int         `json:"hot_expert_cache_slots,omitempty"`
+	HotExpertCacheInserts     int         `json:"hot_expert_cache_inserts,omitempty"`
+	HotExpertCacheLayers      int         `json:"hot_expert_cache_layers,omitempty"`
+	HotExpertCacheVRAMByGPU   map[int]int `json:"hot_expert_cache_vram_by_gpu,omitempty"`
+	HotExpertCacheLayersByGPU map[int]int `json:"hot_expert_cache_layers_by_gpu,omitempty"`
+	HotExpertCacheEvidence    string      `json:"hot_expert_cache_evidence,omitempty"`
+	// Runtime counters are populated only after the candidate-only decode
+	// canary. They distinguish "the backend allocated a cache" from "this
+	// model graph actually used it" and travel with the measured winner.
+	HotExpertCacheSteps   uint64  `json:"hot_expert_cache_steps,omitempty"`
+	HotExpertCacheHits    uint64  `json:"hot_expert_cache_hits,omitempty"`
+	HotExpertCacheMisses  uint64  `json:"hot_expert_cache_misses,omitempty"`
+	HotExpertCacheHitRate float64 `json:"hot_expert_cache_hit_rate,omitempty"`
 	// ModelBasename is the basename of the model this placement was computed for
 	// (filepath.Base of the primary shard). Persisted alongside the placement
 	// cache so a "clear caches" action can match every .place file a model
@@ -213,6 +235,7 @@ type Strategy struct {
 	// predicted cost can select a candidate for measurement but is never itself
 	// sufficient evidence for promotion.
 	OptimizationBottleneck string                `json:"optimization_bottleneck,omitempty"`
+	OptimizationExclusions []string              `json:"optimization_exclusions,omitempty"`
 	EstimatedAgentCost     float64               `json:"estimated_agent_cost,omitempty"`
 	EstimateConfidence     string                `json:"estimate_confidence,omitempty"`
 	OptimizationBoundary   *OptimizationBoundary `json:"optimization_boundary,omitempty"`
@@ -696,6 +719,14 @@ type Options struct {
 	MMProjPath    string // explicit vision projector GGUF
 	SpecMode      string // off, auto, draft, eagle3, dflash, ngram, ngram-mod, ngram-k4v, mtp
 	BackendHelp   string // llama-server --help output for dialect-specific flags
+	// HotExperts is "off", "auto", "on", or a positive slot count. Auto keeps
+	// cache-on as an opportunistic challenger; on uses the same optimizer-sized
+	// coordinate but forbids cache-free fallback. If leftover VRAM cannot hold a
+	// useful cache, the challenger demotes GPU expert layers until it can. A
+	// numeric request is applied directly and fails closed unless it fits.
+	// HotExpertCacheSlots is the parsed numeric form (zero otherwise).
+	HotExperts          string
+	HotExpertCacheSlots int
 	// SpecCandidateValidator asks the selected backend to load a proposed
 	// companion without allocating model buffers. GGUF metadata establishes
 	// target compatibility; this hook establishes runtime compatibility for
@@ -764,7 +795,10 @@ func backendCacheTag(opts Options) string {
 	if tag == "" {
 		tag = opts.BackendTag
 	}
-	return ScopedBackendFeatureTag(ScopedBackendCacheTag(tag, opts.WorkloadProfile), opts.SWAFull)
+	return ScopedBackendRuntimeFeatureTag(
+		ScopedBackendCacheTag(tag, opts.WorkloadProfile),
+		opts.SWAFull, opts.HotExpertCacheSlots, hotExpertCacheDefaultInserts,
+	)
 }
 
 // ScopedBackendFeatureTag isolates allocation evidence that changes when a
@@ -775,17 +809,41 @@ func backendCacheTag(opts Options) string {
 // namespace instead of treating a pre-feature cache entry as evidence for the
 // plain state.
 func ScopedBackendFeatureTag(backendTag string, swaFull bool) string {
+	return ScopedBackendRuntimeFeatureTag(backendTag, swaFull, 0, 0)
+}
+
+// ScopedBackendRuntimeFeatureTag isolates allocation evidence for runtime
+// features which change device memory without changing model/context/KV
+// identity. A hot-expert allocation must never be learned as ordinary graph
+// overhead and then charged a second time to a cache-on candidate.
+func ScopedBackendRuntimeFeatureTag(backendTag string, swaFull bool, hotSlots, hotInserts int) string {
 	backendTag = strings.TrimSpace(backendTag)
 	if backendTag == "" {
 		backendTag = "llama"
 	}
-	if strings.Contains(backendTag, "|swa-full=") {
-		return backendTag
+	// Callers normally pass a clean backend/workload tag, but recovery and
+	// revalidation may receive an already-scoped value. Replace (or remove) the
+	// hot-expert component so a different slot count can never inherit stale
+	// allocation evidence.
+	parts := strings.Split(backendTag, "|")
+	filtered := parts[:1]
+	for _, part := range parts[1:] {
+		if strings.HasPrefix(part, "hot-experts=") {
+			continue
+		}
+		filtered = append(filtered, part)
 	}
-	if !swaFull {
-		return backendTag
+	backendTag = strings.Join(filtered, "|")
+	if swaFull && !strings.Contains(backendTag, "|swa-full=") {
+		backendTag += "|swa-full=true"
 	}
-	return backendTag + "|swa-full=true"
+	if hotSlots > 0 {
+		if hotInserts <= 0 {
+			hotInserts = hotExpertCacheDefaultInserts
+		}
+		backendTag += fmt.Sprintf("|hot-experts=%d,inserts=%d", hotSlots, hotInserts)
+	}
+	return backendTag
 }
 
 // backendFitTakesValue distinguishes current mainline's "--fit [on|off]"
@@ -1004,8 +1062,14 @@ type autoContextSearchResult struct {
 // memory). This keeps "fit" from becoming an aggregate-memory estimate that a
 // later placement overlay can invalidate.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+	finalize := func(strategy *Strategy, err error) (*Strategy, error) {
+		if err != nil || strategy == nil {
+			return strategy, err
+		}
+		return finalizeHotExpertCache(caps, model, opts, strategy)
+	}
 	if opts.ContextSize > 0 {
-		return computeResolvedStrategy(caps, model, opts)
+		return finalize(computeResolvedStrategy(caps, model, opts))
 	}
 	if caps == nil {
 		return nil, fmt.Errorf("automatic context fit requires hardware capabilities")
@@ -1031,11 +1095,11 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 			if verified.ContextFitEvidence == "" {
 				verified.ContextFitEvidence = "reused a launch-validated automatic-context plan"
 			}
-			return verified, nil
+			return finalize(verified, nil)
 		}
 	}
 
-	return computeAutomaticContextStrategy(caps, model, opts)
+	return finalize(computeAutomaticContextStrategy(caps, model, opts))
 }
 
 func computeAutomaticContextStrategy(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
@@ -1485,10 +1549,11 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		// own auto memory-fitting (-fit) is redundant with this explicit plan.
 		// Only value-taking dialects need an explicit "off"; boolean backends are
 		// already disabled when the flag is absent.
-		BackendSupportsFit:           backendHelpSupports(opts.BackendHelp, "-fit"),
-		BackendFitTakesValue:         backendFitTakesValue(opts.BackendHelp),
-		BackendSupportsKVOffload:     backendHelpSupports(opts.BackendHelp, "--kv-offload"),
-		BackendCheckpointMinStepFlag: backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
+		BackendSupportsFit:            backendHelpSupports(opts.BackendHelp, "-fit"),
+		BackendFitTakesValue:          backendFitTakesValue(opts.BackendHelp),
+		BackendSupportsKVOffload:      backendHelpSupports(opts.BackendHelp, "--kv-offload"),
+		BackendCheckpointMinStepFlag:  backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
+		BackendSupportsHotExpertCache: backendSupportsHotExpertCache(opts.BackendHelp),
 	}
 	configureCPUAffinity(s, caps, opts.BackendHelp)
 
@@ -5922,6 +5987,17 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--n-cpu-moe", fmt.Sprintf("%d", s.NCPUMoE))
 	}
 
+	if s.HotExpertCacheSlots > 0 && s.BackendSupportsHotExpertCache {
+		inserts := s.HotExpertCacheInserts
+		if inserts <= 0 {
+			inserts = hotExpertCacheDefaultInserts
+		}
+		args = append(args,
+			"--moe-expert-cache", fmt.Sprintf("%d", s.HotExpertCacheSlots),
+			"--moe-expert-cache-inserts", fmt.Sprintf("%d", inserts),
+		)
+	}
+
 	if !s.MMap {
 		args = append(args, "--no-mmap")
 	}
@@ -6002,7 +6078,12 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 // systemProbeSchema is bumped when the meaning of a stored value changes, so a
 // file written by an older method is re-measured rather than trusted.
-const systemProbeSchema = 2
+//
+// Schema 3 fixes recurrent/SWA launches: every KV region on a device is part of
+// the resident allocation. Schema 2 averaged those rows, then mislabeled the
+// missing half (or more) as permanent CUDA overhead. That poisoned every later
+// placement on the same hardware until the system cache was removed manually.
+const systemProbeSchema = 3
 
 // systemProbeOutlierRatio is how far above its peers a stored per-GPU overhead
 // must sit before it is treated as contaminated rather than measured. Real
@@ -6076,6 +6157,7 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 		return nil
 	}
 	sp := &systemProbe{CUDAOverheadByGPU: map[int]int{}}
+	schemaVersion := 1
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -6094,7 +6176,9 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 				sp.CUDAOverheadMB = v
 			}
 		case key == "SYS_PROBE_SCHEMA":
-			_ = val
+			if v, err := strconv.Atoi(val); err == nil && v > 0 {
+				schemaVersion = v
+			}
 		case key == "SYS_HOST_OVERHEAD_MB":
 			if v, err := strconv.Atoi(val); err == nil && v >= 0 {
 				sp.HostOverheadMB = v
@@ -6107,6 +6191,9 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 				sp.CUDAOverheadByGPU[idx] = v
 			}
 		}
+	}
+	if schemaVersion < systemProbeSchema {
+		return nil
 	}
 	if sp.CUDAOverheadMB == 0 && len(sp.CUDAOverheadByGPU) == 0 {
 		return nil
@@ -6521,19 +6608,21 @@ func RunPostLaunchKVProbe(cacheDir string, model *ModelProfile, ctxSize int, kvT
 // fit-params/guarded preflight on forks that expose no complete no-allocation
 // oracle, without promoting the number to a model-wide extrapolation.
 func RecordPostLaunchContextAllocation(cacheDir string, model *ModelProfile, strategy *Strategy,
-	backendTag string, gpus []detect.GPU, serverLog string,
+	backendTag string, gpus []detect.GPU, serverLog string, serverPIDs ...int,
 ) bool {
 	if model == nil || strategy == nil || strings.TrimSpace(serverLog) == "" {
 		return false
 	}
-	total := int(parseKVBufferTotalMB(serverLog) + 0.5)
+	liveLog := latestBackendAllocationLog(serverLog)
+	total := int(parseKVBufferTotalMB(liveLog) + 0.5)
 	if total <= 0 {
 		return false
 	}
 	identity := AllocationPlacementIdentity(strategy)
 	allocation := MeasuredAllocation{
-		Evidence: "live-allocated", ContextTotalMB: total, PlacementIdentity: identity,
+		Evidence: "live-context-only", ContextTotalMB: total, PlacementIdentity: identity,
 	}
+	preservedObservedEvidence := ""
 	// A healthy launch log often exposes only KV totals. Do not let that sparse
 	// observation erase the complete guarded model/context/peak breakdown that
 	// preflight recorded for the same exact placement moments earlier.
@@ -6546,6 +6635,34 @@ func RecordPostLaunchContextAllocation(cacheDir string, model *ModelProfile, str
 		allocation.ModelHostMB = previous.ModelHostMB
 		allocation.UnaccountedByGPU = previous.UnaccountedByGPU
 		allocation.UnaccountedHostMB = previous.UnaccountedHostMB
+		if observedAllocationEvidence(previous.Evidence) {
+			preservedObservedEvidence = previous.Evidence
+		}
+	}
+	if live, complete := parseLiveAllocationFromLog(cacheDir, strategy, gpus, liveLog); complete {
+		live.ContextTotalMB = total
+		live.PlacementIdentity = identity
+		live.Evidence = "live-allocated"
+		allocation = live
+		if len(serverPIDs) > 0 && serverPIDs[0] > 0 {
+			// The cgroup is the exact host boundary and includes allocations a
+			// backend does not name in its buffer log. Attribute only the residual;
+			// model and context rows remain useful diagnostics.
+			if resident := queryHostNonReclaimableMB(serverPIDs[0]); resident > allocation.ModelHostMB+allocation.ContextHostMB {
+				allocation.UnaccountedHostMB = resident - allocation.ModelHostMB - allocation.ContextHostMB
+			}
+		}
+	} else {
+		// Even a backend that omits model/runtime rows still reports exact KV
+		// distribution. Preserve a previously complete guarded/live breakdown
+		// for the identical placement while refreshing those context rows.
+		if live.ContextTotalMB > 0 {
+			allocation.ContextByGPU = live.ContextByGPU
+			allocation.ContextHostMB = live.ContextHostMB
+		}
+		if preservedObservedEvidence != "" {
+			allocation.Evidence = preservedObservedEvidence
+		}
 	}
 	err := RecordMeasuredAllocation(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
 		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, strategy.Parallel,
@@ -7540,16 +7657,39 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	}
 }
 
-// parseHostBuffersFromLog sums the host-side buffers the backend reported:
-// CUDA_Host (pinned or plain host allocations backing CPU experts) and CPU
-// (host KV when the cache is not offloaded). Maxima, not sums, because the log
-// accumulates across launch attempts within one ggrun run -- the first attempt
-// here reported 86136 MiB before --swa-full was withdrawn and the surviving one
-// 91448 MiB, and adding them would invent 84 GiB that never existed.
-func parseHostBuffersFromLog(log string) int {
-	var maxModel, maxCompute, maxOutput, maxKV float64
-	for _, line := range strings.Split(log, "\n") {
-		if !strings.Contains(line, "CUDA_Host") && !strings.Contains(line, "CPU ") {
+// latestBackendAllocationLog returns the final backend load attempt. A ggrun
+// server log can contain earlier failed attempts; each llama.cpp load starts by
+// reporting its CPU model buffer. Runtime rows from the final healthy attempt
+// must not be summed with a rejected attempt.
+func latestBackendAllocationLog(log string) string {
+	lines := strings.Split(log, "\n")
+	lastStart := -1
+	for i, line := range lines {
+		if strings.Contains(line, "CPU model buffer size =") {
+			lastStart = i
+		}
+	}
+	if lastStart < 0 {
+		return log
+	}
+	return strings.Join(lines[lastStart:], "\n")
+}
+
+// parseHostAllocationFromLog separates the host model, KV, and runtime rows.
+// CPU and CUDA_Host model buffers are distinct resident allocations and are
+// summed, while repeated progress echoes of the same source retain its maximum.
+func parseHostAllocationFromLog(log string) (modelMB, contextMB, runtimeMB int) {
+	modelBySource := map[string]float64{}
+	runtimeBySource := map[string]float64{}
+	var context float64
+	for _, line := range strings.Split(latestBackendAllocationLog(log), "\n") {
+		source := ""
+		switch {
+		case strings.Contains(line, "CUDA_Host"):
+			source = "cuda_host"
+		case strings.Contains(line, "CPU "):
+			source = "cpu"
+		default:
 			continue
 		}
 		if !strings.Contains(line, "buffer size =") {
@@ -7561,24 +7701,37 @@ func parseHostBuffersFromLog(log string) int {
 		}
 		switch {
 		case strings.Contains(line, "KV buffer size ="):
-			if v > maxKV {
-				maxKV = v
+			context += v
+		case strings.Contains(line, "compute buffer size ="), strings.Contains(line, "output buffer size ="):
+			key := source
+			if strings.Contains(line, "output buffer size =") {
+				key += "_output"
 			}
-		case strings.Contains(line, "compute buffer size ="):
-			if v > maxCompute {
-				maxCompute = v
+			if v > runtimeBySource[key] {
+				runtimeBySource[key] = v
 			}
-		case strings.Contains(line, "output buffer size ="):
-			if v > maxOutput {
-				maxOutput = v
-			}
-		default:
-			if v > maxModel {
-				maxModel = v
+		case strings.Contains(line, "model buffer size ="):
+			if v > modelBySource[source] {
+				modelBySource[source] = v
 			}
 		}
 	}
-	return int(maxModel + maxCompute + maxOutput + maxKV + 0.5)
+	for _, v := range modelBySource {
+		modelMB += int(v + 0.5)
+	}
+	contextMB = int(context + 0.5)
+	for _, v := range runtimeBySource {
+		runtimeMB += int(v + 0.5)
+	}
+	return
+}
+
+// parseHostBuffersFromLog sums the host-side buffers the backend reported.
+// The final attempt is isolated first, so recurrent regions and distinct CPU /
+// CUDA_Host allocations can be summed without inventing memory across retries.
+func parseHostBuffersFromLog(log string) int {
+	modelMB, contextMB, runtimeMB := parseHostAllocationFromLog(log)
+	return modelMB + contextMB + runtimeMB
 }
 
 // queryHostNonReclaimableMB reports the non-reclaimable host memory held by the
@@ -7749,16 +7902,16 @@ func parseBuffersFromLog(log string, gpuIndex int) (modelBufMB, kvBufMB, compute
 
 	var maxModelBuf, maxComputeBuf float64
 	var totalKVBuf float64
-	var kvCount int
 
-	lines := strings.Split(log, "\n")
+	lines := strings.Split(latestBackendAllocationLog(log), "\n")
 	for _, line := range lines {
 		if !strings.Contains(line, cudaTag) {
 			continue
 		}
 
 		// Model buffer: "CUDA0 model buffer size = X MiB" or "CUDA0 buffer size = X MiB"
-		if strings.Contains(line, "buffer size =") && !strings.Contains(line, "KV") && !strings.Contains(line, "compute") {
+		if strings.Contains(line, "buffer size =") && !strings.Contains(line, "KV") &&
+			!strings.Contains(line, "compute") && !strings.Contains(line, "output") {
 			if v := parseMiB(line); v > maxModelBuf {
 				maxModelBuf = v
 			}
@@ -7768,7 +7921,6 @@ func parseBuffersFromLog(log string, gpuIndex int) (modelBufMB, kvBufMB, compute
 		if strings.Contains(line, "KV buffer size =") {
 			if v := parseMiB(line); v > 0 {
 				totalKVBuf += v
-				kvCount++
 			}
 		}
 
@@ -7782,10 +7934,48 @@ func parseBuffersFromLog(log string, gpuIndex int) (modelBufMB, kvBufMB, compute
 
 	modelBufMB = int(maxModelBuf + 0.5)
 	computeBufMB = int(maxComputeBuf + 0.5)
-	if totalKVBuf > 0 && kvCount > 0 {
-		kvBufMB = int(totalKVBuf/float64(kvCount) + 0.5)
+	if totalKVBuf > 0 {
+		kvBufMB = int(totalKVBuf + 0.5)
 	}
 	return
+}
+
+// parseLiveAllocationFromLog builds a complete per-device ledger from one
+// healthy backend load. Exact evidence requires every active device to expose
+// model/runtime rows and requires measured CUDA overhead; otherwise callers
+// retain the useful context total but do not unlock optimizer experiments.
+func parseLiveAllocationFromLog(cacheDir string, strategy *Strategy, gpus []detect.GPU, log string) (MeasuredAllocation, bool) {
+	allocation := MeasuredAllocation{
+		ContextByGPU: map[int]int{}, ModelByGPU: map[int]int{}, UnaccountedByGPU: map[int]int{},
+	}
+	overhead := SystemCUDAOverheadByGPU(cacheDir, gpus)
+	contextSum := 0
+	complete := len(gpus) > 0
+	for ordinal, gpu := range gpus {
+		modelMB, contextMB, computeMB := parseBuffersFromLog(log, gpu.Index)
+		allocation.ModelByGPU[gpu.Index] = modelMB
+		allocation.ContextByGPU[gpu.Index] = contextMB
+		contextSum += contextMB
+		if oh := overhead[gpu.Index]; oh > 0 {
+			allocation.UnaccountedByGPU[gpu.Index] = computeMB + oh
+		} else if strategyUsesGPUAt(strategy, ordinal, gpu.Index) {
+			complete = false
+			allocation.UnaccountedByGPU[gpu.Index] = computeMB
+		}
+		if strategyUsesGPUAt(strategy, ordinal, gpu.Index) && (modelMB <= 0 || computeMB <= 0) {
+			complete = false
+		}
+	}
+	allocation.ModelHostMB, allocation.ContextHostMB, allocation.UnaccountedHostMB = parseHostAllocationFromLog(log)
+	allocation.ContextTotalMB = contextSum + allocation.ContextHostMB
+	loggedTotal := int(parseKVBufferTotalMB(log) + 0.5)
+	if loggedTotal <= 0 || absInt(loggedTotal-allocation.ContextTotalMB) > max(64, loggedTotal/100) {
+		complete = false
+	}
+	if allocation.ModelHostMB <= 0 && allocation.UnaccountedHostMB <= 0 {
+		complete = false
+	}
+	return allocation, complete
 }
 
 // parseMiB extracts a floating-point MiB value from a log line containing "X MiB".
@@ -8392,6 +8582,21 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 			measured.CheckpointMB = previous.CheckpointMB
 		}
 		if !measured.AllocationSet {
+			measured.ContextTotalMB = previous.ContextTotalMB
+			measured.ContextHostMB = previous.ContextHostMB
+			measured.ModelHostMB = previous.ModelHostMB
+			measured.UnaccountedHostMB = previous.UnaccountedHostMB
+			measured.AllocationEvidence = previous.AllocationEvidence
+			measured.PlacementIdentity = previous.AllocationPlacementIdentity
+			measured.ContextByGPU = copyProbeIntMap(previous.ContextByGPU)
+			measured.ModelByGPU = copyProbeIntMap(previous.ModelByGPU)
+			measured.UnaccountedByGPU = copyProbeIntMap(previous.UnaccountedByGPU)
+		} else if observedAllocationEvidence(previous.AllocationEvidence) &&
+			!observedAllocationEvidence(measured.AllocationEvidence) {
+			// A later fit-oracle write for the same cache key must not demote a
+			// healthy live/guarded allocation back to planned evidence. This was
+			// the final transition that made topology and hot-expert candidates
+			// disappear immediately after a successful launch.
 			measured.ContextTotalMB = previous.ContextTotalMB
 			measured.ContextHostMB = previous.ContextHostMB
 			measured.ModelHostMB = previous.ModelHostMB

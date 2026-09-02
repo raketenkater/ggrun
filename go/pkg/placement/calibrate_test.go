@@ -193,6 +193,15 @@ func TestLatestCalibrationDecisionForModelAndStatusLine(t *testing.T) {
 	if line := FormatCalibrationStatus(nil); !strings.Contains(line, "cold estimate") {
 		t.Fatalf("nil decision status=%q", line)
 	}
+	unavailable := &CalibrationDecision{
+		Winner: "default", Finalist: "ubatch-2048", FinalistOutcome: "unavailable",
+		BaselineResidency: ResidencyRoomy,
+	}
+	line = FormatCalibrationStatus(unavailable)
+	if !strings.Contains(line, "default retained") || !strings.Contains(line, "finalist ubatch-2048 unavailable") ||
+		strings.Contains(line, "unavailable default") {
+		t.Fatalf("unavailable-finalist status misidentified the serving baseline: %q", line)
+	}
 }
 
 func TestCalibrationModelBasenameUnifiesShardedStatusIdentity(t *testing.T) {
@@ -262,6 +271,29 @@ func TestAdmissionDecisionSuppressesOnlyItsExactAutomaticRetry(t *testing.T) {
 	decision.ValidationLevel = CalibrationValidationWorkflow
 	if decision.SuppressesAutomaticAdmissionRetry("ubatch-2048") {
 		t.Fatal("workflow result was treated as admission-only evidence")
+	}
+}
+
+func TestAdmissionDecisionAccumulatesScopedRejectedCoordinates(t *testing.T) {
+	previous := &CalibrationDecision{
+		Winner: "default", ValidationLevel: CalibrationValidationAdmission,
+		Finalist: "ubatch-2048", FinalistOutcome: "unavailable",
+		FinalistFailureClass: "memory", FinalistFailureReason: "CUDA0 deficit",
+	}
+	current := &CalibrationDecision{
+		Winner: "default", ValidationLevel: CalibrationValidationAdmission,
+		Finalist: "hot-experts-23", FinalistOutcome: "unavailable",
+		FinalistFailureClass: "telemetry", FinalistFailureReason: "no cache hits",
+	}
+	current.RecordAdmissionRejection(current.Finalist, current.FinalistFailureClass, current.FinalistFailureReason)
+	current.MergeAdmissionRejections(previous)
+	for _, finalist := range []string{"ubatch-2048", "hot-experts-23"} {
+		if !current.SuppressesAutomaticAdmissionRetry(finalist) {
+			t.Fatalf("merged decision forgot rejected coordinate %q: %+v", finalist, current.RejectedFinalists)
+		}
+	}
+	if current.SuppressesAutomaticAdmissionRetry("moe-owner-1") {
+		t.Fatal("scoped rejection suppressed an untested coordinate")
 	}
 }
 

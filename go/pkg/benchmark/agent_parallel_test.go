@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -256,5 +257,52 @@ func TestRunAgentParallelCapsSyntheticLoad(t *testing.T) {
 	}
 	if result.Parallel != agentBenchmarkMaxLanes {
 		t.Fatalf("parallel benchmark lanes=%d, want cap %d", result.Parallel, agentBenchmarkMaxLanes)
+	}
+}
+
+func TestRunHotExpertCacheTelemetryCanaryUsesDeterministicUncachedDecode(t *testing.T) {
+	var observed struct {
+		MaxTokens          int             `json:"max_tokens"`
+		MinTokens          int             `json:"min_tokens"`
+		Seed               int             `json:"seed"`
+		CachePrompt        bool            `json:"cache_prompt"`
+		Temperature        float64         `json:"temperature"`
+		ChatTemplateKwargs map[string]bool `json:"chat_template_kwargs"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "ok"}}},
+			"usage":   map[string]int{"prompt_tokens": 20, "completion_tokens": hotExpertTelemetryCanaryTokens},
+			"timings": map[string]float64{"prompt_per_second": 100, "predicted_per_second": 20},
+		})
+	}))
+	defer server.Close()
+
+	generated, err := (&Runner{BaseURL: server.URL, Model: "local", Timeout: time.Second}).RunHotExpertCacheTelemetryCanary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generated != hotExpertTelemetryCanaryTokens || observed.MaxTokens != hotExpertTelemetryCanaryTokens ||
+		observed.MinTokens != hotExpertTelemetryCanaryTokens || observed.Seed != 911 || observed.CachePrompt ||
+		observed.Temperature != 0 || observed.ChatTemplateKwargs["enable_thinking"] {
+		t.Fatalf("generated=%d request=%+v", generated, observed)
+	}
+}
+
+func TestRunHotExpertCacheTelemetryCanaryRejectsShortDecode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "short"}}},
+			"usage":   map[string]int{"prompt_tokens": 20, "completion_tokens": hotExpertTelemetryCanaryTokens - 1},
+		})
+	}))
+	defer server.Close()
+	if _, err := (&Runner{BaseURL: server.URL, Model: "local", Timeout: time.Second}).RunHotExpertCacheTelemetryCanary(); err == nil || !errors.Is(err, ErrHotExpertCanaryIncomplete) {
+		t.Fatal("short decode became hot-expert runtime evidence")
 	}
 }

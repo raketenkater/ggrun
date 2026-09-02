@@ -129,6 +129,23 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 				}
 			}
 		}
+		if mode == calibrateAuto && decision.ValidationLevel == placement.CalibrationValidationAdmission {
+			// Negative evidence is coordinate-local. Remove every exact finalist
+			// this scope already disproved, then let the bounded planner choose the
+			// next legal coordinate. Returning nil here froze the entire optimizer
+			// after one oversized ubatch failed and prevented topology/hot-cache
+			// evidence from ever being collected.
+			filtered := candidates[:1]
+			for _, candidate := range candidates[1:] {
+				if !decision.SuppressesAutomaticAdmissionRetry(candidate.Name) {
+					filtered = append(filtered, candidate)
+				}
+			}
+			candidates = filtered
+			if len(candidates) < 2 {
+				return nil
+			}
+		}
 	}
 	budget := calibrationBudgetFor(mode)
 	if mode == calibrateAuto {
@@ -255,7 +272,7 @@ func automaticCalibrationFinalistPlan(req *launchRequest, cfg *config.Config, mo
 			feasible = append(feasible, candidates[0])
 		}
 		for _, candidate := range candidates[1:] {
-			if candidate.Estimate.Feasible {
+			if candidate.Estimate.Feasible || calibrationCandidateIsHotExperts(candidate.Name) {
 				feasible = append(feasible, candidate)
 			}
 		}
@@ -348,6 +365,23 @@ func selectAutomaticCalibrationFinalist(candidates []placement.CalibrationCandid
 	if len(candidates) < 2 {
 		return candidates
 	}
+	if hot, ok := firstHotExpertCalibrationCandidate(candidates); ok {
+		// Auto asked to turn the cache on. The relative cost model does not
+		// price cache hits, so a cheaper-looking KV/topology neighbor must not
+		// consume the single live A/B slot. Exact allocation still prefers a
+		// measured cache-on shape among hot-expert candidates.
+		if hasExactAllocation != nil {
+			for _, candidate := range candidates[1:] {
+				if !calibrationCandidateIsHotExperts(candidate.Name) {
+					continue
+				}
+				if hasExactAllocation(candidate.Strategy) {
+					return []placement.CalibrationCandidate{candidates[0], candidate}
+				}
+			}
+		}
+		return []placement.CalibrationCandidate{candidates[0], hot}
+	}
 	if hasExactAllocation != nil {
 		bestCost := candidates[1].Estimate.AgentCost
 		for _, candidate := range candidates[1:] {
@@ -364,6 +398,30 @@ func selectAutomaticCalibrationFinalist(candidates []placement.CalibrationCandid
 	// orders nearest coordinate changes first, so validate only its first
 	// calculated finalist. Contained admission remains the fail-closed proof.
 	return []placement.CalibrationCandidate{candidates[0], candidates[1]}
+}
+
+func calibrationCandidateIsHotExperts(name string) bool {
+	return strings.HasPrefix(strings.TrimSpace(name), "hot-experts-")
+}
+
+func firstHotExpertCalibrationCandidate(candidates []placement.CalibrationCandidate) (placement.CalibrationCandidate, bool) {
+	for _, candidate := range candidates[1:] {
+		if !calibrationCandidateIsHotExperts(candidate.Name) {
+			continue
+		}
+		if candidate.Strategy == nil || candidate.Strategy.HotExpertCacheSlots <= 0 {
+			continue
+		}
+		return candidate, true
+	}
+	return placement.CalibrationCandidate{}, false
+}
+
+func keepHotExpertAutoFinalist(candidates []placement.CalibrationCandidate, incoming placement.CalibrationCandidate) bool {
+	if len(candidates) < 2 || !calibrationCandidateIsHotExperts(candidates[1].Name) {
+		return false
+	}
+	return !calibrationCandidateIsHotExperts(incoming.Name)
 }
 
 // applyCalibrationDecision returns the strategy to serve with when a prior
@@ -600,9 +658,9 @@ func automaticCalibrationAdmissionEvidenceValid(decision *placement.CalibrationD
 	if decision == nil {
 		return false
 	}
-	// This state records only an exact admission failure. A benchmark timeout,
-	// malformed response, incomplete workload, or untested estimate must retry
-	// later rather than becoming a permanent negative result.
+	// This state records only deterministic exact-admission or feature-lifecycle
+	// failure. A benchmark timeout, malformed response, incomplete workload, or
+	// untested estimate must retry later rather than becoming a negative result.
 	return decision.Winner == "default" &&
 		decision.Finalist != "" &&
 		decision.FinalistOutcome == "unavailable" &&
@@ -683,8 +741,38 @@ func calibrationScore(result, baseline *benchmark.Result) float64 {
 }
 
 func calibrationCandidateBetter(candidate, current calibrationMeasurement) bool {
+	if candidate.Strategy != nil && current.Strategy != nil &&
+		candidate.Strategy.HotExpertCacheSlots > 0 && current.Strategy.HotExpertCacheSlots == 0 &&
+		validCalibrationResult(candidate.Result) {
+		// Auto requested the cache. A completed cache-on measurement with no
+		// phase regression is the requested coordinate, not a speed veto from
+		// packed GPU experts.
+		if current.Result != nil {
+			floor := 1 - calibrationMaxPhaseRegressionPct/100
+			for _, phase := range [][2]float64{
+				{candidate.Result.PromptTPS, current.Result.PromptTPS},
+				{candidate.Result.GenTPS, current.Result.GenTPS},
+				{candidate.Result.MixedGenTPS, current.Result.MixedGenTPS},
+			} {
+				if phase[1] > 0 && phase[0] < phase[1]*floor {
+					return false
+				}
+			}
+		}
+		return true
+	}
 	if candidate.Score <= current.Score*(1+calibrationMinImprovementPct/100) {
 		return false
+	}
+	if candidate.Strategy != nil && current.Strategy != nil &&
+		candidate.Strategy.HotExpertCacheSlots > current.Strategy.HotExpertCacheSlots {
+		// This backend feature is decode-only. A faster workflow score without a
+		// material pure-decode gain is noise or an unrelated phase effect, not
+		// evidence that caching host experts helped.
+		if candidate.Result == nil || current.Result == nil || current.Result.GenTPS <= 0 ||
+			candidate.Result.GenTPS <= current.Result.GenTPS*(1+calibrationMinImprovementPct/100) {
+			return false
+		}
 	}
 	if candidate.Result != nil && current.Result != nil {
 		floor := 1 - calibrationMaxPhaseRegressionPct/100
@@ -837,6 +925,46 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		res.AgentWorkloadMaxS = res.AgentScenarioMaxS * float64(waves)
 		return res, nil
 	}
+	validateHotExpertRuntime := func(active *placement.Strategy, activeProcess *server.Process) (bool, error) {
+		if active == nil || active.HotExpertCacheSlots <= 0 {
+			return true, nil
+		}
+		remaining := budget.MaxElapsed - time.Since(startedAt)
+		if remaining <= 3*time.Second {
+			return false, fmt.Errorf("calibration elapsed-time budget exhausted before hot-expert telemetry canary")
+		}
+		requestTimeout := 5 * time.Minute
+		if available := remaining - 3*time.Second; available < requestTimeout {
+			requestTimeout = available
+		}
+		runner := &benchmark.Runner{
+			BaseURL: baseURL, Model: model.Basename, Timeout: requestTimeout,
+			WorkloadID: scopeKey,
+		}
+		generated, err := runner.RunHotExpertCacheTelemetryCanary()
+		if err != nil {
+			// A completed response that ignored the forced decode length is stable
+			// incompatibility evidence. Transport/timeouts stay retryable.
+			return errors.Is(err, benchmark.ErrHotExpertCanaryIncomplete), err
+		}
+		if activeProcess == nil || activeProcess.LogBuf == nil {
+			return false, fmt.Errorf("hot-expert candidate has no captured backend log")
+		}
+		telemetry, err := placement.ValidateHotExpertCacheTelemetry(active, activeProcess.LogBuf.String())
+		if err != nil {
+			// A completed deterministic canary plus an invalid/missing backend report
+			// is stable capability evidence for this exact backend/model scope.
+			return true, err
+		}
+		active.HotExpertCacheSteps = telemetry.Steps
+		active.HotExpertCacheHits = telemetry.Hits
+		active.HotExpertCacheMisses = telemetry.Misses
+		active.HotExpertCacheHitRate = telemetry.HitRate
+		active.HotExpertCacheEvidence += "; measured aggregate runtime hit/miss telemetry"
+		fmt.Printf("[hot-experts] runtime canary generated %d tokens; steps=%d hits=%d misses=%d hit-rate=%.1f%%\n",
+			generated, telemetry.Steps, telemetry.Hits, telemetry.Misses, telemetry.HitRate)
+		return true, nil
+	}
 
 	// The default is already running: measure it in place.
 	defaultResult, err := bench(strategy, p)
@@ -866,15 +994,17 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		signal := deviceBalanceSignalFromResult(strategy, defaultResult)
 		if signal.Imbalanced {
 			measuredBottleneck := placement.DeviceBalanceBottleneck(strategy, gpuUtilSamplesFromResult(defaultResult))
-			if strategy != nil && strategy.Residency != placement.ResidencyRoomy {
-				fmt.Printf("[optimize] measured device imbalance, but the exact launch is %s; retaining its proven live-search boundary\n",
-					strategy.Residency)
-			} else if finalist, ok := telemetryDirectedCalibrationFinalist(req, cfg, model, be, caps, strategy, signal, memoryRecovery); ok {
-				if candidates[1].Name != finalist.Name {
-					fmt.Printf("[optimize] replacing calculated finalist %s with telemetry-directed %s to move work off saturated GPU %d\n",
-						candidates[1].Name, finalist.Name, signal.BusyGPU)
+			if finalist, ok := telemetryDirectedCalibrationFinalist(req, cfg, model, be, caps, strategy, signal, memoryRecovery); ok {
+				if keepHotExpertAutoFinalist(candidates, finalist) {
+					fmt.Printf("[optimize] keeping hot-expert finalist %s instead of telemetry-directed %s\n",
+						candidates[1].Name, finalist.Name)
+				} else {
+					if candidates[1].Name != finalist.Name {
+						fmt.Printf("[optimize] replacing calculated finalist %s with telemetry-directed %s to move work off saturated GPU %d\n",
+							candidates[1].Name, finalist.Name, signal.BusyGPU)
+					}
+					candidates = prioritizeCalibrationFinalist(candidates, finalist)
 				}
-				candidates = prioritizeCalibrationFinalist(candidates, finalist)
 			} else {
 				fmt.Printf("[optimize] measured device imbalance, but no non-rejected same-workload topology can relieve GPU %d; keeping calculated finalist %s\n",
 					signal.BusyGPU, candidates[1].Name)
@@ -884,11 +1014,16 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 		}
 		if finalist, ok := bottleneckDirectedCalibrationFinalist(req, cfg, model, be, caps, strategy, baselineDiagnosis, memoryRecovery); ok {
-			if candidates[1].Name != finalist.Name {
-				fmt.Printf("[optimize] replacing calculated finalist %s with phase-directed %s for %s/%s\n",
+			if keepHotExpertAutoFinalist(candidates, finalist) {
+				fmt.Printf("[optimize] keeping hot-expert finalist %s instead of phase-directed %s for %s/%s\n",
 					candidates[1].Name, finalist.Name, baselineDiagnosis.PrimaryPhase, baselineDiagnosis.Primary)
+			} else {
+				if candidates[1].Name != finalist.Name {
+					fmt.Printf("[optimize] replacing calculated finalist %s with phase-directed %s for %s/%s\n",
+						candidates[1].Name, finalist.Name, baselineDiagnosis.PrimaryPhase, baselineDiagnosis.Primary)
+				}
+				candidates = prioritizeCalibrationFinalist(candidates, finalist)
 			}
-			candidates = prioritizeCalibrationFinalist(candidates, finalist)
 		}
 	}
 
@@ -899,6 +1034,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	stableFailureReason := ""
 	admissionInconclusive := false
 	exactCandidateStarted := false
+	stablePostStartFailure := false
 	for _, cand := range candidates[1:] {
 		remaining := budget.MaxElapsed - time.Since(startedAt)
 		if remaining <= 3*time.Second {
@@ -983,6 +1119,31 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 			continue
 		}
+		if measuredStrategy != nil && measuredStrategy.HotExpertCacheSlots > 0 {
+			stable, telemetryErr := validateHotExpertRuntime(measuredStrategy, cp)
+			if telemetryErr != nil {
+				fmt.Fprintf(os.Stderr, "[calibrate] %s hot-expert runtime validation failed (%v); skipping\n", cand.Name, telemetryErr)
+				if stable {
+					stableAdmissionFailed = true
+					stablePostStartFailure = true
+					if stableFailureClass == "" {
+						stableFailureClass = "hot-expert-telemetry"
+						stableFailureReason = telemetryErr.Error()
+					}
+				} else {
+					admissionInconclusive = true
+				}
+				if !stopCalibrationProcessAndWait(cp, cand.Name+" after hot-expert runtime validation", resourceBaseline, 30*time.Second) {
+					req.CalibrationScreened = true
+					return cp, measuredStrategy, measuredArgs, nil
+				}
+				failures++
+				if mode == calibrateAuto || failures >= budget.MaxFailures {
+					break
+				}
+				continue
+			}
+		}
 		score := calibrationScore(result, defaultResult)
 		fmt.Printf("[calibrate] %s: workload makespan %.2fs, decode %.1f tok/s, prefill %.1f tok/s, relative %.3f\n",
 			cand.Name, calibrationTurnTime(result), result.GenTPS, result.PromptTPS, score)
@@ -1014,7 +1175,20 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	// ordinary functional/cache/lifecycle gates.
 	if len(measurements) < 2 {
 		if curP == nil {
-			curP = restartPlacement(req, cfg, model, strategy, be, caps, serverArgs, timeout, memoryRecovery)
+			var restoredStrategy *placement.Strategy
+			var restoredArgs []string
+			curP, restoredStrategy, restoredArgs = restartPlacement(
+				req, cfg, model, strategy, be, caps, serverArgs, timeout, memoryRecovery,
+			)
+			if curP != nil {
+				// Negative finalist evidence belongs to the exact measured baseline.
+				// If restoring it needed recovery, serve that safe result but leave the
+				// experiment retryable under its new scope.
+				if !exactCalibrationCandidate(serverArgs, restoredArgs) {
+					return curP, restoredStrategy, restoredArgs, nil
+				}
+				strategy, serverArgs = restoredStrategy, restoredArgs
+			}
 		}
 		if curP == nil {
 			return nil, strategy, serverArgs, nil
@@ -1022,7 +1196,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		// Only exact admission failures are stable negative evidence. A candidate
 		// that started but whose benchmark timed out or returned incomplete data
 		// must remain retryable on the next launch.
-		if !stableAdmissionFailed || admissionInconclusive || exactCandidateStarted {
+		if !stableAdmissionFailed || admissionInconclusive || (exactCandidateStarted && !stablePostStartFailure) {
 			return curP, strategy, serverArgs, nil
 		}
 		pending := newCalibrationDecision(scopeKey, model, defaultResult, measurements[0])
@@ -1070,18 +1244,52 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	// The support helper (when enabled) has stopped and verified resource release.
 	// Only now may the winning main-model process be started.
-	curP = restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, timeout, memoryRecovery)
+	servingStrategy, servingArgs := best.Strategy, best.Args
+	curP, servingStrategy, servingArgs = restartPlacement(
+		req, cfg, model, best.Strategy, be, caps, best.Args, timeout, memoryRecovery,
+	)
+	cleanRestartFailureClass, cleanRestartFailureReason := "", ""
+	if curP != nil && !exactCalibrationCandidate(best.Args, servingArgs) {
+		// A winner is not reusable unless the clean relaunch reproduced its exact
+		// argv. Automatic hot-cache activation may safely strip only the cache and
+		// return the already-measured baseline; any other recovery is stopped and
+		// followed by an explicit baseline restore.
+		if best.Name != "default" && exactCalibrationCandidate(measurements[0].Args, servingArgs) {
+			if best.Strategy != nil && best.Strategy.HotExpertCacheSlots > 0 &&
+				servingStrategy != nil && servingStrategy.HotExpertCacheSlots == 0 {
+				cleanRestartFailureClass = "hot-expert-clean-relaunch"
+				cleanRestartFailureReason = "the measured hot-expert candidate did not reproduce its cache-on activation during clean relaunch"
+			}
+			fmt.Fprintf(os.Stderr, "[calibrate] winner did not reproduce its exact argv; serving the measured default\n")
+			best = measurements[0]
+		} else {
+			_ = stopCalibrationProcessAndWait(curP, "recovered winner before exact baseline restore", resourceBaseline, 30*time.Second)
+			curP = nil
+		}
+	}
 	if curP == nil && best.Name != "default" {
 		fmt.Fprintln(os.Stderr, "[calibrate] winner restart failed; restoring measured default")
 		best = measurements[0]
-		curP = restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, timeout, memoryRecovery)
+		curP, servingStrategy, servingArgs = restartPlacement(
+			req, cfg, model, best.Strategy, be, caps, best.Args, timeout, memoryRecovery,
+		)
 	}
 	if curP == nil {
-		return nil, best.Strategy, best.Args, nil
+		return nil, servingStrategy, servingArgs, nil
+	}
+	if !exactCalibrationCandidate(best.Args, servingArgs) {
+		// The safe recovery may continue serving, but it is a different placement
+		// from every measured result and cannot produce a calibration decision.
+		return curP, servingStrategy, servingArgs, nil
 	}
 
 	pending := newCalibrationDecision(scopeKey, model, defaultResult, best)
 	annotateOptimizationDecision(pending, candidates, measurements)
+	if pending != nil && cleanRestartFailureClass != "" {
+		pending.FinalistOutcome = "unavailable"
+		pending.FinalistFailureClass = cleanRestartFailureClass
+		pending.FinalistFailureReason = cleanRestartFailureReason
+	}
 	if best.Name != "default" && mode == calibrateOn {
 		req.CalibrationScreened = true
 	}
@@ -1092,7 +1300,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		fmt.Printf("[optimize] candidate winner %s (turn %.2fs, relative %.3f); awaiting launch/cache/workload validation\n",
 			best.Name, calibrationTurnTime(best.Result), best.Score)
 	}
-	return curP, best.Strategy, best.Args, pending
+	return curP, servingStrategy, servingArgs, pending
 }
 
 func newCalibrationDecision(scopeKey string, model *placement.ModelProfile, defaultResult *benchmark.Result, best calibrationMeasurement) *placement.CalibrationDecision {
@@ -1162,6 +1370,12 @@ func annotateOptimizationDecision(decision *placement.CalibrationDecision, candi
 	for _, measured := range measurements {
 		if measured.Name != finalist.Name {
 			continue
+		}
+		if measured.Strategy != nil {
+			decision.FinalistHotExpertSteps = measured.Strategy.HotExpertCacheSteps
+			decision.FinalistHotExpertHits = measured.Strategy.HotExpertCacheHits
+			decision.FinalistHotExpertMisses = measured.Strategy.HotExpertCacheMisses
+			decision.FinalistHotExpertHitRate = measured.Strategy.HotExpertCacheHitRate
 		}
 		if decision.Winner == finalist.Name {
 			decision.FinalistOutcome = "promoted"
@@ -1298,9 +1512,13 @@ func gpuUtilSamplesFromResult(result *benchmark.Result) []placement.GPUUtilSampl
 
 func telemetryDirectedCalibrationFinalist(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, signal placement.DeviceBalanceSignal, memoryRecovery *launchMemoryRecovery) (placement.CalibrationCandidate, bool) {
 	// Utilization can prove a performance defect but cannot prove memory
-	// headroom. Exact resource accounting must have admitted the launch to the
-	// roomy lane before telemetry may authorize a topology reshuffle.
-	if strategy == nil || strategy.Residency != placement.ResidencyRoomy {
+	// headroom. Tight launches may challenge only a same-workload topology that
+	// does not increase CPU expert offload; SelectDeviceBalanceFinalist enforces
+	// that rule. Exact baseline accounting plus contained candidate admission is
+	// the safety authority, rather than the coarse roomy/tight label.
+	if req == nil || cfg == nil || model == nil || be == nil || caps == nil || strategy == nil ||
+		strategy.Residency == placement.ResidencyNonResident ||
+		strategy.ResourceLedger == nil || !strategy.ResourceLedger.Exact || !strategy.ResourceLedger.Fits {
 		return placement.CalibrationCandidate{}, false
 	}
 	frontier := analyzedMeasuredCalibrationFrontier(req, cfg, model, be, caps, strategy, memoryRecovery)
@@ -1544,15 +1762,15 @@ func calibrationAdvisorIncident(req *launchRequest, model *placement.ModelProfil
 }
 
 // restartPlacement brings the selected measured strategy back up after the
-// losing candidate stopped it. A nil return means the restart failed; the
-// caller then reports the error and stops any reviewer before exiting, since
-// leaving the user with no server after a calibration that already measured a
-// working default is worse than failing loudly.
-func restartPlacement(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery) *server.Process {
-	p, _, _, err := restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, timeout, memoryRecovery)
+// losing candidate stopped it. It returns the actual strategy/argv because
+// recovery may legally restore a cache-free baseline; callers must never label
+// that process as the requested cache-on winner. A nil process means restart
+// failed.
+func restartPlacement(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string) {
+	p, restoredStrategy, restoredArgs, err := restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, timeout, memoryRecovery)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[calibrate] restart of best placement failed: %v\n", err)
-		return nil
+		return nil, restoredStrategy, restoredArgs
 	}
-	return p
+	return p, restoredStrategy, restoredArgs
 }

@@ -256,8 +256,10 @@ func TestContaminatedSystemOverheadIsDiscarded(t *testing.T) {
 		{Index: 2, Name: "RTX 4070", Driver: "580"},
 	}
 	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
-	// Exactly what this project recorded, without a schema marker.
-	body := "SYS_CUDA_OVERHEAD_MB_CUDA0=397\nSYS_CUDA_OVERHEAD_MB_CUDA1=2299\nSYS_CUDA_OVERHEAD_MB_CUDA2=255\nSYS_CUDA_OVERHEAD_MB=2299\n"
+	// Exactly what this project recorded, represented in the current schema so
+	// this test exercises outlier filtering rather than schema invalidation.
+	body := fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) +
+		"SYS_CUDA_OVERHEAD_MB_CUDA0=397\nSYS_CUDA_OVERHEAD_MB_CUDA1=2299\nSYS_CUDA_OVERHEAD_MB_CUDA2=255\nSYS_CUDA_OVERHEAD_MB=2299\n"
 	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +282,9 @@ func TestPlausibleSystemOverheadSpreadIsKept(t *testing.T) {
 		{Index: 1, Name: "RTX 3060", Driver: "580"},
 	}
 	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
-	if err := os.WriteFile(path, []byte("SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\nSYS_CUDA_OVERHEAD_MB=488\n"), 0644); err != nil {
+	body := fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) +
+		"SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\nSYS_CUDA_OVERHEAD_MB=488\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
 	got := SystemCUDAOverheadByGPU(dir, gpus)

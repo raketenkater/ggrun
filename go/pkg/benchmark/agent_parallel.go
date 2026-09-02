@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,9 +9,19 @@ import (
 	"time"
 )
 
+// ErrHotExpertCanaryIncomplete marks a completed HTTP response that did not
+// execute the canary's full forced decode. Unlike a transport error, this is
+// stable compatibility evidence for the exact backend/model scope.
+var ErrHotExpertCanaryIncomplete = errors.New("hot-expert telemetry canary response was incomplete")
+
 const (
 	agentBenchmarkMaxLanes  = 4
 	agentBenchmarkGenTokens = 64
+	// The reviewed hot-expert backend reports aggregate hit/miss counters every
+	// 512 decode steps. The normal two-sample agent screen gets a single-slot
+	// candidate most of the way there; this candidate-only canary supplies a
+	// deterministic final window without changing the scored workload.
+	hotExpertTelemetryCanaryTokens = 256
 	// Roughly 8k tokens: long enough for batch/ubatch and scheduler differences
 	// to dominate request overhead, while remaining portable at the 32k minimum
 	// useful agent context. The same deterministic corpus is reused by every
@@ -151,6 +162,35 @@ func (r *Runner) RunAgentParallel(slots int) (*Result, error) {
 		trials = append(trials, result)
 	}
 	return aggregateAgentTrials(trials), nil
+}
+
+// RunHotExpertCacheTelemetryCanary drives enough deterministic single-token
+// decode work for a reviewed hot-expert backend to emit its periodic runtime
+// counters. It is deliberately separate from RunAgentParallel: the identical
+// baseline/finalist workload remains the only performance score, while this
+// extra request proves that the candidate's cache path was actually active.
+func (r *Runner) RunHotExpertCacheTelemetryCanary() (int, error) {
+	prompt := "Continue a deterministic numbered engineering checklist until the exact token budget is exhausted."
+	result, err := r.chatWithOptions(
+		prompt,
+		hotExpertTelemetryCanaryTokens,
+		hotExpertTelemetryCanaryTokens,
+		false,
+		911,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("hot-expert telemetry canary: %w", err)
+	}
+	if result == nil {
+		return 0, fmt.Errorf("%w: no result", ErrHotExpertCanaryIncomplete)
+	}
+	if result.CompletionTokens < hotExpertTelemetryCanaryTokens {
+		return result.CompletionTokens, fmt.Errorf(
+			"%w: produced %d tokens, need %d", ErrHotExpertCanaryIncomplete,
+			result.CompletionTokens, hotExpertTelemetryCanaryTokens,
+		)
+	}
+	return result.CompletionTokens, nil
 }
 
 func (r *Runner) runAgentParallelTrial(lanes, trial int) (*Result, error) {

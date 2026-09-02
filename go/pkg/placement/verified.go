@@ -13,7 +13,7 @@ import (
 // VerifiedConfigSchemaVersion bumps whenever the record shape or its semantics
 // change, so a record saved under older semantics is never applied to a launch
 // the new code would have planned differently.
-const VerifiedConfigSchemaVersion = 7
+const VerifiedConfigSchemaVersion = 8
 
 // VerifiedConfig is a sibling of CacheEntry that stores the *whole* serving
 // decision — placement identity, runtime knobs, and non-flag provenance — so
@@ -81,11 +81,21 @@ type VerifiedConfig struct {
 	// Model semantics are runtime behavior, not merely placement diagnostics:
 	// HasSSM emits --no-context-shift and activates fair parallel-agent batching.
 	// Persist them so the direct-start path cannot erase those policies.
-	HasSSM     bool         `json:"has_ssm,omitempty"`
-	IsMoE      bool         `json:"is_moe,omitempty"`
-	MMProjPath string       `json:"mmproj_path,omitempty"`
-	Draft      *DraftConfig `json:"draft,omitempty"`
-	BackendTag string       `json:"backend_tag,omitempty"` // emitted dialect
+	HasSSM                    bool         `json:"has_ssm,omitempty"`
+	IsMoE                     bool         `json:"is_moe,omitempty"`
+	MMProjPath                string       `json:"mmproj_path,omitempty"`
+	Draft                     *DraftConfig `json:"draft,omitempty"`
+	BackendTag                string       `json:"backend_tag,omitempty"` // emitted dialect
+	HotExpertCacheSlots       int          `json:"hot_expert_cache_slots,omitempty"`
+	HotExpertCacheInserts     int          `json:"hot_expert_cache_inserts,omitempty"`
+	HotExpertCacheLayers      int          `json:"hot_expert_cache_layers,omitempty"`
+	HotExpertCacheVRAMByGPU   map[int]int  `json:"hot_expert_cache_vram_by_gpu,omitempty"`
+	HotExpertCacheLayersByGPU map[int]int  `json:"hot_expert_cache_layers_by_gpu,omitempty"`
+	HotExpertCacheEvidence    string       `json:"hot_expert_cache_evidence,omitempty"`
+	HotExpertCacheSteps       uint64       `json:"hot_expert_cache_steps,omitempty"`
+	HotExpertCacheHits        uint64       `json:"hot_expert_cache_hits,omitempty"`
+	HotExpertCacheMisses      uint64       `json:"hot_expert_cache_misses,omitempty"`
+	HotExpertCacheHitRate     float64      `json:"hot_expert_cache_hit_rate,omitempty"`
 
 	// Non-flag provenance (identity / evidence, not emitted)
 	BackendIdentity        string      `json:"backend_identity"`         // be.Identity
@@ -180,44 +190,63 @@ func DeleteVerifiedConfig(cacheDir, scopeKey string) error {
 // restored — the caller sets what it needs.
 func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilities) *Strategy {
 	s := &Strategy{
-		Type:                     vc.StrategyType,
-		ContextSize:              vc.ContextSize,
-		ContextAuto:              vc.ContextAuto,
-		ContextFitTier:           vc.ContextFitTier,
-		ContextFitRejected:       vc.ContextFitRejected,
-		ContextFitEvidence:       vc.ContextFitEvidence,
-		KVPlacement:              vc.KVPlacement,
-		KVQuality:                kvTypeToQuality(vc.KVType),
-		KVType:                   vc.KVType,
-		KVTypeV:                  vc.KVTypeV,
-		NCPUMoE:                  vc.NCPUMoE,
-		OTString:                 vc.OTString,
-		MainGPU:                  vc.MainGPU,
-		SplitMode:                vc.SplitMode,
-		Threads:                  vc.Threads,
-		ThreadsBatch:             vc.ThreadsBatch,
-		BatchTuned:               vc.BatchTuned,
-		PerformanceTuned:         vc.PerformanceTuned && vc.PerformanceEvidenceSchema == CalibrationSchemaVersion,
-		MMap:                     vc.MMap,
-		MMapRequired:             vc.MMapRequired,
-		MLock:                    vc.MLock,
-		CPUExpertMMapCapability:  vc.CPUExpertMMapCapability,
-		CPUExpertMMapEvidence:    vc.CPUExpertMMapEvidence,
-		ReclaimableHostWeightsMB: vc.ReclaimableHostWeightsMB,
-		FlashAttention:           vc.FlashAttention,
-		SWAFull:                  vc.SWAFull,
-		CRAM:                     vc.CRAM,
-		MaxCheckpoints:           vc.MaxCheckpoints,
-		MeasuredCheckpointMB:     vc.MeasuredCheckpointMB,
-		CheckpointMinStep:        vc.CheckpointMinStep,
-		UseCUDAGraphs:            vc.UseCUDAGraphs,
-		Host:                     vc.Host,
-		NoJinja:                  vc.NoJinja,
-		ReasoningOff:             vc.ReasoningOff,
-		HasSSM:                   vc.HasSSM,
-		IsMoE:                    vc.IsMoE,
-		MMProjPath:               vc.MMProjPath,
-		BackendTag:               vc.BackendTag,
+		Type:                          vc.StrategyType,
+		ContextSize:                   vc.ContextSize,
+		ContextAuto:                   vc.ContextAuto,
+		ContextFitTier:                vc.ContextFitTier,
+		ContextFitRejected:            vc.ContextFitRejected,
+		ContextFitEvidence:            vc.ContextFitEvidence,
+		KVPlacement:                   vc.KVPlacement,
+		KVQuality:                     kvTypeToQuality(vc.KVType),
+		KVType:                        vc.KVType,
+		KVTypeV:                       vc.KVTypeV,
+		NCPUMoE:                       vc.NCPUMoE,
+		OTString:                      vc.OTString,
+		MainGPU:                       vc.MainGPU,
+		SplitMode:                     vc.SplitMode,
+		Threads:                       vc.Threads,
+		ThreadsBatch:                  vc.ThreadsBatch,
+		BatchTuned:                    vc.BatchTuned,
+		PerformanceTuned:              vc.PerformanceTuned && vc.PerformanceEvidenceSchema == CalibrationSchemaVersion,
+		MMap:                          vc.MMap,
+		MMapRequired:                  vc.MMapRequired,
+		MLock:                         vc.MLock,
+		CPUExpertMMapCapability:       vc.CPUExpertMMapCapability,
+		CPUExpertMMapEvidence:         vc.CPUExpertMMapEvidence,
+		ReclaimableHostWeightsMB:      vc.ReclaimableHostWeightsMB,
+		FlashAttention:                vc.FlashAttention,
+		SWAFull:                       vc.SWAFull,
+		CRAM:                          vc.CRAM,
+		MaxCheckpoints:                vc.MaxCheckpoints,
+		MeasuredCheckpointMB:          vc.MeasuredCheckpointMB,
+		CheckpointMinStep:             vc.CheckpointMinStep,
+		UseCUDAGraphs:                 vc.UseCUDAGraphs,
+		Host:                          vc.Host,
+		NoJinja:                       vc.NoJinja,
+		ReasoningOff:                  vc.ReasoningOff,
+		HasSSM:                        vc.HasSSM,
+		IsMoE:                         vc.IsMoE,
+		MMProjPath:                    vc.MMProjPath,
+		BackendTag:                    vc.BackendTag,
+		HotExpertCacheSlots:           vc.HotExpertCacheSlots,
+		HotExpertCacheInserts:         vc.HotExpertCacheInserts,
+		HotExpertCacheLayers:          vc.HotExpertCacheLayers,
+		HotExpertCacheVRAMByGPU:       cloneIntMap(vc.HotExpertCacheVRAMByGPU),
+		HotExpertCacheLayersByGPU:     cloneIntMap(vc.HotExpertCacheLayersByGPU),
+		HotExpertCacheEvidence:        vc.HotExpertCacheEvidence,
+		HotExpertCacheSteps:           vc.HotExpertCacheSteps,
+		HotExpertCacheHits:            vc.HotExpertCacheHits,
+		HotExpertCacheMisses:          vc.HotExpertCacheMisses,
+		HotExpertCacheHitRate:         vc.HotExpertCacheHitRate,
+		BackendSupportsHotExpertCache: backendSupportsHotExpertCache(opts.BackendHelp),
+		// These dialect capabilities are runtime facts of the exact selected
+		// backend and intentionally are not serialized. Re-derive them on a
+		// verified-config hit; otherwise StrategyArgs silently drops
+		// --kv-offload and --fit off and the alleged direct replay is no longer
+		// the configuration whose allocation/canaries were verified.
+		BackendSupportsFit:       backendHelpSupports(opts.BackendHelp, "-fit"),
+		BackendFitTakesValue:     backendFitTakesValue(opts.BackendHelp),
+		BackendSupportsKVOffload: backendHelpSupports(opts.BackendHelp, "--kv-offload"),
 		GPULayers:                999,
 		ModelBasename:            vc.ModelBasename,
 		PlanFreeVRAM:             vc.PlanFreeVRAM,
@@ -323,35 +352,45 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 			}
 			return 0
 		}(),
-		Parallel:                 s.Parallel,
-		Threads:                  s.Threads,
-		ThreadsBatch:             s.ThreadsBatch,
-		MMap:                     s.MMap,
-		MMapRequired:             s.MMapRequired,
-		MLock:                    s.MLock,
-		CPUExpertMMapCapability:  s.CPUExpertMMapCapability,
-		CPUExpertMMapEvidence:    s.CPUExpertMMapEvidence,
-		ReclaimableHostWeightsMB: s.ReclaimableHostWeightsMB,
-		FlashAttention:           s.FlashAttention,
-		SWAFull:                  s.SWAFull,
-		CRAM:                     s.CRAM,
-		MaxCheckpoints:           s.MaxCheckpoints,
-		MeasuredCheckpointMB:     s.MeasuredCheckpointMB,
-		CheckpointMinStep:        s.CheckpointMinStep,
-		UseCUDAGraphs:            s.UseCUDAGraphs,
-		Host:                     s.Host,
-		NoJinja:                  s.NoJinja,
-		ReasoningOff:             s.ReasoningOff,
-		HasSSM:                   s.HasSSM,
-		IsMoE:                    s.IsMoE,
-		MMProjPath:               s.MMProjPath,
-		BackendTag:               s.BackendTag,
-		BackendIdentity:          backendIdentity,
-		BackendPath:              backendPath,
-		ChatTemplate:             chatTemplate,
-		Reviewer:                 reviewer,
-		PlanFreeVRAM:             s.PlanFreeVRAM,
-		PlannedHostFootprintMB:   s.PlannedHostFootprintMB,
+		Parallel:                  s.Parallel,
+		Threads:                   s.Threads,
+		ThreadsBatch:              s.ThreadsBatch,
+		MMap:                      s.MMap,
+		MMapRequired:              s.MMapRequired,
+		MLock:                     s.MLock,
+		CPUExpertMMapCapability:   s.CPUExpertMMapCapability,
+		CPUExpertMMapEvidence:     s.CPUExpertMMapEvidence,
+		ReclaimableHostWeightsMB:  s.ReclaimableHostWeightsMB,
+		FlashAttention:            s.FlashAttention,
+		SWAFull:                   s.SWAFull,
+		CRAM:                      s.CRAM,
+		MaxCheckpoints:            s.MaxCheckpoints,
+		MeasuredCheckpointMB:      s.MeasuredCheckpointMB,
+		CheckpointMinStep:         s.CheckpointMinStep,
+		UseCUDAGraphs:             s.UseCUDAGraphs,
+		Host:                      s.Host,
+		NoJinja:                   s.NoJinja,
+		ReasoningOff:              s.ReasoningOff,
+		HasSSM:                    s.HasSSM,
+		IsMoE:                     s.IsMoE,
+		MMProjPath:                s.MMProjPath,
+		BackendTag:                s.BackendTag,
+		HotExpertCacheSlots:       s.HotExpertCacheSlots,
+		HotExpertCacheInserts:     s.HotExpertCacheInserts,
+		HotExpertCacheLayers:      s.HotExpertCacheLayers,
+		HotExpertCacheVRAMByGPU:   cloneIntMap(s.HotExpertCacheVRAMByGPU),
+		HotExpertCacheLayersByGPU: cloneIntMap(s.HotExpertCacheLayersByGPU),
+		HotExpertCacheEvidence:    s.HotExpertCacheEvidence,
+		HotExpertCacheSteps:       s.HotExpertCacheSteps,
+		HotExpertCacheHits:        s.HotExpertCacheHits,
+		HotExpertCacheMisses:      s.HotExpertCacheMisses,
+		HotExpertCacheHitRate:     s.HotExpertCacheHitRate,
+		BackendIdentity:           backendIdentity,
+		BackendPath:               backendPath,
+		ChatTemplate:              chatTemplate,
+		Reviewer:                  reviewer,
+		PlanFreeVRAM:              s.PlanFreeVRAM,
+		PlannedHostFootprintMB:    s.PlannedHostFootprintMB,
 	}
 	if s.TensorSplit != nil {
 		vc.TensorSplit = append([]float64(nil), s.TensorSplit...)
