@@ -63,6 +63,28 @@ evidence.
 | HOT-6 | Not complete; automatic eligibility remains narrow (resident, p1, layer-split, separate gate/up, non-speculative MoE) | Public architecture/topology matrix before broadening support or claiming a default |
 | PIN/P3 | Deliberately not started | Blocked on appropriate hardware/model artifacts as specified below |
 
+### 2026-09-05 measurement reuse scope hardening
+
+Related growth and compute-scaling predictions now require the same artifact,
+backend/features, physical hardware signature, and slot count. The existing
+hashed probe identity is checked using the record's context/microbatch/KV
+coordinates, preserving compatible measurements while rejecting same-basename
+replacements and foreign backend observations. Placement-plan version 8 and
+calibration schema 25 invalidate derived decisions; raw observations and exact
+fit records remain. Regression tests and the uncached core gate pass. Live
+fit/performance acceptance is still open; see the corresponding section in
+`optimizer-theory.md`.
+
+### 2026-09-05 metadata-preserving cache writes
+
+Compute and growth writers now preserve unrelated source/role labels under the
+file lock, and retained compute values keep their original GPU role. Probe
+schema 9 excludes potentially mislabelled old exact rows; scoped older growth
+remains conservative fallback evidence. Placement-plan version 9 and calibration
+schema 26 invalidate derived decisions, while validated fit records retain
+their schema. Regression tests and the uncached core gate pass; live acceptance
+remains open. Details are in optimizer-theory.md.
+
 ### 2026-09-01 Qwen3.8 three-GPU saturation finding
 
 - The live cache-free baseline served at about 118 prompt tok/s and 15 decode
@@ -93,6 +115,30 @@ evidence.
   so `--moe-expert-cache` is present when auto can plan it; packed stays the
   fail-closed fallback. Live cache-on vs packed remains unproven until that
   relaunch.
+- 2026-09-02 (branch `hot-experts-turboquant`) reverses the schema-23
+  first-serve choice: a live GLM-5.3-Flash Q3 serve stayed ~10.5 h on the
+  demoted all-CPU-expert topology because a failed cache-on challenger's
+  fallback stripped only the cache flags, and because `auto` served the
+  cache-on layout as candidate 0 so the packed-vs-cache-on A/B never ran.
+  `auto` now serves the packed cache-free layout as the fail-closed default
+  and hands cache-on to calibration as the challenger; a demoting challenger
+  captures its exact packed pre-demotion `Strategy` and the fallback restores
+  that (or recomputes cache-free and fails closed). `CalibrationSchemaVersion`
+  24; `HotExpertCacheEvidenceSchemaVersion` gate drops a stale verified
+  record's cache while keeping its fit proof. Full record:
+  `docs/optimizer-theory.md` "2026-09-02 hot-expert fallback + promotion-gate
+  correction". D2 cache-graph-reserve/slot-ladder and prefill microbatch work
+  deferred — the `ub=64` number came from the degraded run.
+- 2026-09-02 follow-up: the first `auto` launch of the restored packed layout
+  loaded, passed health, then OOMed on the warmup decode inside
+  `cudaGraphInstantiate` (no runtime graph-growth evidence for this never-run
+  model; the no-alloc oracle can't see graph-exec memory). The
+  `verifyAndActivateLaunch`-canary seam now routes a post-`model loaded` CUDA
+  OOM through `RecordRuntimeGraphGrowthFromOOM` + re-plan + re-verify (bounded
+  2), with a `CUDA_SCALE_LAUNCH_QUEUES=1x` / `GGML_CUDA_GRAPHS=0` env rung ahead
+  of moving layers for a graph-capture abort. Convergence for this GLM key and
+  the `=1x` throughput cost are unproven until a live run. Full record:
+  `docs/optimizer-theory.md` "2026-09-02 verify-canary CUDA-OOM recovery".
 - Full convergence across winning topology, hot cache, batch, and slot settings
   is still open. A named winner must become the next safe baseline and continue
   bounded coordinate descent in a later launch/idle window until a complete
@@ -1127,6 +1173,88 @@ this is blocked/experimental and outside “automatic best.”
 - [ ] **PORT-5 — release contract.** Document cold estimate vs converged winner,
   per-agent context, inspection/reset, and all last-resort warnings.
 
+## FIRST — cold start on a machine with no evidence
+
+Opened 2026-09-08. Everything in this file assumes ggrun has measured the
+machine. On a new install it has not, and every gate here is deliberately
+fail-closed, so a first run gets the most conservative plan ggrun can build.
+
+The risk is almost certainly not correctness -- fail-closed means a cold launch
+is safe by construction -- it is **bootstrap cost and first impression**. A user
+whose first launch is slow, and whose second and third are also slow because
+each gate needs its own completed serve, concludes the product does not work.
+On a 138 GB model at ~6 minutes per load that is a long way to walk before
+ggrun looks good.
+
+This is worse after today's changes, and that has to be said plainly: the
+displacement gate, the phase weight and the split-mode probe each add evidence a
+cold machine does not have. They are right individually and they compound.
+
+### What a cold machine lacks, and what each costs to obtain
+
+| Evidence | Consumer | Cost to obtain |
+|---|---|---|
+| MeasuredAllocation (Exact) | ledger, hot-expert sizing | 1 completed launch |
+| RuntimeGraphGrowth per GPU | occupancy margin, seats | 1 healthy serve |
+| SystemCUDAOverhead | ledger | system probe (cheap) |
+| ComputeBufByGPU | occupancy, entry cost | fit oracle (cheap) |
+| AgentContextDemand | context cap | 200 request samples |
+| AgentPhaseTiming | batch/objective weight | 8 request samples |
+| HotExpertDisplacementProof | hot-expert auto | 2 launches (matched pair) |
+| SplitModeSupport | mode eligibility | 2 fit-oracle probes (~2 s each) |
+| ObservedPerformance | reporting, ranking | 1 serve |
+
+Open question this table exists to answer: **how many full launches does a cold
+machine actually need before the plan stops improving?** Nobody has counted. If
+the answer is one or two, there is no problem to solve. If it is five, the
+bootstrap needs to be consolidated so a single serve records everything a serve
+can record.
+
+### How to test it
+
+Three layers, cheapest first. Only the first belongs in the core gate.
+
+1. **Cold-cache unit suite (gate-able, no GPU).** Every evidence consumer must
+   return a safe, launchable answer against an empty `CacheDir`: no panic, no
+   error that blocks a launch, no seat offered, no cache funded, no batch
+   promoted. This is the layer that would catch a future gate that accidentally
+   makes a cold machine unlaunchable, and it costs milliseconds.
+
+2. **Cold dry-run (cheap, one host, no serve).** `ggrun dry-run <model>` with
+   `CACHE_DIR` pointed at an empty directory must print a complete argv. This is
+   the honest first-run smoke test: it exercises real detection, the real fit
+   oracle and the real planner without a 6-minute load, and it is the only layer
+   that catches a cold-start failure arising from the interaction of components
+   rather than from any one of them. Add it as a script, not a Go test, so it
+   can run against any model the developer has.
+
+3. **Bootstrap convergence run (live, periodic, not in the gate).** Wipe the
+   cache, launch N times with a fixed workload, and record after each launch
+   which evidence now exists and what the plan changed to. The output is a
+   convergence curve and a number: launches-to-stable-plan. Run it when a gate
+   is added or changed, since that is exactly when the number moves.
+
+Layer 2 is the one to build first. It is the closest thing to what a new user
+actually does, and it is cheap enough to run on every change.
+
+TODO:
+
+- [ ] Count launches-to-stable-plan on a wiped cache. Until this number exists
+      the size of the problem is unknown, and every fix below is speculative.
+- [ ] Cold-cache unit suite asserting a launchable plan with empty evidence.
+- [ ] `scripts/first-run-smoke.sh`: empty CACHE_DIR, dry-run, assert a complete
+      argv and a zero exit.
+- [ ] Consolidate what one serve records. If growth, compute buffers, phase
+      timings and observed performance can all be captured from a single
+      healthy serve, a cold machine needs one launch rather than four.
+- [ ] Decide what a cold `auto` should do about hot experts. Today it declines
+      (no displacement proof), which is the safe answer and also means the
+      feature never engages unless a user asks for it by name. That may be
+      correct; it should be a decision, not a side effect.
+- [ ] Make the first launch say what it is doing. "Measuring this machine;
+      later launches will be faster" turns a slow first run from a defect into
+      an explanation.
+
 ## Tracking rules
 
 - Close a box only with implementation commit, focused regression test, and
@@ -1140,3 +1268,13 @@ this is blocked/experimental and outside “automatic best.”
   its separate lane.
 - AI Tune is legacy/optional. Manual calibration can remain diagnostic, but
   standard launch owns the final fit and performance decision.
+
+
+### 2026-09-06 HOT-2 / HOT-5 admission follow-up
+
+Cache composition now drops cache-free exactness until cache-on allocation is
+observed. Startup and contained-probe CUDA OOMs without a byte count become
+typed exact-argv rejections; no fabricated reserve, ubatch change, or disabled
+CUDA graph is introduced. Calibration schema 27. Core regression tests and vet
+pass. The observed cache-on warmup failure still needs a newly admitted viable
+configuration and matched agent A/B before HOT-4/HOT-5 live acceptance closes.
