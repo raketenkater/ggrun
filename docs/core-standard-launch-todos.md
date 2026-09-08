@@ -1173,6 +1173,58 @@ this is blocked/experimental and outside “automatic best.”
 - [ ] **PORT-5 — release contract.** Document cold estimate vs converged winner,
   per-agent context, inspection/reset, and all last-resort warnings.
 
+## BLIND — hot-expert telemetry was never observable
+
+Opened 2026-09-08, verified live the same day.
+
+Every hot-expert measurement taken this session was blind, including the matched
+A/B that concluded the cache costs 12% decode. The backend emits its hit/miss
+telemetry as `LLAMA_LOG_DEBUG`:
+
+```
+moe-cache: steps=N hits=N misses=N hit-rate=X%      (every 512 decode steps)
+```
+
+In this fork's ladder `LOG_LEVEL_DEBUG` is **5** and `LOG_LEVEL_TRACE` is **4**
+-- debug sits ABOVE trace, inverted from most logging systems -- and
+`common/log.cpp` drops debug when the threshold is below 5. ggrun requests
+`-lv 4` (`backendTraceVerbosity`, main.go). **Off by exactly one level.**
+
+Measured: the A/B cache arm's log contains 1240 info lines and **zero** debug
+lines, so zero telemetry lines, despite the cache allocating 6,364.7 MiB.
+Re-running the same launch with `LLAMA_ARG_LOG_VERBOSITY=5` produced 2650 debug
+lines in the first 45 seconds. The diagnosis is verified, not inferred.
+
+Two consequences:
+
+1. **No hot-expert conclusion this session is supported by mechanism
+   evidence.** "The cache costs 12% decode" was measured, but whether the cache
+   was ever hit is unknown, so whether that cost bought anything is unknown.
+   A 6.2 GB allocation that is never hit and a 6.2 GB allocation with a 60% hit
+   rate look identical in the logs we captured.
+
+2. **`ValidateHotExpertCacheTelemetry` can never pass.** It requires observed
+   telemetry with at least one hit and >= 512 steps. That telemetry is
+   unobtainable at the verbosity ggrun requests, so the hot-expert verification
+   path is dead by construction -- which plausibly explains why the feature
+   never promoted despite repeated attempts.
+
+TODO:
+
+- [ ] Raise the verbosity ggrun requests when hot experts is enabled, or promote
+      the telemetry line to `LLAMA_LOG_INFO` in the patch we own. The second is
+      cheaper at runtime (one line per 512 decode steps rather than all of
+      llama.cpp's debug output) and makes the contract satisfiable regardless of
+      what verbosity a user sets. Decide after the telemetry has been seen to
+      work.
+- [ ] Re-run the hot-expert comparison with telemetry visible and record the
+      hit rate beside the throughput. Until then the feature is unevaluated,
+      not disproven.
+- [ ] Add a launch-time check that a feature ggrun validates through log output
+      is actually emitted at the verbosity ggrun requests. This class of bug --
+      a contract that depends on output the caller silences -- is invisible to
+      every unit test.
+
 ## FIRST — cold start on a machine with no evidence
 
 Opened 2026-09-08. Everything in this file assumes ggrun has measured the
