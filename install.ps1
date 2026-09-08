@@ -176,9 +176,26 @@ set "PATH=%~dp0.bin;%PATH%"
 }
 
 function Build-CudaBackend {
-    Require-Command 'git' 'Install Git for Windows and run this installer again.'
-    Require-Command 'cmake' 'Install CMake or Visual Studio 2022 with C++ CMake tools.'
-    Require-Command 'nvcc' 'Install the NVIDIA CUDA Toolkit and make sure nvcc is on PATH.'
+    # Reported as issue #27: this checked one tool at a time and hard-failed on
+    # the first miss, so a user with none of git, cmake or nvcc was told only
+    # "cmake was not found" and would have needed three separate runs to learn
+    # the rest. Worse, the CPU bundle had already installed successfully by this
+    # point, so a working ggrun looked like a failed install.
+    #
+    # Report every missing prerequisite at once, and be clear about what does
+    # and does not still work.
+    $missing = @()
+    if (!(Test-Command 'git'))   { $missing += 'git (Git for Windows)' }
+    if (!(Test-Command 'cmake')) { $missing += 'cmake (or Visual Studio 2022 with the C++ CMake tools)' }
+    if (!(Test-Command 'nvcc'))  { $missing += 'nvcc (NVIDIA CUDA Toolkit, on PATH)' }
+
+    if ($missing.Count -gt 0) {
+        Warn 'A CUDA backend cannot be built on this machine yet.'
+        Warn ('Missing: ' + ($missing -join '; '))
+        Warn 'There is no prebuilt Windows CUDA bundle, so CUDA has to be built from source here.'
+        Say  'ggrun itself is installed and works with the CPU backend. Install the tools above and re-run with -Backend cuda to add GPU support.'
+        return
+    }
     if (!(Test-Command 'nvidia-smi')) {
         Warn 'nvidia-smi was not found. Install or repair the NVIDIA driver before launching CUDA models.'
     }
