@@ -44,6 +44,48 @@ type preflightDevice struct {
 	UnaccountedMB int // allocator peak not identified by optional backend log labels
 }
 
+// allocationLedgerFromDevices turns one measured per-device table into the
+// occupancy ledger placement consumes, and returns the per-GPU compute buffers
+// separately for RecordMeasuredComputeBuffers.
+//
+// The compute buffer belongs in the ledger's non-model, non-context term.
+// preflightDevice keeps ComputeMB and UnaccountedMB disjoint (see
+// deviceTotalMB), while every consumer of UnaccountedByGPU reads that field as
+// the graph/compute residue: parseLiveAllocationFromLog stores computeMB plus
+// measured CUDA overhead there, optimizer.go takes it as graphMB, and
+// entryCostByGPU charges a device that owns no expert layer at that same rate.
+//
+// Omitting ComputeMB made occupancy read 26675/49134 MiB (54%) on the
+// 2026-09-08 GLM 5.3 Flash serve whose devices had actually committed
+// 41357 MiB (84%); the missing 14682 MiB was almost exactly the three compute
+// buffers. Seats were then offered against VRAM that did not exist -- +1 on all
+// three GPUs when the true free space (1758/2889/3130 MiB) could not hold one
+// 4.5 GB expert layer on any of them -- and packing into that phantom space is
+// what drove CUDA0 1435 MiB past capacity.
+func allocationLedgerFromDevices(devs []preflightDevice) (placement.MeasuredAllocation, map[int]int) {
+	computeByGPU := map[int]int{}
+	allocation := placement.MeasuredAllocation{
+		ContextByGPU:     map[int]int{},
+		ModelByGPU:       map[int]int{},
+		UnaccountedByGPU: map[int]int{},
+	}
+	for _, d := range devs {
+		if idx, ok := cudaDeviceIndex(d.Name); ok {
+			computeByGPU[idx] = d.ComputeMB
+			allocation.ContextByGPU[idx] = d.ContextMB
+			allocation.ModelByGPU[idx] = d.ModelMB
+			allocation.UnaccountedByGPU[idx] = d.ComputeMB + d.UnaccountedMB
+			continue
+		}
+		if d.Name == "Host" {
+			allocation.ContextHostMB = d.ContextMB
+			allocation.ModelHostMB = d.ModelMB
+			allocation.UnaccountedHostMB = d.ComputeMB + d.UnaccountedMB
+		}
+	}
+	return allocation, computeByGPU
+}
+
 type memoryEvidenceLevel string
 
 const (
@@ -867,8 +909,9 @@ func findFitParamsBin(serverBin, modelArch string) string {
 
 // preflightArgValueFlags are the launch flags that shape memory allocation.
 // Everything else (server networking, sampling, logging) is stripped: the
-// fit-params arg parser only accepts its own example's flag set, and none of
-// the stripped flags change where bytes land.
+// fit-params arg parser only accepts its own example's flag set. The hot-expert
+// cache requires loaded tensors and is absent from this oracle; its per-device
+// planning charge is added separately before checking the deficit.
 var preflightArgValueFlags = map[string]bool{
 	"-m": true, "--model": true,
 	"-c": true, "--ctx-size": true, "--ctx": true,
@@ -903,6 +946,90 @@ func preflightArgs(serverArgs []string) []string {
 		}
 	}
 	return out
+}
+
+func emittedHotExpertSlots(serverArgs []string) (int, error) {
+	slots := 0
+	found := false
+	for i := 0; i < len(serverArgs); i++ {
+		a := serverArgs[i]
+		value := ""
+		switch {
+		case a == "--moe-expert-cache":
+			if i+1 >= len(serverArgs) || strings.HasPrefix(serverArgs[i+1], "-") {
+				return 0, fmt.Errorf("--moe-expert-cache has no value")
+			}
+			value = serverArgs[i+1]
+			i++
+		case strings.HasPrefix(a, "--moe-expert-cache="):
+			value = strings.TrimPrefix(a, "--moe-expert-cache=")
+		default:
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return 0, fmt.Errorf("invalid --moe-expert-cache value %q", value)
+		}
+		if found && parsed != slots {
+			return 0, fmt.Errorf("conflicting --moe-expert-cache values %d and %d", slots, parsed)
+		}
+		slots, found = parsed, true
+	}
+	return slots, nil
+}
+
+// addOracleHotExpertCacheCharges augments only the local no-alloc fit rows.
+// targetDevs remains the raw oracle evidence used for persistence; guarded
+// allocation rows must never receive this modeled charge a second time.
+func addOracleHotExpertCacheCharges(devs []preflightDevice, gpus []detect.GPU, strategy *placement.Strategy, serverArgs []string) ([]preflightDevice, error) {
+	emitted, err := emittedHotExpertSlots(serverArgs)
+	if err != nil {
+		return nil, err
+	}
+	planned := 0
+	if strategy != nil {
+		planned = strategy.HotExpertCacheSlots
+	}
+	if emitted != planned {
+		return nil, fmt.Errorf("launch argv emits %d cache slots, strategy requires %d", emitted, planned)
+	}
+	if planned == 0 {
+		return append([]preflightDevice(nil), devs...), nil
+	}
+
+	if len(strategy.HotExpertCacheVRAMByGPU) == 0 {
+		return nil, fmt.Errorf("cache-on strategy has no per-GPU cache charge")
+	}
+	known := make(map[int]bool, len(gpus))
+	for _, gpu := range gpus {
+		known[gpu.Index] = true
+	}
+	out := append([]preflightDevice(nil), devs...)
+	seen := make(map[int]bool, len(devs))
+	for i := range out {
+		idx, ok := cudaDeviceIndex(out[i].Name)
+		if !ok {
+			continue
+		}
+		if seen[idx] {
+			return nil, fmt.Errorf("oracle emitted duplicate CUDA%d row", idx)
+		}
+		seen[idx] = true
+		charge, ok := strategy.HotExpertCacheVRAMByGPU[idx]
+		if !ok {
+			continue
+		}
+		if !known[idx] || charge <= 0 {
+			return nil, fmt.Errorf("cache charge for CUDA%d is not a positive selected-device charge", idx)
+		}
+		out[i].UnaccountedMB += charge
+	}
+	for idx, charge := range strategy.HotExpertCacheVRAMByGPU {
+		if charge <= 0 || !known[idx] || !seen[idx] {
+			return nil, fmt.Errorf("cache charge for CUDA%d has no matching oracle row", idx)
+		}
+	}
+	return out, nil
 }
 
 // runFitPreflight executes the no-alloc accounting and parses the per-device
@@ -1305,33 +1432,22 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		}
 		devs = mergePreflightDevices(devs, reservation)
 	}
+	if !allocationProbe {
+		charged, chargeErr := addOracleHotExpertCacheCharges(devs, caps.GPUs, strategy, serverArgs)
+		if chargeErr != nil {
+			outcome.Err = fmt.Errorf("cache-on oracle charge unavailable: %w", chargeErr)
+			return outcome
+		}
+		devs = charged
+	}
 	// Feed the backend's measured context and compute buffers back into placement
 	// BEFORE checking fit, regardless of outcome. A re-plan below
 	// (ReplanAfterOOM -> Compute) must see these real numbers immediately, not
 	// the first-launch formulas that produced this (possibly wrong) strategy.
 	if model != nil && strategy != nil {
-		computeByGPU := map[int]int{}
-		allocation := placement.MeasuredAllocation{
-			Evidence:          string(outcome.Evidence.Level),
-			PlacementIdentity: placement.AllocationPlacementIdentity(strategy),
-			ContextByGPU:      map[int]int{},
-			ModelByGPU:        map[int]int{},
-			UnaccountedByGPU:  map[int]int{},
-		}
-		for _, d := range targetDevs {
-			if idx, ok := cudaDeviceIndex(d.Name); ok {
-				computeByGPU[idx] = d.ComputeMB
-				allocation.ContextByGPU[idx] = d.ContextMB
-				allocation.ModelByGPU[idx] = d.ModelMB
-				allocation.UnaccountedByGPU[idx] = d.UnaccountedMB
-				continue
-			}
-			if d.Name == "Host" {
-				allocation.ContextHostMB = d.ContextMB
-				allocation.ModelHostMB = d.ModelMB
-				allocation.UnaccountedHostMB = d.UnaccountedMB
-			}
-		}
+		allocation, computeByGPU := allocationLedgerFromDevices(targetDevs)
+		allocation.Evidence = string(outcome.Evidence.Level)
+		allocation.PlacementIdentity = placement.AllocationPlacementIdentity(strategy, model)
 		if !allocationProbe || !hasExternalSpecCompanion(strategy) {
 			allocation.ContextTotalMB = preflightContextTotalMB(targetDevs)
 			if err := placement.RecordMeasuredAllocation(cfg.CacheDir, model, strategy.ContextSize,
@@ -1340,7 +1456,36 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 				fmt.Fprintf(os.Stderr, "[launch] warning: could not persist scoped allocation evidence: %v\n", err)
 			}
 		}
-		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, computeByGPU)
+		// Tag each reading with the role that device had in the measured
+		// placement. An expert-only GPU carries pinned expert tensors and no KV,
+		// so its compute buffer is orders of magnitude smaller than a split
+		// owner's; recording the role keeps a later plan from charging the wrong
+		// one (2026-09-02: a 192 MiB expert-only reading budgeted a device
+		// llama.cpp then billed 4570 MiB for, and the load died in graph_reserve).
+		expertOnlyByGPU := map[int]bool{}
+		for _, d := range targetDevs {
+			if idx, ok := cudaDeviceIndex(d.Name); ok {
+				expertOnlyByGPU[idx] = d.ContextMB <= 0 && d.ModelMB > 0
+			}
+		}
+		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, computeByGPU, expertOnlyByGPU)
+		// Occupancy disclosure. numGPUsExcluded asks whether every GPU has a
+		// tensor-split share; it does not ask whether any of them is carrying
+		// weight. Measured 2026-09-02 on GLM 5.3 Flash: CUDA2's 0.06 share mapped
+		// to 2.7 dense layers -- enough to pass that test -- and the card finished
+		// the run holding 496 of 12288 MiB at 0% SM, with 18.1 GB idle rig-wide
+		// and every GPU-resident expert on a single owner. Report occupancy from
+		// the ledger just recorded above, so an under-packed placement shows up in
+		// the launch record rather than only in nvidia-smi.
+		if seats := placement.ComputeExpertSeats(cfg.CacheDir, caps, model, strategy,
+			allocation, strategy.Parallel, cacheBackendTag); len(seats.Seats) > 0 {
+			fmt.Fprintf(os.Stderr, "[launch] GPU %s\n", seats.Summary())
+			if seats.UnderPacked() {
+				fmt.Fprintf(os.Stderr,
+					"[launch] placement is below this rig's measured maximum: %d expert layer(s) on the host while %d more would fit on GPU\n",
+					seats.ExpertsOnCPU, seats.TotalSeats())
+			}
+		}
 	}
 	overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
@@ -1354,6 +1499,16 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			if related := placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, cacheBackendTag); len(related) > 0 {
 				runtimeGrowthByGPU = related
 			}
+		}
+		// No measured or related runtime-graph-growth reserve exists for a
+		// GPU-backed placement of this model. The no-alloc oracle predicts the
+		// tensor compute buffers but not the driver-side CUDA-graph executable
+		// (cudaGraphInstantiate), so "fits" here is not a guarantee the first
+		// decode will not OOM. Disclose it; do not invent a reserve (a static
+		// margin would strand layers on every cold launch and never self-clear).
+		// The lifecycle-verification canary is the container that measures it.
+		if len(runtimeGrowthByGPU) == 0 && strategy.Type != placement.CPUOnly && len(caps.GPUs) > 0 {
+			fmt.Fprintln(os.Stderr, "[launch] preflight: no measured CUDA runtime graph-growth evidence for this placement; the first decode's graph allocation is unproven until the lifecycle canary runs")
 		}
 	}
 	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
