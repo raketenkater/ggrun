@@ -13,21 +13,27 @@ import (
 //
 // ggrun's objective is real agent work (invariant 5), which means prefill and
 // decode both matter and neither may be optimised away for the other. Deciding
-// how much each matters is not a judgement call: it is measurable, and on this
-// rig the measurement contradicts the intuition that decode dominates.
+// how much each matters is not a judgement call, it is measurable -- and it has
+// to be measured rather than reasoned about, because reasoning about it here
+// produced the wrong answer twice before the numbers arrived.
 //
-// From 14,247 recorded agent requests, prefill outnumbers decode 6.9:1 in
-// tokens (109,733,076 vs 15,857,333; median input 1002, median output 359).
-// Measured rates on GLM 5.3 Flash were 12.0 tok/s prefill against 7.26 decode
-// -- prefill only 1.65x decode, far below the 10-100x of a GPU-resident model,
-// because CPU-resident experts punish prefill hardest: a 2048-token batch
-// routes across nearly all 288 experts while a decode token touches 8.
-//
-// Token counts alone would overstate it, though. llama-server keeps a prefix
+// Request-level counts cannot answer it. Across 14,247 recorded agent requests
+// prefill outnumbers decode 6.9:1 in tokens, but llama-server keeps a prefix
 // cache, so an agent re-sending a stable prefix does not pay to recompute it.
-// The honest quantity is what the server reports it actually processed, which
-// is why this parses the backend's own timing rows rather than counting what
-// was sent.
+// Measured over a real 12-turn agent session the *processed* ratio was 3.34:1 --
+// half the request-level figure. This therefore parses the backend's own timing
+// rows: what it reports it actually did, not what was sent to it.
+//
+// The same session on GLM 5.3 Flash measured:
+//
+//	prefill  10,321 tokens in 311.7 s = 33.11 tok/s   42.3% of processed time
+//	decode    3,086 tokens in 425.9 s =  7.25 tok/s   57.7%
+//
+// Close to even, leaning decode. An estimate taken from the first turn alone
+// said 80% prefill and was wrong twice over: that turn carried a 24:1 token
+// ratio, and the prefill rate falls steeply as context grows (52.7 tok/s at
+// 2906 tokens, 35.2 at 6096, then 10-15 for the rest of the session). Neither
+// one turn nor request-level tokens is a workload model.
 //
 // The weight is per (rig, model, workload) and must stay measured. A rig whose
 // experts are GPU-resident lands somewhere completely different, which is
@@ -183,10 +189,9 @@ func MeasuredAgentPhaseTiming(cacheDir, modelPath string) AgentPhaseTiming {
 //
 // This is the comparison a batch-size decision needs: -b buys prefill and
 // spends VRAM that would otherwise hold resident expert layers, which buys
-// decode. Scoring either phase alone picks the wrong point. On this rig prefill
-// is ~80% of processed time, so a change that trades prefill for decode has to
-// win by a wide margin on decode to break even, and the naive
-// "shrink the batch to free VRAM" move loses outright.
+// decode. Scoring either phase alone picks the wrong point, in whichever
+// direction the measured mix happens to lean -- 42/58 prefill/decode here, but
+// the ranking must hold for a rig that lands at 80/20 either way.
 //
 // Returns zero when either rate is unknown: an unscored candidate must not
 // outrank a scored one (invariant 4).

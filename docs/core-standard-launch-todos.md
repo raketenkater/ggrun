@@ -1237,8 +1237,40 @@ Three layers, cheapest first. Only the first belongs in the core gate.
 Layer 2 is the one to build first. It is the closest thing to what a new user
 actually does, and it is cheap enough to run on every change.
 
+### Measured 2026-09-08: cold start over-provisions context
+
+`scripts/first-run-smoke.sh` (below) found this on its first run. A cold cache
+does produce a complete, launchable plan -- first run is not broken -- but it is
+measurably worse than a warm one on the same model and hardware:
+
+```
+cold   --ctx-size 1048576   --n-cpu-moe 42
+warm   --ctx-size  287744   --n-cpu-moe 40
+```
+
+A 3.6x larger context, and because that KV occupies VRAM the plan would
+otherwise spend on residency, **two more expert layers are pushed onto the
+host**. The first run is therefore slower than the same rig will be later, in
+the phase where a new user forms their opinion of the product.
+
+Cause: `AgentContextDemand` needs `minAgentContextSamples` (200) request
+samples before it can size context to the observed workload, so a cold machine
+falls back to the model/policy ceiling. The ceiling is the safe choice in the
+absence of evidence -- it never truncates an agent -- but "safe" and "what a
+new user should get" are not the same, and 1M tokens of KV is a very expensive
+default for a workload whose measured demand is 287k.
+
+Worth noting the fallback is asymmetric: guessing the context too small
+truncates real work, guessing too large only costs speed. That asymmetry is why
+the current behaviour is defensible; it is not why it is right.
+
 TODO:
 
+- [ ] Decide what a cold machine should assume about context. Options: a
+      smaller evidence floor than 200 samples, a first-run default below the
+      model ceiling, or sizing from the first session's observed requests
+      mid-run. All three are guesses about an unmeasured workload, so this
+      needs a decision on which guess is least harmful, recorded as such.
 - [ ] Count launches-to-stable-plan on a wiped cache. Until this number exists
       the size of the problem is unknown, and every fix below is speculative.
 - [ ] Cold-cache unit suite asserting a launchable plan with empty evidence.

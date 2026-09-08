@@ -75,25 +75,25 @@ func TestParseAgentPhaseTimingsDropsDegenerateRows(t *testing.T) {
 	}
 }
 
-// TestPrefillTimeShareIsDominantHere records the finding that reversed the
-// batch-size recommendation: agent work on this rig is prefill-bound, so a
-// change that frees VRAM by shrinking the batch sells the larger half.
-func TestPrefillTimeShareIsDominantHere(t *testing.T) {
-	// Agent-shaped traffic only: large prompts, short replies, which is what the
-	// 14,247 recorded requests look like (median input 1002, output 359). The
-	// synthetic A/B workload in phaseLog -- 26-token prompts with 300-token
-	// replies -- is decode-dominant, and mixing the two hides the very
-	// difference this weight exists to capture.
+// TestPhaseShareTracksTheWorkload: the share must follow the traffic, not a
+// baked-in assumption about either phase. The two fixtures are deliberately on
+// opposite sides.
+//
+// Neither fixture is a claim about this rig. The real 12-turn measurement here
+// came out 42.3% prefill / 57.7% decode -- close to even and leaning decode --
+// after an estimate from a single turn had said 80% prefill.
+func TestPhaseShareTracksTheWorkload(t *testing.T) {
+	// Large prompts with short replies must read as prefill-heavy...
 	got := ParseAgentPhaseTimings(agentShapedLog)
 	share := got.PrefillTimeShare()
 	if share <= 0.5 {
-		t.Errorf("prefill share: got %.2f, want > 0.5 on agent-shaped traffic", share)
+		t.Errorf("prefill share: got %.2f, want > 0.5 on large-prompt traffic", share)
 	}
 	if share >= 1 {
 		t.Errorf("prefill share must be a fraction; got %.2f", share)
 	}
-	// The synthetic workload must land on the other side, or the weight is not
-	// actually reading the workload.
+	// ...and small prompts with long replies as decode-heavy, or the weight is
+	// not reading the workload at all.
 	if synth := ParseAgentPhaseTimings(syntheticLog).PrefillTimeShare(); synth >= 0.5 {
 		t.Errorf("a 26-token-prompt workload should be decode-dominant; got %.2f", synth)
 	}

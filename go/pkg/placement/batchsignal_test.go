@@ -1,6 +1,9 @@
 package placement
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The 2026-09-08 serve: compute buffers 4855/5114/4855 MiB against a ~4500 MiB
 // routed-expert layer.
@@ -12,11 +15,12 @@ func seatsWithLayerSize(mb int) ExpertSeatReport {
 	return ExpertSeatReport{ExpertLayerMB: mb, ExpertsOnCPU: 40}
 }
 
-// TestBatchSignalRejectsTheObviousMove is the finding this component exists for.
-// Shrinking the batch to reclaim 14.8 GB of compute buffer for resident expert
-// layers looks compelling until the workload is measured: agent traffic here is
-// ~80% prefill, so that trade sells the dominant phase. The signal must point
-// the other way.
+// TestBatchSignalRejectsTheObviousMove: shrinking the batch to reclaim 14.8 GB
+// of compute buffer for resident expert layers looks compelling, but on
+// prefill-heavy traffic it sells the dominant phase, so the signal must point
+// the other way. (This rig's own traffic measured 42/58 and holds instead --
+// see TestBatchSummaryDistinguishesHoldFromUnmeasured. The fixture here is a
+// prefill-heavy workload, not a claim about this hardware.)
 func TestBatchSignalRejectsTheObviousMove(t *testing.T) {
 	mix := ParseAgentPhaseTimings(agentShapedLog)
 	got := AnalyzeBatchSize(mix, seatsWithLayerSize(4500), measuredComputeBuffers())
@@ -126,5 +130,28 @@ func TestBatchChallengerRespectsFloor(t *testing.T) {
 	}
 	if got := BatchChallenger(signal, 0); got != 0 {
 		t.Errorf("an unknown current batch cannot be halved; got %d", got)
+	}
+}
+
+// TestBatchSummaryDistinguishesHoldFromUnmeasured: a measured mix that declines
+// to move the batch is a working decision, not a failed probe. The real
+// 2026-09-08 session (42.3% prefill) lands exactly here, and reporting it as
+// "unmeasured" would send a reader hunting a broken measurement.
+func TestBatchSummaryDistinguishesHoldFromUnmeasured(t *testing.T) {
+	realMix := AgentPhaseTiming{
+		PrefillMS: 311700, PrefillTokens: 10321,
+		DecodeMS: 425900, DecodeTokens: 3086, Samples: 32,
+	}
+	held := AnalyzeBatchSize(realMix, seatsWithLayerSize(4500), measuredComputeBuffers())
+	if held.Observed {
+		t.Fatalf("a 42/58 mix is too even to move the batch; got %s", held.Summary())
+	}
+	if got := held.Summary(); !strings.Contains(got, "hold") || strings.Contains(got, "unmeasured") {
+		t.Errorf("a measured hold must not read as unmeasured; got %q", got)
+	}
+
+	none := AnalyzeBatchSize(AgentPhaseTiming{}, seatsWithLayerSize(4500), measuredComputeBuffers())
+	if got := none.Summary(); !strings.Contains(got, "unmeasured") {
+		t.Errorf("a genuinely unmeasured mix must say so; got %q", got)
 	}
 }

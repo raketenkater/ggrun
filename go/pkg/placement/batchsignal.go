@@ -18,11 +18,14 @@ import "fmt"
 //	smaller batch -> slower prefill, more resident expert layers -> faster decode
 //
 // Which side wins depends entirely on how the workload spends its time, which
-// is why this consumes the measured phase mix rather than a preference. On this
-// rig agent traffic is prefill-dominant (~80% of processed time), so the move
-// that looks obvious -- shrink the batch, reclaim VRAM, seat more experts --
-// sells the larger half to buy the smaller one. On a rig whose experts are
-// already GPU-resident the same arithmetic points the other way.
+// is why this consumes the measured phase mix rather than a preference.
+//
+// Measured here over a 12-turn agent session: 42.3% prefill, 57.7% decode --
+// close to even, and too even to justify trading one phase for the other, so
+// this rig gets no batch challenger at all. That is the correct outcome and
+// worth stating plainly, because an estimate from one turn had said 80% prefill
+// and would have argued for doubling the batch on evidence that did not hold.
+// A rig whose experts are GPU-resident lands somewhere else entirely.
 //
 // Following AnalyzeDeviceBalance: this derives a typed signal from measured
 // evidence and nothing more. It does not prove a different batch is faster. It
@@ -67,12 +70,20 @@ type BatchSizeSignal struct {
 }
 
 // Summary renders the signal for a launch record.
+//
+// "No evidence" and "evidence says hold" are different answers and must read
+// differently: a measured 42/58 mix that declines to move the batch is a
+// working decision, not a failed measurement, and reporting it as unmeasured
+// would send a reader looking for a broken probe.
 func (s BatchSizeSignal) Summary() string {
-	if !s.Observed {
+	if s.Observed {
+		return fmt.Sprintf("batch %s: prefill %.0f%% of processed time, compute buffer %d MiB (%d expert layer(s) worth); %s",
+			s.Direction, s.PrefillShare*100, s.ComputeBufMB, s.LayersWorth, s.Reason)
+	}
+	if s.Reason == "" {
 		return "batch trade unmeasured"
 	}
-	return fmt.Sprintf("batch %s: prefill %.0f%% of processed time, compute buffer %d MiB (%d expert layer(s) worth); %s",
-		s.Direction, s.PrefillShare*100, s.ComputeBufMB, s.LayersWorth, s.Reason)
+	return fmt.Sprintf("batch hold: prefill %.0f%% of processed time; %s", s.PrefillShare*100, s.Reason)
 }
 
 // batchTradeMinShare is how lopsided the phase mix must be before moving the
