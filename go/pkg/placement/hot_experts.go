@@ -650,6 +650,63 @@ func hotExpertCacheCandidate(caps *detect.Capabilities, model *ModelProfile, bas
 	return hotExpertPriorityCandidate(caps, model, base, opts, baseLedger)
 }
 
+// hotExpertFreeLayersForSlots demotes GPU expert layers until the requested
+// slot count fits, and reports how many it had to give up.
+//
+// The automatic path stops as soon as it clears hotExpertMinUsefulSlots, which
+// on GLM 5.3 Flash is 8 and produced a 14-slot cache. That cache measured ~26%
+// hit rate and cost 12% decode: big enough to pay for itself in uploads, too
+// small to earn it back. The patch author measured gains only at K=48-64, and
+// the VRAM for K~55 exists on this rig -- it is simply spent on resident expert
+// layers that measured flat on decode across 9, 7 and 4 of them.
+//
+// So a user who names a slot count must be able to reach it. Invariant 3 makes
+// an explicit choice a constraint, and refusing K=55 because the default packed
+// layout has no room turns a testable question into an untestable one. This
+// only ever runs for an explicit numeric request; auto keeps its own target and
+// its displacement gate.
+//
+// Returns the demoted count, or an error naming what it could not free.
+func hotExpertFreeLayersForSlots(caps *detect.Capabilities, model *ModelProfile,
+	candidate *Strategy, opts Options, baseLedger ResourceLedger, want int,
+) (*hotExpertCacheShape, ResourceLedger, int, error) {
+	slack := hotExpertSlackByGPU(baseLedger)
+	maxDrops := 0
+	if whole, _, err := hotExpertPinnedLayers(candidate.OTString); err == nil {
+		maxDrops = len(whole)
+	}
+	best := 0
+	for drop := 0; drop <= maxDrops; drop++ {
+		shape, err := hotExpertCacheShapeFor(caps, model, candidate, opts)
+		if err != nil {
+			return nil, ResourceLedger{}, drop, err
+		}
+		adjusted := hotExpertLedgerWithSlack(baseLedger, slack)
+		slotLedger := adjusted
+		slotLedger.Exact = baseLedger.Exact
+		slots := hotExpertCacheMaxSlots(model, shape, slotLedger)
+		if slots > best {
+			best = slots
+		}
+		if slots >= want {
+			return shape, adjusted, drop, nil
+		}
+		gpu := hotExpertTightestGPU(shape, slack)
+		layer, ok := hotExpertHighestPinnedLayerOnGPU(candidate.OTString, gpu)
+		if !ok {
+			break
+		}
+		if !hotExpertDemotePinnedLayer(candidate, layer) {
+			break
+		}
+	}
+	// Report the ceiling this rig can actually reach, so the operator can pick a
+	// number instead of bisecting by hand.
+	return nil, ResourceLedger{}, maxDrops, fmt.Errorf(
+		"%d slots do not fit even with every GPU expert layer demoted; this placement tops out near %d slots",
+		want, best)
+}
+
 func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options, baseLedger ResourceLedger) (*Strategy, error) {
 	minUseful := hotExpertMinUsefulSlots(model)
 	candidate := cloneStrategy(base)
@@ -1026,6 +1083,10 @@ func finalizeHotExpertCache(caps *detect.Capabilities, model *ModelProfile, opts
 
 	base := cloneStrategy(s)
 	clearHotExpertCache(base)
+	// The pre-demotion topology, captured before any expert layer is freed for
+	// the requested cache. A failed cache-on admission restores this, not a copy
+	// carrying the inflated NCPUMoE and stripped OTString.
+	packedBaseline := snapshotPackedCacheFreeBaseline(base)
 	baseOpts := opts
 	baseOpts.HotExperts = "off"
 	baseOpts.HotExpertCacheSlots = 0
@@ -1059,8 +1120,35 @@ func finalizeHotExpertCache(caps *detect.Capabilities, model *ModelProfile, opts
 	// must still exercise cache-on warmup before accepting the configuration.
 	ledger := BuildResourceLedger(caps, model, s, baseOpts)
 	if !ledger.Fits {
+		// The packed layout has no room for the requested cache. Rather than
+		// refuse, free the resident expert layers it needs -- the same mechanism
+		// auto uses, aimed at the user's number instead of the automatic
+		// minimum. Invariant 3: an explicit choice is a constraint, and refusing
+		// K=55 because the default layout is full makes the useful sizes
+		// untestable on any rig whose VRAM is already committed.
 		clearHotExpertCache(s)
-		return nil, fmt.Errorf("hot-expert cache with %d slots does not fit the complete per-device ledger", requested)
+		shape, adjusted, dropped, freeErr := hotExpertFreeLayersForSlots(
+			caps, model, s, baseOpts, baseLedger, requested)
+		if freeErr != nil {
+			return nil, fmt.Errorf("hot-expert cache with %d slots does not fit the complete per-device ledger: %w",
+				requested, freeErr)
+		}
+		if err := assignHotExpertCache(s, shape, requested); err != nil {
+			return nil, err
+		}
+		applyHotExpertCacheLedger(&adjusted, s, false)
+		if !adjusted.Fits {
+			clearHotExpertCache(s)
+			return nil, fmt.Errorf("hot-expert cache with %d slots does not fit after demoting %d expert layer(s)",
+				requested, dropped)
+		}
+		if dropped > 0 {
+			s.HotExpertCacheEvidence += fmt.Sprintf(
+				"; explicit %d-slot request demoted %d GPU expert layer(s) to make room", requested, dropped)
+		}
+		s.ResourceLedger = &adjusted
+		s.HotExpertCacheFreeBaseline = packedBaseline
+		return s, nil
 	}
 	s.ResourceLedger = &ledger
 	return s, nil

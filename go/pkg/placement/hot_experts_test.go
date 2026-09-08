@@ -33,7 +33,7 @@ func hotExpertFixture() (*detect.Capabilities, *ModelProfile, *Strategy, Options
 	}
 	gpus := caps.GPUs
 	strategy := &Strategy{
-		Type: MoEOffload, NCPUMoE: 3, Parallel: 1, MainGPU: 3,
+		Type: MoEOffload, NCPUMoE: 3, Parallel: 1, MainGPU: 3, GPULayers: 999,
 		TensorSplit: []float64{1, 1},
 		OTString: buildOTStringWithSubPins(
 			[]int{1, 0}, []subExpertPin{{Layer: 1, GI: 1}},
@@ -166,15 +166,44 @@ func TestExplicitHotExpertSlotsCannotExceedModelExpertCount(t *testing.T) {
 	}
 }
 
-func TestRequiredHotExpertsDoesNotDegradeToCacheFree(t *testing.T) {
+func TestRequiredHotExpertsBootstrapsAnUnmeasuredBaselineButFailsClosedOtherwise(t *testing.T) {
 	caps, model, strategy, opts := hotExpertFixture()
 	opts.HotExperts = "auto"
 	if got, err := finalizeHotExpertCache(caps, model, opts, cloneStrategy(strategy)); err != nil || got == nil {
 		t.Fatalf("auto should retain its cache-free fallback without exact evidence: strategy=%+v err=%v", got, err)
 	}
+
+	// `on` with a baseline that has simply never been allocation-measured is the
+	// chicken-and-egg case: the cache cannot be sized without evidence, and only
+	// a completed launch records it. Serve the baseline once and say so, rather
+	// than refusing this launch shape forever.
 	opts.HotExperts = "on"
-	if got, err := finalizeHotExpertCache(caps, model, opts, cloneStrategy(strategy)); err == nil || got != nil {
-		t.Fatalf("required hot experts silently degraded cache-free: strategy=%+v err=%v", got, err)
+	got, err := finalizeHotExpertCache(caps, model, opts, cloneStrategy(strategy))
+	if err != nil || got == nil {
+		t.Fatalf("required hot experts refused to bootstrap an unmeasured baseline: strategy=%+v err=%v", got, err)
+	}
+	if got.HotExpertCacheSlots != 0 {
+		t.Fatalf("bootstrap launch must serve cache-free: %+v", got)
+	}
+	announced := false
+	for _, x := range got.OptimizationExclusions {
+		// Match the durable half of the promise, not the exact phrasing: the
+		// message now also names the pinned topology it will replay.
+		if strings.Contains(x, "next launch") {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Fatalf("bootstrap was not announced to the user: %+v", got.OptimizationExclusions)
+	}
+
+	// A genuine incompatibility (here: the backend does not advertise the exact
+	// flag pair) must still fail closed under `on` — the bootstrap is scoped to
+	// the missing-measurement case only.
+	incompatible := opts
+	incompatible.BackendHelp = "--some-other-flag N"
+	if got, err := finalizeHotExpertCache(caps, model, incompatible, cloneStrategy(strategy)); err == nil || got != nil {
+		t.Fatalf("required hot experts silently degraded on a real incompatibility: strategy=%+v err=%v", got, err)
 	}
 }
 
@@ -206,7 +235,7 @@ func TestAutomaticHotExpertCandidateRequiresExactCacheFreeAllocation(t *testing.
 			t.Fatalf("estimated baseline generated automatic cache candidate: %+v", candidate)
 		}
 	}
-	if len(base.OptimizationExclusions) == 0 || !strings.Contains(base.OptimizationExclusions[0], "exact cache-free") {
+	if len(base.OptimizationExclusions) == 0 || !strings.Contains(base.OptimizationExclusions[0], "allocation-measured") {
 		t.Fatalf("missing hot-expert exclusion reason: %+v", base.OptimizationExclusions)
 	}
 
@@ -214,7 +243,7 @@ func TestAutomaticHotExpertCandidateRequiresExactCacheFreeAllocation(t *testing.
 		dir, model, base.ContextSize, base.UBatchSize, base.KVQuality,
 		base.KVPlacement, backendCacheTag(opts), caps.GPUs, base.Parallel,
 		MeasuredAllocation{
-			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base),
+			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base, model),
 			ContextTotalMB: 100, ContextHostMB: 100,
 			ModelByGPU:  map[int]int{3: 1000, 7: 1000},
 			ModelHostMB: 100, UnaccountedByGPU: map[int]int{3: 100, 7: 100},
@@ -225,7 +254,7 @@ func TestAutomaticHotExpertCandidateRequiresExactCacheFreeAllocation(t *testing.
 	withMeasurement := CalibrationCandidates(caps, model, base, opts)
 	if len(withMeasurement) < 2 || withMeasurement[1].Name != "hot-experts-4" ||
 		withMeasurement[1].Strategy == nil || withMeasurement[1].Strategy.HotExpertCacheSlots != 4 ||
-		withMeasurement[1].Strategy.ResourceLedger == nil || !withMeasurement[1].Strategy.ResourceLedger.Exact ||
+		withMeasurement[1].Strategy.ResourceLedger == nil || withMeasurement[1].Strategy.ResourceLedger.Exact ||
 		!withMeasurement[1].Strategy.ResourceLedger.Fits {
 		t.Fatalf("exact residual headroom did not produce the bounded first challenger: %+v", withMeasurement)
 	}
@@ -258,7 +287,7 @@ func TestHotExpertPriorityDemotesGPULayersToReserveMinSlots(t *testing.T) {
 		dir, model, base.ContextSize, base.UBatchSize, base.KVQuality,
 		base.KVPlacement, backendCacheTag(opts), caps.GPUs, base.Parallel,
 		MeasuredAllocation{
-			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base),
+			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base, model),
 			ContextTotalMB: 100, ContextHostMB: 100,
 			ModelByGPU:       map[int]int{3: 24500, 7: 1000},
 			UnaccountedByGPU: map[int]int{3: 50, 7: 50},
@@ -341,7 +370,7 @@ func TestHotExpertDemotePinnedLayerRemovesHighestLayer(t *testing.T) {
 	}
 }
 
-func TestFinalizeAutoHotExpertsAppliesDemotedCacheOn(t *testing.T) {
+func TestFinalizeAutoHotExpertsKeepsPackedDefaultWithCacheOnChallenger(t *testing.T) {
 	caps, model, base, opts := hotExpertFixture()
 	dir := t.TempDir()
 	model.Path = filepath.Join(dir, "moe.gguf")
@@ -369,7 +398,7 @@ func TestFinalizeAutoHotExpertsAppliesDemotedCacheOn(t *testing.T) {
 		dir, model, base.ContextSize, base.UBatchSize, base.KVQuality,
 		base.KVPlacement, backendCacheTag(opts), caps.GPUs, base.Parallel,
 		MeasuredAllocation{
-			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base),
+			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base, model),
 			ContextTotalMB: 100, ContextHostMB: 100,
 			ModelByGPU:       map[int]int{3: 24500, 7: 1000},
 			UnaccountedByGPU: map[int]int{3: 50, 7: 50},
@@ -382,12 +411,174 @@ func TestFinalizeAutoHotExpertsAppliesDemotedCacheOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.HotExpertCacheSlots < 2 {
-		t.Fatalf("auto finalize did not turn the cache on: %+v err=%v", got, err)
+	// `auto` serves the packed cache-free layout as the fail-closed default; the
+	// cache-on placement is the challenger the live A/B must win (invariant 7).
+	if got == nil || got.HotExpertCacheSlots != 0 {
+		t.Fatalf("auto finalize did not keep the packed cache-free default: %+v err=%v", got, err)
 	}
 	args := strings.Join(got.Args("moe.gguf", 8080), " ")
-	if !strings.Contains(args, "--moe-expert-cache") {
-		t.Fatalf("auto cache-on strategy omitted the backend flag: %s", args)
+	if strings.Contains(args, "--moe-expert-cache") {
+		t.Fatalf("packed default serve still emitted the cache flag: %s", args)
+	}
+	challenger := got.HotExpertCacheChallenger
+	if challenger == nil || challenger.HotExpertCacheSlots < 2 {
+		t.Fatalf("auto finalize did not attach a cache-on challenger: %+v", challenger)
+	}
+	if challenger.HotExpertCacheFreeBaseline == nil {
+		t.Fatal("cache-on challenger did not capture its packed cache-free baseline")
+	}
+	challengerArgs := strings.Join(challenger.Args("moe.gguf", 8080), " ")
+	if !strings.Contains(challengerArgs, "--moe-expert-cache") {
+		t.Fatalf("cache-on challenger omitted the backend flag: %s", challengerArgs)
+	}
+	// The challenger's captured baseline reproduces the packed topology exactly.
+	restored := RestorePackedCacheFreeBaseline(challenger)
+	if restored == nil || restored.HotExpertCacheSlots != 0 ||
+		restored.NCPUMoE != base.NCPUMoE || restored.OTString != base.OTString {
+		t.Fatalf("restore did not reproduce the packed pre-demotion topology: %+v (base NCPUMoE=%d OT=%s)",
+			restored, base.NCPUMoE, base.OTString)
+	}
+}
+
+func TestRestorePackedCacheFreeBaselineReproducesPackedTopology(t *testing.T) {
+	caps, model, base, opts := hotExpertFixture()
+	dir := t.TempDir()
+	model.Path = filepath.Join(dir, "moe.gguf")
+	model.Basename = "moe.gguf"
+	model.SizeBytes = 32 * hotExpertTestMiB
+	model.TotalSizeMB = 32
+	model.ExpertBytes = model.SizeBytes
+	model.ExpertUsedCount = 2
+	if err := os.WriteFile(model.Path, []byte("model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base.ContextSize = 4096
+	base.BatchSize = 512
+	base.UBatchSize = 128
+	base.KVPlacement = "cpu"
+	base.KVQuality = "high"
+	base.KVType = "q8_0"
+	base.NCPUMoE = 2
+	base.VRAMLedger = []GPULedgerEntry{{GPU: 3, ExpertLayers: 1}, {GPU: 7, ExpertLayers: 0}}
+	base.PlanFreeVRAM = map[int]int{3: 24576, 7: 24576}
+	opts.CacheDir = dir
+	opts.BackendCacheTag = "test-restore-baseline"
+	opts.HotExperts = "auto"
+	// GPU 3 nearly full forces the priority challenger to demote a GPU expert layer.
+	if err := RecordMeasuredAllocation(
+		dir, model, base.ContextSize, base.UBatchSize, base.KVQuality,
+		base.KVPlacement, backendCacheTag(opts), caps.GPUs, base.Parallel,
+		MeasuredAllocation{
+			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base, model),
+			ContextTotalMB: 100, ContextHostMB: 100,
+			ModelByGPU:       map[int]int{3: 24500, 7: 1000},
+			UnaccountedByGPU: map[int]int{3: 50, 7: 50},
+			ModelHostMB:      100,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	wantOT := base.OTString
+	wantNCPU := base.NCPUMoE
+	challenger, err := hotExpertCacheCandidate(caps, model, base, opts)
+	if err != nil || challenger == nil {
+		t.Fatalf("no cache-on challenger: %v", err)
+	}
+	if challenger.HotExpertCacheFreeBaseline == nil {
+		t.Fatal("challenger did not capture a packed cache-free baseline")
+	}
+	demoted := challenger.NCPUMoE != wantNCPU || challenger.OTString != wantOT
+	if !demoted {
+		t.Skip("challenger did not demote on this fixture; nothing to restore")
+	}
+
+	restored := RestorePackedCacheFreeBaseline(challenger)
+	if restored == nil {
+		t.Fatal("restore returned nil despite a captured baseline")
+	}
+	if restored.HotExpertCacheSlots != 0 || restored.HotExpertCacheVRAMByGPU != nil {
+		t.Fatalf("restored baseline still carries cache fields: %+v", restored)
+	}
+	if restored.NCPUMoE != wantNCPU || restored.OTString != wantOT {
+		t.Fatalf("restore did not reproduce the packed topology: NCPUMoE %d/%d OT %q/%q",
+			restored.NCPUMoE, wantNCPU, restored.OTString, wantOT)
+	}
+	// Per-GPU expert-layer count must not regress below the packed baseline.
+	for _, e := range restored.VRAMLedger {
+		for _, b := range base.VRAMLedger {
+			if e.GPU == b.GPU && e.ExpertLayers < b.ExpertLayers {
+				t.Fatalf("GPU%d lost expert layers on restore: %d < %d", e.GPU, e.ExpertLayers, b.ExpertLayers)
+			}
+		}
+	}
+	// A challenger with no snapshot (legacy path) returns nil so the caller
+	// recomputes rather than serving a feature-stripped demoted strategy.
+	challenger.HotExpertCacheFreeBaseline = nil
+	if RestorePackedCacheFreeBaseline(challenger) != nil {
+		t.Fatal("restore invented a baseline for a snapshot-less challenger")
+	}
+}
+
+func TestCalibrationCandidatesKeepPackedDefaultWithHandedOffChallenger(t *testing.T) {
+	caps, model, base, opts := hotExpertFixture()
+	dir := t.TempDir()
+	model.Path = filepath.Join(dir, "moe.gguf")
+	model.Basename = "moe.gguf"
+	model.SizeBytes = 32 * hotExpertTestMiB
+	model.TotalSizeMB = 32
+	model.ExpertBytes = model.SizeBytes
+	model.ExpertUsedCount = 2
+	if err := os.WriteFile(model.Path, []byte("model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base.ContextSize = 4096
+	base.BatchSize = 512
+	base.UBatchSize = 128
+	base.KVPlacement = "cpu"
+	base.KVQuality = "high"
+	base.KVType = "q8_0"
+	base.NCPUMoE = 2
+	base.PlanFreeVRAM = map[int]int{3: 24576, 7: 24576}
+	opts.CacheDir = dir
+	opts.BackendCacheTag = "test-handoff-challenger"
+	opts.HotExperts = "auto"
+	if err := RecordMeasuredAllocation(
+		dir, model, base.ContextSize, base.UBatchSize, base.KVQuality,
+		base.KVPlacement, backendCacheTag(opts), caps.GPUs, base.Parallel,
+		MeasuredAllocation{
+			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(base, model),
+			ContextTotalMB: 100, ContextHostMB: 100,
+			ModelByGPU: map[int]int{3: 1000, 7: 1000}, ModelHostMB: 100,
+			UnaccountedByGPU: map[int]int{3: 100, 7: 100},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	served, err := finalizeHotExpertCache(caps, model, opts, base)
+	if err != nil || served == nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if served.HotExpertCacheSlots != 0 || served.HotExpertCacheChallenger == nil {
+		t.Fatalf("auto finalize did not hand off a challenger over a packed default: %+v", served)
+	}
+
+	got := CalibrationCandidates(caps, model, served, opts)
+	if len(got) < 2 || got[0].Name != "default" || got[0].Strategy.HotExpertCacheSlots != 0 {
+		t.Fatalf("packed cache-free layout is not calibration candidate 0: %+v", got)
+	}
+	sawHot := false
+	for _, c := range got[1:] {
+		if strings.HasPrefix(c.Name, "hot-experts-") {
+			sawHot = true
+			if c.Strategy.HotExpertCacheSlots < 2 {
+				t.Fatalf("cache-on challenger lacked a useful cache: %+v", c.Strategy)
+			}
+		}
+	}
+	if !sawHot {
+		t.Fatalf("auto path did not offer the cache-on challenger for the A/B: %+v", got)
 	}
 }
 
@@ -436,7 +627,7 @@ func TestFinalizeHotExpertCachePreservesVerifiedRuntimeEvidence(t *testing.T) {
 		dir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality,
 		strategy.KVPlacement, backendCacheTag(opts), caps.GPUs, strategy.Parallel,
 		MeasuredAllocation{
-			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(strategy),
+			Evidence: "allocation-verified", PlacementIdentity: AllocationPlacementIdentity(strategy, model),
 			ContextTotalMB: 100, ContextHostMB: 100,
 			ModelByGPU: map[int]int{3: 1000, 7: 1000}, ModelHostMB: 100,
 			UnaccountedByGPU: map[int]int{3: 100, 7: 100},
@@ -477,6 +668,9 @@ func TestHotExpertCacheLedgerChargesExactlyOnce(t *testing.T) {
 	ledger := base
 	ledger.Devices = append([]DeviceResourceLedger(nil), base.Devices...)
 	applyHotExpertCacheLedger(&ledger, strategy, false)
+	if ledger.Exact {
+		t.Fatal("cache-free allocation cannot prove cache-on graph allocation")
+	}
 	if ledger.Devices[0].RequiredMB != 1045 || ledger.Devices[0].SlackMB != 155 || ledger.Devices[0].HotExpertCacheMB != 45 ||
 		ledger.Devices[1].RequiredMB != 2090 || ledger.Devices[1].SlackMB != 10 || ledger.Devices[1].HotExpertCacheMB != 90 {
 		t.Fatalf("cache charge=%+v", ledger.Devices)
@@ -484,6 +678,9 @@ func TestHotExpertCacheLedgerChargesExactlyOnce(t *testing.T) {
 	alreadyMeasured := base
 	alreadyMeasured.Devices = append([]DeviceResourceLedger(nil), base.Devices...)
 	applyHotExpertCacheLedger(&alreadyMeasured, strategy, true)
+	if !alreadyMeasured.Exact {
+		t.Fatal("actual cache-on allocation lost its authority")
+	}
 	if alreadyMeasured.Devices[0].RequiredMB != 1000 || alreadyMeasured.Devices[0].HotExpertCacheMB != 0 {
 		t.Fatalf("measured cache allocation was charged twice: %+v", alreadyMeasured.Devices)
 	}
@@ -583,5 +780,143 @@ func TestWithoutHotExpertCacheDeepCopiesAndClearsEvidence(t *testing.T) {
 	}
 	if original.HotExpertCacheSlots != 4 || original.HotExpertCacheVRAMByGPU[3] != 45 || original.HotExpertCacheSteps != 512 {
 		t.Fatalf("original was mutated: %+v", original)
+	}
+}
+
+// A backend that caches FEWER layers than planned is running a smaller, cheaper
+// cache -- not a silent degradation to cache-off. Requiring exact equality
+// discarded a working 6520 MiB cache on glm5next (2026-09-02): the backend
+// acknowledged 41 layers where ggrun counted 42, because ggrun's cacheable-layer
+// walk includes an MTP/NextN block the backend does not cache, and the feature
+// never ran once all day as a result.
+func TestHotExpertObservationAcceptsFewerCachedLayersThanPlanned(t *testing.T) {
+	plan := &Strategy{
+		HotExpertCacheSlots: 14, HotExpertCacheInserts: 2, HotExpertCacheLayers: 42,
+		HotExpertCacheVRAMByGPU: map[int]int{0: 3400, 1: 3400},
+	}
+	ack := "operator(): MoE expert cache enabled: 41 layers x 14 slots, 2 inserts/step, 6520.3 MiB device memory"
+	if err := ValidateHotExpertCacheObservation(plan, ack); err != nil {
+		t.Fatalf("a 41-of-42-layer cache must be accepted: %v", err)
+	}
+
+	// More layers than planned is memory this plan never budgeted: still refused.
+	over := "operator(): MoE expert cache enabled: 43 layers x 14 slots, 2 inserts/step, 6520.3 MiB device memory"
+	if err := ValidateHotExpertCacheObservation(plan, over); err == nil {
+		t.Fatal("a cache covering MORE layers than planned must be refused")
+	}
+	// A different shape means a different configuration under test: still refused.
+	shape := "operator(): MoE expert cache enabled: 41 layers x 8 slots, 2 inserts/step, 6520.3 MiB device memory"
+	if err := ValidateHotExpertCacheObservation(plan, shape); err == nil {
+		t.Fatal("a cache with a different slot count must be refused")
+	}
+	// Zero covered layers is not a cache at all.
+	none := "operator(): MoE expert cache enabled: 0 layers x 14 slots, 2 inserts/step, 0.0 MiB device memory"
+	if err := ValidateHotExpertCacheObservation(plan, none); err == nil {
+		t.Fatal("a cache covering no layers must be refused")
+	}
+	// A backend that degraded to cache-off is still caught by Enabled.
+	if err := ValidateHotExpertCacheObservation(plan, "failed to allocate moe cache buffer"); err == nil {
+		t.Fatal("a degraded cache-off backend must still be refused")
+	}
+}
+
+// ledgerWithSlack builds an exact, fitting ledger whose devices carry the given
+// slack. Slot arithmetic reads slack, so this is the knob that decides how many
+// slots a placement can seat before any expert layer is demoted.
+func ledgerWithSlack(caps *detect.Capabilities, slackMB int) ResourceLedger {
+	ledger := ResourceLedger{Exact: true, Fits: true, Evidence: "live-allocated"}
+	for _, g := range caps.GPUs {
+		ledger.Devices = append(ledger.Devices, DeviceResourceLedger{
+			GPU: g.Index, Active: true, FreeMB: slackMB, SlackMB: slackMB,
+		})
+	}
+	return ledger
+}
+
+// TestExplicitSlotRequestFreesLayersToReachIt is the change's reason for
+// existing. The automatic path stops as soon as it clears
+// hotExpertMinUsefulSlots, which on GLM 5.3 Flash produced a 14-slot cache
+// measuring ~26% hit rate and costing 12% decode: large enough to pay uploads,
+// too small to earn them back. The sizes the patch author measured gains at
+// (K=48-64) are unreachable that way on a rig whose VRAM is already committed,
+// which makes the useful range untestable rather than merely unchosen.
+//
+// Invariant 3: a named slot count is a constraint, so ggrun must free what it
+// needs rather than refuse.
+func TestExplicitSlotRequestFreesLayersToReachIt(t *testing.T) {
+	caps, model, strategy, opts := hotExpertFixture()
+
+	// Slack enough for a small cache immediately, but not the requested one:
+	// reaching it requires giving up resident expert layers.
+	base := cloneStrategy(strategy)
+	ledger := ledgerWithSlack(caps, 24)
+
+	shape, adjusted, dropped, err := hotExpertFreeLayersForSlots(
+		caps, model, base, opts, ledger, 3)
+	if err != nil {
+		t.Fatalf("an explicit request the rig can satisfy must not be refused: %v", err)
+	}
+	if shape == nil {
+		t.Fatal("a satisfied request must return the cache shape it fits")
+	}
+	if !adjusted.Fits {
+		t.Error("the returned ledger must fit")
+	}
+	if dropped < 0 {
+		t.Errorf("demoted count must not be negative; got %d", dropped)
+	}
+	// Whatever it demoted, the result must actually seat the request. The
+	// returned ledger carries Exact=false on purpose -- the placement is not
+	// exact until the backend admits it -- so slot arithmetic is checked the way
+	// the function itself does it, against the exact source evidence.
+	slotLedger := adjusted
+	slotLedger.Exact = ledger.Exact
+	if slots := hotExpertCacheMaxSlots(model, shape, slotLedger); slots < 3 {
+		t.Errorf("after demoting %d layer(s) the placement seats %d slots, want >= 3", dropped, slots)
+	}
+	if adjusted.Exact {
+		t.Error("a demoted placement must not claim exact evidence before admission")
+	}
+}
+
+// TestExplicitSlotRequestReportsTheCeiling: when even a fully demoted placement
+// cannot seat the request, the error must name what this rig can actually
+// reach. Bisecting a slot count by hand across six-minute model loads is not a
+// reasonable way to find that number.
+func TestExplicitSlotRequestReportsTheCeiling(t *testing.T) {
+	caps, model, strategy, opts := hotExpertFixture()
+	base := cloneStrategy(strategy)
+
+	// Almost no slack: no amount of demotion seats a large cache.
+	_, _, _, err := hotExpertFreeLayersForSlots(
+		caps, model, base, opts, ledgerWithSlack(caps, 1), 4096)
+	if err == nil {
+		t.Fatal("an unreachable request must fail rather than silently under-deliver")
+	}
+	if !strings.Contains(err.Error(), "tops out near") {
+		t.Errorf("error must report the reachable ceiling; got %q", err)
+	}
+	if !strings.Contains(err.Error(), "4096") {
+		t.Errorf("error must name the request that could not be met; got %q", err)
+	}
+}
+
+// TestExplicitSlotRequestDemotesOnlyWhenNeeded: a request the packed layout
+// already satisfies must cost no resident expert layer at all.
+func TestExplicitSlotRequestDemotesOnlyWhenNeeded(t *testing.T) {
+	caps, model, strategy, opts := hotExpertFixture()
+	base := cloneStrategy(strategy)
+	before := base.NCPUMoE
+
+	_, _, dropped, err := hotExpertFreeLayersForSlots(
+		caps, model, base, opts, ledgerWithSlack(caps, 4096), 1)
+	if err != nil {
+		t.Fatalf("a trivially satisfiable request must succeed: %v", err)
+	}
+	if dropped != 0 {
+		t.Errorf("demoted %d layer(s) for a request that already fit", dropped)
+	}
+	if base.NCPUMoE != before {
+		t.Errorf("expert placement changed for a request that already fit: %d -> %d", before, base.NCPUMoE)
 	}
 }
