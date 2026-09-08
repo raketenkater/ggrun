@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -20,6 +21,21 @@ const (
 	hotExpertCacheMiB            = int64(1024 * 1024)
 	hotExpertTelemetryMinSteps   = uint64(512)
 )
+
+// ErrHotExpertBaselineUnmeasured reports that the cache cannot be sized because
+// the cache-free baseline for this exact launch key (model, context, ubatch, KV
+// quality/placement, backend, slots) has no allocation-measured ledger yet --
+// not because the model, backend, or layout is incompatible.
+//
+// Only a completed launch of that key records the measurement, so treating this
+// as a hard failure makes `hot-experts=on` unlaunchable for every key that has
+// never run: the cache needs evidence, the evidence needs a launch, and the
+// launch is refused for want of the cache. `on` therefore serves the cache-free
+// baseline for exactly one launch to obtain the measurement, announces that it
+// did, and engages the cache on the next launch. Every other failure -- an
+// unsupported layout, mmap, speculative decode, a backend without the flags --
+// still fails closed.
+var ErrHotExpertBaselineUnmeasured = errors.New("the cache-free baseline for this launch shape has not been allocation-measured yet")
 
 var hotExpertOTLayerPattern = regexp.MustCompile(`blk\\\.\(([^)]*)\)\\\.`)
 var hotExpertEnabledPattern = regexp.MustCompile(`MoE expert cache enabled: ([0-9]+) layers x ([0-9]+) slots, ([0-9]+) inserts/step, ([0-9]+(?:\.[0-9]+)?) MiB device memory`)
@@ -87,14 +103,31 @@ func ValidateHotExpertCacheObservation(s *Strategy, logData string) error {
 	if !observation.Enabled {
 		return fmt.Errorf("hot-expert cache was not enabled: %s", observation.Reason)
 	}
+	// Slots and inserts are the cache SHAPE this launch asked for: a backend that
+	// answers with a different shape is not running the configuration under test,
+	// so they must match exactly.
+	//
+	// The layer count is a coverage figure, and the same asymmetry the device-MiB
+	// check below documents applies to it: fewer cached layers than planned is a
+	// smaller, cheaper cache -- never a silent degradation to cache-off, which
+	// observation.Enabled already catches -- while MORE layers than planned would
+	// mean memory this plan never budgeted. Requiring exact equality threw away a
+	// working cache over an off-by-one: on glm5next (2026-09-02) the backend
+	// cached 41 layers where ggrun counted 42, because ggrun's cacheable-layer
+	// walk includes an MTP/NextN block the backend does not cache. A 6520 MiB
+	// cache that had allocated successfully was discarded and the feature never
+	// ran.
 	if observation.Slots != s.HotExpertCacheSlots ||
 		observation.Inserts != s.HotExpertCacheInserts ||
-		observation.Layers != s.HotExpertCacheLayers {
+		observation.Layers > s.HotExpertCacheLayers {
 		return fmt.Errorf(
-			"hot-expert cache acknowledgement differs from plan: got %d layers/%d slots/%d inserts, want %d/%d/%d",
+			"hot-expert cache acknowledgement differs from plan: got %d layers/%d slots/%d inserts, want <=%d/%d/%d",
 			observation.Layers, observation.Slots, observation.Inserts,
 			s.HotExpertCacheLayers, s.HotExpertCacheSlots, s.HotExpertCacheInserts,
 		)
+	}
+	if observation.Layers <= 0 {
+		return fmt.Errorf("hot-expert cache acknowledged 0 cached layers; it is not covering any host expert layer")
 	}
 	plannedMiB := 0
 	for _, value := range s.HotExpertCacheVRAMByGPU {
@@ -236,14 +269,49 @@ func clearHotExpertCache(s *Strategy) {
 	s.HotExpertCacheHitRate = 0
 }
 
-// WithoutHotExpertCache returns a cache-free deep copy suitable for deriving
-// the original calibration scope after a verified cache-on winner fails during
-// a later lifecycle. It prevents that old decision from reapplying the same
-// failed winner on every launch.
+// WithoutHotExpertCache returns a copy with only the cache fields zeroed. It is
+// valid solely for deriving a calibration scope hash from a challenger that was
+// NOT built by demoting GPU expert layers (the leftover-VRAM candidate). It must
+// never be used to restore a served placement: a challenger from
+// hotExpertPriorityCandidate has an inflated NCPUMoE and a stripped OTString
+// that this function leaves in place, so serving its result keeps the degraded
+// all-CPU-expert topology. Use RestorePackedCacheFreeBaseline for that.
 func WithoutHotExpertCache(s *Strategy) *Strategy {
 	copy := cloneStrategy(s)
 	clearHotExpertCache(copy)
 	return copy
+}
+
+// snapshotPackedCacheFreeBaseline captures s as the exact packed cache-free
+// placement a hot-expert challenger is about to be derived from. s must be the
+// placement before any GPU expert layer is demoted for cache room. The snapshot
+// carries a nil field of its own so cloneStrategy recursion stays one level.
+func snapshotPackedCacheFreeBaseline(s *Strategy) *Strategy {
+	if s == nil {
+		return nil
+	}
+	baseline := cloneStrategy(s)
+	clearHotExpertCache(baseline)
+	baseline.HotExpertCacheFreeBaseline = nil
+	baseline.HotExpertCacheChallenger = nil
+	return baseline
+}
+
+// RestorePackedCacheFreeBaseline returns the exact packed cache-free placement a
+// cache-on challenger was derived from, so a failed cache-on admission restores
+// the pre-demotion topology instead of a strategy with only the cache fields
+// cleared. It returns nil when no snapshot was captured (for example a
+// verified-config replay that bypassed placement.Compute); the caller must then
+// recompute a cache-free placement and fail closed, never serve the challenger.
+func RestorePackedCacheFreeBaseline(s *Strategy) *Strategy {
+	if s == nil || s.HotExpertCacheFreeBaseline == nil {
+		return nil
+	}
+	restored := cloneStrategy(s.HotExpertCacheFreeBaseline)
+	clearHotExpertCache(restored)
+	restored.HotExpertCacheFreeBaseline = nil
+	restored.HotExpertCacheChallenger = nil
+	return restored
 }
 
 func cloneIntMap(values map[int]int) map[int]int {
@@ -319,6 +387,9 @@ func hotExpertCacheShapeFor(caps *detect.Capabilities, model *ModelProfile, s *S
 	if !model.IsMoE || s.Type != MoEOffload || s.NCPUMoE <= 0 {
 		return nil, fmt.Errorf("hot experts require host-resident routed MoE layers")
 	}
+	if s.GPULayers <= model.NumLayers {
+		return nil, fmt.Errorf("hot-expert router ownership requires full layer offload")
+	}
 	if s.MMapRequired {
 		return nil, fmt.Errorf("hot experts are disabled in the mmap last-resort lane")
 	}
@@ -355,7 +426,10 @@ func hotExpertCacheShapeFor(caps *detect.Capabilities, model *ModelProfile, s *S
 	if err != nil {
 		return nil, err
 	}
-	layerOwners, _ := layerDeviceAssignments(s.TensorSplit, model.NumLayers)
+	layerOwners, _, ownersKnown := emittedLayerDeviceAssignments(s.TensorSplit, model.NumLayers)
+	if !ownersKnown {
+		return nil, fmt.Errorf("hot-expert cache requires an explicit valid router split")
+	}
 	defaultGPU := s.MainGPU
 	if defaultGPU < 0 {
 		defaultGPU = runtimeCaps.GPUs[0].Index
@@ -485,6 +559,48 @@ func assignHotExpertCache(s *Strategy, shape *hotExpertCacheShape, slots int) er
 	return nil
 }
 
+// hotExpertTargetSlots is the slot count worth demoting resident expert layers
+// to reach, as opposed to hotExpertMinUsefulSlots, which is merely the point
+// below which a cache cannot function at all.
+//
+// The two were the same number, and that is why the cache was sized to
+// irrelevance: the demotion loop stopped as soon as ExpertUsedCount slots fit
+// (8 for GLM 5.3 Flash), leaving residency to keep the rest of the VRAM.
+// Measured on this rig 2026-09-07: ggrun chose 14 slots while holding 6-7
+// resident expert layers, and decode was flat across 9, 7 and 4 resident
+// layers (7.11 / 6.98 / 7.19 tok/s, n=11 each) -- residency was buying
+// nothing while the cache was starved.
+//
+// The target comes from two independent sources that agree:
+//
+//   - llama.cpp PR 27861, which introduced this cache, publishes a hit-rate
+//     curve of 32 slots -> 69.3%, 64 -> 81.5%, 96 -> 86.9%, and names 26-48
+//     slots/layer as the practical minimum for a 14-31% speedup.
+//   - MoE routing concentrates: roughly 15-20% of experts serve about 80% of
+//     tokens, so a cache covering a fifth of the experts captures most
+//     lookups.
+//
+// Scaled by the model rather than fixed: a fifth of the routed experts, capped
+// at the point the published curve flattens. A small-expert-count model does
+// not need 48 slots to cover its hot set.
+func hotExpertTargetSlots(model *ModelProfile) int {
+	target := hotExpertCurveKneeSlots
+	if model != nil && model.NumExperts > 0 {
+		if byRouting := model.NumExperts / 5; byRouting < target {
+			target = byRouting
+		}
+	}
+	if min := hotExpertMinUsefulSlots(model); target < min {
+		target = min
+	}
+	return target
+}
+
+// hotExpertCurveKneeSlots is where the published hit-rate curve flattens:
+// 48 -> roughly 75-80%, 64 -> 81.5%, 96 -> 86.9%. Demoting further resident
+// layers past this buys progressively less.
+const hotExpertCurveKneeSlots = 48
+
 func hotExpertMinUsefulSlots(model *ModelProfile) int {
 	if model == nil || model.ExpertUsedCount <= 0 {
 		return 1
@@ -501,8 +617,15 @@ func hotExpertCacheCandidate(caps *detect.Capabilities, model *ModelProfile, bas
 		return nil, err
 	}
 	baseLedger := BuildResourceLedger(caps, model, base, opts)
-	if !baseLedger.Exact || !baseLedger.Fits {
-		return nil, fmt.Errorf("exact cache-free allocation evidence is unavailable")
+	if !baseLedger.Exact {
+		// Distinguished from a real incompatibility: the cache-free baseline for
+		// this exact key has simply never been measured. Only a completed launch
+		// of that key records it, so `on` must be able to serve the baseline once
+		// to obtain it instead of refusing forever (see ErrHotExpertBaselineUnmeasured).
+		return nil, ErrHotExpertBaselineUnmeasured
+	}
+	if !baseLedger.Fits {
+		return nil, fmt.Errorf("the measured cache-free baseline does not fit; there is no residual VRAM to spend on a cache")
 	}
 	slots := hotExpertCacheMaxSlots(model, shape, baseLedger)
 	if slots > 0 {
@@ -511,10 +634,14 @@ func hotExpertCacheCandidate(caps *detect.Capabilities, model *ModelProfile, bas
 			return nil, err
 		}
 		ledger := BuildResourceLedger(caps, model, candidate, opts)
-		if !ledger.Exact || !ledger.Fits {
-			return nil, fmt.Errorf("calculated %d-slot cache does not fit the exact composed ledger", slots)
+		if !ledger.Fits {
+			return nil, fmt.Errorf("calculated %d-slot cache does not fit the composed planning ledger", slots)
 		}
 		candidate.ResourceLedger = &ledger
+		// base is the packed cache-free layout here (leftover-VRAM case, no
+		// demotion). Carry it so a later cache-on admission failure restores this
+		// exact topology rather than a feature-stripped copy.
+		candidate.HotExpertCacheFreeBaseline = snapshotPackedCacheFreeBaseline(base)
 		return candidate, nil
 	}
 	// Leftover VRAM after a packed GPU-expert layout is not the policy when
@@ -527,6 +654,10 @@ func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, 
 	minUseful := hotExpertMinUsefulSlots(model)
 	candidate := cloneStrategy(base)
 	clearHotExpertCache(candidate)
+	// Capture the packed pre-demotion topology now, before the loop below strips
+	// GPU expert layers to make cache room. A failed cache-on admission restores
+	// this, not a copy that still carries the inflated NCPUMoE / stripped OTString.
+	packedBaseline := snapshotPackedCacheFreeBaseline(candidate)
 	slack := hotExpertSlackByGPU(baseLedger)
 	maxDrops := 0
 	if whole, _, err := hotExpertPinnedLayers(candidate.OTString); err == nil {
@@ -546,6 +677,18 @@ func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, 
 		slotLedger.Exact = baseLedger.Exact
 		slots := hotExpertCacheMaxSlots(model, shape, slotLedger)
 		if slots >= minUseful {
+			// Evicting resident expert layers to fund a cache is a trade, and on
+			// 2026-09-08 it lost here by 12% decode with no warming across 16
+			// generations. Auto may make that trade only where a matched
+			// comparison on this same placement shows the cache earns the layers
+			// back; an explicit request still serves once, which is how the
+			// comparison gets recorded at all.
+			if allowed, why := hotExpertDisplacementAllowed(opts.CacheDir, model.Path,
+				AllocationPlacementIdentity(base, model), drop, hotExpertRequired(opts)); !allowed {
+				return nil, fmt.Errorf("hot-expert cache %s", why)
+			} else if drop > 0 {
+				candidate.HotExpertCacheEvidence += "; displacement " + why
+			}
 			if err := assignHotExpertCache(candidate, shape, slots); err != nil {
 				return nil, err
 			}
@@ -557,6 +700,7 @@ func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, 
 				candidate.HotExpertCacheEvidence += fmt.Sprintf("; priority: demoted %d GPU expert layer(s) so a useful cache is a first-class challenger", drop)
 			}
 			candidate.ResourceLedger = &adjusted
+			candidate.HotExpertCacheFreeBaseline = packedBaseline
 			return candidate, nil
 		}
 		gpu := hotExpertTightestGPU(shape, slack)
@@ -764,15 +908,31 @@ func hotExpertRemoveVRAMLedgerLayer(s *Strategy, gpu int) {
 }
 
 // finalizeHotExpertCache applies a requested cache after the stable placement
-// is complete. Auto/on build leftover or demoted cache-on from exact cache-free
-// evidence and return that layout so standard launch actually emits
-// --moe-expert-cache. Auto may restore packed after runtime rejection; on and a
-// positive slot count fail closed instead of silently serving cache-free.
+// is complete. `on` and a positive slot count build a cache-on layout from
+// exact cache-free evidence and fail closed rather than silently serving
+// cache-free. `auto` keeps the packed cache-free layout as the fail-closed
+// default serve and attaches the computed cache-on placement as
+// HotExpertCacheChallenger, so calibration runs the packed-vs-cache-on agent
+// A/B (contract invariant 7) instead of promoting the cache on prediction.
 func finalizeHotExpertCache(caps *detect.Capabilities, model *ModelProfile, opts Options, s *Strategy) (*Strategy, error) {
 	if s == nil {
 		return nil, nil
 	}
 	s.BackendSupportsHotExpertCache = backendSupportsHotExpertCache(opts.BackendHelp)
+
+	// Replay a pinned bootstrap topology before sizing the cache. The previous
+	// launch served this exact shape cache-free specifically to measure it; the
+	// planner has since seen new evidence and would otherwise derive a slightly
+	// different shape whose baseline is unmeasured, bootstrapping forever. Only
+	// the MoE topology is replayed, and exact admission still gates the result.
+	if hotExpertRequired(opts) && model != nil {
+		if pin := MeasuredHotExpertBootstrapPin(opts.CacheDir, model.Path); pin.AppliesTo(s) {
+			if applyHotExpertBootstrapPin(s, pin) {
+				s.OptimizationExclusions = append(s.OptimizationExclusions,
+					"hot-experts: replaying the measured bootstrap topology ("+pin.Describe()+")")
+			}
+		}
+	}
 
 	// A verified automatic winner already carries its exact slots. Revalidate
 	// the capability and model layout rather than erasing the measured result.
@@ -793,11 +953,55 @@ func finalizeHotExpertCache(caps *detect.Capabilities, model *ModelProfile, opts
 		candidate, err := hotExpertCacheCandidate(caps, model, s, opts)
 		if candidate != nil {
 			candidate.BackendSupportsHotExpertCache = s.BackendSupportsHotExpertCache
-			return candidate, nil
+			if hotExpertRequired(opts) {
+				// `on` is an explicit request to serve the cache; there is no
+				// fail-closed packed default to keep.
+				//
+				// The cache engaged, so the bootstrap pin has done its job. Drop
+				// it: it exists only to carry one measurement forward to the
+				// launch that consumes it, and keeping it would replay a frozen
+				// topology after the evidence has moved on.
+				if model != nil {
+					_ = ClearHotExpertBootstrapPin(opts.CacheDir, model.Path)
+				}
+				return candidate, nil
+			}
+			// `auto`: serve the packed cache-free baseline and let the live agent
+			// A/B decide. calibration regenerates this challenger from the packed
+			// base (CalibrationCandidates), so the field is a hand-off, not the
+			// sole record.
+			s.HotExpertCacheChallenger = candidate
+			return s, nil
 		}
 		if err != nil {
 			s.OptimizationExclusions = append(s.OptimizationExclusions, "hot-experts: "+err.Error())
 			if hotExpertRequired(opts) {
+				// Bootstrap, not a silent downgrade: the cache is impossible to size
+				// until this exact key has been allocation-measured, and only a
+				// completed launch records that. Serve the cache-free baseline once
+				// and say so; the next launch of the same shape has its evidence and
+				// engages the cache. Every other reason still fails closed below.
+				if errors.Is(err, ErrHotExpertBaselineUnmeasured) {
+					// Pin the topology being measured. Without this the promise is
+					// empty: recording the measurement changes the evidence, the
+					// next plan comes out a different shape, and its baseline is
+					// unmeasured again. Measured 2026-09-07: four consecutive
+					// launches alternated --n-cpu-moe 41/40/41/40 and the cache
+					// never once engaged.
+					// Marked, not written: finalizeHotExpertCache runs while
+					// candidates are still being evaluated, and the plan here is
+					// not necessarily the one that launches. Recording now pinned
+					// a topology no launch ever served (measured 2026-09-07: pin
+					// n-cpu-moe 38 against a launched 40), which reproduces the
+					// very livelock this is meant to break. The launcher writes
+					// the pin from the final argv instead.
+					s.HotExpertBootstrapPending = true
+					s.OptimizationExclusions = append(s.OptimizationExclusions,
+						"hot-experts: serving the cache-free baseline for this launch to measure it ("+
+							(HotExpertBootstrapPin{ContextSize: s.ContextSize, UBatch: s.UBatchSize, NCPUMoE: s.NCPUMoE}).Describe()+
+							"); the next launch replays this exact topology and engages the cache")
+					return s, nil
+				}
 				return nil, fmt.Errorf("hot experts required but no cache-on placement was admitted: %w", err)
 			}
 		}
@@ -850,12 +1054,11 @@ func finalizeHotExpertCache(caps *detect.Capabilities, model *ModelProfile, opts
 			s.HotExpertCacheEvidence = priorEvidence
 		}
 	}
-	// Admission deliberately composes the allocation-measured cache-free
-	// baseline with the exact GGUF cache charge. The backend's no-alloc path
-	// cannot instantiate this cache (weights have no data buffers there), so
-	// waiting for a cache-on probe would make first use impossible.
+	// This is a planning composition, not cache-on allocation proof. The
+	// cache-free observation and GGUF charge permit bounded admission, which
+	// must still exercise cache-on warmup before accepting the configuration.
 	ledger := BuildResourceLedger(caps, model, s, baseOpts)
-	if !ledger.Exact || !ledger.Fits {
+	if !ledger.Fits {
 		clearHotExpertCache(s)
 		return nil, fmt.Errorf("hot-expert cache with %d slots does not fit the complete per-device ledger", requested)
 	}
@@ -867,6 +1070,10 @@ func applyHotExpertCacheLedger(ledger *ResourceLedger, s *Strategy, allocationAl
 	if ledger == nil || s == nil || s.HotExpertCacheSlots <= 0 || allocationAlreadyIncludesCache {
 		return
 	}
+	// Adding cache tensors also changes the backend decode graph. The cache-free
+	// allocation plus exact tensor byte arithmetic cannot prove cache-on graph
+	// buffers or driver executable allocations. Only cache-on admission can.
+	ledger.Exact = false
 	for i := range ledger.Devices {
 		charge := s.HotExpertCacheVRAMByGPU[ledger.Devices[i].GPU]
 		if charge <= 0 {
