@@ -118,6 +118,36 @@ func RecordHotExpertDisplacementProof(cacheDir, modelPath string, p HotExpertDis
 	return os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
 }
 
+// RecordHotExpertDisplacementArm stores one side of the comparison, leaving the
+// other side as it was.
+//
+// The two arms arrive on different launches and never in one process: a
+// cache-free serve records the baseline, a later cache-on serve of the same
+// placement records the cache. Requiring both at once would be the deadlock
+// this gate is meant to avoid -- the gate needs proof, proof needs a cache-on
+// serve, and the serve is refused for want of proof. Accumulating one arm at a
+// time is what lets an explicit `--hot-experts on` bootstrap complete the pair
+// and hand `auto` a real answer.
+func RecordHotExpertDisplacementArm(cacheDir, modelPath, identity string,
+	demoted, slots int, cacheOn bool, decodeTPS float64,
+) error {
+	if cacheDir == "" || strings.TrimSpace(identity) == "" || decodeTPS <= 0 {
+		return nil
+	}
+	proof, _ := LoadHotExpertDisplacementProof(cacheDir, modelPath, identity)
+	proof.Identity = identity
+	if cacheOn {
+		proof.CacheDecodeTPS = decodeTPS
+		// Slots and demotion describe the cache arm, so only that arm may set
+		// them. A baseline serve knows neither.
+		proof.Slots = slots
+		proof.Demoted = demoted
+	} else {
+		proof.BaselineDecodeTPS = decodeTPS
+	}
+	return RecordHotExpertDisplacementProof(cacheDir, modelPath, proof)
+}
+
 // LoadHotExpertDisplacementProof returns the recorded comparison for one
 // identity.
 func LoadHotExpertDisplacementProof(cacheDir, modelPath, identity string) (HotExpertDisplacementProof, bool) {
