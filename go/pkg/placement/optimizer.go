@@ -24,13 +24,17 @@ const (
 // components are useful for screening; an Exact ledger is populated only when
 // the backend reported the allocation for this exact runtime signature.
 type DeviceResourceLedger struct {
-	GPU              int    `json:"gpu"`
-	Role             string `json:"role,omitempty"`
-	FreeMB           int    `json:"free_mb"`
-	ModelMB          int    `json:"model_mb,omitempty"`
-	ContextMB        int    `json:"context_mb,omitempty"`
-	GraphMB          int    `json:"graph_mb,omitempty"`
-	RuntimeMB        int    `json:"runtime_growth_mb,omitempty"`
+	GPU       int    `json:"gpu"`
+	Role      string `json:"role,omitempty"`
+	FreeMB    int    `json:"free_mb"`
+	ModelMB   int    `json:"model_mb,omitempty"`
+	ContextMB int    `json:"context_mb,omitempty"`
+	GraphMB   int    `json:"graph_mb,omitempty"`
+	RuntimeMB int    `json:"runtime_growth_mb,omitempty"`
+	// RuntimeMeasured is false when no growth evidence exists for this device,
+	// as opposed to growth having been measured at zero. Discretionary spenders
+	// must consult it before spending SlackMB: see SpendableSlackMB.
+	RuntimeMeasured  bool   `json:"runtime_growth_measured,omitempty"`
 	HotExpertCacheMB int    `json:"hot_expert_cache_mb,omitempty"`
 	RequiredMB       int    `json:"required_mb"`
 	SlackMB          int    `json:"slack_mb"`
@@ -246,12 +250,26 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	for i, gpu := range gpus {
 		computeMB := 0
 		runtimeMB := 0
+		// Absence and zero are different answers, and a single-value map read
+		// cannot tell them apart. For a RESERVE the difference is the whole
+		// question: unknown must behave like "large", never like zero, which is
+		// the least conservative value there is.
+		//
+		// Measured 2026-09-09: a plan with no growth row for CUDA1 reserved
+		// runtime=0, packed the device to 24008/24112 MiB, and aborted in warmup
+		// with a CUDA OOM after every buffer had allocated. residency.go has
+		// always used the two-value read for exactly this reason (see
+		// ExpertSeat.MarginMeasured); the ledger could not express it, so every
+		// consumer of SlackMB inherited the ambiguity.
+		runtimeMeasured := false
 		if pc != nil {
 			computeMB = pc.ComputeBufByGPU[gpu.Index]
 			if computeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) {
 				computeMB = pc.ComputeBufMB
 			}
-			runtimeMB = pc.RuntimeGraphGrowthByGPU[gpu.Index]
+			if v, ok := pc.RuntimeGraphGrowthByGPU[gpu.Index]; ok {
+				runtimeMB, runtimeMeasured = v, true
+			}
 		}
 		// Only ever raises the reserve: a device with no exact growth row falls
 		// back to measured growth from a neighbouring signature, never the other
@@ -262,7 +280,9 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 					opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(opts))
 				relatedGrowthLoaded = true
 			}
-			runtimeMB = relatedGrowth[gpu.Index]
+			if v, ok := relatedGrowth[gpu.Index]; ok {
+				runtimeMB, runtimeMeasured = v, true
+			}
 		}
 		if computeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) && !opts.RequireMeasuredBuffers {
 			computeMB = firstLaunchComputeBufMBForGPUParallelAtContext(
@@ -277,6 +297,7 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 		ledger.Devices[i].ContextMB = contextMB
 		ledger.Devices[i].GraphMB = graphMB
 		ledger.Devices[i].RuntimeMB = runtimeMB
+		ledger.Devices[i].RuntimeMeasured = runtimeMeasured
 		ledger.Devices[i].RequiredMB = required
 		ledger.Devices[i].SlackMB = ledger.Devices[i].FreeMB - required
 		ledger.Devices[i].Active = strategyUsesGPUAt(s, i, gpu.Index) || required > 0
@@ -1324,4 +1345,34 @@ func SummarizeCandidateFrontier(candidates []CalibrationCandidate) *Optimization
 		boundary.Evidence = base.ResourceLedger.Evidence
 	}
 	return boundary
+}
+
+// SpendableSlackMB reports how much of this device's slack a DISCRETIONARY
+// allocation may take, and whether it may take any at all.
+//
+// The distinction this encodes, which the contract implies but never stated:
+// a REQUIRED allocation -- model weights, KV, the compute buffer -- may proceed
+// against unmeasured runtime growth, because refusing would make the first
+// launch of any new plan impossible and no evidence could ever be gathered. A
+// DISCRETIONARY allocation -- the expert cache, an extra resident layer -- may
+// not, because it is optional by definition and the cost of being wrong is an
+// OOM that a plan without it would have survived.
+//
+// Measured 2026-09-09: the expert cache spent slack on a device with no growth
+// evidence, packed CUDA1 to 24008/24112 MiB with runtime=0, and aborted in
+// warmup after every buffer had allocated. ComputeExpertSeats already applied
+// this rule to expert seats ("an unmeasured margin buys no seats"); the slot
+// arithmetic did not, because DeviceResourceLedger could not express the
+// difference between absent and zero.
+//
+// Returning (0, false) rather than the raw number keeps the unsafe path out of
+// reach: a caller that ignores the flag gets nothing to spend.
+func (d DeviceResourceLedger) SpendableSlackMB() (int, bool) {
+	if !d.RuntimeMeasured {
+		return 0, false
+	}
+	if d.SlackMB <= 0 {
+		return 0, false
+	}
+	return d.SlackMB, true
 }

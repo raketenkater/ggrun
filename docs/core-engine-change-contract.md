@@ -36,6 +36,23 @@ product lane.
    backend capabilities stay unknown. Do not encode one server's GPU indexes,
    VRAM sizes, CPU numbering/affinity, PCIe layout, model family, or fork
    behavior as a universal rule.
+   **Absent is not zero.** A reserve or margin read from a map, a probe, or a
+   log must distinguish "measured, and the value is zero" from "never
+   measured", because for a reserve the safe reading of unknown is *large* and
+   zero is the least conservative value available. Carry the distinction in the
+   type (`RuntimeMeasured`, `MarginMeasured`) rather than in each caller's
+   memory: a single-value map read of a missing key yields zero silently, and
+   on 2026-09-09 that packed a device to 24008/24112 MiB and aborted the launch
+   in warmup.
+11. **Required and discretionary allocations answer to different rules.**
+   Model weights, KV and the compute buffer are *required*: they may proceed on
+   incomplete evidence, because refusing would make the first launch of any new
+   plan impossible and no evidence could ever be gathered. The expert cache, an
+   extra resident layer, and any other optional spend are *discretionary*: they
+   are optional by definition, so the cost of being wrong is an OOM a plan
+   without them would have survived. `ComputeExpertSeats` applies this to expert
+   seats ("an unmeasured margin buys no seats"). Where a discretionary spender
+   does not yet apply it, that is a recorded open decision, not licence.
 9. **Evidence is versioned.** When eligibility, workload, scoring, or resource
    semantics change, invalidate or explicitly migrate persisted optimization
    evidence. Old fit proof may remain valid while old performance proof does

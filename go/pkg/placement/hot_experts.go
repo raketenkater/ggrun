@@ -516,6 +516,18 @@ func hotExpertCacheMaxSlots(model *ModelProfile, shape *hotExpertCacheShape, led
 	if model == nil || shape == nil || !ledger.Exact || !ledger.Fits {
 		return 0
 	}
+	// NOTE: this spends SlackMB without consulting DeviceResourceLedger's
+	// RuntimeMeasured flag, and that is a known open question rather than an
+	// oversight. Measured 2026-09-09: a plan with no growth row reserved
+	// runtime=0, packed CUDA1 to 24008/24112 MiB, and aborted in warmup with a
+	// CUDA OOM after every buffer had allocated.
+	//
+	// Gating on RuntimeMeasured here contradicts this path's documented gate --
+	// exact cache-free ALLOCATION evidence, not growth evidence -- and fails the
+	// tests that encode it. Growth is keyed per plan, and demoting expert layers
+	// changes the key, so a demoted candidate has growth evidence only when a
+	// related-signature row happens to match. See docs/core-standard-launch-todos.md
+	// (PACKED) for the decision this needs.
 	slack := make(map[int]int, len(ledger.Devices))
 	for _, device := range ledger.Devices {
 		slack[device.GPU] = device.SlackMB

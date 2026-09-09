@@ -743,3 +743,46 @@ func TestTopologyRankingPrefersFastSingleGPUWhenItFits(t *testing.T) {
 		t.Fatalf("calculated finalist=%q, want fastest fitting single GPU", frontier[1].Name)
 	}
 }
+
+// TestSpendableSlackRefusesUnmeasuredGrowth is the invariant that resolves a
+// live inconsistency: two paths in this package held opposite policies on the
+// same question.
+//
+// ComputeExpertSeats refuses to spend an unmeasured margin ("an unmeasured
+// margin buys no seats"); the hot-expert slot arithmetic spent SlackMB
+// regardless. The cause was a type gap, not a judgement call --
+// DeviceResourceLedger.RuntimeMB is an int, a single-value map read of a
+// missing key yields 0, and 0 is indistinguishable from a measured zero. For a
+// reserve, unknown must behave like large, never like zero.
+//
+// Measured 2026-09-09: a device with no growth row reserved runtime=0, was
+// packed to 24008/24112 MiB, and aborted in warmup with a CUDA OOM after every
+// buffer had allocated.
+func TestSpendableSlackRefusesUnmeasuredGrowth(t *testing.T) {
+	unmeasured := DeviceResourceLedger{GPU: 1, SlackMB: 8000, RuntimeMeasured: false}
+	if got, ok := unmeasured.SpendableSlackMB(); ok || got != 0 {
+		t.Errorf("unmeasured growth must yield nothing to spend; got %d, ok=%v", got, ok)
+	}
+
+	measured := DeviceResourceLedger{GPU: 1, SlackMB: 8000, RuntimeMB: 506, RuntimeMeasured: true}
+	if got, ok := measured.SpendableSlackMB(); !ok || got != 8000 {
+		t.Errorf("measured growth must yield its slack; got %d, ok=%v", got, ok)
+	}
+
+	// Growth measured AT zero is a real answer and must be spendable, which is
+	// exactly the case a bare int cannot distinguish from absence.
+	measuredZero := DeviceResourceLedger{GPU: 2, SlackMB: 4000, RuntimeMB: 0, RuntimeMeasured: true}
+	if got, ok := measuredZero.SpendableSlackMB(); !ok || got != 4000 {
+		t.Errorf("growth measured at zero is still measured; got %d, ok=%v", got, ok)
+	}
+
+	// A device with no room offers nothing regardless of evidence.
+	full := DeviceResourceLedger{GPU: 0, SlackMB: 0, RuntimeMeasured: true}
+	if _, ok := full.SpendableSlackMB(); ok {
+		t.Error("a device with no slack must not be spendable")
+	}
+	negative := DeviceResourceLedger{GPU: 0, SlackMB: -128, RuntimeMeasured: true}
+	if got, ok := negative.SpendableSlackMB(); ok || got != 0 {
+		t.Errorf("an over-committed device must not be spendable; got %d, ok=%v", got, ok)
+	}
+}
