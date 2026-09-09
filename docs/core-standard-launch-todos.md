@@ -1643,6 +1643,55 @@ against an implementation that may not survive review.
 - [ ] When adding a test for a rule still under discussion, `t.Skip` with a
       pointer to the open decision rather than shipping it green.
 
+## ENGAGE — hot experts cannot engage on two of three tested models
+
+Measured 2026-09-09 across GLM 5.3 Flash, Qwen3.8-Flash-Next and
+DeepSeek-V4-Flash. Each model was launched twice with `--hot-experts on`, the
+second launch specifically to consume the bootstrap pin and engage the cache.
+
+```
+GLM 5.3 Flash     engages (measured +6.0% at K=32 by hand), but auto still
+                  OOMs: see PACKED -- runtime=0 on the auto path
+Qwen3.8-Flash     never engages: bootstrap loop
+DeepSeek V4       never engages: backend lacks the capability
+```
+
+### Qwen3.8: the bootstrap pin never converges
+
+Launch 1: `hot experts: pinned this launch's topology (n-cpu-moe 18); the next
+launch replays it and engages the cache`. Launch 2, same message, **n-cpu-moe
+22**. Each launch re-plans a different expert topology, so the pin recorded by
+the previous launch never matches the current plan, and every launch is a
+bootstrap. The cache can never engage no matter how many times it is run.
+
+The pin is supposed to carry one measurement forward to the launch that consumes
+it. It cannot do that while the planner is free to choose a different n-cpu-moe
+on the replay. Either the replay must adopt the pinned topology verbatim, or the
+pin must be keyed such that a re-planned topology invalidates it explicitly
+rather than silently re-bootstrapping.
+
+- [ ] Make the replay launch adopt the pinned topology rather than re-planning,
+      or report "pin superseded" instead of silently bootstrapping again.
+- [ ] Add a counter: a second consecutive bootstrap for the same scope is a
+      defect, exactly as the safe floor already reports for repeated floors.
+
+### DeepSeek V4: the backend has no hot-expert capability
+
+`hot experts required but no cache-on placement was admitted: selected backend
+does not advertise the hot-expert cache capability`. Definitive and correct --
+the fork selected for V4 does not carry the feature. Worth recording because it
+means "with and without hot experts" is unanswerable for this model until a
+hot-expert-capable V4 backend exists.
+
+ggrun also self-reported `DEFECT: this scope has now needed the floor 2 time(s);
+a repeated floor is an optimizer bug`, which is the right diagnosis: requiring a
+capability the backend lacks should fail closed once, not drive a repeated
+descent to the safe floor.
+
+- [ ] Refuse `--hot-experts on` up front when the selected backend lacks the
+      capability, rather than discovering it after placement and falling to the
+      floor twice.
+
 ## FEATURES — MTP, speculation and vision, parked and unmeasured
 
 Opened 2026-09-09. These are implemented, referenced across 20-35 files each,
