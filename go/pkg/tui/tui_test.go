@@ -1120,6 +1120,15 @@ func TestHotExpertsTUIReusesExactInstalledComposite(t *testing.T) {
 		t.Fatal("installed composite must be reused without another build prompt")
 	}
 
+	m.backend = feature.Tag // feature installer can leave the overlay selected
+	m.hotExperts = "off"
+	if got := m.launchBackend(); got != base.Tag {
+		t.Fatalf("disabled cache retained an explicit overlay: %q", got)
+	}
+	m.hotExperts = "auto"
+	if got := m.launchBackend(); got != feature.Tag {
+		t.Fatalf("eligible cache lost its selected overlay: %q", got)
+	}
 	m.models[0].IsMoE = false
 	if got := m.effectiveBackend(); got != base.Tag {
 		t.Fatalf("dense model incorrectly selected MoE feature backend %q", got)

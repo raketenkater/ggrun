@@ -6322,7 +6322,6 @@ func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelPro
 		"tune=" + req.TuneCache,
 		"spec=" + req.SpecMode,
 		"hot-experts=" + req.HotExperts,
-		"hot-experts-explicit=" + strconv.FormatBool(req.HotExpertsSet),
 		"force-spec-moe=" + strconv.FormatBool(req.ForceSpecMoE),
 		"ram-budget=" + strconv.Itoa(req.RamBudgetMB),
 		"ram-limit=" + strconv.Itoa(req.RAMLimitPercent),

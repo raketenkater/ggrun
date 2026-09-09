@@ -1036,20 +1036,26 @@ func (m Model) effectiveBackend() string {
 			return fallback
 		}
 	}
-	// A backend explicitly selected by the feature-install return path must win
-	// over the model's ordinary route. Composed backends are helper-only on
-	// purpose, so AutoBackend continues to name their untouched base.
-	if selected := backends.ByTag(m.backend); selected != nil &&
-		(backends.BackendHasFeature(*selected, "hot-experts") || strings.EqualFold(selected.Tag, "hot-experts")) {
-		return selected.Tag
-	}
+	modelUsesExperts := m.selectedModel >= 0 && m.selectedModel < len(m.models) && m.models[m.selectedModel].IsMoE
 	base := strings.TrimSpace(m.backend)
+	// Feature provisioning may leave the overlay selected. Once the policy is
+	// off (or the selected model is dense), return to its base rather than
+	// emitting the old overlay as an explicit, unrecoverable backend override.
+	if selected := backends.ByTag(base); selected != nil &&
+		(backends.BackendHasFeature(*selected, "hot-experts") || strings.EqualFold(selected.Tag, "hot-experts")) {
+		if m.hotExpertsEnabled() && modelUsesExperts {
+			return selected.Tag
+		}
+		base = strings.TrimSpace(selected.BaseTag)
+		if base == "" {
+			base = "auto"
+		}
+	}
 	if m.selectedModel >= 0 && m.selectedModel < len(m.models) {
 		if routed := strings.TrimSpace(m.models[m.selectedModel].AutoBackend); routed != "" {
 			base = routed
 		}
 	}
-	modelUsesExperts := m.selectedModel >= 0 && m.selectedModel < len(m.models) && m.models[m.selectedModel].IsMoE
 	if m.hotExpertsEnabled() && modelUsesExperts {
 		if composite := backends.FeatureBackend(base, "hot-experts"); composite != nil {
 			return composite.Tag

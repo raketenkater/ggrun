@@ -1625,6 +1625,69 @@ against an implementation that may not survive review.
 - [ ] When adding a test for a rule still under discussion, `t.Skip` with a
       pointer to the open decision rather than shipping it green.
 
+## FEATURES — MTP, speculation and vision, parked and unmeasured
+
+Opened 2026-09-09. These are implemented, referenced across 20-35 files each,
+and currently either mutually exclusive with the work that has had all the
+attention or never measured on this rig. Picking them back up needs a decision
+per feature, not a sweep.
+
+### Speculative decoding / MTP
+
+Present: `SpecType`, `MTPFlag`, `NgramN`, `NextNPredictLayers`,
+`backendSupportsMTP`, and a draft-model path (`draft.go:102` enables MTP when
+`Parallel > 1` and the backend advertises it). A test model exists:
+`models/mtp-test/Qwen3.5-4B-Q4_K_M-MTP.gguf`.
+
+Two things currently hold it back, and they pull in opposite directions:
+
+- **The hot-expert backend refuses it.** `hot_experts.go:403`: "the reviewed
+  hot-expert backend bypasses multi-token speculative decode". So on this rig the
+  two features are mutually exclusive, and hot experts has had every hour of
+  attention. Nobody has measured which is worth more.
+- **The safe floor surrenders it** on the way down, correctly, but that means a
+  rig that lands on the floor silently loses it with no later attempt to restore.
+
+The measurement that matters: on an agent workload, speculation targets decode
+(58% of processed time here) by reducing target-model steps, while hot experts
+targets the same phase by reducing host streaming. They are competing solutions
+to one bottleneck and have never been compared.
+
+- [ ] Measure speculation alone against the cache-free baseline on the same
+      workload used for the hot-expert sweep, so the two are comparable.
+- [ ] Decide whether the mutual exclusion is a backend limitation worth patching
+      or a permanent fork property.
+- [ ] Give the safe floor a way to note what it surrendered so a later launch can
+      retry it rather than inheriting the floor's compromises forever.
+
+### Vision / mmproj
+
+Present: `pkg/vision` (3 tests), mmproj handling across 16 files, `MMProjSizeMB`
+in placement. It was deliberately dropped from `AllocationPlacementIdentity`
+during the v4 identity work, which is correct for a *placement* key -- a vision
+projector does not change expert placement -- but means no evidence path
+currently distinguishes a vision launch from a text-only one.
+
+Unknown and worth establishing before anyone relies on it:
+
+- [ ] Does the mmproj allocation reach the ledger at all, or is it the same
+      class of omission the compute buffer was? The compute buffer was invisible
+      to occupancy for months and cost 30% of VRAM; mmproj is a smaller but
+      identical shape of question.
+- [ ] Is a vision launch ever exercised end-to-end on this rig? Three unit tests
+      in `pkg/vision` is not the same as one served multimodal request.
+- [ ] Vision models are usually dense, not MoE, so most of this session's work
+      (expert cache, expert residency, n-cpu-moe) does not apply. Confirm the
+      placement path for a dense multimodal model is not simply untested.
+
+### Why these are grouped
+
+All three share a property that makes them risky to resume casually: they change
+what the backend allocates, and this session has now found two cases
+(compute buffer, runtime growth) where an allocation ggrun did not model was
+either invisible or read as zero. Any of these features returning should start by
+asking what it allocates and whether the ledger sees it.
+
 ## Tracking rules
 
 - Close a box only with implementation commit, focused regression test, and
@@ -1648,3 +1711,34 @@ typed exact-argv rejections; no fabricated reserve, ubatch change, or disabled
 CUDA graph is introduced. Calibration schema 27. Core regression tests and vet
 pass. The observed cache-on warmup failure still needs a newly admitted viable
 configuration and matched agent A/B before HOT-4/HOT-5 live acceptance closes.
+
+## Production hardening review — 2026-09-09
+
+Code fixes in the current development checkout (no new performance campaign):
+
+- [x] Retain a healthy recovered baseline after calibration instead of stopping
+  it for an argv mismatch and returning no server. Changed recovery argv carries
+  no performance promotion; a changed challenger still restores the baseline
+  only after its process and resources are confirmed released.
+- [x] SCOPE: effective hot-expert policy shares TUI/CLI request identity. Keep
+  explicit parallel/batch constraints, which actually change permitted search.
+- [x] OVERLAY: a disabled cache or dense model withdraws a selected TUI overlay
+  to its base. The displayed policy still reaches the launcher.
+- [x] Merge cache-on and cache-free growth floors per GPU, retaining the larger
+  reserve. A partial cache-on map no longer hides another card's measured floor.
+  Regression tests exercise BuildResourceLedger, not just related-row lookup.
+- [x] Reconstruct archived feature recipes using their recorded reviewed patch
+  subset so production rollback survives newly added overlays.
+- [x] Core gate now includes backend recipes and TUI launch-policy tests/vet.
+
+Calibration schema 33 and placement plan schema 15 invalidate changed lifecycle
+and reserve semantics. Cache-free growth is a planning floor, not proof of
+cache-on graph size or speed. The current slot target is a search prior; its
+performance and broader hardware coverage remain unproven. Existing benchmark
+collection belongs to the separate validation work, not this engineering pass.
+
+Verification: expanded uncached core gate passed all eight packages plus vet
+(`/tmp/ggrun-hardening-core-20260909.log`). Installed with `go install -trimpath
+./cmd/ggrun` into `/home/mik/go/bin/ggrun`; PATH symlink and lifecycle fix marker
+verified. No new benchmark collection or model restart in this hardening pass.
+Changes remain in the development working tree for review.

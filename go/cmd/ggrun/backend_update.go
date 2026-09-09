@@ -410,7 +410,7 @@ func rollbackRegisteredBackend(tag string) (backends.Backend, error) {
 	previousIdentity.BaseTag = be.Previous.BaseTag
 	previousIdentity.Features = append([]string(nil), be.Previous.Features...)
 	previousIdentity.AppliedPatches = append([]string(nil), be.Previous.AppliedPatches...)
-	previousRecipe, recipeErr := backends.RecipeForBackend(previousIdentity)
+	previousRecipe, recipeErr := archivedBackendRecipe(previousIdentity)
 	if recipeErr != nil {
 		revert()
 		return backends.Backend{}, fmt.Errorf("restore recipe cannot be reconstructed; active build put back: %w", recipeErr)
@@ -498,4 +498,19 @@ func installedBackendPatchRecipe(be backends.Backend, desired *backends.Recipe) 
 		}
 	}
 	return &installed, nil
+}
+
+// Archived feature builds may predate newly added overlays. Reconstruct only
+// the reviewed patch IDs actually recorded for that build, at its own pin.
+func archivedBackendRecipe(be backends.Backend) (*backends.Recipe, error) {
+	if len(be.Features) == 0 {
+		return backends.RecipeForBackend(be)
+	}
+	identity := be
+	identity.AppliedPatches = nil
+	reviewed, err := backends.RecipeForBackend(identity)
+	if err != nil {
+		return nil, err
+	}
+	return installedBackendPatchRecipe(be, reviewed)
 }

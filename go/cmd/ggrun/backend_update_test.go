@@ -385,3 +385,19 @@ func TestPrepareForkCheckoutUsesExactLocalPinWithoutRemote(t *testing.T) {
 		t.Fatal("unavailable tracking branch was accepted as the local pin")
 	}
 }
+
+func TestArchivedFeatureRecipePreservesOldPinAndPatchSet(t *testing.T) {
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	be := backends.Backend{Tag: "archived-hot", BaseTag: "glm5next", GitURL: "https://example.test/llama.cpp.git", Branch: "glm", Commit: strings.Repeat("b", 40), RouteArch: "glm5next", Features: []string{"hot-experts"}, AppliedPatches: []string{"features/hot-experts/bccbacdb8945"}}
+	got, err := archivedBackendRecipe(be)
+	if err != nil {
+		t.Fatalf("reviewed old overlay cannot roll back: %v", err)
+	}
+	if got.Commit != be.Commit || len(got.Patches) != 1 || got.Patches[0].Name != be.AppliedPatches[0] {
+		t.Fatalf("archive reconstructed as a different build: %+v", got)
+	}
+	be.AppliedPatches = []string{"unknown-patch"}
+	if got, err := archivedBackendRecipe(be); err == nil || got != nil {
+		t.Fatal("unknown archived patch accepted")
+	}
+}

@@ -274,34 +274,30 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 		// Only ever raises the reserve: a device with no exact growth row falls
 		// back to measured growth from a neighbouring signature, never the other
 		// way round, so this cannot make a plan look cheaper than its evidence.
-		if runtimeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) {
+		if strategyUsesGPUAt(s, i, gpu.Index) {
 			if !relatedGrowthLoaded {
 				relatedGrowth = RelatedModelRuntimeGraphGrowth(
 					opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(opts))
-				// backendCacheTag embeds the expert-cache slot count, and
-				// matchingRelatedProbeScope requires the recorded backend tag to
-				// match exactly. A cache-on plan therefore can NEVER match growth
-				// measured on its own cache-free baseline, so runtime reserve was
-				// structurally guaranteed to be zero for every first cache-on
-				// launch -- not merely absent by chance.
-				//
-				// Measured 2026-09-09: that packed CUDA1 to 24008/24112 MiB and
-				// aborted in warmup with a CUDA OOM after every buffer had
-				// allocated. Fall back to the cache-free tag for the same model,
-				// hardware, context and parallelism: a real measurement of a
-				// closely related graph, which is what the "only ever raises the
-				// reserve" rule above is for. The cache adds a second mul_mat_id
-				// chain, so this reserve is a floor rather than a ceiling -- but a
-				// measured floor beats a guaranteed zero.
-				if len(relatedGrowth) == 0 && opts.HotExpertCacheSlots > 0 {
+				if opts.HotExpertCacheSlots > 0 {
 					cacheFree := opts
 					cacheFree.HotExpertCacheSlots = 0
-					relatedGrowth = RelatedModelRuntimeGraphGrowth(
+					floor := RelatedModelRuntimeGraphGrowth(
 						opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(cacheFree))
+					if relatedGrowth == nil {
+						relatedGrowth = make(map[int]int)
+					}
+					// Evidence is per GPU. A cache-on observation on one card
+					// must not hide another card's cache-free growth floor.
+					// Keep the larger reserve, including measured zero.
+					for device, growth := range floor {
+						if current, known := relatedGrowth[device]; !known || growth > current {
+							relatedGrowth[device] = growth
+						}
+					}
 				}
 				relatedGrowthLoaded = true
 			}
-			if v, ok := relatedGrowth[gpu.Index]; ok {
+			if v, ok := relatedGrowth[gpu.Index]; ok && (!runtimeMeasured || v > runtimeMB) {
 				runtimeMB, runtimeMeasured = v, true
 			}
 		}

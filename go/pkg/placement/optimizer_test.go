@@ -829,3 +829,52 @@ func TestCacheOnPlanInheritsCacheFreeGrowth(t *testing.T) {
 		t.Fatal("cache-free growth must be findable under its own tag")
 	}
 }
+
+func TestCacheGrowthLedgerMergesEvidencePerDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cacheOn      map[int]int
+		want3, want7 int
+	}{
+		{"no cache-on evidence", nil, 274, 506},
+		{"partial cache-on evidence", map[int]int{3: 700}, 700, 506},
+		{"cache-free reserve remains a floor", map[int]int{3: 100, 7: 200}, 274, 506},
+		{"cache-on reserve is not reduced", map[int]int{3: 700, 7: 900}, 700, 900},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caps, model, strategy, opts := hotExpertFixture()
+			opts.CacheDir = t.TempDir()
+			opts.BackendTag = "llama"
+			opts.RequireMeasuredBuffers = true
+			strategy.ContextSize = 4096
+			strategy.UBatchSize = 256
+			strategy.KVQuality = "q8_0"
+			strategy.KVType = "q8_0"
+			strategy.KVPlacement = "gpu"
+			model.TotalSizeMB = 32
+			model.SizeBytes = 32 * hotExpertTestMiB
+			if err := RecordRuntimeGraphGrowth(opts.CacheDir, model, 4096, 256, "q8_0", "gpu", backendCacheTag(opts), caps.GPUs, 1, map[int]int{3: 274, 7: 506}); err != nil {
+				t.Fatal(err)
+			}
+			opts.HotExpertCacheSlots = 8
+			if tc.cacheOn != nil {
+				if err := RecordRuntimeGraphGrowth(opts.CacheDir, model, 4096, 256, "q8_0", "gpu", backendCacheTag(opts), caps.GPUs, 1, tc.cacheOn); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := BuildResourceLedger(caps, model, strategy, opts)
+			want := map[int]int{3: tc.want3, 7: tc.want7}
+			if len(got.Devices) != 2 {
+				t.Fatalf("missing device ledger: %+v", got)
+			}
+			for _, device := range got.Devices {
+				if !device.RuntimeMeasured || device.RuntimeMB != want[device.GPU] {
+					t.Fatalf("GPU%d growth=%d measured=%v, want %d", device.GPU, device.RuntimeMB, device.RuntimeMeasured, want[device.GPU])
+				}
+				if device.RequiredMB+device.SlackMB != device.FreeMB {
+					t.Fatal("growth broke device accounting")
+				}
+			}
+		})
+	}
+}

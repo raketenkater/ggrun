@@ -1255,11 +1255,15 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	)
 	cleanRestartFailureClass, cleanRestartFailureReason := "", ""
 	if curP != nil && !exactCalibrationCandidate(best.Args, servingArgs) {
+		if classifyCalibrationRelaunch(best, measurements[0], servingArgs) == calibrationKeepRecoveredBaseline {
+			fmt.Fprintln(os.Stderr, "[calibrate] restored baseline required recovery; keeping the healthy server without promoting a performance decision")
+			return curP, servingStrategy, servingArgs, nil
+		}
 		// A winner is not reusable unless the clean relaunch reproduced its exact
 		// argv. Automatic hot-cache activation may safely strip only the cache and
 		// return the already-measured baseline; any other recovery is stopped and
 		// followed by an explicit baseline restore.
-		if best.Name != "default" && exactCalibrationCandidate(measurements[0].Args, servingArgs) {
+		if classifyCalibrationRelaunch(best, measurements[0], servingArgs) == calibrationUseMeasuredBaseline {
 			if best.Strategy != nil && best.Strategy.HotExpertCacheSlots > 0 &&
 				servingStrategy != nil && servingStrategy.HotExpertCacheSlots == 0 {
 				cleanRestartFailureClass = "hot-expert-clean-relaunch"
@@ -1268,7 +1272,10 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			fmt.Fprintf(os.Stderr, "[calibrate] winner did not reproduce its exact argv; serving the measured default\n")
 			best = measurements[0]
 		} else {
-			_ = stopCalibrationProcessAndWait(curP, "recovered winner before exact baseline restore", resourceBaseline, 30*time.Second)
+			if !stopCalibrationProcessAndWait(curP, "recovered winner before exact baseline restore", resourceBaseline, 30*time.Second) {
+				req.CalibrationScreened = true
+				return curP, servingStrategy, servingArgs, nil
+			}
 			curP = nil
 		}
 	}
@@ -1782,4 +1789,29 @@ func restartPlacement(req *launchRequest, cfg *config.Config, model *placement.M
 		return nil, restoredStrategy, restoredArgs
 	}
 	return p, restoredStrategy, restoredArgs
+}
+
+type calibrationRelaunchDisposition uint8
+
+const (
+	calibrationExactRelaunch calibrationRelaunchDisposition = iota
+	calibrationKeepRecoveredBaseline
+	calibrationUseMeasuredBaseline
+	calibrationRestoreMeasuredBaseline
+)
+
+// A healthy recovered baseline is already the safe serving fallback. Stopping
+// it to restore the same baseline again can strand an otherwise successful
+// launch. Its changed argv cannot carry the earlier performance decision.
+func classifyCalibrationRelaunch(winner, baseline calibrationMeasurement, actualArgs []string) calibrationRelaunchDisposition {
+	if exactCalibrationCandidate(winner.Args, actualArgs) {
+		return calibrationExactRelaunch
+	}
+	if winner.Name == "default" {
+		return calibrationKeepRecoveredBaseline
+	}
+	if exactCalibrationCandidate(baseline.Args, actualArgs) {
+		return calibrationUseMeasuredBaseline
+	}
+	return calibrationRestoreMeasuredBaseline
 }
