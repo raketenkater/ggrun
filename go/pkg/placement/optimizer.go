@@ -278,6 +278,27 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 			if !relatedGrowthLoaded {
 				relatedGrowth = RelatedModelRuntimeGraphGrowth(
 					opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(opts))
+				// backendCacheTag embeds the expert-cache slot count, and
+				// matchingRelatedProbeScope requires the recorded backend tag to
+				// match exactly. A cache-on plan therefore can NEVER match growth
+				// measured on its own cache-free baseline, so runtime reserve was
+				// structurally guaranteed to be zero for every first cache-on
+				// launch -- not merely absent by chance.
+				//
+				// Measured 2026-09-09: that packed CUDA1 to 24008/24112 MiB and
+				// aborted in warmup with a CUDA OOM after every buffer had
+				// allocated. Fall back to the cache-free tag for the same model,
+				// hardware, context and parallelism: a real measurement of a
+				// closely related graph, which is what the "only ever raises the
+				// reserve" rule above is for. The cache adds a second mul_mat_id
+				// chain, so this reserve is a floor rather than a ceiling -- but a
+				// measured floor beats a guaranteed zero.
+				if len(relatedGrowth) == 0 && opts.HotExpertCacheSlots > 0 {
+					cacheFree := opts
+					cacheFree.HotExpertCacheSlots = 0
+					relatedGrowth = RelatedModelRuntimeGraphGrowth(
+						opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(cacheFree))
+				}
 				relatedGrowthLoaded = true
 			}
 			if v, ok := relatedGrowth[gpu.Index]; ok {

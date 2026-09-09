@@ -1465,6 +1465,72 @@ TODO:
       later launches will be faster" turns a slow first run from a defect into
       an explanation.
 
+## SCOPE — TUI and CLI cannot share a verified config
+
+Found by local code review 2026-09-09, confirmed live. Two of the review's seven
+findings were already fixed on this branch; this one and the overlay-selection
+one below are real.
+
+`LaunchArgs` emits `--hot-experts <v>` whenever the value is non-empty, and the
+TUI defaults it to "auto" (tui.go:3586). main.go then sets
+`req.HotExpertsSet = true` for any supplied flag, which puts
+`hot-experts-explicit=true` into `requestedLaunchPolicyIdentity`. A CLI launch of
+the same model under the same effective policy hashes `false`, so the two paths
+compute **different verified-config scope keys and can never share a validated
+plan**. Every TUI launch re-earns evidence a CLI launch already paid for.
+
+`swaFullTouched` and `kvQualityTouched` guard exactly this failure mode for their
+settings; hot experts was never given the same treatment.
+
+### The obvious fix is wrong
+
+Gating the emission on a `hotExpertsTouched` flag was tried and reverted. It
+fails `TestLaunchArgsCarriesHotExpertsPolicy`, which asserts all three values
+reach the launcher -- and that test encodes a real requirement: the TUI displays
+a policy, and if the flag is dropped, ggrun falls back to its config default,
+which may differ from what the user is looking at. Dropping the flag trades a
+cache-sharing bug for a silently-ignored-setting bug.
+
+### The fix worth making
+
+Hash the **effective policy** rather than the fact that a flag was typed.
+`requestedLaunchPolicyIdentity` should contain `hot-experts=auto|on|off|<n>`, not
+`hot-experts-explicit=true|false`. Then a TUI launch and a CLI launch that
+resolve to the same policy share a key, the flag keeps reaching the launcher, and
+neither bug exists.
+
+Note this is not specific to hot experts. Any policy identity that hashes
+"was this typed" rather than "what did it resolve to" splits the cache the same
+way, and `SWAFullSet`/`KVQualitySet` avoid it only by suppressing the flag --
+which works for a boolean toggle whose default is knowable, and would not work
+here.
+
+TODO:
+
+- [ ] Change `requestedLaunchPolicyIdentity` to hash effective policies. Audit
+      the other `*Set` fields it consults for the same shape while there.
+- [ ] Keep `TestLaunchArgsCarriesHotExpertsPolicy` green: the flag must still
+      reach the launcher.
+
+## OVERLAY — hot-experts backend stays selected after the policy is turned off
+
+Same review, confirmed live. `effectiveBackend()` (tui.go:1034) returns the
+overlay whenever `m.backend` names a backend carrying the `hot-experts` feature,
+without consulting `m.hotExpertsEnabled()` or `model.IsMoE`. Because
+`openHotExpertFeatureInstall` sets `m.backend = existing.Tag` when the composite
+is already installed, `m.backend` is no longer "auto" afterwards.
+
+Sequence: launch once with hot experts on, return to the TUI, set Hot experts to
+`off`. `launchBackend()` still returns the overlay tag, so `--backend <overlay>`
+goes out as an explicit, inviolable backend override on a cache-free launch --
+and `userExplicitBackendFlag` reads `OriginalArgs`, so the recovery ladder cannot
+withdraw it.
+
+TODO:
+
+- [ ] Gate the overlay early-return on the hot-experts policy still being
+      enabled, or reset `m.backend` to "auto" when the row is cycled to `off`.
+
 ## TESTS — 1,607 of them, and the gate guards 70%
 
 Opened 2026-09-09. Everything currently passes (`go test ./...` is clean), so

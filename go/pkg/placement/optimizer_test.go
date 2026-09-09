@@ -786,3 +786,46 @@ func TestSpendableSlackRefusesUnmeasuredGrowth(t *testing.T) {
 		t.Errorf("an over-committed device must not be spendable; got %d, ok=%v", got, ok)
 	}
 }
+
+// TestCacheOnPlanInheritsCacheFreeGrowth pins the fix for a structural zero.
+//
+// backendCacheTag embeds the expert-cache slot count and
+// matchingRelatedProbeScope requires an exact backend-tag match, so a cache-on
+// plan could never match growth recorded on its own cache-free baseline. Every
+// first cache-on launch therefore reserved runtime=0 by construction. Measured
+// 2026-09-09: CUDA1 packed to 24008/24112 MiB and the launch aborted in warmup
+// with a CUDA OOM after every buffer had allocated.
+func TestCacheOnPlanInheritsCacheFreeGrowth(t *testing.T) {
+	cacheDir := t.TempDir()
+	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 12282}, {Index: 1, VRAMTotalMB: 24564}}
+	model := &ModelProfile{
+		Path: "moe.gguf", Basename: "moe.gguf", NumLayers: 4, IsMoE: true,
+		NumExperts: 288, ExpertUsedCount: 8,
+	}
+	cacheFree := Options{CacheDir: cacheDir, BackendTag: "llama"}
+	cacheOn := Options{CacheDir: cacheDir, BackendTag: "llama", HotExpertCacheSlots: 32}
+
+	if backendCacheTag(cacheFree) == backendCacheTag(cacheOn) {
+		t.Fatal("fixture invalid: the two policies must produce different backend tags")
+	}
+
+	// Growth recorded by a cache-free serve, which is what a bootstrap produces.
+	if err := RecordRuntimeGraphGrowth(cacheDir, model, 4096, 256, "q8_0", "gpu",
+		backendCacheTag(cacheFree), gpus, 1, map[int]int{0: 274, 1: 506}); err != nil {
+		t.Fatalf("seed cache-free growth: %v", err)
+	}
+
+	// The cache-on tag must not match it directly -- that is the defect's cause.
+	direct := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, backendCacheTag(cacheOn))
+	if len(direct) != 0 {
+		t.Fatalf("expected no direct match for the cache-on tag; got %v", direct)
+	}
+	// ...but the cache-free tag must, which is the evidence the fallback uses.
+	inherited := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, backendCacheTag(cacheFree))
+	if got := inherited[1]; got != 506 {
+		t.Errorf("cache-free growth for CUDA1: got %d, want 506", got)
+	}
+	if len(inherited) == 0 {
+		t.Fatal("cache-free growth must be findable under its own tag")
+	}
+}
