@@ -1075,6 +1075,97 @@ func TestRuntimeLogCUDAOOMPrefersExactAllocation(t *testing.T) {
 	}
 }
 
+func TestRuntimeLogCUDAOOMClassifiesGraphCaptureAbort(t *testing.T) {
+	// The exact shape of the 2026-09-02 GLM-5.3-Flash crash: model loaded and
+	// health passed, then the first decode aborted inside CUDA-graph capture.
+	// llama.cpp names no allocation size for this abort.
+	model := &placement.ModelProfile{Path: "/models/GLM.gguf", NumLayers: 43}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0}, {Index: 1}, {Index: 2}}}
+	log := "srv  llama_server: model loaded\n" +
+		"srv  update_slots: all slots are idle\n" +
+		"E CUDA error: out of memory\n" +
+		"E   current device: 1, in function ggml_cuda_graph_evaluate_and_capture at ggml-cuda.cu:4216\n" +
+		"E   cudaGraphInstantiate(&graph->instance, graph->graph, __null, __null, 0)\n" +
+		"ggml-cuda.cu:107: CUDA error\n"
+
+	device, reserveMB, estimated, ok := runtimeLogCUDAOOM(log, caps, model, nil)
+	if !ok || device != 1 || !estimated || reserveMB <= 0 {
+		t.Fatalf("graph-capture abort not classified as runtime OOM: device=%d reserve=%d estimated=%v ok=%v", device, reserveMB, estimated, ok)
+	}
+	if !logCUDAGraphCaptureOOM(log) {
+		t.Fatal("logCUDAGraphCaptureOOM did not recognize the cudaGraphInstantiate abort")
+	}
+	// It must NOT be tagged as a compute-buffer (gallocr/graph_reserve) OOM: that
+	// flag drives a ubatch derate, which does nothing for a graph-exec allocation.
+	if _, _, isCompute, sok := startupLogCUDAOOMDetailed(log); sok && isCompute {
+		t.Fatal("graph-capture abort was mis-tagged as a compute-buffer OOM")
+	}
+}
+
+func TestRuntimeLogCUDAOOMRejectsGraphCaptureBeforeModelLoaded(t *testing.T) {
+	model := &placement.ModelProfile{Path: "/models/GLM.gguf"}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0}, {Index: 1}}}
+	log := "loading model weights\n" +
+		"E CUDA error: out of memory\n" +
+		"E   current device: 1, in function ggml_cuda_graph_evaluate_and_capture at ggml-cuda.cu:4216\n" +
+		"E   cudaGraphInstantiate(&graph->instance, graph->graph, __null, __null, 0)\n"
+	if _, _, _, ok := runtimeLogCUDAOOM(log, caps, model, nil); ok {
+		t.Fatal("an OOM before the model-loaded marker must not be recorded as runtime graph growth")
+	}
+}
+
+func TestLogCUDAGraphCaptureOOM(t *testing.T) {
+	cases := []struct {
+		name string
+		log  string
+		want bool
+	}{
+		{"evaluate_and_capture", "x\nCUDA error: out of memory\nin function ggml_cuda_graph_evaluate_and_capture at y", true},
+		{"cudaGraphInstantiate", "CUDA error: out of memory\ncudaGraphInstantiate(&graph->instance, ...)", true},
+		{"plain tensor OOM", "allocating 8000.00 MiB on device 0: cudaMalloc failed: out of memory", false},
+		{"no oom", "srv  llama_server: model loaded\nall slots are idle", false},
+		{"oom then unrelated frames only", "CUDA error: out of memory\nggml_backend_sched_alloc_splits\nsome other frame", false},
+	}
+	for _, c := range cases {
+		if got := logCUDAGraphCaptureOOM(c.log); got != c.want {
+			t.Errorf("%s: logCUDAGraphCaptureOOM = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCUDAGraphDerateEnvRungs(t *testing.T) {
+	if got := cudaGraphDerateEnv(0); got != nil {
+		t.Fatalf("level 0 must be a no-op: %v", got)
+	}
+	if got := cudaGraphDerateEnv(1); len(got) != 1 || got[0] != "CUDA_SCALE_LAUNCH_QUEUES=1x" {
+		t.Fatalf("level 1: %v", got)
+	}
+	got := cudaGraphDerateEnv(2)
+	if len(got) != 2 || got[0] != "CUDA_SCALE_LAUNCH_QUEUES=1x" || got[1] != "GGML_CUDA_GRAPHS=0" {
+		t.Fatalf("level 2: %v", got)
+	}
+	// The derate override must beat the =4x that ChildEnv adds for a split.
+	env := server.OverrideEnv(
+		server.ChildEnv(nil, []string{"--tensor-split", "0.5,0.5"}),
+		cudaGraphDerateEnv(2),
+	)
+	lastQueue, graphs := "", ""
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "CUDA_SCALE_LAUNCH_QUEUES="); ok {
+			lastQueue = v
+		}
+		if v, ok := strings.CutPrefix(e, "GGML_CUDA_GRAPHS="); ok {
+			graphs = v
+		}
+	}
+	if lastQueue != "1x" {
+		t.Fatalf("derate did not win over ChildEnv's =4x: effective CUDA_SCALE_LAUNCH_QUEUES=%q", lastQueue)
+	}
+	if graphs != "0" {
+		t.Fatalf("GGML_CUDA_GRAPHS override missing: %q", graphs)
+	}
+}
+
 func TestPreviousClaudeLogMatchesRuntimeShape(t *testing.T) {
 	model := &placement.ModelProfile{Path: "/models/DeepSeek-V4-00001-of-00004.gguf"}
 	strategy := &placement.Strategy{ContextSize: 1048576, Parallel: 4}
@@ -4724,5 +4815,86 @@ func TestClaudeReviewerAutoRequiresClaudeCodeLikeOtherValues(t *testing.T) {
 		if !strings.Contains(err.Error(), "--claude-code") {
 			t.Errorf("--claude-reviewer %s failed with %v, want the --claude-code gate", value, err)
 		}
+	}
+}
+
+// The pre-serve loop must have a wall-clock budget, not only per-adjustment
+// counters. Observed 2026-09-02: the re-plan cycle oscillated between a
+// weight-allocation OOM on one card and a graph_reserve OOM on another, roughly
+// 4.5 minutes apart because every contained probe reloads the whole model, and
+// burned 46 minutes without serving. Nothing returned a terminal error while the
+// loop still had another plan to try, so the safe floor never fired.
+func TestLaunchProbeBudgetIsBoundedAndScales(t *testing.T) {
+	model := &placement.ModelProfile{Path: "/models/m.gguf", TotalSizeMB: 131515}
+	cases := []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{"short timeout still gets a floor", 2 * time.Minute, 10 * time.Minute},
+		{"half of a moderate timeout", 24 * time.Minute, 12 * time.Minute},
+		{"capped for a very long timeout", 3 * time.Hour, 20 * time.Minute},
+	}
+	for _, c := range cases {
+		if got := launchProbeBudget(model, c.timeout); got != c.want {
+			t.Errorf("%s: launchProbeBudget(%s) = %s, want %s", c.name, c.timeout, got, c.want)
+		}
+	}
+	// The budget must always be strictly less than a 30m startup allowance, or
+	// the loop could consume the entire startup window deciding it cannot decide.
+	if got := launchProbeBudget(model, 30*time.Minute); got >= 30*time.Minute {
+		t.Fatalf("budget %s must stay below the startup timeout", got)
+	}
+}
+
+// TestGraphCaptureAbortIsRecognisedForStartupRetry pins the classification gap
+// that made a marginal plan fail permanently instead of recovering.
+//
+// startupLogCUDAOOMDetailed keys off a named allocation size. A
+// cudaGraphInstantiate abort names none, so it classified as "not an OOM" and
+// the startup path returned immediately with no retry -- while the identical
+// placement served on other attempts. Measured 2026-09-07 across five GLM
+// server logs: graph OOMs at --n-cpu-moe 39, 40 and 41, each log also carrying
+// 2-4 successful health checks. logCUDAGraphCaptureOOM is what the startup path
+// must consult before giving up.
+func TestGraphCaptureAbortIsRecognisedForStartupRetry(t *testing.T) {
+	const captureAbort = `
+ggml/src/ggml-cuda/ggml-cuda.cu:107: CUDA error
+CUDA error: out of memory
+  current device: 1, in function ggml_cuda_graph_evaluate_and_capture at ggml-cuda.cu:2748
+  cudaGraphInstantiate(&graph->instance, graph->graph, __null, __null, 0)
+`
+	if !logCUDAGraphCaptureOOM(captureAbort) {
+		t.Fatal("a cudaGraphInstantiate abort must be recognised as a graph-capture OOM")
+	}
+	// It carries no allocation size, which is exactly why the size-based
+	// classifier cannot act on it and the derate path must.
+	if _, _, _, ok := startupLogCUDAOOMDetailed(captureAbort); ok {
+		t.Fatal("a capture abort names no size; the size classifier must not claim it")
+	}
+	// An ordinary sized OOM must still be handled by the size classifier, not
+	// diverted into the derate retry.
+	const sizedOOM = `
+CUDA error: out of memory
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 4571.00 MiB on device 1: cudaMalloc failed
+`
+	if logCUDAGraphCaptureOOM(sizedOOM) {
+		t.Fatal("a plain cudaMalloc OOM is not a graph-capture abort")
+	}
+}
+
+// TestCUDAGraphDerateHasABoundedLadder keeps the startup retry from looping:
+// level 1 cancels the launch-queue multiplier, level 2 disables CUDA graphs,
+// and there is nothing beyond that to try.
+func TestCUDAGraphDerateHasABoundedLadder(t *testing.T) {
+	if len(cudaGraphDerateEnv(0)) != 0 {
+		t.Fatal("level 0 must change nothing")
+	}
+	l1, l2 := cudaGraphDerateEnv(1), cudaGraphDerateEnv(2)
+	if len(l1) == 0 || len(l2) == 0 {
+		t.Fatalf("levels 1 and 2 must both derate something: %v / %v", l1, l2)
+	}
+	if len(l2) <= len(l1) {
+		t.Fatalf("level 2 must be strictly more conservative than level 1: %v vs %v", l2, l1)
 	}
 }

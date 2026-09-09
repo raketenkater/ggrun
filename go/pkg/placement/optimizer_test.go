@@ -55,7 +55,7 @@ func TestMeasuredAllocationIdentityAcceptsUnlabelledGuardPeakOnlyForExactPlaceme
 	}
 	allocation := MeasuredAllocation{
 		Evidence:          "allocation-verified",
-		PlacementIdentity: AllocationPlacementIdentity(strategy),
+		PlacementIdentity: AllocationPlacementIdentity(strategy, nil),
 		ContextTotalMB:    768,
 		ContextByGPU:      map[int]int{0: 512, 1: 256},
 		// The guard observed exact peaks, but this backend did not label model
@@ -97,7 +97,7 @@ func TestPostLaunchContextObservationPreservesMatchingGuardedBreakdown(t *testin
 		Type: MultiGPUDense, TensorSplit: []float64{0.5, 0.5}, ContextSize: 32768,
 		Parallel: 1, BatchSize: 2048, UBatchSize: 512, KVPlacement: "gpu", KVQuality: "high", KVType: "q8_0",
 	}
-	identity := AllocationPlacementIdentity(strategy)
+	identity := AllocationPlacementIdentity(strategy, nil)
 	if err := RecordMeasuredAllocation(dir, model, strategy.ContextSize, strategy.UBatchSize,
 		strategy.KVQuality, strategy.KVPlacement, "test", gpus, strategy.Parallel, MeasuredAllocation{
 			Evidence: "allocation-verified", PlacementIdentity: identity, ContextTotalMB: 100,
@@ -194,7 +194,7 @@ func TestRealQwenRecurrentLogPromotesCompleteLiveAllocation(t *testing.T) {
 	// healthy live ledger that topology and hot-expert search depend on.
 	if err := RecordMeasuredAllocation(dir, model, strategy.ContextSize, strategy.UBatchSize,
 		strategy.KVQuality, strategy.KVPlacement, "qwen", gpus, strategy.Parallel, MeasuredAllocation{
-			Evidence: "oracle-planned", PlacementIdentity: AllocationPlacementIdentity(strategy),
+			Evidence: "oracle-planned", PlacementIdentity: AllocationPlacementIdentity(strategy, nil),
 			ContextTotalMB: 8448, ContextByGPU: map[int]int{0: 2112, 1: 5632, 2: 704},
 		}); err != nil {
 		t.Fatal(err)

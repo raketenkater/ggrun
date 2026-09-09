@@ -1433,6 +1433,21 @@ func buildAndTest(repoDir, buildDir string) bool {
 		return false
 	}
 
+	// Build the placement oracle into the same staged directory so it is
+	// promoted atomically with the server it belongs to. A mismatched pair --
+	// new server, old oracle -- would have the preflight predict against
+	// different graph code than the launch actually runs.
+	//
+	// Optional: a backend without the target still promotes and serves; the
+	// preflight just stays skipped, which is the behaviour that existed before
+	// the oracle was built at all.
+	if path, ferr := backends.BuildFitParamsOracle(repoDir, stagingDir, nproc); ferr != nil {
+		fmt.Printf("  No fit-params oracle for this backend (%v)\n", ferr)
+		fmt.Println("  Placement preflight will be skipped; candidates cost a real model load")
+	} else {
+		fmt.Printf("  Built placement oracle %s\n", filepath.Base(path))
+	}
+
 	stagingBinary := filepath.Join(stagingDir, "bin", "llama-server")
 	if err := smokeBackendConfigured(stagingBinary, cmakeFlags); err != nil {
 		fmt.Printf("  Backend conformance failed at this commit: %v\n", err)
@@ -1445,6 +1460,7 @@ func buildAndTest(repoDir, buildDir string) bool {
 		fmt.Printf("  Could not activate validated build: %v\n", err)
 		return false
 	}
+	repointPromotedCMakeCache(repoDir, buildDir, cmakeFlags)
 	fmt.Println("  Isolated build succeeded and was activated")
 	return true
 }
@@ -1512,6 +1528,42 @@ func smokeBackendConfigured(binary string, cmakeFlags []string) error {
 		return fmt.Errorf("requested %s build does not report a %s device", expected, expected)
 	}
 	return nil
+}
+
+// repointPromotedCMakeCache reconfigures a just-promoted build directory so its
+// CMake cache names the directory it now lives in.
+//
+// promoteBackendBuild activates a staged build with os.Rename, which moves the
+// bytes but leaves CMakeCache.txt recording the staging path it was configured
+// in. CMake refuses to work in such a directory:
+//
+//	CMakeCache.txt directory .../build-cuda is different than the directory
+//	.../build-cuda-candidate-<hash> where CMakeCache.txt was created
+//
+// so every later incremental build there fails -- including the next
+// `ggrun backend update`, which is how the directory got that way. Found
+// 2026-09-04 on this rig: fork-llama.cpp-nanbeige42 (stuck on a promoted
+// candidate path) and llama.cpp (stuck on build-cuda.ggrun-update) could not
+// compile anything further, which is also why nanbeige42 could not be given a
+// placement oracle.
+//
+// Best-effort by design: the promotion is already validated and the binaries in
+// it work. A failure here costs future incremental builds, not this one, so it
+// warns rather than unwinding a good promotion.
+func repointPromotedCMakeCache(repoDir, buildDir string, cmakeFlags []string) {
+	if repoDir == "" || buildDir == "" {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(buildDir, "CMakeCache.txt")); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "cmake", cmakeConfigureArgs(repoDir, buildDir, cmakeFlags)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("  Warning: promoted build kept a stale CMake cache path; future incremental builds there may fail: %s\n",
+			tailLines(string(out), 3))
+	}
 }
 
 func promoteBackendBuild(buildDir, stagingDir string, validate func(string) error) error {

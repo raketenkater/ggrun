@@ -1980,10 +1980,7 @@ func (m Model) viewModelConfig() string {
 	line("kvq", "[k] KV quality", kvQualityLabel)
 	swaLabel := m.swaLabel(model)
 	line("swa", "[w] Full SWA cache", swaLabel)
-	hotLabel := "auto (optimizer builds around it)"
-	if strings.EqualFold(strings.TrimSpace(m.hotExperts), "off") {
-		hotLabel = "off"
-	}
+	hotLabel := hotExpertsLabel(m.hotExperts, "auto (optimizer builds around it)")
 	line("hotexperts", "[h] Hot experts", hotLabel)
 
 	section("Tuning")
@@ -2021,10 +2018,7 @@ func (m Model) viewModelConfig() string {
 		nocacheLabel = "on (derive fresh, ignore cached config)"
 	}
 	statline("[g] Launch without cached config", nocacheLabel)
-	hotStat := "auto (optimizer builds around a useful GPU cache)"
-	if strings.EqualFold(strings.TrimSpace(m.hotExperts), "off") {
-		hotStat = "off"
-	}
+	hotStat := hotExpertsLabel(m.hotExperts, "auto (optimizer builds around a useful GPU cache)")
 	statline("Hot experts", hotStat)
 	statline("[y] Clear caches", "drop cached placement/calibration for this model (keep GGUF)")
 	line("launch", "[L] Launch", "▶ start the server")
@@ -2176,8 +2170,17 @@ func (m *Model) loadResumableSession() {
 	if err != nil {
 		return
 	}
-	rec, err := claudesession.Latest(m.cacheDir, workDir)
+	// Only offer a session that can actually be resumed. Latest() returns the
+	// newest record whatever its state, so it happily proposes a session with no
+	// transcript, or one whose model file has since been moved or deleted --
+	// pressing [R] then fails the launch instantly on a path that no longer
+	// exists. A stale record must simply not be offered; the ordinary launch
+	// still works.
+	rec, err := claudesession.LatestRecoverable(m.cacheDir, workDir)
 	if err != nil {
+		return
+	}
+	if !rec.ModelPathExists() {
 		return
 	}
 	m.resumeSession = rec.SessionID
@@ -2238,6 +2241,14 @@ func (m Model) viewPrelaunch() string {
 	}
 
 	b.WriteString("  Model:          " + model.Path + "\n")
+	// What this model last actually did, taken from the previous serving run's
+	// own backend timings. Shown beside the model rather than in the launch
+	// banner because it is the number an operator wants while choosing settings,
+	// not after committing to them.
+	if perf := placement.MeasuredObservedPerformance(m.cacheDir, model.Path); perf.Measured() {
+		b.WriteString(fmt.Sprintf("  Last run:       %s  (ctx %d, ubatch %d, %d expert layer(s) on GPU)\n",
+			perf.Summary(), perf.ContextSize, perf.UBatch, perf.ExpertLayersOnGPU))
+	}
 	b.WriteString(fmt.Sprintf("  Backend:        %s\n", prelaunchBackend))
 	b.WriteString(fmt.Sprintf("  Context:        %s\n", ctx))
 	if m.port > 0 {
@@ -4493,4 +4504,26 @@ func RunAfterBackendInstall(req *LaunchRequest) (*LaunchRequest, error) {
 	m.messageType = "info"
 	m.screen = ScreenPrelaunch
 	return runModel(m)
+}
+
+// hotExpertsLabel renders the hot-experts setting for the configuration
+// screens.
+//
+// Both call sites previously special-cased only "off" and let every other value
+// fall through to the "auto" text, so a user who selected "on" was shown "auto"
+// and had no way to tell their choice had registered -- the launch request
+// carried "on" correctly the whole time. One helper keeps the two screens from
+// drifting apart again.
+func hotExpertsLabel(value, autoText string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "off":
+		return "off"
+	case "on":
+		return "on (required; launch fails if no cache-on placement is admitted)"
+	case "", "auto":
+		return autoText
+	default:
+		// A numeric slot count is a valid explicit request.
+		return value + " (explicit cache slots)"
+	}
 }

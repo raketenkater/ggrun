@@ -134,6 +134,8 @@ jobs:
         run: bash tests/test_setup_home.sh
       - name: Keep prebuilt backend when --version fails
         run: bash tests/test_place_isolated_backend.sh
+      - name: Reject adopted backends with unresolved shared libraries
+        run: bash tests/test_backend_adoption.sh
       - name: Discover existing llama.cpp, forks, and CUDA
         run: bash tests/test_discover_system.sh
       - name: CUDA host compiler cap

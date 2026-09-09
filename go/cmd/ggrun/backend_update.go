@@ -207,7 +207,11 @@ func updateRegisteredBackend(tag string) error {
 	fmt.Printf("[backend] updating %s (%s)\n", tag, layout.srcDir)
 	oldCommit, _ := gitOutput(layout.srcDir, "rev-parse", "HEAD")
 	oldCommit = strings.TrimSpace(oldCommit)
-	if err := prepareForkCheckoutRecipe(layout.srcDir, branch, commit, recipe); err != nil {
+	installedRecipe, err := installedBackendPatchRecipe(*be, recipe)
+	if err != nil {
+		return err
+	}
+	if err := prepareForkCheckoutRecipe(layout.srcDir, branch, commit, recipe, installedRecipe); err != nil {
 		return fmt.Errorf("source checkout failed: %w", err)
 	}
 	newCommit, _ := gitOutput(layout.srcDir, "rev-parse", "HEAD")
@@ -466,4 +470,32 @@ func shortCommit(c string) string {
 		return "(unknown)"
 	}
 	return c
+}
+
+// Remove only patches recorded for the installed build. The desired recipe can
+// add overlays; trying to reverse those before they exist blocks every upgrade.
+// Stable patch IDs must resolve in order, otherwise preserve the checkout.
+func installedBackendPatchRecipe(be backends.Backend, desired *backends.Recipe) (*backends.Recipe, error) {
+	if desired == nil {
+		return nil, nil
+	}
+	installed := *desired
+	installed.Patches = nil
+	next := 0
+	for _, name := range be.AppliedPatches {
+		found := false
+		for next < len(desired.Patches) {
+			patch := desired.Patches[next]
+			next++
+			if patch.Name == name {
+				installed.Patches = append(installed.Patches, patch)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("installed backend patch %q is not available in the reviewed recipe order; preserving source checkout", name)
+		}
+	}
+	return &installed, nil
 }

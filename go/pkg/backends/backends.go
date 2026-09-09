@@ -128,6 +128,17 @@ var lagunaCmathPatch []byte
 //go:embed patches/features/hot-experts/0001-MoE-expert-cache-GPU-resident-LRU-cache-for-host-off.patch
 var hotExpertsFeaturePatch []byte
 
+// Aggregate counters are required by cache admission. Keep their bounded
+// 512-step cadence visible at normal verbosity without per-token debug logs.
+//
+//go:embed patches/features/hot-experts/0002-bounded-runtime-telemetry.patch
+var hotExpertsTelemetryPatch []byte
+
+// Keep an expert unpublished until its one outstanding upload completes.
+//
+//go:embed patches/features/hot-experts/0003-deduplicate-inflight-experts.patch
+var hotExpertsInflightPatch []byte
+
 var builtinFeatures = []Feature{
 	{
 		Name:          "hot-experts",
@@ -137,6 +148,12 @@ var builtinFeatures = []Feature{
 		Patches: []RecipePatch{{
 			Name:     "features/hot-experts/bccbacdb8945",
 			contents: hotExpertsFeaturePatch,
+		}, {
+			Name:     "features/hot-experts/telemetry-info-v1",
+			contents: hotExpertsTelemetryPatch,
+		}, {
+			Name:     "features/hot-experts/inflight-dedup-v1",
+			contents: hotExpertsInflightPatch,
 		}},
 	},
 }
@@ -155,6 +172,7 @@ var builtinRecipes = []Recipe{
 		GitURL:        "https://github.com/csantiago78/llama.cpp.git",
 		Branch:        "moe-expert-cache",
 		Commit:        "bccbacdb8945680f1cfc7e6bffd1e59014705750",
+		Patches:       []RecipePatch{{Name: "features/hot-experts/telemetry-info-v1", contents: hotExpertsTelemetryPatch}, {Name: "features/hot-experts/inflight-dedup-v1", contents: hotExpertsInflightPatch}},
 		RouteArch:     "",
 		Accel:         "cuda",
 		RequiredFlags: []string{"--moe-expert-cache", "--moe-expert-cache-inserts"},

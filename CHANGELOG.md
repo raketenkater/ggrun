@@ -2,6 +2,121 @@
 
 ## Unreleased
 
+- Automatic challenger admission now recognizes CUDA warmup OOMs even when
+  the driver omits an allocation size. These produce a typed rejection rather
+  than an inconclusive result. Cache-free allocation plus calculated expert
+  cache bytes no longer counts as exact proof for the changed cache-on graph;
+  real admission remains required. Calibration evidence is schema 27.
+
+- Last-run throughput now separates completed prompt and decode timing rows.
+  Fast decode is retained regardless of model size, and cumulative prefill
+  progress no longer counts as multiple completed prompts. Old ambiguous
+  throughput summaries are ignored until remeasured; placement evidence is
+  unchanged.
+
+- Probe-cache updates preserve each retained measurement's GPU role and growth
+  source. Updating compute buffers no longer turns OOM evidence into healthy
+  serving evidence, and recording growth no longer erases compute roles.
+  Older probe metadata is treated conservatively until remeasured.
+
+- Related memory observations now match the model artifact, backend build and
+  features, hardware, and slot count before informing a new placement. This
+  prevents another backend's measurements or a same-name model replacement
+  from changing the current launch's memory reserve. Compatible observations
+  remain reusable without another model load.
+
+- **ggrun now always launches: a terminal safe-floor tier replaces `os.Exit(1)`.**
+  The optimizer was fail-closed at every stage with no guaranteed-serviceable
+  floor, so a *prediction* miss became a *terminal* failure — three separate
+  ones on the same rig in one day. When every ordinary path and the advisor
+  retry are exhausted, `placement.ComputeSafeFloor` descends a bounded ladder —
+  single split owner on the roomiest GPU, hot experts and speculation off,
+  microbatch 64, then evict GPU-seated companions, then KV to host, then the
+  minimum context, then CPU-only — and serves the first tier that resolves. Each
+  rung is a complete placement from the ordinary `Compute` path, so exact-argv
+  admission still gates it; the CPU-only rung is mandatory because it is the
+  only one that does not depend on companions or on the driver-side CUDA-graph
+  executable no oracle predicts.
+  Contract invariant 3 is preserved: the floor moves only coordinates the user
+  left automatic, and refuses — naming the new `--safe-floor` opt-in — when it
+  would have to surrender a pinned one. `--parallel` is never surrendered by any
+  rung, because runtime graph growth (the one measurement a floor launch
+  uniquely produces) only transfers to another key at a matching slot count.
+  A floor placement is never promoted, never cached as a winner, and never
+  suppresses the optimizer. Every activation prints the original failure in full
+  plus each surrendered coordinate, and is recorded in
+  `safe-floor-activations.json`; a second activation for the same launch scope
+  is reported as a defect rather than as normal operation.
+- **A per-GPU compute-buffer measurement is now tagged with the role it was
+  taken in, and never charged to a different role.** A device that carried only
+  pinned expert tensors measures a compute buffer orders of magnitude smaller
+  than a split owner's. That reading was being replayed verbatim onto a later
+  plan that made the same device a split owner, so the ledger under-reserved it:
+  live 2026-09-02, CUDA2 carried a 192 MiB expert-only reading, placement put
+  4184 MiB of weights and 800 MiB of KV on the card, and llama.cpp then billed
+  the real 4570 MiB and failed the load in `graph_reserve` — five contained
+  probes, 24 minutes, then the launch gave up. The probe cache now stores
+  `PROBED_COMPUTE_BUF_EXPERT_ONLY_CUDA<n>` beside each reading, and a
+  split-owner plan falls back to the aggregate or the cold estimate rather than
+  charging an expert-only value. The role is recorded, not inferred from
+  magnitude: a secondary split owner legitimately measures far below the primary
+  (DeepSeek-V4 recorded 599 against a 17970 primary), so no ratio separates the
+  two cases. Readings written before the flag existed stay trusted and heal on
+  the next measured run.
+- **`hot-experts=on` can no longer make a launch shape permanently unlaunchable.**
+  Sizing the cache requires an allocation-measured cache-free ledger for the
+  exact key (model, context, ubatch, KV quality/placement, backend, slots), and
+  only a completed launch of that key records one — so `on` refused every shape
+  that had never run: the cache needed evidence, the evidence needed a launch,
+  and the launch was refused for want of the cache. Changing KV quality or
+  context was enough to trigger it (`Error computing placement: hot experts
+  required but no cache-on placement was admitted: exact cache-free allocation
+  evidence is unavailable`). That one condition is now the typed
+  `ErrHotExpertBaselineUnmeasured`: `on` serves the cache-free baseline for a
+  single launch to measure it, says so in the optimization summary, and engages
+  the cache on the next launch of the same shape. Every other reason — an
+  unsupported layout, mmap, speculative decode, a backend without the exact flag
+  pair — still fails closed, and `auto` is unchanged.
+- **The TUI no longer offers a resume for a session whose model is gone.**
+  `loadResumableSession` used `claudesession.Latest`, which returns the newest
+  record whatever its state, and never consulted the package's own
+  `ModelPathExists`. A six-week-old record pointing at a since-deleted GGUF was
+  still shown as `[R] Resume`, and taking it failed the launch instantly on a
+  path that no longer exists. It now requires `LatestRecoverable` (something to
+  actually reopen) plus a model file still on disk; a stale record is simply not
+  offered and the ordinary launch is unaffected.
+- **A CUDA OOM inside the lifecycle-verification canary now recovers instead of
+  exiting.** The first real decode (e.g. `cudaGraphInstantiate` for the decode
+  graph) can OOM after the server already loaded and passed health -- a seam the
+  startup ladder (load only) and the serving-loop runtime ladder (post-verify
+  only) both missed, so it exited 1 with no retry. The verify path now reads the
+  crashed server's log, and on a post-`model loaded` CUDA OOM it fully reaps the
+  process, records the per-device graph-growth deficit, drops any staged
+  calibration decision for the crashed placement, and re-plans + re-verifies,
+  bounded to two attempts. For a graph-capture abort specifically
+  (`ggml_cuda_graph_evaluate_and_capture` / `cudaGraphInstantiate`), the first
+  rung is the targeted lever: cancel the multi-GPU `CUDA_SCALE_LAUNCH_QUEUES=4x`
+  child-env multiplier (level 2 also sets `GGML_CUDA_GRAPHS=0`) and relaunch the
+  exact placement, since graph-exec memory scales with graph node/split count,
+  not ubatch or weight residency. Preflight now discloses when a GPU-backed
+  placement has no measured runtime graph-growth evidence rather than implying
+  its "fits" is a guarantee.
+- **A failed hot-expert cache can no longer strand the degraded all-CPU-expert
+  topology, and `auto` no longer serves the cache on prediction alone.** When
+  the priority challenger demotes GPU expert layers to make cache room, it now
+  captures the exact packed pre-demotion placement. A cache-on admission or
+  lifecycle failure restores that captured baseline (or, on a verified-config
+  replay with no snapshot, recomputes a cache-free placement and fails closed)
+  instead of stripping only the cache flags and keeping the inflated
+  `--n-cpu-moe` / trimmed `-ot`. `auto` serves the packed cache-free layout as
+  the fail-closed default and hands the cache-on placement to calibration as
+  the decode challenger, so the packed-vs-cache-on agent A/B actually runs
+  (candidate 0 is the packed layout) rather than the cache being promoted to
+  the first serve. Calibration schema 24 retires decisions recorded under the
+  pre-24 default. A verified cache-on record whose `hot_expert_evidence_schema`
+  predates the current admission semantics replays without its cache while its
+  cache-free fit still applies. `on` and a numeric slot count are unchanged:
+  they serve the cache or fail closed.
 - **The TUI can provision hot experts for a model's actual architecture fork.**
   `Hot experts = auto` now offers a one-time isolated composite build on the
   first confirmed MoE launch, then reuses that exact base+feature backend from

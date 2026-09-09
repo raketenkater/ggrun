@@ -674,6 +674,13 @@ type launchRequest struct {
 	SpecMode          string
 	HotExperts        string // off, auto, on, or a positive cache-slot count per eligible layer
 	HotExpertsSet     bool   // --hot-experts was supplied explicitly
+	// SafeFloor is the --safe-floor opt-in: it lets the terminal safe-floor tier
+	// surrender a coordinate the user pinned explicitly. Without it the floor may
+	// move only coordinates left automatic (contract invariant 3).
+	SafeFloor bool
+	// SafeFloorAttempted guards the tier to one attempt per launch, so a floor
+	// that itself fails cannot recurse.
+	SafeFloorAttempted bool
 	// HotExpertsRuntimeDisabled is set only after a requested cache failed its
 	// post-load capability check. Re-plans in the same lifecycle must return to
 	// the cache-free baseline instead of reapplying a stale measured winner.
@@ -682,11 +689,17 @@ type launchRequest struct {
 	// until the restored cache-free baseline reaches StateActive. It is runtime
 	// controller state only and never changes the requested launch identity.
 	HotExpertPendingNegative *placement.CalibrationDecision
-	ForceSpecMoE             bool
-	RamBudgetMB              int
-	RAMLimitPercent          int
-	VRAMHeadroomMB           int
-	RAMHeadroomMB            int
+	// CUDAGraphDerateLevel is bumped by runtime-OOM recovery after a CUDA
+	// graph-capture abort (cudaGraphInstantiate). Level 1 drops the multi-GPU
+	// CUDA_SCALE_LAUNCH_QUEUES=4x child-env multiplier that inflates driver-side
+	// graph-launch memory; level 2 also sets GGML_CUDA_GRAPHS=0. It changes only
+	// the child environment, never the argv or placement identity.
+	CUDAGraphDerateLevel int
+	ForceSpecMoE         bool
+	RamBudgetMB          int
+	RAMLimitPercent      int
+	VRAMHeadroomMB       int
+	RAMHeadroomMB        int
 	// CgroupHeadroomMB is the headroom the post-launch measured-footprint sizing
 	// keeps between the backend's measured non-reclaimable footprint and its hard
 	// MemoryMax. 0 keeps the pre-launch plan-derived ceiling (auto re-size off).
@@ -1194,6 +1207,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.Host = v
 		case "--vision", "-vision":
 			req.VisionAuto = true
+		case "--safe-floor":
+			// Opt-in that lets the terminal safe-floor tier surrender a coordinate
+			// the user pinned. Without it the floor may move only automatic ones.
+			req.SafeFloor = true
 		case "--claude-code":
 			req.ClaudeCode = true
 		case "--claude-reviewer":
@@ -2727,6 +2744,13 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// This is a workload ceiling, not a pre-resolved context. The placement
 		// package still searches the exact full-plan boundary below it, so Claude,
 		// ordinary CLI, TUI, recovery, and dry-run all use one fit resolver.
+		//
+		// Note what this ceiling is derived from: the model's trained context,
+		// not the workload. It is an upper bound on what the model can do, and
+		// placement.autoContextCap lowers it to what this deployment's agent
+		// traffic has actually been measured to need (workload_context.go).
+		// Without that second step, "workload ceiling" here meant 1M tokens
+		// against a measured p99 agent request of 78958 (2026-09-03).
 		autoContextMax = model.CTXTrain
 		if autoContextMax > 1048576 {
 			autoContextMax = 1048576
@@ -2835,6 +2859,11 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		}
 	}
 	warnIfContextForcesOffload(caps, model, req, opts, userSetCtx)
+	// Learn this deployment's real agent context demand before any automatic
+	// context decision consumes it. The router already logs one usage record per
+	// request; until this call nothing read them back, so autoContextMax above
+	// was a ceiling derived from the model rather than from the workload.
+	ensureAgentContextDemand(cacheDir, opts.Parallel)
 	// Derive the strategy-free verified-config scope key from the finalized opts.
 	// It is what the reuse lookup in placement.Compute hashes against, and the
 	// save path uses the same computation, so save and load can never disagree.
@@ -3169,7 +3198,18 @@ func validateBackendLaunchArgs(be *backendInfo, args []string) error {
 	case helpHasExactFlag(be.Help, "--help"):
 		probeFlag = "--help"
 	default:
-		return fmt.Errorf("backend %s exposes neither --version nor --help, so ggrun cannot validate its launch dialect safely", be.Path)
+		// Reported as issue #28: this message was shown for a backend that
+		// could not load at all ("libllama-server-impl.so: cannot open shared
+		// object file"), sending the reporter to look for a launch-dialect
+		// problem that did not exist. backendLoaderFailed catches the known
+		// loader strings above, but an empty or unrecognised probe result is
+		// far more often a broken binary than a genuinely dialect-less one, so
+		// show what the probe actually returned instead of only our conclusion.
+		if detail := strings.TrimSpace(firstNonEmptyLine(be.Help)); detail != "" {
+			return fmt.Errorf("backend %s did not report --version or --help; it said: %s", be.Path, detail)
+		}
+		return fmt.Errorf("backend %s produced no output for --help, so it is probably not executable on this machine "+
+			"(a missing shared library is the usual cause); run it directly to see the loader error", be.Path)
 	}
 
 	probeArgs := append([]string(nil), args[1:]...)
@@ -3918,8 +3958,8 @@ func backendStartOptions(req *launchRequest, caps *detect.Capabilities, be *back
 // backendMemoryMaxMB the pre-launch scope used), so this can only tighten
 // containment, never loosen it past the safety limit. When --ram-budget is set
 // the user named an explicit ceiling and the auto re-size is skipped.
-func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilities, strategy *placement.Strategy, p *server.Process) {
-	if req == nil || caps == nil || p == nil || runtime.GOOS != "linux" {
+func resizeScopeToMeasuredFootprint(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, caps *detect.Capabilities, strategy *placement.Strategy, p *server.Process) {
+	if req == nil || cfg == nil || caps == nil || p == nil || runtime.GOOS != "linux" {
 		return
 	}
 	if req.CgroupHeadroomMB <= 0 || req.RamBudgetMB > 0 {
@@ -3937,6 +3977,16 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 		return
 	}
 	plannedFloor := measuredFootprintPlannedFloor(strategy, measured, ceiling)
+	// A previous kill is harder evidence than any plan estimate: it is the one
+	// number this model has actually been observed to need. Raise the floor to
+	// it so the same workload is not killed at the same point again.
+	if model != nil {
+		if hp := placement.HostPeakFloorMB(cfg.CacheDir, model.Path, req.CgroupHeadroomMB); hp > plannedFloor {
+			fmt.Fprintf(os.Stderr, "[launch] raising the memory scope floor to %d MiB: %s\n",
+				hp, placement.MeasuredHostPeak(cfg.CacheDir, model.Path).Describe())
+			plannedFloor = hp
+		}
+	}
 	newMax := measuredFootprintCgroupMaxMB(measured, req.CgroupHeadroomMB, plannedFloor, ceiling)
 	if strategyUsesReclaimableMMap(strategy) {
 		// Never collapse a file-backed plan's hard ceiling to its anonymous
@@ -4043,8 +4093,28 @@ func hostReclaimCeilingMB(req *launchRequest, caps *detect.Capabilities) int {
 	return ceiling
 }
 
+// cudaGraphDerateEnv returns the child-env overrides for one CUDA graph-capture
+// derate level. Level 1 cancels the CUDA_SCALE_LAUNCH_QUEUES=4x multiplier
+// ChildEnv adds for a multi-GPU split (it inflates the driver launch-queue
+// memory cudaGraphInstantiate allocates); level 2 also disables CUDA graphs.
+// OverrideEnv applies these last, so =1x wins over the =4x ChildEnv appends.
+func cudaGraphDerateEnv(level int) []string {
+	switch {
+	case level <= 0:
+		return nil
+	case level == 1:
+		return []string{"CUDA_SCALE_LAUNCH_QUEUES=1x"}
+	default:
+		return []string{"CUDA_SCALE_LAUNCH_QUEUES=1x", "GGML_CUDA_GRAPHS=0"}
+	}
+}
+
 func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration) (*server.Process, error) {
-	startOpts := backendStartOptions(req, caps, be, hostExpertPinningEnv(be, serverArgs), serverArgs)
+	launchEnv := hostExpertPinningEnv(be, serverArgs)
+	if derate := cudaGraphDerateEnv(req.CUDAGraphDerateLevel); len(derate) > 0 {
+		launchEnv = append(append([]string(nil), launchEnv...), derate...)
+	}
+	startOpts := backendStartOptions(req, caps, be, launchEnv, serverArgs)
 	if req.ClaudeCode {
 		// In Claude Code mode ggrun hands the terminal to the `claude` client, so
 		// the backend's ongoing per-request logs must go to a file instead of
@@ -4339,6 +4409,14 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 		}
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, companionVRAMByGPU)
 		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU)
+		// Learn runtime graph growth from a launch that WORKED. Every other
+		// recorder for this quantity is RecordRuntimeGraphGrowthFromOOM, so
+		// before this call ggrun could only learn it by crashing -- and a rig
+		// that never crashes never earns the evidence ComputeExpertSeats needs
+		// to pack tighter, holding its conservative slack forever (measured
+		// 2026-09-04: 23 of 24 GLM probe entries had no growth at all).
+		placement.RecordRuntimeGraphGrowthFromServe(cfg.CacheDir, model, strategy,
+			cacheBackendTag, gpus, serverLog, companionVRAMByGPU)
 	}
 	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
 	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
@@ -4347,6 +4425,30 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if !probeWritten {
 		return nil
 	}
+	return computeByGPU
+}
+
+// recordFailedLaunchProbes preserves backend-reported compute-buffer rows for
+// immediate startup recovery, but never treats a failed process as a healthy
+// serving observation. Whole-device/PID deltas, context/KV geometry, and
+// serve-derived runtime graph growth require a post-health hook.
+func recordFailedLaunchProbes(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverLog string) map[int]int {
+	if cfg == nil || model == nil || strategy == nil || be == nil || serverLog == "" {
+		return nil
+	}
+	cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
+	var gpus []detect.GPU
+	if caps != nil {
+		gpus = caps.GPUs
+	}
+	if hasExternalSpecCompanion(strategy) {
+		return nil
+	}
+	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
+	// The backend log still contains an actual compute-buffer allocation, so keep
+	// that narrow evidence. This writer does not sample device/PID state or write
+	// serve-derived graph growth.
+	placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
 	return computeByGPU
 }
 
@@ -4532,6 +4634,38 @@ func automaticHotExpertFallbackAllowed(req *launchRequest, strategy *placement.S
 		strings.EqualFold(strings.TrimSpace(req.HotExperts), "auto")
 }
 
+// restoreCacheFreePackedBaseline returns the exact packed cache-free placement a
+// failed cache-on strategy was derived from. It prefers the snapshot the
+// challenger captured before demoting GPU expert layers; when there is none -- a
+// verified-config replay that bypassed placement.Compute -- it recomputes a
+// cache-free placement from scratch and fails closed. It never returns the
+// feature-stripped-but-still-demoted strategy, so a hot-expert admission failure
+// can never leave the degraded all-CPU-expert topology serving.
+func restoreCacheFreePackedBaseline(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
+	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy,
+) (*placement.Strategy, error) {
+	if restored := placement.RestorePackedCacheFreeBaseline(strategy); restored != nil {
+		return restored, nil
+	}
+	cacheDir := ""
+	if cfg != nil {
+		cacheDir = cfg.CacheDir
+	}
+	opts := placementOptionsFromRequestCaps(req, model, be, cacheDir, caps)
+	opts.SkipPlacementCache = true
+	opts.VerifiedConfigScopeKey = ""
+	opts.HotExperts = "off"
+	opts.HotExpertCacheSlots = 0
+	next, err := placement.Compute(caps, model, opts)
+	if err != nil {
+		return nil, fmt.Errorf("recompute cache-free baseline after hot-expert failure: %w", err)
+	}
+	if next == nil {
+		return nil, fmt.Errorf("recompute cache-free baseline after hot-expert failure returned no strategy")
+	}
+	return next, nil
+}
+
 func hotExpertFailureDecisionSource(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
 	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy,
 	pending *placement.CalibrationDecision,
@@ -4549,7 +4683,12 @@ func hotExpertFailureDecisionSource(req *launchRequest, cfg *config.Config, mode
 	if cfg == nil {
 		return nil
 	}
-	cacheFree := placement.WithoutHotExpertCache(strategy)
+	cacheFree := placement.RestorePackedCacheFreeBaseline(strategy)
+	if cacheFree == nil {
+		// No captured snapshot (legacy record / verified replay). The
+		// feature-stripped copy is only a scope-hash input here, never served.
+		cacheFree = placement.WithoutHotExpertCache(strategy)
+	}
 	if cacheFree == nil {
 		return nil
 	}
@@ -4706,9 +4845,34 @@ func backendMeasuredRecomputeWorthVerifying(level memoryEvidenceLevel, current, 
 	return true
 }
 
+// launchProbeBudget is how long the pre-serve re-plan/probe loop may run before
+// it is declared terminal. It scales with the model's own startup allowance so a
+// large MoE still gets several honest attempts, but can never spend the whole
+// startup timeout discovering it cannot decide.
+func launchProbeBudget(model *placement.ModelProfile, timeout time.Duration) time.Duration {
+	budget := timeout / 2
+	if budget < 10*time.Minute {
+		budget = 10 * time.Minute
+	}
+	if budget > 20*time.Minute {
+		budget = 20 * time.Minute
+	}
+	return budget
+}
+
 func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery, restoreExempt bool, exactAdmission bool) (launchProcess *server.Process, launchStrategy *placement.Strategy, launchArgs []string, launchErr error) {
 	const maxRetries = 2
 	const maxPreflightReplans = 5
+	// Wall-clock budget for the whole pre-serve loop. maxPreflightReplans bounds
+	// one adjustment TYPE; nothing bounded the loop as a whole, and on a large
+	// MoE every contained live probe costs a full model load. Observed
+	// 2026-09-02: the re-plan cycle oscillated between a weight-allocation OOM on
+	// one card and a graph_reserve OOM on another, ~4.5 minutes apart, and burned
+	// 46 minutes without ever serving -- the safe floor never fired because no
+	// path returned a terminal error while the loop still had another plan to
+	// try. Exhausting this budget IS terminal, so the caller falls to the floor
+	// and something serves.
+	launchDeadline := time.Now().Add(launchProbeBudget(model, timeout))
 	retries := 0
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
@@ -4759,6 +4923,15 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 	}()
 	for {
+		if time.Now().After(launchDeadline) {
+			// Terminal: the loop still has candidates but has spent its budget.
+			// Returning an error here is what lets the caller serve a safe floor
+			// instead of continuing to probe indefinitely.
+			return nil, strategy, serverArgs, fmt.Errorf(
+				"launch did not converge within its %s pre-serve budget (last plan: %s); "+
+					"the placement search kept re-planning without reaching a servable configuration",
+				launchProbeBudget(model, timeout).Round(time.Minute), formatCommand(serverArgs))
+		}
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
 		}
@@ -4972,6 +5145,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				// fails closed exactly as it would have without the advisor.
 				var unclassified *backendUnclassifiedProbeError
 				if errors.As(preflight.Err, &unclassified) {
+					if exactAdmission {
+						if failure := startupExactAdmissionFailure(unclassified.LogExcerpt, preflight.Err); failure != nil {
+							memoryRecovery.reject(serverArgs)
+							return nil, strategy, serverArgs, failure
+						}
+					}
 					adviseUnclassifiedLaunchFailure(req, cfg, model, be, caps, unclassified.LogExcerpt)
 				}
 				return nil, strategy, serverArgs, fmt.Errorf("memory preflight failed closed: %w", preflight.Err)
@@ -5085,7 +5264,16 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		// A preflight or OOM recovery can move additional expert layers to CPU
 		// after the initial launch confirmation. Re-check here so no re-plan can
 		// silently introduce disk-backed mmap before a real backend start.
-		if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+		// A safe-floor placement has already announced that it is degrading to keep
+		// the service alive, and mmap is the documented last-resort capacity path
+		// (invariant 4). Stopping to ask a question here turns the fallback back into
+		// a failure -- in a non-interactive context the prompt EOFs and exits, which
+		// is exactly the crash the floor exists to prevent.
+		// Gate on the REQUEST, not the strategy: proactivelyDropReviewerForVRAMModel
+		// can recompute and return a different Strategy, dropping the floor tag.
+		if (req.SafeFloorAttempted || placement.IsSafeFloorStrategy(strategy)) && strategy.MMapRequired {
+			fmt.Fprintln(os.Stderr, "[safe-floor] this tier pages model weights from disk (file-backed mmap); accepting it rather than failing to launch")
+		} else if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
 			return nil, strategy, serverArgs, err
 		}
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
@@ -5147,12 +5335,16 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					req.HotExpertPendingNegative = hotExpertUnavailableDecision(
 						negativeSource, strategy, "cache-on activation failed before the exact cache-free baseline was restored: "+hotErr.Error(),
 					)
-					// A hot-cache candidate changes no tensor/KV/batch coordinate. Strip
-					// only that feature from the exact candidate rather than recomputing
-					// under a potentially different free-VRAM snapshot.
-					next := placement.WithoutHotExpertCache(strategy)
-					if next == nil {
-						return nil, strategy, serverArgs, fmt.Errorf("%w; cache-free fallback returned no strategy", hotErr)
+					// Restore the exact packed pre-demotion baseline this challenger
+					// was derived from. Stripping only the cache fields would keep the
+					// inflated --n-cpu-moe / stripped -ot the priority challenger
+					// applied, i.e. serve the degraded all-CPU-expert topology.
+					next, restoreErr := restoreCacheFreePackedBaseline(req, cfg, model, be, caps, strategy)
+					if restoreErr != nil || next == nil {
+						if restoreErr == nil {
+							restoreErr = errors.New("cache-free fallback returned no strategy")
+						}
+						return nil, strategy, serverArgs, fmt.Errorf("%w; %v", hotErr, restoreErr)
 					}
 					next.PerformanceTuned = false
 					next.VerifiedConfigReused = false
@@ -5180,12 +5372,19 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		var measuredComputeByGPU map[int]int
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
-			measuredComputeByGPU = recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, logData, nil, serverProcessPID(p))
+			measuredComputeByGPU = recordFailedLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, logData)
 		}
 		// Diagnose before checking the retry budget: a clean, parseable OOM on
 		// the very last allowed attempt still deserves its real cause recorded
 		// and reported, instead of surfacing only the process's raw exit error
 		// (e.g. a bare "signal: segmentation fault" with no VRAM context).
+		if exactAdmission {
+			if failure := startupExactAdmissionFailure(logData, err); failure != nil {
+				memoryRecovery.reject(serverArgs)
+				return p, strategy, serverArgs, failure
+			}
+			return p, strategy, serverArgs, err
+		}
 		device, allocMB, isComputeBuffer, ok := startupLogCUDAOOMDetailed(logData)
 		// A startup OOM is not runtime growth. recordMeasuredLaunchProbes above
 		// already preserves graph-reserve sizes as compute-buffer measurements;
@@ -5197,13 +5396,30 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			}
 			return p, strategy, serverArgs, err
 		}
+		// A graph-capture abort names no allocation size, so the classifier above
+		// cannot see it and the launch ended here with no retry. That is why the
+		// same marginal plan aborted roughly one attempt in three and never
+		// recovered: measured 2026-09-07 across five GLM logs, graph OOMs at
+		// --n-cpu-moe 39, 40 and 41 alongside 2-4 successful health checks each.
+		//
+		// The canary path already knows the lever. Derate level 1 cancels the
+		// CUDA_SCALE_LAUNCH_QUEUES=4x multiplier ChildEnv adds for a multi-GPU
+		// split, which inflates precisely the driver launch-queue allocation
+		// cudaGraphInstantiate makes. Retry the SAME placement with only the
+		// child environment changed -- no re-plan, nothing recorded, because a
+		// capture abort proves nothing about the placement's memory.
+		if !ok && logCUDAGraphCaptureOOM(logData) && req.CUDAGraphDerateLevel < 2 {
+			req.CUDAGraphDerateLevel++
+			retries++
+			fmt.Fprintf(os.Stderr,
+				"[launch] CUDA graph-capture OOM during startup; retrying the same placement with reduced CUDA launch-queue scaling (derate %d/2, attempt %d/%d)\n",
+				req.CUDAGraphDerateLevel, retries, maxRetries)
+			continue
+		}
 		if !ok {
 			return p, strategy, serverArgs, err
 		}
 		memoryRecovery.reject(serverArgs)
-		if exactAdmission {
-			return p, strategy, serverArgs, exactAdmissionError(exactAdmissionCUDAOOM, fmt.Sprintf(" on device %d allocating %d MiB", device, allocMB), err)
-		}
 
 		// Re-plan with the failed card penalized by its overshoot: the real packer
 		// refits it with partial gate+up chunks and reclaims stranded VRAM on the
@@ -5324,6 +5540,23 @@ func startupLogCUDAOOMDetailed(logData string) (device int, allocMB int, isCompu
 		}
 	}
 	return 0, 0, false, false
+}
+
+// logCUDAGraphCaptureOOM reports whether the most recent CUDA OOM in logData
+// aborted inside CUDA-graph capture/instantiation rather than a tensor-buffer
+// allocation. The graph executable scales with node/split count, not with
+// ubatch bytes or which weights are GPU-resident, so the effective lever is the
+// driver launch-queue multiplier (and, last resort, disabling CUDA graphs) --
+// not shrinking ubatch or moving expert layers.
+func logCUDAGraphCaptureOOM(logData string) bool {
+	lower := strings.ToLower(logData)
+	oom := strings.LastIndex(lower, "cuda error: out of memory")
+	if oom < 0 {
+		return false
+	}
+	tail := lower[oom:]
+	return strings.Contains(tail, "ggml_cuda_graph_evaluate_and_capture") ||
+		strings.Contains(tail, "cudagraphinstantiate")
 }
 
 const unknownRuntimeCUDAOOMReserveMinMB = 2048
@@ -5502,6 +5735,21 @@ func recordRuntimeHostCgroupOOM(req *launchRequest, cfg *config.Config, model *p
 	if markerPath != "" {
 		if data, readErr := os.ReadFile(markerPath); readErr == nil && strings.TrimSpace(string(data)) == fingerprint {
 			return peakMB, true, false, nil
+		}
+	}
+	// Keep the peak. runtimeCgroupOOM already read it and it went only into the
+	// message below, so the next launch derived the same scope estimate and
+	// could be killed at the same point (measured 2026-09-06: killed at a
+	// 127742 MiB ceiling with the prompt cache still growing, and nothing
+	// recorded). Raising a ceiling is the safe direction; the launcher still
+	// clamps to the configured whole-host limit.
+	if model != nil && cfg != nil && peakMB > 0 {
+		peak := placement.HostPeak{PeakMB: peakMB, FromKill: true}
+		if strategy != nil {
+			peak.ContextSize, peak.NCPUMoE = strategy.ContextSize, strategy.NCPUMoE
+		}
+		if perr := placement.RecordMeasuredHostPeak(cfg.CacheDir, model.Path, peak); perr != nil {
+			fmt.Fprintf(os.Stderr, "[launch] warning: could not record the host footprint peak: %v\n", perr)
 		}
 	}
 	reason := fmt.Sprintf("host cgroup OOM after health verification (peak %d MiB)", peakMB)
@@ -5722,7 +5970,7 @@ func preferHotExpertFeatureBackend(req *launchRequest, model *placement.ModelPro
 		fmt.Fprintf(os.Stderr, "Warning: installed hot-experts overlay %q no longer exposes its required cache flags; using base backend %q\n", composite.Tag, selected.Tag)
 		return selected
 	}
-	fmt.Printf("[launch] hot experts enabled: selecting validated overlay %q for base backend %q\n", composite.Tag, selected.Tag)
+	fmt.Printf("[launch] selecting hot-expert-capable overlay %q for base backend %q\n", composite.Tag, selected.Tag)
 	return candidate
 }
 
@@ -6297,8 +6545,37 @@ func cmdLaunch(args []string) {
 				strategy, err = escalatePlacementFailure(req, cfg, model, be, caps, firstCode, replanErr, computeStrategy)
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
-				os.Exit(1)
+				// Placement is the FIRST terminal stage, and it was exiting here.
+				// ggrun must not refuse to launch: fall to the conservative floor,
+				// which drops to a single split owner, then off GPU-seated
+				// companions, then host KV, then the minimum context, then CPU-only.
+				// The original placement error is printed in full by the floor.
+				floorStrategy, floorRung, floorErr := placement.ComputeSafeFloor(
+					caps, model,
+					placementOptionsFromRequestCaps(req, model, be, cfg.CacheDir, caps),
+					terminalSafeFloorConstraints(req),
+				)
+				if floorErr != nil || floorStrategy == nil {
+					fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
+					if floorErr != nil {
+						fmt.Fprintf(os.Stderr, "Error: no safe-floor placement either: %v\n", floorErr)
+					}
+					os.Exit(1)
+				}
+				scope := calibrationScopeKey(req, model, be, caps, floorStrategy)
+				prior := recordSafeFloorActivation(cfg.CacheDir, scope, floorRung, err)
+				fmt.Fprintf(os.Stderr, "\n[safe-floor] placement could not resolve the requested configuration: %s\n",
+					placementErrorMessage(err))
+				fmt.Fprintf(os.Stderr, "[safe-floor] serving the %q tier instead; surrendering: %s\n",
+					floorRung.Name, strings.Join(floorRung.Surrenders, ", "))
+				fmt.Fprintln(os.Stderr, "[safe-floor] this is a serviceability fallback, not a tuned configuration; it is never promoted or cached as a winner")
+				if prior > 0 {
+					fmt.Fprintf(os.Stderr,
+						"[safe-floor] DEFECT: this scope has now needed the floor %d time(s); a repeated floor is an optimizer bug, see %s\n",
+						prior+1, safeFloorLedgerPath(cfg.CacheDir))
+				}
+				req.SafeFloorAttempted = true
+				strategy, err = floorStrategy, nil
 			}
 		}
 	}
@@ -6308,7 +6585,19 @@ func cmdLaunch(args []string) {
 	// successful plan; happened-before any reactive retry path, and never on a
 	// plan that only fits because the reviewer was already dropped.
 	strategy = proactivelyDropReviewerForVRAMModel(req, caps, model, strategy, computeStrategy, os.Stdin, os.Stderr, stdinIsTerminal(), cfg.CacheDir)
-	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
+	// A safe-floor placement has already announced that it is degrading to keep
+	// the service alive, and mmap is the documented last-resort capacity path
+	// (invariant 4). Stopping to ask a question here turns the fallback back into
+	// a failure: non-interactive stdin EOFs and exits, which is precisely the
+	// crash the floor exists to prevent. Gate on the REQUEST, since
+	// proactivelyDropReviewerForVRAMModel above can return a recomputed Strategy
+	// that no longer carries the floor tag.
+	if req.SafeFloorAttempted || placement.IsSafeFloorStrategy(strategy) {
+		if strategy.MMapRequired {
+			fmt.Fprintln(os.Stderr, "[safe-floor] this tier pages model weights from disk (file-backed mmap); accepting it rather than failing to launch")
+			req.ForceMMap, req.NoMMap = true, false
+		}
+	} else if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
 		if !errors.Is(err, errMMapDeclined) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -6426,8 +6715,22 @@ func cmdLaunch(args []string) {
 		}
 		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, timeout, launchRecovery)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
-			os.Exit(1)
+			// Terminal for the requested configuration. Rather than exit, serve the
+			// most conservative placement that resolves: a launcher whose premise
+			// is "measure, don't guess" must have somewhere to stand when nothing
+			// has been measured yet. The floor prints the original failure and
+			// every coordinate it surrenders, and is never promoted or cached.
+			floorP, floorStrategy, floorArgs, floorErr := launchSafeFloor(
+				req, cfg, model, be, caps, timeout, launchRecovery, err,
+			)
+			if floorErr != nil || floorP == nil {
+				fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+				if floorErr != nil {
+					fmt.Fprintf(os.Stderr, "Error: the safe floor could not serve either: %v\n", floorErr)
+				}
+				os.Exit(1)
+			}
+			p, strategy, serverArgs = floorP, floorStrategy, floorArgs
 		}
 	}
 
@@ -6435,6 +6738,20 @@ func cmdLaunch(args []string) {
 	// Record launch usage once per successful launch (never per request) so the
 	// TUI can sort its model list by real history. Best-effort write.
 	modelusage.RecordLaunch(cfg.CacheDir, req.ModelPath)
+	// Pin the topology this launch is about to measure, from the plan that
+	// actually started. The bootstrap decision is taken while candidates are
+	// still being evaluated, so pinning there recorded shapes no launch ever
+	// served; the baseline evidence belongs to THIS argv, so the replay must
+	// too (measured 2026-09-07: a pinned n-cpu-moe 38 against a launched 40).
+	if strategy != nil && strategy.HotExpertBootstrapPending && model != nil {
+		if err := placement.RecordHotExpertBootstrapPin(cfg.CacheDir, model.Path, strategy); err != nil {
+			fmt.Fprintf(os.Stderr, "[launch] warning: could not pin the hot-expert bootstrap topology: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"[launch] hot experts: pinned this launch's topology (n-cpu-moe %d); the next launch replays it and engages the cache\n",
+				strategy.NCPUMoE)
+		}
+	}
 	if p.LogBuf != nil {
 		recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
 	}
@@ -6541,6 +6858,10 @@ func cmdLaunch(args []string) {
 		}
 	}
 	verificationErr := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+	// lastVerifyProc is the process whose crash the runtime-OOM recovery below
+	// must diagnose. The hot-expert fallback can start a second process; track it
+	// so a canary OOM there is read from the right log, not the original.
+	lastVerifyProc := p
 	if verificationErr != nil && automaticHotExpertFallbackAllowed(req, strategy) {
 		hotVerificationErr := verificationErr
 		failedHotStrategy := strategy
@@ -6556,9 +6877,12 @@ func cmdLaunch(args []string) {
 				"cache-on lifecycle failed while the exact cache-free baseline was awaiting verification: "+hotVerificationErr.Error(),
 			)
 			req.CalibrationPending = pendingCalibration != nil
-			fallback := placement.WithoutHotExpertCache(strategy)
-			if fallback == nil {
-				verificationErr = fmt.Errorf("%w; cache-free fallback returned no strategy", verificationErr)
+			fallback, restoreErr := restoreCacheFreePackedBaseline(req, cfg, model, be, caps, strategy)
+			if restoreErr != nil || fallback == nil {
+				if restoreErr == nil {
+					restoreErr = errors.New("cache-free fallback returned no strategy")
+				}
+				verificationErr = fmt.Errorf("%w; %v", verificationErr, restoreErr)
 			} else {
 				fallback.PerformanceTuned = false
 				fallback.VerifiedConfigReused = false
@@ -6567,6 +6891,9 @@ func cmdLaunch(args []string) {
 				fallbackP, fallbackStrategy, actualFallbackArgs, fallbackErr := restoreLaunchWithCUDAOOMRecoveryState(
 					req, cfg, model, fallback, be, caps, fallbackArgs, timeout, launchRecovery,
 				)
+				if fallbackP != nil {
+					lastVerifyProc = fallbackP
+				}
 				if fallbackErr != nil || fallbackP == nil {
 					if fallbackErr == nil {
 						fallbackErr = errors.New("cache-free fallback returned no process")
@@ -6591,8 +6918,112 @@ func cmdLaunch(args []string) {
 			}
 		}
 	}
+	// A CUDA OOM inside the lifecycle-verification canary (the first real decode,
+	// e.g. cudaGraphInstantiate for the decode graph) crashes the server after it
+	// already passed health. The startup ladder only wraps load and the runtime
+	// ladder only runs in the serving loop below, so this seam used to exit(1)
+	// with no retry. Route it through the same runtime-OOM machinery, bounded.
+	const maxVerifyRuntimeOOMRetries = 2
+	verifyRuntimeOOMRetries := 0
+	for verificationErr != nil {
+		crashProc := lastVerifyProc
+		// The canary's error arrives the moment the connection drops, which is
+		// BEFORE the child is reaped and before its final abort text is flushed.
+		// Checking IsRunning() at that instant reports "still running" for a
+		// process that is already dying, so the recovery never fires and the
+		// launch exits -- observed 2026-09-02 on a graph_reserve OOM that
+		// runtimeLogCUDAOOM would otherwise have matched. Wait, bounded.
+		if crashProc != nil && crashProc.IsRunning() {
+			deadline := time.Now().Add(15 * time.Second)
+			for crashProc.IsRunning() && time.Now().Before(deadline) {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+		if crashProc == nil || crashProc.IsRunning() || crashProc.LogBuf == nil {
+			// verify failed for a non-crash reason (router/reviewer canary, a still
+			// -running server): not a runtime-OOM case.
+			break
+		}
+		logData := crashProc.LogBuf.String()
+		cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
+		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
+		// runtimeLogCUDAOOM itself requires a model-loaded marker in the buffer, so
+		// an OOM during load never reaches here (that is the startup ladder's job).
+		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, model, prior)
+		if !ok {
+			break
+		}
+		if verifyRuntimeOOMRetries >= maxVerifyRuntimeOOMRetries {
+			fmt.Fprintf(os.Stderr, "[launch] server crashed with a CUDA OOM on device %d during lifecycle verification after %d recovery attempt(s) — giving up.\n", device, verifyRuntimeOOMRetries)
+			break
+		}
+		// Fully reap the crashed process and its ~model-sized scope before the
+		// relaunch; overlapping it OOMs the retry at load (contract invariant 10).
+		if !stopCalibrationProcessAndWait(crashProc, "crashed verification canary", resourceBaseline, 30*time.Second) {
+			verificationErr = fmt.Errorf("%w; crashed verification process did not release cleanly", verificationErr)
+			break
+		}
+		reason := fmt.Sprintf("CUDA OOM on device %d during lifecycle verification canary", device)
+		if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, reason); err != nil {
+			verificationErr = fmt.Errorf("%w; cannot invalidate runtime-failed profile: %v", verificationErr, err)
+			break
+		}
+		if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
+			verificationErr = fmt.Errorf("%w; cannot persist runtime OOM evidence: %v", verificationErr, err)
+			break
+		}
+		// Any calibration decision staged for this launch names the placement that
+		// just crashed and was invalidated; it must not be promoted after recovery.
+		pendingCalibration = nil
+		req.CalibrationPending = false
+
+		verifyRuntimeOOMRetries++
+		var nextStrategy *placement.Strategy
+		var nextArgs []string
+		if logCUDAGraphCaptureOOM(logData) && req.CUDAGraphDerateLevel < 2 {
+			// A graph-capture abort scales with graph node/split count, not with
+			// ubatch or weight residency. The targeted lever is the CUDA launch
+			// -queue multiplier ChildEnv adds for a multi-GPU split; keep the exact
+			// placement and only change the child environment.
+			req.CUDAGraphDerateLevel++
+			nextStrategy, nextArgs = strategy, serverArgs
+			fmt.Fprintf(os.Stderr, "[launch] verification canary hit a CUDA graph-capture OOM on device %d; relaunching with reduced CUDA launch-queue scaling (derate %d/2) and re-verifying (attempt %d/%d)...\n",
+				device, req.CUDAGraphDerateLevel, verifyRuntimeOOMRetries, maxVerifyRuntimeOOMRetries)
+		} else {
+			replanStrategy, replanArgs, replanErr := replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, launchRecovery)
+			if replanErr != nil {
+				verificationErr = fmt.Errorf("%w; re-plan after verification OOM failed: %v", verificationErr, replanErr)
+				break
+			}
+			nextStrategy, nextArgs = replanStrategy, replanArgs
+			fmt.Fprintf(os.Stderr, "[launch] verification canary hit a CUDA OOM on device %d (needing ~%d MiB more); recorded the deficit, re-planned, and re-verifying (attempt %d/%d)...\n",
+				device, allocMB, verifyRuntimeOOMRetries, maxVerifyRuntimeOOMRetries)
+		}
+		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
+		newP, newStrategy, newArgs, startErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout, launchRecovery)
+		if startErr != nil || newP == nil {
+			if startErr == nil {
+				startErr = errors.New("recovery relaunch produced no process")
+			}
+			verificationErr = fmt.Errorf("%w; relaunch after verification OOM failed: %v", verificationErr, startErr)
+			break
+		}
+		p, strategy, serverArgs, lastVerifyProc = newP, newStrategy, newArgs, newP
+		if newP.LogBuf != nil {
+			recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, newP.LogBuf.String(), baselineVRAM, serverProcessPID(newP))
+			if req.ClaudeCode {
+				if delims := claudeauto.ParseChatMessageDelimiters(newP.LogBuf.String()); len(delims) > 0 {
+					claudeAuto.setMessageDelimiters(delims)
+				}
+			}
+		}
+		verificationErr = verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+	}
 	if verificationErr != nil {
 		_ = p.Stop()
+		if lastVerifyProc != nil && lastVerifyProc != p {
+			_ = lastVerifyProc.Stop()
+		}
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", verificationErr)
 		os.Exit(1)
@@ -6613,7 +7044,7 @@ func cmdLaunch(args []string) {
 	// measurement of the backend's resident footprint. Re-size the scope to
 	// measured+headroom now that a wrong pre-launch plan would have already
 	// failed.
-	resizeScopeToMeasuredFootprint(req, runtimeCaps, strategy, p)
+	resizeScopeToMeasuredFootprint(req, cfg, model, runtimeCaps, strategy, p)
 	if pendingCalibration != nil {
 		scope := launchProfileScope(req, model, be, runtimeCaps)
 		active := controller.Store{CacheDir: cfg.CacheDir}.IsActive(scope, controller.HashArgs(serverArgs))
@@ -6833,6 +7264,12 @@ func cmdLaunch(args []string) {
 		crashed := waitForShutdownOrCrash(p, sigCh)
 		if !crashed {
 			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
+			// Keep what this configuration actually did. Throughput was
+			// recorded only by the calibration A/B, so an ordinary serving run
+			// -- the one that runs the real workload -- taught ggrun nothing
+			// about its own speed, and the TUI had nothing to show beside the
+			// model it was about to relaunch.
+			recordServedThroughput(cfg, model, strategy, p)
 			break
 		}
 
@@ -6911,7 +7348,7 @@ func cmdLaunch(args []string) {
 				saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, newStrategy)
 			}
 		}
-		resizeScopeToMeasuredFootprint(req, runtimeCaps, newStrategy, newP)
+		resizeScopeToMeasuredFootprint(req, cfg, model, runtimeCaps, newStrategy, newP)
 		p, strategy, serverArgs = newP, newStrategy, newArgs
 		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 		fmt.Println("[launch] Press Ctrl+C to stop")

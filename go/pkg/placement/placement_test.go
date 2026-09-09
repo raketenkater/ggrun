@@ -5557,3 +5557,90 @@ func TestStrategyVRAMHeadroomMB(t *testing.T) {
 		t.Fatalf("DenseCPUOffload headroom = %d, want 0", h)
 	}
 }
+
+// TestExpertOnlyComputeReadingNotChargedToSplitOwner guards the role-tagged
+// compute measurement. A per-GPU compute reading recorded while the device
+// carried only pinned experts is orders of magnitude smaller than a split
+// owner's buffer. Charging it to a plan that makes the same device a split owner
+// under-reserves the card: live 2026-09-02, CUDA2 carried a 192 MiB expert-only
+// reading, the ledger charged 192, placement put 4184 MiB of weights plus 800
+// MiB of KV there, and llama.cpp then billed the real 4570 MiB and died in
+// graph_reserve. The role is recorded rather than inferred because magnitude
+// alone cannot separate this from a legitimately small secondary split owner
+// (see TestComputeSplitOwnerChargesPerGPUComputeNotAggregate, where 599 must
+// still be trusted).
+func TestExpertOnlyComputeReadingNotChargedToSplitOwner(t *testing.T) {
+	newCaps := func() *detect.Capabilities {
+		return &detect.Capabilities{
+			GPUs: []detect.GPU{
+				{Index: 0, Name: "GPU A", VRAMTotalMB: 24564, BandwidthMBps: 16000, VRAMUsedMB: 500},
+				{Index: 1, Name: "GPU B", VRAMTotalMB: 24564, BandwidthMBps: 16000, VRAMUsedMB: 300},
+			},
+			RAM: detect.RAMInfo{TotalMB: 128730, FreeMB: 123424},
+			CPU: detect.CPUInfo{Cores: 8},
+		}
+	}
+	newModel := func() *ModelProfile {
+		return &ModelProfile{
+			Path:      "/models/DeepSeek-V4-Flash-UD-IQ4_XS-00001-of-00004.gguf",
+			SizeBytes: 137903959808, TotalSizeMB: 131515,
+			NumLayers: 43, IsMoE: true, NumExperts: 256, ExpertUsedCount: 6, ExpertFF: 2048,
+			ExpertBytes: 131240296448, NonExpertBytes: 6658320448,
+			TokenEmbdBytes: 562626560, OutputBytes: 434380800, ShexpBytes: 1149763584,
+			ContextSize: 65536, CTXTrain: 1048576, HiddenSize: 4096, EmbeddingLength: 4096,
+			HeadCountKV: 1, KeyLength: 512, ValueLength: 512, ModelArch: "deepseek4",
+			MeasuredKVBytesPerTok: map[string]float64{"f16": 6912.25},
+		}
+	}
+
+	// gpu1Layers builds the same plan with GPU1's small per-GPU reading recorded
+	// in the given role, and reports how many expert layers GPU1 was given.
+	gpu1Layers := func(t *testing.T, expertOnly bool) int {
+		t.Helper()
+		caps, model := newCaps(), newModel()
+		cacheDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs))),
+			[]byte("SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\nSYS_CUDA_OVERHEAD_MB=488\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		roles := map[int]bool{}
+		if expertOnly {
+			roles[1] = true
+		}
+		if err := writeProbeCacheForModel(cacheDir, model, 65536, 512, "high", "gpu", "llama", caps.GPUs, 1,
+			map[int]int{0: 17970, 1: 599}, nil, nil, 0,
+			probeMeasurements{ComputeBufExpertOnlyByGPU: roles}); err != nil {
+			t.Fatal(err)
+		}
+		opts := Options{
+			ContextSize: 65536, KVPlacement: "gpu", KVQuality: "high",
+			BackendTag: "llama", Parallel: 1, CacheDir: cacheDir,
+		}
+		base := &Strategy{
+			Type: MoEOffload, ContextSize: 65536, KVPlacement: "gpu", KVQuality: "high",
+			UBatchSize: 512, BatchSize: 512, Parallel: 1, BackendTag: "llama",
+		}
+		strat, err := buildMoEOffload(base, caps, model, model.TotalSizeMB,
+			computeKVTotalMB(model, 65536, "f16", false), opts)
+		if err != nil {
+			return -1 // did not fit at all
+		}
+		return len(parseOTLayersByDevice(t, strat.OTString)[1])
+	}
+
+	splitOwnerReading := gpu1Layers(t, false)
+	expertOnlyReading := gpu1Layers(t, true)
+
+	// Unflagged (or split-owner) reading stays trusted: the card packs.
+	if splitOwnerReading <= 0 {
+		t.Fatalf("a split-owner reading must still be trusted: GPU1 got %d expert layers", splitOwnerReading)
+	}
+	// The same number recorded in the expert-only role must NOT buy that packing:
+	// the plan makes GPU1 a split owner, so it must be charged a split owner's
+	// buffer and therefore fit strictly fewer expert layers.
+	if expertOnlyReading >= splitOwnerReading {
+		t.Fatalf("an expert-only compute reading was charged to a split owner: "+
+			"expert-only-role packing %d >= split-owner-role packing %d",
+			expertOnlyReading, splitOwnerReading)
+	}
+}

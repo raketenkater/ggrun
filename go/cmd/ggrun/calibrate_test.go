@@ -200,7 +200,7 @@ func TestAutomaticCalibrationPrefersHotExpertsOverCheaperKVAlternate(t *testing.
 	}
 }
 
-func TestAdmittedHotExpertsWinsOverFasterPackedBaseline(t *testing.T) {
+func TestAdmittedHotExpertsCannotDisplaceFasterPackedBaseline(t *testing.T) {
 	packed := calibrationMeasurement{
 		Name: "default", Strategy: &placement.Strategy{},
 		Result: &benchmark.Result{
@@ -216,8 +216,8 @@ func TestAdmittedHotExpertsWinsOverFasterPackedBaseline(t *testing.T) {
 		},
 		Score: 0.94,
 	}
-	if !calibrationCandidateBetter(hot, packed) {
-		t.Fatal("admitted cache-on lost to packed GPU experts on token rate")
+	if calibrationCandidateBetter(hot, packed) {
+		t.Fatal("admission alone promoted a slower cache-on workflow")
 	}
 	hot.Result.GenTPS = 10
 	if calibrationCandidateBetter(hot, packed) {
@@ -475,8 +475,8 @@ func TestCalibrationScoreUsesSerialRequestWallTime(t *testing.T) {
 func TestHotExpertCandidateNeedsMaterialDecodeAndWorkflowGain(t *testing.T) {
 	baseStrategy := &placement.Strategy{}
 	hotStrategy := &placement.Strategy{HotExpertCacheSlots: 8}
-	baseline := &benchmark.Result{GenTPS: 100, PromptTPS: 100, MixedGenTPS: 100}
-	candidate := &benchmark.Result{GenTPS: 102, PromptTPS: 100, MixedGenTPS: 100}
+	baseline := &benchmark.Result{GenTPS: 100, PromptTPS: 100, MixedGenTPS: 100, GenTokens: 64, PromptTokens: 128, GenTimeS: 0.64}
+	candidate := &benchmark.Result{GenTPS: 102, PromptTPS: 100, MixedGenTPS: 100, GenTokens: 64, PromptTokens: 128, GenTimeS: 0.63}
 	current := calibrationMeasurement{Strategy: baseStrategy, Result: baseline, Score: 1}
 	challenger := calibrationMeasurement{Strategy: hotStrategy, Result: candidate, Score: 1.10}
 	if calibrationCandidateBetter(challenger, current) {

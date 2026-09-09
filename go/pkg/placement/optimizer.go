@@ -231,6 +231,18 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	modelShares := estimatedModelShares(model, s, gpus, totalSizeMB)
 	contextShares := estimatedContextShares(s, gpus, kvMB)
 	order := orderGPUsByBandwidth(gpus)
+	// Runtime graph growth is recorded against the exact runtime signature that
+	// produced it, but the ubatch ladder descends after the measurement: a serve
+	// measured at ubatch 256 is replanned at ubatch 128, whose probe row carries
+	// compute buffers and no growth, so the exact lookup silently reads zero and
+	// the ledger under-reserves the one quantity no oracle predicts.
+	//
+	// RelatedModelRuntimeGraphGrowth is the right lookup for that: it relaxes
+	// ctx/ubatch while still requiring the same model, GPU signature and slot
+	// count, and refuses to carry any figure recorded as estimated. Resolved once
+	// per ledger rather than per device.
+	var relatedGrowth map[int]int
+	relatedGrowthLoaded := false
 	for i, gpu := range gpus {
 		computeMB := 0
 		runtimeMB := 0
@@ -240,6 +252,17 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 				computeMB = pc.ComputeBufMB
 			}
 			runtimeMB = pc.RuntimeGraphGrowthByGPU[gpu.Index]
+		}
+		// Only ever raises the reserve: a device with no exact growth row falls
+		// back to measured growth from a neighbouring signature, never the other
+		// way round, so this cannot make a plan look cheaper than its evidence.
+		if runtimeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) {
+			if !relatedGrowthLoaded {
+				relatedGrowth = RelatedModelRuntimeGraphGrowth(
+					opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(opts))
+				relatedGrowthLoaded = true
+			}
+			runtimeMB = relatedGrowth[gpu.Index]
 		}
 		if computeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) && !opts.RequireMeasuredBuffers {
 			computeMB = firstLaunchComputeBufMBForGPUParallelAtContext(
@@ -290,7 +313,7 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 // while preserving reuse for batch-only candidates.
 func measuredAllocationMatchesStrategy(allocation MeasuredAllocation, model *ModelProfile, s *Strategy, gpus []detect.GPU) bool {
 	if allocation.PlacementIdentity != "" {
-		return allocation.PlacementIdentity == AllocationPlacementIdentity(s)
+		return allocation.PlacementIdentity == AllocationPlacementIdentity(s, model)
 	}
 	totalSizeMB := 0
 	if model != nil {

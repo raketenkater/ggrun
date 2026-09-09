@@ -1,0 +1,54 @@
+diff --git a/src/llama-moecache.cpp b/src/llama-moecache.cpp
+--- a/src/llama-moecache.cpp
++++ b/src/llama-moecache.cpp
+@@ -29,6 +29,7 @@
+     std::vector<int32_t>  pending;       // uncached ids observed since last step (dedup, obs order)
+ 
+     std::vector<bool>     slot_in_flight; // slot has an upload pending
++    std::vector<bool>     expert_in_flight; // one outstanding upload per expert
+ 
+     uint64_t n_hit  = 0;
+     uint64_t n_miss = 0;
+@@ -114,6 +115,9 @@
+                 ls->slot_last_use[slot] = ++mc->clock;
+             } else {
+                 ls->n_miss++;
++                if (ls->expert_in_flight[id]) {
++                    continue;
++                }
+                 bool dup = false;
+                 for (int32_t p : ls->pending) {
+                     if (p == id) { dup = true; break; }
+@@ -275,6 +279,7 @@
+             ls.expert_slot.assign(n_expert, -1);
+             ls.slot_last_use.assign(n_slots, 0);
+             ls.slot_in_flight.assign(n_slots, false);
++            ls.expert_in_flight.assign(n_expert, false);
+ 
+             std::vector<int32_t> dummy(n_expert, n_slots);
+             ggml_backend_tensor_set(ls.pub.dev_table,  dummy.data(), 0, n_expert*sizeof(int32_t));
+@@ -346,6 +351,7 @@
+             ls.expert_slot[j.expert]   = j.slot;
+             ls.slot_last_use[j.slot]   = ++mc->clock;
+             ls.slot_in_flight[j.slot]  = false;
++            ls.expert_in_flight[j.expert] = false;
+             set_table_entry(ls.pub, j.expert, j.slot);
+         }
+         mc->done.clear();
+@@ -365,7 +371,7 @@
+         int budget = mc->max_inserts;
+         for (auto it = ls.pending.rbegin(); it != ls.pending.rend() && budget > 0; ++it, --budget) {
+             const int32_t id = *it;
+-            if (ls.expert_slot[id] >= 0) {
++            if (ls.expert_slot[id] >= 0 || ls.expert_in_flight[id]) {
+                 continue;
+             }
+ 
+@@ -390,6 +396,7 @@
+                 set_table_entry(ls.pub, victim, mc->n_slots);
+             }
+             ls.slot_in_flight[slot] = true;
++            ls.expert_in_flight[id] = true;
+ 
+             std::lock_guard<std::mutex> wlk(mc->wmtx);
+             mc->todo.push_back({li, id, slot});

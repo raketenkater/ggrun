@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
+	"github.com/raketenkater/ggrun/pkg/claudesession"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	modelstore "github.com/raketenkater/ggrun/pkg/models"
@@ -2524,5 +2525,85 @@ func TestHasAnyUsage(t *testing.T) {
 	}
 	if !hasAnyUsage(map[string]modelusage.Record{"/m": {Launches: 1}}) {
 		t.Fatal("a launched record must report true")
+	}
+}
+
+// A recorded session whose model file has since been moved or deleted must not
+// be offered as resumable: pressing [R] would replay a launch for a path that
+// no longer exists and fail instantly. Reproduced live on 2026-09-02, where the
+// only saved record pointed at a Laguna-S-2.1 GGUF removed weeks earlier.
+func TestLoadResumableSessionSkipsMissingModel(t *testing.T) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	sessionID, err := claudesession.NewSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Workflow.RunID alone makes the record Recoverable(), so this test isolates
+	// the model-path guard rather than passing for lack of a transcript.
+	rec := claudesession.Record{
+		SessionID: sessionID,
+		Recorded:  time.Now().UTC(),
+		WorkDir:   workDir,
+		ModelPath: filepath.Join(cacheDir, "gone", "removed-model.gguf"),
+		Workflow:  &claudesession.Workflow{RunID: "wf_stale"},
+	}
+	if err := claudesession.Save(cacheDir, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Model{cacheDir: cacheDir}
+	m.loadResumableSession()
+	if m.resumeSession != "" {
+		t.Fatalf("a session whose model is gone was offered as resumable: %q", m.resumeSession)
+	}
+
+	// The same record with the model present is still offered.
+	present := filepath.Join(cacheDir, "present-model.gguf")
+	if err := os.WriteFile(present, []byte("gguf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec.ModelPath = present
+	if err := claudesession.Save(cacheDir, rec); err != nil {
+		t.Fatal(err)
+	}
+	m2 := &Model{cacheDir: cacheDir}
+	m2.loadResumableSession()
+	if m2.resumeSession != sessionID {
+		t.Fatalf("a resumable session with its model present was not offered: %q", m2.resumeSession)
+	}
+}
+
+// TestHotExpertsLabelShowsEveryChoice is the regression for a display bug that
+// cost real debugging time: both configuration screens special-cased only
+// "off", so selecting "on" rendered as "auto". The launch request carried "on"
+// correctly throughout, which made the UI actively misleading rather than
+// merely incomplete -- the user could not tell a required setting had taken.
+func TestHotExpertsLabelShowsEveryChoice(t *testing.T) {
+	const autoText = "auto (optimizer builds around it)"
+
+	if got := hotExpertsLabel("on", autoText); got == autoText {
+		t.Fatalf(`"on" must not render as the auto text, got %q`, got)
+	} else if !strings.Contains(strings.ToLower(got), "on") {
+		t.Fatalf(`"on" must name itself, got %q`, got)
+	}
+	if got := hotExpertsLabel("off", autoText); got != "off" {
+		t.Fatalf(`"off" should render as "off", got %q`, got)
+	}
+	for _, v := range []string{"auto", "", "  ", "AUTO"} {
+		if got := hotExpertsLabel(v, autoText); got != autoText {
+			t.Fatalf("%q should render the auto text, got %q", v, got)
+		}
+	}
+	// A numeric slot request is explicit and must not read as automatic.
+	if got := hotExpertsLabel("13", autoText); got == autoText {
+		t.Fatalf(`an explicit slot count must not render as auto, got %q`, got)
+	}
+	// Case must not change the meaning.
+	if hotExpertsLabel("ON", autoText) != hotExpertsLabel("on", autoText) {
+		t.Fatal("label must be case-insensitive")
 	}
 }

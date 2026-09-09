@@ -15,6 +15,12 @@ import (
 // the new code would have planned differently.
 const VerifiedConfigSchemaVersion = 8
 
+// HotExpertCacheEvidenceSchemaVersion gates persisted cache-on decisions.
+// Version 2 requires measured workflow/decode gains; version 1 could promote
+// a slower cache. Reject stale cache-on records at load rather than replaying
+// their demoted topology without its cache. Cache-free fit records stay valid.
+const HotExpertCacheEvidenceSchemaVersion = 2
+
 // VerifiedConfig is a sibling of CacheEntry that stores the *whole* serving
 // decision — placement identity, runtime knobs, and non-flag provenance — so
 // the next launch of the exact same scope can start directly from the flags
@@ -96,6 +102,10 @@ type VerifiedConfig struct {
 	HotExpertCacheHits        uint64       `json:"hot_expert_cache_hits,omitempty"`
 	HotExpertCacheMisses      uint64       `json:"hot_expert_cache_misses,omitempty"`
 	HotExpertCacheHitRate     float64      `json:"hot_expert_cache_hit_rate,omitempty"`
+	// HotExpertEvidenceSchema binds the cache-on fields above to the admission
+	// semantics that produced them. A mismatch drops only those fields on reuse;
+	// the rest of the record (cache-free fit) still applies.
+	HotExpertEvidenceSchema int `json:"hot_expert_evidence_schema,omitempty"`
 
 	// Non-flag provenance (identity / evidence, not emitted)
 	BackendIdentity        string      `json:"backend_identity"`         // be.Identity
@@ -166,6 +176,9 @@ func LoadVerifiedConfig(cacheDir, scopeKey string) (*VerifiedConfig, error) {
 	}
 	if vc.SchemaVersion != VerifiedConfigSchemaVersion || vc.ScopeKey != scopeKey {
 		return nil, fmt.Errorf("verified config scope mismatch")
+	}
+	if vc.HotExpertCacheSlots > 0 && vc.HotExpertEvidenceSchema != HotExpertCacheEvidenceSchemaVersion {
+		return nil, fmt.Errorf("verified hot-expert decision predates current admission and performance semantics")
 	}
 	return &vc, nil
 }
@@ -258,6 +271,13 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 	if vc.Draft != nil {
 		d := *vc.Draft
 		s.Draft = &d
+	}
+	// A cache-on record whose admission semantics predate the current schema
+	// replays without its cache: the direct-start path would otherwise emit a
+	// now-oversized --moe-expert-cache from a decision it never re-measured. The
+	// cache-free coordinates it also carries stay applied.
+	if vc.HotExpertCacheSlots > 0 && vc.HotExpertEvidenceSchema != HotExpertCacheEvidenceSchemaVersion {
+		clearHotExpertCache(s)
 	}
 	// Request-owned knobs win (placement.go:1026-1034 generalized).
 	if opts.AutoParallel && vc.Parallel > 0 {
@@ -385,12 +405,18 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 		HotExpertCacheHits:        s.HotExpertCacheHits,
 		HotExpertCacheMisses:      s.HotExpertCacheMisses,
 		HotExpertCacheHitRate:     s.HotExpertCacheHitRate,
-		BackendIdentity:           backendIdentity,
-		BackendPath:               backendPath,
-		ChatTemplate:              chatTemplate,
-		Reviewer:                  reviewer,
-		PlanFreeVRAM:              s.PlanFreeVRAM,
-		PlannedHostFootprintMB:    s.PlannedHostFootprintMB,
+		HotExpertEvidenceSchema: func() int {
+			if s.HotExpertCacheSlots > 0 {
+				return HotExpertCacheEvidenceSchemaVersion
+			}
+			return 0
+		}(),
+		BackendIdentity:        backendIdentity,
+		BackendPath:            backendPath,
+		ChatTemplate:           chatTemplate,
+		Reviewer:               reviewer,
+		PlanFreeVRAM:           s.PlanFreeVRAM,
+		PlannedHostFootprintMB: s.PlannedHostFootprintMB,
 	}
 	if s.TensorSplit != nil {
 		vc.TensorSplit = append([]float64(nil), s.TensorSplit...)

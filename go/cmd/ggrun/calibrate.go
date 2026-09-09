@@ -330,6 +330,22 @@ func selectAutomaticCalibrationAdmissionPlan(candidates []placement.CalibrationC
 	}
 	out := make([]placement.CalibrationCandidate, 0, min(limit, len(candidates)))
 	out = append(out, candidates[0], primary[1])
+	if calibrationCandidateIsHotExperts(primary[1].Name) && len(out) < limit {
+		primarySlots := 0
+		if primary[1].Strategy != nil {
+			primarySlots = primary[1].Strategy.HotExpertCacheSlots
+		}
+		for _, candidate := range candidates[1:] {
+			if candidate.Name == primary[1].Name || !calibrationCandidateIsHotExperts(candidate.Name) {
+				continue
+			}
+			if candidate.Strategy == nil || candidate.Strategy.HotExpertCacheSlots >= primarySlots {
+				continue
+			}
+			out = append(out, candidate)
+			break
+		}
+	}
 	// If the predicted primary is a batch/topology coordinate, keep one legal
 	// slot-count fallback in the bounded admission ladder. This is especially
 	// important after a high-ubatch candidate fails: retrying two more members
@@ -741,26 +757,6 @@ func calibrationScore(result, baseline *benchmark.Result) float64 {
 }
 
 func calibrationCandidateBetter(candidate, current calibrationMeasurement) bool {
-	if candidate.Strategy != nil && current.Strategy != nil &&
-		candidate.Strategy.HotExpertCacheSlots > 0 && current.Strategy.HotExpertCacheSlots == 0 &&
-		validCalibrationResult(candidate.Result) {
-		// Auto requested the cache. A completed cache-on measurement with no
-		// phase regression is the requested coordinate, not a speed veto from
-		// packed GPU experts.
-		if current.Result != nil {
-			floor := 1 - calibrationMaxPhaseRegressionPct/100
-			for _, phase := range [][2]float64{
-				{candidate.Result.PromptTPS, current.Result.PromptTPS},
-				{candidate.Result.GenTPS, current.Result.GenTPS},
-				{candidate.Result.MixedGenTPS, current.Result.MixedGenTPS},
-			} {
-				if phase[1] > 0 && phase[0] < phase[1]*floor {
-					return false
-				}
-			}
-		}
-		return true
-	}
 	if candidate.Score <= current.Score*(1+calibrationMinImprovementPct/100) {
 		return false
 	}
@@ -1107,7 +1103,16 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		result, berr := bench(measuredStrategy, cp)
 		if berr != nil {
 			fmt.Fprintf(os.Stderr, "[calibrate] %s measurement failed (%v); skipping\n", cand.Name, berr)
-			admissionInconclusive = true
+			if class, reason, oom := candidatePostStartCUDAOOM(cp, berr); oom {
+				stableAdmissionFailed = true
+				stablePostStartFailure = true
+				if stableFailureClass == "" {
+					stableFailureClass, stableFailureReason = class, reason
+				}
+				memoryRecovery.reject(candArgs)
+			} else {
+				admissionInconclusive = true
+			}
 			if !stopCalibrationProcessAndWait(cp, cand.Name+" after failed measurement", resourceBaseline, 30*time.Second) {
 				req.CalibrationScreened = true
 				return cp, measuredStrategy, measuredArgs, nil
@@ -1554,6 +1559,10 @@ func analyzedMeasuredCalibrationFrontier(req *launchRequest, cfg *config.Config,
 func cmdStatus(args []string) {
 	cfg := loadConfigOrExit()
 	jsonOut := hasArg(args, "--json")
+	if hasArg(args, "--capabilities") {
+		printCapabilities(os.Stdout, collectCapabilities(cfg))
+		return
+	}
 	modelArg := ""
 	for _, arg := range args {
 		if arg == "--json" {

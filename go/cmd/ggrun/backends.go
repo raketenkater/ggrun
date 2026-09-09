@@ -142,7 +142,7 @@ func cmdBackendFeature(args []string) {
 			fmt.Fprintf(os.Stderr, "cannot install composed backend %q: that tag belongs to a different backend\n", recipe.Tag)
 			os.Exit(1)
 		}
-		if existing.Commit == recipe.Commit {
+		if existing.Commit == recipe.Commit && sameStrings(existing.AppliedPatches, recipe.PatchNames()) {
 			if err := validateBackendCandidateForRecipe(existing.Path, existing.RouteArch, recipe.Accel, recipe); err == nil {
 				fmt.Printf("[backend] composed backend %q already exists and passes conformance; reusing %s\n", existing.Tag, existing.Path)
 				return
@@ -398,14 +398,18 @@ func prepareForkCheckout(srcDir, branch, commit string) error {
 	return prepareForkCheckoutRecipe(srcDir, branch, commit, nil)
 }
 
-func prepareForkCheckoutRecipe(srcDir, branch, commit string, recipe *backends.Recipe) error {
+func prepareForkCheckoutRecipe(srcDir, branch, commit string, recipe *backends.Recipe, installed ...*backends.Recipe) error {
+	revertRecipe := recipe
+	if len(installed) > 0 {
+		revertRecipe = installed[0]
+	}
 	dirty, err := gitOutput(srcDir, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(dirty) != "" {
-		if recipe != nil {
-			if err := recipe.RevertPatches(srcDir); err != nil {
+		if revertRecipe != nil {
+			if err := revertRecipe.RevertPatches(srcDir); err != nil {
 				return fmt.Errorf("%s has local changes (%w)", srcDir, err)
 			}
 			dirty, err = gitOutput(srcDir, "status", "--porcelain")
@@ -427,13 +431,21 @@ func prepareForkCheckoutRecipe(srcDir, branch, commit string, recipe *backends.R
 			ref = branch
 		}
 	}
-	fetchArgs := []string{"fetch", "--depth", "1", "origin", ref}
-	if err := runStreamed(srcDir, "git", fetchArgs...); err != nil {
-		return fmt.Errorf("git fetch %s: %w", ref, err)
-	}
 	checkout := "FETCH_HEAD"
+	localPinned := false
 	if commit != "" {
+		actual, err := gitOutput(srcDir, "rev-parse", "--verify", commit+"^{commit}")
+		localPinned = err == nil && strings.EqualFold(strings.TrimSpace(actual), commit)
 		checkout = commit
+	}
+	// A reviewed immutable commit already present locally needs no network
+	// refresh. Forks can stop advertising old pins while existing installations
+	// still have the complete source required for a reproducible feature update.
+	if !localPinned {
+		fetchArgs := []string{"fetch", "--depth", "1", "origin", ref}
+		if err := runStreamed(srcDir, "git", fetchArgs...); err != nil {
+			return fmt.Errorf("git fetch %s: %w", ref, err)
+		}
 	}
 	if err := runStreamed(srcDir, "git", "checkout", "--detach", checkout); err != nil {
 		return fmt.Errorf("git checkout %s: %w", checkout, err)
@@ -617,6 +629,18 @@ func buildLlamaForkAt(srcDir, buildDir, accel, cudaArch string) (string, error) 
 	bin := filepath.Join(buildDir, "bin", "llama-server")
 	if _, err := os.Stat(bin); err != nil {
 		return "", fmt.Errorf("build produced no binary at %s", bin)
+	}
+	// Build the launch preflight's oracle alongside the server. Without it
+	// findFitParamsBin returns "" and the preflight silently does nothing, so
+	// every candidate placement costs a real model load (~5 min on a large MoE)
+	// instead of a ~1 s no-alloc dry run. Optional by design: not every backend
+	// has the target, and a serving backend must never fail to install because
+	// a planner accelerator could not be compiled.
+	if path, ferr := backends.BuildFitParamsOracle(srcDir, buildDir, jobs); ferr != nil {
+		fmt.Fprintf(os.Stderr, "[backend] no fit-params oracle for this backend (%v); "+
+			"placement preflight will be skipped and candidates will cost a real load\n", ferr)
+	} else {
+		fmt.Fprintf(os.Stderr, "[backend] built placement oracle %s\n", path)
 	}
 	return bin, nil
 }

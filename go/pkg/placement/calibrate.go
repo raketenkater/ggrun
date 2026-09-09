@@ -16,7 +16,20 @@ import (
 // CalibrationSchemaVersion bumps whenever the candidate set or scoring changes,
 // so a decision measured under older semantics is never applied after an
 // upgrade changes what "fastest" means.
-const CalibrationSchemaVersion = 23
+//
+// 24: `auto` hot experts no longer serve the cache-on placement as the first
+// serve. Candidate 0 is the packed cache-free layout and the cache-on placement
+// is the measured challenger, so a decision recorded under the pre-24 semantics
+// (where the cache-on layout was the default) must not be replayed.
+// 25: related-probe prediction inputs require exact artifact/backend/slot scope.
+// Keep existing fit observations, but re-evaluate prior performance decisions.
+// 26: retained observations keep their original source and GPU role.
+// 27: cache-free allocation no longer proves a changed cache-on graph.
+// 28: post-start candidate CUDA OOM is stable rejection; GLM recurrent cache policy.
+// 29: allocation identity follows emitted float32 ratios with layer-mode guards.
+// 30: oracle cache charges and router ownership corrected; cache/graph attribution separated.
+// 31: explicit cache-slot demotion credits freed device bytes and charges host.
+const CalibrationSchemaVersion = 32
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 
@@ -471,11 +484,25 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 	// that cannot hold a useful cache, the challenger demotes GPU expert layers
 	// until it can. The packed cache-free layout remains candidate 0. The live
 	// agent workload still decides whether locality beats those extra CPU layers.
-	if candidate, hotErr := hotExpertCacheCandidate(caps, model, base, opts); candidate != nil {
+	// Compute already computed the challenger from the packed base and handed it
+	// over as HotExpertCacheChallenger; regenerate it only when that hand-off is
+	// absent (a cache-free base reached here without going through the auto
+	// finalize path).
+	hotCandidate := base.HotExpertCacheChallenger
+	var hotErr error
+	if hotCandidate == nil {
+		hotCandidate, hotErr = hotExpertCacheCandidate(caps, model, base, opts)
+	}
+	if hotCandidate != nil {
 		out = append(out, CalibrationCandidate{
-			Name:     fmt.Sprintf("hot-experts-%d", candidate.HotExpertCacheSlots),
-			Strategy: candidate,
+			Name:     fmt.Sprintf("hot-experts-%d", hotCandidate.HotExpertCacheSlots),
+			Strategy: hotCandidate,
 		})
+		if hotExpertRequestedSlots(opts) == 0 {
+			if lower := hotExpertLowerSlotCandidate(caps, model, hotCandidate, opts); lower != nil {
+				out = append(out, CalibrationCandidate{Name: fmt.Sprintf("hot-experts-%d", lower.HotExpertCacheSlots), Strategy: lower})
+			}
+		}
 	} else if hotErr != nil && hotExpertOptimizerRequested(opts) {
 		base.OptimizationExclusions = append(base.OptimizationExclusions, "hot-experts: "+hotErr.Error())
 	}
@@ -619,6 +646,83 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 		}
 	}
 	return out
+}
+
+// hotExpertLowerSlotCandidate provides one deterministic auto fallback after a
+// cache-on finalist fails post-start admission. It halves the original slots,
+// retaining the complete topology and packed baseline snapshot.
+func hotExpertLowerSlotCandidate(caps *detect.Capabilities, model *ModelProfile, original *Strategy, opts Options) *Strategy {
+	if original == nil || original.HotExpertCacheSlots <= 0 || hotExpertRequestedSlots(opts) > 0 {
+		return nil
+	}
+	slots := original.HotExpertCacheSlots / 2
+	if minUseful := hotExpertMinUsefulSlots(model); slots < minUseful {
+		slots = minUseful
+	}
+	if slots >= original.HotExpertCacheSlots || original.ResourceLedger == nil || !original.ResourceLedger.Fits || original.ResourceLedger.Host.SlackMB < 0 {
+		return nil
+	}
+	shape, err := hotExpertCacheShapeFor(caps, model, original, opts)
+	if err != nil {
+		return nil
+	}
+	candidate := cloneStrategy(original)
+	oldCharge := cloneIntMap(original.HotExpertCacheVRAMByGPU)
+	originalLayout, err := hotExpertCacheLayout(shape, original.HotExpertCacheSlots)
+	if err != nil || len(oldCharge) != len(originalLayout) {
+		return nil
+	}
+	rowCount := make(map[int]int, len(original.ResourceLedger.Devices))
+	for _, device := range original.ResourceLedger.Devices {
+		rowCount[device.GPU]++
+	}
+	for gpu, charge := range originalLayout {
+		if charge <= 0 || oldCharge[gpu] != charge || rowCount[gpu] != 1 {
+			return nil
+		}
+	}
+	for gpu, charge := range oldCharge {
+		if charge <= 0 || originalLayout[gpu] != charge {
+			return nil
+		}
+	}
+	clearHotExpertCache(candidate)
+	if err := assignHotExpertCache(candidate, shape, slots); err != nil {
+		return nil
+	}
+	ledger := *original.ResourceLedger
+	ledger.Devices = append([]DeviceResourceLedger(nil), original.ResourceLedger.Devices...)
+	for i := range ledger.Devices {
+		old := oldCharge[ledger.Devices[i].GPU]
+		if ledger.Devices[i].HotExpertCacheMB > 0 && old <= 0 {
+			return nil
+		}
+		if old > 0 && ledger.Devices[i].HotExpertCacheMB != old {
+			return nil
+		}
+		if old > 0 {
+			ledger.Devices[i].RequiredMB -= old
+			ledger.Devices[i].SlackMB += old
+		}
+		ledger.Devices[i].HotExpertCacheMB = 0
+		if ledger.Devices[i].RequiredMB < 0 || ledger.Devices[i].SlackMB < 0 || ledger.Devices[i].SlackMB > ledger.Devices[i].FreeMB {
+			return nil
+		}
+	}
+	ledger.Exact = false
+	ledger.Fits = true
+	applyHotExpertCacheLedger(&ledger, candidate, false)
+	if !ledger.Fits {
+		return nil
+	}
+	for gpu, charge := range candidate.HotExpertCacheVRAMByGPU {
+		if charge <= 0 || charge > oldCharge[gpu] {
+			return nil
+		}
+	}
+	candidate.ResourceLedger = &ledger
+	candidate.HotExpertCacheFreeBaseline = cloneStrategy(original.HotExpertCacheFreeBaseline)
+	return candidate
 }
 
 func calibrationCandidateExists(candidates []CalibrationCandidate, strategy *Strategy) bool {
@@ -892,6 +996,14 @@ func cloneStrategy(s *Strategy) *Strategy {
 	}
 	c.HotExpertCacheVRAMByGPU = cloneIntMap(s.HotExpertCacheVRAMByGPU)
 	c.HotExpertCacheLayersByGPU = cloneIntMap(s.HotExpertCacheLayersByGPU)
+	if s.HotExpertCacheFreeBaseline != nil {
+		// The nested snapshot always has a nil HotExpertCacheFreeBaseline of its
+		// own, so this recursion terminates after one level.
+		c.HotExpertCacheFreeBaseline = cloneStrategy(s.HotExpertCacheFreeBaseline)
+	}
+	// The cache-on challenger is a transient candidate-generation artifact; a
+	// clone re-derives it from the packed base when it is needed.
+	c.HotExpertCacheChallenger = nil
 	c.ResourceLedger = nil
 	c.Residency = ""
 	c.OptimizationBottleneck = ""
@@ -1139,8 +1251,28 @@ func moeTopologyCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 		altOpts.PlacementPolicy = "link"
 		altOpts.MoESplitOwnerGPU = &owner
 		alt, err := Compute(caps, model, altOpts)
-		if err != nil || alt == nil || alt.Type != MoEOffload ||
-			!sameCalibrationResidency(base, alt) {
+		// Say WHY a topology hypothesis was dropped. The optimizer previously
+		// reported only "no non-rejected same-workload topology can relieve
+		// GPU N" while every candidate vanished silently, which hid a real
+		// defect for a long time: a de-owned device was still charged its old
+		// split-owner compute buffer, so no owner hypothesis ever scored better
+		// than the baseline it was meant to beat. A named rejection is the
+		// difference between "this rig has no better topology" and "the model
+		// cannot see the one it has".
+		switch {
+		case err != nil:
+			moeTopologyRejected(owner, "placement did not resolve: "+err.Error())
+			continue
+		case alt == nil:
+			moeTopologyRejected(owner, "placement returned no strategy")
+			continue
+		case alt.Type != MoEOffload:
+			moeTopologyRejected(owner, fmt.Sprintf("resolved to %s, not an offloaded MoE plan", alt.Type))
+			continue
+		case !sameCalibrationResidency(base, alt):
+			moeTopologyRejected(owner, fmt.Sprintf(
+				"different residency than the baseline (ctx %d vs %d, mmap %t vs %t): not the same workload",
+				alt.ContextSize, base.ContextSize, alt.MMapRequired, base.MMapRequired))
 			continue
 		}
 		out = append(out, CalibrationCandidate{
@@ -1148,6 +1280,13 @@ func moeTopologyCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 		})
 	}
 	return out
+}
+
+// moeTopologyRejected records why one owner hypothesis was not offered. It is
+// deliberately visible on the ordinary launch path: a silently empty candidate
+// set is indistinguishable from a rig that genuinely has no better topology.
+func moeTopologyRejected(owner int, reason string) {
+	fmt.Fprintf(os.Stderr, "[placement] topology hypothesis owner-%d rejected: %s\n", owner, reason)
 }
 
 func clearForeignAllocationEvidence(s *Strategy) {

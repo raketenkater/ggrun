@@ -137,6 +137,47 @@ func TestVerifiedConfigRoundTripsHotExpertShapeAndRuntimeEvidence(t *testing.T) 
 	}
 }
 
+func TestVerifiedToStrategyDropsStaleHotExpertCacheEvidence(t *testing.T) {
+	strategy := &Strategy{
+		Type: MoEOffload, ContextSize: 32768, BatchSize: 2048, UBatchSize: 256,
+		Parallel: 1, NCPUMoE: 20, OTString: "exps=CPU", BackendTag: "llama",
+		TensorSplit:         []float64{0.5, 0.5},
+		HotExpertCacheSlots: 8, HotExpertCacheInserts: 2, HotExpertCacheLayers: 20,
+		HotExpertCacheVRAMByGPU: map[int]int{0: 1024, 2: 768},
+		HotExpertCacheEvidence:  "exact allocation; measured telemetry",
+	}
+	record := VerifiedConfigToRecord("scope", "moe.gguf", strategy, "backend", "/server", "", "")
+	if record.HotExpertEvidenceSchema != HotExpertCacheEvidenceSchemaVersion {
+		t.Fatalf("fresh cache-on record was not stamped with the current hot-expert schema: %d", record.HotExpertEvidenceSchema)
+	}
+
+	// A record whose cache-on decision predates the current admission semantics
+	// replays WITHOUT the cache (recompute path) but keeps its cache-free coords.
+	stale := record
+	stale.HotExpertEvidenceSchema = 0
+	restored := VerifiedToStrategy(&stale, Options{
+		BackendHelp: "--moe-expert-cache N\n--moe-expert-cache-inserts N",
+	}, nil)
+	if restored.HotExpertCacheSlots != 0 || restored.HotExpertCacheInserts != 0 ||
+		restored.HotExpertCacheLayers != 0 || restored.HotExpertCacheVRAMByGPU != nil {
+		t.Fatalf("stale cache-on evidence was replayed: %+v", restored)
+	}
+	if restored.NCPUMoE != 20 || restored.OTString != "exps=CPU" || len(restored.TensorSplit) != 2 {
+		t.Fatalf("stale record dropped its still-valid cache-free coordinates: %+v", restored)
+	}
+	if strings.Contains(strings.Join(restored.Args("m.gguf", 8081), " "), "--moe-expert-cache") {
+		t.Fatal("stale cache-on record still emitted --moe-expert-cache")
+	}
+
+	// The current-schema record keeps the cache.
+	fresh := VerifiedToStrategy(&record, Options{
+		BackendHelp: "--moe-expert-cache N\n--moe-expert-cache-inserts N",
+	}, nil)
+	if fresh.HotExpertCacheSlots != 8 {
+		t.Fatalf("current-schema cache-on record lost its cache: %+v", fresh)
+	}
+}
+
 func TestVerifiedConfigRecomputesCurrentCPUAffinityCapabilities(t *testing.T) {
 	vc := &VerifiedConfig{
 		StrategyType: MoEOffload, ContextSize: 8192, BatchSize: 512, UBatchSize: 256,
@@ -485,5 +526,34 @@ func TestVerifiedConfigToStrategyRestoresRequestOwnedKnobs(t *testing.T) {
 	args := strings.Join(s2.Args("model.gguf", 8081), " ")
 	if !strings.Contains(args, "--kv-offload") || !strings.Contains(args, "--fit off") {
 		t.Fatalf("verified replay dropped current-backend placement semantics: %q", args)
+	}
+}
+
+func TestLoadVerifiedRejectsStaleHotWinnerButPreservesCacheFreeFit(t *testing.T) {
+	dir := t.TempDir()
+	record := VerifiedConfigToRecord("hot-schema-scope", "moe.gguf", &Strategy{
+		Type: MoEOffload, NCPUMoE: 20, HotExpertCacheSlots: 8,
+	}, "backend", "/server", "", "")
+	record.HotExpertEvidenceSchema = 1
+	if _, err := SaveVerifiedConfig(dir, record); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadVerifiedConfig(dir, record.ScopeKey); err == nil || got != nil {
+		t.Fatal("stale cache winner was replayed")
+	}
+	record.HotExpertEvidenceSchema = HotExpertCacheEvidenceSchemaVersion
+	if _, err := SaveVerifiedConfig(dir, record); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadVerifiedConfig(dir, record.ScopeKey); err != nil || got == nil {
+		t.Fatalf("current cache winner rejected: %v", err)
+	}
+	record.HotExpertCacheSlots = 0
+	record.HotExpertEvidenceSchema = 0
+	if _, err := SaveVerifiedConfig(dir, record); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadVerifiedConfig(dir, record.ScopeKey); err != nil || got == nil {
+		t.Fatalf("unrelated cache-free fit discarded: %v", err)
 	}
 }

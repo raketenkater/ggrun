@@ -259,7 +259,7 @@ func TestDesiredBackendRecipeFollowsCurrentInstalledBase(t *testing.T) {
 		len(recipe.Features) != 1 || recipe.Features[0] != "hot-experts" {
 		t.Fatalf("desired composite recipe did not follow exact current base: %#v", recipe)
 	}
-	if names := recipe.PatchNames(); len(names) != 1 || !strings.HasPrefix(names[0], "features/hot-experts/") {
+	if names := recipe.PatchNames(); len(names) != 3 || !strings.HasPrefix(names[0], "features/hot-experts/") || names[1] != "features/hot-experts/telemetry-info-v1" || names[2] != "features/hot-experts/inflight-dedup-v1" {
 		t.Fatalf("desired composite lost reviewed feature patch: %v", names)
 	}
 }
@@ -337,5 +337,51 @@ func TestShortCommit(t *testing.T) {
 	}
 	if got := shortCommit("abc123"); got != "abc123" {
 		t.Errorf("short input = %q", got)
+	}
+}
+
+func TestInstalledBackendPatchRecipeUsesRecordedSubset(t *testing.T) {
+	desired := backends.RecipeByName("hot-experts")
+	if desired == nil || len(desired.Patches) < 2 {
+		t.Fatal("missing reviewed overlays")
+	}
+	names := desired.PatchNames()
+	installed, err := installedBackendPatchRecipe(backends.Backend{AppliedPatches: names[:1]}, desired)
+	if err != nil || len(installed.Patches) != 1 || installed.Patches[0].Name != names[0] {
+		t.Fatalf("old patch set could not migrate: %v %+v", err, installed)
+	}
+	if len(desired.Patches) != len(names) {
+		t.Fatal("desired patch set mutated")
+	}
+	for _, bad := range [][]string{{"unknown"}, {names[1], names[0]}, {names[0], names[0]}} {
+		if got, err := installedBackendPatchRecipe(backends.Backend{AppliedPatches: bad}, desired); err == nil || got != nil {
+			t.Fatalf("unsafe manifest accepted: %v", bad)
+		}
+	}
+	empty, err := installedBackendPatchRecipe(backends.Backend{}, desired)
+	if err != nil || len(empty.Patches) != 0 {
+		t.Fatal("unrecorded patches treated as managed")
+	}
+}
+
+func TestPrepareForkCheckoutUsesExactLocalPinWithoutRemote(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "fixture@example.invalid"}, {"config", "user.name", "Fixture"}, {"commit", "--allow-empty", "-m", "local pin"}} {
+		if _, err := gitOutput(dir, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit = strings.TrimSpace(commit)
+	// No remote exists: fetching would fail. Only the exact immutable local pin
+	// can satisfy this request; branch tracking still requires its remote.
+	if err := prepareForkCheckoutRecipe(dir, "unused", commit, nil); err != nil {
+		t.Fatalf("local reviewed pin unnecessarily fetched: %v", err)
+	}
+	if err := prepareForkCheckoutRecipe(dir, "missing-branch", "", nil); err == nil {
+		t.Fatal("unavailable tracking branch was accepted as the local pin")
 	}
 }

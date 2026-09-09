@@ -66,7 +66,7 @@ func TestHotExpertsFeatureIsEmbeddedAndCapabilityGated(t *testing.T) {
 	if feature == nil {
 		t.Fatal("hot-experts source feature missing")
 	}
-	if feature.Accel != "cuda" || len(feature.Patches) != 1 {
+	if feature.Accel != "cuda" || len(feature.Patches) != 3 {
 		t.Fatalf("unexpected hot-experts feature: %#v", feature)
 	}
 	if len(feature.RequiredFlags) != 2 || feature.RequiredFlags[0] != "--moe-expert-cache" ||
@@ -103,7 +103,7 @@ func TestComposeRecipeKeepsBaseForkAndAddsFeature(t *testing.T) {
 		t.Fatalf("composed recipe lost base identity or isolation: %#v", recipe)
 	}
 	if len(recipe.Features) != 1 || recipe.Features[0] != "hot-experts" ||
-		len(recipe.PatchNames()) != 1 || !strings.HasPrefix(recipe.PatchNames()[0], "features/hot-experts/") {
+		len(recipe.PatchNames()) != 3 || !strings.HasPrefix(recipe.PatchNames()[0], "features/hot-experts/") {
 		t.Fatalf("composed recipe lost feature provenance: %#v", recipe)
 	}
 }
@@ -119,7 +119,7 @@ func TestComposeRecipePreservesReviewedBasePatchesAndRejectsUnknownOnes(t *testi
 		t.Fatal(err)
 	}
 	names := composed.PatchNames()
-	if len(names) != 2 || names[0] != "hy3/0001-fix-router-tensor-name" || !strings.HasPrefix(names[1], "features/hot-experts/") {
+	if len(names) != 4 || names[0] != "hy3/0001-fix-router-tensor-name" || !strings.HasPrefix(names[1], "features/hot-experts/") {
 		t.Fatalf("base/feature patch order=%v", names)
 	}
 

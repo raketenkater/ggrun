@@ -527,6 +527,65 @@ Not proven yet:
 
 Do not turn the first utilization sample into any of those claims.
 
+## 2026-09-05 related-probe identity correction
+
+`RelatedModelRuntimeGraphGrowth` previously ignored its backend argument and
+matched models by basename. `MeasuredComputeExcess` also accepted observations
+without matching backend or slot count. A healthy observation from a different
+backend could therefore replace this backend's larger OOM-derived reserve, and
+a same-name model replacement could inherit another artifact's measurements.
+
+Both readers now validate the existing probe filename against its recorded
+context, microbatch, and KV settings plus the requested artifact identity,
+backend/features, hardware signature, and slot count. Artifact identity uses
+the existing model geometry and per-shard stat fingerprint; this adds no scan of
+the model's tensor bytes. Missing or malformed scope headers are rejected.
+The MoE packer passes the same scoped backend tag as the resource ledger.
+Compatible legacy growth records remain usable with their existing source-rank
+rules; the correction does not delete or re-key raw measurements.
+
+Contract invariants 4, 8, and 9; applies to every model/backend/hardware class
+using these prediction inputs. Placement-plan cache version 8 and calibration
+schema 25 invalidate derived plans/performance decisions made under the wider
+matching rule. The verified fit-record schema is unchanged.
+
+Validation: foreign-backend tests first reproduced a 900 -> 100 MiB reserve
+reduction; the corrected tests reject backend/build/feature changes, model
+geometry/artifact replacement, unkeyed files, and malformed scope. Compatible
+legacy records and context/microbatch transfer still pass. The uncached
+`scripts/verify-core-engine.sh` gate passes (formatting, six core test packages,
+and vet). These are controller invariants, not performance evidence. No live
+launch was run: exact admission, matched agent A/B, and clean relaunch remain
+required before claiming faster or fully optimized serving.
+
+
+## 2026-09-05 probe metadata preservation
+
+Compute-only writes used to copy existing runtime-growth values without their
+OOM-source flags, promoting those values to healthy-serving evidence. Growth
+writes and clears copied compute values without their expert-only role flags.
+The common merge also accepted the incoming role even when its compute value
+lost to a prior observation or larger same-class value.
+
+Writers now submit only their new observations. The file-locked writer keeps
+unrelated history and chooses a compute value together with its role. Tests
+exercise compute-after-OOM, healthy retirement afterward, growth writes and
+clears, rejected smaller/oracle readings, and sparse per-device updates.
+
+Probe schema 9 rejects old exact probe rows whose source/role integrity cannot
+be reconstructed. Their non-estimated growth can still supply conservative
+OOM-class fallback evidence through the scoped related reader; only schema-9
+serving observations receive healthy-source priority. Compute-scaling inputs
+also require schema 9. Validated serving-config records retain their separate
+fit schema. Placement-plan version 9 and calibration schema 26 invalidate
+derived decisions. No production cache files were deleted or rewritten.
+
+Contract invariants 4 and 9; all model/hardware classes using these writers.
+The new regressions failed before correction. The uncached core gate passes
+(formatting, six test packages, vet), as does git diff --check. No real model
+was loaded or benchmarked: memory/stability acceptance, matched live agent
+performance, and clean relaunch remain unproven for the development patch.
+
 ## Known risks that remain
 
 1. The MoE touch model assumes independent uniform routing and uses an ordinal
@@ -566,6 +625,143 @@ frontier analysis cannot reuse cache-free allocation authority. The live p1
 TUI run retained its healthy baseline after `ubatch-2048` failed exact CUDA0
 admission; no hot-expert cache was activated, so that run is not cache efficacy
 evidence.
+
+### 2026-09-02 hot-expert fallback + promotion-gate correction
+
+Branch `hot-experts-turboquant` (worktree `ggrun-hot-experts-dev`, off checkpoint
+`1763650`). Motivated by a live GLM-5.3-Flash Q3 serve that ran ~10.5 h on
+`-ot exps=CPU --n-cpu-moe 43` (all 43 routed expert layers on CPU) with the
+3090 Ti idle, because a cache-on challenger demoted GPU expert layers, the cache
+failed to allocate (6.23 GiB cache + 4.57 GiB cache-enabled graph > CUDA0), and
+`WithoutHotExpertCache` restored only the cache fields — keeping the demoted
+topology. Full live inventory:
+`ggrun-lab/docs/perf-lab/live-evidence-2026-09-02-glm53-flash-cache-off.md`.
+
+Two invariant fixes (contract invariants 7, 10; class: heterogeneous multi-GPU
+host-offloaded MoE, CUDA cc8.0+):
+
+1. **Fallback restores the packed baseline, never the demoted copy.** The
+   priority challenger captures `HotExpertCacheFreeBaseline` (the exact packed
+   pre-demotion `Strategy`) before it strips any GPU expert layer.
+   `RestorePackedCacheFreeBaseline` returns that snapshot; when there is none
+   (a verified-config replay that bypassed `placement.Compute`) the launcher
+   recomputes a cache-free placement with hot experts off and fails closed.
+   Both in-lifecycle fallback sites (`ValidateHotExpertCacheObservation`
+   failure and cache-on lifecycle-verification failure) route through it.
+2. **`auto` no longer serves the cache on prediction alone.**
+   `finalizeHotExpertCache` returns the packed cache-free layout as the
+   fail-closed default and hands the cache-on placement to calibration as
+   `HotExpertCacheChallenger`; `CalibrationCandidates` keeps candidate 0 as the
+   packed layout and the cache-on placement as the measured challenger, so the
+   packed-vs-cache-on agent A/B the CHANGELOG describes actually runs.
+   `on`/numeric are unchanged. `CalibrationSchemaVersion` 24; a new
+   `HotExpertCacheEvidenceSchemaVersion` gate drops a stale cache-on verified
+   record's cache fields while keeping its cache-free fit proof (no
+   `VerifiedConfigSchemaVersion` bump, which would discard the whole record).
+
+`scripts/verify-core-engine.sh` passes uncached; full suite 1544 tests, core
+`-race` 975 tests. New/updated invariant tests:
+`TestFinalizeAutoHotExpertsKeepsPackedDefaultWithCacheOnChallenger`,
+`TestRestorePackedCacheFreeBaselineReproducesPackedTopology`,
+`TestCalibrationCandidatesKeepPackedDefaultWithHandedOffChallenger`,
+`TestVerifiedToStrategyDropsStaleHotExpertCacheEvidence`.
+
+Unproven until a matched live run: cache efficacy / decode gain for `glm5next`
+is still unmeasured (no completed packed-vs-cache-on A/B exists); that a real
+`ValidateHotExpertCacheObservation` failure on the rig now restores the packed
+topology with the 3090 Ti carrying its expert layers; that the verified-replay
+recompute path yields a packed layout that exactly admits under a different
+free-VRAM snapshot; that an inconclusive calibration now lands on the packed
+default rather than the cache. D2 (cache-enabled graph reserve + descending
+slot ladder) and any prefill-microbatch work are deliberately deferred — the
+`ub=64` prefill number was measured on the degraded topology and cannot drive a
+planner change until re-measured on the restored packed plan.
+
+### 2026-09-02 verify-canary CUDA-OOM recovery + graph-capture lever
+
+Follow-up. The first `auto` launch of the packed layout on this rig loaded
+clean, passed health, then aborted on the warmup decode with `CUDA error: out
+of memory` / `current device: 1` / `ggml_cuda_graph_evaluate_and_capture` /
+`cudaGraphInstantiate` — the driver CUDA-graph executable for a 14646-node /
+99-split graph did not fit CUDA1's ~3.5 GiB residual after model + KV + RS +
+`sched_reserve` compute buffer. GLM-5.3-Flash has never completed a run here, so
+`RuntimeGraphGrowthByGPU` and `RelatedModelRuntimeGraphGrowth` were both empty
+and the no-alloc `llama-fit-params` oracle (no warmup) reported "fits". The
+existing runtime-OOM recovery only runs in the post-verify serving loop, so the
+crash hit `os.Exit(1)`.
+
+Fix (contract invariants 4, 9, 10): on a `verifyAndActivateLaunch` failure
+`cmdLaunch` reads the crashed process `LogBuf`; if `runtimeLogCUDAOOM`
+classifies a post-`model loaded` CUDA OOM (its marker gate keeps load-time OOMs
+out), it `stopCalibrationProcessAndWait`s the crashed process,
+`invalidateRuntimeOOMLaunch` + `RecordRuntimeGraphGrowthFromOOM`, clears any
+staged `pendingCalibration` for the crashed placement, and re-plans +
+re-verifies, bounded to `maxVerifyRuntimeOOMRetries = 2`. When
+`logCUDAGraphCaptureOOM` matches, the first rung is `req.CUDAGraphDerateLevel++`:
+level 1 emits `CUDA_SCALE_LAUNCH_QUEUES=1x` (cancelling the `=4x` multiplier
+`server.ChildEnv` adds for a multi-GPU `--tensor-split`, which inflates driver
+launch-queue memory), level 2 also `GGML_CUDA_GRAPHS=0`; the exact placement is
+kept. `isComputeBuffer` is deliberately NOT extended to the graph-capture case —
+that flag drives a ubatch derate, useless for a graph-exec allocation. Preflight
+also prints a disclosure line when a GPU-backed placement has no runtime
+graph-growth evidence (no synthesized reserve: a static margin would strand
+layers on every cold launch and, since `RecordRuntimeGraphGrowth` has no non-OOM
+caller, never self-clear).
+
+Unproven until a matched live run: that recovery converges for this exact GLM
+key within two attempts — `LargestRoutedExpertLayerMB(model)` for this model has
+never been observed against the real deficit, and a re-plan rung that moves
+ubatch/context changes the growth-reserve key so the reserve goes invisible on
+retry; that dropping `CUDA_SCALE_LAUNCH_QUEUES=4x` frees enough for the graph
+exec here; the steady-state throughput cost of `=1x` (the `=4x` default cites a
+measured +2.3% parallel-4 MoE aggregate) is not re-measured — escaping the OOM
+outranks it, but promoting `=1x` as a default would need its own live A/B.
+
+### 2026-09-02 role-tagged compute measurements
+
+Third distinct failure of the same day, same rig, and the clearest instance of a
+structural class: **the ledger and the emitted placement held contradictory
+beliefs about one device, and nothing reconciled them.**
+
+Live evidence (contained probe
+`.cache/memory-probes/failed-e6cba9a62f0e7717071b9a84c882ca75.log`), CUDA2 =
+RTX 3060 with the Claude reviewer already seated:
+
+| | MiB |
+|---|---:|
+| free at probe start | 7957 |
+| model weights placed there | 4184 |
+| KV (288 + 512) | 800 |
+| recurrent state | 13 |
+| **committed** | **4997** |
+| remaining | 2960 |
+| `graph_reserve` then requested | **4570** → OOM |
+
+ggrun's ledger for the same plan charged CUDA2 `graph/runtime 192` while
+charging CUDA0 4841 and CUDA1 5015. The 192 came from `pc.ComputeBufByGPU[2]`,
+recorded on an earlier run where CUDA2 was expert-only. The comment at the read
+site already named the hazard — "a role transition from expert-only to
+split-owner" — but the code only fell back when the reading was *absent*, never
+when it was present and from the wrong role.
+
+Magnitude cannot separate the cases: a secondary split owner legitimately
+measures far below the primary (DeepSeek-V4: 599 against a 17970 primary, which
+`TestComputeSplitOwnerChargesPerGPUComputeNotAggregate` exists to protect). Two
+attempts at a ratio test each broke that test. The role is therefore **recorded**
+rather than inferred: `probeCache.ComputeBufExpertOnlyByGPU`, serialized as
+`PROBED_COMPUTE_BUF_EXPERT_ONLY_CUDA<n>`, written by the preflight from the
+measured placement (expert-only ⇔ weights but no KV), and consulted so each
+ledger variant only ever uses a measurement from its own role. Pre-flag readings
+stay trusted and heal on the next measured run.
+
+Guarded by `TestExpertOnlyComputeReadingNotChargedToSplitOwner`, which asserts
+the same numeric reading buys strictly less packing in the expert-only role than
+in the split-owner role, alongside the existing secondary-split-owner test.
+
+Unproven until a matched live run: that the corrected charge lets the 3060 hold
+a feasible share on this rig rather than being excluded outright, and that the
+GLM key's first successful load writes role-tagged readings that make the next
+plan correct without another probe cycle.
 
 ### P0 — make the correction safe to hand off
 
@@ -661,3 +857,96 @@ Use the repository's documented validation/build scripts for the remaining
 shell/Python/cross-platform checks. Never claim live optimality from the static
 suite, and never replace the canonical binary until the full validation gate
 passes.
+
+
+## 2026-09-06 observed-throughput attribution correction
+
+The new last-run display matched `eval time` inside `prompt eval time`, then
+removed every rate at or above 20 tok/s as a supposed helper. Server `LogBuf`
+is allocated separately for each process; throughput cannot identify a model.
+The prefill parser also treated cumulative progress reports as independent
+samples. These defects affect every model class and can hide fast dense-model
+decode entirely (contract invariants 5, 6, 8, and 9).
+
+The parser now distinguishes complete prompt/decode labels in one pass, keeps
+all positive decode rates with at least 20 generated tokens, and summarizes
+completed prompt timings only. Even-sized samples use the arithmetic midpoint
+median. Display records carry their own schema; unversioned aggregates are
+unrepairable and ignored without invalidating fit or calibration evidence.
+
+Validation: four regression tests failed before correction; the uncached core
+gate passes, including all six test packages and vet. Replaying a preserved
+live backend log through the Go parser and isolated persistence agrees with
+independent phase extraction. Public source contains no private workload data.
+
+Live observation found that one launch-scope log contains baseline, failed
+cache-on admission, and cache-free fallback lifetimes. Analysis must split on
+actual launch argv, rather than merge by the repeated scope header. The
+cache-on attempt failed CUDA graph capture on a device during startup; it has
+no throughput evidence. The fallback is healthy and serving real requests.
+Unmatched historical throughput does not prove improvement or a bottleneck.
+
+Remaining work in the inherited display feature: persistence is still latest
+per model basename, not a full per-configuration history; the recorder is in
+the ordinary serving shutdown loop and must be checked/wired for detached
+Claude serving; the expert-layer display subtracts CPU layers from total
+blocks and can count leading dense blocks as routed-expert layers. These
+limitations preclude calling the saved-config feature finished. Correct those
+with explicit launch identity and lifecycle tests before claiming full coverage.
+Matched agent A/B, separate cold/append/mixed phase guards, and controlled clean
+relaunch remain required for performance acceptance. This display fix does not
+change admission, placement, or promote a configuration.
+
+
+## 2026-09-06 cache-on warmup admission correction
+
+A cache-on challenger allocated its expert cache and tensor compute buffers,
+then failed `cudaGraphInstantiate` before health. The backend reported CUDA OOM
+and a device, but no requested byte count. The startup classifier recognized
+only sized buffer failures, so calibration treated this deterministic refusal
+as inconclusive instead of recording a typed rejection. Runtime-growth parsing
+correctly refused the pre-health failure; weakening that gate would mislabel
+load allocations as runtime growth.
+
+Exact admission now recognizes unsized CUDA OOM diagnostics independently of
+reserve estimation, in both real startup and an unclassified contained probe.
+It rejects the unchanged argv before any retry/recovery branch, preserves the
+original cause, and leaves missing device/size unknown. Existing calibration
+logic restores the baseline and persists the rejection only after the exact
+baseline and lifecycle gates pass. Generic timeouts and unrelated CUDA errors
+remain inconclusive. No guessed margin or graph-disable rewrite was added.
+
+The cache ledger had a related authority defect: composing measured cache-free
+allocation with GGUF cache bytes retained `Exact`, although cache-on changes
+the decode graph and its driver executable. Both automatic and explicit slot
+paths now retain the feasible planning composition without claiming exactness.
+An actual matching cache-on allocation retains its authority and is not charged
+a second time. Calibration schema 27 invalidates old derived decisions; raw
+allocation and verified fit schemas are unchanged.
+
+Contract invariants 4, 7, 8, 9, 10; applies to cache-capable CUDA MoE launches and
+unsized CUDA startup failures generally. Regressions reproduced missing typed
+rejection and false cache-on exactness. Uncached core tests and vet pass.
+This fixes admission/evidence handling, not the unknown driver allocation size.
+A successfully admitted cache-on configuration and its matched performance
+benefit remain unproven. Do not retry the historical failed argv as if it were
+untried or claim a faster default from these tests. The active user workload
+precludes a new model reload during this validation window.
+
+### Automatic hot-expert displacement candidates (2026-09-08)
+
+Auto may generate a cache challenger from an allocation-measured packed
+baseline even when no prior cache win exists. Candidate generation is not
+promotion: the derived per-device and host ledger must fit, exact cache-on
+admission must succeed, and the same repeated agent workload must pass the
+phase, cache correctness, telemetry and clean-relaunch gates before adoption.
+Unpaired serving decode summaries cannot veto or authorize this experiment;
+they lack the complete workload and backend scope. The packed baseline is
+preserved for failed admission or a losing comparison. Calibration schema 32
+and placement plan schema 14 invalidate decisions made under the circular
+prior-win eligibility gate. Unsupported backends and layouts remain cache-free.
+
+Persisted cache-on verified records also require hot-expert evidence schema 2.
+Older records are rejected at load, rather than replaying a potentially slower
+winner or its demoted topology with the cache stripped. Cache-free verified fit
+records remain valid. Backend capability selection alone is not cache activation.
