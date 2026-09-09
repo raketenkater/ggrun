@@ -1465,6 +1465,100 @@ TODO:
       later launches will be faster" turns a slow first run from a defect into
       an explanation.
 
+## TESTS — 1,607 of them, and the gate guards 70%
+
+Opened 2026-09-09. Everything currently passes (`go test ./...` is clean), so
+this is about what the suite *guards* and how it *fails*, not about breakage.
+
+```
+pkg               files  tests    lines
+cmd/ggrun            29    518    12275   in gate
+pkg/placement        43    497    14793   in gate
+pkg/tui               2    107     2831   NOT in gate
+pkg/claudeauto        -     78        -   NOT in gate
+pkg/backends          6     52     1544   NOT in gate
+pkg/tune              -     41        -   NOT in gate
+... 17 more packages                      NOT in gate
+TOTAL                96   1607   ~34000
+```
+
+### 1. 483 tests run in no gate
+
+`scripts/verify-core-engine.sh` covers six packages: cmd/ggrun, benchmark,
+detect, placement, recovery, server. That is 1,124 tests. The other **483 across
+22 packages** are guarded by nothing that AGENTS.md names.
+
+`pkg/backends` is the one that matters most: it holds the hot-expert patches,
+`BackendSupportsArch`, and `fitparams`. A patch that silently stops applying, or
+an arch probe that starts answering wrongly, changes what every launch runs —
+and neither the gate nor the protected-paths list mentions it. This session
+found `hot_inflight_test.go` unformatted precisely because `gofmt -l` in the
+gate never looks there.
+
+- [ ] Either extend the gate to every package with tests, or record per package
+      why it is excluded. "Not in the gate" should be a decision, not an
+      accident of which packages existed when the script was written.
+- [ ] Decide whether `pkg/backends` belongs in AGENTS.md's protected list. It is
+      core-adjacent by function and unprotected by policy.
+
+### 2. Fixtures bypass the constructors they are meant to exercise
+
+The `runtimeMB = 0` defect lived in `BuildResourceLedger`. No ledger test caught
+it, and could not have: every `ResourceLedger` in the suite is a hand-built
+literal. Hand-built fixtures cannot catch constructor bugs, and they silently
+acquire the zero value when a field is added -- which is exactly how seven
+hot-expert tests kept passing against a ledger that no longer described reality.
+
+- [ ] Provide fixture builders that call the real constructors
+      (`BuildResourceLedger`, `ComputeExpertSeats`) from seeded evidence, and
+      prefer them over literals wherever the test is about the resulting values
+      rather than about a specific hand-chosen shape.
+- [ ] Where a literal is genuinely right -- testing arithmetic against an exact
+      shape -- say so in a comment, so the next field addition knows whether the
+      zero value is intended.
+
+### 3. Fixtures too small to exercise the code under test
+
+`hotExpertFixture()` has 4 experts and 4-12 MiB layers. `hotExpertTargetSlots`
+computes `NumExperts / 5`, which is 0 there, so it collapses to the minimum and
+the fixture cannot distinguish "target" from "floor" -- the exact distinction the
+function exists to make. Two tests this session had to inject 288 experts and
+realistic layer sizes before they could assert anything real.
+
+- [ ] Give the shared fixtures a realistic scale, or add a second
+      realistic-scale fixture beside the minimal one. A fixture that cannot
+      reach the branch under test is worse than no fixture, because it passes.
+
+### 4. Helpers collide across files in the same package
+
+`contains` exists in `placement_test.go` as `([]string, string)`. Two new test
+files this session defined `(string, string)` and failed to build. Both times
+the fix was to use `strings.Contains`, which is what should have been there.
+
+- [ ] Sweep for duplicated/shadowing test helpers and consolidate into one
+      `helpers_test.go` per package. Prefer stdlib over a local helper.
+
+### 5. Names that assert facts about a rig rather than behaviour
+
+`TestPrefillTimeShareIsDominantHere` asserted, in its name, that this rig is
+prefill-dominant. Measurement later put it at 42/58 -- decode-dominant. The test
+still passed because its fixture was prefill-heavy; only the name was false, and
+a name is what the next reader trusts.
+
+- [ ] Rename tests that encode environment facts. A test name should say what
+      the code must do, not what the hardware happens to be. Rig facts belong in
+      the perf-lab docs, where they are dated and can be corrected.
+
+### 6. Tests for behaviour that does not exist
+
+One test this session asserted a rule that was then deliberately backed out, and
+had to be deleted. That is the right outcome, but it is worth a convention: a
+test written ahead of a decision should be skipped with the reason, not passing
+against an implementation that may not survive review.
+
+- [ ] When adding a test for a rule still under discussion, `t.Skip` with a
+      pointer to the open decision rather than shipping it green.
+
 ## Tracking rules
 
 - Close a box only with implementation commit, focused regression test, and
