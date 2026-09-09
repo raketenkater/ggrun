@@ -1173,6 +1173,70 @@ this is blocked/experimental and outside “automatic best.”
 - [ ] **PORT-5 — release contract.** Document cold estimate vs converged winner,
   per-agent context, inspection/reset, and all last-resort warnings.
 
+## PACKED — hot-expert sizing ignores unmeasured runtime growth
+
+Measured live 2026-09-09, immediately after the crossover fix landed.
+
+With the target-driven sizing in place, `auto` plans the configuration the sweep
+proved best:
+
+```
+before   --n-cpu-moe 39  --moe-expert-cache 8    (measured 0.967 relative)
+after    --n-cpu-moe 42  --moe-expert-cache 32   (measured 7.72 tok/s, +6.0%)
+```
+
+Planning is fixed. **Admission is not.** The launch aborted with exit 134:
+
+```
+sched_reserve: CUDA0 4855.21  CUDA1 5114.50  CUDA2 4855.00 MiB compute
+MoE expert cache enabled: 41 layers x 32 slots, 14344.7 MiB
+common_init_: warming up the model with an empty run
+CUDA error: out of memory   current device: 1, ggml_cuda_kernel_can_use_pdl
+```
+
+Everything allocated. The failure is in **warmup**, and the ledger says why:
+
+```
+CUDA0 10334/11873 MiB (fit=10060 overhead=274 runtime=0)
+CUDA1 24008/24112 MiB (fit=23563 overhead=445 runtime=0)   <- 104 MiB margin
+CUDA2 10836/11909 MiB (fit=10645 overhead=191 runtime=0)
+```
+
+`runtime=0`: no runtime graph growth was reserved, because growth evidence is
+keyed per plan and this plan had never run. So the slot arithmetic spent every
+byte of slack and warmup had nowhere to grow.
+
+### The inconsistency
+
+`ComputeExpertSeats` already refuses to spend an unmeasured margin -- "an
+unmeasured margin buys no seats. The alternative, a default margin, is exactly
+the static fudge reserve invariant 8 forbids". The hot-expert slot arithmetic
+does not apply that rule: it packs to `SlackMB` whatever the growth evidence
+says. Two paths in the same package, opposite policies on the same question.
+
+Note this is not the cache being too large in principle: a manual llama-server
+run at the same 32 slots, with all 42 layers cached and no pinned layer, served
+fine and measured +6.0%. The difference is that ggrun's plan retained one pinned
+expert layer (blk 7 -> CUDA2), used a slightly different tensor-split, and then
+packed the remainder to 104 MiB.
+
+TODO:
+
+- [ ] Subtract a runtime-growth allowance from the slack the slot arithmetic
+      spends, using `RelatedModelRuntimeGraphGrowth` (the same looser lookup
+      residency.go trusts: matching GPU signature and slot count, exact evidence
+      only). Where a device has no growth evidence, fail closed on that device
+      rather than spending its slack -- consistent with the seat detector.
+- [ ] Decide what a first launch of a new plan should do. It has no growth
+      evidence by construction, so a strict rule makes every new plan
+      unlaunchable. Options: size conservatively for the first launch and
+      re-size once growth is recorded, or carry growth across plans that differ
+      only in slot count. The second is closer to what the evidence supports:
+      growth is a property of the graph shape, and slot count changes it little.
+- [ ] Investigate why `--n-cpu-moe 42` still pins blk 7 to CUDA2. The cache then
+      covers 41 layers rather than 42, and the pinned layer's ~3.1 GB sits on a
+      device the cache also wants.
+
 ## CROSSOVER — ggrun's automatic slot target is below the useful range
 
 Measured 2026-09-08/09. This is the defect that made hot experts look useless.
