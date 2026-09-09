@@ -1175,6 +1175,24 @@ this is blocked/experimental and outside “automatic best.”
 
 ## PACKED — hot-expert sizing ignores unmeasured runtime growth
 
+**Update 2026-09-09 (second measurement, clean rig).** The cache-free-tag
+fallback added in 23b8207 does not fire on the auto/on path, and the failure
+reproduces: `--n-cpu-moe 42 --moe-expert-cache 32`, cache allocated at
+14,344.7 MiB over 41 layers, ledger `runtime=0` on every device, launch dies.
+
+The fallback is gated on `opts.HotExpertCacheSlots > 0`. That is never true for
+`auto` or `on`: the slot count lives on the resolved Strategy, and `opts` carries
+it only for a numeric policy. This is the same asymmetry the 2026-09-09
+architecture review records as its finding 7 -- `backendCacheTag` keys on
+`opts.HotExpertCacheSlots` while `scopedProbeBackendTagForStrategy` writes
+evidence under `strategy.HotExpertCacheSlots`, so auto writes into a namespace
+the reader never consults.
+
+Fix must key the fallback (and the tag) off the resolved strategy, not opts.
+Doing that also closes the orphaned-evidence half of review finding 7.
+
+
+
 Measured live 2026-09-09, immediately after the crossover fix landed.
 
 With the target-driven sizing in place, `auto` plans the configuration the sweep
