@@ -1173,6 +1173,68 @@ this is blocked/experimental and outside “automatic best.”
 - [ ] **PORT-5 — release contract.** Document cold estimate vs converged winner,
   per-agent context, inspection/reset, and all last-resort warnings.
 
+## CROSSOVER — ggrun's automatic slot target is below the useful range
+
+Measured 2026-09-08/09. This is the defect that made hot experts look useless.
+
+`hotExpertMinUsefulSlots` returns `model.ExpertUsedCount` -- 8 on GLM 5.3 Flash
+-- and the demotion loop stops at the first layout that clears it. So automatic
+sizing lands at or just above 8, and every automatic measurement ever taken
+sampled the losing side of a crossing nobody had located.
+
+### The curve (matched workload, 8 generations x 800 tokens)
+
+```
+config              cache MiB   hit rate   decode   prefill   vs no cache
+no cache                    0          -     7.28     11.70            -
+K=14 (auto's pick)     6364.7      25.8%     6.53     11.42       -10.3%
+K=20                   9346.3      32.8%     7.56     11.64        +3.8%
+K=24                  11126.6      36.6%     7.53     11.43        +3.4%
+K=32                  14687.1      43.3%     7.72     11.40        +6.0%
+K=35                  16022.2          -      OOM         -            -
+```
+
+Crossover is between 14 and 20, near 17-18. Ceiling on this rig is K=34.
+**The useful window is roughly K=20..34, and auto targets 8.**
+
+### ggrun's own calibration reproduced it live
+
+Production auto run, 2026-09-09, ggrun's own agent workload:
+
+```
+default         makespan 58.05s   decode 5.5 tok/s   prefill 28.4 tok/s
+hot-experts-14  failed admission on CUDA1 by 17 MiB; skipped
+hot-experts-8   makespan 60.04s   decode 4.8 tok/s   prefill 28.2   relative 0.967
+```
+
+It tested 8 and 14, found 8 slower by 3.3% makespan, and rejected the feature.
+Both verdicts are individually correct and the conclusion is wrong: the
+configuration that wins by 6% was never a candidate. Note also that 14 missed
+admission by **17 MiB** -- the useful range is not merely unchosen here, it is
+barely out of reach at the residency auto keeps.
+
+### What has to change
+
+- [ ] Derive the automatic target from the measured ceiling, not from
+      ExpertUsedCount. The ceiling formula is exact (see the research doc):
+      model + KV + compute + CUDA context overhead + cache(K+1) per device,
+      minimum across devices. On this rig that is 34, and a target near
+      0.6-0.9 of it lands in the useful window.
+- [ ] Demote resident expert layers toward that target. Auto currently stops
+      demoting the moment it clears 8. Freeing all expert layers is what makes
+      K=32 reachable, and resident expert layers measured flat on BOTH decode
+      (9/7/4 layers) and prefill (11.40-11.70 across every config), so they are
+      the cheapest VRAM on the rig to give up.
+- [ ] Revisit the displacement gate added in 9e2a890. Its premise -- that
+      displacing resident layers for a cache loses -- was measured at K=14 and
+      is false at K=32. The rule should be "displace only toward a slot count
+      above the measured crossover", not "do not displace".
+- [ ] Calibrate at least one candidate inside the useful window. A sweep that
+      only samples below the crossover cannot discover it.
+- [ ] Leave `--moe-expert-cache-inserts` at 2. Raising it to 4 improves hit rate
+      43.3% -> 46.1% and LOWERS decode 7.72 -> 7.38: upload cost is the binding
+      term, not miss rate.
+
 ## BLIND — hot-expert telemetry was never observable
 
 Opened 2026-09-08, verified live the same day.
