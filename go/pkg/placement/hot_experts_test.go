@@ -920,3 +920,92 @@ func TestExplicitSlotRequestDemotesOnlyWhenNeeded(t *testing.T) {
 		t.Errorf("expert placement changed for a request that already fit: %d -> %d", before, base.NCPUMoE)
 	}
 }
+
+// TestPriorityCandidateDemotesTowardTargetNotMinimum is the crossover defect.
+//
+// The loop stopped at hotExpertMinUsefulSlots (ExpertUsedCount), which is the
+// point below which a cache cannot function -- not the point at which it is
+// worth having. Measured 2026-09-08: that produced 14 slots on a rig that seats
+// 34, and K=14 costs 10.3% decode while K=32 earns 6.0%. The first layout
+// clearing ExpertUsedCount is reliably on the losing side of the crossover.
+func TestPriorityCandidateDemotesTowardTargetNotMinimum(t *testing.T) {
+	caps, model, strategy, opts := hotExpertFixture()
+	// Slack that already clears minUseful without demoting anything, so a loop
+	// that stops at the minimum returns immediately with a small cache.
+	ledger := ledgerWithSlack(caps, 40)
+
+	got, err := hotExpertPriorityCandidate(caps, model, strategy, opts, ledger)
+	if err != nil {
+		t.Fatalf("candidate: %v", err)
+	}
+	minUseful := hotExpertMinUsefulSlots(model)
+	if got.HotExpertCacheSlots <= minUseful {
+		t.Errorf("sized to %d slots, the bare minimum of %d; the loop must pursue the target",
+			got.HotExpertCacheSlots, minUseful)
+	}
+}
+
+// TestPriorityCandidateSettlesForBestReachable: the target routinely exceeds
+// what a rig can seat -- 48 against a measured ceiling of 34 on the GLM rig --
+// so running out of layers to demote must yield the largest cache that fits,
+// not a failure and not the first one over the minimum.
+func TestPriorityCandidateSettlesForBestReachable(t *testing.T) {
+	caps, model, strategy, opts := hotExpertFixture()
+	// The shared fixture has 4 experts and tiny layers, so its target is the
+	// 2-slot minimum and every slot is nearly free. Give it a realistic shape:
+	// 288 experts targeting 48 slots, with expert layers large enough that slot
+	// count is actually bounded by VRAM.
+	model.NumExperts = 288
+	model.ExpertUsedCount = 8
+	for i := range model.RoutedExpertLayerBytes {
+		model.RoutedExpertLayerBytes[i] = 288 * 10 * hotExpertTestMiB // ~10 MiB per expert
+	}
+	target := hotExpertTargetSlots(model)
+
+	// Enough to be useful, nowhere near the target even after every demotion.
+	got, err := hotExpertPriorityCandidate(caps, model, strategy, opts, ledgerWithSlack(caps, 300))
+	if err != nil {
+		t.Fatalf("an unreachable target must not fail the candidate: %v", err)
+	}
+	if got.HotExpertCacheSlots >= target {
+		t.Fatalf("fixture should not reach the target; got %d >= %d", got.HotExpertCacheSlots, target)
+	}
+	if got.HotExpertCacheSlots < hotExpertMinUsefulSlots(model) {
+		t.Errorf("settled below the minimum useful size: %d", got.HotExpertCacheSlots)
+	}
+	if got.ResourceLedger == nil || !got.ResourceLedger.Fits {
+		t.Error("the returned best-reachable layout must fit")
+	}
+}
+
+// TestPriorityCandidateRefusesWhenNothingUsefulFits keeps the floor: a rig with
+// no room must still fail closed rather than emit a token cache.
+func TestPriorityCandidateRefusesWhenNothingUsefulFits(t *testing.T) {
+	caps, model, strategy, opts := hotExpertFixture()
+	_, err := hotExpertPriorityCandidate(caps, model, strategy, opts, ledgerWithSlack(caps, 1))
+	if err == nil {
+		t.Fatal("a rig that cannot seat the minimum must refuse")
+	}
+	if !strings.Contains(err.Error(), "best reachable") {
+		t.Errorf("refusal should report what was reachable; got %q", err)
+	}
+}
+
+// TestHotExpertTargetScalesWithModel: the target must follow the model's expert
+// count, not a constant. A 32-expert model does not need 48 slots to cover its
+// hot set, and encoding one rig's number would be invariant 8 all over again.
+func TestHotExpertTargetScalesWithModel(t *testing.T) {
+	big := &ModelProfile{NumExperts: 288, ExpertUsedCount: 8}
+	small := &ModelProfile{NumExperts: 32, ExpertUsedCount: 4}
+	if t1, t2 := hotExpertTargetSlots(big), hotExpertTargetSlots(small); t1 <= t2 {
+		t.Errorf("a 288-expert model should target more slots than a 32-expert one: %d vs %d", t1, t2)
+	}
+	if got := hotExpertTargetSlots(small); got > small.NumExperts {
+		t.Errorf("target %d exceeds the model's entire expert count %d", got, small.NumExperts)
+	}
+	// Never below the point a cache stops functioning.
+	tiny := &ModelProfile{NumExperts: 4, ExpertUsedCount: 2}
+	if got := hotExpertTargetSlots(tiny); got < hotExpertMinUsefulSlots(tiny) {
+		t.Errorf("target %d is below the minimum useful %d", got, hotExpertMinUsefulSlots(tiny))
+	}
+}

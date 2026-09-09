@@ -696,9 +696,15 @@ func hotExpertFreeLayersForSlots(caps *detect.Capabilities, model *ModelProfile,
 		if !ok {
 			break
 		}
+		if layer < 0 || layer >= len(model.RoutedExpertLayerBytes) || model.RoutedExpertLayerBytes[layer] <= 0 {
+			return nil, ResourceLedger{}, drop, fmt.Errorf("cannot price demoted expert layer %d", layer)
+		}
 		if !hotExpertDemotePinnedLayer(candidate, layer) {
 			break
 		}
+		// Recompute the next shape against the memory actually released by
+		// this demotion. The derived ledger also charges these bytes to host.
+		slack[gpu] += bytesToMiBCeil(model.RoutedExpertLayerBytes[layer])
 	}
 	// Report the ceiling this rig can actually reach, so the operator can pick a
 	// number instead of bisecting by hand.
@@ -709,6 +715,19 @@ func hotExpertFreeLayersForSlots(caps *detect.Capabilities, model *ModelProfile,
 
 func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options, baseLedger ResourceLedger) (*Strategy, error) {
 	minUseful := hotExpertMinUsefulSlots(model)
+	// Demote toward the size worth having, not merely the size that functions.
+	// Stopping at minUseful is what produced a 14-slot cache on a rig that can
+	// seat 34: measured 2026-09-08, K=14 costs 10.3% decode while K=32 earns
+	// 6.0%, with the crossover near 17-18. The first layout clearing
+	// ExpertUsedCount is reliably on the wrong side of it.
+	target := hotExpertTargetSlots(model)
+	var (
+		bestSlots     int
+		bestShape     *hotExpertCacheShape
+		bestLedger    ResourceLedger
+		bestCandidate *Strategy
+		bestDrop      int
+	)
 	candidate := cloneStrategy(base)
 	clearHotExpertCache(candidate)
 	// Capture the packed pre-demotion topology now, before the loop below strips
@@ -733,32 +752,17 @@ func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, 
 		slotLedger := adjusted
 		slotLedger.Exact = baseLedger.Exact
 		slots := hotExpertCacheMaxSlots(model, shape, slotLedger)
-		if slots >= minUseful {
-			// Evicting resident expert layers to fund a cache is a trade, and on
-			// 2026-09-08 it lost here by 12% decode with no warming across 16
-			// generations. Auto may make that trade only where a matched
-			// comparison on this same placement shows the cache earns the layers
-			// back; an explicit request still serves once, which is how the
-			// comparison gets recorded at all.
-			if allowed, why := hotExpertDisplacementAllowed(opts.CacheDir, model.Path,
-				AllocationPlacementIdentity(base, model), drop, hotExpertRequired(opts)); !allowed {
-				return nil, fmt.Errorf("hot-expert cache %s", why)
-			} else if drop > 0 {
-				candidate.HotExpertCacheEvidence += "; displacement " + why
-			}
-			if err := assignHotExpertCache(candidate, shape, slots); err != nil {
-				return nil, err
-			}
-			applyHotExpertCacheLedger(&adjusted, candidate, false)
-			if !adjusted.Fits {
-				return nil, fmt.Errorf("priority %d-slot cache does not fit the demoted per-device ledger", slots)
-			}
-			if drop > 0 {
-				candidate.HotExpertCacheEvidence += fmt.Sprintf("; priority: demoted %d GPU expert layer(s) so a useful cache is a first-class challenger", drop)
-			}
-			candidate.ResourceLedger = &adjusted
-			candidate.HotExpertCacheFreeBaseline = packedBaseline
-			return candidate, nil
+		// Keep the best layout seen. The target is frequently above what a rig
+		// can seat -- on the 2026-09-08 GLM rig the target is 48 and the
+		// measured ceiling is 34 -- so the loop must be able to run out of
+		// layers to demote and still return the largest cache that fits, rather
+		// than failing or settling for the first one over the minimum.
+		if slots > bestSlots {
+			bestSlots, bestShape, bestLedger = slots, shape, adjusted
+			bestCandidate, bestDrop = cloneStrategy(candidate), drop
+		}
+		if slots >= target {
+			break
 		}
 		gpu := hotExpertTightestGPU(shape, slack)
 		layer, ok := hotExpertHighestPinnedLayerOnGPU(candidate.OTString, gpu)
@@ -777,7 +781,32 @@ func hotExpertPriorityCandidate(caps *detect.Capabilities, model *ModelProfile, 
 		}
 		slack[gpu] += freed
 	}
-	return nil, fmt.Errorf("residual per-device VRAM cannot hold the minimum %d useful slots", minUseful)
+	if bestSlots < minUseful || bestShape == nil || bestCandidate == nil {
+		return nil, fmt.Errorf("residual per-device VRAM cannot hold the minimum %d useful slots (best reachable %d)",
+			minUseful, bestSlots)
+	}
+	candidate = bestCandidate
+	adjusted := bestLedger
+	// This is a challenger, not a serving winner. Requiring a prior displacement
+	// win here prevents auto from ever collecting its first matched comparison.
+	// Unpaired serving decode summaries also lack workload/backend scope and
+	// cannot authorize or veto this candidate. Exact admission and phase-aware
+	// calibration still gate promotion.
+	if err := assignHotExpertCache(candidate, bestShape, bestSlots); err != nil {
+		return nil, err
+	}
+	applyHotExpertCacheLedger(&adjusted, candidate, false)
+	if !adjusted.Fits {
+		return nil, fmt.Errorf("priority %d-slot cache does not fit the demoted per-device ledger", bestSlots)
+	}
+	if bestDrop > 0 {
+		candidate.HotExpertCacheEvidence += fmt.Sprintf(
+			"; priority: demoted %d GPU expert layer(s) for %d slots (target %d); requires matched agent A/B",
+			bestDrop, bestSlots, target)
+	}
+	candidate.ResourceLedger = &adjusted
+	candidate.HotExpertCacheFreeBaseline = packedBaseline
+	return candidate, nil
 }
 
 func hotExpertSlackByGPU(ledger ResourceLedger) map[int]int {
