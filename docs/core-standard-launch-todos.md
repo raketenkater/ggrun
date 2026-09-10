@@ -1643,6 +1643,45 @@ against an implementation that may not survive review.
 - [ ] When adding a test for a rule still under discussion, `t.Skip` with a
       pointer to the open decision rather than shipping it green.
 
+## OVERLAY-EVIDENCE — the hot-expert overlay cannot inherit the base backend's growth
+
+Measured 2026-09-10, after the auto-path slot fix (5c35210) landed. GLM 5.3
+Flash still reserves `runtime=0` on every device and still dies, and ggrun now
+self-reports `DEFECT: this launch scope has now needed the safe floor 3 time(s)`.
+
+The remaining blocker is the backend identity, not the slot count:
+
+```
+hot=off (serves)   backend: fork-glm-5-3-flash
+hot=on  (fails)    backend: fork-glm-5-3-flash-hot-experts
+```
+
+Runtime graph growth is keyed on `backend` among other fields, and
+`matchingRelatedProbeScope` requires that field to match exactly. The
+hot-experts overlay is a *different backend build*, so growth measured by every
+successful cache-free serve lives in a namespace the cache-on plan can never
+read. The cache-free-tag fallback in 23b8207 varies the cache-slot component of
+the tag; it cannot cross a backend-build boundary.
+
+So the chain is: overlay backend -> no growth evidence -> `runtime=0` ->
+slot arithmetic spends every byte of slack -> warmup OOM -> safe floor. Every
+link is now identified and the first one is the one that matters.
+
+The question this needs answered is whether runtime graph growth is a property
+of the *graph shape* or of the *backend build*. The overlay is the same upstream
+source plus the expert-cache patch, so its cache-free growth should be
+identical to the base backend's; if that is accepted, growth may be inherited
+across the overlay boundary for the cache-free shape specifically.
+
+- [ ] Decide whether growth evidence may cross a feature-overlay backend
+      boundary when the overlay is the base build plus a patch. If yes, key
+      growth on the base build and record the overlay separately only when it
+      diverges.
+- [ ] Until then, a first cache-on launch on any overlay backend is guaranteed
+      to reserve zero growth, so hot experts cannot engage through ggrun on any
+      model. The 2026-09-08 hand-measured +6.0% at K=32 remains reachable only
+      by driving llama-server directly.
+
 ## ENGAGE — hot experts cannot engage on two of three tested models
 
 Measured 2026-09-09 across GLM 5.3 Flash, Qwen3.8-Flash-Next and
