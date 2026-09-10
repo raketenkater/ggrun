@@ -35,3 +35,7 @@ Artifacts are under `/tmp/ggrun-linux-e2e-et3tc1pk`. This was a new app installa
 - Full uncached Go race suite and Linux/Windows vet passed before incorporating PR #31's workflow-only change.
 
 An initial harness attempt using a CPU-only bundle on a GPU-visible host failed; the harness also initially used the wrong context flag. The successful runs explicitly use `--cpu` and `--ctx 2048`. They establish installed CPU serving and lifecycle correctness, not GPU performance, hot-expert promotion, or agent-workload throughput.
+
+## Follow-up from PR #33 runners
+
+The first candidate Linux E2E passed, but Windows generation finished before ggrun completed startup. The harness then interrupted the wrapper and left a backend process behind. Backend health is not launcher readiness: the shutdown handler is installed later in launch. The harness now waits for ggrun's own ready message before generation/shutdown. This improves the test; cancellation during startup remains a separate product lifecycle concern requiring a protected-core change. The macOS smoke test remains red despite setup recognizing Mach-O; investigation is deferred in favor of Linux/Windows at the user's request.

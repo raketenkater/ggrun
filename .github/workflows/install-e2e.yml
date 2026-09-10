@@ -6,7 +6,7 @@ name: install-e2e
 
 on:
   push:
-    branches: ["**"]
+    branches: [main, go-core]
     tags: ["v*"]
   pull_request:
   release:

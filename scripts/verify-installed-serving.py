@@ -58,13 +58,17 @@ def main():
                 if proc.poll() is not None:
                     raise RuntimeError(f"launcher exited before ready: {proc.returncode}")
                 try:
-                    if request(args.port, "/health").get("status") == "ok":
+                    # Backend health can precede ggrun's admission/canary and
+                    # shutdown handler. Wait for the installed launcher itself.
+                    launcher_ready = b"[launch] Press Ctrl+C to stop" in (output / "serve.log").read_bytes()
+                    if launcher_ready and request(args.port, "/health").get("status") == "ok":
+                        result["launcher_ready"] = True
                         break
                 except (OSError, ValueError, urllib.error.URLError):
                     pass
                 time.sleep(0.5)
             else:
-                raise RuntimeError("timed out waiting for health")
+                raise RuntimeError("timed out waiting for launcher readiness and health")
             reply = request(args.port, "/v1/chat/completions", {
                 "messages": [{"role": "user", "content": "Name one colour."}],
                 "max_tokens": 32, "temperature": 0, "stream": False,
