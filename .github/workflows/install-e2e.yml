@@ -86,7 +86,10 @@ jobs:
           python3 tests/build_synthetic_gguf.py --out "$HOME/ggrun/models/e2e.gguf" \
             --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 \
             --embd 64 --ff 128 --ctx-train 2048
-          "$HOME/ggrun/ggrun" "$HOME/ggrun/models/e2e.gguf" --cpu \
+          # The bundled test backend advertises no --dry-run allocation mode, so
+          # ggrun asks before doing one contained live load. Nothing can answer a
+          # prompt in CI, so approve it up front.
+          "$HOME/ggrun/ggrun" "$HOME/ggrun/models/e2e.gguf" --cpu --allow-live-memory-probe \
             --host 127.0.0.1 --port 18841 > serve.log 2>&1 &
           for _ in $(seq 1 90); do
             curl -fsS http://127.0.0.1:18841/health 2>/dev/null | grep -q '"status":"ok"' && exit 0
@@ -139,7 +142,7 @@ jobs:
           python tests/build_synthetic_gguf.py --out "$h\models\e2e.gguf" `
             --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 `
             --embd 64 --ff 128 --ctx-train 2048
-          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList "$h\models\e2e.gguf",'--cpu','--host','127.0.0.1','--port','18842' `
+          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList "$h\models\e2e.gguf",'--cpu','--allow-live-memory-probe','--host','127.0.0.1','--port','18842' `
             -RedirectStandardOutput serve.log -RedirectStandardError serve.err -PassThru -NoNewWindow
           foreach ($i in 1..90) {
             try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/health' -TimeoutSec 5).Content -match '"status":"ok"') { exit 0 } } catch {}
