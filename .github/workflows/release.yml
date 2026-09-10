@@ -385,6 +385,7 @@ jobs:
           test -n "$b" || { echo "::error::no llama-server in ${{ env.ASSET }}"; exit 1; }
           rp="$(readelf -d "$b" | awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print; exit }')"
           echo "RUNPATH: [$rp]"
+          # shellcheck disable=SC2016 # ORIGIN is a literal ELF loader token
           case "$rp" in
             *'$ORIGIN'*) ;;
             *) echo "::error::CUDA backend RUNPATH is not \$ORIGIN: [$rp]"; exit 1 ;;
