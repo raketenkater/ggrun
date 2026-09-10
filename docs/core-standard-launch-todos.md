@@ -1814,6 +1814,59 @@ what the backend allocates, and this session has now found two cases
 either invisible or read as zero. Any of these features returning should start by
 asking what it allocates and whether the ledger sees it.
 
+## CI — audit what the 17 jobs actually prove
+
+Opened 2026-09-10, after the new install-e2e job found a shipped bug on its
+first run that the existing suite had never caught.
+
+The suite is large and was not gating. Three install jobs were **red on main**
+while releases went out: `release-install-smoke`, `package-windows-smoke`,
+`release-install-macos-smoke`. A red job nobody blocks on is worse than no job:
+it costs minutes per run and buys the confidence of coverage without the
+coverage.
+
+Worse, the jobs that were green could not have caught #28. They build a fake
+Go backend and install it from a local directory. The fake answers `--version`
+because it is a Go binary with no shared libraries at all -- so it can never
+exercise the failure mode where a real backend cannot find its own. The tests
+were structurally incapable of finding the bug they were nominally about.
+
+### What to establish for each job
+
+- [ ] For all 17 jobs: what failure would this catch that no other job catches?
+      Delete or merge any job with no answer.
+- [ ] Fix or delete the three jobs currently red on main. Decide which, do not
+      leave them red.
+- [ ] Make the release-gating set explicit. Today nothing distinguishes "must be
+      green to tag" from "informational".
+
+### Known coverage gaps
+
+- [ ] **Real backends.** Every install job uses `tests/fake_llama_server.go`,
+      which has no shared-library dependencies. At least one job must install a
+      real published bundle, which is what install-e2e now does.
+- [ ] **The download path.** Until install-e2e, no job fetched from a release
+      URL. #28 was a packaging defect: it could only be caught by installing
+      what users actually download.
+- [ ] **Windows beyond parsing.** `package-windows-smoke` and
+      `windows-release-install` exist, but #27 (no Windows CUDA bundle, three
+      prerequisites reported one at a time) still shipped. install-e2e's Windows
+      job found `ggrun.exe` is not where the docs say on its first run.
+- [ ] **macOS.** `release-install-macos-smoke` is red and there is no macOS
+      end-to-end equivalent.
+
+### Cost
+
+- [ ] Measure wall-clock per job and total per push. 17 jobs on every branch push
+      is a lot; some are seconds and some are minutes, and nobody has looked at
+      which.
+
+### Rule going forward
+
+- [ ] A job that has been red on main for more than one week is either fixed or
+      deleted that week. Carrying red CI trains everyone to ignore it, which is
+      how three install failures reached users while their tests were failing.
+
 ## Tracking rules
 
 - Close a box only with implementation commit, focused regression test, and
