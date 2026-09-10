@@ -87,6 +87,44 @@ if command -v ldd >/dev/null 2>&1; then
     )
 fi
 
+# The macOS counterpart of the ldd walk above. There is no ldd here, so a
+# dependency built outside build/bin was simply never copied: with @loader_path
+# in place dyld looked in the right directory and found nothing.
+#
+#     Library not loaded: @rpath/libllama-common.0.dylib
+#     tried: '.../ggrun-macos-arm64-metal/bin/libllama-common.0.dylib' (no such file)
+#
+# Walk @rpath dependencies to closure -- a copied dylib brings its own -- and
+# refuse to ship a bundle still missing one.
+if [[ "$ASSET_NAME" == *macos* || "$ASSET_NAME" == *darwin* ]] && command -v otool >/dev/null 2>&1; then
+    rpath_deps() {
+        for macho in "$PAYLOAD/bin/llama-server" "$PAYLOAD/bin"/*.dylib; do
+            [[ -f "$macho" ]] || continue
+            otool -L "$macho" 2>/dev/null |
+                awk '$1 ~ /^@rpath\// { sub(/^@rpath\//, "", $1); print $1 }'
+        done | sort -u
+    }
+    BUILD_ROOT="$(cd "$BIN_DIR/.." && pwd)"
+    for _ in 1 2 3 4 5; do
+        copied=0
+        while IFS= read -r dep; do
+            [[ -n "$dep" && ! -e "$PAYLOAD/bin/$dep" ]] || continue
+            found="$(find "$BUILD_ROOT" -type f -name "$dep" 2>/dev/null | head -1)"
+            [[ -n "$found" ]] || continue
+            install -m 0644 "$found" "$PAYLOAD/bin/$dep"
+            copied=1
+        done < <(rpath_deps)
+        [[ "$copied" -eq 0 ]] && break
+    done
+    missing=0
+    while IFS= read -r dep; do
+        [[ -n "$dep" && ! -e "$PAYLOAD/bin/$dep" ]] || continue
+        echo "Error: bundle references @rpath/$dep and does not ship it." >&2
+        missing=1
+    done < <(rpath_deps)
+    [[ "$missing" -eq 0 ]] || exit 1
+fi
+
 # CUDA runtime (not libcuda.so.1 — that is the driver) so a laptop can load
 # the bundle without nvcc. Next release ships these; current hosts harvest
 # the same names from a toolkit already on the machine.
