@@ -159,7 +159,39 @@ done
 #
 # Rewrite RUNPATH to $ORIGIN so the loader looks beside the binary. Do this for
 # the bundled libraries too: they load each other.
+#
+# Rewrite only what is actually mis-pointed: an ELF carrying a non-empty
+# RUNPATH with no $ORIGIN in it. That is precisely the #28 condition.
+#
+# A file with no RUNPATH at all is a different animal and must be left alone.
+# patchelf rewrites program headers, and a Go binary does not survive that: the
+# fake backend used by the install smoke jobs packaged without complaint and
+# then died on --version with "Segmentation fault (core dumped)". Nothing was
+# wrong with it. We broke it by relocating a path it never had.
+elf_runpath() {
+    readelf -d "$1" 2>/dev/null |
+        awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print; exit }'
+}
+
+patch_targets=()
 if [[ "$ASSET_NAME" != *windows* && "$ASSET_NAME" != *darwin* && "$ASSET_NAME" != *macos* ]]; then
+    if ! command -v readelf >/dev/null 2>&1; then
+        # Without readelf we cannot tell a mis-pointed binary from a healthy
+        # one, and both guesses ship a broken artifact.
+        echo "Error: readelf is required to inspect a Linux bundle's RUNPATH." >&2
+        echo "       Install binutils and re-run." >&2
+        exit 1
+    fi
+    for elf in "$PAYLOAD/bin/llama-server" "$PAYLOAD/bin"/lib*.so*; do
+        [[ -f "$elf" ]] || continue          # skip the SONAME symlinks
+        runpath="$(elf_runpath "$elf")"
+        [[ -n "$runpath" ]] || continue      # nothing baked in, nothing to relocate
+        case "$runpath" in *'$ORIGIN'*) continue ;; esac
+        patch_targets+=("$elf")
+    done
+fi
+
+if [[ ${#patch_targets[@]} -gt 0 ]]; then
     if ! command -v patchelf >/dev/null 2>&1; then
         # Failing here is deliberate. A bundle whose RUNPATH points at the build
         # host is broken for every user, and it is invisible in a file listing --
@@ -168,22 +200,30 @@ if [[ "$ASSET_NAME" != *windows* && "$ASSET_NAME" != *darwin* && "$ASSET_NAME" !
         echo "       Install it (apt-get install patchelf) and re-run." >&2
         exit 1
     fi
-    for elf in "$PAYLOAD/bin/llama-server" "$PAYLOAD/bin"/lib*.so*; do
-        [[ -f "$elf" ]] || continue          # skip the SONAME symlinks
+    # Did it run before we touched it? Then it must still run afterwards.
+    ran_before=0
+    if timeout 30 "$PAYLOAD/bin/llama-server" --version >/dev/null 2>&1; then
+        ran_before=1
+    fi
+    for elf in "${patch_targets[@]}"; do
         patchelf --set-rpath '$ORIGIN' "$elf" 2>/dev/null || true
     done
-    # Prove it. A silent patchelf failure would ship the same bug again.
-    if command -v readelf >/dev/null 2>&1; then
-        bad=0
-        while IFS= read -r line; do
-            case "$line" in
-                *'$ORIGIN'*) ;;
-                *) echo "Error: bin/llama-server RUNPATH is not \$ORIGIN: $line" >&2; bad=1 ;;
-            esac
-        done < <(readelf -d "$PAYLOAD/bin/llama-server" 2>/dev/null |
-                 awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print }')
-        [[ "$bad" -eq 0 ]] || exit 1
+    if [[ "$ran_before" -eq 1 ]] &&
+       ! timeout 30 "$PAYLOAD/bin/llama-server" --version >/dev/null 2>&1; then
+        echo "Error: bin/llama-server ran before the RUNPATH rewrite and does not run after it." >&2
+        echo "       Packaging corrupted the binary; refusing to ship it." >&2
+        exit 1
     fi
+    # Prove it. A silent patchelf failure would ship the same bug again.
+    bad=0
+    for elf in "${patch_targets[@]}"; do
+        runpath="$(elf_runpath "$elf")"
+        case "$runpath" in
+            *'$ORIGIN'*) ;;
+            *) echo "Error: $(basename "$elf") RUNPATH is not \$ORIGIN: $runpath" >&2; bad=1 ;;
+        esac
+    done
+    [[ "$bad" -eq 0 ]] || exit 1
 fi
 
 (
