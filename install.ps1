@@ -254,17 +254,23 @@ function Install-PrebuiltCudaBackend([string]$BinDir) {
     # backend works with no CUDA Toolkit / MSVC / CMake - the from-source build
     # (Build-CudaBackend) stays as a fallback.
     Say 'Fetching prebuilt llama.cpp CUDA backend from ggml-org/llama.cpp releases...'
+    # Not releases/latest: since 2026-09 that is a versioned llama.cpp release
+    # with no binaries, while the numbered builds that carry the Windows CUDA
+    # zips are published as prereleases. Asking only for "latest" found nothing
+    # and every NVIDIA install quietly ended up on the CPU backend.
     try {
-        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest' -Headers @{ 'User-Agent' = 'ggrun-installer' }
+        $releases = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20' -Headers @{ 'User-Agent' = 'ggrun-installer' }
     } catch {
         Warn "Could not query llama.cpp releases: $($_.Exception.Message)"
         return $false
     }
+    $rel = $releases | Where-Object { $_.assets | Where-Object { $_.name -match 'bin-win-cuda-.*-x64\.zip$' -and $_.name -notmatch '^cudart-' } } | Select-Object -First 1
+    if (-not $rel) { Warn 'No prebuilt win-cuda asset in recent llama.cpp releases.'; return $false }
     $assets = $rel.assets
     # Prefer the cuda-12.4 build for broad driver compatibility, else any win-cuda x64.
     $server = $assets | Where-Object { $_.name -match 'bin-win-cuda-12\.4-x64\.zip$' -and $_.name -notmatch '^cudart-' } | Select-Object -First 1
     if (-not $server) { $server = $assets | Where-Object { $_.name -match 'bin-win-cuda-.*-x64\.zip$' -and $_.name -notmatch '^cudart-' } | Select-Object -First 1 }
-    if (-not $server) { Warn 'No prebuilt win-cuda asset in the latest llama.cpp release.'; return $false }
+    if (-not $server) { Warn "No prebuilt win-cuda asset in llama.cpp $($rel.tag_name)."; return $false }
     # Match the cudart redistributable to the server asset's CUDA version.
     $cudaVer = if ($server.name -match 'cuda-([0-9.]+)-x64') { $Matches[1] } else { '' }
         $escapedCuda = [regex]::Escape($cudaVer)
