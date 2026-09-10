@@ -2577,6 +2577,30 @@ func TestBackendMatchesVulkanAliases(t *testing.T) {
 	}
 }
 
+// A metal- or vulkan-tagged backend is still mainline llama.cpp. The tag says
+// which device dialect placement must emit, not which fork the binary came
+// from. setup-home.sh records LLM_BACKEND="llama" for a metal install, and
+// detectBackend tags every darwin build "metal", so an exact-tag rule left
+// every macOS install unable to resolve the backend it had just installed:
+// "selected backend \"llama\" was not found under APP_HOME".
+func TestBackendMatchesTreatsMetalAndVulkanAsLlama(t *testing.T) {
+	for _, tag := range []string{"llama", "vulkan", "metal"} {
+		info := &backendInfo{Path: "/app/.bin/llama-server", Tag: tag}
+		if !backendMatches(info, "llama-server", "llama") {
+			t.Fatalf("a %s-tagged backend must satisfy a llama request", tag)
+		}
+	}
+	// A different fork must not be swept in by the same rule.
+	ik := &backendInfo{Path: "/app/.bin/ik_llama-server", Tag: "ik_llama"}
+	if backendMatches(ik, "ik_llama-server", "llama") {
+		t.Fatal("ik_llama is a separate fork and must not satisfy a llama request")
+	}
+	// An explicit device request stays narrow.
+	if backendMatches(&backendInfo{Tag: "llama"}, "llama-server", "metal") {
+		t.Fatal("an explicit metal request must not accept a plain llama build")
+	}
+}
+
 func TestResolveModelPathUsesConfiguredModelDir(t *testing.T) {
 	dir := t.TempDir()
 	model := filepath.Join(dir, "model.gguf")

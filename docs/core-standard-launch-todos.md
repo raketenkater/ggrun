@@ -908,3 +908,53 @@ macOS backend discovery does not see what was installed.
 - [ ] Decide whether `--cpu` on a metal-only install should select the metal
       backend rather than failing, and whether that warning should be an error
       at install time instead of a pass.
+
+## MACOS — resolved 2026-09-10: the tag names the dialect, not the fork
+
+`release-install-macos-smoke` had been red on main for weeks. It was not a test
+artifact and not the packaging bug: **every macOS install was unusable out of
+the box.**
+
+`scripts/setup-home.sh` records the backend for a metal install as:
+
+```sh
+elif [[ "$backend_config" == "cpu" || "$backend_config" == "metal" ]]; then
+    backend_config="llama"
+```
+
+and `detectBackend` tags every darwin build `metal`, deliberately, so placement
+does not emit CUDA or Vulkan device-routing flags for it. `backendMatches`
+required an exact tag match, so a `llama` request could never resolve on macOS
+and launch died with:
+
+```
+selected backend "llama" was not found under APP_HOME "…" or the registered
+backend paths; install/build it or choose backend auto
+```
+
+The tag conflates two different things: which fork the binary came from
+(llama.cpp versus ik_llama.cpp) and which device dialect placement must speak
+(cuda, vulkan, metal). A `llama` request now accepts `llama`, `vulkan` or
+`metal`, because all three are mainline llama.cpp. `ik_llama` is a genuinely
+different fork and stays distinct, and an explicit `metal` or `vulkan` request
+stays narrow.
+
+Fixed in `backendMatches` rather than in the installer on purpose. The
+installer only writes config on a first install ("upgrades must retain user
+choices"), so an installer-side fix would have left every Mac already in the
+field broken.
+
+The same exact-tag rule also meant a Linux user whose config said `llama` could
+not use an installed Vulkan build. That is fixed by the same change.
+
+### Still open
+
+- [ ] The install probe's classifier returns `needs_gpu` as its catch-all for
+      output it does not recognise (`classify_probe_output`, install.sh). A
+      binary that started, printed something and exited cleanly is by
+      definition not missing a GPU runtime. The `runs` branch requires the word
+      "version" in the output, so any backend that words its `--version`
+      differently is filed as needing a GPU it does not need. Harmless today
+      because `needs_gpu` keeps the backend, but it is the least accurate
+      reading available and it made the macOS install log actively misleading
+      while this bug was being chased.
