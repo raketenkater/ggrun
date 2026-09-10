@@ -34,9 +34,10 @@ jobs:
       - uses: actions/checkout@v4
 
       # setup.sh finds a local checkout via ${BASH_SOURCE[0]}. When piped that is
-      # empty, so it downloads the source from GitHub -- which is what a real
-      # user gets. LLM_SETUP_REF points that download at this commit, so a pull
-      # request exercises the real download path against its own code.
+      # empty, so it downloads the source from GitHub -- the real network path a
+      # user takes. LLM_SETUP_REF aims that at this commit so a pull request
+      # tests its own installer; the backend still comes from the published
+      # release, because that is what a user actually receives.
       - name: Install
         env:
           LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -59,19 +60,36 @@ jobs:
           done
           [ "$n" -gt 0 ] || { echo "::error::no backend installed"; exit 1; }
 
+      # A real GGUF, fetched the way a user fetches one. tests/build_synthetic_gguf.py
+      # was used here before and proved nothing: it writes headers only, so it has
+      # no tensors and no rms epsilon, and a real llama-server rejects it outright
+      # ("key not found in model: llama.attention.layer_norm_rms_epsilon"). Only
+      # the fake test backend ever "loaded" it. stories260K is 1.1 MB and is what
+      # llama.cpp's own server tests use.
       - name: Serve a model
         run: |
           set -euo pipefail
-          python3 tests/build_synthetic_gguf.py --out "$HOME/ggrun/models/e2e.gguf" \
-            --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 \
-            --embd 64 --ff 128 --ctx-train 2048
-          "$HOME/ggrun/ggrun" "$HOME/ggrun/models/e2e.gguf" --cpu \
+          mkdir -p "$HOME/ggrun/models"
+          curl -fsSL --retry 3 --retry-all-errors -o "$HOME/ggrun/models/tiny.gguf" \
+            https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
+          # A runner has no GPU, so ggrun would ask before doing one contained
+          # live load. Nothing can answer a prompt in CI, so approve it up front.
+          "$HOME/ggrun/ggrun" "$HOME/ggrun/models/tiny.gguf" --cpu --allow-live-memory-probe \
             --host 127.0.0.1 --port 18841 > serve.log 2>&1 &
+          ok=
           for _ in $(seq 1 90); do
-            curl -fsS http://127.0.0.1:18841/health 2>/dev/null | grep -q '"status":"ok"' && exit 0
+            curl -fsS http://127.0.0.1:18841/health 2>/dev/null | grep -q '"status":"ok"' && { ok=1; break; }
             sleep 2
           done
-          echo "::error::the installed ggrun could not serve a model"; tail -40 serve.log; exit 1
+          [ -n "$ok" ] || { echo "::error::the installed ggrun could not serve a model"; tail -40 serve.log; exit 1; }
+          # Answering /health is not the same as answering a user. Generate.
+          curl -fsS -m 60 http://127.0.0.1:18841/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"once upon a time"}],"max_tokens":16}' \
+            > reply.json || { echo "::error::generation request failed"; tail -40 serve.log; exit 1; }
+          grep -q '"content"' reply.json || {
+            echo "::error::served, but generated nothing"; cat reply.json; tail -40 serve.log; exit 1; }
+          cat reply.json
 
   windows:
     runs-on: windows-latest
@@ -91,10 +109,16 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $bin = "$env:USERPROFILE\ggrun\ggrun.exe"
-          if (-not (Test-Path $bin)) { throw "ggrun.exe not installed at $bin" }
-          & $bin --version
-          & $bin detect | Out-Null
+          # install.ps1 writes a ggrun.cmd wrapper at the install root and puts
+          # the executable in .bin (Write-CmdWrapper). The wrapper is what the
+          # docs tell users to run, so check that, not a bare ggrun.exe.
+          $root = Join-Path $env:USERPROFILE 'ggrun'
+          $cmd  = Join-Path $root 'ggrun.cmd'
+          $exe  = Join-Path $root '.bin\ggrun.exe'
+          if (-not (Test-Path $exe)) { Get-ChildItem $root -Recurse -Depth 1 | Select-Object FullName; throw "ggrun.exe not at $exe" }
+          if (-not (Test-Path $cmd)) { throw "ggrun.cmd wrapper not at $cmd" }
+          & $exe --version
+          & $exe detect | Out-Null
 
       - name: The installed backend runs
         shell: powershell
@@ -104,20 +128,72 @@ jobs:
           if (-not $found) { throw "no backend installed" }
           foreach ($b in $found) { Write-Host $b.FullName; & $b.FullName --version }
 
+      # Same real model as the Linux job -- see the comment there for why the
+      # synthetic GGUF that used to be built here could never load.
       - name: Serve a model
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $h = "$env:USERPROFILE\ggrun"
-          python tests/build_synthetic_gguf.py --out "$h\models\e2e.gguf" `
-            --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 `
-            --embd 64 --ff 128 --ctx-train 2048
-          $p = Start-Process "$h\ggrun.exe" -ArgumentList "$h\models\e2e.gguf",'--cpu','--host','127.0.0.1','--port','18842' `
+          New-Item -ItemType Directory -Force -Path "$h\models" | Out-Null
+          Invoke-WebRequest -UseBasicParsing `
+            'https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf' `
+            -OutFile "$h\models\tiny.gguf"
+          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList "$h\models\tiny.gguf",'--cpu','--allow-live-memory-probe','--host','127.0.0.1','--port','18842' `
             -RedirectStandardOutput serve.log -RedirectStandardError serve.err -PassThru -NoNewWindow
+          $ok = $false
           foreach ($i in 1..90) {
-            try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/health' -TimeoutSec 5).Content -match '"status":"ok"') { exit 0 } } catch {}
+            try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/health' -TimeoutSec 5).Content -match '"status":"ok"') { $ok = $true; break } } catch {}
             if ($p.HasExited) { break }
             Start-Sleep 2
           }
-          Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
-          throw "the installed ggrun could not serve a model"
+          if (-not $ok) {
+            Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
+            throw "the installed ggrun could not serve a model"
+          }
+          # Answering /health is not the same as answering a user. Generate.
+          $body = '{"messages":[{"role":"user","content":"once upon a time"}],"max_tokens":16}'
+          $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/v1/chat/completions' `
+            -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
+          if ($r.Content -notmatch '"content"') {
+            Write-Host $r.Content
+            Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
+            throw "served, but generated nothing"
+          }
+          Write-Host $r.Content
+
+  # Not the human flow -- deliberately. This proves the packaging fix works on a
+  # real binary with real shared libraries, which the jobs above cannot do while
+  # the published release is still broken. It takes the published llama-server,
+  # repackages it with THIS commit's package-release.sh, installs that, and
+  # requires the installed backend to run.
+  #
+  # Delete this job once a release built with the fix has shipped: at that point
+  # the human-flow jobs cover it and this is duplicated scaffolding.
+  packaging-fix-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Repackage the published backend and install it
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          go build -C go -trimpath -o ../ggrun ./cmd/ggrun
+          curl -fsSL -o "$RUNNER_TEMP/pub.tar.gz" \
+            https://github.com/raketenkater/ggrun/releases/download/v3.2.8/ggrun-linux-x86_64-cpu.tar.gz
+          mkdir -p "$RUNNER_TEMP/pub" && tar -xzf "$RUNNER_TEMP/pub.tar.gz" -C "$RUNNER_TEMP/pub"
+          real="$(find "$RUNNER_TEMP/pub" -type f -name llama-server -perm -u+x | head -1)"
+          test -n "$real" || { echo "::error::no llama-server in the published bundle"; exit 1; }
+          echo "published RUNPATH: $(readelf -d "$real" | grep -oE 'Library runpath: \[[^]]*\]' || echo none)"
+          scripts/package-release.sh ggrun-linux-x86_64-cpu.tar.gz "$real" "$RUNNER_TEMP/release"
+          ( cd "$RUNNER_TEMP/release" && sha256sum ggrun-linux-x86_64-cpu.tar.gz > SHA256SUMS )
+          LLM_APP_HOME="$RUNNER_TEMP/app" LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu \
+            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/release" ./setup-linux.sh
+          b="$RUNNER_TEMP/app/.bin/llama-server"
+          echo "installed RUNPATH: $(readelf -d "$(readlink -f "$b")" | grep -oE 'Library runpath: \[[^]]*\]')"
+          timeout 30 "$b" --version </dev/null || { echo "::error::repackaged backend still cannot load"; exit 1; }

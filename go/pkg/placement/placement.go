@@ -2048,7 +2048,10 @@ func resolveHeadDimCompatibleKVQuality(model *ModelProfile, requested string) (s
 		return requested, nil
 	}
 	if exactKVTypeRequested(requested) {
-		return "", fmt.Errorf("KV cache type %s requires K and V head dimensions divisible by %d (model has key_length=%d, value_length=%d); use --kv-quality f16", kvType, kvCacheBlockSize(kvType), model.KeyLength, model.ValueLength)
+		// Report the widths llama.cpp will use, which for a GGUF that omits the
+		// keys are derived from n_embd / n_head, not the absent zeros.
+		keyLen, valueLen, _ := kvHeadDims(model)
+		return "", fmt.Errorf("KV cache type %s requires K and V head dimensions divisible by %d (model has key_length=%d, value_length=%d); use --kv-quality f16", kvType, kvCacheBlockSize(kvType), keyLen, valueLen)
 	}
 	return "high", nil
 }
@@ -4579,15 +4582,56 @@ func kvCacheBlockSize(value string) int {
 	}
 }
 
+// kvHeadDims returns the K and V head widths llama.cpp will actually use, and
+// whether they are knowable at all.
+//
+// A GGUF may omit attention.key_length/value_length. llama.cpp does not treat
+// that as "unconstrained": it derives both from n_embd / n_head
+// (llama-model.cpp, n_embd_head_k_full) and then enforces the block-size rule
+// against the derived width. Absent is not zero — reading the missing key as 0
+// and declaring the constraint satisfied is the least conservative reading
+// available, and it is exactly what let ggrun emit --cache-type-k q8_0 for a
+// model with an 8-wide head. llama.cpp rejected it at context creation ("K
+// cache type q8_0 with block size 32 does not divide n_embd_head_k=8") and the
+// backend died during startup instead of serving.
+func kvHeadDims(model *ModelProfile) (keyLen, valueLen int, known bool) {
+	if model == nil {
+		return 0, 0, false
+	}
+	keyLen, valueLen = model.KeyLength, model.ValueLength
+	if keyLen > 0 && valueLen > 0 {
+		return keyLen, valueLen, true
+	}
+	embed := model.EmbeddingLength
+	if embed <= 0 {
+		embed = model.HiddenSize
+	}
+	if embed <= 0 || model.HeadCount <= 0 {
+		return keyLen, valueLen, false
+	}
+	derived := embed / model.HeadCount
+	if derived <= 0 {
+		return keyLen, valueLen, false
+	}
+	if keyLen <= 0 {
+		keyLen = derived
+	}
+	if valueLen <= 0 {
+		valueLen = derived
+	}
+	return keyLen, valueLen, true
+}
+
 func kvTypeFitsHeadDim(model *ModelProfile, kvType string) bool {
-	if model == nil || model.KeyLength <= 0 || model.ValueLength <= 0 {
+	keyLen, valueLen, known := kvHeadDims(model)
+	if !known {
 		return true
 	}
 	blockSize := kvCacheBlockSize(kvType)
 	if blockSize <= 0 {
 		return false
 	}
-	return model.KeyLength%blockSize == 0 && model.ValueLength%blockSize == 0
+	return keyLen%blockSize == 0 && valueLen%blockSize == 0
 }
 
 func kvTypeFromQuality(quality string) string {

@@ -88,9 +88,11 @@ jobs:
           go-version-file: go/go.mod
           cache: false
 
+      # patchelf is not optional: package-release.sh uses it to rewrite the
+      # backend's RUNPATH to $ORIGIN and refuses to build a bundle without it.
       - name: Install build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libvulkan-dev glslc glslang-tools spirv-headers vulkan-tools
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libvulkan-dev glslc glslang-tools spirv-headers vulkan-tools patchelf
 
       - name: Clone pinned llama.cpp
         run: |
@@ -154,6 +156,25 @@ jobs:
 
       - name: Package
         run: scripts/package-release.sh "${{ matrix.asset }}" /tmp/llama.cpp/build/bin/llama-server dist
+
+      # The smoke test above runs the binary inside its build tree, where its
+      # libraries happen to sit beside it. That is exactly why v3.2.8 shipped a
+      # backend that could not load anywhere else (#28): the test passed and the
+      # bundle was broken. So run the PACKAGED binary from a fresh directory
+      # with the build tree hidden, leaving it nothing to load but what the
+      # bundle actually ships.
+      - name: Verify the packaged backend runs outside the build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mv /tmp/llama.cpp/build/bin /tmp/llama.cpp/build/bin.hidden
+          trap 'mv /tmp/llama.cpp/build/bin.hidden /tmp/llama.cpp/build/bin 2>/dev/null || true' EXIT
+          unpacked="$RUNNER_TEMP/unpacked"
+          rm -rf "$unpacked"; mkdir -p "$unpacked"
+          tar -xzf "dist/${{ matrix.asset }}" -C "$unpacked"
+          server="$(find "$unpacked" -type f -name llama-server -perm -u+x | head -1)"
+          test -n "$server" || { echo "::error::no llama-server in ${{ matrix.asset }}"; exit 1; }
+          "$server" --version
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

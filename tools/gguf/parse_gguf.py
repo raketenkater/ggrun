@@ -79,6 +79,13 @@ def _read_kv(f, r, kv_count):
             if 'expert_count' in key and 'used' not in key: r['experts'] = val
             if key.endswith('.expert_used_count'): r['exp_used'] = val
             if 'head_count_kv' in key: r['hkv'] = val
+            # Attention head count is a standard GGUF key, not something only
+            # derivable from key_length. A model that states head_count but
+            # omits key_length (stories260K, and older converts generally) left
+            # ggrun with no head width at all, so the KV block-size guard could
+            # not see that q8_0 was impossible. Substring 'head_count_kv' above
+            # cannot match this key, so the two do not collide.
+            if key.endswith('.attention.head_count'): r['heads'] = val
             if key.endswith('.attention.key_length'): r['kl'] = val
             if key.endswith('.attention.value_length'): r['vl'] = val
             if key.endswith('.attention.key_length_mla'): r['kl_mla'] = val
