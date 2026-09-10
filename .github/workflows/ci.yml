@@ -204,6 +204,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install patchelf
+        # package-release.sh rewrites RUNPATH to $ORIGIN and fails without it,
+        # because a bundle carrying the build host's RUNPATH is broken for
+        # every user and invisible in a file listing (issue #28).
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+
       - name: Build release archive layout with a fake backend
         run: |
           tmp="$(mktemp -d)"
@@ -284,6 +290,12 @@ jobs:
         with:
           go-version-file: go/go.mod
           cache: false
+      - name: Install patchelf
+        # package-release.sh rewrites RUNPATH to $ORIGIN and fails without it,
+        # because a bundle carrying the build host's RUNPATH is broken for
+        # every user and invisible in a file listing (issue #28).
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+
       - name: Install from local release bundle outside repo
         run: |
           tmp="$(mktemp -d)"
