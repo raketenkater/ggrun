@@ -275,6 +275,42 @@
   handling, and process cleanup. It remains a separate optional development
   lane and is not part of the GGUF placement or release gate. (`eb19f46`)
 
+## v3.2.9 — 2026-09-10
+
+Fixes the Linux bundle from #28 and three defects that stopped ggrun serving
+small or unusual models.
+
+- **The Linux bundle is relocatable again.** v3.2.5 through v3.2.8 shipped a
+  `llama-server` whose RUNPATH was `/tmp/llama.cpp/build/bin`, a directory that
+  existed only on the build machine. The libraries were in the tarball and the
+  loader still could not see them, so the backend would not start anywhere
+  (#28). Packaging now rewrites RUNPATH to `$ORIGIN`, and only for an ELF that
+  actually carries a mis-pointed one: a file with no RUNPATH is left alone,
+  because rewriting program headers destroys a statically-linked Go binary. If
+  the backend ran before the rewrite and not after, packaging fails instead of
+  shipping it.
+- **The release build verifies the packaged backend, not the build tree.** The
+  old smoke test ran the binary inside its own build directory, where its
+  libraries sit beside it. That is why the broken bundle shipped through four
+  releases with a green build. The bundle is now extracted to a fresh directory,
+  with the build tree hidden, and must run there.
+- **A model that states `attention.head_count` but omits `key_length` no longer
+  gets an impossible KV cache.** ggrun back-derived the head count from
+  `key_length` alone, so both ended up at zero, the block-size guard saw no
+  constraint, and it selected `q8_0` for an 8-wide head. llama.cpp rejects that
+  at context creation and the backend died during startup. Head width is now
+  derived the way llama.cpp derives it, from `n_embd / n_head`.
+- **The cache canary fits the context it was launched with.** Its prompt was
+  sized in words, which is ~1,700 tokens on an ordinary tokenizer and 15,873 on
+  a small vocabulary. Against a 2,048-token context the backend returned HTTP
+  400 and ggrun rejected a server that was serving correctly. It now measures
+  the tokenizer's real expansion and fits. Where the context cannot hold two
+  512-token checkpoints it verifies the completion endpoint and reports prefix
+  reuse as unproven rather than failed: degraded, not rejected.
+- **The installer probe is scoped to backend adoption.** Probing an existing
+  `llama-server` is bounded to 10 seconds with stdin closed, and a backend that
+  fails the probe is no longer deleted.
+
 ## v3.2.8 — 2026-08-20
 
 - **An Auto review that cannot reach a separate reviewer goes to the main model.**
