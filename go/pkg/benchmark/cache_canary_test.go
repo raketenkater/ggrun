@@ -202,3 +202,88 @@ func TestCacheCanaryRejectsNonDeterministicReplay(t *testing.T) {
 		t.Fatalf("divergent replay activated profile: %+v", result)
 	}
 }
+
+// contextBoundServer mimics llama-server closely enough to matter: it tokenizes
+// with a fixed expansion and rejects any prompt that does not fit n_ctx, which
+// is what a real backend does ("request (15873 tokens) exceeds the available
+// context size (2048 tokens)") and what the fixed-size canary always tripped.
+func contextBoundServer(t *testing.T, nCtx, tokensPerChar int) *httptest.Server {
+	t.Helper()
+	var calls atomic.Int32
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/tokenize") {
+			var body struct {
+				Content string `json:"content"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"tokens": make([]int, len(body.Content)*tokensPerChar),
+			})
+			return
+		}
+		var body struct {
+			Messages []canaryMessage `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		prompt := 0
+		for _, m := range body.Messages {
+			prompt += len(m.Content) * tokensPerChar
+		}
+		if prompt > nCtx {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"request exceeds the available context size","type":"exceed_context_size_error"}}`))
+			return
+		}
+		call := calls.Add(1)
+		cached := 0
+		switch call {
+		case 2:
+			cached = prompt * 4 / 5
+		case 3, 4:
+			cached = prompt * 4 / 5
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "GGRUN_OK"}}},
+			"usage":   map[string]interface{}{"prompt_tokens": prompt},
+			"timings": map[string]interface{}{"cache_n": cached, "prompt_per_second": 42.0},
+		})
+	}))
+}
+
+func TestCacheCanaryFitsTheServedContext(t *testing.T) {
+	server := contextBoundServer(t, 2048, 1)
+	defer server.Close()
+
+	// Without the served context the canary keeps its fixed geometry and the
+	// backend rejects it -- the exact launch failure this guards.
+	if _, err := (&Runner{BaseURL: server.URL, Model: "local"}).RunCacheCanary(); err == nil {
+		t.Fatal("fixed-size canary was expected to overflow a 2048-token context")
+	}
+
+	result, err := (&Runner{BaseURL: server.URL, Model: "local", ContextTokens: 2048}).RunCacheCanary()
+	if err != nil {
+		t.Fatalf("context-sized canary must fit the server it was launched against: %v", err)
+	}
+	if !result.Functional {
+		t.Fatalf("context-sized canary did not verify the endpoint: %+v", result)
+	}
+}
+
+func TestCacheCanaryReportsUnprovableReuseInsteadOfFailing(t *testing.T) {
+	server := contextBoundServer(t, 600, 1)
+	defer server.Close()
+
+	result, err := (&Runner{BaseURL: server.URL, Model: "local", ContextTokens: 600}).RunCacheCanary()
+	if err != nil {
+		t.Fatalf("a small context must not fail a healthy server: %v", err)
+	}
+	if !result.Functional {
+		t.Fatalf("endpoint verification should still happen: %+v", result)
+	}
+	if result.Passed {
+		t.Fatalf("a context too small for two checkpoints cannot claim verified reuse: %+v", result)
+	}
+	if !strings.Contains(result.Reason, "too small to prove prefix reuse") {
+		t.Fatalf("reason must say what was not proven, got %q", result.Reason)
+	}
+}

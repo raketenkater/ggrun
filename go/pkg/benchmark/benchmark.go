@@ -70,6 +70,13 @@ type Runner struct {
 	BaseURL string
 	Model   string
 	Timeout time.Duration // per-request timeout (default 5 minutes)
+	// ContextTokens is the per-slot context the server was actually launched
+	// with. Zero means unknown. The cache canary uses it to size its prompt:
+	// its segments are counted in words, and token expansion per word is a
+	// property of the tokenizer, not a constant. A 512-entry vocabulary turned
+	// the 1260-word canary into 15873 tokens, and the launch died against a
+	// 2048-token context with HTTP 400 instead of serving.
+	ContextTokens int
 	// WorkloadID distinguishes repeated calibration samples inside one running
 	// server. Candidates use the same IDs in separate processes, so they see the
 	// same prompt lengths without a later sample inheriting an earlier prefix.

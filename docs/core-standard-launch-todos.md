@@ -797,3 +797,114 @@ this is blocked/experimental and outside “automatic best.”
   its separate lane.
 - AI Tune is legacy/optional. Manual calibration can remain diagnostic, but
   standard launch owns the final fit and performance decision.
+
+## SMALLCTX — three defects found by one honest e2e run — 2026-09-10
+
+The `install-e2e` Windows job installed cleanly, ran the backend, and then
+failed to serve. Chasing that single failure surfaced three separate defects,
+all in the same shape: a small or unusual model is not a broken model, and
+ggrun refused to serve one it could have served.
+
+Evidence: real llama-server, `ggml-org/models` `tinyllamas/stories260K.gguf`
+(1.1 MB, `n_embd` 64, `n_head` 8, `n_head_kv` 4, `n_ctx_train` 2048, 512-entry
+SPM vocabulary). Confirmed on the CI runner and reproduced locally on CPU.
+
+**1. The e2e fixture could never have loaded.** Both jobs built their model
+with `tests/build_synthetic_gguf.py`, which writes headers only. A real backend
+rejects it outright:
+
+```
+error loading model hyperparameters: key not found in model:
+  llama.attention.layer_norm_rms_epsilon
+loaded meta data with 9 key-value pairs and 0 tensors
+```
+
+Only the fake test backend ever "loaded" it. The generator is correct for the
+GGUF parser tests it was written for; it is not a serving fixture. Both jobs now
+fetch stories260K, and both ask for a completion after `/health`, because a
+server that answers `/health` has not necessarily loaded anything a user can
+talk to.
+
+**2. The KV block-size guard was blind, because the head count was derived from
+the wrong key.** `parse_gguf.py` never read `attention.head_count`; ggrun
+back-derived heads as `embd / key_length`. A model that states `head_count` and
+omits `key_length` therefore had *both* at zero, `kvTypeFitsHeadDim` saw no
+constraint, and ggrun emitted `--cache-type-k q8_0` for an 8-wide head:
+
+```
+K cache type q8_0 with block size 32 does not divide n_embd_head_k=8
+server process exited during startup: exit status 0xc0000005
+```
+
+The guard itself was already right. Absent is not zero (invariant 9): llama.cpp
+does not treat a missing `key_length` as unconstrained, it derives the width
+from `n_embd / n_head` and enforces the rule against the derived value.
+`parse_gguf.py` now reads `attention.head_count`; `kvHeadDims` derives the width
+the same way llama.cpp does; the plan for this model is now `f16`.
+
+**3. The cache canary sized its prompt in words, and paid in tokens.** Three
+420-word segments are ~1,700 tokens on an ordinary tokenizer and 15,873 tokens
+on a 512-entry vocabulary. Against a 2,048-token context the backend answered
+HTTP 400 and ggrun rejected a server that was serving correctly:
+
+```
+request (15873 tokens) exceeds the available context size (2048 tokens)
+Error verifying server profile: functional canary failed
+```
+
+The canary now receives the per-slot context, measures the tokenizer's actual
+expansion through the backend's own `/tokenize`, and sizes its segments to fit.
+When the context cannot hold two 512-token checkpoints it verifies the
+completion endpoint and reports prefix reuse as *unproven* rather than failed --
+a degraded profile, not a rejected launch. An unmeasurable tokenizer falls back
+to one token per byte, the worst plausible expansion, never a low guess.
+
+Verified end to end after all three: ggrun launches stories260K on CPU, serves,
+and generates. It lands in `StateDegraded` for an honest reason ("output varied
+across replay (expected on very small models)"), which is the correct
+destination for a 260K-parameter model.
+
+### Open
+
+- [ ] The release workflow never ran the *packaged* backend outside its build
+      tree, which is why #28 shipped: the smoke test ran
+      `/tmp/llama.cpp/build/bin/llama-server`, where its libraries sit beside
+      it. Now fixed for the cpu/vulkan bundles by extracting the tarball and
+      running it with the build tree hidden. **The CUDA bundle still is not
+      covered**: `package-cuda` exports `LD_LIBRARY_PATH` to the bundle's own
+      `bin` before running it, which masks a missing RUNPATH exactly the way
+      the build tree did. Decide whether that is legitimate (ggrun's `libhub`
+      does set `LD_LIBRARY_PATH` for the backend it launches) or whether the
+      CUDA bundle should be patchelf'd like the others. Do not change it blind.
+- [ ] `--ctx-size` small enough to break the canary is reachable on ordinary
+      models too, not just tiny ones. Worth a matched run with a normal model
+      pinned to a small context to confirm the new sizing holds there.
+
+## MACOS — the packaged backend installs but ggrun cannot find it — 2026-09-10
+
+`release-install-macos-smoke` has been red on main for weeks and is not
+affected by the 2026-09-10 packaging work. The install itself reports success:
+
+```
+⚠ llama-server installed but needs a GPU runtime on this machine
+    (kept; llama.cpp will still be installed)
+✓ Installed llama-server from ggrun-macos-arm64-metal.tar.gz
+```
+
+and then serving fails:
+
+```
+Error: selected backend "llama" was not found under APP_HOME "…/app" or the
+registered backend paths; install/build it or choose backend auto
+```
+
+So the metal bundle is installed, the installer promises to install llama.cpp
+as well, `--cpu` selects the `llama` backend, and nothing under APP_HOME
+answers to that name. Either the promised llama.cpp install does not happen, or
+macOS backend discovery does not see what was installed.
+
+- [ ] Reproduce on real macOS hardware. The runner log cannot distinguish
+      "never installed" from "installed where discovery does not look".
+- [ ] Decide whether `--cpu` on a metal-only install should select the metal
+      backend rather than failing, and whether that warning should be an error
+      at install time instead of a pass.

@@ -18,7 +18,20 @@ func main() {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--help", "-h":
-			fmt.Println("fake llama-server --host HOST --port PORT --model MODEL --n-gpu-layers N --threads N")
+			// ggrun validates a backend's launch dialect by requiring --help to
+			// LIST the flags it intends to use (helpHasExactFlag). Printing a
+			// usage line that omits --version and --help made ggrun refuse this
+			// binary with "did not report --version or --help", which is why
+			// every install smoke job was failing -- including three that had
+			// been red on main for weeks. Mirror a real llama-server's help.
+			fmt.Println("usage: fake llama-server [options]")
+			fmt.Println("  -h,    --help                  show this help and exit")
+			fmt.Println("         --version               show version and exit")
+			fmt.Println("         --host HOST             listen address")
+			fmt.Println("         --port PORT             listen port")
+			fmt.Println("  -m,    --model FNAME           model path")
+			fmt.Println("  -ngl,  --n-gpu-layers N        layers to offload")
+			fmt.Println("  -t,    --threads N             threads")
 			return
 		case "--version":
 			fmt.Println("fake llama-server 1.0")

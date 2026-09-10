@@ -61,12 +61,16 @@ func canaryEvidence(label string, r *canaryResponse) string {
 
 // RunCacheCanary exercises a cold prompt, strict extension, a branch before the
 // newest checkpoint, and an identical replay. The generated prefix crosses at
-// least two 512-token checkpoint boundaries on ordinary tokenizers; callers
-// should run it only for a new profile, never on every startup.
+// least two 512-token checkpoint boundaries when the served context has room
+// for them; callers should run it only for a new profile, never on every
+// startup. When the context is too small to hold such a prefix the canary still
+// verifies the completion endpoint and reports that reuse was not provable,
+// rather than failing a launch that is otherwise healthy.
 func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
-	segmentA := canarySegment("alpha", 420)
-	segmentB := canarySegment("beta", 420)
-	segmentC := canarySegment("gamma", 420)
+	words, cacheProvable := r.canarySegmentWords()
+	segmentA := canarySegment("alpha", words)
+	segmentB := canarySegment("beta", words)
+	segmentC := canarySegment("gamma", words)
 	base := []canaryMessage{
 		{Role: "system", Content: "This is a deterministic ggrun cache verification. Reply with only GGRUN_OK."},
 		{Role: "user", Content: segmentA},
@@ -125,6 +129,16 @@ func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
 		// legitimately answer differently across replays, and this only means the
 		// profile is not promoted to a verified config.
 		result.Reason = "output varied across replay (expected on very small models)"
+		return result, nil
+	}
+	if !cacheProvable {
+		// Conservative claim, not a failure. The endpoint answered correctly
+		// and deterministically; there was simply no room in this context for a
+		// prefix long enough to prove reuse. Saying "passed" here would claim a
+		// verification that never happened.
+		result.Reason = fmt.Sprintf(
+			"served context (%d tokens) is too small to prove prefix reuse; verified the completion endpoint only",
+			r.ContextTokens)
 		return result, nil
 	}
 	if !result.Supported {
@@ -227,6 +241,108 @@ func (r *Runner) canaryChat(messages []canaryMessage) (*canaryResponse, error) {
 		CachedTokens: cached,
 		PromptTPS:    decoded.Timings.PromptPerSecond,
 	}, nil
+}
+
+const (
+	// The prefix-cache canary's original fixed geometry, kept for a server
+	// whose context is unknown or comfortably large.
+	canaryFullSegmentWords = 420
+	canaryMinSegmentWords  = 12
+	// Room for the 96-token reply plus chat-template framing.
+	canaryReplyReserve = 320
+	// Characters of fixed instruction and GGRUN_OK turns wrapped around the
+	// segments in the cold prompt.
+	canaryFrameChars = 320
+	// Prefix caching checkpoints every 512 tokens. A prompt that cannot hold
+	// two checkpoints cannot demonstrate reuse at all, so below this the canary
+	// reports the endpoint healthy and prefix reuse unproven.
+	canaryCacheProofTokens = 1200
+)
+
+// canarySegmentWords sizes the canary to the context the server was actually
+// launched with, and reports whether the result is still long enough to prove
+// prefix reuse.
+//
+// Segments are written in words, but the backend budgets in tokens, and tokens
+// per word belongs to the tokenizer. On a 512-entry vocabulary the fixed
+// 1260-word canary tokenized to 15873 tokens; against a 2048-token context the
+// backend answered HTTP 400 and ggrun rejected a server that was serving
+// correctly. So measure the expansion with the model's own tokenizer instead of
+// assuming it.
+func (r *Runner) canarySegmentWords() (words int, cacheProvable bool) {
+	if r == nil || r.ContextTokens <= 0 {
+		return canaryFullSegmentWords, true
+	}
+	budget := r.ContextTokens - canaryReplyReserve
+	if budget <= 0 {
+		return 1, false
+	}
+	probe := canarySegment("alpha", canaryFullSegmentWords)
+	tokens, err := r.tokenCount(probe)
+	if err != nil || tokens <= 0 {
+		// An unmeasurable tokenizer is not a licence to guess low: one token
+		// per byte is the worst expansion a byte-level fallback can produce,
+		// and overshooting the budget is the failure this exists to prevent.
+		tokens = len(probe)
+	}
+	perChar := float64(tokens) / float64(len(probe))
+	perWord := float64(tokens) / float64(canaryFullSegmentWords)
+	if perWord <= 0 || perChar <= 0 {
+		return canaryFullSegmentWords, true
+	}
+	// The instructions and GGRUN_OK turns around the segments cost tokens too.
+	budget -= int(float64(canaryFrameChars)*perChar) + 1
+	if budget <= 0 {
+		return 1, false
+	}
+	// The cold prompt carries three segments.
+	words = int(float64(budget) * 0.95 / (3 * perWord))
+	switch {
+	case words > canaryFullSegmentWords:
+		words = canaryFullSegmentWords
+	case words < canaryMinSegmentWords:
+		// A readable minimum is preferred, but never at the cost of
+		// overflowing: a context this small is exactly where the fixed-size
+		// canary died.
+		if float64(canaryMinSegmentWords)*3*perWord <= float64(budget) {
+			words = canaryMinSegmentWords
+		}
+	}
+	if words < 1 {
+		words = 1
+	}
+	promptTokens := int(float64(words) * 3 * perWord)
+	return words, promptTokens >= canaryCacheProofTokens
+}
+
+// tokenCount asks the server to tokenize text with the model's own tokenizer.
+// llama.cpp exposes /tokenize; a backend without it returns an error and the
+// caller falls back to a conservative bound.
+func (r *Runner) tokenCount(text string) (int, error) {
+	payload, err := json.Marshal(map[string]interface{}{"content": text})
+	if err != nil {
+		return 0, err
+	}
+	request, err := http.NewRequest(http.MethodPost, strings.TrimRight(r.BaseURL, "/")+"/tokenize", bytes.NewReader(payload))
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := r.client().Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HTTP %d from /tokenize", response.StatusCode)
+	}
+	var decoded struct {
+		Tokens []int `json:"tokens"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&decoded); err != nil {
+		return 0, err
+	}
+	return len(decoded.Tokens), nil
 }
 
 func canarySegment(name string, words int) string {
