@@ -356,6 +356,55 @@ is_real_llama_server() {
     is_native_binary "$p"
 }
 
+# backend_actually_runs proves the candidate can execute, not merely that it is
+# an ELF file with the right name.
+#
+# Reported as issue #28: a user's install adopted a llama-server already on the
+# machine, and every check above passed -- correct filename, native binary, not
+# a simulator -- while the binary could not load at all:
+#
+#   error while loading shared libraries: libllama-server-impl.so:
+#   cannot open shared object file: No such file or directory
+#
+# Upstream split the server into a shared library
+# (ggml-org/llama.cpp#23494), so a pre-split or partially installed build has
+# the right name and an unsatisfiable NEEDED entry. Adoption then always
+# succeeded and the launch always failed. Nothing here can be inferred from the
+# file alone; the only way to know is to run it.
+# run_bounded_probe executes a backend candidate with a hard time limit and no
+# stdin, returning whatever it printed. A probe that times out returns nothing,
+# which backend_actually_runs treats as "could not prove a failure" and accepts:
+# an unresponsive --version is not evidence the binary is broken.
+run_bounded_probe() {
+    local p="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 10 "$p" "$@" 2>&1 </dev/null
+    else
+        "$p" "$@" 2>&1 </dev/null
+    fi
+}
+
+backend_actually_runs() {
+    local p="$1" out
+    out="$(run_bounded_probe "$p" --version)"
+    if [[ -z "$out" ]]; then
+        out="$(run_bounded_probe "$p" --help)"
+    fi
+    # Reject ONLY on a definite loader or exec failure. Deliberately no
+    # requirement on exit status or output content: llama-server exits non-zero
+    # for --help on some builds, forks print different banners, and this runs on
+    # hardware we cannot test. A false rejection would strand a user with a
+    # working backend -- the same class of bug as #28, in the other direction.
+    # Prove the failure, or accept.
+    case "$out" in
+        *"error while loading shared libraries"*|*"cannot open shared object file"*)
+            BACKEND_RUN_ERROR="$(printf '%s' "$out" | head -n 1)"; return 1 ;;
+        *"Exec format error"*|*"cannot execute binary file"*|*"symbol lookup error"*)
+            BACKEND_RUN_ERROR="$(printf '%s' "$out" | head -n 1)"; return 1 ;;
+    esac
+    return 0
+}
+
 installed_real_server() {
     local p="$INSTALL_DIR/$1" t
     [[ -e "$p" || -L "$p" ]] || return 1
@@ -669,8 +718,23 @@ print_discover_kv() {
 
 link_existing_backend() {
     local src="$1" dest="$2"
+    # Adoption is the only place this check belongs. Putting it in
+    # is_real_llama_server made drop_fake_installed_backends delete a correctly
+    # installed backend whenever the probe failed for any reason -- a false
+    # rejection that strands a user with no backend at all, which is worse than
+    # the bug it guards against. Here the cost of refusing is only that we fall
+    # back to the bundle ggrun ships.
     [[ -x "$src" && -n "$dest" ]] || return 1
-    is_real_llama_server "$src" || return 1
+    BACKEND_RUN_ERROR=""
+    if ! is_real_llama_server "$src" || ! backend_actually_runs "$src"; then
+        # Say why, and say which binary. Issue #28's reporter could not tell
+        # that ggrun was running a binary it had adopted from elsewhere on the
+        # machine rather than the one it shipped.
+        if [[ -n "$BACKEND_RUN_ERROR" ]]; then
+            warn "Ignoring existing $dest at $src: $BACKEND_RUN_ERROR"
+        fi
+        return 1
+    fi
     mkdir -p "$INSTALL_DIR"
     if [[ -e "$INSTALL_DIR/$dest" || -L "$INSTALL_DIR/$dest" ]]; then
         return 0
