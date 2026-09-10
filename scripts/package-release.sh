@@ -109,9 +109,14 @@ if [[ "$ASSET_NAME" == *macos* || "$ASSET_NAME" == *darwin* ]] && command -v oto
         copied=0
         while IFS= read -r dep; do
             [[ -n "$dep" && ! -e "$PAYLOAD/bin/$dep" ]] || continue
-            found="$(find "$BUILD_ROOT" -type f -name "$dep" 2>/dev/null | head -1)"
-            [[ -n "$found" ]] || continue
+            # Symlinks count. The name dyld asks for (libggml.0.dylib) is
+            # usually an alias for the real versioned file, and -type f alone
+            # finds none of them. install copies through the link, so the
+            # payload gets real content under the requested name.
+            found="$(find "$BUILD_ROOT" \( -type f -o -type l \) -name "$dep" 2>/dev/null | head -1)"
+            [[ -n "$found" && -f "$found" ]] || continue
             install -m 0644 "$found" "$PAYLOAD/bin/$dep"
+            echo "  bundled $dep" >&2
             copied=1
         done < <(rpath_deps)
         [[ "$copied" -eq 0 ]] && break
@@ -122,7 +127,12 @@ if [[ "$ASSET_NAME" == *macos* || "$ASSET_NAME" == *darwin* ]] && command -v oto
         echo "Error: bundle references @rpath/$dep and does not ship it." >&2
         missing=1
     done < <(rpath_deps)
-    [[ "$missing" -eq 0 ]] || exit 1
+    if [[ "$missing" -ne 0 ]]; then
+        echo "Searched $BUILD_ROOT. It holds:" >&2
+        find "$BUILD_ROOT" \( -type f -o -type l \) -name '*.dylib' 2>/dev/null |
+            sed 's/^/  /' >&2
+        exit 1
+    fi
 fi
 
 # CUDA runtime (not libcuda.so.1 — that is the driver) so a laptop can load
