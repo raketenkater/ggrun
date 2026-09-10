@@ -24,6 +24,7 @@ type Info struct {
 	EmbeddingLength           int     `json:"embd"`
 	FeedForwardLength         int     `json:"ff"`
 	HeadCountKV               int     `json:"hkv"`
+	HeadCount                 int     `json:"heads"` // attention.head_count; absent in some converts
 	KeyLength                 int     `json:"kl"`
 	ValueLength               int     `json:"vl"`
 	VocabSize                 int     `json:"vocab_size"`

@@ -6128,10 +6128,21 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		return err
 	}
 
+	// llama.cpp divides --ctx-size across slots, so a canary occupying one slot
+	// gets the per-slot share. Give the canary that number so it can size its
+	// prompt to what the server will actually accept.
+	canaryContext := 0
+	if strategy != nil && strategy.ContextSize > 0 {
+		canaryContext = strategy.ContextSize
+		if strategy.Parallel > 1 {
+			canaryContext /= strategy.Parallel
+		}
+	}
 	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://127.0.0.1:%d", req.Port),
-		Model:   filepath.Base(model.Path),
-		Timeout: 20 * time.Minute,
+		BaseURL:       fmt.Sprintf("http://127.0.0.1:%d", req.Port),
+		Model:         filepath.Base(model.Path),
+		Timeout:       20 * time.Minute,
+		ContextTokens: canaryContext,
 	}
 	canary, canaryErr := runner.RunCacheCanary()
 	if canaryErr != nil || canary == nil || !canary.Functional {
@@ -9737,10 +9748,14 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		numExperts = info.Fused
 	}
 
-	// Compute attention head count: embd / key_length
-	// (GGUF only exposes KV head count; total heads = embd / head_dim where head_dim = kl)
-	headCount := 0
-	if info.KeyLength > 0 {
+	// Attention head count. GGUF states it directly as attention.head_count;
+	// prefer that. Only when the model omits it fall back to embd / key_length,
+	// which is what this used to do exclusively -- and which yields nothing at
+	// all for a model that states head_count but omits key_length. That left
+	// both the head count and the head width at zero, so the KV block-size
+	// guard saw no constraint and planned a quantized cache llama.cpp refuses.
+	headCount := info.HeadCount
+	if headCount <= 0 && info.KeyLength > 0 {
 		headCount = info.EmbeddingLength / info.KeyLength
 	}
 

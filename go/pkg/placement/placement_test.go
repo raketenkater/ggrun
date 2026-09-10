@@ -4196,6 +4196,56 @@ func TestUnknownHeadDimensionSkipsKVBlockGuard(t *testing.T) {
 	}
 }
 
+// A GGUF that omits attention.key_length/value_length is not unconstrained:
+// llama.cpp derives the head width from n_embd / n_head and enforces the
+// block-size rule against it. Treating the absent keys as "no constraint" made
+// ggrun emit --cache-type-k q8_0 for stories260K (n_embd 64, n_head 8, so an
+// 8-wide head), and llama-server died during startup with "K cache type q8_0
+// with block size 32 does not divide n_embd_head_k=8".
+func TestDerivedHeadDimensionDrivesKVBlockGuard(t *testing.T) {
+	model := &ModelProfile{
+		Path: "stories260k.gguf", SizeBytes: 2 * 1024 * 1024,
+		NumLayers: 5, ContextSize: 2048, HeadCountKV: 8,
+		EmbeddingLength: 64, HeadCount: 8, // n_embd_head_k = 8, not divisible by 32
+	}
+	for _, quality := range []string{"", "auto", "mid", "low"} {
+		got, err := resolveKVQuality(model, quality, "llama")
+		if err != nil {
+			t.Fatalf("preset %q rejected instead of promoting safely: %v", quality, err)
+		}
+		if kvTypeFromQuality(got) != "f16" {
+			t.Fatalf("preset %q resolved to %q/%q, want f16", quality, got, kvTypeFromQuality(got))
+		}
+	}
+
+	_, err := resolveKVQuality(model, "q8_0", "llama")
+	if err == nil || !strings.Contains(err.Error(), "key_length=8") {
+		t.Fatalf("exact q8_0 error = %v, want the derived width reported, not the absent zero", err)
+	}
+
+	caps := &detect.Capabilities{
+		RAM: detect.RAMInfo{TotalMB: 8192, FreeMB: 8192},
+		CPU: detect.CPUInfo{Cores: 4},
+	}
+	strategy, cerr := Compute(caps, model, Options{CPUMode: true, ContextSize: 2048, KVQuality: "auto"})
+	if cerr != nil {
+		t.Fatalf("compute derived-head-dimension model: %v", cerr)
+	}
+	if strategy.KVType != "f16" {
+		t.Fatalf("derived-head-dimension plan selected %q KV, want f16", strategy.KVType)
+	}
+}
+
+// The derivation must not make the guard paranoid: a model whose derived head
+// width is a clean multiple of 32 keeps its quantized cache.
+func TestDerivedHeadDimensionKeepsQuantizedKVWhenDivisible(t *testing.T) {
+	model := &ModelProfile{EmbeddingLength: 4096, HeadCount: 32} // n_embd_head_k = 128
+	got, err := resolveKVQuality(model, "q8_0", "llama")
+	if err != nil || got != "q8_0" {
+		t.Fatalf("divisible derived head dimension must keep q8_0: got %q, err %v", got, err)
+	}
+}
+
 func TestNormalizeKVType(t *testing.T) {
 	for input, want := range map[string]string{
 		"auto": "q8_0", "high": "f16", "mid": "q8_0", "low": "q4_0", "Q5_1": "q5_1", "fp32": "f32",
