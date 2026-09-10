@@ -280,11 +280,20 @@ jobs:
       ASSET: ggrun-linux-x86_64-cuda.tar.gz
 
     steps:
+      # binutils and patchelf are build dependencies too: this job ends by
+      # calling scripts/package-release.sh, which reads RUNPATH with readelf and
+      # rewrites it with patchelf. Without them the bundle is refused AFTER the
+      # ~2.5 hour CUDA compile, which is the worst possible place to find out.
       - name: Install CUDA build dependencies
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates cmake curl git libcurl4-openssl-dev libgomp1
+            build-essential ca-certificates cmake curl git libcurl4-openssl-dev libgomp1 \
+            binutils patchelf
+          # Fail in seconds if a package silently went missing, not in hours.
+          for t in patchelf readelf cmake; do
+            command -v "$t" >/dev/null || { echo "::error::$t missing after install"; exit 1; }
+          done
 
       - uses: actions/checkout@v7
 
@@ -295,6 +304,26 @@ jobs:
 
       - name: Build pinned ik_llama CUDA bundle
         run: OUT_DIR=dist scripts/build-linux-cuda-bundle.sh
+
+      # This job's smoke test below exports LD_LIBRARY_PATH to the bundle's own
+      # bin before running the binary, which hides a mis-pointed RUNPATH exactly
+      # the way running inside the build tree did for the cpu bundle. A user
+      # running the backend directly exports nothing. Assert relocatability
+      # separately, and by inspection: it needs no GPU driver, so it cannot
+      # produce a false failure on a runner that has none.
+      - name: The packaged backend is relocatable
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cuda-check && mkdir -p /tmp/cuda-check
+          tar -xzf dist/${{ env.ASSET }} -C /tmp/cuda-check
+          b="$(find /tmp/cuda-check -type f -name llama-server -perm -u+x | head -1)"
+          test -n "$b" || { echo "::error::no llama-server in ${{ env.ASSET }}"; exit 1; }
+          rp="$(readelf -d "$b" | awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print; exit }')"
+          echo "RUNPATH: [$rp]"
+          case "$rp" in
+            *'$ORIGIN'*) ;;
+            *) echo "::error::CUDA backend RUNPATH is not \$ORIGIN: [$rp]"; exit 1 ;;
+          esac
 
       - name: Smoke-test backend binary
         run: |
