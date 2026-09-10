@@ -24,12 +24,20 @@ permissions:
 
 env:
   LLM_SETUP_NONINTERACTIVE: "1"
-  LLM_SETUP_PY_DEPS: skip
+  # Python dependencies are deliberately NOT skipped any more. `ggrun download`
+  # runs through download_any_gguf.py, so skipping them meant the documented way
+  # to get a model was the one part of the install CI never touched. A user does
+  # not skip them either.
+  #
+  # An official ggml-org repo carrying three quants, so the downloader has to
+  # choose one rather than take the only file present. Q4_0 is 563 MB.
+  E2E_REPO: ggml-org/Qwen3.5-0.8B-GGUF
+  E2E_QUANT: Q4_0
 
 jobs:
   linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -90,6 +98,45 @@ jobs:
           grep -q '"content"' reply.json || {
             echo "::error::served, but generated nothing"; cat reply.json; tail -40 serve.log; exit 1; }
           cat reply.json
+          pkill -f 'port 18841' || true
+
+      # The README tells people to get a model with `ggrun download <repo>`.
+      # Until now nothing tested that: CI skipped the Python dependencies it
+      # needs and fetched its model with curl instead.
+      - name: Download a model the documented way
+        run: |
+          set -euo pipefail
+          "$HOME/ggrun/ggrun" download "$E2E_REPO" --quant "$E2E_QUANT"
+          shopt -s nullglob
+          got=("$HOME/ggrun/models"/*Q4_0*.gguf)
+          [ ${#got[@]} -gt 0 ] || {
+            echo "::error::ggrun download produced no $E2E_QUANT gguf"; ls -lR "$HOME/ggrun/models"; exit 1; }
+          ls -l "${got[0]}"
+          echo "MODEL=${got[0]}" >> "$GITHUB_ENV"
+
+      # No --cpu. On a runner with no GPU ggrun detects that and plans for the
+      # CPU itself, which is a better test than being told; on a self-hosted
+      # machine with cards the same step exercises real placement.
+      - name: Serve the downloaded model on whatever hardware exists
+        run: |
+          set -euo pipefail
+          "$HOME/ggrun/ggrun" detect
+          "$HOME/ggrun/ggrun" "$MODEL" --allow-live-memory-probe \
+            --host 127.0.0.1 --port 18843 > real.log 2>&1 &
+          ok=
+          for _ in $(seq 1 150); do
+            curl -fsS http://127.0.0.1:18843/health 2>/dev/null | grep -q '"status":"ok"' && { ok=1; break; }
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::could not serve the downloaded model"; tail -60 real.log; exit 1; }
+          curl -fsS -m 120 http://127.0.0.1:18843/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"Name one colour. Answer in one word."}],"max_tokens":24}' \
+            > real-reply.json || { echo "::error::generation failed"; tail -60 real.log; exit 1; }
+          grep -q '"content"' real-reply.json || {
+            echo "::error::served, but generated nothing"; cat real-reply.json; tail -60 real.log; exit 1; }
+          cat real-reply.json
+          grep -E 'placement|context fit' real.log | head -5 || true
 
   windows:
     runs-on: windows-latest
@@ -161,6 +208,116 @@ jobs:
             throw "served, but generated nothing"
           }
           Write-Host $r.Content
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      # Same as the Linux job: exercise the downloader the README documents.
+      - name: Download a model the documented way
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $h = "$env:USERPROFILE\ggrun"
+          & "$h\.bin\ggrun.exe" download $env:E2E_REPO --quant $env:E2E_QUANT
+          if ($LASTEXITCODE -ne 0) { throw "ggrun download exited $LASTEXITCODE" }
+          $got = Get-ChildItem "$h\models" -Filter '*Q4_0*.gguf' -ErrorAction SilentlyContinue
+          if (-not $got) {
+            Get-ChildItem "$h\models" -Recurse | Select-Object FullName
+            throw "ggrun download produced no $env:E2E_QUANT gguf"
+          }
+          Write-Host $got[0].FullName
+          "MODEL=$($got[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # No --cpu: let ggrun decide from the hardware it finds.
+      - name: Serve the downloaded model on whatever hardware exists
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $h = "$env:USERPROFILE\ggrun"
+          & "$h\.bin\ggrun.exe" detect
+          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList $env:MODEL,'--allow-live-memory-probe','--host','127.0.0.1','--port','18844' `
+            -RedirectStandardOutput real.log -RedirectStandardError real.err -PassThru -NoNewWindow
+          $ok = $false
+          foreach ($i in 1..150) {
+            try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18844/health' -TimeoutSec 5).Content -match '"status":"ok"') { $ok = $true; break } } catch {}
+            if ($p.HasExited) { break }
+            Start-Sleep 2
+          }
+          if (-not $ok) {
+            Get-Content real.log,real.err -ErrorAction SilentlyContinue | Select-Object -Last 60
+            throw "could not serve the downloaded model"
+          }
+          $body = '{"messages":[{"role":"user","content":"Name one colour. Answer in one word."}],"max_tokens":24}'
+          $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18844/v1/chat/completions' `
+            -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 120
+          if ($r.Content -notmatch '"content"') {
+            Write-Host $r.Content
+            Get-Content real.log,real.err -ErrorAction SilentlyContinue | Select-Object -Last 60
+            throw "served, but generated nothing"
+          }
+          Write-Host $r.Content
+
+  # The same human flow on a machine with real cards. GitHub's hosted runners
+  # have no GPU, so everything above proves the CPU path only: VRAM admission,
+  # placement across devices and split mode are untested by any job here.
+  #
+  # Opt-in, and skipped rather than queued when the runner does not exist:
+  # register a self-hosted runner labelled "gpu" and set the repository variable
+  # GGRUN_GPU_RUNNER to "true". Without the `if` this job would sit in the queue
+  # forever on a repo with no such runner.
+  gpu:
+    if: vars.GGRUN_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # A self-hosted runner is not a fresh machine, so install somewhere of our
+      # own and leave whatever ggrun the owner already has alone.
+      - name: Install
+        env:
+          LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          LLM_APP_HOME: ${{ github.workspace }}/e2e-home
+        run: cat setup.sh | bash
+
+      - name: The GPUs are visible to ggrun
+        env:
+          LLM_APP_HOME: ${{ github.workspace }}/e2e-home
+          CUDA_DEVICE_ORDER: PCI_BUS_ID
+        run: |
+          set -euo pipefail
+          g="$LLM_APP_HOME/ggrun"
+          "$g" --version
+          "$g" detect | tee detect.txt
+          grep -qiE 'cuda|rocm|vulkan|metal|gpu' detect.txt || {
+            echo "::error::this runner is labelled gpu and ggrun found no GPU"; exit 1; }
+
+      - name: Download and serve on the GPUs
+        env:
+          LLM_APP_HOME: ${{ github.workspace }}/e2e-home
+          CUDA_DEVICE_ORDER: PCI_BUS_ID
+        run: |
+          set -euo pipefail
+          g="$LLM_APP_HOME/ggrun"
+          "$g" download "$E2E_REPO" --quant "$E2E_QUANT"
+          shopt -s nullglob
+          got=("$LLM_APP_HOME/models"/*Q4_0*.gguf)
+          [ ${#got[@]} -gt 0 ] || { echo "::error::no downloaded model"; exit 1; }
+          "$g" "${got[0]}" --allow-live-memory-probe --host 127.0.0.1 --port 18845 > gpu.log 2>&1 &
+          ok=
+          for _ in $(seq 1 240); do
+            curl -fsS http://127.0.0.1:18845/health 2>/dev/null | grep -q '"status":"ok"' && { ok=1; break; }
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::could not serve on the GPUs"; tail -60 gpu.log; exit 1; }
+          curl -fsS -m 120 http://127.0.0.1:18845/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"Name one colour. Answer in one word."}],"max_tokens":24}' \
+            | tee gpu-reply.json | grep -q '"content"' || {
+            echo "::error::served, but generated nothing"; tail -60 gpu.log; exit 1; }
+          # A GPU run that quietly placed every layer on the CPU is not a GPU
+          # run, and it would pass every check above.
+          grep -qE '\-ngl [1-9]|n_gpu_layers|CUDA[0-9]' gpu.log || {
+            echo "::error::served, but nothing was placed on a GPU"; tail -60 gpu.log; exit 1; }
+          grep -E 'placement|context fit|CUDA[0-9]' gpu.log | head -8
 
   # Not the human flow -- deliberately. This proves the packaging fix works on a
   # real binary with real shared libraries, which the jobs above cannot do while
