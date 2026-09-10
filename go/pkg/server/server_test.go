@@ -174,7 +174,15 @@ func TestStartWithMemoryScopeStopsScopedChildOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	p, err := StartWithTimeoutToOptions([]string{script}, 59997, 100*time.Millisecond, &out, &out, StartOptions{MemoryMaxMB: 64})
+	// Long enough for systemd-run to bring the scope up and for the shell to
+	// reach its first line, because the assertion below needs a child that
+	// actually started. This was 100 ms, which is a bet on runner load. On
+	// 2026-09-10 it lost: the child was killed before it wrote its pid and a
+	// release build died in preflight with "backend did not record its pid".
+	// The script sleeps 30 s and never signals readiness, so startup still
+	// fails however generous this is. What is under test is the cleanup, not
+	// the deadline.
+	p, err := StartWithTimeoutToOptions([]string{script}, 59997, 5*time.Second, &out, &out, StartOptions{MemoryMaxMB: 64})
 	if err == nil {
 		if p != nil {
 			_ = p.Stop()
