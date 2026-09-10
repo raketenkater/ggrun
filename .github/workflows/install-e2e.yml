@@ -33,25 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go/go.mod
-          cache: false
-
       # A bundle built from THIS commit, so the job tests this code's packaging.
       # Installing the published release instead would make every pull request
       # red until the next release ships, which says nothing about the change.
       # The published artifact is checked on tags, below.
-      - name: Build a release bundle from this commit
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
-          go build -C go -trimpath -o ../ggrun ./cmd/ggrun
-          go build -o "$RUNNER_TEMP/llama-server" ./tests/fake_llama_server.go
-          scripts/package-release.sh ggrun-linux-x86_64-cpu.tar.gz \
-            "$RUNNER_TEMP/llama-server" "$RUNNER_TEMP/release"
-          ( cd "$RUNNER_TEMP/release" && sha256sum ggrun-linux-x86_64-cpu.tar.gz > SHA256SUMS )
-
       # setup.sh finds a local checkout via ${BASH_SOURCE[0]}. When piped that is
       # empty, so it downloads the source from GitHub -- the real network path.
       # LLM_SETUP_REF aims that at this commit; the backend bundle comes from the
@@ -59,8 +44,6 @@ jobs:
       - name: Install
         env:
           LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-          LLM_SETUP_BACKEND: cpu
-          LLM_INSTALL_RELEASE_DIR: ${{ runner.temp }}/release
         run: cat setup.sh | bash
 
       - name: ggrun runs
@@ -151,3 +134,39 @@ jobs:
           }
           Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
           throw "the installed ggrun could not serve a model"
+
+  # Not the human flow -- deliberately. This proves the packaging fix works on a
+  # real binary with real shared libraries, which the jobs above cannot do while
+  # the published release is still broken. It takes the published llama-server,
+  # repackages it with THIS commit's package-release.sh, installs that, and
+  # requires the installed backend to run.
+  #
+  # Delete this job once a release built with the fix has shipped: at that point
+  # the human-flow jobs cover it and this is duplicated scaffolding.
+  packaging-fix-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Repackage the published backend and install it
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          go build -C go -trimpath -o ../ggrun ./cmd/ggrun
+          curl -fsSL -o "$RUNNER_TEMP/pub.tar.gz" \
+            https://github.com/raketenkater/ggrun/releases/download/v3.2.8/ggrun-linux-x86_64-cpu.tar.gz
+          mkdir -p "$RUNNER_TEMP/pub" && tar -xzf "$RUNNER_TEMP/pub.tar.gz" -C "$RUNNER_TEMP/pub"
+          real="$(find "$RUNNER_TEMP/pub" -type f -name llama-server -perm -u+x | head -1)"
+          test -n "$real" || { echo "::error::no llama-server in the published bundle"; exit 1; }
+          echo "published RUNPATH: $(readelf -d "$real" | grep -oE 'Library runpath: \[[^]]*\]' || echo none)"
+          scripts/package-release.sh ggrun-linux-x86_64-cpu.tar.gz "$real" "$RUNNER_TEMP/release"
+          ( cd "$RUNNER_TEMP/release" && sha256sum ggrun-linux-x86_64-cpu.tar.gz > SHA256SUMS )
+          LLM_APP_HOME="$RUNNER_TEMP/app" LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu \
+            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/release" ./setup-linux.sh
+          b="$RUNNER_TEMP/app/.bin/llama-server"
+          echo "installed RUNPATH: $(readelf -d "$(readlink -f "$b")" | grep -oE 'Library runpath: \[[^]]*\]')"
+          timeout 30 "$b" --version </dev/null || { echo "::error::repackaged backend still cannot load"; exit 1; }
