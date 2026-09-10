@@ -372,11 +372,24 @@ is_real_llama_server() {
 # the right name and an unsatisfiable NEEDED entry. Adoption then always
 # succeeded and the launch always failed. Nothing here can be inferred from the
 # file alone; the only way to know is to run it.
+# run_bounded_probe executes a backend candidate with a hard time limit and no
+# stdin, returning whatever it printed. A probe that times out returns nothing,
+# which backend_actually_runs treats as "could not prove a failure" and accepts:
+# an unresponsive --version is not evidence the binary is broken.
+run_bounded_probe() {
+    local p="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 10 "$p" "$@" 2>&1 </dev/null
+    else
+        "$p" "$@" 2>&1 </dev/null
+    fi
+}
+
 backend_actually_runs() {
     local p="$1" out
-    out="$("$p" --version 2>&1)"
+    out="$(run_bounded_probe "$p" --version)"
     if [[ -z "$out" ]]; then
-        out="$("$p" --help 2>&1)"
+        out="$(run_bounded_probe "$p" --help)"
     fi
     # Reject ONLY on a definite loader or exec failure. Deliberately no
     # requirement on exit status or output content: llama-server exits non-zero

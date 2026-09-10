@@ -80,7 +80,7 @@ eval "$(
     awk '
         /^say\(\)|^ok\(\)|^warn\(\)/ {print; next}
         /^_discover_timeout\(\)|^_discover_abspath\(\)|^_discover_skip_path\(\)|^_discover_locate\(\)/ {keep=1}
-        /^is_native_binary\(\)|^is_real_llama_server\(\)|^installed_real_server\(\)|^drop_fake_installed_backends\(\)/ {keep=1}
+        /^is_native_binary\(\)|^is_real_llama_server\(\)|^backend_actually_runs\(\)|^run_bounded_probe\(\)|^installed_real_server\(\)|^drop_fake_installed_backends\(\)/ {keep=1}
         /^find_nvidia_smi\(\)|^cuda_nvcc_path\(\)/ {keep=1}
         /^FOUND_NVIDIA_SMI=/ {keep=1}
         /^_path_score\(\)|^_better_server\(\)|^classify_llama_bin\(\)|^_collect_llama_bins\(\)/ {keep=1}
