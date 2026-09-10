@@ -1873,16 +1873,25 @@ install_python_runtime() {
     fi
 }
 
+python_in_venv() {
+    python3 -c 'import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)'
+}
+
 ensure_python_pip() {
     python3 -m pip --version >/dev/null 2>&1 && return 0
     # CPython normally bundles ensurepip. Distribution builds may omit it, in
     # which case install_python_runtime above installs the distro's pip package.
-    python3 -m ensurepip --user >/dev/null 2>&1 \
+    local args=(--user)
+    python_in_venv && args=()
+    python3 -m ensurepip "${args[@]}" >/dev/null 2>&1 \
         && python3 -m pip --version >/dev/null 2>&1
 }
 
 install_python_download_deps() {
-    local args=(--user --quiet --upgrade huggingface_hub tqdm)
+    local args=(--quiet --upgrade huggingface_hub tqdm)
+    if ! python_in_venv; then
+        args=(--user "${args[@]}")
+    fi
     python3 -m pip install "${args[@]}" >/dev/null 2>&1 \
         || python3 -m pip install --break-system-packages "${args[@]}" >/dev/null 2>&1
     python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
@@ -2044,6 +2053,8 @@ say "── Installing scripts to $INSTALL_DIR ──"
 
 install_ggrun_from_source() {
     [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" ]] || return 0
+    # Explicit release mode must retain the launcher covered by its checksum.
+    [[ "$INSTALL_MODE" == "release" && "$RELEASE_INSTALLED" == "1" ]] && return 0
     ensure_source_repo
     if [[ -f "$SRC_DIR/go/go.mod" ]]; then
         say "── Building ggrun from this checkout ──"

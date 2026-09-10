@@ -615,7 +615,10 @@ try {
         'LLM_BACKEND="llama"',
         "LLAMA_SERVER=`"$llamaServer`""
     )
-    Set-Content -Path $cfgPath -Value $cfg -Encoding UTF8
+    # Reinstalling/upgrading must not reset user configuration.
+    if (!(Test-Path -LiteralPath $cfgPath)) {
+        Set-Content -Path $cfgPath -Value $cfg -Encoding UTF8
+    }
 
     Write-CmdWrapper (Join-Path $InstallDir 'ggrun.cmd') ''
 

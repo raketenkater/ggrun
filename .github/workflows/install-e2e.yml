@@ -1,23 +1,24 @@
 name: install-e2e
 
-# The install a human actually performs, on a machine that has never seen ggrun.
-#
-# Every install failure reported so far (#18, #26, #27, #28) was "the install
-# produced something that cannot run", and no existing job could have caught
-# them: they build a fake backend and install from a local directory. This runs
-# the real installer and then runs ggrun.
-#
-# The script is PIPED, as the documented one-liner pipes it. That makes stdin
-# the pipe rather than a terminal, which is why a prompt that works when you run
-# ./setup.sh hangs forever for a real user. Piping from the checkout rather than
-# fetching main means a pull request tests its own installer.
+# PRs install THIS candidate with a real backend from the pinned prior release.
+# Published-release checks separately run the documented network entry points.
+# Both paths download a real model, generate, and verify process cleanup.
 
 on:
   push:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  release:
+    types: [published]
+  schedule:
+    - cron: '17 5 * * 1'
   workflow_dispatch:
+    inputs:
+      published:
+        description: Test the currently published release instead of this candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,15 +42,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # setup.sh finds a local checkout via ${BASH_SOURCE[0]}. When piped that is
-      # empty, so it downloads the source from GitHub -- the real network path a
-      # user takes. LLM_SETUP_REF aims that at this commit so a pull request
-      # tests its own installer; the backend still comes from the published
-      # release, because that is what a user actually receives.
-      - name: Install
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      - name: Install candidate with a real packaged backend
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          go build -C go -trimpath -o ggrun ./cmd/ggrun
+          asset=ggrun-linux-x86_64-cpu.tar.gz
+          mkdir -p "$RUNNER_TEMP/published" "$RUNNER_TEMP/candidate"
+          curl -fL --retry 3 "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -o "$RUNNER_TEMP/published/$asset"
+          curl -fL --retry 3 https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS -o "$RUNNER_TEMP/published/SHA256SUMS"
+          (cd "$RUNNER_TEMP/published" && grep " $asset$" SHA256SUMS | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/published/$asset" -C "$RUNNER_TEMP/published"
+          backend="$(find "$RUNNER_TEMP/published" -type f -name llama-server -print -quit)"
+          scripts/package-release.sh "$asset" "$backend" "$RUNNER_TEMP/candidate"
+          (cd "$RUNNER_TEMP/candidate" && sha256sum "$asset" > SHA256SUMS)
+          LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu LLM_INSTALL_SCAN_SYSTEM=0 \
+            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/candidate" ./setup-linux.sh
+
+      - name: Install published release through documented entry point
+        if: ${{ github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true }}
         env:
-          LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: cat setup.sh | bash
+          LLM_INSTALL_SCAN_SYSTEM: "0"
+        run: |
+          # shellcheck disable=SC2002 # piping the documented entry point is the test
+          cat setup.sh | bash
 
       - name: ggrun runs
         run: |
@@ -76,29 +98,21 @@ jobs:
       # llama.cpp's own server tests use.
       - name: Serve a model
         run: |
-          set -euo pipefail
           mkdir -p "$HOME/ggrun/models"
-          curl -fsSL --retry 3 --retry-all-errors -o "$HOME/ggrun/models/tiny.gguf" \
+          curl -fsSL --retry 3 -o "$HOME/ggrun/models/tiny.gguf" \
             https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
-          # A runner has no GPU, so ggrun would ask before doing one contained
-          # live load. Nothing can answer a prompt in CI, so approve it up front.
-          "$HOME/ggrun/ggrun" "$HOME/ggrun/models/tiny.gguf" --cpu --allow-live-memory-probe \
-            --host 127.0.0.1 --port 18841 > serve.log 2>&1 &
-          ok=
-          for _ in $(seq 1 90); do
-            curl -fsS http://127.0.0.1:18841/health 2>/dev/null | grep -q '"status":"ok"' && { ok=1; break; }
-            sleep 2
-          done
-          [ -n "$ok" ] || { echo "::error::the installed ggrun could not serve a model"; tail -40 serve.log; exit 1; }
-          # Answering /health is not the same as answering a user. Generate.
-          curl -fsS -m 60 http://127.0.0.1:18841/v1/chat/completions \
-            -H 'Content-Type: application/json' \
-            -d '{"messages":[{"role":"user","content":"once upon a time"}],"max_tokens":16}' \
-            > reply.json || { echo "::error::generation request failed"; tail -40 serve.log; exit 1; }
-          grep -q '"content"' reply.json || {
-            echo "::error::served, but generated nothing"; cat reply.json; tail -40 serve.log; exit 1; }
-          cat reply.json
-          pkill -f 'port 18841' || true
+          python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" \
+            --model "$HOME/ggrun/models/tiny.gguf" --cpu --port 18841 --output evidence/tiny
+
+      - name: Reinstall candidate without resetting configuration
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        run: |
+          config="$HOME/ggrun/.config/config"
+          printf '\nLLM_PORT=19249\n' >> "$config"
+          cp "$config" "$RUNNER_TEMP/config-before-upgrade"
+          LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu LLM_INSTALL_SCAN_SYSTEM=0 \
+            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/candidate" ./setup-linux.sh
+          cmp "$RUNNER_TEMP/config-before-upgrade" "$config"
 
       # The README tells people to get a model with `ggrun download <repo>`.
       # Until now nothing tested that: CI skipped the Python dependencies it
@@ -118,25 +132,17 @@ jobs:
       # CPU itself, which is a better test than being told; on a self-hosted
       # machine with cards the same step exercises real placement.
       - name: Serve the downloaded model on whatever hardware exists
-        run: |
-          set -euo pipefail
-          "$HOME/ggrun/ggrun" detect
-          "$HOME/ggrun/ggrun" "$MODEL" --allow-live-memory-probe \
-            --host 127.0.0.1 --port 18843 > real.log 2>&1 &
-          ok=
-          for _ in $(seq 1 150); do
-            curl -fsS http://127.0.0.1:18843/health 2>/dev/null | grep -q '"status":"ok"' && { ok=1; break; }
-            sleep 2
-          done
-          [ -n "$ok" ] || { echo "::error::could not serve the downloaded model"; tail -60 real.log; exit 1; }
-          curl -fsS -m 120 http://127.0.0.1:18843/v1/chat/completions \
-            -H 'Content-Type: application/json' \
-            -d '{"messages":[{"role":"user","content":"Name one colour. Answer in one word."}],"max_tokens":24}' \
-            > real-reply.json || { echo "::error::generation failed"; tail -60 real.log; exit 1; }
-          grep -q '"content"' real-reply.json || {
-            echo "::error::served, but generated nothing"; cat real-reply.json; tail -60 real.log; exit 1; }
-          cat real-reply.json
-          grep -E 'placement|context fit' real.log | head -5 || true
+        run: python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" --model "$MODEL" --port 18843 --output evidence/downloaded
+
+      - name: Preserve install and serving evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-install-evidence
+          path: |
+            evidence/
+            ~/ggrun/.logs/setup-*.log
+
 
   windows:
     runs-on: windows-latest
@@ -144,11 +150,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Windows PowerShell 5.1, not pwsh 7: it is what the README tells users to
-      # run, what #27's reporter used, and the only one that reads a BOM-less
-      # UTF-8 script as Windows-1252 (an em-dash in a message broke a whole
-      # install once, #18).
-      - name: Install
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      - name: Install candidate with a real packaged backend
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          go build -C go -trimpath -o ggrun.exe ./cmd/ggrun
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed' }
+          $asset = 'ggrun-windows-x86_64-cpu.zip'
+          $published = Join-Path $env:RUNNER_TEMP 'published'
+          $candidate = Join-Path $env:RUNNER_TEMP 'candidate'
+          New-Item -ItemType Directory -Force -Path $published,$candidate | Out-Null
+          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -OutFile "$published/$asset"
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS' -OutFile "$published/SHA256SUMS"
+          $line = Get-Content "$published/SHA256SUMS" | Where-Object { $_ -match " $([regex]::Escape($asset))$" }
+          if (!$line -or (Get-FileHash "$published/$asset" -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0]) { throw 'Published backend checksum mismatch' }
+          Expand-Archive "$published/$asset" "$published/unpacked"
+          $backend = Get-ChildItem "$published/unpacked" -Recurse -Filter llama-server.exe | Select-Object -First 1
+          if (!$backend) { throw 'Published backend missing' }
+          ./scripts/package-release.ps1 -AssetName $asset -ServerBin $backend.FullName -OutDir $candidate -LlmServerBin go/ggrun.exe
+          $hash = (Get-FileHash "$candidate/$asset" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content "$candidate/SHA256SUMS" -Encoding ASCII
+          ./install.ps1 -InstallDir "$env:USERPROFILE/ggrun" -ReleaseDir $candidate -Backend cpu -NoPath -AssumeYes
+
+      - name: Install published release through documented entry point
+        if: ${{ github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true }}
         shell: powershell
         run: Get-Content install.ps1 -Raw | Invoke-Expression
 
@@ -164,8 +195,10 @@ jobs:
           $exe  = Join-Path $root '.bin\ggrun.exe'
           if (-not (Test-Path $exe)) { Get-ChildItem $root -Recurse -Depth 1 | Select-Object FullName; throw "ggrun.exe not at $exe" }
           if (-not (Test-Path $cmd)) { throw "ggrun.cmd wrapper not at $cmd" }
-          & $exe --version
-          & $exe detect | Out-Null
+          & $cmd --version
+          if ($LASTEXITCODE -ne 0) { throw "Wrapper version failed" }
+          & $cmd detect | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Wrapper detect failed" }
 
       - name: The installed backend runs
         shell: powershell
@@ -173,7 +206,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $found = Get-ChildItem "$env:USERPROFILE\ggrun\.bin" -Filter 'llama-server*.exe' -ErrorAction SilentlyContinue
           if (-not $found) { throw "no backend installed" }
-          foreach ($b in $found) { Write-Host $b.FullName; & $b.FullName --version }
+          foreach ($b in $found) { Write-Host $b.FullName; & $b.FullName --version; if ($LASTEXITCODE -ne 0) { throw "Backend version failed" } }
 
       # Same real model as the Linux job -- see the comment there for why the
       # synthetic GGUF that used to be built here could never load.
@@ -181,34 +214,23 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $h = "$env:USERPROFILE\ggrun"
-          New-Item -ItemType Directory -Force -Path "$h\models" | Out-Null
-          Invoke-WebRequest -UseBasicParsing `
-            'https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf' `
-            -OutFile "$h\models\tiny.gguf"
-          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList "$h\models\tiny.gguf",'--cpu','--allow-live-memory-probe','--host','127.0.0.1','--port','18842' `
-            -RedirectStandardOutput serve.log -RedirectStandardError serve.err -PassThru -NoNewWindow
-          $ok = $false
-          foreach ($i in 1..90) {
-            try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/health' -TimeoutSec 5).Content -match '"status":"ok"') { $ok = $true; break } } catch {}
-            if ($p.HasExited) { break }
-            Start-Sleep 2
-          }
-          if (-not $ok) {
-            Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
-            throw "the installed ggrun could not serve a model"
-          }
-          # Answering /health is not the same as answering a user. Generate.
-          $body = '{"messages":[{"role":"user","content":"once upon a time"}],"max_tokens":16}'
-          $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/v1/chat/completions' `
-            -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
-          if ($r.Content -notmatch '"content"') {
-            Write-Host $r.Content
-            Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
-            throw "served, but generated nothing"
-          }
-          Write-Host $r.Content
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          $root = Join-Path $env:USERPROFILE 'ggrun'
+          New-Item -ItemType Directory -Force -Path "$root\models" | Out-Null
+          Invoke-WebRequest -UseBasicParsing 'https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf' -OutFile "$root\models\tiny.gguf"
+          python scripts/verify-installed-serving.py --launcher "$root\ggrun.cmd" --model "$root\models\tiny.gguf" --cpu --port 18842 --output evidence/tiny
+          if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
+
+      - name: Reinstall candidate without resetting configuration
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $env:USERPROFILE 'ggrun'
+          $config = Join-Path $app '.config/config'
+          Add-Content $config "`nLLM_PORT=19249"
+          $before = (Get-FileHash $config).Hash
+          ./install.ps1 -InstallDir $app -ReleaseDir "$env:RUNNER_TEMP/candidate" -Backend cpu -NoPath -AssumeYes
+          if ((Get-FileHash $config).Hash -ne $before) { throw 'Reinstall changed user configuration' }
 
       # Same as the Linux job: exercise the downloader the README documents.
       - name: Download a model the documented way
@@ -230,30 +252,17 @@ jobs:
       - name: Serve the downloaded model on whatever hardware exists
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          $h = "$env:USERPROFILE\ggrun"
-          & "$h\.bin\ggrun.exe" detect
-          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList $env:MODEL,'--allow-live-memory-probe','--host','127.0.0.1','--port','18844' `
-            -RedirectStandardOutput real.log -RedirectStandardError real.err -PassThru -NoNewWindow
-          $ok = $false
-          foreach ($i in 1..150) {
-            try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18844/health' -TimeoutSec 5).Content -match '"status":"ok"') { $ok = $true; break } } catch {}
-            if ($p.HasExited) { break }
-            Start-Sleep 2
-          }
-          if (-not $ok) {
-            Get-Content real.log,real.err -ErrorAction SilentlyContinue | Select-Object -Last 60
-            throw "could not serve the downloaded model"
-          }
-          $body = '{"messages":[{"role":"user","content":"Name one colour. Answer in one word."}],"max_tokens":24}'
-          $r = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18844/v1/chat/completions' `
-            -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 120
-          if ($r.Content -notmatch '"content"') {
-            Write-Host $r.Content
-            Get-Content real.log,real.err -ErrorAction SilentlyContinue | Select-Object -Last 60
-            throw "served, but generated nothing"
-          }
-          Write-Host $r.Content
+          python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:MODEL" --port 18844 --output evidence/downloaded
+          if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
+
+      - name: Preserve install and serving evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-install-evidence
+          path: |
+            evidence/
+            ~/ggrun/.logs/
 
   # The same human flow on a machine with real cards. GitHub's hosted runners
   # have no GPU, so everything above proves the CPU path only: VRAM admission,
@@ -264,7 +273,7 @@ jobs:
   # GGRUN_GPU_RUNNER to "true". Without the `if` this job would sit in the queue
   # forever on a repo with no such runner.
   gpu:
-    if: vars.GGRUN_GPU_RUNNER == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.GGRUN_GPU_RUNNER == 'true'
     runs-on: [self-hosted, gpu]
     timeout-minutes: 60
     steps:
@@ -274,13 +283,16 @@ jobs:
       # own and leave whatever ggrun the owner already has alone.
       - name: Install
         env:
+          LLM_INSTALL_SCAN_SYSTEM: "0"
           LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-          LLM_APP_HOME: ${{ github.workspace }}/e2e-home
-        run: cat setup.sh | bash
+          LLM_APP_HOME: ${{ runner.temp }}/ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          # shellcheck disable=SC2002 # piping the documented entry point is the test
+          cat setup.sh | bash
 
       - name: The GPUs are visible to ggrun
         env:
-          LLM_APP_HOME: ${{ github.workspace }}/e2e-home
+          LLM_APP_HOME: ${{ runner.temp }}/ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           CUDA_DEVICE_ORDER: PCI_BUS_ID
         run: |
           set -euo pipefail
@@ -292,7 +304,7 @@ jobs:
 
       - name: Download and serve on the GPUs
         env:
-          LLM_APP_HOME: ${{ github.workspace }}/e2e-home
+          LLM_APP_HOME: ${{ runner.temp }}/ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           CUDA_DEVICE_ORDER: PCI_BUS_ID
         run: |
           set -euo pipefail
@@ -301,56 +313,14 @@ jobs:
           shopt -s nullglob
           got=("$LLM_APP_HOME/models"/*Q4_0*.gguf)
           [ ${#got[@]} -gt 0 ] || { echo "::error::no downloaded model"; exit 1; }
-          "$g" "${got[0]}" --allow-live-memory-probe --host 127.0.0.1 --port 18845 > gpu.log 2>&1 &
-          ok=
-          for _ in $(seq 1 240); do
-            curl -fsS http://127.0.0.1:18845/health 2>/dev/null | grep -q '"status":"ok"' && { ok=1; break; }
-            sleep 2
-          done
-          [ -n "$ok" ] || { echo "::error::could not serve on the GPUs"; tail -60 gpu.log; exit 1; }
-          curl -fsS -m 120 http://127.0.0.1:18845/v1/chat/completions \
-            -H 'Content-Type: application/json' \
-            -d '{"messages":[{"role":"user","content":"Name one colour. Answer in one word."}],"max_tokens":24}' \
-            | tee gpu-reply.json | grep -q '"content"' || {
-            echo "::error::served, but generated nothing"; tail -60 gpu.log; exit 1; }
-          # A GPU run that quietly placed every layer on the CPU is not a GPU
-          # run, and it would pass every check above.
-          grep -qE '\-ngl [1-9]|n_gpu_layers|CUDA[0-9]' gpu.log || {
-            echo "::error::served, but nothing was placed on a GPU"; tail -60 gpu.log; exit 1; }
-          grep -E 'placement|context fit|CUDA[0-9]' gpu.log | head -8
+          python3 scripts/verify-installed-serving.py --launcher "$g" --model "${got[0]}" --port 18845 --output evidence/gpu
+          # Require an actual nonzero model allocation, not flag/help text.
+          grep -Eq '(CUDA[0-9]+|Vulkan[0-9]+|Metal)[^[:cntrl:]]*model buffer size = +[1-9][0-9.]* MiB' evidence/gpu/serve.log || {
+            echo "::error::No positive device model allocation recorded"; exit 1; }
 
-  # Not the human flow -- deliberately. This proves the packaging fix works on a
-  # real binary with real shared libraries, which the jobs above cannot do while
-  # the published release is still broken. It takes the published llama-server,
-  # repackages it with THIS commit's package-release.sh, installs that, and
-  # requires the installed backend to run.
-  #
-  # Delete this job once a release built with the fix has shipped: at that point
-  # the human-flow jobs cover it and this is duplicated scaffolding.
-  packaging-fix-proof:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Preserve GPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          go-version-file: go/go.mod
-          cache: false
-      - name: Repackage the published backend and install it
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
-          go build -C go -trimpath -o ../ggrun ./cmd/ggrun
-          curl -fsSL -o "$RUNNER_TEMP/pub.tar.gz" \
-            https://github.com/raketenkater/ggrun/releases/download/v3.2.8/ggrun-linux-x86_64-cpu.tar.gz
-          mkdir -p "$RUNNER_TEMP/pub" && tar -xzf "$RUNNER_TEMP/pub.tar.gz" -C "$RUNNER_TEMP/pub"
-          real="$(find "$RUNNER_TEMP/pub" -type f -name llama-server -perm -u+x | head -1)"
-          test -n "$real" || { echo "::error::no llama-server in the published bundle"; exit 1; }
-          echo "published RUNPATH: $(readelf -d "$real" | grep -oE 'Library runpath: \[[^]]*\]' || echo none)"
-          scripts/package-release.sh ggrun-linux-x86_64-cpu.tar.gz "$real" "$RUNNER_TEMP/release"
-          ( cd "$RUNNER_TEMP/release" && sha256sum ggrun-linux-x86_64-cpu.tar.gz > SHA256SUMS )
-          LLM_APP_HOME="$RUNNER_TEMP/app" LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu \
-            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/release" ./setup-linux.sh
-          b="$RUNNER_TEMP/app/.bin/llama-server"
-          echo "installed RUNPATH: $(readelf -d "$(readlink -f "$b")" | grep -oE 'Library runpath: \[[^]]*\]')"
-          timeout 30 "$b" --version </dev/null || { echo "::error::repackaged backend still cannot load"; exit 1; }
+          name: gpu-install-evidence
+          path: evidence/
