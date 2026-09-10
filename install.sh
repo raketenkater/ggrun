@@ -353,8 +353,7 @@ is_real_llama_server() {
     case "$p" in
         *simulator*|*llama-eval*|*/examples/*) return 1 ;;
     esac
-    is_native_binary "$p" || return 1
-    backend_actually_runs "$p"
+    is_native_binary "$p"
 }
 
 # backend_actually_runs proves the candidate can execute, not merely that it is
@@ -719,9 +718,15 @@ print_discover_kv() {
 
 link_existing_backend() {
     local src="$1" dest="$2"
+    # Adoption is the only place this check belongs. Putting it in
+    # is_real_llama_server made drop_fake_installed_backends delete a correctly
+    # installed backend whenever the probe failed for any reason -- a false
+    # rejection that strands a user with no backend at all, which is worse than
+    # the bug it guards against. Here the cost of refusing is only that we fall
+    # back to the bundle ggrun ships.
     [[ -x "$src" && -n "$dest" ]] || return 1
     BACKEND_RUN_ERROR=""
-    if ! is_real_llama_server "$src"; then
+    if ! is_real_llama_server "$src" || ! backend_actually_runs "$src"; then
         # Say why, and say which binary. Issue #28's reporter could not tell
         # that ggrun was running a binary it had adopted from elsewhere on the
         # machine rather than the one it shipped.
