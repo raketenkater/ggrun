@@ -185,7 +185,11 @@ ggrun does not own are forwarded unchanged.
 - **Linux NVIDIA:** ik_llama.cpp CUDA is the most tested and fastest path on my
   machine. Matching releases ship a portable CUDA bundle; source build is the fallback.
 - **Linux AMD / Intel:** mainline llama.cpp through Vulkan.
-- **macOS:** mainline llama.cpp with Metal and unified-memory detection.
+- **macOS (deprecated, best-effort):** mainline llama.cpp with Metal and
+  unified-memory detection. It builds, installs and serves today, and its CI job
+  still runs so a regression stays visible. But nobody working on ggrun has a Mac
+  to reproduce on, so macOS never holds a release and a release may ship without
+  a macOS bundle. Use it; do not depend on it.
 - **Windows:** CPU bundles and native NVIDIA CUDA support.
 - **Custom binaries:** select one with `--server-bin` or `LLAMA_SERVER`.
 - **FreeToken (experimental):** `ggrun freetoken <checkpoint> --gpu N` provides
