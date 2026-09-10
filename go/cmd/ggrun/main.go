@@ -6227,6 +6227,13 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 	// of this exact scope starts directly from it. Failure degrades to a log —
 	// the launch is already active and must not be failed by a cache write.
 	saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy)
+	// Planning a candidate must not consume its bootstrap evidence. Only a
+	// cache-on process that reached activation has completed that handoff.
+	if strategy.HotExpertCacheSlots > 0 {
+		if err := placement.ClearHotExpertBootstrapPin(cfg.CacheDir, model.Path); err != nil {
+			fmt.Fprintf(os.Stderr, "[hot-experts] could not clear completed bootstrap pin: %v\n", err)
+		}
+	}
 	fmt.Fprintf(os.Stderr, "[verify] active profile: append cache=%d, branch cache=%d tokens\n",
 		canary.AppendCachedTokens, canary.BranchCachedTokens)
 	return nil
@@ -6490,6 +6497,11 @@ func cmdLaunch(args []string) {
 		}
 	}
 	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
+	// Missing required backend features cannot be repaired by memory recovery.
+	if err := validateRequiredHotExpertBackend(req, be); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}

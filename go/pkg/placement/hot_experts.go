@@ -1055,13 +1055,8 @@ func finalizeHotExpertCache(caps *detect.Capabilities, model *ModelProfile, opts
 				// `on` is an explicit request to serve the cache; there is no
 				// fail-closed packed default to keep.
 				//
-				// The cache engaged, so the bootstrap pin has done its job. Drop
-				// it: it exists only to carry one measurement forward to the
-				// launch that consumes it, and keeping it would replay a frozen
-				// topology after the evidence has moved on.
-				if model != nil {
-					_ = ClearHotExpertBootstrapPin(opts.CacheDir, model.Path)
-				}
+				// Candidate construction is not activation. Retain the bootstrap
+				// pin until the launcher verifies a real cache-on process.
 				return candidate, nil
 			}
 			// `auto`: serve the packed cache-free baseline and let the live agent

@@ -1809,3 +1809,38 @@ Verification: expanded uncached core gate passed all eight packages plus vet
 ./cmd/ggrun` into `/home/mik/go/bin/ggrun`; PATH symlink and lifecycle fix marker
 verified. No new benchmark collection or model restart in this hardening pass.
 Changes remain in the development working tree for review.
+
+
+## Hot-expert auto integration follow-up — 2026-09-09
+
+Development changes following the architecture review and latest Claude ENGAGE
+findings (invariants 4, 7, 9 and 10; cache-capable host-offloaded MoE):
+
+- BuildResourceLedger now takes resolved cache slots from Strategy before
+  allocating evidence keys. Auto/on no longer read a cache-free key simply
+  because no numeric slot count was supplied. Per-device cache-free growth
+  remains a floor; larger measured cache-on growth is preserved.
+- Candidate construction no longer deletes the bootstrap pin. Cleanup occurs
+  after a cache-on launch reaches successful activation, so candidate enumeration
+  or a failed admission cannot consume the next launch's bootstrap evidence.
+  This repairs a lifecycle defect; the full reported Qwen topology oscillation
+  is not yet proven resolved on a live replay.
+- Standard cmdLaunch rejects required on/numeric cache policy when the selected
+  backend lacks the exact capability pair, before placement or safe-floor
+  recovery. Auto remains allowed to serve cache-free on unsupported backends.
+- Calibration schema 34 and placement-plan schema 16 retire affected derived
+  decisions. Existing Claude phase-weight edits remain intact.
+
+Verification: scripts/verify-core-engine.sh passed uncached across all eight
+packages and vet. New invariants exercise resolved auto/on/numeric growth with
+partial per-device evidence, repeated real candidate construction retaining the
+pin, and required capability policy. No new performance campaign, model restart,
+backend install or canonical binary replacement was performed in this pass.
+
+Remaining: locate the user's newer merged automatic backend (not present in the
+latest inspected Claude session/registered worktrees/backend manifest), then
+integrate and validate its actual model/layout capabilities. The currently
+available patch remains single-token/separate-expert oriented. These fixes do
+not establish universal model support, a completed Qwen bootstrap replay, GLM
+OOM elimination, or improved agent-workflow throughput. Do not close ENGAGE's
+live acceptance on these unit tests alone.

@@ -152,6 +152,12 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 		return ledger
 	}
 
+	// Auto/on resolve slots on the strategy, not the request. Evidence lookups
+	// must describe that resolved shape, including its cache-free growth floor.
+	if s.HotExpertCacheSlots > 0 {
+		opts.HotExpertCacheSlots = s.HotExpertCacheSlots
+	}
+
 	runtimeCaps, err := restrictGPUs(caps, opts.GPUs)
 	if err != nil || runtimeCaps == nil {
 		ledger.Fits = false
@@ -813,7 +819,23 @@ func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Str
 	// nevertheless, serving N requested agents in fewer scheduler waves is the
 	// central benefit of --parallel. The live workload measures the real curve.
 	contention := 1 + 0.07*float64(activeLanes-1)
-	est.AgentCost = (0.58*est.PrefillCost + 0.42*est.DecodeCost) * float64(waves) * contention
+	// Weight the phases by what this deployment's traffic actually does, not by
+	// a fixed prior. The 0.58/0.42 default carries no derivation and is inverted
+	// for at least one real workload: a twelve-turn agent session on GLM 5.3
+	// Flash measured 42.3% prefill / 57.7% decode of processed time
+	// (2026-09-08), so the constant weighted the smaller phase more heavily.
+	//
+	// Request-level token counts cannot substitute: llama-server's prefix cache
+	// halves the ratio once re-sent prefixes stop being recomputed (6.9:1 sent
+	// vs 3.34:1 processed). MeasuredAgentPhaseTiming reads the backend's own
+	// timing rows and stays unmeasured below its sample floor, so a cold machine
+	// keeps the historical constants rather than trusting one session.
+	prefillWeight, decodeWeight := 0.58, 0.42
+	if mix := MeasuredAgentPhaseTiming(opts.CacheDir, model.Path); mix.Measured() {
+		prefillWeight = mix.PrefillTimeShare()
+		decodeWeight = 1 - prefillWeight
+	}
+	est.AgentCost = (prefillWeight*est.PrefillCost + decodeWeight*est.DecodeCost) * float64(waves) * contention
 	if waves > 1 {
 		est.Bottleneck = "agent admission queue"
 	}

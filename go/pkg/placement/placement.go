@@ -8389,7 +8389,7 @@ const placementProbeCacheVersion = 7
 // Version 9 uses metadata-preserving probe merges.
 // Version 10 recognizes GLM5Next compound/recurrent state and checkpoint policy.
 // Version 11 follows emitted float32 layer ownership with row/partial guards.
-const placementPlanCacheVersion = 15
+const placementPlanCacheVersion = 16
 
 // swaFull belongs in the key because it changes the KV allocation without
 // changing anything else the key already carries: on Laguna the same context

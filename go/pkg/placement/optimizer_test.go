@@ -878,3 +878,48 @@ func TestCacheGrowthLedgerMergesEvidencePerDevice(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentCostUsesMeasuredPhaseWeight replaces an unexplained prior with the
+// deployment's own traffic.
+//
+// EstimateStrategyCost blended prefill and decode at a fixed 0.58/0.42, added in
+// c8aede1 with no derivation. A twelve-turn agent session on GLM 5.3 Flash
+// measured 42.3% prefill / 57.7% decode of processed time (2026-09-08), so the
+// constant weighted the smaller phase more heavily on at least one real
+// workload. A cold machine, having no measurement, must keep the old constants
+// rather than trust a single session.
+func TestAgentCostUsesMeasuredPhaseWeight(t *testing.T) {
+	model := &ModelProfile{Path: "moe.gguf", Basename: "moe.gguf"}
+
+	// Below the sample floor: nothing recorded, so the weight is unmeasured.
+	cold := t.TempDir()
+	if MeasuredAgentPhaseTiming(cold, model.Path).Measured() {
+		t.Fatal("an empty cache must not report a measured phase mix")
+	}
+
+	// The real session: decode is the larger half, inverting the prior.
+	warm := t.TempDir()
+	measured := AgentPhaseTiming{
+		PrefillMS: 311700, PrefillTokens: 10321,
+		DecodeMS: 425900, DecodeTokens: 3086, Samples: 32,
+	}
+	if err := RecordAgentPhaseTiming(warm, model.Path, measured); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got := MeasuredAgentPhaseTiming(warm, model.Path)
+	if !got.Measured() {
+		t.Fatal("32 samples must clear the floor")
+	}
+	share := got.PrefillTimeShare()
+	if share < 0.40 || share > 0.45 {
+		t.Errorf("prefill share: got %.3f, want ~0.423", share)
+	}
+	// The measured weight must actually disagree with the constant it replaces,
+	// or this wiring changes nothing.
+	if share >= 0.58 {
+		t.Errorf("measured share %.3f does not differ from the 0.58 prior", share)
+	}
+	if w := 1 - share; w <= 0.42 {
+		t.Errorf("measured decode weight %.3f should exceed the 0.42 prior", w)
+	}
+}
