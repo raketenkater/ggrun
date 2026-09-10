@@ -289,6 +289,13 @@ small or unusual models.
   because rewriting program headers destroys a statically-linked Go binary. If
   the backend ran before the rewrite and not after, packaging fails instead of
   shipping it.
+- **macOS had the identical bug, in Mach-O clothing.** The metal bundle's
+  `llama-server` referenced `@rpath/libllama-server-impl.dylib` with nothing in
+  its `LC_RPATH` resolving `@rpath` to "next to me", so dyld could not load a
+  dylib sitting in the same directory. Packaging now adds `@loader_path` and
+  re-signs, since editing a Mach-O invalidates its signature and arm64 will not
+  run one that fails validation. This is why the macOS install job had been
+  failing.
 - **The release build verifies the packaged backend, not the build tree.** The
   old smoke test ran the binary inside its own build directory, where its
   libraries sit beside it. That is why the broken bundle shipped through four

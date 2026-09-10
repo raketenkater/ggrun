@@ -229,6 +229,74 @@ if [[ ${#patch_targets[@]} -gt 0 ]]; then
     [[ "$bad" -eq 0 ]] || exit 1
 fi
 
+# macOS has the identical bug in Mach-O clothing, and it went unnoticed for the
+# same reason: the smoke test ran the binary inside its build tree. Extracted
+# anywhere else the v3.2.9 candidate died with
+#
+#     dyld: Library not loaded: @rpath/libllama-server-impl.dylib
+#
+# The dylib is in the tarball, right beside the binary, and dyld still cannot
+# see it because nothing in LC_RPATH resolves @rpath to "next to me".
+#
+# Add @loader_path -- and only to a Mach-O that actually references @rpath, on
+# the same principle as the ELF rule above: a binary with no @rpath dependency
+# has nothing to relocate, and editing it is pure risk. Then re-sign, because
+# editing a Mach-O invalidates its signature and arm64 refuses to execute one
+# that fails validation.
+if [[ "$ASSET_NAME" == *macos* || "$ASSET_NAME" == *darwin* ]]; then
+    # If the bundle ships dylibs, the tools are mandatory. Without otool we
+    # cannot tell a mis-pointed binary from a healthy one, and skipping quietly
+    # is how the broken bundle shipped in the first place.
+    bundled_dylibs=()
+    for lib in "$PAYLOAD/bin"/*.dylib; do
+        [[ -f "$lib" ]] && bundled_dylibs+=("$lib")
+    done
+    if [[ ${#bundled_dylibs[@]} -gt 0 ]]; then
+        for tool in otool install_name_tool codesign; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                echo "Error: $tool is required to produce a relocatable macOS bundle." >&2
+                echo "       Build macOS assets on macOS." >&2
+                exit 1
+            fi
+        done
+    fi
+
+    macho_targets=()
+    for macho in "$PAYLOAD/bin/llama-server" "${bundled_dylibs[@]+"${bundled_dylibs[@]}"}"; do
+        [[ -f "$macho" ]] || continue
+        otool -L "$macho" 2>/dev/null | grep -q '@rpath/' || continue
+        macho_targets+=("$macho")
+    done
+
+    if [[ ${#macho_targets[@]} -gt 0 ]]; then
+        ran_before=0
+        if timeout 30 "$PAYLOAD/bin/llama-server" --version >/dev/null 2>&1; then
+            ran_before=1
+        fi
+        for macho in "${macho_targets[@]}"; do
+            if ! otool -l "$macho" 2>/dev/null | grep -q '@loader_path'; then
+                install_name_tool -add_rpath @loader_path "$macho" 2>/dev/null || true
+            fi
+            codesign --force --sign - "$macho" >/dev/null 2>&1 || true
+        done
+        if [[ "$ran_before" -eq 1 ]] &&
+           ! timeout 30 "$PAYLOAD/bin/llama-server" --version >/dev/null 2>&1; then
+            echo "Error: bin/llama-server ran before the rpath rewrite and does not run after it." >&2
+            echo "       Packaging corrupted the binary; refusing to ship it." >&2
+            exit 1
+        fi
+        # Prove it.
+        bad=0
+        for macho in "${macho_targets[@]}"; do
+            if ! otool -l "$macho" 2>/dev/null | grep -q '@loader_path'; then
+                echo "Error: $(basename "$macho") has no @loader_path in LC_RPATH" >&2
+                bad=1
+            fi
+        done
+        [[ "$bad" -eq 0 ]] || exit 1
+    fi
+fi
+
 (
     cd "$WORK_DIR"
 
