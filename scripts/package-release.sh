@@ -143,6 +143,49 @@ for f in "$PAYLOAD/bin"/lib*.so.*; do
     ln -sfn "$base" "$PAYLOAD/bin/$soname"
 done
 
+# Make the bundle actually relocatable.
+#
+# The copying above puts every library next to the binary, but that is not
+# enough on ELF: the linker records where to look at BUILD time. The v3.2.8
+# Linux bundles shipped with
+#
+#     Library runpath: [/tmp/llama.cpp/build/bin:]
+#
+# baked into bin/llama-server -- a directory that existed only on the build
+# machine and has no $ORIGIN entry. The binary therefore cannot find its own
+# libraries anywhere else, even sitting in the same directory as all of them.
+# That is issue #28: libllama-server-impl.so IS in the tarball, and the loader
+# still cannot see it.
+#
+# Rewrite RUNPATH to $ORIGIN so the loader looks beside the binary. Do this for
+# the bundled libraries too: they load each other.
+if [[ "$ASSET_NAME" != *windows* && "$ASSET_NAME" != *darwin* && "$ASSET_NAME" != *macos* ]]; then
+    if ! command -v patchelf >/dev/null 2>&1; then
+        # Failing here is deliberate. A bundle whose RUNPATH points at the build
+        # host is broken for every user, and it is invisible in a file listing --
+        # which is exactly why it shipped through four releases.
+        echo "Error: patchelf is required to produce a relocatable Linux bundle." >&2
+        echo "       Install it (apt-get install patchelf) and re-run." >&2
+        exit 1
+    fi
+    for elf in "$PAYLOAD/bin/llama-server" "$PAYLOAD/bin"/lib*.so*; do
+        [[ -f "$elf" ]] || continue          # skip the SONAME symlinks
+        patchelf --set-rpath '$ORIGIN' "$elf" 2>/dev/null || true
+    done
+    # Prove it. A silent patchelf failure would ship the same bug again.
+    if command -v readelf >/dev/null 2>&1; then
+        bad=0
+        while IFS= read -r line; do
+            case "$line" in
+                *'$ORIGIN'*) ;;
+                *) echo "Error: bin/llama-server RUNPATH is not \$ORIGIN: $line" >&2; bad=1 ;;
+            esac
+        done < <(readelf -d "$PAYLOAD/bin/llama-server" 2>/dev/null |
+                 awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print }')
+        [[ "$bad" -eq 0 ]] || exit 1
+    fi
+fi
+
 (
     cd "$WORK_DIR"
 
