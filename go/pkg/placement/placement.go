@@ -650,10 +650,11 @@ type Options struct {
 	// RequireMeasuredBuffers removes cold-start compute/host buffer estimates
 	// from authoritative fit decisions. The contained allocation preflight then
 	// supplies exact evidence before ggrun permits a real launch.
-	RequireMeasuredBuffers bool
-	BackendTag             string // "llama" or "ik_llama"
-	BackendCacheTag        string // backend identity for probe/cache isolation; defaults to BackendTag
-	BackendIdentity        string // exact backend build/commit identity for speculative performance profiles
+	RequireMeasuredBuffers      bool
+	BackendTag                  string // "llama" or "ik_llama"
+	BackendCacheTag             string // backend identity for probe/cache isolation; defaults to BackendTag
+	BackendIdentity             string // exact backend build/commit identity for speculative performance profiles
+	RuntimeGrowthBaseBackendTag string // verified overlay parent; used only as a growth floor
 	// CPUExpertMMapCapability is an explicit loader capability supplied by the
 	// command layer after probing the exact backend binary. Core launches always
 	// set it. Empty retains the historical tag-derived behavior only for legacy
@@ -7005,7 +7006,7 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 	}
 	out := map[int]int{}
 	for k, v := range pc.RuntimeGraphGrowthByGPU {
-		if v > 0 {
+		if v >= 0 {
 			out[k] = v
 		}
 	}
@@ -7041,6 +7042,11 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 // This does NOT relax the compute-buffer cache either -- slot count really does
 // change that measurement.
 func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, backendTag string) map[int]int {
+	return relatedRuntimeGraphGrowth(cacheDir, model, gpus, parallel, backendTag, false)
+}
+
+// Parent builds may supply only healthy serving measurements, never OOM guesses.
+func relatedRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, backendTag string, servingOnly bool) map[int]int {
 	if model == nil || cacheDir == "" {
 		return nil
 	}
@@ -7114,12 +7120,15 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 				continue // estimated (guessed) growth is not evidence for a carry
 			}
 			if fromOOM[dev] || legacyUnsourced {
-				if v > oomByDevice[dev] {
+				if servingOnly {
+					continue
+				}
+				if current, known := oomByDevice[dev]; !known || v > current {
 					oomByDevice[dev] = v
 				}
 				continue
 			}
-			if v > serveByDevice[dev] {
+			if current, known := serveByDevice[dev]; !known || v > current {
 				serveByDevice[dev] = v
 			}
 		}
@@ -8389,7 +8398,7 @@ const placementProbeCacheVersion = 7
 // Version 9 uses metadata-preserving probe merges.
 // Version 10 recognizes GLM5Next compound/recurrent state and checkpoint policy.
 // Version 11 follows emitted float32 layer ownership with row/partial guards.
-const placementPlanCacheVersion = 16
+const placementPlanCacheVersion = 17
 
 // swaFull belongs in the key because it changes the KV allocation without
 // changing anything else the key already carries: on Laguna the same context
@@ -9003,7 +9012,7 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	}
 	sort.Ints(growthIndices)
 	for _, idx := range growthIndices {
-		if mergedGrowth[idx] > 0 {
+		if mergedGrowth[idx] >= 0 {
 			fmt.Fprintf(&b, "PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA%d=%d\n", idx, mergedGrowth[idx])
 			if mergedEstimated[idx] {
 				fmt.Fprintf(&b, "PROBED_RUNTIME_GRAPH_GROWTH_ESTIMATED_CUDA%d=1\n", idx)

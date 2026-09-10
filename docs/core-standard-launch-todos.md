@@ -1645,6 +1645,26 @@ against an implementation that may not survive review.
 
 ## OVERLAY-EVIDENCE — the hot-expert overlay cannot inherit the base backend's growth
 
+Implementation update (2026-09-10): parent growth is a conservative floor, not
+proof of identical graphs. A matching full source revision, source URL and
+reviewed ordered patch lineage authorize a reserve-only parent lookup. Serving
+rows retain model, hardware, workload and parallel scope; OOM-only parent rows
+are excluded. The overlay keeps its own exact allocation and performance keys.
+Both estimated and exact allocation ledgers now apply the floor; exact observed
+peaks avoid double counting when compute and overhead breakdowns are known.
+Explicit measured zero survives persistence and lookup. Derived calibration and
+placement plan schemas are invalidated (35 / 17).
+
+Invariant tests cover parent provenance, command-to-placement wiring, exact
+allocation isolation, per-device maxima, slot sizing and missing/wrong-scope
+records. The uncached core gate passed (all eight packages and vet), and the
+controller was installed with `go install -trimpath ./cmd/ggrun`. No model run
+was started. This does not close live acceptance or the PACKED missing-evidence
+spend gate. See [backend review](hot-expert-backend-review-2026-09-10.md).
+
+Historical diagnosis follows (the identical-growth assumption below is not the
+implemented contract):
+
 Measured 2026-09-10, after the auto-path slot fix (5c35210) landed. GLM 5.3
 Flash still reserves `runtime=0` on every device and still dies, and ggrun now
 self-reports `DEFECT: this launch scope has now needed the safe floor 3 time(s)`.

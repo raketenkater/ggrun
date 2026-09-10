@@ -1,0 +1,123 @@
+name: install-e2e
+
+# The install a human actually performs, on a machine that has never seen ggrun.
+#
+# Every install failure reported so far (#18, #26, #27, #28) was "the install
+# produced something that cannot run", and no existing job could have caught
+# them: they build a fake backend and install from a local directory. This runs
+# the real installer and then runs ggrun.
+#
+# The script is PIPED, as the documented one-liner pipes it. That makes stdin
+# the pipe rather than a terminal, which is why a prompt that works when you run
+# ./setup.sh hangs forever for a real user. Piping from the checkout rather than
+# fetching main means a pull request tests its own installer.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LLM_SETUP_NONINTERACTIVE: "1"
+  LLM_SETUP_PY_DEPS: skip
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup.sh finds a local checkout via ${BASH_SOURCE[0]}. When piped that is
+      # empty, so it downloads the source from GitHub -- which is what a real
+      # user gets. LLM_SETUP_REF points that download at this commit, so a pull
+      # request exercises the real download path against its own code.
+      - name: Install
+        env:
+          LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: cat setup.sh | bash
+
+      - name: ggrun runs
+        run: |
+          set -euo pipefail
+          "$HOME/ggrun/ggrun" --version
+          "$HOME/ggrun/ggrun" detect >/dev/null
+
+      - name: The installed backend runs
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          n=0
+          for b in "$HOME/ggrun/.bin/"llama-server*; do
+            n=$((n+1)); ls -l "$b"
+            timeout 30 "$b" --version </dev/null || { echo "::error::$b did not answer --version"; exit 1; }
+          done
+          [ "$n" -gt 0 ] || { echo "::error::no backend installed"; exit 1; }
+
+      - name: Serve a model
+        run: |
+          set -euo pipefail
+          python3 tests/build_synthetic_gguf.py --out "$HOME/ggrun/models/e2e.gguf" \
+            --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 \
+            --embd 64 --ff 128 --ctx-train 2048
+          "$HOME/ggrun/ggrun" "$HOME/ggrun/models/e2e.gguf" --cpu \
+            --host 127.0.0.1 --port 18841 > serve.log 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -fsS http://127.0.0.1:18841/health 2>/dev/null | grep -q '"status":"ok"' && exit 0
+            sleep 2
+          done
+          echo "::error::the installed ggrun could not serve a model"; tail -40 serve.log; exit 1
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows PowerShell 5.1, not pwsh 7: it is what the README tells users to
+      # run, what #27's reporter used, and the only one that reads a BOM-less
+      # UTF-8 script as Windows-1252 (an em-dash in a message broke a whole
+      # install once, #18).
+      - name: Install
+        shell: powershell
+        run: Get-Content install.ps1 -Raw | Invoke-Expression
+
+      - name: ggrun runs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "$env:USERPROFILE\ggrun\ggrun.exe"
+          if (-not (Test-Path $bin)) { throw "ggrun.exe not installed at $bin" }
+          & $bin --version
+          & $bin detect | Out-Null
+
+      - name: The installed backend runs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $found = Get-ChildItem "$env:USERPROFILE\ggrun\.bin" -Filter 'llama-server*.exe' -ErrorAction SilentlyContinue
+          if (-not $found) { throw "no backend installed" }
+          foreach ($b in $found) { Write-Host $b.FullName; & $b.FullName --version }
+
+      - name: Serve a model
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $h = "$env:USERPROFILE\ggrun"
+          python tests/build_synthetic_gguf.py --out "$h\models\e2e.gguf" `
+            --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 `
+            --embd 64 --ff 128 --ctx-train 2048
+          $p = Start-Process "$h\ggrun.exe" -ArgumentList "$h\models\e2e.gguf",'--cpu','--host','127.0.0.1','--port','18842' `
+            -RedirectStandardOutput serve.log -RedirectStandardError serve.err -PassThru -NoNewWindow
+          foreach ($i in 1..90) {
+            try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/health' -TimeoutSec 5).Content -match '"status":"ok"') { exit 0 } } catch {}
+            if ($p.HasExited) { break }
+            Start-Sleep 2
+          }
+          Get-Content serve.log,serve.err -ErrorAction SilentlyContinue | Select-Object -Last 40
+          throw "the installed ggrun could not serve a model"

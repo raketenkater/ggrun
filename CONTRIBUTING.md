@@ -12,11 +12,15 @@ in their own parked lanes and are not core release dependencies.
 ## Building locally
 
 ```bash
-cd go && go build ./cmd/ggrun
+(cd go && go build ./...)
 ```
 
 For the full clone-and-run setup (app home, models dir, config), see the
 "From a clone" steps in [docs/install.md](docs/install.md#recommended-self-contained-app-home).
+
+For feature boundaries and the current hardening sequence, see
+[production readiness](docs/production-readiness.md). Run the commands below
+from the repository root; Go checks use a subshell so shell/Python paths remain valid.
 
 ## Reporting bugs and proposing changes
 
@@ -34,8 +38,8 @@ Before opening a pull request, run what CI actually gates merges on — all of i
 Go tests:
 
 ```bash
-cd go && go build ./... && go vet ./... && test -z "$(gofmt -l .)" && go test -race ./...
-GOOS=windows GOARCH=amd64 go vet ./...
+(cd go && go build ./... && go vet ./... && test -z "$(gofmt -l .)" && go test -race ./...)
+(cd go && GOOS=windows GOARCH=amd64 go vet ./...)
 shellcheck --severity=error $(git ls-files '*.sh')
 bash -n install.sh scripts/*.sh setup.sh setup-linux.sh setup-mac.sh
 python3 tests/test_parse_gguf.py

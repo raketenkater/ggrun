@@ -29,7 +29,7 @@ import (
 // 29: allocation identity follows emitted float32 ratios with layer-mode guards.
 // 30: oracle cache charges and router ownership corrected; cache/graph attribution separated.
 // 31: explicit cache-slot demotion credits freed device bytes and charges host.
-const CalibrationSchemaVersion = 34
+const CalibrationSchemaVersion = 35
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 

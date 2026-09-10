@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -100,7 +99,13 @@ func (d *Daemon) Start() error {
 	mux.HandleFunc("/reload", d.handleReload)
 	mux.HandleFunc("/config", d.handleConfig)
 
-	srv := &http.Server{Addr: d.addr, Handler: mux}
+	srv := &http.Server{
+		Addr: d.addr, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		// No short WriteTimeout: a legitimate model start may take minutes.
+	}
 	d.mu.Lock()
 	d.http = srv
 	token := d.config.ControlToken
@@ -139,7 +144,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	d.mu.Lock()
@@ -158,18 +163,18 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.process != nil && d.process.IsRunning() {
-		http.Error(w, `{"error":"already running"}`, http.StatusConflict)
+		writeControlError(w, http.StatusConflict, "already running")
 		return
 	}
 	p, err := d.start(d.config, d.config.ServerArgs, d.config.Port, d.config.startupTimeout())
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		writeControlError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	d.process = p
@@ -182,17 +187,17 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.process == nil {
-		http.Error(w, `{"error":"not running"}`, http.StatusConflict)
+		writeControlError(w, http.StatusConflict, "not running")
 		return
 	}
 	if err := d.process.Stop(); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		writeControlError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	d.process = nil
@@ -205,16 +210,16 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var newCfg Config
+	if err := decodeControlJSON(w, r, &newCfg); err != nil {
+		writeControlError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	var newCfg Config
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxControlBodyBytes)).Decode(&newCfg); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
-		return
-	}
 	next := d.config
 	if newCfg.ModelPath != "" {
 		next.ModelPath = newCfg.ModelPath
@@ -227,7 +232,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(newCfg.ServerArgs) > 0 {
 		if !d.config.AllowExplicitServerArgs {
-			http.Error(w, `{"error":"server_args reload is disabled; send model_path to recompute placement"}`, http.StatusBadRequest)
+			writeControlError(w, http.StatusBadRequest, "server_args reload is disabled; send model_path to recompute placement")
 			return
 		}
 		next.ServerArgs = newCfg.ServerArgs
@@ -235,7 +240,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 		// Bare model swap — let ggrun compute placement for it.
 		args, err := next.ComputeArgs(next.ModelPath, next.Port)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"compute placement: %s"}`, err.Error()), http.StatusInternalServerError)
+			writeControlError(w, http.StatusInternalServerError, fmt.Sprintf("compute placement: %s", err.Error()))
 			return
 		}
 		next.ServerArgs = args
@@ -243,7 +248,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	if next.ComputeMemory != nil {
 		highMB, maxMB, err := next.ComputeMemory(next.ServerArgs)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"compute memory scope: %s"}`, err.Error()), http.StatusInternalServerError)
+			writeControlError(w, http.StatusInternalServerError, fmt.Sprintf("compute memory scope: %s", err.Error()))
 			return
 		}
 		next.MemoryHighMB, next.MemoryMaxMB = highMB, maxMB
@@ -254,7 +259,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	wasRunning := d.process != nil && d.process.IsRunning()
 	if wasRunning {
 		if err := d.process.Stop(); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"stop old model: %s"}`, err.Error()), http.StatusInternalServerError)
+			writeControlError(w, http.StatusInternalServerError, fmt.Sprintf("stop old model: %s", err.Error()))
 			return
 		}
 		d.process = nil
@@ -263,7 +268,7 @@ func (d *Daemon) handleReload(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := d.start(next, next.ServerArgs, next.Port, next.startupTimeout())
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		writeControlError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	d.process = p
@@ -310,7 +315,7 @@ func (d *Daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "{\"error\":\"method not allowed\"}", http.StatusMethodNotAllowed)
+		writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	d.mu.Lock()
@@ -334,7 +339,7 @@ func (d *Daemon) authorize(w http.ResponseWriter, r *http.Request) bool {
 	token := d.config.ControlToken
 	d.mu.Unlock()
 	if token == "" {
-		http.Error(w, `{"error":"daemon control token is not configured"}`, http.StatusUnauthorized)
+		writeControlError(w, http.StatusUnauthorized, "daemon control token is not configured")
 		return false
 	}
 	got := r.Header.Get("X-GGRUN-Daemon-Token")
@@ -342,7 +347,7 @@ func (d *Daemon) authorize(w http.ResponseWriter, r *http.Request) bool {
 		got = bearerToken(r.Header.Get("Authorization"))
 	}
 	if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		writeControlError(w, http.StatusUnauthorized, "unauthorized")
 		return false
 	}
 	return true

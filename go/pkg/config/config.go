@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/raketenkater/ggrun/internal/atomicfile"
 	"github.com/raketenkater/ggrun/pkg/backends"
 )
 
@@ -595,45 +597,44 @@ func (c *Config) Save() error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	var f strings.Builder
 
-	fmt.Fprintf(f, "# ggrun configuration\n")
-	fmt.Fprintf(f, "# Precedence: CLI flag > env var > this file > built-in default\n")
-	fmt.Fprintf(f, "LLM_PORT=%d\n", c.Port)
-	fmt.Fprintf(f, "LLM_CTX_SIZE=%q\n", c.CtxValue())
-	fmt.Fprintf(f, "LLM_MAX_RESTARTS=%d\n", c.MaxRestarts)
-	fmt.Fprintf(f, "LLM_KEEP_ALIVE=%d\n", c.KeepAlive)
-	fmt.Fprintf(f, "LLM_HEALTH_TIMEOUT=%d\n", c.HealthTimeout)
-	fmt.Fprintf(f, "LLM_MODEL_DIR=%q\n", c.ModelDir)
-	fmt.Fprintf(f, "LLM_CACHE_DIR=%q\n", c.CacheDir)
-	fmt.Fprintf(f, "LLM_LOG_DIR=%q\n", c.LogDir)
-	fmt.Fprintf(f, "LLM_RAM_BUDGET=%q\n", c.RamBudget)
-	fmt.Fprintf(f, "LLM_RAM_LIMIT_PERCENT=%d\n", c.RAMLimitPercent)
-	fmt.Fprintf(f, "LLM_VRAM_HEADROOM=%q\n", c.VRAMHeadroom)
-	fmt.Fprintf(f, "LLM_RAM_HEADROOM=%q\n", c.RAMHeadroom)
-	fmt.Fprintf(f, "LLM_CGROUP_HEADROOM_MB=%d\n", c.CgroupHeadroomMB)
-	fmt.Fprintf(f, "LLM_KV_PLACEMENT=%q\n", c.KVPlacement)
-	fmt.Fprintf(f, "LLM_KV_QUALITY=%q\n", c.KVQuality)
-	fmt.Fprintf(f, "LLM_SWA_FULL=%v\n", c.SWAFull)
-	fmt.Fprintf(f, "LLM_ASSUME_YES=%v\n", c.AssumeYes)
-	fmt.Fprintf(f, "LLM_ALLOW_LIVE_MEMORY_PROBE=%v\n", c.AllowLiveMemoryProbe)
-	fmt.Fprintf(f, "LLM_BACKEND=%q\n", c.Backend)
-	fmt.Fprintf(f, "LLAMA_SERVER=%q\n", c.LlamaServer)
-	fmt.Fprintf(f, "LLM_APP_HOME=%q\n", c.AppHome)
-	fmt.Fprintf(f, "LLM_TUNE_ROUNDS=%d\n", c.TuneRounds)
-	fmt.Fprintf(f, "LLM_VISION=%v\n", c.Vision)
-	fmt.Fprintf(f, "LLM_PARALLEL=%d\n", c.Parallel)
-	fmt.Fprintf(f, "LLM_HOST=%q\n", c.Host)
-	fmt.Fprintf(f, "LLM_SPEC=%q\n", c.Spec)
-	fmt.Fprintf(f, "LLM_HOT_EXPERTS=%q\n", c.HotExperts)
-	fmt.Fprintf(f, "LLM_SUPPORT_EXPERT=%q\n", c.SupportExpert)
-	fmt.Fprintf(f, "LLM_SUPPORT_ONLINE=%v\n", c.SupportOnline)
-	fmt.Fprintf(f, "LLM_SUPPORT_MODEL=%q\n", c.SupportModel)
-	return nil
+	fmt.Fprintf(&f, "# ggrun configuration\n")
+	fmt.Fprintf(&f, "# Precedence: CLI flag > env var > this file > built-in default\n")
+	fmt.Fprintf(&f, "LLM_PORT=%d\n", c.Port)
+	fmt.Fprintf(&f, "LLM_CTX_SIZE=%q\n", c.CtxValue())
+	fmt.Fprintf(&f, "LLM_MAX_RESTARTS=%d\n", c.MaxRestarts)
+	fmt.Fprintf(&f, "LLM_KEEP_ALIVE=%d\n", c.KeepAlive)
+	fmt.Fprintf(&f, "LLM_HEALTH_TIMEOUT=%d\n", c.HealthTimeout)
+	fmt.Fprintf(&f, "LLM_MODEL_DIR=%q\n", c.ModelDir)
+	fmt.Fprintf(&f, "LLM_CACHE_DIR=%q\n", c.CacheDir)
+	fmt.Fprintf(&f, "LLM_LOG_DIR=%q\n", c.LogDir)
+	fmt.Fprintf(&f, "LLM_RAM_BUDGET=%q\n", c.RamBudget)
+	fmt.Fprintf(&f, "LLM_RAM_LIMIT_PERCENT=%d\n", c.RAMLimitPercent)
+	fmt.Fprintf(&f, "LLM_VRAM_HEADROOM=%q\n", c.VRAMHeadroom)
+	fmt.Fprintf(&f, "LLM_RAM_HEADROOM=%q\n", c.RAMHeadroom)
+	fmt.Fprintf(&f, "LLM_CGROUP_HEADROOM_MB=%d\n", c.CgroupHeadroomMB)
+	fmt.Fprintf(&f, "LLM_KV_PLACEMENT=%q\n", c.KVPlacement)
+	fmt.Fprintf(&f, "LLM_KV_QUALITY=%q\n", c.KVQuality)
+	fmt.Fprintf(&f, "LLM_SWA_FULL=%v\n", c.SWAFull)
+	fmt.Fprintf(&f, "LLM_ASSUME_YES=%v\n", c.AssumeYes)
+	fmt.Fprintf(&f, "LLM_ALLOW_LIVE_MEMORY_PROBE=%v\n", c.AllowLiveMemoryProbe)
+	fmt.Fprintf(&f, "LLM_BACKEND=%q\n", c.Backend)
+	fmt.Fprintf(&f, "LLAMA_SERVER=%q\n", c.LlamaServer)
+	fmt.Fprintf(&f, "LLM_APP_HOME=%q\n", c.AppHome)
+	fmt.Fprintf(&f, "LLM_TUNE_ROUNDS=%d\n", c.TuneRounds)
+	fmt.Fprintf(&f, "LLM_VISION=%v\n", c.Vision)
+	fmt.Fprintf(&f, "LLM_PARALLEL=%d\n", c.Parallel)
+	fmt.Fprintf(&f, "LLM_HOST=%q\n", c.Host)
+	fmt.Fprintf(&f, "LLM_SPEC=%q\n", c.Spec)
+	fmt.Fprintf(&f, "LLM_HOT_EXPERTS=%q\n", c.HotExperts)
+	fmt.Fprintf(&f, "LLM_SUPPORT_EXPERT=%q\n", c.SupportExpert)
+	fmt.Fprintf(&f, "LLM_SUPPORT_ONLINE=%v\n", c.SupportOnline)
+	fmt.Fprintf(&f, "LLM_SUPPORT_MODEL=%q\n", c.SupportModel)
+	return atomicfile.Write(path, 0o600, func(w io.Writer) error {
+		_, err := io.WriteString(w, f.String())
+		return err
+	})
 }
 
 // Show prints the current config with source attribution.

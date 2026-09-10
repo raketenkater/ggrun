@@ -2662,6 +2662,9 @@ func detectRegisteredBackend(cb *backends.Backend) *backendInfo {
 	// the probed flag dialect separately. A recipe name such as "hy3" must not
 	// make an IK fork receive mainline split/spec flags.
 	info.Tag = cb.Tag
+	if base := backends.HotExpertGrowthParent(*cb, backends.Load()); base != nil {
+		info.RuntimeGrowthBaseBackendTag = evidenceBackendCacheTag(&backendInfo{Tag: base.Tag, Identity: backendBuildIdentity(base.Path)})
+	}
 	return info
 }
 
@@ -2773,42 +2776,43 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		}
 	}
 	opts := placement.Options{
-		ContextSize:             ctxSize,
-		AutoContextMax:          autoContextMax,
-		KVPlacement:             req.KVPlacement,
-		KVQuality:               req.KVQuality,
-		KVQualityV:              req.KVQualityV,
-		CPUMode:                 req.CPUMode,
-		RamBudgetMB:             req.RamBudgetMB,
-		RAMLimitPercent:         req.RAMLimitPercent,
-		VRAMHeadroomMB:          req.VRAMHeadroomMB,
-		RAMHeadroomMB:           req.RAMHeadroomMB,
-		RequireMeasuredBuffers:  true,
-		NoMMap:                  req.NoMMap,
-		ForceMMap:               req.ForceMMap,
-		CacheDir:                cacheDir,
-		Host:                    req.Host,
-		BackendTag:              backendDialect(be),
-		BackendCacheTag:         evidenceBackendCacheTag(be),
-		BackendIdentity:         be.Identity,
-		CPUExpertMMapCapability: backendCPUExpertMMapCapability(be),
-		CPUExpertMMapEvidence:   be.CPUExpertMMapEvidence,
-		SamplingProfile:         samplingProfile,
-		WorkloadProfile:         requestWorkloadProfile(req, model),
-		WorkloadConcurrency:     requestWorkloadConcurrency(req),
-		VisionAuto:              req.VisionAuto,
-		MMProjPath:              req.MMProjPath,
-		SpecMode:                req.SpecMode,
-		ForceSpecMoE:            req.ForceSpecMoE,
-		BackendHelp:             be.Help,
-		HotExperts:              hotExperts,
-		HotExpertCacheSlots:     hotSlots,
-		SpecCandidateValidator:  backendSpecCandidateValidator(be, model.ModelArch),
-		CacheFile:               req.TuneCache,
-		Parallel:                req.Parallel,
-		ParallelExplicit:        req.ParallelSet,
-		Threads:                 req.Threads,
-		CacheRAMMB:              req.CacheRAMMB,
+		ContextSize:                 ctxSize,
+		AutoContextMax:              autoContextMax,
+		KVPlacement:                 req.KVPlacement,
+		KVQuality:                   req.KVQuality,
+		KVQualityV:                  req.KVQualityV,
+		CPUMode:                     req.CPUMode,
+		RamBudgetMB:                 req.RamBudgetMB,
+		RAMLimitPercent:             req.RAMLimitPercent,
+		VRAMHeadroomMB:              req.VRAMHeadroomMB,
+		RAMHeadroomMB:               req.RAMHeadroomMB,
+		RequireMeasuredBuffers:      true,
+		NoMMap:                      req.NoMMap,
+		ForceMMap:                   req.ForceMMap,
+		CacheDir:                    cacheDir,
+		Host:                        req.Host,
+		BackendTag:                  backendDialect(be),
+		BackendCacheTag:             evidenceBackendCacheTag(be),
+		RuntimeGrowthBaseBackendTag: be.RuntimeGrowthBaseBackendTag,
+		BackendIdentity:             be.Identity,
+		CPUExpertMMapCapability:     backendCPUExpertMMapCapability(be),
+		CPUExpertMMapEvidence:       be.CPUExpertMMapEvidence,
+		SamplingProfile:             samplingProfile,
+		WorkloadProfile:             requestWorkloadProfile(req, model),
+		WorkloadConcurrency:         requestWorkloadConcurrency(req),
+		VisionAuto:                  req.VisionAuto,
+		MMProjPath:                  req.MMProjPath,
+		SpecMode:                    req.SpecMode,
+		ForceSpecMoE:                req.ForceSpecMoE,
+		BackendHelp:                 be.Help,
+		HotExperts:                  hotExperts,
+		HotExpertCacheSlots:         hotSlots,
+		SpecCandidateValidator:      backendSpecCandidateValidator(be, model.ModelArch),
+		CacheFile:                   req.TuneCache,
+		Parallel:                    req.Parallel,
+		ParallelExplicit:            req.ParallelSet,
+		Threads:                     req.Threads,
+		CacheRAMMB:                  req.CacheRAMMB,
 		// --swa-full is a passthrough flag, but placement cannot treat it as
 		// one: it decides whether sliding-window layers hold the whole context,
 		// which on Laguna is the difference between 13.8 GB and 54.0 GB of KV
@@ -9254,25 +9258,26 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 	applyBackendFeatureCompatibility(backendReq, model, be)
 	applyCachedBackendCapabilities(backendReq, cfg.CacheDir, model, be)
 	opts := placement.Options{
-		ContextSize:             resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
-		KVPlacement:             cfg.KVPlacement,
-		KVQuality:               cfg.KVQuality,
-		SWAFull:                 hasArg(backendReq.ExtraArgs, "--swa-full"),
-		RamBudgetMB:             parseBudgetMB(cfg.RamBudget),
-		RAMLimitPercent:         cfg.RAMLimitPercent,
-		VRAMHeadroomMB:          parseBudgetMB(cfg.VRAMHeadroom),
-		RAMHeadroomMB:           parseBudgetMB(cfg.RAMHeadroom),
-		CacheDir:                cfg.CacheDir,
-		Host:                    cfg.Host,
-		BackendTag:              backendDialect(be),
-		BackendCacheTag:         evidenceBackendCacheTag(be),
-		BackendIdentity:         be.Identity,
-		CPUExpertMMapCapability: backendCPUExpertMMapCapability(be),
-		CPUExpertMMapEvidence:   be.CPUExpertMMapEvidence,
-		BackendHelp:             be.Help,
-		VisionAuto:              cfg.Vision,
-		SpecMode:                cfg.Spec,
-		HotExperts:              cfg.HotExperts,
+		ContextSize:                 resolveCtxFlag(cfg.CtxValue(), model.CTXTrain),
+		KVPlacement:                 cfg.KVPlacement,
+		KVQuality:                   cfg.KVQuality,
+		SWAFull:                     hasArg(backendReq.ExtraArgs, "--swa-full"),
+		RamBudgetMB:                 parseBudgetMB(cfg.RamBudget),
+		RAMLimitPercent:             cfg.RAMLimitPercent,
+		VRAMHeadroomMB:              parseBudgetMB(cfg.VRAMHeadroom),
+		RAMHeadroomMB:               parseBudgetMB(cfg.RAMHeadroom),
+		CacheDir:                    cfg.CacheDir,
+		Host:                        cfg.Host,
+		BackendTag:                  backendDialect(be),
+		BackendCacheTag:             evidenceBackendCacheTag(be),
+		RuntimeGrowthBaseBackendTag: be.RuntimeGrowthBaseBackendTag,
+		BackendIdentity:             be.Identity,
+		CPUExpertMMapCapability:     backendCPUExpertMMapCapability(be),
+		CPUExpertMMapEvidence:       be.CPUExpertMMapEvidence,
+		BackendHelp:                 be.Help,
+		VisionAuto:                  cfg.Vision,
+		SpecMode:                    cfg.Spec,
+		HotExperts:                  cfg.HotExperts,
 	}
 	if slots, parseErr := strconv.Atoi(strings.TrimSpace(cfg.HotExperts)); parseErr == nil && slots > 0 {
 		opts.HotExpertCacheSlots = slots
@@ -9872,15 +9877,16 @@ func totalModelSize(path string) int64 {
 }
 
 type backendInfo struct {
-	Path                    string
-	IsIK                    bool
-	SupportsReasoning       bool
-	Tag                     string
-	Dialect                 string // placement/flag family: llama, ik_llama, vulkan, metal
-	Help                    string
-	Identity                string // version/build hash; invalidates speculative performance profiles
-	CPUExpertMMapCapability placement.CPUExpertMMapCapability
-	CPUExpertMMapEvidence   string
+	Path                        string
+	IsIK                        bool
+	SupportsReasoning           bool
+	Tag                         string
+	Dialect                     string // placement/flag family: llama, ik_llama, vulkan, metal
+	Help                        string
+	Identity                    string // version/build hash; invalidates speculative performance profiles
+	CPUExpertMMapCapability     placement.CPUExpertMMapCapability
+	CPUExpertMMapEvidence       string
+	RuntimeGrowthBaseBackendTag string // verified source parent; reserve-only evidence
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.

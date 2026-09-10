@@ -178,6 +178,17 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	}
 
 	backendTag := backendCacheTag(opts)
+	pc := opts.loadProbeCacheForStrategy(model, s, gpus)
+	overhead := SystemCUDAOverheadByGPU(opts.CacheDir, gpus)
+	growthFloor := runtimeGrowthFloor(model, s, opts, gpus)
+	// The exact scope may carry a larger reserve than related serving records.
+	if pc != nil {
+		for gpu, value := range pc.RuntimeGraphGrowthByGPU {
+			if previous, known := growthFloor[gpu]; value >= 0 && (!known || value > previous) {
+				growthFloor[gpu] = value
+			}
+		}
+	}
 	allocation, allocationOK := LoadMeasuredAllocation(
 		opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality,
 		s.KVPlacement, backendTag, gpus, s.Parallel,
@@ -208,6 +219,21 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 			}
 		}
 		if complete {
+			for i := range ledger.Devices {
+				d := &ledger.Devices[i]
+				if growth, known := growthFloor[d.GPU]; known && d.Active {
+					compute, overheadMB := 0, overhead[d.GPU]
+					computeKnown := false
+					if pc != nil {
+						compute, computeKnown = pc.ComputeBufByGPU[d.GPU]
+					}
+					_, overheadKnown := overhead[d.GPU]
+					applyObservedRuntimeFloor(d, growth, compute, overheadMB, computeKnown && overheadKnown)
+					if d.SlackMB < 0 {
+						ledger.Fits = false
+					}
+				}
+			}
 			ledger.Exact = true
 			ledger.Evidence = allocation.Evidence
 			ledger.Host = HostResourceLedger{
@@ -236,23 +262,9 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	if s.ContextAllocationMB > 0 {
 		kvMB = s.ContextAllocationMB
 	}
-	overhead := SystemCUDAOverheadByGPU(opts.CacheDir, gpus)
-	pc := opts.loadProbeCacheForStrategy(model, s, gpus)
 	modelShares := estimatedModelShares(model, s, gpus, totalSizeMB)
 	contextShares := estimatedContextShares(s, gpus, kvMB)
 	order := orderGPUsByBandwidth(gpus)
-	// Runtime graph growth is recorded against the exact runtime signature that
-	// produced it, but the ubatch ladder descends after the measurement: a serve
-	// measured at ubatch 256 is replanned at ubatch 128, whose probe row carries
-	// compute buffers and no growth, so the exact lookup silently reads zero and
-	// the ledger under-reserves the one quantity no oracle predicts.
-	//
-	// RelatedModelRuntimeGraphGrowth is the right lookup for that: it relaxes
-	// ctx/ubatch while still requiring the same model, GPU signature and slot
-	// count, and refuses to carry any figure recorded as estimated. Resolved once
-	// per ledger rather than per device.
-	var relatedGrowth map[int]int
-	relatedGrowthLoaded := false
 	for i, gpu := range gpus {
 		computeMB := 0
 		runtimeMB := 0
@@ -281,29 +293,7 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 		// back to measured growth from a neighbouring signature, never the other
 		// way round, so this cannot make a plan look cheaper than its evidence.
 		if strategyUsesGPUAt(s, i, gpu.Index) {
-			if !relatedGrowthLoaded {
-				relatedGrowth = RelatedModelRuntimeGraphGrowth(
-					opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(opts))
-				if opts.HotExpertCacheSlots > 0 {
-					cacheFree := opts
-					cacheFree.HotExpertCacheSlots = 0
-					floor := RelatedModelRuntimeGraphGrowth(
-						opts.CacheDir, model, gpus, max(1, s.Parallel), backendCacheTag(cacheFree))
-					if relatedGrowth == nil {
-						relatedGrowth = make(map[int]int)
-					}
-					// Evidence is per GPU. A cache-on observation on one card
-					// must not hide another card's cache-free growth floor.
-					// Keep the larger reserve, including measured zero.
-					for device, growth := range floor {
-						if current, known := relatedGrowth[device]; !known || growth > current {
-							relatedGrowth[device] = growth
-						}
-					}
-				}
-				relatedGrowthLoaded = true
-			}
-			if v, ok := relatedGrowth[gpu.Index]; ok && (!runtimeMeasured || v > runtimeMB) {
+			if v, ok := growthFloor[gpu.Index]; ok && (!runtimeMeasured || v > runtimeMB) {
 				runtimeMB, runtimeMeasured = v, true
 			}
 		}

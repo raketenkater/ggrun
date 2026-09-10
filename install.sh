@@ -353,8 +353,7 @@ is_real_llama_server() {
     case "$p" in
         *simulator*|*llama-eval*|*/examples/*) return 1 ;;
     esac
-    is_native_binary "$p" || return 1
-    backend_actually_runs "$p"
+    is_native_binary "$p"
 }
 
 # backend_actually_runs proves the candidate can execute, not merely that it is
@@ -372,11 +371,30 @@ is_real_llama_server() {
 # the right name and an unsatisfiable NEEDED entry. Adoption then always
 # succeeded and the launch always failed. Nothing here can be inferred from the
 # file alone; the only way to know is to run it.
+# run_bounded_probe executes a backend candidate with a hard time limit and no
+# stdin, returning whatever it printed. A probe that times out returns nothing,
+# which backend_actually_runs treats as "could not prove a failure" and accepts:
+# an unresponsive --version is not evidence the binary is broken.
+run_bounded_probe() {
+    local p="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 10 "$p" "$@" 2>&1 </dev/null
+    else
+        "$p" "$@" 2>&1 </dev/null
+    fi
+}
+
 backend_actually_runs() {
     local p="$1" out
-    out="$("$p" --version 2>&1)"
+    # Bound every probe. This runs the candidate, and a binary that does not
+    # implement --version may instead try to START A SERVER and never return,
+    # hanging the installer with no output. Discovery walks several candidates,
+    # so one such binary stalls the whole install.
+    #
+    # </dev/null so a probe that reads stdin cannot block on the terminal.
+    out="$(run_bounded_probe "$p" --version)"
     if [[ -z "$out" ]]; then
-        out="$("$p" --help 2>&1)"
+        out="$(run_bounded_probe "$p" --help)"
     fi
     # Reject ONLY on a definite loader or exec failure. Deliberately no
     # requirement on exit status or output content: llama-server exits non-zero
@@ -708,7 +726,12 @@ link_existing_backend() {
     local src="$1" dest="$2"
     [[ -x "$src" && -n "$dest" ]] || return 1
     BACKEND_RUN_ERROR=""
-    if ! is_real_llama_server "$src"; then
+    # Adoption is the only place this belongs. In is_real_llama_server it also
+    # ran inside drop_fake_installed_backends, which does `rm -f` when the
+    # predicate is false -- so any probe failure deleted a correctly installed
+    # backend and left the user with none. Here, refusing only means falling
+    # back to the bundle ggrun ships.
+    if ! is_real_llama_server "$src" || ! backend_actually_runs "$src"; then
         # Say why, and say which binary. Issue #28's reporter could not tell
         # that ggrun was running a binary it had adopted from elsewhere on the
         # machine rather than the one it shipped.

@@ -42,8 +42,10 @@ Go-first.
 
 ## Backend Contract
 
-ggrun does not fork llama.cpp behavior. It selects flags, starts the
-backend, validates health, runs benchmarks, and records cache metadata. Unknown
+ggrun selects and composes registered backend builds, selects flags, starts the
+backend, validates health, runs benchmarks, and records cache metadata. Optional
+source patches belong to explicit backend recipes with recorded provenance;
+composing a feature does not establish model support or performance. Unknown
 launcher flags are forwarded to the backend so upstream options remain usable.
 
 `n_ubatch <= n_batch` is a launcher invariant. Placement normalizes restored
@@ -130,3 +132,20 @@ change or block the core planner, installer, test matrix, or release gate.
 The [specialist model fabric](specialist-model-fabric-plan.md) is retained only
 as a parked exploratory idea. It is not an accepted architecture or an active
 roadmap item and cannot change the current core release sequence.
+
+## Adding features safely
+
+Keep new product behavior in its owning package; the command layer translates
+user intent and coordinates it. Shared file replacement lives in
+`go/internal/atomicfile`; configuration uses it to preserve the previous file
+until encoding, sync and close succeed. It does not serialize read-modify-write
+transactions or promise filesystem-independent power-loss durability.
+
+Daemon HTTP document limits and JSON errors live in `go/pkg/daemon/http.go`.
+Decode a complete bounded request before taking the lifecycle lock. Feature
+handlers must validate before planning, stopping a process, or persisting state.
+Keep model startup timeouts separate from short HTTP request-read timeouts.
+
+Protected placement/admission behavior remains governed by the
+[core change contract](core-engine-change-contract.md). The current work sequence
+and release evidence requirements are in [production readiness](production-readiness.md).
