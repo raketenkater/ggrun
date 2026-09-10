@@ -49,9 +49,11 @@ done
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"
 
-if [[ -x "$ROOT_DIR/go/ggrun" ]]; then
-    install -m 0755 "$ROOT_DIR/go/ggrun" "$PAYLOAD/bin/ggrun"
+if [[ ! -x "$ROOT_DIR/go/ggrun" ]]; then
+    echo "Error: build go/ggrun before packaging; a backend-only archive is not a ggrun release." >&2
+    exit 1
 fi
+install -m 0755 "$ROOT_DIR/go/ggrun" "$PAYLOAD/bin/ggrun"
 if [[ -n "$MEMGUARD_LIB" ]]; then
     install -m 0644 "$MEMGUARD_LIB" "$PAYLOAD/bin/libggrun-memguard.so"
 fi
@@ -208,14 +210,9 @@ done
 # Rewrite RUNPATH to $ORIGIN so the loader looks beside the binary. Do this for
 # the bundled libraries too: they load each other.
 #
-# Rewrite only what is actually mis-pointed: an ELF carrying a non-empty
-# RUNPATH with no $ORIGIN in it. That is precisely the #28 condition.
-#
-# A file with no RUNPATH at all is a different animal and must be left alone.
-# patchelf rewrites program headers, and a Go binary does not survive that: the
-# fake backend used by the install smoke jobs packaged without complaint and
-# then died on --version with "Segmentation fault (core dumped)". Nothing was
-# wrong with it. We broke it by relocating a path it never had.
+# Relocate only dynamic ELF files that need a library shipped beside them.
+# This includes a missing RUNPATH and an incorrect $ORIGIN subdirectory. Static
+# Go fixtures need no sibling libraries and must not be rewritten.
 # Empty for anything that is not an ELF with a RUNPATH -- including a shell
 # script, which readelf rejects. Under `set -o pipefail` that rejection would
 # otherwise abort the whole packaging run.
@@ -236,8 +233,15 @@ if [[ "$ASSET_NAME" != *windows* && "$ASSET_NAME" != *darwin* && "$ASSET_NAME" !
     for elf in "$PAYLOAD/bin/llama-server" "$PAYLOAD/bin"/lib*.so*; do
         [[ -f "$elf" ]] || continue          # skip the SONAME symlinks
         runpath="$(elf_runpath "$elf")"
-        [[ -n "$runpath" ]] || continue      # nothing baked in, nothing to relocate
-        case "$runpath" in *'$ORIGIN'*) continue ;; esac
+        # A dynamic ELF may need a bundled library even with no RUNPATH. A
+        # static Go fixture does not: inspecting DT_NEEDED distinguishes them.
+        needs_local=0
+        while IFS= read -r needed; do
+            [[ -f "$PAYLOAD/bin/$needed" ]] && needs_local=1
+        done < <(readelf -d "$elf" 2>/dev/null |
+            awk '/NEEDED/ { sub(/.*\[/, ""); sub(/\].*/, ""); print }' || true)
+        [[ "$needs_local" -eq 1 ]] || continue
+        [[ "$runpath" == '$ORIGIN' || "$runpath" == '$ORIGIN:' ]] && continue
         patch_targets+=("$elf")
     done
 fi

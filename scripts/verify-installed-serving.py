@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Exercise an installed launcher; retain logs and stop only our process group."""
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+
+
+def request(port, route, payload=None, timeout=5):
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{route}", data=data,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.load(response)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--port", type=int, default=18843)
+    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--cpu", action="store_true")
+    args = parser.parse_args()
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    # Refuse an occupied port so another server cannot supply false evidence.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", args.port))
+    command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
+               "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port),
+               "--ctx", "2048"]
+    if args.cpu:
+        command.append("--cpu")
+    windows = os.name == "nt"
+    if windows and command[0].lower().endswith((".cmd", ".bat")):
+        command = 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
+    result = {"command": command, "passed": False}
+    (output / "result.json").write_text(json.dumps(result, indent=2))
+    env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
+    proc = None
+    try:
+        with (output / "serve.log").open("wb") as log:
+            proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                    stderr=subprocess.STDOUT, env=env,
+                                    start_new_session=not windows,
+                                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0)
+            result["pid"] = proc.pid
+            deadline = time.monotonic() + args.timeout
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise RuntimeError(f"launcher exited before ready: {proc.returncode}")
+                try:
+                    # Backend health can precede ggrun's admission/canary and
+                    # shutdown handler. Wait for the installed launcher itself.
+                    launcher_ready = b"[launch] Press Ctrl+C to stop" in (output / "serve.log").read_bytes()
+                    if launcher_ready and request(args.port, "/health").get("status") == "ok":
+                        result["launcher_ready"] = True
+                        break
+                except (OSError, ValueError, urllib.error.URLError):
+                    pass
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("timed out waiting for launcher readiness and health")
+            reply = request(args.port, "/v1/chat/completions", {
+                "messages": [{"role": "user", "content": "Name one colour."}],
+                "max_tokens": 32, "temperature": 0, "stream": False,
+            }, timeout=120)
+            (output / "reply.json").write_text(json.dumps(reply, indent=2))
+            choices = reply.get("choices") or []
+            message = choices[0].get("message", {}) if choices else {}
+            # Some reasoning models spend the entire short budget in reasoning.
+            generated = message.get("content") or message.get("reasoning_content")
+            if not isinstance(generated, str) or not generated.strip():
+                raise RuntimeError("completion contained no generated text")
+            if proc.poll() is not None:
+                raise RuntimeError("launcher exited during generation")
+            result["generation"] = True
+    except BaseException as exc:
+        result["error"] = str(exc)
+        raise
+    finally:
+        if proc is not None:
+            try:
+                if windows:
+                    if proc.poll() is None:
+                        proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    # Also catches a backend left behind by an exited launcher.
+                    os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=30)
+                result["forced_cleanup"] = False
+            except ProcessLookupError:
+                result["forced_cleanup"] = False
+            except (OSError, subprocess.TimeoutExpired):
+                result["forced_cleanup"] = True
+                if windows:
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                else:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                proc.wait(timeout=10)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                with socket.socket() as sock:
+                    sock.settimeout(0.5)
+                    if sock.connect_ex(("127.0.0.1", args.port)) != 0:
+                        result["port_released"] = True
+                        break
+                time.sleep(0.2)
+            result["passed"] = bool(result.get("generation") and result.get("port_released")
+                                    and not result.get("forced_cleanup") and not result.get("error"))
+        (output / "result.json").write_text(json.dumps(result, indent=2))
+    if not result["passed"]:
+        raise RuntimeError("installed serving lifecycle did not pass; see result.json")
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

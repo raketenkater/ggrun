@@ -29,6 +29,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install ELF relocation test tool
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+
       - name: Install Python test dependencies
         run: python3 -m pip install pytest huggingface_hub
 
@@ -57,7 +60,7 @@ jobs:
       - name: moe-placement tests
         run: bash tests/test_moe_placement.sh
       - name: pytest
-        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_measure_bandwidth.py
+        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_release_relocation.py
 
   package:
     name: package ${{ matrix.asset }}
@@ -176,6 +179,37 @@ jobs:
           test -n "$server" || { echo "::error::no llama-server in ${{ matrix.asset }}"; exit 1; }
           "$server" --version
 
+      - name: Install and exercise the candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="${{ matrix.asset }}"
+          backend="${asset%.tar.gz}"; backend="${backend##*-}"
+          (cd dist && shasum -a 256 "$asset" > SHA256SUMS)
+          export LLM_APP_HOME="$RUNNER_TEMP/candidate-app"
+          export LLM_SETUP_MODE=release LLM_SETUP_BACKEND="$backend"
+          export LLM_INSTALL_RELEASE_DIR="$PWD/dist" LLM_INSTALL_SCAN_SYSTEM=0
+          export LLM_SETUP_NONINTERACTIVE=1 LLM_SETUP_PY_DEPS=skip
+          ./setup.sh
+          python3 scripts/verify-installed-serving.py --launcher "$LLM_APP_HOME/ggrun" \
+            --model "$RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19146 --output "$RUNNER_TEMP/candidate-evidence"
+          printf '\nLLM_PORT=19149\n' >> "$LLM_APP_HOME/.config/config"
+          cp "$LLM_APP_HOME/.config/config" "$RUNNER_TEMP/config-before-upgrade"
+          ./setup.sh
+          cmp "$RUNNER_TEMP/config-before-upgrade" "$LLM_APP_HOME/.config/config"
+          python3 scripts/verify-installed-serving.py --launcher "$LLM_APP_HOME/ggrun" \
+            --model "$RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19146 --output "$RUNNER_TEMP/upgrade-evidence"
+
+      - name: Preserve candidate installation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ matrix.asset }}
+          path: |
+            ${{ runner.temp }}/candidate-evidence/
+            ${{ runner.temp }}/upgrade-evidence/
+            ${{ runner.temp }}/candidate-app/.logs/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -264,6 +298,37 @@ jobs:
         shell: pwsh
         run: scripts/package-release.ps1 -AssetName $env:ASSET -ServerBin $env:LLAMA_SERVER_PATH -OutDir dist -LlmServerBin go/ggrun.exe
 
+      - name: Install and exercise the candidate archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $PWD "dist/$env:ASSET"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $env:ASSET" | Set-Content dist/SHA256SUMS -Encoding ASCII
+          $app = Join-Path $env:RUNNER_TEMP 'candidate-app'
+          ./install.ps1 -InstallDir $app -ReleaseDir "$PWD/dist" -NoPath -AssumeYes
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate install failed' }
+          python scripts/verify-installed-serving.py --launcher "$app/ggrun.cmd" --model "$env:RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19147 --output "$env:RUNNER_TEMP/candidate-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate serving failed' }
+          $config = Join-Path $app '.config/config'
+          Add-Content $config "`nLLM_PORT=19149"
+          $before = (Get-FileHash $config).Hash
+          ./install.ps1 -InstallDir $app -ReleaseDir "$PWD/dist" -NoPath -AssumeYes
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate reinstall failed' }
+          if ((Get-FileHash $config).Hash -ne $before) { throw 'Upgrade changed user configuration' }
+          python scripts/verify-installed-serving.py --launcher "$app/ggrun.cmd" --model "$env:RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19147 --output "$env:RUNNER_TEMP/upgrade-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Upgraded candidate serving failed' }
+
+      - name: Preserve candidate installation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-windows-cpu
+          path: |
+            ${{ runner.temp }}/candidate-evidence/
+            ${{ runner.temp }}/upgrade-evidence/
+            ${{ runner.temp }}/candidate-app/.logs/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -320,6 +385,7 @@ jobs:
           test -n "$b" || { echo "::error::no llama-server in ${{ env.ASSET }}"; exit 1; }
           rp="$(readelf -d "$b" | awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print; exit }')"
           echo "RUNPATH: [$rp]"
+          # shellcheck disable=SC2016 # ORIGIN is a literal ELF loader token
           case "$rp" in
             *'$ORIGIN'*) ;;
             *) echo "::error::CUDA backend RUNPATH is not \$ORIGIN: [$rp]"; exit 1 ;;
@@ -357,6 +423,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: ggrun-*
           merge-multiple: true
 
       - name: Include installers in the checksum set

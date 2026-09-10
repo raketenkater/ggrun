@@ -192,7 +192,11 @@ usable_llama_server() {
         *simulator*|*llama-eval*|*/examples/*) return 1 ;;
     esac
     hdr="$(head -c 4 "$t" 2>/dev/null || true)"
-    [[ "$hdr" == $'\x7fELF' || "${hdr:0:2}" == "MZ" ]]
+    [[ "$hdr" == $'\x7fELF' || "${hdr:0:2}" == "MZ" ]] && return 0
+    case "$hdr" in
+        $'\xfe\xed\xfa\xcf'|$'\xcf\xfa\xed\xfe'|$'\xfe\xed\xfa\xce'|$'\xce\xfa\xed\xfe'|$'\xca\xfe\xba\xbe'|$'\xbe\xba\xfe\xca'|$'\xca\xfe\xba\xbf'|$'\xbf\xba\xfe\xca') return 0 ;;
+    esac
+    return 1
 }
 
 # Prefer a backend that can actually start. A CUDA ELF that cannot load
@@ -265,6 +269,8 @@ elif [[ "$backend_config" == "skip" ]]; then
     backend_config="auto"
 fi
 
+# Upgrades must retain user choices; defaults belong to the first installation.
+if [[ ! -e "$APP_CONFIG/config" ]]; then
 cat >"$APP_CONFIG/config" <<EOF
 # $APP_NAME Go config. Loaded when LLM_APP_HOME points at this app home.
 LLM_APP_HOME="$APP_HOME"
@@ -275,6 +281,8 @@ LLM_BACKEND="$backend_config"
 EOF
 if [[ -n "$backend_bin" ]]; then
     printf 'LLAMA_SERVER="%s"\n' "$backend_bin" >>"$APP_CONFIG/config"
+fi
+
 fi
 
 cat >"$APP_ENV" <<EOF
