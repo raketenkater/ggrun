@@ -879,3 +879,32 @@ destination for a 260K-parameter model.
 - [ ] `--ctx-size` small enough to break the canary is reachable on ordinary
       models too, not just tiny ones. Worth a matched run with a normal model
       pinned to a small context to confirm the new sizing holds there.
+
+## MACOS — the packaged backend installs but ggrun cannot find it — 2026-09-10
+
+`release-install-macos-smoke` has been red on main for weeks and is not
+affected by the 2026-09-10 packaging work. The install itself reports success:
+
+```
+⚠ llama-server installed but needs a GPU runtime on this machine
+    (kept; llama.cpp will still be installed)
+✓ Installed llama-server from ggrun-macos-arm64-metal.tar.gz
+```
+
+and then serving fails:
+
+```
+Error: selected backend "llama" was not found under APP_HOME "…/app" or the
+registered backend paths; install/build it or choose backend auto
+```
+
+So the metal bundle is installed, the installer promises to install llama.cpp
+as well, `--cpu` selects the `llama` backend, and nothing under APP_HOME
+answers to that name. Either the promised llama.cpp install does not happen, or
+macOS backend discovery does not see what was installed.
+
+- [ ] Reproduce on real macOS hardware. The runner log cannot distinguish
+      "never installed" from "installed where discovery does not look".
+- [ ] Decide whether `--cpu` on a metal-only install should select the metal
+      backend rather than failing, and whether that warning should be an error
+      at install time instead of a pass.

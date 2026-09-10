@@ -168,9 +168,12 @@ done
 # fake backend used by the install smoke jobs packaged without complaint and
 # then died on --version with "Segmentation fault (core dumped)". Nothing was
 # wrong with it. We broke it by relocating a path it never had.
+# Empty for anything that is not an ELF with a RUNPATH -- including a shell
+# script, which readelf rejects. Under `set -o pipefail` that rejection would
+# otherwise abort the whole packaging run.
 elf_runpath() {
     readelf -d "$1" 2>/dev/null |
-        awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print; exit }'
+        awk '/R(UN)?PATH/ { sub(/.*\[/,""); sub(/\].*/,""); print; exit }' || true
 }
 
 patch_targets=()
