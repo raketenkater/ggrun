@@ -338,6 +338,11 @@ jobs:
 
   release-install-macos-smoke:
     runs-on: macos-14
+    # macOS is deprecated and best-effort. It passes today, and the job is kept
+    # so a regression is still visible, but nobody here has a Mac to reproduce
+    # on and it must never be what stands between a change and a green run.
+    # Read its result; do not block on it.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6

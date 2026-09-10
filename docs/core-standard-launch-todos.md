@@ -958,3 +958,24 @@ not use an installed Vulkan build. That is fixed by the same change.
       because `needs_gpu` keeps the backend, but it is the least accurate
       reading available and it made the macOS install log actively misleading
       while this bug was being chased.
+
+## MACOS — deprecated, best-effort, never a release gate — 2026-09-10
+
+macOS is in a working state as of today: the packaging fix bundles its dylibs
+with `@loader_path`, and `backendMatches` resolves a `llama` request against a
+`metal`-tagged backend, so `release-install-macos-smoke` is green on main.
+
+It is nonetheless **deprecated**. Nobody working on ggrun has a Mac, so every
+macOS defect this session was diagnosed from CI logs and artifacts alone, which
+is slow and cannot distinguish some failure modes at all. The decision is to
+keep it working where that is cheap and never to let it gate anything:
+
+- `release-install-macos-smoke` is `continue-on-error: true`. The job still runs
+  and its result is still worth reading; it does not block a merge.
+- The macOS entry in the release `package` matrix is `optional: true` and the
+  job is `continue-on-error`. `publish` merges whatever artifacts exist, so a
+  macOS failure degrades to "no macOS bundle in this release", not "no release".
+- README says so plainly, so a Mac user is not misled about the support level.
+
+Delete rather than deprecate only if it starts costing real time again. Right
+now it costs nothing and it works.

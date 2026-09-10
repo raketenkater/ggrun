@@ -66,6 +66,12 @@ jobs:
     name: package ${{ matrix.asset }}
     needs: preflight
     runs-on: ${{ matrix.os }}
+    # macOS is deprecated and best-effort: nobody here has a Mac to reproduce on,
+    # so it must never hold a release. It still builds and its bundle is still
+    # attached when it succeeds; when it fails, publish goes ahead without it.
+    # `publish` merges whatever artifacts exist, so a missing asset degrades to
+    # "no macOS download in this release" rather than no release.
+    continue-on-error: ${{ matrix.optional || false }}
     env:
       LLAMA_CPP_REF: d2462f8f7ac6d80070a587ffebf6cd73730f4280
 
@@ -82,6 +88,7 @@ jobs:
           - os: macos-14
             asset: ggrun-macos-arm64-metal.tar.gz
             cmake_flags: -DGGML_METAL=ON -DGGML_NATIVE=OFF
+            optional: true
 
     steps:
       - uses: actions/checkout@v7
