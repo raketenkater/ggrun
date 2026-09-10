@@ -33,13 +33,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      # A bundle built from THIS commit, so the job tests this code's packaging.
+      # Installing the published release instead would make every pull request
+      # red until the next release ships, which says nothing about the change.
+      # The published artifact is checked on tags, below.
+      - name: Build a release bundle from this commit
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          go build -C go -trimpath -o ../ggrun ./cmd/ggrun
+          go build -o "$RUNNER_TEMP/llama-server" ./tests/fake_llama_server.go
+          scripts/package-release.sh ggrun-linux-x86_64-cpu.tar.gz \
+            "$RUNNER_TEMP/llama-server" "$RUNNER_TEMP/release"
+          ( cd "$RUNNER_TEMP/release" && sha256sum ggrun-linux-x86_64-cpu.tar.gz > SHA256SUMS )
+
       # setup.sh finds a local checkout via ${BASH_SOURCE[0]}. When piped that is
-      # empty, so it downloads the source from GitHub -- which is what a real
-      # user gets. LLM_SETUP_REF points that download at this commit, so a pull
-      # request exercises the real download path against its own code.
+      # empty, so it downloads the source from GitHub -- the real network path.
+      # LLM_SETUP_REF aims that at this commit; the backend bundle comes from the
+      # build above.
       - name: Install
         env:
           LLM_SETUP_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          LLM_SETUP_BACKEND: cpu
+          LLM_INSTALL_RELEASE_DIR: ${{ runner.temp }}/release
         run: cat setup.sh | bash
 
       - name: ggrun runs
@@ -91,10 +112,16 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $bin = "$env:USERPROFILE\ggrun\ggrun.exe"
-          if (-not (Test-Path $bin)) { throw "ggrun.exe not installed at $bin" }
-          & $bin --version
-          & $bin detect | Out-Null
+          # install.ps1 writes a ggrun.cmd wrapper at the install root and puts
+          # the executable in .bin (Write-CmdWrapper). The wrapper is what the
+          # docs tell users to run, so check that, not a bare ggrun.exe.
+          $root = Join-Path $env:USERPROFILE 'ggrun'
+          $cmd  = Join-Path $root 'ggrun.cmd'
+          $exe  = Join-Path $root '.bin\ggrun.exe'
+          if (-not (Test-Path $exe)) { Get-ChildItem $root -Recurse -Depth 1 | Select-Object FullName; throw "ggrun.exe not at $exe" }
+          if (-not (Test-Path $cmd)) { throw "ggrun.cmd wrapper not at $cmd" }
+          & $exe --version
+          & $exe detect | Out-Null
 
       - name: The installed backend runs
         shell: powershell
@@ -112,7 +139,7 @@ jobs:
           python tests/build_synthetic_gguf.py --out "$h\models\e2e.gguf" `
             --arch llama --name E2E --layers 2 --hkv 1 --kl 16 --vl 16 `
             --embd 64 --ff 128 --ctx-train 2048
-          $p = Start-Process "$h\ggrun.exe" -ArgumentList "$h\models\e2e.gguf",'--cpu','--host','127.0.0.1','--port','18842' `
+          $p = Start-Process "$h\.bin\ggrun.exe" -ArgumentList "$h\models\e2e.gguf",'--cpu','--host','127.0.0.1','--port','18842' `
             -RedirectStandardOutput serve.log -RedirectStandardError serve.err -PassThru -NoNewWindow
           foreach ($i in 1..90) {
             try { if ((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18842/health' -TimeoutSec 5).Content -match '"status":"ok"') { exit 0 } } catch {}
