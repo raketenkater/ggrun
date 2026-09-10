@@ -274,7 +274,8 @@ jobs:
   # forever on a repo with no such runner.
   gpu:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.GGRUN_GPU_RUNNER == 'true'
-    runs-on: [self-hosted, gpu]
+    # Linux label so a Windows GPU runner cannot pick up this job.
+    runs-on: [self-hosted, gpu, Linux]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -323,4 +324,69 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gpu-install-evidence
+          path: evidence/
+
+  # Same flow on a Windows machine with cards. Gated on its own variable so one
+  # platform's runner being absent never leaves the other's job queued.
+  # Register a self-hosted Windows runner labelled "gpu" and set
+  # GGRUN_GPU_RUNNER_WINDOWS to "true".
+  gpu-windows:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.GGRUN_GPU_RUNNER_WINDOWS == 'true'
+    runs-on: [self-hosted, gpu, Windows]
+    timeout-minutes: 60
+    env:
+      LLM_APP_HOME: ${{ runner.temp }}\ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+    steps:
+      - uses: actions/checkout@v4
+
+      # Called with parameters rather than piped, unlike the hosted windows job.
+      # A self-hosted machine is not a fresh one: -InstallDir keeps this out of
+      # the owner's real ~\ggrun, and -NoPath leaves their PATH alone. The
+      # piped entry point is already covered by the hosted job; what this job
+      # exists to prove is GPU placement.
+      - name: Install
+        shell: powershell
+        env:
+          LLM_INSTALL_SCAN_SYSTEM: "0"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\install.ps1 -InstallDir $env:LLM_APP_HOME -NoPath -AssumeYes
+          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "install.ps1 exited $LASTEXITCODE" }
+
+      - name: The GPUs are visible to ggrun
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $g = Join-Path $env:LLM_APP_HOME '.bin\ggrun.exe'
+          if (-not (Test-Path $g)) { throw "ggrun.exe not at $g" }
+          & $g --version
+          & $g detect | Tee-Object -FilePath detect.txt
+          if (-not (Select-String -Path detect.txt -Pattern 'cuda|vulkan|gpu' -Quiet)) {
+            throw "this runner is labelled gpu and ggrun found no GPU"
+          }
+
+      - name: Download and serve on the GPUs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $g = Join-Path $env:LLM_APP_HOME '.bin\ggrun.exe'
+          & $g download $env:E2E_REPO --quant $env:E2E_QUANT
+          if ($LASTEXITCODE -ne 0) { throw "ggrun download exited $LASTEXITCODE" }
+          $got = Get-ChildItem (Join-Path $env:LLM_APP_HOME 'models') -Filter '*Q4_0*.gguf' -ErrorAction SilentlyContinue
+          if (-not $got) { throw "no downloaded model" }
+          python scripts/verify-installed-serving.py --launcher $g --model $got[0].FullName --port 18846 --output evidence/gpu-windows
+          if ($LASTEXITCODE -ne 0) { throw "installed serving check failed" }
+          # A run that quietly placed everything on the CPU would pass every
+          # check above. Require a real, nonzero device allocation.
+          $log = Join-Path 'evidence/gpu-windows' 'serve.log'
+          if (-not (Select-String -Path $log -Pattern 'CUDA\d+.*model buffer size = +[1-9][0-9.]* MiB' -Quiet)) {
+            throw "No positive device model allocation recorded"
+          }
+
+      - name: Preserve GPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-windows-install-evidence
           path: evidence/
