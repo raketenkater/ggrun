@@ -339,19 +339,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Called with parameters rather than piped, unlike the hosted windows job.
-      # A self-hosted machine is not a fresh one: -InstallDir keeps this out of
-      # the owner's real ~\ggrun, and -NoPath leaves their PATH alone. The
-      # piped entry point is already covered by the hosted job; what this job
-      # exists to prove is GPU placement.
-      - name: Install
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      # Install THIS commit, packaged the way the hosted windows job does it.
+      # Installing the published release instead tested a binary 50 commits
+      # behind main: v3.2.8 sent a fixed 6924-token cache canary into a
+      # 2048-token context and exited, a bug #30 had already fixed on main.
+      #
+      # Called with parameters rather than piped. A self-hosted machine is not
+      # a fresh one: -InstallDir keeps this out of the owner's real ~\ggrun, and
+      # -NoPath leaves their PATH alone. No -Backend: install.ps1 detects the
+      # card, finds no CUDA bundle in the candidate, installs the CPU bundle
+      # and adds the prebuilt llama.cpp CUDA backend, as it does for a user.
+      - name: Install candidate
         shell: powershell
         env:
           LLM_APP_HOME: ${{ runner.temp }}\ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           LLM_INSTALL_SCAN_SYSTEM: "0"
         run: |
           $ErrorActionPreference = 'Stop'
-          .\install.ps1 -InstallDir $env:LLM_APP_HOME -NoPath -AssumeYes
+          go build -C go -trimpath -o ggrun.exe ./cmd/ggrun
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed' }
+          $asset = 'ggrun-windows-x86_64-cpu.zip'
+          $published = Join-Path $env:RUNNER_TEMP 'published'
+          $candidate = Join-Path $env:RUNNER_TEMP 'candidate'
+          New-Item -ItemType Directory -Force -Path $published,$candidate | Out-Null
+          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -OutFile "$published/$asset"
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS' -OutFile "$published/SHA256SUMS"
+          $line = Get-Content "$published/SHA256SUMS" | Where-Object { $_ -match " $([regex]::Escape($asset))$" }
+          if (!$line -or (Get-FileHash "$published/$asset" -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0]) { throw 'Published backend checksum mismatch' }
+          Expand-Archive "$published/$asset" "$published/unpacked"
+          $backend = Get-ChildItem "$published/unpacked" -Recurse -Filter llama-server.exe | Select-Object -First 1
+          if (!$backend) { throw 'Published backend missing' }
+          ./scripts/package-release.ps1 -AssetName $asset -ServerBin $backend.FullName -OutDir $candidate -LlmServerBin go/ggrun.exe
+          $hash = (Get-FileHash "$candidate/$asset" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content "$candidate/SHA256SUMS" -Encoding ASCII
+          .\install.ps1 -InstallDir $env:LLM_APP_HOME -ReleaseDir $candidate -NoPath -AssumeYes
           if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "install.ps1 exited $LASTEXITCODE" }
 
       - name: The GPUs are visible to ggrun
