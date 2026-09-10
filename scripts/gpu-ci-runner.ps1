@@ -40,6 +40,19 @@ function Require-Command([string]$Name) {
     }
 }
 
+# Windows PowerShell 5.1 does not escape double quotes embedded in arguments to
+# native programs, so a --jq filter with a string literal reaches gh split into
+# several arguments. It also turns redirected stderr into a terminating error
+# under 'Stop'. Fetch the JSON and filter in PowerShell instead; returns $null
+# on any API failure.
+function Invoke-GhJson([string]$Path) {
+    $ErrorActionPreference = 'Continue'
+    $raw = gh api $Path 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $json = ($raw -join "`n") | ConvertFrom-Json
+    return $json
+}
+
 function Get-FreeVramMb {
     if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { return 0 }
     $total = 0
@@ -52,9 +65,11 @@ function Get-FreeVramMb {
 }
 
 function Get-RunnerStatus {
-    $out = gh api "repos/$Repo/actions/runners" --jq ".runners[] | select(.name==`"$RunnerName`") | .status" 2>$null
-    if ($LASTEXITCODE -ne 0) { return '' }
-    return ($out | Select-Object -First 1)
+    $resp = Invoke-GhJson "repos/$Repo/actions/runners"
+    if (-not $resp) { return '' }
+    $match = $resp.runners | Where-Object { $_.name -eq $RunnerName } | Select-Object -First 1
+    if ($match) { return $match.status }
+    return ''
 }
 
 function Invoke-Setup {
@@ -88,12 +103,14 @@ function Invoke-Setup {
 # repository with no Windows GPU machine skips the job instead of queueing one
 # that can never be picked up.
 function Enable-GpuRunnerVariable {
-    $current = gh api "repos/$Repo/actions/variables/GGRUN_GPU_RUNNER_WINDOWS" --jq .value 2>$null
-    if ($LASTEXITCODE -eq 0 -and $current -eq 'true') { return }
+    $ErrorActionPreference = 'Continue'
+    $current = Invoke-GhJson "repos/$Repo/actions/variables/GGRUN_GPU_RUNNER_WINDOWS"
+    if ($current -and $current.value -eq 'true') { return }
     Write-Host '==> setting GGRUN_GPU_RUNNER_WINDOWS=true'
     gh api -X PATCH "repos/$Repo/actions/variables/GGRUN_GPU_RUNNER_WINDOWS" -f value=true 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
         gh api -X POST "repos/$Repo/actions/variables" -f name=GGRUN_GPU_RUNNER_WINDOWS -f value=true | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'could not set GGRUN_GPU_RUNNER_WINDOWS' }
     }
 }
 
@@ -145,15 +162,25 @@ function Invoke-Run {
         Write-Host "==> run ${runId}: https://github.com/$Repo/actions/runs/$runId"
 
         while ($true) {
-            $status = gh api "repos/$Repo/actions/runs/$runId" --jq .status
-            if ($status -eq 'completed') { break }
-            gh api "repos/$Repo/actions/runs/$runId/jobs" --jq '.jobs[] | select(.name=="gpu-windows") | "    gpu-windows: \(.status) \(.conclusion // "")"'
+            $run = Invoke-GhJson "repos/$Repo/actions/runs/$runId"
+            if ($run -and $run.status -eq 'completed') { break }
+            $progress = Invoke-GhJson "repos/$Repo/actions/runs/$runId/jobs"
+            if ($progress) {
+                $progress.jobs | Where-Object { $_.name -eq 'gpu-windows' } |
+                    ForEach-Object { Write-Host "    gpu-windows: $($_.status) $($_.conclusion)" }
+            }
             Start-Sleep 20
         }
 
         Write-Host '==> finished'
-        gh api "repos/$Repo/actions/runs/$runId/jobs" --jq '.jobs[] | "  \(.name): \(.conclusion // .status)"'
-        $result = gh api "repos/$Repo/actions/runs/$runId/jobs" --jq '.jobs[] | select(.name=="gpu-windows") | .conclusion'
+        $final = Invoke-GhJson "repos/$Repo/actions/runs/$runId/jobs"
+        $jobs = if ($final) { $final.jobs } else { @() }
+        foreach ($job in $jobs) {
+            $state = if ($job.conclusion) { $job.conclusion } else { $job.status }
+            Write-Host "  $($job.name): $state"
+        }
+        $gpuJob = $jobs | Where-Object { $_.name -eq 'gpu-windows' } | Select-Object -First 1
+        $result = if ($gpuJob) { [string]$gpuJob.conclusion } else { '' }
         switch ($result) {
             'success' { Write-Host '==> the Windows GPU job passed' }
             'skipped' { throw 'the gpu-windows job was SKIPPED: check GGRUN_GPU_RUNNER_WINDOWS and that the workflow is on main' }
@@ -173,9 +200,14 @@ function Invoke-Status {
     $configured = if (Test-Path (Join-Path $RunnerDir 'run.cmd')) { "yes ($RunnerDir)" } else { 'no' }
     Write-Host "configured locally: $configured"
     Write-Host 'registered runners:'
-    gh api "repos/$Repo/actions/runners" --jq '.runners[] | "  \(.name)  \(.status)  labels=\([.labels[].name] | join(","))"' 2>$null
-    $enabled = gh api "repos/$Repo/actions/variables/GGRUN_GPU_RUNNER_WINDOWS" --jq .value 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $enabled) { $enabled = '(unset)' }
+    $resp = Invoke-GhJson "repos/$Repo/actions/runners"
+    if (-not $resp) { Write-Host '  (could not list runners; this needs admin on the repository)' }
+    foreach ($r in $resp.runners) {
+        $labels = ($r.labels | ForEach-Object { $_.name }) -join ','
+        Write-Host "  $($r.name)  $($r.status)  labels=$labels"
+    }
+    $variable = Invoke-GhJson "repos/$Repo/actions/variables/GGRUN_GPU_RUNNER_WINDOWS"
+    $enabled = if ($variable -and $variable.value) { $variable.value } else { '(unset)' }
     Write-Host "GGRUN_GPU_RUNNER_WINDOWS: $enabled"
     Write-Host "free VRAM: $(Get-FreeVramMb) MiB"
 }
