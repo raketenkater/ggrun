@@ -2601,7 +2601,15 @@ func backendMatches(info *backendInfo, name, want string) bool {
 	tag := strings.ToLower(info.Tag)
 	return tag == want || name == want ||
 		(want == "ik" && tag == "ik_llama") ||
-		(want == "llama" && tag == "llama") ||
+		// "llama" names the lineage, not the device dialect. detectBackend tags
+		// a macOS build "metal" and a Vulkan build "vulkan" so placement does
+		// not emit CUDA device-routing flags for them, but both ARE mainline
+		// llama.cpp. Requiring an exact tag match made every macOS install
+		// unusable out of the box: setup-home.sh records LLM_BACKEND="llama"
+		// for a metal install, nothing on darwin can ever carry the llama tag,
+		// and launch died with "selected backend "llama" was not found under
+		// APP_HOME". ik_llama is a genuinely different fork and stays distinct.
+		(want == "llama" && (tag == "llama" || tag == "vulkan" || tag == "metal")) ||
 		(want == "vulkan" && (tag == "vulkan" || strings.Contains(strings.ToLower(info.Path), "vulkan"))) ||
 		(want == "llama-vk" && tag == "vulkan")
 }
