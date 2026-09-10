@@ -335,7 +335,6 @@ jobs:
     runs-on: [self-hosted, gpu, Windows]
     timeout-minutes: 60
     env:
-      LLM_APP_HOME: ${{ runner.temp }}\ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       CUDA_DEVICE_ORDER: PCI_BUS_ID
     steps:
       - uses: actions/checkout@v4
@@ -348,6 +347,7 @@ jobs:
       - name: Install
         shell: powershell
         env:
+          LLM_APP_HOME: ${{ runner.temp }}\ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           LLM_INSTALL_SCAN_SYSTEM: "0"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -356,6 +356,8 @@ jobs:
 
       - name: The GPUs are visible to ggrun
         shell: powershell
+        env:
+          LLM_APP_HOME: ${{ runner.temp }}\ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference = 'Stop'
           $g = Join-Path $env:LLM_APP_HOME '.bin\ggrun.exe'
@@ -368,6 +370,8 @@ jobs:
 
       - name: Download and serve on the GPUs
         shell: powershell
+        env:
+          LLM_APP_HOME: ${{ runner.temp }}\ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference = 'Stop'
           $g = Join-Path $env:LLM_APP_HOME '.bin\ggrun.exe'
