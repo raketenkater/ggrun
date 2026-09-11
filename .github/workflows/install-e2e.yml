@@ -315,9 +315,16 @@ jobs:
           got=("$LLM_APP_HOME/models"/*Q4_0*.gguf)
           [ ${#got[@]} -gt 0 ] || { echo "::error::no downloaded model"; exit 1; }
           python3 scripts/verify-installed-serving.py --launcher "$g" --model "${got[0]}" --port 18845 --output evidence/gpu
-          # Require an actual nonzero model allocation, not flag/help text.
-          grep -Eq '(CUDA[0-9]+|Vulkan[0-9]+|Metal)[^[:cntrl:]]*model buffer size = +[1-9][0-9.]* MiB' evidence/gpu/serve.log || {
-            echo "::error::No positive device model allocation recorded"; exit 1; }
+          # Require an actual nonzero weight allocation on a device, not flag or
+          # help text. Backends word this differently and requiring one spelling
+          # failed a run that had offloaded all 25 layers:
+          #   mainline  CUDA0 model buffer size =   526.50 MiB
+          #   ik_llama  llm_load_tensors: CUDA1 buffer size =   526.50 MiB
+          # So match either, then drop the KV, compute and output buffers, which
+          # a device allocates even when the weights stayed on the host.
+          grep -E '(CUDA[0-9]+|Vulkan[0-9]+|Metal)[^[:cntrl:]]*buffer size *= *[1-9][0-9.]* MiB' evidence/gpu/serve.log |
+            grep -vE 'KV buffer|compute buffer|output buffer' | grep -q . || {
+            echo "::error::No positive device weight allocation recorded"; exit 1; }
 
       - name: Preserve GPU evidence
         if: always()
@@ -408,10 +415,17 @@ jobs:
           python scripts/verify-installed-serving.py --launcher $g --model $got[0].FullName --port 18846 --output evidence/gpu-windows
           if ($LASTEXITCODE -ne 0) { throw "installed serving check failed" }
           # A run that quietly placed everything on the CPU would pass every
-          # check above. Require a real, nonzero device allocation.
+          # check above. Require a real, nonzero weight allocation on a device.
+          # Backends word this differently, so match either spelling and drop
+          # the KV, compute and output buffers, which a device allocates even
+          # when the weights stayed on the host:
+          #   mainline  CUDA0 model buffer size =   526.50 MiB
+          #   ik_llama  llm_load_tensors: CUDA1 buffer size =   526.50 MiB
           $log = Join-Path 'evidence/gpu-windows' 'serve.log'
-          if (-not (Select-String -Path $log -Pattern 'CUDA\d+.*model buffer size = +[1-9][0-9.]* MiB' -Quiet)) {
-            throw "No positive device model allocation recorded"
+          $weights = Select-String -Path $log -Pattern '(CUDA\d+|Vulkan\d+|Metal).*buffer size *= *[1-9][0-9.]* MiB' |
+            Where-Object { $_.Line -notmatch 'KV buffer|compute buffer|output buffer' }
+          if (-not $weights) {
+            throw "No positive device weight allocation recorded"
           }
 
       - name: Preserve GPU evidence
