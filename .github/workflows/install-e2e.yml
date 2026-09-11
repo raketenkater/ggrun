@@ -90,33 +90,13 @@ jobs:
           done
           [ "$n" -gt 0 ] || { echo "::error::no backend installed"; exit 1; }
 
-      # A real GGUF, fetched the way a user fetches one. tests/build_synthetic_gguf.py
-      # was used here before and proved nothing: it writes headers only, so it has
-      # no tensors and no rms epsilon, and a real llama-server rejects it outright
-      # ("key not found in model: llama.attention.layer_norm_rms_epsilon"). Only
-      # the fake test backend ever "loaded" it. stories260K is 1.1 MB and is what
-      # llama.cpp's own server tests use.
-      - name: Serve a model
-        run: |
-          mkdir -p "$HOME/ggrun/models"
-          curl -fsSL --retry 3 -o "$HOME/ggrun/models/tiny.gguf" \
-            https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
-          python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" \
-            --model "$HOME/ggrun/models/tiny.gguf" --cpu --port 18841 --output evidence/tiny
-
-      - name: Reinstall candidate without resetting configuration
-        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
-        run: |
-          config="$HOME/ggrun/.config/config"
-          printf '\nLLM_PORT=19249\n' >> "$config"
-          cp "$config" "$RUNNER_TEMP/config-before-upgrade"
-          LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu LLM_INSTALL_SCAN_SYSTEM=0 \
-            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/candidate" ./setup-linux.sh
-          cmp "$RUNNER_TEMP/config-before-upgrade" "$config"
-
-      # The README tells people to get a model with `ggrun download <repo>`.
-      # Until now nothing tested that: CI skipped the Python dependencies it
-      # needs and fetched its model with curl instead.
+      # The README tells people to get a model with `ggrun download <repo>`, and
+      # this is the only place that path is tested. It runs first so both serve
+      # steps share the one download rather than fetching 563 MB twice.
+      #
+      # A real model, not a fixture. The stories GGUFs that used to be served
+      # here have training contexts no real model has, so CI kept asserting
+      # against behaviour no user ever meets.
       - name: Download a model the documented way
         run: |
           set -euo pipefail
@@ -127,6 +107,21 @@ jobs:
             echo "::error::ggrun download produced no $E2E_QUANT gguf"; ls -lR "$HOME/ggrun/models"; exit 1; }
           ls -l "${got[0]}"
           echo "MODEL=${got[0]}" >> "$GITHUB_ENV"
+
+      - name: Serve a model
+        run: |
+          python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" \
+            --model "$MODEL" --cpu --port 18841 --output evidence/cpu
+
+      - name: Reinstall candidate without resetting configuration
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        run: |
+          config="$HOME/ggrun/.config/config"
+          printf '\nLLM_PORT=19249\n' >> "$config"
+          cp "$config" "$RUNNER_TEMP/config-before-upgrade"
+          LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu LLM_INSTALL_SCAN_SYSTEM=0 \
+            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/candidate" ./setup-linux.sh
+          cmp "$RUNNER_TEMP/config-before-upgrade" "$config"
 
       # No --cpu. On a runner with no GPU ggrun detects that and plans for the
       # CPU itself, which is a better test than being told; on a self-hosted
@@ -208,31 +203,8 @@ jobs:
           if (-not $found) { throw "no backend installed" }
           foreach ($b in $found) { Write-Host $b.FullName; & $b.FullName --version; if ($LASTEXITCODE -ne 0) { throw "Backend version failed" } }
 
-      # Same real model as the Linux job -- see the comment there for why the
-      # synthetic GGUF that used to be built here could never load.
-      - name: Serve a model
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:USERPROFILE 'ggrun'
-          New-Item -ItemType Directory -Force -Path "$root\models" | Out-Null
-          Invoke-WebRequest -UseBasicParsing 'https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf' -OutFile "$root\models\tiny.gguf"
-          python scripts/verify-installed-serving.py --launcher "$root\ggrun.cmd" --model "$root\models\tiny.gguf" --cpu --port 18842 --output evidence/tiny
-          if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
-
-      - name: Reinstall candidate without resetting configuration
-        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $app = Join-Path $env:USERPROFILE 'ggrun'
-          $config = Join-Path $app '.config/config'
-          Add-Content $config "`nLLM_PORT=19249"
-          $before = (Get-FileHash $config).Hash
-          ./install.ps1 -InstallDir $app -ReleaseDir "$env:RUNNER_TEMP/candidate" -Backend cpu -NoPath -AssumeYes
-          if ((Get-FileHash $config).Hash -ne $before) { throw 'Reinstall changed user configuration' }
-
-      # Same as the Linux job: exercise the downloader the README documents.
+      # Same as the Linux job: the documented downloader, run first so both
+      # serve steps share the one 563 MB download.
       - name: Download a model the documented way
         shell: powershell
         run: |
@@ -247,6 +219,25 @@ jobs:
           }
           Write-Host $got[0].FullName
           "MODEL=$($got[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Serve a model
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:MODEL" --cpu --port 18842 --output evidence/cpu
+          if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
+
+      - name: Reinstall candidate without resetting configuration
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $env:USERPROFILE 'ggrun'
+          $config = Join-Path $app '.config/config'
+          Add-Content $config "`nLLM_PORT=19249"
+          $before = (Get-FileHash $config).Hash
+          ./install.ps1 -InstallDir $app -ReleaseDir "$env:RUNNER_TEMP/candidate" -Backend cpu -NoPath -AssumeYes
+          if ((Get-FileHash $config).Hash -ne $before) { throw 'Reinstall changed user configuration' }
 
       # No --cpu: let ggrun decide from the hardware it finds.
       - name: Serve the downloaded model on whatever hardware exists
