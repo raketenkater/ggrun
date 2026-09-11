@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -256,5 +259,86 @@ func TestRunAgentParallelCapsSyntheticLoad(t *testing.T) {
 	}
 	if result.Parallel != agentBenchmarkMaxLanes {
 		t.Fatalf("parallel benchmark lanes=%d, want cap %d", result.Parallel, agentBenchmarkMaxLanes)
+	}
+}
+
+// The one-slot baseline must receive every request sent to the wider candidate,
+// including mixed-phase contenders, instead of extrapolating one agent's time.
+func TestRunAgentWorkloadKeepsWorkIdenticalAcrossCapacity(t *testing.T) {
+	var previous []string
+	for _, slots := range []int{1, 2} {
+		var mu sync.Mutex
+		var requests []string
+		capacity := make(chan struct{}, slots)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capacity <- struct{}{}
+			defer func() { <-capacity }()
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode: %v", err)
+				http.Error(w, "bad request", 400)
+				return
+			}
+			encoded, _ := json.Marshal(body)
+			mu.Lock()
+			requests = append(requests, string(encoded))
+			mu.Unlock()
+			time.Sleep(time.Millisecond)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "ok"}}},
+				"usage":   map[string]interface{}{"prompt_tokens": 256, "completion_tokens": body["max_tokens"]},
+				"timings": map[string]interface{}{"prompt_per_second": 100.0, "predicted_per_second": 20.0, "cache_n": 200},
+			})
+		}))
+		result, err := (&Runner{BaseURL: server.URL, Model: "local", WorkloadID: "matched", AgentPromptBytes: 1024, Timeout: time.Second}).RunAgentWorkload(slots, 2)
+		server.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Parallel != slots || result.AgentWorkloadLanes != 2 || result.GenTokens != 2*agentBenchmarkGenTokens {
+			t.Fatalf("capacity changed measured work: %+v", result)
+		}
+		if result.AgentWorkloadTimeS != result.AgentScenarioTimeS || result.AgentWorkloadMaxS != result.AgentScenarioMaxS {
+			t.Fatalf("workflow time was extrapolated: %+v", result)
+		}
+		sort.Strings(requests)
+		if previous != nil && !reflect.DeepEqual(previous, requests) {
+			t.Fatal("slot width changed benchmark requests")
+		}
+		previous = requests
+	}
+}
+
+func TestRunAgentWorkloadRejectsUnsupportedDemand(t *testing.T) {
+	for _, input := range [][2]int{{0, 1}, {1, 0}, {1, 9}} {
+		if result, err := (&Runner{}).RunAgentWorkload(input[0], input[1]); err == nil || result != nil {
+			t.Fatalf("invalid workload %v accepted: %+v, %v", input, result, err)
+		}
+	}
+}
+
+func TestRunAgentWorkloadFailsWhenQueuedLaneFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+			MaxTokens int `json:"max_tokens"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) > 0 && strings.Contains(body.Messages[0].Content, "lane 1 repository") {
+			http.Error(w, "queued request failed", 500)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "ok"}}},
+			"usage":   map[string]int{"prompt_tokens": 256, "completion_tokens": body.MaxTokens},
+			"timings": map[string]interface{}{"prompt_per_second": 100.0, "predicted_per_second": 20.0, "cache_n": 200},
+		})
+	}))
+	defer server.Close()
+	result, err := (&Runner{BaseURL: server.URL, Model: "local", Timeout: time.Second}).RunAgentWorkload(1, 2)
+	if err == nil || result != nil {
+		t.Fatalf("partial workflow accepted: %+v, %v", result, err)
 	}
 }

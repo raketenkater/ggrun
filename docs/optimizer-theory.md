@@ -332,6 +332,15 @@ correctly.
 
 ### Agent-workload result
 
+Calibration measures the same requested lane count on every candidate, including
+one-slot servers: excess requests queue at the backend. Cold-ingest plus cached
+append makespan and its worst repeated sample are measured directly; multiplying
+one lane's time by a predicted number of waves is not promotion evidence. Prompt
+geometry, output work, and requested lanes must match. Evidence schema 24
+invalidates the earlier extrapolated measurements (development schemas 20–23
+are also superseded).
+
+
 For each sample persist:
 
 - exact candidate identity and allocation evidence;

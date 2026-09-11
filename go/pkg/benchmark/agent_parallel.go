@@ -126,12 +126,17 @@ func SuggestedAgentPromptBytes(probe PrefillProbe, activeSlots, ubatch int, targ
 // branch/replay, cache, gateway, and clean-relaunch gates before it can promote
 // an automatic default.
 func (r *Runner) RunAgentParallel(slots int) (*Result, error) {
-	lanes := slots
-	if lanes < 2 {
-		lanes = 1
-	}
-	if lanes > agentBenchmarkMaxLanes {
-		lanes = agentBenchmarkMaxLanes
+	slots = max(1, min(slots, agentBenchmarkMaxLanes))
+	return r.RunAgentWorkload(slots, slots)
+}
+
+// RunAgentWorkload sends the same requested work regardless of server capacity.
+// A narrow server must actually queue the excess requests: multiplying a smaller
+// sample cannot measure queue delays, cache eviction, or mixed-request contention.
+// Reject unsupported demand instead of silently claiming an unmeasured workflow.
+func (r *Runner) RunAgentWorkload(slots, lanes int) (*Result, error) {
+	if slots < 1 || lanes < 1 || lanes > 8 {
+		return nil, fmt.Errorf("agent workload requires positive slots and 1..8 requested lanes")
 	}
 
 	warmupBytes := agentBenchmarkProbeLen
@@ -150,7 +155,12 @@ func (r *Runner) RunAgentParallel(slots int) (*Result, error) {
 		}
 		trials = append(trials, result)
 	}
-	return aggregateAgentTrials(trials), nil
+	result := aggregateAgentTrials(trials)
+	result.Parallel = slots
+	result.AgentWorkloadLanes = lanes
+	result.AgentWorkloadTimeS = result.AgentScenarioTimeS
+	result.AgentWorkloadMaxS = result.AgentScenarioMaxS
+	return result, nil
 }
 
 func (r *Runner) runAgentParallelTrial(lanes, trial int) (*Result, error) {

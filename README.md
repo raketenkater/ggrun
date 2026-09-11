@@ -26,6 +26,7 @@ through to `llama-server`.
 [![Release](https://img.shields.io/github/v/release/raketenkater/ggrun)](https://github.com/raketenkater/ggrun/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#backends)
 [![CI](https://github.com/raketenkater/ggrun/actions/workflows/ci.yml/badge.svg)](https://github.com/raketenkater/ggrun/actions/workflows/ci.yml)
+[![Install E2E](https://github.com/raketenkater/ggrun/actions/workflows/install-e2e.yml/badge.svg)](https://github.com/raketenkater/ggrun/actions/workflows/install-e2e.yml)
 
 ## Quick start
 
@@ -41,6 +42,10 @@ Windows (PowerShell):
 iwr -useb https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1 | iex
 ```
 
+Open a new terminal after adding ggrun to PATH. To launch immediately with the
+standard install location, use `~/ggrun/ggrun` on Linux or
+`& "$env:USERPROFILE\ggrun\ggrun.cmd"` in PowerShell.
+
 Then run a local GGUF, download one from Hugging Face, or open the TUI:
 
 ```bash
@@ -49,6 +54,19 @@ ggrun unsloth/Qwen3.6-27B-GGUF --download
 # (equivalently: ggrun download unsloth/Qwen3.6-27B-GGUF)
 ggrun
 ```
+
+The commands above fetch installers from `main`. Windows normally installs the
+latest published launcher; Linux setup can build the current source when Go is
+available. A green check on `main` does not mean that its fixes are already in
+the [latest release](https://github.com/raketenkater/ggrun/releases/latest).
+See [installation details](docs/install.md) for release and source controls.
+
+[Install E2E](https://github.com/raketenkater/ggrun/actions/workflows/install-e2e.yml)
+checks fresh installs, model download, serving, and candidate reinstalls on Linux
+and Windows. Candidate checks and published-installer checks are separate;
+GPU jobs require configured runners and a manual dispatch. Check individual
+jobs: a skipped GPU job is not GPU validation. Release packaging has its own
+[workflow](https://github.com/raketenkater/ggrun/actions/workflows/release.yml).
 
 On NVIDIA hardware, run this once (and again after changing GPUs or slots) to
 replace topology estimates with measured host-memory and pinned PCIe transfer
@@ -75,14 +93,16 @@ when the profile is absent, stale, incomplete, or corrupt.
   offload configurations.
 - Measures a bounded set of safe performance options with `--ai-tune` and
   preserves the winning configuration for the same setup.
-- Makes the ordinary TUI/direct launch converge from a stable placement estimate
-  toward a faster measured whole configuration for its agent workload. The
+- Uses a bounded automatic comparison on eligible TUI/direct launches to test
+  whether one candidate improves on the stable placement estimate. The
   automatic path computes the complete safe neighbor set, then live-compares
   only the baseline and one highest-confidence finalist; the wider sweep stays
   an explicit maintenance operation. It measures repeated cache-backed turns
   plus mixed prefill/decode and promotes only after contained admission,
   branch/replay, lifecycle, and clean-relaunch gates. Exact evidence—including
   a measured result where the stable baseline won—is reused on the next launch.
+  This synthetic serving workload does not prove maximum hardware performance
+  or end-to-end coding-task throughput; those require matched agent workloads.
 - Prints an informational warning before the first load of a very large model,
   including the startup bound and the possibility of a bounded measured retry.
 - Keeps model downloads, recommendations, launches, and the generated command

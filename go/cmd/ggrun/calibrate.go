@@ -672,7 +672,9 @@ func calibrationScore(result, baseline *benchmark.Result) float64 {
 	if !validCalibrationResult(result) || !validCalibrationResult(baseline) {
 		return 0
 	}
-	if result.AgentSamples > 0 && result.AgentPromptBytes != baseline.AgentPromptBytes {
+	if (result.AgentSamples > 0) != (baseline.AgentSamples > 0) ||
+		result.AgentWorkloadLanes != baseline.AgentWorkloadLanes ||
+		(result.AgentSamples > 0 && (result.AgentPromptBytes != baseline.AgentPromptBytes || result.GenTokens != baseline.GenTokens)) {
 		return 0
 	}
 	baseTime, resultTime := calibrationTurnTime(baseline), calibrationTurnTime(result)
@@ -683,7 +685,10 @@ func calibrationScore(result, baseline *benchmark.Result) float64 {
 }
 
 func calibrationCandidateBetter(candidate, current calibrationMeasurement) bool {
-	if candidate.Score <= current.Score*(1+calibrationMinImprovementPct/100) {
+	if math.IsNaN(candidate.Score) || math.IsInf(candidate.Score, 0) ||
+		math.IsNaN(current.Score) || math.IsInf(current.Score, 0) ||
+		candidate.Score <= 0 || current.Score <= 0 ||
+		candidate.Score <= current.Score*(1+calibrationMinImprovementPct/100) {
 		return false
 	}
 	if candidate.Result != nil && current.Result != nil {
@@ -821,20 +826,13 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if active != nil && active.Parallel > 1 {
 			slots = active.Parallel
 		}
-		if slots > workloadLanes {
-			slots = workloadLanes
-		}
-		res, err := runner.RunAgentParallel(slots)
+		res, err := runner.RunAgentWorkload(slots, workloadLanes)
 		if err != nil {
 			return nil, err
 		}
 		if !validCalibrationResult(res) {
 			return nil, fmt.Errorf("benchmark returned incomplete metrics")
 		}
-		waves := (workloadLanes + slots - 1) / slots
-		res.AgentWorkloadLanes = workloadLanes
-		res.AgentWorkloadTimeS = res.AgentScenarioTimeS * float64(waves)
-		res.AgentWorkloadMaxS = res.AgentScenarioMaxS * float64(waves)
 		return res, nil
 	}
 
