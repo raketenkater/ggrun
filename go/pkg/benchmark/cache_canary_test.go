@@ -9,9 +9,25 @@ import (
 	"testing"
 )
 
+// The canary asks /props for the context a slot actually got and /tokenize for
+// the model's real expansion. These fixtures answer chat completions and count
+// calls, so an unhandled side request would shift their call numbering. Decline
+// both explicitly; the code under test falls back when they are unavailable.
+func declineSideRequests(w http.ResponseWriter, r *http.Request) bool {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/props"), strings.HasSuffix(r.URL.Path, "/tokenize"):
+		w.WriteHeader(http.StatusNotFound)
+		return true
+	}
+	return false
+}
+
 func TestCacheCanaryPassesAppendBranchAndReplay(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if declineSideRequests(w, r) {
+			return
+		}
 		call := calls.Add(1)
 		cached := 0
 		prompt := 1800
@@ -46,6 +62,9 @@ func TestCacheCanaryPassesAppendBranchAndReplay(t *testing.T) {
 func TestCacheCanaryRejectsOneCheckpointBranchMiss(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if declineSideRequests(w, r) {
+			return
+		}
 		call := calls.Add(1)
 		cached := 0
 		if call == 2 || call == 4 {
@@ -70,6 +89,9 @@ func TestCacheCanaryRejectsOneCheckpointBranchMiss(t *testing.T) {
 
 func TestCacheCanaryReportsUnsupportedTelemetry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if declineSideRequests(w, r) {
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "GGRUN_OK"}}},
 			"usage":   map[string]interface{}{"prompt_tokens": 100},
@@ -94,6 +116,9 @@ func TestCacheCanaryAcceptsBoundedThinkingPreamble(t *testing.T) {
 	const preamble = "The user is providing a series of evidence entries; this is a deterministic verification prompt."
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if declineSideRequests(w, r) {
+			return
+		}
 		call := calls.Add(1)
 		cached := 0
 		prompt := 1800
@@ -140,6 +165,9 @@ func TestCacheCanaryRejectsEmptyOrUnboundedOutput(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if declineSideRequests(w, r) {
+					return
+				}
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": tc.content}}},
 					"usage":   map[string]interface{}{"prompt_tokens": 1800},
@@ -165,6 +193,9 @@ func TestCacheCanaryRejectsEmptyOrUnboundedOutput(t *testing.T) {
 func TestCacheCanaryRejectsNonDeterministicReplay(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if declineSideRequests(w, r) {
+			return
+		}
 		call := calls.Add(1)
 		content := "a bounded deterministic answer"
 		if call == 4 {
@@ -211,6 +242,15 @@ func contextBoundServer(t *testing.T, nCtx, tokensPerChar int) *httptest.Server 
 	t.Helper()
 	var calls atomic.Int32
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This fixture models a real server, so it answers both side requests
+		// and counts neither: /props with the context a slot actually got, and
+		// /tokenize with the real expansion.
+		if strings.HasSuffix(r.URL.Path, "/props") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"default_generation_settings": map[string]interface{}{"n_ctx": nCtx},
+			})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/tokenize") {
 			var body struct {
 				Content string `json:"content"`
@@ -254,10 +294,11 @@ func TestCacheCanaryFitsTheServedContext(t *testing.T) {
 	server := contextBoundServer(t, 2048, 1)
 	defer server.Close()
 
-	// Without the served context the canary keeps its fixed geometry and the
-	// backend rejects it -- the exact launch failure this guards.
-	if _, err := (&Runner{BaseURL: server.URL, Model: "local"}).RunCacheCanary(); err == nil {
-		t.Fatal("fixed-size canary was expected to overflow a 2048-token context")
+	// Even with no planned context the canary now asks /props and sizes itself,
+	// so it fits without being told. That is stronger than the old behaviour,
+	// which overflowed unless the caller passed ContextTokens.
+	if _, err := (&Runner{BaseURL: server.URL, Model: "local"}).RunCacheCanary(); err != nil {
+		t.Fatalf("canary should size itself from /props with no planned context: %v", err)
 	}
 
 	result, err := (&Runner{BaseURL: server.URL, Model: "local", ContextTokens: 2048}).RunCacheCanary()
@@ -285,5 +326,26 @@ func TestCacheCanaryReportsUnprovableReuseInsteadOfFailing(t *testing.T) {
 	}
 	if !strings.Contains(result.Reason, "too small to prove prefix reuse") {
 		t.Fatalf("reason must say what was not proven, got %q", result.Reason)
+	}
+}
+
+// The planned context is a request, not a grant. llama.cpp clamps a slot to the
+// model's training context: a release build asked for 2048 against stories15M
+// (n_ctx_train 128), got a 128-token slot, and the canary sized from the plan
+// sent 1779 tokens into it. Ask the server what it actually served.
+func TestCacheCanaryPrefersTheServedContextOverThePlanned(t *testing.T) {
+	// nCtx 128 is what /props reports; 2048 is what the caller planned.
+	server := contextBoundServer(t, 128, 1)
+	defer server.Close()
+
+	result, err := (&Runner{BaseURL: server.URL, Model: "local", ContextTokens: 2048}).RunCacheCanary()
+	if err != nil {
+		t.Fatalf("canary must fit the context the server actually served: %v", err)
+	}
+	if !result.Functional {
+		t.Fatalf("endpoint verification should still happen: %+v", result)
+	}
+	if result.Passed {
+		t.Fatalf("128 tokens cannot hold two checkpoints, so reuse is unprovable: %+v", result)
 	}
 }
