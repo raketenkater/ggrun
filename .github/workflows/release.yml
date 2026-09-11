@@ -198,6 +198,9 @@ jobs:
           export LLM_INSTALL_RELEASE_DIR="$PWD/dist" LLM_INSTALL_SCAN_SYSTEM=0
           export LLM_SETUP_NONINTERACTIVE=1 LLM_SETUP_PY_DEPS=skip
           ./setup.sh
+          # Distinct ports for the two checks. They used one, and the second
+          # bound before the first server's socket had gone, failing with
+          # "Address already in use" the moment the first check started passing.
           python3 scripts/verify-installed-serving.py --launcher "$LLM_APP_HOME/ggrun" \
             --model "$RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19146 --output "$RUNNER_TEMP/candidate-evidence"
           printf '\nLLM_PORT=19149\n' >> "$LLM_APP_HOME/.config/config"
@@ -205,7 +208,7 @@ jobs:
           ./setup.sh
           cmp "$RUNNER_TEMP/config-before-upgrade" "$LLM_APP_HOME/.config/config"
           python3 scripts/verify-installed-serving.py --launcher "$LLM_APP_HOME/ggrun" \
-            --model "$RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19146 --output "$RUNNER_TEMP/upgrade-evidence"
+            --model "$RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19152 --output "$RUNNER_TEMP/upgrade-evidence"
 
       - name: Preserve candidate installation evidence
         if: always()
@@ -323,7 +326,7 @@ jobs:
           ./install.ps1 -InstallDir $app -ReleaseDir "$PWD/dist" -NoPath -AssumeYes
           if ($LASTEXITCODE -ne 0) { throw 'Candidate reinstall failed' }
           if ((Get-FileHash $config).Hash -ne $before) { throw 'Upgrade changed user configuration' }
-          python scripts/verify-installed-serving.py --launcher "$app/ggrun.cmd" --model "$env:RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19147 --output "$env:RUNNER_TEMP/upgrade-evidence"
+          python scripts/verify-installed-serving.py --launcher "$app/ggrun.cmd" --model "$env:RUNNER_TEMP/stories15M-q4_0.gguf" --cpu --port 19153 --output "$env:RUNNER_TEMP/upgrade-evidence"
           if ($LASTEXITCODE -ne 0) { throw 'Upgraded candidate serving failed' }
 
       - name: Preserve candidate installation evidence
