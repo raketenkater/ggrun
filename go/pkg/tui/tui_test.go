@@ -2285,3 +2285,44 @@ func TestHasAnyUsage(t *testing.T) {
 		t.Fatal("a launched record must report true")
 	}
 }
+
+func TestInitialParallelPolicyReachesLaunch(t *testing.T) {
+	for _, tc := range []struct {
+		name, configValue, envValue string
+		wantValue                   int
+		wantExplicit                bool
+	}{
+		{"saved default", "1", "", 1, false},
+		{"configured wider layout", "2", "", 2, true},
+		{"environment pins one", "2", "1", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := t.TempDir()
+			cfgPath := filepath.Join(app, "config")
+			if err := os.WriteFile(cfgPath, []byte("LLM_PARALLEL="+tc.configValue+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("LLM_APP_HOME", app)
+			t.Setenv("LLM_CONFIG", cfgPath)
+			t.Setenv("LLM_PARALLEL", tc.envValue)
+			m := InitialModel()
+			m.models = []ModelItem{{Name: "test.gguf", Path: "/models/test.gguf"}}
+			m.selectedModel = 0
+			m.claudeCode = true
+			req := m.buildLaunchRequest()
+			if req == nil || req.Parallel != tc.wantValue || req.ParallelSet != tc.wantExplicit {
+				t.Fatalf("launch=%#v, want parallel=%d explicit=%v", req, tc.wantValue, tc.wantExplicit)
+			}
+			args := req.LaunchArgs()
+			pinned := false
+			for _, arg := range args {
+				if arg == "--parallel" {
+					pinned = true
+				}
+			}
+			if pinned != tc.wantExplicit {
+				t.Fatalf("args=%v, want explicit parallel=%v", args, tc.wantExplicit)
+			}
+		})
+	}
+}
