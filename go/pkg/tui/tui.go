@@ -269,6 +269,11 @@ func sessionModel() Model {
 	if cfg.Parallel > 0 {
 		parallel = strconv.Itoa(cfg.Parallel)
 	}
+	// Config.Save serializes the built-in one-slot default. Loading it must
+	// not turn automatic Claude scheduling into --parallel 1. Environment
+	// overrides and selections made in the per-model editor remain explicit.
+	parallelExplicit := cfg.Parallel > 0 && cfg.IsExplicit("PARALLEL") &&
+		(cfg.Parallel > 1 || os.Getenv("LLM_PARALLEL") != "")
 	spin := spinner.New()
 	spin.Spinner = spinner.MiniDot
 	spin.Style = titleStyle
@@ -286,7 +291,7 @@ func sessionModel() Model {
 		kvQuality:       cfg.KVQuality,
 		swaFull:         cfg.SWAFull,
 		parallel:        parallel,
-		parallelSet:     cfg.Parallel > 0 && cfg.IsExplicit("PARALLEL"),
+		parallelSet:     parallelExplicit,
 		vision:          cfg.Vision,
 		supportExpert:   cfg.SupportExpert,
 		supportOnline:   cfg.SupportOnline,
