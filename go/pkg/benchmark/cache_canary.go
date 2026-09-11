@@ -68,6 +68,12 @@ func canaryEvidence(label string, r *canaryResponse) string {
 // rather than failing a launch that is otherwise healthy.
 func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
 	words, cacheProvable := r.canarySegmentWords()
+	if words <= 0 {
+		// Not even the instruction frame fits. Sending the framed canary anyway
+		// earns an HTTP 400 and rejects a server that is serving correctly, so
+		// verify the endpoint with the shortest exchange that fits instead.
+		return r.minimalFunctionalCanary()
+	}
 	segmentA := canarySegment("alpha", words)
 	segmentB := canarySegment("beta", words)
 	segmentC := canarySegment("gamma", words)
@@ -158,6 +164,34 @@ func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
 	default:
 		result.Passed = true
 	}
+	return result, nil
+}
+
+// minimalFunctionalCanary is the fallback for a context so small that the
+// framed cache canary cannot fit at all, as on a model whose training context
+// is 128 tokens. It answers one question only: does the completion endpoint
+// return a bounded answer? Prefix reuse is left explicitly unproven rather than
+// assumed, and the launch is not rejected for being small.
+func (r *Runner) minimalFunctionalCanary() (*CacheCanaryResult, error) {
+	reply, err := r.canaryChat([]canaryMessage{
+		{Role: "user", Content: "Reply GGRUN_OK."},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("minimal cache canary: %w", err)
+	}
+	result := &CacheCanaryResult{
+		Functional:       validCanaryOutput(reply.Content),
+		ColdPromptTokens: reply.PromptTokens,
+		ColdPromptTPS:    reply.PromptTPS,
+	}
+	if !result.Functional {
+		result.Reason = "minimal functional canary did not get a bounded non-empty answer: " +
+			canaryEvidence("reply", reply)
+		return result, nil
+	}
+	result.Reason = fmt.Sprintf(
+		"served context (%d tokens) is too small to prove prefix reuse; it cannot hold the canary prefix at all, so only the completion endpoint was verified",
+		r.servedContextTokens())
 	return result, nil
 }
 
@@ -270,12 +304,19 @@ const (
 // correctly. So measure the expansion with the model's own tokenizer instead of
 // assuming it.
 func (r *Runner) canarySegmentWords() (words int, cacheProvable bool) {
-	if r == nil || r.ContextTokens <= 0 {
+	if r == nil {
 		return canaryFullSegmentWords, true
 	}
-	budget := r.ContextTokens - canaryReplyReserve
+	context := r.servedContextTokens()
+	if context <= 0 {
+		context = r.ContextTokens
+	}
+	if context <= 0 {
+		return canaryFullSegmentWords, true
+	}
+	budget := context - canaryReplyReserve
 	if budget <= 0 {
-		return 1, false
+		return 0, false
 	}
 	probe := canarySegment("alpha", canaryFullSegmentWords)
 	tokens, err := r.tokenCount(probe)
@@ -291,9 +332,12 @@ func (r *Runner) canarySegmentWords() (words int, cacheProvable bool) {
 		return canaryFullSegmentWords, true
 	}
 	// The instructions and GGRUN_OK turns around the segments cost tokens too.
+	// The instruction frame and the GGRUN_OK turns are irreducible. If they do
+	// not fit, no segment length rescues this prompt: say so with 0 words and
+	// let the caller fall back to a single minimal exchange.
 	budget -= int(float64(canaryFrameChars)*perChar) + 1
 	if budget <= 0 {
-		return 1, false
+		return 0, false
 	}
 	// The cold prompt carries three segments.
 	words = int(float64(budget) * 0.95 / (3 * perWord))
@@ -313,6 +357,38 @@ func (r *Runner) canarySegmentWords() (words int, cacheProvable bool) {
 	}
 	promptTokens := int(float64(words) * 3 * perWord)
 	return words, promptTokens >= canaryCacheProofTokens
+}
+
+// servedContextTokens asks the server what a slot actually got, returning 0
+// when it cannot say.
+//
+// The planned context is a request, not a grant. llama.cpp clamps a slot to the
+// model's training context, so a launch that asked for 2048 against stories15M
+// (n_ctx_train 128) serves 128 and rejects anything larger. Sizing the canary
+// from the plan sent 1779 tokens into that 128-token slot and failed a release
+// build. Verified against a live server: --ctx-size 2048 reports n_ctx 128.
+func (r *Runner) servedContextTokens() int {
+	request, err := http.NewRequest(http.MethodGet, strings.TrimRight(r.BaseURL, "/")+"/props", nil)
+	if err != nil {
+		return 0
+	}
+	response, err := r.client().Do(request)
+	if err != nil {
+		return 0
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0
+	}
+	var decoded struct {
+		DefaultGenerationSettings struct {
+			NCtx int `json:"n_ctx"`
+		} `json:"default_generation_settings"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded); err != nil {
+		return 0
+	}
+	return decoded.DefaultGenerationSettings.NCtx
 }
 
 // tokenCount asks the server to tokenize text with the model's own tokenizer.
