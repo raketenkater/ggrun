@@ -108,7 +108,13 @@ cmd_run() {
 
     # Record where the run list stood, so the dispatched run is identified by
     # being new rather than by a timestamp this script would have to trust.
-    local before; before="$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=1" --jq '.workflow_runs[0].id // 0')"
+    #
+    # Filter by event here, exactly as the lookup below does. Without the
+    # filter this recorded the newest run of ANY event -- usually a push -- so
+    # the newest *dispatch* run was already different from it and the loop
+    # accepted a stale run on its first try. It then watched a run that had
+    # finished over an hour earlier and reported that old failure as this one.
+    local before; before="$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=1&event=workflow_dispatch" --jq '.workflow_runs[0].id // 0')"
     echo "==> dispatching $WORKFLOW on main"
     gh workflow run "$WORKFLOW" --repo "$REPO" --ref main
 

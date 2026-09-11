@@ -147,7 +147,12 @@ function Invoke-Run {
         Write-Host '==> runner online'
 
         # Identify the dispatched run by being new, rather than by a timestamp.
-        $before = gh api "repos/$Repo/actions/workflows/$Workflow/runs?per_page=1" --jq '.workflow_runs[0].id // 0'
+        # Filter by event here, exactly as the lookup below does. Without the
+        # filter this recorded the newest run of ANY event, usually a push, so
+        # the newest dispatch run already differed from it and the loop
+        # accepted a stale run on its first try, then reported that old run's
+        # result as this one's.
+        $before = gh api "repos/$Repo/actions/workflows/$Workflow/runs?per_page=1&event=workflow_dispatch" --jq '.workflow_runs[0].id // 0'
         Write-Host "==> dispatching $Workflow on main"
         gh workflow run $Workflow --repo $Repo --ref main
         if ($LASTEXITCODE -ne 0) { throw 'dispatch failed' }
