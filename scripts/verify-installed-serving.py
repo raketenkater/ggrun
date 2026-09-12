@@ -21,6 +21,17 @@ def request(port, route, payload=None, timeout=5):
         return json.load(response)
 
 
+def check_port_available(port):
+    with socket.socket() as sock:
+        # Linux leaves closed connections in TIME_WAIT after a clean stop.
+        # Permit rebinding those, but listen as well so an active listener is
+        # still rejected. Windows SO_REUSEADDR can steal a live port: omit it.
+        if os.name != "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+
+
 def weight_devices(log):
     # Ignore allocations from abandoned admissions before the final launch.
     launches = list(re.finditer(r"(?m)^\[launch\] .* -m ", log))
@@ -55,9 +66,6 @@ def main():
         parser.error("--cpu cannot require GPU allocations")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    # Refuse an occupied port so another server cannot supply false evidence.
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", args.port))
     command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
                "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port),
                "--ctx", str(args.ctx)]
@@ -71,6 +79,7 @@ def main():
     env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
     proc = None
     try:
+        check_port_available(args.port)
         with (output / "serve.log").open("wb") as log:
             proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, env=env,
