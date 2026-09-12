@@ -49,7 +49,9 @@ function Invoke-NativeCheck([string]$Program, [string[]]$Arguments, [string]$Log
 function Install-App([string]$Stage) {
     $params = @{ InstallDir = $App; Release = $Release; Backend = $Backend; NoPath = $true; AssumeYes = $true }
     if ($ReleaseDir) { $params.ReleaseDir = $ReleaseDir }
-    & $Installer @params *> (Join-Path $Evidence "$Stage.log")
+    # The installer owns a transcript. Redirecting all its streams here makes
+    # PS 5.1 treat benign native stderr (llama-server --version) as an error.
+    & $Installer @params | Out-Host
     $Summary.stages += $Stage
 }
 function Run-Serving([string]$Stage, [string[]]$SourceArgs, [int]$Ctx, [int]$Devices) {

@@ -34,7 +34,8 @@ def check_port_available(port):
 
 def weight_devices(log):
     # Ignore allocations from abandoned admissions before the final launch.
-    launches = list(re.finditer(r"(?m)^\[launch\] .* -m ", log))
+    launches = list(re.finditer(
+        r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log))
     if launches:
         log = log[launches[-1].start():]
     devices = set()

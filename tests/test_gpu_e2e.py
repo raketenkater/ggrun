@@ -69,6 +69,17 @@ CUDA3 model buffer size = 0.00 MiB
         log += "llm_load_tensors: CUDA1 buffer size = 526.50 MiB\nCUDA2 model buffer size = 12000 MiB\n"
         self.assertEqual(serving.weight_devices(log), ["CUDA1", "CUDA2"])
 
+    def test_backend_restart_without_argv_does_not_reuse_old_allocations(self):
+        log = """[launch] /bin/server -m model
+load_tensors: loading model tensors
+CUDA0 model buffer size = 100 MiB
+CUDA1 model buffer size = 100 MiB
+llm_load_tensors: loading model tensors
+CPU model buffer size = 200 MiB
+CUDA0 compute buffer size = 10 MiB
+"""
+        self.assertEqual(serving.weight_devices(log), [])
+
     def test_split_download_requires_complete_unique_model(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
