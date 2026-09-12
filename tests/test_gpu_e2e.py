@@ -5,6 +5,7 @@ import tempfile
 import socket
 import os
 import json
+import io
 import subprocess
 import sys
 import unittest
@@ -34,6 +35,14 @@ class GPUCheckTests(unittest.TestCase):
             self.assertNotIn("--ctx", evidence["command"])
             self.assertFalse(evidence["passed"])
             self.assertIn("launcher exited", evidence["error"])
+
+    def test_stream_requires_text_and_completion_marker(self):
+        event = b'data: {"choices":[{"delta":{"content":"blue"}}]}\n\n'
+        self.assertEqual(len(serving.read_stream(io.BytesIO(event + b'data: [DONE]\n'))), 1)
+        with self.assertRaisesRegex(RuntimeError, "without \\[DONE\\]"):
+            serving.read_stream(io.BytesIO(event))
+        with self.assertRaisesRegex(RuntimeError, "without generated text"):
+            serving.read_stream(io.BytesIO(b'data: {"choices":[]}\ndata: [DONE]\n'))
 
     def test_live_listener_is_rejected(self):
         with socket.socket() as server:

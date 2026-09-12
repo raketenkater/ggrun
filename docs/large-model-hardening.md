@@ -26,8 +26,8 @@ CPU and Windows smoke jobs retain their original model.
 
 The dispatched job installs into a fresh app home, downloads into a dedicated
 model directory, validates split GGUF completeness, runs the standard launcher,
-generates text and checks shutdown/port release. Evidence includes input.json,
-download.log, serve.log, reply.json and result.json. Model weights are excluded
+checks regular and streamed generation, and checks shutdown/port release. Evidence includes input.json,
+download.log, serve.log, reply.json, stream.json and result.json. Model weights are excluded
 from uploaded artifacts. A two-device requirement rejects CPU fallback and
 single-device placement; KV, compute, output and abandoned launch allocations
 do not count as model weights.
@@ -81,7 +81,8 @@ The script installs a separate app home without changing PATH, checks launcher
 and backend startup, records hardware, downloads and serves a small smoke model,
 reinstalls without changing user configuration, and relaunches. If a large model
 is specified it then serves and relaunches it with the required GPU count. Each
-serving pass checks readiness, nonempty generated text and graceful cleanup.
+serving pass checks readiness, nonempty regular and streamed generation, the
+stream completion marker, and graceful cleanup.
 Python must be available after installation; the script reports a missing Python
 command as a failure. CUDA requires the server's NVIDIA driver.
 

@@ -21,6 +21,37 @@ def request(port, route, payload=None, timeout=5):
         return json.load(response)
 
 
+def read_stream(response):
+    events = []
+    generated = False
+    for raw in response:
+        line = raw.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            if not generated:
+                raise RuntimeError("stream completed without generated text")
+            return events
+        event = json.loads(data)
+        events.append(event)
+        for choice in event.get("choices", []):
+            delta = choice.get("delta", {})
+            text = delta.get("content") or delta.get("reasoning_content")
+            generated = generated or (isinstance(text, str) and bool(text.strip()))
+    raise RuntimeError("stream closed without [DONE]")
+
+
+def streaming_request(port, timeout):
+    payload = {"messages": [{"role": "user", "content": "Name one colour."}],
+               "max_tokens": 32, "temperature": 0, "stream": True}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return read_stream(response)
+
+
 def check_port_available(port):
     with socket.socket() as sock:
         # Linux leaves closed connections in TIME_WAIT after a clean stop.
@@ -122,6 +153,11 @@ def main():
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during generation")
             result["generation"] = True
+            events = streaming_request(args.port, args.request_timeout)
+            (output / "stream.json").write_text(json.dumps(events, indent=2))
+            if proc.poll() is not None:
+                raise RuntimeError("launcher exited during streaming")
+            result["streaming"] = True
     except BaseException as exc:
         result["error"] = str(exc)
         raise
@@ -157,7 +193,7 @@ def main():
                         result["port_released"] = True
                         break
                 time.sleep(0.2)
-            result["passed"] = bool(result.get("generation") and result.get("port_released")
+            result["passed"] = bool(result.get("generation") and result.get("streaming") and result.get("port_released")
                                     and not result.get("forced_cleanup") and not result.get("error"))
         (output / "result.json").write_text(json.dumps(result, indent=2))
     if not result["passed"]:
