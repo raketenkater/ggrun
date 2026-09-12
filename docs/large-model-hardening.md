@@ -57,3 +57,36 @@ completion is only functional evidence.
 Release-bundle acceptance additionally requires installing the exact packaged
 CUDA asset. A source launcher with an existing custom backend is useful for
 isolated debugging, but is not evidence that a new CUDA release asset works.
+
+## Windows Server: run later on the target hardware
+
+From a checkout containing these scripts, in native PowerShell:
+
+```powershell
+.\scripts\test-windows-server.ps1 `
+  -WorkDir D:\ggrun-checks\large-model-01 `
+  -ModelPath D:\models\model-00001-of-00003.gguf `
+  -Backend cuda -MinWeightDevices 2 -Context 32768
+```
+
+Or replace ModelPath with `-ModelRepo YOUR_ORG/YOUR_GGUF_REPO -Quant Q4_K_M`.
+Use a directory that does not already exist. `-Release vX.Y.Z` pins the launcher
+release; `-ReleaseDir D:\candidate` tests local checksummed candidate archives.
+The CUDA backend source is whatever that installer selects; retain its version
+log and do not infer a CUDA release bundle exists from a CPU launcher package.
+
+The script installs a separate app home without changing PATH, checks launcher
+and backend startup, records hardware, downloads and serves a small smoke model,
+reinstalls without changing user configuration, and relaunches. If a large model
+is specified it then serves and relaunches it with the required GPU count. Each
+serving pass checks readiness, nonempty generated text and graceful cleanup.
+Python must be available after installation; the script reports a missing Python
+command as a failure. CUDA requires the server's NVIDIA driver.
+
+Evidence is kept under WorkDir/evidence, including a final summary even on
+failure. Downloads remain under their run directories; exclude downloaded-models
+when sharing evidence. It does not delete the installation, edit the existing
+production configuration, or terminate unrelated servers. Review gpu-before.txt
+and gpu-after.txt for resource release on the actual server. Windows CI runs this
+script against a real CPU candidate bundle, including paths with spaces; that
+checks the script plumbing, not Windows GPU/offload behavior.

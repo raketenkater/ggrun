@@ -280,6 +280,23 @@ jobs:
           python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:MODEL" --port 18844 --output evidence/downloaded
           if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
 
+      - name: Exercise Windows server hardening script with candidate CPU bundle
+        if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
+        shell: powershell
+        run: |
+          ./scripts/test-windows-server.ps1 -WorkDir "$env:RUNNER_TEMP/server check" `
+            -ReleaseDir "$env:RUNNER_TEMP/candidate" -Backend cpu -MinWeightDevices 0 `
+            -ModelPath "$env:MODEL" -Context 2048 -StartupTimeout 300 -Port 18846
+
+      - name: Preserve Windows server hardening evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-server-hardening
+          path: |
+            ${{ runner.temp }}/server check/evidence/**
+            !${{ runner.temp }}/server check/evidence/**/downloaded-models/**
+
       - name: Preserve install and serving evidence
         if: always()
         uses: actions/upload-artifact@v4

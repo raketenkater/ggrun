@@ -42,8 +42,8 @@ def main():
     parser.add_argument("--min-weight-devices", type=int, default=1)
     parser.add_argument("--port", type=int, default=18845)
     args = parser.parse_args()
-    if min(args.ctx, args.timeout, args.request_timeout, args.min_weight_devices) <= 0:
-        parser.error("context, timeouts and required device count must be positive")
+    if min(args.ctx, args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
+        parser.error("context/timeouts must be positive; required device count must be nonnegative")
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -61,6 +61,7 @@ def main():
         model = select_model(models)
     else:
         model = Path(args.model).resolve(strict=True)
+    (output / "selected-model.json").write_text(json.dumps({"model": str(model)}, indent=2))
     subprocess.run([sys.executable, str(Path(__file__).with_name("verify-installed-serving.py")),
                     "--launcher", launcher, "--model", str(model), "--output", str(output),
                     "--ctx", str(args.ctx), "--timeout", str(args.timeout),
