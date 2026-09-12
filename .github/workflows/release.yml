@@ -386,7 +386,12 @@ jobs:
       # running the backend directly exports nothing. Assert relocatability
       # separately, and by inspection: it needs no GPU driver, so it cannot
       # produce a false failure on a runner that has none.
+      # shell: bash is required, not cosmetic. This job runs in a container
+      # where the default run shell is sh, and dash rejects `set -o pipefail`
+      # on line 1 -- which failed a release after a 2h23m build that had
+      # already succeeded.
       - name: The packaged backend is relocatable
+        shell: bash
         run: |
           set -euo pipefail
           rm -rf /tmp/cuda-check && mkdir -p /tmp/cuda-check
