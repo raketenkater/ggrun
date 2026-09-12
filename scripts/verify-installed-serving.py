@@ -60,15 +60,16 @@ def main():
     parser.add_argument("--min-weight-devices", type=int, default=0,
                         help="Require weight allocations on this many devices in the final launch")
     args = parser.parse_args()
-    if min(args.ctx, args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
-        parser.error("context/timeouts must be positive and device minimum nonnegative")
+    if args.ctx < 0 or min(args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
+        parser.error("timeouts must be positive; context/device minimum nonnegative (context 0 means auto)")
     if args.cpu and args.min_weight_devices:
         parser.error("--cpu cannot require GPU allocations")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
-               "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port),
-               "--ctx", str(args.ctx)]
+               "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port)]
+    if args.ctx:
+        command += ["--ctx", str(args.ctx)]
     if args.cpu:
         command.append("--cpu")
     windows = os.name == "nt"

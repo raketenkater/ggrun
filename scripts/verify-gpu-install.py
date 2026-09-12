@@ -42,8 +42,8 @@ def main():
     parser.add_argument("--min-weight-devices", type=int, default=1)
     parser.add_argument("--port", type=int, default=18845)
     args = parser.parse_args()
-    if min(args.ctx, args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
-        parser.error("context/timeouts must be positive; required device count must be nonnegative")
+    if args.ctx < 0 or min(args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
+        parser.error("timeouts must be positive; context/device count must be nonnegative (context 0 means auto)")
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):

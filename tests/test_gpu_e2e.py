@@ -4,6 +4,9 @@ from pathlib import Path
 import tempfile
 import socket
 import os
+import json
+import subprocess
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +20,21 @@ serving = load("verify-installed-serving")
 gpu = load("verify-gpu-install")
 
 class GPUCheckTests(unittest.TestCase):
+    def test_auto_context_reaches_launcher_without_an_override(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = root / "exiting_launcher.py"
+            model.write_text("raise SystemExit(1)\n")
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/verify-installed-serving.py"),
+                                     "--launcher", sys.executable, "--model", str(model),
+                                     "--output", str(root / "evidence"), "--ctx", "0"],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            evidence = json.loads((root / "evidence/result.json").read_text())
+            self.assertNotIn("--ctx", evidence["command"])
+            self.assertFalse(evidence["passed"])
+            self.assertIn("launcher exited", evidence["error"])
+
     def test_live_listener_is_rejected(self):
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))

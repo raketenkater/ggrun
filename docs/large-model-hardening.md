@@ -45,6 +45,8 @@ python3 scripts/verify-gpu-install.py \
   --min-weight-devices 2 --port 18855
 ```
 
+Use `--ctx 0` to omit the context override and exercise automatic context selection.
+
 This local mode tests serving through the installed launcher but does not test
 the installer or download. Use a new output directory per run. It refuses an
 occupied port and terminates only its own process group. Preserve the failure
