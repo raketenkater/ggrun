@@ -20,6 +20,31 @@ on:
         type: boolean
         default: false
 
+      gpu_model_repo:
+        description: Linux GPU model repository (large models are opt-in)
+        type: string
+        default: ggml-org/Qwen3.5-0.8B-GGUF
+      gpu_model_quant:
+        description: Linux GPU model quantization
+        type: string
+        default: Q4_0
+      gpu_context:
+        description: Total Linux GPU serving context
+        type: number
+        default: 2048
+      gpu_startup_timeout:
+        description: Linux GPU launcher readiness timeout in seconds
+        type: number
+        default: 300
+      gpu_request_timeout:
+        description: Linux GPU generation timeout in seconds
+        type: number
+        default: 120
+      gpu_min_weight_devices:
+        description: Minimum devices with model weight allocations (2 exercises splitting)
+        type: number
+        default: 1
+
 permissions:
   contents: read
 
@@ -307,31 +332,28 @@ jobs:
         env:
           LLM_APP_HOME: ${{ runner.temp }}/ggrun-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           CUDA_DEVICE_ORDER: PCI_BUS_ID
+          GPU_MODEL_REPO: ${{ inputs.gpu_model_repo }}
+          GPU_MODEL_QUANT: ${{ inputs.gpu_model_quant }}
+          GPU_CONTEXT: ${{ inputs.gpu_context }}
+          GPU_STARTUP_TIMEOUT: ${{ inputs.gpu_startup_timeout }}
+          GPU_REQUEST_TIMEOUT: ${{ inputs.gpu_request_timeout }}
+          GPU_MIN_WEIGHT_DEVICES: ${{ inputs.gpu_min_weight_devices }}
         run: |
-          set -euo pipefail
-          g="$LLM_APP_HOME/ggrun"
-          "$g" download "$E2E_REPO" --quant "$E2E_QUANT"
-          shopt -s nullglob
-          got=("$LLM_APP_HOME/models"/*Q4_0*.gguf)
-          [ ${#got[@]} -gt 0 ] || { echo "::error::no downloaded model"; exit 1; }
-          python3 scripts/verify-installed-serving.py --launcher "$g" --model "${got[0]}" --port 18845 --output evidence/gpu
-          # Require an actual nonzero weight allocation on a device, not flag or
-          # help text. Backends word this differently and requiring one spelling
-          # failed a run that had offloaded all 25 layers:
-          #   mainline  CUDA0 model buffer size =   526.50 MiB
-          #   ik_llama  llm_load_tensors: CUDA1 buffer size =   526.50 MiB
-          # So match either, then drop the KV, compute and output buffers, which
-          # a device allocates even when the weights stayed on the host.
-          grep -E '(CUDA[0-9]+|Vulkan[0-9]+|Metal)[^[:cntrl:]]*buffer size *= *[1-9][0-9.]* MiB' evidence/gpu/serve.log |
-            grep -vE 'KV buffer|compute buffer|output buffer' | grep -q . || {
-            echo "::error::No positive device weight allocation recorded"; exit 1; }
+          python3 scripts/verify-gpu-install.py --launcher "$LLM_APP_HOME/ggrun" \
+            --repo "${GPU_MODEL_REPO:-$E2E_REPO}" --quant "${GPU_MODEL_QUANT:-$E2E_QUANT}" \
+            --ctx "${GPU_CONTEXT:-2048}" --timeout "${GPU_STARTUP_TIMEOUT:-300}" \
+            --request-timeout "${GPU_REQUEST_TIMEOUT:-120}" \
+            --min-weight-devices "${GPU_MIN_WEIGHT_DEVICES:-1}" \
+            --port 18845 --output evidence/gpu
 
       - name: Preserve GPU evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gpu-install-evidence
-          path: evidence/
+          path: |
+            evidence/gpu/*.json
+            evidence/gpu/*.log
 
   # Same flow on a Windows machine with cards. Gated on its own variable so one
   # platform's runner being absent never leaves the other's job queued.

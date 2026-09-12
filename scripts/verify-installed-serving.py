@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import socket
@@ -20,6 +21,21 @@ def request(port, route, payload=None, timeout=5):
         return json.load(response)
 
 
+def weight_devices(log):
+    # Ignore allocations from abandoned admissions before the final launch.
+    launches = list(re.finditer(r"(?m)^\[launch\] .* -m ", log))
+    if launches:
+        log = log[launches[-1].start():]
+    devices = set()
+    for line in log.splitlines():
+        if re.search(r"(?:KV|compute|output) buffer", line, re.I):
+            continue
+        match = re.search(r"(CUDA\d+|Vulkan\d+|Metal\d*)[^\n]*?buffer size\s*=\s*([0-9.]+) MiB", line)
+        if match and float(match[2]) > 0:
+            devices.add(match[1])
+    return sorted(devices)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launcher", required=True)
@@ -28,7 +44,15 @@ def main():
     parser.add_argument("--port", type=int, default=18843)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--ctx", type=int, default=2048)
+    parser.add_argument("--request-timeout", type=int, default=120)
+    parser.add_argument("--min-weight-devices", type=int, default=0,
+                        help="Require weight allocations on this many devices in the final launch")
     args = parser.parse_args()
+    if min(args.ctx, args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
+        parser.error("context/timeouts must be positive and device minimum nonnegative")
+    if args.cpu and args.min_weight_devices:
+        parser.error("--cpu cannot require GPU allocations")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     # Refuse an occupied port so another server cannot supply false evidence.
@@ -36,7 +60,7 @@ def main():
         sock.bind(("127.0.0.1", args.port))
     command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
                "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port),
-               "--ctx", "2048"]
+               "--ctx", str(args.ctx)]
     if args.cpu:
         command.append("--cpu")
     windows = os.name == "nt"
@@ -69,10 +93,14 @@ def main():
                 time.sleep(0.5)
             else:
                 raise RuntimeError("timed out waiting for launcher readiness and health")
+            result["weight_devices"] = weight_devices((output / "serve.log").read_text(errors="replace"))
+            result["min_weight_devices"] = args.min_weight_devices
+            if len(result["weight_devices"]) < args.min_weight_devices:
+                raise RuntimeError(f"required {args.min_weight_devices} weight devices, observed {result['weight_devices']}")
             reply = request(args.port, "/v1/chat/completions", {
                 "messages": [{"role": "user", "content": "Name one colour."}],
                 "max_tokens": 32, "temperature": 0, "stream": False,
-            }, timeout=120)
+            }, timeout=args.request_timeout)
             (output / "reply.json").write_text(json.dumps(reply, indent=2))
             choices = reply.get("choices") or []
             message = choices[0].get("message", {}) if choices else {}
