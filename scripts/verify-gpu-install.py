@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--request-timeout", type=int, default=120)
     parser.add_argument("--min-weight-devices", type=int, default=1)
     parser.add_argument("--port", type=int, default=18845)
+    parser.add_argument("--relaunch", action="store_true", help="Immediately repeat serving on the same port")
     args = parser.parse_args()
     if args.ctx < 0 or min(args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
         parser.error("timeouts must be positive; context/device count must be nonnegative (context 0 means auto)")
@@ -62,11 +63,13 @@ def main():
     else:
         model = Path(args.model).resolve(strict=True)
     (output / "selected-model.json").write_text(json.dumps({"model": str(model)}, indent=2))
-    subprocess.run([sys.executable, str(Path(__file__).with_name("verify-installed-serving.py")),
-                    "--launcher", launcher, "--model", str(model), "--output", str(output),
-                    "--ctx", str(args.ctx), "--timeout", str(args.timeout),
-                    "--request-timeout", str(args.request_timeout),
-                    "--min-weight-devices", str(args.min_weight_devices), "--port", str(args.port)], check=True)
+    stages = [output, output / "relaunch"] if args.relaunch else [output]
+    for stage in stages:
+        subprocess.run([sys.executable, str(Path(__file__).with_name("verify-installed-serving.py")),
+                        "--launcher", launcher, "--model", str(model), "--output", str(stage),
+                        "--ctx", str(args.ctx), "--timeout", str(args.timeout),
+                        "--request-timeout", str(args.request_timeout),
+                        "--min-weight-devices", str(args.min_weight_devices), "--port", str(args.port)], check=True)
 
 
 if __name__ == "__main__":

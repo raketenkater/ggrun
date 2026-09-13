@@ -9,6 +9,8 @@ import io
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
+import errno
 
 ROOT = Path(__file__).resolve().parents[1]
 def load(name):
@@ -51,10 +53,33 @@ class GPUCheckTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 serving.check_port_available(server.getsockname()[1])
 
+    @unittest.skipIf(os.name == "nt", "POSIX connection probe")
+    def test_unknown_port_probe_error_fails_closed(self):
+        with patch.object(serving.socket, 'socket') as factory:
+            factory.return_value.__enter__.return_value.connect_ex.return_value = errno.ETIMEDOUT
+            with self.assertRaises(OSError):
+                serving.check_port_available(18843)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux SO_REUSEPORT")
+    def test_live_reuseport_listener_is_rejected(self):
+        with socket.socket() as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            with self.assertRaises(OSError):
+                serving.check_port_available(server.getsockname()[1])
+
     @unittest.skipIf(os.name == "nt", "POSIX TIME_WAIT rebinding")
     def test_clean_stop_allows_immediate_relaunch(self):
+        self.assert_timewait_accepted(socket.SO_REUSEADDR)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux ik socket policy")
+    def test_ik_reuseport_clean_stop_allows_immediate_relaunch(self):
+        self.assert_timewait_accepted(socket.SO_REUSEPORT)
+
+    def assert_timewait_accepted(self, reuse_option):
         with socket.socket() as server, socket.socket() as client:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.setsockopt(socket.SOL_SOCKET, reuse_option, 1)
             server.bind(("127.0.0.1", 0))
             port = server.getsockname()[1]
             server.listen(1)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise an installed launcher; retain logs and stop only our process group."""
 import argparse
+import errno
 import json
 import os
 import re
@@ -8,6 +9,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -53,14 +55,25 @@ def streaming_request(port, timeout):
 
 
 def check_port_available(port):
+    if os.name == "nt":
+        # Preserve the native Windows probe: a short loopback connect can
+        # time out as WSAEWOULDBLOCK even when no listener exists. Do not set
+        # SO_REUSEADDR on Windows, where it can share an occupied port.
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+        return
+    # Refuse a live listener without imposing our socket reuse policy on the
+    # backend. ik uses SO_REUSEPORT on Linux; mainline uses SO_REUSEADDR.
+    # A bind probe with the other policy rejects harmless TIME_WAIT sockets.
+    # The launched process must still prove readiness, generation and cleanup.
     with socket.socket() as sock:
-        # Linux leaves closed connections in TIME_WAIT after a clean stop.
-        # Permit rebinding those, but listen as well so an active listener is
-        # still rejected. Windows SO_REUSEADDR can steal a live port: omit it.
-        if os.name != "nt":
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", port))
-        sock.listen(1)
+        sock.settimeout(0.5)
+        error = sock.connect_ex(("127.0.0.1", port))
+    if error == 0:
+        raise OSError(errno.EADDRINUSE, f"port {port} has an active listener")
+    if error not in {errno.ECONNREFUSED, 10061}:  # Winsock WSAECONNREFUSED
+        raise OSError(error, f"could not establish that port {port} has no listener")
 
 
 def weight_devices(log):
@@ -87,6 +100,9 @@ def main():
     parser.add_argument("--port", type=int, default=18843)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--parallel", type=int, default=0, help="0 preserves automatic slot selection")
+    parser.add_argument("--agent-lanes", type=int, default=0, help="Run bounded tool-using repair tasks before shutdown")
+    parser.add_argument("--agent-repeats", type=int, default=3)
     parser.add_argument("--ctx", type=int, default=2048)
     parser.add_argument("--request-timeout", type=int, default=120)
     parser.add_argument("--min-weight-devices", type=int, default=0,
@@ -96,6 +112,8 @@ def main():
         parser.error("timeouts must be positive; context/device minimum nonnegative (context 0 means auto)")
     if args.cpu and args.min_weight_devices:
         parser.error("--cpu cannot require GPU allocations")
+    if args.parallel < 0 or not 0 <= args.agent_lanes <= 8 or args.agent_repeats < 1:
+        parser.error("invalid parallel or agent workload bounds")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
@@ -104,6 +122,8 @@ def main():
         command += ["--ctx", str(args.ctx)]
     if args.cpu:
         command.append("--cpu")
+    if args.parallel:
+        command += ["--parallel", str(args.parallel)]
     windows = os.name == "nt"
     if windows and command[0].lower().endswith((".cmd", ".bat")):
         command = 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
@@ -158,6 +178,12 @@ def main():
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during streaming")
             result["streaming"] = True
+            if args.agent_lanes:
+                subprocess.run([sys.executable, str(Path(__file__).with_name("verify-agent-workload.py")),
+                                "--url", f"http://127.0.0.1:{args.port}", "--output", str(output / "agent-workload"),
+                                "--lanes", str(args.agent_lanes), "--repeats", str(args.agent_repeats),
+                                "--timeout", str(args.request_timeout)], check=True)
+                result["agent_workload"] = True
     except BaseException as exc:
         result["error"] = str(exc)
         raise

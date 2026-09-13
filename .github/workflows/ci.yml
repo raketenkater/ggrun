@@ -176,7 +176,7 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install pytest huggingface_hub
       - name: Run downloader, recommendation, and hardware-helper pytest suites
-        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_release_relocation.py tests/test_gpu_e2e.py
+        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_release_relocation.py tests/test_gpu_e2e.py tests/test_agent_workload.py
 
   installer-smoke:
     runs-on: ubuntu-latest
