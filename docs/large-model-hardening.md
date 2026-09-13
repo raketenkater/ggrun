@@ -93,3 +93,32 @@ production configuration, or terminate unrelated servers. Review gpu-before.txt
 and gpu-after.txt for resource release on the actual server. Windows CI runs this
 script against a real CPU candidate bundle, including paths with spaces; that
 checks the script plumbing, not Windows GPU/offload behavior.
+
+## Same-port restart and tool-using acceptance
+
+The Linux GPU CI check now performs an immediate relaunch on the same port.
+For an equivalent local check, add `--relaunch` to `verify-gpu-install.py`.
+Both stages must generate, stream and release their process without force.
+
+For a bounded real tool loop against an already-serving local endpoint:
+
+```sh
+python3 scripts/verify-agent-workload.py --url http://127.0.0.1:8081 \
+  --output /tmp/ggrun-agent-evidence --lanes 2 --repeats 3
+```
+
+This repairs three small arithmetic fixtures through read_file/write_file/run_tests,
+with an immutable oracle and no execution of model-generated Python. The client
+records complete tool messages, task pass rate, correct tasks per minute and task
+latency; failures remain in the denominator. Evidence directories must be empty.
+Each repetition starts from the same broken source. One warmup is excluded.
+
+For a complete owned launch, `verify-installed-serving.py --agent-lanes 2`
+runs the same workload before normal cleanup. `--parallel 1` gives an explicit
+one-slot control; omit it to retain automatic selection. Keep the exact model,
+backend, useful context, workload hash, sampling, demand and test oracle matched
+across comparisons, run at least three repetitions, and record competing traffic.
+This small fixture suite checks real tool execution and repair correctness; it
+does not replace repository-scale tasks, reviewer quality, long-history replay,
+foreground latency or cancellation acceptance. Do not call a shared live-endpoint
+measurement an isolated performance A/B.

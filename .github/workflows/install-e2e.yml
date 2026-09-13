@@ -352,7 +352,7 @@ jobs:
             --ctx "${GPU_CONTEXT:-2048}" --timeout "${GPU_STARTUP_TIMEOUT:-300}" \
             --request-timeout "${GPU_REQUEST_TIMEOUT:-120}" \
             --min-weight-devices "${GPU_MIN_WEIGHT_DEVICES:-1}" \
-            --port 18845 --output evidence/gpu
+            --port 18845 --output evidence/gpu --relaunch
 
       - name: Preserve GPU evidence
         if: always()
@@ -362,6 +362,8 @@ jobs:
           path: |
             evidence/gpu/*.json
             evidence/gpu/*.log
+            evidence/gpu/relaunch/*.json
+            evidence/gpu/relaunch/*.log
 
   # Same flow on a Windows machine with cards. Gated on its own variable so one
   # platform's runner being absent never leaves the other's job queued.
