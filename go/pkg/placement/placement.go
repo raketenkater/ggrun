@@ -8071,7 +8071,9 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // valid compute/KV measurements that the new generic optimizer needs.
 // Version 6 adds exact feature-scoped allocation evidence and a complete
 // stable hardware signature. Older keys cannot prove either property.
-const placementProbeCacheVersion = 7
+// Version 8 retires oracle measurements taken after memory-policy flags were
+// stripped from the serving argv (KV offload, full SWA and metadata overrides).
+const placementProbeCacheVersion = 8
 
 // Bump whenever placement semantics can change emitted expert residency.
 // Version 6 removes the architecture-specific split-owner exclusion and lets

@@ -979,3 +979,33 @@ keep it working where that is cheap and never to let it gate anything:
 
 Delete rather than deprecate only if it starts costing real time again. Right
 now it costs nothing and it works.
+
+## Generic configuration review — 2026-09-13
+
+Reviewed main `f777280`, independently of the staged production checkout and
+unmerged hot-experts branch. Goal: a useful, correct automatic launch under
+explicit constraints, with bounded evidence-driven fallback before refusal.
+
+| Boundary | Finding | Next action |
+|---|---|---|
+| TUI / CLI | `tuiLaunchArgs` feeds `cmdLaunch`; both use placement and the launch recovery controller. | Preserve this shared path; extend fixtures across entry points. |
+| Oracle / serving argv | `preflightArgs` dropped KV-offload, full-SWA, unified-KV, host-allocation switches and metadata overrides; equals-form overrides and negative layer counts were also lost. | Fixed transport for these flags. Unsupported oracle options return an error and select the existing contained probe. Retired v7 keyed probe measurements. |
+| Recovery | `launchMemoryRecovery` rejects repeated argv; `recoverPreflightOOM` recomputes GPU failures and can reduce automatic context. Explicit constraints and exact challenger admission remain separate. | Trace the full GLM failed allocation through this controller; do not infer its cause from the oracle-filter defect. |
+| Host admission | A cgroup OOM in `runGuardedAllocationPreflight` returns an ordinary error; the caller fails closed before GPU recovery selection. | Add typed host-failure evidence and bounded complete re-placement, preserving explicit resident/mmap and context constraints. |
+| CPU-only | `preflightPlacement` returns immediately when no GPUs are present. | Review host admission and recovery independently; GPU tests do not establish CPU-only fit coverage. |
+| Unknown capabilities | Missing containment may continue on an estimate; some memory-shaping backend extensions remain outside the oracle filter. | Define capability coverage explicitly and avoid presenting partial oracle coverage as complete allocation proof. |
+
+Scope of this fix: contract invariants 2 (complete configurations), 4 (memory
+admission), 8 (model/hardware independence) and 9 (evidence versioning). Tests
+cover policy preservation, last-wins overrides, malformed arguments, unsupported
+oracle options and old-cache rejection. No topology, quality, context or
+performance-selection policy changed. Key invalidation also retires old keyed
+live measurements conservatively; separately recorded runtime-growth evidence
+remains available.
+
+This is controller correctness evidence, not a claim that GLM now loads or that
+all models/hardware fit. No production process was restarted. Full GLM serving,
+long-context stability and matched agent-throughput acceptance remain open.
+
+Validation: `scripts/verify-core-engine.sh` passed uncached after the final
+change (six core package suites, formatting and vet); `git diff --check` passed.

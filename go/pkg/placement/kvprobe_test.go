@@ -548,3 +548,26 @@ func TestParseKVBufferMultipleAggregateLines(t *testing.T) {
 		t.Fatalf("multi-region aggregate: got %.0f, want 16824 (13824+3000)", got)
 	}
 }
+
+// Old oracle records may have measured GPU KV while serving requested CPU KV.
+func TestProbeCacheDoesNotReusePrePolicyOracleKey(t *testing.T) {
+	dir := t.TempDir()
+	model := &ModelProfile{Path: "/models/policy.gguf", NumLayers: 12, EmbeddingLength: 512}
+	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 8192}}
+	oldKey := fmt.Sprintf("probe:v7:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:",
+		SpecTargetIdentity(model), model.NumLayers, model.NumExperts, model.EmbeddingLength, model.FeedForwardLength,
+		4096, 128, "q8_0", "cpu", "llama", gpuSignatureHash(gpus), 0)
+	oldPath := filepath.Join(dir, md5Hash12(oldKey)+".probe")
+	if err := os.WriteFile(oldPath, []byte("PROBE_CACHE_SCHEMA=7\nPROBED_COMPUTE_BUF_MB_CUDA0=123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadProbeCache(dir, model, 4096, 128, "q8_0", "cpu", "llama", gpus, 1); got != nil {
+		t.Fatalf("reused oracle evidence with stripped memory policy: %+v", got)
+	}
+	if err := RecordMeasuredComputeBuffers(dir, model, 4096, 128, "q8_0", "cpu", "llama", gpus, 1, map[int]int{0: 456}); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadProbeCache(dir, model, 4096, 128, "q8_0", "cpu", "llama", gpus, 1); got == nil || got.ComputeBufByGPU[0] != 456 {
+		t.Fatalf("fresh shape evidence not reusable: %+v", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -109,9 +110,68 @@ func TestPreflightArgsKeepsOnlyMemoryShapingFlags(t *testing.T) {
 		"--split-mode", "layer",
 		"-ot", `blk\.(0|1)\.ffn_.*=CUDA0,exps=CPU`,
 		"--n-cpu-moe", "36",
+		"--no-mmap",
 	}
 	if got := preflightArgs(serverArgs); !reflect.DeepEqual(got, want) {
 		t.Fatalf("preflightArgs:\n got  %q\n want %q", got, want)
+	}
+}
+
+// The oracle must measure the same KV, graph and model shape as serving.
+func TestPreflightArgsPreservesAllocationPolicy(t *testing.T) {
+	for _, args := range [][]string{
+		{"--no-kv-offload", "--swa-full", "--no-op-offload"},
+		{"--swa-full=true", "--kv-unified=false"},
+		{"-nkvo", "--kv-offload", "-kvo"},
+		{"--kv-unified", "--no-kv-unified", "-kvu", "-no-kvu"},
+		{"--mmap", "--no-mmap", "--mlock", "--no-repack"},
+		{"--override-kv", "model.block_count=int:12", "--override-kv", "model.context_length=int:8192"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			want := append([]string{"--fit-print", "on"}, args...)
+			if got := preflightArgs(args); !reflect.DeepEqual(got, want) {
+				t.Fatalf("oracle lost allocation policy: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestPreflightArgsPreservesOverridesAndSignedValues(t *testing.T) {
+	args := []string{"--ctx-size", "4096", "--ctx-size=8192", "--gpu-layers", "-1", "--override-kv=model.block_count=int:12", "--port=8081"}
+	want := []string{"--fit-print", "on", "--ctx-size", "4096", "--ctx-size", "8192", "--gpu-layers", "-1", "--override-kv", "model.block_count=int:12"}
+	if got := preflightArgs(args); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracle changed last-wins arguments: got %q, want %q", got, want)
+	}
+}
+
+func TestRunFitPreflightDoesNotHideUnsupportedMemoryPolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell oracle fixture")
+	}
+	fit := filepath.Join(t.TempDir(), "llama-fit-params")
+	script := `#!/bin/sh
+for arg in "$@"; do
+ if [ "$arg" = "--kv-unified" ]; then
+  echo 'unsupported memory policy --kv-unified' >&2
+  exit 2
+ fi
+done
+echo 'CUDA0 100 20 30'
+`
+	if err := os.WriteFile(fit, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	devices, stderr, err := runFitPreflight(fit, []string{"llama-server", "--kv-unified"})
+	if err == nil || len(devices) != 0 || !strings.Contains(stderr, "unsupported memory policy") {
+		t.Fatalf("unsupported shape must select probe fallback, not oracle fit: devices=%v stderr=%q err=%v", devices, stderr, err)
+	}
+}
+
+func TestPreflightArgsMissingValueDoesNotConsumeMemoryPolicy(t *testing.T) {
+	got := preflightArgs([]string{"--ctx-size", "--no-kv-offload", "--tensor-split"})
+	want := []string{"--fit-print", "on", "--ctx-size", "--no-kv-offload", "--tensor-split"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

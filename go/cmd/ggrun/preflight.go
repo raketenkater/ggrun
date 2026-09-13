@@ -866,9 +866,10 @@ func findFitParamsBin(serverBin, modelArch string) string {
 }
 
 // preflightArgValueFlags are the launch flags that shape memory allocation.
-// Everything else (server networking, sampling, logging) is stripped: the
-// fit-params arg parser only accepts its own example's flag set, and none of
-// the stripped flags change where bytes land.
+// Server networking, sampling and logging are omitted. Memory policy flags
+// must survive even when a particular fit-params build rejects them: an oracle
+// error selects the contained exact-argv probe, whereas dropping a flag can
+// incorrectly admit a different allocation shape.
 var preflightArgValueFlags = map[string]bool{
 	"-m": true, "--model": true,
 	"-c": true, "--ctx-size": true, "--ctx": true,
@@ -885,22 +886,55 @@ var preflightArgValueFlags = map[string]bool{
 	"-fa": true, "--flash-attn": true,
 	"-mg": true, "--main-gpu": true,
 	"-dev": true, "--device": true,
+	"--override-kv": true,
 }
 
-// preflightArgs filters real launch args down to the memory-shaping subset.
+// These switches change KV placement, graph shape or host/model allocation.
+var preflightBoolFlags = map[string]bool{
+	"--swa-full": true,
+	"-kvo":       true, "--kv-offload": true, "-nkvo": true, "--no-kv-offload": true,
+	"-kvu": true, "--kv-unified": true, "-no-kvu": true, "--no-kv-unified": true,
+	"--op-offload": true, "--no-op-offload": true,
+	"--mmap": true, "--no-mmap": true, "--mlock": true,
+	"--repack": true, "-nr": true, "--no-repack": true, "--no-host": true,
+}
+
+// preflightArgs preserves order, including repeated last-wins overrides.
 func preflightArgs(serverArgs []string) []string {
 	out := []string{"--fit-print", "on"}
 	for i := 0; i < len(serverArgs); i++ {
 		a := serverArgs[i]
-		if !preflightArgValueFlags[a] || i+1 >= len(serverArgs) {
+		if preflightBoolFlags[a] {
+			out = append(out, a)
 			continue
 		}
-		// No legitimate value of these flags starts with "-"; a following flag
-		// means the user passed the flag bare — drop it rather than mis-pair.
-		if v := serverArgs[i+1]; !strings.HasPrefix(v, "-") {
-			out = append(out, a, v)
-			i++
+		flag, value, inline := strings.Cut(a, "=")
+		if inline && preflightBoolFlags[flag] {
+			out = append(out, a) // Preserve backend-specific boolean syntax or rejection.
+			continue
 		}
+		if !preflightArgValueFlags[flag] {
+			continue
+		}
+		if inline {
+			out = append(out, flag, value)
+			continue
+		}
+		if i+1 >= len(serverArgs) {
+			out = append(out, flag) // Let the oracle reject the malformed shape.
+			continue
+		}
+		value = serverArgs[i+1]
+		// A negative numeric value (for example -ngl -1) is a value, not a flag.
+		// Do not consume a following option when the value is missing.
+		if strings.HasPrefix(value, "-") {
+			if _, err := strconv.Atoi(value); err != nil {
+				out = append(out, flag)
+				continue
+			}
+		}
+		out = append(out, flag, value)
+		i++
 	}
 	return out
 }
