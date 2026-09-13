@@ -368,16 +368,16 @@ func TestCalibrationConfirmationNormalizesDifferentSlotWidths(t *testing.T) {
 	}
 }
 
-func TestCalibrationScoreNormalizesDifferentSlotCountsToOneWorkload(t *testing.T) {
+func TestCalibrationScoreComparesIdenticalWorkAcrossSlotCounts(t *testing.T) {
 	serial := &benchmark.Result{
 		GenTPS: 20, PromptTPS: 200, GenTokens: 128, PromptTokens: 1000, MixedGenTokens: 64, MixedGenTPS: 10,
 		AgentSamples: 2, AgentTurnTimeS: 8, AgentTurnMaxS: 8,
-		AgentScenarioTimeS: 8, AgentScenarioMaxS: 8, AgentPromptBytes: 4096,
+		AgentScenarioTimeS: 16, AgentScenarioMaxS: 16, AgentPromptBytes: 4096,
 		AgentCachedTokens: 500, AgentNewPromptTokens: 50,
 		AgentWorkloadLanes: 2, AgentWorkloadTimeS: 16,
 	}
 	parallel := &benchmark.Result{
-		GenTPS: 35, PromptTPS: 300, GenTokens: 256, PromptTokens: 2000, MixedGenTokens: 64, MixedGenTPS: 12,
+		GenTPS: 35, PromptTPS: 300, GenTokens: 128, PromptTokens: 1000, MixedGenTokens: 64, MixedGenTPS: 12,
 		AgentSamples: 2, AgentTurnTimeS: 10, AgentTurnMaxS: 10,
 		AgentScenarioTimeS: 10, AgentScenarioMaxS: 10, AgentPromptBytes: 4096,
 		AgentCachedTokens: 500, AgentNewPromptTokens: 50,
@@ -385,6 +385,22 @@ func TestCalibrationScoreNormalizesDifferentSlotCountsToOneWorkload(t *testing.T
 	}
 	if got := calibrationScore(parallel, serial); math.Abs(got-1.6) > 1e-9 {
 		t.Fatalf("normalized workload score=%v, want 1.6", got)
+	}
+	for _, change := range []func(*benchmark.Result){
+		func(r *benchmark.Result) { r.AgentWorkloadLanes++ },
+		func(r *benchmark.Result) { r.GenTokens++ },
+		func(r *benchmark.Result) { r.AgentPromptBytes++ },
+	} {
+		mismatch := *parallel
+		change(&mismatch)
+		if got := calibrationScore(&mismatch, serial); got != 0 {
+			t.Fatalf("different requested work received score %v", got)
+		}
+	}
+	for _, score := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 0} {
+		if calibrationCandidateBetter(calibrationMeasurement{Result: parallel, Score: score}, calibrationMeasurement{Result: serial, Score: 1}) {
+			t.Fatalf("invalid score %v promoted", score)
+		}
 	}
 }
 

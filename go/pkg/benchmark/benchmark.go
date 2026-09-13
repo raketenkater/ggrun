@@ -44,9 +44,9 @@ type Result struct {
 	AgentSamples         int     `json:"agent_samples,omitempty"`
 	AgentCachedTokens    int     `json:"agent_cached_tokens,omitempty"`
 	AgentNewPromptTokens int     `json:"agent_new_prompt_tokens,omitempty"`
-	// AgentWorkloadTimeS normalizes candidates with different server slot
-	// counts to the same requested concurrency. A one-slot server serving four
-	// agents pays four serial waves; aggregate tok/s alone cannot express that.
+	// AgentWorkloadTimeS measures identical requested work across server slot
+	// counts, including actual queueing when demand exceeds capacity. These
+	// times are measured directly, never extrapolated from a smaller workload.
 	AgentWorkloadLanes int     `json:"agent_workload_lanes,omitempty"`
 	AgentWorkloadTimeS float64 `json:"agent_workload_time_s,omitempty"`
 	AgentWorkloadMaxS  float64 `json:"agent_workload_max_s,omitempty"`

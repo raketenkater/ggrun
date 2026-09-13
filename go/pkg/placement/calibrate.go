@@ -16,7 +16,9 @@ import (
 // CalibrationSchemaVersion bumps whenever the candidate set or scoring changes,
 // so a decision measured under older semantics is never applied after an
 // upgrade changes what "fastest" means.
-const CalibrationSchemaVersion = 19
+// Versions 20..23 are reserved by the existing development worktree. Version
+// 24 replaces extrapolated waves with measured, identical requested workloads.
+const CalibrationSchemaVersion = 24
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 
