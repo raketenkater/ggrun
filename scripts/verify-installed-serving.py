@@ -55,6 +55,14 @@ def streaming_request(port, timeout):
 
 
 def check_port_available(port):
+    if os.name == "nt":
+        # Preserve the native Windows probe: a short loopback connect can
+        # time out as WSAEWOULDBLOCK even when no listener exists. Do not set
+        # SO_REUSEADDR on Windows, where it can share an occupied port.
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+        return
     # Refuse a live listener without imposing our socket reuse policy on the
     # backend. ik uses SO_REUSEPORT on Linux; mainline uses SO_REUSEADDR.
     # A bind probe with the other policy rejects harmless TIME_WAIT sockets.

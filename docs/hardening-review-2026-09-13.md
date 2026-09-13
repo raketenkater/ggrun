@@ -11,11 +11,12 @@ was skipped. This run tests the merged main, rather than relying on older PR CI.
 The immediate same-backend restart failure was a checker defect: ik's
 cpp-httplib enables SO_REUSEPORT on Linux, whereas the checker tried to bind with
 SO_REUSEADDR. The incompatible probe refused TIME_WAIT sockets even though the
-backend could reuse them. The checker now refuses an active listener using a
+backend could reuse them. On POSIX, the checker now refuses an active listener using a
 bounded connection probe, fails closed on unexpected socket errors, and leaves
 actual binding to the launched backend. Readiness, generation, streaming and
 clean shutdown remain required. It never enables SO_REUSEPORT to share a live
-listener. Real same-port initial launch and immediate relaunch passed on main
+listener. Windows retains its existing bind/listen probe: a short loopback
+connect returned WSAEWOULDBLOCK on an unused port in native CI. Real same-port initial launch and immediate relaunch passed on main
 with the published v3.2.9 CUDA backend (`/tmp/ggrun-main-restart-socket-proof`).
 The earlier cross-backend switch failure is separate; this does not prove all
 backends can inherit each other's TIME_WAIT sockets.

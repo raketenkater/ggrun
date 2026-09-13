@@ -53,6 +53,7 @@ class GPUCheckTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 serving.check_port_available(server.getsockname()[1])
 
+    @unittest.skipIf(os.name == "nt", "POSIX connection probe")
     def test_unknown_port_probe_error_fails_closed(self):
         with patch.object(serving.socket, 'socket') as factory:
             factory.return_value.__enter__.return_value.connect_ex.return_value = errno.ETIMEDOUT
