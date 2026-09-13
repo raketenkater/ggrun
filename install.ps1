@@ -515,7 +515,10 @@ function Collect-Diagnostics([string]$ErrorMessage) {
     $L.Add("- message: $ErrorMessage")
     $L.Add('')
     $L.Add('### Hardware')
-    $gpu = (& nvidia-smi -L 2>$null) -join '; '
+    $gpu = ''
+    if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+        try { $gpu = (& nvidia-smi -L 2>$null) -join '; ' } catch { }
+    }
     if (-not $gpu) { try { $gpu = ((Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue).Name) -join '; ' } catch {} }
     $L.Add("- gpu: $gpu")
     try { $cpuName = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name; $L.Add("- cpu: $cpuName") } catch {}

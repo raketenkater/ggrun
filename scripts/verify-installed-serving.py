@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import socket
@@ -20,6 +21,64 @@ def request(port, route, payload=None, timeout=5):
         return json.load(response)
 
 
+def read_stream(response):
+    events = []
+    generated = False
+    for raw in response:
+        line = raw.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            if not generated:
+                raise RuntimeError("stream completed without generated text")
+            return events
+        event = json.loads(data)
+        events.append(event)
+        for choice in event.get("choices", []):
+            delta = choice.get("delta", {})
+            text = delta.get("content") or delta.get("reasoning_content")
+            generated = generated or (isinstance(text, str) and bool(text.strip()))
+    raise RuntimeError("stream closed without [DONE]")
+
+
+def streaming_request(port, timeout):
+    payload = {"messages": [{"role": "user", "content": "Name one colour."}],
+               "max_tokens": 32, "temperature": 0, "stream": True}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return read_stream(response)
+
+
+def check_port_available(port):
+    with socket.socket() as sock:
+        # Linux leaves closed connections in TIME_WAIT after a clean stop.
+        # Permit rebinding those, but listen as well so an active listener is
+        # still rejected. Windows SO_REUSEADDR can steal a live port: omit it.
+        if os.name != "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+
+
+def weight_devices(log):
+    # Ignore allocations from abandoned admissions before the final launch.
+    launches = list(re.finditer(
+        r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log))
+    if launches:
+        log = log[launches[-1].start():]
+    devices = set()
+    for line in log.splitlines():
+        if re.search(r"(?:KV|compute|output) buffer", line, re.I):
+            continue
+        match = re.search(r"(CUDA\d+|Vulkan\d+|Metal\d*)[^\n]*?buffer size\s*=\s*([0-9.]+) MiB", line)
+        if match and float(match[2]) > 0:
+            devices.add(match[1])
+    return sorted(devices)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launcher", required=True)
@@ -28,15 +87,21 @@ def main():
     parser.add_argument("--port", type=int, default=18843)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--ctx", type=int, default=2048)
+    parser.add_argument("--request-timeout", type=int, default=120)
+    parser.add_argument("--min-weight-devices", type=int, default=0,
+                        help="Require weight allocations on this many devices in the final launch")
     args = parser.parse_args()
+    if args.ctx < 0 or min(args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
+        parser.error("timeouts must be positive; context/device minimum nonnegative (context 0 means auto)")
+    if args.cpu and args.min_weight_devices:
+        parser.error("--cpu cannot require GPU allocations")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    # Refuse an occupied port so another server cannot supply false evidence.
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", args.port))
     command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
-               "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port),
-               "--ctx", "2048"]
+               "--allow-live-memory-probe", "--host", "127.0.0.1", "--port", str(args.port)]
+    if args.ctx:
+        command += ["--ctx", str(args.ctx)]
     if args.cpu:
         command.append("--cpu")
     windows = os.name == "nt"
@@ -47,6 +112,7 @@ def main():
     env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
     proc = None
     try:
+        check_port_available(args.port)
         with (output / "serve.log").open("wb") as log:
             proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, env=env,
@@ -69,10 +135,14 @@ def main():
                 time.sleep(0.5)
             else:
                 raise RuntimeError("timed out waiting for launcher readiness and health")
+            result["weight_devices"] = weight_devices((output / "serve.log").read_text(errors="replace"))
+            result["min_weight_devices"] = args.min_weight_devices
+            if len(result["weight_devices"]) < args.min_weight_devices:
+                raise RuntimeError(f"required {args.min_weight_devices} weight devices, observed {result['weight_devices']}")
             reply = request(args.port, "/v1/chat/completions", {
                 "messages": [{"role": "user", "content": "Name one colour."}],
                 "max_tokens": 32, "temperature": 0, "stream": False,
-            }, timeout=120)
+            }, timeout=args.request_timeout)
             (output / "reply.json").write_text(json.dumps(reply, indent=2))
             choices = reply.get("choices") or []
             message = choices[0].get("message", {}) if choices else {}
@@ -83,6 +153,11 @@ def main():
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during generation")
             result["generation"] = True
+            events = streaming_request(args.port, args.request_timeout)
+            (output / "stream.json").write_text(json.dumps(events, indent=2))
+            if proc.poll() is not None:
+                raise RuntimeError("launcher exited during streaming")
+            result["streaming"] = True
     except BaseException as exc:
         result["error"] = str(exc)
         raise
@@ -118,7 +193,7 @@ def main():
                         result["port_released"] = True
                         break
                 time.sleep(0.2)
-            result["passed"] = bool(result.get("generation") and result.get("port_released")
+            result["passed"] = bool(result.get("generation") and result.get("streaming") and result.get("port_released")
                                     and not result.get("forced_cleanup") and not result.get("error"))
         (output / "result.json").write_text(json.dumps(result, indent=2))
     if not result["passed"]:

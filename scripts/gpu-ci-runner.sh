@@ -116,7 +116,8 @@ cmd_run() {
     # finished over an hour earlier and reported that old failure as this one.
     local before; before="$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=1&event=workflow_dispatch" --jq '.workflow_runs[0].id // 0')"
     echo "==> dispatching $WORKFLOW on main"
-    gh workflow run "$WORKFLOW" --repo "$REPO" --ref main
+    # Optional workflow fields, e.g. run -f gpu_model_repo=... -f gpu_model_quant=...
+    gh workflow run "$WORKFLOW" --repo "$REPO" --ref main "$@"
 
     local run_id=""
     for _ in $(seq 1 30); do
@@ -167,7 +168,7 @@ cmd_status() {
 
 case "${1:-}" in
     setup)  cmd_setup ;;
-    run)    cmd_run ;;
+    run)    shift; cmd_run "$@" ;;
     status) cmd_status ;;
     *)      sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

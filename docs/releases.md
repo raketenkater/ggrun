@@ -28,3 +28,6 @@ sha256sum -c SHA256SUMS
 The release pipeline pins the ik_llama.cpp revision used to build the CUDA
 bundle. Its workflow run and the signed checksum bundle are the source of truth
 for a published artifact.
+
+For optional Linux multi-GPU acceptance with a large model, see
+[large-model hardening](large-model-hardening.md).
