@@ -2823,3 +2823,50 @@ and diff it against the generator's 32. That names the filter in one run. Do not
 change the slot policy until that filter is identified — two diagnoses have
 already been wrong, both from reading a summary line instead of the list behind
 it.
+
+## SLOTREPRO — the live candidate set, reproduced without a launch — 2026-09-14
+
+Building the request with `parseLaunchArgs`, then `placementOptionsFromRequest`,
+then `placement.CalibrationCandidates`, reproduces the live launch's candidate
+set in under a second and with no model load:
+
+```
+OPTS ctx=0 autoMax=1048576 parallel=4 parallelExplicit=false slotTarget=65536
+BASE ctx=254976 parallel=3 batch=128 ubatch=128 auto=true
+TOTAL candidates=6          (no slot candidates)
+```
+
+Six candidates, matching the live `calculated 6 candidates` exactly. This is the
+diagnostic loop that was missing: every earlier attempt to understand the slot
+boundary cost a five-minute 83.8 GB load, and two diagnoses were wrong because
+they read a summary line instead of the list.
+
+### What it establishes
+
+- **The base is `parallel=3`, not 4**, at 254,976 tokens with `auto=true`. The
+  four-slot request is clamped by `claudeCodeSlotsForPlacement` against the
+  context the hardware can actually hold.
+- `calibrationParallelNeighbors` is **not** empty for this shape:
+  `maxParallel = 254976 / 65536 = 3`, current 3, so neighbours are 1 and 2.
+- Yet no slot candidate is emitted, so the drop is inside
+  `recomputeParallelCandidate` (its `Compute` call or the
+  `strategySlots(alt) != parallel` guard) or in `sameCalibrationResidency` /
+  `calibrationCandidateExists` afterwards. All three are unexported, so naming
+  the exact one needs a probe inside `pkg/placement`.
+
+### Corrections carried
+
+`SLOTFIX` and `SLOTTRUTH` both claimed more than was shown. The generator does
+emit `parallel-1/2/3` under hand-built options (`SLOTTRUTH`), and with the real
+request options it emits none — so the earlier "slot candidates are generated"
+is true only for the options I chose, not for the ones the launcher builds.
+
+Three diagnoses on this one question have now been wrong. The pattern each time:
+reading a summary or a partial reproduction and inferring the mechanism instead
+of observing the list the code actually produces.
+
+### Next step
+
+Add a probe inside `pkg/placement` that walks the three drop points for this
+exact base and reports which rejects. The reproduction above makes that a
+sub-second test rather than a launch.
