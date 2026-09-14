@@ -2724,3 +2724,54 @@ Do not hardcode a lower floor. `REVIEWLANE` shows concurrency has real value:
 with reviews and foreground overlapping, the seated companion path completed 8
 of 8 reviews against 3 of 8. The right answer is a measured trade, not a
 smaller constant.
+
+## SLOTFIX — the comparison was wrong, and fixing it was not sufficient — 2026-09-14
+
+`SLOTLEVER` found the candidate boundary pinned at `parallel 4..4`. Tracing it:
+slot candidates *are* generated (`opts.ParallelExplicit` is false without an
+explicit `--parallel`), but `sameCalibrationResidency` required **equal total
+context**, and a slot candidate necessarily changes the total. Every one was
+rejected on arrival.
+
+`calibrationBaseOptions` compounds it by pinning the base's total window, so the
+only slot comparison available was "same total KV, redistributed" — never "fewer
+slots, less KV, more experts resident", which is the shape `CLAUDEMODE` measured
+as three times faster.
+
+The comparison is now on **per-agent context**, the quantity the change contract
+forbids reducing silently. Both legitimate shapes are accepted: the same total
+redistributed across a different width (what an explicit `--ctx-size` asks for)
+and the same per-agent window with the total scaled (what an automatic context
+produces).
+
+An existing test caught the first attempt, which compared only per-agent
+windows: with an explicit context a slot candidate legitimately keeps the total
+and halves the per-agent window, and that attempt broke it.
+
+### It did not work
+
+A live Claude Code launch with calibration on, cached decisions cleared, still
+reports:
+
+```
+[optimize] calculated 6 candidates (6 feasible, 0 exact):
+           batch 128..512, ubatch 64..512, parallel 4..4, 2 topology shape(s)
+```
+
+**No slot candidate appears.** So the residency comparison was one blocker and
+not the only one, and the remaining cause is unidentified. Candidates may be
+failing inside `recomputeParallelCandidate` (its `strategySlots(alt) != parallel`
+guard, or `Compute` failing at the scaled window), or
+`calibrationParallelNeighbors` may be returning nothing for this shape.
+
+The change is kept because the comparison it corrects is wrong on its own terms
+and is covered by tests. **It must not be described as fixing the slot floor.**
+Nothing measured here shows a slot candidate reaching the ladder.
+
+### Next step, narrowed
+
+Instrument the three drop points — neighbour generation, recompute error, and
+the residency check — for one offloaded-MoE launch, and report which rejects.
+The earlier attempt to reproduce this in a unit fixture failed because a
+three-GPU 85 GB MoE baseline would not compute in the test harness; the drop
+point is cheaper to observe on a real launch than to synthesise.

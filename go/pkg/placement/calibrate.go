@@ -689,8 +689,46 @@ func calibrationParallelNeighbors(base *Strategy, opts Options) []int {
 	return out
 }
 
+// sameCalibrationPerAgentContext compares the window one agent gets rather than
+// the total across slots. Candidates that differ only in slot count are
+// comparable exactly when that per-agent window is preserved; the contract
+// treats reducing it as a silent quality loss, not a tuning move.
+func sameCalibrationPerAgentContext(base, candidate *Strategy) bool {
+	if base == nil || candidate == nil {
+		return false
+	}
+	baseSlots, candidateSlots := strategySlots(base), strategySlots(candidate)
+	if baseSlots <= 0 || candidateSlots <= 0 {
+		return false
+	}
+	// Two shapes are comparable, and a slot candidate may be either:
+	//
+	//   - the same total window redistributed across a different width, which is
+	//     what an explicit --ctx-size asks for; and
+	//   - the same per-agent window with the total scaled to match, which is what
+	//     an automatic context produces and the only form that can trade KV for
+	//     expert residency.
+	//
+	// Requiring equal totals alone rejected every candidate of the second kind,
+	// which is why Claude Code mode reported "parallel 4..4" and the slot cost
+	// measured in CLAUDEMODE could never be searched.
+	if base.ContextSize == candidate.ContextSize {
+		return true
+	}
+	if baseSlots == candidateSlots {
+		return false
+	}
+	return base.ContextSize/baseSlots == candidate.ContextSize/candidateSlots
+}
+
 func sameCalibrationResidency(base, candidate *Strategy) bool {
-	if base == nil || candidate == nil || base.ContextSize != candidate.ContextSize {
+	if base == nil || candidate == nil {
+		return false
+	}
+	// A slot candidate scales its total window with the slot count, so equal
+	// totals would reject every one of them. What must not change is the window
+	// each agent actually gets.
+	if !sameCalibrationPerAgentContext(base, candidate) {
 		return false
 	}
 	if !base.MMapRequired && candidate.MMapRequired {
@@ -745,6 +783,26 @@ func recomputeParallelCandidate(caps *detect.Capabilities, model *ModelProfile, 
 	altOpts := calibrationBaseOptions(opts, base)
 	altOpts.Parallel = parallel
 	altOpts.AutoParallel = false
+	// Hold per-agent context, not total. calibrationBaseOptions pins the base's
+	// total window, which makes every slot candidate carry the same total KV and
+	// merely redistribute it. On an offloaded MoE that is the one comparison
+	// that cannot help: the KV is bought out of the same VRAM as the experts, so
+	// the configuration worth finding is fewer slots holding LESS total KV and
+	// leaving more experts resident.
+	//
+	// Measured on Qwen3.8-Flash-Next: four slots at 261,888 per agent left 19 of
+	// 48 expert layers on the GPU and ran at 2.42 correct tasks/min, against 28
+	// resident and 7.63 for a single slot at the same per-agent window.
+	//
+	// Per-agent context is the product invariant — the contract forbids silently
+	// reducing it — so scaling the total with the slot count keeps every
+	// candidate comparable on the thing the user actually gets.
+	if base.ContextAuto && base.Parallel > 0 && parallel != base.Parallel && base.ContextSize > 0 {
+		perAgent := base.ContextSize / base.Parallel
+		if perAgent > 0 {
+			altOpts.ContextSize = perAgent * parallel
+		}
+	}
 	// A different scheduler width deserves its own automatic batch baseline.
 	// Carrying a four-lane fairness cap into a one-lane candidate (or a large
 	// serial batch into four lanes) would benchmark a coupled accident rather
