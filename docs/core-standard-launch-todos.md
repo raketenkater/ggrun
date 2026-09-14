@@ -1807,3 +1807,64 @@ Whether a prefetching, co-scheduling implementation would is untested here and
 is not refuted by anything above. The comparison is also not directly
 transferable: HybriMoE's baseline is a hybrid framework on kTransformers, not
 llama.cpp, and the abstract does not name the models or hardware.
+## QWENFLASH — ggrun cannot launch Qwen3.8-Flash-Next at all — 2026-09-14
+
+Qwen3.8-Flash-Next-UD-Q3_K_XL (83.8 GiB: 52.2 GiB expert, 31.6 GiB non-expert,
+arch `qwen4exp`, 48 layers) fails to launch on **merged main** at the plan
+ggrun chooses for itself. Reproduced with a binary built from `94b7b7e`, so
+this is not caused by any unmerged work:
+
+```
+Error starting server: memory preflight did not converge after 5 re-plans
+```
+
+Both main and the branch plan identically at `--dry-run`: 262,144 tokens, 1
+slot, `n-cpu-moe 21`. The divergence is in preflight recovery, which dry-run
+never reaches.
+
+### The deficit never closes because the wrong lever moves
+
+| round | deficit | ctx | n-cpu-moe | ubatch |
+|---|---:|---:|---:|---:|
+| 1 | 101 MiB | 261,120 | 21 | 256 |
+| 2 | 94 MiB | 260,096 | 22 | 256 |
+| 3 | 87 MiB | 259,072 | 22 | 256 |
+
+Each round trims exactly one 1,024-token context granule and reclaims about
+7 MiB against a ~100 MiB shortfall. At that rate it needs roughly thirteen
+rounds and the budget is five. `ubatch` stays at 256 throughout, though
+derating it would cut the compute buffer by far more than 7 MiB in one step.
+
+This is the pathology `TestGLMContextNudgeCannotBeatFailedDeviceExpertRelief`
+already names on a different path: an irrelevant nudge selected over the lever
+that would actually cover the deficit. The deficit-sized ceiling step added in
+the same session does not help here, and correctly so — reclaiming 165 MiB of
+KV genuinely computes to about 2,000 tokens. Context is simply not where this
+deficit lives.
+
+### At 4 slots it fails earlier
+
+| round | deficit | ctx | n-cpu-moe |
+|---|---:|---:|---:|
+| 1 | 3699 MiB | 1,047,552 | 33 |
+| 2 | 2432 | 1,046,528 | 35 |
+| 3 | 1993 | 1,045,504 | 37 |
+| 4 | 720 | 1,044,480 | 38 |
+| 5 | **24** | 1,043,456 | 38 |
+
+Here recovery does move the relevant lever — expert residency, 33 to 38 CPU
+layers — and the deficit falls 154x to 24 MiB before the budget expires. Note
+what four slots cost: five expert layers displaced to host RAM to buy KV for
+the extra slots. **On a CPU-offloaded MoE a slot is not free concurrency; it is
+paid for in expert residency**, and experts are what set decode speed.
+
+### Open
+
+- Recovery must prefer a lever sized to the deficit. A context granule that
+  reclaims 7 MiB should never be selected against a 100 MiB shortfall when
+  ubatch is still at 256.
+- The 24 MiB residual at 4 slots is a budget question, not a lever question,
+  and the progress-aware accounting in #58 addresses that class.
+- This model is the 1.75x-over-VRAM case that would have bracketed the slot
+  policy threshold between resident (4 slots good) and GLM at 2.86x (4 slots
+  catastrophic). It cannot be measured until the launch converges.
