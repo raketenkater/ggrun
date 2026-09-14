@@ -7051,6 +7051,104 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, mergedGrowth, mergedEstimated, kvPerLayerMB)
 }
 
+// runtimeGraphGrowthFromVRAMDelta is what a healthy launch allocated beyond
+// everything the backend's own log accounts for. Every input is measured: the
+// caller's pre-launch baseline, the live VRAM reading, recorded system CUDA
+// overhead, and the backend's reported buffer sizes. A device that cannot
+// supply all of them yields no entry, because an unexplained remainder is
+// unknown, not growth.
+func runtimeGraphGrowthFromVRAMDelta(
+	gpus []detect.GPU, baselineVRAMByGPU, usedVRAMByGPU, overheadByGPU map[int]int, serverLog string,
+) map[int]int {
+	growthByGPU := map[int]int{}
+	for _, g := range gpus {
+		baselineMB, hadBaseline := baselineVRAMByGPU[g.Index]
+		if !hadBaseline {
+			continue
+		}
+		overheadMB, measuredOverhead := overheadByGPU[g.Index]
+		if !measuredOverhead {
+			continue
+		}
+		usedMB, hadUsed := usedVRAMByGPU[g.Index]
+		if !hadUsed || usedMB <= baselineMB {
+			continue
+		}
+		// The backend's log is authoritative for what it allocated. Deriving the
+		// model and KV shares from the strategy instead would fold planning error
+		// straight into the growth figure.
+		modelBufMB, kvBufMB, computeBufMB := parseBuffersFromLog(serverLog, g.Index)
+		if modelBufMB <= 0 && computeBufMB <= 0 {
+			continue
+		}
+		growthMB := usedMB - baselineMB - overheadMB - (modelBufMB + kvBufMB + computeBufMB)
+		if growthMB < 0 {
+			// The accounting did not close. Record nothing rather than a number
+			// this launch does not support.
+			continue
+		}
+		growthByGPU[g.Index] = growthMB
+	}
+	return growthByGPU
+}
+
+// RecordPostLaunchRuntimeGraphGrowth files the runtime graph growth a launch
+// that reached healthy serving actually needed, for its own exact signature.
+//
+// Without it, growth is only ever learned from launches that FAIL: the two
+// production recorders are both OOM paths, so no key can ever acquire a record
+// by working. An automatic context lands on a different ctx most launches, so
+// the exact key is usually cold and falls back to
+// RelatedModelRuntimeGraphGrowth, which takes the MAXIMUM across every
+// configuration this model ever recorded. One large growth then becomes the
+// permanent floor for every later plan. Measured on GLM-5.3-Flash 2026-09-14:
+// 11,272 MiB reserved across three cards against 746 MiB actually used,
+// carried from a 2026-09-03 record at ctx 790,528 / ubatch 64 on a different
+// backend build. That exiled 43 expert layers to the CPU on a model whose own
+// bottleneck diagnosis reads "CPU expert bandwidth".
+//
+// This cannot loosen a real OOM bound. recordRuntimeGraphGrowth keeps the
+// larger of two measurements, so an observed allocation for this key always
+// wins; it only fills a key that knows nothing, or replaces a guess. If a
+// recorded growth ever proves too small, the backend OOMs, recovery derates,
+// and the OOM recorder ratchets it back up — the direction that already works.
+func RecordPostLaunchRuntimeGraphGrowth(
+	cacheDir string, model *ModelProfile, strategy *Strategy, backendTag string,
+	gpus []detect.GPU, baselineVRAMByGPU map[int]int, serverLog string,
+) bool {
+	if model == nil || strategy == nil || serverLog == "" ||
+		len(gpus) == 0 || len(baselineVRAMByGPU) == 0 ||
+		strategy.ContextSize <= 0 || strategy.UBatchSize <= 0 {
+		return false
+	}
+	usedVRAMByGPU := map[int]int{}
+	for _, g := range gpus {
+		if usedMB := QueryVRAMUsed(g.Index); usedMB > 0 {
+			usedVRAMByGPU[g.Index] = usedMB
+		}
+	}
+	growthByGPU := runtimeGraphGrowthFromVRAMDelta(
+		gpus, baselineVRAMByGPU, usedVRAMByGPU, SystemCUDAOverheadByGPU(cacheDir, gpus), serverLog)
+	if len(growthByGPU) == 0 {
+		return false
+	}
+	if err := RecordRuntimeGraphGrowth(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, backendTag, gpus, strategy.Parallel, growthByGPU); err != nil {
+		return false
+	}
+	indices := make([]int, 0, len(growthByGPU))
+	for idx := range growthByGPU {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	parts := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		parts = append(parts, fmt.Sprintf("CUDA%d=%dMB", idx, growthByGPU[idx]))
+	}
+	fmt.Fprintf(os.Stderr, "  VRAM probe: runtime graph growth %s\n", strings.Join(parts, ", "))
+	return true
+}
+
 // RecordRuntimeGraphGrowthFromOOM records a runtime graph allocation observed in
 // a cudaMalloc OOM line. When estimated is false, allocMB is the size the
 // backend actually asked for, which is measured accounting rather than a

@@ -571,3 +571,66 @@ func TestProbeCacheDoesNotReusePrePolicyOracleKey(t *testing.T) {
 		t.Fatalf("fresh shape evidence not reusable: %+v", got)
 	}
 }
+
+// Growth is what a healthy launch allocated beyond everything the backend's own
+// log accounts for. Every input must be measured; a device missing any of them
+// yields no entry, because an unexplained remainder is unknown, not growth.
+func TestRuntimeGraphGrowthFromVRAMDeltaRecordsOnlyClosedAccounting(t *testing.T) {
+	gpus := []detect.GPU{{Index: 0}, {Index: 1}, {Index: 2}, {Index: 3}}
+	log := strings.Join([]string{
+		"llama: CUDA0 model buffer size =  6941.00 MiB",
+		"llama: CUDA0 KV buffer size =   274.00 MiB",
+		"llama: CUDA0 compute buffer size =   210.00 MiB",
+		"llama: CUDA1 model buffer size =  1000.00 MiB",
+		"llama: CUDA1 compute buffer size =   100.00 MiB",
+		"llama: CUDA3 model buffer size =  1000.00 MiB",
+		"llama: CUDA3 compute buffer size =   100.00 MiB",
+	}, "\n")
+	baseline := map[int]int{0: 1, 1: 1, 2: 1, 3: 1}
+	used := map[int]int{0: 7600, 1: 5000, 2: 5000, 3: 1100}
+	// CUDA1 has no measured system overhead.
+	overhead := map[int]int{0: 100, 2: 100, 3: 100}
+
+	got := runtimeGraphGrowthFromVRAMDelta(gpus, baseline, used, overhead, log)
+
+	// CUDA0 closes: 7600 - 1 - 100 - (6941 + 274 + 210).
+	if len(got) != 1 || got[0] != 74 {
+		t.Fatalf("growth = %v, want only CUDA0=74", got)
+	}
+	if _, ok := got[1]; ok {
+		t.Fatal("recorded growth for a device with no measured overhead")
+	}
+	if _, ok := got[2]; ok {
+		t.Fatal("recorded growth for a device the log accounts nothing for")
+	}
+	if _, ok := got[3]; ok {
+		t.Fatal("recorded growth where the accounting did not close")
+	}
+}
+
+// The reserve may now come down, but never past an allocation that was actually
+// observed to fail. Before this, growth was recorded only on OOM paths, so a
+// cold key borrowed a foreign model's failure and never released it.
+func TestSuccessMeasurementFillsAnEmptyKeyAndNeverLowersAnObservedOOM(t *testing.T) {
+	dir := t.TempDir()
+	model := &ModelProfile{Path: "/models/reserve-moe.gguf", Basename: "reserve-moe.gguf", TotalSizeMB: 140000}
+	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 12282}, {Index: 1, VRAMTotalMB: 24564}}
+
+	// CUDA1 really did fail at 4000 MiB for this exact signature.
+	if err := RecordRuntimeGraphGrowthFromOOM(dir, model, 500736, 128, "mid", "gpu", "llama", gpus, 1, 1, 4000, false); err != nil {
+		t.Fatal(err)
+	}
+	// A launch then reaches healthy serving and measures far less on both.
+	if err := RecordRuntimeGraphGrowth(dir, model, 500736, 128, "mid", "gpu", "llama", gpus, 1,
+		map[int]int{0: 210, 1: 309}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := RuntimeGraphGrowthByGPU(dir, model, 500736, 128, "mid", "gpu", "llama", gpus, 1)
+	if got[0] != 210 {
+		t.Fatalf("CUDA0 growth = %d, want the success measurement 210 on a key that knew nothing", got[0])
+	}
+	if got[1] != 4000 {
+		t.Fatalf("CUDA1 growth = %d, want the observed OOM 4000 preserved", got[1])
+	}
+}
