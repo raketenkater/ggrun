@@ -720,7 +720,7 @@ proof that an older release contains these fixes.
 | Uncached `scripts/verify-core-engine.sh`, six packages | green at every commit in #58 and #61 | local |
 | Linux CPU install, download, generate, cancel, shutdown, port release | green | `install-e2e` linux |
 | Windows install, reinstall preserving config, generate | green | `install-e2e` windows |
-| Linux real-GPU serving | **not yet run on the #61 candidate** | `install-e2e` gpu, manual dispatch on main only |
+| Linux real-GPU serving | **green on the merged candidate** `0a66834` (run 34898139305: linux, windows, gpu all success) | `install-e2e` gpu |
 | Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false | — |
 | macOS | **untested**, lower priority for this work | — |
 
@@ -744,8 +744,9 @@ plainly which one is off in CI and why.
 
 Remaining before this milestone is closed:
 
-- Dispatch the GPU job on the candidate commit. It only runs from main, so the
-  candidate has to land first; that is the sequence, not an exemption.
+- ~~Dispatch the GPU job on the candidate commit~~ — done after #61 merged.
+  Run 34898139305 on `0a66834`: `linux`, `windows` and the real-GPU `gpu` job
+  all success; `gpu-windows` skipped, its runner being offline.
 - ~~Re-run the GLM tight-fit regression~~ — done, 555,008 tokens, recorded above.
 - Windows GPU and macOS stay marked untested. This box cannot certify generic
   public claims; that needs an expanded hardware and model matrix.

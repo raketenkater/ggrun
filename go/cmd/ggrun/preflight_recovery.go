@@ -351,6 +351,10 @@ func recoverPreflightOOM(
 			opts.CacheFile = ""
 			opts = boundByProvenLimits(opts, recovery)
 			candidate, replanErr = placement.Compute(caps, model, opts)
+			// This candidate is returned directly as "context-replanned", so the
+			// residency floor has to be re-imposed here rather than only in the
+			// context-derate recompute below.
+			candidate = holdExpertResidency(caps, model, opts, candidate, recovery.expertResidencyFloor(), outcome.Device)
 		}
 	}
 
@@ -366,6 +370,7 @@ func recoverPreflightOOM(
 		// launch failed closed.
 		replanOpts.UBatchSize = strategy.UBatchSize
 		candidate, replanErr = placement.ReplanAfterOOM(caps, model, replanOpts, oomPenalty)
+		candidate = holdExpertResidency(caps, model, replanOpts, candidate, recovery.expertResidencyFloor(), outcome.Device)
 	}
 
 	var candidateArgs []string
