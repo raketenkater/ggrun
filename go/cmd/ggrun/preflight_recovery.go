@@ -286,13 +286,24 @@ func recoverPreflightOOM(
 	// compute allocation. Its fully recomputed automatic-context plan must not
 	// be discarded by the partial-overlay selector below. Return it for the
 	// caller's next exact preflight; this is a candidate, never fit proof.
-	if outcome.Evidence.Level == memoryEvidenceOraclePlanned &&
+	oracleReplanEligible := outcome.Evidence.Level == memoryEvidenceOraclePlanned &&
 		req != nil && automaticContextRequest(req) && strategy.ContextAuto &&
 		candidate != nil && candidate.ContextAuto &&
 		candidate.ContextSize > 0 && candidate.ContextSize < strategy.ContextSize &&
 		candidate.Parallel == strategy.Parallel && candidate.KVType == strategy.KVType &&
 		candidate.KVTypeV == strategy.KVTypeV && candidate.KVPlacement == strategy.KVPlacement &&
-		candidate.MMapRequired == strategy.MMapRequired && candidate.UBatchSize <= strategy.UBatchSize {
+		candidate.MMapRequired == strategy.MMapRequired && candidate.UBatchSize <= strategy.UBatchSize
+	// A smaller context wins outright only when it reclaims enough KV to cover
+	// the deficit. Taking it unconditionally let a single 1,024-token granule
+	// worth about 7 MiB satisfy a ~100 MiB shortfall and return before any other
+	// lever was considered, so Qwen3.8-Flash-Next never launched: 101 -> 94 ->
+	// 87 MiB with ubatch still at 256. The codebase names this shape in
+	// TestGLMContextNudgeCannotBeatFailedDeviceExpertRelief.
+	//
+	// This is a preference, not a veto. An under-sized drop is still better than
+	// failing closed, so it is retained below as a last resort when no other
+	// lever moves.
+	if oracleReplanEligible && oracleContextDropCoversDeficit(model, strategy, serverArgs, candidate, outcome) {
 		candidate.PerformanceTuned = false
 		return candidate, candidateArgs, "context-replanned", nil
 	}
@@ -313,6 +324,13 @@ func recoverPreflightOOM(
 		if contextCandidate != nil {
 			return contextCandidate, contextArgs, "context-derate", nil
 		}
+	}
+	if !changed && oracleReplanEligible {
+		// No lever sized to the deficit exists. An under-sized context drop is a
+		// worse recovery than one that covers the shortfall, and a better one
+		// than refusing to launch.
+		candidate.PerformanceTuned = false
+		return candidate, candidateArgs, "context-replanned", nil
 	}
 	if !changed {
 		detail := ""
@@ -746,4 +764,30 @@ func deficitProgress(previousMB, currentMB int) bool {
 	}
 	// At least a fifth of the previous shortfall must be gone.
 	return previousMB-currentMB >= previousMB/5
+}
+
+// oracleContextDropCoversDeficit reports whether shrinking to the candidate's
+// context reclaims enough KV to cover the oracle's measured device deficit.
+//
+// The no-allocation oracle reports a total device shortfall rather than a
+// failed allocation, so contextCandidateCoversDeficit -- which needs a measured
+// compute-buffer allocation -- cannot judge it. KV is what a context change
+// moves, so its size per token is the exchange rate, and contextReclaimTokens
+// already converts a deficit into that many tokens.
+//
+// Unknown geometry returns true: without an exchange rate there is no basis to
+// reject a candidate the rest of the guard accepted, and the exact preflight
+// that follows remains the authority either way.
+func oracleContextDropCoversDeficit(
+	model *placement.ModelProfile, current *placement.Strategy, currentArgs []string,
+	candidate *placement.Strategy, outcome preflightOutcome,
+) bool {
+	if current == nil || candidate == nil {
+		return false
+	}
+	needed := contextReclaimTokens(model, current, currentArgs, outcome.DeficitMB)
+	if needed <= 0 {
+		return true
+	}
+	return current.ContextSize-candidate.ContextSize >= needed
 }

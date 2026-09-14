@@ -624,3 +624,45 @@ func TestDeficitProgressSeparatesConvergenceFromNudging(t *testing.T) {
 		}
 	}
 }
+
+// The oracle path accepted any smaller context, so a single 1,024-token granule
+// worth ~7 MiB satisfied a ~100 MiB deficit and returned before ubatch or
+// expert relief was ever considered. Qwen3.8-Flash-Next never launched on main:
+// 101 -> 94 -> 87 MiB with ubatch stuck at 256.
+func TestOracleContextDropMustCoverTheDeficit(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{
+		"llama-server", "--ctx-size", "261120", "-b", "2048", "-ub", "256",
+		"--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--parallel", "1",
+	}
+	current := &placement.Strategy{
+		ContextSize: 261120, ContextAuto: true, UBatchSize: 256, KVType: "q8_0", Parallel: 1,
+	}
+	outcome := preflightOutcome{Device: 0, DeficitMB: 101, DoesNotFit: true,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+
+	needed := contextReclaimTokens(model, current, args, outcome.DeficitMB)
+	if needed <= 1024 {
+		t.Skipf("fixture KV geometry makes one granule sufficient (needed=%d)", needed)
+	}
+
+	// One granule down: the observed nudge. Must be refused.
+	nudge := *current
+	nudge.ContextSize = current.ContextSize - 1024
+	if oracleContextDropCoversDeficit(model, current, args, &nudge, outcome) {
+		t.Fatalf("a 1024-token nudge was accepted against a %d MiB deficit", outcome.DeficitMB)
+	}
+
+	// A drop sized to the deficit is a real recovery and must be accepted.
+	sized := *current
+	sized.ContextSize = current.ContextSize - needed
+	if !oracleContextDropCoversDeficit(model, current, args, &sized, outcome) {
+		t.Fatalf("a deficit-sized drop of %d tokens was refused", needed)
+	}
+
+	// Unknown geometry must not veto a candidate the rest of the guard accepted.
+	noKV := &placement.Strategy{ContextSize: 261120, ContextAuto: true}
+	if !oracleContextDropCoversDeficit(model, noKV, []string{"llama-server"}, &nudge, outcome) {
+		t.Fatal("unknown KV geometry rejected a candidate instead of deferring to preflight")
+	}
+}

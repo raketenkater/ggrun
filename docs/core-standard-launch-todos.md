@@ -1938,3 +1938,50 @@ resident path: concurrent serving works there, proven by the 27B A/B.
   DoesNotFit branch, deliberately not applied in the same pass.
 - Slot count by residency class is unmeasured as a policy. Two data points
   exist: resident wants more than 1, heavily offloaded wants 1.
+
+## RESIDENCYFRACTION — what actually predicts agentic speed — 2026-09-14
+
+With the oracle-path lever fix, Qwen3.8-Flash-Next launches and completes the
+picture. Three models, same agent suite, ggrun's own planning, 1 slot except
+where noted.
+
+| model | size | over VRAM | resident expert layers | VRAM used | correct tasks/min | median task |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen3.8-27B (2 slots) | 17 GiB | resident | all (dense) | 0.898 | **13.5** | 8.4s |
+| Qwen3.8-Flash-Next | 83.8 GiB | 1.75x | **27 of 48 (56%)** | 0.861 | **7.49** | 15.0s |
+| GLM-5.3-Flash | 137.4 GiB | 2.86x | **1 of 43 (2%)** | 0.763 | **1.03** | 115.1s |
+
+All 3/3 oracle-passed.
+
+**Resident expert fraction predicts agentic speed; VRAM fill does not.** GLM
+uses 76% of the machine and is 7x slower than a model using 86%. The difference
+is not how much memory is claimed but how much of the *expert* set avoids the
+host round-trip: 2% versus 56%.
+
+This resolves the apparent conflict between "maximise hardware usage" and
+"fastest agentic serving" recorded in VRAMFILL and BOTHOBJECTIVES. They align
+when spending VRAM raises expert residency, and diverge when it does not. On
+GLM no available lever raises residency materially — 3 GB of a 120 GB expert
+set is a fortieth — which is why every lever measured flat or negative there.
+
+### Practical consequence
+
+Qwen3.8-Flash-Next is the model to run for agent work on this rig: 15s median
+task against GLM's 115s, at 3/3 correctness. It was **unlaunchable on main**
+until the oracle-path fix in this branch, so this was a defect hiding a usable
+configuration, not a hardware limit.
+
+### Slot policy, with the bracket now measured
+
+| model | 4 slots (Claude Code default) |
+|---|---|
+| Qwen3.8-27B, resident | +29% at 2 slots; 4 slots plans cleanly |
+| Qwen3.8-Flash-Next, 1.75x | did not launch before the fix; retest pending |
+| GLM-5.3-Flash, 2.86x | ~5.7x slower per turn, 1 of 3 tasks completed |
+
+The mechanism is visible in the planner's own numbers: to buy KV for four slots
+on Qwen3.8-Flash-Next it pushed `n-cpu-moe` from 33 to 38, displacing five
+expert layers to host RAM. **On a CPU-offloaded MoE a slot is paid for in
+expert residency**, and residency is what sets speed. A slot cap should key on
+that displacement, which ggrun already computes per candidate, rather than on a
+size ratio.
