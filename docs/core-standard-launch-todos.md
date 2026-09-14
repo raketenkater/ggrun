@@ -2522,10 +2522,53 @@ has served a request, so nothing here says a companion cannot pay for itself.
 live plans differ from those estimates (19 resident rather than the estimated
 35), so the dry-run numbers rank the seats but do not size them.
 
+### The correlation is exact
+
+Aligning the nine rounds against the step that produced each one:
+
+| step | kind | `n-cpu-moe` |
+|---|---|---:|
+| 1 | expert-derate | 46 |
+| 2 | **context-replanned** | **45** |
+| 3 | expert-derate | 46 |
+| 4 | **context-replanned** | **40** |
+| 5-7 | expert-derate x3 | 44, 45, 46 |
+| 8 | **context-replanned** | **44** |
+| 9 | expert-derate | 45 |
+
+Every derate raises it; every context re-plan lowers it. Nine for nine, so this
+is a mechanism rather than a plausible reading. `--claude-reviewer qwen` fails
+the same way.
+
+### The fix has a mechanism already in the codebase
+
+`recomputeAutomaticContextRecovery` recomputes a complete plan at a smaller
+context, and `placement.Options` carries no expert-residency floor — which is
+why the recompute is free to re-pack experts back onto the GPU. Confirmed by
+inspection: the only MoE-related inputs are `MoESplitOwnerGPU`,
+`CPUExpertMMapCapability` and `ForceSpecMoE`, none of which pin residency.
+
+`launchRequest.AdvisorVRAMPenaltyMB` is the existing lever for exactly this. Its
+own comment: *"shrinks a device's usable VRAM for the next re-plan... the
+advisor names a device and a layer count, and the deterministic planner re-packs
+every GPU around the reduced budget."* Carrying the accumulated residency into a
+context re-plan as a VRAM penalty would let the packer reproduce it without a
+new placement input, and without any partial argv overlay.
+
+Deliberately not implemented in this pass. It is a protected-path change whose
+proof is a live launch, each costing a multi-minute load of an 83.8 GiB model,
+and the contract does not accept unit tests as evidence for it.
+
 ### Open
 
-- Ratchet expert residency across *failed* preflight rounds, not only after a
-  proven fit, so a context re-plan cannot undo a derate from the same launch.
+- Carry accumulated expert residency into the context re-plan via
+  `AdvisorVRAMPenaltyMB`, so a re-plan cannot undo a derate from the same
+  launch. Verify by launching Flash-Next with `--claude-reviewer qwen2b`, which
+  currently cannot converge.
 - Key the Claude Code slot count on computed expert displacement instead of a
-  fixed parallel-4 floor.
-- Re-run the seat comparison once a seat can launch.
+  fixed parallel-4 floor. The `off` arm above is the evidence: four slots cost
+  nine expert layers and two thirds of the throughput at equal per-agent
+  context.
+- Re-run the seat comparison once a seat can launch. Until then the worker
+  benefit is unmeasured, and nothing here argues a companion cannot pay for
+  itself.
