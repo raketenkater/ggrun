@@ -92,6 +92,47 @@ def weight_devices(log):
     return sorted(devices)
 
 
+def gpu_memory():
+    # nvidia-smi always enumerates in PCI bus order, and the GPU jobs set
+    # CUDA_DEVICE_ORDER=PCI_BUS_ID, so these indices are ggrun's CUDA indices.
+    # Absent tooling is unknown, not zero: report None rather than 0 MiB.
+    try:
+        probe = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total",
+                                "--format=csv,noheader,nounits"],
+                               capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode != 0:
+        return None
+    devices = {}
+    for line in probe.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 3:
+            continue
+        try:
+            devices["CUDA%d" % int(fields[0])] = {"used_mib": int(fields[1]), "total_mib": int(fields[2])}
+        except ValueError:
+            continue
+    return devices or None
+
+
+def utilization(baseline, loaded):
+    """What this launch put on the GPUs, separated from what was already there."""
+    if not loaded:
+        return None
+    baseline = baseline or {}
+    served, capacity, per_device = 0, 0, {}
+    for name, current in sorted(loaded.items()):
+        before = baseline.get(name, {}).get("used_mib", 0)
+        per_device[name] = {"before_mib": before, "after_mib": current["used_mib"],
+                            "launch_mib": current["used_mib"] - before,
+                            "total_mib": current["total_mib"]}
+        served += current["used_mib"] - before
+        capacity += current["total_mib"]
+    return {"devices": per_device, "launch_mib": served, "capacity_mib": capacity,
+            "fraction_of_vram": round(served / capacity, 4) if capacity else None}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launcher", required=True)
@@ -133,6 +174,7 @@ def main():
     proc = None
     try:
         check_port_available(args.port)
+        baseline_memory = gpu_memory()
         with (output / "serve.log").open("wb") as log:
             proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, env=env,
@@ -157,6 +199,16 @@ def main():
                 raise RuntimeError("timed out waiting for launcher readiness and health")
             result["weight_devices"] = weight_devices((output / "serve.log").read_text(errors="replace"))
             result["min_weight_devices"] = args.min_weight_devices
+            # Record what the launch actually consumed before any assertion can
+            # abort the run: a placement that underuses the hardware is the
+            # thing we are hunting, so its evidence has to survive a failure.
+            result["utilization"] = utilization(baseline_memory, gpu_memory())
+            try:
+                props = request(args.port, "/props", timeout=args.request_timeout)
+                settings = props.get("default_generation_settings") or {}
+                result["served"] = {"context": settings.get("n_ctx"), "slots": props.get("total_slots")}
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                result["served"] = {"error": str(exc)}
             if len(result["weight_devices"]) < args.min_weight_devices:
                 raise RuntimeError(f"required {args.min_weight_devices} weight devices, observed {result['weight_devices']}")
             reply = request(args.port, "/v1/chat/completions", {

@@ -28,8 +28,12 @@ on:
         description: Linux GPU model quantization
         type: string
         default: Q4_0
+      gpu_model_path:
+        description: Existing GGUF on the Linux GPU runner; skips downloading (for models too large to fetch per run)
+        type: string
+        default: ""
       gpu_context:
-        description: Total Linux GPU serving context
+        description: Total Linux GPU serving context (0 selects it automatically)
         type: number
         default: 2048
       gpu_startup_timeout:
@@ -342,13 +346,26 @@ jobs:
           CUDA_DEVICE_ORDER: PCI_BUS_ID
           GPU_MODEL_REPO: ${{ inputs.gpu_model_repo }}
           GPU_MODEL_QUANT: ${{ inputs.gpu_model_quant }}
+          GPU_MODEL_PATH: ${{ inputs.gpu_model_path }}
           GPU_CONTEXT: ${{ inputs.gpu_context }}
           GPU_STARTUP_TIMEOUT: ${{ inputs.gpu_startup_timeout }}
           GPU_REQUEST_TIMEOUT: ${{ inputs.gpu_request_timeout }}
           GPU_MIN_WEIGHT_DEVICES: ${{ inputs.gpu_min_weight_devices }}
         run: |
+          set -euo pipefail
+          # The models that actually stress placement are too large to fetch per
+          # run, so a path on the runner is how that shape gets covered. The
+          # default still downloads, because fetching a model is part of the
+          # documented flow and has to keep being tested.
+          if [ -n "${GPU_MODEL_PATH:-}" ]; then
+            [ -f "$GPU_MODEL_PATH" ] || {
+              echo "::error::gpu_model_path is not a file on this runner: $GPU_MODEL_PATH"; exit 1; }
+            source_args=(--model "$GPU_MODEL_PATH")
+          else
+            source_args=(--repo "${GPU_MODEL_REPO:-$E2E_REPO}" --quant "${GPU_MODEL_QUANT:-$E2E_QUANT}")
+          fi
           python3 scripts/verify-gpu-install.py --launcher "$LLM_APP_HOME/ggrun" \
-            --repo "${GPU_MODEL_REPO:-$E2E_REPO}" --quant "${GPU_MODEL_QUANT:-$E2E_QUANT}" \
+            "${source_args[@]}" \
             --ctx "${GPU_CONTEXT:-2048}" --timeout "${GPU_STARTUP_TIMEOUT:-300}" \
             --request-timeout "${GPU_REQUEST_TIMEOUT:-120}" \
             --min-weight-devices "${GPU_MIN_WEIGHT_DEVICES:-1}" \

@@ -1085,6 +1085,63 @@ A real-Compute synthetic regression reproduced the same refusal at 69632 ->
 55296 tokens before the fix. Larger GLM contexts remain subject to admission;
 this repair is recovery correctness, not performance or serving proof.
 
+## UTIL — the GPU e2e job never measured hardware use — 2026-09-14
+
+The goal is the fastest agentic serving the hardware can give, so how much of
+the hardware a launch actually consumes is the number to optimise. The GPU
+install job proved a model *served*; it recorded which devices received weight
+allocations and nothing about how much memory the launch used. A placement that
+serves correctly while leaving two thirds of the VRAM idle passed exactly like
+one that used the machine well.
+
+`verify-installed-serving.py` now samples `nvidia-smi` before the launch and
+again once the launcher is ready, and records the difference:
+
+- `utilization.devices[CUDA<n>]` — `before_mib`, `after_mib`, `launch_mib`,
+  `total_mib` per device.
+- `utilization.launch_mib` / `capacity_mib` / `fraction_of_vram` — what this
+  launch put on the GPUs against what the machine has.
+- `served.context` / `served.slots` — from `/props`, what the backend actually
+  served, not what was planned.
+
+Two deliberate choices. The baseline subtraction keeps another tenant's memory
+out of our number. Absent `nvidia-smi` records `null`, not `0` — absent is not
+zero. The sample is taken before the `--min-weight-devices` assertion can abort
+the run, because an underusing placement is the thing being hunted and its
+evidence has to survive the failure.
+
+`install-e2e.yml` gains a `gpu_model_path` dispatch input. Models large enough
+to stress placement cannot be re-downloaded per run, so a path on the runner is
+how that shape gets covered; the default still exercises `ggrun download`,
+which is the documented flow and has to keep being tested. `gpu_context: 0`
+already means automatic, which is the path that selects context and slots.
+
+### Baseline, this rig, 2026-09-14
+
+`ggrun v3.2.9-dev.c8924d9`, Qwen3.5-4B-Q4_K_M, automatic context and slots:
+
+| | |
+|---|---|
+| weight devices | `CUDA1` only |
+| launch VRAM | 8,937 MiB of 49,134 MiB — **0.1819** |
+| CUDA0 / CUDA2 | 162 / 112 MiB, no weights |
+| served | 262,144 tokens, 1 slot |
+
+Lifecycle passed: generation, streaming, clean shutdown, port released. This is
+a correct launch that uses under a fifth of the machine and leaves two cards
+holding scratch. It is the reference point for the resident-fast-path work in
+P1; a candidate that raises `fraction_of_vram` without losing the lifecycle
+gates is the shape of an improvement.
+
+### Open
+
+- No large-model figure yet. GLM-5.3-Flash UD-Q3_K_XL (137.4 GiB) is the
+  interesting case and currently fails before loading weights; see the context
+  recovery work on `harden/preflight-memory-shape`.
+- `fraction_of_vram` is not yet asserted. It is recorded and compared by hand
+  until enough runs exist to say what a floor should be per model shape.
+- The `gpu` job is gated on `github.ref == 'refs/heads/main'`, so this change
+  has to land on main before a dispatch can exercise it.
 ## CTXRATCHET — memory recovery climbed back into a rejected context — 2026-09-14
 
 GLM-5.3-Flash UD-Q3_K_XL (137.4 GiB), automatic context, `--parallel 1`, on the
