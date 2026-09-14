@@ -2675,3 +2675,52 @@ pattern, one classifier request per tool call.
   measured.
 - The 4B worker seat was not driven with delegated utility work, so its extra
   cost over the 2B still has no measured benefit.
+
+## SLOTLEVER — the optimizer cannot fix the slot floor because slots are not a candidate — 2026-09-14
+
+`CLAUDEMODE` measured four slots costing two thirds of Flash-Next's agentic
+throughput at equal per-agent context. The obvious next step is a
+displacement-aware slot cap. Before writing one, the cheaper question: can the
+existing candidate controller already find this?
+
+**It was never asked.** Every Claude Code arm measured so far ran with
+`--calibrate off` — the harness sets it deliberately to stay out of the
+20-minute optimizer window — so the optimizer had never executed in this mode.
+
+Running it with calibration on gives the answer in one line:
+
+```
+[optimize] calculated 6 candidates (6 feasible, 0 exact):
+           batch 128..512, ubatch 64..512, parallel 4..4, 2 topology shape(s)
+```
+
+**`parallel 4..4`.** The generator offers batch, ubatch and topology variants,
+and no slot-count variant at all. The same pinning appears in every other run
+recorded here: `parallel 1..1` on plain Flash-Next, `parallel 1..1` on the 27B,
+`parallel 1..1` on GLM. The slot count is always the requested value and never a
+coordinate the search can move.
+
+So the measured slot cost is not something calibration failed to find. It is
+outside the candidate space, which means no amount of measurement or ladder
+fixing reaches it.
+
+This is a narrower defect than a displacement-aware cap, and it fits the
+existing architecture: `prioritizeParallelCalibrationCurve` and the
+`parallel-%d` candidate name already exist, and `automaticWorkloadCandidateSet`
+already filters slot candidates against declared demand
+(`requestWorkloadConcurrency` returns 2 for default Claude Code mode, so a
+`parallel-2` candidate would survive that filter). The generator simply does not
+emit them here.
+
+### Next concrete deliverable
+
+Emit slot-count candidates below the requested value when the plan displaces
+expert layers to host RAM, and let the existing ladder and phase guards decide.
+The displacement is already computed per candidate, so the cap keys on measured
+evidence rather than a size ratio — which is what `SLOTS` asked for and what
+`CLAUDEMODE` now quantifies.
+
+Do not hardcode a lower floor. `REVIEWLANE` shows concurrency has real value:
+with reviews and foreground overlapping, the seated companion path completed 8
+of 8 reviews against 3 of 8. The right answer is a measured trade, not a
+smaller constant.
