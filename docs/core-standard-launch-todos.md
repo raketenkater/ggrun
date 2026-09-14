@@ -1723,3 +1723,58 @@ point; a larger K, or fewer inserts, may trade differently, and a model whose
 expert working set is small enough to fit a high hit rate could behave
 differently again. What is established is that the +6% synthetic figure does
 not survive an agent workload, and that the integration case cannot rest on it.
+
+## HOSTBOUND — no placement lever improves GLM on this rig — 2026-09-14
+
+Five levers tested against the same agent suite on GLM-5.3-Flash UD-Q3_K_XL
+(137.4 GiB on 48 GiB of VRAM, ~120 GB of experts in host RAM). Every one either
+did nothing or hurt.
+
+| lever | result |
+|---|---|
+| more resident weights (VRAM 0.7023 -> 0.7627) | decode unchanged, 6.83 -> 6.83 tok/s |
+| hot-expert cache K=32 | tie at 1 slot, **-7.9%** at 2 slots |
+| `--parallel 2`, 4 lanes | **-40%** (0.634 vs ~1.05) |
+| `--n-cpu-moe` 42 -> 39 | **-12 to -16%** |
+| context 664,576 -> 131,072 | no change, within noise |
+
+### Using more of the machine made it slower, monotonically
+
+| config | ctx | n-cpu-moe | VRAM | correct tasks/min |
+|---|---:|---:|---:|---:|
+| backend direct | 131,072 | 42 | **0.408** | **1.074** |
+| ggrun auto | 664,576 | 42 | 0.763 | 1.03 |
+| ggrun, more resident | 131,072 | 39 | 0.600 | 0.907 |
+
+All 3/3 oracle-passed, so this is not a correctness artefact. The fastest
+arrangement used the least VRAM.
+
+### Why
+
+The single contended resource is host/PCIe bandwidth feeding 39-42 CPU-resident
+expert layers per token. Every lever tried either spends that resource to save
+it — the cache's inserts, a second lane's parallel demand — or adds
+cross-device synchronisation to a path already waiting on the CPU, which is
+what moving three expert layers onto GPUs did. Shifting a fortieth of the
+weight cannot pay for the coordination it adds.
+
+### What this means for the objective
+
+`fraction_of_vram` is a diagnostic, not a target, and on this model class it is
+actively anti-correlated with speed. A policy that maximises hardware use would
+have chosen the slowest configuration measured here. The product goal in README
+— "the fastest **stable** plan for the requested workload, not maximum VRAM
+fill" — is the correct one, and this is the measurement that backs it on the
+workload ggrun exists for.
+
+The honest recommendation for a model 3x over VRAM capacity is a smaller
+quantisation or more VRAM. There is no placement decision on this hardware that
+makes it fast, and more tuning attempts are not warranted without new evidence.
+
+### What is not established
+
+One model, one quantisation, one rig, single samples against a measured 3.6%
+noise floor. The `-12 to -16%` residency result is outside that floor but rests
+on one run per arm. A MoE that is only slightly over VRAM capacity — where
+resident experts are a large fraction of the offloaded set rather than a
+fortieth — is the case where residency should pay, and it is untested.
