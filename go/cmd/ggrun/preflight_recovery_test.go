@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
@@ -328,5 +329,52 @@ func TestGeneratedSWAFullIsWithdrawnBeforeSheddingWeights(t *testing.T) {
 		typed, &placement.Strategy{UBatchSize: 512, NCPUMoE: 39}, baseArgs, nil, model, caps, outcome)
 	if method == "swa-full-withdrawn" {
 		t.Fatal("an explicitly typed --swa-full must not be withdrawn")
+	}
+}
+
+func TestOracleDeficitRetainsCompleteAutomaticContextReplan(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	current, err := placement.Compute(caps, model, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+	next, nextArgs, method, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome)
+	if err != nil {
+		t.Fatalf("oracle-backed full context replan discarded: %v", err)
+	}
+	if method != "context-replanned" || next.ContextSize >= current.ContextSize || next.ContextSize < 32768 {
+		t.Fatalf("recovery=%s ctx %d -> %d", method, current.ContextSize, next.ContextSize)
+	}
+	if next.Parallel != 1 || next.KVType != current.KVType || !next.ContextAuto {
+		t.Fatalf("recovery changed workload policy: %+v", next)
+	}
+	rebuilt := buildLaunchServerArgs(req, cfg, be, caps, model, next)
+	if launchArgsIdentity(nextArgs) != launchArgsIdentity(rebuilt) {
+		t.Fatal("recovery returned a partial argv overlay")
+	}
+}
+
+func TestOracleContextRecoveryPreservesExplicitContext(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "65536", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome)
+	if err == nil && next.ContextSize != 65536 {
+		t.Fatalf("explicit context changed to %d", next.ContextSize)
 	}
 }

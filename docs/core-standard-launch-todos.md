@@ -1051,3 +1051,36 @@ baseline and notes unmatched traffic and queue-pressure limitations. No new
 concurrency winner is inferred here. Helper routing already exists through
 `claudeauto` utility/reviewer paths; expansion is deferred behind admission,
 useful-context and failure-recovery correctness.
+
+### User launch observation — 2026-09-14T09:11:48.856630+00:00
+
+After the user launched the installed development binary, process inspection
+found no running ggrun/llama-server process. The newest reviewer log,
+`/home/mik/ggrun-project/ggrun/.logs/ggrun-claude-reviewer-45243.log`
+(2026-09-14 09:11 UTC), records Qwen3.5-4B, one slot, 131072-token
+context, listening on loopback port 45243 and health OK after 3 seconds.
+There is no new main-model serving log; the previous log is from September 13.
+The main model, exact launch argv and reason for exit are not established.
+Awaiting terminal output rather than attributing old context errors to this
+launch. Snapshot: `/tmp/ggrun-user-launch-observation.json`. No process was
+stopped or restarted by this inspection. This is not serving acceptance.
+
+### GLM Flash preflight recovery dead end — 2026-09-14
+
+User terminal output identifies GLM-5.3-Flash Q3 XL (137.4 GiB), one slot,
+592896 total context, q8_0 GPU KV, resident loading, batch/ubatch 2048/128,
+all 43 expert layers on CPU. Reviewer Qwen3.5-4B reached health and measured
+5650 MiB against its 6144 MiB reservation. Main backend was
+`.src/fork-glm-5-3-flash/build-cuda/bin/llama-server` on port 8081.
+The no-allocation oracle reported CUDA0 13707/11873 MiB (1834 MiB deficit).
+Complete re-placement found 515072 tokens, but recovery discarded it because
+its context differed; the remaining context-derate path only handles measured
+compute-allocation failures. No main-model weight load followed.
+
+Fix: accept a fully rebuilt smaller automatic-context candidate from an oracle
+rejection for the next bounded preflight, keeping slots, KV policy, residency
+and non-increasing ubatch. This does not mark it admitted or bypass the outer
+exact-candidate/repeated-argv/retry gates. Explicit context remains immutable.
+A real-Compute synthetic regression reproduced the same refusal at 69632 ->
+55296 tokens before the fix. Larger GLM contexts remain subject to admission;
+this repair is recovery correctness, not performance or serving proof.

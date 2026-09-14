@@ -131,6 +131,20 @@ func recoverPreflightOOM(
 	if candidate != nil {
 		candidateArgs = buildLaunchServerArgs(req, cfg, be, caps, model, candidate)
 	}
+	// The no-allocation oracle reports a total device deficit, not a failed
+	// compute allocation. Its fully recomputed automatic-context plan must not
+	// be discarded by the partial-overlay selector below. Return it for the
+	// caller's next exact preflight; this is a candidate, never fit proof.
+	if outcome.Evidence.Level == memoryEvidenceOraclePlanned &&
+		req != nil && automaticContextRequest(req) && strategy.ContextAuto &&
+		candidate != nil && candidate.ContextAuto &&
+		candidate.ContextSize > 0 && candidate.ContextSize < strategy.ContextSize &&
+		candidate.Parallel == strategy.Parallel && candidate.KVType == strategy.KVType &&
+		candidate.KVTypeV == strategy.KVTypeV && candidate.KVPlacement == strategy.KVPlacement &&
+		candidate.MMapRequired == strategy.MMapRequired && candidate.UBatchSize <= strategy.UBatchSize {
+		candidate.PerformanceTuned = false
+		return candidate, candidateArgs, "context-replanned", nil
+	}
 	nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
 		req, strategy, serverArgs, candidate, model, runtimeCaps, outcome, candidateArgs,
 	)
