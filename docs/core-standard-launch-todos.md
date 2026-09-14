@@ -1276,3 +1276,63 @@ Prompt processing during the canary ran at 20 tok/s on a 6,356-token prompt;
 that is one cold observation, not a performance result, and P1's fast-path work
 still needs matched agent-workload evidence. Comparing this against the
 MiniMax-M3 row in the README requires a matched benchmark run, not this.
+
+## UTIL — first GPU CI run that measures the hardware — 2026-09-14
+
+[Run 34833268807](https://github.com/raketenkater/ggrun/actions/runs/34833268807),
+`gpu` job on the self-hosted Linux runner, main at `7bab725`. Fresh install from
+`setup.sh` into `runner.temp`, Qwen3.8-27B-UD-Q4_K_XL (17 GB, `qwen35`, dense)
+from a path on the runner, `gpu_context=0` so context and slots are automatic.
+
+Backend: `ik_llama-server-cuda`. Both the serve and relaunch stages passed.
+
+| | serve | relaunch |
+|---|---:|---:|
+| CUDA0 | 2,974 MiB | 2,902 MiB |
+| CUDA1 | 23,839 MiB | 23,699 MiB |
+| CUDA2 | 210 MiB | 210 MiB |
+| total | 27,023 / 49,134 | 26,811 / 49,134 |
+| `fraction_of_vram` | **0.5500** | **0.5457** |
+| served | 262,144 / 1 slot | 262,144 / 1 slot |
+
+Weights landed on CUDA0 and CUDA1. **CUDA2 held 210 MiB and no weights** — a
+whole 12 GB card idle while the plan used 55% of the machine. The launch is
+correct and the lifecycle is clean; it simply does not use the third card.
+
+This is the first figure of its kind produced by CI rather than by hand, and it
+is the number P1 has to move. Three points now exist on this rig:
+
+| model | `fraction_of_vram` | devices with weights | served |
+|---|---:|---|---|
+| Qwen3.5-4B-Q4_K_M | 0.1819 | CUDA1 | 262,144 / 1 |
+| Qwen3.8-27B-UD-Q4_K_XL | 0.5500 | CUDA0, CUDA1 | 262,144 / 1 |
+| GLM-5.3-Flash UD-Q3_K_XL | 0.7023 | all three | 500,736 / 1 |
+
+Only the largest model uses all three cards. Utilisation tracks model size, not
+a placement decision to spend the hardware — which is exactly the gap.
+
+### A fork architecture cannot be a fresh-install CI target
+
+The first attempt at this run used GLM-5.3-Flash and failed in 2 minutes:
+
+```
+No installed backend can load architecture glm5next for glm-5-3-flash.
+... The .bin/llama-server-vulkan backend does not support it.
+```
+
+The job installs a clean backend; GLM-5.3-Flash needs the `glm-5-3-flash` fork
+that exists only in a developer's own install. ggrun refused correctly rather
+than loading a backend that cannot serve the architecture, and the Vulkan
+mention is correct fallback reporting, not a backend-selection defect — the
+passing run above selected CUDA on the same machine.
+
+So GPU CI must use a mainline-supported architecture. Local evidence for
+fork-architecture models stays local, and the CTXRATCHET entry's GLM figures
+are not reproducible by this job.
+
+### Open
+
+- CUDA2 idle at 17 GB model size. No assertion on `fraction_of_vram` yet; it is
+  recorded and compared by hand until enough shapes exist to set a floor.
+- Decode throughput is still unmeasured here. The run logged a 765.2 tok/s
+  prefill pilot; that is not a decode result and not an agent-workload result.
