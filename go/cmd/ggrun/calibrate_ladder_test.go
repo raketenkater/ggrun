@@ -46,7 +46,9 @@ func TestAdmissionLadderSpreadsAcrossLevers(t *testing.T) {
 	}
 	families := map[string]int{}
 	for _, c := range plan[1:] {
-		families[calibrationLeverFamily(c.Name)]++
+		for _, family := range calibrationLeverFamilies(c.Name) {
+			families[family]++
+		}
 	}
 	if families["ubatch"] > 1 {
 		t.Errorf("ladder spent %d challenger slots on the ubatch family: %s", families["ubatch"], ladderNames(plan))
@@ -97,22 +99,49 @@ func TestAdmissionLadderNeverRepeatsACandidate(t *testing.T) {
 	}
 }
 
-func TestCalibrationLeverFamilyReadsTheGeneratorNaming(t *testing.T) {
-	for name, want := range map[string]string{
-		"ubatch-2048":           "ubatch",
-		"ubatch-512":            "ubatch",
-		"parallel-4":            "parallel",
-		"topology-balanced-012": "topology",
-		"moe-owner-1":           "moe",
-		"moe-topology-a":        "moe",
-		"single-gpu-2":          "single",
-		"kv-alternate":          "kv",
-		"split-inverted":        "split",
-		"default":               "default",
-		"-leading":              "-leading",
+func TestCalibrationLeverFamiliesReadsTheGeneratorNaming(t *testing.T) {
+	for name, want := range map[string][]string{
+		"ubatch-2048": {"ubatch"},
+		"ubatch-512":  {"ubatch"},
+		"parallel-4":  {"parallel"},
+		// A compound moves two coordinates and must name both. Qwen3.8-27B's
+		// frontier produces this form; Qwen3.8-Flash-Next's never did.
+		"batch-1024-ubatch-512": {"batch", "ubatch"},
+		"batch-8192-ubatch-32":  {"batch", "ubatch"},
+		// Descriptive tails follow a key, not a value, so they are not keys.
+		"topology-balanced-012": {"topology"},
+		"moe-owner-1":           {"moe"},
+		"moe-topology-a":        {"moe"},
+		"single-gpu-2":          {"single"},
+		"kv-alternate":          {"kv"},
+		"split-inverted":        {"split"},
+		"default":               {"default"},
+		"-leading":              {"-leading"},
 	} {
-		if got := calibrationLeverFamily(name); got != want {
-			t.Errorf("calibrationLeverFamily(%q) = %q, want %q", name, got, want)
+		got := calibrationLeverFamilies(name)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("calibrationLeverFamilies(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A compound sharing a coordinate with an already-selected candidate is not a
+// new lever. Without this the ladder pairs "ubatch-512" with
+// "batch-1024-ubatch-512", which carries the same ubatch that was just refused.
+func TestAdmissionLadderTreatsCompoundNamesAsOverlapping(t *testing.T) {
+	candidates := ladderCandidates("default", "ubatch-512", "batch-1024-ubatch-512", "topology-balanced-012", "parallel-2")
+	plan := selectAutomaticCalibrationAdmissionPlan(candidates, nil, 4)
+	if len(plan) != 4 {
+		t.Fatalf("ladder kept %d entries, want 4: %s", len(plan), ladderNames(plan))
+	}
+	if plan[1].Name != "ubatch-512" {
+		t.Fatalf("the predicted finalist lost its slot: %s", ladderNames(plan))
+	}
+	for _, c := range plan[2:] {
+		for _, family := range calibrationLeverFamilies(c.Name) {
+			if family == "ubatch" {
+				t.Errorf("ladder followed ubatch-512 with %s, which moves ubatch too: %s", c.Name, ladderNames(plan))
+			}
 		}
 	}
 }

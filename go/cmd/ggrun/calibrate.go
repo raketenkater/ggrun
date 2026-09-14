@@ -353,17 +353,48 @@ func selectAutomaticCalibrationAdmissionPlan(candidates []placement.CalibrationC
 	return out
 }
 
-// calibrationLeverFamily names the coordinate a candidate moves, read from the
-// generator's own naming ("ubatch-2048" and "ubatch-512" are both "ubatch";
-// "topology-..." and "moe-owner-3" are "topology" and "moe"). Two candidates in
-// one family are near-duplicates for admission: when one cannot be admitted the
-// next rung usually cannot either, and measuring a second member says nothing
-// about a different bottleneck.
-func calibrationLeverFamily(name string) string {
-	if i := strings.Index(name, "-"); i > 0 {
-		return name[:i]
+// calibrationLeverFamilies names every coordinate a candidate moves, read from
+// the generator's own naming. Candidates sharing a coordinate are
+// near-duplicates for admission: when one cannot be admitted the next usually
+// cannot either, and measuring a second says nothing about a different
+// bottleneck.
+//
+// The generator names candidates as key-value runs, so a new key is a
+// non-numeric token that follows a value: "batch-1024-ubatch-512" moves both
+// batch and ubatch. Taking only the leading token would call that one "batch"
+// and treat it as unrelated to "ubatch-512", which is exactly the pairing the
+// spreading is meant to avoid. Descriptive tails are not keys — in
+// "topology-balanced-012" and "moe-owner-1" the second token follows a key
+// rather than a value, so the families are "topology" and "moe".
+//
+// Qwen3.8-Flash-Next never exposed this: its frontier produced five candidates
+// with simple names. Qwen3.8-27B produces twenty-seven, including the compound
+// form.
+func calibrationLeverFamilies(name string) []string {
+	parts := strings.Split(name, "-")
+	if len(parts) == 0 || parts[0] == "" {
+		return []string{name}
 	}
-	return name
+	families := []string{parts[0]}
+	for i := 1; i < len(parts); i++ {
+		if isNumericToken(parts[i]) || !isNumericToken(parts[i-1]) {
+			continue
+		}
+		families = append(families, parts[i])
+	}
+	return families
+}
+
+func isNumericToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func selectedCalibrationCandidate(selected []placement.CalibrationCandidate, candidate placement.CalibrationCandidate) bool {
@@ -375,11 +406,19 @@ func selectedCalibrationCandidate(selected []placement.CalibrationCandidate, can
 	return false
 }
 
+// selectedCalibrationFamily reports whether any coordinate this candidate moves
+// is already represented in the ladder. Overlap is the right relation rather
+// than equality: "batch-1024-ubatch-512" shares ubatch with "ubatch-512" and
+// would be refused for the same reason on the same device.
 func selectedCalibrationFamily(selected []placement.CalibrationCandidate, candidate placement.CalibrationCandidate) bool {
-	family := calibrationLeverFamily(candidate.Name)
+	families := calibrationLeverFamilies(candidate.Name)
 	for _, s := range selected {
-		if calibrationLeverFamily(s.Name) == family {
-			return true
+		for _, taken := range calibrationLeverFamilies(s.Name) {
+			for _, family := range families {
+				if taken == family {
+					return true
+				}
+			}
 		}
 	}
 	return false
