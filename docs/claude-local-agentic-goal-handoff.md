@@ -354,7 +354,37 @@ stays at 22 and the measured deficit falls only 101 -> 94 -> 87 MiB, about
 of any expert movement. Recovery believes it is relieving the failing device and
 is not.
 
-The work is therefore to make relief a **measured quantity** compared against
+### The mechanical root cause, found on the fifth and sixth attempts
+
+`DerateCUDAOOMArgsForDeficit` offers a ubatch reduction only inside
+`if isComputeBuffer`, and it sizes that reduction with
+`nextUBatchForDeficit(currentUBatch, allocMB, deficitMB)`.
+
+For an oracle-planned shortfall there is no failed allocation, so
+`recoverPreflightOOM` synthesises `outcome.AllocMB = outcome.DeficitMB`. The
+helper is then asked whether shrinking a "101 MiB" compute buffer can free
+101 MiB, concludes it cannot, and declines. **The lever is disqualified by a
+fabricated allocation size while the real compute buffer is gigabytes** — on
+GLM the same buffer measured about 3 GiB at ubatch 256.
+
+That is why Qwen3.8-Flash-Next sits at ubatch 256 through every round while the
+deficit falls 101 -> 94 -> 87 MiB, which is the size of the 1,024-token context
+nudge and nothing else.
+
+Two further attempts were made and reverted: ranking candidates by a measured
+per-device relief estimate (`predictedDeviceReliefMB`, pricing expert layers
+leaving the device and KV shrinking on it), and offering one bounded ubatch rung
+directly when the allocation is unmeasured. Both build and gate cleanly; neither
+changed the observed trace, and the execution path was not confirmed before the
+session stopped. They are recorded as unverified rather than shipped.
+
+The remaining work is therefore two coupled changes, not one:
+
+1. Stop synthesising `AllocMB` from the deficit where it feeds sizing decisions,
+   or mark it unmeasured everywhere it is consumed, so a lever is never
+   disqualified by a fabricated number. `outcome.AllocMBMeasured` already
+   records the distinction and is not consulted here.
+2. Make relief a **measured quantity** compared against
 the deficit, not a boolean derived from argv differences: predict MiB freed on
 the failing device for each candidate lever, rank by that, and accept the weak
 candidate only as an explicit fallback. That requires reading the per-device
