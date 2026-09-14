@@ -90,10 +90,16 @@ func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy, recla
 }
 
 // contextReclaimTokens converts a measured VRAM deficit into the number of
-// context tokens whose KV cache covers it. KV is the part of the memory a
-// context change actually moves, so its size per token is the honest exchange
-// rate. Returns 0 when the geometry is unknown rather than guessing.
-func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Strategy, args []string, deficitMB int) int {
+// context tokens whose KV cache covers it on the device that actually failed.
+//
+// The exchange rate must be that device's KV share, not the aggregate across
+// every GPU. Sizing against the total credits the failing device with savings
+// that land on its neighbours, so on a multi-device split the step comes out
+// several times too small. When KV is host-resident the share is zero and a
+// context change relieves no VRAM on that device at all.
+//
+// Returns 0 when the geometry is unknown rather than guessing a rate.
+func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Strategy, args []string, deficitMB, device int) int {
 	if model == nil || strategy == nil || deficitMB <= 0 || strategy.ContextSize <= 0 {
 		return 0
 	}
@@ -104,14 +110,15 @@ func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Str
 	if kvType == "" {
 		return 0
 	}
-	kvTotalMB := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, hasArg(args, "--swa-full"))
-	if kvTotalMB <= 0 {
+	deviceKVMB := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType,
+		strategy.KVPlacement, hasArg(args, "--swa-full"), strategy.TensorSplit, device)
+	if deviceKVMB <= 0 {
 		return 0
 	}
-	// tokens = deficit / (kvTotal / ctx), with the same safety margin the other
+	// tokens = deficit / (deviceKV / ctx), with the same safety margin the other
 	// recovery levers require of themselves.
 	required := recoveryRequiredMB(deficitMB)
-	tokens := int(int64(required) * int64(strategy.ContextSize) / int64(kvTotalMB))
+	tokens := int(int64(required) * int64(strategy.ContextSize) / int64(deviceKVMB))
 	if tokens <= 0 {
 		return 0
 	}
@@ -785,7 +792,7 @@ func oracleContextDropCoversDeficit(
 	if current == nil || candidate == nil {
 		return false
 	}
-	needed := contextReclaimTokens(model, current, currentArgs, outcome.DeficitMB)
+	needed := contextReclaimTokens(model, current, currentArgs, outcome.DeficitMB, outcome.Device)
 	if needed <= 0 {
 		return true
 	}

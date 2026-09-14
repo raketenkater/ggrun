@@ -554,7 +554,7 @@ func TestContextCeilingStepsDownByTheMeasuredDeficit(t *testing.T) {
 	args := []string{"llama-server", "--ctx-size", "816128", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
 	strategy := &placement.Strategy{ContextSize: 816128, ContextAuto: true, KVType: "q8_0"}
 
-	tokens := contextReclaimTokens(model, strategy, args, 4636)
+	tokens := contextReclaimTokens(model, strategy, args, 4636, 0)
 	if tokens <= 1024 {
 		t.Fatalf("a 4636 MiB deficit converted to %d tokens; that is still a nudge", tokens)
 	}
@@ -592,13 +592,13 @@ func TestContextReclaimTokensRefusesToGuess(t *testing.T) {
 	model := &placement.ModelProfile{NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
 	strategy := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0"}
 	args := []string{"llama-server", "--cache-type-k", "q8_0"}
-	if got := contextReclaimTokens(model, strategy, args, 0); got != 0 {
+	if got := contextReclaimTokens(model, strategy, args, 0, 0); got != 0 {
 		t.Fatalf("no deficit gave %d tokens", got)
 	}
-	if got := contextReclaimTokens(nil, strategy, args, 1000); got != 0 {
+	if got := contextReclaimTokens(nil, strategy, args, 1000, 0); got != 0 {
 		t.Fatalf("no model gave %d tokens", got)
 	}
-	if got := contextReclaimTokens(model, &placement.Strategy{ContextAuto: true}, args, 1000); got != 0 {
+	if got := contextReclaimTokens(model, &placement.Strategy{ContextAuto: true}, args, 1000, 0); got != 0 {
 		t.Fatalf("no context gave %d tokens", got)
 	}
 }
@@ -641,7 +641,7 @@ func TestOracleContextDropMustCoverTheDeficit(t *testing.T) {
 	outcome := preflightOutcome{Device: 0, DeficitMB: 101, DoesNotFit: true,
 		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
 
-	needed := contextReclaimTokens(model, current, args, outcome.DeficitMB)
+	needed := contextReclaimTokens(model, current, args, outcome.DeficitMB, 0)
 	if needed <= 1024 {
 		t.Skipf("fixture KV geometry makes one granule sufficient (needed=%d)", needed)
 	}
@@ -664,5 +664,46 @@ func TestOracleContextDropMustCoverTheDeficit(t *testing.T) {
 	noKV := &placement.Strategy{ContextSize: 261120, ContextAuto: true}
 	if !oracleContextDropCoversDeficit(model, noKV, []string{"llama-server"}, &nudge, outcome) {
 		t.Fatal("unknown KV geometry rejected a candidate instead of deferring to preflight")
+	}
+}
+
+// A deficit lands on one device, so the exchange rate is that device's KV
+// share. Sizing against the aggregate credits the failing GPU with savings that
+// land on its neighbours and produces a step several times too small.
+func TestContextReclaimUsesTheFailingDeviceKVShare(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	// CUDA1 owns the majority of layers; CUDA2 owns a small tail.
+	strategy := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "gpu",
+		TensorSplit: []float64{0.12, 0.76, 0.12},
+	}
+	big := contextReclaimTokens(model, strategy, args, 2000, 1)
+	small := contextReclaimTokens(model, strategy, args, 2000, 2)
+	if big <= 0 || small <= 0 {
+		t.Fatalf("no reclaim computed: majority=%d minority=%d", big, small)
+	}
+	// The same deficit on a device owning fewer layers needs a larger context cut.
+	if small <= big {
+		t.Fatalf("minority-owner device asked for %d tokens, majority %d; share ignored", small, big)
+	}
+}
+
+// Freeing host KV does not relieve a GPU. Crediting it against a device deficit
+// is the aggregate error in a different direction.
+func TestContextReclaimRefusesToCreditHostKVAgainstADeviceDeficit(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0"}
+	hostKV := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "cpu",
+		TensorSplit: []float64{0.5, 0.5},
+	}
+	if got := contextReclaimTokens(model, hostKV, args, 2000, 0); got != 0 {
+		t.Fatalf("host-resident KV was credited with %d tokens of GPU relief", got)
+	}
+	gpuKV := *hostKV
+	gpuKV.KVPlacement = "gpu"
+	if got := contextReclaimTokens(model, &gpuKV, args, 2000, 0); got <= 0 {
+		t.Fatalf("GPU-resident KV produced no reclaim: %d", got)
 	}
 }
