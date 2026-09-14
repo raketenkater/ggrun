@@ -776,6 +776,18 @@ func recomputeBatchCandidate(caps *detect.Capabilities, model *ModelProfile, bas
 	return alt, nil
 }
 
+// slotCandidateScalesContext reports whether a slot candidate should scale its
+// total window with the slot count instead of inheriting the base's total.
+//
+// The gate is the *request* being automatic, not the strategy carrying
+// ContextAuto: a Claude Code base arrives with ContextAuto false even though its
+// window was derived rather than typed. AutoContextMax is set only when the
+// launcher resolved the window itself, which is exactly when scaling is correct.
+func slotCandidateScalesContext(opts Options, base *Strategy, parallel int) bool {
+	return opts.AutoContextMax > 0 && base != nil && base.Parallel > 0 &&
+		parallel != base.Parallel && base.ContextSize > 0
+}
+
 func recomputeParallelCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options, parallel int) (*Strategy, error) {
 	if parallel <= 0 {
 		return nil, fmt.Errorf("invalid parallel candidate %d", parallel)
@@ -797,9 +809,13 @@ func recomputeParallelCandidate(caps *detect.Capabilities, model *ModelProfile, 
 	// Per-agent context is the product invariant — the contract forbids silently
 	// reducing it — so scaling the total with the slot count keeps every
 	// candidate comparable on the thing the user actually gets.
-	if base.ContextAuto && base.Parallel > 0 && parallel != base.Parallel && base.ContextSize > 0 {
-		perAgent := base.ContextSize / base.Parallel
-		if perAgent > 0 {
+	// The gate is the *request* being automatic, not the strategy carrying
+	// ContextAuto. A Claude Code base arrives with ContextAuto false even though
+	// its window was derived rather than typed, so gating on the strategy made
+	// this scaling inert exactly where it was needed. AutoContextMax is set only
+	// when the launcher resolved the window itself.
+	if slotCandidateScalesContext(opts, base, parallel) {
+		if perAgent := base.ContextSize / base.Parallel; perAgent > 0 {
 			altOpts.ContextSize = perAgent * parallel
 		}
 	}

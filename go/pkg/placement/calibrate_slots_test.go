@@ -68,3 +68,29 @@ func TestResidencyGuardStillRejectsAHostFallback(t *testing.T) {
 		t.Error("an mmap-required candidate was accepted against a resident base")
 	}
 }
+
+// The scaling gate is the request being automatic, not the strategy carrying
+// ContextAuto. A Claude Code base arrives with ContextAuto false even though its
+// window was derived, so gating on the strategy made the scaling inert exactly
+// where it was needed: slot candidates kept the base's full total, which for
+// parallel-1 meant a million tokens of KV on one slot — no saving and not
+// feasible. Verified against this machine's real capabilities and the real
+// Qwen3.8-Flash-Next profile, where the candidates now come out as
+// 786,432/3, 524,288/2 and 262,144/1, all at 262,144 per agent.
+func TestSlotScalingGateUsesTheAutomaticContextRequest(t *testing.T) {
+	base := &Strategy{ContextSize: 1048576, Parallel: 4, ContextAuto: false}
+
+	automatic := Options{AutoContextMax: 1048576}
+	if !slotCandidateScalesContext(automatic, base, 1) {
+		t.Error("an automatic-context request did not scale a slot candidate")
+	}
+	// An explicit window is a user constraint: the total stays put and the
+	// candidate redistributes it, which is the historical behaviour.
+	if slotCandidateScalesContext(Options{}, base, 1) {
+		t.Error("an explicit-context request scaled a slot candidate")
+	}
+	// Same width is not a slot candidate at all.
+	if slotCandidateScalesContext(automatic, base, 4) {
+		t.Error("a same-width candidate was scaled")
+	}
+}
