@@ -1470,3 +1470,58 @@ Agent-workload makespan. These are 32-token generations from the serving
 check, which measure decode rate, not cache-backed turn time or
 requested-concurrency throughput. Invariant 5 asks for real agent work, and
 `verify-installed-serving.py --agent-lanes` exists for it; no run here used it.
+
+## AGENTBASE — first agent-workload baseline — 2026-09-14
+
+Every throughput figure recorded before this entry was decode rate from
+32-token generations. That is not what invariant 5 asks for. This is the first
+measurement of bounded tool-using agent work on this rig.
+
+`ggrun v3.2.9-dev.62bebe4`, Qwen3.8-27B-UD-Q4_K_XL, `--calibrate off` so the
+20-minute optimizer comparison is not part of what is being timed. Driven by
+`scripts/verify-agent-workload.py`, 2 lanes, 3 repeats, 1 warmup, max 8 turns.
+Each task is a real repair with an oracle: read the source, write a fix, run
+tests, and the harness checks the result against known cases.
+
+| task | median | range | turns |
+|---|---:|---|---:|
+| ceiling | 10.89s | 10.82–13.18 | 4 |
+| clamp | 14.47s | 14.02–14.75 | 5 |
+| interval | 6.92s | 6.63–8.82 | 3 |
+| all | **10.89s** | sum 100.50s over 9 tasks | 4 |
+
+**9/9 oracle-passed.** Not "the model produced text" — the repaired functions
+returned the right answers.
+
+| | |
+|---|---|
+| VRAM | 6,873 + 22,988 + 115 = 29,976 of 49,134 (0.610) |
+| served | 262,144 tokens, **1 slot** |
+
+### The slot count is the first thing to question
+
+`--parallel` was automatic and chose **1**, so the two agent lanes serialised
+through a single slot. The makespan above is therefore a queued makespan, not
+two lanes running concurrently. Earlier evidence that `parallel 1` is fastest
+was collected on single-stream decode, where it is the right answer; it does
+not follow that one slot is right when the workload is several agents at once.
+That is a specific, cheap experiment: rerun this suite at `--parallel 2` and
+compare makespan, not tok/s.
+
+### What this baseline is for
+
+Hot experts and worker/reviewer routing are the two levers proposed for
+agentic speed, and neither had a number to beat. This is that number. A
+candidate must improve median task time or total makespan here, at 9/9 oracle
+passes, to count as faster — an aggregate tok/s gain does not.
+
+Note the model choice. This suite on GLM-5.3-Flash at ~6.8 tok/s would take
+hours and only re-confirm it is CPU-bandwidth-bound. A fully GPU-resident 27B
+is what agent work would actually run against, so it is the honest baseline.
+
+### Still unproven
+
+- Concurrency: only 1 slot was exercised, see above.
+- Cache-backed turn time is not isolated here; the suite measures whole-task
+  wall time, which folds prefill, cache reuse and decode together.
+- No hot-experts or reviewer-routed comparison exists yet.
