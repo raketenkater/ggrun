@@ -2418,3 +2418,44 @@ bus.
   by unit tests; its live effect appears only when a finalist is refused.
 - Two samples per placement. The 1.505 aggregate and the 38% decode regression
   are both far outside that noise, but a promotion would need matched repeats.
+
+## SEATCOST — what a reviewer/worker seat costs on an offloaded MoE — 2026-09-14
+
+Every measurement before this one used plain serving, so no companion was
+seated and none of it describes the configuration an agent user actually runs.
+`ggrun dry-run` prices the seats without loading anything.
+
+Qwen3.8-Flash-Next-UD-Q3_K_XL, same host, GPUs idle, `--claude-code`:
+
+| seat | `--claude-reviewer` | resident expert layers | per-agent context |
+|---|---|---:|---|
+| self-classify | `off` | **35** of 48 | 262,144 |
+| review-only, Qwen3.5-2B | `qwen2b` | **33** | 262,144 |
+| worker + reviewer, Qwen3.5-4B | `qwen` | **31** | 262,144 |
+
+**A review-only seat costs 2 expert layers; the worker/reviewer seat costs 4.**
+Per-agent context is identical across all three, so the arms are comparable on
+the terms the handoff requires: main-model context and quality held equal, and
+the companion charged against the same usable VRAM.
+
+### Claude Code mode is a different plan from plain serving
+
+| | plain | `--claude-code` |
+|---|---|---|
+| context | 262,144 total, 1 slot | 1,048,576 total, **4 slots** |
+| per agent | 262,144 | 262,144 |
+| ubatch | 256 | 64 |
+| resident experts | 28 of 48 | 31-35 of 48 |
+
+Claude Code mode plans four slots at the same per-agent context, which changes
+batch/ubatch and the expert packing with it. Every figure recorded before
+`SEATCOST` — including the 7.63 correct tasks/min on Flash-Next — belongs to the
+plain single-slot plan, not to the agent configuration.
+
+### What this does not yet establish
+
+The cost is measured; the benefit is not. `RESIDENCYFRACTION` says resident
+expert fraction predicts agentic speed, so giving up 4 of 35 layers is a real
+price, and whether the worker earns it back by absorbing classifier and
+cheap-tier traffic is exactly the milestone 3 comparison that has not been run.
+Nothing here says two models lose — only what they cost.

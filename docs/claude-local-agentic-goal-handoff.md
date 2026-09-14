@@ -731,7 +731,7 @@ Model coverage on this machine, all on the installed single binary
 |---|---|---|
 | resident | Qwen3.8-27B-UD-Q4_K_XL | served 262,144 tokens; cancellation 0.607 s; prefix reuse 8.0%; 3/3 agent tasks |
 | moderately CPU-offloaded MoE | Qwen3.8-Flash-Next-UD-Q3_K_XL (1.75x over VRAM) | launches since `EXPERTPIN`; 262,144 tokens at 28/48 resident experts, 89.5% VRAM, 7.63 correct tasks/min |
-| tight fit | GLM-5.3-Flash-UD-Q3_K_XL (2.86x over VRAM) | launched at 498,688 tokens on the #58 candidate; **not re-run since the calibration changes** |
+| tight fit | GLM-5.3-Flash-UD-Q3_K_XL (2.86x over VRAM) | **re-run on the post-calibration binary**: 555,008 tokens, up from 498,688; ladder admitted `kv-alternate` between two ubatch rungs; no false promotion |
 
 Recorded screen size, as the milestone asks rather than calling it long-context
 acceptance: the bounded screen uses 23,296 bytes (~7,701 tokens) per lane, with
@@ -746,7 +746,7 @@ Remaining before this milestone is closed:
 
 - Dispatch the GPU job on the candidate commit. It only runs from main, so the
   candidate has to land first; that is the sequence, not an exemption.
-- Re-run the GLM tight-fit regression on the post-calibration binary.
+- ~~Re-run the GLM tight-fit regression~~ — done, 555,008 tokens, recorded above.
 - Windows GPU and macOS stay marked untested. This box cannot certify generic
   public claims; that needs an expanded hardware and model matrix.
 
