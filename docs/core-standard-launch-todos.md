@@ -1141,3 +1141,49 @@ Not proven: that GLM-5.3-Flash now reaches healthy serving. The fix removes one
 dead end; the launch may still need further recovery below 385,024, and only a
 live load says so. No hardware-utilisation figure exists for a model of this
 size yet — see the UTIL entry above for the measurement that will produce one.
+
+### Live runs, GLM-5.3-Flash UD-Q3_K_XL, 2026-09-14
+
+Three matched runs on the three-card rig, automatic context and slots, through
+`scripts/verify-installed-serving.py` so each one leaves evidence.
+
+`v3.2.9-dev.e049951` — rejected-context ceiling only. The ceiling engaged
+(`model/policy context cap reached`) but the launch still failed:
+
+| step | ctx | preflight |
+|---|---:|---|
+| initial | 670,720 | does not fit |
+| recovery | 563,200 | does not fit |
+| recovery | 555,008 | **fits** |
+| measured re-plan 3/5 | 562,176 | does not fit |
+| recovery | 500,736 | **fits** |
+| measured re-plan 5/5 | 561,152 | does not fit — budget gone |
+
+Both climbs sat *below* the smallest rejected context (563,200) and *above* a
+plan preflight had just accepted. Bounding by rejection alone cannot catch
+that: the accepted plan is the proof, and the re-plan was spending it.
+
+`v3.2.9-dev.f7fdc1a` — accepted context bounds the re-plan. The climb stopped;
+the re-plan re-proposed exactly the accepted 500,736. The launch still failed,
+for a third reason of the same family: at that pinned context the re-plan
+recomputed ubatch from the original automatic request to 256, where the
+accepted plan had been derated to 128, and overshot every device —
+`CUDA0 15880/11873, CUDA1 26826/24112, CUDA2 15227/11909`.
+
+`v3.2.9-dev.2d1d0c1` — the accepted ubatch is pinned too.
+
+The common defect across all three: **the measured re-plan recomputes from the
+original automatic request and silently discards what this launch has already
+proven.** `recoverPreflightOOM` had the discipline for ubatch and nothing else
+had it for context. The ledger now carries both, applied in one place
+(`boundByProvenLimits`), and only ratchets down.
+
+### Open
+
+- Whether GLM-5.3-Flash reaches healthy serving is still unproven; the third
+  run is the first that can. Each fix removed a dead end without establishing
+  that the remaining path converges.
+- `maxPreflightReplans` is 5. Every one of these failures spent the budget on
+  re-plans that undid prior work rather than on genuinely new shapes. If a
+  budget increase is ever proposed, it is a symptom, not a fix.
+- No `fraction_of_vram` figure for a model this size yet.
