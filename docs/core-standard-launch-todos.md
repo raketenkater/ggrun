@@ -1868,3 +1868,270 @@ paid for in expert residency**, and experts are what set decode speed.
 - This model is the 1.75x-over-VRAM case that would have bracketed the slot
   policy threshold between resident (4 slots good) and GLM at 2.86x (4 slots
   catastrophic). It cannot be measured until the launch converges.
+## OFFLOADBASE — the RAM-offload agentic baseline, and why slots are not its lever — 2026-09-14
+
+BOTHOBJECTIVES measured slots on a fully GPU-resident 27B, which is the easy
+case: a second slot spends spare VRAM on KV cache and overlaps two streams.
+ggrun exists for the model that does not fit, so the result has to be checked
+there. It does not transfer.
+
+`ggrun v3.2.9-dev`, GLM-5.3-Flash UD-Q3_K_XL (137.4 GiB, ~120 GB in host RAM),
+agent suite at 1 repeat, 512-token cap, `--calibrate off`.
+
+| | resident 27B, 2 slots | **offloaded GLM, 1 slot** |
+|---|---:|---:|
+| correct tasks/min | 13.27 - 13.74 | **1.03** |
+| median task latency | 8.4s | **115.1s** |
+| oracle-passed | 9/9 | 3/3 |
+| VRAM used | 44,104 (0.898) | 37,482 (**0.763**) |
+| CUDA0 SM mean | 26.5% | 38.4% |
+| CUDA1 SM mean | 37.8% | **7.3%** |
+| CUDA2 SM mean | 29.9% | **2.9%** |
+| CUDA2 busy >5% | 98% of samples | **33%** |
+
+The offloaded model already claims 76% of VRAM at one slot, so there is little
+memory headroom to win. What is idle is **compute**: CUDA1 holds 19.4 GB and
+runs at 7.3% SM, CUDA2 holds 9.4 GB and runs at 2.9%. The cards are not short
+of memory, they are waiting on experts streaming from host RAM. That matches
+the optimizer's own diagnosis, `bottleneck CPU expert bandwidth`.
+
+This also corrects BOTHOBJECTIVES' claim that there is "no idle-card problem
+during agent serving". That holds only for a resident model.
+
+### --parallel 2 is fighting the planner, not a missing feature
+
+Automatic slot selection chose **1** for this model. Forcing 2 exposed three
+real convergence defects, fixed in order, and still did not launch:
+
+1. recovery derived candidates from the original request and ignored the
+   ceiling, so context climbed back (merged, #56).
+2. the ceiling stepped down one 1,024-token granule against multi-GB deficits,
+   so the descent crept: 870,400 -> 817,152 -> 816,128.
+3. the re-plan budget charged productive rounds the same as churn, so a
+   geometric descent died one step short.
+
+With 2 and 3 fixed the descent is sound - 1,185,792 -> 873,472 -> 800,768 ->
+655,360, deficit 6,773 -> 1,558 - and it then stalled in the backend-measured
+branch, which keeps its own budget check.
+
+Stopping there deliberately. A fourth patch to the same loop is epicycles. For
+a model 3x over VRAM capacity, two lanes contend for one host-RAM expert
+stream, so **one slot is very likely correct** and the planner already chose
+it. The defects found along the way are worth having on their own; the
+configuration that exposed them is not worth forcing.
+
+### What would actually move the offloaded case
+
+Hot experts. A GPU-resident LRU cache over the offloaded experts attacks the
+thing idling those two cards - how often a token waits on PCIe - which is a
+compute-occupancy fix, not a memory-fill one. The +6% measured at K=32 has only
+ever been reached by driving llama-server by hand; the branch is 32 commits
+unmerged and still cannot engage through ggrun.
+
+Worker/reviewer routing is the other half, and it is now unblocked on the
+resident path: concurrent serving works there, proven by the 27B A/B.
+
+### Open
+
+- No hot-experts comparison against the 1.03 correct tasks/min figure above.
+- The backend-measured branch still charges progress as churn. Same fix as the
+  DoesNotFit branch, deliberately not applied in the same pass.
+- Slot count by residency class is unmeasured as a policy. Two data points
+  exist: resident wants more than 1, heavily offloaded wants 1.
+
+## RESIDENCYFRACTION — what actually predicts agentic speed — 2026-09-14
+
+With the oracle-path lever fix, Qwen3.8-Flash-Next launches and completes the
+picture. Three models, same agent suite, ggrun's own planning, 1 slot except
+where noted.
+
+| model | size | over VRAM | resident expert layers | VRAM used | correct tasks/min | median task |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen3.8-27B (2 slots) | 17 GiB | resident | all (dense) | 0.898 | **13.5** | 8.4s |
+| Qwen3.8-Flash-Next | 83.8 GiB | 1.75x | **27 of 48 (56%)** | 0.861 | **7.49** | 15.0s |
+| GLM-5.3-Flash | 137.4 GiB | 2.86x | **1 of 43 (2%)** | 0.763 | **1.03** | 115.1s |
+
+All 3/3 oracle-passed.
+
+**Resident expert fraction predicts agentic speed; VRAM fill does not.** GLM
+uses 76% of the machine and is 7x slower than a model using 86%. The difference
+is not how much memory is claimed but how much of the *expert* set avoids the
+host round-trip: 2% versus 56%.
+
+This resolves the apparent conflict between "maximise hardware usage" and
+"fastest agentic serving" recorded in VRAMFILL and BOTHOBJECTIVES. They align
+when spending VRAM raises expert residency, and diverge when it does not. On
+GLM no available lever raises residency materially — 3 GB of a 120 GB expert
+set is a fortieth — which is why every lever measured flat or negative there.
+
+### Practical consequence
+
+Qwen3.8-Flash-Next is the model to run for agent work on this rig: 15s median
+task against GLM's 115s, at 3/3 correctness. It was **unlaunchable on main**
+until the oracle-path fix in this branch, so this was a defect hiding a usable
+configuration, not a hardware limit.
+
+### Slot policy, with the bracket now measured
+
+| model | 4 slots (Claude Code default) |
+|---|---|
+| Qwen3.8-27B, resident | +29% at 2 slots; 4 slots plans cleanly |
+| Qwen3.8-Flash-Next, 1.75x | did not launch before the fix; retest pending |
+| GLM-5.3-Flash, 2.86x | ~5.7x slower per turn, 1 of 3 tasks completed |
+
+The mechanism is visible in the planner's own numbers: to buy KV for four slots
+on Qwen3.8-Flash-Next it pushed `n-cpu-moe` from 33 to 38, displacing five
+expert layers to host RAM. **On a CPU-offloaded MoE a slot is paid for in
+expert residency**, and residency is what sets speed. A slot cap should key on
+that displacement, which ggrun already computes per candidate, rather than on a
+size ratio.
+
+## EXPERTPIN — the measured re-plan handed back proven expert relief — 2026-09-14
+
+Correcting RESIDENCYFRACTION's attribution: Qwen3.8-Flash-Next was not unblocked
+by an oracle-path lever change. Six such changes were tried and all reverted —
+widening the ceiling step to the deficit, bounding that step to a quarter-window,
+a last-resort compute lever, and three re-rankings of the recovery candidates.
+None altered the trace. The defect was one step later, in what happens *after* a
+recovery succeeds.
+
+### The per-device ledger, from `/tmp/q5.log`
+
+| round | CUDA2 need / limit | outcome |
+|---|---:|---|
+| 1 | 12,010 / 11,909 MiB | does not fit |
+| after expert derate | 10,937 / 11,909 MiB | **fits** — 1,073 MiB freed |
+| 2 (backend-measured re-plan) | 12,003 / 11,909 MiB | does not fit again |
+
+The expert lever worked on the first try. The backend-measured recompute then
+replanned from the original request and put the displaced layer straight back.
+Because that recompute produces a *different* argv from the one already
+rejected, `recomputeDecision`'s identity ledger could not catch it, and the
+launch cycled until the replan budget ran out.
+
+`boundByProvenLimits` already pins context and ubatch across a recompute, but
+`placement.Options` takes no expert-residency input, so `n-cpu-moe` cannot be
+pinned on the way in. It is now guarded on the way out: the ledger records the
+largest `NCPUMoE` an exact preflight has proven, and `undoesProvenExpertRelief`
+vetoes any recompute that lowers it. The ratchet only ever moves toward more CPU
+residency.
+
+### Three wrong diagnoses, each killed by a test rather than by reasoning
+
+- "The fabricated `AllocMB` disqualifies the ubatch lever" — the pinned selector
+  test shows the lever available and stepping 256 to 64.
+- "`n-cpu-moe` is stuck at 22" — it steps 22 to 23, CUDA2 expert layers 4 to 3.
+- "The pins are partial sub-pins and are mis-priced" — the override pattern
+  includes `down`, so they are whole-layer.
+
+`TestQwenFlashNextRecoverySelectorShape` pins all three so they are not
+re-derived.
+
+### Evidence after the fix
+
+Both target models launch, and the guard fires usefully on both.
+
+| model | result |
+|---|---|
+| Qwen3.8-Flash-Next | LOADED; plan retained at 10,937 / 11,909 MiB |
+| GLM-5.3-Flash | LOADED; context fit 498,688 tokens, 1 slot |
+
+Agent workload re-run on Qwen3.8-Flash-Next at the stable candidate, 2 lanes,
+1 repeat, ctx 18,912: **3/3 oracle-passed, 7.67 correct tasks/min, 14.8s median,
+16.9s max**. That matches the 7.49 and 7.76 figures recorded before the fix
+under the same suite, so the guard costs nothing at serve time — it only makes
+the launch converge.
+
+Uncached `scripts/verify-core-engine.sh` green across all six core packages.
+
+### Open
+
+- The uneven-GPU KV case is still unexercised: all three cards here hold a
+  similar share, so a plan where one device owns most of the KV has not been
+  driven through recovery.
+- Recovery compares per-device ledgers but that comparison is not yet asserted
+  to be complete — a device absent from one side is not distinguished from a
+  device at zero.
+
+## AGENTPATH — the ordinary agent path, measured end to end — 2026-09-14
+
+First run of the installed launcher through the whole user-facing path rather
+than through health and a single completion. Binary `v3.2.9-dev.expertpin`
+(the `EXPERTPIN` fix), Qwen3.8-27B-UD-Q4_K_XL, automatic context, no flags
+beyond host/port and the live-probe allowance.
+
+| check | result |
+|---|---|
+| launcher readiness and `/health` | ok |
+| weight devices | CUDA0, CUDA1 (CUDA2 left at 114 MiB) |
+| served shape | 262,144 tokens, 1 slot |
+| generation, streaming | ok |
+| **cancellation mid-stream, then reconnect** | slot back in **0.607 s**, no restart |
+| **prefix reuse behind a 6,433-token prefix** | **516 tokens re-evaluated (8.0%)**, 3,788 ms to 487 ms |
+| bounded agent workload, 2 lanes | passed |
+| shutdown | clean, no forced kill, port released |
+
+VRAM at 61% of the machine's 49,134 MiB. That is not underuse: the model and
+its 262k context fit on two cards, and `RESIDENCYFRACTION` already established
+that filling the third would not make it faster.
+
+### What the two new checks establish
+
+Cancellation is the common case in agent use — the user interrupts, or the
+client drops mid-stream — and a slot that is never released turns the next
+request into a hang. Aborting the connection after three SSE chunks and
+immediately asking for a completion returned in 0.607 s, so the slot is
+reclaimed without a restart.
+
+Prefix reuse is what separates a responsive session from one that pays for the
+whole project context every turn. A second question behind an unchanged
+6,433-token prefix re-evaluated 8.0% of it. Both are now part of
+`scripts/verify-installed-serving.py`; cancellation runs unconditionally,
+prefix reuse behind `--prefix-reuse` because it needs a context large enough to
+hold the prefix and the install CI jobs run at 2,048.
+
+### The cancellation check is portable, not tuned to this machine
+
+It ran unchanged in the Linux install-e2e job on `fe58b83`, twice, on a CPU-only
+ubuntu runner serving Qwen3.5-0.8B at 2,048 tokens.
+
+| host | model | recovery after abort |
+|---|---|---:|
+| this rig, 3 NVIDIA cards | Qwen3.8-27B, 262k ctx | 0.607 s |
+| ubuntu-latest, CPU only | Qwen3.5-0.8B, 2k ctx | 0.561 s |
+| ubuntu-latest, CPU only, downloaded model | Qwen3.5-0.8B, 2k ctx | 0.547 s |
+
+Three very different shapes, all within 60 ms of each other, which says the
+number is slot reclaim rather than anything about the hardware. `prefix_reuse`
+is correctly absent from both CI rows: it is gated behind `--prefix-reuse`
+because 2,048 tokens cannot hold the prefix.
+
+### TUI/CLI resolver agreement
+
+Settled by construction rather than by comparison: `cmdGUI` turns the user's
+selections into argv with `tuiLaunchArgs` and calls the same `cmdLaunch` the
+command line calls, so agreement reduces to whether every selection survives the
+argv round trip. Three regressions in `tui_cli_agreement_test.go` now hold that:
+
+- every field of a maximal `tui.LaunchRequest` parses back to the same value,
+  including `BackendExplicit`, which `userExplicitBackendFlag` reads to decide
+  whether a lever may be withdrawn;
+- an untouched row stays a preference and does not become a typed flag, which is
+  what keeps the recovery ladder able to move it;
+- a reflection guard fails when a `LaunchRequest` field is added and never wired
+  into `LaunchArgs`, with each non-argv field carrying its reason.
+
+The guard found one dead field: `FlashAttn` is hardcoded `true` in
+`buildLaunchRequest` and never emitted or read.
+
+### Open
+
+- On this launch the effective per-agent context was never printed.
+  `optimizationSummaryLines` formats `ctx N total / M per agent`, but the
+  calibration path returns before `printOptimizationSummary` when it reuses a
+  cached decision. The information is still visible in
+  `[placement] context fit: 262144 tokens, 1 slot(s)`; the clearer line is not.
+  Left unpatched: it is display-only code inside a protected path.
+- `--prefix-reuse` is not wired through `verify-gpu-install.py`, so the GPU CI
+  job cannot request it yet.
+- One run per check, one machine, three NVIDIA devices.

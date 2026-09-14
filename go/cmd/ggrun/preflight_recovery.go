@@ -35,6 +35,12 @@ type launchMemoryRecovery struct {
 	// the measured re-plan did not, so a plan accepted at ubatch 128 came back
 	// at 256 and overshot every device at the same context.
 	acceptedUBatch int
+	// acceptedNCPUMoE is the largest CPU expert-layer count an exact preflight has
+	// proven fits. More experts on the CPU means less VRAM, so a recompute that
+	// lowers it is undoing proven relief. Observed on Qwen3.8-Flash-Next: the
+	// expert derate freed 1,073 MiB and CUDA2 fitted at 10,937/11,909, then the
+	// measured re-plan returned to 12,003 and the launch never converged.
+	acceptedNCPUMoE int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
@@ -62,14 +68,90 @@ func (r *launchMemoryRecovery) isRejected(args []string) bool {
 // rejectContext records an automatic context proven not to fit. An explicit
 // context is a user constraint, not a coordinate this launch may move, so only
 // automatic contexts are recorded.
-func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy) {
+//
+// reclaimTokens is how far below the rejected context the next proposal has to
+// land to have any chance of covering the measured deficit. Without it the
+// ceiling sits one granule down, and the search creeps 1,024 tokens at a time:
+// GLM-5.3-Flash at --parallel 2 went 870,400 -> 817,152 -> 816,128 against
+// deficits of 2,763, 912 and 4,636 MiB and spent its whole budget getting
+// nowhere. Pass 0 when the deficit cannot be converted to tokens; absent is
+// not zero, so the ceiling then falls back to the one-granule step.
+func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy, reclaimTokens int) {
 	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
+	_ = reclaimTokens // retained in the signature for the caller's measurement; see automaticContextCeiling
 	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
 		r.rejectedContext = strategy.ContextSize
 	}
 }
+
+// contextReclaimTokens converts a measured VRAM deficit into the number of
+// context tokens whose KV cache covers it on the device that actually failed.
+//
+// The exchange rate must be that device's KV share, not the aggregate across
+// every GPU. Sizing against the total credits the failing device with savings
+// that land on its neighbours, so on a multi-device split the step comes out
+// several times too small. When KV is host-resident the share is zero and a
+// context change relieves no VRAM on that device at all.
+//
+// Returns 0 when the geometry is unknown rather than guessing a rate.
+func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Strategy, args []string, deficitMB, device int) int {
+	if model == nil || strategy == nil || deficitMB <= 0 || strategy.ContextSize <= 0 {
+		return 0
+	}
+	kvType := strategy.KVType
+	if kvType == "" {
+		kvType = effectiveMemoryArgValues(args)["cache-k"]
+	}
+	if kvType == "" {
+		return 0
+	}
+	deviceKVMB := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType,
+		strategy.KVPlacement, hasArg(args, "--swa-full"), strategy.TensorSplit, device)
+	if deviceKVMB <= 0 {
+		return 0
+	}
+	// tokens = deficit / (deviceKV / ctx), with the same safety margin the other
+	// recovery levers require of themselves.
+	required := recoveryRequiredMB(deficitMB)
+	tokens := int(int64(required) * int64(strategy.ContextSize) / int64(deviceKVMB))
+	if tokens <= 0 {
+		return 0
+	}
+	// Context can only be the lever when it can credibly cover the deficit while
+	// leaving a usable window. Demanding a cut that lands below the floor yields
+	// no computable plan, recovery returns nothing and the launch fails closed --
+	// observed on GLM-5.3-Flash, where a 2,432 MiB CUDA0 deficit against that
+	// device's KV share asks for more context than exists. Report 0 so expert and
+	// ubatch relief are tried instead of ruling every candidate out.
+	if strategy.ContextSize-tokens < contextRecoveryFloorTokens {
+		return 0
+	}
+	// One step may not discard most of the window. A deficit-sized cut is the
+	// right direction but a poor single move: on GLM-5.3-Flash it leapt 662,528
+	// to 236,544 tokens, and the plan computed at that depth was then refused by
+	// the recovery guards, leaving no lever and failing a launch that converges
+	// gently to ~500,736 without it. Bounding the step keeps the search
+	// converging quickly while every round stays a small perturbation of a plan
+	// the rest of the system has already reasoned about.
+	if maxStep := strategy.ContextSize / contextRecoveryStepDivisor; tokens > maxStep {
+		tokens = maxStep
+	}
+	if tokens <= 0 {
+		return 0
+	}
+	return tokens
+}
+
+// contextRecoveryStepDivisor bounds a single context recovery step to this
+// fraction of the current window.
+const contextRecoveryStepDivisor = 4
+
+// contextRecoveryFloorTokens is the smallest window a context-based recovery may
+// leave. It matches the floor automaticContextRecoveryTarget already applies, so
+// the two context levers agree on what counts as a usable result.
+const contextRecoveryFloorTokens = 32768
 
 // acceptContext records the shape an exact preflight proved fits. Only
 // measured evidence may be recorded; a planner estimate is not proof.
@@ -83,6 +165,9 @@ func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
 	if strategy.UBatchSize > 0 && (r.acceptedUBatch == 0 || strategy.UBatchSize < r.acceptedUBatch) {
 		r.acceptedUBatch = strategy.UBatchSize
 	}
+	if strategy.NCPUMoE > r.acceptedNCPUMoE {
+		r.acceptedNCPUMoE = strategy.NCPUMoE
+	}
 	if !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
@@ -91,20 +176,35 @@ func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
 	}
 }
 
+// undoesProvenExpertRelief reports whether a recomputed plan would return expert
+// layers to a device that an exact preflight has already proven needs them on
+// the CPU. Compute takes no expert-residency input, so this is checked on the
+// result rather than pinned on the way in.
+func (r *launchMemoryRecovery) undoesProvenExpertRelief(next *placement.Strategy) bool {
+	return r != nil && next != nil && r.acceptedNCPUMoE > 0 && next.NCPUMoE < r.acceptedNCPUMoE
+}
+
 // automaticContextCeiling is the largest automatic context this launch may
 // still propose, and it only ever ratchets down.
 //
-// A rejected context excludes itself, so it contributes one token below:
-// placement.Compute floors an AutoContextMax to its context granule, which
-// drops the rejected value without this package knowing the granule. An
-// accepted context contributes itself, because re-proposing exactly the plan
-// that passed is the fixed point this loop is trying to reach.
+// A rejected context contributes a step below itself: at least one token, so
+// that placement.Compute's granule floor drops the rejected value, and as much
+// as the measured deficit requires when that is known. An accepted context
+// contributes itself, because re-proposing exactly the plan that passed is the
+// fixed point this loop is trying to reach.
 func (r *launchMemoryRecovery) automaticContextCeiling() int {
 	if r == nil {
 		return 0
 	}
 	ceiling := 0
 	if r.rejectedContext > 1 {
+		// One token below, so placement.Compute's granule floor drops the rejected
+		// value. Widening this to a deficit-sized step was tried and reverted: it
+		// made GLM-5.3-Flash leap 662,528 -> 236,544 tokens in a single round, and
+		// the plans computed at that depth were refused by the recovery guards,
+		// failing a launch that converges gently to ~500,736 without it. The
+		// deficit-to-tokens conversion is still used to judge whether a proposed
+		// drop covers the shortfall; it is not used to force one.
 		ceiling = r.rejectedContext - 1
 	}
 	if r.acceptedContext > 0 && (ceiling == 0 || r.acceptedContext < ceiling) {
@@ -217,11 +317,15 @@ func recoverPreflightOOM(
 	if candidate == nil && !outcome.IsComputeBuffer {
 		physicalDev := physicalGPUIndex(outcome.Device, visibleToPhysical)
 		oomPenalty[physicalDev] += outcome.DeficitMB
-		candidate, replanErr = placement.ReplanAfterOOM(
-			caps, model,
-			boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery),
-			oomPenalty,
-		)
+		replanOpts := boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery)
+		// Pin ubatch exactly as the compute-buffer branch above does. A recovery
+		// that frees VRAM by cutting context leaves headroom Compute will spend on
+		// a larger microbatch, and the oracle guard then rejects its own candidate
+		// for raising ubatch -- leaving no lever at all. Observed on GLM-5.3-Flash:
+		// a 428k-token cut produced a plan that was refused for that reason and the
+		// launch failed closed.
+		replanOpts.UBatchSize = strategy.UBatchSize
+		candidate, replanErr = placement.ReplanAfterOOM(caps, model, replanOpts, oomPenalty)
 	}
 
 	var candidateArgs []string
@@ -232,13 +336,24 @@ func recoverPreflightOOM(
 	// compute allocation. Its fully recomputed automatic-context plan must not
 	// be discarded by the partial-overlay selector below. Return it for the
 	// caller's next exact preflight; this is a candidate, never fit proof.
-	if outcome.Evidence.Level == memoryEvidenceOraclePlanned &&
+	oracleReplanEligible := outcome.Evidence.Level == memoryEvidenceOraclePlanned &&
 		req != nil && automaticContextRequest(req) && strategy.ContextAuto &&
 		candidate != nil && candidate.ContextAuto &&
 		candidate.ContextSize > 0 && candidate.ContextSize < strategy.ContextSize &&
 		candidate.Parallel == strategy.Parallel && candidate.KVType == strategy.KVType &&
 		candidate.KVTypeV == strategy.KVTypeV && candidate.KVPlacement == strategy.KVPlacement &&
-		candidate.MMapRequired == strategy.MMapRequired && candidate.UBatchSize <= strategy.UBatchSize {
+		candidate.MMapRequired == strategy.MMapRequired && candidate.UBatchSize <= strategy.UBatchSize
+	// A smaller context wins outright only when it reclaims enough KV to cover
+	// the deficit. Taking it unconditionally let a single 1,024-token granule
+	// worth about 7 MiB satisfy a ~100 MiB shortfall and return before any other
+	// lever was considered, so Qwen3.8-Flash-Next never launched: 101 -> 94 ->
+	// 87 MiB with ubatch still at 256. The codebase names this shape in
+	// TestGLMContextNudgeCannotBeatFailedDeviceExpertRelief.
+	//
+	// This is a preference, not a veto. An under-sized drop is still better than
+	// failing closed, so it is retained below as a last resort when no other
+	// lever moves.
+	if oracleReplanEligible && oracleContextDropCoversDeficit(model, strategy, serverArgs, candidate, outcome) {
 		candidate.PerformanceTuned = false
 		return candidate, candidateArgs, "context-replanned", nil
 	}
@@ -259,6 +374,13 @@ func recoverPreflightOOM(
 		if contextCandidate != nil {
 			return contextCandidate, contextArgs, "context-derate", nil
 		}
+	}
+	if !changed && oracleReplanEligible {
+		// No lever sized to the deficit exists. An under-sized context drop is a
+		// worse recovery than one that covers the shortfall, and a better one
+		// than refusing to launch.
+		candidate.PerformanceTuned = false
+		return candidate, candidateArgs, "context-replanned", nil
 	}
 	if !changed {
 		detail := ""
@@ -679,4 +801,43 @@ func effectiveMemoryArgsFingerprint(args []string) string {
 		parts = append(parts, key+"="+values[key])
 	}
 	return strings.Join(parts, "\n")
+}
+
+// deficitProgress reports whether a re-plan materially reduced the measured
+// shortfall. "Materially" is deliberate: a deficit that creeps down by a few
+// MiB per round is the nudge pathology, not convergence, and must still be
+// charged against the re-plan budget. The first round has nothing to compare
+// against and is never treated as progress.
+func deficitProgress(previousMB, currentMB int) bool {
+	if previousMB <= 0 || currentMB <= 0 || currentMB >= previousMB {
+		return false
+	}
+	// At least a fifth of the previous shortfall must be gone.
+	return previousMB-currentMB >= previousMB/5
+}
+
+// oracleContextDropCoversDeficit reports whether shrinking to the candidate's
+// context reclaims enough KV to cover the oracle's measured device deficit.
+//
+// The no-allocation oracle reports a total device shortfall rather than a
+// failed allocation, so contextCandidateCoversDeficit -- which needs a measured
+// compute-buffer allocation -- cannot judge it. KV is what a context change
+// moves, so its size per token is the exchange rate, and contextReclaimTokens
+// already converts a deficit into that many tokens.
+//
+// Unknown geometry returns true: without an exchange rate there is no basis to
+// reject a candidate the rest of the guard accepted, and the exact preflight
+// that follows remains the authority either way.
+func oracleContextDropCoversDeficit(
+	model *placement.ModelProfile, current *placement.Strategy, currentArgs []string,
+	candidate *placement.Strategy, outcome preflightOutcome,
+) bool {
+	if current == nil || candidate == nil {
+		return false
+	}
+	needed := contextReclaimTokens(model, current, currentArgs, outcome.DeficitMB, outcome.Device)
+	if needed <= 0 {
+		return true
+	}
+	return current.ContextSize-candidate.ContextSize >= needed
 }

@@ -397,7 +397,7 @@ func TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute(t *testing.T) {
 	}
 
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(current)
+	recovery.rejectContext(current, 0)
 
 	// This is the backend-measured recompute: it re-enters Compute from the
 	// original automatic request, which is why it reproduces the rejection.
@@ -434,13 +434,13 @@ func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
 		t.Fatal("a launch with no rejection must not cap its own context")
 	}
 	// An explicit context is a user constraint, not a coordinate to move.
-	recovery.rejectContext(&placement.Strategy{ContextSize: 65536})
+	recovery.rejectContext(&placement.Strategy{ContextSize: 65536}, 0)
 	if recovery.automaticContextCeiling() != 0 {
 		t.Fatal("an explicit context was recorded as an automatic rejection")
 	}
 	// The GLM-5.3-Flash sequence observed on 2026-09-14.
 	for _, ctx := range []int{592896, 385024, 589824} {
-		recovery.rejectContext(&placement.Strategy{ContextSize: ctx, ContextAuto: true})
+		recovery.rejectContext(&placement.Strategy{ContextSize: ctx, ContextAuto: true}, 0)
 	}
 	if got := recovery.automaticContextCeiling(); got != 385023 {
 		t.Fatalf("ceiling %d; a later larger rejection must not raise it", got)
@@ -453,8 +453,8 @@ func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
 // limit, exhausting the re-plan budget before any weights loaded.
 func TestAcceptedContextBoundsTheMeasuredReplan(t *testing.T) {
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(&placement.Strategy{ContextSize: 670720, ContextAuto: true})
-	recovery.rejectContext(&placement.Strategy{ContextSize: 563200, ContextAuto: true})
+	recovery.rejectContext(&placement.Strategy{ContextSize: 670720, ContextAuto: true}, 0)
+	recovery.rejectContext(&placement.Strategy{ContextSize: 563200, ContextAuto: true}, 0)
 	recovery.acceptContext(&placement.Strategy{ContextSize: 555008, ContextAuto: true})
 	if got := recovery.automaticContextCeiling(); got != 555008 {
 		t.Fatalf("ceiling %d; an accepted plan must bound the re-plan at itself", got)
@@ -525,7 +525,7 @@ func TestRecoveryCandidateRespectsTheProvenContextCeiling(t *testing.T) {
 		t.Skipf("fixture context %d is already below the rejection", current.ContextSize)
 	}
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(&placement.Strategy{ContextSize: rejected, ContextAuto: true})
+	recovery.rejectContext(&placement.Strategy{ContextSize: rejected, ContextAuto: true}, 0)
 
 	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil,
 		current, args, map[int]int{}, outcome, recovery)
@@ -542,5 +542,270 @@ func TestRecoveryCandidateRespectsTheProvenContextCeiling(t *testing.T) {
 	if _, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil,
 		current, args, map[int]int{}, outcome, nil); err != nil {
 		t.Fatalf("recovery without a ledger regressed: %v", err)
+	}
+}
+
+// The ceiling excludes the rejected context itself and nothing more. A
+// deficit-sized step was tried here and reverted: it made GLM-5.3-Flash leap
+// 662,528 -> 236,544 tokens and the plans computed at that depth were refused
+// by the recovery guards, failing a launch that converges without it.
+func TestContextCeilingExcludesTheRejectedContext(t *testing.T) {
+	strategy := &placement.Strategy{ContextSize: 816128, ContextAuto: true, KVType: "q8_0"}
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(strategy, 76800)
+	if got := recovery.automaticContextCeiling(); got != strategy.ContextSize-1 {
+		t.Fatalf("ceiling %d, want one token below %d regardless of the reclaim", got, strategy.ContextSize)
+	}
+	// The ceiling only ratchets down.
+	lower := &placement.Strategy{ContextSize: 500736, ContextAuto: true, KVType: "q8_0"}
+	recovery.rejectContext(lower, 0)
+	if got := recovery.automaticContextCeiling(); got != lower.ContextSize-1 {
+		t.Fatalf("ceiling %d did not follow the lower rejection", got)
+	}
+	recovery.rejectContext(strategy, 999999)
+	if got := recovery.automaticContextCeiling(); got != lower.ContextSize-1 {
+		t.Fatalf("a higher rejection widened the ceiling to %d", got)
+	}
+}
+
+// Unknown geometry yields no step rather than a guessed one.
+func TestContextReclaimTokensRefusesToGuess(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	strategy := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0"}
+	args := []string{"llama-server", "--cache-type-k", "q8_0"}
+	if got := contextReclaimTokens(model, strategy, args, 0, 0); got != 0 {
+		t.Fatalf("no deficit gave %d tokens", got)
+	}
+	if got := contextReclaimTokens(nil, strategy, args, 1000, 0); got != 0 {
+		t.Fatalf("no model gave %d tokens", got)
+	}
+	if got := contextReclaimTokens(model, &placement.Strategy{ContextAuto: true}, args, 1000, 0); got != 0 {
+		t.Fatalf("no context gave %d tokens", got)
+	}
+}
+
+// The re-plan budget exists to stop churn. A descent that keeps shrinking the
+// measured shortfall is not churn, and a 1,024-token nudge that trims a few MiB
+// is not progress. Both have to be distinguishable.
+func TestDeficitProgressSeparatesConvergenceFromNudging(t *testing.T) {
+	// The GLM-5.3-Flash --parallel 2 descent: every step is progress.
+	for _, step := range [][2]int{{1443, 323}, {323, 136}, {136, 30}} {
+		if !deficitProgress(step[0], step[1]) {
+			t.Fatalf("%d -> %d MiB is convergence and was charged as churn", step[0], step[1])
+		}
+	}
+	// The nudge pathology: a 2,524 MiB shortfall trimmed by 5 MiB a round.
+	if deficitProgress(2524, 2519) {
+		t.Fatal("a 5 MiB trim against a 2524 MiB deficit was credited as progress")
+	}
+	// Growing, equal, and unknown deficits are never progress.
+	for _, step := range [][2]int{{100, 100}, {100, 140}, {0, 50}, {50, 0}} {
+		if deficitProgress(step[0], step[1]) {
+			t.Fatalf("%d -> %d MiB was credited as progress", step[0], step[1])
+		}
+	}
+}
+
+// The oracle path accepted any smaller context, so a single 1,024-token granule
+// worth ~7 MiB satisfied a ~100 MiB deficit and returned before ubatch or
+// expert relief was ever considered. Qwen3.8-Flash-Next never launched on main:
+// 101 -> 94 -> 87 MiB with ubatch stuck at 256.
+func TestOracleContextDropMustCoverTheDeficit(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{
+		"llama-server", "--ctx-size", "261120", "-b", "2048", "-ub", "256",
+		"--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--parallel", "1",
+	}
+	current := &placement.Strategy{
+		ContextSize: 261120, ContextAuto: true, UBatchSize: 256, KVType: "q8_0", Parallel: 1,
+	}
+	outcome := preflightOutcome{Device: 0, DeficitMB: 101, DoesNotFit: true,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+
+	needed := contextReclaimTokens(model, current, args, outcome.DeficitMB, 0)
+	if needed <= 1024 {
+		t.Skipf("fixture KV geometry makes one granule sufficient (needed=%d)", needed)
+	}
+
+	// One granule down: the observed nudge. Must be refused.
+	nudge := *current
+	nudge.ContextSize = current.ContextSize - 1024
+	if oracleContextDropCoversDeficit(model, current, args, &nudge, outcome) {
+		t.Fatalf("a 1024-token nudge was accepted against a %d MiB deficit", outcome.DeficitMB)
+	}
+
+	// A drop sized to the deficit is a real recovery and must be accepted.
+	sized := *current
+	sized.ContextSize = current.ContextSize - needed
+	if !oracleContextDropCoversDeficit(model, current, args, &sized, outcome) {
+		t.Fatalf("a deficit-sized drop of %d tokens was refused", needed)
+	}
+
+	// Unknown geometry must not veto a candidate the rest of the guard accepted.
+	noKV := &placement.Strategy{ContextSize: 261120, ContextAuto: true}
+	if !oracleContextDropCoversDeficit(model, noKV, []string{"llama-server"}, &nudge, outcome) {
+		t.Fatal("unknown KV geometry rejected a candidate instead of deferring to preflight")
+	}
+}
+
+// A deficit lands on one device, so the exchange rate is that device's KV
+// share. Sizing against the aggregate credits the failing GPU with savings that
+// land on its neighbours and produces a step several times too small.
+func TestContextReclaimUsesTheFailingDeviceKVShare(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	// CUDA1 owns the majority of layers; CUDA2 owns a small tail.
+	strategy := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "gpu",
+		TensorSplit: []float64{0.12, 0.76, 0.12},
+	}
+	// A deficit small enough that both devices can cover it above the floor, so
+	// the comparison is about apportionment rather than about bowing out.
+	big := contextReclaimTokens(model, strategy, args, 200, 1)
+	small := contextReclaimTokens(model, strategy, args, 200, 2)
+	if big <= 0 || small <= 0 {
+		t.Fatalf("no reclaim computed: majority=%d minority=%d", big, small)
+	}
+	// The same deficit on a device owning fewer layers needs a larger context cut.
+	if small <= big {
+		t.Fatalf("minority-owner device asked for %d tokens, majority %d; share ignored", small, big)
+	}
+}
+
+// Freeing host KV does not relieve a GPU. Crediting it against a device deficit
+// is the aggregate error in a different direction.
+func TestContextReclaimRefusesToCreditHostKVAgainstADeviceDeficit(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0"}
+	hostKV := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "cpu",
+		TensorSplit: []float64{0.5, 0.5},
+	}
+	if got := contextReclaimTokens(model, hostKV, args, 2000, 0); got != 0 {
+		t.Fatalf("host-resident KV was credited with %d tokens of GPU relief", got)
+	}
+	gpuKV := *hostKV
+	gpuKV.KVPlacement = "gpu"
+	if got := contextReclaimTokens(model, &gpuKV, args, 2000, 0); got <= 0 {
+		t.Fatalf("GPU-resident KV produced no reclaim: %d", got)
+	}
+}
+
+// An explicit context is a user constraint, not a coordinate recovery may move.
+// The ledger must record nothing for it however the deficit is measured.
+func TestExplicitContextIsNeverRecordedByRecovery(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	explicit := &placement.Strategy{ContextSize: 131072, KVType: "q8_0", KVPlacement: "gpu"}
+	recovery.rejectContext(explicit, 4096)
+	if got := recovery.automaticContextCeiling(); got != 0 {
+		t.Fatalf("explicit context produced ceiling %d", got)
+	}
+	recovery.acceptContext(explicit)
+	if got := recovery.automaticContextCeiling(); got != 0 {
+		t.Fatalf("explicit context accepted into the ceiling: %d", got)
+	}
+	// Its ubatch is still a compute lever and is legitimately recorded.
+	explicit.UBatchSize = 128
+	recovery.acceptContext(explicit)
+	if got := boundByProvenLimits(placement.Options{UBatchSize: 512}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("proven ubatch %d not preserved for an explicit-context launch", got.UBatchSize)
+	}
+}
+
+// Competing deficits on different devices are each judged against their own
+// device's KV share, which is what decides whether a proposed drop covers the
+// shortfall. The ceiling itself stays one token below the rejected context.
+func TestCompetingDeviceDeficitsAreJudgedPerDevice(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	strategy := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "gpu",
+		TensorSplit: []float64{0.12, 0.76, 0.12},
+	}
+	majority := contextReclaimTokens(model, strategy, args, 200, 1)
+	minority := contextReclaimTokens(model, strategy, args, 200, 2)
+	if majority <= 0 || minority <= majority {
+		t.Fatalf("per-device judgement collapsed: majority=%d minority=%d", majority, minority)
+	}
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(strategy, majority)
+	recovery.rejectContext(strategy, minority)
+	if got := recovery.automaticContextCeiling(); got != strategy.ContextSize-1 {
+		t.Fatalf("ceiling %d; recovery must not force a deficit-sized step", got)
+	}
+}
+
+// Unknown geometry must leave recovery a legal fallback rather than veto it.
+func TestUnknownGeometryLeavesRecoveryAFallback(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	noSplit := &placement.Strategy{ContextSize: 262144, ContextAuto: true}
+	if got := contextReclaimTokens(model, noSplit, []string{"llama-server"}, 1500, 0); got != 0 {
+		t.Fatalf("unknown KV type produced a guessed rate of %d tokens", got)
+	}
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(noSplit, 0)
+	if got := recovery.automaticContextCeiling(); got != noSplit.ContextSize-1 {
+		t.Fatalf("unknown geometry gave ceiling %d, want one token below %d", got, noSplit.ContextSize)
+	}
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1500, DoesNotFit: true,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+	candidate := *noSplit
+	candidate.ContextSize = noSplit.ContextSize - 1024
+	if !oracleContextDropCoversDeficit(model, noSplit, []string{"llama-server"}, &candidate, outcome) {
+		t.Fatal("unknown geometry vetoed the only remaining candidate")
+	}
+}
+
+// Context is only a lever when it can cover the deficit and still leave a usable
+// window. Demanding more context than exists yields no computable plan, so
+// recovery returns nothing and the launch fails closed. Observed on
+// GLM-5.3-Flash: a 2,432 MiB CUDA0 deficit against that device's KV share asks
+// for a cut deeper than the whole context.
+func TestContextBowsOutWhenItCannotCoverTheDeficit(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	strategy := &placement.Strategy{
+		ContextSize: 65536, ContextAuto: true, KVType: "q8_0", KVPlacement: "gpu",
+		TensorSplit: []float64{0.24, 0.59, 0.17},
+	}
+	// A deficit far beyond what this device's KV share can free.
+	if got := contextReclaimTokens(model, strategy, args, 100000, 0); got != 0 {
+		t.Fatalf("context claimed %d tokens of relief it cannot deliver", got)
+	}
+	// A deficit it can cover while leaving a usable window is still reported.
+	small := contextReclaimTokens(model, strategy, args, 20, 0)
+	if small <= 0 || strategy.ContextSize-small < contextRecoveryFloorTokens {
+		t.Fatalf("a coverable deficit produced %d tokens", small)
+	}
+}
+
+// An exact preflight proved CUDA2 needs more experts on the CPU; a later
+// recompute must not hand them back. Observed on Qwen3.8-Flash-Next: the expert
+// derate freed 1,073 MiB and CUDA2 fitted at 10,937/11,909, then the measured
+// re-plan returned to 12,003 and the launch never converged. Its argv differs
+// from the rejected one, so the identity ledger cannot catch it.
+func TestMeasuredReplanCannotUndoProvenExpertRelief(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	if recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 5}) {
+		t.Fatal("a launch with no accepted plan vetoed a recompute")
+	}
+	recovery.acceptContext(&placement.Strategy{NCPUMoE: 23, ContextSize: 262144, ContextAuto: true})
+
+	if !recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 22}) {
+		t.Fatal("a recompute returning an expert layer to the GPU was allowed")
+	}
+	if recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 23}) {
+		t.Fatal("re-proposing the accepted plan was treated as undoing it")
+	}
+	if recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 24}) {
+		t.Fatal("moving further experts to the CPU was treated as undoing relief")
+	}
+	// The ledger only ratchets toward more CPU residency.
+	recovery.acceptContext(&placement.Strategy{NCPUMoE: 21, ContextSize: 262144, ContextAuto: true})
+	if !recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 22}) {
+		t.Fatal("a lower accepted plan weakened the proven relief")
+	}
+	if recovery.undoesProvenExpertRelief(nil) {
+		t.Fatal("a nil recompute was treated as undoing relief")
 	}
 }

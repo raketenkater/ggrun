@@ -9031,3 +9031,37 @@ func denseFillFastestFirstSplit(s *Strategy, caps *detect.Capabilities, numGPUs,
 	}
 	s.TensorSplit = normalizeSplit(split)
 }
+
+// DeviceKVCacheMB is the share of the KV cache that lands on one device under
+// this layer split, which is what a context change actually relieves there.
+//
+// EstimateKVCacheMB is an aggregate across every device. Sizing a recovery step
+// against that total credits one GPU with savings that land on the others: on a
+// three-way split the failing device may own well under a third of the layers,
+// so the step comes out several times too small and the search creeps.
+//
+// kvPlacement is honoured deliberately. When KV lives in host memory a context
+// change frees no VRAM on the failing device at all, and crediting it against a
+// GPU deficit would be the same error in a different direction. Returns 0 when
+// the geometry is unknown rather than guessing a share.
+func DeviceKVCacheMB(model *ModelProfile, ctxSize int, kvType, kvPlacement string, swaFull bool, tensorSplit []float64, device int) int {
+	if model == nil || ctxSize <= 0 || model.NumLayers <= 0 || device < 0 {
+		return 0
+	}
+	if kvPlacement != "" && !strings.EqualFold(kvPlacement, "gpu") {
+		return 0
+	}
+	total := computeKVTotalMB(model, ctxSize, kvType, swaFull)
+	if total <= 0 {
+		return 0
+	}
+	if len(tensorSplit) == 0 {
+		// Single-device plans own the whole cache; there is no split to apportion.
+		if device == 0 {
+			return total
+		}
+		return 0
+	}
+	owned, _ := layerOwnership(tensorSplit, model.NumLayers)
+	return ownedShareMB(total, owned, model.NumLayers, device)
+}
