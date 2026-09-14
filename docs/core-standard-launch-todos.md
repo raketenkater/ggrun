@@ -1423,3 +1423,50 @@ memory reserve.
   moving experts off the CPU.
 - Decode throughput is still unmeasured. This entry proves residency and
   lifecycle, not tokens per second.
+
+## VRAMFILL — higher VRAM use did not make GLM faster — 2026-09-14
+
+The reserve fix moved 2,988 MiB of expert weights off host RAM onto the cards
+and raised `fraction_of_vram` from 0.7023 to 0.7627. Decode throughput did not
+move. Every `eval time` sample of at least 8 tokens from the three matched
+runs:
+
+| run | samples | median tok/s | mean tok/s |
+|---|---:|---:|---:|
+| before the reserve fix | 13 | 6.83 | 6.87 |
+| A, records the reserve | 20 | 6.77 | 6.23 |
+| B, spends the reserve | 6 | 6.83 | 6.85 |
+
+The medians agree to two decimals. This is not a small win hidden in noise; it
+is no win.
+
+The arithmetic explains it. GLM-5.3-Flash UD-Q3_K_XL keeps about 120 GB of
+experts in host RAM on this 48 GB rig. Moving 2,988 MiB is **2.5% of the
+offloaded weight**, against a bottleneck the optimizer itself labels
+`CPU expert bandwidth`. No placement decision available inside 48 GB of VRAM
+changes the other 117 GB.
+
+### What this means for the objective
+
+`fraction_of_vram` measures how much of the machine a plan claimed. It is not
+a proxy for speed, and it must not become a promotion criterion. README already
+states the product goal — "the fastest **stable** plan for the requested
+workload, not maximum VRAM fill" — and this is the measurement that backs it.
+
+The utilisation figure remains worth recording. It is how the phantom 11,272
+MiB reserve was found, and it is the right diagnostic for "is anything that
+could be resident sitting on the CPU". It is the wrong thing to maximise.
+
+### Where residency gains should pay off
+
+Not on a model 3x past VRAM capacity. The reserve fix should matter where a
+few GB moves a large fraction of the offloaded weight — a MoE close to the
+capacity boundary, where 3 GB is a third of what is on the CPU rather than a
+fortieth. That case is untested here and is the one worth measuring next.
+
+### Still unproven
+
+Agent-workload makespan. These are 32-token generations from the serving
+check, which measure decode rate, not cache-backed turn time or
+requested-concurrency throughput. Invariant 5 asks for real agent work, and
+`verify-installed-serving.py --agent-lanes` exists for it; no run here used it.
