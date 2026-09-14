@@ -2459,3 +2459,73 @@ expert fraction predicts agentic speed, so giving up 4 of 35 layers is a real
 price, and whether the worker earns it back by absorbing classifier and
 cheap-tier traffic is exactly the milestone 3 comparison that has not been run.
 Nothing here says two models lose — only what they cost.
+
+## CLAUDEMODE — the agent configuration is the slow one, and a seat cannot launch — 2026-09-14
+
+First measurements of Qwen3.8-Flash-Next through `--claude-code` rather than
+plain serving. Same agent suite (`ab35d682`), per-agent context matched.
+
+### Claude Code mode costs two thirds of the throughput
+
+| | plain serving | `--claude-code --claude-reviewer off` |
+|---|---:|---:|
+| plan | 262,144 tokens, 1 slot | 1,046,528 total / **261,888 per agent**, 4 slots |
+| resident expert layers | 28 of 48 | **19 of 48** |
+| correct tasks/min | **7.63** | **2.42** |
+| median task | 14.79 s | 30.51 s |
+| tasks completed | 3/3 | **2/3** |
+
+Per-agent context is equal, so this is not a context trade. Four slots need four
+times the total KV, that KV is bought out of the same VRAM, and nine more expert
+layers go to host RAM. `SLOTS` and `RESIDENCYFRACTION` predicted the mechanism;
+this measures the end-to-end cost, including a task that did not finish.
+
+**The four-slot Claude Code default is wrong for a CPU-offloaded MoE.** A slot
+cap keyed on the expert displacement the planner already computes — rather than
+on a fixed parallel-4 floor — is the change this points to.
+
+### With a reviewer seated, the launch does not converge
+
+`--claude-reviewer qwen2b` (the smallest seat, 1.4 GB) never reaches a load:
+
+```
+Error starting server: memory preflight did not converge after 5 re-plans;
+refusing a real model load
+```
+
+It fails closed, which is correct. But the `n-cpu-moe` trace across the rounds
+oscillates rather than converging:
+
+```
+46 → 45 → 46 → 40 → 44 → 45 → 46 → 44 → 45
+```
+
+Twice a `preflight context-replanned` step recomputes placement from scratch and
+returns expert layers that a derate **in this same launch** had already moved to
+the CPU — 46 to 40 gives back six at once. The following rounds claw them back
+one at a time until the replan budget is gone.
+
+This is the `EXPERTPIN` bug family on a path its guard does not cover.
+`undoesProvenExpertRelief` arms only from `acceptedNCPUMoE`, which is recorded
+by `acceptContext` after an exact preflight **fits**. Here nothing ever fits, so
+the ratchet never arms and every context re-plan is free to undo the accumulated
+derates.
+
+So a reviewer seat on this model is not merely expensive, it is currently
+unreachable, and the cause is a defect rather than a capacity limit.
+
+### What this does not establish
+
+The worker/reviewer benefit is still unmeasured: no arm with a seated companion
+has served a request, so nothing here says a companion cannot pay for itself.
+`SEATCOST` priced the seat from dry-run estimates at 2 and 4 expert layers; the
+live plans differ from those estimates (19 resident rather than the estimated
+35), so the dry-run numbers rank the seats but do not size them.
+
+### Open
+
+- Ratchet expert residency across *failed* preflight rounds, not only after a
+  proven fit, so a context re-plan cannot undo a derate from the same launch.
+- Key the Claude Code slot count on computed expert displacement instead of a
+  fixed parallel-4 floor.
+- Re-run the seat comparison once a seat can launch.
