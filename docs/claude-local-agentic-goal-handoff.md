@@ -70,6 +70,35 @@ These add two acceptance requirements: answer with matched complete-workflow
 results, and verify generality beyond the reproducing model. A benchmark guard
 working correctly and a fix working on Flash-Next alone are intermediate proof.
 
+### Latest user steering — 2026-09-14 19:54 UTC
+
+The user asks whether the runs exercise the actual Claude Code mode, notes that
+main-model safety classification can be acceptable, and asks whether the second
+model's worker role makes the combined setup better. These messages were partly
+sent mid-turn; they are product requirements, not benchmark conclusions.
+
+- Verify the tested entry point and effective mode. Record whether the run uses
+  the real Claude Code client/router, which model handles foreground, review
+  and utility requests, and the actual companion reservation/allocation. A
+  backend-only test does not establish that this integration works.
+- Main-only serving is a valid comparison: the chosen model handles reasoning,
+  required safety classification and the same utility workload. Preserve review
+  semantics and client permissions; a separate reviewer is not mandatory merely
+  because one is available.
+- Compare that baseline with the same workload using a companion for both
+  required reviews and explicitly delegated worker/utility tasks. Charge its
+  weights, context and contention against the main model's usable resources.
+  Count successful worker tasks and review outcomes, queueing, main-model
+  responsiveness, retries/rework and total time to a correct result. An idle
+  companion or a healthy reviewer endpoint is not evidence of benefit.
+- Keep main-model context/quality and the requested work equivalent. If either
+  full configuration cannot meet those constraints, record that capacity result
+  rather than quietly reducing the main model's context. Add a review-only arm
+  only if it is needed to explain the combined result; avoid a broad sweep.
+- Select the configuration on the complete local-agent outcome. Retain the
+  existing main fallback when a companion cannot do useful work. Do not disable
+  required review to manufacture a speedup or assume that two models must win.
+
 ### Two concrete PR #61 issues to resolve before merge
 
 1. **Post-load mmap failures are incorrectly counted as pre-load refusals.**
@@ -655,6 +684,26 @@ next lever itself: physical-core count, affinity, and separate batch/decode
 thread settings. No candidate moves those today. PCIe during cached append rose
 roughly 78x and is still not proven saturated, so the current counters do not establish bus saturation or exclude
 transfer/synchronization costs.
+
+**Generality check — and it found a third defect** (`CALIBGENERAL`). Both fixes
+were developed and verified on Flash-Next alone, which proves the bug is gone
+there and nothing about whether the fix travels. Run against Qwen3.8-27B, a
+fully resident model, the ladder broke: that frontier produces **27 candidates**
+against Flash-Next's 5, and its finalist is a **compound name**,
+`batch-1024-ubatch-512`. Grouping families by the leading token called it
+`batch` and treated it as unrelated to `ubatch-512`, so a refused ubatch rung
+would be followed by a candidate carrying the same ubatch. Families are now
+parsed as key-value runs and collide on coordinate overlap.
+
+The lesson is the one the contract already states. Verifying on the model that
+exposed the bug is not evidence the fix generalises; every candidate-selection
+change from here needs at least two residency classes before it is believed.
+
+**The topology imbalance is the strongest unexploited signal, and it is not one
+model's quirk**: Flash-Next prefill 80/7 and 79/8, its append 71/2, the 27B's
+append 79/5, its challenger's prefill 98/0. Two models, two residency classes,
+four launches — one card near saturation while another sits under 10%. No
+candidate family moves it.
 
 Also resolved from milestone 2: the `ctx N total / M per agent` line **does**
 print on a fresh calibration (`[optimize] roomy-resident, ctx 262144 total /

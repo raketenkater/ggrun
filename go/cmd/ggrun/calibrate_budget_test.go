@@ -18,7 +18,6 @@ func TestPreLoadRefusalsAreNotChargedAsReloadFailures(t *testing.T) {
 		exactAdmissionCompat,
 		exactAdmissionCompanion,
 		exactAdmissionMemory,
-		exactAdmissionMMap,
 	}
 	for _, class := range cheap {
 		err := exactAdmissionError(class, " on CUDA0 (1885 MiB deficit)", nil)
@@ -31,11 +30,45 @@ func TestPreLoadRefusalsAreNotChargedAsReloadFailures(t *testing.T) {
 		}
 	}
 
-	// A CUDA OOM surfaces while device allocations are being made, so it did
-	// cost a load and must keep consuming the budget.
-	oom := exactAdmissionError(exactAdmissionCUDAOOM, " on CUDA1", nil)
-	if !exactAdmissionLoadedWeights(oom) {
-		t.Error("a CUDA OOM was treated as costing no model load")
+	// These are returned only after startLaunchProcess has succeeded, so the
+	// weights were read and the budget must still be charged. A CUDA OOM
+	// surfaces during device allocation; an mmap refusal comes from
+	// validateObservedMMapPageability failing on a process that then gets
+	// stopped. Calling either cheap would let real loads run unbudgeted.
+	for _, class := range []exactAdmissionClass{exactAdmissionCUDAOOM, exactAdmissionMMap} {
+		if !exactAdmissionLoadedWeights(exactAdmissionError(class, " on CUDA1", nil)) {
+			t.Errorf("%s is returned after a model load, but was treated as costing none", class)
+		}
+	}
+}
+
+// Deny by default. A new failure class must be classified deliberately rather
+// than inheriting "cheap" from being typed — which is how the mmap class, a
+// post-load refusal, was first mis-filed as an argv-time one.
+func TestEveryAdmissionClassIsClassified(t *testing.T) {
+	// Every class declared in main.go, with where it is returned relative to
+	// startLaunchProcess.
+	declared := map[exactAdmissionClass]bool{ // true == returned before any start
+		exactAdmissionSpec:      true,
+		exactAdmissionCompat:    true,
+		exactAdmissionCompanion: true,
+		exactAdmissionMemory:    true,
+		exactAdmissionMMap:      false,
+		exactAdmissionCUDAOOM:   false,
+	}
+	for class, argvTime := range declared {
+		if got := !exactAdmissionLoadedWeights(exactAdmissionError(class, "", nil)); got != argvTime {
+			t.Errorf("%s: classified argv-time=%v, want %v", class, got, argvTime)
+		}
+	}
+	for class := range argvTimeAdmissionClasses {
+		if _, ok := declared[class]; !ok {
+			t.Errorf("%s is treated as argv-time but is not recorded here; confirm it is returned before startLaunchProcess", class)
+		}
+	}
+	// An unrecognised class must be expensive, not cheap.
+	if !exactAdmissionLoadedWeights(exactAdmissionError(exactAdmissionClass("future-class"), "", nil)) {
+		t.Error("an unclassified failure class defaulted to costing no model load")
 	}
 }
 

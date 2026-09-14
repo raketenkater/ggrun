@@ -4434,13 +4434,27 @@ func isStableExactAdmissionFailure(err error) bool {
 	return errors.As(err, &failure)
 }
 
-// exactAdmissionLoadedWeights reports whether this failure could only have
-// happened after the backend began reading model weights. The typed refusals
-// are argv-time: admission recomputes the plan, sees the exact argv cannot be
-// honored, and declines before a process reads anything. A CUDA OOM is the
-// exception — it surfaces while device allocations are being made.
+// argvTimeAdmissionClasses are the refusals decided before any process starts.
+// Each is returned from a site above startLaunchProcess: admission recomputes
+// the plan, sees the exact argv cannot be honored, and declines without reading
+// a weight.
 //
-// Callers use this to separate cheap rejections from expensive ones. An untyped
+// Deny by default. A class absent here is expensive, so adding a failure class
+// cannot silently make a real model load look free — the mmap class is exactly
+// that trap: it is typed, but it is returned after startLaunchProcess succeeds
+// and validateObservedMMapPageability fails, with the process then stopped.
+// TestEveryAdmissionClassIsClassified fails when a new class appears.
+var argvTimeAdmissionClasses = map[exactAdmissionClass]bool{
+	exactAdmissionSpec:      true,
+	exactAdmissionCompat:    true,
+	exactAdmissionCompanion: true,
+	exactAdmissionMemory:    true,
+}
+
+// exactAdmissionLoadedWeights reports whether this failure could have happened
+// only after the backend began reading model weights.
+//
+// Callers use it to separate cheap rejections from expensive ones. An untyped
 // error is an ordinary start failure (health timeout, interrupted load,
 // transient backend fault) and counts as expensive, because by then a load was
 // usually under way.
@@ -4449,7 +4463,7 @@ func exactAdmissionLoadedWeights(err error) bool {
 	if !errors.As(err, &failure) || failure == nil {
 		return true
 	}
-	return failure.class == exactAdmissionCUDAOOM
+	return !argvTimeAdmissionClasses[failure.class]
 }
 
 func exactAdmissionError(class exactAdmissionClass, detail string, cause error) error {
