@@ -18,7 +18,13 @@ import (
 // upgrade changes what "fastest" means.
 // Versions 20..23 are reserved by the existing development worktree. Version
 // 24 replaces extrapolated waves with measured, identical requested workloads.
-const CalibrationSchemaVersion = 24
+// Version 25 changes which candidates the bounded ladder can admit: a refusal
+// decided before any model load no longer consumes the reload failure budget,
+// and the fallback slots spread across lever families instead of taking
+// neighbouring rungs of the predicted finalist. A decision recorded under 24
+// was reached in a search where those fallbacks were unreachable, so its
+// cached "default" winner must not suppress the search that can now run.
+const CalibrationSchemaVersion = 25
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 

@@ -50,6 +50,147 @@ Product acceptance includes:
   Windows GPU coverage must be reported accurately when unavailable. macOS is
   lower priority for this work.
 
+## Independent review and current direction — 2026-09-14T19:50:58+00:00
+
+This review supersedes stale PR states and completion claims below. Preserve the
+product goal and Claude's detailed progress record. Reviewed PR #58's merged
+result `49463f4` and PR #61 at `91be53c`; the latter was open, mergeable, with
+22 successful checks and two skipped GPU jobs at inspection. Refresh before
+acting. No model was launched, stopped or reconfigured by this review.
+
+### The user's latest steering
+
+The latest two substantive messages in Claude's session were:
+
+- 19:44 UTC: "but which of the runs is overall faster in agetnic work"
+- 19:45 UTC, absorbed mid-turn: after seeing a change work, test a different
+  model from the one used to develop it.
+
+These add two acceptance requirements: answer with matched complete-workflow
+results, and verify generality beyond the reproducing model. A benchmark guard
+working correctly and a fix working on Flash-Next alone are intermediate proof.
+
+### Latest user steering — 2026-09-14 19:54 UTC
+
+The user asks whether the runs exercise the actual Claude Code mode, notes that
+main-model safety classification can be acceptable, and asks whether the second
+model's worker role makes the combined setup better. These messages were partly
+sent mid-turn; they are product requirements, not benchmark conclusions.
+
+- Verify the tested entry point and effective mode. Record whether the run uses
+  the real Claude Code client/router, which model handles foreground, review
+  and utility requests, and the actual companion reservation/allocation. A
+  backend-only test does not establish that this integration works.
+- Main-only serving is a valid comparison: the chosen model handles reasoning,
+  required safety classification and the same utility workload. Preserve review
+  semantics and client permissions; a separate reviewer is not mandatory merely
+  because one is available.
+- Compare that baseline with the same workload using a companion for both
+  required reviews and explicitly delegated worker/utility tasks. Charge its
+  weights, context and contention against the main model's usable resources.
+  Count successful worker tasks and review outcomes, queueing, main-model
+  responsiveness, retries/rework and total time to a correct result. An idle
+  companion or a healthy reviewer endpoint is not evidence of benefit.
+- Keep main-model context/quality and the requested work equivalent. If either
+  full configuration cannot meet those constraints, record that capacity result
+  rather than quietly reducing the main model's context. Add a review-only arm
+  only if it is needed to explain the combined result; avoid a broad sweep.
+- Select the configuration on the complete local-agent outcome. Retain the
+  existing main fallback when a companion cannot do useful work. Do not disable
+  required review to manufacture a speedup or assume that two models must win.
+
+### Two concrete PR #61 issues to resolve before merge
+
+1. **Post-load mmap failures are incorrectly counted as pre-load refusals.**
+   At `91be53c`, `exactAdmissionLoadedWeights` in `go/cmd/ggrun/main.go` returns
+   false for every typed class except CUDA OOM. But `exactAdmissionMMap` is
+   emitted after `startLaunchProcess` succeeds and
+   `validateObservedMMapPageability` fails; the process is then stopped. This
+   can exclude a real model load from the expensive-failure budget and print an
+   incorrect "before any model load" message. The new budget test explicitly
+   puts mmap in the cheap list, so its passing result does not catch this bug.
+   Correct the classification using actual lifecycle evidence. At minimum count
+   this post-load path and unknown typed classes as expensive; do not infer
+   that a future failure class is cheap simply because it is typed. Add a
+   regression tied to the post-start path and verify cheap admission refusals
+   still leave the bounded fallback search available.
+2. **The changed admission policy retains the old calibration schema.**
+   `CalibrationSchemaVersion` remains 24 and the policy is absent from the
+   scope key. `calibrationPlan` and cached-winner application can reuse an old
+   `default` decision before the new ladder runs. Admission-only suppression
+   also keys the finalist, which need not change when its fallbacks change.
+   Manually moving cache files for experiments hides this upgrade problem.
+   Version or explicitly migrate performance/admission decisions for the new
+   selection semantics. Preserve independent fit proof where valid. Add an
+   upgrade regression: an old decision cannot suppress the newly legal search;
+   a fresh decision is reused on the next identical launch.
+
+These are source-review findings, not new observed serving failures. The
+existing focused recovery, ladder and budget tests passed uncached in this
+review; they do not cover these two requirements adequately. No core source was
+modified and no new full core gate or performance experiment was run here.
+
+### Generality and the speed question
+
+At the reviewed state, the strongest exact statement is: **ubatch-512 completed
+one calibration screen in 32.37 s versus 48.72 s for default** (about 34% less
+wall time). Decode throughput in that screen fell from 16.6 to 10.3 tok/s.
+That is why the current phase guard retained default. It does not establish
+which plan completes representative agent work faster. The separate tool-task
+comparison for ubatch-512 had not completed; its attempted wrapper was killed
+by a broad `pkill -f` command. That attempt is neither a model failure nor a
+performance result. Use owned PID/process-group cleanup with identity checks;
+do not repeat broad process-name matching.
+
+Run the same functional workflow with default and the exactly admitted
+ubatch-512 plan, preserving model/quant, context, KV quality, client demand,
+cache state and companion policy. A request containing only an ubatch override
+may also change expert placement and topology: compare the final full argv and
+ledger, and describe a whole-plan comparison when those differ. Include a
+representative sustained-output case and actual project context as well as the
+short repair screen. Keep results for distinct harnesses separate. Retain the
+current phase guard while evaluating; any proposed change to its 5% policy is
+an explicit objective/policy change requiring representative-workflow and
+foreground evidence, not a workaround to promote this one aggregate winner.
+
+Claude is checking the resident Qwen3.8-27B case and plans to recheck the GLM
+memory-constrained case before merging #61. Keep that order, on the final fixed
+candidate. Exercise actual generated candidates across these different classes;
+synthetic tests containing only names and identical strategies do not establish
+semantic diversity. The current parser groups `moe`, `topology`, `single` and
+`split` separately although they can all change placement. Prefer typed
+coordinate metadata or actual configuration differences for diversity and
+exact-configuration deduplication; add rename-invariance coverage. A smaller
+ubatch may fit after a larger one fails, so diversity remains a preference
+inside a bounded admission ladder, not proof that its other rungs are useless.
+Do not claim that these three models on one rig validate every public system.
+
+### Milestone status and next work
+
+| Milestone | Reviewed state | Next acceptance |
+| --- | --- | --- |
+| 1: launch/recovery | #58 merged; expert-relief rollback fixed; deficit-sized ceiling step reverted | Recheck Qwen and GLM on the final #61 candidate; keep the exact ledger regressions |
+| 2: local agent experience | Tool smoke, cancellation/reconnect and roughly 6.4k-prefix observation added | Real client, substantial repository/multi-turn context; connect prefix checks to appropriate GPU validation; fix cached-summary display separately |
+| 3: worker/reviewer | Existing routing/fallback audited | End-to-end required-review and worker correctness plus matched companion-on/main-only comparison; benefit remains unproven |
+| 4: optimizer | A complete measured screen and baseline restoration demonstrated | Resolve the two review findings; different-model validation; answer actual workflow-speed question before more tuning |
+| 5: release | CPU/install checks green; GPU skipped on the reviewed PR | Exact-commit Linux GPU run, GLM regression, final artifact/install proof; Windows GPU remains untested |
+
+The installed-serving cancellation check demonstrates successful follow-up
+completion after disconnect. Its `recovery_s` includes that request's work and
+is not an isolated scheduler slot-release measurement. The prefix check records
+a ratio but does not validate answer correctness or fail when cache evidence is
+missing; treat it as observation until the intended cache contract has an
+appropriate capability-aware assertion. Configuring 262k context and sending
+6k-8k prompts is not 262k-context acceptance.
+
+High configured-worker CPU usage and uneven GPU activity identify hypotheses.
+They do not by themselves prove that more threads or a different topology will
+help; an unsaturated average PCIe counter also does not rule out transfer or
+synchronization stalls. Finish the workflow/generality evidence before opening
+another thread/affinity optimization. Likewise, a worker/reviewer code audit and
+request timing fields do not establish review accuracy, worker task success or
+reduced rework: retain task-level outcomes in the comparison.
+
 ## Reasoning corrections to keep
 
 1. The Qwen3.8-Flash-Next recovery fix is valuable because it turns a rejected
@@ -81,10 +222,11 @@ Product acceptance includes:
 
 ### 1. Consolidate launch correctness
 
-At the last inspection, PR #58 was open and conflicting at `27812a3`; #59 and
-#60 were documentation PRs with checks still running. Refresh this state.
-Review and reconcile the fixes on current main, without folding in unrelated
-staged work from the production checkout.
+PR #58 merged as `49463f4`; #59 and #60 also merged. Its deficit-sized ceiling
+step was reverted; preserving proven expert relief across measured recomputation
+resolved the observed launch cycle. Continue from that result. Review PR #61
+against the current-direction section above without folding unrelated staged
+work from the production checkout into it.
 
 Before editing protected paths, read `AGENTS.md`,
 `docs/core-engine-change-contract.md`, `docs/optimizer-theory.md`, and the
@@ -266,10 +408,10 @@ and feature documentation with the validated release.
 Updated 2026-09-14. Detailed measurements live in
 `docs/core-standard-launch-todos.md`; this section carries state only.
 
-### Milestone 1 — consolidate launch correctness: resolved
+### Milestone 1 — observed launch blockers resolved; wider coverage remains
 
-Refreshed PR state, superseding the snapshot above: #59 and #60 merged. #58
-rebased onto current main and mergeable.
+PR #59 and #60 merged; #58 merged as `49463f4`. The chronology below records
+its investigation and final scope rather than current unmerged work.
 
 **Both target models now launch.** The blocker was not the lever selector at
 all; see "Resolution" below. Full evidence is in the core ledger under
@@ -449,7 +591,7 @@ Remaining for this milestone:
 - Not yet exercised: a long multi-turn session against a substantial repository,
   as opposed to the bounded three-task suite.
 
-### Milestone 3 — worker/reviewer in the same plan: audited, one deliverable left
+### Milestone 3 — worker/reviewer: source audit complete; integration benefit unverified
 
 Read-only audit of `go/pkg/claudeauto` against the four role contracts in this
 file. The required behaviours are already implemented; no second orchestration
@@ -485,10 +627,135 @@ already there — `RequestRecord` carries `Route`, `QueueMS`, `TTFBMS`,
 is a measurement to run, not code to write. It needs a long two-arm session and
 has not been run.
 
+### Milestone 4 — one optimizer comparison completed; policy/generalization review open
+
+First standard launch of Qwen3.8-Flash-Next with the candidate controller
+enabled. Detail in the core ledger under `CALIBSPEND`.
+
+The plan it settled on serves **262,144 tokens with 28 of 48 expert layers
+resident at 89.5% VRAM**, and returns 7.63 correct tasks/min — inside the
+7.49-7.76 band measured at 18,912 tokens. Fourteen times the context at the
+same throughput on this suite is the result worth keeping, and it is exactly
+what this file means by preserving useful context. The suite's tasks are short,
+so it shows no detected short-task slowdown from the larger configured
+capacity in this sample; long-context performance remains untested.
+
+**The run exposed a defect in candidate generation.** All three candidates were
+larger ubatch values; all three failed admission by 1,885 to 7,026 MiB; the
+failure budget was exhausted and the search stopped. Placement had already
+printed nine times that ubatch 512 yields no usable whole-layer MoE plan for
+this model. Calibration does not consult that. The cost is not three wasted
+reloads but that expert packing, topology and slot count are **never reached**
+on this model class, which is why the baseline always wins on this shape.
+
+Two bottlenecks are now named with measurements rather than inferred:
+
+- prefill shows uneven activity, CUDA0 at 80% SM against CUDA2 at 7% on a
+  0.27/0.59/0.14 split; topology is a hypothesis, not an isolated cause;
+- decode is in the CPU-expert path with PCIe active but **not proven saturated**
+  (52/34 MiB/s), so DRAM and synchronization stay live candidates.
+
+Both changes are implemented and a comparison completed. The independent
+review above identifies two remaining correctness gaps. Detail in `CALIBBUDGET`
+and `CALIBLADDER`.
+
+- **Budget accounting** (`CALIBBUDGET`): a refusal that reads no weights no
+  longer charges the reload failure budget. Correct on its own terms, but the
+  live trace showed it was **not** what blocked topology — the budget was
+  reached exactly as the last of three challengers finished, so nothing had ever
+  been skipped because of it.
+- **Candidate selection** (`CALIBLADDER`): that was the blocker. Three challenger
+  slots all went to one lever family. `selectAutomaticCalibrationAdmissionPlan`
+  already stated the fix in a comment and implemented it only for `parallel-`;
+  it now applies to every lever, with the family read from the generator's own
+  naming.
+
+The search then reached and measured a real challenger for the first time on
+this model, and **the phase guard refused it**: `ubatch-512` was 1.505x better
+on workload makespan (48.72 s to 32.37 s) with prefill up 57%, but decode fell
+38% against a 5% allowance. `default` won. Invariant 6 holding on live data is
+worth more than the speedup would have been — scoring the aggregate alone would
+have selected a plan whose measured decode throughput was 38% lower in this
+screen. That does not establish the outcome for every agent workflow.
+
+The bottleneck moved with it. At ubatch 512 decode and mixed show high use of the
+configured host workers (87% and 90%, measured), and the optimizer names the
+next lever itself: physical-core count, affinity, and separate batch/decode
+thread settings. No candidate moves those today. PCIe during cached append rose
+roughly 78x and is still not proven saturated, so the current counters do not establish bus saturation or exclude
+transfer/synchronization costs.
+
+**Generality check — and it found a third defect** (`CALIBGENERAL`). Both fixes
+were developed and verified on Flash-Next alone, which proves the bug is gone
+there and nothing about whether the fix travels. Run against Qwen3.8-27B, a
+fully resident model, the ladder broke: that frontier produces **27 candidates**
+against Flash-Next's 5, and its finalist is a **compound name**,
+`batch-1024-ubatch-512`. Grouping families by the leading token called it
+`batch` and treated it as unrelated to `ubatch-512`, so a refused ubatch rung
+would be followed by a candidate carrying the same ubatch. Families are now
+parsed as key-value runs and collide on coordinate overlap.
+
+The lesson is the one the contract already states. Verifying on the model that
+exposed the bug is not evidence the fix generalises; every candidate-selection
+change from here needs at least two residency classes before it is believed.
+
+**The topology imbalance is the strongest unexploited signal, and it is not one
+model's quirk**: Flash-Next prefill 80/7 and 79/8, its append 71/2, the 27B's
+append 79/5, its challenger's prefill 98/0. Two models, two residency classes,
+four launches — one card near saturation while another sits under 10%. No
+candidate family moves it.
+
+Also resolved from milestone 2: the `ctx N total / M per agent` line **does**
+print on a fresh calibration (`[optimize] roomy-resident, ctx 262144 total /
+262144 per agent, ...`). The gap is specific to the cached-decision path, as
+recorded.
+
+### Milestone 5 — close the release loop: partly closed, with coverage stated
+
+What is validated, and on which commit. Nothing here counts main-branch CI as
+proof that an older release contains these fixes.
+
+| path | state | where |
+|---|---|---|
+| Uncached `scripts/verify-core-engine.sh`, six packages | green at every commit in #58 and #61 | local |
+| Linux CPU install, download, generate, cancel, shutdown, port release | green | `install-e2e` linux |
+| Windows install, reinstall preserving config, generate | green | `install-e2e` windows |
+| Linux real-GPU serving | **not yet run on the #61 candidate** | `install-e2e` gpu, manual dispatch on main only |
+| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false | — |
+| macOS | **untested**, lower priority for this work | — |
+
+Model coverage on this machine, all on the installed single binary
+(`/home/mik/go/bin/ggrun`, PATH symlink `~/.local/bin/ggrun`):
+
+| class | model | state |
+|---|---|---|
+| resident | Qwen3.8-27B-UD-Q4_K_XL | served 262,144 tokens; cancellation 0.607 s; prefix reuse 8.0%; 3/3 agent tasks |
+| moderately CPU-offloaded MoE | Qwen3.8-Flash-Next-UD-Q3_K_XL (1.75x over VRAM) | launches since `EXPERTPIN`; 262,144 tokens at 28/48 resident experts, 89.5% VRAM, 7.63 correct tasks/min |
+| tight fit | GLM-5.3-Flash-UD-Q3_K_XL (2.86x over VRAM) | **re-run on the post-calibration binary**: 555,008 tokens, up from 498,688; ladder admitted `kv-alternate` between two ubatch rungs; no false promotion |
+
+Recorded screen size, as the milestone asks rather than calling it long-context
+acceptance: the bounded screen uses 23,296 bytes (~7,701 tokens) per lane, with
+`reuse >=6503 tokens/lane` and a 48.48 s slowest workflow. The three-repair
+suite is a smoke test; it does not exercise the 262k context the plan now
+serves.
+
+`docs/release-validation.md` now documents the two new serving checks and says
+plainly which one is off in CI and why.
+
+Remaining before this milestone is closed:
+
+- Dispatch the GPU job on the candidate commit. It only runs from main, so the
+  candidate has to land first; that is the sequence, not an exemption.
+- ~~Re-run the GLM tight-fit regression~~ — done, 555,008 tokens, recorded above.
+- Windows GPU and macOS stay marked untested. This box cannot certify generic
+  public claims; that needs an expanded hardware and model matrix.
+
 ### Known limitations of current evidence
 
 - Single runs per configuration; no matched repeats.
-- One machine, three NVIDIA devices; no CPU-only or single-GPU coverage.
+- Performance evidence is from one machine with three NVIDIA devices. CPU-only
+  install/cancellation checks exist; equivalent CPU-only or single-GPU
+  performance/generalization proof is still absent.
 - The three-repair suite is a smoke test, not agentic acceptance, and was used
   only at stable candidates per this file's validation-depth guidance.
 

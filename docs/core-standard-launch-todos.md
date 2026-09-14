@@ -2135,3 +2135,440 @@ The guard found one dead field: `FlashAttn` is hardcoded `true` in
 - `--prefix-reuse` is not wired through `verify-gpu-install.py`, so the GPU CI
   job cannot request it yet.
 - One run per check, one machine, three NVIDIA devices.
+
+## CALIBSPEND — the optimizer's first run on Flash-Next, and what it spent it on — 2026-09-14
+
+`EXPERTPIN` made Qwen3.8-Flash-Next launchable, which means the candidate
+controller had **never run on it**: every prior measurement used
+`--calibrate off` to stay out of the 20-minute comparison. This is the first
+standard launch, defaults throughout, only host/port and the live-probe
+allowance.
+
+### What it chose
+
+| | |
+|---|---|
+| plan | `--n-cpu-moe 20`, ubatch 256, batch 2048, parallel 1 |
+| resident expert layers | **28 of 48**, across all three GPUs |
+| context | 262,144 tokens, 1 slot, KV q8_0 on GPU |
+| VRAM | 43,958 of 49,134 MiB (**89.5%**) |
+| ggrun's own bottleneck call | **CPU expert bandwidth** (live-allocated) |
+| agent workload | 3/3 oracle, **7.63 correct tasks/min**, 14.79s median |
+
+7.63 sits inside the 7.49–7.76 band measured before, so the calibrated plan is
+not faster. What it is, is **much roomier**: 262,144 tokens of context against
+the 18,912 the 7.67 run used, at the same throughput on this suite. For a
+product whose goal is useful context for agent work, 14x the context for no
+measured cost is the result worth keeping. The suite's tasks are short, so this
+says serving a 262k context is free here, not that long context is free.
+
+### The defect this run exposes
+
+The failure budget was spent before a single candidate ran.
+
+| candidate | outcome |
+|---|---|
+| ubatch-2048 | 7,026 MiB deficit on CUDA0 |
+| ubatch-1024 | 3,608 MiB deficit on CUDA0 |
+| ubatch-512 | 1,885 MiB deficit on CUDA0 |
+| — | failure budget reached; candidate search stopped |
+
+Every candidate was a larger ubatch, and on a model 1.75x over VRAM a larger
+ubatch costs compute buffer on every device. The accepted plan leaves CUDA2 at
+11,839 of 11,909 MiB — **70 MiB of slack**. All three were arithmetically
+impossible before they were tried.
+
+**None of them loaded the model.** The three `[calibrate] measuring ...` lines
+and the budget-reached line are consecutive in the log, with no `load_model`
+between them: preflight refused each before a single weight was read. The cost
+was never reload time.
+
+The cost is the accounting. The failure budget exists to bound expensive work —
+a candidate that reads 84 GiB and then dies is why it exists — but an argv-time
+refusal is charged exactly the same. Three cheap rejections inside one lever
+family therefore retire the entire search, and **expert packing, topology and
+slot count are never reached at all** on this model class. That is why the
+baseline always wins on this shape: nothing else is ever measured.
+
+The negative result is at least cached (`cal-ee43f9c5...json`, admission-only
+evidence) so an identical launch does not repeat the search, which is what the
+milestone asks for.
+
+### Two measured bottlenecks worth naming
+
+From the optimizer's own phase analysis on this launch:
+
+- **Prefill is topology-limited: CUDA0 at 80% SM while CUDA2 sits at 7%.** The
+  split is 0.27/0.59/0.14, so the smallest share is also the idlest card. A
+  second independent launch reproduced it at 79% against 8%, and recorded the
+  cached-append phase at 71% against 2%. Two runs is not a distribution, but it
+  is no longer a single reading.
+- **Decode is in the CPU-expert path, and PCIe is not proven saturated** —
+  RX/TX 52/34 MiB/s decode, 74/144 MiB/s mixed. The optimizer explicitly keeps
+  DRAM and synchronization as live candidates rather than blaming the bus, which
+  is the correction this handoff asked for.
+
+Its own safe-lever conclusion: "move serial layer work off the saturated GPU;
+retain expert-storage roles unless routing proves them active."
+
+### Open
+
+- The budget accounting is fixed in `CALIBBUDGET` below, but that was **not**
+  why topology went unmeasured — see the correction there. The open item is
+  candidate selection: three challenger slots, all filled with one lever family.
+- Candidate generation still proposes a shape placement has already refused for
+  this model nine times during planning.
+- The prefill imbalance (80% against 7%) has a named lever and no experiment.
+- One run. The agent suite is three short repair tasks and does not exercise the
+  262k context it now has.
+
+## CALIBBUDGET — a refusal that costs no load should not retire the search — 2026-09-14
+
+Fix for the defect `CALIBSPEND` measured. The failure budget bounds expensive
+work, and `exactAdmissionFailure` already carried the distinction needed to tell
+expensive from cheap: every typed refusal except `cuda-oom` is decided at argv
+time, before a process reads a weight. A CUDA OOM is the exception — it surfaces
+while device allocations are being made.
+
+Pre-load refusals no longer charge the reload failure budget. They still record
+the same stable-failure evidence, so the negative result is still cached. The
+loop stays bounded by the elapsed-time budget and the finite candidate list,
+both untouched.
+
+An untyped start failure — health timeout, interrupted load, transient backend
+fault — is classified as expensive. Mistaking a real reload for a cheap refusal
+is the failure mode that would make the search unbounded, so the default is the
+conservative one.
+
+### Regressions
+
+`calibrate_budget_test.go` covers every cheap class, the `cuda-oom` exception,
+untyped and nil errors, and wrapped errors — admission failures travel up
+several layers before the calibration loop reads them. Uncached
+`scripts/verify-core-engine.sh` green on all six core packages.
+
+### Live trace, same model and defaults
+
+With the cached decision moved aside so the search reruns:
+
+```
+[optimize] calculated 5 candidates (5 feasible, 1 exact): batch 2048..2048,
+           ubatch 128..2048, parallel 1..1, 2 topology shape(s)
+[calibrate] ubatch-2048 failed to start (... CUDA0 (7026 MiB deficit) ...)
+[calibrate] ubatch-2048 was refused before any model load; not charging the reload failure budget
+[calibrate] ubatch-1024 failed to start (... CUDA0 (3608 MiB deficit) ...)
+[calibrate] ubatch-1024 was refused before any model load; not charging the reload failure budget
+[calibrate] ubatch-512  failed to start (... CUDA0 (1885 MiB deficit) ...)
+[calibrate] ubatch-512  was refused before any model load; not charging the reload failure budget
+```
+
+The same three deficits as `CALIBSPEND`, and the three new lines confirm the
+accounting change. **But the search still ends here, and the budget was not why.**
+
+Correcting the `CALIBSPEND` diagnosis: with `calibrationAutoMaxCandidates = 4`
+the automatic set is the baseline plus three challengers, and the log says so —
+"up to 3 contained admissions". `MaxFailures` is also 3. So the budget was
+reached exactly as the last challenger finished; **nothing was ever skipped
+because of it**. The load that follows in this run is the baseline being
+restored, not a candidate: `CUDA_Host model buffer size = 25219.14 MiB` is this
+run's own baseline figure, and `[optimize] calculated finalist was unavailable;
+restored measured baseline` follows it.
+
+The real blocker is candidate **selection**, not budget. The frontier calculated
+five candidates including two topology shapes; the set is trimmed to four, and
+finalist prioritization fills all three challenger slots with ubatch rungs. The
+topology shapes are discarded before the loop sees them.
+
+The budget change remains correct and is kept: charging a reload budget for a
+refusal that reads no weights is wrong on its own terms, and it will matter as
+soon as the challenger slots hold more than one lever family. It is simply not
+the fix that unblocks topology exploration.
+
+The `EXPERTPIN` guard also fired on this launch, unprompted:
+
+```
+[launch] preflight expert-derate after CUDA2 allocation 0 MiB (deficit 101 MiB, ctx=262144, n-cpu-moe=22, ubatch=256)
+[launch] preflight: placement fits (... CUDA2 10937/11909 ...)
+[launch] backend-measured recompute would undo proven expert relief; retaining the verified-safe placement
+```
+
+### Recorded screen size
+
+`[optimize] prefill pilot 128.0 tok/s; bounded screen uses 23296 bytes (~7701
+tokens) per lane for both placements`, and the baseline evidence line records
+`reuse >=6503 tokens/lane, slowest workflow 48.48s`. That is the ~8k corpus the
+handoff describes, recorded as an actual size rather than called long-context
+acceptance.
+
+## CALIBGENERAL — the ladder fix was wrong on a model it was not written on — 2026-09-14
+
+`CALIBLADDER` was developed and verified on Qwen3.8-Flash-Next alone. Running it
+against Qwen3.8-27B — a fully resident model, a different residency class —
+broke it immediately.
+
+The 27B frontier is a different shape: **27 candidates (7 feasible)** against
+Flash-Next's 5, `batch 32..8192`, three topology shapes. Its predicted finalist
+was named `batch-1024-ubatch-512`. The generator emits `batch-%d-ubatch-%d`, a
+**compound**, and Flash-Next's frontier never produced one — every name there
+was a simple `ubatch-N`.
+
+Taking the leading token called that candidate `batch` and treated it as
+unrelated to `ubatch-512`. That defeats the fix in exactly the case it exists
+for: a refused `ubatch-512` would be followed by a candidate carrying the same
+ubatch 512, refused for the same reason on the same device.
+
+Families are now every coordinate a name moves, parsed as key-value runs — a new
+key is a non-numeric token that *follows a value*. Descriptive tails follow a
+key rather than a value, so `topology-balanced-012` stays `topology` and
+`moe-owner-1` stays `moe`. Two candidates collide when their coordinate sets
+**overlap**, not when they are equal.
+
+All nine generator name formats are pinned in `calibrate_ladder_test.go`, with a
+case asserting the ladder will not follow `ubatch-512` with the compound.
+
+### What the 27B run measured
+
+| | default | batch-1024-ubatch-512 |
+|---|---:|---:|
+| workload makespan | 6.09 s | 6.11 s |
+| decode | 32.5 tok/s | 32.4 tok/s |
+| prefill | 1713.5 tok/s | 1709.1 tok/s |
+| relative | 1.000 | 0.997 |
+
+A dead heat; `default` won and passed the relaunch, agent, cache and lifecycle
+gates. The screen here is 32,768 bytes (~10,714 tokens) per lane with
+`reuse >=8943 tokens/lane`, larger than Flash-Next's ~7,701.
+
+### The topology imbalance is not one model's quirk
+
+| model | residency | phase | imbalance |
+|---|---|---|---|
+| Qwen3.8-Flash-Next | 1.75x over VRAM | prefill | CUDA0 80% vs CUDA2 7% |
+| Qwen3.8-Flash-Next, 2nd launch | same | prefill / append | 79% vs 8% / 71% vs 2% |
+| Qwen3.8-27B | fully resident | append | GPU1 79% vs GPU0 5% |
+| Qwen3.8-27B, challenger | fully resident | prefill | GPU1 98% vs GPU2 0% |
+
+Two models, two residency classes, four launches. One card near saturation while
+another sits under 10% is the most reproducible unexploited signal measured so
+far, and no candidate family moves it.
+
+## CALIBLADDER — the ladder reaches a challenger, and the phase guard earns its keep — 2026-09-14
+
+`CALIBBUDGET` fixed the accounting but not the blocker. The blocker was
+selection: `calibrationAutoMaxCandidates = 4` leaves three challenger slots, and
+all three went to `ubatch-2048`, `ubatch-1024` and `ubatch-512` — one lever
+family, three rungs, all refused for the same reason on the same device.
+
+`selectAutomaticCalibrationAdmissionPlan` had already written down the fix and
+implemented only half of it:
+
+> If the predicted primary is a batch/topology coordinate, keep one legal
+> slot-count fallback in the bounded admission ladder. This is especially
+> important after a high-ubatch candidate fails: retrying two more members of
+> the same family teaches nothing about aggregate agent throughput.
+
+That reasoning was applied only to `parallel-`. On this model the frontier
+offered `parallel 1..1`, so the special case matched nothing and the generic
+fill took the ubatch neighbours. It is now applied to every lever: remaining
+slots prefer a family nobody has tried, falling back to same-family only when
+that is all the generator produced. The family is read from the generator's own
+naming (`ubatch-2048` to `ubatch`, `moe-owner-1` to `moe`), so no model or
+hardware specifics are encoded.
+
+### The first measured challenger on this model
+
+| | default | ubatch-512 |
+|---|---:|---:|
+| workload makespan | 48.72 s | **32.37 s** |
+| relative | 1.000 | **1.505** |
+| prefill | 146.3 tok/s | **229.8 tok/s** (+57%) |
+| decode | 16.6 tok/s | **10.3 tok/s** (-38%) |
+| measured bottleneck | GPU topology | host workers at 90% capacity |
+
+**The aggregate winner lost.** `[optimize] candidate winner default (turn
+48.72s, relative 1.000)`, then `workflow winner default passed clean relaunch,
+agent, cache, and lifecycle gates`. A candidate 1.5x better end to end was
+refused because decode regressed 38% against a 5% allowance — invariant 6
+holding on live data rather than in a unit test. Had only the aggregate been
+scored, ggrun would have shipped a plan that makes every generated token 38%
+slower.
+
+### The bottleneck moved, and named a new lever
+
+At ubatch 512 the limit is no longer the GPU split. Decode and mixed both
+saturate the configured host workers (87% and 90%, measured), and the optimizer's
+safe levers change accordingly:
+
+```
+[optimize] ubatch-512 safe levers: tune physical-core count and affinity;
+           separate batch and decode thread settings
+```
+
+PCIe during cached append rose from 60/29 MiB/s at the baseline to 4704/884
+MiB/s at ubatch 512 — roughly 78x — and is still reported as **not proven
+saturated**. Thread count and affinity are the next demonstrated lever, not the
+bus.
+
+### Open
+
+- Separate batch and decode thread settings are untried; the optimizer names
+  them and no candidate moves them.
+- ubatch-512 was admissible on this launch and not on the previous one, because
+  the baseline expert placement differed. The family-spreading itself is proven
+  by unit tests; its live effect appears only when a finalist is refused.
+- Two samples per placement. The 1.505 aggregate and the 38% decode regression
+  are both far outside that noise, but a promotion would need matched repeats.
+
+## SEATCOST — what a reviewer/worker seat costs on an offloaded MoE — 2026-09-14
+
+Every measurement before this one used plain serving, so no companion was
+seated and none of it describes the configuration an agent user actually runs.
+`ggrun dry-run` prices the seats without loading anything.
+
+Qwen3.8-Flash-Next-UD-Q3_K_XL, same host, GPUs idle, `--claude-code`:
+
+| seat | `--claude-reviewer` | resident expert layers | per-agent context |
+|---|---|---:|---|
+| self-classify | `off` | **35** of 48 | 262,144 |
+| review-only, Qwen3.5-2B | `qwen2b` | **33** | 262,144 |
+| worker + reviewer, Qwen3.5-4B | `qwen` | **31** | 262,144 |
+
+**A review-only seat costs 2 expert layers; the worker/reviewer seat costs 4.**
+Per-agent context is identical across all three, so the arms are comparable on
+the terms the handoff requires: main-model context and quality held equal, and
+the companion charged against the same usable VRAM.
+
+### Claude Code mode is a different plan from plain serving
+
+| | plain | `--claude-code` |
+|---|---|---|
+| context | 262,144 total, 1 slot | 1,048,576 total, **4 slots** |
+| per agent | 262,144 | 262,144 |
+| ubatch | 256 | 64 |
+| resident experts | 28 of 48 | 31-35 of 48 |
+
+Claude Code mode plans four slots at the same per-agent context, which changes
+batch/ubatch and the expert packing with it. Every figure recorded before
+`SEATCOST` — including the 7.63 correct tasks/min on Flash-Next — belongs to the
+plain single-slot plan, not to the agent configuration.
+
+### What this does not yet establish
+
+The cost is measured; the benefit is not. `RESIDENCYFRACTION` says resident
+expert fraction predicts agentic speed, so giving up 4 of 35 layers is a real
+price, and whether the worker earns it back by absorbing classifier and
+cheap-tier traffic is exactly the milestone 3 comparison that has not been run.
+Nothing here says two models lose — only what they cost.
+
+## CLAUDEMODE — the agent configuration is the slow one, and a seat cannot launch — 2026-09-14
+
+First measurements of Qwen3.8-Flash-Next through `--claude-code` rather than
+plain serving. Same agent suite (`ab35d682`), per-agent context matched.
+
+### Claude Code mode costs two thirds of the throughput
+
+| | plain serving | `--claude-code --claude-reviewer off` |
+|---|---:|---:|
+| plan | 262,144 tokens, 1 slot | 1,046,528 total / **261,888 per agent**, 4 slots |
+| resident expert layers | 28 of 48 | **19 of 48** |
+| correct tasks/min | **7.63** | **2.42** |
+| median task | 14.79 s | 30.51 s |
+| tasks completed | 3/3 | **2/3** |
+
+Per-agent context is equal, so this is not a context trade. Four slots need four
+times the total KV, that KV is bought out of the same VRAM, and nine more expert
+layers go to host RAM. `SLOTS` and `RESIDENCYFRACTION` predicted the mechanism;
+this measures the end-to-end cost, including a task that did not finish.
+
+**The four-slot Claude Code default is wrong for a CPU-offloaded MoE.** A slot
+cap keyed on the expert displacement the planner already computes — rather than
+on a fixed parallel-4 floor — is the change this points to.
+
+### With a reviewer seated, the launch does not converge
+
+`--claude-reviewer qwen2b` (the smallest seat, 1.4 GB) never reaches a load:
+
+```
+Error starting server: memory preflight did not converge after 5 re-plans;
+refusing a real model load
+```
+
+It fails closed, which is correct. But the `n-cpu-moe` trace across the rounds
+oscillates rather than converging:
+
+```
+46 → 45 → 46 → 40 → 44 → 45 → 46 → 44 → 45
+```
+
+Twice a `preflight context-replanned` step recomputes placement from scratch and
+returns expert layers that a derate **in this same launch** had already moved to
+the CPU — 46 to 40 gives back six at once. The following rounds claw them back
+one at a time until the replan budget is gone.
+
+This is the `EXPERTPIN` bug family on a path its guard does not cover.
+`undoesProvenExpertRelief` arms only from `acceptedNCPUMoE`, which is recorded
+by `acceptContext` after an exact preflight **fits**. Here nothing ever fits, so
+the ratchet never arms and every context re-plan is free to undo the accumulated
+derates.
+
+So a reviewer seat on this model is not merely expensive, it is currently
+unreachable, and the cause is a defect rather than a capacity limit.
+
+### What this does not establish
+
+The worker/reviewer benefit is still unmeasured: no arm with a seated companion
+has served a request, so nothing here says a companion cannot pay for itself.
+`SEATCOST` priced the seat from dry-run estimates at 2 and 4 expert layers; the
+live plans differ from those estimates (19 resident rather than the estimated
+35), so the dry-run numbers rank the seats but do not size them.
+
+### The correlation is exact
+
+Aligning the nine rounds against the step that produced each one:
+
+| step | kind | `n-cpu-moe` |
+|---|---|---:|
+| 1 | expert-derate | 46 |
+| 2 | **context-replanned** | **45** |
+| 3 | expert-derate | 46 |
+| 4 | **context-replanned** | **40** |
+| 5-7 | expert-derate x3 | 44, 45, 46 |
+| 8 | **context-replanned** | **44** |
+| 9 | expert-derate | 45 |
+
+Every derate raises it; every context re-plan lowers it. Nine for nine, so this
+is a mechanism rather than a plausible reading. `--claude-reviewer qwen` fails
+the same way.
+
+### The fix has a mechanism already in the codebase
+
+`recomputeAutomaticContextRecovery` recomputes a complete plan at a smaller
+context, and `placement.Options` carries no expert-residency floor — which is
+why the recompute is free to re-pack experts back onto the GPU. Confirmed by
+inspection: the only MoE-related inputs are `MoESplitOwnerGPU`,
+`CPUExpertMMapCapability` and `ForceSpecMoE`, none of which pin residency.
+
+`launchRequest.AdvisorVRAMPenaltyMB` is the existing lever for exactly this. Its
+own comment: *"shrinks a device's usable VRAM for the next re-plan... the
+advisor names a device and a layer count, and the deterministic planner re-packs
+every GPU around the reduced budget."* Carrying the accumulated residency into a
+context re-plan as a VRAM penalty would let the packer reproduce it without a
+new placement input, and without any partial argv overlay.
+
+Deliberately not implemented in this pass. It is a protected-path change whose
+proof is a live launch, each costing a multi-minute load of an 83.8 GiB model,
+and the contract does not accept unit tests as evidence for it.
+
+### Open
+
+- Carry accumulated expert residency into the context re-plan via
+  `AdvisorVRAMPenaltyMB`, so a re-plan cannot undo a derate from the same
+  launch. Verify by launching Flash-Next with `--claude-reviewer qwen2b`, which
+  currently cannot converge.
+- Key the Claude Code slot count on computed expert displacement instead of a
+  fixed parallel-4 floor. The `off` arm above is the evidence: four slots cost
+  nine expert layers and two thirds of the throughput at equal per-agent
+  context.
+- Re-run the seat comparison once a seat can launch. Until then the worker
+  benefit is unmeasured, and nothing here argues a companion cannot pay for
+  itself.

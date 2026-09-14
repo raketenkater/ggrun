@@ -325,23 +325,103 @@ func selectAutomaticCalibrationAdmissionPlan(candidates []placement.CalibrationC
 			}
 		}
 	}
-	for _, candidate := range candidates[1:] {
-		if len(out) >= limit {
-			break
-		}
-		duplicate := false
-		for _, selected := range out[1:] {
-			if candidate.Name == selected.Name {
-				duplicate = true
+	// Fill the remaining slots with a coordinate nobody has tried yet before
+	// falling back to another rung of a family already represented. This is the
+	// same reasoning the parallel case above states, applied to every lever
+	// rather than only to slot count.
+	//
+	// Without it the ladder degenerates whenever the generator offers several
+	// rungs of the predicted family. Measured on Qwen3.8-Flash-Next: the
+	// frontier calculated five candidates including two topology shapes, the
+	// automatic set keeps four, and all three challenger slots went to
+	// ubatch-2048, ubatch-1024 and ubatch-512. All three were refused for the
+	// same reason on the same device, and no topology shape was ever admitted.
+	for _, preferNewFamily := range []bool{true, false} {
+		for _, candidate := range candidates[1:] {
+			if len(out) >= limit {
 				break
 			}
+			if selectedCalibrationCandidate(out[1:], candidate) {
+				continue
+			}
+			if preferNewFamily && selectedCalibrationFamily(out[1:], candidate) {
+				continue
+			}
+			out = append(out, candidate)
 		}
-		if duplicate {
-			continue
-		}
-		out = append(out, candidate)
 	}
 	return out
+}
+
+// calibrationLeverFamilies names every coordinate a candidate moves, read from
+// the generator's own naming. Candidates sharing a coordinate are
+// near-duplicates for admission: when one cannot be admitted the next usually
+// cannot either, and measuring a second says nothing about a different
+// bottleneck.
+//
+// The generator names candidates as key-value runs, so a new key is a
+// non-numeric token that follows a value: "batch-1024-ubatch-512" moves both
+// batch and ubatch. Taking only the leading token would call that one "batch"
+// and treat it as unrelated to "ubatch-512", which is exactly the pairing the
+// spreading is meant to avoid. Descriptive tails are not keys — in
+// "topology-balanced-012" and "moe-owner-1" the second token follows a key
+// rather than a value, so the families are "topology" and "moe".
+//
+// Qwen3.8-Flash-Next never exposed this: its frontier produced five candidates
+// with simple names. Qwen3.8-27B produces twenty-seven, including the compound
+// form.
+func calibrationLeverFamilies(name string) []string {
+	parts := strings.Split(name, "-")
+	if len(parts) == 0 || parts[0] == "" {
+		return []string{name}
+	}
+	families := []string{parts[0]}
+	for i := 1; i < len(parts); i++ {
+		if isNumericToken(parts[i]) || !isNumericToken(parts[i-1]) {
+			continue
+		}
+		families = append(families, parts[i])
+	}
+	return families
+}
+
+func isNumericToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func selectedCalibrationCandidate(selected []placement.CalibrationCandidate, candidate placement.CalibrationCandidate) bool {
+	for _, s := range selected {
+		if s.Name == candidate.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// selectedCalibrationFamily reports whether any coordinate this candidate moves
+// is already represented in the ladder. Overlap is the right relation rather
+// than equality: "batch-1024-ubatch-512" shares ubatch with "ubatch-512" and
+// would be refused for the same reason on the same device.
+func selectedCalibrationFamily(selected []placement.CalibrationCandidate, candidate placement.CalibrationCandidate) bool {
+	families := calibrationLeverFamilies(candidate.Name)
+	for _, s := range selected {
+		for _, taken := range calibrationLeverFamilies(s.Name) {
+			for _, family := range families {
+				if taken == family {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func selectAutomaticCalibrationFinalist(candidates []placement.CalibrationCandidate, hasExactAllocation func(*placement.Strategy) bool) []placement.CalibrationCandidate {
@@ -935,6 +1015,22 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				}
 			} else {
 				admissionInconclusive = true
+			}
+			// The failure budget bounds expensive work: a candidate that read 84
+			// GiB of weights and then died is why it exists. A refusal that
+			// happens before any weight is read costs a plan and a preflight,
+			// and charging it the same retires the whole search after three
+			// cheap rejections inside one lever family.
+			//
+			// Observed on Qwen3.8-Flash-Next: ubatch 2048, 1024 and 512 were
+			// each refused by preflight with no model load between them
+			// (deficits 7026, 3608 and 1885 MiB on CUDA0), the budget was spent,
+			// and expert packing, topology and slot count were never measured at
+			// all. The elapsed-time budget and the finite candidate list still
+			// bound this loop.
+			if !exactAdmissionLoadedWeights(serr) {
+				fmt.Fprintf(os.Stderr, "[calibrate] %s was refused before any model load; not charging the reload failure budget\n", cand.Name)
+				continue
 			}
 			failures++
 			if failures >= budget.MaxFailures {
