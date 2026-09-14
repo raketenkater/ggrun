@@ -354,7 +354,36 @@ stays at 22 and the measured deficit falls only 101 -> 94 -> 87 MiB, about
 of any expert movement. Recovery believes it is relieving the failing device and
 is not.
 
-### The mechanical root cause, found on the fifth and sixth attempts
+### Correction: the previously recorded root cause was wrong
+
+`preflight_recovery_qwen_test.go` drives the selector with the exact failing
+Qwen argv and outcome. It overturns the diagnosis recorded below, which was
+reached by inference rather than observation:
+
+- The **ubatch lever is available** for this shape: `DerateCUDAOOMArgsForDeficit`
+  with ubatch allowed returns 256 -> 64. It is not disqualified by the
+  synthesised `AllocMB`.
+- The **expert lever does real work**: CUDA2 goes 4 -> 3 expert layers and
+  `n-cpu-moe` 22 -> 23. Recovery is not stalled on a no-op, and it is chosen
+  legitimately because it reports success first.
+- The pins are **whole-layer** — the OT pattern includes `down`, so it is not
+  the partial `gate_up|up_gate|gate|up` sub-pin that `computeBuffersFromVRAMDelta`
+  refuses to price. The expert pricing is not a partial-pin mis-estimate.
+
+So the open question is none of the three things previously blamed. It is why
+the **re-measured** deficit falls only about 7 MiB per round when a whole expert
+layer leaves the failing device. Each round re-plans and re-measures, so the
+plan may be re-committing on CUDA2 what the derate just freed. The next step is
+to compare the complete per-device ledger immediately before and after one
+accepted derate, which the handoff already asks for under "compare complete
+per-device and host ledgers".
+
+Six fixes were attempted and reverted across this session, all from inference
+about which branch executes. The test above exists so the next attempt starts
+from observation. Establishing it cost minutes and would have saved most of
+those six.
+
+### Superseded: the mechanical root cause claimed on the fifth and sixth attempts
 
 `DerateCUDAOOMArgsForDeficit` offers a ubatch reduction only inside
 `if isComputeBuffer`, and it sizes that reduction with
