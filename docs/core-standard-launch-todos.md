@@ -2775,3 +2775,51 @@ the residency check — for one offloaded-MoE launch, and report which rejects.
 The earlier attempt to reproduce this in a unit fixture failed because a
 three-GPU 85 GB MoE baseline would not compute in the test harness; the drop
 point is cheaper to observe on a real launch than to synthesise.
+
+## SLOTTRUTH — correcting SLOTLEVER: slot candidates are generated — 2026-09-14
+
+`SLOTLEVER` concluded from the `parallel 4..4` boundary line that the slot count
+"is outside the candidate space". **That was wrong.** Driving
+`placement.CalibrationCandidates` with this machine's real `detect.Detect()`
+capabilities and the real Qwen3.8-Flash-Next profile emits 32 candidates,
+including:
+
+```
+EMITTED parallel-3   ctx=1048576 parallel=3
+EMITTED parallel-2   ctx=1048576 parallel=2
+EMITTED parallel-1   ctx=1048576 parallel=1
+```
+
+So the generator does offer slot counts for exactly this shape. The boundary is
+computed over whatever candidate list is handed to it
+(`optimizer.go` accumulates `MinParallel`/`MaxParallel` across the passed
+candidates), and the live launch reported **6** candidates against the
+generator's 32. The live set is a filtered subset, and the filtering — not the
+generator — is what removes the slot candidates.
+
+`automaticWorkloadCandidateSet` alone does not explain it: it drops a candidate
+only when `parallel != baseline && parallel > demand`, and with demand 2 that
+drops `parallel-3` while keeping `parallel-2` and `parallel-1`.
+
+### A second correction, to SLOTFIX
+
+The same run shows `BASE ... auto=false`: the Claude Code base strategy does not
+carry `ContextAuto`. The per-agent scaling added in `SLOTFIX` is gated on that
+flag, so **it never executes on this path** — which is why the live boundary was
+unchanged. The residency comparison it fixes is still wrong on its own terms and
+the change is kept, but its gate is wrong for this case.
+
+### What is actually established
+
+- Slot candidates exist for this model and hardware.
+- Something between generation and the reported boundary removes them, and it is
+  not the residency comparison and not the demand filter alone.
+- `SLOTFIX`'s scaling is inert here because the base is not marked automatic.
+
+### Next step
+
+Log the candidate list at the point the boundary is built, on one real launch,
+and diff it against the generator's 32. That names the filter in one run. Do not
+change the slot policy until that filter is identified — two diagnoses have
+already been wrong, both from reading a summary line instead of the list behind
+it.
