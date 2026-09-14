@@ -1651,3 +1651,159 @@ resident model and should not be cited as evidence of wasted hardware here.
 - Automatic slot selection still chooses 1 and has no signal about intended
   lane count. Until a serving request can carry that, `--parallel` is the
   user's decision, and for agent work the measured answer on this rig is 2.
+
+## HOTEXPERTS — measured against agent work, and it does not pay — 2026-09-14
+
+The hot-expert cache has been the standing candidate for the CPU-offloaded MoE
+bottleneck, on the strength of +6% at K=32 from a synthetic benchmark driven by
+hand. It had never been measured against agent work. It has now, and the
+recommendation is **do not integrate**.
+
+Patched backends already exist on this machine for GLM-5.3-Flash and
+Qwen3.8-Flash-Next, advertising `--moe-expert-cache` and
+`--moe-expert-cache-inserts`, so the backend was never the blocker. Driving
+`llama-server` directly avoids the 32-commit rebase entirely and answers the
+question first.
+
+GLM-5.3-Flash UD-Q3_K_XL, ctx 131,072, `--n-cpu-moe 42`,
+`--moe-expert-cache-inserts 2`, `scripts/verify-agent-workload.py`, 1 repeat.
+
+| condition | cache | correct tasks/min | oracle | VRAM | CUDA1 SM |
+|---|---|---:|---:|---:|---:|
+| parallel 1, 2 lanes | off | 1.074 | 3/3 | 0.408 | 5.8% |
+| parallel 1, 2 lanes | off (repeat) | 1.037 | 3/3 | 0.408 | 6.0% |
+| parallel 1, 2 lanes | K=32 | 1.028 | 3/3 | **0.703** | 24.2% |
+| parallel 2, 4 lanes | off | **0.634** | 2/3 | 0.389 | 5.1% |
+| parallel 2, 4 lanes | K=32 | **0.584** | 2/3 | **0.683** | 17.7% |
+
+### The noise floor, measured rather than assumed
+
+Two runs intended as different configurations turned out identical - lowering
+`--n-cpu-moe` from 42 to 37 changed nothing, because the `-ot` string ends in
+`exps=CPU` as a catch-all that overrides it. Identical VRAM (20,060 vs 20,070)
+and identical SM confirm it. They scored 1.074 and 1.037: **3.6% spread on a
+null change.** At 3 tasks per run, nothing under about 7% is a result.
+
+That makes the parallel-1 cache gap (4.3%) a tie, and the load gap (7.9%) a
+real but modest loss.
+
+### Load makes it worse, not better
+
+The hypothesis was that concurrent agents share an expert working set, so hit
+rate should climb with load. The opposite happened. The mechanism is coherent:
+the cache spends host/PCIe bandwidth on inserts to save host/PCIe bandwidth on
+misses, and that path is the single contended resource here. More concurrency
+means more pressure on it, so cache maintenance costs more.
+
+The SM rise is the tell. CUDA1 goes 5.1% -> 17.7% with the cache on while
+throughput falls. That occupancy is upload work, not useful compute. Busy is
+not productive, and SM occupancy must not be used as a promotion signal.
+
+### Concurrency itself also loses on this model
+
+Independently of the cache, `--parallel 2` with 4 lanes scores 0.634 against
+~1.05 at one slot: **about 40% slower**. Two lanes contend for one host-RAM
+expert stream rather than overlapping. This is the mirror image of the resident
+27B, where a second slot was ~29% faster, and it confirms ggrun's automatic
+choice of 1 slot for this model was correct.
+
+### Recommendation
+
+- **Do not integrate** hot experts into the core engine. Four comparisons,
+  never a win, -7.9% under load, and it costs 14.4 GB that would otherwise hold
+  KV. On this rig that VRAM is worth more as agent context than as expert cache.
+- **Pass the flag through** for anyone who wants to experiment. Unknown flags
+  already forward to `llama-server`, so `--moe-expert-cache` needs no ggrun
+  change at all.
+
+### What this does not establish
+
+One model, one quantisation, one rig. K=32 with 2 inserts is a single operating
+point; a larger K, or fewer inserts, may trade differently, and a model whose
+expert working set is small enough to fit a high hit rate could behave
+differently again. What is established is that the +6% synthetic figure does
+not survive an agent workload, and that the integration case cannot rest on it.
+
+## HOSTBOUND — no placement lever improves GLM on this rig — 2026-09-14
+
+Five levers tested against the same agent suite on GLM-5.3-Flash UD-Q3_K_XL
+(137.4 GiB on 48 GiB of VRAM, ~120 GB of experts in host RAM). Every one either
+did nothing or hurt.
+
+| lever | result |
+|---|---|
+| more resident weights (VRAM 0.7023 -> 0.7627) | decode unchanged, 6.83 -> 6.83 tok/s |
+| hot-expert cache K=32 | tie at 1 slot, **-7.9%** at 2 slots |
+| `--parallel 2`, 4 lanes | **-40%** (0.634 vs ~1.05) |
+| `--n-cpu-moe` 42 -> 39 | **-12 to -16%** |
+| context 664,576 -> 131,072 | no change, within noise |
+
+### Using more of the machine made it slower, monotonically
+
+| config | ctx | n-cpu-moe | VRAM | correct tasks/min |
+|---|---:|---:|---:|---:|
+| backend direct | 131,072 | 42 | **0.408** | **1.074** |
+| ggrun auto | 664,576 | 42 | 0.763 | 1.03 |
+| ggrun, more resident | 131,072 | 39 | 0.600 | 0.907 |
+
+All 3/3 oracle-passed, so this is not a correctness artefact. The fastest
+arrangement used the least VRAM.
+
+### Why
+
+The single contended resource is host/PCIe bandwidth feeding 39-42 CPU-resident
+expert layers per token. Every lever tried either spends that resource to save
+it — the cache's inserts, a second lane's parallel demand — or adds
+cross-device synchronisation to a path already waiting on the CPU, which is
+what moving three expert layers onto GPUs did. Shifting a fortieth of the
+weight cannot pay for the coordination it adds.
+
+### What this means for the objective
+
+`fraction_of_vram` is a diagnostic, not a target, and on this model class it is
+actively anti-correlated with speed. A policy that maximises hardware use would
+have chosen the slowest configuration measured here. The product goal in README
+— "the fastest **stable** plan for the requested workload, not maximum VRAM
+fill" — is the correct one, and this is the measurement that backs it on the
+workload ggrun exists for.
+
+The honest recommendation for a model 3x over VRAM capacity is a smaller
+quantisation or more VRAM. There is no placement decision on this hardware that
+makes it fast, and more tuning attempts are not warranted without new evidence.
+
+### What is not established
+
+One model, one quantisation, one rig, single samples against a measured 3.6%
+noise floor. The `-12 to -16%` residency result is outside that floor but rests
+on one run per arm. A MoE that is only slightly over VRAM capacity — where
+resident experts are a large fraction of the offloaded set rather than a
+fortieth — is the case where residency should pay, and it is untested.
+
+### Qualification: this result is about *this* cache, not hybrid MoE inference
+
+HybriMoE (arXiv 2504.05897, built on kTransformers) reports 1.33x prefill and
+1.70x decode over a state-of-the-art hybrid MoE baseline using three mechanisms
+the patch measured above does not have:
+
+- **dynamic intra-layer scheduling** that balances work across CPU and GPU,
+- **impact-driven inter-layer prefetching** rather than loading on miss,
+- **score-based caching** rather than LRU.
+
+The patch tested here is reactive: it loads an expert when a miss occurs, with
+`--moe-expert-cache-inserts` bounding uploads per layer per step, and evicts by
+LRU. That is the difference that explains the measurements. A reactive insert
+spends host/PCIe bandwidth at the exact moment a miss proves that path is
+saturated, which is why the cache lost more under concurrency than at one slot.
+Prefetching moves that transfer off the critical path instead.
+
+The idle-compute signature recorded above — CUDA1 at 5.8% SM and CUDA2 at 2.9%
+while the CPU computes experts — is exactly what intra-layer scheduling
+targets. Those numbers are an argument that there is real headroom here, not
+that the headroom is unreachable.
+
+So the conclusion is narrower than "hot experts does not pay": **this
+implementation, at K=32 with 2 inserts, on this model and rig, did not pay.**
+Whether a prefetching, co-scheduling implementation would is untested here and
+is not refuted by anything above. The comparison is also not directly
+transferable: HybriMoE's baseline is a hybrid framework on kTransformers, not
+llama.cpp, and the abstract does not name the models or hardware.
