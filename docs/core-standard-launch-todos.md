@@ -1336,3 +1336,90 @@ are not reproducible by this job.
   recorded and compared by hand until enough shapes exist to set a floor.
 - Decode throughput is still unmeasured here. The run logged a 765.2 tok/s
   prefill pilot; that is not a decode result and not an agent-workload result.
+
+## RESERVE — the runtime graph reserve could only ratchet up — 2026-09-14
+
+Why the hardware was not being used, measured rather than argued.
+
+GLM-5.3-Flash, three-card rig. ggrun's preflight ledger against what the launch
+actually allocated, sampled once the launcher reported ready:
+
+| device | fit | overhead | runtime reserved | budgeted | actual | over-reserved |
+|---|---:|---:|---:|---:|---:|---:|
+| CUDA0 | 6,941 | 274 | 4,007 | 11,222 | 7,425 | 3,797 |
+| CUDA1 | 16,778 | 445 | 6,406 | 23,629 | 17,532 | 6,097 |
+| CUDA2 | 9,133 | 191 | 859 | 10,183 | 9,551 | 632 |
+| total | | | 11,272 | 45,034 | 34,508 | **10,526** |
+
+ggrun was not choosing to leave 14.6 GB idle. It believed the cards were 94%
+full, and that reserve pushed 43 expert layers to the CPU on a model whose own
+diagnosis reads `bottleneck CPU expert bandwidth`, with 122,844 MiB of weights
+in host RAM.
+
+### Root cause
+
+`RecordRuntimeGraphGrowthFromOOM` has two production callers, `main.go:5245`
+and `main.go:6572`. Both are failure paths. `RecordRuntimeGraphGrowth` — the
+success-path recorder — had **no production caller at all**; only
+`placement_test.go:1937` called it. No key could acquire a growth record by
+working.
+
+An automatic context lands on a different ctx most launches, so the exact key
+is usually cold and falls back to `RelatedModelRuntimeGraphGrowth`. That carry
+matches on model basename plus GPU signature and deliberately relaxes backend,
+ctx and ubatch, then takes the **maximum** across every match. So one large
+growth becomes the permanent floor for every later plan.
+
+Here the 4,007 MiB came from this same model on **2026-09-03**, at ctx 790,528
+/ ubatch 64, on the `glm-5-3-flash-hot-experts` build — applied eleven days
+later to ctx 500,736 / ubatch 128 on the plain build. It is not a foreign
+model's record, and an earlier draft of this entry was wrong to say so; it is
+this model's own record from an unrelated configuration, which the carry cannot
+distinguish.
+
+### The fix
+
+`RecordPostLaunchRuntimeGraphGrowth` files what a launch that reached healthy
+serving actually needed, for its own signature. Growth is
+`used - baseline - system overhead - (model + KV + compute)`, where the buffer
+figures come from the backend's own log via `parseBuffersFromLog` rather than
+from the strategy — deriving them from the plan would fold planning error into
+the measurement. A device missing any input yields no entry: an unexplained
+remainder is unknown, not growth.
+
+It cannot loosen a real OOM bound. `recordRuntimeGraphGrowth` keeps the larger
+of two measurements, so an observed allocation always wins; this only fills a
+key that knows nothing or replaces a guess. If a recorded value ever proves too
+small the backend OOMs, recovery derates, and the OOM recorder ratchets it back
+up — the direction that already worked.
+
+### Live evidence, same rig, automatic context and slots
+
+| run | reserve | `fraction_of_vram` | host model buffer |
+|---|---|---:|---:|
+| before | carried 4007 / 6406 / 859 | 0.7023 | 122,844.81 MiB |
+| A, learns | recorded 708 / 2303 / 474 | **0.7627** | 119,856.81 MiB |
+| B, spends | used the record | **0.7626** | 119,856.81 MiB |
+
+All three served 500,736 tokens on all three devices and passed generation,
+streaming, clean shutdown and port release. 2,988 MiB of expert weights moved
+off host RAM onto the cards, and the result is stable across two launches.
+
+Note the recorded growth (3,485 MiB total) is far above the ~746 MiB idle
+estimate in the table at the top. The recorder samples at the post-health point
+with the graph live, which is the conservative figure, and the right one for a
+memory reserve.
+
+### Open
+
+- The carry still takes the maximum across every configuration of a model. A
+  record from a much larger context or a different backend build can still
+  dominate a cold key. Narrowing it to comparable configurations is the next
+  step; recording success growth reduces how often the carry is reached at all
+  but does not change how it chooses.
+- `OptimizationBoundary.DeviceSlackMB` is written and never read.
+- `CalibrationCandidates` varies batch, ubatch, parallel and topology policy,
+  but never expert residency, so no candidate proposes spending proven slack on
+  moving experts off the CPU.
+- Decode throughput is still unmeasured. This entry proves residency and
+  lifecycle, not tokens per second.

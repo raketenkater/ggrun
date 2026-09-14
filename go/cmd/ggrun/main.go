@@ -4267,6 +4267,11 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU)
 	}
 	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
+	// Learn the reserve from a launch that worked, not only from ones that
+	// failed. Both other growth recorders are OOM paths, so without this the
+	// reserve only ever rises and a cold key keeps borrowing another model's
+	// failure.
+	placement.RecordPostLaunchRuntimeGraphGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU, serverLog)
 	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
 	placement.RecordPostLaunchContextAllocation(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog, strategy.Parallel)
