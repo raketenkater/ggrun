@@ -409,6 +409,46 @@ the launch blocker:
 2. Relief is a boolean derived from argv differences rather than a measured
    quantity compared against the deficit.
 
+### Milestone 2 — verify the ordinary local agent experience: partly verified
+
+Evidence in the core ledger under `AGENTPATH`, all on `v3.2.9-dev.expertpin`.
+
+| item | state |
+|---|---|
+| Clean temporary install, download, launch, generate, cleanup | covered by the install-e2e job on Linux and Windows |
+| Readiness, generation, streaming, clean shutdown, port release | passed |
+| **Cancellation mid-stream then reconnect** | **new check**; slot back in 0.607 s, no restart |
+| **Reusable project prefix** | **new check**; 8.0% of a 6,433-token prefix re-evaluated |
+| Bounded repository task with tool turns | passed, 2 lanes |
+| TUI/CLI resolver agreement | **settled by construction plus three new regressions** |
+| Effective per-agent context shown | formatted in code but not printed on the calibrated path |
+| Automatic context policy left alone | unchanged; no 128k/32k floor invented |
+
+TUI/CLI agreement needed no comparison harness. `cmdGUI` turns selections into
+argv with `tuiLaunchArgs` and calls the same `cmdLaunch` the command line calls,
+so the only way they can disagree is a selection that does not survive the argv
+round trip. `tui_cli_agreement_test.go` now holds the round trip, the
+preference-versus-instruction distinction that keeps the recovery ladder able to
+move an untouched row, and a reflection guard that fails when a field is added
+and never wired. The guard found `FlashAttn` dead: hardcoded true, never
+emitted, never read.
+
+The two new serving checks are in `scripts/verify-installed-serving.py`.
+Cancellation runs everywhere; prefix reuse is behind `--prefix-reuse` because it
+needs a context larger than the 2,048 the install CI jobs use.
+
+Remaining for this milestone:
+
+- The calibrated launch path returns before `printOptimizationSummary` when it
+  reuses a cached decision, so `ctx N total / M per agent` is never printed. The
+  numbers are still visible in the `[placement] context fit` line. Left
+  unpatched because it is display-only code inside a protected path; it wants
+  its own small change with the core gate rather than a drive-by edit.
+- `--prefix-reuse` is not plumbed through `verify-gpu-install.py`, so the GPU CI
+  job cannot request it.
+- Not yet exercised: a long multi-turn session against a substantial repository,
+  as opposed to the bounded three-task suite.
+
 ### Known limitations of current evidence
 
 - Single runs per configuration; no matched repeats.

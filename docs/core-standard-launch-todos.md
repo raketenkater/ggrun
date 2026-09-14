@@ -2052,3 +2052,70 @@ Uncached `scripts/verify-core-engine.sh` green across all six core packages.
 - Recovery compares per-device ledgers but that comparison is not yet asserted
   to be complete — a device absent from one side is not distinguished from a
   device at zero.
+
+## AGENTPATH — the ordinary agent path, measured end to end — 2026-09-14
+
+First run of the installed launcher through the whole user-facing path rather
+than through health and a single completion. Binary `v3.2.9-dev.expertpin`
+(the `EXPERTPIN` fix), Qwen3.8-27B-UD-Q4_K_XL, automatic context, no flags
+beyond host/port and the live-probe allowance.
+
+| check | result |
+|---|---|
+| launcher readiness and `/health` | ok |
+| weight devices | CUDA0, CUDA1 (CUDA2 left at 114 MiB) |
+| served shape | 262,144 tokens, 1 slot |
+| generation, streaming | ok |
+| **cancellation mid-stream, then reconnect** | slot back in **0.607 s**, no restart |
+| **prefix reuse behind a 6,433-token prefix** | **516 tokens re-evaluated (8.0%)**, 3,788 ms to 487 ms |
+| bounded agent workload, 2 lanes | passed |
+| shutdown | clean, no forced kill, port released |
+
+VRAM at 61% of the machine's 49,134 MiB. That is not underuse: the model and
+its 262k context fit on two cards, and `RESIDENCYFRACTION` already established
+that filling the third would not make it faster.
+
+### What the two new checks establish
+
+Cancellation is the common case in agent use — the user interrupts, or the
+client drops mid-stream — and a slot that is never released turns the next
+request into a hang. Aborting the connection after three SSE chunks and
+immediately asking for a completion returned in 0.607 s, so the slot is
+reclaimed without a restart.
+
+Prefix reuse is what separates a responsive session from one that pays for the
+whole project context every turn. A second question behind an unchanged
+6,433-token prefix re-evaluated 8.0% of it. Both are now part of
+`scripts/verify-installed-serving.py`; cancellation runs unconditionally,
+prefix reuse behind `--prefix-reuse` because it needs a context large enough to
+hold the prefix and the install CI jobs run at 2,048.
+
+### TUI/CLI resolver agreement
+
+Settled by construction rather than by comparison: `cmdGUI` turns the user's
+selections into argv with `tuiLaunchArgs` and calls the same `cmdLaunch` the
+command line calls, so agreement reduces to whether every selection survives the
+argv round trip. Three regressions in `tui_cli_agreement_test.go` now hold that:
+
+- every field of a maximal `tui.LaunchRequest` parses back to the same value,
+  including `BackendExplicit`, which `userExplicitBackendFlag` reads to decide
+  whether a lever may be withdrawn;
+- an untouched row stays a preference and does not become a typed flag, which is
+  what keeps the recovery ladder able to move it;
+- a reflection guard fails when a `LaunchRequest` field is added and never wired
+  into `LaunchArgs`, with each non-argv field carrying its reason.
+
+The guard found one dead field: `FlashAttn` is hardcoded `true` in
+`buildLaunchRequest` and never emitted or read.
+
+### Open
+
+- On this launch the effective per-agent context was never printed.
+  `optimizationSummaryLines` formats `ctx N total / M per agent`, but the
+  calibration path returns before `printOptimizationSummary` when it reuses a
+  cached decision. The information is still visible in
+  `[placement] context fit: 262144 tokens, 1 slot(s)`; the clearer line is not.
+  Left unpatched: it is display-only code inside a protected path.
+- `--prefix-reuse` is not wired through `verify-gpu-install.py`, so the GPU CI
+  job cannot request it yet.
+- One run per check, one machine, three NVIDIA devices.

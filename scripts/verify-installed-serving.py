@@ -54,6 +54,72 @@ def streaming_request(port, timeout):
         return read_stream(response)
 
 
+def prefix_reuse(port, timeout):
+    """Ask two questions behind one long shared prefix and report what the
+    second had to re-evaluate.
+
+    A real agent replays a large, stable project prefix on every turn, so this
+    is the difference between a responsive session and one that pays for the
+    whole context each time. llama.cpp reports the prompt tokens it actually
+    evaluated in `timings.prompt_n`; a reused prefix makes the second number a
+    small fraction of the first. This returns the measurement rather than
+    asserting a ratio: prompt caching can be legitimately off, and the point
+    here is recorded evidence, not an invented threshold.
+    """
+    prefix = ("The following is a project file listing that does not change "
+              "between questions.\n") + "\n".join(
+        f"src/module_{i:03d}.go defines helper{i:03d} and its tests" for i in range(400))
+    measured = []
+    for question in ("Which file defines helper007?", "Which file defines helper011?"):
+        reply = request(port, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": f"{prefix}\n\n{question}"}],
+            "max_tokens": 16, "temperature": 0, "stream": False,
+        }, timeout=timeout)
+        timings = reply.get("timings") or {}
+        measured.append({"prompt_n": timings.get("prompt_n"), "prompt_ms": timings.get("prompt_ms")})
+    first, second = measured
+    reuse = {"first": first, "second": second}
+    if isinstance(first.get("prompt_n"), int) and isinstance(second.get("prompt_n"), int) and first["prompt_n"] > 0:
+        reuse["reevaluated_fraction"] = round(second["prompt_n"] / first["prompt_n"], 4)
+    return reuse
+
+
+def cancel_and_reconnect(port, timeout):
+    """Abandon a stream mid-generation, then prove the server still serves.
+
+    Cancellation is the common case in agent use — the user interrupts, or the
+    client drops — and a slot that is never released turns the next request into
+    a hang. Closing the response without draining it is what an interrupted
+    client actually does.
+    """
+    payload = {"messages": [{"role": "user", "content": "Count slowly from one to five hundred."}],
+               "max_tokens": 512, "temperature": 0, "stream": True}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    chunks = 0
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        for raw in response:
+            if raw.decode("utf-8", "replace").strip().startswith("data:"):
+                chunks += 1
+                if chunks >= 3:
+                    break  # leaving the context manager aborts the connection
+    if chunks < 3:
+        raise RuntimeError("stream ended before it could be cancelled")
+    # The slot must come back without a restart, and promptly.
+    started = time.monotonic()
+    reply = request(port, "/v1/chat/completions", {
+        "messages": [{"role": "user", "content": "Name one colour."}],
+        "max_tokens": 16, "temperature": 0, "stream": False,
+    }, timeout=timeout)
+    choices = reply.get("choices") or []
+    message = choices[0].get("message", {}) if choices else {}
+    text = message.get("content") or message.get("reasoning_content")
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("the request after a cancellation produced no text")
+    return {"cancelled_after_chunks": chunks, "recovery_s": round(time.monotonic() - started, 3)}
+
+
 def check_port_available(port):
     if os.name == "nt":
         # Preserve the native Windows probe: a short loopback connect can
@@ -146,6 +212,9 @@ def main():
     parser.add_argument("--agent-repeats", type=int, default=3)
     parser.add_argument("--ctx", type=int, default=2048)
     parser.add_argument("--request-timeout", type=int, default=120)
+    parser.add_argument("--prefix-reuse", action="store_true",
+                        help="Measure prompt re-evaluation behind a long shared prefix "
+                             "(needs a context large enough to hold it)")
     parser.add_argument("--min-weight-devices", type=int, default=0,
                         help="Require weight allocations on this many devices in the final launch")
     args = parser.parse_args()
@@ -230,6 +299,16 @@ def main():
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during streaming")
             result["streaming"] = True
+            # Cancellation and prefix reuse are the two acceptance items the
+            # health/generate/stream sequence above cannot see. Both are the
+            # ordinary agent path, not a stress test.
+            result["cancel_reconnect"] = cancel_and_reconnect(args.port, args.request_timeout)
+            if proc.poll() is not None:
+                raise RuntimeError("launcher exited during cancellation recovery")
+            if args.prefix_reuse:
+                result["prefix_reuse"] = prefix_reuse(args.port, args.request_timeout)
+                if proc.poll() is not None:
+                    raise RuntimeError("launcher exited during the prefix-reuse check")
             if args.agent_lanes:
                 subprocess.run([sys.executable, str(Path(__file__).with_name("verify-agent-workload.py")),
                                 "--url", f"http://127.0.0.1:{args.port}", "--output", str(output / "agent-workload"),
