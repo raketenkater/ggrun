@@ -1868,3 +1868,73 @@ paid for in expert residency**, and experts are what set decode speed.
 - This model is the 1.75x-over-VRAM case that would have bracketed the slot
   policy threshold between resident (4 slots good) and GLM at 2.86x (4 slots
   catastrophic). It cannot be measured until the launch converges.
+## OFFLOADBASE — the RAM-offload agentic baseline, and why slots are not its lever — 2026-09-14
+
+BOTHOBJECTIVES measured slots on a fully GPU-resident 27B, which is the easy
+case: a second slot spends spare VRAM on KV cache and overlaps two streams.
+ggrun exists for the model that does not fit, so the result has to be checked
+there. It does not transfer.
+
+`ggrun v3.2.9-dev`, GLM-5.3-Flash UD-Q3_K_XL (137.4 GiB, ~120 GB in host RAM),
+agent suite at 1 repeat, 512-token cap, `--calibrate off`.
+
+| | resident 27B, 2 slots | **offloaded GLM, 1 slot** |
+|---|---:|---:|
+| correct tasks/min | 13.27 - 13.74 | **1.03** |
+| median task latency | 8.4s | **115.1s** |
+| oracle-passed | 9/9 | 3/3 |
+| VRAM used | 44,104 (0.898) | 37,482 (**0.763**) |
+| CUDA0 SM mean | 26.5% | 38.4% |
+| CUDA1 SM mean | 37.8% | **7.3%** |
+| CUDA2 SM mean | 29.9% | **2.9%** |
+| CUDA2 busy >5% | 98% of samples | **33%** |
+
+The offloaded model already claims 76% of VRAM at one slot, so there is little
+memory headroom to win. What is idle is **compute**: CUDA1 holds 19.4 GB and
+runs at 7.3% SM, CUDA2 holds 9.4 GB and runs at 2.9%. The cards are not short
+of memory, they are waiting on experts streaming from host RAM. That matches
+the optimizer's own diagnosis, `bottleneck CPU expert bandwidth`.
+
+This also corrects BOTHOBJECTIVES' claim that there is "no idle-card problem
+during agent serving". That holds only for a resident model.
+
+### --parallel 2 is fighting the planner, not a missing feature
+
+Automatic slot selection chose **1** for this model. Forcing 2 exposed three
+real convergence defects, fixed in order, and still did not launch:
+
+1. recovery derived candidates from the original request and ignored the
+   ceiling, so context climbed back (merged, #56).
+2. the ceiling stepped down one 1,024-token granule against multi-GB deficits,
+   so the descent crept: 870,400 -> 817,152 -> 816,128.
+3. the re-plan budget charged productive rounds the same as churn, so a
+   geometric descent died one step short.
+
+With 2 and 3 fixed the descent is sound - 1,185,792 -> 873,472 -> 800,768 ->
+655,360, deficit 6,773 -> 1,558 - and it then stalled in the backend-measured
+branch, which keeps its own budget check.
+
+Stopping there deliberately. A fourth patch to the same loop is epicycles. For
+a model 3x over VRAM capacity, two lanes contend for one host-RAM expert
+stream, so **one slot is very likely correct** and the planner already chose
+it. The defects found along the way are worth having on their own; the
+configuration that exposed them is not worth forcing.
+
+### What would actually move the offloaded case
+
+Hot experts. A GPU-resident LRU cache over the offloaded experts attacks the
+thing idling those two cards - how often a token waits on PCIe - which is a
+compute-occupancy fix, not a memory-fill one. The +6% measured at K=32 has only
+ever been reached by driving llama-server by hand; the branch is 32 commits
+unmerged and still cannot engage through ggrun.
+
+Worker/reviewer routing is the other half, and it is now unblocked on the
+resident path: concurrent serving works there, proven by the 27B A/B.
+
+### Open
+
+- No hot-experts comparison against the 1.03 correct tasks/min figure above.
+- The backend-measured branch still charges progress as churn. Same fix as the
+  DoesNotFit branch, deliberately not applied in the same pass.
+- Slot count by residency class is unmeasured as a policy. Two data points
+  exist: resident wants more than 1, heavily offloaded wants 1.
