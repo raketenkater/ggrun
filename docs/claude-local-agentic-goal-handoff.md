@@ -316,6 +316,8 @@ the failing resource, not a larger context step.**
 | `v3.2.9-dev.dad77d9` | Qwen3.8-Flash-Next | 3/3 oracle, 7.76 correct tasks/min, 14.6s median |
 | `v3.2.9-dev.revert` | GLM-5.3-Flash | preflight converges to 500,736, model loads |
 | `v3.2.9-dev.revert` | Qwen3.8-Flash-Next | **still blocked** |
+| `v3.2.9-dev.lever2` | Qwen3.8-Flash-Next | still blocked; compute lever unreachable |
+| `v3.2.9-dev.relief` | Qwen3.8-Flash-Next | still blocked; relief predicate too permissive |
 
 ### Corrections applied to earlier claims in the core ledger
 
@@ -327,13 +329,37 @@ the failing resource, not a larger context step.**
 4. "DeviceSlackMB has no readers, so nothing consumes slack" inferred an absent
    capability from one unread field without tracing candidate/ledger paths.
 
-### Next concrete deliverable
+### Next concrete deliverable, with four hypotheses already eliminated
 
-Make recovery choose a lever with credible relief on the failing device:
-consider ubatch for oracle-planned deficits, compare complete per-device
-ledgers, and rank candidates by relief on that device rather than by whether
-they changed anything. That is the one change that can serve both models; it is
-deliberately not attempted as another point patch on top of five existing ones.
+Make recovery choose a lever with credible relief on the failing device. Four
+attempts were made and reverted; recording them so they are not repeated:
+
+1. **Widen the context step to the measured deficit.** Fixes Qwen, breaks GLM
+   (662,528 -> 236,544 in one round; the plans at that depth are refused by the
+   guards). Reverted.
+2. **Bound that step to a quarter of the window.** Converges close to main's
+   500,736 but still fails GLM. Reverted.
+3. **Allow compute memory as a last-resort lever for oracle-planned deficits.**
+   The branch is never reached: the earlier expert lever reports success first.
+   Reverted.
+4. **Rank levers by `candidateRelievesFailedDevice` before accepting one.** That
+   predicate returns **true** for the weak derate, so the ranking never fires.
+   Reverted.
+
+What (4) established is the sharpest available diagnosis: the lever set is not
+the problem and `candidateRelievesFailedDevice` is too permissive. On
+Qwen3.8-Flash-Next it credits a change as relieving CUDA2 while `n-cpu-moe`
+stays at 22 and the measured deficit falls only 101 -> 94 -> 87 MiB, about
+7 MiB per round, which is the size of the 1,024-token context nudge rather than
+of any expert movement. Recovery believes it is relieving the failing device and
+is not.
+
+The work is therefore to make relief a **measured quantity** compared against
+the deficit, not a boolean derived from argv differences: predict MiB freed on
+the failing device for each candidate lever, rank by that, and accept the weak
+candidate only as an explicit fallback. That requires reading the per-device
+ledger rather than comparing flags, which is why it is a design change and not a
+fifth point patch.
 
 ### Known limitations of current evidence
 
