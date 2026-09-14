@@ -1009,3 +1009,45 @@ long-context stability and matched agent-throughput acceptance remain open.
 
 Validation: `scripts/verify-core-engine.sh` passed uncached after the final
 change (six core package suites, formatting and vet); `git diff --check` passed.
+
+### Context and reliability follow-up — 2026-09-14
+
+User priority: failure to serve, or serving with insufficient context to complete
+agent work, takes precedence over throughput experiments and helper expansion.
+Preserve explicit parallelism; do not reinterpret a context repair as evidence
+that wider concurrency is faster.
+
+Confirmed a context-unit defect: automatic fit treated the model's native
+per-sequence context as a total across all slots. The Claude option builder
+also imposed that same native total cap. A roomy synthetic 131072-native model
+with two slots received 131072 total rather than 262144. The backend's
+`llama-context.cpp` compares per-sequence context with training context; its
+server caps each slot separately.
+
+Correction: derive a native total cap for each candidate slot count, retain the
+existing total workload ceiling and complete memory-fit search, preserve
+explicit numeric/max requests, and bound multiplication. Reduced-slot
+candidates cannot inherit the wider candidate's native allowance. Planner
+identity 6 retires verified configs produced by the earlier semantics.
+
+Regression coverage includes 1/2/4 slots, total policy limits, reduced-slot
+caps, integer overflow, the Claude option-to-placement path, and existing
+explicit-context and occupied-memory tests. The uncached core gate passed
+(six package suites, formatting and vet). This does not establish live memory
+admission or throughput at the larger contexts.
+
+Historical log inspection, 2026-09-14 (no live server found):
+`/home/mik/ggrun-project/ggrun/.logs/ggrun-claude-server-v2-8081-aaa6009f8acf7e7ce82a0f42.log`
+contains Qwen loads at total 262144, parallel 4, per-slot 65536, partitioned KV,
+resident loading. The retained full-GLM probe failure
+`.cache/memory-probes/failed-e8120838fcc66f29922823364dec37b8.log`
+shows mmap, total 172032, parallel 1 and a failed 2946038912-byte CUDA0 compute
+allocation. These are historical log excerpts, not new serving acceptance or
+exact current process identities. The per-slot cap correction cannot explain
+that single-slot GLM reduction; its compute/admission recovery remains open.
+
+The private lab's `qwen38-p1-p2-selection-2026-08-31.md` retains p1 as the serial
+baseline and notes unmatched traffic and queue-pressure limitations. No new
+concurrency winner is inferred here. Helper routing already exists through
+`claudeauto` utility/reviewer paths; expansion is deferred behind admission,
+useful-context and failure-recovery correctness.

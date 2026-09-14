@@ -61,24 +61,24 @@ func TestClaudeCodeDefaultContextIsBoundedByVRAM(t *testing.T) {
 	}
 }
 
-// Ample VRAM must still get the large window Claude Code wants: the bound is a
-// ceiling, not a cap.
+// Ample VRAM must retain the native window per agent, not divide one native
+// window across all concurrent slots.
 func TestClaudeCodeDefaultContextKeepsNativeWhenVRAMAllows(t *testing.T) {
 	model := fitTestModel(65536, 4000)
 	caps := fitTestCaps(24564)
 	req := &launchRequest{ClaudeCode: true, CtxFlag: "fit"}
 
 	opts := placementOptionsFromRequestCaps(req, model, fitTestBackend(), t.TempDir(), caps)
-	if opts.ContextSize != 0 || opts.AutoContextMax != model.CTXTrain {
-		t.Fatalf("fit options = ctx %d cap %d, want unresolved ctx and native cap %d",
-			opts.ContextSize, opts.AutoContextMax, model.CTXTrain)
+	if opts.ContextSize != 0 || opts.AutoContextMax != 1048576 {
+		t.Fatalf("fit options = ctx %d cap %d, want unresolved ctx and total workload cap %d",
+			opts.ContextSize, opts.AutoContextMax, 1048576)
 	}
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
 		t.Fatalf("compute fit: %v", err)
 	}
-	if strategy.ContextSize != model.CTXTrain {
-		t.Errorf("context = %d, want the native %d; VRAM was ample", strategy.ContextSize, model.CTXTrain)
+	if strategy.Parallel != 4 || strategy.ContextSize != 4*model.CTXTrain {
+		t.Errorf("context=%d slots=%d, want four native %d-token windows; VRAM was ample", strategy.ContextSize, strategy.Parallel, model.CTXTrain)
 	}
 }
 

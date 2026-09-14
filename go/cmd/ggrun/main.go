@@ -2669,10 +2669,10 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// This is a workload ceiling, not a pre-resolved context. The placement
 		// package still searches the exact full-plan boundary below it, so Claude,
 		// ordinary CLI, TUI, recovery, and dry-run all use one fit resolver.
-		autoContextMax = model.CTXTrain
-		if autoContextMax > 1048576 {
-			autoContextMax = 1048576
-		} else if autoContextMax <= 0 {
+		// The workload ceiling is total capacity. Native model context is a
+		// per-sequence limit, applied by placement for each candidate slot count.
+		autoContextMax = 1048576
+		if model.CTXTrain <= 0 && model.ContextSize <= 0 {
 			autoContextMax = 131072
 		}
 	}
@@ -5797,7 +5797,8 @@ func saveVerifiedConfigForLaunch(cfg *config.Config, req *launchRequest, model *
 // bandwidth-aware dense splits, VRAM-budgeted context fit, and granular context
 // maximisation all changed what a good plan looks like, and records written
 // before them would otherwise replay the old answer indefinitely.
-const planLogicVersion = "5"
+// Version 6 resolves native context per sequence for every candidate slot count.
+const planLogicVersion = "6"
 
 func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
 	if req == nil || model == nil || be == nil {

@@ -1062,7 +1062,7 @@ func computeAutomaticContextStrategy(caps *detect.Capabilities, model *ModelProf
 						continue
 					}
 					result, searchErr := searchAutomaticContextBoundary(
-						caps, model, opts, quality, kvPlacement, shape, tier, capContext,
+						caps, model, opts, quality, kvPlacement, shape, tier, autoContextCapForSlots(model, opts, shape.slots),
 					)
 					if searchErr != nil {
 						if firstAdmissionErr == nil {
@@ -1129,6 +1129,13 @@ func computeAutomaticContextStrategy(caps *detect.Capabilities, model *ModelProf
 }
 
 func autoContextCap(model *ModelProfile, opts Options) int {
+	return autoContextCapForSlots(model, opts, max(1, opts.Parallel))
+}
+
+// GGUF's native context is per sequence; --ctx-size reserves the total across
+// slots. A reduced slot candidate must receive its own cap, not the original
+// wider candidate's total (which could exceed the model's per-sequence limit).
+func autoContextCapForSlots(model *ModelProfile, opts Options, slots int) int {
 	native := 0
 	if model != nil {
 		native = model.CTXTrain
@@ -1136,15 +1143,27 @@ func autoContextCap(model *ModelProfile, opts Options) int {
 			native = model.ContextSize
 		}
 	}
+	slots = max(1, slots)
+	nativeTotal := 0
+	if native > 0 {
+		// Backend context fields are uint32; Go's planner uses int. Bound before
+		// multiplication so unusual metadata cannot wrap the search range.
+		limit := int(min(uint64(^uint(0)>>1), uint64(^uint32(0))))
+		if native > limit/slots {
+			nativeTotal = limit
+		} else {
+			nativeTotal = native * slots
+		}
+	}
 	capContext := opts.AutoContextMax
 	if capContext <= 0 {
-		capContext = native
+		capContext = nativeTotal
 	}
 	if capContext <= 0 {
 		capContext = unknownAutoContextCap
 	}
-	if native > 0 && native < capContext {
-		capContext = native
+	if nativeTotal > 0 && nativeTotal < capContext {
+		capContext = nativeTotal
 	}
 	if capContext >= contextGranularity {
 		capContext = capContext / contextGranularity * contextGranularity
