@@ -1187,3 +1187,35 @@ had it for context. The ledger now carries both, applied in one place
   re-plans that undid prior work rather than on genuinely new shapes. If a
   budget increase is ever proposed, it is a symptom, not a fix.
 - No `fraction_of_vram` figure for a model this size yet.
+
+### Resolved — GLM-5.3-Flash serves, 2026-09-14
+
+`v3.2.9-dev.2d1d0c1`, same rig, automatic context and slots, via
+`verify-installed-serving.py`. The re-plan reached a fixed point instead of
+undoing itself:
+
+```
+[launch] preflight: placement fits (CUDA0 11222/11873, CUDA1 23629/24112, CUDA2 10183/11909)
+[launch] memory plan stable at oracle-planned evidence
+```
+
+| | |
+|---|---|
+| weight devices | `CUDA0`, `CUDA1`, `CUDA2` — all three |
+| launch VRAM | 7,424 + 17,531 + 9,550 = **34,505 MiB of 49,134** |
+| `fraction_of_vram` | **0.7023** |
+| served | 500,736 tokens, 1 slot |
+| lifecycle | generation, streaming, no forced cleanup, port released |
+
+A 137.4 GiB model serving half a million tokens of context on 48 GB of VRAM,
+using 70% of it, with a clean shutdown. Against the Qwen3.5-4B baseline in the
+UTIL entry above (0.1819) this is the same launcher making very different use
+of the same machine, which is the comparison the utilisation figure exists to
+support.
+
+What this does **not** establish: decode throughput. The harness proves the
+lifecycle and how much hardware the placement claimed, not tokens per second.
+Prompt processing during the canary ran at 20 tok/s on a 6,356-token prompt;
+that is one cold observation, not a performance result, and P1's fast-path work
+still needs matched agent-workload evidence. Comparing this against the
+MiniMax-M3 row in the README requires a matched benchmark run, not this.
