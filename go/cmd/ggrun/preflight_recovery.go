@@ -23,6 +23,13 @@ type launchMemoryRecovery struct {
 	// at a context already disproved, so no identity ever matches and the loop
 	// climbs back into the rejected range until the re-plan budget expires.
 	rejectedContext int
+	// acceptedContext is the smallest automatic context an exact preflight has
+	// proven fits this launch. The backend-measured re-plan exists to refine
+	// placement from measured buffers, never to spend that proof on a larger
+	// context: observed twice on GLM-5.3-Flash, it discarded an accepted
+	// 555,008-token plan for 562,176 and failed against the same limit that had
+	// just rejected 563,200.
+	acceptedContext int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
@@ -59,15 +66,37 @@ func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy) {
 	}
 }
 
+// acceptContext records an automatic context an exact preflight proved fits.
+// Only measured evidence may be recorded; a planner estimate is not proof.
+func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
+	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
+		return
+	}
+	if r.acceptedContext == 0 || strategy.ContextSize < r.acceptedContext {
+		r.acceptedContext = strategy.ContextSize
+	}
+}
+
 // automaticContextCeiling is the largest automatic context this launch may
-// still propose. placement.Compute floors an AutoContextMax to its context
-// granule, so one token below the smallest rejected context excludes that
-// context itself without this package having to know the granule.
+// still propose, and it only ever ratchets down.
+//
+// A rejected context excludes itself, so it contributes one token below:
+// placement.Compute floors an AutoContextMax to its context granule, which
+// drops the rejected value without this package knowing the granule. An
+// accepted context contributes itself, because re-proposing exactly the plan
+// that passed is the fixed point this loop is trying to reach.
 func (r *launchMemoryRecovery) automaticContextCeiling() int {
-	if r == nil || r.rejectedContext <= 1 {
+	if r == nil {
 		return 0
 	}
-	return r.rejectedContext - 1
+	ceiling := 0
+	if r.rejectedContext > 1 {
+		ceiling = r.rejectedContext - 1
+	}
+	if r.acceptedContext > 0 && (ceiling == 0 || r.acceptedContext < ceiling) {
+		ceiling = r.acceptedContext
+	}
+	return ceiling
 }
 
 // boundByRejectedContext constrains a recompute to the contexts this launch has

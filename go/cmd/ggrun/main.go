@@ -4849,6 +4849,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				)
 				continue
 			}
+			// This argv passed exact preflight. Record its automatic context so the
+			// measured re-plan below can refine placement without spending that
+			// proof on a larger context. Only measured evidence counts as proof.
+			if preflight.Evidence.Level != memoryEvidenceNone {
+				memoryRecovery.acceptContext(strategy)
+			}
 			if preflight.Evidence.Level != memoryEvidenceNone && exactAdmission {
 				// The preflight measured this exact argv. Challenger admission must
 				// consume that proof directly; feeding it back through Compute can

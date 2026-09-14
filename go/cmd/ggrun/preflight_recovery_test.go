@@ -446,3 +446,33 @@ func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
 		t.Fatalf("ceiling %d; a later larger rejection must not raise it", got)
 	}
 }
+
+// The backend-measured re-plan refines placement from measured buffers. It may
+// not spend an accepted plan's proof on a larger context: on GLM-5.3-Flash it
+// discarded an accepted 555,008-token plan twice and failed against the same
+// limit, exhausting the re-plan budget before any weights loaded.
+func TestAcceptedContextBoundsTheMeasuredReplan(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(&placement.Strategy{ContextSize: 670720, ContextAuto: true})
+	recovery.rejectContext(&placement.Strategy{ContextSize: 563200, ContextAuto: true})
+	recovery.acceptContext(&placement.Strategy{ContextSize: 555008, ContextAuto: true})
+	if got := recovery.automaticContextCeiling(); got != 555008 {
+		t.Fatalf("ceiling %d; an accepted plan must bound the re-plan at itself", got)
+	}
+	// The observed climb: 562,176 sits under the rejected 563,200 but above the
+	// accepted 555,008, and it is exactly what broke the launch.
+	opts := boundByRejectedContext(placement.Options{}, recovery)
+	if opts.AutoContextMax >= 562176 {
+		t.Fatalf("AutoContextMax %d still admits the plan that broke the launch", opts.AutoContextMax)
+	}
+	// Recovery falling further must ratchet down, never back up.
+	recovery.acceptContext(&placement.Strategy{ContextSize: 500736, ContextAuto: true})
+	if got := recovery.automaticContextCeiling(); got != 500736 {
+		t.Fatalf("ceiling %d after a lower accepted plan", got)
+	}
+	// An explicit context is a user constraint, not a coordinate to record.
+	recovery.acceptContext(&placement.Strategy{ContextSize: 1024})
+	if got := recovery.automaticContextCeiling(); got != 500736 {
+		t.Fatalf("an explicit context moved the ceiling to %d", got)
+	}
+}
