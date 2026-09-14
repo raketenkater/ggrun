@@ -2090,6 +2090,22 @@ whole project context every turn. A second question behind an unchanged
 prefix reuse behind `--prefix-reuse` because it needs a context large enough to
 hold the prefix and the install CI jobs run at 2,048.
 
+### The cancellation check is portable, not tuned to this machine
+
+It ran unchanged in the Linux install-e2e job on `fe58b83`, twice, on a CPU-only
+ubuntu runner serving Qwen3.5-0.8B at 2,048 tokens.
+
+| host | model | recovery after abort |
+|---|---|---:|
+| this rig, 3 NVIDIA cards | Qwen3.8-27B, 262k ctx | 0.607 s |
+| ubuntu-latest, CPU only | Qwen3.5-0.8B, 2k ctx | 0.561 s |
+| ubuntu-latest, CPU only, downloaded model | Qwen3.5-0.8B, 2k ctx | 0.547 s |
+
+Three very different shapes, all within 60 ms of each other, which says the
+number is slot reclaim rather than anything about the hardware. `prefix_reuse`
+is correctly absent from both CI rows: it is gated behind `--prefix-reuse`
+because 2,048 tokens cannot hold the prefix.
+
 ### TUI/CLI resolver agreement
 
 Settled by construction rather than by comparison: `cmdGUI` turns the user's
