@@ -449,6 +449,42 @@ Remaining for this milestone:
 - Not yet exercised: a long multi-turn session against a substantial repository,
   as opposed to the bounded three-task suite.
 
+### Milestone 3 — worker/reviewer in the same plan: audited, one deliverable left
+
+Read-only audit of `go/pkg/claudeauto` against the four role contracts in this
+file. The required behaviours are already implemented; no second orchestration
+system is needed, and none was added.
+
+| required behaviour | where | state |
+|---|---|---|
+| Malformed reviewer output is not approval | `validReviewerVerdict` | holds — exactly one `<block>yes/no</block>`, or the stop-stripped form; thinking-only, tool-only, prose-mixed and *both* verdicts all fail |
+| Reviewer failure does not take the review down | `installReviewerFallbackHooks`, `deferredWriter` | holds — transport errors and non-2xx are withheld, nothing reaches the client, the main model self-classifies |
+| A required review is never silently skipped | `Router.ServeHTTP` classifier branch | holds — every fallback path routes to the main model and says so on stderr |
+| Context overflow is handled | reviewer context window check | holds — an oversized review prompt goes to the main model |
+| Foreground and safety work do not starve | `scheduler.go` lanes | holds — `LaneSafety` outranks interactive, which outranks bulk; fair share bounds the wait by *active conversations*, not queue depth |
+| Companion budgeted with the main model | `launchRequest.ReviewerReservation` | attached to every `Compute`, including recovery re-plans |
+| Cheap-tier work does not queue behind the main model | utility route | holds — `tryReviewerUtility` has the same withhold-and-retry safety without the verdict contract |
+
+Two details worth keeping:
+
+- A rejected reviewer answer is recorded as `reviewer-rejected/invalid-verdict`
+  rather than `unusable-response`, and the answer itself is printed. Without
+  that split a template mismatch is indistinguishable from an absent reviewer,
+  and every review silently leaks to the main model while looking healthy.
+- `conversationKey` once returned one key for every request, which made the
+  scheduler's affinity ordering inert. It was replaced by fair share after a
+  production run measured a foreground turn waiting a median of 35.4 minutes
+  behind a fan-out, against roughly 109 s of actual compute per turn.
+
+**The one thing missing is the comparison this file asks for**: the same
+workflow with a separate companion against a baseline that still performs every
+required review on the main model, measuring main latency, review wait, worker
+success, rework and total time to a correct result. The instrumentation is
+already there — `RequestRecord` carries `Route`, `QueueMS`, `TTFBMS`,
+`TotalMS`, `Aborted` and cache-read usage, which is exactly that set — so this
+is a measurement to run, not code to write. It needs a long two-arm session and
+has not been run.
+
 ### Known limitations of current evidence
 
 - Single runs per configuration; no matched repeats.
