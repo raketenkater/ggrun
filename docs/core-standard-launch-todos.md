@@ -2870,3 +2870,53 @@ of observing the list the code actually produces.
 Add a probe inside `pkg/placement` that walks the three drop points for this
 exact base and reports which rejects. The reproduction above makes that a
 sub-second test rather than a launch.
+
+## SLOTDROP — the slot lever is refused by the residency guard, correctly — 2026-09-14
+
+Fourth diagnosis on this question, and the first one observed rather than
+inferred. Replicating what `recomputeParallelCandidate` builds, against the real
+request options and the real model:
+
+```
+BASE       ctx=254976 parallel=3 perAgent=84992 kv=gpu  type=moe_offload
+parallel-1 ctx=84992  slots=1    perAgent=84992 kv=cpu  type=moe_offload
+parallel-2 ctx=169984 slots=2    perAgent=84992 kv=cpu  type=moe_offload
+```
+
+Both candidates compute cleanly, land on the requested slot count, and preserve
+per-agent context exactly. They are then rejected by `sameCalibrationResidency`,
+because the base is **GPU-resident KV** and every lower-slot plan the packer
+produces is **host KV**.
+
+The guard is right. Moving the KV cache to system RAM is a residency class
+change, not a tuning move, and the inspected backend also moves the
+corresponding attention computation to the CPU with it — a cost this file's own
+reasoning corrections already record. Comparing across that boundary would let a
+"faster" candidate win by quietly relocating attention to the host.
+
+**So the slot lever is not blocked by a defect.** Freeing KV by cutting slots
+gives the packer room it spends on expert residency, and the plan it then
+prefers puts KV on the host. The calibration contract refuses to compare that
+against a GPU-resident baseline, so the candidate never reaches the ladder.
+
+### What would actually open the lever
+
+Pin `KVPlacement` to the base's value inside `recomputeParallelCandidate`, so a
+slot candidate is forced to keep KV where the baseline has it and spend the
+freed memory on experts instead. That is a real placement question — it may
+simply not fit — and it is the experiment to run, not an assumption to encode.
+
+### Corrections this closes out
+
+Four diagnoses, three wrong:
+
+1. "Slots are outside the candidate space" — wrong, they are generated.
+2. "The residency comparison on total context blocks them" — a real flaw, fixed,
+   but not the blocker here.
+3. "Slot candidates are generated under the real options" — wrong; they are
+   generated under hand-built options and rejected under the real ones.
+4. **The residency guard rejects them on KV placement** — observed.
+
+Every wrong one came from reading a summary line or a partial reproduction. The
+sub-second reproduction in `SLOTREPRO` is what finally made the real list
+visible; it should be the first move next time, not the fourth.
