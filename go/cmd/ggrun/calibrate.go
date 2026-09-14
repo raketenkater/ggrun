@@ -936,6 +936,22 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			} else {
 				admissionInconclusive = true
 			}
+			// The failure budget bounds expensive work: a candidate that read 84
+			// GiB of weights and then died is why it exists. A refusal that
+			// happens before any weight is read costs a plan and a preflight,
+			// and charging it the same retires the whole search after three
+			// cheap rejections inside one lever family.
+			//
+			// Observed on Qwen3.8-Flash-Next: ubatch 2048, 1024 and 512 were
+			// each refused by preflight with no model load between them
+			// (deficits 7026, 3608 and 1885 MiB on CUDA0), the budget was spent,
+			// and expert packing, topology and slot count were never measured at
+			// all. The elapsed-time budget and the finite candidate list still
+			// bound this loop.
+			if !exactAdmissionLoadedWeights(serr) {
+				fmt.Fprintf(os.Stderr, "[calibrate] %s was refused before any model load; not charging the reload failure budget\n", cand.Name)
+				continue
+			}
 			failures++
 			if failures >= budget.MaxFailures {
 				fmt.Fprintln(os.Stderr, "[calibrate] failure budget reached; stopping candidate search")

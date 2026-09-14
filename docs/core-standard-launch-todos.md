@@ -2178,20 +2178,20 @@ ubatch costs compute buffer on every device. The accepted plan leaves CUDA2 at
 11,839 of 11,909 MiB — **70 MiB of slack**. All three were arithmetically
 impossible before they were tried.
 
-Placement had already said so. During planning it printed, nine times:
+**None of them loaded the model.** The three `[calibrate] measuring ...` lines
+and the budget-reached line are consecutive in the log, with no `load_model`
+between them: preflight refused each before a single weight was read. The cost
+was never reload time.
 
-```
-[placement] ubatch 512 did not yield a usable whole-layer MoE plan — using ubatch 256 instead
-```
-
-So **calibration does not consult what placement already established**. The
-consequence is not merely three wasted reloads: with the budget exhausted on
-ubatch, expert packing, topology and slot count are never reached at all on this
-model class. That is why the baseline always wins on this shape — nothing else
-is ever measured.
+The cost is the accounting. The failure budget exists to bound expensive work —
+a candidate that reads 84 GiB and then dies is why it exists — but an argv-time
+refusal is charged exactly the same. Three cheap rejections inside one lever
+family therefore retire the entire search, and **expert packing, topology and
+slot count are never reached at all** on this model class. That is why the
+baseline always wins on this shape: nothing else is ever measured.
 
 The negative result is at least cached (`cal-ee43f9c5...json`, admission-only
-evidence) so an identical launch does not reload again, which is what the
+evidence) so an identical launch does not repeat the search, which is what the
 milestone asks for.
 
 ### Two measured bottlenecks worth naming
@@ -2210,9 +2210,49 @@ retain expert-storage roles unless routing proves them active."
 
 ### Open
 
-- Candidate generation should not propose a shape placement has already refused
-  for this model, and an infeasible candidate should not consume the failure
-  budget that expert packing and topology never get to use.
+- Fixed in `CALIBBUDGET` below: a refusal that costs no model load no longer
+  consumes the reload failure budget.
+- Candidate generation still proposes a shape placement has already refused for
+  this model nine times during planning. Cheaper now that it costs no budget,
+  but still avoidable.
 - The prefill imbalance (80% against 7%) has a named lever and no experiment.
 - One run. The agent suite is three short repair tasks and does not exercise the
   262k context it now has.
+
+## CALIBBUDGET — a refusal that costs no load should not retire the search — 2026-09-14
+
+Fix for the defect `CALIBSPEND` measured. The failure budget bounds expensive
+work, and `exactAdmissionFailure` already carried the distinction needed to tell
+expensive from cheap: every typed refusal except `cuda-oom` is decided at argv
+time, before a process reads a weight. A CUDA OOM is the exception — it surfaces
+while device allocations are being made.
+
+Pre-load refusals no longer charge the reload failure budget. They still record
+the same stable-failure evidence, so the negative result is still cached. The
+loop stays bounded by the elapsed-time budget and the finite candidate list,
+both untouched.
+
+An untyped start failure — health timeout, interrupted load, transient backend
+fault — is classified as expensive. Mistaking a real reload for a cheap refusal
+is the failure mode that would make the search unbounded, so the default is the
+conservative one.
+
+### Regressions
+
+`calibrate_budget_test.go` covers every cheap class, the `cuda-oom` exception,
+untyped and nil errors, and wrapped errors — admission failures travel up
+several layers before the calibration loop reads them. Uncached
+`scripts/verify-core-engine.sh` green on all six core packages.
+
+### Live trace, same model and defaults
+
+With the cached decision moved aside so the search reruns, the candidate set is
+visibly wider than the one `CALIBSPEND` recorded:
+
+```
+[optimize] calculated 5 candidates (5 feasible, 1 exact): batch 2048..2048,
+           ubatch 128..2048, parallel 1..1, 2 topology shape(s)
+```
+
+Before the fix the budget was spent inside the ubatch family and the two
+topology shapes were never reached.

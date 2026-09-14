@@ -4434,6 +4434,24 @@ func isStableExactAdmissionFailure(err error) bool {
 	return errors.As(err, &failure)
 }
 
+// exactAdmissionLoadedWeights reports whether this failure could only have
+// happened after the backend began reading model weights. The typed refusals
+// are argv-time: admission recomputes the plan, sees the exact argv cannot be
+// honored, and declines before a process reads anything. A CUDA OOM is the
+// exception — it surfaces while device allocations are being made.
+//
+// Callers use this to separate cheap rejections from expensive ones. An untyped
+// error is an ordinary start failure (health timeout, interrupted load,
+// transient backend fault) and counts as expensive, because by then a load was
+// usually under way.
+func exactAdmissionLoadedWeights(err error) bool {
+	var failure *exactAdmissionFailure
+	if !errors.As(err, &failure) || failure == nil {
+		return true
+	}
+	return failure.class == exactAdmissionCUDAOOM
+}
+
 func exactAdmissionError(class exactAdmissionClass, detail string, cause error) error {
 	message := ""
 	switch class {
