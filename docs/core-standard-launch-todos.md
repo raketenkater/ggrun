@@ -1778,3 +1778,32 @@ noise floor. The `-12 to -16%` residency result is outside that floor but rests
 on one run per arm. A MoE that is only slightly over VRAM capacity — where
 resident experts are a large fraction of the offloaded set rather than a
 fortieth — is the case where residency should pay, and it is untested.
+
+### Qualification: this result is about *this* cache, not hybrid MoE inference
+
+HybriMoE (arXiv 2504.05897, built on kTransformers) reports 1.33x prefill and
+1.70x decode over a state-of-the-art hybrid MoE baseline using three mechanisms
+the patch measured above does not have:
+
+- **dynamic intra-layer scheduling** that balances work across CPU and GPU,
+- **impact-driven inter-layer prefetching** rather than loading on miss,
+- **score-based caching** rather than LRU.
+
+The patch tested here is reactive: it loads an expert when a miss occurs, with
+`--moe-expert-cache-inserts` bounding uploads per layer per step, and evicts by
+LRU. That is the difference that explains the measurements. A reactive insert
+spends host/PCIe bandwidth at the exact moment a miss proves that path is
+saturated, which is why the cache lost more under concurrency than at one slot.
+Prefetching moves that transfer off the critical path instead.
+
+The idle-compute signature recorded above — CUDA1 at 5.8% SM and CUDA2 at 2.9%
+while the CPU computes experts — is exactly what intra-layer scheduling
+targets. Those numbers are an argument that there is real headroom here, not
+that the headroom is unreachable.
+
+So the conclusion is narrower than "hot experts does not pay": **this
+implementation, at K=32 with 2 inserts, on this model and rig, did not pay.**
+Whether a prefetching, co-scheduling implementation would is untested here and
+is not refuted by anything above. The comparison is also not directly
+transferable: HybriMoE's baseline is a hybrid framework on kTransformers, not
+llama.cpp, and the abstract does not name the models or hardware.
