@@ -18,3 +18,10 @@ python3 scripts/verify-installed-serving.py \
 ```
 
 On Windows use the installed `ggrun.cmd` wrapper. The check uses a fixed 2048-token context and a short generation budget. It refuses an occupied port, bounds readiness, records the reply and log, and fails if forced cleanup is needed or the port remains occupied. This is installation/lifecycle validation; performance promotion still requires the protected core contract and matched agent-workload evidence.
+
+Two checks cover the parts of the agent path that health and one completion miss:
+
+- **Cancellation** runs everywhere. It abandons a stream after three chunks and then asks for a completion, so a slot that is never released shows up as a hang rather than passing silently. Recovery has measured 0.55-0.61 s across a CPU-only runner and a three-GPU box, which is slot reclaim rather than anything about the hardware.
+- **Prefix reuse** is behind `--prefix-reuse` and is off in CI, because it needs a context larger than the 2048 the install jobs use. It asks two questions behind one long shared prefix and records how much of it the second had to re-evaluate. It reports the measurement rather than asserting a ratio: prompt caching can legitimately be off.
+
+Add `--agent-lanes N` to run the bounded tool-using repair tasks against the same server. Those three tasks are a smoke test, not agentic acceptance.

@@ -485,7 +485,7 @@ already there — `RequestRecord` carries `Route`, `QueueMS`, `TTFBMS`,
 is a measurement to run, not code to write. It needs a long two-arm session and
 has not been run.
 
-### Milestone 4 — spend remaining capacity on demonstrated bottlenecks: started
+### Milestone 4 — spend remaining capacity on demonstrated bottlenecks: loop closed
 
 First standard launch of Qwen3.8-Flash-Next with the candidate controller
 enabled. Detail in the core ledger under `CALIBSPEND`.
@@ -512,14 +512,78 @@ Two bottlenecks are now named with measurements rather than inferred:
 - decode is in the CPU-expert path with PCIe active but **not proven saturated**
   (52/34 MiB/s), so DRAM and synchronization stay live candidates.
 
-Next for this milestone: stop infeasible candidates from consuming the failure
-budget, so the levers that matter on an offloaded MoE get measured at all. The
-prefill imbalance has a named lever and no experiment yet.
+Both defects are now fixed and the loop closes. Detail in `CALIBBUDGET` and
+`CALIBLADDER`.
+
+- **Budget accounting** (`CALIBBUDGET`): a refusal that reads no weights no
+  longer charges the reload failure budget. Correct on its own terms, but the
+  live trace showed it was **not** what blocked topology — the budget was
+  reached exactly as the last of three challengers finished, so nothing had ever
+  been skipped because of it.
+- **Candidate selection** (`CALIBLADDER`): that was the blocker. Three challenger
+  slots all went to one lever family. `selectAutomaticCalibrationAdmissionPlan`
+  already stated the fix in a comment and implemented it only for `parallel-`;
+  it now applies to every lever, with the family read from the generator's own
+  naming.
+
+The search then reached and measured a real challenger for the first time on
+this model, and **the phase guard refused it**: `ubatch-512` was 1.505x better
+on workload makespan (48.72 s to 32.37 s) with prefill up 57%, but decode fell
+38% against a 5% allowance. `default` won. Invariant 6 holding on live data is
+worth more than the speedup would have been — scoring the aggregate alone would
+have shipped a plan making every generated token 38% slower.
+
+The bottleneck moved with it. At ubatch 512 decode and mixed saturate the
+configured host workers (87% and 90%, measured), and the optimizer names the
+next lever itself: physical-core count, affinity, and separate batch/decode
+thread settings. No candidate moves those today. PCIe during cached append rose
+roughly 78x and is still not proven saturated, so the bus is still not the
+thing to blame.
 
 Also resolved from milestone 2: the `ctx N total / M per agent` line **does**
 print on a fresh calibration (`[optimize] roomy-resident, ctx 262144 total /
 262144 per agent, ...`). The gap is specific to the cached-decision path, as
 recorded.
+
+### Milestone 5 — close the release loop: partly closed, with coverage stated
+
+What is validated, and on which commit. Nothing here counts main-branch CI as
+proof that an older release contains these fixes.
+
+| path | state | where |
+|---|---|---|
+| Uncached `scripts/verify-core-engine.sh`, six packages | green at every commit in #58 and #61 | local |
+| Linux CPU install, download, generate, cancel, shutdown, port release | green | `install-e2e` linux |
+| Windows install, reinstall preserving config, generate | green | `install-e2e` windows |
+| Linux real-GPU serving | **not yet run on the #61 candidate** | `install-e2e` gpu, manual dispatch on main only |
+| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false | — |
+| macOS | **untested**, lower priority for this work | — |
+
+Model coverage on this machine, all on the installed single binary
+(`/home/mik/go/bin/ggrun`, PATH symlink `~/.local/bin/ggrun`):
+
+| class | model | state |
+|---|---|---|
+| resident | Qwen3.8-27B-UD-Q4_K_XL | served 262,144 tokens; cancellation 0.607 s; prefix reuse 8.0%; 3/3 agent tasks |
+| moderately CPU-offloaded MoE | Qwen3.8-Flash-Next-UD-Q3_K_XL (1.75x over VRAM) | launches since `EXPERTPIN`; 262,144 tokens at 28/48 resident experts, 89.5% VRAM, 7.63 correct tasks/min |
+| tight fit | GLM-5.3-Flash-UD-Q3_K_XL (2.86x over VRAM) | launched at 498,688 tokens on the #58 candidate; **not re-run since the calibration changes** |
+
+Recorded screen size, as the milestone asks rather than calling it long-context
+acceptance: the bounded screen uses 23,296 bytes (~7,701 tokens) per lane, with
+`reuse >=6503 tokens/lane` and a 48.48 s slowest workflow. The three-repair
+suite is a smoke test; it does not exercise the 262k context the plan now
+serves.
+
+`docs/release-validation.md` now documents the two new serving checks and says
+plainly which one is off in CI and why.
+
+Remaining before this milestone is closed:
+
+- Dispatch the GPU job on the candidate commit. It only runs from main, so the
+  candidate has to land first; that is the sequence, not an exemption.
+- Re-run the GLM tight-fit regression on the post-calibration binary.
+- Windows GPU and macOS stay marked untested. This box cannot certify generic
+  public claims; that needs an expanded hardware and model matrix.
 
 ### Known limitations of current evidence
 

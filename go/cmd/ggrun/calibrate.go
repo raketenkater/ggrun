@@ -325,23 +325,64 @@ func selectAutomaticCalibrationAdmissionPlan(candidates []placement.CalibrationC
 			}
 		}
 	}
-	for _, candidate := range candidates[1:] {
-		if len(out) >= limit {
-			break
-		}
-		duplicate := false
-		for _, selected := range out[1:] {
-			if candidate.Name == selected.Name {
-				duplicate = true
+	// Fill the remaining slots with a coordinate nobody has tried yet before
+	// falling back to another rung of a family already represented. This is the
+	// same reasoning the parallel case above states, applied to every lever
+	// rather than only to slot count.
+	//
+	// Without it the ladder degenerates whenever the generator offers several
+	// rungs of the predicted family. Measured on Qwen3.8-Flash-Next: the
+	// frontier calculated five candidates including two topology shapes, the
+	// automatic set keeps four, and all three challenger slots went to
+	// ubatch-2048, ubatch-1024 and ubatch-512. All three were refused for the
+	// same reason on the same device, and no topology shape was ever admitted.
+	for _, preferNewFamily := range []bool{true, false} {
+		for _, candidate := range candidates[1:] {
+			if len(out) >= limit {
 				break
 			}
+			if selectedCalibrationCandidate(out[1:], candidate) {
+				continue
+			}
+			if preferNewFamily && selectedCalibrationFamily(out[1:], candidate) {
+				continue
+			}
+			out = append(out, candidate)
 		}
-		if duplicate {
-			continue
-		}
-		out = append(out, candidate)
 	}
 	return out
+}
+
+// calibrationLeverFamily names the coordinate a candidate moves, read from the
+// generator's own naming ("ubatch-2048" and "ubatch-512" are both "ubatch";
+// "topology-..." and "moe-owner-3" are "topology" and "moe"). Two candidates in
+// one family are near-duplicates for admission: when one cannot be admitted the
+// next rung usually cannot either, and measuring a second member says nothing
+// about a different bottleneck.
+func calibrationLeverFamily(name string) string {
+	if i := strings.Index(name, "-"); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
+func selectedCalibrationCandidate(selected []placement.CalibrationCandidate, candidate placement.CalibrationCandidate) bool {
+	for _, s := range selected {
+		if s.Name == candidate.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func selectedCalibrationFamily(selected []placement.CalibrationCandidate, candidate placement.CalibrationCandidate) bool {
+	family := calibrationLeverFamily(candidate.Name)
+	for _, s := range selected {
+		if calibrationLeverFamily(s.Name) == family {
+			return true
+		}
+	}
+	return false
 }
 
 func selectAutomaticCalibrationFinalist(candidates []placement.CalibrationCandidate, hasExactAllocation func(*placement.Strategy) bool) []placement.CalibrationCandidate {

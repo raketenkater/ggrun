@@ -2199,7 +2199,10 @@ milestone asks for.
 From the optimizer's own phase analysis on this launch:
 
 - **Prefill is topology-limited: CUDA0 at 80% SM while CUDA2 sits at 7%.** The
-  split is 0.27/0.59/0.14, so the smallest share is also the idlest card.
+  split is 0.27/0.59/0.14, so the smallest share is also the idlest card. A
+  second independent launch reproduced it at 79% against 8%, and recorded the
+  cached-append phase at 71% against 2%. Two runs is not a distribution, but it
+  is no longer a single reading.
 - **Decode is in the CPU-expert path, and PCIe is not proven saturated** —
   RX/TX 52/34 MiB/s decode, 74/144 MiB/s mixed. The optimizer explicitly keeps
   DRAM and synchronization as live candidates rather than blaming the bus, which
@@ -2210,11 +2213,11 @@ retain expert-storage roles unless routing proves them active."
 
 ### Open
 
-- Fixed in `CALIBBUDGET` below: a refusal that costs no model load no longer
-  consumes the reload failure budget.
+- The budget accounting is fixed in `CALIBBUDGET` below, but that was **not**
+  why topology went unmeasured — see the correction there. The open item is
+  candidate selection: three challenger slots, all filled with one lever family.
 - Candidate generation still proposes a shape placement has already refused for
-  this model nine times during planning. Cheaper now that it costs no budget,
-  but still avoidable.
+  this model nine times during planning.
 - The prefill imbalance (80% against 7%) has a named lever and no experiment.
 - One run. The agent suite is three short repair tasks and does not exercise the
   262k context it now has.
@@ -2246,13 +2249,120 @@ several layers before the calibration loop reads them. Uncached
 
 ### Live trace, same model and defaults
 
-With the cached decision moved aside so the search reruns, the candidate set is
-visibly wider than the one `CALIBSPEND` recorded:
+With the cached decision moved aside so the search reruns:
 
 ```
 [optimize] calculated 5 candidates (5 feasible, 1 exact): batch 2048..2048,
            ubatch 128..2048, parallel 1..1, 2 topology shape(s)
+[calibrate] ubatch-2048 failed to start (... CUDA0 (7026 MiB deficit) ...)
+[calibrate] ubatch-2048 was refused before any model load; not charging the reload failure budget
+[calibrate] ubatch-1024 failed to start (... CUDA0 (3608 MiB deficit) ...)
+[calibrate] ubatch-1024 was refused before any model load; not charging the reload failure budget
+[calibrate] ubatch-512  failed to start (... CUDA0 (1885 MiB deficit) ...)
+[calibrate] ubatch-512  was refused before any model load; not charging the reload failure budget
 ```
 
-Before the fix the budget was spent inside the ubatch family and the two
-topology shapes were never reached.
+The same three deficits as `CALIBSPEND`, and the three new lines confirm the
+accounting change. **But the search still ends here, and the budget was not why.**
+
+Correcting the `CALIBSPEND` diagnosis: with `calibrationAutoMaxCandidates = 4`
+the automatic set is the baseline plus three challengers, and the log says so —
+"up to 3 contained admissions". `MaxFailures` is also 3. So the budget was
+reached exactly as the last challenger finished; **nothing was ever skipped
+because of it**. The load that follows in this run is the baseline being
+restored, not a candidate: `CUDA_Host model buffer size = 25219.14 MiB` is this
+run's own baseline figure, and `[optimize] calculated finalist was unavailable;
+restored measured baseline` follows it.
+
+The real blocker is candidate **selection**, not budget. The frontier calculated
+five candidates including two topology shapes; the set is trimmed to four, and
+finalist prioritization fills all three challenger slots with ubatch rungs. The
+topology shapes are discarded before the loop sees them.
+
+The budget change remains correct and is kept: charging a reload budget for a
+refusal that reads no weights is wrong on its own terms, and it will matter as
+soon as the challenger slots hold more than one lever family. It is simply not
+the fix that unblocks topology exploration.
+
+The `EXPERTPIN` guard also fired on this launch, unprompted:
+
+```
+[launch] preflight expert-derate after CUDA2 allocation 0 MiB (deficit 101 MiB, ctx=262144, n-cpu-moe=22, ubatch=256)
+[launch] preflight: placement fits (... CUDA2 10937/11909 ...)
+[launch] backend-measured recompute would undo proven expert relief; retaining the verified-safe placement
+```
+
+### Recorded screen size
+
+`[optimize] prefill pilot 128.0 tok/s; bounded screen uses 23296 bytes (~7701
+tokens) per lane for both placements`, and the baseline evidence line records
+`reuse >=6503 tokens/lane, slowest workflow 48.48s`. That is the ~8k corpus the
+handoff describes, recorded as an actual size rather than called long-context
+acceptance.
+
+## CALIBLADDER — the ladder reaches a challenger, and the phase guard earns its keep — 2026-09-14
+
+`CALIBBUDGET` fixed the accounting but not the blocker. The blocker was
+selection: `calibrationAutoMaxCandidates = 4` leaves three challenger slots, and
+all three went to `ubatch-2048`, `ubatch-1024` and `ubatch-512` — one lever
+family, three rungs, all refused for the same reason on the same device.
+
+`selectAutomaticCalibrationAdmissionPlan` had already written down the fix and
+implemented only half of it:
+
+> If the predicted primary is a batch/topology coordinate, keep one legal
+> slot-count fallback in the bounded admission ladder. This is especially
+> important after a high-ubatch candidate fails: retrying two more members of
+> the same family teaches nothing about aggregate agent throughput.
+
+That reasoning was applied only to `parallel-`. On this model the frontier
+offered `parallel 1..1`, so the special case matched nothing and the generic
+fill took the ubatch neighbours. It is now applied to every lever: remaining
+slots prefer a family nobody has tried, falling back to same-family only when
+that is all the generator produced. The family is read from the generator's own
+naming (`ubatch-2048` to `ubatch`, `moe-owner-1` to `moe`), so no model or
+hardware specifics are encoded.
+
+### The first measured challenger on this model
+
+| | default | ubatch-512 |
+|---|---:|---:|
+| workload makespan | 48.72 s | **32.37 s** |
+| relative | 1.000 | **1.505** |
+| prefill | 146.3 tok/s | **229.8 tok/s** (+57%) |
+| decode | 16.6 tok/s | **10.3 tok/s** (-38%) |
+| measured bottleneck | GPU topology | host workers at 90% capacity |
+
+**The aggregate winner lost.** `[optimize] candidate winner default (turn
+48.72s, relative 1.000)`, then `workflow winner default passed clean relaunch,
+agent, cache, and lifecycle gates`. A candidate 1.5x better end to end was
+refused because decode regressed 38% against a 5% allowance — invariant 6
+holding on live data rather than in a unit test. Had only the aggregate been
+scored, ggrun would have shipped a plan that makes every generated token 38%
+slower.
+
+### The bottleneck moved, and named a new lever
+
+At ubatch 512 the limit is no longer the GPU split. Decode and mixed both
+saturate the configured host workers (87% and 90%, measured), and the optimizer's
+safe levers change accordingly:
+
+```
+[optimize] ubatch-512 safe levers: tune physical-core count and affinity;
+           separate batch and decode thread settings
+```
+
+PCIe during cached append rose from 60/29 MiB/s at the baseline to 4704/884
+MiB/s at ubatch 512 — roughly 78x — and is still reported as **not proven
+saturated**. Thread count and affinity are the next demonstrated lever, not the
+bus.
+
+### Open
+
+- Separate batch and decode thread settings are untried; the optimizer names
+  them and no candidate moves them.
+- ubatch-512 was admissible on this launch and not on the previous one, because
+  the baseline expert placement differed. The family-spreading itself is proven
+  by unit tests; its live effect appears only when a finalist is refused.
+- Two samples per placement. The 1.505 aggregate and the 38% decode regression
+  are both far outside that noise, but a promotion would need matched repeats.
