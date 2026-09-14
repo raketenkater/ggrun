@@ -1585,3 +1585,69 @@ makespan by a third. The lever was scheduling, not memory.
   slots divide context and may interact with expert bandwidth very differently.
 - Worker/reviewer routing is still unimplemented. It depends on concurrent
   serving working, which it now does.
+
+## BOTHOBJECTIVES — slots maximise hardware use and speed together — 2026-09-14
+
+VRAMFILL showed that raising model-weight residency did not make GLM faster.
+SLOTS showed that a second serving slot made agent work about 29% faster. Those
+two entries read as a conflict between "use more of the hardware" and "serve
+faster". Measured together on the same suite, they are not in conflict at all.
+
+Qwen3.8-27B-UD-Q4_K_XL, `scripts/verify-agent-workload.py`, 2 lanes, 3 repeats,
+SM occupancy sampled once a second for the duration of the agent lanes.
+
+| | parallel 1 | parallel 2 |
+|---|---:|---:|
+| CUDA0 | 6,873 MiB | 11,613 MiB |
+| CUDA1 | 22,988 MiB | 22,732 MiB |
+| CUDA2 | **115 MiB** | **9,759 MiB** |
+| total | 29,976 of 49,134 (**0.610**) | 44,104 of 49,134 (**0.898**) |
+| correct tasks/min | 10.49 | **13.27 - 13.74** |
+| oracle-passed | 9/9 | 9/9 (and one 8/9, variance) |
+
+A second slot raised utilisation from 0.610 to 0.898 *and* cut makespan by
+roughly a third. It also brought CUDA2 from 115 MiB of scratch to 9,759 MiB of
+real work.
+
+### Why residency and slots behave differently
+
+A slot's cost is **context**, not weights. Adding one doubles the KV cache,
+which consumes VRAM that model weights could not usefully claim, and it gives
+the scheduler a second stream to overlap. Adding resident expert layers
+consumes the same VRAM but only shifts a fraction of a bandwidth-bound
+bottleneck, which is exactly what VRAMFILL measured: 3 GB of a 120 GB CPU
+expert set moved, decode unchanged at 6.83 tok/s.
+
+So `fraction_of_vram` is a fine diagnostic and a bad objective. What to
+maximise is useful concurrent work, and VRAM utilisation rises as a
+*consequence* when that is done through slots.
+
+### SM occupancy during agent work
+
+| gpu | mean | median | p90 | max | samples busy >5% |
+|---|---:|---:|---:|---:|---:|
+| CUDA0 | 26.5% | 29% | 31% | 52% | 94% |
+| CUDA1 | 37.8% | 39% | 43% | 54% | 98% |
+| CUDA2 | 29.9% | 31% | 35% | 41% | 98% |
+
+Two things follow. There is **no idle-card problem** during agent serving: all
+three are engaged in 94-98% of samples. And compute is **not** the limit
+either, at 27-38% mean SM — decode is memory-bandwidth bound, which is the
+expected shape.
+
+This also corrects a figure quoted earlier in this work. The
+`GPU 0 at 93% SM while GPU 1 is at 1%` line from the GLM logs is a **prefill**
+observation on a CPU-offloaded MoE. It does not describe agent serving on a
+resident model and should not be cited as evidence of wasted hardware here.
+
+### Open
+
+- Untested above 2 slots. Each slot divides context, so there is a point where
+  per-agent context becomes too small to be useful; the curve has one measured
+  point and needs more.
+- Untested on a CPU-offloaded MoE, where added slots divide context and
+  interact with expert bandwidth. GLM is the case to try and it is slow enough
+  that the suite needs a smaller repeat count.
+- Automatic slot selection still chooses 1 and has no signal about intended
+  lane count. Until a serving request can carry that, `--parallel` is the
+  user's decision, and for agent work the measured answer on this rig is 2.
