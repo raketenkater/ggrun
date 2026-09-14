@@ -1651,3 +1651,75 @@ resident model and should not be cited as evidence of wasted hardware here.
 - Automatic slot selection still chooses 1 and has no signal about intended
   lane count. Until a serving request can carry that, `--parallel` is the
   user's decision, and for agent work the measured answer on this rig is 2.
+
+## HOTEXPERTS — measured against agent work, and it does not pay — 2026-09-14
+
+The hot-expert cache has been the standing candidate for the CPU-offloaded MoE
+bottleneck, on the strength of +6% at K=32 from a synthetic benchmark driven by
+hand. It had never been measured against agent work. It has now, and the
+recommendation is **do not integrate**.
+
+Patched backends already exist on this machine for GLM-5.3-Flash and
+Qwen3.8-Flash-Next, advertising `--moe-expert-cache` and
+`--moe-expert-cache-inserts`, so the backend was never the blocker. Driving
+`llama-server` directly avoids the 32-commit rebase entirely and answers the
+question first.
+
+GLM-5.3-Flash UD-Q3_K_XL, ctx 131,072, `--n-cpu-moe 42`,
+`--moe-expert-cache-inserts 2`, `scripts/verify-agent-workload.py`, 1 repeat.
+
+| condition | cache | correct tasks/min | oracle | VRAM | CUDA1 SM |
+|---|---|---:|---:|---:|---:|
+| parallel 1, 2 lanes | off | 1.074 | 3/3 | 0.408 | 5.8% |
+| parallel 1, 2 lanes | off (repeat) | 1.037 | 3/3 | 0.408 | 6.0% |
+| parallel 1, 2 lanes | K=32 | 1.028 | 3/3 | **0.703** | 24.2% |
+| parallel 2, 4 lanes | off | **0.634** | 2/3 | 0.389 | 5.1% |
+| parallel 2, 4 lanes | K=32 | **0.584** | 2/3 | **0.683** | 17.7% |
+
+### The noise floor, measured rather than assumed
+
+Two runs intended as different configurations turned out identical - lowering
+`--n-cpu-moe` from 42 to 37 changed nothing, because the `-ot` string ends in
+`exps=CPU` as a catch-all that overrides it. Identical VRAM (20,060 vs 20,070)
+and identical SM confirm it. They scored 1.074 and 1.037: **3.6% spread on a
+null change.** At 3 tasks per run, nothing under about 7% is a result.
+
+That makes the parallel-1 cache gap (4.3%) a tie, and the load gap (7.9%) a
+real but modest loss.
+
+### Load makes it worse, not better
+
+The hypothesis was that concurrent agents share an expert working set, so hit
+rate should climb with load. The opposite happened. The mechanism is coherent:
+the cache spends host/PCIe bandwidth on inserts to save host/PCIe bandwidth on
+misses, and that path is the single contended resource here. More concurrency
+means more pressure on it, so cache maintenance costs more.
+
+The SM rise is the tell. CUDA1 goes 5.1% -> 17.7% with the cache on while
+throughput falls. That occupancy is upload work, not useful compute. Busy is
+not productive, and SM occupancy must not be used as a promotion signal.
+
+### Concurrency itself also loses on this model
+
+Independently of the cache, `--parallel 2` with 4 lanes scores 0.634 against
+~1.05 at one slot: **about 40% slower**. Two lanes contend for one host-RAM
+expert stream rather than overlapping. This is the mirror image of the resident
+27B, where a second slot was ~29% faster, and it confirms ggrun's automatic
+choice of 1 slot for this model was correct.
+
+### Recommendation
+
+- **Do not integrate** hot experts into the core engine. Four comparisons,
+  never a win, -7.9% under load, and it costs 14.4 GB that would otherwise hold
+  KV. On this rig that VRAM is worth more as agent context than as expert cache.
+- **Pass the flag through** for anyone who wants to experiment. Unknown flags
+  already forward to `llama-server`, so `--moe-expert-cache` needs no ggrun
+  change at all.
+
+### What this does not establish
+
+One model, one quantisation, one rig. K=32 with 2 inserts is a single operating
+point; a larger K, or fewer inserts, may trade differently, and a model whose
+expert working set is small enough to fit a high hit rate could behave
+differently again. What is established is that the +6% synthetic figure does
+not survive an agent workload, and that the integration case cannot rest on it.
