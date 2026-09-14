@@ -707,3 +707,67 @@ func TestContextReclaimRefusesToCreditHostKVAgainstADeviceDeficit(t *testing.T) 
 		t.Fatalf("GPU-resident KV produced no reclaim: %d", got)
 	}
 }
+
+// An explicit context is a user constraint, not a coordinate recovery may move.
+// The ledger must record nothing for it however the deficit is measured.
+func TestExplicitContextIsNeverRecordedByRecovery(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	explicit := &placement.Strategy{ContextSize: 131072, KVType: "q8_0", KVPlacement: "gpu"}
+	recovery.rejectContext(explicit, 4096)
+	if got := recovery.automaticContextCeiling(); got != 0 {
+		t.Fatalf("explicit context produced ceiling %d", got)
+	}
+	recovery.acceptContext(explicit)
+	if got := recovery.automaticContextCeiling(); got != 0 {
+		t.Fatalf("explicit context accepted into the ceiling: %d", got)
+	}
+	// Its ubatch is still a compute lever and is legitimately recorded.
+	explicit.UBatchSize = 128
+	recovery.acceptContext(explicit)
+	if got := boundByProvenLimits(placement.Options{UBatchSize: 512}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("proven ubatch %d not preserved for an explicit-context launch", got.UBatchSize)
+	}
+}
+
+// Competing deficits on different devices must each be sized against their own
+// device, and the ceiling must ratchet to the most demanding of them.
+func TestCompetingDeviceDeficitsEachSizeAgainstTheirOwnDevice(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	strategy := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "gpu",
+		TensorSplit: []float64{0.12, 0.76, 0.12},
+	}
+	majority := contextReclaimTokens(model, strategy, args, 1500, 1)
+	minority := contextReclaimTokens(model, strategy, args, 1500, 2)
+
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(strategy, majority)
+	recovery.rejectContext(strategy, minority)
+	ceiling := recovery.automaticContextCeiling()
+	want := strategy.ContextSize - maxPreflightInt(majority, minority)
+	if ceiling != want {
+		t.Fatalf("ceiling %d; the most demanding device wanted %d", ceiling, want)
+	}
+}
+
+// Unknown geometry must leave recovery a legal fallback rather than veto it.
+func TestUnknownGeometryLeavesRecoveryAFallback(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	noSplit := &placement.Strategy{ContextSize: 262144, ContextAuto: true}
+	if got := contextReclaimTokens(model, noSplit, []string{"llama-server"}, 1500, 0); got != 0 {
+		t.Fatalf("unknown KV type produced a guessed rate of %d tokens", got)
+	}
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(noSplit, 0)
+	if got := recovery.automaticContextCeiling(); got != noSplit.ContextSize-1 {
+		t.Fatalf("unknown geometry gave ceiling %d, want one token below %d", got, noSplit.ContextSize)
+	}
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1500, DoesNotFit: true,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+	candidate := *noSplit
+	candidate.ContextSize = noSplit.ContextSize - 1024
+	if !oracleContextDropCoversDeficit(model, noSplit, []string{"llama-server"}, &candidate, outcome) {
+		t.Fatal("unknown geometry vetoed the only remaining candidate")
+	}
+}
