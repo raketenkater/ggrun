@@ -23,6 +23,9 @@ type launchMemoryRecovery struct {
 	// at a context already disproved, so no identity ever matches and the loop
 	// climbs back into the rejected range until the re-plan budget expires.
 	rejectedContext int
+	// rejectedReclaimTokens is how far below rejectedContext the next proposal
+	// must land, derived from the measured deficit via KV size per token.
+	rejectedReclaimTokens int
 	// acceptedContext is the smallest automatic context an exact preflight has
 	// proven fits this launch. The backend-measured re-plan exists to refine
 	// placement from measured buffers, never to spend that proof on a larger
@@ -62,13 +65,60 @@ func (r *launchMemoryRecovery) isRejected(args []string) bool {
 // rejectContext records an automatic context proven not to fit. An explicit
 // context is a user constraint, not a coordinate this launch may move, so only
 // automatic contexts are recorded.
-func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy) {
+//
+// reclaimTokens is how far below the rejected context the next proposal has to
+// land to have any chance of covering the measured deficit. Without it the
+// ceiling sits one granule down, and the search creeps 1,024 tokens at a time:
+// GLM-5.3-Flash at --parallel 2 went 870,400 -> 817,152 -> 816,128 against
+// deficits of 2,763, 912 and 4,636 MiB and spent its whole budget getting
+// nowhere. Pass 0 when the deficit cannot be converted to tokens; absent is
+// not zero, so the ceiling then falls back to the one-granule step.
+func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy, reclaimTokens int) {
 	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
 	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
 		r.rejectedContext = strategy.ContextSize
+		r.rejectedReclaimTokens = 0
 	}
+	// Only a reclaim for the context that currently sets the ceiling counts, and
+	// only the largest such step: a later, bigger deficit at the same context
+	// means the earlier step was not enough.
+	if strategy.ContextSize == r.rejectedContext && reclaimTokens > r.rejectedReclaimTokens {
+		r.rejectedReclaimTokens = reclaimTokens
+	}
+}
+
+// contextReclaimTokens converts a measured VRAM deficit into the number of
+// context tokens whose KV cache covers it. KV is the part of the memory a
+// context change actually moves, so its size per token is the honest exchange
+// rate. Returns 0 when the geometry is unknown rather than guessing.
+func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Strategy, args []string, deficitMB int) int {
+	if model == nil || strategy == nil || deficitMB <= 0 || strategy.ContextSize <= 0 {
+		return 0
+	}
+	kvType := strategy.KVType
+	if kvType == "" {
+		kvType = effectiveMemoryArgValues(args)["cache-k"]
+	}
+	if kvType == "" {
+		return 0
+	}
+	kvTotalMB := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, hasArg(args, "--swa-full"))
+	if kvTotalMB <= 0 {
+		return 0
+	}
+	// tokens = deficit / (kvTotal / ctx), with the same safety margin the other
+	// recovery levers require of themselves.
+	required := recoveryRequiredMB(deficitMB)
+	tokens := int(int64(required) * int64(strategy.ContextSize) / int64(kvTotalMB))
+	if tokens <= 0 {
+		return 0
+	}
+	if tokens >= strategy.ContextSize {
+		tokens = strategy.ContextSize - 1
+	}
+	return tokens
 }
 
 // acceptContext records the shape an exact preflight proved fits. Only
@@ -94,18 +144,22 @@ func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
 // automaticContextCeiling is the largest automatic context this launch may
 // still propose, and it only ever ratchets down.
 //
-// A rejected context excludes itself, so it contributes one token below:
-// placement.Compute floors an AutoContextMax to its context granule, which
-// drops the rejected value without this package knowing the granule. An
-// accepted context contributes itself, because re-proposing exactly the plan
-// that passed is the fixed point this loop is trying to reach.
+// A rejected context contributes a step below itself: at least one token, so
+// that placement.Compute's granule floor drops the rejected value, and as much
+// as the measured deficit requires when that is known. An accepted context
+// contributes itself, because re-proposing exactly the plan that passed is the
+// fixed point this loop is trying to reach.
 func (r *launchMemoryRecovery) automaticContextCeiling() int {
 	if r == nil {
 		return 0
 	}
 	ceiling := 0
 	if r.rejectedContext > 1 {
-		ceiling = r.rejectedContext - 1
+		step := maxPreflightInt(r.rejectedReclaimTokens, 1)
+		if step >= r.rejectedContext {
+			step = r.rejectedContext - 1
+		}
+		ceiling = r.rejectedContext - step
 	}
 	if r.acceptedContext > 0 && (ceiling == 0 || r.acceptedContext < ceiling) {
 		ceiling = r.acceptedContext

@@ -397,7 +397,7 @@ func TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute(t *testing.T) {
 	}
 
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(current)
+	recovery.rejectContext(current, 0)
 
 	// This is the backend-measured recompute: it re-enters Compute from the
 	// original automatic request, which is why it reproduces the rejection.
@@ -434,13 +434,13 @@ func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
 		t.Fatal("a launch with no rejection must not cap its own context")
 	}
 	// An explicit context is a user constraint, not a coordinate to move.
-	recovery.rejectContext(&placement.Strategy{ContextSize: 65536})
+	recovery.rejectContext(&placement.Strategy{ContextSize: 65536}, 0)
 	if recovery.automaticContextCeiling() != 0 {
 		t.Fatal("an explicit context was recorded as an automatic rejection")
 	}
 	// The GLM-5.3-Flash sequence observed on 2026-09-14.
 	for _, ctx := range []int{592896, 385024, 589824} {
-		recovery.rejectContext(&placement.Strategy{ContextSize: ctx, ContextAuto: true})
+		recovery.rejectContext(&placement.Strategy{ContextSize: ctx, ContextAuto: true}, 0)
 	}
 	if got := recovery.automaticContextCeiling(); got != 385023 {
 		t.Fatalf("ceiling %d; a later larger rejection must not raise it", got)
@@ -453,8 +453,8 @@ func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
 // limit, exhausting the re-plan budget before any weights loaded.
 func TestAcceptedContextBoundsTheMeasuredReplan(t *testing.T) {
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(&placement.Strategy{ContextSize: 670720, ContextAuto: true})
-	recovery.rejectContext(&placement.Strategy{ContextSize: 563200, ContextAuto: true})
+	recovery.rejectContext(&placement.Strategy{ContextSize: 670720, ContextAuto: true}, 0)
+	recovery.rejectContext(&placement.Strategy{ContextSize: 563200, ContextAuto: true}, 0)
 	recovery.acceptContext(&placement.Strategy{ContextSize: 555008, ContextAuto: true})
 	if got := recovery.automaticContextCeiling(); got != 555008 {
 		t.Fatalf("ceiling %d; an accepted plan must bound the re-plan at itself", got)
@@ -525,7 +525,7 @@ func TestRecoveryCandidateRespectsTheProvenContextCeiling(t *testing.T) {
 		t.Skipf("fixture context %d is already below the rejection", current.ContextSize)
 	}
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(&placement.Strategy{ContextSize: rejected, ContextAuto: true})
+	recovery.rejectContext(&placement.Strategy{ContextSize: rejected, ContextAuto: true}, 0)
 
 	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil,
 		current, args, map[int]int{}, outcome, recovery)
@@ -542,5 +542,63 @@ func TestRecoveryCandidateRespectsTheProvenContextCeiling(t *testing.T) {
 	if _, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil,
 		current, args, map[int]int{}, outcome, nil); err != nil {
 		t.Fatalf("recovery without a ledger regressed: %v", err)
+	}
+}
+
+// A ceiling one granule below the rejection converges, but far too slowly to
+// matter: GLM-5.3-Flash at --parallel 2 walked 870,400 -> 817,152 -> 816,128
+// against deficits of 2,763, 912 and 4,636 MiB and exhausted its budget. The
+// step has to be sized by the deficit the context change must actually cover.
+func TestContextCeilingStepsDownByTheMeasuredDeficit(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--ctx-size", "816128", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	strategy := &placement.Strategy{ContextSize: 816128, ContextAuto: true, KVType: "q8_0"}
+
+	tokens := contextReclaimTokens(model, strategy, args, 4636)
+	if tokens <= 1024 {
+		t.Fatalf("a 4636 MiB deficit converted to %d tokens; that is still a nudge", tokens)
+	}
+
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(strategy, tokens)
+	ceiling := recovery.automaticContextCeiling()
+	if ceiling >= strategy.ContextSize-tokens+1 {
+		t.Fatalf("ceiling %d did not step down by the reclaim %d from %d", ceiling, tokens, strategy.ContextSize)
+	}
+
+	// An unknown deficit must still exclude the rejected context itself, and must
+	// not be treated as a zero-sized step.
+	plain := newLaunchMemoryRecovery()
+	plain.rejectContext(strategy, 0)
+	if got := plain.automaticContextCeiling(); got != strategy.ContextSize-1 {
+		t.Fatalf("unknown deficit gave ceiling %d, want one token below %d", got, strategy.ContextSize)
+	}
+
+	// A bigger deficit at the same context means the earlier step was too small.
+	recovery.rejectContext(strategy, tokens*2)
+	if got := recovery.automaticContextCeiling(); got != strategy.ContextSize-tokens*2 {
+		t.Fatalf("ceiling %d ignored the larger reclaim at the same context", got)
+	}
+	// A reclaim reported against a context that no longer sets the ceiling must
+	// not widen it back out.
+	recovery.rejectContext(&placement.Strategy{ContextSize: 900000, ContextAuto: true}, 1)
+	if got := recovery.automaticContextCeiling(); got != strategy.ContextSize-tokens*2 {
+		t.Fatalf("a stale reclaim moved the ceiling to %d", got)
+	}
+}
+
+// Unknown geometry yields no step rather than a guessed one.
+func TestContextReclaimTokensRefusesToGuess(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	strategy := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0"}
+	args := []string{"llama-server", "--cache-type-k", "q8_0"}
+	if got := contextReclaimTokens(model, strategy, args, 0); got != 0 {
+		t.Fatalf("no deficit gave %d tokens", got)
+	}
+	if got := contextReclaimTokens(nil, strategy, args, 1000); got != 0 {
+		t.Fatalf("no model gave %d tokens", got)
+	}
+	if got := contextReclaimTokens(model, &placement.Strategy{ContextAuto: true}, args, 1000); got != 0 {
+		t.Fatalf("no context gave %d tokens", got)
 	}
 }

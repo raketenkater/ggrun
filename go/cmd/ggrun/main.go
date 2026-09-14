@@ -4832,7 +4832,8 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			}
 			if preflight.DoesNotFit {
 				memoryRecovery.reject(serverArgs)
-				memoryRecovery.rejectContext(strategy)
+				memoryRecovery.rejectContext(strategy,
+					contextReclaimTokens(model, strategy, serverArgs, preflight.DeficitMB))
 				if exactAdmission {
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionMemory, fmt.Sprintf(" on CUDA%d (%d MiB deficit)", preflight.Device, preflight.DeficitMB), nil)
 				}
