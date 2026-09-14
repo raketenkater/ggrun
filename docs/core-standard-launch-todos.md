@@ -1084,3 +1084,60 @@ exact-candidate/repeated-argv/retry gates. Explicit context remains immutable.
 A real-Compute synthetic regression reproduced the same refusal at 69632 ->
 55296 tokens before the fix. Larger GLM contexts remain subject to admission;
 this repair is recovery correctness, not performance or serving proof.
+
+## CTXRATCHET — memory recovery climbed back into a rejected context — 2026-09-14
+
+GLM-5.3-Flash UD-Q3_K_XL (137.4 GiB), automatic context, `--parallel 1`, on the
+three-card rig. Codex had just fixed recovery discarding a fully recomputed
+smaller plan; with that fix the launch got further and then failed a second way:
+
+```
+[launch] preflight context-replanned after CUDA0 allocation 0 MiB (deficit 1810 MiB, ctx=385024, ...)
+[launch] preflight: placement fits (CUDA0 7397/11873, CUDA1 21745/24112, CUDA2 5552/6251)
+[placement] context fit: 589824 tokens, 1 slot(s), KV q8_0 on gpu
+[launch] backend-measured memory re-plan 5/5 changed the exact argv; verifying the new placement before production
+[launch] preflight: placement does not fit (CUDA0 13671/11873 ...)
+```
+
+Recovery lowered context from 592,896 to 385,024 and preflight **accepted** it.
+The backend-measured re-plan then recomputed from `placementOpts()` — the
+original automatic request — and proposed 589,824, back inside the range the
+same launch had already disproved. That burned the re-plan budget and the
+launch failed without ever loading weights.
+
+`launchMemoryRecovery` already refuses to resurrect a rejected argv, but it
+keys on the exact argv identity. The climbed-back plan has a *different* argv
+at a disproved context, so no identity ever matches. Context needed its own
+ledger entry.
+
+The fix mirrors the derating discipline one function away in
+`recoverPreflightOOM`, where a retry at ubatch 256 is explicitly never
+recomputed back to 512:
+
+- `launchMemoryRecovery.rejectContext` records the smallest **automatic**
+  context this launch has proven does not fit. An explicit context is a user
+  constraint (invariant 3) and is never recorded.
+- `automaticContextCeiling` returns one token below it. `placement.Compute`
+  floors `AutoContextMax` to its granule, so the rejected context is excluded
+  without the launch package knowing the granule.
+- `boundByRejectedContext` is the single place that applies the ceiling, so
+  production and tests exercise the same rule rather than a re-description.
+
+The ceiling only ratchets down. A later, larger rejection cannot raise it.
+
+Invariants: this strengthens 4 (memory safety is fail-closed — a disproved
+context stays disproved) and 10 (an ordinary launch does not become an
+unbounded series of long reloads). It moves no coordinate the user pinned.
+
+### What is proven and what is not
+
+Proven: `TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute` fails
+without the fix (`ceiling 0 does not exclude the rejected context 69632`) and
+passes with it; `TestContextCeilingOnlyRatchetsDown` replays the 592,896 →
+385,024 → 589,824 sequence above. Uncached `scripts/verify-core-engine.sh`
+passes on all six packages.
+
+Not proven: that GLM-5.3-Flash now reaches healthy serving. The fix removes one
+dead end; the launch may still need further recovery below 385,024, and only a
+live load says so. No hardware-utilisation figure exists for a model of this
+size yet — see the UTIL entry above for the measurement that will produce one.

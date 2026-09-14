@@ -378,3 +378,71 @@ func TestOracleContextRecoveryPreservesExplicitContext(t *testing.T) {
 		t.Fatalf("explicit context changed to %d", next.ContextSize)
 	}
 }
+
+// A context this launch disproved must stay disproved. The argv identity
+// ledger cannot enforce that: the recompute emits a different argv, so nothing
+// matches and the loop climbs back into the rejected range.
+func TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !current.ContextAuto || current.ContextSize <= 0 {
+		t.Fatalf("fixture did not produce an automatic context: %+v", current)
+	}
+
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(current)
+
+	// This is the backend-measured recompute: it re-enters Compute from the
+	// original automatic request, which is why it reproduces the rejection.
+	replan := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	replan.SkipPlacementCache = true
+	unbounded, err := placement.Compute(caps, model, replan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbounded.ContextSize != current.ContextSize {
+		t.Fatalf("fixture no longer reproduces the climb: %d -> %d", current.ContextSize, unbounded.ContextSize)
+	}
+
+	// Exactly what the launch loop applies before it recomputes.
+	replan = boundByRejectedContext(replan, recovery)
+	if replan.AutoContextMax <= 0 || replan.AutoContextMax >= current.ContextSize {
+		t.Fatalf("ceiling %d does not exclude the rejected context %d", replan.AutoContextMax, current.ContextSize)
+	}
+	bounded, err := placement.Compute(caps, model, replan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounded.ContextSize >= current.ContextSize {
+		t.Fatalf("recompute proposed %d at or above the rejected %d", bounded.ContextSize, current.ContextSize)
+	}
+	if !bounded.ContextAuto || bounded.Parallel != current.Parallel || bounded.KVType != current.KVType {
+		t.Fatalf("the ceiling changed workload policy: %+v", bounded)
+	}
+}
+
+func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	if recovery.automaticContextCeiling() != 0 {
+		t.Fatal("a launch with no rejection must not cap its own context")
+	}
+	// An explicit context is a user constraint, not a coordinate to move.
+	recovery.rejectContext(&placement.Strategy{ContextSize: 65536})
+	if recovery.automaticContextCeiling() != 0 {
+		t.Fatal("an explicit context was recorded as an automatic rejection")
+	}
+	// The GLM-5.3-Flash sequence observed on 2026-09-14.
+	for _, ctx := range []int{592896, 385024, 589824} {
+		recovery.rejectContext(&placement.Strategy{ContextSize: ctx, ContextAuto: true})
+	}
+	if got := recovery.automaticContextCeiling(); got != 385023 {
+		t.Fatalf("ceiling %d; a later larger rejection must not raise it", got)
+	}
+}

@@ -4827,6 +4827,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			}
 			if preflight.DoesNotFit {
 				memoryRecovery.reject(serverArgs)
+				memoryRecovery.rejectContext(strategy)
 				if exactAdmission {
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionMemory, fmt.Sprintf(" on CUDA%d (%d MiB deficit)", preflight.Device, preflight.DeficitMB), nil)
 				}
@@ -4859,6 +4860,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			} else if preflight.Evidence.Level != memoryEvidenceNone {
 				opts := placementOpts()
 				opts.SkipPlacementCache = true
+				// Preserve this launch's own disproof, the same way a retry at
+				// ubatch 256 is never recomputed back to 512. Recomputing from the
+				// original automatic request walks straight back to a context that
+				// exact preflight already rejected, and the argv identity ledger
+				// cannot catch it because the argv differs.
+				opts = boundByRejectedContext(opts, memoryRecovery)
 				next, rerr := placement.Compute(caps, model, opts)
 				if rerr != nil || next == nil {
 					if rerr != nil {

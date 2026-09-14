@@ -17,6 +17,12 @@ import (
 // already disproved.
 type launchMemoryRecovery struct {
 	rejected map[string]struct{}
+	// rejectedContext is the smallest automatic context this launch has proven
+	// does not fit. The argv identity ledger cannot carry this: a later
+	// recompute from the original automatic request proposes a *different* argv
+	// at a context already disproved, so no identity ever matches and the loop
+	// climbs back into the rejected range until the re-plan budget expires.
+	rejectedContext int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
@@ -39,6 +45,41 @@ func (r *launchMemoryRecovery) isRejected(args []string) bool {
 	}
 	_, rejected := r.rejected[launchArgsIdentity(args)]
 	return rejected
+}
+
+// rejectContext records an automatic context proven not to fit. An explicit
+// context is a user constraint, not a coordinate this launch may move, so only
+// automatic contexts are recorded.
+func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy) {
+	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
+		return
+	}
+	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
+		r.rejectedContext = strategy.ContextSize
+	}
+}
+
+// automaticContextCeiling is the largest automatic context this launch may
+// still propose. placement.Compute floors an AutoContextMax to its context
+// granule, so one token below the smallest rejected context excludes that
+// context itself without this package having to know the granule.
+func (r *launchMemoryRecovery) automaticContextCeiling() int {
+	if r == nil || r.rejectedContext <= 1 {
+		return 0
+	}
+	return r.rejectedContext - 1
+}
+
+// boundByRejectedContext constrains a recompute to the contexts this launch has
+// not already disproved. It is the single place that applies the ceiling, so
+// production and tests exercise the same rule. An explicit context is
+// untouched: AutoContextMax caps only an automatic/fit context.
+func boundByRejectedContext(opts placement.Options, r *launchMemoryRecovery) placement.Options {
+	ceiling := r.automaticContextCeiling()
+	if ceiling > 0 && (opts.AutoContextMax <= 0 || ceiling < opts.AutoContextMax) {
+		opts.AutoContextMax = ceiling
+	}
+	return opts
 }
 
 func (r *launchMemoryRecovery) hasRejections() bool {
