@@ -2669,10 +2669,10 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// This is a workload ceiling, not a pre-resolved context. The placement
 		// package still searches the exact full-plan boundary below it, so Claude,
 		// ordinary CLI, TUI, recovery, and dry-run all use one fit resolver.
-		autoContextMax = model.CTXTrain
-		if autoContextMax > 1048576 {
-			autoContextMax = 1048576
-		} else if autoContextMax <= 0 {
+		// The workload ceiling is total capacity. Native model context is a
+		// per-sequence limit, applied by placement for each candidate slot count.
+		autoContextMax = 1048576
+		if model.CTXTrain <= 0 && model.ContextSize <= 0 {
 			autoContextMax = 131072
 		}
 	}
@@ -4827,6 +4827,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			}
 			if preflight.DoesNotFit {
 				memoryRecovery.reject(serverArgs)
+				memoryRecovery.rejectContext(strategy)
 				if exactAdmission {
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionMemory, fmt.Sprintf(" on CUDA%d (%d MiB deficit)", preflight.Device, preflight.DeficitMB), nil)
 				}
@@ -4848,6 +4849,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				)
 				continue
 			}
+			// This argv passed exact preflight. Record its automatic context so the
+			// measured re-plan below can refine placement without spending that
+			// proof on a larger context. Only measured evidence counts as proof.
+			if preflight.Evidence.Level != memoryEvidenceNone {
+				memoryRecovery.acceptContext(strategy)
+			}
 			if preflight.Evidence.Level != memoryEvidenceNone && exactAdmission {
 				// The preflight measured this exact argv. Challenger admission must
 				// consume that proof directly; feeding it back through Compute can
@@ -4859,6 +4866,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			} else if preflight.Evidence.Level != memoryEvidenceNone {
 				opts := placementOpts()
 				opts.SkipPlacementCache = true
+				// Preserve this launch's own disproof, the same way a retry at
+				// ubatch 256 is never recomputed back to 512. Recomputing from the
+				// original automatic request walks straight back to a context that
+				// exact preflight already rejected, and the argv identity ledger
+				// cannot catch it because the argv differs.
+				opts = boundByProvenLimits(opts, memoryRecovery)
 				next, rerr := placement.Compute(caps, model, opts)
 				if rerr != nil || next == nil {
 					if rerr != nil {
@@ -5797,7 +5810,8 @@ func saveVerifiedConfigForLaunch(cfg *config.Config, req *launchRequest, model *
 // bandwidth-aware dense splits, VRAM-budgeted context fit, and granular context
 // maximisation all changed what a good plan looks like, and records written
 // before them would otherwise replay the old answer indefinitely.
-const planLogicVersion = "5"
+// Version 6 resolves native context per sequence for every candidate slot count.
+const planLogicVersion = "6"
 
 func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
 	if req == nil || model == nil || be == nil {

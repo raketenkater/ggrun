@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
@@ -328,5 +329,173 @@ func TestGeneratedSWAFullIsWithdrawnBeforeSheddingWeights(t *testing.T) {
 		typed, &placement.Strategy{UBatchSize: 512, NCPUMoE: 39}, baseArgs, nil, model, caps, outcome)
 	if method == "swa-full-withdrawn" {
 		t.Fatal("an explicitly typed --swa-full must not be withdrawn")
+	}
+}
+
+func TestOracleDeficitRetainsCompleteAutomaticContextReplan(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	current, err := placement.Compute(caps, model, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+	next, nextArgs, method, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome)
+	if err != nil {
+		t.Fatalf("oracle-backed full context replan discarded: %v", err)
+	}
+	if method != "context-replanned" || next.ContextSize >= current.ContextSize || next.ContextSize < 32768 {
+		t.Fatalf("recovery=%s ctx %d -> %d", method, current.ContextSize, next.ContextSize)
+	}
+	if next.Parallel != 1 || next.KVType != current.KVType || !next.ContextAuto {
+		t.Fatalf("recovery changed workload policy: %+v", next)
+	}
+	rebuilt := buildLaunchServerArgs(req, cfg, be, caps, model, next)
+	if launchArgsIdentity(nextArgs) != launchArgsIdentity(rebuilt) {
+		t.Fatal("recovery returned a partial argv overlay")
+	}
+}
+
+func TestOracleContextRecoveryPreservesExplicitContext(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "65536", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome)
+	if err == nil && next.ContextSize != 65536 {
+		t.Fatalf("explicit context changed to %d", next.ContextSize)
+	}
+}
+
+// A context this launch disproved must stay disproved. The argv identity
+// ledger cannot enforce that: the recompute emits a different argv, so nothing
+// matches and the loop climbs back into the rejected range.
+func TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !current.ContextAuto || current.ContextSize <= 0 {
+		t.Fatalf("fixture did not produce an automatic context: %+v", current)
+	}
+
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(current)
+
+	// This is the backend-measured recompute: it re-enters Compute from the
+	// original automatic request, which is why it reproduces the rejection.
+	replan := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	replan.SkipPlacementCache = true
+	unbounded, err := placement.Compute(caps, model, replan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbounded.ContextSize != current.ContextSize {
+		t.Fatalf("fixture no longer reproduces the climb: %d -> %d", current.ContextSize, unbounded.ContextSize)
+	}
+
+	// Exactly what the launch loop applies before it recomputes.
+	replan = boundByProvenLimits(replan, recovery)
+	if replan.AutoContextMax <= 0 || replan.AutoContextMax >= current.ContextSize {
+		t.Fatalf("ceiling %d does not exclude the rejected context %d", replan.AutoContextMax, current.ContextSize)
+	}
+	bounded, err := placement.Compute(caps, model, replan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounded.ContextSize >= current.ContextSize {
+		t.Fatalf("recompute proposed %d at or above the rejected %d", bounded.ContextSize, current.ContextSize)
+	}
+	if !bounded.ContextAuto || bounded.Parallel != current.Parallel || bounded.KVType != current.KVType {
+		t.Fatalf("the ceiling changed workload policy: %+v", bounded)
+	}
+}
+
+func TestContextCeilingOnlyRatchetsDown(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	if recovery.automaticContextCeiling() != 0 {
+		t.Fatal("a launch with no rejection must not cap its own context")
+	}
+	// An explicit context is a user constraint, not a coordinate to move.
+	recovery.rejectContext(&placement.Strategy{ContextSize: 65536})
+	if recovery.automaticContextCeiling() != 0 {
+		t.Fatal("an explicit context was recorded as an automatic rejection")
+	}
+	// The GLM-5.3-Flash sequence observed on 2026-09-14.
+	for _, ctx := range []int{592896, 385024, 589824} {
+		recovery.rejectContext(&placement.Strategy{ContextSize: ctx, ContextAuto: true})
+	}
+	if got := recovery.automaticContextCeiling(); got != 385023 {
+		t.Fatalf("ceiling %d; a later larger rejection must not raise it", got)
+	}
+}
+
+// The backend-measured re-plan refines placement from measured buffers. It may
+// not spend an accepted plan's proof on a larger context: on GLM-5.3-Flash it
+// discarded an accepted 555,008-token plan twice and failed against the same
+// limit, exhausting the re-plan budget before any weights loaded.
+func TestAcceptedContextBoundsTheMeasuredReplan(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(&placement.Strategy{ContextSize: 670720, ContextAuto: true})
+	recovery.rejectContext(&placement.Strategy{ContextSize: 563200, ContextAuto: true})
+	recovery.acceptContext(&placement.Strategy{ContextSize: 555008, ContextAuto: true})
+	if got := recovery.automaticContextCeiling(); got != 555008 {
+		t.Fatalf("ceiling %d; an accepted plan must bound the re-plan at itself", got)
+	}
+	// The observed climb: 562,176 sits under the rejected 563,200 but above the
+	// accepted 555,008, and it is exactly what broke the launch.
+	opts := boundByProvenLimits(placement.Options{}, recovery)
+	if opts.AutoContextMax >= 562176 {
+		t.Fatalf("AutoContextMax %d still admits the plan that broke the launch", opts.AutoContextMax)
+	}
+	// Recovery falling further must ratchet down, never back up.
+	recovery.acceptContext(&placement.Strategy{ContextSize: 500736, ContextAuto: true})
+	if got := recovery.automaticContextCeiling(); got != 500736 {
+		t.Fatalf("ceiling %d after a lower accepted plan", got)
+	}
+	// An explicit context is a user constraint, not a coordinate to record.
+	recovery.acceptContext(&placement.Strategy{ContextSize: 1024})
+	if got := recovery.automaticContextCeiling(); got != 500736 {
+		t.Fatalf("an explicit context moved the ceiling to %d", got)
+	}
+}
+
+// recoverPreflightOOM already refuses to recompute a derated ubatch back up.
+// The measured re-plan did not, so a GLM-5.3-Flash plan accepted at ubatch 128
+// came back at 256 and overshot all three devices at the same context.
+func TestMeasuredReplanKeepsADeratedUBatch(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	recovery.acceptContext(&placement.Strategy{ContextSize: 500736, ContextAuto: true, UBatchSize: 128})
+	if got := boundByProvenLimits(placement.Options{UBatchSize: 512}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("measured re-plan recomputed ubatch back to %d", got.UBatchSize)
+	}
+	// An automatic request carries no ubatch of its own; the proven one applies.
+	if got := boundByProvenLimits(placement.Options{}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("automatic ubatch request ignored the proven derating: %d", got.UBatchSize)
+	}
+	// Like the context ceiling, it only ratchets down.
+	recovery.acceptContext(&placement.Strategy{ContextSize: 400384, ContextAuto: true, UBatchSize: 256})
+	if got := boundByProvenLimits(placement.Options{}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("a later larger ubatch raised the pin to %d", got.UBatchSize)
+	}
+	if got := recovery.automaticContextCeiling(); got != 400384 {
+		t.Fatalf("context ceiling %d did not follow the lower accepted plan", got)
 	}
 }

@@ -979,3 +979,243 @@ keep it working where that is cheap and never to let it gate anything:
 
 Delete rather than deprecate only if it starts costing real time again. Right
 now it costs nothing and it works.
+
+## Generic configuration review — 2026-09-13
+
+Reviewed main `f777280`, independently of the staged production checkout and
+unmerged hot-experts branch. Goal: a useful, correct automatic launch under
+explicit constraints, with bounded evidence-driven fallback before refusal.
+
+| Boundary | Finding | Next action |
+|---|---|---|
+| TUI / CLI | `tuiLaunchArgs` feeds `cmdLaunch`; both use placement and the launch recovery controller. | Preserve this shared path; extend fixtures across entry points. |
+| Oracle / serving argv | `preflightArgs` dropped KV-offload, full-SWA, unified-KV, host-allocation switches and metadata overrides; equals-form overrides and negative layer counts were also lost. | Fixed transport for these flags. Unsupported oracle options return an error and select the existing contained probe. Retired v7 keyed probe measurements. |
+| Recovery | `launchMemoryRecovery` rejects repeated argv; `recoverPreflightOOM` recomputes GPU failures and can reduce automatic context. Explicit constraints and exact challenger admission remain separate. | Trace the full GLM failed allocation through this controller; do not infer its cause from the oracle-filter defect. |
+| Host admission | A cgroup OOM in `runGuardedAllocationPreflight` returns an ordinary error; the caller fails closed before GPU recovery selection. | Add typed host-failure evidence and bounded complete re-placement, preserving explicit resident/mmap and context constraints. |
+| CPU-only | `preflightPlacement` returns immediately when no GPUs are present. | Review host admission and recovery independently; GPU tests do not establish CPU-only fit coverage. |
+| Unknown capabilities | Missing containment may continue on an estimate; some memory-shaping backend extensions remain outside the oracle filter. | Define capability coverage explicitly and avoid presenting partial oracle coverage as complete allocation proof. |
+
+Scope of this fix: contract invariants 2 (complete configurations), 4 (memory
+admission), 8 (model/hardware independence) and 9 (evidence versioning). Tests
+cover policy preservation, last-wins overrides, malformed arguments, unsupported
+oracle options and old-cache rejection. No topology, quality, context or
+performance-selection policy changed. Key invalidation also retires old keyed
+live measurements conservatively; separately recorded runtime-growth evidence
+remains available.
+
+This is controller correctness evidence, not a claim that GLM now loads or that
+all models/hardware fit. No production process was restarted. Full GLM serving,
+long-context stability and matched agent-throughput acceptance remain open.
+
+Validation: `scripts/verify-core-engine.sh` passed uncached after the final
+change (six core package suites, formatting and vet); `git diff --check` passed.
+
+### Context and reliability follow-up — 2026-09-14
+
+User priority: failure to serve, or serving with insufficient context to complete
+agent work, takes precedence over throughput experiments and helper expansion.
+Preserve explicit parallelism; do not reinterpret a context repair as evidence
+that wider concurrency is faster.
+
+Confirmed a context-unit defect: automatic fit treated the model's native
+per-sequence context as a total across all slots. The Claude option builder
+also imposed that same native total cap. A roomy synthetic 131072-native model
+with two slots received 131072 total rather than 262144. The backend's
+`llama-context.cpp` compares per-sequence context with training context; its
+server caps each slot separately.
+
+Correction: derive a native total cap for each candidate slot count, retain the
+existing total workload ceiling and complete memory-fit search, preserve
+explicit numeric/max requests, and bound multiplication. Reduced-slot
+candidates cannot inherit the wider candidate's native allowance. Planner
+identity 6 retires verified configs produced by the earlier semantics.
+
+Regression coverage includes 1/2/4 slots, total policy limits, reduced-slot
+caps, integer overflow, the Claude option-to-placement path, and existing
+explicit-context and occupied-memory tests. The uncached core gate passed
+(six package suites, formatting and vet). This does not establish live memory
+admission or throughput at the larger contexts.
+
+Historical log inspection, 2026-09-14 (no live server found):
+`/home/mik/ggrun-project/ggrun/.logs/ggrun-claude-server-v2-8081-aaa6009f8acf7e7ce82a0f42.log`
+contains Qwen loads at total 262144, parallel 4, per-slot 65536, partitioned KV,
+resident loading. The retained full-GLM probe failure
+`.cache/memory-probes/failed-e8120838fcc66f29922823364dec37b8.log`
+shows mmap, total 172032, parallel 1 and a failed 2946038912-byte CUDA0 compute
+allocation. These are historical log excerpts, not new serving acceptance or
+exact current process identities. The per-slot cap correction cannot explain
+that single-slot GLM reduction; its compute/admission recovery remains open.
+
+The private lab's `qwen38-p1-p2-selection-2026-08-31.md` retains p1 as the serial
+baseline and notes unmatched traffic and queue-pressure limitations. No new
+concurrency winner is inferred here. Helper routing already exists through
+`claudeauto` utility/reviewer paths; expansion is deferred behind admission,
+useful-context and failure-recovery correctness.
+
+### User launch observation — 2026-09-14T09:11:48.856630+00:00
+
+After the user launched the installed development binary, process inspection
+found no running ggrun/llama-server process. The newest reviewer log,
+`/home/mik/ggrun-project/ggrun/.logs/ggrun-claude-reviewer-45243.log`
+(2026-09-14 09:11 UTC), records Qwen3.5-4B, one slot, 131072-token
+context, listening on loopback port 45243 and health OK after 3 seconds.
+There is no new main-model serving log; the previous log is from September 13.
+The main model, exact launch argv and reason for exit are not established.
+Awaiting terminal output rather than attributing old context errors to this
+launch. Snapshot: `/tmp/ggrun-user-launch-observation.json`. No process was
+stopped or restarted by this inspection. This is not serving acceptance.
+
+### GLM Flash preflight recovery dead end — 2026-09-14
+
+User terminal output identifies GLM-5.3-Flash Q3 XL (137.4 GiB), one slot,
+592896 total context, q8_0 GPU KV, resident loading, batch/ubatch 2048/128,
+all 43 expert layers on CPU. Reviewer Qwen3.5-4B reached health and measured
+5650 MiB against its 6144 MiB reservation. Main backend was
+`.src/fork-glm-5-3-flash/build-cuda/bin/llama-server` on port 8081.
+The no-allocation oracle reported CUDA0 13707/11873 MiB (1834 MiB deficit).
+Complete re-placement found 515072 tokens, but recovery discarded it because
+its context differed; the remaining context-derate path only handles measured
+compute-allocation failures. No main-model weight load followed.
+
+Fix: accept a fully rebuilt smaller automatic-context candidate from an oracle
+rejection for the next bounded preflight, keeping slots, KV policy, residency
+and non-increasing ubatch. This does not mark it admitted or bypass the outer
+exact-candidate/repeated-argv/retry gates. Explicit context remains immutable.
+A real-Compute synthetic regression reproduced the same refusal at 69632 ->
+55296 tokens before the fix. Larger GLM contexts remain subject to admission;
+this repair is recovery correctness, not performance or serving proof.
+
+## CTXRATCHET — memory recovery climbed back into a rejected context — 2026-09-14
+
+GLM-5.3-Flash UD-Q3_K_XL (137.4 GiB), automatic context, `--parallel 1`, on the
+three-card rig. Codex had just fixed recovery discarding a fully recomputed
+smaller plan; with that fix the launch got further and then failed a second way:
+
+```
+[launch] preflight context-replanned after CUDA0 allocation 0 MiB (deficit 1810 MiB, ctx=385024, ...)
+[launch] preflight: placement fits (CUDA0 7397/11873, CUDA1 21745/24112, CUDA2 5552/6251)
+[placement] context fit: 589824 tokens, 1 slot(s), KV q8_0 on gpu
+[launch] backend-measured memory re-plan 5/5 changed the exact argv; verifying the new placement before production
+[launch] preflight: placement does not fit (CUDA0 13671/11873 ...)
+```
+
+Recovery lowered context from 592,896 to 385,024 and preflight **accepted** it.
+The backend-measured re-plan then recomputed from `placementOpts()` — the
+original automatic request — and proposed 589,824, back inside the range the
+same launch had already disproved. That burned the re-plan budget and the
+launch failed without ever loading weights.
+
+`launchMemoryRecovery` already refuses to resurrect a rejected argv, but it
+keys on the exact argv identity. The climbed-back plan has a *different* argv
+at a disproved context, so no identity ever matches. Context needed its own
+ledger entry.
+
+The fix mirrors the derating discipline one function away in
+`recoverPreflightOOM`, where a retry at ubatch 256 is explicitly never
+recomputed back to 512:
+
+- `launchMemoryRecovery.rejectContext` records the smallest **automatic**
+  context this launch has proven does not fit. An explicit context is a user
+  constraint (invariant 3) and is never recorded.
+- `automaticContextCeiling` returns one token below it. `placement.Compute`
+  floors `AutoContextMax` to its granule, so the rejected context is excluded
+  without the launch package knowing the granule.
+- `boundByRejectedContext` is the single place that applies the ceiling, so
+  production and tests exercise the same rule rather than a re-description.
+
+The ceiling only ratchets down. A later, larger rejection cannot raise it.
+
+Invariants: this strengthens 4 (memory safety is fail-closed — a disproved
+context stays disproved) and 10 (an ordinary launch does not become an
+unbounded series of long reloads). It moves no coordinate the user pinned.
+
+### What is proven and what is not
+
+Proven: `TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute` fails
+without the fix (`ceiling 0 does not exclude the rejected context 69632`) and
+passes with it; `TestContextCeilingOnlyRatchetsDown` replays the 592,896 →
+385,024 → 589,824 sequence above. Uncached `scripts/verify-core-engine.sh`
+passes on all six packages.
+
+Not proven: that GLM-5.3-Flash now reaches healthy serving. The fix removes one
+dead end; the launch may still need further recovery below 385,024, and only a
+live load says so. No hardware-utilisation figure exists for a model of this
+size yet — see the UTIL entry above for the measurement that will produce one.
+
+### Live runs, GLM-5.3-Flash UD-Q3_K_XL, 2026-09-14
+
+Three matched runs on the three-card rig, automatic context and slots, through
+`scripts/verify-installed-serving.py` so each one leaves evidence.
+
+`v3.2.9-dev.e049951` — rejected-context ceiling only. The ceiling engaged
+(`model/policy context cap reached`) but the launch still failed:
+
+| step | ctx | preflight |
+|---|---:|---|
+| initial | 670,720 | does not fit |
+| recovery | 563,200 | does not fit |
+| recovery | 555,008 | **fits** |
+| measured re-plan 3/5 | 562,176 | does not fit |
+| recovery | 500,736 | **fits** |
+| measured re-plan 5/5 | 561,152 | does not fit — budget gone |
+
+Both climbs sat *below* the smallest rejected context (563,200) and *above* a
+plan preflight had just accepted. Bounding by rejection alone cannot catch
+that: the accepted plan is the proof, and the re-plan was spending it.
+
+`v3.2.9-dev.f7fdc1a` — accepted context bounds the re-plan. The climb stopped;
+the re-plan re-proposed exactly the accepted 500,736. The launch still failed,
+for a third reason of the same family: at that pinned context the re-plan
+recomputed ubatch from the original automatic request to 256, where the
+accepted plan had been derated to 128, and overshot every device —
+`CUDA0 15880/11873, CUDA1 26826/24112, CUDA2 15227/11909`.
+
+`v3.2.9-dev.2d1d0c1` — the accepted ubatch is pinned too.
+
+The common defect across all three: **the measured re-plan recomputes from the
+original automatic request and silently discards what this launch has already
+proven.** `recoverPreflightOOM` had the discipline for ubatch and nothing else
+had it for context. The ledger now carries both, applied in one place
+(`boundByProvenLimits`), and only ratchets down.
+
+### Open
+
+- Whether GLM-5.3-Flash reaches healthy serving is still unproven; the third
+  run is the first that can. Each fix removed a dead end without establishing
+  that the remaining path converges.
+- `maxPreflightReplans` is 5. Every one of these failures spent the budget on
+  re-plans that undid prior work rather than on genuinely new shapes. If a
+  budget increase is ever proposed, it is a symptom, not a fix.
+- No `fraction_of_vram` figure for a model this size yet.
+
+### Resolved — GLM-5.3-Flash serves, 2026-09-14
+
+`v3.2.9-dev.2d1d0c1`, same rig, automatic context and slots, via
+`verify-installed-serving.py`. The re-plan reached a fixed point instead of
+undoing itself:
+
+```
+[launch] preflight: placement fits (CUDA0 11222/11873, CUDA1 23629/24112, CUDA2 10183/11909)
+[launch] memory plan stable at oracle-planned evidence
+```
+
+| | |
+|---|---|
+| weight devices | `CUDA0`, `CUDA1`, `CUDA2` — all three |
+| launch VRAM | 7,424 + 17,531 + 9,550 = **34,505 MiB of 49,134** |
+| `fraction_of_vram` | **0.7023** |
+| served | 500,736 tokens, 1 slot |
+| lifecycle | generation, streaming, no forced cleanup, port released |
+
+A 137.4 GiB model serving half a million tokens of context on 48 GB of VRAM,
+using 70% of it, with a clean shutdown. Against the Qwen3.5-4B baseline in the
+UTIL entry above (0.1819) this is the same launcher making very different use
+of the same machine, which is the comparison the utilisation figure exists to
+support.
+
+What this does **not** establish: decode throughput. The harness proves the
+lifecycle and how much hardware the placement claimed, not tokens per second.
+Prompt processing during the canary ran at 20 tok/s on a 6,356-token prompt;
+that is one cold observation, not a performance result, and P1's fast-path work
+still needs matched agent-workload evidence. Comparing this against the
+MiniMax-M3 row in the README requires a matched benchmark run, not this.

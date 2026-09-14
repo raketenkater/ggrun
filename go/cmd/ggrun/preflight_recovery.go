@@ -17,6 +17,24 @@ import (
 // already disproved.
 type launchMemoryRecovery struct {
 	rejected map[string]struct{}
+	// rejectedContext is the smallest automatic context this launch has proven
+	// does not fit. The argv identity ledger cannot carry this: a later
+	// recompute from the original automatic request proposes a *different* argv
+	// at a context already disproved, so no identity ever matches and the loop
+	// climbs back into the rejected range until the re-plan budget expires.
+	rejectedContext int
+	// acceptedContext is the smallest automatic context an exact preflight has
+	// proven fits this launch. The backend-measured re-plan exists to refine
+	// placement from measured buffers, never to spend that proof on a larger
+	// context: observed twice on GLM-5.3-Flash, it discarded an accepted
+	// 555,008-token plan for 562,176 and failed against the same limit that had
+	// just rejected 563,200.
+	acceptedContext int
+	// acceptedUBatch is the smallest ubatch an exact preflight has proven fits.
+	// recoverPreflightOOM already refuses to recompute a derated ubatch back up;
+	// the measured re-plan did not, so a plan accepted at ubatch 128 came back
+	// at 256 and overshot every device at the same context.
+	acceptedUBatch int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
@@ -39,6 +57,78 @@ func (r *launchMemoryRecovery) isRejected(args []string) bool {
 	}
 	_, rejected := r.rejected[launchArgsIdentity(args)]
 	return rejected
+}
+
+// rejectContext records an automatic context proven not to fit. An explicit
+// context is a user constraint, not a coordinate this launch may move, so only
+// automatic contexts are recorded.
+func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy) {
+	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
+		return
+	}
+	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
+		r.rejectedContext = strategy.ContextSize
+	}
+}
+
+// acceptContext records the shape an exact preflight proved fits. Only
+// measured evidence may be recorded; a planner estimate is not proof.
+func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
+	if r == nil || strategy == nil {
+		return
+	}
+	// ubatch is recorded whatever the context policy, because it is a compute
+	// lever recovery derates on its own and the re-plan recomputes it from the
+	// original automatic request otherwise.
+	if strategy.UBatchSize > 0 && (r.acceptedUBatch == 0 || strategy.UBatchSize < r.acceptedUBatch) {
+		r.acceptedUBatch = strategy.UBatchSize
+	}
+	if !strategy.ContextAuto || strategy.ContextSize <= 0 {
+		return
+	}
+	if r.acceptedContext == 0 || strategy.ContextSize < r.acceptedContext {
+		r.acceptedContext = strategy.ContextSize
+	}
+}
+
+// automaticContextCeiling is the largest automatic context this launch may
+// still propose, and it only ever ratchets down.
+//
+// A rejected context excludes itself, so it contributes one token below:
+// placement.Compute floors an AutoContextMax to its context granule, which
+// drops the rejected value without this package knowing the granule. An
+// accepted context contributes itself, because re-proposing exactly the plan
+// that passed is the fixed point this loop is trying to reach.
+func (r *launchMemoryRecovery) automaticContextCeiling() int {
+	if r == nil {
+		return 0
+	}
+	ceiling := 0
+	if r.rejectedContext > 1 {
+		ceiling = r.rejectedContext - 1
+	}
+	if r.acceptedContext > 0 && (ceiling == 0 || r.acceptedContext < ceiling) {
+		ceiling = r.acceptedContext
+	}
+	return ceiling
+}
+
+// boundByProvenLimits constrains a recompute to the shapes this launch has not
+// already disproved. It is the single place that applies them, so production
+// and tests exercise the same rule rather than two descriptions of it.
+//
+// An explicit context is untouched: AutoContextMax caps only an automatic/fit
+// context. ubatch is pinned the same way recoverPreflightOOM pins it, so a
+// recompute cannot undo a derating this launch had to make.
+func boundByProvenLimits(opts placement.Options, r *launchMemoryRecovery) placement.Options {
+	if ceiling := r.automaticContextCeiling(); ceiling > 0 &&
+		(opts.AutoContextMax <= 0 || ceiling < opts.AutoContextMax) {
+		opts.AutoContextMax = ceiling
+	}
+	if r != nil && r.acceptedUBatch > 0 && (opts.UBatchSize <= 0 || r.acceptedUBatch < opts.UBatchSize) {
+		opts.UBatchSize = r.acceptedUBatch
+	}
+	return opts
 }
 
 func (r *launchMemoryRecovery) hasRejections() bool {
@@ -130,6 +220,20 @@ func recoverPreflightOOM(
 	var candidateArgs []string
 	if candidate != nil {
 		candidateArgs = buildLaunchServerArgs(req, cfg, be, caps, model, candidate)
+	}
+	// The no-allocation oracle reports a total device deficit, not a failed
+	// compute allocation. Its fully recomputed automatic-context plan must not
+	// be discarded by the partial-overlay selector below. Return it for the
+	// caller's next exact preflight; this is a candidate, never fit proof.
+	if outcome.Evidence.Level == memoryEvidenceOraclePlanned &&
+		req != nil && automaticContextRequest(req) && strategy.ContextAuto &&
+		candidate != nil && candidate.ContextAuto &&
+		candidate.ContextSize > 0 && candidate.ContextSize < strategy.ContextSize &&
+		candidate.Parallel == strategy.Parallel && candidate.KVType == strategy.KVType &&
+		candidate.KVTypeV == strategy.KVTypeV && candidate.KVPlacement == strategy.KVPlacement &&
+		candidate.MMapRequired == strategy.MMapRequired && candidate.UBatchSize <= strategy.UBatchSize {
+		candidate.PerformanceTuned = false
+		return candidate, candidateArgs, "context-replanned", nil
 	}
 	nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
 		req, strategy, serverArgs, candidate, model, runtimeCaps, outcome, candidateArgs,

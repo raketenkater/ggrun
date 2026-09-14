@@ -167,3 +167,53 @@ func TestAutomaticContextFitAccountsFinalParallelRuntimePolicy(t *testing.T) {
 			got.ContextSize/got.Parallel)
 	}
 }
+
+func TestAutomaticContextNativeLimitIsPerSlot(t *testing.T) {
+	caps := strategyFitCaps(detect.GPU{Index: 0, VRAMTotalMB: 65536})
+	model := strategyFitDenseModel(4000, 131072)
+	for _, slots := range []int{1, 2, 4} {
+		opts := strategyFitOptions()
+		opts.Parallel = slots
+		got, err := Compute(caps, model, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ContextSize != slots*model.CTXTrain {
+			t.Fatalf("%d slots: context=%d, want %d total (%d per slot)", slots, got.ContextSize, slots*model.CTXTrain, model.CTXTrain)
+		}
+	}
+}
+
+func TestAutomaticContextTotalPolicyCapStillWins(t *testing.T) {
+	caps := strategyFitCaps(detect.GPU{Index: 0, VRAMTotalMB: 65536})
+	model := strategyFitDenseModel(4000, 131072)
+	opts := strategyFitOptions()
+	opts.Parallel = 4
+	opts.AutoContextMax = 262144
+	got, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContextSize != 262144 {
+		t.Fatalf("total context policy lost: %d", got.ContextSize)
+	}
+}
+
+func TestAutomaticContextCapTracksReducedSlotCandidate(t *testing.T) {
+	model := strategyFitDenseModel(4000, 65536)
+	opts := strategyFitOptions()
+	opts.Parallel = 4
+	for _, slots := range []int{4, 2, 1} {
+		if got := autoContextCapForSlots(model, opts, slots); got != slots*65536 {
+			t.Fatalf("%d-slot candidate inherited wrong cap %d", slots, got)
+		}
+	}
+}
+
+func TestAutomaticContextNativeTotalDoesNotOverflow(t *testing.T) {
+	model := &ModelProfile{CTXTrain: int(^uint(0) >> 1)}
+	got := autoContextCapForSlots(model, Options{}, 4)
+	if got <= 0 || uint64(got) > uint64(^uint32(0)) || got%contextGranularity != 0 {
+		t.Fatalf("invalid capped native total: %d", got)
+	}
+}
