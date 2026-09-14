@@ -109,7 +109,7 @@ func cmdMemoryProbe(args []string) {
 			serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 			next, nextArgs, method, replanErr := recoverPreflightOOM(
 				req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
-				strategy, serverArgs, oomPenalty, outcome,
+				strategy, serverArgs, oomPenalty, outcome, nil,
 			)
 			if replanErr != nil {
 				fmt.Fprintf(os.Stderr, "Error: measured placement does not fit and recovery failed closed: %v\n", replanErr)

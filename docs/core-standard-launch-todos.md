@@ -1525,3 +1525,63 @@ is what agent work would actually run against, so it is the honest baseline.
 - Cache-backed turn time is not isolated here; the suite measures whole-task
   wall time, which folds prefill, cache reuse and decode together.
 - No hot-experts or reviewer-routed comparison exists yet.
+
+## SLOTS — concurrency, not VRAM fill, is what made agent work faster — 2026-09-14
+
+`--parallel 2` could not launch Qwen3.8-27B at all. Recovery derated context to
+301,056 tokens and its own next candidate returned to 524,288:
+
+```
+[launch] preflight context-derate after CUDA0 allocation 2188 MiB (deficit 841 MiB, ctx=301056, ...)
+[placement] context fit: 524288 tokens, 2 slot(s)
+Error starting server: memory preflight did not converge after 5 re-plans
+```
+
+Same family as CTXRATCHET, on a site that entry missed. `boundByProvenLimits`
+guarded the backend-measured recompute; `recoverPreflightOOM` derives its own
+candidate from the original automatic request and never saw the ledger. Fixed
+by threading the ledger into recovery and bounding both option derivations.
+
+### The A/B, same suite, same model, same binary
+
+`scripts/verify-agent-workload.py`, 2 lanes, 3 repeats, oracle-checked repairs.
+
+| | parallel 1 | parallel 2 | parallel 2 repeat |
+|---|---:|---:|---:|
+| makespan | 51.47s | 34.94s | 39.97s |
+| correct tasks/min | 10.49 | **13.74** | **13.51** |
+| median task latency | 10.89s | 8.37s | 8.38s |
+| max task latency | 14.75s | 9.54s | 9.54s |
+| oracle-passed | 9/9 | 8/9 | 9/9 |
+| slots x served ctx | 1 x 262,144 | 2 x 262,144 | 2 x 262,144 |
+
+About +29% correct tasks per minute at equal correctness. `correct_tasks_per_minute`
+already weights correctness, so the 8/9 run is not credited for the task it got
+wrong. Median latency reproduces to 0.01s and max latency to 0.00s across the
+two two-slot runs.
+
+The single 8/9 was sampling variance, not a concurrency effect: the repeat under
+identical settings passed 9/9. One failure out of eighteen tasks is not evidence
+of a correctness cost, and it was checked rather than assumed.
+
+### This qualifies the earlier "parallel 1 is fastest" result
+
+That result stands for single-stream decode, and the 39 decode samples in
+VRAMFILL agree with it. It does not transfer to several agents at once, where
+one slot makes the lanes queue. Slot count must be chosen against the workload
+shape, not inherited from a decode benchmark.
+
+Note what did **not** produce this gain. Raising `fraction_of_vram` from 0.7023
+to 0.7627 moved decode not at all. Unblocking a second slot moved agentic
+makespan by a third. The lever was scheduling, not memory.
+
+### Open
+
+- Automatic slot selection still chose 1 for this workload. It has no signal
+  that the client intends concurrent agents; the launcher cannot infer lane
+  count from a serving request, so this remains an explicit `--parallel`
+  decision until something carries that intent.
+- Untested above 2 slots, and untested on a CPU-offloaded MoE, where added
+  slots divide context and may interact with expert bandwidth very differently.
+- Worker/reviewer routing is still unimplemented. It depends on concurrent
+  serving working, which it now does.

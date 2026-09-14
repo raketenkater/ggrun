@@ -4842,7 +4842,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				preflightReplans++
 				next, nextArgs, method, rerr := recoverPreflightOOM(
 					req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
-					strategy, serverArgs, oomPenalty, preflight,
+					strategy, serverArgs, oomPenalty, preflight, memoryRecovery,
 				)
 				if rerr != nil {
 					return nil, strategy, serverArgs, fmt.Errorf("memory preflight recovery failed closed: %w", rerr)

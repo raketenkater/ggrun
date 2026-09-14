@@ -345,7 +345,7 @@ func TestOracleDeficitRetainsCompleteAutomaticContextReplan(t *testing.T) {
 	}
 	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
 	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
-	next, nextArgs, method, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome)
+	next, nextArgs, method, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome, nil)
 	if err != nil {
 		t.Fatalf("oracle-backed full context replan discarded: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestOracleContextRecoveryPreservesExplicitContext(t *testing.T) {
 	}
 	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
 	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
-	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome)
+	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome, nil)
 	if err == nil && next.ContextSize != 65536 {
 		t.Fatalf("explicit context changed to %d", next.ContextSize)
 	}
@@ -497,5 +497,50 @@ func TestMeasuredReplanKeepsADeratedUBatch(t *testing.T) {
 	}
 	if got := recovery.automaticContextCeiling(); got != 400384 {
 		t.Fatalf("context ceiling %d did not follow the lower accepted plan", got)
+	}
+}
+
+// Recovery derives its own candidate from the original automatic request, so it
+// needs the same ledger the measured re-plan uses. At --parallel 2 on
+// Qwen3.8-27B this candidate returned to 524,288 tokens after recovery had
+// already derated to 301,056, and the launch spent its whole re-plan budget
+// without ever loading weights.
+func TestRecoveryCandidateRespectsTheProvenContextCeiling(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+
+	// This launch has already disproved everything at or above 40,960 tokens.
+	const rejected = 40960
+	if current.ContextSize <= rejected {
+		t.Skipf("fixture context %d is already below the rejection", current.ContextSize)
+	}
+	recovery := newLaunchMemoryRecovery()
+	recovery.rejectContext(&placement.Strategy{ContextSize: rejected, ContextAuto: true})
+
+	next, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil,
+		current, args, map[int]int{}, outcome, recovery)
+	if err != nil {
+		t.Fatalf("recovery failed closed against its own ceiling: %v", err)
+	}
+	if next == nil {
+		t.Fatal("recovery returned no candidate")
+	}
+	if next.ContextSize >= rejected {
+		t.Fatalf("recovery proposed %d at or above the rejected %d", next.ContextSize, rejected)
+	}
+	// A nil ledger must stay legal for callers that keep no per-launch state.
+	if _, _, _, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil,
+		current, args, map[int]int{}, outcome, nil); err != nil {
+		t.Fatalf("recovery without a ledger regressed: %v", err)
 	}
 }
