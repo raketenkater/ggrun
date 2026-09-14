@@ -602,3 +602,25 @@ func TestContextReclaimTokensRefusesToGuess(t *testing.T) {
 		t.Fatalf("no context gave %d tokens", got)
 	}
 }
+
+// The re-plan budget exists to stop churn. A descent that keeps shrinking the
+// measured shortfall is not churn, and a 1,024-token nudge that trims a few MiB
+// is not progress. Both have to be distinguishable.
+func TestDeficitProgressSeparatesConvergenceFromNudging(t *testing.T) {
+	// The GLM-5.3-Flash --parallel 2 descent: every step is progress.
+	for _, step := range [][2]int{{1443, 323}, {323, 136}, {136, 30}} {
+		if !deficitProgress(step[0], step[1]) {
+			t.Fatalf("%d -> %d MiB is convergence and was charged as churn", step[0], step[1])
+		}
+	}
+	// The nudge pathology: a 2,524 MiB shortfall trimmed by 5 MiB a round.
+	if deficitProgress(2524, 2519) {
+		t.Fatal("a 5 MiB trim against a 2524 MiB deficit was credited as progress")
+	}
+	// Growing, equal, and unknown deficits are never progress.
+	for _, step := range [][2]int{{100, 100}, {100, 140}, {0, 50}, {50, 0}} {
+		if deficitProgress(step[0], step[1]) {
+			t.Fatalf("%d -> %d MiB was credited as progress", step[0], step[1])
+		}
+	}
+}

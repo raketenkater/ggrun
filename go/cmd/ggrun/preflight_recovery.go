@@ -734,3 +734,16 @@ func effectiveMemoryArgsFingerprint(args []string) string {
 	}
 	return strings.Join(parts, "\n")
 }
+
+// deficitProgress reports whether a re-plan materially reduced the measured
+// shortfall. "Materially" is deliberate: a deficit that creeps down by a few
+// MiB per round is the nudge pathology, not convergence, and must still be
+// charged against the re-plan budget. The first round has nothing to compare
+// against and is never treated as progress.
+func deficitProgress(previousMB, currentMB int) bool {
+	if previousMB <= 0 || currentMB <= 0 || currentMB >= previousMB {
+		return false
+	}
+	// At least a fifth of the previous shortfall must be gone.
+	return previousMB-currentMB >= previousMB/5
+}

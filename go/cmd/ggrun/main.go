@@ -4540,6 +4540,10 @@ func backendMeasuredRecomputeWorthVerifying(level memoryEvidenceLevel, current, 
 func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery, restoreExempt bool, exactAdmission bool) (launchProcess *server.Process, launchStrategy *placement.Strategy, launchArgs []string, launchErr error) {
 	const maxRetries = 2
 	const maxPreflightReplans = 5
+	// Extra rounds granted only while the measured deficit keeps shrinking.
+	const maxConvergingReplans = 6
+	convergingReplans := 0
+	lastPreflightDeficitMB := 0
 	retries := 0
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
@@ -4840,7 +4844,19 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if preflightReplans >= maxPreflightReplans {
 					return nil, strategy, serverArgs, fmt.Errorf("memory preflight did not converge after %d re-plans; refusing a real model load", maxPreflightReplans)
 				}
-				preflightReplans++
+				// A re-plan that materially shrinks the measured deficit is progress,
+				// and the budget exists to stop churn, not progress. GLM-5.3-Flash at
+				// --parallel 2 descends 1443 -> 323 -> 136 -> 30 MiB and needs one
+				// step more than a flat budget allows. Only unproductive rounds are
+				// charged; convergingReplans still bounds the total, so this can
+				// never become an unbounded series of contained preflights.
+				if convergingReplans < maxConvergingReplans &&
+					deficitProgress(lastPreflightDeficitMB, preflight.DeficitMB) {
+					convergingReplans++
+				} else {
+					preflightReplans++
+				}
+				lastPreflightDeficitMB = preflight.DeficitMB
 				next, nextArgs, method, rerr := recoverPreflightOOM(
 					req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
 					strategy, serverArgs, oomPenalty, preflight, memoryRecovery,
