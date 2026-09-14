@@ -177,6 +177,7 @@ func recoverPreflightOOM(
 	serverArgs []string,
 	oomPenalty map[int]int,
 	outcome preflightOutcome,
+	recovery *launchMemoryRecovery,
 ) (*placement.Strategy, []string, string, error) {
 	if !outcome.DoesNotFit || outcome.Device < 0 || model == nil || strategy == nil {
 		return nil, nil, "", fmt.Errorf("invalid preflight allocation failure")
@@ -201,10 +202,14 @@ func recoverPreflightOOM(
 		if recordErr == nil {
 			opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
 			// Preserve a prior derating: a retry at ubatch 256 must never be
-			// recomputed from the original automatic request back to 512.
+			// recomputed from the original automatic request back to 512. The
+			// same holds for context, which this ledger carries: at --parallel 2
+			// this candidate climbed back to 524,288 after recovery had derated
+			// to 301,056, and the launch spent its whole re-plan budget there.
 			opts.UBatchSize = strategy.UBatchSize
 			opts.SkipPlacementCache = true
 			opts.CacheFile = ""
+			opts = boundByProvenLimits(opts, recovery)
 			candidate, replanErr = placement.Compute(caps, model, opts)
 		}
 	}
@@ -213,7 +218,9 @@ func recoverPreflightOOM(
 		physicalDev := physicalGPUIndex(outcome.Device, visibleToPhysical)
 		oomPenalty[physicalDev] += outcome.DeficitMB
 		candidate, replanErr = placement.ReplanAfterOOM(
-			caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir), oomPenalty,
+			caps, model,
+			boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery),
+			oomPenalty,
 		)
 	}
 

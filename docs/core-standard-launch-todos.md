@@ -1423,3 +1423,165 @@ memory reserve.
   moving experts off the CPU.
 - Decode throughput is still unmeasured. This entry proves residency and
   lifecycle, not tokens per second.
+
+## VRAMFILL — higher VRAM use did not make GLM faster — 2026-09-14
+
+The reserve fix moved 2,988 MiB of expert weights off host RAM onto the cards
+and raised `fraction_of_vram` from 0.7023 to 0.7627. Decode throughput did not
+move. Every `eval time` sample of at least 8 tokens from the three matched
+runs:
+
+| run | samples | median tok/s | mean tok/s |
+|---|---:|---:|---:|
+| before the reserve fix | 13 | 6.83 | 6.87 |
+| A, records the reserve | 20 | 6.77 | 6.23 |
+| B, spends the reserve | 6 | 6.83 | 6.85 |
+
+The medians agree to two decimals. This is not a small win hidden in noise; it
+is no win.
+
+The arithmetic explains it. GLM-5.3-Flash UD-Q3_K_XL keeps about 120 GB of
+experts in host RAM on this 48 GB rig. Moving 2,988 MiB is **2.5% of the
+offloaded weight**, against a bottleneck the optimizer itself labels
+`CPU expert bandwidth`. No placement decision available inside 48 GB of VRAM
+changes the other 117 GB.
+
+### What this means for the objective
+
+`fraction_of_vram` measures how much of the machine a plan claimed. It is not
+a proxy for speed, and it must not become a promotion criterion. README already
+states the product goal — "the fastest **stable** plan for the requested
+workload, not maximum VRAM fill" — and this is the measurement that backs it.
+
+The utilisation figure remains worth recording. It is how the phantom 11,272
+MiB reserve was found, and it is the right diagnostic for "is anything that
+could be resident sitting on the CPU". It is the wrong thing to maximise.
+
+### Where residency gains should pay off
+
+Not on a model 3x past VRAM capacity. The reserve fix should matter where a
+few GB moves a large fraction of the offloaded weight — a MoE close to the
+capacity boundary, where 3 GB is a third of what is on the CPU rather than a
+fortieth. That case is untested here and is the one worth measuring next.
+
+### Still unproven
+
+Agent-workload makespan. These are 32-token generations from the serving
+check, which measure decode rate, not cache-backed turn time or
+requested-concurrency throughput. Invariant 5 asks for real agent work, and
+`verify-installed-serving.py --agent-lanes` exists for it; no run here used it.
+
+## AGENTBASE — first agent-workload baseline — 2026-09-14
+
+Every throughput figure recorded before this entry was decode rate from
+32-token generations. That is not what invariant 5 asks for. This is the first
+measurement of bounded tool-using agent work on this rig.
+
+`ggrun v3.2.9-dev.62bebe4`, Qwen3.8-27B-UD-Q4_K_XL, `--calibrate off` so the
+20-minute optimizer comparison is not part of what is being timed. Driven by
+`scripts/verify-agent-workload.py`, 2 lanes, 3 repeats, 1 warmup, max 8 turns.
+Each task is a real repair with an oracle: read the source, write a fix, run
+tests, and the harness checks the result against known cases.
+
+| task | median | range | turns |
+|---|---:|---|---:|
+| ceiling | 10.89s | 10.82–13.18 | 4 |
+| clamp | 14.47s | 14.02–14.75 | 5 |
+| interval | 6.92s | 6.63–8.82 | 3 |
+| all | **10.89s** | sum 100.50s over 9 tasks | 4 |
+
+**9/9 oracle-passed.** Not "the model produced text" — the repaired functions
+returned the right answers.
+
+| | |
+|---|---|
+| VRAM | 6,873 + 22,988 + 115 = 29,976 of 49,134 (0.610) |
+| served | 262,144 tokens, **1 slot** |
+
+### The slot count is the first thing to question
+
+`--parallel` was automatic and chose **1**, so the two agent lanes serialised
+through a single slot. The makespan above is therefore a queued makespan, not
+two lanes running concurrently. Earlier evidence that `parallel 1` is fastest
+was collected on single-stream decode, where it is the right answer; it does
+not follow that one slot is right when the workload is several agents at once.
+That is a specific, cheap experiment: rerun this suite at `--parallel 2` and
+compare makespan, not tok/s.
+
+### What this baseline is for
+
+Hot experts and worker/reviewer routing are the two levers proposed for
+agentic speed, and neither had a number to beat. This is that number. A
+candidate must improve median task time or total makespan here, at 9/9 oracle
+passes, to count as faster — an aggregate tok/s gain does not.
+
+Note the model choice. This suite on GLM-5.3-Flash at ~6.8 tok/s would take
+hours and only re-confirm it is CPU-bandwidth-bound. A fully GPU-resident 27B
+is what agent work would actually run against, so it is the honest baseline.
+
+### Still unproven
+
+- Concurrency: only 1 slot was exercised, see above.
+- Cache-backed turn time is not isolated here; the suite measures whole-task
+  wall time, which folds prefill, cache reuse and decode together.
+- No hot-experts or reviewer-routed comparison exists yet.
+
+## SLOTS — concurrency, not VRAM fill, is what made agent work faster — 2026-09-14
+
+`--parallel 2` could not launch Qwen3.8-27B at all. Recovery derated context to
+301,056 tokens and its own next candidate returned to 524,288:
+
+```
+[launch] preflight context-derate after CUDA0 allocation 2188 MiB (deficit 841 MiB, ctx=301056, ...)
+[placement] context fit: 524288 tokens, 2 slot(s)
+Error starting server: memory preflight did not converge after 5 re-plans
+```
+
+Same family as CTXRATCHET, on a site that entry missed. `boundByProvenLimits`
+guarded the backend-measured recompute; `recoverPreflightOOM` derives its own
+candidate from the original automatic request and never saw the ledger. Fixed
+by threading the ledger into recovery and bounding both option derivations.
+
+### The A/B, same suite, same model, same binary
+
+`scripts/verify-agent-workload.py`, 2 lanes, 3 repeats, oracle-checked repairs.
+
+| | parallel 1 | parallel 2 | parallel 2 repeat |
+|---|---:|---:|---:|
+| makespan | 51.47s | 34.94s | 39.97s |
+| correct tasks/min | 10.49 | **13.74** | **13.51** |
+| median task latency | 10.89s | 8.37s | 8.38s |
+| max task latency | 14.75s | 9.54s | 9.54s |
+| oracle-passed | 9/9 | 8/9 | 9/9 |
+| slots x served ctx | 1 x 262,144 | 2 x 262,144 | 2 x 262,144 |
+
+About +29% correct tasks per minute at equal correctness. `correct_tasks_per_minute`
+already weights correctness, so the 8/9 run is not credited for the task it got
+wrong. Median latency reproduces to 0.01s and max latency to 0.00s across the
+two two-slot runs.
+
+The single 8/9 was sampling variance, not a concurrency effect: the repeat under
+identical settings passed 9/9. One failure out of eighteen tasks is not evidence
+of a correctness cost, and it was checked rather than assumed.
+
+### This qualifies the earlier "parallel 1 is fastest" result
+
+That result stands for single-stream decode, and the 39 decode samples in
+VRAMFILL agree with it. It does not transfer to several agents at once, where
+one slot makes the lanes queue. Slot count must be chosen against the workload
+shape, not inherited from a decode benchmark.
+
+Note what did **not** produce this gain. Raising `fraction_of_vram` from 0.7023
+to 0.7627 moved decode not at all. Unblocking a second slot moved agentic
+makespan by a third. The lever was scheduling, not memory.
+
+### Open
+
+- Automatic slot selection still chose 1 for this workload. It has no signal
+  that the client intends concurrent agents; the launcher cannot infer lane
+  count from a serving request, so this remains an explicit `--parallel`
+  decision until something carries that intent.
+- Untested above 2 slots, and untested on a CPU-offloaded MoE, where added
+  slots divide context and may interact with expert bandwidth very differently.
+- Worker/reviewer routing is still unimplemented. It depends on concurrent
+  serving working, which it now does.
