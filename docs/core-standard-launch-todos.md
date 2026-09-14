@@ -2300,6 +2300,58 @@ tokens) per lane for both placements`, and the baseline evidence line records
 handoff describes, recorded as an actual size rather than called long-context
 acceptance.
 
+## CALIBGENERAL — the ladder fix was wrong on a model it was not written on — 2026-09-14
+
+`CALIBLADDER` was developed and verified on Qwen3.8-Flash-Next alone. Running it
+against Qwen3.8-27B — a fully resident model, a different residency class —
+broke it immediately.
+
+The 27B frontier is a different shape: **27 candidates (7 feasible)** against
+Flash-Next's 5, `batch 32..8192`, three topology shapes. Its predicted finalist
+was named `batch-1024-ubatch-512`. The generator emits `batch-%d-ubatch-%d`, a
+**compound**, and Flash-Next's frontier never produced one — every name there
+was a simple `ubatch-N`.
+
+Taking the leading token called that candidate `batch` and treated it as
+unrelated to `ubatch-512`. That defeats the fix in exactly the case it exists
+for: a refused `ubatch-512` would be followed by a candidate carrying the same
+ubatch 512, refused for the same reason on the same device.
+
+Families are now every coordinate a name moves, parsed as key-value runs — a new
+key is a non-numeric token that *follows a value*. Descriptive tails follow a
+key rather than a value, so `topology-balanced-012` stays `topology` and
+`moe-owner-1` stays `moe`. Two candidates collide when their coordinate sets
+**overlap**, not when they are equal.
+
+All nine generator name formats are pinned in `calibrate_ladder_test.go`, with a
+case asserting the ladder will not follow `ubatch-512` with the compound.
+
+### What the 27B run measured
+
+| | default | batch-1024-ubatch-512 |
+|---|---:|---:|
+| workload makespan | 6.09 s | 6.11 s |
+| decode | 32.5 tok/s | 32.4 tok/s |
+| prefill | 1713.5 tok/s | 1709.1 tok/s |
+| relative | 1.000 | 0.997 |
+
+A dead heat; `default` won and passed the relaunch, agent, cache and lifecycle
+gates. The screen here is 32,768 bytes (~10,714 tokens) per lane with
+`reuse >=8943 tokens/lane`, larger than Flash-Next's ~7,701.
+
+### The topology imbalance is not one model's quirk
+
+| model | residency | phase | imbalance |
+|---|---|---|---|
+| Qwen3.8-Flash-Next | 1.75x over VRAM | prefill | CUDA0 80% vs CUDA2 7% |
+| Qwen3.8-Flash-Next, 2nd launch | same | prefill / append | 79% vs 8% / 71% vs 2% |
+| Qwen3.8-27B | fully resident | append | GPU1 79% vs GPU0 5% |
+| Qwen3.8-27B, challenger | fully resident | prefill | GPU1 98% vs GPU2 0% |
+
+Two models, two residency classes, four launches. One card near saturation while
+another sits under 10% is the most reproducible unexploited signal measured so
+far, and no candidate family moves it.
+
 ## CALIBLADDER — the ladder reaches a challenger, and the phase guard earns its keep — 2026-09-14
 
 `CALIBBUDGET` fixed the accounting but not the blocker. The blocker was
