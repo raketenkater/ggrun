@@ -30,6 +30,11 @@ type launchMemoryRecovery struct {
 	// 555,008-token plan for 562,176 and failed against the same limit that had
 	// just rejected 563,200.
 	acceptedContext int
+	// acceptedUBatch is the smallest ubatch an exact preflight has proven fits.
+	// recoverPreflightOOM already refuses to recompute a derated ubatch back up;
+	// the measured re-plan did not, so a plan accepted at ubatch 128 came back
+	// at 256 and overshot every device at the same context.
+	acceptedUBatch int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
@@ -66,10 +71,19 @@ func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy) {
 	}
 }
 
-// acceptContext records an automatic context an exact preflight proved fits.
-// Only measured evidence may be recorded; a planner estimate is not proof.
+// acceptContext records the shape an exact preflight proved fits. Only
+// measured evidence may be recorded; a planner estimate is not proof.
 func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
-	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
+	if r == nil || strategy == nil {
+		return
+	}
+	// ubatch is recorded whatever the context policy, because it is a compute
+	// lever recovery derates on its own and the re-plan recomputes it from the
+	// original automatic request otherwise.
+	if strategy.UBatchSize > 0 && (r.acceptedUBatch == 0 || strategy.UBatchSize < r.acceptedUBatch) {
+		r.acceptedUBatch = strategy.UBatchSize
+	}
+	if !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
 	if r.acceptedContext == 0 || strategy.ContextSize < r.acceptedContext {
@@ -99,14 +113,20 @@ func (r *launchMemoryRecovery) automaticContextCeiling() int {
 	return ceiling
 }
 
-// boundByRejectedContext constrains a recompute to the contexts this launch has
-// not already disproved. It is the single place that applies the ceiling, so
-// production and tests exercise the same rule. An explicit context is
-// untouched: AutoContextMax caps only an automatic/fit context.
-func boundByRejectedContext(opts placement.Options, r *launchMemoryRecovery) placement.Options {
-	ceiling := r.automaticContextCeiling()
-	if ceiling > 0 && (opts.AutoContextMax <= 0 || ceiling < opts.AutoContextMax) {
+// boundByProvenLimits constrains a recompute to the shapes this launch has not
+// already disproved. It is the single place that applies them, so production
+// and tests exercise the same rule rather than two descriptions of it.
+//
+// An explicit context is untouched: AutoContextMax caps only an automatic/fit
+// context. ubatch is pinned the same way recoverPreflightOOM pins it, so a
+// recompute cannot undo a derating this launch had to make.
+func boundByProvenLimits(opts placement.Options, r *launchMemoryRecovery) placement.Options {
+	if ceiling := r.automaticContextCeiling(); ceiling > 0 &&
+		(opts.AutoContextMax <= 0 || ceiling < opts.AutoContextMax) {
 		opts.AutoContextMax = ceiling
+	}
+	if r != nil && r.acceptedUBatch > 0 && (opts.UBatchSize <= 0 || r.acceptedUBatch < opts.UBatchSize) {
+		opts.UBatchSize = r.acceptedUBatch
 	}
 	return opts
 }

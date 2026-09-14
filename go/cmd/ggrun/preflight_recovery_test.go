@@ -412,7 +412,7 @@ func TestRejectedAutomaticContextCapsTheBackendMeasuredRecompute(t *testing.T) {
 	}
 
 	// Exactly what the launch loop applies before it recomputes.
-	replan = boundByRejectedContext(replan, recovery)
+	replan = boundByProvenLimits(replan, recovery)
 	if replan.AutoContextMax <= 0 || replan.AutoContextMax >= current.ContextSize {
 		t.Fatalf("ceiling %d does not exclude the rejected context %d", replan.AutoContextMax, current.ContextSize)
 	}
@@ -461,7 +461,7 @@ func TestAcceptedContextBoundsTheMeasuredReplan(t *testing.T) {
 	}
 	// The observed climb: 562,176 sits under the rejected 563,200 but above the
 	// accepted 555,008, and it is exactly what broke the launch.
-	opts := boundByRejectedContext(placement.Options{}, recovery)
+	opts := boundByProvenLimits(placement.Options{}, recovery)
 	if opts.AutoContextMax >= 562176 {
 		t.Fatalf("AutoContextMax %d still admits the plan that broke the launch", opts.AutoContextMax)
 	}
@@ -474,5 +474,28 @@ func TestAcceptedContextBoundsTheMeasuredReplan(t *testing.T) {
 	recovery.acceptContext(&placement.Strategy{ContextSize: 1024})
 	if got := recovery.automaticContextCeiling(); got != 500736 {
 		t.Fatalf("an explicit context moved the ceiling to %d", got)
+	}
+}
+
+// recoverPreflightOOM already refuses to recompute a derated ubatch back up.
+// The measured re-plan did not, so a GLM-5.3-Flash plan accepted at ubatch 128
+// came back at 256 and overshot all three devices at the same context.
+func TestMeasuredReplanKeepsADeratedUBatch(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	recovery.acceptContext(&placement.Strategy{ContextSize: 500736, ContextAuto: true, UBatchSize: 128})
+	if got := boundByProvenLimits(placement.Options{UBatchSize: 512}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("measured re-plan recomputed ubatch back to %d", got.UBatchSize)
+	}
+	// An automatic request carries no ubatch of its own; the proven one applies.
+	if got := boundByProvenLimits(placement.Options{}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("automatic ubatch request ignored the proven derating: %d", got.UBatchSize)
+	}
+	// Like the context ceiling, it only ratchets down.
+	recovery.acceptContext(&placement.Strategy{ContextSize: 400384, ContextAuto: true, UBatchSize: 256})
+	if got := boundByProvenLimits(placement.Options{}, recovery); got.UBatchSize != 128 {
+		t.Fatalf("a later larger ubatch raised the pin to %d", got.UBatchSize)
+	}
+	if got := recovery.automaticContextCeiling(); got != 400384 {
+		t.Fatalf("context ceiling %d did not follow the lower accepted plan", got)
 	}
 }

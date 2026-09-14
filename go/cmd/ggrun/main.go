@@ -4871,7 +4871,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				// original automatic request walks straight back to a context that
 				// exact preflight already rejected, and the argv identity ledger
 				// cannot catch it because the argv differs.
-				opts = boundByRejectedContext(opts, memoryRecovery)
+				opts = boundByProvenLimits(opts, memoryRecovery)
 				next, rerr := placement.Compute(caps, model, opts)
 				if rerr != nil || next == nil {
 					if rerr != nil {
