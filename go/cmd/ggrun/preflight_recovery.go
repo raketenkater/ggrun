@@ -35,6 +35,12 @@ type launchMemoryRecovery struct {
 	// the measured re-plan did not, so a plan accepted at ubatch 128 came back
 	// at 256 and overshot every device at the same context.
 	acceptedUBatch int
+	// acceptedNCPUMoE is the largest CPU expert-layer count an exact preflight has
+	// proven fits. More experts on the CPU means less VRAM, so a recompute that
+	// lowers it is undoing proven relief. Observed on Qwen3.8-Flash-Next: the
+	// expert derate freed 1,073 MiB and CUDA2 fitted at 10,937/11,909, then the
+	// measured re-plan returned to 12,003 and the launch never converged.
+	acceptedNCPUMoE int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
@@ -159,12 +165,23 @@ func (r *launchMemoryRecovery) acceptContext(strategy *placement.Strategy) {
 	if strategy.UBatchSize > 0 && (r.acceptedUBatch == 0 || strategy.UBatchSize < r.acceptedUBatch) {
 		r.acceptedUBatch = strategy.UBatchSize
 	}
+	if strategy.NCPUMoE > r.acceptedNCPUMoE {
+		r.acceptedNCPUMoE = strategy.NCPUMoE
+	}
 	if !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
 	if r.acceptedContext == 0 || strategy.ContextSize < r.acceptedContext {
 		r.acceptedContext = strategy.ContextSize
 	}
+}
+
+// undoesProvenExpertRelief reports whether a recomputed plan would return expert
+// layers to a device that an exact preflight has already proven needs them on
+// the CPU. Compute takes no expert-residency input, so this is checked on the
+// result rather than pinned on the way in.
+func (r *launchMemoryRecovery) undoesProvenExpertRelief(next *placement.Strategy) bool {
+	return r != nil && next != nil && r.acceptedNCPUMoE > 0 && next.NCPUMoE < r.acceptedNCPUMoE
 }
 
 // automaticContextCeiling is the largest automatic context this launch may

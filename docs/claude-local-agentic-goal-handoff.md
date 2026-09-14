@@ -266,13 +266,22 @@ and feature documentation with the validated release.
 Updated 2026-09-14. Detailed measurements live in
 `docs/core-standard-launch-todos.md`; this section carries state only.
 
-### Milestone 1 — consolidate launch correctness: blocked, scope reduced
+### Milestone 1 — consolidate launch correctness: resolved
 
 Refreshed PR state, superseding the snapshot above: #59 and #60 merged. #58
 rebased onto current main and mergeable.
 
-**The central finding is a direct tension this file's review helped expose.**
-Two models need opposite things from the same recovery selector:
+**Both target models now launch.** The blocker was not the lever selector at
+all; see "Resolution" below. Full evidence is in the core ledger under
+`EXPERTPIN`.
+
+| model | result | evidence |
+|---|---|---|
+| Qwen3.8-Flash-Next UD-Q3_K_XL | LOADED, then 3/3 oracle at 7.67 correct tasks/min | `EXPERTPIN` |
+| GLM-5.3-Flash UD-Q3_K_XL | LOADED, context fit 498,688 tokens, 1 slot | `EXPERTPIN` |
+
+The apparent tension recorded below was real but was a symptom. Two models
+needed opposite things from the same context step:
 
 | model | needs | with a deficit-sized context step | without it |
 |---|---|---|---|
@@ -288,12 +297,8 @@ The step has been **reverted**. The ceiling is again one token below the
 rejected context. The deficit-to-token conversion is retained for judging
 whether a proposed drop covers the shortfall; it no longer forces one.
 
-Root cause of the tension, which a bigger step only masked: for an
-oracle-planned deficit `DerateCUDAOOMArgsForDeficit` never considers ubatch,
-because that is gated on `IsComputeBuffer`. Qwen sits at ubatch 256 untouched
-while expert derating stalls at `n-cpu-moe` 21 -> 22, so context is pressed into
-relief it cannot deliver. **The fix is lever selection with credible relief on
-the failing resource, not a larger context step.**
+Every root cause proposed for that tension before the per-device ledger was read
+turned out to be wrong; they are kept below only so they are not re-derived.
 
 ### Landed in #58 after scope reduction
 
@@ -329,96 +334,80 @@ the failing resource, not a larger context step.**
 4. "DeviceSlackMB has no readers, so nothing consumes slack" inferred an absent
    capability from one unread field without tracing candidate/ledger paths.
 
-### Next concrete deliverable, with four hypotheses already eliminated
+### Resolution — the measured re-plan handed back proven expert relief
 
-Make recovery choose a lever with credible relief on the failing device. Four
-attempts were made and reverted; recording them so they are not repeated:
+The per-device ledger from `/tmp/q5.log`, which this file had been asking for
+under "compare complete per-device and host ledgers", shows it in three rows:
+
+| round | CUDA2 need / limit | outcome |
+|---|---:|---|
+| 1 | 12,010 / 11,909 MiB | does not fit |
+| after expert derate | 10,937 / 11,909 MiB | **fits** — 1,073 MiB freed |
+| 2 (backend-measured re-plan) | 12,003 / 11,909 MiB | does not fit again |
+
+The lever set was never the problem. The expert derate worked on the first
+attempt and freed over a gigabyte. The backend-measured recompute then replanned
+from the original request and put the displaced layer straight back. Because
+that recompute yields a **different** argv from the one already rejected,
+`recomputeDecision`'s identity ledger could not catch it, and the launch cycled
+until the replan budget ran out.
+
+`boundByProvenLimits` already pins context and ubatch across a recompute, but
+`placement.Options` takes no expert-residency input, so `n-cpu-moe` cannot be
+pinned on the way in. It is now guarded on the way out: `launchMemoryRecovery`
+records the largest `NCPUMoE` an exact preflight has proven, and
+`undoesProvenExpertRelief` vetoes a recompute that lowers it. The ratchet only
+moves toward more CPU residency.
+
+Regression: `TestMeasuredReplanCannotUndoProvenExpertRelief` covers the ratchet,
+the no-accepted-plan case, re-proposing the accepted plan, moving further
+experts to the CPU, and nil. Uncached `scripts/verify-core-engine.sh` green on
+all six core packages.
+
+The guard costs nothing at serve time. Qwen3.8-Flash-Next at the stable
+candidate returns 3/3 oracle-passed, 7.67 correct tasks/min, 14.8s median,
+against 7.49 and 7.76 on the same suite before the fix.
+
+### Seven attempts, six reverted — what was eliminated
+
+Recorded so none of it is repeated. All six reverted changes were reasoned from
+inference about which branch executes; the one that worked came from reading the
+ledger.
 
 1. **Widen the context step to the measured deficit.** Fixes Qwen, breaks GLM
-   (662,528 -> 236,544 in one round; the plans at that depth are refused by the
-   guards). Reverted.
+   (662,528 -> 236,544 in one round; the guards refuse the plans at that depth).
 2. **Bound that step to a quarter of the window.** Converges close to main's
-   500,736 but still fails GLM. Reverted.
+   500,736 but still fails GLM.
 3. **Allow compute memory as a last-resort lever for oracle-planned deficits.**
-   The branch is never reached: the earlier expert lever reports success first.
-   Reverted.
-4. **Rank levers by `candidateRelievesFailedDevice` before accepting one.** That
-   predicate returns **true** for the weak derate, so the ranking never fires.
-   Reverted.
+   The branch is never reached; the earlier expert lever reports success first.
+4. **Rank levers by `candidateRelievesFailedDevice`.** The predicate returns
+   true for the weak derate, so the ranking never fires.
+5. **Rank by `predictedDeviceReliefMB`,** a measured per-device relief estimate.
+   Builds and gates cleanly; did not change the observed trace.
+6. **Offer one bounded ubatch rung when the allocation is unmeasured.** Same.
 
-What (4) established is the sharpest available diagnosis: the lever set is not
-the problem and `candidateRelievesFailedDevice` is too permissive. On
-Qwen3.8-Flash-Next it credits a change as relieving CUDA2 while `n-cpu-moe`
-stays at 22 and the measured deficit falls only 101 -> 94 -> 87 MiB, about
-7 MiB per round, which is the size of the 1,024-token context nudge rather than
-of any expert movement. Recovery believes it is relieving the failing device and
-is not.
+Three diagnoses recorded as root causes were each overturned by
+`preflight_recovery_qwen_test.go`, which drives the selector with the exact
+failing Qwen argv and outcome:
 
-### Correction: the previously recorded root cause was wrong
+- "The synthesised `AllocMB` disqualifies the ubatch lever" — the lever is
+  available and steps 256 -> 64.
+- "`n-cpu-moe` is stuck at 22" — it steps 22 -> 23, CUDA2 expert layers 4 -> 3.
+- "The pins are partial sub-pins and are mis-priced" — the OT pattern includes
+  `down`, so they are whole-layer.
 
-`preflight_recovery_qwen_test.go` drives the selector with the exact failing
-Qwen argv and outcome. It overturns the diagnosis recorded below, which was
-reached by inference rather than observation:
+That test exists so the next attempt starts from observation. It cost minutes
+and would have saved most of the six reverted attempts.
 
-- The **ubatch lever is available** for this shape: `DerateCUDAOOMArgsForDeficit`
-  with ubatch allowed returns 256 -> 64. It is not disqualified by the
-  synthesised `AllocMB`.
-- The **expert lever does real work**: CUDA2 goes 4 -> 3 expert layers and
-  `n-cpu-moe` 22 -> 23. Recovery is not stalled on a no-op, and it is chosen
-  legitimately because it reports success first.
-- The pins are **whole-layer** — the OT pattern includes `down`, so it is not
-  the partial `gate_up|up_gate|gate|up` sub-pin that `computeBuffersFromVRAMDelta`
-  refuses to price. The expert pricing is not a partial-pin mis-estimate.
+Two design items from those attempts remain genuinely open, now decoupled from
+the launch blocker:
 
-So the open question is none of the three things previously blamed. It is why
-the **re-measured** deficit falls only about 7 MiB per round when a whole expert
-layer leaves the failing device. Each round re-plans and re-measures, so the
-plan may be re-committing on CUDA2 what the derate just freed. The next step is
-to compare the complete per-device ledger immediately before and after one
-accepted derate, which the handoff already asks for under "compare complete
-per-device and host ledgers".
-
-Six fixes were attempted and reverted across this session, all from inference
-about which branch executes. The test above exists so the next attempt starts
-from observation. Establishing it cost minutes and would have saved most of
-those six.
-
-### Superseded: the mechanical root cause claimed on the fifth and sixth attempts
-
-`DerateCUDAOOMArgsForDeficit` offers a ubatch reduction only inside
-`if isComputeBuffer`, and it sizes that reduction with
-`nextUBatchForDeficit(currentUBatch, allocMB, deficitMB)`.
-
-For an oracle-planned shortfall there is no failed allocation, so
-`recoverPreflightOOM` synthesises `outcome.AllocMB = outcome.DeficitMB`. The
-helper is then asked whether shrinking a "101 MiB" compute buffer can free
-101 MiB, concludes it cannot, and declines. **The lever is disqualified by a
-fabricated allocation size while the real compute buffer is gigabytes** — on
-GLM the same buffer measured about 3 GiB at ubatch 256.
-
-That is why Qwen3.8-Flash-Next sits at ubatch 256 through every round while the
-deficit falls 101 -> 94 -> 87 MiB, which is the size of the 1,024-token context
-nudge and nothing else.
-
-Two further attempts were made and reverted: ranking candidates by a measured
-per-device relief estimate (`predictedDeviceReliefMB`, pricing expert layers
-leaving the device and KV shrinking on it), and offering one bounded ubatch rung
-directly when the allocation is unmeasured. Both build and gate cleanly; neither
-changed the observed trace, and the execution path was not confirmed before the
-session stopped. They are recorded as unverified rather than shipped.
-
-The remaining work is therefore two coupled changes, not one:
-
-1. Stop synthesising `AllocMB` from the deficit where it feeds sizing decisions,
-   or mark it unmeasured everywhere it is consumed, so a lever is never
-   disqualified by a fabricated number. `outcome.AllocMBMeasured` already
-   records the distinction and is not consulted here.
-2. Make relief a **measured quantity** compared against
-the deficit, not a boolean derived from argv differences: predict MiB freed on
-the failing device for each candidate lever, rank by that, and accept the weak
-candidate only as an explicit fallback. That requires reading the per-device
-ledger rather than comparing flags, which is why it is a design change and not a
-fifth point patch.
+1. `outcome.AllocMB` is synthesised from the deficit for oracle-planned
+   shortfalls while `outcome.AllocMBMeasured` records the distinction and is not
+   consulted at the sizing sites. A lever should never be sized by a fabricated
+   allocation, even though that was not what blocked Qwen.
+2. Relief is a boolean derived from argv differences rather than a measured
+   quantity compared against the deficit.
 
 ### Known limitations of current evidence
 

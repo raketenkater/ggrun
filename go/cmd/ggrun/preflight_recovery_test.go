@@ -778,3 +778,34 @@ func TestContextBowsOutWhenItCannotCoverTheDeficit(t *testing.T) {
 		t.Fatalf("a coverable deficit produced %d tokens", small)
 	}
 }
+
+// An exact preflight proved CUDA2 needs more experts on the CPU; a later
+// recompute must not hand them back. Observed on Qwen3.8-Flash-Next: the expert
+// derate freed 1,073 MiB and CUDA2 fitted at 10,937/11,909, then the measured
+// re-plan returned to 12,003 and the launch never converged. Its argv differs
+// from the rejected one, so the identity ledger cannot catch it.
+func TestMeasuredReplanCannotUndoProvenExpertRelief(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	if recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 5}) {
+		t.Fatal("a launch with no accepted plan vetoed a recompute")
+	}
+	recovery.acceptContext(&placement.Strategy{NCPUMoE: 23, ContextSize: 262144, ContextAuto: true})
+
+	if !recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 22}) {
+		t.Fatal("a recompute returning an expert layer to the GPU was allowed")
+	}
+	if recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 23}) {
+		t.Fatal("re-proposing the accepted plan was treated as undoing it")
+	}
+	if recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 24}) {
+		t.Fatal("moving further experts to the CPU was treated as undoing relief")
+	}
+	// The ledger only ratchets toward more CPU residency.
+	recovery.acceptContext(&placement.Strategy{NCPUMoE: 21, ContextSize: 262144, ContextAuto: true})
+	if !recovery.undoesProvenExpertRelief(&placement.Strategy{NCPUMoE: 22}) {
+		t.Fatal("a lower accepted plan weakened the proven relief")
+	}
+	if recovery.undoesProvenExpertRelief(nil) {
+		t.Fatal("a nil recompute was treated as undoing relief")
+	}
+}

@@ -4905,7 +4905,15 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				next = retainTunedBatch(next)
 				claudeCodeSlotAdjust(next, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
 				nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, next)
-				if changed, rejected := memoryRecovery.recomputeDecision(serverArgs, nextArgs); changed {
+				if memoryRecovery.undoesProvenExpertRelief(next) {
+					// The recompute would return expert layers an exact preflight has
+					// already proved must stay on the CPU. Its argv differs from the
+					// rejected one, so the identity ledger cannot catch it.
+					fmt.Fprintln(os.Stderr, "[launch] backend-measured recompute would undo proven expert relief; retaining the verified-safe placement")
+					if preflight.Evidence.Level == memoryEvidenceAllocated {
+						measuredProductionArgs = formatCommand(serverArgs)
+					}
+				} else if changed, rejected := memoryRecovery.recomputeDecision(serverArgs, nextArgs); changed {
 					if rejected {
 						fmt.Fprintln(os.Stderr, "[launch] backend-measured recompute reproduced an argv rejected by this launch's memory checks; retaining the verified-safe placement")
 						if preflight.Evidence.Level == memoryEvidenceAllocated {

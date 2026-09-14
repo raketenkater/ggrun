@@ -1985,3 +1985,70 @@ expert layers to host RAM. **On a CPU-offloaded MoE a slot is paid for in
 expert residency**, and residency is what sets speed. A slot cap should key on
 that displacement, which ggrun already computes per candidate, rather than on a
 size ratio.
+
+## EXPERTPIN — the measured re-plan handed back proven expert relief — 2026-09-14
+
+Correcting RESIDENCYFRACTION's attribution: Qwen3.8-Flash-Next was not unblocked
+by an oracle-path lever change. Six such changes were tried and all reverted —
+widening the ceiling step to the deficit, bounding that step to a quarter-window,
+a last-resort compute lever, and three re-rankings of the recovery candidates.
+None altered the trace. The defect was one step later, in what happens *after* a
+recovery succeeds.
+
+### The per-device ledger, from `/tmp/q5.log`
+
+| round | CUDA2 need / limit | outcome |
+|---|---:|---|
+| 1 | 12,010 / 11,909 MiB | does not fit |
+| after expert derate | 10,937 / 11,909 MiB | **fits** — 1,073 MiB freed |
+| 2 (backend-measured re-plan) | 12,003 / 11,909 MiB | does not fit again |
+
+The expert lever worked on the first try. The backend-measured recompute then
+replanned from the original request and put the displaced layer straight back.
+Because that recompute produces a *different* argv from the one already
+rejected, `recomputeDecision`'s identity ledger could not catch it, and the
+launch cycled until the replan budget ran out.
+
+`boundByProvenLimits` already pins context and ubatch across a recompute, but
+`placement.Options` takes no expert-residency input, so `n-cpu-moe` cannot be
+pinned on the way in. It is now guarded on the way out: the ledger records the
+largest `NCPUMoE` an exact preflight has proven, and `undoesProvenExpertRelief`
+vetoes any recompute that lowers it. The ratchet only ever moves toward more CPU
+residency.
+
+### Three wrong diagnoses, each killed by a test rather than by reasoning
+
+- "The fabricated `AllocMB` disqualifies the ubatch lever" — the pinned selector
+  test shows the lever available and stepping 256 to 64.
+- "`n-cpu-moe` is stuck at 22" — it steps 22 to 23, CUDA2 expert layers 4 to 3.
+- "The pins are partial sub-pins and are mis-priced" — the override pattern
+  includes `down`, so they are whole-layer.
+
+`TestQwenFlashNextRecoverySelectorShape` pins all three so they are not
+re-derived.
+
+### Evidence after the fix
+
+Both target models launch, and the guard fires usefully on both.
+
+| model | result |
+|---|---|
+| Qwen3.8-Flash-Next | LOADED; plan retained at 10,937 / 11,909 MiB |
+| GLM-5.3-Flash | LOADED; context fit 498,688 tokens, 1 slot |
+
+Agent workload re-run on Qwen3.8-Flash-Next at the stable candidate, 2 lanes,
+1 repeat, ctx 18,912: **3/3 oracle-passed, 7.67 correct tasks/min, 14.8s median,
+16.9s max**. That matches the 7.49 and 7.76 figures recorded before the fix
+under the same suite, so the guard costs nothing at serve time — it only makes
+the launch converge.
+
+Uncached `scripts/verify-core-engine.sh` green across all six core packages.
+
+### Open
+
+- The uneven-GPU KV case is still unexercised: all three cards here hold a
+  similar share, so a plan where one device owns most of the KV has not been
+  driven through recovery.
+- Recovery compares per-device ledgers but that comparison is not yet asserted
+  to be complete — a device absent from one side is not distinguished from a
+  device at zero.
