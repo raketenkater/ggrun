@@ -2572,3 +2572,54 @@ and the contract does not accept unit tests as evidence for it.
 - Re-run the seat comparison once a seat can launch. Until then the worker
   benefit is unmeasured, and nothing here argues a companion cannot pay for
   itself.
+
+## SEATARMS — all three seats measured, and the seat is not what matters — 2026-09-14
+
+Qwen3.8-Flash-Next, `--claude-code`, same suite (`ab35d682`), one repeat each.
+
+| arm | per-agent context | correct tasks/min | median | completed |
+|---|---:|---:|---:|---|
+| `off` self-classify | 261,888 | 2.44 | 25.9 s | 2/3 |
+| `qwen2b` review-only | 262,144 | 2.49 | 26.3 s | 2/3 |
+| `qwen` worker+reviewer | **211,968** | 2.27 | 29.5 s | 2/3 |
+
+**No seat is measurably better.** The spread is 2.27 to 2.49 on single runs with
+no established noise floor. Ranking them would be reading noise, and this file's
+own correction on that point applies.
+
+**The 4B seat costs 19% of per-agent context** — 211,968 against 261,888 — while
+the 2B seat costs none. That is the capacity result to record rather than a
+configuration quietly shrinking the main model's window.
+
+Every arm loses a task, and every arm runs at roughly a third of plain serving's
+7.63 correct tasks/min. Across five launches the cost tracks the four-slot plan,
+not the companion.
+
+### Corrections to CLAUDEMODE
+
+- **"No companion seat can launch" was wrong.** All three converged here, with
+  monotone traces: `off` 38-41-43-44, `qwen` 42-45-47-48-48, `qwen2b` in one
+  round at 47. The earlier double failure does not reproduce.
+- **The oscillation is intermittent, not deterministic.** The nine-for-nine
+  correlation was real for that launch, but four later launches of the same
+  shapes show no oscillation at all. It depends on starting state, not on the
+  configuration alone.
+
+### The residency ratchet is still unexercised
+
+`holdExpertResidency` fired **0 times in all three arms**. The first patch sat
+on `recomputeAutomaticContextRecovery`, which returns method `context-derate`,
+while the oscillating rounds return `context-replanned` from the candidate built
+by `Compute`/`ReplanAfterOOM` — a different site. That is corrected, and the
+guard still has not run, because nothing has oscillated since.
+
+It is gated and covered by unit tests. It is **not** demonstrated to fix
+anything, and must not be described as such until a live run oscillates with it
+installed.
+
+### Open
+
+- The worker seat never did worker work: no delegated or classifier traffic was
+  generated, so this measures the seat's cost with none of its benefit. The
+  milestone 3 comparison needs traffic on the review and utility routes.
+- The four-slot Claude Code plan, not the seat, is what costs the throughput.
