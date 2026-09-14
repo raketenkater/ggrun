@@ -751,6 +751,70 @@ Remaining before this milestone is closed:
 - Windows GPU and macOS stay marked untested. This box cannot certify generic
   public claims; that needs an expanded hardware and model matrix.
 
+### Claude Code mode and the companion seat — measured, with one gap left
+
+Full detail in `SEATCOST`, `CLAUDEMODE` and `SEATARMS`.
+
+**Every measurement before this point used plain serving**, so no companion was
+seated and none of it described the configuration an agent user runs. Claude
+Code mode plans four slots at the same per-agent context, not one.
+
+| | plain | `--claude-code` |
+|---|---:|---:|
+| plan | 262,144, 1 slot | ~1,046,528 total, 4 slots |
+| per agent | 262,144 | 261,888 |
+| resident experts | 28 of 48 | 19 of 48 |
+| correct tasks/min | **7.63** | **2.42** |
+| tasks completed | 3/3 | 2/3 |
+
+**The four-slot plan, not the companion, is what costs the throughput.** All
+three seats land together:
+
+| seat | per-agent context | correct tasks/min |
+|---|---:|---:|
+| `off` self-classify | 261,888 | 2.44 |
+| `qwen2b` review-only | 262,144 | 2.49 |
+| `qwen` worker+reviewer | **211,968** | 2.27 |
+
+Single runs, no established noise floor, so the ordering is not resolvable and
+must not be read as one. The durable result is the capacity one: the 4B seat
+costs 19% of per-agent context, the 2B seat costs none.
+
+**The benefit side is still unmeasured.** No arm generated review or delegated
+worker traffic, so this is the seat's cost with its lane empty. A driver that
+issues classifier-marked requests concurrently with foreground turns is written
+(`scratchpad/review-lane.py`, `review-ab.sh`) and was interrupted before it
+produced results. It needs one uninterrupted GPU window.
+
+### Corrections to earlier entries in this record
+
+1. "The failure budget blocked topology exploration" — it did not. The budget
+   was reached exactly as the last of three challengers finished, so nothing was
+   ever skipped by it. Candidate *selection* was the blocker.
+2. "Three wasted reloads" — those candidates never loaded the model. Preflight
+   refused each before a weight was read.
+3. "No companion seat can launch" — all three launch. The non-convergence is
+   intermittent and depends on starting residency, not on the configuration.
+4. `SEATCOST`'s seat prices came from dry-run estimates (35 resident); the live
+   plans landed at 19. The dry-run ranks the seats but does not size them.
+5. The residency ratchet in PR #62 **has never executed**. It is gated and
+   tested; it is not demonstrated to fix anything.
+
+### Milestone 5 coverage, final for this session
+
+| path | state |
+|---|---|
+| Uncached core gate, six packages | green at every commit |
+| Linux CPU install / download / generate / cancel / shutdown | green |
+| Windows install / reinstall / generate | green |
+| **Linux real GPU on the merged candidate** | **green** — run 34898139305 on `0a66834` |
+| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false |
+| macOS | **untested**, lower priority |
+| Resident / offloaded-MoE / tight-fit models | all three launched and served |
+
+Windows GPU and macOS cannot be closed from this machine. They are reported
+untested rather than inferred from the Linux result.
+
 ### Known limitations of current evidence
 
 - Single runs per configuration; no matched repeats.
