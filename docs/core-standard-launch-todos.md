@@ -2135,3 +2135,84 @@ The guard found one dead field: `FlashAttn` is hardcoded `true` in
 - `--prefix-reuse` is not wired through `verify-gpu-install.py`, so the GPU CI
   job cannot request it yet.
 - One run per check, one machine, three NVIDIA devices.
+
+## CALIBSPEND — the optimizer's first run on Flash-Next, and what it spent it on — 2026-09-14
+
+`EXPERTPIN` made Qwen3.8-Flash-Next launchable, which means the candidate
+controller had **never run on it**: every prior measurement used
+`--calibrate off` to stay out of the 20-minute comparison. This is the first
+standard launch, defaults throughout, only host/port and the live-probe
+allowance.
+
+### What it chose
+
+| | |
+|---|---|
+| plan | `--n-cpu-moe 20`, ubatch 256, batch 2048, parallel 1 |
+| resident expert layers | **28 of 48**, across all three GPUs |
+| context | 262,144 tokens, 1 slot, KV q8_0 on GPU |
+| VRAM | 43,958 of 49,134 MiB (**89.5%**) |
+| ggrun's own bottleneck call | **CPU expert bandwidth** (live-allocated) |
+| agent workload | 3/3 oracle, **7.63 correct tasks/min**, 14.79s median |
+
+7.63 sits inside the 7.49–7.76 band measured before, so the calibrated plan is
+not faster. What it is, is **much roomier**: 262,144 tokens of context against
+the 18,912 the 7.67 run used, at the same throughput on this suite. For a
+product whose goal is useful context for agent work, 14x the context for no
+measured cost is the result worth keeping. The suite's tasks are short, so this
+says serving a 262k context is free here, not that long context is free.
+
+### The defect this run exposes
+
+The failure budget was spent before a single candidate ran.
+
+| candidate | outcome |
+|---|---|
+| ubatch-2048 | 7,026 MiB deficit on CUDA0 |
+| ubatch-1024 | 3,608 MiB deficit on CUDA0 |
+| ubatch-512 | 1,885 MiB deficit on CUDA0 |
+| — | failure budget reached; candidate search stopped |
+
+Every candidate was a larger ubatch, and on a model 1.75x over VRAM a larger
+ubatch costs compute buffer on every device. The accepted plan leaves CUDA2 at
+11,839 of 11,909 MiB — **70 MiB of slack**. All three were arithmetically
+impossible before they were tried.
+
+Placement had already said so. During planning it printed, nine times:
+
+```
+[placement] ubatch 512 did not yield a usable whole-layer MoE plan — using ubatch 256 instead
+```
+
+So **calibration does not consult what placement already established**. The
+consequence is not merely three wasted reloads: with the budget exhausted on
+ubatch, expert packing, topology and slot count are never reached at all on this
+model class. That is why the baseline always wins on this shape — nothing else
+is ever measured.
+
+The negative result is at least cached (`cal-ee43f9c5...json`, admission-only
+evidence) so an identical launch does not reload again, which is what the
+milestone asks for.
+
+### Two measured bottlenecks worth naming
+
+From the optimizer's own phase analysis on this launch:
+
+- **Prefill is topology-limited: CUDA0 at 80% SM while CUDA2 sits at 7%.** The
+  split is 0.27/0.59/0.14, so the smallest share is also the idlest card.
+- **Decode is in the CPU-expert path, and PCIe is not proven saturated** —
+  RX/TX 52/34 MiB/s decode, 74/144 MiB/s mixed. The optimizer explicitly keeps
+  DRAM and synchronization as live candidates rather than blaming the bus, which
+  is the correction this handoff asked for.
+
+Its own safe-lever conclusion: "move serial layer work off the saturated GPU;
+retain expert-storage roles unless routing proves them active."
+
+### Open
+
+- Candidate generation should not propose a shape placement has already refused
+  for this model, and an infeasible candidate should not consume the failure
+  budget that expert packing and topology never get to use.
+- The prefill imbalance (80% against 7%) has a named lever and no experiment.
+- One run. The agent suite is three short repair tasks and does not exercise the
+  262k context it now has.

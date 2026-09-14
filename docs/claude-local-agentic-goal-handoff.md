@@ -485,6 +485,42 @@ already there — `RequestRecord` carries `Route`, `QueueMS`, `TTFBMS`,
 is a measurement to run, not code to write. It needs a long two-arm session and
 has not been run.
 
+### Milestone 4 — spend remaining capacity on demonstrated bottlenecks: started
+
+First standard launch of Qwen3.8-Flash-Next with the candidate controller
+enabled. Detail in the core ledger under `CALIBSPEND`.
+
+The plan it settled on serves **262,144 tokens with 28 of 48 expert layers
+resident at 89.5% VRAM**, and returns 7.63 correct tasks/min — inside the
+7.49-7.76 band measured at 18,912 tokens. Fourteen times the context at the
+same throughput on this suite is the result worth keeping, and it is exactly
+what this file means by preserving useful context. The suite's tasks are short,
+so it shows serving that context is free, not that long context is free.
+
+**The run exposed a defect in candidate generation.** All three candidates were
+larger ubatch values; all three failed admission by 1,885 to 7,026 MiB; the
+failure budget was exhausted and the search stopped. Placement had already
+printed nine times that ubatch 512 yields no usable whole-layer MoE plan for
+this model. Calibration does not consult that. The cost is not three wasted
+reloads but that expert packing, topology and slot count are **never reached**
+on this model class, which is why the baseline always wins on this shape.
+
+Two bottlenecks are now named with measurements rather than inferred:
+
+- prefill is topology-limited, CUDA0 at 80% SM against CUDA2 at 7% on a
+  0.27/0.59/0.14 split;
+- decode is in the CPU-expert path with PCIe active but **not proven saturated**
+  (52/34 MiB/s), so DRAM and synchronization stay live candidates.
+
+Next for this milestone: stop infeasible candidates from consuming the failure
+budget, so the levers that matter on an offloaded MoE get measured at all. The
+prefill imbalance has a named lever and no experiment yet.
+
+Also resolved from milestone 2: the `ctx N total / M per agent` line **does**
+print on a fresh calibration (`[optimize] roomy-resident, ctx 262144 total /
+262144 per agent, ...`). The gap is specific to the cached-decision path, as
+recorded.
+
 ### Known limitations of current evidence
 
 - Single runs per configuration; no matched repeats.
