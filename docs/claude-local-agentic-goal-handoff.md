@@ -778,13 +778,33 @@ three seats land together:
 
 Single runs, no established noise floor, so the ordering is not resolvable and
 must not be read as one. The durable result is the capacity one: the 4B seat
-costs 19% of per-agent context, the 2B seat costs none.
+costs 19% of per-agent context, the 2B seat costs none. **This table measures
+the seat's cost with its review lane idle; see `REVIEWLANE` below for what
+happens once reviews are actually issued.**
 
-**The benefit side is still unmeasured.** No arm generated review or delegated
-worker traffic, so this is the seat's cost with its lane empty. A driver that
-issues classifier-marked requests concurrently with foreground turns is written
-(`scratchpad/review-lane.py`, `review-ab.sh`) and was interrupted before it
-produced results. It needs one uninterrupted GPU window.
+**The benefit side is now measured, and it reverses the reading** (`REVIEWLANE`).
+Driving the lane — 8 classifier requests concurrent with 4 foreground turns —
+separates the arms decisively:
+
+| | `off` self-classify | `qwen2b` seated |
+|---|---:|---:|
+| routes served | `main: 13` | `reviewer: 8`, `main: 4` |
+| reviews completed | **3 of 8** | **8 of 8** |
+| review median | 14.17 s | **0.099 s** |
+| foreground median | 16.58 s | **10.28 s** |
+| errors | **6 x HTTP 502** | **0** |
+
+With no seat every request lands on `main`, reviews queue behind foreground work
+on the same four slots, and six of twelve fail outright. With the 2B seated the
+reviews are served in ~100 ms and the foreground turns get faster as well.
+
+**Recommendation: seat the review-only companion on an offloaded MoE.** It costs
+no per-agent context, and self-classify collapses exactly when reviews and
+foreground work overlap — the normal Claude Code pattern of one classifier
+request per tool call.
+
+Still open: the 4B worker seat has never been driven with delegated utility
+work, so its 19% context cost over the 2B has no measured benefit.
 
 ### Corrections to earlier entries in this record
 

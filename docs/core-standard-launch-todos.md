@@ -2623,3 +2623,55 @@ installed.
   generated, so this measures the seat's cost with none of its benefit. The
   milestone 3 comparison needs traffic on the review and utility routes.
 - The four-slot Claude Code plan, not the seat, is what costs the throughput.
+
+## REVIEWLANE — the seat pays for itself once reviews actually happen — 2026-09-14
+
+`SEATARMS` compared the seats with the review lane empty and found them
+inseparable. That measured a companion's cost with none of its work. This drives
+the lane: 8 classifier requests issued **concurrently** with 4 foreground turns,
+through the Auto router, marked with the same system-prompt string the router
+selects on.
+
+| | `off` self-classify | `qwen2b` seated |
+|---|---:|---:|
+| routes served | `main: 13` | **`reviewer: 8`, `main: 4`** |
+| reviews completed | **3 of 8** | **8 of 8** |
+| review median | 14.17 s | **0.099 s** |
+| review max | 177.6 s | 0.213 s |
+| foreground completed | 3 of 4 | **4 of 4** |
+| foreground median | 16.58 s | **10.28 s** |
+| errors | **6 x HTTP 502** | **0** |
+
+The per-request metrics confirm the mechanism rather than leaving it inferred.
+With no seat, all thirteen requests went to `main`: reviews queued behind
+foreground work on the same four slots, six requests failed with 502, and the
+reviews that survived took up to 178 s. With the 2B seated, the eight reviews
+went to `reviewer` at ~100 ms each returning 8 tokens, and the four foreground
+turns had `main` to themselves.
+
+**Foreground turns got faster too** — 10.28 s against 16.58 s median. The
+companion does not only absorb reviews; it stops them contending for the main
+model.
+
+### This reverses SEATARMS' reading
+
+`SEATARMS` is not wrong, it is incomplete: 2.44 / 2.49 / 2.27 correct tasks/min
+is the seat's cost with its lane idle, and on that evidence the 4B seat's 19%
+context cost looks like a pure loss. Under review traffic the review-only seat
+turns a 62%-failure situation into a zero-failure one at no context cost.
+
+**Recommendation: seat the review-only companion (`--claude-reviewer qwen2b`) on
+an offloaded MoE.** It costs no per-agent context, and self-classify collapses
+once reviews and foreground work overlap — which is the normal Claude Code
+pattern, one classifier request per tool call.
+
+### Limits of this evidence
+
+- One run per arm; no repeats and no noise floor.
+- Synthetic traffic shaped like Claude Code's classifier requests, not a real
+  session.
+- The 502s mean `off` was overloaded rather than merely slow. A gentler review
+  rate would not separate the arms this starkly, and the crossover point is not
+  measured.
+- The 4B worker seat was not driven with delegated utility work, so its extra
+  cost over the 2B still has no measured benefit.
