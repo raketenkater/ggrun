@@ -3986,3 +3986,59 @@ served without a single non-2xx.
   classifier traffic and is the natural next step.
 - A cosmetic `unrecognized_model` warning appears for `local` during session
   title generation. It does not affect the run, but it is noise a user sees.
+
+## REVIEWREAL — the review lane under a real agent session — 2026-09-15
+
+`REALCLIENT` closed the real-client gap but produced only one review request in
+23, because `--permission-mode acceptEdits` auto-approves edits and almost
+nothing reached the classifier. This uses `--permission-mode auto`, which ggrun
+describes as "dedicated local safety reviewer; fail-closed", on a three-file task
+with a test run after each fix.
+
+Qwen3.8-27B + `qwen2b` seated, `claude -p`, 40 turns max.
+
+### Task outcome
+
+**All three functions fixed**, `go test ./...` passes, and the three `_test.go`
+files are untouched as the task required — verified independently with
+`git status`.
+
+### Route split and latency
+
+| | |
+|---|---:|
+| total requests | **55** |
+| `main` | 46 |
+| `reviewer` | 5 |
+| `reviewer/stop-stripped-verdict` | 4 |
+| rejected / fell back to main | **0** |
+| reviewer median | **287 ms** |
+| main median | **31,568 ms** |
+
+**Nine real classifier requests, all answered by the seated 2B, none rejected.**
+The reviewer answers in 287 ms against the main model's 31.6 s median — roughly
+**110x faster** for the decisions that gate every tool call.
+
+Four of the nine came back as `stop-stripped-verdict`: the reviewer emitted
+`<block>yes` without the closing tag, which `validReviewerVerdict` accepts
+deliberately because Claude's own parser sends `</block>` as a stop sequence.
+That path is exercised by real traffic here, not just by its unit test.
+
+### One 400, on main
+
+`statuses: {200: 54, 400: 1}` — a single bad request on the main route, not
+aborted, and the session completed correctly regardless. Worth noting rather
+than explaining away; a session that completes with a 400 in it is a loose end,
+and the request body was not captured to say which call it was.
+
+### What is now established for milestone 3
+
+- **Required reviews happen and are answered locally.** Nine of nine, zero
+  fallbacks to the main model.
+- **The seat pays for itself on latency**: 287 ms versus 31.6 s per decision, on
+  traffic a real agent generated rather than a synthetic marker.
+- **Task correctness holds** with the reviewer in the loop.
+
+Still open: the matched **main-only** arm — the same task with
+`--claude-reviewer off`, so the main model self-classifies — which is what turns
+this into a comparison rather than a strong single observation.
