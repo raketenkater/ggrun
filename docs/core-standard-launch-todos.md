@@ -3487,11 +3487,45 @@ and at 32 tokens the budget was spent before the code was emitted. At 160 tokens
 every depth recalls. **A correctness oracle that shares a budget with the model's
 preamble measures the budget.**
 
+### Mid-context recall, the harder case
+
+A fact at the start is the easy case. An agent's working set buries what matters
+in the middle, so the probe was extended to plant the code at 50% depth and the
+chars-per-token estimate tightened from 4.0 to 3.0 (the first pass asked for 131k
+and got 75,599).
+
+| actual prompt tokens | prefill tok/s | decode tok/s | wall | code recalled |
+|---:|---:|---:|---:|---|
+| 13,406 | 1,708.1 | 35.9 | 12.6 s | yes |
+| 53,761 | 1,463.8 | 30.1 | 40.0 s | yes |
+| 110,094 | 1,193.6 | 24.7 | 98.7 s | yes |
+| **168,085** | 1,001.8 | 20.7 | **174.5 s** | **yes** |
+
+**168,085 tokens with the fact buried mid-context, recalled verbatim.** Quality
+holds at depth on this model; nothing degrades except speed.
+
+### What depth costs
+
+| | 13k -> 168k, mid-context |
+|---|---|
+| prefill | 1,708 -> 1,002 tok/s, **-41%** |
+| decode | 35.9 -> 20.7 tok/s, **-42%** |
+| wall for one turn | 12.6 s -> **174.5 s** |
+
+Decode falling 42% purely from depth is the number that matters for agent work:
+every turn re-reads the conversation, so it is paid on every token of every
+turn, not once. A 174 s turn is fine for one considered answer and unusable in a
+tool-calling loop.
+
+**This is the real capacity/speed trade, measured.** ggrun plans a 262k window on
+this model and the window genuinely works — but there is currently no lever that
+trades depth against turn latency, and no evidence recorded anywhere that the
+planner considers it. A context ceiling chosen for turn time, rather than for
+what fits, is an unexplored direction that this measurement makes concrete.
+
 ### Limits
 
-- One model, one run per depth, one planted fact near the start. Recall at the
-  start is the easiest case; a fact in the middle is the harder one and is not
-  tested here.
-- 131k was requested and 75,599 delivered — the prompt builder's ~4 chars/token
-  estimate undershoots on this tokenizer, so the deepest point measured is 76k,
-  not 131k. The served plan was larger still; depth beyond 76k remains untested.
+- One model, one run per depth, one planted fact. Recall is a needle test; it
+  does not measure reasoning quality over a long working set.
+- Deepest measured is 168k against a 262k served plan. The top of the window is
+  still untested.
