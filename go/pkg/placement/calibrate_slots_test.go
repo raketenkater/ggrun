@@ -94,3 +94,37 @@ func TestSlotScalingGateUsesTheAutomaticContextRequest(t *testing.T) {
 		t.Error("a same-width candidate was scaled")
 	}
 }
+
+// A slot candidate must keep KV where the baseline has it. Left free, the packer
+// spends the KV freed by cutting slots on expert residency and then relocates
+// the cache to the host — a residency change sameCalibrationResidency refuses to
+// compare, so the candidate is discarded before it can be measured.
+//
+// Observed on Qwen3.8-Flash-Next: unpinned, parallel-1 and parallel-2 both came
+// back kv=cpu against a kv=gpu base. Pinned, both stay GPU-resident and
+// n-cpu-moe falls from 48 to 46.
+func TestSlotCandidatesKeepTheBaselineKVPlacement(t *testing.T) {
+	base := &Strategy{ContextSize: 254976, Parallel: 3, KVPlacement: "gpu"}
+	opts := Options{AutoContextMax: 1048576, KVPlacement: ""}
+
+	got := slotCandidateOptions(opts, base, 1)
+	if got.KVPlacement != "gpu" {
+		t.Errorf("slot candidate KV placement = %q, want the baseline's %q", got.KVPlacement, base.KVPlacement)
+	}
+	if got.ContextSize != 84992 {
+		t.Errorf("slot candidate context = %d, want 84992 (per-agent preserved)", got.ContextSize)
+	}
+
+	// An explicit-context request keeps the historical behaviour: the total is a
+	// user constraint, so neither it nor KV placement is rewritten here.
+	explicit := slotCandidateOptions(Options{KVPlacement: ""}, base, 1)
+	if explicit.ContextSize != 0 || explicit.KVPlacement != "" {
+		t.Errorf("an explicit-context request was rewritten: ctx=%d kv=%q", explicit.ContextSize, explicit.KVPlacement)
+	}
+
+	// A baseline with no recorded placement leaves the candidate's choice alone.
+	noPlacement := slotCandidateOptions(opts, &Strategy{ContextSize: 254976, Parallel: 3}, 1)
+	if noPlacement.KVPlacement != "" {
+		t.Errorf("KV placement was invented from an empty baseline: %q", noPlacement.KVPlacement)
+	}
+}

@@ -783,6 +783,35 @@ func recomputeBatchCandidate(caps *detect.Capabilities, model *ModelProfile, bas
 // ContextAuto: a Claude Code base arrives with ContextAuto false even though its
 // window was derived rather than typed. AutoContextMax is set only when the
 // launcher resolved the window itself, which is exactly when scaling is correct.
+// slotCandidateOptions applies the two rewrites a slot candidate needs, and is
+// separate so both are testable without a full placement computation.
+//
+//   - the total window scales with the slot count, holding per-agent context,
+//     which is the quantity the change contract forbids reducing silently; and
+//   - KV placement is held where the baseline has it.
+//
+// The second matters because cutting slots frees KV, and left to choose the
+// packer spends that room on expert residency and then moves the cache to the
+// host. sameCalibrationResidency refuses to compare across that boundary --
+// correctly, since relocating KV moves the matching attention computation to the
+// CPU -- so every slot candidate was discarded before it could be measured.
+//
+// Measured on Qwen3.8-Flash-Next: unpinned, parallel-1 and parallel-2 both came
+// back with host KV against a GPU-resident base. Pinned, both stay resident and
+// n-cpu-moe falls from 48 to 46.
+func slotCandidateOptions(altOpts Options, base *Strategy, parallel int) Options {
+	if !slotCandidateScalesContext(altOpts, base, parallel) {
+		return altOpts
+	}
+	if perAgent := base.ContextSize / base.Parallel; perAgent > 0 {
+		altOpts.ContextSize = perAgent * parallel
+	}
+	if base.KVPlacement != "" {
+		altOpts.KVPlacement = base.KVPlacement
+	}
+	return altOpts
+}
+
 func slotCandidateScalesContext(opts Options, base *Strategy, parallel int) bool {
 	return opts.AutoContextMax > 0 && base != nil && base.Parallel > 0 &&
 		parallel != base.Parallel && base.ContextSize > 0
@@ -795,30 +824,7 @@ func recomputeParallelCandidate(caps *detect.Capabilities, model *ModelProfile, 
 	altOpts := calibrationBaseOptions(opts, base)
 	altOpts.Parallel = parallel
 	altOpts.AutoParallel = false
-	// Hold per-agent context, not total. calibrationBaseOptions pins the base's
-	// total window, which makes every slot candidate carry the same total KV and
-	// merely redistribute it. On an offloaded MoE that is the one comparison
-	// that cannot help: the KV is bought out of the same VRAM as the experts, so
-	// the configuration worth finding is fewer slots holding LESS total KV and
-	// leaving more experts resident.
-	//
-	// Measured on Qwen3.8-Flash-Next: four slots at 261,888 per agent left 19 of
-	// 48 expert layers on the GPU and ran at 2.42 correct tasks/min, against 28
-	// resident and 7.63 for a single slot at the same per-agent window.
-	//
-	// Per-agent context is the product invariant — the contract forbids silently
-	// reducing it — so scaling the total with the slot count keeps every
-	// candidate comparable on the thing the user actually gets.
-	// The gate is the *request* being automatic, not the strategy carrying
-	// ContextAuto. A Claude Code base arrives with ContextAuto false even though
-	// its window was derived rather than typed, so gating on the strategy made
-	// this scaling inert exactly where it was needed. AutoContextMax is set only
-	// when the launcher resolved the window itself.
-	if slotCandidateScalesContext(opts, base, parallel) {
-		if perAgent := base.ContextSize / base.Parallel; perAgent > 0 {
-			altOpts.ContextSize = perAgent * parallel
-		}
-	}
+	altOpts = slotCandidateOptions(altOpts, base, parallel)
 	// A different scheduler width deserves its own automatic batch baseline.
 	// Carrying a four-lane fairness cap into a one-lane candidate (or a large
 	// serial batch into four lanes) would benchmark a coupled accident rather
