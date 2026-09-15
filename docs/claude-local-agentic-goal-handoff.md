@@ -50,6 +50,90 @@ Product acceptance includes:
   Windows GPU coverage must be reported accurately when unavailable. macOS is
   lower priority for this work.
 
+## Direction review — 2026-09-15
+
+Review time: 2026-09-15T08:25:20+00:00. Source reviewed through local `ce3bc0a`. PR #61 is
+merged as `0a66834`; Linux CPU, Windows CPU and Linux real-GPU install/serving
+run 34898139305 passed on that exact commit. PR #62 was still open at the
+previous `81c9f96` head when checked; the latest local KV-pinning change had not
+been covered by those remote checks. Refresh identity before concluding CI is
+current. Earlier PR #61 mmap-accounting and schema findings were addressed in
+its merged result; they are not outstanding #61 blockers.
+
+**Direction: keep the focus on the actual Claude Code path, useful per-agent
+context, and main/companion workflow performance.** The slot/KV interaction is
+a concrete relevant problem. Preserving baseline KV while varying automatic
+slot count is a sensible candidate-generation fix. The reported two extra GPU
+expert layers are a planner result, not a measured speedup. The cheaper
+parse-request-to-candidate reproduction should remain as regression coverage;
+it is more useful than repeated large loads to locate a filter.
+
+### Correct the reviewer evidence before selecting a default
+
+The saved `scratchpad/review-lane.py` and `review-ab.sh` do not support the broad
+`REVIEWLANE` conclusion yet:
+
+- The driver has two serial loops running alongside each other: at most one
+  review and one foreground request in flight, not twelve concurrent requests.
+- It discards successful response bodies. Eight HTTP successes do not establish
+  eight correct review decisions or useful foreground answers. Prompts are
+  tiny synthetic read-file questions; delegated worker tasks are absent.
+- The wrapper waits for backend health and a router address, then starts traffic
+  before final launch/profile/client acceptance. It launches `--claude-code`
+  with stdin from `/dev/null`. The main-only log ends with the client error
+  "Input must be provided either through stdin or as a prompt argument when
+  using --print". The companion arm's log ends with an Anthropic-router canary
+  failure. Startup and teardown therefore contaminate the comparison.
+- Main-only metrics contain immediate 502s with zero queue/response time after
+  earlier requests completed. This does not prove overload or that
+  self-classification intrinsically fails; trace launcher/backend lifetime and
+  the error cause first. The gateway log also admits only one active main
+  request despite four backend slots, so four-slot queueing cannot be assumed.
+- Both arms retain roughly 172-178 second foreground maxima. Comparing only
+  16.58 versus 10.28 second medians hides the unresolved long stall.
+- Cleanup selects every `bin/llama-server` process on the machine. Replace it
+  with owned PID/process-group cleanup; this is especially important with other
+  work ongoing on the shared box.
+
+The raw 0.099-second reviewer HTTP responses suggest the helper can isolate
+cheap requests, but do not justify a universal 2B recommendation. First run an
+accepted, stable local client/router session with unchanged required-review
+semantics, verify actual outputs against expected decisions, include useful
+worker tasks, and account for startup/lifecycle separately from serving time.
+Measure the requested real workflow at a representative context and report
+correct results, total completion time, tail stalls and resource trade-offs.
+Keep the experiment bounded. Main-only remains a supported baseline to repair
+and compare, not a path to write off because this harness produced 502s.
+
+### Address two PR #62 generality issues
+
+1. Slot candidate generation and eligibility changed, while
+   `CalibrationSchemaVersion` is still 25, the version introduced by #61.
+   Old baseline-won/admission-only decisions can still suppress this newly legal
+   search at the same baseline scope. Version or migrate the changed policy and
+   retain an upgrade/reuse regression. Clearing caches manually is not the
+   product fix.
+2. `holdExpertResidency` receives raw `outcome.Device` but builds a penalty map
+   for `ReplanAfterOOM`, which indexes physical `caps.GPUs[i].Index`. The nearby
+   existing recovery path uses `physicalGPUIndex(..., visibleToPhysical)`;
+   the new helper calls omit that translation. On selected/reordered GPUs this
+   can penalize the wrong card or match none. Convert at the boundary and test a
+   non-identity visible-to-physical mapping. The current 0/1/2 rig can hide it.
+
+The speculative residency ratchet has not demonstrated that its repacking
+branch fixes an observed launch. Its tests cover bookkeeping and fallback,
+not a successful repack that restores the intended per-device relief. Require
+that case and a full-ledger regression before merging it together with the
+slot change; use a separate small change if that keeps the proof clear.
+
+Focused existing slot/residency tests passed in this review. No core code,
+running model or CI configuration was changed; no new performance run was made.
+Priority: repair the comparison lifecycle and the two code issues, verify final
+slot candidates through the real resolver on another model class, then select
+main-only versus companion and slot policy from correct completed workflows.
+Avoid further topology/thread/hot-cache exploration until these answers are
+reliable. Keep long-context and real-worker acceptance open.
+
 ## Independent review and current direction — 2026-09-14T19:50:58+00:00
 
 This review supersedes stale PR states and completion claims below. Preserve the
@@ -798,10 +882,10 @@ With no seat every request lands on `main`, reviews queue behind foreground work
 on the same four slots, and six of twelve fail outright. With the 2B seated the
 reviews are served in ~100 ms and the foreground turns get faster as well.
 
-**Recommendation: seat the review-only companion on an offloaded MoE.** It costs
-no per-agent context, and self-classify collapses exactly when reviews and
-foreground work overlap — the normal Claude Code pattern of one classifier
-request per tool call.
+**Provisional hypothesis, superseded by the 2026-09-15 direction review:** a
+review-only companion may help. The saved comparison has startup/teardown
+failures and does not validate review decisions, so it does not establish a
+default policy or that self-classification collapses under normal agent work.
 
 Still open: the 4B worker seat has never been driven with delegated utility
 work, so its 19% context cost over the 2B has no measured benefit.

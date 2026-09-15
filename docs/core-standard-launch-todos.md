@@ -2958,3 +2958,99 @@ now. Nothing here shows `parallel-2` wins. The phase guard that rejected
 showed concurrency has real value — with a companion seated, reviews leave the
 main model's slots entirely, so fewer main slots may cost less than it appears.
 Both outcomes are informative and neither is assumed here.
+
+## Independent review of saved REVIEWLANE artifacts — 2026-09-15T08:25:20+00:00
+
+Historical-artifact audit, not a new live measurement. Sources: `/tmp/claude-1000/-home-mik-ggrun-project-ggrun/0f9dc578-5269-47fc-80bd-f2ebfc454985/scratchpad/review-ab`; driver and wrapper are adjacent `review-lane.py` and `review-ab.sh`.
+
+### off
+
+UTC request-record window: 2026-09-14T21:56:37.736257412Z to 2026-09-14T22:00:14.64286112Z.
+
+Exact backend command captured in the arm log:
+
+```text
+/home/mik/ggrun-project/ggrun/.src/fork-qwen3-8-flash-next/build-cuda/bin/llama-server -m /home/mik/ggrun-project/ggrun/models/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf --host 127.0.0.1 --port 18921 --ctx-size 1047552 --flash-attn on -b 128 -ub 64 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --threads 14 --threads-batch 14 --cpu-range 0-13 --cpu-strict 1 --cpu-range-batch 0-13 --cpu-strict-batch 1 --no-context-shift --parallel 4 -ngl 999 --tensor-split 0.26,0.57,0.16 --split-mode layer -ot 'blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA1,blk\.(1|2|3)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA2,exps=CPU' --n-cpu-moe 44 --no-mmap -cram 17920 --ctx-checkpoints 16 --checkpoint-min-step 512 --timeout 2147483647 --chat-template-file /home/mik/ggrun-project/ggrun/.cache/chat-templates/qwen3.8-27b.jinja --alias local --presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 20 --top-p 0.95 --min-p 0.0 --metrics -lv 4
+```
+
+Saved driver result: `{"total_s":216.95,"foreground":{"n":3,"median_s":16.584,"max_s":171.929,"mean_s":66.8},"review":{"n":3,"median_s":14.165,"max_s":177.574,"mean_s":67.743},"errors":["review 3: HTTP Error 502: Bad Gateway","foreground 3: HTTP Error 502: Bad Gateway","review 4: HTTP Error 502: Bad Gateway","review 5: HTTP Error 502: Bad Gateway","review 6: HTTP Error 502: Bad Gateway","review 7: HTTP Error 502: Bad Gateway"],"error_count":6}`.
+
+### qwen2b
+
+UTC request-record window: 2026-09-14T22:01:14.793854391Z to 2026-09-14T22:04:33.613225309Z.
+
+Exact backend command captured in the arm log:
+
+```text
+/home/mik/ggrun-project/ggrun/.src/fork-qwen3-8-flash-next/build-cuda/bin/llama-server -m /home/mik/ggrun-project/ggrun/models/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf --host 127.0.0.1 --port 18921 --ctx-size 1048576 --flash-attn on -b 128 -ub 64 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --threads 14 --threads-batch 14 --cpu-range 0-13 --cpu-strict 1 --cpu-range-batch 0-13 --cpu-strict-batch 1 --no-context-shift --parallel 4 -ngl 999 --tensor-split 0.26,0.65,0.09 --split-mode layer -ot 'blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA2,exps=CPU' --n-cpu-moe 47 --no-mmap -cram 12800 --ctx-checkpoints 16 --checkpoint-min-step 512 --timeout 2147483647 --chat-template-file /home/mik/ggrun-project/ggrun/.cache/chat-templates/qwen3.8-27b.jinja --alias local --presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 20 --top-p 0.95 --min-p 0.0 --metrics -lv 4
+```
+
+Saved driver result: `{"total_s":205.939,"foreground":{"n":4,"median_s":10.281,"max_s":178.298,"mean_s":51.484},"review":{"n":8,"median_s":0.099,"max_s":0.213,"mean_s":0.113},"errors":[],"error_count":0}`.
+
+These are HTTP completion counts and timings, not oracle-validated reviews.
+The driver runs at most two requests concurrently and discards response bodies.
+The wrapper starts traffic before final launch acceptance; the main-only log
+ends with a missing-input Claude --print error, and the companion log ends
+with a router canary failure. Four main-only 502 metric rows have zero queue
+and total milliseconds after the first errors. Overload has not been isolated
+from process lifetime/startup interference. Both arms have very long foreground
+maxima. Do not promote the earlier universal 2B recommendation from this sample.
+Repair owned-process lifecycle, wait for complete acceptance, retain/check
+responses and run the actual equivalent workflow before making that decision.
+Detailed code-review actions are in the handoff's 2026-09-15 direction review.
+No server was started, stopped or reconfigured by this inspection.
+
+## SLOTMEASURED — the lever opens, the candidate does not fit, and the guard holds — 2026-09-15
+
+The launch from `SLOTOPEN` ran to completion. One trace exercises four separate
+pieces of this session's work, three of which had never fired live.
+
+```
+[calibrate] measuring parallel-2...
+[calibrate] parallel-2 failed to start (exact candidate failed memory admission
+            on CUDA1 (1994 MiB deficit); refusing recovery ladder); skipping
+[calibrate] parallel-2 was refused before any model load; not charging the reload failure budget
+[calibrate] measuring batch-512-ubatch-512...
+[calibrate] batch-512-ubatch-512: workload makespan 29.69s, decode 5.2 tok/s,
+            prefill 125.2 tok/s, relative 2.212
+[optimize] candidate winner default (turn 65.67s, relative 1.000)
+[optimize] workflow winner default passed clean relaunch, agent, cache, and lifecycle gates
+```
+
+| piece | evidence in this trace |
+|---|---|
+| `SLOTOPEN` — slot lever reachable | `parallel-2` was the finalist and was actually attempted |
+| `CALIBBUDGET` — cheap refusals do not retire the search | "not charging the reload failure budget", **first live firing** |
+| `CALIBLADDER` — fallbacks spread across lever families | after the slot candidate was refused the ladder went to **batch/ubatch**, not another slot rung, **first live firing** |
+| phase guard (invariant 6) | a 2.212x aggregate winner was refused |
+
+### The slot trade is still unmeasured, for a capacity reason
+
+`parallel-2` failed exact admission with a **1,994 MiB deficit on CUDA1**. With a
+reviewer seated and KV held on the GPU, two slots at 262,144 per agent does not
+fit on this machine. The lever is open; this particular rung is out of reach
+here. That is a capacity result, not a defect, and it is the kind the handoff
+asks to be recorded rather than worked around by shrinking the main model's
+window.
+
+### The phase guard earned its keep again
+
+| | default | batch-512-ubatch-512 |
+|---|---:|---:|
+| workload makespan | 65.67 s | **29.69 s** |
+| relative | 1.000 | **2.212** |
+| prefill | 38.9 tok/s | **125.2 tok/s** (+222%) |
+| decode | 11.2 tok/s | **5.2 tok/s** (-54%) |
+
+A candidate more than twice as fast end to end was refused because decode more
+than halved. This is the second time in this session the aggregate winner lost
+on a phase regression, on a different model configuration from the first.
+
+### Device imbalance, a sixth reading
+
+`GPU 0 saturated (78% SM) while GPU 2 is idle (0% SM)` on the baseline, and
+75%/2% on the challenger. Six launches, three models, two residency classes, and
+the optimizer's own note is that it "measured device imbalance, but the exact
+launch is tight-resident; retaining its proven live-search boundary" — it sees
+the imbalance and correctly declines to spend proven fit on it. No candidate
+family moves serial layer work off the saturated card.
