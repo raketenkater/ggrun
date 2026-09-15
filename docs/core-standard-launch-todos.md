@@ -4395,3 +4395,56 @@ Reachable: yes, demonstrated. Admitted: no. Faster: unmeasured, and cannot be
 claimed. The objective at the top of the handoff stays open, with the gap now
 narrowed from "the planner cannot consider this" to "the first candidate it
 considers misses by about one expert layer".
+
+## CTXSTRAND — freeing context strands memory instead of buying residency — 2026-09-15
+
+`CTXLEVERLIVE` showed the context candidate reaching the ladder and missing
+admission by about one expert layer. Reading the per-device ledger for both
+candidates explains why, and identifies what actually blocks GLM.
+
+GLM-5.3-Flash, plain serving, base window 166,912:
+
+| plan | `n-cpu-moe` | CUDA1 | CUDA0 | CUDA2 |
+|---|---:|---|---|---|
+| base | 43 | room 586, **stranded 586** | room 7, stranded 7 | room 991, **stranded 991** |
+| `context-125184` (75%) | 42 | room 2,824, **stranded 2,824** | room 725, **1 layer** | room 2,103, **stranded 2,103** |
+| `context-83456` (50%) | 42 | room 2,824, stranded 2,824 | room 725, 1 layer | room 2,103, stranded 2,103 |
+
+Two things fall out, and both matter more than the candidate itself.
+
+### The freed memory strands on two cards out of three
+
+Cutting the window frees KV, and **4,927 MiB of it lands as `stranded`** on CUDA1
+and CUDA2 — room that exists and cannot be used, because no whole expert layer
+fits in it. Only CUDA0 converts its share into an actual layer.
+
+So on this shape the trade does not behave as `CTXLEVER` assumed. Freeing context
+does not buy residency proportionally; it buys one layer on one card and wastes
+the rest. **Whole-layer granularity, not the context policy, is the binding
+constraint on a three-way tensor split.**
+
+### The 50% candidate is not worth reaching
+
+`context-83456` produces an **identical** placement to `context-125184`: same
+`n-cpu-moe`, same layer, same stranding. Halving the window again buys nothing,
+because the next layer still does not fit anywhere.
+
+That answers the open question from `CTXLEVERLIVE` — the untried 50% candidate
+would not have fitted either, and the ladder moving on to a different lever
+family was the right call rather than a missed opportunity.
+
+### What this means for the core objective
+
+The objective at the top of the handoff is unchanged and still open, but the
+blocking mechanism is now specific and model-independent:
+
+**On a tensor-split host-offloaded MoE, VRAM freed by any lever can only be spent
+in whole expert layers, so a device whose free room sits below one layer holds it
+permanently.** GLM strands ~4.9 GiB this way with the context lever applied, on
+top of the ~7.4 GiB still held as growth reserve after `RESERVEFIX`.
+
+The levers that would convert that stranded room into residency are sub-layer
+pinning — which `RelatedModelRuntimeGraphGrowth`'s own comments show the codebase
+already prices for partial `gate_up|up_gate|gate|up` pins — or rebalancing the
+tensor split so the room accumulates on one card instead of three. Neither is
+attempted here; both are now pointed at by a measurement rather than a guess.
