@@ -3054,3 +3054,52 @@ the optimizer's own note is that it "measured device imbalance, but the exact
 launch is tight-resident; retaining its proven live-search boundary" — it sees
 the imbalance and correctly declines to spend proven fit on it. No candidate
 family moves serial layer work off the saturated card.
+
+## SLOTWIDTH — slot count against expert residency, measured directly — 2026-09-15
+
+The ladder could only reach `parallel-2`, which failed admission. An explicit
+`--parallel` names each width, so all three get measured on the same suite with
+calibration off. Qwen3.8-Flash-Next, `--claude-code --claude-reviewer qwen2b`.
+
+| slots | resident expert layers | per-agent ctx | tasks completed | correct tasks/min |
+|---:|---:|---:|---:|---:|
+| 1 | **25** of 48 | — | 0 of 3 | 0.00 |
+| 2 | **21** of 48 | 261,632 | 2 of 3 | 2.54 |
+| 4 | **9** of 48 | 207,360 | 0 of 3 | 0.00 |
+
+**Expert residency scales cleanly with slot width**: 25, 21, 9 for one, two and
+four slots. Four slots costs roughly sixteen expert layers against one slot on
+this model, which is the displacement `CLAUDEMODE` inferred and this measures
+directly.
+
+Four slots is also worse on per-agent context — 207,360 against 261,632 — so it
+is not trading window for concurrency. It loses on both.
+
+### Throughput is inconclusive, and the reason matters
+
+Only the two-slot arm completed any tasks. One and four slots each finished 0 of
+3 inside the suite's budget, so there is no ranking to read here, and the single
+2.54 figure has nothing to be compared against. Recording it as "two slots wins"
+would be reading one surviving sample as a result.
+
+What the failures do say is that this model in Claude Code mode is marginal at
+every width tried: the earlier automatic-slot arm managed 2.42 correct
+tasks/min at 2 of 3 tasks, and nothing here beats that.
+
+### A second non-convergence mode, distinct from the oscillation
+
+An earlier `slots=1` attempt failed with `did not converge after 5 re-plans`, but
+its trace was **monotone**: `29 29 29 30 32 32 32`. Nothing was undone; the
+derate ladder was simply still climbing when the budget ran out. That is a
+different defect from the oscillation `SLOTDROP`'s ratchet targets
+(`46 40 44 45 46 44 45`), and the ratchet cannot help it. Conflating the two
+would attribute a fix to the wrong failure.
+
+### The residency ratchet failed silently
+
+The `slots=4` trace dipped — `47 44 46 47 47 48 48 48` — yet
+`holdExpertResidency` logged nothing. It only prints when the re-pack succeeds;
+a failed `ReplanAfterOOM` returns the original plan quietly. **A guard that
+falls back silently is indistinguishable from one that never ran**, which is why
+this fix has been unprovable across seven launches. Log the attempt, not just
+the success.
