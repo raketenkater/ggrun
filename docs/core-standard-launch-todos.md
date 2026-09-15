@@ -4154,10 +4154,45 @@ The defensible change is to size the reserve from measured post-launch growth �
 `RecordPostLaunchRuntimeGraphGrowth` already exists for exactly this — rather
 than from a max-across-configs probe that one pessimistic sample can dominate.
 
+### The fix already exists, and does not bite
+
+`RecordPostLaunchRuntimeGraphGrowth` was written for precisely this, and its
+doc comment records the same measurement independently:
+
+> Measured on GLM-5.3-Flash 2026-09-14: 11,272 MiB reserved across three cards
+> against 746 MiB actually used, carried from a 2026-09-03 record at ctx 790,528
+> / ubatch 64 on a different backend build. That exiled 43 expert layers to the
+> CPU on a model whose own bottleneck diagnosis reads "CPU expert bandwidth".
+
+Today's independent measurement lands on the same reserve — 11,272 MiB — against
+76 MiB of growth observed under a 170k-token prompt. Two measurements a day
+apart, different methods, same number.
+
+**So why is the reserve still 11,272?** Because the post-launch recorder files
+growth for a launch's **exact** signature (ctx, ubatch, kv quality/placement,
+parallel, backend), while `RelatedModelRuntimeGraphGrowth` relaxes ctx and ubatch
+and takes the maximum. Automatic context lands on a different ctx nearly every
+launch — today's was 538,624 against the stale record's 790,528 — so the exact
+key is cold, the related lookup runs, and the max-across-configs value wins
+again.
+
+The healing path exists but is keyed too narrowly to close on a model whose
+context is chosen automatically. The recorder can only cure a key it has already
+seen; the sizes that actually get used are almost always new.
+
+That is the specific, model-independent defect: **a self-healing cache whose heal
+condition is narrower than its harm condition.** The probe carrying the damage is
+identifiable —
+`a3fd3a1cf1d5.probe` holds `RUNTIME_GRAPH_GROWTH_MB_CUDA1=6406` beside
+`KV_PER_LAYER_MB=531`, and 6406/531 is about twelve layers of KV, the
+mislabelled-allocation shape `RelatedModelRuntimeGraphGrowth`'s own comment
+warns about.
+
 ### Correction
 
 Earlier entries in this session said GLM "leaves 24-30% of VRAM unused" and that
 ggrun was "declining to spend memory it has". That was measured from
 `nvidia-smi` after load and was the right observation with the wrong cause. The
 packer spends everything it is allowed to; the reserve is what holds the memory
-back, and the reserve is mis-sized.
+back, the reserve is mis-sized, and the mis-sizing is a stale cross-config
+maximum that the existing heal path cannot reach.
