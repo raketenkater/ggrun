@@ -466,6 +466,24 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 	// Challenge every bounded legal width that preserves useful per-agent context
 	// and the current residency class. Explicit --parallel is a hard constraint
 	// and never enters this search.
+	// Context is a coordinate on a host-offloaded MoE, where it competes with
+	// expert residency for the same VRAM. Offered only there, only downward, and
+	// bounded; see calibrationContextNeighbors.
+	for _, ctx := range calibrationContextNeighbors(base, opts) {
+		alt, err := recomputeContextCandidate(caps, model, base, opts, ctx)
+		if err != nil || alt == nil || calibrationCandidateExists(out, alt) {
+			continue
+		}
+		// A candidate that frees VRAM and does not return any expert layer to the
+		// GPU has bought nothing on this shape, so it is not worth a reload.
+		if alt.NCPUMoE >= base.NCPUMoE {
+			continue
+		}
+		out = append(out, CalibrationCandidate{
+			Name: fmt.Sprintf("context-%d", ctx), Strategy: alt,
+		})
+	}
+
 	if !opts.ParallelExplicit {
 		for _, parallel := range calibrationParallelNeighbors(base, opts) {
 			alt, err := recomputeParallelCandidate(caps, model, base, opts, parallel)
@@ -652,6 +670,91 @@ func adjacentBatchRung(value int, upward bool) int {
 		}
 	}
 	return value
+}
+
+// calibrationContextNeighbors offers smaller automatic context windows for a
+// host-offloaded MoE, because on that shape context and expert residency compete
+// for the same VRAM and the planner currently never weighs one against the other.
+//
+// Measured on GLM-5.3-Flash 2026-09-15: reclaiming 3,893 MiB of a bogus growth
+// reserve moved expert residency not at all — 42-43 of 48 layers stayed on the
+// host — while the context window grew 24.5%, on a model whose own bottleneck
+// diagnosis reads "CPU expert bandwidth". Freeing memory does not help while the
+// only thing the plan knows how to buy is window.
+//
+// This does not change what the planner picks. It makes the alternative
+// measurable, so the existing live screen and phase guards decide on evidence —
+// the same pattern that made the slot lever reachable.
+//
+// Bounds, because per-agent context is a protected quantity and the contract
+// forbids reducing it silently:
+//
+//   - offered only for MoEOffload bases with experts actually on the host, which
+//     is where the trade exists at all;
+//   - only downward, and never below half the base window, so a candidate cannot
+//     collapse the session's working set;
+//   - never below contextMinimum per slot, the same floor the slot search uses.
+//
+// CTXFLOOR is the reason for the last two: at 16,384 a six-turn session
+// truncated to five turns and looked fastest because it did less work.
+func calibrationContextNeighbors(base *Strategy, opts Options) []int {
+	if base == nil || base.ContextSize <= 0 || base.Type != MoEOffload {
+		return nil
+	}
+	// No experts on the host means no trade to measure.
+	if base.NCPUMoE <= 0 {
+		return nil
+	}
+	// An explicit context is a user constraint, never a coordinate to search.
+	//
+	// The two serving modes signal "automatic" differently and both must be
+	// honoured: Claude Code carries a workload ceiling in AutoContextMax while
+	// opts.ContextSize stays 0, and plain serving resolves the window itself and
+	// marks the resulting strategy ContextAuto. Gating on AutoContextMax alone
+	// excluded every plain launch, which is where this was first measured.
+	if opts.ContextSize > 0 {
+		return nil
+	}
+	if opts.AutoContextMax <= 0 && !base.ContextAuto {
+		return nil
+	}
+	slots := strategySlots(base)
+	if slots <= 0 {
+		slots = 1
+	}
+	floor := contextMinimum * slots
+	if half := base.ContextSize / 2; floor < half {
+		floor = half
+	}
+	out := make([]int, 0, 2)
+	for _, num := range []int{3, 2} { // 75% and 50% of the base window
+		candidate := base.ContextSize * num / 4
+		if candidate >= floor && candidate < base.ContextSize {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+// recomputeContextCandidate re-plans at a smaller window, holding everything the
+// caller owns. The point is what the packer does with the freed VRAM: on a
+// host-offloaded MoE it can return expert layers to the GPU, which is the
+// quantity RESIDENCYFRACTION ties to agentic speed.
+func recomputeContextCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options, contextSize int) (*Strategy, error) {
+	if contextSize <= 0 {
+		return nil, fmt.Errorf("invalid context candidate %d", contextSize)
+	}
+	altOpts := calibrationBaseOptions(opts, base)
+	altOpts.ContextSize = contextSize
+	altOpts.AutoContextMax = 0
+	alt, err := Compute(caps, model, altOpts)
+	if err != nil || alt == nil {
+		return nil, err
+	}
+	if alt.ContextSize != contextSize {
+		return nil, fmt.Errorf("context candidate recomputed as %d", alt.ContextSize)
+	}
+	return alt, nil
 }
 
 func calibrationParallelNeighbors(base *Strategy, opts Options) []int {

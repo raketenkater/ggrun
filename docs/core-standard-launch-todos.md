@@ -4283,3 +4283,67 @@ The reclaimed 3.9 GiB is about one and a half expert layers at GLM's ~2.5 GiB pe
 layer — real but modest. The larger prize needs the planner to weigh residency
 against context for a host-offloaded MoE, which is the objective change recorded
 at the top of the handoff and not attempted here.
+
+## CTXLEVER — context as a candidate makes the residency trade measurable — 2026-09-15
+
+`RESERVEFIX` reclaimed 3,893 MiB on GLM and the planner spent all of it on a
+24.5% larger window while expert residency did not move. That is the objective
+defect: given room, a fit-maximising plan buys capacity, never residency.
+
+On a host-offloaded MoE the two compete for the same VRAM, so **context is the
+residency lever** — and it was not a coordinate the search could move.
+
+### The change
+
+`calibrationContextNeighbors` + `recomputeContextCandidate` offer smaller windows
+as candidates, following the same shape as the batch and slot dimensions. This
+does **not** change what the planner picks; it makes the alternative measurable
+so the live screen and phase guards decide on evidence. Same pattern that made
+the slot lever reachable in `SLOTOPEN`.
+
+Bounds, because per-agent context is contract-protected:
+
+- only for `MoEOffload` bases with experts actually on the host, where the trade
+  exists at all;
+- only downward, never below half the base window;
+- never below `contextMinimum` per slot — the floor `CTXFLOOR` found when 16,384
+  truncated a six-turn session to five and looked fastest for doing less work;
+- never when `--ctx-size` is explicit; a user constraint is not a coordinate;
+- and a candidate that frees VRAM without returning an expert layer is discarded,
+  so it cannot spend a reload on nothing.
+
+### It works, measured on GLM-5.3-Flash
+
+```
+BASE                 ctx=103424  n-cpu-moe=43
+CAND context-77568   ctx=77568   n-cpu-moe=42
+CAND context-51712   ctx=51712   n-cpu-moe=42
+```
+
+A smaller window returns an expert layer to the GPU. The trade
+`RESIDENCYFRACTION` ties to agentic speed is now something the optimizer can
+measure rather than something the planner silently forecloses.
+
+### A gate bug found by the live run, not by the tests
+
+The first implementation gated on `opts.AutoContextMax > 0`, and **no candidate
+appeared on GLM**. That flag is set only in Claude Code mode; plain serving
+resolves the window itself and marks the strategy `ContextAuto`, leaving
+`AutoContextMax` at zero. The guard therefore excluded every plain launch — which
+is exactly where GLM was measured.
+
+Both signals are now honoured and pinned in
+`TestBothAutomaticContextSignalsAreHonoured`. The unit tests passed throughout,
+because they asserted the bounds rather than the mode-specific signal; only the
+live launch showed nothing being generated. Second time in this session a guard
+was correct and its gate was wrong — the same shape as the residency ratchet's
+`base.ContextAuto` gate in `SLOTFIX`.
+
+### Still not promoted
+
+Generating a candidate is not choosing one. Whether a smaller window and one more
+resident expert layer actually serves agent work faster on GLM is unmeasured:
+that needs the live screen to run these candidates, and GLM's own screen budget
+has so far refused every challenger on admission. One expert layer of 48 is a
+small move; the value of this change is that the trade is now visible to the
+search at all.
