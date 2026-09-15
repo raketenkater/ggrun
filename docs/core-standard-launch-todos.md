@@ -3661,3 +3661,62 @@ the figure recorded before the calibration work, so that path is unregressed.
 Method note: the merged candidate was installed as the single PATH binary for
 the check and the branch build restored afterwards, so there was never a second
 ggrun on this machine. The verification worktree was removed.
+
+## LONGFORM — the context cost, paid on real output — 2026-09-15
+
+`MULTITURN` found decode 12% faster at the smaller window but **session time
+indistinguishable**, because those turns answered in one sentence. The honest
+caveat recorded there was that the advantage compounds only with longer outputs,
+and that case was unmeasured. This measures it.
+
+Same six-turn session over the same ~11.9k-token project prefix, but each turn
+asks for real work — write a handler, a table-driven test, a queue consumer, a
+design note, an alerting rule, a summary table — at `max_tokens=900`.
+Qwen3.8-27B, one slot, both arms **6 of 6 correct**.
+
+| | 32,768 ctx | 262,144 ctx (automatic) |
+|---|---:|---:|
+| correct | **6 / 6** | **6 / 6** |
+| **session** | **144.42 s** | **160.60 s** |
+| decode, turn 0 -> 5 | 40.6 -> 39.6 tok/s | 36.1 -> 35.3 tok/s |
+| steady-turn wall | 15.98 - 25.04 s | 23.10 - 26.32 s |
+
+**The smaller window finishes the same work 16.2 seconds sooner, a 10% shorter
+session**, with identical correctness. The short-answer run could not see this:
+the same 12% decode gap was present there and worth nothing, because almost no
+tokens were decoded.
+
+This is the answer to the direction review's "actual workflow-speed question".
+The context a plan buys is charged to every decoded token, so it is invisible in
+smoke tests and material in real agent work, where turns write patches rather
+than sentences.
+
+### Prefix reuse holds under real output too
+
+Turn 0 evaluates 11,892 tokens; later turns evaluate 937-954 — the appended
+question plus the previous ~900-token answer, against prompts growing to 16,584.
+Nothing re-reads the project listing. The cache behaves identically at both
+context settings, so the session difference is decode, not caching.
+
+### What this changes
+
+`CTXCOST` measured 13% on the task suite and `MULTITURN` could not reproduce it
+on session time. Both are now explained: the effect is real, it lives in decode,
+and it shows up in proportion to how much the model writes. Three independent
+measurements now point the same way, on the model this rig recommends for agent
+work.
+
+**ggrun's automatic context fit maximises the window that fits in memory, and
+that default costs about 10% of a real agent session on a resident model with
+spare VRAM.** No candidate family moves context, so the optimizer cannot find
+this. That is the concrete, measured case for making the context ceiling a
+searched coordinate rather than a maximised one.
+
+### Limits
+
+- One model, one run per arm, six turns. 10% on single runs is consistent with
+  two other measurements but is not promotion evidence on its own.
+- 32,768 was a round number, not a searched optimum; the useful ceiling for this
+  workload is still unmeasured.
+- Synthetic prefix and scripted turns. A real client with tool calls is still
+  the open item.
