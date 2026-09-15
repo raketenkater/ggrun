@@ -3103,3 +3103,42 @@ a failed `ReplanAfterOOM` returns the original plan quietly. **A guard that
 falls back silently is indistinguishable from one that never ran**, which is why
 this fix has been unprovable across seven launches. Log the attempt, not just
 the success.
+
+## RATCHETOBS — the guard is now falsifiable, and still unexercised — 2026-09-15
+
+`holdExpertResidency` printed only on success, so a failed `ReplanAfterOOM`
+returned the original plan in silence. "Never fired" and "fired and could not
+help" produced identical logs, and seven launches were inspected for evidence a
+code path was structurally incapable of producing. The giveaway was in the data
+all along: the `SLOTWIDTH` four-slot trace dipped `47 44 46 47 47 48` with
+nothing logged, and a dip means something handed layers back.
+
+It now reports the attempt with its layer count, the outcome, and the reason on
+failure — whether `ReplanAfterOOM` errored or the re-pack simply did not fit.
+
+### The relaunch, and what an empty trace now means
+
+Re-running the exact four-slot configuration that dipped:
+
+```
+[launch] backend-measured recompute would undo proven expert relief; retaining the verified-safe placement
+n-cpu-moe trace: (empty)
+```
+
+No preflight recovery rounds occurred at all — the plan fit on the first
+attempt — so the guard had nothing to act on. That is a **different** state from
+a silent failure, and before this change the two were indistinguishable. The
+`EXPERTPIN` guard from #58 did fire, on the measured recompute.
+
+So the residency ratchet remains unexercised. What changed is that its absence
+is now evidence rather than ambiguity: an empty derate trace means no re-plan
+happened, and a populated one without a guard line would mean the floor
+tracking is wrong.
+
+### The general lesson
+
+Every "unproven" label attached to this fix rested on absence of evidence from a
+path that could not produce evidence. That is the same error as reading
+`parallel 4..4` and concluding slot candidates were never generated: inferring a
+mechanism from a summary incapable of showing it. Before labelling a guard
+unproven, check that it would have said so.
