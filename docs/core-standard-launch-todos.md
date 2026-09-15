@@ -3878,3 +3878,54 @@ Both earlier attempts failed for reasons that were mine, not the product's:
 Worth keeping: the second failure looked exactly like a product defect and was
 a guard doing its job. The log line that settled it —
 `Checksum verification failed` — was one line above the error I first read.
+
+## CTXREPEATS — matched repeats, and the "variance" was warm-up — 2026-09-15
+
+`CTXFLOOR` recorded ~5% single-run variance and warned that it undercut the ~10%
+effect `LONGFORM` reported. Three matched repeats per arm, each set sharing one
+model load, settle both numbers — and correct the variance claim.
+
+Qwen3.8-27B, six-turn long-form session, all six runs **6 of 6 correct**.
+
+| arm | run 1 | run 2 | run 3 | steady-state turn |
+|---|---:|---:|---:|---:|
+| `--ctx-size 32768` | 154.51 s | **131.56 s** | **131.66 s** | **16.0 s** |
+| automatic (262,144) | 169.77 s | **153.29 s** | **153.16 s** | **23.1 s** |
+
+### Run 1 is warm-up, not noise
+
+Both arms show the same shape: the first session after a load is slow, then runs
+2 and 3 land within **0.1%** of each other — 131.56 against 131.66, and 153.29
+against 153.16. That is not a noisy measurement; it is a very stable one with a
+cold first sample.
+
+So `CTXFLOOR`'s "~5% single-run variance" was wrong in kind. The 144.42 s and
+151.55 s it compared were a warm run and a cold one. **Steady-state variance is
+about 0.1%**, which makes this comparison far sharper than I credited.
+
+### The effect is larger than reported, not smaller
+
+Steady state: **131.6 s against 153.2 s, a 16.4% difference** — and per-turn,
+**16.0 s against 23.1 s, 44% slower** at the automatic window. Every earlier
+figure (13%, 12%, 10%) was measured with cold runs mixed in and understated it.
+
+Combined with `CTXSTEP`'s plan comparison — batch 2048/512 at the automatic
+window against 8192/1024 everywhere below it — the picture is complete and
+consistent:
+
+**ggrun's automatic context fit buys the largest fitting window by shrinking the
+batch shape, and that costs 44% of steady-state turn time on the model this rig
+recommends for agent work.** Three windows (32k, 64k, 131k) all keep the larger
+batch shape and all perform identically, so nothing is gained by the maximum.
+
+### Now promotable, with one caveat
+
+This is repeated, matched evidence with 0.1% steady-state variance and identical
+correctness across six sessions. It meets the bar the contract asks for before
+changing a default.
+
+The caveat is scope: one model, one machine, one session shape. The mechanism
+(batch shape traded for context) is visible in the plan and should generalise,
+but the magnitude is specific to a resident model with spare VRAM. An offloaded
+MoE, where the window competes with expert residency rather than batch shape,
+may behave differently and is not tested here.
