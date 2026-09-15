@@ -3142,3 +3142,67 @@ path that could not produce evidence. That is the same error as reading
 `parallel 4..4` and concluding slot candidates were never generated: inferring a
 mechanism from a summary incapable of showing it. Before labelling a guard
 unproven, check that it would have said so.
+
+## HARNESSKILL — every Claude Code agent-suite number in this session is contaminated — 2026-09-15
+
+The `SLOTWIDTH` arms did not measure slot throughput. They measured how many
+tasks finished before the launcher tore the server down.
+
+Task-level results for the four-slot arm:
+
+| task | passed | **oracle** | error |
+|---|---|---|---|
+| ceiling | false | **true** | Remote end closed connection without response |
+| clamp | false | **true** | Remote end closed connection without response |
+| interval | false | false | Connection refused |
+
+**The oracle passed on two tasks whose requests then lost their connection**, and
+the third could not connect at all. The model answered correctly; the server
+disappeared underneath it.
+
+The cause is in the launch log's last line, in every affected arm:
+
+```
+Error: Input must be provided either through stdin or as a prompt argument when using --print
+```
+
+`--claude-code` starts the backend and then opens the Claude Code client. Driven
+from a script with no TTY the client refuses to start, ggrun exits, and its
+shutdown handler stops the backend — mid-suite. The failures are a harness
+artifact of driving `--claude-code` headless, not a product defect and not a
+property of any configuration under test.
+
+### What this retracts
+
+Every agent-suite figure measured through `--claude-code` in this session is
+unreliable, because the run was racing a teardown:
+
+- `CLAUDEMODE`'s "2.42 correct tasks/min against 7.63 for plain serving". The
+  plain-serving side is sound; the Claude Code side is not, so **the headline
+  "Claude Code mode costs two thirds of the throughput" is not established**.
+  The residency mechanism behind it still is — see below.
+- `SEATARMS`' 2.44 / 2.49 / 2.27 across the three seats. Those were already
+  called inseparable; they should now be treated as invalid rather than merely
+  noisy.
+- `SLOTWIDTH`'s throughput column.
+
+### What survives
+
+Anything read from the launch plan rather than from completed tasks, because
+those are recorded at planning time and do not depend on the server outliving
+the harness:
+
+- resident expert layers by slot width: **25 / 21 / 9** for 1 / 2 / 4 slots;
+- per-agent context by slot width, including four slots getting *less*
+  (207,360 against 261,632);
+- `SEATCOST`'s seat prices and every `n-cpu-moe` trace;
+- `REVIEWLANE`, which ran to completion in seconds with zero errors and whose
+  route counts (`main: 13` versus `reviewer: 8` + `main: 4`) come from the
+  router's own metrics.
+
+### How to measure Claude Code mode properly
+
+Keep the backend alive independently of the client. Either drive the launcher
+under a pty so the client starts, or add a serve-only path that brings up the
+backend and router without opening Claude Code. Until then, do not compare
+agent-suite numbers across `--claude-code` arms.
