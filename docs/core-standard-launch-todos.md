@@ -3635,3 +3635,29 @@ Does not establish: anything about a real client. This is a synthetic prefix and
 scripted turns, not Claude Code driving tools against a real repository. The
 review's "real client, substantial multi-turn repository context" remains open —
 this narrows it to the client integration rather than the serving behaviour.
+
+## MAINCHECK — both models on the merged #61 candidate — 2026-09-15
+
+The direction review's first acceptance item: recheck Qwen and GLM on the final
+#61 candidate. Verified on the exact merged commit `0a66834`, not on a branch
+build carrying later work.
+
+| model | result | plan | derate rounds |
+|---|---|---|---|
+| Qwen3.8-Flash-Next-UD-Q3_K_XL (1.75x over VRAM) | **LOADED** | 262,144 tokens, 1 slot | **none** — fit first attempt |
+| GLM-5.3-Flash-UD-Q3_K_XL (2.86x over VRAM) | **LOADED** | 500,736 tokens, 1 slot | 42 -> 41 -> 41, converged |
+
+This is the right regression pair for #61 specifically, because that PR changed
+admission semantics: pre-load refusals stopped consuming the reload budget, the
+ladder began spreading across lever families, and `CalibrationSchemaVersion`
+moved 24 -> 25 so a decision recorded under the old policy cannot suppress the
+search the new one can run.
+
+Flash-Next needing **no derate rounds at all** is the sharper result. It was
+entirely unlaunchable before #58, then converged only after the expert-relief
+guard, and now plans cleanly on the first attempt. GLM's 500,736 tokens matches
+the figure recorded before the calibration work, so that path is unregressed.
+
+Method note: the merged candidate was installed as the single PATH binary for
+the check and the branch build restored afterwards, so there was never a second
+ggrun on this machine. The verification worktree was removed.
