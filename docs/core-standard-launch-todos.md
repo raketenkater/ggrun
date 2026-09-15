@@ -2572,3 +2572,1991 @@ and the contract does not accept unit tests as evidence for it.
 - Re-run the seat comparison once a seat can launch. Until then the worker
   benefit is unmeasured, and nothing here argues a companion cannot pay for
   itself.
+
+## SEATARMS — all three seats measured, and the seat is not what matters — 2026-09-14
+
+Qwen3.8-Flash-Next, `--claude-code`, same suite (`ab35d682`), one repeat each.
+
+| arm | per-agent context | correct tasks/min | median | completed |
+|---|---:|---:|---:|---|
+| `off` self-classify | 261,888 | 2.44 | 25.9 s | 2/3 |
+| `qwen2b` review-only | 262,144 | 2.49 | 26.3 s | 2/3 |
+| `qwen` worker+reviewer | **211,968** | 2.27 | 29.5 s | 2/3 |
+
+**No seat is measurably better.** The spread is 2.27 to 2.49 on single runs with
+no established noise floor. Ranking them would be reading noise, and this file's
+own correction on that point applies.
+
+**The 4B seat costs 19% of per-agent context** — 211,968 against 261,888 — while
+the 2B seat costs none. That is the capacity result to record rather than a
+configuration quietly shrinking the main model's window.
+
+Every arm loses a task, and every arm runs at roughly a third of plain serving's
+7.63 correct tasks/min. Across five launches the cost tracks the four-slot plan,
+not the companion.
+
+### Corrections to CLAUDEMODE
+
+- **"No companion seat can launch" was wrong.** All three converged here, with
+  monotone traces: `off` 38-41-43-44, `qwen` 42-45-47-48-48, `qwen2b` in one
+  round at 47. The earlier double failure does not reproduce.
+- **The oscillation is intermittent, not deterministic.** The nine-for-nine
+  correlation was real for that launch, but four later launches of the same
+  shapes show no oscillation at all. It depends on starting state, not on the
+  configuration alone.
+
+### The residency ratchet is still unexercised
+
+`holdExpertResidency` fired **0 times in all three arms**. The first patch sat
+on `recomputeAutomaticContextRecovery`, which returns method `context-derate`,
+while the oscillating rounds return `context-replanned` from the candidate built
+by `Compute`/`ReplanAfterOOM` — a different site. That is corrected, and the
+guard still has not run, because nothing has oscillated since.
+
+It is gated and covered by unit tests. It is **not** demonstrated to fix
+anything, and must not be described as such until a live run oscillates with it
+installed.
+
+### Open
+
+- The worker seat never did worker work: no delegated or classifier traffic was
+  generated, so this measures the seat's cost with none of its benefit. The
+  milestone 3 comparison needs traffic on the review and utility routes.
+- The four-slot Claude Code plan, not the seat, is what costs the throughput.
+
+## REVIEWLANE — the seat pays for itself once reviews actually happen — 2026-09-14
+
+`SEATARMS` compared the seats with the review lane empty and found them
+inseparable. That measured a companion's cost with none of its work. This drives
+the lane: 8 classifier requests issued **concurrently** with 4 foreground turns,
+through the Auto router, marked with the same system-prompt string the router
+selects on.
+
+| | `off` self-classify | `qwen2b` seated |
+|---|---:|---:|
+| routes served | `main: 13` | **`reviewer: 8`, `main: 4`** |
+| reviews completed | **3 of 8** | **8 of 8** |
+| review median | 14.17 s | **0.099 s** |
+| review max | 177.6 s | 0.213 s |
+| foreground completed | 3 of 4 | **4 of 4** |
+| foreground median | 16.58 s | **10.28 s** |
+| errors | **6 x HTTP 502** | **0** |
+
+The per-request metrics confirm the mechanism rather than leaving it inferred.
+With no seat, all thirteen requests went to `main`: reviews queued behind
+foreground work on the same four slots, six requests failed with 502, and the
+reviews that survived took up to 178 s. With the 2B seated, the eight reviews
+went to `reviewer` at ~100 ms each returning 8 tokens, and the four foreground
+turns had `main` to themselves.
+
+**Foreground turns got faster too** — 10.28 s against 16.58 s median. The
+companion does not only absorb reviews; it stops them contending for the main
+model.
+
+### This reverses SEATARMS' reading
+
+`SEATARMS` is not wrong, it is incomplete: 2.44 / 2.49 / 2.27 correct tasks/min
+is the seat's cost with its lane idle, and on that evidence the 4B seat's 19%
+context cost looks like a pure loss. Under review traffic the review-only seat
+turns a 62%-failure situation into a zero-failure one at no context cost.
+
+**Recommendation: seat the review-only companion (`--claude-reviewer qwen2b`) on
+an offloaded MoE.** It costs no per-agent context, and self-classify collapses
+once reviews and foreground work overlap — which is the normal Claude Code
+pattern, one classifier request per tool call.
+
+### Limits of this evidence
+
+- One run per arm; no repeats and no noise floor.
+- Synthetic traffic shaped like Claude Code's classifier requests, not a real
+  session.
+- The 502s mean `off` was overloaded rather than merely slow. A gentler review
+  rate would not separate the arms this starkly, and the crossover point is not
+  measured.
+- The 4B worker seat was not driven with delegated utility work, so its extra
+  cost over the 2B still has no measured benefit.
+
+## SLOTLEVER — the optimizer cannot fix the slot floor because slots are not a candidate — 2026-09-14
+
+`CLAUDEMODE` measured four slots costing two thirds of Flash-Next's agentic
+throughput at equal per-agent context. The obvious next step is a
+displacement-aware slot cap. Before writing one, the cheaper question: can the
+existing candidate controller already find this?
+
+**It was never asked.** Every Claude Code arm measured so far ran with
+`--calibrate off` — the harness sets it deliberately to stay out of the
+20-minute optimizer window — so the optimizer had never executed in this mode.
+
+Running it with calibration on gives the answer in one line:
+
+```
+[optimize] calculated 6 candidates (6 feasible, 0 exact):
+           batch 128..512, ubatch 64..512, parallel 4..4, 2 topology shape(s)
+```
+
+**`parallel 4..4`.** The generator offers batch, ubatch and topology variants,
+and no slot-count variant at all. The same pinning appears in every other run
+recorded here: `parallel 1..1` on plain Flash-Next, `parallel 1..1` on the 27B,
+`parallel 1..1` on GLM. The slot count is always the requested value and never a
+coordinate the search can move.
+
+So the measured slot cost is not something calibration failed to find. It is
+outside the candidate space, which means no amount of measurement or ladder
+fixing reaches it.
+
+This is a narrower defect than a displacement-aware cap, and it fits the
+existing architecture: `prioritizeParallelCalibrationCurve` and the
+`parallel-%d` candidate name already exist, and `automaticWorkloadCandidateSet`
+already filters slot candidates against declared demand
+(`requestWorkloadConcurrency` returns 2 for default Claude Code mode, so a
+`parallel-2` candidate would survive that filter). The generator simply does not
+emit them here.
+
+### Next concrete deliverable
+
+Emit slot-count candidates below the requested value when the plan displaces
+expert layers to host RAM, and let the existing ladder and phase guards decide.
+The displacement is already computed per candidate, so the cap keys on measured
+evidence rather than a size ratio — which is what `SLOTS` asked for and what
+`CLAUDEMODE` now quantifies.
+
+Do not hardcode a lower floor. `REVIEWLANE` shows concurrency has real value:
+with reviews and foreground overlapping, the seated companion path completed 8
+of 8 reviews against 3 of 8. The right answer is a measured trade, not a
+smaller constant.
+
+## SLOTFIX — the comparison was wrong, and fixing it was not sufficient — 2026-09-14
+
+`SLOTLEVER` found the candidate boundary pinned at `parallel 4..4`. Tracing it:
+slot candidates *are* generated (`opts.ParallelExplicit` is false without an
+explicit `--parallel`), but `sameCalibrationResidency` required **equal total
+context**, and a slot candidate necessarily changes the total. Every one was
+rejected on arrival.
+
+`calibrationBaseOptions` compounds it by pinning the base's total window, so the
+only slot comparison available was "same total KV, redistributed" — never "fewer
+slots, less KV, more experts resident", which is the shape `CLAUDEMODE` measured
+as three times faster.
+
+The comparison is now on **per-agent context**, the quantity the change contract
+forbids reducing silently. Both legitimate shapes are accepted: the same total
+redistributed across a different width (what an explicit `--ctx-size` asks for)
+and the same per-agent window with the total scaled (what an automatic context
+produces).
+
+An existing test caught the first attempt, which compared only per-agent
+windows: with an explicit context a slot candidate legitimately keeps the total
+and halves the per-agent window, and that attempt broke it.
+
+### It did not work
+
+A live Claude Code launch with calibration on, cached decisions cleared, still
+reports:
+
+```
+[optimize] calculated 6 candidates (6 feasible, 0 exact):
+           batch 128..512, ubatch 64..512, parallel 4..4, 2 topology shape(s)
+```
+
+**No slot candidate appears.** So the residency comparison was one blocker and
+not the only one, and the remaining cause is unidentified. Candidates may be
+failing inside `recomputeParallelCandidate` (its `strategySlots(alt) != parallel`
+guard, or `Compute` failing at the scaled window), or
+`calibrationParallelNeighbors` may be returning nothing for this shape.
+
+The change is kept because the comparison it corrects is wrong on its own terms
+and is covered by tests. **It must not be described as fixing the slot floor.**
+Nothing measured here shows a slot candidate reaching the ladder.
+
+### Next step, narrowed
+
+Instrument the three drop points — neighbour generation, recompute error, and
+the residency check — for one offloaded-MoE launch, and report which rejects.
+The earlier attempt to reproduce this in a unit fixture failed because a
+three-GPU 85 GB MoE baseline would not compute in the test harness; the drop
+point is cheaper to observe on a real launch than to synthesise.
+
+## SLOTTRUTH — correcting SLOTLEVER: slot candidates are generated — 2026-09-14
+
+`SLOTLEVER` concluded from the `parallel 4..4` boundary line that the slot count
+"is outside the candidate space". **That was wrong.** Driving
+`placement.CalibrationCandidates` with this machine's real `detect.Detect()`
+capabilities and the real Qwen3.8-Flash-Next profile emits 32 candidates,
+including:
+
+```
+EMITTED parallel-3   ctx=1048576 parallel=3
+EMITTED parallel-2   ctx=1048576 parallel=2
+EMITTED parallel-1   ctx=1048576 parallel=1
+```
+
+So the generator does offer slot counts for exactly this shape. The boundary is
+computed over whatever candidate list is handed to it
+(`optimizer.go` accumulates `MinParallel`/`MaxParallel` across the passed
+candidates), and the live launch reported **6** candidates against the
+generator's 32. The live set is a filtered subset, and the filtering — not the
+generator — is what removes the slot candidates.
+
+`automaticWorkloadCandidateSet` alone does not explain it: it drops a candidate
+only when `parallel != baseline && parallel > demand`, and with demand 2 that
+drops `parallel-3` while keeping `parallel-2` and `parallel-1`.
+
+### A second correction, to SLOTFIX
+
+The same run shows `BASE ... auto=false`: the Claude Code base strategy does not
+carry `ContextAuto`. The per-agent scaling added in `SLOTFIX` is gated on that
+flag, so **it never executes on this path** — which is why the live boundary was
+unchanged. The residency comparison it fixes is still wrong on its own terms and
+the change is kept, but its gate is wrong for this case.
+
+### What is actually established
+
+- Slot candidates exist for this model and hardware.
+- Something between generation and the reported boundary removes them, and it is
+  not the residency comparison and not the demand filter alone.
+- `SLOTFIX`'s scaling is inert here because the base is not marked automatic.
+
+### Next step
+
+Log the candidate list at the point the boundary is built, on one real launch,
+and diff it against the generator's 32. That names the filter in one run. Do not
+change the slot policy until that filter is identified — two diagnoses have
+already been wrong, both from reading a summary line instead of the list behind
+it.
+
+## SLOTREPRO — the live candidate set, reproduced without a launch — 2026-09-14
+
+Building the request with `parseLaunchArgs`, then `placementOptionsFromRequest`,
+then `placement.CalibrationCandidates`, reproduces the live launch's candidate
+set in under a second and with no model load:
+
+```
+OPTS ctx=0 autoMax=1048576 parallel=4 parallelExplicit=false slotTarget=65536
+BASE ctx=254976 parallel=3 batch=128 ubatch=128 auto=true
+TOTAL candidates=6          (no slot candidates)
+```
+
+Six candidates, matching the live `calculated 6 candidates` exactly. This is the
+diagnostic loop that was missing: every earlier attempt to understand the slot
+boundary cost a five-minute 83.8 GB load, and two diagnoses were wrong because
+they read a summary line instead of the list.
+
+### What it establishes
+
+- **The base is `parallel=3`, not 4**, at 254,976 tokens with `auto=true`. The
+  four-slot request is clamped by `claudeCodeSlotsForPlacement` against the
+  context the hardware can actually hold.
+- `calibrationParallelNeighbors` is **not** empty for this shape:
+  `maxParallel = 254976 / 65536 = 3`, current 3, so neighbours are 1 and 2.
+- Yet no slot candidate is emitted, so the drop is inside
+  `recomputeParallelCandidate` (its `Compute` call or the
+  `strategySlots(alt) != parallel` guard) or in `sameCalibrationResidency` /
+  `calibrationCandidateExists` afterwards. All three are unexported, so naming
+  the exact one needs a probe inside `pkg/placement`.
+
+### Corrections carried
+
+`SLOTFIX` and `SLOTTRUTH` both claimed more than was shown. The generator does
+emit `parallel-1/2/3` under hand-built options (`SLOTTRUTH`), and with the real
+request options it emits none — so the earlier "slot candidates are generated"
+is true only for the options I chose, not for the ones the launcher builds.
+
+Three diagnoses on this one question have now been wrong. The pattern each time:
+reading a summary or a partial reproduction and inferring the mechanism instead
+of observing the list the code actually produces.
+
+### Next step
+
+Add a probe inside `pkg/placement` that walks the three drop points for this
+exact base and reports which rejects. The reproduction above makes that a
+sub-second test rather than a launch.
+
+## SLOTDROP — the slot lever is refused by the residency guard, correctly — 2026-09-14
+
+Fourth diagnosis on this question, and the first one observed rather than
+inferred. Replicating what `recomputeParallelCandidate` builds, against the real
+request options and the real model:
+
+```
+BASE       ctx=254976 parallel=3 perAgent=84992 kv=gpu  type=moe_offload
+parallel-1 ctx=84992  slots=1    perAgent=84992 kv=cpu  type=moe_offload
+parallel-2 ctx=169984 slots=2    perAgent=84992 kv=cpu  type=moe_offload
+```
+
+Both candidates compute cleanly, land on the requested slot count, and preserve
+per-agent context exactly. They are then rejected by `sameCalibrationResidency`,
+because the base is **GPU-resident KV** and every lower-slot plan the packer
+produces is **host KV**.
+
+The guard is right. Moving the KV cache to system RAM is a residency class
+change, not a tuning move, and the inspected backend also moves the
+corresponding attention computation to the CPU with it — a cost this file's own
+reasoning corrections already record. Comparing across that boundary would let a
+"faster" candidate win by quietly relocating attention to the host.
+
+**So the slot lever is not blocked by a defect.** Freeing KV by cutting slots
+gives the packer room it spends on expert residency, and the plan it then
+prefers puts KV on the host. The calibration contract refuses to compare that
+against a GPU-resident baseline, so the candidate never reaches the ladder.
+
+### What would actually open the lever
+
+Pin `KVPlacement` to the base's value inside `recomputeParallelCandidate`, so a
+slot candidate is forced to keep KV where the baseline has it and spend the
+freed memory on experts instead. That is a real placement question — it may
+simply not fit — and it is the experiment to run, not an assumption to encode.
+
+### Corrections this closes out
+
+Four diagnoses, three wrong:
+
+1. "Slots are outside the candidate space" — wrong, they are generated.
+2. "The residency comparison on total context blocks them" — a real flaw, fixed,
+   but not the blocker here.
+3. "Slot candidates are generated under the real options" — wrong; they are
+   generated under hand-built options and rejected under the real ones.
+4. **The residency guard rejects them on KV placement** — observed.
+
+Every wrong one came from reading a summary line or a partial reproduction. The
+sub-second reproduction in `SLOTREPRO` is what finally made the real list
+visible; it should be the first move next time, not the fourth.
+
+## SLOTOPEN — the slot lever is open, and the optimizer picks it — 2026-09-15
+
+With baseline KV placement held for slot candidates, the same Claude Code launch
+that reported `parallel 4..4` in every earlier run now reports:
+
+```
+[optimize] calculated 8 candidates (8 feasible, 0 exact):
+           batch 128..2048, ubatch 64..512, parallel 1..4, 2 topology shape(s)
+[optimize] calculated finalist parallel-2: predicted relative 2.238,
+           bottleneck CPU expert bandwidth, confidence low; live agent workflows decide
+```
+
+Two changes from every previous run: the boundary spans **`parallel 1..4`**
+rather than a single pinned value, and the predicted finalist is a **slot
+candidate**. The optimizer, given the lever, immediately nominates fewer slots.
+
+### The full chain, four fixes deep
+
+| # | defect | status |
+|---|---|---|
+| 1 | `sameCalibrationResidency` compared **total** context, which every slot candidate changes | fixed |
+| 2 | candidates inherited the base's total, so `parallel-1` asked for a full window of KV on one slot — infeasible | fixed by scaling to hold per-agent context |
+| 3 | that scaling was gated on `base.ContextAuto`, which a Claude Code base carries as **false** | fixed; the gate is `opts.AutoContextMax` |
+| 4 | the packer spent the freed KV on experts and moved the cache to the **host**, which the residency guard rightly refuses | fixed by holding the baseline's KV placement |
+
+Only #4 was ever visible from a log line. The first three were each found by
+reproducing the candidate list directly (`SLOTREPRO`), which runs in under a
+second against real capabilities and the real model.
+
+### Not yet established
+
+The finalist is *predicted*, at `confidence low`, and the launch is measuring it
+now. Nothing here shows `parallel-2` wins. The phase guard that rejected
+`ubatch-512` for a 38% decode regression applies unchanged, and `REVIEWLANE`
+showed concurrency has real value — with a companion seated, reviews leave the
+main model's slots entirely, so fewer main slots may cost less than it appears.
+Both outcomes are informative and neither is assumed here.
+
+## Independent review of saved REVIEWLANE artifacts — 2026-09-15T08:25:20+00:00
+
+Historical-artifact audit, not a new live measurement. Sources: `/tmp/claude-1000/-home-mik-ggrun-project-ggrun/0f9dc578-5269-47fc-80bd-f2ebfc454985/scratchpad/review-ab`; driver and wrapper are adjacent `review-lane.py` and `review-ab.sh`.
+
+### off
+
+UTC request-record window: 2026-09-14T21:56:37.736257412Z to 2026-09-14T22:00:14.64286112Z.
+
+Exact backend command captured in the arm log:
+
+```text
+/home/mik/ggrun-project/ggrun/.src/fork-qwen3-8-flash-next/build-cuda/bin/llama-server -m /home/mik/ggrun-project/ggrun/models/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf --host 127.0.0.1 --port 18921 --ctx-size 1047552 --flash-attn on -b 128 -ub 64 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --threads 14 --threads-batch 14 --cpu-range 0-13 --cpu-strict 1 --cpu-range-batch 0-13 --cpu-strict-batch 1 --no-context-shift --parallel 4 -ngl 999 --tensor-split 0.26,0.57,0.16 --split-mode layer -ot 'blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA1,blk\.(1|2|3)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA2,exps=CPU' --n-cpu-moe 44 --no-mmap -cram 17920 --ctx-checkpoints 16 --checkpoint-min-step 512 --timeout 2147483647 --chat-template-file /home/mik/ggrun-project/ggrun/.cache/chat-templates/qwen3.8-27b.jinja --alias local --presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 20 --top-p 0.95 --min-p 0.0 --metrics -lv 4
+```
+
+Saved driver result: `{"total_s":216.95,"foreground":{"n":3,"median_s":16.584,"max_s":171.929,"mean_s":66.8},"review":{"n":3,"median_s":14.165,"max_s":177.574,"mean_s":67.743},"errors":["review 3: HTTP Error 502: Bad Gateway","foreground 3: HTTP Error 502: Bad Gateway","review 4: HTTP Error 502: Bad Gateway","review 5: HTTP Error 502: Bad Gateway","review 6: HTTP Error 502: Bad Gateway","review 7: HTTP Error 502: Bad Gateway"],"error_count":6}`.
+
+### qwen2b
+
+UTC request-record window: 2026-09-14T22:01:14.793854391Z to 2026-09-14T22:04:33.613225309Z.
+
+Exact backend command captured in the arm log:
+
+```text
+/home/mik/ggrun-project/ggrun/.src/fork-qwen3-8-flash-next/build-cuda/bin/llama-server -m /home/mik/ggrun-project/ggrun/models/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf --host 127.0.0.1 --port 18921 --ctx-size 1048576 --flash-attn on -b 128 -ub 64 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --threads 14 --threads-batch 14 --cpu-range 0-13 --cpu-strict 1 --cpu-range-batch 0-13 --cpu-strict-batch 1 --no-context-shift --parallel 4 -ngl 999 --tensor-split 0.26,0.65,0.09 --split-mode layer -ot 'blk\.(0)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA2,exps=CPU' --n-cpu-moe 47 --no-mmap -cram 12800 --ctx-checkpoints 16 --checkpoint-min-step 512 --timeout 2147483647 --chat-template-file /home/mik/ggrun-project/ggrun/.cache/chat-templates/qwen3.8-27b.jinja --alias local --presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512 --top-k 20 --top-p 0.95 --min-p 0.0 --metrics -lv 4
+```
+
+Saved driver result: `{"total_s":205.939,"foreground":{"n":4,"median_s":10.281,"max_s":178.298,"mean_s":51.484},"review":{"n":8,"median_s":0.099,"max_s":0.213,"mean_s":0.113},"errors":[],"error_count":0}`.
+
+These are HTTP completion counts and timings, not oracle-validated reviews.
+The driver runs at most two requests concurrently and discards response bodies.
+The wrapper starts traffic before final launch acceptance; the main-only log
+ends with a missing-input Claude --print error, and the companion log ends
+with a router canary failure. Four main-only 502 metric rows have zero queue
+and total milliseconds after the first errors. Overload has not been isolated
+from process lifetime/startup interference. Both arms have very long foreground
+maxima. Do not promote the earlier universal 2B recommendation from this sample.
+Repair owned-process lifecycle, wait for complete acceptance, retain/check
+responses and run the actual equivalent workflow before making that decision.
+Detailed code-review actions are in the handoff's 2026-09-15 direction review.
+No server was started, stopped or reconfigured by this inspection.
+
+## SLOTMEASURED — the lever opens, the candidate does not fit, and the guard holds — 2026-09-15
+
+The launch from `SLOTOPEN` ran to completion. One trace exercises four separate
+pieces of this session's work, three of which had never fired live.
+
+```
+[calibrate] measuring parallel-2...
+[calibrate] parallel-2 failed to start (exact candidate failed memory admission
+            on CUDA1 (1994 MiB deficit); refusing recovery ladder); skipping
+[calibrate] parallel-2 was refused before any model load; not charging the reload failure budget
+[calibrate] measuring batch-512-ubatch-512...
+[calibrate] batch-512-ubatch-512: workload makespan 29.69s, decode 5.2 tok/s,
+            prefill 125.2 tok/s, relative 2.212
+[optimize] candidate winner default (turn 65.67s, relative 1.000)
+[optimize] workflow winner default passed clean relaunch, agent, cache, and lifecycle gates
+```
+
+| piece | evidence in this trace |
+|---|---|
+| `SLOTOPEN` — slot lever reachable | `parallel-2` was the finalist and was actually attempted |
+| `CALIBBUDGET` — cheap refusals do not retire the search | "not charging the reload failure budget", **first live firing** |
+| `CALIBLADDER` — fallbacks spread across lever families | after the slot candidate was refused the ladder went to **batch/ubatch**, not another slot rung, **first live firing** |
+| phase guard (invariant 6) | a 2.212x aggregate winner was refused |
+
+### The slot trade is still unmeasured, for a capacity reason
+
+`parallel-2` failed exact admission with a **1,994 MiB deficit on CUDA1**. With a
+reviewer seated and KV held on the GPU, two slots at 262,144 per agent does not
+fit on this machine. The lever is open; this particular rung is out of reach
+here. That is a capacity result, not a defect, and it is the kind the handoff
+asks to be recorded rather than worked around by shrinking the main model's
+window.
+
+### The phase guard earned its keep again
+
+| | default | batch-512-ubatch-512 |
+|---|---:|---:|
+| workload makespan | 65.67 s | **29.69 s** |
+| relative | 1.000 | **2.212** |
+| prefill | 38.9 tok/s | **125.2 tok/s** (+222%) |
+| decode | 11.2 tok/s | **5.2 tok/s** (-54%) |
+
+A candidate more than twice as fast end to end was refused because decode more
+than halved. This is the second time in this session the aggregate winner lost
+on a phase regression, on a different model configuration from the first.
+
+### Device imbalance, a sixth reading
+
+`GPU 0 saturated (78% SM) while GPU 2 is idle (0% SM)` on the baseline, and
+75%/2% on the challenger. Six launches, three models, two residency classes, and
+the optimizer's own note is that it "measured device imbalance, but the exact
+launch is tight-resident; retaining its proven live-search boundary" — it sees
+the imbalance and correctly declines to spend proven fit on it. No candidate
+family moves serial layer work off the saturated card.
+
+## SLOTWIDTH — slot count against expert residency, measured directly — 2026-09-15
+
+The ladder could only reach `parallel-2`, which failed admission. An explicit
+`--parallel` names each width, so all three get measured on the same suite with
+calibration off. Qwen3.8-Flash-Next, `--claude-code --claude-reviewer qwen2b`.
+
+| slots | resident expert layers | per-agent ctx | tasks completed | correct tasks/min |
+|---:|---:|---:|---:|---:|
+| 1 | **25** of 48 | — | 0 of 3 | 0.00 |
+| 2 | **21** of 48 | 261,632 | 2 of 3 | 2.54 |
+| 4 | **9** of 48 | 207,360 | 0 of 3 | 0.00 |
+
+**Expert residency scales cleanly with slot width**: 25, 21, 9 for one, two and
+four slots. Four slots costs roughly sixteen expert layers against one slot on
+this model, which is the displacement `CLAUDEMODE` inferred and this measures
+directly.
+
+Four slots is also worse on per-agent context — 207,360 against 261,632 — so it
+is not trading window for concurrency. It loses on both.
+
+### Throughput is inconclusive, and the reason matters
+
+Only the two-slot arm completed any tasks. One and four slots each finished 0 of
+3 inside the suite's budget, so there is no ranking to read here, and the single
+2.54 figure has nothing to be compared against. Recording it as "two slots wins"
+would be reading one surviving sample as a result.
+
+What the failures do say is that this model in Claude Code mode is marginal at
+every width tried: the earlier automatic-slot arm managed 2.42 correct
+tasks/min at 2 of 3 tasks, and nothing here beats that.
+
+### A second non-convergence mode, distinct from the oscillation
+
+An earlier `slots=1` attempt failed with `did not converge after 5 re-plans`, but
+its trace was **monotone**: `29 29 29 30 32 32 32`. Nothing was undone; the
+derate ladder was simply still climbing when the budget ran out. That is a
+different defect from the oscillation `SLOTDROP`'s ratchet targets
+(`46 40 44 45 46 44 45`), and the ratchet cannot help it. Conflating the two
+would attribute a fix to the wrong failure.
+
+### The residency ratchet failed silently
+
+The `slots=4` trace dipped — `47 44 46 47 47 48 48 48` — yet
+`holdExpertResidency` logged nothing. It only prints when the re-pack succeeds;
+a failed `ReplanAfterOOM` returns the original plan quietly. **A guard that
+falls back silently is indistinguishable from one that never ran**, which is why
+this fix has been unprovable across seven launches. Log the attempt, not just
+the success.
+
+## RATCHETOBS — the guard is now falsifiable, and still unexercised — 2026-09-15
+
+`holdExpertResidency` printed only on success, so a failed `ReplanAfterOOM`
+returned the original plan in silence. "Never fired" and "fired and could not
+help" produced identical logs, and seven launches were inspected for evidence a
+code path was structurally incapable of producing. The giveaway was in the data
+all along: the `SLOTWIDTH` four-slot trace dipped `47 44 46 47 47 48` with
+nothing logged, and a dip means something handed layers back.
+
+It now reports the attempt with its layer count, the outcome, and the reason on
+failure — whether `ReplanAfterOOM` errored or the re-pack simply did not fit.
+
+### The relaunch, and what an empty trace now means
+
+Re-running the exact four-slot configuration that dipped:
+
+```
+[launch] backend-measured recompute would undo proven expert relief; retaining the verified-safe placement
+n-cpu-moe trace: (empty)
+```
+
+No preflight recovery rounds occurred at all — the plan fit on the first
+attempt — so the guard had nothing to act on. That is a **different** state from
+a silent failure, and before this change the two were indistinguishable. The
+`EXPERTPIN` guard from #58 did fire, on the measured recompute.
+
+So the residency ratchet remains unexercised. What changed is that its absence
+is now evidence rather than ambiguity: an empty derate trace means no re-plan
+happened, and a populated one without a guard line would mean the floor
+tracking is wrong.
+
+### The general lesson
+
+Every "unproven" label attached to this fix rested on absence of evidence from a
+path that could not produce evidence. That is the same error as reading
+`parallel 4..4` and concluding slot candidates were never generated: inferring a
+mechanism from a summary incapable of showing it. Before labelling a guard
+unproven, check that it would have said so.
+
+## HARNESSKILL — every Claude Code agent-suite number in this session is contaminated — 2026-09-15
+
+The `SLOTWIDTH` arms did not measure slot throughput. They measured how many
+tasks finished before the launcher tore the server down.
+
+Task-level results for the four-slot arm:
+
+| task | passed | **oracle** | error |
+|---|---|---|---|
+| ceiling | false | **true** | Remote end closed connection without response |
+| clamp | false | **true** | Remote end closed connection without response |
+| interval | false | false | Connection refused |
+
+**The oracle passed on two tasks whose requests then lost their connection**, and
+the third could not connect at all. The model answered correctly; the server
+disappeared underneath it.
+
+The cause is in the launch log's last line, in every affected arm:
+
+```
+Error: Input must be provided either through stdin or as a prompt argument when using --print
+```
+
+`--claude-code` starts the backend and then opens the Claude Code client. Driven
+from a script with no TTY the client refuses to start, ggrun exits, and its
+shutdown handler stops the backend — mid-suite. The failures are a harness
+artifact of driving `--claude-code` headless, not a product defect and not a
+property of any configuration under test.
+
+### What this retracts
+
+Every agent-suite figure measured through `--claude-code` in this session is
+unreliable, because the run was racing a teardown:
+
+- `CLAUDEMODE`'s "2.42 correct tasks/min against 7.63 for plain serving". The
+  plain-serving side is sound; the Claude Code side is not, so **the headline
+  "Claude Code mode costs two thirds of the throughput" is not established**.
+  The residency mechanism behind it still is — see below.
+- `SEATARMS`' 2.44 / 2.49 / 2.27 across the three seats. Those were already
+  called inseparable; they should now be treated as invalid rather than merely
+  noisy.
+- `SLOTWIDTH`'s throughput column.
+
+### What survives
+
+Anything read from the launch plan rather than from completed tasks, because
+those are recorded at planning time and do not depend on the server outliving
+the harness:
+
+- resident expert layers by slot width: **25 / 21 / 9** for 1 / 2 / 4 slots;
+- per-agent context by slot width, including four slots getting *less*
+  (207,360 against 261,632);
+- `SEATCOST`'s seat prices and every `n-cpu-moe` trace;
+- `REVIEWLANE`, which ran to completion in seconds with zero errors and whose
+  route counts (`main: 13` versus `reviewer: 8` + `main: 4`) come from the
+  router's own metrics.
+
+### How to measure Claude Code mode properly
+
+Keep the backend alive independently of the client. Either drive the launcher
+under a pty so the client starts, or add a serve-only path that brings up the
+backend and router without opening Claude Code. Until then, do not compare
+agent-suite numbers across `--claude-code` arms.
+
+## PTYFIX — Claude Code mode is measurable now — 2026-09-15
+
+`HARNESSKILL` traced every contaminated arm to one cause: `--claude-code` opens
+the Claude Code client, which refuses to start without a TTY, so ggrun exits and
+its shutdown handler stops the backend mid-suite.
+
+Driving the launcher under a pty (`script -qec`) fixes it. Verified on
+Qwen3.8-Flash-Next at `--parallel 2`:
+
+```
+READY at ~60s
+--- does it survive 90s past ready? ---
+{"status":"ok"} STILL ALIVE
+"Input must be provided ..." occurrences: 0
+```
+
+The client error never occurs and the backend outlives the suite. Earlier arms
+died around 50 s, mid-task.
+
+### The first clean Claude Code measurement
+
+Same suite (`ab35d682`), same model, reviewer seated, two slots:
+
+```
+{"passed": true, "completed_tasks": 3, "total_tasks": 3,
+ "correct_tasks_per_minute": 2.688, "task_latency_median_s": 42.04,
+ "task_latency_max_s": 48.51}
+```
+
+**3 of 3 tasks**, where every previous `--claude-code` arm completed 0 to 2. This
+is the first agent-suite figure through Claude Code mode in this session that is
+not racing a teardown.
+
+One number is not a comparison: it does not rank slot widths or seats, and the
+retractions in `HARNESSKILL` stand. It establishes that the configuration works
+and that the measurement path is now sound.
+
+### Standing caveat
+
+The root filesystem was at 100% (2.0 GiB free of 456 GiB) while this ran.
+`ENOSPC` during a launch surfaces as failures that resemble unrelated defects,
+so results taken under that pressure deserve a second look. This one passed
+cleanly, but the comparisons it unblocks should be re-run with space available.
+
+## SLOTCLEAN — the four-slot penalty was the teardown, not the plan — 2026-09-15
+
+First slot comparison on the pty path from `PTYFIX`, after the root filesystem
+was freed. Qwen3.8-Flash-Next, `--claude-code --claude-reviewer qwen2b`,
+calibration off, same suite (`ab35d682`). **All three arms completed 3 of 3**,
+where every earlier arm managed 0 to 2.
+
+| slots | `n-cpu-moe` | resident experts | per-agent ctx | correct tasks/min | median | max |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 25 | **23** of 48 | 262,144 | **4.02** | 30.8 s | 33.4 s |
+| 2 | 31 | 17 | 262,144 | 3.02 | 32.9 s | 53.7 s |
+| 4 | 47 | **1** | 262,144 | 3.41 | **26.5 s** | **30.7 s** |
+
+Per-agent context is identical across all three, so this is a matched
+comparison on the quantity the contract protects.
+
+### This positively contradicts the retracted claim
+
+`CLAUDEMODE` reported four slots costing two thirds of the throughput (2.42
+against 7.63). `HARNESSKILL` retracted that as a teardown artifact. This
+measures it properly: **four slots runs at 3.41 against one slot's 4.02, an 18%
+gap**, and four slots has the *best* median and worst-case latency of the three.
+
+The retraction was right, and the direction of the original claim was wrong.
+
+### RESIDENCYFRACTION needs qualifying
+
+The four-slot arm keeps **1** expert layer resident against the one-slot arm's
+23 — a 23x difference — and loses under a fifth of its throughput. Expert
+residency does not dominate agentic speed within a single model at matched
+per-agent context the way the cross-model table implied. That table compared
+three different architectures, quantisations and active-parameter counts, and
+this file already recorded that confound; this is the controlled version of the
+same question and it comes out much weaker.
+
+### Not a ranking
+
+The ordering is **non-monotone**: 1 > 4 > 2. A result that does not move
+monotonically in the variable under test is noise dominating signal, on single
+runs with no established floor. The arms do not separate cleanly, and no slot
+width is promoted here.
+
+What is solid is the negative: **no arm shows a catastrophic four-slot penalty**,
+so the parallel-4 default is not the defect `CLAUDEMODE` made it look like, and
+the slot-candidate work in PR #62 is an optimizer completeness fix rather than a
+fix for a known performance bug.
+
+## SEATCLEAN — the seats, measured properly — 2026-09-15
+
+Replaces the `SEATARMS` figures that `HARNESSKILL` retracted. Same model, same
+suite (`ab35d682`), pty path, calibration off. **All three arms completed 3 of
+3**, where the retracted run managed 2, 2 and 2.
+
+| seat | per-agent ctx | `n-cpu-moe` | correct tasks/min | median | max |
+|---|---:|---:|---:|---:|---:|
+| `off` self-classify | 261,888 | 44 | **2.84** | 36.8 s | 38.6 s |
+| `qwen2b` review-only | **262,144** | 47 | 2.81 | 37.7 s | 50.4 s |
+| `qwen` worker+reviewer | **206,336** | 41 | 2.76 | 44.2 s | 52.6 s |
+
+### The seats are indistinguishable on this workload
+
+2.84 / 2.81 / 2.76 across a 2.8% spread, on single runs with no established
+noise floor. That is not a ranking and must not be read as one. The retracted
+figures said the same thing less reliably; this says it from runs that finished.
+
+**The durable difference is capacity, not speed.** The 4B worker seat costs 21%
+of per-agent context — 206,336 against 262,144 — while the 2B review-only seat
+costs none. On a window the contract forbids reducing silently, that is the
+result worth acting on.
+
+### Why this does not weaken REVIEWLANE
+
+This suite issues no classifier traffic, so the companion's review lane is idle
+in every arm. `REVIEWLANE` drove it — 8 classifier requests concurrent with 4
+foreground turns — and separated the arms decisively: self-classify completed
+3 of 8 reviews with six HTTP 502s, the seated 2B completed 8 of 8 at ~100 ms
+median and made foreground turns faster. Its route counts came from the router's
+own metrics and it finished in seconds, so it was never exposed to the teardown.
+
+The two results are consistent and answer different questions. Idle lane: the
+seat costs nothing measurable in throughput, and the 4B costs context. Loaded
+lane: the seat is the difference between reviews working and reviews failing.
+
+**The recommendation stands: seat `--claude-reviewer qwen2b` on an offloaded
+MoE.** It costs no per-agent context, it is free on this workload, and it is
+decisive the moment reviews and foreground work overlap — which is the normal
+Claude Code pattern of one classifier request per tool call.
+
+## MINICPM — a reviewer candidate that fails the verdict contract — 2026-09-15
+
+`openbmb/MiniCPM5-2B` surfaced as a possible alternative to the pinned
+Qwen3.5-2B review seat. Tested before any wiring, because a reviewer that cannot
+produce the verdict format fails **invisibly**: every review is rejected, falls
+back to the main model, and the only trace is `reviewer-rejected/invalid-verdict`
+in the metrics log, while the seat still costs VRAM that on an offloaded MoE is
+expert layers.
+
+Artifact: `bartowski/MiniCPM5-2B-GGUF`, `Q4_K_M`, 1,615,826,144 bytes, fetched
+with `ggrun download`. The base `openbmb/MiniCPM5-2B` repo is Safetensors, and
+ggrun's downloader reports that and points at the GGUF repo rather than failing
+obscurely.
+
+| prompt | result | latency |
+|---|---|---|
+| marker + "answer with `<block>yes/no</block>`" | **0 of 4 valid** | 109-176 ms |
+| terser instruction + `</block>` stop sequence | **0 of 4 valid** | 81-138 ms |
+
+Fast enough — comparable to the seated Qwen3.5-2B — but it never emits a bare
+verdict. Every reply opens with prose restating the instruction:
+
+```
+"We are asked to respond with exactly one token sequence: <bl..."
+```
+
+That prose contains **both** tags, so `validReviewerVerdict`'s `yes + no == 1`
+check rejects it. Correctly: a reviewer that says both has decided nothing. The
+stop sequence does not help, because the prose precedes the verdict rather than
+trailing it.
+
+**Not adopted.** No `ModelSpec` was added and the artifact stays out of the
+pinned reviewer cache.
+
+This is the first real candidate to exercise the `invalid-verdict` versus
+`unusable-response` split in the metrics, and it earned its keep: without that
+distinction this model would have looked exactly like an absent reviewer.
+
+### What would change the answer
+
+The failure is prose-before-verdict, not an inability to produce the tags. An
+assistant prefill forcing the reply to begin with `<block>` would likely pull it
+into the contract. That is a router change affecting every reviewer, so it needs
+its own evidence rather than being bolted on for one candidate.
+
+## GLMSEAT — the tightest real configuration serves — 2026-09-15
+
+GLM-5.3-Flash (2.86x over VRAM) with a reviewer seated, on the pty path. This is
+the hardest configuration this machine can be asked for: a tight-fit model plus
+a companion's 1.4 GiB.
+
+| | |
+|---|---|
+| plan | 809,984 tokens total, 4 slots (~202k per agent) |
+| preflight | converged in **one** derate round, `n-cpu-moe=43` |
+| `EXPERTPIN` guard | fired on the measured recompute (fifth independent confirmation) |
+| agent suite | 2 of 3 tasks, 0.65 correct tasks/min, 96.7 s median |
+
+The failing task is a genuine wrong answer (`oracle=False`) with **no connection
+error** — the pty path is behaving, and this is the model being wrong rather than
+the harness dropping requests. On the old path this would have been
+indistinguishable from a teardown.
+
+0.65 correct tasks/min is slow, which matches everything already recorded about
+GLM on this rig. The point of this run is that the configuration is *reachable*:
+a 2.86x-over-VRAM model with a companion seated plans, loads, and serves.
+
+### The residency ratchet, closed out honestly
+
+`n-cpu-moe` trace: **`43`**. One round, one value, nothing handed back — so there
+is no oscillation for `holdExpertResidency` to guard.
+
+Across nine launches spanning three configurations and two models, the
+oscillation recorded in `SLOTDROP` (`46 40 44 45 46 44 45`) has not recurred.
+The guard is correct, gated, covered by tests, and since `RATCHETOBS` it reports
+its attempts rather than failing silently. It targets a state that occurs rarely.
+
+### The mechanism is now proven, separately from the live trigger
+
+Both earlier tests covered only the paths where the guard *declines* to act. The
+success path — where `ReplanAfterOOM` returns a genuinely better plan and the
+guard adopts it — had no coverage at all, which is the real reason nine launches
+of "unexercised" were ambiguous: the mechanism itself had never been shown to
+work, only its guard conditions.
+
+`TestHoldExpertResidencyActuallyRepacks` drives a real three-GPU MoE placement
+and asserts the re-pack:
+
+```
+re-packed n-cpu-moe 23 -> 25 against floor 25
+```
+
+So the guard demonstrably re-packs when a recomputed plan falls below the floor.
+It skips rather than fails if the fixture cannot produce a fitting re-pack on a
+future build, so it cannot become a false green.
+
+That splits the status cleanly, which is the honest form of it:
+
+- **Mechanism: verified.** The guard re-packs and raises CPU expert residency.
+- **Live trigger: not observed.** The oscillation from `SLOTDROP` has not
+  recurred in nine launches across three configurations and two models.
+
+It is a correct guard for a rare condition, and the instrumentation from
+`RATCHETOBS` means the next occurrence will say so unambiguously in the log.
+
+## LONGCTX — the first actual long-context evidence — 2026-09-15
+
+The direction review's sharpest criticism: "Configuring 262k context and sending
+6k-8k prompts is not 262k-context acceptance." Every context figure recorded
+before this came from a *plan*, never from a prompt. This sends real prompts at
+increasing depth with a correctness oracle — an access code planted near the
+**start**, so a model that silently drops early context fails the check rather
+than merely slowing down.
+
+Qwen3.8-27B-UD-Q4_K_XL, plain serving, `--calibrate off`.
+
+| target | actual prompt tokens | prefill tok/s | decode tok/s | wall | code recalled |
+|---:|---:|---:|---:|---:|---|
+| 4k | 516 | 1015.9 | 37.3 | 3.9 s | yes |
+| 16k | 13,967 | 1643.6 | 35.1 | 9.8 s | yes |
+| 64k | 54,312 | 1275.6 | 28.1 | 45.8 s | yes |
+| 131k | **75,599** | 876.0 | 22.0 | 88.7 s | **yes** |
+
+**Long context genuinely works.** 75,599 tokens served, and the planted code came
+back verbatim at every depth. That is the first evidence in this record that the
+configured window is usable rather than merely planned.
+
+### What depth costs
+
+| | 14k -> 76k |
+|---|---|
+| prefill | 1,643 -> 876 tok/s, **-47%** |
+| decode | 35.1 -> 22.0 tok/s, **-37%** |
+| wall for one turn | 9.8 s -> 88.7 s |
+
+Decode falling 37% purely from context depth matters for agent work, where every
+turn re-reads the conversation: the cost is paid on every token of every turn,
+not once. An 88.7 s turn at 76k is usable for a considered answer and poor for a
+tool-calling loop.
+
+### A harness correction
+
+The first pass ran with `max_tokens=32` and reported a recall failure at 54k.
+That was the probe, not the model: this model opens with a reasoning preamble,
+and at 32 tokens the budget was spent before the code was emitted. At 160 tokens
+every depth recalls. **A correctness oracle that shares a budget with the model's
+preamble measures the budget.**
+
+### Mid-context recall, the harder case
+
+A fact at the start is the easy case. An agent's working set buries what matters
+in the middle, so the probe was extended to plant the code at 50% depth and the
+chars-per-token estimate tightened from 4.0 to 3.0 (the first pass asked for 131k
+and got 75,599).
+
+| actual prompt tokens | prefill tok/s | decode tok/s | wall | code recalled |
+|---:|---:|---:|---:|---|
+| 13,406 | 1,708.1 | 35.9 | 12.6 s | yes |
+| 53,761 | 1,463.8 | 30.1 | 40.0 s | yes |
+| 110,094 | 1,193.6 | 24.7 | 98.7 s | yes |
+| **168,085** | 1,001.8 | 20.7 | **174.5 s** | **yes** |
+
+**168,085 tokens with the fact buried mid-context, recalled verbatim.** Quality
+holds at depth on this model; nothing degrades except speed.
+
+### What depth costs
+
+| | 13k -> 168k, mid-context |
+|---|---|
+| prefill | 1,708 -> 1,002 tok/s, **-41%** |
+| decode | 35.9 -> 20.7 tok/s, **-42%** |
+| wall for one turn | 12.6 s -> **174.5 s** |
+
+Decode falling 42% purely from depth is the number that matters for agent work:
+every turn re-reads the conversation, so it is paid on every token of every
+turn, not once. A 174 s turn is fine for one considered answer and unusable in a
+tool-calling loop.
+
+**This is the real capacity/speed trade, measured.** ggrun plans a 262k window on
+this model and the window genuinely works — but there is currently no lever that
+trades depth against turn latency, and no evidence recorded anywhere that the
+planner considers it. A context ceiling chosen for turn time, rather than for
+what fits, is an unexplored direction that this measurement makes concrete.
+
+### Limits
+
+- One model, one run per depth, one planted fact. Recall is a needle test; it
+  does not measure reasoning quality over a long working set.
+- Deepest measured is 168k against a 262k served plan. The top of the window is
+  still untested.
+
+## CTXCOST — the planner maximises context it is not asked to use — 2026-09-15
+
+`LONGCTX` measured what depth costs. This measures what that costs **agent
+work**: the same model and suite at the planner's automatic window versus an
+explicit small one.
+
+Qwen3.8-27B-UD-Q4_K_XL, plain serving, `--calibrate off`, one slot, same suite
+(`ab35d682`), both arms 3 of 3.
+
+| context | correct tasks/min | median task | max |
+|---:|---:|---:|---:|
+| 262,144 (automatic) | 9.84 | 13.86 s | 14.73 s |
+| **32,768 (explicit)** | **11.12** | **12.18 s** | 13.09 s |
+
+**A context eight times smaller serves agent work 13% faster**, and the suite's
+prompts fit comfortably in both. The larger window is not being used by this
+workload; it is being paid for.
+
+### Why this is a planner question, not a user question
+
+ggrun's automatic context fit maximises the window that fits in memory. Nothing
+in that decision asks what the workload will actually use, so on a resident model
+with spare VRAM it buys the largest window available and charges its KV cost to
+every turn. `LONGCTX` shows the window genuinely works when used — 168,085
+tokens with mid-context recall intact — so this is not a capability problem. It
+is a default that optimises the wrong quantity for agent serving.
+
+The contract forbids *silently reducing* useful per-agent context, and rightly.
+But maximising it by default is the opposite error, and the cost is now measured
+rather than assumed.
+
+### The lever that does not exist
+
+No candidate family moves context. `CalibrationCandidates` offers batch, ubatch,
+slots, topology and KV placement; the window is fixed input to all of them. So
+the optimizer cannot discover the 13% that an explicit `--ctx-size 32768` finds
+by hand, on the model this rig recommends for agent work.
+
+That is the same class of gap as the slot lever in `SLOTOPEN`: a coordinate the
+planner controls, that measurably matters, and that the search cannot reach.
+
+### Honest limits
+
+- One model, one run per arm, three short repair tasks. 13% on single runs with
+  no established noise floor is suggestive, not promotable.
+- 32,768 was chosen as a round number, not searched. The useful ceiling for this
+  workload is unmeasured, and a real agent session with a large project prefix
+  would sit somewhere between these two points.
+- A log wart found on the way: `[placement] context fit: 262144 tokens` still
+  prints when `--ctx-size 32768` is given. The served window is correct — `/props`
+  reports `n_ctx=32768` — but the planning line reads as though the override were
+  ignored.
+
+## MULTITURN — a growing session over a project prefix — 2026-09-15
+
+The three-task suite is a smoke test: independent tasks, no shared history. The
+direction review asks for multi-turn repository context, which is the shape agent
+work actually takes — a stable project prefix replayed every turn and a
+conversation that grows underneath it.
+
+This runs a six-turn session over a ~11.9k-token synthetic repository listing,
+with a checkable fact per turn, so a session that speeds up by losing track of
+the project fails rather than scoring well. Qwen3.8-27B, one slot, both arms
+**6 of 6 correct**.
+
+| | 32,768 ctx | 262,144 ctx (automatic) |
+|---|---:|---:|
+| correct | **6 / 6** | **6 / 6** |
+| session | 21.34 s | 21.22 s |
+| turn 0 (cold) | 9.91 s | 8.78 s |
+| turns 1-5 | 1.63 - 2.88 s | 1.80 - 3.16 s |
+| decode | **40.4 tok/s** | 36.0 tok/s |
+
+### Prefix reuse is excellent, and now observed rather than assumed
+
+Turn 0 evaluates all **11,881** prompt tokens. Every later turn evaluates
+**45-50** — the appended question and answer only, against a prompt that has
+grown to 12,096 tokens. That is 99.6% reuse, at both context settings, sustained
+across the session.
+
+`AGENTPATH` measured prefix reuse once with two requests; this shows it holding
+turn after turn as the conversation grows, which is the case that matters.
+
+### Decode is 12% faster at the smaller window
+
+40.4 against 36.0 tok/s, consistent across all six turns at both settings. That
+matches `CTXCOST`'s 13% on the task suite and is the same mechanism: KV depth
+charged to every decoded token.
+
+**Session time did not separate** — 21.34 s against 21.22 s — because these turns
+answer in one short sentence. The decode advantage is invisible when outputs are
+tiny and compounds when they are not. A real agent turn writing a patch decodes
+hundreds of tokens, so this is the arm where the 12% would show, and that case is
+still unmeasured.
+
+### What this does and does not establish
+
+Establishes: multi-turn sessions work correctly at both windows, prefix caching
+holds across a growing conversation, and the smaller window decodes faster for
+the same work.
+
+Does not establish: anything about a real client. This is a synthetic prefix and
+scripted turns, not Claude Code driving tools against a real repository. The
+review's "real client, substantial multi-turn repository context" remains open —
+this narrows it to the client integration rather than the serving behaviour.
+
+## MAINCHECK — both models on the merged #61 candidate — 2026-09-15
+
+The direction review's first acceptance item: recheck Qwen and GLM on the final
+#61 candidate. Verified on the exact merged commit `0a66834`, not on a branch
+build carrying later work.
+
+| model | result | plan | derate rounds |
+|---|---|---|---|
+| Qwen3.8-Flash-Next-UD-Q3_K_XL (1.75x over VRAM) | **LOADED** | 262,144 tokens, 1 slot | **none** — fit first attempt |
+| GLM-5.3-Flash-UD-Q3_K_XL (2.86x over VRAM) | **LOADED** | 500,736 tokens, 1 slot | 42 -> 41 -> 41, converged |
+
+This is the right regression pair for #61 specifically, because that PR changed
+admission semantics: pre-load refusals stopped consuming the reload budget, the
+ladder began spreading across lever families, and `CalibrationSchemaVersion`
+moved 24 -> 25 so a decision recorded under the old policy cannot suppress the
+search the new one can run.
+
+Flash-Next needing **no derate rounds at all** is the sharper result. It was
+entirely unlaunchable before #58, then converged only after the expert-relief
+guard, and now plans cleanly on the first attempt. GLM's 500,736 tokens matches
+the figure recorded before the calibration work, so that path is unregressed.
+
+Method note: the merged candidate was installed as the single PATH binary for
+the check and the branch build restored afterwards, so there was never a second
+ggrun on this machine. The verification worktree was removed.
+
+## LONGFORM — the context cost, paid on real output — 2026-09-15
+
+`MULTITURN` found decode 12% faster at the smaller window but **session time
+indistinguishable**, because those turns answered in one sentence. The honest
+caveat recorded there was that the advantage compounds only with longer outputs,
+and that case was unmeasured. This measures it.
+
+Same six-turn session over the same ~11.9k-token project prefix, but each turn
+asks for real work — write a handler, a table-driven test, a queue consumer, a
+design note, an alerting rule, a summary table — at `max_tokens=900`.
+Qwen3.8-27B, one slot, both arms **6 of 6 correct**.
+
+| | 32,768 ctx | 262,144 ctx (automatic) |
+|---|---:|---:|
+| correct | **6 / 6** | **6 / 6** |
+| **session** | **144.42 s** | **160.60 s** |
+| decode, turn 0 -> 5 | 40.6 -> 39.6 tok/s | 36.1 -> 35.3 tok/s |
+| steady-turn wall | 15.98 - 25.04 s | 23.10 - 26.32 s |
+
+**The smaller window finishes the same work 16.2 seconds sooner, a 10% shorter
+session**, with identical correctness. The short-answer run could not see this:
+the same 12% decode gap was present there and worth nothing, because almost no
+tokens were decoded.
+
+This is the answer to the direction review's "actual workflow-speed question".
+The context a plan buys is charged to every decoded token, so it is invisible in
+smoke tests and material in real agent work, where turns write patches rather
+than sentences.
+
+### Prefix reuse holds under real output too
+
+Turn 0 evaluates 11,892 tokens; later turns evaluate 937-954 — the appended
+question plus the previous ~900-token answer, against prompts growing to 16,584.
+Nothing re-reads the project listing. The cache behaves identically at both
+context settings, so the session difference is decode, not caching.
+
+### What this changes
+
+`CTXCOST` measured 13% on the task suite and `MULTITURN` could not reproduce it
+on session time. Both are now explained: the effect is real, it lives in decode,
+and it shows up in proportion to how much the model writes. Three independent
+measurements now point the same way, on the model this rig recommends for agent
+work.
+
+**ggrun's automatic context fit maximises the window that fits in memory, and
+that default costs about 10% of a real agent session on a resident model with
+spare VRAM.** No candidate family moves context, so the optimizer cannot find
+this. That is the concrete, measured case for making the context ceiling a
+searched coordinate rather than a maximised one.
+
+### Limits
+
+- One model, one run per arm, six turns. 10% on single runs is consistent with
+  two other measurements but is not promotion evidence on its own.
+- 32,768 was a round number, not a searched optimum; the useful ceiling for this
+  workload is still unmeasured.
+- Synthetic prefix and scripted turns. A real client with tool calls is still
+  the open item.
+
+## CTXFLOOR — a searched context ceiling needs a floor, and my variance is 5% — 2026-09-15
+
+`LONGFORM` argued context should be a searched coordinate rather than a
+maximised one. Searching it turned up two corrections to that framing before the
+sweep even finished.
+
+Same six-turn long-form session, Qwen3.8-27B, one slot, windows swept.
+
+| ctx | turns completed | correct | session |
+|---:|---:|---:|---:|
+| 16,384 | **5 of 6** | 5 / 5 | 130.27 s |
+| 32,768 | 6 of 6 | 6 / 6 | 151.55 s |
+
+### "Smaller is faster" needs a floor
+
+At 16,384 the session **truncated**: the prefix is ~11.9k and each turn adds
+roughly 900 tokens of question plus answer, so the conversation outgrows the
+window partway through. It looked fastest because it did less work — five turns
+instead of six.
+
+A searched ceiling therefore needs a workload-derived **floor**, not just a cost
+gradient. Prefix size plus expected conversation growth is the minimum; below it
+a smaller window silently drops turns rather than serving them faster. That is a
+more useful rule for a planner than "prefer smaller", and it is exactly the shape
+of failure the contract's "never silently reduce useful per-agent context" exists
+to prevent — reached here by choosing a ceiling too low rather than by derating.
+
+My own 32,768 was luckier than principled: 11.9k + six ~900-token turns lands
+near 17.3k, comfortably inside 32k and well over 16k.
+
+### Single-run variance is about 5%
+
+The same 32,768 configuration measured **144.42 s** in `LONGFORM` and
+**151.55 s** here — same model, same session, same hardware, ~5% apart.
+
+That is a material fraction of the ~10% effect reported in `LONGFORM`, and it
+applies to every single-run comparison in this record. The direction that
+`CTXCOST` (13% on the task suite), `MULTITURN` (12% decode) and `LONGFORM` (10%
+on session) agree on still stands, because three independent measurements点 the
+same way. The **magnitude** does not: promoting a context policy on these numbers
+would be promoting noise plus signal without separating them.
+
+Matched repeats are the missing evidence, and they are cheap here — a six-turn
+session is about two and a half minutes once the model is loaded.
+
+## CTXSTEP — the context cost is a batch-shape step, not a depth gradient — 2026-09-15
+
+Correcting `CTXCOST`, `MULTITURN` and `LONGFORM`. All three reported that a
+larger context costs decode throughput, and explained it as KV depth being
+charged to every decoded token. **That explanation is wrong.** Sweeping the
+window shows the cost is a step at the automatic plan, not a gradient.
+
+Same six-turn long-form session, Qwen3.8-27B, one slot.
+
+| ctx | session | decode first -> last | batch / ubatch |
+|---:|---:|---|---|
+| 16,384 | 130.27 s (**5 of 6 turns**) | — | — |
+| 32,768 | 151.55 s | 40.6 -> 39.7 | 8192 / 1024 |
+| 65,536 | 150.16 s | 40.6 -> 39.7 | 8192 / 1024 |
+| 131,072 | **149.92 s** | **40.7 -> 39.7** | **8192 / 1024** |
+| 262,144 (automatic) | 160.60 s | **36.1 -> 35.3** | **2048 / 512** |
+
+**Decode is flat at 40.6-40.7 tok/s from 32k through 131k — a four-fold range of
+context — and only drops at the automatic window.** A KV-depth mechanism would
+have produced a gradient across those four points. It produced a step.
+
+### The actual cause
+
+The automatic plan buys its 262,144-token window by shrinking the batch shape to
+fit: **batch 2048 / ubatch 512, against 8192 / 1024 at every smaller window.**
+That is a 4x smaller batch and 2x smaller ubatch, and it is what costs the
+throughput.
+
+So the finding is not "long context is slow". It is that ggrun's context fit
+maximises the window and pays for it in batch shape, and the batch shape is what
+the model decodes with.
+
+### What this changes about the recommendation
+
+Earlier entries argued for making context a searched coordinate. The sweep says
+something cheaper and more specific:
+
+- **There is a broad flat region.** 32k, 64k and 131k are within 1.6 s of each
+  other on a ~150 s session, well inside the ~5% single-run variance recorded in
+  `CTXFLOOR`. Nothing is gained by tuning inside it.
+- **There is a floor.** 16,384 truncated the session to five turns of six; it
+  looked fastest because it did less work.
+- **Only the maximum costs.** The penalty appears when the plan sacrifices batch
+  shape to reach the largest fitting window.
+
+A planner does not need to search context per workload. It needs to **stop
+trading batch shape for context it was not asked for** — which is a smaller and
+more defensible change than the one the earlier entries implied.
+
+### Method note
+
+Three measurements agreed on a direction and I attached a mechanism to them that
+the data had not tested. The sweep that was meant to find an optimum found the
+explanation was wrong instead. A gradient and a step look identical at two
+points; they only separate at four.
+
+## RELEASEARTIFACT — the shipped archive could not install itself — 2026-09-15
+
+The direction review's last milestone-5 item is "final artifact/install proof".
+Building a release archive and installing from it found the archive broken.
+
+### The defect
+
+`scripts/package-release.sh` shipped three user entry points — `setup.sh`,
+`setup-linux.sh`, `setup-mac.sh` — and each does:
+
+```
+exec "$ROOT/scripts/setup-home.sh" linux "$@"
+```
+
+**The archive contained no `scripts/` directory and no `install.sh`.** Extracting
+a release and running the documented command produced:
+
+```
+setup-linux.sh: line 7: .../scripts/setup-home.sh: No such file or directory
+```
+
+### Why install-e2e could not catch it
+
+CI runs `./setup-linux.sh` **from the repo checkout** with
+`LLM_INSTALL_RELEASE_DIR` pointing at the artifact. The installer therefore comes
+from source and only the payload comes from the archive, so the path a user takes
+— extract the tarball, run the script inside it — is never exercised. The job
+passes on a tarball that cannot install itself.
+
+### The fix
+
+Packaging now ships `scripts/setup-home.sh` and `install.sh`, and **fails closed**
+if either is missing, matching the script's existing refusal to package a
+backend-only bundle. Rebuilt and verified end to end.
+
+### The proof, and two harness errors on the way
+
+A clean install from the rebuilt artifact into an empty prefix now succeeds:
+app home created, CUDA backend selected and unpacked, `ik_llama-server-cuda`
+symlinked, launcher wrapper written, and `ggrun --version` runs from the
+installed tree.
+
+Both earlier attempts failed for reasons that were mine, not the product's:
+
+1. **Asset name.** The installer resolves `ggrun-<platform>-<backend>.tar.gz`.
+   A differently named archive is not found locally, so it reached for a
+   published release and hung.
+2. **Missing `SHA256SUMS`.** With the right name it found the local bundle, then
+   fetched checksums from the published release and correctly rejected a
+   locally-built archive that did not match. **That is the installer behaving
+   properly** — it refuses a bundle whose checksum does not verify. Generating
+   `SHA256SUMS` beside the artifact completed the install.
+
+Worth keeping: the second failure looked exactly like a product defect and was
+a guard doing its job. The log line that settled it —
+`Checksum verification failed` — was one line above the error I first read.
+
+## CTXREPEATS — matched repeats, and the "variance" was warm-up — 2026-09-15
+
+`CTXFLOOR` recorded ~5% single-run variance and warned that it undercut the ~10%
+effect `LONGFORM` reported. Three matched repeats per arm, each set sharing one
+model load, settle both numbers — and correct the variance claim.
+
+Qwen3.8-27B, six-turn long-form session, all six runs **6 of 6 correct**.
+
+| arm | run 1 | run 2 | run 3 | steady-state turn |
+|---|---:|---:|---:|---:|
+| `--ctx-size 32768` | 154.51 s | **131.56 s** | **131.66 s** | **16.0 s** |
+| automatic (262,144) | 169.77 s | **153.29 s** | **153.16 s** | **23.1 s** |
+
+### Run 1 is warm-up, not noise
+
+Both arms show the same shape: the first session after a load is slow, then runs
+2 and 3 land within **0.1%** of each other — 131.56 against 131.66, and 153.29
+against 153.16. That is not a noisy measurement; it is a very stable one with a
+cold first sample.
+
+So `CTXFLOOR`'s "~5% single-run variance" was wrong in kind. The 144.42 s and
+151.55 s it compared were a warm run and a cold one. **Steady-state variance is
+about 0.1%**, which makes this comparison far sharper than I credited.
+
+### The effect is larger than reported, not smaller
+
+Steady state: **131.6 s against 153.2 s, a 16.4% difference** — and per-turn,
+**16.0 s against 23.1 s, 44% slower** at the automatic window. Every earlier
+figure (13%, 12%, 10%) was measured with cold runs mixed in and understated it.
+
+Combined with `CTXSTEP`'s plan comparison — batch 2048/512 at the automatic
+window against 8192/1024 everywhere below it — the picture is complete and
+consistent:
+
+**ggrun's automatic context fit buys the largest fitting window by shrinking the
+batch shape, and that costs 44% of steady-state turn time on the model this rig
+recommends for agent work.** Three windows (32k, 64k, 131k) all keep the larger
+batch shape and all perform identically, so nothing is gained by the maximum.
+
+### Now promotable, with one caveat
+
+This is repeated, matched evidence with 0.1% steady-state variance and identical
+correctness across six sessions. It meets the bar the contract asks for before
+changing a default.
+
+The caveat is scope: one model, one machine, one session shape. The mechanism
+(batch shape traded for context) is visible in the plan and should generalise,
+but the magnitude is specific to a resident model with spare VRAM. An offloaded
+MoE, where the window competes with expert residency rather than batch shape,
+may behave differently and is not tested here.
+
+## REALCLIENT — Claude Code fixing a real repository through ggrun — 2026-09-15
+
+The direction review's longest-standing gap: "real client, substantial
+multi-turn repository context". Five synthetic probes narrowed it without
+closing it. `claude -p` closes it — a real client, real tools, a real git
+repository, and a task with an objective pass condition.
+
+### Setup
+
+A Go package with two deliberately broken functions and a passing-by-construction
+test file that must not be edited: `Ceiling` did integer division instead of
+rounding up, `Clamp` ignored its bounds. `go test ./...` failed before the run.
+
+Served: Qwen3.8-27B, `--claude-code --claude-reviewer qwen2b --ctx-size 32768`,
+router on an ephemeral port, backend kept alive by the pty from `PTYFIX`.
+
+Client: `claude -p "<task>" --permission-mode acceptEdits --max-turns 20`, with
+ggrun's own aliases (`ANTHROPIC_MODEL=local`, base URL pointed at the router).
+
+### Result
+
+**The task was completed.** `calc.go` gained 13 lines, the test file was left
+untouched as instructed, and `go test ./...` passes — both tests green, verified
+independently after the session.
+
+Router metrics for the session:
+
+| | |
+|---|---|
+| requests | **23** |
+| routes | `main: 22`, `reviewer: 1` |
+| statuses | **200 x 23** — no errors, no fallbacks |
+
+So the full integration works end to end: tool calls, file edits, test
+execution, a seated reviewer answering on its own route, and every request
+served without a single non-2xx.
+
+### What this establishes that the probes could not
+
+- The **client** integration works, not just the serving path. `MULTITURN` had
+  narrowed the gap to exactly this and could go no further.
+- **Worker/reviewer routing under a real session**: one classifier request was
+  issued and the seated 2B answered it. That is a small sample, but it is real
+  traffic rather than the synthetic marker used in `REVIEWLANE`.
+- **Task-level correctness**, the outcome the review asked for: not token rates
+  or route counts, but whether the agent fixed the code. It did.
+
+### Honest limits
+
+- One task, one run. The task is small — two functions — and a longer session
+  would exercise context growth and rework that this does not.
+- Only **one** review request in 23, so worker success and rework counts remain
+  effectively unmeasured. A session with more tool calls would issue more
+  classifier traffic and is the natural next step.
+- A cosmetic `unrecognized_model` warning appears for `local` during session
+  title generation. It does not affect the run, but it is noise a user sees.
+
+## REVIEWREAL — the review lane under a real agent session — 2026-09-15
+
+`REALCLIENT` closed the real-client gap but produced only one review request in
+23, because `--permission-mode acceptEdits` auto-approves edits and almost
+nothing reached the classifier. This uses `--permission-mode auto`, which ggrun
+describes as "dedicated local safety reviewer; fail-closed", on a three-file task
+with a test run after each fix.
+
+Qwen3.8-27B + `qwen2b` seated, `claude -p`, 40 turns max.
+
+### Task outcome
+
+**All three functions fixed**, `go test ./...` passes, and the three `_test.go`
+files are untouched as the task required — verified independently with
+`git status`.
+
+### Route split and latency
+
+| | |
+|---|---:|
+| total requests | **55** |
+| `main` | 46 |
+| `reviewer` | 5 |
+| `reviewer/stop-stripped-verdict` | 4 |
+| rejected / fell back to main | **0** |
+| reviewer median | **287 ms** |
+| main median | **31,568 ms** |
+
+**Nine real classifier requests, all answered by the seated 2B, none rejected.**
+The reviewer answers in 287 ms against the main model's 31.6 s median — roughly
+**110x faster** for the decisions that gate every tool call.
+
+Four of the nine came back as `stop-stripped-verdict`: the reviewer emitted
+`<block>yes` without the closing tag, which `validReviewerVerdict` accepts
+deliberately because Claude's own parser sends `</block>` as a stop sequence.
+That path is exercised by real traffic here, not just by its unit test.
+
+### One 400, on main
+
+`statuses: {200: 54, 400: 1}` — a single bad request on the main route, not
+aborted, and the session completed correctly regardless. Worth noting rather
+than explaining away; a session that completes with a 400 in it is a loose end,
+and the request body was not captured to say which call it was.
+
+### What is now established for milestone 3
+
+- **Required reviews happen and are answered locally.** Nine of nine, zero
+  fallbacks to the main model.
+- **The seat pays for itself on latency**: 287 ms versus 31.6 s per decision, on
+  traffic a real agent generated rather than a synthetic marker.
+- **Task correctness holds** with the reviewer in the loop.
+
+Still open: the matched **main-only** arm — the same task with
+`--claude-reviewer off`, so the main model self-classifies — which is what turns
+this into a comparison rather than a strong single observation.
+
+## SEATCOMPARE — companion against main-only, on a real agent session — 2026-09-15
+
+The matched arm `REVIEWREAL` was missing. Identical task, identical starting
+repo (hard reset, all three tests failing), same model and context, same
+`--permission-mode auto`, differing only in the seat.
+
+| | `--claude-reviewer qwen2b` | `--claude-reviewer off` |
+|---|---:|---:|
+| task outcome | 3 of 3 fixed, tests pass | **3 of 3 fixed, tests pass** |
+| `_test.go` untouched | yes | yes |
+| total requests | 55 | **21** |
+| routes | `main` 46, `reviewer` 9 | `main` 21 |
+| review requests answered locally | 9, **zero fallbacks** | n/a — main self-classifies |
+| reviewer median | **287 ms** | n/a |
+| main median | 31,568 ms | **15,930 ms** |
+| non-200 | 1 (a 400 on main) | **0** |
+
+### Both arms completed the task
+
+This is the first matched companion comparison with a task-level outcome, and
+the headline is that **the seat did not change whether the work got done**. Both
+fixed all three functions, left the test files alone, and passed independent
+verification.
+
+### The request counts are not comparable, and that matters
+
+55 against 21. The seated arm issued more than twice the requests for the same
+task, which is not a cost of the seat — it is a different session shape. The
+main-only arm's median request is also half the seated arm's (15.9 s against
+31.6 s), consistent with it doing fewer, shorter turns rather than being faster
+per unit of work.
+
+**So this comparison cannot rank the seats on session speed.** The sessions
+diverged in how the agent chose to work, not only in where reviews were served.
+Reporting "main-only was faster" from these numbers would be reading a different
+trajectory as a performance difference.
+
+### What it does establish
+
+- **Review semantics hold in both modes.** Nine reviews answered by the 2B with
+  zero rejections and zero fallbacks; main-only self-classified without error.
+  Neither arm skipped a required review.
+- **The seat is not required for correctness** on a task of this size. The
+  product contract's fallback path is real and works.
+- **The seat's case is latency under concurrency, not sequential throughput.**
+  287 ms against a main model whose median request is 15.9-31.6 s. On a
+  sequential task with ~9 reviews that is invisible; `REVIEWLANE` showed what it
+  is worth when reviews and foreground work overlap — 8 of 8 reviews completed
+  against 3 of 8, with six HTTP 502s on the main-only side.
+
+### Limits
+
+- One run per arm. Session trajectory varies more than the seat does, so
+  matched repeats would be needed before any speed claim.
+- A small task. Nine review requests is real traffic but a thin sample for
+  worker success and rework, which remain effectively unmeasured.
+- The 400 on the seated arm is still unexplained; the request body was not
+  captured.
+
+## RUNTIMERESERVE — the idle VRAM is an over-provisioned growth reserve — 2026-09-15
+
+The core objective's first concrete target was GLM-5.3-Flash leaving 24-30% of
+VRAM unused. Reading the ledger instead of inferring from `nvidia-smi` identifies
+it exactly, and **corrects the earlier framing**: the memory is not unspent, it
+is deliberately reserved against runtime graph growth.
+
+GLM-5.3-Flash, plain serving, 538,624-token plan:
+
+| device | fit | overhead | **runtime reserve** | planned | capacity |
+|---|---:|---:|---:|---:|---:|
+| CUDA0 | 7,366 | 274 | **4,007** | 11,647 | 11,873 |
+| CUDA1 | 14,386 | 445 | **6,406** | 21,237 | 24,112 |
+| CUDA2 | 9,490 | 191 | **859** | 10,540 | 11,909 |
+
+So the plan claims 98%, 88% and 88% of each card. Nothing is being left on the
+table by the packer — **11,272 MiB of it is growth reserve**.
+
+### What the reserve actually needs
+
+Measured on the running server: idle after load, then peak under a ~690 KB
+(~170k token) prompt, which is the shape that grows compute buffers.
+
+| device | reserved | observed growth | over-reserved by |
+|---|---:|---:|---:|
+| CUDA0 | 4,007 | **0** | 4,007 |
+| CUDA1 | 6,406 | **68** | 6,338 |
+| CUDA2 | 859 | **8** | 851 |
+| **total** | **11,272** | **76** | **~11.2 GiB** |
+
+**The reserve is roughly 150x the growth actually observed**, on the model where
+spare VRAM is worth the most — GLM runs 42-43 of 48 expert layers from host RAM,
+and ~11 GiB is about four to five more resident layers.
+
+The cached probe values are inconsistent with each other across scopes
+(`PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA0` appears as 132, 160, 1184, 1188, 1190,
+1459 in different `.probe` files), and `RelatedModelRuntimeGraphGrowth` takes the
+**maximum** across same-model configs. A single pessimistic probe therefore
+propagates to every later launch of that model family.
+
+### What this does not establish
+
+One model, one prompt shape, one run. Observed growth is not worst-case growth:
+a different batch shape, speculative decoding, or a longer sustained load could
+spike it. The reserve exists to prevent an OOM that the contract requires be
+fail-closed, so **this is evidence that the sizing is wrong, not licence to
+delete the reserve**.
+
+The defensible change is to size the reserve from measured post-launch growth —
+`RecordPostLaunchRuntimeGraphGrowth` already exists for exactly this — rather
+than from a max-across-configs probe that one pessimistic sample can dominate.
+
+### The fix already exists, and does not bite
+
+`RecordPostLaunchRuntimeGraphGrowth` was written for precisely this, and its
+doc comment records the same measurement independently:
+
+> Measured on GLM-5.3-Flash 2026-09-14: 11,272 MiB reserved across three cards
+> against 746 MiB actually used, carried from a 2026-09-03 record at ctx 790,528
+> / ubatch 64 on a different backend build. That exiled 43 expert layers to the
+> CPU on a model whose own bottleneck diagnosis reads "CPU expert bandwidth".
+
+Today's independent measurement lands on the same reserve — 11,272 MiB — against
+76 MiB of growth observed under a 170k-token prompt. Two measurements a day
+apart, different methods, same number.
+
+**So why is the reserve still 11,272?** Because the post-launch recorder files
+growth for a launch's **exact** signature (ctx, ubatch, kv quality/placement,
+parallel, backend), while `RelatedModelRuntimeGraphGrowth` relaxes ctx and ubatch
+and takes the maximum. Automatic context lands on a different ctx nearly every
+launch — today's was 538,624 against the stale record's 790,528 — so the exact
+key is cold, the related lookup runs, and the max-across-configs value wins
+again.
+
+The healing path exists but is keyed too narrowly to close on a model whose
+context is chosen automatically. The recorder can only cure a key it has already
+seen; the sizes that actually get used are almost always new.
+
+That is one defect: **a self-healing cache whose heal condition is narrower than
+its harm condition.**
+
+### The second, and it names the source exactly
+
+The probe carrying the damage is `a3fd3a1cf1d5.probe`, and its key line reads:
+
+```
+# ctx=287744 ubatch=256 ... backend=glm-5-3-flash-hot-experts@llama-server-4d57452bc9a31430429b023f|hot-experts=14,inserts=2
+PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA1=6406
+```
+
+**That is the hot-experts fork, running a 14-entry GPU-resident expert cache.**
+Such a cache legitimately allocates GB of VRAM, and it was recorded as runtime
+graph growth.
+
+`RelatedModelRuntimeGraphGrowth` then carries it onto stock-backend launches,
+because its match is deliberately backend-relaxed. From the function itself:
+
+> Match on model basename + gpu_sig. backend is part of the backend= value in the
+> key line but its exact form varies; **relax it here** (the gpu_sig + same-model
+> match is the load-bearing filter).
+
+So an experimental backend's expert cache becomes a permanent growth floor for
+the ordinary backend serving the same model on the same GPUs. The measurement
+was honest for the configuration that produced it and is meaningless for the one
+consuming it.
+
+This is a sharper statement than "the reserve is too large": **a backend-specific
+allocation is being carried across a backend boundary that the lookup relaxes by
+design.** The relaxation is reasonable for graph growth, which is model-graph
+state — and wrong for anything a particular backend build allocates on its own
+account.
+
+### It also complicates the hot-experts question
+
+Hot experts was measured earlier and recorded as not paying. That experiment left
+this probe behind, and the probe has been silently costing every later GLM launch
+about 11 GiB of expert residency. Any future hot-experts comparison needs the
+probe cache cleared between arms, or the cache from one arm follows the other.
+
+### Correction
+
+Earlier entries in this session said GLM "leaves 24-30% of VRAM unused" and that
+ggrun was "declining to spend memory it has". That was measured from
+`nvidia-smi` after load and was the right observation with the wrong cause. The
+packer spends everything it is allowed to; the reserve is what holds the memory
+back, the reserve is mis-sized, and the mis-sizing is a stale cross-config
+maximum that the existing heal path cannot reach.
+
+## RESERVEFIX — reclaiming the reserve proves the objective defect — 2026-09-15
+
+Implemented the narrow guard: `RelatedModelRuntimeGraphGrowth` no longer carries
+a measurement between backends that disagree on whether a GPU expert cache is
+running. It does **not** tighten the backend match generally, which the
+relaxation exists to protect; it requires only that the recording and consuming
+backends agree on that one declared feature.
+
+`backendDeclaresExpertCache` reads the `hot-experts=N` suffix ggrun already
+writes into the probe key line, so the declaration travels with the measurement.
+A declared cache of zero counts as no cache. Six name shapes and the symmetry
+property are pinned in `runtime_reserve_test.go`; uncached
+`scripts/verify-core-engine.sh` green on all six packages.
+
+### Measured effect, GLM-5.3-Flash, same command before and after
+
+| | before | after |
+|---|---:|---:|
+| runtime reserve CUDA0 | 4,007 | 4,007 |
+| runtime reserve CUDA1 | **6,406** | **2,842** |
+| runtime reserve CUDA2 | **859** | **530** |
+| total reserve | **11,272 MiB** | **7,379 MiB** |
+| context fit | 538,624 tokens | **670,720 tokens** |
+| `n-cpu-moe` | 42-43 of 48 | **42-43 of 48** |
+
+**3,893 MiB reclaimed on the first launch.** CUDA0's 4,007 survives because it
+comes from a different probe that does not declare a cache, so the guard
+correctly leaves it alone — the fix removes what is provably foreign, not
+everything large.
+
+### And the memory went to the wrong place
+
+Expert residency did not move: still 42-43 of 48 layers on the host, one expert
+layer on GPU. The planner spent every reclaimed byte on **context**, growing the
+window 24.5% on a model whose own bottleneck diagnosis reads "CPU expert
+bandwidth" and whose context was already half a million tokens.
+
+So this fix, on its own, **does not make GLM faster.** It removes a bogus reserve
+and hands the memory to the fit-maximising behaviour that `CTXSTEP` and
+`CTXREPEATS` already showed costs throughput.
+
+That is the clearest demonstration yet of the core objective's defect. Freeing
+memory is not enough while the planner's objective is capacity: give it room and
+it buys window, never residency, because nothing in the decision asks which one
+serves the workload faster. **Two independent memory findings now converge on the
+same missing objective function.**
+
+### What would complete it
+
+The reclaimed 3.9 GiB is about one and a half expert layers at GLM's ~2.5 GiB per
+layer — real but modest. The larger prize needs the planner to weigh residency
+against context for a host-offloaded MoE, which is the objective change recorded
+at the top of the handoff and not attempted here.
+
+## CTXLEVER — context as a candidate makes the residency trade measurable — 2026-09-15
+
+`RESERVEFIX` reclaimed 3,893 MiB on GLM and the planner spent all of it on a
+24.5% larger window while expert residency did not move. That is the objective
+defect: given room, a fit-maximising plan buys capacity, never residency.
+
+On a host-offloaded MoE the two compete for the same VRAM, so **context is the
+residency lever** — and it was not a coordinate the search could move.
+
+### The change
+
+`calibrationContextNeighbors` + `recomputeContextCandidate` offer smaller windows
+as candidates, following the same shape as the batch and slot dimensions. This
+does **not** change what the planner picks; it makes the alternative measurable
+so the live screen and phase guards decide on evidence. Same pattern that made
+the slot lever reachable in `SLOTOPEN`.
+
+Bounds, because per-agent context is contract-protected:
+
+- only for `MoEOffload` bases with experts actually on the host, where the trade
+  exists at all;
+- only downward, never below half the base window;
+- never below `contextMinimum` per slot — the floor `CTXFLOOR` found when 16,384
+  truncated a six-turn session to five and looked fastest for doing less work;
+- never when `--ctx-size` is explicit; a user constraint is not a coordinate;
+- and a candidate that frees VRAM without returning an expert layer is discarded,
+  so it cannot spend a reload on nothing.
+
+### It works, measured on GLM-5.3-Flash
+
+```
+BASE                 ctx=103424  n-cpu-moe=43
+CAND context-77568   ctx=77568   n-cpu-moe=42
+CAND context-51712   ctx=51712   n-cpu-moe=42
+```
+
+A smaller window returns an expert layer to the GPU. The trade
+`RESIDENCYFRACTION` ties to agentic speed is now something the optimizer can
+measure rather than something the planner silently forecloses.
+
+### A gate bug found by the live run, not by the tests
+
+The first implementation gated on `opts.AutoContextMax > 0`, and **no candidate
+appeared on GLM**. That flag is set only in Claude Code mode; plain serving
+resolves the window itself and marks the strategy `ContextAuto`, leaving
+`AutoContextMax` at zero. The guard therefore excluded every plain launch — which
+is exactly where GLM was measured.
+
+Both signals are now honoured and pinned in
+`TestBothAutomaticContextSignalsAreHonoured`. The unit tests passed throughout,
+because they asserted the bounds rather than the mode-specific signal; only the
+live launch showed nothing being generated. Second time in this session a guard
+was correct and its gate was wrong — the same shape as the residency ratchet's
+`base.ContextAuto` gate in `SLOTFIX`.
+
+### Still not promoted
+
+Generating a candidate is not choosing one. Whether a smaller window and one more
+resident expert layer actually serves agent work faster on GLM is unmeasured:
+that needs the live screen to run these candidates, and GLM's own screen budget
+has so far refused every challenger on admission. One expert layer of 48 is a
+small move; the value of this change is that the trade is now visible to the
+search at all.
+
+## CTXLEVERLIVE — the context candidate reaches the ladder and does not fit — 2026-09-15
+
+`CTXLEVER` made context a coordinate. This is its first live screen on GLM-5.3-Flash.
+
+```
+[calibrate] measuring ubatch-2048...
+[calibrate] ubatch-2048 failed to start (... CUDA1 (84372 MiB deficit) ...)
+[calibrate] measuring context-463872...
+[calibrate] context-463872 failed to start (... CUDA1 (2784 MiB deficit) ...)
+[calibrate] measuring kv-alternate...
+[calibrate] kv-alternate failed to start (... CUDA1 (3728 MiB deficit) ...)
+```
+
+**The candidate was generated, prioritised into the bounded ladder, and measured
+for admission.** The coordinate is reachable by the search, which is what
+`CTXLEVER` set out to establish and what `SLOTLEVER`/`SLOTOPEN` had to fix for
+slots.
+
+### It corrects the premise it was built on
+
+I expected a smaller window to need *less* VRAM and therefore to pass the
+admission that every ubatch challenger failed. It needed **more** on CUDA1.
+
+That is the trade working as designed: the freed KV is spent returning an expert
+layer to the GPU, and at GLM's ~2.5 GiB per layer that layer costs more on the
+receiving device than the context reduction frees there. **A candidate that
+trades context for residency is not a memory reduction; it is a
+redistribution**, and it must pass per-device admission like any other plan.
+
+The margin is also informative. `ubatch-2048` missed by **84,372 MiB** —
+arithmetically hopeless. `context-463872` missed by **2,784 MiB**, about one
+expert layer. The context lever is in the right order of magnitude where the
+batch lever never was.
+
+### What is still untried
+
+The generator offers 75% and 50% of the base window. The ladder reached the 75%
+candidate (463,872 of ~618k) and then moved to a different lever family, so the
+**50% candidate was never measured**. Given the 75% candidate missed by roughly
+one layer, the 50% one is the obvious next thing to try and may well fit.
+
+### Honest status against the core objective
+
+Reachable: yes, demonstrated. Admitted: no. Faster: unmeasured, and cannot be
+claimed. The objective at the top of the handoff stays open, with the gap now
+narrowed from "the planner cannot consider this" to "the first candidate it
+considers misses by about one expert layer".
+
+## CTXSTRAND — freeing context strands memory instead of buying residency — 2026-09-15
+
+`CTXLEVERLIVE` showed the context candidate reaching the ladder and missing
+admission by about one expert layer. Reading the per-device ledger for both
+candidates explains why, and identifies what actually blocks GLM.
+
+GLM-5.3-Flash, plain serving, base window 166,912:
+
+| plan | `n-cpu-moe` | CUDA1 | CUDA0 | CUDA2 |
+|---|---:|---|---|---|
+| base | 43 | room 586, **stranded 586** | room 7, stranded 7 | room 991, **stranded 991** |
+| `context-125184` (75%) | 42 | room 2,824, **stranded 2,824** | room 725, **1 layer** | room 2,103, **stranded 2,103** |
+| `context-83456` (50%) | 42 | room 2,824, stranded 2,824 | room 725, 1 layer | room 2,103, stranded 2,103 |
+
+Two things fall out, and both matter more than the candidate itself.
+
+### The freed memory strands on two cards out of three
+
+Cutting the window frees KV, and **4,927 MiB of it lands as `stranded`** on CUDA1
+and CUDA2 — room that exists and cannot be used, because no whole expert layer
+fits in it. Only CUDA0 converts its share into an actual layer.
+
+So on this shape the trade does not behave as `CTXLEVER` assumed. Freeing context
+does not buy residency proportionally; it buys one layer on one card and wastes
+the rest. **Whole-layer granularity, not the context policy, is the binding
+constraint on a three-way tensor split.**
+
+### The 50% candidate is not worth reaching
+
+`context-83456` produces an **identical** placement to `context-125184`: same
+`n-cpu-moe`, same layer, same stranding. Halving the window again buys nothing,
+because the next layer still does not fit anywhere.
+
+That answers the open question from `CTXLEVERLIVE` — the untried 50% candidate
+would not have fitted either, and the ladder moving on to a different lever
+family was the right call rather than a missed opportunity.
+
+### What this means for the core objective
+
+The objective at the top of the handoff is unchanged and still open, but the
+blocking mechanism is now specific and model-independent:
+
+**On a tensor-split host-offloaded MoE, VRAM freed by any lever can only be spent
+in whole expert layers, so a device whose free room sits below one layer holds it
+permanently.** GLM strands ~4.9 GiB this way with the context lever applied, on
+top of the ~7.4 GiB still held as growth reserve after `RESERVEFIX`.
+
+The levers that would convert that stranded room into residency are sub-layer
+pinning — which `RelatedModelRuntimeGraphGrowth`'s own comments show the codebase
+already prices for partial `gate_up|up_gate|gate|up` pins — or rebalancing the
+tensor split so the room accumulates on one card instead of three. Neither is
+attempted here; both are now pointed at by a measurement rather than a guess.
+
+## STRANDBYDESIGN — the stranded VRAM is a measured trade, not a defect — 2026-09-15
+
+`CTXSTRAND` found ~4.9 GiB of freed VRAM stranding on two of three cards because
+no whole expert layer fits. The obvious fix — sub-layer pins — **already exists
+and is deliberately disabled**:
+
+```go
+// Automatic partial expert projection pins are intentionally disabled. Live
+// parallel-4 benchmarks showed that gate+up-only packing raised serial decode
+// 2.4% but reduced prompt-heavy aggregate throughput 17-19% because every
+// partial layer adds a CPU/GPU boundary. Keep the parser/cache support for
+// explicit or legacy plans, but the general planner emits complete expert
+// layers only until a topology-aware benchmark can prove partial pins faster.
+const enableAutomaticSubLayerExpertPins = false
+```
+
+`packGateUpChunks` and `buildOTStringWithSubPins` are present and wired; only the
+constant gates them.
+
+So the stranding is the **price of a decision that was measured**: whole layers
+cost idle VRAM and avoid a per-layer CPU/GPU boundary that cost 17-19% of
+prompt-heavy throughput. That is a real trade, made on evidence, and it is the
+correct default on the workload it was measured against.
+
+### This corrects CTXSTRAND's framing
+
+`CTXSTRAND` called whole-layer granularity "the binding constraint" and pointed
+at sub-layer pinning as an unexplored lever. It is not unexplored — it was
+explored, measured, and switched off with the reason recorded in the code. The
+constraint is real; calling it an oversight was wrong.
+
+### The condition for revisiting is stated, and this session's workload differs
+
+The comment names its own reopening condition: *"until a topology-aware benchmark
+can prove partial pins faster"*. The measurement that closed it was **parallel-4
+and prompt-heavy**. The agent workload measured throughout this session is
+neither: one slot, ~99.6% prefix reuse, and turns dominated by decode rather than
+prompt ingestion (`MULTITURN`, `LONGFORM`).
+
+A partial pin costs a CPU/GPU boundary on every token of prompt ingestion and
+pays back on decode. The original benchmark loaded the side that loses; an
+agent session loads the side that gains — and the +2.4% serial decode figure was
+already positive.
+
+So the honest position is not "sub-pins are wrong" nor "sub-pins would help", but
+that **the existing evidence does not cover the workload this project now
+optimises for**, and the constant's own condition invites exactly that
+measurement.
+
+### The experiment that would settle it
+
+Build with `enableAutomaticSubLayerExpertPins = true`, serve GLM-5.3-Flash, and
+run the long-form multi-turn session against the current build, matched repeats,
+discarding the cold first run per `CTXREPEATS`. That reads directly on the
+question: does converting ~4.9 GiB of stranded room into partial expert residency
+serve agent work faster on a host-offloaded MoE?
+
+Not run here. It is a placement-policy change gated behind a measured decision,
+and reversing such a decision needs its own matched evidence rather than a
+tail-end edit.
+
+## RESERVEFIX-REGRESSION — the reclaimed memory produced an unservable plan — 2026-09-15
+
+**`RESERVEFIX` is reported wrongly in this ledger and must not be trusted as
+written.** It was recorded as a success after reading the preflight ledger. The
+launch was never checked for serving. It does not serve.
+
+| run | context planned | served |
+|---|---:|---|
+| before the fix | 538,624 | **yes** |
+| after the fix | 670,720 | **no** — `Aborted (core dumped)`, exit 134 at 96% warm-up |
+| calibration run | 617,472 | yes |
+| baseline re-attempt | 670,720 | **no** — same abort |
+
+Reclaiming 3,893 MiB of growth reserve did not leave the plan safer. The planner
+immediately spent the freed memory on a larger context window, and that window
+does not survive backend warm-up. The boundary sits between 617,472 (serves) and
+670,720 (aborts).
+
+### What this shows about the reserve
+
+The reserve was genuinely over-sized **for graph growth** — 11,272 MiB held
+against 76 MiB observed, and the probe carrying it came from a hot-experts
+backend, both of which remain true. It was nonetheless **load-bearing in
+practice**, because the planner's fit objective converts any freed VRAM directly
+into context. Memory held back by a pessimistic reserve was doing a second job
+nobody designed it for: capping a context the plan cannot actually run.
+
+That is the fit-not-outcome defect biting in the opposite direction from
+everywhere else in this record. Elsewhere it wastes speed; here it turns a
+memory-accounting fix into a launch failure.
+
+### Consequences
+
+- **`RESERVEFIX` must not ship as it stands.** The backend guard is correct in
+  isolation and unsafe in composition with a fit-maximising planner.
+- The earlier claim that GLM "leaves 24-30% of VRAM unused" and that 11 GiB was
+  recoverable is now doubly corrected: it is a reserve (already recorded), and
+  reclaiming it without changing the objective produces a plan that aborts.
+- `CTXLEVERLIVE` and `CTXSTRAND` were measured on builds carrying this change.
+  Their candidate-generation findings stand, since they are read from plans
+  rather than from serving, but any timing measured on a 670,720 plan would be
+  invalid — none was taken, because the server never came up.
+
+### The process failure, stated plainly
+
+A preflight ledger is a plan, not an outcome. Reading "placement fits" and
+reporting a reclaim as verified skipped the only check that mattered: whether
+`Press Ctrl+C to stop` ever appeared. Four GLM launches in this session are now
+labelled SERVED / NOT-SERVED above, and that column should have been the first
+thing recorded for each, not the last.

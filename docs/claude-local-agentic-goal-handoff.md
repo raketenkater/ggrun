@@ -4,6 +4,62 @@ User-aligned handoff, 2026-09-14. This is a development plan, not a claim that
 the acceptance checks below have passed. Refresh branch and CI state before
 acting; preserve the existing dirty production checkout.
 
+## The core objective — non-negotiable, and not yet met
+
+**Run the selected model as fast as the given hardware allows.** The model is the
+user's choice. ggrun's job is to extract the most from that model on that
+machine, never to be faster by serving something else or something smaller.
+
+This milestone is not complete while a selected model is measurably slower than
+its own hardware permits. As of 2026-09-15 it is **not met**, with the gap
+measured rather than asserted:
+
+| model | symptom | measured |
+|---|---|---|
+| GLM-5.3-Flash | **24-30% of VRAM unused** (`fraction_of_vram` 0.70-0.76) while 42-43 of 48 expert layers sit in host RAM | ~12-15 GiB idle, roughly 5 more expert layers' worth |
+| Qwen3.8-27B | automatic context buys the largest fitting window by shrinking batch shape to 2048/512 instead of 8192/1024 | **44% of steady-state turn time** (`CTXREPEATS`) |
+| every launch measured | one GPU near saturation while another idles | 78-98% SM against 0-8%, six launches, three models |
+
+### The defect underneath all three
+
+**ggrun optimises for fit, not for outcome.** Context fit takes the largest
+window that fits; placement takes the most weights that fit; admission asks only
+whether it fits. Those are capacity objectives. They coincide with speed often
+enough to look correct, and they diverge measurably.
+
+Filling VRAM with KV nothing reads is not *using* the hardware, it is occupying
+it. Equally, leaving 12 GiB idle while experts page from host RAM is not
+conservatism, it is unspent capacity.
+
+The right shape is:
+
+- **Requirement**: per-agent context at least what the workload needs — the floor
+  `CTXFLOOR` found, where 16,384 silently truncated a six-turn session.
+- **Constraint**: it must fit, fail-closed. Unchanged.
+- **Objective**: fastest correct agent work on the selected model. **Currently
+  absent from the planner.**
+
+ggrun already *measures* the objective — `correct_tasks_per_minute`, workload
+makespan, the phase guards. It does not let the planner *choose* on it, because
+the coordinates that move it (context, slots, topology, threads, expert
+residency) are not in the candidate space. The baseline won every calibration run
+in this session across four model/mode combinations, which is what a search with
+nothing to offer looks like.
+
+### Optimise the logic, not this machine
+
+The mechanism generalises; the numbers do not. "Do not trade batch shape for
+context nobody requested" is model-independent. "Cap context at 32k" is a fact
+about one model on one rig and must not be encoded. The change contract says the
+same thing, and every fix under this objective is held to it.
+
+### Acceptance
+
+This objective is met when, for a selected model on given hardware, ggrun can
+show that no candidate configuration it can construct serves real agent work
+faster — and when the levers above are reachable by the search rather than only
+by a human passing flags by hand.
+
 ## The actual product goal
 
 Make capable local agentic work easy to start, responsive, and reliable on the
@@ -49,6 +105,90 @@ Product acceptance includes:
   coverage, versioned evidence, and instructions matching the shipped artifact.
   Windows GPU coverage must be reported accurately when unavailable. macOS is
   lower priority for this work.
+
+## Direction review — 2026-09-15
+
+Review time: 2026-09-15T08:25:20+00:00. Source reviewed through local `ce3bc0a`. PR #61 is
+merged as `0a66834`; Linux CPU, Windows CPU and Linux real-GPU install/serving
+run 34898139305 passed on that exact commit. PR #62 was still open at the
+previous `81c9f96` head when checked; the latest local KV-pinning change had not
+been covered by those remote checks. Refresh identity before concluding CI is
+current. Earlier PR #61 mmap-accounting and schema findings were addressed in
+its merged result; they are not outstanding #61 blockers.
+
+**Direction: keep the focus on the actual Claude Code path, useful per-agent
+context, and main/companion workflow performance.** The slot/KV interaction is
+a concrete relevant problem. Preserving baseline KV while varying automatic
+slot count is a sensible candidate-generation fix. The reported two extra GPU
+expert layers are a planner result, not a measured speedup. The cheaper
+parse-request-to-candidate reproduction should remain as regression coverage;
+it is more useful than repeated large loads to locate a filter.
+
+### Correct the reviewer evidence before selecting a default
+
+The saved `scratchpad/review-lane.py` and `review-ab.sh` do not support the broad
+`REVIEWLANE` conclusion yet:
+
+- The driver has two serial loops running alongside each other: at most one
+  review and one foreground request in flight, not twelve concurrent requests.
+- It discards successful response bodies. Eight HTTP successes do not establish
+  eight correct review decisions or useful foreground answers. Prompts are
+  tiny synthetic read-file questions; delegated worker tasks are absent.
+- The wrapper waits for backend health and a router address, then starts traffic
+  before final launch/profile/client acceptance. It launches `--claude-code`
+  with stdin from `/dev/null`. The main-only log ends with the client error
+  "Input must be provided either through stdin or as a prompt argument when
+  using --print". The companion arm's log ends with an Anthropic-router canary
+  failure. Startup and teardown therefore contaminate the comparison.
+- Main-only metrics contain immediate 502s with zero queue/response time after
+  earlier requests completed. This does not prove overload or that
+  self-classification intrinsically fails; trace launcher/backend lifetime and
+  the error cause first. The gateway log also admits only one active main
+  request despite four backend slots, so four-slot queueing cannot be assumed.
+- Both arms retain roughly 172-178 second foreground maxima. Comparing only
+  16.58 versus 10.28 second medians hides the unresolved long stall.
+- Cleanup selects every `bin/llama-server` process on the machine. Replace it
+  with owned PID/process-group cleanup; this is especially important with other
+  work ongoing on the shared box.
+
+The raw 0.099-second reviewer HTTP responses suggest the helper can isolate
+cheap requests, but do not justify a universal 2B recommendation. First run an
+accepted, stable local client/router session with unchanged required-review
+semantics, verify actual outputs against expected decisions, include useful
+worker tasks, and account for startup/lifecycle separately from serving time.
+Measure the requested real workflow at a representative context and report
+correct results, total completion time, tail stalls and resource trade-offs.
+Keep the experiment bounded. Main-only remains a supported baseline to repair
+and compare, not a path to write off because this harness produced 502s.
+
+### Address two PR #62 generality issues
+
+1. Slot candidate generation and eligibility changed, while
+   `CalibrationSchemaVersion` is still 25, the version introduced by #61.
+   Old baseline-won/admission-only decisions can still suppress this newly legal
+   search at the same baseline scope. Version or migrate the changed policy and
+   retain an upgrade/reuse regression. Clearing caches manually is not the
+   product fix.
+2. `holdExpertResidency` receives raw `outcome.Device` but builds a penalty map
+   for `ReplanAfterOOM`, which indexes physical `caps.GPUs[i].Index`. The nearby
+   existing recovery path uses `physicalGPUIndex(..., visibleToPhysical)`;
+   the new helper calls omit that translation. On selected/reordered GPUs this
+   can penalize the wrong card or match none. Convert at the boundary and test a
+   non-identity visible-to-physical mapping. The current 0/1/2 rig can hide it.
+
+The speculative residency ratchet has not demonstrated that its repacking
+branch fixes an observed launch. Its tests cover bookkeeping and fallback,
+not a successful repack that restores the intended per-device relief. Require
+that case and a full-ledger regression before merging it together with the
+slot change; use a separate small change if that keeps the proof clear.
+
+Focused existing slot/residency tests passed in this review. No core code,
+running model or CI configuration was changed; no new performance run was made.
+Priority: repair the comparison lifecycle and the two code issues, verify final
+slot candidates through the real resolver on another model class, then select
+main-only versus companion and slot policy from correct completed workflows.
+Avoid further topology/thread/hot-cache exploration until these answers are
+reliable. Keep long-context and real-worker acceptance open.
 
 ## Independent review and current direction — 2026-09-14T19:50:58+00:00
 
@@ -720,8 +860,8 @@ proof that an older release contains these fixes.
 | Uncached `scripts/verify-core-engine.sh`, six packages | green at every commit in #58 and #61 | local |
 | Linux CPU install, download, generate, cancel, shutdown, port release | green | `install-e2e` linux |
 | Windows install, reinstall preserving config, generate | green | `install-e2e` windows |
-| Linux real-GPU serving | **not yet run on the #61 candidate** | `install-e2e` gpu, manual dispatch on main only |
-| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false | — |
+| Linux real-GPU serving | **green on the merged candidate** `0a66834` (run 34898139305: linux, windows, gpu all success) | `install-e2e` gpu |
+| Windows GPU | **deferred by the user, 2026-09-15** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false. To be tested another time; not blocking this milestone. | — |
 | macOS | **untested**, lower priority for this work | — |
 
 Model coverage on this machine, all on the installed single binary
@@ -744,11 +884,201 @@ plainly which one is off in CI and why.
 
 Remaining before this milestone is closed:
 
-- Dispatch the GPU job on the candidate commit. It only runs from main, so the
-  candidate has to land first; that is the sequence, not an exemption.
+- ~~Dispatch the GPU job on the candidate commit~~ — done after #61 merged.
+  Run 34898139305 on `0a66834`: `linux`, `windows` and the real-GPU `gpu` job
+  all success; `gpu-windows` skipped, its runner being offline.
 - ~~Re-run the GLM tight-fit regression~~ — done, 555,008 tokens, recorded above.
 - Windows GPU and macOS stay marked untested. This box cannot certify generic
   public claims; that needs an expanded hardware and model matrix.
+
+### Claude Code mode and the companion seat — measured, with one gap left
+
+Full detail in `SEATCOST`, `CLAUDEMODE` and `SEATARMS`.
+
+**Every measurement before this point used plain serving**, so no companion was
+seated and none of it described the configuration an agent user runs. Claude
+Code mode plans four slots at the same per-agent context, not one.
+
+| | plain | `--claude-code` |
+|---|---:|---:|
+| plan | 262,144, 1 slot | ~1,046,528 total, 4 slots |
+| per agent | 262,144 | 261,888 |
+| resident experts | 28 of 48 | 19 of 48 |
+| correct tasks/min | **7.63** | **2.42** |
+| tasks completed | 3/3 | 2/3 |
+
+**The four-slot plan, not the companion, is what costs the throughput.** All
+three seats land together:
+
+| seat | per-agent context | correct tasks/min |
+|---|---:|---:|
+| `off` self-classify | 261,888 | 2.44 |
+| `qwen2b` review-only | 262,144 | 2.49 |
+| `qwen` worker+reviewer | **211,968** | 2.27 |
+
+Single runs, no established noise floor, so the ordering is not resolvable and
+must not be read as one. The durable result is the capacity one: the 4B seat
+costs 19% of per-agent context, the 2B seat costs none. **This table measures
+the seat's cost with its review lane idle; see `REVIEWLANE` below for what
+happens once reviews are actually issued.**
+
+**The benefit side is now measured, and it reverses the reading** (`REVIEWLANE`).
+Driving the lane — 8 classifier requests concurrent with 4 foreground turns —
+separates the arms decisively:
+
+| | `off` self-classify | `qwen2b` seated |
+|---|---:|---:|
+| routes served | `main: 13` | `reviewer: 8`, `main: 4` |
+| reviews completed | **3 of 8** | **8 of 8** |
+| review median | 14.17 s | **0.099 s** |
+| foreground median | 16.58 s | **10.28 s** |
+| errors | **6 x HTTP 502** | **0** |
+
+With no seat every request lands on `main`, reviews queue behind foreground work
+on the same four slots, and six of twelve fail outright. With the 2B seated the
+reviews are served in ~100 ms and the foreground turns get faster as well.
+
+**Provisional hypothesis, superseded by the 2026-09-15 direction review:** a
+review-only companion may help. The saved comparison has startup/teardown
+failures and does not validate review decisions, so it does not establish a
+default policy or that self-classification collapses under normal agent work.
+
+Still open: the 4B worker seat has never been driven with delegated utility
+work, so its 19% context cost over the 2B has no measured benefit.
+
+### Corrections to earlier entries in this record
+
+1. "The failure budget blocked topology exploration" — it did not. The budget
+   was reached exactly as the last of three challengers finished, so nothing was
+   ever skipped by it. Candidate *selection* was the blocker.
+2. "Three wasted reloads" — those candidates never loaded the model. Preflight
+   refused each before a weight was read.
+3. "No companion seat can launch" — all three launch. The non-convergence is
+   intermittent and depends on starting residency, not on the configuration.
+4. `SEATCOST`'s seat prices came from dry-run estimates (35 resident); the live
+   plans landed at 19. The dry-run ranks the seats but does not size them.
+5. The residency ratchet in PR #62 **has never executed**. It is gated and
+   tested; it is not demonstrated to fix anything.
+
+### RETRACTION — every Claude Code agent-suite number above is contaminated
+
+Read this before acting on any throughput figure in this record. Detail in
+`HARNESSKILL` and `PTYFIX`.
+
+`--claude-code` starts the backend and then opens the Claude Code client. Driven
+from a script with no TTY the client refuses to start, ggrun exits, and its
+shutdown handler stops the backend **mid-suite**. Task-level evidence from the
+four-slot arm: two tasks whose **oracle passed** came back as "Remote end closed
+connection", and the third got "Connection refused". Those runs timed a
+teardown, not a configuration.
+
+Retracted:
+
+- **"Claude Code mode costs two thirds of the throughput"** (2.42 against 7.63).
+  The plain-serving side is sound; the Claude Code side is not.
+- The three-seat comparison, 2.44 / 2.49 / 2.27. Treat as invalid, not merely
+  inseparable.
+- Slot-width throughput.
+
+Still standing, because it is read from the launch plan rather than from
+completed tasks:
+
+- resident expert layers by slot width, **25 / 21 / 9** for 1 / 2 / 4 slots, and
+  four slots also getting *less* per-agent context (207,360 against 261,632);
+- `SEATCOST`'s seat prices and every `n-cpu-moe` trace;
+- `REVIEWLANE`, which completed in seconds with zero errors and whose route
+  counts come from the router's own metrics. **The recommendation to seat the
+  review-only companion survives.**
+
+**The measurement path is fixed.** Driving the launcher under a pty
+(`script -qec`) keeps the client alive; verified alive 90 s past ready with the
+client error absent, and the first clean run through Claude Code mode returned
+3 of 3 tasks at 2.688 correct tasks/min. The retracted comparisons are now
+runnable and should be re-run before any of those claims return.
+
+### Blocked on disk, not on knowledge
+
+The root filesystem is at 100% — 158 MiB free of 456 GiB. Measurements taken
+under that pressure are untrustworthy: `ENOSPC` during a launch surfaces as
+failures that resemble unrelated defects, which is the trap this session already
+fell into twice. Everything below is runnable the moment there is headroom.
+
+`~/2tb-disk` is a separate 1.9 TiB volume with **574 GiB free**; moving part of
+`~/ggrun-project` (289 GiB, mostly models and `.src` build trees) there is
+probably the cheapest fix, but it is a storage-layout decision for the user.
+
+### Platform scope, settled 2026-09-15
+
+**Linux is the main goal.** The user has scoped the platform matrix: Linux is
+the target, **macOS is deprecated** and retired, and **Windows GPU is deferred**
+to a later session. Neither of the latter blocks milestone 5.
+
+Read this before planning work: effort belongs on the Linux path — CPU and real
+GPU, install through serving — not on widening the matrix.
+
+That closes the release-validation matrix for this work: Linux CPU and Linux
+real-GPU are green on the merged candidate, Windows install/reinstall/generate
+is green, Windows GPU is deferred by decision, and macOS is out of scope. A
+future session should not re-open these as outstanding work.
+
+### Re-measured after the disk was freed — what replaced the retraction
+
+The pty fix made Claude Code mode measurable; the retracted comparisons were
+then re-run properly. Every arm below completed 3 of 3, where the retracted runs
+managed 0 to 2. Detail in `SLOTCLEAN`, `SEATCLEAN`, `GLMSEAT`, `MINICPM`.
+
+**Slot widths** (Flash-Next, reviewer seated, per-agent context matched at
+262,144):
+
+| slots | resident experts | correct tasks/min | median |
+|---:|---:|---:|---:|
+| 1 | 23 of 48 | 4.02 | 30.8 s |
+| 2 | 17 | 3.02 | 32.9 s |
+| 4 | **1** | 3.41 | **26.5 s** |
+
+**The four-slot penalty was the teardown, not the plan.** Four slots runs 18%
+below one slot, not the 3x originally reported, and has the best median latency.
+The ordering is non-monotone, so no slot width is promoted — but the catastrophic
+penalty claim is positively contradicted, which makes PR #62's slot work an
+optimizer completeness fix rather than a fix for a known performance bug.
+
+This also **qualifies RESIDENCYFRACTION**: 23x fewer resident experts costs under
+a fifth of throughput at matched per-agent context. Residency dominates across
+models far more than within one.
+
+**Seats** (same model and suite): 2.84 / 2.81 / 2.76 correct tasks/min for
+`off` / `qwen2b` / `qwen` — a 2.8% spread, indistinguishable, and not a ranking.
+The durable difference is capacity: the 4B seat costs 21% of per-agent context,
+the 2B costs none. `REVIEWLANE` still answers the other question, and the
+recommendation to seat `qwen2b` stands.
+
+**Hardest real configuration works.** GLM-5.3-Flash (2.86x over VRAM) with a
+reviewer seated plans, loads and serves: 809,984 tokens across 4 slots,
+converging in one derate round.
+
+**MiniCPM5-2B rejected.** 0 of 4 valid verdicts, twice, including with the
+router's stop sequence. Fast but always prefaces with prose containing both
+tags. Not wired; no `ModelSpec` added.
+
+**Residency ratchet**: mechanism verified by test
+(`re-packed n-cpu-moe 23 -> 25`); the live oscillation has not recurred in nine
+launches across three configurations and two models. Correct guard, rare
+trigger, and instrumented since `RATCHETOBS` to report its attempts.
+
+### Milestone 5 coverage, final for this session
+
+| path | state |
+|---|---|
+| Uncached core gate, six packages | green at every commit |
+| Linux CPU install / download / generate / cancel / shutdown | green |
+| Windows install / reinstall / generate | green |
+| **Linux real GPU on the merged candidate** | **green** — run 34898139305 on `0a66834` |
+| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false |
+| macOS | **deprecated, 2026-09-15** — the user has retired this platform from the matrix. Do not spend effort here. |
+| Resident / offloaded-MoE / tight-fit models | all three launched and served |
+
+Windows GPU and macOS cannot be closed from this machine. They are reported
+untested rather than inferred from the Linux result.
 
 ### Known limitations of current evidence
 

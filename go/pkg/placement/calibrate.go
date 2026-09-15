@@ -466,6 +466,24 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 	// Challenge every bounded legal width that preserves useful per-agent context
 	// and the current residency class. Explicit --parallel is a hard constraint
 	// and never enters this search.
+	// Context is a coordinate on a host-offloaded MoE, where it competes with
+	// expert residency for the same VRAM. Offered only there, only downward, and
+	// bounded; see calibrationContextNeighbors.
+	for _, ctx := range calibrationContextNeighbors(base, opts) {
+		alt, err := recomputeContextCandidate(caps, model, base, opts, ctx)
+		if err != nil || alt == nil || calibrationCandidateExists(out, alt) {
+			continue
+		}
+		// A candidate that frees VRAM and does not return any expert layer to the
+		// GPU has bought nothing on this shape, so it is not worth a reload.
+		if alt.NCPUMoE >= base.NCPUMoE {
+			continue
+		}
+		out = append(out, CalibrationCandidate{
+			Name: fmt.Sprintf("context-%d", ctx), Strategy: alt,
+		})
+	}
+
 	if !opts.ParallelExplicit {
 		for _, parallel := range calibrationParallelNeighbors(base, opts) {
 			alt, err := recomputeParallelCandidate(caps, model, base, opts, parallel)
@@ -654,6 +672,91 @@ func adjacentBatchRung(value int, upward bool) int {
 	return value
 }
 
+// calibrationContextNeighbors offers smaller automatic context windows for a
+// host-offloaded MoE, because on that shape context and expert residency compete
+// for the same VRAM and the planner currently never weighs one against the other.
+//
+// Measured on GLM-5.3-Flash 2026-09-15: reclaiming 3,893 MiB of a bogus growth
+// reserve moved expert residency not at all — 42-43 of 48 layers stayed on the
+// host — while the context window grew 24.5%, on a model whose own bottleneck
+// diagnosis reads "CPU expert bandwidth". Freeing memory does not help while the
+// only thing the plan knows how to buy is window.
+//
+// This does not change what the planner picks. It makes the alternative
+// measurable, so the existing live screen and phase guards decide on evidence —
+// the same pattern that made the slot lever reachable.
+//
+// Bounds, because per-agent context is a protected quantity and the contract
+// forbids reducing it silently:
+//
+//   - offered only for MoEOffload bases with experts actually on the host, which
+//     is where the trade exists at all;
+//   - only downward, and never below half the base window, so a candidate cannot
+//     collapse the session's working set;
+//   - never below contextMinimum per slot, the same floor the slot search uses.
+//
+// CTXFLOOR is the reason for the last two: at 16,384 a six-turn session
+// truncated to five turns and looked fastest because it did less work.
+func calibrationContextNeighbors(base *Strategy, opts Options) []int {
+	if base == nil || base.ContextSize <= 0 || base.Type != MoEOffload {
+		return nil
+	}
+	// No experts on the host means no trade to measure.
+	if base.NCPUMoE <= 0 {
+		return nil
+	}
+	// An explicit context is a user constraint, never a coordinate to search.
+	//
+	// The two serving modes signal "automatic" differently and both must be
+	// honoured: Claude Code carries a workload ceiling in AutoContextMax while
+	// opts.ContextSize stays 0, and plain serving resolves the window itself and
+	// marks the resulting strategy ContextAuto. Gating on AutoContextMax alone
+	// excluded every plain launch, which is where this was first measured.
+	if opts.ContextSize > 0 {
+		return nil
+	}
+	if opts.AutoContextMax <= 0 && !base.ContextAuto {
+		return nil
+	}
+	slots := strategySlots(base)
+	if slots <= 0 {
+		slots = 1
+	}
+	floor := contextMinimum * slots
+	if half := base.ContextSize / 2; floor < half {
+		floor = half
+	}
+	out := make([]int, 0, 2)
+	for _, num := range []int{3, 2} { // 75% and 50% of the base window
+		candidate := base.ContextSize * num / 4
+		if candidate >= floor && candidate < base.ContextSize {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+// recomputeContextCandidate re-plans at a smaller window, holding everything the
+// caller owns. The point is what the packer does with the freed VRAM: on a
+// host-offloaded MoE it can return expert layers to the GPU, which is the
+// quantity RESIDENCYFRACTION ties to agentic speed.
+func recomputeContextCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options, contextSize int) (*Strategy, error) {
+	if contextSize <= 0 {
+		return nil, fmt.Errorf("invalid context candidate %d", contextSize)
+	}
+	altOpts := calibrationBaseOptions(opts, base)
+	altOpts.ContextSize = contextSize
+	altOpts.AutoContextMax = 0
+	alt, err := Compute(caps, model, altOpts)
+	if err != nil || alt == nil {
+		return nil, err
+	}
+	if alt.ContextSize != contextSize {
+		return nil, fmt.Errorf("context candidate recomputed as %d", alt.ContextSize)
+	}
+	return alt, nil
+}
+
 func calibrationParallelNeighbors(base *Strategy, opts Options) []int {
 	if base == nil || base.ContextSize <= 0 {
 		return nil
@@ -689,8 +792,46 @@ func calibrationParallelNeighbors(base *Strategy, opts Options) []int {
 	return out
 }
 
+// sameCalibrationPerAgentContext compares the window one agent gets rather than
+// the total across slots. Candidates that differ only in slot count are
+// comparable exactly when that per-agent window is preserved; the contract
+// treats reducing it as a silent quality loss, not a tuning move.
+func sameCalibrationPerAgentContext(base, candidate *Strategy) bool {
+	if base == nil || candidate == nil {
+		return false
+	}
+	baseSlots, candidateSlots := strategySlots(base), strategySlots(candidate)
+	if baseSlots <= 0 || candidateSlots <= 0 {
+		return false
+	}
+	// Two shapes are comparable, and a slot candidate may be either:
+	//
+	//   - the same total window redistributed across a different width, which is
+	//     what an explicit --ctx-size asks for; and
+	//   - the same per-agent window with the total scaled to match, which is what
+	//     an automatic context produces and the only form that can trade KV for
+	//     expert residency.
+	//
+	// Requiring equal totals alone rejected every candidate of the second kind,
+	// which is why Claude Code mode reported "parallel 4..4" and the slot cost
+	// measured in CLAUDEMODE could never be searched.
+	if base.ContextSize == candidate.ContextSize {
+		return true
+	}
+	if baseSlots == candidateSlots {
+		return false
+	}
+	return base.ContextSize/baseSlots == candidate.ContextSize/candidateSlots
+}
+
 func sameCalibrationResidency(base, candidate *Strategy) bool {
-	if base == nil || candidate == nil || base.ContextSize != candidate.ContextSize {
+	if base == nil || candidate == nil {
+		return false
+	}
+	// A slot candidate scales its total window with the slot count, so equal
+	// totals would reject every one of them. What must not change is the window
+	// each agent actually gets.
+	if !sameCalibrationPerAgentContext(base, candidate) {
 		return false
 	}
 	if !base.MMapRequired && candidate.MMapRequired {
@@ -738,6 +879,47 @@ func recomputeBatchCandidate(caps *detect.Capabilities, model *ModelProfile, bas
 	return alt, nil
 }
 
+// slotCandidateScalesContext reports whether a slot candidate should scale its
+// total window with the slot count instead of inheriting the base's total.
+//
+// The gate is the *request* being automatic, not the strategy carrying
+// ContextAuto: a Claude Code base arrives with ContextAuto false even though its
+// window was derived rather than typed. AutoContextMax is set only when the
+// launcher resolved the window itself, which is exactly when scaling is correct.
+// slotCandidateOptions applies the two rewrites a slot candidate needs, and is
+// separate so both are testable without a full placement computation.
+//
+//   - the total window scales with the slot count, holding per-agent context,
+//     which is the quantity the change contract forbids reducing silently; and
+//   - KV placement is held where the baseline has it.
+//
+// The second matters because cutting slots frees KV, and left to choose the
+// packer spends that room on expert residency and then moves the cache to the
+// host. sameCalibrationResidency refuses to compare across that boundary --
+// correctly, since relocating KV moves the matching attention computation to the
+// CPU -- so every slot candidate was discarded before it could be measured.
+//
+// Measured on Qwen3.8-Flash-Next: unpinned, parallel-1 and parallel-2 both came
+// back with host KV against a GPU-resident base. Pinned, both stay resident and
+// n-cpu-moe falls from 48 to 46.
+func slotCandidateOptions(altOpts Options, base *Strategy, parallel int) Options {
+	if !slotCandidateScalesContext(altOpts, base, parallel) {
+		return altOpts
+	}
+	if perAgent := base.ContextSize / base.Parallel; perAgent > 0 {
+		altOpts.ContextSize = perAgent * parallel
+	}
+	if base.KVPlacement != "" {
+		altOpts.KVPlacement = base.KVPlacement
+	}
+	return altOpts
+}
+
+func slotCandidateScalesContext(opts Options, base *Strategy, parallel int) bool {
+	return opts.AutoContextMax > 0 && base != nil && base.Parallel > 0 &&
+		parallel != base.Parallel && base.ContextSize > 0
+}
+
 func recomputeParallelCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options, parallel int) (*Strategy, error) {
 	if parallel <= 0 {
 		return nil, fmt.Errorf("invalid parallel candidate %d", parallel)
@@ -745,6 +927,7 @@ func recomputeParallelCandidate(caps *detect.Capabilities, model *ModelProfile, 
 	altOpts := calibrationBaseOptions(opts, base)
 	altOpts.Parallel = parallel
 	altOpts.AutoParallel = false
+	altOpts = slotCandidateOptions(altOpts, base, parallel)
 	// A different scheduler width deserves its own automatic batch baseline.
 	// Carrying a four-lane fairness cap into a one-lane candidate (or a large
 	// serial batch into four lanes) would benchmark a coupled accident rather

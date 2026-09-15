@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,10 +42,45 @@ type launchMemoryRecovery struct {
 	// expert derate freed 1,073 MiB and CUDA2 fitted at 10,937/11,909, then the
 	// measured re-plan returned to 12,003 and the launch never converged.
 	acceptedNCPUMoE int
+	// derivedNCPUMoE is the largest CPU expert-layer count any round of this
+	// launch has reached, whether or not it fitted. acceptedNCPUMoE only arms
+	// after an exact preflight fits, so on a launch where nothing ever fits it
+	// stays zero and guards nothing.
+	//
+	// That is the Qwen3.8-Flash-Next reviewer-seat failure. Every expert-derate
+	// raised n-cpu-moe and every context re-plan lowered it, nine rounds for
+	// nine: 46, 45, 46, 40, 44, 45, 46, 44, 45. The re-plan recomputes a
+	// complete placement at a smaller context and placement.Options carries no
+	// residency floor, so the packer is free to put experts back on the GPU.
+	// The derate ladder then restarts from a lower rung every time and the
+	// replan budget runs out before it can converge.
+	derivedNCPUMoE int
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {
 	return &launchMemoryRecovery{rejected: map[string]struct{}{}}
+}
+
+// observeExpertResidency records the residency of a plan this launch actually
+// constructed. It ratchets only toward more experts on the CPU, the direction
+// that frees VRAM, so the floor is always safe to re-impose.
+func (r *launchMemoryRecovery) observeExpertResidency(strategy *placement.Strategy) {
+	if r == nil || strategy == nil {
+		return
+	}
+	if strategy.NCPUMoE > r.derivedNCPUMoE {
+		r.derivedNCPUMoE = strategy.NCPUMoE
+	}
+}
+
+// expertResidencyFloor is the CPU expert-layer count a re-plan in this launch
+// must not fall below. Zero means nothing has been derated yet, so a re-plan is
+// unconstrained.
+func (r *launchMemoryRecovery) expertResidencyFloor() int {
+	if r == nil {
+		return 0
+	}
+	return r.derivedNCPUMoE
 }
 
 func (r *launchMemoryRecovery) reject(args []string) {
@@ -282,6 +318,10 @@ func recoverPreflightOOM(
 	if !outcome.DoesNotFit || outcome.Device < 0 || model == nil || strategy == nil {
 		return nil, nil, "", fmt.Errorf("invalid preflight allocation failure")
 	}
+	// The plan entering this round is evidence of how far the derate ladder has
+	// climbed, even though it did not fit. A later context re-plan must not fall
+	// below it.
+	recovery.observeExpertResidency(strategy)
 	if outcome.AllocMB <= 0 {
 		outcome.AllocMB = maxPreflightInt(outcome.DeficitMB, 1)
 		outcome.AllocMBMeasured = false
@@ -311,6 +351,10 @@ func recoverPreflightOOM(
 			opts.CacheFile = ""
 			opts = boundByProvenLimits(opts, recovery)
 			candidate, replanErr = placement.Compute(caps, model, opts)
+			// This candidate is returned directly as "context-replanned", so the
+			// residency floor has to be re-imposed here rather than only in the
+			// context-derate recompute below.
+			candidate = holdExpertResidency(caps, model, opts, candidate, recovery.expertResidencyFloor(), outcome.Device)
 		}
 	}
 
@@ -326,6 +370,7 @@ func recoverPreflightOOM(
 		// launch failed closed.
 		replanOpts.UBatchSize = strategy.UBatchSize
 		candidate, replanErr = placement.ReplanAfterOOM(caps, model, replanOpts, oomPenalty)
+		candidate = holdExpertResidency(caps, model, replanOpts, candidate, recovery.expertResidencyFloor(), outcome.Device)
 	}
 
 	var candidateArgs []string
@@ -366,7 +411,7 @@ func recoverPreflightOOM(
 		// and host-ledger state together. Recompute the complete configuration at
 		// one deficit-sized target, then let the normal exact preflight prove it.
 		contextCandidate, contextArgs, contextErr := recomputeAutomaticContextRecovery(
-			req, cfg, model, be, caps, strategy, serverArgs, outcome,
+			req, cfg, model, be, caps, strategy, serverArgs, outcome, recovery.expertResidencyFloor(),
 		)
 		if contextErr != nil {
 			return nil, nil, "", contextErr
@@ -716,7 +761,7 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 // recomputeAutomaticContextRecovery turns the measured target into one complete
 // placement. A context change is never applied to the current Strategy in
 // place: all context-derived memory and cache state must come from Compute.
-func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome) (*placement.Strategy, []string, error) {
+func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, floorNCPUMoE int) (*placement.Strategy, []string, error) {
 	target, ok := automaticContextRecoveryTarget(req, current, currentArgs, outcome)
 	if !ok || cfg == nil || model == nil || be == nil || caps == nil {
 		return nil, nil, nil
@@ -735,6 +780,7 @@ func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, m
 	if err != nil {
 		return nil, nil, fmt.Errorf("full context-recovery re-plan at %d tokens: %w", target, err)
 	}
+	next = holdExpertResidency(caps, model, opts, next, floorNCPUMoE, outcome.Device)
 	if next == nil || next.ContextSize != target {
 		return nil, nil, fmt.Errorf("full context-recovery re-plan did not preserve target %d", target)
 	}
@@ -754,6 +800,56 @@ func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, m
 		return nil, nil, fmt.Errorf("full context-recovery re-plan at %d tokens cannot cover the measured %d MiB deficit", target, outcome.DeficitMB)
 	}
 	return next, nextArgs, nil
+}
+
+// holdExpertResidency re-imposes this launch's expert-residency floor on a
+// freshly recomputed plan.
+//
+// placement.Options has no residency input, so the floor cannot be requested
+// directly. ReplanAfterOOM is the existing mechanism for the same problem: it
+// shrinks a device's usable VRAM and re-runs the real packer, which moves
+// experts to the CPU on its own and keeps the sub-pin squeeze rather than
+// dropping whole layers blindly.
+//
+// The penalty goes to the device whose allocation failed, because that is the
+// card the plan has to give room back on. Returns the recomputed plan when it
+// restores the floor, and otherwise the original: a re-plan that still fits is
+// better than failing closed, and the caller's exact preflight remains the
+// authority either way.
+func holdExpertResidency(caps *detect.Capabilities, model *placement.ModelProfile, opts placement.Options, next *placement.Strategy, floorNCPUMoE, device int) *placement.Strategy {
+	if next == nil || floorNCPUMoE <= 0 || next.NCPUMoE >= floorNCPUMoE || device < 0 {
+		return next
+	}
+	perLayerMB := expertLayerVRAMMB(model)
+	if perLayerMB <= 0 {
+		return next
+	}
+	returned := floorNCPUMoE - next.NCPUMoE
+	// Report the attempt, not only the success. This guard previously printed
+	// only when the re-pack worked, so a failed ReplanAfterOOM returned the
+	// original plan in silence and was indistinguishable from a guard that never
+	// ran at all. Seven launches were inspected for evidence it had fired before
+	// that was noticed, including one whose n-cpu-moe visibly dipped
+	// (47 44 46 47 47 48) with nothing logged.
+	fmt.Fprintf(os.Stderr,
+		"[launch] re-plan returned %d expert layer(s) this launch had already moved to the CPU; re-packing CUDA%d to hold n-cpu-moe>=%d\n",
+		returned, device, floorNCPUMoE)
+	penalty := map[int]int{device: perLayerMB * returned}
+	held, err := placement.ReplanAfterOOM(caps, model, opts, penalty)
+	if err != nil || held == nil || held.NCPUMoE < next.NCPUMoE {
+		reason := "the re-pack did not fit"
+		if err != nil {
+			reason = err.Error()
+		} else if held != nil {
+			reason = fmt.Sprintf("the re-pack returned n-cpu-moe=%d, below the recomputed %d", held.NCPUMoE, next.NCPUMoE)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[launch] could not hold expert residency (%s); keeping the recomputed placement at n-cpu-moe=%d\n",
+			reason, next.NCPUMoE)
+		return next
+	}
+	fmt.Fprintf(os.Stderr, "[launch] held expert residency at n-cpu-moe=%d\n", held.NCPUMoE)
+	return held
 }
 
 func automaticContextRequest(req *launchRequest) bool {
