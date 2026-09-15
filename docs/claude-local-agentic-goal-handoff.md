@@ -951,11 +951,14 @@ fell into twice. Everything below is runnable the moment there is headroom.
 `~/ggrun-project` (289 GiB, mostly models and `.src` build trees) there is
 probably the cheapest fix, but it is a storage-layout decision for the user.
 
-### Platform coverage, settled 2026-09-15
+### Platform scope, settled 2026-09-15
 
-The user has ruled on the two platform rows rather than leaving them open:
-**macOS is deprecated** and retired from the matrix, and **Windows GPU is
-deferred** to a later session. Neither blocks milestone 5.
+**Linux is the main goal.** The user has scoped the platform matrix: Linux is
+the target, **macOS is deprecated** and retired, and **Windows GPU is deferred**
+to a later session. Neither of the latter blocks milestone 5.
+
+Read this before planning work: effort belongs on the Linux path — CPU and real
+GPU, install through serving — not on widening the matrix.
 
 That closes the release-validation matrix for this work: Linux CPU and Linux
 real-GPU are green on the merged candidate, Windows install/reinstall/generate
