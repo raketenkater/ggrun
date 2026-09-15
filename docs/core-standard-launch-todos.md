@@ -2920,3 +2920,41 @@ Four diagnoses, three wrong:
 Every wrong one came from reading a summary line or a partial reproduction. The
 sub-second reproduction in `SLOTREPRO` is what finally made the real list
 visible; it should be the first move next time, not the fourth.
+
+## SLOTOPEN — the slot lever is open, and the optimizer picks it — 2026-09-15
+
+With baseline KV placement held for slot candidates, the same Claude Code launch
+that reported `parallel 4..4` in every earlier run now reports:
+
+```
+[optimize] calculated 8 candidates (8 feasible, 0 exact):
+           batch 128..2048, ubatch 64..512, parallel 1..4, 2 topology shape(s)
+[optimize] calculated finalist parallel-2: predicted relative 2.238,
+           bottleneck CPU expert bandwidth, confidence low; live agent workflows decide
+```
+
+Two changes from every previous run: the boundary spans **`parallel 1..4`**
+rather than a single pinned value, and the predicted finalist is a **slot
+candidate**. The optimizer, given the lever, immediately nominates fewer slots.
+
+### The full chain, four fixes deep
+
+| # | defect | status |
+|---|---|---|
+| 1 | `sameCalibrationResidency` compared **total** context, which every slot candidate changes | fixed |
+| 2 | candidates inherited the base's total, so `parallel-1` asked for a full window of KV on one slot — infeasible | fixed by scaling to hold per-agent context |
+| 3 | that scaling was gated on `base.ContextAuto`, which a Claude Code base carries as **false** | fixed; the gate is `opts.AutoContextMax` |
+| 4 | the packer spent the freed KV on experts and moved the cache to the **host**, which the residency guard rightly refuses | fixed by holding the baseline's KV placement |
+
+Only #4 was ever visible from a log line. The first three were each found by
+reproducing the candidate list directly (`SLOTREPRO`), which runs in under a
+second against real capabilities and the real model.
+
+### Not yet established
+
+The finalist is *predicted*, at `confidence low`, and the launch is measuring it
+now. Nothing here shows `parallel-2` wins. The phase guard that rejected
+`ubatch-512` for a 38% decode regression applies unchanged, and `REVIEWLANE`
+showed concurrency has real value — with a companion seated, reviews leave the
+main model's slots entirely, so fewer main slots may cost less than it appears.
+Both outcomes are informative and neither is assumed here.
