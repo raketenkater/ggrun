@@ -6848,6 +6848,32 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 //
 // This does NOT relax the compute-buffer cache either -- slot count really does
 // change that measurement.
+// backendDeclaresExpertCache reports whether a backend identity string declares a
+// GPU-resident expert cache. ggrun records the cache size in the probe key line
+// as a "hot-experts=N" suffix on the backend value, so the declaration travels
+// with the measurement.
+//
+// It is used to keep a cache-carrying backend's allocation from being read as
+// runtime graph growth by a backend that runs no cache. A zero-size cache counts
+// as no cache.
+func backendDeclaresExpertCache(backend string) bool {
+	idx := strings.Index(backend, "hot-experts=")
+	if idx < 0 {
+		return false
+	}
+	rest := backend[idx+len("hot-experts="):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return false
+	}
+	n := 0
+	fmt.Sscanf(rest[:end], "%d", &n)
+	return n > 0
+}
+
 func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, backendTag string) map[int]int {
 	if model == nil || cacheDir == "" {
 		return nil
@@ -6873,6 +6899,7 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 		var par int
 		fileSchema := 1
 		matched := false
+		var entryBackend string
 		hasEstimate := map[int]bool{}
 		growth := map[int]int{}
 		for _, line := range lines {
@@ -6897,6 +6924,8 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 						sig = strings.TrimPrefix(kv, "gpu_sig=")
 					case strings.HasPrefix(kv, "parallel="):
 						fmt.Sscanf(strings.TrimPrefix(kv, "parallel="), "%d", &par)
+					case strings.HasPrefix(kv, "backend="):
+						entryBackend = strings.TrimPrefix(kv, "backend=")
 					}
 				}
 			}
@@ -6924,6 +6953,25 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 			}
 		}
 		if !matched {
+			continue
+		}
+		// Graph growth is model-graph state, so the backend match is relaxed
+		// above. A backend FEATURE allocation is not: an expert cache is memory
+		// a particular build reserves on its own account, and carrying it to a
+		// build that runs no cache reserves gigabytes for something that will
+		// never be allocated.
+		//
+		// Measured on GLM-5.3-Flash 2026-09-15: a probe recorded under
+		// backend=glm-5-3-flash-hot-experts|hot-experts=14 carried 6,406 MiB on
+		// CUDA1 into stock-backend launches. Total reserve across three cards was
+		// 11,272 MiB against 76 MiB of growth observed under a 170k-token prompt,
+		// exiling four to five expert layers to host RAM on a model whose own
+		// bottleneck diagnosis reads "CPU expert bandwidth".
+		//
+		// This does not tighten the backend match, which would strand cold
+		// launches the relaxation exists to protect. It requires only that the
+		// recording and consuming backends agree on whether a cache is running.
+		if backendDeclaresExpertCache(entryBackend) != backendDeclaresExpertCache(backendTag) {
 			continue
 		}
 		// Same reasoning as loadProbeCache: an ungated growth figure carried

@@ -4229,3 +4229,57 @@ ggrun was "declining to spend memory it has". That was measured from
 packer spends everything it is allowed to; the reserve is what holds the memory
 back, the reserve is mis-sized, and the mis-sizing is a stale cross-config
 maximum that the existing heal path cannot reach.
+
+## RESERVEFIX — reclaiming the reserve proves the objective defect — 2026-09-15
+
+Implemented the narrow guard: `RelatedModelRuntimeGraphGrowth` no longer carries
+a measurement between backends that disagree on whether a GPU expert cache is
+running. It does **not** tighten the backend match generally, which the
+relaxation exists to protect; it requires only that the recording and consuming
+backends agree on that one declared feature.
+
+`backendDeclaresExpertCache` reads the `hot-experts=N` suffix ggrun already
+writes into the probe key line, so the declaration travels with the measurement.
+A declared cache of zero counts as no cache. Six name shapes and the symmetry
+property are pinned in `runtime_reserve_test.go`; uncached
+`scripts/verify-core-engine.sh` green on all six packages.
+
+### Measured effect, GLM-5.3-Flash, same command before and after
+
+| | before | after |
+|---|---:|---:|
+| runtime reserve CUDA0 | 4,007 | 4,007 |
+| runtime reserve CUDA1 | **6,406** | **2,842** |
+| runtime reserve CUDA2 | **859** | **530** |
+| total reserve | **11,272 MiB** | **7,379 MiB** |
+| context fit | 538,624 tokens | **670,720 tokens** |
+| `n-cpu-moe` | 42-43 of 48 | **42-43 of 48** |
+
+**3,893 MiB reclaimed on the first launch.** CUDA0's 4,007 survives because it
+comes from a different probe that does not declare a cache, so the guard
+correctly leaves it alone — the fix removes what is provably foreign, not
+everything large.
+
+### And the memory went to the wrong place
+
+Expert residency did not move: still 42-43 of 48 layers on the host, one expert
+layer on GPU. The planner spent every reclaimed byte on **context**, growing the
+window 24.5% on a model whose own bottleneck diagnosis reads "CPU expert
+bandwidth" and whose context was already half a million tokens.
+
+So this fix, on its own, **does not make GLM faster.** It removes a bogus reserve
+and hands the memory to the fit-maximising behaviour that `CTXSTEP` and
+`CTXREPEATS` already showed costs throughput.
+
+That is the clearest demonstration yet of the core objective's defect. Freeing
+memory is not enough while the planner's objective is capacity: give it room and
+it buys window, never residency, because nothing in the decision asks which one
+serves the workload faster. **Two independent memory findings now converge on the
+same missing objective function.**
+
+### What would complete it
+
+The reclaimed 3.9 GiB is about one and a half expert layers at GLM's ~2.5 GiB per
+layer — real but modest. The larger prize needs the planner to weigh residency
+against context for a host-offloaded MoE, which is the objective change recorded
+at the top of the handoff and not attempted here.
