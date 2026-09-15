@@ -904,6 +904,53 @@ work, so its 19% context cost over the 2B has no measured benefit.
 5. The residency ratchet in PR #62 **has never executed**. It is gated and
    tested; it is not demonstrated to fix anything.
 
+### RETRACTION — every Claude Code agent-suite number above is contaminated
+
+Read this before acting on any throughput figure in this record. Detail in
+`HARNESSKILL` and `PTYFIX`.
+
+`--claude-code` starts the backend and then opens the Claude Code client. Driven
+from a script with no TTY the client refuses to start, ggrun exits, and its
+shutdown handler stops the backend **mid-suite**. Task-level evidence from the
+four-slot arm: two tasks whose **oracle passed** came back as "Remote end closed
+connection", and the third got "Connection refused". Those runs timed a
+teardown, not a configuration.
+
+Retracted:
+
+- **"Claude Code mode costs two thirds of the throughput"** (2.42 against 7.63).
+  The plain-serving side is sound; the Claude Code side is not.
+- The three-seat comparison, 2.44 / 2.49 / 2.27. Treat as invalid, not merely
+  inseparable.
+- Slot-width throughput.
+
+Still standing, because it is read from the launch plan rather than from
+completed tasks:
+
+- resident expert layers by slot width, **25 / 21 / 9** for 1 / 2 / 4 slots, and
+  four slots also getting *less* per-agent context (207,360 against 261,632);
+- `SEATCOST`'s seat prices and every `n-cpu-moe` trace;
+- `REVIEWLANE`, which completed in seconds with zero errors and whose route
+  counts come from the router's own metrics. **The recommendation to seat the
+  review-only companion survives.**
+
+**The measurement path is fixed.** Driving the launcher under a pty
+(`script -qec`) keeps the client alive; verified alive 90 s past ready with the
+client error absent, and the first clean run through Claude Code mode returned
+3 of 3 tasks at 2.688 correct tasks/min. The retracted comparisons are now
+runnable and should be re-run before any of those claims return.
+
+### Blocked on disk, not on knowledge
+
+The root filesystem is at 100% — 158 MiB free of 456 GiB. Measurements taken
+under that pressure are untrustworthy: `ENOSPC` during a launch surfaces as
+failures that resemble unrelated defects, which is the trap this session already
+fell into twice. Everything below is runnable the moment there is headroom.
+
+`~/2tb-disk` is a separate 1.9 TiB volume with **574 GiB free**; moving part of
+`~/ggrun-project` (289 GiB, mostly models and `.src` build trees) there is
+probably the cheapest fix, but it is a storage-layout decision for the user.
+
 ### Milestone 5 coverage, final for this session
 
 | path | state |
