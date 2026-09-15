@@ -805,7 +805,7 @@ proof that an older release contains these fixes.
 | Linux CPU install, download, generate, cancel, shutdown, port release | green | `install-e2e` linux |
 | Windows install, reinstall preserving config, generate | green | `install-e2e` windows |
 | Linux real-GPU serving | **green on the merged candidate** `0a66834` (run 34898139305: linux, windows, gpu all success) | `install-e2e` gpu |
-| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false | — |
+| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false. The only milestone-5 item still open, and it needs hardware rather than effort. | — |
 | macOS | **untested**, lower priority for this work | — |
 
 Model coverage on this machine, all on the installed single binary
@@ -950,6 +950,50 @@ fell into twice. Everything below is runnable the moment there is headroom.
 `~/2tb-disk` is a separate 1.9 TiB volume with **574 GiB free**; moving part of
 `~/ggrun-project` (289 GiB, mostly models and `.src` build trees) there is
 probably the cheapest fix, but it is a storage-layout decision for the user.
+
+### Re-measured after the disk was freed — what replaced the retraction
+
+The pty fix made Claude Code mode measurable; the retracted comparisons were
+then re-run properly. Every arm below completed 3 of 3, where the retracted runs
+managed 0 to 2. Detail in `SLOTCLEAN`, `SEATCLEAN`, `GLMSEAT`, `MINICPM`.
+
+**Slot widths** (Flash-Next, reviewer seated, per-agent context matched at
+262,144):
+
+| slots | resident experts | correct tasks/min | median |
+|---:|---:|---:|---:|
+| 1 | 23 of 48 | 4.02 | 30.8 s |
+| 2 | 17 | 3.02 | 32.9 s |
+| 4 | **1** | 3.41 | **26.5 s** |
+
+**The four-slot penalty was the teardown, not the plan.** Four slots runs 18%
+below one slot, not the 3x originally reported, and has the best median latency.
+The ordering is non-monotone, so no slot width is promoted — but the catastrophic
+penalty claim is positively contradicted, which makes PR #62's slot work an
+optimizer completeness fix rather than a fix for a known performance bug.
+
+This also **qualifies RESIDENCYFRACTION**: 23x fewer resident experts costs under
+a fifth of throughput at matched per-agent context. Residency dominates across
+models far more than within one.
+
+**Seats** (same model and suite): 2.84 / 2.81 / 2.76 correct tasks/min for
+`off` / `qwen2b` / `qwen` — a 2.8% spread, indistinguishable, and not a ranking.
+The durable difference is capacity: the 4B seat costs 21% of per-agent context,
+the 2B costs none. `REVIEWLANE` still answers the other question, and the
+recommendation to seat `qwen2b` stands.
+
+**Hardest real configuration works.** GLM-5.3-Flash (2.86x over VRAM) with a
+reviewer seated plans, loads and serves: 809,984 tokens across 4 slots,
+converging in one derate round.
+
+**MiniCPM5-2B rejected.** 0 of 4 valid verdicts, twice, including with the
+router's stop sequence. Fast but always prefaces with prose containing both
+tags. Not wired; no `ModelSpec` added.
+
+**Residency ratchet**: mechanism verified by test
+(`re-packed n-cpu-moe 23 -> 25`); the live oscillation has not recurred in nine
+launches across three configurations and two models. Correct guard, rare
+trigger, and instrumented since `RATCHETOBS` to report its attempts.
 
 ### Milestone 5 coverage, final for this session
 
