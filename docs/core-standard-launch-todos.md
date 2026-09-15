@@ -3383,3 +3383,39 @@ The failure is prose-before-verdict, not an inability to produce the tags. An
 assistant prefill forcing the reply to begin with `<block>` would likely pull it
 into the contract. That is a router change affecting every reviewer, so it needs
 its own evidence rather than being bolted on for one candidate.
+
+## GLMSEAT — the tightest real configuration serves — 2026-09-15
+
+GLM-5.3-Flash (2.86x over VRAM) with a reviewer seated, on the pty path. This is
+the hardest configuration this machine can be asked for: a tight-fit model plus
+a companion's 1.4 GiB.
+
+| | |
+|---|---|
+| plan | 809,984 tokens total, 4 slots (~202k per agent) |
+| preflight | converged in **one** derate round, `n-cpu-moe=43` |
+| `EXPERTPIN` guard | fired on the measured recompute (fifth independent confirmation) |
+| agent suite | 2 of 3 tasks, 0.65 correct tasks/min, 96.7 s median |
+
+The failing task is a genuine wrong answer (`oracle=False`) with **no connection
+error** — the pty path is behaving, and this is the model being wrong rather than
+the harness dropping requests. On the old path this would have been
+indistinguishable from a teardown.
+
+0.65 correct tasks/min is slow, which matches everything already recorded about
+GLM on this rig. The point of this run is that the configuration is *reachable*:
+a 2.86x-over-VRAM model with a companion seated plans, loads, and serves.
+
+### The residency ratchet, closed out honestly
+
+`n-cpu-moe` trace: **`43`**. One round, one value, nothing handed back — so there
+is no oscillation for `holdExpertResidency` to guard.
+
+Across nine launches spanning three configurations and two models, the
+oscillation recorded in `SLOTDROP` (`46 40 44 45 46 44 45`) has not recurred.
+The guard is correct, gated, covered by tests, and since `RATCHETOBS` it reports
+its attempts rather than failing silently. It targets a state that occurs rarely.
+
+That is the accurate status: **not unverified through neglect, and not proven
+either**. It is a correct guard for a rare condition, and the instrumentation now
+means the next occurrence will say so unambiguously in the log.
