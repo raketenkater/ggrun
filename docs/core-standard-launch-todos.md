@@ -3338,3 +3338,48 @@ lane: the seat is the difference between reviews working and reviews failing.
 MoE.** It costs no per-agent context, it is free on this workload, and it is
 decisive the moment reviews and foreground work overlap — which is the normal
 Claude Code pattern of one classifier request per tool call.
+
+## MINICPM — a reviewer candidate that fails the verdict contract — 2026-09-15
+
+`openbmb/MiniCPM5-2B` surfaced as a possible alternative to the pinned
+Qwen3.5-2B review seat. Tested before any wiring, because a reviewer that cannot
+produce the verdict format fails **invisibly**: every review is rejected, falls
+back to the main model, and the only trace is `reviewer-rejected/invalid-verdict`
+in the metrics log, while the seat still costs VRAM that on an offloaded MoE is
+expert layers.
+
+Artifact: `bartowski/MiniCPM5-2B-GGUF`, `Q4_K_M`, 1,615,826,144 bytes, fetched
+with `ggrun download`. The base `openbmb/MiniCPM5-2B` repo is Safetensors, and
+ggrun's downloader reports that and points at the GGUF repo rather than failing
+obscurely.
+
+| prompt | result | latency |
+|---|---|---|
+| marker + "answer with `<block>yes/no</block>`" | **0 of 4 valid** | 109-176 ms |
+| terser instruction + `</block>` stop sequence | **0 of 4 valid** | 81-138 ms |
+
+Fast enough — comparable to the seated Qwen3.5-2B — but it never emits a bare
+verdict. Every reply opens with prose restating the instruction:
+
+```
+"We are asked to respond with exactly one token sequence: <bl..."
+```
+
+That prose contains **both** tags, so `validReviewerVerdict`'s `yes + no == 1`
+check rejects it. Correctly: a reviewer that says both has decided nothing. The
+stop sequence does not help, because the prose precedes the verdict rather than
+trailing it.
+
+**Not adopted.** No `ModelSpec` was added and the artifact stays out of the
+pinned reviewer cache.
+
+This is the first real candidate to exercise the `invalid-verdict` versus
+`unusable-response` split in the metrics, and it earned its keep: without that
+distinction this model would have looked exactly like an absent reviewer.
+
+### What would change the answer
+
+The failure is prose-before-verdict, not an inability to produce the tags. An
+assistant prefill forcing the reply to begin with `<block>` would likely pull it
+into the contract. That is a router change affecting every reviewer, so it needs
+its own evidence rather than being bolted on for one candidate.
