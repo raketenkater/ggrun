@@ -3529,3 +3529,56 @@ what fits, is an unexplored direction that this measurement makes concrete.
   does not measure reasoning quality over a long working set.
 - Deepest measured is 168k against a 262k served plan. The top of the window is
   still untested.
+
+## CTXCOST — the planner maximises context it is not asked to use — 2026-09-15
+
+`LONGCTX` measured what depth costs. This measures what that costs **agent
+work**: the same model and suite at the planner's automatic window versus an
+explicit small one.
+
+Qwen3.8-27B-UD-Q4_K_XL, plain serving, `--calibrate off`, one slot, same suite
+(`ab35d682`), both arms 3 of 3.
+
+| context | correct tasks/min | median task | max |
+|---:|---:|---:|---:|
+| 262,144 (automatic) | 9.84 | 13.86 s | 14.73 s |
+| **32,768 (explicit)** | **11.12** | **12.18 s** | 13.09 s |
+
+**A context eight times smaller serves agent work 13% faster**, and the suite's
+prompts fit comfortably in both. The larger window is not being used by this
+workload; it is being paid for.
+
+### Why this is a planner question, not a user question
+
+ggrun's automatic context fit maximises the window that fits in memory. Nothing
+in that decision asks what the workload will actually use, so on a resident model
+with spare VRAM it buys the largest window available and charges its KV cost to
+every turn. `LONGCTX` shows the window genuinely works when used — 168,085
+tokens with mid-context recall intact — so this is not a capability problem. It
+is a default that optimises the wrong quantity for agent serving.
+
+The contract forbids *silently reducing* useful per-agent context, and rightly.
+But maximising it by default is the opposite error, and the cost is now measured
+rather than assumed.
+
+### The lever that does not exist
+
+No candidate family moves context. `CalibrationCandidates` offers batch, ubatch,
+slots, topology and KV placement; the window is fixed input to all of them. So
+the optimizer cannot discover the 13% that an explicit `--ctx-size 32768` finds
+by hand, on the model this rig recommends for agent work.
+
+That is the same class of gap as the slot lever in `SLOTOPEN`: a coordinate the
+planner controls, that measurably matters, and that the search cannot reach.
+
+### Honest limits
+
+- One model, one run per arm, three short repair tasks. 13% on single runs with
+  no established noise floor is suggestive, not promotable.
+- 32,768 was chosen as a round number, not searched. The useful ceiling for this
+  workload is unmeasured, and a real agent session with a large project prefix
+  would sit somewhere between these two points.
+- A log wart found on the way: `[placement] context fit: 262144 tokens` still
+  prints when `--ctx-size 32768` is given. The served window is correct — `/props`
+  reports `n_ctx=32768` — but the planning line reads as though the override were
+  ignored.
