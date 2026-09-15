@@ -3929,3 +3929,60 @@ The caveat is scope: one model, one machine, one session shape. The mechanism
 but the magnitude is specific to a resident model with spare VRAM. An offloaded
 MoE, where the window competes with expert residency rather than batch shape,
 may behave differently and is not tested here.
+
+## REALCLIENT — Claude Code fixing a real repository through ggrun — 2026-09-15
+
+The direction review's longest-standing gap: "real client, substantial
+multi-turn repository context". Five synthetic probes narrowed it without
+closing it. `claude -p` closes it — a real client, real tools, a real git
+repository, and a task with an objective pass condition.
+
+### Setup
+
+A Go package with two deliberately broken functions and a passing-by-construction
+test file that must not be edited: `Ceiling` did integer division instead of
+rounding up, `Clamp` ignored its bounds. `go test ./...` failed before the run.
+
+Served: Qwen3.8-27B, `--claude-code --claude-reviewer qwen2b --ctx-size 32768`,
+router on an ephemeral port, backend kept alive by the pty from `PTYFIX`.
+
+Client: `claude -p "<task>" --permission-mode acceptEdits --max-turns 20`, with
+ggrun's own aliases (`ANTHROPIC_MODEL=local`, base URL pointed at the router).
+
+### Result
+
+**The task was completed.** `calc.go` gained 13 lines, the test file was left
+untouched as instructed, and `go test ./...` passes — both tests green, verified
+independently after the session.
+
+Router metrics for the session:
+
+| | |
+|---|---|
+| requests | **23** |
+| routes | `main: 22`, `reviewer: 1` |
+| statuses | **200 x 23** — no errors, no fallbacks |
+
+So the full integration works end to end: tool calls, file edits, test
+execution, a seated reviewer answering on its own route, and every request
+served without a single non-2xx.
+
+### What this establishes that the probes could not
+
+- The **client** integration works, not just the serving path. `MULTITURN` had
+  narrowed the gap to exactly this and could go no further.
+- **Worker/reviewer routing under a real session**: one classifier request was
+  issued and the seated 2B answered it. That is a small sample, but it is real
+  traffic rather than the synthetic marker used in `REVIEWLANE`.
+- **Task-level correctness**, the outcome the review asked for: not token rates
+  or route counts, but whether the agent fixed the code. It did.
+
+### Honest limits
+
+- One task, one run. The task is small — two functions — and a longer session
+  would exercise context growth and rework that this does not.
+- Only **one** review request in 23, so worker success and rework counts remain
+  effectively unmeasured. A session with more tool calls would issue more
+  classifier traffic and is the natural next step.
+- A cosmetic `unrecognized_model` warning appears for `local` during session
+  title generation. It does not affect the run, but it is noise a user sees.
