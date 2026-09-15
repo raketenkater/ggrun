@@ -805,7 +805,7 @@ proof that an older release contains these fixes.
 | Linux CPU install, download, generate, cancel, shutdown, port release | green | `install-e2e` linux |
 | Windows install, reinstall preserving config, generate | green | `install-e2e` windows |
 | Linux real-GPU serving | **green on the merged candidate** `0a66834` (run 34898139305: linux, windows, gpu all success) | `install-e2e` gpu |
-| Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false. The only milestone-5 item still open, and it needs hardware rather than effort. | — |
+| Windows GPU | **deferred by the user, 2026-09-15** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false. To be tested another time; not blocking this milestone. | — |
 | macOS | **untested**, lower priority for this work | — |
 
 Model coverage on this machine, all on the installed single binary
@@ -951,6 +951,17 @@ fell into twice. Everything below is runnable the moment there is headroom.
 `~/ggrun-project` (289 GiB, mostly models and `.src` build trees) there is
 probably the cheapest fix, but it is a storage-layout decision for the user.
 
+### Platform coverage, settled 2026-09-15
+
+The user has ruled on the two platform rows rather than leaving them open:
+**macOS is deprecated** and retired from the matrix, and **Windows GPU is
+deferred** to a later session. Neither blocks milestone 5.
+
+That closes the release-validation matrix for this work: Linux CPU and Linux
+real-GPU are green on the merged candidate, Windows install/reinstall/generate
+is green, Windows GPU is deferred by decision, and macOS is out of scope. A
+future session should not re-open these as outstanding work.
+
 ### Re-measured after the disk was freed — what replaced the retraction
 
 The pty fix made Claude Code mode measurable; the retracted comparisons were
@@ -1004,7 +1015,7 @@ trigger, and instrumented since `RATCHETOBS` to report its attempts.
 | Windows install / reinstall / generate | green |
 | **Linux real GPU on the merged candidate** | **green** — run 34898139305 on `0a66834` |
 | Windows GPU | **untested** — runner offline, `GGRUN_GPU_RUNNER_WINDOWS` false |
-| macOS | **untested**, lower priority |
+| macOS | **deprecated, 2026-09-15** — the user has retired this platform from the matrix. Do not spend effort here. |
 | Resident / offloaded-MoE / tight-fit models | all three launched and served |
 
 Windows GPU and macOS cannot be closed from this machine. They are reported
