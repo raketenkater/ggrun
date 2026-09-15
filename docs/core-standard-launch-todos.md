@@ -4509,3 +4509,54 @@ serve agent work faster on a host-offloaded MoE?
 Not run here. It is a placement-policy change gated behind a measured decision,
 and reversing such a decision needs its own matched evidence rather than a
 tail-end edit.
+
+## RESERVEFIX-REGRESSION — the reclaimed memory produced an unservable plan — 2026-09-15
+
+**`RESERVEFIX` is reported wrongly in this ledger and must not be trusted as
+written.** It was recorded as a success after reading the preflight ledger. The
+launch was never checked for serving. It does not serve.
+
+| run | context planned | served |
+|---|---:|---|
+| before the fix | 538,624 | **yes** |
+| after the fix | 670,720 | **no** — `Aborted (core dumped)`, exit 134 at 96% warm-up |
+| calibration run | 617,472 | yes |
+| baseline re-attempt | 670,720 | **no** — same abort |
+
+Reclaiming 3,893 MiB of growth reserve did not leave the plan safer. The planner
+immediately spent the freed memory on a larger context window, and that window
+does not survive backend warm-up. The boundary sits between 617,472 (serves) and
+670,720 (aborts).
+
+### What this shows about the reserve
+
+The reserve was genuinely over-sized **for graph growth** — 11,272 MiB held
+against 76 MiB observed, and the probe carrying it came from a hot-experts
+backend, both of which remain true. It was nonetheless **load-bearing in
+practice**, because the planner's fit objective converts any freed VRAM directly
+into context. Memory held back by a pessimistic reserve was doing a second job
+nobody designed it for: capping a context the plan cannot actually run.
+
+That is the fit-not-outcome defect biting in the opposite direction from
+everywhere else in this record. Elsewhere it wastes speed; here it turns a
+memory-accounting fix into a launch failure.
+
+### Consequences
+
+- **`RESERVEFIX` must not ship as it stands.** The backend guard is correct in
+  isolation and unsafe in composition with a fit-maximising planner.
+- The earlier claim that GLM "leaves 24-30% of VRAM unused" and that 11 GiB was
+  recoverable is now doubly corrected: it is a reserve (already recorded), and
+  reclaiming it without changing the objective produces a plan that aborts.
+- `CTXLEVERLIVE` and `CTXSTRAND` were measured on builds carrying this change.
+  Their candidate-generation findings stand, since they are read from plans
+  rather than from serving, but any timing measured on a 670,720 plan would be
+  invalid — none was taken, because the server never came up.
+
+### The process failure, stated plainly
+
+A preflight ledger is a plan, not an outcome. Reading "placement fits" and
+reporting a reclaim as verified skipped the only check that mattered: whether
+`Press Ctrl+C to stop` ever appeared. Four GLM launches in this session are now
+labelled SERVED / NOT-SERVED above, and that column should have been the first
+thing recorded for each, not the last.
