@@ -4448,3 +4448,64 @@ pinning — which `RelatedModelRuntimeGraphGrowth`'s own comments show the codeb
 already prices for partial `gate_up|up_gate|gate|up` pins — or rebalancing the
 tensor split so the room accumulates on one card instead of three. Neither is
 attempted here; both are now pointed at by a measurement rather than a guess.
+
+## STRANDBYDESIGN — the stranded VRAM is a measured trade, not a defect — 2026-09-15
+
+`CTXSTRAND` found ~4.9 GiB of freed VRAM stranding on two of three cards because
+no whole expert layer fits. The obvious fix — sub-layer pins — **already exists
+and is deliberately disabled**:
+
+```go
+// Automatic partial expert projection pins are intentionally disabled. Live
+// parallel-4 benchmarks showed that gate+up-only packing raised serial decode
+// 2.4% but reduced prompt-heavy aggregate throughput 17-19% because every
+// partial layer adds a CPU/GPU boundary. Keep the parser/cache support for
+// explicit or legacy plans, but the general planner emits complete expert
+// layers only until a topology-aware benchmark can prove partial pins faster.
+const enableAutomaticSubLayerExpertPins = false
+```
+
+`packGateUpChunks` and `buildOTStringWithSubPins` are present and wired; only the
+constant gates them.
+
+So the stranding is the **price of a decision that was measured**: whole layers
+cost idle VRAM and avoid a per-layer CPU/GPU boundary that cost 17-19% of
+prompt-heavy throughput. That is a real trade, made on evidence, and it is the
+correct default on the workload it was measured against.
+
+### This corrects CTXSTRAND's framing
+
+`CTXSTRAND` called whole-layer granularity "the binding constraint" and pointed
+at sub-layer pinning as an unexplored lever. It is not unexplored — it was
+explored, measured, and switched off with the reason recorded in the code. The
+constraint is real; calling it an oversight was wrong.
+
+### The condition for revisiting is stated, and this session's workload differs
+
+The comment names its own reopening condition: *"until a topology-aware benchmark
+can prove partial pins faster"*. The measurement that closed it was **parallel-4
+and prompt-heavy**. The agent workload measured throughout this session is
+neither: one slot, ~99.6% prefix reuse, and turns dominated by decode rather than
+prompt ingestion (`MULTITURN`, `LONGFORM`).
+
+A partial pin costs a CPU/GPU boundary on every token of prompt ingestion and
+pays back on decode. The original benchmark loaded the side that loses; an
+agent session loads the side that gains — and the +2.4% serial decode figure was
+already positive.
+
+So the honest position is not "sub-pins are wrong" nor "sub-pins would help", but
+that **the existing evidence does not cover the workload this project now
+optimises for**, and the constant's own condition invites exactly that
+measurement.
+
+### The experiment that would settle it
+
+Build with `enableAutomaticSubLayerExpertPins = true`, serve GLM-5.3-Flash, and
+run the long-form multi-turn session against the current build, matched repeats,
+discarding the cold first run per `CTXREPEATS`. That reads directly on the
+question: does converting ~4.9 GiB of stranded room into partial expert residency
+serve agent work faster on a host-offloaded MoE?
+
+Not run here. It is a placement-policy change gated behind a measured decision,
+and reversing such a decision needs its own matched evidence rather than a
+tail-end edit.
