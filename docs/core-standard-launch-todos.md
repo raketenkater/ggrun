@@ -3720,3 +3720,48 @@ searched coordinate rather than a maximised one.
   workload is still unmeasured.
 - Synthetic prefix and scripted turns. A real client with tool calls is still
   the open item.
+
+## CTXFLOOR — a searched context ceiling needs a floor, and my variance is 5% — 2026-09-15
+
+`LONGFORM` argued context should be a searched coordinate rather than a
+maximised one. Searching it turned up two corrections to that framing before the
+sweep even finished.
+
+Same six-turn long-form session, Qwen3.8-27B, one slot, windows swept.
+
+| ctx | turns completed | correct | session |
+|---:|---:|---:|---:|
+| 16,384 | **5 of 6** | 5 / 5 | 130.27 s |
+| 32,768 | 6 of 6 | 6 / 6 | 151.55 s |
+
+### "Smaller is faster" needs a floor
+
+At 16,384 the session **truncated**: the prefix is ~11.9k and each turn adds
+roughly 900 tokens of question plus answer, so the conversation outgrows the
+window partway through. It looked fastest because it did less work — five turns
+instead of six.
+
+A searched ceiling therefore needs a workload-derived **floor**, not just a cost
+gradient. Prefix size plus expected conversation growth is the minimum; below it
+a smaller window silently drops turns rather than serving them faster. That is a
+more useful rule for a planner than "prefer smaller", and it is exactly the shape
+of failure the contract's "never silently reduce useful per-agent context" exists
+to prevent — reached here by choosing a ceiling too low rather than by derating.
+
+My own 32,768 was luckier than principled: 11.9k + six ~900-token turns lands
+near 17.3k, comfortably inside 32k and well over 16k.
+
+### Single-run variance is about 5%
+
+The same 32,768 configuration measured **144.42 s** in `LONGFORM` and
+**151.55 s** here — same model, same session, same hardware, ~5% apart.
+
+That is a material fraction of the ~10% effect reported in `LONGFORM`, and it
+applies to every single-run comparison in this record. The direction that
+`CTXCOST` (13% on the task suite), `MULTITURN` (12% decode) and `LONGFORM` (10%
+on session) agree on still stands, because three independent measurements点 the
+same way. The **magnitude** does not: promoting a context policy on these numbers
+would be promoting noise plus signal without separating them.
+
+Matched repeats are the missing evidence, and they are cheap here — a six-turn
+session is about two and a half minutes once the model is loaded.
