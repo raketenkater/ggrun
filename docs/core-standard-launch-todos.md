@@ -3297,3 +3297,44 @@ What is solid is the negative: **no arm shows a catastrophic four-slot penalty**
 so the parallel-4 default is not the defect `CLAUDEMODE` made it look like, and
 the slot-candidate work in PR #62 is an optimizer completeness fix rather than a
 fix for a known performance bug.
+
+## SEATCLEAN — the seats, measured properly — 2026-09-15
+
+Replaces the `SEATARMS` figures that `HARNESSKILL` retracted. Same model, same
+suite (`ab35d682`), pty path, calibration off. **All three arms completed 3 of
+3**, where the retracted run managed 2, 2 and 2.
+
+| seat | per-agent ctx | `n-cpu-moe` | correct tasks/min | median | max |
+|---|---:|---:|---:|---:|---:|
+| `off` self-classify | 261,888 | 44 | **2.84** | 36.8 s | 38.6 s |
+| `qwen2b` review-only | **262,144** | 47 | 2.81 | 37.7 s | 50.4 s |
+| `qwen` worker+reviewer | **206,336** | 41 | 2.76 | 44.2 s | 52.6 s |
+
+### The seats are indistinguishable on this workload
+
+2.84 / 2.81 / 2.76 across a 2.8% spread, on single runs with no established
+noise floor. That is not a ranking and must not be read as one. The retracted
+figures said the same thing less reliably; this says it from runs that finished.
+
+**The durable difference is capacity, not speed.** The 4B worker seat costs 21%
+of per-agent context — 206,336 against 262,144 — while the 2B review-only seat
+costs none. On a window the contract forbids reducing silently, that is the
+result worth acting on.
+
+### Why this does not weaken REVIEWLANE
+
+This suite issues no classifier traffic, so the companion's review lane is idle
+in every arm. `REVIEWLANE` drove it — 8 classifier requests concurrent with 4
+foreground turns — and separated the arms decisively: self-classify completed
+3 of 8 reviews with six HTTP 502s, the seated 2B completed 8 of 8 at ~100 ms
+median and made foreground turns faster. Its route counts came from the router's
+own metrics and it finished in seconds, so it was never exposed to the teardown.
+
+The two results are consistent and answer different questions. Idle lane: the
+seat costs nothing measurable in throughput, and the 4B costs context. Loaded
+lane: the seat is the difference between reviews working and reviews failing.
+
+**The recommendation stands: seat `--claude-reviewer qwen2b` on an offloaded
+MoE.** It costs no per-agent context, it is free on this workload, and it is
+decisive the moment reviews and foreground work overlap — which is the normal
+Claude Code pattern of one classifier request per tool call.
