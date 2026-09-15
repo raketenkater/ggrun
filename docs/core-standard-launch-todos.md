@@ -4347,3 +4347,51 @@ that needs the live screen to run these candidates, and GLM's own screen budget
 has so far refused every challenger on admission. One expert layer of 48 is a
 small move; the value of this change is that the trade is now visible to the
 search at all.
+
+## CTXLEVERLIVE — the context candidate reaches the ladder and does not fit — 2026-09-15
+
+`CTXLEVER` made context a coordinate. This is its first live screen on GLM-5.3-Flash.
+
+```
+[calibrate] measuring ubatch-2048...
+[calibrate] ubatch-2048 failed to start (... CUDA1 (84372 MiB deficit) ...)
+[calibrate] measuring context-463872...
+[calibrate] context-463872 failed to start (... CUDA1 (2784 MiB deficit) ...)
+[calibrate] measuring kv-alternate...
+[calibrate] kv-alternate failed to start (... CUDA1 (3728 MiB deficit) ...)
+```
+
+**The candidate was generated, prioritised into the bounded ladder, and measured
+for admission.** The coordinate is reachable by the search, which is what
+`CTXLEVER` set out to establish and what `SLOTLEVER`/`SLOTOPEN` had to fix for
+slots.
+
+### It corrects the premise it was built on
+
+I expected a smaller window to need *less* VRAM and therefore to pass the
+admission that every ubatch challenger failed. It needed **more** on CUDA1.
+
+That is the trade working as designed: the freed KV is spent returning an expert
+layer to the GPU, and at GLM's ~2.5 GiB per layer that layer costs more on the
+receiving device than the context reduction frees there. **A candidate that
+trades context for residency is not a memory reduction; it is a
+redistribution**, and it must pass per-device admission like any other plan.
+
+The margin is also informative. `ubatch-2048` missed by **84,372 MiB** —
+arithmetically hopeless. `context-463872` missed by **2,784 MiB**, about one
+expert layer. The context lever is in the right order of magnitude where the
+batch lever never was.
+
+### What is still untried
+
+The generator offers 75% and 50% of the base window. The ladder reached the 75%
+candidate (463,872 of ~618k) and then moved to a different lever family, so the
+**50% candidate was never measured**. Given the 75% candidate missed by roughly
+one layer, the 50% one is the obvious next thing to try and may well fit.
+
+### Honest status against the core objective
+
+Reachable: yes, demonstrated. Admitted: no. Faster: unmeasured, and cannot be
+claimed. The objective at the top of the handoff stays open, with the gap now
+narrowed from "the planner cannot consider this" to "the first candidate it
+considers misses by about one expert layer".
