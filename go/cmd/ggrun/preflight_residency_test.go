@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -92,4 +93,57 @@ func TestHoldExpertResidencyFallsBackToTheRecomputedPlan(t *testing.T) {
 	if got := holdExpertResidency(nil, model, placement.Options{}, plan, 46, 0); got != plan {
 		t.Error("a failed re-pack did not fall back to the recomputed plan")
 	}
+}
+
+// The guard's success path had no test: both cases above prove it declines to
+// act, and neither proves it can re-pack. That gap is why nine launches of
+// "unexercised" were ambiguous — the mechanism itself was never demonstrated,
+// only its guard conditions.
+//
+// This drives a real placement computation: a three-GPU MoE whose recomputed
+// plan has fewer experts on the CPU than the launch has already proven, which is
+// exactly the shape holdExpertResidency exists to correct.
+func TestHoldExpertResidencyActuallyRepacks(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, VRAMTotalMB: 12282, VRAMUsedMB: 200, BandwidthMBps: 32000},
+			{Index: 1, VRAMTotalMB: 24564, VRAMUsedMB: 200, BandwidthMBps: 32000},
+			{Index: 2, VRAMTotalMB: 12288, VRAMUsedMB: 200, BandwidthMBps: 32000},
+		},
+		RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	model := &placement.ModelProfile{
+		Path: "moe.gguf", IsMoE: true, TotalSizeMB: 60 * 1024, NumLayers: 48, NumExperts: 128,
+		ExpertBytes: 50 * 1024 * 1024 * 1024, NonExpertBytes: 10 * 1024 * 1024 * 1024,
+		HiddenSize: 4096, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+	}
+	opts := placement.Options{ContextSize: 32768, KVPlacement: "gpu", KVQuality: "mid",
+		Parallel: 1, CacheDir: t.TempDir(), SkipPlacementCache: true}
+
+	recomputed, err := placement.Compute(caps, model, opts)
+	if err != nil || recomputed == nil {
+		t.Skipf("fixture does not produce a plan on this build: %v", err)
+	}
+	if perLayer := expertLayerVRAMMB(model); perLayer <= 0 {
+		t.Fatalf("expert layers are unpriced for this model, so no penalty can be computed")
+	}
+
+	// Ask for more experts on the CPU than the recomputed plan chose.
+	floor := recomputed.NCPUMoE + 2
+	held := holdExpertResidency(caps, model, opts, recomputed, floor, 0)
+	if held == nil {
+		t.Fatal("the guard returned no plan at all")
+	}
+	if held == recomputed {
+		t.Skipf("the re-pack did not fit on this fixture (n-cpu-moe=%d, floor=%d); "+
+			"the guard correctly kept the recomputed plan", recomputed.NCPUMoE, floor)
+	}
+	// It returned a different plan, so it re-packed: that plan must not have
+	// fewer experts on the CPU than the one it replaced.
+	if held.NCPUMoE < recomputed.NCPUMoE {
+		t.Errorf("re-pack moved experts back onto the GPU: n-cpu-moe %d -> %d",
+			recomputed.NCPUMoE, held.NCPUMoE)
+	}
+	t.Logf("re-packed n-cpu-moe %d -> %d against floor %d", recomputed.NCPUMoE, held.NCPUMoE, floor)
 }

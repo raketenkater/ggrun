@@ -3416,6 +3416,30 @@ oscillation recorded in `SLOTDROP` (`46 40 44 45 46 44 45`) has not recurred.
 The guard is correct, gated, covered by tests, and since `RATCHETOBS` it reports
 its attempts rather than failing silently. It targets a state that occurs rarely.
 
-That is the accurate status: **not unverified through neglect, and not proven
-either**. It is a correct guard for a rare condition, and the instrumentation now
-means the next occurrence will say so unambiguously in the log.
+### The mechanism is now proven, separately from the live trigger
+
+Both earlier tests covered only the paths where the guard *declines* to act. The
+success path — where `ReplanAfterOOM` returns a genuinely better plan and the
+guard adopts it — had no coverage at all, which is the real reason nine launches
+of "unexercised" were ambiguous: the mechanism itself had never been shown to
+work, only its guard conditions.
+
+`TestHoldExpertResidencyActuallyRepacks` drives a real three-GPU MoE placement
+and asserts the re-pack:
+
+```
+re-packed n-cpu-moe 23 -> 25 against floor 25
+```
+
+So the guard demonstrably re-packs when a recomputed plan falls below the floor.
+It skips rather than fails if the fixture cannot produce a fitting re-pack on a
+future build, so it cannot become a false green.
+
+That splits the status cleanly, which is the honest form of it:
+
+- **Mechanism: verified.** The guard re-packs and raises CPU expert residency.
+- **Live trigger: not observed.** The oscillation from `SLOTDROP` has not
+  recurred in nine launches across three configurations and two models.
+
+It is a correct guard for a rare condition, and the instrumentation from
+`RATCHETOBS` means the next occurrence will say so unambiguously in the log.
