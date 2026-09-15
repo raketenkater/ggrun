@@ -45,6 +45,23 @@ done
 for f in setup.sh setup-linux.sh setup-mac.sh; do
     [[ -f "$ROOT_DIR/$f" ]] && install -m 0755 "$ROOT_DIR/$f" "$PAYLOAD/$f"
 done
+# The three entry points above all exec scripts/setup-home.sh, which in turn
+# runs install.sh. Shipping the entry points without them produced an archive
+# whose documented command failed immediately:
+#
+#   setup-linux.sh: line 7: .../scripts/setup-home.sh: No such file or directory
+#
+# install-e2e never caught it because CI runs ./setup-linux.sh from the repo
+# checkout with LLM_INSTALL_RELEASE_DIR pointing at the archive — the installer
+# comes from source and only the payload comes from the artifact. A user who
+# downloads the release and follows the README takes the other path.
+install -d -m 0755 "$PAYLOAD/scripts"
+for f in scripts/setup-home.sh; do
+    [[ -f "$ROOT_DIR/$f" ]] || { echo "Error: $f missing; the release entry points cannot run without it." >&2; exit 1; }
+    install -m 0755 "$ROOT_DIR/$f" "$PAYLOAD/$f"
+done
+[[ -f "$ROOT_DIR/install.sh" ]] || { echo "Error: install.sh missing; setup-home.sh cannot run without it." >&2; exit 1; }
+install -m 0755 "$ROOT_DIR/install.sh" "$PAYLOAD/install.sh"
 [[ -f "$ROOT_DIR/install.ps1" ]] && install -m 0644 "$ROOT_DIR/install.ps1" "$PAYLOAD/install.ps1"
 
 install -m 0755 "$SERVER_BIN" "$PAYLOAD/bin/llama-server"

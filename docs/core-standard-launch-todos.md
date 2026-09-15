@@ -3821,3 +3821,60 @@ Three measurements agreed on a direction and I attached a mechanism to them that
 the data had not tested. The sweep that was meant to find an optimum found the
 explanation was wrong instead. A gradient and a step look identical at two
 points; they only separate at four.
+
+## RELEASEARTIFACT — the shipped archive could not install itself — 2026-09-15
+
+The direction review's last milestone-5 item is "final artifact/install proof".
+Building a release archive and installing from it found the archive broken.
+
+### The defect
+
+`scripts/package-release.sh` shipped three user entry points — `setup.sh`,
+`setup-linux.sh`, `setup-mac.sh` — and each does:
+
+```
+exec "$ROOT/scripts/setup-home.sh" linux "$@"
+```
+
+**The archive contained no `scripts/` directory and no `install.sh`.** Extracting
+a release and running the documented command produced:
+
+```
+setup-linux.sh: line 7: .../scripts/setup-home.sh: No such file or directory
+```
+
+### Why install-e2e could not catch it
+
+CI runs `./setup-linux.sh` **from the repo checkout** with
+`LLM_INSTALL_RELEASE_DIR` pointing at the artifact. The installer therefore comes
+from source and only the payload comes from the archive, so the path a user takes
+— extract the tarball, run the script inside it — is never exercised. The job
+passes on a tarball that cannot install itself.
+
+### The fix
+
+Packaging now ships `scripts/setup-home.sh` and `install.sh`, and **fails closed**
+if either is missing, matching the script's existing refusal to package a
+backend-only bundle. Rebuilt and verified end to end.
+
+### The proof, and two harness errors on the way
+
+A clean install from the rebuilt artifact into an empty prefix now succeeds:
+app home created, CUDA backend selected and unpacked, `ik_llama-server-cuda`
+symlinked, launcher wrapper written, and `ggrun --version` runs from the
+installed tree.
+
+Both earlier attempts failed for reasons that were mine, not the product's:
+
+1. **Asset name.** The installer resolves `ggrun-<platform>-<backend>.tar.gz`.
+   A differently named archive is not found locally, so it reached for a
+   published release and hung.
+2. **Missing `SHA256SUMS`.** With the right name it found the local bundle, then
+   fetched checksums from the published release and correctly rejected a
+   locally-built archive that did not match. **That is the installer behaving
+   properly** — it refuses a bundle whose checksum does not verify. Generating
+   `SHA256SUMS` beside the artifact completed the install.
+
+Worth keeping: the second failure looked exactly like a product defect and was
+a guard doing its job. The log line that settled it —
+`Checksum verification failed` — was one line above the error I first read.
