@@ -3765,3 +3765,59 @@ would be promoting noise plus signal without separating them.
 
 Matched repeats are the missing evidence, and they are cheap here — a six-turn
 session is about two and a half minutes once the model is loaded.
+
+## CTXSTEP — the context cost is a batch-shape step, not a depth gradient — 2026-09-15
+
+Correcting `CTXCOST`, `MULTITURN` and `LONGFORM`. All three reported that a
+larger context costs decode throughput, and explained it as KV depth being
+charged to every decoded token. **That explanation is wrong.** Sweeping the
+window shows the cost is a step at the automatic plan, not a gradient.
+
+Same six-turn long-form session, Qwen3.8-27B, one slot.
+
+| ctx | session | decode first -> last | batch / ubatch |
+|---:|---:|---|---|
+| 16,384 | 130.27 s (**5 of 6 turns**) | — | — |
+| 32,768 | 151.55 s | 40.6 -> 39.7 | 8192 / 1024 |
+| 65,536 | 150.16 s | 40.6 -> 39.7 | 8192 / 1024 |
+| 131,072 | **149.92 s** | **40.7 -> 39.7** | **8192 / 1024** |
+| 262,144 (automatic) | 160.60 s | **36.1 -> 35.3** | **2048 / 512** |
+
+**Decode is flat at 40.6-40.7 tok/s from 32k through 131k — a four-fold range of
+context — and only drops at the automatic window.** A KV-depth mechanism would
+have produced a gradient across those four points. It produced a step.
+
+### The actual cause
+
+The automatic plan buys its 262,144-token window by shrinking the batch shape to
+fit: **batch 2048 / ubatch 512, against 8192 / 1024 at every smaller window.**
+That is a 4x smaller batch and 2x smaller ubatch, and it is what costs the
+throughput.
+
+So the finding is not "long context is slow". It is that ggrun's context fit
+maximises the window and pays for it in batch shape, and the batch shape is what
+the model decodes with.
+
+### What this changes about the recommendation
+
+Earlier entries argued for making context a searched coordinate. The sweep says
+something cheaper and more specific:
+
+- **There is a broad flat region.** 32k, 64k and 131k are within 1.6 s of each
+  other on a ~150 s session, well inside the ~5% single-run variance recorded in
+  `CTXFLOOR`. Nothing is gained by tuning inside it.
+- **There is a floor.** 16,384 truncated the session to five turns of six; it
+  looked fastest because it did less work.
+- **Only the maximum costs.** The penalty appears when the plan sacrifices batch
+  shape to reach the largest fitting window.
+
+A planner does not need to search context per workload. It needs to **stop
+trading batch shape for context it was not asked for** — which is a smaller and
+more defensible change than the one the earlier entries implied.
+
+### Method note
+
+Three measurements agreed on a direction and I attached a mechanism to them that
+the data had not tested. The sweep that was meant to find an optimum found the
+explanation was wrong instead. A gradient and a step look identical at two
+points; they only separate at four.
