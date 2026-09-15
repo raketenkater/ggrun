@@ -3582,3 +3582,56 @@ planner controls, that measurably matters, and that the search cannot reach.
   prints when `--ctx-size 32768` is given. The served window is correct — `/props`
   reports `n_ctx=32768` — but the planning line reads as though the override were
   ignored.
+
+## MULTITURN — a growing session over a project prefix — 2026-09-15
+
+The three-task suite is a smoke test: independent tasks, no shared history. The
+direction review asks for multi-turn repository context, which is the shape agent
+work actually takes — a stable project prefix replayed every turn and a
+conversation that grows underneath it.
+
+This runs a six-turn session over a ~11.9k-token synthetic repository listing,
+with a checkable fact per turn, so a session that speeds up by losing track of
+the project fails rather than scoring well. Qwen3.8-27B, one slot, both arms
+**6 of 6 correct**.
+
+| | 32,768 ctx | 262,144 ctx (automatic) |
+|---|---:|---:|
+| correct | **6 / 6** | **6 / 6** |
+| session | 21.34 s | 21.22 s |
+| turn 0 (cold) | 9.91 s | 8.78 s |
+| turns 1-5 | 1.63 - 2.88 s | 1.80 - 3.16 s |
+| decode | **40.4 tok/s** | 36.0 tok/s |
+
+### Prefix reuse is excellent, and now observed rather than assumed
+
+Turn 0 evaluates all **11,881** prompt tokens. Every later turn evaluates
+**45-50** — the appended question and answer only, against a prompt that has
+grown to 12,096 tokens. That is 99.6% reuse, at both context settings, sustained
+across the session.
+
+`AGENTPATH` measured prefix reuse once with two requests; this shows it holding
+turn after turn as the conversation grows, which is the case that matters.
+
+### Decode is 12% faster at the smaller window
+
+40.4 against 36.0 tok/s, consistent across all six turns at both settings. That
+matches `CTXCOST`'s 13% on the task suite and is the same mechanism: KV depth
+charged to every decoded token.
+
+**Session time did not separate** — 21.34 s against 21.22 s — because these turns
+answer in one short sentence. The decode advantage is invisible when outputs are
+tiny and compounds when they are not. A real agent turn writing a patch decodes
+hundreds of tokens, so this is the arm where the 12% would show, and that case is
+still unmeasured.
+
+### What this does and does not establish
+
+Establishes: multi-turn sessions work correctly at both windows, prefix caching
+holds across a growing conversation, and the smaller window decodes faster for
+the same work.
+
+Does not establish: anything about a real client. This is a synthetic prefix and
+scripted turns, not Claude Code driving tools against a real repository. The
+review's "real client, substantial multi-turn repository context" remains open —
+this narrows it to the client integration rather than the serving behaviour.
