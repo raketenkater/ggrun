@@ -824,14 +824,31 @@ func holdExpertResidency(caps *detect.Capabilities, model *placement.ModelProfil
 	if perLayerMB <= 0 {
 		return next
 	}
-	penalty := map[int]int{device: perLayerMB * (floorNCPUMoE - next.NCPUMoE)}
+	returned := floorNCPUMoE - next.NCPUMoE
+	// Report the attempt, not only the success. This guard previously printed
+	// only when the re-pack worked, so a failed ReplanAfterOOM returned the
+	// original plan in silence and was indistinguishable from a guard that never
+	// ran at all. Seven launches were inspected for evidence it had fired before
+	// that was noticed, including one whose n-cpu-moe visibly dipped
+	// (47 44 46 47 47 48) with nothing logged.
+	fmt.Fprintf(os.Stderr,
+		"[launch] re-plan returned %d expert layer(s) this launch had already moved to the CPU; re-packing CUDA%d to hold n-cpu-moe>=%d\n",
+		returned, device, floorNCPUMoE)
+	penalty := map[int]int{device: perLayerMB * returned}
 	held, err := placement.ReplanAfterOOM(caps, model, opts, penalty)
 	if err != nil || held == nil || held.NCPUMoE < next.NCPUMoE {
+		reason := "the re-pack did not fit"
+		if err != nil {
+			reason = err.Error()
+		} else if held != nil {
+			reason = fmt.Sprintf("the re-pack returned n-cpu-moe=%d, below the recomputed %d", held.NCPUMoE, next.NCPUMoE)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[launch] could not hold expert residency (%s); keeping the recomputed placement at n-cpu-moe=%d\n",
+			reason, next.NCPUMoE)
 		return next
 	}
-	fmt.Fprintf(os.Stderr,
-		"[launch] context re-plan returned %d expert layer(s) this launch had already moved to the CPU; re-packing CUDA%d to hold n-cpu-moe>=%d\n",
-		floorNCPUMoE-next.NCPUMoE, device, floorNCPUMoE)
+	fmt.Fprintf(os.Stderr, "[launch] held expert residency at n-cpu-moe=%d\n", held.NCPUMoE)
 	return held
 }
 
