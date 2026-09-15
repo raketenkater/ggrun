@@ -4042,3 +4042,62 @@ and the request body was not captured to say which call it was.
 Still open: the matched **main-only** arm — the same task with
 `--claude-reviewer off`, so the main model self-classifies — which is what turns
 this into a comparison rather than a strong single observation.
+
+## SEATCOMPARE — companion against main-only, on a real agent session — 2026-09-15
+
+The matched arm `REVIEWREAL` was missing. Identical task, identical starting
+repo (hard reset, all three tests failing), same model and context, same
+`--permission-mode auto`, differing only in the seat.
+
+| | `--claude-reviewer qwen2b` | `--claude-reviewer off` |
+|---|---:|---:|
+| task outcome | 3 of 3 fixed, tests pass | **3 of 3 fixed, tests pass** |
+| `_test.go` untouched | yes | yes |
+| total requests | 55 | **21** |
+| routes | `main` 46, `reviewer` 9 | `main` 21 |
+| review requests answered locally | 9, **zero fallbacks** | n/a — main self-classifies |
+| reviewer median | **287 ms** | n/a |
+| main median | 31,568 ms | **15,930 ms** |
+| non-200 | 1 (a 400 on main) | **0** |
+
+### Both arms completed the task
+
+This is the first matched companion comparison with a task-level outcome, and
+the headline is that **the seat did not change whether the work got done**. Both
+fixed all three functions, left the test files alone, and passed independent
+verification.
+
+### The request counts are not comparable, and that matters
+
+55 against 21. The seated arm issued more than twice the requests for the same
+task, which is not a cost of the seat — it is a different session shape. The
+main-only arm's median request is also half the seated arm's (15.9 s against
+31.6 s), consistent with it doing fewer, shorter turns rather than being faster
+per unit of work.
+
+**So this comparison cannot rank the seats on session speed.** The sessions
+diverged in how the agent chose to work, not only in where reviews were served.
+Reporting "main-only was faster" from these numbers would be reading a different
+trajectory as a performance difference.
+
+### What it does establish
+
+- **Review semantics hold in both modes.** Nine reviews answered by the 2B with
+  zero rejections and zero fallbacks; main-only self-classified without error.
+  Neither arm skipped a required review.
+- **The seat is not required for correctness** on a task of this size. The
+  product contract's fallback path is real and works.
+- **The seat's case is latency under concurrency, not sequential throughput.**
+  287 ms against a main model whose median request is 15.9-31.6 s. On a
+  sequential task with ~9 reviews that is invisible; `REVIEWLANE` showed what it
+  is worth when reviews and foreground work overlap — 8 of 8 reviews completed
+  against 3 of 8, with six HTTP 502s on the main-only side.
+
+### Limits
+
+- One run per arm. Session trajectory varies more than the seat does, so
+  matched repeats would be needed before any speed claim.
+- A small task. Nine review requests is real traffic but a thin sample for
+  worker success and rework, which remain effectively unmeasured.
+- The 400 on the seated arm is still unexplained; the request body was not
+  captured.
