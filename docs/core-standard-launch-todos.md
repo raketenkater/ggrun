@@ -4101,3 +4101,63 @@ trajectory as a performance difference.
   worker success and rework, which remain effectively unmeasured.
 - The 400 on the seated arm is still unexplained; the request body was not
   captured.
+
+## RUNTIMERESERVE — the idle VRAM is an over-provisioned growth reserve — 2026-09-15
+
+The core objective's first concrete target was GLM-5.3-Flash leaving 24-30% of
+VRAM unused. Reading the ledger instead of inferring from `nvidia-smi` identifies
+it exactly, and **corrects the earlier framing**: the memory is not unspent, it
+is deliberately reserved against runtime graph growth.
+
+GLM-5.3-Flash, plain serving, 538,624-token plan:
+
+| device | fit | overhead | **runtime reserve** | planned | capacity |
+|---|---:|---:|---:|---:|---:|
+| CUDA0 | 7,366 | 274 | **4,007** | 11,647 | 11,873 |
+| CUDA1 | 14,386 | 445 | **6,406** | 21,237 | 24,112 |
+| CUDA2 | 9,490 | 191 | **859** | 10,540 | 11,909 |
+
+So the plan claims 98%, 88% and 88% of each card. Nothing is being left on the
+table by the packer — **11,272 MiB of it is growth reserve**.
+
+### What the reserve actually needs
+
+Measured on the running server: idle after load, then peak under a ~690 KB
+(~170k token) prompt, which is the shape that grows compute buffers.
+
+| device | reserved | observed growth | over-reserved by |
+|---|---:|---:|---:|
+| CUDA0 | 4,007 | **0** | 4,007 |
+| CUDA1 | 6,406 | **68** | 6,338 |
+| CUDA2 | 859 | **8** | 851 |
+| **total** | **11,272** | **76** | **~11.2 GiB** |
+
+**The reserve is roughly 150x the growth actually observed**, on the model where
+spare VRAM is worth the most — GLM runs 42-43 of 48 expert layers from host RAM,
+and ~11 GiB is about four to five more resident layers.
+
+The cached probe values are inconsistent with each other across scopes
+(`PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA0` appears as 132, 160, 1184, 1188, 1190,
+1459 in different `.probe` files), and `RelatedModelRuntimeGraphGrowth` takes the
+**maximum** across same-model configs. A single pessimistic probe therefore
+propagates to every later launch of that model family.
+
+### What this does not establish
+
+One model, one prompt shape, one run. Observed growth is not worst-case growth:
+a different batch shape, speculative decoding, or a longer sustained load could
+spike it. The reserve exists to prevent an OOM that the contract requires be
+fail-closed, so **this is evidence that the sizing is wrong, not licence to
+delete the reserve**.
+
+The defensible change is to size the reserve from measured post-launch growth —
+`RecordPostLaunchRuntimeGraphGrowth` already exists for exactly this — rather
+than from a max-across-configs probe that one pessimistic sample can dominate.
+
+### Correction
+
+Earlier entries in this session said GLM "leaves 24-30% of VRAM unused" and that
+ggrun was "declining to spend memory it has". That was measured from
+`nvidia-smi` after load and was the right observation with the wrong cause. The
+packer spends everything it is allowed to; the reserve is what holds the memory
+back, and the reserve is mis-sized.
