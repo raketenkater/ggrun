@@ -3250,3 +3250,50 @@ The root filesystem was at 100% (2.0 GiB free of 456 GiB) while this ran.
 `ENOSPC` during a launch surfaces as failures that resemble unrelated defects,
 so results taken under that pressure deserve a second look. This one passed
 cleanly, but the comparisons it unblocks should be re-run with space available.
+
+## SLOTCLEAN — the four-slot penalty was the teardown, not the plan — 2026-09-15
+
+First slot comparison on the pty path from `PTYFIX`, after the root filesystem
+was freed. Qwen3.8-Flash-Next, `--claude-code --claude-reviewer qwen2b`,
+calibration off, same suite (`ab35d682`). **All three arms completed 3 of 3**,
+where every earlier arm managed 0 to 2.
+
+| slots | `n-cpu-moe` | resident experts | per-agent ctx | correct tasks/min | median | max |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 25 | **23** of 48 | 262,144 | **4.02** | 30.8 s | 33.4 s |
+| 2 | 31 | 17 | 262,144 | 3.02 | 32.9 s | 53.7 s |
+| 4 | 47 | **1** | 262,144 | 3.41 | **26.5 s** | **30.7 s** |
+
+Per-agent context is identical across all three, so this is a matched
+comparison on the quantity the contract protects.
+
+### This positively contradicts the retracted claim
+
+`CLAUDEMODE` reported four slots costing two thirds of the throughput (2.42
+against 7.63). `HARNESSKILL` retracted that as a teardown artifact. This
+measures it properly: **four slots runs at 3.41 against one slot's 4.02, an 18%
+gap**, and four slots has the *best* median and worst-case latency of the three.
+
+The retraction was right, and the direction of the original claim was wrong.
+
+### RESIDENCYFRACTION needs qualifying
+
+The four-slot arm keeps **1** expert layer resident against the one-slot arm's
+23 — a 23x difference — and loses under a fifth of its throughput. Expert
+residency does not dominate agentic speed within a single model at matched
+per-agent context the way the cross-model table implied. That table compared
+three different architectures, quantisations and active-parameter counts, and
+this file already recorded that confound; this is the controlled version of the
+same question and it comes out much weaker.
+
+### Not a ranking
+
+The ordering is **non-monotone**: 1 > 4 > 2. A result that does not move
+monotonically in the variable under test is noise dominating signal, on single
+runs with no established floor. The arms do not separate cleanly, and no slot
+width is promoted here.
+
+What is solid is the negative: **no arm shows a catastrophic four-slot penalty**,
+so the parallel-4 default is not the defect `CLAUDEMODE` made it look like, and
+the slot-candidate work in PR #62 is an optimizer completeness fix rather than a
+fix for a known performance bug.
