@@ -4,6 +4,62 @@ User-aligned handoff, 2026-09-14. This is a development plan, not a claim that
 the acceptance checks below have passed. Refresh branch and CI state before
 acting; preserve the existing dirty production checkout.
 
+## The core objective — non-negotiable, and not yet met
+
+**Run the selected model as fast as the given hardware allows.** The model is the
+user's choice. ggrun's job is to extract the most from that model on that
+machine, never to be faster by serving something else or something smaller.
+
+This milestone is not complete while a selected model is measurably slower than
+its own hardware permits. As of 2026-09-15 it is **not met**, with the gap
+measured rather than asserted:
+
+| model | symptom | measured |
+|---|---|---|
+| GLM-5.3-Flash | **24-30% of VRAM unused** (`fraction_of_vram` 0.70-0.76) while 42-43 of 48 expert layers sit in host RAM | ~12-15 GiB idle, roughly 5 more expert layers' worth |
+| Qwen3.8-27B | automatic context buys the largest fitting window by shrinking batch shape to 2048/512 instead of 8192/1024 | **44% of steady-state turn time** (`CTXREPEATS`) |
+| every launch measured | one GPU near saturation while another idles | 78-98% SM against 0-8%, six launches, three models |
+
+### The defect underneath all three
+
+**ggrun optimises for fit, not for outcome.** Context fit takes the largest
+window that fits; placement takes the most weights that fit; admission asks only
+whether it fits. Those are capacity objectives. They coincide with speed often
+enough to look correct, and they diverge measurably.
+
+Filling VRAM with KV nothing reads is not *using* the hardware, it is occupying
+it. Equally, leaving 12 GiB idle while experts page from host RAM is not
+conservatism, it is unspent capacity.
+
+The right shape is:
+
+- **Requirement**: per-agent context at least what the workload needs — the floor
+  `CTXFLOOR` found, where 16,384 silently truncated a six-turn session.
+- **Constraint**: it must fit, fail-closed. Unchanged.
+- **Objective**: fastest correct agent work on the selected model. **Currently
+  absent from the planner.**
+
+ggrun already *measures* the objective — `correct_tasks_per_minute`, workload
+makespan, the phase guards. It does not let the planner *choose* on it, because
+the coordinates that move it (context, slots, topology, threads, expert
+residency) are not in the candidate space. The baseline won every calibration run
+in this session across four model/mode combinations, which is what a search with
+nothing to offer looks like.
+
+### Optimise the logic, not this machine
+
+The mechanism generalises; the numbers do not. "Do not trade batch shape for
+context nobody requested" is model-independent. "Cap context at 32k" is a fact
+about one model on one rig and must not be encoded. The change contract says the
+same thing, and every fix under this objective is held to it.
+
+### Acceptance
+
+This objective is met when, for a selected model on given hardware, ggrun can
+show that no candidate configuration it can construct serves real agent work
+faster — and when the levers above are reachable by the search rather than only
+by a human passing flags by hand.
+
 ## The actual product goal
 
 Make capable local agentic work easy to start, responsive, and reliable on the
