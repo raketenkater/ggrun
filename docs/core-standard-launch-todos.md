@@ -4180,13 +4180,46 @@ The healing path exists but is keyed too narrowly to close on a model whose
 context is chosen automatically. The recorder can only cure a key it has already
 seen; the sizes that actually get used are almost always new.
 
-That is the specific, model-independent defect: **a self-healing cache whose heal
-condition is narrower than its harm condition.** The probe carrying the damage is
-identifiable —
-`a3fd3a1cf1d5.probe` holds `RUNTIME_GRAPH_GROWTH_MB_CUDA1=6406` beside
-`KV_PER_LAYER_MB=531`, and 6406/531 is about twelve layers of KV, the
-mislabelled-allocation shape `RelatedModelRuntimeGraphGrowth`'s own comment
-warns about.
+That is one defect: **a self-healing cache whose heal condition is narrower than
+its harm condition.**
+
+### The second, and it names the source exactly
+
+The probe carrying the damage is `a3fd3a1cf1d5.probe`, and its key line reads:
+
+```
+# ctx=287744 ubatch=256 ... backend=glm-5-3-flash-hot-experts@llama-server-4d57452bc9a31430429b023f|hot-experts=14,inserts=2
+PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA1=6406
+```
+
+**That is the hot-experts fork, running a 14-entry GPU-resident expert cache.**
+Such a cache legitimately allocates GB of VRAM, and it was recorded as runtime
+graph growth.
+
+`RelatedModelRuntimeGraphGrowth` then carries it onto stock-backend launches,
+because its match is deliberately backend-relaxed. From the function itself:
+
+> Match on model basename + gpu_sig. backend is part of the backend= value in the
+> key line but its exact form varies; **relax it here** (the gpu_sig + same-model
+> match is the load-bearing filter).
+
+So an experimental backend's expert cache becomes a permanent growth floor for
+the ordinary backend serving the same model on the same GPUs. The measurement
+was honest for the configuration that produced it and is meaningless for the one
+consuming it.
+
+This is a sharper statement than "the reserve is too large": **a backend-specific
+allocation is being carried across a backend boundary that the lookup relaxes by
+design.** The relaxation is reasonable for graph growth, which is model-graph
+state — and wrong for anything a particular backend build allocates on its own
+account.
+
+### It also complicates the hot-experts question
+
+Hot experts was measured earlier and recorded as not paying. That experiment left
+this probe behind, and the probe has been silently costing every later GLM launch
+about 11 GiB of expert residency. Any future hot-experts comparison needs the
+probe cache cleared between arms, or the cache from one arm follows the other.
 
 ### Correction
 
