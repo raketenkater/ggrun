@@ -3206,3 +3206,47 @@ Keep the backend alive independently of the client. Either drive the launcher
 under a pty so the client starts, or add a serve-only path that brings up the
 backend and router without opening Claude Code. Until then, do not compare
 agent-suite numbers across `--claude-code` arms.
+
+## PTYFIX — Claude Code mode is measurable now — 2026-09-15
+
+`HARNESSKILL` traced every contaminated arm to one cause: `--claude-code` opens
+the Claude Code client, which refuses to start without a TTY, so ggrun exits and
+its shutdown handler stops the backend mid-suite.
+
+Driving the launcher under a pty (`script -qec`) fixes it. Verified on
+Qwen3.8-Flash-Next at `--parallel 2`:
+
+```
+READY at ~60s
+--- does it survive 90s past ready? ---
+{"status":"ok"} STILL ALIVE
+"Input must be provided ..." occurrences: 0
+```
+
+The client error never occurs and the backend outlives the suite. Earlier arms
+died around 50 s, mid-task.
+
+### The first clean Claude Code measurement
+
+Same suite (`ab35d682`), same model, reviewer seated, two slots:
+
+```
+{"passed": true, "completed_tasks": 3, "total_tasks": 3,
+ "correct_tasks_per_minute": 2.688, "task_latency_median_s": 42.04,
+ "task_latency_max_s": 48.51}
+```
+
+**3 of 3 tasks**, where every previous `--claude-code` arm completed 0 to 2. This
+is the first agent-suite figure through Claude Code mode in this session that is
+not racing a teardown.
+
+One number is not a comparison: it does not rank slot widths or seats, and the
+retractions in `HARNESSKILL` stand. It establishes that the configuration works
+and that the measurement path is now sound.
+
+### Standing caveat
+
+The root filesystem was at 100% (2.0 GiB free of 456 GiB) while this ran.
+`ENOSPC` during a launch surfaces as failures that resemble unrelated defects,
+so results taken under that pressure deserve a second look. This one passed
+cleanly, but the comparisons it unblocks should be re-run with space available.
