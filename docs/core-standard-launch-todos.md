@@ -3443,3 +3443,55 @@ That splits the status cleanly, which is the honest form of it:
 
 It is a correct guard for a rare condition, and the instrumentation from
 `RATCHETOBS` means the next occurrence will say so unambiguously in the log.
+
+## LONGCTX — the first actual long-context evidence — 2026-09-15
+
+The direction review's sharpest criticism: "Configuring 262k context and sending
+6k-8k prompts is not 262k-context acceptance." Every context figure recorded
+before this came from a *plan*, never from a prompt. This sends real prompts at
+increasing depth with a correctness oracle — an access code planted near the
+**start**, so a model that silently drops early context fails the check rather
+than merely slowing down.
+
+Qwen3.8-27B-UD-Q4_K_XL, plain serving, `--calibrate off`.
+
+| target | actual prompt tokens | prefill tok/s | decode tok/s | wall | code recalled |
+|---:|---:|---:|---:|---:|---|
+| 4k | 516 | 1015.9 | 37.3 | 3.9 s | yes |
+| 16k | 13,967 | 1643.6 | 35.1 | 9.8 s | yes |
+| 64k | 54,312 | 1275.6 | 28.1 | 45.8 s | yes |
+| 131k | **75,599** | 876.0 | 22.0 | 88.7 s | **yes** |
+
+**Long context genuinely works.** 75,599 tokens served, and the planted code came
+back verbatim at every depth. That is the first evidence in this record that the
+configured window is usable rather than merely planned.
+
+### What depth costs
+
+| | 14k -> 76k |
+|---|---|
+| prefill | 1,643 -> 876 tok/s, **-47%** |
+| decode | 35.1 -> 22.0 tok/s, **-37%** |
+| wall for one turn | 9.8 s -> 88.7 s |
+
+Decode falling 37% purely from context depth matters for agent work, where every
+turn re-reads the conversation: the cost is paid on every token of every turn,
+not once. An 88.7 s turn at 76k is usable for a considered answer and poor for a
+tool-calling loop.
+
+### A harness correction
+
+The first pass ran with `max_tokens=32` and reported a recall failure at 54k.
+That was the probe, not the model: this model opens with a reasoning preamble,
+and at 32 tokens the budget was spent before the code was emitted. At 160 tokens
+every depth recalls. **A correctness oracle that shares a budget with the model's
+preamble measures the budget.**
+
+### Limits
+
+- One model, one run per depth, one planted fact near the start. Recall at the
+  start is the easiest case; a fact in the middle is the harder one and is not
+  tested here.
+- 131k was requested and 75,599 delivered — the prompt builder's ~4 chars/token
+  estimate undershoots on this tokenizer, so the deepest point measured is 76k,
+  not 131k. The served plan was larger still; depth beyond 76k remains untested.
