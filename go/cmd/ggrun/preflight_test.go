@@ -546,8 +546,18 @@ func TestPreflightWorstDeficitIncludesMeasuredRuntimeGrowth(t *testing.T) {
 	if deficit != want {
 		t.Fatalf("deficit = %d, want %d", deficit, want)
 	}
-	if !strings.Contains(summary, "fit=11198 overhead=678 runtime=1000") {
+	if !strings.Contains(summary, "fit=11198") ||
+		!strings.Contains(summary, "overhead=678") ||
+		!strings.Contains(summary, "runtime=1000") {
 		t.Fatalf("summary missing exact terms: %s", summary)
+	}
+	// The failure path must decompose fit, not merely total it. A plan that does
+	// not fit is the one case where knowing which component grew matters, and
+	// printing only the total forced three wrong attributions on 2026-09-15.
+	for _, want := range []string{"model=10248", "context=351", "compute=599"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing component %q: %s", want, summary)
+		}
 	}
 }
 

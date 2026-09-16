@@ -4870,6 +4870,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				memoryRecovery.reject(serverArgs)
 				memoryRecovery.rejectContext(strategy,
 					contextReclaimTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
+				if contextDeficitOutstripsDevice(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device) {
+					memoryRecovery.rejectContextOutstripped(strategy)
+				}
 				if exactAdmission {
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionMemory, fmt.Sprintf(" on CUDA%d (%d MiB deficit)", preflight.Device, preflight.DeficitMB), nil)
 				}
@@ -8866,6 +8869,33 @@ func isIKOnlyArch(arch string) bool {
 	return backends.RequiredBackendForArch(arch) == "ik_llama"
 }
 
+// backendProvenToCarryArch reports whether the resolved backend demonstrably
+// contains this architecture, by probing its own library graph.
+//
+// RequiredBackendForArch is a static name table: it records which upstream
+// project first carried an architecture. That is a useful default and a poor
+// veto. A user who registers a purpose-built fork for an architecture
+// (`ggrun backend add`, route-arch) has made an explicit choice, and invariant 3
+// makes explicit choices constraints rather than suggestions. Refusing that
+// launch on a name table — while the same function one branch later trusts
+// BackendSupportsArch for exactly this question — contradicts ggrun's own
+// evidence rule and strands a model whose backend is sitting right there.
+//
+// Measured case: minimax-m3 is listed as ik_llama-only, but the registered
+// fork-llama.cpp-minimax-m3 build carries the `minimax-m3` arch literal in its
+// libllama.so. The static table vetoed a backend that supports the model.
+//
+// Fail-safe by construction: only a positive probe overrides the table. When the
+// probe cannot read the binary (probed == false, e.g. a Windows build keeping
+// architectures in a DLL) the conservative hard failure is preserved unchanged.
+func backendProvenToCarryArch(be *backendInfo, arch string) bool {
+	if be == nil || be.Path == "" || strings.TrimSpace(arch) == "" {
+		return false
+	}
+	supported, probed := backends.BackendSupportsArch(be.Path, arch)
+	return probed && supported
+}
+
 // availableIKBinary returns the path of a detected ik_llama.cpp server binary, if any.
 func availableIKBinary(caps *detect.Capabilities, configuredAppHome ...string) string {
 	seen := map[string]bool{}
@@ -8897,7 +8927,7 @@ func preflightBackendArch(model *placement.ModelProfile, be *backendInfo, caps *
 	if model == nil || be == nil {
 		return
 	}
-	if !be.IsIK && isIKOnlyArch(model.ModelArch) {
+	if !be.IsIK && isIKOnlyArch(model.ModelArch) && !backendProvenToCarryArch(be, model.ModelArch) {
 		preflightIKOnlyArch(model, be, caps, configuredAppHome...)
 		return
 	}

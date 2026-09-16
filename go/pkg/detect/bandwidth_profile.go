@@ -230,7 +230,7 @@ func MeasureBandwidth(caps *Capabilities) (*BandwidthProfile, error) {
 	}
 	script := findBandwidthScript()
 	if script == "" {
-		return nil, fmt.Errorf("measure_bandwidth.py not found; reinstall ggrun or set LLM_SCRIPT_DIR to tools/hardware")
+		return nil, fmt.Errorf("measure_bandwidth.py could not be located or extracted: %w", errBandwidthScriptUnavailable())
 	}
 	args := []string{
 		script,
@@ -402,6 +402,12 @@ func findBandwidthScript() string {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate
 		}
+	}
+	// No on-disk copy. Fall back to the embedded probe so the command works
+	// from a bare `go install` binary. On-disk copies deliberately win, so a
+	// developer editing tools/ or a packaged install still overrides this.
+	if path, err := extractBandwidthScript(); err == nil {
+		return path
 	}
 	return ""
 }

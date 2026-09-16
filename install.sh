@@ -2090,7 +2090,7 @@ done
 install_source_file "tools/gguf/parse_gguf.py" "parse_gguf.py" 0755 || warn "parse_gguf.py not found in source; skipping"
 install_source_file "tools/models/model_index.py" "model_index.py" 0755 || warn "model_index.py not found in source; skipping"
 install_source_file "tools/download/download_any_gguf.py" "download_any_gguf.py" 0755 || warn "download_any_gguf.py not found in source; skipping"
-install_source_file "tools/hardware/measure_bandwidth.py" "measure_bandwidth.py" 0755 || warn "measure_bandwidth.py not found in source; skipping"
+install_source_file "go/pkg/detect/scripts/measure_bandwidth.py" "measure_bandwidth.py" 0755 || warn "measure_bandwidth.py not found in source; skipping"
 install_legacy_bash_shim
 install_ggrun_from_source
 

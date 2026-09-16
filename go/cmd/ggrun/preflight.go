@@ -1213,7 +1213,18 @@ func preflightWorstDeficit(devs []preflightDevice, gpus []detect.GPU, overheadBy
 			fitMB := d.TotalMB()
 			need := fitMB + overheadMB + runtimeMB
 			free := g.VRAMFreeMB()
-			summary = append(summary, fmt.Sprintf("%s %d/%d MiB (fit=%d overhead=%d runtime=%d)", d.Name, need, free, fitMB, overheadMB, runtimeMB))
+			// Decompose fit into the components the probe already measured. The
+			// success path prints model/context/compute per device; the failure
+			// path printed only the total, so a plan that does NOT fit -- the one
+			// case where knowing why matters -- could not be attributed without
+			// re-deriving it by hand. That cost three wrong attributions on
+			// 2026-09-15 (see PLANOVER), including one that blamed compute buffers
+			// the probe cache then showed scale linearly.
+			summary = append(summary, fmt.Sprintf(
+				"%s %d/%d MiB (fit=%d [model=%d context=%d compute=%d unaccounted=%d] overhead=%d runtime=%d)",
+				d.Name, need, free, fitMB,
+				d.ModelMB, d.ContextMB, d.ComputeMB, d.UnaccountedMB,
+				overheadMB, runtimeMB))
 			if deficit := need - free; deficit > worstDeficit {
 				worstDev, worstDeficit = idx, deficit
 			}

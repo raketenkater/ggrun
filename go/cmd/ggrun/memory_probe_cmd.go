@@ -31,6 +31,22 @@ type memoryProbeOutput struct {
 	ServerArgv      []string                  `json:"server_argv"`
 }
 
+// memoryProbeRecomputeOptions builds the options for the probe loop's post-fit
+// recompute. It exists as a named function so the convergence wiring is
+// testable: the defect it fixes was not a bad bound but a missing one, and a
+// future edit that drops `recovery` here would otherwise be invisible.
+func memoryProbeRecomputeOptions(
+	req *launchRequest,
+	model *placement.ModelProfile,
+	be *backendInfo,
+	cacheDir string,
+	recovery *launchMemoryRecovery,
+) placement.Options {
+	opts := placementOptionsFromRequest(req, model, be, cacheDir)
+	opts.SkipPlacementCache = true
+	return boundByProvenLimits(opts, recovery)
+}
+
 func cmdMemoryProbe(args []string) {
 	wantJSON := hasArg(args, "--json")
 	filtered := make([]string, 0, len(args))
@@ -74,8 +90,19 @@ func cmdMemoryProbe(args []string) {
 	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
 	oomPenalty := map[int]int{}
+	// This command previews the launch plan, so it has to converge the same way a
+	// launch does. Without this ledger the probe loop is the launch loop minus
+	// every convergence ratchet: recoverPreflightOOM received nil, so
+	// observeExpertResidency recorded nothing, boundByProvenLimits bounded
+	// nothing, and expertResidencyFloor returned zero. Observed on
+	// GLM-5.3-Flash 2026-09-15: `memory-probe -ctx fit` cycled n-cpu-moe 40 <-> 41
+	// at a constant 500,736-token context, flipping the -ot expert assignment
+	// between CUDA1 and CUDA2 each round, and exhausted all six attempts on a
+	// configuration the launch path plans successfully.
+	recovery := newLaunchMemoryRecovery()
+	progress := newProbeSearchProgress(strategy)
 
-	for attempt := 1; attempt <= 6; attempt++ {
+	for attempt := 1; attempt <= memoryProbeMaxAttempts; attempt++ {
 		if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -107,14 +134,24 @@ func cmdMemoryProbe(args []string) {
 		}
 		if outcome.DoesNotFit {
 			serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
+			// Same order as the launch path: record the disproof before recovering
+			// from it, so the next proposal is bounded by it.
+			recovery.reject(serverArgs)
+			recovery.rejectContext(strategy,
+				contextReclaimTokens(model, strategy, serverArgs, outcome.DeficitMB, outcome.Device))
+			if contextDeficitOutstripsDevice(model, strategy, serverArgs, outcome.DeficitMB, outcome.Device) {
+				recovery.rejectContextOutstripped(strategy)
+			}
 			next, nextArgs, method, replanErr := recoverPreflightOOM(
 				req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
-				strategy, serverArgs, oomPenalty, outcome, nil,
+				strategy, serverArgs, oomPenalty, outcome, recovery,
 			)
 			if replanErr != nil {
 				fmt.Fprintf(os.Stderr, "Error: measured placement does not fit and recovery failed closed: %v\n", replanErr)
 				os.Exit(1)
 			}
+			progress.record(strategy, next, outcome.DeficitMB,
+				contextReclaimTokens(model, strategy, serverArgs, outcome.DeficitMB, outcome.Device))
 			strategy = next
 			fmt.Fprintf(os.Stderr,
 				"[memory-probe] %s after CUDA%d allocation %d MiB (deficit %d MiB, next=%s)\n",
@@ -123,8 +160,15 @@ func cmdMemoryProbe(args []string) {
 			continue
 		}
 
-		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-		opts.SkipPlacementCache = true
+		// This argv fitted. Record what it proves before recomputing, and bound the
+		// recompute by it, exactly as the launch path does: without this the
+		// recompute walks back to a context or ubatch this probe already
+		// disproved, the argv differs so the identity check below never matches,
+		// and the loop burns its whole attempt budget.
+		if outcome.Evidence.Level != memoryEvidenceNone {
+			recovery.acceptContext(strategy)
+		}
+		opts := memoryProbeRecomputeOptions(req, model, be, cfg.CacheDir, recovery)
 		next, replanErr := placement.Compute(caps, model, opts)
 		if replanErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: measured placement recompute failed: %v\n", replanErr)
@@ -162,6 +206,11 @@ func cmdMemoryProbe(args []string) {
 		}
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Error: memory probe did not reach a fixed point after 6 attempts")
+	fmt.Fprintf(os.Stderr, "Error: memory probe did not reach a fixed point after %d attempts\n", memoryProbeMaxAttempts)
+	// "N attempts" alone cannot distinguish a search that is stuck from one that
+	// is merely slow, and the difference decides whether the user should retry,
+	// name a smaller -ctx, or report a bug. Diagnosing the GLM-5.3-Flash case
+	// took a hand-diff of the per-round argv; this reports it directly.
+	progress.report(os.Stderr)
 	os.Exit(1)
 }

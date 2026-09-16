@@ -334,6 +334,25 @@ type ModelProfile struct {
 	CTXTrain               int     `json:"ctx_train"`
 	ModelArch              string  `json:"model_arch"`
 	ExpertUsedCount        int     `json:"expert_used_count,omitempty"`
+	// MeasuredComputeCoefficient is the graph fan-out coefficient (bytes per
+	// hidden-unit per layer per ubatch token, normalised to a 1,048,576-token
+	// context) that this model's compute buffers ACTUALLY showed on previous
+	// launches, derived from recorded PROBED_COMPUTE_BUF_MB_CUDA* values.
+	//
+	// It exists because the built-in coefficients are architecture-gated and
+	// wrong for anything they were not calibrated on. firstLaunchComputeBufMBParallel
+	// charges 42 bytes unless the arch is literally "deepseek4", which then gets
+	// ExpertUsedCount*128. GLM-5.3-Flash (glm5next, 4096 hidden, 46 layers, 288
+	// experts, 8 used) is an MoE that receives the DENSE coefficient and no
+	// context scaling at all: measured 2026-09-15, that predicts 2,026 MiB at
+	// ubatch 256 where the backend allocated 13,140 MiB per device -- 6.5x low on
+	// a term that turned out to be 60% of the whole plan, which is how a placement
+	// needing 66,556 MiB on a 47,894 MiB machine cleared the estimate.
+	//
+	// Zero means no usable evidence; callers keep the built-in coefficients. This
+	// is the same contract MeasuredKVBytesPerTok follows: measured truth is
+	// preferred where it exists, and its absence is never a licence to guess.
+	MeasuredComputeCoefficient float64 `json:"-"`
 	// MeasuredKVBytesPerTok maps a KV cache type (e.g. "q8_0") to the KV cache
 	// bytes-per-token that llama.cpp ACTUALLY allocated on a previous launch of
 	// this model, read back from the backend log. It is the ground truth for
@@ -1459,6 +1478,13 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		if model.MeasuredKVGeometry == nil {
 			if g := loadMeasuredKVGeometry(opts.CacheDir, model); g != nil {
 				model.MeasuredKVGeometry = g
+			}
+		}
+		// Same contract for the graph coefficient: measured truth where it exists,
+		// built-in coefficients where it does not.
+		if model.MeasuredComputeCoefficient <= 0 {
+			if c := loadMeasuredComputeCoefficient(opts.CacheDir, model); c > 0 {
+				model.MeasuredComputeCoefficient = c
 			}
 		}
 	}
@@ -5033,6 +5059,102 @@ func plannedModelAwareHeadroom(model *ModelProfile, opts Options) int {
 // ~9412 MiB (covers the measured ~9020). Over-estimating is safe — the probe cache
 // overrides this with the measured value after the first launch; under-estimating
 // is fatal (OOM crash). A nil model falls back to the old per-ubatch heuristic.
+// computeCoefficientReferenceContext is the context the graph coefficient is
+// normalised to. It matches the reference firstLaunchComputeBufMBForGPUParallelAtContext
+// already uses, so a derived coefficient and the built-in DeepSeek4 scaling
+// speak the same units.
+const computeCoefficientReferenceContext = 1048576
+
+// loadMeasuredComputeCoefficient derives this model's graph fan-out coefficient
+// from compute buffers the backend actually allocated on previous launches.
+//
+// Each probe records PROBED_COMPUTE_BUF_MB_CUDA* against a known ctx and ubatch,
+// so the coefficient follows directly from
+//
+//	computeMB = ubatch * hidden * layers * C * (ctx / reference) / 1e6
+//
+// Verified on GLM-5.3-Flash 2026-09-15: entries at (529,408 / ub 128) and
+// (786,432 / ub 256) imply 369.6 and 363.2 bytes, agreeing to 1.8%, and a
+// coefficient of 365 predicts four independent probe entries to within 4%.
+//
+// The MEDIAN is taken rather than the max: a single anomalous probe (a failed
+// allocation recorded at whatever size it reached, say) must not inflate every
+// future plan, and the recorder is known to file partial values -- see the
+// RelatedModelRuntimeGraphGrowth comment on a KV figure mislabelled as growth.
+//
+// Returns 0 when there is no usable evidence, which leaves the built-in
+// coefficients untouched. A model with no probes plans exactly as it does today.
+func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float64 {
+	if cacheDir == "" || model == nil || model.HiddenSize <= 0 || model.NumLayers <= 0 {
+		return 0
+	}
+	modelBase := filepath.Base(model.Path)
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return 0
+	}
+	var coefficients []float64
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".probe") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cacheDir, ent.Name()))
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		if modelBase != "" && !strings.Contains(text, modelBase) {
+			continue
+		}
+		ctx, ubatch := 0, 0
+		var buffers []int
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "# ctx=") {
+				for _, kv := range strings.Fields(line) {
+					if v, ok := strings.CutPrefix(kv, "ctx="); ok {
+						ctx, _ = strconv.Atoi(v)
+					}
+					if v, ok := strings.CutPrefix(kv, "ubatch="); ok {
+						ubatch, _ = strconv.Atoi(v)
+					}
+				}
+				continue
+			}
+			if v, ok := strings.CutPrefix(line, "PROBED_COMPUTE_BUF_MB_CUDA"); ok {
+				if _, after, found := strings.Cut(v, "="); found {
+					if mb, convErr := strconv.Atoi(after); convErr == nil && mb > 0 {
+						buffers = append(buffers, mb)
+					}
+				}
+			}
+		}
+		if ctx <= 0 || ubatch <= 0 || len(buffers) == 0 {
+			continue
+		}
+		// Per-device buffers for one plan are near-identical when every device
+		// owns split layers; take the median so a device holding only a fragment
+		// (expert-only, or a 0.00 tensor-split share) cannot drag the estimate
+		// down for the devices that carry the real graph.
+		sort.Ints(buffers)
+		measured := buffers[len(buffers)/2]
+		denom := float64(ubatch) * float64(model.HiddenSize) * float64(model.NumLayers) *
+			(float64(ctx) / float64(computeCoefficientReferenceContext))
+		if denom <= 0 {
+			continue
+		}
+		if c := float64(measured) * 1e6 / denom; c > 0 {
+			coefficients = append(coefficients, c)
+		}
+	}
+	if len(coefficients) < 2 {
+		// One sample cannot be distinguished from a recording artefact.
+		return 0
+	}
+	sort.Float64s(coefficients)
+	return coefficients[len(coefficients)/2]
+}
+
 func firstLaunchComputeBufMB(model *ModelProfile, uBatch int) int {
 	return firstLaunchComputeBufMBParallel(model, uBatch, 1)
 }
@@ -5055,6 +5177,14 @@ func firstLaunchComputeBufMBParallel(model *ModelProfile, uBatch, parallel int) 
 			if moeCoefficient > coefficient {
 				coefficient = moeCoefficient
 			}
+		}
+		// This model's own measured graph outranks both built-ins. The constants
+		// above are calibrated per architecture and are wrong for architectures
+		// they never saw: GLM-5.3-Flash is an MoE that falls through to the dense
+		// 42 and was underestimated 6.5x on the term carrying 60% of its plan.
+		// Absent evidence this is 0 and nothing changes.
+		if model.MeasuredComputeCoefficient > 0 {
+			coefficient = model.MeasuredComputeCoefficient
 		}
 		per := float64(model.HiddenSize) * float64(model.NumLayers) * coefficient / 1e6
 		est = int(float64(uBatch) * per)
@@ -5093,10 +5223,18 @@ func firstLaunchComputeBufMBForGPUParallel(model *ModelProfile, uBatch, parallel
 // configuration already proven through a 60k request.
 func firstLaunchComputeBufMBForGPUParallelAtContext(model *ModelProfile, uBatch, parallel, contextSize, gpuPos int, order []int) int {
 	est := firstLaunchComputeBufMBForGPUParallel(model, uBatch, parallel, gpuPos, order)
-	if model == nil || !strings.EqualFold(model.ModelArch, "deepseek4") || contextSize <= 0 {
+	if model == nil || contextSize <= 0 {
 		return est
 	}
-	const referenceContext = 1048576
+	// A measured coefficient is normalised to the reference context, so it MUST be
+	// scaled back down to the plan's actual window -- charging it unscaled would
+	// bill every launch at full 1M-context graph size. Architectures without
+	// measured evidence keep the previous behaviour exactly: DeepSeek4 scales,
+	// everything else is charged flat.
+	if !strings.EqualFold(model.ModelArch, "deepseek4") && model.MeasuredComputeCoefficient <= 0 {
+		return est
+	}
+	const referenceContext = computeCoefficientReferenceContext
 	if est <= computeFloorMB {
 		return est
 	}

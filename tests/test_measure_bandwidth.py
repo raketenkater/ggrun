@@ -9,7 +9,7 @@ import pytest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "tools" / "hardware" / "measure_bandwidth.py"
+SCRIPT = ROOT / "go" / "pkg" / "detect" / "scripts" / "measure_bandwidth.py"
 SPEC = importlib.util.spec_from_file_location("measure_bandwidth", SCRIPT)
 assert SPEC and SPEC.loader
 measure_bandwidth = importlib.util.module_from_spec(SPEC)
