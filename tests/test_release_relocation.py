@@ -18,6 +18,13 @@ class ReleaseRelocation(unittest.TestCase):
                 (root / "scripts").mkdir()
                 (root / "go").mkdir()
                 shutil.copy2(ROOT / "scripts/package-release.sh", root / "scripts/package-release.sh")
+                # package-release.sh fails closed on these two, deliberately: an
+                # archive shipped without them has a documented command that dies
+                # with "scripts/setup-home.sh: No such file or directory". The
+                # fixture predates that guard, so it packaged nothing and this
+                # test failed for a missing input rather than a runpath fault.
+                shutil.copy2(ROOT / "scripts/setup-home.sh", root / "scripts/setup-home.sh")
+                shutil.copy2(ROOT / "install.sh", root / "install.sh")
                 launcher = root / "go/ggrun"
                 launcher.write_text("#!/bin/sh\necho ggrun-fixture\n")
                 launcher.chmod(0o755)
