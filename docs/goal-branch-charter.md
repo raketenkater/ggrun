@@ -73,15 +73,40 @@ Three things follow, and they are the reason this branch exists:
 1. **Nothing is saturated** — CPU ~45%, GPUs 0%, VRAM held but not exercised.
    Throughput is nevertheless capped. The ledger's reading is memory latency on
    the host expert path, which is an **inference**, not a counter (see `BOTTLENECK-1`).
-2. **The optimiser has no speed objective.** The expert packer
-   (`go/pkg/placement/placement.go:3320-3344`) is a greedy first-fit maximising
-   *expert layers resident in the VRAM left after KV and compute* — not decode
-   latency. Context sizing takes the largest window that fits. So "tune for
-   performance" has no gradient to follow yet.
-3. **The plan may already be known-better than the launch.** ggrun's own cached
-   plans for this exact model cluster at `--n-cpu-moe` 25–27; the live run is on
-   **29**, with 4.65 GiB of VRAM left unspent. The `-ot` string is ggrun's own
-   emitted form, byte-for-byte.
+2. **The objective is a hand-weighted bandwidth model, not absent.** The packer
+   (`go/pkg/placement/placement.go:3312-3334`) is a greedy first-fit maximising
+   resident expert layers under VRAM (`roomMBPer`) and models no time at all.
+   But choosing between complete configurations *does* use a speed scalar, in the
+   optimizer package — `optimizer.go:731`:
+
+   ```
+   AgentCost = (0.58*PrefillCost + 0.42*DecodeCost) * waves * contention
+   ```
+
+   Every term is a bytes/bandwidth service time (backbone bytes over VRAM
+   bandwidth, expert bytes over VRAM or host DRAM bandwidth, activation round
+   trips over link bandwidth). So the objective exists but is a **static,
+   hand-weighted bandwidth estimate with a 58/42 prefill/decode split and a
+   linear contention factor of `1 + 0.07*(lanes-1)`** — no measured
+   tokens/second, no cache-prefix reuse, no queue/TTFT, no thread count, and no
+   feedback from the agent-work measurements the project already collects. That
+   is the concrete thing to fix.
+3. **The plan is 4 expert layers worse than a plan ggrun itself computed.** Every
+   `.place` record for this model at the live coordinates (ctx 262144 / ub 256 /
+   par 1 / kv q8_0) agrees: `d4f0fa99dca4` (2026-09-15) stores
+   `CACHED_NCPUMOE=25` with 23 GPU expert layers; `8e0cf3887cc2`, `38e30480c79c`,
+   `c8b97d05c89b`, `88a847b97a70`, `9d6f1d5897ff` cluster at 25–27. **The live run
+   is on 29 with 19 GPU layers.** The KV-first reservation is honoured and *not*
+   the cause (self-KV 3,264 MiB is on the GPUs at the charged amounts,
+   `PROBED_CONTEXT_MB_HOST=0`), and the place-cache key did not change, so this
+   is not a schema migration. The gap is unexplained and is the concrete defect
+   this branch exists to close.
+
+   *Correction to an earlier reading of this branch:* the broader "25–27 cluster"
+   spans **different coordinates** (ctx 196,608–1,048,576, ub 64–512, par 1–4) and
+   is not evidence about the live plan. Only the same-coordinate records above are
+   comparable. At ctx 1,048,576 the same model legitimately carries
+   `NCPUMOE` 47–48 with 0–1 GPU layers.
 
 ## Where the evidence lives
 
