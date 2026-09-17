@@ -110,6 +110,10 @@ Three things follow, and they are the reason this branch exists:
 
    ### The gap is explained, and the cause is verified
 
+   > **CORRECTION (same day, by running the probe).** The coefficient theory below
+   > was **falsified**. It is preserved because the falsification is the useful
+   > result. See "What the probe actually found" immediately after it.
+
    `loadMeasuredComputeCoefficient` (`placement.go:5086-5155`) builds the compute
    coefficient from **every** `.probe` whose text merely *contains the model
    basename*, ignoring the probe's own evidence class, its `ctx`, its `ubatch` and
@@ -153,6 +157,63 @@ Three things follow, and they are the reason this branch exists:
 
    **This is a plan-input defect, not an objective defect.** It is in a protected
    path, so it needs the full contract procedure and `scripts/verify-core-engine.sh`.
+
+   ### What the probe actually found — the coefficient theory is FALSIFIED
+
+   The numbers above are all real and reproduce exactly. **They are also
+   irrelevant to the live plan.** Running the read-only probe
+   (`ggrun dry-run … --ctx-size 262144 --ubatch-size 256 --cache-type-k q8_0
+   --cache-type-v q8_0 --parallel 1`, with `GGRUN_TRACE_PLACEMENT=1`) shows the
+   coefficient never reaches the packer:
+
+   ```
+   [trace] gpu0 probeHit=false ctx=262144 ub=256 kvq=q8_0 par=1 free=2779 sysOH=1845 compute=0 growth=0 fixed=1845
+   ```
+
+   `compute=0` is structural, not a lookup failure. `optionsFromRequest`
+   (`main.go:2691`) sets **`RequireMeasuredBuffers: true`**, and
+   `placement.go:3003-3007` then does:
+
+   ```go
+   if opts.RequireMeasuredBuffers {
+       computeBufMB = 0   // the coefficient-derived estimate is DISCARDED
+       expertOnlyComputeMB = 0
+   }
+   ```
+
+   Default `opts := placement.Options{}` leaves `RequireMeasuredBuffers` **false**,
+   which is why the coefficient path exists and its unit test passes — but every
+   real launch and dry-run sets it true. **So the 197.09-vs-148.38 evidence-class
+   defect is a genuine latent bug with no effect on the live plan.** Two real
+   defects were found and neither explains the gap. Confirmed on the empty-key
+   path too (`probeHit=false` with default options).
+
+   **The live gap has a different, mundane cause: the probe cache was invalidated
+   by measurement.** `gpuSignatureHash` (`placement.go:6352-6368`) embeds
+   `bw%d` — the measured bandwidth — so when the 2026-09-16 bandwidth work landed,
+   the GPU signature changed `f10a43e9645f` → `21cfcac0c1d0` and the entire older
+   probe corpus stopped keying. This model's probes split **145 under the old
+   signature, 8 under the new**. The live server started `09:13:31`, two minutes
+   before the first new-signature probe was written (`09:15:02`), so **it launched
+   with no usable probe and took the conservative cold-start path** — which packs
+   fewer expert layers onto the GPUs. That is why it used 29 instead of the 25 a
+   probe-informed plan produced the day before.
+
+   Current probes for this model at the live coordinates under the new signature
+   are already healthy: `d9af2da9171c` (ctx 262144 / ub 256 / kv gpu / par 0) has
+   `PROBED_COMPUTE_BUF_MB=1159` `EVIDENCE=live-allocated`.
+
+   **Consequence for the plan:** the branch's first target is not the coefficient
+   and not the packer objective. It is that **a measurement change silently
+   invalidates the probe corpus, and a launch during that window gets a worse
+   plan with no warning.** The real question is why the bandwidth measurement —
+   which is a *speed* input — belongs in the placement *identity* key at all.
+
+   Also observed: `ggrun dry-run` fails today with
+   `Model does not fit … no GPU has free VRAM after CUDA/compute overhead`, because
+   the live server holds the VRAM. The probe still printed the full ledger and
+   `-ot`, which is why it was decisive — a guard message, not a launch
+   (`main.go:494` assembles it; no process was started).
 
 ## Where the evidence lives
 
