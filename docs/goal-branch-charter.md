@@ -108,6 +108,52 @@ Three things follow, and they are the reason this branch exists:
    comparable. At ctx 1,048,576 the same model legitimately carries
    `NCPUMOE` 47–48 with 0–1 GPU layers.
 
+   ### The gap is explained, and the cause is verified
+
+   `loadMeasuredComputeCoefficient` (`placement.go:5086-5155`) builds the compute
+   coefficient from **every** `.probe` whose text merely *contains the model
+   basename*, ignoring the probe's own evidence class, its `ctx`, its `ubatch` and
+   its `parallel`. It parses only `# ctx=`, `ubatch=` and
+   `PROBED_COMPUTE_BUF_MB_CUDA*` — it never reads `PROBED_COMPUTE_BUF_EVIDENCE`.
+
+   Reproduced independently for this model (148 samples):
+
+   | | value | meaning |
+   |---|---:|---|
+   | median over all probes | **197.0927** | what the code uses |
+   | median over `live-allocated` only | **148.3826** | the measurements |
+   | samples | 148 = **124 `oracle-planned` + 24 `live-allocated`** | 84% are predictions |
+
+   The charge formula (`placement.go:5241`) is
+   `floor + (est − floor) · ctx/ref`, **not** `max(est·ctx/ref, floor)`. With
+   `est = ubatch · hidden · layers · C / 1e6`:
+
+   | C | est | charge |
+   |---|---:|---:|
+   | 197.09 (code) | 6,200 | **2,318 MiB** |
+   | 148.38 (live) | 4,667 | 1,934 MiB |
+   | 0 (pre-`d46e139`, unscaled 42) | 1,321 | 1,321 MiB |
+
+   The backend's own `sched_reserve` allocated **1,159.25 / 1,036.11 / 828.00 MiB**.
+   So the planner charges **2,318 MiB against a measured 1,159** — an overcharge of
+   1,159 MiB, ≈ one whole expert layer (1,062.5 MiB) per split-owner card, ≈ the
+   4-layer gap.
+
+   **Timeline (verified):** the live binary was built `2026-09-16 08:44:47`;
+   `d46e139` ("launch, detect, preflight: five fixes") is `08:44:20` — 27 s before.
+   The live server started `09:13:31`, i.e. from that binary. The comparable
+   cached plan `d4f0fa99dca4` (`NCPUMOE=25`) is `2026-09-15 08:41:33`, **before**
+   the change. So the live run is the first launch on the new coefficient path,
+   and the gap is a regression from it, not a property of the packer.
+
+   Two independent defects live in the same function: **(a)** the evidence class
+   is ignored, so 124 predictions outvote 24 measurements; **(b)** the 1,024 MiB
+   floor is added *after* scaling rather than discounted by `(1 − ctx/ref)`
+   (`computeFloorMB · (1 − 768/1024) = 768 MiB` of pure overcharge).
+
+   **This is a plan-input defect, not an objective defect.** It is in a protected
+   path, so it needs the full contract procedure and `scripts/verify-core-engine.sh`.
+
 ## Where the evidence lives
 
 - **`docs/core-standard-launch-todos.md`** — the measurement ledger. Its current
