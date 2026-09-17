@@ -1,0 +1,138 @@
+# goal/agentic-speed-and-hardware — work charter
+
+Branch: `goal/agentic-speed-and-hardware`, based on `main` @ `9d44a31`
+(2026-09-16). Worktree: `/home/mik/ggrun-project/ggrun-perf`.
+Created 2026-09-17. **Nothing is committed on this branch yet.**
+
+This file states what the branch is for, how "done" is judged, and where the
+evidence lives — so a different model can review the work without re-deriving
+the context.
+
+## The goal (from the standing `/goal` prompt)
+
+> ggrun's job is to **CHOOSE THE BEST CONFIGURATION** for the selected model on
+> the given machine; the case that matters most is the **big MoE that needs CPU,
+> RAM and every GPU at once**, which is ggrun's core feature. Judge "best" by
+> **measured agent-work speed**, never by `fraction_of_vram` or SM occupancy,
+> both of which are measurably anti-correlated with speed here.
+
+The user restated it on 2026-09-17 as two coupled aims:
+
+1. **Serve the user-selected model as fast as possible for agentic work** on the
+   given hardware.
+2. **Use the given hardware to the fullest** — use all available compute.
+
+**These two conflict on this rig, and the conflict is measured, not theoretical.**
+Note the earlier `/goal` phrasing ("reach maximum hardware usage ... which should
+result in fastest possible serving") was **retired as false on this rig**: six
+matched arms showed raising VRAM spend is same-or-slower. What survives is that
+aim 2 is a real user requirement, while aim 1 is the tie-breaker — so a change
+must not buy speed by leaving hardware idle *without saying so*.
+
+## What "best" is judged by (invariants, from the change contract)
+
+`docs/core-engine-change-contract.md` is binding. The load-bearing ones here:
+
+- **5 — the objective is real agent work.** Optimize cache-backed turn time and
+  requested-concurrency workflow makespan, preserving prefill *and* decode.
+  Aggregate tok/s alone is never sufficient.
+- **6 — keep phases separate.** Cold prefill, cached append, decode, and mixed
+  foreground-decode-plus-prefill keep separate evidence; a phase regression
+  cannot be hidden by a good aggregate.
+- **3 — explicit user choices are constraints.** Never silently reduce useful
+  per-agent context or quality to win throughput.
+- **7 — prediction chooses at most a finalist.** Only repeated identical live
+  A/B can promote. A baseline-only measurement is not a completed decision.
+- **10 — lifecycle is part of correctness.** Never disturb the user's live
+  server; warn before optimizer-driven long reloads.
+
+Method rules the project paid for: state the VRAM of *both* arms before calling
+anything a hardware-usage test; `/health` is the authority for "serving", not a
+log string; a predicted improvement is not promotion evidence; record background
+load with every absolute number.
+
+## The measured starting position
+
+From the live run on `:8081` (Qwen3.8-Flash-Next UD-Q3_K_XL, 86 GB, 262,144 ctx,
+`--n-cpu-moe 29`), read 2026-09-17:
+
+| quantity | value |
+|---|---|
+| decode | 10.89 tok/s (91.81 ms/token) |
+| uncached prefill | 105.7 tok/s |
+| cache hit | 97.44% |
+| tokens per `llama_decode` | 1.0032 (batch = 1) |
+| CPU in the 13 `call` threads | 83.80% of 240,477 CPU-s |
+| `cuda*` host threads | 0.03% |
+| GPUs during work | 0% SM / 0% mem-ctrl, P8, 210 MHz |
+| VRAM held | 74.05 / 80.85 / 89.35% |
+| **queue share of turn time** | **41.4%** (`sum(queue_ms)` 27,333 s of `sum(total_ms)` 65,944 s) |
+
+Three things follow, and they are the reason this branch exists:
+
+1. **Nothing is saturated** — CPU ~45%, GPUs 0%, VRAM held but not exercised.
+   Throughput is nevertheless capped. The ledger's reading is memory latency on
+   the host expert path, which is an **inference**, not a counter (see `BOTTLENECK-1`).
+2. **The optimiser has no speed objective.** The expert packer
+   (`go/pkg/placement/placement.go:3320-3344`) is a greedy first-fit maximising
+   *expert layers resident in the VRAM left after KV and compute* — not decode
+   latency. Context sizing takes the largest window that fits. So "tune for
+   performance" has no gradient to follow yet.
+3. **The plan may already be known-better than the launch.** ggrun's own cached
+   plans for this exact model cluster at `--n-cpu-moe` 25–27; the live run is on
+   **29**, with 4.65 GiB of VRAM left unspent. The `-ot` string is ggrun's own
+   emitted form, byte-for-byte.
+
+## Where the evidence lives
+
+- **`docs/core-standard-launch-todos.md`** — the measurement ledger. Its current
+  head is on branch `fix/residency-ratchet` (102 ahead of main), worktree
+  `/tmp/ggrun-reserve`. `main`'s copy is truncated and ~4,060 lines behind.
+  **Read the branch copy, not main's.** Entries to read first: `BOTTLENECK`
+  (2026-09-17), `LIVEAGENT`/`LIVEAGENT-4`, `VRAMAUDIT`, `SLOTCLEAN`, `SEATARMS`/
+  `SEATCLEAN`, `CTXSTEP`, `HOSTBOUND`, `BOTTLENECK-CONFIRM` (added 2026-09-17 by
+  this branch's author).
+- **`docs/claude-local-agentic-goal-handoff.md`** — the goal/milestone record.
+  Note: the standing `/goal` prompt names `claude-local-agentic-handoff.md`,
+  which never existed; a local-only symlink now resolves it.
+- **User constraint: development data does NOT go to the public repo.** Code goes
+  to `origin/main`; the ledger and handoff stay local. Do not push docs.
+
+## Open milestones, and their blockers
+
+| item | state | blocker |
+|---|---|---|
+| `M3-BENEFIT` — matched companion on/off pair | open | needs exclusive GPU access |
+| `M4` — different-model validation across resident/boundary/over-capacity | open | needs GPU |
+| `M4` — the workflow-speed question | open | `LIVEAGENT` shows 96.2% cached prefix, which no calibration screen reproduces |
+| `M5` — exact-commit Linux **GPU** run; GLM regression | open | needs GPU |
+| `BOTTLENECK-1` — confirm the latency inference with a counter | open | needs `kernel.perf_event_paranoid=0` (root) |
+| `BOTTLENECK-2` — why only ~6–7.6 of 14 threads are ever busy | open | cheap to test; distinguishes stalls from serialization |
+| `SPECOFF` — `ggrun spec-test` has never run, so `--spec auto` has no profile | open | this checkpoint has **no draft head** (0 of 1,224 tensors), so it needs a separate draft model |
+| `CTXSPEND-2` / `-3` — context sizing; `AGENT_CTX_*` demand read by no Go code | open | one-lever sweep |
+
+## Rules for working on this branch
+
+- `main` is the always-stable path. **Nothing merges to main from here without a
+  deliberate decision**; this branch is a staging area for review.
+- Protected paths (read-only unless the task explicitly requires it):
+  `go/pkg/placement/`, `go/pkg/benchmark/`, `calibrate.go`, launch/admission in
+  `main.go`/`preflight*.go`/`memory_probe_cmd.go`, `claude_progress*.go`,
+  `go/pkg/detect/`, `go/pkg/recovery/`, `go/pkg/server/`.
+- Any core change needs an invariant-focused test **and**
+  `scripts/verify-core-engine.sh` (uncached).
+- **Exactly one ggrun binary**: `/home/mik/go/bin/ggrun` via
+  `go install -trimpath ./cmd/ggrun`. Never a second artifact or `.bak`.
+- Never restart, kill, or reload the user's live server on `:8081`, and never
+  start a rival model server while it holds VRAM (invariant 10). Check
+  `curl :8081/health` before any measurement harness.
+
+## Reviewer notes
+
+For the reviewing model: the honest state is that **aim 2 (use all compute) and
+aim 1 (fastest agentic work) are in measured tension here**, and the unresolved
+question is whether today's plan is the best of the two or merely a fit-driven
+compromise. The first useful review question is not "is the code correct" but
+**"is the packer's objective the right one, and is the live plan optimal under
+it?"** — because if the objective is wrong, every downstream tuning is settled in
+the wrong direction.
