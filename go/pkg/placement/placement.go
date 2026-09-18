@@ -6254,8 +6254,10 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 		home, _ := os.UserHomeDir()
 		cacheDir = filepath.Join(home, ".cache", "ggrun")
 	}
-	// Compute GPU signature hash: sort(names+drivers), MD5, take first 12 chars
-	gpuSig := gpuSignatureHash(gpus)
+	// Compute stable GPU identity: sort(identity fields), MD5, take first 12 chars.
+	// The system probe holds measured allocations, which do not depend on link
+	// bandwidth, so it keys on identity alone.
+	gpuSig := gpuIdentityHash(gpus)
 	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
 	data, err := os.ReadFile(path)
 	if err != nil && explicitCacheDir {
@@ -6347,21 +6349,99 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	return sp
 }
 
-// gpuSignatureHash computes MD5 hash of sorted GPU name+driver pairs.
-// GPU signature: nvidia-smi --query-gpu=name,driver_version | sort | md5sum | cut -c1-12
-func gpuSignatureHash(gpus []detect.GPU) string {
+// gpuIdentityHash computes the STABLE hardware identity of the GPU set: MD5 of
+// the sorted per-device identity records, first 12 hex chars.
+//
+// Stable hardware identity only: never include current free/used VRAM, but do
+// include topology and capacity. Two same-name cards on x1 and x16 links are
+// materially different placement hardware, as are two revisions carrying
+// different VRAM sizes.
+//
+// Deliberately EXCLUDES BandwidthMBps. It is not a hardware property: it is a
+// MEASURED value injected into caps by detect.ApplyCachedBandwidthProfile, and
+// it is noisy run to run on fixed hardware. Measured on this project's three-card
+// rig across two `ggrun detect` runs it moved +2 / +3 / -1 MB/s on values of
+// ~12,190 / ~12,318 / ~6,270. Hashing that at integer precision meant every
+// re-measurement produced a new signature and orphaned the entire cached probe
+// corpus: on 2026-09-17 the store held 643 probes, 535 of them stranded under a
+// superseded signature, and a launch that began two minutes before the first
+// probe was rewritten under the new one planned from no measured evidence at all
+// and emitted four more CPU expert layers than the same coordinates had planned
+// the day before (NCPUMOE 29 against a cached 25).
+//
+// Topology is still covered: PCIGen and PCILanes carry the link shape that
+// BandwidthMBps was standing in for, and they do not move when a measurement is
+// repeated. Bandwidth remains load-bearing for the PACKED PLAN (orderGPUsByBandwidth
+// sorts on it), so callers that key a plan must use the pair below, not this hash
+// alone.
+func gpuIdentityHash(gpus []detect.GPU) string {
 	var parts []string
 	for _, g := range gpus {
-		// Stable hardware identity only: never include current free/used VRAM,
-		// but do include topology and capacity. Two same-name cards on x1 and
-		// x16 links are materially different placement hardware, as are two
-		// revisions carrying different VRAM sizes.
-		parts = append(parts, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d|bw%d",
+		parts = append(parts, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d",
 			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID,
-			g.PCIGen, g.PCILanes, g.BandwidthMBps))
+			g.PCIGen, g.PCILanes))
 	}
 	sort.Strings(parts)
 	input := strings.Join(parts, "\n") + "\n"
+	h := md5.New()
+	h.Write([]byte(input))
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
+// bandwidthClassMBps buckets a measured link bandwidth into a coarse class so it
+// can participate in a PLAN key without making that key volatile.
+//
+// Bandwidth is a real input to packing, so a plan key must still separate a
+// materially different link. But every use of it in the planner is an ORDERING or
+// a PROPORTION, never an absolute value:
+//
+//   - orderGPUsByBandwidth (placement.go:4792) sorts on it, descending;
+//   - expertOnlySlowGPUs (placement.go:4946) tests the ratio bw/maxBandwidth
+//     against the 0.33 cliff;
+//   - the dense and MoE split weights (placement.go:2567/2581) use
+//     effective_free_VRAM * bw / sum(...), a proportion again.
+//
+// So quantising it to an absolute bucket is behaviour-preserving as long as the
+// bucket stays finer than any real difference between two cards. Measured on this
+// project's three-card rig the smallest real gap is 129 MB/s (12,192 vs 12,321 on
+// two Gen3 x16 cards) and the largest is 5,923 (x16 vs the x8 3060). The bucket
+// must therefore sit below 129 and comfortably above the measurement noise, which
+// is +-3 MB/s observed between two `ggrun detect` runs on fixed hardware.
+//
+// 100 MB/s satisfies both with margin: it separates all four distinct links this
+// rig produces (12,192 / 12,321 / 15,760 / 7,880), and a value must move more than
+// 20 MB/s - roughly 7x the observed noise - before its class can change. It is
+// deliberately ABSOLUTE rather than a percentage: the noise is absolute, and a
+// relative bucket both merged genuinely different links (12,192 and 6,269 landed
+// in the same class) and flipped on smaller inputs (a 1,200 MB/s link moved class
+// on a 6 MB/s wobble).
+//
+// This is a key-stability device, not a costing device. It must never be used to
+// price anything: a caller that needs the magnitude must read BandwidthMBps.
+func bandwidthClassMBps(mbps int) string {
+	if mbps <= 0 {
+		// Unknown is its own class, never the lowest measured one: an unmeasured
+		// device must not inherit a plan key from a measured slow link.
+		return "unknown"
+	}
+	const classMBps = 100
+	return strconv.Itoa((mbps + classMBps/2) / classMBps)
+}
+
+// gpuSignatureHash keys a PLACEMENT PLAN: stable identity plus the coarse
+// bandwidth class, because packing depends on both.
+//
+// Fit/measurement keys (.probe, system_*.cache) must NOT use this. Nothing they
+// store depends on link bandwidth, and using it there is what stranded the probe
+// corpus. They use gpuIdentityHash directly.
+func gpuSignatureHash(gpus []detect.GPU) string {
+	var parts []string
+	for _, g := range gpus {
+		parts = append(parts, fmt.Sprintf("%d|%s|bw%s",
+			g.Index, g.PCIBusID, bandwidthClassMBps(g.BandwidthMBps)))
+	}
+	sort.Strings(parts)
+	input := gpuIdentityHash(gpus) + "\n" + strings.Join(parts, "\n") + "\n"
 	h := md5.New()
 	h.Write([]byte(input))
 	return fmt.Sprintf("%x", h.Sum(nil))[:12]
@@ -6991,7 +7071,9 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 		return nil
 	}
 	modelBase := filepath.Base(model.Path)
-	wantSig := gpuSignatureHash(gpus)
+	// Runtime graph growth is allocation state, not a speed figure: carry it
+	// across re-measurements of the link, so only the STABLE identity must match.
+	wantSig := gpuIdentityHash(gpus)
 	wantParallel := probeParallelKey(parallel)
 	exactByDevice := map[int]int{}
 	entries, err := os.ReadDir(cacheDir)
@@ -7807,7 +7889,7 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return
 	}
-	gpuSig := gpuSignatureHash(gpus)
+	gpuSig := gpuIdentityHash(gpus)
 	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
 	var b strings.Builder
 	fmt.Fprintf(&b, "# System probe (post-launch per-device measurement)\n")
@@ -8310,7 +8392,7 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	key := fmt.Sprintf("probe:v%d:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:",
 		placementProbeCacheVersion, modelIdentity, model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
-		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel)
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuIdentityHash(gpus), parallel)
 	hash := md5Hash12(key)
 	return filepath.Join(cacheDir, hash+".probe")
 }
@@ -8328,7 +8410,13 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // stable hardware signature. Older keys cannot prove either property.
 // Version 8 retires oracle measurements taken after memory-policy flags were
 // stripped from the serving argv (KV offload, full SWA and metadata overrides).
-const placementProbeCacheVersion = 8
+// Version 9 replaces the bandwidth-bearing GPU signature with the stable
+// gpuIdentityHash. Until 9 the measured link bandwidth was hashed at integer
+// precision, so re-measuring it (it drifts by single-digit MB/s run to run on
+// fixed hardware) minted a new key and orphaned every probe written under the
+// old one. Old entries are not recoverable under the new key by design; that
+// invalidation is the point, and it is declared here rather than left implicit.
+const placementProbeCacheVersion = 9
 
 // Bump whenever placement semantics can change emitted expert residency.
 // Version 6 removes the architecture-specific split-owner exclusion and lets
@@ -8337,7 +8425,11 @@ const placementProbeCacheVersion = 8
 // sliding-window layers were priced at their window depth even under --swa-full,
 // and a geometry measured at one KV type was not reused for another, so plans
 // were validated against an allocation the backend would never make.
-const placementPlanCacheVersion = 7
+// Version 8 keys on the coarse bandwidth class instead of the raw measured
+// value. Bandwidth still orders devices for packing, so it must separate a
+// materially different link; bucketing keeps that while stopping re-measurement
+// noise from discarding a plan that is still correct.
+const placementPlanCacheVersion = 8
 
 // swaFull belongs in the key because it changes the KV allocation without
 // changing anything else the key already carries: on Laguna the same context
@@ -8794,7 +8886,7 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Probe cache for %s\n", filepath.Base(model.Path))
 	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s parallel=%d\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallelKey)
+	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s parallel=%d\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuIdentityHash(gpus), parallelKey)
 	fmt.Fprintf(&b, "PROBE_CACHE_SCHEMA=%d\n", probeCacheSchema)
 	// The conditions every number below was measured under. Without them a
 	// reader cannot tell a healthy measurement from one taken while the previous

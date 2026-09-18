@@ -152,7 +152,7 @@ func TestLegacyMeasuredCachesMigrateToAppCache(t *testing.T) {
 	}
 
 	gpus := []detect.GPU{{Index: 0, Name: "RTX 3090 Ti", Driver: "580"}}
-	systemName := fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus))
+	systemName := fmt.Sprintf("system_%s.cache", gpuIdentityHash(gpus))
 	legacySystem := filepath.Join(home, ".cache", "ggrun", systemName)
 	if err := os.WriteFile(legacySystem, []byte("SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB=488\n"), 0644); err != nil {
 		t.Fatal(err)

@@ -938,7 +938,7 @@ func TestComputeDeepSeekV4DoesNotUseLegacyGlobalKVToForceFullContext(t *testing.
 	if err := os.WriteFile(kvCachePath("", model), []byte("KV_BYTES_PER_TOK_f16=6912.2500\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	systemPath := filepath.Join(legacyDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs)))
+	systemPath := filepath.Join(legacyDir, fmt.Sprintf("system_%s.cache", gpuIdentityHash(caps.GPUs)))
 	systemData := "SYS_CUDA_OVERHEAD_MB_CUDA0=488\n" +
 		"SYS_CUDA_OVERHEAD_MB_CUDA1=311\n" +
 		"SYS_CUDA_OVERHEAD_MB_CUDA2=367\n" +
@@ -1021,7 +1021,7 @@ func TestComputeDeepSeekV4Parallel4UsesMeasuredStableWholeLayerPlan(t *testing.T
 		"SYS_CUDA_OVERHEAD_MB_CUDA1=311\n" +
 		"SYS_CUDA_OVERHEAD_MB_CUDA2=367\n" +
 		"SYS_CUDA_OVERHEAD_MB=488\n"
-	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs))), []byte(systemData), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuIdentityHash(caps.GPUs))), []byte(systemData), 0644); err != nil {
 		t.Fatal(err)
 	}
 	for _, ubatch := range []int{512, 256, 128, 64} {
@@ -1160,7 +1160,7 @@ func TestComputeSplitOwnerChargesPerGPUComputeNotAggregate(t *testing.T) {
 		MeasuredKVBytesPerTok: map[string]float64{"f16": 6912.25},
 	}
 	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs))),
+	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuIdentityHash(caps.GPUs))),
 		[]byte("SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\nSYS_CUDA_OVERHEAD_MB=488\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1288,7 +1288,7 @@ func TestLadderDescentsWhenBasePlanCPUOverFills(t *testing.T) {
 		MeasuredKVBytesPerTok: map[string]float64{"f16": 6912.25},
 	}
 	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(caps.GPUs))),
+	if err := os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuIdentityHash(caps.GPUs))),
 		[]byte("SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\nSYS_CUDA_OVERHEAD_MB_CUDA2=367\nSYS_CUDA_OVERHEAD_MB=488\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -5170,7 +5170,7 @@ func TestLoadSystemProbeDropsCurrentSchemaOutliers(t *testing.T) {
 		{Index: 1, Name: "RTX 3090 Ti", VRAMTotalMB: 24564},
 		{Index: 2, Name: "RTX 3060", VRAMTotalMB: 12288},
 	}
-	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
+	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuIdentityHash(gpus)))
 	// Schema 2 still latched a 4230 MiB "overhead" on CUDA1 after a DeepSeek
 	// load. That is graph/KV, not CUDA context; charging it on the next launch
 	// moved four expert layers onto the CPU.
@@ -5221,7 +5221,7 @@ func TestHostOverheadProbeDoesNotRemeasureAlreadyMeasuredCards(t *testing.T) {
 		{Index: 1, Name: "RTX 3060", VRAMTotalMB: 12288},
 		{Index: 2, Name: "RTX 4070", VRAMTotalMB: 12282},
 	}
-	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuSignatureHash(gpus)))
+	path := filepath.Join(dir, fmt.Sprintf("system_%s.cache", gpuIdentityHash(gpus)))
 	good := "SYS_PROBE_SCHEMA=2\nSYS_CUDA_OVERHEAD_MB_CUDA0=1327\n" +
 		"SYS_CUDA_OVERHEAD_MB_CUDA1=301\nSYS_CUDA_OVERHEAD_MB_CUDA2=359\nSYS_CUDA_OVERHEAD_MB=1327\n"
 	if err := os.WriteFile(path, []byte(good), 0o644); err != nil {
