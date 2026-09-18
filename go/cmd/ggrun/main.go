@@ -586,7 +586,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
 				skip = true
 			}
 			continue
@@ -739,8 +739,12 @@ type launchRequest struct {
 	// different user workload/quality policies isolated.
 	ProfilePolicyIdentity string
 	EmitServerArgvJSON    bool // dry-run machine interface for reproducible benchmark harnesses
-	SpecDraftMax          int  // internal spec-test ceiling; not a public launch override
-	ExtraArgs             []string
+	// InventoryPath names a captured hardware inventory (detect.Capabilities JSON)
+	// to plan against instead of the live machine. Accepted on dry-run only; a
+	// real launch refuses it, because provisional plans are not admission proof.
+	InventoryPath string
+	SpecDraftMax  int // internal spec-test ceiling; not a public launch override
+	ExtraArgs     []string
 	// ChatTemplateOverride names a chat-template catalog entry (pkg/chattemplate)
 	// the user explicitly selected with --chat-template. It forces that entry's
 	// corrected template regardless of the model's arch/basename, and overrides
@@ -1082,6 +1086,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if a == "--emit-server-argv-json" {
 				req.EmitServerArgvJSON = true
 			}
+			continue
+		case "--inventory":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.InventoryPath = v
 			continue
 		case "--model", "-m":
 			v, err := next()
@@ -6009,6 +6020,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(2)
 	}
+	refuseInventoryOnLaunch(req)
 	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun launch <model.gguf>")
 		os.Exit(2)
@@ -7321,6 +7333,51 @@ func cmdGUI() {
 	}
 }
 
+// loadInventory reads a captured hardware inventory for planning.
+//
+// This is deliberately reachable ONLY from a dry-run. Every path that can start
+// a model must refuse `--inventory`: invariant 4 makes exact-argv admission,
+// process-scoped failure containment and observed allocations the authorities
+// for what fits, and a plan computed against hardware that is not present would
+// defeat that fail-closed boundary. The refusal is enforced at the call sites
+// rather than here, so this stays a single explicit read.
+func loadInventory(path string) (*detect.Capabilities, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	caps, err := detect.LoadCapabilities(data)
+	if err != nil {
+		return nil, err
+	}
+	// A plan is only meaningful against hardware that is actually free. A
+	// captured inventory carries whatever VRAM was in use at capture time, so a
+	// stale capture would plan around a server that has since exited.
+	fmt.Fprintf(os.Stderr,
+		"[inventory] planning against %d GPU(s) from %s (planning only; no device is touched)\n",
+		len(caps.GPUs), path)
+	return caps, nil
+}
+
+// refuseInventoryOnLaunch stops a real launch from planning against synthetic
+// hardware. Called on every launch path.
+func refuseInventoryOnLaunch(req *launchRequest) {
+	if req.InventoryPath == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Error: --inventory is a dry-run planning input and cannot be used to launch.\n"+
+			"A launch must be admitted against the hardware that is present; a plan for other\n"+
+			"hardware is not admission proof. Re-run without --inventory, or use `ggrun dry-run`.\n")
+	os.Exit(2)
+}
+
 func cmdDryRun(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
@@ -7336,6 +7393,17 @@ func cmdDryRun(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
 		os.Exit(1)
+	}
+	// A dry-run may plan for a DIFFERENT machine, or for this one while another
+	// process holds its VRAM. Planning-only: real launches refuse the flag
+	// outright (see loadInventory), because exact-argv admission and observed
+	// allocations are the authority for what actually fits.
+	if req.InventoryPath != "" {
+		caps, err = loadInventory(req.InventoryPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading inventory: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	cfg := loadConfigOrExit()

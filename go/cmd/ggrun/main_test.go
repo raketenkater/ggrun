@@ -4611,3 +4611,40 @@ func TestClaudeReviewerAutoRequiresClaudeCodeLikeOtherValues(t *testing.T) {
 		}
 	}
 }
+
+// --inventory lets a dry-run plan for a machine other than the one running
+// ggrun, or for this one while another process holds its VRAM. The flag is
+// planning-only: it must be parsed but must never be usable to launch, because
+// invariant 4 makes exact-argv admission against present hardware the authority.
+func TestParseLaunchArgsRetainsInventoryForPlanning(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--inventory", "/tmp/box.json"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.InventoryPath != "/tmp/box.json" {
+		t.Fatalf("--inventory was not retained: %q", req.InventoryPath)
+	}
+}
+
+// A missing value must be an error, not a silently empty path that would fall
+// back to planning against the live machine.
+func TestParseLaunchArgsInventoryNeedsAValue(t *testing.T) {
+	isolateConfig(t)
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--inventory"}); err == nil {
+		t.Fatal("--inventory with no value was accepted")
+	}
+}
+
+// The flag must not be swallowed by the "skip the next token" walk that handles
+// value-taking flags, or the path would be re-parsed as a positional argument.
+func TestInventoryValueIsNotTreatedAsAPositionalArg(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--inventory", "/tmp/box.json"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.ModelPath != "model.gguf" {
+		t.Fatalf("the inventory path displaced the model path: %q", req.ModelPath)
+	}
+}
