@@ -4679,3 +4679,54 @@ func TestInventoryEmptyEqualsFormIsAnError(t *testing.T) {
 		t.Fatal("--inventory= with no path was accepted; it would plan against the live machine")
 	}
 }
+
+// --ctx-checkpoints must produce exactly ONE value in the argv.
+//
+// It previously had no parse case, so the token fell through to ExtraArgs and
+// the emitted argv carried the coordinate twice: ggrun's derived value and the
+// user's. llama.cpp keeps the last, so the override appeared to work — but two
+// values for one coordinate is the partial overlay invariant 2 forbids, and it
+// makes "diff the final full argv" comparisons ambiguous.
+func TestCtxCheckpointsOverrideReplacesTheDerivedValue(t *testing.T) {
+	isolateConfig(t)
+
+	// Both spellings must parse into the request rather than ExtraArgs.
+	for _, form := range [][]string{
+		{"model.gguf", "--ctx-checkpoints", "32"},
+		{"model.gguf", "--ctx-checkpoints=32"},
+		{"model.gguf", "-ctxcp", "32"},
+	} {
+		req, err := parseLaunchArgs(form)
+		if err != nil {
+			t.Fatalf("%v: parse: %v", form, err)
+		}
+		if !req.MaxCheckpointsSet || req.MaxCheckpoints != 32 {
+			t.Errorf("%v did not set the override: set=%v value=%d",
+				form, req.MaxCheckpointsSet, req.MaxCheckpoints)
+		}
+		for _, a := range req.ExtraArgs {
+			if strings.HasPrefix(a, "--ctx-checkpoints") || strings.HasPrefix(a, "-ctxcp") {
+				t.Errorf("%v leaked the flag into ExtraArgs: %q — it would be "+
+					"appended to the derived value and emitted twice", form, a)
+			}
+		}
+	}
+}
+
+// An explicit 0 is a real decision (disable checkpoints), not "unset", so the
+// setter needs its own bool. Without it a 0 override would be indistinguishable
+// from the zero value and silently ignored.
+func TestCtxCheckpointsZeroIsAnExplicitOverride(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--ctx-checkpoints", "0"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !req.MaxCheckpointsSet {
+		t.Error("--ctx-checkpoints 0 was treated as unset; the user asked to " +
+			"disable checkpoints and would silently get the derived cap instead")
+	}
+	if req.MaxCheckpoints != 0 {
+		t.Errorf("value = %d, want 0", req.MaxCheckpoints)
+	}
+}

@@ -686,15 +686,21 @@ type launchRequest struct {
 	ParallelSet          bool // --parallel given explicitly; claude-code mode must not override it
 	Threads              int  // --threads; 0 keeps the physical-core default
 	CacheRAMMB           int  // --cache-ram; 0 keeps the derived prompt-cache budget
-	ClaudeMaxActive      int  // --claude-max-active; 0 means no admission limit
-	ClaudeMaxActiveSet   bool
-	BatchSize            int
-	BatchSizeSet         bool
-	UBatchSize           int
-	UBatchSizeSet        bool
-	Benchmark            bool
-	WorkerBenchmark      bool // task-specific support/reviewer quality plus throughput
-	ClaudeCode           bool
+	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. -1 (the zero
+	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
+	// the field exists because leaving the flag unparsed let it fall through to
+	// ExtraArgs and emit the coordinate twice.
+	MaxCheckpoints     int
+	MaxCheckpointsSet  bool
+	ClaudeMaxActive    int // --claude-max-active; 0 means no admission limit
+	ClaudeMaxActiveSet bool
+	BatchSize          int
+	BatchSizeSet       bool
+	UBatchSize         int
+	UBatchSizeSet      bool
+	Benchmark          bool
+	WorkerBenchmark    bool // task-specific support/reviewer quality plus throughput
+	ClaudeCode         bool
 	// ClaudeReviewerOverride selects the local reviewer/worker model when
 	// Claude Code mode starts its Auto companion: "auto" (and the historical
 	// "qwen") resolve to the Qwen3.5-4B worker/reviewer, "qwen2b" forces the
@@ -983,6 +989,18 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 					return nil, err
 				}
 				req.CacheRAMMB = cram
+				continue
+			case "--ctx-checkpoints", "-ctxcp":
+				// Without this case the token falls through to ExtraArgs and the
+				// argv carries the coordinate twice — the derived value and this
+				// one. llama.cpp keeps the last, so it appeared to work, but two
+				// values for one coordinate is exactly the partial overlay
+				// invariant 2 forbids and ambiguous to diff.
+				cps, err := parseNonNegativeFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.MaxCheckpoints, req.MaxCheckpointsSet = cps, true
 				continue
 			case "--claude-max-active":
 				limit, err := parseNonNegativeFlag(key, val)
@@ -1344,6 +1362,16 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.CacheRAMMB = cram
+		case "--ctx-checkpoints", "-ctxcp":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			cps, err := parseNonNegativeFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.MaxCheckpoints, req.MaxCheckpointsSet = cps, true
 		case "--claude-max-active":
 			v, err := next()
 			if err != nil {
@@ -2736,6 +2764,8 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		ParallelExplicit:        req.ParallelSet,
 		Threads:                 req.Threads,
 		CacheRAMMB:              req.CacheRAMMB,
+		MaxCheckpoints:          req.MaxCheckpoints,
+		MaxCheckpointsSet:       req.MaxCheckpointsSet,
 		// --swa-full is a passthrough flag, but placement cannot treat it as
 		// one: it decides whether sliding-window layers hold the whole context,
 		// which on Laguna is the difference between 13.8 GB and 54.0 GB of KV

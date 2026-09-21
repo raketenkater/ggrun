@@ -689,6 +689,19 @@ type Options struct {
 	// the same box. Sizing that correctly needs a measurement per model, so the
 	// override exists to take it.
 	CacheRAMMB int
+	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. Zero means
+	// "keep the derived value"; MaxCheckpointsSet distinguishes an explicit 0
+	// (disable checkpoints, which is a real derived decision the emitter must be
+	// able to express) from unset.
+	//
+	// It exists as a first-class option rather than a passthrough for a concrete
+	// reason: an unparsed --ctx-checkpoints fell through to ExtraArgs and the
+	// emitted argv carried the coordinate twice — the derived value and the
+	// user's. llama.cpp keeps the last, so the override appeared to work, but two
+	// values for one coordinate is the partial overlay invariant 2 forbids, and
+	// it makes a "diff the final full argv" comparison ambiguous.
+	MaxCheckpoints    int
+	MaxCheckpointsSet bool
 	// BatchSize and UBatchSize are explicit launcher requests. A positive value
 	// must be accounted for before placement is chosen; treating it as a late
 	// backend override can make the emitted server graph exceed the plan.
@@ -1823,13 +1836,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 						LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 					}
 					if s.CRAM == 0 {
-						cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
-						if opts.CacheRAMMB > 0 {
-							cram = opts.CacheRAMMB
-						}
-						s.CRAM = cram
-						s.MaxCheckpoints = maxCheckpoints
-						s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
+						applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 					}
 					if s.Host == "" {
 						s.Host = "127.0.0.1"
@@ -1914,11 +1921,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 			if !opts.SkipCachedConfig {
 				LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 			}
-			s.CRAM, s.MaxCheckpoints = computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
-			s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
-			if opts.CacheRAMMB > 0 {
-				s.CRAM = opts.CacheRAMMB
-			}
+			applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 			if s.Host == "" {
 				s.Host = "127.0.0.1"
 			}
@@ -1996,13 +1999,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	if !opts.SkipCachedConfig {
 		LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 	}
-	cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
-	if opts.CacheRAMMB > 0 {
-		cram = opts.CacheRAMMB
-	}
-	s.CRAM = cram
-	s.MaxCheckpoints = maxCheckpoints
-	s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
+	applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 
 	// Default host
 	if s.Host == "" {
@@ -5477,6 +5474,30 @@ func StrategyVRAMHeadroomMB(caps *detect.Capabilities, model *ModelProfile, s *S
 }
 
 // computeCRAM calculates prompt cache size from remaining memory after load.
+// applyRuntimeCachePolicy derives the host prompt-cache budget and checkpoint cap
+// for a resolved strategy, honouring the explicit overrides.
+//
+// It exists because the derivation was written out at three separate call sites,
+// and an override added to one of them silently did nothing on the other two —
+// the observed failure was `--ctx-checkpoints 32` emitting the derived 16. One
+// function means one place for the overrides to be correct.
+func applyRuntimeCachePolicy(model *ModelProfile, s *Strategy, caps *detect.Capabilities,
+	totalSizeMB, kvTotalMB int, opts Options) {
+	cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
+	if opts.CacheRAMMB > 0 {
+		cram = opts.CacheRAMMB
+	}
+	if opts.MaxCheckpointsSet {
+		// Replace, never append: one coordinate, one value. An explicit 0 is a
+		// real decision (disable checkpoints when VRAM is tight) and must be
+		// expressible, which is why the setter carries a separate bool.
+		maxCheckpoints = opts.MaxCheckpoints
+	}
+	s.CRAM = cram
+	s.MaxCheckpoints = maxCheckpoints
+	s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
+}
+
 func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int) (int, int) {
 	numGPUs := len(caps.GPUs)
 
