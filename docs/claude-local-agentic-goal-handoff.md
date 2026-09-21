@@ -1,5 +1,12 @@
 # ggrun: easy, useful local agentic work
 
+> **Current handoff — 2026-09-20:** read
+> [/home/mik/ggrun-project/ggrun/docs/claude-local-agentic-goal-handoff.md](/home/mik/ggrun-project/ggrun/docs/claude-local-agentic-goal-handoff.md)
+> first, including `LIVE-20260920` in that checkout's core TODO ledger. It contains
+> the latest phase-specific live findings, reasoning corrections and next tasks.
+> The material below is historical; keep new status in the canonical handoff.
+> This pointer and development evidence remain local, not for publication.
+
 User-aligned handoff, 2026-09-14. This is a development plan, not a claim that
 the acceptance checks below have passed. Refresh branch and CI state before
 acting; preserve the existing dirty production checkout.

@@ -2,7 +2,8 @@
 
 Branch: `goal/agentic-speed-and-hardware`, based on `main` @ `9d44a31`
 (2026-09-16). Worktree: `/home/mik/ggrun-project/ggrun-perf`.
-Created 2026-09-17. **Nothing is committed on this branch yet.**
+Created 2026-09-17. As reviewed on 2026-09-20: six local commits through
+`e593c4b`; no fresh-load or matched agent-work validation of this branch yet.
 
 This file states what the branch is for, how "done" is judged, and where the
 evidence lives — so a different model can review the work without re-deriving
@@ -22,12 +23,16 @@ The user restated it on 2026-09-17 as two coupled aims:
    given hardware.
 2. **Use the given hardware to the fullest** — use all available compute.
 
-**These two conflict on this rig, and the conflict is measured, not theoretical.**
-Note the earlier `/goal` phrasing ("reach maximum hardware usage ... which should
-result in fastest possible serving") was **retired as false on this rig**: six
-matched arms showed raising VRAM spend is same-or-slower. What survives is that
-aim 2 is a real user requirement, while aim 1 is the tie-breaker — so a change
-must not buy speed by leaving hardware idle *without saying so*.
+**Correction from the September 20 review:** judge hardware use by the useful
+agent work it enables. The earlier VRAM-spend comparisons do not establish a
+fundamental conflict between using available compute and fast agent work.
+Agent-work speed and correctness are the objective, not a tie-breaker against
+occupancy. Keep hardware counters as evidence for bottleneck diagnosis.
+
+Read the current review in the canonical local handoff:
+`/home/mik/ggrun-project/ggrun/docs/claude-local-agentic-goal-handoff.md`.
+Its `LIVE-20260920` evidence distinguishes decode, full prompt reprocessing and
+queueing, and supersedes the older categorical DRAM-latency diagnosis.
 
 ## What "best" is judged by (invariants, from the change contract)
 
@@ -91,16 +96,39 @@ Three things follow, and they are the reason this branch exists:
    tokens/second, no cache-prefix reuse, no queue/TTFT, no thread count, and no
    feedback from the agent-work measurements the project already collects. That
    is the concrete thing to fix.
-3. **The plan is 4 expert layers worse than a plan ggrun itself computed.** Every
-   `.place` record for this model at the live coordinates (ctx 262144 / ub 256 /
-   par 1 / kv q8_0) agrees: `d4f0fa99dca4` (2026-09-15) stores
-   `CACHED_NCPUMOE=25` with 23 GPU expert layers; `8e0cf3887cc2`, `38e30480c79c`,
-   `c8b97d05c89b`, `88a847b97a70`, `9d6f1d5897ff` cluster at 25–27. **The live run
-   is on 29 with 19 GPU layers.** The KV-first reservation is honoured and *not*
-   the cause (self-KV 3,264 MiB is on the GPUs at the charged amounts,
-   `PROBED_CONTEXT_MB_HOST=0`), and the place-cache key did not change, so this
-   is not a schema migration. The gap is unexplained and is the concrete defect
-   this branch exists to close.
+3. ~~**The plan is 4 expert layers worse than a plan ggrun itself computed.**~~
+   **RETRACTED — see "The premise, retired" immediately below.** This was the
+   branch's founding claim and it does not survive. It is kept struck-through
+   rather than deleted so the correction has something to point at, but it is no
+   longer a reason to do anything.
+
+   ### The premise, retired — 2026-09-21
+
+   **Do not act on item 3 above.** Three independent findings retired it:
+
+   - **The comparison was never like-for-like.** The cached records it leans on
+     were written under a different place-cache key generation, so "identical
+     coordinates" is not true in the frame that decides placement.
+   - **The cluster differs in a field outside the key.** All 28 Flash `.place`
+     records split cleanly on the third card's free VRAM (`2:8075` vs `2:11909`),
+     because `--fit off` is not part of the key while the planner depends on it.
+     So the cluster the claim compares against is a different configuration class.
+   - **The engine's own search contradicted it.** Given a free machine and a real
+     workload, ggrun moved the plan *away* from high residency — it ended on all
+     serial work on one card — and matched or beat its own initial plan on
+     identical prompts.
+
+   **Layer count is not a defect indicator.** More resident expert layers is not
+   the same as faster, and the branch's job is to choose the best configuration,
+   not the fullest one.
+
+   What *did* survive from the original investigation is a real cache defect,
+   fixed in `78b51b6` and verified live: the GPU signature hashed the measured
+   link bandwidth at integer precision, that value drifts ±3 MB/s on unchanged
+   hardware, and **535 of 643 stored probes were stranded** by it. That is a
+   genuine bug with a measured consequence — the live Flash-Next launch began two
+   minutes before the first probe was rewritten under a new signature and planned
+   from no measured evidence. It is just not the "four layers" claim.
 
    *Correction to an earlier reading of this branch:* the broader "25–27 cluster"
    spans **different coordinates** (ctx 196,608–1,048,576, ub 64–512, par 1–4) and
@@ -261,10 +289,8 @@ Three things follow, and they are the reason this branch exists:
 
 ## Reviewer notes
 
-For the reviewing model: the honest state is that **aim 2 (use all compute) and
-aim 1 (fastest agentic work) are in measured tension here**, and the unresolved
-question is whether today's plan is the best of the two or merely a fit-driven
-compromise. The first useful review question is not "is the code correct" but
-**"is the packer's objective the right one, and is the live plan optimal under
-it?"** — because if the objective is wrong, every downstream tuning is settled in
-the wrong direction.
+For review, first establish correct evidence identity and generic boundary
+behavior. Then ask whether the complete admitted configuration improves actual
+agent workflows at the requested context and quality. Phase-specific observation
+can nominate a challenger; only matched live evidence can establish its benefit.
+Do not infer a universal optimum or a hardware/speed conflict from VRAM occupancy.

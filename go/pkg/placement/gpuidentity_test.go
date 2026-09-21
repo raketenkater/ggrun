@@ -106,26 +106,15 @@ func TestPlacementKeyStillSeparatesARealBandwidthChange(t *testing.T) {
 	}
 }
 
-// And the plan key must still be stable against noise, or the fix has only moved
-// the problem from the probe cache to the placement cache. These are the values
-// this rig actually produces (4070 / 3090 Ti / 3060), moved by the observed
-// run-to-run spread.
-func TestPlacementKeySurvivesBandwidthNoise(t *testing.T) {
-	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
-	// One fixed directory: t.TempDir() inside the closure would make every call
-	// differ by path alone and the comparison would prove nothing.
-	dir := t.TempDir()
-	args := func(gpus []detect.GPU) string {
-		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1, "0.29,0.63,0.08", false)
-	}
-
-	base := args(fitBox(12192, 12321, 6269))
-	jittered := args(fitBox(12210, 12305, 6255))
-	if base != jittered {
-		t.Error("plan key moved on measurement noise this rig produces: " +
-			"a re-measured link would discard a still-correct plan")
-	}
-}
+// NOTE: a TestPlacementKeySurvivesBandwidthNoise lived here and was VACUOUS.
+// It called PlacementCachePathFor with a hardcoded split and two fixtures that
+// differed only in BandwidthMBps, so both calls produced byte-identical keys
+// whether or not the key carried a bandwidth term — it could not fail, and a
+// second senior review caught it. The property it meant to assert (the key must
+// not flap on measurement noise) is covered properly by
+// TestPlanKeySeparatesALinkChangeWithoutATensorSplit below, which drives an
+// EMPTY split the way the real lookup path does and asserts both halves:
+// stable under +-3 MB/s, and different for a real link change.
 
 // The edge case that a coarse CLASS could not survive, and the reason the class
 // was removed rather than widened.
