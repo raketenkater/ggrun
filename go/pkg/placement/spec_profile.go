@@ -132,19 +132,27 @@ func specArtifactStatIdentity(path string) string {
 // just a stored speed figure.
 //
 // Identity-class facts only. Bandwidth is deliberately absent: it is an ordering
-// input to planning, not a machine identity, and the placement key already carries
-// a coarse class of it where a plan genuinely depends on the link. PCIGen and
-// PCILanes are kept because link shape is a real per-machine property that does
-// not move when a measurement repeats.
+// input to planning, not a machine identity. (An earlier version of this comment
+// justified that by pointing at a coarse bandwidth class in the placement key;
+// that class was removed in 97404a3 because tensorSplit already carries what a
+// bandwidth change moves, so the key separates plans without a bandwidth term.
+// The conclusion is unchanged and now rests on the plan key carrying the split,
+// not on a class that no longer exists.)
+//
+// g.Index is absent for the same reason as in gpuIdentityHash: it is a slot
+// ordinal assigned by bus-id sort (detect.go:185-189), so a reseat or a driver
+// reload re-orphaned the record for no information gained. PCIBusID is the
+// card's stable address; PCIGen and PCILanes are kept because link shape is a
+// real per-machine property that does not move when a measurement repeats.
 func SpecHardwareIdentity(caps *detect.Capabilities) string {
 	if caps == nil {
 		return ""
 	}
 	parts := make([]string, 0, len(caps.GPUs))
 	for _, gpu := range caps.GPUs {
-		parts = append(parts, fmt.Sprintf("%d:%s:%d:%s:%s:%s:%d:%d",
-			gpu.Index, gpu.Name, gpu.VRAMTotalMB, gpu.Driver, gpu.ComputeCap,
-			gpu.PCIBusID, gpu.PCIGen, gpu.PCILanes))
+		parts = append(parts, fmt.Sprintf("%s:%s:%d:%s:%s:%d:%d",
+			gpu.PCIBusID, gpu.Name, gpu.VRAMTotalMB, gpu.Driver, gpu.ComputeCap,
+			gpu.PCIGen, gpu.PCILanes))
 	}
 	sort.Strings(parts)
 	parts = append(parts, caps.OS, caps.Arch, caps.CPU.Model, strconv.Itoa(caps.CPU.Cores), strconv.Itoa(caps.CPU.Threads), strconv.Itoa(caps.RAM.TotalMB))

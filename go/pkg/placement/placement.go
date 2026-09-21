@@ -8408,13 +8408,19 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // stable hardware signature. Older keys cannot prove either property.
 // Version 8 retires oracle measurements taken after memory-policy flags were
 // stripped from the serving argv (KV offload, full SWA and metadata overrides).
-// Version 9 replaces the bandwidth-bearing GPU signature with the stable
+// Version 9 replaced the bandwidth-bearing GPU signature with the stable
 // gpuIdentityHash. Until 9 the measured link bandwidth was hashed at integer
 // precision, so re-measuring it (it drifts by single-digit MB/s run to run on
 // fixed hardware) minted a new key and orphaned every probe written under the
-// old one. Old entries are not recoverable under the new key by design; that
-// invalidation is the point, and it is declared here rather than left implicit.
-const placementProbeCacheVersion = 9
+// old one.
+// Version 10 drops g.Index from that identity. Index is a slot ordinal assigned
+// by bus-id sort, so a reseat, a driver reload, or a machine that enumerates in
+// another order changed the key again for no information gained. Bumped
+// separately from 9 because it is a second, independent change to what the key
+// means: a reader of a v9 file cannot know which fields were in it.
+// Old entries are not recoverable under a new key by design; that invalidation
+// is the point, and it is declared here rather than left implicit.
+const placementProbeCacheVersion = 10
 
 // Bump whenever placement semantics can change emitted expert residency.
 // Version 6 removes the architecture-specific split-owner exclusion and lets
@@ -8423,11 +8429,14 @@ const placementProbeCacheVersion = 9
 // sliding-window layers were priced at their window depth even under --swa-full,
 // and a geometry measured at one KV type was not reused for another, so plans
 // were validated against an allocation the backend would never make.
-// Version 8 keys on the coarse bandwidth class instead of the raw measured
-// value. Bandwidth still orders devices for packing, so it must separate a
-// materially different link; bucketing keeps that while stopping re-measurement
-// noise from discarding a plan that is still correct.
-const placementPlanCacheVersion = 8
+// Version 8 keyed on a coarse bandwidth class instead of the raw measured value.
+// Version 9 REMOVES the bandwidth term entirely. The class was redundant: the
+// key already carries tensorSplit, and the split is the normalised proportion a
+// bandwidth change actually moves, so the plan is separated without a separate
+// bandwidth field. It was also actively harmful — the class was a 100 MB/s grid,
+// so a value on an edge changed class on a 1 MB/s move (12,149 classified 121 and
+// 12,150 classified 122) and minted a new plan key for an unchanged plan.
+const placementPlanCacheVersion = 9
 
 // swaFull belongs in the key because it changes the KV allocation without
 // changing anything else the key already carries: on Laguna the same context
