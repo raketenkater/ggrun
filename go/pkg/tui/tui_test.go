@@ -2384,38 +2384,70 @@ func TestTerminalAvailableFollowsStdinNotADevicePath(t *testing.T) {
 }
 
 // The platform-independent half of the #63 regression, expressible without a
-// Windows console: the terminal check must not be derived from the Unix device
-// path. A source-level assertion, because the behavioural one above cannot fail
-// on Linux (where /dev/tty exists) and no CI job runs Go tests on Windows.
+// Windows console: the terminal check must be platform-split, and on Unix it must
+// consult stdin AND keep bubbletea's /dev/tty fallback.
 //
-// If the check is reimplemented by opening "/dev/tty", this fails. If it is
-// reimplemented portably, it passes — the intent is pinned even though the
-// mechanism may legitimately change.
-func TestTerminalCheckDoesNotDependOnAUnixDevicePath(t *testing.T) {
-	src, err := os.ReadFile("tui.go")
-	if err != nil {
-		t.Fatalf("read tui.go: %v", err)
+// Both properties are load-bearing, and a first fix attempt got the second one
+// wrong:
+//
+//  1. There must be a Windows implementation. The original bug was one unsplit
+//     terminalAvailable opening "/dev/tty", which cannot exist on Windows, so a
+//     bare `ggrun` reported no terminal at a real console and the TUI was
+//     unreachable there.
+//  2. On Unix, /dev/tty must remain ONE input, not the only one. It is
+//     bubbletea's documented fallback for a piped stdin that still owns a
+//     controlling terminal, so removing it refuses `echo x | ggrun`, which
+//     worked before. Verified with a pty: IsTerminal(stdin) false, /dev/tty
+//     opens — bubbletea would have run.
+//
+// This inspects the FUNCTION BODY, not the file: a first version of this guard
+// searched the whole file and passed when the fallback was deleted, because the
+// path was still mentioned in a comment. A guard that passes on prose is worse
+// than no guard.
+func TestTerminalCheckIsPlatformSplitAndKeepsTheUnixFallback(t *testing.T) {
+	body := func(file, sig string) string {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("%s is missing: %v — the check must be platform-split so "+
+				"Windows has its own implementation (issue #63)", file, err)
+		}
+		s := string(src)
+		i := strings.Index(s, sig)
+		if i < 0 {
+			t.Fatalf("%s does not define %s", file, sig)
+		}
+		j := strings.Index(s[i:], "\n}")
+		if j < 0 {
+			t.Fatalf("could not delimit %s in %s", sig, file)
+		}
+		// Strip comment lines so prose cannot satisfy a code assertion.
+		var code []string
+		for _, ln := range strings.Split(s[i:i+j], "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(ln), "//") {
+				code = append(code, ln)
+			}
+		}
+		return strings.Join(code, "\n")
 	}
-	body := string(src)
-	// Locate the terminalAvailable definition and inspect only its own body, so
-	// an unrelated mention of the path elsewhere cannot satisfy this.
-	start := strings.Index(body, "func terminalAvailable() bool {")
-	if start < 0 {
-		t.Fatal("terminalAvailable is gone; update this guard with it")
-	}
-	end := strings.Index(body[start:], "\n}")
-	if end < 0 {
-		t.Fatal("could not delimit terminalAvailable")
-	}
-	fn := body[start : start+end]
 
-	if strings.Contains(fn, "/dev/tty") {
-		t.Error("terminalAvailable opens the Unix-only /dev/tty again: on Windows " +
-			"that path never exists, so a bare ggrun would report no terminal at a " +
-			"real console and the TUI would be unreachable (issue #63)")
+	unix := body("terminal_unix.go", "func terminalAvailable() bool {")
+	win := body("terminal_windows.go", "func terminalAvailable() bool {")
+
+	if unix == "" || win == "" {
+		t.Fatal("both platform implementations are required")
 	}
-	if !strings.Contains(fn, "IsTerminal") {
-		t.Error("terminalAvailable no longer uses a platform-aware terminal check; " +
-			"the portable predicate is term.IsTerminal(fd)")
+	if !strings.Contains(unix, "/dev/tty") {
+		t.Error("the Unix check no longer opens /dev/tty: bubbletea opens it as " +
+			"the fallback for a piped stdin with a controlling terminal, so " +
+			"dropping it refuses `echo x | ggrun`, which worked before")
+	}
+	if !strings.Contains(unix, "IsTerminal") || !strings.Contains(unix, "os.Stdin.Fd()") {
+		t.Error("the Unix check must test stdin, which is bubbletea's primary input")
+	}
+	if strings.Contains(win, "/dev/tty") {
+		t.Error("the Windows check references /dev/tty, which cannot exist on Windows")
+	}
+	if !strings.Contains(win, "IsTerminal") {
+		t.Error("the Windows check does not use a console-aware predicate")
 	}
 }
