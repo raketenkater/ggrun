@@ -1,7 +1,6 @@
 package placement
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -77,19 +76,29 @@ func TestProbeCacheSurvivesABandwidthRemeasurement(t *testing.T) {
 }
 
 // The inverse, so the test above cannot pass by making the hash ignore hardware
-// entirely: a real bandwidth change must still move a PLAN key. Bandwidth orders
-// devices for packing (orderGPUsByBandwidth), so a plan computed for a 1 GB/s
-// link is not a plan for a 15 GB/s one.
+// entirely: a real link change must still move a PLAN key.
+//
+// The key does NOT carry bandwidth any more, so it separates these two plans
+// through tensorSplit — the split weights are proportional to free VRAM times
+// bandwidth, and the caller serialises them into the key. This test therefore
+// supplies the split each plan would actually produce, which is what the launch
+// path does, rather than a fixed literal that could not differ.
 func TestPlacementKeyStillSeparatesARealBandwidthChange(t *testing.T) {
 	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
 	dir := t.TempDir()
-	args := func(gpus []detect.GPU) string {
-		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1, "0.29,0.63,0.08", false)
+	args := func(gpus []detect.GPU, split string) string {
+		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1, split, false)
 	}
 
-	fast := args(fitBox(12192, 12321, 6269))
-	// CUDA2 degraded from x8 Gen3 to a genuinely narrower link.
-	slow := args(fitBox(12192, 12321, 1200))
+	gpus := fitBox(12192, 12321, 6269)
+	// Same devices, a genuinely narrower link on the third card. The placement
+	// weight is the bandwidth proportion the split is built from, so it moves even
+	// though the ORDER does not.
+	fast := args(gpus, splitCompactKey([]float64{
+		gpuPlacementWeight(gpus[0], "link"), gpuPlacementWeight(gpus[1], "link"), gpuPlacementWeight(gpus[2], "link")}))
+	slowG := fitBox(12192, 12321, 1200)
+	slow := args(slowG, splitCompactKey([]float64{
+		gpuPlacementWeight(slowG[0], "link"), gpuPlacementWeight(slowG[1], "link"), gpuPlacementWeight(slowG[2], "link")}))
 
 	if fast == slow {
 		t.Error("a real link change did not move the plan key: " +
@@ -118,40 +127,71 @@ func TestPlacementKeySurvivesBandwidthNoise(t *testing.T) {
 	}
 }
 
-// The class must separate every distinct link on this rig, including the two
-// Gen3 x16 cards whose 129 MB/s gap is the tightest real margin. A bucket coarser
-// than that gap would merge the 4070 and the 3090 Ti and lose their ordering.
-func TestBandwidthClassSeparatesEveryRealLink(t *testing.T) {
-	links := map[string]int{
-		"4070 Gen3 x16":    12192,
-		"3090 Ti Gen3 x16": 12321,
-		"3060 Gen3 x8":     6269,
-		"theoretical x16":  15760,
-		"theoretical x8":   7880,
+// The edge case that a coarse CLASS could not survive, and the reason the class
+// was removed rather than widened.
+//
+// A 100 MB/s class grid has an edge every 100 MB/s, so a value sitting on one
+// changed class on a 1 MB/s move: 12,149 classified as 121 and 12,150 as 122.
+// That minted a new plan key for a plan that had not changed. Measured directly
+// before the removal, orderGPUsByBandwidth returned the identical order [1 0 2]
+// for 12,149 and 12,151 — the key moved while the placement did not.
+//
+// No bucket width fixes this in general: any grid has edges, and the rig's
+// smallest real gap (129 MB/s) bounds how coarse the bucket may be. The plan key
+// does not need the class because it already carries tensorSplit, which is the
+// quantity a bandwidth change actually moves.
+func TestPlacementKeyIsStableAcrossAClassBoundary(t *testing.T) {
+	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
+	dir := t.TempDir()
+	args := func(gpus []detect.GPU) string {
+		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1, "0.29,0.63,0.08", false)
 	}
-	seen := map[string]string{}
-	for label, mbps := range links {
-		c := bandwidthClassMBps(mbps)
-		if other, dup := seen[c]; dup {
-			t.Errorf("%s (%d) and %s share bandwidth class %s: "+
-				"their ordering would be lost", label, mbps, other, c)
-		}
-		seen[c] = label
+
+	// The exact pair the goal handoff cites as a boundary failure.
+	if a, b := args(fitBox(12149, 12321, 6269)), args(fitBox(12151, 12321, 6269)); a != b {
+		t.Error("a 2 MB/s change moved the plan key — a class boundary is still " +
+			"in the key, and a re-measurement near it would discard a correct plan")
+	}
+	// And a value sitting exactly on the old grid edge.
+	if a, b := args(fitBox(12150, 12321, 6269)), args(fitBox(12149, 12321, 6269)); a != b {
+		t.Error("a 1 MB/s change moved the plan key at a grid edge")
 	}
 }
 
-// Missing evidence is its own class, never folded into a measured bucket: an
-// unmeasured device must not inherit a plan key from a measured slow one.
-func TestUnknownBandwidthDoesNotCollideWithAMeasuredLink(t *testing.T) {
-	if bandwidthClassMBps(0) == bandwidthClassMBps(1000) {
-		t.Error("an unmeasured link shares a plan key with a measured one")
+// The class was removed because tensorSplit already separates plans whose links
+// differ enough to matter. This pins that reasoning at the level that actually
+// decides it.
+//
+// The real split is `effective_free_VRAM * bandwidth / total` (placement.go:2581),
+// a NORMALISED proportion, and it is serialised into the key at two decimals by
+// splitCompactKey. Normalisation is what makes it stable: the observed run-to-run
+// spread (+2 / -3 / +1 MB/s here) moves each share by far less than 0.005, so the
+// two-decimal string is unchanged. A genuinely narrower link moves it enough to
+// show. This helper reproduces the real formula rather than supplying raw weights,
+// because raw weights are NOT what the key carries.
+func TestBandwidthMovesTheSplitWeightsNotJustTheOrder(t *testing.T) {
+	effectiveVRAM := []float64{12282, 24564, 12288}
+	splitKey := func(gpus []detect.GPU) string {
+		var total float64
+		for i, g := range gpus {
+			total += effectiveVRAM[i] * gpuPlacementWeight(g, "link")
+		}
+		share := make([]float64, len(gpus))
+		for i, g := range gpus {
+			share[i] = effectiveVRAM[i] * gpuPlacementWeight(g, "link") / total
+		}
+		return splitCompactKey(share)
 	}
-	if !strings.Contains(bandwidthClassMBps(0), "unknown") {
-		t.Errorf("unknown bandwidth should be labelled, got %q", bandwidthClassMBps(0))
+
+	fast := splitKey(fitBox(12192, 12321, 6269))
+	if slow := splitKey(fitBox(12192, 12321, 1200)); slow == fast {
+		t.Error("a genuinely slower third card did not move the split shares: " +
+			"the plan would be reused for a different topology")
 	}
-	// A plausible low measurement must not be mistaken for absence either.
-	if bandwidthClassMBps(0) == bandwidthClassMBps(500) {
-		t.Error("an unmeasured link collides with a slow measured link")
+	// The observed run-to-run spread must not move it, or the key is still
+	// unstable and the fix has only relocated the defect.
+	if jit := splitKey(fitBox(12194, 12318, 6270)); jit != fast {
+		t.Errorf("measurement noise moved the split shares: %s vs %s", fast, jit)
 	}
 }
 

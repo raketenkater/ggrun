@@ -6388,63 +6388,32 @@ func gpuIdentityHash(gpus []detect.GPU) string {
 	return fmt.Sprintf("%x", h.Sum(nil))[:12]
 }
 
-// bandwidthClassMBps buckets a measured link bandwidth into a coarse class so it
-// can participate in a PLAN key without making that key volatile.
+// gpuSignatureHash keys a PLACEMENT PLAN.
 //
-// Bandwidth is a real input to packing, so a plan key must still separate a
-// materially different link. But every use of it in the planner is an ORDERING or
-// a PROPORTION, never an absolute value:
+// It is the STABLE identity only. Bandwidth is deliberately absent, and the
+// reason is not that bandwidth is unimportant — it orders devices for packing —
+// but that its EFFECT is already in this key through the tensor split.
 //
-//   - orderGPUsByBandwidth (placement.go:4792) sorts on it, descending;
-//   - expertOnlySlowGPUs (placement.go:4946) tests the ratio bw/maxBandwidth
-//     against the 0.33 cliff;
-//   - the dense and MoE split weights (placement.go:2567/2581) use
-//     effective_free_VRAM * bw / sum(...), a proportion again.
+// A plan key of the form `place:v8:...:<this>:<parallel>:<tensorSplit>:swafull=`
+// (PlacementCachePathFor) already carries tensorSplit, and tensorSplit is exactly
+// the quantity a bandwidth change moves: orderGPUsByBandwidth sorts on bandwidth,
+// the order selects the split owner and weights, and the resulting TensorSplit is
+// serialised into the key. So two machines whose links differ enough to change the
+// plan produce different keys without any bandwidth term, and two measurements of
+// the same link — which leave the order identical — produce the same key.
 //
-// So quantising it to an absolute bucket is behaviour-preserving as long as the
-// bucket stays finer than any real difference between two cards. Measured on this
-// project's three-card rig the smallest real gap is 129 MB/s (12,192 vs 12,321 on
-// two Gen3 x16 cards) and the largest is 5,923 (x16 vs the x8 3060). The bucket
-// must therefore sit below 129 and comfortably above the measurement noise, which
-// is +-3 MB/s observed between two `ggrun detect` runs on fixed hardware.
+// The previous version of this function added a coarse bandwidth CLASS as well,
+// to "separate a materially different link". That was redundant with tensorSplit
+// and actively harmful: the class is a 100 MB/s grid with an edge every 100 MB/s,
+// so a value sitting on an edge changed class on a 1 MB/s move (12,149 -> 121,
+// 12,150 -> 122) and minted a new plan key for an unchanged plan. Measured
+// directly: 12,149 and 12,151 classify as 121 and 122 while orderGPUsByBandwidth
+// returns the identical order [1 0 2] for both — a key change describing nothing.
 //
-// 100 MB/s satisfies both with margin: it separates all four distinct links this
-// rig produces (12,192 / 12,321 / 15,760 / 7,880), and a value must move more than
-// 20 MB/s - roughly 7x the observed noise - before its class can change. It is
-// deliberately ABSOLUTE rather than a percentage: the noise is absolute, and a
-// relative bucket both merged genuinely different links (12,192 and 6,269 landed
-// in the same class) and flipped on smaller inputs (a 1,200 MB/s link moved class
-// on a 6 MB/s wobble).
-//
-// This is a key-stability device, not a costing device. It must never be used to
-// price anything: a caller that needs the magnitude must read BandwidthMBps.
-func bandwidthClassMBps(mbps int) string {
-	if mbps <= 0 {
-		// Unknown is its own class, never the lowest measured one: an unmeasured
-		// device must not inherit a plan key from a measured slow link.
-		return "unknown"
-	}
-	const classMBps = 100
-	return strconv.Itoa((mbps + classMBps/2) / classMBps)
-}
-
-// gpuSignatureHash keys a PLACEMENT PLAN: stable identity plus the coarse
-// bandwidth class, because packing depends on both.
-//
-// Fit/measurement keys (.probe, system_*.cache) must NOT use this. Nothing they
-// store depends on link bandwidth, and using it there is what stranded the probe
-// corpus. They use gpuIdentityHash directly.
+// Fit/measurement keys (.probe, system_*.cache) must not use this either; they use
+// gpuIdentityHash's content directly and need no signature indirection.
 func gpuSignatureHash(gpus []detect.GPU) string {
-	var parts []string
-	for _, g := range gpus {
-		parts = append(parts, fmt.Sprintf("%d|%s|bw%s",
-			g.Index, g.PCIBusID, bandwidthClassMBps(g.BandwidthMBps)))
-	}
-	sort.Strings(parts)
-	input := gpuIdentityHash(gpus) + "\n" + strings.Join(parts, "\n") + "\n"
-	h := md5.New()
-	h.Write([]byte(input))
-	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+	return gpuIdentityHash(gpus)
 }
 
 // RunPostLaunchProbe measures actual CUDA overhead after a successful server launch.
