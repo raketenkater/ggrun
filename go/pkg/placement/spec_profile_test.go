@@ -158,3 +158,52 @@ func TestSpecProfileScopeTracksThreadsCacheRAMAndSpecKnobs(t *testing.T) {
 		t.Fatalf("SpecMode normalized inconsistently: %q vs %q", a.SpecMode, b.SpecMode)
 	}
 }
+
+// The hardware identity scopes BOTH the speculative profile and the calibration
+// decision key, so it gates reuse of a whole admission-shaping argv. It used to
+// hash gpu.BandwidthMBps — a measured value that drifts by single-digit MB/s
+// between two `ggrun detect` runs on unchanged hardware — so a re-measurement
+// orphaned records that were still correct. That is the same defect fixed in
+// gpuIdentityHash, and it mattered more here than for a stored speed figure.
+//
+// The identity must therefore be stable under a re-measured link, while still
+// separating genuinely different machines.
+func TestHardwareIdentitySurvivesABandwidthRemeasurement(t *testing.T) {
+	caps := func(bw int) *detect.Capabilities {
+		return &detect.Capabilities{
+			OS: "linux", Arch: "amd64",
+			GPUs: []detect.GPU{{
+				Index: 0, Name: "NVIDIA GeForce RTX 4070", VRAMTotalMB: 12282,
+				Driver: "580", ComputeCap: "8.9", PCIBusID: "00000000:17:00.0",
+				PCIGen: 3, PCILanes: 16, BandwidthMBps: bw,
+			}},
+			CPU: detect.CPUInfo{Model: "i9-10940X", Cores: 14, Threads: 28},
+			RAM: detect.RAMInfo{TotalMB: 217096},
+		}
+	}
+	// Observed spread between two detect runs on this rig.
+	if a, b := SpecHardwareIdentity(caps(12190)), SpecHardwareIdentity(caps(12192)); a != b {
+		t.Error("re-measuring the link changed the hardware identity: " +
+			"a cached profile and calibration decision would be orphaned")
+	}
+	// A genuine machine difference must still separate. Note that link SPEED alone
+	// deliberately does not: two cards agreeing on bus id, capacity and PCIe width
+	// are the same machine whether the link measures 12192 or 6269, because a
+	// measured rate is not an identity. Topology and capacity are what separate.
+	other := caps(12192)
+	other.GPUs[0].VRAMTotalMB = 24564
+	if SpecHardwareIdentity(caps(12192)) == SpecHardwareIdentity(other) {
+		t.Error("a VRAM capacity change did not change the hardware identity")
+	}
+	other2 := caps(12192)
+	other2.GPUs[0].PCILanes = 4
+	if SpecHardwareIdentity(caps(12192)) == SpecHardwareIdentity(other2) {
+		t.Error("a PCIe width change did not change the hardware identity")
+	}
+	other3 := caps(12192)
+	other3.GPUs[0].Name = "NVIDIA GeForce RTX 3060"
+	other3.GPUs[0].PCIBusID = "00000000:B3:00.0"
+	if SpecHardwareIdentity(caps(12192)) == SpecHardwareIdentity(other3) {
+		t.Error("a different card did not change the hardware identity")
+	}
+}

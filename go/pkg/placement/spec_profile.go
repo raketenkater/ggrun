@@ -121,13 +121,30 @@ func specArtifactStatIdentity(path string) string {
 	return specHash(parts...)
 }
 
+// SpecHardwareIdentity identifies the PHYSICAL machine a cached record belongs to.
+//
+// It must be stable across re-measurement, because it scopes both the speculative
+// profile and the calibration decision key (calibrate.go:1400). It previously
+// included gpu.BandwidthMBps, a MEASURED value that drifts by single-digit MB/s
+// run to run on fixed hardware; a +3 MB/s re-measure minted a new identity and
+// orphaned the record. That is the same defect fixed in gpuIdentityHash, and it
+// mattered more here: this key gates reuse of a whole admission-shaping argv, not
+// just a stored speed figure.
+//
+// Identity-class facts only. Bandwidth is deliberately absent: it is an ordering
+// input to planning, not a machine identity, and the placement key already carries
+// a coarse class of it where a plan genuinely depends on the link. PCIGen and
+// PCILanes are kept because link shape is a real per-machine property that does
+// not move when a measurement repeats.
 func SpecHardwareIdentity(caps *detect.Capabilities) string {
 	if caps == nil {
 		return ""
 	}
 	parts := make([]string, 0, len(caps.GPUs))
 	for _, gpu := range caps.GPUs {
-		parts = append(parts, fmt.Sprintf("%d:%s:%d:%s:%s:%s:%d", gpu.Index, gpu.Name, gpu.VRAMTotalMB, gpu.Driver, gpu.ComputeCap, gpu.PCIBusID, gpu.BandwidthMBps))
+		parts = append(parts, fmt.Sprintf("%d:%s:%d:%s:%s:%s:%d:%d",
+			gpu.Index, gpu.Name, gpu.VRAMTotalMB, gpu.Driver, gpu.ComputeCap,
+			gpu.PCIBusID, gpu.PCIGen, gpu.PCILanes))
 	}
 	sort.Strings(parts)
 	parts = append(parts, caps.OS, caps.Arch, caps.CPU.Model, strconv.Itoa(caps.CPU.Cores), strconv.Itoa(caps.CPU.Threads), strconv.Itoa(caps.RAM.TotalMB))

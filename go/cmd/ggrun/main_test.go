@@ -4648,3 +4648,34 @@ func TestInventoryValueIsNotTreatedAsAPositionalArg(t *testing.T) {
 		t.Fatalf("the inventory path displaced the model path: %q", req.ModelPath)
 	}
 }
+
+// The `--flag=value` spelling never reaches the bare-token switch, and an
+// unhandled token falls through to ExtraArgs. Before this was handled, an
+// `--inventory=/path` was silently swallowed: the plan ran against the LIVE
+// machine while the user believed they had modelled another, and the literal
+// token was handed to the backend.
+func TestInventoryEqualsFormIsParsedNotSwallowed(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--inventory=/tmp/box.json", "--swa-full"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.InventoryPath != "/tmp/box.json" {
+		t.Fatalf("--inventory=path was not parsed: %q (ExtraArgs=%v)", req.InventoryPath, req.ExtraArgs)
+	}
+	for _, a := range req.ExtraArgs {
+		if a == "--inventory=/tmp/box.json" {
+			t.Fatal("--inventory=path leaked into ExtraArgs and would be sent to the backend")
+		}
+	}
+}
+
+// An empty value must fail closed. Accepting it would leave InventoryPath empty
+// and quietly plan against the live machine, which is the opposite of the
+// command's intent.
+func TestInventoryEmptyEqualsFormIsAnError(t *testing.T) {
+	isolateConfig(t)
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--inventory="}); err == nil {
+		t.Fatal("--inventory= with no path was accepted; it would plan against the live machine")
+	}
+}

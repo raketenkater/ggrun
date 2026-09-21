@@ -1023,6 +1023,19 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			case "--claude-resume":
 				req.ClaudeResume, req.ClaudeCode = val, true
 				continue
+			case "--inventory":
+				// Must be handled here as well as in the bare-token switch: the
+				// `--flag=value` spelling never reaches that switch, and an
+				// unhandled token falls through to ExtraArgs — which would plan
+				// against the LIVE machine while the user believed they had
+				// modelled another, and would hand the literal token to the
+				// backend. A value must be present: `--inventory=` is an error
+				// rather than a silent empty path that plans against the live box.
+				if val == "" {
+					return nil, fmt.Errorf("--inventory: needs a path (use `-` for stdin)")
+				}
+				req.InventoryPath = val
+				continue
 			case "--chat-template":
 				// --chat-template doubles as llama.cpp's built-in template selector
 				// (e.g. "--chat-template chatml"). When the value names a
