@@ -2326,3 +2326,96 @@ func TestInitialParallelPolicyReachesLaunch(t *testing.T) {
 		})
 	}
 }
+
+// The terminal check must be a property of STDIN, not of a Unix device path.
+//
+// It previously opened the literal "/dev/tty", which cannot exist on Windows, so
+// a bare `ggrun` at a real Windows console always printed the no-terminal
+// guidance and the TUI was unreachable there (issue #63). This test pins the
+// portable contract on every platform: give the process a known stdin and the
+// answer must follow.
+//
+// HONEST LIMIT, recorded rather than hidden: on Linux this test does not fail
+// against the old /dev/tty implementation, because /dev/tty genuinely exists in
+// a developer shell and the old probe succeeded regardless of stdin. The
+// platform-independent assertion that WOULD catch the regression is the Windows
+// build, where the old code could never open the path — see
+// TestTerminalCheckDoesNotDependOnAUnixDevicePath below, which fails at compile
+// time on Windows if the check reintroduces a Unix-only path.
+func TestTerminalAvailableFollowsStdinNotADevicePath(t *testing.T) {
+	saved := os.Stdin
+	t.Cleanup(func() { os.Stdin = saved })
+
+	// A pipe is not a terminal, so the UI must decline it regardless of whether
+	// this process happens to own a controlling terminal.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	os.Stdin = r
+	if terminalAvailable() {
+		t.Error("a pipe stdin was reported as an interactive terminal; " +
+			"a full-screen UI would be started in a pipeline or CI job")
+	}
+
+	// /dev/null is a character device but is not a terminal. The old /dev/tty
+	// probe could not distinguish this case either.
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+	os.Stdin = devNull
+	if terminalAvailable() {
+		t.Error("stdin on the null device was reported as an interactive terminal")
+	}
+
+	// A regular file is not a terminal.
+	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	os.Stdin = f
+	if terminalAvailable() {
+		t.Error("a regular-file stdin was reported as an interactive terminal")
+	}
+}
+
+// The platform-independent half of the #63 regression, expressible without a
+// Windows console: the terminal check must not be derived from the Unix device
+// path. A source-level assertion, because the behavioural one above cannot fail
+// on Linux (where /dev/tty exists) and no CI job runs Go tests on Windows.
+//
+// If the check is reimplemented by opening "/dev/tty", this fails. If it is
+// reimplemented portably, it passes — the intent is pinned even though the
+// mechanism may legitimately change.
+func TestTerminalCheckDoesNotDependOnAUnixDevicePath(t *testing.T) {
+	src, err := os.ReadFile("tui.go")
+	if err != nil {
+		t.Fatalf("read tui.go: %v", err)
+	}
+	body := string(src)
+	// Locate the terminalAvailable definition and inspect only its own body, so
+	// an unrelated mention of the path elsewhere cannot satisfy this.
+	start := strings.Index(body, "func terminalAvailable() bool {")
+	if start < 0 {
+		t.Fatal("terminalAvailable is gone; update this guard with it")
+	}
+	end := strings.Index(body[start:], "\n}")
+	if end < 0 {
+		t.Fatal("could not delimit terminalAvailable")
+	}
+	fn := body[start : start+end]
+
+	if strings.Contains(fn, "/dev/tty") {
+		t.Error("terminalAvailable opens the Unix-only /dev/tty again: on Windows " +
+			"that path never exists, so a bare ggrun would report no terminal at a " +
+			"real console and the TUI would be unreachable (issue #63)")
+	}
+	if !strings.Contains(fn, "IsTerminal") {
+		t.Error("terminalAvailable no longer uses a platform-aware terminal check; " +
+			"the portable predicate is term.IsTerminal(fd)")
+	}
+}

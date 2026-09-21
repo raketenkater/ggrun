@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/chattemplate"
 	"github.com/raketenkater/ggrun/pkg/claudesession"
@@ -4164,16 +4165,24 @@ func noTerminalError() error {
 }
 
 // terminalAvailable reports whether the process has an interactive terminal it
-// could run the full-screen UI on. Bubbletea opens /dev/tty itself, so checking
-// that device directly is what actually predicts its failure; /dev/null counts
-// as a character device but is not a terminal.
+// could run the full-screen UI on.
+//
+// This used to open the literal path "/dev/tty". That is a Unix-only device, so
+// on Windows the open always failed and a bare `ggrun` always reported
+// "no terminal available for the interactive UI" even at a real console — the
+// TUI was unreachable there (issue #63).
+//
+// The predictor is stdin, not /dev/tty: runModel passes no input option, so
+// bubbletea uses os.Stdin and only falls back to opening /dev/tty when stdin is
+// not itself a terminal. Testing stdin therefore matches what bubbletea will do,
+// and it is meaningful on every platform. /dev/null and pipes are correctly
+// rejected, which is what the previous comment was guarding against.
+//
+// A false NEGATIVE here costs the interactive UI and prints the subcommand
+// guidance; a false POSITIVE would hand a non-interactive stdin to a full-screen
+// program in a cron job or CI. The check errs toward the first.
 func terminalAvailable() bool {
-	f, err := os.Open("/dev/tty")
-	if err != nil {
-		return false
-	}
-	_ = f.Close()
-	return true
+	return term.IsTerminal(os.Stdin.Fd())
 }
 
 func runModel(initial Model) (*LaunchRequest, error) {
