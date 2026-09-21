@@ -6378,28 +6378,36 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 // materially different placement hardware, as are two revisions carrying
 // different VRAM sizes.
 //
-// Deliberately EXCLUDES BandwidthMBps. It is not a hardware property: it is a
-// MEASURED value injected into caps by detect.ApplyCachedBandwidthProfile, and
-// it is noisy run to run on fixed hardware. Measured on this project's three-card
-// rig across two `ggrun detect` runs it moved +2 / +3 / -1 MB/s on values of
-// ~12,190 / ~12,318 / ~6,270. Hashing that at integer precision meant every
-// re-measurement produced a new signature and orphaned the entire cached probe
-// corpus: on 2026-09-17 the store held 643 probes, 535 of them stranded under a
-// superseded signature, and a launch that began two minutes before the first
-// probe was rewritten under the new one planned from no measured evidence at all
-// and emitted four more CPU expert layers than the same coordinates had planned
-// the day before (NCPUMOE 29 against a cached 25).
+// Deliberately EXCLUDES two things.
+//
+// BandwidthMBps is not a hardware property but a MEASURED value injected by
+// detect.ApplyCachedBandwidthProfile, and it is noisy run to run on fixed
+// hardware (+2 / +3 / -1 MB/s observed between two `ggrun detect` calls on values
+// of ~12,190 / ~12,318 / ~6,270). Hashing it at integer precision meant every
+// re-measurement produced a new signature and orphaned the cached probe corpus:
+// on 2026-09-17 the store held 643 probes and 535 were stranded under a
+// superseded signature, and the live Flash-Next launch began two minutes before
+// the first probe was rewritten under the new one, so it planned from no measured
+// evidence and emitted four more CPU expert layers than the same coordinates had
+// planned the day before (NCPUMOE 29 against a cached 25).
+//
+// g.Index is a SLOT ORDINAL, not a hardware fact. detect assigns it by sorting on
+// PCIBusID (detect.go:185-189), so it is already a deterministic function of a
+// field this hash keeps — and the value it adds is exactly the one that changes
+// when a card moves to a different slot. Including it re-orphaned evidence by a
+// second mechanism for no information gained.
 //
 // Topology is still covered: PCIGen and PCILanes carry the link shape that
-// BandwidthMBps was standing in for, and they do not move when a measurement is
-// repeated. Bandwidth remains load-bearing for the PACKED PLAN (orderGPUsByBandwidth
-// sorts on it), so callers that key a plan must use the pair below, not this hash
-// alone.
+// BandwidthMBps was standing in for, and neither moves when a measurement repeats
+// or a card is reseated.
 func gpuIdentityHash(gpus []detect.GPU) string {
 	var parts []string
 	for _, g := range gpus {
-		parts = append(parts, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d",
-			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID,
+		// Field order is not load-bearing (the parts are sorted below), but the
+		// SET is: bus id first because it is the card's stable address, then the
+		// facts that distinguish two cards on the same bus.
+		parts = append(parts, fmt.Sprintf("%s|%s|%d|%s|%s|gen%d|x%d",
+			g.PCIBusID, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap,
 			g.PCIGen, g.PCILanes))
 	}
 	sort.Strings(parts)

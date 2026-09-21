@@ -236,3 +236,75 @@ func TestIdentityHashIsDeterministicAndDiscriminating(t *testing.T) {
 		t.Error("a PCIe width change did not move the identity hash")
 	}
 }
+
+// The identity must survive a card moving to a different slot.
+//
+// g.Index is a SLOT ORDINAL: detect assigns it by sorting on PCIBusID
+// (detect.go:185-189), so it is already a deterministic function of a field the
+// hash keeps. Including it meant the identity changed when a card was reseated —
+// or when detection simply ordered the same cards differently — and every cached
+// measurement was orphaned again, for no information gained. The hash already
+// discarded ORDER by sorting its parts, so Index contributed only itself.
+func TestIdentitySurvivesACardMovingSlots(t *testing.T) {
+	base := fitBox(12192, 12321, 6269)
+
+	// Same three physical cards, detected in a different order. This is what a
+	// reseat, a driver reload, or a machine that enumerates in another order
+	// produces.
+	reordered := []detect.GPU{base[2], base[0], base[1]}
+	for i := range reordered {
+		reordered[i].Index = i // detect renumbers from the sort
+	}
+
+	if gpuIdentityHash(base) != gpuIdentityHash(reordered) {
+		t.Error("rescanning the same cards in a different order changed the " +
+			"hardware identity: cached evidence would be orphaned by a reseat")
+	}
+}
+
+// The identity must still be a function of the physical cards, not of how many
+// there are. Dropping Index must not make two different machines collide.
+func TestIdentityStillSeparatesDifferentCardSets(t *testing.T) {
+	three := fitBox(12192, 12321, 6269)
+	// Truncate deliberately: fitBox always builds the full three-card fixture
+	// (its variadic argument only sets bandwidths), so a two-card machine has to
+	// be expressed by slicing rather than by passing fewer bandwidths.
+	two := fitBox(12192, 12321)[:2]
+
+	if gpuIdentityHash(three) == gpuIdentityHash(two) {
+		t.Error("a two-card machine shares an identity with a three-card one")
+	}
+	// A different card in the same slot must separate too.
+	swapped := fitBox(12192, 12321, 6269)
+	swapped[2].VRAMTotalMB = 8192
+	if gpuIdentityHash(three) == gpuIdentityHash(swapped) {
+		t.Error("a capacity change did not change the identity")
+	}
+}
+
+// PCIBusID is the field that now leads the record, and it is `omitempty` on
+// detect.GPU — so a hand-written or partial inventory can omit it. That must not
+// silently collapse two different cards into one identity.
+func TestIdentityWithoutBusIDsStillSeparatesByNameAndCapacity(t *testing.T) {
+	a := fitBox(12192, 12321, 6269)
+	b := fitBox(12192, 12321, 6269)
+	for i := range a {
+		a[i].PCIBusID = ""
+		b[i].PCIBusID = ""
+	}
+	// Same cards with no bus id: identity must match (there is nothing else to
+	// distinguish them by, and they ARE the same hardware).
+	if gpuIdentityHash(a) != gpuIdentityHash(b) {
+		t.Error("identical cards without bus ids produced different identities")
+	}
+	// But a genuinely different card must still separate without bus ids.
+	c := fitBox(12192, 12321, 6269)
+	for i := range c {
+		c[i].PCIBusID = ""
+	}
+	c[0].Name = "NVIDIA GeForce RTX 5080"
+	if gpuIdentityHash(a) == gpuIdentityHash(c) {
+		t.Error("a different card collided once bus ids were absent; nothing " +
+			"distinguishes the set but name and capacity, so those must carry it")
+	}
+}
