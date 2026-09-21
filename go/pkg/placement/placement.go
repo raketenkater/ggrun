@@ -1837,6 +1837,17 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 					}
 					if s.CRAM == 0 {
 						applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
+					} else if opts.MaxCheckpointsSet {
+						// The saved config is the complete serving decision and is
+						// kept, with one exception: an EXPLICIT user override made
+						// now outranks a value saved earlier. Without this branch
+						// `--ctx-checkpoints N` was silently dropped on every launch
+						// that reused a promoted config — the same "override does
+						// nothing on one path" defect that collapsing the three
+						// derivation sites was meant to remove, relocated to a
+						// fourth site. The flag is parsed and reaches Options; it
+						// must reach the argv.
+						s.MaxCheckpoints = opts.MaxCheckpoints
 					}
 					if s.Host == "" {
 						s.Host = "127.0.0.1"
@@ -6421,28 +6432,82 @@ func gpuIdentityHash(gpus []detect.GPU) string {
 //
 // It is the STABLE identity only. Bandwidth is deliberately absent, and the
 // reason is not that bandwidth is unimportant — it orders devices for packing —
-// but that its EFFECT is already in this key through the tensor split.
+// bandwidthRatioClass expresses each device's link speed as a percentage of the
+// fastest device's, quantised to 10% steps.
 //
-// A plan key of the form `place:v8:...:<this>:<parallel>:<tensorSplit>:swafull=`
-// (PlacementCachePathFor) already carries tensorSplit, and tensorSplit is exactly
-// the quantity a bandwidth change moves: orderGPUsByBandwidth sorts on bandwidth,
-// the order selects the split owner and weights, and the resulting TensorSplit is
-// serialised into the key. So two machines whose links differ enough to change the
-// plan produce different keys without any bandwidth term, and two measurements of
-// the same link — which leave the order identical — produce the same key.
+// It exists because a PLAN key needs a bandwidth signal that is both STABLE and
+// PRESENT, and the two obvious candidates each fail one half:
 //
-// The previous version of this function added a coarse bandwidth CLASS as well,
-// to "separate a materially different link". That was redundant with tensorSplit
-// and actively harmful: the class is a 100 MB/s grid with an edge every 100 MB/s,
-// so a value sitting on an edge changed class on a 1 MB/s move (12,149 -> 121,
-// 12,150 -> 122) and minted a new plan key for an unchanged plan. Measured
-// directly: 12,149 and 12,151 classify as 121 and 122 while orderGPUsByBandwidth
-// returns the identical order [1 0 2] for both — a key change describing nothing.
+//   - The raw measured value drifts single-digit MB/s between two `ggrun detect`
+//     runs on unchanged hardware. Hashing it at integer precision orphaned the
+//     whole probe corpus (535 of 643 entries) and made a launch plan from no
+//     measured evidence.
+//   - The device ORDER alone (orderGPUsByBandwidth) is stable but too coarse: it
+//     changes only when the fastest card changes. Degrading the third card from
+//     6,269 to 1,200 MB/s — a real hardware change that moves the split shares
+//     from 0.28/0.57/0.15 to 0.32/0.65/0.03 — leaves the order [1 0 2] untouched,
+//     so an order-only key would reuse a plan packed for a different machine.
 //
-// Fit/measurement keys (.probe, system_*.cache) must not use this either; they use
-// gpuIdentityHash's content directly and need no signature indirection.
+// A ratio is the right shape because it is what the planner actually uses: the
+// split weights are effective_VRAM * bandwidth / total, a proportion. Expressing
+// it relative to the fastest device also makes it scale-free, so nothing about
+// this rig's absolute speeds is encoded as a rule.
+//
+// 10% steps are chosen from the measured margins. The observed run-to-run spread
+// is 0.02%, so a step is ~500x the noise; the smallest real inter-card gap here
+// is 129 MB/s on ~12,300 (1.05%), which the quantisation deliberately does NOT
+// resolve — two cards within 10% of each other are equivalent for packing
+// purposes, and treating them as distinct is what made the earlier 100 MB/s grid
+// flip class on a 1 MB/s move.
+//
+// Zero or unknown is its own class, never the slowest real one.
+func bandwidthRatioClass(gpus []detect.GPU) string {
+	fastest := 0
+	for _, g := range gpus {
+		if g.BandwidthMBps > fastest {
+			fastest = g.BandwidthMBps
+		}
+	}
+	if fastest <= 0 {
+		return "unknown"
+	}
+	parts := make([]string, len(gpus))
+	for i, g := range gpus {
+		if g.BandwidthMBps <= 0 {
+			parts[i] = "unknown"
+			continue
+		}
+		pct := (g.BandwidthMBps*100 + fastest/2) / fastest
+		parts[i] = strconv.Itoa((pct / 10) * 10)
+	}
+	return strings.Join(parts, "-")
+}
+
+// gpuSignatureHash keys a PLACEMENT PLAN: the stable identity plus the coarse
+// link-ratio class of the devices.
+//
+// Both terms are load-bearing, and both were got wrong in opposite directions
+// before:
+//
+//   - Identity alone is insufficient. The key is computed BEFORE the tensor split
+//     exists, so it cannot lean on tensorSplit to separate two links:
+//
+//     1786  cacheSplitKey := splitCompactKey(s.TensorSplit)   // s is fresh: empty
+//     1787  s.PlacementCachePath = PlacementCachePathFor(..., cacheSplitKey, ...)
+//     1794  if that path exists -> reuse the cached plan, split and all
+//     1900  s.TensorSplit = normalizeSplit(cache.TensorSplit) // comes FROM the cache
+//
+//     A version that dropped the bandwidth term on the reasoning that "tensorSplit
+//     already carries it" therefore had NO bandwidth signal in the key at all, and
+//     returned a plan packed for a fast link when the link was slow.
+//
+//   - The raw measured value is too volatile, for the reason recorded on
+//     gpuIdentityHash. The ratio class is the stable form of the same information.
+//
+// Fit/measurement keys (.probe, system_*.cache) must not use this; they use
+// gpuIdentityHash's content directly and nothing they store depends on the link.
 func gpuSignatureHash(gpus []detect.GPU) string {
-	return gpuIdentityHash(gpus)
+	return gpuIdentityHash(gpus) + "." + bandwidthRatioClass(gpus)
 }
 
 // RunPostLaunchProbe measures actual CUDA overhead after a successful server launch.

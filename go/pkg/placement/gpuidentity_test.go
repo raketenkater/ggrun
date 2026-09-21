@@ -308,3 +308,109 @@ func TestIdentityWithoutBusIDsStillSeparatesByNameAndCapacity(t *testing.T) {
 			"distinguishes the set but name and capacity, so those must carry it")
 	}
 }
+
+// The plan key is computed BEFORE the tensor split exists, so it cannot rely on
+// tensorSplit to separate two links. This is the regression 97404a3 introduced.
+//
+// The lookup path is:
+//
+//	1786  cacheSplitKey := splitCompactKey(s.TensorSplit)   // s is fresh: empty
+//	1787  s.PlacementCachePath = PlacementCachePathFor(..., cacheSplitKey, ...)
+//	1794  if that path exists -> reuse the cached plan
+//	1900  s.TensorSplit = normalizeSplit(cache.TensorSplit) // comes FROM the cache
+//
+// so at lookup time the split component of the key is a constant. Before 97404a3
+// the key also carried a bandwidth class, which did differ between links;
+// removing it left the key with NO bandwidth signal, and a plan packed for a fast
+// link is now returned for a slow one.
+//
+// The boundary test below therefore drives PlacementCachePathFor the way the
+// launch path does — with the split it actually has at that moment, which is
+// empty — rather than supplying a split by hand, which is why the older tests
+// could not see this.
+func TestPlanKeySeparatesALinkChangeWithoutATensorSplit(t *testing.T) {
+	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
+	dir := t.TempDir()
+
+	// Empty split: exactly what the lookup path has.
+	lookupKey := func(gpus []detect.GPU) string {
+		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1,
+			splitCompactKey(nil), false)
+	}
+
+	fast := lookupKey(fitBox(12192, 12321, 6269))
+	// The 3060 degrades to a genuinely narrower link — a real hardware change
+	// that reorders devices and changes what should be packed.
+	slow := lookupKey(fitBox(12192, 12321, 1200))
+	if fast == slow {
+		t.Error("a real link change did not move the plan key at lookup time: " +
+			"a plan packed for a fast link would be reused for a slow one, because " +
+			"the key carries no bandwidth signal until the split exists")
+	}
+
+	// And it must still be stable against the noise this rig produces, or the
+	// fix has merely restored the flapping key that was removed.
+	if a, b := lookupKey(fitBox(12192, 12321, 6269)), lookupKey(fitBox(12194, 12318, 6270)); a != b {
+		t.Error("the plan key flaps on measurement noise again")
+	}
+}
+
+// An explicit --ctx-checkpoints must reach the argv even when a launch reuses a
+// promoted verified config.
+//
+// The reuse branch restores the saved CRAM and MaxCheckpoints and, before the
+// fix, skipped the cache-policy helper entirely because that call is guarded by
+// `s.CRAM == 0`. So an override was silently dropped on every launch after a
+// config had been promoted — the same "override does nothing on one path" defect
+// that collapsing the three derivation sites was meant to remove, relocated to a
+// fourth site.
+//
+// TESTING LIMIT, stated rather than hidden: the reuse path is not reachable from
+// an in-package test. It requires opts.VerifiedConfigScopeKey to match the key the
+// LAUNCHER builds (main.go:2823), and that key ends with
+// planLogicVersion, a constant in cmd/ggrun — not exported to this package. A
+// test here can set any key it likes and the lookup will miss, which is how an
+// earlier version of this test passed with the fix deleted.
+//
+// The reuse path is therefore covered end to end by the CLI-level check recorded
+// in the ledger (save a config, relaunch with --ctx-checkpoints N, assert N
+// reaches the argv). What is pinned here is the resolution RULE the reuse branch
+// must follow, so the rule itself cannot regress silently.
+func TestExplicitCheckpointOverrideBeatsASavedConfigValue(t *testing.T) {
+	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
+	caps := &detect.Capabilities{
+		GPUs: fitBox(12192, 12321, 6269),
+		RAM:  detect.RAMInfo{TotalMB: 217096, FreeMB: 200000},
+		CPU:  detect.CPUInfo{Cores: 14, Threads: 28},
+	}
+
+	// The state a reuse hit restores: a complete saved decision with a non-zero
+	// CRAM, which is exactly why the helper's `s.CRAM == 0` guard skips it.
+	saved := &Strategy{CRAM: 13824, MaxCheckpoints: 16}
+
+	// Explicit override must win over the saved value.
+	over := &Strategy{CRAM: saved.CRAM, MaxCheckpoints: saved.MaxCheckpoints}
+	applyRuntimeCachePolicy(model, over, caps, 90000, 4000,
+		Options{MaxCheckpoints: 32, MaxCheckpointsSet: true})
+	if over.MaxCheckpoints != 32 {
+		t.Errorf("MaxCheckpoints = %d, want the explicit 32: an override must "+
+			"outrank a value saved by an earlier launch", over.MaxCheckpoints)
+	}
+
+	// An explicit 0 (disable) is a real decision and must also win.
+	off := &Strategy{CRAM: saved.CRAM, MaxCheckpoints: saved.MaxCheckpoints}
+	applyRuntimeCachePolicy(model, off, caps, 90000, 4000,
+		Options{MaxCheckpoints: 0, MaxCheckpointsSet: true})
+	if off.MaxCheckpoints != 0 {
+		t.Errorf("MaxCheckpoints = %d, want 0: --ctx-checkpoints 0 asks to disable "+
+			"checkpoints and was ignored", off.MaxCheckpoints)
+	}
+
+	// Without the setter flag the field's zero value must NOT clobber anything,
+	// or every launch would silently disable checkpoints.
+	unset := &Strategy{CRAM: saved.CRAM, MaxCheckpoints: saved.MaxCheckpoints}
+	applyRuntimeCachePolicy(model, unset, caps, 90000, 4000, Options{MaxCheckpoints: 32})
+	if unset.MaxCheckpoints == 32 {
+		t.Error("an unset override still overrode: MaxCheckpointsSet must gate it")
+	}
+}
