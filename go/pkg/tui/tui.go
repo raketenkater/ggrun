@@ -2854,6 +2854,12 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 				if routed := backends.ForArch(info.Architecture); routed != nil {
 					modelBackendTag = routed.Tag
 					models[i].AutoBackend = routed.Tag
+				} else if helper := backends.SoleHelperForArch(info.Architecture); helper != nil {
+					// The CLI routes an architecture served only by a helper-only
+					// fork to that fork (selectBackendForModel). Mirror it, or an
+					// installed helper recipe keeps being offered for install.
+					modelBackendTag = helper.Tag
+					models[i].AutoBackend = helper.Tag
 				} else if recipes := backends.RecipesForArch(info.Architecture); len(recipes) > 0 {
 					// Catalog order is preference order. For architectures with an
 					// alternative recipe (Laguna's upstream target-only fork), the first
@@ -3895,10 +3901,13 @@ func (m Model) buildArgs() []string {
 
 // LaunchRequest is returned when the user chooses to launch a model.
 type LaunchRequest struct {
-	Update        bool
-	BackendArgs   []string
-	DownloadRepo  string
-	DownloadQuant string
+	Update      bool
+	BackendArgs []string
+	// BackendInstallError is set by the caller when a model-aware backend
+	// install failed; RunAfterBackendInstall reports it on the model screen.
+	BackendInstallError string
+	DownloadRepo        string
+	DownloadQuant       string
 	// DownloadDir sends this one download somewhere other than the configured
 	// model directory, without changing that setting. Large quants routinely
 	// have to land on a different disk than the default one, and making the
@@ -4186,33 +4195,52 @@ func Run() (*LaunchRequest, error) {
 	return runModel(loadingModel())
 }
 
-// RunAfterBackendInstall reopens the same model and settings at pre-launch
-// after a reviewed fork has built successfully. The recipe tag stays scoped to
+// RunAfterBackendInstall reopens the same model and settings after a
+// model-aware backend install: at pre-launch when it succeeded, at the model
+// configuration with the error when it failed. The recipe tag stays scoped to
 // this request; it does not overwrite the user's default backend for unrelated
 // models.
 func RunAfterBackendInstall(req *LaunchRequest) (*LaunchRequest, error) {
 	if !terminalAvailable() {
 		return nil, noTerminalError()
 	}
+	return runModel(afterBackendInstallModel(req))
+}
+
+// afterBackendInstallModel builds the screen shown after a model-aware backend
+// install, successful or not.
+func afterBackendInstallModel(req *LaunchRequest) Model {
 	m := InitialModel()
 	if req == nil {
-		return runModel(m)
+		return m
 	}
-	if req.Backend != "" {
-		m.backend = req.Backend
-	}
+	// Do not copy req.Backend (the recipe tag) into m.backend: that is the
+	// session default, so backing out and picking an unrelated model sent
+	// --backend <recipe> as an explicit pin. The rescan in InitialModel already
+	// routes this model to the fork through its AutoBackend.
 	if !m.selectModelPath(req.ModelPath) {
 		m.message = "Backend installed, but the selected model is no longer available: " + req.ModelPath
-		m.messageType = "warning"
+		if failure := strings.TrimSpace(req.BackendInstallError); failure != "" {
+			m.message = "Backend install failed: " + failure
+			m.messageType = "error"
+		} else {
+			m.messageType = "warning"
+		}
 		m.screen = ScreenMain
-		return runModel(m)
+		return m
 	}
 	m.applyLaunchRequestFields(req)
 	m.backendRouteBypass = false
 	m.replayRequest = nil
 	m.replaySavedAt = time.Time{}
+	if failure := strings.TrimSpace(req.BackendInstallError); failure != "" {
+		m.message = "Backend install failed: " + failure + ". Nothing was changed; choose another backend or retry the install."
+		m.messageType = "error"
+		m.screen = ScreenModelConfig
+		return m
+	}
 	m.message = "Backend installed and auto-selected for this model. Review the launch, then press Enter."
 	m.messageType = "info"
 	m.screen = ScreenPrelaunch
-	return runModel(m)
+	return m
 }

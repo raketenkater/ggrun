@@ -910,9 +910,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.ServerBinExplicit = true
 				continue
 			case "--backend":
-				req.Backend = val
-				// Auto requests model-aware selection; it does not pin a binary.
-				req.BackendExplicit = val != "auto"
+				req.Backend, req.BackendExplicit = parseBackendFlag(val)
 				continue
 			case "--tune-cache":
 				req.TuneCache = val
@@ -1263,8 +1261,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if err != nil {
 				return nil, err
 			}
-			req.Backend = v
-			req.BackendExplicit = v != "auto"
+			req.Backend, req.BackendExplicit = parseBackendFlag(v)
 		case "--tune-cache":
 			v, err := next()
 			if err != nil {
@@ -1941,6 +1938,22 @@ func resolveModelPath(path, modelDir string) string {
 
 func parseBudgetMB(s string) int { return config.ParseBudgetMB(s) }
 
+// parseBackendFlag interprets a --backend value. Any case of "auto" requests
+// model-aware selection and pins nothing; configuredBackendExplicit already
+// compares case-insensitively, and the flag must agree with it. A literal
+// --backend skip stays explicit so it fails clearly.
+func parseBackendFlag(value string) (string, bool) {
+	if strings.EqualFold(strings.TrimSpace(value), "auto") {
+		return "auto", false
+	}
+	return value, true
+}
+
+// backendChoiceExplicit reports whether the user pinned the backend binary.
+func backendChoiceExplicit(req *launchRequest) bool {
+	return req != nil && (req.BackendExplicit || req.ServerBinExplicit)
+}
+
 func configuredBackendExplicit(backend string) bool {
 	backend = strings.TrimSpace(backend)
 	// "skip" is an installer-only choice used by older launcher-only app homes;
@@ -1972,7 +1985,10 @@ func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
 		if _, err := os.Stat(req.ServerBin); err == nil {
 			return detectBackend(req.ServerBin)
 		}
-		fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", req.ServerBin)
+		// Like a named backend that is missing, an explicit binary that is not
+		// there must not fall through to some other build: that skipped the
+		// architecture route and launched a binary proven not to load the model.
+		return nil
 	}
 	if want != "" && want != "auto" {
 		seen := make(map[string]bool)
@@ -2089,6 +2105,30 @@ func autoBackendCandidates(caps *detect.Capabilities, req *launchRequest) []auto
 		for _, backend := range caps.Backends {
 			add(backend.Path)
 		}
+	}
+	// A fork installed without --route-arch is still an installed backend. Left
+	// out, a model only that fork can load was refused as "no installed backend
+	// supports" it, and the launch then offered to install something else.
+	// Forks join last and never count as canonical, so at equal probe support
+	// they lose the locality tie-break to mainline; a fork is chosen when its
+	// probe proves the architecture and no earlier candidate does. (The
+	// file-backed-experts tie-break for large CPU-expert MoE still applies to
+	// forks as to any backend.) Helper-only forks keep their metadata-only role.
+	for _, fork := range backends.Load() {
+		path := strings.TrimSpace(fork.Path)
+		if backends.IsHelperOnly(fork) || path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if st, err := os.Stat(path); err != nil || st.IsDir() {
+			continue
+		}
+		fork := fork
+		info := detectRegisteredBackend(&fork)
+		if backendLoaderFailed(info.Help) {
+			continue
+		}
+		out = append(out, autoBackendCandidate{info: info})
 	}
 	return out
 }
@@ -2242,6 +2282,17 @@ func chooseAutoBackend(candidates []autoBackendCandidate, arch string, probe bac
 		return nil, candidates[bestIndex].info
 	}
 	return candidates[bestIndex].info, nil
+}
+
+// reviewedInstallOffer is the reviewed recipe a launch should offer to install,
+// or nil. An explicit --backend/--server-bin is kept even after an install, so
+// offering one could only build a fork the launch then ignores; the
+// architecture warning in preflightBackendArch still names the fork.
+func reviewedInstallOffer(req *launchRequest, arch string, be *backendInfo) *backends.Recipe {
+	if backendChoiceExplicit(req) {
+		return nil
+	}
+	return reviewedRecipeRequiredForMain(arch, be)
 }
 
 func reviewedRecipeRequiredForMain(arch string, be *backendInfo) *backends.Recipe {
@@ -2496,7 +2547,9 @@ var searchArchForkPRs = func(ctx context.Context, model *placement.ModelProfile)
 }
 
 func installDiscoveredArchFork(recipe backends.Recipe) error {
-	cmdBackendAddRecipe([]string{
+	// Return the failure: the caller falls back to the mainline-update offer,
+	// which a clone or build error used to skip by exiting the process.
+	return addBackendRecipe([]string{
 		recipe.GitURL,
 		"--tag", recipe.Tag,
 		"--checkout-name", recipe.Tag,
@@ -2504,7 +2557,6 @@ func installDiscoveredArchFork(recipe backends.Recipe) error {
 		"--commit", recipe.Commit,
 		"--route-arch", recipe.RouteArch,
 	}, &recipe)
-	return nil
 }
 
 // offerDiscoveredArchFork searches the official llama.cpp PR index and the
@@ -2595,6 +2647,11 @@ func backendUnavailableMessage(req *launchRequest) string {
 		// instead of the generic "no binary found" fallback.
 		if reason := strings.TrimSpace(req.BackendUnavailableReason); reason != "" {
 			return reason
+		}
+		if req.ServerBinExplicit && strings.TrimSpace(req.ServerBin) != "" {
+			if _, err := os.Stat(req.ServerBin); err != nil {
+				return fmt.Sprintf("server binary %q was not found; fix the path, or omit --server-bin to let ggrun choose a backend for this model", req.ServerBin)
+			}
 		}
 		want := requestedBackendName(req)
 		if want != "" && !strings.EqualFold(want, "auto") {
@@ -6110,13 +6167,16 @@ func cmdLaunch(args []string) {
 	}
 
 	be := resolveLaunchBackend(req, model, caps)
-	if recipe := reviewedRecipeRequiredForMain(model.ModelArch, be); recipe != nil {
+	if recipe := reviewedInstallOffer(req, model.ModelArch, be); recipe != nil {
 		if !confirmReviewedBackendInstall(recipe, model.ModelArch, cfg.AssumeYes, os.Stdin, os.Stderr, stdinIsTerminal()) {
 			fmt.Fprintf(os.Stderr, "Error: no proven main-model backend for architecture %q; install the reviewed backend with: ggrun backend install %s\n", model.ModelArch, recipe.Name)
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "[launch] installing reviewed backend %q before model placement\n", recipe.Name)
-		cmdBackendInstall([]string{recipe.Name})
+		if err := installBackendRecipe([]string{recipe.Name}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: reviewed backend %q did not install: %v\n", recipe.Name, err)
+			os.Exit(1)
+		}
 		be = resolveLaunchBackend(req, model, caps)
 	}
 	if be == nil {
@@ -7286,6 +7346,17 @@ func cmdKVProbe(args []string) {
 	}
 }
 
+// runTUIBackendAction runs a backend command chosen in the TUI. Installs
+// return their error so the TUI can recover; other backend commands keep
+// their command-line behaviour.
+func runTUIBackendAction(args []string) error {
+	if len(args) > 0 && args[0] == "install" {
+		return installBackendRecipe(args[1:])
+	}
+	cmdBackend(args)
+	return nil
+}
+
 func tuiLaunchArgs(req *tui.LaunchRequest, cfg *config.Config) []string {
 	if req == nil {
 		return nil
@@ -7320,16 +7391,24 @@ func cmdGUI() {
 			return
 		}
 		if len(req.BackendArgs) > 0 {
-			cmdBackend(req.BackendArgs)
+			err := runTUIBackendAction(req.BackendArgs)
 			if req.ModelPath != "" {
 				// A model-aware install carries the current launch settings. Once
 				// the recipe registers its architecture route, return to a review
 				// screen with that route selected instead of making the user find
-				// and configure the model again.
+				// and configure the model again. A failed clone or build returns
+				// to the same model with the error rather than ending ggrun.
 				copyReq := *req
 				copyReq.BackendArgs = nil
+				if err != nil {
+					copyReq.BackendInstallError = err.Error()
+				}
 				pendingReview = &copyReq
 				continue
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
 			return
 		}
@@ -9074,7 +9153,7 @@ func suggestForkForArch(arch string, be *backendInfo) {
 	for _, r := range recipes {
 		fmt.Fprintf(os.Stderr, "[launch]   reviewed fork available: ggrun backend install %s   (%s)\n", r.Name, r.Description)
 	}
-	fmt.Fprintln(os.Stderr, "[launch] continuing anyway; if the model fails to load, install the fork above.")
+	fmt.Fprintln(os.Stderr, "[launch] continuing with the selected backend; to use the fork, install it and launch with --backend auto.")
 }
 
 func preflightIKOnlyArch(model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, configuredAppHome ...string) {

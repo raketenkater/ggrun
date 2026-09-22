@@ -48,6 +48,7 @@ func SaveLatestLaunch(cacheDir string, req *LaunchRequest) error {
 	// backend installation, or download operation.
 	clean.Update = false
 	clean.BackendArgs = nil
+	clean.BackendInstallError = ""
 	clean.DownloadRepo = ""
 	clean.DownloadQuant = ""
 	record := latestLaunchRecord{
@@ -115,6 +116,7 @@ func LoadLatestLaunch(cacheDir string) (*LaunchRequest, time.Time, error) {
 	// action that happens to share LaunchRequest.
 	record.Request.Update = false
 	record.Request.BackendArgs = nil
+	record.Request.BackendInstallError = ""
 	record.Request.DownloadRepo = ""
 	record.Request.DownloadQuant = ""
 	savedAt, err := time.Parse(time.RFC3339, record.SavedAt)
