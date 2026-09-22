@@ -39,8 +39,24 @@ curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | 
 Windows (PowerShell):
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1 | iex
+$s = irm https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1; iex "& { $s }"
 ```
+
+This is written to survive the two things that broke the previous one-liner
+(`iwr -useb ... | iex`):
+
+- **The script used to be served with a UTF-8 BOM.** Piped into `iex`, the BOM is
+  not stripped, so `<# ... #>` was not recognised as a comment block and the help
+  text inside it was parsed as code — the failure surfaced as a confusing error on
+  the line of the usage example, mentioning a cmdlet binding. The BOM is gone, and
+  the form above wraps the text in a script block so any leading character is
+  harmless.
+- **Piped installs had no way to answer the consent prompt.** `Read-Host` in a
+  session with no console stdin throws or hangs. The installer now detects a
+  redirected stdin, like `setup.sh` always has, and skips prompts it cannot ask.
+
+`-AssumeYes` or `LLM_INSTALL_NONINTERACTIVE=1` still force non-interactive
+behaviour if you want it explicitly.
 
 Open a new terminal after adding ggrun to PATH. To launch immediately with the
 standard install location, use `~/ggrun/ggrun` on Linux or

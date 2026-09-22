@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Installs a native Windows ggrun app home from a release bundle.
 
@@ -55,10 +55,32 @@ function Require-Command($Name, $Hint) {
     if (!(Test-Command $Name)) { Fail "$Name was not found. $Hint" }
 }
 
-function Confirm-Install([string]$What) {
-    # Consent gate before installing third-party software. Non-interactive when
-    # -AssumeYes or LLM_INSTALL_NONINTERACTIVE=1 (CI / piped installs).
+function Test-NonInteractive {
+    # True when the installer cannot ask a question: -AssumeYes,
+    # LLM_INSTALL_NONINTERACTIVE=1, or a session with no usable console stdin.
+    #
+    # The third case is the documented one-liner:
+    #   iwr -useb .../install.ps1 | iex
+    # Under `iex` there is no interactive host to answer Read-Host, so a prompt
+    # either throws or hangs forever with no output. setup.sh has detected this
+    # since it was written (`[[ ! -t 0 ]]`); install.ps1 did not, and relied on the
+    # caller passing -AssumeYes or setting the variable — neither of which the
+    # documented one-liner does.
     if ($AssumeYes -or $env:LLM_INSTALL_NONINTERACTIVE -eq '1') { return $true }
+    try {
+        # IsInputRedirected is true for a piped/redirected stdin, i.e. the iex path.
+        if ([Console]::IsInputRedirected) { return $true }
+    } catch {
+        # No console at all (service host, some CI shells): treat as non-interactive.
+        return $true
+    }
+    return $false
+}
+
+function Confirm-Install([string]$What) {
+    # Consent gate before installing third-party software. Non-interactive when the
+    # session cannot answer a prompt, which includes the documented piped install.
+    if (Test-NonInteractive) { return $true }
     $reply = Read-Host "Install $What now? [Y/n]"
     return ($reply -eq '' -or $reply -match '^(y|yes)$')
 }
@@ -553,7 +575,9 @@ function Report-InstallFailure($ErrorRecord) {
     $url = "https://github.com/$Repo/issues/new?labels=install&title=$titleEsc&body=$bodyEsc"
     $ghAuthed = $false
     if (Get-Command gh -ErrorAction SilentlyContinue) { gh auth status 2>$null | Out-Null; $ghAuthed = ($LASTEXITCODE -eq 0) }
-    $interactive = (-not $AssumeYes) -and ($env:LLM_INSTALL_NONINTERACTIVE -ne '1')
+    # Same gate as Confirm-Install: a piped `iwr | iex` install has no console
+    # stdin, so it must not reach Read-Host here either.
+    $interactive = -not (Test-NonInteractive)
     $reply = ''
     if ($ghAuthed -and $interactive) {
         # Guard Read-Host: a non-interactive/piped install that failed must still
