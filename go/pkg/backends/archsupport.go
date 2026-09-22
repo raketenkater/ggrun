@@ -3,6 +3,7 @@ package backends
 import (
 	"bytes"
 	"debug/elf"
+	"debug/pe"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,7 +110,11 @@ func archProbeFiles(binaryPath string) []string {
 	seen := map[string]bool{binaryPath: true}
 
 	for i := 0; i < len(out) && len(out) < archProbeMaxFiles; i++ {
-		for _, dep := range elfLlamaDeps(out[i]) {
+		deps := elfLlamaDeps(out[i])
+		if len(deps) == 0 {
+			deps = peLlamaDeps(out[i])
+		}
+		for _, dep := range deps {
 			if seen[dep] {
 				continue
 			}
@@ -127,6 +132,64 @@ func archProbeFiles(binaryPath string) []string {
 // its DT_RUNPATH/DT_RPATH. Only $ORIGIN-relative and absolute entries are
 // resolved -- backends built from source always locate their own libraries that
 // way, and guessing at system search paths would invite the wrong libllama.
+// peLlamaDeps is elfLlamaDeps for Windows builds. llama-server.exe carries no
+// architecture literal; they live in llama.dll, reached through
+// llama-server-impl.dll. Scanning only the .exe reported every architecture,
+// even "llama", as proven unsupported, so automatic selection on Windows would
+// refuse every model (the installer's pinned LLM_BACKEND="llama" only hid it).
+// Windows resolves a DLL from the executable's own directory first, and that is
+// where the bundle ships them.
+func peLlamaDeps(path string) []string {
+	f, err := pe.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	// debug/pe's ImportedLibraries is an unimplemented stub that always returns
+	// nil; ImportedSymbols does parse the import table, as "symbol:library".
+	symbols, err := f.ImportedSymbols()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var imports []string
+	for _, sym := range symbols {
+		i := strings.LastIndexByte(sym, ':')
+		if i < 0 || seen[strings.ToLower(sym[i+1:])] {
+			continue
+		}
+		seen[strings.ToLower(sym[i+1:])] = true
+		imports = append(imports, sym[i+1:])
+	}
+	return resolveSiblingLlamaLibs(filepath.Dir(path), imports)
+}
+
+// resolveSiblingLlamaLibs finds the llama libraries among imports in dir,
+// ignoring case the way Windows does.
+func resolveSiblingLlamaLibs(dir string, imports []string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	byLower := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			byLower[strings.ToLower(e.Name())] = e.Name()
+		}
+	}
+	var out []string
+	for _, name := range imports {
+		lower := strings.ToLower(filepath.Base(name))
+		if !strings.Contains(lower, "llama") {
+			continue
+		}
+		if actual, ok := byLower[lower]; ok {
+			out = append(out, filepath.Join(dir, actual))
+		}
+	}
+	return out
+}
+
 func elfLlamaDeps(path string) []string {
 	f, err := elf.Open(path)
 	if err != nil {
