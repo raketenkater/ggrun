@@ -700,3 +700,79 @@ func TestLegacySystemProbeRefusesADifferentGPUSet(t *testing.T) {
 			"another machine's overhead must not shape this plan", got)
 	}
 }
+
+// A schema-3 probe states which hardware it measured, so it can be adopted even
+// when its FILENAME is from an era this build cannot reconstruct — and it must be
+// refused when the recorded identity is another machine's.
+//
+// This is what resolves the tension that made the earlier two attempts fail.
+// Adoption by filename alone is dead (no reconstruction covers every past
+// signature). Adoption by content alone is unsafe (a probe carried no identity, so
+// a three-GPU probe from another machine is indistinguishable from this one's —
+// verified against this box's own 2026-07-08 file, which has three overhead
+// numbers and no names, bus ids or driver versions). Recording the identity in the
+// body removes the guess: every probe written from schema 3 on can prove itself.
+func TestSchemaThreeProbeIsAdoptedByIdentityNotFilename(t *testing.T) {
+	gpus := []detect.GPU{
+		{Index: 0, Name: "NVIDIA GeForce RTX 4070", VRAMTotalMB: 12282, Driver: "580", ComputeCap: "8.9", PCIBusID: "00000000:17:00.0", PCIGen: 3, PCILanes: 16, BandwidthMBps: 12192},
+		{Index: 1, Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24564, Driver: "580", ComputeCap: "8.6", PCIBusID: "00000000:65:00.0", PCIGen: 3, PCILanes: 16, BandwidthMBps: 12321},
+		{Index: 2, Name: "NVIDIA GeForce RTX 3060", VRAMTotalMB: 12288, Driver: "580", ComputeCap: "8.6", PCIBusID: "00000000:B3:00.0", PCIGen: 3, PCILanes: 8, BandwidthMBps: 6269},
+	}
+	// A name no reconstruction produces — the case that matters.
+	const staleName = "system_0123456789ab.cache"
+
+	write := func(t *testing.T, identity string) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".cache", "ggrun")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "# System probe\n" +
+			fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) +
+			"SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\n" +
+			"SYS_CUDA_OVERHEAD_MB_CUDA2=367\nSYS_CUDA_OVERHEAD_MB=488\n"
+		if identity != "" {
+			body = "# System probe\n" +
+				fmt.Sprintf("SYS_PROBE_SCHEMA=%d\n", systemProbeSchema) +
+				"SYS_GPU_SET_IDENTITY=" + identity + "\n" +
+				"SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB_CUDA1=311\n" +
+				"SYS_CUDA_OVERHEAD_MB_CUDA2=367\nSYS_CUDA_OVERHEAD_MB=488\n"
+		}
+		if err := os.WriteFile(filepath.Join(dir, staleName), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return home
+	}
+
+	// Precondition: the name really is unreconstructible, so a pass cannot come
+	// from the filename path.
+	if legacyNameMatchesGPUSet(staleName, gpus) {
+		t.Fatal("precondition failed: this name IS reconstructible")
+	}
+
+	// (1) Recording THIS machine's identity makes it adoptable regardless of name.
+	write(t, gpuIdentityHash(gpus))
+	got := SystemCUDAOverheadByGPU(t.TempDir(), gpus)
+	if got[0] != 488 || got[1] != 311 || got[2] != 367 {
+		t.Errorf("a schema-3 probe recording THIS machine was not adopted: got %v, "+
+			"want map[0:488 1:311 2:367]", got)
+	}
+
+	// (2) Recording ANOTHER machine's identity must still be refused, even at the
+	// same device count. This is the guard the content-only attempt lost.
+	other := []detect.GPU{{Index: 0, Name: "RTX 5080", VRAMTotalMB: 16384, PCIBusID: "00000000:01:00.0", PCIGen: 5, PCILanes: 8, BandwidthMBps: 31504}}
+	write(t, gpuIdentityHash(other))
+	if got := SystemCUDAOverheadByGPU(t.TempDir(), gpus); got[0] != 0 {
+		t.Errorf("a probe recording a DIFFERENT machine was adopted: got %v, want "+
+			"nothing — another machine's overhead must not shape this plan", got)
+	}
+
+	// (3) A schema-2 body with no identity row cannot prove its origin and is
+	// skipped. Conservative by design; the cost is one re-measurement.
+	write(t, "")
+	if got := SystemCUDAOverheadByGPU(t.TempDir(), gpus); got[0] != 0 {
+		t.Errorf("an identity-less probe was adopted: got %v, want nothing", got)
+	}
+}

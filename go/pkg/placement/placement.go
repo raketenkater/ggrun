@@ -6235,7 +6235,13 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 // systemProbeSchema is bumped when the meaning of a stored value changes, so a
 // file written by an older method is re-measured rather than trusted.
-const systemProbeSchema = 2
+// Version 3 records SYS_GPU_SET_IDENTITY and per-device SYS_GPU_DEVICE rows, so a
+// probe states which hardware it measured instead of leaving a reader to infer it
+// from the filename. Schema 2 and below carry only overhead numbers and a
+// timestamp: a probe from another machine of the same GPU count is
+// indistinguishable from this one's by content, which is why the legacy migration
+// could be either unsafe or dead but not both safe and useful.
+const systemProbeSchema = 3
 
 // systemProbeOutlierRatio is how far above its peers a stored per-GPU overhead
 // must sit before it is treated as contaminated rather than measured. Real
@@ -6363,7 +6369,22 @@ func loadLegacySystemProbe(newPath string, gpus []detect.GPU) []byte {
 		// this build cannot reconstruct is skipped. That is the safe direction. The
 		// cost of a skip is one re-measurement on the next launch; the cost of a
 		// wrong adoption is a mis-planned launch, silently.
-		if !legacyNameMatchesGPUSet(name, gpus) {
+		//
+		// Two kinds of evidence count, and schema 3 added the second:
+		//
+		//  1. The NAME matches this GPU set — the current identity, or a form an
+		//     earlier build could have produced for this hardware.
+		//  2. The BODY records this GPU set (schema 3+: SYS_GPU_SET_IDENTITY).
+		//     A recorded identity needs no reconstruction and no content inference,
+		//     so it works however many times the signature has changed since.
+		//
+		// Before schema 3, neither was sufficient alone: the filename cannot be
+		// reconstructed across an unknown number of signature changes (this box's
+		// 2026-07-08 probe matches no reconstruction, including origin/main
+		// 9d44a31's), and the body carried no identity, so a content rule could not
+		// tell this machine's three-GPU probe from another's and had to be
+		// rejected. Schema 3 closes that.
+		if !legacyNameMatchesGPUSet(name, gpus) && !recordedIdentityMatchesGPUSet(data, gpus) {
 			continue
 		}
 		// Adopt it: write the same content at the current key so the next launch
@@ -6374,6 +6395,34 @@ func loadLegacySystemProbe(newPath string, gpus []detect.GPU) []byte {
 		return data
 	}
 	return nil
+}
+
+// recordedIdentityMatchesGPUSet reports whether a system probe STATES that it
+// measured this GPU set.
+//
+// Schema 3 and later write SYS_GPU_SET_IDENTITY, the same hash the filename
+// carries, so the body answers the question the filename cannot once the
+// signature has changed. That makes adoption possible for a file whose name this
+// build cannot reconstruct, without the unsafe content inference: the file says
+// which hardware it measured rather than leaving a reader to guess from a device
+// count that any same-sized machine would match.
+//
+// A probe with no identity row is not a match. Schema 2 and below cannot prove
+// which machine they came from, and unproven is skipped.
+func recordedIdentityMatchesGPUSet(data []byte, gpus []detect.GPU) bool {
+	if len(data) == 0 || len(gpus) == 0 {
+		return false
+	}
+	want := gpuIdentityHash(gpus)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		v, ok := strings.CutPrefix(line, "SYS_GPU_SET_IDENTITY=")
+		if !ok {
+			continue
+		}
+		return strings.TrimSpace(v) == want
+	}
+	return false
 }
 
 // legacyNameMatchesGPUSet reports whether a legacy system-probe filename was
@@ -8182,6 +8231,19 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	var b strings.Builder
 	fmt.Fprintf(&b, "# System probe (post-launch per-device measurement)\n")
 	fmt.Fprintf(&b, "SYS_PROBE_SCHEMA=%d\n", systemProbeSchema)
+	// Record WHICH hardware this measured, so a later reader never has to infer it.
+	//
+	// Until schema 3 the body carried only per-device overhead numbers and a
+	// timestamp -- no names, bus ids or driver versions -- so a probe from another
+	// machine of the same GPU count was indistinguishable from this one's, and the
+	// only machine check available was the filename, which cannot be reconstructed
+	// once the signature changes. That left the legacy migration either unsafe
+	// (adopt a foreign probe) or dead (reach no historical file). Recording the
+	// identity removes the guess for every file written from now on.
+	fmt.Fprintf(&b, "SYS_GPU_SET_IDENTITY=%s\n", gpuSig)
+	for _, g := range gpus {
+		fmt.Fprintf(&b, "SYS_GPU_DEVICE=%s|%s|%d|%d\n", g.PCIBusID, g.Name, g.VRAMTotalMB, g.PCILanes)
+	}
 	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().Format(time.RFC3339))
 	indices := make([]int, 0, len(overheadByGPU))
 	for idx := range overheadByGPU {
