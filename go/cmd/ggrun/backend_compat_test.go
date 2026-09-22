@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -223,5 +224,15 @@ func TestStdinFromDevNullIsNotATerminal(t *testing.T) {
 		if stdinIsTerminal() {
 			t.Errorf("stdin from %s was treated as an interactive terminal", name)
 		}
+	}
+}
+
+// A dry-run allocation probe must get a size-scaled budget: ik_llama's dry run
+// still reads and repacks expert weights, and a fixed two minutes failed a
+// fresh 148.5 GiB MoE launch closed before the probe finished.
+func TestAllocationDryRunProbeScalesWithModelSize(t *testing.T) {
+	large := &placement.ModelProfile{SizeBytes: 148 << 30, IsMoE: true}
+	if got, want := allocationProbeTimeout(large), autoStartupTimeout(large); got != want || got < 10*time.Minute {
+		t.Fatalf("dry-run probe timeout %v for a 148 GiB MoE, want the startup budget %v", got, want)
 	}
 }

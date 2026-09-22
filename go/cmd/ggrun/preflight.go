@@ -642,10 +642,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		// uses CUDA host registration even with GGML_CUDA_NO_PINNED requested.
 		envOverrides = memprobe.GuardEnvironment(guardLibrary, guardLogPath, gpuLimitsMB, 0, os.Getenv("LD_PRELOAD"))
 	}
-	timeout := 2 * time.Minute
-	if !dryRun {
-		timeout = autoStartupTimeout(model)
-	}
+	timeout := allocationProbeTimeout(model)
 	// Same scope regime as the production launch (backendStartOptions): under
 	// mmap the plan's full file-backed footprint is charged to the cgroup as
 	// reclaimable page cache, so a hard cap at the resident budget OOM-kills a
@@ -1488,4 +1485,14 @@ func replaceUBatchArg(args []string, ub int) []string {
 // keeps preflightPlacement testable without a full config.Config.
 type configForPreflight struct {
 	CacheDir string
+}
+
+// allocationProbeTimeout bounds the contained allocation probe. A --dry-run
+// probe used a fixed two minutes on the assumption that it touches no weights,
+// but ik_llama's dry run still reads and repacks every expert tensor: a fresh
+// install timed out at expert layer 56/60 of a 148.5 GiB MiniMax-M3 and failed
+// closed on its first launch. The bound is a ceiling, not a cost, so a dry run
+// gets the same size-scaled budget as a load.
+func allocationProbeTimeout(model *placement.ModelProfile) time.Duration {
+	return autoStartupTimeout(model)
 }
