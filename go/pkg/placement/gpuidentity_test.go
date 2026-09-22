@@ -116,34 +116,116 @@ func TestPlacementKeyStillSeparatesARealBandwidthChange(t *testing.T) {
 // EMPTY split the way the real lookup path does and asserts both halves:
 // stable under +-3 MB/s, and different for a real link change.
 
-// The edge case that a coarse CLASS could not survive, and the reason the class
-// was removed rather than widened.
+// What a class boundary actually costs, measured rather than asserted.
 //
-// A 100 MB/s class grid has an edge every 100 MB/s, so a value sitting on one
-// changed class on a 1 MB/s move: 12,149 classified as 121 and 12,150 as 122.
-// That minted a new plan key for a plan that had not changed. Measured directly
-// before the removal, orderGPUsByBandwidth returned the identical order [1 0 2]
-// for 12,149 and 12,151 — the key moved while the placement did not.
+// A test with this name used to live here and was MISLEADING. It called
+// PlacementCachePathFor with a hardcoded split ("0.29,0.63,0.08") and asserted
+// the key did not move across a boundary. But the launch path computes the key
+// BEFORE the split exists (placement.go:1786-1787, against a fresh Strategy), so
+// the split component is a constant at lookup time — 9be1ec2 found that and
+// restored the class for exactly that reason. Handing the function a split is
+// therefore the one input the real lookup cannot have, and the test passed for a
+// reason that does not hold where it matters.
 //
-// No bucket width fixes this in general: any grid has edges, and the rig's
-// smallest real gap (129 MB/s) bounds how coarse the bucket may be. The plan key
-// does not need the class because it already carries tensorSplit, which is the
-// quantity a bandwidth change actually moves.
-func TestPlacementKeyIsStableAcrossAClassBoundary(t *testing.T) {
+// The property that DOES hold, and the one worth pinning, is a split of
+// responsibilities between the two keys:
+//
+//   - the PROBE key carries gpuIdentityHash only (probeCachePath), so a
+//     bandwidth wobble cannot strand a measurement. This is the guarantee the
+//     branch exists for, and it is asserted below across a real boundary.
+//   - the PLAN key also carries bandwidthRatioClass, so it can move at an edge.
+//     The cost is one recompute from probes that are still there — not lost
+//     evidence. Measured on this rig's own cards, 6,098 and 6,099 MB/s sit on
+//     either side of the 49.5% edge and mint different .place keys while
+//     producing an IDENTICAL fresh plan (same split, same n-cpu-moe). So the
+//     churn is real and buys nothing, but it is safe, and removing the class is
+//     not the fix: 97404a3 tried that and left the key with no bandwidth signal
+//     at all, which would reuse a plan packed for a fast link on a slow one.
+//
+// Recorded as an accepted cost with a test rather than left as an unverified
+// claim in a commit message.
+func TestProbeKeySurvivesAClassBoundaryThatMovesThePlanKey(t *testing.T) {
 	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
 	dir := t.TempDir()
-	args := func(gpus []detect.GPU) string {
-		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1, "0.29,0.63,0.08", false)
+	// The lookup path's own inputs: an EMPTY split, because the key is computed
+	// before any split exists.
+	lookupKey := func(gpus []detect.GPU) string {
+		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1,
+			splitCompactKey(nil), false)
+	}
+	probeKey := func(gpus []detect.GPU) string {
+		return probeCachePath(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1)
 	}
 
-	// The exact pair the goal handoff cites as a boundary failure.
-	if a, b := args(fitBox(12149, 12321, 6269)), args(fitBox(12151, 12321, 6269)); a != b {
-		t.Error("a 2 MB/s change moved the plan key — a class boundary is still " +
-			"in the key, and a re-measurement near it would discard a correct plan")
+	// This rig's third card measures ~6,270 MB/s and the ratio edge sits at
+	// 49.5% of the 3090 Ti's ~12,320, so 6,098 and 6,099 straddle it. That is a
+	// real coincidence of this hardware, not a contrived pair.
+	lo, hi := fitBox(12192, 12321, 6098), fitBox(12192, 12321, 6099)
+	if bandwidthRatioClass(lo) == bandwidthRatioClass(hi) {
+		t.Fatalf("fixture no longer straddles a class boundary: %s == %s",
+			bandwidthRatioClass(lo), bandwidthRatioClass(hi))
 	}
-	// And a value sitting exactly on the old grid edge.
-	if a, b := args(fitBox(12150, 12321, 6269)), args(fitBox(12149, 12321, 6269)); a != b {
-		t.Error("a 1 MB/s change moved the plan key at a grid edge")
+
+	// The guarantee: allocation/geometry evidence is NOT keyed by link
+	// bandwidth, so a re-measurement across the edge cannot strand it.
+	if probeKey(lo) != probeKey(hi) {
+		t.Error("a bandwidth measurement crossing a class boundary moved the PROBE " +
+			"key: a re-measurement would strand allocation evidence, which is the " +
+			"defect this branch exists to remove")
+	}
+
+	// The accepted cost, pinned so it cannot regress silently in either
+	// direction: the plan key does move here.
+	if lookupKey(lo) == lookupKey(hi) {
+		t.Error("the plan key no longer separates a class boundary. That is only " +
+			"safe if a bandwidth signal survives somewhere else in the key — " +
+			"97404a3 removed the class on the belief that tensorSplit covered it, " +
+			"and 9be1ec2 showed the split is a constant at lookup time, so the key " +
+			"was left with no bandwidth signal at all")
+	}
+}
+
+// The churn above is only acceptable because it costs a recompute, not a
+// measurement: the fresh plan must come out the same on both sides of the edge.
+//
+// This is the half that makes the boundary a nuisance rather than a defect, and
+// it was previously only asserted in prose. If a boundary crossing ever changed
+// the PACKING, the same re-measurement that today costs a recompute would start
+// changing where expert layers land.
+func TestAClassBoundaryDoesNotChangeTheFreshPlan(t *testing.T) {
+	model := &ModelProfile{
+		Path: "m.gguf", SizeBytes: 30 * 1024 * 1024 * 1024,
+		NumLayers: 48, NumExperts: 256, EmbeddingLength: 2560,
+		FeedForwardLength: 9728, IsMoE: true, ContextSize: 32768,
+	}
+	plan := func(bw int) *Strategy {
+		gpus := fitBox(12192, 12321, bw)
+		for i := range gpus {
+			gpus[i].VRAMUsedMB = 0
+		}
+		caps := &detect.Capabilities{
+			GPUs: gpus, RAM: detect.RAMInfo{TotalMB: 131072},
+			CPU: detect.CPUInfo{Cores: 14},
+		}
+		s, err := Compute(caps, model, Options{KVPlacement: "gpu", KVQuality: "mid", ContextSize: 32768})
+		if err != nil {
+			t.Fatalf("compute at %d MB/s: %v", bw, err)
+		}
+		return s
+	}
+
+	lo, hi := plan(6098), plan(6099)
+	if bandwidthRatioClass(fitBox(12192, 12321, 6098)) == bandwidthRatioClass(fitBox(12192, 12321, 6099)) {
+		t.Fatal("fixture no longer straddles a class boundary")
+	}
+	if lo.NCPUMoE != hi.NCPUMoE {
+		t.Errorf("a class boundary changed the expert offload: n-cpu-moe %d -> %d. "+
+			"A re-measurement that crosses the edge would then change where expert "+
+			"layers are packed, not merely force a recompute", lo.NCPUMoE, hi.NCPUMoE)
+	}
+	if splitCompactKey(lo.TensorSplit) != splitCompactKey(hi.TensorSplit) {
+		t.Errorf("a class boundary changed the tensor split: %v -> %v",
+			lo.TensorSplit, hi.TensorSplit)
 	}
 }
 
