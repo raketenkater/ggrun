@@ -6340,11 +6340,30 @@ func loadLegacySystemProbe(newPath string, gpus []detect.GPU) []byte {
 		// whose hash equals the identity this build would have produced BEFORE the
 		// signature change, which is reconstructible from the GPU set. That keeps
 		// the guard sound while making the migration reach the files it exists for.
-		if !legacyNameMatchesGPUSet(name, gpus) {
-			continue
-		}
 		data, readErr := os.ReadFile(legacyPath)
 		if readErr != nil || !usableLegacySystemProbe(data) {
+			continue
+		}
+		// Adopt ONLY a file whose name matches this GPU set — the current identity
+		// or a form an earlier build could have produced for this hardware.
+		//
+		// A content-only rule was tried and REJECTED, and the reason is worth
+		// recording because it looks tempting: a probe records one per-device
+		// overhead per GPU, so its device count identifies the machine SIZE. But
+		// that is all it identifies — the file carries no names, bus ids or driver
+		// versions, verified against this box's own
+		// ~/.cache/ggrun/system_d2fc41d1d9f9.cache. So a three-device probe from
+		// another three-GPU machine is indistinguishable from this one's by content
+		// alone, and adopting it would import that machine's measured overhead into
+		// this plan. A wrong number silently shapes placement, which is worse than
+		// having no measurement, so the count check cannot carry the decision.
+		//
+		// The consequence, stated plainly: this migration is now conservative and
+		// will not reach every historical file — a probe whose name is from an era
+		// this build cannot reconstruct is skipped. That is the safe direction. The
+		// cost of a skip is one re-measurement on the next launch; the cost of a
+		// wrong adoption is a mis-planned launch, silently.
+		if !legacyNameMatchesGPUSet(name, gpus) {
 			continue
 		}
 		// Adopt it: write the same content at the current key so the next launch
@@ -6394,16 +6413,36 @@ func legacyNameMatchesGPUSet(name string, gpus []detect.GPU) bool {
 // produced before the two signature changes in this branch. Kept deliberately
 // narrow: each entry is a form that shipped, so the migration cannot be widened
 // by accident into accepting arbitrary names.
+// supersededGPUSetHashes returns GPU-set hashes an EARLIER build of this project
+// could have produced for this hardware.
+//
+// INCOMPLETE BY NATURE, and kept only as a best-effort first attempt. The
+// signatures have changed more than these forms cover, and a probe on this box
+// dated 2026-07-08 does not match any reconstruction — including the one from
+// origin/main 9d44a31, whose formula is
+// `Index|Name|VRAM|Driver|ComputeCap|BusID|genN|xN|bwN`. A hash chain cannot be
+// reconstructed reliably across an unknown number of past changes, so this is a
+// fast path, not the mechanism. See loadLegacySystemProbe for what actually
+// decides adoption.
 func supersededGPUSetHashes(gpus []detect.GPU) []string {
-	out := make([]string, 0, 2)
-	// Form 1: identity with the raw measured bandwidth appended (pre-97404a3).
+	out := make([]string, 0, 3)
+	// Form 1: origin/main 9d44a31 — identity with bandwidth AND index.
+	var mainline []string
+	for _, g := range gpus {
+		mainline = append(mainline, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d|bw%d",
+			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID,
+			g.PCIGen, g.PCILanes, g.BandwidthMBps))
+	}
+	out = append(out, hashSortedLines(mainline))
+	// Form 2: identity with bandwidth, after g.Index was dropped by a3c71c1's
+	// predecessor but before the term was removed.
 	var withBandwidth []string
 	for _, g := range gpus {
 		withBandwidth = append(withBandwidth, fmt.Sprintf("%s|%s|%d|%s|%s|gen%d|x%d|bw%d",
 			g.PCIBusID, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIGen, g.PCILanes, g.BandwidthMBps))
 	}
 	out = append(out, hashSortedLines(withBandwidth))
-	// Form 2: the same, before g.Index was dropped (pre-a3c71c1).
+	// Form 3: identity with index, before the bandwidth term was removed.
 	var withIndex []string
 	for _, g := range gpus {
 		withIndex = append(withIndex, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d",
@@ -6659,6 +6698,13 @@ func bandwidthRatioClass(gpus []detect.GPU) string {
 		pct := (g.BandwidthMBps*100 + fastest/2) / fastest
 		parts[i] = strconv.Itoa((pct / 10) * 10)
 	}
+	// SORTED, not in caller order. The class is part of a cache key, so it must not
+	// depend on how detection happened to enumerate the cards: a re-enumeration, a
+	// reseat or a driver reload that reorders the slice would otherwise mint a new
+	// key for the same machine. That is exactly the re-orphaning mechanism that
+	// dropping g.Index removed, so joining in slice order reintroduced it one layer
+	// up. gpuIdentityHash sorts its parts for the same reason.
+	sort.Strings(parts)
 	return strings.Join(parts, "-")
 }
 
@@ -8674,12 +8720,21 @@ const placementProbeCacheVersion = 10
 // and a geometry measured at one KV type was not reused for another, so plans
 // were validated against an allocation the backend would never make.
 // Version 8 keyed on a coarse bandwidth class instead of the raw measured value.
-// Version 9 REMOVES the bandwidth term entirely. The class was redundant: the
-// key already carries tensorSplit, and the split is the normalised proportion a
-// bandwidth change actually moves, so the plan is separated without a separate
-// bandwidth field. It was also actively harmful — the class was a 100 MB/s grid,
-// so a value on an edge changed class on a 1 MB/s move (12,149 classified 121 and
-// 12,150 classified 122) and minted a new plan key for an unchanged plan.
+// Version 9 REPLACES that class with a ratio-to-fastest class.
+//
+// An intermediate change removed the bandwidth term from this key entirely, on
+// the reasoning that tensorSplit already carries what a link change moves. That
+// reasoning was WRONG and it was reverted: the key is computed before the split
+// exists (see gpuSignatureHash), so dropping the term left the key with no
+// bandwidth signal at all and a plan packed for a fast link was reused for a slow
+// one. The class form is kept because the key genuinely needs a bandwidth term at
+// lookup time, and made relative rather than absolute so it does not encode this
+// rig's speeds as a rule.
+//
+// A 100 MB/s absolute grid was also actively harmful — an edge every 100 MB/s
+// meant a value ON an edge changed class on a 1 MB/s move (12,149 classified 121
+// and 12,150 classified 122). The ratio form's 10% steps are ~500x the observed
+// run-to-run noise instead.
 const placementPlanCacheVersion = 9
 
 // swaFull belongs in the key because it changes the KV allocation without

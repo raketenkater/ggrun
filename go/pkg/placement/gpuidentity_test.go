@@ -403,3 +403,34 @@ func TestExplicitCheckpointOverrideBeatsASavedConfigValue(t *testing.T) {
 		t.Error("an unset override still overrode: MaxCheckpointsSet must gate it")
 	}
 }
+
+// The plan key must not depend on the order detection enumerated the cards in.
+//
+// bandwidthRatioClass built one class per element in CALLER order and joined with
+// "-", so {12192,12321,6269} gave "90-100-50" while the reversed slice gave
+// "50-100-90" — a different plan key for the same machine. That is precisely the
+// re-orphaning mechanism that dropping g.Index removed, reintroduced one layer up:
+// a reseat, a driver reload, or a differently-ordered enumeration would discard a
+// still-correct plan. gpuIdentityHash already sorts its parts, and
+// TestIdentitySurvivesACardMovingSlots asserts the property for identity; this
+// asserts it for the ratio term.
+func TestPlanKeyIsInvariantToDeviceEnumerationOrder(t *testing.T) {
+	model := &ModelProfile{Path: "/models/qwen.gguf", NumLayers: 48, NumExperts: 512, EmbeddingLength: 2560}
+	dir := t.TempDir()
+	key := func(gpus []detect.GPU) string {
+		// Empty split: what the lookup path actually has.
+		return PlacementCachePathFor(dir, model, 262144, 256, "q8_0", "gpu", "llama", gpus, 1,
+			splitCompactKey(nil), false)
+	}
+
+	base := fitBox(12192, 12321, 6269)
+	reversed := []detect.GPU{base[2], base[1], base[0]}
+	for i := range reversed {
+		reversed[i].Index = i // detection renumbers from its own sort
+	}
+
+	if key(base) != key(reversed) {
+		t.Error("re-enumerating the same cards in a different order changed the " +
+			"plan key: a reseat or driver reload would orphan a still-correct plan")
+	}
+}

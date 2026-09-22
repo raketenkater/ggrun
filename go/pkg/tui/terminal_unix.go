@@ -11,22 +11,31 @@ import (
 // terminalAvailable reports whether bubbletea has a terminal to drive the
 // interactive UI on, on Unix.
 //
-// It mirrors bubbletea's own input selection rather than approximating it. That
-// logic (bubbletea tea.go, `standardInput` case) is:
+// It mirrors bubbletea's OWN input selection, which is the only thing that
+// decides whether the program can run. In bubbletea v1.3.10 `initInput`:
 //
-//   - if os.Stdin IS a terminal, use it and stop;
-//   - if os.Stdin is NOT a terminal, open /dev/tty and use that instead.
+//	if term.IsTerminal(f.Fd()) { break }   // os.Stdin is usable
+//	f, err := openInputTTY()               // otherwise /dev/tty
 //
-// Both halves matter. Checking stdin alone would refuse `echo x | ggrun` — a
-// pipe into a process that still owns a controlling terminal — which bubbletea
-// handles correctly today via the /dev/tty fallback. That case was verified: with
-// stdin piped inside a pty, IsTerminal(stdin) is false while /dev/tty opens.
+// Two things about that are easy to get wrong, and an earlier version of this
+// file got both:
 //
-// Checking /dev/tty alone (the original implementation) is the mirror-image bug:
-// it cannot work on Windows at all, and it rejects a detached session that still
-// has a usable stdout.
+//   - STDOUT IS NOT CONSULTED. Bubbletea assigns `p.output = os.Stdout`
+//     unconditionally (tea.go:262) and never tests it for terminal-ness. An
+//     earlier version OR-ed `IsTerminal(os.Stdout)` into this check, which has no
+//     basis in bubbletea and made the function return true for a piped stdin
+//     whenever the process happened to own a terminal — the test below caught it,
+//     but only when run under a real pty, because `go test` outside one has
+//     non-terminal stdout and the clause could not fire.
+//
+//   - The /dev/tty fallback IS load-bearing, for the opposite case: a piped stdin
+//     in a process that still owns a controlling terminal. Bubbletea opens
+//     /dev/tty there, so `echo x | ggrun` works, and refusing it would be a
+//     regression. Verified under a pty: IsTerminal(stdin) false, /dev/tty opens.
+//
+// So: stdin first, then the platform's console device. Nothing else.
 func terminalAvailable() bool {
-	if term.IsTerminal(os.Stdin.Fd()) || term.IsTerminal(os.Stdout.Fd()) {
+	if term.IsTerminal(os.Stdin.Fd()) {
 		return true
 	}
 	// bubbletea's non-TTY-stdin fallback: if this opens, the UI can run.

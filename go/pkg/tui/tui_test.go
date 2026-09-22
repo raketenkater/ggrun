@@ -2346,41 +2346,54 @@ func TestTerminalAvailableFollowsStdinNotADevicePath(t *testing.T) {
 	saved := os.Stdin
 	t.Cleanup(func() { os.Stdin = saved })
 
-	// A pipe is not a terminal, so the UI must decline it regardless of whether
-	// this process happens to own a controlling terminal.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
+	// The contract has TWO clauses, and a test of one must not assume the other is
+	// absent. terminalAvailable mirrors bubbletea: stdin if it is a terminal,
+	// otherwise the platform console fallback (/dev/tty, or CONIN$ on Windows).
+	//
+	// So "a pipe stdin is refused" is only true when there is NO console fallback.
+	// Under a pty the fallback legitimately fires — bubbletea would open /dev/tty
+	// and run — and asserting refusal there is the test being wrong, not the code.
+	// An earlier version asserted refusal unconditionally and passed only because
+	// `go test` outside a pty has no terminal to fall back to.
+	hasFallback := func() bool {
+		f, err := os.Open("/dev/tty")
+		if err != nil {
+			return false
+		}
+		_ = f.Close()
+		return true
 	}
-	defer func() { _ = r.Close(); _ = w.Close() }()
-	os.Stdin = r
-	if terminalAvailable() {
-		t.Error("a pipe stdin was reported as an interactive terminal; " +
-			"a full-screen UI would be started in a pipeline or CI job")
+	fallback := hasFallback()
+
+	check := func(label string, f *os.File) {
+		os.Stdin = f
+		if got, want := terminalAvailable(), fallback; got != want {
+			t.Errorf("with %s stdin: terminalAvailable()=%v, want %v "+
+				"(console fallback available=%v); a non-terminal stdin must not "+
+				"itself be treated as a terminal", label, got, want, fallback)
+		}
 	}
 
-	// /dev/null is a character device but is not a terminal. The old /dev/tty
-	// probe could not distinguish this case either.
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatalf("open %s: %v", os.DevNull, err)
 	}
 	defer func() { _ = devNull.Close() }()
-	os.Stdin = devNull
-	if terminalAvailable() {
-		t.Error("stdin on the null device was reported as an interactive terminal")
-	}
+	check("a null device", devNull)
 
-	// A regular file is not a terminal.
-	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	check("a pipe", r)
+
+	tmp, err := os.CreateTemp(t.TempDir(), "stdin")
 	if err != nil {
 		t.Fatalf("tempfile: %v", err)
 	}
-	defer func() { _ = f.Close() }()
-	os.Stdin = f
-	if terminalAvailable() {
-		t.Error("a regular-file stdin was reported as an interactive terminal")
-	}
+	defer func() { _ = tmp.Close() }()
+	check("a regular file", tmp)
 }
 
 // The platform-independent half of the #63 regression, expressible without a
