@@ -6499,7 +6499,9 @@ func cmdLaunch(args []string) {
 			claudeRouterURL = claudeAuto.router.URL()
 		}
 	}
-	if err := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL); err != nil {
+	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+	}); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
@@ -6800,7 +6802,9 @@ func cmdLaunch(args []string) {
 		if newP.LogBuf != nil {
 			recordMeasuredLaunchProbes(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String(), baselineVRAM, serverProcessPID(newP))
 		}
-		if err := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL); err != nil {
+		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
+		}); err != nil {
 			_ = newP.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] recovered placement failed lifecycle verification: %v\n", err)
