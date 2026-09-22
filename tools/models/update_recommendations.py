@@ -476,6 +476,16 @@ def display_name(row: dict[str, Any]) -> str:
     return name or row_slug(row)
 
 
+def bare_model_name(row: dict[str, Any]) -> str:
+    """The model's own name, without the creator prefix display_name() adds.
+
+    Hugging Face repos are named after the model alone ("GLM-5.3-Flash" ->
+    unsloth/GLM-5.3-Flash-GGUF), so the creator-prefixed spelling names no real
+    repo for any creator whose name is not already part of the model name.
+    """
+    return str(value_from(row, "name", "shortName", "slug") or "").strip()
+
+
 def row_name(row: dict[str, Any]) -> str:
     return " ".join(
         part
@@ -784,10 +794,17 @@ def direct_repo_candidates(row: dict[str, Any]) -> list[str]:
                 repos.append(f"{owner}/{base_name}-GGUF")
             repos.append(f"unsloth/{base_name}-GGUF")
             repos.append(f"bartowski/{base_name}-GGUF")
-    query = re.sub(r"\s+", "-", model_query(row))
-    if query:
-        repos.append(f"unsloth/{query}-GGUF")
-        repos.append(f"bartowski/{query}-GGUF")
+    # Artificial Analysis stopped publishing the HF repo link in September 2026,
+    # so with no base repo the name has to be rebuilt from the row. model_query()
+    # falls back to display_name(), which prefixes the creator ("Z AI
+    # GLM-5.3-Flash") and names no real repo; the bare model name does
+    # (unsloth/GLM-5.3-Flash-GGUF). Try the bare spelling first and keep the
+    # prefixed one for creators that really are part of the repo name.
+    for name in (bare_model_name(row), display_name(row)):
+        slug = re.sub(r"\s+", "-", clean_repo_model_name(name))
+        if slug:
+            repos.append(f"unsloth/{slug}-GGUF")
+            repos.append(f"bartowski/{slug}-GGUF")
     return uniq(repos)
 
 
@@ -795,7 +812,7 @@ def search_queries(row: dict[str, Any]) -> list[str]:
     query = model_query(row)
     display = display_name(row)
     base = huggingface_repo(row)
-    parts = [f"{query} GGUF", f"{display} GGUF"]
+    parts = [f"{query} GGUF", f"{bare_model_name(row)} GGUF", f"{display} GGUF"]
     if base:
         parts.append(f"{repo_name(base)} GGUF")
     return uniq(parts)
