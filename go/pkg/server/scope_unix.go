@@ -46,6 +46,93 @@ kill "$watcher" 2>/dev/null
 wait "$watcher" 2>/dev/null
 exit "$status"`
 
+// scopeMode selects which systemd instance owns a containment scope.
+//
+// The scope must be created, observed and reaped by the SAME instance, so the
+// mode is resolved once per Process and threaded through every site rather than
+// re-derived. A mismatch is not cosmetic: creating a scope one way and reaping it
+// the other leaves the transient unit running, which is exactly the leak the
+// failure-path cleanup exists to prevent.
+type scopeMode int
+
+const (
+	// scopeUser is the ordinary case: a per-user transient scope, reachable over
+	// the user session bus.
+	scopeUser scopeMode = iota
+	// scopeSystem is the root case. A root session has no per-user systemd
+	// manager and no session bus ($XDG_RUNTIME_DIR / $DBUS_SESSION_BUS_ADDRESS),
+	// so `systemd-run --user` fails outright with a dbus error (issue #64). Root
+	// CAN create a system-scope transient unit, and it provides the same
+	// MemoryMax / MemorySwapMax=0 / OOMPolicy=kill containment, so containment is
+	// preserved rather than dropped.
+	scopeSystem
+	// scopeUnsupported means no usable systemd instance at all. Callers must
+	// refuse rather than launch uncontained.
+	scopeUnsupported
+)
+
+// scopeModeEnvOverride lets tests select a mode without being root and without a
+// real systemd. Read only here so the override cannot leak into other decisions.
+const scopeModeEnvOverride = "GGRUN_SCOPE_MODE"
+
+// resolveScopeMode decides which systemd instance this process can use.
+//
+// Detected by capability, not by assuming root implies system scope: a root
+// session inside a container may have no systemd at all, and a non-root user in
+// a login session has a user manager. The test is the same one systemd itself
+// needs — a reachable runtime dir, or the ability to talk to the system bus.
+func resolveScopeMode() scopeMode {
+	if v := strings.TrimSpace(os.Getenv(scopeModeEnvOverride)); v != "" {
+		switch v {
+		case "user":
+			return scopeUser
+		case "system":
+			return scopeSystem
+		case "unsupported":
+			return scopeUnsupported
+		}
+	}
+	if os.Geteuid() == 0 {
+		// Root: the user manager is unreachable (no XDG_RUNTIME_DIR / session
+		// bus), but the system instance is. Verify we are not in a container with
+		// no systemd at all before promising containment.
+		if _, err := os.Stat("/run/systemd/system"); err != nil {
+			return scopeUnsupported
+		}
+		return scopeSystem
+	}
+	// Non-root: use the user instance when this session has one.
+	if os.Getenv("XDG_RUNTIME_DIR") != "" {
+		return scopeUser
+	}
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		// A non-root process without a session bus can still reach the system
+		// instance only if it is permitted; do not silently claim user scope.
+		return scopeUser
+	}
+	return scopeUnsupported
+}
+
+// systemctlArgs builds a systemctl invocation against the instance that owns the
+// scope. Every read, teardown and property write must go through this so a
+// scope created in one instance is never addressed in the other.
+func systemctlArgs(mode scopeMode, verb string, rest ...string) []string {
+	out := []string{"systemctl"}
+	if mode == scopeUser {
+		out = append(out, "--user")
+	}
+	out = append(out, verb)
+	return append(out, rest...)
+}
+
+// systemctlCmd builds the exec.Cmd for a systemctl call against the instance that
+// owns the scope. Paired with systemctlArgs so argv construction and execution
+// can never disagree about --user.
+func systemctlCmd(mode scopeMode, verb string, rest ...string) *exec.Cmd {
+	a := systemctlArgs(mode, verb, rest...)
+	return exec.Command(a[0], a[1:]...)
+}
+
 func scopedCommandArgs(args []string, memoryMaxMB int) ([]string, error) {
 	return scopedCommandArgsWithUnit(args, memoryMaxMB, "ggrun-test.scope")
 }
@@ -65,11 +152,26 @@ func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, u
 	if err != nil {
 		return nil, fmt.Errorf("backend memory containment requires systemd-run: %w", err)
 	}
+	// Refuse before building any argv when no instance can own a scope. This must
+	// be an explicit ggrun-authored error rather than a raw systemd failure
+	// surfacing later from cmd.Start, so the failure classifies deterministically
+	// (support.go matches this phrase) instead of landing in
+	// unclassified_launch_failure.
+	mode := resolveScopeMode()
+	if mode == scopeUnsupported {
+		return nil, fmt.Errorf(
+			"backend memory containment unavailable: no usable systemd instance " +
+				"(root session and containers have no --user manager; a system scope " +
+				"needs /run/systemd/system). Refusing to start an uncontained backend. " +
+				"Disable the limit with --ram-budget 0 to launch without containment.")
+	}
 	out := []string{
 		systemdRun,
-		"--user",
 		"--scope",
 		"--quiet",
+	}
+	if mode == scopeUser {
+		out = append(out, "--user")
 	}
 	if unit != "" {
 		// Do not use systemd-run --collect here. A failed/OOM-killed transient
@@ -105,7 +207,7 @@ func stopScopeUnit(unit string) error {
 	if unit == "" {
 		return nil
 	}
-	err := exec.Command("systemctl", "--user", "stop", unit).Run()
+	err := systemctlCmd(resolveScopeMode(), "stop", unit).Run()
 	// A transient scope may disappear between the activity check and stop.
 	// systemctl returns exit 5 for that already-stopped state; teardown has
 	// nevertheless achieved its only required outcome.
@@ -119,7 +221,7 @@ func resetFailedScopeUnit(unit string) error {
 	if unit == "" {
 		return nil
 	}
-	return exec.Command("systemctl", "--user", "reset-failed", unit).Run()
+	return systemctlCmd(resolveScopeMode(), "reset-failed", unit).Run()
 }
 
 func waitScopeUnitStopped(unit string, timeout time.Duration) error {
@@ -137,7 +239,7 @@ func waitScopeUnitStopped(unit string, timeout time.Duration) error {
 }
 
 func scopeUnitActive(unit string) bool {
-	return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
+	return systemctlCmd(resolveScopeMode(), "is-active", "--quiet", unit).Run() == nil
 }
 
 func scopeMemoryPeakBytes(unit string) (uint64, error) {
@@ -166,7 +268,7 @@ func scopeMemoryStats(unit string) (uint64, uint64, error, error) {
 }
 
 func scopeUnitMemoryStats(unit string) (uint64, uint64, error, error) {
-	peakOut, peakErr := exec.Command("systemctl", "--user", "show", "--property=MemoryPeak", "--value", unit).Output()
+	peakOut, peakErr := systemctlCmd(resolveScopeMode(), "show", "--property=MemoryPeak", "--value", unit).Output()
 	peak := uint64(0)
 	if peakErr == nil {
 		peak, peakErr = strconv.ParseUint(strings.TrimSpace(string(peakOut)), 10, 64)
@@ -174,7 +276,7 @@ func scopeUnitMemoryStats(unit string) (uint64, uint64, error, error) {
 	if peakErr != nil {
 		peakErr = fmt.Errorf("read scope MemoryPeak property: %w", peakErr)
 	}
-	resultOut, resultErr := exec.Command("systemctl", "--user", "show", "--property=Result", "--value", unit).Output()
+	resultOut, resultErr := systemctlCmd(resolveScopeMode(), "show", "--property=Result", "--value", unit).Output()
 	oomKills := uint64(0)
 	if resultErr == nil && strings.TrimSpace(string(resultOut)) == "oom-kill" {
 		oomKills = 1
@@ -189,7 +291,7 @@ func scopeControlGroup(unit string) (string, error) {
 	if unit == "" {
 		return "", fmt.Errorf("empty systemd scope unit")
 	}
-	out, err := exec.Command("systemctl", "--user", "show", "--property=ControlGroup", "--value", unit).Output()
+	out, err := systemctlCmd(resolveScopeMode(), "show", "--property=ControlGroup", "--value", unit).Output()
 	if err != nil {
 		return "", fmt.Errorf("read scope control group: %w", err)
 	}
@@ -325,7 +427,7 @@ func setScopeMemoryLimitMB(unit, cgroupFile, systemdProperty string, limitMB int
 	// Fallback: systemctl set-property on the transient unit. This goes through
 	// DBus and may fail for a scope that was never fully registered, which the
 	// caller treats as a non-fatal signal.
-	if exec.Command("systemctl", "--user", "set-property", unit, systemdProperty, fmt.Sprintf("%d", bytes)).Run() == nil {
+	if systemctlCmd(resolveScopeMode(), "set-property", unit, systemdProperty, fmt.Sprintf("%d", bytes)).Run() == nil {
 		return nil
 	}
 	return fmt.Errorf("set scope %s at %s", cgroupFile, path)

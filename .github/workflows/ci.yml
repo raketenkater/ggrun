@@ -19,6 +19,31 @@ jobs:
       - name: Run protected core-engine contract
         run: scripts/verify-core-engine.sh
 
+  # No job previously compiled or tested the tree for Windows on a Windows
+  # runner, so a Unix-only path could sit in code that is built for Windows and
+  # only fail for real users. Issue #63 was exactly that: pkg/tui called
+  # os.Open("/dev/tty"), which cannot succeed on Windows, and a bare `ggrun`
+  # reported "no terminal available" at a real console.
+  #
+  # This is a build, not a test, because a console cannot be driven reliably on
+  # a CI runner. It catches the class of defect that matters here — code that
+  # cannot work on the platform it is compiled for — and the source-level guard
+  # in pkg/tui covers the specific terminal regression.
+  windows-cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Build every package for Windows
+        working-directory: go
+        run: GOOS=windows GOARCH=amd64 go build ./...
+      - name: Vet every package for Windows
+        working-directory: go
+        run: GOOS=windows GOARCH=amd64 go vet ./...
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:

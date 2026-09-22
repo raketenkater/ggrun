@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -729,4 +730,43 @@ func (c *Capabilities) TotalVRAMFree() int {
 // JSON returns a pretty-printed JSON representation.
 func (c *Capabilities) JSON() ([]byte, error) {
 	return json.MarshalIndent(c, "", "  ")
+}
+
+// LoadCapabilities decodes an inventory captured by Capabilities.JSON, so a plan
+// can be computed for a machine other than the one running ggrun — or for this
+// machine while another process is holding its VRAM.
+//
+// This is a PLANNING input only. Every caller on a real launch must reject it:
+// invariant 4 makes exact-argv admission and observed allocations the authority,
+// and a synthetic inventory reaching admission would defeat fail-closed memory
+// safety. It lives here rather than in cmd so the same decode is available to
+// tests and tools without importing the launcher.
+//
+// Validation is deliberately strict, because a half-populated inventory silently
+// produces a plausible plan for hardware that does not exist:
+//   - every GPU must carry a positive VRAMTotalMB, since every placement decision
+//     is budgeted against it and zero would silently fit nothing;
+//   - RAM and CPU counts must not be negative.
+func LoadCapabilities(data []byte) (*Capabilities, error) {
+	var caps Capabilities
+	dec := json.NewDecoder(bytes.NewReader(data))
+	// Reject unknown fields: a typo in a hand-written inventory (VRAMTotalMb for
+	// vram_total_mb) would otherwise be ignored and planned as zero VRAM.
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&caps); err != nil {
+		return nil, fmt.Errorf("inventory is not a ggrun hardware inventory: %w", err)
+	}
+	for i, g := range caps.GPUs {
+		if g.VRAMTotalMB <= 0 {
+			return nil, fmt.Errorf("inventory GPU %d (%s) has no vram_total_mb; "+
+				"every placement decision is budgeted against it", i, g.Name)
+		}
+	}
+	if caps.RAM.TotalMB < 0 || caps.RAM.FreeMB < 0 {
+		return nil, fmt.Errorf("inventory has negative RAM: total=%d free=%d", caps.RAM.TotalMB, caps.RAM.FreeMB)
+	}
+	if caps.CPU.Cores < 0 {
+		return nil, fmt.Errorf("inventory has negative CPU cores: %d", caps.CPU.Cores)
+	}
+	return &caps, nil
 }

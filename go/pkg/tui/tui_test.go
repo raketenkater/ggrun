@@ -2326,3 +2326,147 @@ func TestInitialParallelPolicyReachesLaunch(t *testing.T) {
 		})
 	}
 }
+
+// The terminal check must be a property of STDIN, not of a Unix device path.
+//
+// It previously opened the literal "/dev/tty", which cannot exist on Windows, so
+// a bare `ggrun` at a real Windows console always printed the no-terminal
+// guidance and the TUI was unreachable there (issue #63). This test pins the
+// portable contract on every platform: give the process a known stdin and the
+// answer must follow.
+//
+// HONEST LIMIT, recorded rather than hidden: on Linux this test does not fail
+// against the old /dev/tty implementation, because /dev/tty genuinely exists in
+// a developer shell and the old probe succeeded regardless of stdin. The
+// platform-independent assertion that WOULD catch the regression is the Windows
+// build, where the old code could never open the path — see
+// TestTerminalCheckDoesNotDependOnAUnixDevicePath below, which fails at compile
+// time on Windows if the check reintroduces a Unix-only path.
+func TestTerminalAvailableFollowsStdinNotADevicePath(t *testing.T) {
+	saved := os.Stdin
+	t.Cleanup(func() { os.Stdin = saved })
+
+	// The contract has TWO clauses, and a test of one must not assume the other is
+	// absent. terminalAvailable mirrors bubbletea: stdin if it is a terminal,
+	// otherwise the platform console fallback (/dev/tty, or CONIN$ on Windows).
+	//
+	// So "a pipe stdin is refused" is only true when there is NO console fallback.
+	// Under a pty the fallback legitimately fires — bubbletea would open /dev/tty
+	// and run — and asserting refusal there is the test being wrong, not the code.
+	// An earlier version asserted refusal unconditionally and passed only because
+	// `go test` outside a pty has no terminal to fall back to.
+	hasFallback := func() bool {
+		f, err := os.Open("/dev/tty")
+		if err != nil {
+			return false
+		}
+		_ = f.Close()
+		return true
+	}
+	fallback := hasFallback()
+
+	check := func(label string, f *os.File) {
+		os.Stdin = f
+		if got, want := terminalAvailable(), fallback; got != want {
+			t.Errorf("with %s stdin: terminalAvailable()=%v, want %v "+
+				"(console fallback available=%v); a non-terminal stdin must not "+
+				"itself be treated as a terminal", label, got, want, fallback)
+		}
+	}
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+	check("a null device", devNull)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	check("a pipe", r)
+
+	tmp, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer func() { _ = tmp.Close() }()
+	check("a regular file", tmp)
+}
+
+// The platform-independent half of the #63 regression, expressible without a
+// Windows console: the terminal check must be platform-split, and on BOTH
+// platforms it must mirror bubbletea's input selection rather than approximate it.
+//
+// Bubbletea's logic is the same on both platforms — if os.Stdin IS a terminal use
+// it, otherwise open the fallback console device and use that. The device differs
+// (/dev/tty on Unix, CONIN$ on Windows); the shape does not. Getting this wrong in
+// either direction is a real defect:
+//
+//   - Checking /dev/tty ALONE was the original bug. That path cannot exist on
+//     Windows, so a bare `ggrun` reported no terminal at a real console and the
+//     TUI was unreachable there (issue #63).
+//   - Checking stdin ALONE refuses `echo x | ggrun`, where stdin is a pipe but a
+//     controlling terminal exists and bubbletea would have run the UI. Verified
+//     under a pty: IsTerminal(stdin) false, /dev/tty opens.
+//   - Checking the console handles WITHOUT the fallback does the same on Windows,
+//     refusing a shell redirect that bubbletea can serve via CONIN$. An earlier
+//     version of the Windows file made exactly this mistake.
+//
+// This inspects the FUNCTION BODY with comment lines stripped: a first version
+// searched whole files and passed when the fallback was deleted, because the path
+// was still named in a comment. A guard that passes on prose is worse than none.
+func TestTerminalCheckMirrorsBubbleteasInputSelectionOnEveryPlatform(t *testing.T) {
+	body := func(file, sig string) string {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("%s is missing: %v — the check must be platform-split so "+
+				"Windows has its own implementation (issue #63)", file, err)
+		}
+		s := string(src)
+		i := strings.Index(s, sig)
+		if i < 0 {
+			t.Fatalf("%s does not define %s", file, sig)
+		}
+		j := strings.Index(s[i:], "\n}")
+		if j < 0 {
+			t.Fatalf("could not delimit %s in %s", sig, file)
+		}
+		var code []string
+		for _, ln := range strings.Split(s[i:i+j], "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(ln), "//") {
+				code = append(code, ln)
+			}
+		}
+		return strings.Join(code, "\n")
+	}
+
+	unix := body("terminal_unix.go", "func terminalAvailable() bool {")
+	win := body("terminal_windows.go", "func terminalAvailable() bool {")
+
+	// Both must test the streams bubbletea will actually use.
+	for name, b := range map[string]string{"unix": unix, "windows": win} {
+		if !strings.Contains(b, "IsTerminal") || !strings.Contains(b, "os.Stdin.Fd()") {
+			t.Errorf("%s: the check must test stdin, bubbletea's primary input", name)
+		}
+	}
+	// And both must keep the platform's own console fallback.
+	if !strings.Contains(unix, "/dev/tty") {
+		t.Error("the Unix check dropped /dev/tty: bubbletea opens it as the fallback " +
+			"for a piped stdin with a controlling terminal, so `echo x | ggrun` " +
+			"would be refused where it previously ran")
+	}
+	if !strings.Contains(win, "CONIN$") {
+		t.Error("the Windows check dropped CONIN$: bubbletea opens it as the fallback " +
+			"for a non-console stdin, so a Windows shell redirect would be refused")
+	}
+	// Neither may name the other platform's device.
+	if strings.Contains(win, "/dev/tty") {
+		t.Error("the Windows check references /dev/tty, which cannot exist on Windows")
+	}
+	if strings.Contains(unix, "CONIN$") {
+		t.Error("the Unix check references CONIN$, which is a Windows device")
+	}
+}
