@@ -6209,6 +6209,11 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
+	if offerAcceleratedMainline(req, model, be, caps, cfg.AssumeYes) {
+		if next := resolveLaunchBackend(req, model, caps); next != nil {
+			be = next
+		}
+	}
 	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
