@@ -2365,6 +2365,11 @@ func TestBackendUnavailableReasonNovelArchNamesMainline(t *testing.T) {
 	if !strings.Contains(message, "search open llama.cpp PRs") || !strings.Contains(message, "fork") {
 		t.Fatalf("novel-arch message does not offer a fork search: %q", message)
 	}
+	// A headless run gets no prompt, so the message must say how to get one or
+	// how to accept without one; "ggrun can search" named no way to do either.
+	if !strings.Contains(message, "terminal") || !strings.Contains(message, "LLM_ASSUME_YES") {
+		t.Fatalf("novel-arch message gives a headless user no way to proceed: %q", message)
+	}
 }
 
 // TestBackendUnavailableReasonRecipeArchKeepsRecipeHint guards that an arch with

@@ -199,3 +199,29 @@ func TestFailedForkInstallReturnsInsteadOfExiting(t *testing.T) {
 		t.Fatalf("an unknown recipe is a usage error, got %T %v", err, err)
 	}
 }
+
+// stdin redirected from /dev/null (CI, nohup, cron, service units) is not a
+// terminal. The ModeCharDevice test accepted it, so consent prompts printed
+// [y/N], read EOF and declined, and a headless launch never printed the exact
+// install command it had for an unsupported architecture.
+func TestStdinFromDevNullIsNotATerminal(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	saved := os.Stdin
+	defer func() { os.Stdin = saved }()
+	for name, f := range map[string]*os.File{"/dev/null": devNull, "a pipe": r} {
+		os.Stdin = f
+		if stdinIsTerminal() {
+			t.Errorf("stdin from %s was treated as an interactive terminal", name)
+		}
+	}
+}

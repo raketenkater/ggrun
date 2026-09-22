@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
+
+	"github.com/charmbracelet/x/term"
 )
 
 const (
@@ -274,12 +276,13 @@ func updateCacheDir() string {
 	return filepath.Join(os.TempDir(), "ggrun")
 }
 
+// isTerminal is a real terminal check. A ModeCharDevice test also accepts
+// /dev/null, which is what a scripted run redirects stdin from.
 func isTerminal(f *os.File) bool {
 	if f == nil {
 		return false
 	}
-	info, err := f.Stat()
-	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
+	return term.IsTerminal(f.Fd())
 }
 
 // Release holds GitHub release info.

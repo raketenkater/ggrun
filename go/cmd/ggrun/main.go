@@ -44,6 +44,8 @@ import (
 	"github.com/raketenkater/ggrun/pkg/tui"
 	"github.com/raketenkater/ggrun/pkg/tune"
 	"github.com/raketenkater/ggrun/pkg/update"
+
+	"github.com/charmbracelet/x/term"
 )
 
 // version comes from pkg/update so the binary and the update checker can never
@@ -2477,7 +2479,7 @@ func normalizeArchKVRequest(req *launchRequest, model *placement.ModelProfile) {
 func backendUnavailableReason(arch, backendPath string) string {
 	actionable := fmt.Sprintf("Update the mainline llama.cpp backend or install a fork that adds %s (ggrun backend install <recipe>).", arch)
 	if len(backends.RecipesForArch(arch)) == 0 {
-		actionable = "It requires a newer llama.cpp mainline or a fork that adds the architecture. ggrun can search open llama.cpp PRs for a supporting fork, or update the mainline backend."
+		actionable = "It requires a newer llama.cpp mainline or a fork that adds the architecture. Run ggrun in a terminal and it will search open llama.cpp PRs for a supporting fork or offer a mainline backend update; set LLM_ASSUME_YES=true to accept them without a prompt."
 	}
 	return fmt.Sprintf(
 		"No installed backend supports the %s architecture. The %s backend does not support it.\n  %s",
@@ -3783,9 +3785,13 @@ func rememberLiveMemoryProbeConsent(cfg *config.Config, output io.Writer) {
 	fmt.Fprintln(output, "[config] live memory probe approval saved; future launches will not ask again")
 }
 
+// stdinIsTerminal reports whether a consent prompt could actually be answered.
+// A ModeCharDevice test is not enough: /dev/null is a character device, and
+// stdin redirected from it is what CI, nohup, cron and service units provide.
+// Treating that as a terminal printed [y/N], read EOF and declined, so a
+// headless launch never showed the exact install command it had for this case.
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(os.Stdin.Fd())
 }
 
 // hostExpertPinningEnv disables ik_llama's pinned host buffer when the plan
