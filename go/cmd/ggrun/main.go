@@ -5110,7 +5110,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				}
 			}
 		}
-		if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+		if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 			return nil, strategy, serverArgs, err
 		}
 		// A preflight or OOM recovery can move additional expert layers to CPU
@@ -6318,7 +6318,7 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
-	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -7376,7 +7376,7 @@ func cmdKVProbe(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -8564,7 +8564,7 @@ func cmdTune(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
