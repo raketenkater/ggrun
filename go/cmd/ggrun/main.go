@@ -6213,6 +6213,7 @@ func cmdLaunch(args []string) {
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
+	applyVulkanDeviceOrder(req, be, caps)
 	if err := guardPortFree(req.Port, "launch"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -7585,6 +7586,11 @@ func cmdDryRun(args []string) {
 
 	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 	envPrefix := applyGPUVisibility(req, backendDialect(be))
+	if vkEnv, vkErr := vulkanDeviceOrderEnv(req, be, caps, listVulkanDevices); vkErr != nil {
+		fmt.Fprintf(os.Stderr, "[dry-run] warning: could not align Vulkan device order with detected GPUs: %v\n", vkErr)
+	} else if vkEnv != "" {
+		envPrefix = vkEnv
+	}
 	if req.EmitServerArgvJSON {
 		plan := struct {
 			Schema               string                          `json:"schema"`
@@ -8483,6 +8489,7 @@ func cmdTune(args []string) {
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[tune] GPU restriction: %s\n", env)
 	}
+	applyVulkanDeviceOrder(req, be, caps)
 
 	tuneOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
 	tuneOpts.ReasoningOff = true // tuning measures throughput, so think-free like benchmarks

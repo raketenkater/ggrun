@@ -133,6 +133,7 @@ func runSpecTest(args []string) error {
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[spec-test] GPU restriction: %s\n", env)
 	}
+	applyVulkanDeviceOrder(req, be, caps)
 	if hubDir, ok, setupErr := libhub.Setup(be.Path); setupErr != nil {
 		fmt.Fprintf(os.Stderr, "[spec-test] warning: lib hub: %v\n", setupErr)
 	} else if ok {
