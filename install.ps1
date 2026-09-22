@@ -55,6 +55,30 @@ function Require-Command($Name, $Hint) {
     if (!(Test-Command $Name)) { Fail "$Name was not found. $Hint" }
 }
 
+function Get-OSArchitecture {
+    # The process architecture, on BOTH Windows PowerShell 5.1 and pwsh 7+.
+    #
+    # [RuntimeInformation]::OSArchitecture is a .NET Core API. On .NET Framework —
+    # which is what ships as Windows PowerShell 5.1, the default `powershell`, and
+    # what a user gets from a console one-liner — the property exists but returns
+    # NULL, so .ToString() on it throws "cannot call a method on a null-valued
+    # expression". That was the first-run failure a user hit, reported as
+    # "Es ist nicht möglich, eine Methode für einen Ausdruck aufzurufen, der den
+    # NULL hat" at the very next line after the banner.
+    #
+    # Environment::Is64BitOperatingSystem and ::Is64BitProcess are .NET Framework
+    # 4.0 APIs, so they work everywhere this installer runs. The installer is
+    # x86_64-only, so the real question is whether the PROCESS is 64-bit: a 32-bit
+    # powershell on a 64-bit OS still cannot load a 64-bit backend and must be told
+    # to re-run under the 64-bit host.
+    if (-not [System.Environment]::Is64BitProcess) {
+        if ([System.Environment]::Is64BitOperatingSystem) { return 'x86 (32-bit host)' }
+        return 'x86'
+    }
+    if ([System.Environment]::Is64BitOperatingSystem) { return 'X64' }
+    return 'unknown'
+}
+
 function Test-NonInteractive {
     # True when the installer cannot ask a question: -AssumeYes,
     # LLM_INSTALL_NONINTERACTIVE=1, or a session with no usable console stdin.
@@ -527,7 +551,7 @@ function Collect-Diagnostics([string]$ErrorMessage) {
     $dateStr = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $L.Add("- date: $dateStr")
     $osVer = [System.Environment]::OSVersion.VersionString
-    $osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    $osArch = Get-OSArchitecture
     $L.Add("- os: $osVer ($osArch)")
     $psVer = $PSVersionTable.PSVersion
     $L.Add("- powershell: $psVer")
@@ -595,7 +619,7 @@ function Report-InstallFailure($ErrorRecord) {
 Say '=== ggrun native Windows installer ==='
 Say "Install dir: $InstallDir"
 Say "Backend:     $Backend"
-$arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$arch = Get-OSArchitecture
 if ($arch -ne 'X64') {
     Fail "This installer currently supports Windows x86_64 only; detected architecture: $arch"
 }
