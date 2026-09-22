@@ -6280,6 +6280,184 @@ func SystemCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
 	return out
 }
 
+// loadLegacySystemProbe finds a system probe written by an older install under
+// ~/.cache/ggrun and copies it forward.
+//
+// It SEARCHES rather than rebuilding the filename. The legacy directory may hold
+// files written under any earlier GPU signature — the raw-bandwidth form, or the
+// form before g.Index was dropped — and none of those names can be reconstructed
+// from the current identity. Requiring the legacy name to equal the new one is
+// what made the previous version of this migration dead code.
+//
+// It is deliberately conservative, because adopting the wrong file would import
+// another machine's measured CUDA overhead into this one's planning:
+//
+//   - only files named system_*.cache are considered;
+//   - the content must parse as a system probe with at least one positive
+//     per-device overhead (a truncated or foreign file is refused);
+//   - the file must have been written by the same major schema, so a future
+//     redefinition cannot be silently adopted as if it were current.
+//
+// Returns nil when nothing usable is found, which leaves the caller to treat the
+// measurement as unknown — the same fail-safe outcome as a miss.
+func loadLegacySystemProbe(newPath string, gpus []detect.GPU) []byte {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	legacyDir := filepath.Join(home, ".cache", "ggrun")
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return nil
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if !strings.HasPrefix(name, "system_") || !strings.HasSuffix(name, ".cache") {
+			continue
+		}
+		legacyPath := filepath.Join(legacyDir, name)
+		if legacyPath == newPath {
+			continue
+		}
+		// The filename encodes the GPU-SET identity it was measured on:
+		// `system_<gpuHash>.cache`. Adopting a file whose hash differs from the
+		// current one would import ANOTHER GPU SET'S measured overhead into this
+		// plan, which is worse than having no measurement — a wrong number silently
+		// shapes placement. This was found the hard way: an unguarded search picked
+		// up a 2026-07-08 probe from this box's ~/.cache/ggrun and changed a
+		// context-fit test's answer.
+		//
+		// So the hash must match. The reason the old code was dead is not that it
+		// compared hashes — that part was right — but that it looked in only ONE
+		// legacy name. The hash function changed, so the SAME GPU set now hashes
+		// differently and its old file carries the old hash. Matching the current
+		// hash alone cannot find it, and matching anything finds too much.
+		//
+		// Resolution: accept only files whose hash equals the current identity OR
+		// whose hash equals the identity this build would have produced BEFORE the
+		// signature change, which is reconstructible from the GPU set. That keeps
+		// the guard sound while making the migration reach the files it exists for.
+		if !legacyNameMatchesGPUSet(name, gpus) {
+			continue
+		}
+		data, readErr := os.ReadFile(legacyPath)
+		if readErr != nil || !usableLegacySystemProbe(data) {
+			continue
+		}
+		// Adopt it: write the same content at the current key so the next launch
+		// reads it directly, and return it for this one.
+		if mkErr := os.MkdirAll(filepath.Dir(newPath), 0755); mkErr == nil {
+			_ = atomicWriteFile(newPath, data, 0o644)
+		}
+		return data
+	}
+	return nil
+}
+
+// legacyNameMatchesGPUSet reports whether a legacy system-probe filename was
+// written for THIS GPU set.
+//
+// A system probe is a measurement of one machine's per-device CUDA overhead, and
+// the filename records which machine: `system_<hash>.cache`, where the hash is
+// the GPU-set identity at the time. Adopting a file for a different set imports
+// another machine's numbers into this plan, so the hash has to be checked.
+//
+// Two forms count as "this set":
+//
+//   - the current identity, for a file written by this build under an older
+//     app-home path;
+//   - the identity this build would have produced BEFORE the signature changes in
+//     this branch, which is reconstructible from the GPU set. Two such changes
+//     landed: the raw measured bandwidth was removed, and g.Index was dropped.
+//     A pre-existing install has files under those older hashes, and they are
+//     exactly what the migration exists to preserve.
+//
+// Anything else is refused, which is the fail-safe direction: no measurement is
+// better than a wrong one.
+func legacyNameMatchesGPUSet(name string, gpus []detect.GPU) bool {
+	want := fmt.Sprintf("system_%s.cache", gpuIdentityHash(gpus))
+	if name == want {
+		return true
+	}
+	for _, superseded := range supersededGPUSetHashes(gpus) {
+		if name == fmt.Sprintf("system_%s.cache", superseded) {
+			return true
+		}
+	}
+	return false
+}
+
+// supersededGPUSetHashes returns the GPU-set hashes this build might have
+// produced before the two signature changes in this branch. Kept deliberately
+// narrow: each entry is a form that shipped, so the migration cannot be widened
+// by accident into accepting arbitrary names.
+func supersededGPUSetHashes(gpus []detect.GPU) []string {
+	out := make([]string, 0, 2)
+	// Form 1: identity with the raw measured bandwidth appended (pre-97404a3).
+	var withBandwidth []string
+	for _, g := range gpus {
+		withBandwidth = append(withBandwidth, fmt.Sprintf("%s|%s|%d|%s|%s|gen%d|x%d|bw%d",
+			g.PCIBusID, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIGen, g.PCILanes, g.BandwidthMBps))
+	}
+	out = append(out, hashSortedLines(withBandwidth))
+	// Form 2: the same, before g.Index was dropped (pre-a3c71c1).
+	var withIndex []string
+	for _, g := range gpus {
+		withIndex = append(withIndex, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d",
+			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID, g.PCIGen, g.PCILanes))
+	}
+	out = append(out, hashSortedLines(withIndex))
+	return out
+}
+
+func hashSortedLines(parts []string) string {
+	sort.Strings(parts)
+	h := md5.New()
+	h.Write([]byte(strings.Join(parts, "\n") + "\n"))
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
+// usableLegacySystemProbe reports whether a candidate file is a system probe this
+// build may adopt. It validates content rather than trusting the filename.
+//
+// It requires a POSITIVE per-device overhead, not a schema marker. Real legacy
+// files written before the schema line existed carry only the overhead keys —
+// verified against this project's own store, where
+// `.cache/system_10bb13ba741a.cache` (2026-07-27) has no SYS_PROBE_SCHEMA line at
+// all. Requiring one would reject exactly the files this migration exists to
+// preserve, which is how the previous version was already dead. A file with no
+// positive per-device reading is not evidence of anything and is refused.
+//
+// A schema line, when present, must still be current: a future redefinition of
+// the stored meaning must not be adopted as if it were the current one.
+func usableLegacySystemProbe(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	hasOverhead := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "SYS_PROBE_SCHEMA="); ok {
+			n, convErr := strconv.Atoi(v)
+			if convErr != nil || n != systemProbeSchema {
+				return false
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "SYS_CUDA_OVERHEAD_MB") {
+			if _, after, found := strings.Cut(line, "="); found {
+				if mb, convErr := strconv.Atoi(after); convErr == nil && mb > 0 {
+					hasOverhead = true
+				}
+			}
+		}
+	}
+	return hasOverhead
+}
+
 func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	explicitCacheDir := cacheDir != ""
 	if cacheDir == "" {
@@ -6296,15 +6474,16 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 		// App-local installs used to read ~/.cache/ggrun before LLM_APP_HOME
 		// became authoritative. Preserve those measured CUDA values and migrate
 		// them lazily instead of treating the missing new-path file as zero.
-		home, _ := os.UserHomeDir()
-		legacyPath := filepath.Join(home, ".cache", "ggrun", fmt.Sprintf("system_%s.cache", gpuSig))
-		if legacyPath != path {
-			if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
-				data, err = legacyData, nil
-				if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr == nil {
-					_ = atomicWriteFile(path, legacyData, 0o644)
-				}
-			}
+		//
+		// The file is found by SEARCHING, not by rebuilding its name. An earlier
+		// version constructed `system_<gpuSig>.cache` under the legacy directory
+		// using the CURRENT hash, so a file written under the old bandwidth-bearing
+		// (or pre-g.Index-drop) signature could never match it and the migration
+		// could never fire — dead code that silently stopped preserving measured
+		// CUDA values. The content is self-describing (SYS_PROBE_SCHEMA plus
+		// per-device overheads), so the name is not needed to identify it.
+		if migrated := loadLegacySystemProbe(path, gpus); migrated != nil {
+			data, err = migrated, nil
 		}
 	}
 	if err != nil {

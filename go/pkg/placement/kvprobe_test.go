@@ -634,3 +634,69 @@ func TestSuccessMeasurementFillsAnEmptyKeyAndNeverLowersAnObservedOOM(t *testing
 		t.Fatalf("CUDA1 growth = %d, want the observed OOM 4000 preserved", got[1])
 	}
 }
+
+// The legacy system-probe migration must find a file written under a SUPERSEDED
+// GPU-set signature, because that is the only case it exists for.
+//
+// It previously rebuilt the legacy filename with the CURRENT hash, so it could
+// only match a file already at the current name — i.e. never. Two signature
+// changes landed in this branch (the raw measured bandwidth was removed, then
+// g.Index was dropped), so every pre-existing system probe on an existing install
+// is exactly the case the old code could not reach: dead code that silently
+// stopped preserving measured CUDA values.
+func TestLegacySystemProbeIsFoundUnderASupersededSignature(t *testing.T) {
+	gpus := []detect.GPU{{Index: 0, Name: "RTX 3090 Ti", Driver: "580",
+		PCIBusID: "00000000:65:00.0", PCIGen: 3, PCILanes: 16, VRAMTotalMB: 24564,
+		BandwidthMBps: 12321}}
+	superseded := supersededGPUSetHashes(gpus)
+	if len(superseded) == 0 {
+		t.Fatal("no superseded signatures are reconstructible, so the migration " +
+			"cannot reach any pre-existing file")
+	}
+
+	for _, hash := range superseded {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		legacyDir := filepath.Join(home, ".cache", "ggrun")
+		if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		name := "system_" + hash + ".cache"
+		if err := os.WriteFile(filepath.Join(legacyDir, name),
+			[]byte("SYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB=488\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := SystemCUDAOverheadByGPU(t.TempDir(), gpus)[0]; got != 488 {
+			t.Errorf("a probe under superseded signature %s was not migrated: "+
+				"got %d, want 488", hash, got)
+		}
+	}
+}
+
+// And it must REFUSE a probe measured on a different GPU set. Adopting one would
+// import another machine's overhead into this plan, which is worse than having no
+// measurement at all — a wrong number silently shapes placement.
+//
+// Found the hard way: an unguarded search picked up a 2026-07-08 probe from this
+// box's real ~/.cache/ggrun and changed a context-fit test's answer.
+func TestLegacySystemProbeRefusesADifferentGPUSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyDir := filepath.Join(home, ".cache", "ggrun")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A well-formed probe body under a name that matches no GPU set this build
+	// could have produced from the set under test.
+	if err := os.WriteFile(filepath.Join(legacyDir, "system_ffffffffffff.cache"),
+		[]byte("# System probe\nSYS_CUDA_OVERHEAD_MB_CUDA0=488\nSYS_CUDA_OVERHEAD_MB=488\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gpus := []detect.GPU{{Index: 0, Name: "RTX 4070", Driver: "580",
+		PCIBusID: "00000000:17:00.0", PCIGen: 3, PCILanes: 16, VRAMTotalMB: 12282,
+		BandwidthMBps: 12192}}
+	if got := SystemCUDAOverheadByGPU(t.TempDir(), gpus)[0]; got != 0 {
+		t.Errorf("a probe from a DIFFERENT GPU set was adopted: got %d, want 0 — "+
+			"another machine's overhead must not shape this plan", got)
+	}
+}
