@@ -25,6 +25,15 @@ param(
     [string]$RunnerDir = $(if ($env:GGRUN_RUNNER_DIR) { $env:GGRUN_RUNNER_DIR } else { Join-Path $env:USERPROFILE 'actions-runner' }),
     [string]$RunnerVersion = '2.337.0',
     [string]$RunnerName = "$env:COMPUTERNAME-gpu",
+    # The ref to dispatch. Default stays main because the gpu-windows job is
+    # itself gated `github.ref == 'refs/heads/main'` - that gate is deliberate,
+    # since a self-hosted runner on a personal machine should not execute
+    # arbitrary branch code. Dispatching anything else therefore comes back
+    # 'skipped', which the result check below reports by name rather than
+    # mistaking for a pass. To test a BRANCH on real hardware, use
+    # scripts/windows-e2e.ps1 instead: it drives the same checks locally and
+    # crosses no runner trust boundary.
+    [string]$GitRef = 'main',
     # The job downloads a 563 MB Q4_0 model and serves it. Below this there is
     # no point starting: ggrun would refuse to fit or quietly place on the CPU,
     # and the job asserts a real device allocation.
@@ -153,8 +162,8 @@ function Invoke-Run {
         # accepted a stale run on its first try, then reported that old run's
         # result as this one's.
         $before = gh api "repos/$Repo/actions/workflows/$Workflow/runs?per_page=1&event=workflow_dispatch" --jq '.workflow_runs[0].id // 0'
-        Write-Host "==> dispatching $Workflow on main"
-        gh workflow run $Workflow --repo $Repo --ref main
+        Write-Host "==> dispatching $Workflow on $GitRef"
+        gh workflow run $Workflow --repo $Repo --ref $GitRef
         if ($LASTEXITCODE -ne 0) { throw 'dispatch failed' }
 
         $runId = ''
@@ -188,8 +197,8 @@ function Invoke-Run {
         $result = if ($gpuJob) { [string]$gpuJob.conclusion } else { '' }
         switch ($result) {
             'success' { Write-Host '==> the Windows GPU job passed' }
-            'skipped' { throw 'the gpu-windows job was SKIPPED: check GGRUN_GPU_RUNNER_WINDOWS and that the workflow is on main' }
-            ''        { throw 'no gpu-windows job in this run; is the workflow on main?' }
+            'skipped' { throw "the gpu-windows job was SKIPPED: it needs GGRUN_GPU_RUNNER_WINDOWS=true, a dispatch, and ref refs/heads/main (asked for $GitRef). For a branch, use scripts/windows-e2e.ps1." }
+            ''        { throw "no gpu-windows job in this run; does $GitRef carry the workflow?" }
             default   { throw "the gpu-windows job did not pass: $result" }
         }
     } finally {
