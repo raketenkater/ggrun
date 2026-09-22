@@ -401,6 +401,40 @@ jobs:
           $errs = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$errs)
           if ($errs.Count) { Write-Error "install.ps1 fails to parse under pwsh 7: $($errs[0].Message)"; exit 1 }
+          # A parse-error check is NOT enough, and this is the lesson from
+          # 7d45a56 (2026-09-22). Windows PowerShell 5.1 reads a BOM-less .ps1 as
+          # the ANSI code page (CP1252), not UTF-8. In CP1252 the UTF-8 bytes for
+          # the em-dash become the smart quotes 0x93/0x94 and the NBSP 0xA0 — all
+          # of which PowerShell treats as STRING DELIMITERS. The quotes open, the
+          # comment block stretches over the code between them, and function
+          # definitions are silently swallowed. PS 5.1 reports ZERO parse errors;
+          # the functions simply stop existing, and the installer dies later with
+          # "The term 'Warn' is not recognized as the name of a cmdlet".
+          #
+          # So compare the FUNCTION SET both ways, not just the error count. The
+          # UTF-8 bytes are re-read as CP1252 the way 5.1 would, and every
+          # function that exists at UTF-8 but not as CP1252 is a silent
+          # truncation. ASCII-only sources pass trivially, which is the intended
+          # fix and the reason this stays cheap.
+          $path = (Resolve-Path install.ps1).Path
+          function Get-FunctionNames([string]$File) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($File, [ref]$null, [ref]$null)
+            @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+              ForEach-Object { $_.Name })
+          }
+          # Re-read the bytes as CP1252 and write them back as UTF-8, so parsing
+          # the copy reproduces exactly what 5.1 sees on the original.
+          $asAnsi = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::GetEncoding(1252))
+          $copy = Join-Path $env:RUNNER_TEMP 'install-as-cp1252.ps1'
+          [System.IO.File]::WriteAllText($copy, $asAnsi, (New-Object System.Text.UTF8Encoding $false))
+          $utf8Names = @(Get-FunctionNames $path)
+          $ansiNames = @(Get-FunctionNames $copy)
+          $lost = @($utf8Names | Where-Object { $ansiNames -notcontains $_ })
+          if ($lost.Count) {
+            Write-Error ("install.ps1 loses $($lost.Count) function definition(s) when Windows PowerShell 5.1 reads it as CP1252: " + ($lost -join ', ') + ". Keep install.ps1 pure ASCII (or restore the UTF-8 BOM).")
+            exit 1
+          }
+          Write-Host "install.ps1 parses under pwsh 7; all $($utf8Names.Count) functions survive a CP1252 read."
           # The documented install command is `powershell` (5.1); guard against
           # regressions that only surface under Windows PowerShell 5.1.
           powershell -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1",[ref]$null,[ref]$e); if($e.Count){Write-Error ("5.1 parse error at line "+$e[0].Extent.StartLineNumber+": "+$e[0].Message); exit 1}'

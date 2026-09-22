@@ -43,8 +43,8 @@ $CpuAsset = 'ggrun-windows-x86_64-cpu.zip'
 $ReleaseInfo = $null
 
 function Say($Message) { Write-Host $Message }
-function Ok($Message) { Write-Host "  ✓ $Message" -ForegroundColor Green }
-function Warn($Message) { Write-Host "  ⚠ $Message" -ForegroundColor Yellow }
+function Ok($Message) { Write-Host "  $([char]0x2713) $Message" -ForegroundColor Green }
+function Warn($Message) { Write-Host "  $([char]0x26A0) $Message" -ForegroundColor Yellow }
 function Fail($Message) { throw $Message }
 
 function Test-Command($Name) {
@@ -58,12 +58,12 @@ function Require-Command($Name, $Hint) {
 function Get-OSArchitecture {
     # The process architecture, on BOTH Windows PowerShell 5.1 and pwsh 7+.
     #
-    # [RuntimeInformation]::OSArchitecture is a .NET Core API. On .NET Framework —
+    # [RuntimeInformation]::OSArchitecture is a .NET Core API. On .NET Framework -
     # which is what ships as Windows PowerShell 5.1, the default `powershell`, and
-    # what a user gets from a console one-liner — the property exists but returns
+    # what a user gets from a console one-liner - the property exists but returns
     # NULL, so .ToString() on it throws "cannot call a method on a null-valued
     # expression". That was the first-run failure a user hit, reported as
-    # "Es ist nicht möglich, eine Methode für einen Ausdruck aufzurufen, der den
+    # "Es ist nicht moeglich, eine Methode fuer einen Ausdruck aufzurufen, der den
     # NULL hat" at the very next line after the banner.
     #
     # Environment::Is64BitOperatingSystem and ::Is64BitProcess are .NET Framework
@@ -88,7 +88,7 @@ function Test-NonInteractive {
     # Under `iex` there is no interactive host to answer Read-Host, so a prompt
     # either throws or hangs forever with no output. setup.sh has detected this
     # since it was written (`[[ ! -t 0 ]]`); install.ps1 did not, and relied on the
-    # caller passing -AssumeYes or setting the variable — neither of which the
+    # caller passing -AssumeYes or setting the variable - neither of which the
     # documented one-liner does.
     if ($AssumeYes -or $env:LLM_INSTALL_NONINTERACTIVE -eq '1') { return $true }
     try {
@@ -727,9 +727,9 @@ try {
     Ok 'Installed native Windows ggrun'
     Ok 'CLI, hardware detection, and backend startup checks passed'
     Say ''
-    Say '╔════════════════════════════════════════════════════════════╗'
-    Say '║ ggrun installer finished                                   ║'
-    Say '╚════════════════════════════════════════════════════════════╝'
+    Say '+------------------------------------------------------------+'
+    Say '| ggrun installer finished                                   |'
+    Say '+------------------------------------------------------------+'
     Say "CLI/GUI: $InstallDir\ggrun.cmd   (no arguments opens the GUI)"
     Say "Models:  $models"
     Say "Config:  $cfgPath"
