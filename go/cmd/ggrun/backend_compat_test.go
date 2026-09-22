@@ -236,3 +236,17 @@ func TestAllocationDryRunProbeScalesWithModelSize(t *testing.T) {
 		t.Fatalf("dry-run probe timeout %v for a 148 GiB MoE, want the startup budget %v", got, want)
 	}
 }
+
+// ggrun's own post-launch clients must reach the backend where it is bound.
+func TestBackendBaseURLFollowsTheBoundHost(t *testing.T) {
+	for host, want := range map[string]string{
+		"":               "http://localhost:18080",
+		"0.0.0.0":        "http://localhost:18080",
+		"192.168.178.97": "http://192.168.178.97:18080",
+		"fd00::5":        "http://[fd00::5]:18080",
+	} {
+		if got := backendBaseURL(&launchRequest{Host: host, Port: 18080}); got != want {
+			t.Errorf("host %q: got %s, want %s", host, got, want)
+		}
+	}
+}

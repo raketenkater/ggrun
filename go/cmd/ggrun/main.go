@@ -1952,6 +1952,14 @@ func parseBackendFlag(value string) (string, bool) {
 }
 
 // backendChoiceExplicit reports whether the user pinned the backend binary.
+// backendBaseURL is how ggrun's own post-launch clients (canaries,
+// calibration, tuning, benchmarks) reach the backend it started: on the
+// --host it was bound to, or localhost for a wildcard bind. Hardcoding
+// localhost failed every one of them for a server bound to a LAN address.
+func backendBaseURL(req *launchRequest) string {
+	return fmt.Sprintf("http://%s:%d", server.ClientHost(req.Host), req.Port)
+}
+
 func backendChoiceExplicit(req *launchRequest) bool {
 	return req != nil && (req.BackendExplicit || req.ServerBinExplicit)
 }
@@ -5835,7 +5843,7 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 	}
 	runner := &benchmark.Runner{
-		BaseURL:       fmt.Sprintf("http://127.0.0.1:%d", req.Port),
+		BaseURL:       backendBaseURL(req),
 		Model:         filepath.Base(model.Path),
 		Timeout:       20 * time.Minute,
 		ContextTokens: canaryContext,
@@ -6571,9 +6579,9 @@ func cmdLaunch(args []string) {
 		var benchmarkErr error
 		if req.WorkerBenchmark {
 			usedVRAMMB := measuredLaunchVRAMMB(runtimeCaps, visibleToPhysical, baselineVRAM)
-			benchmarkErr = runOneShotWorkerBenchmark(req.Port, filepath.Base(req.ModelPath), usedVRAMMB)
+			benchmarkErr = runOneShotWorkerBenchmark(req.Host, req.Port, filepath.Base(req.ModelPath), usedVRAMMB)
 		} else {
-			benchmarkErr = runOneShotBenchmark(req.Port, filepath.Base(req.ModelPath))
+			benchmarkErr = runOneShotBenchmark(req.Host, req.Port, filepath.Base(req.ModelPath))
 		}
 		stopErr := p.Stop()
 		if stopErr != nil {
@@ -8544,7 +8552,7 @@ func cmdTune(args []string) {
 
 	cache := tune.NewCache(cfg.CacheDir)
 	engine := &tune.Engine{
-		BaseURL:           fmt.Sprintf("http://localhost:%d", req.Port),
+		BaseURL:           backendBaseURL(req),
 		Model:             filepath.Base(req.ModelPath),
 		Rounds:            rounds,
 		Cache:             cache,
@@ -8604,7 +8612,7 @@ func cmdBenchmark(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := runOneShotBenchmark(port, model); err != nil {
+	if err := runOneShotBenchmark("", port, model); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -8672,9 +8680,9 @@ func requireBenchmarkServer(port int, timeout time.Duration) error {
 	return nil
 }
 
-func runOneShotBenchmark(port int, model string) error {
+func runOneShotBenchmark(host string, port int, model string) error {
 	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://localhost:%d", port),
+		BaseURL: fmt.Sprintf("http://%s:%d", server.ClientHost(host), port),
 		Model:   model,
 	}
 	res, err := runner.Run()
@@ -8686,9 +8694,9 @@ func runOneShotBenchmark(port int, model string) error {
 	return nil
 }
 
-func runOneShotWorkerBenchmark(port int, model string, peakVRAMMB int) error {
+func runOneShotWorkerBenchmark(host string, port int, model string, peakVRAMMB int) error {
 	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://localhost:%d", port),
+		BaseURL: fmt.Sprintf("http://%s:%d", server.ClientHost(host), port),
 		Model:   model,
 	}
 	throughput, err := runner.Run()

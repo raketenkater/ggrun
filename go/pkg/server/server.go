@@ -24,8 +24,11 @@ import (
 
 // Process wraps a running llama-server subprocess.
 type Process struct {
-	Cmd    *exec.Cmd
-	Port   int
+	Cmd  *exec.Cmd
+	Port int
+	// host is where readiness is polled: the backend's --host, or localhost
+	// for a wildcard bind.
+	host   string
 	cancel context.CancelFunc
 	LogBuf *threadSafeBuffer // captured stderr for post-launch probe
 
@@ -227,7 +230,7 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
+	p := &Process{Cmd: cmd, Port: port, host: readinessHost(args), cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
 	if scopeUnit != "" {
 		go p.monitorMemoryStats()
 	}
@@ -240,7 +243,7 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 	}()
 
 	start := time.Now()
-	logStartupEvent(logStartupEvents, safeTermErr, "[launch] health check: polling http://127.0.0.1:%d/health then /v1/models (timeout %s)", port, timeout)
+	logStartupEvent(logStartupEvents, safeTermErr, "[launch] health check: polling http://%s:%d/health then /v1/models (timeout %s)", readinessHost(args), port, timeout)
 	logStartupEvent(logStartupEvents, safeTermErr, "%s", loadingIntro(args, timeout))
 	stopSpin := make(chan struct{})
 	spinDone := make(chan struct{})
@@ -338,12 +341,47 @@ func hasMultiGPUSplit(args []string) bool {
 	return false
 }
 
+// readinessHost is the address to poll for a backend started with args.
+// Polling localhost regardless of --host meant a server bound to one specific
+// address (a LAN IP, or another loopback such as 127.0.0.2) loaded fully and
+// was still reported as never ready.
+func readinessHost(args []string) string {
+	host := ""
+	for i, arg := range args {
+		if arg == "--host" && i+1 < len(args) {
+			host = args[i+1]
+		} else if value, ok := strings.CutPrefix(arg, "--host="); ok {
+			host = value
+		}
+	}
+	return ClientHost(host)
+}
+
+// ClientHost is the address a local client should use to reach a server bound
+// to host: localhost for a wildcard or unset bind, otherwise the bound address
+// itself (bracketed for IPv6).
+func ClientHost(host string) string {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	switch host {
+	case "", "0.0.0.0", "::":
+		return "localhost"
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
 func (p *Process) waitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{}
+	host := p.host
+	if host == "" {
+		host = "localhost"
+	}
 	urls := []string{
-		fmt.Sprintf("http://localhost:%d/health", p.Port),
-		fmt.Sprintf("http://localhost:%d/v1/models", p.Port),
+		fmt.Sprintf("http://%s:%d/health", host, p.Port),
+		fmt.Sprintf("http://%s:%d/v1/models", host, p.Port),
 	}
 	for time.Now().Before(deadline) {
 		// Fail fast when the process dies during startup instead of polling
@@ -577,7 +615,11 @@ func (p *Process) IsRunning() bool {
 
 // QueryModels returns the models endpoint response.
 func (p *Process) QueryModels() ([]byte, error) {
-	url := fmt.Sprintf("http://localhost:%d/v1/models", p.Port)
+	host := p.host
+	if host == "" {
+		host = "localhost"
+	}
+	url := fmt.Sprintf("http://%s:%d/v1/models", host, p.Port)
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
