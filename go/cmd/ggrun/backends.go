@@ -339,6 +339,33 @@ func prepareForkCheckout(srcDir, branch, commit string) error {
 	return prepareForkCheckoutRecipe(srcDir, branch, commit, nil)
 }
 
+// resolveShortCommit expands an abbreviated pin to the full commit id. Servers
+// only fetch unadvertised commits by full id, and a llama.cpp build reports
+// just seven hex digits in --version ("version: 1 (d2462f8)"), so the CUDA
+// build pinned to a Vulkan build's commit failed with "git fetch d2462f8:
+// exit status 128". Fetching the branch history without blobs is small even
+// for llama.cpp and lets git resolve the abbreviation locally.
+func resolveShortCommit(srcDir, branch, short string) (string, error) {
+	ref := branch
+	if ref == "" {
+		ref = "HEAD"
+	}
+	// The fork checkout is a --depth 1 clone; a plain fetch keeps that shallow
+	// boundary, so older commits never arrive without --unshallow.
+	fetch := []string{"fetch", "--filter=blob:none", "origin", ref}
+	if shallow, _ := gitOutput(srcDir, "rev-parse", "--is-shallow-repository"); strings.TrimSpace(shallow) == "true" {
+		fetch = []string{"fetch", "--filter=blob:none", "--unshallow", "origin", ref}
+	}
+	if err := runStreamed(srcDir, "git", fetch...); err != nil {
+		return "", fmt.Errorf("git fetch %s history to resolve %s: %w", ref, short, err)
+	}
+	full, err := gitOutput(srcDir, "rev-parse", "--verify", "--quiet", short+"^{commit}")
+	if err != nil || len(strings.TrimSpace(full)) != 40 {
+		return "", fmt.Errorf("commit %s is not on %s", short, ref)
+	}
+	return strings.TrimSpace(full), nil
+}
+
 func prepareForkCheckoutRecipe(srcDir, branch, commit string, recipe *backends.Recipe) error {
 	dirty, err := gitOutput(srcDir, "status", "--porcelain")
 	if err != nil {
@@ -360,6 +387,13 @@ func prepareForkCheckoutRecipe(srcDir, branch, commit string, recipe *backends.R
 	}
 	if err := ensureRecipeOrigin(srcDir, recipe); err != nil {
 		return err
+	}
+	if commit != "" && len(commit) < 40 {
+		full, err := resolveShortCommit(srcDir, branch, commit)
+		if err != nil {
+			return err
+		}
+		commit = full
 	}
 	ref := commit
 	if ref == "" {
