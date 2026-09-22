@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -5305,8 +5306,29 @@ func startupLogCUDAOOMDetailed(logData string) (device int, allocMB int, isCompu
 			return device, allocMB, isComputeBuffer, true
 		}
 	}
+	// ggml's backend-neutral wording, which is all a Vulkan backend prints:
+	// "failed to allocate Vulkan0 buffer of size 1962934272" from gallocr (the
+	// compute graph) or alloc_tensor_range (weights). Unrecognized, a MiMo-V2.6
+	// Vulkan probe that measured exactly this shortfall failed closed instead
+	// of reaching the ubatch/expert-layer recovery. VulkanN matches ggrun's
+	// device N because vulkanDeviceOrderEnv lists the devices in ggrun's order.
+	for i := len(lines) - 1; i >= 0; i-- {
+		m := backendBufferOOMPattern.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		device, _ := strconv.Atoi(m[1])
+		bytes, _ := strconv.ParseInt(m[2], 10, 64)
+		isComputeBuffer := strings.Contains(lines[i], "gallocr")
+		for j := i + 1; j < len(lines) && j <= i+3 && !isComputeBuffer; j++ {
+			isComputeBuffer = strings.Contains(lines[j], "graph_reserve") || strings.Contains(lines[j], "compute buffers")
+		}
+		return device, bytesToMiBCeil(uint64(bytes)), isComputeBuffer, true
+	}
 	return 0, 0, false, false
 }
+
+var backendBufferOOMPattern = regexp.MustCompile(`failed to allocate (?:CUDA|Vulkan)(\d+) buffer of size (\d+)`)
 
 const unknownRuntimeCUDAOOMReserveMinMB = 2048
 
