@@ -3,6 +3,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -46,30 +48,99 @@ kill "$watcher" 2>/dev/null
 wait "$watcher" 2>/dev/null
 exit "$status"`
 
+// scopeModeEnvOverride lets tests select a mode without being root and without a
+// real systemd. Read only here so the override cannot leak into other decisions.
+const scopeModeEnvOverride = "GGRUN_SCOPE_MODE"
+
+// resolveScopeMode selects an owner once, before starting a contained process.
+// A directory or inherited session variable does not establish a reachable bus.
+func resolveScopeMode() scopeMode {
+	switch strings.TrimSpace(os.Getenv(scopeModeEnvOverride)) {
+	case "user":
+		return scopeUser
+	case "system":
+		return scopeSystem
+	case "unsupported":
+		return scopeUnsupported
+	}
+	return scopeModeForUID(os.Geteuid())
+}
+
+func scopeModeForUID(uid int) scopeMode {
+	mode := scopeUser
+	if uid == 0 {
+		mode = scopeSystem
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	args := systemctlArgs(mode, "show", "--property=Version", "--value")
+	out, err := exec.CommandContext(ctx, args[0], args[1:]...).Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return scopeUnsupported
+	}
+	return mode
+}
+
+// systemctlArgs builds a systemctl invocation against the instance that owns the
+// scope. Every read, teardown and property write must go through this so a
+// scope created in one instance is never addressed in the other.
+func systemctlArgs(mode scopeMode, verb string, rest ...string) []string {
+	out := []string{"systemctl"}
+	if mode == scopeUser {
+		out = append(out, "--user")
+	}
+	out = append(out, verb)
+	return append(out, rest...)
+}
+
+// systemctlCmd builds the exec.Cmd for a systemctl call against the instance that
+// owns the scope. Paired with systemctlArgs so argv construction and execution
+// can never disagree about --user.
+func systemctlCmd(mode scopeMode, verb string, rest ...string) *exec.Cmd {
+	a := systemctlArgs(mode, verb, rest...)
+	return exec.Command(a[0], a[1:]...)
+}
+
 func scopedCommandArgs(args []string, memoryMaxMB int) ([]string, error) {
 	return scopedCommandArgsWithUnit(args, memoryMaxMB, "ggrun-test.scope")
 }
 
 func scopedCommandArgsWithUnit(args []string, memoryMaxMB int, unit string) ([]string, error) {
-	return scopedCommandArgsWithLimits(args, 0, memoryMaxMB, unit)
+	out, _, err := scopedCommandArgsWithLimits(args, 0, memoryMaxMB, unit)
+	return out, err
 }
 
-func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, unit string) ([]string, error) {
+func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, unit string) ([]string, scopeMode, error) {
 	if len(args) == 0 {
-		return nil, fmt.Errorf("start server: empty argv")
+		return nil, scopeUnsupported, fmt.Errorf("start server: empty argv")
 	}
 	if memoryMaxMB <= 0 {
-		return args, nil
+		return args, scopeUnsupported, nil
 	}
 	systemdRun, err := exec.LookPath("systemd-run")
 	if err != nil {
-		return nil, fmt.Errorf("backend memory containment requires systemd-run: %w", err)
+		return nil, scopeUnsupported, fmt.Errorf("backend memory containment requires systemd-run: %w", err)
+	}
+	// Refuse before building any argv when no instance can own a scope. This must
+	// be an explicit ggrun-authored error rather than a raw systemd failure
+	// surfacing later from cmd.Start, so the failure classifies deterministically
+	// (support.go matches this phrase) instead of landing in
+	// unclassified_launch_failure.
+	mode := resolveScopeMode()
+	if mode == scopeUnsupported {
+		return nil, scopeUnsupported, fmt.Errorf(
+			"backend memory containment unavailable: no reachable systemd manager. " +
+				"Run in a systemd login session with a working user manager, or as root " +
+				"on a host with a working system manager. " +
+				"Refusing to start an uncontained backend.")
 	}
 	out := []string{
 		systemdRun,
-		"--user",
 		"--scope",
 		"--quiet",
+	}
+	if mode == scopeUser {
+		out = append(out, "--user")
 	}
 	if unit != "" {
 		// Do not use systemd-run --collect here. A failed/OOM-killed transient
@@ -98,37 +169,43 @@ func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, u
 	)
 	wrapper := []string{"/bin/sh", "-c", scopedParentWatchScript, "ggrun-scope-watch", strconv.Itoa(os.Getpid())}
 	out = append(out, wrapper...)
-	return append(out, args...), nil
+	return append(out, args...), mode, nil
 }
 
-func stopScopeUnit(unit string) error {
+func stopScopeUnit(unit string, mode scopeMode) error {
 	if unit == "" {
 		return nil
 	}
-	err := exec.Command("systemctl", "--user", "stop", unit).Run()
+	err := systemctlCmd(mode, "stop", unit).Run()
 	// A transient scope may disappear between the activity check and stop.
 	// systemctl returns exit 5 for that already-stopped state; teardown has
 	// nevertheless achieved its only required outcome.
-	if err != nil && !scopeUnitActive(unit) {
-		return nil
+	if err != nil {
+		if active, stateErr := scopeUnitActive(unit, mode); stateErr == nil && !active {
+			return nil
+		}
 	}
 	return err
 }
 
-func resetFailedScopeUnit(unit string) error {
+func resetFailedScopeUnit(unit string, mode scopeMode) error {
 	if unit == "" {
 		return nil
 	}
-	return exec.Command("systemctl", "--user", "reset-failed", unit).Run()
+	return systemctlCmd(mode, "reset-failed", unit).Run()
 }
 
-func waitScopeUnitStopped(unit string, timeout time.Duration) error {
+func waitScopeUnitStopped(unit string, mode scopeMode, timeout time.Duration) error {
 	if unit == "" {
 		return nil
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !scopeUnitActive(unit) {
+		active, err := scopeUnitActive(unit, mode)
+		if err != nil {
+			return err
+		}
+		if !active {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -136,23 +213,31 @@ func waitScopeUnitStopped(unit string, timeout time.Duration) error {
 	return fmt.Errorf("systemd scope %s did not stop within %s", unit, timeout)
 }
 
-func scopeUnitActive(unit string) bool {
-	return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
+func scopeUnitActive(unit string, mode scopeMode) (bool, error) {
+	err := systemctlCmd(mode, "is-active", "--quiet", unit).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && (exitErr.ExitCode() == 3 || exitErr.ExitCode() == 4) {
+		return false, nil // inactive or absent unit
+	}
+	return false, fmt.Errorf("read scope %s activity: %w", unit, err)
 }
 
-func scopeMemoryPeakBytes(unit string) (uint64, error) {
-	peak, _, peakErr, _ := scopeMemoryStats(unit)
+func scopeMemoryPeakBytes(unit string, mode scopeMode) (uint64, error) {
+	peak, _, peakErr, _ := scopeMemoryStats(unit, mode)
 	return peak, peakErr
 }
 
-func scopeMemoryStats(unit string) (uint64, uint64, error, error) {
-	cgroup, err := scopeControlGroup(unit)
+func scopeMemoryStats(unit string, mode scopeMode) (uint64, uint64, error, error) {
+	cgroup, err := scopeControlGroup(unit, mode)
 	if err != nil {
-		return scopeUnitMemoryStats(unit)
+		return scopeUnitMemoryStats(unit, mode)
 	}
 	data, err := os.ReadFile("/sys/fs/cgroup" + cgroup + "/memory.peak")
 	if err != nil {
-		return scopeUnitMemoryStats(unit)
+		return scopeUnitMemoryStats(unit, mode)
 	}
 	peak, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 	if err != nil {
@@ -160,13 +245,13 @@ func scopeMemoryStats(unit string) (uint64, uint64, error, error) {
 	}
 	oomKills, oomErr := scopeMemoryOOMKillCountAt(cgroup)
 	if oomErr != nil {
-		return scopeUnitMemoryStats(unit)
+		return scopeUnitMemoryStats(unit, mode)
 	}
 	return peak, oomKills, nil, oomErr
 }
 
-func scopeUnitMemoryStats(unit string) (uint64, uint64, error, error) {
-	peakOut, peakErr := exec.Command("systemctl", "--user", "show", "--property=MemoryPeak", "--value", unit).Output()
+func scopeUnitMemoryStats(unit string, mode scopeMode) (uint64, uint64, error, error) {
+	peakOut, peakErr := systemctlCmd(mode, "show", "--property=MemoryPeak", "--value", unit).Output()
 	peak := uint64(0)
 	if peakErr == nil {
 		peak, peakErr = strconv.ParseUint(strings.TrimSpace(string(peakOut)), 10, 64)
@@ -174,7 +259,7 @@ func scopeUnitMemoryStats(unit string) (uint64, uint64, error, error) {
 	if peakErr != nil {
 		peakErr = fmt.Errorf("read scope MemoryPeak property: %w", peakErr)
 	}
-	resultOut, resultErr := exec.Command("systemctl", "--user", "show", "--property=Result", "--value", unit).Output()
+	resultOut, resultErr := systemctlCmd(mode, "show", "--property=Result", "--value", unit).Output()
 	oomKills := uint64(0)
 	if resultErr == nil && strings.TrimSpace(string(resultOut)) == "oom-kill" {
 		oomKills = 1
@@ -185,11 +270,11 @@ func scopeUnitMemoryStats(unit string) (uint64, uint64, error, error) {
 	return peak, oomKills, peakErr, resultErr
 }
 
-func scopeControlGroup(unit string) (string, error) {
+func scopeControlGroup(unit string, mode scopeMode) (string, error) {
 	if unit == "" {
 		return "", fmt.Errorf("empty systemd scope unit")
 	}
-	out, err := exec.Command("systemctl", "--user", "show", "--property=ControlGroup", "--value", unit).Output()
+	out, err := systemctlCmd(mode, "show", "--property=ControlGroup", "--value", unit).Output()
 	if err != nil {
 		return "", fmt.Errorf("read scope control group: %w", err)
 	}
@@ -200,8 +285,8 @@ func scopeControlGroup(unit string) (string, error) {
 	return cgroup, nil
 }
 
-func scopeMemoryOOMKillCount(unit string) (uint64, error) {
-	cgroup, err := scopeControlGroup(unit)
+func scopeMemoryOOMKillCount(unit string, mode scopeMode) (uint64, error) {
+	cgroup, err := scopeControlGroup(unit, mode)
 	if err != nil {
 		return 0, err
 	}
@@ -217,7 +302,7 @@ func (p *Process) ScopeNonReclaimableMB() (int, error) {
 	if p == nil || p.scopeUnit == "" {
 		return 0, fmt.Errorf("backend has no memory scope")
 	}
-	cgroup, err := scopeControlGroup(p.scopeUnit)
+	cgroup, err := scopeControlGroup(p.scopeUnit, p.scopeMode)
 	if err != nil {
 		return 0, err
 	}
@@ -233,7 +318,7 @@ func (p *Process) SetMemoryMaxMB(memoryMaxMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryMaxMB(p.scopeUnit, memoryMaxMB)
+	return setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB)
 }
 
 // SetMemoryHighMB updates the running backend scope's reclaim/throttle
@@ -245,7 +330,7 @@ func (p *Process) SetMemoryHighMB(memoryHighMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryHighMB(p.scopeUnit, memoryHighMB)
+	return setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB)
 }
 
 func scopeMemoryOOMKillCountAt(cgroup string) (uint64, error) {
@@ -298,22 +383,22 @@ func scopeNonReclaimableMB(cgroup string) (int, error) {
 // is allowed and avoids systemd's transient-unit set-property quirks; a
 // systemctl --user set-property fallback keeps DBus in the loop when the
 // direct write is not permitted.
-func setScopeMemoryMaxMB(unit string, memoryMaxMB int) error {
-	return setScopeMemoryLimitMB(unit, "memory.max", "MemoryMax", memoryMaxMB)
+func setScopeMemoryMaxMB(unit string, mode scopeMode, memoryMaxMB int) error {
+	return setScopeMemoryLimitMB(unit, mode, "memory.max", "MemoryMax", memoryMaxMB)
 }
 
-func setScopeMemoryHighMB(unit string, memoryHighMB int) error {
-	return setScopeMemoryLimitMB(unit, "memory.high", "MemoryHigh", memoryHighMB)
+func setScopeMemoryHighMB(unit string, mode scopeMode, memoryHighMB int) error {
+	return setScopeMemoryLimitMB(unit, mode, "memory.high", "MemoryHigh", memoryHighMB)
 }
 
-func setScopeMemoryLimitMB(unit, cgroupFile, systemdProperty string, limitMB int) error {
+func setScopeMemoryLimitMB(unit string, mode scopeMode, cgroupFile, systemdProperty string, limitMB int) error {
 	if unit == "" {
 		return fmt.Errorf("empty scope unit")
 	}
 	if limitMB <= 0 {
 		return fmt.Errorf("invalid %s %d MiB", cgroupFile, limitMB)
 	}
-	cgroup, err := scopeControlGroup(unit)
+	cgroup, err := scopeControlGroup(unit, mode)
 	if err != nil {
 		return err
 	}
@@ -325,7 +410,7 @@ func setScopeMemoryLimitMB(unit, cgroupFile, systemdProperty string, limitMB int
 	// Fallback: systemctl set-property on the transient unit. This goes through
 	// DBus and may fail for a scope that was never fully registered, which the
 	// caller treats as a non-fatal signal.
-	if exec.Command("systemctl", "--user", "set-property", unit, systemdProperty, fmt.Sprintf("%d", bytes)).Run() == nil {
+	if systemctlCmd(mode, "set-property", unit, systemdProperty, fmt.Sprintf("%d", bytes)).Run() == nil {
 		return nil
 	}
 	return fmt.Errorf("set scope %s at %s", cgroupFile, path)

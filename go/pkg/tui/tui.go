@@ -4163,19 +4163,6 @@ func noTerminalError() error {
 	return errors.New("no terminal available for the interactive UI; use subcommands instead, e.g. ggrun recommend | ggrun models list | ggrun <model.gguf>")
 }
 
-// terminalAvailable reports whether the process has an interactive terminal it
-// could run the full-screen UI on. Bubbletea opens /dev/tty itself, so checking
-// that device directly is what actually predicts its failure; /dev/null counts
-// as a character device but is not a terminal.
-func terminalAvailable() bool {
-	f, err := os.Open("/dev/tty")
-	if err != nil {
-		return false
-	}
-	_ = f.Close()
-	return true
-}
-
 func runModel(initial Model) (*LaunchRequest, error) {
 	p := tea.NewProgram(initial, tea.WithAltScreen())
 	m, err := p.Run()

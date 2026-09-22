@@ -19,32 +19,33 @@ func scopedCommandArgsWithUnit(args []string, memoryMaxMB int, _ string) ([]stri
 	return args, nil
 }
 
-func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, unit string) ([]string, error) {
+func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, unit string) ([]string, scopeMode, error) {
 	_ = memoryHighMB
-	return scopedCommandArgsWithUnit(args, memoryMaxMB, unit)
+	out, err := scopedCommandArgsWithUnit(args, memoryMaxMB, unit)
+	return out, scopeUnsupported, err
 }
 
-func stopScopeUnit(string) error { return nil }
+func stopScopeUnit(string, scopeMode) error { return nil }
 
-func resetFailedScopeUnit(string) error { return nil }
+func resetFailedScopeUnit(string, scopeMode) error { return nil }
 
-func scopeUnitActive(string) bool { return false }
+func scopeUnitActive(string, scopeMode) (bool, error) { return false, nil }
 
-func scopeControlGroup(string) (string, error) {
+func scopeControlGroup(string, scopeMode) (string, error) {
 	return "", fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
 
-func waitScopeUnitStopped(string, time.Duration) error { return nil }
+func waitScopeUnitStopped(string, scopeMode, time.Duration) error { return nil }
 
-func scopeMemoryPeakBytes(string) (uint64, error) {
+func scopeMemoryPeakBytes(string, scopeMode) (uint64, error) {
 	return 0, fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
 
-func scopeMemoryOOMKillCount(string) (uint64, error) {
+func scopeMemoryOOMKillCount(string, scopeMode) (uint64, error) {
 	return 0, fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
 
-func scopeMemoryStats(string) (uint64, uint64, error, error) {
+func scopeMemoryStats(string, scopeMode) (uint64, uint64, error, error) {
 	err := fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 	return 0, 0, err, err
 }
@@ -53,11 +54,11 @@ func scopeNonReclaimableMB(string) (int, error) {
 	return 0, fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
 
-func setScopeMemoryMaxMB(string, int) error {
+func setScopeMemoryMaxMB(string, scopeMode, int) error {
 	return fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
 
-func setScopeMemoryHighMB(string, int) error {
+func setScopeMemoryHighMB(string, scopeMode, int) error {
 	return fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
 

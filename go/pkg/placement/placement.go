@@ -689,6 +689,19 @@ type Options struct {
 	// the same box. Sizing that correctly needs a measurement per model, so the
 	// override exists to take it.
 	CacheRAMMB int
+	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. Zero means
+	// "keep the derived value"; MaxCheckpointsSet distinguishes an explicit 0
+	// (disable checkpoints, which is a real derived decision the emitter must be
+	// able to express) from unset.
+	//
+	// It exists as a first-class option rather than a passthrough for a concrete
+	// reason: an unparsed --ctx-checkpoints fell through to ExtraArgs and the
+	// emitted argv carried the coordinate twice — the derived value and the
+	// user's. llama.cpp keeps the last, so the override appeared to work, but two
+	// values for one coordinate is the partial overlay invariant 2 forbids, and
+	// it makes a "diff the final full argv" comparison ambiguous.
+	MaxCheckpoints    int
+	MaxCheckpointsSet bool
 	// BatchSize and UBatchSize are explicit launcher requests. A positive value
 	// must be accounted for before placement is chosen; treating it as a late
 	// backend override can make the emitted server graph exceed the plan.
@@ -1823,13 +1836,18 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 						LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 					}
 					if s.CRAM == 0 {
-						cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
-						if opts.CacheRAMMB > 0 {
-							cram = opts.CacheRAMMB
-						}
-						s.CRAM = cram
-						s.MaxCheckpoints = maxCheckpoints
-						s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
+						applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
+					} else if opts.MaxCheckpointsSet {
+						// The saved config is the complete serving decision and is
+						// kept, with one exception: an EXPLICIT user override made
+						// now outranks a value saved earlier. Without this branch
+						// `--ctx-checkpoints N` was silently dropped on every launch
+						// that reused a promoted config — the same "override does
+						// nothing on one path" defect that collapsing the three
+						// derivation sites was meant to remove, relocated to a
+						// fourth site. The flag is parsed and reaches Options; it
+						// must reach the argv.
+						s.MaxCheckpoints = opts.MaxCheckpoints
 					}
 					if s.Host == "" {
 						s.Host = "127.0.0.1"
@@ -1914,11 +1932,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 			if !opts.SkipCachedConfig {
 				LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 			}
-			s.CRAM, s.MaxCheckpoints = computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
-			s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
-			if opts.CacheRAMMB > 0 {
-				s.CRAM = opts.CacheRAMMB
-			}
+			applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 			if s.Host == "" {
 				s.Host = "127.0.0.1"
 			}
@@ -1996,13 +2010,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	if !opts.SkipCachedConfig {
 		LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 	}
-	cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
-	if opts.CacheRAMMB > 0 {
-		cram = opts.CacheRAMMB
-	}
-	s.CRAM = cram
-	s.MaxCheckpoints = maxCheckpoints
-	s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
+	applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 
 	// Default host
 	if s.Host == "" {
@@ -5477,6 +5485,30 @@ func StrategyVRAMHeadroomMB(caps *detect.Capabilities, model *ModelProfile, s *S
 }
 
 // computeCRAM calculates prompt cache size from remaining memory after load.
+// applyRuntimeCachePolicy derives the host prompt-cache budget and checkpoint cap
+// for a resolved strategy, honouring the explicit overrides.
+//
+// It exists because the derivation was written out at three separate call sites,
+// and an override added to one of them silently did nothing on the other two —
+// the observed failure was `--ctx-checkpoints 32` emitting the derived 16. One
+// function means one place for the overrides to be correct.
+func applyRuntimeCachePolicy(model *ModelProfile, s *Strategy, caps *detect.Capabilities,
+	totalSizeMB, kvTotalMB int, opts Options) {
+	cram, maxCheckpoints := computeCRAM(caps, model, s, totalSizeMB, kvTotalMB)
+	if opts.CacheRAMMB > 0 {
+		cram = opts.CacheRAMMB
+	}
+	if opts.MaxCheckpointsSet {
+		// Replace, never append: one coordinate, one value. An explicit 0 is a
+		// real decision (disable checkpoints when VRAM is tight) and must be
+		// expressible, which is why the setter carries a separate bool.
+		maxCheckpoints = opts.MaxCheckpoints
+	}
+	s.CRAM = cram
+	s.MaxCheckpoints = maxCheckpoints
+	s.CheckpointMinStep = checkpointMinStep(model, s.UBatchSize)
+}
+
 func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, totalSizeMB, kvTotalMB int) (int, int) {
 	numGPUs := len(caps.GPUs)
 
@@ -6203,7 +6235,13 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 
 // systemProbeSchema is bumped when the meaning of a stored value changes, so a
 // file written by an older method is re-measured rather than trusted.
-const systemProbeSchema = 2
+// Version 3 records SYS_GPU_SET_IDENTITY and per-device SYS_GPU_DEVICE rows, so a
+// probe states which hardware it measured instead of leaving a reader to infer it
+// from the filename. Schema 2 and below carry only overhead numbers and a
+// timestamp: a probe from another machine of the same GPU count is
+// indistinguishable from this one's by content, which is why the legacy migration
+// could be either unsafe or dead but not both safe and useful.
+const systemProbeSchema = 3
 
 // systemProbeOutlierRatio is how far above its peers a stored per-GPU overhead
 // must sit before it is treated as contaminated rather than measured. Real
@@ -6248,29 +6286,292 @@ func SystemCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
 	return out
 }
 
+// loadLegacySystemProbe finds a system probe written by an older install under
+// ~/.cache/ggrun and copies it forward.
+//
+// It SEARCHES rather than rebuilding the filename. The legacy directory may hold
+// files written under any earlier GPU signature — the raw-bandwidth form, or the
+// form before g.Index was dropped — and none of those names can be reconstructed
+// from the current identity. Requiring the legacy name to equal the new one is
+// what made the previous version of this migration dead code.
+//
+// It is deliberately conservative, because adopting the wrong file would import
+// another machine's measured CUDA overhead into this one's planning:
+//
+//   - only files named system_*.cache are considered;
+//   - the content must parse as a system probe with at least one positive
+//     per-device overhead (a truncated or foreign file is refused);
+//   - the file must have been written by the same major schema, so a future
+//     redefinition cannot be silently adopted as if it were current.
+//
+// Returns nil when nothing usable is found, which leaves the caller to treat the
+// measurement as unknown — the same fail-safe outcome as a miss.
+func loadLegacySystemProbe(newPath string, gpus []detect.GPU) []byte {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	legacyDir := filepath.Join(home, ".cache", "ggrun")
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return nil
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if !strings.HasPrefix(name, "system_") || !strings.HasSuffix(name, ".cache") {
+			continue
+		}
+		legacyPath := filepath.Join(legacyDir, name)
+		if legacyPath == newPath {
+			continue
+		}
+		// The filename encodes the GPU-SET identity it was measured on:
+		// `system_<gpuHash>.cache`. Adopting a file whose hash differs from the
+		// current one would import ANOTHER GPU SET'S measured overhead into this
+		// plan, which is worse than having no measurement — a wrong number silently
+		// shapes placement. This was found the hard way: an unguarded search picked
+		// up a 2026-07-08 probe from this box's ~/.cache/ggrun and changed a
+		// context-fit test's answer.
+		//
+		// So the hash must match. The reason the old code was dead is not that it
+		// compared hashes — that part was right — but that it looked in only ONE
+		// legacy name. The hash function changed, so the SAME GPU set now hashes
+		// differently and its old file carries the old hash. Matching the current
+		// hash alone cannot find it, and matching anything finds too much.
+		//
+		// Resolution: accept only files whose hash equals the current identity OR
+		// whose hash equals the identity this build would have produced BEFORE the
+		// signature change, which is reconstructible from the GPU set. That keeps
+		// the guard sound while making the migration reach the files it exists for.
+		data, readErr := os.ReadFile(legacyPath)
+		if readErr != nil || !usableLegacySystemProbe(data) {
+			continue
+		}
+		// Adopt ONLY a file whose name matches this GPU set — the current identity
+		// or a form an earlier build could have produced for this hardware.
+		//
+		// A content-only rule was tried and REJECTED, and the reason is worth
+		// recording because it looks tempting: a probe records one per-device
+		// overhead per GPU, so its device count identifies the machine SIZE. But
+		// that is all it identifies — the file carries no names, bus ids or driver
+		// versions, verified against this box's own
+		// ~/.cache/ggrun/system_d2fc41d1d9f9.cache. So a three-device probe from
+		// another three-GPU machine is indistinguishable from this one's by content
+		// alone, and adopting it would import that machine's measured overhead into
+		// this plan. A wrong number silently shapes placement, which is worse than
+		// having no measurement, so the count check cannot carry the decision.
+		//
+		// The consequence, stated plainly: this migration is now conservative and
+		// will not reach every historical file — a probe whose name is from an era
+		// this build cannot reconstruct is skipped. That is the safe direction. The
+		// cost of a skip is one re-measurement on the next launch; the cost of a
+		// wrong adoption is a mis-planned launch, silently.
+		//
+		// Two kinds of evidence count, and schema 3 added the second:
+		//
+		//  1. The NAME matches this GPU set — the current identity, or a form an
+		//     earlier build could have produced for this hardware.
+		//  2. The BODY records this GPU set (schema 3+: SYS_GPU_SET_IDENTITY).
+		//     A recorded identity needs no reconstruction and no content inference,
+		//     so it works however many times the signature has changed since.
+		//
+		// Before schema 3, neither was sufficient alone: the filename cannot be
+		// reconstructed across an unknown number of signature changes (this box's
+		// 2026-07-08 probe matches no reconstruction, including origin/main
+		// 9d44a31's), and the body carried no identity, so a content rule could not
+		// tell this machine's three-GPU probe from another's and had to be
+		// rejected. Schema 3 closes that.
+		if !legacyNameMatchesGPUSet(name, gpus) && !recordedIdentityMatchesGPUSet(data, gpus) {
+			continue
+		}
+		// Adopt it: write the same content at the current key so the next launch
+		// reads it directly, and return it for this one.
+		if mkErr := os.MkdirAll(filepath.Dir(newPath), 0755); mkErr == nil {
+			_ = atomicWriteFile(newPath, data, 0o644)
+		}
+		return data
+	}
+	return nil
+}
+
+// recordedIdentityMatchesGPUSet reports whether a system probe STATES that it
+// measured this GPU set.
+//
+// Schema 3 and later write SYS_GPU_SET_IDENTITY, the same hash the filename
+// carries, so the body answers the question the filename cannot once the
+// signature has changed. That makes adoption possible for a file whose name this
+// build cannot reconstruct, without the unsafe content inference: the file says
+// which hardware it measured rather than leaving a reader to guess from a device
+// count that any same-sized machine would match.
+//
+// A probe with no identity row is not a match. Schema 2 and below cannot prove
+// which machine they came from, and unproven is skipped.
+func recordedIdentityMatchesGPUSet(data []byte, gpus []detect.GPU) bool {
+	if len(data) == 0 || len(gpus) == 0 {
+		return false
+	}
+	want := gpuIdentityHash(gpus)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		v, ok := strings.CutPrefix(line, "SYS_GPU_SET_IDENTITY=")
+		if !ok {
+			continue
+		}
+		return strings.TrimSpace(v) == want
+	}
+	return false
+}
+
+// legacyNameMatchesGPUSet reports whether a legacy system-probe filename was
+// written for THIS GPU set.
+//
+// A system probe is a measurement of one machine's per-device CUDA overhead, and
+// the filename records which machine: `system_<hash>.cache`, where the hash is
+// the GPU-set identity at the time. Adopting a file for a different set imports
+// another machine's numbers into this plan, so the hash has to be checked.
+//
+// Two forms count as "this set":
+//
+//   - the current identity, for a file written by this build under an older
+//     app-home path;
+//   - the identity this build would have produced BEFORE the signature changes in
+//     this branch, which is reconstructible from the GPU set. Two such changes
+//     landed: the raw measured bandwidth was removed, and g.Index was dropped.
+//     A pre-existing install has files under those older hashes, and they are
+//     exactly what the migration exists to preserve.
+//
+// Anything else is refused, which is the fail-safe direction: no measurement is
+// better than a wrong one.
+func legacyNameMatchesGPUSet(name string, gpus []detect.GPU) bool {
+	want := fmt.Sprintf("system_%s.cache", gpuIdentityHash(gpus))
+	if name == want {
+		return true
+	}
+	for _, superseded := range supersededGPUSetHashes(gpus) {
+		if name == fmt.Sprintf("system_%s.cache", superseded) {
+			return true
+		}
+	}
+	return false
+}
+
+// supersededGPUSetHashes returns the GPU-set hashes this build might have
+// produced before the two signature changes in this branch. Kept deliberately
+// narrow: each entry is a form that shipped, so the migration cannot be widened
+// by accident into accepting arbitrary names.
+// supersededGPUSetHashes returns GPU-set hashes an EARLIER build of this project
+// could have produced for this hardware.
+//
+// INCOMPLETE BY NATURE, and kept only as a best-effort first attempt. The
+// signatures have changed more than these forms cover, and a probe on this box
+// dated 2026-07-08 does not match any reconstruction — including the one from
+// origin/main 9d44a31, whose formula is
+// `Index|Name|VRAM|Driver|ComputeCap|BusID|genN|xN|bwN`. A hash chain cannot be
+// reconstructed reliably across an unknown number of past changes, so this is a
+// fast path, not the mechanism. See loadLegacySystemProbe for what actually
+// decides adoption.
+func supersededGPUSetHashes(gpus []detect.GPU) []string {
+	out := make([]string, 0, 3)
+	// Form 1: origin/main 9d44a31 — identity with bandwidth AND index.
+	var mainline []string
+	for _, g := range gpus {
+		mainline = append(mainline, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d|bw%d",
+			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID,
+			g.PCIGen, g.PCILanes, g.BandwidthMBps))
+	}
+	out = append(out, hashSortedLines(mainline))
+	// Form 2: identity with bandwidth, after g.Index was dropped by a3c71c1's
+	// predecessor but before the term was removed.
+	var withBandwidth []string
+	for _, g := range gpus {
+		withBandwidth = append(withBandwidth, fmt.Sprintf("%s|%s|%d|%s|%s|gen%d|x%d|bw%d",
+			g.PCIBusID, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIGen, g.PCILanes, g.BandwidthMBps))
+	}
+	out = append(out, hashSortedLines(withBandwidth))
+	// Form 3: identity with index, before the bandwidth term was removed.
+	var withIndex []string
+	for _, g := range gpus {
+		withIndex = append(withIndex, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d",
+			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID, g.PCIGen, g.PCILanes))
+	}
+	out = append(out, hashSortedLines(withIndex))
+	return out
+}
+
+func hashSortedLines(parts []string) string {
+	sort.Strings(parts)
+	h := md5.New()
+	h.Write([]byte(strings.Join(parts, "\n") + "\n"))
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
+// usableLegacySystemProbe reports whether a candidate file is a system probe this
+// build may adopt. It validates content rather than trusting the filename.
+//
+// It requires a POSITIVE per-device overhead, not a schema marker. Real legacy
+// files written before the schema line existed carry only the overhead keys —
+// verified against this project's own store, where
+// `.cache/system_10bb13ba741a.cache` (2026-07-27) has no SYS_PROBE_SCHEMA line at
+// all. Requiring one would reject exactly the files this migration exists to
+// preserve, which is how the previous version was already dead. A file with no
+// positive per-device reading is not evidence of anything and is refused.
+//
+// A schema line, when present, must still be current: a future redefinition of
+// the stored meaning must not be adopted as if it were the current one.
+func usableLegacySystemProbe(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	hasOverhead := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "SYS_PROBE_SCHEMA="); ok {
+			n, convErr := strconv.Atoi(v)
+			if convErr != nil || n != systemProbeSchema {
+				return false
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "SYS_CUDA_OVERHEAD_MB") {
+			if _, after, found := strings.Cut(line, "="); found {
+				if mb, convErr := strconv.Atoi(after); convErr == nil && mb > 0 {
+					hasOverhead = true
+				}
+			}
+		}
+	}
+	return hasOverhead
+}
+
 func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	explicitCacheDir := cacheDir != ""
 	if cacheDir == "" {
 		home, _ := os.UserHomeDir()
 		cacheDir = filepath.Join(home, ".cache", "ggrun")
 	}
-	// Compute GPU signature hash: sort(names+drivers), MD5, take first 12 chars
-	gpuSig := gpuSignatureHash(gpus)
+	// Compute stable GPU identity: sort(identity fields), MD5, take first 12 chars.
+	// The system probe holds measured allocations, which do not depend on link
+	// bandwidth, so it keys on identity alone.
+	gpuSig := gpuIdentityHash(gpus)
 	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
 	data, err := os.ReadFile(path)
 	if err != nil && explicitCacheDir {
 		// App-local installs used to read ~/.cache/ggrun before LLM_APP_HOME
 		// became authoritative. Preserve those measured CUDA values and migrate
 		// them lazily instead of treating the missing new-path file as zero.
-		home, _ := os.UserHomeDir()
-		legacyPath := filepath.Join(home, ".cache", "ggrun", fmt.Sprintf("system_%s.cache", gpuSig))
-		if legacyPath != path {
-			if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
-				data, err = legacyData, nil
-				if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr == nil {
-					_ = atomicWriteFile(path, legacyData, 0o644)
-				}
-			}
+		//
+		// The file is found by SEARCHING, not by rebuilding its name. An earlier
+		// version constructed `system_<gpuSig>.cache` under the legacy directory
+		// using the CURRENT hash, so a file written under the old bandwidth-bearing
+		// (or pre-g.Index-drop) signature could never match it and the migration
+		// could never fire — dead code that silently stopped preserving measured
+		// CUDA values. The content is self-describing (SYS_PROBE_SCHEMA plus
+		// per-device overheads), so the name is not needed to identify it.
+		if migrated := loadLegacySystemProbe(path, gpus); migrated != nil {
+			data, err = migrated, nil
 		}
 	}
 	if err != nil {
@@ -6347,24 +6648,193 @@ func loadSystemProbe(cacheDir string, gpus []detect.GPU) *systemProbe {
 	return sp
 }
 
-// gpuSignatureHash computes MD5 hash of sorted GPU name+driver pairs.
-// GPU signature: nvidia-smi --query-gpu=name,driver_version | sort | md5sum | cut -c1-12
-func gpuSignatureHash(gpus []detect.GPU) string {
-	var parts []string
-	for _, g := range gpus {
-		// Stable hardware identity only: never include current free/used VRAM,
-		// but do include topology and capacity. Two same-name cards on x1 and
-		// x16 links are materially different placement hardware, as are two
-		// revisions carrying different VRAM sizes.
-		parts = append(parts, fmt.Sprintf("%d|%s|%d|%s|%s|%s|gen%d|x%d|bw%d",
-			g.Index, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap, g.PCIBusID,
-			g.PCIGen, g.PCILanes, g.BandwidthMBps))
-	}
+// gpuIdentityHash computes the STABLE hardware identity of the GPU set: MD5 of
+// the sorted per-device identity records, first 12 hex chars.
+//
+// Stable hardware identity only: never include current free/used VRAM, but do
+// include topology and capacity. Two same-name cards on x1 and x16 links are
+// materially different placement hardware, as are two revisions carrying
+// different VRAM sizes.
+//
+// Deliberately EXCLUDES two things.
+//
+// BandwidthMBps is not a hardware property but a MEASURED value injected by
+// detect.ApplyCachedBandwidthProfile, and it is noisy run to run on fixed
+// hardware (+2 / +3 / -1 MB/s observed between two `ggrun detect` calls on values
+// of ~12,190 / ~12,318 / ~6,270). Hashing it at integer precision meant every
+// re-measurement produced a new signature and orphaned the cached probe corpus:
+// on 2026-09-17 the store held 643 probes and 535 were stranded under a
+// superseded signature, and the live Flash-Next launch began two minutes before
+// the first probe was rewritten under the new one, so it planned from no measured
+// evidence and emitted four more CPU expert layers than the same coordinates had
+// planned the day before (NCPUMOE 29 against a cached 25).
+//
+// g.Index is a SLOT ORDINAL, not a hardware fact. detect assigns it by sorting on
+// PCIBusID (detect.go:185-189), so it is already a deterministic function of a
+// field this hash keeps — and the value it adds is exactly the one that changes
+// when a card moves to a different slot. Including it re-orphaned evidence by a
+// second mechanism for no information gained.
+//
+// Topology is still covered: PCIGen and PCILanes carry the link shape that
+// BandwidthMBps was standing in for, and neither moves when a measurement repeats
+// or a card is reseated.
+func gpuIdentityHash(gpus []detect.GPU) string {
+	parts := gpuDeviceIdentities(gpus)
 	sort.Strings(parts)
 	input := strings.Join(parts, "\n") + "\n"
 	h := md5.New()
 	h.Write([]byte(input))
 	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
+// gpuDeviceIdentity is one card's stable identity: everything gpuIdentityHash
+// keeps for it, and nothing that moves when a measurement repeats or a card is
+// renumbered. Field order is not load-bearing (callers sort), but the SET is: bus
+// id first because it is the card's stable address, then the facts that
+// distinguish two cards on the same bus.
+func gpuDeviceIdentity(g detect.GPU) string {
+	return fmt.Sprintf("%s|%s|%d|%s|%s|gen%d|x%d",
+		g.PCIBusID, g.Name, g.VRAMTotalMB, g.Driver, g.ComputeCap,
+		g.PCIGen, g.PCILanes)
+}
+
+// gpuDeviceIdentities returns each device's identity in slice order, binding the
+// enumeration ordinal in only when the ordinal is not already implied.
+//
+// Per-device evidence (PROBED_COMPUTE_BUF_MB_CUDA<i>, runtime growth, system
+// overhead) is stored by device INDEX under a key that sorts identities and so
+// ignores order. That is sound exactly when the index is a deterministic function
+// of the identity. NVIDIA detection guarantees it: detect renumbers by sorted
+// PCIBusID, and restrictGPUs keeps that order for a --gpus subset. So with a
+// distinct bus id on every device the ordinal adds nothing, and leaving it out is
+// what keeps a reseat from orphaning evidence.
+//
+// Vulkan detection has no bus id and numbers devices in enumeration order. Two
+// different cards that enumerate the other way round then produced the SAME
+// identity with SWAPPED indices, and a probe written for one order loaded for the
+// other: measured on two equal-capacity cards (RX 7800 XT, Arc A770), each
+// inherited the other's compute-buffer measurement. probeMeasuredUnderDuress only
+// caught it by accident when the capacities differed. With no bus id the ordinal
+// is the only link between an index and a card, so it becomes part of that card's
+// identity: a reorder then invalidates the evidence instead of misapplying it,
+// at the cost of one re-measurement.
+func gpuDeviceIdentities(gpus []detect.GPU) []string {
+	busIDsIdentify := len(gpus) > 0
+	seen := make(map[string]bool, len(gpus))
+	for _, g := range gpus {
+		if g.PCIBusID == "" || seen[g.PCIBusID] {
+			busIDsIdentify = false
+			break
+		}
+		seen[g.PCIBusID] = true
+	}
+	out := make([]string, len(gpus))
+	for i, g := range gpus {
+		out[i] = gpuDeviceIdentity(g)
+		if !busIDsIdentify {
+			out[i] = fmt.Sprintf("#%d|%s", g.Index, out[i])
+		}
+	}
+	return out
+}
+
+// bandwidthRatioClass expresses each device's link speed as a percentage of the
+// fastest device's, quantised to 10% steps.
+//
+// It exists because a PLAN key needs a bandwidth signal that is both STABLE and
+// PRESENT, and the two obvious candidates each fail one half:
+//
+//   - The raw measured value drifts single-digit MB/s between two `ggrun detect`
+//     runs on unchanged hardware. Hashing it at integer precision orphaned the
+//     whole probe corpus (535 of 643 entries) and made a launch plan from no
+//     measured evidence.
+//   - The device ORDER alone (orderGPUsByBandwidth) is stable but too coarse: it
+//     changes only when the fastest card changes. Degrading the third card from
+//     6,269 to 1,200 MB/s — a real hardware change that moves the split shares
+//     from 0.28/0.57/0.15 to 0.32/0.65/0.03 — leaves the order [1 0 2] untouched,
+//     so an order-only key would reuse a plan packed for a different machine.
+//
+// A ratio is the right shape because it is what the planner actually uses: the
+// split weights are effective_VRAM * bandwidth / total, a proportion. Expressing
+// it relative to the fastest device also makes it scale-free, so nothing about
+// this rig's absolute speeds is encoded as a rule.
+//
+// 10% steps are chosen from the measured margins. The observed run-to-run spread
+// is 0.02%, so a step is ~500x the noise; the smallest real inter-card gap here
+// is 129 MB/s on ~12,300 (1.05%), which the quantisation deliberately does NOT
+// resolve — two cards within 10% of each other are equivalent for packing
+// purposes, and treating them as distinct is what made the earlier 100 MB/s grid
+// flip class on a 1 MB/s move.
+//
+// Zero or unknown is its own class, never the slowest real one.
+func bandwidthRatioClass(gpus []detect.GPU) string {
+	fastest := 0
+	for _, g := range gpus {
+		if g.BandwidthMBps > fastest {
+			fastest = g.BandwidthMBps
+		}
+	}
+	if fastest <= 0 {
+		return "unknown"
+	}
+	parts := make([]string, len(gpus))
+	for i, g := range gpus {
+		if g.BandwidthMBps <= 0 {
+			parts[i] = "unknown"
+			continue
+		}
+		pct := (g.BandwidthMBps*100 + fastest/2) / fastest
+		parts[i] = strconv.Itoa((pct / 10) * 10)
+	}
+	// Each class stays attached to the card that has it, and the PAIRS are sorted.
+	//
+	// Sorting is required: the class is part of a cache key, so it must not depend
+	// on how detection enumerated the cards, or a reseat or driver reload that
+	// reorders the slice mints a new key for the same machine — the re-orphaning
+	// mechanism that dropping g.Index removed.
+	//
+	// But sorting the BARE classes was wrong in the other direction: it reduced a
+	// per-card assignment to a multiset. Swapping which physical card has the fast
+	// link — {4070:100, 3060:50} versus {4070:50, 3060:100} — produced the same
+	// class "100-50-90" and so the same plan key, while the fresh plan differs
+	// (split 0.25/0.54/0.21 versus 0.21/0.54/0.25). A plan packed for one
+	// assignment would be reused for the other. Binding the class to the card's
+	// stable identity keeps enumeration-order invariance and loses nothing.
+	ids := gpuDeviceIdentities(gpus)
+	for i := range gpus {
+		parts[i] = ids[i] + "=" + parts[i]
+	}
+	sort.Strings(parts)
+	h := md5.New()
+	h.Write([]byte(strings.Join(parts, "\n")))
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}
+
+// gpuSignatureHash keys a PLACEMENT PLAN: the stable identity plus the coarse
+// link-ratio class of the devices.
+//
+// Both terms are load-bearing, and both were got wrong in opposite directions
+// before:
+//
+//   - Identity alone is insufficient. The key is computed BEFORE the tensor split
+//     exists, so it cannot lean on tensorSplit to separate two links:
+//
+//     1786  cacheSplitKey := splitCompactKey(s.TensorSplit)   // s is fresh: empty
+//     1787  s.PlacementCachePath = PlacementCachePathFor(..., cacheSplitKey, ...)
+//     1794  if that path exists -> reuse the cached plan, split and all
+//     1900  s.TensorSplit = normalizeSplit(cache.TensorSplit) // comes FROM the cache
+//
+//     A version that dropped the bandwidth term on the reasoning that "tensorSplit
+//     already carries it" therefore had NO bandwidth signal in the key at all, and
+//     returned a plan packed for a fast link when the link was slow.
+//
+//   - The raw measured value is too volatile, for the reason recorded on
+//     gpuIdentityHash. The ratio class is the stable form of the same information.
+//
+// Fit/measurement keys (.probe, system_*.cache) must not use this; they use
+// gpuIdentityHash's content directly and nothing they store depends on the link.
+func gpuSignatureHash(gpus []detect.GPU) string {
+	return gpuIdentityHash(gpus) + "." + bandwidthRatioClass(gpus)
 }
 
 // RunPostLaunchProbe measures actual CUDA overhead after a successful server launch.
@@ -6991,7 +7461,9 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 		return nil
 	}
 	modelBase := filepath.Base(model.Path)
-	wantSig := gpuSignatureHash(gpus)
+	// Runtime graph growth is allocation state, not a speed figure: carry it
+	// across re-measurements of the link, so only the STABLE identity must match.
+	wantSig := gpuIdentityHash(gpus)
 	wantParallel := probeParallelKey(parallel)
 	exactByDevice := map[int]int{}
 	entries, err := os.ReadDir(cacheDir)
@@ -7807,11 +8279,24 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return
 	}
-	gpuSig := gpuSignatureHash(gpus)
+	gpuSig := gpuIdentityHash(gpus)
 	path := filepath.Join(cacheDir, fmt.Sprintf("system_%s.cache", gpuSig))
 	var b strings.Builder
 	fmt.Fprintf(&b, "# System probe (post-launch per-device measurement)\n")
 	fmt.Fprintf(&b, "SYS_PROBE_SCHEMA=%d\n", systemProbeSchema)
+	// Record WHICH hardware this measured, so a later reader never has to infer it.
+	//
+	// Until schema 3 the body carried only per-device overhead numbers and a
+	// timestamp -- no names, bus ids or driver versions -- so a probe from another
+	// machine of the same GPU count was indistinguishable from this one's, and the
+	// only machine check available was the filename, which cannot be reconstructed
+	// once the signature changes. That left the legacy migration either unsafe
+	// (adopt a foreign probe) or dead (reach no historical file). Recording the
+	// identity removes the guess for every file written from now on.
+	fmt.Fprintf(&b, "SYS_GPU_SET_IDENTITY=%s\n", gpuSig)
+	for _, g := range gpus {
+		fmt.Fprintf(&b, "SYS_GPU_DEVICE=%s|%s|%d|%d\n", g.PCIBusID, g.Name, g.VRAMTotalMB, g.PCILanes)
+	}
 	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().Format(time.RFC3339))
 	indices := make([]int, 0, len(overheadByGPU))
 	for idx := range overheadByGPU {
@@ -8310,7 +8795,7 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	key := fmt.Sprintf("probe:v%d:%s:%d:%d:%d:%d:%d:%d:%s:%s:%s:%s:%d:",
 		placementProbeCacheVersion, modelIdentity, model.NumLayers, model.NumExperts,
 		model.EmbeddingLength, model.FeedForwardLength,
-		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallel)
+		ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuIdentityHash(gpus), parallel)
 	hash := md5Hash12(key)
 	return filepath.Join(cacheDir, hash+".probe")
 }
@@ -8328,7 +8813,19 @@ func probeCachePath(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 // stable hardware signature. Older keys cannot prove either property.
 // Version 8 retires oracle measurements taken after memory-policy flags were
 // stripped from the serving argv (KV offload, full SWA and metadata overrides).
-const placementProbeCacheVersion = 8
+// Version 9 replaced the bandwidth-bearing GPU signature with the stable
+// gpuIdentityHash. Until 9 the measured link bandwidth was hashed at integer
+// precision, so re-measuring it (it drifts by single-digit MB/s run to run on
+// fixed hardware) minted a new key and orphaned every probe written under the
+// old one.
+// Version 10 drops g.Index from that identity. Index is a slot ordinal assigned
+// by bus-id sort, so a reseat, a driver reload, or a machine that enumerates in
+// another order changed the key again for no information gained. Bumped
+// separately from 9 because it is a second, independent change to what the key
+// means: a reader of a v9 file cannot know which fields were in it.
+// Old entries are not recoverable under a new key by design; that invalidation
+// is the point, and it is declared here rather than left implicit.
+const placementProbeCacheVersion = 10
 
 // Bump whenever placement semantics can change emitted expert residency.
 // Version 6 removes the architecture-specific split-owner exclusion and lets
@@ -8337,7 +8834,29 @@ const placementProbeCacheVersion = 8
 // sliding-window layers were priced at their window depth even under --swa-full,
 // and a geometry measured at one KV type was not reused for another, so plans
 // were validated against an allocation the backend would never make.
-const placementPlanCacheVersion = 7
+// Version 8 keyed on a coarse bandwidth class instead of the raw measured value.
+// Version 9 REPLACES that class with a ratio-to-fastest class.
+//
+// An intermediate change removed the bandwidth term from this key entirely, on
+// the reasoning that tensorSplit already carries what a link change moves. That
+// reasoning was WRONG and it was reverted: the key is computed before the split
+// exists (see gpuSignatureHash), so dropping the term left the key with no
+// bandwidth signal at all and a plan packed for a fast link was reused for a slow
+// one. The class form is kept because the key genuinely needs a bandwidth term at
+// lookup time, and made relative rather than absolute so it does not encode this
+// rig's speeds as a rule.
+//
+// A 100 MB/s absolute grid was also actively harmful — an edge every 100 MB/s
+// meant a value ON an edge changed class on a 1 MB/s move (12,149 classified 121
+// and 12,150 classified 122). The ratio form's 10% steps are ~500x the observed
+// run-to-run noise instead.
+//
+// Version 10 binds each class to its card's identity before sorting. Version 9
+// sorted bare classes, so two machines that differ only in which physical card
+// has the fast link shared a plan key while their fresh plans differ; a v9 .place
+// file cannot say which assignment it was packed for, so none is reused.
+// Measurement (.probe) keys do not carry the class and are unaffected.
+const placementPlanCacheVersion = 10
 
 // swaFull belongs in the key because it changes the KV allocation without
 // changing anything else the key already carries: on Laguna the same context
@@ -8794,7 +9313,7 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Probe cache for %s\n", filepath.Base(model.Path))
 	fmt.Fprintf(&b, "# Generated: %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s parallel=%d\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuSignatureHash(gpus), parallelKey)
+	fmt.Fprintf(&b, "# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s parallel=%d\n", ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpuIdentityHash(gpus), parallelKey)
 	fmt.Fprintf(&b, "PROBE_CACHE_SCHEMA=%d\n", probeCacheSchema)
 	// The conditions every number below was measured under. Without them a
 	// reader cannot tell a healthy measurement from one taken while the previous

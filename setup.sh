@@ -11,7 +11,7 @@ set -euo pipefail
 
 # No terminal at all (CI, no /dev/tty): do not prompt.
 # curl | bash on a real machine still has /dev/tty and can guide the user.
-if [[ ! -t 0 && ! -r /dev/tty && -z "${LLM_SETUP_NONINTERACTIVE:-}" ]]; then
+if [[ ! -t 0 && -z "${LLM_SETUP_NONINTERACTIVE:-}" ]] && ! ( : </dev/tty ) 2>/dev/null; then
     export LLM_SETUP_NONINTERACTIVE=1
     export LLM_INSTALL_NONINTERACTIVE=1
 fi

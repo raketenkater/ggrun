@@ -18,6 +18,25 @@ jobs:
           cache: false
       - name: Run protected core-engine contract
         run: scripts/verify-core-engine.sh
+      - name: Verify root memory scope lifecycle
+        working-directory: go
+        run: >-
+          sudo env GOCACHE="$RUNNER_TEMP/ggrun-root-go-cache"
+          GOMODCACHE="$(go env GOMODCACHE)" "$(command -v go)"
+          test -count=1 ./pkg/server
+          -run '^(TestStartWithMemoryScopeStopsScopedChildOnFailure|TestStartWithMemoryScopeCapturesOOMCounters|TestScopeSetMemoryMaxMBAndNonReclaimable)$'
+
+  windows-terminal:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Test native console and detached input
+        working-directory: go
+        run: go test -count=1 ./pkg/tui -run Terminal
 
   shellcheck:
     runs-on: ubuntu-latest

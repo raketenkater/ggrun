@@ -112,6 +112,7 @@ func TestOverrideEnvReplacesInheritedGPUVisibility(t *testing.T) {
 }
 
 func TestScopedCommandArgsWrapsMemoryMax(t *testing.T) {
+	t.Setenv("GGRUN_SCOPE_MODE", "user")
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd-run memory scopes are Linux-only")
 	}
@@ -135,13 +136,14 @@ func TestScopedCommandArgsWrapsMemoryMax(t *testing.T) {
 }
 
 func TestScopedCommandArgsClampsMemoryHighToMax(t *testing.T) {
+	t.Setenv("GGRUN_SCOPE_MODE", "user")
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd-run memory scopes are Linux-only")
 	}
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		t.Skip("systemd-run not installed")
 	}
-	got, err := scopedCommandArgsWithLimits([]string{"llama-server"}, 70000, 64000, "test.scope")
+	got, _, err := scopedCommandArgsWithLimits([]string{"llama-server"}, 70000, 64000, "test.scope")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,6 +315,9 @@ func TestScopeSetMemoryMaxMBAndNonReclaimable(t *testing.T) {
 		t.Fatalf("start healthy scoped server: %v", err)
 	}
 	defer func() { _ = p.Stop() }()
+	// Changing the resolver after startup must not redirect this real scope's
+	// observations, limit updates, or teardown to another systemd instance.
+	t.Setenv("GGRUN_SCOPE_MODE", "unsupported")
 
 	// Re-size the running scope to a higher ceiling (the post-launch measured
 	// footprint + headroom path).
@@ -320,7 +325,7 @@ func TestScopeSetMemoryMaxMBAndNonReclaimable(t *testing.T) {
 		t.Fatalf("SetMemoryMaxMB: %v", err)
 	}
 	// The scope's own cgroup should now show the raised ceiling.
-	cgroup, cgErr := scopeControlGroup(p.scopeUnit)
+	cgroup, cgErr := scopeControlGroup(p.scopeUnit, p.scopeMode)
 	if cgErr != nil {
 		t.Fatalf("scope control group: %v", cgErr)
 	}

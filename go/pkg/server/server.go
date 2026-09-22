@@ -37,6 +37,7 @@ type Process struct {
 	waitMu             sync.RWMutex
 	waitErr            error
 	scopeUnit          string
+	scopeMode          scopeMode
 	statsMu            sync.Mutex
 	memoryPeakBytes    uint64
 	memoryOOMKillCount uint64
@@ -80,7 +81,7 @@ func (p *Process) captureMemoryStats() {
 	if p.scopeUnit == "" {
 		return
 	}
-	peak, oomKills, peakErr, oomErr := scopeMemoryStats(p.scopeUnit)
+	peak, oomKills, peakErr, oomErr := scopeMemoryStats(p.scopeUnit, p.scopeMode)
 	p.statsMu.Lock()
 	defer p.statsMu.Unlock()
 	if peakErr == nil {
@@ -193,7 +194,7 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		launchArgs = commandWithEnvironment(args, opts.EnvOverrides)
 		outerEnvOverrides = nil
 	}
-	cmdArgs, err := scopedCommandArgsWithLimits(launchArgs, opts.MemoryHighMB, opts.MemoryMaxMB, scopeUnit)
+	cmdArgs, owner, err := scopedCommandArgsWithLimits(launchArgs, opts.MemoryHighMB, opts.MemoryMaxMB, scopeUnit)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -226,7 +227,7 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit}
+	p := &Process{Cmd: cmd, Port: port, cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
 	if scopeUnit != "" {
 		go p.monitorMemoryStats()
 	}
@@ -467,8 +468,8 @@ func (p *Process) Stop() error {
 		var scopeErr error
 		scopeStopped := false
 		if p.scopeUnit != "" {
-			scopeErr = stopScopeUnit(p.scopeUnit)
-			scopeStopped = scopeErr == nil || !scopeUnitActive(p.scopeUnit)
+			scopeErr = stopScopeUnit(p.scopeUnit, p.scopeMode)
+			scopeStopped = scopeErr == nil
 			if scopeStopped {
 				scopeErr = nil
 			}
@@ -513,15 +514,15 @@ func (p *Process) Stop() error {
 			p.cancel()
 		}
 		if p.scopeUnit != "" {
-			if err := stopScopeUnit(p.scopeUnit); err != nil && scopeErr == nil {
+			if err := stopScopeUnit(p.scopeUnit, p.scopeMode); err != nil && scopeErr == nil {
 				scopeErr = err
 			}
-			if err := waitScopeUnitStopped(p.scopeUnit, 15*time.Second); err != nil && scopeErr == nil {
+			if err := waitScopeUnitStopped(p.scopeUnit, p.scopeMode, 15*time.Second); err != nil && scopeErr == nil {
 				scopeErr = err
 			}
 			// Failed transient scopes retain MemoryPeak/Result after their cgroup
 			// disappears. Clear that retained unit only after captureMemoryStats.
-			_ = resetFailedScopeUnit(p.scopeUnit)
+			_ = resetFailedScopeUnit(p.scopeUnit, p.scopeMode)
 		}
 		if p.stopErr == nil && scopeErr != nil {
 			p.stopErr = scopeErr
@@ -538,8 +539,8 @@ func (p *Process) Kill() {
 		return
 	}
 	if p.scopeUnit != "" {
-		_ = stopScopeUnit(p.scopeUnit)
-		_ = waitScopeUnitStopped(p.scopeUnit, 5*time.Second)
+		_ = stopScopeUnit(p.scopeUnit, p.scopeMode)
+		_ = waitScopeUnitStopped(p.scopeUnit, p.scopeMode, 5*time.Second)
 	}
 	if p.cancel != nil {
 		p.cancel()
