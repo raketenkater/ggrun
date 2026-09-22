@@ -117,13 +117,14 @@ func TestUntouchedTUIRowsDoNotBecomeTypedFlags(t *testing.T) {
 func TestEveryTUILaunchFieldHasADisposition(t *testing.T) {
 	// Fields that legitimately never become launch argv.
 	notLaunchArgv := map[string]string{
-		"Update":        "routes to cmdUpdate instead of a launch",
-		"BackendArgs":   "routes to cmdBackend instead of a launch",
-		"DownloadRepo":  "download path; never launches",
-		"DownloadQuant": "download path; never launches",
-		"DownloadDir":   "download path; never launches",
-		"AITune":        "selects cmdTune over cmdLaunch; only gates --rounds",
-		"FlashAttn":     "hardcoded true in buildLaunchRequest and never emitted; vestigial",
+		"Update":              "routes to cmdUpdate instead of a launch",
+		"BackendArgs":         "routes to cmdBackend instead of a launch",
+		"BackendInstallError": "carries a failed install back to the TUI model screen; never launches",
+		"DownloadRepo":        "download path; never launches",
+		"DownloadQuant":       "download path; never launches",
+		"DownloadDir":         "download path; never launches",
+		"AITune":              "selects cmdTune over cmdLaunch; only gates --rounds",
+		"FlashAttn":           "hardcoded true in buildLaunchRequest and never emitted; vestigial",
 	}
 
 	typ := reflect.TypeOf(tui.LaunchRequest{})

@@ -839,7 +839,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			budget.MaxCandidates, budget.MaxFailures, budget.MaxElapsed)
 	}
 
-	baseURL := fmt.Sprintf("http://localhost:%d", req.Port)
+	baseURL := backendBaseURL(req)
 	workloadLanes := requestWorkloadConcurrency(req)
 	utilizationCaps, _ := runtimeGPUCapabilities(caps, req)
 	agentPromptBytes := 0

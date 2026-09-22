@@ -2326,3 +2326,62 @@ func TestInitialParallelPolicyReachesLaunch(t *testing.T) {
 		})
 	}
 }
+
+// Redirected stdin can use a controlling console when the platform provides one.
+func TestTerminalAvailableWithRedirectedStdin(t *testing.T) {
+	saved := os.Stdin
+	t.Cleanup(func() { os.Stdin = saved })
+
+	// The contract has TWO clauses, and a test of one must not assume the other is
+	// absent. terminalAvailable mirrors bubbletea: stdin if it is a terminal,
+	// otherwise the platform console fallback (/dev/tty, or CONIN$ on Windows).
+	//
+	// So "a pipe stdin is refused" is only true when there is NO console fallback.
+	// Under a pty the fallback legitimately fires — bubbletea would open /dev/tty
+	// and run — and asserting refusal there is the test being wrong, not the code.
+	// An earlier version asserted refusal unconditionally and passed only because
+	// `go test` outside a pty has no terminal to fall back to.
+	hasFallback := func() bool {
+		device := "/dev/tty"
+		if runtime.GOOS == "windows" {
+			device = "CONIN$"
+		}
+		f, err := os.Open(device)
+		if err != nil {
+			return false
+		}
+		_ = f.Close()
+		return true
+	}
+	fallback := hasFallback()
+
+	check := func(label string, f *os.File) {
+		os.Stdin = f
+		if got, want := terminalAvailable(), fallback; got != want {
+			t.Errorf("with %s stdin: terminalAvailable()=%v, want %v "+
+				"(console fallback available=%v); a non-terminal stdin must not "+
+				"itself be treated as a terminal", label, got, want, fallback)
+		}
+	}
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+	check("a null device", devNull)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	check("a pipe", r)
+
+	tmp, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer func() { _ = tmp.Close() }()
+	check("a regular file", tmp)
+}

@@ -44,6 +44,8 @@ import (
 	"github.com/raketenkater/ggrun/pkg/tui"
 	"github.com/raketenkater/ggrun/pkg/tune"
 	"github.com/raketenkater/ggrun/pkg/update"
+
+	"github.com/charmbracelet/x/term"
 )
 
 // version comes from pkg/update so the binary and the update checker can never
@@ -586,7 +588,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert":
+			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
 				skip = true
 			}
 			continue
@@ -686,15 +688,21 @@ type launchRequest struct {
 	ParallelSet          bool // --parallel given explicitly; claude-code mode must not override it
 	Threads              int  // --threads; 0 keeps the physical-core default
 	CacheRAMMB           int  // --cache-ram; 0 keeps the derived prompt-cache budget
-	ClaudeMaxActive      int  // --claude-max-active; 0 means no admission limit
-	ClaudeMaxActiveSet   bool
-	BatchSize            int
-	BatchSizeSet         bool
-	UBatchSize           int
-	UBatchSizeSet        bool
-	Benchmark            bool
-	WorkerBenchmark      bool // task-specific support/reviewer quality plus throughput
-	ClaudeCode           bool
+	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. -1 (the zero
+	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
+	// the field exists because leaving the flag unparsed let it fall through to
+	// ExtraArgs and emit the coordinate twice.
+	MaxCheckpoints     int
+	MaxCheckpointsSet  bool
+	ClaudeMaxActive    int // --claude-max-active; 0 means no admission limit
+	ClaudeMaxActiveSet bool
+	BatchSize          int
+	BatchSizeSet       bool
+	UBatchSize         int
+	UBatchSizeSet      bool
+	Benchmark          bool
+	WorkerBenchmark    bool // task-specific support/reviewer quality plus throughput
+	ClaudeCode         bool
 	// ClaudeReviewerOverride selects the local reviewer/worker model when
 	// Claude Code mode starts its Auto companion: "auto" (and the historical
 	// "qwen") resolve to the Qwen3.5-4B worker/reviewer, "qwen2b" forces the
@@ -739,8 +747,12 @@ type launchRequest struct {
 	// different user workload/quality policies isolated.
 	ProfilePolicyIdentity string
 	EmitServerArgvJSON    bool // dry-run machine interface for reproducible benchmark harnesses
-	SpecDraftMax          int  // internal spec-test ceiling; not a public launch override
-	ExtraArgs             []string
+	// InventoryPath names a captured hardware inventory (detect.Capabilities JSON)
+	// to plan against instead of the live machine. Accepted on dry-run only; a
+	// real launch refuses it, because provisional plans are not admission proof.
+	InventoryPath string
+	SpecDraftMax  int // internal spec-test ceiling; not a public launch override
+	ExtraArgs     []string
 	// ChatTemplateOverride names a chat-template catalog entry (pkg/chattemplate)
 	// the user explicitly selected with --chat-template. It forces that entry's
 	// corrected template regardless of the model's arch/basename, and overrides
@@ -900,8 +912,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.ServerBinExplicit = true
 				continue
 			case "--backend":
-				req.Backend = val
-				req.BackendExplicit = true
+				req.Backend, req.BackendExplicit = parseBackendFlag(val)
 				continue
 			case "--tune-cache":
 				req.TuneCache = val
@@ -980,6 +991,18 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				}
 				req.CacheRAMMB = cram
 				continue
+			case "--ctx-checkpoints", "-ctxcp":
+				// Without this case the token falls through to ExtraArgs and the
+				// argv carries the coordinate twice — the derived value and this
+				// one. llama.cpp keeps the last, so it appeared to work, but two
+				// values for one coordinate is exactly the partial overlay
+				// invariant 2 forbids and ambiguous to diff.
+				cps, err := parseNonNegativeFlag(key, val)
+				if err != nil {
+					return nil, err
+				}
+				req.MaxCheckpoints, req.MaxCheckpointsSet = cps, true
+				continue
 			case "--claude-max-active":
 				limit, err := parseNonNegativeFlag(key, val)
 				if err != nil {
@@ -1018,6 +1041,19 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				continue
 			case "--claude-resume":
 				req.ClaudeResume, req.ClaudeCode = val, true
+				continue
+			case "--inventory":
+				// Must be handled here as well as in the bare-token switch: the
+				// `--flag=value` spelling never reaches that switch, and an
+				// unhandled token falls through to ExtraArgs — which would plan
+				// against the LIVE machine while the user believed they had
+				// modelled another, and would hand the literal token to the
+				// backend. A value must be present: `--inventory=` is an error
+				// rather than a silent empty path that plans against the live box.
+				if val == "" {
+					return nil, fmt.Errorf("--inventory: needs a path (use `-` for stdin)")
+				}
+				req.InventoryPath = val
 				continue
 			case "--chat-template":
 				// --chat-template doubles as llama.cpp's built-in template selector
@@ -1082,6 +1118,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if a == "--emit-server-argv-json" {
 				req.EmitServerArgvJSON = true
 			}
+			continue
+		case "--inventory":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			req.InventoryPath = v
 			continue
 		case "--model", "-m":
 			v, err := next()
@@ -1220,8 +1263,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			if err != nil {
 				return nil, err
 			}
-			req.Backend = v
-			req.BackendExplicit = true
+			req.Backend, req.BackendExplicit = parseBackendFlag(v)
 		case "--tune-cache":
 			v, err := next()
 			if err != nil {
@@ -1320,6 +1362,16 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.CacheRAMMB = cram
+		case "--ctx-checkpoints", "-ctxcp":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			cps, err := parseNonNegativeFlag(a, v)
+			if err != nil {
+				return nil, err
+			}
+			req.MaxCheckpoints, req.MaxCheckpointsSet = cps, true
 		case "--claude-max-active":
 			v, err := next()
 			if err != nil {
@@ -1888,6 +1940,30 @@ func resolveModelPath(path, modelDir string) string {
 
 func parseBudgetMB(s string) int { return config.ParseBudgetMB(s) }
 
+// parseBackendFlag interprets a --backend value. Any case of "auto" requests
+// model-aware selection and pins nothing; configuredBackendExplicit already
+// compares case-insensitively, and the flag must agree with it. A literal
+// --backend skip stays explicit so it fails clearly.
+func parseBackendFlag(value string) (string, bool) {
+	if strings.EqualFold(strings.TrimSpace(value), "auto") {
+		return "auto", false
+	}
+	return value, true
+}
+
+// backendChoiceExplicit reports whether the user pinned the backend binary.
+// backendBaseURL is how ggrun's own post-launch clients (canaries,
+// calibration, tuning, benchmarks) reach the backend it started: on the
+// --host it was bound to, or localhost for a wildcard bind. Hardcoding
+// localhost failed every one of them for a server bound to a LAN address.
+func backendBaseURL(req *launchRequest) string {
+	return fmt.Sprintf("http://%s:%d", server.ClientHost(req.Host), req.Port)
+}
+
+func backendChoiceExplicit(req *launchRequest) bool {
+	return req != nil && (req.BackendExplicit || req.ServerBinExplicit)
+}
+
 func configuredBackendExplicit(backend string) bool {
 	backend = strings.TrimSpace(backend)
 	// "skip" is an installer-only choice used by older launcher-only app homes;
@@ -1919,7 +1995,10 @@ func selectBackend(caps *detect.Capabilities, req *launchRequest) *backendInfo {
 		if _, err := os.Stat(req.ServerBin); err == nil {
 			return detectBackend(req.ServerBin)
 		}
-		fmt.Fprintf(os.Stderr, "Warning: server binary not found: %s\n", req.ServerBin)
+		// Like a named backend that is missing, an explicit binary that is not
+		// there must not fall through to some other build: that skipped the
+		// architecture route and launched a binary proven not to load the model.
+		return nil
 	}
 	if want != "" && want != "auto" {
 		seen := make(map[string]bool)
@@ -2036,6 +2115,30 @@ func autoBackendCandidates(caps *detect.Capabilities, req *launchRequest) []auto
 		for _, backend := range caps.Backends {
 			add(backend.Path)
 		}
+	}
+	// A fork installed without --route-arch is still an installed backend. Left
+	// out, a model only that fork can load was refused as "no installed backend
+	// supports" it, and the launch then offered to install something else.
+	// Forks join last and never count as canonical, so at equal probe support
+	// they lose the locality tie-break to mainline; a fork is chosen when its
+	// probe proves the architecture and no earlier candidate does. (The
+	// file-backed-experts tie-break for large CPU-expert MoE still applies to
+	// forks as to any backend.) Helper-only forks keep their metadata-only role.
+	for _, fork := range backends.Load() {
+		path := strings.TrimSpace(fork.Path)
+		if backends.IsHelperOnly(fork) || path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if st, err := os.Stat(path); err != nil || st.IsDir() {
+			continue
+		}
+		fork := fork
+		info := detectRegisteredBackend(&fork)
+		if backendLoaderFailed(info.Help) {
+			continue
+		}
+		out = append(out, autoBackendCandidate{info: info})
 	}
 	return out
 }
@@ -2189,6 +2292,17 @@ func chooseAutoBackend(candidates []autoBackendCandidate, arch string, probe bac
 		return nil, candidates[bestIndex].info
 	}
 	return candidates[bestIndex].info, nil
+}
+
+// reviewedInstallOffer is the reviewed recipe a launch should offer to install,
+// or nil. An explicit --backend/--server-bin is kept even after an install, so
+// offering one could only build a fork the launch then ignores; the
+// architecture warning in preflightBackendArch still names the fork.
+func reviewedInstallOffer(req *launchRequest, arch string, be *backendInfo) *backends.Recipe {
+	if backendChoiceExplicit(req) {
+		return nil
+	}
+	return reviewedRecipeRequiredForMain(arch, be)
 }
 
 func reviewedRecipeRequiredForMain(arch string, be *backendInfo) *backends.Recipe {
@@ -2373,7 +2487,7 @@ func normalizeArchKVRequest(req *launchRequest, model *placement.ModelProfile) {
 func backendUnavailableReason(arch, backendPath string) string {
 	actionable := fmt.Sprintf("Update the mainline llama.cpp backend or install a fork that adds %s (ggrun backend install <recipe>).", arch)
 	if len(backends.RecipesForArch(arch)) == 0 {
-		actionable = "It requires a newer llama.cpp mainline or a fork that adds the architecture. ggrun can search open llama.cpp PRs for a supporting fork, or update the mainline backend."
+		actionable = "It requires a newer llama.cpp mainline or a fork that adds the architecture. Run ggrun in a terminal and it will search open llama.cpp PRs for a supporting fork or offer a mainline backend update; set LLM_ASSUME_YES=true to accept them without a prompt."
 	}
 	return fmt.Sprintf(
 		"No installed backend supports the %s architecture. The %s backend does not support it.\n  %s",
@@ -2443,7 +2557,9 @@ var searchArchForkPRs = func(ctx context.Context, model *placement.ModelProfile)
 }
 
 func installDiscoveredArchFork(recipe backends.Recipe) error {
-	cmdBackendAddRecipe([]string{
+	// Return the failure: the caller falls back to the mainline-update offer,
+	// which a clone or build error used to skip by exiting the process.
+	return addBackendRecipe([]string{
 		recipe.GitURL,
 		"--tag", recipe.Tag,
 		"--checkout-name", recipe.Tag,
@@ -2451,7 +2567,6 @@ func installDiscoveredArchFork(recipe backends.Recipe) error {
 		"--commit", recipe.Commit,
 		"--route-arch", recipe.RouteArch,
 	}, &recipe)
-	return nil
 }
 
 // offerDiscoveredArchFork searches the official llama.cpp PR index and the
@@ -2542,6 +2657,11 @@ func backendUnavailableMessage(req *launchRequest) string {
 		// instead of the generic "no binary found" fallback.
 		if reason := strings.TrimSpace(req.BackendUnavailableReason); reason != "" {
 			return reason
+		}
+		if req.ServerBinExplicit && strings.TrimSpace(req.ServerBin) != "" {
+			if _, err := os.Stat(req.ServerBin); err != nil {
+				return fmt.Sprintf("server binary %q was not found; fix the path, or omit --server-bin to let ggrun choose a backend for this model", req.ServerBin)
+			}
 		}
 		want := requestedBackendName(req)
 		if want != "" && !strings.EqualFold(want, "auto") {
@@ -2712,6 +2832,8 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		ParallelExplicit:        req.ParallelSet,
 		Threads:                 req.Threads,
 		CacheRAMMB:              req.CacheRAMMB,
+		MaxCheckpoints:          req.MaxCheckpoints,
+		MaxCheckpointsSet:       req.MaxCheckpointsSet,
 		// --swa-full is a passthrough flag, but placement cannot treat it as
 		// one: it decides whether sliding-window layers hold the whole context,
 		// which on Laguna is the difference between 13.8 GB and 54.0 GB of KV
@@ -3671,9 +3793,13 @@ func rememberLiveMemoryProbeConsent(cfg *config.Config, output io.Writer) {
 	fmt.Fprintln(output, "[config] live memory probe approval saved; future launches will not ask again")
 }
 
+// stdinIsTerminal reports whether a consent prompt could actually be answered.
+// A ModeCharDevice test is not enough: /dev/null is a character device, and
+// stdin redirected from it is what CI, nohup, cron and service units provide.
+// Treating that as a terminal printed [y/N], read EOF and declined, so a
+// headless launch never showed the exact install command it had for this case.
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(os.Stdin.Fd())
 }
 
 // hostExpertPinningEnv disables ik_llama's pinned host buffer when the plan
@@ -5717,7 +5843,7 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 	}
 	runner := &benchmark.Runner{
-		BaseURL:       fmt.Sprintf("http://127.0.0.1:%d", req.Port),
+		BaseURL:       backendBaseURL(req),
 		Model:         filepath.Base(model.Path),
 		Timeout:       20 * time.Minute,
 		ContextTokens: canaryContext,
@@ -6009,6 +6135,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(2)
 	}
+	refuseInventoryOnLaunch(req)
 	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun launch <model.gguf>")
 		os.Exit(2)
@@ -6054,13 +6181,16 @@ func cmdLaunch(args []string) {
 	}
 
 	be := resolveLaunchBackend(req, model, caps)
-	if recipe := reviewedRecipeRequiredForMain(model.ModelArch, be); recipe != nil {
+	if recipe := reviewedInstallOffer(req, model.ModelArch, be); recipe != nil {
 		if !confirmReviewedBackendInstall(recipe, model.ModelArch, cfg.AssumeYes, os.Stdin, os.Stderr, stdinIsTerminal()) {
 			fmt.Fprintf(os.Stderr, "Error: no proven main-model backend for architecture %q; install the reviewed backend with: ggrun backend install %s\n", model.ModelArch, recipe.Name)
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "[launch] installing reviewed backend %q before model placement\n", recipe.Name)
-		cmdBackendInstall([]string{recipe.Name})
+		if err := installBackendRecipe([]string{recipe.Name}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: reviewed backend %q did not install: %v\n", recipe.Name, err)
+			os.Exit(1)
+		}
 		be = resolveLaunchBackend(req, model, caps)
 	}
 	if be == nil {
@@ -6449,9 +6579,9 @@ func cmdLaunch(args []string) {
 		var benchmarkErr error
 		if req.WorkerBenchmark {
 			usedVRAMMB := measuredLaunchVRAMMB(runtimeCaps, visibleToPhysical, baselineVRAM)
-			benchmarkErr = runOneShotWorkerBenchmark(req.Port, filepath.Base(req.ModelPath), usedVRAMMB)
+			benchmarkErr = runOneShotWorkerBenchmark(req.Host, req.Port, filepath.Base(req.ModelPath), usedVRAMMB)
 		} else {
-			benchmarkErr = runOneShotBenchmark(req.Port, filepath.Base(req.ModelPath))
+			benchmarkErr = runOneShotBenchmark(req.Host, req.Port, filepath.Base(req.ModelPath))
 		}
 		stopErr := p.Stop()
 		if stopErr != nil {
@@ -7230,6 +7360,17 @@ func cmdKVProbe(args []string) {
 	}
 }
 
+// runTUIBackendAction runs a backend command chosen in the TUI. Installs
+// return their error so the TUI can recover; other backend commands keep
+// their command-line behaviour.
+func runTUIBackendAction(args []string) error {
+	if len(args) > 0 && args[0] == "install" {
+		return installBackendRecipe(args[1:])
+	}
+	cmdBackend(args)
+	return nil
+}
+
 func tuiLaunchArgs(req *tui.LaunchRequest, cfg *config.Config) []string {
 	if req == nil {
 		return nil
@@ -7264,16 +7405,24 @@ func cmdGUI() {
 			return
 		}
 		if len(req.BackendArgs) > 0 {
-			cmdBackend(req.BackendArgs)
+			err := runTUIBackendAction(req.BackendArgs)
 			if req.ModelPath != "" {
 				// A model-aware install carries the current launch settings. Once
 				// the recipe registers its architecture route, return to a review
 				// screen with that route selected instead of making the user find
-				// and configure the model again.
+				// and configure the model again. A failed clone or build returns
+				// to the same model with the error rather than ending ggrun.
 				copyReq := *req
 				copyReq.BackendArgs = nil
+				if err != nil {
+					copyReq.BackendInstallError = err.Error()
+				}
 				pendingReview = &copyReq
 				continue
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
 			return
 		}
@@ -7321,6 +7470,51 @@ func cmdGUI() {
 	}
 }
 
+// loadInventory reads a captured hardware inventory for planning.
+//
+// This is deliberately reachable ONLY from a dry-run. Every path that can start
+// a model must refuse `--inventory`: invariant 4 makes exact-argv admission,
+// process-scoped failure containment and observed allocations the authorities
+// for what fits, and a plan computed against hardware that is not present would
+// defeat that fail-closed boundary. The refusal is enforced at the call sites
+// rather than here, so this stays a single explicit read.
+func loadInventory(path string) (*detect.Capabilities, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	caps, err := detect.LoadCapabilities(data)
+	if err != nil {
+		return nil, err
+	}
+	// A plan is only meaningful against hardware that is actually free. A
+	// captured inventory carries whatever VRAM was in use at capture time, so a
+	// stale capture would plan around a server that has since exited.
+	fmt.Fprintf(os.Stderr,
+		"[inventory] planning against %d GPU(s) from %s (planning only; no device is touched)\n",
+		len(caps.GPUs), path)
+	return caps, nil
+}
+
+// refuseInventoryOnLaunch stops a real launch from planning against synthetic
+// hardware. Called on every launch path.
+func refuseInventoryOnLaunch(req *launchRequest) {
+	if req.InventoryPath == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Error: --inventory is a dry-run planning input and cannot be used to launch.\n"+
+			"A launch must be admitted against the hardware that is present; a plan for other\n"+
+			"hardware is not admission proof. Re-run without --inventory, or use `ggrun dry-run`.\n")
+	os.Exit(2)
+}
+
 func cmdDryRun(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
@@ -7336,6 +7530,17 @@ func cmdDryRun(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
 		os.Exit(1)
+	}
+	// A dry-run may plan for a DIFFERENT machine, or for this one while another
+	// process holds its VRAM. Planning-only: real launches refuse the flag
+	// outright (see loadInventory), because exact-argv admission and observed
+	// allocations are the authority for what actually fits.
+	if req.InventoryPath != "" {
+		caps, err = loadInventory(req.InventoryPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading inventory: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	cfg := loadConfigOrExit()
@@ -8347,7 +8552,7 @@ func cmdTune(args []string) {
 
 	cache := tune.NewCache(cfg.CacheDir)
 	engine := &tune.Engine{
-		BaseURL:           fmt.Sprintf("http://localhost:%d", req.Port),
+		BaseURL:           backendBaseURL(req),
 		Model:             filepath.Base(req.ModelPath),
 		Rounds:            rounds,
 		Cache:             cache,
@@ -8407,7 +8612,7 @@ func cmdBenchmark(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := runOneShotBenchmark(port, model); err != nil {
+	if err := runOneShotBenchmark("", port, model); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -8475,9 +8680,9 @@ func requireBenchmarkServer(port int, timeout time.Duration) error {
 	return nil
 }
 
-func runOneShotBenchmark(port int, model string) error {
+func runOneShotBenchmark(host string, port int, model string) error {
 	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://localhost:%d", port),
+		BaseURL: fmt.Sprintf("http://%s:%d", server.ClientHost(host), port),
 		Model:   model,
 	}
 	res, err := runner.Run()
@@ -8489,9 +8694,9 @@ func runOneShotBenchmark(port int, model string) error {
 	return nil
 }
 
-func runOneShotWorkerBenchmark(port int, model string, peakVRAMMB int) error {
+func runOneShotWorkerBenchmark(host string, port int, model string, peakVRAMMB int) error {
 	runner := &benchmark.Runner{
-		BaseURL: fmt.Sprintf("http://localhost:%d", port),
+		BaseURL: fmt.Sprintf("http://%s:%d", server.ClientHost(host), port),
 		Model:   model,
 	}
 	throughput, err := runner.Run()
@@ -8962,7 +9167,7 @@ func suggestForkForArch(arch string, be *backendInfo) {
 	for _, r := range recipes {
 		fmt.Fprintf(os.Stderr, "[launch]   reviewed fork available: ggrun backend install %s   (%s)\n", r.Name, r.Description)
 	}
-	fmt.Fprintln(os.Stderr, "[launch] continuing anyway; if the model fails to load, install the fork above.")
+	fmt.Fprintln(os.Stderr, "[launch] continuing with the selected backend; to use the fork, install it and launch with --backend auto.")
 }
 
 func preflightIKOnlyArch(model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, configuredAppHome ...string) {

@@ -101,16 +101,24 @@ func cmdBackendRecipes() {
 }
 
 func cmdBackendInstall(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "install needs a recipe name; available recipes:")
+	err := installBackendRecipe(args)
+	if _, usage := err.(backendUsageError); usage {
+		fmt.Fprintln(os.Stderr, err)
 		cmdBackendRecipes()
 		os.Exit(2)
 	}
+	exitOnBackendError(err)
+}
+
+// installBackendRecipe clones, builds and registers a reviewed recipe,
+// returning the failure instead of exiting.
+func installBackendRecipe(args []string) error {
+	if len(args) == 0 {
+		return backendUsageError("install needs a recipe name; available recipes:")
+	}
 	recipe := backends.RecipeByName(args[0])
 	if recipe == nil {
-		fmt.Fprintf(os.Stderr, "unknown backend recipe %q; available recipes:\n", args[0])
-		cmdBackendRecipes()
-		os.Exit(2)
+		return backendUsageError(fmt.Sprintf("unknown backend recipe %q; available recipes:", args[0]))
 	}
 	generated := []string{
 		recipe.GitURL,
@@ -127,7 +135,7 @@ func cmdBackendInstall(args []string) {
 	}
 	// User build-only overrides such as --cuda-arch come last.
 	generated = append(generated, args[1:]...)
-	cmdBackendAddRecipe(generated, recipe)
+	return addBackendRecipe(generated, recipe)
 }
 
 func cmdBackendList() {
@@ -219,15 +227,37 @@ func cmdBackendAdd(args []string) {
 	cmdBackendAddRecipe(args, nil)
 }
 
+// cmdBackendAddRecipe is the `ggrun backend add/install` command: it reports
+// a failure and exits. Launch and TUI flows call addBackendRecipe instead so a
+// failed clone or build can fall back to the next option rather than end ggrun.
 func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
+	exitOnBackendError(addBackendRecipe(args, recipe))
+}
+
+// backendUsageError marks a malformed backend command (exit status 2).
+type backendUsageError string
+
+func (e backendUsageError) Error() string { return string(e) }
+
+func exitOnBackendError(err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintln(os.Stderr, err)
+	if _, usage := err.(backendUsageError); usage {
+		backendUsage()
+		os.Exit(2)
+	}
+	os.Exit(1)
+}
+
+func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 	url, f := parseBackendFlags(args)
 	if url == "" {
 		url = f["url"]
 	}
 	if url == "" {
-		fmt.Fprintln(os.Stderr, "add needs a git URL")
-		backendUsage()
-		os.Exit(2)
+		return backendUsageError("add needs a git URL")
 	}
 	branch := f["branch"]
 	commit := f["commit"]
@@ -243,15 +273,12 @@ func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 	// Clone into .src/fork-<repo>-<branch> so it never clobbers the mainline checkout.
 	srcDir := backends.IsolatedForkSourceDir(backends.AppHome(), url, branch, f["checkout-name"])
 	if !backends.IsIsolatedForkSourceDir(srcDir) {
-		fmt.Fprintf(os.Stderr, "refusing to install a fork into %s; that path is not an isolated .src/fork-* checkout\n", srcDir)
-		os.Exit(1)
+		return fmt.Errorf("refusing to install a fork into %s; that path is not an isolated .src/fork-* checkout", srcDir)
 	}
 	if same, err := sameFilesystemPath(srcDir, backends.MainlineSourceDir("")); err != nil {
-		fmt.Fprintf(os.Stderr, "could not compare fork path with mainline llama.cpp: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("could not compare fork path with mainline llama.cpp: %v", err)
 	} else if same {
-		fmt.Fprintf(os.Stderr, "refusing to install a PR/fork over the mainline llama.cpp checkout %s\n", srcDir)
-		os.Exit(1)
+		return fmt.Errorf("refusing to install a PR/fork over the mainline llama.cpp checkout %s", srcDir)
 	}
 	if _, err := os.Stat(filepath.Join(srcDir, ".git")); err != nil {
 		fmt.Printf("[backend] cloning %s%s → %s (separate fork; mainline llama.cpp is not modified)\n", url, branchNote(branch), srcDir)
@@ -261,26 +288,22 @@ func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 		}
 		cloneArgs = append(cloneArgs, url, srcDir)
 		if err := runStreamed("", "git", cloneArgs...); err != nil {
-			fmt.Fprintf(os.Stderr, "clone failed: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("clone failed: %v", err)
 		}
 	} else {
 		fmt.Printf("[backend] reusing existing checkout %s\n", srcDir)
 	}
 	if err := prepareForkCheckoutRecipe(srcDir, branch, commit, recipe); err != nil {
-		fmt.Fprintf(os.Stderr, "source checkout failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("source checkout failed: %v", err)
 	}
 
 	fmt.Printf("[backend] building (%s)… this can take 30–60 min\n", accel)
 	bin, err := buildLlamaFork(srcDir, accel, f["cuda-arch"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "build failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("build failed: %v", err)
 	}
 	if err := validateBackendCandidate(bin, f["route-arch"], accel); err != nil {
-		fmt.Fprintf(os.Stderr, "backend conformance failed; refusing registration: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("backend conformance failed; refusing registration: %v", err)
 	}
 	if arch := strings.TrimSpace(f["route-arch"]); arch != "" {
 		fmt.Printf("[backend] verified architecture %q in the new fork binary\n", arch)
@@ -292,8 +315,7 @@ func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 		be.AppliedPatches = recipe.PatchNames()
 	}
 	if err := backends.Upsert(be); err != nil {
-		fmt.Fprintf(os.Stderr, "register failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("register failed: %v", err)
 	}
 	// Symlink into .bin so it also shows up in the normal backend search paths.
 	link := filepath.Join(backends.AppHome(), ".bin", tag+"-server-"+accel)
@@ -307,6 +329,7 @@ func cmdBackendAddRecipe(args []string, recipe *backends.Recipe) {
 	} else if be.RouteArch != "" {
 		fmt.Printf("Architecture %q verified for helper use; main-model auto-routing remains unchanged.\n", be.RouteArch)
 	}
+	return nil
 }
 
 // prepareForkCheckout updates a ggrun-owned fork checkout without trampling

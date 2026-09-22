@@ -756,6 +756,10 @@ func classifyAdvisorFailure(cause error) string {
 		strings.Contains(message, "access denied"):
 		return "permission_denied"
 	case strings.Contains(message, "requires systemd-run") ||
+		// The containment refusal is ggrun-authored and stable. Matching it
+		// explicitly keeps a root/container launch out of unclassified_launch_failure,
+		// which is where a raw systemd-run dbus error used to land (issue #64).
+		strings.Contains(message, "backend memory containment unavailable") ||
 		(strings.Contains(message, "cgroup") &&
 			(strings.Contains(message, "containment") || strings.Contains(message, "memory") || strings.Contains(message, "limit"))):
 		return "memory_cgroup_limit"

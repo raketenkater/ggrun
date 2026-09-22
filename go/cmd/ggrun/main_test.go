@@ -2365,6 +2365,11 @@ func TestBackendUnavailableReasonNovelArchNamesMainline(t *testing.T) {
 	if !strings.Contains(message, "search open llama.cpp PRs") || !strings.Contains(message, "fork") {
 		t.Fatalf("novel-arch message does not offer a fork search: %q", message)
 	}
+	// A headless run gets no prompt, so the message must say how to get one or
+	// how to accept without one; "ggrun can search" named no way to do either.
+	if !strings.Contains(message, "terminal") || !strings.Contains(message, "LLM_ASSUME_YES") {
+		t.Fatalf("novel-arch message gives a headless user no way to proceed: %q", message)
+	}
 }
 
 // TestBackendUnavailableReasonRecipeArchKeepsRecipeHint guards that an arch with
@@ -4609,5 +4614,124 @@ func TestClaudeReviewerAutoRequiresClaudeCodeLikeOtherValues(t *testing.T) {
 		if !strings.Contains(err.Error(), "--claude-code") {
 			t.Errorf("--claude-reviewer %s failed with %v, want the --claude-code gate", value, err)
 		}
+	}
+}
+
+// --inventory lets a dry-run plan for a machine other than the one running
+// ggrun, or for this one while another process holds its VRAM. The flag is
+// planning-only: it must be parsed but must never be usable to launch, because
+// invariant 4 makes exact-argv admission against present hardware the authority.
+func TestParseLaunchArgsRetainsInventoryForPlanning(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--inventory", "/tmp/box.json"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.InventoryPath != "/tmp/box.json" {
+		t.Fatalf("--inventory was not retained: %q", req.InventoryPath)
+	}
+}
+
+// A missing value must be an error, not a silently empty path that would fall
+// back to planning against the live machine.
+func TestParseLaunchArgsInventoryNeedsAValue(t *testing.T) {
+	isolateConfig(t)
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--inventory"}); err == nil {
+		t.Fatal("--inventory with no value was accepted")
+	}
+}
+
+// The flag must not be swallowed by the "skip the next token" walk that handles
+// value-taking flags, or the path would be re-parsed as a positional argument.
+func TestInventoryValueIsNotTreatedAsAPositionalArg(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--inventory", "/tmp/box.json"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.ModelPath != "model.gguf" {
+		t.Fatalf("the inventory path displaced the model path: %q", req.ModelPath)
+	}
+}
+
+// The `--flag=value` spelling never reaches the bare-token switch, and an
+// unhandled token falls through to ExtraArgs. Before this was handled, an
+// `--inventory=/path` was silently swallowed: the plan ran against the LIVE
+// machine while the user believed they had modelled another, and the literal
+// token was handed to the backend.
+func TestInventoryEqualsFormIsParsedNotSwallowed(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--inventory=/tmp/box.json", "--swa-full"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.InventoryPath != "/tmp/box.json" {
+		t.Fatalf("--inventory=path was not parsed: %q (ExtraArgs=%v)", req.InventoryPath, req.ExtraArgs)
+	}
+	for _, a := range req.ExtraArgs {
+		if a == "--inventory=/tmp/box.json" {
+			t.Fatal("--inventory=path leaked into ExtraArgs and would be sent to the backend")
+		}
+	}
+}
+
+// An empty value must fail closed. Accepting it would leave InventoryPath empty
+// and quietly plan against the live machine, which is the opposite of the
+// command's intent.
+func TestInventoryEmptyEqualsFormIsAnError(t *testing.T) {
+	isolateConfig(t)
+	if _, err := parseLaunchArgs([]string{"model.gguf", "--inventory="}); err == nil {
+		t.Fatal("--inventory= with no path was accepted; it would plan against the live machine")
+	}
+}
+
+// --ctx-checkpoints must produce exactly ONE value in the argv.
+//
+// It previously had no parse case, so the token fell through to ExtraArgs and
+// the emitted argv carried the coordinate twice: ggrun's derived value and the
+// user's. llama.cpp keeps the last, so the override appeared to work — but two
+// values for one coordinate is the partial overlay invariant 2 forbids, and it
+// makes "diff the final full argv" comparisons ambiguous.
+func TestCtxCheckpointsOverrideReplacesTheDerivedValue(t *testing.T) {
+	isolateConfig(t)
+
+	// Both spellings must parse into the request rather than ExtraArgs.
+	for _, form := range [][]string{
+		{"model.gguf", "--ctx-checkpoints", "32"},
+		{"model.gguf", "--ctx-checkpoints=32"},
+		{"model.gguf", "-ctxcp", "32"},
+	} {
+		req, err := parseLaunchArgs(form)
+		if err != nil {
+			t.Fatalf("%v: parse: %v", form, err)
+		}
+		if !req.MaxCheckpointsSet || req.MaxCheckpoints != 32 {
+			t.Errorf("%v did not set the override: set=%v value=%d",
+				form, req.MaxCheckpointsSet, req.MaxCheckpoints)
+		}
+		for _, a := range req.ExtraArgs {
+			if strings.HasPrefix(a, "--ctx-checkpoints") || strings.HasPrefix(a, "-ctxcp") {
+				t.Errorf("%v leaked the flag into ExtraArgs: %q — it would be "+
+					"appended to the derived value and emitted twice", form, a)
+			}
+		}
+	}
+}
+
+// An explicit 0 is a real decision (disable checkpoints), not "unset", so the
+// setter needs its own bool. Without it a 0 override would be indistinguishable
+// from the zero value and silently ignored.
+func TestCtxCheckpointsZeroIsAnExplicitOverride(t *testing.T) {
+	isolateConfig(t)
+	req, err := parseLaunchArgs([]string{"model.gguf", "--ctx-checkpoints", "0"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !req.MaxCheckpointsSet {
+		t.Error("--ctx-checkpoints 0 was treated as unset; the user asked to " +
+			"disable checkpoints and would silently get the derived cap instead")
+	}
+	if req.MaxCheckpoints != 0 {
+		t.Errorf("value = %d, want 0", req.MaxCheckpoints)
 	}
 }

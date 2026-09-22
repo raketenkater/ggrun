@@ -27,16 +27,22 @@ INSTALL_MODE="${LLM_SETUP_MODE:-${LLM_INSTALL_MODE:-auto}}"
 BACKEND="${LLM_SETUP_BACKEND:-${LLM_INSTALL_BACKEND:-auto}}"
 INSTALL_REF="${LLM_SETUP_REF:-${LLM_INSTALL_REF:-main}}"
 SOURCE_REPO_DIR=""
-if [[ ! -d "$ROOT/.git" ]]; then
+# Linked worktrees have a .git file and must still build the local checkout.
+if [[ ! -e "$ROOT/.git" ]]; then
     SOURCE_REPO_DIR="$APP_SRC/ggrun"
 fi
 PY_DEPS="${LLM_SETUP_PY_DEPS:-${LLM_INSTALL_PY_DEPS:-auto}}"
 DEPS="${LLM_SETUP_DEPS:-${LLM_INSTALL_DEPS:-auto}}"
 NONINTERACTIVE="${LLM_SETUP_NONINTERACTIVE:-${LLM_INSTALL_NONINTERACTIVE:-0}}"
+# /dev/tty can exist and be readable even when this process has no console.
+if ! ( : </dev/tty ) 2>/dev/null; then
+    NONINTERACTIVE=1
+fi
 LOG_TS="$(date +%Y%m%d-%H%M%S)"
 
 say() { printf '%s\n' "$*"; }
 err() { printf 'Error: %s\n' "$*" >&2; }
+warn() { printf 'Warning: %s\n' "$*" >&2; }
 
 case "$PLATFORM" in
     linux|mac) ;;
@@ -333,7 +339,7 @@ if (( GUIDE_DOWNLOAD_MODEL )); then
     repo="$(read_tty "Hugging Face repo to download (empty skips)" "$first_repo")"
     if [[ -n "$repo" ]]; then
         say "Downloading $repo …"
-        if LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" download "$repo"; then
+        if LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" download "$repo" </dev/tty; then
             say "  Model download finished"
         else
             warn "Download failed. You can retry: $APP_HOME/ggrun download $repo"
@@ -383,7 +389,7 @@ say "  \"$APP_HOME/ggrun\" detect"
 say "  \"$APP_HOME/ggrun\" <repo/name> --download"
 say "  \"$APP_HOME/ggrun\" \"$APP_MODELS/your-model.gguf\""
 say ""
-if [[ -n "$SOURCE_REPO_DIR" ]]; then
+if [[ -n "$SOURCE_REPO_DIR" && -d "$SOURCE_REPO_DIR/.git" ]]; then
     say "Source:    $SOURCE_REPO_DIR"
 fi
 say "Internals: $APP_BIN, $APP_CACHE, $APP_SRC"
