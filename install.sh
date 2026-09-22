@@ -242,6 +242,20 @@ if (( ! DISCOVER_ONLY )); then
     fi
 fi
 
+# clone_source_ref makes a shallow checkout of a branch, tag or commit.
+# `git clone --branch` accepts only branch and tag names, so a pinned commit
+# (LLM_SETUP_REF=<sha>, as CI and exact-candidate installs use) failed silently
+# and left no checkout behind while the summary still reported one.
+clone_source_ref() {
+    local url="$1" ref="$2" dir="$3"
+    git clone --depth=1 --branch "$ref" "$url" "$dir" >/dev/null 2>&1 && return 0
+    rm -rf "$dir"
+    git init -q "$dir" >/dev/null 2>&1 &&
+        git -C "$dir" remote add origin "$url" >/dev/null 2>&1 &&
+        git -C "$dir" fetch -q --depth=1 origin "$ref" >/dev/null 2>&1 &&
+        git -C "$dir" checkout -q FETCH_HEAD >/dev/null 2>&1
+}
+
 prepare_persistent_source_repo() {
     [[ -n "$SOURCE_REPO_DIR" ]] || return 1
     command -v git >/dev/null || { warn "git required to keep a source checkout for updates"; return 1; }
@@ -260,7 +274,11 @@ prepare_persistent_source_repo() {
     else
         mkdir -p "$(dirname "$SOURCE_REPO_DIR")"
         say "── Cloning ggrun source for future updates: $SOURCE_REPO_DIR ($SOURCE_REF) ──"
-        git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SOURCE_REPO_DIR" >/dev/null 2>&1 || return 1
+        if ! clone_source_ref "$REPO_URL" "$SOURCE_REF" "$SOURCE_REPO_DIR"; then
+            rm -rf "$SOURCE_REPO_DIR"
+            warn "could not keep a source checkout of $SOURCE_REF; this install continues without one"
+            return 1
+        fi
         ok "Source checkout ready at $SOURCE_REPO_DIR"
     fi
     SRC_DIR="$SOURCE_REPO_DIR"

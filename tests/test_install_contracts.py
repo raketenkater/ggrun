@@ -18,6 +18,34 @@ def function(path, name):
 
 
 class InstallContracts(unittest.TestCase):
+    def test_source_checkout_accepts_a_pinned_commit(self):
+        # `git clone --branch` rejects a commit id, so LLM_SETUP_REF=<sha> (CI and
+        # exact-candidate installs) kept no source checkout while the summary
+        # still printed one.
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        with tempfile.TemporaryDirectory() as tmp:
+            work, bare = Path(tmp) / "work", Path(tmp) / "origin.git"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+            subprocess.run(git + ["-C", str(work), "commit", "-q", "--allow-empty", "-m", "one"], check=True)
+            pinned = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"], check=True,
+                                    capture_output=True, text=True).stdout.strip()
+            subprocess.run(git + ["-C", str(work), "commit", "-q", "--allow-empty", "-m", "two"], check=True)
+            subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+            script = function("install.sh", "clone_source_ref")
+            for ref, want in ((pinned, pinned), ("main", None)):
+                with self.subTest(ref=ref):
+                    dest = Path(tmp) / ("co-" + ref[:7])
+                    subprocess.run(["bash", "-eu", "-c", script + f'\nclone_source_ref "file://{bare}" "{ref}" "{dest}"\n'],
+                                   check=True)
+                    head = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], check=True,
+                                          capture_output=True, text=True).stdout.strip()
+                    if want:
+                        self.assertEqual(head, want)
+            missing = Path(tmp) / "co-missing"
+            result = subprocess.run(["bash", "-eu", "-c", script +
+                                     f'\nclone_source_ref "file://{bare}" "{"0" * 40}" "{missing}"\n'])
+            self.assertNotEqual(result.returncode, 0)
+
     def test_release_does_not_rebuild_checked_launcher(self):
         script = function("install.sh", "install_ggrun_from_source")
         script += "\nensure_source_repo() { echo unexpected-source-build; exit 99; }\n"

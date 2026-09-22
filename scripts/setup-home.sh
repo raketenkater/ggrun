@@ -389,7 +389,7 @@ say "  \"$APP_HOME/ggrun\" detect"
 say "  \"$APP_HOME/ggrun\" <repo/name> --download"
 say "  \"$APP_HOME/ggrun\" \"$APP_MODELS/your-model.gguf\""
 say ""
-if [[ -n "$SOURCE_REPO_DIR" ]]; then
+if [[ -n "$SOURCE_REPO_DIR" && -d "$SOURCE_REPO_DIR/.git" ]]; then
     say "Source:    $SOURCE_REPO_DIR"
 fi
 say "Internals: $APP_BIN, $APP_CACHE, $APP_SRC"
