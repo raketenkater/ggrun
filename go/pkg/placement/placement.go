@@ -370,8 +370,12 @@ type ModelProfile struct {
 	ExpertSharedCount         int                   `json:"expert_shared_count,omitempty"`
 	ExpertSharedCountInferred bool                  `json:"expert_shared_count_inferred,omitempty"`
 	LeadingDense              int                   `json:"leading_dense,omitempty"`
-	LeadingDenseInferred      bool                  `json:"leading_dense_inferred,omitempty"`
-	NextNPredictLayers        int                   `json:"nextn_predict_layers,omitempty"`
+	// KVLoops is how many times a looped transformer runs its physical blocks
+	// per token (GGUF <arch>.num_loops). Each pass keeps its own KV cache, so the
+	// cache scales with it while layer placement still counts physical blocks.
+	KVLoops              int  `json:"kv_loops,omitempty"`
+	LeadingDenseInferred bool `json:"leading_dense_inferred,omitempty"`
+	NextNPredictLayers   int  `json:"nextn_predict_layers,omitempty"`
 }
 
 // GPULedgerEntry is one card's expert-placement arithmetic.
@@ -4564,6 +4568,13 @@ func computeKVTotalMB(model *ModelProfile, ctxSize int, kvType string, swaFull b
 		// Standard GQA/MQA
 		kvBytesPerLayerPerToken := model.HeadCountKV * (model.KeyLength + model.ValueLength)
 		kvElemsTotal = model.NumLayers * ctxSize * kvBytesPerLayerPerToken
+	}
+
+	// Nanbeige4.2 (num_loops 2) allocated 23,936 MiB of KV at 262k context
+	// where this formula, counting the 22 physical blocks once, planned half;
+	// the fail-closed guard refused a launch no derating could fix.
+	if model.KVLoops > 1 {
+		kvElemsTotal *= model.KVLoops
 	}
 
 	bytesPerElem, ok := kvTypeBytesPerElement(kvType)

@@ -9384,6 +9384,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		ExpertSharedCount:         info.ExpertSharedCount,
 		ExpertSharedCountInferred: info.ExpertSharedCountInferred != 0,
 		LeadingDense:              info.LeadingDense,
+		KVLoops:                   info.KVLoops,
 		LeadingDenseInferred:      info.LeadingDenseInferred != 0,
 		RopeDim:                   info.NRot,
 		HasSSM:                    info.SSM,
