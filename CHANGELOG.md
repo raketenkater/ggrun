@@ -4,16 +4,30 @@
 
 ## v3.2.10 — 2026-09-23
 
-- Automatic backend installs: CUDA builds for Vulkan-only architectures,
-  discovered PR forks, and build offers for unsupported architectures.
-- Backends on current llama.cpp use `--load-mode`.
-- Stuck or crashed backends are stopped during launch verification.
-- Relaunch after large models; Vulkan device order; Windows architecture probe.
-- Recommendations rank by speed again.
-- The TUI default launch matches the CLI default.
-- The optimizer no longer repeats a search that cannot finish.
-- KV planning for looped transformers; recovery convergence fixes.
-- Root `--ai-tune` tested in CI (#64).
+### Added
+
+- Automatic backend provisioning: CUDA builds for architectures supported only
+  by the Vulkan backend, installation of discovered llama.cpp pull-request
+  forks, and build offers for architectures no installed backend supports.
+- Backend health monitoring during launch verification.
+- CI coverage for `--ai-tune` when running as root (#64).
+
+### Changed
+
+- The TUI default launch now uses the same configuration as the CLI default.
+- Optimizer results are retained when a profile cannot verify cache reuse, and
+  retries of an incomplete measurement are bounded.
+
+### Fixed
+
+- Compatibility with backends that use `--load-mode` instead of the mmap flags.
+- Relaunch reliability after large models.
+- Vulkan device ordering and Windows architecture detection.
+- Speed estimates in model recommendations.
+- KV cache planning for looped transformer models.
+- Convergence of memory recovery re-planning.
+
+### Other changes
 
 - **Agent transport hardening now fails early and records truthful phases.**
   Workflow calls with competing `name`, `script`, or `scriptPath` sources are
