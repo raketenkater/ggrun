@@ -690,6 +690,43 @@ func automaticCalibrationAdmissionEvidenceValid(decision *placement.CalibrationD
 		decision.FinalistFailureReason != ""
 }
 
+// errCalibrationBudgetExhausted marks a measurement cut off by the
+// controller's elapsed-time budget rather than by the candidate itself.
+var errCalibrationBudgetExhausted = errors.New("calibration elapsed-time budget exhausted")
+
+// markFinalistUnmeasured records a budget-bound finalist, counting attempts
+// across launches for the same finalist so the retry is bounded.
+func markFinalistUnmeasured(pending, prev *placement.CalibrationDecision) {
+	pending.Winner = "default"
+	pending.FinalistOutcome = placement.FinalistOutcomeUnmeasured
+	pending.FinalistFailureClass = "elapsed-budget"
+	pending.FinalistFailureReason = "the finalist could not be measured within the calibration elapsed-time budget"
+	pending.FinalistAttempts = 1
+	if prev != nil && prev.Finalist == pending.Finalist && prev.FinalistOutcome == placement.FinalistOutcomeUnmeasured {
+		pending.FinalistAttempts = prev.FinalistAttempts + 1
+	}
+}
+
+func unmeasuredFinalistEvidenceValid(decision *placement.CalibrationDecision) bool {
+	return decision != nil && decision.Winner == "default" && decision.Finalist != "" &&
+		decision.FinalistOutcome == placement.FinalistOutcomeUnmeasured && decision.FinalistAttempts > 0
+}
+
+// degradedBaselinePersistable reports whether a pending automatic decision may
+// be kept although the served profile is degraded rather than active. Only a
+// baseline winner qualifies, and only on a profile that answered the functional
+// canary: nothing new is promoted, so the unprovable cache gate does not
+// matter, while throwing the decision away makes every launch repeat the same
+// search (invariant 10). A challenger winner still needs the full gates.
+func degradedBaselinePersistable(mode string, decision *placement.CalibrationDecision, functional bool) bool {
+	if mode != calibrateAuto || !functional || decision == nil || decision.Winner != "default" {
+		return false
+	}
+	return automaticCalibrationEvidenceValid(decision) ||
+		automaticCalibrationAdmissionEvidenceValid(decision) ||
+		unmeasuredFinalistEvidenceValid(decision)
+}
+
 func exactAdmissionFailureEvidence(err error) (string, string) {
 	var failure *exactAdmissionFailure
 	if !errors.As(err, &failure) || failure == nil {
@@ -885,7 +922,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	bench := func(active *placement.Strategy, activeProcess *server.Process) (*benchmark.Result, error) {
 		remaining := budget.MaxElapsed - time.Since(startedAt)
 		if remaining <= 3*time.Second {
-			return nil, fmt.Errorf("calibration elapsed-time budget exhausted")
+			return nil, errCalibrationBudgetExhausted
 		}
 		// Bound each request by a fraction of the remaining controller budget. The
 		// agent runner issues several requests concurrently, so this is deliberately
@@ -977,11 +1014,13 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	stableFailureReason := ""
 	admissionInconclusive := false
 	exactCandidateStarted := false
+	budgetExhausted := false
 	for _, cand := range candidates[1:] {
 		remaining := budget.MaxElapsed - time.Since(startedAt)
 		if remaining <= 3*time.Second {
 			fmt.Fprintln(os.Stderr, "[calibrate] elapsed-time budget reached; stopping candidate search")
 			admissionInconclusive = true
+			budgetExhausted = true
 			break
 		}
 		candArgs := buildLaunchServerArgs(req, cfg, be, caps, model, cand.Strategy)
@@ -1066,6 +1105,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if berr != nil {
 			fmt.Fprintf(os.Stderr, "[calibrate] %s measurement failed (%v); skipping\n", cand.Name, berr)
 			admissionInconclusive = true
+			if errors.Is(berr, errCalibrationBudgetExhausted) {
+				budgetExhausted = true
+			}
 			if !stopCalibrationProcessAndWait(cp, cand.Name+" after failed measurement", resourceBaseline, 30*time.Second) {
 				req.CalibrationScreened = true
 				return cp, measuredStrategy, measuredArgs, nil
@@ -1112,6 +1154,21 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		}
 		if curP == nil {
 			return nil, strategy, serverArgs, nil
+		}
+		// A finalist that could not be measured within the elapsed budget is
+		// not negative evidence, but the next launch repeats the identical
+		// budget-bound search. Record the attempt so the retry is bounded; the
+		// decision never names a winner other than the measured baseline.
+		if budgetExhausted && !stableAdmissionFailed && mode == calibrateAuto {
+			pending := newCalibrationDecision(scopeKey, model, defaultResult, measurements[0])
+			annotateOptimizationDecision(pending, candidates, measurements)
+			if pending != nil {
+				prev, _ := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
+				markFinalistUnmeasured(pending, prev)
+				fmt.Printf("[optimize] finalist %s was not measured within the time budget (attempt %d of %d); serving the measured baseline\n",
+					pending.Finalist, pending.FinalistAttempts, placement.MaxUnmeasuredFinalistAttempts)
+				return curP, strategy, serverArgs, pending
+			}
 		}
 		// Only exact admission failures are stable negative evidence. A candidate
 		// that started but whose benchmark timed out or returned incomplete data

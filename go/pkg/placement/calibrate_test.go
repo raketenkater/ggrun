@@ -563,3 +563,38 @@ func TestDeleteCalibrationDecisionsForModel(t *testing.T) {
 		t.Fatalf("other model calibration decision was removed: %v", err)
 	}
 }
+
+// MiniMax-M3 on the reference rig: the calculated finalist loaded but its
+// workload never finished inside the 20-minute budget, so no decision was kept
+// and every launch repeated the same search, ending on the same baseline.
+// Bounded evidence must stop that loop without ever becoming a winner.
+func TestBaselineBoundedSuppressesOnlyTheSameExhaustedFinalist(t *testing.T) {
+	d := &CalibrationDecision{
+		Winner: "default", ValidationLevel: CalibrationValidationBaselineBounded,
+		Finalist: "ubatch-2048", FinalistOutcome: FinalistOutcomeUnmeasured, FinalistAttempts: 1,
+		FinalistFailureClass: "elapsed-budget", FinalistFailureReason: "not measured within budget",
+	}
+	if d.AutomaticEligible() {
+		t.Fatal("bounded baseline evidence became automatic performance evidence")
+	}
+	if d.SuppressesAutomaticAdmissionRetry("ubatch-2048") {
+		t.Fatal("the first budget-bound attempt was not retried")
+	}
+	d.FinalistAttempts = MaxUnmeasuredFinalistAttempts
+	if !d.SuppressesAutomaticAdmissionRetry("ubatch-2048") {
+		t.Fatal("a repeatedly budget-bound finalist is still searched on every launch")
+	}
+	if d.SuppressesAutomaticAdmissionRetry("parallel-2") {
+		t.Fatal("one exhausted finalist suppressed a different candidate")
+	}
+	lost := &CalibrationDecision{Winner: "default", ValidationLevel: CalibrationValidationBaselineBounded,
+		Finalist: "batch-8192-ubatch-2048", FinalistOutcome: "baseline-won"}
+	if !lost.SuppressesAutomaticAdmissionRetry("batch-8192-ubatch-2048") {
+		t.Fatal("a measured finalist that lost is re-measured on every launch")
+	}
+	promoted := &CalibrationDecision{Winner: "ubatch-2048", ValidationLevel: CalibrationValidationBaselineBounded,
+		Finalist: "ubatch-2048", FinalistOutcome: "promoted"}
+	if promoted.SuppressesAutomaticAdmissionRetry("ubatch-2048") {
+		t.Fatal("bounded evidence carried a challenger winner")
+	}
+}

@@ -809,3 +809,77 @@ func TestMeasuredReplanCannotUndoProvenExpertRelief(t *testing.T) {
 		t.Fatal("a nil recompute was treated as undoing relief")
 	}
 }
+
+// Nanbeige4.2 (2026-09-23): each 1,024-token step freed ~95 MiB against a
+// ~950 MiB CUDA1 deficit, so five re-plans could never converge and a 3B model
+// failed closed. A priced cut on a majority-KV device beyond what granule steps
+// can cover takes the priced step, capped at a quarter of the context: the
+// uncapped deficit-sized step was reverted after it leapt GLM-5.3-Flash from
+// 662,528 to 236,544 tokens.
+func TestPricedContextStepCoversWhatGranuleStepsCannot(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	nanbeige := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0"}
+	recovery.rejectContext(nanbeige, 12800)
+	recovery.notePricedContextStep(nanbeige, 12800)
+	if got := recovery.automaticContextCeiling(); got != 262144-12800 {
+		t.Fatalf("ceiling %d, want the priced cut to %d", got, 262144-12800)
+	}
+	gentle := newLaunchMemoryRecovery()
+	gentle.rejectContext(nanbeige, 0)
+	gentle.notePricedContextStep(nanbeige, 4*contextRecoveryGranuleTokens)
+	if got := gentle.automaticContextCeiling(); got != 262143 {
+		t.Fatalf("a cut granule steps can cover moved the ceiling to %d", got)
+	}
+	glm := newLaunchMemoryRecovery()
+	leap := &placement.Strategy{ContextSize: 662528, ContextAuto: true, KVType: "q8_0"}
+	glm.rejectContext(leap, 426000)
+	glm.notePricedContextStep(leap, 426000)
+	if got := glm.automaticContextCeiling(); got < 662528-662528/contextRecoveryStepDivisor || got >= 662528 {
+		t.Fatalf("ceiling %d: the priced step must be capped at a quarter, never the reverted leap", got)
+	}
+}
+
+// A deficit on a small-share device prices to a large global cut; it must not
+// drive the priced step, while the same deficit on the majority device may.
+func TestPricedStepIgnoresMinorityDeviceDeficits(t *testing.T) {
+	model := &placement.ModelProfile{NumLayers: 48, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	args := []string{"llama-server", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	strategy := &placement.Strategy{
+		ContextSize: 262144, ContextAuto: true, KVType: "q8_0", KVPlacement: "gpu",
+		TensorSplit: []float64{0.12, 0.76, 0.12},
+	}
+	if got := majorityDevicePricedTokens(model, strategy, args, 900, 2); got != 0 {
+		t.Fatalf("minority-device deficit priced a global cut of %d tokens", got)
+	}
+	if got := majorityDevicePricedTokens(model, strategy, args, 900, 1); got <= 0 {
+		t.Fatal("majority-device deficit was not priced")
+	}
+}
+
+// Nanbeige4.2 (2026-09-23): a ubatch derate to 128 fitted, but the re-plan was
+// handed 128 as a mere default and Compute's own ladder returned 512; every
+// round failed, derated and repeated, and the context crept one granule below
+// the context that had just fitted. The proven ubatch must bind Compute, and
+// an accepted context supersedes a rejection made at a larger ubatch.
+func TestReplanKeepsTheProvenUBatchAndAcceptedContext(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	atLarge := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0", UBatchSize: 256}
+	recovery.rejectContext(atLarge, 0)
+	atSmall := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0", UBatchSize: 128}
+	recovery.acceptContext(atSmall)
+	opts := boundByProvenLimits(placement.Options{UBatchSize: 512}, recovery)
+	if opts.UBatchSize != 128 || !opts.UBatchSizeExplicit {
+		t.Fatalf("proven ubatch not binding: ub=%d explicit=%v", opts.UBatchSize, opts.UBatchSizeExplicit)
+	}
+	if opts.AutoContextMax != 262144 {
+		t.Fatalf("ceiling %d, want the accepted 262144 once its rejection was at a larger ubatch", opts.AutoContextMax)
+	}
+	// A rejection below the accepted context still binds.
+	lower := &placement.Strategy{ContextSize: 131072, ContextAuto: true, KVType: "q8_0", UBatchSize: 128}
+	fresh := newLaunchMemoryRecovery()
+	fresh.acceptContext(&placement.Strategy{ContextSize: 65536, ContextAuto: true, UBatchSize: 128})
+	fresh.rejectContext(lower, 0)
+	if got := fresh.automaticContextCeiling(); got != 65536 {
+		t.Fatalf("ceiling %d, want the accepted 65536 below the rejection", got)
+	}
+}

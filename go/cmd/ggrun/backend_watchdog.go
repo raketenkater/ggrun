@@ -160,15 +160,22 @@ func (w processWatch) CPUTicks() (uint64, bool) {
 	return processTreeCPUTicks(w.p.Cmd.Process.Pid)
 }
 
-// processTreeCPUTicks sums utime+stime over root and its descendants. The
-// launched pid is a scope wrapper; the backend is its child. Linux only.
+// procEntry is one /proc/<pid>/stat row reduced to what the watchdog needs.
+type procEntry struct {
+	ppid  int
+	comm  string
+	ticks uint64
+}
+
+// processTreeCPUTicks sums utime+stime of the backend processes under root.
+// The launched pid is a scope wrapper; the backend is its child. Linux only;
+// elsewhere ok=false and the watchdog never treats silence as a wedge.
 func processTreeCPUTicks(root int) (uint64, bool) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0, false
 	}
-	parent := map[int]int{}
-	ticks := map[int]uint64{}
+	procs := map[int]procEntry{}
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
@@ -180,8 +187,8 @@ func processTreeCPUTicks(root int) (uint64, bool) {
 		}
 		// The command name is parenthesised and may contain spaces.
 		stat := string(data)
-		end := strings.LastIndexByte(stat, ')')
-		if end < 0 {
+		start, end := strings.IndexByte(stat, '('), strings.LastIndexByte(stat, ')')
+		if start < 0 || end < start {
 			continue
 		}
 		fields := strings.Fields(stat[end+1:])
@@ -191,17 +198,29 @@ func processTreeCPUTicks(root int) (uint64, bool) {
 		ppid, _ := strconv.Atoi(fields[1])
 		utime, _ := strconv.ParseUint(fields[11], 10, 64)
 		stime, _ := strconv.ParseUint(fields[12], 10, 64)
-		parent[pid] = ppid
-		ticks[pid] = utime + stime
+		procs[pid] = procEntry{ppid: ppid, comm: stat[start+1 : end], ticks: utime + stime}
 	}
-	if _, ok := ticks[root]; !ok {
+	return backendTreeTicks(procs, root)
+}
+
+// Launch helpers that live as long as the backend. The memory-scope wrapper's
+// watcher subshell polls with `sleep 1` for the backend's whole life; its fork
+// ticks made a frozen backend (SIGSTOP, 10 minutes, live) look busy, so the
+// wedge rule never fired.
+var watchdogHelperComms = map[string]bool{"sh": true, "bash": true, "dash": true, "sleep": true, "setsid": true, "systemd-run": true}
+
+func backendTreeTicks(procs map[int]procEntry, root int) (uint64, bool) {
+	if _, ok := procs[root]; !ok {
 		return 0, false
 	}
 	var total uint64
-	for pid, t := range ticks {
-		for cur, hops := pid, 0; cur > 0 && hops < 64; cur, hops = parent[cur], hops+1 {
+	for pid, p := range procs {
+		if watchdogHelperComms[p.comm] {
+			continue
+		}
+		for cur, hops := pid, 0; cur > 0 && hops < 64; cur, hops = procs[cur].ppid, hops+1 {
 			if cur == root {
-				total += t
+				total += p.ticks
 				break
 			}
 		}

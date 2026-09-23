@@ -166,6 +166,21 @@ jobs:
       - name: Serve the downloaded model on whatever hardware exists
         run: python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" --model "$MODEL" --port 18843 --output evidence/downloaded
 
+      # Issue #64: `ggrun <model> --ai-tune` as root failed because root has no
+      # user session bus. Run the reporter's command as real root with no
+      # XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS. Last, because it leaves
+      # root-owned files in the install.
+      - name: AI tune as root without a user session (issue 64)
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/root-ai-tune.log"
+          sudo env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
+            timeout 1500 "$HOME/ggrun/ggrun" "$MODEL" --ai-tune --rounds 2 --port 18845 2>&1 | tee "$log"
+          grep -q "backend memory scope" "$log" || { echo "::error::no contained tune launch"; exit 1; }
+          if grep -qiE "user scope bus|XDG_RUNTIME_DIR" "$log"; then echo "::error::root still needs a user bus"; exit 1; fi
+          if pgrep -x llama-server; then echo "::error::tune left a backend running"; exit 1; fi
+          mkdir -p evidence && cp "$log" evidence/
+
       - name: Preserve install and serving evidence
         if: always()
         uses: actions/upload-artifact@v4

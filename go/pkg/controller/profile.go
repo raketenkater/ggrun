@@ -315,3 +315,25 @@ func cloneProfile(profile Profile) Profile {
 	}
 	return copy
 }
+
+// ReachedFunctional reports whether the profile for this exact argv answered
+// the functional canary, whatever its final state. A degraded profile serves
+// correctly but could not prove cache reuse; it is not active, yet a baseline
+// decision measured on it is still worth keeping. A rejected profile is not.
+func (s Store) ReachedFunctional(scope, argsHash string) bool {
+	record, err := s.Load(scope)
+	if err != nil {
+		return false
+	}
+	for _, p := range []*Profile{record.Active, record.Candidate} {
+		if p == nil || p.ArgsHash != argsHash || p.State == StateRejected {
+			continue
+		}
+		for _, e := range p.Events {
+			if e.State == StateFunctionalVerified {
+				return true
+			}
+		}
+	}
+	return false
+}

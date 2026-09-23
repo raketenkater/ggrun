@@ -5594,3 +5594,24 @@ func TestStrategyVRAMHeadroomMB(t *testing.T) {
 		t.Fatalf("DenseCPUOffload headroom = %d, want 0", h)
 	}
 }
+
+// Nanbeige4.2-3B (GGUF num_loops 2, 22 physical blocks) allocated 23,936 MiB of
+// q8_0 KV at 262,144 context on CUDA1 while the plan counted each block once;
+// the fail-closed guard then refused a launch no derating could repair. Every
+// loop keeps its own cache, so the estimate must scale with the loop count.
+func TestLoopedTransformerKVScalesWithLoops(t *testing.T) {
+	model := &ModelProfile{ModelArch: "nanbeige", NumLayers: 22, HeadCountKV: 8, KeyLength: 128, ValueLength: 128}
+	once := computeKVTotalMB(model, 262144, "q8_0", false)
+	model.KVLoops = 2
+	looped := computeKVTotalMB(model, 262144, "q8_0", false)
+	if looped != once*2 && looped != once*2+1 {
+		t.Fatalf("looped KV = %d MiB, want twice %d", looped, once)
+	}
+	if looped < 23000 || looped > 25000 {
+		t.Fatalf("looped KV = %d MiB, backend allocated 23,936 MiB", looped)
+	}
+	model.KVLoops = 1
+	if got := computeKVTotalMB(model, 262144, "q8_0", false); got != once {
+		t.Fatalf("a single loop changed the estimate: %d vs %d", got, once)
+	}
+}

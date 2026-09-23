@@ -55,6 +55,11 @@ type launchMemoryRecovery struct {
 	// The derate ladder then restarts from a lower rung every time and the
 	// replan budget runs out before it can converge.
 	derivedNCPUMoE int
+	// pricedContext is the lowest context a priced rejection asked for when
+	// one-granule steps could not cover its deficit within the whole re-plan
+	// budget. Nanbeige4.2 missed by ~950 MiB per round on CUDA1 while each
+	// 1,024-token step freed ~95 MiB, so five rounds could never converge.
+	pricedContext int
 	// outstrippedContext is the smallest automatic context rejected with a deficit
 	// that was priced and found larger than a single cut could cover. Those
 	// rounds get a bounded descent instead of the one-granule minimum, because
@@ -128,6 +133,27 @@ func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy, recla
 	_ = reclaimTokens // retained in the signature for the caller's measurement; see automaticContextCeiling
 	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
 		r.rejectedContext = strategy.ContextSize
+	}
+}
+
+// notePricedContextStep lets a rejection whose deficit sits on a device holding
+// at least an even share of the KV take a priced step when one-granule steps
+// could not cover it within the re-plan budget. The step never exceeds the
+// fraction the outstripped descent uses: an uncapped deficit-sized step once
+// leapt GLM-5.3-Flash from 662,528 to 236,544 tokens. Pass the result of
+// majorityDevicePricedTokens; 0 records nothing.
+func (r *launchMemoryRecovery) notePricedContextStep(strategy *placement.Strategy, reclaimTokens int) {
+	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
+		return
+	}
+	if reclaimTokens > maxPreflightReplans*contextRecoveryGranuleTokens {
+		step := reclaimTokens
+		if limit := strategy.ContextSize / contextRecoveryStepDivisor; step > limit {
+			step = limit
+		}
+		if candidate := strategy.ContextSize - step; r.pricedContext == 0 || candidate < r.pricedContext {
+			r.pricedContext = candidate
+		}
 	}
 }
 
@@ -244,9 +270,47 @@ func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Str
 	return tokens
 }
 
+// majorityDevicePricedTokens prices a deficit for notePricedContextStep, only
+// when the failing device holds at least an even share of the KV. A deficit on
+// a small-share device prices to a large global cut (every token frees little
+// there); moving layers off that device is the right lever, not shrinking
+// everyone's context.
+func majorityDevicePricedTokens(model *placement.ModelProfile, strategy *placement.Strategy, args []string, deficitMB, device int) int {
+	tokens := contextReclaimTokens(model, strategy, args, deficitMB, device)
+	if tokens <= 0 {
+		return 0
+	}
+	kvType := strategy.KVType
+	if kvType == "" {
+		kvType = effectiveMemoryArgValues(args)["cache-k"]
+	}
+	swaFull := hasArg(args, "--swa-full")
+	deviceKV := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType, strategy.KVPlacement, swaFull, strategy.TensorSplit, device)
+	totalKV := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, swaFull)
+	devices := 0
+	for _, share := range strategy.TensorSplit {
+		if share > 0 {
+			devices++
+		}
+	}
+	if devices <= 1 {
+		return tokens
+	}
+	if deviceKV <= 0 || totalKV <= 0 || deviceKV*devices < totalKV {
+		return 0
+	}
+	return tokens
+}
+
 // contextRecoveryStepDivisor bounds a single context recovery step to this
 // fraction of the current window.
 const contextRecoveryStepDivisor = 4
+
+// maxPreflightReplans bounds backend-measured re-plans in one launch.
+const maxPreflightReplans = 5
+
+// contextRecoveryGranuleTokens is the automatic context granule placement uses.
+const contextRecoveryGranuleTokens = 1024
 
 // contextRecoveryFloorTokens is the smallest window a context-based recovery may
 // leave. It matches the floor automaticContextRecoveryTarget already applies, so
@@ -297,7 +361,12 @@ func (r *launchMemoryRecovery) automaticContextCeiling() int {
 		return 0
 	}
 	ceiling := 0
-	if r.rejectedContext > 1 {
+	// A context accepted at or above the smallest rejected one was rejected at a
+	// larger ubatch that boundByProvenLimits now pins away, so the accepted plan
+	// is the fixed point. Excluding it made the re-plan creep one granule below
+	// a proven-fitting context every round (Nanbeige4.2, 2026-09-23).
+	rejectionSuperseded := r.acceptedContext > 0 && r.acceptedContext >= r.rejectedContext
+	if r.rejectedContext > 1 && !rejectionSuperseded {
 		// One token below, so placement.Compute's granule floor drops the rejected
 		// value. Widening this to a deficit-sized step was tried and reverted: it
 		// made GLM-5.3-Flash leap 662,528 -> 236,544 tokens in a single round, and
@@ -326,6 +395,18 @@ func (r *launchMemoryRecovery) automaticContextCeiling() int {
 			ceiling = candidate
 		}
 	}
+	if r.pricedContext > 0 {
+		candidate := r.pricedContext
+		if candidate < contextRecoveryFloorTokens {
+			candidate = contextRecoveryFloorTokens
+		}
+		if r.acceptedContext > 0 && candidate < r.acceptedContext {
+			candidate = r.acceptedContext
+		}
+		if ceiling == 0 || candidate < ceiling {
+			ceiling = candidate
+		}
+	}
 	if r.acceptedContext > 0 && (ceiling == 0 || r.acceptedContext < ceiling) {
 		ceiling = r.acceptedContext
 	}
@@ -346,6 +427,11 @@ func boundByProvenLimits(opts placement.Options, r *launchMemoryRecovery) placem
 	}
 	if r != nil && r.acceptedUBatch > 0 && (opts.UBatchSize <= 0 || r.acceptedUBatch < opts.UBatchSize) {
 		opts.UBatchSize = r.acceptedUBatch
+		// Without the explicit bit Compute treats the value as a default and
+		// runs its own ubatch ladder: Nanbeige4.2 was pinned to a proven 128 and
+		// every re-plan came back at 512, failed, derated and repeated until the
+		// budget ran out.
+		opts.UBatchSizeExplicit = true
 	}
 	return opts
 }

@@ -116,6 +116,11 @@ type Model struct {
 	claudeReviewer string
 	supportExpert  string
 	supportOnline  bool
+	// supportSet carries a replayed launch's explicit support choice. A normal
+	// launch leaves it false so cmdLaunch applies the saved setting exactly as
+	// the CLI does: sending the saved value as --no-support-online made it a
+	// user instruction and blocked online research on an escalated failure.
+	supportSet bool
 	// noCachedConfig derives this launch fresh, ignoring cached placement/probe
 	// measurements (--no-cached-config). Per-launch; never persisted.
 	noCachedConfig bool
@@ -980,6 +985,7 @@ func (m *Model) applyLaunchRequestFields(req *LaunchRequest) {
 		m.supportExpert = req.SupportExpert
 		m.supportOnline = req.SupportOnline
 	}
+	m.supportSet = req.SupportSet
 	m.noCachedConfig = req.NoCachedConfig
 	m.chatTemplate = req.ChatTemplate
 	m.resumeSession, m.resumeRun, m.resumeCached = req.ResumeSession, "", 0
@@ -1031,6 +1037,27 @@ func (m Model) effectiveBackend() string {
 		}
 	}
 	return m.backend
+}
+
+// requestBackend is the backend a launch asks for. With the default "auto"
+// setting a model's registered route is exactly what automatic selection picks,
+// so it stays a display value: sending it as --backend made the default TUI
+// launch an explicit backend choice, which the CLI default is not, and that
+// switches off route fallback, the reviewed-recipe and fork offers and the
+// CUDA-build offer. A configured global backend would override the route in
+// cmdLaunch, so there the route is still sent to keep a fork scoped to the
+// model that needs it.
+func (m Model) requestBackend() string {
+	if m.backendRouteBypass {
+		if fallback := strings.TrimSpace(m.backendRouteBypassBackend); fallback != "" {
+			return fallback
+		}
+	}
+	configured := strings.TrimSpace(m.backend)
+	if configured == "" || strings.EqualFold(configured, "auto") {
+		return configured
+	}
+	return m.effectiveBackend()
 }
 
 // openSelectedBackendInstall asks before the network clone/build. Confirming
@@ -3873,7 +3900,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		Parallel:      parallel,
 		ParallelSet:   parallelSet,
 		Vision:        m.vision,
-		Backend:       m.effectiveBackend(),
+		Backend:       m.requestBackend(),
 		TuneCache:     m.tunePath,
 		AITune:        m.aitune,
 		AITuneRounds:  m.aituneRounds,
@@ -3885,7 +3912,7 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		ClaudeReviewerOverride: m.claudeReviewer,
 		SupportExpert:          m.supportExpert,
 		SupportOnline:          m.supportOnline,
-		SupportSet:             true,
+		SupportSet:             m.supportSet,
 		NoCachedConfig:         m.noCachedConfig,
 		ChatTemplate:           m.chatTemplate,
 	}

@@ -175,3 +175,30 @@ func TestProcessTreeCPUTicksReadsThisProcess(t *testing.T) {
 		t.Error("a pid that does not exist must report unreadable")
 	}
 }
+
+// Live 2026-09-23: a backend frozen with SIGSTOP during verification was never
+// stopped because the scope wrapper's `sleep 1` watcher subshell kept adding
+// CPU ticks to the tree, so the watchdog read the backend as busy for 612 s.
+func TestFrozenBackendIsNotHiddenByHelperTicks(t *testing.T) {
+	tree := func(helperTicks, backendTicks uint64) map[int]procEntry {
+		return map[int]procEntry{
+			100: {ppid: 1, comm: "sh", ticks: 1}, // scope wrapper (launched pid)
+			101: {ppid: 100, comm: "ik_llama-server", ticks: backendTicks},
+			102: {ppid: 100, comm: "sh", ticks: helperTicks},    // parent watcher
+			103: {ppid: 102, comm: "sleep", ticks: helperTicks}, // its poll
+			900: {ppid: 1, comm: "unrelated", ticks: helperTicks},
+		}
+	}
+	before, ok1 := backendTreeTicks(tree(10, 5000), 100)
+	after, ok2 := backendTreeTicks(tree(40, 5000), 100)
+	if !ok1 || !ok2 || before != after {
+		t.Fatalf("helper polling reads as backend progress: %d -> %d", before, after)
+	}
+	working, _ := backendTreeTicks(tree(40, 5100), 100)
+	if working == after {
+		t.Fatal("a working backend's CPU no longer counts as progress")
+	}
+	if _, ok := backendTreeTicks(tree(1, 1), 4242); ok {
+		t.Fatal("a missing launch pid reported CPU evidence")
+	}
+}

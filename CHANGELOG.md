@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **Automatic backends reach serving.** On NVIDIA, an architecture only the
+  Vulkan build knows (MiMo-V2.6) gets an offer to build CUDA llama.cpp at the
+  same commit; a discovered PR fork (llama.cpp #28699) installs, serves and
+  relaunches. Backends on current llama.cpp get `--load-mode` instead of the
+  removed `--mmap/--no-mmap/--mlock`, keeping resident loading.
+- **Crashed or wedged backends are stopped** during launch verification (fatal
+  ggml line, exit, or no health and no CPU progress) instead of waiting out the
+  canary.
+- **Relaunch after a large model works.** Shutdown waits for the backend's
+  memory to be released, and the containment check waits for memory still
+  being returned.
+- **Vulkan:** devices are numbered in ggrun's order, so the split, `-ot` and
+  `--gpus` reach the intended cards; Vulkan allocation failures recover like
+  CUDA ones.
+- **Windows:** the architecture probe follows DLL imports; automatic selection
+  no longer rejects every model.
+- **Recommendations rank by speed again.** Parameter counts come from the model
+  name, quant sizes and GGUF geometry; the catalog stopped carrying them on
+  2026-09-10, which removed speed from ranking.
+- **The TUI default launch is the CLI default launch.** It no longer pins the
+  model's route as `--backend` or the saved support setting as a flag.
+- **Root:** `ggrun <model> --ai-tune` as root without a user session is tested
+  in CI (#64).
+
 - **Agent transport hardening now fails early and records truthful phases.**
   Workflow calls with competing `name`, `script`, or `scriptPath` sources are
   rejected instead of silently following tool precedence; materialized scripts

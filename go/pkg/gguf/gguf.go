@@ -54,6 +54,7 @@ type Info struct {
 	FullAttnInterval          int     `json:"full_interval"`                // full attention every N layers (hybrid SSM/SWA)
 	SlidingWindow             int     `json:"swa"`                          // sliding window size (0 = no SWA)
 	LeadingDense              int     `json:"leading_dense"`                // leading dense block count (MoE models)
+	KVLoops                   int     `json:"kv_loops"`                     // looped-transformer passes, each with its own KV (0/1 = none)
 	LeadingDenseInferred      int     `json:"leading_dense_inferred"`       // derived from tensor layout
 	ExpertSharedCount         int     `json:"expert_shared_count"`          // shared experts per routed layer
 	ExpertSharedCountInferred int     `json:"expert_shared_count_inferred"` // derived from tensor layout

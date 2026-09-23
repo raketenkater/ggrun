@@ -76,6 +76,10 @@ def _read_kv(f, r, kv_count):
         if vt == 4:  # uint32
             val = struct.unpack('<I', f.read(4))[0]
             if key.endswith('.block_count'): r['layers'] = val
+            # Looped transformers (Nanbeige4.2) run the physical blocks num_loops
+            # times and keep a KV cache per pass. The older loop_count spelling
+            # already reports the logical block count, so only num_loops scales KV.
+            if key.endswith('.num_loops'): r['kv_loops'] = val
             if 'expert_count' in key and 'used' not in key: r['experts'] = val
             if key.endswith('.expert_used_count'): r['exp_used'] = val
             if 'head_count_kv' in key: r['hkv'] = val

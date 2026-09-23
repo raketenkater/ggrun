@@ -4698,7 +4698,6 @@ func backendMeasuredRecomputeWorthVerifying(level memoryEvidenceLevel, current, 
 
 func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery, restoreExempt bool, exactAdmission bool) (launchProcess *server.Process, launchStrategy *placement.Strategy, launchArgs []string, launchErr error) {
 	const maxRetries = 2
-	const maxPreflightReplans = 5
 	// Extra rounds granted only while the measured deficit keeps shrinking.
 	const maxConvergingReplans = 6
 	convergingReplans := 0
@@ -4997,6 +4996,8 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				memoryRecovery.reject(serverArgs)
 				memoryRecovery.rejectContext(strategy,
 					contextReclaimTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
+				memoryRecovery.notePricedContextStep(strategy,
+					majorityDevicePricedTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
 				if contextDeficitOutstripsDevice(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device) {
 					memoryRecovery.rejectContextOutstripped(strategy)
 				}
@@ -6223,6 +6224,9 @@ func cmdLaunch(args []string) {
 		if offerDiscoveredArchFork(req, model, cfg.AssumeYes) {
 			be = resolveLaunchBackend(req, model, caps)
 		}
+		if be == nil && offerAcceleratedArchBuild(req, model, caps, cfg.AssumeYes) {
+			be = resolveLaunchBackend(req, model, caps)
+		}
 		if be == nil && offerMainlineBackendUpdate(req, model, cfg.AssumeYes) {
 			be = resolveLaunchBackend(req, model, caps)
 		}
@@ -6557,11 +6561,25 @@ func cmdLaunch(args []string) {
 		active := controller.Store{CacheDir: cfg.CacheDir}.IsActive(scope, controller.HashArgs(serverArgs))
 		mode := effectiveCalibrationMode(req)
 		if !active {
-			fmt.Fprintf(os.Stderr, "[calibrate] screened winner did not reach an active profile; decision not cached\n")
+			functional := controller.Store{CacheDir: cfg.CacheDir}.ReachedFunctional(scope, controller.HashArgs(serverArgs))
+			if degradedBaselinePersistable(mode, pendingCalibration, functional) {
+				// Only the decision is kept: the profile did not pass every canary,
+				// so no verified config or placement cache is written for it.
+				pendingCalibration.ValidationLevel = placement.CalibrationValidationBaselineBounded
+				if path, saveErr := placement.SaveCalibrationDecision(cfg.CacheDir, *pendingCalibration); saveErr != nil {
+					fmt.Fprintf(os.Stderr, "[optimize] bounded baseline cache failed: %v\n", saveErr)
+				} else {
+					fmt.Printf("[optimize] baseline kept for %s (%s); the profile serves but could not prove cache reuse, so identical launches skip this search (%s)\n",
+						pendingCalibration.Finalist, pendingCalibration.FinalistOutcome, path)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "[calibrate] screened winner did not reach an active profile; decision not cached\n")
+			}
 		} else {
 			performanceEvidence := mode != calibrateAuto || automaticCalibrationEvidenceValid(pendingCalibration)
 			admissionEvidence := mode == calibrateAuto && automaticCalibrationAdmissionEvidenceValid(pendingCalibration)
-			if !performanceEvidence && !admissionEvidence {
+			unmeasuredEvidence := mode == calibrateAuto && unmeasuredFinalistEvidenceValid(pendingCalibration)
+			if !performanceEvidence && !admissionEvidence && !unmeasuredEvidence {
 				fmt.Fprintf(os.Stderr, "[optimize] winner reached active state but agent-workflow evidence was incomplete; decision not promoted\n")
 				req.CalibrationPending = false
 			} else {
@@ -6569,6 +6587,8 @@ func cmdLaunch(args []string) {
 					pendingCalibration.ValidationLevel = placement.CalibrationValidationWorkflow
 				} else if admissionEvidence {
 					pendingCalibration.ValidationLevel = placement.CalibrationValidationAdmission
+				} else if unmeasuredEvidence {
+					pendingCalibration.ValidationLevel = placement.CalibrationValidationBaselineBounded
 				}
 				path, saveErr := placement.SaveCalibrationDecision(cfg.CacheDir, *pendingCalibration)
 				if saveErr != nil {
@@ -6589,6 +6609,9 @@ func cmdLaunch(args []string) {
 					if performanceEvidence {
 						fmt.Printf("[optimize] workflow winner %s passed clean relaunch, agent, cache, and lifecycle gates; cached at %s\n",
 							pendingCalibration.Winner, path)
+					} else if unmeasuredEvidence {
+						fmt.Printf("[optimize] finalist %s not measured within the time budget (attempt %d of %d); recorded so the retry stays bounded (%s)\n",
+							pendingCalibration.Finalist, pendingCalibration.FinalistAttempts, placement.MaxUnmeasuredFinalistAttempts, path)
 					} else {
 						fmt.Printf("[optimize] exact finalist %s was unavailable; cached admission-only evidence so identical launches keep the verified baseline without another reload (%s)\n",
 							pendingCalibration.Finalist, path)
@@ -9362,6 +9385,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		ExpertSharedCount:         info.ExpertSharedCount,
 		ExpertSharedCountInferred: info.ExpertSharedCountInferred != 0,
 		LeadingDense:              info.LeadingDense,
+		KVLoops:                   info.KVLoops,
 		LeadingDenseInferred:      info.LeadingDenseInferred != 0,
 		RopeDim:                   info.NRot,
 		HasSSM:                    info.SSM,

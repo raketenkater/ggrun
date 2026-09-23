@@ -85,3 +85,26 @@ func TestConcurrentProfileUpdatesStayValidJSON(t *testing.T) {
 		t.Fatalf("profile lock leaked: %v", err)
 	}
 }
+
+func TestReachedFunctionalSeesDegradedButNotRejected(t *testing.T) {
+	store := Store{CacheDir: t.TempDir()}
+	p, _ := store.Begin(Profile{Scope: "scope", ArgsHash: "args"})
+	for _, state := range []State{StateAllocationVerified, StateLoadHealthy, StateFunctionalVerified, StateDegraded} {
+		if _, err := store.Transition("scope", p.ID, state, "", ""); err != nil {
+			t.Fatalf("transition to %s: %v", state, err)
+		}
+	}
+	if store.IsActive("scope", "args") || !store.ReachedFunctional("scope", "args") {
+		t.Fatal("a degraded profile that answered the functional canary was not recognized")
+	}
+	if store.ReachedFunctional("scope", "other-args") {
+		t.Fatal("a different argv inherited functional evidence")
+	}
+	q, _ := store.Begin(Profile{Scope: "scope", ArgsHash: "args"})
+	if _, err := store.Transition("scope", q.ID, StateRejected, "failed", "canary"); err != nil {
+		t.Fatal(err)
+	}
+	if store.ReachedFunctional("scope", "args") {
+		t.Fatal("a rejected profile counted as functional")
+	}
+}

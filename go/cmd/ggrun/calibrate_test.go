@@ -976,3 +976,43 @@ func TestApplyCalibrationDecisionSkipsWithNoCachedConfig(t *testing.T) {
 		t.Fatalf("base strategy mutated to %q", base.KVPlacement)
 	}
 }
+
+// A degraded profile (serves correctly, cannot prove cache reuse) used to drop
+// every decision, so hybrid and nondeterministic models re-ran the optimizer on
+// each launch. Only a baseline outcome may be kept for it; a challenger still
+// needs every gate.
+func TestDegradedProfileKeepsOnlyBaselineDecisions(t *testing.T) {
+	baselineWon := &placement.CalibrationDecision{
+		Winner: "default", Finalist: "ubatch-512", FinalistOutcome: "baseline-won",
+		DefaultAgentSamples: 2, WinnerAgentSamples: 2, DefaultTurnTimeS: 10, WinnerTurnTimeS: 11,
+		DefaultTurnMaxS: 11, WinnerTurnMaxS: 12, DefaultCachedTokens: 1000, WinnerCachedTokens: 1000,
+		DefaultNewPromptTokens: 50, WinnerNewPromptTokens: 50, DefaultMixedTPS: 20, WinnerMixedTPS: 19,
+		AgentPromptBytes: 4096,
+	}
+	if !degradedBaselinePersistable(calibrateAuto, baselineWon, true) {
+		t.Fatal("a measured baseline win on a functional degraded profile was discarded")
+	}
+	if degradedBaselinePersistable(calibrateAuto, baselineWon, false) {
+		t.Fatal("a profile that never answered the functional canary kept a decision")
+	}
+	if degradedBaselinePersistable(calibrateOn, baselineWon, true) {
+		t.Fatal("explicit calibration bypassed the full gates")
+	}
+	promoted := *baselineWon
+	promoted.Winner, promoted.FinalistOutcome = "ubatch-512", "promoted"
+	if degradedBaselinePersistable(calibrateAuto, &promoted, true) {
+		t.Fatal("a challenger was promoted without the cache gate")
+	}
+	unmeasured := &placement.CalibrationDecision{Winner: "default", Finalist: "ubatch-2048"}
+	markFinalistUnmeasured(unmeasured, nil)
+	if unmeasured.FinalistAttempts != 1 || !degradedBaselinePersistable(calibrateAuto, unmeasured, true) {
+		t.Fatalf("budget-bound finalist not recorded: %+v", unmeasured)
+	}
+	next := &placement.CalibrationDecision{Winner: "default", Finalist: "ubatch-2048"}
+	markFinalistUnmeasured(next, unmeasured)
+	other := &placement.CalibrationDecision{Winner: "default", Finalist: "parallel-2"}
+	markFinalistUnmeasured(other, unmeasured)
+	if next.FinalistAttempts != 2 || other.FinalistAttempts != 1 {
+		t.Fatalf("attempts not counted per finalist: same=%d other=%d", next.FinalistAttempts, other.FinalistAttempts)
+	}
+}

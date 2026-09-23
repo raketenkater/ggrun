@@ -116,6 +116,9 @@ func DisplayFit(fit string) string {
 func Shortlist() []Candidate {
 	var doc catalogDoc
 	if err := json.Unmarshal(catalogBytes(), &doc); err == nil && len(doc.Candidates) > 0 {
+		for i := range doc.Candidates {
+			doc.Candidates[i] = inferParams(doc.Candidates[i])
+		}
 		return doc.Candidates
 	}
 	return fallbackShortlist()
