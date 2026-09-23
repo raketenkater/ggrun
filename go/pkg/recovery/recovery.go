@@ -230,7 +230,8 @@ func (l *Launcher) runOnce(ctx context.Context, binaryPath string, restartCount 
 	// concurrently running instance.
 	l.lastLogPath = logPath
 
-	cmd := exec.CommandContext(ctx, binaryPath, l.Args...)
+	backendArgs := server.LoadModeArgs(append([]string{binaryPath}, l.Args...))
+	cmd := exec.CommandContext(ctx, backendArgs[0], backendArgs[1:]...)
 	cmd.SysProcAttr = setProcessGroupAttr()
 
 	// llama.cpp writes ~all of its logs (load progress, errors) to STDERR. During

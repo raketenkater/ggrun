@@ -184,6 +184,7 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 
 // StartWithTimeoutToOptions is StartWithTimeoutTo with explicit launch options.
 func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, termOut, termErr io.Writer, opts StartOptions) (*Process, error) {
+	args = LoadModeArgs(args)
 	ctx, cancel := context.WithCancel(context.Background())
 	scopeUnit := ""
 	launchArgs := args

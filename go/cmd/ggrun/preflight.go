@@ -946,7 +946,7 @@ func preflightArgs(serverArgs []string) []string {
 // carrying --swa-full cost 6364 MiB of context instead of 871 MiB — 5.5 GiB of
 // the main GPU spent on a feature the model silently ignored.
 func runFitPreflight(fitBin string, serverArgs []string) ([]preflightDevice, string, error) {
-	args := preflightArgs(serverArgs[1:])
+	args := server.LoadModeArgs(append([]string{fitBin}, preflightArgs(serverArgs[1:])...))[1:]
 	cmd := exec.Command(fitBin, args...)
 	// Same device numbering contract as the real server launch (server.go):
 	// placement indices are PCI-ordered, CUDA's default order is fastest-first.

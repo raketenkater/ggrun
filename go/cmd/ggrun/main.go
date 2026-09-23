@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -3221,7 +3222,7 @@ func validateBackendLaunchArgs(be *backendInfo, args []string) error {
 		return fmt.Errorf("backend %s exposes neither --version nor --help, so ggrun cannot validate its launch dialect safely", be.Path)
 	}
 
-	probeArgs := append([]string(nil), args[1:]...)
+	probeArgs := append([]string(nil), server.LoadModeArgs(args)[1:]...)
 	probeArgs = append(probeArgs, probeFlag)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -5109,7 +5110,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				}
 			}
 		}
-		if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+		if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 			return nil, strategy, serverArgs, err
 		}
 		// A preflight or OOM recovery can move additional expert layers to CPU
@@ -5305,8 +5306,29 @@ func startupLogCUDAOOMDetailed(logData string) (device int, allocMB int, isCompu
 			return device, allocMB, isComputeBuffer, true
 		}
 	}
+	// ggml's backend-neutral wording, which is all a Vulkan backend prints:
+	// "failed to allocate Vulkan0 buffer of size 1962934272" from gallocr (the
+	// compute graph) or alloc_tensor_range (weights). Unrecognized, a MiMo-V2.6
+	// Vulkan probe that measured exactly this shortfall failed closed instead
+	// of reaching the ubatch/expert-layer recovery. VulkanN matches ggrun's
+	// device N because vulkanDeviceOrderEnv lists the devices in ggrun's order.
+	for i := len(lines) - 1; i >= 0; i-- {
+		m := backendBufferOOMPattern.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		device, _ := strconv.Atoi(m[1])
+		bytes, _ := strconv.ParseInt(m[2], 10, 64)
+		isComputeBuffer := strings.Contains(lines[i], "gallocr")
+		for j := i + 1; j < len(lines) && j <= i+3 && !isComputeBuffer; j++ {
+			isComputeBuffer = strings.Contains(lines[j], "graph_reserve") || strings.Contains(lines[j], "compute buffers")
+		}
+		return device, bytesToMiBCeil(uint64(bytes)), isComputeBuffer, true
+	}
 	return 0, 0, false, false
 }
+
+var backendBufferOOMPattern = regexp.MustCompile(`failed to allocate (?:CUDA|Vulkan)(\d+) buffer of size (\d+)`)
 
 const unknownRuntimeCUDAOOMReserveMinMB = 2048
 
@@ -6209,10 +6231,16 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
+	if offerAcceleratedMainline(req, model, be, caps, cfg.AssumeYes) {
+		if next := resolveLaunchBackend(req, model, caps); next != nil {
+			be = next
+		}
+	}
 	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
+	applyVulkanDeviceOrder(req, be, caps)
 	if err := guardPortFree(req.Port, "launch"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -6290,7 +6318,7 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
-	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -6499,7 +6527,9 @@ func cmdLaunch(args []string) {
 			claudeRouterURL = claudeAuto.router.URL()
 		}
 	}
-	if err := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL); err != nil {
+	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+	}); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
@@ -6800,7 +6830,9 @@ func cmdLaunch(args []string) {
 		if newP.LogBuf != nil {
 			recordMeasuredLaunchProbes(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String(), baselineVRAM, serverProcessPID(newP))
 		}
-		if err := verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL); err != nil {
+		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
+		}); err != nil {
 			_ = newP.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] recovered placement failed lifecycle verification: %v\n", err)
@@ -6831,6 +6863,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
 		p.Kill()
 	}
+	waitForShutdownRelease(resourceBaseline, 2*time.Minute, launchResourcesAtBaseline, time.Sleep)
 	claudeAuto.stop()
 }
 
@@ -7344,7 +7377,7 @@ func cmdKVProbe(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -7581,6 +7614,11 @@ func cmdDryRun(args []string) {
 
 	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 	envPrefix := applyGPUVisibility(req, backendDialect(be))
+	if vkEnv, vkErr := vulkanDeviceOrderEnv(req, be, caps, listVulkanDevices); vkErr != nil {
+		fmt.Fprintf(os.Stderr, "[dry-run] warning: could not align Vulkan device order with detected GPUs: %v\n", vkErr)
+	} else if vkEnv != "" {
+		envPrefix = vkEnv
+	}
 	if req.EmitServerArgvJSON {
 		plan := struct {
 			Schema               string                          `json:"schema"`
@@ -8479,6 +8517,7 @@ func cmdTune(args []string) {
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[tune] GPU restriction: %s\n", env)
 	}
+	applyVulkanDeviceOrder(req, be, caps)
 
 	tuneOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
 	tuneOpts.ReasoningOff = true // tuning measures throughput, so think-free like benchmarks
@@ -8526,7 +8565,7 @@ func cmdTune(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := validateHostMemoryContainment(req, caps, strategy); err != nil {
+	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -9575,6 +9614,9 @@ func detectBackend(path string) *backendInfo {
 	}
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true
+	}
+	if helpHasExactFlag(help, "--load-mode") && !helpHasExactFlag(help, "--no-mmap") {
+		server.RegisterLoadModeBackend(path)
 	}
 	info.CPUExpertMMapCapability, info.CPUExpertMMapEvidence = probedCPUExpertMMapCapability(info)
 	return info

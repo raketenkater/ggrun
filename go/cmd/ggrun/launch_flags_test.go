@@ -348,3 +348,23 @@ func TestNoCachedConfigFlagParsesAndReachesPlacementOptions(t *testing.T) {
 		t.Errorf("--no-cached-config must not pass through to the backend argv")
 	}
 }
+
+// The qwen4exp PR fork refused the whole launch on "--no-mmap" because current
+// llama.cpp spells it "--load-mode none". Detection must recognise that dialect
+// from --help, and the parser probe must then see the translated command.
+func TestLoadModeBackendAcceptsResidentLaunch(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "llama-server")
+	script := "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n" +
+		"    --help) echo '-lm,   --load-mode MODE   model loading mode'; echo 'usage: llama-server'; exit 0;;\n" +
+		"    --no-mmap|--mmap|--mlock) echo \"error: invalid argument: $arg\" >&2; exit 1;;\n" +
+		"  esac\ndone\necho 'version: test'\n"
+	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	be := detectBackend(bin)
+	be.Help += "\n--version"
+	if err := validateBackendLaunchArgs(be, []string{bin, "-m", "never-loaded.gguf", "--no-mmap"}); err != nil {
+		t.Fatalf("resident launch on a --load-mode backend rejected: %v", err)
+	}
+}

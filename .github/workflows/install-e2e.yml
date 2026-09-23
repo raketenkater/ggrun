@@ -119,6 +119,14 @@ jobs:
           done
           [ "$n" -gt 0 ] || { echo "::error::no backend installed"; exit 1; }
 
+      # Automatic backend selection trusts this probe to say which architectures
+      # the installed loader knows; a probe that cannot read the shipped layout
+      # refuses every model.
+      - name: The architecture probe reads the installed backend
+        run: |
+          GGRUN_ARCH_PROBE_BACKEND="$HOME/ggrun/.bin/llama-server" \
+            go test -C go -count=1 ./pkg/backends -run TestArchProbeOnInstalledBackend -v
+
       # The README tells people to get a model with `ggrun download <repo>`, and
       # this is the only place that path is tested. It runs first so both serve
       # steps share the one download rather than fetching 563 MB twice.
@@ -231,6 +239,16 @@ jobs:
           $found = Get-ChildItem "$env:USERPROFILE\ggrun\.bin" -Filter 'llama-server*.exe' -ErrorAction SilentlyContinue
           if (-not $found) { throw "no backend installed" }
           foreach ($b in $found) { Write-Host $b.FullName; & $b.FullName --version; if ($LASTEXITCODE -ne 0) { throw "Backend version failed" } }
+
+      # The architecture literals live in llama.dll, not llama-server.exe; before
+      # PE imports were followed the probe read only the .exe and reported every
+      # architecture, even "llama", as unsupported.
+      - name: The architecture probe reads the installed backend
+        shell: powershell
+        run: |
+          $env:GGRUN_ARCH_PROBE_BACKEND = "$env:USERPROFILE\ggrun\.bin\llama-server.exe"
+          go test -C go -count=1 ./pkg/backends -run TestArchProbeOnInstalledBackend -v
+          if ($LASTEXITCODE -ne 0) { throw 'the architecture probe cannot read the installed backend' }
 
       # Same as the Linux job: the documented downloader, run first so both
       # serve steps share the one 563 MB download.
