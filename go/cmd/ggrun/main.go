@@ -3222,7 +3222,7 @@ func validateBackendLaunchArgs(be *backendInfo, args []string) error {
 		return fmt.Errorf("backend %s exposes neither --version nor --help, so ggrun cannot validate its launch dialect safely", be.Path)
 	}
 
-	probeArgs := append([]string(nil), args[1:]...)
+	probeArgs := append([]string(nil), server.LoadModeArgs(args)[1:]...)
 	probeArgs = append(probeArgs, probeFlag)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -9614,6 +9614,9 @@ func detectBackend(path string) *backendInfo {
 	}
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true
+	}
+	if helpHasExactFlag(help, "--load-mode") && !helpHasExactFlag(help, "--no-mmap") {
+		server.RegisterLoadModeBackend(path)
 	}
 	info.CPUExpertMMapCapability, info.CPUExpertMMapEvidence = probedCPUExpertMMapCapability(info)
 	return info
