@@ -550,11 +550,12 @@ func TestRecoveryCandidateRespectsTheProvenContextCeiling(t *testing.T) {
 // 662,528 -> 236,544 tokens and the plans computed at that depth were refused
 // by the recovery guards, failing a launch that converges without it.
 func TestContextCeilingExcludesTheRejectedContext(t *testing.T) {
-	strategy := &placement.Strategy{ContextSize: 816128, ContextAuto: true, KVType: "q8_0"}
+	// A small priced cut keeps the gentle one-granule step.
+	small := &placement.Strategy{ContextSize: 816128, ContextAuto: true, KVType: "q8_0"}
 	recovery := newLaunchMemoryRecovery()
-	recovery.rejectContext(strategy, 76800)
-	if got := recovery.automaticContextCeiling(); got != strategy.ContextSize-1 {
-		t.Fatalf("ceiling %d, want one token below %d regardless of the reclaim", got, strategy.ContextSize)
+	recovery.rejectContext(small, 4*contextRecoveryGranuleTokens)
+	if got := recovery.automaticContextCeiling(); got != small.ContextSize-1 {
+		t.Fatalf("ceiling %d, want one token below %d for a cut granule steps can cover", got, small.ContextSize)
 	}
 	// The ceiling only ratchets down.
 	lower := &placement.Strategy{ContextSize: 500736, ContextAuto: true, KVType: "q8_0"}
@@ -562,9 +563,38 @@ func TestContextCeilingExcludesTheRejectedContext(t *testing.T) {
 	if got := recovery.automaticContextCeiling(); got != lower.ContextSize-1 {
 		t.Fatalf("ceiling %d did not follow the lower rejection", got)
 	}
-	recovery.rejectContext(strategy, 999999)
+	recovery.rejectContext(small, 0)
 	if got := recovery.automaticContextCeiling(); got != lower.ContextSize-1 {
 		t.Fatalf("a higher rejection widened the ceiling to %d", got)
+	}
+}
+
+// Nanbeige4.2 (2026-09-23): each 1,024-token step freed ~95 MiB against a
+// ~950 MiB deficit, so five re-plans could never converge and a 3B model failed
+// closed. A priced cut beyond what granule steps can cover takes the priced
+// step, capped at a quarter of the context: the uncapped deficit-sized step
+// was reverted after it leapt GLM-5.3-Flash from 662,528 to 236,544 tokens.
+func TestPricedContextStepCoversWhatGranuleStepsCannot(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	nanbeige := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0"}
+	recovery.rejectContext(nanbeige, 12800)
+	if got := recovery.automaticContextCeiling(); got != 262144-12800 {
+		t.Fatalf("ceiling %d, want the priced cut to %d", got, 262144-12800)
+	}
+
+	glm := newLaunchMemoryRecovery()
+	leap := &placement.Strategy{ContextSize: 662528, ContextAuto: true, KVType: "q8_0"}
+	glm.rejectContext(leap, 426000)
+	got := glm.automaticContextCeiling()
+	if got < 662528-662528/contextRecoveryStepDivisor || got >= 662528 {
+		t.Fatalf("ceiling %d: the priced step must be capped at a quarter (never the reverted leap to 236,544)", got)
+	}
+
+	floored := newLaunchMemoryRecovery()
+	near := &placement.Strategy{ContextSize: 40960, ContextAuto: true, KVType: "q8_0"}
+	floored.rejectContext(near, 30000)
+	if got := floored.automaticContextCeiling(); got < contextRecoveryFloorTokens {
+		t.Fatalf("priced step went below the usable-window floor: %d", got)
 	}
 }
 

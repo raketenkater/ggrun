@@ -4698,7 +4698,6 @@ func backendMeasuredRecomputeWorthVerifying(level memoryEvidenceLevel, current, 
 
 func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery, restoreExempt bool, exactAdmission bool) (launchProcess *server.Process, launchStrategy *placement.Strategy, launchArgs []string, launchErr error) {
 	const maxRetries = 2
-	const maxPreflightReplans = 5
 	// Extra rounds granted only while the measured deficit keeps shrinking.
 	const maxConvergingReplans = 6
 	convergingReplans := 0

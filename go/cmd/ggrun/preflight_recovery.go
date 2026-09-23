@@ -55,6 +55,11 @@ type launchMemoryRecovery struct {
 	// The derate ladder then restarts from a lower rung every time and the
 	// replan budget runs out before it can converge.
 	derivedNCPUMoE int
+	// pricedContext is the lowest context a priced rejection asked for when
+	// one-granule steps could not cover its deficit within the whole re-plan
+	// budget. Nanbeige4.2 missed by ~950 MiB per round on CUDA1 while each
+	// 1,024-token step freed ~95 MiB, so five rounds could never converge.
+	pricedContext int
 	// outstrippedContext is the smallest automatic context rejected with a deficit
 	// that was priced and found larger than a single cut could cover. Those
 	// rounds get a bounded descent instead of the one-granule minimum, because
@@ -125,9 +130,21 @@ func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy, recla
 	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
-	_ = reclaimTokens // retained in the signature for the caller's measurement; see automaticContextCeiling
 	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
 		r.rejectedContext = strategy.ContextSize
+	}
+	// Granule steps stay the rule while they can plausibly cover the deficit in
+	// the budget. Only a priced requirement beyond that takes a larger step, and
+	// never more than the fraction the outstripped descent uses: an uncapped
+	// deficit-sized step once leapt GLM-5.3-Flash from 662,528 to 236,544 tokens.
+	if reclaimTokens > maxPreflightReplans*contextRecoveryGranuleTokens {
+		step := reclaimTokens
+		if limit := strategy.ContextSize / contextRecoveryStepDivisor; step > limit {
+			step = limit
+		}
+		if candidate := strategy.ContextSize - step; r.pricedContext == 0 || candidate < r.pricedContext {
+			r.pricedContext = candidate
+		}
 	}
 }
 
@@ -248,6 +265,12 @@ func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Str
 // fraction of the current window.
 const contextRecoveryStepDivisor = 4
 
+// maxPreflightReplans bounds backend-measured re-plans in one launch.
+const maxPreflightReplans = 5
+
+// contextRecoveryGranuleTokens is the automatic context granule placement uses.
+const contextRecoveryGranuleTokens = 1024
+
 // contextRecoveryFloorTokens is the smallest window a context-based recovery may
 // leave. It matches the floor automaticContextRecoveryTarget already applies, so
 // the two context levers agree on what counts as a usable result.
@@ -323,6 +346,18 @@ func (r *launchMemoryRecovery) automaticContextCeiling() int {
 			candidate = r.acceptedContext
 		}
 		if candidate > 0 && (ceiling == 0 || candidate < ceiling) {
+			ceiling = candidate
+		}
+	}
+	if r.pricedContext > 0 {
+		candidate := r.pricedContext
+		if candidate < contextRecoveryFloorTokens {
+			candidate = contextRecoveryFloorTokens
+		}
+		if r.acceptedContext > 0 && candidate < r.acceptedContext {
+			candidate = r.acceptedContext
+		}
+		if ceiling == 0 || candidate < ceiling {
 			ceiling = candidate
 		}
 	}
