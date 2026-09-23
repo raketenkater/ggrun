@@ -855,3 +855,31 @@ func TestPricedStepIgnoresMinorityDeviceDeficits(t *testing.T) {
 		t.Fatal("majority-device deficit was not priced")
 	}
 }
+
+// Nanbeige4.2 (2026-09-23): a ubatch derate to 128 fitted, but the re-plan was
+// handed 128 as a mere default and Compute's own ladder returned 512; every
+// round failed, derated and repeated, and the context crept one granule below
+// the context that had just fitted. The proven ubatch must bind Compute, and
+// an accepted context supersedes a rejection made at a larger ubatch.
+func TestReplanKeepsTheProvenUBatchAndAcceptedContext(t *testing.T) {
+	recovery := newLaunchMemoryRecovery()
+	atLarge := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0", UBatchSize: 256}
+	recovery.rejectContext(atLarge, 0)
+	atSmall := &placement.Strategy{ContextSize: 262144, ContextAuto: true, KVType: "q8_0", UBatchSize: 128}
+	recovery.acceptContext(atSmall)
+	opts := boundByProvenLimits(placement.Options{UBatchSize: 512}, recovery)
+	if opts.UBatchSize != 128 || !opts.UBatchSizeExplicit {
+		t.Fatalf("proven ubatch not binding: ub=%d explicit=%v", opts.UBatchSize, opts.UBatchSizeExplicit)
+	}
+	if opts.AutoContextMax != 262144 {
+		t.Fatalf("ceiling %d, want the accepted 262144 once its rejection was at a larger ubatch", opts.AutoContextMax)
+	}
+	// A rejection below the accepted context still binds.
+	lower := &placement.Strategy{ContextSize: 131072, ContextAuto: true, KVType: "q8_0", UBatchSize: 128}
+	fresh := newLaunchMemoryRecovery()
+	fresh.acceptContext(&placement.Strategy{ContextSize: 65536, ContextAuto: true, UBatchSize: 128})
+	fresh.rejectContext(lower, 0)
+	if got := fresh.automaticContextCeiling(); got != 65536 {
+		t.Fatalf("ceiling %d, want the accepted 65536 below the rejection", got)
+	}
+}

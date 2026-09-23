@@ -361,7 +361,12 @@ func (r *launchMemoryRecovery) automaticContextCeiling() int {
 		return 0
 	}
 	ceiling := 0
-	if r.rejectedContext > 1 {
+	// A context accepted at or above the smallest rejected one was rejected at a
+	// larger ubatch that boundByProvenLimits now pins away, so the accepted plan
+	// is the fixed point. Excluding it made the re-plan creep one granule below
+	// a proven-fitting context every round (Nanbeige4.2, 2026-09-23).
+	rejectionSuperseded := r.acceptedContext > 0 && r.acceptedContext >= r.rejectedContext
+	if r.rejectedContext > 1 && !rejectionSuperseded {
 		// One token below, so placement.Compute's granule floor drops the rejected
 		// value. Widening this to a deficit-sized step was tried and reverted: it
 		// made GLM-5.3-Flash leap 662,528 -> 236,544 tokens in a single round, and
@@ -422,6 +427,11 @@ func boundByProvenLimits(opts placement.Options, r *launchMemoryRecovery) placem
 	}
 	if r != nil && r.acceptedUBatch > 0 && (opts.UBatchSize <= 0 || r.acceptedUBatch < opts.UBatchSize) {
 		opts.UBatchSize = r.acceptedUBatch
+		// Without the explicit bit Compute treats the value as a default and
+		// runs its own ubatch ladder: Nanbeige4.2 was pinned to a proven 128 and
+		// every re-plan came back at 512, failed, derated and repeated until the
+		// budget ran out.
+		opts.UBatchSizeExplicit = true
 	}
 	return opts
 }
