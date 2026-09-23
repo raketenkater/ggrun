@@ -63,3 +63,29 @@ func TestGenuinelyInsufficientMemoryStillRefusedPromptly(t *testing.T) {
 		t.Errorf("waited %s on flat memory; must give up after %s", *waited, defaultHostMemorySettle.flatFor)
 	}
 }
+
+// ggrun must not exit while the backend it stopped still holds memory.
+func TestShutdownWaitsForBackendMemoryRelease(t *testing.T) {
+	baseline := &detect.Capabilities{}
+	checks := 0
+	releasedAfter := 6
+	sleep, waited := fakeClock()
+	ok := waitForShutdownRelease(baseline, 2*time.Minute, func(*detect.Capabilities) bool {
+		checks++
+		return checks > releasedAfter
+	}, sleep)
+	if !ok || checks != releasedAfter+1 {
+		t.Fatalf("ok=%v after %d checks; want release observed on check %d", ok, checks, releasedAfter+1)
+	}
+	if *waited != time.Duration(releasedAfter)*500*time.Millisecond {
+		t.Errorf("waited %s", *waited)
+	}
+
+	sleep, waited = fakeClock()
+	if waitForShutdownRelease(baseline, 5*time.Second, func(*detect.Capabilities) bool { return false }, sleep) {
+		t.Fatal("reported release that never happened")
+	}
+	if *waited > 5*time.Second {
+		t.Errorf("waited %s past its bound", *waited)
+	}
+}

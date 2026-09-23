@@ -6863,6 +6863,7 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
 		p.Kill()
 	}
+	waitForShutdownRelease(resourceBaseline, 2*time.Minute, launchResourcesAtBaseline, time.Sleep)
 	claudeAuto.stop()
 }
 
