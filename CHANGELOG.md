@@ -27,6 +27,18 @@
   model's route as `--backend` or the saved support setting as a flag.
 - **Root:** `ggrun <model> --ai-tune` as root without a user session is tested
   in CI (#64).
+- **The optimizer stops repeating itself.** Models that serve but cannot prove
+  cache reuse (hybrid recurrent, nondeterministic replay) keep their measured
+  baseline, and a finalist the time budget cuts off is retried a bounded number
+  of times; MiniMax-M3 and hybrid Qwen no longer re-run the search every launch.
+- **Unsupported architectures get a build offer.** When nothing installed loads
+  a model (Nanbeige4.2 on a release install), ggrun offers a GPU build of the
+  reviewed source or current mainline.
+- **Looped transformers** (`num_loops`) are planned with a KV cache per loop.
+- **Recovery converges.** Measured re-plans keep a proven ubatch and accepted
+  context, and a large deficit on the main KV device takes a bounded priced step.
+- **The wedge watchdog counts only the backend's CPU**, so a frozen backend is
+  stopped after 3 minutes instead of being hidden by launch helper processes.
 
 - **Agent transport hardening now fails early and records truthful phases.**
   Workflow calls with competing `name`, `script`, or `scriptPath` sources are
