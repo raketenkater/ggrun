@@ -6557,11 +6557,25 @@ func cmdLaunch(args []string) {
 		active := controller.Store{CacheDir: cfg.CacheDir}.IsActive(scope, controller.HashArgs(serverArgs))
 		mode := effectiveCalibrationMode(req)
 		if !active {
-			fmt.Fprintf(os.Stderr, "[calibrate] screened winner did not reach an active profile; decision not cached\n")
+			functional := controller.Store{CacheDir: cfg.CacheDir}.ReachedFunctional(scope, controller.HashArgs(serverArgs))
+			if degradedBaselinePersistable(mode, pendingCalibration, functional) {
+				// Only the decision is kept: the profile did not pass every canary,
+				// so no verified config or placement cache is written for it.
+				pendingCalibration.ValidationLevel = placement.CalibrationValidationBaselineBounded
+				if path, saveErr := placement.SaveCalibrationDecision(cfg.CacheDir, *pendingCalibration); saveErr != nil {
+					fmt.Fprintf(os.Stderr, "[optimize] bounded baseline cache failed: %v\n", saveErr)
+				} else {
+					fmt.Printf("[optimize] baseline kept for %s (%s); the profile serves but could not prove cache reuse, so identical launches skip this search (%s)\n",
+						pendingCalibration.Finalist, pendingCalibration.FinalistOutcome, path)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "[calibrate] screened winner did not reach an active profile; decision not cached\n")
+			}
 		} else {
 			performanceEvidence := mode != calibrateAuto || automaticCalibrationEvidenceValid(pendingCalibration)
 			admissionEvidence := mode == calibrateAuto && automaticCalibrationAdmissionEvidenceValid(pendingCalibration)
-			if !performanceEvidence && !admissionEvidence {
+			unmeasuredEvidence := mode == calibrateAuto && unmeasuredFinalistEvidenceValid(pendingCalibration)
+			if !performanceEvidence && !admissionEvidence && !unmeasuredEvidence {
 				fmt.Fprintf(os.Stderr, "[optimize] winner reached active state but agent-workflow evidence was incomplete; decision not promoted\n")
 				req.CalibrationPending = false
 			} else {
@@ -6569,6 +6583,8 @@ func cmdLaunch(args []string) {
 					pendingCalibration.ValidationLevel = placement.CalibrationValidationWorkflow
 				} else if admissionEvidence {
 					pendingCalibration.ValidationLevel = placement.CalibrationValidationAdmission
+				} else if unmeasuredEvidence {
+					pendingCalibration.ValidationLevel = placement.CalibrationValidationBaselineBounded
 				}
 				path, saveErr := placement.SaveCalibrationDecision(cfg.CacheDir, *pendingCalibration)
 				if saveErr != nil {
@@ -6589,6 +6605,9 @@ func cmdLaunch(args []string) {
 					if performanceEvidence {
 						fmt.Printf("[optimize] workflow winner %s passed clean relaunch, agent, cache, and lifecycle gates; cached at %s\n",
 							pendingCalibration.Winner, path)
+					} else if unmeasuredEvidence {
+						fmt.Printf("[optimize] finalist %s not measured within the time budget (attempt %d of %d); recorded so the retry stays bounded (%s)\n",
+							pendingCalibration.Finalist, pendingCalibration.FinalistAttempts, placement.MaxUnmeasuredFinalistAttempts, path)
 					} else {
 						fmt.Printf("[optimize] exact finalist %s was unavailable; cached admission-only evidence so identical launches keep the verified baseline without another reload (%s)\n",
 							pendingCalibration.Finalist, path)

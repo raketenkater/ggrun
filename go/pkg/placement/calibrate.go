@@ -57,7 +57,26 @@ const (
 	// same destructive stop/reload loop, but it must never advertise the default
 	// as a measured fastest configuration.
 	CalibrationValidationAdmission = "admission-only-v1"
+	// CalibrationValidationBaselineBounded keeps the measured baseline serving
+	// when repeating the same finalist search cannot produce new evidence: the
+	// finalist was measured and lost under a canary that could not prove cache
+	// reuse (hybrid recurrent branches, replay nondeterminism), or it could not
+	// be measured within the elapsed budget on MaxUnmeasuredFinalistAttempts
+	// launches. Like admission-only it is never performance evidence and never
+	// promotes a challenger; it exists so ordinary launch stays finite instead of
+	// re-running an identical, budget-bound search on every start.
+	CalibrationValidationBaselineBounded = "baseline-bounded-v1"
 )
+
+// FinalistOutcomeUnmeasured records a finalist whose measurement did not
+// complete within the calibration elapsed-time budget.
+const FinalistOutcomeUnmeasured = "unmeasured"
+
+// MaxUnmeasuredFinalistAttempts is how many launches may spend their budget on
+// a finalist that never finishes measuring. The first retry covers a transient
+// slow run; after that the identical search is suppressed until the scope or
+// schema changes or the user retunes.
+const MaxUnmeasuredFinalistAttempts = 2
 
 // CalibrationDecision records which candidate won a measured placement screen
 // for one scope, with the numbers that decided it and the validation level that
@@ -106,6 +125,7 @@ type CalibrationDecision struct {
 	FinalistOutcome        string                `json:"finalist_outcome,omitempty"`
 	FinalistFailureClass   string                `json:"finalist_failure_class,omitempty"`
 	FinalistFailureReason  string                `json:"finalist_failure_reason,omitempty"`
+	FinalistAttempts       int                   `json:"finalist_attempts,omitempty"`
 	FinalistEstimatedCost  float64               `json:"finalist_estimated_agent_cost,omitempty"`
 	FinalistConfidence     string                `json:"finalist_estimate_confidence,omitempty"`
 	ExploredBoundary       *OptimizationBoundary `json:"explored_boundary,omitempty"`
@@ -166,14 +186,24 @@ func (d *CalibrationDecision) AutomaticEligible() bool {
 // bind the negative result to the same model/backend/hardware/workload policy;
 // either changing retires it automatically.
 func (d *CalibrationDecision) SuppressesAutomaticAdmissionRetry(finalist string) bool {
-	return d != nil &&
-		d.ValidationLevel == CalibrationValidationAdmission &&
-		d.Winner == "default" &&
-		d.FinalistOutcome == "unavailable" &&
-		d.FinalistFailureClass != "" &&
-		d.FinalistFailureReason != "" &&
-		d.Finalist != "" &&
-		d.Finalist == finalist
+	if d == nil || d.Winner != "default" || d.Finalist == "" || d.Finalist != finalist {
+		return false
+	}
+	failed := d.FinalistFailureClass != "" && d.FinalistFailureReason != ""
+	switch d.ValidationLevel {
+	case CalibrationValidationAdmission:
+		return d.FinalistOutcome == "unavailable" && failed
+	case CalibrationValidationBaselineBounded:
+		switch d.FinalistOutcome {
+		case "unavailable":
+			return failed
+		case "baseline-won":
+			return true
+		case FinalistOutcomeUnmeasured:
+			return failed && d.FinalistAttempts >= MaxUnmeasuredFinalistAttempts
+		}
+	}
+	return false
 }
 
 // LoadCalibrationDecision reads a prior calibration for the scope, rejecting
