@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -573,5 +574,93 @@ func TestPromoteBackendBuildRollsBackFailedValidation(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(buildDir, "bin", "llama-server"))
 	if err != nil || string(data) != "old" {
 		t.Fatalf("rollback binary = %q, err=%v", data, err)
+	}
+}
+
+func TestUpdateRepoCandidatesIncludeAppHomeItself(t *testing.T) {
+	appHome := t.TempDir()
+	if err := os.Mkdir(filepath.Join(appHome, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("LLM_SERVER_REPO", "")
+	for _, row := range updateRepoCandidates() {
+		if row.Label == "ggrun" && row.Dir == appHome {
+			return
+		}
+	}
+	t.Fatal("startup update check omitted the source checkout used by SelfUpdate")
+}
+
+func TestSelfUpdateRebuildsWhenSourceAlreadyCurrent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix source updater")
+	}
+	repo, remote, appHome, fakeBin := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	write := func(path, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "--bare", "-q", remote)
+	run("init", "-q", repo)
+	write(filepath.Join(repo, "go.mod"), "module fixture\n", 0644)
+	run("-C", repo, "add", "go.mod")
+	run("-C", repo, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial")
+	run("-C", repo, "tag", "v3.2.9")
+	run("-C", repo, "remote", "add", "origin", remote)
+	run("-C", repo, "push", "-qu", "origin", "HEAD")
+	if err := os.Mkdir(filepath.Join(appHome, ".bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(appHome, ".bin", "ggrun")
+	write(binary, "#!/bin/sh\necho stale\n", 0755)
+	// Exercise the update transaction without compiling or using the network.
+	write(filepath.Join(fakeBin, "go"), `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+ if [ "$1" = "-o" ]; then shift; output="$1"; fi
+ shift
+done
+printf '#!/bin/sh\necho rebuilt\n' > "$output"
+chmod +x "$output"
+`, 0755)
+	t.Setenv("LLM_SERVER_REPO", repo)
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := SelfUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(binary, "--version").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "rebuilt" {
+		t.Fatalf("stale binary survived update: %q %v", out, err)
+	}
+	if _, err := os.Stat(binary + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("backup not cleaned: %v", err)
+	}
+	// Retrying a failed build on an unchanged checkout must preserve both the
+	// working installation and the checked-out branch (no detached HEAD).
+	branch, err := exec.Command("git", "-C", repo, "symbolic-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(fakeBin, "go"), "#!/bin/sh\nexit 1\n", 0755)
+	if err := SelfUpdate(); err == nil {
+		t.Fatal("failed build reported success")
+	}
+	after, err := exec.Command("git", "-C", repo, "symbolic-ref", "HEAD").Output()
+	if err != nil || string(after) != string(branch) {
+		t.Fatalf("failed retry changed branch: %q %v", after, err)
+	}
+	out, err = exec.Command(binary, "--version").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "rebuilt" {
+		t.Fatalf("failed retry damaged binary: %q %v", out, err)
 	}
 }
