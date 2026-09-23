@@ -2385,3 +2385,31 @@ func TestTerminalAvailableWithRedirectedStdin(t *testing.T) {
 	defer func() { _ = tmp.Close() }()
 	check("a regular file", tmp)
 }
+
+// The default TUI launch must be the CLI default launch. Sending the model's
+// route as --backend made it an explicit choice (no fallback, no fork or
+// CUDA-build offer), and sending the saved support setting as
+// --no-support-online made it a user instruction that blocked online research
+// on an escalated failure. Neither is what `ggrun <model>` does.
+func TestDefaultTUILaunchSendsNoBackendOrSupportChoice(t *testing.T) {
+	m := Model{
+		models:        []ModelItem{{Name: "MiMo.gguf", Path: "/models/mimo.gguf", Architecture: "mimo2", AutoBackend: "llama-cuda-d2462f8"}},
+		selectedModel: 0,
+		backend:       "auto",
+		kvPlacement:   "auto",
+		ctxMode:       "fit",
+		supportExpert: "auto",
+	}
+	req := m.buildLaunchRequest()
+	args := strings.Join(req.LaunchArgs(), " ")
+	if strings.Contains(args, "--backend") || strings.Contains(args, "support-online") {
+		t.Fatalf("default TUI launch made a choice the CLI default does not: %q", args)
+	}
+	if view := m.viewModelConfig(); !strings.Contains(view, "llama-cuda-d2462f8") {
+		t.Fatalf("the route the launch will use is no longer shown: %q", view)
+	}
+	m.applyLaunchRequestFields(&LaunchRequest{ModelPath: "/models/mimo.gguf", SupportSet: true, SupportOnline: true})
+	if args := strings.Join(m.buildLaunchRequest().LaunchArgs(), " "); !strings.Contains(args, "--support-online") {
+		t.Fatalf("a replayed explicit support choice was dropped: %q", args)
+	}
+}
