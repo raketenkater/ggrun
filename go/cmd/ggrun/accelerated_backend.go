@@ -76,8 +76,90 @@ func acceleratedMainlineRecipe(arch string, be *backendInfo, caps *detect.Capabi
 }
 
 func acceleratedMainlineArgs(r *backends.Recipe) []string {
-	return []string{r.GitURL, "--tag", r.Tag, "--checkout-name", r.Tag, "--branch", r.Branch,
-		"--commit", r.Commit, "--route-arch", r.RouteArch, "--accel", r.Accel}
+	args := []string{r.GitURL, "--tag", r.Tag, "--checkout-name", r.Tag, "--branch", r.Branch}
+	if r.Commit != "" {
+		args = append(args, "--commit", r.Commit)
+	}
+	return append(args, "--route-arch", r.RouteArch, "--accel", r.Accel)
+}
+
+// acceleratedArchBuildRecipe is the main-model build to offer when no installed
+// backend can load arch at all and no fork was found. A reviewed helper recipe
+// already names an upstream commit (and patches) that knows the architecture;
+// it is kept CPU-only and helper-scoped for the support model, so the offer is
+// a separately tagged accelerated build of the same source. Without one,
+// current mainline is the only candidate, and the build is verified to carry
+// the architecture before it is registered.
+//
+// Nanbeige4.2 needed this: a release install has no mainline source build, so
+// the existing "update mainline" offer could only answer "nothing to update".
+func acceleratedArchBuildRecipe(arch string, caps *detect.Capabilities, accelFallback string) *backends.Recipe {
+	arch = strings.TrimSpace(arch)
+	if arch == "" {
+		return nil
+	}
+	accel := accelFallback
+	if hostHasNVIDIAGPU(caps) {
+		accel = "cuda"
+	}
+	for _, r := range backends.Recipes() {
+		if r.HelperOnly && strings.EqualFold(strings.TrimSpace(r.RouteArch), arch) {
+			c := r
+			c.Tag = r.Tag + "-" + accel
+			c.Name = c.Tag
+			c.HelperOnly = false
+			c.Accel = accel
+			c.RouteArch = arch
+			return &c
+		}
+	}
+	tag := "llama-" + accel + "-" + strings.ToLower(regexp.MustCompile(`[^A-Za-z0-9]+`).ReplaceAllString(arch, "-"))
+	return &backends.Recipe{Name: tag, Tag: tag, GitURL: mainlineLlamaCppGit, Branch: "master", RouteArch: arch, Accel: accel}
+}
+
+// offerAcceleratedArchBuildWith asks (or, headless, explains) before building
+// a backend for an architecture nothing installed can load. Declining or a
+// failed build leaves the existing fail-closed error in place.
+func offerAcceleratedArchBuildWith(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities,
+	assumeYes bool, in io.Reader, out io.Writer, terminal bool, accelFallback string,
+	install func([]string, *backends.Recipe) error,
+) bool {
+	if backendChoiceExplicit(req) || model == nil {
+		return false
+	}
+	recipe := acceleratedArchBuildRecipe(model.ModelArch, caps, accelFallback)
+	if recipe == nil {
+		return false
+	}
+	source := "current mainline llama.cpp"
+	if recipe.Commit != "" {
+		source = "llama.cpp at reviewed commit " + recipe.Commit
+	}
+	args := acceleratedMainlineArgs(recipe)
+	if !assumeYes {
+		if !terminal {
+			fmt.Fprintf(out, "[launch] no installed backend loads %s. Build %s with %s with: ggrun backend add %s\n",
+				model.ModelArch, source, recipe.Accel, strings.Join(args, " "))
+			return false
+		}
+		fmt.Fprintf(out, "No installed backend can load %s. Build %s with %s as backend %q (about 20-40 min)? [y/N] ",
+			model.ModelArch, source, recipe.Accel, recipe.Tag)
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
+			return false
+		}
+	}
+	fmt.Fprintf(out, "[launch] building %s with %s as backend %q for %s\n", source, recipe.Accel, recipe.Tag, model.ModelArch)
+	if err := install(args, recipe); err != nil {
+		fmt.Fprintf(out, "[launch] build failed: %v\n", err)
+		return false
+	}
+	return true
+}
+
+func offerAcceleratedArchBuild(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities, assumeYes bool) bool {
+	return offerAcceleratedArchBuildWith(req, model, caps, assumeYes, os.Stdin, os.Stderr, stdinIsTerminal(),
+		defaultAccel(), addBackendRecipe)
 }
 
 // offerAcceleratedMainlineWith asks (or, headless, explains) before building a

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -93,5 +94,52 @@ func TestFailedCUDABuildFallsBackToVulkan(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "continuing on the Vulkan backend") {
 		t.Fatalf("failure not explained: %q", out.String())
+	}
+}
+
+// Nanbeige4.2 on a fresh install: neither bundled backend knows "nanbeige",
+// the only recipe is the CPU-only helper, and the mainline-update offer could
+// only say "nothing to update". The launch must offer an accelerated build of
+// the reviewed source instead, without touching the helper build.
+func TestUnsupportedArchOffersAcceleratedBuildOfReviewedSource(t *testing.T) {
+	nvidia := &detect.Capabilities{GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti"}}}
+	r := acceleratedArchBuildRecipe("nanbeige", nvidia, "cpu")
+	if r == nil || r.HelperOnly || r.Accel != "cuda" || r.Tag != "nanbeige42-cuda" || r.Commit == "" || len(r.Patches) == 0 {
+		t.Fatalf("reviewed helper source not offered as an accelerated main build: %+v", r)
+	}
+	if backends.RecipeByName(r.Tag) != nil {
+		t.Fatal("the accelerated build shares a tag with a catalog recipe and would inherit its helper policy")
+	}
+	novel := acceleratedArchBuildRecipe("brandnew", nil, "cpu")
+	if novel == nil || novel.GitURL != mainlineLlamaCppGit || novel.Commit != "" || novel.Accel != "cpu" || novel.RouteArch != "brandnew" {
+		t.Fatalf("novel architecture did not fall back to current mainline: %+v", novel)
+	}
+	if args := strings.Join(acceleratedMainlineArgs(novel), " "); strings.Contains(args, "--commit") {
+		t.Fatalf("an unpinned build passed an empty commit: %q", args)
+	}
+
+	model := &placement.ModelProfile{ModelArch: "nanbeige"}
+	var installed []string
+	install := func(args []string, _ *backends.Recipe) error { installed = args; return nil }
+	var out strings.Builder
+	if offerAcceleratedArchBuildWith(&launchRequest{}, model, nvidia, false, strings.NewReader(""), &out, false, "cpu", install) || installed != nil {
+		t.Fatal("headless launch built without consent")
+	}
+	if !strings.Contains(out.String(), "ggrun backend add") {
+		t.Fatalf("headless launch did not print the build command: %q", out.String())
+	}
+	if offerAcceleratedArchBuildWith(&launchRequest{}, model, nvidia, false, strings.NewReader("n\n"), &out, true, "cpu", install) || installed != nil {
+		t.Fatal("declined build still ran")
+	}
+	if !offerAcceleratedArchBuildWith(&launchRequest{}, model, nvidia, false, strings.NewReader("y\n"), &out, true, "cpu", install) || installed == nil {
+		t.Fatal("accepted build did not run")
+	}
+	installed = nil
+	if offerAcceleratedArchBuildWith(&launchRequest{BackendExplicit: true}, model, nvidia, true, nil, &out, true, "cpu", install) || installed != nil {
+		t.Fatal("an explicit backend choice was overridden by a build offer")
+	}
+	failed := func([]string, *backends.Recipe) error { return errors.New("cmake failed") }
+	if offerAcceleratedArchBuildWith(&launchRequest{}, model, nvidia, true, nil, &out, true, "cpu", failed) {
+		t.Fatal("a failed build reported success")
 	}
 }

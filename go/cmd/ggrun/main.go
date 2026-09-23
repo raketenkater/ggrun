@@ -6223,6 +6223,9 @@ func cmdLaunch(args []string) {
 		if offerDiscoveredArchFork(req, model, cfg.AssumeYes) {
 			be = resolveLaunchBackend(req, model, caps)
 		}
+		if be == nil && offerAcceleratedArchBuild(req, model, caps, cfg.AssumeYes) {
+			be = resolveLaunchBackend(req, model, caps)
+		}
 		if be == nil && offerMainlineBackendUpdate(req, model, cfg.AssumeYes) {
 			be = resolveLaunchBackend(req, model, caps)
 		}
