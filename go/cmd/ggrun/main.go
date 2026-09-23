@@ -6188,6 +6188,11 @@ func cmdLaunch(args []string) {
 	if !waitForPredecessorPort(launchPort, 20*time.Second, os.Stderr) {
 		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 20s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
 	}
+	if releaseIsPending(cfg.CacheDir) {
+		if pre, perr := detect.Detect(); perr == nil {
+			waitForPendingRelease(cfg.CacheDir, 90*time.Second, currentReleaseReadings(pre.GPUs), time.Sleep)
+		}
+	}
 
 	caps, err := detect.Detect()
 	if err != nil {
@@ -6886,7 +6891,9 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
 		p.Kill()
 	}
-	waitForShutdownRelease(resourceBaseline, 2*time.Minute, launchResourcesAtBaseline, time.Sleep)
+	if !waitForShutdownRelease(resourceBaseline, shutdownReleaseWait, launchResourcesAtBaseline, time.Sleep) {
+		markReleasePending(cfg.CacheDir)
+	}
 	claudeAuto.stop()
 }
 

@@ -690,6 +690,34 @@ func automaticCalibrationAdmissionEvidenceValid(decision *placement.CalibrationD
 		decision.FinalistFailureReason != ""
 }
 
+type unmeasuredSearchOutcome int
+
+const (
+	// searchRetry keeps the search retryable: nothing stable was learned.
+	searchRetry unmeasuredSearchOutcome = iota
+	// searchBudgetBound records a bounded attempt: the elapsed budget cut the
+	// search off, and the next launch would repeat it identically.
+	searchBudgetBound
+	// searchAdmissionOnly records that the finalist failed exact admission.
+	searchAdmissionOnly
+)
+
+// classifyUnmeasuredSearch decides what a search that measured no challenger
+// may record. Only exact admission failures are stable negative evidence; a
+// candidate that started and then timed out or returned incomplete data stays
+// retryable, unless the controller's own budget cut the search off, which
+// repeats identically and so is recorded as a bounded attempt. That includes a
+// refused finalist whose fallback ran out of time (MiniMax-M3, 2026-09-23).
+func classifyUnmeasuredSearch(mode string, budgetExhausted, stableAdmissionFailed, admissionInconclusive, exactCandidateStarted bool) unmeasuredSearchOutcome {
+	if budgetExhausted && mode == calibrateAuto {
+		return searchBudgetBound
+	}
+	if !stableAdmissionFailed || admissionInconclusive || exactCandidateStarted {
+		return searchRetry
+	}
+	return searchAdmissionOnly
+}
+
 // errCalibrationBudgetExhausted marks a measurement cut off by the
 // controller's elapsed-time budget rather than by the candidate itself.
 var errCalibrationBudgetExhausted = errors.New("calibration elapsed-time budget exhausted")
@@ -1155,11 +1183,13 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if curP == nil {
 			return nil, strategy, serverArgs, nil
 		}
-		// A finalist that could not be measured within the elapsed budget is
-		// not negative evidence, but the next launch repeats the identical
-		// budget-bound search. Record the attempt so the retry is bounded; the
-		// decision never names a winner other than the measured baseline.
-		if budgetExhausted && !stableAdmissionFailed && mode == calibrateAuto {
+		// A search the elapsed budget cut off is not negative evidence, but the
+		// next launch repeats it identically, including when the finalist was
+		// refused and only its fallback ran out of time. Record the attempt so
+		// the retry is bounded; the decision never names a winner other than the
+		// measured baseline.
+		outcome := classifyUnmeasuredSearch(mode, budgetExhausted, stableAdmissionFailed, admissionInconclusive, exactCandidateStarted)
+		if outcome == searchBudgetBound {
 			pending := newCalibrationDecision(scopeKey, model, defaultResult, measurements[0])
 			annotateOptimizationDecision(pending, candidates, measurements)
 			if pending != nil {
@@ -1170,10 +1200,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				return curP, strategy, serverArgs, pending
 			}
 		}
-		// Only exact admission failures are stable negative evidence. A candidate
-		// that started but whose benchmark timed out or returned incomplete data
-		// must remain retryable on the next launch.
-		if !stableAdmissionFailed || admissionInconclusive || exactCandidateStarted {
+		if outcome == searchRetry {
 			return curP, strategy, serverArgs, nil
 		}
 		pending := newCalibrationDecision(scopeKey, model, defaultResult, measurements[0])
