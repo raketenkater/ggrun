@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.2.10 — 2026-09-23
+
 - **Automatic backends reach serving.** On NVIDIA, an architecture only the
   Vulkan build knows (MiMo-V2.6) gets an offer to build CUDA llama.cpp at the
   same commit; a discovered PR fork (llama.cpp #28699) installs, serves and
