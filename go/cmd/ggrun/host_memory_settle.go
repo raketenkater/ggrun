@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -87,4 +88,79 @@ func waitForShutdownRelease(baseline *detect.Capabilities, timeout time.Duration
 	}
 	fmt.Fprintf(os.Stderr, "[launch] warning: RAM/VRAM had not returned to the pre-launch level within %s; a relaunch now may see less free memory\n", timeout)
 	return false
+}
+
+// shutdownReleaseWait bounds how long exit waits for the stopped backend's
+// memory. It stays under the 30 s grace a supervisor typically allows after
+// SIGINT: MiniMax-M3 (about 120 GiB resident) outlasted a 2-minute wait and
+// the launcher was force-killed. Memory still returning after this is left to
+// the next launch, which waits for it (releasePendingMarker).
+const shutdownReleaseWait = 20 * time.Second
+
+func releasePendingMarker(cacheDir string) string {
+	return filepath.Join(cacheDir, "release-pending")
+}
+
+func releaseIsPending(cacheDir string) bool {
+	if cacheDir == "" {
+		return false
+	}
+	_, err := os.Stat(releasePendingMarker(cacheDir))
+	return err == nil
+}
+
+// markReleasePending records that a backend was still returning memory when
+// ggrun exited.
+func markReleasePending(cacheDir string) {
+	if cacheDir == "" {
+		return
+	}
+	_ = os.MkdirAll(cacheDir, 0o755)
+	_ = os.WriteFile(releasePendingMarker(cacheDir), []byte(time.Now().UTC().Format(time.RFC3339)), 0o644)
+}
+
+// waitForPendingRelease runs before hardware detection. Only a recent marker
+// triggers it, so an ordinary launch pays nothing. It polls until RAM and VRAM
+// readings stop changing, bounded by limit, then clears the marker.
+func waitForPendingRelease(cacheDir string, limit time.Duration, read func() (ramMB, vramMB int), sleep func(time.Duration)) {
+	path := releasePendingMarker(cacheDir)
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	defer os.Remove(path)
+	if time.Since(info.ModTime()) > 10*time.Minute {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "[launch] the previous backend was still releasing memory; waiting for it to settle")
+	ram, vram := read()
+	stable := 0
+	for waited := time.Duration(0); waited < limit && stable < 3; waited += 2 * time.Second {
+		sleep(2 * time.Second)
+		nowRAM, nowVRAM := read()
+		if abs(nowRAM-ram) < 256 && abs(nowVRAM-vram) < 256 {
+			stable++
+		} else {
+			stable = 0
+		}
+		ram, vram = nowRAM, nowVRAM
+	}
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// currentReleaseReadings sums what waitForPendingRelease compares.
+func currentReleaseReadings(gpus []detect.GPU) func() (int, int) {
+	return func() (int, int) {
+		vram := 0
+		for _, g := range gpus {
+			vram += placement.QueryVRAMUsed(g.Index)
+		}
+		return currentAvailableRAMMB(), vram
+	}
 }

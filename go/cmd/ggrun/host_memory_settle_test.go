@@ -89,3 +89,42 @@ func TestShutdownWaitsForBackendMemoryRelease(t *testing.T) {
 		t.Errorf("waited %s past its bound", *waited)
 	}
 }
+
+// MiniMax-M3 (about 120 GiB resident) outlasted a 2-minute exit wait and the
+// supervising harness force-killed the launcher. Exit waits briefly, and the
+// memory still returning is waited for by the next launch instead.
+func TestPendingReleaseMovesTheWaitToTheNextLaunch(t *testing.T) {
+	if shutdownReleaseWait >= 30*time.Second {
+		t.Fatalf("exit wait %s is not below a supervisor's typical 30 s grace", shutdownReleaseWait)
+	}
+	dir := t.TempDir()
+	if releaseIsPending(dir) {
+		t.Fatal("marker present before any shutdown")
+	}
+	calls := 0
+	read := func() (int, int) { calls++; return 100000, 1000 }
+	waitForPendingRelease(dir, time.Minute, read, func(time.Duration) {})
+	if calls != 0 {
+		t.Fatal("an ordinary launch waited for a release that was never pending")
+	}
+	markReleasePending(dir)
+	if !releaseIsPending(dir) {
+		t.Fatal("marker not written")
+	}
+	ram, vram := 60000, 40000
+	read = func() (int, int) {
+		calls++
+		if ram < 180000 {
+			ram += 40000
+			vram -= 13000
+		}
+		return ram, vram
+	}
+	waitForPendingRelease(dir, time.Minute, read, func(time.Duration) {})
+	if ram < 180000 {
+		t.Fatalf("launch stopped waiting while memory was still returning (ram %d)", ram)
+	}
+	if releaseIsPending(dir) {
+		t.Fatal("marker not cleared after waiting")
+	}
+}
