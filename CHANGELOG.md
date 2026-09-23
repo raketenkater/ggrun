@@ -4,41 +4,16 @@
 
 ## v3.2.10 — 2026-09-23
 
-- **Automatic backends reach serving.** On NVIDIA, an architecture only the
-  Vulkan build knows (MiMo-V2.6) gets an offer to build CUDA llama.cpp at the
-  same commit; a discovered PR fork (llama.cpp #28699) installs, serves and
-  relaunches. Backends on current llama.cpp get `--load-mode` instead of the
-  removed `--mmap/--no-mmap/--mlock`, keeping resident loading.
-- **Crashed or wedged backends are stopped** during launch verification (fatal
-  ggml line, exit, or no health and no CPU progress) instead of waiting out the
-  canary.
-- **Relaunch after a large model works.** Shutdown waits for the backend's
-  memory to be released, and the containment check waits for memory still
-  being returned.
-- **Vulkan:** devices are numbered in ggrun's order, so the split, `-ot` and
-  `--gpus` reach the intended cards; Vulkan allocation failures recover like
-  CUDA ones.
-- **Windows:** the architecture probe follows DLL imports; automatic selection
-  no longer rejects every model.
-- **Recommendations rank by speed again.** Parameter counts come from the model
-  name, quant sizes and GGUF geometry; the catalog stopped carrying them on
-  2026-09-10, which removed speed from ranking.
-- **The TUI default launch is the CLI default launch.** It no longer pins the
-  model's route as `--backend` or the saved support setting as a flag.
-- **Root:** `ggrun <model> --ai-tune` as root without a user session is tested
-  in CI (#64).
-- **The optimizer stops repeating itself.** Models that serve but cannot prove
-  cache reuse (hybrid recurrent, nondeterministic replay) keep their measured
-  baseline, and a finalist the time budget cuts off is retried a bounded number
-  of times; MiniMax-M3 and hybrid Qwen no longer re-run the search every launch.
-- **Unsupported architectures get a build offer.** When nothing installed loads
-  a model (Nanbeige4.2 on a release install), ggrun offers a GPU build of the
-  reviewed source or current mainline.
-- **Looped transformers** (`num_loops`) are planned with a KV cache per loop.
-- **Recovery converges.** Measured re-plans keep a proven ubatch and accepted
-  context, and a large deficit on the main KV device takes a bounded priced step.
-- **The wedge watchdog counts only the backend's CPU**, so a frozen backend is
-  stopped after 3 minutes instead of being hidden by launch helper processes.
+- Automatic backend installs: CUDA builds for Vulkan-only architectures,
+  discovered PR forks, and build offers for unsupported architectures.
+- Backends on current llama.cpp use `--load-mode`.
+- Stuck or crashed backends are stopped during launch verification.
+- Relaunch after large models; Vulkan device order; Windows architecture probe.
+- Recommendations rank by speed again.
+- The TUI default launch matches the CLI default.
+- The optimizer no longer repeats a search that cannot finish.
+- KV planning for looped transformers; recovery convergence fixes.
+- Root `--ai-tune` tested in CI (#64).
 
 - **Agent transport hardening now fails early and records truthful phases.**
   Workflow calls with competing `name`, `script`, or `scriptPath` sources are
