@@ -139,6 +139,8 @@ func cmdMemoryProbe(args []string) {
 			recovery.reject(serverArgs)
 			recovery.rejectContext(strategy,
 				contextReclaimTokens(model, strategy, serverArgs, outcome.DeficitMB, outcome.Device))
+			recovery.notePricedContextStep(strategy,
+				majorityDevicePricedTokens(model, strategy, serverArgs, outcome.DeficitMB, outcome.Device))
 			if contextDeficitOutstripsDevice(model, strategy, serverArgs, outcome.DeficitMB, outcome.Device) {
 				recovery.rejectContextOutstripped(strategy)
 			}

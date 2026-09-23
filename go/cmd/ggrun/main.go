@@ -4996,6 +4996,8 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				memoryRecovery.reject(serverArgs)
 				memoryRecovery.rejectContext(strategy,
 					contextReclaimTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
+				memoryRecovery.notePricedContextStep(strategy,
+					majorityDevicePricedTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
 				if contextDeficitOutstripsDevice(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device) {
 					memoryRecovery.rejectContextOutstripped(strategy)
 				}

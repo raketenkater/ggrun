@@ -130,13 +130,22 @@ func (r *launchMemoryRecovery) rejectContext(strategy *placement.Strategy, recla
 	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
 		return
 	}
+	_ = reclaimTokens // retained in the signature for the caller's measurement; see automaticContextCeiling
 	if r.rejectedContext == 0 || strategy.ContextSize < r.rejectedContext {
 		r.rejectedContext = strategy.ContextSize
 	}
-	// Granule steps stay the rule while they can plausibly cover the deficit in
-	// the budget. Only a priced requirement beyond that takes a larger step, and
-	// never more than the fraction the outstripped descent uses: an uncapped
-	// deficit-sized step once leapt GLM-5.3-Flash from 662,528 to 236,544 tokens.
+}
+
+// notePricedContextStep lets a rejection whose deficit sits on a device holding
+// at least an even share of the KV take a priced step when one-granule steps
+// could not cover it within the re-plan budget. The step never exceeds the
+// fraction the outstripped descent uses: an uncapped deficit-sized step once
+// leapt GLM-5.3-Flash from 662,528 to 236,544 tokens. Pass the result of
+// majorityDevicePricedTokens; 0 records nothing.
+func (r *launchMemoryRecovery) notePricedContextStep(strategy *placement.Strategy, reclaimTokens int) {
+	if r == nil || strategy == nil || !strategy.ContextAuto || strategy.ContextSize <= 0 {
+		return
+	}
 	if reclaimTokens > maxPreflightReplans*contextRecoveryGranuleTokens {
 		step := reclaimTokens
 		if limit := strategy.ContextSize / contextRecoveryStepDivisor; step > limit {
@@ -256,6 +265,38 @@ func contextReclaimTokens(model *placement.ModelProfile, strategy *placement.Str
 		tokens = maxStep
 	}
 	if tokens <= 0 {
+		return 0
+	}
+	return tokens
+}
+
+// majorityDevicePricedTokens prices a deficit for notePricedContextStep, only
+// when the failing device holds at least an even share of the KV. A deficit on
+// a small-share device prices to a large global cut (every token frees little
+// there); moving layers off that device is the right lever, not shrinking
+// everyone's context.
+func majorityDevicePricedTokens(model *placement.ModelProfile, strategy *placement.Strategy, args []string, deficitMB, device int) int {
+	tokens := contextReclaimTokens(model, strategy, args, deficitMB, device)
+	if tokens <= 0 {
+		return 0
+	}
+	kvType := strategy.KVType
+	if kvType == "" {
+		kvType = effectiveMemoryArgValues(args)["cache-k"]
+	}
+	swaFull := hasArg(args, "--swa-full")
+	deviceKV := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType, strategy.KVPlacement, swaFull, strategy.TensorSplit, device)
+	totalKV := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, swaFull)
+	devices := 0
+	for _, share := range strategy.TensorSplit {
+		if share > 0 {
+			devices++
+		}
+	}
+	if devices <= 1 {
+		return tokens
+	}
+	if deviceKV <= 0 || totalKV <= 0 || deviceKV*devices < totalKV {
 		return 0
 	}
 	return tokens
