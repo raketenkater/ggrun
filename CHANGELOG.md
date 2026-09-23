@@ -2,29 +2,32 @@
 
 ## Unreleased
 
-- **Automatic backends reach serving.** On NVIDIA, an architecture only the
-  Vulkan build knows (MiMo-V2.6) gets an offer to build CUDA llama.cpp at the
-  same commit; a discovered PR fork (llama.cpp #28699) installs, serves and
-  relaunches. Backends on current llama.cpp get `--load-mode` instead of the
-  removed `--mmap/--no-mmap/--mlock`, keeping resident loading.
-- **Crashed or wedged backends are stopped** during launch verification (fatal
-  ggml line, exit, or no health and no CPU progress) instead of waiting out the
-  canary.
-- **Relaunch after a large model works.** Shutdown waits for the backend's
-  memory to be released, and the containment check waits for memory still
-  being returned.
-- **Vulkan:** devices are numbered in ggrun's order, so the split, `-ot` and
-  `--gpus` reach the intended cards; Vulkan allocation failures recover like
-  CUDA ones.
-- **Windows:** the architecture probe follows DLL imports; automatic selection
-  no longer rejects every model.
-- **Recommendations rank by speed again.** Parameter counts come from the model
-  name, quant sizes and GGUF geometry; the catalog stopped carrying them on
-  2026-09-10, which removed speed from ranking.
-- **The TUI default launch is the CLI default launch.** It no longer pins the
-  model's route as `--backend` or the saved support setting as a flag.
-- **Root:** `ggrun <model> --ai-tune` as root without a user session is tested
-  in CI (#64).
+## v3.2.10 — 2026-09-23
+
+### Added
+
+- Automatic backend provisioning: CUDA builds for architectures supported only
+  by the Vulkan backend, installation of discovered llama.cpp pull-request
+  forks, and build offers for architectures no installed backend supports.
+- Backend health monitoring during launch verification.
+- CI coverage for `--ai-tune` when running as root (#64).
+
+### Changed
+
+- The TUI default launch now uses the same configuration as the CLI default.
+- Optimizer results are retained when a profile cannot verify cache reuse, and
+  retries of an incomplete measurement are bounded.
+
+### Fixed
+
+- Compatibility with backends that use `--load-mode` instead of the mmap flags.
+- Relaunch reliability after large models.
+- Vulkan device ordering and Windows architecture detection.
+- Speed estimates in model recommendations.
+- KV cache planning for looped transformer models.
+- Convergence of memory recovery re-planning.
+
+### Other changes
 
 - **Agent transport hardening now fails early and records truthful phases.**
   Workflow calls with competing `name`, `script`, or `scriptPath` sources are
