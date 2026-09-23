@@ -1016,3 +1016,23 @@ func TestDegradedProfileKeepsOnlyBaselineDecisions(t *testing.T) {
 		t.Fatalf("attempts not counted per finalist: same=%d other=%d", next.FinalistAttempts, other.FinalistAttempts)
 	}
 }
+
+func TestUnmeasuredSearchIsBoundedWhenTheBudgetCutsItOff(t *testing.T) {
+	for _, tc := range []struct {
+		name                                         string
+		mode                                         string
+		budget, stableRefusal, inconclusive, started bool
+		want                                         unmeasuredSearchOutcome
+	}{
+		{"finalist started, budget cut its workload", calibrateAuto, true, false, true, true, searchBudgetBound},
+		{"finalist refused, fallback cut by budget", calibrateAuto, true, true, true, false, searchBudgetBound},
+		{"finalist refused, nothing else tried", calibrateAuto, false, true, false, false, searchAdmissionOnly},
+		{"finalist started, benchmark failed", calibrateAuto, false, false, true, true, searchRetry},
+		{"explicit calibration keeps retrying", calibrateOn, true, false, true, true, searchRetry},
+	} {
+		got := classifyUnmeasuredSearch(tc.mode, tc.budget, tc.stableRefusal, tc.inconclusive, tc.started)
+		if got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
