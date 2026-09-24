@@ -101,7 +101,8 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 		// non-reproducible. Explicit maintenance mode may still request it.
 		return nil
 	}
-	scopeKey := calibrationScopeKey(req, model, be, caps, strategy)
+	scope := calibrationScope(req, model, be, caps, strategy)
+	scopeKey := scope.String()
 	candidates := calibrationCandidates(req, cfg, model, be, caps, strategy)
 	if len(rejected) > 0 && rejected[0] != nil {
 		candidates = filterCalibrationCandidates(candidates, rejected[0])
@@ -110,7 +111,11 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 		return nil
 	}
 	var cachedDecision *placement.CalibrationDecision
-	if decision, err := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey); err == nil {
+	decision, loadErr := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
+	if loadErr != nil {
+		explainCalibrationMiss(cfg.CacheDir, model, scope)
+	}
+	if loadErr == nil {
 		cachedDecision = decision
 		// A reusable recorded decision (including "default won") makes the
 		// controller finite. A merely screened explicit result is intentionally
@@ -621,9 +626,39 @@ func calibrationCandidates(req *launchRequest, cfg *config.Config, model *placem
 }
 
 func calibrationScopeKey(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy) string {
+	return calibrationScope(req, model, be, caps, strategy).String()
+}
+
+func calibrationScope(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy) placement.CalibrationScopeKey {
 	opts := placementOptionsFromRequest(req, model, be, "")
-	key := placement.NewCalibrationScopeKey(model, caps, opts, strategy)
-	return key.String()
+	return placement.NewCalibrationScopeKey(model, caps, opts, strategy)
+}
+
+// scopedCalibrationDecision records the scope components beside the hash.
+func scopedCalibrationDecision(scope placement.CalibrationScopeKey, model *placement.ModelProfile, defaultResult *benchmark.Result, best calibrationMeasurement) *placement.CalibrationDecision {
+	decision := newCalibrationDecision(scope.String(), model, defaultResult, best)
+	if decision != nil {
+		decision.Scope = &scope
+	}
+	return decision
+}
+
+// explainCalibrationMiss says why this launch has no reusable decision when an
+// earlier launch of the same model recorded one: the optimizer is about to
+// repeat, and the changed scope component is the reason.
+func explainCalibrationMiss(cacheDir string, model *placement.ModelProfile, scope placement.CalibrationScopeKey) {
+	if model == nil {
+		return
+	}
+	file, differing := placement.ExplainCalibrationScopeMiss(cacheDir, placement.CalibrationModelBasename(model.Path), scope)
+	if file == "" {
+		return
+	}
+	if len(differing) == 0 {
+		fmt.Printf("[optimize] no reusable decision for this scope although %s has identical components\n", file)
+		return
+	}
+	fmt.Printf("[optimize] no decision for this scope; %s was recorded with different %s\n", file, strings.Join(differing, ", "))
 }
 
 type calibrationMeasurement struct {
@@ -885,7 +920,8 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	}
 	mode := effectiveCalibrationMode(req)
 	budget := calibrationBudgetFor(mode)
-	scopeKey := calibrationScopeKey(req, model, be, caps, strategy)
+	scope := calibrationScope(req, model, be, caps, strategy)
+	scopeKey := scope.String()
 	startedAt := time.Now()
 	if mode == calibrateAuto {
 		fmt.Printf("[optimize] measuring the live baseline plus one successful calculated challenger (up to %d contained admissions, elapsed budget=%s)\n",
@@ -1246,7 +1282,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		// measured baseline.
 		outcome := classifyUnmeasuredSearch(mode, budgetExhausted, stableAdmissionFailed, admissionInconclusive, exactCandidateStarted)
 		if outcome == searchBudgetBound {
-			pending := newCalibrationDecision(scopeKey, model, defaultResult, measurements[0])
+			pending := scopedCalibrationDecision(scope, model, defaultResult, measurements[0])
 			annotateOptimizationDecision(pending, candidates, measurements)
 			if pending != nil {
 				prev, _ := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
@@ -1263,7 +1299,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if outcome == searchRetry {
 			return curP, strategy, serverArgs, nil
 		}
-		pending := newCalibrationDecision(scopeKey, model, defaultResult, measurements[0])
+		pending := scopedCalibrationDecision(scope, model, defaultResult, measurements[0])
 		annotateOptimizationDecision(pending, candidates, measurements)
 		pending.FinalistFailureClass = stableFailureClass
 		pending.FinalistFailureReason = stableFailureReason
@@ -1325,7 +1361,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		return curP, restoredStrategy, restoredArgs, nil
 	}
 
-	pending := newCalibrationDecision(scopeKey, model, defaultResult, best)
+	pending := scopedCalibrationDecision(scope, model, defaultResult, best)
 	annotateOptimizationDecision(pending, candidates, measurements)
 	if best.Name != "default" && mode == calibrateOn {
 		req.CalibrationScreened = true

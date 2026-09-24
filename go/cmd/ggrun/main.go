@@ -9620,7 +9620,7 @@ func detectBackend(path string) *backendInfo {
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
 	out, _ := cmd.CombinedOutput()
-	help := string(out)
+	help := stableBackendProbeOutput(string(out))
 	info.Help = help
 	info.Identity = backendBuildIdentity(path)
 	lowerBase := strings.ToLower(filepath.Base(path))
@@ -9671,6 +9671,26 @@ func probedCPUExpertMMapCapability(info *backendInfo) (placement.CPUExpertMMapCa
 	return placement.CPUExpertMMapFileBacked, "help-probed mapped CPU-expert loader: " + identity
 }
 
+// backendLogLine matches llama.cpp's common_log prefix: elapsed time since
+// process start, then a level letter ("0.00.000.407 I srv  llama_server: ...").
+var backendLogLine = regexp.MustCompile(`^\d+\.\d{2}\.\d{3}\.\d{3} [DIWE] `)
+
+// stableBackendProbeOutput drops the backend's own timestamped log lines from
+// --version/--help output. Those lines carry a per-run elapsed time, and since
+// llama.cpp began logging one on startup, hashing the raw output gave the same
+// build a new identity on every launch: every cache keyed on it missed, so
+// each relaunch repeated calibration (observed live, 2026-09-24).
+func stableBackendProbeOutput(out string) string {
+	lines := strings.Split(out, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !backendLogLine.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 func backendBuildIdentity(path string) string {
 	cmd := exec.Command(path, "--version")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
@@ -9678,7 +9698,7 @@ func backendBuildIdentity(path string) string {
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
 	out, _ := cmd.CombinedOutput()
-	material := strings.TrimSpace(string(out))
+	material := strings.TrimSpace(stableBackendProbeOutput(string(out)))
 	if fi, err := os.Stat(path); err == nil {
 		material += fmt.Sprintf("\n%s\n%d\n%d", filepath.Base(path), fi.Size(), fi.ModTime().UnixNano())
 	}
