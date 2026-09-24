@@ -16,12 +16,19 @@ import (
 
 const mainlineLlamaCppGit = "https://github.com/ggml-org/llama.cpp.git"
 
-var backendVersionCommit = regexp.MustCompile(`version:\s*\d+\s*\(([0-9a-f]{7,40})\)`)
+// backendVersionCommit matches both llama.cpp version lines: the older
+// "version: 10954 (89fe24240)" and the newer
+// "version: 0.5.0-dev (build 11159, commit 6b790a9c2)".
+var backendVersionCommit = regexp.MustCompile(`version:\s*(?:\d+\s*\(|[^\n(]*\(build\s+\d+,\s*commit\s+)([0-9a-f]{7,40})\)`)
 
 // backendCommit reads the source commit a llama.cpp build reports.
 func backendCommit(path string) string {
 	out, _ := exec.Command(path, "--version").CombinedOutput()
-	if m := backendVersionCommit.FindStringSubmatch(string(out)); m != nil {
+	return parseBackendVersionCommit(string(out))
+}
+
+func parseBackendVersionCommit(out string) string {
+	if m := backendVersionCommit.FindStringSubmatch(out); m != nil {
 		return m[1]
 	}
 	return ""

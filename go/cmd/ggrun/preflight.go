@@ -485,6 +485,62 @@ func backendLoadFailureDiagnostic(logData string) string {
 	return best
 }
 
+// modelFormatRejectionMarkers are llama.cpp loader errors about the GGUF's own
+// metadata or tensor layout. They mean the backend predates the model's format
+// (for example a newer revision of a supported architecture that adds layers),
+// so no memory, context or KV setting can make the load succeed. Allocation
+// failures ("unable to allocate ... buffer") are deliberately absent: they are
+// reported through the same "error loading model" prefix but are memory errors.
+var modelFormatRejectionMarkers = []string{
+	"error loading model hyperparameters",
+	"error loading model architecture",
+	"error loading model vocabulary",
+	"unknown model architecture",
+	"wrong array length",
+	"missing tensor",
+	"has wrong shape",
+	"wrong number of tensors",
+}
+
+// modelFormatRejection returns the backend's loader line when it rejected the
+// model file itself, or "" when the log shows no such rejection.
+func modelFormatRejection(logData string) string {
+	for _, line := range strings.Split(logData, "\n") {
+		lower := strings.ToLower(line)
+		for _, marker := range modelFormatRejectionMarkers {
+			if !strings.Contains(lower, marker) {
+				continue
+			}
+			detail := strings.TrimSpace(line)
+			if i := strings.LastIndex(lower, "error loading model"); i >= 0 {
+				detail = strings.TrimSpace(line[i:])
+			}
+			if len(detail) > 300 {
+				detail = detail[:300]
+			}
+			return detail
+		}
+	}
+	return ""
+}
+
+// backendModelFormatError marks a backend that cannot read the model file. It
+// is not a memory result: the launch must not suggest memory controls, and the
+// actionable fix is a newer backend.
+type backendModelFormatError struct {
+	Backend string
+	Detail  string
+	LogPath string
+}
+
+func (e *backendModelFormatError) Error() string {
+	msg := fmt.Sprintf("backend %s cannot read this model file; it is older than the model's format: %s. Update it with: ggrun backend update", e.Backend, e.Detail)
+	if e.LogPath != "" {
+		msg += " (backend log: " + e.LogPath + ")"
+	}
+	return msg
+}
+
 // backendUnclassifiedProbeError marks a contained allocation preflight that
 // failed with a backend/model error no ggrun rule classified: no memory OOM
 // (device or firewall/cgroup), no backendAdjustmentFromLog rule, and no known
@@ -714,6 +770,11 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 			return memoryPlanEvidence{}, &ikAllocationOOMError{
 				Device: device, AllocMB: allocMB, DeficitMB: deficit, IsComputeBuffer: isComputeBuffer,
 			}
+		}
+		// A loader that rejects the file itself cannot be helped by any launch
+		// flag, so it is reported before flag adjustments are considered.
+		if detail := modelFormatRejection(logData); detail != "" {
+			return memoryPlanEvidence{}, &backendModelFormatError{Backend: be.Path, Detail: detail, LogPath: failureLogPath}
 		}
 		// Resource failures take precedence when more than one diagnostic is
 		// present. Only mutate optional launch flags once the firewall, cgroup,
