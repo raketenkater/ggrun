@@ -791,13 +791,32 @@ def raw_name_tokens(text: str) -> set[str]:
     return set(norm(text).split())
 
 
+def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[str, Any]) -> bool:
+    """Words before the model's own name may only be its creator's name.
+
+    Quantizers prefix the publisher ("mistralai_Devstral", "LiquidAI_LFM2.5");
+    anything else there names a retune ("MANGO-Qwen3-Omni", "Huihui-...").
+    """
+    words = norm(candidate_name).split()
+    families = family_tokens(target_tokens)
+    start = next((i for i, w in enumerate(words)
+                  if w in target_tokens or any(w.startswith(f) for f in families)), None)
+    if not start:
+        return True
+    prefix = "".join(words[:start])
+    creator = norm(model_creator_name(row)).replace(" ", "")
+    return bool(creator) and (prefix.startswith(creator) or creator.startswith(prefix))
+
+
 def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     target_query = model_query(row)
     target_tokens = tokens(target_query)
     # Judge the repository's model name, not its owner: "DevQuasar-4" once
     # supplied the "4" of "Mistral Small 4" for a Small-24B-Base-2501 repo.
     candidate_name = repo_name(candidate_repo)
-    candidate_tokens = tokens(candidate_name)
+    # Quant and GGUF suffixes are not part of the name: "Q4_0_4_8" once
+    # supplied the "4" of "Mistral Small 4" for a Small-Instruct-2409 repo.
+    candidate_tokens = tokens(clean_repo_model_name(candidate_name))
     if not target_tokens or not candidate_tokens:
         return False
     if not family_match(target_tokens, candidate_tokens):
@@ -818,6 +837,8 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     target_raw = raw_name_tokens(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
     candidate_raw = raw_name_tokens(clean_repo_model_name(candidate_name))
     if (target_raw & VARIANT_QUALIFIERS) != (candidate_raw & VARIANT_QUALIFIERS):
+        return False
+    if not creator_prefix_only(clean_repo_model_name(candidate_name), target_tokens, row):
         return False
     overlap = len(target_tokens & candidate_tokens)
     if overlap == 0 and not versions_match(target_versions, version_tuples(candidate_name)):

@@ -135,3 +135,18 @@ def test_modified_derivatives_do_not_inherit_the_original_score():
     assert not updater.candidate_relevant("timteh673/Mistral-Small-4-119B-Uncensored-GGUF", row)
     magistral = {"name": "Magistral Small 1.2", "creator": {"name": "Mistral"}}
     assert not updater.candidate_relevant("mradermacher/Magistral-Small-2509-Heretic-v1.2-i1-GGUF", magistral)
+
+
+def test_quant_suffix_and_retune_prefixes_are_not_identity():
+    updater = load_updater()
+    small4 = {"name": "Mistral Small 4 (Reasoning)", "creator": {"name": "Mistral"}}
+    assert not updater.candidate_relevant("pipilok/Mistral-Small-Instruct-2409-Q4_0_4_8-GGUF", small4)
+    omni = {"name": "Qwen3 Omni 30B A3B Instruct", "creator": {"name": "Alibaba"}}
+    assert not updater.candidate_relevant("mradermacher/MANGO-Qwen3-Omni-30B-A3B-Instruct-i1-GGUF", omni)
+    assert updater.candidate_relevant("unsloth/Qwen3-Omni-30B-A3B-Instruct-GGUF", omni)
+    for row, repo in [
+        ({"name": "LFM2.5-2.6B", "creator": {"name": "Liquid AI"}}, "bartowski/LiquidAI_LFM2.5-2.6B-GGUF"),
+        ({"name": "Devstral Small 2", "creator": {"name": "Mistral"}}, "bartowski/mistralai_Devstral-Small-2-24B-Instruct-2512-GGUF"),
+        ({"name": "Llama 3.1 Instruct 405B", "creator": {"name": "Meta"}}, "ThomasBaruzier/Meta-Llama-3.1-405B-Instruct-GGUF"),
+    ]:
+        assert updater.candidate_relevant(repo, row), repo
