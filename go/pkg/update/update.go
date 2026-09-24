@@ -195,7 +195,7 @@ func updateRepoCandidates() []repoCandidate {
 	// already trusts for backend updates, so ggrun self-update stops missing a
 	// source tree that lives outside ~/ggrun (e.g. ~/ggrun-project/ggrun).
 	if appHome := backends.AppHome(); appHome != "" {
-		if repo := repoFromAppHome(appHome); repo != "" && repo != appHome {
+		if repo := repoFromAppHome(appHome); repo != "" {
 			add("ggrun", repo)
 		} else if repoDir := filepath.Join(appHome, ".src", "ggrun"); repoDir != "" {
 			add("ggrun", repoDir)
@@ -382,25 +382,25 @@ func SelfUpdate() error {
 
 	newHash, _ := gitRevParse(repoDir, "HEAD")
 	if oldHash == newHash {
-		fmt.Println("  Already up to date.")
-		if backupPath != "" {
-			os.Remove(backupPath)
+		// The checkout may have been pulled separately, or a previous build
+		// may have failed. An unchanged HEAD says nothing about the binary.
+		fmt.Println("  Source already up to date; rebuilding the installed binary.")
+	} else {
+		commits, _ := gitLogOneline(repoDir, oldHash+".."+newHash)
+		fmt.Printf("  Updated: %d new commits\n", len(commits))
+		for _, c := range commits {
+			if len(c) > 60 {
+				c = c[:60] + "..."
+			}
+			fmt.Printf("    %s\n", c)
 		}
-		return nil
-	}
-
-	commits, _ := gitLogOneline(repoDir, oldHash+".."+newHash)
-	fmt.Printf("  Updated: %d new commits\n", len(commits))
-	for _, c := range commits {
-		if len(c) > 60 {
-			c = c[:60] + "..."
-		}
-		fmt.Printf("    %s\n", c)
 	}
 
 	if err := rebuildSelfUpdateBinary(repoDir, scriptPath); err != nil {
 		fmt.Println("  Error: Build/install failed. Rolling back...")
-		gitCheckout(repoDir, oldHash)
+		if oldHash != newHash {
+			gitCheckout(repoDir, oldHash)
+		}
 		if backupPath != "" {
 			cp(backupPath, scriptPath)
 		}
@@ -413,7 +413,9 @@ func SelfUpdate() error {
 		cmd := exec.Command(scriptPath, "--version")
 		if err := cmd.Run(); err != nil {
 			fmt.Println("  Error: New version failed self-check. Rolling back...")
-			gitCheckout(repoDir, oldHash)
+			if oldHash != newHash {
+				gitCheckout(repoDir, oldHash)
+			}
 			if backupPath != "" {
 				cp(backupPath, scriptPath)
 			}
@@ -789,6 +791,12 @@ func installedLLMServerPath() string {
 			filepath.Join(appHome, "ggrun.cmd"),
 		} {
 			if _, err := os.Stat(candidate); err == nil {
+				// Resolve a linked app-home entry to the real binary. Renaming a
+				// rebuilt binary over the link would replace the link with a
+				// second, independent copy that PATH never runs.
+				if resolved, err := filepath.EvalSymlinks(candidate); err == nil && resolved != "" {
+					return resolved
+				}
 				return candidate
 			}
 		}

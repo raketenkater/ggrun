@@ -157,6 +157,7 @@ type Model struct {
 	kvQualityTouched bool
 	settingsCursor   int
 	ramLimitPercent  int
+	ramBudgetMB      int
 
 	// Advanced (per-launch) config screen cursor
 	cfgCursor int
@@ -302,6 +303,7 @@ func sessionModel() Model {
 		supportOnline:   cfg.SupportOnline,
 		aituneRounds:    rounds,
 		ramLimitPercent: cfg.RAMLimitPercent,
+		ramBudgetMB:     config.ParseBudgetMB(cfg.RamBudget),
 		spinner:         spin,
 	}
 	m.modelUsage = modelusage.Load(cfg.CacheDir)
@@ -352,7 +354,7 @@ type startupReadyMsg struct {
 	recs      []recommend.Recommendation
 }
 
-func loadHardwareAndModelsCmd(modelDir, cacheDir, backend string, ramLimit, vramHeadroomMB, ramHeadroomMB int) tea.Cmd {
+func loadHardwareAndModelsCmd(modelDir, cacheDir, backend string, ramLimit, vramHeadroomMB, ramHeadroomMB, ramBudgetMB int) tea.Cmd {
 	return func() tea.Msg {
 		caps, _ := detect.Detect()
 		models := loadRecognizedModels(modelDir, cacheDir, backend, caps)
@@ -362,6 +364,7 @@ func loadHardwareAndModelsCmd(modelDir, cacheDir, backend string, ramLimit, vram
 			vramHeadroomMB:  vramHeadroomMB,
 			ramHeadroomMB:   ramHeadroomMB,
 		}
+		tmp.ramBudgetMB = ramBudgetMB
 		tmp.refreshRecommendations()
 		return startupReadyMsg{
 			caps: caps, models: models,
@@ -574,7 +577,7 @@ func (m Model) Init() tea.Cmd {
 	}
 	return tea.Batch(
 		m.spinner.Tick,
-		loadHardwareAndModelsCmd(m.modelDir, m.cacheDir, m.backend, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB),
+		loadHardwareAndModelsCmd(m.modelDir, m.cacheDir, m.backend, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB, m.ramBudgetMB),
 	)
 }
 
@@ -2410,9 +2413,7 @@ func formatHeadroomMB(mb int) string {
 }
 
 func (m *Model) refreshRecommendations() {
-	caps := detect.ApplyRAMLimitPercent(m.caps, m.ramLimitPercent)
-	caps = detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB)
-	caps = detect.ApplyRAMHeadroom(caps, m.ramHeadroomMB)
+	caps := recommend.PlanningCapabilities(m.caps, m.ramBudgetMB, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB)
 	m.recommendationGroups = recommend.TopCategories(caps, 4)
 	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 	if len(m.recommendations) == 0 {

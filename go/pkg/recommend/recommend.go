@@ -312,9 +312,9 @@ func hardware(caps *detect.Capabilities) hardwareBudget {
 				budget.largestVRAM = g.VRAMTotalMB
 			}
 		}
-		if caps.RAM.TotalMB > 0 {
-			totalRAM = caps.RAM.TotalMB
-		}
+		// A supplied zero budget means no host capacity, not the nil-hardware
+		// fallback. Headroom can intentionally exhaust the available budget.
+		totalRAM = max(0, caps.RAM.TotalMB)
 	}
 	// The recommender is a planning tool: base RAM on total hardware capacity,
 	// not currently-available RAM (MemAvailable / AvailPhys), which reflects

@@ -172,6 +172,7 @@ Commands:
   tune <model.gguf>    AI-tune model for best performance
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   recommend --first    Print the top Hugging Face repo only
+  recommend --gpus 0 --ram-budget 32G   Rank within a restricted hardware budget
   support              Native optional support expert / optimizer (status, install, doctor)
   models [list|browse|path|rm] List, browse, locate, or safely remove GGUF models
   config [show|edit|path|reset]  Manage settings
@@ -8414,95 +8415,6 @@ func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
 		}
 	}
 	return fallback, nil
-}
-
-func cmdRecommend(args []string) {
-	limit := 5
-	firstOnly := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-n", "--limit":
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
-					limit = n
-				}
-				i++
-			}
-		case "--first":
-			firstOnly = true
-		default:
-			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "-n")); err == nil && n > 0 {
-				limit = n
-			}
-		}
-	}
-
-	recommend.MaybeRefresh() // pull the latest published catalog (TTL-gated, best-effort)
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	gpu := "CPU only"
-	if len(caps.GPUs) > 0 {
-		names := make([]string, 0, len(caps.GPUs))
-		for _, g := range caps.GPUs {
-			names = append(names, fmt.Sprintf("%s %dGB", g.Name, g.VRAMTotalMB/1024))
-		}
-		gpu = strings.Join(names, " + ")
-	}
-	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
-
-	cfg := loadConfigOrExit()
-	if cfg.RAMLimitPercent > 0 {
-		fmt.Printf("RAM limit: %d%% whole-host utilisation\n", cfg.RAMLimitPercent)
-		caps = detect.ApplyRAMLimitPercent(caps, cfg.RAMLimitPercent)
-	}
-	if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
-		fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
-		caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
-	}
-	if headroomMB := parseBudgetMB(cfg.RAMHeadroom); headroomMB > 0 {
-		fmt.Printf("RAM headroom: %d MB reserved (set via Settings or --ram-headroom)\n", headroomMB)
-		caps = detect.ApplyRAMHeadroom(caps, headroomMB)
-	}
-
-	cats := recommend.TopCategories(caps, limit)
-	if len(cats.Balanced) == 0 {
-		fmt.Println("No models in the catalog fit this machine.")
-		return
-	}
-	if firstOnly {
-		fmt.Println(cats.Balanced[0].Repo)
-		return
-	}
-	printRecGroup := func(title string, rows []recommend.Recommendation) {
-		if len(rows) == 0 {
-			return
-		}
-		fmt.Printf("\n%s\n", title)
-		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Est.speed")
-		for _, r := range rows {
-			name := r.Name
-			if len(name) > 36 {
-				name = name[:35] + "…"
-			}
-			tps := "—"
-			if r.PredictedTPS > 0 {
-				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
-			}
-			fmt.Printf("  %-36s %-10s %-8s %5.1fG %4.0f%% %8s\n",
-				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, r.QualityRetained*100, tps)
-		}
-	}
-	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
-	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
-	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
-	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
-	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
-	fmt.Printf("\n%s\n", recommend.CatalogAttribution())
 }
 
 func cmdTune(args []string) {
