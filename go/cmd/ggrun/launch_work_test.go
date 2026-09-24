@@ -276,3 +276,26 @@ func TestInfeasibleFinalistEstimateStillPersists(t *testing.T) {
 		t.Fatalf("decision with an infeasible finalist estimate could not be saved: %v", err)
 	}
 }
+
+func TestLearnedReplanOnlyAfterAnOracleOnlyFailure(t *testing.T) {
+	unresolved := &preflightUnresolvedError{errors.New("memory preflight recovery failed closed")}
+	measured := newLaunchMemoryRecovery()
+	measured.observeAdmissionWork(&admissionWork{oracleRuns: 5})
+	if !shouldReplanFromLearnedEvidence(fmt.Errorf("start: %w", unresolved), measured, false) {
+		t.Fatal("oracle-only first-use failure was not re-planned")
+	}
+	if shouldReplanFromLearnedEvidence(unresolved, measured, true) {
+		t.Fatal("re-planned twice")
+	}
+	loaded := newLaunchMemoryRecovery()
+	loaded.observeAdmissionWork(&admissionWork{oracleRuns: 5, loads: 1})
+	if shouldReplanFromLearnedEvidence(unresolved, loaded, false) {
+		t.Fatal("re-planned after weights were loaded")
+	}
+	if shouldReplanFromLearnedEvidence(unresolved, newLaunchMemoryRecovery(), false) {
+		t.Fatal("re-planned with nothing newly measured")
+	}
+	if shouldReplanFromLearnedEvidence(errors.New("health timeout"), measured, false) {
+		t.Fatal("an ordinary start failure triggered a re-plan")
+	}
+}

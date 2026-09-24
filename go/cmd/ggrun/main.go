@@ -4741,6 +4741,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	// the final error cannot say that: a memory deficit or compatibility verdict
 	// can arrive after a contained probe loaded the whole model.
 	defer func() {
+		memoryRecovery.observeAdmissionWork(work)
 		var failure *exactAdmissionFailure
 		if work.loadedWeights() && errors.As(launchErr, &failure) && failure != nil {
 			failure.loadedWeights = true
@@ -5052,7 +5053,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionMemory, fmt.Sprintf(" on CUDA%d (%d MiB deficit)", preflight.Device, preflight.DeficitMB), nil)
 				}
 				if preflightReplans >= maxPreflightReplans {
-					return nil, strategy, serverArgs, fmt.Errorf("memory preflight did not converge after %d re-plans; refusing a real model load", maxPreflightReplans)
+					return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("memory preflight did not converge after %d re-plans; refusing a real model load", maxPreflightReplans)}
 				}
 				// A re-plan that materially shrinks the measured deficit is progress,
 				// and the budget exists to stop churn, not progress. GLM-5.3-Flash at
@@ -5072,7 +5073,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					strategy, serverArgs, oomPenalty, preflight, memoryRecovery,
 				)
 				if rerr != nil {
-					return nil, strategy, serverArgs, fmt.Errorf("memory preflight recovery failed closed: %w", rerr)
+					return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("memory preflight recovery failed closed: %w", rerr)}
 				}
 				strategy, serverArgs = next, nextArgs
 				fmt.Fprintf(os.Stderr,
@@ -5140,7 +5141,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 								fmt.Fprintln(os.Stderr, "[launch] measured re-plan budget reached; retaining the exact allocation-proven placement")
 								measuredProductionArgs = formatCommand(serverArgs)
 							} else {
-								return nil, strategy, serverArgs, fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)
+								return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)}
 							}
 						} else {
 							strategy = next
@@ -6511,6 +6512,16 @@ func cmdLaunch(args []string) {
 			}
 			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
+		}
+		if shouldReplanFromLearnedEvidence(err, launchRecovery, os.Getenv(learnedReplanEnv) != "") {
+			fmt.Fprintln(os.Stderr, "[launch] the first plan failed memory admission before any model load; planning once more from the memory the backend just measured")
+			// exec skips deferred cleanup; release this launch's library hub first.
+			if ok {
+				libhub.Cleanup(hubDir)
+			}
+			if relaunchErr := relaunchLaunch(req.OriginalArgs, learnedReplanEnv); relaunchErr != nil {
+				fmt.Fprintf(os.Stderr, "[launch] could not re-plan: %v\n", relaunchErr)
+			}
 		}
 		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, restartAdmissionWindow(model), launchRecovery)
 		if err != nil {

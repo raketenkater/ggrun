@@ -77,8 +77,11 @@ type admissionWork struct {
 	ceiling  time.Duration
 	maxLoads int
 	loads    int
-	cacheDir string
-	now      func() time.Time
+	// oracleRuns counts no-allocation oracle runs; each may record measured
+	// compute/context rows that a later plan can use.
+	oracleRuns int
+	cacheDir   string
+	now        func() time.Time
 	// lastProductionLoad is the elapsed time of this admission's successful
 	// production start, the observed cost of loading this configuration.
 	lastProductionLoad time.Duration
@@ -194,6 +197,9 @@ func (w *admissionWork) record(rec launchWorkRecord) {
 	if rec.Phase == "" {
 		rec.Phase = w.phase
 	}
+	if rec.Kind == "oracle" {
+		w.oracleRuns++
+	}
 	if rec.LoadedWeights {
 		rec.AdmissionLoad = w.loads
 	}
@@ -268,4 +274,31 @@ func backendIdentity(be *backendInfo) string {
 		return be.Identity
 	}
 	return be.Path
+}
+
+// preflightUnresolvedError is an admission that memory planning could not
+// resolve. It never started a production process for the failing plan.
+type preflightUnresolvedError struct{ err error }
+
+func (e *preflightUnresolvedError) Error() string { return e.err.Error() }
+func (e *preflightUnresolvedError) Unwrap() error { return e.err }
+
+// learnedReplanEnv marks a launch that already re-planned once from the
+// evidence its first admission measured, so the re-plan cannot repeat.
+const learnedReplanEnv = "GGRUN_LEARNED_REPLAN"
+
+// shouldReplanFromLearnedEvidence decides whether a failed first admission may
+// plan once more. The first plan of a never-seen model is computed before any
+// backend measurement exists; the oracle rounds that refused it record exact
+// compute and context rows, and a plan computed from them can fit where the
+// in-lifecycle ladder (which may only derate the first plan) cannot. Observed:
+// MiMo-V2.6-Flash failed closed on first use and fitted at full context on the
+// next launch. Allowed only when no weights were loaded, the oracle measured
+// something, and this launch has not already re-planned.
+func shouldReplanFromLearnedEvidence(err error, recovery *launchMemoryRecovery, alreadyReplanned bool) bool {
+	var unresolved *preflightUnresolvedError
+	if alreadyReplanned || recovery == nil || !errors.As(err, &unresolved) {
+		return false
+	}
+	return recovery.weightLoads == 0 && recovery.oracleRuns > 0
 }

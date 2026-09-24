@@ -23,6 +23,9 @@ type launchMemoryRecovery struct {
 	// start that reached health and how long its load took.
 	lastProductionArgs string
 	lastProductionLoad time.Duration
+	// weightLoads and oracleRuns total every admission in this lifecycle.
+	weightLoads int
+	oracleRuns  int
 	// rejectedContext is the smallest automatic context this launch has proven
 	// does not fit. The argv identity ledger cannot carry this: a later
 	// recompute from the original automatic request proposes a *different* argv
@@ -85,6 +88,14 @@ func (r *launchMemoryRecovery) observeProductionLoad(args []string, elapsed time
 	}
 	r.lastProductionArgs = formatCommand(args)
 	r.lastProductionLoad = elapsed
+}
+
+func (r *launchMemoryRecovery) observeAdmissionWork(work *admissionWork) {
+	if r == nil || work == nil {
+		return
+	}
+	r.weightLoads += work.loads
+	r.oracleRuns += work.oracleRuns
 }
 
 // productionLoadCost returns the observed load time of args, when this launch
