@@ -83,6 +83,10 @@ type preflightOutcome struct {
 	// on a machine with no GPU. `ggrun memory-probe` asked for the measurement
 	// specifically, so it still treats this as a failure.
 	ProbeUnavailable string
+	// DeviceComputeMB is the no-allocation oracle's compute-buffer row for the
+	// failed device: an exact graph size, reported even though the deficit
+	// itself is a device total.
+	DeviceComputeMB int
 }
 
 const memoryEvidenceSchemaVersion = memprobe.SchemaVersion
@@ -1498,6 +1502,11 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		outcome.DeficitMB = deficit
 		outcome.DoesNotFit = true
 		outcome.CompanionRejected = companionRejected
+		for _, d := range devs {
+			if idx, ok := cudaDeviceIndex(d.Name); ok && idx == dev {
+				outcome.DeviceComputeMB += d.ComputeMB
+			}
+		}
 		return outcome
 	}
 	fmt.Printf("[launch] preflight: placement fits (%s)\n", summary)

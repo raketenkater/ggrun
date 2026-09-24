@@ -523,6 +523,7 @@ func recoverPreflightOOM(
 	if outcome.DeficitMB <= 0 {
 		outcome.DeficitMB = 1
 	}
+	outcome = oracleComputeBoundOutcome(outcome)
 
 	var candidate *placement.Strategy
 	var replanErr error
@@ -632,6 +633,25 @@ func recoverPreflightOOM(
 		)
 	}
 	return nextStrategy, nextArgs, method, nil
+}
+
+// oracleComputeBoundOutcome classifies an oracle deficit that the failed
+// device's own graph buffer could cover as a compute-buffer failure of exactly
+// that oracle-reported size. The oracle reports device totals, so without this
+// the ladder saw an unclassified deficit, could only move experts, and failed
+// closed once the device had none left even though a smaller ubatch fit:
+// MiMo-V2.6-Flash on the default path stopped 220 MiB over on CUDA0 while the
+// oracle priced its compute buffer at 3125 MiB (2026-09-24). The ordinary
+// order still applies: experts leave the failed device before ubatch drops.
+func oracleComputeBoundOutcome(outcome preflightOutcome) preflightOutcome {
+	if outcome.IsComputeBuffer || outcome.Evidence.Level != memoryEvidenceOraclePlanned ||
+		outcome.DeviceComputeMB <= 0 || outcome.DeviceComputeMB < outcome.DeficitMB {
+		return outcome
+	}
+	outcome.IsComputeBuffer = true
+	outcome.AllocMB = outcome.DeviceComputeMB
+	outcome.AllocMBMeasured = true
+	return outcome
 }
 
 // applyMemoryRecoverySelection turns a selected non-context memory recovery

@@ -243,3 +243,23 @@ func TestPrescreenNeverStartsAContainedProbe(t *testing.T) {
 		}
 	}
 }
+
+// MiMo-V2.6-Flash, default path, first use: the oracle left CUDA0 220 MiB
+// over after every expert had left it, while pricing that device's graph
+// buffer at 3125 MiB. That deficit is compute-bound and must reach the ubatch
+// rung instead of failing closed.
+func TestOracleDeficitCoveredByComputeIsComputeBound(t *testing.T) {
+	oracle := memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}
+	got := oracleComputeBoundOutcome(preflightOutcome{Device: 0, DeficitMB: 220, AllocMB: 220, DoesNotFit: true, DeviceComputeMB: 3125, Evidence: oracle})
+	if !got.IsComputeBuffer || got.AllocMB != 3125 || !got.AllocMBMeasured {
+		t.Fatalf("compute-coverable oracle deficit = %#v", got)
+	}
+	// A deficit larger than the graph buffer is not solvable by ubatch alone.
+	if got := oracleComputeBoundOutcome(preflightOutcome{DeficitMB: 5314, DeviceComputeMB: 3125, Evidence: oracle}); got.IsComputeBuffer {
+		t.Fatal("a weight-sized deficit was classified as compute-bound")
+	}
+	// Only oracle rows are exact graph sizes; other evidence keeps its class.
+	if got := oracleComputeBoundOutcome(preflightOutcome{DeficitMB: 220, DeviceComputeMB: 3125, Evidence: memoryPlanEvidence{Level: memoryEvidenceAllocated}}); got.IsComputeBuffer {
+		t.Fatal("non-oracle evidence was reclassified")
+	}
+}
