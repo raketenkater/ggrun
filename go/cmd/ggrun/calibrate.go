@@ -1437,7 +1437,12 @@ func annotateOptimizationDecision(decision *placement.CalibrationDecision, candi
 		break
 	}
 	decision.Finalist = finalist.Name
-	decision.FinalistEstimatedCost = finalist.Estimate.AgentCost
+	// An infeasible estimate is +Inf, which JSON cannot encode: storing it made
+	// the whole decision unsavable, so the next identical launch repeated the
+	// search (MiMo-V2.6-Flash, 2026-09-24). Unknown cost is simply omitted.
+	if cost := finalist.Estimate.AgentCost; !math.IsInf(cost, 0) && !math.IsNaN(cost) {
+		decision.FinalistEstimatedCost = cost
+	}
 	decision.FinalistConfidence = finalist.Estimate.Confidence
 	decision.FinalistOutcome = "unavailable"
 	for _, measured := range measurements {

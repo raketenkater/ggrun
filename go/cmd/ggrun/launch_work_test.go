@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -261,5 +262,17 @@ func TestOracleDeficitCoveredByComputeIsComputeBound(t *testing.T) {
 	// Only oracle rows are exact graph sizes; other evidence keeps its class.
 	if got := oracleComputeBoundOutcome(preflightOutcome{DeficitMB: 220, DeviceComputeMB: 3125, Evidence: memoryPlanEvidence{Level: memoryEvidenceAllocated}}); got.IsComputeBuffer {
 		t.Fatal("non-oracle evidence was reclassified")
+	}
+}
+
+func TestInfeasibleFinalistEstimateStillPersists(t *testing.T) {
+	decision := &placement.CalibrationDecision{ScopeKey: "s", Winner: "default"}
+	candidates := []placement.CalibrationCandidate{
+		{Name: "default", Strategy: &placement.Strategy{}},
+		{Name: "context-786432", Strategy: &placement.Strategy{}, Estimate: placement.CandidateEstimate{AgentCost: math.Inf(1)}},
+	}
+	annotateOptimizationDecision(decision, candidates, []calibrationMeasurement{{Name: "default"}})
+	if _, err := placement.SaveCalibrationDecision(t.TempDir(), *decision); err != nil {
+		t.Fatalf("decision with an infeasible finalist estimate could not be saved: %v", err)
 	}
 }
