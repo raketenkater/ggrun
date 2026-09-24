@@ -2993,7 +2993,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// components, not free VRAM; they contribute 0 to whole-layer fitting but
 	// block optional remainder squeeze below until a successful launch measures
 	// them.
-	sysCUDAOverheadByGPU := SystemCUDAOverheadByGPU(opts.CacheDir, caps.GPUs)
+	sysCUDAOverheadByGPU := PlanningCUDAOverheadByGPU(opts.CacheDir, caps.GPUs)
 
 	// Load per-model/runtime probe cache. Until a model has completed one launch
 	// with these settings, use a first-launch fallback that keeps the main GPU
@@ -6293,6 +6293,38 @@ func SystemCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// UnmeasuredCUDAOverheadMB is reserved on a device whose runtime overhead
+// (CUDA context, library workspaces, driver allocations) has never been
+// measured on this machine. It is llama.cpp's own default --fit-target margin:
+// the same backend reserves 1024 MiB per device for exactly this unaccounted
+// memory when it fits a model itself, and ggrun launches it with --fit off.
+// Without it a first launch admitted plans the no-allocation oracle priced at
+// 76 and 218 MiB of slack; both ran out of CUDA0 memory at the end of a
+// ten-minute load (MiMo-V2.6-Flash, 2026-09-24; later measured overhead on the
+// same card: 234 MiB). A measured value always replaces it.
+const UnmeasuredCUDAOverheadMB = 1024
+
+// PlanningCUDAOverheadByGPU is the per-device runtime overhead planning and
+// admission must reserve: the measured value where one exists, otherwise
+// UnmeasuredCUDAOverheadMB. Measurement code that subtracts overhead from an
+// observed VRAM delta must keep using SystemCUDAOverheadByGPU, which reports
+// only what was measured.
+func PlanningCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
+	out := SystemCUDAOverheadByGPU(cacheDir, gpus)
+	if len(gpus) == 0 {
+		return out
+	}
+	if out == nil {
+		out = map[int]int{}
+	}
+	for _, g := range gpus {
+		if out[g.Index] <= 0 {
+			out[g.Index] = UnmeasuredCUDAOverheadMB
+		}
 	}
 	return out
 }

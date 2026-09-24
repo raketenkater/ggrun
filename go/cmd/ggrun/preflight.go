@@ -690,7 +690,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		guardLogPath = guardLog.Name()
 		_ = guardLog.Close()
 		defer os.Remove(guardLogPath)
-		overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+		overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 		gpuLimitsMB := make([]int, len(caps.GPUs))
 		for i, gpu := range caps.GPUs {
 			gpuLimitsMB[i] = gpu.VRAMFreeMB() - overheadByGPU[gpu.Index]
@@ -1465,7 +1465,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		}
 		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
-	overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
 		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)

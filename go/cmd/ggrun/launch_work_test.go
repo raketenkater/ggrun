@@ -214,11 +214,13 @@ func TestPrescreenRefusesOracleDeficitWithoutStoppingBaseline(t *testing.T) {
 	strategy := &placement.Strategy{ContextSize: 125952, UBatchSize: 1024, Parallel: 1}
 	refused, class, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
 		&backendInfo{Path: server, Tag: "llama"}, caps, baseline, strategy, []string{server, "-m", "q.gguf", "-ub", "1024"})
-	if !refused || class != string(exactAdmissionMemory) || !strings.Contains(reason, "CUDA0 deficit 5 MiB") {
+	// A fresh cache has no measured CUDA overhead, so the backend's default
+	// 1024 MiB margin is reserved on top of the oracle's 5 MiB deficit.
+	if !refused || class != string(exactAdmissionMemory) || !strings.Contains(reason, "CUDA0 deficit 1029 MiB") {
 		t.Fatalf("prescreen = %v %q %q", refused, class, reason)
 	}
 	// With the reviewer's memory back after the stop, a plan that fits is not refused.
-	fits := fakeOracleBuild(t, "echo 'CUDA0 2603 1308 1124'\n")
+	fits := fakeOracleBuild(t, "echo 'CUDA0 2603 800 900'\n")
 	if refused, _, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
 		&backendInfo{Path: fits, Tag: "llama"}, caps, baseline, strategy, []string{fits, "-m", "q.gguf"}); refused {
 		t.Fatalf("fitting candidate refused: %s", reason)

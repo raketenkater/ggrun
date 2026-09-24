@@ -203,7 +203,7 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	if s.ContextAllocationMB > 0 {
 		kvMB = s.ContextAllocationMB
 	}
-	overhead := SystemCUDAOverheadByGPU(opts.CacheDir, gpus)
+	overhead := PlanningCUDAOverheadByGPU(opts.CacheDir, gpus)
 	pc := opts.loadProbeCacheForStrategy(model, s, gpus)
 	modelShares := estimatedModelShares(model, s, gpus, totalSizeMB)
 	contextShares := estimatedContextShares(s, gpus, kvMB)
