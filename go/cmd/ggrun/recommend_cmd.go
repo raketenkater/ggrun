@@ -20,6 +20,7 @@ type recommendOptions struct {
 	first           bool
 	json            bool
 	gpus            string
+	cpuOnly         bool
 	ramBudgetMB     int
 	ramLimitPercent int
 	vramHeadroomMB  int
@@ -35,6 +36,9 @@ func parseRecommendArgs(args []string, cfg *config.Config) (recommendOptions, er
 	fs.BoolVar(&opts.first, "first", false, "print only the first repository")
 	fs.BoolVar(&opts.json, "json", false, "print the planning hardware and recommendations as JSON")
 	fs.StringVar(&opts.gpus, "gpus", "", "physical GPU indices available for recommendations")
+	// Same spelling as launch: a CPU-only machine or budget must be expressible
+	// in both, or a recommendation cannot be reproduced by the launch.
+	fs.BoolVar(&opts.cpuOnly, "cpu", false, "recommend for CPU-only serving")
 	budget := fs.String("ram-budget", cfg.RamBudget, "RAM ceiling, e.g. 32G")
 	fs.IntVar(&opts.ramLimitPercent, "ram-limit-percent", cfg.RAMLimitPercent, "installed RAM percentage available for planning")
 	vram := fs.String("vram-headroom", cfg.VRAMHeadroom, "VRAM held back")
@@ -83,6 +87,9 @@ func parseRecommendArgs(args []string, cfg *config.Config) (recommendOptions, er
 		}
 		*v.dst = n
 	}
+	if opts.cpuOnly && strings.TrimSpace(opts.gpus) != "" {
+		return opts, fmt.Errorf("--cpu and --gpus cannot be combined")
+	}
 	if opts.first && opts.json {
 		return opts, fmt.Errorf("--first and --json cannot be combined")
 	}
@@ -97,7 +104,9 @@ func recommendationCapabilities(caps *detect.Capabilities, opts recommendOptions
 		return nil, err
 	}
 	selected := *caps
-	if strings.TrimSpace(opts.gpus) != "" {
+	if opts.cpuOnly {
+		selected.GPUs = nil
+	} else if strings.TrimSpace(opts.gpus) != "" {
 		indices, err := parseGPUIndices(opts.gpus)
 		if err != nil {
 			return nil, err
@@ -120,7 +129,7 @@ func cmdRecommend(args []string) {
 	cfg := loadConfigOrExit()
 	opts, err := parseRecommendArgs(args, cfg)
 	if errors.Is(err, flag.ErrHelp) {
-		fmt.Println("Usage: ggrun recommend [-n N] [--first | --json] [--gpus 0,1] [--ram-budget 32G] [--ram-limit-percent N] [--vram-headroom 1G] [--ram-headroom 4G]")
+		fmt.Println("Usage: ggrun recommend [-n N] [--first | --json] [--gpus 0,1 | --cpu] [--ram-budget 32G] [--ram-limit-percent N] [--vram-headroom 1G] [--ram-headroom 4G]")
 		fmt.Println("Limits affect recommendations only; pass the same restrictions when launching. Speeds are estimates.")
 		return
 	}
@@ -168,7 +177,7 @@ func cmdRecommend(args []string) {
 		gpu = strings.Join(names, " + ")
 	}
 	fmt.Printf("Recommendation budget: %s | RAM %.1f GiB\n", gpu, float64(caps.RAM.TotalMB)/1024)
-	if opts.gpus != "" || opts.ramBudgetMB > 0 {
+	if opts.gpus != "" || opts.cpuOnly || opts.ramBudgetMB > 0 {
 		fmt.Println("Restrictions apply to recommendations; repeat them when launching.")
 	}
 	if len(cats.Balanced) == 0 {
