@@ -104,11 +104,15 @@ func candidateAllocationEvidenceCached(req *launchRequest, cfg *config.Config, b
 // starts, so an oracle failure can never become a contained probe beside the
 // live baseline. It reports a refusal only for outcomes exact admission would
 // also refuse; anything inconclusive leaves the decision to the real admission.
-func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, resourceBaseline *detect.Capabilities, strategy *placement.Strategy, args []string) (bool, string, string) {
-	if cfg == nil || resourceBaseline == nil || strategy == nil {
+//
+// caps must be the launch's detection-time capabilities, the same input exact
+// admission uses. A live snapshot taken after companions started would count
+// their memory twice: once as used VRAM and again as the runtime reservation.
+func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, args []string) (bool, string, string) {
+	if cfg == nil || caps == nil || strategy == nil {
 		return false, "", ""
 	}
-	runtimeCaps, _ := runtimeGPUCapabilitiesForLaunch(resourceBaseline, req, strategy)
+	runtimeCaps, _ := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
 	if runtimeCaps == nil {
 		return false, "", ""
 	}
@@ -122,7 +126,7 @@ func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model
 	case outcome.CompanionRejected:
 		return true, string(exactAdmissionCompanion), "the speculative companion was rejected"
 	case outcome.DoesNotFit:
-		return true, string(exactAdmissionMemory), fmt.Sprintf("CUDA%d deficit %d MiB against the pre-launch resource state", outcome.Device, outcome.DeficitMB)
+		return true, string(exactAdmissionMemory), fmt.Sprintf("CUDA%d deficit %d MiB against the launch resources", outcome.Device, outcome.DeficitMB)
 	}
 	return false, "", ""
 }

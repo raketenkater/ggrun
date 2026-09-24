@@ -204,7 +204,7 @@ func TestPrescreenRefusesOracleDeficitWithoutStoppingBaseline(t *testing.T) {
 		t.Skip("POSIX fake oracle")
 	}
 	server := fakeOracleBuild(t, "echo 'CUDA0 2603 2141 990'\n")
-	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 5729}}}
+	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282, VRAMUsedMB: 6553}}}
 	cfg := &config.Config{CacheDir: t.TempDir()}
 	strategy := &placement.Strategy{ContextSize: 125952, UBatchSize: 1024, Parallel: 1}
 	refused, class, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
