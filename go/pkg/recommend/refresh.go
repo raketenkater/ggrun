@@ -38,15 +38,32 @@ func cachedCatalogPath() string {
 	return ""
 }
 
-// catalogBytes prefers a valid cached catalog (fresher than the embedded one and
-// usable offline), falling back to the embedded catalog.
+// catalogBytes serves the newer of a valid cached catalog and the embedded one.
+// A cache is only a way to get fresher data without a new binary: one left by
+// an older release must not override the catalog this binary shipped with,
+// which is what let a July cache keep serving after an updated build.
 func catalogBytes() []byte {
 	if p := cachedCatalogPath(); p != "" {
-		if b, err := os.ReadFile(p); err == nil && validCatalog(b) {
+		if b, err := os.ReadFile(p); err == nil && validCatalog(b) && catalogNewerOrEqual(b, catalogJSON) {
 			return b
 		}
 	}
 	return catalogJSON
+}
+
+// catalogNewerOrEqual orders catalogs by schema version, then generation time.
+func catalogNewerOrEqual(a, b []byte) bool {
+	var x, y catalogDoc
+	if json.Unmarshal(a, &x) != nil {
+		return false
+	}
+	if json.Unmarshal(b, &y) != nil {
+		return true
+	}
+	if x.Version != y.Version {
+		return x.Version > y.Version
+	}
+	return x.GeneratedAt >= y.GeneratedAt
 }
 
 func validCatalog(b []byte) bool {
