@@ -98,3 +98,31 @@ func candidateAllocationEvidenceCached(req *launchRequest, cfg *config.Config, b
 	_, ok := loadMemoryEvidence(cfg.CacheDir, memoryEvidenceKey(be, model, runtimeCaps, args))
 	return ok
 }
+
+// prescreenCalibrationCandidate runs the candidate's memory admission through
+// the same-build oracle only: its admission work allows zero weight-loading
+// starts, so an oracle failure can never become a contained probe beside the
+// live baseline. It reports a refusal only for outcomes exact admission would
+// also refuse; anything inconclusive leaves the decision to the real admission.
+func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, resourceBaseline *detect.Capabilities, strategy *placement.Strategy, args []string) (bool, string, string) {
+	if cfg == nil || resourceBaseline == nil || strategy == nil {
+		return false, "", ""
+	}
+	runtimeCaps, _ := runtimeGPUCapabilitiesForLaunch(resourceBaseline, req, strategy)
+	if runtimeCaps == nil {
+		return false, "", ""
+	}
+	work := newAdmissionWork("prescreen", time.Minute, time.Minute, 0, cfg.CacheDir, nil)
+	outcome := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir, Work: work}, runtimeCaps, model, strategy, args)
+	switch {
+	case outcome.Err != nil || outcome.ProbeUnavailable != "":
+		return false, "", ""
+	case outcome.BackendAdjustment != nil:
+		return true, string(exactAdmissionCompat), "backend compatibility adjustment required: " + outcome.BackendAdjustment.Reason
+	case outcome.CompanionRejected:
+		return true, string(exactAdmissionCompanion), "the speculative companion was rejected"
+	case outcome.DoesNotFit:
+		return true, string(exactAdmissionMemory), fmt.Sprintf("CUDA%d deficit %d MiB against the pre-launch resource state", outcome.Device, outcome.DeficitMB)
+	}
+	return false, "", ""
+}

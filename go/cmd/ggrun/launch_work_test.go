@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -179,5 +180,56 @@ func TestStalledProductionLoadIsBoundedAndRecorded(t *testing.T) {
 	}
 	if filepath.Base(launchWorkLedgerPath(cacheDir)) != "launch-work.jsonl" {
 		t.Fatal("ledger path changed")
+	}
+}
+
+func fakeOracleBuild(t *testing.T, fitBody string) string {
+	t.Helper()
+	dir := t.TempDir()
+	server := filepath.Join(dir, "llama-server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "llama-fit-params"), []byte("#!/bin/sh\n"+fitBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+// Qwen3.5-4B, live: three challengers were refused by the oracle only after the
+// healthy baseline had been stopped, which then cost a restoration load. The
+// oracle can refuse them against the pre-launch resource state first.
+func TestPrescreenRefusesOracleDeficitWithoutStoppingBaseline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake oracle")
+	}
+	server := fakeOracleBuild(t, "echo 'CUDA0 2603 2141 990'\n")
+	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 5729}}}
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	strategy := &placement.Strategy{ContextSize: 125952, UBatchSize: 1024, Parallel: 1}
+	refused, class, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
+		&backendInfo{Path: server, Tag: "llama"}, baseline, strategy, []string{server, "-m", "q.gguf", "-ub", "1024"})
+	if !refused || class != string(exactAdmissionMemory) || !strings.Contains(reason, "CUDA0 deficit") {
+		t.Fatalf("prescreen = %v %q %q", refused, class, reason)
+	}
+}
+
+func TestPrescreenNeverStartsAContainedProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake oracle")
+	}
+	server := fakeOracleBuild(t, "echo 'boom' >&2; exit 1\n")
+	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282}}}
+	cacheDir := t.TempDir()
+	refused, _, _ := prescreenCalibrationCandidate(&launchRequest{AllowLiveMemoryProbe: true}, &config.Config{CacheDir: cacheDir},
+		&placement.ModelProfile{Basename: "q"}, &backendInfo{Path: server, Tag: "llama"}, baseline,
+		&placement.Strategy{ContextSize: 4096, UBatchSize: 512, Parallel: 1}, []string{server, "-m", "q.gguf"})
+	if refused {
+		t.Fatal("an oracle failure was treated as a refusal")
+	}
+	for _, rec := range readLaunchWork(t, cacheDir) {
+		if rec.LoadedWeights {
+			t.Fatalf("prescreen started a weight-loading process: %#v", rec)
+		}
 	}
 }

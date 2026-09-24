@@ -30,7 +30,7 @@ func (r *Runner) RunClaudeRouterCanary() error {
 			"input_schema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 		}},
 	}
-	answer, err := r.runClaudeMessagesCanary(body, "Claude router")
+	answer, err := r.runBoundedClaudeCanary(body, "Claude router")
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,7 @@ func (r *Runner) RunClaudeReviewerCanary() error {
 			"role": "user", "content": []map[string]string{{"type": "text", "text": "The action is a read-only health check."}},
 		}},
 	}
-	answer, err := r.runClaudeMessagesCanary(body, "Claude reviewer route")
+	answer, err := r.runBoundedClaudeCanary(body, "Claude reviewer route")
 	if err != nil {
 		return err
 	}
@@ -69,24 +69,45 @@ func (r *Runner) RunClaudeReviewerCanary() error {
 	return nil
 }
 
-func (r *Runner) runClaudeMessagesCanary(body map[string]interface{}, lane string) (string, error) {
+// canaryReasoningMaxTokens is the one larger output cap a canary may retry with.
+// A small reasoning model can spend the ordinary 96 tokens thinking and return
+// no text at all (Qwen3.5-4B did, on a server that otherwise worked). The retry
+// happens only when the backend reports that the cap, not the model, ended the
+// answer, so a non-reasoning model never pays for it.
+const canaryReasoningMaxTokens = 1024
+
+func (r *Runner) runBoundedClaudeCanary(body map[string]interface{}, lane string) (string, error) {
+	answer, stopReason, err := r.runClaudeMessagesCanary(body, lane)
+	if err != nil || strings.TrimSpace(answer) != "" || stopReason != "max_tokens" {
+		return answer, err
+	}
+	retry := make(map[string]interface{}, len(body))
+	for key, value := range body {
+		retry[key] = value
+	}
+	retry["max_tokens"] = canaryReasoningMaxTokens
+	answer, _, err = r.runClaudeMessagesCanary(retry, lane)
+	return answer, err
+}
+
+func (r *Runner) runClaudeMessagesCanary(body map[string]interface{}, lane string) (string, string, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	request, err := http.NewRequest(http.MethodPost, strings.TrimRight(r.BaseURL, "/")+"/v1/messages", bytes.NewReader(data))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := r.client().Do(request)
 	if err != nil {
-		return "", fmt.Errorf("%s request: %w", lane, err)
+		return "", "", fmt.Errorf("%s request: %w", lane, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		return "", fmt.Errorf("%s HTTP %d: %s", lane, response.StatusCode, strings.TrimSpace(string(detail)))
+		return "", "", fmt.Errorf("%s HTTP %d: %s", lane, response.StatusCode, strings.TrimSpace(string(detail)))
 	}
 	var decoded struct {
 		Content []struct {
@@ -94,9 +115,10 @@ func (r *Runner) runClaudeMessagesCanary(body map[string]interface{}, lane strin
 			Text string `json:"text"`
 		} `json:"content"`
 		Completion string `json:"completion"`
+		StopReason string `json:"stop_reason"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded); err != nil {
-		return "", fmt.Errorf("decode %s response: %w", strings.ToLower(lane), err)
+		return "", "", fmt.Errorf("decode %s response: %w", strings.ToLower(lane), err)
 	}
 	texts := make([]string, 0, len(decoded.Content)+1)
 	for _, block := range decoded.Content {
@@ -107,5 +129,5 @@ func (r *Runner) runClaudeMessagesCanary(body map[string]interface{}, lane strin
 	if decoded.Completion != "" {
 		texts = append(texts, decoded.Completion)
 	}
-	return strings.Join(texts, " "), nil
+	return strings.Join(texts, " "), decoded.StopReason, nil
 }

@@ -1069,6 +1069,22 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 			continue
 		}
+		// With a same-build oracle, admission can be decided in seconds without
+		// stopping the healthy baseline: price the candidate against the
+		// resources captured before the main model started, which is what it
+		// will see once the baseline is gone. A refusal here saves a stop and a
+		// restoration load.
+		if curP != nil && oracleAvailable {
+			if refused, class, reason := prescreenCalibrationCandidate(req, cfg, model, be, resourceBaseline, cand.Strategy, candArgs); refused {
+				fmt.Fprintf(os.Stderr, "[calibrate] %s refused by the memory oracle while the baseline keeps serving (%s)\n", cand.Name, reason)
+				memoryRecovery.reject(candArgs)
+				stableAdmissionFailed = true
+				if stableFailureClass == "" {
+					stableFailureClass, stableFailureReason = class, reason
+				}
+				continue
+			}
+		}
 		// Price the whole experiment before touching the healthy baseline:
 		// candidate admission, its load, the workload, two releases and the
 		// baseline's restoration, from this launch's observed costs.
