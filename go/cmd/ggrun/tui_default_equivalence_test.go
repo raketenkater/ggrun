@@ -24,7 +24,9 @@ func TestFreshTUIDefaultLaunchMatchesPlainCLI(t *testing.T) {
 	a, b := reflect.ValueOf(*plain), reflect.ValueOf(*fromTUI)
 	for i := 0; i < a.NumField(); i++ {
 		name := a.Type().Field(i).Name
-		if name == "OriginalArgs" {
+		// OriginalArgs records the argv (used for resume); unexported fields are
+		// runtime state filled in after parsing, not part of the request.
+		if name == "OriginalArgs" || !a.Type().Field(i).IsExported() {
 			continue
 		}
 		if x, y := fmt.Sprintf("%#v", a.Field(i).Interface()), fmt.Sprintf("%#v", b.Field(i).Interface()); x != y {
