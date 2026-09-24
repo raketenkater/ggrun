@@ -193,6 +193,31 @@ func TestInstalledPathPrefersAppHomeBinary(t *testing.T) {
 	}
 }
 
+// An app home whose .bin/ggrun links to the PATH binary must update that
+// binary. Returning the link made the self-update rename a rebuilt binary over
+// it, leaving PATH on the old build and a second copy in the app home.
+func TestInstalledPathResolvesLinkedAppHomeBinary(t *testing.T) {
+	appHome := t.TempDir()
+	binDir := filepath.Join(appHome, ".bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(t.TempDir(), "ggrun")
+	if err := os.WriteFile(canonical, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canonical, filepath.Join(appHome, "ggrun")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../ggrun", filepath.Join(binDir, "ggrun")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_APP_HOME", appHome)
+	if got := installedLLMServerPath(); got != canonical {
+		t.Fatalf("installed path = %q, want the linked binary %q", got, canonical)
+	}
+}
+
 func TestSourceRepoFromExecutableResolvesCanonicalSymlink(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "ggrun")
 	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {

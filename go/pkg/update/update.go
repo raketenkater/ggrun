@@ -791,6 +791,12 @@ func installedLLMServerPath() string {
 			filepath.Join(appHome, "ggrun.cmd"),
 		} {
 			if _, err := os.Stat(candidate); err == nil {
+				// Resolve a linked app-home entry to the real binary. Renaming a
+				// rebuilt binary over the link would replace the link with a
+				// second, independent copy that PATH never runs.
+				if resolved, err := filepath.EvalSymlinks(candidate); err == nil && resolved != "" {
+					return resolved
+				}
 				return candidate
 			}
 		}
