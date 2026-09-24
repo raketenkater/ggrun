@@ -1074,7 +1074,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		// exact admission will once the baseline is gone. A refusal here saves
 		// a stop and a restoration load.
 		if curP != nil && oracleAvailable {
-			if refused, class, reason := prescreenCalibrationCandidate(req, cfg, model, be, caps, cand.Strategy, candArgs); refused {
+			if refused, class, reason := prescreenCalibrationCandidate(req, cfg, model, be, caps, resourceBaseline, cand.Strategy, candArgs); refused {
 				fmt.Fprintf(os.Stderr, "[calibrate] %s refused by the memory oracle while the baseline keeps serving (%s)\n", cand.Name, reason)
 				memoryRecovery.reject(candArgs)
 				stableAdmissionFailed = true

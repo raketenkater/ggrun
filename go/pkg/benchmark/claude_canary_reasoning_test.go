@@ -66,3 +66,34 @@ func TestEmptyAnswerWithoutTruncationIsNotRetried(t *testing.T) {
 		t.Fatalf("calls = %d, want no retry", calls)
 	}
 }
+
+func canaryServer(t *testing.T, response string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(response))
+	}))
+}
+
+// Qwen3.5-4B through the live router: stop_reason tool_use with two calls to
+// the declared no-op tool and no text. Transport worked; the model disobeyed.
+func TestRouterCanaryAcceptsWellFormedCallsToTheDeclaredTool(t *testing.T) {
+	server := canaryServer(t, `{"content":[{"type":"thinking","thinking":"hm"},{"type":"tool_use","id":"a","name":"ggrun_canary_noop","input":{}},{"type":"tool_use","id":"b","name":"ggrun_canary_noop","input":{}}],"stop_reason":"tool_use"}`)
+	defer server.Close()
+	if err := (&Runner{BaseURL: server.URL, Model: "local"}).RunClaudeRouterCanary(); err != nil {
+		t.Fatalf("well-formed declared tool call rejected: %v", err)
+	}
+}
+
+func TestRouterCanaryRejectsUndeclaredOrMalformedToolCalls(t *testing.T) {
+	for name, body := range map[string]string{
+		"undeclared": `{"content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"ls"}}],"stop_reason":"tool_use"}`,
+		"malformed":  `{"content":[{"type":"tool_use","id":"a","name":"ggrun_canary_noop","input":"{"}],"stop_reason":"tool_use"}`,
+		"no-reason":  `{"content":[{"type":"tool_use","id":"a","name":"ggrun_canary_noop","input":{}}],"stop_reason":"end_turn"}`,
+	} {
+		server := canaryServer(t, body)
+		err := (&Runner{BaseURL: server.URL, Model: "local"}).RunClaudeRouterCanary()
+		server.Close()
+		if err == nil {
+			t.Fatalf("%s tool response accepted", name)
+		}
+	}
+}

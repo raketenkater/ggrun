@@ -105,14 +105,22 @@ func candidateAllocationEvidenceCached(req *launchRequest, cfg *config.Config, b
 // live baseline. It reports a refusal only for outcomes exact admission would
 // also refuse; anything inconclusive leaves the decision to the real admission.
 //
-// caps must be the launch's detection-time capabilities, the same input exact
-// admission uses. A live snapshot taken after companions started would count
-// their memory twice: once as used VRAM and again as the runtime reservation.
-func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, args []string) (bool, string, string) {
-	if cfg == nil || caps == nil || strategy == nil {
+// It must price the moment after the baseline stops, as exact admission will.
+// caps are the launch's detection-time capabilities (the admission's input,
+// with the reviewer reservation applied on top), and resourceBaseline is the
+// live usage captured after companions started and before the main model did,
+// which is what the devices return to once the baseline is gone. Reading live
+// usage now would count the serving baseline itself; using the snapshot as the
+// detection input would count the companions twice.
+func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps, resourceBaseline *detect.Capabilities, strategy *placement.Strategy, args []string) (bool, string, string) {
+	if cfg == nil || caps == nil || resourceBaseline == nil || strategy == nil {
 		return false, "", ""
 	}
-	runtimeCaps, _ := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
+	afterStop := map[int]int{}
+	for _, gpu := range resourceBaseline.GPUs {
+		afterStop[gpu.Index] = gpu.VRAMUsedMB
+	}
+	runtimeCaps, _ := runtimeGPUCapabilitiesWithUsage(caps, req, strategy, func(physical int) int { return afterStop[physical] })
 	if runtimeCaps == nil {
 		return false, "", ""
 	}

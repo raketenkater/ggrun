@@ -1889,6 +1889,14 @@ var runtimeVRAMUsedMB = placement.QueryVRAMUsed
 // stricter of the deterministic reservation and a fresh whole-device reading,
 // which also catches unrelated workloads that appeared after placement.
 func runtimeGPUCapabilitiesForLaunch(caps *detect.Capabilities, req *launchRequest, strategy *placement.Strategy) (*detect.Capabilities, map[int]int) {
+	return runtimeGPUCapabilitiesWithUsage(caps, req, strategy, runtimeVRAMUsedMB)
+}
+
+// runtimeGPUCapabilitiesWithUsage is runtimeGPUCapabilitiesForLaunch with the
+// live per-physical-GPU usage reading supplied by the caller, so a decision
+// about a later moment (after the serving baseline stops) can use the usage
+// expected then instead of now.
+func runtimeGPUCapabilitiesWithUsage(caps *detect.Capabilities, req *launchRequest, strategy *placement.Strategy, liveUsedMB func(physical int) int) (*detect.Capabilities, map[int]int) {
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
 	if runtimeCaps == nil {
 		return nil, visibleToPhysical
@@ -1908,7 +1916,7 @@ func runtimeGPUCapabilitiesForLaunch(caps *detect.Capabilities, req *launchReque
 	for i := range adjusted.GPUs {
 		physical := physicalGPUIndex(adjusted.GPUs[i].Index, visibleToPhysical)
 		usedFloor := adjusted.GPUs[i].VRAMUsedMB + plannedByPhysical[physical]
-		if liveUsed := runtimeVRAMUsedMB(physical); liveUsed > usedFloor {
+		if liveUsed := liveUsedMB(physical); liveUsed > usedFloor {
 			usedFloor = liveUsed
 		}
 		adjusted.GPUs[i].VRAMUsedMB = usedFloor

@@ -204,13 +204,23 @@ func TestPrescreenRefusesOracleDeficitWithoutStoppingBaseline(t *testing.T) {
 		t.Skip("POSIX fake oracle")
 	}
 	server := fakeOracleBuild(t, "echo 'CUDA0 2603 2141 990'\n")
+	// Detection saw an idle 4070; the reviewer then took 6553 MiB, which is
+	// what the card returns to once the baseline stops. The live 4B launch
+	// admitted this exact ubatch-1024 plan after the stop with a 5 MiB deficit.
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282}}}
 	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282, VRAMUsedMB: 6553}}}
 	cfg := &config.Config{CacheDir: t.TempDir()}
 	strategy := &placement.Strategy{ContextSize: 125952, UBatchSize: 1024, Parallel: 1}
 	refused, class, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
-		&backendInfo{Path: server, Tag: "llama"}, baseline, strategy, []string{server, "-m", "q.gguf", "-ub", "1024"})
-	if !refused || class != string(exactAdmissionMemory) || !strings.Contains(reason, "CUDA0 deficit") {
+		&backendInfo{Path: server, Tag: "llama"}, caps, baseline, strategy, []string{server, "-m", "q.gguf", "-ub", "1024"})
+	if !refused || class != string(exactAdmissionMemory) || !strings.Contains(reason, "CUDA0 deficit 5 MiB") {
 		t.Fatalf("prescreen = %v %q %q", refused, class, reason)
+	}
+	// With the reviewer's memory back after the stop, a plan that fits is not refused.
+	fits := fakeOracleBuild(t, "echo 'CUDA0 2603 1308 1124'\n")
+	if refused, _, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
+		&backendInfo{Path: fits, Tag: "llama"}, caps, baseline, strategy, []string{fits, "-m", "q.gguf"}); refused {
+		t.Fatalf("fitting candidate refused: %s", reason)
 	}
 }
 
@@ -222,7 +232,7 @@ func TestPrescreenNeverStartsAContainedProbe(t *testing.T) {
 	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282}}}
 	cacheDir := t.TempDir()
 	refused, _, _ := prescreenCalibrationCandidate(&launchRequest{AllowLiveMemoryProbe: true}, &config.Config{CacheDir: cacheDir},
-		&placement.ModelProfile{Basename: "q"}, &backendInfo{Path: server, Tag: "llama"}, baseline,
+		&placement.ModelProfile{Basename: "q"}, &backendInfo{Path: server, Tag: "llama"}, baseline, baseline,
 		&placement.Strategy{ContextSize: 4096, UBatchSize: 512, Parallel: 1}, []string{server, "-m", "q.gguf"})
 	if refused {
 		t.Fatal("an oracle failure was treated as a refusal")
