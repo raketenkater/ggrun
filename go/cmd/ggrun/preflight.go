@@ -87,6 +87,8 @@ type preflightOutcome struct {
 	// failed device: an exact graph size, reported even though the deficit
 	// itself is a device total.
 	DeviceComputeMB int
+	// DeviceContextMB is the oracle's KV/context row for the failed device.
+	DeviceContextMB int
 }
 
 const memoryEvidenceSchemaVersion = memprobe.SchemaVersion
@@ -1505,6 +1507,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		for _, d := range devs {
 			if idx, ok := cudaDeviceIndex(d.Name); ok && idx == dev {
 				outcome.DeviceComputeMB += d.ComputeMB
+				outcome.DeviceContextMB += d.ContextMB
 			}
 		}
 		return outcome

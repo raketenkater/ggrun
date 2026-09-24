@@ -43,3 +43,14 @@ func TestPostLaunchOverheadPrefersLiveUsageAboveTheOracleTotal(t *testing.T) {
 		t.Fatalf("measured overhead did not replace the default: %v", got)
 	}
 }
+
+func TestPostLaunchGrowthIsMeasuredAgainstTheOracleTotal(t *testing.T) {
+	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 12282}}
+	log := "load_tensors: CUDA0 model buffer size = 4459.00 MiB\n"
+	// Qwen3.8-Flash-Next: log-itemized buffers miss the recurrent state, so the
+	// log-only figure books it as growth; the oracle total accounts for it.
+	got := runtimeGraphGrowthFromVRAMDelta(gpus, map[int]int{0: 1}, map[int]int{0: 11000}, map[int]int{0: 330}, log, map[int]int{0: 10449})
+	if got[0] != 11000-1-330-10449 {
+		t.Fatalf("growth = %v, want %d", got, 11000-1-330-10449)
+	}
+}

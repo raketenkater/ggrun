@@ -591,7 +591,7 @@ func TestRuntimeGraphGrowthFromVRAMDeltaRecordsOnlyClosedAccounting(t *testing.T
 	// CUDA1 has no measured system overhead.
 	overhead := map[int]int{0: 100, 2: 100, 3: 100}
 
-	got := runtimeGraphGrowthFromVRAMDelta(gpus, baseline, used, overhead, log)
+	got := runtimeGraphGrowthFromVRAMDelta(gpus, baseline, used, overhead, log, nil)
 
 	// CUDA0 closes: 7600 - 1 - 100 - (6941 + 274 + 210).
 	if len(got) != 1 || got[0] != 74 {

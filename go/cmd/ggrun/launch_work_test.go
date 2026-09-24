@@ -347,3 +347,19 @@ func TestProvenFitIsKeptAfterPlannerDisproof(t *testing.T) {
 		t.Fatalf("oracle runs %d, production starts %d; want one of each", oracles, productions)
 	}
 }
+
+// A 974 MiB oracle deficit on a device whose KV row is 4600 MiB and graph row
+// 1428 MiB needs about an 18% context cut, not the 75% a compute-only sizing
+// produced (262,144 -> 64,512 on Qwen3.8-Flash-Next).
+func TestOracleContextTargetCountsTheKVRow(t *testing.T) {
+	req := &launchRequest{CtxFlag: "fit"}
+	current := &placement.Strategy{ContextSize: 262144, ContextAuto: true, Parallel: 1}
+	outcome := oracleComputeBoundOutcome(preflightOutcome{
+		Device: 0, DeficitMB: 974, DoesNotFit: true, DeviceComputeMB: 1428, DeviceContextMB: 4600,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned},
+	})
+	target, ok := automaticContextRecoveryTarget(req, current, []string{"llama-server", "--ctx-size", "262144"}, outcome)
+	if !ok || target < 200000 || target >= 262144 {
+		t.Fatalf("context target = %d, %v; want a proportionate cut", target, ok)
+	}
+}

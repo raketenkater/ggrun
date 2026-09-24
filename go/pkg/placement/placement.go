@@ -7723,6 +7723,7 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 // unknown, not growth.
 func runtimeGraphGrowthFromVRAMDelta(
 	gpus []detect.GPU, baselineVRAMByGPU, usedVRAMByGPU, overheadByGPU map[int]int, serverLog string,
+	oracleTotalsByGPU map[int]int,
 ) map[int]int {
 	growthByGPU := map[int]int{}
 	for _, g := range gpus {
@@ -7742,10 +7743,17 @@ func runtimeGraphGrowthFromVRAMDelta(
 		// model and KV shares from the strategy instead would fold planning error
 		// straight into the growth figure.
 		modelBufMB, kvBufMB, computeBufMB := parseBuffersFromLog(serverLog, g.Index)
-		if modelBufMB <= 0 && computeBufMB <= 0 {
+		accountedMB := modelBufMB + kvBufMB + computeBufMB
+		// The oracle's total for the started argv includes buffers the log does
+		// not itemize (recurrent/SWA state); against the log alone, Qwen3.8-
+		// Flash-Next booked 1792-2030 MiB of "growth" that the next launch then
+		// reserved, while that launch peaked ~450 MiB above its oracle total.
+		if oracleMB := oracleTotalsByGPU[g.Index]; oracleMB > 0 {
+			accountedMB = oracleMB
+		} else if modelBufMB <= 0 && computeBufMB <= 0 {
 			continue
 		}
-		growthMB := usedMB - baselineMB - overheadMB - (modelBufMB + kvBufMB + computeBufMB)
+		growthMB := usedMB - baselineMB - overheadMB - accountedMB
 		if growthMB < 0 {
 			// The accounting did not close. Record nothing rather than a number
 			// this launch does not support.
@@ -7778,7 +7786,7 @@ func runtimeGraphGrowthFromVRAMDelta(
 // and the OOM recorder ratchets it back up — the direction that already works.
 func RecordPostLaunchRuntimeGraphGrowth(
 	cacheDir string, model *ModelProfile, strategy *Strategy, backendTag string,
-	gpus []detect.GPU, baselineVRAMByGPU map[int]int, serverLog string,
+	gpus []detect.GPU, baselineVRAMByGPU map[int]int, serverLog string, oracleTotalsByGPU map[int]int,
 ) bool {
 	if model == nil || strategy == nil || serverLog == "" ||
 		len(gpus) == 0 || len(baselineVRAMByGPU) == 0 ||
@@ -7792,7 +7800,7 @@ func RecordPostLaunchRuntimeGraphGrowth(
 		}
 	}
 	growthByGPU := runtimeGraphGrowthFromVRAMDelta(
-		gpus, baselineVRAMByGPU, usedVRAMByGPU, SystemCUDAOverheadByGPU(cacheDir, gpus), serverLog)
+		gpus, baselineVRAMByGPU, usedVRAMByGPU, SystemCUDAOverheadByGPU(cacheDir, gpus), serverLog, oracleTotalsByGPU)
 	if len(growthByGPU) == 0 {
 		return false
 	}

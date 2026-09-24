@@ -4417,7 +4417,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	// failed. Both other growth recorders are OOM paths, so without this the
 	// reserve only ever rises and a cold key keeps borrowing another model's
 	// failure.
-	placement.RecordPostLaunchRuntimeGraphGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU, serverLog)
+	placement.RecordPostLaunchRuntimeGraphGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU, serverLog, oracleTotals)
 	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
 	placement.RecordPostLaunchContextAllocation(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog, strategy.Parallel)

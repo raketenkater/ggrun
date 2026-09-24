@@ -1004,9 +1004,18 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 		return 0, false
 	}
 	required := recoveryRequiredMB(outcome.DeficitMB)
+	// What a context cut reclaims. For a failed graph allocation that is the
+	// compute buffer; for an oracle deficit the device's KV row shrinks with
+	// context too. Sizing an oracle deficit on compute alone cut Qwen3.8-Flash-
+	// Next from 262,144 to 64,512 tokens for a 974 MiB shortfall on a device
+	// whose KV row alone was 4,600 MiB.
+	scalableMB := outcome.AllocMB
+	if outcome.Evidence.Level == memoryEvidenceOraclePlanned && outcome.DeviceContextMB > 0 {
+		scalableMB = outcome.DeviceComputeMB + outcome.DeviceContextMB
+	}
 	target := minimum
-	if required < outcome.AllocMB {
-		target = currentCtx * (outcome.AllocMB - required) / outcome.AllocMB
+	if required < scalableMB {
+		target = currentCtx * (scalableMB - required) / scalableMB
 	}
 	target = target / 1024 * 1024
 	if target < minimum {
