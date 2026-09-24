@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // backendFormatRetryEnv marks a launch that already updated the backend once
@@ -25,6 +27,24 @@ func isMainlineBackendPath(path string) bool {
 	}
 	repo := filepath.Dir(filepath.Dir(filepath.Dir(path)))
 	return filepath.Base(repo) == "llama.cpp"
+}
+
+// backendBuildFingerprint identifies the build behind a backend path: its
+// reported commit, or the resolved binary's modification time when the build
+// does not report one. Either changes when an update swaps in a new build.
+func backendBuildFingerprint(path string) string {
+	if commit := backendCommit(path); commit != "" {
+		return commit
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return ""
+	}
+	return info.ModTime().UTC().Format(time.RFC3339Nano)
 }
 
 // offerBackendUpdateForModelFormatWith updates the mainline llama.cpp backend

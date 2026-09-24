@@ -6438,7 +6438,7 @@ func cmdLaunch(args []string) {
 		var formatErr *backendModelFormatError
 		if errors.As(err, &formatErr) {
 			if offerBackendUpdateForModelFormatWith(req, be, formatErr, cfg.AssumeYes, os.Getenv(backendFormatRetryEnv) != "",
-				os.Stdin, os.Stderr, stdinIsTerminal(), backendCommit, updateMainlineBackend) {
+				os.Stdin, os.Stderr, stdinIsTerminal(), backendBuildFingerprint, updateMainlineBackend) {
 				err = relaunchAfterBackendUpdate()
 			}
 			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)

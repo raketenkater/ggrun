@@ -126,3 +126,19 @@ func TestModelFormatUpdateRespectsChoiceAndBackendFamily(t *testing.T) {
 		t.Fatalf("non-terminal launch must print the fix: %q", out.String())
 	}
 }
+
+// Upstream llama.cpp changed its version line. Reading only the old form made
+// every new build look commit-less, so an update that succeeded was reported
+// as "already at the newest llama.cpp" and the launch never relaunched.
+func TestBackendCommitReadsOldAndNewVersionLines(t *testing.T) {
+	for out, want := range map[string]string{
+		"version: 10954 (89fe24240)\nbuilt with GNU 13.3.0 for Linux x86_64\n":                                     "89fe24240",
+		"0.00.000.388 I srv  llama_server: initializing ...\nversion: 0.5.0-dev (build 11159, commit 6b790a9c2)\n": "6b790a9c2",
+		"version: 1 (d2462f8)\n": "d2462f8",
+		"no version here\n":      "",
+	} {
+		if got := parseBackendVersionCommit(out); got != want {
+			t.Fatalf("parseBackendVersionCommit(%q) = %q, want %q", out, got, want)
+		}
+	}
+}
