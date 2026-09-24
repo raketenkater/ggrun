@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -18,6 +19,10 @@ import (
 // already disproved.
 type launchMemoryRecovery struct {
 	rejected map[string]struct{}
+	// lastProductionArgs/lastProductionLoad are the most recent production
+	// start that reached health and how long its load took.
+	lastProductionArgs string
+	lastProductionLoad time.Duration
 	// rejectedContext is the smallest automatic context this launch has proven
 	// does not fit. The argv identity ledger cannot carry this: a later
 	// recompute from the original automatic request proposes a *different* argv
@@ -69,6 +74,26 @@ type launchMemoryRecovery struct {
 	// Unknown geometry is deliberately NOT recorded here: knowing nothing and
 	// knowing the shortfall exceeds the device's share want opposite responses.
 	outstrippedContext int
+}
+
+// observeProductionLoad records the observed cost of a production start that
+// reached health. It is what an optional experiment must budget to restore this
+// configuration; a prediction from file size is not.
+func (r *launchMemoryRecovery) observeProductionLoad(args []string, elapsed time.Duration) {
+	if r == nil {
+		return
+	}
+	r.lastProductionArgs = formatCommand(args)
+	r.lastProductionLoad = elapsed
+}
+
+// productionLoadCost returns the observed load time of args, when this launch
+// has loaded exactly that configuration.
+func (r *launchMemoryRecovery) productionLoadCost(args []string) (time.Duration, bool) {
+	if r == nil || r.lastProductionLoad <= 0 || r.lastProductionArgs != formatCommand(args) {
+		return 0, false
+	}
+	return r.lastProductionLoad, true
 }
 
 func newLaunchMemoryRecovery() *launchMemoryRecovery {

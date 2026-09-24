@@ -982,7 +982,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	}
 
 	// The default is already running: measure it in place.
+	benchStarted := time.Now()
 	defaultResult, err := bench(strategy, p)
+	baselineWorkload := time.Since(benchStarted)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[calibrate] baseline measurement failed (%v); serving default placement\n", err)
 		return p, strategy, serverArgs, nil
@@ -1036,6 +1038,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	}
 
 	curP := p
+	baselineLoad, baselineLoadObserved := memoryRecovery.productionLoadCost(serverArgs)
+	oracleAvailable := be != nil && findFitParamsBin(be.Path, model.ModelArch) != ""
+	unaffordable := ""
 	failures := 0
 	stableAdmissionFailed := false
 	stableFailureClass := ""
@@ -1064,6 +1069,24 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 			continue
 		}
+		// Price the whole experiment before touching the healthy baseline:
+		// candidate admission, its load, the workload, two releases and the
+		// baseline's restoration, from this launch's observed costs.
+		cost := estimateChallengerCost(challengerCostInputs{
+			BaselineLoad: baselineLoad, BaselineLoadObserved: baselineLoadObserved,
+			BaselineWorkload: baselineWorkload, Ceiling: autoStartupTimeout(model),
+			ProbeNeeded:     !oracleAvailable && !candidateAllocationEvidenceCached(req, cfg, be, caps, model, cand.Strategy, candArgs),
+			BaselineRunning: curP != nil,
+		})
+		if !cost.Affordable(remaining) {
+			unaffordable = fmt.Sprintf("the finalist experiment and baseline restoration need about %s; %s remains", cost.Total().Round(time.Second), remaining.Round(time.Second))
+			appendLaunchWork(cfg.CacheDir, launchWorkRecord{Phase: "challenger", Kind: "budget-refusal", Model: modelBasename(model),
+				Backend: backendIdentity(be), ArgvHash: argvHash(candArgs), Outcome: "not-started", Reason: unaffordable + "; " + cost.String()})
+			fmt.Fprintf(os.Stderr, "[optimize] not measuring %s: %s; keeping the live baseline\n", cand.Name, unaffordable)
+			admissionInconclusive = true
+			budgetExhausted = true
+			break
+		}
 		fmt.Printf("[calibrate] measuring %s...\n", cand.Name)
 		if curP != nil {
 			if !stopCalibrationProcessAndWait(curP, "default before "+cand.Name, resourceBaseline, 30*time.Second) {
@@ -1071,10 +1094,20 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 			curP = nil
 		}
-		candidateTimeout := boundedCalibrationTimeout(timeout, remaining)
+		// Shutdown spent part of the budget; the candidate may use what is left
+		// minus the restoration reserve, across probe, load and retries alike.
+		remaining = budget.MaxElapsed - time.Since(startedAt)
+		candidateTimeout := boundedCalibrationTimeout(timeout, remaining-cost.Restore)
 		cp, measuredStrategy, measuredArgs, serr := startLaunchExactAdmission(req, cfg, model, cand.Strategy, be, caps, candArgs, candidateTimeout, memoryRecovery)
 		if serr != nil {
 			fmt.Fprintf(os.Stderr, "[calibrate] %s failed to start (%v); skipping\n", cand.Name, serr)
+			if isAdmissionBudgetError(serr) {
+				// Out of time is not negative evidence about the candidate, and
+				// no later candidate can do better on the same budget.
+				admissionInconclusive = true
+				budgetExhausted = true
+				break
+			}
 			if isStableExactAdmissionFailure(serr) {
 				stableAdmissionFailed = true
 				if stableFailureClass == "" {
@@ -1178,10 +1211,18 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	// ordinary functional/cache/lifecycle gates.
 	if len(measurements) < 2 {
 		if curP == nil {
-			curP = restartPlacement(req, cfg, model, strategy, be, caps, serverArgs, timeout, memoryRecovery)
-		}
-		if curP == nil {
-			return nil, strategy, serverArgs, nil
+			restored, restoredStrategy, restoredArgs := restartPlacement(req, cfg, model, strategy, be, caps, serverArgs, restartAdmissionWindow(model), memoryRecovery)
+			if restored == nil {
+				return nil, strategy, serverArgs, nil
+			}
+			curP = restored
+			if formatCommand(restoredArgs) != formatCommand(serverArgs) {
+				// Recovery changed the restored shape, so the baseline measurement
+				// describes a configuration that is not serving. Serve what
+				// actually runs and let ordinary validation judge it.
+				fmt.Fprintln(os.Stderr, "[calibrate] baseline restoration needed memory recovery; its measurement no longer applies and is not recorded")
+				return curP, restoredStrategy, restoredArgs, nil
+			}
 		}
 		// A search the elapsed budget cut off is not negative evidence, but the
 		// next launch repeats it identically, including when the finalist was
@@ -1195,6 +1236,10 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			if pending != nil {
 				prev, _ := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
 				markFinalistUnmeasured(pending, prev)
+				if unaffordable != "" {
+					pending.FinalistFailureClass = "restore-budget"
+					pending.FinalistFailureReason = unaffordable
+				}
 				fmt.Printf("[optimize] finalist %s was not measured within the time budget (attempt %d of %d); serving the measured baseline\n",
 					pending.Finalist, pending.FinalistAttempts, placement.MaxUnmeasuredFinalistAttempts)
 				return curP, strategy, serverArgs, pending
@@ -1248,14 +1293,21 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	// The support helper (when enabled) has stopped and verified resource release.
 	// Only now may the winning main-model process be started.
-	curP = restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, timeout, memoryRecovery)
+	curP, restoredStrategy, restoredArgs := restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, restartAdmissionWindow(model), memoryRecovery)
 	if curP == nil && best.Name != "default" {
 		fmt.Fprintln(os.Stderr, "[calibrate] winner restart failed; restoring measured default")
 		best = measurements[0]
-		curP = restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, timeout, memoryRecovery)
+		curP, restoredStrategy, restoredArgs = restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, restartAdmissionWindow(model), memoryRecovery)
 	}
 	if curP == nil {
 		return nil, best.Strategy, best.Args, nil
+	}
+	if formatCommand(restoredArgs) != formatCommand(best.Args) {
+		// The restart boundary recovered into a different argv. The measured
+		// performance belongs to best.Args, so it must not become this
+		// configuration's evidence.
+		fmt.Fprintf(os.Stderr, "[calibrate] restart of %s needed memory recovery; serving the recovered configuration without its measurement\n", best.Name)
+		return curP, restoredStrategy, restoredArgs, nil
 	}
 
 	pending := newCalibrationDecision(scopeKey, model, defaultResult, best)
@@ -1726,11 +1778,13 @@ func calibrationAdvisorIncident(req *launchRequest, model *placement.ModelProfil
 // caller then reports the error and stops any reviewer before exiting, since
 // leaving the user with no server after a calibration that already measured a
 // working default is worse than failing loudly.
-func restartPlacement(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration, memoryRecovery *launchMemoryRecovery) *server.Process {
-	p, _, _, err := restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, timeout, memoryRecovery)
+func restartPlacement(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, window time.Duration, memoryRecovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string) {
+	p, restoredStrategy, restoredArgs, err := restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, window, memoryRecovery)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[calibrate] restart of best placement failed: %v\n", err)
-		return nil
+		return nil, strategy, serverArgs
 	}
-	return p
+	// The start boundary may recover into a different argv; the caller needs
+	// the configuration that is actually running, not the one it asked for.
+	return p, restoredStrategy, restoredArgs
 }

@@ -103,6 +103,20 @@ func pruneCandidateBuildDir(path, activeBuildDir string) error {
 	return os.RemoveAll(path)
 }
 
+// validateActiveBackendBuild is the "nothing to rebuild" test for an installed
+// build: its server must pass conformance and every auxiliary tool its tree
+// defines must be present. A build that lost its memory oracle still serves,
+// but every launch then pays contained full loads to measure memory.
+func validateActiveBackendBuild(be backends.Backend, layout backendBuildLayout) error {
+	if err := validateBackendCandidate(be.Path, be.RouteArch, layout.accel); err != nil {
+		return err
+	}
+	if missing := backends.MissingBuildTools(layout.buildDir); len(missing) > 0 {
+		return fmt.Errorf("its build lacks %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // cmdBackendUpdate rebuilds one named fork. The reusable core returns errors so
 // ggrun update can continue through every registered backend instead of the
 // first failure terminating the entire process via os.Exit.
@@ -143,7 +157,7 @@ func updateRegisteredBackend(tag string) error {
 		branch, commit = recipe.Branch, recipe.Commit
 		if commit != "" && strings.EqualFold(commit, be.Commit) &&
 			sameStrings(recipe.PatchNames(), be.AppliedPatches) {
-			if validateErr := validateBackendCandidate(be.Path, be.RouteArch, layout.accel); validateErr == nil {
+			if validateErr := validateActiveBackendBuild(*be, layout); validateErr == nil {
 				// Persist catalog policy even when no source rebuild is needed.
 				// This migrates manifests written before helper_only existed.
 				*be = backends.ApplyBuiltinPolicy(*be)
@@ -161,7 +175,7 @@ func updateRegisteredBackend(tag string) error {
 		// A hand-pinned backend has nothing to advance to. Tracking the branch
 		// instead would silently discard the pin the user chose. It may still
 		// need a same-commit rebuild when its active binary is damaged.
-		if validateErr := validateBackendCandidate(be.Path, be.RouteArch, layout.accel); validateErr == nil {
+		if validateErr := validateActiveBackendBuild(*be, layout); validateErr == nil {
 			fmt.Printf("[backend] %s is pinned to commit %s with no recipe to advance it and passes conformance.\n", tag, shortCommit(commit))
 			fmt.Println("[backend] re-add it with a new --commit to move the pin.")
 			return nil
@@ -181,8 +195,15 @@ func updateRegisteredBackend(tag string) error {
 	newCommit = strings.TrimSpace(newCommit)
 	patchesCurrent := recipe == nil || sameStrings(recipe.PatchNames(), be.AppliedPatches)
 	if newCommit != "" && strings.EqualFold(newCommit, be.Commit) && patchesCurrent && !forceRebuild {
-		fmt.Printf("[backend] %s already at %s; nothing to rebuild.\n", tag, shortCommit(newCommit))
-		return nil
+		if gapErr := validateActiveBackendBuild(*be, layout); gapErr == nil {
+			fmt.Printf("[backend] %s already at %s; nothing to rebuild.\n", tag, shortCommit(newCommit))
+			return nil
+		} else {
+			// Same revision, incomplete or damaged build: rebuild through the
+			// staged path so the active tree is untouched until a complete
+			// replacement passes.
+			fmt.Printf("[backend] %s is at %s but %v; rebuilding the same revision.\n", tag, shortCommit(newCommit), gapErr)
+		}
 	}
 
 	candidateBuildDir := fmt.Sprintf("%s-candidate-%s-%d", layout.buildDir, shortCommit(newCommit), time.Now().UnixNano())

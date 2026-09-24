@@ -986,7 +986,7 @@ func UpdateBackend(name, repoDir string, walkback int) error {
 
 	newCommit, _ := gitRevParse(repoDir, "HEAD")
 	if oldCommit == newCommit {
-		if validateErr := smokeBackendConfigured(binary, collectCMakeFlags(buildDir)); validateErr == nil {
+		if validateErr := activeBuildComplete(buildDir); validateErr == nil {
 			fmt.Println("  Already up to date and active backend passes conformance.")
 			os.Remove(binaryBackup)
 			return nil
@@ -1299,8 +1299,7 @@ func updateBackendBuildGroup(repoDir string, targets []BackendBuildTarget, walkb
 		results := make([]BackendUpdateResult, 0, len(targets))
 		allValid := true
 		for _, target := range targets {
-			binary := filepath.Join(target.BuildDir, "bin", "llama-server")
-			if err := smokeBackendConfigured(binary, collectCMakeFlags(target.BuildDir)); err != nil {
+			if err := activeBuildComplete(target.BuildDir); err != nil {
 				fmt.Printf("  %s source is current but active build failed conformance (%v); rebuilding.\n", target.Label, err)
 				allValid = false
 				continue
@@ -1444,6 +1443,23 @@ func buildAndTest(repoDir, buildDir string) bool {
 		return false
 	}
 
+	// Auxiliary tools come from the same staging tree, so the promoted bundle
+	// never pairs this server with another build's memory oracle. They are
+	// optional: a failure is reported and launch keeps its contained fallback.
+	for _, target := range backends.OptionalBuildTargets(stagingDir) {
+		tool := exec.Command("cmake", "--build", stagingDir, "--config", "Release", "--parallel", strconv.Itoa(nproc), "--target", target)
+		out, toolErr := tool.CombinedOutput()
+		if toolErr == nil {
+			toolErr = backends.CheckFitParamsTool(filepath.Join(stagingDir, "bin", target))
+		} else {
+			toolErr = fmt.Errorf("%w: %s", toolErr, tailLines(string(out), 3))
+		}
+		if toolErr != nil {
+			backends.DiscardBrokenBuildTool(stagingDir, target, toolErr)
+			fmt.Printf("  Optional %s unavailable at this commit (%v); launches will use contained measurement\n", target, toolErr)
+		}
+	}
+
 	stagingBinary := filepath.Join(stagingDir, "bin", "llama-server")
 	if err := smokeBackendConfigured(stagingBinary, cmakeFlags); err != nil {
 		fmt.Printf("  Backend conformance failed at this commit: %v\n", err)
@@ -1458,6 +1474,20 @@ func buildAndTest(repoDir, buildDir string) bool {
 	}
 	fmt.Println("  Isolated build succeeded and was activated")
 	return true
+}
+
+// activeBuildComplete is the "source is current, nothing to rebuild" test. The
+// server must pass conformance and every auxiliary tool the tree defines must be
+// present: a build that lost its memory oracle still serves, but every launch
+// then measures memory with contained full model loads.
+func activeBuildComplete(buildDir string) error {
+	if err := smokeBackendConfigured(filepath.Join(buildDir, "bin", "llama-server"), collectCMakeFlags(buildDir)); err != nil {
+		return err
+	}
+	if missing := backends.MissingBuildTools(buildDir); len(missing) > 0 {
+		return fmt.Errorf("build lacks %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func cmakeConfigureArgs(repoDir, buildDir string, flags []string) []string {

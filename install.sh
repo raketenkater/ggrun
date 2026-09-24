@@ -1381,6 +1381,11 @@ place_isolated_backend() {
     box="$INSTALL_DIR/backends/$dest_name"
     mkdir -p "$box"
     install -m 0755 "$src" "$box/llama-server"
+    # Keep the same bundle's memory oracle beside its server; launch never
+    # pairs a server with another build's llama-fit-params.
+    if [[ -f "$(dirname "$src")/llama-fit-params" ]]; then
+        install -m 0755 "$(dirname "$src")/llama-fit-params" "$box/llama-fit-params"
+    fi
     copy_backend_libs "$(dirname "$src")" "$box"
     ln -sfn "backends/$dest_name/llama-server" "$INSTALL_DIR/$dest_name"
     [[ -x "$box/llama-server" && -e "$INSTALL_DIR/$dest_name" ]] || return 1
@@ -2027,7 +2032,25 @@ build_backend() {
         fi
     fi
     env "${cmake_env[@]}" cmake -S "$BACKEND_DIR" -B "$BACKEND_BUILD" -DCMAKE_BUILD_TYPE=Release "${cmake_args[@]}" \
-        && cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-server
+        && cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-server \
+        || return 1
+    build_backend_fit_params
+}
+
+# llama-fit-params is the backend's no-allocation memory oracle: launch prices a
+# configuration with it instead of a contained full model load. Build it from the
+# same tree as the server when the source defines it; a failure is not fatal.
+build_backend_fit_params() {
+    local tool="$BACKEND_BUILD/bin/llama-fit-params"
+    compgen -G "$BACKEND_BUILD/*/*/CMakeFiles/llama-fit-params.dir" >/dev/null || return 0
+    local help=""
+    if cmake --build "$BACKEND_BUILD" --config Release -j"$(nproc 2>/dev/null || echo 4)" -t llama-fit-params; then
+        help="$("$tool" --help 2>&1 || true)"
+        [[ "$help" == *--fit-print* ]] && return 0
+    fi
+    rm -f "$tool"
+    warn "Optional llama-fit-params did not build; launches will measure memory with contained loads."
+    return 0
 }
 
 # ── Stage 3: install scripts ────────────────────────────────────────────────

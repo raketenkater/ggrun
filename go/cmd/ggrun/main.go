@@ -4538,6 +4538,9 @@ type exactAdmissionFailure struct {
 	class   exactAdmissionClass
 	message string
 	cause   error
+	// loadedWeights records that the admission which produced this refusal
+	// started a weight-reading process, e.g. a contained allocation probe.
+	loadedWeights bool
 }
 
 func (e *exactAdmissionFailure) Error() string {
@@ -4589,6 +4592,9 @@ var argvTimeAdmissionClasses = map[exactAdmissionClass]bool{
 func exactAdmissionLoadedWeights(err error) bool {
 	var failure *exactAdmissionFailure
 	if !errors.As(err, &failure) || failure == nil {
+		return true
+	}
+	if failure.loadedWeights {
 		return true
 	}
 	return !argvTimeAdmissionClasses[failure.class]
@@ -4709,6 +4715,29 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	if memoryRecovery == nil {
 		memoryRecovery = newLaunchMemoryRecovery()
 	}
+	// timeout is this admission's whole window. Contained probes, the
+	// production start and every retry draw from it, each process additionally
+	// capped at the model's own startup ceiling, so no nested step can reset it.
+	phase, maxLoads := "start", maxStartAdmissionLoads
+	if exactAdmission {
+		phase, maxLoads = "challenger", maxBoundedAdmissionLoads
+	} else if restoreExempt {
+		phase, maxLoads = "restore", maxBoundedAdmissionLoads
+	}
+	cacheDir := ""
+	if cfg != nil {
+		cacheDir = cfg.CacheDir
+	}
+	work := newAdmissionWork(phase, timeout, autoStartupTimeout(model), maxLoads, cacheDir, nil)
+	// A refusal is cheap only when this admission read no weights. The class of
+	// the final error cannot say that: a memory deficit or compatibility verdict
+	// can arrive after a contained probe loaded the whole model.
+	defer func() {
+		var failure *exactAdmissionFailure
+		if work.loadedWeights() && errors.As(launchErr, &failure) && failure != nil {
+			failure.loadedWeights = true
+		}
+	}()
 	specDisabled := false
 	measuredProductionArgs := ""
 	exactCandidateArgs := ""
@@ -4786,7 +4815,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		// without paying for the load to learn it. Re-planned args loop back
 		// here, so every retry is re-gated too.
 		if strategy != nil {
-			preflight := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
+			preflight := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir, Work: work}, runtimeCaps, model, strategy, serverArgs)
 			if adjustment := preflight.BackendAdjustment; adjustment != nil {
 				if exactAdmission {
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionCompat, adjustment.Reason, nil)
@@ -4973,6 +5002,10 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if errors.As(preflight.Err, &formatErr) {
 					return nil, strategy, serverArgs, preflight.Err
 				}
+				// Running out of admission budget is not a memory verdict.
+				if isAdmissionBudgetError(preflight.Err) {
+					return nil, strategy, serverArgs, preflight.Err
+				}
 				return nil, strategy, serverArgs, fmt.Errorf("memory preflight failed closed: %w", preflight.Err)
 			}
 			if preflight.ProbeUnavailable != "" {
@@ -5129,8 +5162,32 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
 		}
-		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, timeout)
+		processTimeout, budgetErr := work.beginLoad(timeout)
+		if budgetErr != nil {
+			work.record(launchWorkRecord{Kind: "budget-refusal", Model: modelBasename(model), Backend: backendIdentity(be),
+				ArgvHash: argvHash(serverArgs), Outcome: "refused", Reason: budgetErr.Error()})
+			return nil, strategy, serverArgs, budgetErr
+		}
+		loadStarted := time.Now()
+		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, processTimeout)
+		loadElapsed := time.Since(loadStarted)
+		{
+			outcome, reason, lastOutputAge := describeStartOutcome(err)
+			rec := launchWorkRecord{Kind: "production", LoadedWeights: true, Model: modelBasename(model), Backend: backendIdentity(be),
+				ArgvHash: argvHash(serverArgs), ElapsedSec: loadElapsed.Seconds(), TimeoutSec: processTimeout.Seconds(),
+				Outcome: outcome, Reason: reason, LastOutputAge: lastOutputAge}
+			if p != nil {
+				if peak, peakErr := p.MemoryPeakBytes(); peakErr == nil {
+					rec.CgroupPeakMiB = bytesToMiBCeil(peak)
+				}
+				if kills, killErr := p.MemoryOOMKillCount(); killErr == nil {
+					rec.OOMKills = kills
+				}
+			}
+			work.record(rec)
+		}
 		if err == nil {
+			memoryRecovery.observeProductionLoad(serverArgs, loadElapsed)
 			if mmapErr := validateObservedMMapPageability(cfg, model, be, strategy, p); mmapErr != nil {
 				memoryRecovery.reject(serverArgs)
 				_ = p.Stop()
@@ -6427,7 +6484,9 @@ func cmdLaunch(args []string) {
 	// process may start.
 	resourceBaseline := captureLaunchResourceBaseline(caps)
 	launchRecovery := newLaunchMemoryRecovery()
-	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, timeout, launchRecovery)
+	// The first start gets room for a probe, a corrected probe and a slow
+	// production load; every nested step shares that one window.
+	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, startupAdmissionWindow(model), launchRecovery)
 	if err != nil {
 		claudeAuto.stop()
 		if releaseErr := stopFailedLaunchBeforeAdvisor(p, caps, 30*time.Second); releaseErr != nil {
@@ -6445,7 +6504,7 @@ func cmdLaunch(args []string) {
 			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
 		}
-		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, timeout, launchRecovery)
+		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, restartAdmissionWindow(model), launchRecovery)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
@@ -6475,7 +6534,7 @@ func cmdLaunch(args []string) {
 			// so the restore-exempt start boundary is used (a deliberate fallback
 			// must not be re-gated into a dead box).
 			restorePrevious := func() bool {
-				p, strategy, serverArgs, err = restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, oldStrategy, be, caps, oldArgs, timeout, launchRecovery)
+				p, strategy, serverArgs, err = restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, oldStrategy, be, caps, oldArgs, restartAdmissionWindow(model), launchRecovery)
 				if err != nil {
 					claudeAuto.stop()
 					fmt.Fprintf(os.Stderr, "Error restoring previous loaded placement: %v\n", err)
@@ -6492,7 +6551,7 @@ func cmdLaunch(args []string) {
 				restorePrevious()
 			} else {
 				fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
-				promotedP, promotedStrategy, promotedArgs, promoteErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout, launchRecovery)
+				promotedP, promotedStrategy, promotedArgs, promoteErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
 				if promoteErr != nil {
 					if !stopCalibrationProcessAndWait(promotedP, "failed measured baseline", resourceBaseline, 30*time.Second) {
 						fmt.Fprintln(os.Stderr, "Error: failed measured baseline did not release resources; refusing an overlapping restore — attempting restore of the previous placement")
@@ -6866,7 +6925,7 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
-		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout, launchRecovery)
+		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
 		if err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] relaunch after runtime OOM failed: %v\n", err)
