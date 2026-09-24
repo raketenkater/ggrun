@@ -780,6 +780,10 @@ def model_query(row: dict[str, Any]) -> str:
 VARIANT_QUALIFIERS = {
     "air", "base", "coder", "distill", "flash", "large", "lite", "medium", "mini",
     "nano", "next", "omni", "small", "tiny", "vl",
+    # Modified derivatives are different models too: an "Uncensored" or
+    # "Heretic" retune does not carry the original's benchmark score.
+    "abliterated", "ablated", "decensored", "heretic", "lorablated", "merge",
+    "merged", "nsfw", "roleplay", "uncensored",
 }
 
 
@@ -809,7 +813,9 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     generations = {t for t in target_tokens if t.isdigit()}
     if generations - candidate_tokens:
         return False
-    target_raw = raw_name_tokens(" ".join([target_query, row_name(row)]))
+    # Parenthetical notes ("based on GLM-4.5-Air") describe lineage, not the
+    # model's own name.
+    target_raw = raw_name_tokens(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
     candidate_raw = raw_name_tokens(clean_repo_model_name(candidate_name))
     if (target_raw & VARIANT_QUALIFIERS) != (candidate_raw & VARIANT_QUALIFIERS):
         return False

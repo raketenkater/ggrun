@@ -121,3 +121,17 @@ def test_hyphenated_size_is_not_a_version_mismatch():
     row = {"name": "Qwen3.6 27B", "creator": {"name": "Alibaba"}}
     assert updater.candidate_relevant("unsloth/Qwen3.6-27B-GGUF", row)
     assert not updater.candidate_relevant("unsloth/Qwen3.5-27B-GGUF", row)
+
+
+def test_lineage_notes_are_not_variant_qualifiers():
+    updater = load_updater()
+    row = {"name": "INTELLECT-3 (based on GLM-4.5-Air)", "creator": {"name": "Prime Intellect"}}
+    assert updater.candidate_relevant("bartowski/PrimeIntellect_INTELLECT-3-GGUF", row)
+
+
+def test_modified_derivatives_do_not_inherit_the_original_score():
+    updater = load_updater()
+    row = {"name": "Mistral Small 4 (Reasoning)", "creator": {"name": "Mistral"}}
+    assert not updater.candidate_relevant("timteh673/Mistral-Small-4-119B-Uncensored-GGUF", row)
+    magistral = {"name": "Magistral Small 1.2", "creator": {"name": "Mistral"}}
+    assert not updater.candidate_relevant("mradermacher/Magistral-Small-2509-Heretic-v1.2-i1-GGUF", magistral)
