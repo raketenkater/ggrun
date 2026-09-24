@@ -883,3 +883,36 @@ func TestReplanKeepsTheProvenUBatchAndAcceptedContext(t *testing.T) {
 		t.Fatalf("ceiling %d, want the accepted 65536 below the rejection", got)
 	}
 }
+
+// MiMo-V2.6-Flash, first use: each "context-replanned" candidate was refused
+// by the next oracle check, and the next round took the planner's candidate
+// again, shedding one context granule per round until the budget ran out.
+// Once the exact check disproves a planner re-plan, recovery must use a
+// deterministic lever instead.
+func TestDisprovedPlannerReplanIsNotTakenAgain(t *testing.T) {
+	model := fitTestModel(131072, 6000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVQuality: "mid", KVPlacement: "gpu", RAMLimitPercent: 95}
+	be := fitTestBackend()
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 0, DeficitMB: 1000, DoesNotFit: true, Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}}
+
+	recovery := newLaunchMemoryRecovery()
+	_, _, first, err := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome, recovery)
+	if err != nil || first != "context-replanned" {
+		t.Fatalf("first recovery = %q, %v; fixture expects a planner re-plan", first, err)
+	}
+	// The exact check refused that candidate: the same deficit comes back.
+	_, _, second, _ := recoverPreflightOOM(req, cfg, model, be, caps, caps, nil, current, args, map[int]int{}, outcome, recovery)
+	if second == "context-replanned" || second == "replanned" {
+		t.Fatalf("a disproved planner estimate was trusted again: %q", second)
+	}
+	if !recovery.plannerWasDisproved() {
+		t.Fatal("the disproof was not recorded for the rest of the launch")
+	}
+}

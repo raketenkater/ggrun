@@ -26,6 +26,12 @@ type launchMemoryRecovery struct {
 	// weightLoads and oracleRuns total every admission in this lifecycle.
 	weightLoads int
 	oracleRuns  int
+	// lastRecoveryMethod is the rung the previous memory recovery took. When it
+	// was a planner re-plan and the exact check still refused the result, the
+	// planner's estimate for this launch is disproved: plannerDisproved then
+	// limits the rest of the lifecycle to deterministic levers.
+	lastRecoveryMethod string
+	plannerDisproved   bool
 	// rejectedContext is the smallest automatic context this launch has proven
 	// does not fit. The argv identity ledger cannot carry this: a later
 	// recompute from the original automatic request proposes a *different* argv
@@ -88,6 +94,10 @@ func (r *launchMemoryRecovery) observeProductionLoad(args []string, elapsed time
 	}
 	r.lastProductionArgs = formatCommand(args)
 	r.lastProductionLoad = elapsed
+}
+
+func (r *launchMemoryRecovery) plannerWasDisproved() bool {
+	return r != nil && r.plannerDisproved
 }
 
 func (r *launchMemoryRecovery) observeAdmissionWork(work *admissionWork) {
@@ -535,10 +545,38 @@ func recoverPreflightOOM(
 		outcome.DeficitMB = 1
 	}
 	outcome = oracleComputeBoundOutcome(outcome)
+	// Entering recovery again right after a planner re-plan means the exact
+	// check refused what the planner predicted would fit. Its next candidate
+	// would come from the same estimate, and on MiMo-V2.6-Flash such candidates
+	// only shed one 1,024-token context granule per round against a 0.6-1.8 GiB
+	// deficit until the re-plan budget ran out.
+	if recovery != nil && (recovery.lastRecoveryMethod == "context-replanned" || recovery.lastRecoveryMethod == "replanned") {
+		recovery.plannerDisproved = true
+	}
+	next, nextArgs, method, err := recoverPreflightOOMOnce(req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
+		strategy, serverArgs, oomPenalty, outcome, recovery)
+	if recovery != nil {
+		recovery.lastRecoveryMethod = method
+	}
+	return next, nextArgs, method, err
+}
 
+func recoverPreflightOOMOnce(
+	req *launchRequest,
+	cfg *config.Config,
+	model *placement.ModelProfile,
+	be *backendInfo,
+	caps, runtimeCaps *detect.Capabilities,
+	visibleToPhysical map[int]int,
+	strategy *placement.Strategy,
+	serverArgs []string,
+	oomPenalty map[int]int,
+	outcome preflightOutcome,
+	recovery *launchMemoryRecovery,
+) (*placement.Strategy, []string, string, error) {
 	var candidate *placement.Strategy
 	var replanErr error
-	if outcome.IsComputeBuffer && outcome.AllocMBMeasured && cfg != nil && be != nil && runtimeCaps != nil {
+	if outcome.IsComputeBuffer && outcome.AllocMBMeasured && cfg != nil && be != nil && runtimeCaps != nil && !recovery.plannerWasDisproved() {
 		cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 		recordErr := placement.RecordMeasuredComputeBuffers(
 			cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize,
@@ -564,7 +602,7 @@ func recoverPreflightOOM(
 		}
 	}
 
-	if candidate == nil && !outcome.IsComputeBuffer {
+	if candidate == nil && !outcome.IsComputeBuffer && !recovery.plannerWasDisproved() {
 		physicalDev := physicalGPUIndex(outcome.Device, visibleToPhysical)
 		oomPenalty[physicalDev] += outcome.DeficitMB
 		replanOpts := boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery)
