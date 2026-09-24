@@ -8127,7 +8127,14 @@ func parseMemoryBreakdownTable(log string) map[int]int {
 // system cache — otherwise the companion latches as permanent CUDA overhead on
 // its card (the 2916 MiB bug from 2026-08-02, and the 6160 MiB GPU1 column in
 // the current logs).
-func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, serverPID int, companionVRAMByGPU map[int]int) {
+//
+// oracleTotalsByGPU, when non-empty, holds the no-allocation oracle's
+// per-device total for exactly the argv that started. Live usage minus that
+// total is the memory admission could not see, which is precisely the reserve
+// admission needs, so it is the preferred source. oracleOnly restricts the
+// probe to that source (used for dense models, which the log-based sources
+// have never measured).
+func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, serverPID int, companionVRAMByGPU map[int]int, oracleTotalsByGPU map[int]int, oracleOnly bool) {
 	if len(gpus) == 0 || serverLog == "" {
 		return
 	}
@@ -8196,7 +8203,32 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	// leaving the term budgeted 0 forever. It is also already net of any
 	// companion's VRAM (the companion sits in "free"), so it cannot re-latch the
 	// 2916 MiB companion-as-overhead bug.
+	// Preferred source: live usage against the oracle's own total for this
+	// argv. On MiMo-V2.6-Flash it was 608/831/481 MiB on CUDA0/1/2 across two
+	// different placements, while the log-based whole-device source recorded
+	// 1775/4626/354 because it misses buffers the log does not itemize.
+	for _, gpu := range gpus {
+		if _, done := overheadByGPU[gpu.Index]; done {
+			continue
+		}
+		oracleMB := oracleTotalsByGPU[gpu.Index]
+		if oracleMB <= 0 {
+			continue
+		}
+		usedMB := QueryVRAMUsedByPIDOnGPU(serverPID, gpu.Index)
+		if usedMB <= 0 {
+			if live := QueryVRAMUsed(gpu.Index); live > 0 {
+				usedMB = live - companionVRAMByGPU[gpu.Index]
+			}
+		}
+		if delta := usedMB - oracleMB; delta > 0 && delta < gpu.VRAMTotalMB/systemProbeOutlierRatio {
+			overheadByGPU[gpu.Index] = delta
+		}
+	}
 	tableOverhead := parseMemoryBreakdownTable(serverLog)
+	if oracleOnly {
+		tableOverhead = nil
+	}
 	if len(tableOverhead) > 0 {
 		for _, gpu := range gpus {
 			if _, done := overheadByGPU[gpu.Index]; done {
@@ -8238,6 +8270,9 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	// tensors as a result, and so re-measured the same way. A card the server
 	// does not use is skipped, not guessed at.
 	for _, gpu := range gpus {
+		if oracleOnly {
+			break
+		}
 		if _, ok := overheadByGPU[gpu.Index]; ok {
 			continue // breakdown table already provided this device
 		}
@@ -8279,6 +8314,9 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	// the same outlier ceiling as the other sources. Anything larger is another
 	// workload, not a CUDA context, and must not latch.
 	for _, gpu := range gpus {
+		if oracleOnly {
+			break
+		}
 		if _, ok := overheadByGPU[gpu.Index]; ok {
 			continue // an earlier source already answered for this device
 		}

@@ -720,7 +720,10 @@ type launchRequest struct {
 	ClaudeResume           string   // session id or "latest": reopen a recorded Claude session
 	ClaudeResumeForce      bool     // accept a resume whose backend shape no longer matches
 	OriginalArgs           []string // launch argv as given, so a resume can reproduce it exactly
-	Calibrate              string   // "auto" (workflow-validated replay only), "on" (explicit bounded screen), "off"
+	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
+	// the start boundary last started, when the oracle priced exactly it.
+	admittedOracleTotals map[int]int
+	Calibrate            string // "auto" (workflow-validated replay only), "on" (explicit bounded screen), "off"
 	// CalibrationScreened marks a non-default configuration selected only by the
 	// bounded screen. It may serve this explicit run, but must not leak into the
 	// automatic verified-config or MoE placement caches.
@@ -4377,6 +4380,13 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if hasExternalSpecCompanion(strategy) {
 		return nil
 	}
+	var oracleTotals map[int]int
+	if req != nil {
+		oracleTotals = req.admittedOracleTotals
+	}
+	if !model.IsMoE && len(gpus) > 0 && len(oracleTotals) > 0 {
+		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, nil, oracleTotals, true)
+	}
 	if model.IsMoE && len(gpus) > 0 {
 		// Build the per-GPU companion VRAM map so the system probe can net it
 		// out of the breakdown table's unaccounted column. Without this the
@@ -4399,7 +4409,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 				companionVRAMByGPU[cp.GPU] += mb
 			}
 		}
-		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, companionVRAMByGPU)
+		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, companionVRAMByGPU, oracleTotals, false)
 		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU)
 	}
 	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
@@ -4748,6 +4758,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 	}()
 	specDisabled := false
+	oracleTotalsByArgv := map[string]map[int]int{}
 	measuredProductionArgs := ""
 	exactCandidateArgs := ""
 	if exactAdmission {
@@ -5088,6 +5099,15 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			if preflight.Evidence.Level != memoryEvidenceNone {
 				memoryRecovery.acceptContext(strategy)
 			}
+			if preflight.Evidence.Level == memoryEvidenceOraclePlanned {
+				totals := map[int]int{}
+				for _, d := range preflight.Evidence.Devices {
+					if idx, ok := cudaDeviceIndex(d.Name); ok {
+						totals[idx] += d.TotalMB()
+					}
+				}
+				oracleTotalsByArgv[formatCommand(serverArgs)] = totals
+			}
 			if preflight.Evidence.Level != memoryEvidenceNone && exactAdmission {
 				// The preflight measured this exact argv. Challenger admission must
 				// consume that proof directly; feeding it back through Compute can
@@ -5197,6 +5217,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		if err == nil {
 			memoryRecovery.observeProductionLoad(serverArgs, loadElapsed)
+			if req != nil {
+				req.admittedOracleTotals = oracleTotalsByArgv[formatCommand(serverArgs)]
+			}
 			if mmapErr := validateObservedMMapPageability(cfg, model, be, strategy, p); mmapErr != nil {
 				memoryRecovery.reject(serverArgs)
 				_ = p.Stop()

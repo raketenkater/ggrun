@@ -5232,7 +5232,7 @@ func TestHostOverheadProbeDoesNotRemeasureAlreadyMeasuredCards(t *testing.T) {
 	// answer for CUDA0 if it were allowed to run.
 	log := "load_tensors:        CUDA0 model buffer size = 11000.00 MiB\n" +
 		"sched_reserve:      CUDA0 compute buffer size =  1000.00 MiB\n"
-	RunPostLaunchProbe(dir, gpus, log, 0, nil)
+	RunPostLaunchProbe(dir, gpus, log, 0, nil, nil, false)
 
 	sp := loadSystemProbe(dir, gpus)
 	if sp == nil {
