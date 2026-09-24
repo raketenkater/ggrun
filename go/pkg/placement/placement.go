@@ -1809,7 +1809,18 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	// full-config layer is broader: dense models get one too) and is a clean
 	// miss when the scope key is absent, mismatched, or the file is missing.
 	if !opts.SkipCachedConfig && opts.VerifiedConfigScopeKey != "" {
-		if vc, verr := LoadVerifiedConfig(opts.CacheDir, opts.VerifiedConfigScopeKey); verr == nil && vc != nil {
+		vc, verr := LoadVerifiedConfig(opts.CacheDir, opts.VerifiedConfigScopeKey)
+		switch {
+		case verr != nil && os.IsNotExist(verr):
+			fmt.Fprintln(os.Stderr, "[verified] no verified config for this scope; planning from measurements")
+		case verr != nil:
+			fmt.Fprintf(os.Stderr, "[verified] verified config unusable (%v); planning from measurements\n", verr)
+		case vc != nil:
+			if reason, stale := verifiedConfigFreeVRAMStale(vc, caps); stale {
+				fmt.Fprintf(os.Stderr, "[verified] %s; re-planning\n", reason)
+			}
+		}
+		if verr == nil && vc != nil {
 			if _, stale := verifiedConfigFreeVRAMStale(vc, caps); !stale {
 				restored := VerifiedToStrategy(vc, opts, caps)
 				if restored != nil {
