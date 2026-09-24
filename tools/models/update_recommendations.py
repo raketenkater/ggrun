@@ -135,6 +135,16 @@ def version_tuples(text: str) -> set[tuple[str, ...]]:
     return versions
 
 
+def versions_match(target: set[tuple[str, ...]], candidate: set[tuple[str, ...]]) -> bool:
+    """True when some candidate version starts with a target version.
+
+    The parser also reads a hyphenated size as a third component, so
+    "Qwen3.6-27B" yields (3, 6, 27); requiring equality with the row's (3, 6)
+    rejected every such repo.
+    """
+    return any(c[: len(t)] == t for t in target for c in candidate)
+
+
 def uniq(values: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -762,10 +772,28 @@ def model_query(row: dict[str, Any]) -> str:
     return clean_repo_model_name(display_name(row))
 
 
+# Words that name a different model of the same family and generation. A repo
+# carrying one the scored model lacks (or lacking one it has) is another model:
+# "Devstral 2" is not "Devstral Small 2", and an instruct row must not inherit a
+# "-Base-" repo. "base" is a stop word for search, so these are compared on the
+# raw name.
+VARIANT_QUALIFIERS = {
+    "air", "base", "coder", "distill", "flash", "large", "lite", "medium", "mini",
+    "nano", "next", "omni", "small", "tiny", "vl",
+}
+
+
+def raw_name_tokens(text: str) -> set[str]:
+    return set(norm(text).split())
+
+
 def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     target_query = model_query(row)
     target_tokens = tokens(target_query)
-    candidate_tokens = tokens(candidate_repo)
+    # Judge the repository's model name, not its owner: "DevQuasar-4" once
+    # supplied the "4" of "Mistral Small 4" for a Small-24B-Base-2501 repo.
+    candidate_name = repo_name(candidate_repo)
+    candidate_tokens = tokens(candidate_name)
     if not target_tokens or not candidate_tokens:
         return False
     if not family_match(target_tokens, candidate_tokens):
@@ -774,10 +802,19 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     if needed_sizes and not (needed_sizes & candidate_tokens):
         return False
     target_versions = version_tuples(target_query)
-    if target_versions and not (target_versions & version_tuples(candidate_repo)):
+    if target_versions and not versions_match(target_versions, version_tuples(candidate_name)):
+        return False
+    # A bare generation number ("Small 4", "Devstral 2") identifies the model as
+    # much as a dotted version does.
+    generations = {t for t in target_tokens if t.isdigit()}
+    if generations - candidate_tokens:
+        return False
+    target_raw = raw_name_tokens(" ".join([target_query, row_name(row)]))
+    candidate_raw = raw_name_tokens(clean_repo_model_name(candidate_name))
+    if (target_raw & VARIANT_QUALIFIERS) != (candidate_raw & VARIANT_QUALIFIERS):
         return False
     overlap = len(target_tokens & candidate_tokens)
-    if overlap == 0 and not (version_tuples(target_query) & version_tuples(candidate_repo)):
+    if overlap == 0 and not versions_match(target_versions, version_tuples(candidate_name)):
         return False
     return True
 

@@ -81,3 +81,43 @@ def test_repo_candidates_keep_creator_named_models():
     }
     repos = updater.direct_repo_candidates(row)
     assert "unsloth/DeepSeek-V4.1-Flash-GGUF" in repos, repos
+
+
+def test_identity_rejects_other_generation_and_owner_digits():
+    """Mistral Small 4 was resolved to a Small-24B *Base* 2501 repo whose owner,
+    DevQuasar-4, supplied the "4"."""
+    updater = load_updater()
+    row = {"name": "Mistral Small 4", "slug": "mistral-small-4", "creator": {"name": "Mistral", "slug": "mistral"}}
+    assert not updater.candidate_relevant("DevQuasar-4/mistralai.Mistral-Small-24B-Base-2501-GGUF", row)
+    assert updater.candidate_relevant("unsloth/Mistral-Small-4-119B-2603-GGUF", row)
+
+
+def test_identity_rejects_a_different_variant():
+    """Devstral 2 was resolved to Devstral Small 2."""
+    updater = load_updater()
+    row = {"name": "Devstral 2", "slug": "devstral-2", "creator": {"name": "Mistral", "slug": "mistral"}}
+    assert not updater.candidate_relevant("bartowski/mistralai_Devstral-Small-2-24B-Instruct-2512-GGUF", row)
+    assert updater.candidate_relevant("unsloth/Devstral-2-123B-Instruct-2512-GGUF", row)
+    small = {"name": "Devstral Small 2", "slug": "devstral-small-2", "creator": {"name": "Mistral", "slug": "mistral"}}
+    assert updater.candidate_relevant("bartowski/mistralai_Devstral-Small-2-24B-Instruct-2512-GGUF", small)
+
+
+def test_identity_keeps_valid_spellings():
+    updater = load_updater()
+    cases = [
+        ({"name": "GLM-5.3-Flash", "creator": {"name": "Z AI"}}, "unsloth/GLM-5.3-Flash-GGUF", True),
+        ({"name": "GLM-5.3-Flash", "creator": {"name": "Z AI"}}, "unsloth/GLM-5.3-GGUF", False),
+        ({"name": "DeepSeek V4.1 Flash", "creator": {"name": "DeepSeek"}}, "unsloth/DeepSeek-V4.1-Flash-GGUF", True),
+        ({"name": "Qwen3.6 27B", "creator": {"name": "Alibaba"}}, "unsloth/Qwen3.6-27B-GGUF", True),
+        ({"name": "Qwen3.6 27B", "creator": {"name": "Alibaba"}}, "unsloth/Qwen3.6-Coder-27B-GGUF", False),
+        ({"name": "MiniMax M3", "creator": {"name": "MiniMax"}}, "unsloth/MiniMax-M3-GGUF", True),
+    ]
+    for row, repo, want in cases:
+        assert updater.candidate_relevant(repo, row) is want, (row["name"], repo)
+
+
+def test_hyphenated_size_is_not_a_version_mismatch():
+    updater = load_updater()
+    row = {"name": "Qwen3.6 27B", "creator": {"name": "Alibaba"}}
+    assert updater.candidate_relevant("unsloth/Qwen3.6-27B-GGUF", row)
+    assert not updater.candidate_relevant("unsloth/Qwen3.5-27B-GGUF", row)
