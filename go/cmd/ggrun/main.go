@@ -4967,6 +4967,11 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if errors.As(preflight.Err, &unclassified) {
 					adviseUnclassifiedLaunchFailure(req, cfg, model, be, caps, unclassified.LogExcerpt)
 				}
+				// A backend that cannot read the model file is not a memory result.
+				var formatErr *backendModelFormatError
+				if errors.As(preflight.Err, &formatErr) {
+					return nil, strategy, serverArgs, preflight.Err
+				}
 				return nil, strategy, serverArgs, fmt.Errorf("memory preflight failed closed: %w", preflight.Err)
 			}
 			if preflight.ProbeUnavailable != "" {
@@ -6426,6 +6431,17 @@ func cmdLaunch(args []string) {
 		claudeAuto.stop()
 		if releaseErr := stopFailedLaunchBeforeAdvisor(p, caps, 30*time.Second); releaseErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", releaseErr)
+			os.Exit(1)
+		}
+		// The backend rejected the model file: no launch setting can help, so
+		// offer a newer backend and start over on it instead of the advisor.
+		var formatErr *backendModelFormatError
+		if errors.As(err, &formatErr) {
+			if offerBackendUpdateForModelFormatWith(req, be, formatErr, cfg.AssumeYes, os.Getenv(backendFormatRetryEnv) != "",
+				os.Stdin, os.Stderr, stdinIsTerminal(), backendCommit, updateMainlineBackend) {
+				err = relaunchAfterBackendUpdate()
+			}
+			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
 		}
 		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, timeout, launchRecovery)
