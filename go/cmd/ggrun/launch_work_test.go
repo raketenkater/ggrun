@@ -301,3 +301,49 @@ func TestLearnedReplanOnlyAfterAnOracleOnlyFailure(t *testing.T) {
 		t.Fatal("an ordinary start failure triggered a re-plan")
 	}
 }
+
+// After the exact check disproved a planner re-plan in this launch, a fitting
+// oracle result is kept as it is: no re-plan round, and the production start
+// uses exactly the admitted argv.
+func TestProvenFitIsKeptAfterPlannerDisproof(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fakes")
+	}
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "nvidia-smi"), []byte("#!/bin/sh\necho 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := fakeOracleBuild(t, "echo 'CUDA0 2000 1000 500'\n")
+	cacheDir := t.TempDir()
+	model := fitTestModel(131072, 2000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{SpecMode: "off", CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVPlacement: "gpu", RAMLimitPercent: 95, Port: 59994}
+	be := &backendInfo{Path: server, Dialect: "llama", Tag: "llama", Identity: "test"}
+	strategy := &placement.Strategy{ContextSize: 65536, UBatchSize: 512, Parallel: 1}
+	args := []string{server, "-m", "m.gguf", "--ctx-size", "65536", "-ub", "512", "--port", "59994"}
+	recovery := newLaunchMemoryRecovery()
+	recovery.plannerDisproved = true
+	_, _, gotArgs, err := startLaunchWithCUDAOOMRecoveryState(req, &config.Config{CacheDir: cacheDir}, model, strategy, be, caps, args, 3*time.Second, recovery)
+	if err == nil {
+		t.Fatal("fake server reported ready")
+	}
+	if formatCommand(gotArgs) != formatCommand(args) {
+		t.Fatalf("proven argv was replaced: %v", gotArgs)
+	}
+	var oracles, productions int
+	for _, rec := range readLaunchWork(t, cacheDir) {
+		switch rec.Kind {
+		case "oracle":
+			oracles++
+		case "production":
+			productions++
+			if rec.ArgvHash != argvHash(args) {
+				t.Fatalf("production started a different argv: %#v", rec)
+			}
+		}
+	}
+	if oracles != 1 || productions != 1 {
+		t.Fatalf("oracle runs %d, production starts %d; want one of each", oracles, productions)
+	}
+}

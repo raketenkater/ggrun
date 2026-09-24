@@ -5116,6 +5116,15 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if preflight.Evidence.Level == memoryEvidenceAllocated {
 					measuredProductionArgs = formatCommand(serverArgs)
 				}
+			} else if preflight.Evidence.Level != memoryEvidenceNone && memoryRecovery.plannerWasDisproved() {
+				// This launch already saw the exact check refuse a planner
+				// re-plan. A new candidate from the same estimate could only trade
+				// this proven fit for an unproven one; on MiMo-V2.6-Flash first use
+				// it did, and the ladder then gave up 224k tokens of context.
+				fmt.Fprintf(os.Stderr, "[launch] memory plan proven at %s evidence; keeping it rather than a re-plan from an estimate this launch disproved\n", preflight.Evidence.Level)
+				if preflight.Evidence.Level == memoryEvidenceAllocated {
+					measuredProductionArgs = formatCommand(serverArgs)
+				}
 			} else if preflight.Evidence.Level != memoryEvidenceNone {
 				opts := placementOpts()
 				opts.SkipPlacementCache = true
