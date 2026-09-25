@@ -9637,6 +9637,12 @@ func detectBackend(path string) *backendInfo {
 	} else if strings.Contains(lowerBase, "vulkan") || strings.Contains(lowerDir, "build-vulkan") {
 		info.Tag = "vulkan"
 		info.Dialect = "vulkan"
+	} else if strings.Contains(lowerBase, "rocm") || strings.Contains(lowerBase, "hip") ||
+		strings.Contains(lowerDir, "rocm") || strings.Contains(lowerDir, "hip") {
+		// HIP builds name devices ROCm%d (llama-server --list-devices); set
+		// the dialect so placement emits ROCm device-routing flags. Tag stays
+		// empty so backend matching against llama-server binaries is intact.
+		info.Dialect = "rocm"
 	} else if runtime.GOOS == "darwin" {
 		// macOS llama.cpp builds default to Metal; placement must not emit
 		// CUDA/Vulkan device-routing flags for them.

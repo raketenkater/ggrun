@@ -4458,12 +4458,18 @@ func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU
 
 func otStringUsesDevice(ot string, index int) bool {
 	return strings.Contains(ot, fmt.Sprintf("=CUDA%d", index)) ||
-		strings.Contains(ot, fmt.Sprintf("=Vulkan%d", index))
+		strings.Contains(ot, fmt.Sprintf("=Vulkan%d", index)) ||
+		strings.Contains(ot, fmt.Sprintf("=ROCm%d", index))
 }
 
 func deviceName(backendTag string, index int) string {
 	if strings.EqualFold(backendTag, "vulkan") {
 		return fmt.Sprintf("Vulkan%d", index)
+	}
+	// HIP builds name devices ROCm%d (llama-server --list-devices); match
+	// rocm/hip backend tags so device routing uses the right names.
+	if strings.Contains(strings.ToLower(backendTag), "rocm") || strings.Contains(strings.ToLower(backendTag), "hip") {
+		return fmt.Sprintf("ROCm%d", index)
 	}
 	return fmt.Sprintf("CUDA%d", index)
 }

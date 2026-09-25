@@ -1102,6 +1102,11 @@ func draftDeviceForPreflight(backendTag string, gpu int) string {
 	if strings.Contains(strings.ToLower(backendTag), "vulkan") {
 		return fmt.Sprintf("Vulkan%d", gpu)
 	}
+	// HIP builds name devices ROCm%d; match rocm/hip backend tags so
+	// preflight emits the right device flag instead of CUDA0.
+	if strings.Contains(strings.ToLower(backendTag), "rocm") || strings.Contains(strings.ToLower(backendTag), "hip") {
+		return fmt.Sprintf("ROCm%d", gpu)
+	}
 	return fmt.Sprintf("CUDA%d", gpu)
 }
 
