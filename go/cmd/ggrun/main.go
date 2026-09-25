@@ -723,7 +723,11 @@ type launchRequest struct {
 	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
 	// the start boundary last started, when the oracle priced exactly it.
 	admittedOracleTotals map[int]int
-	Calibrate            string // "auto" (workflow-validated replay only), "on" (explicit bounded screen), "off"
+	// verifiedScopeKey is this launch's verified-config key, fixed at the
+	// first computation so lookup and save agree.
+	verifiedScopeKey   string
+	verifiedScopeShape string
+	Calibrate          string // "auto" (workflow-validated replay only), "on" (explicit bounded screen), "off"
 	// CalibrationScreened marks a non-default configuration selected only by the
 	// bounded screen. It may serve this explicit run, but must not leak into the
 	// automatic verified-config or MoE placement caches.
@@ -2901,7 +2905,12 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	// It is what the reuse lookup in placement.Compute hashes against, and the
 	// save path uses the same computation, so save and load can never disagree.
 	if caps != nil && !req.NoCachedConfig {
-		opts.VerifiedConfigScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+		shape := verifiedScopeShape(model, be, caps)
+		if req.verifiedScopeKey == "" || req.verifiedScopeShape != shape {
+			req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+			req.verifiedScopeShape = shape
+		}
+		opts.VerifiedConfigScopeKey = req.verifiedScopeKey
 	}
 	return opts
 }
@@ -6138,6 +6147,15 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	if req.NoCachedConfig {
 		return ""
 	}
+	// One key per launch, taken from the request as given. Recovery rewrites
+	// the request during a launch (a generated --swa-full is withdrawn, KV
+	// quality adjusted for the backend), and hashing the rewritten request at
+	// save time filed the record under a key the next identical launch never
+	// computes: every relaunch reported no verified config and re-planned.
+	shape := verifiedScopeShape(model, be, caps)
+	if req.verifiedScopeKey != "" && req.verifiedScopeShape == shape {
+		return req.verifiedScopeKey
+	}
 	opts := placementOptionsFromRequestCaps(req, model, be, "", caps)
 	// A verified config REPLAYS a whole plan and bypasses placement.Compute, so
 	// nothing in the hardware/model/backend scope changes when ggrun's own
@@ -6146,7 +6164,20 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	// it: bumping planLogicVersion retires every stored config exactly once.
 	// Only verified configs carry this; measured calibration data describes the
 	// hardware, not our arithmetic, and stays valid across planner changes.
-	return placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeShape = shape
+	return req.verifiedScopeKey
+}
+
+// verifiedScopeShape identifies what a memoized verified-config key belongs
+// to. Request rewrites during a launch keep it; a different model, backend or
+// hardware set does not.
+func verifiedScopeShape(model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
+	identity := ""
+	if be != nil {
+		identity = be.Identity + "|" + be.Tag + "|" + be.Path
+	}
+	return placement.SpecTargetIdentity(model) + "|" + identity + "|" + placement.SpecHardwareIdentity(caps)
 }
 
 func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelProfile) string {

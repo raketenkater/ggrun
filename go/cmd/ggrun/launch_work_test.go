@@ -363,3 +363,20 @@ func TestOracleContextTargetCountsTheKVRow(t *testing.T) {
 		t.Fatalf("context target = %d, %v; want a proportionate cut", target, ok)
 	}
 }
+
+func TestVerifiedConfigKeySurvivesRequestRewrites(t *testing.T) {
+	req := &launchRequest{CtxFlag: "fit", ExtraArgs: []string{"--swa-full"}, KVQuality: "auto"}
+	model, caps, be := fitTestModel(131072, 2000), fitTestCaps(12000), fitTestBackend()
+	lookup := placementOptionsFromRequestCaps(req, model, be, t.TempDir(), caps).VerifiedConfigScopeKey
+	// Recovery withdraws the generated --swa-full and the backend adjusts KV.
+	req.ExtraArgs = nil
+	req.KVQualityV = "f16"
+	if save := verifiedConfigScopeKey(req, model, be, caps); save != lookup || save == "" {
+		t.Fatalf("save key %q differs from the launch's lookup key %q", save, lookup)
+	}
+	// A new launch with the same original request computes the same key.
+	fresh := &launchRequest{CtxFlag: "fit", ExtraArgs: []string{"--swa-full"}, KVQuality: "auto"}
+	if next := verifiedConfigScopeKey(fresh, model, be, caps); next != lookup {
+		t.Fatalf("next launch key %q, recorded %q", next, lookup)
+	}
+}
