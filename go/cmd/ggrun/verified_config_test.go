@@ -171,4 +171,21 @@ func TestVerifiedConfigScopeKeyChangesWithRequest(t *testing.T) {
 	if got := verifiedConfigScopeKey(base, model, diffBackend, caps); got == key {
 		t.Fatal("a different backend must produce a different verified-config scope key")
 	}
+	diffKV := &launchRequest{CtxFlag: "8192", KVQuality: "q8_0", KVPlacement: "gpu", Parallel: 1}
+	if got := verifiedConfigScopeKey(diffKV, model, backend, caps); got == key {
+		t.Fatal("a different KV quality must produce a different verified-config scope key")
+	}
+	diffSWA := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1, ExtraArgs: []string{"--swa-full"}}
+	if got := verifiedConfigScopeKey(diffSWA, model, backend, caps); got == key {
+		t.Fatal("full SWA must produce a different verified-config scope key")
+	}
+	moved := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "3090", VRAMTotalMB: 24576, PCIBusID: "0000:65:00.0", PCIGen: 3, PCILanes: 16}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	movedReq := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1}
+	if got := verifiedConfigScopeKey(movedReq, model, backend, moved); got == key {
+		t.Fatal("a different physical device must produce a different verified-config scope key")
+	}
 }

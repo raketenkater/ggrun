@@ -17,10 +17,21 @@ func glmProfile() *ModelProfile {
 	}
 }
 
+func glmCoefficientScope() computeCoefficientScope {
+	return computeCoefficientScope{
+		BackendTag: "llama@glm-build", GPUSignature: "4070sig", KVQuality: "q8_0", KVPlacement: "gpu",
+	}
+}
+
 func writeComputeProbe(t *testing.T, dir, name string, ctx, ubatch int, bufs []int) {
 	t.Helper()
-	body := fmt.Sprintf("# Probe cache for %s\n# ctx=%d ubatch=%d kv_quality=q8_0 kv_placement=gpu\n",
-		filepath.Base(glmProfile().Path), ctx, ubatch)
+	writeScopedComputeProbe(t, dir, name, glmCoefficientScope(), ctx, ubatch, bufs)
+}
+
+func writeScopedComputeProbe(t *testing.T, dir, name string, scope computeCoefficientScope, ctx, ubatch int, bufs []int) {
+	t.Helper()
+	body := fmt.Sprintf("# Probe cache for %s\n# ctx=%d ubatch=%d kv_quality=%s kv_placement=%s backend=%s gpu_sig=%s parallel=1\n",
+		filepath.Base(glmProfile().Path), ctx, ubatch, scope.KVQuality, scope.KVPlacement, scope.BackendTag, scope.GPUSignature)
 	for i, mb := range bufs {
 		body += fmt.Sprintf("PROBED_COMPUTE_BUF_MB_CUDA%d=%d\n", i, mb)
 	}
@@ -36,7 +47,7 @@ func TestCoefficientDerivedFromMeasuredProbes(t *testing.T) {
 	writeComputeProbe(t, dir, "a.probe", 529408, 128, []int{4501, 4630, 4624})
 	writeComputeProbe(t, dir, "b.probe", 786432, 256, []int{6669, 6798, 6667})
 
-	got := loadMeasuredComputeCoefficient(dir, glmProfile())
+	got := loadMeasuredComputeCoefficient(dir, glmProfile(), glmCoefficientScope())
 	if got < 350 || got > 380 {
 		t.Fatalf("coefficient %.1f outside the measured range 363-370", got)
 	}
@@ -46,7 +57,7 @@ func TestCoefficientDerivedFromMeasuredProbes(t *testing.T) {
 // as it does today.
 func TestNoProbesLeavesTheBuiltInCoefficient(t *testing.T) {
 	dir := t.TempDir()
-	if got := loadMeasuredComputeCoefficient(dir, glmProfile()); got != 0 {
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), glmCoefficientScope()); got != 0 {
 		t.Fatalf("empty cache produced coefficient %.1f, want 0", got)
 	}
 	model := glmProfile()
@@ -61,7 +72,7 @@ func TestNoProbesLeavesTheBuiltInCoefficient(t *testing.T) {
 func TestSingleProbeIsNotEnough(t *testing.T) {
 	dir := t.TempDir()
 	writeComputeProbe(t, dir, "only.probe", 529408, 128, []int{4501, 4630, 4624})
-	if got := loadMeasuredComputeCoefficient(dir, glmProfile()); got != 0 {
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), glmCoefficientScope()); got != 0 {
 		t.Fatalf("one probe produced coefficient %.1f, want 0", got)
 	}
 }
@@ -74,8 +85,72 @@ func TestOtherModelsProbesAreIgnored(t *testing.T) {
 
 	other := glmProfile()
 	other.Path = "/models/Some-Other-Model.gguf"
-	if got := loadMeasuredComputeCoefficient(dir, other); got != 0 {
+	if got := loadMeasuredComputeCoefficient(dir, other, glmCoefficientScope()); got != 0 {
 		t.Fatalf("coefficient %.1f derived from another model's probes", got)
+	}
+}
+
+// A probe measured on another backend, another card, another KV type, or with
+// full SWA (the feature lives in the backend tag) must not move this plan's
+// coefficient. Two scopes must not be pooled into one median either.
+func TestCoefficientDoesNotCrossBackendDeviceKVOrSWA(t *testing.T) {
+	dir := t.TempDir()
+	writeComputeProbe(t, dir, "a.probe", 529408, 128, []int{4501, 4630, 4624})
+	writeComputeProbe(t, dir, "b.probe", 786432, 256, []int{6669, 6798, 6667})
+	home := glmCoefficientScope()
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), home); got < 350 || got > 380 {
+		t.Fatalf("matching scope coefficient %.1f", got)
+	}
+
+	otherBackend := home
+	otherBackend.BackendTag = "ik_llama@other"
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), otherBackend); got != 0 {
+		t.Fatalf("other backend inherited coefficient %.1f", got)
+	}
+	otherDevice := home
+	otherDevice.GPUSignature = "3090sig"
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), otherDevice); got != 0 {
+		t.Fatalf("other device inherited coefficient %.1f", got)
+	}
+	otherKV := home
+	otherKV.KVQuality = "f16"
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), otherKV); got != 0 {
+		t.Fatalf("other KV quality inherited coefficient %.1f", got)
+	}
+	swa := home
+	swa.BackendTag = home.BackendTag + "|swa-full=true"
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), swa); got != 0 {
+		t.Fatalf("full SWA inherited the windowed coefficient %.1f", got)
+	}
+
+	// A second scope's buffers must not be mixed into the matching median.
+	foreign := home
+	foreign.KVQuality = "f16"
+	writeScopedComputeProbe(t, dir, "foreign-a.probe", foreign, 529408, 128, []int{100, 100, 100})
+	writeScopedComputeProbe(t, dir, "foreign-b.probe", foreign, 786432, 256, []int{100, 100, 100})
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), home); got < 350 || got > 380 {
+		t.Fatalf("foreign scope moved the coefficient to %.1f", got)
+	}
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), foreign); got == 0 || got > 50 {
+		t.Fatalf("foreign scope did not keep its own small coefficient: %.1f", got)
+	}
+
+	cpu := home
+	cpu.KVPlacement = "cpu"
+	writeScopedComputeProbe(t, dir, "cpu-a.probe", cpu, 529408, 128, []int{9000, 9000, 9000})
+	writeScopedComputeProbe(t, dir, "cpu-b.probe", cpu, 786432, 256, []int{9000, 9000, 9000})
+	auto := home
+	auto.KVPlacement = "auto"
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), auto); got != 0 {
+		t.Fatalf("auto placement pooled gpu and cpu probes into %.1f", got)
+	}
+	unscoped := filepath.Join(dir, "bare.probe")
+	body := fmt.Sprintf("# Probe cache for %s\n# ctx=529408 ubatch=128\nPROBED_COMPUTE_BUF_MB_CUDA0=4501\n", filepath.Base(glmProfile().Path))
+	if err := os.WriteFile(unscoped, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadMeasuredComputeCoefficient(dir, glmProfile(), home); got < 350 || got > 380 {
+		t.Fatalf("a probe with no provenance changed the coefficient to %.1f", got)
 	}
 }
 
@@ -120,7 +195,7 @@ func TestFragmentDeviceDoesNotDepressTheCoefficient(t *testing.T) {
 	writeComputeProbe(t, dir, "a.probe", 529408, 128, []int{4501, 4630, 97})
 	writeComputeProbe(t, dir, "b.probe", 786432, 256, []int{6669, 6798, 155})
 
-	got := loadMeasuredComputeCoefficient(dir, glmProfile())
+	got := loadMeasuredComputeCoefficient(dir, glmProfile(), glmCoefficientScope())
 	if got < 350 || got > 380 {
 		t.Fatalf("fragment device skewed the coefficient to %.1f", got)
 	}

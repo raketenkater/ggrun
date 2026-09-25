@@ -1497,18 +1497,25 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 				model.MeasuredKVGeometry = g
 			}
 		}
-		// Same contract for the graph coefficient: measured truth where it exists,
-		// built-in coefficients where it does not.
-		if model.MeasuredComputeCoefficient <= 0 {
-			if c := loadMeasuredComputeCoefficient(opts.CacheDir, model); c > 0 {
-				model.MeasuredComputeCoefficient = c
-			}
-		}
 	}
 
 	resolvedKVQuality, err := resolveKVQuality(model, opts.KVQuality, opts.BackendTag)
 	if err != nil {
 		return nil, err
+	}
+	// The graph coefficient is a cross-shape fit. It may combine ctx/ubatch
+	// points only when they share this plan's backend (including the SWA
+	// feature tag), physical devices, and KV quality/placement. A probe that
+	// does not say which scope it measured stays unused.
+	if !opts.SkipCachedConfig && model.MeasuredComputeCoefficient <= 0 {
+		if c := loadMeasuredComputeCoefficient(opts.CacheDir, model, computeCoefficientScope{
+			BackendTag:   backendCacheTag(opts),
+			GPUSignature: gpuIdentityHash(caps.GPUs),
+			KVQuality:    resolvedKVQuality,
+			KVPlacement:  opts.KVPlacement,
+		}); c > 0 {
+			model.MeasuredComputeCoefficient = c
+		}
 	}
 
 	s := &Strategy{
@@ -5112,10 +5119,80 @@ const computeCoefficientReferenceContext = 1048576
 // future plan, and the recorder is known to file partial values -- see the
 // RelatedModelRuntimeGraphGrowth comment on a KV figure mislabelled as growth.
 //
+// computeCoefficientScope is the provenance a learned graph coefficient has
+// to share with the plan that would use it. BackendTag is the probe cache
+// tag, so a --swa-full measurement (the tag gains "|swa-full=true") is a
+// different scope from the same backend without that feature.
+type computeCoefficientScope struct {
+	BackendTag   string
+	GPUSignature string
+	KVQuality    string
+	KVPlacement  string
+}
+
+func (s computeCoefficientScope) complete() bool {
+	return strings.TrimSpace(s.BackendTag) != "" &&
+		strings.TrimSpace(s.GPUSignature) != "" &&
+		strings.TrimSpace(s.KVQuality) != "" &&
+		strings.TrimSpace(s.KVPlacement) != ""
+}
+
+func (s computeCoefficientScope) placementSpecified() bool {
+	switch strings.ToLower(strings.TrimSpace(s.KVPlacement)) {
+	case "", "auto":
+		return false
+	default:
+		return true
+	}
+}
+
+// probeCoefficientHeader reads the scope line the probe writer emits. A file
+// that does not name backend, devices, KV quality and placement has no
+// provenance and cannot feed the coefficient.
+func probeCoefficientHeader(line string) (ctx, ubatch int, scope computeCoefficientScope, ok bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "# ctx=") {
+		return 0, 0, computeCoefficientScope{}, false
+	}
+	fields := map[string]string{}
+	for _, kv := range strings.Fields(line) {
+		k, v, found := strings.Cut(kv, "=")
+		if !found || k == "" {
+			continue
+		}
+		fields[k] = v
+	}
+	ctx, _ = strconv.Atoi(fields["ctx"])
+	ubatch, _ = strconv.Atoi(fields["ubatch"])
+	scope = computeCoefficientScope{
+		BackendTag:   fields["backend"],
+		GPUSignature: fields["gpu_sig"],
+		KVQuality:    fields["kv_quality"],
+		KVPlacement:  fields["kv_placement"],
+	}
+	return ctx, ubatch, scope, scope.complete()
+}
+
+func coefficientScopeMatches(probe, want computeCoefficientScope) bool {
+	if probe.BackendTag != want.BackendTag || probe.GPUSignature != want.GPUSignature || probe.KVQuality != want.KVQuality {
+		return false
+	}
+	if want.placementSpecified() && probe.KVPlacement != want.KVPlacement {
+		return false
+	}
+	return true
+}
+
 // Returns 0 when there is no usable evidence, which leaves the built-in
 // coefficients untouched. A model with no probes plans exactly as it does today.
-func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float64 {
+func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile, want computeCoefficientScope) float64 {
+	// Missing backend, devices, or KV quality is not a licence to scan every
+	// probe. An unspecified placement ("auto" or empty) is allowed: the
+	// probes must then all share one placement, enforced below.
 	if cacheDir == "" || model == nil || model.HiddenSize <= 0 || model.NumLayers <= 0 {
+		return 0
+	}
+	if strings.TrimSpace(want.BackendTag) == "" || strings.TrimSpace(want.GPUSignature) == "" || strings.TrimSpace(want.KVQuality) == "" {
 		return 0
 	}
 	modelBase := filepath.Base(model.Path)
@@ -5123,7 +5200,12 @@ func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float6
 	if err != nil {
 		return 0
 	}
-	var coefficients []float64
+	type probedPoint struct {
+		scope       computeCoefficientScope
+		ctx, ubatch int
+		buffers     []int
+	}
+	var points []probedPoint
 	for _, ent := range entries {
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".probe") {
 			continue
@@ -5137,18 +5219,13 @@ func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float6
 			continue
 		}
 		ctx, ubatch := 0, 0
+		var scope computeCoefficientScope
+		header := false
 		var buffers []int
 		for _, line := range strings.Split(text, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "# ctx=") {
-				for _, kv := range strings.Fields(line) {
-					if v, ok := strings.CutPrefix(kv, "ctx="); ok {
-						ctx, _ = strconv.Atoi(v)
-					}
-					if v, ok := strings.CutPrefix(kv, "ubatch="); ok {
-						ubatch, _ = strconv.Atoi(v)
-					}
-				}
+				ctx, ubatch, scope, header = probeCoefficientHeader(line)
 				continue
 			}
 			if v, ok := strings.CutPrefix(line, "PROBED_COMPUTE_BUF_MB_CUDA"); ok {
@@ -5159,6 +5236,26 @@ func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float6
 				}
 			}
 		}
+		if !header || ctx <= 0 || ubatch <= 0 || len(buffers) == 0 || !coefficientScopeMatches(scope, want) {
+			continue
+		}
+		points = append(points, probedPoint{scope: scope, ctx: ctx, ubatch: ubatch, buffers: buffers})
+	}
+	if !want.placementSpecified() {
+		placement := ""
+		for _, point := range points {
+			if placement == "" {
+				placement = point.scope.KVPlacement
+				continue
+			}
+			if point.scope.KVPlacement != placement {
+				return 0
+			}
+		}
+	}
+	var coefficients []float64
+	for _, point := range points {
+		ctx, ubatch, buffers := point.ctx, point.ubatch, point.buffers
 		if ctx <= 0 || ubatch <= 0 || len(buffers) == 0 {
 			continue
 		}

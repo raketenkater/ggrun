@@ -358,11 +358,46 @@ func TestBackendAllocationDryRunMustBeAdvertisedExactly(t *testing.T) {
 func TestMemoryEvidenceKeyIncludesHostAllocationFlags(t *testing.T) {
 	be := &backendInfo{Identity: "ik-build-a"}
 	model := &placement.ModelProfile{Path: "model.gguf", SizeBytes: 1234}
-	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 24576}}}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 24576, PCIBusID: "0000:17:00.0", PCIGen: 3, PCILanes: 16}}}
 	resident := memoryEvidenceKey(be, model, caps, []string{"llama-server", "-m", "model.gguf", "--no-mmap"})
 	mapped := memoryEvidenceKey(be, model, caps, []string{"llama-server", "-m", "model.gguf", "--mmap"})
 	if resident == mapped {
 		t.Fatal("resident and mmap launches shared allocation evidence key")
+	}
+}
+
+func TestMemoryEvidenceKeySeparatesBackendDeviceKVAndSWA(t *testing.T) {
+	be := &backendInfo{Identity: "build-a"}
+	model := &placement.ModelProfile{Path: "model.gguf", SizeBytes: 1234}
+	card := detect.GPU{Index: 0, Name: "RTX", VRAMTotalMB: 12288, PCIBusID: "0000:17:00.0", PCIGen: 3, PCILanes: 16}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{card}}
+	args := []string{"llama-server", "-m", "model.gguf", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"}
+	base := memoryEvidenceKey(be, model, caps, args)
+
+	otherBackend := &backendInfo{Identity: "build-b"}
+	if memoryEvidenceKey(otherBackend, model, caps, args) == base {
+		t.Fatal("a different backend build reused allocation evidence")
+	}
+	otherCard := card
+	otherCard.PCIBusID = "0000:65:00.0"
+	otherCaps := &detect.Capabilities{GPUs: []detect.GPU{otherCard}}
+	if memoryEvidenceKey(be, model, otherCaps, args) == base {
+		t.Fatal("a same-name card on another bus reused allocation evidence")
+	}
+	tighter := &detect.Capabilities{GPUs: []detect.GPU{card}}
+	tighter.GPUs[0].VRAMUsedMB = 8000
+	if memoryEvidenceKey(be, model, tighter, args) != base {
+		t.Fatal("free-memory change erased allocation evidence for the same device")
+	}
+	kv := append([]string{}, args...)
+	kv[4] = "f16"
+	kv[6] = "f16"
+	if memoryEvidenceKey(be, model, caps, kv) == base {
+		t.Fatal("a different KV type reused allocation evidence")
+	}
+	swa := append(append([]string{}, args...), "--swa-full")
+	if memoryEvidenceKey(be, model, caps, swa) == base {
+		t.Fatal("full SWA reused allocation evidence from the windowed shape")
 	}
 }
 

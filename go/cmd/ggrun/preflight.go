@@ -253,7 +253,12 @@ func memoryEvidenceKey(be *backendInfo, model *placement.ModelProfile, caps *det
 	}
 	if caps != nil {
 		for _, gpu := range caps.GPUs {
-			_, _ = io.WriteString(h, fmt.Sprintf("gpu=%d:%s:%d\n", gpu.Index, gpu.Name, gpu.VRAMTotalMB))
+			// Index is the slot the device rows were measured in. PCI address
+			// and link shape distinguish two cards that share a name and a
+			// VRAM size; free memory is intentionally absent so a tighter
+			// budget does not erase a still-valid allocation observation.
+			_, _ = io.WriteString(h, fmt.Sprintf("gpu=%d|%s|%s|%d|gen%d|x%d\n",
+				gpu.Index, gpu.PCIBusID, gpu.Name, gpu.VRAMTotalMB, gpu.PCIGen, gpu.PCILanes))
 		}
 	}
 	// The ik canary is sensitive to host-allocation flags such as --no-mmap,
