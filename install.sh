@@ -1071,11 +1071,13 @@ build_go_binary() {
     local out="$1"
     [[ -n "$SRC_DIR" && -f "$SRC_DIR/go/go.mod" ]] || return 1
     ensure_go_toolchain || return 1
-    # Stamp the version only on exact tag checkouts; branch builds keep the
-    # in-source default so the update checker is not misled.
+    # Stamp what `ggrun update` stamps (git describe), so an installed build
+    # names its commit. The in-source default identifies nothing and makes the
+    # update checker report a newer release forever; describe output such as
+    # v3.2.10-9-g6106ccd orders correctly against releases.
     local ldflags="-s -w"
     local ver
-    ver="$(git -C "$SRC_DIR" describe --tags --exact-match 2>/dev/null || true)"
+    ver="$(git -C "$SRC_DIR" describe --tags --always 2>/dev/null || true)"
     [[ -n "$ver" ]] && ldflags="$ldflags -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$ver"
     (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="$ldflags" -o "$out" ./cmd/ggrun)
 }
