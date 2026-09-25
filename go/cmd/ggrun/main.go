@@ -6170,14 +6170,17 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 }
 
 // verifiedScopeShape identifies what a memoized verified-config key belongs
-// to. Request rewrites during a launch keep it; a different model, backend or
-// hardware set does not.
+// to. Request rewrites during a launch keep it; a different model or backend
+// does not. Hardware is deliberately absent: the first computation (the
+// lookup) hashes the detected inventory, while the save is handed the runtime
+// view, which --gpus narrows and re-indexes; comparing those made every
+// restricted launch save under a key its successor never looked up.
 func verifiedScopeShape(model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
 	identity := ""
 	if be != nil {
 		identity = be.Identity + "|" + be.Tag + "|" + be.Path
 	}
-	return placement.SpecTargetIdentity(model) + "|" + identity + "|" + placement.SpecHardwareIdentity(caps)
+	return placement.SpecTargetIdentity(model) + "|" + identity
 }
 
 func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelProfile) string {

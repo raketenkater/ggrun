@@ -380,3 +380,19 @@ func TestVerifiedConfigKeySurvivesRequestRewrites(t *testing.T) {
 		t.Fatalf("next launch key %q, recorded %q", next, lookup)
 	}
 }
+
+// With --gpus 0 the save is handed the runtime view (one re-indexed GPU)
+// while the lookup hashed the detected inventory; both must use one key.
+func TestVerifiedConfigKeyIgnoresTheRuntimeHardwareView(t *testing.T) {
+	req := &launchRequest{CtxFlag: "fit", GPUsFlag: "0"}
+	model, be := fitTestModel(131072, 2000), fitTestBackend()
+	detected := &detect.Capabilities{GPUs: []detect.GPU{
+		{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282, PCIBusID: "00000000:17:00.0"},
+		{Index: 1, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, PCIBusID: "00000000:65:00.0"},
+	}, RAM: detect.RAMInfo{TotalMB: 212000, FreeMB: 200000}, CPU: detect.CPUInfo{Cores: 14}}
+	lookup := placementOptionsFromRequestCaps(req, model, be, t.TempDir(), detected).VerifiedConfigScopeKey
+	runtimeView, _ := runtimeGPUCapabilities(detected, req)
+	if save := verifiedConfigScopeKey(req, model, be, runtimeView); save != lookup {
+		t.Fatalf("restricted launch saved under %q but looks up %q", save, lookup)
+	}
+}
