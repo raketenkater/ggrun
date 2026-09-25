@@ -5125,6 +5125,14 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if preflight.Evidence.Level == memoryEvidenceAllocated {
 					measuredProductionArgs = formatCommand(serverArgs)
 				}
+			} else if preflight.Evidence.Level != memoryEvidenceNone && strategy != nil && strategy.VerifiedConfigReused {
+				// The saved config just passed this launch's exact preflight.
+				// Recomputing from the original request can change the argv and
+				// turn the next optional search into another full reload.
+				fmt.Fprintln(os.Stderr, "[launch] verified config passed exact preflight; keeping that argv rather than re-planning")
+				if preflight.Evidence.Level == memoryEvidenceAllocated {
+					measuredProductionArgs = formatCommand(serverArgs)
+				}
 			} else if preflight.Evidence.Level != memoryEvidenceNone && memoryRecovery.plannerWasDisproved() {
 				// This launch already saw the exact check refuse a planner
 				// re-plan. A new candidate from the same estimate could only trade

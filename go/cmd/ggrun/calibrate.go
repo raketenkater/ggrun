@@ -101,6 +101,14 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 		// non-reproducible. Explicit maintenance mode may still request it.
 		return nil
 	}
+	// An unchanged verified config is already the serving decision. Automatic
+	// mode must not schedule another challenger load on top of it: the Qwen3.8
+	// 27B and Flash-Next relaunches reused the config and then still paid for
+	// a baseline, a challenger, and a restore. Explicit --calibrate on remains
+	// a maintenance sweep.
+	if mode == calibrateAuto && strategy.VerifiedConfigReused {
+		return nil
+	}
 	scope := calibrationScope(req, model, be, caps, strategy)
 	scopeKey := scope.String()
 	candidates := calibrationCandidates(req, cfg, model, be, caps, strategy)
