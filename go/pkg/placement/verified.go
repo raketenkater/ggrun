@@ -95,6 +95,11 @@ type VerifiedConfig struct {
 	PlanFreeVRAM           map[int]int `json:"plan_free_vram,omitempty"` // stale-plan guard (cache.go:121-129)
 	PlannedHostFootprintMB int         `json:"planned_host_footprint_mb,omitempty"`
 	MeasuredAt             string      `json:"measured_at"`
+	// KVQuality is the strategy's own quality spelling (an exact type such as
+	// "q8_0" or a tier such as "mid"). It is part of the calibration scope, so a
+	// reuse that re-derived it from KVType missed the decision recorded for the
+	// very same configuration and screened again. Empty on older records.
+	KVQuality string `json:"kv_quality,omitempty"`
 }
 
 // VerifiedConfigPath returns the cache file for one verified-config scope.
@@ -187,7 +192,7 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 		ContextFitRejected:       vc.ContextFitRejected,
 		ContextFitEvidence:       vc.ContextFitEvidence,
 		KVPlacement:              vc.KVPlacement,
-		KVQuality:                kvTypeToQuality(vc.KVType),
+		KVQuality:                verifiedKVQuality(vc),
 		KVType:                   vc.KVType,
 		KVTypeV:                  vc.KVTypeV,
 		NCPUMoE:                  vc.NCPUMoE,
@@ -313,6 +318,7 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 		KVPlacement:        s.KVPlacement,
 		KVType:             s.KVType,
 		KVTypeV:            s.KVTypeV,
+		KVQuality:          s.KVQuality,
 		BatchSize:          s.BatchSize,
 		UBatchSize:         s.UBatchSize,
 		BatchTuned:         s.BatchTuned,
@@ -408,4 +414,11 @@ func kvTypeToQuality(kvType string) string {
 	default:
 		return ""
 	}
+}
+
+func verifiedKVQuality(vc *VerifiedConfig) string {
+	if vc.KVQuality != "" {
+		return vc.KVQuality
+	}
+	return kvTypeToQuality(vc.KVType)
 }

@@ -54,3 +54,17 @@ func TestPostLaunchGrowthIsMeasuredAgainstTheOracleTotal(t *testing.T) {
 		t.Fatalf("growth = %v, want %d", got, 11000-1-330-10449)
 	}
 }
+
+func TestVerifiedReuseKeepsTheKVQualitySpelling(t *testing.T) {
+	s := &Strategy{Type: MoEOffload, KVType: "q8_0", KVQuality: "q8_0", ContextSize: 224256, UBatchSize: 128}
+	vc := VerifiedConfigToRecord("k", "m.gguf", s, "b", "/bin/llama-server", "", "")
+	restored := VerifiedToStrategy(&vc, Options{}, &detect.Capabilities{})
+	if restored.KVQuality != "q8_0" {
+		t.Fatalf("reused KV quality = %q, want the recorded q8_0", restored.KVQuality)
+	}
+	legacy := vc
+	legacy.KVQuality = ""
+	if got := VerifiedToStrategy(&legacy, Options{}, &detect.Capabilities{}).KVQuality; got == "" {
+		t.Fatal("an older record lost its KV quality")
+	}
+}
