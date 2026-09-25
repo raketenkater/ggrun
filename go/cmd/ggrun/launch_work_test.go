@@ -396,3 +396,27 @@ func TestVerifiedConfigKeyIgnoresTheRuntimeHardwareView(t *testing.T) {
 		t.Fatalf("restricted launch saved under %q but looks up %q", save, lookup)
 	}
 }
+
+func TestBackendBesideTheInstalledLauncherIsFound(t *testing.T) {
+	prefix := t.TempDir()
+	server := filepath.Join(prefix, "llama-server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := executablePath
+	executablePath = func() (string, error) { return filepath.Join(prefix, "ggrun"), nil }
+	defer func() { executablePath = old }()
+	paths := backendSearchPaths(t.TempDir())
+	found := false
+	for _, p := range paths {
+		if p == server {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("installer's sibling backend %s not searched: %v", server, paths)
+	}
+	if paths[len(paths)-2] != server {
+		t.Fatal("the sibling must come after every existing candidate")
+	}
+}

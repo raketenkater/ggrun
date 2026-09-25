@@ -9605,6 +9605,9 @@ func findBackend(caps *detect.Capabilities, configuredAppHome ...string) *backen
 	return nil
 }
 
+// executablePath is os.Executable, replaceable in tests.
+var executablePath = os.Executable
+
 func backendSearchPaths(configuredAppHome ...string) []string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -9647,6 +9650,15 @@ func backendSearchPaths(configuredAppHome ...string) []string {
 		filepath.Join(appHome, ".src", "llama.cpp", "build-vulkan", "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server.exe"),
+	}
+	// The installer links llama-server beside the ggrun it installs and asks
+	// the user to put that directory on PATH. Without PATH (a launcher started
+	// by its absolute path, a service, a fresh shell) that sibling was never
+	// considered and a correct fresh install reported no backend. Last, so no
+	// existing installation's choice changes.
+	if exe, err := executablePath(); err == nil && exe != "" {
+		dir := filepath.Dir(exe)
+		paths = append(paths, filepath.Join(dir, "llama-server"), filepath.Join(dir, "llama-server.exe"))
 	}
 	// A configured APP_HOME is an explicit installation boundary. Global
 	// detection still runs after these paths in selectBackend/findBackend, but
