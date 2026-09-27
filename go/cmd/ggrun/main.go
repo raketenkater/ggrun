@@ -5949,7 +5949,7 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 		// The already-active fast path is a re-validation of the same profile: the
 		// config was already promoted, so refresh the verified config record too.
-		saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy)
+		saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy, serverArgs)
 		fmt.Fprintln(os.Stderr, "[verify] exact launch profile is already active; reusing its canary result")
 		return nil
 	}
@@ -6102,10 +6102,38 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 	// the promotion boundary. Save the full verified config so the next launch
 	// of this exact scope starts directly from it. Failure degrades to a log —
 	// the launch is already active and must not be failed by a cache write.
-	saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy, serverArgs)
 	fmt.Fprintf(os.Stderr, "[verify] active profile: append cache=%d, branch cache=%d tokens\n",
 		canary.AppendCachedTokens, canary.BranchCachedTokens)
 	return nil
+}
+
+// strategyForServedArgs returns a copy of strategy whose argv-visible runtime
+// coordinates are those of the argv that actually served. The verified config
+// is what an unchanged relaunch rebuilds its argv from, so it must describe the
+// served launch; recomputes after start (measured placements, in-lifecycle
+// derates) had left CRAM and mmap in the strategy disagreeing with the served
+// argv, which turned every unchanged relaunch into a different launch and a
+// fresh memory probe.
+func strategyForServedArgs(strategy *placement.Strategy, served []string) *placement.Strategy {
+	if strategy == nil || len(served) == 0 {
+		return strategy
+	}
+	s := *strategy
+	if v := argIntValue(served, "-cram", "--cache-ram"); v >= 0 {
+		s.CRAM = v
+	}
+	if v := argIntValue(served, "--ctx-checkpoints"); v >= 0 {
+		s.MaxCheckpoints = v
+	}
+	if v := argIntValue(served, "-b", "--batch-size"); v > 0 {
+		s.BatchSize = v
+	}
+	if v := argIntValue(served, "-ub", "--ubatch-size"); v > 0 {
+		s.UBatchSize = v
+	}
+	s.MMap = !hasArg(served, "--no-mmap")
+	return &s
 }
 
 // saveVerifiedConfigForLaunch persists the full serving config at the promotion
@@ -6114,11 +6142,12 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 // disagree about what launch they describe. A save failure degrades to a stderr
 // log — the launch is already active and must never be failed by a cache write.
 func saveVerifiedConfigForLaunch(cfg *config.Config, req *launchRequest, model *placement.ModelProfile,
-	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy,
+	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, servedArgs []string,
 ) {
 	if cfg == nil || req == nil || model == nil || be == nil || strategy == nil {
 		return
 	}
+	strategy = strategyForServedArgs(strategy, servedArgs)
 	// --no-cached-config is the escape hatch: do not write a verified config for
 	// a launch that explicitly asked to derive fresh.
 	if req.NoCachedConfig || req.CalibrationScreened || req.CalibrationPending {
@@ -6739,7 +6768,7 @@ func cmdLaunch(args []string) {
 		// canary measurement above is newer than that write, so refresh the record
 		// before this process tightens its cgroup. Pending calibration profiles are
 		// intentionally withheld here and saved by the promotion block below.
-		saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy)
+		saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy, serverArgs)
 	}
 	// The functional canary is the first real request: it grows the graph and
 	// allocates the first context checkpoints, so this is the earliest honest
@@ -6791,7 +6820,7 @@ func cmdLaunch(args []string) {
 					// never strand a falsely tuned verified config.
 					strategy.PerformanceTuned = performanceEvidence
 					req.CalibrationPending = false
-					saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy)
+					saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy, serverArgs)
 					if strategy.Type == placement.MoEOffload && strategy.PlacementCachePath != "" {
 						if placeErr := placement.SavePlacementCache(strategy.PlacementCachePath, placement.StrategyToCacheEntry(strategy)); placeErr != nil {
 							fmt.Fprintf(os.Stderr, "[optimize] verified placement cache write failed (launch unaffected): %v\n", placeErr)
@@ -7054,7 +7083,7 @@ func cmdLaunch(args []string) {
 		}
 		if newP.LogBuf != nil {
 			if recordLiveCheckpointEvidence(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String()) {
-				saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, newStrategy)
+				saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, newStrategy, newArgs)
 			}
 		}
 		resizeScopeToMeasuredFootprint(req, runtimeCaps, newStrategy, newP)
