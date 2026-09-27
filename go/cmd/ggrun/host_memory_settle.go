@@ -164,3 +164,36 @@ func currentReleaseReadings(gpus []detect.GPU) func() (int, int) {
 		return currentAvailableRAMMB(), vram
 	}
 }
+
+// containHostMemory applies the host-memory containment gate and, when it
+// refuses, plans once more with the gate's reserve held back from placement.
+// Placement sizes a plan against the whole-host ceiling while the gate also
+// requires headroom (or CRAM) under it, so a near-boundary MoE could plan
+// every expert layer onto the host and then be refused outright
+// (K2-Horizon-MoVA-36B on one 12 GiB card at a 28 GiB ceiling). Holding the
+// reserve back lets context fit trade context for GPU expert layers; the
+// containment ceiling itself is unchanged, and the gate re-validates the new
+// plan. A plan that passes the first check is returned unchanged.
+func containHostMemory(req *launchRequest, caps *detect.Capabilities, strategy *placement.Strategy,
+	recompute func(*launchRequest) (*placement.Strategy, error),
+	validate func(*launchRequest, *detect.Capabilities, *placement.Strategy) error) (*placement.Strategy, error) {
+	err := validate(req, caps, strategy)
+	if err == nil || req == nil || strategy == nil || recompute == nil || req.PlacementHostReserveMB > 0 {
+		return strategy, err
+	}
+	reserve := max(req.CgroupHeadroomMB, strategy.CRAM)
+	if reserve <= 0 || strategy.PlannedHostFootprintMB <= 0 {
+		return strategy, err
+	}
+	fmt.Fprintf(os.Stderr, "[placement] %v; re-planning once with %d MiB host reserve held back\n", err, reserve)
+	req.PlacementHostReserveMB = reserve
+	next, replanErr := recompute(req)
+	if replanErr != nil {
+		return strategy, fmt.Errorf("%w; re-plan with the reserve held back failed: %v", err, replanErr)
+	}
+	if verr := validate(req, caps, next); verr != nil {
+		return strategy, verr
+	}
+	fmt.Fprintf(os.Stderr, "[placement] contained re-plan: ctx %d, host footprint %d MiB\n", next.ContextSize, next.PlannedHostFootprintMB)
+	return next, nil
+}

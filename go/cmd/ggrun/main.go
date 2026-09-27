@@ -686,14 +686,19 @@ type launchRequest struct {
 	// keeps between the backend's measured non-reclaimable footprint and its hard
 	// MemoryMax. 0 keeps the pre-launch plan-derived ceiling (auto re-size off).
 	// -1 means unset; the config default applies.
-	CgroupHeadroomMB     int
-	AllowLiveMemoryProbe bool
-	NoMMap               bool
-	ForceMMap            bool
-	Parallel             int
-	ParallelSet          bool // --parallel given explicitly; claude-code mode must not override it
-	Threads              int  // --threads; 0 keeps the physical-core default
-	CacheRAMMB           int  // --cache-ram; 0 keeps the derived prompt-cache budget
+	CgroupHeadroomMB int
+	// PlacementHostReserveMB is host RAM placement holds back on top of
+	// RAMHeadroomMB without lowering the containment ceiling: the reserve the
+	// containment gate requires, set only when re-planning after that gate
+	// refused a plan (containHostMemory).
+	PlacementHostReserveMB int
+	AllowLiveMemoryProbe   bool
+	NoMMap                 bool
+	ForceMMap              bool
+	Parallel               int
+	ParallelSet            bool // --parallel given explicitly; claude-code mode must not override it
+	Threads                int  // --threads; 0 keeps the physical-core default
+	CacheRAMMB             int  // --cache-ram; 0 keeps the derived prompt-cache budget
 	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. -1 (the zero
 	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
 	// the field exists because leaving the flag unparsed let it fall through to
@@ -2835,7 +2840,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		RamBudgetMB:             req.RamBudgetMB,
 		RAMLimitPercent:         req.RAMLimitPercent,
 		VRAMHeadroomMB:          req.VRAMHeadroomMB,
-		RAMHeadroomMB:           req.RAMHeadroomMB,
+		RAMHeadroomMB:           req.RAMHeadroomMB + req.PlacementHostReserveMB,
 		RequireMeasuredBuffers:  true,
 		NoMMap:                  req.NoMMap,
 		ForceMMap:               req.ForceMMap,
@@ -6484,7 +6489,8 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
-	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
+	strategy, err = containHostMemory(req, caps, strategy, computeStrategy, validateHostMemoryContainmentWaiting)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
