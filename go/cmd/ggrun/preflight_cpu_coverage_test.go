@@ -34,3 +34,26 @@ func TestCPUOnlyProbeCoverageNeedsNoDeviceEvents(t *testing.T) {
 		t.Fatal("complete GPU coverage rejected")
 	}
 }
+
+// Host-only evidence from a complete CPU-only probe is reused on relaunch;
+// evidence that measured nothing at all is not.
+func TestHostOnlyMemoryEvidenceIsReused(t *testing.T) {
+	dir := t.TempDir()
+	coverage := memprobe.Coverage{GuardLoaded: true, CgroupV2: true, Complete: true}
+	host := memprobe.HostMemory{ModelBytes: 3 << 30, ContextBytes: 4 << 30, ComputeBytes: 256 << 20}
+	if _, err := memprobe.Save(dir, memprobe.Plan{Key: "cpu", Evidence: memprobe.EvidenceGuardedAllocated,
+		BackendIdentity: "ik", Outcome: "fit", Coverage: coverage, Host: host}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := loadMemoryEvidence(dir, "cpu")
+	if !ok || len(got.Devices) != 1 || got.Devices[0].Name != "Host" || got.Devices[0].ModelMB != 3072 {
+		t.Fatalf("host-only evidence not reused: ok=%v %#v", ok, got)
+	}
+	if _, err := memprobe.Save(dir, memprobe.Plan{Key: "empty", Evidence: memprobe.EvidenceGuardedAllocated,
+		BackendIdentity: "ik", Outcome: "fit", Coverage: coverage}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadMemoryEvidence(dir, "empty"); ok {
+		t.Fatal("evidence that measured nothing was reused")
+	}
+}

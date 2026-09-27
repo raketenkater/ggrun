@@ -270,7 +270,10 @@ func memoryEvidenceKey(be *backendInfo, model *placement.ModelProfile, caps *det
 
 func loadMemoryEvidence(cacheDir, key string) (memoryPlanEvidence, bool) {
 	plan, ok := memprobe.Load(cacheDir, key)
-	if !ok || plan.Evidence != memprobe.EvidenceGuardedAllocated || len(plan.Devices) == 0 {
+	// A CPU-only launch measures host memory only; its evidence has no device
+	// rows. Rejecting that made every CPU-only relaunch probe again.
+	hostMeasured := plan.Host.ModelBytes+plan.Host.ContextBytes+plan.Host.ComputeBytes+plan.Host.UnaccountedBytes > 0
+	if !ok || plan.Evidence != memprobe.EvidenceGuardedAllocated || (len(plan.Devices) == 0 && !hostMeasured) {
 		return memoryPlanEvidence{}, false
 	}
 	devices := make([]preflightDevice, 0, len(plan.Devices))
