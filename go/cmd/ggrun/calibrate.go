@@ -899,6 +899,33 @@ func calibrationCandidateBetter(candidate, current calibrationMeasurement) bool 
 	return true
 }
 
+// calibrationSideEffects are the process, clock and workload effects of
+// runCalibration. Tests replace them to drive the controller through time
+// without processes or GPUs; runCalibration reads them once per call.
+type calibrationSideEffects struct {
+	now             func() time.Time
+	probePrefill    func(*benchmark.Runner) (benchmark.PrefillProbe, error)
+	runWorkload     func(r *benchmark.Runner, slots, lanes int) (*benchmark.Result, error)
+	oracleAvailable func(be *backendInfo, model *placement.ModelProfile) bool
+	prescreen       func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps, resourceBaseline *detect.Capabilities, strategy *placement.Strategy, args []string) (bool, string, string)
+	stopAndWait     func(p *server.Process, label string, baseline *detect.Capabilities, timeout time.Duration) bool
+	startExact      func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, args []string, timeout time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string, error)
+	restart         func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, args []string, window time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string)
+}
+
+var calibrationEffects = calibrationSideEffects{
+	now:          time.Now,
+	probePrefill: (*benchmark.Runner).ProbeAgentPrefill,
+	runWorkload:  (*benchmark.Runner).RunAgentWorkload,
+	oracleAvailable: func(be *backendInfo, model *placement.ModelProfile) bool {
+		return be != nil && model != nil && findFitParamsBin(be.Path, model.ModelArch) != ""
+	},
+	prescreen:   prescreenCalibrationCandidate,
+	stopAndWait: stopCalibrationProcessAndWait,
+	startExact:  startLaunchExactAdmission,
+	restart:     restartPlacement,
+}
+
 func boundedCalibrationTimeout(configured, remaining time.Duration) time.Duration {
 	if configured <= 0 || configured > remaining {
 		return remaining
@@ -930,7 +957,13 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	budget := calibrationBudgetFor(mode)
 	scope := calibrationScope(req, model, be, caps, strategy)
 	scopeKey := scope.String()
-	startedAt := time.Now()
+	fx := calibrationEffects
+	// One deadline for the whole experiment; restoration may exceed it only by
+	// the separately reported emergency policy (restoreService). The serving
+	// baseline's own measurement is not cut off (see bench), so while it
+	// serves the launch may take max(deadline, baseline measurement) before
+	// the emergency window.
+	exp := newCalibrationExperiment(budget.MaxElapsed, restartAdmissionWindow(model), fx.now)
 	if mode == calibrateAuto {
 		fmt.Printf("[optimize] measuring the live baseline plus one successful calculated challenger (up to %d contained admissions, elapsed budget=%s)\n",
 			max(1, len(candidates)-1), budget.MaxElapsed)
@@ -971,13 +1004,13 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 		}
 		probeTimeout := calibrationAutoProbeTimeout
-		if remaining := budget.MaxElapsed - time.Since(startedAt); remaining/4 < probeTimeout {
+		if remaining := exp.remaining(); remaining/4 < probeTimeout {
 			probeTimeout = remaining / 4
 		}
 		probeRunner := &benchmark.Runner{
 			BaseURL: baseURL, Model: model.Basename, Timeout: probeTimeout, WorkloadID: scopeKey,
 		}
-		probe, probeErr := probeRunner.ProbeAgentPrefill()
+		probe, probeErr := fx.probePrefill(probeRunner)
 		agentPromptBytes = benchmark.SuggestedAgentPromptBytes(probe, activeSlots, maxUBatch, calibrationAutoAgentWaveTarget)
 		if probeErr != nil {
 			fmt.Fprintf(os.Stderr, "[optimize] short prefill pilot failed (%v); using bounded %d-byte/lane fallback\n",
@@ -991,8 +1024,15 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				probe.PromptTPS, agentPromptBytes, approxTokens)
 		}
 	}
-	bench := func(active *placement.Strategy, activeProcess *server.Process) (*benchmark.Result, error) {
-		remaining := budget.MaxElapsed - time.Since(startedAt)
+	// bench measures the active process. A challenger passes a hard deadline
+	// that leaves the restoration reserve; the serving baseline passes none,
+	// since stopping its measurement early would protect nothing and only
+	// lose the evidence (the loop refuses any challenger that no longer fits).
+	bench := func(active *placement.Strategy, activeProcess *server.Process, deadline time.Time) (*benchmark.Result, error) {
+		remaining := exp.remaining()
+		if !deadline.IsZero() {
+			remaining = deadline.Sub(fx.now())
+		}
 		if remaining <= 3*time.Second {
 			return nil, errCalibrationBudgetExhausted
 		}
@@ -1004,7 +1044,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			requestTimeout = perRequest
 		}
 		runner := &benchmark.Runner{
-			BaseURL: baseURL, Model: model.Basename, Timeout: requestTimeout,
+			BaseURL: baseURL, Model: model.Basename, Timeout: requestTimeout, Deadline: deadline,
 			WorkloadID: scopeKey, AgentPromptBytes: agentPromptBytes,
 			SampleResources: calibrationProcessResourceSampler(activeProcess),
 			SampleGPUUtilization: func() []benchmark.GPUUtilization {
@@ -1015,7 +1055,10 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if active != nil && active.Parallel > 1 {
 			slots = active.Parallel
 		}
-		res, err := runner.RunAgentWorkload(slots, workloadLanes)
+		res, err := fx.runWorkload(runner, slots, workloadLanes)
+		if errors.Is(err, benchmark.ErrDeadline) {
+			return nil, fmt.Errorf("%w: %v", errCalibrationBudgetExhausted, err)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1026,9 +1069,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	}
 
 	// The default is already running: measure it in place.
-	benchStarted := time.Now()
-	defaultResult, err := bench(strategy, p)
-	baselineWorkload := time.Since(benchStarted)
+	benchStarted := fx.now()
+	defaultResult, err := bench(strategy, p, time.Time{})
+	baselineWorkload := fx.now().Sub(benchStarted)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[calibrate] baseline measurement failed (%v); serving default placement\n", err)
 		return p, strategy, serverArgs, nil
@@ -1083,7 +1126,13 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	curP := p
 	baselineLoad, baselineLoadObserved := memoryRecovery.productionLoadCost(serverArgs)
-	oracleAvailable := be != nil && findFitParamsBin(be.Path, model.ModelArch) != ""
+	oracleAvailable := fx.oracleAvailable(be, model)
+	// The baseline's priced restoration: its admission (the oracle reruns) and
+	// its load. A winner restart holds it back, plus the failed winner's
+	// release, so the baseline can still come back if the winner does not.
+	restoreFloor := oracleAdmissionCost + estimateChallengerCost(challengerCostInputs{
+		BaselineLoad: baselineLoad, BaselineLoadObserved: baselineLoadObserved, Ceiling: autoStartupTimeout(model),
+	}).Restore
 	unaffordable := ""
 	failures := 0
 	stableAdmissionFailed := false
@@ -1093,7 +1142,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	exactCandidateStarted := false
 	budgetExhausted := false
 	for _, cand := range candidates[1:] {
-		remaining := budget.MaxElapsed - time.Since(startedAt)
+		remaining := exp.remaining()
 		if remaining <= 3*time.Second {
 			fmt.Fprintln(os.Stderr, "[calibrate] elapsed-time budget reached; stopping candidate search")
 			admissionInconclusive = true
@@ -1113,21 +1162,6 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			}
 			continue
 		}
-		// With a same-build oracle, admission can be decided in seconds without
-		// stopping the healthy baseline: price the candidate exactly as its
-		// exact admission will once the baseline is gone. A refusal here saves
-		// a stop and a restoration load.
-		if curP != nil && oracleAvailable {
-			if refused, class, reason := prescreenCalibrationCandidate(req, cfg, model, be, caps, resourceBaseline, cand.Strategy, candArgs); refused {
-				fmt.Fprintf(os.Stderr, "[calibrate] %s refused by the memory oracle while the baseline keeps serving (%s)\n", cand.Name, reason)
-				memoryRecovery.reject(candArgs)
-				stableAdmissionFailed = true
-				if stableFailureClass == "" {
-					stableFailureClass, stableFailureReason = class, reason
-				}
-				continue
-			}
-		}
 		// Price the whole experiment before touching the healthy baseline:
 		// candidate admission, its load, the workload, two releases and the
 		// baseline's restoration, from this launch's observed costs.
@@ -1137,6 +1171,31 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			ProbeNeeded:     !oracleAvailable && !candidateAllocationEvidenceCached(req, cfg, be, caps, model, cand.Strategy, candArgs),
 			BaselineRunning: curP != nil,
 		})
+		// With a same-build oracle, admission can be decided in seconds without
+		// stopping the healthy baseline: price the candidate exactly as its
+		// exact admission will once the baseline is gone. A refusal here saves
+		// a stop and a restoration load. An experiment that already does not
+		// fit is refused below without paying for the oracle run.
+		if curP != nil && oracleAvailable && cost.Affordable(exp.remaining()) {
+			if refused, class, reason := fx.prescreen(req, cfg, model, be, caps, resourceBaseline, cand.Strategy, candArgs); refused {
+				fmt.Fprintf(os.Stderr, "[calibrate] %s refused by the memory oracle while the baseline keeps serving (%s)\n", cand.Name, reason)
+				memoryRecovery.reject(candArgs)
+				stableAdmissionFailed = true
+				if stableFailureClass == "" {
+					stableFailureClass, stableFailureReason = class, reason
+				}
+				continue
+			}
+		}
+		// The remaining time is read after the prescreen, and nothing runs
+		// between this check and the baseline stop.
+		remaining = exp.remaining()
+		if remaining <= 3*time.Second {
+			fmt.Fprintln(os.Stderr, "[calibrate] elapsed-time budget reached; stopping candidate search")
+			admissionInconclusive = true
+			budgetExhausted = true
+			break
+		}
 		if !cost.Affordable(remaining) {
 			unaffordable = fmt.Sprintf("the finalist experiment and baseline restoration need about %s; %s remains", cost.Total().Round(time.Second), remaining.Round(time.Second))
 			appendLaunchWork(cfg.CacheDir, launchWorkRecord{Phase: "challenger", Kind: "budget-refusal", Model: modelBasename(model),
@@ -1148,16 +1207,17 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		}
 		fmt.Printf("[calibrate] measuring %s...\n", cand.Name)
 		if curP != nil {
-			if !stopCalibrationProcessAndWait(curP, "default before "+cand.Name, resourceBaseline, 30*time.Second) {
+			if !fx.stopAndWait(curP, "default before "+cand.Name, resourceBaseline, 30*time.Second) {
 				return curP, strategy, serverArgs, nil
 			}
 			curP = nil
 		}
-		// Shutdown spent part of the budget; the candidate may use what is left
-		// minus the restoration reserve, across probe, load and retries alike.
-		remaining = budget.MaxElapsed - time.Since(startedAt)
-		candidateTimeout := boundedCalibrationTimeout(timeout, remaining-cost.Restore)
-		cp, measuredStrategy, measuredArgs, serr := startLaunchExactAdmission(req, cfg, model, cand.Strategy, be, caps, candArgs, candidateTimeout, memoryRecovery)
+		// Shutdown spent part of the budget. Admission, across probe, load and
+		// retries alike, may use what is left after the workload and the
+		// restoration reserve: a candidate that loads later could not be
+		// measured and restored in time anyway.
+		candidateTimeout := boundedCalibrationTimeout(timeout, exp.until(cost.Workload+cost.Reserve()))
+		cp, measuredStrategy, measuredArgs, serr := fx.startExact(req, cfg, model, cand.Strategy, be, caps, candArgs, candidateTimeout, memoryRecovery)
 		if serr != nil {
 			fmt.Fprintf(os.Stderr, "[calibrate] %s failed to start (%v); skipping\n", cand.Name, serr)
 			if isAdmissionBudgetError(serr) {
@@ -1209,7 +1269,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				stableFailureClass = "memory-recovery-rewrote-argv"
 				stableFailureReason = "the finalist started only after memory recovery changed its exact argv"
 			}
-			if !stopCalibrationProcessAndWait(cp, cand.Name+" after memory recovery", resourceBaseline, 30*time.Second) {
+			if !fx.stopAndWait(cp, cand.Name+" after memory recovery", resourceBaseline, 30*time.Second) {
 				req.CalibrationScreened = true
 				return cp, measuredStrategy, measuredArgs, nil
 			}
@@ -1221,16 +1281,19 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			continue
 		}
 		exactCandidateStarted = true
-		result, berr := bench(measuredStrategy, cp)
+		result, berr := bench(measuredStrategy, cp, exp.deadline.Add(-cost.Reserve()))
 		if berr != nil {
 			fmt.Fprintf(os.Stderr, "[calibrate] %s measurement failed (%v); skipping\n", cand.Name, berr)
 			admissionInconclusive = true
-			if errors.Is(berr, errCalibrationBudgetExhausted) {
-				budgetExhausted = true
-			}
-			if !stopCalibrationProcessAndWait(cp, cand.Name+" after failed measurement", resourceBaseline, 30*time.Second) {
+			if !fx.stopAndWait(cp, cand.Name+" after failed measurement", resourceBaseline, 30*time.Second) {
 				req.CalibrationScreened = true
 				return cp, measuredStrategy, measuredArgs, nil
+			}
+			if errors.Is(berr, errCalibrationBudgetExhausted) {
+				// Only the reserve is left: pricing another candidate against
+				// it would misreport a workload cut-off as a restore refusal.
+				budgetExhausted = true
+				break
 			}
 			failures++
 			if failures >= budget.MaxFailures {
@@ -1252,7 +1315,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			Name: cand.Name, Strategy: measuredStrategy, Args: measuredArgs,
 			Result: result, Score: score,
 		})
-		if !stopCalibrationProcessAndWait(cp, "measured candidate "+cand.Name, resourceBaseline, 30*time.Second) {
+		if !fx.stopAndWait(cp, "measured candidate "+cand.Name, resourceBaseline, 30*time.Second) {
 			req.CalibrationScreened = true
 			return cp, measuredStrategy, measuredArgs, nil
 		}
@@ -1270,7 +1333,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	// ordinary functional/cache/lifecycle gates.
 	if len(measurements) < 2 {
 		if curP == nil {
-			restored, restoredStrategy, restoredArgs := restartPlacement(req, cfg, model, strategy, be, caps, serverArgs, restartAdmissionWindow(model), memoryRecovery)
+			restored, restoredStrategy, restoredArgs := restoreService(fx, exp, cfg, model, be, "baseline", 0, restoreFloor, func(window time.Duration) (*server.Process, *placement.Strategy, []string) {
+				return fx.restart(req, cfg, model, strategy, be, caps, serverArgs, window, memoryRecovery)
+			}, serverArgs)
 			if restored == nil {
 				return nil, strategy, serverArgs, nil
 			}
@@ -1328,7 +1393,17 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	selected, optimized := "", false
 	if mode == calibrateOn && defaultResult.Parallel <= 1 {
 		var optimizerErr error
-		selected, optimized, optimizerErr = maybeOptimizeCalibration(req, cfg, model, be, caps, scopeKey, measurements)
+		// The advisor is optional: it runs only inside the optimization budget
+		// and may not delay the winner restart past it.
+		// Only the query honors the context: the helper's start and release do
+		// not, so the advisor runs only when its whole lifecycle fits.
+		if remaining := exp.remaining(); remaining < calibrationAdvisorBound {
+			fmt.Fprintln(os.Stderr, "[calibrate] optimization budget too short for the support optimizer; skipping it")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), remaining)
+			selected, optimized, optimizerErr = maybeOptimizeCalibration(ctx, req, cfg, model, be, caps, scopeKey, measurements)
+			cancel()
+		}
 		if optimizerErr != nil {
 			fmt.Fprintf(os.Stderr, "[calibrate] refusing main-model restart: %v\n", optimizerErr)
 			return nil, strategy, serverArgs, nil
@@ -1351,12 +1426,28 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	}
 
 	// The support helper (when enabled) has stopped and verified resource release.
-	// Only now may the winning main-model process be started.
-	curP, restoredStrategy, restoredArgs := restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, restartAdmissionWindow(model), memoryRecovery)
-	if curP == nil && best.Name != "default" {
-		fmt.Fprintln(os.Stderr, "[calibrate] winner restart failed; restoring measured default")
-		best = measurements[0]
-		curP, restoredStrategy, restoredArgs = restartPlacement(req, cfg, model, best.Strategy, be, caps, best.Args, restartAdmissionWindow(model), memoryRecovery)
+	// Only now may the winning main-model process be started. A restart is
+	// unavoidable either way, so a measured winner is not skipped merely because
+	// the optimization deadline passed; it must leave the baseline's priced
+	// restoration inside the emergency window.
+	var restoredStrategy *placement.Strategy
+	var restoredArgs []string
+	winnerRestartFailed := false
+	if best.Name != "default" {
+		winner := best
+		curP, restoredStrategy, restoredArgs = restoreService(fx, exp, cfg, model, be, "winner "+winner.Name, restoreFloor+calibrationReleaseCost, 0, func(window time.Duration) (*server.Process, *placement.Strategy, []string) {
+			return fx.restart(req, cfg, model, winner.Strategy, be, caps, winner.Args, window, memoryRecovery)
+		}, winner.Args)
+		if curP == nil {
+			fmt.Fprintln(os.Stderr, "[calibrate] winner restart failed; restoring measured default")
+			winnerRestartFailed = true
+			best = measurements[0]
+		}
+	}
+	if curP == nil {
+		curP, restoredStrategy, restoredArgs = restoreService(fx, exp, cfg, model, be, "baseline", 0, restoreFloor, func(window time.Duration) (*server.Process, *placement.Strategy, []string) {
+			return fx.restart(req, cfg, model, strategy, be, caps, serverArgs, window, memoryRecovery)
+		}, serverArgs)
 	}
 	if curP == nil {
 		return nil, best.Strategy, best.Args, nil
@@ -1371,6 +1462,19 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	pending := scopedCalibrationDecision(scope, model, defaultResult, best)
 	annotateOptimizationDecision(pending, candidates, measurements)
+	if winnerRestartFailed {
+		// The finalist measured, but it could not be put back into service.
+		// Recording that as baseline-won would bury a faster finalist as
+		// comparative evidence; record a bounded attempt instead.
+		if mode != calibrateAuto || pending == nil {
+			return curP, strategy, serverArgs, nil
+		}
+		prev, _ := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
+		markFinalistUnmeasured(pending, prev)
+		pending.FinalistFailureClass = "winner-restart"
+		pending.FinalistFailureReason = "the measured finalist could not be restarted within the restoration window"
+		return curP, strategy, serverArgs, pending
+	}
 	if best.Name != "default" && mode == calibrateOn {
 		req.CalibrationScreened = true
 	}
@@ -1382,6 +1486,38 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			best.Name, calibrationTurnTime(best.Result), best.Score)
 	}
 	return curP, best.Strategy, best.Args, pending
+}
+
+// restoreService puts a measured configuration back into service: the only
+// step allowed past the optimization deadline. Its window never exceeds one
+// restart window and ends by the experiment's shared emergency deadline after
+// holding back keep; floor guarantees the baseline its priced restoration even
+// when bounded process stops already used that window. Any overrun of the
+// optimization budget is printed and recorded in the launch-work ledger.
+func restoreService(fx calibrationSideEffects, exp *calibrationExperiment, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, label string, keep, floor time.Duration, restart func(time.Duration) (*server.Process, *placement.Strategy, []string), args []string) (*server.Process, *placement.Strategy, []string) {
+	window := exp.serviceWindow(restartAdmissionWindow(model), keep, floor)
+	if window < minUsefulLoadWindow {
+		fmt.Fprintf(os.Stderr, "[calibrate] no restoration time left for %s; the baseline keeps the emergency window\n", label)
+		return nil, nil, nil
+	}
+	started := fx.now()
+	p, strategy, restoredArgs := restart(window)
+	if over := exp.overrun(); over > 0 {
+		outcome := "ready"
+		if p == nil {
+			outcome = "failed"
+		}
+		reason := fmt.Sprintf("restoring %s ended %s past the %s optimization budget (emergency bound %s)",
+			label, over.Round(time.Second), exp.deadline.Sub(exp.started).Round(time.Second),
+			exp.emergencyDeadline.Sub(exp.deadline).Round(time.Second))
+		// The restart's own admission records its weight load; this line only
+		// reports the overrun, so it must not count a second load.
+		appendLaunchWork(cfg.CacheDir, launchWorkRecord{Phase: "restore", Kind: "emergency-restore", Model: modelBasename(model),
+			Backend: backendIdentity(be), ArgvHash: argvHash(args), ElapsedSec: fx.now().Sub(started).Seconds(),
+			TimeoutSec: window.Seconds(), Outcome: outcome, Reason: reason})
+		fmt.Fprintf(os.Stderr, "[optimize] %s\n", reason)
+	}
+	return p, strategy, restoredArgs
 }
 
 func newCalibrationDecision(scopeKey string, model *placement.ModelProfile, defaultResult *benchmark.Result, best calibrationMeasurement) *placement.CalibrationDecision {
@@ -1724,7 +1860,7 @@ func printLaunchOptimizerStatus(decision *placement.CalibrationDecision) {
 // fully installed in auto mode. Its candidate IDs and metrics come exclusively
 // from successful ggrun benchmark runs, and the caller retains a deterministic
 // near-tie guard even after schema validation.
-func maybeOptimizeCalibration(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, scopeKey string, measurements []calibrationMeasurement) (string, bool, error) {
+func maybeOptimizeCalibration(ctx context.Context, req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, scopeKey string, measurements []calibrationMeasurement) (string, bool, error) {
 	if cfg == nil || len(measurements) < 2 {
 		return "", false, nil
 	}
@@ -1746,7 +1882,7 @@ func maybeOptimizeCalibration(req *launchRequest, cfg *config.Config, model *pla
 	if be != nil {
 		preferred = be.Path
 	}
-	decision, report, runErr := runSupportIncidentFn(context.Background(), cfg, caps, preferred, incident, online)
+	decision, report, runErr := runSupportIncidentFn(ctx, cfg, caps, preferred, incident, online)
 	var decisionPtr *advisor.Decision
 	if runErr == nil {
 		decisionPtr = &decision

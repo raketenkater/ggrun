@@ -164,7 +164,7 @@ func (w *admissionWork) boundCheap(configured time.Duration) time.Duration {
 type launchWorkRecord struct {
 	Time          string  `json:"time"`
 	Phase         string  `json:"phase"`
-	Kind          string  `json:"kind"` // oracle, cached-evidence, contained-probe, production, budget-refusal
+	Kind          string  `json:"kind"` // oracle, cached-evidence, contained-probe, production, budget-refusal, emergency-restore
 	LoadedWeights bool    `json:"loaded_weights"`
 	Model         string  `json:"model,omitempty"`
 	Backend       string  `json:"backend,omitempty"`

@@ -2,12 +2,15 @@ package benchmark
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -341,4 +344,87 @@ func TestRunAgentWorkloadFailsWhenQueuedLaneFails(t *testing.T) {
 	if err == nil || result != nil {
 		t.Fatalf("partial workflow accepted: %+v, %v", result, err)
 	}
+}
+
+// A per-request timeout cannot bound a workload of sequential waves: nine waves
+// at remaining/3 each overran the calibration budget threefold. Deadline must
+// bound the whole run, cancel a request in flight, and start nothing once it
+// has passed.
+func TestRunnerDeadlineBoundsTheWholeWorkload(t *testing.T) {
+	reply := func(w http.ResponseWriter, maxTokens interface{}) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{"message": map[string]string{"content": "ok"}}},
+			"usage":   map[string]interface{}{"prompt_tokens": 256, "completion_tokens": maxTokens},
+			"timings": map[string]interface{}{"prompt_per_second": 100.0, "predicted_per_second": 20.0, "cache_n": 200},
+		})
+	}
+	run := func(t *testing.T, handler http.HandlerFunc, deadline time.Time) (time.Duration, error) {
+		t.Helper()
+		server := httptest.NewServer(handler)
+		defer server.Close()
+		started := time.Now()
+		runner := &Runner{BaseURL: server.URL, Model: "local", WorkloadID: "deadline", AgentPromptBytes: 1024,
+			Timeout: 30 * time.Second, Deadline: deadline}
+		_, err := runner.RunAgentWorkload(1, 1)
+		return time.Since(started), err
+	}
+
+	t.Run("sequential waves", func(t *testing.T) {
+		// The complete workload takes at least nine 150ms waves.
+		elapsed, err := run(t, func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			select {
+			case <-time.After(150 * time.Millisecond):
+				reply(w, body["max_tokens"])
+			case <-r.Context().Done():
+			}
+		}, time.Now().Add(400*time.Millisecond))
+		if !errors.Is(err, ErrDeadline) || elapsed > 2*time.Second {
+			t.Fatalf("workload past its deadline returned %v after %s, want ErrDeadline promptly", err, elapsed)
+		}
+	})
+
+	t.Run("request in flight is cancelled", func(t *testing.T) {
+		elapsed, err := run(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+		}, time.Now().Add(300*time.Millisecond))
+		if !errors.Is(err, ErrDeadline) || elapsed > 5*time.Second {
+			t.Fatalf("hung request returned %v after %s, want ErrDeadline at the deadline", err, elapsed)
+		}
+	})
+
+	t.Run("deadline during the response body", func(t *testing.T) {
+		_, err := run(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[`))
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+		}, time.Now().Add(300*time.Millisecond))
+		if !errors.Is(err, ErrDeadline) {
+			t.Fatalf("deadline while reading the body returned %v, want ErrDeadline", err)
+		}
+	})
+
+	t.Run("passed deadline starts nothing", func(t *testing.T) {
+		var requests atomic.Int32
+		_, err := run(t, func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			reply(w, 1)
+		}, time.Now().Add(-time.Second))
+		if !errors.Is(err, ErrDeadline) {
+			t.Fatalf("passed deadline returned %v, want ErrDeadline", err)
+		}
+		if n := requests.Load(); n != 0 {
+			t.Fatalf("%d requests started after the deadline", n)
+		}
+	})
 }

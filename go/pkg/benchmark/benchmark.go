@@ -2,11 +2,16 @@ package benchmark
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 )
+
+// ErrDeadline reports that a request would end after Runner.Deadline.
+var ErrDeadline = errors.New("benchmark deadline reached")
 
 // Result holds benchmark metrics.
 type Result struct {
@@ -70,6 +75,12 @@ type Runner struct {
 	BaseURL string
 	Model   string
 	Timeout time.Duration // per-request timeout (default 5 minutes)
+	// Deadline, when set, bounds chat-completion runs (Run, ProbeAgentPrefill,
+	// RunAgentWorkload): no request starts at or after it and a request in
+	// flight is cancelled when it passes. The per-request Timeout alone cannot
+	// bound a workload that issues requests in sequence. Canary and worker
+	// requests do not honor it.
+	Deadline time.Time
 	// ContextTokens is the per-slot context the server was actually launched
 	// with. Zero means unknown. The cache canary uses it to size its prompt:
 	// its segments are counted in words, and token expansion per word is a
@@ -213,8 +224,25 @@ func (r *Runner) chatWithOptions(prompt string, maxTokens, minTokens int, cacheP
 	body["temperature"] = 0
 	body["chat_template_kwargs"] = map[string]bool{"enable_thinking": false}
 	data, _ := json.Marshal(body)
-	resp, err := r.client().Post(r.BaseURL+"/v1/chat/completions", "application/json", bytes.NewReader(data))
+	ctx := context.Background()
+	if !r.Deadline.IsZero() {
+		if !time.Now().Before(r.Deadline) {
+			return nil, ErrDeadline
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, r.Deadline)
+		defer cancel()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, r.BaseURL+"/v1/chat/completions", bytes.NewReader(data))
 	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	resp, err := r.client().Do(request)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w: %v", ErrDeadline, err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -243,6 +271,9 @@ func (r *Runner) chatWithOptions(prompt string, maxTokens, minTokens int, cacheP
 		} `json:"timings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w: %v", ErrDeadline, err)
+		}
 		return nil, err
 	}
 	if len(out.Choices) == 0 {

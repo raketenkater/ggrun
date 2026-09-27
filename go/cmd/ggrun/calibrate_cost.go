@@ -21,10 +21,15 @@ import (
 // not guaranteed to be as fast as the one observed (page cache, repack, I/O).
 const (
 	loadCostUncertainty = 1.25
-	// Each release waits up to this long for resources (stopCalibrationProcessAndWait).
-	calibrationReleaseCost = 30 * time.Second
+	// One release is a process stop (server.Process.Stop waits up to 15s for
+	// exit plus 15s for its scope) and then up to 30s for RAM/VRAM to return
+	// (stopCalibrationProcessAndWait). The reserve must price the real bound.
+	calibrationReleaseCost = 60 * time.Second
 	// A no-allocation oracle run is metadata work; this bounds it generously.
 	oracleAdmissionCost = 30 * time.Second
+	// The support optimizer's lifecycle outside its query context: helper
+	// startup (advisor.Runner default 5m), its release wait and a release.
+	calibrationAdvisorBound = 5*time.Minute + 30*time.Second + calibrationReleaseCost
 )
 
 type challengerCostInputs struct {
@@ -56,10 +61,66 @@ func (c challengerCost) Affordable(remaining time.Duration) bool {
 	return c.Total() <= remaining
 }
 
+// Reserve is the part of the experiment that must stay available once the
+// candidate runs: releasing the candidate and restoring the baseline. Candidate
+// admission and its workload may never spend it.
+func (c challengerCost) Reserve() time.Duration {
+	return calibrationReleaseCost + c.Restore
+}
+
 func (c challengerCost) String() string {
-	return fmt.Sprintf("admission=%s load=%s workload=%s release=%s restore=%s",
+	return fmt.Sprintf("admission=%s load=%s workload=%s release=%s restore=%s reserve=%s",
 		c.Admission.Round(time.Second), c.Load.Round(time.Second), c.Workload.Round(time.Second),
-		c.Release.Round(time.Second), c.Restore.Round(time.Second))
+		c.Release.Round(time.Second), c.Restore.Round(time.Second), c.Reserve().Round(time.Second))
+}
+
+// calibrationExperiment is the one clock of an optimization experiment, fixed
+// when the experiment starts. The optimization deadline bounds every optional
+// step: pilots, prescreens, challenger admission and its workload. Only putting
+// a measured configuration back into service may run past it, and only until
+// emergencyDeadline, which is fixed at creation and shared by every restart:
+// leaving no server to meet a timer is worse than a bounded, reported overrun.
+type calibrationExperiment struct {
+	started, deadline, emergencyDeadline time.Time
+	now                                  func() time.Time
+}
+
+func newCalibrationExperiment(budget, emergencyGrace time.Duration, now func() time.Time) *calibrationExperiment {
+	if now == nil {
+		now = time.Now
+	}
+	start := now()
+	return &calibrationExperiment{
+		started: start, deadline: start.Add(budget),
+		emergencyDeadline: start.Add(budget + emergencyGrace), now: now,
+	}
+}
+
+// remaining is the optimization time left; it may be negative.
+func (e *calibrationExperiment) remaining() time.Duration { return e.deadline.Sub(e.now()) }
+
+// until is the optimization time left once reserve is held back.
+func (e *calibrationExperiment) until(reserve time.Duration) time.Duration {
+	return e.remaining() - reserve
+}
+
+// overrun is how far the experiment has run past its optimization deadline.
+func (e *calibrationExperiment) overrun() time.Duration {
+	return max(0, e.now().Sub(e.deadline))
+}
+
+// serviceWindow bounds a restart that puts a measured configuration back into
+// service. It never exceeds one restart window, ends by the shared emergency
+// deadline after holding back keep (the baseline's restoration when a winner
+// restart could still fail), and is never below floor: when earlier bounded
+// steps (process stops) already consumed the emergency window, the baseline
+// still receives its priced restoration rather than being abandoned.
+func (e *calibrationExperiment) serviceWindow(restartCap, keep, floor time.Duration) time.Duration {
+	window := min(restartCap, e.emergencyDeadline.Sub(e.now())-keep)
+	if floor > 0 && window < floor {
+		window = min(max(floor, minUsefulLoadWindow), restartCap)
+	}
+	return window
 }
 
 func estimateChallengerCost(in challengerCostInputs) challengerCost {
