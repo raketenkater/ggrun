@@ -52,9 +52,12 @@ case "$*" in
         # Prove the stub was actually consumed, so a future query change fails
         # here instead of quietly degrading the suite to a CPU-only run.
         touch "$(dirname "$0")/../gpu-query-matched"
-        echo "0, 00000000:01:00.0, RTX 4090, 24576, 0, 24576, 580.0, 8.9"
-        echo "1, 00000000:02:00.0, RTX 4090, 24576, 0, 24576, 580.0, 8.9"
-        echo "2, 00000000:03:00.0, RTX 4090, 24576, 0, 24576, 580.0, 8.9"
+        # 32 GB cards: this suite checks placement shape, not the 1024 MiB
+        # margin a never-measured device reserves. On 24 GB cards that margin
+        # leaves no room for one whole Kimi expert layer plus its compute buffer.
+        echo "0, 00000000:01:00.0, RTX 5090, 32607, 0, 32607, 580.0, 12.0"
+        echo "1, 00000000:02:00.0, RTX 5090, 32607, 0, 32607, 580.0, 12.0"
+        echo "2, 00000000:03:00.0, RTX 5090, 32607, 0, 32607, 580.0, 12.0"
         exit 0
         ;;
     *"--query-gpu=pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max"*)
