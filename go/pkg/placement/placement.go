@@ -4116,8 +4116,11 @@ func DerateCUDAOOMArgsForDeficit(args []string, model *ModelProfile, caps *detec
 			// Keep the in-memory Strategy's UBatchSize in sync with serverArgs —
 			// applyDeratedPlacementEntry applies this to strategy, which is what
 			// the success path persists to the .place cache. Without it, a cache
-			// hit later would resurrect the OOM'd, too-large ubatch.
-			return newArgs, &CacheEntry{UBatchSize: next}, true
+			// hit later would resurrect the OOM'd, too-large ubatch. The entry
+			// also carries the argv's mmap state: applyDeratedPlacementEntry
+			// copies MMap unconditionally, and a zero value turned a served
+			// mmap launch into a verified config that relaunched --no-mmap.
+			return newArgs, &CacheEntry{UBatchSize: next, MMap: argIndex(newArgs, "--no-mmap") < 0}, true
 		}
 	}
 	_, moeLayers := moeLayerRange(model)

@@ -2852,6 +2852,28 @@ func TestDerateCUDAOOMArgsForDeficitJumpsPastInsufficientRung(t *testing.T) {
 	}
 }
 
+// A ubatch-only derate must not change the launch's mmap state: the derated
+// strategy becomes the verified config, and an unchanged relaunch must rebuild
+// the same argv the derated launch served.
+func TestUBatchDerateKeepsTheArgvMMapState(t *testing.T) {
+	model := &ModelProfile{NumLayers: 32}
+	for _, tc := range []struct {
+		args []string
+		mmap bool
+	}{
+		{[]string{"llama-server", "-b", "2048", "-ub", "512"}, true},
+		{[]string{"llama-server", "-b", "2048", "-ub", "512", "--no-mmap"}, false},
+	} {
+		newArgs, entry, ok := DerateCUDAOOMArgsForDeficit(tc.args, model, nil, 0, 505, 235, true)
+		if !ok || entry == nil || entry.UBatchSize >= 512 {
+			t.Fatalf("compute deficit did not derate ubatch: %v %+v", newArgs, entry)
+		}
+		if entry.MMap != tc.mmap || (argIndex(newArgs, "--no-mmap") < 0) != tc.mmap {
+			t.Fatalf("args %v: derate entry MMap=%v, derated argv %v", tc.args, entry.MMap, newArgs)
+		}
+	}
+}
+
 func TestCurrentUBatchMatchesBackendLastValueWins(t *testing.T) {
 	args := []string{"llama-server", "-ub", "512", "--ubatch-size", "64"}
 	if got := CurrentUBatch(args); got != 64 {
