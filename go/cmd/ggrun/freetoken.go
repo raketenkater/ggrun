@@ -348,7 +348,7 @@ func cmdFreeToken(args []string) {
 	serverArgs := buildFreeTokenCommand(req, bin)
 	env := []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu.Index)}
 	if req.DryRun {
-		fmt.Printf("CUDA_DEVICE_ORDER=PCI_BUS_ID %s %s\n", env[0], formatCommand(serverArgs))
+		fmt.Println(displayCommandWithEnv([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID", env[0]}, serverArgs))
 		return
 	}
 	if err := guardPortFree(req.Port, "FreeToken"); err != nil {
