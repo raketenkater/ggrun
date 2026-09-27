@@ -2924,6 +2924,18 @@ func TestApplyGPUVisibilitySetsEnv(t *testing.T) {
 	}
 }
 
+// A CPU-only launch hides every CUDA device, so it cannot open contexts or
+// run work on cards another process is using.
+func TestCPUModeHidesEveryCUDADevice(t *testing.T) {
+	t.Setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+	if env := applyGPUVisibility(&launchRequest{CPUMode: true}, "ik_llama"); env != "CUDA_VISIBLE_DEVICES=-1" {
+		t.Fatalf("CPU-only env assignment = %q", env)
+	}
+	if got := os.Getenv("CUDA_VISIBLE_DEVICES"); got != "-1" {
+		t.Fatalf("CUDA_VISIBLE_DEVICES = %q, want every device hidden", got)
+	}
+}
+
 func TestApplyGPUVisibilityNoFlagNoEnv(t *testing.T) {
 	if env := applyGPUVisibility(&launchRequest{}, "ik_llama"); env != "" {
 		t.Fatalf("expected no env assignment without --gpus, got %q", env)

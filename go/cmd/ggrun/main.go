@@ -1748,9 +1748,16 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 
 // applyGPUVisibility restricts which devices the backend can enumerate so the
 // computed placement (tensor splits, -ot device names, renumbered indices)
-// matches reality. Returns the env assignment for display, or "" when --gpus
-// was not given.
+// matches reality. Returns the env assignment for display, or "" when neither
+// --gpus nor --cpu was given.
 func applyGPUVisibility(req *launchRequest, backendTag string) string {
+	if req != nil && req.CPUMode && !strings.EqualFold(backendTag, "vulkan") {
+		// A CPU-only launch must not see any device. A CUDA build given -ngl 0
+		// still opens a context on every visible card and may run large-batch
+		// matmuls there, on GPUs another process may be using.
+		os.Setenv("CUDA_VISIBLE_DEVICES", "-1")
+		return "CUDA_VISIBLE_DEVICES=-1"
+	}
 	if req == nil || req.GPUsFlag == "" {
 		return ""
 	}
