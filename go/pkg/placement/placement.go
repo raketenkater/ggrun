@@ -1857,7 +1857,10 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 					if !opts.SkipCachedConfig {
 						LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 					}
-					if s.CRAM == 0 {
+					// A recorded 0 is a real decision (no host prompt cache), and
+					// re-deriving it served a different argv on every relaunch
+					// (K2-Horizon-MoVA on a 12 GiB card: 0 served, 2560 relaunched).
+					if s.CRAM == 0 && !vc.CRAMSet {
 						applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 					} else if opts.MaxCheckpointsSet {
 						// The saved config is the complete serving decision and is

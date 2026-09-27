@@ -450,3 +450,52 @@ func TestVerifiedConfigToStrategyRestoresRequestOwnedKnobs(t *testing.T) {
 		t.Fatalf("tensor split not restored: %v", s2.TensorSplit)
 	}
 }
+
+// A served CRAM of 0 is a real decision. Reuse re-derived it (0 served,
+// 2560 relaunched), so every unchanged relaunch was a different launch. A
+// record that predates storing CRAM still derives it.
+func TestVerifiedReuseKeepsAServedZeroCRAM(t *testing.T) {
+	dir := t.TempDir()
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "3090", VRAMTotalMB: 24576, VRAMUsedMB: 512, BandwidthMBps: 30000}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: filepath.Join(dir, "target.gguf"), SizeBytes: 4 << 30, TotalSizeMB: 4096,
+		ModelArch: "llama", NumLayers: 32, EmbeddingLength: 4096, ContextSize: 32768,
+	}
+	opts := Options{
+		ContextSize: 8192, KVQuality: "mid", KVPlacement: "gpu", Parallel: 1,
+		CacheDir: dir, BackendIdentity: "b", BackendTag: "llama",
+	}
+	key := NewCalibrationScopeKey(model, caps, opts, nil).String()
+	first, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CRAM == 0 {
+		t.Fatal("fixture must derive a non-zero CRAM so a re-derivation is visible")
+	}
+	served := *first
+	served.CRAM = 0
+	reuseOpts := opts
+	reuseOpts.VerifiedConfigScopeKey = key
+
+	vc := VerifiedConfigToRecord(key, model.Basename, &served, "b", "/p", "", "")
+	if _, err := SaveVerifiedConfig(dir, vc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Compute(caps, model, reuseOpts)
+	if err != nil || !got.VerifiedConfigReused || got.CRAM != 0 {
+		t.Fatalf("reuse changed the served CRAM 0: reused=%v cram=%d err=%v", got != nil && got.VerifiedConfigReused, got.CRAM, err)
+	}
+
+	vc.CRAMSet = false // a record written before CRAM was stored
+	if _, err := SaveVerifiedConfig(dir, vc); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Compute(caps, model, reuseOpts); err != nil || got.CRAM != first.CRAM {
+		t.Fatalf("legacy record without CRAM was not re-derived: cram=%d want %d err=%v", got.CRAM, first.CRAM, err)
+	}
+}

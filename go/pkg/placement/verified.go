@@ -71,13 +71,17 @@ type VerifiedConfig struct {
 	FlashAttention            bool                    `json:"flash_attention"`
 	SWAFull                   bool                    `json:"swa_full"`
 	CRAM                      int                     `json:"cram,omitempty"`
-	MaxCheckpoints            int                     `json:"max_checkpoints,omitempty"`
-	MeasuredCheckpointMB      float64                 `json:"measured_checkpoint_mb,omitempty"`
-	CheckpointMinStep         int                     `json:"checkpoint_min_step,omitempty"`
-	UseCUDAGraphs             bool                    `json:"use_cuda_graphs,omitempty"`
-	Host                      string                  `json:"host,omitempty"`
-	NoJinja                   bool                    `json:"no_jinja,omitempty"`
-	ReasoningOff              bool                    `json:"reasoning_off"`
+	// CRAMSet marks a record whose CRAM is the served decision, including a
+	// deliberate 0 (no host prompt cache). Records without it predate storing
+	// CRAM, so a 0 there still means "derive it".
+	CRAMSet              bool    `json:"cram_set,omitempty"`
+	MaxCheckpoints       int     `json:"max_checkpoints,omitempty"`
+	MeasuredCheckpointMB float64 `json:"measured_checkpoint_mb,omitempty"`
+	CheckpointMinStep    int     `json:"checkpoint_min_step,omitempty"`
+	UseCUDAGraphs        bool    `json:"use_cuda_graphs,omitempty"`
+	Host                 string  `json:"host,omitempty"`
+	NoJinja              bool    `json:"no_jinja,omitempty"`
+	ReasoningOff         bool    `json:"reasoning_off"`
 	// Model semantics are runtime behavior, not merely placement diagnostics:
 	// HasSSM emits --no-context-shift and activates fair parallel-agent batching.
 	// Persist them so the direct-start path cannot erase those policies.
@@ -341,6 +345,7 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 		FlashAttention:           s.FlashAttention,
 		SWAFull:                  s.SWAFull,
 		CRAM:                     s.CRAM,
+		CRAMSet:                  true,
 		MaxCheckpoints:           s.MaxCheckpoints,
 		MeasuredCheckpointMB:     s.MeasuredCheckpointMB,
 		CheckpointMinStep:        s.CheckpointMinStep,
