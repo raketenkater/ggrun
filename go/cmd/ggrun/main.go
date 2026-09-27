@@ -325,6 +325,10 @@ func dispatchCompat(args []string) bool {
 	return true
 }
 
+// formatCommand is the argv identity: exact-admission, recovery and calibration
+// compare it, and the "[ggrun] launch:" backend log records it (the preimage of
+// any persisted argv hash). It is platform-independent; do not change its
+// output. Use displayCommand for commands printed for a person to replay.
 func formatCommand(args []string) string {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
@@ -5380,7 +5384,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		serverArgs = nextArgs
 		retries++
 		printVRAMLedger(strategy)
-		fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
+		fmt.Printf("[launch] %s\n", displayCommand(serverArgs))
 	}
 }
 
@@ -6533,7 +6537,7 @@ func cmdLaunch(args []string) {
 		}
 	}
 
-	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
+	fmt.Printf("[launch] %s\n", displayCommand(serverArgs))
 	if memMax := backendMemoryMaxMB(req, caps); memMax > 0 {
 		fmt.Printf("[launch] backend memory scope: MemoryMax=%d MiB\n", memMax)
 	}
@@ -6643,7 +6647,7 @@ func cmdLaunch(args []string) {
 				fmt.Fprintln(os.Stderr, "Error: current server/resources did not release before measured baseline promotion; attempting restore of the previous placement")
 				restorePrevious()
 			} else {
-				fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
+				fmt.Printf("[launch] %s\n", displayCommand(nextArgs))
 				promotedP, promotedStrategy, promotedArgs, promoteErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
 				if promoteErr != nil {
 					if !stopCalibrationProcessAndWait(promotedP, "failed measured baseline", resourceBaseline, 30*time.Second) {
@@ -7017,7 +7021,7 @@ func cmdLaunch(args []string) {
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
+		fmt.Printf("[launch] %s\n", displayCommand(nextArgs))
 		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
 		if err != nil {
 			claudeAuto.stop()
@@ -7860,10 +7864,11 @@ func cmdDryRun(args []string) {
 		return
 	}
 	printOptimizationSummary("dry-run", strategy, true)
+	var displayEnv []string
 	if envPrefix != "" {
-		fmt.Print(envPrefix + " ")
+		displayEnv = []string{envPrefix}
 	}
-	fmt.Println(formatCommand(serverArgs))
+	fmt.Println(displayCommandWithEnv(displayEnv, serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
 	}

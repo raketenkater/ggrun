@@ -288,7 +288,7 @@ func runSpecConfiguration(req *launchRequest, cfg *config.Config, caps *detect.C
 		return specTestConfiguration{Name: name, DraftMax: ceiling}, strategy, fmt.Errorf("no compatible %s path for selected backend", mode.Label)
 	}
 	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
-	fmt.Printf("[spec-test] loading %s: %s\n", name, formatCommand(serverArgs))
+	fmt.Printf("[spec-test] loading %s: %s\n", name, displayCommand(serverArgs))
 	p, finalStrategy, finalArgs, err := startLaunchWithCUDAOOMRecovery(req, cfg, model, strategy, be, caps, serverArgs, autoStartupTimeout(model))
 	if err != nil {
 		return specTestConfiguration{Name: name, DraftMax: ceiling}, finalStrategy, err

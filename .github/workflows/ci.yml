@@ -37,6 +37,9 @@ jobs:
       - name: Test native console and detached input
         working-directory: go
         run: go test -count=1 ./pkg/tui -run Terminal
+      - name: Replay printed commands in PowerShell
+        working-directory: go
+        run: go test -count=1 ./cmd/ggrun -run "DisplayCommand|HelperEchoArgv|PrintedCommands"
 
   shellcheck:
     runs-on: ubuntu-latest
