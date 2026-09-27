@@ -1108,6 +1108,58 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
     }
 
 
+# The architecture tables of the backends ggrun builds. A catalog row whose
+# GGUF architecture neither registers cannot load without an unmerged fork, so
+# recommending it only sends the user to "unknown architecture".
+UPSTREAM_ARCH_TABLES = (
+    ("llama.cpp", "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/src/llama-arch.cpp"),
+    ("ik_llama.cpp", "https://raw.githubusercontent.com/ikawrakow/ik_llama.cpp/main/src/llama-arch.cpp"),
+)
+
+
+def parse_arch_names(source: str) -> set[str]:
+    """Architecture names registered in a llama-arch.cpp LLM_ARCH_NAMES table."""
+    start = source.find("LLM_ARCH_NAMES")
+    if start < 0:
+        return set()
+    body = source[start:]
+    end = body.find("};")
+    if end < 0:
+        return set()
+    return {name.lower() for name in re.findall(r'\{\s*LLM_ARCH_\w+\s*,\s*"([^"]+)"', body[:end])}
+
+
+def fetch_upstream_arches() -> set[str] | None:
+    """Union of upstream architecture names, or None when any table is unreadable.
+
+    A partial union would mark rows the missing backend loads as unrunnable, so
+    an incomplete fetch stamps nothing and the recommender falls back to its
+    explicit blocklist.
+    """
+    names: set[str] = set()
+    for label, url in UPSTREAM_ARCH_TABLES:
+        try:
+            parsed = parse_arch_names(fetch_text(url, timeout=30))
+        except Exception as exc:  # noqa: BLE001 - any failure leaves rows unstamped
+            print(f"warning: {label} architecture table unavailable ({exc}); runnability not stamped", file=sys.stderr)
+            return None
+        if not parsed:
+            print(f"warning: {label} architecture table had no entries; runnability not stamped", file=sys.stderr)
+            return None
+        names |= parsed
+    return names
+
+
+def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) -> None:
+    """Mark each row with a known GGUF architecture as loadable upstream or not."""
+    if not arches:
+        return
+    for cand in candidates:
+        arch = str(cand.get("arch") or "").lower()
+        if arch:
+            cand["runnable"] = arch in arches
+
+
 def catalog_intelligence(row: dict[str, Any]) -> float:
     val = row.get("aa_intelligence_index")
     return float(val) if isinstance(val, (int, float)) else 0.0
@@ -1141,6 +1193,7 @@ def main() -> int:
     parser.add_argument("--print-top", type=int, default=0, help="print top N source models by intelligence index")
     parser.add_argument("--print-open-weights-top", type=int, default=0, help="print top N open-weight source models by intelligence index")
     parser.add_argument("--print-catalog-top", type=int, default=0, help="print top N checked-in GGUF recommendation rows by cached intelligence")
+    parser.add_argument("--stamp-runnable-only", action="store_true", help="only re-stamp upstream runnability on the existing catalog")
     args = parser.parse_args()
 
     global HF_MIN_DELAY_SECONDS, HF_429_BACKOFF_SECONDS
@@ -1148,6 +1201,17 @@ def main() -> int:
     HF_429_BACKOFF_SECONDS = max(0.0, args.hf_429_backoff)
 
     catalog_path = Path(args.catalog)
+    if args.stamp_runnable_only:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        arches = fetch_upstream_arches()
+        if not arches:
+            raise SystemExit("upstream architecture tables unavailable")
+        stamp_runnable(catalog.get("candidates", []), arches)
+        tmp = catalog_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(catalog_path)
+        print(f"stamped runnability in {catalog_path}")
+        return 0
     api_key = os.environ.get(args.api_key_env, "").strip()
     if not api_key and not args.allow_missing_key:
         raise SystemExit(f"{args.api_key_env} is not set")
@@ -1171,6 +1235,7 @@ def main() -> int:
             return 0
         raise SystemExit("no GGUF candidates resolved")
 
+    stamp_runnable(catalog["candidates"], fetch_upstream_arches())
     if args.print_catalog_top > 0:
         print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")

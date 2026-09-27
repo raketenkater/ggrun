@@ -150,3 +150,44 @@ def test_quant_suffix_and_retune_prefixes_are_not_identity():
         ({"name": "Llama 3.1 Instruct 405B", "creator": {"name": "Meta"}}, "ThomasBaruzier/Meta-Llama-3.1-405B-Instruct-GGUF"),
     ]:
         assert updater.candidate_relevant(repo, row), repo
+
+
+ARCH_SOURCE = '''
+static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+    { LLM_ARCH_LLAMA,           "llama"        },
+    { LLM_ARCH_K2_HORIZON,      "k2-horizon"   },
+    { LLM_ARCH_UNKNOWN,         "(unknown)"    },
+};
+static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+    { LLM_KV_GENERAL_TYPE, "general.type" },
+};
+'''
+
+
+def test_parse_arch_names_reads_only_the_arch_table():
+    updater = load_updater()
+    assert updater.parse_arch_names(ARCH_SOURCE) == {"llama", "k2-horizon", "(unknown)"}
+    assert updater.parse_arch_names("no table here") == set()
+
+
+def test_stamp_runnable_marks_rows_no_upstream_backend_loads():
+    updater = load_updater()
+    rows = [{"arch": "llama"}, {"arch": "K2-Horizon"}, {"arch": "axk2"}, {"name": "legacy row"}]
+    updater.stamp_runnable(rows, {"llama", "k2-horizon"})
+    assert [row.get("runnable") for row in rows] == [True, True, False, None]
+
+
+def test_unreadable_upstream_table_stamps_nothing(monkeypatch):
+    updater = load_updater()
+
+    def fetch_text(url, **_):
+        if "ik_llama" in url:
+            raise OSError("offline")
+        return ARCH_SOURCE
+
+    monkeypatch.setattr(updater, "fetch_text", fetch_text)
+    # A partial union would hide rows only the missing backend loads.
+    assert updater.fetch_upstream_arches() is None
+    rows = [{"arch": "axk2"}]
+    updater.stamp_runnable(rows, updater.fetch_upstream_arches())
+    assert "runnable" not in rows[0]

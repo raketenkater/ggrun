@@ -209,6 +209,20 @@ func TestArchRunnableFiltersUnsupported(t *testing.T) {
 	}
 }
 
+func TestCatalogRunnableStampFiltersArchesNoUpstreamBackendLoads(t *testing.T) {
+	no, yes := false, true
+	if archRunnable(Candidate{Arch: "axk2", Runnable: &no}) {
+		t.Fatal("a row stamped unrunnable was recommended")
+	}
+	if !archRunnable(Candidate{Arch: "k2-horizon", Runnable: &yes}) || !archRunnable(Candidate{Arch: "qwen35"}) {
+		t.Fatal("a runnable or unstamped row was filtered")
+	}
+	// The explicit blocklist still applies when a stamp is absent.
+	if archRunnable(Candidate{Arch: "longcat-flash-ngram"}) {
+		t.Fatal("blocklisted arch was recommended without a stamp")
+	}
+}
+
 func TestCatalogPrefersValidCacheOverEmbedded(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LLM_CACHE_DIR", dir)
