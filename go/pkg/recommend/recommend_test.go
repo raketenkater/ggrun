@@ -209,13 +209,16 @@ func TestArchRunnableFiltersUnsupported(t *testing.T) {
 	}
 }
 
-func TestCatalogRunnableStampFiltersArchesNoUpstreamBackendLoads(t *testing.T) {
+// A model no upstream backend loads still runs: its first launch finds and
+// builds a fork backend. The stamp only labels it.
+func TestForkOnlyArchitecturesStayRecommendable(t *testing.T) {
 	no, yes := false, true
-	if archRunnable(Candidate{Arch: "axk2", Runnable: &no}) {
-		t.Fatal("a row stamped unrunnable was recommended")
+	fork := Candidate{Arch: "axk2", Runnable: &no}
+	if !archRunnable(fork) || !fork.NeedsForkBackend() {
+		t.Fatal("a fork-only model was hidden or not labelled")
 	}
-	if !archRunnable(Candidate{Arch: "k2-horizon", Runnable: &yes}) || !archRunnable(Candidate{Arch: "qwen35"}) {
-		t.Fatal("a runnable or unstamped row was filtered")
+	if (Candidate{Arch: "k2-horizon", Runnable: &yes}).NeedsForkBackend() || (Candidate{Arch: "qwen35"}).NeedsForkBackend() {
+		t.Fatal("an upstream or unstamped model was labelled as needing a fork")
 	}
 	// The explicit blocklist still applies when a stamp is absent.
 	if archRunnable(Candidate{Arch: "longcat-flash-ngram"}) {

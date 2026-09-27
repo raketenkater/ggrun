@@ -184,6 +184,7 @@ func cmdRecommend(args []string) {
 		fmt.Println("No models in the catalog fit this budget.")
 		return
 	}
+	forkShown := false
 	printRecGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -192,8 +193,15 @@ func cmdRecommend(args []string) {
 		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Est.speed")
 		for _, r := range rows {
 			name := r.Name
-			if len(name) > 36 {
-				name = name[:35] + "…"
+			limit := 36
+			if r.NeedsForkBackend() {
+				limit, forkShown = 34, true
+			}
+			if len(name) > limit {
+				name = name[:limit-1] + "…"
+			}
+			if r.NeedsForkBackend() {
+				name += " *"
 			}
 			tps := "—"
 			if r.PredictedTPS > 0 {
@@ -206,6 +214,9 @@ func cmdRecommend(args []string) {
 	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
 	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
+	if forkShown {
+		fmt.Println("\n* No upstream backend loads this architecture yet; the first launch builds a fork backend automatically.")
+	}
 	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
 	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
 	fmt.Printf("\n%s\n", recommend.CatalogAttribution())

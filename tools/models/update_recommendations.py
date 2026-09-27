@@ -1109,8 +1109,8 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
 
 
 # The architecture tables of the backends ggrun builds. A catalog row whose
-# GGUF architecture neither registers cannot load without an unmerged fork, so
-# recommending it only sends the user to "unknown architecture".
+# GGUF architecture neither registers needs a fork backend on first launch,
+# which ggrun builds automatically; the recommender labels such rows.
 UPSTREAM_ARCH_TABLES = (
     ("llama.cpp", "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/src/llama-arch.cpp"),
     ("ik_llama.cpp", "https://raw.githubusercontent.com/ikawrakow/ik_llama.cpp/main/src/llama-arch.cpp"),
@@ -1151,7 +1151,10 @@ def fetch_upstream_arches() -> set[str] | None:
 
 
 def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) -> None:
-    """Mark each row with a known GGUF architecture as loadable upstream or not."""
+    """Mark each row with a known GGUF architecture as loadable upstream or not.
+
+    The stamp labels fork-only rows; it never removes them from recommendations.
+    """
     if not arches:
         return
     for cand in candidates:

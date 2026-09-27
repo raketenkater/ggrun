@@ -70,9 +70,16 @@ type Candidate struct {
 	LeadingDense int    `json:"leading_dense,omitempty"`
 	TrainCtx     int    `json:"ctx_train,omitempty"`
 	// Runnable is stamped by the catalog builder from the upstream mainline and
-	// ik_llama architecture tables; false means no backend ggrun builds can
-	// load the architecture without an unmerged fork. Absent when unknown.
+	// ik_llama architecture tables; false means the first launch needs a fork
+	// backend, which ggrun finds and builds automatically. Absent when unknown.
 	Runnable *bool `json:"runnable,omitempty"`
+}
+
+// NeedsForkBackend reports that no upstream backend registers this model's
+// architecture, so its first launch builds a fork backend. It is shown, never
+// filtered: automatic backend compatibility is how such models run.
+func (c Candidate) NeedsForkBackend() bool {
+	return c.Runnable != nil && !*c.Runnable
 }
 
 // Recommendation is a candidate ranked for the current machine.
@@ -561,9 +568,6 @@ func loadUnrunnableArches(data []byte) (map[string]bool, error) {
 // architecture. Entries without arch metadata (legacy catalog rows) are kept:
 // the launcher's own preflight still guards them at load time.
 func archRunnable(c Candidate) bool {
-	if c.Runnable != nil && !*c.Runnable {
-		return false
-	}
 	if c.Arch == "" {
 		return true
 	}
