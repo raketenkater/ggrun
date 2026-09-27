@@ -256,6 +256,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+      - name: Bandwidth helper tests on native Windows
+        shell: pwsh
+        run: |
+          python -m pip install pytest
+          if ($LASTEXITCODE -ne 0) { throw 'pip install pytest failed' }
+          python -m pytest -p no:cacheprovider tests/test_measure_bandwidth.py
       - name: Build Windows package and install from local release dir
         shell: pwsh
         run: |
