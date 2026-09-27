@@ -652,6 +652,14 @@ func backendAdjustmentFromLog(logData string) *backendLaunchAdjustment {
 	return nil
 }
 
+// guardedProbeCoverageComplete reports whether a contained probe observed
+// everything its memory evidence claims. Device allocations are required only
+// when a device was visible: a CPU-only launch has none to observe, and
+// requiring them turned every CPU-only probe into a consent refusal.
+func guardedProbeCoverageComplete(summary memprobe.Summary, guardInstalled, cgroupComplete, devicesVisible bool) bool {
+	return summary.Loaded && guardInstalled && cgroupComplete && (summary.DeviceEvents || !devicesVisible)
+}
+
 func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, serverArgs []string) (memoryPlanEvidence, error) {
 	key := memoryEvidenceKey(be, model, caps, serverArgs)
 	if evidence, ok := loadMemoryEvidence(cfg.CacheDir, key); ok {
@@ -830,7 +838,8 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		return memoryPlanEvidence{}, &backendLaunchAdjustmentError{Adjustment: *adjustment}
 	}
 	parsed := parseIKAllocationDevices(logData)
-	coverageComplete := summary.Loaded && summary.DeviceEvents && guardLibrary != "" && cgroupStatsComplete
+	devicesVisible := !req.CPUMode && caps != nil && len(caps.GPUs) > 0
+	coverageComplete := guardedProbeCoverageComplete(summary, guardLibrary != "", cgroupStatsComplete, devicesVisible)
 	devices := reconcileGuardedDevices(parsed, summary)
 	if !coverageComplete && !req.AllowLiveMemoryProbe {
 		return memoryPlanEvidence{}, &liveMemoryProbeConsentError{Reason: "the automatic memory probe completed without full CUDA/cgroup evidence, so only an explicitly approved one-use result is available"}
