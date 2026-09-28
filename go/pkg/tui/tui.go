@@ -2413,7 +2413,7 @@ func formatHeadroomMB(mb int) string {
 }
 
 func (m *Model) refreshRecommendations() {
-	caps := recommend.PlanningCapabilities(m.caps, m.ramBudgetMB, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB)
+	caps := recommend.PlanningCapabilities(restrictedCapabilities(m.caps), m.ramBudgetMB, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB)
 	m.recommendationGroups = recommend.TopCategories(caps, 4)
 	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 	if len(m.recommendations) == 0 {
@@ -3875,6 +3875,8 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		}
 	}
 	return &LaunchRequest{
+		GPUs:        hardwareRestriction.gpus,
+		CPUOnly:     hardwareRestriction.cpuOnly,
 		ModelPath:   model.Path,
 		Port:        m.port,
 		CtxSize:     ctx,
@@ -3980,6 +3982,48 @@ type LaunchRequest struct {
 	// catalog (pkg/chattemplate), mirroring the CLI's --chat-template <name>.
 	// Empty means auto-match. Per-launch only.
 	ChatTemplate string
+	// GPUs and CPUOnly carry the hardware restriction the TUI was opened with
+	// (`ggrun tui --gpus 0,1` / `--cpu`) into every launch, as the CLI flags.
+	GPUs    string
+	CPUOnly bool
+}
+
+// hardwareRestriction is the GPU selection or CPU-only mode the TUI was opened
+// with. It shapes recommendations and every launch, so a TUI session on a
+// shared machine plans and serves inside the same devices as the CLI would.
+var hardwareRestriction struct {
+	gpus    string
+	cpuOnly bool
+}
+
+// SetHardwareRestriction restricts this TUI session to the given physical GPU
+// indices (as --gpus) or to CPU-only serving. Empty and false mean all devices.
+func SetHardwareRestriction(gpus string, cpuOnly bool) {
+	hardwareRestriction.gpus = strings.TrimSpace(gpus)
+	hardwareRestriction.cpuOnly = cpuOnly
+}
+
+// restrictedCapabilities applies the session's hardware restriction to the
+// detected inventory used for recommendations.
+func restrictedCapabilities(caps *detect.Capabilities) *detect.Capabilities {
+	if caps == nil || (hardwareRestriction.gpus == "" && !hardwareRestriction.cpuOnly) {
+		return caps
+	}
+	selected := *caps
+	selected.GPUs = nil
+	if hardwareRestriction.cpuOnly {
+		return &selected
+	}
+	wanted := map[string]bool{}
+	for _, part := range strings.Split(hardwareRestriction.gpus, ",") {
+		wanted[strings.TrimSpace(part)] = true
+	}
+	for _, gpu := range caps.GPUs {
+		if wanted[strconv.Itoa(gpu.Index)] {
+			selected.GPUs = append(selected.GPUs, gpu)
+		}
+	}
+	return &selected
 }
 
 func (req *LaunchRequest) LaunchArgs() []string {
@@ -3987,6 +4031,11 @@ func (req *LaunchRequest) LaunchArgs() []string {
 		return nil
 	}
 	args := []string{req.ModelPath}
+	if req.CPUOnly {
+		args = append(args, "--cpu")
+	} else if req.GPUs != "" {
+		args = append(args, "--gpus", req.GPUs)
+	}
 	if req.Port > 0 {
 		args = append(args, "--port", strconv.Itoa(req.Port))
 	}

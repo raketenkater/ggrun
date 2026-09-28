@@ -130,6 +130,12 @@ func main() {
 	case "claude":
 		cmdClaude(args[1:])
 	case "gui", "tui":
+		gpus, cpuOnly, err := parseTUIHardwareArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\nUsage: ggrun tui [--gpus 0,1 | --cpu]\n", err)
+			os.Exit(2)
+		}
+		tui.SetHardwareRestriction(gpus, cpuOnly)
 		cmdGUI()
 	case "config":
 		cmdConfig(args[1:])
@@ -181,7 +187,7 @@ Commands:
   update, --update     Update ggrun and backends
   claude [list|resume] List recorded Claude Code sessions, or relaunch the recorded
                        backend shape and resume one (default: newest in this directory)
-  gui, tui             Interactive TUI (model picker, settings, launch)
+  gui, tui [--gpus 0,1 | --cpu]  Interactive TUI (model picker, settings, launch)
 
 Diagnostics (advanced):
   probe                Check free GPU/RAM memory (useful when a launch's capacity numbers look wrong)
@@ -7657,6 +7663,29 @@ func runTUIBackendAction(args []string) error {
 	}
 	cmdBackend(args)
 	return nil
+}
+
+// parseTUIHardwareArgs reads the hardware restriction `ggrun tui` accepts, with
+// the same spelling and validation as launch and recommend, so a TUI session
+// can plan and serve inside the devices a shared machine leaves free.
+func parseTUIHardwareArgs(args []string) (string, bool, error) {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	gpus := fs.String("gpus", "", "physical GPU indices")
+	cpuOnly := fs.Bool("cpu", false, "CPU-only serving")
+	if err := fs.Parse(args); err != nil {
+		return "", false, err
+	}
+	if fs.NArg() > 0 {
+		return "", false, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if *cpuOnly && strings.TrimSpace(*gpus) != "" {
+		return "", false, fmt.Errorf("--cpu and --gpus cannot be combined")
+	}
+	if _, err := parseGPUIndices(*gpus); err != nil {
+		return "", false, fmt.Errorf("--gpus: %w", err)
+	}
+	return strings.TrimSpace(*gpus), *cpuOnly, nil
 }
 
 func tuiLaunchArgs(req *tui.LaunchRequest, cfg *config.Config) []string {

@@ -34,3 +34,17 @@ func TestFreshTUIDefaultLaunchMatchesPlainCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestTUIHardwareArgsMatchLaunchSpelling(t *testing.T) {
+	if gpus, cpu, err := parseTUIHardwareArgs([]string{"--gpus", "2"}); err != nil || gpus != "2" || cpu {
+		t.Fatalf("--gpus 2 = %q %v %v", gpus, cpu, err)
+	}
+	if _, cpu, err := parseTUIHardwareArgs([]string{"--cpu"}); err != nil || !cpu {
+		t.Fatalf("--cpu = %v %v", cpu, err)
+	}
+	for _, bad := range [][]string{{"--cpu", "--gpus", "1"}, {"--gpus", "x"}, {"model.gguf"}} {
+		if _, _, err := parseTUIHardwareArgs(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
