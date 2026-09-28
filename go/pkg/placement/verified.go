@@ -280,6 +280,14 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 		s.CPUExpertMMapCapability = opts.CPUExpertMMapCapability
 		s.CPUExpertMMapEvidence = opts.CPUExpertMMapEvidence
 	}
+	// Backend flag dialect is a property of the current backend, set by the
+	// same probes Compute's base strategy uses. Without it a DenseCPUOffload
+	// record rebuilt `-ngl 999` instead of the `--fit` that served, and the
+	// unchanged relaunch of a 27B on a 12 GiB card ran out of memory.
+	s.BackendSupportsFit = backendHelpSupports(opts.BackendHelp, "-fit")
+	s.BackendFitTakesValue = backendFitTakesValue(opts.BackendHelp)
+	s.BackendSupportsKVOffload = backendHelpSupports(opts.BackendHelp, "--kv-offload")
+	s.BackendCheckpointMinStepFlag = backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag)
 	if s.Host == "" {
 		s.Host = "127.0.0.1"
 	}

@@ -4800,7 +4800,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	}
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
 	placementOpts := func() placement.Options {
-		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+		opts := startBoundaryReplanOptions(placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 		tunedBatch.apply(&opts)
 		if specDisabled {
 			opts.SpecMode = "off"
@@ -4821,7 +4821,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if delErr := placement.DeleteVerifiedConfig(cfg.CacheDir, key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] warning: could not delete stale verified config: %v\n", delErr)
 				} else {
-					fmt.Fprintln(os.Stderr, "[verified] verified config reuse hit failed to launch; record deleted, re-deriving fresh")
+					fmt.Fprintln(os.Stderr, "[verified] verified config reuse hit failed to launch; record deleted, the next launch re-derives")
 				}
 			}
 		}
@@ -6141,6 +6141,16 @@ func strategyForServedArgs(strategy *placement.Strategy, served []string) *place
 // CalibrationScopeKey the reuse path hashes against, so save and load can never
 // disagree about what launch they describe. A save failure degrades to a stderr
 // log — the launch is already active and must never be failed by a cache write.
+// startBoundaryReplanOptions are the placement options for a re-plan inside
+// the start boundary, after the current argv was rejected. Replaying the
+// verified record would rebuild that same argv, so recovery reported "nothing
+// changed" and failed closed even though a fresh plan fits (Qwen3.5-27B
+// relaunch on a 12 GiB card).
+func startBoundaryReplanOptions(opts placement.Options) placement.Options {
+	opts.VerifiedConfigScopeKey = ""
+	return opts
+}
+
 func saveVerifiedConfigForLaunch(cfg *config.Config, req *launchRequest, model *placement.ModelProfile,
 	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, servedArgs []string,
 ) {

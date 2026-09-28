@@ -207,3 +207,16 @@ func TestVerifiedConfigRecordsTheServedArgv(t *testing.T) {
 		t.Fatal("no served argv must leave the strategy as is")
 	}
 }
+
+// A re-plan inside the start boundary must derive, not replay the verified
+// record whose argv was just rejected.
+func TestStartBoundaryReplanNeverReplaysTheVerifiedRecord(t *testing.T) {
+	in := placement.Options{VerifiedConfigScopeKey: "scope-that-was-reused", ContextSize: 8192, BackendTag: "llama"}
+	got := startBoundaryReplanOptions(in)
+	if got.VerifiedConfigScopeKey != "" {
+		t.Fatalf("re-plan options replay verified record %q", got.VerifiedConfigScopeKey)
+	}
+	if got.ContextSize != 8192 || got.BackendTag != "llama" {
+		t.Fatal("re-plan options changed anything but the verified key")
+	}
+}

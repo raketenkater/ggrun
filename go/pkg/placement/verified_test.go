@@ -499,3 +499,28 @@ func TestVerifiedReuseKeepsAServedZeroCRAM(t *testing.T) {
 		t.Fatalf("legacy record without CRAM was not re-derived: cram=%d want %d err=%v", got.CRAM, first.CRAM, err)
 	}
 }
+
+// A reused verified config must rebuild the argv that served. The backend's
+// flag dialect is not in the record: a DenseCPUOffload plan that served with
+// `--fit` was rebuilt as `-ngl 999` and ran out of memory on relaunch.
+func TestVerifiedReuseKeepsTheBackendFitDialect(t *testing.T) {
+	help := "usage: llama-server [-fit [on|off]] [--kv-offload] --ctx-checkpoints N"
+	opts := Options{BackendHelp: help, BackendTag: "ik_llama"}
+	served := &Strategy{Type: DenseCPUOffload, ContextSize: 262144, KVType: "q8_0", Parallel: 1,
+		BackendSupportsFit: true, BackendFitTakesValue: backendFitTakesValue(help), BackendTag: "ik_llama"}
+	servedArgs := served.Args("m.gguf", 8081)
+	vc := VerifiedConfigToRecord("scope", "m.gguf", served, "b", "/p", "", "")
+	restored := VerifiedToStrategy(&vc, opts, nil)
+	got := restored.Args("m.gguf", 8081)
+	has := func(args []string, flag string) bool {
+		for _, a := range args {
+			if a == flag {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(servedArgs, "--fit") || !has(got, "--fit") || has(got, "999") {
+		t.Fatalf("reused config lost the backend fit dialect:\nserved %v\nreused %v", servedArgs, got)
+	}
+}
