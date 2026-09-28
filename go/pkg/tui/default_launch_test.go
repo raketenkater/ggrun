@@ -2,6 +2,8 @@ package tui
 
 import (
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -73,5 +75,26 @@ func TestRecommendedHeaderShowsTheRestrictedInventory(t *testing.T) {
 	view := m.viewRecommended()
 	if !strings.Contains(view, "RTX 3060 12G · 28GB RAM") || strings.Contains(view, "RTX 4070") {
 		t.Fatalf("recommended header does not show the restricted inventory:\n%s", strings.SplitN(view, "\n", 3)[1])
+	}
+}
+
+// A model linked into the model directory is listed with its target's size,
+// not the few bytes of the link.
+func TestSymlinkedModelListsTheTargetSize(t *testing.T) {
+	target := isolatedModelDir(t)
+	if err := os.Truncate(target, 3<<30); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "linked.gguf")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _, ok := modelItemFromPath(link, info, false)
+	if !ok || item.SizeGB < 2.9 {
+		t.Fatalf("symlinked model listed at %.1f GB, want its 3 GB target", item.SizeGB)
 	}
 }

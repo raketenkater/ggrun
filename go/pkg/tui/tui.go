@@ -2727,6 +2727,12 @@ func modelItemFromPath(path string, info os.FileInfo, external bool) (ModelItem,
 	dirPath := filepath.Dir(path)
 	modelKey := filepath.Join(dirPath, baseName)
 	totalBytes := info.Size()
+	// Walk reports the link itself for a symlinked model; size the target.
+	if info.Mode()&os.ModeSymlink != 0 {
+		if st, err := os.Stat(path); err == nil {
+			totalBytes = st.Size()
+		}
+	}
 	if isMultiPart {
 		totalBytes = 0
 		for _, shardPath := range shardFiles {
