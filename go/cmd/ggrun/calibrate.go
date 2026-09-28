@@ -1133,6 +1133,25 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	restoreFloor := oracleAdmissionCost + estimateChallengerCost(challengerCostInputs{
 		BaselineLoad: baselineLoad, BaselineLoadObserved: baselineLoadObserved, Ceiling: autoStartupTimeout(model),
 	}).Restore
+	// A stop whose resource wait timed out leaves either a process that is
+	// still running, which keeps serving, or one that exited. An exited process
+	// is not a server: returning it reported "Server running" over nothing
+	// while a concurrent download held memory (TUI cell, 2026-09-28). Restore
+	// the measured baseline through the bounded restoration instead; its
+	// admission rechecks live memory and fails closed if it cannot fit.
+	afterFailedRelease := func(stopped *server.Process, strategy2 *placement.Strategy, args2 []string) (*server.Process, *placement.Strategy, []string, *placement.CalibrationDecision) {
+		if stopped != nil && stopped.IsRunning() {
+			return stopped, strategy2, args2, nil
+		}
+		fmt.Fprintln(os.Stderr, "[calibrate] the stopped process exited but its resources did not settle; restoring the measured baseline")
+		restored, restoredStrategy, restoredArgs := restoreService(fx, exp, cfg, model, be, "baseline", 0, restoreFloor, func(window time.Duration) (*server.Process, *placement.Strategy, []string) {
+			return fx.restart(req, cfg, model, strategy, be, caps, serverArgs, window, memoryRecovery)
+		}, serverArgs)
+		if restored == nil {
+			return nil, strategy, serverArgs, nil
+		}
+		return restored, restoredStrategy, restoredArgs, nil
+	}
 	unaffordable := ""
 	failures := 0
 	stableAdmissionFailed := false
@@ -1208,7 +1227,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		fmt.Printf("[calibrate] measuring %s...\n", cand.Name)
 		if curP != nil {
 			if !fx.stopAndWait(curP, "default before "+cand.Name, resourceBaseline, 30*time.Second) {
-				return curP, strategy, serverArgs, nil
+				return afterFailedRelease(curP, strategy, serverArgs)
 			}
 			curP = nil
 		}
@@ -1270,8 +1289,11 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				stableFailureReason = "the finalist started only after memory recovery changed its exact argv"
 			}
 			if !fx.stopAndWait(cp, cand.Name+" after memory recovery", resourceBaseline, 30*time.Second) {
-				req.CalibrationScreened = true
-				return cp, measuredStrategy, measuredArgs, nil
+				if cp.IsRunning() {
+					req.CalibrationScreened = true
+					return cp, measuredStrategy, measuredArgs, nil
+				}
+				return afterFailedRelease(cp, measuredStrategy, measuredArgs)
 			}
 			failures++
 			if failures >= budget.MaxFailures {
@@ -1286,8 +1308,11 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			fmt.Fprintf(os.Stderr, "[calibrate] %s measurement failed (%v); skipping\n", cand.Name, berr)
 			admissionInconclusive = true
 			if !fx.stopAndWait(cp, cand.Name+" after failed measurement", resourceBaseline, 30*time.Second) {
-				req.CalibrationScreened = true
-				return cp, measuredStrategy, measuredArgs, nil
+				if cp.IsRunning() {
+					req.CalibrationScreened = true
+					return cp, measuredStrategy, measuredArgs, nil
+				}
+				return afterFailedRelease(cp, measuredStrategy, measuredArgs)
 			}
 			if errors.Is(berr, errCalibrationBudgetExhausted) {
 				// Only the reserve is left: pricing another candidate against
@@ -1316,8 +1341,11 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 			Result: result, Score: score,
 		})
 		if !fx.stopAndWait(cp, "measured candidate "+cand.Name, resourceBaseline, 30*time.Second) {
-			req.CalibrationScreened = true
-			return cp, measuredStrategy, measuredArgs, nil
+			if cp.IsRunning() {
+				req.CalibrationScreened = true
+				return cp, measuredStrategy, measuredArgs, nil
+			}
+			return afterFailedRelease(cp, measuredStrategy, measuredArgs)
 		}
 		if mode == calibrateAuto {
 			// The extra candidates are admission fallbacks, not permission to make

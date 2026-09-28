@@ -639,3 +639,30 @@ func TestSupportOptimizerIsBoundedByTheOptimizationBudget(t *testing.T) {
 		})
 	}
 }
+
+// A stop whose resource wait timed out must not hand back an exited process
+// as the server: the TUI cell printed "Server running" over nothing when a
+// concurrent download kept memory from settling. The measured baseline is
+// restored instead, at either stop site.
+func TestExitedProcessAfterFailedReleaseRestoresTheBaseline(t *testing.T) {
+	for _, label := range []string{"default before", "measured candidate"} {
+		t.Run(label, func(t *testing.T) {
+			h := newBudgetHarness(t, time.Minute, time.Minute)
+			stop := h.fx.stopAndWait
+			h.fx.stopAndWait = func(p *server.Process, l string, base *detect.Capabilities, timeout time.Duration) bool {
+				stop(p, l, base, timeout)
+				return !strings.HasPrefix(l, label) // this release never settles; the process has exited
+			}
+			p, s, args, _ := h.run()
+			if p == nil || p == h.baseline {
+				t.Fatalf("returned %v, want a restored baseline, not the exited process", p)
+			}
+			if len(h.restarts) != 1 || formatCommand(h.restarts[0].args) != formatCommand(h.serverArgs) {
+				t.Fatalf("restarts=%+v, want one baseline restoration", h.restarts)
+			}
+			if s != h.strategy || formatCommand(args) != formatCommand(h.serverArgs) {
+				t.Fatal("restored configuration is not the measured baseline")
+			}
+		})
+	}
+}
