@@ -3,6 +3,7 @@ package tui
 import (
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,21 @@ func TestHardwareRestrictionReachesLaunchAndRecommendations(t *testing.T) {
 	want := append([]string{modelPath}, TUIDefaultLaunchArgsTail...)
 	if got := m.buildLaunchRequest().LaunchArgs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("unrestricted TUI argv changed: %q", got)
+	}
+}
+
+// The Recommended header names the inventory its recommendations were planned
+// against, not every card on the machine.
+func TestRecommendedHeaderShowsTheRestrictedInventory(t *testing.T) {
+	t.Cleanup(func() { SetHardwareRestriction("", false) })
+	t.Setenv("LLM_CACHE_DIR", t.TempDir())
+	SetHardwareRestriction("2", false)
+	m := Model{caps: &detect.Capabilities{CPU: detect.CPUInfo{Cores: 8}, RAM: detect.RAMInfo{TotalMB: 212 * 1024, FreeMB: 200 * 1024},
+		GPUs: []detect.GPU{{Index: 0, Name: "NVIDIA GeForce RTX 4070", VRAMTotalMB: 12282}, {Index: 2, Name: "NVIDIA GeForce RTX 3060", VRAMTotalMB: 12288}}},
+		ramBudgetMB: 28 * 1024, ramLimitPercent: 90, width: 120}
+	m.refreshRecommendations()
+	view := m.viewRecommended()
+	if !strings.Contains(view, "RTX 3060 12G · 28GB RAM") || strings.Contains(view, "RTX 4070") {
+		t.Fatalf("recommended header does not show the restricted inventory:\n%s", strings.SplitN(view, "\n", 3)[1])
 	}
 }

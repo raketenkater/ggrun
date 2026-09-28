@@ -1675,7 +1675,7 @@ func (m Model) viewMain() string {
 
 	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  Models:   %d recognized (%d elsewhere)\n", len(m.models), external))
 	b.WriteString(fmt.Sprintf("  Primary:  %s\n", m.modelDir))
 	b.WriteString(fmt.Sprintf("  Settings: %s\n", m.settingsPath))
@@ -1711,7 +1711,7 @@ func (m Model) viewMain() string {
 func (m Model) viewFirstRun() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ ggrun First Run ═══") + "\n")
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
 	b.WriteString("  Start with Recommended; ggrun will choose a model and quant that fit.\n")
 	b.WriteString("\n")
@@ -2503,7 +2503,9 @@ func wordWrap(s string, width int) []string {
 func (m Model) viewRecommended() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ Recommended Downloads ═══") + "\n")
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	// Show the inventory the recommendations below were planned against:
+	// the session's device restriction and the configured RAM ceiling.
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(recommend.PlanningCapabilities(restrictedCapabilities(m.caps), m.ramBudgetMB, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB))))
 	b.WriteString("  " + m.recommendedHeadroomControls() + "\n")
 	for _, line := range wordWrap(recommend.CatalogAttribution(), m.width) {
 		b.WriteString("  " + line + "\n")
