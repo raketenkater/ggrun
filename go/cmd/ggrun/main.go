@@ -130,6 +130,12 @@ func main() {
 	case "claude":
 		cmdClaude(args[1:])
 	case "gui", "tui":
+		gpus, cpuOnly, err := parseTUIHardwareArgs(args[1:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\nUsage: ggrun tui [--gpus 0,1 | --cpu]\n", err)
+			os.Exit(2)
+		}
+		tui.SetHardwareRestriction(gpus, cpuOnly)
 		cmdGUI()
 	case "config":
 		cmdConfig(args[1:])
@@ -172,6 +178,7 @@ Commands:
   tune <model.gguf>    AI-tune model for best performance
   recommend [-n N]     Rank models that fit this machine (intelligence x speed)
   recommend --first    Print the top Hugging Face repo only
+  recommend --gpus 0 --ram-budget 32G   Rank within a restricted hardware budget
   support              Native optional support expert / optimizer (status, install, doctor)
   models [list|browse|path|rm] List, browse, locate, or safely remove GGUF models
   config [show|edit|path|reset]  Manage settings
@@ -180,7 +187,7 @@ Commands:
   update, --update     Update ggrun and backends
   claude [list|resume] List recorded Claude Code sessions, or relaunch the recorded
                        backend shape and resume one (default: newest in this directory)
-  gui, tui             Interactive TUI (model picker, settings, launch)
+  gui, tui [--gpus 0,1 | --cpu]  Interactive TUI (model picker, settings, launch)
 
 Diagnostics (advanced):
   probe                Check free GPU/RAM memory (useful when a launch's capacity numbers look wrong)
@@ -324,6 +331,10 @@ func dispatchCompat(args []string) bool {
 	return true
 }
 
+// formatCommand is the argv identity: exact-admission, recovery and calibration
+// compare it, and the "[ggrun] launch:" backend log records it (the preimage of
+// any persisted argv hash). It is platform-independent; do not change its
+// output. Use displayCommand for commands printed for a person to replay.
 func formatCommand(args []string) string {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
@@ -681,14 +692,19 @@ type launchRequest struct {
 	// keeps between the backend's measured non-reclaimable footprint and its hard
 	// MemoryMax. 0 keeps the pre-launch plan-derived ceiling (auto re-size off).
 	// -1 means unset; the config default applies.
-	CgroupHeadroomMB     int
-	AllowLiveMemoryProbe bool
-	NoMMap               bool
-	ForceMMap            bool
-	Parallel             int
-	ParallelSet          bool // --parallel given explicitly; claude-code mode must not override it
-	Threads              int  // --threads; 0 keeps the physical-core default
-	CacheRAMMB           int  // --cache-ram; 0 keeps the derived prompt-cache budget
+	CgroupHeadroomMB int
+	// PlacementHostReserveMB is host RAM placement holds back on top of
+	// RAMHeadroomMB without lowering the containment ceiling: the reserve the
+	// containment gate requires, set only when re-planning after that gate
+	// refused a plan (containHostMemory).
+	PlacementHostReserveMB int
+	AllowLiveMemoryProbe   bool
+	NoMMap                 bool
+	ForceMMap              bool
+	Parallel               int
+	ParallelSet            bool // --parallel given explicitly; claude-code mode must not override it
+	Threads                int  // --threads; 0 keeps the physical-core default
+	CacheRAMMB             int  // --cache-ram; 0 keeps the derived prompt-cache budget
 	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. -1 (the zero
 	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
 	// the field exists because leaving the flag unparsed let it fall through to
@@ -719,7 +735,14 @@ type launchRequest struct {
 	ClaudeResume           string   // session id or "latest": reopen a recorded Claude session
 	ClaudeResumeForce      bool     // accept a resume whose backend shape no longer matches
 	OriginalArgs           []string // launch argv as given, so a resume can reproduce it exactly
-	Calibrate              string   // "auto" (workflow-validated replay only), "on" (explicit bounded screen), "off"
+	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
+	// the start boundary last started, when the oracle priced exactly it.
+	admittedOracleTotals map[int]int
+	// verifiedScopeKey is this launch's verified-config key, fixed at the
+	// first computation so lookup and save agree.
+	verifiedScopeKey   string
+	verifiedScopeShape string
+	Calibrate          string // "auto" (workflow-validated replay only), "on" (explicit bounded screen), "off"
 	// CalibrationScreened marks a non-default configuration selected only by the
 	// bounded screen. It may serve this explicit run, but must not leak into the
 	// automatic verified-config or MoE placement caches.
@@ -1736,9 +1759,16 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 
 // applyGPUVisibility restricts which devices the backend can enumerate so the
 // computed placement (tensor splits, -ot device names, renumbered indices)
-// matches reality. Returns the env assignment for display, or "" when --gpus
-// was not given.
+// matches reality. Returns the env assignment for display, or "" when neither
+// --gpus nor --cpu was given.
 func applyGPUVisibility(req *launchRequest, backendTag string) string {
+	if req != nil && req.CPUMode && !strings.EqualFold(backendTag, "vulkan") {
+		// A CPU-only launch must not see any device. A CUDA build given -ngl 0
+		// still opens a context on every visible card and may run large-batch
+		// matmuls there, on GPUs another process may be using.
+		os.Setenv("CUDA_VISIBLE_DEVICES", "-1")
+		return "CUDA_VISIBLE_DEVICES=-1"
+	}
 	if req == nil || req.GPUsFlag == "" {
 		return ""
 	}
@@ -1888,6 +1918,14 @@ var runtimeVRAMUsedMB = placement.QueryVRAMUsed
 // stricter of the deterministic reservation and a fresh whole-device reading,
 // which also catches unrelated workloads that appeared after placement.
 func runtimeGPUCapabilitiesForLaunch(caps *detect.Capabilities, req *launchRequest, strategy *placement.Strategy) (*detect.Capabilities, map[int]int) {
+	return runtimeGPUCapabilitiesWithUsage(caps, req, strategy, runtimeVRAMUsedMB)
+}
+
+// runtimeGPUCapabilitiesWithUsage is runtimeGPUCapabilitiesForLaunch with the
+// live per-physical-GPU usage reading supplied by the caller, so a decision
+// about a later moment (after the serving baseline stops) can use the usage
+// expected then instead of now.
+func runtimeGPUCapabilitiesWithUsage(caps *detect.Capabilities, req *launchRequest, strategy *placement.Strategy, liveUsedMB func(physical int) int) (*detect.Capabilities, map[int]int) {
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilities(caps, req)
 	if runtimeCaps == nil {
 		return nil, visibleToPhysical
@@ -1907,7 +1945,7 @@ func runtimeGPUCapabilitiesForLaunch(caps *detect.Capabilities, req *launchReque
 	for i := range adjusted.GPUs {
 		physical := physicalGPUIndex(adjusted.GPUs[i].Index, visibleToPhysical)
 		usedFloor := adjusted.GPUs[i].VRAMUsedMB + plannedByPhysical[physical]
-		if liveUsed := runtimeVRAMUsedMB(physical); liveUsed > usedFloor {
+		if liveUsed := liveUsedMB(physical); liveUsed > usedFloor {
 			usedFloor = liveUsed
 		}
 		adjusted.GPUs[i].VRAMUsedMB = usedFloor
@@ -2808,7 +2846,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		RamBudgetMB:             req.RamBudgetMB,
 		RAMLimitPercent:         req.RAMLimitPercent,
 		VRAMHeadroomMB:          req.VRAMHeadroomMB,
-		RAMHeadroomMB:           req.RAMHeadroomMB,
+		RAMHeadroomMB:           req.RAMHeadroomMB + req.PlacementHostReserveMB,
 		RequireMeasuredBuffers:  true,
 		NoMMap:                  req.NoMMap,
 		ForceMMap:               req.ForceMMap,
@@ -2889,7 +2927,12 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	// It is what the reuse lookup in placement.Compute hashes against, and the
 	// save path uses the same computation, so save and load can never disagree.
 	if caps != nil && !req.NoCachedConfig {
-		opts.VerifiedConfigScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+		shape := verifiedScopeShape(model, be, caps)
+		if req.verifiedScopeKey == "" || req.verifiedScopeShape != shape {
+			req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+			req.verifiedScopeShape = shape
+		}
+		opts.VerifiedConfigScopeKey = req.verifiedScopeKey
 	}
 	return opts
 }
@@ -4368,6 +4411,13 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if hasExternalSpecCompanion(strategy) {
 		return nil
 	}
+	var oracleTotals map[int]int
+	if req != nil {
+		oracleTotals = req.admittedOracleTotals
+	}
+	if !model.IsMoE && len(gpus) > 0 && len(oracleTotals) > 0 {
+		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, nil, oracleTotals, true)
+	}
 	if model.IsMoE && len(gpus) > 0 {
 		// Build the per-GPU companion VRAM map so the system probe can net it
 		// out of the breakdown table's unaccounted column. Without this the
@@ -4390,7 +4440,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 				companionVRAMByGPU[cp.GPU] += mb
 			}
 		}
-		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, companionVRAMByGPU)
+		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, companionVRAMByGPU, oracleTotals, false)
 		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU)
 	}
 	computeByGPU := placement.ParseComputeBuffersByGPU(serverLog)
@@ -4398,7 +4448,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	// failed. Both other growth recorders are OOM paths, so without this the
 	// reserve only ever rises and a cold key keeps borrowing another model's
 	// failure.
-	placement.RecordPostLaunchRuntimeGraphGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU, serverLog)
+	placement.RecordPostLaunchRuntimeGraphGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU, serverLog, oracleTotals)
 	probeWritten := placement.RunPostLaunchModelProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, gpus, strategy.Parallel, serverLog)
 	placement.RecordPostLaunchContextAllocation(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, serverLog)
 	placement.RunPostLaunchKVProbe(cfg.CacheDir, model, strategy.ContextSize, strategy.KVType, serverLog, strategy.Parallel)
@@ -4537,6 +4587,9 @@ type exactAdmissionFailure struct {
 	class   exactAdmissionClass
 	message string
 	cause   error
+	// loadedWeights records that the admission which produced this refusal
+	// started a weight-reading process, e.g. a contained allocation probe.
+	loadedWeights bool
 }
 
 func (e *exactAdmissionFailure) Error() string {
@@ -4588,6 +4641,9 @@ var argvTimeAdmissionClasses = map[exactAdmissionClass]bool{
 func exactAdmissionLoadedWeights(err error) bool {
 	var failure *exactAdmissionFailure
 	if !errors.As(err, &failure) || failure == nil {
+		return true
+	}
+	if failure.loadedWeights {
 		return true
 	}
 	return !argvTimeAdmissionClasses[failure.class]
@@ -4708,7 +4764,32 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	if memoryRecovery == nil {
 		memoryRecovery = newLaunchMemoryRecovery()
 	}
+	// timeout is this admission's whole window. Contained probes, the
+	// production start and every retry draw from it, each process additionally
+	// capped at the model's own startup ceiling, so no nested step can reset it.
+	phase, maxLoads := "start", maxStartAdmissionLoads
+	if exactAdmission {
+		phase, maxLoads = "challenger", maxBoundedAdmissionLoads
+	} else if restoreExempt {
+		phase, maxLoads = "restore", maxBoundedAdmissionLoads
+	}
+	cacheDir := ""
+	if cfg != nil {
+		cacheDir = cfg.CacheDir
+	}
+	work := newAdmissionWork(phase, timeout, autoStartupTimeout(model), maxLoads, cacheDir, nil)
+	// A refusal is cheap only when this admission read no weights. The class of
+	// the final error cannot say that: a memory deficit or compatibility verdict
+	// can arrive after a contained probe loaded the whole model.
+	defer func() {
+		memoryRecovery.observeAdmissionWork(work)
+		var failure *exactAdmissionFailure
+		if work.loadedWeights() && errors.As(launchErr, &failure) && failure != nil {
+			failure.loadedWeights = true
+		}
+	}()
 	specDisabled := false
+	oracleTotalsByArgv := map[string]map[int]int{}
 	measuredProductionArgs := ""
 	exactCandidateArgs := ""
 	if exactAdmission {
@@ -4725,7 +4806,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	}
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
 	placementOpts := func() placement.Options {
-		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+		opts := startBoundaryReplanOptions(placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 		tunedBatch.apply(&opts)
 		if specDisabled {
 			opts.SpecMode = "off"
@@ -4746,7 +4827,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if delErr := placement.DeleteVerifiedConfig(cfg.CacheDir, key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] warning: could not delete stale verified config: %v\n", delErr)
 				} else {
-					fmt.Fprintln(os.Stderr, "[verified] verified config reuse hit failed to launch; record deleted, re-deriving fresh")
+					fmt.Fprintln(os.Stderr, "[verified] verified config reuse hit failed to launch; record deleted, the next launch re-derives")
 				}
 			}
 		}
@@ -4785,7 +4866,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		// without paying for the load to learn it. Re-planned args loop back
 		// here, so every retry is re-gated too.
 		if strategy != nil {
-			preflight := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir}, runtimeCaps, model, strategy, serverArgs)
+			preflight := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir, Work: work}, runtimeCaps, model, strategy, serverArgs)
 			if adjustment := preflight.BackendAdjustment; adjustment != nil {
 				if exactAdmission {
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionCompat, adjustment.Reason, nil)
@@ -4967,6 +5048,15 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if errors.As(preflight.Err, &unclassified) {
 					adviseUnclassifiedLaunchFailure(req, cfg, model, be, caps, unclassified.LogExcerpt)
 				}
+				// A backend that cannot read the model file is not a memory result.
+				var formatErr *backendModelFormatError
+				if errors.As(preflight.Err, &formatErr) {
+					return nil, strategy, serverArgs, preflight.Err
+				}
+				// Running out of admission budget is not a memory verdict.
+				if isAdmissionBudgetError(preflight.Err) {
+					return nil, strategy, serverArgs, preflight.Err
+				}
 				return nil, strategy, serverArgs, fmt.Errorf("memory preflight failed closed: %w", preflight.Err)
 			}
 			if preflight.ProbeUnavailable != "" {
@@ -5005,7 +5095,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					return nil, strategy, serverArgs, exactAdmissionError(exactAdmissionMemory, fmt.Sprintf(" on CUDA%d (%d MiB deficit)", preflight.Device, preflight.DeficitMB), nil)
 				}
 				if preflightReplans >= maxPreflightReplans {
-					return nil, strategy, serverArgs, fmt.Errorf("memory preflight did not converge after %d re-plans; refusing a real model load", maxPreflightReplans)
+					return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("memory preflight did not converge after %d re-plans; refusing a real model load", maxPreflightReplans)}
 				}
 				// A re-plan that materially shrinks the measured deficit is progress,
 				// and the budget exists to stop churn, not progress. GLM-5.3-Flash at
@@ -5025,7 +5115,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					strategy, serverArgs, oomPenalty, preflight, memoryRecovery,
 				)
 				if rerr != nil {
-					return nil, strategy, serverArgs, fmt.Errorf("memory preflight recovery failed closed: %w", rerr)
+					return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("memory preflight recovery failed closed: %w", rerr)}
 				}
 				strategy, serverArgs = next, nextArgs
 				fmt.Fprintf(os.Stderr,
@@ -5040,11 +5130,37 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			if preflight.Evidence.Level != memoryEvidenceNone {
 				memoryRecovery.acceptContext(strategy)
 			}
+			if preflight.Evidence.Level == memoryEvidenceOraclePlanned {
+				totals := map[int]int{}
+				for _, d := range preflight.Evidence.Devices {
+					if idx, ok := cudaDeviceIndex(d.Name); ok {
+						totals[idx] += d.TotalMB()
+					}
+				}
+				oracleTotalsByArgv[formatCommand(serverArgs)] = totals
+			}
 			if preflight.Evidence.Level != memoryEvidenceNone && exactAdmission {
 				// The preflight measured this exact argv. Challenger admission must
 				// consume that proof directly; feeding it back through Compute can
 				// produce a different split and turn one bounded experiment into an
 				// unrequested recovery search.
+				if preflight.Evidence.Level == memoryEvidenceAllocated {
+					measuredProductionArgs = formatCommand(serverArgs)
+				}
+			} else if preflight.Evidence.Level != memoryEvidenceNone && strategy != nil && strategy.VerifiedConfigReused {
+				// The saved config just passed this launch's exact preflight.
+				// Recomputing from the original request can change the argv and
+				// turn the next optional search into another full reload.
+				fmt.Fprintln(os.Stderr, "[launch] verified config passed exact preflight; keeping that argv rather than re-planning")
+				if preflight.Evidence.Level == memoryEvidenceAllocated {
+					measuredProductionArgs = formatCommand(serverArgs)
+				}
+			} else if preflight.Evidence.Level != memoryEvidenceNone && memoryRecovery.plannerWasDisproved() {
+				// This launch already saw the exact check refuse a planner
+				// re-plan. A new candidate from the same estimate could only trade
+				// this proven fit for an unproven one; on MiMo-V2.6-Flash first use
+				// it did, and the ladder then gave up 224k tokens of context.
+				fmt.Fprintf(os.Stderr, "[launch] memory plan proven at %s evidence; keeping it rather than a re-plan from an estimate this launch disproved\n", preflight.Evidence.Level)
 				if preflight.Evidence.Level == memoryEvidenceAllocated {
 					measuredProductionArgs = formatCommand(serverArgs)
 				}
@@ -5093,7 +5209,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 								fmt.Fprintln(os.Stderr, "[launch] measured re-plan budget reached; retaining the exact allocation-proven placement")
 								measuredProductionArgs = formatCommand(serverArgs)
 							} else {
-								return nil, strategy, serverArgs, fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)
+								return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)}
 							}
 						} else {
 							strategy = next
@@ -5123,8 +5239,35 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
 		}
-		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, timeout)
+		processTimeout, budgetErr := work.beginLoad(timeout)
+		if budgetErr != nil {
+			work.record(launchWorkRecord{Kind: "budget-refusal", Model: modelBasename(model), Backend: backendIdentity(be),
+				ArgvHash: argvHash(serverArgs), Outcome: "refused", Reason: budgetErr.Error()})
+			return nil, strategy, serverArgs, budgetErr
+		}
+		loadStarted := time.Now()
+		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, processTimeout)
+		loadElapsed := time.Since(loadStarted)
+		{
+			outcome, reason, lastOutputAge := describeStartOutcome(err)
+			rec := launchWorkRecord{Kind: "production", LoadedWeights: true, Model: modelBasename(model), Backend: backendIdentity(be),
+				ArgvHash: argvHash(serverArgs), ElapsedSec: loadElapsed.Seconds(), TimeoutSec: processTimeout.Seconds(),
+				Outcome: outcome, Reason: reason, LastOutputAge: lastOutputAge}
+			if p != nil {
+				if peak, peakErr := p.MemoryPeakBytes(); peakErr == nil {
+					rec.CgroupPeakMiB = bytesToMiBCeil(peak)
+				}
+				if kills, killErr := p.MemoryOOMKillCount(); killErr == nil {
+					rec.OOMKills = kills
+				}
+			}
+			work.record(rec)
+		}
 		if err == nil {
+			memoryRecovery.observeProductionLoad(serverArgs, loadElapsed)
+			if req != nil {
+				req.admittedOracleTotals = oracleTotalsByArgv[formatCommand(serverArgs)]
+			}
 			if mmapErr := validateObservedMMapPageability(cfg, model, be, strategy, p); mmapErr != nil {
 				memoryRecovery.reject(serverArgs)
 				_ = p.Stop()
@@ -5259,7 +5402,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		serverArgs = nextArgs
 		retries++
 		printVRAMLedger(strategy)
-		fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
+		fmt.Printf("[launch] %s\n", displayCommand(serverArgs))
 	}
 }
 
@@ -5812,7 +5955,7 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 		// The already-active fast path is a re-validation of the same profile: the
 		// config was already promoted, so refresh the verified config record too.
-		saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy)
+		saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy, serverArgs)
 		fmt.Fprintln(os.Stderr, "[verify] exact launch profile is already active; reusing its canary result")
 		return nil
 	}
@@ -5965,10 +6108,38 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 	// the promotion boundary. Save the full verified config so the next launch
 	// of this exact scope starts directly from it. Failure degrades to a log —
 	// the launch is already active and must not be failed by a cache write.
-	saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, be, caps, strategy, serverArgs)
 	fmt.Fprintf(os.Stderr, "[verify] active profile: append cache=%d, branch cache=%d tokens\n",
 		canary.AppendCachedTokens, canary.BranchCachedTokens)
 	return nil
+}
+
+// strategyForServedArgs returns a copy of strategy whose argv-visible runtime
+// coordinates are those of the argv that actually served. The verified config
+// is what an unchanged relaunch rebuilds its argv from, so it must describe the
+// served launch; recomputes after start (measured placements, in-lifecycle
+// derates) had left CRAM and mmap in the strategy disagreeing with the served
+// argv, which turned every unchanged relaunch into a different launch and a
+// fresh memory probe.
+func strategyForServedArgs(strategy *placement.Strategy, served []string) *placement.Strategy {
+	if strategy == nil || len(served) == 0 {
+		return strategy
+	}
+	s := *strategy
+	if v := argIntValue(served, "-cram", "--cache-ram"); v >= 0 {
+		s.CRAM = v
+	}
+	if v := argIntValue(served, "--ctx-checkpoints"); v >= 0 {
+		s.MaxCheckpoints = v
+	}
+	if v := argIntValue(served, "-b", "--batch-size"); v > 0 {
+		s.BatchSize = v
+	}
+	if v := argIntValue(served, "-ub", "--ubatch-size"); v > 0 {
+		s.UBatchSize = v
+	}
+	s.MMap = !hasArg(served, "--no-mmap")
+	return &s
 }
 
 // saveVerifiedConfigForLaunch persists the full serving config at the promotion
@@ -5976,12 +6147,23 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 // CalibrationScopeKey the reuse path hashes against, so save and load can never
 // disagree about what launch they describe. A save failure degrades to a stderr
 // log — the launch is already active and must never be failed by a cache write.
+// startBoundaryReplanOptions are the placement options for a re-plan inside
+// the start boundary, after the current argv was rejected. Replaying the
+// verified record would rebuild that same argv, so recovery reported "nothing
+// changed" and failed closed even though a fresh plan fits (Qwen3.5-27B
+// relaunch on a 12 GiB card).
+func startBoundaryReplanOptions(opts placement.Options) placement.Options {
+	opts.VerifiedConfigScopeKey = ""
+	return opts
+}
+
 func saveVerifiedConfigForLaunch(cfg *config.Config, req *launchRequest, model *placement.ModelProfile,
-	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy,
+	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, servedArgs []string,
 ) {
 	if cfg == nil || req == nil || model == nil || be == nil || strategy == nil {
 		return
 	}
+	strategy = strategyForServedArgs(strategy, servedArgs)
 	// --no-cached-config is the escape hatch: do not write a verified config for
 	// a launch that explicitly asked to derive fresh.
 	if req.NoCachedConfig || req.CalibrationScreened || req.CalibrationPending {
@@ -6034,6 +6216,15 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	if req.NoCachedConfig {
 		return ""
 	}
+	// One key per launch, taken from the request as given. Recovery rewrites
+	// the request during a launch (a generated --swa-full is withdrawn, KV
+	// quality adjusted for the backend), and hashing the rewritten request at
+	// save time filed the record under a key the next identical launch never
+	// computes: every relaunch reported no verified config and re-planned.
+	shape := verifiedScopeShape(model, be, caps)
+	if req.verifiedScopeKey != "" && req.verifiedScopeShape == shape {
+		return req.verifiedScopeKey
+	}
 	opts := placementOptionsFromRequestCaps(req, model, be, "", caps)
 	// A verified config REPLAYS a whole plan and bypasses placement.Compute, so
 	// nothing in the hardware/model/backend scope changes when ggrun's own
@@ -6042,7 +6233,23 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	// it: bumping planLogicVersion retires every stored config exactly once.
 	// Only verified configs carry this; measured calibration data describes the
 	// hardware, not our arithmetic, and stays valid across planner changes.
-	return placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeShape = shape
+	return req.verifiedScopeKey
+}
+
+// verifiedScopeShape identifies what a memoized verified-config key belongs
+// to. Request rewrites during a launch keep it; a different model or backend
+// does not. Hardware is deliberately absent: the first computation (the
+// lookup) hashes the detected inventory, while the save is handed the runtime
+// view, which --gpus narrows and re-indexes; comparing those made every
+// restricted launch save under a key its successor never looked up.
+func verifiedScopeShape(model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities) string {
+	identity := ""
+	if be != nil {
+		identity = be.Identity + "|" + be.Tag + "|" + be.Path
+	}
+	return placement.SpecTargetIdentity(model) + "|" + identity
 }
 
 func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelProfile) string {
@@ -6185,8 +6392,9 @@ func cmdLaunch(args []string) {
 	if launchPort <= 0 {
 		launchPort = cfg.Port
 	}
-	if !waitForPredecessorPort(launchPort, 20*time.Second, os.Stderr) {
-		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 20s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
+	// 75 s outlasts Linux's 60 s TIME_WAIT left by the previous server.
+	if !waitForPredecessorPort(launchPort, 75*time.Second, os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 75s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
 	}
 	if releaseIsPending(cfg.CacheDir) {
 		if pre, perr := detect.Detect(); perr == nil {
@@ -6327,7 +6535,8 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
-	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
+	strategy, err = containHostMemory(req, caps, strategy, computeStrategy, validateHostMemoryContainmentWaiting)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -6387,7 +6596,7 @@ func cmdLaunch(args []string) {
 		}
 	}
 
-	fmt.Printf("[launch] %s\n", formatCommand(serverArgs))
+	fmt.Printf("[launch] %s\n", displayCommand(serverArgs))
 	if memMax := backendMemoryMaxMB(req, caps); memMax > 0 {
 		fmt.Printf("[launch] backend memory scope: MemoryMax=%d MiB\n", memMax)
 	}
@@ -6421,14 +6630,37 @@ func cmdLaunch(args []string) {
 	// process may start.
 	resourceBaseline := captureLaunchResourceBaseline(caps)
 	launchRecovery := newLaunchMemoryRecovery()
-	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, timeout, launchRecovery)
+	// The first start gets room for a probe, a corrected probe and a slow
+	// production load; every nested step shares that one window.
+	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, startupAdmissionWindow(model), launchRecovery)
 	if err != nil {
 		claudeAuto.stop()
 		if releaseErr := stopFailedLaunchBeforeAdvisor(p, caps, 30*time.Second); releaseErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", releaseErr)
 			os.Exit(1)
 		}
-		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, timeout, launchRecovery)
+		// The backend rejected the model file: no launch setting can help, so
+		// offer a newer backend and start over on it instead of the advisor.
+		var formatErr *backendModelFormatError
+		if errors.As(err, &formatErr) {
+			if offerBackendUpdateForModelFormatWith(req, be, formatErr, cfg.AssumeYes, os.Getenv(backendFormatRetryEnv) != "",
+				os.Stdin, os.Stderr, stdinIsTerminal(), backendBuildFingerprint, updateMainlineBackend) {
+				err = relaunchAfterBackendUpdate()
+			}
+			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+			os.Exit(1)
+		}
+		if shouldReplanFromLearnedEvidence(err, launchRecovery, os.Getenv(learnedReplanEnv) != "") {
+			fmt.Fprintln(os.Stderr, "[launch] the first plan failed memory admission before any model load; planning once more from the memory the backend just measured")
+			// exec skips deferred cleanup; release this launch's library hub first.
+			if ok {
+				libhub.Cleanup(hubDir)
+			}
+			if relaunchErr := relaunchLaunch(req.OriginalArgs, learnedReplanEnv); relaunchErr != nil {
+				fmt.Fprintf(os.Stderr, "[launch] could not re-plan: %v\n", relaunchErr)
+			}
+		}
+		p, strategy, serverArgs, claudeAuto, err = retryStartWithAdvisor(req, cfg, model, be, caps, strategy, err, restartAdmissionWindow(model), launchRecovery)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
@@ -6458,7 +6690,7 @@ func cmdLaunch(args []string) {
 			// so the restore-exempt start boundary is used (a deliberate fallback
 			// must not be re-gated into a dead box).
 			restorePrevious := func() bool {
-				p, strategy, serverArgs, err = restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, oldStrategy, be, caps, oldArgs, timeout, launchRecovery)
+				p, strategy, serverArgs, err = restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, oldStrategy, be, caps, oldArgs, restartAdmissionWindow(model), launchRecovery)
 				if err != nil {
 					claudeAuto.stop()
 					fmt.Fprintf(os.Stderr, "Error restoring previous loaded placement: %v\n", err)
@@ -6474,8 +6706,8 @@ func cmdLaunch(args []string) {
 				fmt.Fprintln(os.Stderr, "Error: current server/resources did not release before measured baseline promotion; attempting restore of the previous placement")
 				restorePrevious()
 			} else {
-				fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
-				promotedP, promotedStrategy, promotedArgs, promoteErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout, launchRecovery)
+				fmt.Printf("[launch] %s\n", displayCommand(nextArgs))
+				promotedP, promotedStrategy, promotedArgs, promoteErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
 				if promoteErr != nil {
 					if !stopCalibrationProcessAndWait(promotedP, "failed measured baseline", resourceBaseline, 30*time.Second) {
 						fmt.Fprintln(os.Stderr, "Error: failed measured baseline did not release resources; refusing an overlapping restore — attempting restore of the previous placement")
@@ -6553,7 +6785,7 @@ func cmdLaunch(args []string) {
 		// canary measurement above is newer than that write, so refresh the record
 		// before this process tightens its cgroup. Pending calibration profiles are
 		// intentionally withheld here and saved by the promotion block below.
-		saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy)
+		saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy, serverArgs)
 	}
 	// The functional canary is the first real request: it grows the graph and
 	// allocates the first context checkpoints, so this is the earliest honest
@@ -6605,7 +6837,7 @@ func cmdLaunch(args []string) {
 					// never strand a falsely tuned verified config.
 					strategy.PerformanceTuned = performanceEvidence
 					req.CalibrationPending = false
-					saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy)
+					saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, strategy, serverArgs)
 					if strategy.Type == placement.MoEOffload && strategy.PlacementCachePath != "" {
 						if placeErr := placement.SavePlacementCache(strategy.PlacementCachePath, placement.StrategyToCacheEntry(strategy)); placeErr != nil {
 							fmt.Fprintf(os.Stderr, "[optimize] verified placement cache write failed (launch unaffected): %v\n", placeErr)
@@ -6848,8 +7080,8 @@ func cmdLaunch(args []string) {
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
-		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, timeout, launchRecovery)
+		fmt.Printf("[launch] %s\n", displayCommand(nextArgs))
+		newP, newStrategy, newArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
 		if err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] relaunch after runtime OOM failed: %v\n", err)
@@ -6868,7 +7100,7 @@ func cmdLaunch(args []string) {
 		}
 		if newP.LogBuf != nil {
 			if recordLiveCheckpointEvidence(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String()) {
-				saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, newStrategy)
+				saveVerifiedConfigForLaunch(cfg, req, model, be, runtimeCaps, newStrategy, newArgs)
 			}
 		}
 		resizeScopeToMeasuredFootprint(req, runtimeCaps, newStrategy, newP)
@@ -7434,6 +7666,29 @@ func runTUIBackendAction(args []string) error {
 	return nil
 }
 
+// parseTUIHardwareArgs reads the hardware restriction `ggrun tui` accepts, with
+// the same spelling and validation as launch and recommend, so a TUI session
+// can plan and serve inside the devices a shared machine leaves free.
+func parseTUIHardwareArgs(args []string) (string, bool, error) {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	gpus := fs.String("gpus", "", "physical GPU indices")
+	cpuOnly := fs.Bool("cpu", false, "CPU-only serving")
+	if err := fs.Parse(args); err != nil {
+		return "", false, err
+	}
+	if fs.NArg() > 0 {
+		return "", false, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if *cpuOnly && strings.TrimSpace(*gpus) != "" {
+		return "", false, fmt.Errorf("--cpu and --gpus cannot be combined")
+	}
+	if _, err := parseGPUIndices(*gpus); err != nil {
+		return "", false, fmt.Errorf("--gpus: %w", err)
+	}
+	return strings.TrimSpace(*gpus), *cpuOnly, nil
+}
+
 func tuiLaunchArgs(req *tui.LaunchRequest, cfg *config.Config) []string {
 	if req == nil {
 		return nil
@@ -7691,10 +7946,11 @@ func cmdDryRun(args []string) {
 		return
 	}
 	printOptimizationSummary("dry-run", strategy, true)
+	var displayEnv []string
 	if envPrefix != "" {
-		fmt.Print(envPrefix + " ")
+		displayEnv = []string{envPrefix}
 	}
-	fmt.Println(formatCommand(serverArgs))
+	fmt.Println(displayCommandWithEnv(displayEnv, serverArgs))
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
 	}
@@ -8414,95 +8670,6 @@ func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
 		}
 	}
 	return fallback, nil
-}
-
-func cmdRecommend(args []string) {
-	limit := 5
-	firstOnly := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-n", "--limit":
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
-					limit = n
-				}
-				i++
-			}
-		case "--first":
-			firstOnly = true
-		default:
-			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "-n")); err == nil && n > 0 {
-				limit = n
-			}
-		}
-	}
-
-	recommend.MaybeRefresh() // pull the latest published catalog (TTL-gated, best-effort)
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	gpu := "CPU only"
-	if len(caps.GPUs) > 0 {
-		names := make([]string, 0, len(caps.GPUs))
-		for _, g := range caps.GPUs {
-			names = append(names, fmt.Sprintf("%s %dGB", g.Name, g.VRAMTotalMB/1024))
-		}
-		gpu = strings.Join(names, " + ")
-	}
-	fmt.Printf("Hardware: %s | RAM %dGB\n", gpu, caps.RAM.TotalMB/1024)
-
-	cfg := loadConfigOrExit()
-	if cfg.RAMLimitPercent > 0 {
-		fmt.Printf("RAM limit: %d%% whole-host utilisation\n", cfg.RAMLimitPercent)
-		caps = detect.ApplyRAMLimitPercent(caps, cfg.RAMLimitPercent)
-	}
-	if headroomMB := parseBudgetMB(cfg.VRAMHeadroom); headroomMB > 0 {
-		fmt.Printf("VRAM headroom: %d MB reserved (set via Settings or --vram-headroom)\n", headroomMB)
-		caps = detect.ApplyVRAMHeadroom(caps, headroomMB)
-	}
-	if headroomMB := parseBudgetMB(cfg.RAMHeadroom); headroomMB > 0 {
-		fmt.Printf("RAM headroom: %d MB reserved (set via Settings or --ram-headroom)\n", headroomMB)
-		caps = detect.ApplyRAMHeadroom(caps, headroomMB)
-	}
-
-	cats := recommend.TopCategories(caps, limit)
-	if len(cats.Balanced) == 0 {
-		fmt.Println("No models in the catalog fit this machine.")
-		return
-	}
-	if firstOnly {
-		fmt.Println(cats.Balanced[0].Repo)
-		return
-	}
-	printRecGroup := func(title string, rows []recommend.Recommendation) {
-		if len(rows) == 0 {
-			return
-		}
-		fmt.Printf("\n%s\n", title)
-		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Est.speed")
-		for _, r := range rows {
-			name := r.Name
-			if len(name) > 36 {
-				name = name[:35] + "…"
-			}
-			tps := "—"
-			if r.PredictedTPS > 0 {
-				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
-			}
-			fmt.Printf("  %-36s %-10s %-8s %5.1fG %4.0f%% %8s\n",
-				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, r.QualityRetained*100, tps)
-		}
-	}
-	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
-	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
-	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
-	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
-	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
-	fmt.Printf("\n%s\n", recommend.CatalogAttribution())
 }
 
 func cmdTune(args []string) {
@@ -9533,6 +9700,9 @@ func findBackend(caps *detect.Capabilities, configuredAppHome ...string) *backen
 	return nil
 }
 
+// executablePath is os.Executable, replaceable in tests.
+var executablePath = os.Executable
+
 func backendSearchPaths(configuredAppHome ...string) []string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -9575,6 +9745,15 @@ func backendSearchPaths(configuredAppHome ...string) []string {
 		filepath.Join(appHome, ".src", "llama.cpp", "build-vulkan", "bin", "llama-server.exe"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server"),
 		filepath.Join(appHome, ".src", "llama.cpp", "build", "bin", "llama-server.exe"),
+	}
+	// The installer links llama-server beside the ggrun it installs and asks
+	// the user to put that directory on PATH. Without PATH (a launcher started
+	// by its absolute path, a service, a fresh shell) that sibling was never
+	// considered and a correct fresh install reported no backend. Last, so no
+	// existing installation's choice changes.
+	if exe, err := executablePath(); err == nil && exe != "" {
+		dir := filepath.Dir(exe)
+		paths = append(paths, filepath.Join(dir, "llama-server"), filepath.Join(dir, "llama-server.exe"))
 	}
 	// A configured APP_HOME is an explicit installation boundary. Global
 	// detection still runs after these paths in selectBackend/findBackend, but
@@ -9625,7 +9804,7 @@ func detectBackend(path string) *backendInfo {
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
 	out, _ := cmd.CombinedOutput()
-	help := string(out)
+	help := stableBackendProbeOutput(string(out))
 	info.Help = help
 	info.Identity = backendBuildIdentity(path)
 	lowerBase := strings.ToLower(filepath.Base(path))
@@ -9676,6 +9855,26 @@ func probedCPUExpertMMapCapability(info *backendInfo) (placement.CPUExpertMMapCa
 	return placement.CPUExpertMMapFileBacked, "help-probed mapped CPU-expert loader: " + identity
 }
 
+// backendLogLine matches llama.cpp's common_log prefix: elapsed time since
+// process start, then a level letter ("0.00.000.407 I srv  llama_server: ...").
+var backendLogLine = regexp.MustCompile(`^\d+\.\d{2}\.\d{3}\.\d{3} [DIWE] `)
+
+// stableBackendProbeOutput drops the backend's own timestamped log lines from
+// --version/--help output. Those lines carry a per-run elapsed time, and since
+// llama.cpp began logging one on startup, hashing the raw output gave the same
+// build a new identity on every launch: every cache keyed on it missed, so
+// each relaunch repeated calibration (observed live, 2026-09-24).
+func stableBackendProbeOutput(out string) string {
+	lines := strings.Split(out, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !backendLogLine.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 func backendBuildIdentity(path string) string {
 	cmd := exec.Command(path, "--version")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
@@ -9683,7 +9882,7 @@ func backendBuildIdentity(path string) string {
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
 	out, _ := cmd.CombinedOutput()
-	material := strings.TrimSpace(string(out))
+	material := strings.TrimSpace(stableBackendProbeOutput(string(out)))
 	if fi, err := os.Stat(path); err == nil {
 		material += fmt.Sprintf("\n%s\n%d\n%d", filepath.Base(path), fi.Size(), fi.ModTime().UnixNano())
 	}

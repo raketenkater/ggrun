@@ -157,6 +157,7 @@ type Model struct {
 	kvQualityTouched bool
 	settingsCursor   int
 	ramLimitPercent  int
+	ramBudgetMB      int
 
 	// Advanced (per-launch) config screen cursor
 	cfgCursor int
@@ -302,6 +303,7 @@ func sessionModel() Model {
 		supportOnline:   cfg.SupportOnline,
 		aituneRounds:    rounds,
 		ramLimitPercent: cfg.RAMLimitPercent,
+		ramBudgetMB:     config.ParseBudgetMB(cfg.RamBudget),
 		spinner:         spin,
 	}
 	m.modelUsage = modelusage.Load(cfg.CacheDir)
@@ -352,7 +354,7 @@ type startupReadyMsg struct {
 	recs      []recommend.Recommendation
 }
 
-func loadHardwareAndModelsCmd(modelDir, cacheDir, backend string, ramLimit, vramHeadroomMB, ramHeadroomMB int) tea.Cmd {
+func loadHardwareAndModelsCmd(modelDir, cacheDir, backend string, ramLimit, vramHeadroomMB, ramHeadroomMB, ramBudgetMB int) tea.Cmd {
 	return func() tea.Msg {
 		caps, _ := detect.Detect()
 		models := loadRecognizedModels(modelDir, cacheDir, backend, caps)
@@ -362,6 +364,7 @@ func loadHardwareAndModelsCmd(modelDir, cacheDir, backend string, ramLimit, vram
 			vramHeadroomMB:  vramHeadroomMB,
 			ramHeadroomMB:   ramHeadroomMB,
 		}
+		tmp.ramBudgetMB = ramBudgetMB
 		tmp.refreshRecommendations()
 		return startupReadyMsg{
 			caps: caps, models: models,
@@ -574,7 +577,7 @@ func (m Model) Init() tea.Cmd {
 	}
 	return tea.Batch(
 		m.spinner.Tick,
-		loadHardwareAndModelsCmd(m.modelDir, m.cacheDir, m.backend, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB),
+		loadHardwareAndModelsCmd(m.modelDir, m.cacheDir, m.backend, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB, m.ramBudgetMB),
 	)
 }
 
@@ -1672,7 +1675,7 @@ func (m Model) viewMain() string {
 
 	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  Models:   %d recognized (%d elsewhere)\n", len(m.models), external))
 	b.WriteString(fmt.Sprintf("  Primary:  %s\n", m.modelDir))
 	b.WriteString(fmt.Sprintf("  Settings: %s\n", m.settingsPath))
@@ -1708,7 +1711,7 @@ func (m Model) viewMain() string {
 func (m Model) viewFirstRun() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ ggrun First Run ═══") + "\n")
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
 	b.WriteString("  Start with Recommended; ggrun will choose a model and quant that fit.\n")
 	b.WriteString("\n")
@@ -2410,9 +2413,7 @@ func formatHeadroomMB(mb int) string {
 }
 
 func (m *Model) refreshRecommendations() {
-	caps := detect.ApplyRAMLimitPercent(m.caps, m.ramLimitPercent)
-	caps = detect.ApplyVRAMHeadroom(caps, m.vramHeadroomMB)
-	caps = detect.ApplyRAMHeadroom(caps, m.ramHeadroomMB)
+	caps := recommend.PlanningCapabilities(restrictedCapabilities(m.caps), m.ramBudgetMB, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB)
 	m.recommendationGroups = recommend.TopCategories(caps, 4)
 	m.recommendations = flattenRecommendationCategories(m.recommendationGroups)
 	if len(m.recommendations) == 0 {
@@ -2502,7 +2503,9 @@ func wordWrap(s string, width int) []string {
 func (m Model) viewRecommended() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ Recommended Downloads ═══") + "\n")
-	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(m.caps)))
+	// Show the inventory the recommendations below were planned against:
+	// the session's device restriction and the configured RAM ceiling.
+	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(recommend.PlanningCapabilities(restrictedCapabilities(m.caps), m.ramBudgetMB, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB))))
 	b.WriteString("  " + m.recommendedHeadroomControls() + "\n")
 	for _, line := range wordWrap(recommend.CatalogAttribution(), m.width) {
 		b.WriteString("  " + line + "\n")
@@ -2724,6 +2727,12 @@ func modelItemFromPath(path string, info os.FileInfo, external bool) (ModelItem,
 	dirPath := filepath.Dir(path)
 	modelKey := filepath.Join(dirPath, baseName)
 	totalBytes := info.Size()
+	// Walk reports the link itself for a symlinked model; size the target.
+	if info.Mode()&os.ModeSymlink != 0 {
+		if st, err := os.Stat(path); err == nil {
+			totalBytes = st.Size()
+		}
+	}
 	if isMultiPart {
 		totalBytes = 0
 		for _, shardPath := range shardFiles {
@@ -3874,6 +3883,8 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		}
 	}
 	return &LaunchRequest{
+		GPUs:        hardwareRestriction.gpus,
+		CPUOnly:     hardwareRestriction.cpuOnly,
 		ModelPath:   model.Path,
 		Port:        m.port,
 		CtxSize:     ctx,
@@ -3979,6 +3990,48 @@ type LaunchRequest struct {
 	// catalog (pkg/chattemplate), mirroring the CLI's --chat-template <name>.
 	// Empty means auto-match. Per-launch only.
 	ChatTemplate string
+	// GPUs and CPUOnly carry the hardware restriction the TUI was opened with
+	// (`ggrun tui --gpus 0,1` / `--cpu`) into every launch, as the CLI flags.
+	GPUs    string
+	CPUOnly bool
+}
+
+// hardwareRestriction is the GPU selection or CPU-only mode the TUI was opened
+// with. It shapes recommendations and every launch, so a TUI session on a
+// shared machine plans and serves inside the same devices as the CLI would.
+var hardwareRestriction struct {
+	gpus    string
+	cpuOnly bool
+}
+
+// SetHardwareRestriction restricts this TUI session to the given physical GPU
+// indices (as --gpus) or to CPU-only serving. Empty and false mean all devices.
+func SetHardwareRestriction(gpus string, cpuOnly bool) {
+	hardwareRestriction.gpus = strings.TrimSpace(gpus)
+	hardwareRestriction.cpuOnly = cpuOnly
+}
+
+// restrictedCapabilities applies the session's hardware restriction to the
+// detected inventory used for recommendations.
+func restrictedCapabilities(caps *detect.Capabilities) *detect.Capabilities {
+	if caps == nil || (hardwareRestriction.gpus == "" && !hardwareRestriction.cpuOnly) {
+		return caps
+	}
+	selected := *caps
+	selected.GPUs = nil
+	if hardwareRestriction.cpuOnly {
+		return &selected
+	}
+	wanted := map[string]bool{}
+	for _, part := range strings.Split(hardwareRestriction.gpus, ",") {
+		wanted[strings.TrimSpace(part)] = true
+	}
+	for _, gpu := range caps.GPUs {
+		if wanted[strconv.Itoa(gpu.Index)] {
+			selected.GPUs = append(selected.GPUs, gpu)
+		}
+	}
+	return &selected
 }
 
 func (req *LaunchRequest) LaunchArgs() []string {
@@ -3986,6 +4039,11 @@ func (req *LaunchRequest) LaunchArgs() []string {
 		return nil
 	}
 	args := []string{req.ModelPath}
+	if req.CPUOnly {
+		args = append(args, "--cpu")
+	} else if req.GPUs != "" {
+		args = append(args, "--gpus", req.GPUs)
+	}
 	if req.Port > 0 {
 		args = append(args, "--port", strconv.Itoa(req.Port))
 	}

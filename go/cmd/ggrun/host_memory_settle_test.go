@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -126,5 +127,48 @@ func TestPendingReleaseMovesTheWaitToTheNextLaunch(t *testing.T) {
 	}
 	if releaseIsPending(dir) {
 		t.Fatal("marker not cleared after waiting")
+	}
+}
+
+// A plan the containment gate refuses is re-planned once with the gate's
+// reserve held back from placement, and the re-plan must pass the same gate.
+func TestContainHostMemoryReplansWithTheReserveHeldBack(t *testing.T) {
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072}}
+	gate := func(req *launchRequest, _ *detect.Capabilities, s *placement.Strategy) error {
+		if s.PlannedHostFootprintMB+max(req.CgroupHeadroomMB, s.CRAM) > req.RamBudgetMB {
+			return fmt.Errorf("planned host footprint %d MiB exceeds the ceiling", s.PlannedHostFootprintMB)
+		}
+		return nil
+	}
+	first := &placement.Strategy{Type: placement.MoEOffload, ContextSize: 78848, PlannedHostFootprintMB: 26497, CRAM: 1024}
+	contained := &placement.Strategy{Type: placement.MoEOffload, ContextSize: 58368, PlannedHostFootprintMB: 24434, CRAM: 1024}
+
+	req := &launchRequest{RamBudgetMB: 28672, CgroupHeadroomMB: 4096}
+	var reserveSeen int
+	got, err := containHostMemory(req, caps, first, func(r *launchRequest) (*placement.Strategy, error) {
+		reserveSeen = r.PlacementHostReserveMB
+		return contained, nil
+	}, gate)
+	if err != nil || got != contained {
+		t.Fatalf("refused plan was not re-planned into containment: %v %+v", err, got)
+	}
+	if reserveSeen != 4096 {
+		t.Fatalf("re-plan held back %d MiB, want the gate's 4096 MiB reserve", reserveSeen)
+	}
+
+	// A re-plan that still does not fit is refused, not launched.
+	req = &launchRequest{RamBudgetMB: 28672, CgroupHeadroomMB: 4096}
+	if _, err := containHostMemory(req, caps, first, func(*launchRequest) (*placement.Strategy, error) { return first, nil }, gate); err == nil {
+		t.Fatal("an uncontainable re-plan was accepted")
+	}
+
+	// A plan that already fits is returned unchanged with no re-plan.
+	req = &launchRequest{RamBudgetMB: 28672, CgroupHeadroomMB: 4096}
+	got, err = containHostMemory(req, caps, contained, func(*launchRequest) (*placement.Strategy, error) {
+		t.Fatal("a contained plan was re-planned")
+		return nil, nil
+	}, gate)
+	if err != nil || got != contained || req.PlacementHostReserveMB != 0 {
+		t.Fatalf("contained plan changed: %v %+v reserve=%d", err, got, req.PlacementHostReserveMB)
 	}
 }

@@ -135,6 +135,16 @@ def version_tuples(text: str) -> set[tuple[str, ...]]:
     return versions
 
 
+def versions_match(target: set[tuple[str, ...]], candidate: set[tuple[str, ...]]) -> bool:
+    """True when some candidate version starts with a target version.
+
+    The parser also reads a hyphenated size as a third component, so
+    "Qwen3.6-27B" yields (3, 6, 27); requiring equality with the row's (3, 6)
+    rejected every such repo.
+    """
+    return any(c[: len(t)] == t for t in target for c in candidate)
+
+
 def uniq(values: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -762,10 +772,51 @@ def model_query(row: dict[str, Any]) -> str:
     return clean_repo_model_name(display_name(row))
 
 
+# Words that name a different model of the same family and generation. A repo
+# carrying one the scored model lacks (or lacking one it has) is another model:
+# "Devstral 2" is not "Devstral Small 2", and an instruct row must not inherit a
+# "-Base-" repo. "base" is a stop word for search, so these are compared on the
+# raw name.
+VARIANT_QUALIFIERS = {
+    "air", "base", "coder", "distill", "flash", "large", "lite", "medium", "mini",
+    "nano", "next", "omni", "small", "tiny", "vl",
+    # Modified derivatives are different models too: an "Uncensored" or
+    # "Heretic" retune does not carry the original's benchmark score.
+    "abliterated", "ablated", "decensored", "heretic", "lorablated", "merge",
+    "merged", "nsfw", "roleplay", "uncensored",
+}
+
+
+def raw_name_tokens(text: str) -> set[str]:
+    return set(norm(text).split())
+
+
+def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[str, Any]) -> bool:
+    """Words before the model's own name may only be its creator's name.
+
+    Quantizers prefix the publisher ("mistralai_Devstral", "LiquidAI_LFM2.5");
+    anything else there names a retune ("MANGO-Qwen3-Omni", "Huihui-...").
+    """
+    words = norm(candidate_name).split()
+    families = family_tokens(target_tokens)
+    start = next((i for i, w in enumerate(words)
+                  if w in target_tokens or any(w.startswith(f) for f in families)), None)
+    if not start:
+        return True
+    prefix = "".join(words[:start])
+    creator = norm(model_creator_name(row)).replace(" ", "")
+    return bool(creator) and (prefix.startswith(creator) or creator.startswith(prefix))
+
+
 def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     target_query = model_query(row)
     target_tokens = tokens(target_query)
-    candidate_tokens = tokens(candidate_repo)
+    # Judge the repository's model name, not its owner: "DevQuasar-4" once
+    # supplied the "4" of "Mistral Small 4" for a Small-24B-Base-2501 repo.
+    candidate_name = repo_name(candidate_repo)
+    # Quant and GGUF suffixes are not part of the name: "Q4_0_4_8" once
+    # supplied the "4" of "Mistral Small 4" for a Small-Instruct-2409 repo.
+    candidate_tokens = tokens(clean_repo_model_name(candidate_name))
     if not target_tokens or not candidate_tokens:
         return False
     if not family_match(target_tokens, candidate_tokens):
@@ -774,10 +825,23 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     if needed_sizes and not (needed_sizes & candidate_tokens):
         return False
     target_versions = version_tuples(target_query)
-    if target_versions and not (target_versions & version_tuples(candidate_repo)):
+    if target_versions and not versions_match(target_versions, version_tuples(candidate_name)):
+        return False
+    # A bare generation number ("Small 4", "Devstral 2") identifies the model as
+    # much as a dotted version does.
+    generations = {t for t in target_tokens if t.isdigit()}
+    if generations - candidate_tokens:
+        return False
+    # Parenthetical notes ("based on GLM-4.5-Air") describe lineage, not the
+    # model's own name.
+    target_raw = raw_name_tokens(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
+    candidate_raw = raw_name_tokens(clean_repo_model_name(candidate_name))
+    if (target_raw & VARIANT_QUALIFIERS) != (candidate_raw & VARIANT_QUALIFIERS):
+        return False
+    if not creator_prefix_only(clean_repo_model_name(candidate_name), target_tokens, row):
         return False
     overlap = len(target_tokens & candidate_tokens)
-    if overlap == 0 and not (version_tuples(target_query) & version_tuples(candidate_repo)):
+    if overlap == 0 and not versions_match(target_versions, version_tuples(candidate_name)):
         return False
     return True
 
@@ -1044,6 +1108,61 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
     }
 
 
+# The architecture tables of the backends ggrun builds. A catalog row whose
+# GGUF architecture neither registers needs a fork backend on first launch,
+# which ggrun builds automatically; the recommender labels such rows.
+UPSTREAM_ARCH_TABLES = (
+    ("llama.cpp", "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/src/llama-arch.cpp"),
+    ("ik_llama.cpp", "https://raw.githubusercontent.com/ikawrakow/ik_llama.cpp/main/src/llama-arch.cpp"),
+)
+
+
+def parse_arch_names(source: str) -> set[str]:
+    """Architecture names registered in a llama-arch.cpp LLM_ARCH_NAMES table."""
+    start = source.find("LLM_ARCH_NAMES")
+    if start < 0:
+        return set()
+    body = source[start:]
+    end = body.find("};")
+    if end < 0:
+        return set()
+    return {name.lower() for name in re.findall(r'\{\s*LLM_ARCH_\w+\s*,\s*"([^"]+)"', body[:end])}
+
+
+def fetch_upstream_arches() -> set[str] | None:
+    """Union of upstream architecture names, or None when any table is unreadable.
+
+    A partial union would mark rows the missing backend loads as unrunnable, so
+    an incomplete fetch stamps nothing and the recommender falls back to its
+    explicit blocklist.
+    """
+    names: set[str] = set()
+    for label, url in UPSTREAM_ARCH_TABLES:
+        try:
+            parsed = parse_arch_names(fetch_text(url, timeout=30))
+        except Exception as exc:  # noqa: BLE001 - any failure leaves rows unstamped
+            print(f"warning: {label} architecture table unavailable ({exc}); runnability not stamped", file=sys.stderr)
+            return None
+        if not parsed:
+            print(f"warning: {label} architecture table had no entries; runnability not stamped", file=sys.stderr)
+            return None
+        names |= parsed
+    return names
+
+
+def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) -> None:
+    """Mark each row with a known GGUF architecture as loadable upstream or not.
+
+    The stamp labels fork-only rows; it never removes them from recommendations.
+    """
+    if not arches:
+        return
+    for cand in candidates:
+        arch = str(cand.get("arch") or "").lower()
+        if arch:
+            cand["runnable"] = arch in arches
+
+
 def catalog_intelligence(row: dict[str, Any]) -> float:
     val = row.get("aa_intelligence_index")
     return float(val) if isinstance(val, (int, float)) else 0.0
@@ -1077,6 +1196,7 @@ def main() -> int:
     parser.add_argument("--print-top", type=int, default=0, help="print top N source models by intelligence index")
     parser.add_argument("--print-open-weights-top", type=int, default=0, help="print top N open-weight source models by intelligence index")
     parser.add_argument("--print-catalog-top", type=int, default=0, help="print top N checked-in GGUF recommendation rows by cached intelligence")
+    parser.add_argument("--stamp-runnable-only", action="store_true", help="only re-stamp upstream runnability on the existing catalog")
     args = parser.parse_args()
 
     global HF_MIN_DELAY_SECONDS, HF_429_BACKOFF_SECONDS
@@ -1084,6 +1204,17 @@ def main() -> int:
     HF_429_BACKOFF_SECONDS = max(0.0, args.hf_429_backoff)
 
     catalog_path = Path(args.catalog)
+    if args.stamp_runnable_only:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        arches = fetch_upstream_arches()
+        if not arches:
+            raise SystemExit("upstream architecture tables unavailable")
+        stamp_runnable(catalog.get("candidates", []), arches)
+        tmp = catalog_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(catalog_path)
+        print(f"stamped runnability in {catalog_path}")
+        return 0
     api_key = os.environ.get(args.api_key_env, "").strip()
     if not api_key and not args.allow_missing_key:
         raise SystemExit(f"{args.api_key_env} is not set")
@@ -1107,6 +1238,7 @@ def main() -> int:
             return 0
         raise SystemExit("no GGUF candidates resolved")
 
+    stamp_runnable(catalog["candidates"], fetch_upstream_arches())
     if args.print_catalog_top > 0:
         print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")

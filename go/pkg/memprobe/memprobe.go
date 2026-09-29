@@ -248,11 +248,26 @@ func Load(cacheDir, key string) (Plan, bool) {
 	return plan, true
 }
 
-func FindGuardLibrary() string {
+// GuardLibraryName is the CUDA allocation firewall preloaded into contained
+// memory probes.
+const GuardLibraryName = "libggrun-memguard.so"
+
+// FindGuardLibrary locates the allocation firewall for the install rooted at
+// appHome. An explicit GGRUN_MEMGUARD_LIBRARY is authoritative: when it does not
+// name a regular file the guard is unavailable rather than silently replaced.
+//
+// Otherwise the candidates are the running executable's own bundle (release
+// archives ship the library beside the binary) and then the resolved app home's
+// .bin/bin directories (the source installer and a `go install` layout). The
+// current directory is deliberately not searched: the library is LD_PRELOADed
+// into the backend, and the directory a user happens to launch from is neither
+// a reliable install location nor a trusted one.
+func FindGuardLibrary(appHome string) string {
 	if runtime.GOOS != "linux" {
 		return ""
 	}
-	if configured := strings.TrimSpace(os.Getenv("GGRUN_MEMGUARD_LIBRARY")); configured != "" {
+	if configured, ok := os.LookupEnv("GGRUN_MEMGUARD_LIBRARY"); ok && strings.TrimSpace(configured) != "" {
+		configured = strings.TrimSpace(configured)
 		if regularFile(configured) {
 			return configured
 		}
@@ -262,15 +277,15 @@ func FindGuardLibrary() string {
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
-			filepath.Join(dir, "libggrun-memguard.so"),
-			filepath.Join(dir, "..", "lib", "libggrun-memguard.so"),
+			filepath.Join(dir, GuardLibraryName),
+			filepath.Join(dir, "..", "lib", GuardLibraryName),
 		)
 	}
-	if cwd, err := os.Getwd(); err == nil {
+	if appHome = strings.TrimSpace(appHome); appHome != "" {
 		candidates = append(candidates,
-			filepath.Join(cwd, "native", "memguard", "libggrun-memguard.so"),
-			filepath.Join(cwd, "..", "native", "memguard", "libggrun-memguard.so"),
-			filepath.Join(cwd, "..", "..", "native", "memguard", "libggrun-memguard.so"),
+			filepath.Join(appHome, ".bin", GuardLibraryName),
+			filepath.Join(appHome, "bin", GuardLibraryName),
+			filepath.Join(appHome, "native", "memguard", GuardLibraryName),
 		)
 	}
 	for _, candidate := range candidates {

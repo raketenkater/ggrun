@@ -28,7 +28,7 @@ func TestSaveVerifiedConfigWritesScopedRecord(t *testing.T) {
 	}
 	req := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1}
 
-	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy, nil)
 
 	key := verifiedConfigScopeKey(req, model, backend, caps)
 	if key == "" {
@@ -63,7 +63,7 @@ func TestSaveVerifiedConfigSkipsNoCachedConfig(t *testing.T) {
 	strategy := &placement.Strategy{Type: placement.SingleGPU, ContextSize: 8192, MainGPU: 0, BatchSize: 2048, UBatchSize: 512, Parallel: 1, MMap: true, FlashAttention: true}
 	req := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1, NoCachedConfig: true}
 
-	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy, nil)
 
 	key := verifiedConfigScopeKey(req, model, backend, caps)
 	if key != "" {
@@ -83,7 +83,7 @@ func TestSaveVerifiedConfigSkipsScreenedCalibrationWinner(t *testing.T) {
 	strategy := &placement.Strategy{Type: placement.SingleGPU, ContextSize: 8192, MainGPU: 0, BatchSize: 256, UBatchSize: 256, Parallel: 2}
 	req := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 2, CalibrationScreened: true}
 
-	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy, nil)
 
 	if entries, _ := filepath.Glob(filepath.Join(cacheDir, "verified-configs", "verified-*.json")); len(entries) != 0 {
 		t.Fatalf("screened calibration winner leaked into automatic verified configs: %v", entries)
@@ -99,12 +99,12 @@ func TestSaveVerifiedConfigSkipsPendingOptimizerDecision(t *testing.T) {
 	strategy := &placement.Strategy{Type: placement.SingleGPU, ContextSize: 8192, MainGPU: 0, BatchSize: 256, UBatchSize: 256, Parallel: 2, PerformanceTuned: true}
 	req := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 2, CalibrationPending: true}
 
-	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy, nil)
 	if entries, _ := filepath.Glob(filepath.Join(cacheDir, "verified-configs", "verified-*.json")); len(entries) != 0 {
 		t.Fatalf("pending optimizer winner leaked into verified configs: %v", entries)
 	}
 	req.CalibrationPending = false
-	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy, nil)
 	if entries, _ := filepath.Glob(filepath.Join(cacheDir, "verified-configs", "verified-*.json")); len(entries) != 1 {
 		t.Fatalf("promoted optimizer winner was not persisted: %v", entries)
 	}
@@ -123,7 +123,7 @@ func TestInvalidateRuntimeOOMDeletesVerifiedConfig(t *testing.T) {
 	strategy := &placement.Strategy{Type: placement.SingleGPU, ContextSize: 8192, MainGPU: 0, BatchSize: 2048, UBatchSize: 512, Parallel: 1, MMap: true, FlashAttention: true}
 	req := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1}
 
-	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy)
+	saveVerifiedConfigForLaunch(cfg, req, model, backend, caps, strategy, nil)
 	key := verifiedConfigScopeKey(req, model, backend, caps)
 	if key == "" {
 		t.Fatal("expected a scope key")
@@ -170,5 +170,53 @@ func TestVerifiedConfigScopeKeyChangesWithRequest(t *testing.T) {
 	diffBackend := &backendInfo{Tag: "ik_llama", Identity: "ik-build", Path: "/usr/bin/ik_llama"}
 	if got := verifiedConfigScopeKey(base, model, diffBackend, caps); got == key {
 		t.Fatal("a different backend must produce a different verified-config scope key")
+	}
+	diffKV := &launchRequest{CtxFlag: "8192", KVQuality: "q8_0", KVPlacement: "gpu", Parallel: 1}
+	if got := verifiedConfigScopeKey(diffKV, model, backend, caps); got == key {
+		t.Fatal("a different KV quality must produce a different verified-config scope key")
+	}
+	diffSWA := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1, ExtraArgs: []string{"--swa-full"}}
+	if got := verifiedConfigScopeKey(diffSWA, model, backend, caps); got == key {
+		t.Fatal("full SWA must produce a different verified-config scope key")
+	}
+	moved := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "3090", VRAMTotalMB: 24576, PCIBusID: "0000:65:00.0", PCIGen: 3, PCILanes: 16}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	movedReq := &launchRequest{CtxFlag: "8192", KVQuality: "mid", KVPlacement: "gpu", Parallel: 1}
+	if got := verifiedConfigScopeKey(movedReq, model, backend, moved); got == key {
+		t.Fatal("a different physical device must produce a different verified-config scope key")
+	}
+}
+
+// The verified config must describe the launch that served: an unchanged
+// relaunch rebuilds its argv from it. A strategy whose CRAM or mmap drifted
+// after start (B2: served -cram 0, recorded 2560) is reconciled to the argv.
+func TestVerifiedConfigRecordsTheServedArgv(t *testing.T) {
+	strategy := &placement.Strategy{Type: placement.MoEOffload, CRAM: 2560, MaxCheckpoints: 16, BatchSize: 2048, UBatchSize: 512, MMap: true}
+	served := []string{"llama-server", "-b", "2048", "-ub", "128", "--no-mmap", "-cram", "0", "--ctx-checkpoints", "8"}
+	got := strategyForServedArgs(strategy, served)
+	if got.CRAM != 0 || got.MaxCheckpoints != 8 || got.UBatchSize != 128 || got.MMap {
+		t.Fatalf("record does not match the served argv: %+v", got)
+	}
+	if strategy.CRAM != 2560 || !strategy.MMap {
+		t.Fatal("reconciliation mutated the caller's strategy")
+	}
+	if strategyForServedArgs(strategy, nil) != strategy {
+		t.Fatal("no served argv must leave the strategy as is")
+	}
+}
+
+// A re-plan inside the start boundary must derive, not replay the verified
+// record whose argv was just rejected.
+func TestStartBoundaryReplanNeverReplaysTheVerifiedRecord(t *testing.T) {
+	in := placement.Options{VerifiedConfigScopeKey: "scope-that-was-reused", ContextSize: 8192, BackendTag: "llama"}
+	got := startBoundaryReplanOptions(in)
+	if got.VerifiedConfigScopeKey != "" {
+		t.Fatalf("re-plan options replay verified record %q", got.VerifiedConfigScopeKey)
+	}
+	if got.ContextSize != 8192 || got.BackendTag != "llama" {
+		t.Fatal("re-plan options changed anything but the verified key")
 	}
 }

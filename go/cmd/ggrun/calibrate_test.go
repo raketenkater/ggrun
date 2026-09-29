@@ -616,6 +616,32 @@ func TestCalibrationPlanCachesUnavailableAdmissionWithoutPerformancePromotion(t 
 	}
 }
 
+func TestVerifiedConfigReuseDoesNotScheduleAnotherChallengerLoad(t *testing.T) {
+	req, cfg, model, be, caps := calibrateTestSetup(60 * 1024)
+	cfg.CacheDir = t.TempDir()
+	strategy := &placement.Strategy{
+		Type: placement.MoEOffload, KVPlacement: "cpu", KVQuality: "mid",
+		ContextSize: 32768, Parallel: 1, BatchSize: 2048, UBatchSize: 512,
+		NCPUMoE: 40, VerifiedConfigReused: true,
+	}
+	if got := calibrationPlan(req, cfg, model, be, caps, strategy); len(got) != 0 {
+		t.Fatalf("verified-config relaunch scheduled %d calibration loads", len(got))
+	}
+	// The same shape without a verified config still has a search, so the skip
+	// is the reuse flag and not an empty candidate generator.
+	fresh := *strategy
+	fresh.VerifiedConfigReused = false
+	if got := calibrationPlan(req, cfg, model, be, caps, &fresh); len(got) < 2 {
+		t.Fatalf("unverified launch lost its calibration finalist: %+v", got)
+	}
+	// An explicit maintenance sweep may still measure alternatives.
+	maintain := *req
+	maintain.Calibrate = calibrateOn
+	if got := calibrationPlan(&maintain, cfg, model, be, caps, strategy); len(got) < 2 {
+		t.Fatalf("explicit calibrate on was suppressed by verified-config reuse: %+v", got)
+	}
+}
+
 func TestExactCalibrationCandidateRejectsRecoveredArgv(t *testing.T) {
 	candidate := []string{"llama-server", "-ub", "1024", "--n-cpu-moe", "40"}
 	if !exactCalibrationCandidate(candidate, append([]string(nil), candidate...)) {

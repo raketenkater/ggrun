@@ -531,8 +531,9 @@ func defaultAccel() string {
 	return "cpu"
 }
 
-// buildLlamaFork cmake-configures and builds llama-server for the given
-// accelerator. Returns the built binary path.
+// buildLlamaFork cmake-configures and builds llama-server, plus the fork's own
+// memory oracle when it defines one, for the given accelerator. Returns the
+// built server path.
 func buildLlamaFork(srcDir, accel, cudaArch string) (string, error) {
 	buildDir := filepath.Join(srcDir, "build-"+accel)
 	return buildLlamaForkAt(srcDir, buildDir, accel, cudaArch)
@@ -593,7 +594,29 @@ func buildLlamaForkAt(srcDir, buildDir, accel, cudaArch string) (string, error) 
 	if _, err := os.Stat(bin); err != nil {
 		return "", fmt.Errorf("build produced no binary at %s", bin)
 	}
+	buildOptionalBackendTools(buildDir, func(target string) error {
+		return runStreamed(srcDir, "cmake", "--build", buildDir, "--config", "Release", "--parallel", strconv.Itoa(jobs), "--target", target)
+	})
 	return bin, nil
+}
+
+// buildOptionalBackendTools builds the auxiliary targets the configured tree
+// defines, into the same build directory as its server so both come from one
+// source and configuration. A failure is reported, not fatal: the server works
+// and launch falls back to contained measurement. A tool that builds but does
+// not start is removed so launch cannot select it.
+func buildOptionalBackendTools(buildDir string, build func(target string) error) {
+	for _, target := range backends.OptionalBuildTargets(buildDir) {
+		if err := build(target); err != nil {
+			backends.DiscardBrokenBuildTool(buildDir, target, err)
+			fmt.Fprintf(os.Stderr, "[backend] optional %s did not build (%v); launches will measure memory with contained loads instead\n", target, err)
+			continue
+		}
+		if err := backends.CheckFitParamsTool(filepath.Join(buildDir, "bin", target)); err != nil {
+			backends.DiscardBrokenBuildTool(buildDir, target, err)
+			fmt.Fprintf(os.Stderr, "[backend] optional %s failed its check (%v); removed\n", target, err)
+		}
+	}
 }
 
 // validateBackendCandidate is the activation gate shared by fresh installs and

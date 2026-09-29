@@ -129,14 +129,56 @@ type StartOptions struct {
 
 // threadSafeBuffer is a bytes.Buffer protected by a mutex for concurrent writes.
 type threadSafeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	lastWrite time.Time
 }
 
 func (b *threadSafeBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(p) > 0 {
+		b.lastWrite = time.Now()
+	}
 	return b.buf.Write(p)
+}
+
+// LastWrite is when the backend last produced output; zero when it never did.
+func (b *threadSafeBuffer) LastWrite() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastWrite
+}
+
+// StartupFailure is the supervisor's typed account of a backend that never
+// became ready. A log that stops after a few seconds says nothing about the
+// remaining wait; this records how the wait actually ended and how long the
+// backend had been silent, so a stalled load is distinguishable from a slow one.
+type StartupFailure struct {
+	// Outcome is "timeout" (readiness deadline expired and the process was
+	// stopped), "exited" (the process ended on its own) or "health-error" (the
+	// health endpoint reported a failure).
+	Outcome string
+	Elapsed time.Duration
+	Timeout time.Duration
+	// LastOutputAge is the time between the backend's last output and the end
+	// of the wait; -1 when it produced no output at all.
+	LastOutputAge time.Duration
+	Err           error
+}
+
+func (e *StartupFailure) Error() string {
+	if e == nil || e.Err == nil {
+		return "backend startup failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *StartupFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 func (b *threadSafeBuffer) String() string {
@@ -259,13 +301,17 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		fmt.Fprint(os.Stderr, "\r\033[K") // clear the spinner line
 	}
 	if err != nil {
+		failure := &StartupFailure{Outcome: startupOutcome(p, err), Elapsed: time.Since(start), Timeout: timeout, LastOutputAge: -1, Err: err}
+		if last := logBuf.LastWrite(); !last.IsZero() {
+			failure.LastOutputAge = time.Since(last)
+		}
 		logStartupEvent(logStartupEvents, safeTermErr, "[launch] health check failed after %s: %v", time.Since(start).Round(time.Second), err)
 		if tty {
 			fmt.Fprintln(os.Stderr, "[launch] backend failed to start; last output:")
 			fmt.Fprintln(os.Stderr, tailLines(logBuf.String(), 20))
 		}
 		p.Stop()
-		return p, fmt.Errorf("server not ready: %w", err)
+		return p, fmt.Errorf("server not ready: %w", failure)
 	}
 	live.Store(true) // backend is up — stream its logs from here on
 	logStartupEvent(logStartupEvents, safeTermErr, "[launch] health check OK after %s", time.Since(start).Round(time.Second))
@@ -273,6 +319,20 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		fmt.Fprintf(os.Stderr, "[launch] model loaded - server ready in %s\n", time.Since(start).Round(time.Second))
 	}
 	return p, nil
+}
+
+// startupOutcome classifies why readiness failed. A process that already ended
+// exited on its own; otherwise the supervisor gave up on a live process.
+func startupOutcome(p *Process, err error) string {
+	select {
+	case <-p.done:
+		return "exited"
+	default:
+	}
+	if strings.HasPrefix(err.Error(), "timeout waiting for server") {
+		return "timeout"
+	}
+	return "health-error"
 }
 
 func commandWithEnvironment(args, overrides []string) []string {

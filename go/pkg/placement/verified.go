@@ -71,13 +71,17 @@ type VerifiedConfig struct {
 	FlashAttention            bool                    `json:"flash_attention"`
 	SWAFull                   bool                    `json:"swa_full"`
 	CRAM                      int                     `json:"cram,omitempty"`
-	MaxCheckpoints            int                     `json:"max_checkpoints,omitempty"`
-	MeasuredCheckpointMB      float64                 `json:"measured_checkpoint_mb,omitempty"`
-	CheckpointMinStep         int                     `json:"checkpoint_min_step,omitempty"`
-	UseCUDAGraphs             bool                    `json:"use_cuda_graphs,omitempty"`
-	Host                      string                  `json:"host,omitempty"`
-	NoJinja                   bool                    `json:"no_jinja,omitempty"`
-	ReasoningOff              bool                    `json:"reasoning_off"`
+	// CRAMSet marks a record whose CRAM is the served decision, including a
+	// deliberate 0 (no host prompt cache). Records without it predate storing
+	// CRAM, so a 0 there still means "derive it".
+	CRAMSet              bool    `json:"cram_set,omitempty"`
+	MaxCheckpoints       int     `json:"max_checkpoints,omitempty"`
+	MeasuredCheckpointMB float64 `json:"measured_checkpoint_mb,omitempty"`
+	CheckpointMinStep    int     `json:"checkpoint_min_step,omitempty"`
+	UseCUDAGraphs        bool    `json:"use_cuda_graphs,omitempty"`
+	Host                 string  `json:"host,omitempty"`
+	NoJinja              bool    `json:"no_jinja,omitempty"`
+	ReasoningOff         bool    `json:"reasoning_off"`
 	// Model semantics are runtime behavior, not merely placement diagnostics:
 	// HasSSM emits --no-context-shift and activates fair parallel-agent batching.
 	// Persist them so the direct-start path cannot erase those policies.
@@ -95,6 +99,11 @@ type VerifiedConfig struct {
 	PlanFreeVRAM           map[int]int `json:"plan_free_vram,omitempty"` // stale-plan guard (cache.go:121-129)
 	PlannedHostFootprintMB int         `json:"planned_host_footprint_mb,omitempty"`
 	MeasuredAt             string      `json:"measured_at"`
+	// KVQuality is the strategy's own quality spelling (an exact type such as
+	// "q8_0" or a tier such as "mid"). It is part of the calibration scope, so a
+	// reuse that re-derived it from KVType missed the decision recorded for the
+	// very same configuration and screened again. Empty on older records.
+	KVQuality string `json:"kv_quality,omitempty"`
 }
 
 // VerifiedConfigPath returns the cache file for one verified-config scope.
@@ -187,7 +196,7 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 		ContextFitRejected:       vc.ContextFitRejected,
 		ContextFitEvidence:       vc.ContextFitEvidence,
 		KVPlacement:              vc.KVPlacement,
-		KVQuality:                kvTypeToQuality(vc.KVType),
+		KVQuality:                verifiedKVQuality(vc),
 		KVType:                   vc.KVType,
 		KVTypeV:                  vc.KVTypeV,
 		NCPUMoE:                  vc.NCPUMoE,
@@ -271,6 +280,14 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 		s.CPUExpertMMapCapability = opts.CPUExpertMMapCapability
 		s.CPUExpertMMapEvidence = opts.CPUExpertMMapEvidence
 	}
+	// Backend flag dialect is a property of the current backend, set by the
+	// same probes Compute's base strategy uses. Without it a DenseCPUOffload
+	// record rebuilt `-ngl 999` instead of the `--fit` that served, and the
+	// unchanged relaunch of a 27B on a 12 GiB card ran out of memory.
+	s.BackendSupportsFit = backendHelpSupports(opts.BackendHelp, "-fit")
+	s.BackendFitTakesValue = backendFitTakesValue(opts.BackendHelp)
+	s.BackendSupportsKVOffload = backendHelpSupports(opts.BackendHelp, "--kv-offload")
+	s.BackendCheckpointMinStepFlag = backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag)
 	if s.Host == "" {
 		s.Host = "127.0.0.1"
 	}
@@ -313,6 +330,7 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 		KVPlacement:        s.KVPlacement,
 		KVType:             s.KVType,
 		KVTypeV:            s.KVTypeV,
+		KVQuality:          s.KVQuality,
 		BatchSize:          s.BatchSize,
 		UBatchSize:         s.UBatchSize,
 		BatchTuned:         s.BatchTuned,
@@ -335,6 +353,7 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 		FlashAttention:           s.FlashAttention,
 		SWAFull:                  s.SWAFull,
 		CRAM:                     s.CRAM,
+		CRAMSet:                  true,
 		MaxCheckpoints:           s.MaxCheckpoints,
 		MeasuredCheckpointMB:     s.MeasuredCheckpointMB,
 		CheckpointMinStep:        s.CheckpointMinStep,
@@ -408,4 +427,11 @@ func kvTypeToQuality(kvType string) string {
 	default:
 		return ""
 	}
+}
+
+func verifiedKVQuality(vc *VerifiedConfig) string {
+	if vc.KVQuality != "" {
+		return vc.KVQuality
+	}
+	return kvTypeToQuality(vc.KVType)
 }

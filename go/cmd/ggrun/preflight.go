@@ -83,6 +83,12 @@ type preflightOutcome struct {
 	// on a machine with no GPU. `ggrun memory-probe` asked for the measurement
 	// specifically, so it still treats this as a failure.
 	ProbeUnavailable string
+	// DeviceComputeMB is the no-allocation oracle's compute-buffer row for the
+	// failed device: an exact graph size, reported even though the deficit
+	// itself is a device total.
+	DeviceComputeMB int
+	// DeviceContextMB is the oracle's KV/context row for the failed device.
+	DeviceContextMB int
 }
 
 const memoryEvidenceSchemaVersion = memprobe.SchemaVersion
@@ -152,7 +158,7 @@ func waitForPredecessorPort(port int, timeout time.Duration, warn io.Writer) boo
 	deadline := time.Now().Add(timeout)
 	waited := false
 	for {
-		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		ln, err := listenLikeBackend(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err == nil {
 			_ = ln.Close()
 			if waited {
@@ -247,7 +253,12 @@ func memoryEvidenceKey(be *backendInfo, model *placement.ModelProfile, caps *det
 	}
 	if caps != nil {
 		for _, gpu := range caps.GPUs {
-			_, _ = io.WriteString(h, fmt.Sprintf("gpu=%d:%s:%d\n", gpu.Index, gpu.Name, gpu.VRAMTotalMB))
+			// Index is the slot the device rows were measured in. PCI address
+			// and link shape distinguish two cards that share a name and a
+			// VRAM size; free memory is intentionally absent so a tighter
+			// budget does not erase a still-valid allocation observation.
+			_, _ = io.WriteString(h, fmt.Sprintf("gpu=%d|%s|%s|%d|gen%d|x%d\n",
+				gpu.Index, gpu.PCIBusID, gpu.Name, gpu.VRAMTotalMB, gpu.PCIGen, gpu.PCILanes))
 		}
 	}
 	// The ik canary is sensitive to host-allocation flags such as --no-mmap,
@@ -259,7 +270,10 @@ func memoryEvidenceKey(be *backendInfo, model *placement.ModelProfile, caps *det
 
 func loadMemoryEvidence(cacheDir, key string) (memoryPlanEvidence, bool) {
 	plan, ok := memprobe.Load(cacheDir, key)
-	if !ok || plan.Evidence != memprobe.EvidenceGuardedAllocated || len(plan.Devices) == 0 {
+	// A CPU-only launch measures host memory only; its evidence has no device
+	// rows. Rejecting that made every CPU-only relaunch probe again.
+	hostMeasured := plan.Host.ModelBytes+plan.Host.ContextBytes+plan.Host.ComputeBytes+plan.Host.UnaccountedBytes > 0
+	if !ok || plan.Evidence != memprobe.EvidenceGuardedAllocated || (len(plan.Devices) == 0 && !hostMeasured) {
 		return memoryPlanEvidence{}, false
 	}
 	devices := make([]preflightDevice, 0, len(plan.Devices))
@@ -485,6 +499,62 @@ func backendLoadFailureDiagnostic(logData string) string {
 	return best
 }
 
+// modelFormatRejectionMarkers are llama.cpp loader errors about the GGUF's own
+// metadata or tensor layout. They mean the backend predates the model's format
+// (for example a newer revision of a supported architecture that adds layers),
+// so no memory, context or KV setting can make the load succeed. Allocation
+// failures ("unable to allocate ... buffer") are deliberately absent: they are
+// reported through the same "error loading model" prefix but are memory errors.
+var modelFormatRejectionMarkers = []string{
+	"error loading model hyperparameters",
+	"error loading model architecture",
+	"error loading model vocabulary",
+	"unknown model architecture",
+	"wrong array length",
+	"missing tensor",
+	"has wrong shape",
+	"wrong number of tensors",
+}
+
+// modelFormatRejection returns the backend's loader line when it rejected the
+// model file itself, or "" when the log shows no such rejection.
+func modelFormatRejection(logData string) string {
+	for _, line := range strings.Split(logData, "\n") {
+		lower := strings.ToLower(line)
+		for _, marker := range modelFormatRejectionMarkers {
+			if !strings.Contains(lower, marker) {
+				continue
+			}
+			detail := strings.TrimSpace(line)
+			if i := strings.LastIndex(lower, "error loading model"); i >= 0 {
+				detail = strings.TrimSpace(line[i:])
+			}
+			if len(detail) > 300 {
+				detail = detail[:300]
+			}
+			return detail
+		}
+	}
+	return ""
+}
+
+// backendModelFormatError marks a backend that cannot read the model file. It
+// is not a memory result: the launch must not suggest memory controls, and the
+// actionable fix is a newer backend.
+type backendModelFormatError struct {
+	Backend string
+	Detail  string
+	LogPath string
+}
+
+func (e *backendModelFormatError) Error() string {
+	msg := fmt.Sprintf("backend %s cannot read this model file; it is older than the model's format: %s. Update it with: ggrun backend update", e.Backend, e.Detail)
+	if e.LogPath != "" {
+		msg += " (backend log: " + e.LogPath + ")"
+	}
+	return msg
+}
+
 // backendUnclassifiedProbeError marks a contained allocation preflight that
 // failed with a backend/model error no ggrun rule classified: no memory OOM
 // (device or firewall/cgroup), no backendAdjustmentFromLog rule, and no known
@@ -585,9 +655,19 @@ func backendAdjustmentFromLog(logData string) *backendLaunchAdjustment {
 	return nil
 }
 
+// guardedProbeCoverageComplete reports whether a contained probe observed
+// everything its memory evidence claims. Device allocations are required only
+// when a device was visible: a CPU-only launch has none to observe, and
+// requiring them turned every CPU-only probe into a consent refusal.
+func guardedProbeCoverageComplete(summary memprobe.Summary, guardInstalled, cgroupComplete, devicesVisible bool) bool {
+	return summary.Loaded && guardInstalled && cgroupComplete && (summary.DeviceEvents || !devicesVisible)
+}
+
 func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, serverArgs []string) (memoryPlanEvidence, error) {
 	key := memoryEvidenceKey(be, model, caps, serverArgs)
 	if evidence, ok := loadMemoryEvidence(cfg.CacheDir, key); ok {
+		cfg.Work.record(launchWorkRecord{Kind: "cached-evidence", Model: modelBasename(model), Backend: backendIdentity(be),
+			ArgvHash: argvHash(serverArgs), EvidenceKey: key, Outcome: "reused"})
 		return evidence, nil
 	}
 	memoryMaxMB := backendMemoryMaxMB(req, caps)
@@ -602,7 +682,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		}
 	}
 	dryRun := backendSupportsAllocationDryRun(be)
-	guardLibrary := memprobe.FindGuardLibrary()
+	guardLibrary := memprobe.FindGuardLibrary(backends.AppHome())
 	if !dryRun && !req.AllowLiveMemoryProbe {
 		return memoryPlanEvidence{}, &liveMemoryProbeConsentError{Reason: "the selected backend has no advertised --dry-run allocation mode, so measurement requires one contained live model load"}
 	}
@@ -628,7 +708,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		guardLogPath = guardLog.Name()
 		_ = guardLog.Close()
 		defer os.Remove(guardLogPath)
-		overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+		overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 		gpuLimitsMB := make([]int, len(caps.GPUs))
 		for i, gpu := range caps.GPUs {
 			gpuLimitsMB[i] = gpu.VRAMFreeMB() - overheadByGPU[gpu.Index]
@@ -642,7 +722,15 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		// uses CUDA host registration even with GGML_CUDA_NO_PINNED requested.
 		envOverrides = memprobe.GuardEnvironment(guardLibrary, guardLogPath, gpuLimitsMB, 0, os.Getenv("LD_PRELOAD"))
 	}
-	timeout := allocationProbeTimeout(model)
+	// The probe reads the weights, so it spends one of the admission's loads and
+	// may not outlive the admission's deadline.
+	timeout, budgetErr := cfg.Work.beginLoad(allocationProbeTimeout(model))
+	if budgetErr != nil {
+		cfg.Work.record(launchWorkRecord{Kind: "budget-refusal", Model: modelBasename(model), Backend: backendIdentity(be),
+			ArgvHash: argvHash(serverArgs), EvidenceKey: key, Outcome: "refused", Reason: budgetErr.Error()})
+		return memoryPlanEvidence{}, budgetErr
+	}
+	probeStarted := time.Now()
 	// Same scope regime as the production launch (backendStartOptions): under
 	// mmap the plan's full file-backed footprint is charged to the cgroup as
 	// reclaimable page cache, so a hard cap at the resident budget OOM-kills a
@@ -662,6 +750,10 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		cgroupStatsComplete = peakErr == nil && oomErr == nil
 		_ = p.Stop()
 	}
+	outcome, reason, lastOutputAge := describeStartOutcome(startErr)
+	cfg.Work.record(launchWorkRecord{Kind: "contained-probe", LoadedWeights: true, Model: modelBasename(model), Backend: backendIdentity(be),
+		ArgvHash: argvHash(serverArgs), EvidenceKey: key, ElapsedSec: time.Since(probeStarted).Seconds(), TimeoutSec: timeout.Seconds(),
+		Outcome: outcome, Reason: reason, LastOutputAge: lastOutputAge, CgroupPeakMiB: bytesToMiBCeil(cgroupPeakBytes), OOMKills: cgroupOOMKills})
 	summary := memprobe.Summary{Devices: map[int]memprobe.DeviceMemory{}}
 	if guardLogPath != "" {
 		var parseErr error
@@ -670,6 +762,12 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 			return memoryPlanEvidence{}, fmt.Errorf("read CUDA allocation firewall evidence: %w", parseErr)
 		}
 		if summary.Denied != nil && (summary.Denied.Kind == "device" || summary.Denied.Kind == "managed") {
+			// Keep the raw backend and firewall logs before returning: the denial
+			// is the evidence a later launch needs to explain this refusal
+			// without paying for another full load.
+			if startErr != nil {
+				persistFailedAllocationProbe(cfg.CacheDir, key, logData, guardLogPath)
+			}
 			deficitBytes := summary.Denied.ActiveBytes + summary.Denied.Bytes
 			if deficitBytes > summary.Denied.LimitBytes {
 				deficitBytes -= summary.Denied.LimitBytes
@@ -715,6 +813,11 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 				Device: device, AllocMB: allocMB, DeficitMB: deficit, IsComputeBuffer: isComputeBuffer,
 			}
 		}
+		// A loader that rejects the file itself cannot be helped by any launch
+		// flag, so it is reported before flag adjustments are considered.
+		if detail := modelFormatRejection(logData); detail != "" {
+			return memoryPlanEvidence{}, &backendModelFormatError{Backend: be.Path, Detail: detail, LogPath: failureLogPath}
+		}
 		// Resource failures take precedence when more than one diagnostic is
 		// present. Only mutate optional launch flags once the firewall, cgroup,
 		// and CUDA log all agree that allocation itself succeeded.
@@ -738,7 +841,8 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		return memoryPlanEvidence{}, &backendLaunchAdjustmentError{Adjustment: *adjustment}
 	}
 	parsed := parseIKAllocationDevices(logData)
-	coverageComplete := summary.Loaded && summary.DeviceEvents && guardLibrary != "" && cgroupStatsComplete
+	devicesVisible := !req.CPUMode && caps != nil && len(caps.GPUs) > 0
+	coverageComplete := guardedProbeCoverageComplete(summary, guardLibrary != "", cgroupStatsComplete, devicesVisible)
 	devices := reconcileGuardedDevices(parsed, summary)
 	if !coverageComplete && !req.AllowLiveMemoryProbe {
 		return memoryPlanEvidence{}, &liveMemoryProbeConsentError{Reason: "the automatic memory probe completed without full CUDA/cgroup evidence, so only an explicitly approved one-use result is available"}
@@ -812,54 +916,43 @@ func preflightContextTotalMB(devs []preflightDevice) int {
 }
 
 // findFitParamsBin locates the llama-fit-params binary belonging to the given
-// server binary: a sibling of the resolved binary (backend build dir), then a
-// sibling of the unresolved path (.bin), then PATH. Empty when unavailable.
+// server binary: the oracle must sit in the same directory as the resolved
+// server, i.e. come from the same build. Empty when unavailable.
 //
-// modelArch guards against pairing a fork-only architecture with mainline's
-// fit-params. A fork backend (e.g. nanbeige42, laguna) may have no fit-params
-// sibling of its own, and mainline llama-fit-params cannot load the fork-only
-// architecture — it aborts with "unknown model architecture: 'nanbeige'". ggrun
-// already knows the served GGUF's architecture, so a candidate that cannot load
-// it is rejected rather than run (which would crash the whole launch).
+// Same-build is required, not merely preferred. An app-home .bin directory can
+// hold llama-server linked into ik_llama's build next to llama-fit-params
+// linked into mainline's; pairing them would price ik_llama's allocations with
+// mainline's graph planner. A bare server name is resolved through PATH first
+// and held to the same rule.
+//
+// modelArch guards against a same-build oracle that still cannot load the
+// served architecture; a failed architecture probe does not refuse, because the
+// contained exact-argv probe remains available either way.
 func findFitParamsBin(serverBin, modelArch string) string {
 	if serverBin == "" {
 		return ""
 	}
-	okForArch := func(path string) bool {
-		if modelArch == "" {
-			return true
-		}
-		supported, probed := backends.BackendSupportsArch(path, modelArch)
-		// A failed probe must not block a launch: we could not answer, so do
-		// not refuse on the unknown (the fork path the user selected still gets
-		// to try its own measurement or the contained probe fallback).
-		return !probed || supported
-	}
-	var candidates []string
-	if resolved, err := filepath.EvalSymlinks(serverBin); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(resolved), "llama-fit-params"))
-	}
-	candidates = append(candidates, filepath.Join(filepath.Dir(serverBin), "llama-fit-params"))
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-			if okForArch(c) {
-				return c
-			}
-			// The sibling exists but cannot load this architecture — keep
-			// looking (a sibling of the fork build dir is preferred but must
-			// be compatible) before falling back to PATH.
-			continue
-		}
-	}
-	// A PATH fallback is safe only when the server was itself selected by name.
-	// For an absolute/custom fork path it could pair a fork with mainline's
-	// fit-params and produce false compatibility or memory results.
 	if filepath.Base(serverBin) == serverBin {
-		if p, err := exec.LookPath("llama-fit-params"); err == nil && okForArch(p) {
-			return p
+		found, err := exec.LookPath(serverBin)
+		if err != nil {
+			return ""
+		}
+		serverBin = found
+	}
+	resolved, err := filepath.EvalSymlinks(serverBin)
+	if err != nil {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(resolved), backends.FitParamsTool)
+	if fi, err := os.Stat(candidate); err != nil || fi.IsDir() {
+		return ""
+	}
+	if modelArch != "" {
+		if supported, probed := backends.BackendSupportsArch(candidate, modelArch); probed && !supported {
+			return ""
 		}
 	}
-	return ""
+	return candidate
 }
 
 // preflightArgValueFlags are the launch flags that shape memory allocation.
@@ -1271,7 +1364,14 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		targetDevs = evidence.Devices
 	} else {
 		var err error
+		oracleStarted := time.Now()
 		targetDevs, fitStderr, err = runFitPreflight(fitBin, serverArgs)
+		oracleOutcome, oracleReason := "planned", ""
+		if err != nil {
+			oracleOutcome, oracleReason = "failed", err.Error()
+		}
+		cfg.Work.record(launchWorkRecord{Kind: "oracle", Model: modelBasename(model), Backend: backendIdentity(be),
+			ArgvHash: argvHash(serverArgs), ElapsedSec: time.Since(oracleStarted).Seconds(), Outcome: oracleOutcome, Reason: oracleReason})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[launch] selected-backend memory oracle failed; switching to contained allocation probe: %v\n", err)
 			allocationProbe = true
@@ -1384,7 +1484,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		}
 		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
-	overheadByGPU := placement.SystemCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
 		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
@@ -1421,6 +1521,12 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		outcome.DeficitMB = deficit
 		outcome.DoesNotFit = true
 		outcome.CompanionRejected = companionRejected
+		for _, d := range devs {
+			if idx, ok := cudaDeviceIndex(d.Name); ok && idx == dev {
+				outcome.DeviceComputeMB += d.ComputeMB
+				outcome.DeviceContextMB += d.ContextMB
+			}
+		}
 		return outcome
 	}
 	fmt.Printf("[launch] preflight: placement fits (%s)\n", summary)
@@ -1485,6 +1591,8 @@ func replaceUBatchArg(args []string, ub int) []string {
 // keeps preflightPlacement testable without a full config.Config.
 type configForPreflight struct {
 	CacheDir string
+	// Work bounds and records the enclosing admission. Nil is unbounded.
+	Work *admissionWork
 }
 
 // allocationProbeTimeout bounds the contained allocation probe. A --dry-run

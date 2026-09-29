@@ -1146,7 +1146,7 @@ func retryStartWithAdvisor(req *launchRequest, cfg *config.Config, model *placem
 	if req.ClaudeCode && reviewer == nil {
 		reviewer = &claudeAutoRuntime{reviewerGPU: -1}
 	}
-	fmt.Printf("[launch] %s\n", formatCommand(nextArgs))
+	fmt.Printf("[launch] %s\n", displayCommand(nextArgs))
 	process, next, nextArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, next, be, caps, nextArgs, timeout, memoryRecovery)
 	if err != nil {
 		reviewer.stop()

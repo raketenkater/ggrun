@@ -64,18 +64,26 @@ def _timed_copy(
     return mbps, iterations
 
 
-def _load_memmove() -> Callable[..., object]:
-    candidates = [None]
+def _memmove_library_candidates() -> List[Optional[str]]:
+    """C runtime libraries that export memmove on this platform, in order."""
     if os.name == "nt":
-        candidates.extend(("msvcrt.dll", "ucrtbase.dll"))
-    else:
-        discovered = ctypes.util.find_library("c")
-        if discovered:
-            candidates.append(discovered)
-    for candidate in candidates:
+        # ctypes.CDLL(None) raises TypeError on Windows: there is no dlopen(NULL).
+        return ["vcruntime140.dll", "ucrtbase.dll", "msvcrt.dll"]
+    candidates: List[Optional[str]] = [None]  # the running process, dlopen(NULL)
+    discovered = ctypes.util.find_library("c")
+    if discovered:
+        candidates.append(discovered)
+    return candidates
+
+
+def _load_memmove() -> Callable[..., object]:
+    errors: List[str] = []
+    for candidate in _memmove_library_candidates():
+        name = candidate or "process"
         try:
-            library = ctypes.CDLL(candidate) if candidate else ctypes.CDLL(None)
-        except OSError:
+            library = ctypes.CDLL(candidate)
+        except (OSError, TypeError) as exc:
+            errors.append(f"{name}: {exc}")
             continue
         function = getattr(library, "memmove", None)
         if function is None:
@@ -84,7 +92,9 @@ def _load_memmove() -> Callable[..., object]:
             function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
             function.restype = ctypes.c_void_p
             return function
-    raise ProbeError("C runtime memmove is unavailable")
+        errors.append(f"{name}: no memmove or memcpy export")
+    detail = "; ".join(errors) if errors else "no C runtime library candidate"
+    raise ProbeError(f"C runtime memmove is unavailable ({detail})")
 
 
 def _host_copy_worker(

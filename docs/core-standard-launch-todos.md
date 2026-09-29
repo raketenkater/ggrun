@@ -778,6 +778,9 @@ this is blocked/experimental and outside “automatic best.”
 - [ ] **PORT-3 — hardware matrix.** Validate resident dense, heterogeneous
   multi-GPU, offloaded MoE, recurrent/SWA, parallel-agent, and mmap cases; add
   AMD/Metal/Windows evidence when hardware exists.
+  - 2026-09-27, #73: the Windows host-copy memmove loader is fixed (CRT DLLs
+    only, fails closed). The native CUDA half (`nvcuda.dll`, `cuMemHostAlloc`,
+    profile plausibility) and any Windows placement effect are not yet proven live.
 - [ ] **PORT-4 — fault injection.** Cover stale profiles, flag changes, busy
   devices, partial shards, no oracle, crash/OOM, disk stalls, and interrupted
   relaunch.

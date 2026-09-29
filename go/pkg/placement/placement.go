@@ -1497,18 +1497,25 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 				model.MeasuredKVGeometry = g
 			}
 		}
-		// Same contract for the graph coefficient: measured truth where it exists,
-		// built-in coefficients where it does not.
-		if model.MeasuredComputeCoefficient <= 0 {
-			if c := loadMeasuredComputeCoefficient(opts.CacheDir, model); c > 0 {
-				model.MeasuredComputeCoefficient = c
-			}
-		}
 	}
 
 	resolvedKVQuality, err := resolveKVQuality(model, opts.KVQuality, opts.BackendTag)
 	if err != nil {
 		return nil, err
+	}
+	// The graph coefficient is a cross-shape fit. It may combine ctx/ubatch
+	// points only when they share this plan's backend (including the SWA
+	// feature tag), physical devices, and KV quality/placement. A probe that
+	// does not say which scope it measured stays unused.
+	if !opts.SkipCachedConfig && model.MeasuredComputeCoefficient <= 0 {
+		if c := loadMeasuredComputeCoefficient(opts.CacheDir, model, computeCoefficientScope{
+			BackendTag:   backendCacheTag(opts),
+			GPUSignature: gpuIdentityHash(caps.GPUs),
+			KVQuality:    resolvedKVQuality,
+			KVPlacement:  opts.KVPlacement,
+		}); c > 0 {
+			model.MeasuredComputeCoefficient = c
+		}
 	}
 
 	s := &Strategy{
@@ -1809,7 +1816,18 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	// full-config layer is broader: dense models get one too) and is a clean
 	// miss when the scope key is absent, mismatched, or the file is missing.
 	if !opts.SkipCachedConfig && opts.VerifiedConfigScopeKey != "" {
-		if vc, verr := LoadVerifiedConfig(opts.CacheDir, opts.VerifiedConfigScopeKey); verr == nil && vc != nil {
+		vc, verr := LoadVerifiedConfig(opts.CacheDir, opts.VerifiedConfigScopeKey)
+		switch {
+		case verr != nil && os.IsNotExist(verr):
+			fmt.Fprintln(os.Stderr, "[verified] no verified config for this scope; planning from measurements")
+		case verr != nil:
+			fmt.Fprintf(os.Stderr, "[verified] verified config unusable (%v); planning from measurements\n", verr)
+		case vc != nil:
+			if reason, stale := verifiedConfigFreeVRAMStale(vc, caps); stale {
+				fmt.Fprintf(os.Stderr, "[verified] %s; re-planning\n", reason)
+			}
+		}
+		if verr == nil && vc != nil {
 			if _, stale := verifiedConfigFreeVRAMStale(vc, caps); !stale {
 				restored := VerifiedToStrategy(vc, opts, caps)
 				if restored != nil {
@@ -1839,7 +1857,10 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 					if !opts.SkipCachedConfig {
 						LoadMeasuredPromptCache(opts.CacheDir, model, s, backendCacheTag(opts), caps.GPUs)
 					}
-					if s.CRAM == 0 {
+					// A recorded 0 is a real decision (no host prompt cache), and
+					// re-deriving it served a different argv on every relaunch
+					// (K2-Horizon-MoVA on a 12 GiB card: 0 served, 2560 relaunched).
+					if s.CRAM == 0 && !vc.CRAMSet {
 						applyRuntimeCachePolicy(model, s, caps, totalSizeMB, kvTotalMB, opts)
 					} else if opts.MaxCheckpointsSet {
 						// The saved config is the complete serving decision and is
@@ -2993,7 +3014,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// components, not free VRAM; they contribute 0 to whole-layer fitting but
 	// block optional remainder squeeze below until a successful launch measures
 	// them.
-	sysCUDAOverheadByGPU := SystemCUDAOverheadByGPU(opts.CacheDir, caps.GPUs)
+	sysCUDAOverheadByGPU := PlanningCUDAOverheadByGPU(opts.CacheDir, caps.GPUs)
 
 	// Load per-model/runtime probe cache. Until a model has completed one launch
 	// with these settings, use a first-launch fallback that keeps the main GPU
@@ -4098,8 +4119,11 @@ func DerateCUDAOOMArgsForDeficit(args []string, model *ModelProfile, caps *detec
 			// Keep the in-memory Strategy's UBatchSize in sync with serverArgs —
 			// applyDeratedPlacementEntry applies this to strategy, which is what
 			// the success path persists to the .place cache. Without it, a cache
-			// hit later would resurrect the OOM'd, too-large ubatch.
-			return newArgs, &CacheEntry{UBatchSize: next}, true
+			// hit later would resurrect the OOM'd, too-large ubatch. The entry
+			// also carries the argv's mmap state: applyDeratedPlacementEntry
+			// copies MMap unconditionally, and a zero value turned a served
+			// mmap launch into a verified config that relaunched --no-mmap.
+			return newArgs, &CacheEntry{UBatchSize: next, MMap: argIndex(newArgs, "--no-mmap") < 0}, true
 		}
 	}
 	_, moeLayers := moeLayerRange(model)
@@ -5101,10 +5125,80 @@ const computeCoefficientReferenceContext = 1048576
 // future plan, and the recorder is known to file partial values -- see the
 // RelatedModelRuntimeGraphGrowth comment on a KV figure mislabelled as growth.
 //
+// computeCoefficientScope is the provenance a learned graph coefficient has
+// to share with the plan that would use it. BackendTag is the probe cache
+// tag, so a --swa-full measurement (the tag gains "|swa-full=true") is a
+// different scope from the same backend without that feature.
+type computeCoefficientScope struct {
+	BackendTag   string
+	GPUSignature string
+	KVQuality    string
+	KVPlacement  string
+}
+
+func (s computeCoefficientScope) complete() bool {
+	return strings.TrimSpace(s.BackendTag) != "" &&
+		strings.TrimSpace(s.GPUSignature) != "" &&
+		strings.TrimSpace(s.KVQuality) != "" &&
+		strings.TrimSpace(s.KVPlacement) != ""
+}
+
+func (s computeCoefficientScope) placementSpecified() bool {
+	switch strings.ToLower(strings.TrimSpace(s.KVPlacement)) {
+	case "", "auto":
+		return false
+	default:
+		return true
+	}
+}
+
+// probeCoefficientHeader reads the scope line the probe writer emits. A file
+// that does not name backend, devices, KV quality and placement has no
+// provenance and cannot feed the coefficient.
+func probeCoefficientHeader(line string) (ctx, ubatch int, scope computeCoefficientScope, ok bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "# ctx=") {
+		return 0, 0, computeCoefficientScope{}, false
+	}
+	fields := map[string]string{}
+	for _, kv := range strings.Fields(line) {
+		k, v, found := strings.Cut(kv, "=")
+		if !found || k == "" {
+			continue
+		}
+		fields[k] = v
+	}
+	ctx, _ = strconv.Atoi(fields["ctx"])
+	ubatch, _ = strconv.Atoi(fields["ubatch"])
+	scope = computeCoefficientScope{
+		BackendTag:   fields["backend"],
+		GPUSignature: fields["gpu_sig"],
+		KVQuality:    fields["kv_quality"],
+		KVPlacement:  fields["kv_placement"],
+	}
+	return ctx, ubatch, scope, scope.complete()
+}
+
+func coefficientScopeMatches(probe, want computeCoefficientScope) bool {
+	if probe.BackendTag != want.BackendTag || probe.GPUSignature != want.GPUSignature || probe.KVQuality != want.KVQuality {
+		return false
+	}
+	if want.placementSpecified() && probe.KVPlacement != want.KVPlacement {
+		return false
+	}
+	return true
+}
+
 // Returns 0 when there is no usable evidence, which leaves the built-in
 // coefficients untouched. A model with no probes plans exactly as it does today.
-func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float64 {
+func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile, want computeCoefficientScope) float64 {
+	// Missing backend, devices, or KV quality is not a licence to scan every
+	// probe. An unspecified placement ("auto" or empty) is allowed: the
+	// probes must then all share one placement, enforced below.
 	if cacheDir == "" || model == nil || model.HiddenSize <= 0 || model.NumLayers <= 0 {
+		return 0
+	}
+	if strings.TrimSpace(want.BackendTag) == "" || strings.TrimSpace(want.GPUSignature) == "" || strings.TrimSpace(want.KVQuality) == "" {
 		return 0
 	}
 	modelBase := filepath.Base(model.Path)
@@ -5112,7 +5206,12 @@ func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float6
 	if err != nil {
 		return 0
 	}
-	var coefficients []float64
+	type probedPoint struct {
+		scope       computeCoefficientScope
+		ctx, ubatch int
+		buffers     []int
+	}
+	var points []probedPoint
 	for _, ent := range entries {
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".probe") {
 			continue
@@ -5126,18 +5225,13 @@ func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float6
 			continue
 		}
 		ctx, ubatch := 0, 0
+		var scope computeCoefficientScope
+		header := false
 		var buffers []int
 		for _, line := range strings.Split(text, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "# ctx=") {
-				for _, kv := range strings.Fields(line) {
-					if v, ok := strings.CutPrefix(kv, "ctx="); ok {
-						ctx, _ = strconv.Atoi(v)
-					}
-					if v, ok := strings.CutPrefix(kv, "ubatch="); ok {
-						ubatch, _ = strconv.Atoi(v)
-					}
-				}
+				ctx, ubatch, scope, header = probeCoefficientHeader(line)
 				continue
 			}
 			if v, ok := strings.CutPrefix(line, "PROBED_COMPUTE_BUF_MB_CUDA"); ok {
@@ -5148,6 +5242,26 @@ func loadMeasuredComputeCoefficient(cacheDir string, model *ModelProfile) float6
 				}
 			}
 		}
+		if !header || ctx <= 0 || ubatch <= 0 || len(buffers) == 0 || !coefficientScopeMatches(scope, want) {
+			continue
+		}
+		points = append(points, probedPoint{scope: scope, ctx: ctx, ubatch: ubatch, buffers: buffers})
+	}
+	if !want.placementSpecified() {
+		placement := ""
+		for _, point := range points {
+			if placement == "" {
+				placement = point.scope.KVPlacement
+				continue
+			}
+			if point.scope.KVPlacement != placement {
+				return 0
+			}
+		}
+	}
+	var coefficients []float64
+	for _, point := range points {
+		ctx, ubatch, buffers := point.ctx, point.ubatch, point.buffers
 		if ctx <= 0 || ubatch <= 0 || len(buffers) == 0 {
 			continue
 		}
@@ -6293,6 +6407,38 @@ func SystemCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// UnmeasuredCUDAOverheadMB is reserved on a device whose runtime overhead
+// (CUDA context, library workspaces, driver allocations) has never been
+// measured on this machine. It is llama.cpp's own default --fit-target margin:
+// the same backend reserves 1024 MiB per device for exactly this unaccounted
+// memory when it fits a model itself, and ggrun launches it with --fit off.
+// Without it a first launch admitted plans the no-allocation oracle priced at
+// 76 and 218 MiB of slack; both ran out of CUDA0 memory at the end of a
+// ten-minute load (MiMo-V2.6-Flash, 2026-09-24; later measured overhead on the
+// same card: 234 MiB). A measured value always replaces it.
+const UnmeasuredCUDAOverheadMB = 1024
+
+// PlanningCUDAOverheadByGPU is the per-device runtime overhead planning and
+// admission must reserve: the measured value where one exists, otherwise
+// UnmeasuredCUDAOverheadMB. Measurement code that subtracts overhead from an
+// observed VRAM delta must keep using SystemCUDAOverheadByGPU, which reports
+// only what was measured.
+func PlanningCUDAOverheadByGPU(cacheDir string, gpus []detect.GPU) map[int]int {
+	out := SystemCUDAOverheadByGPU(cacheDir, gpus)
+	if len(gpus) == 0 {
+		return out
+	}
+	if out == nil {
+		out = map[int]int{}
+	}
+	for _, g := range gpus {
+		if out[g.Index] <= 0 {
+			out[g.Index] = UnmeasuredCUDAOverheadMB
+		}
 	}
 	return out
 }
@@ -7680,6 +7826,7 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 // unknown, not growth.
 func runtimeGraphGrowthFromVRAMDelta(
 	gpus []detect.GPU, baselineVRAMByGPU, usedVRAMByGPU, overheadByGPU map[int]int, serverLog string,
+	oracleTotalsByGPU map[int]int,
 ) map[int]int {
 	growthByGPU := map[int]int{}
 	for _, g := range gpus {
@@ -7699,10 +7846,17 @@ func runtimeGraphGrowthFromVRAMDelta(
 		// model and KV shares from the strategy instead would fold planning error
 		// straight into the growth figure.
 		modelBufMB, kvBufMB, computeBufMB := parseBuffersFromLog(serverLog, g.Index)
-		if modelBufMB <= 0 && computeBufMB <= 0 {
+		accountedMB := modelBufMB + kvBufMB + computeBufMB
+		// The oracle's total for the started argv includes buffers the log does
+		// not itemize (recurrent/SWA state); against the log alone, Qwen3.8-
+		// Flash-Next booked 1792-2030 MiB of "growth" that the next launch then
+		// reserved, while that launch peaked ~450 MiB above its oracle total.
+		if oracleMB := oracleTotalsByGPU[g.Index]; oracleMB > 0 {
+			accountedMB = oracleMB
+		} else if modelBufMB <= 0 && computeBufMB <= 0 {
 			continue
 		}
-		growthMB := usedMB - baselineMB - overheadMB - (modelBufMB + kvBufMB + computeBufMB)
+		growthMB := usedMB - baselineMB - overheadMB - accountedMB
 		if growthMB < 0 {
 			// The accounting did not close. Record nothing rather than a number
 			// this launch does not support.
@@ -7735,7 +7889,7 @@ func runtimeGraphGrowthFromVRAMDelta(
 // and the OOM recorder ratchets it back up — the direction that already works.
 func RecordPostLaunchRuntimeGraphGrowth(
 	cacheDir string, model *ModelProfile, strategy *Strategy, backendTag string,
-	gpus []detect.GPU, baselineVRAMByGPU map[int]int, serverLog string,
+	gpus []detect.GPU, baselineVRAMByGPU map[int]int, serverLog string, oracleTotalsByGPU map[int]int,
 ) bool {
 	if model == nil || strategy == nil || serverLog == "" ||
 		len(gpus) == 0 || len(baselineVRAMByGPU) == 0 ||
@@ -7749,7 +7903,7 @@ func RecordPostLaunchRuntimeGraphGrowth(
 		}
 	}
 	growthByGPU := runtimeGraphGrowthFromVRAMDelta(
-		gpus, baselineVRAMByGPU, usedVRAMByGPU, SystemCUDAOverheadByGPU(cacheDir, gpus), serverLog)
+		gpus, baselineVRAMByGPU, usedVRAMByGPU, SystemCUDAOverheadByGPU(cacheDir, gpus), serverLog, oracleTotalsByGPU)
 	if len(growthByGPU) == 0 {
 		return false
 	}
@@ -8095,7 +8249,14 @@ func parseMemoryBreakdownTable(log string) map[int]int {
 // system cache — otherwise the companion latches as permanent CUDA overhead on
 // its card (the 2916 MiB bug from 2026-08-02, and the 6160 MiB GPU1 column in
 // the current logs).
-func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, serverPID int, companionVRAMByGPU map[int]int) {
+//
+// oracleTotalsByGPU, when non-empty, holds the no-allocation oracle's
+// per-device total for exactly the argv that started. Live usage minus that
+// total is the memory admission could not see, which is precisely the reserve
+// admission needs, so it is the preferred source. oracleOnly restricts the
+// probe to that source (used for dense models, which the log-based sources
+// have never measured).
+func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, serverPID int, companionVRAMByGPU map[int]int, oracleTotalsByGPU map[int]int, oracleOnly bool) {
 	if len(gpus) == 0 || serverLog == "" {
 		return
 	}
@@ -8164,7 +8325,32 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	// leaving the term budgeted 0 forever. It is also already net of any
 	// companion's VRAM (the companion sits in "free"), so it cannot re-latch the
 	// 2916 MiB companion-as-overhead bug.
+	// Preferred source: live usage against the oracle's own total for this
+	// argv. On MiMo-V2.6-Flash it was 608/831/481 MiB on CUDA0/1/2 across two
+	// different placements, while the log-based whole-device source recorded
+	// 1775/4626/354 because it misses buffers the log does not itemize.
+	for _, gpu := range gpus {
+		if _, done := overheadByGPU[gpu.Index]; done {
+			continue
+		}
+		oracleMB := oracleTotalsByGPU[gpu.Index]
+		if oracleMB <= 0 {
+			continue
+		}
+		usedMB := QueryVRAMUsedByPIDOnGPU(serverPID, gpu.Index)
+		if usedMB <= 0 {
+			if live := QueryVRAMUsed(gpu.Index); live > 0 {
+				usedMB = live - companionVRAMByGPU[gpu.Index]
+			}
+		}
+		if delta := usedMB - oracleMB; delta > 0 && delta < gpu.VRAMTotalMB/systemProbeOutlierRatio {
+			overheadByGPU[gpu.Index] = delta
+		}
+	}
 	tableOverhead := parseMemoryBreakdownTable(serverLog)
+	if oracleOnly {
+		tableOverhead = nil
+	}
 	if len(tableOverhead) > 0 {
 		for _, gpu := range gpus {
 			if _, done := overheadByGPU[gpu.Index]; done {
@@ -8206,6 +8392,9 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	// tensors as a result, and so re-measured the same way. A card the server
 	// does not use is skipped, not guessed at.
 	for _, gpu := range gpus {
+		if oracleOnly {
+			break
+		}
 		if _, ok := overheadByGPU[gpu.Index]; ok {
 			continue // breakdown table already provided this device
 		}
@@ -8247,6 +8436,9 @@ func RunPostLaunchProbe(cacheDir string, gpus []detect.GPU, serverLog string, se
 	// the same outlier ceiling as the other sources. Anything larger is another
 	// workload, not a CUDA context, and must not latch.
 	for _, gpu := range gpus {
+		if oracleOnly {
+			break
+		}
 		if _, ok := overheadByGPU[gpu.Index]; ok {
 			continue // an earlier source already answered for this device
 		}

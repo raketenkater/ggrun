@@ -157,7 +157,7 @@ func cmdMemoryProbe(args []string) {
 			strategy = next
 			fmt.Fprintf(os.Stderr,
 				"[memory-probe] %s after CUDA%d allocation %d MiB (deficit %d MiB, next=%s)\n",
-				method, outcome.Device, outcome.AllocMB, outcome.DeficitMB, formatCommand(nextArgs),
+				method, outcome.Device, outcome.AllocMB, outcome.DeficitMB, displayCommand(nextArgs),
 			)
 			continue
 		}

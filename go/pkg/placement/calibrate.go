@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -94,7 +95,11 @@ type CalibrationDecision struct {
 	// this explicit marker. Old decisions without the field stay valid for
 	// loading (scope-key validation is unchanged); they just cannot be matched
 	// for clearing.
-	ModelBasename          string                `json:"model_basename,omitempty"`
+	ModelBasename string `json:"model_basename,omitempty"`
+	// Scope keeps the components ScopeKey hashes, so a later launch that misses
+	// this decision can say which component changed instead of silently
+	// repeating the search. Informational only: ScopeKey stays the authority.
+	Scope                  *CalibrationScopeKey  `json:"scope,omitempty"`
 	Winner                 string                `json:"winner"` // candidate Name, e.g. "default" or "kv-alternate"
 	ValidationLevel        string                `json:"validation_level"`
 	DefaultTPS             float64               `json:"default_tps"`
@@ -222,6 +227,56 @@ func LoadCalibrationDecision(cacheDir, scopeKey string) (*CalibrationDecision, e
 		return nil, fmt.Errorf("calibration decision scope mismatch")
 	}
 	return &d, nil
+}
+
+// ExplainCalibrationScopeMiss names the scope components that differ between
+// key and the most recent decision recorded for the same model, so a repeated
+// search is attributable. It returns the compared file and the differing
+// component names; an empty file means there was nothing comparable.
+func ExplainCalibrationScopeMiss(cacheDir, modelBasename string, key CalibrationScopeKey) (string, []string) {
+	dir := filepath.Join(cacheDir, "calibration")
+	entries, err := os.ReadDir(dir)
+	if err != nil || modelBasename == "" {
+		return "", nil
+	}
+	var newest *CalibrationDecision
+	newestFile := ""
+	var newestTime time.Time
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "cal-") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var d CalibrationDecision
+		if json.Unmarshal(data, &d) != nil || d.Scope == nil || d.ModelBasename != modelBasename {
+			continue
+		}
+		if newest == nil || info.ModTime().After(newestTime) {
+			decision := d
+			newest, newestFile, newestTime = &decision, entry.Name(), info.ModTime()
+		}
+	}
+	if newest == nil {
+		return "", nil
+	}
+	var differing []string
+	if newest.SchemaVersion != CalibrationSchemaVersion {
+		differing = append(differing, "SchemaVersion")
+	}
+	a, b := reflect.ValueOf(key), reflect.ValueOf(*newest.Scope)
+	for i := 0; i < a.NumField(); i++ {
+		if !reflect.DeepEqual(a.Field(i).Interface(), b.Field(i).Interface()) {
+			differing = append(differing, a.Type().Field(i).Name)
+		}
+	}
+	return newestFile, differing
 }
 
 // DeleteCalibrationDecision removes a cached calibration result for one scope.

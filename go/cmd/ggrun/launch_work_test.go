@@ -1,0 +1,422 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/placement"
+)
+
+type admissionClock struct{ t time.Time }
+
+func (c *admissionClock) now() time.Time          { return c.t }
+func (c *admissionClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// A nested probe used to take a fresh 30-minute timeout of its own. Under one
+// admission every start draws from the same deadline and load allowance.
+func TestNestedLoadsCannotResetTheAdmissionDeadline(t *testing.T) {
+	clock := &admissionClock{t: time.Unix(1_700_000_000, 0)}
+	work := newAdmissionWork("start", 50*time.Minute, 30*time.Minute, maxStartAdmissionLoads, "", clock.now)
+
+	first, err := work.beginLoad(30 * time.Minute)
+	if err != nil || first != 30*time.Minute {
+		t.Fatalf("first probe = %s, %v; want its own 30m ceiling", first, err)
+	}
+	clock.advance(30 * time.Minute) // the probe ran to its timeout
+	second, err := work.beginLoad(30 * time.Minute)
+	if err != nil || second != 20*time.Minute {
+		t.Fatalf("second load = %s, %v; want the 20m left in the window", second, err)
+	}
+	clock.advance(20*time.Minute - 500*time.Millisecond)
+	if _, err := work.beginLoad(30 * time.Minute); !isAdmissionBudgetError(err) {
+		t.Fatalf("expired window allowed another load: %v", err)
+	}
+	if work.loads != 2 || !work.loadedWeights() {
+		t.Fatalf("loads = %d, loadedWeights = %v", work.loads, work.loadedWeights())
+	}
+}
+
+func TestAdmissionLoadAllowanceIsFinite(t *testing.T) {
+	clock := &admissionClock{t: time.Unix(1_700_000_000, 0)}
+	work := newAdmissionWork("challenger", 10*time.Hour, time.Minute, maxBoundedAdmissionLoads, "", clock.now)
+	for i := 0; i < maxBoundedAdmissionLoads; i++ {
+		if _, err := work.beginLoad(time.Minute); err != nil {
+			t.Fatalf("load %d refused early: %v", i+1, err)
+		}
+		clock.advance(time.Second)
+	}
+	_, err := work.beginLoad(time.Minute)
+	var budget *admissionBudgetError
+	if !errors.As(err, &budget) || budget.Loads != maxBoundedAdmissionLoads {
+		t.Fatalf("third challenger load = %v", err)
+	}
+	// Budget exhaustion is not a memory verdict and must never be cached as one.
+	if isStableExactAdmissionFailure(err) {
+		t.Fatal("budget exhaustion classified as stable negative admission evidence")
+	}
+}
+
+// A memory refusal decided after a contained full-load probe cost a load; the
+// same refusal from the oracle or cached evidence did not.
+func TestRefusalAfterContainedProbeIsExpensive(t *testing.T) {
+	for _, class := range []exactAdmissionClass{exactAdmissionMemory, exactAdmissionCompat, exactAdmissionCompanion} {
+		cheap := exactAdmissionError(class, " on CUDA0 (2701 MiB deficit)", nil)
+		if exactAdmissionLoadedWeights(cheap) {
+			t.Fatalf("%s from metadata was charged as a load", class)
+		}
+		probed := exactAdmissionError(class, " on CUDA0 (2701 MiB deficit)", nil)
+		probed.(*exactAdmissionFailure).loadedWeights = true
+		if !exactAdmissionLoadedWeights(fmt.Errorf("calibrate: %w", probed)) {
+			t.Fatalf("%s after a contained probe was treated as free", class)
+		}
+		if !isStableExactAdmissionFailure(probed) {
+			t.Fatalf("%s stopped being stable evidence", class)
+		}
+	}
+}
+
+// The observed lifecycle: an 11m28s baseline, no oracle, a 20-minute budget.
+// Stopping the baseline for that finalist cannot be paid back.
+func TestHealthyBaselineIsKeptWhenRestorationIsUnaffordable(t *testing.T) {
+	cost := estimateChallengerCost(challengerCostInputs{
+		BaselineLoad: 11*time.Minute + 28*time.Second, BaselineLoadObserved: true,
+		BaselineWorkload: 3 * time.Minute, Ceiling: 30 * time.Minute,
+		ProbeNeeded: true, BaselineRunning: true,
+	})
+	remaining := 20*time.Minute - 3*time.Minute
+	if cost.Affordable(remaining) {
+		t.Fatalf("MiMo finalist judged affordable: %s within %s", cost, remaining)
+	}
+	// Even with the oracle, candidate load + restoration exceed the budget.
+	cost = estimateChallengerCost(challengerCostInputs{
+		BaselineLoad: 11*time.Minute + 28*time.Second, BaselineLoadObserved: true,
+		BaselineWorkload: 3 * time.Minute, Ceiling: 30 * time.Minute, BaselineRunning: true,
+	})
+	if cost.Affordable(remaining) {
+		t.Fatalf("two 11.5-minute loads judged affordable in %s: %s", remaining, cost)
+	}
+	if cost.Restore < 11*time.Minute+28*time.Second {
+		t.Fatalf("restoration reserve %s is below the observed load", cost.Restore)
+	}
+}
+
+func TestSmallModelChallengerRemainsAffordable(t *testing.T) {
+	cost := estimateChallengerCost(challengerCostInputs{
+		BaselineLoad: 12 * time.Second, BaselineLoadObserved: true,
+		BaselineWorkload: 70 * time.Second, Ceiling: 8 * time.Minute, BaselineRunning: true,
+	})
+	if !cost.Affordable(18 * time.Minute) {
+		t.Fatalf("a 12-second model cannot afford one challenger: %s", cost)
+	}
+}
+
+func TestUnobservedBaselineLoadIsPricedAtTheCeiling(t *testing.T) {
+	cost := estimateChallengerCost(challengerCostInputs{Ceiling: 30 * time.Minute, BaselineWorkload: time.Minute})
+	if cost.Load < 30*time.Minute || cost.Restore < 30*time.Minute {
+		t.Fatalf("unknown load cost was assumed cheap: %s", cost)
+	}
+}
+
+func readLaunchWork(t *testing.T, cacheDir string) []launchWorkRecord {
+	t.Helper()
+	f, err := os.Open(launchWorkLedgerPath(cacheDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var out []launchWorkRecord
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var rec launchWorkRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// End to end through the real start boundary: a loader that goes silent uses
+// only its admission window, the attempt is in the ledger as a timeout with its
+// silence, and the admission ends instead of starting another load.
+func TestStalledProductionLoadIsBoundedAndRecorded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake backend")
+	}
+	backend := writeFakeBackend(t, "llama-server", "echo 'load_tensors: loading' >&2\nexec sleep 30\n")
+	cacheDir := t.TempDir()
+	args := []string{backend, "--port", "59995"}
+	started := time.Now()
+	_, _, _, err := startLaunchWithCUDAOOMRecoveryState(
+		&launchRequest{SpecMode: "off", Port: 59995}, &config.Config{CacheDir: cacheDir}, &placement.ModelProfile{Basename: "stall"},
+		nil, &backendInfo{Path: backend, Identity: "fake"}, nil, args, 1500*time.Millisecond, newLaunchMemoryRecovery(),
+	)
+	if err == nil {
+		t.Fatal("stalled load reported success")
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("admission outlived its window: %s", elapsed)
+	}
+	records := readLaunchWork(t, cacheDir)
+	if len(records) != 1 {
+		t.Fatalf("ledger = %#v, want exactly one production attempt", records)
+	}
+	rec := records[0]
+	if rec.Kind != "production" || !rec.LoadedWeights || rec.Outcome != "timeout" || rec.AdmissionLoad != 1 {
+		t.Fatalf("production record = %#v", rec)
+	}
+	if rec.LastOutputAge <= 0 || !strings.Contains(rec.Reason, "timeout waiting for server") {
+		t.Fatalf("record lacks the terminal reason or silence: %#v", rec)
+	}
+	if filepath.Base(launchWorkLedgerPath(cacheDir)) != "launch-work.jsonl" {
+		t.Fatal("ledger path changed")
+	}
+}
+
+func fakeOracleBuild(t *testing.T, fitBody string) string {
+	t.Helper()
+	dir := t.TempDir()
+	server := filepath.Join(dir, "llama-server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "llama-fit-params"), []byte("#!/bin/sh\n"+fitBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+// Qwen3.5-4B, live: three challengers were refused by the oracle only after the
+// healthy baseline had been stopped, which then cost a restoration load. The
+// oracle can refuse them against the pre-launch resource state first.
+func TestPrescreenRefusesOracleDeficitWithoutStoppingBaseline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake oracle")
+	}
+	server := fakeOracleBuild(t, "echo 'CUDA0 2603 2141 990'\n")
+	// Detection saw an idle 4070; the reviewer then took 6553 MiB, which is
+	// what the card returns to once the baseline stops. The live 4B launch
+	// admitted this exact ubatch-1024 plan after the stop with a 5 MiB deficit.
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282}}}
+	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282, VRAMUsedMB: 6553}}}
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	strategy := &placement.Strategy{ContextSize: 125952, UBatchSize: 1024, Parallel: 1}
+	refused, class, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
+		&backendInfo{Path: server, Tag: "llama"}, caps, baseline, strategy, []string{server, "-m", "q.gguf", "-ub", "1024"})
+	// A fresh cache has no measured CUDA overhead, so the backend's default
+	// 1024 MiB margin is reserved on top of the oracle's 5 MiB deficit.
+	if !refused || class != string(exactAdmissionMemory) || !strings.Contains(reason, "CUDA0 deficit 1029 MiB") {
+		t.Fatalf("prescreen = %v %q %q", refused, class, reason)
+	}
+	// With the reviewer's memory back after the stop, a plan that fits is not refused.
+	fits := fakeOracleBuild(t, "echo 'CUDA0 2603 800 900'\n")
+	if refused, _, reason := prescreenCalibrationCandidate(&launchRequest{}, cfg, &placement.ModelProfile{Basename: "q"},
+		&backendInfo{Path: fits, Tag: "llama"}, caps, baseline, strategy, []string{fits, "-m", "q.gguf"}); refused {
+		t.Fatalf("fitting candidate refused: %s", reason)
+	}
+}
+
+func TestPrescreenNeverStartsAContainedProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake oracle")
+	}
+	server := fakeOracleBuild(t, "echo 'boom' >&2; exit 1\n")
+	baseline := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282}}}
+	cacheDir := t.TempDir()
+	refused, _, _ := prescreenCalibrationCandidate(&launchRequest{AllowLiveMemoryProbe: true}, &config.Config{CacheDir: cacheDir},
+		&placement.ModelProfile{Basename: "q"}, &backendInfo{Path: server, Tag: "llama"}, baseline, baseline,
+		&placement.Strategy{ContextSize: 4096, UBatchSize: 512, Parallel: 1}, []string{server, "-m", "q.gguf"})
+	if refused {
+		t.Fatal("an oracle failure was treated as a refusal")
+	}
+	for _, rec := range readLaunchWork(t, cacheDir) {
+		if rec.LoadedWeights {
+			t.Fatalf("prescreen started a weight-loading process: %#v", rec)
+		}
+	}
+}
+
+// MiMo-V2.6-Flash, default path, first use: the oracle left CUDA0 220 MiB
+// over after every expert had left it, while pricing that device's graph
+// buffer at 3125 MiB. That deficit is compute-bound and must reach the ubatch
+// rung instead of failing closed.
+func TestOracleDeficitCoveredByComputeIsComputeBound(t *testing.T) {
+	oracle := memoryPlanEvidence{Level: memoryEvidenceOraclePlanned}
+	got := oracleComputeBoundOutcome(preflightOutcome{Device: 0, DeficitMB: 220, AllocMB: 220, DoesNotFit: true, DeviceComputeMB: 3125, Evidence: oracle})
+	if !got.IsComputeBuffer || got.AllocMB != 3125 || !got.AllocMBMeasured {
+		t.Fatalf("compute-coverable oracle deficit = %#v", got)
+	}
+	// A deficit larger than the graph buffer is not solvable by ubatch alone.
+	if got := oracleComputeBoundOutcome(preflightOutcome{DeficitMB: 5314, DeviceComputeMB: 3125, Evidence: oracle}); got.IsComputeBuffer {
+		t.Fatal("a weight-sized deficit was classified as compute-bound")
+	}
+	// Only oracle rows are exact graph sizes; other evidence keeps its class.
+	if got := oracleComputeBoundOutcome(preflightOutcome{DeficitMB: 220, DeviceComputeMB: 3125, Evidence: memoryPlanEvidence{Level: memoryEvidenceAllocated}}); got.IsComputeBuffer {
+		t.Fatal("non-oracle evidence was reclassified")
+	}
+}
+
+func TestInfeasibleFinalistEstimateStillPersists(t *testing.T) {
+	decision := &placement.CalibrationDecision{ScopeKey: "s", Winner: "default"}
+	candidates := []placement.CalibrationCandidate{
+		{Name: "default", Strategy: &placement.Strategy{}},
+		{Name: "context-786432", Strategy: &placement.Strategy{}, Estimate: placement.CandidateEstimate{AgentCost: math.Inf(1)}},
+	}
+	annotateOptimizationDecision(decision, candidates, []calibrationMeasurement{{Name: "default"}})
+	if _, err := placement.SaveCalibrationDecision(t.TempDir(), *decision); err != nil {
+		t.Fatalf("decision with an infeasible finalist estimate could not be saved: %v", err)
+	}
+}
+
+func TestLearnedReplanOnlyAfterAnOracleOnlyFailure(t *testing.T) {
+	unresolved := &preflightUnresolvedError{errors.New("memory preflight recovery failed closed")}
+	measured := newLaunchMemoryRecovery()
+	measured.observeAdmissionWork(&admissionWork{oracleRuns: 5})
+	if !shouldReplanFromLearnedEvidence(fmt.Errorf("start: %w", unresolved), measured, false) {
+		t.Fatal("oracle-only first-use failure was not re-planned")
+	}
+	if shouldReplanFromLearnedEvidence(unresolved, measured, true) {
+		t.Fatal("re-planned twice")
+	}
+	loaded := newLaunchMemoryRecovery()
+	loaded.observeAdmissionWork(&admissionWork{oracleRuns: 5, loads: 1})
+	if shouldReplanFromLearnedEvidence(unresolved, loaded, false) {
+		t.Fatal("re-planned after weights were loaded")
+	}
+	if shouldReplanFromLearnedEvidence(unresolved, newLaunchMemoryRecovery(), false) {
+		t.Fatal("re-planned with nothing newly measured")
+	}
+	if shouldReplanFromLearnedEvidence(errors.New("health timeout"), measured, false) {
+		t.Fatal("an ordinary start failure triggered a re-plan")
+	}
+}
+
+// After the exact check disproved a planner re-plan in this launch, a fitting
+// oracle result is kept as it is: no re-plan round, and the production start
+// uses exactly the admitted argv.
+func TestProvenFitIsKeptAfterPlannerDisproof(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fakes")
+	}
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "nvidia-smi"), []byte("#!/bin/sh\necho 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := fakeOracleBuild(t, "echo 'CUDA0 2000 1000 500'\n")
+	cacheDir := t.TempDir()
+	model := fitTestModel(131072, 2000)
+	caps := fitTestCaps(12000)
+	req := &launchRequest{SpecMode: "off", CtxFlag: "fit", Parallel: 1, ParallelSet: true, KVPlacement: "gpu", RAMLimitPercent: 95, Port: 59994}
+	be := &backendInfo{Path: server, Dialect: "llama", Tag: "llama", Identity: "test"}
+	strategy := &placement.Strategy{ContextSize: 65536, UBatchSize: 512, Parallel: 1}
+	args := []string{server, "-m", "m.gguf", "--ctx-size", "65536", "-ub", "512", "--port", "59994"}
+	recovery := newLaunchMemoryRecovery()
+	recovery.plannerDisproved = true
+	_, _, gotArgs, err := startLaunchWithCUDAOOMRecoveryState(req, &config.Config{CacheDir: cacheDir}, model, strategy, be, caps, args, 3*time.Second, recovery)
+	if err == nil {
+		t.Fatal("fake server reported ready")
+	}
+	if formatCommand(gotArgs) != formatCommand(args) {
+		t.Fatalf("proven argv was replaced: %v", gotArgs)
+	}
+	var oracles, productions int
+	for _, rec := range readLaunchWork(t, cacheDir) {
+		switch rec.Kind {
+		case "oracle":
+			oracles++
+		case "production":
+			productions++
+			if rec.ArgvHash != argvHash(args) {
+				t.Fatalf("production started a different argv: %#v", rec)
+			}
+		}
+	}
+	if oracles != 1 || productions != 1 {
+		t.Fatalf("oracle runs %d, production starts %d; want one of each", oracles, productions)
+	}
+}
+
+// A 974 MiB oracle deficit on a device whose KV row is 4600 MiB and graph row
+// 1428 MiB needs about an 18% context cut, not the 75% a compute-only sizing
+// produced (262,144 -> 64,512 on Qwen3.8-Flash-Next).
+func TestOracleContextTargetCountsTheKVRow(t *testing.T) {
+	req := &launchRequest{CtxFlag: "fit"}
+	current := &placement.Strategy{ContextSize: 262144, ContextAuto: true, Parallel: 1}
+	outcome := oracleComputeBoundOutcome(preflightOutcome{
+		Device: 0, DeficitMB: 974, DoesNotFit: true, DeviceComputeMB: 1428, DeviceContextMB: 4600,
+		Evidence: memoryPlanEvidence{Level: memoryEvidenceOraclePlanned},
+	})
+	target, ok := automaticContextRecoveryTarget(req, current, []string{"llama-server", "--ctx-size", "262144"}, outcome)
+	if !ok || target < 200000 || target >= 262144 {
+		t.Fatalf("context target = %d, %v; want a proportionate cut", target, ok)
+	}
+}
+
+func TestVerifiedConfigKeySurvivesRequestRewrites(t *testing.T) {
+	req := &launchRequest{CtxFlag: "fit", ExtraArgs: []string{"--swa-full"}, KVQuality: "auto"}
+	model, caps, be := fitTestModel(131072, 2000), fitTestCaps(12000), fitTestBackend()
+	lookup := placementOptionsFromRequestCaps(req, model, be, t.TempDir(), caps).VerifiedConfigScopeKey
+	// Recovery withdraws the generated --swa-full and the backend adjusts KV.
+	req.ExtraArgs = nil
+	req.KVQualityV = "f16"
+	if save := verifiedConfigScopeKey(req, model, be, caps); save != lookup || save == "" {
+		t.Fatalf("save key %q differs from the launch's lookup key %q", save, lookup)
+	}
+	// A new launch with the same original request computes the same key.
+	fresh := &launchRequest{CtxFlag: "fit", ExtraArgs: []string{"--swa-full"}, KVQuality: "auto"}
+	if next := verifiedConfigScopeKey(fresh, model, be, caps); next != lookup {
+		t.Fatalf("next launch key %q, recorded %q", next, lookup)
+	}
+}
+
+// With --gpus 0 the save is handed the runtime view (one re-indexed GPU)
+// while the lookup hashed the detected inventory; both must use one key.
+func TestVerifiedConfigKeyIgnoresTheRuntimeHardwareView(t *testing.T) {
+	req := &launchRequest{CtxFlag: "fit", GPUsFlag: "0"}
+	model, be := fitTestModel(131072, 2000), fitTestBackend()
+	detected := &detect.Capabilities{GPUs: []detect.GPU{
+		{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282, PCIBusID: "00000000:17:00.0"},
+		{Index: 1, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, PCIBusID: "00000000:65:00.0"},
+	}, RAM: detect.RAMInfo{TotalMB: 212000, FreeMB: 200000}, CPU: detect.CPUInfo{Cores: 14}}
+	lookup := placementOptionsFromRequestCaps(req, model, be, t.TempDir(), detected).VerifiedConfigScopeKey
+	runtimeView, _ := runtimeGPUCapabilities(detected, req)
+	if save := verifiedConfigScopeKey(req, model, be, runtimeView); save != lookup {
+		t.Fatalf("restricted launch saved under %q but looks up %q", save, lookup)
+	}
+}
+
+func TestBackendBesideTheInstalledLauncherIsFound(t *testing.T) {
+	prefix := t.TempDir()
+	server := filepath.Join(prefix, "llama-server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := executablePath
+	executablePath = func() (string, error) { return filepath.Join(prefix, "ggrun"), nil }
+	defer func() { executablePath = old }()
+	paths := backendSearchPaths(t.TempDir())
+	found := false
+	for _, p := range paths {
+		if p == server {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("installer's sibling backend %s not searched: %v", server, paths)
+	}
+	if paths[len(paths)-2] != server {
+		t.Fatal("the sibling must come after every existing candidate")
+	}
+}
