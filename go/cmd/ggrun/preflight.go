@@ -158,7 +158,7 @@ func waitForPredecessorPort(port int, timeout time.Duration, warn io.Writer) boo
 	deadline := time.Now().Add(timeout)
 	waited := false
 	for {
-		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		ln, err := listenLikeBackend(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err == nil {
 			_ = ln.Close()
 			if waited {

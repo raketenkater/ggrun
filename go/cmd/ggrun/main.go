@@ -6392,8 +6392,9 @@ func cmdLaunch(args []string) {
 	if launchPort <= 0 {
 		launchPort = cfg.Port
 	}
-	if !waitForPredecessorPort(launchPort, 20*time.Second, os.Stderr) {
-		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 20s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
+	// 75 s outlasts Linux's 60 s TIME_WAIT left by the previous server.
+	if !waitForPredecessorPort(launchPort, 75*time.Second, os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 75s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
 	}
 	if releaseIsPending(cfg.CacheDir) {
 		if pre, perr := detect.Detect(); perr == nil {
