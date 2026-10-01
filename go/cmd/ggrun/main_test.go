@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -3310,6 +3311,60 @@ func TestClaudeCodeSearchMCPArgsEnablesResearchTools(t *testing.T) {
 
 	got = claudeCodeSearchMCPArgs([]string{"--allowed-tools", "mine"})
 	if hasArg(got, "--allowedTools") || hasArg(got, "--allowed-tools") {
+		t.Fatalf("user allowed-tools must not be overridden, got %v", got)
+	}
+}
+
+func TestClaudeCodeSearchMCPArgsYouComOptIn(t *testing.T) {
+	binDir := t.TempDir()
+	uvx := filepath.Join(binDir, "uvx")
+	if err := os.WriteFile(uvx, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("GGRUN_CLAUDE_YOUCOM_MCP", "on")
+
+	got := claudeCodeSearchMCPArgs(nil)
+	cfg := ""
+	for i, a := range got {
+		if a == "--mcp-config" && i+1 < len(got) {
+			cfg = got[i+1]
+		}
+	}
+	if cfg == "" {
+		t.Fatalf("missing --mcp-config value: %v", got)
+	}
+	var parsed struct {
+		MCPServers map[string]struct {
+			Command string `json:"command"`
+			Type    string `json:"type"`
+			URL     string `json:"url"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(cfg), &parsed); err != nil {
+		t.Fatalf("generated mcp config is not valid JSON: %v", err)
+	}
+	if _, ok := parsed.MCPServers["ddg-search"]; !ok {
+		t.Fatalf("ddg-search must stay wired, got %v", parsed.MCPServers)
+	}
+	you, ok := parsed.MCPServers["you-search"]
+	if !ok || you.Type != "http" || you.URL != "https://api.you.com/mcp?profile=free" {
+		t.Fatalf("you-search must be the keyless http server, got %+v", you)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"mcp__ddg-search__search", "mcp__ddg-search__fetch_content", "mcp__you-search__you-search", "mcp__you-search__you-discover"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in research MCP args: %v", want, got)
+		}
+	}
+
+	t.Setenv("GGRUN_CLAUDE_YOUCOM_MCP", "")
+	if got := claudeCodeSearchMCPArgs(nil); strings.Contains(strings.Join(got, " "), "you.com") {
+		t.Fatalf("You.com MCP must stay opt-in, got %v", got)
+	}
+
+	t.Setenv("GGRUN_CLAUDE_YOUCOM_MCP", "on")
+	if got := claudeCodeSearchMCPArgs([]string{"--allowed-tools", "mine"}); hasArg(got, "--allowedTools") || hasArg(got, "--allowed-tools") {
 		t.Fatalf("user allowed-tools must not be overridden, got %v", got)
 	}
 }

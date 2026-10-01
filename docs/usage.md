@@ -369,7 +369,10 @@ Two deliberate restrictions:
   are pre-authorized so agents can locate and read current sources without a
   permission prompt — `--claude-code` does this for you. Prefer another provider? Add it with
   `claude mcp add …` (it runs alongside `ddg-search`), or launch `claude` yourself
-  from the printed recipe and drop/replace the `--mcp-config` line.
+  from the printed recipe and drop/replace the `--mcp-config` line. Set
+  `GGRUN_CLAUDE_YOUCOM_MCP=on` to also wire You.com's hosted `you-search` MCP
+  alongside `ddg-search` — its free profile needs no API key either, and its
+  `you-search`/`you-discover` tools are pre-authorized the same way.
 - **Auto works locally and remains fail-closed.** ggrun detects Claude Code's
   exact security-monitor requests and routes them to a pinned local companion.
   The default `auto` profile is Qwen3.5-4B and also handles explicit
