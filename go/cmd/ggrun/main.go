@@ -8233,12 +8233,22 @@ func claudeCodeAutocompactPct(serverArgs []string, actualCtx int) int {
 	return 75
 }
 
+// claudeYouComMCPEnabled reports whether GGRUN_CLAUDE_YOUCOM_MCP opts the
+// generated search MCP config into You.com's keyless hosted search server.
+func claudeYouComMCPEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_YOUCOM_MCP")), "on")
+}
+
 // claudeCodeSearchMCPArgs returns --mcp-config args that wire a no-key DuckDuckGo
 // search MCP into Claude Code, replacing the Anthropic-only WebSearch tool that
 // can't run against a local endpoint. Returns nil if the user already passed their
 // own --mcp-config or no MCP runner (uvx) is installed. The exposed tool surfaces to
 // agents and workflows as mcp__ddg-search__search and
 // mcp__ddg-search__fetch_content.
+//
+// GGRUN_CLAUDE_YOUCOM_MCP=on additionally wires You.com's hosted search MCP as
+// you-search next to ddg-search. Its free profile needs no API key either, so the
+// zero-setup property is preserved and the DuckDuckGo server stays wired.
 func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 	if hasArg(extraArgs, "--mcp-config") {
 		return nil
@@ -8249,9 +8259,14 @@ func claudeCodeSearchMCPArgs(extraArgs []string) []string {
 		return nil
 	}
 	cfg := `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]}}}`
+	allowedTools := "mcp__ddg-search__search,mcp__ddg-search__fetch_content"
+	if claudeYouComMCPEnabled() {
+		cfg = `{"mcpServers":{"ddg-search":{"command":"uvx","args":["duckduckgo-mcp-server"]},"you-search":{"type":"http","url":"https://api.you.com/mcp?profile=free"}}}`
+		allowedTools += ",mcp__you-search__you-search,mcp__you-search__you-discover"
+	}
 	args := []string{"--mcp-config", cfg}
 	if !hasArg(extraArgs, "--allowedTools") && !hasArg(extraArgs, "--allowed-tools") {
-		args = append(args, "--allowedTools", "mcp__ddg-search__search,mcp__ddg-search__fetch_content")
+		args = append(args, "--allowedTools", allowedTools)
 	}
 	return args
 }
@@ -8431,7 +8446,11 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string, 
 	}
 	if mcp := claudeCodeSearchMCPArgs(extraArgs); mcp != nil {
 		args = append(mcp, args...)
-		fmt.Println("[claude-code] Online research enabled through DuckDuckGo MCP (search + fetch_content).")
+		if claudeYouComMCPEnabled() {
+			fmt.Println("[claude-code] Online research enabled through DuckDuckGo MCP (search + fetch_content) + keyless You.com MCP (you-search).")
+		} else {
+			fmt.Println("[claude-code] Online research enabled through DuckDuckGo MCP (search + fetch_content).")
+		}
 	} else {
 		fmt.Println("[claude-code] WebSearch disabled (Anthropic-only); install uvx or add a search MCP for web research.")
 	}

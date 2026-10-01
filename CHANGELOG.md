@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Optional `GGRUN_CLAUDE_YOUCOM_MCP=on` wires You.com's keyless hosted search
+  MCP (`you-search`) next to the auto-wired DuckDuckGo search MCP in
+  `--claude-code` launches.
+
 ## v3.2.10 — 2026-09-23
 
 ### Added
