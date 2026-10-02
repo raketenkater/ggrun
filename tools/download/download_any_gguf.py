@@ -47,6 +47,26 @@ QUANT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Speculative-decoding heads published beside the weights under the same quant
+# names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). They are companions,
+# not a quantization of the model; ggrun fetches drafts itself.
+DRAFT_HEAD_NAMES = ("mtp", "dflash")
+
+
+def is_draft_head_gguf(path):
+    parts = path.lower().split("/")
+    return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
+        part in DRAFT_HEAD_NAMES for part in parts[:-1])
+
+
+def without_draft_heads(paths):
+    """Drop draft heads, unless the repo holds nothing else (a draft-only repo)."""
+    kept = [p for p in paths if not is_draft_head_gguf(p)]
+    if any(p.lower().endswith(".gguf") and "mmproj" not in p.lower() for p in kept):
+        return kept
+    return list(paths)
+
+
 def clear_screen():
     """Clear terminal screen"""
     os.system("cls" if os.name == "nt" else "clear")
@@ -230,10 +250,11 @@ def list_available_quantizations(repo):
     try:
         api = HfApi()
         info = api.model_info(repo, files_metadata=True)
+        weights = set(without_draft_heads([s.rfilename for s in info.siblings]))
         gguf_files = [
             (s.rfilename, s.size or 0)
             for s in info.siblings
-            if s.rfilename.endswith(".gguf") and "mmproj" not in s.rfilename.lower()
+            if s.rfilename in weights and s.rfilename.endswith(".gguf") and "mmproj" not in s.rfilename.lower()
         ]
 
         if not gguf_files:
@@ -283,7 +304,7 @@ def get_model_files(repo, selected_quantization):
     try:
         import re
 
-        files = list_repo_files(repo)
+        files = without_draft_heads(list_repo_files(repo))
 
         if selected_quantization:
             # Normalize quantization name for matching
