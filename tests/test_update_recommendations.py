@@ -191,3 +191,34 @@ def test_unreadable_upstream_table_stamps_nothing(monkeypatch):
     rows = [{"arch": "axk2"}]
     updater.stamp_runnable(rows, updater.fetch_upstream_arches())
     assert "runnable" not in rows[0]
+
+
+def _sibling(name, size):
+    return {"rfilename": name, "lfs": {"size": size}}
+
+
+def test_draft_heads_and_projectors_are_not_model_quants(monkeypatch):
+    updater = load_updater()
+    gb = 1024**3
+    siblings = [
+        _sibling("Model-MXFP4-00001-of-00002.gguf", 10 * 1024**2),
+        _sibling("Model-MXFP4-00002-of-00002.gguf", 500 * gb),
+        _sibling("Model-Q6_K-00001-of-00002.gguf", 300 * gb),
+        _sibling("Model-Q6_K-00002-of-00002.gguf", 300 * gb),
+        _sibling("mtp-Model-Q4_0.gguf", 2 * gb),
+        _sibling("mtp-Model-BF16.gguf", 7 * gb),
+        _sibling("dflash-Model-BF16.gguf", 5 * gb),
+        _sibling("MTP/mtp-Model-shared-Q8_0.gguf", 3 * gb),
+        _sibling("mmproj-Model-BF16.gguf", 3 * gb),
+    ]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    quants = {q["name"]: q["size_bytes"] for q in updater.fetch_hf_quants("owner/Model-GGUF")}
+    assert quants == {"MXFP4": 500 * gb + 10 * 1024**2, "Q6_K": 600 * gb}
+    assert updater._representative_gguf_file(siblings) == "Model-MXFP4-00001-of-00002.gguf"
+
+
+def test_a_draft_only_repo_keeps_its_drafts(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("dflash-Model-BF16.gguf", 5 * 1024**3), _sibling("dflash-Model-Q8_0.gguf", 3 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert {q["name"] for q in updater.fetch_hf_quants("owner/Model-DFlash-GGUF")} == {"BF16", "Q8_0"}
