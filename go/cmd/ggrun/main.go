@@ -5119,6 +5119,11 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				continue
 			}
 			if preflight.DoesNotFit {
+				if proven, provenArgs, ok := memoryRecovery.restoreAfterRefusedReplan(serverArgs); ok {
+					fmt.Fprintf(os.Stderr, "[launch] the measured re-plan did not fit (CUDA%d, %d MiB deficit); restoring the plan exact preflight admitted before it\n", preflight.Device, preflight.DeficitMB)
+					strategy, serverArgs = proven, provenArgs
+					continue
+				}
 				memoryRecovery.reject(serverArgs)
 				memoryRecovery.rejectContext(strategy,
 					contextReclaimTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
@@ -5259,6 +5264,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 								return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)}
 							}
 						} else {
+							memoryRecovery.noteMeasuredReplan(strategy, serverArgs)
 							strategy = next
 							serverArgs = nextArgs
 							preflightReplans++

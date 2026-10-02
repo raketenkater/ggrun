@@ -916,3 +916,47 @@ func TestDisprovedPlannerReplanIsNotTakenAgain(t *testing.T) {
 		t.Fatal("the disproof was not recorded for the rest of the launch")
 	}
 }
+
+// A probe-proven plan is never lost to its own measured re-plan. Observed on a
+// fresh install (ik_llama, Qwen3.8-27B, 2026-10-02): proven A was re-planned to
+// B, B overshot CUDA1, the ladder derated from B, and the start budget refused
+// the launch although A had loaded.
+func TestRefusedMeasuredReplanRestoresTheAdmittedPlanOnce(t *testing.T) {
+	a := &placement.Strategy{ContextSize: 262144, UBatchSize: 512}
+	argsA := []string{"llama-server", "-ub", "512", "--tensor-split", "0.10,0.90,0.00"}
+	argsB := []string{"llama-server", "-ub", "512", "--tensor-split", "0.07,0.93,0.00"}
+
+	r := newLaunchMemoryRecovery()
+	if _, _, ok := r.restoreAfterRefusedReplan(argsB); ok {
+		t.Fatal("restored with no measured re-plan on record")
+	}
+	r.noteMeasuredReplan(a, argsA)
+	got, gotArgs, ok := r.restoreAfterRefusedReplan(argsB)
+	if !ok || got != a || formatCommand(gotArgs) != formatCommand(argsA) {
+		t.Fatalf("restore = %v %v %v, want the admitted plan", got, gotArgs, ok)
+	}
+	if !r.isRejected(argsB) {
+		t.Fatal("the refused re-plan was not rejected for this launch")
+	}
+	if !r.plannerWasDisproved() {
+		t.Fatal("the planner must be disproved so the restored plan is kept, not re-planned")
+	}
+	if _, _, ok := r.restoreAfterRefusedReplan(argsB); ok {
+		t.Fatal("restored twice for one proven plan")
+	}
+
+	// The admitted plan itself being refused leaves nothing to restore.
+	r = newLaunchMemoryRecovery()
+	r.noteMeasuredReplan(a, argsA)
+	if _, _, ok := r.restoreAfterRefusedReplan(argsA); ok {
+		t.Fatal("restored the plan that was just refused")
+	}
+
+	// Once ordinary recovery has acted, a later refusal is not the re-plan's.
+	r = newLaunchMemoryRecovery()
+	r.noteMeasuredReplan(a, argsA)
+	r.lastRecoveryMethod = "ubatch-derate"
+	if _, _, ok := r.restoreAfterRefusedReplan(argsB); ok {
+		t.Fatal("restored after a derate took over")
+	}
+}
