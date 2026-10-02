@@ -2539,6 +2539,8 @@ func (m Model) viewRecommended() string {
 			return
 		}
 		b.WriteString(recommendStyle.Render("  "+title) + "\n")
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-34s %-9s %-11s %6s %5s %7s",
+			"Model", "Fit", "Quant", "Size", "Intel", "Est.t/s")) + "\n")
 		for _, rec := range rows {
 			prefix := "  "
 			if idx == m.selectedRecommendation {
@@ -2556,8 +2558,8 @@ func (m Model) viewRecommended() string {
 			if len(name) > 34 {
 				name = name[:33] + "…"
 			}
-			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %3.0f%% %7s",
-				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, rec.QualityRetained*100, tps)
+			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %5s %7s",
+				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
 			if idx == m.selectedRecommendation {
 				b.WriteString(prefix + selectedStyle.Render(line) + "\n")
 			} else {
@@ -2567,9 +2569,11 @@ func (m Model) viewRecommended() string {
 		}
 		b.WriteString("\n")
 	}
-	writeGroup("Best overall — balanced quality, speed and fit", m.recommendationGroups.Balanced)
+	writeGroup("Best overall — intelligence first, practical quant", m.recommendationGroups.Balanced)
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
+	b.WriteString(mutedStyle.Render("  Intel is base-model catalog intelligence (~ estimated), not quantized accuracy.") + "\n")
+	b.WriteString(mutedStyle.Render("  1–2 bit quants are fallbacks within a model; task accuracy is unverified.") + "\n")
 	b.WriteString(mutedStyle.Render("  Speeds are estimates; Benchmark measures this exact machine.") + "\n")
 	b.WriteString(mutedStyle.Render("  Fit uses installed capacity; launch rechecks memory currently free.") + "\n\n")
 

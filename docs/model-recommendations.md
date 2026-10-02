@@ -1,9 +1,28 @@
 # Model Recommendations
 
-The TUI and `ggrun recommend` offer balanced, smartest, and fastest categories.
-They filter the catalog using hardware capacity and rank candidates using catalog
-intelligence, estimated local speed, quantization quality, and fit. Speed and fit
-are planning estimates; launch performs its own admission checks.
+The TUI and `ggrun recommend` filter models by hardware capacity, choose a
+practical fitting quant for each model, and offer three categories:
+
+- **Best overall:** catalog intelligence first among usable models. Predicted
+  decode speeds below 6 tokens/s receive a usability discount; extra speed above
+  that threshold does not override intelligence.
+- **Smartest:** highest catalog intelligence that fits, including slower models.
+  It uses the same practical quant selection as Best overall, so an unnecessarily
+  slow BF16 variant does not hide a model with a usable Q4/Q5 variant.
+- **Fastest:** highest estimated speed among models with at least 40% of the
+  best fitting model's catalog intelligence, using Q4-class or smaller quants.
+
+Quantization heuristics compare variants of the same model; they do not multiply
+another model's benchmark score down. Within a model, a usable 3-bit-or-higher
+variant is preferred over 1–2-bit alternatives. Lower-bit variants remain
+available when memory or speed requires them.
+
+The `Intel` column shows base-model catalog intelligence from Artificial Analysis;
+`~` marks a fallback estimate. It does not measure the accuracy of the downloaded
+quant or its ability to complete an agent workflow. The legacy JSON fields
+`AdjustedIntelligence` and `QualityRetained` are within-model heuristics, not
+measured accuracy. Speed and fit are also planning estimates; launch performs
+its own admission checks.
 
 To plan for one GPU and a RAM ceiling:
 

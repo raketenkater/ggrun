@@ -154,7 +154,7 @@ func cmdRecommend(args []string) {
 			Hardware   *detect.Capabilities `json:"planning_hardware"`
 			Categories recommend.Categories `json:"categories"`
 			Note       string               `json:"note"`
-		}{caps, cats, "Advisory capacity and estimated speeds; launch rechecks actual hardware. Repeat restrictions on launch."}, "", "  ")
+		}{caps, cats, "Advisory capacity and estimated speeds; launch rechecks actual hardware. Repeat restrictions on launch. AAIntelligence is base-model catalog data; AdjustedIntelligence and QualityRetained are within-model quant heuristics, not measured accuracy."}, "", "  ")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -190,7 +190,7 @@ func cmdRecommend(args []string) {
 			return
 		}
 		fmt.Printf("\n%s\n", title)
-		fmt.Printf("  %-36s %-10s %-8s %6s %5s %8s\n", "Model", "Fit", "Quant", "Size", "Qual", "Est.speed")
+		fmt.Printf("  %-36s %-10s %-8s %6s %6s %8s\n", "Model", "Fit", "Quant", "Size", "Intel", "Est.speed")
 		for _, r := range rows {
 			name := r.Name
 			limit := 36
@@ -207,16 +207,18 @@ func cmdRecommend(args []string) {
 			if r.PredictedTPS > 0 {
 				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
 			}
-			fmt.Printf("  %-36s %-10s %-8s %5.1fG %4.0f%% %8s\n",
-				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, r.QualityRetained*100, tps)
+			fmt.Printf("  %-36s %-10s %-8s %5.1fG %6s %8s\n",
+				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, recommend.DisplayIntelligence(r), tps)
 		}
 	}
-	printRecGroup("Best overall — balanced quality, speed and fit", cats.Balanced)
+	printRecGroup("Best overall — intelligence first, practical quant", cats.Balanced)
 	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
 	if forkShown {
 		fmt.Println("\n* No upstream backend loads this architecture yet; the first launch builds a fork backend automatically.")
 	}
+	fmt.Println("\nIntel is base-model catalog intelligence (~ marks an estimate), not quantized accuracy.")
+	fmt.Println("1–2 bit quants are fallback choices within a model; their task accuracy is unverified.")
 	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
 	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
 	fmt.Printf("\n%s\n", recommend.CatalogAttribution())

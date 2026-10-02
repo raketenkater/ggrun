@@ -88,12 +88,12 @@ type Recommendation struct {
 	Fit                  string
 	BackendHint          string
 	Reason               string
-	Score                int
+	Score                int // base-model intelligence with a slow-serving usability discount
 	QuantName            string
 	QuantSizeGB          float64
 	MemoryNeedGB         float64
-	AdjustedIntelligence float64 // base AA index * quality retained after quantization
-	QualityRetained      float64 // fraction of base intelligence kept by this quant (0,1]
+	AdjustedIntelligence float64 // heuristic used only to choose quants within one model
+	QualityRetained      float64 // within-model quant preference, not measured intelligence retention
 	PredictedTPS         float64 // estimated decode tok/s on this machine (0 = unknown)
 	SpeedTier            int     // 2 interactive, 1 usable, 0 slow, -1 unknown
 }
@@ -107,6 +107,19 @@ type catalogDoc struct {
 }
 
 const Attribution = "Artificial Analysis intelligence data is used when available; cached locally and filtered by ggrun hardware fit"
+
+// DisplayIntelligence shows the catalog's base-model signal, not a fabricated
+// benchmark score for a quantized artifact. A fallback quality estimate is
+// explicitly marked when Artificial Analysis data is unavailable.
+func DisplayIntelligence(r Recommendation) string {
+	if r.AAIntelligence > 0 {
+		return fmt.Sprintf("%.1f", r.AAIntelligence)
+	}
+	if r.Quality > 0 {
+		return fmt.Sprintf("~%.1f", modelIntelligence(r.Candidate))
+	}
+	return "—"
+}
 
 // DisplayFit shortens internal fit-mode labels for display in the CLI and TUI.
 func DisplayFit(fit string) string {
@@ -148,8 +161,7 @@ func allRecommendations(caps *detect.Capabilities) []Recommendation {
 }
 
 // allRecommendationsWithQuantFilter ranks each runnable model at its
-// highest-quality fitting quant (intelligence-first). Used by Smartest and, with
-// a quant filter, by Fastest.
+// highest-quality fitting quant. Used with a quant filter by Fastest.
 func allRecommendationsWithQuantFilter(caps *detect.Capabilities, allowQuant func(QuantOption) bool) []Recommendation {
 	return collectRecommendations(caps, allowQuant, better)
 }
@@ -157,9 +169,8 @@ func allRecommendationsWithQuantFilter(caps *detect.Capabilities, allowQuant fun
 // allRecommendationsBalanced selects each model's representative quant by the
 // blended score (effective intelligence * speed) instead of by raw
 // intelligence, so a model surfaces at its best *practical* quant in Best
-// overall — e.g. a 27B dense at Q5 (~40 tok/s) rather than BF16 (~3 tok/s on RAM
-// spill). Smartest keeps the intelligence-first selector so quality-first picks
-// still surface there.
+// overall and Smartest — e.g. a 27B dense at Q5 (~40 tok/s) rather than BF16
+// (~3 tok/s on RAM spill). Cross-model capability is ranked separately.
 func allRecommendationsBalanced(caps *detect.Capabilities) []Recommendation {
 	return collectRecommendations(caps, nil, betterByScore)
 }
@@ -184,7 +195,7 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 	if limit <= 0 {
 		limit = 5
 	}
-	rows := allRecommendations(caps)
+	rows := allRecommendationsBalanced(caps)
 	sortRecommendations(rows)
 	if len(rows) > limit {
 		rows = rows[:limit]
@@ -195,8 +206,8 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 // Categories groups recommendations by intent so the intelligence/speed/fit
 // tradeoff is explicit instead of collapsed into one ranked list.
 type Categories struct {
-	Balanced []Recommendation // best blend of intelligence, speed and fit
-	Smartest []Recommendation // highest effective intelligence that fits (may be slow)
+	Balanced []Recommendation // intelligence first among practical fitting choices
+	Smartest []Recommendation // highest base-model intelligence (may be slow)
 	Fastest  []Recommendation // fastest while still genuinely capable
 }
 
@@ -208,15 +219,18 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	if n <= 0 {
 		n = 4
 	}
-	rows := allRecommendations(caps)
+	// Choose a practical quant before comparing model capability. Selecting an
+	// unnecessarily slow BF16 first used to lower a capable model's rank even
+	// when its Q4/Q5 variant was readily usable on the same machine.
+	rows := allRecommendationsBalanced(caps)
 	if len(rows) == 0 {
 		return Categories{}
 	}
 
-	maxEff := 0.0
+	maxIntelligence := 0.0
 	for _, r := range rows {
-		if r.AdjustedIntelligence > maxEff {
-			maxEff = r.AdjustedIntelligence
+		if intelligence := modelIntelligence(r.Candidate); intelligence > maxIntelligence {
+			maxIntelligence = intelligence
 		}
 	}
 
@@ -240,25 +254,17 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		return out
 	}
 
-	// Balanced: each model at its best *practical* quant (blended score), then
-	// ranked by that score. This uses a separate evaluation pass (betterByScore)
-	// so a fast Q5 represents a model here even though Smartest below still sees
-	// the intelligence-first reps in `rows` (e.g. the same model at BF16).
-	balancedPool := allRecommendationsBalanced(caps)
+	// Quant preference is local to a model; cross-model ranking uses catalog
+	// intelligence, with a usability discount only below the usable speed floor.
+	balancedPool := append([]Recommendation(nil), rows...)
 	sortRecommendations(balancedPool)
 	balanced := take(balancedPool)
 
-	// Smartest: effective intelligence, lightly usability-weighted so a
-	// marginally-smarter quant that crawls (e.g. a 27B at BF16 @ 3 tok/s) does
-	// not beat a nearly-as-smart, far faster quant of the same model (the same
-	// 27B at Q5 @ 40 tok/s). Genuinely-smartest-but-slow picks (a big MoE at
-	// ~6 tok/s) still surface — the weighting only bites below usableTPS.
+	// Smartest keeps the base-model capability order even when serving is slow.
+	// Quant preferences must not become a second cross-model ranking signal.
 	smartPool := append([]Recommendation(nil), rows...)
-	smartKey := func(r Recommendation) float64 {
-		return r.AdjustedIntelligence * usabilityFactor(r.PredictedTPS)
-	}
 	sort.SliceStable(smartPool, func(i, j int) bool {
-		ki, kj := smartKey(smartPool[i]), smartKey(smartPool[j])
+		ki, kj := modelIntelligence(smartPool[i].Candidate), modelIntelligence(smartPool[j].Candidate)
 		if ki == kj {
 			return smartPool[i].QuantSizeGB < smartPool[j].QuantSizeGB
 		}
@@ -267,20 +273,20 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	smartest := take(smartPool)
 
 	// Fastest: highest predicted tok/s among models that are still capable
-	// (>= 40% of the best effective intelligence on this machine). The floor
+	// (>= 40% of the best base-model intelligence on this machine). The floor
 	// is lower than Smartest's implicit bar because this category is about
 	// speed — a 158 t/s model at 53% of max intelligence is genuinely useful.
 	// Use a Q4-class ceiling so Fastest means fast/small by default; Q5/Q6/Q8
 	// and BF16/F16/F32 still belong in Best overall and Smartest when memory
 	// allows.
 	// Fastest does NOT dedup against Balanced/Smartest: the fastest models
-	// often also score well in Best overall (speedFactor caps at interactive),
+	// often also score well in Best overall,
 	// and deduping them out would leave Fastest showing slow leftovers.
-	floor := 0.40 * maxEff
+	floor := 0.40 * maxIntelligence
 	fastRows := allRecommendationsWithQuantFilter(caps, fastestQuantAllowed)
 	fastPool := make([]Recommendation, 0, len(fastRows))
 	for _, r := range fastRows {
-		if r.AdjustedIntelligence >= floor && r.PredictedTPS > 0 {
+		if modelIntelligence(r.Candidate) >= floor && r.PredictedTPS > 0 {
 			fastPool = append(fastPool, r)
 		}
 	}
@@ -295,10 +301,10 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 func sortRecommendations(rows []Recommendation) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Score == rows[j].Score {
-			if rows[i].AdjustedIntelligence == rows[j].AdjustedIntelligence {
+			if modelIntelligence(rows[i].Candidate) == modelIntelligence(rows[j].Candidate) {
 				return rows[i].QuantSizeGB < rows[j].QuantSizeGB
 			}
-			return rows[i].AdjustedIntelligence > rows[j].AdjustedIntelligence
+			return modelIntelligence(rows[i].Candidate) > modelIntelligence(rows[j].Candidate)
 		}
 		return rows[i].Score > rows[j].Score
 	})
@@ -358,7 +364,7 @@ func evaluateWithQuantFilter(caps *detect.Capabilities, c Candidate, allowQuant 
 
 // evaluateWithSelector picks one representative quant for a candidate. isBetter
 // decides which of two fitting quants wins: better (intelligence-first, the
-// default and Smartest) or betterByScore (blended, Best overall).
+// local quality selector) or betterByScore (practical, the public default).
 func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant func(QuantOption) bool, isBetter func(a, b Recommendation) bool) (Recommendation, bool) {
 	budget := hardware(caps)
 	backend := backendHint(caps)
@@ -392,7 +398,11 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 			continue
 		}
 		tps := predictDecodeTPS(caps, c, q)
-		score := effIntel * speedFactor(tps)
+		// Quant-retention guesses are not benchmark measurements. Compare
+		// models on their catalog intelligence, discounting only predicted
+		// serving below the usable floor. Extra speed beyond that is not a
+		// substitute for model capability; it has its own Fastest category.
+		score := base * usabilityFactor(tps)
 		rec := Recommendation{
 			Candidate:            c,
 			Fit:                  fit,
@@ -468,8 +478,19 @@ func better(a, b Recommendation) bool {
 // a fast Q5 beat a BF16 that only fits by spilling to RAM. A scalar key keeps
 // the pairwise selection in evaluateWithSelector a proper (transitive) ordering.
 func betterByScore(a, b Recommendation) bool {
-	ka := float64(a.Score) * fitFactor(a.Fit)
-	kb := float64(b.Score) * fitFactor(b.Fit)
+	// Prefer a usable 3-bit-or-higher variant of this model before considering
+	// very-low-bit alternatives. If none is usable, keep the normal speed/fit
+	// tradeoff: merely fitting a slow Q8 must not force it over a usable Q2.
+	preferred := func(r Recommendation) bool {
+		return !lowBitQuant(r.QuantName) && (r.PredictedTPS <= 0 || r.PredictedTPS >= usableTPS)
+	}
+	if preferred(a) != preferred(b) {
+		return preferred(a)
+	}
+	// This heuristic compares quants of the SAME model only. Score is the
+	// separate cross-model capability key and must not feed this calculation.
+	ka := a.AdjustedIntelligence * speedFactor(a.PredictedTPS) * fitFactor(a.Fit)
+	kb := b.AdjustedIntelligence * speedFactor(b.PredictedTPS) * fitFactor(b.Fit)
 	if ka != kb {
 		return ka > kb
 	}
@@ -480,6 +501,13 @@ func betterByScore(a, b Recommendation) bool {
 		return a.QuantSizeGB < b.QuantSizeGB
 	}
 	return a.AdjustedIntelligence > b.AdjustedIntelligence
+}
+
+// Very-low-bit variants remain within-model fallbacks when memory or speed
+// demands them. This classification must not demote a model against another.
+func lowBitQuant(name string) bool {
+	q := strings.ToUpper(name)
+	return strings.Contains(q, "Q1") || strings.Contains(q, "Q2")
 }
 
 // fitFactor gently discounts placements that consume more of the machine, so the
