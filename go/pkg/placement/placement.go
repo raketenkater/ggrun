@@ -41,6 +41,9 @@ const (
 	hybridCheckpointReservePerCheckpointMB = 128
 	hybridCheckpointMinimum                = 4
 	hybridCheckpointMaximum                = 16
+	// minReuseCheckpoints is the multi-GPU policy's own floor whenever it keeps
+	// checkpoints at all; it is used when prefix reuse depends on them.
+	minReuseCheckpoints = 2
 	// Cards below this fraction of the fastest PCIe link are too slow to own
 	// regular layer slots in MoE layer-split mode, but can still be useful as
 	// expert-only VRAM when one or more whole expert layers fit.
@@ -734,6 +737,10 @@ type Options struct {
 	// it makes a "diff the final full argv" comparison ambiguous.
 	MaxCheckpoints    int
 	MaxCheckpointsSet bool
+	// CheckpointReuseRequired is set when a configured --swa-full was withdrawn
+	// because context checkpoints give prefix reuse without it. The derived
+	// checkpoint cap then never falls to zero; an explicit cap still wins.
+	CheckpointReuseRequired bool
 	// BatchSize and UBatchSize are explicit launcher requests. A positive value
 	// must be accounted for before placement is chosen; treating it as a late
 	// backend override can make the emitted server graph exceed the plan.
@@ -5763,6 +5770,10 @@ func applyRuntimeCachePolicy(model *ModelProfile, s *Strategy, caps *detect.Capa
 		// real decision (disable checkpoints when VRAM is tight) and must be
 		// expressible, which is why the setter carries a separate bool.
 		maxCheckpoints = opts.MaxCheckpoints
+	} else if opts.CheckpointReuseRequired && maxCheckpoints == 0 {
+		// The full window cache was withdrawn on the promise of checkpoint
+		// reuse; a derived zero would leave a sliding-window model with none.
+		maxCheckpoints = minReuseCheckpoints
 	}
 	s.CRAM = cram
 	s.MaxCheckpoints = maxCheckpoints

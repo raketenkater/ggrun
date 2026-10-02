@@ -724,8 +724,14 @@ type launchRequest struct {
 	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
 	// the field exists because leaving the flag unparsed let it fall through to
 	// ExtraArgs and emit the coordinate twice.
-	MaxCheckpoints     int
-	MaxCheckpointsSet  bool
+	MaxCheckpoints    int
+	MaxCheckpointsSet bool
+
+	// SWAFullWithdrawnForCheckpoints records that a configured --swa-full was
+	// dropped because context checkpoints give the prefix reuse it exists for;
+	// placement must then keep checkpoints on.
+	SWAFullWithdrawnForCheckpoints bool
+
 	ClaudeMaxActive    int // --claude-max-active; 0 means no admission limit
 	ClaudeMaxActiveSet bool
 	BatchSize          int
@@ -2888,6 +2894,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		CacheRAMMB:              req.CacheRAMMB,
 		MaxCheckpoints:          req.MaxCheckpoints,
 		MaxCheckpointsSet:       req.MaxCheckpointsSet,
+		CheckpointReuseRequired: req.SWAFullWithdrawnForCheckpoints,
 		// --swa-full is a passthrough flag, but placement cannot treat it as
 		// one: it decides whether sliding-window layers hold the whole context,
 		// which on Laguna is the difference between 13.8 GB and 54.0 GB of KV
@@ -5941,6 +5948,12 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 			fmt.Printf("[launch] %s; disabling -khad for this model/backend profile.\n", reason)
 		}
 	}
+	// The withdrawal below is a decision about one backend. Re-resolving to
+	// another starts from the configured request again.
+	if req.SWAFullWithdrawnForCheckpoints && !hasArg(req.ExtraArgs, "--swa-full") {
+		req.SWAFullWithdrawnForCheckpoints = false
+		req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", true)
+	}
 	if !hasArg(req.ExtraArgs, "--swa-full") {
 		return
 	}
@@ -5964,12 +5977,19 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 	// checkpoints already give that reuse, a full-size window cache that at
 	// least doubles the KV per token only costs context: on MiMo-V2.6 it cut
 	// the automatic context from 724k to ~126k tokens for no reuse gain
-	// (checkpoints reused 82k of 86k tokens without it).
+	// (checkpoints reused 82k of 86k tokens without it). Backend support is
+	// not enough: the launch must keep checkpoints on. Placement keeps the
+	// derived checkpoint count above zero for a withdrawn --swa-full.
 	if !userExplicitBackendFlag(req, "--swa-full") && placement.BackendSupportsCheckpointReuse(be.Help) {
 		if ratio, ok := placement.SWAFullKVMultiplier(model); ok && ratio >= 2 {
-			req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", false)
-			fmt.Printf("[launch] --swa-full would cost %.1fx the KV per token; context checkpoints keep prefix reuse without it, so it is off for this launch (pass --swa-full to force it).\n", ratio)
-			return
+			if checkpointsDisabled(req) {
+				fmt.Printf("[launch] keeping the configured --swa-full: context checkpoints are disabled for this launch, so prefix reuse needs the full window cache.\n")
+			} else {
+				req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", false)
+				req.SWAFullWithdrawnForCheckpoints = true
+				fmt.Printf("[launch] --swa-full would cost %.1fx the KV per token; context checkpoints keep prefix reuse without it, so it is off for this launch (pass --swa-full to force it).\n", ratio)
+				return
+			}
 		}
 	}
 	// An empty help surface is unknown, not unsupported. With a real help probe,
@@ -5987,6 +6007,26 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 		archLabel = arch
 	}
 	fmt.Printf("[launch] Full SWA cache is unavailable for %s on backend %s; disabling it for this launch.\n", archLabel, be.Path)
+}
+
+// checkpointsDisabled reports whether this launch turns context checkpoints
+// off: --ctx-checkpoints 0 parsed by ggrun, or a backend spelling of it passed
+// through.
+func checkpointsDisabled(req *launchRequest) bool {
+	if req.MaxCheckpointsSet && req.MaxCheckpoints == 0 {
+		return true
+	}
+	if argIntValue(req.ExtraArgs, "--ctx-checkpoints", "-ctxcp", "--swa-checkpoints") == 0 {
+		return true
+	}
+	for _, a := range req.ExtraArgs {
+		for _, name := range []string{"--ctx-checkpoints=", "-ctxcp=", "--swa-checkpoints="} {
+			if v, ok := strings.CutPrefix(a, name); ok && strings.TrimSpace(v) == "0" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func launchHardwareIdentity(caps *detect.Capabilities) string {
