@@ -67,12 +67,53 @@ GGUF_TYPE_SIZE = {
 # GGUF value-type fixed sizes. 8=string, 9=array are variable-length.
 _KV_FIXED = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
+# Integer (and bool) GGUF element types, as struct formats. llama.cpp's loader
+# accepts bool/uint32/int32 per-layer arrays; the others are read so a valid
+# file with a wider encoding is not silently dropped.
+_INT_FORMATS = {0: 'B', 1: 'b', 2: 'H', 3: 'h', 4: 'I', 5: 'i', 7: 'B', 10: 'Q', 11: 'q'}
+
+# Per-layer attention arrays. A mixed-head model (MiMo-V2) states its KV head
+# count and sliding-window layout per block; skipping them left ggrun with no
+# KV width at all. Values are validated here only for type and sign: whether
+# the length matches the block count is placement's call, because it also
+# knows which blocks the backend actually caches.
+_LAYER_ARRAYS = {
+    '.attention.head_count_kv': 'hkv_arr',
+    '.attention.sliding_window_pattern': 'swa_pattern',
+}
+
+# Recurrent state that llama.cpp keeps beside the KV cache
+# (llm_arch_is_recurrent / llm_arch_is_hybrid). The backend cannot truncate
+# it, so a request that branches inside a cached prompt resumes only from a
+# context checkpoint. 'ssm' remains the SSM block-layout flag; 'recurrent' is
+# the cache semantics. GLM-5.3-Flash states only ssm.conv_kernel and kda.*,
+# and Inkling only shortconv_kernel; neither has ssm.state_size.
+_RECURRENT_KEY_MARKERS = ('.ssm.', '.kda.', '.shortconv', '.wkv.')
+_RECURRENT_ARCHS = frozenset({
+    'mamba', 'mamba2', 'rwkv6', 'rwkv6qwen2', 'rwkv7', 'arwkv7',
+    'jamba', 'falcon-h1', 'plamo2', 'granitehybrid', 'lfm2', 'lfm2moe',
+    'nemotron_h', 'nemotron_h_moe', 'qwen3next', 'kimi-linear', 'bailingmoe3',
+    'kimi-k3', 'qwen35', 'qwen35moe', 'qwen4exp', 'deepseek4', 'minimax-01',
+    'glm5next', 'inkling',
+})
+
+
+def _read_int_array(f, at, al):
+    fmt = _INT_FORMATS[at]
+    size = struct.calcsize('<' + fmt)
+    raw = f.read(al * size)
+    if len(raw) != al * size:
+        raise EOFError('truncated array')
+    return list(struct.unpack('<%d%s' % (al, fmt), raw))
+
 
 def _read_kv(f, r, kv_count):
     for _ in range(kv_count):
         kl = struct.unpack('<Q', f.read(8))[0]
         key = f.read(kl).decode('utf-8', errors='replace')
         vt = struct.unpack('<I', f.read(4))[0]
+        if any(marker in key for marker in _RECURRENT_KEY_MARKERS):
+            r['recurrent'] = 1
         if vt == 4:  # uint32
             val = struct.unpack('<I', f.read(4))[0]
             if key.endswith('.block_count'): r['layers'] = val
@@ -92,6 +133,10 @@ def _read_kv(f, r, kv_count):
             if key.endswith('.attention.head_count'): r['heads'] = val
             if key.endswith('.attention.key_length'): r['kl'] = val
             if key.endswith('.attention.value_length'): r['vl'] = val
+            # Windowed layers may use their own head width; the backend
+            # defaults these to the full-attention widths when absent.
+            if key.endswith('.attention.key_length_swa'): r['kl_swa'] = val
+            if key.endswith('.attention.value_length_swa'): r['vl_swa'] = val
             if key.endswith('.attention.key_length_mla'): r['kl_mla'] = val
             if key.endswith('.attention.value_length_mla'): r['vl_mla'] = val
             if 'ssm.state_size' in key: r['ssm'] = 1
@@ -126,7 +171,20 @@ def _read_kv(f, r, kv_count):
             al = struct.unpack('<Q', f.read(8))[0]
             if key == 'tokenizer.ggml.tokens':
                 r['vocab_size'] = al
-            if at in _KV_FIXED:
+            layer_key = next((v for k, v in _LAYER_ARRAYS.items() if key.endswith(k)), None)
+            if layer_key and at in _INT_FORMATS and 0 < al <= 4096:
+                values = _read_int_array(f, at, al)
+                if layer_key == 'swa_pattern':
+                    # The loader reads any non-zero entry as "windowed".
+                    r[layer_key] = [1 if v != 0 else 0 for v in values]
+                elif all(v >= 0 for v in values):
+                    r[layer_key] = values
+                    # A uniform array is exactly the scalar form; publish it so
+                    # scalar consumers keep working. Mixed counts are never
+                    # averaged into a scalar.
+                    if values and all(v == values[0] for v in values) and values[0] > 0:
+                        r['hkv'] = values[0]
+            elif at in _KV_FIXED:
                 f.read(al * _KV_FIXED[at])
             elif at == 8:
                 token_hash = hashlib.sha256() if key == 'tokenizer.ggml.tokens' else None
@@ -337,6 +395,8 @@ def parse(path: str) -> Dict[str, Any]:
                 read_shard(sp, {})
             except Exception:
                 continue
+    if r.get('ssm') or r.get('arch') in _RECURRENT_ARCHS:
+        r['recurrent'] = 1
     if 'leading_dense' not in r and '_first_moe_layer' in r:
         r['leading_dense'] = r['_first_moe_layer']
         r['leading_dense_inferred'] = 1

@@ -65,6 +65,21 @@ type Info struct {
 	HasShexp                  int     `json:"has_shexp"`                    // shared experts present
 	NextNPredictLayers        int     `json:"nextn_predict_layers"`         // MTP/NextN prediction layers
 	IsMoE                     bool    `json:"is_moe"`
+
+	// HeadCountKVByLayer and SlidingWindowPattern are the per-block arrays a
+	// mixed-attention model states instead of (or alongside) the scalars.
+	// They are raw metadata; placement validates them against the block count
+	// and never averages mixed head counts into HeadCountKV.
+	HeadCountKVByLayer   []int `json:"hkv_arr,omitempty"`
+	SlidingWindowPattern []int `json:"swa_pattern,omitempty"` // 1 = windowed layer
+	KeyLengthSWA         int   `json:"kl_swa"`                // 0 = same as KeyLength
+	ValueLengthSWA       int   `json:"vl_swa"`                // 0 = same as ValueLength
+
+	// RecurrentState is 1 when the backend keeps untruncatable recurrent state
+	// beside the KV cache (SSM, delta-net/KDA, short convolution, RWKV). It is
+	// wider than SSM, which also describes the block layout: GLM-5.3-Flash and
+	// Inkling state no ssm.state_size but still resume only from checkpoints.
+	RecurrentState int `json:"recurrent"`
 }
 
 // Parse calls the bundled GGUF metadata helper.

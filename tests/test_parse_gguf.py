@@ -110,6 +110,29 @@ def test_ssm_hybrid():
     print('  ✓ ssm_hybrid')
 
 
+def test_recurrent_state_beyond_ssm_state_size():
+    """'recurrent' is the cache fact: state the backend cannot truncate, so a
+    branch resumes only from a checkpoint. GLM-5.3-Flash (ssm.conv_kernel +
+    kda.*) and Inkling (shortconv_kernel) state no ssm.state_size; treating
+    them as plain attention restored 9 of 4,247 shared tokens on a branch."""
+    cases = [
+        (dict(arch='glm5next', layers=46, kv_lora=512,
+              u32=['ssm.conv_kernel=4', 'kda.head_dim=128']), 0, 1),
+        (dict(arch='inkling', swa=512, u32=['shortconv_kernel=4']), 0, 1),
+        (dict(arch='future-linear', u32=['kda.head_dim=128']), 0, 1),
+        (dict(arch='lfm2', layers=16), 0, 1),
+        (dict(arch='qwen35', full_interval=4, ssm=True), 1, 1),
+        (dict(arch='llama', layers=32, hkv=8), 0, 0),
+    ]
+    for kwargs, ssm, recurrent in cases:
+        with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+            build(f.name, **kwargs)
+            r = parse(f.name)
+        assert_eq(r.get('ssm', 0), ssm, f"{kwargs['arch']} ssm")
+        assert_eq(r.get('recurrent', 0), recurrent, f"{kwargs['arch']} recurrent")
+    print('  ✓ recurrent_state_beyond_ssm_state_size')
+
+
 def test_tokenizer_hash_is_stable_and_vocab_sensitive():
     with tempfile.NamedTemporaryFile(suffix='.gguf') as first, \
             tempfile.NamedTemporaryFile(suffix='.gguf') as same, \
@@ -221,6 +244,31 @@ def test_known_quant_table_has_ik_llama_ids():
     print('  ✓ known_quant_table_has_ik_llama_ids')
 
 
+def test_per_layer_attention_arrays():
+    """Mixed-head / explicit-window models state KV geometry only as per-layer
+    arrays (MiMo-V2 style: 4 KV heads on full-attention blocks, 8 on windowed
+    ones, NextN blocks at the end). The arrays must survive, a mixed head count
+    must never collapse into the scalar, and later keys must stay aligned."""
+    pattern = [0, 1, 1, 1, 1, 0, 1, 1, 0, 0]
+    heads = [4 if p == 0 else 8 for p in pattern]
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='mimo2', hkv_arr=','.join(map(str, heads)),
+              swa_pattern=','.join(map(str, pattern)), layers=10, nextn=2,
+              kl=192, vl=128, swa=128)
+        r = parse(f.name)
+    assert_eq(r.get('hkv_arr'), heads, 'hkv_arr')
+    assert_eq(r.get('swa_pattern'), pattern, 'swa_pattern')
+    assert 'hkv' not in r, f'mixed heads averaged into scalar hkv={r.get("hkv")}'
+    assert_eq(r['layers'], 10, 'layers after arrays')
+    assert_eq(r['nextn_predict_layers'], 2, 'nextn after arrays')
+    assert_eq(r['swa'], 128, 'swa after arrays')
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='llama', hkv_arr='8,8,8,8', layers=4)
+        r = parse(f.name)
+    assert_eq(r.get('hkv'), 8, 'uniform array keeps the scalar contract')
+    print('  ✓ per_layer_attention_arrays')
+
+
 def main():
     print('parse_gguf.py regression tests:')
     test_dense_llama()
@@ -228,12 +276,14 @@ def main():
     test_mla_deepseek()
     test_iswa_gemma()
     test_ssm_hybrid()
+    test_recurrent_state_beyond_ssm_state_size()
     test_tokenizer_hash_is_stable_and_vocab_sensitive()
     test_corrupted_gguf()
     test_shell_format_emits_all_keys()
     test_ik_llama_iq3_k_tensor_bytes()
     test_unknown_ttype_falls_back_to_4bpw()
     test_known_quant_table_has_ik_llama_ids()
+    test_per_layer_attention_arrays()
     print('All tests passed.')
 
 
