@@ -4306,6 +4306,9 @@ func serverProcessPID(p *server.Process) int {
 const (
 	failedLaunchRAMReleaseToleranceMB = 1024
 	failedLaunchGPUReleaseToleranceMB = 64
+	// failedStartReleaseWait bounds the wait for a failed start's memory before
+	// a recovery attempt loads again.
+	failedStartReleaseWait = 60 * time.Second
 )
 
 // stopFailedLaunchBeforeAdvisor is the boundary between a failed main-model
@@ -4858,6 +4861,10 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 	}()
 	ubatchRaisedArgs := ""
+	// raiseBase is the admitted plan a microbatch raise replaced: the safe
+	// baseline a raised plan that fails in warmup falls back to.
+	var raiseBase *placement.Strategy
+	var raiseBaseArgs []string
 	var oracleDevs []preflightDevice
 	oracleArgs := ""
 	var admittedPlans []admittedPlan
@@ -5290,6 +5297,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					} else {
 						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: raising ubatch %d -> %d at the same context and placement (backend accounting fits); verifying before production\n", base.UBatchSize, ub)
 					}
+					raiseBase, raiseBaseArgs = strategy, append([]string(nil), serverArgs...)
 					strategy, serverArgs = next, nextArgs
 					ubatchRaisedArgs = formatCommand(nextArgs)
 					continue
@@ -5314,6 +5322,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				ArgvHash: argvHash(serverArgs), Outcome: "refused", Reason: budgetErr.Error()})
 			return nil, strategy, serverArgs, budgetErr
 		}
+		resourceBaseline := captureLaunchResourceBaseline(caps)
 		loadStarted := time.Now()
 		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, processTimeout)
 		loadElapsed := time.Since(loadStarted)
@@ -5387,18 +5396,52 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		// already preserves graph-reserve sizes as compute-buffer measurements;
 		// recording the same cudaMalloc again as post-health growth double-counted
 		// it on the next placement. Only post-health crash paths record growth.
+		//
+		// A warmup abort is the exception: every buffer was allocated, and the
+		// kernels and pool temporaries that ran out are exactly the growth no
+		// accounting sees. It carries no size, so what is filed is an estimate.
+		warmup := false
+		if !ok {
+			device, warmup = warmupCUDAOOM(logData)
+		}
 		if retries >= maxRetries {
 			if ok {
 				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d allocating %d MiB (retry budget exhausted after %d attempts): %w", device, allocMB, retries, err)
 			}
+			if warmup {
+				recordWarmupCUDAOOM(req, cfg.CacheDir, model, strategy, be, runtimeCaps, device)
+				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d during warmup (retry budget exhausted after %d attempts): %w", device, retries, err)
+			}
 			return p, strategy, serverArgs, err
 		}
-		if !ok {
+		if !ok && !warmup {
 			return p, strategy, serverArgs, err
 		}
 		memoryRecovery.reject(serverArgs)
+		if warmup {
+			allocMB = recordWarmupCUDAOOM(req, cfg.CacheDir, model, strategy, be, runtimeCaps, device)
+			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d during warmup, after every buffer was allocated (no size reported); recorded an estimated %d MiB of runtime growth for this exact configuration\n", device, allocMB)
+		}
 		if exactAdmission {
-			return p, strategy, serverArgs, exactAdmissionError(exactAdmissionCUDAOOM, fmt.Sprintf(" on device %d allocating %d MiB", device, allocMB), err)
+			detail := fmt.Sprintf(" on device %d allocating %d MiB", device, allocMB)
+			if warmup {
+				detail = fmt.Sprintf(" on device %d during warmup", device)
+			}
+			return p, strategy, serverArgs, exactAdmissionError(exactAdmissionCUDAOOM, detail, err)
+		}
+		// Never load the next attempt over memory the failed one still holds.
+		if releaseErr := stopFailedLaunchBeforeAdvisor(p, resourceBaseline, failedStartReleaseWait); releaseErr != nil {
+			return p, strategy, serverArgs, fmt.Errorf("%w (after CUDA OOM on device %d)", releaseErr, device)
+		}
+		if warmup && raiseBase != nil && ubatchRaisedArgs == formatCommand(serverArgs) && !memoryRecovery.isRejected(raiseBaseArgs) {
+			// The raise spent proven headroom on performance; its failure
+			// returns the plan exact preflight admitted before it, unchanged.
+			fmt.Fprintf(os.Stderr, "[launch] restoring the admitted plan from before the microbatch raise (ubatch %d -> %d, ctx %d)\n",
+				strategy.UBatchSize, raiseBase.UBatchSize, raiseBase.ContextSize)
+			strategy, serverArgs = raiseBase, raiseBaseArgs
+			raiseBase, raiseBaseArgs = nil, nil
+			retries++
+			continue
 		}
 
 		// Re-plan with the failed card penalized by its overshoot: the real packer
@@ -5445,25 +5488,32 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
 			req, strategy, serverArgs, s, model, runtimeCaps,
-			preflightOutcome{Device: device, AllocMB: allocMB, AllocMBMeasured: allocMB > 0, DeficitMB: 1, IsComputeBuffer: isComputeBuffer},
+			preflightOutcome{Device: device, AllocMB: allocMB, AllocMBMeasured: ok && allocMB > 0, DeficitMB: 1, IsComputeBuffer: isComputeBuffer},
 			recoveryCandidateArgs,
 		)
 		if !changed {
+			if warmup {
+				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d during warmup and no different safe placement remains for this launch; the next launch plans around the recorded estimate: %w", device, err)
+			}
 			return p, strategy, serverArgs, err
+		}
+		cause := fmt.Sprintf("CUDA OOM on device %d allocating %d MiB", device, allocMB)
+		if warmup {
+			cause = fmt.Sprintf("CUDA OOM on device %d during warmup (estimated %d MiB)", device, allocMB)
 		}
 		switch method {
 		case "replanned":
 			if isComputeBuffer && computeMeasuredOnFailedGPU {
 				fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB); measured compute buffer and re-planned (n-cpu-moe=%d) without a duplicate penalty\n", device, allocMB, nextStrategy.NCPUMoE)
 			} else {
-				fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB, over ~%d MiB); re-planned (n-cpu-moe=%d) and retrying\n", device, allocMB, oomPenalty[physicalDevice], nextStrategy.NCPUMoE)
+				fmt.Fprintf(os.Stderr, "[launch] %s, over ~%d MiB; re-planned (n-cpu-moe=%d) and retrying\n", cause, oomPenalty[physicalDevice], nextStrategy.NCPUMoE)
 			}
 		case "swa-full-withdrawn":
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; withdrawing --swa-full (a full-context KV cache this model does not reuse) before touching placement\n", device, allocMB)
+			fmt.Fprintf(os.Stderr, "[launch] %s; withdrawing --swa-full (a full-context KV cache this model does not reuse) before touching placement\n", cause)
 		case "expert-derate":
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; moving one expert layer off the failed GPU before lowering ubatch\n", device, allocMB)
+			fmt.Fprintf(os.Stderr, "[launch] %s; moving one expert layer off the failed GPU before lowering ubatch\n", cause)
 		case "ubatch-derate":
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; no movable expert remains, lowering ubatch to %d\n", device, allocMB, nextStrategy.UBatchSize)
+			fmt.Fprintf(os.Stderr, "[launch] %s; no movable expert remains, lowering ubatch to %d\n", cause, nextStrategy.UBatchSize)
 		default:
 			return p, strategy, serverArgs, fmt.Errorf("unsupported CUDA OOM recovery method %q", method)
 		}
@@ -5614,34 +5664,95 @@ func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placeme
 		if !isOOM {
 			continue
 		}
-		// Reserve exactly one routed expert layer: that is the unit placement
-		// moves between GPU and CPU, its size is known exactly from the GGUF
-		// ledger, and it is the smallest step that changes the outcome. A tenth
-		// of the card, which this used to reserve, is a quantity derived from
-		// nothing -- on a 24 GiB device it withheld 2457 MiB, close to two
-		// layers, and a second abort compounded it permanently.
-		reserveMB = placement.LargestRoutedExpertLayerMB(model)
-		if reserveMB <= 0 {
-			// No ledger: fall back to the old fraction rather than reserve
-			// nothing, since an OOM is proof that something must give.
-			reserveMB = unknownRuntimeCUDAOOMReserveMinMB
-			if caps != nil {
-				for _, gpu := range caps.GPUs {
-					if gpu.Index == device {
-						if scaled := (gpu.VRAMTotalMB + 9) / 10; scaled > reserveMB {
-							reserveMB = scaled
-						}
-						break
+		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, true
+	}
+	return 0, 0, false, false
+}
+
+// sizelessCUDAOOMReserveMB is the estimate filed for a CUDA out-of-memory
+// abort that names a device but no size.
+//
+// Reserve exactly one routed expert layer: that is the unit placement moves
+// between GPU and CPU, its size is known exactly from the GGUF ledger, and it
+// is the smallest step that changes the outcome. A tenth of the card, which
+// this used to reserve, is a quantity derived from nothing -- on a 24 GiB
+// device it withheld 2457 MiB, close to two layers, and a second abort
+// compounded it permanently. A repeat stacks on the earlier estimate.
+func sizelessCUDAOOMReserveMB(caps *detect.Capabilities, model *placement.ModelProfile, device int, prior map[int]int) int {
+	reserveMB := placement.LargestRoutedExpertLayerMB(model)
+	if reserveMB <= 0 {
+		// No ledger: fall back to the old fraction rather than reserve
+		// nothing, since an OOM is proof that something must give.
+		reserveMB = unknownRuntimeCUDAOOMReserveMinMB
+		if caps != nil {
+			for _, gpu := range caps.GPUs {
+				if gpu.Index == device {
+					if scaled := (gpu.VRAMTotalMB + 9) / 10; scaled > reserveMB {
+						reserveMB = scaled
 					}
+					break
 				}
 			}
 		}
-		if prior[device] >= reserveMB {
-			reserveMB += prior[device]
-		}
-		return device, reserveMB, true, true
 	}
-	return 0, 0, false, false
+	if prior[device] >= reserveMB {
+		reserveMB += prior[device]
+	}
+	return reserveMB
+}
+
+// warmupCUDAOOM recognizes a CUDA out-of-memory abort after every load-time
+// buffer was allocated but before the backend reported the model loaded: the
+// warmup run, which first launches kernels and allocates pool temporaries that
+// no-alloc accounting never sees. ggml prints the device but no size:
+//
+//	E CUDA error: out of memory
+//	E   current device: 0, in function ggml_cuda_kernel_can_use_pdl at ...
+//	E   cudaFuncGetAttributes(&attr, kernel)
+//
+// Seen on GLM-5.3-Flash at ubatch 512 (CUDA0, 2026-10-01) and on
+// Qwen3.8-Flash-Next (CUDA1, 2026-09-21). A sized allocation failure, any other
+// CUDA error, or an abort after the model loaded is not this.
+func warmupCUDAOOM(logData string) (int, bool) {
+	lines := strings.Split(logData, "\n")
+	start := -1
+	for i, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "warming up the model") || strings.Contains(lower, "compute buffer size") {
+			start = i
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	if loaded, ok := runtimeGrowthWindowStart(lines); ok && loaded > start {
+		return 0, false
+	}
+	for i := start + 1; i < len(lines); i++ {
+		if !strings.Contains(strings.ToLower(lines[i]), "cuda error: out of memory") {
+			continue
+		}
+		for j := i + 1; j < len(lines) && j <= i+3; j++ {
+			if device, ok := recovery.ParseCUDADevice(lines[j]); ok {
+				return device, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// recordWarmupCUDAOOM files a warmup abort as estimated runtime growth on the
+// failed device for this exact launch key. It is labelled an estimate, so a
+// later measurement replaces it; it is never a measured allocation. Returns
+// the MiB recorded.
+func recordWarmupCUDAOOM(req *launchRequest, cacheDir string, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, device int) int {
+	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
+	prior := placement.RuntimeGraphGrowthByGPU(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
+	reserveMB := sizelessCUDAOOMReserveMB(caps, model, device, prior)
+	if err := placement.RecordRuntimeGraphGrowthFromOOM(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel, device, reserveMB, true); err != nil {
+		fmt.Fprintf(os.Stderr, "[launch] warning: could not persist warmup OOM evidence: %v\n", err)
+	}
+	return reserveMB
 }
 
 func oomLogFingerprint(logData string) string {

@@ -1603,6 +1603,24 @@ func stagedPrefillUBatchRaise(fitBin string, serverArgs []string, current []pref
 	}
 	want := modelRows(current)
 	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+	// The growth this model measured under related keys, raised to any
+	// estimate a warmup abort left at the rung: that estimate is kept free at
+	// every context, or the fit would return one granule below the failure.
+	relatedByUB := map[int]map[int]int{}
+	relatedGrowth := func(ub int) map[int]int {
+		if related, ok := relatedByUB[ub]; ok {
+			return related
+		}
+		related := map[int]int{}
+		for dev, mb := range placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, backendTag) {
+			related[dev] = mb
+		}
+		for dev, mb := range placement.EstimatedRuntimeGraphGrowthAtUBatch(cfg.CacheDir, model, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel) {
+			related[dev] = max(related[dev], mb)
+		}
+		relatedByUB[ub] = related
+		return related
+	}
 	check := func(ub, ctx int) (raiseProbe, bool) {
 		args := replaceUBatchArg(serverArgs, ub)
 		if ctx != strategy.ContextSize {
@@ -1617,8 +1635,7 @@ func stagedPrefillUBatchRaise(fitBin string, serverArgs []string, current []pref
 		// leave nothing for it. A measurement on another device does not count.
 		growth := runtimeGrowthReserve(
 			placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, ctx, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel),
-			placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, backendTag),
-			activePreflightGPUs(devs, caps.GPUs), raiseUnmeasuredGrowthMB)
+			relatedGrowth(ub), activePreflightGPUs(devs, caps.GPUs), raiseUnmeasuredGrowthMB)
 		return raiseProbe{ctx: ctx, devs: devs, slack: preflightDeviceSlack(devs, caps.GPUs, overheadByGPU, growth)}, true
 	}
 	for _, ub := range candidates {

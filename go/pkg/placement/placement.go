@@ -7863,6 +7863,80 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 	return byDevice
 }
 
+// EstimatedRuntimeGraphGrowthAtUBatch is the largest ESTIMATED runtime growth
+// per device that this model recorded at one microbatch, under the same KV,
+// backend, GPU set and slot count, at any context. An estimate is filed only
+// for a CUDA abort that named a device but no size, such as a warmup abort.
+//
+// A microbatch raise fits context to the oracle's boundary, so a failure keyed
+// to its exact context would only move the next fit one granule lower, to an
+// almost identical configuration. Keeping the estimate free at the whole rung
+// moves it away from the boundary instead. It is never a measurement.
+func EstimatedRuntimeGraphGrowthAtUBatch(cacheDir string, model *ModelProfile, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) map[int]int {
+	if model == nil || cacheDir == "" || ubatch <= 0 {
+		return nil
+	}
+	modelBase := filepath.Base(model.Path)
+	want := map[string]string{
+		"ubatch": strconv.Itoa(ubatch), "kv_quality": kvQuality, "kv_placement": kvPlacement,
+		"backend": backendTag, "gpu_sig": gpuIdentityHash(gpus), "parallel": strconv.Itoa(probeParallelKey(parallel)),
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return nil
+	}
+	out := map[int]int{}
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".probe") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cacheDir, ent.Name()))
+		if err != nil {
+			continue
+		}
+		header, schema, matched := "", 1, true
+		growth, estimated := map[int]int{}, map[int]bool{}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(line, "# Probe cache for "):
+				header = strings.TrimPrefix(line, "# Probe cache for ")
+			case strings.HasPrefix(line, "# ctx="):
+				for _, field := range strings.Fields(strings.TrimPrefix(line, "#")) {
+					if k, v, ok := strings.Cut(field, "="); ok {
+						if w, keyed := want[k]; keyed && w != v {
+							matched = false
+						}
+					}
+				}
+			case strings.HasPrefix(line, "PROBE_CACHE_SCHEMA="):
+				if v, err := strconv.Atoi(strings.TrimPrefix(line, "PROBE_CACHE_SCHEMA=")); err == nil {
+					schema = v
+				}
+			default:
+				var dev, v int
+				if _, err := fmt.Sscanf(line, "PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA%d=%d", &dev, &v); err == nil {
+					growth[dev] = v
+				} else if _, err := fmt.Sscanf(line, "PROBED_RUNTIME_GRAPH_GROWTH_ESTIMATED_CUDA%d=%d", &dev, &v); err == nil && v != 0 {
+					estimated[dev] = true
+				}
+			}
+		}
+		if header != modelBase || !matched || growthPredatesServingGate(schema) {
+			continue
+		}
+		for dev, v := range growth {
+			if estimated[dev] && v > out[dev] {
+				out[dev] = v
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // HasRuntimeGraphGrowthProbe reports whether all active GPUs have measured
 // runtime-growth data for this exact runtime signature. This is a verification
 // marker for future agents: no static fallback is hidden behind this predicate.
