@@ -199,6 +199,22 @@ def utilization(baseline, loaded):
             "fraction_of_vram": round(served / capacity, 4) if capacity else None}
 
 
+def claude_free_path(path):
+    """PATH without directories that provide a claude executable."""
+    names = ("claude", "claude.exe", "claude.cmd")
+    return os.pathsep.join(d for d in path.split(os.pathsep)
+                           if d and not any(Path(d, n).exists() for n in names))
+
+
+def check_ubatch_raise(log_text):
+    """A staged-prefill ubatch raise must be followed by exact admission of
+    the raised argv. Any model: the raise is optional, its admission is not."""
+    raised = "[launch] staged expert prefill: raising ubatch" in log_text
+    if raised and "[launch] raised microbatch passed exact preflight" not in log_text:
+        raise RuntimeError("ubatch raise was not admitted by exact preflight")
+    return {"raised": raised}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launcher", required=True)
@@ -215,6 +231,8 @@ def main():
     parser.add_argument("--prefix-reuse", action="store_true",
                         help="Measure prompt re-evaluation behind a long shared prefix "
                              "(needs a context large enough to hold it)")
+    parser.add_argument("--claude-code", action="store_true",
+                        help="Launch in Claude Code mode (reviewer + agent policy); the claude client is kept off PATH so ggrun serves")
     parser.add_argument("--min-weight-devices", type=int, default=0,
                         help="Require weight allocations on this many devices in the final launch")
     args = parser.parse_args()
@@ -234,12 +252,18 @@ def main():
         command.append("--cpu")
     if args.parallel:
         command += ["--parallel", str(args.parallel)]
+    if args.claude_code:
+        command.append("--claude-code")
     windows = os.name == "nt"
     if windows and command[0].lower().endswith((".cmd", ".bat")):
         command = 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
     result = {"command": command, "passed": False}
     (output / "result.json").write_text(json.dumps(result, indent=2))
     env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
+    if args.claude_code:
+        # With a claude client on PATH ggrun hands it the terminal; this check
+        # drives the served endpoint itself, as the acceptance harness does.
+        env["PATH"] = claude_free_path(env.get("PATH", ""))
     proc = None
     try:
         check_port_available(args.port)
@@ -299,6 +323,7 @@ def main():
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during streaming")
             result["streaming"] = True
+            result["ubatch_raise"] = check_ubatch_raise((output / "serve.log").read_text(errors="replace"))
             # Cancellation and prefix reuse are the two acceptance items the
             # health/generate/stream sequence above cannot see. Both are the
             # ordinary agent path, not a stress test.
