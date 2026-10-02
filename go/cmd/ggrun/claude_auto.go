@@ -446,7 +446,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 	var lastErr error
 	for _, gpu := range candidates {
 		env := claudeReviewerBackendEnv(be.Path, []string{fmt.Sprintf("CUDA_VISIBLE_DEVICES=%d", gpu)})
-		device, probeErr := claudeReviewerGPUDevice(be.Path, env)
+		device, probeErr := claudeReviewerDeviceForGPU(be.Path, env, claudeReviewerPhysicalGPU(caps, gpu))
 		if probeErr != nil {
 			lastErr = probeErr
 			if planned {
@@ -625,7 +625,7 @@ func helpHasExactFlag(help, flag string) bool {
 	return false
 }
 
-func claudeReviewerGPUDevice(binary string, env []string) (string, error) {
+func claudeReviewerListDevices(binary string, env []string) (string, error) {
 	args := []string{binary, "--list-devices"}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = server.OverrideEnv(server.ChildEnv(os.Environ(), args), env)
@@ -633,7 +633,65 @@ func claudeReviewerGPUDevice(binary string, env []string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("probe %s --list-devices: %w: %s", binary, err, strings.TrimSpace(string(out)))
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	return string(out), nil
+}
+
+func claudeReviewerPhysicalGPU(caps *detect.Capabilities, index int) *detect.GPU {
+	if caps == nil {
+		return nil
+	}
+	for i := range caps.GPUs {
+		if caps.GPUs[i].Index == index {
+			return &caps.GPUs[i]
+		}
+	}
+	return nil
+}
+
+// claudeReviewerDeviceForGPU names the backend device that is physical GPU
+// gpu. A CUDA backend is isolated by CUDA_VISIBLE_DEVICES and reports it
+// directly. A Vulkan backend ignores that isolation and enumerates every card
+// in its own order, so the device is matched by name, and only when exactly
+// one Vulkan device carries it: fresh NVIDIA installs pair the ik_llama CUDA
+// server, which cannot run the reviewer, with a mainline Vulkan server.
+func claudeReviewerDeviceForGPU(binary string, env []string, gpu *detect.GPU) (string, error) {
+	device, err := claudeReviewerGPUDevice(binary, env)
+	if err == nil || gpu == nil || strings.TrimSpace(gpu.Name) == "" {
+		return device, err
+	}
+	out, listErr := claudeReviewerListDevices(binary, env)
+	if listErr != nil {
+		return "", listErr
+	}
+	var matches []string
+	for _, line := range strings.Split(out, "\n") {
+		name, desc, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || !strings.HasPrefix(name, "Vulkan") {
+			continue
+		}
+		desc = strings.TrimSpace(desc)
+		if i := strings.LastIndex(desc, " ("); i >= 0 {
+			desc = desc[:i]
+		}
+		if strings.EqualFold(strings.TrimSpace(desc), strings.TrimSpace(gpu.Name)) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("backend %s exposes %d Vulkan devices named %q; cannot tell which is GPU %d", binary, len(matches), gpu.Name, gpu.Index)
+	}
+	return "", err
+}
+
+func claudeReviewerGPUDevice(binary string, env []string) (string, error) {
+	out, err := claudeReviewerListDevices(binary, env)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) == 0 {
 			continue
@@ -643,7 +701,7 @@ func claudeReviewerGPUDevice(binary string, env []string) (string, error) {
 			return name, nil
 		}
 	}
-	return "", fmt.Errorf("backend %s advertises no CUDA device after GPU isolation: %s", binary, strings.TrimSpace(string(out)))
+	return "", fmt.Errorf("backend %s advertises no CUDA device after GPU isolation: %s", binary, strings.TrimSpace(out))
 }
 
 func claudeReviewerCPUEnv() []string {
