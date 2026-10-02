@@ -25,7 +25,12 @@ import (
 // neighbouring rungs of the predicted finalist. A decision recorded under 24
 // was reached in a search where those fallbacks were unreachable, so its
 // cached "default" winner must not suppress the search that can now run.
-const CalibrationSchemaVersion = 25
+// Version 26 distinguishes missing compute evidence from fitting memory and
+// retains admission-needed candidates without promoting them to proven room.
+// Version 27 prices host-expert GPU staging separately from CPU execution,
+// charges KV to the layers' owning devices from per-layer geometry, and scopes
+// decisions by the backend's host-weight execution policy.
+const CalibrationSchemaVersion = 27
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 
@@ -1422,6 +1427,12 @@ type CalibrationScopeKey struct {
 	// (catalog Entry.Name) is a different serving contract — the flags emitted
 	// for --chat-template-file differ from an auto-matched template.
 	ChatTemplate string
+	// HostExecution is the host-expert execution policy (op offload, threshold,
+	// staging device) of a base that keeps experts in host memory. It changes
+	// prefill cost without changing argv, so a decision measured under one
+	// policy is not performance evidence for another. Empty otherwise, which
+	// keeps verified-config keys (built without a base) unchanged.
+	HostExecution string
 }
 
 // NewCalibrationScopeKey builds the key from the same identity sources the
@@ -1513,8 +1524,9 @@ func NewCalibrationScopeKey(model *ModelProfile, caps *detect.Capabilities, opts
 			string(effectiveCPUExpertMMapCapability(opts)),
 			opts.CPUExpertMMapEvidence,
 		),
-		SWAFull:      opts.SWAFull,
-		ChatTemplate: opts.ChatTemplate,
+		SWAFull:       opts.SWAFull,
+		ChatTemplate:  opts.ChatTemplate,
+		HostExecution: hostExecutionScope(caps, opts, base),
 	}
 }
 
@@ -1538,7 +1550,7 @@ func calibrationCompanionPolicy(companions []CompanionReservation) string {
 
 // String renders the key as a stable, opaque hash for use as a cache filename.
 func (k CalibrationScopeKey) String() string {
-	return specHash(
+	parts := []string{
 		k.ModelIdentity, k.BackendIdentity, k.HardwareID, k.WorkloadProfile,
 		fmt.Sprintf("%d", max(1, k.WorkloadConcurrency)),
 		fmt.Sprintf("%d", k.ContextSize), fmt.Sprintf("%d", k.Parallel),
@@ -1550,5 +1562,20 @@ func (k CalibrationScopeKey) String() string {
 		k.KVQuality, k.KVQualityV, k.KVType, k.GPUSet, k.BasePlacement, k.MemoryPolicy,
 		k.SamplingProfile, k.CompanionPolicy, k.SpecPolicy, k.BackendCapabilities,
 		fmt.Sprintf("%t", k.SWAFull), k.ChatTemplate,
-	)
+	}
+	// Appended only when set, so every key without host experts hashes as it
+	// did before this component existed.
+	if k.HostExecution != "" {
+		parts = append(parts, "host-exec="+k.HostExecution)
+	}
+	return specHash(parts...)
+}
+
+// hostExecutionScope fingerprints the execution policy for a base that keeps
+// routed experts in host memory.
+func hostExecutionScope(caps *detect.Capabilities, opts Options, base *Strategy) string {
+	if base == nil || base.Type != MoEOffload || base.NCPUMoE <= 0 {
+		return ""
+	}
+	return ResolveHostExpertExecution(caps, opts).Fingerprint()
 }

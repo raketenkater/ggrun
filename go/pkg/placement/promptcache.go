@@ -368,3 +368,22 @@ func LargestRoutedExpertLayerMB(model *ModelProfile) int {
 	}
 	return int((maxBytes + (1 << 20) - 1) / (1 << 20))
 }
+
+// RefreshRuntimeCachePolicy returns a copy of s whose host prompt-cache budget
+// and checkpoint limits are re-sized from the current measurements. Placement,
+// context and microbatch are kept: a prompt-cache measurement changes a host
+// RAM budget, not what the GPUs hold, and re-planning everything for it threw
+// away a verified (or oracle-raised) plan on every Claude Code relaunch.
+func RefreshRuntimeCachePolicy(caps *detect.Capabilities, model *ModelProfile, s *Strategy, opts Options) *Strategy {
+	if caps == nil || model == nil || s == nil {
+		return s
+	}
+	next := cloneStrategy(s)
+	LoadMeasuredPromptCache(opts.CacheDir, model, next, backendCacheTag(opts), caps.GPUs)
+	totalSizeMB := model.TotalSizeMB
+	if totalSizeMB <= 0 {
+		totalSizeMB = int((model.SizeBytes + 1048575) / 1048576)
+	}
+	applyRuntimeCachePolicy(model, next, caps, totalSizeMB, computeKVTotalMBForStrategy(model, next), opts)
+	return next
+}

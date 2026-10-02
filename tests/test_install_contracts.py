@@ -46,6 +46,34 @@ class InstallContracts(unittest.TestCase):
                                      f'\nclone_source_ref "file://{bare}" "{"0" * 40}" "{missing}"\n'])
             self.assertNotEqual(result.returncode, 0)
 
+    def test_release_bundle_installs_the_memory_guard_where_ggrun_finds_it(self):
+        # The guard was only copied into the backend directory, where ggrun never
+        # looks, so a fresh install had no CUDA allocation firewall.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            payload = tmp / "src" / "ggrun-linux-x86_64-cuda" / "bin"
+            payload.mkdir(parents=True)
+            for name in ("ggrun", "llama-server", "libggrun-memguard.so"):
+                (payload / name).write_text(name)
+            archive = tmp / "bundle.tar.gz"
+            subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp / "src"), "."], check=True)
+            install_dir = tmp / "bin"
+            install_dir.mkdir()
+            script = "\n".join(function("install.sh", name) for name in ("install_release_bundle", "install_payload_file"))
+            script += f"""
+say() {{ :; }}; ok() {{ :; }}; warn() {{ :; }}; err() {{ :; }}
+platform_slug() {{ echo linux-x86_64; }}
+release_asset_name() {{ echo ggrun-linux-x86_64-cuda.tar.gz; }}
+find_release_asset_url() {{ [[ $1 == SHA256SUMS ]] && return 1; echo https://example.invalid/$1; }}
+curl() {{ while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && cp "{archive}" "$2"; shift; done; }}
+place_isolated_backend() {{ return 0; }}
+BACKEND_CHOICE=cuda MAIN_IMPL=go INSTALL_DIR="{install_dir}" LLM_INSTALL_ALLOW_UNVERIFIED=1
+install_release_bundle ik_llama-server-cuda
+"""
+            result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual((install_dir / "libggrun-memguard.so").read_text(), "libggrun-memguard.so")
+
     def test_release_does_not_rebuild_checked_launcher(self):
         script = function("install.sh", "install_ggrun_from_source")
         script += "\nensure_source_repo() { echo unexpected-source-build; exit 99; }\n"

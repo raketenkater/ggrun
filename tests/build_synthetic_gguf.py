@@ -47,6 +47,16 @@ def w_kv_string(buf, key, val):
     w_string(buf, val)
 
 
+def w_kv_int_array(buf, key, elem_type, vals):
+    """Per-layer integer array: elem_type 5 = int32, 7 = bool (one byte)."""
+    w_string(buf, key)
+    w_uint32(buf, VT_ARRAY)
+    w_uint32(buf, elem_type)
+    w_uint64(buf, len(vals))
+    for val in vals:
+        buf.append(struct.pack('<i', val) if elem_type == 5 else struct.pack('<B', 1 if val else 0))
+
+
 def w_kv_string_array(buf, key, vals):
     w_string(buf, key)
     w_uint32(buf, VT_ARRAY)
@@ -136,6 +146,15 @@ def build(args):
         kv_pairs.append((f'{arch}.rope.dimension_count', 'uint32', args.rope_dim))
     if args.ssm:
         kv_pairs.append((f'{arch}.ssm.state_size', 'uint32', 128))
+    if args.hkv_arr:
+        kv_pairs.append((f'{arch}.attention.head_count_kv', 'int32s', [int(v) for v in args.hkv_arr.split(',')]))
+    if args.swa_pattern:
+        kv_pairs.append((f'{arch}.attention.sliding_window_pattern', 'bools', [int(v) for v in args.swa_pattern.split(',')]))
+    if args.nextn is not None:
+        kv_pairs.append((f'{arch}.nextn_predict_layers', 'uint32', args.nextn))
+    for item in args.u32 or []:
+        name, _, value = item.partition('=')
+        kv_pairs.append((f'{arch}.{name}', 'uint32', int(value)))
 
     w_uint64(out, tensor_count)
     w_uint64(out, len(kv_pairs))
@@ -146,6 +165,10 @@ def build(args):
             w_kv_string(out, key, val)
         elif vtype == 'strings':
             w_kv_string_array(out, key, val)
+        elif vtype == 'int32s':
+            w_kv_int_array(out, key, 5, val)
+        elif vtype == 'bools':
+            w_kv_int_array(out, key, 7, val)
         else:
             raise ValueError(f'unhandled type {vtype}')
 
@@ -170,6 +193,10 @@ def main():
     ap.add_argument('--vocab-size', type=int, default=0)
     ap.add_argument('--layers', type=int, default=None)
     ap.add_argument('--hkv', type=int, default=None)
+    ap.add_argument('--hkv-arr', default='', help='comma-separated per-layer KV heads (int32 array)')
+    ap.add_argument('--swa-pattern', default='', help='comma-separated per-layer 0/1 window flags (bool array)')
+    ap.add_argument('--nextn', type=int, default=None)
+    ap.add_argument('--u32', action='append', help='extra arch-relative uint32 key, e.g. ssm.conv_kernel=4')
     ap.add_argument('--kl', type=int, default=None)
     ap.add_argument('--vl', type=int, default=None)
     ap.add_argument('--embd', type=int, default=None)

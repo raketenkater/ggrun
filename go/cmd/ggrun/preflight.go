@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1487,16 +1488,15 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
-		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-		// Cold-start carry: agree with the fit loop — when the keyed growth is
-		// unmeasured, reserve the measured related-key growth so preflight and
-		// placement both pack around it on a cold key (preflight must not fit
-		// while the real launch would OOM, or vice versa).
-		if len(runtimeGrowthByGPU) == 0 {
-			if related := placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, cacheBackendTag); len(related) > 0 {
-				runtimeGrowthByGPU = related
-			}
-		}
+		// Cold-start carry: agree with the fit loop — a device without keyed
+		// growth reserves the measured related-key growth so preflight and
+		// placement both pack around it (preflight must not fit while the real
+		// launch would OOM, or vice versa). Per device: a measurement on one GPU
+		// is no evidence for another.
+		runtimeGrowthByGPU = runtimeGrowthReserve(
+			placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel),
+			placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, cacheBackendTag),
+			caps.GPUs, 0)
 	}
 	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
 	if isEmbeddedMainlineMTP(strategy) && deficit > 0 {
@@ -1571,6 +1571,296 @@ func measureUBatchLadderCandidates(fitBin string, serverArgs []string, cfg *conf
 		}
 		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
+}
+
+// stagedPrefillUBatchRaise proposes a larger physical microbatch for an
+// admitted automatic plan whose host-resident experts are staged onto a GPU
+// during prefill (placement.StagedPrefillUBatchRaiseCandidates). Each rung is
+// checked with the backend's no-alloc oracle on this exact argv with only -ub
+// (and, for an automatic context, --ctx-size) changed; a rung qualifies only
+// if model weights stay on the same devices, no backend compatibility warning
+// appears, and no device is short by the measure that admitted the current
+// plan. It returns the largest such rung and its context, or 0. The caller
+// still sends the new argv through full preflight.
+//
+// The microbatch is reserved before context (user policy, 2026-09-30): when a
+// rung is short only because an automatic context filled the cards, context
+// is fitted to what remains, never below minRaiseContext. The fit reads only
+// oracle answers. GLM-5.3-Flash's compute buffers grow with ubatch x context,
+// so its KV rows alone priced every rung as unaffordable at any context.
+func stagedPrefillUBatchRaise(fitBin string, serverArgs []string, current []preflightDevice, cfg *configForPreflight, caps *detect.Capabilities,
+	model *placement.ModelProfile, strategy *placement.Strategy, backendTag string, candidates []int, contextAuto bool) (int, int) {
+	if fitBin == "" || model == nil || strategy == nil || caps == nil || len(candidates) == 0 {
+		return 0, 0
+	}
+	modelRows := func(devs []preflightDevice) string {
+		parts := []string{}
+		for _, d := range devs {
+			parts = append(parts, fmt.Sprintf("%s=%d", d.Name, d.ModelMB))
+		}
+		sort.Strings(parts)
+		return strings.Join(parts, ",")
+	}
+	want := modelRows(current)
+	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+	// The growth this model measured under related keys, raised to any
+	// estimate a warmup abort left at the rung: that estimate is kept free at
+	// every context, or the fit would return one granule below the failure.
+	relatedByUB := map[int]map[int]int{}
+	relatedGrowth := func(ub int) map[int]int {
+		if related, ok := relatedByUB[ub]; ok {
+			return related
+		}
+		related := map[int]int{}
+		for dev, mb := range placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, backendTag) {
+			related[dev] = mb
+		}
+		for dev, mb := range placement.EstimatedRuntimeGraphGrowthAtUBatch(cfg.CacheDir, model, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel) {
+			related[dev] = max(related[dev], mb)
+		}
+		relatedByUB[ub] = related
+		return related
+	}
+	check := func(ub, ctx int) (raiseProbe, bool) {
+		args := replaceUBatchArg(serverArgs, ub)
+		if ctx != strategy.ContextSize {
+			args = replaceContextArg(args, ctx)
+		}
+		devs, stderr, err := runFitPreflight(fitBin, args)
+		if err != nil || backendAdjustmentFromLog(stderr) != nil || modelRows(devs) != want {
+			return raiseProbe{}, false
+		}
+		// A device whose growth at this rung was never measured here keeps the
+		// unmeasured reserve: a context fitted to the oracle's boundary would
+		// leave nothing for it. A measurement on another device does not count.
+		growth := runtimeGrowthReserve(
+			placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, ctx, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel),
+			relatedGrowth(ub), activePreflightGPUs(devs, caps.GPUs), raiseUnmeasuredGrowthMB)
+		return raiseProbe{ctx: ctx, devs: devs, slack: preflightDeviceSlack(devs, caps.GPUs, overheadByGPU, growth)}, true
+	}
+	for _, ub := range candidates {
+		p, ok := check(ub, strategy.ContextSize)
+		if ok && !p.fits() && contextAuto && strategy.ContextSize > minRaiseContext {
+			p, ok = largestFittingContext(p, func(ctx int) (raiseProbe, bool) { return check(ub, ctx) })
+		}
+		if !ok || !p.fits() {
+			if contextAuto {
+				fmt.Fprintf(os.Stderr, "[launch] ubatch %d not admitted by backend accounting with at least %d tokens of automatic context\n", ub, minRaiseContext)
+			} else {
+				fmt.Fprintf(os.Stderr, "[launch] ubatch %d not admitted by backend accounting at the explicit context\n", ub)
+			}
+			continue
+		}
+		computeByGPU := map[int]int{}
+		for _, d := range p.devs {
+			if idx, ok := cudaDeviceIndex(d.Name); ok {
+				computeByGPU[idx] = d.ComputeMB
+			}
+		}
+		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, p.ctx, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel, computeByGPU)
+		return ub, p.ctx
+	}
+	return 0, 0
+}
+
+// raiseProbe is one oracle answer for a candidate microbatch: the context it
+// was asked at, its rows, and the MiB each CUDA device has left (negative when
+// short).
+type raiseProbe struct {
+	ctx   int
+	devs  []preflightDevice
+	slack map[int]int
+}
+
+func (p raiseProbe) fits() bool {
+	for _, mb := range p.slack {
+		if mb < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// largestFittingContext searches automatic context between minRaiseContext
+// and hi, an oracle answer that is short. Every row is close to linear in
+// context, compute included, so each step interpolates the nearest fitting and
+// short answers. Only a context the oracle admitted is returned.
+func largestFittingContext(hi raiseProbe, check func(int) (raiseProbe, bool)) (raiseProbe, bool) {
+	lo, ok := check(minRaiseContext)
+	if !ok || !lo.fits() {
+		return lo, false
+	}
+	for attempt := 0; attempt < 4; attempt++ {
+		next := interpolateFittingContext(lo, hi)
+		if next <= lo.ctx {
+			break
+		}
+		p, ok := check(next)
+		if !ok {
+			break
+		}
+		if p.fits() {
+			lo = p
+		} else {
+			hi = p
+		}
+	}
+	return lo, true
+}
+
+// interpolateFittingContext is the largest 1,024-token context below hi at
+// which every device short at hi reaches zero slack on the line through lo.
+func interpolateFittingContext(lo, hi raiseProbe) int {
+	best := hi.ctx - 1
+	for idx, short := range hi.slack {
+		if short >= 0 {
+			continue
+		}
+		perToken := float64(lo.slack[idx]-short) / float64(hi.ctx-lo.ctx)
+		if perToken <= 0 {
+			return lo.ctx
+		}
+		best = min(best, lo.ctx+int(float64(lo.slack[idx])/perToken))
+	}
+	return best / 1024 * 1024
+}
+
+// admittedPlan is a placement exact preflight admitted in this launch, with
+// the argv and oracle rows that admitted it.
+type admittedPlan struct {
+	strategy *placement.Strategy
+	args     []string
+	devs     []preflightDevice
+}
+
+// chooseStagedPrefillPlan raises every placement admitted in this launch and
+// returns the index, microbatch and context of the lowest staged-prefill plus
+// decode cost (placement.HostExpertAgentCost). Placement and microbatch
+// compete for the same VRAM: on GLM-5.3-Flash a re-plan that put two more
+// expert layers on the GPUs left no room for a larger microbatch, while the
+// plan it replaced could run ubatch 128 — 39% less staged prefill traffic
+// against 4.7% fewer decode host reads. The current (last) plan wins ties and
+// is the only candidate when costs are unknown. ub is 0 when nothing helps.
+func chooseStagedPrefillPlan(fitBin string, plans []admittedPlan, cfg *configForPreflight, caps *detect.Capabilities,
+	model *placement.ModelProfile, opts placement.Options, backendTag func(*placement.Strategy) string, contextAuto bool) (int, int, int) {
+	if len(plans) == 0 {
+		return -1, 0, 0
+	}
+	current := len(plans) - 1
+	type result struct{ ub, ctx int }
+	evaluate := func(p admittedPlan) (result, float64, bool) {
+		r := result{p.strategy.UBatchSize, p.strategy.ContextSize}
+		if candidates := placement.StagedPrefillUBatchRaiseCandidates(caps, opts, p.strategy); len(candidates) > 0 {
+			if ub, ctx := stagedPrefillUBatchRaise(fitBin, p.args, p.devs, cfg, caps, model, p.strategy, backendTag(p.strategy), candidates, contextAuto); ub > 0 {
+				r = result{ub, ctx}
+			}
+		}
+		cost, ok := placement.HostExpertAgentCost(caps, model, opts, r.ub, p.strategy.NCPUMoE)
+		return r, cost, ok
+	}
+	best, bestResult := current, result{}
+	bestResult, bestCost, ok := evaluate(plans[current])
+	if ok {
+		seen := map[string]bool{placementKey(plans[current].strategy): true}
+		for i := 0; i < current; i++ {
+			// The same placement gives the same answer; only a different
+			// expert/backbone layout can trade residency for microbatch.
+			key := placementKey(plans[i].strategy)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if r, cost, ok := evaluate(plans[i]); ok && cost < bestCost*0.98 {
+				best, bestResult, bestCost = i, r, cost
+			}
+		}
+	}
+	if best == current && bestResult.ub == plans[current].strategy.UBatchSize {
+		return best, 0, 0
+	}
+	return best, bestResult.ub, bestResult.ctx
+}
+
+// placementKey identifies the weight layout of a plan: expert layers on the
+// host, tensor split and expert pins.
+func placementKey(s *placement.Strategy) string {
+	return fmt.Sprintf("%d|%v|%s", s.NCPUMoE, s.TensorSplit, s.OTString)
+}
+
+// minRaiseContext keeps a microbatch raise from shrinking an automatic context
+// below a long agent session: the longest recorded one held ~129k tokens.
+const minRaiseContext = 131072
+
+// raiseUnmeasuredGrowthMB is kept free on each device for a raised rung whose
+// runtime growth has not been measured: CUDA pool temporaries and lazily
+// loaded kernels that no-alloc accounting does not see. It is llama.cpp's own
+// --fit-target default. GLM-5.3-Flash at ubatch 512, fitted to the oracle's
+// exact boundary, aborted in warmup with 256 MiB free on CUDA0.
+const raiseUnmeasuredGrowthMB = 1024
+
+// runtimeGrowthReserve is the runtime graph growth to hold free on each of
+// gpus. A device's own keyed measurement is kept as observed, zero included.
+// A device without one is unknown, whatever its peers measured: it reserves
+// the largest growth the model measured under a related key, or floorMB if
+// that is larger. GPUs outside gpus get no entry.
+func runtimeGrowthReserve(measured, related map[int]int, gpus []detect.GPU, floorMB int) map[int]int {
+	out := map[int]int{}
+	for _, g := range gpus {
+		if mb, ok := measured[g.Index]; ok {
+			out[g.Index] = mb
+		} else if mb := max(related[g.Index], floorMB); mb > 0 {
+			out[g.Index] = mb
+		}
+	}
+	return out
+}
+
+// activePreflightGPUs is the subset of gpus the oracle placed anything on.
+func activePreflightGPUs(devs []preflightDevice, gpus []detect.GPU) []detect.GPU {
+	used := map[int]bool{}
+	for _, d := range devs {
+		if idx, ok := cudaDeviceIndex(d.Name); ok && d.TotalMB() > 0 {
+			used[idx] = true
+		}
+	}
+	var out []detect.GPU
+	for _, g := range gpus {
+		if used[g.Index] {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// preflightDeviceSlack is the MiB each CUDA device has left after its oracle
+// rows, CUDA overhead and runtime graph growth; negative when short.
+func preflightDeviceSlack(devs []preflightDevice, gpus []detect.GPU, overheadByGPU, runtimeGrowthByGPU map[int]int) map[int]int {
+	required := map[int]int{}
+	for _, d := range devs {
+		if idx, ok := cudaDeviceIndex(d.Name); ok {
+			required[idx] += d.TotalMB()
+		}
+	}
+	out := map[int]int{}
+	for _, g := range gpus {
+		if mb, ok := required[g.Index]; ok {
+			out[g.Index] = g.VRAMFreeMB() - mb - overheadByGPU[g.Index] - runtimeGrowthByGPU[g.Index]
+		}
+	}
+	return out
+}
+
+// replaceContextArg sets --ctx-size/-c to ctx, appending it if absent.
+func replaceContextArg(args []string, ctx int) []string {
+	out := append([]string(nil), args...)
+	val := strconv.Itoa(ctx)
+	for i, a := range out {
+		if (a == "--ctx-size" || a == "-c") && i+1 < len(out) {
+			out[i+1] = val
+			return out
+		}
+	}
+	return append(out, "--ctx-size", val)
 }
 
 // replaceUBatchArg returns a copy of args with -ub/--ubatch-size's value set

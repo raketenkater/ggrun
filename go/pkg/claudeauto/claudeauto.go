@@ -37,18 +37,15 @@ const (
 
 	DefaultReviewerDisplayName = "Qwen3.5-4B"
 	DefaultReviewerFile        = "Qwen3.5-4B-Q4_K_M-00001-of-00001.gguf"
-	// DefaultReviewerSize and DefaultReviewerSHA pin the exact Q4_K_M artifact
-	// installed locally at models/Qwen3.5-4B-Q4_K_M/ (a symlink to
-	// /home/mik/2tb-disk/AI_Models/Qwen3.5-4B-Q4_K_M.gguf), so an upstream branch
-	// update cannot silently change local permission decisions.
+	// DefaultReviewerSize and DefaultReviewerSHA pin the exact Q4_K_M artifact,
+	// so an upstream branch update cannot silently change local permission
+	// decisions.
 	DefaultReviewerSize = int64(2740937888)
 	DefaultReviewerSHA  = "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
-	// DefaultReviewerURL is the remote mirror for first-use installs; when the
-	// exact 4B Q4_K_M GGUF is not present on the hub under this path, the pinned
-	// primary source is the local model directory and downloads only happen for
-	// the URL that actually resolves. The 4B is already present locally, so the
-	// reviewer uses it without downloading.
-	DefaultReviewerURL = "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/" + DefaultReviewerFile
+	// DefaultReviewerURL is the hub file with exactly that size and SHA. Its
+	// remote name differs from DefaultReviewerFile, the local name: deriving
+	// the URL from the local name pointed at a file the hub never had (404).
+	DefaultReviewerURL = "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"
 
 	// DefaultReviewerLocalDir is the model-directory subfolder that already holds
 	// the pinned Q4_K_M artifact (models/Qwen3.5-4B-Q4_K_M/), so first use does

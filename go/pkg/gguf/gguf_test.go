@@ -3,6 +3,7 @@ package gguf
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -390,5 +391,251 @@ func TestChatTemplateAbsentReturnsEmpty(t *testing.T) {
 	}
 	if got := ChatTemplate(""); got != "" {
 		t.Fatalf("ChatTemplate of empty path = %q, want \"\"", got)
+	}
+}
+
+// fixtureKV writes one GGUF metadata entry: key, value type, and payload.
+type fixtureKV struct {
+	key   string
+	vtype uint32
+	write func(*bytes.Buffer)
+}
+
+func kvU32(key string, v uint32) fixtureKV {
+	return fixtureKV{key, 4, func(b *bytes.Buffer) { binary.Write(b, binary.LittleEndian, v) }}
+}
+
+func kvString(key, v string) fixtureKV {
+	return fixtureKV{key, 8, func(b *bytes.Buffer) {
+		binary.Write(b, binary.LittleEndian, uint64(len(v)))
+		b.WriteString(v)
+	}}
+}
+
+// kvArray encodes values with the given GGUF element type (0..12).
+func kvArray(key string, elemType uint32, values []float64) fixtureKV {
+	return fixtureKV{key, 9, func(b *bytes.Buffer) {
+		binary.Write(b, binary.LittleEndian, elemType)
+		binary.Write(b, binary.LittleEndian, uint64(len(values)))
+		for _, v := range values {
+			switch elemType {
+			case 0, 7:
+				b.WriteByte(uint8(v))
+			case 1:
+				binary.Write(b, binary.LittleEndian, int8(v))
+			case 2:
+				binary.Write(b, binary.LittleEndian, uint16(v))
+			case 3:
+				binary.Write(b, binary.LittleEndian, int16(v))
+			case 4:
+				binary.Write(b, binary.LittleEndian, uint32(v))
+			case 5:
+				binary.Write(b, binary.LittleEndian, int32(v))
+			case 6:
+				binary.Write(b, binary.LittleEndian, float32(v))
+			case 10:
+				binary.Write(b, binary.LittleEndian, uint64(v))
+			case 11:
+				binary.Write(b, binary.LittleEndian, int64(v))
+			}
+		}
+	}}
+}
+
+// writeGGUFMetadataFixture writes a tensor-less GGUF v3 header carrying only
+// the given metadata, which is all the attention-geometry parser reads.
+func writeGGUFMetadataFixture(t *testing.T, path string, kvs []fixtureKV) {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	buf.WriteString("GGUF")
+	binary.Write(buf, binary.LittleEndian, uint32(3))
+	binary.Write(buf, binary.LittleEndian, uint64(0))
+	binary.Write(buf, binary.LittleEndian, uint64(len(kvs)))
+	for _, kv := range kvs {
+		binary.Write(buf, binary.LittleEndian, uint64(len(kv.key)))
+		buf.WriteString(kv.key)
+		binary.Write(buf, binary.LittleEndian, kv.vtype)
+		kv.write(buf)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+// mimoAttentionArrays loads the independently verified MiMo-V2 header arrays.
+func mimoAttentionArrays(t *testing.T) (hkv, pattern []float64) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "placement", "testdata", "mimo2-kv-geometry.json"))
+	if err != nil {
+		t.Fatalf("read verified fixture: %v", err)
+	}
+	var fixture struct {
+		Metadata map[string]json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(fixture.Metadata["mimo2.attention.head_count_kv"], &hkv); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(fixture.Metadata["mimo2.attention.sliding_window_pattern"], &pattern); err != nil {
+		t.Fatal(err)
+	}
+	return hkv, pattern
+}
+
+func intsEqual(got []int, want []float64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if float64(got[i]) != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// A mixed-head model states its KV geometry only as per-layer arrays. The
+// parser once skipped every numeric array, so this model reached placement
+// with no KV width at all. Both signed and unsigned encodings are legal.
+func TestParsePreservesMixedPerLayerAttentionArrays(t *testing.T) {
+	hkv, pattern := mimoAttentionArrays(t)
+	for _, enc := range []struct {
+		name          string
+		hkvType, swaT uint32
+	}{{"uint32/bool", 4, 7}, {"int32/int32", 5, 5}, {"uint8/uint32", 0, 4}} {
+		t.Run(enc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mimo.gguf")
+			writeGGUFMetadataFixture(t, path, []fixtureKV{
+				kvString("general.architecture", "mimo2"),
+				kvArray("mimo2.attention.head_count_kv", enc.hkvType, hkv),
+				kvArray("mimo2.attention.sliding_window_pattern", enc.swaT, pattern),
+				// Keys after the arrays prove the reader stayed aligned.
+				kvU32("mimo2.block_count", 51),
+				kvU32("mimo2.nextn_predict_layers", 3),
+				kvU32("mimo2.attention.key_length", 192),
+				kvU32("mimo2.attention.value_length", 128),
+				kvU32("mimo2.attention.sliding_window", 128),
+			})
+			info, err := Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !intsEqual(info.HeadCountKVByLayer, hkv) || !intsEqual(info.SlidingWindowPattern, pattern) {
+				t.Fatalf("arrays lost: hkv=%v swa=%v", info.HeadCountKVByLayer, info.SlidingWindowPattern)
+			}
+			if info.HeadCountKV != 0 {
+				t.Fatalf("mixed 4/8 head counts collapsed into scalar %d", info.HeadCountKV)
+			}
+			if info.BlockCount != 51 || info.NextNPredictLayers != 3 || info.KeyLength != 192 ||
+				info.ValueLength != 128 || info.SlidingWindow != 128 {
+				t.Fatalf("reader misaligned after arrays: %+v", info)
+			}
+		})
+	}
+}
+
+func TestParseUniformHeadArrayKeepsScalarContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "uniform.gguf")
+	writeGGUFMetadataFixture(t, path, []fixtureKV{
+		kvArray("llama.attention.head_count_kv", 4, []float64{8, 8, 8, 8}),
+		kvU32("llama.block_count", 4),
+		kvU32("llama.attention.key_length_swa", 256),
+		kvU32("llama.attention.value_length_swa", 128),
+	})
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.HeadCountKV != 8 || len(info.HeadCountKVByLayer) != 4 {
+		t.Fatalf("uniform array must equal the scalar form: %+v", info)
+	}
+	if info.KeyLengthSWA != 256 || info.ValueLengthSWA != 128 || info.KeyLength != 0 {
+		t.Fatalf("SWA head widths confused with full widths: %+v", info)
+	}
+}
+
+// Invalid or foreign encodings are skipped, never guessed, and never leave the
+// reader misaligned for the keys that follow.
+func TestParseRejectsInvalidAttentionArrays(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.gguf")
+	writeGGUFMetadataFixture(t, path, []fixtureKV{
+		kvArray("x.attention.head_count_kv", 5, []float64{4, -1, 8}),
+		kvArray("x.attention.sliding_window_pattern", 6, []float64{0, 1, 1}),
+		kvU32("x.block_count", 3),
+	})
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.HeadCountKVByLayer) != 0 || info.HeadCountKV != 0 {
+		t.Fatalf("negative head count accepted: %+v", info)
+	}
+	if len(info.SlidingWindowPattern) != 0 {
+		t.Fatalf("float pattern accepted: %v", info.SlidingWindowPattern)
+	}
+	if info.BlockCount != 3 {
+		t.Fatalf("reader misaligned after skipped arrays: %d", info.BlockCount)
+	}
+}
+
+// Recurrent state is a cache fact, not only an SSM layout. GLM-5.3-Flash states
+// ssm.conv_kernel and kda.* but no ssm.state_size, so it was served as a plain
+// attention model and a branch restored 9 of 4,247 shared tokens.
+func TestParseReportsRecurrentStateBeyondSSMStateSize(t *testing.T) {
+	glmHeads := make([]float64, 46)
+	for i := 3; i < len(glmHeads); i += 4 {
+		glmHeads[i] = 1
+	}
+	glmHeads[45] = 1
+	for _, tc := range []struct {
+		name           string
+		kvs            []fixtureKV
+		ssm, recurrent int
+	}{
+		{"glm5next KDA", []fixtureKV{
+			kvString("general.architecture", "glm5next"),
+			kvArray("glm5next.attention.head_count_kv", 4, glmHeads),
+			kvU32("glm5next.attention.kv_lora_rank", 512),
+			kvU32("glm5next.ssm.conv_kernel", 4),
+			kvU32("glm5next.kda.head_dim", 128),
+			kvU32("glm5next.block_count", 46),
+		}, 0, 1},
+		{"inkling short convolution", []fixtureKV{
+			kvString("general.architecture", "inkling"),
+			kvU32("inkling.attention.sliding_window", 512),
+			kvU32("inkling.shortconv_kernel", 4),
+		}, 0, 1},
+		{"unlisted architecture stating KDA", []fixtureKV{
+			kvString("general.architecture", "future-linear"),
+			kvU32("future-linear.kda.head_dim", 128),
+		}, 0, 1},
+		{"listed architecture without state keys", []fixtureKV{
+			kvString("general.architecture", "lfm2"),
+			kvU32("lfm2.block_count", 16),
+		}, 0, 1},
+		{"qwen35 SSM layout", []fixtureKV{
+			kvString("general.architecture", "qwen35"),
+			kvU32("qwen35.ssm.state_size", 128),
+			kvU32("qwen35.full_attention_interval", 4),
+		}, 1, 1},
+		{"plain attention", []fixtureKV{
+			kvString("general.architecture", "llama"),
+			kvU32("llama.block_count", 32),
+			kvU32("llama.attention.head_count_kv", 8),
+		}, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "model.gguf")
+			writeGGUFMetadataFixture(t, path, tc.kvs)
+			info, err := Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.SSM != tc.ssm || info.RecurrentState != tc.recurrent {
+				t.Fatalf("ssm=%d recurrent=%d, want ssm=%d recurrent=%d", info.SSM, info.RecurrentState, tc.ssm, tc.recurrent)
+			}
+		})
 	}
 }

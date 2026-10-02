@@ -153,9 +153,9 @@ func TestFastestQuantCeilingFallsBackToQ4(t *testing.T) {
 
 func TestBalancedPrefersBlendedQuantOverBF16(t *testing.T) {
 	// 24 GB GPU + 64 GB RAM: a ~27B dense fits at Q4/Q5 entirely in VRAM (fast),
-	// but its BF16 (~55 GB) only fits by spilling to RAM (slow). Smartest/default
-	// should keep the highest-quality BF16; Best overall (betterByScore) should
-	// pick the fast practical quant instead. This is the Qwen3.6-27B bug.
+	// but its BF16 (~55 GB) only fits by spilling to RAM (slow). The local
+	// quality-only selector keeps BF16; the public practical selector should
+	// pick the fast quant instead. This is the Qwen3.6-27B bug.
 	caps := &detect.Capabilities{
 		OS:       "linux",
 		RAM:      detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
@@ -178,7 +178,7 @@ func TestBalancedPrefersBlendedQuantOverBF16(t *testing.T) {
 		t.Fatal("expected candidate to fit")
 	}
 	if smart.QuantName != "BF16" {
-		t.Fatalf("Smartest/default should keep highest-quality BF16, got %q", smart.QuantName)
+		t.Fatalf("quality-only selector should keep highest-quality BF16, got %q", smart.QuantName)
 	}
 	balanced, ok := evaluateWithSelector(caps, c, nil, betterByScore)
 	if !ok {

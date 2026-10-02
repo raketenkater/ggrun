@@ -19,6 +19,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/modelusage"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/recommend"
+	"github.com/raketenkater/ggrun/pkg/update"
 )
 
 func TestActionMenuArrowNav(t *testing.T) {
@@ -2411,5 +2412,62 @@ func TestDefaultTUILaunchSendsNoBackendOrSupportChoice(t *testing.T) {
 	m.applyLaunchRequestFields(&LaunchRequest{ModelPath: "/models/mimo.gguf", SupportSet: true, SupportOnline: true})
 	if args := strings.Join(m.buildLaunchRequest().LaunchArgs(), " "); !strings.Contains(args, "--support-online") {
 		t.Fatalf("a replayed explicit support choice was dropped: %q", args)
+	}
+}
+
+// The start screen names the running build and whether it is the newest ggrun,
+// in the same label column as Backend/Hardware, and keeps its place while the
+// background check is pending, failed or disabled.
+func TestStartScreenShowsVersionAndUpdateState(t *testing.T) {
+	const v = "v3.2.10-65-g1b69562-dirty"
+	m := Model{screen: ScreenMain, width: 120, height: 40, backend: "llama",
+		models:        []ModelItem{{Name: "model.gguf", Path: "/models/model.gguf"}},
+		versionStatus: update.Status{Version: v}}
+	m.rebuildMainList()
+	for _, tc := range []struct {
+		status update.Status
+		want   string
+	}{
+		{update.Status{Version: v}, "checking for updates…"},
+		{update.Status{Version: v, State: update.StatusCurrent}, "up to date"},
+		{update.Status{Version: v, State: update.StatusBehind, Newer: "origin/main"}, "update available: origin/main · u to update"},
+		{update.Status{Version: v, State: update.StatusBehind, Newer: "v3.2.11"}, "update available: v3.2.11 · u to update"},
+		{update.Status{Version: v, State: update.StatusUnknown}, "update check unavailable"},
+		{update.Status{Version: v, State: update.StatusOff}, "update check off"},
+	} {
+		next := m
+		if tc.status.State != update.StatusChecking {
+			got, _ := m.Update(versionStatusMsg(tc.status))
+			next = got.(Model)
+		}
+		view := next.View()
+		row := "  Version:  " + v + " · "
+		i, j := strings.Index(view, row), strings.Index(view, "  Backend:  llama")
+		if i < 0 || j < i || !strings.Contains(view[i:j], tc.want) {
+			t.Fatalf("state %v: version row missing %q above Backend:\n%s", tc.status.State, tc.want, view)
+		}
+	}
+	first := Model{screen: ScreenFirstRun, width: 120, height: 40,
+		versionStatus: update.Status{Version: v, State: update.StatusCurrent}}
+	if view := first.View(); !strings.Contains(view, "  Version:  "+v+" · ") || !strings.Contains(view, "up to date") {
+		t.Fatalf("first-run screen lacks the version row:\n%s", view)
+	}
+}
+
+// The check runs in the background from startup and may answer while the
+// loading screen is still up; the answer must survive into the start screen.
+func TestVersionStatusArrivingDuringLoadingReachesStartScreen(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("LLM_APP_HOME", t.TempDir())
+	m := loadingModel()
+	if m.versionStatus.Version != update.Version() {
+		t.Fatalf("model starts without the running version: %+v", m.versionStatus)
+	}
+	got, _ := m.Update(versionStatusMsg(update.Status{Version: m.versionStatus.Version, State: update.StatusBehind, Newer: "v9.9.9"}))
+	got, _ = got.(Model).Update(startupReadyMsg{models: []ModelItem{{Name: "model.gguf", Path: "/models/model.gguf"}}})
+	ready := got.(Model)
+	ready.width, ready.height = 120, 40
+	if view := ready.View(); ready.screen != ScreenMain || !strings.Contains(view, "update available: v9.9.9 · u to update") {
+		t.Fatalf("status lost across loading (screen %v):\n%s", ready.screen, view)
 	}
 }

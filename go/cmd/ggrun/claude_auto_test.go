@@ -228,6 +228,36 @@ func TestClaudeReviewerGPUDeviceRejectsBackendWithoutCUDA(t *testing.T) {
 	}
 }
 
+// A fresh NVIDIA install runs the reviewer on the mainline Vulkan server, which
+// ignores CUDA_VISIBLE_DEVICES and orders cards its own way.
+func TestClaudeReviewerDeviceForGPUMatchesVulkanByName(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "llama-server")
+	script := "#!/bin/sh\nprintf 'Available devices:\\n  Vulkan0: NVIDIA GeForce RTX 3090 Ti (24810 MiB, 24352 MiB free)\\n  Vulkan1: NVIDIA GeForce RTX 4070 (12528 MiB, 12100 MiB free)\\n  Vulkan2: NVIDIA GeForce RTX 3060 (12534 MiB, 12149 MiB free)\\n'\n"
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"CUDA_VISIBLE_DEVICES=2"}
+	got, err := claudeReviewerDeviceForGPU(binary, env, &detect.GPU{Index: 2, Name: "NVIDIA GeForce RTX 3060"})
+	if err != nil || got != "Vulkan2" {
+		t.Fatalf("got %q, %v; want Vulkan2", got, err)
+	}
+	if got, _ := claudeReviewerDeviceForGPU(binary, env, &detect.GPU{Index: 0, Name: "NVIDIA GeForce RTX 4070"}); got != "Vulkan1" {
+		t.Fatalf("physical GPU 0 mapped to %q, want Vulkan1", got)
+	}
+	if _, err := claudeReviewerDeviceForGPU(binary, env, &detect.GPU{Index: 1, Name: "Other GPU"}); err == nil {
+		t.Fatal("an unmatched GPU must not get a Vulkan device")
+	}
+	twin := filepath.Join(dir, "twin")
+	script = "#!/bin/sh\nprintf 'Available devices:\\n  Vulkan0: RTX 3090 (24576 MiB)\\n  Vulkan1: RTX 3090 (24576 MiB)\\n'\n"
+	if err := os.WriteFile(twin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claudeReviewerDeviceForGPU(twin, env, &detect.GPU{Index: 1, Name: "RTX 3090"}); err == nil || !strings.Contains(err.Error(), "cannot tell") {
+		t.Fatalf("identical cards must be refused, got %v", err)
+	}
+}
+
 func TestFindClaudeReviewerBackendSkipsVulkanForCUDA(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

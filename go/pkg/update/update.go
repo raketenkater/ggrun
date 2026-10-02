@@ -327,6 +327,114 @@ func Check() (*Result, error) {
 	}, nil
 }
 
+// StatusState is how this build compares with the newest ggrun available.
+type StatusState int
+
+const (
+	StatusChecking StatusState = iota // no answer yet
+	StatusCurrent
+	StatusBehind
+	StatusUnknown // offline, rate-limited, or nothing to compare against
+	StatusOff     // LLM_SERVER_NO_UPDATE_CHECK
+)
+
+// Status answers "is this ggrun the newest?" for the start screen.
+type Status struct {
+	Version string
+	State   StatusState
+	Newer   string // what is newer when behind: a release tag or an upstream ref
+}
+
+// CheckStatus compares this build with the newest release and, for a source
+// install, with its checkout's upstream. A source build ahead of the latest
+// release is still behind when upstream has commits the build lacks.
+func CheckStatus() Status {
+	return checkStatus(Version(), Check, installedSourceRepoDir())
+}
+
+func checkStatus(version string, release func() (*Result, error), repoDir string) Status {
+	st := Status{Version: version, State: StatusUnknown}
+	if os.Getenv("LLM_SERVER_NO_UPDATE_CHECK") != "" {
+		st.State = StatusOff
+		return st
+	}
+	known := false
+	if res, err := release(); err == nil {
+		if res.HasUpdate {
+			st.State, st.Newer = StatusBehind, res.Latest
+			return st
+		}
+		known = true
+	}
+	if upstream, behind, ok := buildBehindUpstream(repoDir, version); ok {
+		if behind {
+			st.State, st.Newer = StatusBehind, upstream
+			return st
+		}
+		known = true
+	}
+	if known {
+		st.State = StatusCurrent
+	}
+	return st
+}
+
+// buildBehindUpstream reports whether the checkout's upstream has commits
+// that the build does not contain. Comparing the build's own commit, not the
+// checkout's HEAD, keeps a pulled but not rebuilt binary reported as behind.
+func buildBehindUpstream(repoDir, version string) (upstream string, behind, ok bool) {
+	commit := buildCommit(version)
+	if repoDir == "" || commit == "" {
+		return "", false, false
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		return "", false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "git", "-C", repoDir, "remote", "update", "--prune").Run(); err != nil {
+		return "", false, false
+	}
+	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output()
+	if err != nil {
+		return "", false, false
+	}
+	upstream = strings.TrimSpace(string(out))
+	err = exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", "@{u}", commit+"^{commit}").Run()
+	if err == nil {
+		return upstream, false, true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return upstream, true, true
+	}
+	return "", false, false
+}
+
+// buildCommit is the commit a stamped version names: the hash of a describe
+// version (v3.2.10-65-g1b69562-dirty) or the tag of an exact release build.
+// The unstamped in-source default names nothing.
+func buildCommit(version string) string {
+	v := strings.TrimSuffix(strings.TrimSpace(version), "-dirty")
+	if i := strings.LastIndex(v, "-g"); i >= 0 {
+		hash := v[i+2:]
+		if len(hash) >= 7 && strings.Trim(hash, "0123456789abcdef") == "" {
+			return hash
+		}
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
+	if !strings.HasPrefix(v, "v") || len(parts) != 3 {
+		return ""
+	}
+	for _, p := range parts {
+		if _, err := strconv.Atoi(p); err != nil {
+			return ""
+		}
+	}
+	return v
+}
+
 // Version returns the current version string.
 func Version() string {
 	if v := os.Getenv("LLM_SERVER_VERSION"); v != "" {

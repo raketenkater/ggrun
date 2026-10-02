@@ -416,6 +416,21 @@ func hasArg(args []string, want string) bool {
 	return false
 }
 
+// effectiveOpOffloadFlag returns the last --op-offload/--no-op-offload in the
+// passthrough arguments ("on"/"off"), or "" when the backend default applies.
+func effectiveOpOffloadFlag(args []string) string {
+	value := ""
+	for _, arg := range args {
+		switch arg {
+		case "--op-offload":
+			value = "on"
+		case "--no-op-offload":
+			value = "off"
+		}
+	}
+	return value
+}
+
 // userExplicitBackendFlag distinguishes command-line intent from a generated
 // or config-default optimization already materialized in ExtraArgs. Recovery
 // may remove the latter after measured rejection, but must fail closed rather
@@ -709,8 +724,14 @@ type launchRequest struct {
 	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
 	// the field exists because leaving the flag unparsed let it fall through to
 	// ExtraArgs and emit the coordinate twice.
-	MaxCheckpoints     int
-	MaxCheckpointsSet  bool
+	MaxCheckpoints    int
+	MaxCheckpointsSet bool
+
+	// SWAFullWithdrawnForCheckpoints records that a configured --swa-full was
+	// dropped because context checkpoints give the prefix reuse it exists for;
+	// placement must then keep checkpoints on.
+	SWAFullWithdrawnForCheckpoints bool
+
 	ClaudeMaxActive    int // --claude-max-active; 0 means no admission limit
 	ClaudeMaxActiveSet bool
 	BatchSize          int
@@ -2873,6 +2894,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		CacheRAMMB:              req.CacheRAMMB,
 		MaxCheckpoints:          req.MaxCheckpoints,
 		MaxCheckpointsSet:       req.MaxCheckpointsSet,
+		CheckpointReuseRequired: req.SWAFullWithdrawnForCheckpoints,
 		// --swa-full is a passthrough flag, but placement cannot treat it as
 		// one: it decides whether sliding-window layers hold the whole context,
 		// which on Laguna is the difference between 13.8 GB and 54.0 GB of KV
@@ -2894,6 +2916,10 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// another (different serving contract, different emitted flags).
 		ChatTemplate: req.ChatTemplateOverride,
 	}
+	// Where host-resident experts execute follows the backend's effective
+	// op-offload switch and threshold, which the child process inherits.
+	opts.HostWeightOffload = effectiveOpOffloadFlag(req.ExtraArgs)
+	opts.OpOffloadMinBatchEnv, opts.OpOffloadMinBatchEnvSet = os.LookupEnv("GGML_OP_OFFLOAD_MIN_BATCH")
 	if req.GPUsFlag != "" {
 		if indices, err := parseGPUIndices(req.GPUsFlag); err == nil {
 			opts.GPUs = indices
@@ -3081,8 +3107,7 @@ func applyClaudeCodeRuntimePolicy(strategy *placement.Strategy, model *placement
 	// the final serving policy model-derived as well as strategy-derived so a
 	// cached record can never erase recurrent semantics, context-shift safety, or
 	// the parallel-agent fairness baseline.
-	modelHasSSM := model != nil && (model.HasSSM != 0 || strings.EqualFold(model.ModelArch, "deepseek4"))
-	if modelHasSSM {
+	if placement.HasRecurrentState(model) {
 		strategy.HasSSM = true
 	}
 	// Normalize the slot count before applying the fairness policy: an automatic
@@ -4281,6 +4306,9 @@ func serverProcessPID(p *server.Process) int {
 const (
 	failedLaunchRAMReleaseToleranceMB = 1024
 	failedLaunchGPUReleaseToleranceMB = 64
+	// failedStartReleaseWait bounds the wait for a failed start's memory before
+	// a recovery attempt loads again.
+	failedStartReleaseWait = 60 * time.Second
 )
 
 // stopFailedLaunchBeforeAdvisor is the boundary between a failed main-model
@@ -4832,6 +4860,14 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			}
 		}
 	}()
+	ubatchRaisedArgs := ""
+	// raiseBase is the admitted plan a microbatch raise replaced: the safe
+	// baseline a raised plan that fails in warmup falls back to.
+	var raiseBase *placement.Strategy
+	var raiseBaseArgs []string
+	var oracleDevs []preflightDevice
+	oracleArgs := ""
+	var admittedPlans []admittedPlan
 	for {
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
@@ -5083,6 +5119,11 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				continue
 			}
 			if preflight.DoesNotFit {
+				if proven, provenArgs, ok := memoryRecovery.restoreAfterRefusedReplan(serverArgs); ok {
+					fmt.Fprintf(os.Stderr, "[launch] the measured re-plan did not fit (CUDA%d, %d MiB deficit); restoring the plan exact preflight admitted before it\n", preflight.Device, preflight.DeficitMB)
+					strategy, serverArgs = proven, provenArgs
+					continue
+				}
 				memoryRecovery.reject(serverArgs)
 				memoryRecovery.rejectContext(strategy,
 					contextReclaimTokens(model, strategy, serverArgs, preflight.DeficitMB, preflight.Device))
@@ -5138,6 +5179,10 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					}
 				}
 				oracleTotalsByArgv[formatCommand(serverArgs)] = totals
+				oracleDevs, oracleArgs = preflight.Evidence.Devices, formatCommand(serverArgs)
+				if strategy != nil && (len(admittedPlans) == 0 || formatCommand(admittedPlans[len(admittedPlans)-1].args) != oracleArgs) {
+					admittedPlans = append(admittedPlans, admittedPlan{placement.WithUBatch(strategy, model, strategy.UBatchSize), append([]string(nil), serverArgs...), oracleDevs})
+				}
 			}
 			if preflight.Evidence.Level != memoryEvidenceNone && exactAdmission {
 				// The preflight measured this exact argv. Challenger admission must
@@ -5152,6 +5197,13 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				// Recomputing from the original request can change the argv and
 				// turn the next optional search into another full reload.
 				fmt.Fprintln(os.Stderr, "[launch] verified config passed exact preflight; keeping that argv rather than re-planning")
+				if preflight.Evidence.Level == memoryEvidenceAllocated {
+					measuredProductionArgs = formatCommand(serverArgs)
+				}
+			} else if preflight.Evidence.Level != memoryEvidenceNone && ubatchRaisedArgs == formatCommand(serverArgs) {
+				// The raised microbatch was admitted by backend accounting. A
+				// recompute would price it with the cold estimate that hid it.
+				fmt.Fprintln(os.Stderr, "[launch] raised microbatch passed exact preflight; keeping that argv rather than re-planning")
 				if preflight.Evidence.Level == memoryEvidenceAllocated {
 					measuredProductionArgs = formatCommand(serverArgs)
 				}
@@ -5212,6 +5264,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 								return nil, strategy, serverArgs, &preflightUnresolvedError{fmt.Errorf("backend memory plan did not reach a fixed point after %d re-plans; refusing a real model load", maxPreflightReplans)}
 							}
 						} else {
+							memoryRecovery.noteMeasuredReplan(strategy, serverArgs)
 							strategy = next
 							serverArgs = nextArgs
 							preflightReplans++
@@ -5224,6 +5277,36 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					if preflight.Evidence.Level == memoryEvidenceAllocated {
 						measuredProductionArgs = formatCommand(serverArgs)
 					}
+				}
+			}
+		}
+		// Staged expert prefill: once per launch, try the larger microbatches the
+		// cold estimate never measured, at this exact context and placement.
+		if strategy != nil && model != nil && !exactAdmission && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
+			ubatchRaisedArgs = formatCommand(serverArgs) // one attempt, raised or not
+			backendTag := func(s *placement.Strategy) string { return scopedProbeBackendTagForStrategy(req, model, be, s) }
+			plan, ub, ctx := chooseStagedPrefillPlan(findFitParamsBin(be.Path, model.ModelArch), admittedPlans,
+				&configForPreflight{CacheDir: cfg.CacheDir, Work: work}, runtimeCaps, model, placementOpts(), backendTag,
+				resolveCtxFlag(req.CtxFlag, model.CTXTrain) == 0)
+			if ub > 0 {
+				base := admittedPlans[plan].strategy
+				next := placement.WithUBatch(base, model, ub)
+				next.ContextSize = ctx
+				nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, next)
+				if formatCommand(nextArgs) != formatCommand(serverArgs) && !memoryRecovery.isRejected(nextArgs) {
+					if plan != len(admittedPlans)-1 {
+						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: an earlier admitted placement (n-cpu-moe=%d) at ubatch %d has lower prefill+decode cost than the current one (n-cpu-moe=%d, ubatch %d); verifying it before production\n",
+							base.NCPUMoE, ub, strategy.NCPUMoE, strategy.UBatchSize)
+					}
+					if ctx != base.ContextSize {
+						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: raising ubatch %d -> %d, reserved before automatic context (%d -> %d tokens) at the same placement (backend accounting fits); verifying before production\n", base.UBatchSize, ub, base.ContextSize, ctx)
+					} else {
+						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: raising ubatch %d -> %d at the same context and placement (backend accounting fits); verifying before production\n", base.UBatchSize, ub)
+					}
+					raiseBase, raiseBaseArgs = strategy, append([]string(nil), serverArgs...)
+					strategy, serverArgs = next, nextArgs
+					ubatchRaisedArgs = formatCommand(nextArgs)
+					continue
 				}
 			}
 		}
@@ -5245,6 +5328,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				ArgvHash: argvHash(serverArgs), Outcome: "refused", Reason: budgetErr.Error()})
 			return nil, strategy, serverArgs, budgetErr
 		}
+		resourceBaseline := captureLaunchResourceBaseline(caps)
 		loadStarted := time.Now()
 		p, err := startLaunchProcess(req, cfg, model, be, caps, serverArgs, processTimeout)
 		loadElapsed := time.Since(loadStarted)
@@ -5318,18 +5402,52 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		// already preserves graph-reserve sizes as compute-buffer measurements;
 		// recording the same cudaMalloc again as post-health growth double-counted
 		// it on the next placement. Only post-health crash paths record growth.
+		//
+		// A warmup abort is the exception: every buffer was allocated, and the
+		// kernels and pool temporaries that ran out are exactly the growth no
+		// accounting sees. It carries no size, so what is filed is an estimate.
+		warmup := false
+		if !ok {
+			device, warmup = warmupCUDAOOM(logData)
+		}
 		if retries >= maxRetries {
 			if ok {
 				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d allocating %d MiB (retry budget exhausted after %d attempts): %w", device, allocMB, retries, err)
 			}
+			if warmup {
+				recordWarmupCUDAOOM(req, cfg.CacheDir, model, strategy, be, runtimeCaps, device)
+				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d during warmup (retry budget exhausted after %d attempts): %w", device, retries, err)
+			}
 			return p, strategy, serverArgs, err
 		}
-		if !ok {
+		if !ok && !warmup {
 			return p, strategy, serverArgs, err
 		}
 		memoryRecovery.reject(serverArgs)
+		if warmup {
+			allocMB = recordWarmupCUDAOOM(req, cfg.CacheDir, model, strategy, be, runtimeCaps, device)
+			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d during warmup, after every buffer was allocated (no size reported); recorded an estimated %d MiB of runtime growth for this exact configuration\n", device, allocMB)
+		}
 		if exactAdmission {
-			return p, strategy, serverArgs, exactAdmissionError(exactAdmissionCUDAOOM, fmt.Sprintf(" on device %d allocating %d MiB", device, allocMB), err)
+			detail := fmt.Sprintf(" on device %d allocating %d MiB", device, allocMB)
+			if warmup {
+				detail = fmt.Sprintf(" on device %d during warmup", device)
+			}
+			return p, strategy, serverArgs, exactAdmissionError(exactAdmissionCUDAOOM, detail, err)
+		}
+		// Never load the next attempt over memory the failed one still holds.
+		if releaseErr := stopFailedLaunchBeforeAdvisor(p, resourceBaseline, failedStartReleaseWait); releaseErr != nil {
+			return p, strategy, serverArgs, fmt.Errorf("%w (after CUDA OOM on device %d)", releaseErr, device)
+		}
+		if warmup && raiseBase != nil && ubatchRaisedArgs == formatCommand(serverArgs) && !memoryRecovery.isRejected(raiseBaseArgs) {
+			// The raise spent proven headroom on performance; its failure
+			// returns the plan exact preflight admitted before it, unchanged.
+			fmt.Fprintf(os.Stderr, "[launch] restoring the admitted plan from before the microbatch raise (ubatch %d -> %d, ctx %d)\n",
+				strategy.UBatchSize, raiseBase.UBatchSize, raiseBase.ContextSize)
+			strategy, serverArgs = raiseBase, raiseBaseArgs
+			raiseBase, raiseBaseArgs = nil, nil
+			retries++
+			continue
 		}
 
 		// Re-plan with the failed card penalized by its overshoot: the real packer
@@ -5376,25 +5494,32 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
 			req, strategy, serverArgs, s, model, runtimeCaps,
-			preflightOutcome{Device: device, AllocMB: allocMB, AllocMBMeasured: allocMB > 0, DeficitMB: 1, IsComputeBuffer: isComputeBuffer},
+			preflightOutcome{Device: device, AllocMB: allocMB, AllocMBMeasured: ok && allocMB > 0, DeficitMB: 1, IsComputeBuffer: isComputeBuffer},
 			recoveryCandidateArgs,
 		)
 		if !changed {
+			if warmup {
+				return p, strategy, serverArgs, fmt.Errorf("CUDA OOM on device %d during warmup and no different safe placement remains for this launch; the next launch plans around the recorded estimate: %w", device, err)
+			}
 			return p, strategy, serverArgs, err
+		}
+		cause := fmt.Sprintf("CUDA OOM on device %d allocating %d MiB", device, allocMB)
+		if warmup {
+			cause = fmt.Sprintf("CUDA OOM on device %d during warmup (estimated %d MiB)", device, allocMB)
 		}
 		switch method {
 		case "replanned":
 			if isComputeBuffer && computeMeasuredOnFailedGPU {
 				fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB); measured compute buffer and re-planned (n-cpu-moe=%d) without a duplicate penalty\n", device, allocMB, nextStrategy.NCPUMoE)
 			} else {
-				fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d (%d MiB, over ~%d MiB); re-planned (n-cpu-moe=%d) and retrying\n", device, allocMB, oomPenalty[physicalDevice], nextStrategy.NCPUMoE)
+				fmt.Fprintf(os.Stderr, "[launch] %s, over ~%d MiB; re-planned (n-cpu-moe=%d) and retrying\n", cause, oomPenalty[physicalDevice], nextStrategy.NCPUMoE)
 			}
 		case "swa-full-withdrawn":
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; withdrawing --swa-full (a full-context KV cache this model does not reuse) before touching placement\n", device, allocMB)
+			fmt.Fprintf(os.Stderr, "[launch] %s; withdrawing --swa-full (a full-context KV cache this model does not reuse) before touching placement\n", cause)
 		case "expert-derate":
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; moving one expert layer off the failed GPU before lowering ubatch\n", device, allocMB)
+			fmt.Fprintf(os.Stderr, "[launch] %s; moving one expert layer off the failed GPU before lowering ubatch\n", cause)
 		case "ubatch-derate":
-			fmt.Fprintf(os.Stderr, "[launch] CUDA OOM on device %d allocating %d MiB; no movable expert remains, lowering ubatch to %d\n", device, allocMB, nextStrategy.UBatchSize)
+			fmt.Fprintf(os.Stderr, "[launch] %s; no movable expert remains, lowering ubatch to %d\n", cause, nextStrategy.UBatchSize)
 		default:
 			return p, strategy, serverArgs, fmt.Errorf("unsupported CUDA OOM recovery method %q", method)
 		}
@@ -5545,34 +5670,95 @@ func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placeme
 		if !isOOM {
 			continue
 		}
-		// Reserve exactly one routed expert layer: that is the unit placement
-		// moves between GPU and CPU, its size is known exactly from the GGUF
-		// ledger, and it is the smallest step that changes the outcome. A tenth
-		// of the card, which this used to reserve, is a quantity derived from
-		// nothing -- on a 24 GiB device it withheld 2457 MiB, close to two
-		// layers, and a second abort compounded it permanently.
-		reserveMB = placement.LargestRoutedExpertLayerMB(model)
-		if reserveMB <= 0 {
-			// No ledger: fall back to the old fraction rather than reserve
-			// nothing, since an OOM is proof that something must give.
-			reserveMB = unknownRuntimeCUDAOOMReserveMinMB
-			if caps != nil {
-				for _, gpu := range caps.GPUs {
-					if gpu.Index == device {
-						if scaled := (gpu.VRAMTotalMB + 9) / 10; scaled > reserveMB {
-							reserveMB = scaled
-						}
-						break
+		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, true
+	}
+	return 0, 0, false, false
+}
+
+// sizelessCUDAOOMReserveMB is the estimate filed for a CUDA out-of-memory
+// abort that names a device but no size.
+//
+// Reserve exactly one routed expert layer: that is the unit placement moves
+// between GPU and CPU, its size is known exactly from the GGUF ledger, and it
+// is the smallest step that changes the outcome. A tenth of the card, which
+// this used to reserve, is a quantity derived from nothing -- on a 24 GiB
+// device it withheld 2457 MiB, close to two layers, and a second abort
+// compounded it permanently. A repeat stacks on the earlier estimate.
+func sizelessCUDAOOMReserveMB(caps *detect.Capabilities, model *placement.ModelProfile, device int, prior map[int]int) int {
+	reserveMB := placement.LargestRoutedExpertLayerMB(model)
+	if reserveMB <= 0 {
+		// No ledger: fall back to the old fraction rather than reserve
+		// nothing, since an OOM is proof that something must give.
+		reserveMB = unknownRuntimeCUDAOOMReserveMinMB
+		if caps != nil {
+			for _, gpu := range caps.GPUs {
+				if gpu.Index == device {
+					if scaled := (gpu.VRAMTotalMB + 9) / 10; scaled > reserveMB {
+						reserveMB = scaled
 					}
+					break
 				}
 			}
 		}
-		if prior[device] >= reserveMB {
-			reserveMB += prior[device]
-		}
-		return device, reserveMB, true, true
 	}
-	return 0, 0, false, false
+	if prior[device] >= reserveMB {
+		reserveMB += prior[device]
+	}
+	return reserveMB
+}
+
+// warmupCUDAOOM recognizes a CUDA out-of-memory abort after every load-time
+// buffer was allocated but before the backend reported the model loaded: the
+// warmup run, which first launches kernels and allocates pool temporaries that
+// no-alloc accounting never sees. ggml prints the device but no size:
+//
+//	E CUDA error: out of memory
+//	E   current device: 0, in function ggml_cuda_kernel_can_use_pdl at ...
+//	E   cudaFuncGetAttributes(&attr, kernel)
+//
+// Seen on GLM-5.3-Flash at ubatch 512 (CUDA0, 2026-10-01) and on
+// Qwen3.8-Flash-Next (CUDA1, 2026-09-21). A sized allocation failure, any other
+// CUDA error, or an abort after the model loaded is not this.
+func warmupCUDAOOM(logData string) (int, bool) {
+	lines := strings.Split(logData, "\n")
+	start := -1
+	for i, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "warming up the model") || strings.Contains(lower, "compute buffer size") {
+			start = i
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	if loaded, ok := runtimeGrowthWindowStart(lines); ok && loaded > start {
+		return 0, false
+	}
+	for i := start + 1; i < len(lines); i++ {
+		if !strings.Contains(strings.ToLower(lines[i]), "cuda error: out of memory") {
+			continue
+		}
+		for j := i + 1; j < len(lines) && j <= i+3; j++ {
+			if device, ok := recovery.ParseCUDADevice(lines[j]); ok {
+				return device, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// recordWarmupCUDAOOM files a warmup abort as estimated runtime growth on the
+// failed device for this exact launch key. It is labelled an estimate, so a
+// later measurement replaces it; it is never a measured allocation. Returns
+// the MiB recorded.
+func recordWarmupCUDAOOM(req *launchRequest, cacheDir string, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, device int) int {
+	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
+	prior := placement.RuntimeGraphGrowthByGPU(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
+	reserveMB := sizelessCUDAOOMReserveMB(caps, model, device, prior)
+	if err := placement.RecordRuntimeGraphGrowthFromOOM(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel, device, reserveMB, true); err != nil {
+		fmt.Fprintf(os.Stderr, "[launch] warning: could not persist warmup OOM evidence: %v\n", err)
+	}
+	return reserveMB
 }
 
 func oomLogFingerprint(logData string) string {
@@ -5761,18 +5947,13 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 		if !promptCacheGrew {
 			return strategy, nil
 		}
-		// CRAM was sized before the measurement existed. Re-plan so the budget
-		// reaches the launch rather than waiting for the run after next.
-		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-		opts.SkipPlacementCache = true
-		opts.VerifiedConfigScopeKey = ""
-		next, err := placement.Compute(caps, model, opts)
-		if err != nil {
-			return nil, err
-		}
-		next = applyCalibrationDecision(req, cfg, model, be, caps, next)
-		claudeCodeSlotAdjust(next, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-		fmt.Printf("[launch] prompt cache: re-planned -cram %d -> %d MiB from the measured entry size\n", strategy.CRAM, next.CRAM)
+		// CRAM was sized before the measurement existed. Re-size it now so the
+		// budget reaches this launch. Only the host cache budget changed, so the
+		// chosen plan (verified, or raised by exact accounting) is kept; a full
+		// re-plan here re-derived context and microbatch from the cold estimate
+		// and made every Claude Code relaunch serve a different argv.
+		next := placement.RefreshRuntimeCachePolicy(caps, model, strategy, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+		fmt.Printf("[launch] prompt cache: re-sized -cram %d -> %d MiB from the measured entry size (placement kept)\n", strategy.CRAM, next.CRAM)
 		return next, nil
 	}
 	if estimated {
@@ -5884,6 +6065,12 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 			fmt.Printf("[launch] %s; disabling -khad for this model/backend profile.\n", reason)
 		}
 	}
+	// The withdrawal below is a decision about one backend. Re-resolving to
+	// another starts from the configured request again.
+	if req.SWAFullWithdrawnForCheckpoints && !hasArg(req.ExtraArgs, "--swa-full") {
+		req.SWAFullWithdrawnForCheckpoints = false
+		req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", true)
+	}
 	if !hasArg(req.ExtraArgs, "--swa-full") {
 		return
 	}
@@ -5903,6 +6090,25 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 		fmt.Printf("[launch] Full SWA cache is unavailable for %s (no sliding-window layer); disabling it for this launch.\n", archLabel)
 		return
 	}
+	// A configured (not typed) --swa-full exists for prefix reuse. Where context
+	// checkpoints already give that reuse, a full-size window cache that at
+	// least doubles the KV per token only costs context: on MiMo-V2.6 it cut
+	// the automatic context from 724k to ~126k tokens for no reuse gain
+	// (checkpoints reused 82k of 86k tokens without it). Backend support is
+	// not enough: the launch must keep checkpoints on. Placement keeps the
+	// derived checkpoint count above zero for a withdrawn --swa-full.
+	if !userExplicitBackendFlag(req, "--swa-full") && placement.BackendSupportsCheckpointReuse(be.Help) {
+		if ratio, ok := placement.SWAFullKVMultiplier(model); ok && ratio >= 2 {
+			if checkpointsDisabled(req) {
+				fmt.Printf("[launch] keeping the configured --swa-full: context checkpoints are disabled for this launch, so prefix reuse needs the full window cache.\n")
+			} else {
+				req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", false)
+				req.SWAFullWithdrawnForCheckpoints = true
+				fmt.Printf("[launch] --swa-full would cost %.1fx the KV per token; context checkpoints keep prefix reuse without it, so it is off for this launch (pass --swa-full to force it).\n", ratio)
+				return
+			}
+		}
+	}
 	// An empty help surface is unknown, not unsupported. With a real help probe,
 	// however, passing an absent option is guaranteed to abort argument parsing.
 	if strings.TrimSpace(be.Help) == "" || strings.Contains(be.Help, "--swa-full") {
@@ -5918,6 +6124,26 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 		archLabel = arch
 	}
 	fmt.Printf("[launch] Full SWA cache is unavailable for %s on backend %s; disabling it for this launch.\n", archLabel, be.Path)
+}
+
+// checkpointsDisabled reports whether this launch turns context checkpoints
+// off: --ctx-checkpoints 0 parsed by ggrun, or a backend spelling of it passed
+// through.
+func checkpointsDisabled(req *launchRequest) bool {
+	if req.MaxCheckpointsSet && req.MaxCheckpoints == 0 {
+		return true
+	}
+	if argIntValue(req.ExtraArgs, "--ctx-checkpoints", "-ctxcp", "--swa-checkpoints") == 0 {
+		return true
+	}
+	for _, a := range req.ExtraArgs {
+		for _, name := range []string{"--ctx-checkpoints=", "-ctxcp=", "--swa-checkpoints="} {
+			if v, ok := strings.CutPrefix(a, name); ok && strings.TrimSpace(v) == "0" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func launchHardwareIdentity(caps *detect.Capabilities) string {
@@ -9573,6 +9799,11 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		CTXTrain:                  info.ContextLength,
 		ModelArch:                 info.Architecture,
 		NextNPredictLayers:        info.NextNPredictLayers,
+		HeadCountKVByLayer:        append([]int(nil), info.HeadCountKVByLayer...),
+		SWAPattern:                append([]int(nil), info.SlidingWindowPattern...),
+		KeyLengthSWA:              info.KeyLengthSWA,
+		ValueLengthSWA:            info.ValueLengthSWA,
+		RecurrentState:            info.RecurrentState,
 	}
 }
 

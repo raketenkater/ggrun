@@ -7,7 +7,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
-// This file models the two real axes a recommendation should rank on:
+// This file supplies heuristics for choosing a fitting quant within ONE model:
 //
 //  1. effective intelligence = base AA index * quality retained after quantization,
 //     where retention depends on bits-per-weight AND model size (large models keep
@@ -18,8 +18,9 @@ import (
 //     model: per-token bytes = active params * bytes/weight, read at a blend of
 //     VRAM and system-RAM bandwidth weighted by how much of the model fits in VRAM.
 //
-// Both are approximations tuned to keep ordering correct and to gate genuinely
-// unusable picks; they are not a substitute for `--ai-tune`, which measures.
+// Neither is a measured intelligence score for a quantized artifact. Cross-model
+// ranking uses catalog intelligence; quant retention is only a local preference.
+// Predicted speed supplies a usability discount below usableTPS.
 
 // Speed tiers used to rank usable models ahead of technically-fits-but-crawls ones.
 const (
@@ -72,8 +73,9 @@ func bytesPerWeight(quant string) float64 {
 	}
 }
 
-// quantQualityRetention returns the fraction (0,1] of base intelligence retained
-// after quantization. Loss shrinks with model size and for Unsloth dynamic quants.
+// quantQualityRetention is a within-model quant preference heuristic in (0,1].
+// It must not be presented as measured intelligence retained after quantization
+// or used to rewrite cross-model benchmark scores.
 func quantQualityRetention(quant string, totalParamsB float64, dynamic bool) float64 {
 	q := strings.ToUpper(quant)
 	var loss float64
@@ -305,12 +307,9 @@ func speedFactor(tps float64) float64 {
 	return clampF(0.30+0.70*(tps/interactiveTPS), 0.30, 1.0)
 }
 
-// usabilityFactor lightly down-weights picks too slow to actually use, so the
-// "Smartest" category does not surface a marginally-smarter quant that crawls
-// (e.g. a 27B at BF16 @ 3 tok/s) when a nearly-as-smart, far faster quant of the
-// same model exists (the same 27B at Q5 @ 40 tok/s). 1.0 at/above usableTPS,
-// ramping to 0.5 at 0 tok/s. Unknown speed (no params) returns 1.0 so it does
-// not penalize models we can't predict.
+// usabilityFactor discounts slow serving in Best overall. At/above usableTPS,
+// intelligence decides without another reward for raw speed. It ramps to 0.5
+// at 0 tok/s. Unknown speed returns 1.0 rather than inventing a measurement.
 func usabilityFactor(tps float64) float64 {
 	if tps <= 0 || tps >= usableTPS {
 		return 1.0

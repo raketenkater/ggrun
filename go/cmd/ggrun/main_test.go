@@ -3522,6 +3522,12 @@ func TestClaudeCodeHybridRepairsMissingVerifiedConfigSemantics(t *testing.T) {
 	if s.BatchSize != claudeHybridBatch || s.UBatchSize != claudeHybridBatch {
 		t.Fatalf("restored hybrid batch/ubatch=%d/%d, want %d/%d", s.BatchSize, s.UBatchSize, claudeHybridBatch, claudeHybridBatch)
 	}
+	// GLM-5.3-Flash states its KDA state without ssm.state_size.
+	glm := &placement.Strategy{ContextSize: 262144, Parallel: 1, BatchSize: 2048, UBatchSize: 512}
+	claudeCodeSlotAdjust(glm, &placement.ModelProfile{ModelArch: "glm5next", RecurrentState: 1}, true, true, false, false)
+	if !glm.HasSSM || claudeCodeShiftableContext(nil, glm) {
+		t.Fatalf("recurrent state without an SSM layout lost its semantics: %+v", glm)
+	}
 }
 
 func TestClaudeCodeHybridExplicitBatchOverridesFairnessCap(t *testing.T) {
@@ -4745,5 +4751,110 @@ func TestCtxCheckpointsZeroIsAnExplicitOverride(t *testing.T) {
 	}
 	if req.MaxCheckpoints != 0 {
 		t.Errorf("value = %d, want 0", req.MaxCheckpoints)
+	}
+}
+
+// A configured --swa-full buys prefix reuse only where checkpoints cannot. When
+// checkpoints are available and the full window cache at least doubles the KV
+// per token, it only costs context, so it is dropped; a typed flag is kept.
+func TestConfiguredSWAFullDroppedWhenCheckpointsGiveReuse(t *testing.T) {
+	checkpoints := "--swa-full --ctx-checkpoints N --checkpoint-min-step N"
+	swaHeavy := func() *placement.ModelProfile {
+		return &placement.ModelProfile{ModelArch: "mimo2", NumLayers: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+			SlidingWindow: 128, SWAPattern: []int{1, 1, 1, 0}}
+	}
+	cases := []struct {
+		name     string
+		req      *launchRequest
+		model    *placement.ModelProfile
+		help     string
+		wantKept bool
+	}{
+		{"configured, checkpoints, 3.9x", &launchRequest{ExtraArgs: []string{"--swa-full"}}, swaHeavy(), checkpoints, false},
+		{"typed on the command line", &launchRequest{ExtraArgs: []string{"--swa-full"}, OriginalArgs: []string{"m.gguf", "--swa-full"}}, swaHeavy(), checkpoints, true},
+		{"no checkpoint support", &launchRequest{ExtraArgs: []string{"--swa-full"}}, swaHeavy(), "--swa-full", true},
+		{"unknown KV size", &launchRequest{ExtraArgs: []string{"--swa-full"}}, &placement.ModelProfile{ModelArch: "laguna", SlidingWindow: 512}, checkpoints, true},
+		{"mostly full-attention layers", &launchRequest{ExtraArgs: []string{"--swa-full"}},
+			&placement.ModelProfile{ModelArch: "mimo2", NumLayers: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+				SlidingWindow: 128, SWAPattern: []int{1, 0, 0, 0}}, checkpoints, true},
+	}
+	for _, c := range cases {
+		applyBackendFeatureCompatibility(c.req, c.model, &backendInfo{Path: "/llama/llama-server", Help: c.help})
+		if got := hasArg(c.req.ExtraArgs, "--swa-full"); got != c.wantKept {
+			t.Errorf("%s: --swa-full kept=%v, want %v", c.name, got, c.wantKept)
+		}
+	}
+}
+
+// Backend help only proves checkpoints can exist. A launch that turns them off
+// gets no checkpoint reuse, so a configured --swa-full is its only prefix reuse
+// and stays. Both the configured and the typed request are honoured, with the
+// checkpoint choice coming from either command-line spelling or passthrough.
+func TestConfiguredSWAFullKeptWhenCheckpointsDisabled(t *testing.T) {
+	isolateConfig(t)
+	model := &placement.ModelProfile{ModelArch: "mimo2", NumLayers: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+		SlidingWindow: 128, SWAPattern: []int{1, 1, 1, 0}}
+	be := &backendInfo{Path: "/fixture/llama-server", Tag: "llama", Help: "--swa-full --ctx-checkpoints N --checkpoint-min-step N"}
+	cases := []struct {
+		name       string
+		configured bool
+		args       []string
+		wantSWA    bool
+		wantCkpts  int // emitted --ctx-checkpoints; -1 when placement leaves the backend default
+		wantReuse  bool
+	}{
+		{"configured, checkpoints default", true, nil, false, -1, true},
+		{"configured, --ctx-checkpoints 0", true, []string{"--ctx-checkpoints", "0"}, true, 0, false},
+		{"configured, --ctx-checkpoints=0", true, []string{"--ctx-checkpoints=0"}, true, 0, false},
+		{"configured, -ctxcp 0", true, []string{"-ctxcp", "0"}, true, 0, false},
+		{"configured, --ctx-checkpoints 4", true, []string{"--ctx-checkpoints", "4"}, false, 4, true},
+		{"typed --swa-full, --ctx-checkpoints 0", false, []string{"--swa-full", "--ctx-checkpoints", "0"}, true, 0, false},
+		{"typed --swa-full, checkpoints on", false, []string{"--swa-full"}, true, -1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.configured {
+				t.Setenv("LLM_SWA_FULL", "true")
+			} else {
+				t.Setenv("LLM_SWA_FULL", "")
+			}
+			req, err := parseLaunchArgs(append([]string{"model.gguf"}, c.args...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			applyBackendFeatureCompatibility(req, model, be)
+			if got := hasArg(req.ExtraArgs, "--swa-full"); got != c.wantSWA {
+				t.Fatalf("--swa-full kept=%v, want %v (args %v)", got, c.wantSWA, req.ExtraArgs)
+			}
+			opts := placementOptionsFromRequest(req, model, be, t.TempDir())
+			if opts.CheckpointReuseRequired != c.wantReuse {
+				t.Fatalf("checkpoint reuse required=%v, want %v", opts.CheckpointReuseRequired, c.wantReuse)
+			}
+			if opts.MaxCheckpointsSet && opts.MaxCheckpoints != c.wantCkpts {
+				t.Fatalf("explicit checkpoint cap %d, want %d", opts.MaxCheckpoints, c.wantCkpts)
+			}
+		})
+	}
+	// A passthrough spelling ggrun does not parse is still the user's choice.
+	req := &launchRequest{ExtraArgs: []string{"--swa-full", "--swa-checkpoints", "0"}}
+	applyBackendFeatureCompatibility(req, model, be)
+	if !hasArg(req.ExtraArgs, "--swa-full") || req.SWAFullWithdrawnForCheckpoints {
+		t.Fatalf("passthrough --swa-checkpoints 0 lost the full window: %v", req.ExtraArgs)
+	}
+}
+
+// The withdrawal is a decision about one backend. Re-resolving the launch to a
+// backend without checkpoint reuse restores the configured window cache.
+func TestWithdrawnSWAFullReturnsForBackendWithoutCheckpoints(t *testing.T) {
+	model := &placement.ModelProfile{ModelArch: "mimo2", NumLayers: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+		SlidingWindow: 128, SWAPattern: []int{1, 1, 1, 0}}
+	req := &launchRequest{ExtraArgs: []string{"--swa-full"}}
+	applyBackendFeatureCompatibility(req, model, &backendInfo{Path: "/a/llama-server", Help: "--swa-full --ctx-checkpoints N --checkpoint-min-step N"})
+	if hasArg(req.ExtraArgs, "--swa-full") || !req.SWAFullWithdrawnForCheckpoints {
+		t.Fatalf("first backend should withdraw it: %v", req.ExtraArgs)
+	}
+	applyBackendFeatureCompatibility(req, model, &backendInfo{Path: "/b/llama-server", Help: "--swa-full"})
+	if !hasArg(req.ExtraArgs, "--swa-full") || req.SWAFullWithdrawnForCheckpoints {
+		t.Fatalf("a backend without checkpoints must get the window cache back: %v", req.ExtraArgs)
 	}
 }

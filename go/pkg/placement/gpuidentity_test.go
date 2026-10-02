@@ -486,6 +486,43 @@ func TestExplicitCheckpointOverrideBeatsASavedConfigValue(t *testing.T) {
 	}
 }
 
+// A configured --swa-full withdrawn because checkpoints give prefix reuse needs
+// those checkpoints. On a tight host the multi-GPU policy derives zero, which
+// would leave a sliding-window model with no reuse at all; the derived cap then
+// keeps the policy's own floor. An explicit --ctx-checkpoints 0 still wins (and
+// the launcher keeps --swa-full for it).
+func TestWithdrawnSWAFullKeepsDerivedCheckpointsOn(t *testing.T) {
+	model := &ModelProfile{Path: "/models/mimo.gguf", NumLayers: 48, SlidingWindow: 128}
+	caps := &detect.Capabilities{
+		GPUs: fitBox(12192, 12321, 6269),
+		RAM:  detect.RAMInfo{TotalMB: 217096, FreeMB: 200000},
+		CPU:  detect.CPUInfo{Cores: 14, Threads: 28},
+	}
+	tight := func() *Strategy { return &Strategy{Type: MoEOffload, Parallel: 1, PlannedHostFootprintMB: 199400} }
+
+	derived := tight()
+	applyRuntimeCachePolicy(model, derived, caps, 90000, 100, Options{})
+	if derived.MaxCheckpoints != 0 {
+		t.Fatalf("fixture: tight host derived %d checkpoints, want 0", derived.MaxCheckpoints)
+	}
+	reuse := tight()
+	applyRuntimeCachePolicy(model, reuse, caps, 90000, 100, Options{CheckpointReuseRequired: true})
+	if reuse.MaxCheckpoints != minReuseCheckpoints {
+		t.Fatalf("withdrawn --swa-full: %d checkpoints, want %d", reuse.MaxCheckpoints, minReuseCheckpoints)
+	}
+	explicit := tight()
+	applyRuntimeCachePolicy(model, explicit, caps, 90000, 100,
+		Options{CheckpointReuseRequired: true, MaxCheckpointsSet: true, MaxCheckpoints: 0})
+	if explicit.MaxCheckpoints != 0 {
+		t.Fatalf("explicit --ctx-checkpoints 0 overridden to %d", explicit.MaxCheckpoints)
+	}
+	roomy := &Strategy{Type: MoEOffload, Parallel: 1, PlannedHostFootprintMB: 100000}
+	applyRuntimeCachePolicy(model, roomy, caps, 90000, 100, Options{CheckpointReuseRequired: true})
+	if roomy.MaxCheckpoints < minReuseCheckpoints {
+		t.Fatalf("roomy host lost its derived checkpoints: %d", roomy.MaxCheckpoints)
+	}
+}
+
 // The plan key must not depend on the order detection enumerated the cards in.
 //
 // bandwidthRatioClass built one class per element in CALLER order and joined with

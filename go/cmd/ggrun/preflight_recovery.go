@@ -83,6 +83,40 @@ type launchMemoryRecovery struct {
 	// Unknown geometry is deliberately NOT recorded here: knowing nothing and
 	// knowing the shortfall exceeds the device's share want opposite responses.
 	outstrippedContext int
+	// provenStrategy/provenArgs are the plan an exact preflight admitted before
+	// a backend-measured re-plan replaced it. When the re-plan's own preflight
+	// is refused, the launch returns to this plan instead of derating from the
+	// refused one. Observed on a fresh install (ik_llama, Qwen3.8-27B): twice a
+	// probe-proven plan was re-planned into a CUDA1 overshoot, and the ladder
+	// derated from the overshoot until the start budget refused the launch.
+	provenStrategy *placement.Strategy
+	provenArgs     []string
+}
+
+// noteMeasuredReplan records the admitted plan a backend-measured re-plan is
+// about to replace.
+func (r *launchMemoryRecovery) noteMeasuredReplan(proven *placement.Strategy, provenArgs []string) {
+	if r == nil || proven == nil {
+		return
+	}
+	r.provenStrategy, r.provenArgs = proven, append([]string(nil), provenArgs...)
+	r.lastRecoveryMethod = "measured-replanned"
+}
+
+// restoreAfterRefusedReplan returns the admitted plan when the plan just
+// refused is the measured re-plan that replaced it. The refused argv is
+// rejected for this launch and the planner is disproved, so the restored plan
+// is served rather than re-planned again. It applies once per proven plan.
+func (r *launchMemoryRecovery) restoreAfterRefusedReplan(refusedArgs []string) (*placement.Strategy, []string, bool) {
+	if r == nil || r.provenStrategy == nil || r.lastRecoveryMethod != "measured-replanned" ||
+		formatCommand(refusedArgs) == formatCommand(r.provenArgs) || r.isRejected(r.provenArgs) {
+		return nil, nil, false
+	}
+	strategy, args := r.provenStrategy, r.provenArgs
+	r.reject(refusedArgs)
+	r.plannerDisproved = true
+	r.provenStrategy, r.provenArgs, r.lastRecoveryMethod = nil, nil, ""
+	return strategy, args, true
 }
 
 // observeProductionLoad records the observed cost of a production start that

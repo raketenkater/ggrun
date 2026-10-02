@@ -43,6 +43,27 @@ func TestCalibrationAutoOwnsBoundedStandardLaunchSearch(t *testing.T) {
 	}
 }
 
+func TestAutomaticPlanRetainsUnmeasuredNearestMicrobatch(t *testing.T) {
+	req, cfg, model, be, caps := calibrateTestSetup(8000)
+	cfg.CacheDir = t.TempDir()
+	base := &placement.Strategy{
+		Type: placement.MultiGPUDense, MainGPU: 0, TensorSplit: []float64{.5, .5},
+		BatchSize: 2048, UBatchSize: 64, Parallel: 1, ContextSize: 32768,
+		KVType: "q8_0", KVQuality: "q8_0", KVPlacement: "cpu",
+	}
+	near, far := *base, *base
+	near.UBatchSize, far.UBatchSize = 128, 2048
+	got := automaticCalibrationFinalistPlan(req, cfg, model, be, caps, []placement.CalibrationCandidate{
+		{Name: "default", Strategy: base}, {Name: "ubatch-128", Strategy: &near}, {Name: "ubatch-2048", Strategy: &far},
+	})
+	if len(got) < 2 || got[0].Strategy != base || got[1].Strategy != &near {
+		t.Fatalf("unknown memory lost the baseline/nearest admission: %+v", got)
+	}
+	if got[1].Estimate.Feasible || !got[1].Estimate.NeedsAdmission || base.OptimizationBoundary.FeasibleCount != 0 {
+		t.Fatalf("unmeasured microbatch reported as fitting: %+v", got[1].Estimate)
+	}
+}
+
 func TestCalibrationPlanForcedOnIgnoresSizeGate(t *testing.T) {
 	req, cfg, model, be, caps := calibrateTestSetup(60 * 1024)
 	req.Calibrate = calibrateOn

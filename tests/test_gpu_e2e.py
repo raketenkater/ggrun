@@ -23,6 +23,24 @@ serving = load("verify-installed-serving")
 gpu = load("verify-gpu-install")
 
 class GPUCheckTests(unittest.TestCase):
+    def test_ubatch_raise_requires_exact_admission(self):
+        admitted = ("[launch] staged expert prefill: raising ubatch 64 -> 512 at the same context\n"
+                    "[launch] preflight: placement fits (...)\n"
+                    "[launch] raised microbatch passed exact preflight; keeping that argv\n")
+        self.assertEqual(serving.check_ubatch_raise(admitted), {"raised": True})
+        self.assertEqual(serving.check_ubatch_raise("[launch] preflight: placement fits\n"), {"raised": False})
+        with self.assertRaisesRegex(RuntimeError, "not admitted"):
+            serving.check_ubatch_raise("[launch] staged expert prefill: raising ubatch 64 -> 512\n")
+
+    def test_claude_code_mode_serves_without_a_client_on_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with_claude, without = Path(temp, "a"), Path(temp, "b")
+            with_claude.mkdir()
+            without.mkdir()
+            (with_claude / "claude").write_text("")
+            path = serving.claude_free_path(os.pathsep.join([str(with_claude), str(without)]))
+            self.assertEqual(path, str(without))
+
     def test_auto_context_reaches_launcher_without_an_override(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

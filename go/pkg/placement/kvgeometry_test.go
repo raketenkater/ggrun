@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -471,5 +472,64 @@ func TestParseKVGeometryDefaultsToOneSequenceWithoutTheField(t *testing.T) {
 	g, ok := ParseKVGeometry(`llama_kv_cache: size = 1728.00 MiB (131072 cells,  12 layers)`)
 	if !ok || g.BytesPerCellPerLayer != 1152 {
 		t.Fatalf("legacy line mis-parsed: ok=%v geometry=%+v", ok, g)
+	}
+}
+
+// Recurrent state stated outside ssm.state_size must get the same checkpoint
+// semantics as an SSM layout. GLM-5.3-Flash (MLA attention plus KDA blocks)
+// was served without --checkpoint-min-step; the backend default kept one
+// checkpoint per 8,192 tokens, and a branch restored 9 of 4,247 shared tokens.
+// Its measured KV evidence must stay usable: only an SSM layout is scoped.
+func TestRecurrentStateWithoutSSMLayoutGetsCheckpointSemantics(t *testing.T) {
+	const rate = 11812.0 // bytes/token measured on GLM-5.3-Flash at q8_0
+	glm := func(recurrent int) *ModelProfile {
+		return &ModelProfile{
+			Path: "glm5next.gguf", ModelArch: "glm5next", RecurrentState: recurrent,
+			TotalSizeMB: 8192, NumLayers: 46, ContextSize: 131072, HiddenSize: 4096,
+			KVLoraRank: 512, KeyLength: 512, ValueLength: 512,
+			MeasuredKVBytesPerTok: map[string]float64{"q8_0": rate},
+		}
+	}
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}},
+		RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	opts := Options{ContextSize: 131072, KVPlacement: "gpu", KVQuality: "q8_0", CacheDir: t.TempDir(),
+		BackendHelp: "--ctx-checkpoints N\n--checkpoint-min-step N\n--no-context-shift"}
+	plan := func(model *ModelProfile) (*Strategy, []string) {
+		s, err := Compute(caps, model, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, s.Args(model.Path, 8081)
+	}
+
+	s, args := plan(glm(1))
+	if !s.HasSSM || !hasAdjacentArgPlacement(args, "--checkpoint-min-step", strconv.Itoa(checkpointMinStepFloor)) ||
+		!contains(args, "--no-context-shift") {
+		t.Fatalf("recurrent state lost its checkpoint semantics: has_ssm=%v args=%v", s.HasSSM, args)
+	}
+	if s.MaxCheckpoints < hybridCheckpointMinimum || s.MaxCheckpoints > hybridCheckpointMaximum {
+		t.Fatalf("checkpoints=%d, want %d..%d", s.MaxCheckpoints, hybridCheckpointMinimum, hybridCheckpointMaximum)
+	}
+	if got, want := computeKVTotalMB(glm(1), 131072, "q8_0", false), int(rate*131072/1048576+0.5); got != want {
+		t.Fatalf("measured KV evidence discarded: got %d MiB, want %d", got, want)
+	}
+	// The pre-fix profile: no recurrent bit, no spacing, backend default.
+	if s, args := plan(glm(0)); s.HasSSM || contains(args, "--checkpoint-min-step") {
+		t.Fatalf("control without the bit changed: has_ssm=%v args=%v", s.HasSSM, args)
+	}
+
+	// Inkling: short convolutions beside windowed attention on every block.
+	// The window keeps its own spacing and the per-block KV path still prices it.
+	ink := &ModelProfile{ModelArch: "inkling", RecurrentState: 1, NumLayers: 6, SlidingWindow: 512,
+		HeadCountKVByLayer: []int{8, 8, 8, 8, 8, 8}, SWAPattern: []int{1, 1, 1, 1, 1, 0},
+		KeyLength: 128, ValueLength: 128}
+	if !isRecurrentOrHybrid(ink) || checkpointMinStep(ink, 512) != 1024 {
+		t.Fatalf("inkling: recurrent=%v step=%d", isRecurrentOrHybrid(ink), checkpointMinStep(ink, 512))
+	}
+	if _, ok := kvLayerTotalMB(ink, kvCacheShape{Context: 131072, KVType: "q8_0"}); !ok {
+		t.Fatal("recurrent state removed a valid per-block KV layout")
 	}
 }

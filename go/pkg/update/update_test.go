@@ -689,3 +689,99 @@ chmod +x "$output"
 		t.Fatalf("failed retry damaged binary: %q %v", out, err)
 	}
 }
+
+func TestBuildCommitNamesTheBuild(t *testing.T) {
+	for version, want := range map[string]string{
+		"v3.2.10-65-g1b69562-dirty": "1b69562",
+		"v3.2.10-65-g1b69562":       "1b69562",
+		"v3.2.10":                   "v3.2.10",
+		"v3.2.10-dirty":             "v3.2.10",
+		"v3.2.0-go":                 "", // unstamped in-source default
+		"v3.2.10-rc1":               "",
+		"":                          "",
+	} {
+		if got := buildCommit(version); got != want {
+			t.Errorf("buildCommit(%q) = %q, want %q", version, got, want)
+		}
+	}
+}
+
+func TestCheckStatusStates(t *testing.T) {
+	newer := func() (*Result, error) { return &Result{Latest: "v3.2.11", HasUpdate: true}, nil }
+	same := func() (*Result, error) { return &Result{Latest: "v3.2.10"}, nil }
+	offline := func() (*Result, error) { return nil, errors.New("offline") }
+	for _, tc := range []struct {
+		name    string
+		release func() (*Result, error)
+		state   StatusState
+		newer   string
+	}{
+		{"newer release", newer, StatusBehind, "v3.2.11"},
+		{"latest release", same, StatusCurrent, ""},
+		{"no answer", offline, StatusUnknown, ""},
+	} {
+		got := checkStatus("v3.2.10", tc.release, "")
+		if got.State != tc.state || got.Newer != tc.newer || got.Version != "v3.2.10" {
+			t.Errorf("%s: %+v, want state %v newer %q", tc.name, got, tc.state, tc.newer)
+		}
+	}
+	t.Setenv("LLM_SERVER_NO_UPDATE_CHECK", "1")
+	if got := checkStatus("v3.2.10", newer, ""); got.State != StatusOff {
+		t.Fatalf("opt-out still checked: %+v", got)
+	}
+}
+
+// A source build is compared by its own commit: upstream commits it lacks make
+// it behind even when the checkout was pulled, and local commits ahead of
+// upstream do not.
+func TestBuildBehindUpstreamComparesTheBuildNotTheCheckout(t *testing.T) {
+	remote, dev, other := t.TempDir(), t.TempDir(), t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	commit := func(repo, name string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git("-C", repo, "add", name)
+		git("-C", repo, "commit", "-qm", name)
+		return git("-C", repo, "rev-parse", "--short=7", "HEAD")
+	}
+	git("init", "--bare", "-q", remote)
+	git("init", "-q", dev)
+	git("-C", dev, "remote", "add", "origin", remote)
+	built := commit(dev, "one")
+	git("-C", dev, "push", "-qu", "origin", "HEAD")
+
+	version := "v3.2.10-1-g" + built + "-dirty"
+	if _, behind, ok := buildBehindUpstream(dev, version); !ok || behind {
+		t.Fatalf("build at upstream head: behind=%v ok=%v", behind, ok)
+	}
+	git("clone", "-q", remote, other)
+	commit(other, "two")
+	git("-C", other, "push", "-q")
+	upstream, behind, ok := buildBehindUpstream(dev, version)
+	if !ok || !behind || upstream == "" {
+		t.Fatalf("upstream moved on: upstream=%q behind=%v ok=%v", upstream, behind, ok)
+	}
+	if got := checkStatus(version, func() (*Result, error) { return &Result{Latest: "v3.2.10"}, nil }, dev); got.State != StatusBehind || got.Newer != upstream {
+		t.Fatalf("release current but upstream ahead: %+v", got)
+	}
+	git("-C", dev, "pull", "-q", "--rebase")
+	if _, behind, _ := buildBehindUpstream(dev, version); !behind {
+		t.Fatal("pulled checkout hid a build that was not rebuilt")
+	}
+	local := commit(dev, "three")
+	if _, behind, ok := buildBehindUpstream(dev, "v3.2.10-3-g"+local); !ok || behind {
+		t.Fatalf("local commits ahead of upstream: behind=%v ok=%v", behind, ok)
+	}
+	if _, _, ok := buildBehindUpstream(dev, "v3.2.0-go"); ok {
+		t.Fatal("unstamped build compared against upstream")
+	}
+}

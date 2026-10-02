@@ -31,6 +31,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/probe"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 	"github.com/raketenkater/ggrun/pkg/tune"
+	"github.com/raketenkater/ggrun/pkg/update"
 )
 
 var (
@@ -199,6 +200,10 @@ type Model struct {
 	backendRouteBypass        bool
 	backendRouteBypassBackend string
 
+	// versionStatus is the running build and whether it is the newest
+	// available, filled in by a background check after startup.
+	versionStatus update.Status
+
 	// Messages
 	message        string
 	messageType    string // info, warning, error
@@ -285,6 +290,7 @@ func sessionModel() Model {
 	spin.Style = titleStyle
 	m := Model{
 		screen:          ScreenMain,
+		versionStatus:   update.Status{Version: update.Version()},
 		cfgMemo:         &configMemo{},
 		backend:         backend,
 		modelDir:        cfg.ModelDir,
@@ -573,13 +579,22 @@ func (d mainItemDelegate) Render(w io.Writer, m list.Model, index int, listItem 
 
 func (m Model) Init() tea.Cmd {
 	if m.screen != ScreenLoading {
-		return nil
+		return checkVersionCmd
 	}
 	return tea.Batch(
 		m.spinner.Tick,
 		loadHardwareAndModelsCmd(m.modelDir, m.cacheDir, m.backend, m.ramLimitPercent, m.vramHeadroomMB, m.ramHeadroomMB, m.ramBudgetMB),
+		checkVersionCmd,
 	)
 }
+
+// versionStatusMsg carries the background answer to "is this the newest ggrun?".
+type versionStatusMsg update.Status
+
+// checkVersion is replaceable in tests; the real check uses the network.
+var checkVersion = update.CheckStatus
+
+func checkVersionCmd() tea.Msg { return versionStatusMsg(checkVersion()) }
 
 func (m Model) updateLoading(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -613,6 +628,10 @@ func (m Model) updateLoading(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if status, ok := msg.(versionStatusMsg); ok {
+		m.versionStatus = update.Status(status)
+		return m, nil
+	}
 	if m.screen == ScreenLoading {
 		return m.updateLoading(msg)
 	}
@@ -1674,6 +1693,7 @@ func (m Model) viewMain() string {
 	}
 
 	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
+	b.WriteString(m.versionLine())
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  Models:   %d recognized (%d elsewhere)\n", len(m.models), external))
@@ -1708,9 +1728,28 @@ func (m Model) viewMain() string {
 	return b.String()
 }
 
+// versionLine is the start screen's version row: the running build and whether
+// it is the newest ggrun available. `u` runs the update from either screen.
+func (m Model) versionLine() string {
+	s := m.versionStatus
+	status := mutedStyle.Render("checking for updates…")
+	switch s.State {
+	case update.StatusCurrent:
+		status = highlightStyle.Render("up to date")
+	case update.StatusBehind:
+		status = warningStyle.Render("update available: " + s.Newer + " · u to update")
+	case update.StatusUnknown:
+		status = mutedStyle.Render("update check unavailable")
+	case update.StatusOff:
+		status = mutedStyle.Render("update check off")
+	}
+	return fmt.Sprintf("  Version:  %s · %s\n", s.Version, status)
+}
+
 func (m Model) viewFirstRun() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("═══ ggrun First Run ═══") + "\n")
+	b.WriteString(m.versionLine())
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  No runnable GGUF models found in: %s\n", m.modelDir))
 	b.WriteString("  Start with Recommended; ggrun will choose a model and quant that fit.\n")
@@ -2539,6 +2578,8 @@ func (m Model) viewRecommended() string {
 			return
 		}
 		b.WriteString(recommendStyle.Render("  "+title) + "\n")
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-34s %-9s %-11s %6s %5s %7s",
+			"Model", "Fit", "Quant", "Size", "Intel", "Est.t/s")) + "\n")
 		for _, rec := range rows {
 			prefix := "  "
 			if idx == m.selectedRecommendation {
@@ -2556,8 +2597,8 @@ func (m Model) viewRecommended() string {
 			if len(name) > 34 {
 				name = name[:33] + "…"
 			}
-			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %3.0f%% %7s",
-				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, rec.QualityRetained*100, tps)
+			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %5s %7s",
+				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
 			if idx == m.selectedRecommendation {
 				b.WriteString(prefix + selectedStyle.Render(line) + "\n")
 			} else {
@@ -2567,9 +2608,11 @@ func (m Model) viewRecommended() string {
 		}
 		b.WriteString("\n")
 	}
-	writeGroup("Best overall — balanced quality, speed and fit", m.recommendationGroups.Balanced)
+	writeGroup("Best overall — intelligence first, practical quant", m.recommendationGroups.Balanced)
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
+	b.WriteString(mutedStyle.Render("  Intel is base-model catalog intelligence (~ estimated), not quantized accuracy.") + "\n")
+	b.WriteString(mutedStyle.Render("  1–2 bit quants are fallbacks within a model; task accuracy is unverified.") + "\n")
 	b.WriteString(mutedStyle.Render("  Speeds are estimates; Benchmark measures this exact machine.") + "\n")
 	b.WriteString(mutedStyle.Render("  Fit uses installed capacity; launch rechecks memory currently free.") + "\n\n")
 
@@ -2926,6 +2969,13 @@ func kvProfileFromGGUF(info *gguf.Info) *placement.ModelProfile {
 		FullAttnInterval: info.FullAttnInterval,
 		SlidingWindow:    info.SlidingWindow,
 		ModelArch:        info.Architecture,
+		// Per-layer arrays price mixed-head and explicit-window models; the
+		// NextN count tells placement which stored blocks hold no cache.
+		NextNPredictLayers: info.NextNPredictLayers,
+		HeadCountKVByLayer: info.HeadCountKVByLayer,
+		SWAPattern:         info.SlidingWindowPattern,
+		KeyLengthSWA:       info.KeyLengthSWA,
+		ValueLengthSWA:     info.ValueLengthSWA,
 		// The KV rate/geometry cache (kvCachePath) is keyed on the model's exact
 		// byte size. Without it, the profile built here produces kv_<basename>_0
 		// which never matches the kv_<basename>_<actualsize> written at launch,

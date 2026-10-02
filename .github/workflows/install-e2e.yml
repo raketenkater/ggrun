@@ -48,6 +48,10 @@ on:
         description: Minimum devices with model weight allocations (2 exercises splitting)
         type: number
         default: 1
+      gpu_claude_code:
+        description: Also serve once in Claude Code mode (--claude-code --parallel 1)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -384,6 +388,7 @@ jobs:
           GPU_STARTUP_TIMEOUT: ${{ inputs.gpu_startup_timeout }}
           GPU_REQUEST_TIMEOUT: ${{ inputs.gpu_request_timeout }}
           GPU_MIN_WEIGHT_DEVICES: ${{ inputs.gpu_min_weight_devices }}
+          GPU_CLAUDE_CODE: ${{ inputs.gpu_claude_code }}
         run: |
           set -euo pipefail
           # The models that actually stress placement are too large to fetch per
@@ -397,8 +402,10 @@ jobs:
           else
             source_args=(--repo "${GPU_MODEL_REPO:-$E2E_REPO}" --quant "${GPU_MODEL_QUANT:-$E2E_QUANT}")
           fi
+          mode_args=()
+          if [ "${GPU_CLAUDE_CODE:-true}" != "false" ]; then mode_args=(--claude-code); fi
           python3 scripts/verify-gpu-install.py --launcher "$LLM_APP_HOME/ggrun" \
-            "${source_args[@]}" \
+            "${source_args[@]}" "${mode_args[@]}" \
             --ctx "${GPU_CONTEXT:-2048}" --timeout "${GPU_STARTUP_TIMEOUT:-300}" \
             --request-timeout "${GPU_REQUEST_TIMEOUT:-120}" \
             --min-weight-devices "${GPU_MIN_WEIGHT_DEVICES:-1}" \
@@ -414,6 +421,8 @@ jobs:
             evidence/gpu/*.log
             evidence/gpu/relaunch/*.json
             evidence/gpu/relaunch/*.log
+            evidence/gpu/claude-code/*.json
+            evidence/gpu/claude-code/*.log
 
   # Same flow on a Windows machine with cards. Gated on its own variable so one
   # platform's runner being absent never leaves the other's job queued.

@@ -60,6 +60,11 @@ type ResourceLedger struct {
 	Exact    bool                   `json:"exact"`
 	Evidence string                 `json:"evidence"`
 	Fits     bool                   `json:"fits"`
+	// NeedsAdmission means the known components fit, but required compute rows
+	// are missing. Fits is false: the residual numbers are upper bounds on
+	// slack, not proof of room for a performance experiment.
+	NeedsAdmission     bool  `json:"needs_admission,omitempty"`
+	MissingComputeGPUs []int `json:"missing_compute_gpus,omitempty"`
 }
 
 // CandidateEstimate predicts only enough to order a bounded finalist set. It
@@ -77,7 +82,13 @@ type CandidateEstimate struct {
 	Confidence     string  `json:"confidence"`
 	Bottleneck     string  `json:"bottleneck"`
 	Feasible       bool    `json:"feasible"`
+	NeedsAdmission bool    `json:"needs_admission,omitempty"`
 	ActionableGain bool    `json:"actionable_gain"`
+	// HostExpert separates where host-resident experts are stored from where
+	// the backend executes them. PrefillBottleneck names the dominant prefill
+	// term when it differs from the decode bottleneck.
+	HostExpert        *HostExpertEstimate `json:"host_expert,omitempty"`
+	PrefillBottleneck string              `json:"prefill_bottleneck,omitempty"`
 }
 
 // OptimizationBoundary is the finite calculated region explored before one
@@ -85,19 +96,20 @@ type CandidateEstimate struct {
 // baseline-won result meaningful: later launches can see what was ruled out
 // instead of repeating an opaque search.
 type OptimizationBoundary struct {
-	CandidateCount int         `json:"candidate_count"`
-	FeasibleCount  int         `json:"feasible_count"`
-	ExactCount     int         `json:"exact_count,omitempty"`
-	MinBatch       int         `json:"min_batch,omitempty"`
-	MaxBatch       int         `json:"max_batch,omitempty"`
-	MinUBatch      int         `json:"min_ubatch,omitempty"`
-	MaxUBatch      int         `json:"max_ubatch,omitempty"`
-	MinParallel    int         `json:"min_parallel,omitempty"`
-	MaxParallel    int         `json:"max_parallel,omitempty"`
-	Topologies     []string    `json:"topologies,omitempty"`
-	DeviceSlackMB  map[int]int `json:"device_slack_mb,omitempty"`
-	HostSlackMB    int         `json:"host_slack_mb"`
-	Evidence       string      `json:"evidence,omitempty"`
+	CandidateCount  int         `json:"candidate_count"`
+	FeasibleCount   int         `json:"feasible_count"`
+	UnmeasuredCount int         `json:"unmeasured_count,omitempty"`
+	ExactCount      int         `json:"exact_count,omitempty"`
+	MinBatch        int         `json:"min_batch,omitempty"`
+	MaxBatch        int         `json:"max_batch,omitempty"`
+	MinUBatch       int         `json:"min_ubatch,omitempty"`
+	MaxUBatch       int         `json:"max_ubatch,omitempty"`
+	MinParallel     int         `json:"min_parallel,omitempty"`
+	MaxParallel     int         `json:"max_parallel,omitempty"`
+	Topologies      []string    `json:"topologies,omitempty"`
+	DeviceSlackMB   map[int]int `json:"device_slack_mb,omitempty"`
+	HostSlackMB     int         `json:"host_slack_mb"`
+	Evidence        string      `json:"evidence,omitempty"`
 }
 
 // AnalyzeStrategy builds the common resource ledger and a topology-aware
@@ -199,29 +211,39 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	if totalSizeMB <= 0 {
 		totalSizeMB = int((model.SizeBytes + 1048575) / 1048576)
 	}
-	kvMB := computeKVTotalMB(model, s.ContextSize, s.KVType, s.SWAFull)
+	kvMB := computeKVTotalMBForStrategy(model, s)
 	if s.ContextAllocationMB > 0 {
 		kvMB = s.ContextAllocationMB
 	}
 	overhead := PlanningCUDAOverheadByGPU(opts.CacheDir, gpus)
 	pc := opts.loadProbeCacheForStrategy(model, s, gpus)
 	modelShares := estimatedModelShares(model, s, gpus, totalSizeMB)
-	contextShares := estimatedContextShares(s, gpus, kvMB)
+	contextShares := estimatedModelContextShares(model, s, gpus, kvMB)
 	order := orderGPUsByBandwidth(gpus)
 	for i, gpu := range gpus {
 		computeMB := 0
+		computeKnown := false
 		runtimeMB := 0
 		if pc != nil {
-			computeMB = pc.ComputeBufByGPU[gpu.Index]
-			if computeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) {
+			computeMB, computeKnown = pc.ComputeBufByGPU[gpu.Index]
+			computeKnown = computeKnown && computeMB >= 0
+			// A legacy aggregate can conservatively price every device. Once
+			// device rows exist, a missing row is not the largest peer's proof.
+			if !computeKnown && len(pc.ComputeBufByGPU) == 0 && pc.ComputeBufMB > 0 {
 				computeMB = pc.ComputeBufMB
+				computeKnown = true
 			}
 			runtimeMB = pc.RuntimeGraphGrowthByGPU[gpu.Index]
 		}
-		if computeMB <= 0 && strategyUsesGPUAt(s, i, gpu.Index) && !opts.RequireMeasuredBuffers {
+		if !computeKnown && strategyUsesGPUAt(s, i, gpu.Index) && !opts.RequireMeasuredBuffers {
 			computeMB = firstLaunchComputeBufMBForGPUParallelAtContext(
 				model, s.UBatchSize, max(1, s.Parallel), s.ContextSize, i, order,
 			)
+			computeKnown = computeMB > 0
+		}
+		if !computeKnown && strategyUsesGPUAt(s, i, gpu.Index) {
+			ledger.MissingComputeGPUs = append(ledger.MissingComputeGPUs, gpu.Index)
+			ledger.Devices[i].Evidence = "missing-compute-measurement"
 		}
 		modelMB := modelShares[i]
 		contextMB := contextShares[i]
@@ -256,6 +278,11 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 	if ledger.Host.SlackMB < 0 && !s.MMapRequired {
 		ledger.Fits = false
 	}
+	if len(ledger.MissingComputeGPUs) > 0 {
+		ledger.NeedsAdmission = ledger.Fits
+		ledger.Fits = false
+		ledger.Evidence = "incomplete-compute-evidence"
+	}
 	return ledger
 }
 
@@ -284,10 +311,10 @@ func measuredAllocationMatchesStrategy(allocation MeasuredAllocation, model *Mod
 	if s != nil && s.KVPlacement != "cpu" {
 		expectedContextTotal = allocation.ContextTotalMB
 		if expectedContextTotal <= 0 && model != nil {
-			expectedContextTotal = computeKVTotalMB(model, s.ContextSize, s.KVType, s.SWAFull)
+			expectedContextTotal = computeKVTotalMBForStrategy(model, s)
 		}
 	}
-	expectedContext := estimatedContextShares(s, gpus, expectedContextTotal)
+	expectedContext := estimatedModelContextShares(model, s, gpus, expectedContextTotal)
 	return allocationDistributionCompatible(expectedContext, allocation.ContextByGPU, gpus)
 }
 
@@ -374,6 +401,26 @@ func estimatedContextShares(s *Strategy, gpus []detect.GPU, totalMB int) []int {
 	shares := normalizedStrategySplit(s, n)
 	for i := range out {
 		out[i] = int(math.Ceil(float64(totalMB) * shares[i]))
+	}
+	return out
+}
+
+// estimatedModelContextShares charges each device the KV of the layers it
+// owns when the model states its per-layer geometry; otherwise it keeps the
+// split-fraction estimate. Row and graph split modes do not place whole layers
+// by the split, so they keep it too.
+func estimatedModelContextShares(model *ModelProfile, s *Strategy, gpus []detect.GPU, totalMB int) []int {
+	out := estimatedContextShares(s, gpus, totalMB)
+	if s == nil || totalMB <= 0 || s.KVPlacement == "cpu" || s.Type == CPUOnly || s.Type == SingleGPU ||
+		(s.SplitMode != "" && !strings.EqualFold(s.SplitMode, "layer")) {
+		return out
+	}
+	fractions, ok := kvLayerDeviceFractions(model, kvShapeForStrategy(s, false), normalizedStrategySplit(s, len(gpus)))
+	if !ok {
+		return out
+	}
+	for i := range out {
+		out[i] = int(math.Ceil(float64(totalMB) * fractions[i]))
 	}
 	return out
 }
@@ -595,8 +642,8 @@ func topologyActivationTransferCost(caps *detect.Capabilities, model *ModelProfi
 // measured hardware ceilings. It chooses a finalist only; the live agent
 // workload remains the sole performance authority.
 func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Strategy, opts Options, ledger ResourceLedger) CandidateEstimate {
-	est := CandidateEstimate{Feasible: ledger.Fits, Confidence: "derived"}
-	if caps == nil || model == nil || s == nil || !ledger.Fits {
+	est := CandidateEstimate{Feasible: ledger.Fits, NeedsAdmission: ledger.NeedsAdmission, Confidence: "derived"}
+	if caps == nil || model == nil || s == nil || (!ledger.Fits && !ledger.NeedsAdmission) {
 		est.Confidence = "unknown"
 		est.Bottleneck = "memory admission"
 		est.AgentCost = math.Inf(1)
@@ -684,13 +731,43 @@ func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Str
 			hostBW = 1
 			est.Confidence = "low"
 		}
+		exec := ResolveHostExpertExecution(caps, opts)
+		host := &HostExpertEstimate{Execution: exec, StoredMB: cpuExpertMB, TouchFraction: prefillExpertTouch}
+		est.HostExpert = host
+		if exec.Mode == HostExpertExecUnknown {
+			est.Confidence = "low"
+		}
+		// Decode: one step of activeLanes tokens. It stays a per-step host read
+		// unless that batch reaches the staging threshold.
 		decodeHostCost := cpuExpertMB * decodeExpertTouch / float64(hostBW)
-		prefillHostCost := cpuExpertMB * prefillExpertTouch / float64(hostBW)
+		if exec.StagedAt(activeLanes) {
+			if perToken, _, ok := stagedExpertTransfer(caps, exec, cpuExpertMB, decodeExpertTouch, activeLanes); ok {
+				decodeHostCost = perToken * float64(activeLanes)
+			} else {
+				est.Confidence = "low"
+			}
+		}
 		est.CPUExpertCost = decodeHostCost
 		est.DecodeCost += decodeHostCost
-		prefillWeightCost += prefillHostCost
 		if decodeHostCost > maxDeviceCost {
 			est.Bottleneck = "CPU expert bandwidth"
+		}
+		// Prefill: a staged microbatch streams its touched experts over the
+		// staging link. That per-token transfer replaces the host-read prior;
+		// it is already amortised by the microbatch and is added after the
+		// ubatchGain division below, never divided twice.
+		staged := false
+		if exec.StagedAt(max(1, s.UBatchSize)) {
+			perToken, rate, ok := stagedExpertTransfer(caps, exec, cpuExpertMB, prefillExpertTouch, max(1, s.UBatchSize))
+			if ok {
+				staged = true
+				host.PrefillStaged, host.TransferSecPerToken, host.CopyRateMBps = true, perToken, rate
+			} else {
+				est.Confidence = "low"
+			}
+		}
+		if !staged {
+			prefillWeightCost += cpuExpertMB * prefillExpertTouch / float64(hostBW)
 		}
 	}
 
@@ -706,19 +783,19 @@ func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Str
 		est.DecodeCost = 1
 		est.Confidence = "low"
 	}
-	ubatch := max(32, s.UBatchSize)
-	ubatchGain := 1.0 + 0.28*math.Log2(float64(ubatch)/32.0)
-	if ubatchGain < 1 {
-		ubatchGain = 1
-	}
-	if ubatchGain > 3.5 {
-		ubatchGain = 3.5
-	}
+	ubatchGain := ubatchPrefillGain(s.UBatchSize)
 	// Larger physical microbatches improve arithmetic intensity and amortize
 	// weight reads, but the actual knee depends on kernels, quantization, and
 	// model shape. This bounded prior orders one finalist; the identical live
 	// prefill/decode workload determines whether the predicted gain is real.
 	est.PrefillCost = prefillWeightCost/ubatchGain + prefillTransfer
+	if est.HostExpert != nil && est.HostExpert.PrefillStaged {
+		staging := est.HostExpert.TransferSecPerToken
+		est.PrefillCost += staging
+		if staging > prefillWeightCost/ubatchGain {
+			est.PrefillBottleneck = fmt.Sprintf("GPU %d host-expert staging link", est.HostExpert.Execution.StagingGPU)
+		}
+	}
 	if est.PrefillCost <= 0 {
 		est.PrefillCost = est.DecodeCost / ubatchGain
 	}
@@ -738,10 +815,19 @@ func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Str
 	if ledger.Exact && est.Confidence != "low" {
 		est.Confidence = "allocation-measured"
 	}
+	if ledger.NeedsAdmission {
+		est.Confidence = "unknown-memory"
+	}
 	if est.Bottleneck == "" {
 		est.Bottleneck = "scheduler/graph"
 	}
 	return est
+}
+
+// ubatchPrefillGain is the bounded prefill prior for a physical microbatch.
+func ubatchPrefillGain(ubatch int) float64 {
+	gain := 1.0 + 0.28*math.Log2(float64(max(32, ubatch))/32.0)
+	return math.Max(1, math.Min(3.5, gain))
 }
 
 // AnalyzeCandidateFrontier annotates every candidate, orders alternates by
@@ -758,11 +844,32 @@ func AnalyzeCandidateFrontier(caps *detect.Capabilities, model *ModelProfile, op
 		candidates[i].Estimate = AnalyzeStrategy(caps, model, candidates[i].Strategy, opts)
 	}
 	if len(candidates) > 2 {
+		baseCost := candidates[0].Estimate.AgentCost
+		predictedGain := func(e CandidateEstimate) bool {
+			return baseCost > 0 && !math.IsInf(baseCost, 0) && e.AgentCost < baseCost
+		}
 		sort.SliceStable(candidates[1:], func(i, j int) bool {
 			a := candidates[1+i].Estimate
 			b := candidates[1+j].Estimate
 			if a.Feasible != b.Feasible {
 				return a.Feasible
+			}
+			if a.NeedsAdmission != b.NeedsAdmission {
+				return a.NeedsAdmission
+			}
+			if a.NeedsAdmission && b.NeedsAdmission {
+				// The cost prior cannot establish a memory-safe rung. Retain
+				// the generator's nearest-coordinate order until admission
+				// supplies the missing evidence, rather than jumping to the
+				// largest physical microbatch on a zero-cost graph assumption.
+				// A candidate predicted slower than the baseline still never
+				// precedes one predicted faster: testing a predicted loss
+				// (MiniMax-M3 Claude mode picked a smaller context predicted
+				// 5% slower) spends the one bounded experiment on nothing.
+				if ga, gb := predictedGain(a), predictedGain(b); ga != gb {
+					return ga
+				}
+				return false
 			}
 			if a.AgentCost != b.AgentCost {
 				return a.AgentCost < b.AgentCost
@@ -951,6 +1058,10 @@ func TightLiveCandidates(candidates []CalibrationCandidate) []CalibrationCandida
 	base := candidates[0].Strategy
 	for _, candidate := range candidates[1:] {
 		if candidate.Estimate.Feasible && tightLiveEligible(base, candidate.Strategy) {
+			out = append(out, candidate)
+		} else if candidate.Estimate.NeedsAdmission && sameProvenShape(base, candidate.Strategy) {
+			// Unknown same-shape neighbors may reach contained admission;
+			// they do not establish roomy residency or authorize a reshuffle.
 			out = append(out, candidate)
 		}
 	}
@@ -1233,6 +1344,9 @@ func SummarizeCandidateFrontier(candidates []CalibrationCandidate) *Optimization
 		}
 		if candidate.Estimate.Feasible {
 			boundary.FeasibleCount++
+		}
+		if candidate.Estimate.NeedsAdmission {
+			boundary.UnmeasuredCount++
 		}
 		if s.ResourceLedger != nil && s.ResourceLedger.Exact {
 			boundary.ExactCount++
