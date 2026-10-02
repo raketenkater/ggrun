@@ -29,9 +29,29 @@ OPEN_WEIGHTS_PAGE_URL = "https://artificialanalysis.ai/leaderboards/models?weigh
 HF_MODEL_API_URL = "https://huggingface.co/api/models"
 DEFAULT_CATALOG_LIMIT = 100
 QUANT_PATTERN = re.compile(
-    r"(IQ[1-8]_(?:XXS|XS|NL|S|M|L)|Q[1-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
+    r"(IQ[1-8]_(?:XXS|XS|NL|S|M|L)|Q[1-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
     re.IGNORECASE,
 )
+
+# Speculative-decoding heads published beside the weights under the same quant
+# names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). Counting them made a
+# 2 GB MTP head a "Q4_0" of a 1T model.
+DRAFT_HEAD_NAMES = ("mtp", "dflash")
+
+
+def is_draft_head_gguf(path: str) -> bool:
+    parts = path.lower().split("/")
+    return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
+        part in DRAFT_HEAD_NAMES for part in parts[:-1])
+
+
+def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
+    """GGUF weight files: no projectors, and no draft heads unless the repo holds nothing else."""
+    ggufs = [item for item in siblings if isinstance(item, dict)
+             and str(item.get("rfilename") or "").lower().endswith(".gguf")
+             and "mmproj" not in str(item.get("rfilename") or "").lower()]
+    weights = [item for item in ggufs if not is_draft_head_gguf(str(item.get("rfilename") or ""))]
+    return weights or ggufs
 
 TRUSTED_GGUF_OWNERS = {
     "unsloth": 140,
@@ -573,12 +593,8 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
         HF_QUANT_CACHE[key] = []
         return []
     quant_sizes: dict[str, dict[str, int | bool]] = {}
-    for item in siblings:
-        if not isinstance(item, dict):
-            continue
+    for item in model_weight_siblings(siblings):
         fname = str(item.get("rfilename") or "")
-        if not fname.lower().endswith(".gguf") or "mmproj" in fname.lower():
-            continue
         # For LFS-tracked files (all real GGUF weights) item["size"] is the tiny
         # pointer-file size; the actual blob size is in item["lfs"]["size"].
         # Reading the pointer size is what produced phantom quants like
@@ -636,12 +652,8 @@ def _representative_gguf_file(siblings: list[dict[str, Any]]) -> str | None:
     # Prefer the first shard of a split model (KV metadata is duplicated across
     # shards, so shard 1 always carries it). Fall back to any non-mmproj GGUF.
     candidates: list[tuple[str, int]] = []
-    for item in siblings:
-        if not isinstance(item, dict):
-            continue
+    for item in model_weight_siblings(siblings):
         fname = str(item.get("rfilename") or "")
-        if not fname.lower().endswith(".gguf") or "mmproj" in fname.lower():
-            continue
         size = 0
         lfs = item.get("lfs")
         if isinstance(lfs, dict) and isinstance(lfs.get("size"), int):
