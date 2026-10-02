@@ -217,8 +217,10 @@ func TestReviewerConstantsPointToQwen4B(t *testing.T) {
 	if DefaultReviewerSHA != "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4" {
 		t.Fatalf("DefaultReviewerSHA changed: %q", DefaultReviewerSHA)
 	}
-	if !strings.Contains(DefaultReviewerURL, "Qwen3.5-4B-GGUF") {
-		t.Fatalf("DefaultReviewerURL must target the 4B repo, got %q", DefaultReviewerURL)
+	// The hub file carrying exactly this size and SHA (verified 2026-10-02);
+	// the local name is not a hub path.
+	if DefaultReviewerURL != "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf" {
+		t.Fatalf("DefaultReviewerURL = %q, want the unsloth file matching the pinned SHA", DefaultReviewerURL)
 	}
 }
 
