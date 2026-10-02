@@ -1488,16 +1488,15 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
-		runtimeGrowthByGPU = placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-		// Cold-start carry: agree with the fit loop — when the keyed growth is
-		// unmeasured, reserve the measured related-key growth so preflight and
-		// placement both pack around it on a cold key (preflight must not fit
-		// while the real launch would OOM, or vice versa).
-		if len(runtimeGrowthByGPU) == 0 {
-			if related := placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, cacheBackendTag); len(related) > 0 {
-				runtimeGrowthByGPU = related
-			}
-		}
+		// Cold-start carry: agree with the fit loop — a device without keyed
+		// growth reserves the measured related-key growth so preflight and
+		// placement both pack around it (preflight must not fit while the real
+		// launch would OOM, or vice versa). Per device: a measurement on one GPU
+		// is no evidence for another.
+		runtimeGrowthByGPU = runtimeGrowthReserve(
+			placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel),
+			placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, cacheBackendTag),
+			caps.GPUs, 0)
 	}
 	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
 	if isEmbeddedMainlineMTP(strategy) && deficit > 0 {
@@ -1613,16 +1612,13 @@ func stagedPrefillUBatchRaise(fitBin string, serverArgs []string, current []pref
 		if err != nil || backendAdjustmentFromLog(stderr) != nil || modelRows(devs) != want {
 			return raiseProbe{}, false
 		}
-		growth := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, ctx, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel)
-		if len(growth) == 0 {
-			// This rung has never run here, so its runtime growth is unknown.
-			// A context fitted to the oracle's boundary would leave nothing for it.
-			related := placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, backendTag)
-			growth = map[int]int{}
-			for _, g := range caps.GPUs {
-				growth[g.Index] = max(related[g.Index], raiseUnmeasuredGrowthMB)
-			}
-		}
+		// A device whose growth at this rung was never measured here keeps the
+		// unmeasured reserve: a context fitted to the oracle's boundary would
+		// leave nothing for it. A measurement on another device does not count.
+		growth := runtimeGrowthReserve(
+			placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, ctx, ub, strategy.KVQuality, strategy.KVPlacement, backendTag, caps.GPUs, strategy.Parallel),
+			placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, backendTag),
+			activePreflightGPUs(devs, caps.GPUs), raiseUnmeasuredGrowthMB)
 		return raiseProbe{ctx: ctx, devs: devs, slack: preflightDeviceSlack(devs, caps.GPUs, overheadByGPU, growth)}, true
 	}
 	for _, ub := range candidates {
@@ -1784,6 +1780,40 @@ const minRaiseContext = 131072
 // --fit-target default. GLM-5.3-Flash at ubatch 512, fitted to the oracle's
 // exact boundary, aborted in warmup with 256 MiB free on CUDA0.
 const raiseUnmeasuredGrowthMB = 1024
+
+// runtimeGrowthReserve is the runtime graph growth to hold free on each of
+// gpus. A device's own keyed measurement is kept as observed, zero included.
+// A device without one is unknown, whatever its peers measured: it reserves
+// the largest growth the model measured under a related key, or floorMB if
+// that is larger. GPUs outside gpus get no entry.
+func runtimeGrowthReserve(measured, related map[int]int, gpus []detect.GPU, floorMB int) map[int]int {
+	out := map[int]int{}
+	for _, g := range gpus {
+		if mb, ok := measured[g.Index]; ok {
+			out[g.Index] = mb
+		} else if mb := max(related[g.Index], floorMB); mb > 0 {
+			out[g.Index] = mb
+		}
+	}
+	return out
+}
+
+// activePreflightGPUs is the subset of gpus the oracle placed anything on.
+func activePreflightGPUs(devs []preflightDevice, gpus []detect.GPU) []detect.GPU {
+	used := map[int]bool{}
+	for _, d := range devs {
+		if idx, ok := cudaDeviceIndex(d.Name); ok && d.TotalMB() > 0 {
+			used[idx] = true
+		}
+	}
+	var out []detect.GPU
+	for _, g := range gpus {
+		if used[g.Index] {
+			out = append(out, g)
+		}
+	}
+	return out
+}
 
 // preflightDeviceSlack is the MiB each CUDA device has left after its oracle
 // rows, CUDA overhead and runtime graph growth; negative when short.

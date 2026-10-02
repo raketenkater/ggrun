@@ -196,6 +196,145 @@ func TestStagedPrefillUBatchRaiseReservesUnmeasuredRuntimeGrowth(t *testing.T) {
 	}
 }
 
+// Runtime growth is evidence about one device. With 300 MiB free on CUDA0,
+// growth recorded on CUDA1 alone must not admit ubatch 512 (review
+// 2026-10-01). A device keeps its own measurement, a measured zero included;
+// a device without one reserves the larger of the model's related measured
+// growth and the unmeasured floor; a guess (an abort without a size) counts as
+// evidence of growth; evidence for another context or ubatch is only related.
+func TestStagedPrefillUBatchRaiseKeepsReservePerUnmeasuredGPU(t *testing.T) {
+	const ctx, ub = 262144, 512
+	type rec struct {
+		ctx, ub   int
+		growth    map[int]int
+		estimated bool
+	}
+	cases := []struct {
+		name  string
+		recs  []rec
+		admit bool
+	}{
+		{"absent", nil, false},
+		{"partial: CUDA1 only", []rec{{ctx, ub, map[int]int{1: 200}, false}}, false},
+		{"complete", []rec{{ctx, ub, map[int]int{0: 200, 1: 200}, false}}, true},
+		{"measured zero on CUDA0", []rec{{ctx, ub, map[int]int{0: 0, 1: 200}, false}}, true},
+		{"zero overturned by an abort", []rec{{ctx, ub, map[int]int{0: 0, 1: 200}, false}, {ctx, ub, map[int]int{0: 2000}, true}}, false},
+		{"guess on CUDA0", []rec{{ctx, ub, map[int]int{1: 200}, false}, {ctx, ub, map[int]int{0: 2000}, true}}, false},
+		{"stale: another context", []rec{{131072, ub, map[int]int{0: 200, 1: 200}, false}}, false},
+		{"stale: another ubatch", []rec{{ctx, 256, map[int]int{0: 200, 1: 200}, false}}, false},
+		{"related growth above the floor", []rec{{ctx, ub, map[int]int{0: 200}, false}, {131072, 64, map[int]int{1: 7000}, false}}, false},
+		{"related growth below the floor", []rec{{ctx, ub, map[int]int{0: 200}, false}, {131072, 64, map[int]int{1: 500}, false}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			caps, model, s, _, current, cfg := ubatchRaiseFixture(t)
+			for i := range caps.GPUs {
+				caps.GPUs[i].VRAMTotalMB += placement.UnmeasuredCUDAOverheadMB
+			}
+			s.ContextSize = ctx
+			args := []string{"llama-server", "-m", model.Path, "-c", "262144", "-b", "2048", "-ub", "64"}
+			// 300 MiB free on CUDA0, 6,500 on CUDA1.
+			fit := fakeUBatchOracle(t, map[string]string{"512": `CUDA0 4000 2000 5700\nCUDA1 10000 5100 2400\n`})
+			for _, r := range c.recs {
+				for dev, mb := range r.growth {
+					var err error
+					if r.estimated {
+						err = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, r.ctx, r.ub, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, s.Parallel, dev, mb, true)
+					} else {
+						err = placement.RecordRuntimeGraphGrowth(cfg.CacheDir, model, r.ctx, r.ub, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, s.Parallel, map[int]int{dev: mb})
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			got, _ := stagedPrefillUBatchRaise(fit, args, current, cfg, caps, model, s, "llama", []int{ub}, false)
+			if (got == ub) != c.admit {
+				growth := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, ctx, ub, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, s.Parallel)
+				t.Fatalf("admitted=%v, want %v (keyed growth %v)", got == ub, c.admit, growth)
+			}
+		})
+	}
+}
+
+// Only devices the plan places something on reserve unmeasured growth: an
+// unused card that another process filled must not block the raise.
+func TestStagedPrefillUBatchRaiseReservesOnlyActiveDevices(t *testing.T) {
+	caps, model, s, args, _, cfg := ubatchRaiseFixture(t)
+	caps.GPUs = append(caps.GPUs, detect.GPU{Index: 2, VRAMTotalMB: 12000, VRAMUsedMB: 11800})
+	for i := range caps.GPUs {
+		caps.GPUs[i].VRAMTotalMB += placement.UnmeasuredCUDAOverheadMB
+	}
+	current := []preflightDevice{{Name: "CUDA0", ModelMB: 4000, ContextMB: 2000, ComputeMB: 2100},
+		{Name: "CUDA1", ModelMB: 10000, ContextMB: 5000, ComputeMB: 1800}, {Name: "CUDA2"}}
+	fit := fakeUBatchOracle(t, map[string]string{"512": `CUDA0 4000 2000 4000\nCUDA1 10000 5100 2400\nCUDA2 0 0 0\n`})
+	if got, _ := stagedPrefillUBatchRaise(fit, args, current, cfg, caps, model, s, "llama", []int{512}, false); got != 512 {
+		t.Fatalf("an unused, nearly full CUDA2 blocked the raise: got ubatch %d", got)
+	}
+}
+
+func TestRuntimeGrowthReserveIsPerDevice(t *testing.T) {
+	gpus := []detect.GPU{{Index: 0}, {Index: 1}, {Index: 2}}
+	cases := []struct {
+		name              string
+		measured, related map[int]int
+		floor             int
+		want              map[int]int
+	}{
+		{"nothing known, no floor", nil, nil, 0, map[int]int{}},
+		{"nothing known, floor", nil, nil, 1024, map[int]int{0: 1024, 1: 1024, 2: 1024}},
+		{"partial", map[int]int{1: 200}, nil, 1024, map[int]int{0: 1024, 1: 200, 2: 1024}},
+		{"partial with related carry", map[int]int{1: 200}, map[int]int{0: 300, 1: 900}, 0, map[int]int{0: 300, 1: 200}},
+		{"related above floor", nil, map[int]int{2: 1500}, 1024, map[int]int{0: 1024, 1: 1024, 2: 1500}},
+		{"measured zero kept", map[int]int{0: 0}, map[int]int{0: 800}, 1024, map[int]int{0: 0, 1: 1024, 2: 1024}},
+		{"unlisted device ignored", map[int]int{7: 99}, map[int]int{8: 99}, 0, map[int]int{}},
+	}
+	for _, c := range cases {
+		got := runtimeGrowthReserve(c.measured, c.related, gpus, c.floor)
+		if len(got) != len(c.want) {
+			t.Fatalf("%s: got %v, want %v", c.name, got, c.want)
+		}
+		for k, v := range c.want {
+			if mb, ok := got[k]; !ok || mb != v {
+				t.Fatalf("%s: got %v, want %v", c.name, got, c.want)
+			}
+		}
+	}
+}
+
+// The ordinary preflight agrees with the fit loop: a device without growth for
+// this key carries the model's related measured growth even when another
+// device has keyed evidence.
+func TestPreflightCarriesRelatedGrowthPerUnmeasuredGPU(t *testing.T) {
+	caps, model, s, args, _, cfg := ubatchRaiseFixture(t)
+	for i := range caps.GPUs {
+		caps.GPUs[i].VRAMTotalMB += placement.UnmeasuredCUDAOverheadMB
+	}
+	// 800 MiB free on CUDA0 at this exact argv.
+	fit := fakeUBatchOracle(t, map[string]string{"64": `CUDA0 4000 2000 5200\nCUDA1 10000 5000 1800\n`})
+	server := filepath.Join(filepath.Dir(fit), "llama-server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	be := &backendInfo{Path: server, Tag: "llama", Dialect: "llama"}
+	req := &launchRequest{}
+	tag := scopedProbeBackendTagForStrategy(req, model, be, s)
+	// CUDA0 measured 900 MiB of growth at another context; this key knows CUDA1 only.
+	if err := placement.RecordRuntimeGraphGrowth(cfg.CacheDir, model, 131072, 64, s.KVQuality, s.KVPlacement, tag, caps.GPUs, s.Parallel, map[int]int{0: 900}); err != nil {
+		t.Fatal(err)
+	}
+	if err := placement.RecordRuntimeGraphGrowth(cfg.CacheDir, model, s.ContextSize, 64, s.KVQuality, s.KVPlacement, tag, caps.GPUs, s.Parallel, map[int]int{1: 100}); err != nil {
+		t.Fatal(err)
+	}
+	out := preflightPlacement(req, be, cfg, caps, model, s, args)
+	if out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	if !out.DoesNotFit || out.Device != 0 {
+		t.Fatalf("CUDA0 lost its related growth reserve: fits=%v device=%d deficit=%d", !out.DoesNotFit, out.Device, out.DeficitMB)
+	}
+}
+
 // A relaunch replays the raised plan. A larger rung was rejected because it is
 // short even at minRaiseContext, which does not depend on the context a launch
 // starts from, so the relaunch keeps the same argv.

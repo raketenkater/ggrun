@@ -3080,7 +3080,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			// stays as the cold-start fallback when nothing is measured.
 			expertOnlyComputeMB = 0
 		}
-		runtimeGrowthMB := 0
+		runtimeGrowthMB, growthMeasured := 0, false
 		if pc != nil {
 			// Charge a split-owner the compute buffer MEASURED for THIS device
 			// in the placement that ran (pc.ComputeBufByGPU), falling back to
@@ -3122,14 +3122,15 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			// this growth (RecordRuntimeGraphGrowth/-FromOOM), reserve it here
 			// so the next placement for this exact key packs around it
 			// instead of rediscovering the deficit by crashing again.
-			runtimeGrowthMB = pc.RuntimeGraphGrowthByGPU[g.Index]
+			runtimeGrowthMB, growthMeasured = pc.RuntimeGraphGrowthByGPU[g.Index]
 		}
-		// Cold-start carry: on a key with no measured runtime growth, reserve the
-		// largest MEASURED (non-estimated) growth from a related key of the same
-		// model/GPU-slot set. Measured-not-static; self-heals once this key
-		// records its own value. Runs OUTSIDE the pc!=nil guard so a genuinely
-		// cold key (pc==nil) still gets the reserve.
-		if runtimeGrowthMB == 0 {
+		// Cold-start carry: on a device with no runtime growth recorded for this
+		// key, reserve the largest MEASURED (non-estimated) growth from a related
+		// key of the same model/GPU-slot set. Measured-not-static; self-heals once
+		// this key records its own value, a measured zero included. Runs OUTSIDE
+		// the pc!=nil guard so a genuinely cold key (pc==nil) still gets the
+		// reserve.
+		if !growthMeasured {
 			if related := RelatedModelRuntimeGraphGrowth(opts.CacheDir, model, caps.GPUs, s.Parallel, opts.BackendTag); related != nil {
 				runtimeGrowthMB = related[g.Index]
 			}
@@ -7705,7 +7706,7 @@ func RecordMeasuredComputeBuffers(cacheDir string, model *ModelProfile, ctxSize,
 // RuntimeGraphGrowthByGPU returns measured post-health graph growth keyed by CUDA
 // device. These values are populated only from observed runtime allocation growth
 // or exact cudaMalloc failures for the same runtime signature; missing means
-// unknown, not zero-margin proof.
+// unknown, not zero-margin proof. A present zero was measured.
 func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) map[int]int {
 	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
 	if pc == nil || len(pc.RuntimeGraphGrowthByGPU) == 0 {
@@ -7713,7 +7714,7 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 	}
 	out := map[int]int{}
 	for k, v := range pc.RuntimeGraphGrowthByGPU {
-		if v > 0 {
+		if v >= 0 {
 			out[k] = v
 		}
 	}
@@ -7938,6 +7939,11 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 			// Measurement replaces a guess outright, even downwards.
 			mergedGrowth[idx] = v
 			mergedEstimated[idx] = false
+		case estimated && prior == 0:
+			// An out-of-memory abort overturns a measured zero: something more
+			// was needed. It stays a guess so a measurement can replace it.
+			mergedGrowth[idx] = v
+			mergedEstimated[idx] = true
 		case estimated && !priorEstimated:
 			// A guess must not raise a value that was actually observed.
 		default:
@@ -9635,6 +9641,9 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 				mergedGrowth[idx], mergedEstimated[idx] = value, incomingEstimated
 			case !incomingEstimated && priorEstimated:
 				mergedGrowth[idx], mergedEstimated[idx] = value, false
+			case incomingEstimated && prior == 0:
+				// An abort overturns a measured zero (see recordRuntimeGraphGrowth).
+				mergedGrowth[idx], mergedEstimated[idx] = value, true
 			case incomingEstimated && !priorEstimated:
 				// Never replace measured evidence with an estimate.
 			case value > prior:
@@ -9726,7 +9735,10 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 	}
 	sort.Ints(growthIndices)
 	for _, idx := range growthIndices {
-		if mergedGrowth[idx] > 0 {
+		// A measured zero is evidence (the device needed nothing beyond its
+		// accounted buffers); an absent row is unknown and must stay absent.
+		// Estimates always carry a size, so an estimated zero is noise.
+		if mergedGrowth[idx] > 0 || (mergedGrowth[idx] == 0 && !mergedEstimated[idx]) {
 			fmt.Fprintf(&b, "PROBED_RUNTIME_GRAPH_GROWTH_MB_CUDA%d=%d\n", idx, mergedGrowth[idx])
 			if mergedEstimated[idx] {
 				fmt.Fprintf(&b, "PROBED_RUNTIME_GRAPH_GROWTH_ESTIMATED_CUDA%d=1\n", idx)

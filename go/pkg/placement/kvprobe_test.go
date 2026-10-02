@@ -635,6 +635,118 @@ func TestSuccessMeasurementFillsAnEmptyKeyAndNeverLowersAnObservedOOM(t *testing
 	}
 }
 
+// A measured zero is evidence and an absent row is unknown. The recorder keeps
+// the zero through later rewrites, an abort overturns it (and stays a guess a
+// measurement can replace), and clearing removes it.
+func TestMeasuredZeroRuntimeGrowthIsEvidence(t *testing.T) {
+	dir := t.TempDir()
+	model := &ModelProfile{Path: "/models/zero-moe.gguf", Basename: "zero-moe.gguf", TotalSizeMB: 140000}
+	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 12282}, {Index: 1, VRAMTotalMB: 24564}, {Index: 2, VRAMTotalMB: 12288}}
+	read := func() map[int]int {
+		return RuntimeGraphGrowthByGPU(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1)
+	}
+	if err := RecordRuntimeGraphGrowth(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1, map[int]int{0: 0, 1: 60}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); len(got) != 2 || got[0] != 0 || got[1] != 60 {
+		t.Fatalf("growth = %v, want CUDA0 measured 0, CUDA1 60, CUDA2 unknown", got)
+	}
+	if HasRuntimeGraphGrowthProbe(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1) {
+		t.Fatal("CUDA2 was never measured")
+	}
+	// Unrelated rewrites of the same key keep the zero.
+	if err := RecordMeasuredComputeBuffers(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1, map[int]int{0: 8127}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordMeasuredPromptCache(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1, 1200); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := read()[0]; !ok || got != 0 {
+		t.Fatalf("rewrite lost the measured zero: %v", read())
+	}
+	// A guess never raises an observed positive value, but an abort on a
+	// device measured at zero proves more was needed.
+	if err := RecordRuntimeGraphGrowthFromOOM(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1, 1, 2000, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordRuntimeGraphGrowthFromOOM(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1, 0, 2000, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got[0] != 2000 || got[1] != 60 {
+		t.Fatalf("after aborts: %v, want CUDA0 2000 (guess over a zero), CUDA1 60 kept", got)
+	}
+	if err := RecordRuntimeGraphGrowth(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1, map[int]int{0: 300}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got[0] != 300 {
+		t.Fatalf("a measurement must replace the guess: %v", got)
+	}
+	if err := ClearRuntimeGraphGrowth(dir, model, 214016, 512, "mid", "gpu", "llama", gpus, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); len(got) != 0 {
+		t.Fatalf("clear left %v", got)
+	}
+}
+
+// The fit loop carries a related key's measured growth only to devices this
+// key knows nothing about. A measured zero for this key ends the carry.
+func TestFitLoopCarriesRelatedGrowthOnlyToUnmeasuredDevices(t *testing.T) {
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "GPU A", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+			{Index: 1, Name: "GPU B", VRAMTotalMB: 24564, BandwidthMBps: 15754},
+		},
+		RAM: detect.RAMInfo{TotalMB: 262144, FreeMB: 250000},
+		CPU: detect.CPUInfo{Cores: 16},
+	}
+	const gib = int64(1024 * 1024 * 1024)
+	model := &ModelProfile{
+		Path: "carry-moe.gguf", SizeBytes: 104 * gib, TotalSizeMB: 104 * 1024,
+		NumLayers: 32, IsMoE: true, NumExperts: 64, ExpertUsedCount: 4, ExpertFF: 2048,
+		ExpertBytes: 96 * gib, NonExpertBytes: 8 * gib,
+		TokenEmbdBytes: 512 * 1024 * 1024, OutputBytes: 512 * 1024 * 1024,
+		ContextSize: 65536, CTXTrain: 65536, HiddenSize: 4096, EmbeddingLength: 4096,
+		HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+		ModelArch: "deepseek4", MeasuredKVBytesPerTok: map[string]float64{"f16": 4096},
+	}
+	opts := Options{ContextSize: 65536, KVPlacement: "gpu", KVQuality: "high", BackendTag: "llama", Parallel: 1, CacheDir: t.TempDir()}
+	gpuLayers := func() (int, *Strategy) {
+		t.Helper()
+		s, err := Compute(caps, model, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(parseOTLayersByDevice(t, s.OTString)[0]), s
+	}
+	cold, s := gpuLayers()
+	if cold == 0 {
+		t.Fatalf("fixture: no expert layers on CUDA0: %s", s.OTString)
+	}
+	// Another key measured 16 GiB of growth on CUDA0: carried as a reserve.
+	if err := RecordRuntimeGraphGrowth(opts.CacheDir, model, 32768, s.UBatchSize, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, 1, map[int]int{0: 16384}); err != nil {
+		t.Fatal(err)
+	}
+	carried, _ := gpuLayers()
+	if carried >= cold {
+		t.Fatalf("related growth not carried: %d CUDA0 layers, cold %d", carried, cold)
+	}
+	// Evidence for CUDA1 alone says nothing about CUDA0: the carry stays.
+	if err := RecordRuntimeGraphGrowth(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, 1, map[int]int{1: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if partial, _ := gpuLayers(); partial != carried {
+		t.Fatalf("CUDA1-only evidence changed CUDA0: %d layers, want %d", partial, carried)
+	}
+	// This key measured zero on CUDA0: the carry ends.
+	if err := RecordRuntimeGraphGrowth(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, 1, map[int]int{0: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if measured, _ := gpuLayers(); measured != cold {
+		t.Fatalf("measured zero still carried related growth: %d CUDA0 layers, want %d", measured, cold)
+	}
+}
+
 // The legacy system-probe migration must find a file written under a SUPERSEDED
 // GPU-set signature, because that is the only case it exists for.
 //
