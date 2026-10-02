@@ -268,7 +268,7 @@ func automaticCalibrationFinalistPlan(req *launchRequest, cfg *config.Config, mo
 			feasible = append(feasible, candidates[0])
 		}
 		for _, candidate := range candidates[1:] {
-			if candidate.Estimate.Feasible {
+			if candidate.Estimate.Feasible || candidate.Estimate.NeedsAdmission {
 				feasible = append(feasible, candidate)
 			}
 		}
@@ -549,8 +549,8 @@ func printOptimizationReuse(decision *placement.CalibrationDecision) {
 	}
 	explored := ""
 	if b := decision.ExploredBoundary; b != nil {
-		explored = fmt.Sprintf("; explored %d candidates (%d feasible), batch %d..%d, ubatch %d..%d, parallel %d..%d",
-			b.CandidateCount, b.FeasibleCount, b.MinBatch, b.MaxBatch, b.MinUBatch, b.MaxUBatch, b.MinParallel, b.MaxParallel)
+		explored = fmt.Sprintf("; explored %d candidates (%d feasible, %d need memory admission), batch %d..%d, ubatch %d..%d, parallel %d..%d",
+			b.CandidateCount, b.FeasibleCount, b.UnmeasuredCount, b.MinBatch, b.MaxBatch, b.MinUBatch, b.MaxUBatch, b.MinParallel, b.MaxParallel)
 	}
 	measured := ""
 	if decision.MeasuredAt != "" {
@@ -1879,8 +1879,8 @@ func printLaunchOptimizerStatus(decision *placement.CalibrationDecision) {
 	}
 	if decision.ExploredBoundary != nil {
 		b := decision.ExploredBoundary
-		fmt.Printf("  explored:  %d candidates (%d feasible), batch %d..%d, ubatch %d..%d, parallel %d..%d\n",
-			b.CandidateCount, b.FeasibleCount, b.MinBatch, b.MaxBatch, b.MinUBatch, b.MaxUBatch, b.MinParallel, b.MaxParallel)
+		fmt.Printf("  explored:  %d candidates (%d feasible, %d need memory admission), batch %d..%d, ubatch %d..%d, parallel %d..%d\n",
+			b.CandidateCount, b.FeasibleCount, b.UnmeasuredCount, b.MinBatch, b.MaxBatch, b.MinUBatch, b.MaxUBatch, b.MinParallel, b.MaxParallel)
 	}
 }
 

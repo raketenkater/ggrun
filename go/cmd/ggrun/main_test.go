@@ -3522,6 +3522,12 @@ func TestClaudeCodeHybridRepairsMissingVerifiedConfigSemantics(t *testing.T) {
 	if s.BatchSize != claudeHybridBatch || s.UBatchSize != claudeHybridBatch {
 		t.Fatalf("restored hybrid batch/ubatch=%d/%d, want %d/%d", s.BatchSize, s.UBatchSize, claudeHybridBatch, claudeHybridBatch)
 	}
+	// GLM-5.3-Flash states its KDA state without ssm.state_size.
+	glm := &placement.Strategy{ContextSize: 262144, Parallel: 1, BatchSize: 2048, UBatchSize: 512}
+	claudeCodeSlotAdjust(glm, &placement.ModelProfile{ModelArch: "glm5next", RecurrentState: 1}, true, true, false, false)
+	if !glm.HasSSM || claudeCodeShiftableContext(nil, glm) {
+		t.Fatalf("recurrent state without an SSM layout lost its semantics: %+v", glm)
+	}
 }
 
 func TestClaudeCodeHybridExplicitBatchOverridesFairnessCap(t *testing.T) {
@@ -4745,5 +4751,37 @@ func TestCtxCheckpointsZeroIsAnExplicitOverride(t *testing.T) {
 	}
 	if req.MaxCheckpoints != 0 {
 		t.Errorf("value = %d, want 0", req.MaxCheckpoints)
+	}
+}
+
+// A configured --swa-full buys prefix reuse only where checkpoints cannot. When
+// checkpoints are available and the full window cache at least doubles the KV
+// per token, it only costs context, so it is dropped; a typed flag is kept.
+func TestConfiguredSWAFullDroppedWhenCheckpointsGiveReuse(t *testing.T) {
+	checkpoints := "--swa-full --ctx-checkpoints N --checkpoint-min-step N"
+	swaHeavy := func() *placement.ModelProfile {
+		return &placement.ModelProfile{ModelArch: "mimo2", NumLayers: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+			SlidingWindow: 128, SWAPattern: []int{1, 1, 1, 0}}
+	}
+	cases := []struct {
+		name     string
+		req      *launchRequest
+		model    *placement.ModelProfile
+		help     string
+		wantKept bool
+	}{
+		{"configured, checkpoints, 3.9x", &launchRequest{ExtraArgs: []string{"--swa-full"}}, swaHeavy(), checkpoints, false},
+		{"typed on the command line", &launchRequest{ExtraArgs: []string{"--swa-full"}, OriginalArgs: []string{"m.gguf", "--swa-full"}}, swaHeavy(), checkpoints, true},
+		{"no checkpoint support", &launchRequest{ExtraArgs: []string{"--swa-full"}}, swaHeavy(), "--swa-full", true},
+		{"unknown KV size", &launchRequest{ExtraArgs: []string{"--swa-full"}}, &placement.ModelProfile{ModelArch: "laguna", SlidingWindow: 512}, checkpoints, true},
+		{"mostly full-attention layers", &launchRequest{ExtraArgs: []string{"--swa-full"}},
+			&placement.ModelProfile{ModelArch: "mimo2", NumLayers: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+				SlidingWindow: 128, SWAPattern: []int{1, 0, 0, 0}}, checkpoints, true},
+	}
+	for _, c := range cases {
+		applyBackendFeatureCompatibility(c.req, c.model, &backendInfo{Path: "/llama/llama-server", Help: c.help})
+		if got := hasArg(c.req.ExtraArgs, "--swa-full"); got != c.wantKept {
+			t.Errorf("%s: --swa-full kept=%v, want %v", c.name, got, c.wantKept)
+		}
 	}
 }

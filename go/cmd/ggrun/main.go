@@ -416,6 +416,21 @@ func hasArg(args []string, want string) bool {
 	return false
 }
 
+// effectiveOpOffloadFlag returns the last --op-offload/--no-op-offload in the
+// passthrough arguments ("on"/"off"), or "" when the backend default applies.
+func effectiveOpOffloadFlag(args []string) string {
+	value := ""
+	for _, arg := range args {
+		switch arg {
+		case "--op-offload":
+			value = "on"
+		case "--no-op-offload":
+			value = "off"
+		}
+	}
+	return value
+}
+
 // userExplicitBackendFlag distinguishes command-line intent from a generated
 // or config-default optimization already materialized in ExtraArgs. Recovery
 // may remove the latter after measured rejection, but must fail closed rather
@@ -2894,6 +2909,10 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// another (different serving contract, different emitted flags).
 		ChatTemplate: req.ChatTemplateOverride,
 	}
+	// Where host-resident experts execute follows the backend's effective
+	// op-offload switch and threshold, which the child process inherits.
+	opts.HostWeightOffload = effectiveOpOffloadFlag(req.ExtraArgs)
+	opts.OpOffloadMinBatchEnv, opts.OpOffloadMinBatchEnvSet = os.LookupEnv("GGML_OP_OFFLOAD_MIN_BATCH")
 	if req.GPUsFlag != "" {
 		if indices, err := parseGPUIndices(req.GPUsFlag); err == nil {
 			opts.GPUs = indices
@@ -3081,8 +3100,7 @@ func applyClaudeCodeRuntimePolicy(strategy *placement.Strategy, model *placement
 	// the final serving policy model-derived as well as strategy-derived so a
 	// cached record can never erase recurrent semantics, context-shift safety, or
 	// the parallel-agent fairness baseline.
-	modelHasSSM := model != nil && (model.HasSSM != 0 || strings.EqualFold(model.ModelArch, "deepseek4"))
-	if modelHasSSM {
+	if placement.HasRecurrentState(model) {
 		strategy.HasSSM = true
 	}
 	// Normalize the slot count before applying the fairness policy: an automatic
@@ -4832,6 +4850,10 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			}
 		}
 	}()
+	ubatchRaisedArgs := ""
+	var oracleDevs []preflightDevice
+	oracleArgs := ""
+	var admittedPlans []admittedPlan
 	for {
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
@@ -5138,6 +5160,10 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					}
 				}
 				oracleTotalsByArgv[formatCommand(serverArgs)] = totals
+				oracleDevs, oracleArgs = preflight.Evidence.Devices, formatCommand(serverArgs)
+				if strategy != nil && (len(admittedPlans) == 0 || formatCommand(admittedPlans[len(admittedPlans)-1].args) != oracleArgs) {
+					admittedPlans = append(admittedPlans, admittedPlan{placement.WithUBatch(strategy, model, strategy.UBatchSize), append([]string(nil), serverArgs...), oracleDevs})
+				}
 			}
 			if preflight.Evidence.Level != memoryEvidenceNone && exactAdmission {
 				// The preflight measured this exact argv. Challenger admission must
@@ -5152,6 +5178,13 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				// Recomputing from the original request can change the argv and
 				// turn the next optional search into another full reload.
 				fmt.Fprintln(os.Stderr, "[launch] verified config passed exact preflight; keeping that argv rather than re-planning")
+				if preflight.Evidence.Level == memoryEvidenceAllocated {
+					measuredProductionArgs = formatCommand(serverArgs)
+				}
+			} else if preflight.Evidence.Level != memoryEvidenceNone && ubatchRaisedArgs == formatCommand(serverArgs) {
+				// The raised microbatch was admitted by backend accounting. A
+				// recompute would price it with the cold estimate that hid it.
+				fmt.Fprintln(os.Stderr, "[launch] raised microbatch passed exact preflight; keeping that argv rather than re-planning")
 				if preflight.Evidence.Level == memoryEvidenceAllocated {
 					measuredProductionArgs = formatCommand(serverArgs)
 				}
@@ -5224,6 +5257,35 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					if preflight.Evidence.Level == memoryEvidenceAllocated {
 						measuredProductionArgs = formatCommand(serverArgs)
 					}
+				}
+			}
+		}
+		// Staged expert prefill: once per launch, try the larger microbatches the
+		// cold estimate never measured, at this exact context and placement.
+		if strategy != nil && model != nil && !exactAdmission && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
+			ubatchRaisedArgs = formatCommand(serverArgs) // one attempt, raised or not
+			backendTag := func(s *placement.Strategy) string { return scopedProbeBackendTagForStrategy(req, model, be, s) }
+			plan, ub, ctx := chooseStagedPrefillPlan(findFitParamsBin(be.Path, model.ModelArch), admittedPlans,
+				&configForPreflight{CacheDir: cfg.CacheDir, Work: work}, runtimeCaps, model, placementOpts(), backendTag,
+				resolveCtxFlag(req.CtxFlag, model.CTXTrain) == 0)
+			if ub > 0 {
+				base := admittedPlans[plan].strategy
+				next := placement.WithUBatch(base, model, ub)
+				next.ContextSize = ctx
+				nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, next)
+				if formatCommand(nextArgs) != formatCommand(serverArgs) && !memoryRecovery.isRejected(nextArgs) {
+					if plan != len(admittedPlans)-1 {
+						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: an earlier admitted placement (n-cpu-moe=%d) at ubatch %d has lower prefill+decode cost than the current one (n-cpu-moe=%d, ubatch %d); verifying it before production\n",
+							base.NCPUMoE, ub, strategy.NCPUMoE, strategy.UBatchSize)
+					}
+					if ctx != base.ContextSize {
+						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: raising ubatch %d -> %d, reserved before automatic context (%d -> %d tokens) at the same placement (backend accounting fits); verifying before production\n", base.UBatchSize, ub, base.ContextSize, ctx)
+					} else {
+						fmt.Fprintf(os.Stderr, "[launch] staged expert prefill: raising ubatch %d -> %d at the same context and placement (backend accounting fits); verifying before production\n", base.UBatchSize, ub)
+					}
+					strategy, serverArgs = next, nextArgs
+					ubatchRaisedArgs = formatCommand(nextArgs)
+					continue
 				}
 			}
 		}
@@ -5761,18 +5823,13 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 		if !promptCacheGrew {
 			return strategy, nil
 		}
-		// CRAM was sized before the measurement existed. Re-plan so the budget
-		// reaches the launch rather than waiting for the run after next.
-		opts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-		opts.SkipPlacementCache = true
-		opts.VerifiedConfigScopeKey = ""
-		next, err := placement.Compute(caps, model, opts)
-		if err != nil {
-			return nil, err
-		}
-		next = applyCalibrationDecision(req, cfg, model, be, caps, next)
-		claudeCodeSlotAdjust(next, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-		fmt.Printf("[launch] prompt cache: re-planned -cram %d -> %d MiB from the measured entry size\n", strategy.CRAM, next.CRAM)
+		// CRAM was sized before the measurement existed. Re-size it now so the
+		// budget reaches this launch. Only the host cache budget changed, so the
+		// chosen plan (verified, or raised by exact accounting) is kept; a full
+		// re-plan here re-derived context and microbatch from the cold estimate
+		// and made every Claude Code relaunch serve a different argv.
+		next := placement.RefreshRuntimeCachePolicy(caps, model, strategy, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+		fmt.Printf("[launch] prompt cache: re-sized -cram %d -> %d MiB from the measured entry size (placement kept)\n", strategy.CRAM, next.CRAM)
 		return next, nil
 	}
 	if estimated {
@@ -5902,6 +5959,18 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 		}
 		fmt.Printf("[launch] Full SWA cache is unavailable for %s (no sliding-window layer); disabling it for this launch.\n", archLabel)
 		return
+	}
+	// A configured (not typed) --swa-full exists for prefix reuse. Where context
+	// checkpoints already give that reuse, a full-size window cache that at
+	// least doubles the KV per token only costs context: on MiMo-V2.6 it cut
+	// the automatic context from 724k to ~126k tokens for no reuse gain
+	// (checkpoints reused 82k of 86k tokens without it).
+	if !userExplicitBackendFlag(req, "--swa-full") && placement.BackendSupportsCheckpointReuse(be.Help) {
+		if ratio, ok := placement.SWAFullKVMultiplier(model); ok && ratio >= 2 {
+			req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", false)
+			fmt.Printf("[launch] --swa-full would cost %.1fx the KV per token; context checkpoints keep prefix reuse without it, so it is off for this launch (pass --swa-full to force it).\n", ratio)
+			return
+		}
 	}
 	// An empty help surface is unknown, not unsupported. With a real help probe,
 	// however, passing an absent option is guaranteed to abort argument parsing.
@@ -9573,6 +9642,11 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		CTXTrain:                  info.ContextLength,
 		ModelArch:                 info.Architecture,
 		NextNPredictLayers:        info.NextNPredictLayers,
+		HeadCountKVByLayer:        append([]int(nil), info.HeadCountKVByLayer...),
+		SWAPattern:                append([]int(nil), info.SlidingWindowPattern...),
+		KeyLengthSWA:              info.KeyLengthSWA,
+		ValueLengthSWA:            info.ValueLengthSWA,
+		RecurrentState:            info.RecurrentState,
 	}
 }
 

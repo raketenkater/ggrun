@@ -124,3 +124,31 @@ func TestMeasuredPromptCacheTargetRoundsUpWithoutBreakingHostCap(t *testing.T) {
 		t.Fatalf("capped CRAM = %d MiB, want 5632 MiB", cram)
 	}
 }
+
+// A prompt-cache measurement re-sizes the host cache budget of the chosen
+// plan; it must not move context, microbatch, split or expert layout.
+func TestRefreshRuntimeCachePolicyKeepsTheChosenPlan(t *testing.T) {
+	dir := t.TempDir()
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 12000}, {Index: 1, VRAMTotalMB: 24000}},
+		RAM: detect.RAMInfo{TotalMB: 200000, FreeMB: 180000}}
+	model := &ModelProfile{Path: dir + "/m.gguf", NumLayers: 48, IsMoE: true, TotalSizeMB: 130000,
+		HeadCountKV: 4, KeyLength: 128, ValueLength: 128}
+	s := &Strategy{Type: MoEOffload, ContextSize: 662528, UBatchSize: 1024, BatchSize: 2048, Parallel: 1,
+		TensorSplit: []float64{.28, .66, .06}, NCPUMoE: 49, KVType: "q8_0", KVQuality: "q8_0", KVPlacement: "gpu",
+		PlannedHostFootprintMB: 120000, CRAM: 8704}
+	opts := Options{CacheDir: dir, BackendCacheTag: "llama"}
+	if err := RecordMeasuredPromptCache(dir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement, "llama", caps.GPUs, 1, 4096); err != nil {
+		t.Fatal(err)
+	}
+	next := RefreshRuntimeCachePolicy(caps, model, s, opts)
+	if next.ContextSize != s.ContextSize || next.UBatchSize != 1024 || next.NCPUMoE != 49 ||
+		splitCompactKey(next.TensorSplit) != splitCompactKey(s.TensorSplit) {
+		t.Fatalf("cache refresh re-planned the placement: %+v", next)
+	}
+	if next.MeasuredPromptCacheBPT != 4096 {
+		t.Fatalf("measurement not loaded: %v", next.MeasuredPromptCacheBPT)
+	}
+	if s.MeasuredPromptCacheBPT != 0 {
+		t.Fatal("refresh mutated the chosen strategy")
+	}
+}

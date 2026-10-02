@@ -2969,6 +2969,13 @@ func kvProfileFromGGUF(info *gguf.Info) *placement.ModelProfile {
 		FullAttnInterval: info.FullAttnInterval,
 		SlidingWindow:    info.SlidingWindow,
 		ModelArch:        info.Architecture,
+		// Per-layer arrays price mixed-head and explicit-window models; the
+		// NextN count tells placement which stored blocks hold no cache.
+		NextNPredictLayers: info.NextNPredictLayers,
+		HeadCountKVByLayer: info.HeadCountKVByLayer,
+		SWAPattern:         info.SlidingWindowPattern,
+		KeyLengthSWA:       info.KeyLengthSWA,
+		ValueLengthSWA:     info.ValueLengthSWA,
 		// The KV rate/geometry cache (kvCachePath) is keyed on the model's exact
 		// byte size. Without it, the profile built here produces kv_<basename>_0
 		// which never matches the kv_<basename>_<actualsize> written at launch,
