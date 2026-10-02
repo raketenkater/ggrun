@@ -1166,6 +1166,13 @@ install_release_bundle() {
             ok "Installed $f"
         fi
     done
+    # The CUDA allocation firewall ships beside the bundle's binaries. ggrun
+    # looks for it beside itself, not inside a backend directory; without it
+    # every default launch stopped to ask for a slower live memory probe.
+    if install_payload_file "$payload_root/libggrun-memguard.so" "$INSTALL_DIR/libggrun-memguard.so" 0644 \
+        || install_payload_file "$payload_root/bin/libggrun-memguard.so" "$INSTALL_DIR/libggrun-memguard.so" 0644; then
+        ok "Installed GPU memory-safety guard"
+    fi
     # Old bundles need the -go binary promoted to the primary command.
     if [[ ! -x "$INSTALL_DIR/ggrun" && -x "$INSTALL_DIR/llm-server-go" ]]; then
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
