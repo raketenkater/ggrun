@@ -2697,3 +2697,19 @@ verification (first launch or the recovered relaunch) now revokes the profile
 and records the stacking reserve under the failed plan's scope, and says to
 launch again. Tests: `verification_oom_test.go`. Live check: consecutive B2
 launches at the end of the matrix.
+
+## CLAUDE-CODE PREFLIGHT — KV-cache OOM failed closed — 2026-10-07
+
+Evidence: acceptance A2 `--claude-code` serving check (Qwen3.8-27B UD-Q5_K_S, full
+host, reviewer Qwen3.5-4B on CUDA2). Plan: 628,736 tokens, 4 slots. Guarded
+preflight: CUDA0 KV allocation 6,711 MiB missed the guard by 308 MiB
+(`llama_kv_cache_init: failed to allocate buffer for kv cache`); recovery
+reported that neither re-planning nor derating changed the configuration and
+the launch exited. Context derating, the lever that fits, was gated to
+compute-buffer failures only. The same model without `--claude-code` (1 slot,
+262,144) passed all tasks.
+
+Fix: a KV-cache allocation failure is flagged (`IsKVCache`) and qualifies for
+automatic context derating sized to the deficit; explicit context stays a
+constraint. Tests: `kv_oom_recovery_test.go`. Live re-check at the end of the
+matrix.

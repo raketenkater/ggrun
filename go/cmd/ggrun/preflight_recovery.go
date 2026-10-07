@@ -991,7 +991,7 @@ func ubatchCandidateCoversDeficit(currentArgs, candidateArgs []string, outcome p
 }
 
 func contextCandidateCoversDeficit(currentArgs, candidateArgs []string, model *placement.ModelProfile, outcome preflightOutcome) bool {
-	if !outcome.IsComputeBuffer || !outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
+	if !(outcome.IsComputeBuffer || outcome.IsKVCache) || !outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
 		return false
 	}
 	currentValues := effectiveMemoryArgValues(currentArgs)
@@ -1018,7 +1018,11 @@ func contextCandidateCoversDeficit(currentArgs, candidateArgs []string, model *p
 }
 
 func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strategy, currentArgs []string, outcome preflightOutcome) (int, bool) {
-	if req == nil || current == nil || !current.ContextAuto || !outcome.IsComputeBuffer ||
+	// A failed KV-cache allocation scales with context exactly as a compute
+	// buffer does. Excluding it left a --claude-code launch of Qwen3.8-27B (4
+	// slots, 628,736 tokens) failing closed 308 MiB short on CUDA0 with context,
+	// the one lever that fits, never tried.
+	if req == nil || current == nil || !current.ContextAuto || !(outcome.IsComputeBuffer || outcome.IsKVCache) ||
 		!outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
 		return 0, false
 	}
