@@ -2674,3 +2674,17 @@ to ggml's own formats, so text in logged prompts never counts. The log is read
 incrementally. Tests: `serving_watch_test.go`.
 
 Open: the cuBLAS error itself (ik bug or this configuration) is not diagnosed.
+
+Follow-up, same day: on relaunch the backend aborted with a size-less `CUDA error:
+out of memory` (alloc, device 0) on the first Claude Code request. The new
+serving watch stopped it within seconds and runtime OOM recovery ran, but the
+one-layer estimate (242 MiB) left the 33-layer plan unchanged and recovery
+refused an identical relaunch. The 33-layer plan came from the launch-time
+challenger (the first launch started at 26 layers); the synthetic ~7k-token
+calibration workload never reached the growth a 21k-token agent prompt causes.
+
+Fix: when a size-less estimate reproduces the crashed argv, reserve one more
+routed expert layer (stacked on the recorded guess) and re-plan, at most 4
+times; a measurement still replaces the guess. Tests:
+`runtime_oom_escalation_test.go`. Open: calibration workload does not cover
+long agent prompts, so a challenger can win without runtime headroom.

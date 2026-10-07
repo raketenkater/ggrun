@@ -7316,7 +7316,14 @@ func cmdLaunch(args []string) {
 				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
 		}
 
-		nextStrategy, nextArgs, err := replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, launchRecovery)
+		nextStrategy, nextArgs, err := escalateSizelessRuntimeOOM(estimated, func() (*placement.Strategy, []string, error) {
+			return replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, launchRecovery)
+		}, func() error {
+			prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
+			allocMB = sizelessCUDAOOMReserveMB(caps, model, device, prior)
+			fmt.Fprintf(os.Stderr, "[launch] that reserve left the plan unchanged, but the crash shows its headroom was too small — reserving %d MiB on device %d\n", allocMB, device)
+			return placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, allocMB, true)
+		})
 		if err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
@@ -7464,9 +7471,36 @@ func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placem
 	claudeCodeSlotAdjust(nextStrategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
 	nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, nextStrategy)
 	if formatCommand(nextArgs) == formatCommand(serverArgs) {
-		return nil, nil, fmt.Errorf("runtime OOM re-plan reproduced the exact failed argv; refusing an identical relaunch")
+		return nil, nil, errRuntimeOOMReplanIdentical
 	}
 	return nextStrategy, nextArgs, nil
+}
+
+var errRuntimeOOMReplanIdentical = errors.New("runtime OOM re-plan reproduced the exact failed argv; refusing an identical relaunch")
+
+// maxSizelessOOMEscalations bounds how many extra expert layers a size-less
+// runtime OOM may reserve before recovery gives up.
+const maxSizelessOOMEscalations = 4
+
+// escalateSizelessRuntimeOOM re-plans after a runtime OOM. A size-less abort is
+// filed as one routed expert layer, and when that fits inside the plan's slack
+// the re-plan reproduces the argv that just crashed. The crash is proof the
+// slack was not enough, so reserve one more layer and re-plan, up to
+// maxSizelessOOMEscalations times. A sized OOM, or a re-plan that fails for any
+// other reason, is returned unchanged.
+//
+// Qwen3.6-35B-A3B on one RTX 4070 aborted with a size-less OOM on its first
+// Claude Code request; one layer (242 MiB) left the 33-layer plan unchanged and
+// recovery refused to relaunch.
+func escalateSizelessRuntimeOOM(estimated bool, replan func() (*placement.Strategy, []string, error), reserveMore func() error) (*placement.Strategy, []string, error) {
+	strategy, args, err := replan()
+	for i := 0; i < maxSizelessOOMEscalations && estimated && errors.Is(err, errRuntimeOOMReplanIdentical); i++ {
+		if rerr := reserveMore(); rerr != nil {
+			return nil, nil, rerr
+		}
+		strategy, args, err = replan()
+	}
+	return strategy, args, err
 }
 
 // waitForShutdownOrCrash blocks until either a shutdown signal arrives
