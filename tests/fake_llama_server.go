@@ -12,6 +12,11 @@ import (
 	"strings"
 )
 
+// archTable mirrors the NUL-terminated architecture name a real llama.cpp
+// loader carries. ggrun's default (auto) backend selection probes the binary
+// for it and refuses a backend that lacks the model's architecture.
+var archTable = "\x00llama\x00"
+
 func main() {
 	host, port := "127.0.0.1", 8080
 	args := os.Args[1:]
@@ -35,6 +40,9 @@ func main() {
 			return
 		case "--version":
 			fmt.Println("fake llama-server 1.0")
+			return
+		case "--list-archs":
+			fmt.Println(strings.Trim(archTable, "\x00"))
 			return
 		case "--host":
 			if i+1 < len(args) {
