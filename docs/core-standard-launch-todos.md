@@ -2621,3 +2621,22 @@ and the offered "build current mainline" route would build for 30-60 min and
 then fail its post-build architecture check. Until the GGUF and upstream agree,
 the honest route is the fork recipe; the mainline build offer should not be
 made for a name upstream does not register. Not changed in this release.
+
+## SECOND SESSION — Claude Code prompt reuse across sessions — 2026-10-07
+
+Evidence: acceptance cell C1 (Qwen3.5-4B UD-Q4_K_XL, `--cpu --ram-budget 16G`,
+ik_llama CPU, launcher v3.2.10-92-gbcf5ff5), three separate Claude Code
+sessions on one server; analysis `accept-20261007/harness/prompt_reuse.py`.
+
+| request | prompt tokens | evaluated | reused | prefill |
+|---|---:|---:|---:|---:|
+| session 1, first | 21,006 | 21,006 | 0 | 168.1 s |
+| session 1, first side request | 12,773 | 12,261 | 512 | 88.8 s |
+| session 2, first | 21,011 | 3,091 | 17,920 (85%) | 30.7 s |
+| session 3, first | 21,014 | 3,094 | 17,920 (85%) | 30.7 s |
+| 160 warm turns | 13k-33k | median 155 | rest | ~1-3 s |
+
+A new session already reuses the shared prefix; only ~3.1k session-specific
+tokens are re-evaluated, and the main and side prompt families both stay cached
+in one slot. Cross-session caching work would save at most those ~3k tokens per
+new session, so it is not proposed.
