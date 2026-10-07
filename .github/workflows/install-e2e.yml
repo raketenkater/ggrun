@@ -88,8 +88,8 @@ jobs:
           go build -C go -trimpath -o ggrun ./cmd/ggrun
           asset=ggrun-linux-x86_64-cpu.tar.gz
           mkdir -p "$RUNNER_TEMP/published" "$RUNNER_TEMP/candidate"
-          curl -fL --retry 3 "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -o "$RUNNER_TEMP/published/$asset"
-          curl -fL --retry 3 https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS -o "$RUNNER_TEMP/published/SHA256SUMS"
+          curl -fL --retry 3 "https://github.com/raketenkater/ggrun/releases/download/v3.2.10/$asset" -o "$RUNNER_TEMP/published/$asset"
+          curl -fL --retry 3 https://github.com/raketenkater/ggrun/releases/download/v3.2.10/SHA256SUMS -o "$RUNNER_TEMP/published/SHA256SUMS"
           (cd "$RUNNER_TEMP/published" && grep " $asset$" SHA256SUMS | sha256sum -c -)
           tar -xzf "$RUNNER_TEMP/published/$asset" -C "$RUNNER_TEMP/published"
           backend="$(find "$RUNNER_TEMP/published" -type f -name llama-server -print -quit)"
@@ -285,8 +285,8 @@ jobs:
           $published = Join-Path $env:RUNNER_TEMP 'published'
           $candidate = Join-Path $env:RUNNER_TEMP 'candidate'
           New-Item -ItemType Directory -Force -Path $published,$candidate | Out-Null
-          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -OutFile "$published/$asset"
-          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS' -OutFile "$published/SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.10/$asset" -OutFile "$published/$asset"
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.10/SHA256SUMS' -OutFile "$published/SHA256SUMS"
           $line = Get-Content "$published/SHA256SUMS" | Where-Object { $_ -match " $([regex]::Escape($asset))$" }
           if (!$line -or (Get-FileHash "$published/$asset" -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0]) { throw 'Published backend checksum mismatch' }
           Expand-Archive "$published/$asset" "$published/unpacked"
@@ -583,8 +583,8 @@ jobs:
           $published = Join-Path $env:RUNNER_TEMP 'published'
           $candidate = Join-Path $env:RUNNER_TEMP 'candidate'
           New-Item -ItemType Directory -Force -Path $published,$candidate | Out-Null
-          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -OutFile "$published/$asset"
-          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS' -OutFile "$published/SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.10/$asset" -OutFile "$published/$asset"
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.10/SHA256SUMS' -OutFile "$published/SHA256SUMS"
           $line = Get-Content "$published/SHA256SUMS" | Where-Object { $_ -match " $([regex]::Escape($asset))$" }
           if (!$line -or (Get-FileHash "$published/$asset" -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0]) { throw 'Published backend checksum mismatch' }
           Expand-Archive "$published/$asset" "$published/unpacked"

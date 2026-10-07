@@ -247,33 +247,12 @@ if [[ -z "$backend_bin" ]]; then
     done < <(backend_candidates)
 fi
 
-backend_real="$backend_bin"
-if [[ -n "$backend_bin" ]]; then
-    backend_real="$(readlink -f "$backend_bin" 2>/dev/null || printf '%s' "$backend_bin")"
-fi
-
-backend_config="$BACKEND"
-if [[ "$backend_config" == "auto" ]]; then
-    # Both servers may be present. Leave auto so ggrun can pick per model.
-    if [[ -e "$APP_BIN/ik_llama-server-cuda" && -e "$APP_BIN/llama-server-vulkan" ]]; then
-        backend_config="auto"
-    elif [[ "$backend_real" == *ik_llama.cpp* || -e "$APP_BIN/ik_llama-server-cuda" ]]; then
-        backend_config="ik_llama"
-    elif [[ "$backend_real" == *vulkan* || -e "$APP_BIN/llama-server-vulkan" ]]; then
-        backend_config="vulkan"
-    elif [[ "$PLATFORM" == "mac" ]]; then
-        backend_config="llama"
-    else
-        backend_config="llama"
-    fi
-elif [[ "$backend_config" == "cuda" ]]; then
-    backend_config="ik_llama"
-elif [[ "$backend_config" == "cpu" || "$backend_config" == "metal" ]]; then
-    backend_config="llama"
-elif [[ "$backend_config" == "skip" ]]; then
-    # "skip" controls installation only; it is not a runtime backend tag.
-    backend_config="auto"
-fi
+# The runtime backend stays "auto" whatever was installed. ggrun then probes
+# each installed backend for the model's architecture and offers a build when
+# none loads it. A configured name is treated as the user's explicit choice and
+# turns both off, so a CPU install pinned to "llama" met a newer architecture
+# with a bare loader error instead of the build offer.
+backend_config="auto"
 
 # Upgrades must retain user choices; defaults belong to the first installation.
 if [[ ! -e "$APP_CONFIG/config" ]]; then

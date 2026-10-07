@@ -669,7 +669,9 @@ try {
         "LLM_MODEL_DIR=`"$models`"",
         "LLM_CACHE_DIR=`"$cache`"",
         "LLM_LOG_DIR=`"$logs`"",
-        'LLM_BACKEND="llama"',
+        # auto, not a pinned name: a configured name disables the per-model
+        # architecture probe and the build offer for models it cannot load.
+        'LLM_BACKEND="auto"',
         "LLAMA_SERVER=`"$llamaServer`""
     )
     # Reinstalling/upgrading must not reset user configuration.

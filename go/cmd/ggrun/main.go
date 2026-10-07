@@ -7940,6 +7940,8 @@ func cmdGUI() {
 			req *tui.LaunchRequest
 			err error
 		)
+		// Re-probe each pass: the TUI can install a backend before returning.
+		enableInstalledArchSupport()
 		if pendingReview != nil {
 			req, err = tui.RunAfterBackendInstall(pendingReview)
 			pendingReview = nil

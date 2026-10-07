@@ -96,6 +96,46 @@ type Recommendation struct {
 	QualityRetained      float64 // within-model quant preference, not measured intelligence retention
 	PredictedTPS         float64 // estimated decode tok/s on this machine (0 = unknown)
 	SpeedTier            int     // 2 interactive, 1 usable, 0 slow, -1 unknown
+	// NeedsBackendBuild: every installed backend was probed and none loads
+	// this architecture, so the first launch offers a 20-40 minute build.
+	NeedsBackendBuild bool
+}
+
+// installedArchSupport answers whether an installed backend loads an
+// architecture; known is false when that could not be determined. The catalog's
+// Runnable flag is stamped against upstream tables, which run ahead of the
+// backend a release ships: K2 Horizon was in mainline master but not in the
+// release backend, so a fresh install's top CPU pick could not load. Only the
+// launcher knows the installed backends, so it supplies the probe.
+var installedArchSupport func(caps *detect.Capabilities, arch string) (loads, known bool)
+
+// SetInstalledArchSupport installs the probe used to flag rows that need a
+// backend build. nil disables the check.
+func SetInstalledArchSupport(fn func(caps *detect.Capabilities, arch string) (loads, known bool)) {
+	installedArchSupport = fn
+}
+
+func markBackendBuild(caps *detect.Capabilities, r *Recommendation) {
+	if installedArchSupport == nil || strings.TrimSpace(r.Arch) == "" {
+		return
+	}
+	if loads, known := installedArchSupport(caps, r.Arch); known && !loads {
+		r.NeedsBackendBuild = true
+		note := "no installed backend loads " + r.Arch + "; the first launch offers to build one"
+		if r.Reason == "" {
+			r.Reason = note
+		} else {
+			r.Reason += "; " + note
+		}
+	}
+}
+
+// preferLoadable keeps each list's order but moves rows that need a backend
+// build after the rows the installed backends can serve now.
+func preferLoadable(rows []Recommendation) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return !rows[i].NeedsBackendBuild && rows[j].NeedsBackendBuild
+	})
 }
 
 type catalogDoc struct {
@@ -185,6 +225,7 @@ func collectRecommendations(caps *detect.Capabilities, allowQuant func(QuantOpti
 			continue
 		}
 		if rec, ok := evaluateWithSelector(caps, c, allowQuant, isBetter); ok {
+			markBackendBuild(caps, &rec)
 			rows = append(rows, rec)
 		}
 	}
@@ -197,6 +238,7 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 	}
 	rows := allRecommendationsBalanced(caps)
 	sortRecommendations(rows)
+	preferLoadable(rows)
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
@@ -258,6 +300,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	// intelligence, with a usability discount only below the usable speed floor.
 	balancedPool := append([]Recommendation(nil), rows...)
 	sortRecommendations(balancedPool)
+	preferLoadable(balancedPool)
 	balanced := take(balancedPool)
 
 	// Smartest keeps the base-model capability order even when serving is slow.
@@ -270,6 +313,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		}
 		return ki > kj
 	})
+	preferLoadable(smartPool)
 	smartest := take(smartPool)
 
 	// Fastest: highest predicted tok/s among models that are still capable
@@ -293,6 +337,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sort.SliceStable(fastPool, func(i, j int) bool {
 		return fastPool[i].PredictedTPS > fastPool[j].PredictedTPS
 	})
+	preferLoadable(fastPool)
 	fastest := take(fastPool)
 
 	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
