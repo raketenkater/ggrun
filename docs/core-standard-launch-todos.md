@@ -2640,3 +2640,17 @@ A new session already reuses the shared prefix; only ~3.1k session-specific
 tokens are re-evaluated, and the main and side prompt families both stay cached
 in one slot. Cross-session caching work would save at most those ~3k tokens per
 new session, so it is not proposed.
+
+## NANBEIGE CPU — reviewed fork too slow for Claude Code on CPU — 2026-10-07
+
+Evidence: acceptance cell C2 (Nanbeige4.2-3B Q4_K_M, `--cpu --ram-budget 16G`,
+14 threads, AVX-512, reviewed fork `nanbeige42-cuda` at b77d646, ctx 117,760,
+q8_0 KV). Prompt processing: 6,907-token canary at 16.2 tok/s (427 s); the first
+Claude Code request fell from ~6 to 5.6 tok/s by 15.9k tokens (2,832 s for 73%
+of 21.8k). Same profile on ik_llama with Qwen3.5-4B: 134 tok/s. The cell was
+stopped after the first request; no task result.
+
+The same fork on GPU served normally (fork-auto run: 7,233 tokens in 2.9 s).
+Cause on CPU not investigated (fork CPU attention path with quantized KV is the
+first suspect). Until then the fork-only CPU route works but is not usable for
+agent work.
