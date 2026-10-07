@@ -2713,3 +2713,26 @@ Fix: a KV-cache allocation failure is flagged (`IsKVCache`) and qualifies for
 automatic context derating sized to the deficit; explicit context stays a
 constraint. Tests: `kv_oom_recovery_test.go`. Live re-check at the end of the
 matrix.
+
+## MINIMAX RUNTIME OOM — recovery reserve refilled with KV — 2026-10-07
+
+Evidence: acceptance A1 (MiniMax-M3 UD-IQ3_XXS, full host, ctx 405,504, ub 64,
+13 expert layers on GPU). Ready after a 17-minute load, canary passed; the first
+Claude Code request hit a size-less OOM on CUDA0. The serving watch stopped the
+hung backend and recovery reserved 3,204 MiB (one expert layer), but the free
+re-plan moved experts off the GPUs (13 -> 2) and then spent the freed VRAM on
+KV: context 442,368, CUDA0 11,382/11,873 MiB, `runtime=0`. The recovered launch
+died in its canary. Cause: the reserve is filed under the crashed plan's exact
+probe key and size-less estimates are not carried to related keys, so a re-plan
+that changes context or ubatch never sees it.
+
+Fix: the runtime-OOM re-plan is pinned to the crashed plan's context, ubatch,
+batch and slots, so it packs around the reserve on the same key. Tests:
+`TestRuntimeOOMReplanKeepsTheCrashedShape`. Live re-check: MiniMax recovery
+cell. Note: a full-suite run under matrix load timed out
+`TestWarmupOOMWithoutARaiseNeverReloadsAFailedArgv` (61 s); it passes alone
+with and without this change and in the next package run.
+
+Pattern across B2 and A1: the first long agent prompt (~20k tokens) needs more
+CUDA0 memory than the ~6-7k-token canary shows. Recovery now copes; making the
+plan or the canary cover long prompts is open.

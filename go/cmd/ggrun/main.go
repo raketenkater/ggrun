@@ -7322,7 +7322,7 @@ func cmdLaunch(args []string) {
 		}
 
 		nextStrategy, nextArgs, err := escalateSizelessRuntimeOOM(estimated, func() (*placement.Strategy, []string, error) {
-			return replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, launchRecovery)
+			return replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, strategy, launchRecovery)
 		}, func() error {
 			prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
 			allocMB = sizelessCUDAOOMReserveMB(caps, model, device, prior)
@@ -7493,11 +7493,11 @@ func invalidateRuntimeOOMLaunch(req *launchRequest, cfg *config.Config, model *p
 // other recovery path (preflight, startup OOM, measured promotion,
 // calibration candidates) already refuses a rejected argv; this is the one
 // path that previously relied on the retry counter alone.
-func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, serverArgs []string, launchRecovery *launchMemoryRecovery) (*placement.Strategy, []string, error) {
+func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, serverArgs []string, failed *placement.Strategy, launchRecovery *launchMemoryRecovery) (*placement.Strategy, []string, error) {
 	if launchRecovery != nil {
 		launchRecovery.reject(serverArgs)
 	}
-	replanOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	replanOpts := pinRuntimeOOMReplan(placementOptionsFromRequest(req, model, be, cfg.CacheDir), failed)
 	// Without this, Compute() prefers the .place cache written when the
 	// prior instance loaded cleanly and passed health — which is exactly
 	// the placement that just OOM'd mid-request. Skipping it forces a
@@ -7508,12 +7508,40 @@ func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placem
 	if err != nil {
 		return nil, nil, err
 	}
+	if failed != nil && failed.ContextSize > 0 {
+		nextStrategy.ContextAuto = failed.ContextAuto
+	}
 	claudeCodeSlotAdjust(nextStrategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
 	nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, nextStrategy)
 	if formatCommand(nextArgs) == formatCommand(serverArgs) {
 		return nil, nil, errRuntimeOOMReplanIdentical
 	}
 	return nextStrategy, nextArgs, nil
+}
+
+// pinRuntimeOOMReplan keeps a runtime-OOM re-plan on the crashed plan's
+// context, ubatch, batch and slot count. The reserve just recorded is filed
+// under that exact probe key, and a size-less estimate is deliberately not
+// carried to related keys, so a free re-plan that moves context or ubatch never
+// sees it. MiniMax-M3 showed the cost: after a 3,204 MiB reserve the automatic
+// re-plan moved experts off CUDA0 and then refilled the freed VRAM with KV
+// (context 405,504 -> 442,368), left 491 MiB free and crashed again. Pinned,
+// the planner has to pack around the reserve on the same key.
+func pinRuntimeOOMReplan(opts placement.Options, failed *placement.Strategy) placement.Options {
+	if failed == nil || failed.ContextSize <= 0 {
+		return opts
+	}
+	opts.ContextSize = failed.ContextSize
+	opts.AutoContextMax = 0
+	if failed.UBatchSize > 0 {
+		opts.UBatchSize = failed.UBatchSize
+	}
+	if failed.BatchSize > 0 {
+		opts.BatchSize = failed.BatchSize
+	}
+	opts.Parallel = maxPreflightInt(failed.Parallel, 1)
+	opts.AutoParallel = false
+	return opts
 }
 
 var errRuntimeOOMReplanIdentical = errors.New("runtime OOM re-plan reproduced the exact failed argv; refusing an identical relaunch")

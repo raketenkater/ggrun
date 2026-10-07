@@ -4473,7 +4473,7 @@ func TestRuntimeOOMReplanRefusesIdenticalFailedArgv(t *testing.T) {
 	// Derive a first argv, then ask for a re-plan after a runtime OOM of that
 	// same argv. The crashed argv is rejected on the shared lifecycle recovery,
 	// and an identical re-plan is refused outright.
-	firstStrategy, firstArgs, err := replanAfterRuntimeOOM(req, cfg, model, be, caps, nil, newLaunchMemoryRecovery())
+	firstStrategy, firstArgs, err := replanAfterRuntimeOOM(req, cfg, model, be, caps, nil, nil, newLaunchMemoryRecovery())
 	if err != nil {
 		t.Fatalf("first runtime OOM replan failed: %v", err)
 	}
@@ -4483,7 +4483,7 @@ func TestRuntimeOOMReplanRefusesIdenticalFailedArgv(t *testing.T) {
 	// Re-planning after the exact argv that just crashed must reject that argv
 	// and refuse an identical relaunch: a fresh derivation that reproduces the
 	// failed placement must not be handed back to be re-run identically.
-	_, _, err = replanAfterRuntimeOOM(req, cfg, model, be, caps, firstArgs, newLaunchMemoryRecovery())
+	_, _, err = replanAfterRuntimeOOM(req, cfg, model, be, caps, firstArgs, nil, newLaunchMemoryRecovery())
 	if err == nil || !strings.Contains(err.Error(), "refusing an identical relaunch") {
 		t.Fatalf("re-plan after the crashed argv should refuse an identical relaunch, got %v", err)
 	}
