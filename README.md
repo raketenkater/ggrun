@@ -164,7 +164,7 @@ documented in [docs/usage.md](docs/usage.md#use-with-claude-code).
 ## Numbers from my weird rig
 
 My reference machine is deliberately awkward: RTX 3090 Ti 24GB, RTX 3060 12GB,
-RTX 4070 12GB, and 128GB RAM, with the smaller cards on slow PCIe links. These are
+RTX 4070 12GB, and 212GB RAM on a PCIe Gen 3 board, with the 3060 at x8. These are
 decode results from the dated, reproducible runs in
 [docs/launch-performance.md](docs/launch-performance.md), not a promise that
 every machine gets the same speedup.
