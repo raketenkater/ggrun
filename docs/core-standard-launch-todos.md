@@ -2688,3 +2688,12 @@ routed expert layer (stacked on the recorded guess) and re-plan, at most 4
 times; a measurement still replaces the guess. Tests:
 `runtime_oom_escalation_test.go`. Open: calibration workload does not cover
 long agent prompts, so a challenger can win without runtime headroom.
+
+Second follow-up: with no verified config the fresh B2 plan was 33 layers at
+ub 512 with 110 MiB free on CUDA0 (`runtime=0`); the 7k-token canary died with a
+size-less OOM, the launch ended at verification, and nothing was learned, so
+every relaunch re-derived the same plan. Fix: a CUDA OOM after load during
+verification (first launch or the recovered relaunch) now revokes the profile
+and records the stacking reserve under the failed plan's scope, and says to
+launch again. Tests: `verification_oom_test.go`. Live check: consecutive B2
+launches at the end of the matrix.

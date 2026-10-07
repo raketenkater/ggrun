@@ -7016,6 +7016,11 @@ func cmdLaunch(args []string) {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
+		if p.LogBuf != nil {
+			if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, p.LogBuf.String()); ok {
+				fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
+			}
+		}
 		os.Exit(1)
 	}
 	checkpointPlanChanged := false
@@ -7345,6 +7350,11 @@ func cmdLaunch(args []string) {
 			_ = newP.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] recovered placement failed lifecycle verification: %v\n", err)
+			if newP.LogBuf != nil {
+				if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, newStrategy, newArgs, newP.LogBuf.String()); ok {
+					fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
+				}
+			}
 			os.Exit(1)
 		}
 		if newP.LogBuf != nil {
@@ -7376,6 +7386,36 @@ func cmdLaunch(args []string) {
 		markReleasePending(cfg.CacheDir)
 	}
 	claudeAuto.stop()
+}
+
+// learnFromVerificationOOM handles a CUDA OOM during the first requests after
+// load (the functional canary), which the serving loop's runtime recovery never
+// sees because the launch ends at verification. Without it the next launch
+// re-derived the identical plan: Qwen3.6-35B-A3B on one 12 GB GPU planned 33
+// expert layers with 110 MiB free, died in the canary, and would have died the
+// same way on every relaunch. The failed profile is revoked and the reserve is
+// recorded under the failed plan's exact scope, stacking on earlier guesses,
+// so each further failure moves the plan by at least one more layer.
+func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo,
+	caps, runtimeCaps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, logData string,
+) (string, bool) {
+	if req == nil || cfg == nil || model == nil || strategy == nil || caps == nil {
+		return "", false
+	}
+	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
+	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
+	device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, model, prior)
+	if !ok {
+		return "", false
+	}
+	if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs,
+		fmt.Sprintf("CUDA OOM on device %d during the first requests after load", device)); err != nil {
+		return fmt.Sprintf("CUDA OOM on device %d after load, and the failed profile could not be revoked: %v", device, err), true
+	}
+	if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
+		return fmt.Sprintf("CUDA OOM on device %d after load, and the reserve could not be recorded: %v", device, err), true
+	}
+	return fmt.Sprintf("CUDA OOM on device %d after load: the failed plan was revoked and %d MiB is now reserved on that device. Launch again to use the adjusted plan.", device, allocMB), true
 }
 
 func invalidateRuntimeOOMLaunch(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
