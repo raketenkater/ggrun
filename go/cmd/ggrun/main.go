@@ -7262,7 +7262,7 @@ func cmdLaunch(args []string) {
 	const maxRuntimeOOMRetries = 2
 	runtimeOOMRetries := 0
 	for {
-		crashed := waitForShutdownOrCrash(p, sigCh)
+		crashed := waitForShutdownCrashOrWedge(processWatch{p}, sigCh, backendBaseURL(req)+"/health", defaultServingWatch)
 		if !crashed {
 			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
 			break

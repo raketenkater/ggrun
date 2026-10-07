@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -140,11 +141,119 @@ func backendAnswers(client *http.Client, url string) bool {
 	return true
 }
 
+// servingFatalLine is fatalBackendLine for the serving phase. At verbose log
+// levels the backend logs request bodies and generated text, so a marker in a
+// user's prompt or a model's answer must not count: only lines that begin like
+// ggml's own abort output ("CUDA error: ...", "/src/ggml-cuda.cu:139: CUDA
+// error", "terminate called ...") do.
+func servingFatalLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if servingFatalRe.MatchString(line) {
+			return line
+		}
+	}
+	return ""
+}
+
+// servingFatalRe anchors the fatal markers at the start of a line, after at
+// most a llama.cpp log prefix ("0.12.345.678 E ") and a "file.cu:139: " source
+// location, which is how ggml writes them. A logged request body or generated
+// text begins with something else.
+var servingFatalRe = regexp.MustCompile(`^(?:\d+\.\d+\.\d+\.\d+ [A-Z] )?(?:\S+:\d+: )?(?:CUDA error|GGML_ASSERT\(|GGML_ABORT|ggml_abort|terminate called|Segmentation fault)`)
+
+// servingBackend is what the serving watch needs from a running backend.
+type servingBackend interface {
+	IsRunning() bool
+	Kill()
+	LogSince(offset int) (string, int)
+	CPUTicks() (uint64, bool)
+}
+
+// servingWatch bounds how long a backend may sit dead after printing a fatal
+// error while serving.
+type servingWatch struct {
+	interval     time.Duration
+	probeTimeout time.Duration
+	// confirmAfter is how long, after a fatal line, /health must stay silent
+	// with no CPU progress before the backend is stopped.
+	confirmAfter time.Duration
+}
+
+var defaultServingWatch = servingWatch{interval: 2 * time.Second, probeTimeout: 5 * time.Second, confirmAfter: 20 * time.Second}
+
+// waitForShutdownCrashOrWedge returns false on a shutdown signal and true when
+// the backend has died. Dead includes a backend that printed a fatal ggml error
+// and then hung: ggml's abort forks a backtrace helper, which can deadlock, and
+// the process then never exits. Qwen3.6-35B-A3B on the bundled ik CUDA build
+// did that after "CUDA error: an unsupported value or parameter was passed to
+// the function" and Claude Code waited on it indefinitely. A fatal line alone is
+// not enough; /health must also stop answering and the process tree stop using
+// CPU, so text in a logged prompt never stops a working server.
+func waitForShutdownCrashOrWedge(b servingBackend, sigCh <-chan os.Signal, healthURL string, w servingWatch) bool {
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+	client := &http.Client{Timeout: w.probeTimeout}
+	offset, carry, fatal := 0, "", ""
+	var fatalSince time.Time
+	var lastTicks uint64
+	for {
+		select {
+		case <-sigCh:
+			return false
+		case <-ticker.C:
+		}
+		if !b.IsRunning() {
+			return true
+		}
+		chunk, next := b.LogSince(offset)
+		offset = next
+		text := carry + chunk
+		if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+			carry, text = text[i+1:], text[:i+1]
+		} else {
+			carry, text = text, ""
+		}
+		if len(carry) > 4096 {
+			carry = carry[len(carry)-4096:]
+		}
+		if fatal == "" {
+			if fatal = servingFatalLine(text); fatal == "" {
+				continue
+			}
+			fatalSince = time.Now()
+			lastTicks, _ = b.CPUTicks()
+		}
+		if backendAnswers(client, healthURL) {
+			fatal = ""
+			continue
+		}
+		if ticks, ok := b.CPUTicks(); !ok || ticks != lastTicks {
+			lastTicks, fatalSince = ticks, time.Now()
+			continue
+		}
+		if time.Since(fatalSince) >= w.confirmAfter {
+			fmt.Fprintf(os.Stderr, "[launch] backend failed and stopped responding: %s\n", fatal)
+			b.Kill()
+			return true
+		}
+	}
+}
+
 // processWatch adapts a launched backend to watchedBackend.
 type processWatch struct{ p *server.Process }
 
 func (w processWatch) IsRunning() bool { return w.p.IsRunning() }
 func (w processWatch) Stop() error     { return w.p.Stop() }
+
+func (w processWatch) Kill() { w.p.Kill() }
+
+func (w processWatch) LogSince(offset int) (string, int) {
+	if w.p.LogBuf == nil {
+		return "", 0
+	}
+	return w.p.LogBuf.Since(offset)
+}
 
 func (w processWatch) Log() string {
 	if w.p.LogBuf == nil {

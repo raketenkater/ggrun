@@ -2654,3 +2654,23 @@ The same fork on GPU served normally (fork-auto run: 7,233 tokens in 2.9 s).
 Cause on CPU not investigated (fork CPU attention path with quantized KV is the
 first suspect). Until then the fork-only CPU route works but is not usable for
 agent work.
+
+## SERVING HANG — backend aborts, deadlocks, and serving never ends — 2026-10-07
+
+Evidence: acceptance cell B2 (Qwen3.6-35B-A3B UD-IQ2_XXS, `--gpus 0 --ram-budget
+32G`, bundled ik CUDA, 27 expert layers on the RTX 4070, ub 256). Ready in 148 s,
+canary passed; on the first Claude Code request the backend printed `CUDA error:
+an unsupported value or parameter was passed to the function` in
+`ggml_cuda_op_mul_mat_cublas` (cublasSgemm, 17-token batch) and then hung: the
+abort's forked backtrace helper deadlocked on a futex (no gdb on the host), the
+parent sat in waitpid, `/health` stopped answering and CPU use was 0. ggrun's
+serving loop only noticed process exit, so Claude Code waited indefinitely.
+Ctrl+C still cleaned up (0.4 s, VRAM released).
+
+Fix: the serving loop now stops a backend that printed a fatal ggml line AND
+stopped answering `/health` AND used no CPU for 20 s, then takes the existing
+crash path (CUDA OOM still goes through OOM recovery). Fatal lines are anchored
+to ggml's own formats, so text in logged prompts never counts. The log is read
+incrementally. Tests: `serving_watch_test.go`.
+
+Open: the cuBLAS error itself (ik bug or this configuration) is not diagnosed.
