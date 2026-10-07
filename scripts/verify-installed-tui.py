@@ -13,10 +13,12 @@ answered as a user would: the contained live memory probe gets "y", any other
 import argparse
 import json
 import os
+import queue
 import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -35,17 +37,34 @@ class Term:
         if WINDOWS:
             from winpty import PtyProcess  # pywinpty
             self.proc = PtyProcess.spawn(subprocess.list2cmdline(argv), cwd=cwd, env=env, dimensions=(rows, cols))
+            # PtyProcess.read blocks until output arrives, so a quiet screen
+            # hung the journey past every timeout. Read on a thread instead.
+            self.chunks = queue.Queue()
+            threading.Thread(target=self._pump, daemon=True).start()
         else:
             import pexpect
             self.proc = pexpect.spawn(argv[0], argv[1:], env=env, cwd=cwd, encoding="utf-8",
                                       codec_errors="replace", dimensions=(rows, cols), timeout=5)
 
+    def _pump(self):
+        while True:
+            try:
+                data = self.proc.read(65536)
+            except Exception:
+                data = None
+            self.chunks.put(data)
+            if data is None:
+                return
+
     def _read(self, timeout):
         try:
             if WINDOWS:
-                if not self.proc.isalive():
+                try:
+                    data = self.chunks.get(timeout=timeout)
+                except queue.Empty:
+                    return ""
+                if data is None:
                     return None
-                data = self.proc.read(65536)
             else:
                 data = self.proc.read_nonblocking(65536, timeout=timeout)
         except Exception as exc:  # EOF and timeouts differ per platform
@@ -82,8 +101,6 @@ class Term:
                         self.buf = ""
                         return i
                 return -1
-            if WINDOWS and got == "":
-                time.sleep(0.2)
         raise TimeoutError(f"none of {patterns} within {timeout}s; screen tail: {ANSI.sub('', self.buf)[-600:]!r}")
 
     def send(self, keys):
