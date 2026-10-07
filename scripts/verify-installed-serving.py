@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -225,6 +226,79 @@ def utilization(baseline, loaded):
             "fraction_of_vram": round(served / capacity, 4) if capacity and not unknown else None}
 
 
+class GPUSampler:
+    """Samples every NVML device once per interval for the whole run.
+
+    Raw samples go to telemetry.jsonl; summary() reports per-device peak
+    memory and mean/peak utilization. No nvidia-smi means no samples, and the
+    summary says so instead of reporting zeros.
+    """
+
+    def __init__(self, path, interval=1.0):
+        self.path, self.interval = path, interval
+        self.samples = 0
+        self.stats = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def _run(self):
+        with open(self.path, "w") as fh:
+            while not self._stop.is_set():
+                snap = gpu_memory()
+                if snap:
+                    t = time.time()
+                    fh.write(json.dumps({"t": round(t, 2), "devices": snap}) + "\n")
+                    fh.flush()
+                    self.samples += 1
+                    for name, d in snap.items():
+                        st = self.stats.setdefault(name, {"uuid": d.get("uuid"), "peak_used_mib": 0,
+                                                          "util_sum": 0, "util_n": 0, "peak_util_pct": None})
+                        st["peak_used_mib"] = max(st["peak_used_mib"], d["used_mib"])
+                        if d.get("utilization_pct") is not None:
+                            st["util_sum"] += d["utilization_pct"]
+                            st["util_n"] += 1
+                            st["peak_util_pct"] = max(st["peak_util_pct"] or 0, d["utilization_pct"])
+                self._stop.wait(self.interval)
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=10)
+
+    def summary(self):
+        if not self.samples:
+            return {"samples": 0, "devices": None, "note": "no GPU telemetry available"}
+        out = {}
+        for name, st in self.stats.items():
+            out[name] = {"uuid": st["uuid"], "peak_used_mib": st["peak_used_mib"],
+                         "mean_util_pct": round(st["util_sum"] / st["util_n"], 1) if st["util_n"] else None,
+                         "peak_util_pct": st["peak_util_pct"]}
+        return {"samples": self.samples, "interval_s": self.interval, "devices": out}
+
+
+def device_allocations(log_text):
+    """Model/KV/compute MiB per device for the final launch, from the backend log."""
+    launches = list(re.finditer(r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log_text))
+    if launches:
+        log_text = log_text[launches[-1].start():]
+    alloc = {}
+    for line in log_text.splitlines():
+        m = re.search(r"(CUDA\d+|Vulkan\d+|Metal\d*|CUDA_Host|CPU)[^\n]*?(model|KV|compute|RS|output) buffer size\s*=\s*([0-9.]+) MiB", line)
+        if not m:
+            m2 = re.search(r"(CUDA\d+|Vulkan\d+|CUDA_Host|CPU) buffer size\s*=\s*([0-9.]+) MiB", line)
+            if not m2:
+                continue
+            dev, kind, mib = m2[1], "model", float(m2[2])
+        else:
+            dev, kind, mib = m[1], m[2].lower(), float(m[3])
+        d = alloc.setdefault(dev, {})
+        d[kind] = round(d.get(kind, 0) + mib, 2)
+    return alloc or None
+
+
 def released_after_stop(baseline, after, tolerance_mib=256):
     """Per device: did memory return to the pre-launch level after shutdown?"""
     if not baseline or not after:
@@ -356,6 +430,12 @@ def main():
     if windows and command[0].lower().endswith((".cmd", ".bat")):
         command = 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
     result = {"command": command, "passed": False}
+    t_start = time.monotonic()
+    phases = {}
+
+    def mark(name):
+        phases[name] = round(time.monotonic() - t_start, 2)
+        result["phases_s"] = phases
     result["identity"] = {"launcher": launcher_identity(args.launcher)}
     model_path = Path(args.model).resolve()
     result["identity"]["model"] = (file_identity(model_path) if args.hash_model
@@ -376,6 +456,8 @@ def main():
         check_port_available(args.port)
         baseline_memory = gpu_memory()
         result["device_map"] = device_map(baseline_memory)
+        sampler = GPUSampler(output / "telemetry.jsonl").start() if baseline_memory else None
+        mark("launch")
         with (output / "serve.log").open("wb") as log:
             proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, env=env,
@@ -392,6 +474,7 @@ def main():
                     launcher_ready = b"[launch] Press Ctrl+C to stop" in (output / "serve.log").read_bytes()
                     if launcher_ready and request(args.port, "/health").get("status") == "ok":
                         result["launcher_ready"] = True
+                        mark("ready")
                         break
                 except (OSError, ValueError, urllib.error.URLError):
                     pass
@@ -401,6 +484,7 @@ def main():
             log_text = (output / "serve.log").read_text(errors="replace")
             result["identity"]["backend"] = backend_identity(log_text)
             result["weight_devices"] = weight_devices(log_text)
+            result["device_allocations_mib"] = device_allocations(log_text)
             result["min_weight_devices"] = args.min_weight_devices
             # Record what the launch actually consumed before any assertion can
             # abort the run: a placement that underuses the hardware is the
@@ -419,6 +503,7 @@ def main():
                 "max_tokens": 32, "temperature": 0, "stream": False,
             }, timeout=args.request_timeout)
             (output / "reply.json").write_text(json.dumps(reply, indent=2))
+            result["generation_timings"] = reply.get("timings")
             choices = reply.get("choices") or []
             message = choices[0].get("message", {}) if choices else {}
             # Some reasoning models spend the entire short budget in reasoning.
@@ -428,20 +513,24 @@ def main():
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during generation")
             result["generation"] = True
+            mark("generated")
             events = streaming_request(args.port, args.request_timeout)
             (output / "stream.json").write_text(json.dumps(events, indent=2))
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during streaming")
             result["streaming"] = True
+            mark("streamed")
             result["ubatch_raise"] = check_ubatch_raise((output / "serve.log").read_text(errors="replace"))
             # Cancellation and prefix reuse are the two acceptance items the
             # health/generate/stream sequence above cannot see. Both are the
             # ordinary agent path, not a stress test.
             result["cancel_reconnect"] = cancel_and_reconnect(args.port, args.request_timeout)
+            mark("cancel_recovered")
             if proc.poll() is not None:
                 raise RuntimeError("launcher exited during cancellation recovery")
             if args.prefix_reuse:
                 result["prefix_reuse"] = prefix_reuse(args.port, args.request_timeout)
+                mark("prefix_reuse")
                 if proc.poll() is not None:
                     raise RuntimeError("launcher exited during the prefix-reuse check")
             if args.agent_lanes:
@@ -450,6 +539,7 @@ def main():
                                 "--lanes", str(args.agent_lanes), "--repeats", str(args.agent_repeats),
                                 "--timeout", str(args.request_timeout)], check=True)
                 result["agent_workload"] = True
+                mark("agent_workload")
     except BaseException as exc:
         result["error"] = str(exc)
         raise
@@ -485,9 +575,13 @@ def main():
                         result["port_released"] = True
                         break
                 time.sleep(0.2)
+            mark("stopped")
             if baseline_memory:
                 time.sleep(2)
                 result["memory_released"] = released_after_stop(baseline_memory, gpu_memory())
+            if "sampler" in locals() and sampler is not None:
+                sampler.stop()
+                result["gpu_telemetry"] = sampler.summary()
             result["passed"] = bool(result.get("generation") and result.get("streaming") and result.get("port_released")
                                     and not result.get("forced_cleanup") and not result.get("error")
                                     and all(v is not False for v in (result.get("memory_released") or {}).values()))
