@@ -55,8 +55,10 @@ Artificial Analysis data can refresh the catalog through GitHub Actions. Store
 your key as the repository secret `ARTIFICIAL_ANALYSIS_API_KEY`; the workflow
 also accepts the existing `ARTIFICIALANALYSISAPIKEY` spelling.
 
-The scheduled workflow `.github/workflows/update-recommendations.yml` runs weekly
-and can also be started manually. It calls:
+The scheduled workflow `.github/workflows/update-recommendations.yml` runs every
+three days and can also be started manually. Installed clients refresh their
+copy of the published catalog at most once per 24 hours and keep the last valid
+catalog when a refresh fails. The workflow calls:
 
 ```bash
 python3 tools/models/update_recommendations.py
@@ -64,7 +66,12 @@ python3 tools/models/update_recommendations.py
 
 The key is read only from the workflow environment and is never written to the
 repo. The workflow commits `catalog.json` back to `main` when the API refresh
-changes the catalog.
+changes the catalog and the recommendation tests pass on the result.
+
+A quant is offered only when it is a complete main-model artifact: every shard
+of one variant, with known sizes. Draft heads (MTP, DFlash), projectors,
+adapters and importance matrices are excluded, and two different variants that
+share a quant label are not added together.
 
 Attribution is required when using Artificial Analysis data; the catalog and GUI
 include attribution to `https://artificialanalysis.ai/`.
