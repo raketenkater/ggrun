@@ -2595,3 +2595,29 @@ canary. Invariants: tests in `cache_canary_budget_test.go`.
 Unproven: the tiny probe's prompt rate underestimates batched prefill, so some
 machines near the 5-minute line now run a shorter canary than before. Live
 check pending: the PR's Linux/Windows hosted launch.
+
+## RELAUNCH — ~55 s wait for the port after a clean stop — 2026-10-07
+
+Evidence: installed TUI journey (`scripts/verify-installed-tui.py`), local run
+on `accept-20261007`. Stop, then "Run latest configuration", waited ~55 s before
+the backend started. The previous server's sockets sit in TIME_WAIT, and the
+launcher's port probe (`listenLikeBackend`) binds with options that differ from
+the backend's. Measured on kernel 7.0: REUSEADDR after a REUSEADDR server binds,
+REUSEPORT after REUSEPORT binds, a probe without options or with the other
+style gets EADDRINUSE. Mainline sets SO_REUSEADDR; ik_llama (httplib 0.46)
+sets only SO_REUSEPORT. So the probe reports "busy" for a port the backend
+could bind.
+
+Not changed in this release. Proposed fix: a connect check for a live listener
+plus a bind check in the selected backend's own socket style, made against the
+launch port before any backend starts. Needs a port-probe invariant test and a
+relaunch timing check.
+
+## GLM-5.3-Flash — architecture name differs from upstream — 2026-10-07
+
+The local GGUF says `glm5next` (from the unmerged llama.cpp PR #27752 fork);
+upstream master registers `glm5-next`. On a fresh install no backend loads it,
+and the offered "build current mainline" route would build for 30-60 min and
+then fail its post-build architecture check. Until the GGUF and upstream agree,
+the honest route is the fork recipe; the mainline build offer should not be
+made for a name upstream does not register. Not changed in this release.
