@@ -81,7 +81,7 @@ func main() {
 	case "help", "--help", "-h":
 		usage()
 	case "version", "--version", "-v":
-		fmt.Println("ggrun", version)
+		cmdVersion(args[1:])
 	case "detect":
 		cmdDetect(args[1:])
 	case "launch":
