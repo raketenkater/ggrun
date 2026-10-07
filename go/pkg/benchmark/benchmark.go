@@ -88,6 +88,11 @@ type Runner struct {
 	// the 1260-word canary into 15873 tokens, and the launch died against a
 	// 2048-token context with HTTP 400 instead of serving.
 	ContextTokens int
+	// PrefillBudget bounds the cache canary's projected cold prefill. Zero
+	// keeps the full canary. The canary runs before a launch reports ready, and
+	// its ~7k-token prompt took about 43 minutes at the 2.6 tok/s a two-thread
+	// CPU runner measured, so a launch that was serving still timed out.
+	PrefillBudget time.Duration
 	// WorkloadID distinguishes repeated calibration samples inside one running
 	// server. Candidates use the same IDs in separate processes, so they see the
 	// same prompt lengths without a later sample inheriting an earlier prefix.

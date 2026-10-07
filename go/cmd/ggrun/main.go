@@ -2020,6 +2020,12 @@ func backendBaseURL(req *launchRequest) string {
 	return fmt.Sprintf("http://%s:%d", server.ClientHost(req.Host), req.Port)
 }
 
+// cacheCanaryPrefillBudget bounds the prefix-cache check that runs before a new
+// profile reports ready. Machines that prefill the full canary within it are
+// checked exactly as before; slower ones verify the endpoint and leave reuse
+// unproven, which keeps the profile from being promoted.
+const cacheCanaryPrefillBudget = 5 * time.Minute
+
 func backendChoiceExplicit(req *launchRequest) bool {
 	return req != nil && (req.BackendExplicit || req.ServerBinExplicit)
 }
@@ -6239,6 +6245,7 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		Model:         filepath.Base(model.Path),
 		Timeout:       20 * time.Minute,
 		ContextTokens: canaryContext,
+		PrefillBudget: cacheCanaryPrefillBudget,
 	}
 	canary, canaryErr := runner.RunCacheCanary()
 	if canaryErr != nil || canary == nil || !canary.Functional {

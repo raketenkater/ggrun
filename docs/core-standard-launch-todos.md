@@ -2575,3 +2575,23 @@ and the contract does not accept unit tests as evidence for it.
 - Re-run the seat comparison once a seat can launch. Until then the worker
   benefit is unmeasured, and nothing here argues a companion cannot pay for
   itself.
+
+## CANARY — first launch blocked ~43 min on a slow CPU — 2026-10-07
+
+Evidence: PR #81 install-e2e run 37653926240 (Linux, 4-vCPU hosted runner,
+`--threads 2`). Recommended model Qwen3.5-9B UD-IQ3_XXS, 262144 context. The
+server was listening 3.3 s after start, but the new-profile cache canary sent a
+6924-token cold prompt that prefilled at 2.62-2.67 tok/s; after 1172 s it had
+processed 3072 tokens and the launch never printed ready. The per-request
+canary timeout (20 min) would have rejected the profile before finishing.
+
+Fix (`pkg/benchmark` `PrefillBudget`, launch budget 5 min): one minimal
+exchange measures prompt speed. If the full canary fits the budget it runs
+unchanged; otherwise it shrinks to the budget; if even the 1200-token reuse
+proof does not fit, the endpoint is verified, reuse stays unproven and the
+profile is degraded, not promoted. Unknown speed or tokenizer keeps the full
+canary. Invariants: tests in `cache_canary_budget_test.go`.
+
+Unproven: the tiny probe's prompt rate underestimates batched prefill, so some
+machines near the 5-minute line now run a shorter canary than before. Live
+check pending: the PR's Linux/Windows hosted launch.
