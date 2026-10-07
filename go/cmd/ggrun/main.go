@@ -6656,18 +6656,27 @@ func cmdLaunch(args []string) {
 		be = resolveLaunchBackend(req, model, caps)
 	}
 	if be == nil {
-		// No reviewed recipe for this architecture. Search open llama.cpp PRs
-		// and Hugging Face GGUF cards for a head fork that adds the loader; if
-		// the user declines or nothing is found, the mainline-update offer
-		// remains. A scripted non-terminal call never blocks.
-		if offerDiscoveredArchFork(req, model, cfg.AssumeYes) {
-			be = resolveLaunchBackend(req, model, caps)
-		}
-		if be == nil && offerAcceleratedArchBuild(req, model, caps, cfg.AssumeYes) {
-			be = resolveLaunchBackend(req, model, caps)
-		}
-		if be == nil && offerMainlineBackendUpdate(req, model, cfg.AssumeYes) {
-			be = resolveLaunchBackend(req, model, caps)
+		// No installed backend loads this architecture. Reviewed sources first:
+		// a reviewed recipe pinning an upstream commit is offered before open
+		// llama.cpp PR / Hugging Face discovery, which is unreviewed code. Then a
+		// current-mainline build, then the mainline update. A scripted
+		// non-terminal call never blocks.
+		for _, route := range unsupportedArchRoutes(model.ModelArch) {
+			if be != nil {
+				break
+			}
+			offered := false
+			switch route {
+			case "reviewed-build", "mainline-build":
+				offered = offerAcceleratedArchBuild(req, model, caps, cfg.AssumeYes)
+			case "discovered-fork":
+				offered = offerDiscoveredArchFork(req, model, cfg.AssumeYes)
+			case "mainline-update":
+				offered = offerMainlineBackendUpdate(req, model, cfg.AssumeYes)
+			}
+			if offered {
+				be = resolveLaunchBackend(req, model, caps)
+			}
 		}
 		if be == nil {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", backendUnavailableMessage(req))
