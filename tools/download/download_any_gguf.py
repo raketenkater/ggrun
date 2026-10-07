@@ -43,7 +43,7 @@ FAMILY_PREFIXES = {
 }
 
 QUANT_PATTERN = re.compile(
-    r"(IQ[1-8]_(?:XXS|XS|NL|S|M|L)|Q[2-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
+    r"(TQ[12]_0|IQ[1-8]_(?:XXS|XS|NL(?:_XL)?|S|M|L)|Q[1-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
     re.IGNORECASE,
 )
 

@@ -295,3 +295,41 @@ def test_gguf_importance_matrix_is_not_a_tiny_bf16_model(monkeypatch):
     assert [(q["name"], q["size_bytes"]) for q in updater.fetch_hf_quants("owner/GLM")] == [
         ("Q4_K_M", 200828233184)]
     assert updater._representative_gguf_file(siblings) == siblings[1]["rfilename"]
+
+
+def test_quant_labels_for_ternary_and_xl_variants_match_downloader():
+    """UD-TQ1_0 is ternary, not Q1_0; IQ4_NL_XL is not IQ4_NL. Both tools must
+    agree, or the catalog offers a label the downloader cannot find."""
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+
+    def load(rel):
+        spec = importlib.util.spec_from_file_location(Path(rel).stem, root / rel)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    updater = load("tools/models/update_recommendations.py")
+    downloader = load("tools/download/download_any_gguf.py")
+    assert updater.QUANT_PATTERN.pattern == downloader.QUANT_PATTERN.pattern
+    cases = {
+        "Qwen3-Coder-Next-UD-TQ1_0.gguf": "UD-TQ1_0",
+        "UD-TQ2_0/Kimi-K3-UD-TQ2_0-00002-of-00013.gguf": "UD-TQ2_0",
+        "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf": "UD-IQ4_NL",
+        "Qwen3.6-35B-A3B-UD-IQ4_NL_XL.gguf": "UD-IQ4_NL_XL",
+        "Q2_K/meta-models.Muse-Glimmer-30B.f16.gguf.Q2_K.gguf": "Q2_K",
+        "GLM-5.3-Flash-BF16-Q4_0/GLM-5.3-Flash-BF16-Q4_0-00001-of-00005.gguf": "Q4_0",
+    }
+    for path, want in cases.items():
+        assert updater.artifact_quant(path) == want, path
+        assert downloader.artifact_quant(path) == want, path
+
+
+def test_identity_rejects_a_domain_finetune():
+    """Ling 3.0 Flash was resolved to the finance retune Ling-3.0-flash-Fin."""
+    updater = load_updater()
+    base = {"name": "Ling 3.0 Flash", "creator": {"name": "InclusionAI"}}
+    fin = {"name": "Ling-3.0-flash-Fin", "creator": {"name": "InclusionAI"}}
+    assert not updater.candidate_relevant("bartowski/Ling-3.0-flash-Fin-GGUF", base)
+    assert updater.candidate_relevant("AtomicChat/Ling-3.0-flash-GGUF", base)
+    assert updater.candidate_relevant("bartowski/Ling-3.0-flash-Fin-GGUF", fin)

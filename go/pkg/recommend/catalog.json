@@ -4,10 +4,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 46.324,
-      "aa_output_tps": 40.12,
+      "aa_output_tps": 46.454,
       "aa_query": "Xiaomi MiMo V2.6 Pro",
       "aa_slug": "mimo-v2-6-pro",
-      "aa_updated_at": "2026-10-07T11:51:14Z",
+      "aa_updated_at": "2026-10-07T15:48:40Z",
       "active_params_b": 0,
       "arch": "mimo2",
       "ctx_train": 1048576,
@@ -17,7 +17,7 @@
       "experts": 384,
       "family": "Xiaomi",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:51:14Z",
+      "hf_quant_updated_at": "2026-10-07T15:48:40Z",
       "hkv": 8,
       "kl": 192,
       "layers": 70,
@@ -28,21 +28,9 @@
       "quants": [
         {
           "dynamic": false,
-          "name": "Q4_0",
-          "size_bytes": 2149176480,
-          "size_gb": 2.0
-        },
-        {
-          "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 8993456768,
-          "size_gb": 8.38
-        },
-        {
-          "dynamic": false,
-          "name": "BF16",
-          "size_bytes": 16917742208,
-          "size_gb": 15.76
+          "name": "Q2_K",
+          "size_bytes": 418769299904,
+          "size_gb": 390.01
         },
         {
           "dynamic": false,
@@ -54,17 +42,17 @@
       "repo": "ggml-org/MiMo-V2.6-Pro-RL-GGUF",
       "runnable": true,
       "size_gb": 516.15,
-      "speed": 40,
+      "speed": 46,
       "total_params_b": 0,
       "vl": 128
     },
     {
       "aa_id": "",
       "aa_intelligence_index": 44.777,
-      "aa_output_tps": 77.248,
+      "aa_output_tps": 77.179,
       "aa_query": "Z AI GLM 5.3",
       "aa_slug": "glm-5-3",
-      "aa_updated_at": "2026-10-07T11:51:17Z",
+      "aa_updated_at": "2026-10-07T15:48:45Z",
       "active_params_b": 0,
       "arch": "glm-dsa",
       "ctx_train": 1048576,
@@ -74,7 +62,7 @@
       "experts": 256,
       "family": "Z AI",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:51:17Z",
+      "hf_quant_updated_at": "2026-10-07T15:48:45Z",
       "hkv": 1,
       "kl": 576,
       "kv_lora": 512,
@@ -169,10 +157,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 43.594,
-      "aa_output_tps": 42.928,
+      "aa_output_tps": 43.669,
       "aa_query": "Kimi K3",
       "aa_slug": "kimi-k3",
-      "aa_updated_at": "2026-10-07T11:51:20Z",
+      "aa_updated_at": "2026-10-07T15:48:48Z",
       "active_params_b": 0,
       "arch": "kimi-k3",
       "ctx_train": 1048576,
@@ -182,7 +170,7 @@
       "experts": 896,
       "family": "Kimi",
       "ff": 33792,
-      "hf_quant_updated_at": "2026-10-07T11:51:20Z",
+      "hf_quant_updated_at": "2026-10-07T15:48:48Z",
       "kl": 576,
       "kv_lora": 512,
       "layers": 93,
@@ -195,7 +183,19 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q2_0",
+          "name": "UD-Q1_0",
+          "size_bytes": 466369456320,
+          "size_gb": 434.34
+        },
+        {
+          "dynamic": true,
+          "name": "UD-TQ1_0",
+          "size_bytes": 508912281952,
+          "size_gb": 473.96
+        },
+        {
+          "dynamic": true,
+          "name": "UD-TQ2_0",
           "size_bytes": 551455107488,
           "size_gb": 513.58
         },
@@ -225,12 +225,6 @@
         },
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
-          "size_bytes": 975281738272,
-          "size_gb": 908.3
-        },
-        {
-          "dynamic": true,
           "name": "UD-Q4_K_XL",
           "size_bytes": 1508668683104,
           "size_gb": 1405.06
@@ -245,17 +239,17 @@
       "repo": "unsloth/Kimi-K3-GGUF",
       "runnable": true,
       "size_gb": 1405.06,
-      "speed": 43,
+      "speed": 44,
       "total_params_b": 0,
       "vl": 74
     },
     {
       "aa_id": "",
       "aa_intelligence_index": 41.807,
-      "aa_output_tps": 50.485,
+      "aa_output_tps": 51.363,
       "aa_query": "Z AI GLM 5.3 Flash",
       "aa_slug": "glm-5-3-flash",
-      "aa_updated_at": "2026-10-07T11:51:24Z",
+      "aa_updated_at": "2026-10-07T15:48:53Z",
       "active_params_b": 0,
       "arch": "glm5-next",
       "ctx_train": 1048576,
@@ -265,7 +259,7 @@
       "experts": 288,
       "family": "Z AI",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:51:24Z",
+      "hf_quant_updated_at": "2026-10-07T15:48:53Z",
       "kl": 512,
       "kv_lora": 512,
       "layers": 46,
@@ -311,6 +305,12 @@
           "name": "IQ2_M",
           "size_bytes": 120618067200,
           "size_gb": 112.33
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 125671154912,
+          "size_gb": 117.04
         },
         {
           "dynamic": false,
@@ -380,6 +380,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 202609804736,
+          "size_gb": 188.7
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 227912951264,
           "size_gb": 212.26
@@ -398,21 +404,21 @@
         },
         {
           "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 341502043648,
-          "size_gb": 318.05
+          "name": "Q6_K",
+          "size_bytes": 281044297408,
+          "size_gb": 261.74
         },
         {
           "dynamic": false,
-          "name": "BF16",
-          "size_bytes": 4145594023360,
-          "size_gb": 3860.89
+          "name": "Q8_0",
+          "size_bytes": 341502043648,
+          "size_gb": 318.05
         }
       ],
       "repo": "bartowski/GLM-5.3-Flash-BF16-GGUF",
       "runnable": true,
       "size_gb": 187.04,
-      "speed": 50,
+      "speed": 51,
       "total_params_b": 0,
       "vl": 512
     },
@@ -422,7 +428,7 @@
       "aa_output_tps": 38.704,
       "aa_query": "Alibaba Qwen3.8 2.4T A95B",
       "aa_slug": "qwen3-8-2-4t-a95b",
-      "aa_updated_at": "2026-10-07T11:51:28Z",
+      "aa_updated_at": "2026-10-07T15:48:58Z",
       "active_params_b": 0,
       "arch": "qwen35moe",
       "ctx_train": 262144,
@@ -432,7 +438,7 @@
       "exp_used": 10,
       "experts": 512,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-10-07T11:51:28Z",
+      "hf_quant_updated_at": "2026-10-07T15:48:58Z",
       "hkv": 4,
       "kl": 256,
       "layers": 93,
@@ -509,7 +515,7 @@
       "aa_output_tps": 55.129,
       "aa_query": "Alibaba Qwen3.8 Flash Next",
       "aa_slug": "qwen3-8-flash-next",
-      "aa_updated_at": "2026-10-07T11:51:32Z",
+      "aa_updated_at": "2026-10-07T15:49:02Z",
       "active_params_b": 0,
       "arch": "qwen4exp",
       "ctx_train": 262144,
@@ -519,7 +525,7 @@
       "exp_used": 10,
       "experts": 512,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-10-07T11:51:32Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:02Z",
       "hkv": 2,
       "kl": 256,
       "layers": 48,
@@ -528,12 +534,6 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 66,
       "quants": [
-        {
-          "dynamic": false,
-          "name": "Q4_K_M",
-          "size_bytes": 4693356736,
-          "size_gb": 4.37
-        },
         {
           "dynamic": true,
           "name": "UD-IQ1_S",
@@ -591,19 +591,19 @@
         {
           "dynamic": false,
           "name": "Q8_0",
-          "size_bytes": 199286459744,
-          "size_gb": 185.6
+          "size_bytes": 188225033248,
+          "size_gb": 175.3
         },
         {
           "dynamic": false,
           "name": "BF16",
-          "size_bytes": 367028654272,
-          "size_gb": 341.82
+          "size_bytes": 354029930496,
+          "size_gb": 329.72
         }
       ],
       "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
       "runnable": true,
-      "size_gb": 4.37,
+      "size_gb": 103.69,
       "speed": 55,
       "total_params_b": 0,
       "vl": 256
@@ -614,7 +614,7 @@
       "aa_output_tps": 226.595,
       "aa_query": "DeepSeek V4.1 Flash",
       "aa_slug": "deepseek-v4-1-flash",
-      "aa_updated_at": "2026-10-07T11:51:37Z",
+      "aa_updated_at": "2026-10-07T15:49:06Z",
       "active_params_b": 0,
       "arch": "deepseek41",
       "ctx_train": 1048576,
@@ -623,7 +623,7 @@
       "exp_used": 6,
       "experts": 384,
       "family": "DeepSeek",
-      "hf_quant_updated_at": "2026-10-07T11:51:37Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:06Z",
       "hkv": 1,
       "kl": 512,
       "layers": 40,
@@ -633,6 +633,12 @@
       "q_lora": 1280,
       "quality": 65,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 264515279456,
+          "size_gb": 246.35
+        },
         {
           "dynamic": false,
           "name": "Q3_K_M",
@@ -662,10 +668,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 37.884,
-      "aa_output_tps": 56.419,
+      "aa_output_tps": 57.989,
       "aa_query": "Xiaomi MiMo V2.6 Flash",
       "aa_slug": "mimo-v2-6-flash",
-      "aa_updated_at": "2026-10-07T11:51:41Z",
+      "aa_updated_at": "2026-10-07T15:49:10Z",
       "active_params_b": 0,
       "arch": "mimo2",
       "ctx_train": 1048576,
@@ -675,7 +681,7 @@
       "experts": 256,
       "family": "Xiaomi",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:51:41Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:10Z",
       "kl": 192,
       "layers": 48,
       "moe": false,
@@ -685,21 +691,9 @@
       "quants": [
         {
           "dynamic": false,
-          "name": "Q4_0",
-          "size_bytes": 1264898272,
-          "size_gb": 1.18
-        },
-        {
-          "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 3949639904,
-          "size_gb": 3.68
-        },
-        {
-          "dynamic": false,
-          "name": "BF16",
-          "size_bytes": 7423703264,
-          "size_gb": 6.91
+          "name": "Q2_K",
+          "size_bytes": 126214593856,
+          "size_gb": 117.55
         },
         {
           "dynamic": false,
@@ -711,7 +705,7 @@
       "repo": "ggml-org/MiMo-V2.6-Flash-RL-GGUF",
       "runnable": true,
       "size_gb": 155.87,
-      "speed": 56,
+      "speed": 58,
       "total_params_b": 0,
       "vl": 128
     },
@@ -721,7 +715,7 @@
       "aa_output_tps": 99.083,
       "aa_query": "DeepSeek V4 Pro 0813",
       "aa_slug": "deepseek-v4-pro",
-      "aa_updated_at": "2026-10-07T11:51:43Z",
+      "aa_updated_at": "2026-10-07T15:49:14Z",
       "active_params_b": 0,
       "arch": "deepseek4",
       "ctx_train": 1048576,
@@ -730,7 +724,7 @@
       "exp_used": 6,
       "experts": 384,
       "family": "DeepSeek",
-      "hf_quant_updated_at": "2026-10-07T11:51:43Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:14Z",
       "hkv": 1,
       "kl": 512,
       "layers": 61,
@@ -754,6 +748,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 569417374368,
+          "size_gb": 530.31
+        },
+        {
+          "dynamic": false,
           "name": "BF16",
           "size_bytes": 852163752416,
           "size_gb": 793.64
@@ -763,6 +763,12 @@
           "name": "Q4_0",
           "size_bytes": 885309568896,
           "size_gb": 824.51
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 983553415424,
+          "size_gb": 916.01
         }
       ],
       "repo": "ryant0000/DeepSeek-V4-Pro-0813-gguf",
@@ -778,14 +784,14 @@
       "aa_output_tps": 47.055,
       "aa_query": "Alibaba Qwen3.8 27B",
       "aa_slug": "qwen3-8-27b",
-      "aa_updated_at": "2026-10-07T11:51:50Z",
+      "aa_updated_at": "2026-10-07T15:49:19Z",
       "active_params_b": 0,
       "arch": "qwen35",
       "ctx_train": 262144,
       "embd": 5120,
       "family": "Alibaba",
       "ff": 17408,
-      "hf_quant_updated_at": "2026-10-07T11:51:50Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:19Z",
       "hkv": 4,
       "kl": 256,
       "layers": 65,
@@ -855,6 +861,12 @@
           "size_gb": 14.3
         },
         {
+          "dynamic": false,
+          "name": "Q4_0",
+          "size_bytes": 16056478688,
+          "size_gb": 14.95
+        },
+        {
           "dynamic": true,
           "name": "UD-Q4_K_M",
           "size_bytes": 16464440224,
@@ -862,9 +874,9 @@
         },
         {
           "dynamic": false,
-          "name": "Q4_0",
-          "size_bytes": 17426069344,
-          "size_gb": 16.23
+          "name": "Q4_1",
+          "size_bytes": 17540705248,
+          "size_gb": 16.34
         },
         {
           "dynamic": true,
@@ -889,6 +901,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 20876938144,
           "size_gb": 19.44
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 21983677344,
+          "size_gb": 20.47
         },
         {
           "dynamic": true,
@@ -946,7 +964,7 @@
       "aa_output_tps": 0,
       "aa_query": "Motif Technologies Motif 3",
       "aa_slug": "motif-3",
-      "aa_updated_at": "2026-10-07T11:51:54Z",
+      "aa_updated_at": "2026-10-07T15:49:24Z",
       "active_params_b": 0,
       "arch": "motif3",
       "ctx_train": 262144,
@@ -957,7 +975,7 @@
       "experts": 384,
       "family": "Motif Technologies",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:51:54Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:24Z",
       "hkv": 16,
       "kl": 192,
       "kv_lora": 512,
@@ -971,24 +989,30 @@
       "quants": [
         {
           "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 121523831712,
+          "size_gb": 113.18
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_M",
+          "size_bytes": 156359984192,
+          "size_gb": 145.62
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_M",
-          "size_bytes": 195958638208,
+          "size_bytes": 195958637632,
           "size_gb": 182.5
         },
         {
           "dynamic": false,
           "name": "Q5_K_M",
-          "size_bytes": 228535273216,
+          "size_bytes": 228535272640,
           "size_gb": 212.84
-        },
-        {
-          "dynamic": false,
-          "name": "Q3_K_M",
-          "size_bytes": 298683935904,
-          "size_gb": 278.17
         }
       ],
-      "repo": "avar6/Motif-3-gguf",
+      "repo": "avar6/Motif-3-Beta-gguf",
       "runnable": false,
       "size_gb": 182.5,
       "speed": 0,
@@ -998,10 +1022,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 30.502,
-      "aa_output_tps": 117.577,
+      "aa_output_tps": 118.383,
       "aa_query": "Institute of Foundation Models K2 Horizon 375B A23B",
       "aa_slug": "k2-horizon-375b-a23b",
-      "aa_updated_at": "2026-10-07T11:51:57Z",
+      "aa_updated_at": "2026-10-07T15:49:28Z",
       "active_params_b": 0,
       "arch": "k2-horizon",
       "ctx_train": 524288,
@@ -1012,7 +1036,7 @@
       "experts": 192,
       "family": "Institute of Foundation Models",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:51:57Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:28Z",
       "hkv": 8,
       "kl": 128,
       "layers": 61,
@@ -1045,10 +1069,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 29.22,
-      "aa_output_tps": 98.456,
+      "aa_output_tps": 100.389,
       "aa_query": "MiniMax M3",
       "aa_slug": "minimax-m3",
-      "aa_updated_at": "2026-10-07T11:52:01Z",
+      "aa_updated_at": "2026-10-07T15:49:33Z",
       "active_params_b": 0,
       "arch": "minimax-m3",
       "ctx_train": 1048576,
@@ -1058,7 +1082,7 @@
       "experts": 128,
       "family": "MiniMax",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:52:01Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:33Z",
       "hkv": 4,
       "kl": 128,
       "layers": 60,
@@ -1172,6 +1196,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 354416850624,
+          "size_gb": 330.08
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 387182753536,
           "size_gb": 360.59
@@ -1198,7 +1228,7 @@
       "repo": "unsloth/MiniMax-M3-GGUF",
       "runnable": true,
       "size_gb": 245.9,
-      "speed": 98,
+      "speed": 100,
       "total_params_b": 0,
       "vl": 128
     },
@@ -1208,7 +1238,7 @@
       "aa_output_tps": 0,
       "aa_query": "Nex AGI Nex N2 Pro",
       "aa_slug": "nex-n2-pro",
-      "aa_updated_at": "2026-10-07T11:52:05Z",
+      "aa_updated_at": "2026-10-07T15:49:37Z",
       "active_params_b": 0,
       "arch": "qwen35moe",
       "ctx_train": 262144,
@@ -1218,7 +1248,7 @@
       "exp_used": 10,
       "experts": 512,
       "family": "Nex AGI",
-      "hf_quant_updated_at": "2026-10-07T11:52:05Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:37Z",
       "hkv": 2,
       "kl": 256,
       "layers": 60,
@@ -1262,6 +1292,12 @@
           "name": "IQ2_M",
           "size_bytes": 133131531744,
           "size_gb": 123.99
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 139499484672,
+          "size_gb": 129.92
         },
         {
           "dynamic": false,
@@ -1349,6 +1385,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 249095042912,
+          "size_gb": 231.99
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 273994331968,
           "size_gb": 255.18
@@ -1358,6 +1400,12 @@
           "name": "Q5_K_M",
           "size_bytes": 283257518080,
           "size_gb": 263.8
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 342387325024,
+          "size_gb": 318.87
         },
         {
           "dynamic": false,
@@ -1376,10 +1424,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 25.812,
-      "aa_output_tps": 83.794,
+      "aa_output_tps": 83.973,
       "aa_query": "Kimi K2.7 Code",
       "aa_slug": "kimi-k2-7-code",
-      "aa_updated_at": "2026-10-07T11:52:09Z",
+      "aa_updated_at": "2026-10-07T15:49:42Z",
       "active_params_b": 0,
       "arch": "deepseek2",
       "ctx_train": 262144,
@@ -1389,7 +1437,7 @@
       "experts": 384,
       "family": "Kimi",
       "ff": 18432,
-      "hf_quant_updated_at": "2026-10-07T11:52:09Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:42Z",
       "hkv": 1,
       "kl": 576,
       "kv_lora": 512,
@@ -1472,10 +1520,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 25.658,
-      "aa_output_tps": 204.582,
+      "aa_output_tps": 192.94,
       "aa_query": "Thinking Machines Inkling Small",
       "aa_slug": "inkling-small",
-      "aa_updated_at": "2026-10-07T11:52:13Z",
+      "aa_updated_at": "2026-10-07T15:49:49Z",
       "active_params_b": 0,
       "arch": "inkling",
       "ctx_train": 1048576,
@@ -1485,7 +1533,7 @@
       "experts": 256,
       "family": "Thinking Machines",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:52:13Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:49Z",
       "hkv": 8,
       "kl": 128,
       "layers": 42,
@@ -1604,6 +1652,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 218907142464,
+          "size_gb": 203.87
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 239710890304,
           "size_gb": 223.25
@@ -1640,7 +1694,7 @@
       "aa_output_tps": 0,
       "aa_query": "Institute of Foundation Models K2 Horizon MoVA 36B A4B",
       "aa_slug": "k2-horizon-mova-36b-a4b",
-      "aa_updated_at": "2026-10-07T11:52:16Z",
+      "aa_updated_at": "2026-10-07T15:49:54Z",
       "active_params_b": 0,
       "arch": "k2-horizon",
       "ctx_train": 524288,
@@ -1651,7 +1705,7 @@
       "experts": 64,
       "family": "Institute of Foundation Models",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:52:16Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:54Z",
       "hkv": 8,
       "kl": 128,
       "layers": 48,
@@ -1684,6 +1738,12 @@
           "name": "Q2_K_S",
           "size_bytes": 12809614560,
           "size_gb": 11.93
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 13622388960,
+          "size_gb": 12.69
         },
         {
           "dynamic": false,
@@ -1741,9 +1801,21 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 23579542240,
+          "size_gb": 21.96
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_M",
           "size_bytes": 26439456480,
           "size_gb": 24.62
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 30765366240,
+          "size_gb": 28.65
         },
         {
           "dynamic": false,
@@ -1762,10 +1834,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 25.297,
-      "aa_output_tps": 85.021,
+      "aa_output_tps": 86.703,
       "aa_query": "Tencent Hy3",
       "aa_slug": "hy3",
-      "aa_updated_at": "2026-10-07T11:52:20Z",
+      "aa_updated_at": "2026-10-07T15:49:58Z",
       "active_params_b": 0,
       "arch": "hy_v3",
       "ctx_train": 262144,
@@ -1776,7 +1848,7 @@
       "experts": 192,
       "family": "Tencent",
       "ff": 13312,
-      "hf_quant_updated_at": "2026-10-07T11:52:20Z",
+      "hf_quant_updated_at": "2026-10-07T15:49:58Z",
       "hkv": 8,
       "kl": 128,
       "layers": 80,
@@ -1785,6 +1857,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 42,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 107386596384,
+          "size_gb": 100.01
+        },
         {
           "dynamic": false,
           "name": "Q3_K_M",
@@ -1805,31 +1883,31 @@
         },
         {
           "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 313662845920,
-          "size_gb": 292.12
+          "name": "Q6_K",
+          "size_bytes": 242224623936,
+          "size_gb": 225.59
         },
         {
           "dynamic": false,
-          "name": "F16",
-          "size_bytes": 1192237374752,
-          "size_gb": 1110.36
+          "name": "Q8_0",
+          "size_bytes": 313662845920,
+          "size_gb": 292.12
         }
       ],
       "repo": "DevQuasar/tencent.Hy3-GGUF",
       "runnable": true,
       "size_gb": 166.31,
-      "speed": 85,
+      "speed": 87,
       "total_params_b": 0,
       "vl": 128
     },
     {
       "aa_id": "",
       "aa_intelligence_index": 24.985,
-      "aa_output_tps": 162.477,
+      "aa_output_tps": 188.238,
       "aa_query": "Thinking Machines Inkling",
       "aa_slug": "inkling",
-      "aa_updated_at": "2026-10-07T11:52:23Z",
+      "aa_updated_at": "2026-10-07T15:50:05Z",
       "active_params_b": 0,
       "arch": "inkling",
       "ctx_train": 1048576,
@@ -1839,7 +1917,7 @@
       "experts": 256,
       "family": "Thinking Machines",
       "ff": 24576,
-      "hf_quant_updated_at": "2026-10-07T11:52:23Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:05Z",
       "kl": 128,
       "layers": 66,
       "moe": false,
@@ -1852,6 +1930,12 @@
           "name": "IQ2_XXS",
           "size_bytes": 246467064896,
           "size_gb": 229.54
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 343956042176,
+          "size_gb": 320.33
         },
         {
           "dynamic": false,
@@ -1879,7 +1963,7 @@
       "aa_output_tps": 0,
       "aa_query": "Upstage Solar Open2 250B",
       "aa_slug": "solar-open2-250b",
-      "aa_updated_at": "2026-10-07T11:52:27Z",
+      "aa_updated_at": "2026-10-07T15:50:09Z",
       "active_params_b": 0,
       "arch": "solar-open2",
       "ctx_train": 1048576,
@@ -1889,7 +1973,7 @@
       "experts": 320,
       "family": "Upstage",
       "ff": 10240,
-      "hf_quant_updated_at": "2026-10-07T11:52:27Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:09Z",
       "kl": 128,
       "layers": 48,
       "leading_dense": 0,
@@ -1900,20 +1984,32 @@
       "quants": [
         {
           "dynamic": false,
-          "name": "Q4_K_M",
-          "size_bytes": 151819124576,
-          "size_gb": 141.39
+          "name": "IQ1_M",
+          "size_bytes": 60450717632,
+          "size_gb": 56.3
         },
         {
           "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 266136846528,
-          "size_gb": 247.86
+          "name": "Q2_K",
+          "size_bytes": 95427444768,
+          "size_gb": 88.87
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_XS",
+          "size_bytes": 136236466304,
+          "size_gb": 126.88
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 205554819072,
+          "size_gb": 191.44
         }
       ],
-      "repo": "llamaraspberryrabbit/Solar-Open2-250B-GGUF",
+      "repo": "prometheusAIR/Solar-Open2-250B-GGUF",
       "runnable": false,
-      "size_gb": 141.39,
+      "size_gb": 126.88,
       "speed": 0,
       "total_params_b": 0,
       "vl": 128
@@ -1921,10 +2017,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 24.569,
-      "aa_output_tps": 143.643,
+      "aa_output_tps": 143.336,
       "aa_query": "InclusionAI Ling 3.0 flash VL",
       "aa_slug": "ling-3-0-flash-vl",
-      "aa_updated_at": "2026-10-07T11:52:32Z",
+      "aa_updated_at": "2026-10-07T15:50:15Z",
       "active_params_b": 0,
       "arch": "bailingmoe3",
       "ctx_train": 131072,
@@ -1935,7 +2031,7 @@
       "experts": 512,
       "family": "InclusionAI",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:52:32Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:15Z",
       "kl": 576,
       "kv_lora": 512,
       "layers": 42,
@@ -1980,6 +2076,12 @@
           "name": "IQ2_M",
           "size_bytes": 45320276960,
           "size_gb": 42.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 47805205472,
+          "size_gb": 44.52
         },
         {
           "dynamic": false,
@@ -2037,6 +2139,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 78473796768,
+          "size_gb": 73.08
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_M",
           "size_bytes": 78661520544,
           "size_gb": 73.26
@@ -2073,6 +2181,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 109694127360,
+          "size_gb": 102.16
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 132365277248,
           "size_gb": 123.27
@@ -2094,10 +2208,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 22.928,
-      "aa_output_tps": 156.21,
+      "aa_output_tps": 164.756,
       "aa_query": "NVIDIA Nemotron 3 Ultra 550B A55B",
       "aa_slug": "nvidia-nemotron-3-ultra-550b-a55b",
-      "aa_updated_at": "2026-10-07T11:52:36Z",
+      "aa_updated_at": "2026-10-07T15:50:21Z",
       "active_params_b": 0,
       "arch": "nemotron_h_moe",
       "ctx_train": 1048576,
@@ -2107,7 +2221,7 @@
       "exp_used": 22,
       "experts": 512,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:52:36Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:21Z",
       "kl": 128,
       "layers": 108,
       "moe": false,
@@ -2219,6 +2333,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 460735987968,
+          "size_gb": 429.09
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 523147231552,
           "size_gb": 487.22
@@ -2252,10 +2372,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 22.597,
-      "aa_output_tps": 320.355,
+      "aa_output_tps": 324.264,
       "aa_query": "InclusionAI Ling 3.0 flash Fin",
       "aa_slug": "ling-3-0-flash-fin",
-      "aa_updated_at": "2026-10-07T11:52:41Z",
+      "aa_updated_at": "2026-10-07T15:50:26Z",
       "active_params_b": 0,
       "arch": "bailingmoe3",
       "ctx_train": 262144,
@@ -2266,7 +2386,7 @@
       "experts": 512,
       "family": "InclusionAI",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:52:41Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:26Z",
       "kl": 576,
       "kv_lora": 512,
       "layers": 43,
@@ -2311,6 +2431,12 @@
           "name": "IQ2_M",
           "size_bytes": 43638665472,
           "size_gb": 40.64
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 45900759680,
+          "size_gb": 42.75
         },
         {
           "dynamic": false,
@@ -2398,6 +2524,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 80204410080,
+          "size_gb": 74.7
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 87892609216,
           "size_gb": 81.86
@@ -2413,6 +2545,12 @@
           "name": "Q5_K_L",
           "size_bytes": 90909622496,
           "size_gb": 84.67
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 109259389504,
+          "size_gb": 101.76
         },
         {
           "dynamic": false,
@@ -2440,7 +2578,7 @@
       "aa_output_tps": 0,
       "aa_query": "AI9Stars G9v3 39A5B",
       "aa_slug": "g9v3-39a5b",
-      "aa_updated_at": "2026-10-07T11:52:43Z",
+      "aa_updated_at": "2026-10-07T15:50:30Z",
       "active_params_b": 0,
       "arch": "g9v3",
       "ctx_train": 131072,
@@ -2450,7 +2588,7 @@
       "experts": 320,
       "family": "AI9Stars",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:52:43Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:30Z",
       "hkv": 2,
       "kl": 128,
       "layers": 38,
@@ -2498,7 +2636,7 @@
       "aa_output_tps": 0,
       "aa_query": "SK Telecom A.X K2",
       "aa_slug": "a-x-k2",
-      "aa_updated_at": "2026-10-07T11:52:45Z",
+      "aa_updated_at": "2026-10-07T15:50:33Z",
       "active_params_b": 0,
       "arch": "axk2",
       "ctx_train": 262144,
@@ -2508,7 +2646,7 @@
       "experts": 256,
       "family": "SK Telecom",
       "ff": 18432,
-      "hf_quant_updated_at": "2026-10-07T11:52:45Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:33Z",
       "hkv": 1,
       "kl": 576,
       "kv_lora": 512,
@@ -2540,7 +2678,7 @@
       "aa_output_tps": 85.959,
       "aa_query": "Alibaba Qwen3.5 397B A17B",
       "aa_slug": "qwen3-5-397b-a17b-non-reasoning",
-      "aa_updated_at": "2026-10-07T11:52:49Z",
+      "aa_updated_at": "2026-10-07T15:50:37Z",
       "active_params_b": 0,
       "arch": "qwen35moe",
       "ctx_train": 262144,
@@ -2550,7 +2688,7 @@
       "exp_used": 10,
       "experts": 512,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-10-07T11:52:49Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:37Z",
       "hkv": 2,
       "kl": 256,
       "layers": 60,
@@ -2698,6 +2836,18 @@
           "size_gb": 274.61
         },
         {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 326595345056,
+          "size_gb": 304.17
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 326595345056,
+          "size_gb": 304.17
+        },
+        {
           "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 362328980288,
@@ -2735,7 +2885,7 @@
       "aa_output_tps": 0,
       "aa_query": "Institute of Foundation Models K2 Horizon 7B",
       "aa_slug": "k2-horizon-7b",
-      "aa_updated_at": "2026-10-07T11:52:53Z",
+      "aa_updated_at": "2026-10-07T15:50:42Z",
       "active_params_b": 0,
       "arch": "k2-horizon",
       "ctx_train": 524288,
@@ -2744,7 +2894,7 @@
       "experts": 0,
       "family": "Institute of Foundation Models",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:52:53Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:42Z",
       "hkv": 8,
       "kl": 128,
       "layers": 36,
@@ -2758,6 +2908,12 @@
           "name": "IQ2_M",
           "size_bytes": 3468647712,
           "size_gb": 3.23
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 3628326176,
+          "size_gb": 3.38
         },
         {
           "dynamic": false,
@@ -2827,6 +2983,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5896445216,
+          "size_gb": 5.49
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 6150561056,
           "size_gb": 5.73
@@ -2848,6 +3010,12 @@
           "name": "Q6_K_S",
           "size_bytes": 7526612256,
           "size_gb": 7.01
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 7809006880,
+          "size_gb": 7.27
         },
         {
           "dynamic": false,
@@ -2878,10 +3046,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 20.133,
-      "aa_output_tps": 321.373,
+      "aa_output_tps": 331.65,
       "aa_query": "InclusionAI Ling 3.0 Flash",
       "aa_slug": "ling-3-0-flash",
-      "aa_updated_at": "2026-10-07T11:52:57Z",
+      "aa_updated_at": "2026-10-07T15:50:48Z",
       "active_params_b": 0,
       "arch": "bailingmoe3",
       "ctx_train": 131072,
@@ -2892,7 +3060,7 @@
       "experts": 512,
       "family": "InclusionAI",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:52:57Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:48Z",
       "kl": 576,
       "kv_lora": 512,
       "layers": 42,
@@ -2964,6 +3132,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_K",
+          "size_bytes": 72336115840,
+          "size_gb": 67.37
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_S",
           "size_bytes": 74223552640,
           "size_gb": 69.13
@@ -3000,27 +3174,15 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 107512973568,
+          "size_gb": 100.13
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 133111334912,
           "size_gb": 123.97
-        },
-        {
-          "dynamic": false,
-          "name": "Q4_K_M",
-          "size_bytes": 154573257984,
-          "size_gb": 143.96
-        },
-        {
-          "dynamic": false,
-          "name": "Q5_K_M",
-          "size_bytes": 177790336224,
-          "size_gb": 165.58
-        },
-        {
-          "dynamic": false,
-          "name": "IQ4_XS",
-          "size_bytes": 209821491584,
-          "size_gb": 195.41
         },
         {
           "dynamic": false,
@@ -3031,7 +3193,7 @@
       ],
       "repo": "AtomicChat/Ling-3.0-flash-GGUF",
       "runnable": true,
-      "size_gb": 143.96,
+      "size_gb": 69.13,
       "speed": 100,
       "total_params_b": 0,
       "vl": 512
@@ -3039,10 +3201,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 18.229,
-      "aa_output_tps": 135.328,
+      "aa_output_tps": 135.779,
       "aa_query": "Alibaba Qwen3.6 35B A3B",
       "aa_slug": "qwen3-6-35b-a3b",
-      "aa_updated_at": "2026-10-07T11:53:06Z",
+      "aa_updated_at": "2026-10-07T15:50:57Z",
       "active_params_b": 0,
       "arch": "qwen35moe",
       "ctx_train": 262144,
@@ -3052,7 +3214,7 @@
       "exp_used": 8,
       "experts": 256,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-10-07T11:53:06Z",
+      "hf_quant_updated_at": "2026-10-07T15:50:57Z",
       "hkv": 2,
       "kl": 256,
       "layers": 40,
@@ -3123,6 +3285,18 @@
         },
         {
           "dynamic": true,
+          "name": "UD-IQ4_NL",
+          "size_bytes": 18040888288,
+          "size_gb": 16.8
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ4_NL_XL",
+          "size_bytes": 19500506080,
+          "size_gb": 18.16
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q4_K_S",
           "size_bytes": 20893015008,
           "size_gb": 19.46
@@ -3165,6 +3339,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 29308320736,
+          "size_gb": 27.3
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 31843777504,
           "size_gb": 29.66
@@ -3174,12 +3354,6 @@
           "name": "Q8_0",
           "size_bytes": 36903140320,
           "size_gb": 34.37
-        },
-        {
-          "dynamic": true,
-          "name": "UD-IQ4_NL",
-          "size_bytes": 37541394368,
-          "size_gb": 34.96
         },
         {
           "dynamic": true,
@@ -3204,10 +3378,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 17.748,
-      "aa_output_tps": 142.672,
+      "aa_output_tps": 141.358,
       "aa_query": "Alibaba Qwen3.5 122B A10B",
       "aa_slug": "qwen3-5-122b-a10b-non-reasoning",
-      "aa_updated_at": "2026-10-07T11:53:10Z",
+      "aa_updated_at": "2026-10-07T15:51:03Z",
       "active_params_b": 0,
       "arch": "qwen35moe",
       "ctx_train": 262144,
@@ -3217,7 +3391,7 @@
       "exp_used": 8,
       "experts": 256,
       "family": "Alibaba",
-      "hf_quant_updated_at": "2026-10-07T11:53:10Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:03Z",
       "hkv": 2,
       "kl": 256,
       "layers": 48,
@@ -3335,6 +3509,12 @@
           "size_gb": 85.61
         },
         {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 101009782432,
+          "size_gb": 94.07
+        },
+        {
           "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 112401249920,
@@ -3369,17 +3549,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 17.475,
-      "aa_output_tps": 105.839,
+      "aa_output_tps": 110.484,
       "aa_query": "Meta Muse Glimmer",
       "aa_slug": "muse-glimmer",
-      "aa_updated_at": "2026-10-07T11:53:13Z",
+      "aa_updated_at": "2026-10-07T15:51:07Z",
       "active_params_b": 0,
       "arch": "muse-glimmer",
       "ctx_train": 131072,
       "embd": 6656,
       "family": "Meta",
       "ff": 19968,
-      "hf_quant_updated_at": "2026-10-07T11:53:13Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:07Z",
       "hkv": 2,
       "kl": 128,
       "layers": 52,
@@ -3390,9 +3570,9 @@
       "quants": [
         {
           "dynamic": false,
-          "name": "BF16",
-          "size_bytes": 5125206176,
-          "size_gb": 4.77
+          "name": "Q2_K",
+          "size_bytes": 10686698784,
+          "size_gb": 9.95
         },
         {
           "dynamic": false,
@@ -3403,8 +3583,8 @@
         {
           "dynamic": false,
           "name": "Q4_K_M",
-          "size_bytes": 18458430400,
-          "size_gb": 17.19
+          "size_bytes": 16935291680,
+          "size_gb": 15.77
         },
         {
           "dynamic": false,
@@ -3414,20 +3594,20 @@
         },
         {
           "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 32342004416,
-          "size_gb": 30.12
+          "name": "Q6_K",
+          "size_bytes": 22867215392,
+          "size_gb": 21.3
         },
         {
           "dynamic": false,
-          "name": "F16",
-          "size_bytes": 113594057664,
-          "size_gb": 105.79
+          "name": "Q8_0",
+          "size_bytes": 29612958240,
+          "size_gb": 27.58
         }
       ],
       "repo": "DevQuasar/meta-models.Muse-Glimmer-30B-GGUF",
       "runnable": true,
-      "size_gb": 17.19,
+      "size_gb": 15.77,
       "speed": 100,
       "total_params_b": 0,
       "vl": 128
@@ -3438,7 +3618,7 @@
       "aa_output_tps": 0,
       "aa_query": "Google Gemma 4 26B A4B",
       "aa_slug": "gemma-4-26b-a4b",
-      "aa_updated_at": "2026-10-07T11:53:17Z",
+      "aa_updated_at": "2026-10-07T15:51:12Z",
       "active_params_b": 0,
       "arch": "gemma4",
       "ctx_train": 262144,
@@ -3448,7 +3628,7 @@
       "experts": 128,
       "family": "Google",
       "ff": 2112,
-      "hf_quant_updated_at": "2026-10-07T11:53:17Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:12Z",
       "kl": 512,
       "layers": 30,
       "moe": false,
@@ -3479,6 +3659,12 @@
           "name": "IQ2_M",
           "size_bytes": 10700622464,
           "size_gb": 9.97
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 10951927936,
+          "size_gb": 10.2
         },
         {
           "dynamic": false,
@@ -3543,14 +3729,20 @@
         {
           "dynamic": false,
           "name": "Q4_0",
-          "size_bytes": 15080530560,
-          "size_gb": 14.04
+          "size_bytes": 14759385216,
+          "size_gb": 13.75
         },
         {
           "dynamic": false,
           "name": "Q4_K_S",
           "size_bytes": 15844288640,
           "size_gb": 14.76
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 16144845952,
+          "size_gb": 15.04
         },
         {
           "dynamic": false,
@@ -3584,6 +3776,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 22862577280,
+          "size_gb": 21.29
+        },
+        {
+          "dynamic": false,
           "name": "Q6_K_L",
           "size_bytes": 23041359488,
           "size_gb": 21.46
@@ -3591,8 +3789,8 @@
         {
           "dynamic": false,
           "name": "Q8_0",
-          "size_bytes": 27321646720,
-          "size_gb": 25.45
+          "size_bytes": 26859861120,
+          "size_gb": 25.02
         },
         {
           "dynamic": false,
@@ -3614,7 +3812,7 @@
       "aa_output_tps": 0,
       "aa_query": "Institute of Foundation Models K2 Horizon 3.7B",
       "aa_slug": "k2-horizon-3-7b",
-      "aa_updated_at": "2026-10-07T11:53:23Z",
+      "aa_updated_at": "2026-10-07T15:51:19Z",
       "active_params_b": 0,
       "arch": "k2-horizon",
       "ctx_train": 524288,
@@ -3623,7 +3821,7 @@
       "experts": 0,
       "family": "Institute of Foundation Models",
       "ff": 10240,
-      "hf_quant_updated_at": "2026-10-07T11:53:23Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:19Z",
       "hkv": 8,
       "kl": 128,
       "layers": 36,
@@ -3637,6 +3835,12 @@
           "name": "IQ2_M",
           "size_bytes": 2021062944,
           "size_gb": 1.88
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 2064378144,
+          "size_gb": 1.92
         },
         {
           "dynamic": false,
@@ -3706,6 +3910,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 3335684384,
+          "size_gb": 3.11
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 3464728864,
           "size_gb": 3.23
@@ -3727,6 +3937,12 @@
           "name": "Q6_K_S",
           "size_bytes": 4233153824,
           "size_gb": 3.94
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 4388699424,
+          "size_gb": 4.09
         },
         {
           "dynamic": false,
@@ -3757,17 +3973,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 14.831,
-      "aa_output_tps": 74.588,
+      "aa_output_tps": 75.033,
       "aa_query": "IBM Granite 4.2 30B",
       "aa_slug": "granite-4-2-30b",
-      "aa_updated_at": "2026-10-07T11:53:29Z",
+      "aa_updated_at": "2026-10-07T15:51:25Z",
       "active_params_b": 0,
       "arch": "granite",
       "ctx_train": 131072,
       "embd": 4096,
       "family": "IBM",
       "ff": 32768,
-      "hf_quant_updated_at": "2026-10-07T11:53:29Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:25Z",
       "hkv": 8,
       "layers": 64,
       "moe": false,
@@ -3798,6 +4014,12 @@
           "name": "IQ2_M",
           "size_bytes": 10825888800,
           "size_gb": 10.08
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 11122897952,
+          "size_gb": 10.36
         },
         {
           "dynamic": false,
@@ -3885,6 +4107,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 18488488992,
+          "size_gb": 17.22
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 20259009568,
           "size_gb": 18.87
@@ -3900,6 +4128,12 @@
           "name": "Q5_K_L",
           "size_bytes": 21279208480,
           "size_gb": 19.82
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 24508953632,
+          "size_gb": 22.83
         },
         {
           "dynamic": false,
@@ -3929,17 +4163,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 14.669,
-      "aa_output_tps": 35.008,
+      "aa_output_tps": 34.954,
       "aa_query": "Google Gemma 4 31B",
       "aa_slug": "gemma-4-31b",
-      "aa_updated_at": "2026-10-07T11:53:33Z",
+      "aa_updated_at": "2026-10-07T15:51:30Z",
       "active_params_b": 0,
       "arch": "gemma4",
       "ctx_train": 262144,
       "embd": 5376,
       "family": "Google",
       "ff": 21504,
-      "hf_quant_updated_at": "2026-10-07T11:53:33Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:30Z",
       "kl": 512,
       "layers": 60,
       "moe": false,
@@ -3970,6 +4204,12 @@
           "name": "IQ2_S",
           "size_bytes": 12075358560,
           "size_gb": 11.25
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 12631624032,
+          "size_gb": 11.76
         },
         {
           "dynamic": false,
@@ -4039,21 +4279,27 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_0",
+          "size_bytes": 18076264800,
+          "size_gb": 16.83
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_S",
           "size_bytes": 18195655008,
           "size_gb": 16.95
         },
         {
           "dynamic": false,
-          "name": "Q4_0",
-          "size_bytes": 18425426784,
-          "size_gb": 17.16
-        },
-        {
-          "dynamic": false,
           "name": "Q4_K_M",
           "size_bytes": 19598489952,
           "size_gb": 18.25
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 19765274976,
+          "size_gb": 18.41
         },
         {
           "dynamic": false,
@@ -4081,6 +4327,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 26726721888,
+          "size_gb": 24.89
+        },
+        {
+          "dynamic": false,
           "name": "Q6_K_L",
           "size_bytes": 27068033376,
           "size_gb": 25.21
@@ -4088,8 +4340,8 @@
         {
           "dynamic": false,
           "name": "Q8_0",
-          "size_bytes": 33150382944,
-          "size_gb": 30.87
+          "size_bytes": 32635677024,
+          "size_gb": 30.39
         },
         {
           "dynamic": false,
@@ -4108,17 +4360,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 14.189,
-      "aa_output_tps": 169.993,
+      "aa_output_tps": 169.994,
       "aa_query": "Mistral Medium 3.5",
       "aa_slug": "mistral-medium-3-5",
-      "aa_updated_at": "2026-10-07T11:53:37Z",
+      "aa_updated_at": "2026-10-07T15:51:34Z",
       "active_params_b": 0,
       "arch": "mistral3",
       "ctx_train": 262144,
       "embd": 12288,
       "family": "Mistral",
       "ff": 28672,
-      "hf_quant_updated_at": "2026-10-07T11:53:37Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:34Z",
       "hkv": 8,
       "kl": 128,
       "layers": 88,
@@ -4138,6 +4390,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 44109112416,
           "size_gb": 41.08
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 46590698592,
+          "size_gb": 43.39
         },
         {
           "dynamic": false,
@@ -4213,6 +4471,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 78471079328,
+          "size_gb": 73.08
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 86184404416,
           "size_gb": 80.27
@@ -4228,6 +4492,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 88382088608,
           "size_gb": 82.31
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 102575220288,
+          "size_gb": 95.53
         },
         {
           "dynamic": true,
@@ -4267,14 +4537,14 @@
       "aa_output_tps": 113.206,
       "aa_query": "Google Gemma 4 12B",
       "aa_slug": "gemma-4-12b",
-      "aa_updated_at": "2026-10-07T11:53:40Z",
+      "aa_updated_at": "2026-10-07T15:51:39Z",
       "active_params_b": 0,
       "arch": "gemma4",
       "ctx_train": 262144,
       "embd": 3840,
       "family": "Google",
       "ff": 15360,
-      "hf_quant_updated_at": "2026-10-07T11:53:40Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:39Z",
       "kl": 512,
       "layers": 48,
       "moe": false,
@@ -4299,17 +4569,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 13.266,
-      "aa_output_tps": 82.235,
+      "aa_output_tps": 88.332,
       "aa_query": "Alibaba Qwen3.5 9B",
       "aa_slug": "qwen3-5-9b-non-reasoning",
-      "aa_updated_at": "2026-10-07T11:53:48Z",
+      "aa_updated_at": "2026-10-07T15:51:47Z",
       "active_params_b": 0,
       "arch": "qwen35",
       "ctx_train": 262144,
       "embd": 4096,
       "family": "Alibaba",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:53:48Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:47Z",
       "hkv": 4,
       "kl": 256,
       "layers": 32,
@@ -4391,6 +4661,12 @@
           "size_gb": 5.29
         },
         {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5837251808,
+          "size_gb": 5.44
+        },
+        {
           "dynamic": true,
           "name": "UD-Q4_K_XL",
           "size_bytes": 5966095584,
@@ -4413,6 +4689,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 6743680224,
           "size_gb": 6.28
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 7458301152,
+          "size_gb": 6.95
         },
         {
           "dynamic": true,
@@ -4442,7 +4724,7 @@
       "repo": "unsloth/Qwen3.5-9B-GGUF",
       "runnable": true,
       "size_gb": 5.29,
-      "speed": 82,
+      "speed": 88,
       "total_params_b": 0,
       "vl": 256
     },
@@ -4452,14 +4734,14 @@
       "aa_output_tps": 17.596,
       "aa_query": "Alibaba Qwen3.5 4B",
       "aa_slug": "qwen3-5-4b",
-      "aa_updated_at": "2026-10-07T11:53:57Z",
+      "aa_updated_at": "2026-10-07T15:51:58Z",
       "active_params_b": 0,
       "arch": "qwen35",
       "ctx_train": 262144,
       "embd": 2560,
       "family": "Alibaba",
       "ff": 9216,
-      "hf_quant_updated_at": "2026-10-07T11:53:57Z",
+      "hf_quant_updated_at": "2026-10-07T15:51:58Z",
       "hkv": 4,
       "kl": 256,
       "layers": 32,
@@ -4541,6 +4823,12 @@
           "size_gb": 2.55
         },
         {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2784416928,
+          "size_gb": 2.59
+        },
+        {
           "dynamic": true,
           "name": "UD-Q4_K_XL",
           "size_bytes": 2912109728,
@@ -4563,6 +4851,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 3250869408,
           "size_gb": 3.03
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 3525956768,
+          "size_gb": 3.28
         },
         {
           "dynamic": true,
@@ -4602,7 +4896,7 @@
       "aa_output_tps": 303.753,
       "aa_query": "NVIDIA Nemotron 3.5 Lightning",
       "aa_slug": "nemotron-3-5-lightning",
-      "aa_updated_at": "2026-10-07T11:54:01Z",
+      "aa_updated_at": "2026-10-07T15:52:02Z",
       "active_params_b": 0,
       "arch": "nemotron_h_moe",
       "ctx_train": 1048576,
@@ -4612,7 +4906,7 @@
       "exp_used": 6,
       "experts": 128,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:54:01Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:02Z",
       "kl": 128,
       "layers": 53,
       "moe": false,
@@ -4742,7 +5036,7 @@
       "aa_output_tps": 151.487,
       "aa_query": "NVIDIA Nemotron 3 Super 120B A12B",
       "aa_slug": "nvidia-nemotron-3-super-120b-a12b",
-      "aa_updated_at": "2026-10-07T11:54:05Z",
+      "aa_updated_at": "2026-10-07T15:52:07Z",
       "active_params_b": 0,
       "arch": "nemotron_h_moe",
       "ctx_train": 1048576,
@@ -4752,7 +5046,7 @@
       "exp_used": 22,
       "experts": 512,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:54:05Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:07Z",
       "kl": 128,
       "layers": 88,
       "moe": false,
@@ -4870,6 +5164,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 114751457216,
+          "size_gb": 106.87
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 117853407200,
           "size_gb": 109.76
@@ -4906,14 +5206,14 @@
       "aa_output_tps": 0,
       "aa_query": "OpenBMB MiniCPM5 2B",
       "aa_slug": "minicpm5-2b",
-      "aa_updated_at": "2026-10-07T11:54:09Z",
+      "aa_updated_at": "2026-10-07T15:52:13Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 131072,
       "embd": 2048,
       "family": "OpenBMB",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:54:09Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:13Z",
       "hkv": 2,
       "kl": 128,
       "layers": 42,
@@ -4922,6 +5222,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 21,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1039928256,
+          "size_gb": 0.97
+        },
         {
           "dynamic": false,
           "name": "Q3_K_M",
@@ -4942,15 +5248,15 @@
         },
         {
           "dynamic": false,
-          "name": "Q8_0",
-          "size_bytes": 2679712704,
-          "size_gb": 2.5
+          "name": "Q6_K",
+          "size_bytes": 2070227904,
+          "size_gb": 1.93
         },
         {
           "dynamic": false,
-          "name": "F16",
-          "size_bytes": 10450675328,
-          "size_gb": 9.73
+          "name": "Q8_0",
+          "size_bytes": 2679712704,
+          "size_gb": 2.5
         }
       ],
       "repo": "DevQuasar/openbmb.MiniCPM5-2B-GGUF",
@@ -4966,7 +5272,7 @@
       "aa_output_tps": 0,
       "aa_query": "NVIDIA Nemotron Cascade 2 30B A3B",
       "aa_slug": "nemotron-cascade-2-30b-a3b",
-      "aa_updated_at": "2026-10-07T11:54:16Z",
+      "aa_updated_at": "2026-10-07T15:52:22Z",
       "active_params_b": 0,
       "arch": "nemotron_h_moe",
       "ctx_train": 1048576,
@@ -4976,7 +5282,7 @@
       "exp_used": 6,
       "experts": 128,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:54:16Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:22Z",
       "kl": 128,
       "layers": 52,
       "moe": false,
@@ -5007,6 +5313,12 @@
           "name": "IQ2_M",
           "size_bytes": 18102874560,
           "size_gb": 16.86
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 18161537472,
+          "size_gb": 16.91
         },
         {
           "dynamic": false,
@@ -5076,6 +5388,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 20120369088,
+          "size_gb": 18.74
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_S",
           "size_bytes": 22447521216,
           "size_gb": 20.91
@@ -5112,6 +5430,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 33553498560,
+          "size_gb": 31.25
+        },
+        {
+          "dynamic": false,
           "name": "Q6_K_L",
           "size_bytes": 33553498560,
           "size_gb": 31.25
@@ -5139,10 +5463,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 11.603,
-      "aa_output_tps": 189.476,
+      "aa_output_tps": 184.359,
       "aa_query": "OpenAI gpt oss 120b",
       "aa_slug": "gpt-oss-120b",
-      "aa_updated_at": "2026-10-07T11:54:20Z",
+      "aa_updated_at": "2026-10-07T15:52:27Z",
       "active_params_b": 0,
       "arch": "gpt-oss",
       "ctx_train": 131072,
@@ -5152,7 +5476,7 @@
       "experts": 128,
       "family": "OpenAI",
       "ff": 2880,
-      "hf_quant_updated_at": "2026-10-07T11:54:20Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:27Z",
       "hkv": 8,
       "kl": 64,
       "layers": 36,
@@ -5193,6 +5517,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 62706284224,
+          "size_gb": 58.4
+        },
+        {
+          "dynamic": false,
           "name": "Q3_K_M",
           "size_bytes": 62706468544,
           "size_gb": 58.4
@@ -5208,6 +5538,12 @@
           "name": "IQ4_XS",
           "size_bytes": 62709601984,
           "size_gb": 58.4
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 62739162304,
+          "size_gb": 58.43
         },
         {
           "dynamic": false,
@@ -5232,6 +5568,12 @@
           "name": "Q4_K_L",
           "size_bytes": 63058888384,
           "size_gb": 58.73
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 63284496064,
+          "size_gb": 58.94
         },
         {
           "dynamic": false,
@@ -5265,14 +5607,14 @@
       "aa_output_tps": 0,
       "aa_query": "Institute of Foundation Models K2 Think V2",
       "aa_slug": "k2-think-v2",
-      "aa_updated_at": "2026-10-07T11:54:23Z",
+      "aa_updated_at": "2026-10-07T15:52:30Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 262144,
       "embd": 8192,
       "family": "Institute of Foundation Models",
       "ff": 28672,
-      "hf_quant_updated_at": "2026-10-07T11:54:23Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:30Z",
       "hkv": 8,
       "kl": 128,
       "layers": 80,
@@ -5281,6 +5623,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 19,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 59529628480,
+          "size_gb": 55.44
+        },
         {
           "dynamic": false,
           "name": "F32",
@@ -5301,7 +5649,7 @@
       "aa_output_tps": 0,
       "aa_query": "LongCat Flash Lite",
       "aa_slug": "longcat-flash-lite",
-      "aa_updated_at": "2026-10-07T11:54:25Z",
+      "aa_updated_at": "2026-10-07T15:52:33Z",
       "active_params_b": 0,
       "arch": "longcat-flash-ngram",
       "ctx_train": 327680,
@@ -5311,7 +5659,7 @@
       "experts": 256,
       "family": "LongCat",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:54:25Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:33Z",
       "hkv": 1,
       "kl": 576,
       "kv_lora": 512,
@@ -5343,6 +5691,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 56284972352,
+          "size_gb": 52.42
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 72871665728,
           "size_gb": 67.87
@@ -5367,14 +5721,14 @@
       "aa_output_tps": 47.527,
       "aa_query": "IBM Granite 4.2 8B",
       "aa_slug": "granite-4-2-8b",
-      "aa_updated_at": "2026-10-07T11:54:37Z",
+      "aa_updated_at": "2026-10-07T15:52:46Z",
       "active_params_b": 0,
       "arch": "granite",
       "ctx_train": 131072,
       "embd": 4096,
       "family": "IBM",
       "ff": 12800,
-      "hf_quant_updated_at": "2026-10-07T11:54:37Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:46Z",
       "hkv": 8,
       "layers": 40,
       "moe": false,
@@ -5387,6 +5741,12 @@
           "name": "IQ2_M",
           "size_bytes": 3510387104,
           "size_gb": 3.27
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 3577463200,
+          "size_gb": 3.33
         },
         {
           "dynamic": false,
@@ -5468,6 +5828,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5645255072,
+          "size_gb": 5.26
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 5844353440,
           "size_gb": 5.44
@@ -5489,6 +5855,12 @@
           "name": "Q5_K_L",
           "size_bytes": 6663553440,
           "size_gb": 6.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 7521223072,
+          "size_gb": 7.0
         },
         {
           "dynamic": false,
@@ -5518,10 +5890,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 11.064,
-      "aa_output_tps": 57.386,
+      "aa_output_tps": 58.269,
       "aa_query": "InclusionAI Ling 3.0 Tiny",
       "aa_slug": "ling-3-0-tiny",
-      "aa_updated_at": "2026-10-07T11:54:41Z",
+      "aa_updated_at": "2026-10-07T15:52:50Z",
       "active_params_b": 0,
       "arch": "bailingmoe3",
       "ctx_train": 131072,
@@ -5532,7 +5904,7 @@
       "experts": 128,
       "family": "InclusionAI",
       "ff": 4608,
-      "hf_quant_updated_at": "2026-10-07T11:54:41Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:50Z",
       "kl": 576,
       "kv_lora": 512,
       "layers": 24,
@@ -5548,6 +5920,12 @@
           "name": "IQ2_M",
           "size_bytes": 2827455808,
           "size_gb": 2.63
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 3000103360,
+          "size_gb": 2.79
         },
         {
           "dynamic": false,
@@ -5629,6 +6007,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5077992640,
+          "size_gb": 4.73
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 5096544448,
           "size_gb": 4.75
@@ -5653,6 +6037,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 6839076160,
+          "size_gb": 6.37
+        },
+        {
+          "dynamic": false,
           "name": "Q6_K_L",
           "size_bytes": 6956021056,
           "size_gb": 6.48
@@ -5673,7 +6063,7 @@
       "repo": "bartowski/Ling-3.0-tiny-GGUF",
       "runnable": true,
       "size_gb": 4.58,
-      "speed": 57,
+      "speed": 58,
       "total_params_b": 0,
       "vl": 128
     },
@@ -5683,14 +6073,14 @@
       "aa_output_tps": 0,
       "aa_query": "AI9Stars G9v3 3B",
       "aa_slug": "g9v3-3b",
-      "aa_updated_at": "2026-10-07T11:54:45Z",
+      "aa_updated_at": "2026-10-07T15:52:55Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 131072,
       "embd": 2048,
       "family": "AI9Stars",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:54:45Z",
+      "hf_quant_updated_at": "2026-10-07T15:52:55Z",
       "hkv": 2,
       "kl": 128,
       "layers": 52,
@@ -5704,6 +6094,12 @@
           "name": "IQ2_M",
           "size_bytes": 1233615424,
           "size_gb": 1.15
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1266866752,
+          "size_gb": 1.18
         },
         {
           "dynamic": false,
@@ -5785,6 +6181,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 1947310656,
+          "size_gb": 1.81
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 2101041728,
           "size_gb": 1.96
@@ -5806,6 +6208,12 @@
           "name": "Q5_K_L",
           "size_bytes": 2353437248,
           "size_gb": 2.19
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 2546604608,
+          "size_gb": 2.37
         },
         {
           "dynamic": false,
@@ -5836,10 +6244,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 10.824,
-      "aa_output_tps": 361.582,
+      "aa_output_tps": 370.563,
       "aa_query": "Arcee AI Trinity Large Thinking",
       "aa_slug": "trinity-large-thinking",
-      "aa_updated_at": "2026-10-07T11:54:49Z",
+      "aa_updated_at": "2026-10-07T15:53:00Z",
       "active_params_b": 0,
       "arch": "afmoe",
       "ctx_train": 262144,
@@ -5849,7 +6257,7 @@
       "experts": 256,
       "family": "Arcee AI",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:54:49Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:00Z",
       "hkv": 8,
       "kl": 128,
       "layers": 60,
@@ -5894,6 +6302,12 @@
           "name": "IQ2_M",
           "size_bytes": 133011136416,
           "size_gb": 123.88
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 139221295008,
+          "size_gb": 129.66
         },
         {
           "dynamic": false,
@@ -5981,6 +6395,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 250117374208,
+          "size_gb": 232.94
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 274892145056,
           "size_gb": 256.01
@@ -5996,6 +6416,12 @@
           "name": "Q5_K_L",
           "size_bytes": 283986653600,
           "size_gb": 264.48
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 343236219360,
+          "size_gb": 319.66
         },
         {
           "dynamic": false,
@@ -6023,7 +6449,7 @@
       "aa_output_tps": 0,
       "aa_query": "Prime Intellect INTELLECT 3",
       "aa_slug": "intellect-3",
-      "aa_updated_at": "2026-10-07T11:54:53Z",
+      "aa_updated_at": "2026-10-07T15:53:05Z",
       "active_params_b": 0,
       "arch": "glm4moe",
       "ctx_train": 131072,
@@ -6033,7 +6459,7 @@
       "experts": 128,
       "family": "Prime Intellect",
       "ff": 10944,
-      "hf_quant_updated_at": "2026-10-07T11:54:53Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:05Z",
       "hkv": 8,
       "kl": 128,
       "layers": 46,
@@ -6078,6 +6504,12 @@
           "name": "IQ2_M",
           "size_bytes": 43226846016,
           "size_gb": 40.26
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 44712219456,
+          "size_gb": 41.64
         },
         {
           "dynamic": false,
@@ -6153,6 +6585,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 67280516128,
+          "size_gb": 62.66
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_M",
           "size_bytes": 71358092288,
           "size_gb": 66.46
@@ -6177,6 +6615,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 96031286400,
+          "size_gb": 89.44
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 113612256128,
           "size_gb": 105.81
@@ -6195,7 +6639,7 @@
       "aa_output_tps": 0,
       "aa_query": "Upstage Solar Open 100B",
       "aa_slug": "solar-open-100b-reasoning",
-      "aa_updated_at": "2026-10-07T11:54:56Z",
+      "aa_updated_at": "2026-10-07T15:53:09Z",
       "active_params_b": 0,
       "arch": "glm4moe",
       "ctx_train": 131072,
@@ -6205,7 +6649,7 @@
       "experts": 128,
       "family": "Upstage",
       "ff": 10240,
-      "hf_quant_updated_at": "2026-10-07T11:54:56Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:09Z",
       "hkv": 8,
       "kl": 128,
       "layers": 48,
@@ -6220,6 +6664,12 @@
           "name": "IQ2_XXS",
           "size_bytes": 27175972864,
           "size_gb": 25.31
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 37689462528,
+          "size_gb": 35.1
         },
         {
           "dynamic": false,
@@ -6241,6 +6691,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 84296569248,
+          "size_gb": 78.51
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 109151359552,
           "size_gb": 101.66
@@ -6256,10 +6712,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 10.251,
-      "aa_output_tps": 238.579,
+      "aa_output_tps": 239.744,
       "aa_query": "NVIDIA Nemotron 3 Nano Omni 30B A3B Reasoning",
       "aa_slug": "nemotron-3-nano-omni-30b-a3b",
-      "aa_updated_at": "2026-10-07T11:54:59Z",
+      "aa_updated_at": "2026-10-07T15:53:14Z",
       "active_params_b": 0,
       "arch": "nemotron_h_moe",
       "ctx_train": 1048576,
@@ -6269,7 +6725,7 @@
       "exp_used": 6,
       "experts": 128,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:54:59Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:14Z",
       "kl": 128,
       "layers": 52,
       "moe": false,
@@ -6306,6 +6762,18 @@
           "name": "UD-IQ3_XXS",
           "size_bytes": 19459349952,
           "size_gb": 18.12
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ4_NL",
+          "size_bytes": 19536678336,
+          "size_gb": 18.19
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ4_NL_XL",
+          "size_bytes": 19536678336,
+          "size_gb": 18.19
         },
         {
           "dynamic": true,
@@ -6375,6 +6843,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 33585499584,
+          "size_gb": 31.28
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 33585499584,
           "size_gb": 31.28
@@ -6384,12 +6858,6 @@
           "name": "UD-Q8_K_XL",
           "size_bytes": 35400222144,
           "size_gb": 32.97
-        },
-        {
-          "dynamic": true,
-          "name": "UD-IQ4_NL",
-          "size_bytes": 39073356672,
-          "size_gb": 36.39
         }
       ],
       "repo": "unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF",
@@ -6405,7 +6873,7 @@
       "aa_output_tps": 44.54,
       "aa_query": "Meta Llama 4 Maverick",
       "aa_slug": "llama-4-maverick",
-      "aa_updated_at": "2026-10-07T11:55:04Z",
+      "aa_updated_at": "2026-10-07T15:53:19Z",
       "active_params_b": 0,
       "arch": "llama4",
       "ctx_train": 1048576,
@@ -6415,7 +6883,7 @@
       "experts": 128,
       "family": "Meta",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:55:04Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:19Z",
       "hkv": 8,
       "kl": 128,
       "layers": 48,
@@ -6441,6 +6909,12 @@
           "name": "UD-IQ2_XXS",
           "size_bytes": 134055135232,
           "size_gb": 124.85
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 145645120544,
+          "size_gb": 135.64
         },
         {
           "dynamic": false,
@@ -6516,6 +6990,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 250714806624,
+          "size_gb": 233.5
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 275693627776,
           "size_gb": 256.76
@@ -6533,10 +7013,10 @@
           "size_gb": 267.3
         },
         {
-          "dynamic": true,
-          "name": "UD-IQ2_M",
-          "size_bytes": 293827825664,
-          "size_gb": 273.65
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 328773622752,
+          "size_gb": 306.19
         },
         {
           "dynamic": true,
@@ -6573,10 +7053,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 9.953,
-      "aa_output_tps": 239.519,
+      "aa_output_tps": 249.941,
       "aa_query": "OpenAI gpt oss 20b",
       "aa_slug": "gpt-oss-20b-low",
-      "aa_updated_at": "2026-10-07T11:55:08Z",
+      "aa_updated_at": "2026-10-07T15:53:24Z",
       "active_params_b": 0,
       "arch": "gpt-oss",
       "ctx_train": 131072,
@@ -6586,7 +7066,7 @@
       "experts": 32,
       "family": "OpenAI",
       "ff": 2880,
-      "hf_quant_updated_at": "2026-10-07T11:55:08Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:24Z",
       "hkv": 8,
       "kl": 64,
       "layers": 24,
@@ -6657,6 +7137,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 11559002176,
+          "size_gb": 10.77
+        },
+        {
+          "dynamic": false,
           "name": "Q3_K_M",
           "size_bytes": 11559186496,
           "size_gb": 10.77
@@ -6672,6 +7158,12 @@
           "name": "IQ4_XS",
           "size_bytes": 11561214016,
           "size_gb": 10.77
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 11592986176,
+          "size_gb": 10.8
         },
         {
           "dynamic": false,
@@ -6723,6 +7215,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 12040998976,
+          "size_gb": 11.21
+        },
+        {
+          "dynamic": false,
           "name": "Q6_K_L",
           "size_bytes": 12040998976,
           "size_gb": 11.21
@@ -6756,10 +7254,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 9.915,
-      "aa_output_tps": 70.657,
+      "aa_output_tps": 82.642,
       "aa_query": "Cohere North Mini Code",
       "aa_slug": "north-mini-code",
-      "aa_updated_at": "2026-10-07T11:55:12Z",
+      "aa_updated_at": "2026-10-07T15:53:29Z",
       "active_params_b": 0,
       "arch": "cohere2moe",
       "ctx_train": 500000,
@@ -6769,7 +7267,7 @@
       "experts": 128,
       "family": "Cohere",
       "ff": 3072,
-      "hf_quant_updated_at": "2026-10-07T11:55:12Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:29Z",
       "hkv": 4,
       "kl": 128,
       "layers": 49,
@@ -6883,6 +7381,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 25513517152,
+          "size_gb": 23.76
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 27853938784,
           "size_gb": 25.94
@@ -6909,7 +7413,7 @@
       "repo": "unsloth/North-Mini-Code-1.0-GGUF",
       "runnable": true,
       "size_gb": 17.88,
-      "speed": 71,
+      "speed": 83,
       "total_params_b": 0,
       "vl": 128
     },
@@ -6919,7 +7423,7 @@
       "aa_output_tps": 176.754,
       "aa_query": "Alibaba Qwen3 Next 80B A3B Instruct",
       "aa_slug": "qwen3-next-80b-a3b-instruct",
-      "aa_updated_at": "2026-10-07T11:55:19Z",
+      "aa_updated_at": "2026-10-07T15:53:36Z",
       "active_params_b": 0,
       "arch": "qwen3next",
       "ctx_train": 262144,
@@ -6930,7 +7434,7 @@
       "experts": 512,
       "family": "Alibaba",
       "ff": 5120,
-      "hf_quant_updated_at": "2026-10-07T11:55:19Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:36Z",
       "hkv": 2,
       "kl": 256,
       "layers": 48,
@@ -6941,7 +7445,7 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
+          "name": "UD-TQ1_0",
           "size_bytes": 20466297632,
           "size_gb": 19.06
         },
@@ -6962,6 +7466,12 @@
           "name": "UD-IQ2_XXS",
           "size_bytes": 26211158816,
           "size_gb": 24.41
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 29171165984,
+          "size_gb": 27.17
         },
         {
           "dynamic": false,
@@ -7037,6 +7547,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 50054077408,
+          "size_gb": 46.62
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 55014972384,
           "size_gb": 51.24
@@ -7052,6 +7568,12 @@
           "name": "Q5_K_M",
           "size_bytes": 56807578592,
           "size_gb": 52.91
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 65540654048,
+          "size_gb": 61.04
         },
         {
           "dynamic": true,
@@ -7091,7 +7613,7 @@
       "aa_output_tps": 0,
       "aa_query": "Google DiffusionGemma 26B A4B",
       "aa_slug": "diffusiongemma-26b-a4b",
-      "aa_updated_at": "2026-10-07T11:55:22Z",
+      "aa_updated_at": "2026-10-07T15:53:39Z",
       "active_params_b": 0,
       "arch": "diffusion-gemma",
       "ctx_train": 262144,
@@ -7101,7 +7623,7 @@
       "experts": 128,
       "family": "Google",
       "ff": 2112,
-      "hf_quant_updated_at": "2026-10-07T11:55:22Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:39Z",
       "kl": 512,
       "layers": 30,
       "moe": false,
@@ -7120,6 +7642,12 @@
           "name": "Q5_K_M",
           "size_bytes": 19145543264,
           "size_gb": 17.83
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 22654490464,
+          "size_gb": 21.1
         },
         {
           "dynamic": false,
@@ -7144,10 +7672,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 9.266,
-      "aa_output_tps": 81.198,
+      "aa_output_tps": 81.136,
       "aa_query": "Mistral Large 3",
       "aa_slug": "mistral-large-3",
-      "aa_updated_at": "2026-10-07T11:55:26Z",
+      "aa_updated_at": "2026-10-07T15:53:45Z",
       "active_params_b": 0,
       "arch": "deepseek2",
       "ctx_train": 294912,
@@ -7157,7 +7685,7 @@
       "experts": 128,
       "family": "Mistral",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:55:26Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:45Z",
       "hkv": 1,
       "kl": 576,
       "kv_lora": 512,
@@ -7171,7 +7699,7 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
+          "name": "UD-TQ1_0",
           "size_bytes": 168604875200,
           "size_gb": 157.03
         },
@@ -7198,6 +7726,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 235376884672,
           "size_gb": 219.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 247110065152,
+          "size_gb": 230.14
         },
         {
           "dynamic": false,
@@ -7273,6 +7807,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 422366526912,
+          "size_gb": 393.36
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 464446570080,
           "size_gb": 432.55
@@ -7288,6 +7828,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 479797460544,
           "size_gb": 446.85
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 553317879616,
+          "size_gb": 515.32
         },
         {
           "dynamic": true,
@@ -7324,10 +7870,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 9.237,
-      "aa_output_tps": 97.826,
+      "aa_output_tps": 99.816,
       "aa_query": "Alibaba Qwen3 Coder Next",
       "aa_slug": "qwen3-coder-next",
-      "aa_updated_at": "2026-10-07T11:55:29Z",
+      "aa_updated_at": "2026-10-07T15:53:50Z",
       "active_params_b": 0,
       "arch": "qwen3next",
       "ctx_train": 262144,
@@ -7338,7 +7884,7 @@
       "experts": 512,
       "family": "Alibaba",
       "ff": 5120,
-      "hf_quant_updated_at": "2026-10-07T11:55:29Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:50Z",
       "hkv": 2,
       "kl": 256,
       "layers": 48,
@@ -7349,7 +7895,7 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
+          "name": "UD-TQ1_0",
           "size_bytes": 18941835296,
           "size_gb": 17.64
         },
@@ -7388,6 +7934,12 @@
           "name": "UD-IQ3_XXS",
           "size_bytes": 28482506752,
           "size_gb": 26.53
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 29224450080,
+          "size_gb": 27.22
         },
         {
           "dynamic": false,
@@ -7499,6 +8051,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 50057423200,
+          "size_gb": 46.62
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 55055280480,
           "size_gb": 51.27
@@ -7528,6 +8086,18 @@
           "size_gb": 55.45
         },
         {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 65613992288,
+          "size_gb": 61.11
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 65789092160,
+          "size_gb": 61.27
+        },
+        {
           "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 73118769504,
@@ -7555,24 +8125,24 @@
       "repo": "unsloth/Qwen3-Coder-Next-GGUF",
       "runnable": true,
       "size_gb": 45.92,
-      "speed": 98,
+      "speed": 100,
       "total_params_b": 0,
       "vl": 256
     },
     {
       "aa_id": "",
       "aa_intelligence_index": 9.056,
-      "aa_output_tps": 214.294,
+      "aa_output_tps": 214.817,
       "aa_query": "IBM Granite 4.2 3B",
       "aa_slug": "granite-4-2-3b",
-      "aa_updated_at": "2026-10-07T11:55:33Z",
+      "aa_updated_at": "2026-10-07T15:53:58Z",
       "active_params_b": 0,
       "arch": "granite",
       "ctx_train": 131072,
       "embd": 2560,
       "family": "IBM",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:55:33Z",
+      "hf_quant_updated_at": "2026-10-07T15:53:58Z",
       "hkv": 8,
       "layers": 40,
       "moe": false,
@@ -7585,6 +8155,12 @@
           "name": "IQ2_M",
           "size_bytes": 1485269408,
           "size_gb": 1.38
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1520249248,
+          "size_gb": 1.42
         },
         {
           "dynamic": false,
@@ -7666,6 +8242,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2367383968,
+          "size_gb": 2.2
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 2507794848,
           "size_gb": 2.34
@@ -7687,6 +8269,12 @@
           "name": "Q5_K_L",
           "size_bytes": 2831378848,
           "size_gb": 2.64
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 3120638368,
+          "size_gb": 2.91
         },
         {
           "dynamic": false,
@@ -7719,14 +8307,14 @@
       "aa_output_tps": 0,
       "aa_query": "Trillion Labs Tri 21B Think",
       "aa_slug": "tri-21b-think-v0-5",
-      "aa_updated_at": "2026-10-07T11:55:37Z",
+      "aa_updated_at": "2026-10-07T15:54:04Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 32768,
       "embd": 5120,
       "family": "Trillion Labs",
       "ff": 27392,
-      "hf_quant_updated_at": "2026-10-07T11:55:37Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:04Z",
       "hkv": 8,
       "kl": 160,
       "layers": 40,
@@ -7755,6 +8343,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 17010085952,
+          "size_gb": 15.84
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 22029447232,
           "size_gb": 20.52
@@ -7776,17 +8370,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 8.915,
-      "aa_output_tps": 29.307,
+      "aa_output_tps": 28.37,
       "aa_query": "Google Gemma 4 E4B",
       "aa_slug": "gemma-4-e4b",
-      "aa_updated_at": "2026-10-07T11:55:42Z",
+      "aa_updated_at": "2026-10-07T15:54:10Z",
       "active_params_b": 0,
       "arch": "gemma4",
       "ctx_train": 131072,
       "embd": 2560,
       "family": "Google",
       "ff": 10240,
-      "hf_quant_updated_at": "2026-10-07T11:55:42Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:10Z",
       "hkv": 2,
       "kl": 512,
       "layers": 42,
@@ -7800,6 +8394,12 @@
           "name": "IQ2_M",
           "size_bytes": 3959908832,
           "size_gb": 3.69
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 4458093024,
+          "size_gb": 4.15
         },
         {
           "dynamic": false,
@@ -7869,6 +8469,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5458479584,
+          "size_gb": 5.08
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 5701290464,
           "size_gb": 5.31
@@ -7890,6 +8496,12 @@
           "name": "Q4_K_L",
           "size_bytes": 6250322400,
           "size_gb": 5.82
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 6329954784,
+          "size_gb": 5.9
         },
         {
           "dynamic": false,
@@ -7919,17 +8531,17 @@
       "repo": "bartowski/google_gemma-4-E4B-it-GGUF",
       "runnable": true,
       "size_gb": 5.03,
-      "speed": 29,
+      "speed": 28,
       "total_params_b": 0,
       "vl": 512
     },
     {
       "aa_id": "",
       "aa_intelligence_index": 8.896,
-      "aa_output_tps": 183.892,
+      "aa_output_tps": 175.681,
       "aa_query": "NVIDIA Nemotron 3 Nano 30B A3B",
       "aa_slug": "nvidia-nemotron-3-nano-30b-a3b-reasoning",
-      "aa_updated_at": "2026-10-07T11:55:46Z",
+      "aa_updated_at": "2026-10-07T15:54:15Z",
       "active_params_b": 0,
       "arch": "nemotron_h_moe",
       "ctx_train": 1048576,
@@ -7939,7 +8551,7 @@
       "exp_used": 6,
       "experts": 128,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:55:46Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:15Z",
       "kl": 128,
       "layers": 52,
       "moe": false,
@@ -7970,6 +8582,12 @@
           "name": "IQ2_M",
           "size_bytes": 18034839776,
           "size_gb": 16.8
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 18082750688,
+          "size_gb": 16.84
         },
         {
           "dynamic": false,
@@ -8039,6 +8657,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 20055946976,
+          "size_gb": 18.68
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_S",
           "size_bytes": 22385593568,
           "size_gb": 20.85
@@ -8075,6 +8699,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 33433338080,
+          "size_gb": 31.14
+        },
+        {
+          "dynamic": false,
           "name": "Q6_K_L",
           "size_bytes": 33433338080,
           "size_gb": 31.14
@@ -8105,14 +8735,14 @@
       "aa_output_tps": 0,
       "aa_query": "OpenBMB MiniCPM5 1B",
       "aa_slug": "minicpm5-1b",
-      "aa_updated_at": "2026-10-07T11:55:48Z",
+      "aa_updated_at": "2026-10-07T15:54:18Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 131072,
       "embd": 1536,
       "family": "OpenBMB",
       "ff": 4608,
-      "hf_quant_updated_at": "2026-10-07T11:55:48Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:18Z",
       "hkv": 2,
       "kl": 128,
       "layers": 24,
@@ -8153,10 +8783,10 @@
       "aa_output_tps": 0,
       "aa_query": "Sarvam 105B",
       "aa_slug": "sarvam-105b",
-      "aa_updated_at": "2026-10-07T11:55:52Z",
+      "aa_updated_at": "2026-10-07T15:54:25Z",
       "active_params_b": 0,
       "family": "Sarvam",
-      "hf_quant_updated_at": "2026-10-07T11:55:52Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:25Z",
       "moe": false,
       "name": "Sarvam 105B (High)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
@@ -8186,14 +8816,14 @@
       "aa_output_tps": 0,
       "aa_query": "Nanbeige4.1 3B",
       "aa_slug": "nanbeige4-1-3b",
-      "aa_updated_at": "2026-10-07T11:55:58Z",
+      "aa_updated_at": "2026-10-07T15:54:33Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 262144,
       "embd": 2560,
       "family": "Nanbeige",
       "ff": 10496,
-      "hf_quant_updated_at": "2026-10-07T11:55:58Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:33Z",
       "hkv": 4,
       "kl": 128,
       "layers": 32,
@@ -8202,6 +8832,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 14,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1623104064,
+          "size_gb": 1.51
+        },
         {
           "dynamic": false,
           "name": "Q3_K_S",
@@ -8252,6 +8888,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 3231311424,
+          "size_gb": 3.01
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 4183948864,
           "size_gb": 3.9
@@ -8276,14 +8918,14 @@
       "aa_output_tps": 0,
       "aa_query": "Liquid AI LFM2.5 2.6B",
       "aa_slug": "lfm2-5-2-6b",
-      "aa_updated_at": "2026-10-07T11:56:02Z",
+      "aa_updated_at": "2026-10-07T15:54:38Z",
       "active_params_b": 0,
       "arch": "lfm2",
       "ctx_train": 128000,
       "embd": 2048,
       "family": "Liquid AI",
       "ff": 10752,
-      "hf_quant_updated_at": "2026-10-07T11:56:02Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:38Z",
       "layers": 30,
       "moe": false,
       "name": "Liquid AI LFM2.5-2.6B",
@@ -8295,6 +8937,12 @@
           "name": "IQ2_M",
           "size_bytes": 1022470432,
           "size_gb": 0.95
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1102850336,
+          "size_gb": 1.03
         },
         {
           "dynamic": false,
@@ -8382,6 +9030,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 1749346592,
+          "size_gb": 1.63
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 1900472608,
           "size_gb": 1.77
@@ -8397,6 +9051,12 @@
           "name": "Q5_K_L",
           "size_bytes": 2011031840,
           "size_gb": 1.87
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 2236852512,
+          "size_gb": 2.08
         },
         {
           "dynamic": false,
@@ -8426,10 +9086,10 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 8.075,
-      "aa_output_tps": 54.445,
+      "aa_output_tps": 49.384,
       "aa_query": "Meta Llama 4 Scout",
       "aa_slug": "llama-4-scout",
-      "aa_updated_at": "2026-10-07T11:56:08Z",
+      "aa_updated_at": "2026-10-07T15:54:45Z",
       "active_params_b": 0,
       "arch": "llama4",
       "ctx_train": 10485760,
@@ -8439,7 +9099,7 @@
       "experts": 16,
       "family": "Meta",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:56:08Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:45Z",
       "hkv": 8,
       "kl": 128,
       "layers": 48,
@@ -8450,7 +9110,7 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
+          "name": "UD-TQ1_0",
           "size_bytes": 29261483520,
           "size_gb": 27.25
         },
@@ -8477,6 +9137,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 39078694400,
           "size_gb": 36.39
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 39563317760,
+          "size_gb": 36.85
         },
         {
           "dynamic": false,
@@ -8552,6 +9218,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 67586260672,
+          "size_gb": 62.94
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 74256944832,
           "size_gb": 69.16
@@ -8567,6 +9239,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 79146503872,
           "size_gb": 73.71
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 88432148672,
+          "size_gb": 82.36
         },
         {
           "dynamic": true,
@@ -8596,7 +9274,7 @@
       "repo": "unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF",
       "runnable": true,
       "size_gb": 60.87,
-      "speed": 54,
+      "speed": 49,
       "total_params_b": 0,
       "vl": 128
     },
@@ -8606,14 +9284,14 @@
       "aa_output_tps": 0,
       "aa_query": "TII UAE Falcon H1R 7B",
       "aa_slug": "falcon-h1r-7b",
-      "aa_updated_at": "2026-10-07T11:56:15Z",
+      "aa_updated_at": "2026-10-07T15:54:57Z",
       "active_params_b": 0,
       "arch": "falcon-h1",
       "ctx_train": 262144,
       "embd": 3072,
       "family": "TII UAE",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:56:15Z",
+      "hf_quant_updated_at": "2026-10-07T15:54:57Z",
       "hkv": 2,
       "kl": 128,
       "layers": 44,
@@ -8645,6 +9323,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 2728074592,
           "size_gb": 2.54
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 2893693024,
+          "size_gb": 2.69
         },
         {
           "dynamic": false,
@@ -8720,6 +9404,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 4828836448,
+          "size_gb": 4.5
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 5277895264,
           "size_gb": 4.92
@@ -8735,6 +9425,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 5395952224,
           "size_gb": 5.03
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 6232145248,
+          "size_gb": 5.8
         },
         {
           "dynamic": true,
@@ -8774,13 +9470,13 @@
       "aa_output_tps": 0,
       "aa_query": "Google Gemma 4 E2B",
       "aa_slug": "gemma-4-e2b",
-      "aa_updated_at": "2026-10-07T11:56:18Z",
+      "aa_updated_at": "2026-10-07T15:55:02Z",
       "active_params_b": 0,
       "arch": "gemma4",
       "ctx_train": 131072,
       "embd": 1536,
       "family": "Google",
-      "hf_quant_updated_at": "2026-10-07T11:56:18Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:02Z",
       "hkv": 1,
       "kl": 512,
       "layers": 35,
@@ -8794,6 +9490,12 @@
           "name": "IQ2_M",
           "size_bytes": 2620200416,
           "size_gb": 2.44
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 3020053984,
+          "size_gb": 2.81
         },
         {
           "dynamic": false,
@@ -8857,6 +9559,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 3490069984,
+          "size_gb": 3.25
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 3603758560,
           "size_gb": 3.36
@@ -8872,6 +9580,12 @@
           "name": "Q2_K_L",
           "size_bytes": 3686424032,
           "size_gb": 3.43
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 3898486240,
+          "size_gb": 3.63
         },
         {
           "dynamic": false,
@@ -8923,14 +9637,14 @@
       "aa_output_tps": 0,
       "aa_query": "StepFun Step3 VL 10B",
       "aa_slug": "step-3-vl-10b",
-      "aa_updated_at": "2026-10-07T11:56:24Z",
+      "aa_updated_at": "2026-10-07T15:55:11Z",
       "active_params_b": 0,
       "arch": "qwen3",
       "ctx_train": 65536,
       "embd": 4096,
       "family": "StepFun",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:56:24Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:11Z",
       "hkv": 8,
       "kl": 128,
       "layers": 36,
@@ -8995,6 +9709,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 6725900096,
+          "size_gb": 6.26
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 8709519168,
           "size_gb": 8.11
@@ -9022,17 +9742,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 7.664,
-      "aa_output_tps": 81.202,
+      "aa_output_tps": 82.702,
       "aa_query": "Meta Llama 3.3 Instruct 70B",
       "aa_slug": "llama-3-3-instruct-70b",
-      "aa_updated_at": "2026-10-07T11:56:28Z",
+      "aa_updated_at": "2026-10-07T15:55:15Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 131072,
       "embd": 8192,
       "family": "Meta",
       "ff": 28672,
-      "hf_quant_updated_at": "2026-10-07T11:56:28Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:15Z",
       "hkv": 8,
       "kl": 128,
       "layers": 80,
@@ -9064,6 +9784,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 24295197280,
           "size_gb": 22.63
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 26375113312,
+          "size_gb": 24.56
         },
         {
           "dynamic": false,
@@ -9139,6 +9865,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 44313594464,
+          "size_gb": 41.27
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 48657451616,
           "size_gb": 45.32
@@ -9189,7 +9921,7 @@
       "repo": "unsloth/Llama-3.3-70B-Instruct-GGUF",
       "runnable": true,
       "size_gb": 39.6,
-      "speed": 81,
+      "speed": 83,
       "total_params_b": 0,
       "vl": 128
     },
@@ -9199,7 +9931,7 @@
       "aa_output_tps": 0,
       "aa_query": "Baidu ERNIE 4.5 300B A47B",
       "aa_slug": "ernie-4-5-300b-a47b",
-      "aa_updated_at": "2026-10-07T11:56:35Z",
+      "aa_updated_at": "2026-10-07T15:55:22Z",
       "active_params_b": 0,
       "arch": "ernie4_5-moe",
       "ctx_train": 131072,
@@ -9209,7 +9941,7 @@
       "experts": 64,
       "family": "Baidu",
       "ff": 28672,
-      "hf_quant_updated_at": "2026-10-07T11:56:35Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:22Z",
       "hkv": 8,
       "layers": 54,
       "leading_dense": 3,
@@ -9220,7 +9952,7 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
+          "name": "UD-TQ1_0",
           "size_bytes": 76750552640,
           "size_gb": 71.48
         },
@@ -9247,6 +9979,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 105736339360,
           "size_gb": 98.47
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 109067796352,
+          "size_gb": 101.58
         },
         {
           "dynamic": false,
@@ -9322,6 +10060,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 187438759936,
+          "size_gb": 174.57
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 206101840032,
           "size_gb": 191.95
@@ -9337,6 +10081,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 214013870240,
           "size_gb": 199.32
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 245760884832,
+          "size_gb": 228.88
         },
         {
           "dynamic": true,
@@ -9375,13 +10125,13 @@
       "aa_output_tps": 0,
       "aa_query": "NVIDIA Nemotron Nano 12B v2 VL",
       "aa_slug": "nvidia-nemotron-nano-12b-v2-vl-reasoning",
-      "aa_updated_at": "2026-10-07T11:56:41Z",
+      "aa_updated_at": "2026-10-07T15:55:30Z",
       "active_params_b": 0,
       "arch": "nemotron_h",
       "ctx_train": 1048576,
       "embd": 5120,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:56:41Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:30Z",
       "kl": 128,
       "layers": 62,
       "moe": false,
@@ -9415,13 +10165,13 @@
       "aa_output_tps": 17.687,
       "aa_query": "NVIDIA Nemotron Nano 9B V2",
       "aa_slug": "nvidia-nemotron-nano-9b-v2-reasoning",
-      "aa_updated_at": "2026-10-07T11:56:46Z",
+      "aa_updated_at": "2026-10-07T15:55:36Z",
       "active_params_b": 0,
       "arch": "nemotron_h",
       "ctx_train": 1048576,
       "embd": 4480,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:56:46Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:36Z",
       "kl": 128,
       "layers": 56,
       "moe": false,
@@ -9429,6 +10179,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 12,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 5006192192,
+          "size_gb": 4.66
+        },
         {
           "dynamic": false,
           "name": "Q3_K_S",
@@ -9485,6 +10241,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 9135892032,
+          "size_gb": 8.51
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 9458093632,
           "size_gb": 8.81
@@ -9509,7 +10271,7 @@
       "aa_output_tps": 0,
       "aa_query": "Kimi Linear 48B A3B Instruct",
       "aa_slug": "kimi-linear-48b-a3b-instruct",
-      "aa_updated_at": "2026-10-07T11:56:51Z",
+      "aa_updated_at": "2026-10-07T15:55:41Z",
       "active_params_b": 0,
       "arch": "kimi-linear",
       "ctx_train": 1048576,
@@ -9519,7 +10281,7 @@
       "experts": 256,
       "family": "Kimi",
       "ff": 9216,
-      "hf_quant_updated_at": "2026-10-07T11:56:51Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:41Z",
       "kl": 576,
       "kv_lora": 512,
       "layers": 27,
@@ -9529,6 +10291,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 12,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 18028532352,
+          "size_gb": 16.79
+        },
         {
           "dynamic": false,
           "name": "Q3_K_S",
@@ -9573,6 +10341,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 40364126720,
+          "size_gb": 37.59
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 52248385920,
           "size_gb": 48.66
@@ -9591,14 +10365,14 @@
       "aa_output_tps": 0,
       "aa_query": "Meta Llama 3.1 Instruct 405B",
       "aa_slug": "llama-3-1-instruct-405b",
-      "aa_updated_at": "2026-10-07T11:56:55Z",
+      "aa_updated_at": "2026-10-07T15:55:47Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 131072,
       "embd": 16384,
       "family": "Meta",
       "ff": 53248,
-      "hf_quant_updated_at": "2026-10-07T11:56:55Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:47Z",
       "hkv": 8,
       "layers": 126,
       "moe": false,
@@ -9647,6 +10421,12 @@
           "name": "Q2_K_S",
           "size_bytes": 137790549248,
           "size_gb": 128.33
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 149322788224,
+          "size_gb": 139.07
         },
         {
           "dynamic": false,
@@ -9733,7 +10513,7 @@
       "aa_output_tps": 0,
       "aa_query": "Liquid AI LFM2.5 8B A1B",
       "aa_slug": "lfm2-5-8b-a1b",
-      "aa_updated_at": "2026-10-07T11:56:59Z",
+      "aa_updated_at": "2026-10-07T15:55:52Z",
       "active_params_b": 0,
       "arch": "lfm2moe",
       "ctx_train": 128000,
@@ -9743,7 +10523,7 @@
       "experts": 32,
       "family": "Liquid AI",
       "ff": 7168,
-      "hf_quant_updated_at": "2026-10-07T11:56:59Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:52Z",
       "layers": 24,
       "leading_dense": 2,
       "moe": false,
@@ -9855,6 +10635,12 @@
         },
         {
           "dynamic": true,
+          "name": "UD-Q6_K",
+          "size_bytes": 7088287328,
+          "size_gb": 6.6
+        },
+        {
+          "dynamic": true,
           "name": "UD-Q6_K_XL",
           "size_bytes": 7742467680,
           "size_gb": 7.21
@@ -9890,7 +10676,7 @@
       "aa_output_tps": 0,
       "aa_query": "InclusionAI Ring flash 2.0",
       "aa_slug": "ring-flash-2-0",
-      "aa_updated_at": "2026-10-07T11:57:04Z",
+      "aa_updated_at": "2026-10-07T15:55:57Z",
       "active_params_b": 0,
       "arch": "bailingmoe2",
       "ctx_train": 32768,
@@ -9901,7 +10687,7 @@
       "experts": 256,
       "family": "InclusionAI",
       "ff": 9216,
-      "hf_quant_updated_at": "2026-10-07T11:57:04Z",
+      "hf_quant_updated_at": "2026-10-07T15:55:57Z",
       "hkv": 4,
       "kl": 128,
       "layers": 32,
@@ -9931,6 +10717,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 37656641376,
+          "size_gb": 35.07
+        },
+        {
+          "dynamic": false,
           "name": "Q3_K_M",
           "size_bytes": 49328455936,
           "size_gb": 45.94
@@ -9946,6 +10738,12 @@
           "name": "Q5_K_M",
           "size_bytes": 73178890752,
           "size_gb": 68.15
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 84512473760,
+          "size_gb": 78.71
         },
         {
           "dynamic": false,
@@ -9967,14 +10765,14 @@
       "aa_output_tps": 0,
       "aa_query": "Allen Institute for AI Olmo 3.1 32B Think",
       "aa_slug": "olmo-3-1-32b-think",
-      "aa_updated_at": "2026-10-07T11:57:08Z",
+      "aa_updated_at": "2026-10-07T15:56:01Z",
       "active_params_b": 0,
       "arch": "olmo2",
       "ctx_train": 65536,
       "embd": 5120,
       "family": "Allen Institute for AI",
       "ff": 27648,
-      "hf_quant_updated_at": "2026-10-07T11:57:08Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:01Z",
       "hkv": 8,
       "layers": 64,
       "moe": false,
@@ -10005,6 +10803,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 11047570336,
           "size_gb": 10.29
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 12005940576,
+          "size_gb": 11.18
         },
         {
           "dynamic": false,
@@ -10080,6 +10884,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 20253369856,
+          "size_gb": 18.86
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 22235810176,
           "size_gb": 20.71
@@ -10095,6 +10905,12 @@
           "name": "Q5_K_M",
           "size_bytes": 22859712896,
           "size_gb": 21.29
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 26448495872,
+          "size_gb": 24.63
         },
         {
           "dynamic": true,
@@ -10133,7 +10949,7 @@
       "aa_output_tps": 62.313,
       "aa_query": "Cohere Command A",
       "aa_slug": "command-a",
-      "aa_updated_at": "2026-10-07T11:57:12Z",
+      "aa_updated_at": "2026-10-07T15:56:06Z",
       "active_params_b": 0,
       "arch": "cohere2moe",
       "ctx_train": 200000,
@@ -10144,7 +10960,7 @@
       "experts": 128,
       "family": "Cohere",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:57:12Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:06Z",
       "hkv": 8,
       "kl": 128,
       "layers": 32,
@@ -10189,6 +11005,12 @@
           "name": "IQ2_M",
           "size_bytes": 76582703776,
           "size_gb": 71.32
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 80055063328,
+          "size_gb": 74.56
         },
         {
           "dynamic": false,
@@ -10276,6 +11098,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 138825651104,
+          "size_gb": 129.29
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 152138372000,
           "size_gb": 141.69
@@ -10285,6 +11113,12 @@
           "name": "Q5_K_M",
           "size_bytes": 157767128128,
           "size_gb": 146.93
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 189828387872,
+          "size_gb": 176.79
         },
         {
           "dynamic": false,
@@ -10306,14 +11140,14 @@
       "aa_output_tps": 0,
       "aa_query": "Alibaba Qwen3.5 2B",
       "aa_slug": "qwen3-5-2b",
-      "aa_updated_at": "2026-10-07T11:57:15Z",
+      "aa_updated_at": "2026-10-07T15:56:12Z",
       "active_params_b": 0,
       "arch": "qwen35",
       "ctx_train": 262144,
       "embd": 2048,
       "family": "Alibaba",
       "ff": 6144,
-      "hf_quant_updated_at": "2026-10-07T11:57:15Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:12Z",
       "hkv": 2,
       "kl": 256,
       "layers": 24,
@@ -10395,6 +11229,12 @@
           "size_gb": 1.19
         },
         {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 1293517056,
+          "size_gb": 1.2
+        },
+        {
           "dynamic": true,
           "name": "UD-Q4_K_XL",
           "size_bytes": 1339752704,
@@ -10417,6 +11257,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 1466687744,
           "size_gb": 1.37
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 1574961408,
+          "size_gb": 1.47
         },
         {
           "dynamic": true,
@@ -10456,7 +11302,7 @@
       "aa_output_tps": 0,
       "aa_query": "Sarvam 30B",
       "aa_slug": "sarvam-30b",
-      "aa_updated_at": "2026-10-07T11:57:21Z",
+      "aa_updated_at": "2026-10-07T15:56:18Z",
       "active_params_b": 0,
       "arch": "bailingmoe2",
       "ctx_train": 131072,
@@ -10467,7 +11313,7 @@
       "experts": 128,
       "family": "Sarvam",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:57:21Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:18Z",
       "hkv": 4,
       "kl": 64,
       "layers": 19,
@@ -10482,6 +11328,12 @@
           "name": "Q4_K_M",
           "size_bytes": 19579101888,
           "size_gb": 18.23
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 26420765376,
+          "size_gb": 24.61
         },
         {
           "dynamic": false,
@@ -10509,14 +11361,14 @@
       "aa_output_tps": 0,
       "aa_query": "Allen Institute for AI Olmo 3.1 32B Instruct",
       "aa_slug": "olmo-3-1-32b-instruct",
-      "aa_updated_at": "2026-10-07T11:57:24Z",
+      "aa_updated_at": "2026-10-07T15:56:25Z",
       "active_params_b": 0,
       "arch": "olmo2",
       "ctx_train": 65536,
       "embd": 5120,
       "family": "Allen Institute for AI",
       "ff": 27648,
-      "hf_quant_updated_at": "2026-10-07T11:57:24Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:25Z",
       "hkv": 8,
       "layers": 64,
       "moe": false,
@@ -10547,6 +11399,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 11047571776,
           "size_gb": 10.29
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 12005942016,
+          "size_gb": 11.18
         },
         {
           "dynamic": false,
@@ -10622,6 +11480,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 20253371296,
+          "size_gb": 18.86
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 22235811616,
           "size_gb": 20.71
@@ -10637,6 +11501,12 @@
           "name": "Q5_K_M",
           "size_bytes": 22859714336,
           "size_gb": 21.29
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 26448497312,
+          "size_gb": 24.63
         },
         {
           "dynamic": true,
@@ -10675,7 +11545,7 @@
       "aa_output_tps": 0,
       "aa_query": "Perplexity R1 1776",
       "aa_slug": "r1-1776",
-      "aa_updated_at": "2026-10-07T11:57:29Z",
+      "aa_updated_at": "2026-10-07T15:56:30Z",
       "active_params_b": 0,
       "arch": "deepseek2",
       "ctx_train": 163840,
@@ -10685,7 +11555,7 @@
       "experts": 256,
       "family": "Perplexity",
       "ff": 18432,
-      "hf_quant_updated_at": "2026-10-07T11:57:29Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:30Z",
       "hkv": 128,
       "kl": 192,
       "kv_lora": 512,
@@ -10741,6 +11611,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 550798327232,
+          "size_gb": 512.97
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 713286514880,
           "size_gb": 664.3
@@ -10762,17 +11638,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 6.329,
-      "aa_output_tps": 45.508,
+      "aa_output_tps": 45.515,
       "aa_query": "Microsoft Phi 4 Mini Instruct",
       "aa_slug": "phi-4-mini",
-      "aa_updated_at": "2026-10-07T11:57:35Z",
+      "aa_updated_at": "2026-10-07T15:56:38Z",
       "active_params_b": 0,
       "arch": "phi3",
       "ctx_train": 131072,
       "embd": 3072,
       "family": "Microsoft",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:57:35Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:38Z",
       "hkv": 8,
       "layers": 32,
       "moe": false,
@@ -10791,6 +11667,12 @@
           "name": "IQ3_XXS",
           "size_bytes": 1678866816,
           "size_gb": 1.56
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1682636160,
+          "size_gb": 1.57
         },
         {
           "dynamic": false,
@@ -10866,6 +11748,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2526477696,
+          "size_gb": 2.35
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 2640722304,
           "size_gb": 2.46
@@ -10887,6 +11775,12 @@
           "name": "Q5_K_L",
           "size_bytes": 2996976000,
           "size_gb": 2.79
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 3155623296,
+          "size_gb": 2.94
         },
         {
           "dynamic": false,
@@ -10913,14 +11807,14 @@
       "aa_output_tps": 0,
       "aa_query": "Alibaba Qwen3.5 0.8B",
       "aa_slug": "qwen3-5-0-8b",
-      "aa_updated_at": "2026-10-07T11:57:41Z",
+      "aa_updated_at": "2026-10-07T15:56:44Z",
       "active_params_b": 0,
       "arch": "qwen35",
       "ctx_train": 262144,
       "embd": 1024,
       "family": "Alibaba",
       "ff": 3584,
-      "hf_quant_updated_at": "2026-10-07T11:57:41Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:44Z",
       "hkv": 2,
       "kl": 256,
       "layers": 24,
@@ -11002,6 +11896,12 @@
           "size_gb": 0.5
         },
         {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 535171328,
+          "size_gb": 0.5
+        },
+        {
           "dynamic": true,
           "name": "UD-Q4_K_XL",
           "size_bytes": 558772480,
@@ -11024,6 +11924,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 606585088,
           "size_gb": 0.56
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 639029504,
+          "size_gb": 0.6
         },
         {
           "dynamic": true,
@@ -11063,14 +11969,14 @@
       "aa_output_tps": 0,
       "aa_query": "Nous Research DeepHermes 3   Mistral 24B Preview",
       "aa_slug": "deephermes-3-mistral-24b-preview",
-      "aa_updated_at": "2026-10-07T11:57:44Z",
+      "aa_updated_at": "2026-10-07T15:56:49Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 32768,
       "embd": 5120,
       "family": "Nous Research",
       "ff": 32768,
-      "hf_quant_updated_at": "2026-10-07T11:57:44Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:49Z",
       "hkv": 8,
       "kl": 128,
       "layers": 40,
@@ -11096,6 +12002,12 @@
           "name": "IQ2_M",
           "size_bytes": 8114085568,
           "size_gb": 7.56
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 8890360448,
+          "size_gb": 8.28
         },
         {
           "dynamic": false,
@@ -11183,6 +12095,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 14873151008,
+          "size_gb": 13.85
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 16304459168,
           "size_gb": 15.18
@@ -11198,6 +12116,12 @@
           "name": "Q5_K_L",
           "size_bytes": 17178236832,
           "size_gb": 16.0
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 19345989024,
+          "size_gb": 18.02
         },
         {
           "dynamic": false,
@@ -11231,7 +12155,7 @@
       "aa_output_tps": 0,
       "aa_query": "AI21 Labs Jamba 1.7 Large",
       "aa_slug": "jamba-1-7-large",
-      "aa_updated_at": "2026-10-07T11:57:47Z",
+      "aa_updated_at": "2026-10-07T15:56:53Z",
       "active_params_b": 0,
       "arch": "jamba",
       "ctx_train": 262144,
@@ -11240,7 +12164,7 @@
       "experts": 16,
       "family": "AI21 Labs",
       "ff": 24576,
-      "hf_quant_updated_at": "2026-10-07T11:57:47Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:53Z",
       "layers": 72,
       "moe": false,
       "name": "AI21 Labs Jamba 1.7 Large",
@@ -11282,6 +12206,12 @@
           "name": "IQ2_M",
           "size_bytes": 125786388544,
           "size_gb": 117.15
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 138055837760,
+          "size_gb": 128.57
         },
         {
           "dynamic": false,
@@ -11369,6 +12299,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 249336662464,
+          "size_gb": 232.21
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 274206231104,
           "size_gb": 255.37
@@ -11378,6 +12314,12 @@
           "name": "Q5_K_M",
           "size_bytes": 282393840160,
           "size_gb": 263.0
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 327054064288,
+          "size_gb": 304.59
         },
         {
           "dynamic": false,
@@ -11398,7 +12340,7 @@
       "aa_output_tps": 8.77,
       "aa_query": "IBM Granite 4.0 H Small",
       "aa_slug": "granite-4-0-h-small",
-      "aa_updated_at": "2026-10-07T11:57:52Z",
+      "aa_updated_at": "2026-10-07T15:56:58Z",
       "active_params_b": 0,
       "arch": "granitehybrid",
       "ctx_train": 1048576,
@@ -11408,7 +12350,7 @@
       "experts": 72,
       "family": "IBM",
       "ff": 768,
-      "hf_quant_updated_at": "2026-10-07T11:57:52Z",
+      "hf_quant_updated_at": "2026-10-07T15:56:58Z",
       "layers": 40,
       "moe": false,
       "name": "IBM Granite 4.0 H Small",
@@ -11417,7 +12359,7 @@
       "quants": [
         {
           "dynamic": true,
-          "name": "UD-Q1_0",
+          "name": "UD-TQ1_0",
           "size_bytes": 8710302624,
           "size_gb": 8.11
         },
@@ -11444,6 +12386,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 11569212320,
           "size_gb": 10.77
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 11995655072,
+          "size_gb": 11.17
         },
         {
           "dynamic": false,
@@ -11519,6 +12467,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 20341173152,
+          "size_gb": 18.94
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 22347230112,
           "size_gb": 20.81
@@ -11534,6 +12488,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 23121537952,
           "size_gb": 21.53
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 26529000352,
+          "size_gb": 24.71
         },
         {
           "dynamic": true,
@@ -11569,17 +12529,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 6.044,
-      "aa_output_tps": 88.384,
+      "aa_output_tps": 90.273,
       "aa_query": "Mistral Ministral 3 14B",
       "aa_slug": "ministral-3-14b",
-      "aa_updated_at": "2026-10-07T11:57:58Z",
+      "aa_updated_at": "2026-10-07T15:57:02Z",
       "active_params_b": 0,
       "arch": "mistral3",
       "ctx_train": 262144,
       "embd": 5120,
       "family": "Mistral",
       "ff": 16384,
-      "hf_quant_updated_at": "2026-10-07T11:57:58Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:02Z",
       "hkv": 8,
       "kl": 128,
       "layers": 40,
@@ -11611,6 +12571,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 4912131264,
           "size_gb": 4.57
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 5246528704,
+          "size_gb": 4.89
         },
         {
           "dynamic": false,
@@ -11686,6 +12652,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 8581655744,
+          "size_gb": 7.99
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 9383816384,
           "size_gb": 8.74
@@ -11701,6 +12673,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 9640103104,
           "size_gb": 8.98
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 11088407744,
+          "size_gb": 10.33
         },
         {
           "dynamic": true,
@@ -11730,17 +12708,17 @@
       "repo": "unsloth/Ministral-3-14B-Reasoning-2512-GGUF",
       "runnable": true,
       "size_gb": 7.67,
-      "speed": 88,
+      "speed": 90,
       "total_params_b": 0,
       "vl": 128
     },
     {
       "aa_id": "",
       "aa_intelligence_index": 6.006,
-      "aa_output_tps": 96.181,
+      "aa_output_tps": 95.946,
       "aa_query": "Alibaba Qwen3 Omni 30B A3B Instruct",
       "aa_slug": "qwen3-omni-30b-a3b-instruct",
-      "aa_updated_at": "2026-10-07T11:58:01Z",
+      "aa_updated_at": "2026-10-07T15:57:06Z",
       "active_params_b": 0,
       "arch": "qwen3vlmoe",
       "ctx_train": 65536,
@@ -11751,7 +12729,7 @@
       "experts": 128,
       "family": "Alibaba",
       "ff": 768,
-      "hf_quant_updated_at": "2026-10-07T11:58:01Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:06Z",
       "hkv": 4,
       "kl": 128,
       "layers": 48,
@@ -11804,7 +12782,7 @@
       "aa_output_tps": 0,
       "aa_query": "Liquid AI LFM2 24B A2B",
       "aa_slug": "lfm2-24b-a2b",
-      "aa_updated_at": "2026-10-07T11:58:04Z",
+      "aa_updated_at": "2026-10-07T15:57:10Z",
       "active_params_b": 0,
       "arch": "lfm2moe",
       "ctx_train": 128000,
@@ -11814,7 +12792,7 @@
       "experts": 64,
       "family": "Liquid AI",
       "ff": 11776,
-      "hf_quant_updated_at": "2026-10-07T11:58:04Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:10Z",
       "layers": 40,
       "leading_dense": 2,
       "moe": false,
@@ -11845,6 +12823,12 @@
           "name": "IQ2_M",
           "size_bytes": 7738953632,
           "size_gb": 7.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 8320749472,
+          "size_gb": 7.75
         },
         {
           "dynamic": false,
@@ -11932,6 +12916,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 14958088096,
+          "size_gb": 13.93
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 16443854752,
           "size_gb": 15.31
@@ -11947,6 +12937,12 @@
           "name": "Q5_K_L",
           "size_bytes": 16964063136,
           "size_gb": 15.8
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 19583700896,
+          "size_gb": 18.24
         },
         {
           "dynamic": false,
@@ -11976,17 +12972,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 5.923,
-      "aa_output_tps": 39.712,
+      "aa_output_tps": 39.625,
       "aa_query": "Microsoft Phi 4",
       "aa_slug": "phi-4",
-      "aa_updated_at": "2026-10-07T11:58:08Z",
+      "aa_updated_at": "2026-10-07T15:57:15Z",
       "active_params_b": 0,
       "arch": "phi3",
       "ctx_train": 16384,
       "embd": 5120,
       "family": "Microsoft",
       "ff": 17920,
-      "hf_quant_updated_at": "2026-10-07T11:58:08Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:15Z",
       "hkv": 10,
       "layers": 40,
       "moe": false,
@@ -11994,6 +12990,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 10,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 5547348064,
+          "size_gb": 5.17
+        },
         {
           "dynamic": false,
           "name": "Q3_K_M",
@@ -12011,6 +13013,12 @@
           "name": "Q5_K_M",
           "size_bytes": 10604187744,
           "size_gb": 9.88
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 12030251104,
+          "size_gb": 11.2
         },
         {
           "dynamic": false,
@@ -12037,7 +13045,7 @@
       "aa_output_tps": 0,
       "aa_query": "AI21 Labs Jamba Reasoning 3B",
       "aa_slug": "jamba-reasoning-3b",
-      "aa_updated_at": "2026-10-07T11:58:18Z",
+      "aa_updated_at": "2026-10-07T15:57:30Z",
       "active_params_b": 0,
       "arch": "jamba",
       "ctx_train": 262144,
@@ -12046,7 +13054,7 @@
       "experts": 1,
       "family": "AI21 Labs",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:58:18Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:30Z",
       "layers": 28,
       "moe": false,
       "name": "AI21 Labs Jamba Reasoning 3B",
@@ -12058,6 +13066,12 @@
           "name": "IQ2_M",
           "size_bytes": 1130980832,
           "size_gb": 1.05
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1211037152,
+          "size_gb": 1.13
         },
         {
           "dynamic": false,
@@ -12139,6 +13153,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2043390432,
+          "size_gb": 1.9
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 2057216992,
           "size_gb": 1.92
@@ -12160,6 +13180,12 @@
           "name": "Q5_K_L",
           "size_bytes": 2376438752,
           "size_gb": 2.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 2639588832,
+          "size_gb": 2.46
         },
         {
           "dynamic": false,
@@ -12189,18 +13215,19 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 5.646,
-      "aa_output_tps": 93.84,
+      "aa_output_tps": 93.611,
       "aa_query": "Reka AI Reka Flash 3",
       "aa_slug": "reka-flash-3",
-      "aa_updated_at": "2026-10-07T11:58:22Z",
+      "aa_updated_at": "2026-10-07T15:57:34Z",
       "active_params_b": 0,
       "arch": "llama",
       "ctx_train": 32768,
       "embd": 6144,
       "family": "Reka AI",
       "ff": 19648,
-      "hf_quant_updated_at": "2026-10-07T11:58:22Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:34Z",
       "hkv": 8,
+      "kl": 96,
       "layers": 44,
       "moe": false,
       "name": "Reka AI Reka Flash 3",
@@ -12209,154 +13236,59 @@
       "quants": [
         {
           "dynamic": false,
-          "name": "IQ2_XXS",
-          "size_bytes": 7385212672,
-          "size_gb": 6.88
-        },
-        {
-          "dynamic": false,
-          "name": "IQ2_XS",
-          "size_bytes": 7827482368,
-          "size_gb": 7.29
-        },
-        {
-          "dynamic": false,
-          "name": "IQ2_S",
-          "size_bytes": 8123672320,
-          "size_gb": 7.57
-        },
-        {
-          "dynamic": false,
-          "name": "IQ2_M",
-          "size_bytes": 8514037504,
-          "size_gb": 7.93
-        },
-        {
-          "dynamic": false,
-          "name": "IQ3_XXS",
-          "size_bytes": 9177982720,
-          "size_gb": 8.55
+          "name": "Q2_K",
+          "size_bytes": 8630896224,
+          "size_gb": 8.04
         },
         {
           "dynamic": false,
           "name": "Q2_K_L",
-          "size_bytes": 9233008384,
-          "size_gb": 8.6
-        },
-        {
-          "dynamic": false,
-          "name": "IQ3_XS",
-          "size_bytes": 9501144832,
-          "size_gb": 8.85
-        },
-        {
-          "dynamic": false,
-          "name": "Q3_K_S",
-          "size_bytes": 9934628608,
-          "size_gb": 9.25
-        },
-        {
-          "dynamic": false,
-          "name": "IQ3_M",
-          "size_bytes": 10258245376,
-          "size_gb": 9.55
+          "size_bytes": 8775403104,
+          "size_gb": 8.17
         },
         {
           "dynamic": false,
           "name": "Q3_K_M",
-          "size_bytes": 10863011584,
+          "size_bytes": 10863011424,
           "size_gb": 10.12
         },
         {
           "dynamic": false,
-          "name": "Q3_K_L",
-          "size_bytes": 11412285184,
-          "size_gb": 10.63
-        },
-        {
-          "dynamic": false,
-          "name": "IQ4_XS",
-          "size_bytes": 11488151296,
-          "size_gb": 10.7
-        },
-        {
-          "dynamic": false,
-          "name": "IQ4_NL",
-          "size_bytes": 11949688576,
-          "size_gb": 11.13
-        },
-        {
-          "dynamic": false,
-          "name": "Q3_K_XL",
-          "size_bytes": 11951777536,
-          "size_gb": 11.13
-        },
-        {
-          "dynamic": false,
-          "name": "Q4_0",
-          "size_bytes": 11961460480,
-          "size_gb": 11.14
-        },
-        {
-          "dynamic": false,
-          "name": "Q4_K_S",
-          "size_bytes": 12627764992,
-          "size_gb": 11.76
-        },
-        {
-          "dynamic": false,
           "name": "Q4_K_M",
-          "size_bytes": 13610362624,
+          "size_bytes": 13610362464,
           "size_gb": 12.68
         },
         {
           "dynamic": false,
-          "name": "Q4_K_L",
-          "size_bytes": 14067967744,
-          "size_gb": 13.1
-        },
-        {
-          "dynamic": false,
-          "name": "Q5_K_S",
-          "size_bytes": 14791755520,
-          "size_gb": 13.78
-        },
-        {
-          "dynamic": false,
           "name": "Q5_K_M",
-          "size_bytes": 15635474176,
+          "size_bytes": 15635474016,
           "size_gb": 14.56
         },
         {
           "dynamic": false,
-          "name": "Q5_K_L",
-          "size_bytes": 16016008960,
-          "size_gb": 14.92
-        },
-        {
-          "dynamic": false,
-          "name": "Q6_K_L",
-          "size_bytes": 18739373824,
-          "size_gb": 17.45
+          "name": "Q6_K",
+          "size_bytes": 18440726112,
+          "size_gb": 17.17
         },
         {
           "dynamic": false,
           "name": "Q8_0",
-          "size_bytes": 22217246464,
+          "size_bytes": 22217246304,
           "size_gb": 20.69
         },
         {
           "dynamic": false,
           "name": "BF16",
-          "size_bytes": 41815623136,
+          "size_bytes": 41815623264,
           "size_gb": 38.94
         }
       ],
-      "repo": "bartowski/RekaAI_reka-flash-3-GGUF",
+      "repo": "unsloth/reka-flash-3-GGUF",
       "runnable": true,
       "size_gb": 12.68,
       "speed": 94,
-      "total_params_b": 0
+      "total_params_b": 0,
+      "vl": 96
     },
     {
       "aa_id": "",
@@ -12364,14 +13296,14 @@
       "aa_output_tps": 0,
       "aa_query": "Allen Institute for AI Olmo 3 7B Think",
       "aa_slug": "olmo-3-7b-think",
-      "aa_updated_at": "2026-10-07T11:58:26Z",
+      "aa_updated_at": "2026-10-07T15:57:39Z",
       "active_params_b": 0,
       "arch": "olmo2",
       "ctx_train": 65536,
       "embd": 4096,
       "family": "Allen Institute for AI",
       "ff": 11008,
-      "hf_quant_updated_at": "2026-10-07T11:58:26Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:39Z",
       "hkv": 32,
       "layers": 32,
       "moe": false,
@@ -12402,6 +13334,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 2717036992,
           "size_gb": 2.53
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 2857913536,
+          "size_gb": 2.66
         },
         {
           "dynamic": true,
@@ -12477,6 +13415,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 4646825280,
+          "size_gb": 4.33
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 5077246784,
           "size_gb": 4.73
@@ -12492,6 +13436,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 5214102336,
           "size_gb": 4.86
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 5991892480,
+          "size_gb": 5.58
         },
         {
           "dynamic": true,
@@ -12527,17 +13477,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 5.478,
-      "aa_output_tps": 99.901,
+      "aa_output_tps": 97.741,
       "aa_query": "Mistral Ministral 3 8B",
       "aa_slug": "ministral-3-8b",
-      "aa_updated_at": "2026-10-07T11:58:32Z",
+      "aa_updated_at": "2026-10-07T15:57:46Z",
       "active_params_b": 0,
       "arch": "mistral3",
       "ctx_train": 262144,
       "embd": 4096,
       "family": "Mistral",
       "ff": 14336,
-      "hf_quant_updated_at": "2026-10-07T11:58:32Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:46Z",
       "hkv": 8,
       "kl": 128,
       "layers": 34,
@@ -12569,6 +13519,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 3168114208,
           "size_gb": 2.95
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 3352925728,
+          "size_gb": 3.12
         },
         {
           "dynamic": false,
@@ -12644,6 +13600,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5419669024,
+          "size_gb": 5.05
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 5916694048,
           "size_gb": 5.51
@@ -12659,6 +13621,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 6072243744,
           "size_gb": 5.66
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 6972872224,
+          "size_gb": 6.49
         },
         {
           "dynamic": true,
@@ -12688,7 +13656,7 @@
       "repo": "unsloth/Ministral-3-8B-Instruct-2512-GGUF",
       "runnable": true,
       "size_gb": 4.84,
-      "speed": 100,
+      "speed": 98,
       "total_params_b": 0,
       "vl": 128
     },
@@ -12698,14 +13666,14 @@
       "aa_output_tps": 0,
       "aa_query": "Allen Institute for AI Olmo 3 7B Instruct",
       "aa_slug": "olmo-3-7b-instruct",
-      "aa_updated_at": "2026-10-07T11:58:42Z",
+      "aa_updated_at": "2026-10-07T15:57:57Z",
       "active_params_b": 0,
       "arch": "olmo2",
       "ctx_train": 65536,
       "embd": 4096,
       "family": "Allen Institute for AI",
       "ff": 11008,
-      "hf_quant_updated_at": "2026-10-07T11:58:42Z",
+      "hf_quant_updated_at": "2026-10-07T15:57:57Z",
       "hkv": 32,
       "layers": 32,
       "moe": false,
@@ -12736,6 +13704,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 2717038080,
           "size_gb": 2.53
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 2857914624,
+          "size_gb": 2.66
         },
         {
           "dynamic": true,
@@ -12811,6 +13785,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 4646826368,
+          "size_gb": 4.33
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 5077247872,
           "size_gb": 4.73
@@ -12826,6 +13806,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 5214103424,
           "size_gb": 4.86
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 5991893568,
+          "size_gb": 5.58
         },
         {
           "dynamic": true,
@@ -12864,20 +13850,26 @@
       "aa_output_tps": 0,
       "aa_query": "Liquid AI LFM2.5 1.2B Thinking",
       "aa_slug": "lfm2-5-1-2b-thinking",
-      "aa_updated_at": "2026-10-07T11:58:46Z",
+      "aa_updated_at": "2026-10-07T15:58:02Z",
       "active_params_b": 0,
       "arch": "lfm2",
       "ctx_train": 128000,
       "embd": 2048,
       "family": "Liquid AI",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:58:46Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:02Z",
       "layers": 16,
       "moe": false,
       "name": "Liquid AI LFM2.5-1.2B-Thinking",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 9,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 483398880,
+          "size_gb": 0.45
+        },
         {
           "dynamic": false,
           "name": "Q2_K_L",
@@ -12934,6 +13926,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 760501472,
+          "size_gb": 0.71
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 825251040,
           "size_gb": 0.77
@@ -12949,6 +13947,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 843355360,
           "size_gb": 0.79
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 962843872,
+          "size_gb": 0.9
         },
         {
           "dynamic": true,
@@ -12987,7 +13991,7 @@
       "aa_output_tps": 0,
       "aa_query": "AI21 Labs Jamba 1.7 Mini",
       "aa_slug": "jamba-1-7-mini",
-      "aa_updated_at": "2026-10-07T11:58:50Z",
+      "aa_updated_at": "2026-10-07T15:58:07Z",
       "active_params_b": 0,
       "arch": "jamba",
       "ctx_train": 262144,
@@ -12996,7 +14000,7 @@
       "experts": 16,
       "family": "AI21 Labs",
       "ff": 14336,
-      "hf_quant_updated_at": "2026-10-07T11:58:50Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:07Z",
       "layers": 32,
       "moe": false,
       "name": "AI21 Labs Jamba 1.7 Mini",
@@ -13026,6 +14030,12 @@
           "name": "IQ2_M",
           "size_bytes": 16242767264,
           "size_gb": 15.13
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 17976382880,
+          "size_gb": 16.74
         },
         {
           "dynamic": false,
@@ -13113,6 +14123,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 32315086240,
+          "size_gb": 30.1
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 35519993248,
           "size_gb": 33.08
@@ -13128,6 +14144,12 @@
           "name": "Q5_K_L",
           "size_bytes": 36747416992,
           "size_gb": 34.22
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 42330420640,
+          "size_gb": 39.42
         },
         {
           "dynamic": false,
@@ -13160,20 +14182,26 @@
       "aa_output_tps": 0,
       "aa_query": "Liquid AI LFM2.5 1.2B Instruct",
       "aa_slug": "lfm2-5-1-2b-instruct",
-      "aa_updated_at": "2026-10-07T11:58:54Z",
+      "aa_updated_at": "2026-10-07T15:58:12Z",
       "active_params_b": 0,
       "arch": "lfm2",
       "ctx_train": 128000,
       "embd": 2048,
       "family": "Liquid AI",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:58:54Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:12Z",
       "layers": 16,
       "moe": false,
       "name": "Liquid AI LFM2.5-1.2B-Instruct",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 9,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 483398880,
+          "size_gb": 0.45
+        },
         {
           "dynamic": false,
           "name": "Q2_K_L",
@@ -13230,6 +14258,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 760501472,
+          "size_gb": 0.71
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 825251040,
           "size_gb": 0.77
@@ -13245,6 +14279,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 843355360,
           "size_gb": 0.79
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 962843872,
+          "size_gb": 0.9
         },
         {
           "dynamic": true,
@@ -13283,7 +14323,7 @@
       "aa_output_tps": 0,
       "aa_query": "IBM Granite 4.0 H 1B",
       "aa_slug": "granite-4-0-h-nano-1b",
-      "aa_updated_at": "2026-10-07T11:58:57Z",
+      "aa_updated_at": "2026-10-07T15:58:16Z",
       "active_params_b": 0,
       "arch": "granitehybrid",
       "ctx_train": 1048576,
@@ -13293,7 +14333,7 @@
       "experts": 0,
       "family": "IBM",
       "ff": 4096,
-      "hf_quant_updated_at": "2026-10-07T11:58:57Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:16Z",
       "layers": 40,
       "moe": false,
       "name": "IBM Granite 4.0 H 1B",
@@ -13323,6 +14363,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 543110976,
           "size_gb": 0.51
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 588929088,
+          "size_gb": 0.55
         },
         {
           "dynamic": false,
@@ -13398,6 +14444,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 949976640,
+          "size_gb": 0.88
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 1031636544,
           "size_gb": 0.96
@@ -13413,6 +14465,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 1049675328,
           "size_gb": 0.98
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 1205163840,
+          "size_gb": 1.12
         },
         {
           "dynamic": true,
@@ -13451,14 +14509,14 @@
       "aa_output_tps": 0,
       "aa_query": "Google Gemma 3 270M",
       "aa_slug": "gemma-3-270m",
-      "aa_updated_at": "2026-10-07T11:59:01Z",
+      "aa_updated_at": "2026-10-07T15:58:20Z",
       "active_params_b": 0,
       "arch": "gemma3",
       "ctx_train": 32768,
       "embd": 640,
       "family": "Google",
       "ff": 2048,
-      "hf_quant_updated_at": "2026-10-07T11:59:01Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:20Z",
       "hkv": 1,
       "kl": 256,
       "layers": 18,
@@ -13471,6 +14529,12 @@
           "dynamic": false,
           "name": "Q3_K_S",
           "size_bytes": 236708576,
+          "size_gb": 0.22
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 237077216,
           "size_gb": 0.22
         },
         {
@@ -13511,6 +14575,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 282972896,
+          "size_gb": 0.26
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 291543776,
           "size_gb": 0.27
@@ -13535,14 +14605,14 @@
       "aa_output_tps": 0,
       "aa_query": "Swiss AI Initiative Apertus 70B Instruct",
       "aa_slug": "apertus-70b-instruct",
-      "aa_updated_at": "2026-10-07T11:59:05Z",
+      "aa_updated_at": "2026-10-07T15:58:25Z",
       "active_params_b": 0,
       "arch": "apertus",
       "ctx_train": 65536,
       "embd": 8192,
       "family": "Swiss AI Initiative",
       "ff": 43008,
-      "hf_quant_updated_at": "2026-10-07T11:59:05Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:25Z",
       "hkv": 8,
       "layers": 80,
       "moe": false,
@@ -13573,6 +14643,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 24825341600,
           "size_gb": 23.12
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 27272062624,
+          "size_gb": 25.4
         },
         {
           "dynamic": false,
@@ -13648,6 +14724,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 44347074208,
+          "size_gb": 41.3
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 48692373152,
           "size_gb": 45.35
@@ -13663,6 +14745,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 50966210400,
           "size_gb": 47.47
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 57926133600,
+          "size_gb": 53.95
         },
         {
           "dynamic": true,
@@ -13701,7 +14789,7 @@
       "aa_output_tps": 0,
       "aa_query": "IBM Granite 4.0 Micro",
       "aa_slug": "granite-4-0-micro",
-      "aa_updated_at": "2026-10-07T11:59:08Z",
+      "aa_updated_at": "2026-10-07T15:58:29Z",
       "active_params_b": 0,
       "arch": "granite",
       "ctx_train": 131072,
@@ -13711,7 +14799,7 @@
       "experts": 0,
       "family": "IBM",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:59:08Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:29Z",
       "hkv": 8,
       "layers": 40,
       "moe": false,
@@ -13742,6 +14830,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 1265680128,
           "size_gb": 1.18
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1371438848,
+          "size_gb": 1.28
         },
         {
           "dynamic": false,
@@ -13817,6 +14911,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2181218048,
+          "size_gb": 2.03
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 2377826048,
           "size_gb": 2.21
@@ -13832,6 +14932,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 2449813248,
           "size_gb": 2.28
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 2795618048,
+          "size_gb": 2.6
         },
         {
           "dynamic": true,
@@ -13870,14 +14976,14 @@
       "aa_output_tps": 0,
       "aa_query": "Allen Institute for AI Molmo2 8B",
       "aa_slug": "molmo2-8b",
-      "aa_updated_at": "2026-10-07T11:59:14Z",
+      "aa_updated_at": "2026-10-07T15:58:39Z",
       "active_params_b": 0,
       "arch": "qwen3",
       "ctx_train": 36864,
       "embd": 4096,
       "family": "Allen Institute for AI",
       "ff": 12288,
-      "hf_quant_updated_at": "2026-10-07T11:59:14Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:39Z",
       "hkv": 8,
       "kl": 128,
       "layers": 36,
@@ -13915,17 +15021,17 @@
     {
       "aa_id": "",
       "aa_intelligence_index": 4.838,
-      "aa_output_tps": 232.316,
+      "aa_output_tps": 232.722,
       "aa_query": "Mistral Ministral 3 3B",
       "aa_slug": "ministral-3-3b",
-      "aa_updated_at": "2026-10-07T11:59:17Z",
+      "aa_updated_at": "2026-10-07T15:58:44Z",
       "active_params_b": 0,
       "arch": "mistral3",
       "ctx_train": 262144,
       "embd": 3072,
       "family": "Mistral",
       "ff": 9216,
-      "hf_quant_updated_at": "2026-10-07T11:59:17Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:44Z",
       "hkv": 8,
       "kl": 128,
       "layers": 26,
@@ -13962,6 +15068,12 @@
           "dynamic": true,
           "name": "UD-IQ3_XXS",
           "size_bytes": 1457803008,
+          "size_gb": 1.36
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1458958080,
           "size_gb": 1.36
         },
         {
@@ -14032,6 +15144,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2230202112,
+          "size_gb": 2.08
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 2419339008,
           "size_gb": 2.25
@@ -14047,6 +15165,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 2479156992,
           "size_gb": 2.31
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 2821254912,
+          "size_gb": 2.63
         },
         {
           "dynamic": true,
@@ -14086,20 +15210,26 @@
       "aa_output_tps": 0,
       "aa_query": "Liquid AI LFM2.5 VL 1.6B",
       "aa_slug": "lfm2-5-vl-1-6b",
-      "aa_updated_at": "2026-10-07T11:59:21Z",
+      "aa_updated_at": "2026-10-07T15:58:48Z",
       "active_params_b": 0,
       "arch": "lfm2",
       "ctx_train": 128000,
       "embd": 2048,
       "family": "Liquid AI",
       "ff": 8192,
-      "hf_quant_updated_at": "2026-10-07T11:59:21Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:48Z",
       "layers": 16,
       "moe": false,
       "name": "Liquid AI LFM2.5-VL-1.6B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 8,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 483399264,
+          "size_gb": 0.45
+        },
         {
           "dynamic": false,
           "name": "Q2_K_L",
@@ -14156,6 +15286,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 760501856,
+          "size_gb": 0.71
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 825251424,
           "size_gb": 0.77
@@ -14171,6 +15307,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 843355744,
           "size_gb": 0.79
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 962844256,
+          "size_gb": 0.9
         },
         {
           "dynamic": true,
@@ -14209,7 +15351,7 @@
       "aa_output_tps": 0,
       "aa_query": "IBM Granite 4.0 350M",
       "aa_slug": "granite-4-0-350m",
-      "aa_updated_at": "2026-10-07T11:59:24Z",
+      "aa_updated_at": "2026-10-07T15:58:53Z",
       "active_params_b": 0,
       "arch": "granitehybrid",
       "ctx_train": 1048576,
@@ -14219,7 +15361,7 @@
       "experts": 0,
       "family": "IBM",
       "ff": 2048,
-      "hf_quant_updated_at": "2026-10-07T11:59:24Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:53Z",
       "layers": 32,
       "moe": false,
       "name": "IBM Granite 4.0 350M",
@@ -14288,6 +15430,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 232505632,
+          "size_gb": 0.22
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 248937760,
           "size_gb": 0.23
@@ -14303,6 +15451,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 252611872,
           "size_gb": 0.24
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 283856032,
+          "size_gb": 0.26
         },
         {
           "dynamic": true,
@@ -14341,14 +15495,14 @@
       "aa_output_tps": 0,
       "aa_query": "Cohere Tiny Aya Global",
       "aa_slug": "tiny-aya-global",
-      "aa_updated_at": "2026-10-07T11:59:28Z",
+      "aa_updated_at": "2026-10-07T15:58:59Z",
       "active_params_b": 0,
       "arch": "cohere2",
       "ctx_train": 500000,
       "embd": 2048,
       "family": "Cohere",
       "ff": 11008,
-      "hf_quant_updated_at": "2026-10-07T11:59:28Z",
+      "hf_quant_updated_at": "2026-10-07T15:58:59Z",
       "hkv": 4,
       "kl": 128,
       "layers": 36,
@@ -14357,6 +15511,12 @@
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 8,
       "quants": [
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 1481974272,
+          "size_gb": 1.38
+        },
         {
           "dynamic": false,
           "name": "Q3_K_S",
@@ -14401,6 +15561,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 2759533056,
+          "size_gb": 2.57
+        },
+        {
+          "dynamic": false,
           "name": "Q8_0",
           "size_bytes": 3570655744,
           "size_gb": 3.33
@@ -14425,14 +15591,14 @@
       "aa_output_tps": 0,
       "aa_query": "Swiss AI Initiative Apertus 8B Instruct",
       "aa_slug": "apertus-8b-instruct",
-      "aa_updated_at": "2026-10-07T11:59:31Z",
+      "aa_updated_at": "2026-10-07T15:59:03Z",
       "active_params_b": 0,
       "arch": "apertus",
       "ctx_train": 65536,
       "embd": 4096,
       "family": "Swiss AI Initiative",
       "ff": 21504,
-      "hf_quant_updated_at": "2026-10-07T11:59:31Z",
+      "hf_quant_updated_at": "2026-10-07T15:59:03Z",
       "hkv": 8,
       "layers": 32,
       "moe": false,
@@ -14463,6 +15629,12 @@
           "name": "UD-IQ2_M",
           "size_bytes": 3026105600,
           "size_gb": 2.82
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 3287889152,
+          "size_gb": 3.06
         },
         {
           "dynamic": true,
@@ -14538,6 +15710,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 5147014400,
+          "size_gb": 4.79
+        },
+        {
+          "dynamic": false,
           "name": "Q5_K_S",
           "size_bytes": 5616776448,
           "size_gb": 5.23
@@ -14553,6 +15731,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 5823968512,
           "size_gb": 5.42
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 6615020800,
+          "size_gb": 6.16
         },
         {
           "dynamic": true,
@@ -14591,13 +15775,13 @@
       "aa_output_tps": 0,
       "aa_query": "NVIDIA Nemotron 3 Nano 4B",
       "aa_slug": "nvidia-nemotron-3-nano-4b",
-      "aa_updated_at": "2026-10-07T11:59:36Z",
+      "aa_updated_at": "2026-10-07T15:59:09Z",
       "active_params_b": 0,
       "arch": "nemotron_h",
       "ctx_train": 1048576,
       "embd": 3136,
       "family": "NVIDIA",
-      "hf_quant_updated_at": "2026-10-07T11:59:36Z",
+      "hf_quant_updated_at": "2026-10-07T15:59:09Z",
       "kl": 128,
       "layers": 42,
       "moe": false,
@@ -14667,6 +15851,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 2707268640,
+          "size_gb": 2.52
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_S",
           "size_bytes": 2831999904,
           "size_gb": 2.64
@@ -14700,6 +15890,12 @@
           "name": "UD-Q5_K_XL",
           "size_bytes": 3311437856,
           "size_gb": 3.08
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 4056162592,
+          "size_gb": 3.78
         },
         {
           "dynamic": false,
@@ -14739,7 +15935,7 @@
       "aa_output_tps": 0,
       "aa_query": "Institute of Foundation Models K2 Horizon 0.9B",
       "aa_slug": "k2-horizon-0-9b",
-      "aa_updated_at": "2026-10-07T11:59:39Z",
+      "aa_updated_at": "2026-10-07T15:59:13Z",
       "active_params_b": 0,
       "arch": "k2-horizon",
       "ctx_train": 131072,
@@ -14748,7 +15944,7 @@
       "experts": 0,
       "family": "Institute of Foundation Models",
       "ff": 5120,
-      "hf_quant_updated_at": "2026-10-07T11:59:39Z",
+      "hf_quant_updated_at": "2026-10-07T15:59:13Z",
       "hkv": 8,
       "kl": 64,
       "layers": 28,
@@ -14762,6 +15958,12 @@
           "name": "IQ2_M",
           "size_bytes": 420520032,
           "size_gb": 0.39
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 431265888,
+          "size_gb": 0.4
         },
         {
           "dynamic": false,
@@ -14831,6 +16033,12 @@
         },
         {
           "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 704790624,
+          "size_gb": 0.66
+        },
+        {
+          "dynamic": false,
           "name": "Q4_K_L",
           "size_bytes": 741132384,
           "size_gb": 0.69
@@ -14852,6 +16060,12 @@
           "name": "Q6_K_S",
           "size_bytes": 904258656,
           "size_gb": 0.84
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 940446816,
+          "size_gb": 0.88
         },
         {
           "dynamic": false,
@@ -14880,7 +16094,7 @@
       "vl": 64
     }
   ],
-  "generated_at": "2026-10-07T11:59:39Z",
+  "generated_at": "2026-10-07T15:59:13Z",
   "source": "Artificial Analysis open-weight leaderboard page; resolved 115 GGUF repos with quant sizes; skipped 31 open-weight rows without matching GGUF quants",
   "version": 2
 }

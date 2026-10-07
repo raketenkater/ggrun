@@ -29,7 +29,7 @@ OPEN_WEIGHTS_PAGE_URL = "https://artificialanalysis.ai/leaderboards/models?weigh
 HF_MODEL_API_URL = "https://huggingface.co/api/models"
 DEFAULT_CATALOG_LIMIT = 100
 QUANT_PATTERN = re.compile(
-    r"(IQ[1-8]_(?:XXS|XS|NL|S|M|L)|Q[1-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
+    r"(TQ[12]_0|IQ[1-8]_(?:XXS|XS|NL(?:_XL)?|S|M|L)|Q[1-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
     re.IGNORECASE,
 )
 
@@ -833,6 +833,10 @@ VARIANT_QUALIFIERS = {
     # "Heretic" retune does not carry the original's benchmark score.
     "abliterated", "ablated", "decensored", "heretic", "lorablated", "merge",
     "merged", "nsfw", "roleplay", "uncensored",
+    # Domain fine-tunes carry their own leaderboard rows: Ling 3.0 Flash was
+    # resolved to the finance retune Ling-3.0-flash-Fin, and the duplicate repo
+    # then dropped the base model from the catalog.
+    "fin",
 }
 
 
