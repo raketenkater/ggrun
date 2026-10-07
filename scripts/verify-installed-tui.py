@@ -199,7 +199,9 @@ def launch_and_serve(term, port, steps, t0, args, record, label):
 
 def spawn(args, transcript, rows=45, cols=160):
     env = dict(os.environ, TERM="xterm-256color", LLM_PORT=str(args.port), LLM_SERVER_NO_UPDATE_CHECK="1",
-               LLM_MODEL_DIR=str(Path(args.model).resolve().parent), LLM_COMMUNITY_TUNES="off")
+               # the directory holding the model as given; resolving would follow a
+               # symlinked model into its target's folder and list unrelated models
+               LLM_MODEL_DIR=os.path.dirname(os.path.abspath(args.model)), LLM_COMMUNITY_TUNES="off")
     if args.app_home:
         # What the installed wrappers set (Windows ggrun.cmd: LLM_APP_HOME and .bin on PATH).
         env["LLM_APP_HOME"] = args.app_home
@@ -230,7 +232,9 @@ def main():
             raise RuntimeError(f"port {args.port} is already in use")
         name = Path(args.model).stem
         term = spawn(args, transcript)
-        term.expect([r"═══ ggrun ═══|ggrun First Run"], timeout=120)
+        # The title is also drawn on the "Starting up" screen, where keys are
+        # not handled yet: wait for the menu itself.
+        term.expect([r"Recommended downloads|ggrun First Run"], timeout=180)
         term.expect([re.escape(name[:18])], timeout=120)
         steps.append(("main screen lists model", round(time.monotonic() - t0, 1)))
 
@@ -276,7 +280,8 @@ def main():
 
         # Relaunch: a fresh TUI replays the latest launch from the main screen.
         term = spawn(args, transcript)
-        term.expect([r"═══ ggrun ═══"], timeout=120)
+        term.expect([r"Run latest configuration"], timeout=180)
+        term.drain(1)
         term.send("l")
         i = term.expect([r"Pre-launch", r"Configure"], timeout=60)
         if i == 1:
