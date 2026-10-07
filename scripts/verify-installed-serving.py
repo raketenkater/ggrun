@@ -2,6 +2,7 @@
 """Exercise an installed launcher; retain logs and stop only our process group."""
 import argparse
 import errno
+import hashlib
 import json
 import os
 import re
@@ -159,11 +160,12 @@ def weight_devices(log):
 
 
 def gpu_memory():
-    # nvidia-smi always enumerates in PCI bus order, and the GPU jobs set
-    # CUDA_DEVICE_ORDER=PCI_BUS_ID, so these indices are ggrun's CUDA indices.
-    # Absent tooling is unknown, not zero: report None rather than 0 MiB.
+    # Keyed by NVML index, the physical enumeration nvidia-smi reports. A
+    # backend's CUDA<n> is that index only when CUDA_DEVICE_ORDER=PCI_BUS_ID and
+    # CUDA_VISIBLE_DEVICES is unset; device_map() records what applies instead of
+    # assuming. Absent tooling is unknown, not zero: report None rather than 0 MiB.
     try:
-        probe = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total",
+        probe = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,pci.bus_id,memory.used,memory.total,utilization.gpu",
                                 "--format=csv,noheader,nounits"],
                                capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
@@ -173,30 +175,122 @@ def gpu_memory():
     devices = {}
     for line in probe.stdout.splitlines():
         fields = [field.strip() for field in line.split(",")]
-        if len(fields) != 3:
+        if len(fields) != 6:
             continue
         try:
-            devices["CUDA%d" % int(fields[0])] = {"used_mib": int(fields[1]), "total_mib": int(fields[2])}
+            util = int(fields[5]) if fields[5].isdigit() else None
+            devices["nvml%d" % int(fields[0])] = {"uuid": fields[1], "pci_bus_id": fields[2],
+                                                  "used_mib": int(fields[3]), "total_mib": int(fields[4]),
+                                                  "utilization_pct": util}
         except ValueError:
             continue
     return devices or None
 
 
+def device_map(devices):
+    """How backend device names relate to the NVML devices measured above."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    order = os.environ.get("CUDA_DEVICE_ORDER")
+    mapping = None
+    if devices and visible is None and order == "PCI_BUS_ID":
+        mapping = {name.replace("nvml", "CUDA"): name for name in devices}
+    return {"cuda_visible_devices": visible, "cuda_device_order": order,
+            "backend_to_nvml": mapping,
+            "note": None if mapping else "backend CUDA<n> to NVML mapping not established; compare by UUID"}
+
+
 def utilization(baseline, loaded):
-    """What this launch put on the GPUs, separated from what was already there."""
+    """What this launch put on the GPUs, separated from what was already there.
+
+    A device without a baseline reading is unknown, not zero: subtracting a
+    defaulted 0 would attribute another process's memory to this launch.
+    """
     if not loaded:
         return None
     baseline = baseline or {}
-    served, capacity, per_device = 0, 0, {}
+    served, capacity, per_device, unknown = 0, 0, {}, []
     for name, current in sorted(loaded.items()):
-        before = baseline.get(name, {}).get("used_mib", 0)
-        per_device[name] = {"before_mib": before, "after_mib": current["used_mib"],
-                            "launch_mib": current["used_mib"] - before,
-                            "total_mib": current["total_mib"]}
-        served += current["used_mib"] - before
+        before = baseline.get(name, {}).get("used_mib")
+        launch = current["used_mib"] - before if before is not None else None
+        per_device[name] = {"uuid": current.get("uuid"), "before_mib": before, "after_mib": current["used_mib"],
+                            "launch_mib": launch, "total_mib": current["total_mib"],
+                            "utilization_pct": current.get("utilization_pct")}
+        if launch is None:
+            unknown.append(name)
+        else:
+            served += launch
         capacity += current["total_mib"]
-    return {"devices": per_device, "launch_mib": served, "capacity_mib": capacity,
-            "fraction_of_vram": round(served / capacity, 4) if capacity else None}
+    return {"devices": per_device, "launch_mib": None if unknown else served, "capacity_mib": capacity,
+            "unknown_baseline": unknown,
+            "fraction_of_vram": round(served / capacity, 4) if capacity and not unknown else None}
+
+
+def released_after_stop(baseline, after, tolerance_mib=256):
+    """Per device: did memory return to the pre-launch level after shutdown?"""
+    if not baseline or not after:
+        return None
+    out = {}
+    for name, current in after.items():
+        before = baseline.get(name, {}).get("used_mib")
+        out[name] = None if before is None else current["used_mib"] - before <= tolerance_mib
+    return out
+
+
+def file_identity(path):
+    """Size and sha256 of a file; None for anything unreadable."""
+    try:
+        path = Path(path)
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for block in iter(lambda: fh.read(1 << 22), b""):
+                digest.update(block)
+        return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+    except OSError:
+        return None
+
+
+def launcher_identity(launcher):
+    """The launcher's own build identity plus the hash of the executable run."""
+    exe = Path(launcher).resolve()
+    if exe.suffix.lower() in (".cmd", ".bat"):
+        candidate = exe.parent / ".bin" / "ggrun.exe"
+        if candidate.exists():
+            exe = candidate
+    ident = {"file": file_identity(exe)}
+    try:
+        out = subprocess.run([str(exe), "version", "--json"], capture_output=True, text=True, timeout=30)
+        ident["build"] = json.loads(out.stdout.strip().splitlines()[-1]) if out.returncode == 0 and out.stdout.strip() else None
+        if ident["build"] is None:
+            plain = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=30)
+            ident["version_text"] = plain.stdout.strip()
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        ident["build"] = None
+    return ident
+
+
+def backend_identity(log_text):
+    """The backend binary and effective argv ggrun actually launched last."""
+    launches = re.findall(r"(?m)^\[launch\] (\S+llama-server\S*) (-m .*)$", log_text)
+    if not launches:
+        return None
+    binary, argv = launches[-1]
+    ident = {"binary": file_identity(binary), "argv": argv}
+    try:
+        out = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30,
+                             stdin=subprocess.DEVNULL)
+        ident["version_text"] = (out.stdout + out.stderr).strip()[-400:]
+    except (OSError, subprocess.SubprocessError):
+        ident["version_text"] = None
+    return ident
+
+
+def revision_matches(ident, expected):
+    """The installed launcher was built from the expected commit."""
+    build = ident.get("build") or {}
+    revision = build.get("revision") or ""
+    stamped = build.get("version") or ident.get("version_text") or ""
+    return bool(expected) and (revision.startswith(expected) or expected.startswith(revision or "\0")
+                               or re.search(r"-g" + re.escape(expected[:7]), stamped) is not None)
 
 
 def claude_free_path(path):
@@ -235,6 +329,10 @@ def main():
                         help="Launch in Claude Code mode (reviewer + agent policy); the claude client is kept off PATH so ggrun serves")
     parser.add_argument("--min-weight-devices", type=int, default=0,
                         help="Require weight allocations on this many devices in the final launch")
+    parser.add_argument("--expect-revision", default="",
+                        help="Fail unless the installed launcher was built from this commit")
+    parser.add_argument("--hash-model", action="store_true",
+                        help="Record the model file's sha256 (reads the whole file)")
     args = parser.parse_args()
     if args.ctx < 0 or min(args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
         parser.error("timeouts must be positive; context/device minimum nonnegative (context 0 means auto)")
@@ -258,6 +356,14 @@ def main():
     if windows and command[0].lower().endswith((".cmd", ".bat")):
         command = 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
     result = {"command": command, "passed": False}
+    result["identity"] = {"launcher": launcher_identity(args.launcher)}
+    model_path = Path(args.model).resolve()
+    result["identity"]["model"] = (file_identity(model_path) if args.hash_model
+                                   else {"path": str(model_path), "bytes": model_path.stat().st_size, "sha256": None})
+    if args.expect_revision and not revision_matches(result["identity"]["launcher"], args.expect_revision):
+        result["error"] = f"installed launcher is not revision {args.expect_revision}: {result['identity']['launcher']}"
+        (output / "result.json").write_text(json.dumps(result, indent=2))
+        raise RuntimeError(result["error"])
     (output / "result.json").write_text(json.dumps(result, indent=2))
     env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
     if args.claude_code:
@@ -265,9 +371,11 @@ def main():
         # drives the served endpoint itself, as the acceptance harness does.
         env["PATH"] = claude_free_path(env.get("PATH", ""))
     proc = None
+    baseline_memory = None
     try:
         check_port_available(args.port)
         baseline_memory = gpu_memory()
+        result["device_map"] = device_map(baseline_memory)
         with (output / "serve.log").open("wb") as log:
             proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, env=env,
@@ -290,7 +398,9 @@ def main():
                 time.sleep(0.5)
             else:
                 raise RuntimeError("timed out waiting for launcher readiness and health")
-            result["weight_devices"] = weight_devices((output / "serve.log").read_text(errors="replace"))
+            log_text = (output / "serve.log").read_text(errors="replace")
+            result["identity"]["backend"] = backend_identity(log_text)
+            result["weight_devices"] = weight_devices(log_text)
             result["min_weight_devices"] = args.min_weight_devices
             # Record what the launch actually consumed before any assertion can
             # abort the run: a placement that underuses the hardware is the
@@ -375,8 +485,12 @@ def main():
                         result["port_released"] = True
                         break
                 time.sleep(0.2)
+            if baseline_memory:
+                time.sleep(2)
+                result["memory_released"] = released_after_stop(baseline_memory, gpu_memory())
             result["passed"] = bool(result.get("generation") and result.get("streaming") and result.get("port_released")
-                                    and not result.get("forced_cleanup") and not result.get("error"))
+                                    and not result.get("forced_cleanup") and not result.get("error")
+                                    and all(v is not False for v in (result.get("memory_released") or {}).values()))
         (output / "result.json").write_text(json.dumps(result, indent=2))
     if not result["passed"]:
         raise RuntimeError("installed serving lifecycle did not pass; see result.json")
