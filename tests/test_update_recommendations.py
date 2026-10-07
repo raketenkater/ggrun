@@ -217,8 +217,81 @@ def test_draft_heads_and_projectors_are_not_model_quants(monkeypatch):
     assert updater._representative_gguf_file(siblings) == "Model-MXFP4-00001-of-00002.gguf"
 
 
-def test_a_draft_only_repo_keeps_its_drafts(monkeypatch):
+def test_a_draft_only_repo_cannot_supply_a_scored_main_model(monkeypatch):
     updater = load_updater()
     siblings = [_sibling("dflash-Model-BF16.gguf", 5 * 1024**3), _sibling("dflash-Model-Q8_0.gguf", 3 * 1024**3)]
     monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
-    assert {q["name"] for q in updater.fetch_hf_quants("owner/Model-DFlash-GGUF")} == {"BF16", "Q8_0"}
+    assert updater.fetch_hf_quants("owner/Model-DFlash-GGUF") == []
+    assert updater._representative_gguf_file(siblings) is None
+
+
+def test_quant_identity_uses_only_the_final_label(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-BF16-Q4_K_M.gguf", 4 * 1024**3),
+                _sibling("Model-BF16-Q8_0.gguf", 8 * 1024**3),
+                _sibling("UD-IQ3_XXS/Model-UD-IQ3_XXS.gguf", 3 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    quants = {q["name"]: q["size_bytes"] for q in updater.fetch_hf_quants("owner/Model-BF16-GGUF")}
+    assert quants == {"Q4_K_M": 4 * 1024**3, "Q8_0": 8 * 1024**3, "UD-IQ3_XXS": 3 * 1024**3}
+
+
+def test_partial_shards_and_unknown_sizes_never_look_like_small_models(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-Q4_K_M-00001-of-00002.gguf", 1024**3),
+                _sibling("Model-Q8_0-00001-of-00002.gguf", 1024**3),
+                {"rfilename": "Model-Q8_0-00002-of-00002.gguf"},
+                _sibling("Model-Q6_K.gguf", 6 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert [q["name"] for q in updater.fetch_hf_quants("owner/Model")] == ["Q6_K"]
+
+
+def test_distinct_models_with_same_quant_are_not_summed(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-2B-Q4_K_M.gguf", 1024**3),
+                _sibling("Model-20B-Q4_K_M.gguf", 10 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert updater.fetch_hf_quants("owner/Model") == []
+
+
+def test_unknown_size_does_not_hide_an_ambiguous_variant(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-2B-Q4_K_M.gguf", 1024**3),
+                _sibling("Model-20B-Q4_K_M.gguf", None)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert updater.fetch_hf_quants("owner/Model") == []
+
+
+def test_search_cannot_promote_a_draft_through_base_model_tags(monkeypatch):
+    updater = load_updater()
+    row = {"name": "Qwen3.8-Flash-Next", "creator": {"name": "Alibaba"},
+           "huggingfaceUrl": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next"}
+    draft = "unsloth/Qwen3.8-Flash-Next-MTP-GGUF"
+    assert not updater.candidate_relevant(draft, row)
+    inspected = []
+    monkeypatch.setattr(updater, "search_hf_models", lambda *args: [
+        {"id": draft, "tags": ["base_model:Qwen/Qwen3.8-Flash-Next"]}])
+    def quants(repo):
+        inspected.append(repo)
+        return [{"name": "Q4_K_M", "size_gb": 2}] if repo == draft else []
+    monkeypatch.setattr(updater, "fetch_hf_quants", quants)
+    assert updater.resolve_gguf_repo(row, 20) is None
+    assert draft not in inspected
+
+
+def test_shard_completeness_requires_each_index_once():
+    updater = load_updater()
+    assert updater.complete_shards(["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00001-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00001-of-00002.gguf", "m-00001-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00000-of-00002.gguf", "m-00002-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00001-of-00002.gguf", "m-00002-of-00003.gguf"])
+
+
+def test_gguf_importance_matrix_is_not_a_tiny_bf16_model(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("GLM-5.3-Flash-BF16-imatrix.gguf", 512687648),
+                _sibling("GLM-5.3-Flash-BF16-Q4_K_M.gguf", 200828233184)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert [(q["name"], q["size_bytes"]) for q in updater.fetch_hf_quants("owner/GLM")] == [
+        ("Q4_K_M", 200828233184)]
+    assert updater._representative_gguf_file(siblings) == siblings[1]["rfilename"]

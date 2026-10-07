@@ -53,6 +53,15 @@ QUANT_PATTERN = re.compile(
 DRAFT_HEAD_NAMES = ("mtp", "dflash")
 
 
+def is_calibration_or_adapter(path):
+    # Importance matrices can themselves be GGUFs, even hundreds of MiB,
+    # and inherit a source precision in their name. They are not weights.
+    parts = path.lower().replace("_", "-").split("/")
+    return (parts[-1].endswith(("-imatrix.gguf", "-adapter.gguf", "-lora.gguf"))
+            or parts[-1].startswith(("imatrix-", "adapter-", "lora-"))
+            or any(p in {"imatrix", "adapters", "adapter", "lora"} for p in parts[:-1]))
+
+
 def is_draft_head_gguf(path):
     parts = path.lower().split("/")
     return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
@@ -61,10 +70,47 @@ def is_draft_head_gguf(path):
 
 def without_draft_heads(paths):
     """Drop draft heads, unless the repo holds nothing else (a draft-only repo)."""
+    paths = [p for p in paths if not is_calibration_or_adapter(p)]
     kept = [p for p in paths if not is_draft_head_gguf(p)]
     if any(p.lower().endswith(".gguf") and "mmproj" not in p.lower() for p in kept):
         return kept
     return list(paths)
+
+
+SHARD_PATTERN = re.compile(r"^(.*)-(\d+)-of-(\d+)\.gguf$", re.IGNORECASE)
+
+
+def artifact_quant(path: str) -> str:
+    """Use the final quant label; model names can themselves contain BF16."""
+    basename = path.rsplit("/", 1)[-1]
+    matches = list(QUANT_PATTERN.finditer(basename))
+    if not matches:
+        matches = list(QUANT_PATTERN.finditer(path.rsplit("/", 1)[0])) if "/" in path else []
+        source = path.rsplit("/", 1)[0]
+    else:
+        source = basename
+    if not matches:
+        return ""
+    match = matches[-1]
+    quant = normalize_quant_name(match.group())
+    if source[max(0, match.start() - 3):match.start()].upper() == "UD-":
+        quant = "UD-" + quant
+    return quant
+
+
+def complete_shards(paths: list[str]) -> bool:
+    """An artifact is one standalone file or every shard, exactly once."""
+    matches = [SHARD_PATTERN.fullmatch(p) for p in paths]
+    if not any(matches):
+        return len(paths) == 1
+    if not all(matches):
+        return False
+    totals = {int(m.group(3)) for m in matches}
+    if len(totals) != 1:
+        return False
+    total = totals.pop()
+    indices = {int(m.group(2)) for m in matches}
+    return total > 0 and len(paths) == total and indices == set(range(1, total + 1))
 
 
 def clear_screen():
@@ -140,6 +186,9 @@ def _model_query(repo):
 
 
 def _repo_relevant(candidate_repo, target_repo):
+    auxiliary = {"mtp", "dflash", "draft", "mmproj", "adapter", "lora"}
+    if (_tokens(_repo_name(candidate_repo)) & auxiliary) != (_tokens(_repo_name(target_repo)) & auxiliary):
+        return False
     target_query = _model_query(target_repo)
     target_tokens = _tokens(target_query)
     candidate_tokens = _tokens(candidate_repo)
@@ -244,33 +293,45 @@ def resolve_best_gguf_repo(repo, vram_mb=0, ram_mb=0, search_enabled=True):
         print(f"   Selected repo: {repo} (best match among {len(ranked)} GGUF repos)")
     return best
 
+def model_quant_groups(paths):
+    groups = {}
+    for path in without_draft_heads(paths):
+        if not path.lower().endswith(".gguf") or "mmproj" in path.lower():
+            continue
+        quant = artifact_quant(path)
+        if not quant:
+            continue
+        shard = SHARD_PATTERN.fullmatch(path)
+        stem = shard.group(1) if shard else path
+        groups.setdefault(quant, {}).setdefault(stem, []).append(path)
+    result = {}
+    for quant, variants in groups.items():
+        complete = [files for files in variants.values() if complete_shards(files)]
+        if len(complete) == 1:
+            result[quant] = complete[0]
+    return result
+
+
 def list_available_quantizations(repo):
     """List available quantizations with total file sizes.
     Returns list of (quant_name, total_size_bytes) tuples sorted by size."""
     try:
         api = HfApi()
         info = api.model_info(repo, files_metadata=True)
-        weights = set(without_draft_heads([s.rfilename for s in info.siblings]))
-        gguf_files = [
-            (s.rfilename, s.size or 0)
-            for s in info.siblings
-            if s.rfilename in weights and s.rfilename.endswith(".gguf") and "mmproj" not in s.rfilename.lower()
-        ]
-
-        if not gguf_files:
-            return []
-
-        # Map each quant to its total size (sum of split files)
+        sizes = {}
+        for sibling in info.siblings:
+            size = sibling.size
+            lfs = getattr(sibling, "lfs", None)
+            if isinstance(lfs, dict):
+                size = lfs.get("size", size)
+            elif lfs is not None:
+                size = getattr(lfs, "size", size)
+            sizes[sibling.rfilename] = size
         quant_sizes = {}
-        for fname, size in gguf_files:
-            basename = fname.split("/")[-1]
-            matches = QUANT_PATTERN.findall(basename)
-            for m in matches:
-                if m not in quant_sizes:
-                    quant_sizes[m] = 0
-                quant_sizes[m] += size
-
-        # Sort by size (smallest to largest)
+        for quant, paths in model_quant_groups(list(sizes)).items():
+            values = [sizes[p] for p in paths]
+            if all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values):
+                quant_sizes[quant] = sum(values)
         return sorted(quant_sizes.items(), key=lambda x: x[1])
     except Exception as e:
         print(f"Warning: Could not list quantizations: {e}")
@@ -296,6 +357,9 @@ def quant_name_aliases(quant):
     aliases = [normalized]
     if normalized.startswith("UD-"):
         aliases.append(normalized[3:])
+    else:
+        # Older catalogs/downloader menus stripped the dynamic prefix.
+        aliases.append("UD-" + normalized)
     return aliases
 
 
@@ -306,25 +370,23 @@ def get_model_files(repo, selected_quantization):
 
         files = without_draft_heads(list_repo_files(repo))
 
+        groups = model_quant_groups(files)
         if selected_quantization:
-            # Normalize quantization name for matching
-            # Remove trailing dot and underscore prefix for comparison
-            quant_aliases = quant_name_aliases(selected_quantization)
-
-            # Filter by exact quantization name match
-            matching = []
-            for f in files:
-                if not f.endswith(".gguf"):
-                    continue
-                basename = f.split("/")[-1]
-                # Check if filename contains the exact quantization pattern
-                if any(re.search(rf"\b{re.escape(alias)}\b", basename, re.IGNORECASE) for alias in quant_aliases):
-                    matching.append(f)
-        else:
-            # Get all gguf files
-            matching = [f for f in files if f.endswith(".gguf")]
-
-        return matching
+            # Prefer the exact dynamic label before its supported bare alias.
+            for quant in quant_name_aliases(selected_quantization):
+                if quant in groups:
+                    projectors = [f for f in files if "mmproj" in f.lower() and artifact_quant(f) in quant_name_aliases(selected_quantization)]
+                    return groups[quant] + projectors
+            return []
+        # No quant requested: preserve support for unnamed GGUFs, but never
+        # fetch a partial split artifact as if it were runnable.
+        grouped = {}
+        for f in files:
+            if not f.lower().endswith(".gguf"):
+                continue
+            shard = SHARD_PATTERN.fullmatch(f)
+            grouped.setdefault(shard.group(1) if shard else f, []).append(f)
+        return [f for group in grouped.values() if complete_shards(group) for f in group]
     except Exception as e:
         print(f"Error listing files: {e}")
         return []
