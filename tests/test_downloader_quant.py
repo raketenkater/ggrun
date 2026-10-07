@@ -195,3 +195,29 @@ def test_get_model_files_accepts_unsloth_dynamic_catalog_alias(monkeypatch):
     files = downloader.get_model_files("unsloth/Qwen3.5-4B-GGUF", "UD-Q4_K_XL")
 
     assert files == ["model-Q4_K_XL.gguf"]
+
+
+def test_draft_heads_are_neither_listed_nor_downloaded_as_the_model(monkeypatch):
+    downloader = load_downloader()
+    names = [
+        "Model-Q8_0-00001-of-00002.gguf", "Model-Q8_0-00002-of-00002.gguf", "Model-Q6_K.gguf",
+        "mtp-Model-BF16.gguf", "mtp-Model-Q8_0.gguf", "dflash-Model-BF16.gguf",
+        "MTP/mtp-Model-shared-Q8_0.gguf", "mmproj-Model-Q8_0.gguf",
+    ]
+
+    class FakeHfApi:
+        def model_info(self, repo, files_metadata=True):
+            return _Info([_Sibling(name, 1) for name in names])
+
+    monkeypatch.setattr(downloader, "HfApi", FakeHfApi)
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: names)
+    assert {name for name, _ in downloader.list_available_quantizations("owner/repo")} == {"Q8_0", "Q6_K"}
+    assert downloader.get_model_files("owner/repo", "Q8_0") == [
+        "Model-Q8_0-00001-of-00002.gguf", "Model-Q8_0-00002-of-00002.gguf", "mmproj-Model-Q8_0.gguf"]
+    assert downloader.get_model_files("owner/repo", "BF16") == []
+
+
+def test_a_draft_only_repo_still_downloads(monkeypatch):
+    downloader = load_downloader()
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: ["dflash-Model-BF16.gguf", "README.md"])
+    assert downloader.get_model_files("owner/Model-DFlash", "BF16") == ["dflash-Model-BF16.gguf"]
