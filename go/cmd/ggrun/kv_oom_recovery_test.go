@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -61,4 +63,41 @@ type placementStrategyForTest struct{ ctx, parallel int }
 
 func (p placementStrategyForTest) strategy() *placement.Strategy {
 	return &placement.Strategy{ContextSize: p.ctx, ContextAuto: true, BatchSize: 1024, UBatchSize: 512, KVType: "q8_0", Parallel: p.parallel}
+}
+
+// The derated context must be re-planned around the failed device's deficit.
+// A free re-plan rebalanced layers onto the device that had just run short.
+func TestKVContextDerateKeepsTheFailedDevicesDeficit(t *testing.T) {
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	model := &placement.ModelProfile{Path: "dense.gguf", Basename: "dense", TotalSizeMB: 18 * 1024, SizeBytes: 18 << 30,
+		NumLayers: 64, HeadCountKV: 4, KeyLength: 128, ValueLength: 128}
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 12282}, {Index: 1, VRAMTotalMB: 24564}},
+		RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072}, CPU: detect.CPUInfo{Cores: 16},
+	}
+	be := &backendInfo{Tag: "ik_llama", Identity: "ik"}
+	req := &launchRequest{CtxFlag: "fit", Parallel: 4, ParallelSet: true}
+	current, err := placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
+	if err != nil || current == nil || len(current.TensorSplit) != 2 {
+		t.Skipf("fixture did not produce a two-GPU split: %v", err)
+	}
+	current.ContextAuto = true
+	args := buildLaunchServerArgs(req, cfg, be, caps, model, current)
+	outcome := preflightOutcome{Device: 1, AllocMB: 6000, AllocMBMeasured: true, DeficitMB: 700, IsKVCache: true}
+
+	free, _, err := recomputeAutomaticContextRecovery(req, cfg, model, be, caps, current, args, outcome, 0, nil)
+	if err != nil || free == nil {
+		t.Skipf("no context target for this fixture: %v", err)
+	}
+	held, _, err := recomputeAutomaticContextRecovery(req, cfg, model, be, caps, current, args, outcome, 0, map[int]int{1: 700})
+	if err != nil || held == nil {
+		t.Fatalf("penalised context re-plan failed: %v", err)
+	}
+	if held.ContextSize != free.ContextSize {
+		t.Fatalf("both re-plans must use the same deficit-sized context: %d vs %d", held.ContextSize, free.ContextSize)
+	}
+	t.Logf("ctx %d: free split %v, with deficit %v", free.ContextSize, free.TensorSplit, held.TensorSplit)
+	if held.TensorSplit[1] >= free.TensorSplit[1] {
+		t.Fatalf("re-plan gave the short device more: split %v vs %v", held.TensorSplit, free.TensorSplit)
+	}
 }

@@ -689,7 +689,7 @@ func recoverPreflightOOMOnce(
 		// and host-ledger state together. Recompute the complete configuration at
 		// one deficit-sized target, then let the normal exact preflight prove it.
 		contextCandidate, contextArgs, contextErr := recomputeAutomaticContextRecovery(
-			req, cfg, model, be, caps, strategy, serverArgs, outcome, recovery.expertResidencyFloor(),
+			req, cfg, model, be, caps, strategy, serverArgs, outcome, recovery.expertResidencyFloor(), oomPenalty,
 		)
 		if contextErr != nil {
 			return nil, nil, "", contextErr
@@ -1071,7 +1071,7 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 // recomputeAutomaticContextRecovery turns the measured target into one complete
 // placement. A context change is never applied to the current Strategy in
 // place: all context-derived memory and cache state must come from Compute.
-func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, floorNCPUMoE int) (*placement.Strategy, []string, error) {
+func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, floorNCPUMoE int, oomPenalty map[int]int) (*placement.Strategy, []string, error) {
 	target, ok := automaticContextRecoveryTarget(req, current, currentArgs, outcome)
 	if !ok || cfg == nil || model == nil || be == nil || caps == nil {
 		return nil, nil, nil
@@ -1086,7 +1086,20 @@ func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, m
 	opts.SkipPlacementCache = true
 	opts.CacheFile = ""
 	opts.VerifiedConfigScopeKey = ""
-	next, err := placement.Compute(caps, model, opts)
+	var next *placement.Strategy
+	var err error
+	if outcome.IsKVCache && len(oomPenalty) > 0 {
+		// A free re-plan at the smaller context rebalances layers across the
+		// GPUs and refills the KV room it just freed: the --claude-code launch
+		// of Qwen3.8-27B cut 593,920 -> 460,800 tokens over four starts while
+		// the deficit stayed 466-737 MiB and moved between CUDA0 and CUDA1,
+		// until the start-admission budget ended it. Keep the accumulated
+		// per-device deficits out of the re-plan so the cut stays where it
+		// was needed.
+		next, err = placement.ReplanAfterOOM(caps, model, opts, oomPenalty)
+	} else {
+		next, err = placement.Compute(caps, model, opts)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("full context-recovery re-plan at %d tokens: %w", target, err)
 	}

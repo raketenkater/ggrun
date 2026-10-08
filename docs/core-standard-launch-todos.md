@@ -2815,3 +2815,15 @@ one of those: 33 expert layers with the reserve vs 32 without. A candidate with
 no evidence beats one whose evidence says to keep room. Needs a dedicated look
 at the placement-cache key (backend tag / scope) and candidate selection; not
 changed here.
+
+## CLAUDE-CODE DERATE — context cut refilled by the re-plan — 2026-10-08
+
+Evidence: `A2-q38-27b-claude-code-kvfix`. With KV failures now derating
+context, four starts cut 593,920 -> 518,144 -> 483,328 -> 460,800 tokens while
+the deficit stayed 648, 737, 724, 466 MiB and moved CUDA0 -> CUDA1; the
+start-admission budget (4 weight-loading starts) then ended the launch. Each
+free re-plan at the smaller context rebalanced layers onto the device that had
+just run short. Fix: for a KV-cache failure the context re-plan keeps the
+accumulated per-device deficits (`ReplanAfterOOM`), so the freed room stays
+on the short device. Test: `TestKVContextDerateKeepsTheFailedDevicesDeficit`
+(split on the short device 0.67 -> 0.66 at the same context).
