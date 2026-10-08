@@ -7988,10 +7988,10 @@ const probeGrowthGateSchema = 6
 // backend process, which ggrun's recovery derates and restarts; it does not
 // take the host down.
 func RecordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int) error {
-	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, growthByGPU, false)
+	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, growthByGPU, false, nil)
 }
 
-func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int, estimated bool) error {
+func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int, estimated bool, supersedes map[int]int) error {
 	if model == nil || ctxSize <= 0 || ubatch <= 0 || len(growthByGPU) == 0 {
 		return nil
 	}
@@ -8030,7 +8030,12 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 			mergedGrowth[idx] = v
 			mergedEstimated[idx] = true
 		case estimated && !priorEstimated:
-			// A guess must not raise a value that was actually observed.
+			// A guess must not raise a value that was actually observed --
+			// unless it is an abort's estimate made against that very value.
+			if sup, ok := supersedes[idx]; ok && prior <= sup && v > prior {
+				mergedGrowth[idx] = v
+				mergedEstimated[idx] = true
+			}
 		default:
 			// Same kind of evidence on both sides: keep the larger. For
 			// estimates this caps them rather than summing, which is what made
@@ -8040,7 +8045,8 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 			}
 		}
 	}
-	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, mergedGrowth, mergedEstimated, kvPerLayerMB)
+	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, mergedGrowth, mergedEstimated, kvPerLayerMB,
+		probeMeasurements{AbortSupersedesMB: supersedes})
 }
 
 // runtimeGraphGrowthFromVRAMDelta is what a healthy launch allocated beyond
@@ -8159,7 +8165,24 @@ func RecordRuntimeGraphGrowthFromOOM(cacheDir string, model *ModelProfile, ctxSi
 	if device < 0 || allocMB <= 0 {
 		return nil
 	}
-	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, map[int]int{device: allocMB}, estimated)
+	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, map[int]int{device: allocMB}, estimated, nil)
+}
+
+// RecordRuntimeGraphGrowthAfterAbort files a size-less out-of-memory estimate
+// that knows what it disproved: inEffectMB is the growth the crashed plan had
+// reserved on that device. Unlike an ordinary estimate it may raise a measured
+// value no larger than inEffectMB. Without that, a measured peak taken before
+// an abort (a lower bound) trapped the reserve below the real need, and every
+// relaunch re-planned identically.
+func RecordRuntimeGraphGrowthAfterAbort(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel, device, allocMB, inEffectMB int) error {
+	if device < 0 || allocMB <= 0 {
+		return nil
+	}
+	if inEffectMB < 0 {
+		inEffectMB = 0
+	}
+	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel,
+		map[int]int{device: allocMB}, true, map[int]int{device: inEffectMB})
 }
 
 // ClearRuntimeGraphGrowth removes learned growth for one runtime signature so it
@@ -9521,6 +9544,10 @@ type probeMeasurements struct {
 	// they never clobber observed evidence). See observedAllocationEvidence.
 	ComputeBufEvidence string
 	ClearRuntimeGrowth bool
+	// AbortSupersedesMB carries, per device, the runtime growth that was in
+	// effect when an out-of-memory abort happened. The abort's estimate may
+	// raise a measured value no larger than that: the abort disproved it.
+	AbortSupersedesMB map[int]int
 }
 
 // observedAllocationEvidence reports whether evidence came from a real backend
@@ -9730,7 +9757,11 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 				// An abort overturns a measured zero (see recordRuntimeGraphGrowth).
 				mergedGrowth[idx], mergedEstimated[idx] = value, true
 			case incomingEstimated && !priorEstimated:
-				// Never replace measured evidence with an estimate.
+				// Never replace measured evidence with an estimate -- unless the
+				// estimate is an abort made against that very value.
+				if sup, ok := measured.AbortSupersedesMB[idx]; ok && prior <= sup && value > prior {
+					mergedGrowth[idx], mergedEstimated[idx] = value, true
+				}
 			case value > prior:
 				mergedGrowth[idx], mergedEstimated[idx] = value, incomingEstimated
 			}

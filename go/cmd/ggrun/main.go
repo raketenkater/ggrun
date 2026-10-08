@@ -5774,10 +5774,22 @@ func recordWarmupCUDAOOM(req *launchRequest, cacheDir string, model *placement.M
 	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
 	reserveMB := sizelessCUDAOOMReserveMB(caps, model, device, prior)
-	if err := placement.RecordRuntimeGraphGrowthFromOOM(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel, device, reserveMB, true); err != nil {
+	if err := recordAbortGrowth(cacheDir, model, strategy, tag, caps.GPUs, device, reserveMB, true, prior); err != nil {
 		fmt.Fprintf(os.Stderr, "[launch] warning: could not persist warmup OOM evidence: %v\n", err)
 	}
 	return reserveMB
+}
+
+// recordAbortGrowth files an out-of-memory abort's runtime growth. A size-less
+// estimate records the reserve it ran against (prior[device]) so it can raise a
+// measurement it disproved; a sized allocation is a measurement.
+func recordAbortGrowth(cacheDir string, model *placement.ModelProfile, strategy *placement.Strategy, tag string, gpus []detect.GPU, device, allocMB int, estimated bool, prior map[int]int) error {
+	if estimated {
+		return placement.RecordRuntimeGraphGrowthAfterAbort(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+			strategy.KVQuality, strategy.KVPlacement, tag, gpus, strategy.Parallel, device, allocMB, prior[device])
+	}
+	return placement.RecordRuntimeGraphGrowthFromOOM(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, tag, gpus, strategy.Parallel, device, allocMB, false)
 }
 
 func oomLogFingerprint(logData string) string {
@@ -5804,7 +5816,7 @@ func recordRuntimeOOMLog(req *launchRequest, cfg *config.Config, model *placemen
 	if !ok {
 		return 0, 0, false, false, false, nil
 	}
-	if err = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, reserveMB, estimated); err != nil {
+	if err = recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, caps.GPUs, device, reserveMB, estimated, prior); err != nil {
 		return device, reserveMB, estimated, false, true, err
 	}
 	changed = reserveMB > prior[device]
@@ -6928,6 +6940,7 @@ func cmdLaunch(args []string) {
 	modelusage.RecordLaunch(cfg.CacheDir, req.ModelPath)
 	if p.LogBuf != nil {
 		recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
+		noteBackendLoadedVRAM(serverProcessPID(p))
 	}
 	// Consume allocation measurements before performance calibration. A plan
 	// with fewer CPU experts is only a new baseline candidate until benchmarked;
@@ -6978,6 +6991,7 @@ func cmdLaunch(args []string) {
 			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 			if p.LogBuf != nil {
 				recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
+				noteBackendLoadedVRAM(serverProcessPID(p))
 			}
 		}
 	}
@@ -7267,6 +7281,8 @@ func cmdLaunch(args []string) {
 	fmt.Println("[launch] Press Ctrl+C to stop")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
+	growth := startServingGrowthRecorder(cfg.CacheDir, model, strategy, scopedProbeBackendTagForStrategy(req, model, be, strategy),
+		runtimeGrowthCaps(caps, runtimeCaps), visibleToPhysical, serverProcessPID(p))
 
 	// The loop below owns the entire remaining lifecycle: it blocks until
 	// either the user asks to stop, or the backend dies on its own. A crash
@@ -7281,6 +7297,9 @@ func cmdLaunch(args []string) {
 	runtimeOOMRetries := 0
 	for {
 		crashed := waitForShutdownCrashOrWedge(processWatch{p}, sigCh, backendBaseURL(req)+"/health", defaultServingWatch)
+		// File what this backend measured before any crash handling reads the
+		// reserve, so an abort's estimate can supersede it.
+		growth.stop()
 		if !crashed {
 			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
 			break
@@ -7318,7 +7337,7 @@ func cmdLaunch(args []string) {
 			fmt.Fprintf(os.Stderr, "[launch] cannot invalidate runtime-failed profile: %v\n", err)
 			os.Exit(1)
 		}
-		if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
+		if err := recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, growthCaps.GPUs, device, allocMB, estimated, prior); err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] cannot persist runtime OOM evidence: %v\n", err)
 			os.Exit(1)
@@ -7344,7 +7363,7 @@ func cmdLaunch(args []string) {
 			prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel)
 			allocMB = sizelessCUDAOOMReserveMB(growthCaps, model, device, prior)
 			fmt.Fprintf(os.Stderr, "[launch] that reserve left the plan unchanged, but the crash shows its headroom was too small — reserving %d MiB on device %d\n", allocMB, device)
-			return placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel, device, allocMB, true)
+			return recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, growthCaps.GPUs, device, allocMB, true, prior)
 		})
 		if err != nil {
 			claudeAuto.stop()
@@ -7360,6 +7379,7 @@ func cmdLaunch(args []string) {
 		}
 		if newP.LogBuf != nil {
 			recordMeasuredLaunchProbes(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String(), baselineVRAM, serverProcessPID(newP))
+			noteBackendLoadedVRAM(serverProcessPID(newP))
 		}
 		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
 			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
@@ -7383,6 +7403,8 @@ func cmdLaunch(args []string) {
 		p, strategy, serverArgs = newP, newStrategy, newArgs
 		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 		fmt.Println("[launch] Press Ctrl+C to stop")
+		growth = startServingGrowthRecorder(cfg.CacheDir, model, strategy, scopedProbeBackendTagForStrategy(req, model, be, strategy),
+			runtimeGrowthCaps(caps, runtimeCaps), visibleToPhysical, serverProcessPID(p))
 	}
 
 	done := make(chan struct{})
@@ -7430,7 +7452,7 @@ func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *pla
 		fmt.Sprintf("CUDA OOM on device %d during the first requests after load", device)); err != nil {
 		return fmt.Sprintf("CUDA OOM on device %d after load, and the failed profile could not be revoked: %v", device, err), true
 	}
-	if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
+	if err := recordAbortGrowth(cfg.CacheDir, model, strategy, tag, caps.GPUs, device, allocMB, estimated, prior); err != nil {
 		return fmt.Sprintf("CUDA OOM on device %d after load, and the reserve could not be recorded: %v", device, err), true
 	}
 	return fmt.Sprintf("CUDA OOM on device %d after load: the failed plan was revoked and %d MiB is now reserved on that device. Launch again to use the adjusted plan.", device, allocMB), true

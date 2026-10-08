@@ -2841,3 +2841,24 @@ weight-loading start (at most 2 per admission; `maxConvergingAdmissionLoads`,
 Root cause behind the whole walk: in 4-slot `--claude-code` plans the estimate
 is short by ~650-740 MiB per device. The estimator, not more recovery steps,
 is the fix.
+
+## SERVING GROWTH — record real runtime growth instead of guessing — 2026-10-08
+
+Owner question: why does ggrun not record the growth instead of needing a static
+reserve? It was designed to (`RecordPostLaunchRuntimeGraphGrowth`, related-key
+carry of measured values), but the recorder runs right after load, before any
+request, so it saw ~0; growth was only ever learned from aborts, as estimates,
+which are not carried across keys and which a measurement could trap.
+
+Changes:
+- Serving growth recorder (`serving_growth.go`): snapshots the backend process
+  tree's own VRAM per device right after load, samples it every 10 s while
+  serving, and files the peak growth as a measurement for the launch key (every
+  minute and on stop, only upward). It is stopped before crash handling reads
+  the reserve. Companions and other applications are not counted.
+- Causal abort rule (`RecordRuntimeGraphGrowthAfterAbort`): a size-less abort
+  records the reserve it ran against and may raise a measured value no larger
+  than that — the abort disproved it. Ordinary estimates still never raise a
+  measurement (concurrent-writer invariant kept).
+Tests: `serving_growth_test.go`, `TestAbortRaisesOnlyTheMeasurementItDisproved`.
+Live check pending (owner paused GPU work for an hour).
