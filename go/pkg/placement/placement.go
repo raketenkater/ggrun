@@ -2064,7 +2064,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 
 	switch strategy {
 	case CPUOnly:
-		s, err = buildCPUOnly(s, caps, model, opts)
+		s, err = buildCPUOnly(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	case SingleGPU:
 		s, err = buildSingleGPU(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	case MultiGPUDense:
@@ -2422,11 +2422,19 @@ func maybeReduceDenseAutoContext(s *Strategy, caps *detect.Capabilities, model *
 	return s, kvTotalMB, false
 }
 
-func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	s.GPULayers = 0
 	s.MMap = !opts.NoMMap
 	s.BatchSize = 512
 	s.UBatchSize = 256
+	// Weights, KV and runtime buffers all live in host RAM. Left at 0,
+	// computeCRAM charged only the weights: Qwen3.8-27B UD-IQ2_XXS under a 16
+	// GiB scope got -cram 6144 on top of a plan that already filled it, and the
+	// first 21k-token Claude Code prompt was killed by the cgroup. The
+	// checkpoint room the memory check reserved is left out: computeCRAM
+	// divides it between checkpoints and the prompt cache.
+	s.PlannedHostFootprintMB = totalSizeMB + max(0, kvTotalMB) +
+		plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts)
 	return s, nil
 }
 
@@ -2955,7 +2963,7 @@ func cachedMoEHostMemoryFits(caps *detect.Capabilities, model *ModelProfile, s *
 func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	numGPUs := len(caps.GPUs)
 	if numGPUs == 0 {
-		return buildCPUOnly(s, caps, model, opts)
+		return buildCPUOnly(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	}
 	if model.NumLayers <= 0 {
 		return nil, fmt.Errorf("MoE placement requires model layer count")
@@ -5647,7 +5655,10 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 	neededMB := modelOverheadMB + kvTotalMB
 	ramOverheadMB := 0
 	if s.Type == CPUOnly || s.Type == DenseCPUOffload {
-		ramOverheadMB = plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts)
+		// Context checkpoints are host buffers too: 16 x 149.66 MiB on that
+		// Qwen3.8 CPU launch, outside a plan that fit to within 1 MiB.
+		ramOverheadMB = plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts) +
+			checkpointFootprintMB(model, s.MaxCheckpoints, s.Parallel, kvTotalMB, s.ContextSize, s.MeasuredCheckpointMB)
 		neededMB += ramOverheadMB
 	}
 
