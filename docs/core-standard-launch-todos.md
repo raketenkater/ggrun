@@ -3053,3 +3053,25 @@ download needs one of the owner's models removed (owner decision). The local
 UD-Q2_K_XL (237 GB) exceeds the 206 GB RAM budget and is refused without
 `--mmap` ("placement requires file-backed mmap; rerun with --mmap to approve
 it explicitly"), by design.
+
+## CPU HOST FOOTPRINT — prompt cache and checkpoints outside a full scope — 2026-10-08
+
+Evidence: matrix4 C-q38-iq2-first (fc57b75, `--cpu --ram-budget 16G`). Start
+fixed (one probe), stream and cancel passed, then the first 21k-token Claude
+Code prompt: "server was killed by its host-memory cgroup at 16384 MiB". The
+plan: weights 6,930 + KV 6,304 + host runtime 3,149 = 16,383 of 16,384 MiB,
+and on top `-cram 6144` and `--ctx-checkpoints 16` (149.66 MiB each). The
+relaunch re-planned the identical 185,344 tokens: revoking the profile does
+not change a plan whose terms were all "right" but incomplete.
+
+Causes: buildCPUOnly never set PlannedHostFootprintMB, so computeCRAM charged
+only the weights (16,384 - 6,930 -> cram min(KV, 2/3) = 6,144); and
+checkMemoryOrDie's CPU/dense-offload ledger had no checkpoint term (the
+resident GPU paths do, via residentHostFootprintMB).
+
+Fix (09aecd6): the CPU-only footprint is weights + KV + runtime buffers; the
+CPU and dense-offload memory check adds the checkpoint reserve, which
+computeCRAM then divides between checkpoints and the prompt cache. Dry-run on
+the same profile: ctx 122,880, `-cram 1024`, 8 checkpoints. Invariant test:
+footprint + cram + checkpoints within the budget. Core gate passed. Live rerun
+queued (matrix6).
