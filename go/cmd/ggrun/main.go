@@ -5668,7 +5668,8 @@ func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placeme
 		}
 		isOOM := false
 		for j := i - 1; j >= 0 && j >= i-3; j-- {
-			if strings.Contains(strings.ToLower(lines[j]), "cuda error: out of memory") {
+			lower := strings.ToLower(lines[j])
+			if strings.Contains(lower, "cuda error: out of memory") || cublasWorkspaceOOM(lower, lines[i]) {
 				isOOM = true
 				break
 			}
@@ -5679,6 +5680,17 @@ func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placeme
 		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, true
 	}
 	return 0, 0, false, false
+}
+
+// cublasWorkspaceOOM recognizes cuBLAS failing a GEMM with "an unsupported
+// value or parameter" on a device at its memory ceiling. It is an allocation
+// failure in disguise: the same Qwen3.6-35B-A3B plan on one RTX 4070 served
+// 21k- and 28k-token prompts when its pool peaked 14-30 MiB below the card's
+// 11,873 MiB, and failed this way when an earlier request had grown the pool
+// to 11,871 MiB. -amb and the expert count made no difference.
+func cublasWorkspaceOOM(errorLineLower, deviceLine string) bool {
+	return strings.Contains(errorLineLower, "cuda error: an unsupported value or parameter") &&
+		strings.Contains(deviceLine, "ggml_cuda_op_mul_mat_cublas")
 }
 
 // sizelessCUDAOOMReserveMB is the estimate filed for a CUDA out-of-memory

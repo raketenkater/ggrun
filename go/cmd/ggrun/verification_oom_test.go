@@ -64,3 +64,23 @@ func TestVerificationFailureWithoutOOMLearnsNothing(t *testing.T) {
 		}
 	}
 }
+
+// The cuBLAS form of the same ceiling failure must drive the same recovery.
+func TestCublasUnsupportedValueAtTheCeilingIsASizelessOOM(t *testing.T) {
+	const log = `srv  llama_server: model loaded
+CUDA error: an unsupported value or parameter was passed to the function
+  current device: 0, in function ggml_cuda_op_mul_mat_cublas at ggml-cuda.cu:1878
+  cublasSgemm_v2(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N, row_diff, src1_ncols, ne10, &alpha, src0_ddf_i, ne00, src1_ddf1_i, ne10, &beta, dst_dd_i, ldc)
+/src/ggml-cuda.cu:139: CUDA error`
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 11873}}}
+	model := &placement.ModelProfile{Path: "m.gguf", RoutedExpertLayerBytes: []int64{242 << 20}}
+	device, reserve, estimated, ok := runtimeLogCUDAOOM(log, caps, model, nil)
+	if !ok || device != 0 || !estimated || reserve != 242 {
+		t.Fatalf("cuBLAS ceiling failure not read as a size-less OOM: device=%d reserve=%d estimated=%v ok=%v", device, reserve, estimated, ok)
+	}
+	// The same error text from another function is not this failure.
+	other := strings.Replace(log, "ggml_cuda_op_mul_mat_cublas", "ggml_cuda_flash_attn_ext", 1)
+	if _, _, _, ok := runtimeLogCUDAOOM(other, caps, model, nil); ok {
+		t.Fatal("an unsupported-value error outside the cuBLAS GEMM was taken for an OOM")
+	}
+}

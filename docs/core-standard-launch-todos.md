@@ -2755,3 +2755,43 @@ Open, needs its own investigation before more recovery work:
 - a default per-device runtime reserve until growth is measured (llama.cpp's
   fitter keeps 1 GiB): a placement policy change for every model that needs a
   matched A/B before promotion.
+
+## GROWTH PROBE — the 4070 crashes are a memory ceiling — 2026-10-08
+
+Evidence: `accept-20261007/harness/growth_probe.py` replaying the exact B2 argv
+(Qwen3.6-35B-A3B UD-IQ2_XXS, RTX 4070 only, 33 expert layers, ub 256, ctx
+262,144), fresh prompts, nvidia-smi sampled every 0.5 s.
+
+| run | after load | 7k | 14k | 21k | 28k |
+|---|---:|---:|---:|---:|---:|
+| base | 11,685 | 11,815 | 11,843 | died at 11,871 | — |
+| repeat | 11,685 | 11,815 | — | 11,843 ok | 11,857 ok |
+| `-amb 512` | 11,685 | 11,817 | — | 11,843 ok | 11,857 ok |
+
+(MiB of 11,873.) The plan leaves ~188 MiB after load; long prompts grow the
+backend pool by ~130-170 MiB. A run fails only when the pool touches the card
+ceiling, and it then fails either as `CUDA error: out of memory` or as cuBLAS
+"an unsupported value or parameter" in `ggml_cuda_op_mul_mat_cublas`. `-amb`
+and `--n-cpu-moe` (overridden by the explicit `-ot` list) change nothing.
+Prompt processing ~1,050-1,100 tok/s throughout.
+
+Fixed: the cuBLAS form now counts as a size-less OOM, so serving watch,
+runtime recovery and verification learning all engage
+(`TestCublasUnsupportedValueAtTheCeilingIsASizelessOOM`).
+
+Open (owner decision): a default per-device runtime reserve while growth is
+unmeasured. Observed need: >=190 MiB (Qwen3.6, 28k tokens) and >491 MiB
+(MiniMax-M3, ~20k). Plans with headroom are unaffected (Qwen3.8-27B left >1 GB).
+Needs consistent accounting in expert packing, automatic context fit and exact
+preflight, plus a matched A/B.
+
+Side finding: with CUDA0 full from another process, a launch planned only on
+CUDA1 failed preflight with "CUDA-capable device(s) is/are busy or
+unavailable" — the backend initialises every visible GPU. Restricting
+CUDA_VISIBLE_DEVICES to the planned devices would avoid it.
+
+Matched pairs (main a505173 vs candidate): Qwen3.8-27B full host — comparable,
+no regression (decode 32.22 vs 32.20 tok/s, identical allocations, ready 199 s
+vs 114 s). Qwen3.5-4B — identical argv and allocations, decode 103.9 vs 104.1
+tok/s; its ready time differed by the ~55 s TIME_WAIT wait because both sides
+reused one port back to back (RELAUNCH entry).

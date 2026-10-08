@@ -12,7 +12,22 @@ Exit 0: comparable, no regression. 1: regression. 2: not comparable.
 """
 import argparse
 import json
+import os
+import re
 import sys
+
+# Flags whose value is a file inside each run's own cache directory. Two runs
+# with separate caches write the same generated file to different paths, so
+# only the file name is part of the identity.
+PER_CACHE_PATH_FLAGS = ("--chat-template-file",)
+
+
+def normalized_argv(argv):
+    if not argv:
+        return argv
+    for flag in PER_CACHE_PATH_FLAGS:
+        argv = re.sub(rf"({re.escape(flag)} )(\S+)", lambda m: m.group(1) + os.path.basename(m.group(2)), argv)
+    return argv
 
 
 def ident(r):
@@ -20,7 +35,7 @@ def ident(r):
     backend = (r.get("identity") or {}).get("backend") or {}
     served = r.get("served") or {}
     return {"model": model.get("sha256") or (model.get("path"), model.get("bytes")),
-            "argv": backend.get("argv"), "context": served.get("context")}
+            "argv": normalized_argv(backend.get("argv")), "context": served.get("context")}
 
 
 def main():
