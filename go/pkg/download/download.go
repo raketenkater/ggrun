@@ -30,14 +30,10 @@ func New(modelDir, cacheDir, appHome string) *Downloader {
 }
 
 func findScript(appHome string) string {
-	candidates := []string{
-		"download_any_gguf.py",
-		filepath.Join("tools", "download", "download_any_gguf.py"),
-		filepath.Join("..", "download_any_gguf.py"),
-		filepath.Join("..", "tools", "download", "download_any_gguf.py"),
-		filepath.Join("..", "..", "download_any_gguf.py"),
-		filepath.Join("..", "..", "tools", "download", "download_any_gguf.py"),
-	}
+	// The installed copy wins over whatever sits in the working directory: a
+	// model directory can hold an older downloader that ignores --repo and
+	// waits for input (October 8, `ggrun download` run from AI_Models).
+	var candidates []string
 	// Check LLM_SERVER_HOME env var (repo root)
 	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
 		candidates = append(candidates,
@@ -65,6 +61,15 @@ func findScript(appHome string) string {
 			filepath.Join(exeDir, "..", "..", "..", "download_any_gguf.py"),
 		)
 	}
+	// A source checkout run from the repo or go/ directory.
+	candidates = append(candidates,
+		filepath.Join("tools", "download", "download_any_gguf.py"),
+		filepath.Join("..", "tools", "download", "download_any_gguf.py"),
+		filepath.Join("..", "..", "tools", "download", "download_any_gguf.py"),
+		"download_any_gguf.py",
+		filepath.Join("..", "download_any_gguf.py"),
+		filepath.Join("..", "..", "download_any_gguf.py"),
+	)
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c
