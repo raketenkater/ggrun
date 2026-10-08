@@ -475,3 +475,17 @@ jobs:
           $env:LLM_APP_HOME = "$env:USERPROFILE\ggrun"
           & "$env:USERPROFILE\ggrun\.bin\ggrun.exe" version
           & "$env:USERPROFILE\ggrun\.bin\llama-server.exe" --version
+      # The unauthenticated GitHub API rate-limits shared runners and NAT'd
+      # networks; the installer then resolves the release from github.com.
+      - name: Install through the github.com fallback (release API skipped)
+        shell: cmd
+        env:
+          LLM_INSTALL_SKIP_RELEASE_API: '1'
+        run: powershell -ExecutionPolicy Bypass -File install.ps1 -Backend cpu -NoPath -AssumeYes -InstallDir "%USERPROFILE%\ggrun-web"
+      - name: Smoke test the fallback install
+        shell: pwsh
+        run: |
+          $env:LLM_APP_HOME = "$env:USERPROFILE\ggrun-web"
+          & "$env:USERPROFILE\ggrun-web\.bin\ggrun.exe" version
+          & "$env:USERPROFILE\ggrun-web\.bin\llama-server.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'fallback-installed backend did not run' }
