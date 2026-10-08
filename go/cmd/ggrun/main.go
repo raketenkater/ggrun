@@ -2874,6 +2874,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		RAMLimitPercent:         req.RAMLimitPercent,
 		VRAMHeadroomMB:          req.VRAMHeadroomMB,
 		RAMHeadroomMB:           req.RAMHeadroomMB + req.PlacementHostReserveMB,
+		HostGrowthReserveMB:     hostGrowthReserveMB(req),
 		RequireMeasuredBuffers:  true,
 		NoMMap:                  req.NoMMap,
 		ForceMMap:               req.ForceMMap,
@@ -3594,6 +3595,15 @@ func backendMemoryMaxMB(req *launchRequest, caps *detect.Capabilities) int {
 		return 0
 	}
 	return limit
+}
+
+// hostGrowthReserveMB is the gate's reserve for placement to plan around; a
+// re-plan that already holds it back (PlacementHostReserveMB) passes 0.
+func hostGrowthReserveMB(req *launchRequest) int {
+	if req == nil || req.PlacementHostReserveMB > 0 || req.CgroupHeadroomMB <= 0 {
+		return 0
+	}
+	return req.CgroupHeadroomMB
 }
 
 func validateHostMemoryContainment(req *launchRequest, caps *detect.Capabilities, strategy *placement.Strategy) error {

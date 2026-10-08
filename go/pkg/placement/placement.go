@@ -670,6 +670,10 @@ type Options struct {
 	RAMLimitPercent int // whole-host RAM utilisation target; fixed RamBudgetMB wins
 	VRAMHeadroomMB  int // hold back this much total VRAM as a safety margin
 	RAMHeadroomMB   int // hold back this much system RAM as a safety margin
+	// HostGrowthReserveMB is the room the launcher's containment gate requires
+	// between a host-RAM plan's footprint and its ceiling (--cgroup-headroom).
+	// A CPU-only plan reserves it once, for checkpoints and the prompt cache.
+	HostGrowthReserveMB int
 	// RequireMeasuredBuffers removes cold-start compute/host buffer estimates
 	// from authoritative fit decisions. The contained allocation preflight then
 	// supplies exact evidence before ggrun permits a real launch.
@@ -5657,8 +5661,14 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 	if s.Type == CPUOnly || s.Type == DenseCPUOffload {
 		// Context checkpoints are host buffers too: 16 x 149.66 MiB on that
 		// Qwen3.8 CPU launch, outside a plan that fit to within 1 MiB.
-		ramOverheadMB = plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts) +
-			checkpointFootprintMB(model, s.MaxCheckpoints, s.Parallel, kvTotalMB, s.ContextSize, s.MeasuredCheckpointMB)
+		growthMB := checkpointFootprintMB(model, s.MaxCheckpoints, s.Parallel, kvTotalMB, s.ContextSize, s.MeasuredCheckpointMB)
+		// The containment gate refuses a CPU-only plan without this room; the
+		// checkpoints and prompt cache are carved out of it, not added to it.
+		// Charging both (plus the gate's own re-plan) left 161 MiB for KV.
+		if s.Type == CPUOnly && s.ReclaimableHostWeightsMB <= 0 && opts.HostGrowthReserveMB > growthMB {
+			growthMB = opts.HostGrowthReserveMB
+		}
+		ramOverheadMB = plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts) + growthMB
 		neededMB += ramOverheadMB
 	}
 
@@ -5943,7 +5953,8 @@ func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, to
 		if checkpointHeadroom < 0 {
 			checkpointHeadroom = 0
 		}
-		capacity := checkpointHeadroom / (slots * hybridCheckpointReservePerCheckpointMB)
+		perCheckpoint := max(hybridCheckpointReservePerCheckpointMB, int(math.Ceil(s.MeasuredCheckpointMB)))
+		capacity := checkpointHeadroom / (slots * perCheckpoint)
 		if capacity >= hybridCheckpointMinimum {
 			if capacity > hybridCheckpointMaximum {
 				capacity = hybridCheckpointMaximum
