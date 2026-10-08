@@ -2905,3 +2905,12 @@ so an old guess cannot become a permanent floor. Dry-run trace on a copy of the
 real cache: CUDA0 growth 22 -> 3,204 MiB in all 360 candidate evaluations.
 Tests: the rewritten carry subtest; the warmup test now uses the measured-only
 view `RelatedMeasuredRuntimeGraphGrowth`.
+
+MiniMax-M3 learn-4/5 (83c7d78): the plan now carried `runtime=3204` on CUDA0 but
+still overshot by 103-151 MiB on an oracle total (neither compute nor KV), with
+5,929 MiB of KV on CUDA0; recovery found no lever and failed closed. Fix: a
+shortfall on a device that holds KV under automatic context qualifies for a
+context derate sized on that device's KV share; an eligible oracle re-plan still
+answers first (disproof protocol unchanged). Live: "preflight context-derate
+after CUDA0 allocation 0 MiB (deficit 103 MiB)", 372,736 -> 368,640 tokens,
+exact preflight passed. Test: `TestKVBackedOracleShortfallDeratesContext`.

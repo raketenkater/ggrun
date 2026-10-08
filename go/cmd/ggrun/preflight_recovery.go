@@ -685,7 +685,12 @@ func recoverPreflightOOMOnce(
 	nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
 		req, strategy, serverArgs, candidate, model, runtimeCaps, outcome, candidateArgs,
 	)
-	if !changed {
+	// An untyped (oracle total) shortfall goes to the oracle's own complete
+	// re-plan first when one is eligible; the KV-backed context derate answers
+	// only when none is -- MiniMax-M3's re-plan kept its context and failed
+	// closed 103-151 MiB short with 5,929 MiB of KV on the device.
+	untyped := !outcome.IsComputeBuffer && !outcome.IsKVCache
+	if !changed && !(untyped && oracleReplanEligible) {
 		// Context is the last automatic compute-memory lever. It cannot be an
 		// argv patch: context changes KV, graph, CRAM, checkpoint, placement-cache,
 		// and host-ledger state together. Recompute the complete configuration at
@@ -998,7 +1003,9 @@ func ubatchCandidateCoversDeficit(currentArgs, candidateArgs []string, outcome p
 }
 
 func contextCandidateCoversDeficit(currentArgs, candidateArgs []string, model *placement.ModelProfile, outcome preflightOutcome) bool {
-	if !(outcome.IsComputeBuffer || outcome.IsKVCache) || !outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
+	kvBacked := deviceKVShareMB(model, currentArgs, outcome.Device) > 0
+	typed := outcome.IsComputeBuffer || outcome.IsKVCache
+	if !(typed || kvBacked) || (typed && (!outcome.AllocMBMeasured || outcome.AllocMB <= 0)) || outcome.DeficitMB <= 0 {
 		return false
 	}
 	currentValues := effectiveMemoryArgValues(currentArgs)
@@ -1060,8 +1067,21 @@ func automaticContextRecoveryTargetWithKV(req *launchRequest, current *placement
 	// buffer does. Excluding it left a --claude-code launch of Qwen3.8-27B (4
 	// slots, 628,736 tokens) failing closed 308 MiB short on CUDA0 with context,
 	// the one lever that fits, never tried.
-	if req == nil || current == nil || !current.ContextAuto || !(outcome.IsComputeBuffer || outcome.IsKVCache) ||
-		!outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
+	// Any shortfall on a device that holds KV under automatic context can be
+	// met by a context cut. MiniMax-M3 planned 5,929 MiB of KV on CUDA0 and
+	// failed closed 103-151 MiB short on an oracle total that was neither a
+	// compute nor a KV allocation.
+	kvBacked := deviceKVMB > 0
+	typed := outcome.IsComputeBuffer || outcome.IsKVCache
+	if req == nil || current == nil || !current.ContextAuto || !(typed || kvBacked) {
+		return 0, false
+	}
+	// A typed allocation needs its measured size; the KV-backed path is sized
+	// on the device's KV share and needs only the measured deficit.
+	if typed && (!outcome.AllocMBMeasured || outcome.AllocMB <= 0) {
+		return 0, false
+	}
+	if !typed && outcome.DeficitMB <= 0 {
 		return 0, false
 	}
 	if !automaticContextRequest(req) {
@@ -1088,6 +1108,8 @@ func automaticContextRecoveryTargetWithKV(req *launchRequest, current *placement
 	scalableMB := outcome.AllocMB
 	if outcome.Evidence.Level == memoryEvidenceOraclePlanned && outcome.DeviceContextMB > 0 {
 		scalableMB = outcome.DeviceComputeMB + outcome.DeviceContextMB
+	} else if !outcome.IsComputeBuffer && !outcome.IsKVCache && kvBacked {
+		scalableMB = deviceKVMB
 	} else if outcome.IsComputeBuffer && deviceKVMB > 0 {
 		// A context cut also frees the failed device's KV share. Sized on the
 		// compute buffer alone, a 15-29 MiB shortfall on a 73-79 MiB allocation

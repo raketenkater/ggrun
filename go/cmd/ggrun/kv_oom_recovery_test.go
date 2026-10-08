@@ -126,3 +126,25 @@ func TestSmallComputeShortfallCutsContextBySize(t *testing.T) {
 		t.Fatalf("KV on the CPU is not freed on the GPU: %d", kv)
 	}
 }
+
+// An oracle shortfall that is neither a compute nor a KV allocation, on a
+// device holding KV under automatic context, is met by a small context cut.
+func TestKVBackedOracleShortfallDeratesContext(t *testing.T) {
+	args := []string{"llama-server", "--ctx-size", "369664", "-ub", "64", "--parallel", "1",
+		"--cache-type-k", "q8_0", "--tensor-split", "0.30,0.55,0.15"}
+	current := &placement.Strategy{ContextSize: 369664, ContextAuto: true, UBatchSize: 64, KVType: "q8_0", Parallel: 1}
+	outcome := preflightOutcome{Device: 0, AllocMB: 151, DeficitMB: 151}
+	req := &launchRequest{CtxFlag: "fit"}
+	target, ok := automaticContextRecoveryTargetWithKV(req, current, args, outcome, 5929)
+	if !ok || target >= 369664 || target < 369664*90/100 {
+		t.Fatalf("151 MiB short with 5,929 MiB of KV on the device: target %d ok=%v", target, ok)
+	}
+	if _, ok := automaticContextRecoveryTargetWithKV(req, current, args, outcome, 0); ok {
+		t.Fatal("an untyped shortfall on a device without KV is not a context problem")
+	}
+	explicit := *current
+	explicit.ContextAuto = false
+	if _, ok := automaticContextRecoveryTargetWithKV(&launchRequest{CtxFlag: "369664"}, &explicit, args, outcome, 5929); ok {
+		t.Fatal("an explicit context stays a constraint")
+	}
+}
