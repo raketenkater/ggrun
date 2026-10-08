@@ -83,9 +83,12 @@ type kvCacheShape struct {
 const backendDefaultUBatch = 512
 
 // kvSpecialCacheArchs share or reuse KV between blocks, or repurpose the NextN
-// count for a router block, so a per-block sum does not describe them.
+// count for a router block, so a per-block sum does not describe them. Gemma 4
+// is priced per block: its head counts and window pattern are only stated per
+// block (no scalar head_count_kv), so the scalar path priced 0 MiB, and a
+// variant with shared KV layers is overestimated, not under.
 var kvSpecialCacheArchs = map[string]bool{
-	"gemma3n": true, "gemma4": true, "gemma4-assistant": true, "graniteswitch": true,
+	"gemma3n": true, "gemma4-assistant": true, "graniteswitch": true,
 }
 
 // modelKVLayerLayout validates the per-block arrays. It applies only when the
@@ -252,6 +255,9 @@ func kvLayerBytes(model *ModelProfile, shape kvCacheShape) ([]int64, bool) {
 	layout, ok := modelKVLayerLayout(model)
 	if !ok || shape.Context <= 0 {
 		return nil, false
+	}
+	if model.FullContextWindowedKV {
+		shape.SWAFull = true
 	}
 	full, swa, streams := layout.cells(shape)
 	out := make([]int64, len(layout.Layers))

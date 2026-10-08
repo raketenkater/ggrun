@@ -380,6 +380,13 @@ type ModelProfile struct {
 	LeadingDenseInferred bool `json:"leading_dense_inferred,omitempty"`
 	NextNPredictLayers   int  `json:"nextn_predict_layers,omitempty"`
 
+	// FullContextWindowedKV is a serving-backend fact, set at backend
+	// selection: the backend gives sliding-window layers a full-context cache.
+	// ik_llama.cpp sizes every layer's K/V at kv_size (llama_kv_cache_init)
+	// and applies the window as a mask; Gemma 4 26B A4B at 262,144 tokens
+	// asked for 29,920 MiB of KV where windowed pricing planned ~3 GiB.
+	FullContextWindowedKV bool `json:"-"`
+
 	// SSM geometry (GGUF ssm.*): sizes the per-slot recurrent state a hybrid
 	// keeps on each recurrent block's device (kvlayers.go).
 	SSMConvKernel   int `json:"ssm_d_conv,omitempty"`
@@ -4675,6 +4682,9 @@ func measuredKVTotalMB(model *ModelProfile, ctxSize int, kvType string, swaFull 
 
 // computeKVTotalMB calculates exact KV cache size.
 func computeKVTotalMB(model *ModelProfile, ctxSize int, kvType string, swaFull bool) int {
+	if model != nil && model.FullContextWindowedKV {
+		swaFull = true
+	}
 	// Prefer the KV size llama.cpp actually allocated on a previous launch (read
 	// back from its log) — it is exact for every attention scheme, including the
 	// compressed ones (MLA / CSA-HCA / sliding-window) the formula below can't

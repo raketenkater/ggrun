@@ -6068,6 +6068,20 @@ func resolveLaunchBackend(req *launchRequest, model *placement.ModelProfile, cap
 	return be
 }
 
+// backendHasNoWindowedKV: ik_llama.cpp (1fddd12) has no windowed KV cache and
+// no --swa-full; every layer's cache is full context and the window is a mask.
+// DeepSeek4 and OpenPangu keep their own compressed/windowed caches.
+func backendHasNoWindowedKV(be *backendInfo, model *placement.ModelProfile) bool {
+	if be == nil || !be.IsIK || model == nil || strings.Contains(be.Help, "--swa-full") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(model.ModelArch)) {
+	case "deepseek4", "openpangu":
+		return false
+	}
+	return model.KVLoraRank == 0 && (model.SlidingWindow > 0 || len(model.SWAPattern) > 0)
+}
+
 func applyBackendFeatureCompatibility(req *launchRequest, model *placement.ModelProfile, be *backendInfo) {
 	if req == nil || be == nil {
 		return
@@ -6077,6 +6091,9 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 		arch = strings.TrimSpace(model.ModelArch)
 	}
 	isDeepSeek4IK := strings.EqualFold(arch, "deepseek4") && be.IsIK
+	if model != nil {
+		model.FullContextWindowedKV = backendHasNoWindowedKV(be, model)
+	}
 	// The architecture's KV rule is re-applied here because backend selection can
 	// land somewhere the pre-selection pass did not assume, and because a cached
 	// or resumed request can arrive with a KV type the rule forbids. Both backend

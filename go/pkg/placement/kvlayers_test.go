@@ -233,7 +233,7 @@ func TestKVLayerLayoutRejectsWhatItCannotDescribe(t *testing.T) {
 		"mla":                clone(func(m *ModelProfile) { m.KVLoraRank = 512 }),
 		"recurrent":          clone(func(m *ModelProfile) { m.HasSSM = 1 }),
 		"looped":             clone(func(m *ModelProfile) { m.KVLoops = 2 }),
-		"shared kv arch":     clone(func(m *ModelProfile) { m.ModelArch = "gemma4" }),
+		"shared kv arch":     clone(func(m *ModelProfile) { m.ModelArch = "gemma3n" }),
 		"router arch":        clone(func(m *ModelProfile) { m.ModelArch = "graniteswitch" }),
 		"no head width":      clone(func(m *ModelProfile) { m.KeyLength, m.ValueLength = 0, 0 }),
 		"scalar-only models": {NumLayers: 32, HeadCountKV: 8, KeyLength: 128, ValueLength: 128},
