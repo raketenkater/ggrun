@@ -7299,8 +7299,12 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 		cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
-		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, model, prior)
+		// Runtime growth is filed under the GPU set the backend actually ran on,
+		// the key its measured probes use; the full detected set never matches a
+		// --gpus launch, so its learned reserve was never read back.
+		growthCaps := runtimeGrowthCaps(caps, runtimeCaps)
+		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel)
+		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, growthCaps, model, prior)
 		if !ok {
 			claudeAuto.stop()
 			fmt.Fprintln(os.Stderr, "[launch] server exited unexpectedly (not a recognized CUDA OOM) — see the log for details.")
@@ -7313,7 +7317,7 @@ func cmdLaunch(args []string) {
 			fmt.Fprintf(os.Stderr, "[launch] cannot invalidate runtime-failed profile: %v\n", err)
 			os.Exit(1)
 		}
-		if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
+		if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] cannot persist runtime OOM evidence: %v\n", err)
 			os.Exit(1)
@@ -7336,10 +7340,10 @@ func cmdLaunch(args []string) {
 		nextStrategy, nextArgs, err := escalateSizelessRuntimeOOM(estimated, func() (*placement.Strategy, []string, error) {
 			return replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, strategy, launchRecovery)
 		}, func() error {
-			prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-			allocMB = sizelessCUDAOOMReserveMB(caps, model, device, prior)
+			prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel)
+			allocMB = sizelessCUDAOOMReserveMB(growthCaps, model, device, prior)
 			fmt.Fprintf(os.Stderr, "[launch] that reserve left the plan unchanged, but the crash shows its headroom was too small — reserving %d MiB on device %d\n", allocMB, device)
-			return placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, allocMB, true)
+			return placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel, device, allocMB, true)
 		})
 		if err != nil {
 			claudeAuto.stop()
@@ -7414,6 +7418,7 @@ func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *pla
 	if req == nil || cfg == nil || model == nil || strategy == nil || caps == nil {
 		return "", false
 	}
+	caps = runtimeGrowthCaps(caps, runtimeCaps)
 	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
 	device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, model, prior)
@@ -7554,6 +7559,16 @@ func pinRuntimeOOMReplan(opts placement.Options, failed *placement.Strategy) pla
 	opts.Parallel = maxPreflightInt(failed.Parallel, 1)
 	opts.AutoParallel = false
 	return opts
+}
+
+// runtimeGrowthCaps is the GPU set runtime growth is filed under: the devices
+// the backend ran on (restricted and renumbered for --gpus), which is also the
+// set measured probes and the planner's lookups use.
+func runtimeGrowthCaps(caps, runtimeCaps *detect.Capabilities) *detect.Capabilities {
+	if runtimeCaps != nil && len(runtimeCaps.GPUs) > 0 {
+		return runtimeCaps
+	}
+	return caps
 }
 
 var errRuntimeOOMReplanIdentical = errors.New("runtime OOM re-plan reproduced the exact failed argv; refusing an identical relaunch")

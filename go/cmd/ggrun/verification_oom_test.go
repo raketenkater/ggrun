@@ -84,3 +84,21 @@ CUDA error: an unsupported value or parameter was passed to the function
 		t.Fatal("an unsupported-value error outside the cuBLAS GEMM was taken for an OOM")
 	}
 }
+
+// A --gpus launch runs on a restricted, renumbered GPU set and its measured
+// probes are filed under it. Learned growth filed under the full detected set
+// never matched, so four relaunches recorded 242..968 MiB and planned
+// identically.
+func TestRuntimeGrowthIsFiledUnderTheRuntimeGPUSet(t *testing.T) {
+	full := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0}, {Index: 1}, {Index: 2}}}
+	restricted := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0}}}
+	if got := runtimeGrowthCaps(full, restricted); got != restricted {
+		t.Fatal("growth must use the GPU set the backend ran on")
+	}
+	if got := runtimeGrowthCaps(full, nil); got != full {
+		t.Fatal("without a runtime set, fall back to the detected set")
+	}
+	if got := runtimeGrowthCaps(full, &detect.Capabilities{}); got != full {
+		t.Fatal("an empty runtime set (CPU launch) must fall back to the detected set")
+	}
+}

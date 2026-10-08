@@ -2795,3 +2795,23 @@ no regression (decode 32.22 vs 32.20 tok/s, identical allocations, ready 199 s
 vs 114 s). Qwen3.5-4B — identical argv and allocations, decode 103.9 vs 104.1
 tok/s; its ready time differed by the ~55 s TIME_WAIT wait because both sides
 reused one port back to back (RELAUNCH entry).
+
+## LEARNED RESERVE NOT APPLIED — keying and candidate selection — 2026-10-08
+
+Evidence: four consecutive B2 launches (launcher 13067d9) each died in the
+canary with a size-less OOM and recorded a stacking reserve on CUDA0 (242, 484,
+726, 968 MiB), yet every next launch planned identically (CUDA0 11,763/11,873,
+`runtime=0`). Cause 1: the reserve was filed under the full detected GPU set
+(gpu_sig e6d0cebf81c0) while a `--gpus 0` launch plans and measures under the
+restricted runtime set (9dccdb747f84). Fixed: runtime growth is read and
+recorded under the runtime GPU set (`runtimeGrowthCaps`,
+`TestRuntimeGrowthIsFiledUnderTheRuntimeGPUSet`).
+
+Cause 2, open: with the reserve under the right key, `GGRUN_TRACE_PLACEMENT`
+shows the planner reading it (`probeHit=true ... ub=512 compute=489 growth=968
+fixed=1767`), but most candidates at the same ctx/ubatch are evaluated with
+`probeHit=false` (`compute=0 growth=0 fixed=310`), and the chosen plan came from
+one of those: 33 expert layers with the reserve vs 32 without. A candidate with
+no evidence beats one whose evidence says to keep room. Needs a dedicated look
+at the placement-cache key (backend tag / scope) and candidate selection; not
+changed here.
