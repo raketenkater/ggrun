@@ -40,8 +40,10 @@ const (
 	// A contained preflight that is still shrinking its measured deficit may
 	// start this many probes beyond maxLoads. The load cap stops churn, not
 	// progress: a --claude-code launch of Qwen3.8-27B went 724 -> 78 MiB and
-	// was refused the start that would have fit. The window still bounds time.
-	maxConvergingAdmissionLoads = 2
+	// was refused the start that would have fit; with two grants it went
+	// 88 -> 15 MiB and was refused again. Each probe there took ~3 s; the
+	// admission window, not this count, is what bounds a slow model.
+	maxConvergingAdmissionLoads = 4
 )
 
 func startupAdmissionWindow(model *placement.ModelProfile) time.Duration {
