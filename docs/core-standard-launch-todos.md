@@ -3075,3 +3075,25 @@ computeCRAM then divides between checkpoints and the prompt cache. Dry-run on
 the same profile: ctx 122,880, `-cram 1024`, 8 checkpoints. Invariant test:
 footprint + cram + checkpoints within the budget. Core gate passed. Live rerun
 queued (matrix6).
+
+## CPU CONTAINMENT RESERVE — gate and fit charged growth twice — 2026-10-08
+
+Evidence: matrix6 C-q38-iq2-first (09aecd6). With the CPU footprint now real,
+the containment gate refused: "planned host footprint 14309 MiB + required
+reserve 4096 MiB (cgroup headroom 4096 MiB, CRAM 1024 MiB) exceeds the 16384
+MiB whole-host ceiling". Its re-plan held 4,096 MiB back and the fit also
+charged 16 checkpoints (2,048) on top of 3,149 MiB runtime buffers: 161 MiB
+left for KV, no context above the floor, launch refused (first and relaunch).
+
+Gemma 4 on 09aecd6 (matrix5): PASS. Relaunch checks on 09aecd6 (matrix6): CPU
+Qwen3.6 IQ2_XXS calc correct (427 s); 4070 Qwen3.8 IQ3_XXS calc correct
+(1,466 s).
+
+Fix (3551a2a): placement takes the gate's reserve (HostGrowthReserveMB =
+--cgroup-headroom, 0 when the gate's re-plan already holds it back) as one
+growth term for a non-reclaimable CPU-only plan, max(reserve, checkpoint
+reserve); checkpoints and the prompt cache are carved out of it, and
+computeCRAM sizes hybrid checkpoints at the measured size when known.
+Invariant test (16 GiB Qwen3.8 profile): ctx 61,440, footprint 12,268 MiB,
+cram 2,048, 16 checkpoints; footprint + max(reserve, cram) and cram +
+checkpoints both within the ceiling. Core gate passed. Live rerun: matrix7.
