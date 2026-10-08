@@ -2914,3 +2914,22 @@ context derate sized on that device's KV share; an eligible oracle re-plan still
 answers first (disproof protocol unchanged). Live: "preflight context-derate
 after CUDA0 allocation 0 MiB (deficit 103 MiB)", 372,736 -> 368,640 tokens,
 exact preflight passed. Test: `TestKVBackedOracleShortfallDeratesContext`.
+
+MiniMax-M3 direct-1 (b2a6d74 build): the derated plan loaded in 17 min and then
+OOM'd on CUDA1 in the canary; the abort filed 3,204 MiB on CUDA1. Direct-2
+(ae8ee40) planned `runtime=3204` on CUDA0 and CUDA1, loaded twice (the
+allocation measurement moved one expert layer to GPU, 55 -> 54 CPU MoE), was
+ready in 42 min, and served Claude Code: calc correct (8 turns, 1,481 s).
+The serving recorder filed measured growth CUDA0 1,182, CUDA1 4,022, CUDA2
+1,002 MiB. CUDA1 peaked within ~260 MiB of the card. The learned reserve on
+CUDA1 is still short of the real growth, so the next launch plans with the
+4,022 MiB measurement.
+
+## RUNTIME OOM RE-PLAN — keep the crashed KV placement — 2026-10-08
+
+Evidence: B2-q36-35b-learned. The first runtime abort reserved 638 MiB; the
+pinned re-plan kept ctx/ub/slots but switched KV to the host (`--no-kv-offload`)
+and put every expert on the GPU (was `--n-cpu-moe 8`). KV placement is part of
+the growth key, so the new plan showed `runtime=0` and crashed again (growth
+1,146 MiB). Fix: the runtime-OOM re-plan also pins the crashed plan's resolved
+KV placement and quality. Test: `TestRuntimeOOMReplanKeepsTheCrashedShape`.

@@ -7575,11 +7575,22 @@ func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placem
 // re-plan moved experts off CUDA0 and then refilled the freed VRAM with KV
 // (context 405,504 -> 442,368), left 491 MiB free and crashed again. Pinned,
 // the planner has to pack around the reserve on the same key.
+//
+// KV placement and quality are part of that key too. Qwen3.6-35B-A3B on one
+// RTX 4070: after a 638 MiB reserve the re-plan moved KV to the host
+// (--no-kv-offload) and every expert onto the GPU, planned with runtime=0 on
+// the new key, and crashed again.
 func pinRuntimeOOMReplan(opts placement.Options, failed *placement.Strategy) placement.Options {
 	if failed == nil || failed.ContextSize <= 0 {
 		return opts
 	}
 	opts.ContextSize = failed.ContextSize
+	if failed.KVPlacement == "gpu" || failed.KVPlacement == "cpu" {
+		opts.KVPlacement = failed.KVPlacement
+	}
+	if failed.KVQuality != "" {
+		opts.KVQuality = failed.KVQuality
+	}
 	opts.AutoContextMax = 0
 	if failed.UBatchSize > 0 {
 		opts.UBatchSize = failed.UBatchSize
