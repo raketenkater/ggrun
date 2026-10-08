@@ -3133,3 +3133,12 @@ Fixes:
   MiB, cram 1,024, 16 checkpoints, inside the gate and above the measured
   load; the Qwen3.8 plan survives the 149.662 MiB observation unchanged; the
   re-plan does not restore the saved config.
+
+Live (matrix8, f0ce380, 16 GiB CPU scope): Qwen3.6-35B-A3B UD-IQ2_XXS clean
+cache planned ctx 108,544, -cram 1,024, 16 checkpoints (the invariant test's
+numbers), ready 111 s, calc/textstats/inventory correct (346/478/160 s);
+relaunch ready 18 s from the verified config, ledger correct (669 s); decode
+~17.5 tok/s. Qwen3.8-27B UD-IQ2_XXS relaunch on matrix7's cache: gate refused
+the saved 12,621 MiB config, re-plan from measurements ctx 59,392 / footprint
+9,884 MiB, served, stream/cancel/stop pass, memory.peak 15.5 GB of 16 GiB.
+Core gate: core-gate-cpu-overhead.log, pass.
