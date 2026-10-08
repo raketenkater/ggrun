@@ -161,6 +161,10 @@ model endpoint and wires the local workflow; it does not make a model with weak
 tool use behave like a strong coding model. The complete setup and overrides are
 documented in [docs/usage.md](docs/usage.md#use-with-claude-code).
 
+Known issue: on a multi-GPU host, the 4-slot `--claude-code` launch of
+Qwen3.8-27B does not start yet (the plan's layer split differs from
+ik_llama's); a plain `ggrun model.gguf` launch of the same model does.
+
 ## Numbers from my weird rig
 
 My reference machine is deliberately awkward: RTX 3090 Ti 24GB, RTX 3060 12GB,
