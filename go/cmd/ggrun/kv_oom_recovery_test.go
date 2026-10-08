@@ -101,3 +101,28 @@ func TestKVContextDerateKeepsTheFailedDevicesDeficit(t *testing.T) {
 		t.Fatalf("re-plan gave the short device more: split %v vs %v", held.TensorSplit, free.TensorSplit)
 	}
 }
+
+// A small compute-buffer shortfall must not cost most of the context when the
+// same cut frees the device's KV share.
+func TestSmallComputeShortfallCutsContextBySize(t *testing.T) {
+	args := []string{"llama-server", "--ctx-size", "518144", "-ub", "64", "--parallel", "4",
+		"--cache-type-k", "q8_0", "--cache-type-v", "q8_0", "--tensor-split", "0.27,0.58,0.15"}
+	current := &placement.Strategy{ContextSize: 518144, ContextAuto: true, UBatchSize: 64, KVType: "q8_0", Parallel: 4}
+	outcome := preflightOutcome{Device: 0, AllocMB: 79, AllocMBMeasured: true, DeficitMB: 29, IsComputeBuffer: true}
+	req := &launchRequest{CtxFlag: "fit", ClaudeCode: true}
+	floor, ok := automaticContextRecoveryTargetWithKV(req, current, args, outcome, 0)
+	if !ok || floor != 4*claudeSlotMin {
+		t.Fatalf("without the KV share the old sizing falls to the floor: %d %v", floor, ok)
+	}
+	sized, ok := automaticContextRecoveryTargetWithKV(req, current, args, outcome, 5000)
+	if !ok || sized < 518144*95/100 || sized >= 518144 {
+		t.Fatalf("a 29 MiB shortfall with a 5 GB KV share cut context to %d", sized)
+	}
+	model := &placement.ModelProfile{NumLayers: 64, HeadCountKV: 4, KeyLength: 128, ValueLength: 128}
+	if kv := deviceKVShareMB(model, args, 0); kv <= 0 {
+		t.Fatalf("device 0 holds 27%% of the KV: estimated %d MiB", kv)
+	}
+	if kv := deviceKVShareMB(model, append(args, "--no-kv-offload"), 0); kv != 0 {
+		t.Fatalf("KV on the CPU is not freed on the GPU: %d", kv)
+	}
+}

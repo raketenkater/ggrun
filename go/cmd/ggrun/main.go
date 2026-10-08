@@ -4792,6 +4792,8 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	const maxConvergingReplans = 6
 	convergingReplans := 0
 	lastPreflightDeficitMB := 0
+	// admittedArgv is the last argv an exact (allocated) preflight passed.
+	admittedArgv := ""
 	retries := 0
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
@@ -5172,6 +5174,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				)
 				continue
 			}
+			if preflight.Evidence.Level == memoryEvidenceAllocated {
+				admittedArgv = formatCommand(serverArgs)
+			}
 			// This argv passed exact preflight. Record its automatic context so the
 			// measured re-plan below can refine placement without spending that
 			// proof on a larger context. Only measured evidence counts as proof.
@@ -5328,6 +5333,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
+		}
+		if admittedArgv != "" && admittedArgv == formatCommand(serverArgs) {
+			work.grantAdmittedStart()
 		}
 		processTimeout, budgetErr := work.beginLoad(timeout)
 		if budgetErr != nil {

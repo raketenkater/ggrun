@@ -2873,3 +2873,19 @@ the 2 TB disk `ggrun-accept-20261007-evidence/growth-learning-b2*`):
   21k and 28k-token prompts all served, CUDA0 peak 11,815/11,873 MiB; the
   serving recorder filed measured growth CUDA0=328 MiB, replacing the guess.
 A brand-new model on a tight device still fails once before it has learned.
+
+`--claude-code` follow-up (3 launches on caa5b40, all exited): each walk ended
+with exact preflight passing twice and the production start refused at the
+6-start limit; a 15-29 MiB compute shortfall had again cut context ~518k ->
+98,304. Fixes: (1) a compute-buffer context derate counts the failed device's
+KV share (model KV at the current context times its tensor-split share), so a
+small shortfall gets a small cut (`TestSmallComputeShortfallCutsContextBySize`);
+(2) the production start of an argv that passed an allocated exact preflight is
+granted once even when the probes spent the allowance
+(`TestAdmittedStartIsGrantedOnce`). Nothing persists from a launch that never
+succeeds, so cross-launch learning cannot help this case.
+
+Qwen3.6-35B-A3B on the 4070 with Claude Code (launcher caa5b40, learned cache):
+calc, textstats, inventory all correct (160/157/131 s). Two mid-session aborts
+were caught by the serving watch and recovered in-process; measured growth rose
+to 1,546 MiB. The first recovery's preflight still showed `runtime=0`.

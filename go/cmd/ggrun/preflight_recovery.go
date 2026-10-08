@@ -1025,6 +1025,37 @@ func contextCandidateCoversDeficit(currentArgs, candidateArgs []string, model *p
 }
 
 func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strategy, currentArgs []string, outcome preflightOutcome) (int, bool) {
+	return automaticContextRecoveryTargetWithKV(req, current, currentArgs, outcome, 0)
+}
+
+// deviceKVShareMB estimates the KV cache the failed device holds under
+// currentArgs: the model's KV at the current context times the device's
+// tensor-split share (all of it on a single-device plan). Zero when KV is not
+// on the GPUs or the share is unknown.
+func deviceKVShareMB(model *placement.ModelProfile, currentArgs []string, device int) int {
+	if model == nil || hasArg(currentArgs, "--no-kv-offload") {
+		return 0
+	}
+	values := effectiveMemoryArgValues(currentArgs)
+	ctx := memoryValueInt(values, "ctx")
+	if ctx <= 0 {
+		return 0
+	}
+	share := tensorSplitShare(values, device)
+	if values["tensor-split"] == "" {
+		share = 1
+	}
+	if share <= 0 {
+		return 0
+	}
+	kvType := values["cache-k"]
+	if kvType == "" {
+		kvType = "q8_0"
+	}
+	return int(float64(placement.EstimateKVCacheMB(model, ctx, kvType, hasArg(currentArgs, "--swa-full"))) * share)
+}
+
+func automaticContextRecoveryTargetWithKV(req *launchRequest, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, deviceKVMB int) (int, bool) {
 	// A failed KV-cache allocation scales with context exactly as a compute
 	// buffer does. Excluding it left a --claude-code launch of Qwen3.8-27B (4
 	// slots, 628,736 tokens) failing closed 308 MiB short on CUDA0 with context,
@@ -1057,6 +1088,12 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 	scalableMB := outcome.AllocMB
 	if outcome.Evidence.Level == memoryEvidenceOraclePlanned && outcome.DeviceContextMB > 0 {
 		scalableMB = outcome.DeviceComputeMB + outcome.DeviceContextMB
+	} else if outcome.IsComputeBuffer && deviceKVMB > 0 {
+		// A context cut also frees the failed device's KV share. Sized on the
+		// compute buffer alone, a 15-29 MiB shortfall on a 73-79 MiB allocation
+		// cut the --claude-code Qwen3.8-27B context from ~518k to its 98,304
+		// floor.
+		scalableMB += deviceKVMB
 	}
 	target := minimum
 	if required < scalableMB {
@@ -1079,7 +1116,7 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 // placement. A context change is never applied to the current Strategy in
 // place: all context-derived memory and cache state must come from Compute.
 func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, floorNCPUMoE int, oomPenalty map[int]int) (*placement.Strategy, []string, error) {
-	target, ok := automaticContextRecoveryTarget(req, current, currentArgs, outcome)
+	target, ok := automaticContextRecoveryTargetWithKV(req, current, currentArgs, outcome, deviceKVShareMB(model, currentArgs, outcome.Device))
 	if !ok || cfg == nil || model == nil || be == nil || caps == nil {
 		return nil, nil, nil
 	}

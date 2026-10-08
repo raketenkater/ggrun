@@ -92,6 +92,24 @@ type admissionWork struct {
 	lastProductionLoad time.Duration
 	// convergingLoads counts starts granted beyond maxLoads for progress.
 	convergingLoads int
+	// admittedStartGranted records the one production start granted after a
+	// passing exact preflight.
+	admittedStartGranted bool
+}
+
+// grantAdmittedStart lets the production start of an argv that just passed
+// exact preflight go ahead even when the probes that proved it used the load
+// allowance -- that start is what the probes were for. Once per admission; the
+// window still bounds time.
+func (w *admissionWork) grantAdmittedStart() bool {
+	if w == nil || w.admittedStartGranted {
+		return false
+	}
+	w.admittedStartGranted = true
+	if w.loads >= w.maxLoads {
+		w.maxLoads = w.loads + 1
+	}
+	return true
 }
 
 // grantConvergingLoad allows one more weight-loading start because the last
