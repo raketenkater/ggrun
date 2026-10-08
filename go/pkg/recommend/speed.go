@@ -232,6 +232,17 @@ func denseSingleGPUEfficiency(activeB float64) float64 {
 // predictDecodeTPS estimates decode tok/s for a candidate+quant on this machine.
 // Returns 0 when params are unknown (callers then skip speed gating).
 func predictDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption) float64 {
+	return predictDecodeTPSForFit(caps, c, quant, "", 0)
+}
+
+// predictDecodeTPSForFit is predictDecodeTPS once the fit is known. A dense
+// model that did not fit one GPU spills weights to RAM, and the VRAM it keeps
+// is what is left after the fit's GPU-side overhead (KV, graph scratch).
+// Qwen3.8-27B UD-IQ3_XXS (10.2 GiB) on one 12 GiB RTX 4070 fit as GPU plus
+// RAM but was predicted at 31.5 tok/s, as if fully resident; the launch kept
+// 52% of its weights on the GPU and decoded 4.2-4.8 tok/s.
+func predictDecodeTPSForFit(caps *detect.Capabilities, c Candidate, quant QuantOption, fit string, gpuOverheadMB int) float64 {
+	spilled := !c.MoE && fit != "" && fit != "single GPU"
 	activeB := c.TotalParamsB
 	if c.MoE && c.ActiveParamsB > 0 {
 		activeB = c.ActiveParamsB
@@ -246,7 +257,7 @@ func predictDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption)
 
 	vramBW := weightedVRAMBandwidth(caps)
 	singleDense := false
-	if !c.MoE {
+	if !c.MoE && !spilled {
 		if bw, ok := denseSingleGPUBandwidth(caps, quant.SizeGB); ok {
 			vramBW = bw
 			singleDense = true
@@ -254,6 +265,9 @@ func predictDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption)
 	}
 	budget := hardware(caps)
 	usableVRAMGB := float64(budget.totalVRAM) / 1024.0 * 0.88
+	if spilled {
+		usableVRAMGB -= float64(gpuOverheadMB) / 1024.0
+	}
 	// fraction of the model's weights resident in VRAM
 	f := 0.0
 	if vramBW > 0 {

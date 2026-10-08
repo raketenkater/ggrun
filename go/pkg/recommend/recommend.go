@@ -442,7 +442,7 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 		if effIntel <= 0 {
 			continue
 		}
-		tps := predictDecodeTPS(caps, c, q)
+		tps := predictDecodeTPSForFit(caps, c, q, fit, gpuSideOverheadMB(caps, c, q))
 		// Quant-retention guesses are not benchmark measurements. Compare
 		// models on their catalog intelligence, discounting only predicted
 		// serving below the usable floor. Extra speed beyond that is not a
@@ -658,6 +658,16 @@ func quantOptions(c Candidate) []QuantOption {
 		name = "auto"
 	}
 	return []QuantOption{{Name: name, SizeGB: c.SizeGB}}
+}
+
+// gpuSideOverheadMB is the part of fitQuant's overhead that stays in VRAM:
+// KV at the expected launch context plus graph scratch.
+func gpuSideOverheadMB(caps *detect.Capabilities, c Candidate, q QuantOption) int {
+	modelMB := int(q.SizeGB * 1024)
+	if hasGeometry(c) {
+		return 2048 + recommendKVMB(c, recommendAutoContext(caps, c, modelMB), "q4_0")
+	}
+	return estimateOverheadMB(modelMB, caps, c)
 }
 
 func fitQuant(b hardwareBudget, caps *detect.Capabilities, c Candidate, q QuantOption) (fit, reason string, fitPenalty, needGB float64, ok bool) {
