@@ -3014,3 +3014,42 @@ pick changed on any of the four profiles. Still above the measured value
 because the launch takes the full 262k context in the offload tier; whether
 the offload tier should trade context for resident weights is an open launch
 policy question (agent sessions need long context), not changed here.
+
+## WINDOWED KV ON IK — Gemma 4 priced at 0 MiB, allocated at full context — 2026-10-08
+
+Evidence: cell B-gemma4-iq4 (Gemma 4 26B A4B IQ4_XS, the RTX 4070 + 32 GiB
+Fastest pick, f618a9f). Plan: ctx 262,144 gpu-resident, `KV 0` on CUDA0. Both
+contained probes: `allocating 29920.01 MiB on device 0: cudaMalloc failed`
+for the KV cache; context recovery at 61,440 tokens failed closed. Never
+served (first and relaunch).
+
+Two causes:
+
+1. Gemma 4 states head_count_kv and the window pattern only per block. It was
+   excluded from per-block pricing as a shared-KV arch, and the scalar path
+   multiplied by a scalar head count of 0.
+2. ik_llama.cpp (1fddd12, `llama_kv_cache_init`) sizes every layer's K/V at
+   kv_size and applies the window as a mask; it has no windowed cache and no
+   `--swa-full`. 29,920 MiB = 262,144 x (5 x 2 x 1,024 + 25 x 8 x 512) x
+   1.0625 B exactly. Planner pricing followed the mainline windowed cache.
+
+Fix (ff22aee): Gemma 4 is priced per block (a shared-KV variant is now
+overestimated, not 0); an ik backend that does not advertise `--swa-full`
+sets ModelProfile.FullContextWindowedKV at backend selection for
+standard-attention windowed models (not DeepSeek4, OpenPangu, MLA), and
+computeKVTotalMB / kvLayerBytes price windowed layers at full context. Dry-run
+on the same profile: ctx 74,752, KV 8,532 MiB on CUDA0 (119,680 B/token,
+matching the backend), experts on CPU. Core gate passed. Live rerun queued
+(matrix5).
+
+Live confirmation of 22bd4a8 (CPU HYBRID START): the CPU Qwen3.8 IQ2_XXS cell
+on fc57b75 planned 185,344 tokens, one probe, "memory plan stable at
+allocation-verified evidence", served (decode ~3.9 tok/s).
+
+## FULL HOST BALANCED / SMARTEST — not testable on this disk — 2026-10-08
+
+The pick is GLM-5.3 UD-IQ2_M (222.2 GB). The model disk has 144 GB free; the
+download needs one of the owner's models removed (owner decision). The local
+UD-Q2_K_XL (237 GB) exceeds the 206 GB RAM budget and is refused without
+`--mmap` ("placement requires file-backed mmap; rerun with --mmap to approve
+it explicitly"), by design.
