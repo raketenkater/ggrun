@@ -2736,3 +2736,22 @@ with and without this change and in the next package run.
 Pattern across B2 and A1: the first long agent prompt (~20k tokens) needs more
 CUDA0 memory than the ~6-7k-token canary shows. Recovery now copes; making the
 plan or the canary cover long prompts is open.
+
+Third follow-up (A1 recovery cell, launcher 1d037e8): a fresh launch with the
+recorded reserve and the residency hold ("re-packing CUDA0 to hold
+n-cpu-moe>=54") passed exact preflight as CUDA0 388/11,873 MiB with model=0
+context=0, CUDA1 22,161/24,112 with context=0. At runtime CUDA0 peaked at
+11,775 MiB and CUDA1 at 24,110 MiB, and the first canary request died with the
+cuBLAS "unsupported value or parameter" error. The preflight's per-device
+accounting did not see where the backend actually put the KV cache. The
+cuBLAS error is not treated as an OOM, so nothing was learned. The pinned
+runtime re-plan was not exercised (no post-ready crash).
+
+Open, needs its own investigation before more recovery work:
+- preflight per-device KV accounting vs the backend's real placement for
+  MiniMax-M3 with experts held on CPU;
+- whether the cuBLAS INVALID_VALUE on a nearly full device is an allocation
+  failure (treat as size-less OOM) — inferred, not shown;
+- a default per-device runtime reserve until growth is measured (llama.cpp's
+  fitter keeps 1 GiB): a placement policy change for every model that needs a
+  matched A/B before promotion.
