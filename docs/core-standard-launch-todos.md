@@ -2933,3 +2933,44 @@ and put every expert on the GPU (was `--n-cpu-moe 8`). KV placement is part of
 the growth key, so the new plan showed `runtime=0` and crashed again (growth
 1,146 MiB). Fix: the runtime-OOM re-plan also pins the crashed plan's resolved
 KV placement and quality. Test: `TestRuntimeOOMReplanKeepsTheCrashedShape`.
+
+MiniMax-M3 direct-2 final: stream (TTFT 2.1 s), cancel and reconnect, Claude
+Code calc (8 turns, 1,481 s) and textstats (9 turns, 1,343 s) all correct; no
+serving abort in 48 min of agent work; clean stop.
+
+## LAYER SPLIT — ik_llama assigns layers by bytes, ggrun predicts by count — 2026-10-08
+
+Evidence: `--claude-code` Qwen3.8-27B (4 slots, full host) on 7907674, attempts
+6-7: seven preflights each failed on a KV allocation 15-737 MiB short, the
+deficit moving between CUDA0 and CUDA1 after each re-split; admission budget
+exhausted. Same with a memory-probe (no reviewer present): CUDA0 6,868 MiB at
+804,864 tokens, 247 MiB over the guard.
+
+Two causes, measured with the backend directly (split 0.27/0.58/0.15, ctx
+65,536, q8_0):
+
+1. Hybrid recurrent state is not priced per slot. Qwen3.8 (qwen35, 48
+   recurrent + 16 attention trunk blocks, 1 MTP block) allocates 149.63 MiB of
+   delta-net state per slot beside the "KV self size" (2,176 MiB): per-device
+   KV buffers sum to 2,325.6 MiB at 1 slot and 2,774.5 MiB at 4. ggrun reads
+   the aggregate line and the formula counts attention only. ik_llama sizes it
+   as n_embd_v_s = (d_conv-1)(2 d_state n_group + d_inner) + (d_inner/dt_rank)^2
+   dt_rank F32 per recurrent block per slot (GGUF ssm.*, not parsed today).
+2. The layer-to-device assignment differs. ik_llama since #1466 (0871ab29,
+   2026-03-20; shipped backend 1fddd12) fills devices by cumulative bytes:
+   per-block weights (all `blk.N` tensors, routed experts included even when
+   overridden to CPU) plus that block's cache at n_ctx and n_seq_max, plus
+   max_compute per device; `--tensor-split` is a byte fraction. ggrun's
+   `layerDeviceAssignments` mirrors mainline's count rule. Backend log: blocks
+   0-19 / 20-58 / 59-65 (20/39/7, "Setting default device in layer N to D");
+   ggrun predicts 0-17 on CUDA0. An attention block is 1.6 GiB at 800k tokens,
+   so one block off moves the deficit to the next device.
+
+Tried and reverted: per-block pricing of delta-net hybrids with per-slot
+recurrent state (matches the backend's totals exactly). With the count-based
+assignment it still left CUDA0 213 MiB short in the memory-probe, so it is not
+promotion evidence. Patch and test kept with the acceptance evidence
+(`hybrid-kv-wip.patch`). Fix direction: mirror ik_llama's byte-weighted
+assignment for the ik backend (or translate intended layer boundaries into
+byte fractions), then price hybrids per block; both change every multi-GPU
+plan and need matched A/B.
