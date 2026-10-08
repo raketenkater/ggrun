@@ -52,6 +52,11 @@ type Info struct {
 	NRot                      int     `json:"n_rot"`                        // rope dimension
 	SSM                       int     `json:"ssm"`                          // 1 if model uses SSM layers
 	FullAttnInterval          int     `json:"full_interval"`                // full attention every N layers (hybrid SSM/SWA)
+	SSMConvKernel             int     `json:"ssm_d_conv"`                   // ssm.conv_kernel
+	SSMStateSize              int     `json:"ssm_d_state"`                  // ssm.state_size
+	SSMGroupCount             int     `json:"ssm_n_group"`                  // ssm.group_count
+	SSMInnerSize              int     `json:"ssm_d_inner"`                  // ssm.inner_size
+	SSMTimeStepRank           int     `json:"ssm_dt_rank"`                  // ssm.time_step_rank
 	SlidingWindow             int     `json:"swa"`                          // sliding window size (0 = no SWA)
 	LeadingDense              int     `json:"leading_dense"`                // leading dense block count (MoE models)
 	KVLoops                   int     `json:"kv_loops"`                     // looped-transformer passes, each with its own KV (0/1 = none)

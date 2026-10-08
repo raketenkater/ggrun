@@ -2983,6 +2983,11 @@ func kvProfileFromGGUF(info *gguf.Info) *placement.ModelProfile {
 		// Per-layer arrays price mixed-head and explicit-window models; the
 		// NextN count tells placement which stored blocks hold no cache.
 		NextNPredictLayers: info.NextNPredictLayers,
+		SSMConvKernel:      info.SSMConvKernel,
+		SSMStateSize:       info.SSMStateSize,
+		SSMGroupCount:      info.SSMGroupCount,
+		SSMInnerSize:       info.SSMInnerSize,
+		SSMTimeStepRank:    info.SSMTimeStepRank,
 		HeadCountKVByLayer: info.HeadCountKVByLayer,
 		SWAPattern:         info.SlidingWindowPattern,
 		KeyLengthSWA:       info.KeyLengthSWA,

@@ -380,6 +380,14 @@ type ModelProfile struct {
 	LeadingDenseInferred bool `json:"leading_dense_inferred,omitempty"`
 	NextNPredictLayers   int  `json:"nextn_predict_layers,omitempty"`
 
+	// SSM geometry (GGUF ssm.*): sizes the per-slot recurrent state a hybrid
+	// keeps on each recurrent block's device (kvlayers.go).
+	SSMConvKernel   int `json:"ssm_d_conv,omitempty"`
+	SSMStateSize    int `json:"ssm_d_state,omitempty"`
+	SSMGroupCount   int `json:"ssm_n_group,omitempty"`
+	SSMInnerSize    int `json:"ssm_d_inner,omitempty"`
+	SSMTimeStepRank int `json:"ssm_dt_rank,omitempty"`
+
 	// HeadCountKVByLayer and SWAPattern carry the per-block attention arrays
 	// from the GGUF header (SWAPattern: 1 = windowed). KeyLengthSWA and
 	// ValueLengthSWA are the windowed layers' head widths when they differ.

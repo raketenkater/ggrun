@@ -33,9 +33,22 @@ import (
 //
 // It is a formula, not a measurement: an exact scoped allocation, a measured
 // geometry or a measured rate keeps precedence wherever computeKVTotalMB
-// already prefers it. Layouts this file cannot describe (MLA, recurrent or
-// hybrid state, looped blocks, shared/reused KV layers, router blocks, an SWA
-// window without a stated pattern) return !ok and keep the existing path.
+// already prefers it. Layouts this file cannot describe (MLA, recurrent
+// hybrids other than the one below, looped blocks, shared/reused KV layers,
+// router blocks, an SWA window without a stated pattern) return !ok and keep
+// the existing path.
+//
+// Gated delta-net hybrids (qwen3next, qwen35, qwen35moe; ik_llama.cpp
+// src/llama-hparams.cpp and llama_kv_cache_init) are priced per block too:
+// among the non-MTP blocks, il is full attention when (il+1) %
+// full_attention_interval == 0 and recurrent otherwise; MTP blocks hold no
+// cache. A recurrent block keeps n_embd_v_s F32 values per slot,
+// (d_conv-1)*(2*d_state*n_group + d_inner) + (d_inner/dt_rank)^2*dt_rank, on
+// its own device. Qwen3.8-27B (64 trunk blocks, interval 4) measured 149.63 MiB
+// of recurrent state per slot beside 16 attention blocks. Unpriced, it made
+// every probed CPU context fail its own re-plan by ~150 MiB: the launch stepped
+// down one 1,024-token granule per weight-loading start and exhausted the
+// start budget without serving.
 
 // kvLayer is one stored block's normal-context cache.
 type kvLayer struct {
@@ -43,6 +56,9 @@ type kvLayer struct {
 	SWA    bool
 	KWidth int // elements per cell
 	VWidth int
+	// RecurrentF32 is a recurrent block's state per slot (F32 values); such a
+	// block has no attention cache.
+	RecurrentF32 int64
 }
 
 type kvLayerLayout struct {
@@ -75,6 +91,9 @@ var kvSpecialCacheArchs = map[string]bool{
 // modelKVLayerLayout validates the per-block arrays. It applies only when the
 // model states at least one array; scalar-only models keep the scalar path.
 func modelKVLayerLayout(model *ModelProfile) (kvLayerLayout, bool) {
+	if layout, ok := deltaNetHybridLayout(model); ok {
+		return layout, true
+	}
 	if model == nil || (len(model.HeadCountKVByLayer) == 0 && len(model.SWAPattern) == 0) {
 		return kvLayerLayout{}, false
 	}
@@ -151,6 +170,42 @@ func modelKVLayerLayout(model *ModelProfile) (kvLayerLayout, bool) {
 	return layout, true
 }
 
+// deltaNetHybridArchs place full attention every full_attention_interval
+// blocks and gated delta-net recurrent state everywhere else.
+var deltaNetHybridArchs = map[string]bool{"qwen3next": true, "qwen35": true, "qwen35moe": true}
+
+func deltaNetHybridLayout(model *ModelProfile) (kvLayerLayout, bool) {
+	if model == nil || !deltaNetHybridArchs[strings.ToLower(model.ModelArch)] || !hasSSMLayout(model) ||
+		len(model.HeadCountKVByLayer) > 0 || len(model.SWAPattern) > 0 || model.SlidingWindow > 0 ||
+		model.KVLoraRank > 0 || model.KVLoops > 1 {
+		return kvLayerLayout{}, false
+	}
+	n, interval := model.NumLayers, model.FullAttnInterval
+	dConv, dState, nGroup := model.SSMConvKernel, model.SSMStateSize, model.SSMGroupCount
+	dInner, dtRank := model.SSMInnerSize, model.SSMTimeStepRank
+	keyLen, valueLen, heads := model.KeyLength, model.ValueLength, model.HeadCountKV
+	if n <= 0 || interval <= 0 || dConv <= 0 || dState <= 0 || nGroup <= 0 || dInner <= 0 || dtRank <= 0 ||
+		dInner%dtRank != 0 || keyLen <= 0 || valueLen <= 0 || heads <= 0 {
+		return kvLayerLayout{}, false
+	}
+	headV := int64(dInner / dtRank)
+	stateF32 := int64(dConv-1)*int64(2*dState*nGroup+dInner) + headV*headV*int64(dtRank)
+	trunk := n
+	if nextn := model.NextNPredictLayers; nextn > 0 && nextn < n {
+		trunk = n - nextn
+	}
+	layout := kvLayerLayout{Layers: make([]kvLayer, n)}
+	for il := 0; il < trunk; il++ {
+		if (il+1)%interval != 0 {
+			layout.Layers[il] = kvLayer{Cached: true, RecurrentF32: stateF32}
+			continue
+		}
+		layout.Layers[il] = kvLayer{Cached: true, KWidth: heads * keyLen, VWidth: heads * valueLen}
+		layout.VWidthMax = max(layout.VWidthMax, heads*valueLen)
+	}
+	return layout, true
+}
+
 func padTo256(n int64) int64 {
 	return (n + 255) / 256 * 256
 }
@@ -202,6 +257,10 @@ func kvLayerBytes(model *ModelProfile, shape kvCacheShape) ([]int64, bool) {
 	out := make([]int64, len(layout.Layers))
 	for il, layer := range layout.Layers {
 		if !layer.Cached {
+			continue
+		}
+		if layer.RecurrentF32 > 0 {
+			out[il] = layer.RecurrentF32 * 4 * int64(max(1, shape.Slots))
 			continue
 		}
 		vWidth := layer.VWidth
@@ -302,6 +361,11 @@ func kvLayerShareMB(model *ModelProfile, shape kvCacheShape, totalMB int, split 
 	if fractions, ok := kvLayerDeviceFractions(model, shape, split); ok {
 		if idx >= len(fractions) || fractions[idx] <= 0 {
 			return 0
+		}
+		// A total priced without the slot count misses recurrent state the
+		// extra slots keep; the shape's own per-block sum is the floor.
+		if exact, ok := kvLayerTotalMB(model, shape); ok && exact > totalMB {
+			totalMB = exact
 		}
 		return int(math.Ceil(float64(totalMB) * fractions[idx]))
 	}
