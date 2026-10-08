@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/gguf"
@@ -4700,14 +4701,36 @@ func TestRelatedModelRuntimeGraphGrowthTakesPerDeviceMaximum(t *testing.T) {
 func TestRelatedModelRuntimeGraphGrowthRejectsNonEvidence(t *testing.T) {
 	gpus, model := growthCarryFixture()
 
-	t.Run("estimated growth is not a measurement", func(t *testing.T) {
+	// An abort's estimate is carried only while it is the newest evidence for
+	// its device; a later measurement supersedes it, so it cannot become a
+	// permanent floor.
+	t.Run("an estimate is carried only until a newer measurement", func(t *testing.T) {
 		cacheDir := t.TempDir()
-		if err := writeProbeCacheForModel(cacheDir, model, 131072, 512, "high", "gpu", "llama", gpus, 1,
-			nil, map[int]int{0: 5504}, map[int]bool{0: true}, 0); err != nil {
-			t.Fatalf("write estimated probe: %v", err)
+		setAll := func(at time.Time) {
+			entries, _ := os.ReadDir(cacheDir)
+			for _, e := range entries {
+				_ = os.Chtimes(filepath.Join(cacheDir, e.Name()), at, at)
+			}
 		}
-		if got := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, "llama"); got[0] != 0 {
-			t.Fatalf("estimated growth carried as measured evidence: %d MiB", got[0])
+		if err := writeProbeCacheForModel(cacheDir, model, 131072, 512, "high", "gpu", "llama", gpus, 1,
+			nil, map[int]int{0: 22}, map[int]bool{0: false}, 0); err != nil {
+			t.Fatal(err)
+		}
+		setAll(time.Now().Add(-2 * time.Hour))
+		if err := writeProbeCacheForModel(cacheDir, model, 262144, 512, "high", "gpu", "llama", gpus, 1,
+			nil, map[int]int{0: 3204}, map[int]bool{0: true}, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, "llama"); got[0] != 3204 {
+			t.Fatalf("the newest evidence, an abort's estimate, was not carried: %d MiB", got[0])
+		}
+		setAll(time.Now().Add(-time.Hour))
+		if err := writeProbeCacheForModel(cacheDir, model, 65536, 512, "high", "gpu", "llama", gpus, 1,
+			nil, map[int]int{0: 900}, map[int]bool{0: false}, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, "llama"); got[0] != 900 {
+			t.Fatalf("a newer measurement must supersede the older estimate: %d MiB", got[0])
 		}
 	})
 

@@ -2889,3 +2889,19 @@ Qwen3.6-35B-A3B on the 4070 with Claude Code (launcher caa5b40, learned cache):
 calc, textstats, inventory all correct (160/157/131 s). Two mid-session aborts
 were caught by the serving watch and recovered in-process; measured growth rose
 to 1,546 MiB. The first recovery's preflight still showed `runtime=0`.
+
+## ESTIMATE CARRY — an abort's reserve must reach the next plan's key — 2026-10-08
+
+Evidence: MiniMax-M3 learn-1 (launcher e0f5673) died in its canary with a
+size-less OOM and filed 3,204 MiB on CUDA0 for its key (ctx 436,224 / ub 512).
+Learn-2 planned with `runtime=22` on CUDA0: automatic context landed on another
+key (ctx 442,368 / ub 64) holding an older 22 MiB measurement, and estimates were
+never carried across keys. Probe files held four keys with conflicting entries.
+
+Fix: estimates are dated by their probe file. A related key's abort estimate is
+used when it is newer than every measurement for its device (cold key) or newer
+than the exact key's own file (measured key); a later measurement supersedes it,
+so an old guess cannot become a permanent floor. Dry-run trace on a copy of the
+real cache: CUDA0 growth 22 -> 3,204 MiB in all 360 candidate evaluations.
+Tests: the rewritten carry subtest; the warmup test now uses the measured-only
+view `RelatedMeasuredRuntimeGraphGrowth`.

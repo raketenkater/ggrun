@@ -3141,6 +3141,10 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			if related := RelatedModelRuntimeGraphGrowth(opts.CacheDir, model, caps.GPUs, s.Parallel, opts.BackendTag); related != nil {
 				runtimeGrowthMB = related[g.Index]
 			}
+		} else if pc != nil {
+			if newer := newerAbortEstimates(opts.CacheDir, model, caps.GPUs, s.Parallel, pc.ModTime)[g.Index]; newer > runtimeGrowthMB {
+				runtimeGrowthMB = newer
+			}
 		}
 		fixedPerGPU[i] = sysCUDAOverheadByGPU[g.Index] + computeBufMB + runtimeGrowthMB
 		expertOnlyFixedPerGPU[i] = sysCUDAOverheadByGPU[g.Index] + expertOnlyComputeMB + runtimeGrowthMB
@@ -7760,8 +7764,61 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 // This does NOT relax the compute-buffer cache either -- slot count really does
 // change that measurement.
 func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, backendTag string) map[int]int {
-	if model == nil || cacheDir == "" {
+	measured, newestMeasured, estimates := relatedGrowthEvidence(cacheDir, model, gpus, parallel)
+	byDevice := map[int]int{}
+	for dev, v := range measured {
+		byDevice[dev] = v
+	}
+	for dev, list := range estimates {
+		for _, e := range list {
+			if e.at.After(newestMeasured[dev]) && e.mb > byDevice[dev] {
+				byDevice[dev] = e.mb
+			}
+		}
+	}
+	if len(byDevice) == 0 {
 		return nil
+	}
+	return byDevice
+}
+
+// RelatedMeasuredRuntimeGraphGrowth is the measured-only view of the related
+// keys: per device, the largest growth that was observed rather than guessed.
+func RelatedMeasuredRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int) map[int]int {
+	measured, _, _ := relatedGrowthEvidence(cacheDir, model, gpus, parallel)
+	if len(measured) == 0 {
+		return nil
+	}
+	return measured
+}
+
+// carriedEstimate is an abort's runtime-growth estimate with its probe file's
+// modification time.
+type carriedEstimate struct {
+	mb int
+	at time.Time
+}
+
+// newerAbortEstimates returns, per device, the largest abort estimate filed on
+// any related key after since. An exact key's own measurement is evidence only
+// up to the next abort: MiniMax-M3 planned on a key holding a 22 MiB measurement
+// while a newer abort on another key had filed 3,204 MiB.
+func newerAbortEstimates(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, since time.Time) map[int]int {
+	_, _, estimates := relatedGrowthEvidence(cacheDir, model, gpus, parallel)
+	out := map[int]int{}
+	for dev, list := range estimates {
+		for _, e := range list {
+			if e.at.After(since) && e.mb > out[dev] {
+				out[dev] = e.mb
+			}
+		}
+	}
+	return out
+}
+
+func relatedGrowthEvidence(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int) (measured map[int]int, newestMeasured map[int]time.Time, estimates map[int][]carriedEstimate) {
+	if model == nil || cacheDir == "" {
+		return nil, nil, nil
 	}
 	modelBase := filepath.Base(model.Path)
 	// Runtime graph growth is allocation state, not a speed figure: carry it
@@ -7769,13 +7826,25 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 	wantSig := gpuIdentityHash(gpus)
 	wantParallel := probeParallelKey(parallel)
 	exactByDevice := map[int]int{}
+	// An abort's estimate is carried only while it is the newest evidence for
+	// its device. Automatic context lands on a different key from launch to
+	// launch, so an estimate filed for the crashed key alone never reached the
+	// next plan: MiniMax-M3 recorded 3,204 MiB on CUDA0 and re-planned with an
+	// older 22 MiB measurement from another key. A measurement taken after the
+	// abort supersedes it, so an old guess cannot become a permanent floor.
+	newestMeasured = map[int]time.Time{}
+	estimates = map[int][]carriedEstimate{}
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
-		return nil
+		return nil, nil, nil
 	}
 	for _, ent := range entries {
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".probe") {
 			continue
+		}
+		var modified time.Time
+		if info, infoErr := ent.Info(); infoErr == nil {
+			modified = info.ModTime()
 		}
 		data, err := os.ReadFile(filepath.Join(cacheDir, ent.Name()))
 		if err != nil {
@@ -7849,18 +7918,20 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 		}
 		for dev, v := range growth {
 			if hasEstimate[dev] {
-				continue // estimated (guessed) growth is not evidence for a carry
+				// Not a measurement: carried below only while it is newer than
+				// every measurement for this device.
+				estimates[dev] = append(estimates[dev], carriedEstimate{v, modified})
+				continue
 			}
 			if v > exactByDevice[dev] {
 				exactByDevice[dev] = v
 			}
+			if modified.After(newestMeasured[dev]) {
+				newestMeasured[dev] = modified
+			}
 		}
 	}
-	byDevice := exactByDevice
-	if len(byDevice) == 0 {
-		return nil
-	}
-	return byDevice
+	return exactByDevice, newestMeasured, estimates
 }
 
 // EstimatedRuntimeGraphGrowthAtUBatch is the largest ESTIMATED runtime growth
@@ -9068,8 +9139,13 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	if err != nil {
 		return nil
 	}
+	var modTime time.Time
+	if info, statErr := os.Stat(path); statErr == nil {
+		modTime = info.ModTime()
+	}
 	content := string(data)
 	pc := &probeCache{
+		ModTime:                          modTime,
 		ComputeBufByGPU:                  map[int]int{},
 		RuntimeGraphGrowthByGPU:          map[int]int{},
 		RuntimeGraphGrowthEstimatedByGPU: map[int]bool{},
@@ -9419,6 +9495,8 @@ type probeCache struct {
 	// RuntimeGraphGrowthByGPU is VRAM a real request needed beyond the
 	// load-time graph reserve, keyed by GPU index.
 	RuntimeGraphGrowthByGPU map[int]int
+	// ModTime is the probe file's modification time when loaded.
+	ModTime time.Time
 	// RuntimeGraphGrowthEstimatedByGPU marks entries that were guessed rather
 	// than read from the backend.
 	//
