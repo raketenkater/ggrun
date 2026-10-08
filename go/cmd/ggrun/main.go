@@ -2875,6 +2875,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		VRAMHeadroomMB:          req.VRAMHeadroomMB,
 		RAMHeadroomMB:           req.RAMHeadroomMB + req.PlacementHostReserveMB,
 		HostGrowthReserveMB:     hostGrowthReserveMB(req),
+		SkipVerifiedConfig:      req.PlacementHostReserveMB > 0,
 		RequireMeasuredBuffers:  true,
 		NoMMap:                  req.NoMMap,
 		ForceMMap:               req.ForceMMap,

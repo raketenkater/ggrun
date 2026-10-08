@@ -3097,3 +3097,39 @@ computeCRAM sizes hybrid checkpoints at the measured size when known.
 Invariant test (16 GiB Qwen3.8 profile): ctx 61,440, footprint 12,268 MiB,
 cram 2,048, 16 checkpoints; footprint + max(reserve, cram) and cram +
 checkpoints both within the ceiling. Core gate passed. Live rerun: matrix7.
+
+## CPU MATRIX7 — slow Best overall, refused relaunch, no-fit MoE — 2026-10-08
+
+Evidence: matrix7 (3551a2a, `--cpu --ram-budget 16G`) and
+`cpu-footprint/q36-iq2` (gate off, scratch cache).
+
+- Qwen3.8-27B UD-IQ2_XXS first launch: served at ctx 61,440, no cgroup kill,
+  but calc and textstats both timed out at 3,600 s. Backend: prompt 12-14
+  tok/s, decode ~3 tok/s; Claude Code's ~21k-token first prompt alone is
+  ~25 min. Not usable as Best overall on this profile.
+- Relaunch refused: the backend measured 149.662 MiB per checkpoint against
+  the 128 MiB floor and raised the saved footprint 12,268 -> 12,621 MiB;
+  12,621 + 4,096 > 16,384. The gate's re-plan restored the same verified
+  config and was refused again.
+- Qwen3.6-35B-A3B UD-IQ2_XXS clean cache: "Model weights 10259 / Host runtime
+  buffers 7252 / Total 19104 / Available 16384" at every context. The cold
+  estimate charged 1,024 MiB CUDA host staging and 2,048 MiB graph scratch
+  with no GPU in use. Measured (gate off): guarded load peak 11,331 MiB =
+  weights 10,247.8 + KV 912.8 + compute 244.5 at ctx 81,920; anon after a
+  71k-token prompt 12,332 MiB including 12 checkpoints and -cram 512. The CPU
+  compute buffer is the logits, ub 256 x vocab 248,320 x 4 = 242.5 MiB, at
+  every context tried (also 247.5 for Qwen3.8).
+
+Fixes:
+- 1504ea9 (recommender, not core): Best overall ranks models predicted below
+  6 tok/s after every usable one. CPU 16 GiB Best overall is now Qwen3.6
+  IQ2_XXS; Smartest stays Qwen3.8 IQ2_XXS.
+- Core: a hybrid checkpoint is priced at max(128, recurrent state per slot,
+  measurement) — 150 MiB for Qwen3.8 — so the measurement no longer moves a
+  plan; the containment re-plan skips the verified config it was handed; a
+  CPU-only cold host estimate is 512 MiB process base + ub x vocab x 4 +
+  page table + activations (2,048 MiB graph when vocab is unknown).
+  Invariant tests: Qwen3.6 16 GiB profile plans ctx 108,544, footprint 12,287
+  MiB, cram 1,024, 16 checkpoints, inside the gate and above the measured
+  load; the Qwen3.8 plan survives the 149.662 MiB observation unchanged; the
+  re-plan does not restore the saved config.

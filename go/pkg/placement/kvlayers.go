@@ -177,6 +177,21 @@ func modelKVLayerLayout(model *ModelProfile) (kvLayerLayout, bool) {
 // blocks and gated delta-net recurrent state everywhere else.
 var deltaNetHybridArchs = map[string]bool{"qwen3next": true, "qwen35": true, "qwen35moe": true}
 
+// recurrentStateMiBPerSlot is one slot's recurrent state, which is what a
+// context checkpoint of a delta-net hybrid saves: 149.63 MiB for Qwen3.8-27B,
+// where ik_llama measured 149.66 MiB per checkpoint. 0 when unknown.
+func recurrentStateMiBPerSlot(model *ModelProfile) float64 {
+	layout, ok := deltaNetHybridLayout(model)
+	if !ok {
+		return 0
+	}
+	var f32 int64
+	for _, layer := range layout.Layers {
+		f32 += layer.RecurrentF32
+	}
+	return float64(f32*4) / (1 << 20)
+}
+
 func deltaNetHybridLayout(model *ModelProfile) (kvLayerLayout, bool) {
 	if model == nil || !deltaNetHybridArchs[strings.ToLower(model.ModelArch)] || !hasSSMLayout(model) ||
 		len(model.HeadCountKVByLayer) > 0 || len(model.SWAPattern) > 0 || model.SlidingWindow > 0 ||

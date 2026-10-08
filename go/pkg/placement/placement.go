@@ -566,6 +566,16 @@ const checkpointMinStepFloor = 512
 // checkpoints. Their GGUF metadata cannot derive the state size, so a cold
 // launch uses hybridCheckpointReservePerCheckpointMB and a later exact backend
 // measurement replaces that floor.
+// hybridCheckpointMB is one recurrent checkpoint: the larger of the reserve
+// floor, the model's recurrent state and a backend measurement. The flat 128
+// MiB floor under-sized Qwen3.8-27B (150 MiB) by 352 MiB over 16 checkpoints,
+// which the first launch then folded into its footprint and the relaunch's
+// containment gate refused under a 16 GiB scope.
+func hybridCheckpointMB(model *ModelProfile, measuredMB float64) int {
+	return max(hybridCheckpointReservePerCheckpointMB,
+		int(math.Ceil(recurrentStateMiBPerSlot(model))), int(math.Ceil(measuredMB)))
+}
+
 func checkpointFootprintMB(model *ModelProfile, maxCheckpoints, slots, kvTotalMB, ctxSize int, measuredCheckpointMB ...float64) int {
 	if model == nil || (model.SlidingWindow <= 0 && !isRecurrentOrHybrid(model)) {
 		return 0
@@ -586,8 +596,8 @@ func checkpointFootprintMB(model *ModelProfile, maxCheckpoints, slots, kvTotalMB
 			perCheckpoint = 20
 		}
 	}
-	if isRecurrentOrHybrid(model) && perCheckpoint < hybridCheckpointReservePerCheckpointMB {
-		perCheckpoint = hybridCheckpointReservePerCheckpointMB
+	if isRecurrentOrHybrid(model) {
+		perCheckpoint = max(perCheckpoint, hybridCheckpointMB(model, 0))
 	}
 	if len(measuredCheckpointMB) > 0 && measuredCheckpointMB[0] > 0 {
 		measured := int(math.Ceil(measuredCheckpointMB[0]))
@@ -674,6 +684,10 @@ type Options struct {
 	// between a host-RAM plan's footprint and its ceiling (--cgroup-headroom).
 	// A CPU-only plan reserves it once, for checkpoints and the prompt cache.
 	HostGrowthReserveMB int
+	// SkipVerifiedConfig plans from measurements instead of restoring the saved
+	// verified config: set on the containment re-plan, whose input config was
+	// just refused and would otherwise be restored unchanged.
+	SkipVerifiedConfig bool
 	// RequireMeasuredBuffers removes cold-start compute/host buffer estimates
 	// from authoritative fit decisions. The contained allocation preflight then
 	// supplies exact evidence before ggrun permits a real launch.
@@ -1116,7 +1130,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// scope. Give it one direct-start lookup before doing a fresh boundary search.
 	// The seed context is irrelevant to a hit (the record restores the whole
 	// strategy), but keeps all pre-lookup accounting bounded on a miss.
-	if !opts.SkipCachedConfig && opts.VerifiedConfigScopeKey != "" {
+	if !opts.SkipCachedConfig && !opts.SkipVerifiedConfig && opts.VerifiedConfigScopeKey != "" {
 		probe := opts
 		probe.ContextSize = autoContextFloor(model, autoContextCap(model, opts))
 		probe.DenseCPUOffloadPrompt = nil
@@ -1878,7 +1892,10 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	// re-probe, no re-calibrate. It is checked before the MoE .place cache (the
 	// full-config layer is broader: dense models get one too) and is a clean
 	// miss when the scope key is absent, mismatched, or the file is missing.
-	if !opts.SkipCachedConfig && opts.VerifiedConfigScopeKey != "" {
+	if opts.SkipVerifiedConfig && opts.VerifiedConfigScopeKey != "" {
+		fmt.Fprintln(os.Stderr, "[verified] skipping the saved config: re-planning under the containment reserve")
+	}
+	if !opts.SkipCachedConfig && !opts.SkipVerifiedConfig && opts.VerifiedConfigScopeKey != "" {
 		vc, verr := LoadVerifiedConfig(opts.CacheDir, opts.VerifiedConfigScopeKey)
 		switch {
 		case verr != nil && os.IsNotExist(verr):
@@ -5593,6 +5610,11 @@ func measuredCUDAOverheadMB(sysProbe *systemProbe) int {
 func ramRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
 	const cudaHostMB = 1024
 	const graphScratchMB = 2048
+	return cudaHostMB + graphScratchMB + hostPageAndActivationMB(model, uBatch, totalSizeMB)
+}
+
+// hostPageAndActivationMB is the mmap page table plus CPU activation buffers.
+func hostPageAndActivationMB(model *ModelProfile, uBatch, totalSizeMB int) int {
 	mmapPTMB := totalSizeMB / 500
 
 	actFFN := model.FeedForwardLength
@@ -5609,7 +5631,7 @@ func ramRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
 	if cpuActMB < 64 {
 		cpuActMB = 64
 	}
-	return cudaHostMB + graphScratchMB + mmapPTMB + cpuActMB
+	return mmapPTMB + cpuActMB
 }
 
 func plannedRAMRuntimeOverheadMB(caps *detect.Capabilities, model *ModelProfile, uBatch, totalSizeMB int, opts Options) int {
@@ -5625,7 +5647,30 @@ func plannedRAMRuntimeOverheadMB(caps *detect.Capabilities, model *ModelProfile,
 		}
 		return 0
 	}
+	if opts.CPUMode || caps == nil || len(caps.GPUs) == 0 {
+		return cpuOnlyRuntimeOverheadMB(model, uBatch, totalSizeMB)
+	}
 	return ramRuntimeOverheadMB(model, uBatch, totalSizeMB)
+}
+
+// cpuOnlyRuntimeOverheadMB is the cold host estimate when no GPU is in use.
+// There is no CUDA host staging, and the graph is dominated by the output
+// logits (n_ubatch x n_vocab F32): ik_llama reported a 244.5 MiB compute
+// buffer for Qwen3.6-35B-A3B at ub 256 and n_vocab 248,320 (242.5 MiB of
+// logits) at every context tried. Its guarded load peaked at 11,331 MiB,
+// within 75 MiB of weights + KV + compute. The GPU estimate charged 3,156 MiB
+// and refused that model under a 16 GiB scope at any context.
+func cpuOnlyRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
+	const processBaseMB = 512
+	const unknownGraphMB = 2048
+	graphMB := unknownGraphMB
+	if model.VocabSize > 0 {
+		if uBatch <= 0 {
+			uBatch = 512
+		}
+		graphMB = int(math.Ceil(float64(uBatch) * float64(model.VocabSize) * 4 / (1 << 20)))
+	}
+	return processBaseMB + graphMB + hostPageAndActivationMB(model, uBatch, totalSizeMB)
 }
 
 // checkMemoryOrDie refuses to launch when model + KV + compute buffers exceed the pool.
@@ -5953,7 +5998,7 @@ func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, to
 		if checkpointHeadroom < 0 {
 			checkpointHeadroom = 0
 		}
-		perCheckpoint := max(hybridCheckpointReservePerCheckpointMB, int(math.Ceil(s.MeasuredCheckpointMB)))
+		perCheckpoint := hybridCheckpointMB(model, s.MeasuredCheckpointMB)
 		capacity := checkpointHeadroom / (slots * perCheckpoint)
 		if capacity >= hybridCheckpointMinimum {
 			if capacity > hybridCheckpointMaximum {

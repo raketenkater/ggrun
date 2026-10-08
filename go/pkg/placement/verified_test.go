@@ -524,3 +524,39 @@ func TestVerifiedReuseKeepsTheBackendFitDialect(t *testing.T) {
 		t.Fatalf("reused config lost the backend fit dialect:\nserved %v\nreused %v", servedArgs, got)
 	}
 }
+
+// The containment gate's re-plan exists because the plan it got was refused.
+// matrix7: a CPU-only relaunch restored the refused verified config on both
+// attempts and never started. The re-plan must plan from measurements.
+func TestContainmentReplanDoesNotRestoreTheRefusedConfig(t *testing.T) {
+	dir := t.TempDir()
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "3090", VRAMTotalMB: 24576, VRAMUsedMB: 512, BandwidthMBps: 30000}},
+		RAM:  detect.RAMInfo{TotalMB: 65536, FreeMB: 60000},
+		CPU:  detect.CPUInfo{Cores: 8},
+	}
+	model := &ModelProfile{
+		Path: filepath.Join(dir, "target.gguf"), SizeBytes: 4 << 30, TotalSizeMB: 4096,
+		ModelArch: "llama", NumLayers: 32, EmbeddingLength: 4096, ContextSize: 32768,
+	}
+	opts := Options{
+		ContextSize: 8192, KVQuality: "mid", KVPlacement: "gpu", Parallel: 1,
+		CacheDir: dir, BackendIdentity: "b", BackendTag: "llama",
+	}
+	key := NewCalibrationScopeKey(model, caps, opts, nil).String()
+	first, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveVerifiedConfig(dir, VerifiedConfigToRecord(key, model.Basename, first, "b", "/p", "", "")); err != nil {
+		t.Fatal(err)
+	}
+	opts.VerifiedConfigScopeKey = key
+	if got, err := Compute(caps, model, opts); err != nil || !got.VerifiedConfigReused {
+		t.Fatalf("fixture must reuse the saved config: err=%v", err)
+	}
+	opts.SkipVerifiedConfig = true
+	if got, err := Compute(caps, model, opts); err != nil || got.VerifiedConfigReused {
+		t.Fatalf("the containment re-plan restored the saved config: err=%v", err)
+	}
+}
