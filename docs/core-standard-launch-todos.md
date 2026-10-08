@@ -2974,3 +2974,43 @@ promotion evidence. Patch and test kept with the acceptance evidence
 assignment for the ik backend (or translate intended layer boundaries into
 byte fractions), then price hybrids per block; both change every multi-GPU
 plan and need matched A/B.
+
+## CPU HYBRID START — unpriced recurrent state walks the context down one granule per start — 2026-10-08
+
+Evidence: recommendation matrix cell C-q38-iq2-first (Qwen3.8-27B UD-IQ2_XXS,
+the CPU + 16 GiB Balanced and Smartest pick; `--cpu --ram-budget 16G`, f618a9f).
+The launch never served: `start admission budget exhausted after 4
+weight-loading start(s) in 17s`. All four contained probes reached ready with
+a cgroup peak of 11.5-12.1 GiB under the 16 GiB cap. Each probe's measured
+context (6,440 / 6,406 / 6,372 / 6,338 MiB at 189,440 / 188,416 / 187,392 /
+186,368 tokens) made that same point fail the plan's own arithmetic by 33-135
+MiB, so the re-plan stepped one 1,024-token granule (~34 MiB) to an unmeasured
+point whose estimate was again ~150 MiB low. 149.63 MiB is the per-slot
+delta-net state of the previous entry.
+
+Fix (22bd4a8): parse GGUF `ssm.*` and price delta-net hybrids (qwen3next,
+qwen35, qwen35moe) per block: attention blocks by context, recurrent blocks by
+slot. Matches the backend's totals at 1 and 4 slots (2,325.6 / 2,774.5 MiB);
+computeKVTotalMB now includes one slot of state. Per-device placement still
+follows the count rule (LAYER SPLIT, open). Core gate passed. Live rerun of the
+cell: pending (below).
+
+## RECOMMENDER — spilled dense fit predicted as resident — 2026-10-08
+
+Evidence: cell B-q38-iq3 (Qwen3.8-27B UD-IQ3_XXS, RTX 4070 only + 32 GiB, the
+Balanced and Smartest pick). Recommender: 31.5 tok/s. Default launch: ctx
+262,144 (memory-resident tier, "model/policy context cap reached"), 5,263 MiB of
+weights and 4,417 MiB of KV on CUDA0, 4,821 MiB of weights and 4,436 MiB of KV
+in host RAM; decode 4.2-4.8 tok/s at Claude Code's 21k+ prompts. Tasks all
+correct but slow: calc 1,610 s, textstats 861 s, inventory 601 s, ledger 2,254
+s (3090 Ti Q5_K_S cell: 98 / 67 / 78 / 163 s).
+
+`fitQuant` placed the quant as GPU plus RAM, but `predictDecodeTPS` took the
+VRAM fraction as usable VRAM / size (clamped to 1) and the single-GPU
+bandwidth. Fix (daeb6b8): a dense non-single-GPU fit charges its GPU-side
+overhead (KV at the expected context + scratch) before counting resident
+weights and does not use the single-card path: 31.5 -> 8.2 tok/s. No category
+pick changed on any of the four profiles. Still above the measured value
+because the launch takes the full 262k context in the offload tier; whether
+the offload tier should trade context for resident weights is an open launch
+policy question (agent sessions need long context), not changed here.
