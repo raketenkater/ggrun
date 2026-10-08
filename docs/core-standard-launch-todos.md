@@ -2827,3 +2827,17 @@ just run short. Fix: for a KV-cache failure the context re-plan keeps the
 accumulated per-device deficits (`ReplanAfterOOM`), so the freed room stays
 on the short device. Test: `TestKVContextDerateKeepsTheFailedDevicesDeficit`
 (split on the short device 0.67 -> 0.66 at the same context).
+
+Follow-up, live on 3031e67+: the KV derate path now also records the device
+deficit itself when the device-penalty branch did not run, and a contained
+preflight that shrinks its deficit by at least a fifth earns one extra
+weight-loading start (at most 2 per admission; `maxConvergingAdmissionLoads`,
+`TestConvergingPreflightEarnsBoundedExtraStarts`). Live: 648 -> 737 -> 724 ->
+78 -> 4 MiB, exact preflight then fit — but two defects remain:
+- the compute-buffer context derate sizes against the failed allocation, so a
+  4 MiB shortfall on a 75 MiB allocation cut context to its floor
+  (483,328 -> 98,304 tokens, 4 slots -> 1);
+- the production start needed a 7th load and was refused.
+Root cause behind the whole walk: in 4-slot `--claude-code` plans the estimate
+is short by ~650-740 MiB per device. The estimator, not more recovery steps,
+is the fix.

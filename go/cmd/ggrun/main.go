@@ -5153,6 +5153,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if convergingReplans < maxConvergingReplans &&
 					deficitProgress(lastPreflightDeficitMB, preflight.DeficitMB) {
 					convergingReplans++
+					work.grantConvergingLoad()
 				} else {
 					preflightReplans++
 				}

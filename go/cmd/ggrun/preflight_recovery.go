@@ -636,9 +636,11 @@ func recoverPreflightOOMOnce(
 		}
 	}
 
+	penalized := false
 	if candidate == nil && !outcome.IsComputeBuffer && !recovery.plannerWasDisproved() {
 		physicalDev := physicalGPUIndex(outcome.Device, visibleToPhysical)
 		oomPenalty[physicalDev] += outcome.DeficitMB
+		penalized = true
 		replanOpts := boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery)
 		// Pin ubatch exactly as the compute-buffer branch above does. A recovery
 		// that frees VRAM by cutting context leaves headroom Compute will spend on
@@ -688,6 +690,11 @@ func recoverPreflightOOMOnce(
 		// argv patch: context changes KV, graph, CRAM, checkpoint, placement-cache,
 		// and host-ledger state together. Recompute the complete configuration at
 		// one deficit-sized target, then let the normal exact preflight prove it.
+		if outcome.IsKVCache && !penalized && oomPenalty != nil {
+			// The context re-plan must keep this device's shortfall even when
+			// the device-penalty branch above did not run.
+			oomPenalty[physicalGPUIndex(outcome.Device, visibleToPhysical)] += outcome.DeficitMB
+		}
 		contextCandidate, contextArgs, contextErr := recomputeAutomaticContextRecovery(
 			req, cfg, model, be, caps, strategy, serverArgs, outcome, recovery.expertResidencyFloor(), oomPenalty,
 		)
