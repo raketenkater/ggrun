@@ -343,8 +343,15 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
 }
 
+// sortRecommendations orders Best overall: usable models first, then catalog
+// intelligence. A model predicted below the usable floor ranks after every
+// usable one; the discount alone let a 2-tok/s dense model on CPU outrank a
+// usable MoE and time out on a Claude Code task (October 8 matrix).
 func sortRecommendations(rows []Recommendation) {
 	sort.SliceStable(rows, func(i, j int) bool {
+		if si, sj := rows[i].SpeedTier == 0, rows[j].SpeedTier == 0; si != sj {
+			return sj
+		}
 		if rows[i].Score == rows[j].Score {
 			if modelIntelligence(rows[i].Candidate) == modelIntelligence(rows[j].Candidate) {
 				return rows[i].QuantSizeGB < rows[j].QuantSizeGB

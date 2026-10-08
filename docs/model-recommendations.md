@@ -3,9 +3,9 @@
 The TUI and `ggrun recommend` filter models by hardware capacity, choose a
 practical fitting quant for each model, and offer three categories:
 
-- **Best overall:** catalog intelligence first among usable models. Predicted
-  decode speeds below 6 tokens/s receive a usability discount; extra speed above
-  that threshold does not override intelligence.
+- **Best overall:** catalog intelligence first among usable models. A model
+  predicted below 6 tokens/s decode ranks after every usable one; extra speed
+  above that threshold does not override intelligence.
 - **Smartest:** highest catalog intelligence that fits, including slower models.
   It uses the same practical quant selection as Best overall, so an unnecessarily
   slow BF16 variant does not hide a model with a usable Q4/Q5 variant.
