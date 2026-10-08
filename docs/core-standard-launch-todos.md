@@ -2862,3 +2862,14 @@ Changes:
   measurement (concurrent-writer invariant kept).
 Tests: `serving_growth_test.go`, `TestAbortRaisesOnlyTheMeasurementItDisproved`.
 Live check pending (owner paused GPU work for an hour).
+
+Live check (launcher caa5b40, Qwen3.6-35B-A3B UD-IQ2_XXS, `--gpus 0 --ram-budget
+32G`, fresh cache; `accept-20261007/harness/growth_learning_check.py`, evidence on
+the 2 TB disk `ggrun-accept-20261007-evidence/growth-learning-b2*`):
+- launch 1: 33 expert layers on CUDA0, preflight `runtime=0`; the canary died
+  with the cuBLAS ceiling error, recognised as a size-less OOM, and 242 MiB was
+  filed under the runtime GPU set;
+- launch 2: preflight `runtime=242`, 32 layers; ready in 88 s; fresh 7k, 14k,
+  21k and 28k-token prompts all served, CUDA0 peak 11,815/11,873 MiB; the
+  serving recorder filed measured growth CUDA0=328 MiB, replacing the guess.
+A brand-new model on a tight device still fails once before it has learned.
