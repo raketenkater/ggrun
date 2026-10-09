@@ -67,6 +67,7 @@ func TestServingFatalLineFormats(t *testing.T) {
 		"/src/ggml/src/ggml-cuda.cu:139: CUDA error",
 		"/src/ggml/src/ggml.c:5432: GGML_ASSERT(ne0 > 0) failed",
 		"terminate called after throwing an instance of 'std::runtime_error'",
+		"/__w/ggrun/ggrun/.ik_llama.cpp/ggml/src/ggml-cuda/mmq.cuh:112: fatal error",
 	} {
 		if servingFatalLine("ok\n"+line+"\n") == "" {
 			t.Fatalf("fatal line not recognized: %q", line)

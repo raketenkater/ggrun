@@ -66,9 +66,18 @@ func fatalBackendLine(log string) string {
 				return strings.TrimSpace(line)
 			}
 		}
+		if ggmlAbortRe.MatchString(strings.TrimSpace(line)) {
+			return strings.TrimSpace(line)
+		}
 	}
 	return ""
 }
+
+// ggmlAbortRe is GGML_ABORT's own output, "<source file>:<line>: <message>",
+// whatever the message. ik_llama's "mmq.cuh:112: fatal error" (an IQ1_M tensor
+// reaching MMQ) matched no marker, and the launch waited out its canary
+// timeouts for 28 minutes on a backend that had already aborted.
+var ggmlAbortRe = regexp.MustCompile(`^\S+\.(?:c|cc|cpp|cu|cuh|h|hpp):\d+: \S`)
 
 // runWatchingBackend runs step (a canary or verification that talks to the
 // backend) and stops the backend as soon as it has exited, printed a fatal
@@ -160,7 +169,7 @@ func servingFatalLine(text string) string {
 // most a llama.cpp log prefix ("0.12.345.678 E ") and a "file.cu:139: " source
 // location, which is how ggml writes them. A logged request body or generated
 // text begins with something else.
-var servingFatalRe = regexp.MustCompile(`^(?:\d+\.\d+\.\d+\.\d+ [A-Z] )?(?:\S+:\d+: )?(?:CUDA error|GGML_ASSERT\(|GGML_ABORT|ggml_abort|terminate called|Segmentation fault)`)
+var servingFatalRe = regexp.MustCompile(`^(?:\d+\.\d+\.\d+\.\d+ [A-Z] )?(?:(?:\S+:\d+: )?(?:CUDA error|GGML_ASSERT\(|GGML_ABORT|ggml_abort|terminate called|Segmentation fault)|\S+\.(?:c|cc|cpp|cu|cuh|h|hpp):\d+: \S)`)
 
 // servingBackend is what the serving watch needs from a running backend.
 type servingBackend interface {
