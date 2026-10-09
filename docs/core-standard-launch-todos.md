@@ -3142,3 +3142,33 @@ relaunch ready 18 s from the verified config, ledger correct (669 s); decode
 the saved 12,621 MiB config, re-plan from measurements ctx 59,392 / footprint
 9,884 MiB, served, stream/cancel/stop pass, memory.peak 15.5 GB of 16 GiB.
 Core gate: core-gate-cpu-overhead.log, pass.
+
+## SHIPPED BACKEND — IQ1_M reached MMQ; aborts not recognised — 2026-10-09
+
+Evidence: matrix10 B-q38-iq2-first/relaunch (f0ce380, 4070 + 32 GiB, the
+opt-in bandwidth-profile Best overall pick, Qwen3.8-27B UD-IQ2_XXS fully
+resident, ctx 112,640). The first batched prompt aborted the bundled ik_llama
+(1fddd12): "Unhandled type iq1_m (29)" / "ggml-cuda/mmq.cuh:112: fatal
+error". UD-IQ2_XXS carries 22 IQ1_M tensors; after an MMQ matmul the fusion
+loop in ggml_cuda_mul_mat_q took the next matmul sharing src1 without asking
+ggml_cuda_should_use_mmq, and IQ1_M has no MMQ layout. Fixed upstream in
+ikawrakow/ik_llama.cpp#2356 (c49f7db3, 2026-08-25), after our pin. UD-IQ3_XXS
+(3 IQ1_M tensors, partly on CPU) ran on the same card.
+
+The process kept answering /props and /tokenize after the abort, and the
+watchdog's markers did not include GGML_ABORT's own "file:line: message"
+format, so each launch waited out its canary timeouts (~28 min) before
+failing.
+
+Fixes: 43d2965 applies patches/ik_llama/0001 (upstream #2356) in
+scripts/build-linux-cuda-bundle.sh (git apply --check before the compile;
+reused checkouts reset with checkout --force). 2fbb3e5 recognises
+"<source>.<c|cc|cpp|cu|cuh|h|hpp>:<line>: <message>" as a fatal backend line
+in the launch watchdog and (anchored) in the serving watch; across all matrix
+logs it matches only the 18 real CUDA aborts and the 2 MMQ aborts. 7538be9
+refuses an mmproj (arch clip) given as the model (it had been planned at
+4,194,304 tokens on Vulkan).
+
+Live: matrix12, same model/profile on a local build of 1fddd12 + #2356 (CUDA
+13.2, sm_86/89): canary passed, verified config saved, serving; tasks running.
+The published bundle needs a release build to carry the patch.
