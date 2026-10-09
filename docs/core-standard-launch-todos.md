@@ -3172,3 +3172,29 @@ refuses an mmproj (arch clip) given as the model (it had been planned at
 Live: matrix12, same model/profile on a local build of 1fddd12 + #2356 (CUDA
 13.2, sm_86/89): canary passed, verified config saved, serving; tasks running.
 The published bundle needs a release build to carry the patch.
+
+## CONTEXT SHIFT — ik_llama shifted and crashed Gemma 4 12B — 2026-10-09
+
+Evidence: matrix11 B-gemma4-12b-first (f0ce380, 4070 + 32 GiB, opt-in profile
+Fastest pick, Gemma 4 12B Q4_0, ctx 43,008, KV q4_0, FA on, -ub 64). calc
+correct (951 s); during textstats "slot context shift ... n_past=43007
+n_ctx=43008 n_discard=21503", then "CUDA error: an illegal memory access was
+encountered"; the serving watch stopped the backend. ik_llama shifts by
+default (`--context-shift` default on); mainline llama.cpp defaults it off.
+ggrun passed --no-context-shift only for SSM models.
+
+Repro (gemma12-repro/, backend run directly with the served argv): a
+~42.6k-token prompt generating past the slot — shipped 1fddd12: shift, then
+the illegal access, backend hung alive; 1fddd12 + upstream #2356 + #2566 (the
+wmma-f16 SWA mask-stride fix): same crash, so #2566 is not the fix and is not
+added. Shipped backend with --no-context-shift: "context_length_exceeded"
+error, slot released, no CUDA error, backend healthy. Four cached turns up to
+40,303 tokens without a shift ran clean on both builds.
+
+Fix (2226452): --no-context-shift for every model when the backend's help
+lists it (exact token). A shift also silently drops half of an agent's
+conversation; with it off a full context is an error the client acts on
+(ggrun's Claude Code recipe already compacts at the real slot: window =
+slot ctx, 75%). Invariant test: context_shift_test.go. Core gate passed
+(core-gate-context-shift.log). The acceptance harness now sets the same
+autocompact window from /props. Live rerun: matrix13.
