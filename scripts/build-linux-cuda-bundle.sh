@@ -43,7 +43,8 @@ esac
 if [[ -d "$IK_DIR/.git" ]]; then
     echo "==> Updating ik_llama.cpp ($IK_REF)"
     git -C "$IK_DIR" fetch --depth 1 origin "$IK_REF"
-    git -C "$IK_DIR" checkout FETCH_HEAD
+    # --force drops patches applied by an earlier build of this checkout.
+    git -C "$IK_DIR" checkout --force --detach FETCH_HEAD
 else
     echo "==> Cloning ik_llama.cpp ($IK_REF)"
     git init "$IK_DIR"
@@ -51,6 +52,14 @@ else
     git -C "$IK_DIR" fetch --depth 1 origin "$IK_REF"
     git -C "$IK_DIR" checkout --detach FETCH_HEAD
 fi
+# Upstream fixes newer than the pinned revision, applied in order. A patch that
+# no longer applies fails here, not after the compile.
+for patch in "$ROOT_DIR"/patches/ik_llama/*.patch; do
+    [[ -e "$patch" ]] || continue
+    echo "==> Applying $(basename "$patch")"
+    git -C "$IK_DIR" apply --check "$patch"
+    git -C "$IK_DIR" apply "$patch"
+done
 echo "==> Configuring + building llama-server (CUDA)"
 # CI has nvcc, not the driver. -L stubs is not enough: ld then looks up
 # libcuda.so.1 as a DT_NEEDED of libggml.so and still misses it unless the
