@@ -37,6 +37,13 @@ const (
 	// Promotion, restoration and recovery restarts get two ceilings: at most a
 	// probe and the production load.
 	restartAdmissionWindowLoads = 2
+	// A contained preflight that is still shrinking its measured deficit may
+	// start this many probes beyond maxLoads. The load cap stops churn, not
+	// progress: a --claude-code launch of Qwen3.8-27B went 724 -> 78 MiB and
+	// was refused the start that would have fit; with two grants it went
+	// 88 -> 15 MiB and was refused again. Each probe there took ~3 s; the
+	// admission window, not this count, is what bounds a slow model.
+	maxConvergingAdmissionLoads = 4
 )
 
 func startupAdmissionWindow(model *placement.ModelProfile) time.Duration {
@@ -85,6 +92,37 @@ type admissionWork struct {
 	// lastProductionLoad is the elapsed time of this admission's successful
 	// production start, the observed cost of loading this configuration.
 	lastProductionLoad time.Duration
+	// convergingLoads counts starts granted beyond maxLoads for progress.
+	convergingLoads int
+	// admittedStartGranted records the one production start granted after a
+	// passing exact preflight.
+	admittedStartGranted bool
+}
+
+// grantAdmittedStart lets the production start of an argv that just passed
+// exact preflight go ahead even when the probes that proved it used the load
+// allowance -- that start is what the probes were for. Once per admission; the
+// window still bounds time.
+func (w *admissionWork) grantAdmittedStart() bool {
+	if w == nil || w.admittedStartGranted {
+		return false
+	}
+	w.admittedStartGranted = true
+	if w.loads >= w.maxLoads {
+		w.maxLoads = w.loads + 1
+	}
+	return true
+}
+
+// grantConvergingLoad allows one more weight-loading start because the last
+// preflight measurably shrank its deficit. It is bounded per admission.
+func (w *admissionWork) grantConvergingLoad() bool {
+	if w == nil || w.convergingLoads >= maxConvergingAdmissionLoads {
+		return false
+	}
+	w.convergingLoads++
+	w.maxLoads++
+	return true
 }
 
 func newAdmissionWork(phase string, window, ceiling time.Duration, maxLoads int, cacheDir string, now func() time.Time) *admissionWork {

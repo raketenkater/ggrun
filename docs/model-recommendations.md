@@ -3,9 +3,9 @@
 The TUI and `ggrun recommend` filter models by hardware capacity, choose a
 practical fitting quant for each model, and offer three categories:
 
-- **Best overall:** catalog intelligence first among usable models. Predicted
-  decode speeds below 6 tokens/s receive a usability discount; extra speed above
-  that threshold does not override intelligence.
+- **Best overall:** catalog intelligence first among usable models. A model
+  predicted below 6 tokens/s decode ranks after every usable one; extra speed
+  above that threshold does not override intelligence.
 - **Smartest:** highest catalog intelligence that fits, including slower models.
   It uses the same practical quant selection as Best overall, so an unnecessarily
   slow BF16 variant does not hide a model with a usable Q4/Q5 variant.
@@ -55,8 +55,10 @@ Artificial Analysis data can refresh the catalog through GitHub Actions. Store
 your key as the repository secret `ARTIFICIAL_ANALYSIS_API_KEY`; the workflow
 also accepts the existing `ARTIFICIALANALYSISAPIKEY` spelling.
 
-The scheduled workflow `.github/workflows/update-recommendations.yml` runs weekly
-and can also be started manually. It calls:
+The scheduled workflow `.github/workflows/update-recommendations.yml` runs every
+three days and can also be started manually. Installed clients refresh their
+copy of the published catalog at most once per 24 hours and keep the last valid
+catalog when a refresh fails. The workflow calls:
 
 ```bash
 python3 tools/models/update_recommendations.py
@@ -64,7 +66,21 @@ python3 tools/models/update_recommendations.py
 
 The key is read only from the workflow environment and is never written to the
 repo. The workflow commits `catalog.json` back to `main` when the API refresh
-changes the catalog.
+changes the catalog and the recommendation tests pass on the result.
+
+A quant is offered only when it is a complete main-model artifact: every shard
+of one variant, with known sizes. Draft heads (MTP, DFlash), projectors,
+adapters and importance matrices are excluded, and two different variants that
+share a quant label are not added together.
+
+The catalog marks architectures against upstream llama.cpp, which can be ahead
+of the backend you installed. `ggrun recommend` and the TUI probe the installed
+backends; a model none of them loads is marked `+` and listed after the models
+they load. Its first launch offers a 20-40 minute backend build. The same
+applies on an NVIDIA host when a default launch would serve the model on the
+Vulkan build (an architecture only mainline loads, or a large MoE whose
+file-backed experts win the backend choice): it runs, but far below the CUDA
+estimate until the offered CUDA build exists.
 
 Attribution is required when using Artificial Analysis data; the catalog and GUI
 include attribution to `https://artificialanalysis.ai/`.

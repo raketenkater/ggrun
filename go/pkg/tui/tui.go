@@ -2573,6 +2573,7 @@ func (m Model) viewRecommended() string {
 	}
 
 	idx := 0
+	buildShown := false
 	writeGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -2594,8 +2595,15 @@ func (m Model) viewRecommended() string {
 				tps = fmt.Sprintf("~%.0f t/s", rec.PredictedTPS)
 			}
 			name := rec.Name
-			if len(name) > 34 {
-				name = name[:33] + "…"
+			limit := 34
+			if rec.NeedsBackendBuild {
+				limit, buildShown = 32, true
+			}
+			if len(name) > limit {
+				name = name[:limit-1] + "…"
+			}
+			if rec.NeedsBackendBuild {
+				name += " +"
 			}
 			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %5s %7s",
 				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
@@ -2611,6 +2619,9 @@ func (m Model) viewRecommended() string {
 	writeGroup("Best overall — intelligence first, practical quant", m.recommendationGroups.Balanced)
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
+	if buildShown {
+		b.WriteString(mutedStyle.Render("  + No installed backend loads it; first launch offers a 20-40 min build.") + "\n")
+	}
 	b.WriteString(mutedStyle.Render("  Intel is base-model catalog intelligence (~ estimated), not quantized accuracy.") + "\n")
 	b.WriteString(mutedStyle.Render("  1–2 bit quants are fallbacks within a model; task accuracy is unverified.") + "\n")
 	b.WriteString(mutedStyle.Render("  Speeds are estimates; Benchmark measures this exact machine.") + "\n")
@@ -2972,6 +2983,11 @@ func kvProfileFromGGUF(info *gguf.Info) *placement.ModelProfile {
 		// Per-layer arrays price mixed-head and explicit-window models; the
 		// NextN count tells placement which stored blocks hold no cache.
 		NextNPredictLayers: info.NextNPredictLayers,
+		SSMConvKernel:      info.SSMConvKernel,
+		SSMStateSize:       info.SSMStateSize,
+		SSMGroupCount:      info.SSMGroupCount,
+		SSMInnerSize:       info.SSMInnerSize,
+		SSMTimeStepRank:    info.SSMTimeStepRank,
 		HeadCountKVByLayer: info.HeadCountKVByLayer,
 		SWAPattern:         info.SlidingWindowPattern,
 		KeyLengthSWA:       info.KeyLengthSWA,

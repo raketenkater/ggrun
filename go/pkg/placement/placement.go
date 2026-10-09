@@ -147,6 +147,9 @@ type Strategy struct {
 	// --kv-offload switch. GPU KV is the backend default, so a backend which
 	// only exposes --no-kv-offload must receive no positive flag at all.
 	BackendSupportsKVOffload bool `json:"-"`
+	// BackendSupportsNoContextShift reports whether the backend accepts
+	// --no-context-shift. ik_llama shifts by default (mainline does not).
+	BackendSupportsNoContextShift bool `json:"-"`
 	// BackendCheckpointMinStepFlag is the help-probed spelling for checkpoint
 	// spacing. Mainline and ik_llama expose the same control under different
 	// names; emitting mainline's spelling to ik makes the server exit in argument
@@ -380,6 +383,21 @@ type ModelProfile struct {
 	LeadingDenseInferred bool `json:"leading_dense_inferred,omitempty"`
 	NextNPredictLayers   int  `json:"nextn_predict_layers,omitempty"`
 
+	// FullContextWindowedKV is a serving-backend fact, set at backend
+	// selection: the backend gives sliding-window layers a full-context cache.
+	// ik_llama.cpp sizes every layer's K/V at kv_size (llama_kv_cache_init)
+	// and applies the window as a mask; Gemma 4 26B A4B at 262,144 tokens
+	// asked for 29,920 MiB of KV where windowed pricing planned ~3 GiB.
+	FullContextWindowedKV bool `json:"-"`
+
+	// SSM geometry (GGUF ssm.*): sizes the per-slot recurrent state a hybrid
+	// keeps on each recurrent block's device (kvlayers.go).
+	SSMConvKernel   int `json:"ssm_d_conv,omitempty"`
+	SSMStateSize    int `json:"ssm_d_state,omitempty"`
+	SSMGroupCount   int `json:"ssm_n_group,omitempty"`
+	SSMInnerSize    int `json:"ssm_d_inner,omitempty"`
+	SSMTimeStepRank int `json:"ssm_dt_rank,omitempty"`
+
 	// HeadCountKVByLayer and SWAPattern carry the per-block attention arrays
 	// from the GGUF header (SWAPattern: 1 = windowed). KeyLengthSWA and
 	// ValueLengthSWA are the windowed layers' head widths when they differ.
@@ -551,6 +569,16 @@ const checkpointMinStepFloor = 512
 // checkpoints. Their GGUF metadata cannot derive the state size, so a cold
 // launch uses hybridCheckpointReservePerCheckpointMB and a later exact backend
 // measurement replaces that floor.
+// hybridCheckpointMB is one recurrent checkpoint: the larger of the reserve
+// floor, the model's recurrent state and a backend measurement. The flat 128
+// MiB floor under-sized Qwen3.8-27B (150 MiB) by 352 MiB over 16 checkpoints,
+// which the first launch then folded into its footprint and the relaunch's
+// containment gate refused under a 16 GiB scope.
+func hybridCheckpointMB(model *ModelProfile, measuredMB float64) int {
+	return max(hybridCheckpointReservePerCheckpointMB,
+		int(math.Ceil(recurrentStateMiBPerSlot(model))), int(math.Ceil(measuredMB)))
+}
+
 func checkpointFootprintMB(model *ModelProfile, maxCheckpoints, slots, kvTotalMB, ctxSize int, measuredCheckpointMB ...float64) int {
 	if model == nil || (model.SlidingWindow <= 0 && !isRecurrentOrHybrid(model)) {
 		return 0
@@ -571,8 +599,8 @@ func checkpointFootprintMB(model *ModelProfile, maxCheckpoints, slots, kvTotalMB
 			perCheckpoint = 20
 		}
 	}
-	if isRecurrentOrHybrid(model) && perCheckpoint < hybridCheckpointReservePerCheckpointMB {
-		perCheckpoint = hybridCheckpointReservePerCheckpointMB
+	if isRecurrentOrHybrid(model) {
+		perCheckpoint = max(perCheckpoint, hybridCheckpointMB(model, 0))
 	}
 	if len(measuredCheckpointMB) > 0 && measuredCheckpointMB[0] > 0 {
 		measured := int(math.Ceil(measuredCheckpointMB[0]))
@@ -655,6 +683,14 @@ type Options struct {
 	RAMLimitPercent int // whole-host RAM utilisation target; fixed RamBudgetMB wins
 	VRAMHeadroomMB  int // hold back this much total VRAM as a safety margin
 	RAMHeadroomMB   int // hold back this much system RAM as a safety margin
+	// HostGrowthReserveMB is the room the launcher's containment gate requires
+	// between a host-RAM plan's footprint and its ceiling (--cgroup-headroom).
+	// A CPU-only plan reserves it once, for checkpoints and the prompt cache.
+	HostGrowthReserveMB int
+	// SkipVerifiedConfig plans from measurements instead of restoring the saved
+	// verified config: set on the containment re-plan, whose input config was
+	// just refused and would otherwise be restored unchanged.
+	SkipVerifiedConfig bool
 	// RequireMeasuredBuffers removes cold-start compute/host buffer estimates
 	// from authoritative fit decisions. The contained allocation preflight then
 	// supplies exact evidence before ggrun permits a real launch.
@@ -1097,7 +1133,7 @@ func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Str
 	// scope. Give it one direct-start lookup before doing a fresh boundary search.
 	// The seed context is irrelevant to a hit (the record restores the whole
 	// strategy), but keeps all pre-lookup accounting bounded on a miss.
-	if !opts.SkipCachedConfig && opts.VerifiedConfigScopeKey != "" {
+	if !opts.SkipCachedConfig && !opts.SkipVerifiedConfig && opts.VerifiedConfigScopeKey != "" {
 		probe := opts
 		probe.ContextSize = autoContextFloor(model, autoContextCap(model, opts))
 		probe.DenseCPUOffloadPrompt = nil
@@ -1598,10 +1634,11 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		// own auto memory-fitting (-fit) is redundant with this explicit plan.
 		// Only value-taking dialects need an explicit "off"; boolean backends are
 		// already disabled when the flag is absent.
-		BackendSupportsFit:           backendHelpSupports(opts.BackendHelp, "-fit"),
-		BackendFitTakesValue:         backendFitTakesValue(opts.BackendHelp),
-		BackendSupportsKVOffload:     backendHelpSupports(opts.BackendHelp, "--kv-offload"),
-		BackendCheckpointMinStepFlag: backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
+		BackendSupportsFit:            backendHelpSupports(opts.BackendHelp, "-fit"),
+		BackendFitTakesValue:          backendFitTakesValue(opts.BackendHelp),
+		BackendSupportsKVOffload:      backendHelpSupports(opts.BackendHelp, "--kv-offload"),
+		BackendSupportsNoContextShift: backendHelpSupportsExactFlag(opts.BackendHelp, "--no-context-shift"),
+		BackendCheckpointMinStepFlag:  backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
 	}
 	configureCPUAffinity(s, caps, opts.BackendHelp)
 
@@ -1859,7 +1896,10 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	// re-probe, no re-calibrate. It is checked before the MoE .place cache (the
 	// full-config layer is broader: dense models get one too) and is a clean
 	// miss when the scope key is absent, mismatched, or the file is missing.
-	if !opts.SkipCachedConfig && opts.VerifiedConfigScopeKey != "" {
+	if opts.SkipVerifiedConfig && opts.VerifiedConfigScopeKey != "" {
+		fmt.Fprintln(os.Stderr, "[verified] skipping the saved config: re-planning under the containment reserve")
+	}
+	if !opts.SkipCachedConfig && !opts.SkipVerifiedConfig && opts.VerifiedConfigScopeKey != "" {
 		vc, verr := LoadVerifiedConfig(opts.CacheDir, opts.VerifiedConfigScopeKey)
 		switch {
 		case verr != nil && os.IsNotExist(verr):
@@ -2049,7 +2089,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 
 	switch strategy {
 	case CPUOnly:
-		s, err = buildCPUOnly(s, caps, model, opts)
+		s, err = buildCPUOnly(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	case SingleGPU:
 		s, err = buildSingleGPU(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	case MultiGPUDense:
@@ -2407,11 +2447,19 @@ func maybeReduceDenseAutoContext(s *Strategy, caps *detect.Capabilities, model *
 	return s, kvTotalMB, false
 }
 
-func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+func buildCPUOnly(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	s.GPULayers = 0
 	s.MMap = !opts.NoMMap
 	s.BatchSize = 512
 	s.UBatchSize = 256
+	// Weights, KV and runtime buffers all live in host RAM. Left at 0,
+	// computeCRAM charged only the weights: Qwen3.8-27B UD-IQ2_XXS under a 16
+	// GiB scope got -cram 6144 on top of a plan that already filled it, and the
+	// first 21k-token Claude Code prompt was killed by the cgroup. The
+	// checkpoint room the memory check reserved is left out: computeCRAM
+	// divides it between checkpoints and the prompt cache.
+	s.PlannedHostFootprintMB = totalSizeMB + max(0, kvTotalMB) +
+		plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts)
 	return s, nil
 }
 
@@ -2940,7 +2988,7 @@ func cachedMoEHostMemoryFits(caps *detect.Capabilities, model *ModelProfile, s *
 func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile, totalSizeMB, kvTotalMB int, opts Options) (*Strategy, error) {
 	numGPUs := len(caps.GPUs)
 	if numGPUs == 0 {
-		return buildCPUOnly(s, caps, model, opts)
+		return buildCPUOnly(s, caps, model, totalSizeMB, kvTotalMB, opts)
 	}
 	if model.NumLayers <= 0 {
 		return nil, fmt.Errorf("MoE placement requires model layer count")
@@ -3140,6 +3188,10 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		if !growthMeasured {
 			if related := RelatedModelRuntimeGraphGrowth(opts.CacheDir, model, caps.GPUs, s.Parallel, opts.BackendTag); related != nil {
 				runtimeGrowthMB = related[g.Index]
+			}
+		} else if pc != nil {
+			if newer := newerAbortEstimates(opts.CacheDir, model, caps.GPUs, s.Parallel, pc.ModTime)[g.Index]; newer > runtimeGrowthMB {
+				runtimeGrowthMB = newer
 			}
 		}
 		fixedPerGPU[i] = sysCUDAOverheadByGPU[g.Index] + computeBufMB + runtimeGrowthMB
@@ -4663,6 +4715,9 @@ func measuredKVTotalMB(model *ModelProfile, ctxSize int, kvType string, swaFull 
 
 // computeKVTotalMB calculates exact KV cache size.
 func computeKVTotalMB(model *ModelProfile, ctxSize int, kvType string, swaFull bool) int {
+	if model != nil && model.FullContextWindowedKV {
+		swaFull = true
+	}
 	// Prefer the KV size llama.cpp actually allocated on a previous launch (read
 	// back from its log) — it is exact for every attention scheme, including the
 	// compressed ones (MLA / CSA-HCA / sliding-window) the formula below can't
@@ -5559,6 +5614,11 @@ func measuredCUDAOverheadMB(sysProbe *systemProbe) int {
 func ramRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
 	const cudaHostMB = 1024
 	const graphScratchMB = 2048
+	return cudaHostMB + graphScratchMB + hostPageAndActivationMB(model, uBatch, totalSizeMB)
+}
+
+// hostPageAndActivationMB is the mmap page table plus CPU activation buffers.
+func hostPageAndActivationMB(model *ModelProfile, uBatch, totalSizeMB int) int {
 	mmapPTMB := totalSizeMB / 500
 
 	actFFN := model.FeedForwardLength
@@ -5575,7 +5635,7 @@ func ramRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
 	if cpuActMB < 64 {
 		cpuActMB = 64
 	}
-	return cudaHostMB + graphScratchMB + mmapPTMB + cpuActMB
+	return mmapPTMB + cpuActMB
 }
 
 func plannedRAMRuntimeOverheadMB(caps *detect.Capabilities, model *ModelProfile, uBatch, totalSizeMB int, opts Options) int {
@@ -5591,7 +5651,30 @@ func plannedRAMRuntimeOverheadMB(caps *detect.Capabilities, model *ModelProfile,
 		}
 		return 0
 	}
+	if opts.CPUMode || caps == nil || len(caps.GPUs) == 0 {
+		return cpuOnlyRuntimeOverheadMB(model, uBatch, totalSizeMB)
+	}
 	return ramRuntimeOverheadMB(model, uBatch, totalSizeMB)
+}
+
+// cpuOnlyRuntimeOverheadMB is the cold host estimate when no GPU is in use.
+// There is no CUDA host staging, and the graph is dominated by the output
+// logits (n_ubatch x n_vocab F32): ik_llama reported a 244.5 MiB compute
+// buffer for Qwen3.6-35B-A3B at ub 256 and n_vocab 248,320 (242.5 MiB of
+// logits) at every context tried. Its guarded load peaked at 11,331 MiB,
+// within 75 MiB of weights + KV + compute. The GPU estimate charged 3,156 MiB
+// and refused that model under a 16 GiB scope at any context.
+func cpuOnlyRuntimeOverheadMB(model *ModelProfile, uBatch, totalSizeMB int) int {
+	const processBaseMB = 512
+	const unknownGraphMB = 2048
+	graphMB := unknownGraphMB
+	if model.VocabSize > 0 {
+		if uBatch <= 0 {
+			uBatch = 512
+		}
+		graphMB = int(math.Ceil(float64(uBatch) * float64(model.VocabSize) * 4 / (1 << 20)))
+	}
+	return processBaseMB + graphMB + hostPageAndActivationMB(model, uBatch, totalSizeMB)
 }
 
 // checkMemoryOrDie refuses to launch when model + KV + compute buffers exceed the pool.
@@ -5625,7 +5708,16 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 	neededMB := modelOverheadMB + kvTotalMB
 	ramOverheadMB := 0
 	if s.Type == CPUOnly || s.Type == DenseCPUOffload {
-		ramOverheadMB = plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts)
+		// Context checkpoints are host buffers too: 16 x 149.66 MiB on that
+		// Qwen3.8 CPU launch, outside a plan that fit to within 1 MiB.
+		growthMB := checkpointFootprintMB(model, s.MaxCheckpoints, s.Parallel, kvTotalMB, s.ContextSize, s.MeasuredCheckpointMB)
+		// The containment gate refuses a CPU-only plan without this room; the
+		// checkpoints and prompt cache are carved out of it, not added to it.
+		// Charging both (plus the gate's own re-plan) left 161 MiB for KV.
+		if s.Type == CPUOnly && s.ReclaimableHostWeightsMB <= 0 && opts.HostGrowthReserveMB > growthMB {
+			growthMB = opts.HostGrowthReserveMB
+		}
+		ramOverheadMB = plannedRAMRuntimeOverheadMB(caps, model, s.UBatchSize, totalSizeMB, opts) + growthMB
 		neededMB += ramOverheadMB
 	}
 
@@ -5910,7 +6002,8 @@ func computeCRAM(caps *detect.Capabilities, model *ModelProfile, s *Strategy, to
 		if checkpointHeadroom < 0 {
 			checkpointHeadroom = 0
 		}
-		capacity := checkpointHeadroom / (slots * hybridCheckpointReservePerCheckpointMB)
+		perCheckpoint := hybridCheckpointMB(model, s.MeasuredCheckpointMB)
+		capacity := checkpointHeadroom / (slots * perCheckpoint)
 		if capacity >= hybridCheckpointMinimum {
 			if capacity > hybridCheckpointMaximum {
 				capacity = hybridCheckpointMaximum
@@ -6357,8 +6450,13 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--reasoning", "off")
 	}
 
-	// SSM/Mamba models need --no-context-shift
-	if s.HasSSM {
+	// SSM/Mamba models need --no-context-shift. Every other model gets it too
+	// when the backend takes it: a shift silently drops half of an agent's
+	// conversation, and on ik_llama (shift on by default) Gemma 4 12B with a
+	// q4_0 cache hit "CUDA error: an illegal memory access" right after
+	// "slot context shift" at n_past 43,007 of 43,008 (matrix11). Without it
+	// a full context is an error the client can act on, as on mainline.
+	if s.HasSSM || s.BackendSupportsNoContextShift {
 		args = append(args, "--no-context-shift")
 	}
 
@@ -7760,8 +7858,61 @@ func RuntimeGraphGrowthByGPU(cacheDir string, model *ModelProfile, ctxSize, ubat
 // This does NOT relax the compute-buffer cache either -- slot count really does
 // change that measurement.
 func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, backendTag string) map[int]int {
-	if model == nil || cacheDir == "" {
+	measured, newestMeasured, estimates := relatedGrowthEvidence(cacheDir, model, gpus, parallel)
+	byDevice := map[int]int{}
+	for dev, v := range measured {
+		byDevice[dev] = v
+	}
+	for dev, list := range estimates {
+		for _, e := range list {
+			if e.at.After(newestMeasured[dev]) && e.mb > byDevice[dev] {
+				byDevice[dev] = e.mb
+			}
+		}
+	}
+	if len(byDevice) == 0 {
 		return nil
+	}
+	return byDevice
+}
+
+// RelatedMeasuredRuntimeGraphGrowth is the measured-only view of the related
+// keys: per device, the largest growth that was observed rather than guessed.
+func RelatedMeasuredRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int) map[int]int {
+	measured, _, _ := relatedGrowthEvidence(cacheDir, model, gpus, parallel)
+	if len(measured) == 0 {
+		return nil
+	}
+	return measured
+}
+
+// carriedEstimate is an abort's runtime-growth estimate with its probe file's
+// modification time.
+type carriedEstimate struct {
+	mb int
+	at time.Time
+}
+
+// newerAbortEstimates returns, per device, the largest abort estimate filed on
+// any related key after since. An exact key's own measurement is evidence only
+// up to the next abort: MiniMax-M3 planned on a key holding a 22 MiB measurement
+// while a newer abort on another key had filed 3,204 MiB.
+func newerAbortEstimates(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int, since time.Time) map[int]int {
+	_, _, estimates := relatedGrowthEvidence(cacheDir, model, gpus, parallel)
+	out := map[int]int{}
+	for dev, list := range estimates {
+		for _, e := range list {
+			if e.at.After(since) && e.mb > out[dev] {
+				out[dev] = e.mb
+			}
+		}
+	}
+	return out
+}
+
+func relatedGrowthEvidence(cacheDir string, model *ModelProfile, gpus []detect.GPU, parallel int) (measured map[int]int, newestMeasured map[int]time.Time, estimates map[int][]carriedEstimate) {
+	if model == nil || cacheDir == "" {
+		return nil, nil, nil
 	}
 	modelBase := filepath.Base(model.Path)
 	// Runtime graph growth is allocation state, not a speed figure: carry it
@@ -7769,13 +7920,25 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 	wantSig := gpuIdentityHash(gpus)
 	wantParallel := probeParallelKey(parallel)
 	exactByDevice := map[int]int{}
+	// An abort's estimate is carried only while it is the newest evidence for
+	// its device. Automatic context lands on a different key from launch to
+	// launch, so an estimate filed for the crashed key alone never reached the
+	// next plan: MiniMax-M3 recorded 3,204 MiB on CUDA0 and re-planned with an
+	// older 22 MiB measurement from another key. A measurement taken after the
+	// abort supersedes it, so an old guess cannot become a permanent floor.
+	newestMeasured = map[int]time.Time{}
+	estimates = map[int][]carriedEstimate{}
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
-		return nil
+		return nil, nil, nil
 	}
 	for _, ent := range entries {
 		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".probe") {
 			continue
+		}
+		var modified time.Time
+		if info, infoErr := ent.Info(); infoErr == nil {
+			modified = info.ModTime()
 		}
 		data, err := os.ReadFile(filepath.Join(cacheDir, ent.Name()))
 		if err != nil {
@@ -7849,18 +8012,20 @@ func RelatedModelRuntimeGraphGrowth(cacheDir string, model *ModelProfile, gpus [
 		}
 		for dev, v := range growth {
 			if hasEstimate[dev] {
-				continue // estimated (guessed) growth is not evidence for a carry
+				// Not a measurement: carried below only while it is newer than
+				// every measurement for this device.
+				estimates[dev] = append(estimates[dev], carriedEstimate{v, modified})
+				continue
 			}
 			if v > exactByDevice[dev] {
 				exactByDevice[dev] = v
 			}
+			if modified.After(newestMeasured[dev]) {
+				newestMeasured[dev] = modified
+			}
 		}
 	}
-	byDevice := exactByDevice
-	if len(byDevice) == 0 {
-		return nil
-	}
-	return byDevice
+	return exactByDevice, newestMeasured, estimates
 }
 
 // EstimatedRuntimeGraphGrowthAtUBatch is the largest ESTIMATED runtime growth
@@ -7988,10 +8153,10 @@ const probeGrowthGateSchema = 6
 // backend process, which ggrun's recovery derates and restarts; it does not
 // take the host down.
 func RecordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int) error {
-	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, growthByGPU, false)
+	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, growthByGPU, false, nil)
 }
 
-func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int, estimated bool) error {
+func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int, growthByGPU map[int]int, estimated bool, supersedes map[int]int) error {
 	if model == nil || ctxSize <= 0 || ubatch <= 0 || len(growthByGPU) == 0 {
 		return nil
 	}
@@ -8030,7 +8195,12 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 			mergedGrowth[idx] = v
 			mergedEstimated[idx] = true
 		case estimated && !priorEstimated:
-			// A guess must not raise a value that was actually observed.
+			// A guess must not raise a value that was actually observed --
+			// unless it is an abort's estimate made against that very value.
+			if sup, ok := supersedes[idx]; ok && prior <= sup && v > prior {
+				mergedGrowth[idx] = v
+				mergedEstimated[idx] = true
+			}
 		default:
 			// Same kind of evidence on both sides: keep the larger. For
 			// estimates this caps them rather than summing, which is what made
@@ -8040,7 +8210,8 @@ func recordRuntimeGraphGrowth(cacheDir string, model *ModelProfile, ctxSize, uba
 			}
 		}
 	}
-	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, mergedGrowth, mergedEstimated, kvPerLayerMB)
+	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, computeByGPU, mergedGrowth, mergedEstimated, kvPerLayerMB,
+		probeMeasurements{AbortSupersedesMB: supersedes})
 }
 
 // runtimeGraphGrowthFromVRAMDelta is what a healthy launch allocated beyond
@@ -8159,7 +8330,24 @@ func RecordRuntimeGraphGrowthFromOOM(cacheDir string, model *ModelProfile, ctxSi
 	if device < 0 || allocMB <= 0 {
 		return nil
 	}
-	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, map[int]int{device: allocMB}, estimated)
+	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel, map[int]int{device: allocMB}, estimated, nil)
+}
+
+// RecordRuntimeGraphGrowthAfterAbort files a size-less out-of-memory estimate
+// that knows what it disproved: inEffectMB is the growth the crashed plan had
+// reserved on that device. Unlike an ordinary estimate it may raise a measured
+// value no larger than inEffectMB. Without that, a measured peak taken before
+// an abort (a lower bound) trapped the reserve below the real need, and every
+// relaunch re-planned identically.
+func RecordRuntimeGraphGrowthAfterAbort(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel, device, allocMB, inEffectMB int) error {
+	if device < 0 || allocMB <= 0 {
+		return nil
+	}
+	if inEffectMB < 0 {
+		inEffectMB = 0
+	}
+	return recordRuntimeGraphGrowth(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel,
+		map[int]int{device: allocMB}, true, map[int]int{device: inEffectMB})
 }
 
 // ClearRuntimeGraphGrowth removes learned growth for one runtime signature so it
@@ -9045,8 +9233,13 @@ func loadProbeCache(cacheDir string, model *ModelProfile, ctxSize int, ubatch in
 	if err != nil {
 		return nil
 	}
+	var modTime time.Time
+	if info, statErr := os.Stat(path); statErr == nil {
+		modTime = info.ModTime()
+	}
 	content := string(data)
 	pc := &probeCache{
+		ModTime:                          modTime,
 		ComputeBufByGPU:                  map[int]int{},
 		RuntimeGraphGrowthByGPU:          map[int]int{},
 		RuntimeGraphGrowthEstimatedByGPU: map[int]bool{},
@@ -9396,6 +9589,8 @@ type probeCache struct {
 	// RuntimeGraphGrowthByGPU is VRAM a real request needed beyond the
 	// load-time graph reserve, keyed by GPU index.
 	RuntimeGraphGrowthByGPU map[int]int
+	// ModTime is the probe file's modification time when loaded.
+	ModTime time.Time
 	// RuntimeGraphGrowthEstimatedByGPU marks entries that were guessed rather
 	// than read from the backend.
 	//
@@ -9521,6 +9716,10 @@ type probeMeasurements struct {
 	// they never clobber observed evidence). See observedAllocationEvidence.
 	ComputeBufEvidence string
 	ClearRuntimeGrowth bool
+	// AbortSupersedesMB carries, per device, the runtime growth that was in
+	// effect when an out-of-memory abort happened. The abort's estimate may
+	// raise a measured value no larger than that: the abort disproved it.
+	AbortSupersedesMB map[int]int
 }
 
 // observedAllocationEvidence reports whether evidence came from a real backend
@@ -9730,7 +9929,11 @@ func writeProbeCacheForModel(cacheDir string, model *ModelProfile, ctxSize, ubat
 				// An abort overturns a measured zero (see recordRuntimeGraphGrowth).
 				mergedGrowth[idx], mergedEstimated[idx] = value, true
 			case incomingEstimated && !priorEstimated:
-				// Never replace measured evidence with an estimate.
+				// Never replace measured evidence with an estimate -- unless the
+				// estimate is an abort made against that very value.
+				if sup, ok := measured.AbortSupersedesMB[idx]; ok && prior <= sup && value > prior {
+					mergedGrowth[idx], mergedEstimated[idx] = value, true
+				}
 			case value > prior:
 				mergedGrowth[idx], mergedEstimated[idx] = value, incomingEstimated
 			}

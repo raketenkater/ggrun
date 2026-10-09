@@ -68,7 +68,7 @@ jobs:
       - name: moe-placement tests
         run: bash tests/test_moe_placement.sh
       - name: pytest
-        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_release_relocation.py
+        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_mimo_catalog.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_release_relocation.py
 
   package:
     name: package ${{ matrix.asset }}

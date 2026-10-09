@@ -172,3 +172,16 @@ func TestContainHostMemoryReplansWithTheReserveHeldBack(t *testing.T) {
 		t.Fatalf("contained plan changed: %v %+v reserve=%d", err, got, req.PlacementHostReserveMB)
 	}
 }
+
+// Only the containment re-plan (a held-back reserve) skips the saved config.
+func TestContainmentReplanSkipsTheVerifiedConfig(t *testing.T) {
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 16384, FreeMB: 16384}}
+	req := &launchRequest{CgroupHeadroomMB: 4096}
+	if placementOptionsFromRequestCaps(req, &placement.ModelProfile{}, fitTestBackend(), t.TempDir(), caps).SkipVerifiedConfig {
+		t.Fatal("a first plan must be allowed to reuse the verified config")
+	}
+	req.PlacementHostReserveMB = 4096
+	if !placementOptionsFromRequestCaps(req, &placement.ModelProfile{}, fitTestBackend(), t.TempDir(), caps).SkipVerifiedConfig {
+		t.Fatal("the containment re-plan restored the config the gate refused")
+	}
+}

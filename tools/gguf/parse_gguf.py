@@ -140,6 +140,13 @@ def _read_kv(f, r, kv_count):
             if key.endswith('.attention.key_length_mla'): r['kl_mla'] = val
             if key.endswith('.attention.value_length_mla'): r['vl_mla'] = val
             if 'ssm.state_size' in key: r['ssm'] = 1
+            # Recurrent-state geometry: the backend keeps this per slot on
+            # each recurrent block's device, beside the attention KV.
+            if key.endswith('.ssm.conv_kernel'): r['ssm_d_conv'] = val
+            if key.endswith('.ssm.state_size'): r['ssm_d_state'] = val
+            if key.endswith('.ssm.group_count'): r['ssm_n_group'] = val
+            if key.endswith('.ssm.inner_size'): r['ssm_d_inner'] = val
+            if key.endswith('.ssm.time_step_rank'): r['ssm_dt_rank'] = val
             if key.endswith('.embedding_length'): r['embd'] = val
             if key.endswith('.feed_forward_length'): r['ff'] = val
             if key.endswith('.expert_feed_forward_length'): r['exp_ff'] = val

@@ -88,8 +88,8 @@ jobs:
           go build -C go -trimpath -o ggrun ./cmd/ggrun
           asset=ggrun-linux-x86_64-cpu.tar.gz
           mkdir -p "$RUNNER_TEMP/published" "$RUNNER_TEMP/candidate"
-          curl -fL --retry 3 "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -o "$RUNNER_TEMP/published/$asset"
-          curl -fL --retry 3 https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS -o "$RUNNER_TEMP/published/SHA256SUMS"
+          curl -fL --retry 3 "https://github.com/raketenkater/ggrun/releases/download/v3.2.10/$asset" -o "$RUNNER_TEMP/published/$asset"
+          curl -fL --retry 3 https://github.com/raketenkater/ggrun/releases/download/v3.2.10/SHA256SUMS -o "$RUNNER_TEMP/published/SHA256SUMS"
           (cd "$RUNNER_TEMP/published" && grep " $asset$" SHA256SUMS | sha256sum -c -)
           tar -xzf "$RUNNER_TEMP/published/$asset" -C "$RUNNER_TEMP/published"
           backend="$(find "$RUNNER_TEMP/published" -type f -name llama-server -print -quit)"
@@ -111,6 +111,49 @@ jobs:
           set -euo pipefail
           "$HOME/ggrun/ggrun" --version
           "$HOME/ggrun/ggrun" detect >/dev/null
+
+      # Which launcher was installed is the first thing to prove: a candidate job
+      # must run this commit, and the documented auto path builds main from
+      # source and can keep an older binary when that build fails.
+      - name: Installed launcher identity
+        env:
+          PUBLISHED: ${{ github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          "$HOME/ggrun/ggrun" version --json | tee evidence/launcher-identity.json
+          sha256sum "$HOME/ggrun/.bin/"ggrun* "$HOME/ggrun/.bin/"llama-server* | tee evidence/installed-sha256.txt
+          main_head="$(git ls-remote https://github.com/raketenkater/ggrun refs/heads/main | cut -f1)"
+          python3 - "$main_head" <<'EOF'
+          import json, os, re, sys
+          ident = json.load(open("evidence/launcher-identity.json"))
+          rev, ver, sha = ident.get("revision") or "", ident.get("version") or "", os.environ["GITHUB_SHA"]
+          if os.environ["PUBLISHED"] == "true":
+              # default auto mode builds main from source
+              ok = any(rev == c or re.search("-g" + c[:7], ver) for c in (sha, sys.argv[1]) if c)
+          else:
+              ok = rev == sha
+          if not ok:
+              sys.exit(f"::error::installed launcher {ident} is not this revision ({sha})")
+          print("launcher revision verified:", rev or ver)
+          EOF
+
+      # Published-path only: the documented auto path above builds from source,
+      # so it cannot prove the release archive. Install the release alone.
+      - name: The published release archive installs as itself
+        if: ${{ github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true }}
+        env:
+          LLM_INSTALL_SCAN_SYSTEM: "0"
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-}"
+          [ -n "$tag" ] || tag="$(curl -fsSL https://api.github.com/repos/raketenkater/ggrun/releases/latest | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])')"
+          LLM_APP_HOME="$RUNNER_TEMP/release-only" LLM_SETUP_MODE=release LLM_INSTALL_RELEASE="$tag" \
+            LLM_SETUP_BACKEND=cpu ./setup-linux.sh
+          got="$("$RUNNER_TEMP/release-only/ggrun" --version)"
+          echo "$got" | tee evidence/release-only-version.txt
+          [ "$got" = "ggrun $tag" ] || { echo "::error::release-only install reports '$got', expected 'ggrun $tag'"; exit 1; }
 
       - name: The installed backend runs
         run: |
@@ -149,10 +192,20 @@ jobs:
           ls -l "${got[0]}"
           echo "MODEL=${got[0]}" >> "$GITHUB_ENV"
 
+      # The repo/quant above is fixed by this workflow. A user instead follows
+      # ggrun's recommendation for the machine, so do that too: the top pick is
+      # checked to be a complete artifact and its bytes must match the catalog.
+      - name: Follow ggrun's recommendation for this runner
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-recommended-download.py --launcher "$HOME/ggrun/ggrun" \
+            --models-dir "$HOME/ggrun/models" --output evidence/recommended --max-download-gb 6 | tee rec.out
+          grep '^MODEL=' rec.out | sed 's/^MODEL=/REC_MODEL=/' >> "$GITHUB_ENV"
+
       - name: Serve a model
         run: |
           python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" \
-            --model "$MODEL" --cpu --port 18841 --output evidence/cpu
+            --model "$MODEL" --cpu --port 18841 --output evidence/cpu --hash-model
 
       - name: Reinstall candidate without resetting configuration
         if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
@@ -169,6 +222,21 @@ jobs:
       # machine with cards the same step exercises real placement.
       - name: Serve the downloaded model on whatever hardware exists
         run: python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" --model "$MODEL" --port 18843 --output evidence/downloaded
+
+      # The 2048-token checks above are bounded smoke tests. The default user
+      # launch picks context and backend itself: no --ctx, no --cpu.
+      - name: Default launch of the recommended model (automatic context and backend)
+        run: |
+          python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" --model "$REC_MODEL" \
+            --ctx 0 --port 18847 --timeout 1200 --request-timeout 600 --hash-model --output evidence/recommended-default
+
+      # The installed TUI in a real terminal: recommendations, settings, resize,
+      # filter, Configure -> Pre-launch -> default launch, Ctrl+C, relaunch.
+      - name: Installed TUI journey
+        run: |
+          python3 -m pip install --quiet pexpect
+          python3 scripts/verify-installed-tui.py --launcher "$HOME/ggrun/ggrun" --model "$MODEL" \
+            --app-home "$HOME/ggrun" --port 18848 --output evidence/tui
 
       # Issue #64: `ggrun <model> --ai-tune` as root failed because root has no
       # user session bus. Run the reporter's command as real root with no
@@ -197,7 +265,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -217,8 +285,8 @@ jobs:
           $published = Join-Path $env:RUNNER_TEMP 'published'
           $candidate = Join-Path $env:RUNNER_TEMP 'candidate'
           New-Item -ItemType Directory -Force -Path $published,$candidate | Out-Null
-          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -OutFile "$published/$asset"
-          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS' -OutFile "$published/SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.10/$asset" -OutFile "$published/$asset"
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.10/SHA256SUMS' -OutFile "$published/SHA256SUMS"
           $line = Get-Content "$published/SHA256SUMS" | Where-Object { $_ -match " $([regex]::Escape($asset))$" }
           if (!$line -or (Get-FileHash "$published/$asset" -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0]) { throw 'Published backend checksum mismatch' }
           Expand-Archive "$published/$asset" "$published/unpacked"
@@ -250,6 +318,32 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Wrapper version failed" }
           & $cmd detect | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Wrapper detect failed" }
+
+      # Candidate jobs must run this commit; the documented Windows installer
+      # installs the published launcher, which must report the latest tag.
+      - name: Installed launcher identity
+        shell: powershell
+        env:
+          PUBLISHED: ${{ github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          $exe = "$env:USERPROFILE\ggrun\.bin\ggrun.exe"
+          $json = & $exe version --json
+          if ($LASTEXITCODE -ne 0) { throw 'version --json failed' }
+          $json | Set-Content evidence/launcher-identity.json -Encoding ASCII
+          Get-ChildItem "$env:USERPROFILE\ggrun\.bin" -Filter '*.exe' | Get-FileHash -Algorithm SHA256 |
+            Select-Object Hash, Path | Format-Table -AutoSize | Out-String -Width 400 | Set-Content evidence/installed-sha256.txt
+          $id = $json | ConvertFrom-Json
+          if ($env:PUBLISHED -eq 'true') {
+            $tag = $env:RELEASE_TAG
+            if (-not $tag) { $tag = (Invoke-RestMethod https://api.github.com/repos/raketenkater/ggrun/releases/latest).tag_name }
+            if ($id.version -ne $tag) { throw "installed launcher reports $($id.version), expected $tag" }
+          } elseif ($id.revision -ne $env:GITHUB_SHA) {
+            throw "installed launcher revision '$($id.revision)' is not this commit $env:GITHUB_SHA"
+          }
+          Write-Host "launcher identity verified: $json"
 
       - name: The installed backend runs
         shell: powershell
@@ -286,11 +380,21 @@ jobs:
           Write-Host $got[0].FullName
           "MODEL=$($got[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Follow ggrun's recommendation for this runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $h = "$env:USERPROFILE\ggrun"
+          $out = python scripts/verify-recommended-download.py --launcher "$h\.bin\ggrun.exe" --models-dir "$h\models" --output evidence/recommended --max-download-gb 6
+          if ($LASTEXITCODE -ne 0) { throw 'recommended download failed' }
+          $line = $out | Where-Object { $_ -like 'MODEL=*' } | Select-Object -Last 1
+          ("REC_MODEL=" + $line.Substring(6)) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Serve a model
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:MODEL" --cpu --port 18842 --output evidence/cpu
+          python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:MODEL" --cpu --port 18842 --output evidence/cpu --hash-model
           if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
 
       - name: Reinstall candidate without resetting configuration
@@ -311,6 +415,20 @@ jobs:
         run: |
           python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:MODEL" --port 18844 --output evidence/downloaded
           if ($LASTEXITCODE -ne 0) { throw 'Installed serving check failed' }
+
+      - name: Default launch of the recommended model (automatic context and backend)
+        shell: powershell
+        run: |
+          python scripts/verify-installed-serving.py --launcher "$env:USERPROFILE\ggrun\ggrun.cmd" --model "$env:REC_MODEL" --ctx 0 --port 18847 --timeout 1200 --request-timeout 600 --hash-model --output evidence/recommended-default
+          if ($LASTEXITCODE -ne 0) { throw 'Default launch of the recommended model failed' }
+
+      # The installed TUI in a real Windows console (ConPTY via pywinpty).
+      - name: Installed TUI journey
+        shell: powershell
+        run: |
+          python -m pip install --quiet pywinpty
+          python scripts/verify-installed-tui.py --launcher "$env:USERPROFILE\ggrun\.bin\ggrun.exe" --model "$env:MODEL" --app-home "$env:USERPROFILE\ggrun" --port 18848 --output evidence/tui
+          if ($LASTEXITCODE -ne 0) { throw 'Installed TUI journey failed' }
 
       - name: Exercise Windows server hardening script with candidate CPU bundle
         if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
@@ -465,8 +583,8 @@ jobs:
           $published = Join-Path $env:RUNNER_TEMP 'published'
           $candidate = Join-Path $env:RUNNER_TEMP 'candidate'
           New-Item -ItemType Directory -Force -Path $published,$candidate | Out-Null
-          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.8/$asset" -OutFile "$published/$asset"
-          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.8/SHA256SUMS' -OutFile "$published/SHA256SUMS"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/raketenkater/ggrun/releases/download/v3.2.10/$asset" -OutFile "$published/$asset"
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/raketenkater/ggrun/releases/download/v3.2.10/SHA256SUMS' -OutFile "$published/SHA256SUMS"
           $line = Get-Content "$published/SHA256SUMS" | Where-Object { $_ -match " $([regex]::Escape($asset))$" }
           if (!$line -or (Get-FileHash "$published/$asset" -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($line -split '\s+')[0]) { throw 'Published backend checksum mismatch' }
           Expand-Archive "$published/$asset" "$published/unpacked"

@@ -1,0 +1,447 @@
+[
+  {
+    "before_quants": [
+      {
+        "dynamic": false,
+        "name": "Q4_0",
+        "size_bytes": 2149176480,
+        "size_gb": 2.0
+      },
+      {
+        "dynamic": false,
+        "name": "Q8_0",
+        "size_bytes": 7001424288,
+        "size_gb": 6.52
+      },
+      {
+        "dynamic": false,
+        "name": "BF16",
+        "size_bytes": 13168034208,
+        "size_gb": 12.26
+      },
+      {
+        "dynamic": false,
+        "name": "MXFP4",
+        "size_bytes": 554211765568,
+        "size_gb": 516.15
+      }
+    ],
+    "checked_at": "2026-10-06T12:35:59Z",
+    "geometry_diff": {},
+    "main_model_geometry": {
+      "arch": "mimo2",
+      "ctx_train": 1048576,
+      "embd": 6144,
+      "exp_ff": 2048,
+      "exp_used": 8,
+      "experts": 384,
+      "ff": 16384,
+      "hkv": 8,
+      "kl": 192,
+      "layers": 70,
+      "vl": 128
+    },
+    "quants": [
+      {
+        "dynamic": false,
+        "name": "MXFP4",
+        "size_bytes": 554211765568,
+        "size_gb": 516.15
+      }
+    ],
+    "repo": "pcuenq/MiMo-V2.6-Pro-RL-GGUF",
+    "sha": "94312aea7b760effb1e90e944d08828b1c3fefa6",
+    "siblings": [
+      {
+        "blobId": "397c9ea9918c26a4381d9267958868b2da6fade1",
+        "lfs": {
+          "pointerSize": 132,
+          "sha256": "6f20d2c9f9af08428eb0b851382756e23f2fd2ecb380594274eac83ade266cf5",
+          "size": 5948832
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00001-of-00015.gguf",
+        "size": 5948832
+      },
+      {
+        "blobId": "fb54a8b6dcaf4789e9548a98a202fb5496057892",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "378782359b95dcb47e556d2ef8913ce77b599a24ec81ae316c330f5198d3872a",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00002-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "20466698b940f4785aada77878e3ed004d06400c",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "280451aa5e5c0559c619c94e7b7b543ca459b553d68e4fb653564d3a8e887264",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00003-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "f68460a01343ac98afc6bd5ad93eef2d37adcae5",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "505466bca7d1d9be9df9ad3158a7916d372134fd74fb32671fe9b0c48a3c8dd5",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00004-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "aacb3d2c06ba9331f2e03cd15cdabe295ddeb071",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "b8e7c2cefd737ca114a3e628c5362e868d279b0fadddacc6d6afdccad8e40a03",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00005-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "c409319d3115c6768117b0b4e7fe9f5fa76f9192",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "dc02ed3b2b878f0f8c50019f99ba9941a768c2a8217b9154e24a903965ff5fba",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00006-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "92bfbf3954a1b45d176a61819ba656e476d94958",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "4f1bf39d811faf98baf4f15b9391ed080f83b6d46a6650d341934321fcf516ff",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00007-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "4cfbeef43e4a3d5d6282c9a1f4f84e74aa17c61f",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "23747329718f9b9e43119c547288f67c28600b71589dd6e43e0843946c8ea414",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00008-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "4bd5cd203210f9aa9d29281fbffa79f78f5bb7be",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "67e6058444a56f8d87915af0331806711836bab82361f53590cd539aee8914b2",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00009-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "ad7dc12aecf17c7ee66aae9d52dc91a1ab769451",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "6590376d74ae60e662ccac67090897c6f8ea7ca5857b59646ec7de9efec503f3",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00010-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "eb1e22b7d188a83827170b3c877e4c0beb533e33",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "a1b8d9f40371a061799b3bd8266e6e464b67bd52636777dbc1b4be633145003b",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00011-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "49f1def0c10f180301bc08751d04938576415e34",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "44258ccfb13c16d3465ccfb676f2048ff25cb0863cba6d7ff208edb3b23a3bf4",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00012-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "8e21111859d23fd089ced6580443397d684fed75",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "e592b31c594cbe0e6c7f366692ea8b7b8ff2c1847b4bb2603d78b2f0dacd9772",
+          "size": 43637540192
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00013-of-00015.gguf",
+        "size": 43637540192
+      },
+      {
+        "blobId": "79f26c94068d0fa6baab429b3a25e1b4226ed9bb",
+        "lfs": {
+          "pointerSize": 136,
+          "sha256": "e0cec6fa0e1bf425be5c7f2a306b4e803ec71baff1ae8b286001dd544dc3fc77",
+          "size": 27735880768
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00014-of-00015.gguf",
+        "size": 27735880768
+      },
+      {
+        "blobId": "09c53737518b308f5c68cc520ae9496fa8f2dd02",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "ec59f9ae9207d41cd5f2d1e0a6cca11854940a53a9318d3642878ee84522d654",
+          "size": 2819453664
+        },
+        "rfilename": "MiMo-V2.6-Pro-RL-MXFP4-00015-of-00015.gguf",
+        "size": 2819453664
+      },
+      {
+        "blobId": "c4d87ee04f1bfc1aabee16671b2db145edd13699",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "bd540301cf844e24fc38246ebd35572ae4b0fb4aa690a656d059ea2cf1b449c8",
+          "size": 5542735104
+        },
+        "rfilename": "dflash-MiMo-V2.6-Pro-RL-BF16.gguf",
+        "size": 5542735104
+      },
+      {
+        "blobId": "c8977241e7fe3f2ecff78638831e6e8048d14597",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "c0ae0340789ca379868f4686b134fa68dddde1172e0768e10e118c17c92c6fb4",
+          "size": 2947509504
+        },
+        "rfilename": "dflash-MiMo-V2.6-Pro-RL-Q8_0.gguf",
+        "size": 2947509504
+      },
+      {
+        "blobId": "4c5848cbc32724209e141f1ab7e4708c459874fa",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "9acca6b1eadadf557232f1a6a742f8fe08235e594b8f8e9f6068f89e85038c8e",
+          "size": 2836590176
+        },
+        "rfilename": "mmproj-MiMo-V2.6-Pro-RL-BF16.gguf",
+        "size": 2836590176
+      },
+      {
+        "blobId": "fca8a1d8c2483ef44f71dee7db63977e46f94473",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "c82b726922800eb670857f454b463ccd919a4202cec13e01dfb34e1774f483a6",
+          "size": 1611230816
+        },
+        "rfilename": "mmproj-MiMo-V2.6-Pro-RL-Q8_0.gguf",
+        "size": 1611230816
+      },
+      {
+        "blobId": "53617a741e8b28959761b9e5896ce2df14762ef5",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "0ac5700ccb15d1b2f8004f846b1533448e5bf20c9770371d3d2a26003a73be2b",
+          "size": 7625299104
+        },
+        "rfilename": "mtp-MiMo-V2.6-Pro-RL-BF16.gguf",
+        "size": 7625299104
+      },
+      {
+        "blobId": "5b3363e210c75982027111ea2a3dc8cfb53d7da5",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "741be72c45a9b9c1265f746baf4f124da3d37a4378f262782c732578e55021c1",
+          "size": 2149176480
+        },
+        "rfilename": "mtp-MiMo-V2.6-Pro-RL-Q4_0.gguf",
+        "size": 2149176480
+      },
+      {
+        "blobId": "0448fa42d0e6aef8626d42f35bcd7c3f0c4aca1e",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "bc342d88400dccf3c830feba538630816cb5594bcfe36c6fef8561c81a1ef37f",
+          "size": 4053914784
+        },
+        "rfilename": "mtp-MiMo-V2.6-Pro-RL-Q8_0.gguf",
+        "size": 4053914784
+      }
+    ]
+  },
+  {
+    "before_quants": [
+      {
+        "dynamic": false,
+        "name": "Q4_0",
+        "size_bytes": 1264898272,
+        "size_gb": 1.18
+      },
+      {
+        "dynamic": false,
+        "name": "Q8_0",
+        "size_bytes": 3949639904,
+        "size_gb": 3.68
+      },
+      {
+        "dynamic": false,
+        "name": "BF16",
+        "size_bytes": 7423703264,
+        "size_gb": 6.91
+      },
+      {
+        "dynamic": false,
+        "name": "MXFP4",
+        "size_bytes": 167369465152,
+        "size_gb": 155.87
+      }
+    ],
+    "checked_at": "2026-10-06T12:36:01Z",
+    "geometry_diff": {},
+    "main_model_geometry": {
+      "arch": "mimo2",
+      "ctx_train": 1048576,
+      "embd": 4096,
+      "exp_ff": 2048,
+      "exp_used": 8,
+      "experts": 256,
+      "ff": 16384,
+      "kl": 192,
+      "layers": 48,
+      "vl": 128
+    },
+    "quants": [
+      {
+        "dynamic": false,
+        "name": "Q2_K",
+        "size_bytes": 126214593856,
+        "size_gb": 117.55
+      },
+      {
+        "dynamic": false,
+        "name": "MXFP4",
+        "size_bytes": 167369465152,
+        "size_gb": 155.87
+      }
+    ],
+    "repo": "ggml-org/MiMo-V2.6-Flash-RL-GGUF",
+    "sha": "a5d1269fdcf9c3346934411f700038e9cd9d5102",
+    "siblings": [
+      {
+        "blobId": "f37a43243cc2bfec52488d7119d258ef623cff68",
+        "lfs": {
+          "pointerSize": 132,
+          "sha256": "a34f63df32086bba7a14aa8a2f6c2f111f6e626ad7b10be18957e42d14d84738",
+          "size": 5948640
+        },
+        "rfilename": "MiMo-V2.6-Flash-RL-MXFP4-00001-of-00002.gguf",
+        "size": 5948640
+      },
+      {
+        "blobId": "343158460c29097079e30af6211d65a2c3550817",
+        "lfs": {
+          "pointerSize": 137,
+          "sha256": "10b74ff85577de18b336718c19905a50bcbccfee9cae7b9edd446667084f623c",
+          "size": 167363516512
+        },
+        "rfilename": "MiMo-V2.6-Flash-RL-MXFP4-00002-of-00002.gguf",
+        "size": 167363516512
+      },
+      {
+        "blobId": "f37a43243cc2bfec52488d7119d258ef623cff68",
+        "lfs": {
+          "pointerSize": 132,
+          "sha256": "a34f63df32086bba7a14aa8a2f6c2f111f6e626ad7b10be18957e42d14d84738",
+          "size": 5948640
+        },
+        "rfilename": "MiMo-V2.6-Flash-RL-Q2_K-00001-of-00002.gguf",
+        "size": 5948640
+      },
+      {
+        "blobId": "790666db0ce22efe8887c00a96d185d0d4d801e9",
+        "lfs": {
+          "pointerSize": 137,
+          "sha256": "383c6e508cf1d4f125bcd63ace01763debf4f9111ece46eb45ce868f6a56f1e8",
+          "size": 126208645216
+        },
+        "rfilename": "MiMo-V2.6-Flash-RL-Q2_K-00002-of-00002.gguf",
+        "size": 126208645216
+      },
+      {
+        "blobId": "6d00e070eb63411da3c510ddab51c1234974958e",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "8c7b8fe999669c48ff71d231d694eddaf98a0e5a88c40fad426111edbd9b3763",
+          "size": 2942167040
+        },
+        "rfilename": "dflash-MiMo-V2.6-Flash-RL-BF16.gguf",
+        "size": 2942167040
+      },
+      {
+        "blobId": "96f631791056e8b69d311a4028f92449b485e887",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "1ff494f602bb4921deb4da68b42be9b3c43c27f8415813f3344321d4e712051c",
+          "size": 1565911040
+        },
+        "rfilename": "dflash-MiMo-V2.6-Flash-RL-Q8_0.gguf",
+        "size": 1565911040
+      },
+      {
+        "blobId": "cfad88db50cb235db06b18df6f5d48bd765e5bce",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "2e8e28450b9218c0f1f7f9e208a3f6884be82a067361bff070828a68344415b0",
+          "size": 2748509792
+        },
+        "rfilename": "mmproj-MiMo-V2.6-Flash-RL-BF16.gguf",
+        "size": 2748509792
+      },
+      {
+        "blobId": "d141ce14a143e9074984f21c97f5466dbf96d7cb",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "ce8ab7109b3e15d185ce35e92c26c2c5e344dfa3a64f659b0f9ec972b230b45e",
+          "size": 1564438112
+        },
+        "rfilename": "mmproj-MiMo-V2.6-Flash-RL-Q8_0.gguf",
+        "size": 1564438112
+      },
+      {
+        "blobId": "31f87467f70596cbb0207710488bf6b43d23f230",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "4719f59c59079fe458da67640719b6a463731c6facb620d7f06e7feb9a7f1441",
+          "size": 4481536224
+        },
+        "rfilename": "mtp-MiMo-V2.6-Flash-RL-BF16.gguf",
+        "size": 4481536224
+      },
+      {
+        "blobId": "97de88a7d33aa2ba52f003e9874f8c6c6c5c9458",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "5318c079bf646ed702271281609abc5b7cfc7fecdd354f42b4296b9aad4a83d7",
+          "size": 1264898272
+        },
+        "rfilename": "mtp-MiMo-V2.6-Flash-RL-Q4_0.gguf",
+        "size": 1264898272
+      },
+      {
+        "blobId": "6afde2518a3c07e1388c4714e6eb3fea65c5e77f",
+        "lfs": {
+          "pointerSize": 135,
+          "sha256": "cbcd8a22e62754b4133dc6f9ba87356268aa2d6377ee3e78be5d61172643969e",
+          "size": 2383728864
+        },
+        "rfilename": "mtp-MiMo-V2.6-Flash-RL-Q8_0.gguf",
+        "size": 2383728864
+      }
+    ]
+  }
+]

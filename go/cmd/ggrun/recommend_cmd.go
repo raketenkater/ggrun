@@ -148,6 +148,7 @@ func cmdRecommend(args []string) {
 		os.Exit(2)
 	}
 	recommend.MaybeRefresh()
+	enableInstalledArchSupport()
 	cats := recommend.TopCategories(caps, opts.limit)
 	if opts.json {
 		data, err := json.MarshalIndent(struct {
@@ -184,7 +185,7 @@ func cmdRecommend(args []string) {
 		fmt.Println("No models in the catalog fit this budget.")
 		return
 	}
-	forkShown := false
+	forkShown, buildShown := false, false
 	printRecGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -194,15 +195,20 @@ func cmdRecommend(args []string) {
 		for _, r := range rows {
 			name := r.Name
 			limit := 36
-			if r.NeedsForkBackend() {
-				limit, forkShown = 34, true
+			marker := ""
+			switch {
+			case r.NeedsForkBackend():
+				marker, forkShown = " *", true
+			case r.NeedsBackendBuild:
+				marker, buildShown = " +", true
+			}
+			if marker != "" {
+				limit = 34
 			}
 			if len(name) > limit {
 				name = name[:limit-1] + "…"
 			}
-			if r.NeedsForkBackend() {
-				name += " *"
-			}
+			name += marker
 			tps := "—"
 			if r.PredictedTPS > 0 {
 				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
@@ -216,6 +222,9 @@ func cmdRecommend(args []string) {
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
 	if forkShown {
 		fmt.Println("\n* No upstream backend loads this architecture yet; the first launch builds a fork backend automatically.")
+	}
+	if buildShown {
+		fmt.Println("\n+ No installed backend loads this architecture; the first launch offers to build a newer one (about 20-40 min).")
 	}
 	fmt.Println("\nIntel is base-model catalog intelligence (~ marks an estimate), not quantized accuracy.")
 	fmt.Println("1–2 bit quants are fallback choices within a model; their task accuracy is unverified.")

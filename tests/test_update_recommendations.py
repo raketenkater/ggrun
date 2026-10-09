@@ -191,3 +191,145 @@ def test_unreadable_upstream_table_stamps_nothing(monkeypatch):
     rows = [{"arch": "axk2"}]
     updater.stamp_runnable(rows, updater.fetch_upstream_arches())
     assert "runnable" not in rows[0]
+
+
+def _sibling(name, size):
+    return {"rfilename": name, "lfs": {"size": size}}
+
+
+def test_draft_heads_and_projectors_are_not_model_quants(monkeypatch):
+    updater = load_updater()
+    gb = 1024**3
+    siblings = [
+        _sibling("Model-MXFP4-00001-of-00002.gguf", 10 * 1024**2),
+        _sibling("Model-MXFP4-00002-of-00002.gguf", 500 * gb),
+        _sibling("Model-Q6_K-00001-of-00002.gguf", 300 * gb),
+        _sibling("Model-Q6_K-00002-of-00002.gguf", 300 * gb),
+        _sibling("mtp-Model-Q4_0.gguf", 2 * gb),
+        _sibling("mtp-Model-BF16.gguf", 7 * gb),
+        _sibling("dflash-Model-BF16.gguf", 5 * gb),
+        _sibling("MTP/mtp-Model-shared-Q8_0.gguf", 3 * gb),
+        _sibling("mmproj-Model-BF16.gguf", 3 * gb),
+    ]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    quants = {q["name"]: q["size_bytes"] for q in updater.fetch_hf_quants("owner/Model-GGUF")}
+    assert quants == {"MXFP4": 500 * gb + 10 * 1024**2, "Q6_K": 600 * gb}
+    assert updater._representative_gguf_file(siblings) == "Model-MXFP4-00001-of-00002.gguf"
+
+
+def test_a_draft_only_repo_cannot_supply_a_scored_main_model(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("dflash-Model-BF16.gguf", 5 * 1024**3), _sibling("dflash-Model-Q8_0.gguf", 3 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert updater.fetch_hf_quants("owner/Model-DFlash-GGUF") == []
+    assert updater._representative_gguf_file(siblings) is None
+
+
+def test_quant_identity_uses_only_the_final_label(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-BF16-Q4_K_M.gguf", 4 * 1024**3),
+                _sibling("Model-BF16-Q8_0.gguf", 8 * 1024**3),
+                _sibling("UD-IQ3_XXS/Model-UD-IQ3_XXS.gguf", 3 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    quants = {q["name"]: q["size_bytes"] for q in updater.fetch_hf_quants("owner/Model-BF16-GGUF")}
+    assert quants == {"Q4_K_M": 4 * 1024**3, "Q8_0": 8 * 1024**3, "UD-IQ3_XXS": 3 * 1024**3}
+
+
+def test_partial_shards_and_unknown_sizes_never_look_like_small_models(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-Q4_K_M-00001-of-00002.gguf", 1024**3),
+                _sibling("Model-Q8_0-00001-of-00002.gguf", 1024**3),
+                {"rfilename": "Model-Q8_0-00002-of-00002.gguf"},
+                _sibling("Model-Q6_K.gguf", 6 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert [q["name"] for q in updater.fetch_hf_quants("owner/Model")] == ["Q6_K"]
+
+
+def test_distinct_models_with_same_quant_are_not_summed(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-2B-Q4_K_M.gguf", 1024**3),
+                _sibling("Model-20B-Q4_K_M.gguf", 10 * 1024**3)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert updater.fetch_hf_quants("owner/Model") == []
+
+
+def test_unknown_size_does_not_hide_an_ambiguous_variant(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("Model-2B-Q4_K_M.gguf", 1024**3),
+                _sibling("Model-20B-Q4_K_M.gguf", None)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert updater.fetch_hf_quants("owner/Model") == []
+
+
+def test_search_cannot_promote_a_draft_through_base_model_tags(monkeypatch):
+    updater = load_updater()
+    row = {"name": "Qwen3.8-Flash-Next", "creator": {"name": "Alibaba"},
+           "huggingfaceUrl": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next"}
+    draft = "unsloth/Qwen3.8-Flash-Next-MTP-GGUF"
+    assert not updater.candidate_relevant(draft, row)
+    inspected = []
+    monkeypatch.setattr(updater, "search_hf_models", lambda *args: [
+        {"id": draft, "tags": ["base_model:Qwen/Qwen3.8-Flash-Next"]}])
+    def quants(repo):
+        inspected.append(repo)
+        return [{"name": "Q4_K_M", "size_gb": 2}] if repo == draft else []
+    monkeypatch.setattr(updater, "fetch_hf_quants", quants)
+    assert updater.resolve_gguf_repo(row, 20) is None
+    assert draft not in inspected
+
+
+def test_shard_completeness_requires_each_index_once():
+    updater = load_updater()
+    assert updater.complete_shards(["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00001-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00001-of-00002.gguf", "m-00001-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00000-of-00002.gguf", "m-00002-of-00002.gguf"])
+    assert not updater.complete_shards(["m-00001-of-00002.gguf", "m-00002-of-00003.gguf"])
+
+
+def test_gguf_importance_matrix_is_not_a_tiny_bf16_model(monkeypatch):
+    updater = load_updater()
+    siblings = [_sibling("GLM-5.3-Flash-BF16-imatrix.gguf", 512687648),
+                _sibling("GLM-5.3-Flash-BF16-Q4_K_M.gguf", 200828233184)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert [(q["name"], q["size_bytes"]) for q in updater.fetch_hf_quants("owner/GLM")] == [
+        ("Q4_K_M", 200828233184)]
+    assert updater._representative_gguf_file(siblings) == siblings[1]["rfilename"]
+
+
+def test_quant_labels_for_ternary_and_xl_variants_match_downloader():
+    """UD-TQ1_0 is ternary, not Q1_0; IQ4_NL_XL is not IQ4_NL. Both tools must
+    agree, or the catalog offers a label the downloader cannot find."""
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+
+    def load(rel):
+        spec = importlib.util.spec_from_file_location(Path(rel).stem, root / rel)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    updater = load("tools/models/update_recommendations.py")
+    downloader = load("tools/download/download_any_gguf.py")
+    assert updater.QUANT_PATTERN.pattern == downloader.QUANT_PATTERN.pattern
+    cases = {
+        "Qwen3-Coder-Next-UD-TQ1_0.gguf": "UD-TQ1_0",
+        "UD-TQ2_0/Kimi-K3-UD-TQ2_0-00002-of-00013.gguf": "UD-TQ2_0",
+        "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf": "UD-IQ4_NL",
+        "Qwen3.6-35B-A3B-UD-IQ4_NL_XL.gguf": "UD-IQ4_NL_XL",
+        "Q2_K/meta-models.Muse-Glimmer-30B.f16.gguf.Q2_K.gguf": "Q2_K",
+        "GLM-5.3-Flash-BF16-Q4_0/GLM-5.3-Flash-BF16-Q4_0-00001-of-00005.gguf": "Q4_0",
+    }
+    for path, want in cases.items():
+        assert updater.artifact_quant(path) == want, path
+        assert downloader.artifact_quant(path) == want, path
+
+
+def test_identity_rejects_a_domain_finetune():
+    """Ling 3.0 Flash was resolved to the finance retune Ling-3.0-flash-Fin."""
+    updater = load_updater()
+    base = {"name": "Ling 3.0 Flash", "creator": {"name": "InclusionAI"}}
+    fin = {"name": "Ling-3.0-flash-Fin", "creator": {"name": "InclusionAI"}}
+    assert not updater.candidate_relevant("bartowski/Ling-3.0-flash-Fin-GGUF", base)
+    assert updater.candidate_relevant("AtomicChat/Ling-3.0-flash-GGUF", base)
+    assert updater.candidate_relevant("bartowski/Ling-3.0-flash-Fin-GGUF", fin)

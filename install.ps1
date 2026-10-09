@@ -109,21 +109,50 @@ function Confirm-Install([string]$What) {
     return ($reply -eq '' -or $reply -match '^(y|yes)$')
 }
 
+function Resolve-LatestTagFromWeb {
+    # github.com/<repo>/releases/latest redirects to the tag page and is not
+    # subject to the unauthenticated REST API rate limit that shared runners and
+    # NAT'd networks hit.
+    try {
+        $request = [System.Net.HttpWebRequest]::Create("https://github.com/$Repo/releases/latest")
+        $request.AllowAutoRedirect = $false
+        $request.UserAgent = 'ggrun-installer'
+        $response = $request.GetResponse()
+        $location = $response.Headers['Location']
+        $response.Close()
+        if ($location -match '/releases/tag/([^/?#]+)$') { return $Matches[1] }
+    } catch { }
+    return ''
+}
+
 function Get-ReleaseInfo {
     if ($script:ReleaseInfo) { return $script:ReleaseInfo }
     try {
+        # CI exercises the github.com fallback below without waiting for a real
+        # API outage.
+        if ($env:LLM_INSTALL_SKIP_RELEASE_API -eq '1') { throw 'release API skipped (LLM_INSTALL_SKIP_RELEASE_API=1)' }
         if ($Release -eq 'latest') {
             $script:ReleaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
         } else {
             $script:ReleaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Release"
         }
     } catch {
-        Fail "Could not query GitHub release '$Release'. Check internet/proxy access to api.github.com. Details: $($_.Exception.Message)"
+        $apiError = $_.Exception.Message
+        $tag = $Release
+        if ($Release -eq 'latest') { $tag = Resolve-LatestTagFromWeb }
+        if (!$tag) {
+            Fail "Could not query GitHub release '$Release'. Check internet/proxy access to api.github.com and github.com. Details: $apiError"
+        }
+        # Without the API the asset list is unknown: assets are fetched from the
+        # standard release URLs and SHA256SUMS is still required.
+        Warn "GitHub API unavailable ($apiError); using release $tag from github.com directly."
+        $script:ReleaseInfo = [pscustomobject]@{ tag_name = $tag; assets = @(); fallback = $true }
     }
     return $script:ReleaseInfo
 }
 
 function Get-AssetUrl($Info, [string]$Name) {
+    if ($Info.fallback) { return "https://github.com/$Repo/releases/download/$($Info.tag_name)/$Name" }
     foreach ($item in $Info.assets) {
         if ($item.name -eq $Name) { return $item.browser_download_url }
     }
@@ -154,6 +183,8 @@ function Save-ReleaseAsset([string]$Name, [bool]$Required) {
         try {
             Invoke-WebRequest -Uri $url -OutFile $archive
         } catch {
+            # Without the API listing, an optional asset may simply not exist.
+            if ($info.fallback -and !$Required) { return '' }
             Fail "Could not download $Name. Check internet/proxy access to github.com. Details: $($_.Exception.Message)"
         }
         $sumsUrl = Get-AssetUrl $info 'SHA256SUMS'
@@ -669,7 +700,9 @@ try {
         "LLM_MODEL_DIR=`"$models`"",
         "LLM_CACHE_DIR=`"$cache`"",
         "LLM_LOG_DIR=`"$logs`"",
-        'LLM_BACKEND="llama"',
+        # auto, not a pinned name: a configured name disables the per-model
+        # architecture probe and the build offer for models it cannot load.
+        'LLM_BACKEND="auto"',
         "LLAMA_SERVER=`"$llamaServer`""
     )
     # Reinstalling/upgrading must not reset user configuration.

@@ -155,6 +155,8 @@ func TestFatalBackendLineRecognizesGGMLAborts(t *testing.T) {
 		"CUDA error: an unsupported value or parameter was passed to the function",
 		"/src/ggml/src/ggml.c:1234: GGML_ASSERT(ne00 == ne10) failed",
 		"terminate called after throwing an instance of 'std::runtime_error'",
+		// GGML_ABORT("fatal error") after "Unhandled type iq1_m (29)", ik 1fddd12.
+		"/__w/ggrun/ggrun/.ik_llama.cpp/ggml/src/ggml-cuda/mmq.cuh:112: fatal error",
 	} {
 		if fatalBackendLine("ok\n"+line+"\n") == "" {
 			t.Errorf("fatal line not recognized: %q", line)

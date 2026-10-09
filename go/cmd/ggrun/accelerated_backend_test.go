@@ -143,3 +143,22 @@ func TestUnsupportedArchOffersAcceleratedBuildOfReviewedSource(t *testing.T) {
 		t.Fatal("a failed build reported success")
 	}
 }
+
+// A reviewed recipe for the architecture must be offered before unreviewed
+// open-PR discovery (docs/fork-backends.md). Nanbeige has one: upstream b77d646
+// plus the reviewed loop_count patch the published GGUF needs.
+func TestUnsupportedArchRoutesPreferReviewedRecipe(t *testing.T) {
+	got := unsupportedArchRoutes("nanbeige")
+	if len(got) == 0 || got[0] != "reviewed-build" {
+		t.Fatalf("nanbeige routes %v: the reviewed recipe must come first", got)
+	}
+	unknown := unsupportedArchRoutes("some-new-arch")
+	if len(unknown) == 0 || unknown[0] != "discovered-fork" {
+		t.Fatalf("routes without a reviewed recipe %v: discovery comes first", unknown)
+	}
+	for _, routes := range [][]string{got, unknown} {
+		if routes[len(routes)-1] != "mainline-update" {
+			t.Fatalf("mainline update must stay the last offer: %v", routes)
+		}
+	}
+}

@@ -103,10 +103,16 @@ def test_iswa_gemma():
 def test_ssm_hybrid():
     with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
         build(f.name, arch='qwen35', layers=64, hkv=4, kl=256, vl=256,
-              embd=5120, ff=17408, ctx_train=262144, full_interval=4, ssm=True)
+              embd=5120, ff=17408, ctx_train=262144, full_interval=4, ssm=True,
+              u32=['ssm.conv_kernel=4', 'ssm.group_count=16', 'ssm.inner_size=6144',
+                   'ssm.time_step_rank=48'])
         r = parse(f.name)
     assert_eq(r['ssm'], 1, 'ssm')
     assert_eq(r['full_interval'], 4, 'full_interval')
+    # Placement prices the per-slot recurrent state from these.
+    for key, want in (('ssm_d_conv', 4), ('ssm_d_state', 128), ('ssm_n_group', 16),
+                      ('ssm_d_inner', 6144), ('ssm_dt_rank', 48)):
+        assert_eq(r.get(key), want, key)
     print('  ✓ ssm_hybrid')
 
 

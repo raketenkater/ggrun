@@ -96,6 +96,69 @@ type Recommendation struct {
 	QualityRetained      float64 // within-model quant preference, not measured intelligence retention
 	PredictedTPS         float64 // estimated decode tok/s on this machine (0 = unknown)
 	SpeedTier            int     // 2 interactive, 1 usable, 0 slow, -1 unknown
+	// NeedsBackendBuild: every installed backend was probed and none loads
+	// this architecture, so the first launch offers a 20-40 minute build.
+	NeedsBackendBuild bool
+}
+
+// installedArchSupport answers whether an installed backend loads an
+// architecture; known is false when that could not be determined. The catalog's
+// Runnable flag is stamped against upstream tables, which run ahead of the
+// backend a release ships: K2 Horizon was in mainline master but not in the
+// release backend, so a fresh install's top CPU pick could not load. Only the
+// launcher knows the installed backends, so it supplies the probe.
+var installedArchSupport func(caps *detect.Capabilities, arch string) (loads, known bool)
+
+// SetInstalledArchSupport installs the probe used to flag rows that need a
+// backend build. nil disables the check.
+func SetInstalledArchSupport(fn func(caps *detect.Capabilities, arch string) (loads, known bool)) {
+	installedArchSupport = fn
+}
+
+// SetVulkanOnCUDA installs the probe for rows a default launch would serve on
+// the Vulkan build although the host has an NVIDIA GPU: an architecture only
+// mainline loads, or a large MoE whose file-backed experts win the launch's
+// tie-break. The launch then offers a CUDA build; until it exists the model
+// runs far below the CUDA estimate (MiMo-V2.6-Flash Q2_K on the full rig:
+// 2.9 tok/s, predicted 10.5).
+func SetVulkanOnCUDA(fn func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool) {
+	vulkanOnCUDA = fn
+}
+
+var vulkanOnCUDA func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool
+
+func markBackendBuild(caps *detect.Capabilities, r *Recommendation) {
+	if installedArchSupport == nil || strings.TrimSpace(r.Arch) == "" {
+		return
+	}
+	if vulkanOnCUDA != nil && vulkanOnCUDA(caps, r.Arch, r.MoE, int(r.QuantSizeGB*1024)) {
+		r.NeedsBackendBuild = true
+		r.BackendHint = "Vulkan"
+		note := "a default launch serves " + r.Arch + " on the Vulkan build here; the first launch offers a CUDA build"
+		if r.Reason == "" {
+			r.Reason = note
+		} else {
+			r.Reason += "; " + note
+		}
+		return
+	}
+	if loads, known := installedArchSupport(caps, r.Arch); known && !loads {
+		r.NeedsBackendBuild = true
+		note := "no installed backend loads " + r.Arch + "; the first launch offers to build one"
+		if r.Reason == "" {
+			r.Reason = note
+		} else {
+			r.Reason += "; " + note
+		}
+	}
+}
+
+// preferLoadable keeps each list's order but moves rows that need a backend
+// build after the rows the installed backends can serve now.
+func preferLoadable(rows []Recommendation) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return !rows[i].NeedsBackendBuild && rows[j].NeedsBackendBuild
+	})
 }
 
 type catalogDoc struct {
@@ -185,6 +248,7 @@ func collectRecommendations(caps *detect.Capabilities, allowQuant func(QuantOpti
 			continue
 		}
 		if rec, ok := evaluateWithSelector(caps, c, allowQuant, isBetter); ok {
+			markBackendBuild(caps, &rec)
 			rows = append(rows, rec)
 		}
 	}
@@ -197,6 +261,7 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 	}
 	rows := allRecommendationsBalanced(caps)
 	sortRecommendations(rows)
+	preferLoadable(rows)
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
@@ -258,6 +323,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	// intelligence, with a usability discount only below the usable speed floor.
 	balancedPool := append([]Recommendation(nil), rows...)
 	sortRecommendations(balancedPool)
+	preferLoadable(balancedPool)
 	balanced := take(balancedPool)
 
 	// Smartest keeps the base-model capability order even when serving is slow.
@@ -270,6 +336,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		}
 		return ki > kj
 	})
+	preferLoadable(smartPool)
 	smartest := take(smartPool)
 
 	// Fastest: highest predicted tok/s among models that are still capable
@@ -293,13 +360,21 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sort.SliceStable(fastPool, func(i, j int) bool {
 		return fastPool[i].PredictedTPS > fastPool[j].PredictedTPS
 	})
+	preferLoadable(fastPool)
 	fastest := take(fastPool)
 
 	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
 }
 
+// sortRecommendations orders Best overall: usable models first, then catalog
+// intelligence. A model predicted below the usable floor ranks after every
+// usable one; the discount alone let a 2-tok/s dense model on CPU outrank a
+// usable MoE and time out on a Claude Code task (October 8 matrix).
 func sortRecommendations(rows []Recommendation) {
 	sort.SliceStable(rows, func(i, j int) bool {
+		if si, sj := rows[i].SpeedTier == 0, rows[j].SpeedTier == 0; si != sj {
+			return sj
+		}
 		if rows[i].Score == rows[j].Score {
 			if modelIntelligence(rows[i].Candidate) == modelIntelligence(rows[j].Candidate) {
 				return rows[i].QuantSizeGB < rows[j].QuantSizeGB
@@ -397,7 +472,7 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 		if effIntel <= 0 {
 			continue
 		}
-		tps := predictDecodeTPS(caps, c, q)
+		tps := predictDecodeTPSForFit(caps, c, q, fit, gpuSideOverheadMB(caps, c, q))
 		// Quant-retention guesses are not benchmark measurements. Compare
 		// models on their catalog intelligence, discounting only predicted
 		// serving below the usable floor. Extra speed beyond that is not a
@@ -613,6 +688,16 @@ func quantOptions(c Candidate) []QuantOption {
 		name = "auto"
 	}
 	return []QuantOption{{Name: name, SizeGB: c.SizeGB}}
+}
+
+// gpuSideOverheadMB is the part of fitQuant's overhead that stays in VRAM:
+// KV at the expected launch context plus graph scratch.
+func gpuSideOverheadMB(caps *detect.Capabilities, c Candidate, q QuantOption) int {
+	modelMB := int(q.SizeGB * 1024)
+	if hasGeometry(c) {
+		return 2048 + recommendKVMB(c, recommendAutoContext(caps, c, modelMB), "q4_0")
+	}
+	return estimateOverheadMB(modelMB, caps, c)
 }
 
 func fitQuant(b hardwareBudget, caps *detect.Capabilities, c Candidate, q QuantOption) (fit, reason string, fitPenalty, needGB float64, ok bool) {

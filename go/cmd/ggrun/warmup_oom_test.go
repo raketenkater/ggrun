@@ -189,7 +189,7 @@ func TestWarmupOOMOnRaisedPlanRestoresTheAdmittedBaseline(t *testing.T) {
 	if estimate[0] <= 0 {
 		t.Fatalf("no estimate recorded for the failed rung: %v", estimate)
 	}
-	if measured := placement.RelatedModelRuntimeGraphGrowth(cacheDir, model, caps.GPUs, strategy.Parallel, tag); measured[0] > 0 {
+	if measured := placement.RelatedMeasuredRuntimeGraphGrowth(cacheDir, model, caps.GPUs, strategy.Parallel); measured[0] > 0 {
 		t.Fatalf("the guess was filed as a measurement: %v", measured)
 	}
 	productions := 0

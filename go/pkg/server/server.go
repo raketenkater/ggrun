@@ -187,6 +187,19 @@ func (b *threadSafeBuffer) String() string {
 	return b.buf.String()
 }
 
+// Since returns the output written after offset and the new end offset, so a
+// watcher that runs for the whole serving session reads each byte once instead
+// of copying a log that reaches hundreds of megabytes at verbose levels.
+func (b *threadSafeBuffer) Since(offset int) (string, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := b.buf.Bytes()
+	if offset < 0 || offset > len(data) {
+		offset = 0
+	}
+	return string(data[offset:]), len(data)
+}
+
 func (b *threadSafeBuffer) Tail(max int) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()

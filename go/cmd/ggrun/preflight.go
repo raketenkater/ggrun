@@ -70,9 +70,12 @@ type preflightOutcome struct {
 	// abort (cudaGraphInstantiate) names no size at all, and storing the
 	// stand-in as a measurement teaches the planner a compute buffer that was
 	// never observed — in either direction.
-	AllocMBMeasured   bool
-	DeficitMB         int
-	IsComputeBuffer   bool
+	AllocMBMeasured bool
+	DeficitMB       int
+	IsComputeBuffer bool
+	// IsKVCache marks a failed KV-cache allocation. Like a compute buffer it
+	// shrinks with context, so automatic context is a valid recovery lever.
+	IsKVCache         bool
 	DoesNotFit        bool
 	CompanionRejected bool
 	Evidence          memoryPlanEvidence
@@ -99,6 +102,15 @@ type ikAllocationOOMError struct {
 	AllocMB         int
 	DeficitMB       int
 	IsComputeBuffer bool
+	IsKVCache       bool
+}
+
+// kvCacheAllocationFailed reports the loader's own account of a failed KV-cache
+// allocation ("llama_kv_cache_init: failed to allocate buffer for kv cache").
+func kvCacheAllocationFailed(logData string) bool {
+	lower := strings.ToLower(logData)
+	return strings.Contains(lower, "failed to allocate buffer for kv cache") ||
+		strings.Contains(lower, "llama_kv_cache_init() failed")
 }
 
 func (e *ikAllocationOOMError) Error() string {
@@ -781,6 +793,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 				AllocMB:         bytesToMiBCeil(summary.Denied.Bytes),
 				DeficitMB:       bytesToMiBCeil(deficitBytes),
 				IsComputeBuffer: isComputeBuffer,
+				IsKVCache:       !isComputeBuffer && kvCacheAllocationFailed(logData),
 			}
 		}
 	}
@@ -812,6 +825,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 			}
 			return memoryPlanEvidence{}, &ikAllocationOOMError{
 				Device: device, AllocMB: allocMB, DeficitMB: deficit, IsComputeBuffer: isComputeBuffer,
+				IsKVCache: !isComputeBuffer && kvCacheAllocationFailed(logData),
 			}
 		}
 		// A loader that rejects the file itself cannot be helped by any launch
@@ -1543,6 +1557,7 @@ func allocationOOMOutcome(outcome preflightOutcome, oom *ikAllocationOOMError) p
 	outcome.AllocMB = maxPreflightInt(oom.AllocMB, 1)
 	outcome.DeficitMB = maxPreflightInt(oom.DeficitMB, 1)
 	outcome.IsComputeBuffer = oom.IsComputeBuffer
+	outcome.IsKVCache = oom.IsKVCache
 	outcome.DoesNotFit = true
 	return outcome
 }
