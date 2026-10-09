@@ -287,6 +287,7 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 	s.BackendSupportsFit = backendHelpSupports(opts.BackendHelp, "-fit")
 	s.BackendFitTakesValue = backendFitTakesValue(opts.BackendHelp)
 	s.BackendSupportsKVOffload = backendHelpSupports(opts.BackendHelp, "--kv-offload")
+	s.BackendSupportsNoContextShift = backendHelpSupportsExactFlag(opts.BackendHelp, "--no-context-shift")
 	s.BackendCheckpointMinStepFlag = backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag)
 	if s.Host == "" {
 		s.Host = "127.0.0.1"

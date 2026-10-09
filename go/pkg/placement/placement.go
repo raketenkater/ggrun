@@ -147,6 +147,9 @@ type Strategy struct {
 	// --kv-offload switch. GPU KV is the backend default, so a backend which
 	// only exposes --no-kv-offload must receive no positive flag at all.
 	BackendSupportsKVOffload bool `json:"-"`
+	// BackendSupportsNoContextShift reports whether the backend accepts
+	// --no-context-shift. ik_llama shifts by default (mainline does not).
+	BackendSupportsNoContextShift bool `json:"-"`
 	// BackendCheckpointMinStepFlag is the help-probed spelling for checkpoint
 	// spacing. Mainline and ik_llama expose the same control under different
 	// names; emitting mainline's spelling to ik makes the server exit in argument
@@ -1631,10 +1634,11 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		// own auto memory-fitting (-fit) is redundant with this explicit plan.
 		// Only value-taking dialects need an explicit "off"; boolean backends are
 		// already disabled when the flag is absent.
-		BackendSupportsFit:           backendHelpSupports(opts.BackendHelp, "-fit"),
-		BackendFitTakesValue:         backendFitTakesValue(opts.BackendHelp),
-		BackendSupportsKVOffload:     backendHelpSupports(opts.BackendHelp, "--kv-offload"),
-		BackendCheckpointMinStepFlag: backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
+		BackendSupportsFit:            backendHelpSupports(opts.BackendHelp, "-fit"),
+		BackendFitTakesValue:          backendFitTakesValue(opts.BackendHelp),
+		BackendSupportsKVOffload:      backendHelpSupports(opts.BackendHelp, "--kv-offload"),
+		BackendSupportsNoContextShift: backendHelpSupportsExactFlag(opts.BackendHelp, "--no-context-shift"),
+		BackendCheckpointMinStepFlag:  backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
 	}
 	configureCPUAffinity(s, caps, opts.BackendHelp)
 
@@ -6446,8 +6450,13 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--reasoning", "off")
 	}
 
-	// SSM/Mamba models need --no-context-shift
-	if s.HasSSM {
+	// SSM/Mamba models need --no-context-shift. Every other model gets it too
+	// when the backend takes it: a shift silently drops half of an agent's
+	// conversation, and on ik_llama (shift on by default) Gemma 4 12B with a
+	// q4_0 cache hit "CUDA error: an illegal memory access" right after
+	// "slot context shift" at n_past 43,007 of 43,008 (matrix11). Without it
+	// a full context is an error the client can act on, as on mainline.
+	if s.HasSSM || s.BackendSupportsNoContextShift {
 		args = append(args, "--no-context-shift")
 	}
 
