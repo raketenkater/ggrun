@@ -10029,6 +10029,16 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 	}
 }
 
+// rejectProjectorModel refuses a multimodal projector given as the model. An
+// mmproj GGUF (architecture "clip", no transformer blocks) was planned at a
+// 4,194,304-token context on Vulkan and only failed at the memory probe.
+func rejectProjectorModel(info *gguf.Info, path string) error {
+	if info == nil || !strings.EqualFold(strings.TrimSpace(info.Architecture), "clip") {
+		return nil
+	}
+	return fmt.Errorf("%s is a multimodal projector (mmproj), not a language model; launch the model file (the projector is paired automatically, or pass it with --mmproj)", filepath.Base(path))
+}
+
 // parseModel calls parse_gguf.py to extract real model metadata.
 // For multi-part models, it sums all shard files for total size.
 func parseModel(path string) (*placement.ModelProfile, error) {
@@ -10037,6 +10047,9 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	}
 	info, err := gguf.Parse(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectProjectorModel(info, path); err != nil {
 		return nil, err
 	}
 
