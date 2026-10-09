@@ -115,8 +115,31 @@ func SetInstalledArchSupport(fn func(caps *detect.Capabilities, arch string) (lo
 	installedArchSupport = fn
 }
 
+// SetVulkanOnCUDA installs the probe for rows a default launch would serve on
+// the Vulkan build although the host has an NVIDIA GPU: an architecture only
+// mainline loads, or a large MoE whose file-backed experts win the launch's
+// tie-break. The launch then offers a CUDA build; until it exists the model
+// runs far below the CUDA estimate (MiMo-V2.6-Flash Q2_K on the full rig:
+// 2.9 tok/s, predicted 10.5).
+func SetVulkanOnCUDA(fn func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool) {
+	vulkanOnCUDA = fn
+}
+
+var vulkanOnCUDA func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool
+
 func markBackendBuild(caps *detect.Capabilities, r *Recommendation) {
 	if installedArchSupport == nil || strings.TrimSpace(r.Arch) == "" {
+		return
+	}
+	if vulkanOnCUDA != nil && vulkanOnCUDA(caps, r.Arch, r.MoE, int(r.QuantSizeGB*1024)) {
+		r.NeedsBackendBuild = true
+		r.BackendHint = "Vulkan"
+		note := "a default launch serves " + r.Arch + " on the Vulkan build here; the first launch offers a CUDA build"
+		if r.Reason == "" {
+			r.Reason = note
+		} else {
+			r.Reason += "; " + note
+		}
 		return
 	}
 	if loads, known := installedArchSupport(caps, r.Arch); known && !loads {

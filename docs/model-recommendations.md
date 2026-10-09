@@ -76,7 +76,11 @@ share a quant label are not added together.
 The catalog marks architectures against upstream llama.cpp, which can be ahead
 of the backend you installed. `ggrun recommend` and the TUI probe the installed
 backends; a model none of them loads is marked `+` and listed after the models
-they load. Its first launch offers a 20-40 minute backend build.
+they load. Its first launch offers a 20-40 minute backend build. The same
+applies on an NVIDIA host when a default launch would serve the model on the
+Vulkan build (an architecture only mainline loads, or a large MoE whose
+file-backed experts win the backend choice): it runs, but far below the CUDA
+estimate until the offered CUDA build exists.
 
 Attribution is required when using Artificial Analysis data; the catalog and GUI
 include attribution to `https://artificialanalysis.ai/`.

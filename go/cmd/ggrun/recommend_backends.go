@@ -7,6 +7,7 @@ import (
 
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
@@ -80,4 +81,32 @@ func enableInstalledArchSupport() {
 		cache[arch] = answer{loads, known}
 		return loads, known
 	})
+	var candidates []autoBackendCandidate
+	candidatesLoaded := false
+	recommend.SetVulkanOnCUDA(func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool {
+		if !hostHasNVIDIAGPU(caps) {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if !candidatesLoaded {
+			candidates = autoBackendCandidates(caps, &launchRequest{AppHome: backends.AppHome()})
+			candidatesLoaded = true
+		}
+		return defaultLaunchUsesVulkan(candidates, arch, moe, sizeMB, backends.BackendSupportsArch)
+	})
+}
+
+// defaultLaunchUsesVulkan mirrors selectBackendForModel for a recommendation
+// row: a registered route or sole helper wins first, then chooseAutoBackend
+// ranks the installed backends with the row's size (the large-MoE file-backed
+// tie-break depends on it).
+func defaultLaunchUsesVulkan(candidates []autoBackendCandidate, arch string, moe bool, sizeMB int, probe backendArchProbe) bool {
+	arch = strings.ToLower(strings.TrimSpace(arch))
+	if arch == "" || backends.ForArch(arch) != nil || backends.SoleHelperForArch(arch) != nil {
+		return false
+	}
+	model := &placement.ModelProfile{ModelArch: arch, IsMoE: moe, TotalSizeMB: sizeMB}
+	chosen, _ := chooseAutoBackend(candidates, arch, probe, model)
+	return chosen != nil && strings.EqualFold(chosen.Dialect, "vulkan")
 }
