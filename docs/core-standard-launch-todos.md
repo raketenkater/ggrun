@@ -3198,3 +3198,27 @@ conversation; with it off a full context is an error the client acts on
 slot ctx, 75%). Invariant test: context_shift_test.go. Core gate passed
 (core-gate-context-shift.log). The acceptance harness now sets the same
 autocompact window from /props. Live rerun: matrix13.
+
+## RECOMMENDER vs LAUNCH BACKEND — large MoE served on Vulkan — 2026-10-09
+
+Evidence: matrix9/15 (2226452, full host). Best overall MiMo-V2.6-Flash Q2_K
+(117.5 GiB, arch mimo2) was listed as "CUDA / ik_llama" at ~10.5 tok/s. The
+launch chose the bundled Vulkan build: both it and ik carry the mimo2 literal
+(support class 2 each, no reviewed recipe), and the large-MoE file-backed
+tie-break (largeCPUMoEPrefersFileBacked, >= 48 GiB) prefers mainline's
+file-backed experts. Vulkan has no --dry-run, so a non-interactive launch also
+needs --allow-live-memory-probe (interactive: one remembered consent). Served:
+calc 1,444 s and textstats 1,160 s correct, decode 2.9 tok/s.
+
+Fix (d8ae4b9, recommender only): the recommendation asks the launch's own
+chooseAutoBackend (after registered routes / sole helpers) with the row's
+arch, MoE flag and quant size; a Vulkan choice on an NVIDIA host marks the row
+`+` ("a default launch serves <arch> on the Vulkan build here; the first launch
+offers a CUDA build") and lists it after rows that run now. Full host, fresh
+install: Best overall becomes Qwen3.8-27B UD-Q5_K_S (passed, matrix10);
+Smartest DeepSeek V4 Pro 0813 Q1_0 (206.9 GB; GLM-5.3 UD-IQ2_M glm-dsa is also
+Vulkan-served now). 4070/3090 Ti/CPU top picks unchanged.
+
+Open: whether the file-backed tie-break should hand a large MoE to Vulkan on
+an NVIDIA host by default (memory safety vs ~3x speed) is a core policy
+question; the CUDA mainline build offer is the existing remedy.
