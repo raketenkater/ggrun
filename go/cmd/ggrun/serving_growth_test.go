@@ -54,8 +54,15 @@ func TestServingGrowthRecorderStopFlushesAndIsSafe(t *testing.T) {
 	if len(recorded) != 1 || recorded[0][0] != 500 {
 		t.Fatalf("stop must take a last sample and flush: %v", recorded)
 	}
+	// Crash handling reads the measured peak after stop as memory evidence.
+	if peak := r.peakGrowth(); peak[0] != 500 {
+		t.Fatalf("peak growth after stop = %v, want 500 MiB on CUDA0", peak)
+	}
 	var none *servingGrowthRecorder
 	none.stop()
+	if none.peakGrowth() != nil {
+		t.Fatal("a recorder that never ran has no measured growth")
+	}
 }
 
 func TestProcessTreeIncludesTheRoot(t *testing.T) {

@@ -181,6 +181,21 @@ func (r *servingGrowthRecorder) flush() {
 	fmt.Fprintf(os.Stderr, "[serve] recorded measured runtime growth %s; the next launch plans with it\n", strings.Join(parts, ", "))
 }
 
+// peakGrowth returns the peak growth measured on each runtime device. Safe on
+// nil.
+func (r *servingGrowthRecorder) peakGrowth() map[int]int {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[int]int, len(r.peak))
+	for idx, mb := range r.peak {
+		out[idx] = mb
+	}
+	return out
+}
+
 // stop takes a last sample and flushes. Safe on nil and on repeat calls.
 func (r *servingGrowthRecorder) stop() {
 	if r == nil {

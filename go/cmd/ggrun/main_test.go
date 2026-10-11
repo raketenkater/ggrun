@@ -1009,11 +1009,11 @@ func TestRuntimeLogCUDAOOMRecognizesVMMFormat(t *testing.T) {
 		"  cuMemCreate(&handle, reserve_size, &prop, 0)",
 	}, "\n")
 	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24564}}}
-	device, reserveMB, estimated, ok := runtimeLogCUDAOOM(log, caps, nil, nil)
+	device, reserveMB, estimated, _, ok := runtimeLogCUDAOOM(log, caps, nil, nil, nil)
 	if !ok || !estimated || device != 0 || reserveMB != 2457 {
 		t.Fatalf("VMM OOM = device %d reserve %d estimated=%v ok=%v", device, reserveMB, estimated, ok)
 	}
-	_, repeatedReserve, _, ok := runtimeLogCUDAOOM(log, caps, nil, map[int]int{0: reserveMB})
+	_, repeatedReserve, _, _, ok := runtimeLogCUDAOOM(log, caps, nil, map[int]int{0: reserveMB}, nil)
 	if !ok || repeatedReserve != 4914 {
 		t.Fatalf("repeated VMM OOM reserve = %d ok=%v, want 4914", repeatedReserve, ok)
 	}
@@ -1024,7 +1024,7 @@ func TestRuntimeLogCUDAOOMPrefersExactAllocation(t *testing.T) {
 	// exact allocation size, not about when the failure happened.
 	log := "srv  llama_server: model loaded\n" +
 		"allocating 1679.00 MiB on device 2: cudaMalloc failed: out of memory"
-	device, reserveMB, estimated, ok := runtimeLogCUDAOOM(log, nil, nil, nil)
+	device, reserveMB, estimated, _, ok := runtimeLogCUDAOOM(log, nil, nil, nil, nil)
 	if !ok || estimated || device != 2 || reserveMB != 1679 {
 		t.Fatalf("exact OOM = device %d reserve %d estimated=%v ok=%v", device, reserveMB, estimated, ok)
 	}
@@ -3908,7 +3908,7 @@ func TestRuntimeLogCUDAOOMIgnoresFailuresBeforeModelLoaded(t *testing.T) {
 		"CUDA error: out of memory",
 		"  current device: 0, in function alloc at ggml-cuda.cu:529",
 	}, "\n")
-	if _, reserve, _, ok := runtimeLogCUDAOOM(loadTime, nil, model, map[int]int{}); ok {
+	if _, reserve, _, _, ok := runtimeLogCUDAOOM(loadTime, nil, model, map[int]int{}, nil); ok {
 		t.Fatalf("a load-time OOM was recorded as runtime growth (%d MiB)", reserve)
 	}
 
@@ -3921,7 +3921,7 @@ func TestRuntimeLogCUDAOOMIgnoresFailuresBeforeModelLoaded(t *testing.T) {
 		"CUDA error: out of memory",
 		"  current device: 0, in function alloc at ggml-cuda.cu:529",
 	}, "\n")
-	if _, _, _, ok := runtimeLogCUDAOOM(runtime, nil, model, map[int]int{}); !ok {
+	if _, _, _, _, ok := runtimeLogCUDAOOM(runtime, nil, model, map[int]int{}, nil); !ok {
 		t.Fatal("a post-load OOM was not recognised as runtime growth")
 	}
 }
