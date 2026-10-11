@@ -53,6 +53,7 @@ func TestBackendFeatureCompatibilitySetsByteWeightedSplitFact(t *testing.T) {
 		{"ik with --fit", &backendInfo{Tag: "ik_llama", IsIK: true, Help: "       --fit   automatically determine"}, true},
 		{"ik without --fit", &backendInfo{Tag: "ik_llama", IsIK: true, Help: "--split-mode-graph"}, false},
 		{"ik without help", &backendInfo{Tag: "ik_llama", IsIK: true}, false},
+		{"ik with best-fit only", &backendInfo{Tag: "ik_llama", IsIK: true, Help: "--sched best-fit"}, false},
 		{"mainline with --fit", &backendInfo{Tag: "llama", Help: "-fit, --fit [on|off]"}, false},
 	} {
 		model := &placement.ModelProfile{ModelArch: "qwen35", ByteWeightedLayerSplit: !tc.want}

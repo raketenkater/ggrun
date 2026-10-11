@@ -6095,10 +6095,12 @@ func backendHasNoWindowedKV(be *backendInfo, model *placement.ModelProfile) bool
 
 // backendSplitsLayersByBytes: ik_llama.cpp since #1466 (0871ab29) assigns
 // blocks to devices by cumulative bytes and reads --tensor-split as a byte
-// fraction. -fit (86f4f516, five days later) dates the help surface; a build
-// that does not advertise it keeps the slot rule.
+// fraction. --fit (86f4f516, five days later) dates the help surface; a build
+// that does not advertise it keeps the slot rule. The mirror in
+// placement/iklayersplit.go is checked against the shipped 1fddd12 only; an
+// ik build between 86f4f516 and 1fddd12 may size blocks differently.
 func backendSplitsLayersByBytes(be *backendInfo) bool {
-	return be != nil && be.IsIK && strings.Contains(be.Help, "-fit")
+	return be != nil && be.IsIK && helpHasExactFlag(be.Help, "--fit")
 }
 
 func applyBackendFeatureCompatibility(req *launchRequest, model *placement.ModelProfile, be *backendInfo) {

@@ -2617,14 +2617,24 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	// A byte-weighted backend reads the split as a fraction of its own byte sum
 	// and rounds each boundary to a block edge (iklayersplit.go). Emit the
 	// fractions whose backend boundaries hold the intended bytes, and refuse a
-	// plan that would overfill a card the aggregate check passed.
+	// plan whose weights and KV alone overfill a card beyond its measured
+	// reserves; a cold compute estimate does not refuse.
 	if model.ByteWeightedLayerSplit {
 		gpuKVMB := kvTotalMB
 		if s.KVPlacement == "cpu" {
 			gpuKVMB = 0
 		}
+		measuredComputeForGPU := func(idx int) int {
+			if pc == nil {
+				return 0
+			}
+			if measuredPerGPU := pc.ComputeBufByGPU[idx]; measuredPerGPU > 0 {
+				return measuredPerGPU
+			}
+			return max(0, pc.ComputeBufMB)
+		}
 		split, ok, err := ikDenseSplit(model, kvShapeForStrategy(s, opts.SWAFull), gpuKVMB, s.TensorSplit,
-			ikDenseDevices(s, caps, cudaOverheadMB, computeBufForGPU))
+			ikDenseDevices(s, caps, cudaOverheadMB, computeBufForGPU, measuredComputeForGPU))
 		if ok {
 			if err != nil {
 				return nil, err

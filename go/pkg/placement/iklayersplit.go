@@ -387,7 +387,11 @@ func ikDeviceKVMB(model *ModelProfile, shape kvCacheShape, totalMB int, devices 
 // ikDenseDevice is one device of a fully resident layer split.
 type ikDenseDevice struct {
 	FreeMB     int
-	CapacityMB int // free less CUDA context, compute buffer and projector
+	CapacityMB int // free less CUDA context, compute buffer and projector, at least 0
+	// FirmMB is CapacityMB reserving only a measured compute buffer. A split
+	// that overfills CapacityMB but not FirmMB is emitted: the cold compute
+	// estimate only ranks, and exact preflight decides.
+	FirmMB int
 }
 
 // ikDenseDeviceMB is the weights plus KV each device holds under a split.
@@ -416,8 +420,10 @@ func ikDenseDeviceMB(model *ModelProfile, shape kvCacheShape, kvTotalMB int, spl
 // boundary so a small sizing error cannot move it. The last used device takes
 // the rest. When that overfills a later device, the walk is repeated filling
 // every earlier device as far as its capacity allows, then over every card
-// with room. ok is false when the backend's sizes are unavailable; err reports
-// a device the result still overfills.
+// with room. When no split fits, the same steps run against the firm
+// capacity, which reserves only measured compute buffers. ok is false when the
+// backend's sizes are unavailable; err reports a device whose weights and KV
+// still exceed its firm capacity. A device that holds nothing is never over.
 func ikDenseSplit(model *ModelProfile, shape kvCacheShape, kvTotalMB int, intent []float64, devices []ikDenseDevice) ([]float64, bool, error) {
 	if _, _, ok := ikLayerSizes(model, shape); !ok || len(intent) < 2 || len(devices) != len(intent) {
 		return intent, false, nil
@@ -446,7 +452,13 @@ func ikDenseSplit(model *ModelProfile, shape kvCacheShape, kvTotalMB int, intent
 		realTotal += mb
 	}
 
-	choose := func(active []int, fill bool) []float64 {
+	capacity := func(dev int, firm bool) int {
+		if firm {
+			return devices[dev].FirmMB
+		}
+		return devices[dev].CapacityMB
+	}
+	choose := func(active []int, fill, firm bool) []float64 {
 		split := make([]float64, len(intent))
 		prev := 0 // cumulative grid points (hundredths) assigned so far
 		cumIntent := 0.0
@@ -465,7 +477,7 @@ func ikDenseSplit(model *ModelProfile, shape kvCacheShape, kvTotalMB int, intent
 			bestUsed := -1
 			for points := prev; points <= 100; points++ {
 				mb := allMB(candidate(points))
-				if mb[dev] > devices[dev].CapacityMB {
+				if mb[dev] > capacity(dev, firm) {
 					break
 				}
 				used := 0
@@ -500,33 +512,42 @@ func ikDenseSplit(model *ModelProfile, shape kvCacheShape, kvTotalMB int, intent
 		}
 		return split
 	}
-	over := func(split []float64) (int, int, int) {
+	over := func(split []float64, firm bool) (int, int, int) {
 		mb := allMB(split)
-		for i, d := range devices {
-			if mb[i] > d.CapacityMB {
-				return i, mb[i], d.CapacityMB
+		for i := range devices {
+			if c := capacity(i, firm); mb[i] > 0 && mb[i] > c {
+				return i, mb[i], c
 			}
 		}
 		return -1, 0, 0
 	}
-	split := choose(active, false)
-	if dev, _, _ := over(split); dev >= 0 {
-		split = choose(active, true)
-	}
-	if dev, _, _ := over(split); dev >= 0 {
-		// Block edges can leave a card the intent did not need short of the
-		// last block; fill every card that has room, in device order.
-		var all []int
-		for i, d := range devices {
-			if d.CapacityMB > 0 {
-				all = append(all, i)
+	fit := func(firm bool) []float64 {
+		split := choose(active, false, firm)
+		if dev, _, _ := over(split, firm); dev >= 0 {
+			split = choose(active, true, firm)
+		}
+		if dev, _, _ := over(split, firm); dev >= 0 {
+			// Block edges can leave a card the intent did not need short of the
+			// last block; fill every card that has room, in device order.
+			var all []int
+			for i := range devices {
+				if capacity(i, firm) > 0 {
+					all = append(all, i)
+				}
+			}
+			if len(all) > len(active) {
+				split = choose(all, true, firm)
 			}
 		}
-		if len(all) > len(active) {
-			split = choose(all, true)
-		}
+		return split
 	}
-	if dev, mb, capacity := over(split); dev >= 0 {
+	split := fit(false)
+	if dev, _, _ := over(split, false); dev >= 0 {
+		// The cold compute estimate only ranks: when no split leaves it free,
+		// fit the bytes against the measured reserves alone.
+		split = fit(true)
+	}
+	if dev, mb, capacity := over(split, true); dev >= 0 {
 		return split, true, fmt.Errorf("byte-weighted layer split leaves GPU ordinal %d %d MiB over its %d MiB capacity (%d MiB of weights and KV)",
 			dev, mb-capacity, capacity, mb)
 	}
@@ -535,19 +556,23 @@ func ikDenseSplit(model *ModelProfile, shape kvCacheShape, kvTotalMB int, intent
 
 // ikDenseDevices prices the capacity of every card for ikDenseSplit the way
 // the dense split functions do: free VRAM less the CUDA context, the device's
-// compute buffer, and the projector on the first card of the fill order.
-func ikDenseDevices(s *Strategy, caps *detect.Capabilities, cudaOverheadMB int, computeBufForGPU func(int) int) []ikDenseDevice {
+// compute buffer, and the projector on the first card of the fill order,
+// clamped at 0 as denseFillFastestFirstSplit clamps it. measuredComputeForGPU
+// is the compute buffer a probe measured for the card, 0 when none did.
+func ikDenseDevices(s *Strategy, caps *detect.Capabilities, cudaOverheadMB int, computeBufForGPU, measuredComputeForGPU func(int) int) []ikDenseDevice {
 	order := orderGPUsByBandwidth(caps.GPUs)
 	if denseMemBandwidthKnown(caps.GPUs) {
 		order = orderGPUsByMemoryBandwidth(caps.GPUs)
 	}
 	out := make([]ikDenseDevice, len(caps.GPUs))
 	for i, g := range caps.GPUs {
-		out[i].FreeMB = g.VRAMFreeMB()
-		out[i].CapacityMB = g.VRAMFreeMB() - cudaOverheadMB - computeBufForGPU(g.Index)
+		base := g.VRAMFreeMB() - cudaOverheadMB
 		if len(order) > 0 && i == order[0] && s.MMProjSizeMB > 0 {
-			out[i].CapacityMB -= s.MMProjSizeMB
+			base -= s.MMProjSizeMB
 		}
+		out[i].FreeMB = g.VRAMFreeMB()
+		out[i].CapacityMB = max(0, base-computeBufForGPU(g.Index))
+		out[i].FirmMB = max(0, base-measuredComputeForGPU(g.Index))
 	}
 	return out
 }

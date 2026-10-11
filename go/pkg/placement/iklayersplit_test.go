@@ -3,7 +3,6 @@ package placement
 import (
 	"math"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -262,28 +261,23 @@ func ikPlanOverfill(t *testing.T, caps *detect.Capabilities, model *ModelProfile
 }
 
 // The converging-preflight failure: every derate re-split the cards and the
-// backend's byte walk moved the deficit to another device. Each context of
-// the logged derate sequence must now either plan a split whose backend
-// assignment fits every card, or be refused; and the slot-rule plan the
-// launch used must show the overfill the backend reported.
+// backend's byte walk moved the deficit to another device. Every context of
+// the logged derate sequence fits the box's weights and KV, so each must plan
+// a split whose backend assignment fits every card; and the slot-rule plan
+// the launch used must show the overfill the backend reported. The recovery
+// loop itself is driven in cmd/ggrun (TestIKKVDerateKeepsEveryDeviceWithinCapacity).
 func TestIKDenseSplitKeepsEveryDeviceWithinCapacityAcrossDerates(t *testing.T) {
 	caps := claudeCodeBox()
-	planned := 0
 	countOverfilled := 0
 	for _, ctx := range []int{661504, 593920, 518144, 483328, 476160, 262144, 131072} {
 		opts := claudeCodeOptions(t, ctx)
 		model := qwen38Q5KSProfile()
 		s, err := Compute(caps, model, opts)
 		if err != nil {
-			if !strings.Contains(err.Error(), "byte-weighted layer split") && !strings.Contains(err.Error(), "does not fit") {
-				t.Fatalf("ctx=%d: unexpected refusal: %v", ctx, err)
-			}
-			t.Logf("ctx=%d refused: %v", ctx, err)
-		} else {
-			planned++
-			if over, dev := ikPlanOverfill(t, caps, model, s, opts); over > 0 {
-				t.Errorf("ctx=%d split %v: backend assignment overfills CUDA%d by %d MiB", ctx, s.TensorSplit, dev, over)
-			}
+			t.Fatalf("ctx=%d: refused: %v", ctx, err)
+		}
+		if over, dev := ikPlanOverfill(t, caps, model, s, opts); over > 0 {
+			t.Errorf("ctx=%d split %v: backend assignment overfills CUDA%d by %d MiB", ctx, s.TensorSplit, dev, over)
 		}
 		mainline := qwen38Q5KSProfile()
 		mainline.ByteWeightedLayerSplit = false
@@ -293,9 +287,6 @@ func TestIKDenseSplitKeepsEveryDeviceWithinCapacityAcrossDerates(t *testing.T) {
 				t.Logf("ctx=%d slot-rule split %v overfills CUDA%d by %d MiB under the byte walk", ctx, old.TensorSplit, dev, over)
 			}
 		}
-	}
-	if planned == 0 {
-		t.Fatal("no context of the derate sequence planned")
 	}
 	if countOverfilled == 0 {
 		t.Fatal("the slot-rule plans never overfill under the byte walk; the test no longer reproduces the failure")
@@ -414,6 +405,240 @@ func TestByteWeightedSplitLeavesOtherPlansUnchanged(t *testing.T) {
 		if s.ContextSize != tc.ctx || !reflect.DeepEqual(s.TensorSplit, tc.split) || s.NCPUMoE != tc.ncpumoe || s.OTString != tc.ot {
 			t.Errorf("%s: mainline plan changed: ctx %d split %v n-cpu-moe %d ot %q\nwant ctx %d split %v n-cpu-moe %d ot %q",
 				tc.name, s.ContextSize, s.TensorSplit, s.NCPUMoE, s.OTString, tc.ctx, tc.split, tc.ncpumoe, tc.ot)
+		}
+	}
+}
+
+// A card the plan does not need may hold less free VRAM than its CUDA context
+// and compute reserve (a reviewer, a desktop, an OOM penalty). Its capacity is
+// clamped at 0 and a device holding nothing is never over, so the ik plan uses
+// the same cards and context as mainline.
+func TestIKDenseSplitIgnoresAFullUnusedCard(t *testing.T) {
+	for _, used := range []int{11700, 12200} {
+		for name, opts := range map[string]Options{
+			"explicit": {ContextSize: 262144, Parallel: 1, KVPlacement: "gpu", KVQuality: "q8_0", CacheDir: t.TempDir()},
+			"auto":     {Parallel: 1, KVPlacement: "gpu", KVQuality: "q8_0", CacheDir: t.TempDir()},
+		} {
+			caps := claudeCodeBox()
+			caps.GPUs[2].VRAMUsedMB = used
+			mainline := qwen38Q5KSProfile()
+			mainline.ByteWeightedLayerSplit = false
+			want, err := Compute(caps, mainline, opts)
+			if err != nil {
+				t.Fatalf("used=%d %s: mainline: %v", used, name, err)
+			}
+			got, err := Compute(caps, qwen38Q5KSProfile(), opts)
+			if err != nil {
+				t.Fatalf("used=%d %s: ik refused the plan mainline makes (%v split %v): %v", used, name, want.Type, want.TensorSplit, err)
+			}
+			cards := func(s *Strategy) int {
+				n := 0
+				for _, v := range s.TensorSplit {
+					if v > 0 {
+						n++
+					}
+				}
+				return n
+			}
+			if got.Type != want.Type || got.ContextSize != want.ContextSize || cards(got) != cards(want) {
+				t.Errorf("used=%d %s: ik %v ctx %d split %v, mainline %v ctx %d split %v",
+					used, name, got.Type, got.ContextSize, got.TensorSplit, want.Type, want.ContextSize, want.TensorSplit)
+			}
+			if got.Type == MultiGPUDense && got.TensorSplit[2] != 0 {
+				t.Errorf("used=%d %s: split %v gives the full card a share", used, name, got.TensorSplit)
+			}
+		}
+	}
+}
+
+// Block edges can leave a card short of the cold 1024 MiB compute floor. That
+// estimate only ranks: the best split is emitted for exact preflight. Weights
+// and KV alone over a card's capacity less measured reserves still refuse.
+func TestIKDenseSplitRefusesOnlyOnFirmCapacity(t *testing.T) {
+	model := qwen38Q5KSProfile()
+	shape := kvCacheShape{Context: 622592, UBatch: 128, Slots: 4, KVType: "q8_0"}
+	kvTotal := computeKVTotalMB(model, shape.Context, shape.KVType, false)
+	intent := []float64{0.27, 0.58, 0.15}
+	modelMB, kvMB := ikDenseDeviceMB(model, shape, kvTotal, intent)
+	need := 0
+	for i := range modelMB {
+		need += modelMB[i] + kvMB[i]
+	}
+	// Total capacity one MiB short of the bytes: no split fits every card.
+	devices := make([]ikDenseDevice, 3)
+	left := need - 1
+	for i := range devices {
+		c := (modelMB[i] + kvMB[i]) * (need - 1) / need
+		if i == len(devices)-1 {
+			c = left
+		}
+		left -= c
+		devices[i] = ikDenseDevice{FreeMB: c, CapacityMB: c, FirmMB: c}
+	}
+	if _, ok, err := ikDenseSplit(model, shape, kvTotal, intent, devices); !ok || err == nil {
+		t.Fatalf("firm overfill not refused: ok=%v err=%v", ok, err)
+	}
+	// The same shortfall against a cold compute reserve emits a split: with
+	// room for the largest block beside each card's share, block edges cannot
+	// overfill the firm capacity.
+	sizes, _, _ := ikLayerSizes(model, shape)
+	largest := 0.0
+	for _, size := range sizes {
+		largest = max(largest, size)
+	}
+	for i := range devices {
+		devices[i].FirmMB += int(largest/mib) + 1
+	}
+	split, ok, err := ikDenseSplit(model, shape, kvTotal, intent, devices)
+	if !ok || err != nil {
+		t.Fatalf("cold-reserve overfill refused: ok=%v err=%v", ok, err)
+	}
+	modelMB, kvMB = ikDenseDeviceMB(model, shape, kvTotal, split)
+	for i, d := range devices {
+		if mb := modelMB[i] + kvMB[i]; mb > d.FirmMB {
+			t.Errorf("split %v: CUDA%d holds %d MiB over its firm %d", split, i, mb, d.FirmMB)
+		}
+	}
+
+	// Explicit contexts planned with cold buffers on the --claude-code box,
+	// which mainline plans (622,592 is the failing launch's split), are not
+	// refused, and their weights and KV fit every card's free VRAM.
+	caps := claudeCodeBox()
+	for _, ctx := range []int{604160, 610304, 622592} {
+		opts := claudeCodeOptions(t, ctx)
+		opts.RequireMeasuredBuffers = false
+		s, err := Compute(caps, qwen38Q5KSProfile(), opts)
+		if err != nil {
+			t.Fatalf("ctx=%d: cold ik plan refused: %v", ctx, err)
+		}
+		firm := opts
+		firm.RequireMeasuredBuffers = true
+		if over, dev := ikPlanOverfill(t, caps, qwen38Q5KSProfile(), s, firm); over > 0 {
+			t.Errorf("ctx=%d split %v: CUDA%d weights and KV over free VRAM by %d MiB", ctx, s.TensorSplit, dev, over)
+		}
+	}
+}
+
+// MiniMax-M3-UD-IQ3_XXS (5 shards), header fields as ggrun's gguf parser
+// reports them: three dense blocks, then MoE blocks of 2,585,788,416 routed
+// expert bytes, 2,831,155,200 in blocks 52 and 58 and 3,359,637,504 in 59.
+func minimaxM3Profile() *ModelProfile {
+	m := &ModelProfile{
+		Path: "MiniMax-M3-UD-IQ3_XXS-00001-of-00005.gguf", ModelArch: "minimax-m3",
+		SizeBytes: 159407162624, TotalSizeMB: 152023, CTXTrain: 1048576, ContextSize: 1048576,
+		NumLayers: 60, IsMoE: true, NumExperts: 128, ExpertUsedCount: 4, LeadingDense: 3,
+		HeadCount: 64, HeadCountKV: 4, KeyLength: 128, ValueLength: 128, RopeDim: 64,
+		EmbeddingLength: 6144, HiddenSize: 6144, FeedForwardLength: 12288, ExpertFF: 3072,
+		ExpertSharedCount: 1, HasShexp: 1, VocabSize: 200064,
+		ExpertBytes: 151315808256, NonExpertBytes: 8083051008, TokenEmbdBytes: 1008322560, OutputBytes: 1008322560,
+		ShexpBytes: 2661285888, ExpertAuxBytes: 179306496,
+		ByteWeightedLayerSplit: true,
+	}
+	for il := 0; il < m.NumLayers; il++ {
+		nonExpert, routed, shexp, aux := int64(87787008), int64(2585788416), int64(46448640), int64(3145728)
+		switch il {
+		case 0:
+			nonExpert, routed, shexp, aux = 273581056, 0, 0, 0
+		case 1, 2:
+			nonExpert, routed, shexp, aux = 291865600, 0, 0, 0
+		case 52, 58:
+			routed = 2831155200
+		case 59:
+			nonExpert, routed, shexp = 113690112, 3359637504, 60162048
+		}
+		m.NonExpertLayerBytes = append(m.NonExpertLayerBytes, nonExpert)
+		m.RoutedExpertLayerBytes = append(m.RoutedExpertLayerBytes, routed)
+		m.ShexpLayerBytes = append(m.ShexpLayerBytes, shexp)
+		m.ExpertAuxLayerBytes = append(m.ExpertAuxLayerBytes, aux)
+		m.ExpertLayerBytes = append(m.ExpertLayerBytes, routed+shexp)
+	}
+	return m
+}
+
+// ik_llama-server 1fddd12 under ggrun (matrix2/A1-minimax-learn-1 ggrun log):
+// --ctx-size 436224 -b 2048 -ub 512 q8_0 --parallel 1 --tensor-split
+// 0.27,0.59,0.14, routed experts on the CPU except blocks 3-4 (experts, shared
+// experts and router pinned to CUDA2). The backend walk counts the CPU experts
+// and gives 18/35/7 blocks; the slot rule gives 17/36/7.
+func TestIKMiniMaxM3BuffersMatchTheBackendLog(t *testing.T) {
+	model := minimaxM3Profile()
+	var experts, shexp, aux int64
+	for il := range model.ExpertLayerBytes {
+		experts += model.ExpertLayerBytes[il]
+		shexp += model.ShexpLayerBytes[il]
+		aux += model.ExpertAuxLayerBytes[il]
+	}
+	if experts != model.ExpertBytes || shexp != model.ShexpBytes || aux != model.ExpertAuxBytes {
+		t.Fatalf("per-block bytes %d/%d/%d do not sum to the header's %d/%d/%d", experts, shexp, aux,
+			model.ExpertBytes, model.ShexpBytes, model.ExpertAuxBytes)
+	}
+	split := []float64{0.27, 0.59, 0.14}
+	shape := kvCacheShape{Context: 436224, UBatch: 512, Slots: 1, KVType: "q8_0"}
+	owned, output := backendLayerOwnership(model, shape, split)
+	if !reflect.DeepEqual(owned, []int{18, 35, 7}) || output != 2 {
+		t.Fatalf("owned %v output %d, backend 18/35/7 output 2", owned, output)
+	}
+	// "CUDAn KV buffer size": 8147.26 / 15841.89 / 3168.38 MiB.
+	total := computeKVTotalMB(model, shape.Context, shape.KVType, false)
+	for i, want := range []float64{8147.26, 15841.89, 3168.38} {
+		if got := kvLayerShareMB(model, shape, total, split, owned, i); float64(got) < want || float64(got) > want+2 {
+			t.Errorf("CUDA%d KV %d MiB, backend %.2f", i, got, want)
+		}
+	}
+	// "CUDAn buffer size": 2688.26 / 4585.60 / 6943.13 MiB. The -ot pin moves
+	// blocks 3-4's experts, shared experts and router from their owner to CUDA2.
+	devices, outputDev := backendLayerDeviceAssignments(model, shape, split)
+	weights := ikDeviceWeightBytes(model, shape, devices, outputDev, 3, false)
+	for _, il := range []int{3, 4} {
+		weights[devices[il]] -= model.ShexpLayerBytes[il] + model.ExpertAuxLayerBytes[il]
+		weights[2] += model.ExpertLayerBytes[il] + model.ExpertAuxLayerBytes[il]
+	}
+	for i, want := range []float64{2688.26, 4585.60, 6943.13} {
+		if got := float64(weights[i]) / mib; math.Abs(got-want) > 0.02 {
+			t.Errorf("CUDA%d weights %.2f MiB, backend %.2f", i, got, want)
+		}
+	}
+	model.ByteWeightedLayerSplit = false
+	if owned, _ := backendLayerOwnership(model, shape, split); reflect.DeepEqual(owned, []int{18, 35, 7}) {
+		t.Fatal("the slot rule also gives 18/35/7; the test no longer separates the rules")
+	}
+}
+
+// The optimizer's resource ledger prices each device of an ik dense plan
+// with the walk the planner refused overfills with: weights and KV together
+// equal ikDenseDeviceMB, and a calibration split candidate that would overfill
+// a card under the walk is not offered.
+func TestIKResourceLedgerFollowsTheWalk(t *testing.T) {
+	caps := claudeCodeBox()
+	opts := claudeCodeOptions(t, 0)
+	model := qwen38Q5KSProfile()
+	s, err := Compute(caps, model, opts)
+	if err != nil || s.Type != MultiGPUDense {
+		t.Fatalf("auto plan: %v %v", s, err)
+	}
+	ledger := BuildResourceLedger(caps, model, s, opts)
+	modelMB, kvMB := ikDenseDeviceMB(model, kvShapeForStrategy(s, false), computeKVTotalMBForStrategy(model, s), s.TensorSplit)
+	for i, d := range ledger.Devices {
+		if d.ModelMB+d.ContextMB != modelMB[i]+kvMB[i] {
+			t.Errorf("CUDA%d ledger %d+%d MiB, walk %d+%d", i, d.ModelMB, d.ContextMB, modelMB[i], kvMB[i])
+		}
+	}
+	for _, c := range CalibrationCandidates(caps, model, s, opts) {
+		cs := c.Strategy
+		if cs.Type != MultiGPUDense || len(cs.TensorSplit) != len(caps.GPUs) {
+			continue
+		}
+		if over, dev := ikPlanOverfill(t, caps, model, cs, opts); over > 0 {
+			t.Errorf("candidate %s split %v overfills CUDA%d by %d MiB under the walk", c.Name, cs.TensorSplit, dev, over)
+		}
+	}
+	// Mainline keeps the split-fraction weights.
+	mainline := qwen38Q5KSProfile()
+	mainline.ByteWeightedLayerSplit = false
+	shares := estimatedModelShares(mainline, s, caps.GPUs, mainline.TotalSizeMB)
+	for i, v := range s.TensorSplit {
+		if want := int(math.Ceil(float64(mainline.TotalSizeMB) * v)); shares[i] != want {
+			t.Errorf("mainline CUDA%d weights %d MiB, want the split fraction's %d", i, shares[i], want)
 		}
 	}
 }
