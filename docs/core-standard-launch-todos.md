@@ -3270,3 +3270,50 @@ Unproven: the ~55 s same-style wait on the default 127.0.0.1 host was not
 reproduced live (no servers on 127.0.0.1 here); the TUI "Run latest
 configuration" path, GPU launches and ik -> mainline were not run live (unit
 tests only); one run per cell. Windows and macOS were only compiled here.
+
+## EVIDENCE IDENTITY — the wrapper's hash recorded as the launcher — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P2), read-only check of the recorded
+cells. All 22 verify-installed-serving result.json cells run through
+`accept-20261007/app/ggrun` recorded `identity.launcher.file` = that 148-byte
+shell wrapper (sha256 193471b1...) for builds 85-g475661f through
+118-g7907674; with -buildvcs=false `revision` is empty, so only the version
+string told the builds apart. The live harness (accept-20261007/harness,
+outside the repo) records `ggrun_sha256` of the same wrapper in all 74
+runs.jsonl cells (72 x app/ggrun, 2 x app-p1/ggrun 38d7bbb2...).
+matrix/A1-minimax-serving hashed only shard 1 of 5 of MiniMax-M3 (8,243,104
+bytes); 13 runs.jsonl cells on split models (MiniMax 5, MiMo 2, GLM-5.3 7
+shards) carry no shard hash. The two pair-*-main cells hashed a direct binary
+(harness/ggrun-main-a505173) but have no build metadata. The backend regex
+did not match the PowerShell `& ` launch line, so Windows results had no
+backend identity.
+
+Change: ac263de adds `executable_resolved` (os.Executable + EvalSymlinks) to
+`ggrun version --json`; existing keys unchanged. 0d79845:
+verify-installed-serving records `identity.launcher.entry` (path, own hash,
+kind wrapper|executable), `.executable` (the file that answered version
+--json through that entry, run as the launch runs it: cmd.exe for .cmd/.bat;
+path, bytes, sha256) and `.build`; `identity.model.shards` lists every
+-0000k-of-0000N shard (path, bytes, sha256 with --hash-model); the bounded
+`--fingerprint-model MIB` records size plus sha256 of the first and last MIB
+per shard under `fingerprint`, never under `sha256`; top-level `sha256` is
+null for split models; --mmproj / --model-draft files in the launched argv go
+under `companions`. compare-gpu-acceptance matches every shard.
+core-hardware-window hashes the reported executable (candidate.sha256) and
+keeps candidate.entry.sha256. The Linux candidate install job asserts the
+wrapper ran ~/ggrun/.bin/ggrun.
+
+Invariant tests: tests/test_gpu_e2e.py EvidenceIdentityTests (two builds
+behind one wrapper: same entry hash, different executable hash; result.json
+keeps no wrapper-only `file`; .cmd wrapper; every shard; fingerprint never a
+sha256), version_cmd_test.go. Local check without a GPU: two -buildvcs=false
+builds behind an installer-style wrapper; the 1a0ecb6 script recorded the
+same file hash for both, the new record gives executables cb342871... and
+bb60f470... (logs/evidence-identity/wrapper-smoke.log on the 2 TB disk).
+Core gate passed (0d79845, uncached).
+
+Unproven: no live rerun (NVML down on this boot). The cmd.exe path is unit
+tested with a mocked run only; the Windows E2E has not exercised it. The
+live harness still hashes the wrapper. Every candidate cell above, including
+the matrix3..15 recommender cells in GO-NO-GO.md, needs a rerun on the final
+candidate before it identifies the bytes tested.
