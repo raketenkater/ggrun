@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/recommend"
+)
 
 func TestArchLoadedByNeedsEveryBackendProbedToClaimABuild(t *testing.T) {
 	probe := func(answers map[string][2]bool) backendArchProbe {
@@ -32,10 +36,11 @@ func TestBackendBuildRouteFollowsTheLaunchOffers(t *testing.T) {
 	cases := []struct {
 		name                    string
 		arch                    string
-		upstream, pinned, tools bool
+		mainline, pinned, tools bool
 		want                    bool
 	}{
-		{"upstream arch builds current mainline", "k2-horizon", true, false, true, true},
+		{"mainline arch builds current mainline", "k2-horizon", true, false, true, true},
+		{"ik-only arch has no mainline build", "deepseek41", false, false, true, false},
 		{"reviewed recipe", "hy_v3", false, false, true, true},
 		{"reviewed helper recipe pins a commit", "nanbeige", false, false, true, true},
 		{"fork-only arch without a recipe", "inkling", false, false, true, false},
@@ -44,7 +49,7 @@ func TestBackendBuildRouteFollowsTheLaunchOffers(t *testing.T) {
 		{"no build tools", "hy_v3", true, false, false, false},
 	}
 	for _, c := range cases {
-		if got := backendBuildRoute(c.arch, c.upstream, c.pinned, c.tools); got != c.want {
+		if got := backendBuildRoute(c.arch, c.mainline, c.pinned, c.tools); got != c.want {
 			t.Fatalf("%s: got %v", c.name, got)
 		}
 	}
@@ -69,5 +74,51 @@ func TestBuildToolsPresentNeedsGitCMakeAndACompiler(t *testing.T) {
 	}
 	if buildToolsPresent("windows", have("git", "cmake", "c++")) {
 		t.Fatal("Windows source builds produce no bin/llama-server")
+	}
+}
+
+// An NVIDIA host builds with CUDA, so without nvcc no build starts there.
+func TestBuildCanStartNeedsCUDAOnAnNVIDIAHost(t *testing.T) {
+	for _, c := range []struct {
+		tools, nvidia bool
+		accel         string
+		want          bool
+	}{
+		{true, false, "cpu", true},
+		{true, true, "cuda", true},
+		{true, true, "cpu", false},
+		{false, false, "cpu", false},
+		{false, true, "cuda", false},
+	} {
+		if got := buildCanStart(c.tools, c.nvidia, c.accel); got != c.want {
+			t.Fatalf("tools=%v nvidia=%v accel=%s: got %v", c.tools, c.nvidia, c.accel, got)
+		}
+	}
+}
+
+// The CLI marks each status that is not simply ready, and a probed status
+// outranks the catalog's fork stamp.
+func TestRecommendationMarkerPerBackendStatus(t *testing.T) {
+	no := false
+	fork := recommend.Candidate{Arch: "inkling", Runnable: &no}
+	for _, c := range []struct {
+		rec  recommend.Recommendation
+		want string
+	}{
+		{recommend.Recommendation{BackendStatus: recommend.BackendReady, BackendHint: "CUDA / ik_llama"}, ""},
+		{recommend.Recommendation{BackendStatus: recommend.BackendNeedsSetup}, " +"},
+		{recommend.Recommendation{BackendStatus: recommend.BackendReady, BackendHint: "Vulkan", CUDABuildOffered: true}, " ^"},
+		{recommend.Recommendation{BackendStatus: recommend.BackendReady, BackendHint: "Vulkan"}, " ^"},
+		{recommend.Recommendation{Candidate: fork, BackendStatus: recommend.BackendUnsupported}, " !"},
+		{recommend.Recommendation{Candidate: fork, BackendStatus: recommend.BackendUnknown}, " *"},
+		{recommend.Recommendation{Candidate: fork, BackendStatus: recommend.BackendNeedsSetup}, " +"},
+	} {
+		got := recommendationMarker(c.rec)
+		if got != c.want {
+			t.Fatalf("%+v: marker %q, want %q", c.rec, got, c.want)
+		}
+		if got != "" && recommendationFootnotes[got] == "" {
+			t.Fatalf("marker %q has no footnote", got)
+		}
 	}
 }

@@ -25,6 +25,20 @@ def run(cmd, timeout):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
+def backend_status(row):
+    """BackendStatus, or the older launchers' NeedsBackendBuild equivalent.
+
+    The published-release E2E runs this script against a launcher that predates
+    BackendStatus. A row carrying neither key fails closed: a renamed field must
+    not let every row through.
+    """
+    if "BackendStatus" in row:
+        return row["BackendStatus"]
+    if "NeedsBackendBuild" in row:
+        return "needs_setup" if row["NeedsBackendBuild"] else "unknown"
+    raise RuntimeError(f"recommend --json row has no backend status: {row.get('repo')}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--launcher", required=True)
@@ -48,7 +62,7 @@ def main():
         rec["planning_hardware"] = {k: doc["planning_hardware"].get(k) for k in ("os", "arch", "ram", "gpus")}
         rows = doc["categories"].get(a.category) or []
         rec["top"] = [{k: row.get(k) for k in ("name", "repo", "arch", "QuantName", "QuantSizeGB", "MemoryNeedGB", "Fit",
-                                           "BackendStatus", "Reason")}
+                                           "BackendStatus", "CUDABuildOffered", "Reason")}
                       for row in rows]
         if not rows:
             raise RuntimeError(f"no {a.category} recommendation for this hardware")
@@ -66,7 +80,7 @@ def main():
             # Select a row ready now explicitly; the ranking no longer demotes
             # rows whose backend the first launch builds. "unknown" means the
             # probe could not read a backend, which ranks as if unprobed.
-            status = row.get("BackendStatus", "unknown")
+            status = backend_status(row)
             if status not in ("ready", "unknown"):
                 rec.setdefault("skipped_for_runner_limits", []).append(
                     {"repo": row["repo"], "quant": quant["name"], "reason": f"backend {status}"})

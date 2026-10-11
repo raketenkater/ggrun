@@ -1,6 +1,7 @@
 package recommend
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -31,11 +32,11 @@ func resetBackendProbes() {
 }
 
 // blockedUpstreamArch picks the architecture of the first Best overall row the
-// catalog stamps as upstream-registered, so blocking it exercises a build route.
+// catalog stamps as mainline-registered, so blocking it exercises a build route.
 func blockedUpstreamArch(t *testing.T, c Categories) string {
 	t.Helper()
 	for _, r := range c.Balanced {
-		if r.Arch != "" && !r.NeedsForkBackend() {
+		if r.Arch != "" && r.MainlineRegisters() {
 			return strings.ToLower(r.Arch)
 		}
 	}
@@ -200,18 +201,69 @@ func TestBackendRouteDecidesRankPerCategory(t *testing.T) {
 	}
 }
 
-// Without the launcher's answer a route is assumed exactly when upstream
-// registers the architecture; a fork-only one has none.
-func TestCatalogOnlyRouteFollowsUpstreamStamp(t *testing.T) {
+// Without the launcher's answer a route is assumed exactly when mainline
+// registers the architecture. A fork-only one has none, and neither has one
+// only ik_llama registers (DeepSeek V4.1 Flash, deepseek41): every automatic
+// build is mainline or a reviewed recipe. A catalog without the mainline stamp
+// falls back to the union stamp; a row with neither stamp has no route.
+func TestCatalogOnlyRouteFollowsMainlineStamp(t *testing.T) {
 	t.Cleanup(resetBackendProbes)
 	resetBackendProbes()
 	SetInstalledArchSupport(func(*detect.Capabilities, string) (bool, bool) { return false, true })
 	yes, no := true, false
-	upstream := Recommendation{Candidate: Candidate{Name: "up", Arch: "k2-horizon", Runnable: &yes}}
-	fork := Recommendation{Candidate: Candidate{Name: "fork", Arch: "inkling", Runnable: &no}}
-	markBackendStatus(nil, &upstream)
-	markBackendStatus(nil, &fork)
-	if upstream.BackendStatus != BackendNeedsSetup || fork.BackendStatus != BackendUnsupported {
-		t.Fatalf("upstream %q, fork-only %q", upstream.BackendStatus, fork.BackendStatus)
+	for _, c := range []struct {
+		name string
+		cand Candidate
+		want BackendStatus
+	}{
+		{"mainline", Candidate{Arch: "k2-horizon", Runnable: &yes, RunnableMainline: &yes}, BackendNeedsSetup},
+		{"ik-only", Candidate{Arch: "deepseek41", Runnable: &yes, RunnableMainline: &no}, BackendUnsupported},
+		{"fork-only", Candidate{Arch: "inkling", Runnable: &no, RunnableMainline: &no}, BackendUnsupported},
+		{"legacy union stamp", Candidate{Arch: "k2-horizon", Runnable: &yes}, BackendNeedsSetup},
+		{"unstamped", Candidate{Arch: "k2-horizon"}, BackendUnsupported},
+	} {
+		r := Recommendation{Candidate: c.cand}
+		markBackendStatus(nil, &r)
+		if r.BackendStatus != c.want {
+			t.Fatalf("%s: %q, want %q", c.name, r.BackendStatus, c.want)
+		}
+	}
+}
+
+// The updater stamps runnable_mainline wherever it stamps runnable, and the
+// mainline table is part of the union. Which architectures are ik-only follows
+// upstream (deepseek41 on 2026-10-11), so this checks the stamps' shape, not a
+// name; a fetch failure leaves both absent.
+func TestEmbeddedCatalogStampsMainlineWithTheUnion(t *testing.T) {
+	var doc catalogDoc
+	if err := json.Unmarshal(catalogJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range doc.Candidates {
+		if c.Arch == "" || c.Runnable == nil {
+			continue
+		}
+		if c.RunnableMainline == nil {
+			t.Fatalf("%s (%s) has runnable but no runnable_mainline stamp", c.Repo, c.Arch)
+		}
+		if *c.RunnableMainline && !*c.Runnable {
+			t.Fatalf("%s: mainline registers %s but the union stamp does not", c.Repo, c.Arch)
+		}
+	}
+}
+
+// recommend --json consumers (the install E2E) select rows by these keys.
+func TestRecommendationJSONCarriesBackendStatus(t *testing.T) {
+	data, err := json.Marshal(Recommendation{BackendStatus: BackendNeedsSetup, CUDABuildOffered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"BackendStatus":"needs_setup"`, `"CUDABuildOffered":true`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("JSON lacks %s: %s", want, data)
+		}
+	}
+	if strings.Contains(string(data), "NeedsBackendBuild") {
+		t.Fatalf("JSON still carries NeedsBackendBuild: %s", data)
 	}
 }

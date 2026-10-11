@@ -68,20 +68,22 @@ func archLoadedBy(paths []string, arch string, probe backendArchProbe) (loads, k
 
 // backendBuildRoute reports whether a launch builds a backend for an
 // architecture no installed backend loads, following unsupportedArchRoutes: a
-// reviewed recipe, or a current-mainline build when upstream registers the
-// architecture. A configured backend name turns those offers off, and each is
-// a source build. Open-PR discovery is not counted: whether it finds a fork
-// is unknown until launch, and the code is unreviewed. A mainline build does
-// not serve an architecture that requires ik_llama (chooseAutoBackend scores
-// it 0), so upstream alone is no route there.
-func backendBuildRoute(arch string, upstream, pinned, buildable bool) bool {
+// reviewed recipe, or a current-mainline build when mainline registers the
+// architecture. Every build is mainline or a reviewed recipe, so an
+// architecture only ik_llama registers has no route. A configured backend
+// name turns those offers off, and each is a source build. Open-PR discovery
+// is not counted: whether it finds a fork is unknown until launch, and the
+// code is unreviewed. A mainline build does not serve an architecture that
+// requires ik_llama (chooseAutoBackend scores it 0), so mainline alone is no
+// route there.
+func backendBuildRoute(arch string, mainline, pinned, buildable bool) bool {
 	if pinned || !buildable {
 		return false
 	}
 	if len(backends.RecipesForArch(arch)) > 0 || reviewedArchBuildAvailable(arch) {
 		return true
 	}
-	return upstream && backends.RequiredBackendForArch(arch) == ""
+	return mainline && backends.RequiredBackendForArch(arch) == ""
 }
 
 // buildToolsPresent reports whether the source builds every route runs can
@@ -92,6 +94,13 @@ func buildToolsPresent(goos string, onPath func(string) bool) bool {
 		return false
 	}
 	return onPath("git") && onPath("cmake") && (onPath("c++") || onPath("g++") || onPath("clang++"))
+}
+
+// buildCanStart reports whether the launch's build can run: the tools, and on
+// an NVIDIA host the CUDA toolkit, since acceleratedArchBuildRecipe builds
+// with CUDA there and defaultAccel only says "cuda" when nvcc is found.
+func buildCanStart(tools, nvidiaHost bool, accel string) bool {
+	return tools && (!nvidiaHost || accel == "cuda")
 }
 
 // enableInstalledArchSupport lets recommendations flag models that no
@@ -120,11 +129,9 @@ func enableInstalledArchSupport() {
 		_, err := exec.LookPath(name)
 		return err == nil
 	})
-	recommend.SetBackendRoute(func(caps *detect.Capabilities, arch string, upstream bool) bool {
-		// An NVIDIA host builds with CUDA (acceleratedArchBuildRecipe), which
-		// needs nvcc; defaultAccel looks for it.
-		cuda := !hostHasNVIDIAGPU(caps) || defaultAccel() == "cuda"
-		return backendBuildRoute(arch, upstream, pinned, tools && cuda)
+	accel := defaultAccel()
+	recommend.SetBackendRoute(func(caps *detect.Capabilities, arch string, mainline bool) bool {
+		return backendBuildRoute(arch, mainline, pinned, buildCanStart(tools, hostHasNVIDIAGPU(caps), accel))
 	})
 	var candidates []autoBackendCandidate
 	candidatesLoaded := false

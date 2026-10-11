@@ -125,6 +125,31 @@ func recommendationCapabilities(caps *detect.Capabilities, opts recommendOptions
 	return recommend.PlanningCapabilities(&selected, opts.ramBudgetMB, opts.ramLimitPercent, opts.vramHeadroomMB, opts.ramHeadroomMB), nil
 }
 
+// recommendationMarker flags a row whose backend is not simply ready: "!" no
+// supported route loads it, "+" the first launch builds its backend, "^" it
+// loads now on the Vulkan build of an NVIDIA host, "*" the catalog says only a
+// fork loads it and no installed backend was probed.
+func recommendationMarker(r recommend.Recommendation) string {
+	switch {
+	case r.BackendStatus == recommend.BackendUnsupported:
+		return " !"
+	case r.BackendStatus == recommend.BackendNeedsSetup:
+		return " +"
+	case r.ServedOnVulkan():
+		return " ^"
+	case r.BackendStatus == recommend.BackendUnknown && r.NeedsForkBackend():
+		return " *"
+	}
+	return ""
+}
+
+var recommendationFootnotes = map[string]string{
+	" *": "* No upstream backend loads this architecture yet; the first launch offers a reviewed fork or searches open llama.cpp PRs for one.",
+	" +": "+ No installed backend loads this architecture; the first launch offers to build one (about 20-40 min).",
+	" ^": "^ Loads now on the Vulkan build, below the CUDA estimate shown; the first launch offers a CUDA build when it can build one here (about 20-40 min).",
+	" !": "! No installed backend loads this architecture and no supported route builds one here; listed last.",
+}
+
 func cmdRecommend(args []string) {
 	cfg := loadConfigOrExit()
 	opts, err := parseRecommendArgs(args, cfg)
@@ -185,7 +210,7 @@ func cmdRecommend(args []string) {
 		fmt.Println("No models in the catalog fit this budget.")
 		return
 	}
-	forkShown, buildShown, unsupportedShown := false, false, false
+	shown := map[string]bool{}
 	printRecGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -195,17 +220,9 @@ func cmdRecommend(args []string) {
 		for _, r := range rows {
 			name := r.Name
 			limit := 36
-			marker := ""
-			switch {
-			case r.BackendStatus == recommend.BackendUnsupported:
-				marker, unsupportedShown = " !", true
-			case r.BackendStatus == recommend.BackendNeedsSetup:
-				marker, buildShown = " +", true
-			case r.BackendStatus == recommend.BackendUnknown && r.NeedsForkBackend():
-				marker, forkShown = " *", true
-			}
+			marker := recommendationMarker(r)
 			if marker != "" {
-				limit = 34
+				limit, shown[marker] = 34, true
 			}
 			if len(name) > limit {
 				name = name[:limit-1] + "…"
@@ -222,14 +239,10 @@ func cmdRecommend(args []string) {
 	printRecGroup("Best overall — intelligence first, practical quant", cats.Balanced)
 	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
-	if forkShown {
-		fmt.Println("\n* No upstream backend loads this architecture yet; the first launch offers a reviewed fork or searches open llama.cpp PRs for one.")
-	}
-	if buildShown {
-		fmt.Println("\n+ The installed backends cannot serve this as estimated; the first launch offers a backend build (about 20-40 min).")
-	}
-	if unsupportedShown {
-		fmt.Println("\n! No installed backend loads this architecture and no supported route builds one here; listed last.")
+	for _, marker := range []string{" *", " +", " ^", " !"} {
+		if shown[marker] {
+			fmt.Println("\n" + recommendationFootnotes[marker])
+		}
 	}
 	fmt.Println("\nIntel is base-model catalog intelligence (~ marks an estimate), not quantized accuracy.")
 	fmt.Println("1–2 bit quants are fallback choices within a model; their task accuracy is unverified.")

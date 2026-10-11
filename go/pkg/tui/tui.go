@@ -2573,7 +2573,7 @@ func (m Model) viewRecommended() string {
 	}
 
 	idx := 0
-	buildShown, unsupportedShown := false, false
+	buildShown, vulkanShown, unsupportedShown := false, false, false
 	writeGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -2597,11 +2597,13 @@ func (m Model) viewRecommended() string {
 			name := rec.Name
 			limit := 34
 			marker := ""
-			switch rec.BackendStatus {
-			case recommend.BackendNeedsSetup:
+			switch {
+			case rec.BackendStatus == recommend.BackendNeedsSetup:
 				marker, buildShown = " +", true
-			case recommend.BackendUnsupported:
+			case rec.BackendStatus == recommend.BackendUnsupported:
 				marker, unsupportedShown = " !", true
+			case rec.ServedOnVulkan():
+				marker, vulkanShown = " ^", true
 			}
 			if marker != "" {
 				limit = 32
@@ -2625,7 +2627,10 @@ func (m Model) viewRecommended() string {
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
 	if buildShown {
-		b.WriteString(mutedStyle.Render("  + Installed backends cannot serve it as estimated; first launch offers a 20-40 min build.") + "\n")
+		b.WriteString(mutedStyle.Render("  + No installed backend loads it; first launch offers a 20-40 min build.") + "\n")
+	}
+	if vulkanShown {
+		b.WriteString(mutedStyle.Render("  ^ Loads now on Vulkan, below the CUDA estimate; first launch offers a CUDA build if it can.") + "\n")
 	}
 	if unsupportedShown {
 		b.WriteString(mutedStyle.Render("  ! No installed backend loads it and no supported route builds one here; listed last.") + "\n")

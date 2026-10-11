@@ -850,6 +850,30 @@ func TestRecommendedViewLabelsPredictedSpeedAsEstimate(t *testing.T) {
 	}
 }
 
+// Each backend status is visible in the list with its footnote; a ready row
+// carries no marker.
+func TestRecommendedViewMarksBackendStatus(t *testing.T) {
+	row := func(name string, status recommend.BackendStatus, hint string) recommend.Recommendation {
+		return recommend.Recommendation{Candidate: recommend.Candidate{Name: name}, BackendStatus: status, BackendHint: hint, QuantName: "Q4_K_M"}
+	}
+	rows := []recommend.Recommendation{
+		row("Ready model", recommend.BackendReady, "CUDA / ik_llama"),
+		row("Setup model", recommend.BackendNeedsSetup, "CUDA / ik_llama"),
+		row("Vulkan model", recommend.BackendReady, "Vulkan"),
+		row("Blocked model", recommend.BackendUnsupported, "CUDA / ik_llama"),
+	}
+	m := Model{recommendationGroups: recommend.Categories{Balanced: rows}, recommendations: rows, selectedRecommendation: -1}
+	view := m.viewRecommended()
+	for _, want := range []string{"Setup model +", "Vulkan model ^", "Blocked model !", "  + No installed backend loads it", "  ^ Loads now on Vulkan", "  ! No installed backend loads it"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view lacks %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Ready model +") || strings.Contains(view, "Ready model ^") || strings.Contains(view, "Ready model !") {
+		t.Fatalf("ready row carries a marker:\n%s", view)
+	}
+}
+
 func TestHWSummary(t *testing.T) {
 	// Test with nil
 	s := hwSummary(nil)
