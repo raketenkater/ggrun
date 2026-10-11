@@ -119,7 +119,14 @@ mkdir -p "$out_dir"
 
 printf '%s\n' "$CANDIDATE" >"$out_dir/candidate.path"
 "$CANDIDATE" version >"$out_dir/candidate.version.txt"
-sha256sum "$CANDIDATE" >"$out_dir/candidate.sha256"
+# A wrapper or symlink can front any build: hash the executable that answered
+# version --json, and keep the entry point's own hash apart from it.
+"$CANDIDATE" version --json >"$out_dir/candidate.build.json"
+candidate_exe=$(python3 -c 'import json, sys; b = json.load(open(sys.argv[1])); print(b.get("executable_resolved") or b.get("executable") or "")' \
+  "$out_dir/candidate.build.json") || die "candidate version --json is not JSON: $CANDIDATE"
+[[ -n "$candidate_exe" ]] || die "candidate did not report its executable: $CANDIDATE"
+sha256sum "$candidate_exe" >"$out_dir/candidate.sha256"
+sha256sum "$CANDIDATE" >"$out_dir/candidate.entry.sha256"
 git -C "$REPO_DIR" rev-parse HEAD >"$out_dir/git-head.txt"
 git -C "$REPO_DIR" status --short >"$out_dir/git-status.txt"
 git -C "$REPO_DIR" diff --binary >"$out_dir/source.patch"

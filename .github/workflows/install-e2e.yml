@@ -133,6 +133,11 @@ jobs:
               ok = any(rev == c or re.search("-g" + c[:7], ver) for c in (sha, sys.argv[1]) if c)
           else:
               ok = rev == sha
+              # The wrapper's bytes are the same for every build: the executable
+              # that answered must be the installed one hashed above.
+              installed = os.path.realpath(os.path.expanduser("~/ggrun/.bin/ggrun"))
+              if ident.get("executable_resolved") != installed:
+                  sys.exit(f"::error::the wrapper ran {ident.get('executable_resolved')}, not {installed}")
           if not ok:
               sys.exit(f"::error::installed launcher {ident} is not this revision ({sha})")
           print("launcher revision verified:", rev or ver)

@@ -311,43 +311,183 @@ def released_after_stop(baseline, after, tolerance_mib=256):
 
 
 def file_identity(path):
-    """Size and sha256 of a file; None for anything unreadable."""
+    """Size and sha256 of a file; None for anything unreadable. A symlink
+    keeps its own path and names the file whose bytes were hashed."""
     try:
         path = Path(path)
         digest = hashlib.sha256()
         with path.open("rb") as fh:
             for block in iter(lambda: fh.read(1 << 22), b""):
                 digest.update(block)
-        return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+        ident = {"path": str(path), "bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+        if path.is_symlink():
+            ident["resolved"] = str(path.resolve())
+        return ident
     except OSError:
         return None
 
 
-def launcher_identity(launcher):
-    """The launcher's own build identity plus the hash of the executable run."""
-    exe = Path(launcher).resolve()
-    if exe.suffix.lower() in (".cmd", ".bat"):
-        candidate = exe.parent / ".bin" / "ggrun.exe"
-        if candidate.exists():
-            exe = candidate
-    ident = {"file": file_identity(exe)}
+def file_fingerprint(path, window_mib):
+    """A bounded, partial identity for files too large to hash in full: sha256
+    of the first and last window. It is not the file's sha256 and is never
+    recorded under that key."""
+    window = window_mib << 20
+    path = Path(path)
+    size = path.stat().st_size
+
+    def digest(fh):
+        h, left = hashlib.sha256(), window
+        while left > 0:
+            block = fh.read(min(left, 1 << 22))
+            if not block:
+                break
+            h.update(block)
+            left -= len(block)
+        return h.hexdigest()
+
+    with path.open("rb") as fh:
+        head = digest(fh)
+        fh.seek(max(0, size - window))
+        tail = digest(fh)
+    return {"scheme": "sha256-of-head-and-tail", "window_bytes": window, "head": head, "tail": tail}
+
+
+SPLIT_SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
+
+
+def model_shards(model):
+    """Every file a split GGUF loads, in order, or the model alone. Companion
+    files (mmproj, draft) never carry the split name and are not included."""
+    split = SPLIT_SHARD.search(model.name)
+    if not split or int(split[2]) < 1:
+        return [model]
+    total, stem = int(split[2]), model.name[:split.start()]
+    return [model.with_name(f"{stem}-{shard:05d}-of-{total:05d}.gguf") for shard in range(1, total + 1)]
+
+
+def model_identity(model, hash_mode=None, window_mib=64):
+    """Path, bytes and identity of every shard the model loads.
+
+    A split model's first shard is a few MiB of metadata, so hashing it alone
+    identifies nothing. hash_mode "sha256" hashes every shard in full,
+    "fingerprint" records file_fingerprint() per shard, None records sizes.
+    Top-level sha256 is the file's hash only for a single-file model.
+    """
+    model = Path(model).resolve()
+    shards = []
+    for shard in model_shards(model):
+        if not shard.is_file():
+            shards.append({"path": str(shard), "bytes": None, "missing": True})
+        elif hash_mode == "sha256":
+            shards.append(file_identity(shard) or {"path": str(shard), "bytes": None, "unreadable": True})
+        elif hash_mode == "fingerprint":
+            shards.append({"path": str(shard), "bytes": shard.stat().st_size,
+                           "fingerprint": file_fingerprint(shard, window_mib)})
+        else:
+            shards.append({"path": str(shard), "bytes": shard.stat().st_size})
+    complete = all(s.get("bytes") is not None for s in shards)
+    return {"path": str(model), "bytes": sum(s["bytes"] for s in shards) if complete else None,
+            "hash": hash_mode, "complete": complete, "shards": shards,
+            "sha256": shards[0].get("sha256") if len(shards) == 1 else None}
+
+
+# Native executable headers: ELF, PE, Mach-O (both byte orders, fat).
+EXECUTABLE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+                    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
+
+
+def entry_kind(path):
+    """'executable' for a native binary, 'wrapper' for a script that starts one."""
+    if path.suffix.lower() in (".cmd", ".bat"):
+        return "wrapper"
     try:
-        out = subprocess.run([str(exe), "version", "--json"], capture_output=True, text=True, timeout=30)
-        ident["build"] = json.loads(out.stdout.strip().splitlines()[-1]) if out.returncode == 0 and out.stdout.strip() else None
+        with path.open("rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return None
+    return "executable" if head.startswith(EXECUTABLE_MAGIC) else "wrapper"
+
+
+def entry_command(entry, args, windows=os.name == "nt"):
+    """Run entry as a user's shell would: a .cmd/.bat wrapper through cmd.exe."""
+    command = [str(entry)] + list(args)
+    if windows and str(entry).lower().endswith((".cmd", ".bat")):
+        return 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
+    return command
+
+
+def launcher_identity(launcher):
+    """The entry point run, the Go executable that answered, and its build.
+
+    The entry point is often a wrapper (the Linux install's shell script, the
+    Windows ggrun.cmd) with the same bytes for every candidate, so its hash
+    proves nothing about the launcher tested. The executable is the one that
+    answered `version --json` through that entry point, as the launch does.
+    """
+    entry = Path(os.path.abspath(launcher))
+    kind = entry_kind(entry)
+    ident = {"entry": dict(file_identity(entry) or {"path": str(entry)}, kind=kind), "build": None}
+
+    def run(args):
+        return subprocess.run(entry_command(entry, args), capture_output=True, text=True, timeout=30,
+                              stdin=subprocess.DEVNULL)
+    try:
+        out = run(["version", "--json"])
+        try:
+            lines = out.stdout.strip().splitlines() if out.returncode == 0 else []
+            build = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            build = None
+        ident["build"] = build if isinstance(build, dict) else None
         if ident["build"] is None:
-            plain = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=30)
-            ident["version_text"] = plain.stdout.strip()
-    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
-        ident["build"] = None
+            ident["version_text"] = run(["--version"]).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    build = ident["build"] or {}
+    reported = build.get("executable_resolved") or build.get("executable")
+    if reported:
+        exe, source = Path(reported).resolve(), "version --json"
+    elif kind == "executable":
+        exe, source = entry.resolve(), "entry"
+    else:
+        exe, source = None, None
+    ident["executable"] = (dict(file_identity(exe) or {"path": str(exe)}, source=source)
+                           if exe is not None else None)
+    if ident["executable"] is None:
+        ident["note"] = "the wrapper did not report the executable it runs"
     return ident
+
+
+# The last argv ggrun launched, as displayCommand prints it: POSIX, or
+# PowerShell's "& " call form on Windows; a path with spaces is single-quoted.
+LAUNCH_LINE = re.compile(r"(?m)^\[launch\] (?:& )?(?:'([^']*llama-server[^']*)'|(\S*llama-server\S*)) (-m .*)$")
+COMPANION_FLAGS = re.compile(r"(?:^| )(--mmproj|--model-draft|-md) (?:'([^']*)'|(\S+))")
+
+
+def launched_backend(log_text):
+    """(binary, argv) of the backend ggrun launched last, or None."""
+    launches = LAUNCH_LINE.findall(log_text)
+    if not launches:
+        return None
+    quoted, bare, argv = launches[-1]
+    return quoted or bare, argv
+
+
+def companion_identity(argv, hash_mode=None, window_mib=64):
+    """Projector and draft models the launched argv loads beside the model."""
+    found = []
+    for flag, quoted, bare in COMPANION_FLAGS.findall(argv or ""):
+        ident = model_identity(quoted or bare, hash_mode, window_mib)
+        found.append(dict(ident, flag=flag))
+    return found
 
 
 def backend_identity(log_text):
     """The backend binary and effective argv ggrun actually launched last."""
-    launches = re.findall(r"(?m)^\[launch\] (\S+llama-server\S*) (-m .*)$", log_text)
-    if not launches:
+    launched = launched_backend(log_text)
+    if launched is None:
         return None
-    binary, argv = launches[-1]
+    binary, argv = launched
     ident = {"binary": file_identity(binary), "argv": argv}
     try:
         out = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30,
@@ -405,8 +545,12 @@ def main():
                         help="Require weight allocations on this many devices in the final launch")
     parser.add_argument("--expect-revision", default="",
                         help="Fail unless the installed launcher was built from this commit")
-    parser.add_argument("--hash-model", action="store_true",
-                        help="Record the model file's sha256 (reads the whole file)")
+    hashing = parser.add_mutually_exclusive_group()
+    hashing.add_argument("--hash-model", action="store_true",
+                         help="Record the sha256 of every model shard (reads every byte)")
+    hashing.add_argument("--fingerprint-model", type=int, default=0, metavar="MIB",
+                         help="For models too large to hash: record per shard its size and the sha256 "
+                              "of its first and last MIB MiB, labelled as a fingerprint, not a file hash")
     args = parser.parse_args()
     if args.ctx < 0 or min(args.timeout, args.request_timeout) <= 0 or args.min_weight_devices < 0:
         parser.error("timeouts must be positive; context/device minimum nonnegative (context 0 means auto)")
@@ -414,6 +558,9 @@ def main():
         parser.error("--cpu cannot require GPU allocations")
     if args.parallel < 0 or not 0 <= args.agent_lanes <= 8 or args.agent_repeats < 1:
         parser.error("invalid parallel or agent workload bounds")
+    if args.fingerprint_model < 0:
+        parser.error("--fingerprint-model must be a positive window in MiB")
+    model_hash = "sha256" if args.hash_model else "fingerprint" if args.fingerprint_model else None
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     command = [str(Path(args.launcher).resolve()), str(Path(args.model).resolve()),
@@ -427,8 +574,7 @@ def main():
     if args.claude_code:
         command.append("--claude-code")
     windows = os.name == "nt"
-    if windows and command[0].lower().endswith((".cmd", ".bat")):
-        command = 'cmd.exe /d /s /c "' + subprocess.list2cmdline(command) + '"'
+    command = entry_command(command[0], command[1:], windows)
     result = {"command": command, "passed": False}
     t_start = time.monotonic()
     phases = {}
@@ -437,9 +583,7 @@ def main():
         phases[name] = round(time.monotonic() - t_start, 2)
         result["phases_s"] = phases
     result["identity"] = {"launcher": launcher_identity(args.launcher)}
-    model_path = Path(args.model).resolve()
-    result["identity"]["model"] = (file_identity(model_path) if args.hash_model
-                                   else {"path": str(model_path), "bytes": model_path.stat().st_size, "sha256": None})
+    result["identity"]["model"] = model_identity(args.model, model_hash, args.fingerprint_model)
     if args.expect_revision and not revision_matches(result["identity"]["launcher"], args.expect_revision):
         result["error"] = f"installed launcher is not revision {args.expect_revision}: {result['identity']['launcher']}"
         (output / "result.json").write_text(json.dumps(result, indent=2))
@@ -483,6 +627,9 @@ def main():
                 raise RuntimeError("timed out waiting for launcher readiness and health")
             log_text = (output / "serve.log").read_text(errors="replace")
             result["identity"]["backend"] = backend_identity(log_text)
+            if result["identity"]["backend"]:
+                result["identity"]["model"]["companions"] = companion_identity(
+                    result["identity"]["backend"]["argv"], model_hash, args.fingerprint_model)
             result["weight_devices"] = weight_devices(log_text)
             result["device_allocations_mib"] = device_allocations(log_text)
             result["min_weight_devices"] = args.min_weight_devices

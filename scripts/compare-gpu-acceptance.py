@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Compare a GPU acceptance run with a known-good run of the same workload.
 
-Only matched runs are compared: same model file (sha256 when both recorded,
-else path and size), same effective backend argv, same serving context. A
-mismatch is reported as "not comparable", never as a pass or a regression.
+Only matched runs are compared: same model shards (sha256 when both recorded,
+else fingerprint, else path and size), same effective backend argv, same
+serving context. A mismatch is reported as "not comparable", never as a pass
+or a regression.
 There is deliberately no VRAM-fill target: fuller memory is not faster work.
 
 usage: compare-gpu-acceptance.py <baseline result.json> <candidate result.json>
@@ -30,11 +31,21 @@ def normalized_argv(argv):
     return argv
 
 
+def model_key(model):
+    """Every shard's hash, else its fingerprint, else its path and size. A
+    split model's first shard alone is metadata, not the artifact."""
+    shards = model.get("shards")
+    if not shards:  # recorded before per-shard identity
+        return model.get("sha256") or (model.get("path"), model.get("bytes"))
+    keys = [s.get("sha256") or s.get("fingerprint") or (s.get("path"), s.get("bytes")) for s in shards]
+    return keys[0] if len(keys) == 1 else keys
+
+
 def ident(r):
     model = (r.get("identity") or {}).get("model") or {}
     backend = (r.get("identity") or {}).get("backend") or {}
     served = r.get("served") or {}
-    return {"model": model.get("sha256") or (model.get("path"), model.get("bytes")),
+    return {"model": model_key(model),
             "argv": normalized_argv(backend.get("argv")), "context": served.get("context")}
 
 
