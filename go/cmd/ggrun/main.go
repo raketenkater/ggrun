@@ -6093,6 +6093,14 @@ func backendHasNoWindowedKV(be *backendInfo, model *placement.ModelProfile) bool
 	return model.KVLoraRank == 0 && (model.SlidingWindow > 0 || len(model.SWAPattern) > 0)
 }
 
+// backendSplitsLayersByBytes: ik_llama.cpp since #1466 (0871ab29) assigns
+// blocks to devices by cumulative bytes and reads --tensor-split as a byte
+// fraction. -fit (86f4f516, five days later) dates the help surface; a build
+// that does not advertise it keeps the slot rule.
+func backendSplitsLayersByBytes(be *backendInfo) bool {
+	return be != nil && be.IsIK && strings.Contains(be.Help, "-fit")
+}
+
 func applyBackendFeatureCompatibility(req *launchRequest, model *placement.ModelProfile, be *backendInfo) {
 	if req == nil || be == nil {
 		return
@@ -6104,6 +6112,7 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 	isDeepSeek4IK := strings.EqualFold(arch, "deepseek4") && be.IsIK
 	if model != nil {
 		model.FullContextWindowedKV = backendHasNoWindowedKV(be, model)
+		model.ByteWeightedLayerSplit = backendSplitsLayersByBytes(be)
 	}
 	// The architecture's KV rule is re-applied here because backend selection can
 	// land somewhere the pre-selection pass did not assume, and because a cached

@@ -76,6 +76,7 @@ type kvCacheShape struct {
 	SWAFull     bool
 	KVType      string
 	VTransposed bool // flash attention off
+	MTP         bool // MTP decoding: ik_llama loads the NextN blocks
 }
 
 // backendDefaultUBatch is llama.cpp's n_ubatch when none is passed. Model-wide
@@ -326,6 +327,7 @@ func kvShapeForStrategy(s *Strategy, swaFull bool) kvCacheShape {
 		Context: s.ContextSize, UBatch: s.UBatchSize, Slots: s.Parallel,
 		SWAFull: swaFull || s.SWAFull, KVType: s.KVType,
 		VTransposed: strings.EqualFold(s.KVPlacement, "cpu"),
+		MTP:         s.Draft != nil && s.Draft.Type == DraftMTP,
 	}
 }
 
@@ -348,17 +350,26 @@ func computeKVTotalMBForStrategy(model *ModelProfile, s *Strategy) int {
 }
 
 // kvLayerDeviceFractions is the share of the per-layer KV bytes owned by each
-// device under a layer split: the same n_layer_all+1 slot assignment the
-// backend uses for weights, applied to the blocks that actually hold cache.
+// device under a layer split: the same assignment the backend uses for
+// weights (backendLayerDeviceAssignments), applied to the blocks that actually
+// hold cache.
 func kvLayerDeviceFractions(model *ModelProfile, shape kvCacheShape, split []float64) ([]float64, bool) {
 	layers, ok := kvLayerBytes(model, shape)
 	if !ok || len(split) == 0 {
 		return nil, false
 	}
-	devices, _ := layerDeviceAssignments(split, len(layers))
-	out := make([]float64, len(split))
+	devices, _ := backendLayerDeviceAssignments(model, shape, split)
+	return kvLayerFractions(layers, devices, len(split))
+}
+
+// kvLayerFractions sums per-block KV bytes onto each block's device.
+func kvLayerFractions(layers []int64, devices []int, numDevices int) ([]float64, bool) {
+	out := make([]float64, numDevices)
 	var total int64
 	for il, b := range layers {
+		if il >= len(devices) {
+			break
+		}
 		if dev := devices[il]; b > 0 && dev >= 0 && dev < len(out) {
 			out[dev] += float64(b)
 			total += b

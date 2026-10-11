@@ -271,8 +271,7 @@ func contextReclaimRequirement(model *placement.ModelProfile, strategy *placemen
 	if kvType == "" {
 		return 0, false
 	}
-	deviceKVMB := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType,
-		strategy.KVPlacement, hasArg(args, "--swa-full"), strategy.TensorSplit, device)
+	deviceKVMB := placement.StrategyDeviceKVCacheMB(model, strategy, kvType, hasArg(args, "--swa-full"), device)
 	if deviceKVMB <= 0 {
 		return 0, false
 	}
@@ -365,7 +364,7 @@ func majorityDevicePricedTokens(model *placement.ModelProfile, strategy *placeme
 		kvType = effectiveMemoryArgValues(args)["cache-k"]
 	}
 	swaFull := hasArg(args, "--swa-full")
-	deviceKV := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType, strategy.KVPlacement, swaFull, strategy.TensorSplit, device)
+	deviceKV := placement.StrategyDeviceKVCacheMB(model, strategy, kvType, swaFull, device)
 	totalKV := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, swaFull)
 	devices := 0
 	for _, share := range strategy.TensorSplit {

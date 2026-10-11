@@ -40,3 +40,25 @@ func TestBackendFeatureCompatibilitySetsWindowedKVFact(t *testing.T) {
 		t.Fatal("a windowed backend must price the window")
 	}
 }
+
+// ik_llama with the byte-weighted walk (#1466, dated by --fit) reads the split
+// as bytes; a mainline backend or an older ik build keeps the slot rule, and
+// re-resolving clears the fact.
+func TestBackendFeatureCompatibilitySetsByteWeightedSplitFact(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		be   *backendInfo
+		want bool
+	}{
+		{"ik with --fit", &backendInfo{Tag: "ik_llama", IsIK: true, Help: "       --fit   automatically determine"}, true},
+		{"ik without --fit", &backendInfo{Tag: "ik_llama", IsIK: true, Help: "--split-mode-graph"}, false},
+		{"ik without help", &backendInfo{Tag: "ik_llama", IsIK: true}, false},
+		{"mainline with --fit", &backendInfo{Tag: "llama", Help: "-fit, --fit [on|off]"}, false},
+	} {
+		model := &placement.ModelProfile{ModelArch: "qwen35", ByteWeightedLayerSplit: !tc.want}
+		applyBackendFeatureCompatibility(&launchRequest{}, model, tc.be)
+		if model.ByteWeightedLayerSplit != tc.want {
+			t.Errorf("%s: ByteWeightedLayerSplit=%v, want %v", tc.name, model.ByteWeightedLayerSplit, tc.want)
+		}
+	}
+}
