@@ -3332,3 +3332,103 @@ VRAM released), relaunch to ready.
 4. Dense multi-GPU control: Qwen3.5-27B-Q4_K_M default launch, or with
    --parallel 4 if it lands on one card; no pure-attention dense model of
    multi-GPU size is in the local acceptance set.
+
+## LAYER SPLIT — review fixes to the ik byte walk — 2026-10-11
+
+Follows the entry above; supersedes its planner effects, its calibration
+"not modelled" item and its A/B arm 3. Still offline (driver mismatch).
+
+Defects found in review of f510ce0 and fixed (5329183):
+
+- An unused card with less free VRAM than its CUDA context plus compute
+  reserve had negative capacity, and 0 MiB > -436 MiB refused every ik dense
+  plan: Qwen3.8-27B, 1 slot, GPU2 at 11,700 or 12,200 MiB used. Mainline
+  planned 262,144 tokens on 0.16/0.84/0; ik refused the explicit context and
+  fell to single_gpu 134,144 under auto. Now capacity is clamped at 0 and a
+  card holding nothing is never over; ik plans 262,144 on 0.17/0.83/0.
+- ikDenseSplit refused on the cold 1,024 MiB compute floor (backend compute
+  for this model is 46.5-123.75 MiB, q38-split-probe-np4.log). It now fits
+  against cold capacity first, then against firm capacity (measured compute
+  only), and refuses only when weights and KV exceed firm capacity. The
+  4-slot --claude-code auto context is 622,592 again (mainline's value), split
+  0.26/0.56/0.18, each card's walk-priced weights and KV within free VRAM;
+  explicit 604,160 / 610,304 / 622,592 with cold buffers plan.
+- deviceKVShareMB (compute and oracle context cuts, contextCandidateCoversDeficit)
+  took the split fraction of the model-wide KV; under ik it now prices the
+  argv's split, slots, min(-b, -ub) and --spec-type mtp with the walk. CUDA0
+  of the failed 661,504 preflight: 7051 MiB (logged 7051); the fraction gave
+  0.27 of the total.
+- BuildResourceLedger weighted each device's weights by the split fraction
+  (4629/9969/3205 MiB on the auto plan) beside walk-priced KV; ik dense plans
+  now price weights with the walk (4228/9545/3003). Calibration: the
+  split-inverted candidate must pass that ledger on ik (it overfilled GPU2 by
+  1,534 MiB under the walk), and topology candidates take the walk's output
+  owner as main GPU.
+- majorityDevicePricedTokens compared a slot-shaped device share with a
+  1-slot total; the total is now the sum of device shares at the same shape.
+- The fact matched any "-fit" substring ("best-fit"); now --fit exactly.
+
+Mainline recovery change (from f510ce0, not stated there):
+contextReclaimRequirement and majorityDevicePricedTokens price the failing
+device's KV at the strategy's slots, ubatch and MTP on every backend. With
+--parallel > 1 a hybrid's share now includes N slots of recurrent state that
+a context cut cannot free (4 slots on Qwen3.8 CUDA0 at 661,504: about 187 of
+7,051 MiB), so the token cut is about 3% short; the 10% recovery margin
+covers it here, but SWA-heavy multi-slot models are unmeasured. Mainline
+plans are unchanged (goldens at 1a0ecb6).
+
+MiniMax-M3 UD-IQ3_XXS, offline, profile from the real 5-shard header
+(matrix2/A1-minimax-learn-1, 1fddd12, 436,224, -ub 512, 0.27/0.59/0.14,
+experts on the CPU except blocks 3-4 pinned to CUDA2):
+
+| | backend log | walk | slot rule |
+|---|---|---|---|
+| blocks per device | 18/35/7 (from KV) | 18/35/7 | 17/36/7 |
+| KV MiB | 8147.26/15841.89/3168.38 | 8148/15842/3169 | 7695/16295/3169 |
+| weights MiB (pins applied) | 2688.26/4585.60/6943.13 | 2688.26/4585.60/6943.13 | — |
+
+That run later died with "CUDA error: out of memory, current device: 0"
+during a 2,048-token prefill; the slot rule had priced CUDA0 453 MiB of KV
+short. Consistent with, not proof of, the walk being right. Plan change on
+the claude-code box (cold, 1 slot, auto): mainline 360,448 tokens, n-cpu-moe
+57, no pins; ik 334,848 (-7.1%), n-cpu-moe 56, block 3 pinned to CUDA1. The
+synthetic 80B MoE stays 567,296 / 36 -> 513,024 / 34.
+
+Invariant tests: TestIKDenseSplitIgnoresAFullUnusedCard,
+TestIKDenseSplitRefusesOnlyOnFirmCapacity, TestIKMiniMaxM3BuffersMatchTheBackendLog,
+TestIKResourceLedgerFollowsTheWalk; the derate test now requires every
+logged context to plan. cmd/ggrun TestIKKVDerateKeepsEveryDeviceWithinCapacity
+drives the launch's DoesNotFit branch (reject, priced steps,
+recoverPreflightOOM) from the logged 661,504 / 0.27/0.58/0.15 plan against a
+simulated backend that places blocks by the walk and holds back on each card
+the 755 MiB the logged CUDA0 failure implies (as used VRAM, so planner and
+simulation agree on capacity): with the walk the first derate (593,920,
+0.26/0.57/0.17, 9346/22521/5228 MiB) fits every card; with the slot rule the
+deficit moves to CUDA1 (207 MiB) before 580,608 fits. The simulation is not
+the backend: it assumes a uniform 755 MiB reserve per card. Without that
+reserve known to the planner, the walk run still moved the deficit to CUDA1
+(ReplanAfterOOM's penalty is subtracted from free VRAM, not from what the
+failed plan held), which this change does not address.
+TestIKDeviceKVShareFollowsTheWalk. Core gate on 5329183: all six packages ok,
+gofmt and vet clean, exit 0.
+
+Still not modelled: the MLA, -amb, Gemma 4, OpenPangu, partial offload and
+MTP-KV items above; a pre-1fddd12 ik build with --fit is assumed to size
+blocks as 1fddd12 does (about 50 src/llama.cpp commits lie between 0871ab29
+and 1fddd12); calibration topology splits are rejected when the walk
+overfills, not re-fitted through ikDenseSplit.
+
+A/B plan amendments (setup, phases, correctness, stop and relaunch as above;
+candidate is this branch's head):
+
+3. MiniMax-M3 multi-GPU, default --claude-code-free launch on the full host.
+   Pass: admitted on the first exact preflight; logged KV buffers equal the
+   walk (±2 MiB); context not below baseline by more than the plan change
+   above (-7.1%) unless the baseline's CUDA0 is shown to overfill (OOM or
+   runtime growth past free); cold prefill, cached append and decode each
+   within run-to-run noise of baseline (three repeats); no CUDA OOM over the
+   matrix workload; clean relaunch.
+5. Mainline recovery pricing: Qwen3.8-27B UD-Q5_K_S on the mainline backend,
+   --parallel 4, three GPUs, automatic context. Pass: plan identical to
+   baseline; if a preflight derates, the derate count is not higher than
+   baseline's.
