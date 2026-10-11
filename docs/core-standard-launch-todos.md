@@ -3222,3 +3222,52 @@ Vulkan-served now). 4070/3090 Ti/CPU top picks unchanged.
 Open: whether the file-backed tie-break should hand a large MoE to Vulkan on
 an NVIDIA host by default (memory safety vs ~3x speed) is a core policy
 question; the CUDA mainline build offer is the existing remedy.
+
+## RECOMMENDER — backend setup no longer outranks capability — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P1). preferLoadable put every row no
+installed backend loads after every row one does, in all three categories,
+even when the first launch builds that backend. Reviewer test (ported): two
+fitting 4B models, intelligence 55 needing a build vs 20 loadable now;
+Smartest returned the 20 at 1a0ecb6.
+
+Change (e7bf2d4, recommender only): rows carry BackendStatus ready /
+needs_setup / unsupported / unknown. needs_setup means the launch's own
+routes offer a build: a reviewed recipe, or current mainline when upstream
+registers the arch (not for ik-only arches), with no pinned backend, git,
+cmake and a C++ compiler, and nvcc on an NVIDIA host. Open-PR discovery is
+not counted. Only unsupported rows move last. Vulkan-on-NVIDIA rows stay after
+other usable rows in Best overall and Fastest (MiMo 2.9 vs 10.5 tok/s above);
+Smartest keeps capability order. CLI/TUI: `+` needs_setup, `!` unsupported.
+verify-recommended-download.py now selects a ready row by BackendStatus.
+
+`recommend --json -n 3`, embedded catalog, isolated HOME/config/cache, app home
+linking the accept-20261007 ik CUDA + Vulkan backends read-only, simulated
+nvidia-smi inventory (driver mismatch), build tools and nvcc present:
+
+| profile | category | 1a0ecb6 top | e7bf2d4 top |
+|---|---|---|---|
+| full | Best overall | Qwen3.8 27B (ready) | GLM 5.3 Flash glm5-next (+) |
+| full | Smartest | Qwen3.8 27B | GLM-5.3 Max (+, Vulkan) |
+| full | Fastest | Qwen3.6 35B A3B | unchanged |
+| --gpus 0, 32G | Best/Smartest | Qwen3.8 27B | unchanged; K2 Horizon MoVA, Ling-3.0-flash-VL (+) 2-3 |
+| --gpus 0, 32G | Fastest | Gemma 4 12B | K2 Horizon 3.7B (+) |
+| --gpus 1, 64G | Best/Smartest | Qwen3.8 27B | Qwen3.8-Flash-Next qwen4exp (+) |
+| --gpus 1, 64G | Fastest | Qwen3.6 35B A3B | unchanged |
+| --cpu, 16G | Best overall | Qwen3.6 35B A3B | K2 Horizon MoVA Q1_0 (+) |
+| --cpu, 16G | Smartest | Qwen3.8 27B | unchanged |
+| --cpu, 16G | Fastest | Qwen3.6 35B A3B | K2 Horizon MoVA Q1_0 (+) |
+
+Without cmake on PATH the --cpu 16G output equals 1a0ecb6 and the K2 Horizon
+rows are unsupported, last (the original failure stays fixed).
+
+Invariant tests: backend_build_test.go (per-category rank with and without a
+route, unsupported last, unknown probe inert), vulkan_only_test.go,
+recommend_backends_test.go (launch routes, build tools).
+
+Unproven: no build of these arches was run (no GPU, no model downloads), so
+whether each mainline build loads its catalog GGUF, and how fast, is open. The
+catalog stamp unions mainline and ik tables, so an ik-only arch other than
+minimax-m* may be claimed buildable. The ready probe does not apply the
+minimax-m* ik requirement. `recommend --first` (installer default) can now
+name a `+` row.
