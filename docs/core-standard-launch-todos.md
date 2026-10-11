@@ -3222,3 +3222,51 @@ Vulkan-served now). 4070/3090 Ti/CPU top picks unchanged.
 Open: whether the file-backed tie-break should hand a large MoE to Vulkan on
 an NVIDIA host by default (memory safety vs ~3x speed) is a core policy
 question; the CUDA mainline build offer is the existing remedy.
+
+## RELAUNCH — port probe in the backend's own socket style — 2026-10-11
+
+Source: ik_llama 1fddd12 vendors cpp-httplib 0.46, whose
+default_socket_options sets SO_REUSEPORT alone on Linux; every mainline
+server since the first (httplib 0.12.2) did the same until b8560 (5c1a7b835),
+which sets SO_REUSEADDR itself and adds `--reuse-port` (ggrun never passes
+it). The old probe bound with neither option, and always on 127.0.0.1.
+
+Fix (edd6b2d): the predecessor wait (before placement) only asks whether a
+server still answers on the launch address (connect; only a refusal is free).
+After backend selection, and before any backend starts, the port must also
+bind with the backend's option, read from its probed --help: `--reuse-port`
+listed -> SO_REUSEADDR, else SO_REUSEPORT; empty or broken help binds with
+neither (any TIME_WAIT blocks it). Waits are bounded (75 s, then continue
+with a warning). Windows binds as before; other non-Linux systems bind with
+neither option. Invariant tests (real sockets, 127.0.0.2):
+`port_probe_unix_test.go` — TIME_WAIT left by a REUSEPORT or REUSEADDR server
+passes the same style at once, the probe agrees with that backend's own bind
+for every style (mismatch busy), a live listener blocks every style, waits
+stay within their bound; `TestBackendBindStyleFromHelp`.
+
+Live (CPU only, GPU driver mismatched): 127.0.0.2, fresh isolated
+config/cache, Qwen3.5-2B Q4_K_M, `--cpu --calibrate off --ctx 8192`;
+backends from accept-20261007 (ik 1fddd12 CUDA build, mainline Vulkan
+d2462f8). Start, one completion, SIGINT, relaunch on the same port once the
+backend exited. before = 1a0ecb6, after = edd6b2d. Backend start = ggrun's
+"starting backend" line; ready = /health 200; seconds from relaunch start.
+
+| relaunch | build | TIME_WAIT | backend start | ready |
+|---|---|---:|---:|---:|
+| ik -> ik | before | 4 | 1.37 | 2.56 |
+| ik -> ik | after | 4 | 1.44 | 2.51 |
+| mainline -> mainline | before | 1 | 1.75 | 3.44 |
+| mainline -> mainline | after | 1 | 2.34 | 4.08 |
+| mainline -> ik | before | 2 | 1.52 | never: "couldn't bind to server socket", exit 1 |
+| mainline -> ik | after | 2 | 63.63 (waited from 0.49) | 64.65 |
+
+In every TIME_WAIT window a neither-option bind on 127.0.0.2 failed
+(EADDRINUSE) and the matching style bound; the same bind on 127.0.0.1
+passed, which is why the before build did not wait here. Raw logs:
+`ggrun-wf1/logs/relaunch-port-probe/` (first attempt, which left TIME_WAIT
+only by chance, kept in `attempt1-nondeterministic-timewait/`).
+
+Unproven: the ~55 s same-style wait on the default 127.0.0.1 host was not
+reproduced live (no servers on 127.0.0.1 here); the TUI "Run latest
+configuration" path, GPU launches and ik -> mainline were not run live (unit
+tests only); one run per cell. Windows and macOS were only compiled here.
