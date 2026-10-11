@@ -3421,7 +3421,8 @@ overfills, not re-fitted through ikDenseSplit.
 A/B plan amendments (setup, phases, correctness, stop and relaunch as above;
 candidate is this branch's head):
 
-3. MiniMax-M3 multi-GPU, default --claude-code-free launch on the full host.
+3. MiniMax-M3 multi-GPU, the default launch (no --claude-code) on the full
+   host, as A1-minimax-serving.
    Pass: admitted on the first exact preflight; logged KV buffers equal the
    walk (±2 MiB); context not below baseline by more than the plan change
    above (-7.1%) unless the baseline's CUDA0 is shown to overfill (OOM or
