@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 )
@@ -19,12 +20,17 @@ type buildIdentity struct {
 	GoVersion  string `json:"go_version"`
 	Platform   string `json:"platform"`
 	Executable string `json:"executable,omitempty"`
+	// ExecutableResolved is the file whose bytes are running. A user's entry
+	// point is often a wrapper or symlink with the same bytes for every
+	// build, so an identity check hashes this file instead.
+	ExecutableResolved string `json:"executable_resolved,omitempty"`
 }
 
 func currentBuildIdentity() buildIdentity {
 	id := buildIdentity{Version: version, GoVersion: runtime.Version(), Platform: runtime.GOOS + "/" + runtime.GOARCH}
 	if exe, err := os.Executable(); err == nil {
 		id.Executable = exe
+		id.ExecutableResolved = resolvedExecutable(exe)
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, s := range info.Settings {
@@ -40,6 +46,19 @@ func currentBuildIdentity() buildIdentity {
 		}
 	}
 	return id
+}
+
+// resolvedExecutable follows symlinks to an absolute path, or returns "" when
+// the file cannot be resolved; a guessed path would be worse than none.
+func resolvedExecutable(exe string) string {
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return ""
+	}
+	if abs, err := filepath.Abs(resolved); err == nil {
+		return abs
+	}
+	return ""
 }
 
 // cmdVersion keeps `ggrun --version` byte-for-byte unchanged (installers and
