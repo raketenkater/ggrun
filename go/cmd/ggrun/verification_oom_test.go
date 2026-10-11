@@ -36,7 +36,7 @@ func TestVerificationOOMRecordsAStackingReserve(t *testing.T) {
 		return placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, 262144, 512, "q8_0", "gpu", tag, caps.GPUs, 1)[0]
 	}
 
-	msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, canaryOOMLog)
+	msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, canaryOOMLog, nil)
 	if !ok || !strings.Contains(msg, "Launch again") {
 		t.Fatalf("verification OOM not learned: ok=%v msg=%q", ok, msg)
 	}
@@ -44,7 +44,7 @@ func TestVerificationOOMRecordsAStackingReserve(t *testing.T) {
 	if first < 242 {
 		t.Fatalf("recorded reserve %d MiB, want at least one 242 MiB layer", first)
 	}
-	if _, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, canaryOOMLog); !ok {
+	if _, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, canaryOOMLog, nil); !ok {
 		t.Fatal("repeat OOM not learned")
 	}
 	if second := growth(); second <= first {
@@ -61,16 +61,16 @@ func TestVerificationFailureWithoutOOMLearnsNothing(t *testing.T) {
 		"srv  llama_server: model loaded\nfunctional canary did not get a bounded answer\n",
 		"CUDA error: out of memory\n  current device: 0, in function alloc at x.cu:1\n", // still loading: placement, not runtime
 	} {
-		if msg, ok := learnFromVerificationOOM(&launchRequest{}, cfg, model, &backendInfo{}, caps, caps, strategy, nil, log); ok {
+		if msg, ok := learnFromVerificationOOM(&launchRequest{}, cfg, model, &backendInfo{}, caps, caps, strategy, nil, log, nil); ok {
 			t.Fatalf("non-runtime failure was learned as an OOM: %q", msg)
 		}
 	}
 }
 
 // The B2 canary failure, verbatim from the acceptance log
-// (growth-learning-b2.first.ggrun.log): Qwen3.6-35B-A3B on one RTX 4070 with
-// 11,710 MiB free at load and 8,393 + 2,783 + 245 MiB placed, so 290 MiB left
-// when the first request's cuBLAS GEMM failed.
+// (growth-learning-b2.first.ggrun.log): Qwen3.6-35B-A3B on one RTX 4070. The
+// harness's nvidia-smi had the device at 11,871 of 11,873 MiB when the first
+// request's cuBLAS GEMM failed.
 const b2CublasCeilingLog = `ggml_cuda_init: found 1 CUDA devices:
   Device 0: NVIDIA GeForce RTX 4070, compute capability 8.9, VMM: yes, VRAM: 11873 MiB
 CUDA0: using device CUDA0 - 11710 MiB free
@@ -89,8 +89,8 @@ CUDA error: an unsupported value or parameter was passed to the function
 /__w/ggrun/ggrun/.ik_llama.cpp/ggml/src/ggml-cuda.cu:139: CUDA error`
 
 // The B2 serving failure, verbatim (B2-q36-35b-warm log): KV on the host, so
-// 1,798 MiB left at load, and the serving recorder had measured 1,672 MiB of
-// growth when the GEMM failed.
+// the device had 1,798 MiB left by the load's own accounting and only reached
+// its ceiling by growing while serving.
 const b2CublasServingLog = `CUDA0: using device CUDA0 - 11710 MiB free
 llm_load_tensors:      CUDA0 buffer size =  9490.99 MiB
 llama_kv_cache_init:        CPU KV buffer size =  2782.81 MiB
@@ -105,64 +105,85 @@ CUDA error: an unsupported value or parameter was passed to the function
 
 const cublasUnsupportedValue = "CUDA error: an unsupported value or parameter was passed to the function"
 
+// A request whose prompt quotes a backend log, as one escaped VERB line: the
+// owner's normal workflow when working on ggrun through Claude Code.
+const pastedBackendLogRequest = `VERB [      log_server_request] request | tid="123706209792000" timestamp=1791463300 request="{\"messages\":[{\"role\":\"user\",\"content\":\"CUDA0: using device CUDA0 - 11710 MiB free\\nllm_load_tensors:      CUDA0 buffer size =  8392.99 MiB\\nINFO [ main] model loaded\"}]}"`
+
+// insertBeforeFailure puts lines between the load-complete marker and the
+// failing request.
+func insertBeforeFailure(log, lines string) string {
+	return strings.Replace(log, "VERB [            update_slots] decoding batch", lines+"\nVERB [            update_slots] decoding batch", 1)
+}
+
 // cuBLAS reports "an unsupported value or parameter" (INVALID_VALUE) for shape
-// and build incompatibilities too, so it is an OOM only when the device was at
-// its ceiling, and the diagnostics keep the backend's own line.
+// and build incompatibilities too, so it is an OOM only when the device's free
+// VRAM, sampled after the failure, shows it at its ceiling. Log text never
+// stands in for that sample, and the diagnostics keep the backend's own line.
 func TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling(t *testing.T) {
 	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 11873}}}
 	model := &placement.ModelProfile{Path: "m.gguf", RoutedExpertLayerBytes: []int64{242 << 20}}
+	atCeiling := map[int]int{0: 2} // 11,871 of 11,873 MiB, as recorded
 
-	device, reserve, estimated, suspect, ok := runtimeLogCUDAOOM(b2CublasCeilingLog, caps, model, nil, nil)
+	device, reserve, estimated, suspect, ok := runtimeLogCUDAOOM(b2CublasCeilingLog, caps, model, nil, atCeiling)
 	if !ok || device != 0 || !estimated || reserve != 242 {
 		t.Fatalf("B2 ceiling failure not read as a size-less OOM: device=%d reserve=%d estimated=%v ok=%v", device, reserve, estimated, ok)
 	}
-	if !strings.Contains(suspect, cublasUnsupportedValue) || !strings.Contains(suspect, "290 MiB left") {
+	if !strings.Contains(suspect, cublasUnsupportedValue) || !strings.Contains(suspect, "2 MiB free") {
 		t.Fatalf("suspected OOM lost the backend's error or its evidence: %q", suspect)
 	}
-
-	// Serving: only the measured growth puts the device at its ceiling.
-	if _, _, _, _, ok := runtimeLogCUDAOOM(b2CublasServingLog, caps, model, nil, nil); ok {
-		t.Fatal("1,798 MiB left at load and no measured growth was taken for an OOM")
-	}
-	if _, _, _, suspect, ok := runtimeLogCUDAOOM(b2CublasServingLog, caps, model, nil, map[int]int{0: 1672}); !ok || !strings.Contains(suspect, "126 MiB left") {
-		t.Fatalf("B2 serving failure after 1,672 MiB of measured growth not read as an OOM: ok=%v suspect=%q", ok, suspect)
-	}
-
 	for name, log := range map[string]string{
-		// The same line with 12 GiB still free on the device.
-		"far from the ceiling": strings.Replace(b2CublasCeilingLog, "11710 MiB free", "23719 MiB free", 1),
-		// No free-memory report: nothing corroborates an OOM.
-		"no memory evidence": "srv  llama_server: model loaded\n" + cublasUnsupportedValue +
-			"\n  current device: 0, in function ggml_cuda_op_mul_mat_cublas at ggml-cuda.cu:1878\n",
-		// Text in a logged prompt is not the backend's accounting.
-		"evidence in a prompt": "srv  llama_server: model loaded\n" +
-			`VERB [ batch_pending_prompt] prompt tokenized | prompt_tokens="CUDA0: using device CUDA0 - 11710 MiB free` + "\n" +
-			`llm_load_tensors:      CUDA0 buffer size = 11500.00 MiB"` + "\n" +
-			cublasUnsupportedValue + "\n  current device: 0, in function ggml_cuda_op_mul_mat_cublas at ggml-cuda.cu:1878\n",
-		// The same error text from another function is not this failure.
-		"another function": strings.Replace(b2CublasCeilingLog, "ggml_cuda_op_mul_mat_cublas", "ggml_cuda_flash_attn_ext", 1),
+		"serving, KV on the host": b2CublasServingLog,
+		// A prompt quoting free memory and a load marker cannot hide it.
+		"prompt quotes a load": insertBeforeFailure(b2CublasCeilingLog, pastedBackendLogRequest),
 	} {
-		if _, reserve, _, suspect, ok := runtimeLogCUDAOOM(log, caps, model, nil, nil); ok {
+		if _, _, _, suspect, ok := runtimeLogCUDAOOM(log, caps, model, nil, atCeiling); !ok || !strings.Contains(suspect, cublasUnsupportedValue) {
+			t.Errorf("%s: ceiling failure not read as an OOM: ok=%v suspect=%q", name, ok, suspect)
+		}
+	}
+
+	for name, c := range map[string]struct {
+		log  string
+		free map[int]int
+	}{
+		"no sample":                      {b2CublasCeilingLog, nil},
+		"packed but not grown":           {b2CublasCeilingLog, map[int]int{0: 188}}, // the B2 plan right after load
+		"far from the ceiling":           {b2CublasCeilingLog, map[int]int{0: 12000}},
+		"another device at its ceiling":  {b2CublasCeilingLog, map[int]int{1: 2}},
+		"another function":               {strings.Replace(b2CublasCeilingLog, "ggml_cuda_op_mul_mat_cublas", "ggml_cuda_flash_attn_ext", 1), atCeiling},
+		"prompt pastes a full device":    {insertBeforeFailure(b2CublasServingLog, pastedBackendLogRequest), map[int]int{0: 1798}},
+		"prompt pastes, nothing sampled": {insertBeforeFailure(b2CublasServingLog, pastedBackendLogRequest), nil},
+	} {
+		if _, reserve, _, suspect, ok := runtimeLogCUDAOOM(c.log, caps, model, nil, c.free); ok {
 			t.Errorf("%s: cuBLAS error taken for an OOM (reserve %d MiB, %q)", name, reserve, suspect)
 		}
 	}
 }
 
-// Real llama.cpp load lines (fork-auto serve.log): 23,841 MiB free, 2,178 +
-// 19,916 + 883 MiB placed on CUDA1.
-func TestCUDADeviceHeadroomReadsMainlineLoadLines(t *testing.T) {
-	lines := strings.Split(`0.00.603.112 I llama_prepare_model_devices: using device CUDA1 (NVIDIA GeForce RTX 3090 Ti) (0000:65:00.0) - 23841 MiB free
-0.00.827.970 I load_tensors:        CUDA1 model buffer size =  2177.95 MiB
-0.01.190.870 I llama_kv_cache:      CUDA1 KV buffer size = 19915.50 MiB
-0.01.233.018 I sched_reserve:      CUDA1 compute buffer size =   883.20 MiB`, "\n")
-	if headroom, ok := cudaDeviceHeadroomMB(lines, 1, 0); !ok || headroom != 864 {
-		t.Fatalf("CUDA1 headroom = %d ok=%v, want 864", headroom, ok)
+// The sample is matched to runtime devices by PCI bus ID, so a --gpus launch
+// that renumbered the 3090 Ti to CUDA0 reads the 3090 Ti's free memory.
+func TestFreeVRAMByRuntimeDeviceMatchesBusIDs(t *testing.T) {
+	smi := "00000000:17:00.0, 9000\n00000000:65:00.0, 2\n00000000:B3:00.0, 11000\nnot a row\n"
+	gpus := []detect.GPU{{Index: 0, PCIBusID: "00000000:65:00.0"}, {Index: 1, PCIBusID: "00000000:b3:00.0"}}
+	if got := freeVRAMByRuntimeDevice(smi, gpus); len(got) != 2 || got[0] != 2 || got[1] != 11000 {
+		t.Fatalf("free VRAM by runtime device = %v, want map[0:2 1:11000]", got)
 	}
-	if headroom, ok := cudaDeviceHeadroomMB(lines, 1, 400); !ok || headroom != 464 {
-		t.Fatalf("CUDA1 headroom after 400 MiB growth = %d ok=%v, want 464", headroom, ok)
+	if got := freeVRAMByRuntimeDevice(smi, []detect.GPU{{Index: 0}}); got != nil {
+		t.Fatalf("a GPU without a bus ID was sampled: %v", got)
 	}
-	if _, ok := cudaDeviceHeadroomMB(lines, 0, 0); ok {
-		t.Fatal("a device the backend never reported has no headroom evidence")
+	if got := freeVRAMByRuntimeDevice("", gpus); got != nil {
+		t.Fatalf("no nvidia-smi output still produced a sample: %v", got)
+	}
+}
+
+// The quoted line is the failure that ended serving, not a fatal-looking line
+// from the load phase.
+func TestUnrecognizedCrashQuotesTheServingFailure(t *testing.T) {
+	log := "/src/llama.cpp/src/llama-model.cpp:812: unknown key, using default\n" + b2CublasCeilingLog
+	if got := runtimeFatalLine(log); got != cublasUnsupportedValue {
+		t.Fatalf("runtime fatal line = %q, want the cuBLAS error", got)
+	}
+	if msg := unrecognizedCrashMessage(log); !strings.Contains(msg, cublasUnsupportedValue) || strings.Contains(msg, "unknown key") {
+		t.Fatalf("crash message = %q", msg)
 	}
 }
 
@@ -174,7 +195,7 @@ func TestCublasErrorFarFromTheCeilingLearnsNothing(t *testing.T) {
 	cfg := &config.Config{CacheDir: t.TempDir()}
 	model := &placement.ModelProfile{Path: "/models/m.gguf", Name: "m", ModelArch: "test", SizeBytes: 1234,
 		RoutedExpertLayerBytes: []int64{242 << 20}}
-	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24112}},
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 11873}},
 		RAM: detect.RAMInfo{TotalMB: 32768}, CPU: detect.CPUInfo{Model: "cpu", Cores: 8}}
 	be := &backendInfo{Tag: "ik_llama", Identity: "ik-build"}
 	req := &launchRequest{CtxFlag: "262144", KVQuality: "q8_0", KVPlacement: "gpu", Parallel: 1}
@@ -190,14 +211,15 @@ func TestCublasErrorFarFromTheCeilingLearnsNothing(t *testing.T) {
 	if err := os.WriteFile(strategy.PlacementCachePath, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	far := strings.Replace(b2CublasCeilingLog, "11710 MiB free", "23719 MiB free", 1)
-
-	if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, far); ok || msg != "" {
-		t.Fatalf("verification learned an OOM from a cuBLAS error with 12 GiB free: ok=%v msg=%q", ok, msg)
-	}
 	marker := filepath.Join(cfg.CacheDir, "claude.oom-recorded")
-	if _, _, _, _, _, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, far, marker); ok || err != nil {
-		t.Fatalf("Claude Code recorder took the cuBLAS error for an OOM: ok=%v err=%v", ok, err)
+
+	for name, free := range map[string]map[int]int{"room on the device": {0: 9000}, "no sample": nil} {
+		if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, b2CublasCeilingLog, free); ok || msg != "" {
+			t.Fatalf("%s: verification learned an OOM from a cuBLAS error: ok=%v msg=%q", name, ok, msg)
+		}
+		if _, _, _, _, _, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, b2CublasCeilingLog, marker, free); ok || err != nil {
+			t.Fatalf("%s: Claude Code recorder took the cuBLAS error for an OOM: ok=%v err=%v", name, ok, err)
+		}
 	}
 	if got := growth(); got != 0 {
 		t.Fatalf("a non-memory cuBLAS failure reserved %d MiB", got)
@@ -208,12 +230,12 @@ func TestCublasErrorFarFromTheCeilingLearnsNothing(t *testing.T) {
 	if _, err := os.Stat(strategy.PlacementCachePath); err != nil {
 		t.Fatalf("a non-memory cuBLAS failure revoked the plan: %v", err)
 	}
-	if msg := unrecognizedCrashMessage(far); !strings.Contains(msg, cublasUnsupportedValue) {
+	if msg := unrecognizedCrashMessage(b2CublasCeilingLog); !strings.Contains(msg, cublasUnsupportedValue) {
 		t.Fatalf("serving error lost the backend's line: %q", msg)
 	}
 
 	// At the ceiling the same consumer learns, and still names the backend error.
-	msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, b2CublasCeilingLog)
+	msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, b2CublasCeilingLog, map[int]int{0: 2})
 	if !ok || !strings.Contains(msg, "suspected CUDA OOM on device 0") || !strings.Contains(msg, cublasUnsupportedValue) {
 		t.Fatalf("ceiling failure not learned with its original error: ok=%v msg=%q", ok, msg)
 	}

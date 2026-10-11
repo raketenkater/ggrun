@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -56,6 +57,37 @@ func TestServingWatchStopsABackendHungAfterAFatalError(t *testing.T) {
 	}
 	if b.IsRunning() {
 		t.Fatal("the hung backend must be killed")
+	}
+}
+
+// The serving watch samples a failed backend as soon as it sees the fatal
+// line, while the process still holds its memory, and only then.
+func TestServingWatchSamplesAFailedBackendWhileItRuns(t *testing.T) {
+	b := newFakeBackend()
+	b.appendLog("srv  update_slots: all slots are idle\n")
+	var mu sync.Mutex
+	var calls int
+	var runningAtSample bool
+	w := fastServingWatch
+	w.onFatal = func() { mu.Lock(); calls++; runningAtSample = b.IsRunning(); mu.Unlock() }
+	done := make(chan bool, 1)
+	go func() { done <- waitForShutdownCrashOrWedge(b, make(chan os.Signal, 1), silentHealth(t), w) }()
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	if calls != 0 {
+		t.Fatalf("sampled %d time(s) before any fatal line", calls)
+	}
+	mu.Unlock()
+	b.appendLog(ikCublasAbort)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hung backend was not stopped")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 || !runningAtSample {
+		t.Fatalf("failure sample: calls=%d runningAtSample=%v, want one sample of the live backend", calls, runningAtSample)
 	}
 }
 
