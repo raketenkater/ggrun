@@ -2,10 +2,13 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/recommend"
@@ -63,6 +66,34 @@ func archLoadedBy(paths []string, arch string, probe backendArchProbe) (loads, k
 	return false, known
 }
 
+// backendBuildRoute reports whether a launch builds a backend for an
+// architecture no installed backend loads, following unsupportedArchRoutes: a
+// reviewed recipe, or a current-mainline build when upstream registers the
+// architecture. A configured backend name turns those offers off, and each is
+// a source build. Open-PR discovery is not counted: whether it finds a fork
+// is unknown until launch, and the code is unreviewed. A mainline build does
+// not serve an architecture that requires ik_llama (chooseAutoBackend scores
+// it 0), so upstream alone is no route there.
+func backendBuildRoute(arch string, upstream, pinned, buildable bool) bool {
+	if pinned || !buildable {
+		return false
+	}
+	if len(backends.RecipesForArch(arch)) > 0 || reviewedArchBuildAvailable(arch) {
+		return true
+	}
+	return upstream && backends.RequiredBackendForArch(arch) == ""
+}
+
+// buildToolsPresent reports whether the source builds every route runs can
+// start here. Windows has none: buildLlamaForkAt expects bin/llama-server,
+// which a Windows build names llama-server.exe.
+func buildToolsPresent(goos string, onPath func(string) bool) bool {
+	if goos == "windows" {
+		return false
+	}
+	return onPath("git") && onPath("cmake") && (onPath("c++") || onPath("g++") || onPath("clang++"))
+}
+
 // enableInstalledArchSupport lets recommendations flag models that no
 // installed backend loads. Results are cached per architecture for the
 // process; installing a backend means a new ggrun process anyway.
@@ -80,6 +111,20 @@ func enableInstalledArchSupport() {
 		loads, known := archLoadedBy(installedBackendPaths(caps), arch, backends.BackendSupportsArch)
 		cache[arch] = answer{loads, known}
 		return loads, known
+	})
+	pinned := false
+	if cfg, err := config.Load(); err == nil {
+		pinned = configuredBackendExplicit(cfg.Backend)
+	}
+	tools := buildToolsPresent(runtime.GOOS, func(name string) bool {
+		_, err := exec.LookPath(name)
+		return err == nil
+	})
+	recommend.SetBackendRoute(func(caps *detect.Capabilities, arch string, upstream bool) bool {
+		// An NVIDIA host builds with CUDA (acceleratedArchBuildRecipe), which
+		// needs nvcc; defaultAccel looks for it.
+		cuda := !hostHasNVIDIAGPU(caps) || defaultAccel() == "cuda"
+		return backendBuildRoute(arch, upstream, pinned, tools && cuda)
 	})
 	var candidates []autoBackendCandidate
 	candidatesLoaded := false

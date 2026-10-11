@@ -2573,7 +2573,7 @@ func (m Model) viewRecommended() string {
 	}
 
 	idx := 0
-	buildShown := false
+	buildShown, unsupportedShown := false, false
 	writeGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -2596,15 +2596,20 @@ func (m Model) viewRecommended() string {
 			}
 			name := rec.Name
 			limit := 34
-			if rec.NeedsBackendBuild {
-				limit, buildShown = 32, true
+			marker := ""
+			switch rec.BackendStatus {
+			case recommend.BackendNeedsSetup:
+				marker, buildShown = " +", true
+			case recommend.BackendUnsupported:
+				marker, unsupportedShown = " !", true
+			}
+			if marker != "" {
+				limit = 32
 			}
 			if len(name) > limit {
 				name = name[:limit-1] + "…"
 			}
-			if rec.NeedsBackendBuild {
-				name += " +"
-			}
+			name += marker
 			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %5s %7s",
 				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
 			if idx == m.selectedRecommendation {
@@ -2620,7 +2625,10 @@ func (m Model) viewRecommended() string {
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
 	if buildShown {
-		b.WriteString(mutedStyle.Render("  + No installed backend loads it; first launch offers a 20-40 min build.") + "\n")
+		b.WriteString(mutedStyle.Render("  + Installed backends cannot serve it as estimated; first launch offers a 20-40 min build.") + "\n")
+	}
+	if unsupportedShown {
+		b.WriteString(mutedStyle.Render("  ! No installed backend loads it and no supported route builds one here; listed last.") + "\n")
 	}
 	b.WriteString(mutedStyle.Render("  Intel is base-model catalog intelligence (~ estimated), not quantized accuracy.") + "\n")
 	b.WriteString(mutedStyle.Render("  1–2 bit quants are fallbacks within a model; task accuracy is unverified.") + "\n")
