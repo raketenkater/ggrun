@@ -3271,3 +3271,41 @@ catalog stamp unions mainline and ik tables, so an ik-only arch other than
 minimax-m* may be claimed buildable. The ready probe does not apply the
 minimax-m* ik requirement. `recommend --first` (installer default) can now
 name a `+` row.
+
+## RECOMMENDER — mainline stamp and Vulkan readiness split from build state — 2026-10-11
+
+Evidence: review of e7bf2d4. (1) The build route used the catalog's union
+stamp (mainline + ik_llama), so an ik-only arch counted as mainline-buildable:
+DeepSeek V4.1 Flash (deepseek41) is in ik_llama's llama-arch.cpp but not
+mainline's (both fetched 2026-10-11), and the accept-20261007 ik build lacks
+it. The entry above says "not for ik-only arches"; the code then did not hold
+that. (2) A Vulkan-served row that loads now was reported needs_setup, the same
+value as a row that cannot load.
+
+Change (915ec38, recommender only): the catalog stamps `runnable_mainline` from
+the mainline table (updater + embedded catalog; all 114 arch rows match today's
+upstream tables, deepseek41 is the one ik-only arch). Only it opens the
+mainline-build route; a catalog without it falls back to the union stamp. A
+Vulkan-served row is `ready` with `CUDABuildOffered`; only Vulkan rows with no
+CUDA build offered stay after usable rows in Best overall and Fastest. CLI/TUI
+mark Vulkan rows `^`. verify-recommended-download.py reads NeedsBackendBuild
+from older launchers and fails closed when neither key exists.
+
+`recommend --json -n 3`, same probe as above (accept-20261007 backends linked
+read-only, simulated nvidia-smi, build tools and nvcc present): top-3 order in
+all four profiles is identical to e7bf2d4. GLM-5.3 Max (full Smartest #1) and
+Nex-N2-Pro (--gpus 1 Smartest #3) now read `ready`, CUDABuildOffered=true. At
+-n 40, Vulkan rows with a CUDA build offered rise in Best overall (full, --gpus
+0, --gpus 1) and Fastest (full: MiMo, Qwen3.5 397B, Nex-N2-Pro above Hy3 and
+MiniMax-M3 at 11-15); Smartest and --cpu are unchanged.
+
+Invariant tests: backend_build_test.go (ik-only arch unsupported, legacy and
+unstamped catalogs, embedded stamps consistent, JSON keys),
+vulkan_only_test.go (Vulkan row ready, keeps rank with a CUDA build offered),
+recommend_backends_test.go (no nvcc on an NVIDIA host means no route, CLI
+markers have footnotes), tui_test.go (markers and footnotes).
+
+Unproven: no CUDA build of a Vulkan-served arch or mainline build of a `+` arch
+was run (no GPU, no downloads), so the estimates for those rows rest on builds
+that were not measured. `recommend --first` still prints Best overall #1, which
+can be a `+` row.
