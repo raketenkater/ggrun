@@ -3222,3 +3222,113 @@ Vulkan-served now). 4070/3090 Ti/CPU top picks unchanged.
 Open: whether the file-backed tie-break should hand a large MoE to Vulkan on
 an NVIDIA host by default (memory safety vs ~3x speed) is a core policy
 question; the CUDA mainline build offer is the existing remedy.
+
+## LAYER SPLIT — byte-weighted assignment mirrored for ik_llama — 2026-10-11
+
+Follows LAYER SPLIT (2026-10-08). Offline only: the NVIDIA kernel module
+(580.173.02) does not match userspace (580.178), so no GPU run was possible.
+
+Algorithm at 1fddd12 (src/llama.cpp): get_layer_sizes (3573-3799) sizes block
+il as every blk.il tensor (routed experts included even when -ot keeps them on
+the CPU; NextN blocks 0 unless -mtp) plus llama_model::cache_size(il)
+(src/llama-model.cpp:2190): recurrent state x min(n_seq_max, n_ctx), else K+V
+rows at n_ctx, NextN cache included though never allocated. n_ctx, n_seq_max,
+n_ubatch = --ctx-size, --parallel, min(-b, -ub, n_ctx) (common.cpp:4157,
+4208-4210). max_compute = max over blocks of max(routed x n_expert_used,
+shared, dense) FFN ne[1] sums x n_ubatch x 4 plus n_embd x n_ubatch x 4 (x2
+with a norm); MLA with attn_v_b adds 2 x v_head x n_head x n_ctx x 4 under
+-mla 3. Output slot = output.weight + n_vocab x n_ubatch x 4 - max_compute.
+The walk (3966-3990, 4057-4087) normalizes the split in float and fills each
+device to split x (sum + max_compute x devices), max_compute charged once per
+device; a crossing block stays when it overshoots by less than the room it
+leaves; the rest default to the last device. Under -ngl 999 (always emitted
+with a split) the walk starts at block 0 and includes the output slot.
+
+Choice: mirror (a) for the prediction everywhere, and for dense plans use the
+mirror to pick the emitted fractions (b). Translation alone needs the walk to
+invert anyway; the mirror alone leaves dense plans emitting fractions the
+backend reads against a different byte sum (unallocated NextN cache, output
+buffer, max_compute per device), which put up to half a 1.3 GiB attention
+block extra on CUDA0.
+
+Change (f510ce0): `ByteWeightedLayerSplit`, a backend fact set at backend
+selection for ik builds whose help lists --fit (86f4f516, five days after the
+walk; no help or an older build keeps the slot rule). iklayersplit.go mirrors
+get_layer_sizes and the walk; device KV fractions, the MoE owner charges and
+room, the VRAM-delta compute probe and the recovery exchange rate
+(StrategyDeviceKVCacheMB, which now carries slots, ubatch and MTP, so the
+22bd4a8 per-slot recurrent state lands on each block's device) use it. Dense
+ik plans emit, per device in order, the 0.01-grid fraction whose backend
+boundary brings cumulative bytes closest to the fill-fastest intent within
+capacity, centred among grid points giving the same boundary; failing that
+they fill each card as far as it holds, then over every card with room; a
+plan that still overfills a card is refused, so the automatic context search
+lowers the context instead of preflight.
+
+Predicted vs logged (Qwen3.8-27B UD-Q5_K_S, q8_0, from the real GGUF header):
+
+| case | backend log | mirror | slot rule |
+|---|---|---|---|
+| probe 0.27/0.58/0.15, 65,536, np1/np4: blocks | 0-19/20-58/59-65 | same | 0-17/18-56/57-65 |
+| probe: layer table, 66 rows, both np | as logged | all within 0.01 MiB | — |
+| probe: weights CUDA0/1/2 | 4433.47/9917.10/2423.22 | 4433.47/9917.09/2423.22 | 4022/9750/3002 |
+| probe np1: KV | 726.76/1317.52/281.35 | 727/1318/282 | 588/1451/288 |
+| probe np4: KV | 867.03/1598.07/309.41 | 868/1599/310 | 719/1722/335 |
+| --claude-code first preflight, 661,504, np4: CUDA0 KV | 7051 (failed) | 7051 | 5666 |
+| default 1-slot launch, 262,144, 0.13/0.87/0: weights | 2365.29/14408.50 | 2366/14409 | 2141/14634 |
+| same: KV | 1112.94/7740.69 | 1113/7742 | 1110/7745 |
+
+The later preflights (6387 MiB CUDA0 at 593,920; 12202 / 11433 MiB CUDA1)
+decompose exactly into 1,232.5 / 1,075.25 / 1,003 MiB attention blocks plus
+12.47 MiB of 4-slot state per recurrent block, but their re-split fractions
+were not logged, so their assignments are not checked.
+
+Invariant tests (iklayersplit_test.go): the table, assignment and buffers
+above; the failed 7051 MiB allocation; the control split; the fact needs ik,
+--fit and tensor bytes (else the slot rule); single-GPU and CPU-only argv
+identical with and without the fact; mainline dense (explicit and auto,
+including the failing launch's 0.27/0.58/0.15) and MoE plans identical to
+1a0ecb6; across the logged derate sequence (661,504 -> 476,160, 4 slots) every
+ik plan fits each card under the mirror while the slot-rule plans overfill
+CUDA1 by 601 / 1,075 MiB and CUDA0 by 535 MiB; the auto context fits every
+card. TestBackendFeatureCompatibilitySetsByteWeightedSplitFact. Core gate:
+passed (logs/ik-byte-split/core-gate.log; t.TempDir on /tmp, the worktree's
+NTFS disk fails a permission test unrelated to this change).
+
+Planner effects (unit, cold 1,024 MiB compute floors): ik auto context for
+the 4-slot case 622,592 -> 603,136 (GPU2 holding the reviewer is the binding
+card); a synthetic 80B MoE on ik 567,296 / n-cpu-moe 36 -> 513,024 / 34.
+
+Not modelled: an attn_kv_b-only MLA GGUF and a non-q8_0 rebuilt attn_kv_b,
+-amb, Gemma 4 per-layer output tensors, OpenPangu indexer keys, partial
+offload (-ngl < n_layer), the MTP block's KV in kvLayerBytes, the calibration
+topology candidates (invertDenseSplit, denseTopologyCandidates,
+splitOutputOwner) which still use the intent split and slot-rule output owner.
+
+Unproven until a matched live A/B (prediction only, not promotion evidence):
+
+Setup: reboot so NVML works; baseline ggrun 1a0ecb6 and candidate f510ce0
+built into two app dirs of the same acceptance install, same ik_llama
+1fddd12 and reviewer, same model files (Q5_K_S sha256 899e3838...), a fresh
+copy of the same cache dir per arm, nothing else on the GPUs (record
+nvidia-smi free per GPU before each start), server on 127.0.0.2, argv
+identical except the ggrun binary. Per arm: plan argv, every preflight
+(device, allocation, deficit), backend "Setting default device" and
+per-device buffer lines vs the mirror, phases (load, ready, cold prefill,
+cached append, decode, mixed foreground decode + prefill) kept separate,
+Claude Code calc/textstats/inventory/ledger correctness, clean stop (port and
+VRAM released), relaunch to ready.
+
+1. Failing case: `--claude-code` Qwen3.8-27B UD-Q5_K_S, 4 slots, full host.
+   Baseline: start budget exhausted (as A2-q38-27b-claude-code-*). Pass:
+   first exact preflight admits with no context-derate, logged boundaries and
+   KV buffers equal the mirror (±2 MiB), tasks correct, clean relaunch.
+2. Control: default 1-slot launch of the same model (A2-q38-27b-serving).
+   Must not regress: context >= baseline's 262,144, admitted first try,
+   phases within run-to-run noise.
+3. MiniMax-M3 multi-GPU (A1-minimax-serving shape, 442,368 / n-cpu-moe 54):
+   the MoE owners and room now follow the byte walk; compare plan, exact
+   admission, recorded runtime growth, calc correctness, phases, relaunch.
+4. Dense multi-GPU control: Qwen3.5-27B-Q4_K_M default launch, or with
+   --parallel 4 if it lands on one card; no pure-attention dense model of
+   multi-GPU size is in the local acceptance set.
