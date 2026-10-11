@@ -3222,3 +3222,53 @@ Vulkan-served now). 4070/3090 Ti/CPU top picks unchanged.
 Open: whether the file-backed tie-break should hand a large MoE to Vulkan on
 an NVIDIA host by default (memory safety vs ~3x speed) is a core policy
 question; the CUDA mainline build offer is the existing remedy.
+
+## CUBLAS OOM EVIDENCE — an unsupported value is an OOM only at the ceiling — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P2). `cublasWorkspaceOOM` read cuBLAS "an
+unsupported value or parameter" in `ggml_cuda_op_mul_mat_cublas` as a
+size-less OOM from the text alone. cuBLAS reports allocation failure as its own
+status ([CUBLAS_STATUS_ALLOC_FAILED](https://docs.nvidia.com/cuda/cublas/index.html));
+this line is INVALID_VALUE, which non-memory causes raise too. Every recorded
+failure (accept-20261007 logs, read-only) by the backend's own accounting
+(free at load minus that device's buffers) and ggrun's serving recorder:
+
+| log | device | free at load | placed | left | measured growth | at failure |
+|---|---|---:|---:|---:|---:|---:|
+| growth-learning-b2.first, B2 first (canary) | CUDA0 4070 | 11,710 | 11,420 | 290 | — | 290 |
+| B2-q36-35b-learned #1 (serving) | CUDA0 | 11,710 | 11,206 | 504 | 396 | 108 |
+| B2-q36-35b-learned #2 (serving, KV on host) | CUDA0 | 11,710 | 10,396 | 1,314 | 1,146 | 168 |
+| B2-q36-35b-warm (serving, KV on host) | CUDA0 | 11,710 | 9,912 | 1,798 | 1,672 | 126 |
+| A1 MiniMax-M3 (canary, KV on host) | CUDA1 3090 Ti | 23,719 | 21,557 | 2,162 | not sampled | — |
+
+(MiB.) The harness's nvidia-smi put the B2 pool at 11,871/11,873 and A1's
+CUDA1 at 24,110/24,112 when they died; ggrun itself never sees those samples.
+
+Change (89d92d7): the cuBLAS line is a suspected OOM only when that device's
+headroom is <= 512 MiB: free memory from the backend's "using device CUDAn -
+N MiB free" line, minus every CUDAn buffer of the same load (lines before the
+load-complete marker only, so a logged prompt cannot supply evidence), minus
+the peak growth the serving recorder measured (serving loop only). 512 = the
+worst recorded 290 plus one unsampled long-prompt step (~170). Otherwise it is
+an ordinary failure: no revocation, no reserve, no re-plan, and the serving
+message quotes the backend line. A suspected OOM keeps the backend's line and
+the headroom in every message and in the revocation reason.
+
+Invariant tests: `TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling` (real B2
+canary and serving lines; far from the ceiling, no free-memory line, evidence
+only in a prompt, another function), `TestCublasErrorFarFromTheCeilingLearnsNothing`
+(verification learning and the Claude Code recorder record and revoke nothing;
+the same consumer learns 242 MiB at the ceiling), `TestCUDADeviceHeadroomReadsMainlineLoadLines`.
+Core gate passed on the final HEAD (GOFLAGS=-work: on the NTFS disk go's temp
+cleanup otherwise exits 1 after passing tests).
+
+Unproven / open:
+- no live run (driver/userspace mismatch blocks GPU work); checked against
+  recorded logs only;
+- an A1-style canary failure with KV on the host is now an ordinary failure:
+  the log leaves 2,162 MiB and verification samples no VRAM, so nothing is
+  learned and a relaunch repeats it. Sampling the backend's VRAM while it hangs
+  after the fatal line would supply the evidence;
+- 512 MiB comes from one model on one card; a non-memory cuBLAS failure on a
+  device packed within 512 MiB is still read as an OOM (bounded by the
+  existing retry and escalation limits).
