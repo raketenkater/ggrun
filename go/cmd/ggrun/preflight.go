@@ -154,26 +154,27 @@ func (e *liveMemoryProbeConsentError) Error() string {
 	return e.Reason + "; rerun with --allow-live-memory-probe or approve the interactive prompt"
 }
 
-// waitForPredecessorPort blocks until the requested server port is bindable,
-// so placement is not computed against the VRAM of a predecessor still
-// exiting. The settle rounds in detect cannot catch this: a server that has
-// not started releasing yet reads as perfectly stable, and the information
-// that its 43 GB is about to vanish is not in the numbers. The port is: if the
-// previous server still holds it, the machine ggrun is about to measure is not
-// the machine it will launch into -- and launching would fail to bind anyway.
+// waitForPredecessorPort blocks until no server holds the launch address, so
+// placement is not computed against the VRAM of a predecessor still exiting.
+// The settle rounds in detect cannot catch this: a server that has not started
+// releasing yet reads as perfectly stable, and the information that its 43 GB
+// is about to vanish is not in the numbers. The port is: if the previous
+// server still holds it, the machine ggrun is about to measure is not the
+// machine it will launch into. The backend is not chosen yet, so whether its
+// bind can pass the TIME_WAIT connections a clean stop leaves behind is
+// waitForBackendPort's question; they hold no VRAM.
 // Returns false if the port never freed within the timeout, which is worth a
 // warning but not an abort: the holder may be an unrelated persistent server,
 // and then its VRAM use is genuinely occupied and the plan is right to see it.
-func waitForPredecessorPort(port int, timeout time.Duration, warn io.Writer) bool {
+func waitForPredecessorPort(host string, port int, timeout time.Duration, warn io.Writer) bool {
 	if port <= 0 {
 		return true
 	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	deadline := time.Now().Add(timeout)
 	waited := false
 	for {
-		ln, err := listenLikeBackend(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-		if err == nil {
-			_ = ln.Close()
+		if !predecessorHoldsPort(addr) {
 			if waited {
 				// The process releases the port before the driver finishes
 				// releasing its VRAM; give the frees a moment to land and let
@@ -187,6 +188,64 @@ func waitForPredecessorPort(port int, timeout time.Duration, warn io.Writer) boo
 		}
 		if !waited {
 			fmt.Fprintf(warn, "[launch] port %d is still held by the previous server; waiting for it to exit so placement sees the real free VRAM\n", port)
+			waited = true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// portBindStyle is the reuse option a backend's HTTP listener sets. On Linux a
+// bind passes the previous server's TIME_WAIT sockets only when both carry the
+// same one, so the probe must bind with the backend's option, not ggrun's.
+type portBindStyle int
+
+const (
+	// bindStyleUnknown sets neither option: any socket on the port reads busy.
+	bindStyleUnknown portBindStyle = iota
+	// bindStyleReuseAddr: mainline llama-server since b8560 (5c1a7b835) sets
+	// SO_REUSEADDR itself, and added --reuse-port in the same change.
+	bindStyleReuseAddr
+	// bindStyleReusePort: cpp-httplib's default, SO_REUSEPORT alone where the
+	// OS has it. ik_llama (1fddd12 vendors httplib 0.46) and older mainline.
+	bindStyleReusePort
+)
+
+// backendBindStyle reads the listener's reuse option from the probed --help.
+// Every llama.cpp-family server binds through cpp-httplib; the ones listing
+// --reuse-port replace its default with SO_REUSEADDR. Empty or broken help
+// stays unknown.
+func backendBindStyle(be *backendInfo) portBindStyle {
+	if be == nil || strings.TrimSpace(be.Help) == "" || backendLoaderFailed(be.Help) {
+		return bindStyleUnknown
+	}
+	if helpHasExactFlag(be.Help, "--reuse-port") {
+		return bindStyleReuseAddr
+	}
+	return bindStyleReusePort
+}
+
+// waitForBackendPort blocks until the selected backend could bind the launch
+// address: no server answers there and a bind with the backend's own reuse
+// option succeeds. Probing with other options waited out the full TIME_WAIT
+// after every clean stop (~55 s) for a port the backend could already bind,
+// or reported free a port it could not. Returns false on timeout.
+func waitForBackendPort(host string, port int, style portBindStyle, timeout time.Duration, warn io.Writer) bool {
+	if port <= 0 {
+		return true
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	deadline := time.Now().Add(timeout)
+	waited := false
+	for {
+		err := backendPortBusy(addr, style)
+		if err == nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		if !waited {
+			fmt.Fprintf(warn, "[launch] port %d is not yet bindable by the backend (%v); waiting for the previous server's connections to close\n", port, err)
 			waited = true
 		}
 		time.Sleep(500 * time.Millisecond)

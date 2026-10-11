@@ -4,8 +4,19 @@ package main
 
 import "net"
 
-// listenLikeBackend binds as the backend will. Go does not set SO_REUSEADDR
+// predecessorHoldsPort binds as the backend will. Go does not set SO_REUSEADDR
 // on Windows, so the default listener already matches.
-func listenLikeBackend(addr string) (net.Listener, error) {
-	return net.Listen("tcp", addr)
+func predecessorHoldsPort(addr string) bool {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return true
+	}
+	_ = ln.Close()
+	return false
+}
+
+// backendPortBusy adds nothing on Windows: predecessorHoldsPort already bound
+// the launch address the way the backend does.
+func backendPortBusy(string, portBindStyle) error {
+	return nil
 }

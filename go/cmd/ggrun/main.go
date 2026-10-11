@@ -6686,8 +6686,7 @@ func cmdLaunch(args []string) {
 	if launchPort <= 0 {
 		launchPort = cfg.Port
 	}
-	// 75 s outlasts Linux's 60 s TIME_WAIT left by the previous server.
-	if !waitForPredecessorPort(launchPort, 75*time.Second, os.Stderr) {
+	if !waitForPredecessorPort(req.Host, launchPort, 75*time.Second, os.Stderr) {
 		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 75s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
 	}
 	if releaseIsPending(cfg.CacheDir) {
@@ -6764,6 +6763,10 @@ func cmdLaunch(args []string) {
 	if err := guardPortFree(req.Port, "launch"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	// 75 s outlasts Linux's 60 s TIME_WAIT left by the previous server.
+	if !waitForBackendPort(req.Host, req.Port, backendBindStyle(be), 75*time.Second, os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[launch] port %d is still not bindable by the backend after 75s; continuing, but the bind may fail\n", req.Port)
 	}
 
 	// Claude Code's Auto permission checks must not run on the giant coding
