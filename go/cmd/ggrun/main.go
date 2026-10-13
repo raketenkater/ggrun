@@ -2943,6 +2943,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	// spilling the model into system RAM.
 	opts.DenseCPUOffloadPrompt = req.DenseOffloadPrompt
 	requestedParallel := claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet, req.ClaudeProfile)
+	requestedParallel = claudeHybridSSMSlots(requestedParallel, model, req.ClaudeCode, req.ParallelSet, req.ClaudeProfile)
 	opts.Parallel = claudeCodeSlotsForPlacement(
 		requestedParallel,
 		opts.ContextSize, req.ClaudeCode, req.ParallelSet,
@@ -3053,6 +3054,32 @@ func claudeCodeParallel(parallel int, claudeCode, explicit bool, profile string)
 		}
 	}
 	return parallel
+}
+
+// claudeHybridSSMSlots keeps Claude Code's automatic slot count at one for a
+// model with an SSM layout (the Qwen3.5-3.8 / qwen3next family). On the
+// bundled ik_llama build, four slots of Qwen3.8-27B produced corrupted output
+// in a Claude Code session (tool-call markup decaying into "</it>\note"
+// repeats until the 32,000-token limit), both in default Claude mode and with
+// --parallel 4, and again when the same traffic was replayed offline; across
+// a dozen one-slot sessions of the same model none did (2026-10-13). Mixed
+// prefill/decode batches of such a model also fall back to single-token
+// chunks there, so the slots are slower as well. An explicit --parallel or
+// the parallel profile is still honored, with a warning.
+func claudeHybridSSMSlots(parallel int, model *placement.ModelProfile, claudeCode, explicit bool, profile string) int {
+	if !claudeCode || model == nil || model.HasSSM == 0 || parallel <= 1 {
+		return parallel
+	}
+	if explicit || profile == claudeProfileParallel {
+		claudeHybridSSMWarn(parallel)
+		return parallel
+	}
+	fmt.Fprintf(os.Stderr, "[claude-code] %s has an SSM layout: one slot (multi-slot output on this model family was corrupted on the bundled backend; --parallel N overrides)\n", model.Name)
+	return 1
+}
+
+var claudeHybridSSMWarn = func(parallel int) {
+	fmt.Fprintf(os.Stderr, "[claude-code] warning: %d slots on an SSM-layout model; multi-slot output on this model family was corrupted on the bundled backend\n", parallel)
 }
 
 // claudeSlotTarget is the per-slot context Claude Code comfortably works in.
