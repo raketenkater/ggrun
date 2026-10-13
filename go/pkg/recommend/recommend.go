@@ -309,11 +309,53 @@ func DisplayFit(fit string) string {
 	}
 }
 
+// companionParamRatio: the quants of one model all imply about the same
+// parameter count (file size over bytes per weight; dynamic quants keep it
+// within ~2x; gpt-oss "BF16" keeps MXFP4 experts and implies 6.8x fewer, a
+// low-bit DeepSeek V4 Pro 4.1x). A draft, MTP or projector file implies 22-123x
+// fewer in the rows seen (MiMo-V2.6 Flash/Pro, Qwen3.8-Flash-Next, Muse).
+const companionParamRatio = 15
+
+// dropCompanionSizedQuants removes quants whose implied parameter count is
+// under 1/companionParamRatio of the row's largest. The catalog builder skips
+// such files by name, but a runtime refresh can fetch a catalog an older
+// builder wrote: main's 2026-10-13 refresh listed MiMo-V2.6-Flash Q4_0 / Q8_0 /
+// BF16 at 1.26 / 5.28 / 9.92 GB, the mtp and dflash heads beside the 167 GB
+// MXFP4, and that Q8_0 became the hosted CPU runners' top pick.
+func dropCompanionSizedQuants(c Candidate) Candidate {
+	implied := func(q QuantOption) float64 {
+		bytes := float64(q.SizeBytes)
+		if bytes <= 0 {
+			bytes = q.SizeGB * 1e9
+		}
+		if bpw := bytesPerWeight(q.Name); bpw > 0 {
+			return bytes / bpw
+		}
+		return 0
+	}
+	most := 0.0
+	for _, q := range c.Quants {
+		most = max(most, implied(q))
+	}
+	if most <= 0 {
+		return c
+	}
+	kept := c.Quants[:0:0]
+	for _, q := range c.Quants {
+		if p := implied(q); p > 0 && p*companionParamRatio < most {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	c.Quants = kept
+	return c
+}
+
 func Shortlist() []Candidate {
 	var doc catalogDoc
 	if err := json.Unmarshal(catalogBytes(), &doc); err == nil && len(doc.Candidates) > 0 {
 		for i := range doc.Candidates {
-			doc.Candidates[i] = inferParams(doc.Candidates[i])
+			doc.Candidates[i] = inferParams(dropCompanionSizedQuants(doc.Candidates[i]))
 		}
 		return doc.Candidates
 	}
