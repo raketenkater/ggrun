@@ -700,9 +700,14 @@ type Options struct {
 	// from authoritative fit decisions. The contained allocation preflight then
 	// supplies exact evidence before ggrun permits a real launch.
 	RequireMeasuredBuffers bool
-	BackendTag             string // "llama" or "ik_llama"
-	BackendCacheTag        string // backend identity for probe/cache isolation; defaults to BackendTag
-	BackendIdentity        string // exact backend build/commit identity for speculative performance profiles
+	// AutomaticContextCandidate marks a context the automatic-context search
+	// is trying, not one the user asked for. Such a candidate must leave the
+	// cold reserves free: a fallback that fits it against measured buffers
+	// alone would let the search grow context into headroom nothing measured.
+	AutomaticContextCandidate bool
+	BackendTag                string // "llama" or "ik_llama"
+	BackendCacheTag           string // backend identity for probe/cache isolation; defaults to BackendTag
+	BackendIdentity           string // exact backend build/commit identity for speculative performance profiles
 	// CPUExpertMMapCapability is an explicit loader capability supplied by the
 	// command layer after probing the exact backend binary. Core launches always
 	// set it. Empty retains the historical tag-derived behavior only for legacy
@@ -1437,6 +1442,7 @@ func stableAutoContextOptions(opts Options) Options {
 func automaticContextCandidateOptions(opts Options, context int, quality, kvPlacement string, parallel int) Options {
 	candidate := stableAutoContextOptions(opts)
 	candidate.ContextSize = context
+	candidate.AutomaticContextCandidate = true
 	candidate.AutoContextMax = 0
 	candidate.KVQuality = quality
 	candidate.KVPlacement = kvPlacement
@@ -2618,13 +2624,21 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	// and rounds each boundary to a block edge (iklayersplit.go). Emit the
 	// fractions whose backend boundaries hold the intended bytes, and refuse a
 	// plan whose weights and KV alone overfill a card beyond its measured
-	// reserves; a cold compute estimate does not refuse.
+	// reserves; for an explicit context a cold compute estimate does not
+	// refuse, exact preflight decides. An automatic-context candidate keeps the
+	// cold reserve: fitting it against measured buffers alone, which are 0 when
+	// nothing was measured, grew the 4-slot --claude-code context from 603,136
+	// to 622,592 and left CUDA1 636 MiB where the failed launch implied about
+	// 755 MiB was needed.
 	if model.ByteWeightedLayerSplit {
 		gpuKVMB := kvTotalMB
 		if s.KVPlacement == "cpu" {
 			gpuKVMB = 0
 		}
 		measuredComputeForGPU := func(idx int) int {
+			if opts.AutomaticContextCandidate {
+				return computeBufForGPU(idx)
+			}
 			if pc == nil {
 				return 0
 			}

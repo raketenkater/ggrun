@@ -389,8 +389,9 @@ type ikDenseDevice struct {
 	FreeMB     int
 	CapacityMB int // free less CUDA context, compute buffer and projector, at least 0
 	// FirmMB is CapacityMB reserving only a measured compute buffer. A split
-	// that overfills CapacityMB but not FirmMB is emitted: the cold compute
-	// estimate only ranks, and exact preflight decides.
+	// that overfills CapacityMB but not FirmMB is emitted for an explicit
+	// context: the cold compute estimate only ranks, and exact preflight
+	// decides. For an automatic-context candidate FirmMB equals CapacityMB.
 	FirmMB int
 }
 

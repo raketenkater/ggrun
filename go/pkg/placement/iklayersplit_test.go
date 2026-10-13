@@ -312,6 +312,33 @@ func TestIKAutoContextFitsEveryDevice(t *testing.T) {
 	t.Logf("auto ctx=%d split %v", s.ContextSize, s.TensorSplit)
 }
 
+// Nothing measured the compute buffer or runtime growth of the 4-slot
+// --claude-code plan, so the automatic context must leave every used card its
+// cold reserve. Fitting the search's candidates against measured buffers
+// alone (0 here) grew the context to 622,592 and left CUDA1 636 MiB where the
+// failed launch implied about 755 MiB was needed. An explicit context keeps
+// that fallback: exact preflight decides it (TestIKDenseSplitRefusesOnlyOnFirmCapacity).
+func TestIKAutoContextKeepsTheColdReserveOnEveryCard(t *testing.T) {
+	caps := claudeCodeBox()
+	opts := claudeCodeOptions(t, 0)
+	model := qwen38Q5KSProfile()
+	s, err := Compute(caps, model, opts)
+	if err != nil {
+		t.Fatalf("auto context: %v", err)
+	}
+	cold := opts
+	cold.RequireMeasuredBuffers = false
+	if _, computeBufMB := perGPUOverheadMB(caps, model, s, cold); computeBufMB < computeFloorMB {
+		t.Fatalf("cold compute reserve %d MiB, want the %d MiB floor: the test needs an unmeasured cache", computeBufMB, computeFloorMB)
+	}
+	if over, dev := ikPlanOverfill(t, caps, model, s, cold); over > 0 {
+		t.Fatalf("auto ctx=%d split %v: CUDA%d is %d MiB into its unmeasured cold reserve", s.ContextSize, s.TensorSplit, dev, over)
+	}
+	if s.ContextSize >= 622592 {
+		t.Fatalf("auto ctx=%d, want below the 622,592 the measured-only fallback planned", s.ContextSize)
+	}
+}
+
 // syntheticMoEProfile is an 80B-class MoE with per-block tensor bytes: three
 // dense leading blocks, then 2 GiB of routed experts per block.
 func syntheticMoEProfile() *ModelProfile {
