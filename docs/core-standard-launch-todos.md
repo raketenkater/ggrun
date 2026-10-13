@@ -3791,3 +3791,49 @@ recaptured on the final installed candidate.
 Unproven: all of the above is offline. Live A/B, exact admission, Claude mode
 with companion, explicit 4 slots versus the 1-slot control, the cuBLAS
 sampling path and the build route remain.
+
+## DENSE PLANS — the guard's CUDA overhead was planned as zero — 2026-10-13
+
+Live, candidate `v3.2.10-173-g475e592` installed by `setup-linux.sh` (auto
+mode, local bundle dir: ik_llama 1fddd12 + #2356 built with the release cmake
+flags, CUDA 13.2; Vulkan d2462f8 from the v3.2.10 asset) into an isolated
+HOME, fresh cache per configuration, full host, Qwen3.8-27B UD-Q5_K_S
+(sha256 899e3838...). Harness `accept-20261013/harness/cell_accept.py` (127.0.0.1:8081,
+Claude Code 2.x client, objective unittest oracle). Evidence
+`2tb-disk/ggrun-accept-20261013-evidence/p1/`.
+
+| cell | outcome |
+|---|---|
+| 1-slot default, first launch | PASS: ready 153 s (262,144 ctx, split 0.13/0.87/0); calc 90 / textstats 68 / inventory 82 s; cold prefill 1,400 tok/s (9,461 tokens), decode 30.8 tok/s median; stream, cancel, reconnect, stop 0.6 s |
+| same, cached relaunch | PASS: ready 7 s (one load), sustained ledger task 30 turns correct in 240 s |
+| same, three tasks concurrently | PASS: makespan 341 s (worse than 240 s sequential): one slot alternates conversations, 170,898 prompt tokens re-processed vs 86,352 |
+| `--claude-code` default (Auto reviewer on GPU 2, 4 slots) | FAIL: 6 contained probes in 27 s, start budget exhausted |
+
+The `--claude-code` failure, from the backend's probe logs and memguard
+records (`cache/p1-cc/memory-probes/failed-*.log`): the plan put 4,433 MiB of
+weights + 6,413 MiB of KV on CUDA0 (11,612 MiB physically free), and the guard
+denied the KV 10 MiB short. Each re-plan then re-split the cards and the next
+denial was 726 / 724 / 649 MiB on CUDA0 or CUDA1. These were guard denials,
+not device OOMs. Root cause (scratch-build trace, `GGRUN_TRACE_IK`): with no
+system probe the dense planner's CUDA overhead is `measuredCUDAOverheadMB` = 0,
+while the guard limit is free less `PlanningCUDAOverheadByGPU` = 1,024 MiB per
+unmeasured card (the MoE planner and optimizer use the same planning value).
+The automatic search's 1,024 MiB cold compute reserve was spent on the
+guard's overhead (10 MiB miss); the exact re-plans, which drop the cold
+reserve, overran the guard by the whole ~1 GiB less the backend's real compute
+(~300 MiB). No fresh cache ever got a system probe in these runs.
+
+Fix (e40c127): dense planning paths (single GPU, multi-GPU dense and its ik
+capacities, dense auto-ctx reduction, batch tier, memory check) use
+`planningCUDAOverheadMB`, the largest PlanningCUDAOverheadByGPU value on the
+selected GPUs. Invariant `TestDensePlanStaysInsideTheGuardOnAFreshCache`
+(1 and 4 slots, unmeasured cache: weights + KV + cold compute within free less
+the guard overhead on every card); mutation to measured-or-zero overruns CUDA1
+by 1,008 MiB. Tests whose subject is not the unmeasured reserve now state their
+overhead (`measuredOverheadCache`, or the rig's measured 488/311/367 MiB for
+the ik fixtures); ik goldens re-pinned (auto 578,560 at 0.27/0.59/0.14 on
+mainline, 565,248 on ik); the cmd derate simulation enforces the guard's limit
+instead of a 755 MiB stand-in and still shows the walk converging in one derate
+while the slot rule moves the deficit. Core gate uncached: pass.
+
+Unproven: live rerun on e40c127 (p1r2) pending at time of writing.
