@@ -29,9 +29,39 @@ OPEN_WEIGHTS_PAGE_URL = "https://artificialanalysis.ai/leaderboards/models?weigh
 HF_MODEL_API_URL = "https://huggingface.co/api/models"
 DEFAULT_CATALOG_LIMIT = 100
 QUANT_PATTERN = re.compile(
-    r"(IQ[1-8]_(?:XXS|XS|NL|S|M|L)|Q[1-9]_(?:K_?(?:XL|XL_?M|L|S|M)|0|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
+    r"(TQ[12]_0|IQ[1-8]_(?:XXS|XS|NL(?:_XL)?|S|M|L)|Q[1-9]_(?:K(?:_?(?:XL(?:_?M)?|L|S|M))?|[01]|[1-9]_?[KS])|MXFP4(?:_MOE)?|MXP4(?:_MOE)?|BF16|F16|F32|F8|I4)",
     re.IGNORECASE,
 )
+
+# Speculative-decoding heads published beside the weights under the same quant
+# names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). Counting them made a
+# 2 GB MTP head a "Q4_0" of a 1T model.
+DRAFT_HEAD_NAMES = ("mtp", "dflash")
+
+
+def is_calibration_or_adapter(path):
+    # Importance matrices can themselves be GGUFs, even hundreds of MiB,
+    # and inherit a source precision in their name. They are not weights.
+    parts = path.lower().replace("_", "-").split("/")
+    return (parts[-1].endswith(("-imatrix.gguf", "-adapter.gguf", "-lora.gguf"))
+            or parts[-1].startswith(("imatrix-", "adapter-", "lora-"))
+            or any(p in {"imatrix", "adapters", "adapter", "lora"} for p in parts[:-1]))
+
+
+def is_draft_head_gguf(path: str) -> bool:
+    parts = path.lower().split("/")
+    return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
+        part in DRAFT_HEAD_NAMES for part in parts[:-1])
+
+
+def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
+    """Only main-model weights may inherit a leaderboard score, even in draft-only repos."""
+    ggufs = [item for item in siblings if isinstance(item, dict)
+             and str(item.get("rfilename") or "").lower().endswith(".gguf")
+             and "mmproj" not in str(item.get("rfilename") or "").lower()
+             and not is_calibration_or_adapter(str(item.get("rfilename") or ""))]
+    weights = [item for item in ggufs if not is_draft_head_gguf(str(item.get("rfilename") or ""))]
+    return weights
 
 TRUSTED_GGUF_OWNERS = {
     "unsloth": 140,
@@ -560,6 +590,42 @@ def fetch_hf_model_info(repo: str) -> dict[str, Any] | None:
     return data
 
 
+SHARD_PATTERN = re.compile(r"^(.*)-(\d+)-of-(\d+)\.gguf$", re.IGNORECASE)
+
+
+def artifact_quant(path: str) -> str:
+    """Use the final quant label; model names can themselves contain BF16."""
+    basename = path.rsplit("/", 1)[-1]
+    matches = list(QUANT_PATTERN.finditer(basename))
+    if not matches:
+        matches = list(QUANT_PATTERN.finditer(path.rsplit("/", 1)[0])) if "/" in path else []
+        source = path.rsplit("/", 1)[0]
+    else:
+        source = basename
+    if not matches:
+        return ""
+    match = matches[-1]
+    quant = normalize_quant(match.group())
+    if source[max(0, match.start() - 3):match.start()].upper() == "UD-":
+        quant = "UD-" + quant
+    return quant
+
+
+def complete_shards(paths: list[str]) -> bool:
+    """An artifact is one standalone file or every shard, exactly once."""
+    matches = [SHARD_PATTERN.fullmatch(p) for p in paths]
+    if not any(matches):
+        return len(paths) == 1
+    if not all(matches):
+        return False
+    totals = {int(m.group(3)) for m in matches}
+    if len(totals) != 1:
+        return False
+    total = totals.pop()
+    indices = {int(m.group(2)) for m in matches}
+    return total > 0 and len(paths) == total and indices == set(range(1, total + 1))
+
+
 def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     key = repo.lower()
     if key in HF_QUANT_CACHE:
@@ -572,44 +638,33 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     if not isinstance(siblings, list):
         HF_QUANT_CACHE[key] = []
         return []
-    quant_sizes: dict[str, dict[str, int | bool]] = {}
-    for item in siblings:
-        if not isinstance(item, dict):
-            continue
+    # Group complete artifacts before adding sizes. Different files with the
+    # same quant are not necessarily shards of the same model.
+    groups: dict[str, dict[str, list[tuple[str, int | None]]]] = {}
+    for item in model_weight_siblings(siblings):
         fname = str(item.get("rfilename") or "")
-        if not fname.lower().endswith(".gguf") or "mmproj" in fname.lower():
+        quant = artifact_quant(fname)
+        if not quant:
             continue
-        # For LFS-tracked files (all real GGUF weights) item["size"] is the tiny
-        # pointer-file size; the actual blob size is in item["lfs"]["size"].
-        # Reading the pointer size is what produced phantom quants like
-        # "F16 = 0.9GB" for a 30B model. Prefer the LFS size.
-        size = None
-        lfs = item.get("lfs")
-        if isinstance(lfs, dict) and isinstance(lfs.get("size"), int):
-            size = lfs["size"]
-        elif isinstance(item.get("size"), int):
-            size = item.get("size")
-        if not isinstance(size, int) or size <= 0:
-            continue
-        basename = fname.rsplit("/", 1)[-1]
-        # Unsloth dynamic quants carry a "UD-" prefix (e.g. UD-IQ4_XS).
-        # Preserve it so the recommender knows this is an optimized quant
-        # (loss * 0.7) rather than a generic quant of the same type.
-        is_dynamic = "-UD-" in basename or basename.upper().startswith("UD-")
-        matches = QUANT_PATTERN.findall(basename)
-        if not matches and "/" in fname:
-            matches = QUANT_PATTERN.findall(fname.split("/", 1)[0])
-        for match in matches:
-            quant = normalize_quant(match)
-            if is_dynamic:
-                quant = "UD-" + quant
-            entry = quant_sizes.setdefault(quant, {"size": 0, "dynamic": is_dynamic})
-            entry["size"] = entry["size"] + size
-            entry["dynamic"] = is_dynamic or entry["dynamic"]
-    quants = [
-        {"name": name, "size_gb": round(info["size"] / 1073741824, 2), "size_bytes": info["size"], "dynamic": info["dynamic"]}
-        for name, info in sorted(quant_sizes.items(), key=lambda row: row[1]["size"])
-    ]
+        size = item.get("size")
+        if isinstance(item.get("lfs"), dict):
+            size = item["lfs"].get("size", size)
+        shard = SHARD_PATTERN.fullmatch(fname)
+        stem = shard.group(1) if shard else fname
+        groups.setdefault(quant, {}).setdefault(stem, []).append((fname, size))
+    quants = []
+    for quant, variants in groups.items():
+        complete = [files for files in variants.values()
+                    if complete_shards([name for name, _ in files])]
+        if len(complete) != 1:
+            continue  # ambiguous model variants must not be added together
+        files = complete[0]
+        if any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for _, size in files):
+            continue  # missing size must not make a shard set appear smaller
+        size = sum(size for _, size in files)
+        quants.append({"name": quant, "size_gb": round(size / 1073741824, 2),
+                       "size_bytes": size, "dynamic": quant.startswith("UD-")})
+    quants.sort(key=lambda q: q["size_bytes"])
     HF_QUANT_CACHE[key] = quants
     return quants
 
@@ -635,18 +690,12 @@ def _gguf_resolve_url(repo: str, fname: str) -> str:
 def _representative_gguf_file(siblings: list[dict[str, Any]]) -> str | None:
     # Prefer the first shard of a split model (KV metadata is duplicated across
     # shards, so shard 1 always carries it). Fall back to any non-mmproj GGUF.
-    candidates: list[tuple[str, int]] = []
-    for item in siblings:
-        if not isinstance(item, dict):
-            continue
+    groups: dict[str, list[str]] = {}
+    for item in model_weight_siblings(siblings):
         fname = str(item.get("rfilename") or "")
-        if not fname.lower().endswith(".gguf") or "mmproj" in fname.lower():
-            continue
-        size = 0
-        lfs = item.get("lfs")
-        if isinstance(lfs, dict) and isinstance(lfs.get("size"), int):
-            size = lfs["size"]
-        candidates.append((fname, size))
+        shard = SHARD_PATTERN.fullmatch(fname)
+        groups.setdefault(shard.group(1) if shard else fname, []).append(fname)
+    candidates = [(name, 0) for paths in groups.values() if complete_shards(paths) for name in paths]
     if not candidates:
         return None
     # "00001-of" or "-of-00001" (single file) sorts first.
@@ -784,6 +833,10 @@ VARIANT_QUALIFIERS = {
     # "Heretic" retune does not carry the original's benchmark score.
     "abliterated", "ablated", "decensored", "heretic", "lorablated", "merge",
     "merged", "nsfw", "roleplay", "uncensored",
+    # Domain fine-tunes carry their own leaderboard rows: Ling 3.0 Flash was
+    # resolved to the finance retune Ling-3.0-flash-Fin, and the duplicate repo
+    # then dropped the base model from the catalog.
+    "fin",
 }
 
 
@@ -808,7 +861,13 @@ def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[
     return bool(creator) and (prefix.startswith(creator) or creator.startswith(prefix))
 
 
+def auxiliary_repo(repo: str) -> bool:
+    return bool(raw_name_tokens(repo_name(repo)) & {"mtp", "dflash", "draft", "mmproj", "adapter", "lora"})
+
+
 def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
+    if auxiliary_repo(candidate_repo):
+        return False
     target_query = model_query(row)
     target_tokens = tokens(target_query)
     # Judge the repository's model name, not its owner: "DevQuasar-4" once
@@ -943,7 +1002,7 @@ def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list
     inspected: set[str] = set()
 
     base = huggingface_repo(row)
-    if base and "gguf" in base.lower():
+    if base and "gguf" in base.lower() and not auxiliary_repo(base):
         quants = fetch_hf_quants(base)
         inspected.add(base.lower())
         if quants:
@@ -953,7 +1012,7 @@ def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list
     for query in search_queries(row):
         for item in search_hf_models(query, search_limit):
             repo = search_model_id(item)
-            if not repo or "gguf" not in repo.lower():
+            if not repo or "gguf" not in repo.lower() or auxiliary_repo(repo):
                 continue
             if not candidate_relevant(repo, row) and not base_model_tag_matches(item, row):
                 continue
@@ -972,6 +1031,8 @@ def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list
 
     if not ranked:
         for repo in direct_repo_candidates(row)[:4]:
+            if auxiliary_repo(repo):
+                continue
             if repo.lower() in inspected:
                 continue
             inspected.add(repo.lower())
@@ -1129,14 +1190,14 @@ def parse_arch_names(source: str) -> set[str]:
     return {name.lower() for name in re.findall(r'\{\s*LLM_ARCH_\w+\s*,\s*"([^"]+)"', body[:end])}
 
 
-def fetch_upstream_arches() -> set[str] | None:
-    """Union of upstream architecture names, or None when any table is unreadable.
+def fetch_upstream_arch_tables() -> dict[str, set[str]] | None:
+    """Architecture names per upstream table, or None when any table is unreadable.
 
     A partial union would mark rows the missing backend loads as unrunnable, so
     an incomplete fetch stamps nothing and the recommender falls back to its
     explicit blocklist.
     """
-    names: set[str] = set()
+    tables: dict[str, set[str]] = {}
     for label, url in UPSTREAM_ARCH_TABLES:
         try:
             parsed = parse_arch_names(fetch_text(url, timeout=30))
@@ -1146,14 +1207,23 @@ def fetch_upstream_arches() -> set[str] | None:
         if not parsed:
             print(f"warning: {label} architecture table had no entries; runnability not stamped", file=sys.stderr)
             return None
-        names |= parsed
-    return names
+        tables[label] = parsed
+    return tables
 
 
-def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) -> None:
+def fetch_upstream_arches() -> set[str] | None:
+    """Union of upstream architecture names, or None when any table is unreadable."""
+    tables = fetch_upstream_arch_tables()
+    return set().union(*tables.values()) if tables else None
+
+
+def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None, mainline: set[str] | None = None) -> None:
     """Mark each row with a known GGUF architecture as loadable upstream or not.
 
     The stamp labels fork-only rows; it never removes them from recommendations.
+    runnable_mainline records the mainline table alone: the launcher's automatic
+    builds are mainline (or a reviewed recipe), so an architecture only ik_llama
+    registers has no build route.
     """
     if not arches:
         return
@@ -1161,6 +1231,15 @@ def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) ->
         arch = str(cand.get("arch") or "").lower()
         if arch:
             cand["runnable"] = arch in arches
+            if mainline:
+                cand["runnable_mainline"] = arch in mainline
+
+
+def stamp_upstream(candidates: list[dict[str, Any]], tables: dict[str, set[str]] | None) -> None:
+    """Stamp runnable and runnable_mainline from fetched upstream tables."""
+    if not tables:
+        return
+    stamp_runnable(candidates, set().union(*tables.values()), tables.get("llama.cpp"))
 
 
 def catalog_intelligence(row: dict[str, Any]) -> float:
@@ -1206,10 +1285,10 @@ def main() -> int:
     catalog_path = Path(args.catalog)
     if args.stamp_runnable_only:
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-        arches = fetch_upstream_arches()
-        if not arches:
+        tables = fetch_upstream_arch_tables()
+        if not tables:
             raise SystemExit("upstream architecture tables unavailable")
-        stamp_runnable(catalog.get("candidates", []), arches)
+        stamp_upstream(catalog.get("candidates", []), tables)
         tmp = catalog_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(catalog_path)
@@ -1238,7 +1317,7 @@ def main() -> int:
             return 0
         raise SystemExit("no GGUF candidates resolved")
 
-    stamp_runnable(catalog["candidates"], fetch_upstream_arches())
+    stamp_upstream(catalog["candidates"], fetch_upstream_arch_tables())
     if args.print_catalog_top > 0:
         print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")

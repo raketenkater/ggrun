@@ -647,24 +647,46 @@ func TestPreflightFallsBackToEstimateWhenProbeCannotRun(t *testing.T) {
 // signal that distinguishes "VRAM about to be released" from "VRAM genuinely
 // in use", because the new server cannot bind until it exits either way.
 func TestWaitForPredecessorPort(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.2:0")
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("127.0.0.2 is not bindable here: %v", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	var warn bytes.Buffer
-	if waitForPredecessorPort(port, 250*time.Millisecond, &warn) {
+	if waitForPredecessorPort("127.0.0.2", port, 250*time.Millisecond, &warn) {
 		t.Fatal("reported free while the predecessor still held the port")
 	}
 	if !strings.Contains(warn.String(), "still held") {
 		t.Errorf("the wait must be explained: %q", warn.String())
 	}
 	_ = ln.Close()
-	if !waitForPredecessorPort(port, time.Second, &warn) {
+	if !waitForPredecessorPort("127.0.0.2", port, time.Second, &warn) {
 		t.Fatal("port was free but the wait never returned")
 	}
-	if !waitForPredecessorPort(0, time.Second, &warn) {
+	if !waitForPredecessorPort("127.0.0.2", 0, time.Second, &warn) {
 		t.Fatal("an unknown port must not block the launch")
+	}
+}
+
+// The probe binds with the backend's reuse option, read from its --help: the
+// servers listing --reuse-port set SO_REUSEADDR, every other llama.cpp-family
+// server keeps cpp-httplib's SO_REUSEPORT, and an unprobed one is unknown.
+func TestBackendBindStyleFromHelp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		be   *backendInfo
+		want portBindStyle
+	}{
+		{"no backend", nil, bindStyleUnknown},
+		{"empty help", &backendInfo{Path: "llama-server"}, bindStyleUnknown},
+		{"loader failure", &backendInfo{Help: "error while loading shared libraries: libggml.so"}, bindStyleUnknown},
+		{"mainline", &backendInfo{Help: "--port PORT  port to listen\n--reuse-port                            allow multiple sockets to bind to the same port (default: disabled)"}, bindStyleReuseAddr},
+		{"ik_llama", &backendInfo{IsIK: true, Help: "--port PORT  port to listen\n-smgs, --split-mode-graph-scheduling"}, bindStyleReusePort},
+		{"older mainline", &backendInfo{Help: "--port PORT  port to listen (default: 8080)"}, bindStyleReusePort},
+	} {
+		if got := backendBindStyle(tc.be); got != tc.want {
+			t.Errorf("%s: style %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }
 

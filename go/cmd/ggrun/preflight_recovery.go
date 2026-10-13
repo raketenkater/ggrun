@@ -271,8 +271,7 @@ func contextReclaimRequirement(model *placement.ModelProfile, strategy *placemen
 	if kvType == "" {
 		return 0, false
 	}
-	deviceKVMB := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType,
-		strategy.KVPlacement, hasArg(args, "--swa-full"), strategy.TensorSplit, device)
+	deviceKVMB := placement.StrategyDeviceKVCacheMB(model, strategy, kvType, hasArg(args, "--swa-full"), device)
 	if deviceKVMB <= 0 {
 		return 0, false
 	}
@@ -365,10 +364,13 @@ func majorityDevicePricedTokens(model *placement.ModelProfile, strategy *placeme
 		kvType = effectiveMemoryArgValues(args)["cache-k"]
 	}
 	swaFull := hasArg(args, "--swa-full")
-	deviceKV := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType, strategy.KVPlacement, swaFull, strategy.TensorSplit, device)
-	totalKV := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, swaFull)
+	deviceKV := placement.StrategyDeviceKVCacheMB(model, strategy, kvType, swaFull, device)
+	// The total is priced at the same shape as the device share: per-slot
+	// recurrent and windowed state on every device.
+	totalKV := 0
 	devices := 0
-	for _, share := range strategy.TensorSplit {
+	for i, share := range strategy.TensorSplit {
+		totalKV += placement.StrategyDeviceKVCacheMB(model, strategy, kvType, swaFull, i)
 		if share > 0 {
 			devices++
 		}
@@ -636,9 +638,11 @@ func recoverPreflightOOMOnce(
 		}
 	}
 
+	penalized := false
 	if candidate == nil && !outcome.IsComputeBuffer && !recovery.plannerWasDisproved() {
 		physicalDev := physicalGPUIndex(outcome.Device, visibleToPhysical)
 		oomPenalty[physicalDev] += outcome.DeficitMB
+		penalized = true
 		replanOpts := boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery)
 		// Pin ubatch exactly as the compute-buffer branch above does. A recovery
 		// that frees VRAM by cutting context leaves headroom Compute will spend on
@@ -683,13 +687,23 @@ func recoverPreflightOOMOnce(
 	nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
 		req, strategy, serverArgs, candidate, model, runtimeCaps, outcome, candidateArgs,
 	)
-	if !changed {
+	// An untyped (oracle total) shortfall goes to the oracle's own complete
+	// re-plan first when one is eligible; the KV-backed context derate answers
+	// only when none is -- MiniMax-M3's re-plan kept its context and failed
+	// closed 103-151 MiB short with 5,929 MiB of KV on the device.
+	untyped := !outcome.IsComputeBuffer && !outcome.IsKVCache
+	if !changed && !(untyped && oracleReplanEligible) {
 		// Context is the last automatic compute-memory lever. It cannot be an
 		// argv patch: context changes KV, graph, CRAM, checkpoint, placement-cache,
 		// and host-ledger state together. Recompute the complete configuration at
 		// one deficit-sized target, then let the normal exact preflight prove it.
+		if outcome.IsKVCache && !penalized && oomPenalty != nil {
+			// The context re-plan must keep this device's shortfall even when
+			// the device-penalty branch above did not run.
+			oomPenalty[physicalGPUIndex(outcome.Device, visibleToPhysical)] += outcome.DeficitMB
+		}
 		contextCandidate, contextArgs, contextErr := recomputeAutomaticContextRecovery(
-			req, cfg, model, be, caps, strategy, serverArgs, outcome, recovery.expertResidencyFloor(),
+			req, cfg, model, be, caps, strategy, serverArgs, outcome, recovery.expertResidencyFloor(), oomPenalty,
 		)
 		if contextErr != nil {
 			return nil, nil, "", contextErr
@@ -991,7 +1005,9 @@ func ubatchCandidateCoversDeficit(currentArgs, candidateArgs []string, outcome p
 }
 
 func contextCandidateCoversDeficit(currentArgs, candidateArgs []string, model *placement.ModelProfile, outcome preflightOutcome) bool {
-	if !outcome.IsComputeBuffer || !outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
+	kvBacked := deviceKVShareMB(model, currentArgs, outcome.Device) > 0
+	typed := outcome.IsComputeBuffer || outcome.IsKVCache
+	if !(typed || kvBacked) || (typed && (!outcome.AllocMBMeasured || outcome.AllocMB <= 0)) || outcome.DeficitMB <= 0 {
 		return false
 	}
 	currentValues := effectiveMemoryArgValues(currentArgs)
@@ -1018,8 +1034,93 @@ func contextCandidateCoversDeficit(currentArgs, candidateArgs []string, model *p
 }
 
 func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strategy, currentArgs []string, outcome preflightOutcome) (int, bool) {
-	if req == nil || current == nil || !current.ContextAuto || !outcome.IsComputeBuffer ||
-		!outcome.AllocMBMeasured || outcome.AllocMB <= 0 {
+	return automaticContextRecoveryTargetWithKV(req, current, currentArgs, outcome, 0)
+}
+
+// deviceKVShareMB estimates the KV cache the failed device holds under
+// currentArgs: the model's KV at the current context times the device's
+// tensor-split share (all of it on a single-device plan). Zero when KV is not
+// on the GPUs or the share is unknown. A byte-weighted backend reads the split
+// as bytes, so the share is the KV of the blocks its walk puts on the device
+// (argvDeviceKVCacheMB).
+func deviceKVShareMB(model *placement.ModelProfile, currentArgs []string, device int) int {
+	if model == nil || hasArg(currentArgs, "--no-kv-offload") {
+		return 0
+	}
+	values := effectiveMemoryArgValues(currentArgs)
+	ctx := memoryValueInt(values, "ctx")
+	if ctx <= 0 {
+		return 0
+	}
+	share := tensorSplitShare(values, device)
+	if values["tensor-split"] == "" {
+		share = 1
+	}
+	if share <= 0 {
+		return 0
+	}
+	kvType := values["cache-k"]
+	if kvType == "" {
+		kvType = "q8_0"
+	}
+	if model.ByteWeightedLayerSplit && values["tensor-split"] != "" {
+		return argvDeviceKVCacheMB(model, currentArgs, values, ctx, kvType, device)
+	}
+	return int(float64(placement.EstimateKVCacheMB(model, ctx, kvType, hasArg(currentArgs, "--swa-full"))) * share)
+}
+
+// argvDeviceKVCacheMB is placement.StrategyDeviceKVCacheMB for the shape an
+// argv states: context, split, slots, microbatch (min of -b and -ub, as the
+// backend takes it) and MTP decoding.
+func argvDeviceKVCacheMB(model *placement.ModelProfile, args []string, values map[string]string, ctx int, kvType string, device int) int {
+	parts := strings.Split(values["tensor-split"], ",")
+	split := make([]float64, len(parts))
+	for i, part := range parts {
+		share, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil || share < 0 {
+			return 0
+		}
+		split[i] = share
+	}
+	ubatch := memoryValueInt(values, "ubatch")
+	if batch := memoryValueInt(values, "batch"); batch > 0 && (ubatch <= 0 || batch < ubatch) {
+		ubatch = batch
+	}
+	s := &placement.Strategy{
+		ContextSize: ctx, TensorSplit: split, Parallel: maxPreflightInt(memoryValueInt(values, "parallel"), 1),
+		UBatchSize: ubatch, KVType: kvType, KVPlacement: "gpu",
+	}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--spec-type" {
+			s.Draft = nil
+			if strings.HasPrefix(args[i+1], "mtp") {
+				s.Draft = &placement.DraftConfig{Type: placement.DraftMTP}
+			}
+		}
+	}
+	return placement.StrategyDeviceKVCacheMB(model, s, kvType, hasArg(args, "--swa-full"), device)
+}
+
+func automaticContextRecoveryTargetWithKV(req *launchRequest, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, deviceKVMB int) (int, bool) {
+	// A failed KV-cache allocation scales with context exactly as a compute
+	// buffer does. Excluding it left a --claude-code launch of Qwen3.8-27B (4
+	// slots, 628,736 tokens) failing closed 308 MiB short on CUDA0 with context,
+	// the one lever that fits, never tried.
+	// Any shortfall on a device that holds KV under automatic context can be
+	// met by a context cut. MiniMax-M3 planned 5,929 MiB of KV on CUDA0 and
+	// failed closed 103-151 MiB short on an oracle total that was neither a
+	// compute nor a KV allocation.
+	kvBacked := deviceKVMB > 0
+	typed := outcome.IsComputeBuffer || outcome.IsKVCache
+	if req == nil || current == nil || !current.ContextAuto || !(typed || kvBacked) {
+		return 0, false
+	}
+	// A typed allocation needs its measured size; the KV-backed path is sized
+	// on the device's KV share and needs only the measured deficit.
+	if typed && (!outcome.AllocMBMeasured || outcome.AllocMB <= 0) {
+		return 0, false
+	}
+	if !typed && outcome.DeficitMB <= 0 {
 		return 0, false
 	}
 	if !automaticContextRequest(req) {
@@ -1046,6 +1147,14 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 	scalableMB := outcome.AllocMB
 	if outcome.Evidence.Level == memoryEvidenceOraclePlanned && outcome.DeviceContextMB > 0 {
 		scalableMB = outcome.DeviceComputeMB + outcome.DeviceContextMB
+	} else if !outcome.IsComputeBuffer && !outcome.IsKVCache && kvBacked {
+		scalableMB = deviceKVMB
+	} else if outcome.IsComputeBuffer && deviceKVMB > 0 {
+		// A context cut also frees the failed device's KV share. Sized on the
+		// compute buffer alone, a 15-29 MiB shortfall on a 73-79 MiB allocation
+		// cut the --claude-code Qwen3.8-27B context from ~518k to its 98,304
+		// floor.
+		scalableMB += deviceKVMB
 	}
 	target := minimum
 	if required < scalableMB {
@@ -1067,8 +1176,8 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 // recomputeAutomaticContextRecovery turns the measured target into one complete
 // placement. A context change is never applied to the current Strategy in
 // place: all context-derived memory and cache state must come from Compute.
-func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, floorNCPUMoE int) (*placement.Strategy, []string, error) {
-	target, ok := automaticContextRecoveryTarget(req, current, currentArgs, outcome)
+func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, floorNCPUMoE int, oomPenalty map[int]int) (*placement.Strategy, []string, error) {
+	target, ok := automaticContextRecoveryTargetWithKV(req, current, currentArgs, outcome, deviceKVShareMB(model, currentArgs, outcome.Device))
 	if !ok || cfg == nil || model == nil || be == nil || caps == nil {
 		return nil, nil, nil
 	}
@@ -1082,7 +1191,20 @@ func recomputeAutomaticContextRecovery(req *launchRequest, cfg *config.Config, m
 	opts.SkipPlacementCache = true
 	opts.CacheFile = ""
 	opts.VerifiedConfigScopeKey = ""
-	next, err := placement.Compute(caps, model, opts)
+	var next *placement.Strategy
+	var err error
+	if outcome.IsKVCache && len(oomPenalty) > 0 {
+		// A free re-plan at the smaller context rebalances layers across the
+		// GPUs and refills the KV room it just freed: the --claude-code launch
+		// of Qwen3.8-27B cut 593,920 -> 460,800 tokens over four starts while
+		// the deficit stayed 466-737 MiB and moved between CUDA0 and CUDA1,
+		// until the start-admission budget ended it. Keep the accumulated
+		// per-device deficits out of the re-plan so the cut stays where it
+		// was needed.
+		next, err = placement.ReplanAfterOOM(caps, model, opts, oomPenalty)
+	} else {
+		next, err = placement.Compute(caps, model, opts)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("full context-recovery re-plan at %d tokens: %w", target, err)
 	}

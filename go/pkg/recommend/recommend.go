@@ -73,6 +73,9 @@ type Candidate struct {
 	// ik_llama architecture tables; false means the first launch needs a fork
 	// backend, which ggrun finds and builds automatically. Absent when unknown.
 	Runnable *bool `json:"runnable,omitempty"`
+	// RunnableMainline is stamped from the mainline table alone: the
+	// architecture a current-mainline build can load. Absent when unknown.
+	RunnableMainline *bool `json:"runnable_mainline,omitempty"`
 }
 
 // NeedsForkBackend reports that no upstream backend registers this model's
@@ -80,6 +83,17 @@ type Candidate struct {
 // filtered: automatic backend compatibility is how such models run.
 func (c Candidate) NeedsForkBackend() bool {
 	return c.Runnable != nil && !*c.Runnable
+}
+
+// MainlineRegisters reports that the catalog stamps mainline llama.cpp as
+// registering this architecture. A catalog stamped before runnable_mainline
+// existed falls back to the union stamp, the rule it was ranked by; a row with
+// neither stamp is not assumed to.
+func (c Candidate) MainlineRegisters() bool {
+	if c.RunnableMainline != nil {
+		return *c.RunnableMainline
+	}
+	return c.Runnable != nil && *c.Runnable
 }
 
 // Recommendation is a candidate ranked for the current machine.
@@ -96,6 +110,164 @@ type Recommendation struct {
 	QualityRetained      float64 // within-model quant preference, not measured intelligence retention
 	PredictedTPS         float64 // estimated decode tok/s on this machine (0 = unknown)
 	SpeedTier            int     // 2 interactive, 1 usable, 0 slow, -1 unknown
+	BackendStatus        BackendStatus
+	// CUDABuildOffered: a default launch serves this row on the Vulkan build
+	// although the host has an NVIDIA GPU, and the first launch offers the
+	// CUDA build the speed estimate assumes. The row loads now either way.
+	CUDABuildOffered bool
+}
+
+// BackendStatus says how the first launch gets a backend that serves a row.
+type BackendStatus string
+
+const (
+	// BackendUnknown: no probe ran, or an installed backend could not be read.
+	// The row is ranked and shown as if there were no probe.
+	BackendUnknown BackendStatus = "unknown"
+	// BackendReady: an installed backend loads the row now. A row served on
+	// the Vulkan build of an NVIDIA host is ready too; CUDABuildOffered says
+	// whether the first launch offers the faster build.
+	BackendReady BackendStatus = "ready"
+	// BackendNeedsSetup: no installed backend loads the architecture, and the
+	// first launch offers a supported 20-40 minute build of one: a reviewed
+	// recipe, or current mainline when mainline registers the architecture.
+	BackendNeedsSetup BackendStatus = "needs_setup"
+	// BackendUnsupported: no installed backend loads the architecture and no
+	// supported route builds one here.
+	BackendUnsupported BackendStatus = "unsupported"
+)
+
+// vulkanOnCUDAHint is the BackendHint of a row a default launch serves on the
+// Vulkan build although the host has an NVIDIA GPU.
+const vulkanOnCUDAHint = "Vulkan"
+
+// ServedOnVulkan reports a row a default launch serves on the Vulkan build
+// although the host has an NVIDIA GPU; its speed estimate assumes CUDA.
+func (r Recommendation) ServedOnVulkan() bool {
+	return r.BackendHint == vulkanOnCUDAHint
+}
+
+// installedArchSupport answers whether an installed backend loads an
+// architecture; known is false when that could not be determined. The catalog's
+// Runnable flag is stamped against upstream tables, which run ahead of the
+// backend a release ships: K2 Horizon was in mainline master but not in the
+// release backend, so a fresh install's top CPU pick could not load. Only the
+// launcher knows the installed backends, so it supplies the probe.
+var installedArchSupport func(caps *detect.Capabilities, arch string) (loads, known bool)
+
+// SetInstalledArchSupport installs the probe that sets each row's
+// BackendStatus. nil disables the check.
+func SetInstalledArchSupport(fn func(caps *detect.Capabilities, arch string) (loads, known bool)) {
+	installedArchSupport = fn
+}
+
+// backendRoute reports whether the first launch can build a backend that
+// loads an architecture no installed backend does; mainline is the catalog's
+// stamp that mainline llama.cpp registers it. The union stamp (Runnable) is
+// not enough: an architecture only ik_llama registers has no automatic build
+// route, since every launch build is mainline or a reviewed recipe. Only the
+// launcher knows the reviewed recipes, the configured backend and the build
+// tools, so it supplies the answer. Without it a route is assumed exactly
+// when mainline registers the architecture.
+var backendRoute func(caps *detect.Capabilities, arch string, mainline bool) bool
+
+// SetBackendRoute installs that answer. nil restores the catalog-only rule.
+func SetBackendRoute(fn func(caps *detect.Capabilities, arch string, mainline bool) bool) {
+	backendRoute = fn
+}
+
+func backendBuildable(caps *detect.Capabilities, arch string, mainline bool) bool {
+	if backendRoute == nil {
+		return mainline
+	}
+	return backendRoute(caps, arch, mainline)
+}
+
+// SetVulkanOnCUDA installs the probe for rows a default launch would serve on
+// the Vulkan build although the host has an NVIDIA GPU: an architecture only
+// mainline loads, or a large MoE whose file-backed experts win the launch's
+// tie-break. The launch then offers a CUDA build; until it exists the model
+// runs far below the CUDA estimate (MiMo-V2.6-Flash Q2_K on the full rig:
+// 2.9 tok/s, predicted 10.5).
+func SetVulkanOnCUDA(fn func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool) {
+	vulkanOnCUDA = fn
+}
+
+var vulkanOnCUDA func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool
+
+func markBackendStatus(caps *detect.Capabilities, r *Recommendation) {
+	r.BackendStatus = BackendUnknown
+	if installedArchSupport == nil || strings.TrimSpace(r.Arch) == "" {
+		return
+	}
+	if vulkanOnCUDA != nil && vulkanOnCUDA(caps, r.Arch, r.MoE, int(r.QuantSizeGB*1024)) {
+		// Ready either way: declining or failing the CUDA build keeps the
+		// Vulkan backend that already loads it. The CUDA build is of the same
+		// mainline source, so mainline registers the architecture.
+		r.BackendHint = vulkanOnCUDAHint
+		r.BackendStatus = BackendReady
+		r.CUDABuildOffered = backendBuildable(caps, r.Arch, true)
+		if r.CUDABuildOffered {
+			appendReason(r, "a default launch serves "+r.Arch+" on the Vulkan build here; the first launch offers a CUDA build")
+		} else {
+			appendReason(r, "a default launch serves "+r.Arch+" on the Vulkan build here, below the CUDA estimate")
+		}
+		return
+	}
+	loads, known := installedArchSupport(caps, r.Arch)
+	switch {
+	case !known:
+	case loads:
+		r.BackendStatus = BackendReady
+	case backendBuildable(caps, r.Arch, r.MainlineRegisters()):
+		r.BackendStatus = BackendNeedsSetup
+		appendReason(r, "no installed backend loads "+r.Arch+"; the first launch offers to build one")
+	default:
+		r.BackendStatus = BackendUnsupported
+		appendReason(r, "no installed backend loads "+r.Arch+" and no supported route builds one here")
+	}
+}
+
+func appendReason(r *Recommendation, note string) {
+	if r.Reason == "" {
+		r.Reason = note
+	} else {
+		r.Reason += "; " + note
+	}
+}
+
+// preferServable keeps each list's order but moves rows no supported backend
+// route can load after the rest. What stays last is the K2 Horizon failure:
+// the release backend lacked k2-horizon, nothing offered a build, and a fresh
+// install's top CPU pick could not load.
+//
+// Installation state is not capability: Smartest keeps a row whose backend the
+// first launch builds in capability order. speedRanked (Best overall, Fastest)
+// is a practical choice, so there setup feasibility counts: such a row, and a
+// row a default launch serves on Vulkan on an NVIDIA host, follow the rows
+// that serve as estimated now. A needs_setup row's
+// first launch is a 20-40 minute source build that needs git, cmake, a
+// compiler and on NVIDIA the CUDA toolkit, and its speed estimate rests on a
+// backend nobody measured; the one measured row off the default backend
+// (MiMo-V2.6-Flash Q2_K, full rig, matrix15) decoded 2.9 tok/s against 10.5
+// predicted. A Vulkan row reaches its CUDA estimate only after the CUDA build
+// the first launch offers, or never when none is offered; declined or
+// non-interactive it serves at the Vulkan speed (MiMo matrix15: 46 minutes to
+// ready, every Claude Code task 19-53 minutes). Best overall #1 is also what
+// `recommend --first` and the installer's first download take.
+func preferServable(rows []Recommendation, speedRanked bool) {
+	rank := func(r Recommendation) int {
+		switch {
+		case r.BackendStatus == BackendUnsupported:
+			return 2
+		case speedRanked && r.BackendStatus == BackendNeedsSetup:
+			return 1
+		case speedRanked && r.ServedOnVulkan():
+			return 1
+		}
+		return 0
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rank(rows[i]) < rank(rows[j]) })
 }
 
 type catalogDoc struct {
@@ -137,11 +309,74 @@ func DisplayFit(fit string) string {
 	}
 }
 
+// companionParamRatio: the quants of one model all imply about the same
+// parameter count (file size over bytes per weight; dynamic quants keep it
+// within ~2x; gpt-oss "BF16" keeps MXFP4 experts and implies 6.8x fewer, a
+// low-bit DeepSeek V4 Pro 4.1x). A draft, MTP or projector file implies 22-123x
+// fewer in the rows seen (MiMo-V2.6 Flash/Pro, Qwen3.8-Flash-Next, Muse).
+const companionParamRatio = 15
+
+// dropCompanionSizedQuants removes quants whose implied parameter count is
+// under 1/companionParamRatio of the row's largest. The catalog builder skips
+// such files by name, but a runtime refresh can fetch a catalog an older
+// builder wrote: main's 2026-10-13 refresh listed MiMo-V2.6-Flash Q4_0 / Q8_0 /
+// BF16 at 1.26 / 5.28 / 9.92 GB, the mtp and dflash heads beside the 167 GB
+// MXFP4, and that Q8_0 became the hosted CPU runners' top pick.
+func dropCompanionSizedQuants(c Candidate) Candidate {
+	implied := func(q QuantOption) float64 {
+		bytes := float64(q.SizeBytes)
+		if bytes <= 0 {
+			bytes = q.SizeGB * 1e9
+		}
+		if bpw := bytesPerWeight(q.Name); bpw > 0 {
+			return bytes / bpw
+		}
+		return 0
+	}
+	most := 0.0
+	for _, q := range c.Quants {
+		most = max(most, implied(q))
+	}
+	if most <= 0 {
+		return c
+	}
+	kept := c.Quants[:0:0]
+	for _, q := range c.Quants {
+		if p := implied(q); p > 0 && p*companionParamRatio < most {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	c.Quants = kept
+	return c
+}
+
+// MainlineRegistersArch reports what the catalog's upstream stamp says about
+// current mainline llama.cpp and an architecture: registers is true when a row
+// of that architecture carries runnable_mainline=true; known is false when no
+// row of it carries the stamp.
+func MainlineRegistersArch(arch string) (registers, known bool) {
+	arch = strings.ToLower(strings.TrimSpace(arch))
+	if arch == "" {
+		return false, false
+	}
+	for _, c := range Shortlist() {
+		if strings.ToLower(strings.TrimSpace(c.Arch)) != arch || c.RunnableMainline == nil {
+			continue
+		}
+		if *c.RunnableMainline {
+			return true, true
+		}
+		known = true
+	}
+	return false, known
+}
+
 func Shortlist() []Candidate {
 	var doc catalogDoc
 	if err := json.Unmarshal(catalogBytes(), &doc); err == nil && len(doc.Candidates) > 0 {
 		for i := range doc.Candidates {
-			doc.Candidates[i] = inferParams(doc.Candidates[i])
+			doc.Candidates[i] = inferParams(dropCompanionSizedQuants(doc.Candidates[i]))
 		}
 		return doc.Candidates
 	}
@@ -185,6 +420,7 @@ func collectRecommendations(caps *detect.Capabilities, allowQuant func(QuantOpti
 			continue
 		}
 		if rec, ok := evaluateWithSelector(caps, c, allowQuant, isBetter); ok {
+			markBackendStatus(caps, &rec)
 			rows = append(rows, rec)
 		}
 	}
@@ -197,6 +433,7 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 	}
 	rows := allRecommendationsBalanced(caps)
 	sortRecommendations(rows)
+	preferServable(rows, true)
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
@@ -258,6 +495,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	// intelligence, with a usability discount only below the usable speed floor.
 	balancedPool := append([]Recommendation(nil), rows...)
 	sortRecommendations(balancedPool)
+	preferServable(balancedPool, true)
 	balanced := take(balancedPool)
 
 	// Smartest keeps the base-model capability order even when serving is slow.
@@ -270,6 +508,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		}
 		return ki > kj
 	})
+	preferServable(smartPool, false)
 	smartest := take(smartPool)
 
 	// Fastest: highest predicted tok/s among models that are still capable
@@ -293,13 +532,21 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sort.SliceStable(fastPool, func(i, j int) bool {
 		return fastPool[i].PredictedTPS > fastPool[j].PredictedTPS
 	})
+	preferServable(fastPool, true)
 	fastest := take(fastPool)
 
 	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
 }
 
+// sortRecommendations orders Best overall: usable models first, then catalog
+// intelligence. A model predicted below the usable floor ranks after every
+// usable one; the discount alone let a 2-tok/s dense model on CPU outrank a
+// usable MoE and time out on a Claude Code task (October 8 matrix).
 func sortRecommendations(rows []Recommendation) {
 	sort.SliceStable(rows, func(i, j int) bool {
+		if si, sj := rows[i].SpeedTier == 0, rows[j].SpeedTier == 0; si != sj {
+			return sj
+		}
 		if rows[i].Score == rows[j].Score {
 			if modelIntelligence(rows[i].Candidate) == modelIntelligence(rows[j].Candidate) {
 				return rows[i].QuantSizeGB < rows[j].QuantSizeGB
@@ -397,7 +644,7 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 		if effIntel <= 0 {
 			continue
 		}
-		tps := predictDecodeTPS(caps, c, q)
+		tps := predictDecodeTPSForFit(caps, c, q, fit, gpuSideOverheadMB(caps, c, q))
 		// Quant-retention guesses are not benchmark measurements. Compare
 		// models on their catalog intelligence, discounting only predicted
 		// serving below the usable floor. Extra speed beyond that is not a
@@ -613,6 +860,16 @@ func quantOptions(c Candidate) []QuantOption {
 		name = "auto"
 	}
 	return []QuantOption{{Name: name, SizeGB: c.SizeGB}}
+}
+
+// gpuSideOverheadMB is the part of fitQuant's overhead that stays in VRAM:
+// KV at the expected launch context plus graph scratch.
+func gpuSideOverheadMB(caps *detect.Capabilities, c Candidate, q QuantOption) int {
+	modelMB := int(q.SizeGB * 1024)
+	if hasGeometry(c) {
+		return 2048 + recommendKVMB(c, recommendAutoContext(caps, c, modelMB), "q4_0")
+	}
+	return estimateOverheadMB(modelMB, caps, c)
 }
 
 func fitQuant(b hardwareBudget, caps *detect.Capabilities, c Candidate, q QuantOption) (fit, reason string, fitPenalty, needGB float64, ok bool) {

@@ -81,7 +81,7 @@ func main() {
 	case "help", "--help", "-h":
 		usage()
 	case "version", "--version", "-v":
-		fmt.Println("ggrun", version)
+		cmdVersion(args[1:])
 	case "detect":
 		cmdDetect(args[1:])
 	case "launch":
@@ -2020,6 +2020,12 @@ func backendBaseURL(req *launchRequest) string {
 	return fmt.Sprintf("http://%s:%d", server.ClientHost(req.Host), req.Port)
 }
 
+// cacheCanaryPrefillBudget bounds the prefix-cache check that runs before a new
+// profile reports ready. Machines that prefill the full canary within it are
+// checked exactly as before; slower ones verify the endpoint and leave reuse
+// unproven, which keeps the profile from being promoted.
+const cacheCanaryPrefillBudget = 5 * time.Minute
+
 func backendChoiceExplicit(req *launchRequest) bool {
 	return req != nil && (req.BackendExplicit || req.ServerBinExplicit)
 }
@@ -2868,6 +2874,8 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		RAMLimitPercent:         req.RAMLimitPercent,
 		VRAMHeadroomMB:          req.VRAMHeadroomMB,
 		RAMHeadroomMB:           req.RAMHeadroomMB + req.PlacementHostReserveMB,
+		HostGrowthReserveMB:     hostGrowthReserveMB(req),
+		SkipVerifiedConfig:      req.PlacementHostReserveMB > 0,
 		RequireMeasuredBuffers:  true,
 		NoMMap:                  req.NoMMap,
 		ForceMMap:               req.ForceMMap,
@@ -2935,6 +2943,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	// spilling the model into system RAM.
 	opts.DenseCPUOffloadPrompt = req.DenseOffloadPrompt
 	requestedParallel := claudeCodeParallel(opts.Parallel, req.ClaudeCode, req.ParallelSet, req.ClaudeProfile)
+	requestedParallel = claudeHybridSSMSlots(requestedParallel, model, req.ClaudeCode, req.ParallelSet, req.ClaudeProfile)
 	opts.Parallel = claudeCodeSlotsForPlacement(
 		requestedParallel,
 		opts.ContextSize, req.ClaudeCode, req.ParallelSet,
@@ -3045,6 +3054,32 @@ func claudeCodeParallel(parallel int, claudeCode, explicit bool, profile string)
 		}
 	}
 	return parallel
+}
+
+// claudeHybridSSMSlots keeps Claude Code's automatic slot count at one for a
+// model with an SSM layout (the Qwen3.5-3.8 / qwen3next family). On the
+// bundled ik_llama build, four slots of Qwen3.8-27B produced corrupted output
+// in a Claude Code session (tool-call markup decaying into "</it>\note"
+// repeats until the 32,000-token limit), both in default Claude mode and with
+// --parallel 4, and again when the same traffic was replayed offline; across
+// a dozen one-slot sessions of the same model none did (2026-10-13). Mixed
+// prefill/decode batches of such a model also fall back to single-token
+// chunks there, so the slots are slower as well. An explicit --parallel or
+// the parallel profile is still honored, with a warning.
+func claudeHybridSSMSlots(parallel int, model *placement.ModelProfile, claudeCode, explicit bool, profile string) int {
+	if !claudeCode || model == nil || model.HasSSM == 0 || parallel <= 1 {
+		return parallel
+	}
+	if explicit || profile == claudeProfileParallel {
+		claudeHybridSSMWarn(parallel)
+		return parallel
+	}
+	fmt.Fprintf(os.Stderr, "[claude-code] %s has an SSM layout: one slot (multi-slot output on this model family was corrupted on the bundled backend; --parallel N overrides)\n", model.Name)
+	return 1
+}
+
+var claudeHybridSSMWarn = func(parallel int) {
+	fmt.Fprintf(os.Stderr, "[claude-code] warning: %d slots on an SSM-layout model; multi-slot output on this model family was corrupted on the bundled backend\n", parallel)
 }
 
 // claudeSlotTarget is the per-slot context Claude Code comfortably works in.
@@ -3588,6 +3623,15 @@ func backendMemoryMaxMB(req *launchRequest, caps *detect.Capabilities) int {
 		return 0
 	}
 	return limit
+}
+
+// hostGrowthReserveMB is the gate's reserve for placement to plan around; a
+// re-plan that already holds it back (PlacementHostReserveMB) passes 0.
+func hostGrowthReserveMB(req *launchRequest) int {
+	if req == nil || req.PlacementHostReserveMB > 0 || req.CgroupHeadroomMB <= 0 {
+		return 0
+	}
+	return req.CgroupHeadroomMB
 }
 
 func validateHostMemoryContainment(req *launchRequest, caps *detect.Capabilities, strategy *placement.Strategy) error {
@@ -4786,6 +4830,8 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	const maxConvergingReplans = 6
 	convergingReplans := 0
 	lastPreflightDeficitMB := 0
+	// admittedArgv is the last argv an exact (allocated) preflight passed.
+	admittedArgv := ""
 	retries := 0
 	preflightReplans := 0
 	oomPenalty := map[int]int{}
@@ -5147,6 +5193,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 				if convergingReplans < maxConvergingReplans &&
 					deficitProgress(lastPreflightDeficitMB, preflight.DeficitMB) {
 					convergingReplans++
+					work.grantConvergingLoad()
 				} else {
 					preflightReplans++
 				}
@@ -5164,6 +5211,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 					method, preflight.Device, preflight.AllocMB, preflight.DeficitMB, strategy.ContextSize, strategy.NCPUMoE, strategy.UBatchSize,
 				)
 				continue
+			}
+			if preflight.Evidence.Level == memoryEvidenceAllocated {
+				admittedArgv = formatCommand(serverArgs)
 			}
 			// This argv passed exact preflight. Record its automatic context so the
 			// measured re-plan below can refine placement without spending that
@@ -5321,6 +5371,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		if err := validateExactAdmissionArgv(exactAdmission, exactCandidateArgs, serverArgs); err != nil {
 			return nil, strategy, serverArgs, err
+		}
+		if admittedArgv != "" && admittedArgv == formatCommand(serverArgs) {
+			work.grantAdmittedStart()
 		}
 		processTimeout, budgetErr := work.beginLoad(timeout)
 		if budgetErr != nil {
@@ -5645,16 +5698,20 @@ func runtimeGrowthWindowStart(lines []string) (int, bool) {
 	return 0, false
 }
 
-func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placement.ModelProfile, prior map[int]int) (device int, reserveMB int, estimated bool, ok bool) {
+// failedFree is failedBackendFreeVRAM sampled after the backend's fatal line
+// (nil when nothing was sampled). suspect is set when the backend never said
+// "out of memory" and the failure was read as one from that sample: it keeps
+// the backend's own error line for the diagnostics.
+func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placement.ModelProfile, prior, failedFree map[int]int) (device int, reserveMB int, estimated bool, suspect string, ok bool) {
 	lines := strings.Split(logData, "\n")
 	loadedAt, loaded := runtimeGrowthWindowStart(lines)
 	if !loaded {
 		// Still loading when it died: a placement problem, not a runtime term.
-		return 0, 0, false, false
+		return 0, 0, false, "", false
 	}
 	for i := len(lines) - 1; i > loadedAt; i-- {
 		if device, allocMB, ok := recovery.ParseCUDAOOM(lines[i]); ok {
-			return device, allocMB, false, true
+			return device, allocMB, false, "", true
 		}
 		device, ok = recovery.ParseCUDADevice(lines[i])
 		if !ok {
@@ -5662,17 +5719,113 @@ func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placeme
 		}
 		isOOM := false
 		for j := i - 1; j >= 0 && j >= i-3; j-- {
-			if strings.Contains(strings.ToLower(lines[j]), "cuda error: out of memory") {
+			lower := strings.ToLower(lines[j])
+			if strings.Contains(lower, "cuda error: out of memory") {
 				isOOM = true
+				break
+			}
+			if freeMB, sampled := failedFree[device]; cublasWorkspaceOOM(lower, lines[i], freeMB, sampled) {
+				isOOM = true
+				suspect = fmt.Sprintf("%s; %d MiB free on the device after the failure", strings.TrimSpace(lines[j]), freeMB)
 				break
 			}
 		}
 		if !isOOM {
 			continue
 		}
-		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, true
+		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, suspect, true
 	}
-	return 0, 0, false, false
+	return 0, 0, false, "", false
+}
+
+// cublasCeilingFreeMB is how little VRAM a device may have left, sampled after
+// the failure, for a cuBLAS "unsupported value" GEMM failure to count as an
+// allocation failure. The recorded failures left 2 MiB (B2: 11,871 of 11,873
+// MiB; A1: 24,110 of 24,112). ggrun's packing leaves more than that right after
+// load (188 MiB on the B2 plan that later failed), so a device this full has
+// grown to its ceiling, and a non-memory failure on a packed device that has
+// not grown there does not qualify.
+const cublasCeilingFreeMB = 64
+
+// cublasWorkspaceOOM recognizes cuBLAS failing a GEMM with "an unsupported
+// value or parameter" on a device at its memory ceiling. The same
+// Qwen3.6-35B-A3B plan on one RTX 4070 served 21k- and 28k-token prompts when
+// its pool peaked 14-30 MiB below the card's 11,873 MiB, and failed this way
+// when an earlier request had grown the pool to 11,871 MiB. -amb and the
+// expert count made no difference.
+//
+// The error text alone is not that evidence. cuBLAS reports allocation failure
+// as its own status (ALLOC_FAILED); "an unsupported value or parameter" is
+// INVALID_VALUE, which a shape or build incompatibility raises too, and reading
+// that as an OOM would teach a persistent reserve and cost reloads. So it
+// counts only when the device's free VRAM, sampled after the failure while the
+// backend still held its memory, is within cublasCeilingFreeMB. No log text
+// stands in for that sample: a logged prompt can quote any load line.
+func cublasWorkspaceOOM(errorLineLower, deviceLine string, freeMB int, sampled bool) bool {
+	return strings.Contains(errorLineLower, "cuda error: an unsupported value or parameter") &&
+		strings.Contains(deviceLine, "ggml_cuda_op_mul_mat_cublas") &&
+		sampled && freeMB <= cublasCeilingFreeMB
+}
+
+// failedBackendFreeVRAM samples the free VRAM of each device a failed backend
+// runs on, keyed by its runtime CUDA index. Callers take it once the backend
+// has printed a fatal line and while it is still running: ggml's abort forks a
+// backtrace helper that can deadlock, and the B2 and A1 backends sat alive like
+// that, holding their memory. nil when nothing could be sampled.
+func failedBackendFreeVRAM(runtime *detect.Capabilities) map[int]int {
+	if runtime == nil || len(runtime.GPUs) == 0 {
+		return nil
+	}
+	out, err := exec.Command("nvidia-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil
+	}
+	return freeVRAMByRuntimeDevice(string(out), runtime.GPUs)
+}
+
+// freeVRAMByRuntimeDevice maps nvidia-smi "pci.bus_id, memory.free" rows onto
+// the runtime GPUs by bus ID, which survives --gpus renumbering.
+func freeVRAMByRuntimeDevice(out string, gpus []detect.GPU) map[int]int {
+	byBus := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, ",")
+		if len(f) != 2 {
+			continue
+		}
+		if mb, err := strconv.Atoi(strings.TrimSpace(f[1])); err == nil {
+			byBus[strings.ToLower(strings.TrimSpace(f[0]))] = mb
+		}
+	}
+	free := map[int]int{}
+	for _, g := range gpus {
+		if mb, ok := byBus[strings.ToLower(strings.TrimSpace(g.PCIBusID))]; ok && g.PCIBusID != "" {
+			free[g.Index] = mb
+		}
+	}
+	if len(free) == 0 {
+		return nil
+	}
+	return free
+}
+
+// unrecognizedCrashMessage reports a serving backend that died of something
+// other than a recognized CUDA OOM. It quotes the backend's own fatal line, so
+// an error that only resembles an OOM is still named exactly.
+func unrecognizedCrashMessage(logData string) string {
+	if line := runtimeFatalLine(logData); line != "" {
+		return "server exited unexpectedly (not a recognized CUDA OOM): " + line + " — see the log for details."
+	}
+	return "server exited unexpectedly (not a recognized CUDA OOM) — see the log for details."
+}
+
+// runtimeFatalLine is the first fatal line after the load-complete marker: the
+// start of the failure that ended serving, not a line from the load phase.
+func runtimeFatalLine(logData string) string {
+	lines := strings.Split(logData, "\n")
+	if loadedAt, ok := runtimeGrowthWindowStart(lines); ok {
+		lines = lines[loadedAt+1:]
+	}
+	return servingFatalLine(strings.Join(lines, "\n"))
 }
 
 // sizelessCUDAOOMReserveMB is the estimate filed for a CUDA out-of-memory
@@ -5755,10 +5908,22 @@ func recordWarmupCUDAOOM(req *launchRequest, cacheDir string, model *placement.M
 	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
 	reserveMB := sizelessCUDAOOMReserveMB(caps, model, device, prior)
-	if err := placement.RecordRuntimeGraphGrowthFromOOM(cacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel, device, reserveMB, true); err != nil {
+	if err := recordAbortGrowth(cacheDir, model, strategy, tag, caps.GPUs, device, reserveMB, true, prior); err != nil {
 		fmt.Fprintf(os.Stderr, "[launch] warning: could not persist warmup OOM evidence: %v\n", err)
 	}
 	return reserveMB
+}
+
+// recordAbortGrowth files an out-of-memory abort's runtime growth. A size-less
+// estimate records the reserve it ran against (prior[device]) so it can raise a
+// measurement it disproved; a sized allocation is a measurement.
+func recordAbortGrowth(cacheDir string, model *placement.ModelProfile, strategy *placement.Strategy, tag string, gpus []detect.GPU, device, allocMB int, estimated bool, prior map[int]int) error {
+	if estimated {
+		return placement.RecordRuntimeGraphGrowthAfterAbort(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+			strategy.KVQuality, strategy.KVPlacement, tag, gpus, strategy.Parallel, device, allocMB, prior[device])
+	}
+	return placement.RecordRuntimeGraphGrowthFromOOM(cacheDir, model, strategy.ContextSize, strategy.UBatchSize,
+		strategy.KVQuality, strategy.KVPlacement, tag, gpus, strategy.Parallel, device, allocMB, false)
 }
 
 func oomLogFingerprint(logData string) string {
@@ -5769,32 +5934,33 @@ func oomLogFingerprint(logData string) string {
 // recordRuntimeOOMLog records either the exact failed allocation or the
 // bounded VMM fallback above. markerPath prevents a Claude crash recorded on
 // exit from being counted again when its previous log is recovered next run.
-func recordRuntimeOOMLog(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string) (device, reserveMB int, estimated, changed, ok bool, err error) {
+// failedFree and suspect are runtimeLogCUDAOOM's.
+func recordRuntimeOOMLog(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string, failedFree map[int]int) (device, reserveMB int, estimated bool, suspect string, changed, ok bool, err error) {
 	if cfg == nil || model == nil || strategy == nil || be == nil || caps == nil {
-		return 0, 0, false, false, false, nil
+		return 0, 0, false, "", false, false, nil
 	}
 	fingerprint := oomLogFingerprint(logData)
 	if markerPath != "" {
 		if data, readErr := os.ReadFile(markerPath); readErr == nil && strings.TrimSpace(string(data)) == fingerprint {
-			return 0, 0, false, false, false, nil
+			return 0, 0, false, "", false, false, nil
 		}
 	}
 	cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-	device, reserveMB, estimated, ok = runtimeLogCUDAOOM(logData, caps, model, prior)
+	device, reserveMB, estimated, suspect, ok = runtimeLogCUDAOOM(logData, caps, model, prior, failedFree)
 	if !ok {
-		return 0, 0, false, false, false, nil
+		return 0, 0, false, "", false, false, nil
 	}
-	if err = placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, reserveMB, estimated); err != nil {
-		return device, reserveMB, estimated, false, true, err
+	if err = recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, caps.GPUs, device, reserveMB, estimated, prior); err != nil {
+		return device, reserveMB, estimated, suspect, false, true, err
 	}
 	changed = reserveMB > prior[device]
 	if markerPath != "" {
 		if err = os.WriteFile(markerPath, []byte(fingerprint+"\n"), 0600); err != nil {
-			return device, reserveMB, estimated, changed, true, err
+			return device, reserveMB, estimated, suspect, changed, true, err
 		}
 	}
-	return device, reserveMB, estimated, changed, true, nil
+	return device, reserveMB, estimated, suspect, changed, true, nil
 }
 
 func classifyRuntimeCgroupOOM(oomKills, peakBytes uint64) (peakMB int, ok bool) {
@@ -5939,7 +6105,8 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 	// it before anything re-plans, so one re-plan picks up both.
 	promptCacheGrew := recordPreviousClaudePromptCache(req, cfg, model, strategy, be, caps, string(logData))
 	markerPath := logPath + ".oom-recorded"
-	device, reserveMB, estimated, changed, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, string(logData), markerPath)
+	// The backend is long gone, so nothing corroborates a cuBLAS-form failure.
+	device, reserveMB, estimated, suspect, changed, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, string(logData), markerPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("recover previous Claude runtime OOM: %w", err)
 	}
@@ -5956,7 +6123,9 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 		fmt.Printf("[launch] prompt cache: re-sized -cram %d -> %d MiB from the measured entry size (placement kept)\n", strategy.CRAM, next.CRAM)
 		return next, nil
 	}
-	if estimated {
+	if suspect != "" {
+		fmt.Printf("[launch] recovered previous suspected CUDA OOM on device %d (%s); reserving %d MiB runtime headroom and re-planning\n", device, suspect, reserveMB)
+	} else if estimated {
 		fmt.Printf("[launch] recovered previous CUDA VMM OOM on device %d; llama.cpp omitted its allocation size, reserving %d MiB runtime headroom and re-planning\n", device, reserveMB)
 	} else {
 		fmt.Printf("[launch] recovered previous CUDA OOM on device %d; reserving the measured %d MiB allocation and re-planning\n", device, reserveMB)
@@ -6029,6 +6198,30 @@ func resolveLaunchBackend(req *launchRequest, model *placement.ModelProfile, cap
 	return be
 }
 
+// backendHasNoWindowedKV: ik_llama.cpp (1fddd12) has no windowed KV cache and
+// no --swa-full; every layer's cache is full context and the window is a mask.
+// DeepSeek4 and OpenPangu keep their own compressed/windowed caches.
+func backendHasNoWindowedKV(be *backendInfo, model *placement.ModelProfile) bool {
+	if be == nil || !be.IsIK || model == nil || strings.Contains(be.Help, "--swa-full") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(model.ModelArch)) {
+	case "deepseek4", "openpangu":
+		return false
+	}
+	return model.KVLoraRank == 0 && (model.SlidingWindow > 0 || len(model.SWAPattern) > 0)
+}
+
+// backendSplitsLayersByBytes: ik_llama.cpp since #1466 (0871ab29) assigns
+// blocks to devices by cumulative bytes and reads --tensor-split as a byte
+// fraction. --fit (86f4f516, five days later) dates the help surface; a build
+// that does not advertise it keeps the slot rule. The mirror in
+// placement/iklayersplit.go is checked against the shipped 1fddd12 only; an
+// ik build between 86f4f516 and 1fddd12 may size blocks differently.
+func backendSplitsLayersByBytes(be *backendInfo) bool {
+	return be != nil && be.IsIK && helpHasExactFlag(be.Help, "--fit")
+}
+
 func applyBackendFeatureCompatibility(req *launchRequest, model *placement.ModelProfile, be *backendInfo) {
 	if req == nil || be == nil {
 		return
@@ -6038,6 +6231,10 @@ func applyBackendFeatureCompatibility(req *launchRequest, model *placement.Model
 		arch = strings.TrimSpace(model.ModelArch)
 	}
 	isDeepSeek4IK := strings.EqualFold(arch, "deepseek4") && be.IsIK
+	if model != nil {
+		model.FullContextWindowedKV = backendHasNoWindowedKV(be, model)
+		model.ByteWeightedLayerSplit = backendSplitsLayersByBytes(be)
+	}
 	// The architecture's KV rule is re-applied here because backend selection can
 	// land somewhere the pre-selection pass did not assume, and because a cached
 	// or resumed request can arrive with a KV type the rule forbids. Both backend
@@ -6239,6 +6436,7 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		Model:         filepath.Base(model.Path),
 		Timeout:       20 * time.Minute,
 		ContextTokens: canaryContext,
+		PrefillBudget: cacheCanaryPrefillBudget,
 	}
 	canary, canaryErr := runner.RunCacheCanary()
 	if canaryErr != nil || canary == nil || !canary.Functional {
@@ -6618,8 +6816,7 @@ func cmdLaunch(args []string) {
 	if launchPort <= 0 {
 		launchPort = cfg.Port
 	}
-	// 75 s outlasts Linux's 60 s TIME_WAIT left by the previous server.
-	if !waitForPredecessorPort(launchPort, 75*time.Second, os.Stderr) {
+	if !waitForPredecessorPort(req.Host, launchPort, 75*time.Second, os.Stderr) {
 		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 75s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
 	}
 	if releaseIsPending(cfg.CacheDir) {
@@ -6656,18 +6853,27 @@ func cmdLaunch(args []string) {
 		be = resolveLaunchBackend(req, model, caps)
 	}
 	if be == nil {
-		// No reviewed recipe for this architecture. Search open llama.cpp PRs
-		// and Hugging Face GGUF cards for a head fork that adds the loader; if
-		// the user declines or nothing is found, the mainline-update offer
-		// remains. A scripted non-terminal call never blocks.
-		if offerDiscoveredArchFork(req, model, cfg.AssumeYes) {
-			be = resolveLaunchBackend(req, model, caps)
-		}
-		if be == nil && offerAcceleratedArchBuild(req, model, caps, cfg.AssumeYes) {
-			be = resolveLaunchBackend(req, model, caps)
-		}
-		if be == nil && offerMainlineBackendUpdate(req, model, cfg.AssumeYes) {
-			be = resolveLaunchBackend(req, model, caps)
+		// No installed backend loads this architecture. Reviewed sources first:
+		// a reviewed recipe pinning an upstream commit is offered before open
+		// llama.cpp PR / Hugging Face discovery, which is unreviewed code. Then a
+		// current-mainline build, then the mainline update. A scripted
+		// non-terminal call never blocks.
+		for _, route := range unsupportedArchRoutes(model.ModelArch) {
+			if be != nil {
+				break
+			}
+			offered := false
+			switch route {
+			case "reviewed-build", "mainline-build":
+				offered = offerAcceleratedArchBuild(req, model, caps, cfg.AssumeYes)
+			case "discovered-fork":
+				offered = offerDiscoveredArchFork(req, model, cfg.AssumeYes)
+			case "mainline-update":
+				offered = offerMainlineBackendUpdate(req, model, cfg.AssumeYes)
+			}
+			if offered {
+				be = resolveLaunchBackend(req, model, caps)
+			}
 		}
 		if be == nil {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", backendUnavailableMessage(req))
@@ -6687,6 +6893,10 @@ func cmdLaunch(args []string) {
 	if err := guardPortFree(req.Port, "launch"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	// 75 s outlasts Linux's 60 s TIME_WAIT left by the previous server.
+	if !waitForBackendPort(req.Host, req.Port, backendBindStyle(be), 75*time.Second, os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[launch] port %d is still not bindable by the backend after 75s; continuing, but the bind may fail\n", req.Port)
 	}
 
 	// Claude Code's Auto permission checks must not run on the giant coding
@@ -6899,6 +7109,7 @@ func cmdLaunch(args []string) {
 	modelusage.RecordLaunch(cfg.CacheDir, req.ModelPath)
 	if p.LogBuf != nil {
 		recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
+		noteBackendLoadedVRAM(serverProcessPID(p))
 	}
 	// Consume allocation measurements before performance calibration. A plan
 	// with fewer CPU experts is only a new baseline candidate until benchmarked;
@@ -6949,6 +7160,7 @@ func cmdLaunch(args []string) {
 			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 			if p.LogBuf != nil {
 				recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
+				noteBackendLoadedVRAM(serverProcessPID(p))
 			}
 		}
 	}
@@ -6994,12 +7206,20 @@ func cmdLaunch(args []string) {
 			claudeRouterURL = claudeAuto.router.URL()
 		}
 	}
-	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+	var failedFree map[int]int
+	verifyWatch := defaultBackendWatch
+	verifyWatch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeCaps) }
+	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", verifyWatch, func() error {
 		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
 	}); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
+		if p.LogBuf != nil {
+			if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, p.LogBuf.String(), failedFree); ok {
+				fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
+			}
+		}
 		os.Exit(1)
 	}
 	checkpointPlanChanged := false
@@ -7133,7 +7353,12 @@ func cmdLaunch(args []string) {
 				case <-ticker.C:
 				}
 				if !isServerRunning(req.Host, req.Port) {
-					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — recording OOM for next launch\n")
+					// A backend wedged after its fatal line still holds its memory.
+					var failedFree map[int]int
+					if p.IsRunning() {
+						failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps))
+					}
+					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — checking its log for an OOM to record for the next launch\n")
 					logData := ""
 					if p.LogBuf != nil {
 						logData = p.LogBuf.String()
@@ -7147,9 +7372,15 @@ func cmdLaunch(args []string) {
 							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded host cgroup OOM at %d MiB; revoked the profile and cached host-state evidence for the next launch\n", peakMB)
 						}
 					} else if p.LogBuf != nil {
-						device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath)
+						device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, failedFree)
 						if recordErr != nil {
 							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
+						} else if !ok {
+							if line := runtimeFatalLine(logData); line != "" {
+								fmt.Fprintf(os.Stderr, "[launch] backend failed (not a recognized CUDA OOM): %s — nothing recorded\n", line)
+							}
+						} else if suspect != "" {
+							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded suspected CUDA OOM on device %d (%s) and a %d MiB reserve for the next launch\n", device, suspect, reserveMB)
 						} else if ok && estimated {
 							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
 						} else if ok {
@@ -7202,6 +7433,9 @@ func cmdLaunch(args []string) {
 			// still be recorded before Stop(), so the NEXT `--claude-code`
 			// launch of this exact model/context reserves the measured
 			// deficit instead of repeating the same crash blind.
+			// The backend has exited and released its memory, so nothing
+			// corroborates a cuBLAS-form failure here; a wedged one was
+			// sampled by the health monitor.
 			if !p.IsRunning() && p.LogBuf != nil {
 				markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
 				logData := p.LogBuf.String()
@@ -7212,8 +7446,14 @@ func cmdLaunch(args []string) {
 					if recorded {
 						fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (host cgroup OOM at %d MiB) — profile revoked and host-state evidence recorded for the next launch.\n", peakMB)
 					}
-				} else if device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath); recordErr != nil {
+				} else if device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, nil); recordErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM: %v\n", recordErr)
+				} else if !ok {
+					if line := runtimeFatalLine(logData); line != "" {
+						fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (not a recognized CUDA OOM): %s\n", line)
+					}
+				} else if suspect != "" {
+					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (suspected CUDA OOM on device %d: %s) — recorded %d MiB runtime reserve for the next launch.\n", device, suspect, reserveMB)
 				} else if ok && estimated {
 					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA VMM OOM on device %d; allocation size omitted) — recorded %d MiB runtime reserve for the next launch.\n", device, reserveMB)
 				} else if ok {
@@ -7233,6 +7473,8 @@ func cmdLaunch(args []string) {
 	fmt.Println("[launch] Press Ctrl+C to stop")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
+	growth := startServingGrowthRecorder(cfg.CacheDir, model, strategy, scopedProbeBackendTagForStrategy(req, model, be, strategy),
+		runtimeGrowthCaps(caps, runtimeCaps), visibleToPhysical, serverProcessPID(p))
 
 	// The loop below owns the entire remaining lifecycle: it blocks until
 	// either the user asks to stop, or the backend dies on its own. A crash
@@ -7246,7 +7488,14 @@ func cmdLaunch(args []string) {
 	const maxRuntimeOOMRetries = 2
 	runtimeOOMRetries := 0
 	for {
-		crashed := waitForShutdownOrCrash(p, sigCh)
+		failedFree = nil
+		watch := defaultServingWatch
+		watch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps)) }
+		watch.onRecover = func() { failedFree = nil }
+		crashed := waitForShutdownCrashOrWedge(processWatch{p}, sigCh, backendBaseURL(req)+"/health", watch)
+		// File what this backend measured before any crash handling reads the
+		// reserve, so an abort's estimate can supersede it.
+		growth.stop()
 		if !crashed {
 			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
 			break
@@ -7266,33 +7515,44 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 		cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
-		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, model, prior)
+		// Runtime growth is filed under the GPU set the backend actually ran on,
+		// the key its measured probes use; the full detected set never matches a
+		// --gpus launch, so its learned reserve was never read back.
+		growthCaps := runtimeGrowthCaps(caps, runtimeCaps)
+		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel)
+		device, allocMB, estimated, suspect, ok := runtimeLogCUDAOOM(logData, growthCaps, model, prior, failedFree)
 		if !ok {
 			claudeAuto.stop()
-			fmt.Fprintln(os.Stderr, "[launch] server exited unexpectedly (not a recognized CUDA OOM) — see the log for details.")
+			fmt.Fprintf(os.Stderr, "[launch] %s\n", unrecognizedCrashMessage(logData))
 			os.Exit(1)
 		}
 
-		reason := fmt.Sprintf("CUDA OOM on device %d after health verification", device)
+		what := fmt.Sprintf("CUDA OOM on device %d", device)
+		if suspect != "" {
+			what = fmt.Sprintf("suspected CUDA OOM on device %d (%s)", device, suspect)
+		}
+		reason := what + " after health verification"
 		if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, reason); err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] cannot invalidate runtime-failed profile: %v\n", err)
 			os.Exit(1)
 		}
-		if err := placement.RecordRuntimeGraphGrowthFromOOM(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, device, allocMB, estimated); err != nil {
+		if err := recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, growthCaps.GPUs, device, allocMB, estimated, prior); err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] cannot persist runtime OOM evidence: %v\n", err)
 			os.Exit(1)
 		}
 		if runtimeOOMRetries >= maxRuntimeOOMRetries {
 			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "[launch] server crashed (CUDA OOM on device %d, %d MiB) after %d recovery attempt(s) — giving up. The failed profile and placement cache were revoked; the recorded deficit will drive the next launch.\n", device, allocMB, runtimeOOMRetries)
+			fmt.Fprintf(os.Stderr, "[launch] server crashed (%s, %d MiB) after %d recovery attempt(s) — giving up. The failed profile and placement cache were revoked; the recorded deficit will drive the next launch.\n", what, allocMB, runtimeOOMRetries)
 			os.Exit(1)
 		}
 
 		runtimeOOMRetries++
-		if estimated {
+		if suspect != "" {
+			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: %s — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
+				what, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
+		} else if estimated {
 			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA VMM OOM on device %d omitted its allocation size — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
 				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
 		} else {
@@ -7300,7 +7560,14 @@ func cmdLaunch(args []string) {
 				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
 		}
 
-		nextStrategy, nextArgs, err := replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, launchRecovery)
+		nextStrategy, nextArgs, err := escalateSizelessRuntimeOOM(estimated, func() (*placement.Strategy, []string, error) {
+			return replanAfterRuntimeOOM(req, cfg, model, be, caps, serverArgs, strategy, launchRecovery)
+		}, func() error {
+			prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel)
+			allocMB = sizelessCUDAOOMReserveMB(growthCaps, model, device, prior)
+			fmt.Fprintf(os.Stderr, "[launch] that reserve left the plan unchanged, but the crash shows its headroom was too small — reserving %d MiB on device %d\n", allocMB, device)
+			return recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, growthCaps.GPUs, device, allocMB, true, prior)
+		})
 		if err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] re-plan after runtime OOM failed: %v\n", err)
@@ -7315,13 +7582,20 @@ func cmdLaunch(args []string) {
 		}
 		if newP.LogBuf != nil {
 			recordMeasuredLaunchProbes(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String(), baselineVRAM, serverProcessPID(newP))
+			noteBackendLoadedVRAM(serverProcessPID(newP))
 		}
-		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+		failedFree = nil
+		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", verifyWatch, func() error {
 			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
 		}); err != nil {
 			_ = newP.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] recovered placement failed lifecycle verification: %v\n", err)
+			if newP.LogBuf != nil {
+				if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, newStrategy, newArgs, newP.LogBuf.String(), failedFree); ok {
+					fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
+				}
+			}
 			os.Exit(1)
 		}
 		if newP.LogBuf != nil {
@@ -7333,6 +7607,8 @@ func cmdLaunch(args []string) {
 		p, strategy, serverArgs = newP, newStrategy, newArgs
 		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 		fmt.Println("[launch] Press Ctrl+C to stop")
+		growth = startServingGrowthRecorder(cfg.CacheDir, model, strategy, scopedProbeBackendTagForStrategy(req, model, be, strategy),
+			runtimeGrowthCaps(caps, runtimeCaps), visibleToPhysical, serverProcessPID(p))
 	}
 
 	done := make(chan struct{})
@@ -7353,6 +7629,41 @@ func cmdLaunch(args []string) {
 		markReleasePending(cfg.CacheDir)
 	}
 	claudeAuto.stop()
+}
+
+// learnFromVerificationOOM handles a CUDA OOM during the first requests after
+// load (the functional canary), which the serving loop's runtime recovery never
+// sees because the launch ends at verification. Without it the next launch
+// re-derived the identical plan: Qwen3.6-35B-A3B on one 12 GB GPU planned 33
+// expert layers with 110 MiB free, died in the canary, and would have died the
+// same way on every relaunch. The failed profile is revoked and the reserve is
+// recorded under the failed plan's exact scope, stacking on earlier guesses,
+// so each further failure moves the plan by at least one more layer.
+func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo,
+	caps, runtimeCaps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, logData string, failedFree map[int]int,
+) (string, bool) {
+	if req == nil || cfg == nil || model == nil || strategy == nil || caps == nil {
+		return "", false
+	}
+	caps = runtimeGrowthCaps(caps, runtimeCaps)
+	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
+	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
+	device, allocMB, estimated, suspect, ok := runtimeLogCUDAOOM(logData, caps, model, prior, failedFree)
+	if !ok {
+		return "", false
+	}
+	what := fmt.Sprintf("CUDA OOM on device %d", device)
+	if suspect != "" {
+		what = fmt.Sprintf("suspected CUDA OOM on device %d (%s)", device, suspect)
+	}
+	if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs,
+		what+" during the first requests after load"); err != nil {
+		return fmt.Sprintf("%s after load, and the failed profile could not be revoked: %v", what, err), true
+	}
+	if err := recordAbortGrowth(cfg.CacheDir, model, strategy, tag, caps.GPUs, device, allocMB, estimated, prior); err != nil {
+		return fmt.Sprintf("%s after load, and the reserve could not be recorded: %v", what, err), true
+	}
+	return fmt.Sprintf("%s after load: the failed plan was revoked and %d MiB is now reserved on that device. Launch again to use the adjusted plan.", what, allocMB), true
 }
 
 func invalidateRuntimeOOMLaunch(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
@@ -7430,11 +7741,11 @@ func invalidateRuntimeOOMLaunch(req *launchRequest, cfg *config.Config, model *p
 // other recovery path (preflight, startup OOM, measured promotion,
 // calibration candidates) already refuses a rejected argv; this is the one
 // path that previously relied on the retry counter alone.
-func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, serverArgs []string, launchRecovery *launchMemoryRecovery) (*placement.Strategy, []string, error) {
+func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, serverArgs []string, failed *placement.Strategy, launchRecovery *launchMemoryRecovery) (*placement.Strategy, []string, error) {
 	if launchRecovery != nil {
 		launchRecovery.reject(serverArgs)
 	}
-	replanOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
+	replanOpts := pinRuntimeOOMReplan(placementOptionsFromRequest(req, model, be, cfg.CacheDir), failed)
 	// Without this, Compute() prefers the .place cache written when the
 	// prior instance loaded cleanly and passed health — which is exactly
 	// the placement that just OOM'd mid-request. Skipping it forces a
@@ -7445,12 +7756,88 @@ func replanAfterRuntimeOOM(req *launchRequest, cfg *config.Config, model *placem
 	if err != nil {
 		return nil, nil, err
 	}
+	if failed != nil && failed.ContextSize > 0 {
+		nextStrategy.ContextAuto = failed.ContextAuto
+	}
 	claudeCodeSlotAdjust(nextStrategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
 	nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, nextStrategy)
 	if formatCommand(nextArgs) == formatCommand(serverArgs) {
-		return nil, nil, fmt.Errorf("runtime OOM re-plan reproduced the exact failed argv; refusing an identical relaunch")
+		return nil, nil, errRuntimeOOMReplanIdentical
 	}
 	return nextStrategy, nextArgs, nil
+}
+
+// pinRuntimeOOMReplan keeps a runtime-OOM re-plan on the crashed plan's
+// context, ubatch, batch and slot count. The reserve just recorded is filed
+// under that exact probe key, and a size-less estimate is deliberately not
+// carried to related keys, so a free re-plan that moves context or ubatch never
+// sees it. MiniMax-M3 showed the cost: after a 3,204 MiB reserve the automatic
+// re-plan moved experts off CUDA0 and then refilled the freed VRAM with KV
+// (context 405,504 -> 442,368), left 491 MiB free and crashed again. Pinned,
+// the planner has to pack around the reserve on the same key.
+//
+// KV placement and quality are part of that key too. Qwen3.6-35B-A3B on one
+// RTX 4070: after a 638 MiB reserve the re-plan moved KV to the host
+// (--no-kv-offload) and every expert onto the GPU, planned with runtime=0 on
+// the new key, and crashed again.
+func pinRuntimeOOMReplan(opts placement.Options, failed *placement.Strategy) placement.Options {
+	if failed == nil || failed.ContextSize <= 0 {
+		return opts
+	}
+	opts.ContextSize = failed.ContextSize
+	if failed.KVPlacement == "gpu" || failed.KVPlacement == "cpu" {
+		opts.KVPlacement = failed.KVPlacement
+	}
+	if failed.KVQuality != "" {
+		opts.KVQuality = failed.KVQuality
+	}
+	opts.AutoContextMax = 0
+	if failed.UBatchSize > 0 {
+		opts.UBatchSize = failed.UBatchSize
+	}
+	if failed.BatchSize > 0 {
+		opts.BatchSize = failed.BatchSize
+	}
+	opts.Parallel = maxPreflightInt(failed.Parallel, 1)
+	opts.AutoParallel = false
+	return opts
+}
+
+// runtimeGrowthCaps is the GPU set runtime growth is filed under: the devices
+// the backend ran on (restricted and renumbered for --gpus), which is also the
+// set measured probes and the planner's lookups use.
+func runtimeGrowthCaps(caps, runtimeCaps *detect.Capabilities) *detect.Capabilities {
+	if runtimeCaps != nil && len(runtimeCaps.GPUs) > 0 {
+		return runtimeCaps
+	}
+	return caps
+}
+
+var errRuntimeOOMReplanIdentical = errors.New("runtime OOM re-plan reproduced the exact failed argv; refusing an identical relaunch")
+
+// maxSizelessOOMEscalations bounds how many extra expert layers a size-less
+// runtime OOM may reserve before recovery gives up.
+const maxSizelessOOMEscalations = 4
+
+// escalateSizelessRuntimeOOM re-plans after a runtime OOM. A size-less abort is
+// filed as one routed expert layer, and when that fits inside the plan's slack
+// the re-plan reproduces the argv that just crashed. The crash is proof the
+// slack was not enough, so reserve one more layer and re-plan, up to
+// maxSizelessOOMEscalations times. A sized OOM, or a re-plan that fails for any
+// other reason, is returned unchanged.
+//
+// Qwen3.6-35B-A3B on one RTX 4070 aborted with a size-less OOM on its first
+// Claude Code request; one layer (242 MiB) left the 33-layer plan unchanged and
+// recovery refused to relaunch.
+func escalateSizelessRuntimeOOM(estimated bool, replan func() (*placement.Strategy, []string, error), reserveMore func() error) (*placement.Strategy, []string, error) {
+	strategy, args, err := replan()
+	for i := 0; i < maxSizelessOOMEscalations && estimated && errors.Is(err, errRuntimeOOMReplanIdentical); i++ {
+		if rerr := reserveMore(); rerr != nil {
+			return nil, nil, rerr
+		}
+		strategy, args, err = replan()
+	}
+	return strategy, args, err
 }
 
 // waitForShutdownOrCrash blocks until either a shutdown signal arrives
@@ -7931,6 +8318,8 @@ func cmdGUI() {
 			req *tui.LaunchRequest
 			err error
 		)
+		// Re-probe each pass: the TUI can install a backend before returning.
+		enableInstalledArchSupport()
 		if pendingReview != nil {
 			req, err = tui.RunAfterBackendInstall(pendingReview)
 			pendingReview = nil
@@ -9799,12 +10188,27 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		CTXTrain:                  info.ContextLength,
 		ModelArch:                 info.Architecture,
 		NextNPredictLayers:        info.NextNPredictLayers,
+		SSMConvKernel:             info.SSMConvKernel,
+		SSMStateSize:              info.SSMStateSize,
+		SSMGroupCount:             info.SSMGroupCount,
+		SSMInnerSize:              info.SSMInnerSize,
+		SSMTimeStepRank:           info.SSMTimeStepRank,
 		HeadCountKVByLayer:        append([]int(nil), info.HeadCountKVByLayer...),
 		SWAPattern:                append([]int(nil), info.SlidingWindowPattern...),
 		KeyLengthSWA:              info.KeyLengthSWA,
 		ValueLengthSWA:            info.ValueLengthSWA,
 		RecurrentState:            info.RecurrentState,
 	}
+}
+
+// rejectProjectorModel refuses a multimodal projector given as the model. An
+// mmproj GGUF (architecture "clip", no transformer blocks) was planned at a
+// 4,194,304-token context on Vulkan and only failed at the memory probe.
+func rejectProjectorModel(info *gguf.Info, path string) error {
+	if info == nil || !strings.EqualFold(strings.TrimSpace(info.Architecture), "clip") {
+		return nil
+	}
+	return fmt.Errorf("%s is a multimodal projector (mmproj), not a language model; launch the model file (the projector is paired automatically, or pass it with --mmproj)", filepath.Base(path))
 }
 
 // parseModel calls parse_gguf.py to extract real model metadata.
@@ -9815,6 +10219,9 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	}
 	info, err := gguf.Parse(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectProjectorModel(info, path); err != nil {
 		return nil, err
 	}
 

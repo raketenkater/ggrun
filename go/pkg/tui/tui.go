@@ -2573,6 +2573,7 @@ func (m Model) viewRecommended() string {
 	}
 
 	idx := 0
+	buildShown, vulkanShown, unsupportedShown := false, false, false
 	writeGroup := func(title string, rows []recommend.Recommendation) {
 		if len(rows) == 0 {
 			return
@@ -2594,9 +2595,23 @@ func (m Model) viewRecommended() string {
 				tps = fmt.Sprintf("~%.0f t/s", rec.PredictedTPS)
 			}
 			name := rec.Name
-			if len(name) > 34 {
-				name = name[:33] + "…"
+			limit := 34
+			marker := ""
+			switch {
+			case rec.BackendStatus == recommend.BackendNeedsSetup:
+				marker, buildShown = " +", true
+			case rec.BackendStatus == recommend.BackendUnsupported:
+				marker, unsupportedShown = " !", true
+			case rec.ServedOnVulkan():
+				marker, vulkanShown = " ^", true
 			}
+			if marker != "" {
+				limit = 32
+			}
+			if len(name) > limit {
+				name = name[:limit-1] + "…"
+			}
+			name += marker
 			line := fmt.Sprintf("%-34s %-9s %-11s %5.1fG %5s %7s",
 				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
 			if idx == m.selectedRecommendation {
@@ -2611,6 +2626,15 @@ func (m Model) viewRecommended() string {
 	writeGroup("Best overall — intelligence first, practical quant", m.recommendationGroups.Balanced)
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
+	if buildShown {
+		b.WriteString(mutedStyle.Render("  + No installed backend loads it; first launch offers a 20-40 min build.") + "\n")
+	}
+	if vulkanShown {
+		b.WriteString(mutedStyle.Render("  ^ Loads now on Vulkan, below the CUDA estimate; first launch offers a CUDA build if it can.") + "\n")
+	}
+	if unsupportedShown {
+		b.WriteString(mutedStyle.Render("  ! No installed backend loads it and no supported route builds one here; listed last.") + "\n")
+	}
 	b.WriteString(mutedStyle.Render("  Intel is base-model catalog intelligence (~ estimated), not quantized accuracy.") + "\n")
 	b.WriteString(mutedStyle.Render("  1–2 bit quants are fallbacks within a model; task accuracy is unverified.") + "\n")
 	b.WriteString(mutedStyle.Render("  Speeds are estimates; Benchmark measures this exact machine.") + "\n")
@@ -2730,7 +2754,7 @@ func discoverModels(dir string) []ModelItem {
 	var items []ModelItem
 	seen := make(map[string]bool)
 
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(modelstore.WalkRoot(dir), func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -2972,6 +2996,11 @@ func kvProfileFromGGUF(info *gguf.Info) *placement.ModelProfile {
 		// Per-layer arrays price mixed-head and explicit-window models; the
 		// NextN count tells placement which stored blocks hold no cache.
 		NextNPredictLayers: info.NextNPredictLayers,
+		SSMConvKernel:      info.SSMConvKernel,
+		SSMStateSize:       info.SSMStateSize,
+		SSMGroupCount:      info.SSMGroupCount,
+		SSMInnerSize:       info.SSMInnerSize,
+		SSMTimeStepRank:    info.SSMTimeStepRank,
 		HeadCountKVByLayer: info.HeadCountKVByLayer,
 		SWAPattern:         info.SlidingWindowPattern,
 		KeyLengthSWA:       info.KeyLengthSWA,

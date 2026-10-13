@@ -2575,3 +2575,1350 @@ and the contract does not accept unit tests as evidence for it.
 - Re-run the seat comparison once a seat can launch. Until then the worker
   benefit is unmeasured, and nothing here argues a companion cannot pay for
   itself.
+
+## CANARY — first launch blocked ~43 min on a slow CPU — 2026-10-07
+
+Evidence: PR #81 install-e2e run 37653926240 (Linux, 4-vCPU hosted runner,
+`--threads 2`). Recommended model Qwen3.5-9B UD-IQ3_XXS, 262144 context. The
+server was listening 3.3 s after start, but the new-profile cache canary sent a
+6924-token cold prompt that prefilled at 2.62-2.67 tok/s; after 1172 s it had
+processed 3072 tokens and the launch never printed ready. The per-request
+canary timeout (20 min) would have rejected the profile before finishing.
+
+Fix (`pkg/benchmark` `PrefillBudget`, launch budget 5 min): one minimal
+exchange measures prompt speed. If the full canary fits the budget it runs
+unchanged; otherwise it shrinks to the budget; if even the 1200-token reuse
+proof does not fit, the endpoint is verified, reuse stays unproven and the
+profile is degraded, not promoted. Unknown speed or tokenizer keeps the full
+canary. Invariants: tests in `cache_canary_budget_test.go`.
+
+Unproven: the tiny probe's prompt rate underestimates batched prefill, so some
+machines near the 5-minute line now run a shorter canary than before. Live
+check pending: the PR's Linux/Windows hosted launch.
+
+## RELAUNCH — ~55 s wait for the port after a clean stop — 2026-10-07
+
+Evidence: installed TUI journey (`scripts/verify-installed-tui.py`), local run
+on `accept-20261007`. Stop, then "Run latest configuration", waited ~55 s before
+the backend started. The previous server's sockets sit in TIME_WAIT, and the
+launcher's port probe (`listenLikeBackend`) binds with options that differ from
+the backend's. Measured on kernel 7.0: REUSEADDR after a REUSEADDR server binds,
+REUSEPORT after REUSEPORT binds, a probe without options or with the other
+style gets EADDRINUSE. Mainline sets SO_REUSEADDR; ik_llama (httplib 0.46)
+sets only SO_REUSEPORT. So the probe reports "busy" for a port the backend
+could bind.
+
+Not changed in this release. Proposed fix: a connect check for a live listener
+plus a bind check in the selected backend's own socket style, made against the
+launch port before any backend starts. Needs a port-probe invariant test and a
+relaunch timing check.
+
+## GLM-5.3-Flash — architecture name differs from upstream — 2026-10-07
+
+The local GGUF says `glm5next` (from the unmerged llama.cpp PR #27752 fork);
+upstream master registers `glm5-next`. On a fresh install no backend loads it,
+and the offered "build current mainline" route would build for 30-60 min and
+then fail its post-build architecture check. Until the GGUF and upstream agree,
+the honest route is the fork recipe; the mainline build offer should not be
+made for a name upstream does not register. Not changed in this release.
+
+## SECOND SESSION — Claude Code prompt reuse across sessions — 2026-10-07
+
+Evidence: acceptance cell C1 (Qwen3.5-4B UD-Q4_K_XL, `--cpu --ram-budget 16G`,
+ik_llama CPU, launcher v3.2.10-92-gbcf5ff5), three separate Claude Code
+sessions on one server; analysis `accept-20261007/harness/prompt_reuse.py`.
+
+| request | prompt tokens | evaluated | reused | prefill |
+|---|---:|---:|---:|---:|
+| session 1, first | 21,006 | 21,006 | 0 | 168.1 s |
+| session 1, first side request | 12,773 | 12,261 | 512 | 88.8 s |
+| session 2, first | 21,011 | 3,091 | 17,920 (85%) | 30.7 s |
+| session 3, first | 21,014 | 3,094 | 17,920 (85%) | 30.7 s |
+| 160 warm turns | 13k-33k | median 155 | rest | ~1-3 s |
+
+A new session already reuses the shared prefix; only ~3.1k session-specific
+tokens are re-evaluated, and the main and side prompt families both stay cached
+in one slot. Cross-session caching work would save at most those ~3k tokens per
+new session, so it is not proposed.
+
+## NANBEIGE CPU — reviewed fork too slow for Claude Code on CPU — 2026-10-07
+
+Evidence: acceptance cell C2 (Nanbeige4.2-3B Q4_K_M, `--cpu --ram-budget 16G`,
+14 threads, AVX-512, reviewed fork `nanbeige42-cuda` at b77d646, ctx 117,760,
+q8_0 KV). Prompt processing: 6,907-token canary at 16.2 tok/s (427 s); the first
+Claude Code request fell from ~6 to 5.6 tok/s by 15.9k tokens (2,832 s for 73%
+of 21.8k). Same profile on ik_llama with Qwen3.5-4B: 134 tok/s. The cell was
+stopped after the first request; no task result.
+
+The same fork on GPU served normally (fork-auto run: 7,233 tokens in 2.9 s).
+Cause on CPU not investigated (fork CPU attention path with quantized KV is the
+first suspect). Until then the fork-only CPU route works but is not usable for
+agent work.
+
+## SERVING HANG — backend aborts, deadlocks, and serving never ends — 2026-10-07
+
+Evidence: acceptance cell B2 (Qwen3.6-35B-A3B UD-IQ2_XXS, `--gpus 0 --ram-budget
+32G`, bundled ik CUDA, 27 expert layers on the RTX 4070, ub 256). Ready in 148 s,
+canary passed; on the first Claude Code request the backend printed `CUDA error:
+an unsupported value or parameter was passed to the function` in
+`ggml_cuda_op_mul_mat_cublas` (cublasSgemm, 17-token batch) and then hung: the
+abort's forked backtrace helper deadlocked on a futex (no gdb on the host), the
+parent sat in waitpid, `/health` stopped answering and CPU use was 0. ggrun's
+serving loop only noticed process exit, so Claude Code waited indefinitely.
+Ctrl+C still cleaned up (0.4 s, VRAM released).
+
+Fix: the serving loop now stops a backend that printed a fatal ggml line AND
+stopped answering `/health` AND used no CPU for 20 s, then takes the existing
+crash path (CUDA OOM still goes through OOM recovery). Fatal lines are anchored
+to ggml's own formats, so text in logged prompts never counts. The log is read
+incrementally. Tests: `serving_watch_test.go`.
+
+Open: the cuBLAS error itself (ik bug or this configuration) is not diagnosed.
+
+Follow-up, same day: on relaunch the backend aborted with a size-less `CUDA error:
+out of memory` (alloc, device 0) on the first Claude Code request. The new
+serving watch stopped it within seconds and runtime OOM recovery ran, but the
+one-layer estimate (242 MiB) left the 33-layer plan unchanged and recovery
+refused an identical relaunch. The 33-layer plan came from the launch-time
+challenger (the first launch started at 26 layers); the synthetic ~7k-token
+calibration workload never reached the growth a 21k-token agent prompt causes.
+
+Fix: when a size-less estimate reproduces the crashed argv, reserve one more
+routed expert layer (stacked on the recorded guess) and re-plan, at most 4
+times; a measurement still replaces the guess. Tests:
+`runtime_oom_escalation_test.go`. Open: calibration workload does not cover
+long agent prompts, so a challenger can win without runtime headroom.
+
+Second follow-up: with no verified config the fresh B2 plan was 33 layers at
+ub 512 with 110 MiB free on CUDA0 (`runtime=0`); the 7k-token canary died with a
+size-less OOM, the launch ended at verification, and nothing was learned, so
+every relaunch re-derived the same plan. Fix: a CUDA OOM after load during
+verification (first launch or the recovered relaunch) now revokes the profile
+and records the stacking reserve under the failed plan's scope, and says to
+launch again. Tests: `verification_oom_test.go`. Live check: consecutive B2
+launches at the end of the matrix.
+
+## CLAUDE-CODE PREFLIGHT — KV-cache OOM failed closed — 2026-10-07
+
+Evidence: acceptance A2 `--claude-code` serving check (Qwen3.8-27B UD-Q5_K_S, full
+host, reviewer Qwen3.5-4B on CUDA2). Plan: 628,736 tokens, 4 slots. Guarded
+preflight: CUDA0 KV allocation 6,711 MiB missed the guard by 308 MiB
+(`llama_kv_cache_init: failed to allocate buffer for kv cache`); recovery
+reported that neither re-planning nor derating changed the configuration and
+the launch exited. Context derating, the lever that fits, was gated to
+compute-buffer failures only. The same model without `--claude-code` (1 slot,
+262,144) passed all tasks.
+
+Fix: a KV-cache allocation failure is flagged (`IsKVCache`) and qualifies for
+automatic context derating sized to the deficit; explicit context stays a
+constraint. Tests: `kv_oom_recovery_test.go`. Live re-check at the end of the
+matrix.
+
+## MINIMAX RUNTIME OOM — recovery reserve refilled with KV — 2026-10-07
+
+Evidence: acceptance A1 (MiniMax-M3 UD-IQ3_XXS, full host, ctx 405,504, ub 64,
+13 expert layers on GPU). Ready after a 17-minute load, canary passed; the first
+Claude Code request hit a size-less OOM on CUDA0. The serving watch stopped the
+hung backend and recovery reserved 3,204 MiB (one expert layer), but the free
+re-plan moved experts off the GPUs (13 -> 2) and then spent the freed VRAM on
+KV: context 442,368, CUDA0 11,382/11,873 MiB, `runtime=0`. The recovered launch
+died in its canary. Cause: the reserve is filed under the crashed plan's exact
+probe key and size-less estimates are not carried to related keys, so a re-plan
+that changes context or ubatch never sees it.
+
+Fix: the runtime-OOM re-plan is pinned to the crashed plan's context, ubatch,
+batch and slots, so it packs around the reserve on the same key. Tests:
+`TestRuntimeOOMReplanKeepsTheCrashedShape`. Live re-check: MiniMax recovery
+cell. Note: a full-suite run under matrix load timed out
+`TestWarmupOOMWithoutARaiseNeverReloadsAFailedArgv` (61 s); it passes alone
+with and without this change and in the next package run.
+
+Pattern across B2 and A1: the first long agent prompt (~20k tokens) needs more
+CUDA0 memory than the ~6-7k-token canary shows. Recovery now copes; making the
+plan or the canary cover long prompts is open.
+
+Third follow-up (A1 recovery cell, launcher 1d037e8): a fresh launch with the
+recorded reserve and the residency hold ("re-packing CUDA0 to hold
+n-cpu-moe>=54") passed exact preflight as CUDA0 388/11,873 MiB with model=0
+context=0, CUDA1 22,161/24,112 with context=0. At runtime CUDA0 peaked at
+11,775 MiB and CUDA1 at 24,110 MiB, and the first canary request died with the
+cuBLAS "unsupported value or parameter" error. The preflight's per-device
+accounting did not see where the backend actually put the KV cache. The
+cuBLAS error is not treated as an OOM, so nothing was learned. The pinned
+runtime re-plan was not exercised (no post-ready crash).
+
+Open, needs its own investigation before more recovery work:
+- preflight per-device KV accounting vs the backend's real placement for
+  MiniMax-M3 with experts held on CPU;
+- whether the cuBLAS INVALID_VALUE on a nearly full device is an allocation
+  failure (treat as size-less OOM) — inferred, not shown;
+- a default per-device runtime reserve until growth is measured (llama.cpp's
+  fitter keeps 1 GiB): a placement policy change for every model that needs a
+  matched A/B before promotion.
+
+## GROWTH PROBE — the 4070 crashes are a memory ceiling — 2026-10-08
+
+Evidence: `accept-20261007/harness/growth_probe.py` replaying the exact B2 argv
+(Qwen3.6-35B-A3B UD-IQ2_XXS, RTX 4070 only, 33 expert layers, ub 256, ctx
+262,144), fresh prompts, nvidia-smi sampled every 0.5 s.
+
+| run | after load | 7k | 14k | 21k | 28k |
+|---|---:|---:|---:|---:|---:|
+| base | 11,685 | 11,815 | 11,843 | died at 11,871 | — |
+| repeat | 11,685 | 11,815 | — | 11,843 ok | 11,857 ok |
+| `-amb 512` | 11,685 | 11,817 | — | 11,843 ok | 11,857 ok |
+
+(MiB of 11,873.) The plan leaves ~188 MiB after load; long prompts grow the
+backend pool by ~130-170 MiB. A run fails only when the pool touches the card
+ceiling, and it then fails either as `CUDA error: out of memory` or as cuBLAS
+"an unsupported value or parameter" in `ggml_cuda_op_mul_mat_cublas`. `-amb`
+and `--n-cpu-moe` (overridden by the explicit `-ot` list) change nothing.
+Prompt processing ~1,050-1,100 tok/s throughout.
+
+Fixed: the cuBLAS form now counts as a size-less OOM, so serving watch,
+runtime recovery and verification learning all engage
+(`TestCublasUnsupportedValueAtTheCeilingIsASizelessOOM`).
+
+Open (owner decision): a default per-device runtime reserve while growth is
+unmeasured. Observed need: >=190 MiB (Qwen3.6, 28k tokens) and >491 MiB
+(MiniMax-M3, ~20k). Plans with headroom are unaffected (Qwen3.8-27B left >1 GB).
+Needs consistent accounting in expert packing, automatic context fit and exact
+preflight, plus a matched A/B.
+
+Side finding: with CUDA0 full from another process, a launch planned only on
+CUDA1 failed preflight with "CUDA-capable device(s) is/are busy or
+unavailable" — the backend initialises every visible GPU. Restricting
+CUDA_VISIBLE_DEVICES to the planned devices would avoid it.
+
+Matched pairs (main a505173 vs candidate): Qwen3.8-27B full host — comparable,
+no regression (decode 32.22 vs 32.20 tok/s, identical allocations, ready 199 s
+vs 114 s). Qwen3.5-4B — identical argv and allocations, decode 103.9 vs 104.1
+tok/s; its ready time differed by the ~55 s TIME_WAIT wait because both sides
+reused one port back to back (RELAUNCH entry).
+
+## LEARNED RESERVE NOT APPLIED — keying and candidate selection — 2026-10-08
+
+Evidence: four consecutive B2 launches (launcher 13067d9) each died in the
+canary with a size-less OOM and recorded a stacking reserve on CUDA0 (242, 484,
+726, 968 MiB), yet every next launch planned identically (CUDA0 11,763/11,873,
+`runtime=0`). Cause 1: the reserve was filed under the full detected GPU set
+(gpu_sig e6d0cebf81c0) while a `--gpus 0` launch plans and measures under the
+restricted runtime set (9dccdb747f84). Fixed: runtime growth is read and
+recorded under the runtime GPU set (`runtimeGrowthCaps`,
+`TestRuntimeGrowthIsFiledUnderTheRuntimeGPUSet`).
+
+Cause 2, open: with the reserve under the right key, `GGRUN_TRACE_PLACEMENT`
+shows the planner reading it (`probeHit=true ... ub=512 compute=489 growth=968
+fixed=1767`), but most candidates at the same ctx/ubatch are evaluated with
+`probeHit=false` (`compute=0 growth=0 fixed=310`), and the chosen plan came from
+one of those: 33 expert layers with the reserve vs 32 without. A candidate with
+no evidence beats one whose evidence says to keep room. Needs a dedicated look
+at the placement-cache key (backend tag / scope) and candidate selection; not
+changed here.
+
+## CLAUDE-CODE DERATE — context cut refilled by the re-plan — 2026-10-08
+
+Evidence: `A2-q38-27b-claude-code-kvfix`. With KV failures now derating
+context, four starts cut 593,920 -> 518,144 -> 483,328 -> 460,800 tokens while
+the deficit stayed 648, 737, 724, 466 MiB and moved CUDA0 -> CUDA1; the
+start-admission budget (4 weight-loading starts) then ended the launch. Each
+free re-plan at the smaller context rebalanced layers onto the device that had
+just run short. Fix: for a KV-cache failure the context re-plan keeps the
+accumulated per-device deficits (`ReplanAfterOOM`), so the freed room stays
+on the short device. Test: `TestKVContextDerateKeepsTheFailedDevicesDeficit`
+(split on the short device 0.67 -> 0.66 at the same context).
+
+Follow-up, live on 3031e67+: the KV derate path now also records the device
+deficit itself when the device-penalty branch did not run, and a contained
+preflight that shrinks its deficit by at least a fifth earns one extra
+weight-loading start (at most 2 per admission; `maxConvergingAdmissionLoads`,
+`TestConvergingPreflightEarnsBoundedExtraStarts`). Live: 648 -> 737 -> 724 ->
+78 -> 4 MiB, exact preflight then fit — but two defects remain:
+- the compute-buffer context derate sizes against the failed allocation, so a
+  4 MiB shortfall on a 75 MiB allocation cut context to its floor
+  (483,328 -> 98,304 tokens, 4 slots -> 1);
+- the production start needed a 7th load and was refused.
+Root cause behind the whole walk: in 4-slot `--claude-code` plans the estimate
+is short by ~650-740 MiB per device. The estimator, not more recovery steps,
+is the fix.
+
+## SERVING GROWTH — record real runtime growth instead of guessing — 2026-10-08
+
+Owner question: why does ggrun not record the growth instead of needing a static
+reserve? It was designed to (`RecordPostLaunchRuntimeGraphGrowth`, related-key
+carry of measured values), but the recorder runs right after load, before any
+request, so it saw ~0; growth was only ever learned from aborts, as estimates,
+which are not carried across keys and which a measurement could trap.
+
+Changes:
+- Serving growth recorder (`serving_growth.go`): snapshots the backend process
+  tree's own VRAM per device right after load, samples it every 10 s while
+  serving, and files the peak growth as a measurement for the launch key (every
+  minute and on stop, only upward). It is stopped before crash handling reads
+  the reserve. Companions and other applications are not counted.
+- Causal abort rule (`RecordRuntimeGraphGrowthAfterAbort`): a size-less abort
+  records the reserve it ran against and may raise a measured value no larger
+  than that — the abort disproved it. Ordinary estimates still never raise a
+  measurement (concurrent-writer invariant kept).
+Tests: `serving_growth_test.go`, `TestAbortRaisesOnlyTheMeasurementItDisproved`.
+Live check pending (owner paused GPU work for an hour).
+
+Live check (launcher caa5b40, Qwen3.6-35B-A3B UD-IQ2_XXS, `--gpus 0 --ram-budget
+32G`, fresh cache; `accept-20261007/harness/growth_learning_check.py`, evidence on
+the 2 TB disk `ggrun-accept-20261007-evidence/growth-learning-b2*`):
+- launch 1: 33 expert layers on CUDA0, preflight `runtime=0`; the canary died
+  with the cuBLAS ceiling error, recognised as a size-less OOM, and 242 MiB was
+  filed under the runtime GPU set;
+- launch 2: preflight `runtime=242`, 32 layers; ready in 88 s; fresh 7k, 14k,
+  21k and 28k-token prompts all served, CUDA0 peak 11,815/11,873 MiB; the
+  serving recorder filed measured growth CUDA0=328 MiB, replacing the guess.
+A brand-new model on a tight device still fails once before it has learned.
+
+`--claude-code` follow-up (3 launches on caa5b40, all exited): each walk ended
+with exact preflight passing twice and the production start refused at the
+6-start limit; a 15-29 MiB compute shortfall had again cut context ~518k ->
+98,304. Fixes: (1) a compute-buffer context derate counts the failed device's
+KV share (model KV at the current context times its tensor-split share), so a
+small shortfall gets a small cut (`TestSmallComputeShortfallCutsContextBySize`);
+(2) the production start of an argv that passed an allocated exact preflight is
+granted once even when the probes spent the allowance
+(`TestAdmittedStartIsGrantedOnce`). Nothing persists from a launch that never
+succeeds, so cross-launch learning cannot help this case.
+
+Qwen3.6-35B-A3B on the 4070 with Claude Code (launcher caa5b40, learned cache):
+calc, textstats, inventory all correct (160/157/131 s). Two mid-session aborts
+were caught by the serving watch and recovered in-process; measured growth rose
+to 1,546 MiB. The first recovery's preflight still showed `runtime=0`.
+
+## ESTIMATE CARRY — an abort's reserve must reach the next plan's key — 2026-10-08
+
+Evidence: MiniMax-M3 learn-1 (launcher e0f5673) died in its canary with a
+size-less OOM and filed 3,204 MiB on CUDA0 for its key (ctx 436,224 / ub 512).
+Learn-2 planned with `runtime=22` on CUDA0: automatic context landed on another
+key (ctx 442,368 / ub 64) holding an older 22 MiB measurement, and estimates were
+never carried across keys. Probe files held four keys with conflicting entries.
+
+Fix: estimates are dated by their probe file. A related key's abort estimate is
+used when it is newer than every measurement for its device (cold key) or newer
+than the exact key's own file (measured key); a later measurement supersedes it,
+so an old guess cannot become a permanent floor. Dry-run trace on a copy of the
+real cache: CUDA0 growth 22 -> 3,204 MiB in all 360 candidate evaluations.
+Tests: the rewritten carry subtest; the warmup test now uses the measured-only
+view `RelatedMeasuredRuntimeGraphGrowth`.
+
+MiniMax-M3 learn-4/5 (83c7d78): the plan now carried `runtime=3204` on CUDA0 but
+still overshot by 103-151 MiB on an oracle total (neither compute nor KV), with
+5,929 MiB of KV on CUDA0; recovery found no lever and failed closed. Fix: a
+shortfall on a device that holds KV under automatic context qualifies for a
+context derate sized on that device's KV share; an eligible oracle re-plan still
+answers first (disproof protocol unchanged). Live: "preflight context-derate
+after CUDA0 allocation 0 MiB (deficit 103 MiB)", 372,736 -> 368,640 tokens,
+exact preflight passed. Test: `TestKVBackedOracleShortfallDeratesContext`.
+
+MiniMax-M3 direct-1 (b2a6d74 build): the derated plan loaded in 17 min and then
+OOM'd on CUDA1 in the canary; the abort filed 3,204 MiB on CUDA1. Direct-2
+(ae8ee40) planned `runtime=3204` on CUDA0 and CUDA1, loaded twice (the
+allocation measurement moved one expert layer to GPU, 55 -> 54 CPU MoE), was
+ready in 42 min, and served Claude Code: calc correct (8 turns, 1,481 s).
+The serving recorder filed measured growth CUDA0 1,182, CUDA1 4,022, CUDA2
+1,002 MiB. CUDA1 peaked within ~260 MiB of the card. The learned reserve on
+CUDA1 is still short of the real growth, so the next launch plans with the
+4,022 MiB measurement.
+
+## RUNTIME OOM RE-PLAN — keep the crashed KV placement — 2026-10-08
+
+Evidence: B2-q36-35b-learned. The first runtime abort reserved 638 MiB; the
+pinned re-plan kept ctx/ub/slots but switched KV to the host (`--no-kv-offload`)
+and put every expert on the GPU (was `--n-cpu-moe 8`). KV placement is part of
+the growth key, so the new plan showed `runtime=0` and crashed again (growth
+1,146 MiB). Fix: the runtime-OOM re-plan also pins the crashed plan's resolved
+KV placement and quality. Test: `TestRuntimeOOMReplanKeepsTheCrashedShape`.
+
+MiniMax-M3 direct-2 final: stream (TTFT 2.1 s), cancel and reconnect, Claude
+Code calc (8 turns, 1,481 s) and textstats (9 turns, 1,343 s) all correct; no
+serving abort in 48 min of agent work; clean stop.
+
+## LAYER SPLIT — ik_llama assigns layers by bytes, ggrun predicts by count — 2026-10-08
+
+Evidence: `--claude-code` Qwen3.8-27B (4 slots, full host) on 7907674, attempts
+6-7: seven preflights each failed on a KV allocation 15-737 MiB short, the
+deficit moving between CUDA0 and CUDA1 after each re-split; admission budget
+exhausted. Same with a memory-probe (no reviewer present): CUDA0 6,868 MiB at
+804,864 tokens, 247 MiB over the guard.
+
+Two causes, measured with the backend directly (split 0.27/0.58/0.15, ctx
+65,536, q8_0):
+
+1. Hybrid recurrent state is not priced per slot. Qwen3.8 (qwen35, 48
+   recurrent + 16 attention trunk blocks, 1 MTP block) allocates 149.63 MiB of
+   delta-net state per slot beside the "KV self size" (2,176 MiB): per-device
+   KV buffers sum to 2,325.6 MiB at 1 slot and 2,774.5 MiB at 4. ggrun reads
+   the aggregate line and the formula counts attention only. ik_llama sizes it
+   as n_embd_v_s = (d_conv-1)(2 d_state n_group + d_inner) + (d_inner/dt_rank)^2
+   dt_rank F32 per recurrent block per slot (GGUF ssm.*, not parsed today).
+2. The layer-to-device assignment differs. ik_llama since #1466 (0871ab29,
+   2026-03-20; shipped backend 1fddd12) fills devices by cumulative bytes:
+   per-block weights (all `blk.N` tensors, routed experts included even when
+   overridden to CPU) plus that block's cache at n_ctx and n_seq_max, plus
+   max_compute per device; `--tensor-split` is a byte fraction. ggrun's
+   `layerDeviceAssignments` mirrors mainline's count rule. Backend log: blocks
+   0-19 / 20-58 / 59-65 (20/39/7, "Setting default device in layer N to D");
+   ggrun predicts 0-17 on CUDA0. An attention block is 1.6 GiB at 800k tokens,
+   so one block off moves the deficit to the next device.
+
+Tried and reverted: per-block pricing of delta-net hybrids with per-slot
+recurrent state (matches the backend's totals exactly). With the count-based
+assignment it still left CUDA0 213 MiB short in the memory-probe, so it is not
+promotion evidence. Patch and test kept with the acceptance evidence
+(`hybrid-kv-wip.patch`). Fix direction: mirror ik_llama's byte-weighted
+assignment for the ik backend (or translate intended layer boundaries into
+byte fractions), then price hybrids per block; both change every multi-GPU
+plan and need matched A/B.
+
+## CPU HYBRID START — unpriced recurrent state walks the context down one granule per start — 2026-10-08
+
+Evidence: recommendation matrix cell C-q38-iq2-first (Qwen3.8-27B UD-IQ2_XXS,
+the CPU + 16 GiB Balanced and Smartest pick; `--cpu --ram-budget 16G`, f618a9f).
+The launch never served: `start admission budget exhausted after 4
+weight-loading start(s) in 17s`. All four contained probes reached ready with
+a cgroup peak of 11.5-12.1 GiB under the 16 GiB cap. Each probe's measured
+context (6,440 / 6,406 / 6,372 / 6,338 MiB at 189,440 / 188,416 / 187,392 /
+186,368 tokens) made that same point fail the plan's own arithmetic by 33-135
+MiB, so the re-plan stepped one 1,024-token granule (~34 MiB) to an unmeasured
+point whose estimate was again ~150 MiB low. 149.63 MiB is the per-slot
+delta-net state of the previous entry.
+
+Fix (22bd4a8): parse GGUF `ssm.*` and price delta-net hybrids (qwen3next,
+qwen35, qwen35moe) per block: attention blocks by context, recurrent blocks by
+slot. Matches the backend's totals at 1 and 4 slots (2,325.6 / 2,774.5 MiB);
+computeKVTotalMB now includes one slot of state. Per-device placement still
+follows the count rule (LAYER SPLIT, open). Core gate passed. Live rerun of the
+cell: pending (below).
+
+## RECOMMENDER — spilled dense fit predicted as resident — 2026-10-08
+
+Evidence: cell B-q38-iq3 (Qwen3.8-27B UD-IQ3_XXS, RTX 4070 only + 32 GiB, the
+Balanced and Smartest pick). Recommender: 31.5 tok/s. Default launch: ctx
+262,144 (memory-resident tier, "model/policy context cap reached"), 5,263 MiB of
+weights and 4,417 MiB of KV on CUDA0, 4,821 MiB of weights and 4,436 MiB of KV
+in host RAM; decode 4.2-4.8 tok/s at Claude Code's 21k+ prompts. Tasks all
+correct but slow: calc 1,610 s, textstats 861 s, inventory 601 s, ledger 2,254
+s (3090 Ti Q5_K_S cell: 98 / 67 / 78 / 163 s).
+
+`fitQuant` placed the quant as GPU plus RAM, but `predictDecodeTPS` took the
+VRAM fraction as usable VRAM / size (clamped to 1) and the single-GPU
+bandwidth. Fix (daeb6b8): a dense non-single-GPU fit charges its GPU-side
+overhead (KV at the expected context + scratch) before counting resident
+weights and does not use the single-card path: 31.5 -> 8.2 tok/s. No category
+pick changed on any of the four profiles. Still above the measured value
+because the launch takes the full 262k context in the offload tier; whether
+the offload tier should trade context for resident weights is an open launch
+policy question (agent sessions need long context), not changed here.
+
+## WINDOWED KV ON IK — Gemma 4 priced at 0 MiB, allocated at full context — 2026-10-08
+
+Evidence: cell B-gemma4-iq4 (Gemma 4 26B A4B IQ4_XS, the RTX 4070 + 32 GiB
+Fastest pick, f618a9f). Plan: ctx 262,144 gpu-resident, `KV 0` on CUDA0. Both
+contained probes: `allocating 29920.01 MiB on device 0: cudaMalloc failed`
+for the KV cache; context recovery at 61,440 tokens failed closed. Never
+served (first and relaunch).
+
+Two causes:
+
+1. Gemma 4 states head_count_kv and the window pattern only per block. It was
+   excluded from per-block pricing as a shared-KV arch, and the scalar path
+   multiplied by a scalar head count of 0.
+2. ik_llama.cpp (1fddd12, `llama_kv_cache_init`) sizes every layer's K/V at
+   kv_size and applies the window as a mask; it has no windowed cache and no
+   `--swa-full`. 29,920 MiB = 262,144 x (5 x 2 x 1,024 + 25 x 8 x 512) x
+   1.0625 B exactly. Planner pricing followed the mainline windowed cache.
+
+Fix (ff22aee): Gemma 4 is priced per block (a shared-KV variant is now
+overestimated, not 0); an ik backend that does not advertise `--swa-full`
+sets ModelProfile.FullContextWindowedKV at backend selection for
+standard-attention windowed models (not DeepSeek4, OpenPangu, MLA), and
+computeKVTotalMB / kvLayerBytes price windowed layers at full context. Dry-run
+on the same profile: ctx 74,752, KV 8,532 MiB on CUDA0 (119,680 B/token,
+matching the backend), experts on CPU. Core gate passed. Live rerun queued
+(matrix5).
+
+Live confirmation of 22bd4a8 (CPU HYBRID START): the CPU Qwen3.8 IQ2_XXS cell
+on fc57b75 planned 185,344 tokens, one probe, "memory plan stable at
+allocation-verified evidence", served (decode ~3.9 tok/s).
+
+## FULL HOST BALANCED / SMARTEST — not testable on this disk — 2026-10-08
+
+The pick is GLM-5.3 UD-IQ2_M (222.2 GB). The model disk has 144 GB free; the
+download needs one of the owner's models removed (owner decision). The local
+UD-Q2_K_XL (237 GB) exceeds the 206 GB RAM budget and is refused without
+`--mmap` ("placement requires file-backed mmap; rerun with --mmap to approve
+it explicitly"), by design.
+
+## CPU HOST FOOTPRINT — prompt cache and checkpoints outside a full scope — 2026-10-08
+
+Evidence: matrix4 C-q38-iq2-first (fc57b75, `--cpu --ram-budget 16G`). Start
+fixed (one probe), stream and cancel passed, then the first 21k-token Claude
+Code prompt: "server was killed by its host-memory cgroup at 16384 MiB". The
+plan: weights 6,930 + KV 6,304 + host runtime 3,149 = 16,383 of 16,384 MiB,
+and on top `-cram 6144` and `--ctx-checkpoints 16` (149.66 MiB each). The
+relaunch re-planned the identical 185,344 tokens: revoking the profile does
+not change a plan whose terms were all "right" but incomplete.
+
+Causes: buildCPUOnly never set PlannedHostFootprintMB, so computeCRAM charged
+only the weights (16,384 - 6,930 -> cram min(KV, 2/3) = 6,144); and
+checkMemoryOrDie's CPU/dense-offload ledger had no checkpoint term (the
+resident GPU paths do, via residentHostFootprintMB).
+
+Fix (09aecd6): the CPU-only footprint is weights + KV + runtime buffers; the
+CPU and dense-offload memory check adds the checkpoint reserve, which
+computeCRAM then divides between checkpoints and the prompt cache. Dry-run on
+the same profile: ctx 122,880, `-cram 1024`, 8 checkpoints. Invariant test:
+footprint + cram + checkpoints within the budget. Core gate passed. Live rerun
+queued (matrix6).
+
+## CPU CONTAINMENT RESERVE — gate and fit charged growth twice — 2026-10-08
+
+Evidence: matrix6 C-q38-iq2-first (09aecd6). With the CPU footprint now real,
+the containment gate refused: "planned host footprint 14309 MiB + required
+reserve 4096 MiB (cgroup headroom 4096 MiB, CRAM 1024 MiB) exceeds the 16384
+MiB whole-host ceiling". Its re-plan held 4,096 MiB back and the fit also
+charged 16 checkpoints (2,048) on top of 3,149 MiB runtime buffers: 161 MiB
+left for KV, no context above the floor, launch refused (first and relaunch).
+
+Gemma 4 on 09aecd6 (matrix5): PASS. Relaunch checks on 09aecd6 (matrix6): CPU
+Qwen3.6 IQ2_XXS calc correct (427 s); 4070 Qwen3.8 IQ3_XXS calc correct
+(1,466 s).
+
+Fix (3551a2a): placement takes the gate's reserve (HostGrowthReserveMB =
+--cgroup-headroom, 0 when the gate's re-plan already holds it back) as one
+growth term for a non-reclaimable CPU-only plan, max(reserve, checkpoint
+reserve); checkpoints and the prompt cache are carved out of it, and
+computeCRAM sizes hybrid checkpoints at the measured size when known.
+Invariant test (16 GiB Qwen3.8 profile): ctx 61,440, footprint 12,268 MiB,
+cram 2,048, 16 checkpoints; footprint + max(reserve, cram) and cram +
+checkpoints both within the ceiling. Core gate passed. Live rerun: matrix7.
+
+## CPU MATRIX7 — slow Best overall, refused relaunch, no-fit MoE — 2026-10-08
+
+Evidence: matrix7 (3551a2a, `--cpu --ram-budget 16G`) and
+`cpu-footprint/q36-iq2` (gate off, scratch cache).
+
+- Qwen3.8-27B UD-IQ2_XXS first launch: served at ctx 61,440, no cgroup kill,
+  but calc and textstats both timed out at 3,600 s. Backend: prompt 12-14
+  tok/s, decode ~3 tok/s; Claude Code's ~21k-token first prompt alone is
+  ~25 min. Not usable as Best overall on this profile.
+- Relaunch refused: the backend measured 149.662 MiB per checkpoint against
+  the 128 MiB floor and raised the saved footprint 12,268 -> 12,621 MiB;
+  12,621 + 4,096 > 16,384. The gate's re-plan restored the same verified
+  config and was refused again.
+- Qwen3.6-35B-A3B UD-IQ2_XXS clean cache: "Model weights 10259 / Host runtime
+  buffers 7252 / Total 19104 / Available 16384" at every context. The cold
+  estimate charged 1,024 MiB CUDA host staging and 2,048 MiB graph scratch
+  with no GPU in use. Measured (gate off): guarded load peak 11,331 MiB =
+  weights 10,247.8 + KV 912.8 + compute 244.5 at ctx 81,920; anon after a
+  71k-token prompt 12,332 MiB including 12 checkpoints and -cram 512. The CPU
+  compute buffer is the logits, ub 256 x vocab 248,320 x 4 = 242.5 MiB, at
+  every context tried (also 247.5 for Qwen3.8).
+
+Fixes:
+- 1504ea9 (recommender, not core): Best overall ranks models predicted below
+  6 tok/s after every usable one. CPU 16 GiB Best overall is now Qwen3.6
+  IQ2_XXS; Smartest stays Qwen3.8 IQ2_XXS.
+- Core: a hybrid checkpoint is priced at max(128, recurrent state per slot,
+  measurement) — 150 MiB for Qwen3.8 — so the measurement no longer moves a
+  plan; the containment re-plan skips the verified config it was handed; a
+  CPU-only cold host estimate is 512 MiB process base + ub x vocab x 4 +
+  page table + activations (2,048 MiB graph when vocab is unknown).
+  Invariant tests: Qwen3.6 16 GiB profile plans ctx 108,544, footprint 12,287
+  MiB, cram 1,024, 16 checkpoints, inside the gate and above the measured
+  load; the Qwen3.8 plan survives the 149.662 MiB observation unchanged; the
+  re-plan does not restore the saved config.
+
+Live (matrix8, f0ce380, 16 GiB CPU scope): Qwen3.6-35B-A3B UD-IQ2_XXS clean
+cache planned ctx 108,544, -cram 1,024, 16 checkpoints (the invariant test's
+numbers), ready 111 s, calc/textstats/inventory correct (346/478/160 s);
+relaunch ready 18 s from the verified config, ledger correct (669 s); decode
+~17.5 tok/s. Qwen3.8-27B UD-IQ2_XXS relaunch on matrix7's cache: gate refused
+the saved 12,621 MiB config, re-plan from measurements ctx 59,392 / footprint
+9,884 MiB, served, stream/cancel/stop pass, memory.peak 15.5 GB of 16 GiB.
+Core gate: core-gate-cpu-overhead.log, pass.
+
+## SHIPPED BACKEND — IQ1_M reached MMQ; aborts not recognised — 2026-10-09
+
+Evidence: matrix10 B-q38-iq2-first/relaunch (f0ce380, 4070 + 32 GiB, the
+opt-in bandwidth-profile Best overall pick, Qwen3.8-27B UD-IQ2_XXS fully
+resident, ctx 112,640). The first batched prompt aborted the bundled ik_llama
+(1fddd12): "Unhandled type iq1_m (29)" / "ggml-cuda/mmq.cuh:112: fatal
+error". UD-IQ2_XXS carries 22 IQ1_M tensors; after an MMQ matmul the fusion
+loop in ggml_cuda_mul_mat_q took the next matmul sharing src1 without asking
+ggml_cuda_should_use_mmq, and IQ1_M has no MMQ layout. Fixed upstream in
+ikawrakow/ik_llama.cpp#2356 (c49f7db3, 2026-08-25), after our pin. UD-IQ3_XXS
+(3 IQ1_M tensors, partly on CPU) ran on the same card.
+
+The process kept answering /props and /tokenize after the abort, and the
+watchdog's markers did not include GGML_ABORT's own "file:line: message"
+format, so each launch waited out its canary timeouts (~28 min) before
+failing.
+
+Fixes: 43d2965 applies patches/ik_llama/0001 (upstream #2356) in
+scripts/build-linux-cuda-bundle.sh (git apply --check before the compile;
+reused checkouts reset with checkout --force). 2fbb3e5 recognises
+"<source>.<c|cc|cpp|cu|cuh|h|hpp>:<line>: <message>" as a fatal backend line
+in the launch watchdog and (anchored) in the serving watch; across all matrix
+logs it matches only the 18 real CUDA aborts and the 2 MMQ aborts. 7538be9
+refuses an mmproj (arch clip) given as the model (it had been planned at
+4,194,304 tokens on Vulkan).
+
+Live: matrix12, same model/profile on a local build of 1fddd12 + #2356 (CUDA
+13.2, sm_86/89): canary passed, verified config saved, serving; tasks running.
+The published bundle needs a release build to carry the patch.
+
+## CONTEXT SHIFT — ik_llama shifted and crashed Gemma 4 12B — 2026-10-09
+
+Evidence: matrix11 B-gemma4-12b-first (f0ce380, 4070 + 32 GiB, opt-in profile
+Fastest pick, Gemma 4 12B Q4_0, ctx 43,008, KV q4_0, FA on, -ub 64). calc
+correct (951 s); during textstats "slot context shift ... n_past=43007
+n_ctx=43008 n_discard=21503", then "CUDA error: an illegal memory access was
+encountered"; the serving watch stopped the backend. ik_llama shifts by
+default (`--context-shift` default on); mainline llama.cpp defaults it off.
+ggrun passed --no-context-shift only for SSM models.
+
+Repro (gemma12-repro/, backend run directly with the served argv): a
+~42.6k-token prompt generating past the slot — shipped 1fddd12: shift, then
+the illegal access, backend hung alive; 1fddd12 + upstream #2356 + #2566 (the
+wmma-f16 SWA mask-stride fix): same crash, so #2566 is not the fix and is not
+added. Shipped backend with --no-context-shift: "context_length_exceeded"
+error, slot released, no CUDA error, backend healthy. Four cached turns up to
+40,303 tokens without a shift ran clean on both builds.
+
+Fix (2226452): --no-context-shift for every model when the backend's help
+lists it (exact token). A shift also silently drops half of an agent's
+conversation; with it off a full context is an error the client acts on
+(ggrun's Claude Code recipe already compacts at the real slot: window =
+slot ctx, 75%). Invariant test: context_shift_test.go. Core gate passed
+(core-gate-context-shift.log). The acceptance harness now sets the same
+autocompact window from /props. Live rerun: matrix13.
+
+## RECOMMENDER vs LAUNCH BACKEND — large MoE served on Vulkan — 2026-10-09
+
+Evidence: matrix9/15 (2226452, full host). Best overall MiMo-V2.6-Flash Q2_K
+(117.5 GiB, arch mimo2) was listed as "CUDA / ik_llama" at ~10.5 tok/s. The
+launch chose the bundled Vulkan build: both it and ik carry the mimo2 literal
+(support class 2 each, no reviewed recipe), and the large-MoE file-backed
+tie-break (largeCPUMoEPrefersFileBacked, >= 48 GiB) prefers mainline's
+file-backed experts. Vulkan has no --dry-run, so a non-interactive launch also
+needs --allow-live-memory-probe (interactive: one remembered consent). Served:
+calc 1,444 s and textstats 1,160 s correct, decode 2.9 tok/s.
+
+Fix (d8ae4b9, recommender only): the recommendation asks the launch's own
+chooseAutoBackend (after registered routes / sole helpers) with the row's
+arch, MoE flag and quant size; a Vulkan choice on an NVIDIA host marks the row
+`+` ("a default launch serves <arch> on the Vulkan build here; the first launch
+offers a CUDA build") and lists it after rows that run now. Full host, fresh
+install: Best overall becomes Qwen3.8-27B UD-Q5_K_S (passed, matrix10);
+Smartest DeepSeek V4 Pro 0813 Q1_0 (206.9 GB; GLM-5.3 UD-IQ2_M glm-dsa is also
+Vulkan-served now). 4070/3090 Ti/CPU top picks unchanged.
+
+Open: whether the file-backed tie-break should hand a large MoE to Vulkan on
+an NVIDIA host by default (memory safety vs ~3x speed) is a core policy
+question; the CUDA mainline build offer is the existing remedy.
+
+## RELAUNCH — port probe in the backend's own socket style — 2026-10-11
+
+Source: ik_llama 1fddd12 vendors cpp-httplib 0.46, whose
+default_socket_options sets SO_REUSEPORT alone on Linux; every mainline
+server since the first (httplib 0.12.2) did the same until b8560 (5c1a7b835),
+which sets SO_REUSEADDR itself and adds `--reuse-port` (ggrun never passes
+it). The old probe bound with neither option, and always on 127.0.0.1.
+
+Fix (edd6b2d): the predecessor wait (before placement) only asks whether a
+server still answers on the launch address (connect; only a refusal is free).
+After backend selection, and before any backend starts, the port must also
+bind with the backend's option, read from its probed --help: `--reuse-port`
+listed -> SO_REUSEADDR, else SO_REUSEPORT; empty or broken help binds with
+neither (any TIME_WAIT blocks it). Waits are bounded (75 s, then continue
+with a warning). Windows binds as before; other non-Linux systems bind with
+neither option. Invariant tests (real sockets, 127.0.0.2):
+`port_probe_unix_test.go` — TIME_WAIT left by a REUSEPORT or REUSEADDR server
+passes the same style at once, the probe agrees with that backend's own bind
+for every style (mismatch busy), a live listener blocks every style, waits
+stay within their bound; `TestBackendBindStyleFromHelp`.
+
+Live (CPU only, GPU driver mismatched): 127.0.0.2, fresh isolated
+config/cache, Qwen3.5-2B Q4_K_M, `--cpu --calibrate off --ctx 8192`;
+backends from accept-20261007 (ik 1fddd12 CUDA build, mainline Vulkan
+d2462f8). Start, one completion, SIGINT, relaunch on the same port once the
+backend exited. before = 1a0ecb6, after = edd6b2d. Backend start = ggrun's
+"starting backend" line; ready = /health 200; seconds from relaunch start.
+
+| relaunch | build | TIME_WAIT | backend start | ready |
+|---|---|---:|---:|---:|
+| ik -> ik | before | 4 | 1.37 | 2.56 |
+| ik -> ik | after | 4 | 1.44 | 2.51 |
+| mainline -> mainline | before | 1 | 1.75 | 3.44 |
+| mainline -> mainline | after | 1 | 2.34 | 4.08 |
+| mainline -> ik | before | 2 | 1.52 | never: "couldn't bind to server socket", exit 1 |
+| mainline -> ik | after | 2 | 63.63 (waited from 0.49) | 64.65 |
+
+In every TIME_WAIT window a neither-option bind on 127.0.0.2 failed
+(EADDRINUSE) and the matching style bound; the same bind on 127.0.0.1
+passed, which is why the before build did not wait here. Raw logs:
+`ggrun-wf1/logs/relaunch-port-probe/` (first attempt, which left TIME_WAIT
+only by chance, kept in `attempt1-nondeterministic-timewait/`).
+
+Unproven: the ~55 s same-style wait on the default 127.0.0.1 host was not
+reproduced live (no servers on 127.0.0.1 here); the TUI "Run latest
+configuration" path, GPU launches and ik -> mainline were not run live (unit
+tests only); one run per cell. Windows and macOS were only compiled here.
+
+## EVIDENCE IDENTITY — the wrapper's hash recorded as the launcher — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P2), read-only check of the recorded
+cells. All 22 verify-installed-serving result.json cells run through
+`accept-20261007/app/ggrun` recorded `identity.launcher.file` = that 148-byte
+shell wrapper (sha256 193471b1...) for builds 85-g475661f through
+118-g7907674; with -buildvcs=false `revision` is empty, so only the version
+string told the builds apart. The live harness (accept-20261007/harness,
+outside the repo) records `ggrun_sha256` of the same wrapper in all 74
+runs.jsonl cells (72 x app/ggrun, 2 x app-p1/ggrun 38d7bbb2...).
+matrix/A1-minimax-serving hashed only shard 1 of 5 of MiniMax-M3 (8,243,104
+bytes); 13 runs.jsonl cells on split models (MiniMax 5, MiMo 2, GLM-5.3 7
+shards) carry no shard hash. The two pair-*-main cells hashed a direct binary
+(harness/ggrun-main-a505173) but have no build metadata. The backend regex
+did not match the PowerShell `& ` launch line, so Windows results had no
+backend identity.
+
+Change: ac263de adds `executable_resolved` (os.Executable + EvalSymlinks) to
+`ggrun version --json`; existing keys unchanged. 0d79845:
+verify-installed-serving records `identity.launcher.entry` (path, own hash,
+kind wrapper|executable), `.executable` (the file that answered version
+--json through that entry, run as the launch runs it: cmd.exe for .cmd/.bat;
+path, bytes, sha256) and `.build`; `identity.model.shards` lists every
+-0000k-of-0000N shard (path, bytes, sha256 with --hash-model); the bounded
+`--fingerprint-model MIB` records size plus sha256 of the first and last MIB
+per shard under `fingerprint`, never under `sha256`; top-level `sha256` is
+null for split models; --mmproj / --model-draft files in the launched argv go
+under `companions`. compare-gpu-acceptance matches every shard.
+core-hardware-window hashes the reported executable (candidate.sha256) and
+keeps candidate.entry.sha256. The Linux candidate install job asserts the
+wrapper ran ~/ggrun/.bin/ggrun.
+
+Invariant tests: tests/test_gpu_e2e.py EvidenceIdentityTests (two builds
+behind one wrapper: same entry hash, different executable hash; result.json
+keeps no wrapper-only `file`; .cmd wrapper; every shard; fingerprint never a
+sha256), version_cmd_test.go. Local check without a GPU: two -buildvcs=false
+builds behind an installer-style wrapper; the 1a0ecb6 script recorded the
+same file hash for both, the new record gives executables cb342871... and
+bb60f470... (logs/evidence-identity/wrapper-smoke.log on the 2 TB disk).
+Core gate passed (0d79845, uncached).
+
+Unproven: no live rerun (NVML down on this boot). The cmd.exe path is unit
+tested with a mocked run only; the Windows E2E has not exercised it. The
+live harness still hashes the wrapper. Every candidate cell above, including
+the matrix3..15 recommender cells in GO-NO-GO.md, needs a rerun on the final
+candidate before it identifies the bytes tested.
+
+## CUBLAS OOM EVIDENCE — an unsupported value is an OOM only at the ceiling — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P2). `cublasWorkspaceOOM` read cuBLAS "an
+unsupported value or parameter" in `ggml_cuda_op_mul_mat_cublas` as a
+size-less OOM from the text alone. cuBLAS reports allocation failure as its own
+status ([CUBLAS_STATUS_ALLOC_FAILED](https://docs.nvidia.com/cuda/cublas/index.html));
+this line is INVALID_VALUE, which non-memory causes raise too. Every recorded
+failure (accept-20261007 logs, read-only) by the backend's own accounting
+(free at load minus that device's buffers) and ggrun's serving recorder:
+
+| log | device | free at load | placed | left | measured growth | at failure |
+|---|---|---:|---:|---:|---:|---:|
+| growth-learning-b2.first, B2 first (canary) | CUDA0 4070 | 11,710 | 11,420 | 290 | — | 290 |
+| B2-q36-35b-learned #1 (serving) | CUDA0 | 11,710 | 11,206 | 504 | 396 | 108 |
+| B2-q36-35b-learned #2 (serving, KV on host) | CUDA0 | 11,710 | 10,396 | 1,314 | 1,146 | 168 |
+| B2-q36-35b-warm (serving, KV on host) | CUDA0 | 11,710 | 9,912 | 1,798 | 1,672 | 126 |
+| A1 MiniMax-M3 (canary, KV on host) | CUDA1 3090 Ti | 23,719 | 21,557 | 2,162 | not sampled | — |
+
+(MiB.) The harness's nvidia-smi put the B2 pool at 11,871/11,873 and A1's
+CUDA1 at 24,110/24,112 when they died; ggrun itself never sees those samples.
+
+Change (89d92d7): the cuBLAS line is a suspected OOM only when that device's
+headroom is <= 512 MiB: free memory from the backend's "using device CUDAn -
+N MiB free" line, minus every CUDAn buffer of the same load (lines before the
+load-complete marker only, so a logged prompt cannot supply evidence), minus
+the peak growth the serving recorder measured (serving loop only). 512 = the
+worst recorded 290 plus one unsampled long-prompt step (~170). Otherwise it is
+an ordinary failure: no revocation, no reserve, no re-plan, and the serving
+message quotes the backend line. A suspected OOM keeps the backend's line and
+the headroom in every message and in the revocation reason.
+
+Invariant tests: `TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling` (real B2
+canary and serving lines; far from the ceiling, no free-memory line, evidence
+only in a prompt, another function), `TestCublasErrorFarFromTheCeilingLearnsNothing`
+(verification learning and the Claude Code recorder record and revoke nothing;
+the same consumer learns 242 MiB at the ceiling), `TestCUDADeviceHeadroomReadsMainlineLoadLines`.
+Core gate passed on the final HEAD (GOFLAGS=-work: on the NTFS disk go's temp
+cleanup otherwise exits 1 after passing tests).
+
+Unproven / open:
+- no live run (driver/userspace mismatch blocks GPU work); checked against
+  recorded logs only;
+- an A1-style canary failure with KV on the host is now an ordinary failure:
+  the log leaves 2,162 MiB and verification samples no VRAM, so nothing is
+  learned and a relaunch repeats it. Sampling the backend's VRAM while it hangs
+  after the fatal line would supply the evidence;
+- 512 MiB comes from one model on one card; a non-memory cuBLAS failure on a
+  device packed within 512 MiB is still read as an OOM (bounded by the
+  existing retry and escalation limits).
+
+## CUBLAS OOM EVIDENCE — corroborate with a VRAM sample, not the log — 2026-10-11
+
+Evidence: independent review of 89d92d7. (1) Log accounting could be supplied
+or hidden by a logged prompt: the load window ended at the last "model loaded"
+anywhere, and the free/buffer patterns were unanchored. (2) Only the Linux
+serving loop had measured growth; the canary, the `--claude-code` health
+monitor, exit and previous-log paths, and Windows judged load accounting
+alone, so the B2-learned/warm shapes (1,314 / 1,798 MiB left at load) were no
+longer learned there. (3) 512 MiB does not separate the ceiling from ggrun's
+normal packing: recomputed load headroom is 259 (B2-learn-1..4), 246-286 (A1
+CUDA0) and 504 MiB (the plan packed around the learned 242 MiB reserve).
+
+The harness's nvidia-smi samples (2 s, read-only) at every recorded cuBLAS
+failure:
+
+| log | device | used at failure (MiB) | held after |
+|---|---|---:|---:|
+| B2-q36-35b-learned 11:17:26 | CUDA0 4070 | 11,871/11,873 | >= 18 s |
+| B2-q36-35b-learned 11:20:01 | CUDA0 | 11,871/11,873 | >= 14 s |
+| B2-q36-35b-warm 12:42:55 | CUDA0 | 11,871/11,873 | >= 20 s |
+| B2-q36-35b-first 19:47 | CUDA0 | 11,871/11,873 | wedged |
+| A1-minimax-relaunch 00:05:15 | CUDA1 3090 Ti | 24,110/24,112 | ~5 min |
+| A1-minimax-recovery 00:34:27 | CUDA1 | 24,110/24,112 | ~5 min |
+
+Every failure sat at 2 MiB free and the wedged backend kept holding it; the
+load-accounting estimates (108-290 MiB) were off by 100+ MiB. The B2 plan had
+188 MiB free right after load.
+
+Change (e8dfe17): the evidence is a direct sample. The canary watch
+(`runWatchingBackend`), the serving watch (`waitForShutdownCrashOrWedge`) and
+the Claude Code health monitor sample each runtime device's free VRAM
+(nvidia-smi, matched by PCI bus ID) once the backend has printed a fatal line
+and is still running. The cuBLAS line is a suspected OOM only at <= 64 MiB
+free on its device. No log text feeds the decision, so prompts cannot
+supply or hide it; the load-accounting parser and `peakGrowth` are gone. The
+Claude Code exit and previous-log paths have no live backend to sample and
+treat the line as an ordinary failure. A non-OOM death in Claude Code mode now
+prints the backend's line; the quoted line is the first fatal line after
+load, not one from the load phase.
+
+Invariant tests: `TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling` (real B2
+canary and serving lines at 2 MiB free; no sample, 188 MiB free, 12 GiB free,
+another device full, another function, and a prompt pasting a backend log
+in both directions), `TestCublasErrorFarFromTheCeilingLearnsNothing`,
+`TestWatchdogSamplesAFailedBackendBeforeStoppingIt`,
+`TestServingWatchSamplesAFailedBackendWhileItRuns`,
+`TestFreeVRAMByRuntimeDeviceMatchesBusIDs`,
+`TestUnrecognizedCrashQuotesTheServingFailure`. Mutations checked: ignoring
+the sample fails the negative cases; dropping the watch hooks fails the
+sampling tests.
+
+Unproven / open:
+- no live run (driver/userspace mismatch); the sampling path has never run
+  against a failing backend. Checked only against recorded logs and samples;
+- a backend that exits before the next watch tick (2 s serving, 5 s canary,
+  30 s health monitor), e.g. when gdb is installed and the backtrace
+  completes, gives no sample and is not learned, so a relaunch repeats it;
+- a non-memory cuBLAS failure on a device that really is within 64 MiB of
+  full (successful runs peaked at 16-58 MiB free) is still read as an OOM;
+- the sample is device-wide, so another process filling the card also counts.
+
+## RECOMMENDER — backend setup no longer outranks capability — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P1). preferLoadable put every row no
+installed backend loads after every row one does, in all three categories,
+even when the first launch builds that backend. Reviewer test (ported): two
+fitting 4B models, intelligence 55 needing a build vs 20 loadable now;
+Smartest returned the 20 at 1a0ecb6.
+
+Change (e7bf2d4, recommender only): rows carry BackendStatus ready /
+needs_setup / unsupported / unknown. needs_setup means the launch's own
+routes offer a build: a reviewed recipe, or current mainline when upstream
+registers the arch (not for ik-only arches), with no pinned backend, git,
+cmake and a C++ compiler, and nvcc on an NVIDIA host. Open-PR discovery is
+not counted. Only unsupported rows move last. Vulkan-on-NVIDIA rows stay after
+other usable rows in Best overall and Fastest (MiMo 2.9 vs 10.5 tok/s above);
+Smartest keeps capability order. CLI/TUI: `+` needs_setup, `!` unsupported.
+verify-recommended-download.py now selects a ready row by BackendStatus.
+
+`recommend --json -n 3`, embedded catalog, isolated HOME/config/cache, app home
+linking the accept-20261007 ik CUDA + Vulkan backends read-only, simulated
+nvidia-smi inventory (driver mismatch), build tools and nvcc present:
+
+| profile | category | 1a0ecb6 top | e7bf2d4 top |
+|---|---|---|---|
+| full | Best overall | Qwen3.8 27B (ready) | GLM 5.3 Flash glm5-next (+) |
+| full | Smartest | Qwen3.8 27B | GLM-5.3 Max (+, Vulkan) |
+| full | Fastest | Qwen3.6 35B A3B | unchanged |
+| --gpus 0, 32G | Best/Smartest | Qwen3.8 27B | unchanged; K2 Horizon MoVA, Ling-3.0-flash-VL (+) 2-3 |
+| --gpus 0, 32G | Fastest | Gemma 4 12B | K2 Horizon 3.7B (+) |
+| --gpus 1, 64G | Best/Smartest | Qwen3.8 27B | Qwen3.8-Flash-Next qwen4exp (+) |
+| --gpus 1, 64G | Fastest | Qwen3.6 35B A3B | unchanged |
+| --cpu, 16G | Best overall | Qwen3.6 35B A3B | K2 Horizon MoVA Q1_0 (+) |
+| --cpu, 16G | Smartest | Qwen3.8 27B | unchanged |
+| --cpu, 16G | Fastest | Qwen3.6 35B A3B | K2 Horizon MoVA Q1_0 (+) |
+
+Without cmake on PATH the --cpu 16G output equals 1a0ecb6 and the K2 Horizon
+rows are unsupported, last (the original failure stays fixed).
+
+Invariant tests: backend_build_test.go (per-category rank with and without a
+route, unsupported last, unknown probe inert), vulkan_only_test.go,
+recommend_backends_test.go (launch routes, build tools).
+
+Unproven: no build of these arches was run (no GPU, no model downloads), so
+whether each mainline build loads its catalog GGUF, and how fast, is open. The
+catalog stamp unions mainline and ik tables, so an ik-only arch other than
+minimax-m* may be claimed buildable. The ready probe does not apply the
+minimax-m* ik requirement. `recommend --first` (installer default) can now
+name a `+` row.
+
+## RECOMMENDER — mainline stamp and Vulkan readiness split from build state — 2026-10-11
+
+Evidence: review of e7bf2d4. (1) The build route used the catalog's union
+stamp (mainline + ik_llama), so an ik-only arch counted as mainline-buildable:
+DeepSeek V4.1 Flash (deepseek41) is in ik_llama's llama-arch.cpp but not
+mainline's (both fetched 2026-10-11), and the accept-20261007 ik build lacks
+it. The entry above says "not for ik-only arches"; the code then did not hold
+that. (2) A Vulkan-served row that loads now was reported needs_setup, the same
+value as a row that cannot load.
+
+Change (915ec38, recommender only): the catalog stamps `runnable_mainline` from
+the mainline table (updater + embedded catalog; all 114 arch rows match today's
+upstream tables, deepseek41 is the one ik-only arch). Only it opens the
+mainline-build route; a catalog without it falls back to the union stamp. A
+Vulkan-served row is `ready` with `CUDABuildOffered`; only Vulkan rows with no
+CUDA build offered stay after usable rows in Best overall and Fastest. CLI/TUI
+mark Vulkan rows `^`. verify-recommended-download.py reads NeedsBackendBuild
+from older launchers and fails closed when neither key exists.
+
+`recommend --json -n 3`, same probe as above (accept-20261007 backends linked
+read-only, simulated nvidia-smi, build tools and nvcc present): top-3 order in
+all four profiles is identical to e7bf2d4. GLM-5.3 Max (full Smartest #1) and
+Nex-N2-Pro (--gpus 1 Smartest #3) now read `ready`, CUDABuildOffered=true. At
+-n 40, Vulkan rows with a CUDA build offered rise in Best overall (full, --gpus
+0, --gpus 1) and Fastest (full: MiMo, Qwen3.5 397B, Nex-N2-Pro above Hy3 and
+MiniMax-M3 at 11-15); Smartest and --cpu are unchanged.
+
+Invariant tests: backend_build_test.go (ik-only arch unsupported, legacy and
+unstamped catalogs, embedded stamps consistent, JSON keys),
+vulkan_only_test.go (Vulkan row ready, keeps rank with a CUDA build offered),
+recommend_backends_test.go (no nvcc on an NVIDIA host means no route, CLI
+markers have footnotes), tui_test.go (markers and footnotes).
+
+Unproven: no CUDA build of a Vulkan-served arch or mainline build of a `+` arch
+was run (no GPU, no downloads), so the estimates for those rows rest on builds
+that were not measured. `recommend --first` still prints Best overall #1, which
+can be a `+` row.
+
+## LAYER SPLIT — byte-weighted assignment mirrored for ik_llama — 2026-10-11
+
+Follows LAYER SPLIT (2026-10-08). Offline only: the NVIDIA kernel module
+(580.173.02) does not match userspace (580.178), so no GPU run was possible.
+
+Algorithm at 1fddd12 (src/llama.cpp): get_layer_sizes (3573-3799) sizes block
+il as every blk.il tensor (routed experts included even when -ot keeps them on
+the CPU; NextN blocks 0 unless -mtp) plus llama_model::cache_size(il)
+(src/llama-model.cpp:2190): recurrent state x min(n_seq_max, n_ctx), else K+V
+rows at n_ctx, NextN cache included though never allocated. n_ctx, n_seq_max,
+n_ubatch = --ctx-size, --parallel, min(-b, -ub, n_ctx) (common.cpp:4157,
+4208-4210). max_compute = max over blocks of max(routed x n_expert_used,
+shared, dense) FFN ne[1] sums x n_ubatch x 4 plus n_embd x n_ubatch x 4 (x2
+with a norm); MLA with attn_v_b adds 2 x v_head x n_head x n_ctx x 4 under
+-mla 3. Output slot = output.weight + n_vocab x n_ubatch x 4 - max_compute.
+The walk (3966-3990, 4057-4087) normalizes the split in float and fills each
+device to split x (sum + max_compute x devices), max_compute charged once per
+device; a crossing block stays when it overshoots by less than the room it
+leaves; the rest default to the last device. Under -ngl 999 (always emitted
+with a split) the walk starts at block 0 and includes the output slot.
+
+Choice: mirror (a) for the prediction everywhere, and for dense plans use the
+mirror to pick the emitted fractions (b). Translation alone needs the walk to
+invert anyway; the mirror alone leaves dense plans emitting fractions the
+backend reads against a different byte sum (unallocated NextN cache, output
+buffer, max_compute per device), which put up to half a 1.3 GiB attention
+block extra on CUDA0.
+
+Change (f510ce0): `ByteWeightedLayerSplit`, a backend fact set at backend
+selection for ik builds whose help lists --fit (86f4f516, five days after the
+walk; no help or an older build keeps the slot rule). iklayersplit.go mirrors
+get_layer_sizes and the walk; device KV fractions, the MoE owner charges and
+room, the VRAM-delta compute probe and the recovery exchange rate
+(StrategyDeviceKVCacheMB, which now carries slots, ubatch and MTP, so the
+22bd4a8 per-slot recurrent state lands on each block's device) use it. Dense
+ik plans emit, per device in order, the 0.01-grid fraction whose backend
+boundary brings cumulative bytes closest to the fill-fastest intent within
+capacity, centred among grid points giving the same boundary; failing that
+they fill each card as far as it holds, then over every card with room; a
+plan that still overfills a card is refused, so the automatic context search
+lowers the context instead of preflight.
+
+Predicted vs logged (Qwen3.8-27B UD-Q5_K_S, q8_0, from the real GGUF header):
+
+| case | backend log | mirror | slot rule |
+|---|---|---|---|
+| probe 0.27/0.58/0.15, 65,536, np1/np4: blocks | 0-19/20-58/59-65 | same | 0-17/18-56/57-65 |
+| probe: layer table, 66 rows, both np | as logged | all within 0.01 MiB | — |
+| probe: weights CUDA0/1/2 | 4433.47/9917.10/2423.22 | 4433.47/9917.09/2423.22 | 4022/9750/3002 |
+| probe np1: KV | 726.76/1317.52/281.35 | 727/1318/282 | 588/1451/288 |
+| probe np4: KV | 867.03/1598.07/309.41 | 868/1599/310 | 719/1722/335 |
+| --claude-code first preflight, 661,504, np4: CUDA0 KV | 7051 (failed) | 7051 | 5666 |
+| default 1-slot launch, 262,144, 0.13/0.87/0: weights | 2365.29/14408.50 | 2366/14409 | 2141/14634 |
+| same: KV | 1112.94/7740.69 | 1113/7742 | 1110/7745 |
+
+The later preflights (6387 MiB CUDA0 at 593,920; 12202 / 11433 MiB CUDA1)
+decompose exactly into 1,232.5 / 1,075.25 / 1,003 MiB attention blocks plus
+12.47 MiB of 4-slot state per recurrent block, but their re-split fractions
+were not logged, so their assignments are not checked.
+
+Invariant tests (iklayersplit_test.go): the table, assignment and buffers
+above; the failed 7051 MiB allocation; the control split; the fact needs ik,
+--fit and tensor bytes (else the slot rule); single-GPU and CPU-only argv
+identical with and without the fact; mainline dense (explicit and auto,
+including the failing launch's 0.27/0.58/0.15) and MoE plans identical to
+1a0ecb6; across the logged derate sequence (661,504 -> 476,160, 4 slots) every
+ik plan fits each card under the mirror while the slot-rule plans overfill
+CUDA1 by 601 / 1,075 MiB and CUDA0 by 535 MiB; the auto context fits every
+card. TestBackendFeatureCompatibilitySetsByteWeightedSplitFact. Core gate:
+passed (logs/ik-byte-split/core-gate.log; t.TempDir on /tmp, the worktree's
+NTFS disk fails a permission test unrelated to this change).
+
+Planner effects (unit, cold 1,024 MiB compute floors): ik auto context for
+the 4-slot case 622,592 -> 603,136 (GPU2 holding the reviewer is the binding
+card); a synthetic 80B MoE on ik 567,296 / n-cpu-moe 36 -> 513,024 / 34.
+
+Not modelled: an attn_kv_b-only MLA GGUF and a non-q8_0 rebuilt attn_kv_b,
+-amb, Gemma 4 per-layer output tensors, OpenPangu indexer keys, partial
+offload (-ngl < n_layer), the MTP block's KV in kvLayerBytes, the calibration
+topology candidates (invertDenseSplit, denseTopologyCandidates,
+splitOutputOwner) which still use the intent split and slot-rule output owner.
+
+Unproven until a matched live A/B (prediction only, not promotion evidence):
+
+Setup: reboot so NVML works; baseline ggrun 1a0ecb6 and candidate f510ce0
+built into two app dirs of the same acceptance install, same ik_llama
+1fddd12 and reviewer, same model files (Q5_K_S sha256 899e3838...), a fresh
+copy of the same cache dir per arm, nothing else on the GPUs (record
+nvidia-smi free per GPU before each start), server on 127.0.0.2, argv
+identical except the ggrun binary. Per arm: plan argv, every preflight
+(device, allocation, deficit), backend "Setting default device" and
+per-device buffer lines vs the mirror, phases (load, ready, cold prefill,
+cached append, decode, mixed foreground decode + prefill) kept separate,
+Claude Code calc/textstats/inventory/ledger correctness, clean stop (port and
+VRAM released), relaunch to ready.
+
+1. Failing case: `--claude-code` Qwen3.8-27B UD-Q5_K_S, 4 slots, full host.
+   Baseline: start budget exhausted (as A2-q38-27b-claude-code-*). Pass:
+   first exact preflight admits with no context-derate, logged boundaries and
+   KV buffers equal the mirror (±2 MiB), tasks correct, clean relaunch.
+2. Control: default 1-slot launch of the same model (A2-q38-27b-serving).
+   Must not regress: context >= baseline's 262,144, admitted first try,
+   phases within run-to-run noise.
+3. MiniMax-M3 multi-GPU (A1-minimax-serving shape, 442,368 / n-cpu-moe 54):
+   the MoE owners and room now follow the byte walk; compare plan, exact
+   admission, recorded runtime growth, calc correctness, phases, relaunch.
+4. Dense multi-GPU control: Qwen3.5-27B-Q4_K_M default launch, or with
+   --parallel 4 if it lands on one card; no pure-attention dense model of
+   multi-GPU size is in the local acceptance set.
+
+## LAYER SPLIT — review fixes to the ik byte walk — 2026-10-11
+
+Follows the entry above; supersedes its planner effects, its calibration
+"not modelled" item and its A/B arm 3. Still offline (driver mismatch).
+
+Defects found in review of f510ce0 and fixed (5329183):
+
+- An unused card with less free VRAM than its CUDA context plus compute
+  reserve had negative capacity, and 0 MiB > -436 MiB refused every ik dense
+  plan: Qwen3.8-27B, 1 slot, GPU2 at 11,700 or 12,200 MiB used. Mainline
+  planned 262,144 tokens on 0.16/0.84/0; ik refused the explicit context and
+  fell to single_gpu 134,144 under auto. Now capacity is clamped at 0 and a
+  card holding nothing is never over; ik plans 262,144 on 0.17/0.83/0.
+- ikDenseSplit refused on the cold 1,024 MiB compute floor (backend compute
+  for this model is 46.5-123.75 MiB, q38-split-probe-np4.log). It now fits
+  against cold capacity first, then against firm capacity (measured compute
+  only), and refuses only when weights and KV exceed firm capacity. The
+  4-slot --claude-code auto context is 622,592 again (mainline's value), split
+  0.26/0.56/0.18, each card's walk-priced weights and KV within free VRAM;
+  explicit 604,160 / 610,304 / 622,592 with cold buffers plan.
+- deviceKVShareMB (compute and oracle context cuts, contextCandidateCoversDeficit)
+  took the split fraction of the model-wide KV; under ik it now prices the
+  argv's split, slots, min(-b, -ub) and --spec-type mtp with the walk. CUDA0
+  of the failed 661,504 preflight: 7051 MiB (logged 7051); the fraction gave
+  0.27 of the total.
+- BuildResourceLedger weighted each device's weights by the split fraction
+  (4629/9969/3205 MiB on the auto plan) beside walk-priced KV; ik dense plans
+  now price weights with the walk (4228/9545/3003). Calibration: the
+  split-inverted candidate must pass that ledger on ik (it overfilled GPU2 by
+  1,534 MiB under the walk), and topology candidates take the walk's output
+  owner as main GPU.
+- majorityDevicePricedTokens compared a slot-shaped device share with a
+  1-slot total; the total is now the sum of device shares at the same shape.
+- The fact matched any "-fit" substring ("best-fit"); now --fit exactly.
+
+Mainline recovery change (from f510ce0, not stated there):
+contextReclaimRequirement and majorityDevicePricedTokens price the failing
+device's KV at the strategy's slots, ubatch and MTP on every backend. With
+--parallel > 1 a hybrid's share now includes N slots of recurrent state that
+a context cut cannot free (4 slots on Qwen3.8 CUDA0 at 661,504: about 187 of
+7,051 MiB), so the token cut is about 3% short; the 10% recovery margin
+covers it here, but SWA-heavy multi-slot models are unmeasured. Mainline
+plans are unchanged (goldens at 1a0ecb6).
+
+MiniMax-M3 UD-IQ3_XXS, offline, profile from the real 5-shard header
+(matrix2/A1-minimax-learn-1, 1fddd12, 436,224, -ub 512, 0.27/0.59/0.14,
+experts on the CPU except blocks 3-4 pinned to CUDA2):
+
+| | backend log | walk | slot rule |
+|---|---|---|---|
+| blocks per device | 18/35/7 (from KV) | 18/35/7 | 17/36/7 |
+| KV MiB | 8147.26/15841.89/3168.38 | 8148/15842/3169 | 7695/16295/3169 |
+| weights MiB (pins applied) | 2688.26/4585.60/6943.13 | 2688.26/4585.60/6943.13 | — |
+
+That run later died with "CUDA error: out of memory, current device: 0"
+during a 2,048-token prefill; the slot rule had priced CUDA0 453 MiB of KV
+short. Consistent with, not proof of, the walk being right. Plan change on
+the claude-code box (cold, 1 slot, auto): mainline 360,448 tokens, n-cpu-moe
+57, no pins; ik 334,848 (-7.1%), n-cpu-moe 56, block 3 pinned to CUDA1. The
+synthetic 80B MoE stays 567,296 / 36 -> 513,024 / 34.
+
+Invariant tests: TestIKDenseSplitIgnoresAFullUnusedCard,
+TestIKDenseSplitRefusesOnlyOnFirmCapacity, TestIKMiniMaxM3BuffersMatchTheBackendLog,
+TestIKResourceLedgerFollowsTheWalk; the derate test now requires every
+logged context to plan. cmd/ggrun TestIKKVDerateKeepsEveryDeviceWithinCapacity
+drives the launch's DoesNotFit branch (reject, priced steps,
+recoverPreflightOOM) from the logged 661,504 / 0.27/0.58/0.15 plan against a
+simulated backend that places blocks by the walk and holds back on each card
+the 755 MiB the logged CUDA0 failure implies (as used VRAM, so planner and
+simulation agree on capacity): with the walk the first derate (593,920,
+0.26/0.57/0.17, 9346/22521/5228 MiB) fits every card; with the slot rule the
+deficit moves to CUDA1 (207 MiB) before 580,608 fits. The simulation is not
+the backend: it assumes a uniform 755 MiB reserve per card. Without that
+reserve known to the planner, the walk run still moved the deficit to CUDA1
+(ReplanAfterOOM's penalty is subtracted from free VRAM, not from what the
+failed plan held), which this change does not address.
+TestIKDeviceKVShareFollowsTheWalk. Core gate on 5329183: all six packages ok,
+gofmt and vet clean, exit 0.
+
+Still not modelled: the MLA, -amb, Gemma 4, OpenPangu, partial offload and
+MTP-KV items above; a pre-1fddd12 ik build with --fit is assumed to size
+blocks as 1fddd12 does (about 50 src/llama.cpp commits lie between 0871ab29
+and 1fddd12); calibration topology splits are rejected when the walk
+overfills, not re-fitted through ikDenseSplit.
+
+A/B plan amendments (setup, phases, correctness, stop and relaunch as above;
+candidate is this branch's head):
+
+3. MiniMax-M3 multi-GPU, the default launch (no --claude-code) on the full
+   host, as A1-minimax-serving.
+   Pass: admitted on the first exact preflight; logged KV buffers equal the
+   walk (±2 MiB); context not below baseline by more than the plan change
+   above (-7.1%) unless the baseline's CUDA0 is shown to overfill (OOM or
+   runtime growth past free); cold prefill, cached append and decode each
+   within run-to-run noise of baseline (three repeats); no CUDA OOM over the
+   matrix workload; clean relaunch.
+5. Mainline recovery pricing: Qwen3.8-27B UD-Q5_K_S on the mainline backend,
+   --parallel 4, three GPUs, automatic context. Pass: plan identical to
+   baseline; if a preflight derates, the derate count is not higher than
+   baseline's.
+
+## HELD FIXES — integration and review findings resolved offline — 2026-10-13
+
+Integrated `wip/cublas-oom-evidence` (48391d3), `wip/smartest-ranking`
+(51804cd) and `wip/ik-byte-split` (4ca390a) onto 9803807 as
+`integrate/held-fixes`. NVIDIA module and userspace are both 580.178.04 after
+the owner's reboot; NVML and all three cards answer.
+
+**ik byte split, open high finding.** `ikDenseDevices` priced FirmMB with the
+measured compute buffer, 0 when nothing was measured, so the firm-capacity
+fallback counted unmeasured compute as zero. Under `RequireMeasuredBuffers`
+(exact preflight) the cold term is already 0, so the fallback only changed the
+automatic-context search, where it grew the 4-slot `--claude-code` context
+603,136 -> 622,592 and left CUDA1 636 MiB (about 755 MiB needed). Fix
+(9035b70): `Options.AutomaticContextCandidate`, set by the search; such a
+candidate's firm capacity is its cold capacity. Explicit contexts keep the
+fallback, and exact preflight decides them. Invariant:
+`TestIKAutoContextKeepsTheColdReserveOnEveryCard` (auto ctx 603,136, every
+used card keeps its 1,024 MiB cold reserve). Mutation: disabling the branch
+gives 622,592 with CUDA1 388 MiB into the reserve (the finding exactly).
+
+**cuBLAS classification.** The serving watch sampled VRAM at a fatal line but
+kept the sample when /health answered again, so a later failure the backend
+died of between ticks was judged by a stale reading. Fix (a1e24c6):
+`servingWatch.onRecover` drops it. Tests: survived failure then exit keeps no
+sample (mutation fails it); "illegal memory access" and "operation not
+supported" at 2 MiB free are not OOMs. Policy: a cuBLAS INVALID_VALUE at <= 64
+MiB free stays a *suspected* OOM. It records an estimated reserve; estimates
+never compound and any later measurement replaces them, even downward
+(`recordRuntimeGraphGrowth`), so a wrong suspicion costs at most the bounded
+recovery reloads and heals on the next measured run. A web search found no
+source tying INVALID_VALUE to allocation failure; healthy runs reached 16-58
+MiB free, so the sample is necessary evidence, not proof.
+
+**Recommendation policy.** (765c96b) A `--cpu` launch built CUDA (full host
+caps) for an architecture build while `recommend --cpu` offered the build
+without nvcc; it now builds the CPU backend, as a CPU-only machine does.
+(5a2ad80) verify-recommended-download.py failed closed against the published
+v3.2.10 launcher, whose rows carry neither status key (published-mode Windows
+E2E); a tagged release <= v3.2.10 reads them as `legacy`, recorded in the
+evidence; a build past a tag still fails closed. (72f8f2a, 7e9d4e2) Best
+overall and Fastest list needs_setup rows and Vulkan-served rows after rows
+that run as estimated now; Smartest keeps capability order. Evidence:
+matrix15 MiMo Q2_K on Vulkan (46 min to ready, 2.9 tok/s vs 10.5 predicted,
+ledger timeout). A dense GPU-to-RAM spill decodes at efficiency 0.40, from
+the one measurement (Qwen3.8 IQ3_XXS on a 4070, 4.2-4.8 tok/s, predicted 8.2
+at 0.70); the 4070 + 32 GiB pick becomes Qwen3.8 UD-IQ2_XXS resident, which
+passed on the #2356-patched backend (October 9, matrix12).
+
+Catalog refreshed 2026-10-13T07:35:29Z (687f001; 114 rows, Qwen3.8-Flash-Next
+moved to bartowski, Ministral 3 8B Instruct replaces Reasoning). Core gate
+(uncached) passed on the integration head before the recommender commits.
+
+Provisional picks (embedded catalog, update checks off, candidate installed by
+`setup-linux.sh` auto mode from a local bundle dir: CUDA ik 1fddd12 + #2356,
+Vulkan/CPU d2462f8): full host Qwen3.8-27B UD-Q5_K_S / GLM-5.3 UD-IQ2_M
+(Vulkan) / Qwen3.6-35B-A3B UD-IQ4_XS; 4070 + 32 GiB Qwen3.8 UD-IQ2_XXS /
+same / Gemma 4 26B A4B IQ4_XS; 3090 Ti + 128 GiB Qwen3.8 UD-Q5_K_S /
+GLM-5.3-Flash UD-IQ3_XXS (needs_setup) / Qwen3.6 UD-IQ4_XS; CPU + 16 GiB
+Qwen3.6 UD-IQ2_XXS / Qwen3.8 UD-IQ2_XXS / Qwen3.6 UD-IQ2_XXS. Not final until
+recaptured on the final installed candidate.
+
+Unproven: all of the above is offline. Live A/B, exact admission, Claude mode
+with companion, explicit 4 slots versus the 1-slot control, the cuBLAS
+sampling path and the build route remain.
+
+## DENSE PLANS — the guard's CUDA overhead was planned as zero — 2026-10-13
+
+Live, candidate `v3.2.10-173-g475e592` installed by `setup-linux.sh` (auto
+mode, local bundle dir: ik_llama 1fddd12 + #2356 built with the release cmake
+flags, CUDA 13.2; Vulkan d2462f8 from the v3.2.10 asset) into an isolated
+HOME, fresh cache per configuration, full host, Qwen3.8-27B UD-Q5_K_S
+(sha256 899e3838...). Harness `accept-20261013/harness/cell_accept.py` (127.0.0.1:8081,
+Claude Code 2.x client, objective unittest oracle). Evidence
+`2tb-disk/ggrun-accept-20261013-evidence/p1/`.
+
+| cell | outcome |
+|---|---|
+| 1-slot default, first launch | PASS: ready 153 s (262,144 ctx, split 0.13/0.87/0); calc 90 / textstats 68 / inventory 82 s; cold prefill 1,400 tok/s (9,461 tokens), decode 30.8 tok/s median; stream, cancel, reconnect, stop 0.6 s |
+| same, cached relaunch | PASS: ready 7 s (one load), sustained ledger task 30 turns correct in 240 s |
+| same, three tasks concurrently | PASS: makespan 341 s (worse than 240 s sequential): one slot alternates conversations, 170,898 prompt tokens re-processed vs 86,352 |
+| `--claude-code` default (Auto reviewer on GPU 2, 4 slots) | FAIL: 6 contained probes in 27 s, start budget exhausted |
+
+The `--claude-code` failure, from the backend's probe logs and memguard
+records (`cache/p1-cc/memory-probes/failed-*.log`): the plan put 4,433 MiB of
+weights + 6,413 MiB of KV on CUDA0 (11,612 MiB physically free), and the guard
+denied the KV 10 MiB short. Each re-plan then re-split the cards and the next
+denial was 726 / 724 / 649 MiB on CUDA0 or CUDA1. These were guard denials,
+not device OOMs. Root cause (scratch-build trace, `GGRUN_TRACE_IK`): with no
+system probe the dense planner's CUDA overhead is `measuredCUDAOverheadMB` = 0,
+while the guard limit is free less `PlanningCUDAOverheadByGPU` = 1,024 MiB per
+unmeasured card (the MoE planner and optimizer use the same planning value).
+The automatic search's 1,024 MiB cold compute reserve was spent on the
+guard's overhead (10 MiB miss); the exact re-plans, which drop the cold
+reserve, overran the guard by the whole ~1 GiB less the backend's real compute
+(~300 MiB). No fresh cache ever got a system probe in these runs.
+
+Fix (e40c127): dense planning paths (single GPU, multi-GPU dense and its ik
+capacities, dense auto-ctx reduction, batch tier, memory check) use
+`planningCUDAOverheadMB`, the largest PlanningCUDAOverheadByGPU value on the
+selected GPUs. Invariant `TestDensePlanStaysInsideTheGuardOnAFreshCache`
+(1 and 4 slots, unmeasured cache: weights + KV + cold compute within free less
+the guard overhead on every card); mutation to measured-or-zero overruns CUDA1
+by 1,008 MiB. Tests whose subject is not the unmeasured reserve now state their
+overhead (`measuredOverheadCache`, or the rig's measured 488/311/367 MiB for
+the ik fixtures); ik goldens re-pinned (auto 578,560 at 0.27/0.59/0.14 on
+mainline, 565,248 on ik); the cmd derate simulation enforces the guard's limit
+instead of a 755 MiB stand-in and still shows the walk converging in one derate
+while the slot rule moves the deficit. Core gate uncached: pass.
+
+Unproven: live rerun on e40c127 (p1r2) pending at time of writing.
+
+## MATRIX — 4070 + 32 GiB and CPU + 16 GiB on e40c127 — 2026-10-13
+
+Candidate `v3.2.10-174-ge40c127` (launcher sha256 ee64122f..., ik backend
+8269d74c...), installed as above; fresh cache per cell; profile flags repeated
+on every launch; tasks are Claude Code `-p` runs checked by unittest oracles.
+The owner's ComfyUI held 8-22 GB on the 3090 Ti throughout (not used by these
+cells); its RAM growth kept host memory from returning to the pre-launch
+baseline, so stops on those runs include ggrun's bounded 20 s release wait.
+Evidence `2tb-disk/ggrun-accept-20261013-evidence/p2/`.
+
+| cell | outcome |
+|---|---|
+| 4070 + 32 GiB, Best overall + Smartest: Qwen3.8-27B UD-IQ2_XXS | PASS: ready 256 s, ctx 76,800 (1 slot), memory.max 32 GiB, CUDA_VISIBLE_DEVICES=0; calc 231 / textstats 137 / inventory 85 s; decode 31.2 tok/s (predicted 46); relaunch ready 50 s, ledger 470 s |
+| 4070 + 32 GiB, Fastest: Gemma 4 26B A4B IQ4_XS | PASS: ready 225 s, ctx 74,752; calc 161 / textstats 153 / inventory 168 s; decode 30.0 (predicted 49.5), cold prefill 265 tok/s; relaunch ready 8 s, ledger 206 s |
+| CPU + 16 GiB, Best overall + Fastest: Qwen3.6-35B-A3B UD-IQ2_XXS | first launch: ready 206 s, ctx 108,544, memory.max 16 GiB, CUDA_VISIBLE_DEVICES=-1; calc 323 / textstats 147 s correct; inventory TIMEOUT at 3,600 s: the server answered a request every ~15 s, each 119 decoded tokens at ~10.8 tok/s, prompt growing to 66k tokens, i.e. the model repeated a tool call (model loop, not a serving stall); relaunch ready 15 s, ledger 34 turns correct in 586 s, decode 15.3 tok/s |
+
+The 4070 contexts are lower than the October 9 opt-in run (112,640) because a
+fresh install now reserves the guard's 1,024 MiB of unmeasured CUDA overhead.
+On the ik path dense launches are not oracle-admitted, so
+`recordMeasuredLaunchProbes` never measures that overhead for them (the
+log-based source over-recorded 1,775 vs ~600 MiB on MiMo, which is why it is
+MoE/oracle-only): such a plan keeps the 1,024 MiB reserve on later launches.
+Follow-up, not in this change: a dense-safe measurement of CUDA overhead.
+
+## CLAUDE MODE — four slots start now, but SSM-layout output corrupts — 2026-10-13
+
+Candidate e40c127 (ik_llama 1fddd12 + #2356, release flags), full host, the
+owner's ComfyUI stopped with permission. Evidence
+`2tb-disk/ggrun-accept-20261013-evidence/p3/`, `replay-ab/`.
+
+| cell | outcome |
+|---|---|
+| `--claude-code` default, first launch | starts: ready 532 s (companion included), 500,736 tokens over 4 slots after one measured re-plan admitted on exact preflight (the morning's admission failure is gone); three tasks at once: textstats 411 s, inventory 311 s correct, calc TIMEOUT 2,400 s |
+| same, relaunch | PASS: ready 306 s (six short probe loads, 557,056 tokens), ledger correct in 593 s |
+| `--parallel 4` explicit | ready 423 s, 701,440 tokens; textstats 324 s, inventory 390 s correct, calc TIMEOUT 2,400 s |
+| CPU + 16 GiB Smartest Qwen3.8 UD-IQ2_XXS | first launch: calc 2,613 / textstats 1,450 / inventory 1,206 s correct, decode 3.1 tok/s; relaunch ready 9 s, ledger TIMEOUT at 5,400 s |
+
+The calc timeouts are corrupted output, not model looping: one request
+decoded 32,000 tokens (2,065 s) that begin as a tool call and decay into
+`</it>\note` repeats; every HTTP status was 200. Replaying that session's 26
+probe and 45 Claude requests directly against the same argv on 4 slots
+reproduced a corrupted calc reply (`replay_parallel.py`); greedy 768-token
+prompts on 4 staggered slots showed no debris but diverged from the solo
+output after 50-229 characters. Every one-slot session of this model today
+(about a dozen) was clean. The backend also logs `qwen3next mixed-sequence
+batch contains repeated seq_id values; falling back to single-token chunking`
+(2,284 times in the replay): mixed prefill/decode batches of this hybrid
+run one token at a time, so the slots are slower too (1-slot concurrent
+makespan 341 s against >2,400 s). Upstream ik_llama #2628 (per-slot sampler
+state leak) was the first suspect; a build with it could not be compared,
+the arm was invalid (port held by the previous arm), and the sampler state of
+the logged probes (`ignore_eos:false`, empty logit_bias) does not support it.
+
+Fix (f21898d, not a placement change): default Claude mode serves a model
+with an SSM layout (`HasSSM`) on one slot; an explicit `--parallel` or the
+parallel profile is honored with a warning. Test `TestClaudeHybridSSMSlots`.
+Core gate uncached: pass. Explicit 4-slot remains a known failure on this
+backend for the qwen3next family; not hidden: it is reported as such.
+
+Also learned today: the 4,096-token-capped replay reply and the stalled
+cells show Claude Code's 32,000-token max_tokens lets a corrupted stream run
+for 30+ minutes; a server-side output cap would bound it (follow-up).
+
+## MATRIX — full host and 3090 Ti + 128 GiB on f21898d — 2026-10-13
+
+Candidate `v3.2.10-181-gf21898d` (launcher fb4e09c2..., same ik backend
+6e15634f...). Evidence `2tb-disk/ggrun-accept-20261013-evidence/p4/`.
+
+| cell | outcome |
+|---|---|
+| full host, `--claude-code` default (1 slot now, companion) | PASS: ready 290 s, 262,144 tokens; calc 452 / textstats 184 / inventory 478 s run at once (makespan 478 s); decode 29.8, cold prefill 1,350 tok/s; relaunch ready 202 s, ledger 400 s |
+| full host Best overall Qwen3.8-27B UD-Q5_K_S, spot check on the final launcher | PASS: ready 121 s; 116 / 82 / 98 s; decode 30.7 |
+| full host Fastest Qwen3.6-35B-A3B UD-IQ4_XS | PASS: ready 315 s, 262,144; 38 / 38 / 43 s; prefill 3,645, decode 80.2; relaunch 13 s, ledger 108 s |
+| 3090 Ti + 128 GiB Best overall Qwen3.8-27B UD-Q5_K_S | PASS: memory.max 137,438,953,472, CUDA_VISIBLE_DEVICES=1; ready 175 s, 122,880; 64 / 79 / 76 s; decode 34.7; relaunch 6 s, ledger 256 s |
+| 3090 Ti + 128 GiB Fastest Qwen3.6-35B-A3B UD-IQ4_XS | PASS: ready 106 s, 262,144; 23 / 20 / 1,338 s (inventory: a coherent 12,024-token reasoning turn, one slot); decode 92.5; relaunch 9 s, ledger 99 s |
+
+Acquisition route (4ce1f41): the GLM-5.3-Flash (glm5-next) first launch with
+LLM_ASSUME_YES took open-PR discovery and started building
+`willweimike/llama.cpp` (PR #30268, branch fix-glm) although mainline
+registers glm5-next and `recommend` had promised a mainline build. Stopped
+before the build finished (nothing registered). Now, when the catalog's
+runnable_mainline stamp covers the architecture, the mainline build comes
+before discovery (`TestUnsupportedArchRoutesPreferMainlineWhenItRegisters`).
+The rerun clones ggml-org/llama.cpp master. Core gate uncached: pass.

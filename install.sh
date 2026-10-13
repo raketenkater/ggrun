@@ -895,18 +895,46 @@ release_api_url() {
     fi
 }
 
+# github.com/<repo>/releases/latest redirects to the tag page and is not subject
+# to the unauthenticated REST API rate limit that shared runners and NAT'd
+# networks hit.
+release_web_tag() {
+    if [[ "$INSTALL_RELEASE" != "latest" ]]; then
+        printf '%s\n' "$INSTALL_RELEASE"
+        return 0
+    fi
+    curl -fsSI -A ggrun-installer "https://github.com/$GITHUB_REPO/releases/latest" 2>/dev/null \
+        | tr -d '\r' \
+        | sed -nE 's#^[Ll]ocation: .*/releases/tag/([^/?#]+)$#\1#p' \
+        | head -n 1
+}
+
 find_release_asset_url() {
-    local asset="$1" api
+    local asset="$1" api url="" tag candidate
     if [[ -n "$INSTALL_RELEASE_DIR" && -f "$INSTALL_RELEASE_DIR/$asset" ]]; then
         printf 'file://%s/%s\n' "$(cd "$INSTALL_RELEASE_DIR" && pwd)" "$asset"
         return 0
     fi
-    api="$(release_api_url)"
-    curl -fsSL "$api" 2>/dev/null \
-        | grep -Eo '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
-        | sed -E 's/^"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//' \
-        | grep -F "/$asset" \
-        | head -n 1
+    # LLM_INSTALL_SKIP_RELEASE_API=1 lets CI exercise the github.com fallback.
+    if [[ "${LLM_INSTALL_SKIP_RELEASE_API:-0}" != "1" ]]; then
+        api="$(release_api_url)"
+        url="$(curl -fsSL "$api" 2>/dev/null \
+            | grep -Eo '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | sed -E 's/^"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//' \
+            | grep -F "/$asset" \
+            | head -n 1)"
+    fi
+    if [[ -z "$url" ]]; then
+        # Without the API listing, offer only an asset that exists.
+        tag="$(release_web_tag)"
+        if [[ -n "$tag" ]]; then
+            candidate="https://github.com/$GITHUB_REPO/releases/download/$tag/$asset"
+            if curl -fsIL -A ggrun-installer -o /dev/null "$candidate" 2>/dev/null; then
+                url="$candidate"
+            fi
+        fi
+    fi
+    [[ -n "$url" ]] && printf '%s\n' "$url"
 }
 
 

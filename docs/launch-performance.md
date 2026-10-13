@@ -4,7 +4,7 @@ ggrun's default placement vs raw llama.cpp `--fit` (its built-in auto-placement)
 same GGUFs, measured with `scripts/bench-v3-comparison.sh`. These are ggrun's defaults —
 no `--ai-tune` (see the note at the end).
 
-Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, 128GB RAM. Context: 32768,
+Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, 212GB RAM. Context: 32768,
 256-token decode. CUDA backend: ik_llama.cpp build 4641 (`6c00e87a`). Numbers are from
 the 2026-06-22 retest on this rig.
 

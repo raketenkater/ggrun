@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // CacheCanaryResult separates protocol support, functional determinism, and
@@ -73,6 +74,16 @@ func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
 		// earns an HTTP 400 and rejects a server that is serving correctly, so
 		// verify the endpoint with the shortest exchange that fits instead.
 		return r.minimalFunctionalCanary()
+	}
+	if r.PrefillBudget > 0 && cacheProvable {
+		fitted, provable, probe, reason, err := r.fitCanaryToPrefillBudget(words)
+		if err != nil {
+			return nil, err
+		}
+		if !provable {
+			return endpointOnlyCanary(probe, reason), nil
+		}
+		words = fitted
 	}
 	segmentA := canarySegment("alpha", words)
 	segmentB := canarySegment("beta", words)
@@ -193,6 +204,55 @@ func (r *Runner) minimalFunctionalCanary() (*CacheCanaryResult, error) {
 		"served context (%d tokens) is too small to prove prefix reuse; it cannot hold the canary prefix at all, so only the completion endpoint was verified",
 		r.servedContextTokens())
 	return result, nil
+}
+
+// fitCanaryToPrefillBudget measures prompt speed with one minimal exchange and
+// shrinks the canary so its cold prompt fits r.PrefillBudget. When even the
+// smallest prompt that can prove reuse does not fit, provable is false and the
+// caller verifies the endpoint only, as it does for a context too small to hold
+// the canary. An unknown speed or token expansion keeps the requested size:
+// missing evidence is not a reason to change the check.
+func (r *Runner) fitCanaryToPrefillBudget(words int) (fitted int, provable bool, probe *canaryResponse, reason string, err error) {
+	probe, err = r.canaryChat([]canaryMessage{{Role: "user", Content: "Reply GGRUN_OK."}})
+	if err != nil {
+		return 0, false, nil, "", fmt.Errorf("prefill speed probe: %w", err)
+	}
+	segment := canarySegment("alpha", words)
+	segmentTokens, tokErr := r.tokenCount(segment)
+	if tokErr != nil || segmentTokens <= 0 || probe.PromptTPS <= 0 {
+		return words, true, probe, "", nil
+	}
+	promptTokens := 3 * segmentTokens
+	allowed := probe.PromptTPS * r.PrefillBudget.Seconds()
+	if float64(promptTokens) <= allowed {
+		return words, true, probe, "", nil
+	}
+	if allowed < canaryCacheProofTokens {
+		projected := time.Duration(float64(canaryCacheProofTokens) / probe.PromptTPS * float64(time.Second))
+		reason = fmt.Sprintf("prompt processing measured %.1f tok/s, so proving prefix reuse would take about %s, over the %s startup budget; verified the completion endpoint only",
+			probe.PromptTPS, projected.Round(time.Second), r.PrefillBudget)
+		return 0, false, probe, reason, nil
+	}
+	fitted = int(float64(words) * allowed / float64(promptTokens))
+	if fitted < 1 {
+		fitted = 1
+	}
+	return fitted, true, probe, "", nil
+}
+
+// endpointOnlyCanary reports a functional endpoint whose prefix reuse was not
+// measured. It is never Passed, so the profile is not promoted.
+func endpointOnlyCanary(reply *canaryResponse, reason string) *CacheCanaryResult {
+	result := &CacheCanaryResult{
+		Functional:       validCanaryOutput(reply.Content),
+		ColdPromptTokens: reply.PromptTokens,
+		ColdPromptTPS:    reply.PromptTPS,
+		Reason:           reason,
+	}
+	if !result.Functional {
+		result.Reason = "minimal functional canary did not get a bounded non-empty answer: " + canaryEvidence("reply", reply)
+	}
+	return result
 }
 
 func (r *Runner) canaryChat(messages []canaryMessage) (*canaryResponse, error) {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/gguf"
@@ -1836,8 +1837,9 @@ func TestExpertOnlyCapacityRespectsCurrentFreeVRAM(t *testing.T) {
 }
 
 func TestRequireMeasuredBuffersRemovesColdGuessButUsesRecordedCompute(t *testing.T) {
-	cacheDir := t.TempDir()
 	gpus := []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 8192}}
+	// The subject is the cold compute guess, so the CUDA overhead is measured.
+	cacheDir := measuredOverheadCache(t, gpus, 100)
 	caps := &detect.Capabilities{GPUs: gpus}
 	model := &ModelProfile{Path: "model.gguf", SizeBytes: 7000 * 1024 * 1024, TotalSizeMB: 7000, NumLayers: 32}
 	strategy := &Strategy{ContextSize: 32768, UBatchSize: 512, KVQuality: "mid", KVPlacement: "gpu"}
@@ -4700,14 +4702,36 @@ func TestRelatedModelRuntimeGraphGrowthTakesPerDeviceMaximum(t *testing.T) {
 func TestRelatedModelRuntimeGraphGrowthRejectsNonEvidence(t *testing.T) {
 	gpus, model := growthCarryFixture()
 
-	t.Run("estimated growth is not a measurement", func(t *testing.T) {
+	// An abort's estimate is carried only while it is the newest evidence for
+	// its device; a later measurement supersedes it, so it cannot become a
+	// permanent floor.
+	t.Run("an estimate is carried only until a newer measurement", func(t *testing.T) {
 		cacheDir := t.TempDir()
-		if err := writeProbeCacheForModel(cacheDir, model, 131072, 512, "high", "gpu", "llama", gpus, 1,
-			nil, map[int]int{0: 5504}, map[int]bool{0: true}, 0); err != nil {
-			t.Fatalf("write estimated probe: %v", err)
+		setAll := func(at time.Time) {
+			entries, _ := os.ReadDir(cacheDir)
+			for _, e := range entries {
+				_ = os.Chtimes(filepath.Join(cacheDir, e.Name()), at, at)
+			}
 		}
-		if got := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, "llama"); got[0] != 0 {
-			t.Fatalf("estimated growth carried as measured evidence: %d MiB", got[0])
+		if err := writeProbeCacheForModel(cacheDir, model, 131072, 512, "high", "gpu", "llama", gpus, 1,
+			nil, map[int]int{0: 22}, map[int]bool{0: false}, 0); err != nil {
+			t.Fatal(err)
+		}
+		setAll(time.Now().Add(-2 * time.Hour))
+		if err := writeProbeCacheForModel(cacheDir, model, 262144, 512, "high", "gpu", "llama", gpus, 1,
+			nil, map[int]int{0: 3204}, map[int]bool{0: true}, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, "llama"); got[0] != 3204 {
+			t.Fatalf("the newest evidence, an abort's estimate, was not carried: %d MiB", got[0])
+		}
+		setAll(time.Now().Add(-time.Hour))
+		if err := writeProbeCacheForModel(cacheDir, model, 65536, 512, "high", "gpu", "llama", gpus, 1,
+			nil, map[int]int{0: 900}, map[int]bool{0: false}, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := RelatedModelRuntimeGraphGrowth(cacheDir, model, gpus, 1, "llama"); got[0] != 900 {
+			t.Fatalf("a newer measurement must supersede the older estimate: %d MiB", got[0])
 		}
 	})
 
@@ -5402,7 +5426,9 @@ func TestComputeDenseAutoReducePicksLargestFit(t *testing.T) {
 	// nearly half the window was discarded. Assert the property rather than a
 	// constant -- the chosen context must fit, and one granule more must not.
 	free := caps.GPUs[0].VRAMFreeMB() + caps.GPUs[1].VRAMFreeMB() + caps.GPUs[2].VRAMFreeMB()
-	fixed := 30804 + 3*computeFloorMB
+	// Nothing measured the CUDA overhead, so each card also reserves
+	// UnmeasuredCUDAOverheadMB, as the allocation guard does.
+	fixed := 30804 + 3*(computeFloorMB+UnmeasuredCUDAOverheadMB)
 	kv := computeKVTotalMB(model, strat.ContextSize, strat.KVType, true)
 	if fixed+kv > free {
 		t.Fatalf("ctx=%d does not fit: model+overhead+kv = %d > %d free", strat.ContextSize, fixed+kv, free)

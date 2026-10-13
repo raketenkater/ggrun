@@ -850,6 +850,30 @@ func TestRecommendedViewLabelsPredictedSpeedAsEstimate(t *testing.T) {
 	}
 }
 
+// Each backend status is visible in the list with its footnote; a ready row
+// carries no marker.
+func TestRecommendedViewMarksBackendStatus(t *testing.T) {
+	row := func(name string, status recommend.BackendStatus, hint string) recommend.Recommendation {
+		return recommend.Recommendation{Candidate: recommend.Candidate{Name: name}, BackendStatus: status, BackendHint: hint, QuantName: "Q4_K_M"}
+	}
+	rows := []recommend.Recommendation{
+		row("Ready model", recommend.BackendReady, "CUDA / ik_llama"),
+		row("Setup model", recommend.BackendNeedsSetup, "CUDA / ik_llama"),
+		row("Vulkan model", recommend.BackendReady, "Vulkan"),
+		row("Blocked model", recommend.BackendUnsupported, "CUDA / ik_llama"),
+	}
+	m := Model{recommendationGroups: recommend.Categories{Balanced: rows}, recommendations: rows, selectedRecommendation: -1}
+	view := m.viewRecommended()
+	for _, want := range []string{"Setup model +", "Vulkan model ^", "Blocked model !", "  + No installed backend loads it", "  ^ Loads now on Vulkan", "  ! No installed backend loads it"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view lacks %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Ready model +") || strings.Contains(view, "Ready model ^") || strings.Contains(view, "Ready model !") {
+		t.Fatalf("ready row carries a marker:\n%s", view)
+	}
+}
+
 func TestHWSummary(t *testing.T) {
 	// Test with nil
 	s := hwSummary(nil)
@@ -2469,5 +2493,26 @@ func TestVersionStatusArrivingDuringLoadingReachesStartScreen(t *testing.T) {
 	ready.width, ready.height = 120, 40
 	if view := ready.View(); ready.screen != ScreenMain || !strings.Contains(view, "update available: v9.9.9 · u to update") {
 		t.Fatalf("status lost across loading (screen %v):\n%s", ready.screen, view)
+	}
+}
+
+// A models directory that is itself a symlink lists its models, under the
+// configured path.
+func TestDiscoverModelsInASymlinkedModelDir(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "disk")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "Qwen3.8-27B-UD-Q5_K_S.gguf"), []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "models")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	items := discoverModels(link)
+	if len(items) != 1 || !strings.HasPrefix(items[0].Path, link+string(os.PathSeparator)) {
+		t.Fatalf("discovered %+v, want one model under %s", items, link)
 	}
 }

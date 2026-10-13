@@ -12,6 +12,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
 const mainlineLlamaCppGit = "https://github.com/ggml-org/llama.cpp.git"
@@ -90,6 +91,45 @@ func acceleratedMainlineArgs(r *backends.Recipe) []string {
 	return append(args, "--route-arch", r.RouteArch, "--accel", r.Accel)
 }
 
+// unsupportedArchRoutes orders the acquisition routes for an architecture no
+// installed backend loads. Reviewed sources come first, as docs/fork-backends.md
+// promises: a reviewed recipe that pins an upstream commit (and any patches) for
+// this architecture outranks unreviewed open-PR discovery. Without one, discovery
+// precedes a generic current-mainline build, then the mainline update offer.
+//
+// When the catalog's upstream stamp says current mainline registers the
+// architecture, the mainline build comes before discovery: it is upstream code,
+// and it is the route `recommend` promised. GLM-5.3-Flash (glm5-next) otherwise
+// cloned and built an open pull request's fork with LLM_ASSUME_YES set
+// (2026-10-13) although mainline loads it.
+func unsupportedArchRoutes(arch string) []string {
+	if reviewedArchBuildAvailable(arch) {
+		return []string{"reviewed-build", "discovered-fork", "mainline-update"}
+	}
+	if registers, _ := mainlineRegistersArch(arch); registers {
+		return []string{"mainline-build", "discovered-fork", "mainline-update"}
+	}
+	return []string{"discovered-fork", "mainline-build", "mainline-update"}
+}
+
+var mainlineRegistersArch = recommend.MainlineRegistersArch
+
+// reviewedArchBuildAvailable reports a reviewed recipe that pins an upstream
+// commit able to load arch, which acceleratedArchBuildRecipe turns into an
+// accelerated main-model build.
+func reviewedArchBuildAvailable(arch string) bool {
+	arch = strings.TrimSpace(arch)
+	if arch == "" {
+		return false
+	}
+	for _, r := range backends.Recipes() {
+		if r.HelperOnly && r.Commit != "" && strings.EqualFold(strings.TrimSpace(r.RouteArch), arch) {
+			return true
+		}
+	}
+	return false
+}
+
 // acceleratedArchBuildRecipe is the main-model build to offer when no installed
 // backend can load arch at all and no fork was found. A reviewed helper recipe
 // already names an upstream commit (and patches) that knows the architecture;
@@ -165,8 +205,22 @@ func offerAcceleratedArchBuildWith(req *launchRequest, model *placement.ModelPro
 }
 
 func offerAcceleratedArchBuild(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities, assumeYes bool) bool {
+	caps, accel := archBuildTarget(req, caps, defaultAccel())
 	return offerAcceleratedArchBuildWith(req, model, caps, assumeYes, os.Stdin, os.Stderr, stdinIsTerminal(),
-		defaultAccel(), addBackendRecipe)
+		accel, addBackendRecipe)
+}
+
+// archBuildTarget is the hardware an architecture build is for. A --cpu launch
+// serves on no GPU, so it builds the CPU backend, as on a machine without one:
+// building CUDA for it needed nvcc although `recommend --cpu` (which sees no
+// GPU) offered the row as buildable without it.
+func archBuildTarget(req *launchRequest, caps *detect.Capabilities, accel string) (*detect.Capabilities, string) {
+	if req == nil || !req.CPUMode || caps == nil {
+		return caps, accel
+	}
+	cpu := *caps
+	cpu.GPUs = nil
+	return &cpu, "cpu"
 }
 
 // offerAcceleratedMainlineWith asks (or, headless, explains) before building a

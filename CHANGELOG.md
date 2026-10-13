@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+## v3.2.11 — 2026-10-13
+
+### Added
+
+- `ggrun version --json` reports the build identity and the resolved executable.
+- Serving ends with a clear error when the backend aborts or hangs, instead of
+  leaving the client waiting.
+- Memory growth measured while serving is used by later launches.
+
+### Changed
+
+- Recommendations use complete model artifacts (MiMo V2.6 repaired; draft heads
+  and companion files excluded, also from a fetched catalog). Smartest ranks by
+  capability across models whose backend the first launch builds (`+`); Best
+  overall and Fastest list models that run now first, and Best overall puts
+  models predicted below 6 tok/s after usable ones. Rows a default launch
+  serves on Vulkan on an NVIDIA host are marked `^`.
+- Claude Code mode serves Qwen3.5-3.8-family (SSM layout) models on one slot by
+  default; `--parallel` still overrides.
+- The backend's context shift is off for every model; a full context returns
+  an error instead of silently dropping half the conversation.
+- A reviewed fork recipe is offered before open pull-request discovery.
+- The installer writes `LLM_BACKEND=auto` and falls back to github.com when the
+  GitHub API is rate limited (checksums are still required).
+
+### Fixed
+
+- Memory planning for delta-net hybrid recurrent state, windowed attention on
+  ik_llama, Gemma 4 KV, and CPU-only hosts (KV, checkpoints, logits buffer,
+  containment reserve counted once).
+- Runtime out-of-memory recovery keeps the crashed context, batch and KV
+  placement, learns from failures during verification, and files the reserve
+  under the GPUs the backend ran on.
+- A KV-cache allocation failure at startup lowers context by the device's
+  actual deficit; converging startup checks get a bounded number of retries.
+- The first-launch cache check is bounded by measured prefill speed.
+- The CUDA bundle includes upstream ik_llama #2356; IQ1_M models no longer abort.
+- `GGML_ABORT` output is recognised as a backend failure immediately.
+- Relaunch probes the port the way the backend binds it; a relaunch after a
+  different backend no longer fails to bind.
+- A multimodal projector file is refused as a model.
+- `ggrun download` uses the installed downloader, not one in the working
+  directory.
+- Speed estimates for dense models that spill to system RAM.
+- Dense multi-GPU plans reserve the same unmeasured CUDA overhead as the
+  allocation guard; Claude Code mode on a fresh install starts again.
+- ik_llama layer splits are planned by bytes, as the backend assigns them.
+- A cuBLAS error counts as out of memory only from a VRAM sample taken while
+  the failed backend still holds its memory.
+- A `--cpu` launch builds a CPU backend for an unsupported architecture.
+- An architecture current mainline llama.cpp supports is built from mainline
+  before open pull-request discovery is tried.
+- A models directory that is itself a symlink lists its models.
+
+### Known issues
+
+- `--claude-code` with four slots does not start on multiple GPUs (the backend
+  assigns layers by bytes); the default single-slot launch works.
+- On NVIDIA hosts, very large MoE models default to the Vulkan build, roughly
+  3x slower than CUDA; the first launch offers a CUDA build.
+- Windows GPU serving is untested.
+
 ## v3.2.10 — 2026-09-23
 
 ### Added

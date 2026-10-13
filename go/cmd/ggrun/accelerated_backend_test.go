@@ -143,3 +143,42 @@ func TestUnsupportedArchOffersAcceleratedBuildOfReviewedSource(t *testing.T) {
 		t.Fatal("a failed build reported success")
 	}
 }
+
+// A reviewed recipe for the architecture must be offered before unreviewed
+// open-PR discovery (docs/fork-backends.md). Nanbeige has one: upstream b77d646
+// plus the reviewed loop_count patch the published GGUF needs.
+func TestUnsupportedArchRoutesPreferReviewedRecipe(t *testing.T) {
+	got := unsupportedArchRoutes("nanbeige")
+	if len(got) == 0 || got[0] != "reviewed-build" {
+		t.Fatalf("nanbeige routes %v: the reviewed recipe must come first", got)
+	}
+	unknown := unsupportedArchRoutes("some-new-arch")
+	if len(unknown) == 0 || unknown[0] != "discovered-fork" {
+		t.Fatalf("routes without a reviewed recipe %v: discovery comes first", unknown)
+	}
+	for _, routes := range [][]string{got, unknown} {
+		if routes[len(routes)-1] != "mainline-update" {
+			t.Fatalf("mainline update must stay the last offer: %v", routes)
+		}
+	}
+}
+
+// When the catalog says current mainline registers the architecture, its build
+// comes before open-PR discovery: GLM-5.3-Flash (glm5-next) otherwise built an
+// open pull request's fork, while recommend promised a mainline build.
+func TestUnsupportedArchRoutesPreferMainlineWhenItRegisters(t *testing.T) {
+	prev := mainlineRegistersArch
+	t.Cleanup(func() { mainlineRegistersArch = prev })
+	mainlineRegistersArch = func(arch string) (bool, bool) { return arch == "glm5-next", true }
+	if got := unsupportedArchRoutes("glm5-next"); len(got) == 0 || got[0] != "mainline-build" {
+		t.Fatalf("glm5-next routes %v: the mainline build must come first", got)
+	}
+	if got := unsupportedArchRoutes("some-new-arch"); got[0] != "discovered-fork" {
+		t.Fatalf("an architecture mainline does not register keeps discovery first: %v", got)
+	}
+	// The embedded catalog stamps glm5-next as mainline-registered.
+	mainlineRegistersArch = prev
+	if registers, known := mainlineRegistersArch("glm5-next"); !registers || !known {
+		t.Fatalf("embedded catalog: glm5-next registers=%v known=%v", registers, known)
+	}
+}

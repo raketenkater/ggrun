@@ -362,6 +362,19 @@ func estimatedModelShares(model *ModelProfile, s *Strategy, gpus []detect.GPU, t
 		return out
 	}
 	shares := normalizedStrategySplit(s, n)
+	if s.Type == MultiGPUDense && model != nil && model.ByteWeightedLayerSplit &&
+		(s.SplitMode == "" || strings.EqualFold(s.SplitMode, "layer")) {
+		// A byte-weighted backend places whole blocks by its own walk, and each
+		// device's KV row already follows it (estimatedModelContextShares).
+		shape := kvShapeForStrategy(s, false)
+		if _, _, ok := ikLayerSizes(model, shape); ok {
+			devices, outputDev := backendLayerDeviceAssignments(model, shape, shares)
+			for i, b := range ikDeviceWeightBytes(model, shape, devices, outputDev, n, true) {
+				out[i] = bytesToMiBCeil(b)
+			}
+			return out
+		}
+	}
 	for i := range out {
 		out[i] = int(math.Ceil(float64(totalMB) * shares[i]))
 	}

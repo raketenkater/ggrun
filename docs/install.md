@@ -56,6 +56,13 @@ Only `LLM_APP_HOME` and `PATH` are exported by the environment; everything else 
 dir, backend, cache, logs, llama-server path) is read from `.config/config`, so CLI and
 GUI edits take effect instead of being shadowed by environment variables.
 
+New installs write `LLM_BACKEND="auto"`: each launch picks an installed backend
+that loads the model's architecture and offers a build when none does. A named
+backend (`llama`, `ik_llama`, `vulkan`) is treated as your explicit choice and
+turns that off. Installs made before this change may still have
+`LLM_BACKEND="llama"` (CPU and Windows) or a single backend name; updates keep
+your config, so set it to `auto` yourself to get automatic selection.
+
 ## Release bundles
 
 The [latest GitHub release](https://github.com/raketenkater/ggrun/releases/latest)

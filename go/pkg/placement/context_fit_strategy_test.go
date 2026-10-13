@@ -51,6 +51,7 @@ func TestAutomaticContextFitAccountsCompanionBeforeBoundary(t *testing.T) {
 	caps := strategyFitCaps(detect.GPU{Index: 0, VRAMTotalMB: 12000})
 	model := strategyFitDenseModel(6000, 131072)
 	opts := strategyFitOptions()
+	opts.CacheDir = measuredOverheadCache(t, caps.GPUs, 300)
 
 	without, err := Compute(caps, model, opts)
 	if err != nil {
@@ -89,6 +90,12 @@ func TestAutomaticContextFitUsesOnlySelectedCurrentFreeVRAM(t *testing.T) {
 	)
 	model := strategyFitDenseModel(5000, 131072)
 	opts := strategyFitOptions()
+	opts.CacheDir = measuredOverheadCache(t, caps.GPUs, 300)
+	selectedCaps, err := restrictGPUs(caps, []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedMeasuredOverhead(t, opts.CacheDir, selectedCaps.GPUs, 300)
 
 	all, err := Compute(caps, model, opts)
 	if err != nil {
@@ -115,6 +122,7 @@ func TestAutomaticContextFitDoesNotLowerExplicitQualityPreset(t *testing.T) {
 	model := strategyFitDenseModel(9000, 32768)
 
 	fixed := strategyFitOptions()
+	fixed.CacheDir = measuredOverheadCache(t, caps.GPUs, 300)
 	fixed.KVQuality = "mid"
 	mid, err := Compute(caps, model, fixed)
 	if err != nil {

@@ -86,7 +86,7 @@ func List(root string) ([]Model, error) {
 	}
 
 	grouped := map[string]*Model{}
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(WalkRoot(root), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -127,6 +127,17 @@ func List(root string) ([]Model, error) {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out, nil
+}
+
+// WalkRoot is root with a trailing separator when root itself is a symlink to
+// a directory: filepath.Walk and WalkDir do not descend into a symlinked root,
+// so a models directory linked to a larger disk listed nothing. Only the root
+// is resolved; links to directories below it are still not followed.
+func WalkRoot(root string) string {
+	if fi, err := os.Lstat(root); err == nil && fi.Mode()&os.ModeSymlink != 0 && !strings.HasSuffix(root, string(os.PathSeparator)) {
+		return root + string(os.PathSeparator)
+	}
+	return root
 }
 
 // Remove deletes one listed model. It accepts only a model name emitted by

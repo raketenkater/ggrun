@@ -888,3 +888,46 @@ func TestSchemaThreeProbeIsAdoptedByIdentityNotFilename(t *testing.T) {
 		t.Errorf("an identity-less probe was adopted: got %v, want nothing", got)
 	}
 }
+
+// An abort's estimate may raise only the measured value it ran against: that is
+// what it disproved. A measurement taken after an older, smaller reserve was
+// not disproved and stays.
+func TestAbortRaisesOnlyTheMeasurementItDisproved(t *testing.T) {
+	dir := t.TempDir()
+	model := &ModelProfile{Path: "/models/q36.gguf", Basename: "q36.gguf", TotalSizeMB: 10000}
+	gpus := []detect.GPU{{Index: 0, VRAMTotalMB: 11873}}
+	read := func() (int, bool) {
+		pc := loadProbeCache(dir, model, 262144, 512, "q8_0", "gpu", "ik", gpus, 1)
+		if pc == nil {
+			return 0, false
+		}
+		return pc.RuntimeGraphGrowthByGPU[0], pc.RuntimeGraphGrowthEstimatedByGPU[0]
+	}
+	if err := RecordRuntimeGraphGrowth(dir, model, 262144, 512, "q8_0", "gpu", "ik", gpus, 1, map[int]int{0: 172}); err != nil {
+		t.Fatal(err)
+	}
+	// Abort against an older, smaller reserve: the 172 measurement stands.
+	if err := RecordRuntimeGraphGrowthAfterAbort(dir, model, 262144, 512, "q8_0", "gpu", "ik", gpus, 1, 0, 242, 100); err != nil {
+		t.Fatal(err)
+	}
+	if v, est := read(); v != 172 || est {
+		t.Fatalf("an abort against an older reserve overwrote the measurement: %d estimated=%v", v, est)
+	}
+	// Abort while 172 was in effect: it is disproved, the estimate raises it.
+	if err := RecordRuntimeGraphGrowthAfterAbort(dir, model, 262144, 512, "q8_0", "gpu", "ik", gpus, 1, 0, 414, 172); err != nil {
+		t.Fatal(err)
+	}
+	if v, est := read(); v != 414 || !est {
+		t.Fatalf("an abort against the measured reserve did not raise it: %d estimated=%v", v, est)
+	}
+	// An ordinary estimate still never raises a measurement.
+	if err := RecordRuntimeGraphGrowth(dir, model, 262144, 512, "q8_0", "gpu", "ik", gpus, 1, map[int]int{0: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordRuntimeGraphGrowthFromOOM(dir, model, 262144, 512, "q8_0", "gpu", "ik", gpus, 1, 0, 2000, true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := read(); v != 500 {
+		t.Fatalf("a plain estimate raised a measurement: %d", v)
+	}
+}

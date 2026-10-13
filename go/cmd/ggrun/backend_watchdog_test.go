@@ -115,6 +115,23 @@ func TestWatchdogStopsOnAFatalLinePrintedBeforeTheStep(t *testing.T) {
 	}
 }
 
+// A cuBLAS failure counts as an OOM only from a VRAM sample taken while the
+// failed backend still holds its memory, so the hook runs before Stop.
+func TestWatchdogSamplesAFailedBackendBeforeStoppingIt(t *testing.T) {
+	b := newFakeBackend()
+	b.appendLog("CUDA error: an unsupported value or parameter was passed to the function\n")
+	var calls int
+	var runningAtSample bool
+	w := backendWatch{interval: 10 * time.Millisecond, probeTimeout: 50 * time.Millisecond, wedgedAfter: time.Hour, stopGrace: time.Second,
+		onFatal: func() { calls++; runningAtSample = b.IsRunning() }}
+	if err := runBounded(t, b, silentHealth(t), w, blockedUntilStopped(b)); err == nil {
+		t.Fatal("want a fatal-error stop")
+	}
+	if calls != 1 || !runningAtSample {
+		t.Fatalf("failure sample: calls=%d runningAtSample=%v, want one sample of the live backend", calls, runningAtSample)
+	}
+}
+
 func TestWatchdogStopsWhenTheBackendExits(t *testing.T) {
 	b := newFakeBackend()
 	url := silentHealth(t)
@@ -155,6 +172,8 @@ func TestFatalBackendLineRecognizesGGMLAborts(t *testing.T) {
 		"CUDA error: an unsupported value or parameter was passed to the function",
 		"/src/ggml/src/ggml.c:1234: GGML_ASSERT(ne00 == ne10) failed",
 		"terminate called after throwing an instance of 'std::runtime_error'",
+		// GGML_ABORT("fatal error") after "Unhandled type iq1_m (29)", ik 1fddd12.
+		"/__w/ggrun/ggrun/.ik_llama.cpp/ggml/src/ggml-cuda/mmq.cuh:112: fatal error",
 	} {
 		if fatalBackendLine("ok\n"+line+"\n") == "" {
 			t.Errorf("fatal line not recognized: %q", line)

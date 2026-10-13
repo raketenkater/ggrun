@@ -133,7 +133,7 @@ func TestRuntimeOOMReservesOneMeasuredExpertLayer(t *testing.T) {
 		RoutedExpertLayerBytes: []int64{1300 << 20, 1400 << 20, 1200 << 20},
 	}
 
-	device, reserveMB, estimated, ok := runtimeLogCUDAOOM(log, caps, model, nil)
+	device, reserveMB, estimated, _, ok := runtimeLogCUDAOOM(log, caps, model, nil, nil)
 	if !ok {
 		t.Fatal("a sizeless CUDA OOM was not recognized")
 	}
@@ -148,14 +148,14 @@ func TestRuntimeOOMReservesOneMeasuredExpertLayer(t *testing.T) {
 	}
 
 	// A repeat at the same shape moves a second layer rather than standing still.
-	_, repeat, _, ok := runtimeLogCUDAOOM(log, caps, model, map[int]int{0: reserveMB})
+	_, repeat, _, _, ok := runtimeLogCUDAOOM(log, caps, model, map[int]int{0: reserveMB}, nil)
 	if !ok || repeat <= reserveMB {
 		t.Errorf("repeat reserve = %d, want more than %d", repeat, reserveMB)
 	}
 
 	// Without a ledger it must still reserve something: an OOM proves
 	// something has to give.
-	if _, fallback, _, ok := runtimeLogCUDAOOM(log, caps, nil, nil); !ok || fallback <= 0 {
+	if _, fallback, _, _, ok := runtimeLogCUDAOOM(log, caps, nil, nil, nil); !ok || fallback <= 0 {
 		t.Errorf("fallback reserve = %d, want positive", fallback)
 	}
 }
