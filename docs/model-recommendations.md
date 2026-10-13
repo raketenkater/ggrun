@@ -73,14 +73,24 @@ of one variant, with known sizes. Draft heads (MTP, DFlash), projectors,
 adapters and importance matrices are excluded, and two different variants that
 share a quant label are not added together.
 
-The catalog marks architectures against upstream llama.cpp, which can be ahead
-of the backend you installed. `ggrun recommend` and the TUI probe the installed
-backends; a model none of them loads is marked `+` and listed after the models
-they load. Its first launch offers a 20-40 minute backend build. The same
-applies on an NVIDIA host when a default launch would serve the model on the
-Vulkan build (an architecture only mainline loads, or a large MoE whose
-file-backed experts win the backend choice): it runs, but far below the CUDA
-estimate until the offered CUDA build exists.
+The catalog marks architectures against upstream llama.cpp and ik_llama.cpp
+(`runnable`), and against mainline alone (`runnable_mainline`); both can be
+ahead of the backend you installed. `ggrun recommend` and the TUI probe the
+installed backends and set each row's `BackendStatus` (`recommend --json`):
+`ready` when one loads it, `needs_setup` (marked `+`) when none does but the
+first launch offers a 20-40 minute build, `unsupported` (marked `!`) when no
+such route exists, and `unknown` when a backend could not be probed. A build
+route is a reviewed recipe, or current mainline when mainline registers the
+architecture (an architecture only ik_llama registers has none), and needs git,
+cmake and a C++ compiler on PATH, nvcc on an NVIDIA host, no backend pinned in
+the config, and a non-Windows host. A `needs_setup` row keeps its rank; an
+`unsupported` row is listed after every usable one. On an NVIDIA host a model a
+default launch would serve on the Vulkan build (an architecture only mainline
+loads, or a large MoE whose file-backed experts win the backend choice) is
+`ready` but runs far below the CUDA estimate (marked `^`). `CUDABuildOffered`
+says whether the first launch offers the CUDA build; when it does the row keeps
+its rank, and when it does not, Best overall and Fastest list it after the other
+usable rows. Smartest keeps it in capability order.
 
 Attribution is required when using Artificial Analysis data; the catalog and GUI
 include attribution to `https://artificialanalysis.ai/`.

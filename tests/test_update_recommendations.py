@@ -177,6 +177,15 @@ def test_stamp_runnable_marks_rows_no_upstream_backend_loads():
     assert [row.get("runnable") for row in rows] == [True, True, False, None]
 
 
+def test_stamp_runnable_records_mainline_separately():
+    updater = load_updater()
+    rows = [{"arch": "llama"}, {"arch": "deepseek41"}, {"arch": "axk2"}]
+    updater.stamp_upstream(rows, {"llama.cpp": {"llama"}, "ik_llama.cpp": {"llama", "deepseek41"}})
+    # An ik-only architecture is runnable, but no mainline build loads it.
+    assert [row.get("runnable") for row in rows] == [True, True, False]
+    assert [row.get("runnable_mainline") for row in rows] == [True, False, False]
+
+
 def test_unreadable_upstream_table_stamps_nothing(monkeypatch):
     updater = load_updater()
 
@@ -190,7 +199,8 @@ def test_unreadable_upstream_table_stamps_nothing(monkeypatch):
     assert updater.fetch_upstream_arches() is None
     rows = [{"arch": "axk2"}]
     updater.stamp_runnable(rows, updater.fetch_upstream_arches())
-    assert "runnable" not in rows[0]
+    updater.stamp_upstream(rows, updater.fetch_upstream_arch_tables())
+    assert "runnable" not in rows[0] and "runnable_mainline" not in rows[0]
 
 
 def _sibling(name, size):

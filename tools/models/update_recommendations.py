@@ -1190,14 +1190,14 @@ def parse_arch_names(source: str) -> set[str]:
     return {name.lower() for name in re.findall(r'\{\s*LLM_ARCH_\w+\s*,\s*"([^"]+)"', body[:end])}
 
 
-def fetch_upstream_arches() -> set[str] | None:
-    """Union of upstream architecture names, or None when any table is unreadable.
+def fetch_upstream_arch_tables() -> dict[str, set[str]] | None:
+    """Architecture names per upstream table, or None when any table is unreadable.
 
     A partial union would mark rows the missing backend loads as unrunnable, so
     an incomplete fetch stamps nothing and the recommender falls back to its
     explicit blocklist.
     """
-    names: set[str] = set()
+    tables: dict[str, set[str]] = {}
     for label, url in UPSTREAM_ARCH_TABLES:
         try:
             parsed = parse_arch_names(fetch_text(url, timeout=30))
@@ -1207,14 +1207,23 @@ def fetch_upstream_arches() -> set[str] | None:
         if not parsed:
             print(f"warning: {label} architecture table had no entries; runnability not stamped", file=sys.stderr)
             return None
-        names |= parsed
-    return names
+        tables[label] = parsed
+    return tables
 
 
-def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) -> None:
+def fetch_upstream_arches() -> set[str] | None:
+    """Union of upstream architecture names, or None when any table is unreadable."""
+    tables = fetch_upstream_arch_tables()
+    return set().union(*tables.values()) if tables else None
+
+
+def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None, mainline: set[str] | None = None) -> None:
     """Mark each row with a known GGUF architecture as loadable upstream or not.
 
     The stamp labels fork-only rows; it never removes them from recommendations.
+    runnable_mainline records the mainline table alone: the launcher's automatic
+    builds are mainline (or a reviewed recipe), so an architecture only ik_llama
+    registers has no build route.
     """
     if not arches:
         return
@@ -1222,6 +1231,15 @@ def stamp_runnable(candidates: list[dict[str, Any]], arches: set[str] | None) ->
         arch = str(cand.get("arch") or "").lower()
         if arch:
             cand["runnable"] = arch in arches
+            if mainline:
+                cand["runnable_mainline"] = arch in mainline
+
+
+def stamp_upstream(candidates: list[dict[str, Any]], tables: dict[str, set[str]] | None) -> None:
+    """Stamp runnable and runnable_mainline from fetched upstream tables."""
+    if not tables:
+        return
+    stamp_runnable(candidates, set().union(*tables.values()), tables.get("llama.cpp"))
 
 
 def catalog_intelligence(row: dict[str, Any]) -> float:
@@ -1267,10 +1285,10 @@ def main() -> int:
     catalog_path = Path(args.catalog)
     if args.stamp_runnable_only:
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-        arches = fetch_upstream_arches()
-        if not arches:
+        tables = fetch_upstream_arch_tables()
+        if not tables:
             raise SystemExit("upstream architecture tables unavailable")
-        stamp_runnable(catalog.get("candidates", []), arches)
+        stamp_upstream(catalog.get("candidates", []), tables)
         tmp = catalog_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(catalog_path)
@@ -1299,7 +1317,7 @@ def main() -> int:
             return 0
         raise SystemExit("no GGUF candidates resolved")
 
-    stamp_runnable(catalog["candidates"], fetch_upstream_arches())
+    stamp_upstream(catalog["candidates"], fetch_upstream_arch_tables())
     if args.print_catalog_top > 0:
         print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")

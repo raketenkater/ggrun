@@ -5,9 +5,10 @@ Records the recommender's top choices, checks the offered quant is a complete
 main-model artifact (not a draft head or a partial shard set), downloads it with
 the documented `ggrun download`, and verifies the bytes on disk equal the
 catalog's size. A top pick too large for the runner's disk/bandwidth limit, or
-one no installed backend loads (its first launch is a 20-40 minute backend
-build), is recorded as such and the first recommendation within the limits is
-used instead; the substitution is visible in the evidence, never silent.
+one an installed backend does not serve now (BackendStatus needs_setup: its
+first launch offers a 20-40 minute backend build; unsupported: no route), is
+recorded as such and the first recommendation within the limits is used
+instead; the substitution is visible in the evidence, never silent.
 
 Prints MODEL=<path> on success (append it to $GITHUB_ENV in CI).
 """
@@ -22,6 +23,20 @@ from pathlib import Path
 
 def run(cmd, timeout):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def backend_status(row):
+    """BackendStatus, or the older launchers' NeedsBackendBuild equivalent.
+
+    The published-release E2E runs this script against a launcher that predates
+    BackendStatus. A row carrying neither key fails closed: a renamed field must
+    not let every row through.
+    """
+    if "BackendStatus" in row:
+        return row["BackendStatus"]
+    if "NeedsBackendBuild" in row:
+        return "needs_setup" if row["NeedsBackendBuild"] else "unknown"
+    raise RuntimeError(f"recommend --json row has no backend status: {row.get('repo')}")
 
 
 def main():
@@ -47,7 +62,7 @@ def main():
         rec["planning_hardware"] = {k: doc["planning_hardware"].get(k) for k in ("os", "arch", "ram", "gpus")}
         rows = doc["categories"].get(a.category) or []
         rec["top"] = [{k: row.get(k) for k in ("name", "repo", "arch", "QuantName", "QuantSizeGB", "MemoryNeedGB", "Fit",
-                                           "NeedsBackendBuild", "Reason")}
+                                           "BackendStatus", "CUDABuildOffered", "Reason")}
                       for row in rows]
         if not rows:
             raise RuntimeError(f"no {a.category} recommendation for this hardware")
@@ -62,9 +77,13 @@ def main():
             # 1.2 GB MTP head as a 156 GB model's Q4_0.
             if quant["size_bytes"] * 25 < max(sizes):
                 raise RuntimeError(f"recommended {row['repo']} {quant['name']} ({quant['size_bytes']} B) is a companion-sized artifact")
-            if row.get("NeedsBackendBuild"):
+            # Select a row ready now explicitly; the ranking no longer demotes
+            # rows whose backend the first launch builds. "unknown" means the
+            # probe could not read a backend, which ranks as if unprobed.
+            status = backend_status(row)
+            if status not in ("ready", "unknown"):
                 rec.setdefault("skipped_for_runner_limits", []).append(
-                    {"repo": row["repo"], "quant": quant["name"], "reason": "needs a backend build"})
+                    {"repo": row["repo"], "quant": quant["name"], "reason": f"backend {status}"})
                 continue
             if quant["size_bytes"] / 1e9 <= a.max_download_gb:
                 chosen = (row, quant)

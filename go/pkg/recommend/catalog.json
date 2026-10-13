@@ -41,6 +41,7 @@
       ],
       "repo": "ggml-org/MiMo-V2.6-Pro-RL-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 516.15,
       "speed": 43,
       "total_params_b": 0,
@@ -149,6 +150,7 @@
       ],
       "repo": "unsloth/GLM-5.3-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 435.2,
       "speed": 83,
       "total_params_b": 0,
@@ -238,6 +240,7 @@
       ],
       "repo": "unsloth/Kimi-K3-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1405.06,
       "speed": 41,
       "total_params_b": 0,
@@ -348,6 +351,10 @@
       "runnable": true,
       "size_gb": 185.99,
       "speed": 53,
+
+      "runnable_mainline": true,
+      "size_gb": 187.04,
+      "speed": 51,
       "total_params_b": 0,
       "vl": 512
     },
@@ -433,6 +440,7 @@
       ],
       "repo": "unsloth/Qwen3.8-2.4T-A95B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1220.85,
       "speed": 37,
       "total_params_b": 0,
@@ -532,6 +540,7 @@
       ],
       "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 103.69,
       "speed": 56,
       "total_params_b": 0,
@@ -589,6 +598,7 @@
       ],
       "repo": "vcruz305/DeepSeek-V4.1-Flash-GGUF",
       "runnable": true,
+      "runnable_mainline": false,
       "size_gb": 414.19,
       "speed": 100,
       "total_params_b": 0,
@@ -633,6 +643,7 @@
       ],
       "repo": "ggml-org/MiMo-V2.6-Flash-RL-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 155.87,
       "speed": 58,
       "total_params_b": 0,
@@ -702,6 +713,7 @@
       ],
       "repo": "ryant0000/DeepSeek-V4-Pro-0813-gguf",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 793.64,
       "speed": 89,
       "total_params_b": 0,
@@ -882,6 +894,7 @@
       ],
       "repo": "unsloth/Qwen3.8-27B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 15.33,
       "speed": 46,
       "total_params_b": 0,
@@ -943,6 +956,7 @@
       ],
       "repo": "avar6/Motif-3-Beta-gguf",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 182.5,
       "speed": 0,
       "total_params_b": 0,
@@ -1123,6 +1137,9 @@
       "repo": "bartowski/K2-Horizon-375B-A23B-GGUF",
       "runnable": true,
       "size_gb": 221.47,
+
+      "runnable_mainline": true,
+      "size_gb": 375.4,
       "speed": 100,
       "total_params_b": 0,
       "vl": 128
@@ -1288,6 +1305,7 @@
       ],
       "repo": "unsloth/MiniMax-M3-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 245.9,
       "speed": 92,
       "total_params_b": 0,
@@ -1477,6 +1495,7 @@
       ],
       "repo": "bartowski/nex-agi_Nex-N2-Pro-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 225.2,
       "speed": 0,
       "total_params_b": 0,
@@ -1573,6 +1592,7 @@
       ],
       "repo": "unsloth/Kimi-K2.7-Code-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 543.62,
       "speed": 79,
       "total_params_b": 0,
@@ -1744,6 +1764,7 @@
       ],
       "repo": "unsloth/Inkling-Small-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 151.37,
       "speed": 100,
       "total_params_b": 0,
@@ -1924,6 +1945,9 @@
       "repo": "bartowski/K2-Horizon-MoVA-36B-A4B-GGUF",
       "runnable": true,
       "size_gb": 21.14,
+
+      "runnable_mainline": true,
+      "size_gb": 20.83,
       "speed": 0,
       "total_params_b": 0,
       "vl": 128
@@ -1993,6 +2017,7 @@
       ],
       "repo": "DevQuasar/tencent.Hy3-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 166.31,
       "speed": 83,
       "total_params_b": 0,
@@ -2049,6 +2074,7 @@
       ],
       "repo": "DevQuasar/thinkingmachines.Inkling-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 533.18,
       "speed": 100,
       "total_params_b": 0,
@@ -2106,6 +2132,7 @@
       ],
       "repo": "prometheusAIR/Solar-Open2-250B-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 126.88,
       "speed": 0,
       "total_params_b": 0,
@@ -2297,6 +2324,7 @@
       ],
       "repo": "bartowski/Ling-3.0-flash-VL-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 73.26,
       "speed": 100,
       "total_params_b": 0,
@@ -2461,6 +2489,7 @@
       ],
       "repo": "unsloth/NVIDIA-Nemotron-3-Ultra-550B-A55B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 334.55,
       "speed": 100,
       "total_params_b": 0,
@@ -2664,6 +2693,7 @@
       ],
       "repo": "bartowski/Ling-3.0-flash-Fin-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 72.46,
       "speed": 100,
       "total_params_b": 0,
@@ -2722,6 +2752,7 @@
       ],
       "repo": "linuxid10t/G9v3-39A5B-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 21.94,
       "speed": 0,
       "total_params_b": 0,
@@ -2764,6 +2795,7 @@
       ],
       "repo": "skt/A.X-K2-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 344.99,
       "speed": 0,
       "total_params_b": 0,
@@ -2971,6 +3003,7 @@
       ],
       "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 227.33,
       "speed": 83,
       "total_params_b": 0,
@@ -3135,10 +3168,168 @@
       ],
       "repo": "bartowski/K2-Horizon-7B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 5.38,
       "speed": 0,
       "total_params_b": 0,
       "vl": 128
+    },
+    {
+      "aa_id": "",
+
+      "aa_intelligence_index": 20.133,
+      "aa_output_tps": 331.65,
+      "aa_query": "InclusionAI Ling 3.0 Flash",
+      "aa_slug": "ling-3-0-flash",
+      "aa_updated_at": "2026-10-07T15:50:48Z",
+      "active_params_b": 0,
+      "arch": "bailingmoe3",
+      "ctx_train": 131072,
+      "embd": 2560,
+      "exp_ff": 768,
+      "exp_shared_ff": 768,
+      "exp_used": 8,
+      "experts": 512,
+      "family": "InclusionAI",
+      "ff": 6144,
+      "hf_quant_updated_at": "2026-10-07T15:50:48Z",
+      "kl": 576,
+      "kv_lora": 512,
+      "layers": 42,
+      "leading_dense": 2,
+      "moe": false,
+      "name": "InclusionAI Ling 3.0 Flash",
+      "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
+      "quality": 33,
+      "quants": [
+        {
+          "dynamic": false,
+          "name": "IQ1_S",
+          "size_bytes": 32385370016,
+          "size_gb": 30.16
+        },
+        {
+          "dynamic": false,
+          "name": "IQ1_M",
+          "size_bytes": 36474816416,
+          "size_gb": 33.97
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_XXS",
+          "size_bytes": 39227328416,
+          "size_gb": 36.53
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_XS",
+          "size_bytes": 44732352416,
+          "size_gb": 41.66
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_S",
+          "size_bytes": 46934362208,
+          "size_gb": 43.71
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_M",
+          "size_bytes": 49097050240,
+          "size_gb": 45.73
+        },
+        {
+          "dynamic": false,
+          "name": "IQ3_XXS",
+          "size_bytes": 57079335040,
+          "size_gb": 53.16
+        },
+        {
+          "dynamic": false,
+          "name": "IQ3_S",
+          "size_bytes": 57826445440,
+          "size_gb": 53.86
+        },
+        {
+          "dynamic": false,
+          "name": "IQ3_M",
+          "size_bytes": 62191143040,
+          "size_gb": 57.92
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_XXS",
+          "size_bytes": 69347674240,
+          "size_gb": 64.59
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K",
+          "size_bytes": 72336115840,
+          "size_gb": 67.37
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_S",
+          "size_bytes": 74223552640,
+          "size_gb": 69.13
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_NL",
+          "size_bytes": 79296039040,
+          "size_gb": 73.85
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_L",
+          "size_bytes": 83975309440,
+          "size_gb": 78.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_S",
+          "size_bytes": 87435610208,
+          "size_gb": 81.43
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_L",
+          "size_bytes": 95339251968,
+          "size_gb": 88.79
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K_S",
+          "size_bytes": 102242049280,
+          "size_gb": 95.22
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 107512973568,
+          "size_gb": 100.13
+        },
+        {
+          "dynamic": false,
+          "name": "Q8_0",
+          "size_bytes": 133111334912,
+          "size_gb": 123.97
+        },
+        {
+          "dynamic": false,
+          "name": "BF16",
+          "size_bytes": 248944043968,
+          "size_gb": 231.85
+        }
+      ],
+      "repo": "AtomicChat/Ling-3.0-flash-GGUF",
+      "runnable": true,
+      "runnable_mainline": true,
+      "size_gb": 69.13,
+      "speed": 100,
+      "total_params_b": 0,
+      "vl": 512
     },
     {
       "aa_id": "",
@@ -3312,6 +3503,7 @@
       ],
       "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 20.61,
       "speed": 100,
       "total_params_b": 0,
@@ -3483,6 +3675,7 @@
       ],
       "repo": "unsloth/Qwen3.5-122B-A10B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 71.28,
       "speed": 100,
       "total_params_b": 0,
@@ -3549,6 +3742,7 @@
       ],
       "repo": "DevQuasar/meta-models.Muse-Glimmer-30B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 15.77,
       "speed": 100,
       "total_params_b": 0,
@@ -3743,6 +3937,7 @@
       ],
       "repo": "bartowski/google_gemma-4-26B-A4B-it-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 15.87,
       "speed": 0,
       "total_params_b": 0,
@@ -3907,10 +4102,203 @@
       ],
       "repo": "bartowski/K2-Horizon-3.7B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 3.03,
       "speed": 0,
       "total_params_b": 0,
       "vl": 128
+    },
+    {
+      "aa_id": "",
+
+      "aa_intelligence_index": 14.831,
+      "aa_output_tps": 75.033,
+      "aa_query": "IBM Granite 4.2 30B",
+      "aa_slug": "granite-4-2-30b",
+      "aa_updated_at": "2026-10-07T15:51:25Z",
+      "active_params_b": 0,
+      "arch": "granite",
+      "ctx_train": 131072,
+      "embd": 4096,
+      "family": "IBM",
+      "ff": 32768,
+      "hf_quant_updated_at": "2026-10-07T15:51:25Z",
+      "hkv": 8,
+      "layers": 64,
+      "moe": false,
+      "name": "IBM Granite 4.2 30B",
+      "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
+      "quality": 24,
+      "quants": [
+        {
+          "dynamic": false,
+          "name": "IQ2_XXS",
+          "size_bytes": 9026728992,
+          "size_gb": 8.41
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_XS",
+          "size_bytes": 9764926496,
+          "size_gb": 9.09
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_S",
+          "size_bytes": 10121245728,
+          "size_gb": 9.43
+        },
+        {
+          "dynamic": false,
+          "name": "IQ2_M",
+          "size_bytes": 10825888800,
+          "size_gb": 10.08
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 11122897952,
+          "size_gb": 10.36
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K_L",
+          "size_bytes": 11524305952,
+          "size_gb": 10.73
+        },
+        {
+          "dynamic": false,
+          "name": "IQ3_XXS",
+          "size_bytes": 11690964000,
+          "size_gb": 10.89
+        },
+        {
+          "dynamic": false,
+          "name": "IQ3_XS",
+          "size_bytes": 12387284000,
+          "size_gb": 11.54
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_S",
+          "size_bytes": 12955612192,
+          "size_gb": 12.07
+        },
+        {
+          "dynamic": false,
+          "name": "IQ3_M",
+          "size_bytes": 13310030880,
+          "size_gb": 12.4
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_M",
+          "size_bytes": 14358606880,
+          "size_gb": 13.37
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_L",
+          "size_bytes": 15382017056,
+          "size_gb": 14.33
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_XL",
+          "size_bytes": 15741678624,
+          "size_gb": 14.66
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_XS",
+          "size_bytes": 15910302752,
+          "size_gb": 14.82
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_0",
+          "size_bytes": 16785077280,
+          "size_gb": 15.63
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_NL",
+          "size_bytes": 16787174432,
+          "size_gb": 15.63
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_S",
+          "size_bytes": 16868963360,
+          "size_gb": 15.71
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_M",
+          "size_bytes": 18027639840,
+          "size_gb": 16.79
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_L",
+          "size_bytes": 18332709920,
+          "size_gb": 17.07
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 18488488992,
+          "size_gb": 17.22
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_S",
+          "size_bytes": 20259009568,
+          "size_gb": 18.87
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_M",
+          "size_bytes": 21025518624,
+          "size_gb": 19.58
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_L",
+          "size_bytes": 21279208480,
+          "size_gb": 19.82
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 24508953632,
+          "size_gb": 22.83
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K_L",
+          "size_bytes": 24708052000,
+          "size_gb": 23.01
+        },
+        {
+          "dynamic": false,
+          "name": "Q8_0",
+          "size_bytes": 31111705632,
+          "size_gb": 28.98
+        },
+        {
+          "dynamic": false,
+          "name": "BF16",
+          "size_bytes": 58558182304,
+          "size_gb": 54.54
+        }
+      ],
+      "repo": "bartowski/granite-4.2-30b-GGUF",
+      "runnable": true,
+      "runnable_mainline": true,
+      "size_gb": 16.79,
+      "speed": 75,
+      "total_params_b": 0
     },
     {
       "aa_id": "",
@@ -4104,6 +4492,7 @@
       ],
       "repo": "bartowski/google_gemma-4-31B-it-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 18.25,
       "speed": 35,
       "total_params_b": 0,
@@ -4278,6 +4667,7 @@
       ],
       "repo": "unsloth/Mistral-Medium-3.5-128B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 69.75,
       "speed": 100,
       "total_params_b": 0,
@@ -4313,6 +4703,7 @@
       ],
       "repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 6.5,
       "speed": 100,
       "total_params_b": 0,
@@ -4475,6 +4866,7 @@
       ],
       "repo": "unsloth/Qwen3.5-9B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 5.29,
       "speed": 81,
       "total_params_b": 0,
@@ -4637,6 +5029,7 @@
       ],
       "repo": "unsloth/Qwen3.5-4B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.55,
       "speed": 23,
       "total_params_b": 0,
@@ -4777,6 +5170,7 @@
       ],
       "repo": "unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 23.53,
       "speed": 100,
       "total_params_b": 0,
@@ -4947,6 +5341,7 @@
       ],
       "repo": "unsloth/NVIDIA-Nemotron-3-Super-120B-A12B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 76.87,
       "speed": 100,
       "total_params_b": 0,
@@ -5203,6 +5598,7 @@
       ],
       "repo": "DevQuasar/openbmb.MiniCPM5-2B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1.45,
       "speed": 0,
       "total_params_b": 0,
@@ -5397,6 +5793,7 @@
       ],
       "repo": "bartowski/nvidia_Nemotron-Cascade-2-30B-A3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 23.03,
       "speed": 0,
       "total_params_b": 0,
@@ -5538,6 +5935,7 @@
       ],
       "repo": "bartowski/openai_gpt-oss-120b-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 58.53,
       "speed": 100,
       "total_params_b": 0,
@@ -5580,6 +5978,7 @@
       ],
       "repo": "benjaminradio/K2-Think-V2-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 270.28,
       "speed": 0,
       "total_params_b": 0,
@@ -5652,6 +6051,7 @@
       ],
       "repo": "InquiringMinds-AI/LongCat-Flash-Lite-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 37.47,
       "speed": 0,
       "total_params_b": 0,
@@ -5999,6 +6399,7 @@
       ],
       "repo": "bartowski/granite-4.2-8b-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 5.16,
       "speed": 52,
       "total_params_b": 0
@@ -6178,6 +6579,7 @@
       ],
       "repo": "bartowski/Ling-3.0-tiny-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.58,
       "speed": 55,
       "total_params_b": 0,
@@ -6352,6 +6754,7 @@
       ],
       "repo": "bartowski/ai9stars_G9v3-3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1.77,
       "speed": 0,
       "total_params_b": 0,
@@ -6554,6 +6957,7 @@
       ],
       "repo": "bartowski/arcee-ai_Trinity-Large-Thinking-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 225.24,
       "speed": 100,
       "total_params_b": 0,
@@ -6744,6 +7148,7 @@
       ],
       "repo": "bartowski/PrimeIntellect_INTELLECT-3-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 66.46,
       "speed": 0,
       "total_params_b": 0,
@@ -6820,6 +7225,7 @@
       ],
       "repo": "DevQuasar-11/upstage.Solar-Open-100B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 57.98,
       "speed": 0,
       "total_params_b": 0,
@@ -6978,6 +7384,7 @@
       ],
       "repo": "unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 22.25,
       "speed": 100,
       "total_params_b": 0,
@@ -7173,6 +7580,7 @@
       ],
       "repo": "unsloth/Llama-4-Maverick-17B-128E-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 226.09,
       "speed": 35,
       "total_params_b": 0,
@@ -7374,6 +7782,7 @@
       ],
       "repo": "bartowski/openai_gpt-oss-20b-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 10.87,
       "speed": 100,
       "total_params_b": 0,
@@ -7540,6 +7949,7 @@
       ],
       "repo": "unsloth/North-Mini-Code-1.0-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 17.88,
       "speed": 49,
       "total_params_b": 0,
@@ -7730,6 +8140,7 @@
       ],
       "repo": "unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 45.17,
       "speed": 100,
       "total_params_b": 0,
@@ -7792,8 +8203,209 @@
       ],
       "repo": "unsloth/diffusiongemma-26B-A4B-it-GGUF",
       "runnable": false,
+      "runnable_mainline": false,
       "size_gb": 15.65,
       "speed": 0,
+      "total_params_b": 0,
+      "vl": 512
+    },
+    {
+      "aa_id": "",
+
+      "aa_intelligence_index": 9.266,
+      "aa_output_tps": 81.136,
+      "aa_query": "Mistral Large 3",
+      "aa_slug": "mistral-large-3",
+      "aa_updated_at": "2026-10-07T15:53:45Z",
+      "active_params_b": 0,
+      "arch": "deepseek2",
+      "ctx_train": 294912,
+      "embd": 7168,
+      "exp_ff": 4096,
+      "exp_used": 4,
+      "experts": 128,
+      "family": "Mistral",
+      "ff": 16384,
+      "hf_quant_updated_at": "2026-10-07T15:53:45Z",
+      "hkv": 1,
+      "kl": 576,
+      "kv_lora": 512,
+      "layers": 61,
+      "leading_dense": 3,
+      "moe": false,
+      "name": "Mistral Large 3",
+      "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
+      "q_lora": 1536,
+      "quality": 15,
+      "quants": [
+        {
+          "dynamic": true,
+          "name": "UD-TQ1_0",
+          "size_bytes": 168604875200,
+          "size_gb": 157.03
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ1_S",
+          "size_bytes": 190801132352,
+          "size_gb": 177.7
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ1_M",
+          "size_bytes": 206460042240,
+          "size_gb": 192.28
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ2_XXS",
+          "size_bytes": 224807238656,
+          "size_gb": 209.37
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ2_M",
+          "size_bytes": 235376884672,
+          "size_gb": 219.21
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K",
+          "size_bytes": 247110065152,
+          "size_gb": 230.14
+        },
+        {
+          "dynamic": false,
+          "name": "Q2_K_L",
+          "size_bytes": 247330266208,
+          "size_gb": 230.34
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q2_K_XL",
+          "size_bytes": 256369376320,
+          "size_gb": 238.76
+        },
+        {
+          "dynamic": true,
+          "name": "UD-IQ3_XXS",
+          "size_bytes": 279215127616,
+          "size_gb": 260.04
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_S",
+          "size_bytes": 291854199872,
+          "size_gb": 271.81
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q3_K_XL",
+          "size_bytes": 300791151872,
+          "size_gb": 280.13
+        },
+        {
+          "dynamic": false,
+          "name": "Q3_K_M",
+          "size_bytes": 321845570720,
+          "size_gb": 299.74
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_XS",
+          "size_bytes": 359954316736,
+          "size_gb": 335.23
+        },
+        {
+          "dynamic": false,
+          "name": "IQ4_NL",
+          "size_bytes": 380738813248,
+          "size_gb": 354.59
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_0",
+          "size_bytes": 381700357440,
+          "size_gb": 355.49
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_S",
+          "size_bytes": 382661901632,
+          "size_gb": 356.38
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q4_K_XL",
+          "size_bytes": 387880303968,
+          "size_gb": 361.24
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_K_M",
+          "size_bytes": 406989520384,
+          "size_gb": 379.04
+        },
+        {
+          "dynamic": false,
+          "name": "Q4_1",
+          "size_bytes": 422366526912,
+          "size_gb": 393.36
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_S",
+          "size_bytes": 464446570080,
+          "size_gb": 432.55
+        },
+        {
+          "dynamic": false,
+          "name": "Q5_K_M",
+          "size_bytes": 477969661536,
+          "size_gb": 445.14
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q5_K_XL",
+          "size_bytes": 479797460544,
+          "size_gb": 446.85
+        },
+        {
+          "dynamic": false,
+          "name": "Q6_K",
+          "size_bytes": 553317879616,
+          "size_gb": 515.32
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q6_K_XL",
+          "size_bytes": 576471842784,
+          "size_gb": 536.88
+        },
+        {
+          "dynamic": false,
+          "name": "Q8_0",
+          "size_bytes": 715677646752,
+          "size_gb": 666.53
+        },
+        {
+          "dynamic": true,
+          "name": "UD-Q8_K_XL",
+          "size_bytes": 773503992160,
+          "size_gb": 720.38
+        },
+        {
+          "dynamic": false,
+          "name": "BF16",
+          "size_bytes": 1346959087424,
+          "size_gb": 1254.45
+        }
+      ],
+      "repo": "unsloth/Mistral-Large-3-675B-Instruct-2512-GGUF",
+      "runnable": true,
+      "runnable_mainline": true,
+      "size_gb": 379.04,
+      "speed": 81,
       "total_params_b": 0,
       "vl": 512
     },
@@ -8054,6 +8666,7 @@
       ],
       "repo": "unsloth/Qwen3-Coder-Next-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 45.92,
       "speed": 88,
       "total_params_b": 0,
@@ -8227,6 +8840,7 @@
       ],
       "repo": "bartowski/granite-4.2-3b-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.16,
       "speed": 100,
       "total_params_b": 0
@@ -8292,6 +8906,7 @@
       ],
       "repo": "mykor/Tri-21B-Think-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 11.72,
       "speed": 0,
       "total_params_b": 0,
@@ -8460,6 +9075,7 @@
       ],
       "repo": "bartowski/google_gemma-4-E4B-it-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 5.03,
       "speed": 27,
       "total_params_b": 0,
@@ -8654,6 +9270,7 @@
       ],
       "repo": "bartowski/nvidia_Nemotron-3-Nano-30B-A3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 22.96,
       "speed": 100,
       "total_params_b": 0,
@@ -8702,6 +9319,7 @@
       ],
       "repo": "openbmb/MiniCPM5-1B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.64,
       "speed": 0,
       "total_params_b": 0,
@@ -8837,6 +9455,7 @@
       ],
       "repo": "mradermacher/Nanbeige4.1-3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.28,
       "speed": 0,
       "total_params_b": 0,
@@ -9009,6 +9628,7 @@
       ],
       "repo": "bartowski/LiquidAI_LFM2.5-2.6B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1.57,
       "speed": 0,
       "total_params_b": 0
@@ -9203,6 +9823,7 @@
       ],
       "repo": "unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 60.87,
       "speed": 73,
       "total_params_b": 0,
@@ -9389,6 +10010,7 @@
       ],
       "repo": "unsloth/Falcon-H1R-7B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.28,
       "speed": 0,
       "total_params_b": 0,
@@ -9556,6 +10178,7 @@
       ],
       "repo": "bartowski/google_gemma-4-E2B-it-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 3.22,
       "speed": 0,
       "total_params_b": 0,
@@ -9664,6 +10287,7 @@
       ],
       "repo": "seanbailey518/Step3-VL-10B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.68,
       "speed": 0,
       "total_params_b": 0,
@@ -9850,6 +10474,7 @@
       ],
       "repo": "unsloth/Llama-3.3-70B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 39.6,
       "speed": 88,
       "total_params_b": 0,
@@ -10045,6 +10670,7 @@
       ],
       "repo": "unsloth/ERNIE-4.5-300B-A47B-PT-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 167.78,
       "speed": 0,
       "total_params_b": 0
@@ -10084,6 +10710,7 @@
       ],
       "repo": "tomlawrence/NVIDIA-Nemotron-Nano-12B-v2-VL-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 22.96,
       "speed": 0,
       "total_params_b": 0,
@@ -10190,6 +10817,7 @@
       ],
       "repo": "second-state/NVIDIA-Nemotron-Nano-9B-v2-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 6.08,
       "speed": 18,
       "total_params_b": 0,
@@ -10284,6 +10912,7 @@
       ],
       "repo": "DhruvalLabs/Kimi-Linear-48B-A3B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 27.66,
       "speed": 0,
       "total_params_b": 0,
@@ -10433,6 +11062,7 @@
       ],
       "repo": "ThomasBaruzier/Meta-Llama-3.1-405B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 226.38,
       "speed": 0,
       "total_params_b": 0
@@ -10596,6 +11226,7 @@
       ],
       "repo": "unsloth/LFM2.5-8B-A1B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.96,
       "speed": 0,
       "total_params_b": 0
@@ -10684,6 +11315,7 @@
       ],
       "repo": "DevQuasar-11/inclusionAI.Ring-flash-2.0-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 58.14,
       "speed": 0,
       "total_params_b": 0,
@@ -10869,6 +11501,7 @@
       ],
       "repo": "unsloth/Olmo-3.1-32B-Think-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 18.14,
       "speed": 0,
       "total_params_b": 0
@@ -11050,6 +11683,10 @@
       "runnable": true,
       "size_gb": 62.52,
       "speed": 55,
+
+      "runnable_mainline": true,
+      "size_gb": 125.81,
+      "speed": 62,
       "total_params_b": 0,
       "vl": 128
     },
@@ -11210,6 +11847,7 @@
       ],
       "repo": "unsloth/Qwen3.5-2B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1.19,
       "speed": 0,
       "total_params_b": 0,
@@ -11269,6 +11907,7 @@
       ],
       "repo": "Sumitc13/sarvam-30b-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 18.23,
       "speed": 0,
       "total_params_b": 0,
@@ -11454,6 +12093,7 @@
       ],
       "repo": "unsloth/Olmo-3.1-32B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 18.14,
       "speed": 0,
       "total_params_b": 0
@@ -11549,6 +12189,7 @@
       ],
       "repo": "unsloth/r1-1776-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 376.65,
       "speed": 0,
       "total_params_b": 0,
@@ -11716,6 +12357,7 @@
       ],
       "repo": "bartowski/microsoft_Phi-4-mini-instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.32,
       "speed": 45,
       "total_params_b": 0
@@ -11877,6 +12519,7 @@
       ],
       "repo": "unsloth/Qwen3.5-0.8B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.5,
       "speed": 0,
       "total_params_b": 0,
@@ -12063,6 +12706,7 @@
       ],
       "repo": "bartowski/NousResearch_DeepHermes-3-Mistral-24B-Preview-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 13.35,
       "speed": 0,
       "total_params_b": 0,
@@ -12249,6 +12893,7 @@
       ],
       "repo": "bartowski/ai21labs_AI21-Jamba-Large-1.7-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 223.92,
       "speed": 0,
       "total_params_b": 0
@@ -12441,6 +13086,7 @@
       ],
       "repo": "unsloth/granite-4.0-h-small-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 18.23,
       "speed": 15,
       "total_params_b": 0
@@ -12626,6 +13272,7 @@
       ],
       "repo": "unsloth/Ministral-3-14B-Reasoning-2512-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 7.67,
       "speed": 71,
       "total_params_b": 0,
@@ -12690,6 +13337,7 @@
       ],
       "repo": "grapeV-ai/Qwen3-Omni-30B-A3B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 17.28,
       "speed": 97,
       "total_params_b": 0,
@@ -12884,6 +13532,7 @@
       ],
       "repo": "bartowski/LiquidAI_LFM2-24B-A2B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 13.44,
       "speed": 0,
       "total_params_b": 0
@@ -12954,6 +13603,7 @@
       ],
       "repo": "DevQuasar-2/microsoft.phi-4-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 8.43,
       "speed": 40,
       "total_params_b": 0
@@ -13127,6 +13777,7 @@
       ],
       "repo": "bartowski/ai21labs_AI21-Jamba-Reasoning-3B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1.8,
       "speed": 0,
       "total_params_b": 0
@@ -13204,6 +13855,7 @@
       ],
       "repo": "unsloth/reka-flash-3-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 12.68,
       "speed": 94,
       "total_params_b": 0,
@@ -13389,6 +14041,7 @@
       ],
       "repo": "unsloth/Olmo-3-7B-Think-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.16,
       "speed": 0,
       "total_params_b": 0
@@ -13574,6 +14227,7 @@
       ],
       "repo": "unsloth/Ministral-3-8B-Reasoning-2512-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.84,
       "speed": 100,
       "total_params_b": 0,
@@ -13759,6 +14413,7 @@
       ],
       "repo": "unsloth/Olmo-3-7B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.16,
       "speed": 0,
       "total_params_b": 0
@@ -13900,6 +14555,7 @@
       ],
       "repo": "unsloth/LFM2.5-1.2B-Thinking-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.68,
       "speed": 0,
       "total_params_b": 0
@@ -14091,6 +14747,7 @@
       ],
       "repo": "bartowski/ai21labs_AI21-Jamba-Mini-1.7-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 29.04,
       "speed": 0,
       "total_params_b": 0
@@ -14232,6 +14889,7 @@
       ],
       "repo": "unsloth/LFM2.5-1.2B-Instruct-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.68,
       "speed": 0,
       "total_params_b": 0
@@ -14418,6 +15076,7 @@
       ],
       "repo": "unsloth/Granite-4.0-H-1B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.84,
       "speed": 0,
       "total_params_b": 0
@@ -14513,6 +15172,7 @@
       ],
       "repo": "DevQuasar/google.gemma-3-270m-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.24,
       "speed": 0,
       "total_params_b": 0,
@@ -14698,6 +15358,7 @@
       ],
       "repo": "unsloth/Apertus-70B-Instruct-2509-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 40.72,
       "speed": 0,
       "total_params_b": 0
@@ -14885,6 +15546,7 @@
       ],
       "repo": "unsloth/granite-4.0-micro-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 1.96,
       "speed": 0,
       "total_params_b": 0
@@ -14932,6 +15594,7 @@
       ],
       "repo": "mu2solutions/Molmo2-8B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.68,
       "speed": 0,
       "total_params_b": 0,
@@ -15118,6 +15781,7 @@
       ],
       "repo": "unsloth/Ministral-3-3B-Reasoning-2512-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.0,
       "speed": 100,
       "total_params_b": 0,
@@ -15260,6 +15924,7 @@
       ],
       "repo": "unsloth/LFM2.5-VL-1.6B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.68,
       "speed": 0,
       "total_params_b": 0
@@ -15404,6 +16069,7 @@
       ],
       "repo": "unsloth/granite-4.0-h-350m-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.21,
       "speed": 0,
       "total_params_b": 0
@@ -15499,6 +16165,7 @@
       ],
       "repo": "DevQuasar/CohereLabs.tiny-aya-global-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.0,
       "speed": 0,
       "total_params_b": 0,
@@ -15684,6 +16351,7 @@
       ],
       "repo": "unsloth/Apertus-8B-Instruct-2509-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 4.71,
       "speed": 0,
       "total_params_b": 0
@@ -15843,6 +16511,7 @@
       ],
       "repo": "unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 2.7,
       "speed": 0,
       "total_params_b": 0,
@@ -16007,6 +16676,7 @@
       ],
       "repo": "bartowski/K2-Horizon-0.9B-GGUF",
       "runnable": true,
+      "runnable_mainline": true,
       "size_gb": 0.64,
       "speed": 0,
       "total_params_b": 0,
