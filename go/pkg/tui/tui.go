@@ -2754,7 +2754,7 @@ func discoverModels(dir string) []ModelItem {
 	var items []ModelItem
 	seen := make(map[string]bool)
 
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(modelstore.WalkRoot(dir), func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

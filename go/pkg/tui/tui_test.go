@@ -2495,3 +2495,24 @@ func TestVersionStatusArrivingDuringLoadingReachesStartScreen(t *testing.T) {
 		t.Fatalf("status lost across loading (screen %v):\n%s", ready.screen, view)
 	}
 }
+
+// A models directory that is itself a symlink lists its models, under the
+// configured path.
+func TestDiscoverModelsInASymlinkedModelDir(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "disk")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "Qwen3.8-27B-UD-Q5_K_S.gguf"), []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "models")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	items := discoverModels(link)
+	if len(items) != 1 || !strings.HasPrefix(items[0].Path, link+string(os.PathSeparator)) {
+		t.Fatalf("discovered %+v, want one model under %s", items, link)
+	}
+}
