@@ -3837,3 +3837,27 @@ instead of a 755 MiB stand-in and still shows the walk converging in one derate
 while the slot rule moves the deficit. Core gate uncached: pass.
 
 Unproven: live rerun on e40c127 (p1r2) pending at time of writing.
+
+## MATRIX — 4070 + 32 GiB and CPU + 16 GiB on e40c127 — 2026-10-13
+
+Candidate `v3.2.10-174-ge40c127` (launcher sha256 ee64122f..., ik backend
+8269d74c...), installed as above; fresh cache per cell; profile flags repeated
+on every launch; tasks are Claude Code `-p` runs checked by unittest oracles.
+The owner's ComfyUI held 8-22 GB on the 3090 Ti throughout (not used by these
+cells); its RAM growth kept host memory from returning to the pre-launch
+baseline, so stops on those runs include ggrun's bounded 20 s release wait.
+Evidence `2tb-disk/ggrun-accept-20261013-evidence/p2/`.
+
+| cell | outcome |
+|---|---|
+| 4070 + 32 GiB, Best overall + Smartest: Qwen3.8-27B UD-IQ2_XXS | PASS: ready 256 s, ctx 76,800 (1 slot), memory.max 32 GiB, CUDA_VISIBLE_DEVICES=0; calc 231 / textstats 137 / inventory 85 s; decode 31.2 tok/s (predicted 46); relaunch ready 50 s, ledger 470 s |
+| 4070 + 32 GiB, Fastest: Gemma 4 26B A4B IQ4_XS | PASS: ready 225 s, ctx 74,752; calc 161 / textstats 153 / inventory 168 s; decode 30.0 (predicted 49.5), cold prefill 265 tok/s; relaunch ready 8 s, ledger 206 s |
+| CPU + 16 GiB, Best overall + Fastest: Qwen3.6-35B-A3B UD-IQ2_XXS | first launch: ready 206 s, ctx 108,544, memory.max 16 GiB, CUDA_VISIBLE_DEVICES=-1; calc 323 / textstats 147 s correct; inventory TIMEOUT at 3,600 s: the server answered a request every ~15 s, each 119 decoded tokens at ~10.8 tok/s, prompt growing to 66k tokens, i.e. the model repeated a tool call (model loop, not a serving stall); relaunch ready 15 s, ledger 34 turns correct in 586 s, decode 15.3 tok/s |
+
+The 4070 contexts are lower than the October 9 opt-in run (112,640) because a
+fresh install now reserves the guard's 1,024 MiB of unmeasured CUDA overhead.
+On the ik path dense launches are not oracle-admitted, so
+`recordMeasuredLaunchProbes` never measures that overhead for them (the
+log-based source over-recorded 1,775 vs ~600 MiB on MiMo, which is why it is
+MoE/oracle-only): such a plan keeps the 1,024 MiB reserve on later launches.
+Follow-up, not in this change: a dense-safe measurement of CUDA overhead.
