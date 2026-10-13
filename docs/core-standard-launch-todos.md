@@ -4007,3 +4007,22 @@ card: 231 s at ctx 76,800 fully on GPU). The reviewer size is not the main
 lever; the planner's 262k context with host-resident KV is. Whether Claude
 mode should trade context for GPU-resident KV on tight cards is an owner
 decision (invariant 3).
+
+## PUBLIC v3.2.11 — one-command install and prior-release update — 2026-10-13
+
+Release published 23:22 UTC (run 38473930986; Linux CPU/CUDA/Vulkan and
+Windows assets; macOS failed, non-blocking). `releases/latest` resolves to
+v3.2.11. Isolated homes under `/var/tmp`, model Qwen3.5-4B Q4_K_M, evidence
+`accept-20261013/evidence-public/`.
+
+Fresh: the README command (`main/setup.sh`) installed in 140 s. It builds the
+launcher from main (`bfb2f4e`, docs-only after the tag) and takes the release
+backends: installed ik `llama-server` sha256 `fc824e97...` equals the v3.2.11
+CUDA asset's. Launch, generation, streaming, stop, port released: PASS.
+
+Update: a home pinned with `LLM_SETUP_REF=v3.2.10` keeps a detached
+single-tag checkout; `ggrun update` reports "Already up to date" and only
+prints that v3.2.11 exists. A default v3.2.10 install tracks main; with that
+checkout at af150b2, `ggrun update` moved the launcher v3.2.10 ->
+v3.2.11-3-gbfb2f4e in 9 s and the model launch passed. The finishing
+v3.2.10 process still printed "newer version available" (cosmetic).
