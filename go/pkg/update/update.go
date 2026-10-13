@@ -317,12 +317,10 @@ func Check() (*Result, error) {
 		return nil, fmt.Errorf("decode release: %w", err)
 	}
 	latest := rel.TagName
-	// Simple semver comparison: strip v prefix, split by dots, compare numeric parts
-	hasUpdate := compareVersions(current, latest) < 0
 	return &Result{
 		Current:   current,
 		Latest:    latest,
-		HasUpdate: hasUpdate,
+		HasUpdate: releaseIsNewer(current, latest),
 		URL:       rel.HTMLURL,
 	}, nil
 }
@@ -1778,6 +1776,20 @@ func versionPartParts(s string) (base int, ahead bool, ok bool) {
 		return 0, false, false
 	}
 	return n, ahead, true
+}
+
+// releaseIsNewer reports whether the latest release tag is newer than this
+// build. A build stamped with a bare commit (the installer's shallow source
+// checkout has no tags to describe) cannot be ordered against a tag; ranking it
+// below every release offered each fresh source install an "update" to the
+// release it already contains. Source builds are compared with their upstream
+// checkout instead (buildBehindUpstream, repoBehind).
+func releaseIsNewer(current, latest string) bool {
+	major := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(current), "v"), ".", 2)[0]
+	if _, _, ok := versionPartParts(major); !ok {
+		return false
+	}
+	return compareVersions(current, latest) < 0
 }
 
 func compareVersions(a, b string) int {
