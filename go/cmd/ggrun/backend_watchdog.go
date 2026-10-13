@@ -196,6 +196,10 @@ type servingWatch struct {
 	// onFatal, when set, runs once per fatal line while the backend is still
 	// running, before it can be stopped.
 	onFatal func()
+	// onRecover, when set, runs when /health answers again after a fatal line:
+	// whatever onFatal sampled describes a failure the backend survived, not a
+	// later one it dies of between ticks.
+	onRecover func()
 }
 
 var defaultServingWatch = servingWatch{interval: 2 * time.Second, probeTimeout: 5 * time.Second, confirmAfter: 20 * time.Second}
@@ -247,6 +251,9 @@ func waitForShutdownCrashOrWedge(b servingBackend, sigCh <-chan os.Signal, healt
 		}
 		if backendAnswers(client, healthURL) {
 			fatal = ""
+			if w.onRecover != nil {
+				w.onRecover()
+			}
 			continue
 		}
 		if ticks, ok := b.CPUTicks(); !ok || ticks != lastTicks {

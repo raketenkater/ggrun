@@ -7464,6 +7464,7 @@ func cmdLaunch(args []string) {
 		failedFree = nil
 		watch := defaultServingWatch
 		watch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps)) }
+		watch.onRecover = func() { failedFree = nil }
 		crashed := waitForShutdownCrashOrWedge(processWatch{p}, sigCh, backendBaseURL(req)+"/health", watch)
 		// File what this backend measured before any crash handling reads the
 		// reserve, so an abort's estimate can supersede it.

@@ -152,6 +152,10 @@ func TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling(t *testing.T) {
 		"another function":               {strings.Replace(b2CublasCeilingLog, "ggml_cuda_op_mul_mat_cublas", "ggml_cuda_flash_attn_ext", 1), atCeiling},
 		"prompt pastes a full device":    {insertBeforeFailure(b2CublasServingLog, pastedBackendLogRequest), map[int]int{0: 1798}},
 		"prompt pastes, nothing sampled": {insertBeforeFailure(b2CublasServingLog, pastedBackendLogRequest), nil},
+		// A full device does not turn every CUDA failure into an OOM: a grown
+		// pool sits this close to the ceiling on healthy runs too.
+		"illegal access at the ceiling":       {strings.Replace(b2CublasCeilingLog, cublasUnsupportedValue, "CUDA error: an illegal memory access was encountered", 1), atCeiling},
+		"cuBLAS not supported at the ceiling": {strings.Replace(b2CublasCeilingLog, cublasUnsupportedValue, "CUDA error: operation not supported", 1), atCeiling},
 	} {
 		if _, reserve, _, suspect, ok := runtimeLogCUDAOOM(c.log, caps, model, nil, c.free); ok {
 			t.Errorf("%s: cuBLAS error taken for an OOM (reserve %d MiB, %q)", name, reserve, suspect)

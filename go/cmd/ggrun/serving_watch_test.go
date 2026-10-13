@@ -154,3 +154,35 @@ func TestServingWatchStillHonoursShutdownAndExit(t *testing.T) {
 		t.Fatal("an exited backend must end serving as a crash")
 	}
 }
+
+// A backend that prints a fatal line and then answers /health again survived
+// it. The sample taken for that line must be dropped, or a later failure the
+// backend dies of between ticks would be judged by a stale reading.
+func TestServingWatchDropsTheSampleOfASurvivedFailure(t *testing.T) {
+	b := newFakeBackend()
+	b.appendLog("srv  update_slots: all slots are idle\n")
+	var mu sync.Mutex
+	sampled := false
+	w := fastServingWatch
+	w.onFatal = func() { mu.Lock(); sampled = true; mu.Unlock() }
+	w.onRecover = func() { mu.Lock(); sampled = false; mu.Unlock() }
+	done := make(chan bool, 1)
+	go func() { done <- waitForShutdownCrashOrWedge(b, make(chan os.Signal, 1), answeringHealth(t), w) }()
+	b.appendLog(ikCublasAbort)
+	time.Sleep(100 * time.Millisecond)
+	// The backend now exits before the watch sees another fatal line.
+	_ = b.Stop()
+	select {
+	case crashed := <-done:
+		if !crashed {
+			t.Fatal("an exited backend must end serving as a crash")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exited backend was not noticed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sampled {
+		t.Fatal("the sample of a failure the backend survived was kept for its later exit")
+	}
+}
