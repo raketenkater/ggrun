@@ -3900,3 +3900,25 @@ backend for the qwen3next family; not hidden: it is reported as such.
 Also learned today: the 4,096-token-capped replay reply and the stalled
 cells show Claude Code's 32,000-token max_tokens lets a corrupted stream run
 for 30+ minutes; a server-side output cap would bound it (follow-up).
+
+## MATRIX — full host and 3090 Ti + 128 GiB on f21898d — 2026-10-13
+
+Candidate `v3.2.10-181-gf21898d` (launcher fb4e09c2..., same ik backend
+6e15634f...). Evidence `2tb-disk/ggrun-accept-20261013-evidence/p4/`.
+
+| cell | outcome |
+|---|---|
+| full host, `--claude-code` default (1 slot now, companion) | PASS: ready 290 s, 262,144 tokens; calc 452 / textstats 184 / inventory 478 s run at once (makespan 478 s); decode 29.8, cold prefill 1,350 tok/s; relaunch ready 202 s, ledger 400 s |
+| full host Best overall Qwen3.8-27B UD-Q5_K_S, spot check on the final launcher | PASS: ready 121 s; 116 / 82 / 98 s; decode 30.7 |
+| full host Fastest Qwen3.6-35B-A3B UD-IQ4_XS | PASS: ready 315 s, 262,144; 38 / 38 / 43 s; prefill 3,645, decode 80.2; relaunch 13 s, ledger 108 s |
+| 3090 Ti + 128 GiB Best overall Qwen3.8-27B UD-Q5_K_S | PASS: memory.max 137,438,953,472, CUDA_VISIBLE_DEVICES=1; ready 175 s, 122,880; 64 / 79 / 76 s; decode 34.7; relaunch 6 s, ledger 256 s |
+| 3090 Ti + 128 GiB Fastest Qwen3.6-35B-A3B UD-IQ4_XS | PASS: ready 106 s, 262,144; 23 / 20 / 1,338 s (inventory: a coherent 12,024-token reasoning turn, one slot); decode 92.5; relaunch 9 s, ledger 99 s |
+
+Acquisition route (4ce1f41): the GLM-5.3-Flash (glm5-next) first launch with
+LLM_ASSUME_YES took open-PR discovery and started building
+`willweimike/llama.cpp` (PR #30268, branch fix-glm) although mainline
+registers glm5-next and `recommend` had promised a mainline build. Stopped
+before the build finished (nothing registered). Now, when the catalog's
+runnable_mainline stamp covers the architecture, the mainline build comes
+before discovery (`TestUnsupportedArchRoutesPreferMainlineWhenItRegisters`).
+The rerun clones ggml-org/llama.cpp master. Core gate uncached: pass.

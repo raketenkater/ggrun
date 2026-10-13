@@ -14,10 +14,13 @@
 ### Changed
 
 - Recommendations use complete model artifacts (MiMo V2.6 repaired; draft heads
-  and companion files excluded). Models the installed backends run are listed
-  first in every category, and Best overall puts models predicted below
-  6 tok/s after usable ones. Rows that a default launch serves on the Vulkan
-  build on an NVIDIA host are marked `+`.
+  and companion files excluded, also from a fetched catalog). Smartest ranks by
+  capability across models whose backend the first launch builds (`+`); Best
+  overall and Fastest list models that run now first, and Best overall puts
+  models predicted below 6 tok/s after usable ones. Rows a default launch
+  serves on Vulkan on an NVIDIA host are marked `^`.
+- Claude Code mode serves Qwen3.5-3.8-family (SSM layout) models on one slot by
+  default; `--parallel` still overrides.
 - The backend's context shift is off for every model; a full context returns
   an error instead of silently dropping half the conversation.
 - A reviewed fork recipe is offered before open pull-request discovery.
@@ -43,6 +46,13 @@
 - `ggrun download` uses the installed downloader, not one in the working
   directory.
 - Speed estimates for dense models that spill to system RAM.
+- Dense multi-GPU plans reserve the same unmeasured CUDA overhead as the
+  allocation guard; Claude Code mode on a fresh install starts again.
+- ik_llama layer splits are planned by bytes, as the backend assigns them.
+- A cuBLAS error counts as out of memory only from a VRAM sample taken while
+  the failed backend still holds its memory.
+- A `--cpu` launch builds a CPU backend for an unsupported architecture.
+- A models directory that is itself a symlink lists its models.
 
 ### Known issues
 
