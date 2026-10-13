@@ -3726,3 +3726,68 @@ candidate is this branch's head):
    --parallel 4, three GPUs, automatic context. Pass: plan identical to
    baseline; if a preflight derates, the derate count is not higher than
    baseline's.
+
+## HELD FIXES — integration and review findings resolved offline — 2026-10-13
+
+Integrated `wip/cublas-oom-evidence` (48391d3), `wip/smartest-ranking`
+(51804cd) and `wip/ik-byte-split` (4ca390a) onto 9803807 as
+`integrate/held-fixes`. NVIDIA module and userspace are both 580.178.04 after
+the owner's reboot; NVML and all three cards answer.
+
+**ik byte split, open high finding.** `ikDenseDevices` priced FirmMB with the
+measured compute buffer, 0 when nothing was measured, so the firm-capacity
+fallback counted unmeasured compute as zero. Under `RequireMeasuredBuffers`
+(exact preflight) the cold term is already 0, so the fallback only changed the
+automatic-context search, where it grew the 4-slot `--claude-code` context
+603,136 -> 622,592 and left CUDA1 636 MiB (about 755 MiB needed). Fix
+(9035b70): `Options.AutomaticContextCandidate`, set by the search; such a
+candidate's firm capacity is its cold capacity. Explicit contexts keep the
+fallback, and exact preflight decides them. Invariant:
+`TestIKAutoContextKeepsTheColdReserveOnEveryCard` (auto ctx 603,136, every
+used card keeps its 1,024 MiB cold reserve). Mutation: disabling the branch
+gives 622,592 with CUDA1 388 MiB into the reserve (the finding exactly).
+
+**cuBLAS classification.** The serving watch sampled VRAM at a fatal line but
+kept the sample when /health answered again, so a later failure the backend
+died of between ticks was judged by a stale reading. Fix (a1e24c6):
+`servingWatch.onRecover` drops it. Tests: survived failure then exit keeps no
+sample (mutation fails it); "illegal memory access" and "operation not
+supported" at 2 MiB free are not OOMs. Policy: a cuBLAS INVALID_VALUE at <= 64
+MiB free stays a *suspected* OOM. It records an estimated reserve; estimates
+never compound and any later measurement replaces them, even downward
+(`recordRuntimeGraphGrowth`), so a wrong suspicion costs at most the bounded
+recovery reloads and heals on the next measured run. A web search found no
+source tying INVALID_VALUE to allocation failure; healthy runs reached 16-58
+MiB free, so the sample is necessary evidence, not proof.
+
+**Recommendation policy.** (765c96b) A `--cpu` launch built CUDA (full host
+caps) for an architecture build while `recommend --cpu` offered the build
+without nvcc; it now builds the CPU backend, as a CPU-only machine does.
+(5a2ad80) verify-recommended-download.py failed closed against the published
+v3.2.10 launcher, whose rows carry neither status key (published-mode Windows
+E2E); a tagged release <= v3.2.10 reads them as `legacy`, recorded in the
+evidence; a build past a tag still fails closed. (72f8f2a, 7e9d4e2) Best
+overall and Fastest list needs_setup rows and Vulkan-served rows after rows
+that run as estimated now; Smartest keeps capability order. Evidence:
+matrix15 MiMo Q2_K on Vulkan (46 min to ready, 2.9 tok/s vs 10.5 predicted,
+ledger timeout). A dense GPU-to-RAM spill decodes at efficiency 0.40, from
+the one measurement (Qwen3.8 IQ3_XXS on a 4070, 4.2-4.8 tok/s, predicted 8.2
+at 0.70); the 4070 + 32 GiB pick becomes Qwen3.8 UD-IQ2_XXS resident, which
+passed on the #2356-patched backend (October 9, matrix12).
+
+Catalog refreshed 2026-10-13T07:35:29Z (687f001; 114 rows, Qwen3.8-Flash-Next
+moved to bartowski, Ministral 3 8B Instruct replaces Reasoning). Core gate
+(uncached) passed on the integration head before the recommender commits.
+
+Provisional picks (embedded catalog, update checks off, candidate installed by
+`setup-linux.sh` auto mode from a local bundle dir: CUDA ik 1fddd12 + #2356,
+Vulkan/CPU d2462f8): full host Qwen3.8-27B UD-Q5_K_S / GLM-5.3 UD-IQ2_M
+(Vulkan) / Qwen3.6-35B-A3B UD-IQ4_XS; 4070 + 32 GiB Qwen3.8 UD-IQ2_XXS /
+same / Gemma 4 26B A4B IQ4_XS; 3090 Ti + 128 GiB Qwen3.8 UD-Q5_K_S /
+GLM-5.3-Flash UD-IQ3_XXS (needs_setup) / Qwen3.6 UD-IQ4_XS; CPU + 16 GiB
+Qwen3.6 UD-IQ2_XXS / Qwen3.8 UD-IQ2_XXS / Qwen3.6 UD-IQ2_XXS. Not final until
+recaptured on the final installed candidate.
+
+Unproven: all of the above is offline. Live A/B, exact admission, Claude mode
+with companion, explicit 4 slots versus the 1-slot control, the cuBLAS
+sampling path and the build route remain.
