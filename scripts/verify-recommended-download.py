@@ -14,6 +14,7 @@ Prints MODEL=<path> on success (append it to $GITHUB_ENV in CI).
 """
 import argparse
 import json
+import re
 import os
 import subprocess
 import sys
@@ -25,17 +26,36 @@ def run(cmd, timeout):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def backend_status(row):
+# The last release whose recommend --json carries no backend status at all.
+LEGACY_STATUS_RELEASE = (3, 2, 10)
+
+
+def launcher_release(version_text):
+    """(major, minor, patch) of a tagged release's `--version`, or None.
+
+    A build past a tag ("v3.2.10-126-gabc1234") is not that release.
+    """
+    m = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)(-\d+-g[0-9a-f]+)?", version_text or "")
+    if not m or m.group(4):
+        return None
+    return tuple(int(x) for x in m.groups()[:3])
+
+
+def backend_status(row, legacy=False):
     """BackendStatus, or the older launchers' NeedsBackendBuild equivalent.
 
-    The published-release E2E runs this script against a launcher that predates
-    BackendStatus. A row carrying neither key fails closed: a renamed field must
-    not let every row through.
+    The published-release E2E runs this script against the latest release,
+    whose rows carry neither key; `legacy` (a launcher at or before
+    LEGACY_STATUS_RELEASE) reads such a row as "legacy", which ranks as
+    unprobed. Otherwise a row carrying neither key fails closed: a renamed
+    field must not let every row through.
     """
     if "BackendStatus" in row:
         return row["BackendStatus"]
     if "NeedsBackendBuild" in row:
         return "needs_setup" if row["NeedsBackendBuild"] else "unknown"
+    if legacy:
+        return "legacy"
     raise RuntimeError(f"recommend --json row has no backend status: {row.get('repo')}")
 
 
@@ -58,6 +78,11 @@ def main():
         if r.returncode != 0:
             raise RuntimeError(f"recommend failed: {r.stderr[-800:]}")
         doc = json.loads(r.stdout)
+        v = run([a.launcher, "--version"], 60)
+        release = launcher_release(v.stdout + v.stderr)
+        rec["launcher_version"] = (v.stdout + v.stderr).strip()[:200]
+        legacy = release is not None and release <= LEGACY_STATUS_RELEASE
+        rec["backend_status_source"] = "legacy launcher (no status keys)" if legacy else "recommend --json"
         (out / "recommend.json").write_text(json.dumps(doc, indent=1))
         rec["planning_hardware"] = {k: doc["planning_hardware"].get(k) for k in ("os", "arch", "ram", "gpus")}
         rows = doc["categories"].get(a.category) or []
@@ -80,8 +105,8 @@ def main():
             # Select a row ready now explicitly; the ranking no longer demotes
             # rows whose backend the first launch builds. "unknown" means the
             # probe could not read a backend, which ranks as if unprobed.
-            status = backend_status(row)
-            if status not in ("ready", "unknown"):
+            status = backend_status(row, legacy)
+            if status not in ("ready", "unknown", "legacy"):
                 rec.setdefault("skipped_for_runner_limits", []).append(
                     {"repo": row["repo"], "quant": quant["name"], "reason": f"backend {status}"})
                 continue
