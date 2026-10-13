@@ -193,8 +193,22 @@ func offerAcceleratedArchBuildWith(req *launchRequest, model *placement.ModelPro
 }
 
 func offerAcceleratedArchBuild(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities, assumeYes bool) bool {
+	caps, accel := archBuildTarget(req, caps, defaultAccel())
 	return offerAcceleratedArchBuildWith(req, model, caps, assumeYes, os.Stdin, os.Stderr, stdinIsTerminal(),
-		defaultAccel(), addBackendRecipe)
+		accel, addBackendRecipe)
+}
+
+// archBuildTarget is the hardware an architecture build is for. A --cpu launch
+// serves on no GPU, so it builds the CPU backend, as on a machine without one:
+// building CUDA for it needed nvcc although `recommend --cpu` (which sees no
+// GPU) offered the row as buildable without it.
+func archBuildTarget(req *launchRequest, caps *detect.Capabilities, accel string) (*detect.Capabilities, string) {
+	if req == nil || !req.CPUMode || caps == nil {
+		return caps, accel
+	}
+	cpu := *caps
+	cpu.GPUs = nil
+	return &cpu, "cpu"
 }
 
 // offerAcceleratedMainlineWith asks (or, headless, explains) before building a

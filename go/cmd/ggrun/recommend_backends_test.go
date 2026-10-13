@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
@@ -120,5 +121,27 @@ func TestRecommendationMarkerPerBackendStatus(t *testing.T) {
 		if got != "" && recommendationFootnotes[got] == "" {
 			t.Fatalf("marker %q has no footnote", got)
 		}
+	}
+}
+
+// `recommend --cpu` sees no GPU, so it offers a build without nvcc; the --cpu
+// launch on the same NVIDIA host must then build the CPU backend, not CUDA.
+func TestCPUOnlyBuildRouteMatchesTheLaunchBuild(t *testing.T) {
+	host := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "NVIDIA GeForce RTX 3090 Ti"}}}
+	recommendCaps := &detect.Capabilities{}
+	if !buildCanStart(true, hostHasNVIDIAGPU(recommendCaps), "cpu") {
+		t.Fatal("recommend --cpu offers no build route without nvcc")
+	}
+	caps, accel := archBuildTarget(&launchRequest{CPUMode: true}, host, "cpu")
+	if r := acceleratedArchBuildRecipe("k2-horizon", caps, accel); r == nil || r.Accel != "cpu" {
+		t.Fatalf("--cpu launch builds %+v, want the CPU backend recommend offered", r)
+	}
+	if len(host.GPUs) != 1 {
+		t.Fatal("archBuildTarget changed the detected capabilities")
+	}
+	// A GPU launch on the same host still builds CUDA.
+	caps, accel = archBuildTarget(&launchRequest{}, host, "cpu")
+	if r := acceleratedArchBuildRecipe("k2-horizon", caps, accel); r == nil || r.Accel != "cuda" {
+		t.Fatalf("GPU launch builds %+v, want CUDA", r)
 	}
 }
