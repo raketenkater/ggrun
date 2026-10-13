@@ -52,6 +52,8 @@
 - A cuBLAS error counts as out of memory only from a VRAM sample taken while
   the failed backend still holds its memory.
 - A `--cpu` launch builds a CPU backend for an unsupported architecture.
+- An architecture current mainline llama.cpp supports is built from mainline
+  before open pull-request discovery is tried.
 - A models directory that is itself a symlink lists its models.
 
 ### Known issues
