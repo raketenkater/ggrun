@@ -36,6 +36,9 @@ type backendWatch struct {
 	// stopGrace bounds the wait for the step to return once the backend has
 	// been stopped.
 	stopGrace time.Duration
+	// onFatal, when set, runs on a fatal line before the backend is stopped,
+	// while it still holds its memory.
+	onFatal func()
 }
 
 var defaultBackendWatch = backendWatch{
@@ -108,6 +111,9 @@ func runWatchingBackend(b watchedBackend, healthURL string, w backendWatch, step
 			cause = "backend process exited"
 		} else if line := fatalBackendLine(b.Log()); line != "" {
 			cause = "backend reported a fatal error: " + line
+			if w.onFatal != nil {
+				w.onFatal()
+			}
 		} else if backendAnswers(client, healthURL) {
 			silentSince = time.Time{}
 		} else {
@@ -187,6 +193,9 @@ type servingWatch struct {
 	// confirmAfter is how long, after a fatal line, /health must stay silent
 	// with no CPU progress before the backend is stopped.
 	confirmAfter time.Duration
+	// onFatal, when set, runs once per fatal line while the backend is still
+	// running, before it can be stopped.
+	onFatal func()
 }
 
 var defaultServingWatch = servingWatch{interval: 2 * time.Second, probeTimeout: 5 * time.Second, confirmAfter: 20 * time.Second}
@@ -232,6 +241,9 @@ func waitForShutdownCrashOrWedge(b servingBackend, sigCh <-chan os.Signal, healt
 			}
 			fatalSince = time.Now()
 			lastTicks, _ = b.CPUTicks()
+			if w.onFatal != nil {
+				w.onFatal()
+			}
 		}
 		if backendAnswers(client, healthURL) {
 			fatal = ""

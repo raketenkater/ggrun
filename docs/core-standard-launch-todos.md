@@ -3317,3 +3317,114 @@ tested with a mocked run only; the Windows E2E has not exercised it. The
 live harness still hashes the wrapper. Every candidate cell above, including
 the matrix3..15 recommender cells in GO-NO-GO.md, needs a rerun on the final
 candidate before it identifies the bytes tested.
+
+## CUBLAS OOM EVIDENCE — an unsupported value is an OOM only at the ceiling — 2026-10-11
+
+Evidence: senior review 2026-10-08 (P2). `cublasWorkspaceOOM` read cuBLAS "an
+unsupported value or parameter" in `ggml_cuda_op_mul_mat_cublas` as a
+size-less OOM from the text alone. cuBLAS reports allocation failure as its own
+status ([CUBLAS_STATUS_ALLOC_FAILED](https://docs.nvidia.com/cuda/cublas/index.html));
+this line is INVALID_VALUE, which non-memory causes raise too. Every recorded
+failure (accept-20261007 logs, read-only) by the backend's own accounting
+(free at load minus that device's buffers) and ggrun's serving recorder:
+
+| log | device | free at load | placed | left | measured growth | at failure |
+|---|---|---:|---:|---:|---:|---:|
+| growth-learning-b2.first, B2 first (canary) | CUDA0 4070 | 11,710 | 11,420 | 290 | — | 290 |
+| B2-q36-35b-learned #1 (serving) | CUDA0 | 11,710 | 11,206 | 504 | 396 | 108 |
+| B2-q36-35b-learned #2 (serving, KV on host) | CUDA0 | 11,710 | 10,396 | 1,314 | 1,146 | 168 |
+| B2-q36-35b-warm (serving, KV on host) | CUDA0 | 11,710 | 9,912 | 1,798 | 1,672 | 126 |
+| A1 MiniMax-M3 (canary, KV on host) | CUDA1 3090 Ti | 23,719 | 21,557 | 2,162 | not sampled | — |
+
+(MiB.) The harness's nvidia-smi put the B2 pool at 11,871/11,873 and A1's
+CUDA1 at 24,110/24,112 when they died; ggrun itself never sees those samples.
+
+Change (89d92d7): the cuBLAS line is a suspected OOM only when that device's
+headroom is <= 512 MiB: free memory from the backend's "using device CUDAn -
+N MiB free" line, minus every CUDAn buffer of the same load (lines before the
+load-complete marker only, so a logged prompt cannot supply evidence), minus
+the peak growth the serving recorder measured (serving loop only). 512 = the
+worst recorded 290 plus one unsampled long-prompt step (~170). Otherwise it is
+an ordinary failure: no revocation, no reserve, no re-plan, and the serving
+message quotes the backend line. A suspected OOM keeps the backend's line and
+the headroom in every message and in the revocation reason.
+
+Invariant tests: `TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling` (real B2
+canary and serving lines; far from the ceiling, no free-memory line, evidence
+only in a prompt, another function), `TestCublasErrorFarFromTheCeilingLearnsNothing`
+(verification learning and the Claude Code recorder record and revoke nothing;
+the same consumer learns 242 MiB at the ceiling), `TestCUDADeviceHeadroomReadsMainlineLoadLines`.
+Core gate passed on the final HEAD (GOFLAGS=-work: on the NTFS disk go's temp
+cleanup otherwise exits 1 after passing tests).
+
+Unproven / open:
+- no live run (driver/userspace mismatch blocks GPU work); checked against
+  recorded logs only;
+- an A1-style canary failure with KV on the host is now an ordinary failure:
+  the log leaves 2,162 MiB and verification samples no VRAM, so nothing is
+  learned and a relaunch repeats it. Sampling the backend's VRAM while it hangs
+  after the fatal line would supply the evidence;
+- 512 MiB comes from one model on one card; a non-memory cuBLAS failure on a
+  device packed within 512 MiB is still read as an OOM (bounded by the
+  existing retry and escalation limits).
+
+## CUBLAS OOM EVIDENCE — corroborate with a VRAM sample, not the log — 2026-10-11
+
+Evidence: independent review of 89d92d7. (1) Log accounting could be supplied
+or hidden by a logged prompt: the load window ended at the last "model loaded"
+anywhere, and the free/buffer patterns were unanchored. (2) Only the Linux
+serving loop had measured growth; the canary, the `--claude-code` health
+monitor, exit and previous-log paths, and Windows judged load accounting
+alone, so the B2-learned/warm shapes (1,314 / 1,798 MiB left at load) were no
+longer learned there. (3) 512 MiB does not separate the ceiling from ggrun's
+normal packing: recomputed load headroom is 259 (B2-learn-1..4), 246-286 (A1
+CUDA0) and 504 MiB (the plan packed around the learned 242 MiB reserve).
+
+The harness's nvidia-smi samples (2 s, read-only) at every recorded cuBLAS
+failure:
+
+| log | device | used at failure (MiB) | held after |
+|---|---|---:|---:|
+| B2-q36-35b-learned 11:17:26 | CUDA0 4070 | 11,871/11,873 | >= 18 s |
+| B2-q36-35b-learned 11:20:01 | CUDA0 | 11,871/11,873 | >= 14 s |
+| B2-q36-35b-warm 12:42:55 | CUDA0 | 11,871/11,873 | >= 20 s |
+| B2-q36-35b-first 19:47 | CUDA0 | 11,871/11,873 | wedged |
+| A1-minimax-relaunch 00:05:15 | CUDA1 3090 Ti | 24,110/24,112 | ~5 min |
+| A1-minimax-recovery 00:34:27 | CUDA1 | 24,110/24,112 | ~5 min |
+
+Every failure sat at 2 MiB free and the wedged backend kept holding it; the
+load-accounting estimates (108-290 MiB) were off by 100+ MiB. The B2 plan had
+188 MiB free right after load.
+
+Change (e8dfe17): the evidence is a direct sample. The canary watch
+(`runWatchingBackend`), the serving watch (`waitForShutdownCrashOrWedge`) and
+the Claude Code health monitor sample each runtime device's free VRAM
+(nvidia-smi, matched by PCI bus ID) once the backend has printed a fatal line
+and is still running. The cuBLAS line is a suspected OOM only at <= 64 MiB
+free on its device. No log text feeds the decision, so prompts cannot
+supply or hide it; the load-accounting parser and `peakGrowth` are gone. The
+Claude Code exit and previous-log paths have no live backend to sample and
+treat the line as an ordinary failure. A non-OOM death in Claude Code mode now
+prints the backend's line; the quoted line is the first fatal line after
+load, not one from the load phase.
+
+Invariant tests: `TestCublasUnsupportedValueIsAnOOMOnlyAtTheCeiling` (real B2
+canary and serving lines at 2 MiB free; no sample, 188 MiB free, 12 GiB free,
+another device full, another function, and a prompt pasting a backend log
+in both directions), `TestCublasErrorFarFromTheCeilingLearnsNothing`,
+`TestWatchdogSamplesAFailedBackendBeforeStoppingIt`,
+`TestServingWatchSamplesAFailedBackendWhileItRuns`,
+`TestFreeVRAMByRuntimeDeviceMatchesBusIDs`,
+`TestUnrecognizedCrashQuotesTheServingFailure`. Mutations checked: ignoring
+the sample fails the negative cases; dropping the watch hooks fails the
+sampling tests.
+
+Unproven / open:
+- no live run (driver/userspace mismatch); the sampling path has never run
+  against a failing backend. Checked only against recorded logs and samples;
+- a backend that exits before the next watch tick (2 s serving, 5 s canary,
+  30 s health monitor), e.g. when gdb is installed and the backtrace
+  completes, gives no sample and is not learned, so a relaunch repeats it;
+- a non-memory cuBLAS failure on a device that really is within 64 MiB of
+  full (successful runs peaked at 16-58 MiB free) is still read as an OOM;
+- the sample is device-wide, so another process filling the card also counts.

@@ -5671,16 +5671,20 @@ func runtimeGrowthWindowStart(lines []string) (int, bool) {
 	return 0, false
 }
 
-func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placement.ModelProfile, prior map[int]int) (device int, reserveMB int, estimated bool, ok bool) {
+// failedFree is failedBackendFreeVRAM sampled after the backend's fatal line
+// (nil when nothing was sampled). suspect is set when the backend never said
+// "out of memory" and the failure was read as one from that sample: it keeps
+// the backend's own error line for the diagnostics.
+func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placement.ModelProfile, prior, failedFree map[int]int) (device int, reserveMB int, estimated bool, suspect string, ok bool) {
 	lines := strings.Split(logData, "\n")
 	loadedAt, loaded := runtimeGrowthWindowStart(lines)
 	if !loaded {
 		// Still loading when it died: a placement problem, not a runtime term.
-		return 0, 0, false, false
+		return 0, 0, false, "", false
 	}
 	for i := len(lines) - 1; i > loadedAt; i-- {
 		if device, allocMB, ok := recovery.ParseCUDAOOM(lines[i]); ok {
-			return device, allocMB, false, true
+			return device, allocMB, false, "", true
 		}
 		device, ok = recovery.ParseCUDADevice(lines[i])
 		if !ok {
@@ -5689,28 +5693,112 @@ func runtimeLogCUDAOOM(logData string, caps *detect.Capabilities, model *placeme
 		isOOM := false
 		for j := i - 1; j >= 0 && j >= i-3; j-- {
 			lower := strings.ToLower(lines[j])
-			if strings.Contains(lower, "cuda error: out of memory") || cublasWorkspaceOOM(lower, lines[i]) {
+			if strings.Contains(lower, "cuda error: out of memory") {
 				isOOM = true
+				break
+			}
+			if freeMB, sampled := failedFree[device]; cublasWorkspaceOOM(lower, lines[i], freeMB, sampled) {
+				isOOM = true
+				suspect = fmt.Sprintf("%s; %d MiB free on the device after the failure", strings.TrimSpace(lines[j]), freeMB)
 				break
 			}
 		}
 		if !isOOM {
 			continue
 		}
-		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, true
+		return device, sizelessCUDAOOMReserveMB(caps, model, device, prior), true, suspect, true
 	}
-	return 0, 0, false, false
+	return 0, 0, false, "", false
 }
 
+// cublasCeilingFreeMB is how little VRAM a device may have left, sampled after
+// the failure, for a cuBLAS "unsupported value" GEMM failure to count as an
+// allocation failure. The recorded failures left 2 MiB (B2: 11,871 of 11,873
+// MiB; A1: 24,110 of 24,112). ggrun's packing leaves more than that right after
+// load (188 MiB on the B2 plan that later failed), so a device this full has
+// grown to its ceiling, and a non-memory failure on a packed device that has
+// not grown there does not qualify.
+const cublasCeilingFreeMB = 64
+
 // cublasWorkspaceOOM recognizes cuBLAS failing a GEMM with "an unsupported
-// value or parameter" on a device at its memory ceiling. It is an allocation
-// failure in disguise: the same Qwen3.6-35B-A3B plan on one RTX 4070 served
-// 21k- and 28k-token prompts when its pool peaked 14-30 MiB below the card's
-// 11,873 MiB, and failed this way when an earlier request had grown the pool
-// to 11,871 MiB. -amb and the expert count made no difference.
-func cublasWorkspaceOOM(errorLineLower, deviceLine string) bool {
+// value or parameter" on a device at its memory ceiling. The same
+// Qwen3.6-35B-A3B plan on one RTX 4070 served 21k- and 28k-token prompts when
+// its pool peaked 14-30 MiB below the card's 11,873 MiB, and failed this way
+// when an earlier request had grown the pool to 11,871 MiB. -amb and the
+// expert count made no difference.
+//
+// The error text alone is not that evidence. cuBLAS reports allocation failure
+// as its own status (ALLOC_FAILED); "an unsupported value or parameter" is
+// INVALID_VALUE, which a shape or build incompatibility raises too, and reading
+// that as an OOM would teach a persistent reserve and cost reloads. So it
+// counts only when the device's free VRAM, sampled after the failure while the
+// backend still held its memory, is within cublasCeilingFreeMB. No log text
+// stands in for that sample: a logged prompt can quote any load line.
+func cublasWorkspaceOOM(errorLineLower, deviceLine string, freeMB int, sampled bool) bool {
 	return strings.Contains(errorLineLower, "cuda error: an unsupported value or parameter") &&
-		strings.Contains(deviceLine, "ggml_cuda_op_mul_mat_cublas")
+		strings.Contains(deviceLine, "ggml_cuda_op_mul_mat_cublas") &&
+		sampled && freeMB <= cublasCeilingFreeMB
+}
+
+// failedBackendFreeVRAM samples the free VRAM of each device a failed backend
+// runs on, keyed by its runtime CUDA index. Callers take it once the backend
+// has printed a fatal line and while it is still running: ggml's abort forks a
+// backtrace helper that can deadlock, and the B2 and A1 backends sat alive like
+// that, holding their memory. nil when nothing could be sampled.
+func failedBackendFreeVRAM(runtime *detect.Capabilities) map[int]int {
+	if runtime == nil || len(runtime.GPUs) == 0 {
+		return nil
+	}
+	out, err := exec.Command("nvidia-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil
+	}
+	return freeVRAMByRuntimeDevice(string(out), runtime.GPUs)
+}
+
+// freeVRAMByRuntimeDevice maps nvidia-smi "pci.bus_id, memory.free" rows onto
+// the runtime GPUs by bus ID, which survives --gpus renumbering.
+func freeVRAMByRuntimeDevice(out string, gpus []detect.GPU) map[int]int {
+	byBus := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, ",")
+		if len(f) != 2 {
+			continue
+		}
+		if mb, err := strconv.Atoi(strings.TrimSpace(f[1])); err == nil {
+			byBus[strings.ToLower(strings.TrimSpace(f[0]))] = mb
+		}
+	}
+	free := map[int]int{}
+	for _, g := range gpus {
+		if mb, ok := byBus[strings.ToLower(strings.TrimSpace(g.PCIBusID))]; ok && g.PCIBusID != "" {
+			free[g.Index] = mb
+		}
+	}
+	if len(free) == 0 {
+		return nil
+	}
+	return free
+}
+
+// unrecognizedCrashMessage reports a serving backend that died of something
+// other than a recognized CUDA OOM. It quotes the backend's own fatal line, so
+// an error that only resembles an OOM is still named exactly.
+func unrecognizedCrashMessage(logData string) string {
+	if line := runtimeFatalLine(logData); line != "" {
+		return "server exited unexpectedly (not a recognized CUDA OOM): " + line + " — see the log for details."
+	}
+	return "server exited unexpectedly (not a recognized CUDA OOM) — see the log for details."
+}
+
+// runtimeFatalLine is the first fatal line after the load-complete marker: the
+// start of the failure that ended serving, not a line from the load phase.
+func runtimeFatalLine(logData string) string {
+	lines := strings.Split(logData, "\n")
+	if loadedAt, ok := runtimeGrowthWindowStart(lines); ok {
+		lines = lines[loadedAt+1:]
+	}
+	return servingFatalLine(strings.Join(lines, "\n"))
 }
 
 // sizelessCUDAOOMReserveMB is the estimate filed for a CUDA out-of-memory
@@ -5819,32 +5907,33 @@ func oomLogFingerprint(logData string) string {
 // recordRuntimeOOMLog records either the exact failed allocation or the
 // bounded VMM fallback above. markerPath prevents a Claude crash recorded on
 // exit from being counted again when its previous log is recovered next run.
-func recordRuntimeOOMLog(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string) (device, reserveMB int, estimated, changed, ok bool, err error) {
+// failedFree and suspect are runtimeLogCUDAOOM's.
+func recordRuntimeOOMLog(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, logData, markerPath string, failedFree map[int]int) (device, reserveMB int, estimated bool, suspect string, changed, ok bool, err error) {
 	if cfg == nil || model == nil || strategy == nil || be == nil || caps == nil {
-		return 0, 0, false, false, false, nil
+		return 0, 0, false, "", false, false, nil
 	}
 	fingerprint := oomLogFingerprint(logData)
 	if markerPath != "" {
 		if data, readErr := os.ReadFile(markerPath); readErr == nil && strings.TrimSpace(string(data)) == fingerprint {
-			return 0, 0, false, false, false, nil
+			return 0, 0, false, "", false, false, nil
 		}
 	}
 	cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel)
-	device, reserveMB, estimated, ok = runtimeLogCUDAOOM(logData, caps, model, prior)
+	device, reserveMB, estimated, suspect, ok = runtimeLogCUDAOOM(logData, caps, model, prior, failedFree)
 	if !ok {
-		return 0, 0, false, false, false, nil
+		return 0, 0, false, "", false, false, nil
 	}
 	if err = recordAbortGrowth(cfg.CacheDir, model, strategy, cacheBackendTag, caps.GPUs, device, reserveMB, estimated, prior); err != nil {
-		return device, reserveMB, estimated, false, true, err
+		return device, reserveMB, estimated, suspect, false, true, err
 	}
 	changed = reserveMB > prior[device]
 	if markerPath != "" {
 		if err = os.WriteFile(markerPath, []byte(fingerprint+"\n"), 0600); err != nil {
-			return device, reserveMB, estimated, changed, true, err
+			return device, reserveMB, estimated, suspect, changed, true, err
 		}
 	}
-	return device, reserveMB, estimated, changed, true, nil
+	return device, reserveMB, estimated, suspect, changed, true, nil
 }
 
 func classifyRuntimeCgroupOOM(oomKills, peakBytes uint64) (peakMB int, ok bool) {
@@ -5989,7 +6078,8 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 	// it before anything re-plans, so one re-plan picks up both.
 	promptCacheGrew := recordPreviousClaudePromptCache(req, cfg, model, strategy, be, caps, string(logData))
 	markerPath := logPath + ".oom-recorded"
-	device, reserveMB, estimated, changed, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, string(logData), markerPath)
+	// The backend is long gone, so nothing corroborates a cuBLAS-form failure.
+	device, reserveMB, estimated, suspect, changed, ok, err := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, string(logData), markerPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("recover previous Claude runtime OOM: %w", err)
 	}
@@ -6006,7 +6096,9 @@ func recoverPreviousClaudeRuntimeOOM(req *launchRequest, cfg *config.Config, mod
 		fmt.Printf("[launch] prompt cache: re-sized -cram %d -> %d MiB from the measured entry size (placement kept)\n", strategy.CRAM, next.CRAM)
 		return next, nil
 	}
-	if estimated {
+	if suspect != "" {
+		fmt.Printf("[launch] recovered previous suspected CUDA OOM on device %d (%s); reserving %d MiB runtime headroom and re-planning\n", device, suspect, reserveMB)
+	} else if estimated {
 		fmt.Printf("[launch] recovered previous CUDA VMM OOM on device %d; llama.cpp omitted its allocation size, reserving %d MiB runtime headroom and re-planning\n", device, reserveMB)
 	} else {
 		fmt.Printf("[launch] recovered previous CUDA OOM on device %d; reserving the measured %d MiB allocation and re-planning\n", device, reserveMB)
@@ -7076,14 +7168,17 @@ func cmdLaunch(args []string) {
 			claudeRouterURL = claudeAuto.router.URL()
 		}
 	}
-	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+	var failedFree map[int]int
+	verifyWatch := defaultBackendWatch
+	verifyWatch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeCaps) }
+	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", verifyWatch, func() error {
 		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
 	}); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
 		if p.LogBuf != nil {
-			if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, p.LogBuf.String()); ok {
+			if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, p.LogBuf.String(), failedFree); ok {
 				fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
 			}
 		}
@@ -7220,7 +7315,12 @@ func cmdLaunch(args []string) {
 				case <-ticker.C:
 				}
 				if !isServerRunning(req.Host, req.Port) {
-					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — recording OOM for next launch\n")
+					// A backend wedged after its fatal line still holds its memory.
+					var failedFree map[int]int
+					if p.IsRunning() {
+						failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps))
+					}
+					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — checking its log for an OOM to record for the next launch\n")
 					logData := ""
 					if p.LogBuf != nil {
 						logData = p.LogBuf.String()
@@ -7234,9 +7334,15 @@ func cmdLaunch(args []string) {
 							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded host cgroup OOM at %d MiB; revoked the profile and cached host-state evidence for the next launch\n", peakMB)
 						}
 					} else if p.LogBuf != nil {
-						device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath)
+						device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, failedFree)
 						if recordErr != nil {
 							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
+						} else if !ok {
+							if line := runtimeFatalLine(logData); line != "" {
+								fmt.Fprintf(os.Stderr, "[launch] backend failed (not a recognized CUDA OOM): %s — nothing recorded\n", line)
+							}
+						} else if suspect != "" {
+							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded suspected CUDA OOM on device %d (%s) and a %d MiB reserve for the next launch\n", device, suspect, reserveMB)
 						} else if ok && estimated {
 							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
 						} else if ok {
@@ -7289,6 +7395,9 @@ func cmdLaunch(args []string) {
 			// still be recorded before Stop(), so the NEXT `--claude-code`
 			// launch of this exact model/context reserves the measured
 			// deficit instead of repeating the same crash blind.
+			// The backend has exited and released its memory, so nothing
+			// corroborates a cuBLAS-form failure here; a wedged one was
+			// sampled by the health monitor.
 			if !p.IsRunning() && p.LogBuf != nil {
 				markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
 				logData := p.LogBuf.String()
@@ -7299,8 +7408,14 @@ func cmdLaunch(args []string) {
 					if recorded {
 						fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (host cgroup OOM at %d MiB) — profile revoked and host-state evidence recorded for the next launch.\n", peakMB)
 					}
-				} else if device, reserveMB, estimated, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath); recordErr != nil {
+				} else if device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, nil); recordErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM: %v\n", recordErr)
+				} else if !ok {
+					if line := runtimeFatalLine(logData); line != "" {
+						fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (not a recognized CUDA OOM): %s\n", line)
+					}
+				} else if suspect != "" {
+					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (suspected CUDA OOM on device %d: %s) — recorded %d MiB runtime reserve for the next launch.\n", device, suspect, reserveMB)
 				} else if ok && estimated {
 					fmt.Fprintf(os.Stderr, "[launch] backend crashed during this session (CUDA VMM OOM on device %d; allocation size omitted) — recorded %d MiB runtime reserve for the next launch.\n", device, reserveMB)
 				} else if ok {
@@ -7335,7 +7450,10 @@ func cmdLaunch(args []string) {
 	const maxRuntimeOOMRetries = 2
 	runtimeOOMRetries := 0
 	for {
-		crashed := waitForShutdownCrashOrWedge(processWatch{p}, sigCh, backendBaseURL(req)+"/health", defaultServingWatch)
+		failedFree = nil
+		watch := defaultServingWatch
+		watch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps)) }
+		crashed := waitForShutdownCrashOrWedge(processWatch{p}, sigCh, backendBaseURL(req)+"/health", watch)
 		// File what this backend measured before any crash handling reads the
 		// reserve, so an abort's estimate can supersede it.
 		growth.stop()
@@ -7363,14 +7481,18 @@ func cmdLaunch(args []string) {
 		// --gpus launch, so its learned reserve was never read back.
 		growthCaps := runtimeGrowthCaps(caps, runtimeCaps)
 		prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, growthCaps.GPUs, strategy.Parallel)
-		device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, growthCaps, model, prior)
+		device, allocMB, estimated, suspect, ok := runtimeLogCUDAOOM(logData, growthCaps, model, prior, failedFree)
 		if !ok {
 			claudeAuto.stop()
-			fmt.Fprintln(os.Stderr, "[launch] server exited unexpectedly (not a recognized CUDA OOM) — see the log for details.")
+			fmt.Fprintf(os.Stderr, "[launch] %s\n", unrecognizedCrashMessage(logData))
 			os.Exit(1)
 		}
 
-		reason := fmt.Sprintf("CUDA OOM on device %d after health verification", device)
+		what := fmt.Sprintf("CUDA OOM on device %d", device)
+		if suspect != "" {
+			what = fmt.Sprintf("suspected CUDA OOM on device %d (%s)", device, suspect)
+		}
+		reason := what + " after health verification"
 		if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, reason); err != nil {
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] cannot invalidate runtime-failed profile: %v\n", err)
@@ -7383,12 +7505,15 @@ func cmdLaunch(args []string) {
 		}
 		if runtimeOOMRetries >= maxRuntimeOOMRetries {
 			claudeAuto.stop()
-			fmt.Fprintf(os.Stderr, "[launch] server crashed (CUDA OOM on device %d, %d MiB) after %d recovery attempt(s) — giving up. The failed profile and placement cache were revoked; the recorded deficit will drive the next launch.\n", device, allocMB, runtimeOOMRetries)
+			fmt.Fprintf(os.Stderr, "[launch] server crashed (%s, %d MiB) after %d recovery attempt(s) — giving up. The failed profile and placement cache were revoked; the recorded deficit will drive the next launch.\n", what, allocMB, runtimeOOMRetries)
 			os.Exit(1)
 		}
 
 		runtimeOOMRetries++
-		if estimated {
+		if suspect != "" {
+			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: %s — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
+				what, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
+		} else if estimated {
 			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: CUDA VMM OOM on device %d omitted its allocation size — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
 				device, allocMB, runtimeOOMRetries, maxRuntimeOOMRetries)
 		} else {
@@ -7420,14 +7545,15 @@ func cmdLaunch(args []string) {
 			recordMeasuredLaunchProbes(req, cfg, model, newStrategy, be, runtimeCaps, newP.LogBuf.String(), baselineVRAM, serverProcessPID(newP))
 			noteBackendLoadedVRAM(serverProcessPID(newP))
 		}
-		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", defaultBackendWatch, func() error {
+		failedFree = nil
+		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", verifyWatch, func() error {
 			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
 		}); err != nil {
 			_ = newP.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] recovered placement failed lifecycle verification: %v\n", err)
 			if newP.LogBuf != nil {
-				if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, newStrategy, newArgs, newP.LogBuf.String()); ok {
+				if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, newStrategy, newArgs, newP.LogBuf.String(), failedFree); ok {
 					fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
 				}
 			}
@@ -7475,7 +7601,7 @@ func cmdLaunch(args []string) {
 // recorded under the failed plan's exact scope, stacking on earlier guesses,
 // so each further failure moves the plan by at least one more layer.
 func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo,
-	caps, runtimeCaps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, logData string,
+	caps, runtimeCaps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, logData string, failedFree map[int]int,
 ) (string, bool) {
 	if req == nil || cfg == nil || model == nil || strategy == nil || caps == nil {
 		return "", false
@@ -7483,18 +7609,22 @@ func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *pla
 	caps = runtimeGrowthCaps(caps, runtimeCaps)
 	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
-	device, allocMB, estimated, ok := runtimeLogCUDAOOM(logData, caps, model, prior)
+	device, allocMB, estimated, suspect, ok := runtimeLogCUDAOOM(logData, caps, model, prior, failedFree)
 	if !ok {
 		return "", false
 	}
+	what := fmt.Sprintf("CUDA OOM on device %d", device)
+	if suspect != "" {
+		what = fmt.Sprintf("suspected CUDA OOM on device %d (%s)", device, suspect)
+	}
 	if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs,
-		fmt.Sprintf("CUDA OOM on device %d during the first requests after load", device)); err != nil {
-		return fmt.Sprintf("CUDA OOM on device %d after load, and the failed profile could not be revoked: %v", device, err), true
+		what+" during the first requests after load"); err != nil {
+		return fmt.Sprintf("%s after load, and the failed profile could not be revoked: %v", what, err), true
 	}
 	if err := recordAbortGrowth(cfg.CacheDir, model, strategy, tag, caps.GPUs, device, allocMB, estimated, prior); err != nil {
-		return fmt.Sprintf("CUDA OOM on device %d after load, and the reserve could not be recorded: %v", device, err), true
+		return fmt.Sprintf("%s after load, and the reserve could not be recorded: %v", what, err), true
 	}
-	return fmt.Sprintf("CUDA OOM on device %d after load: the failed plan was revoked and %d MiB is now reserved on that device. Launch again to use the adjusted plan.", device, allocMB), true
+	return fmt.Sprintf("%s after load: the failed plan was revoked and %d MiB is now reserved on that device. Launch again to use the adjusted plan.", what, allocMB), true
 }
 
 func invalidateRuntimeOOMLaunch(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
