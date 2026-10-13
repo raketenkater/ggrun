@@ -351,6 +351,27 @@ func dropCompanionSizedQuants(c Candidate) Candidate {
 	return c
 }
 
+// MainlineRegistersArch reports what the catalog's upstream stamp says about
+// current mainline llama.cpp and an architecture: registers is true when a row
+// of that architecture carries runnable_mainline=true; known is false when no
+// row of it carries the stamp.
+func MainlineRegistersArch(arch string) (registers, known bool) {
+	arch = strings.ToLower(strings.TrimSpace(arch))
+	if arch == "" {
+		return false, false
+	}
+	for _, c := range Shortlist() {
+		if strings.ToLower(strings.TrimSpace(c.Arch)) != arch || c.RunnableMainline == nil {
+			continue
+		}
+		if *c.RunnableMainline {
+			return true, true
+		}
+		known = true
+	}
+	return false, known
+}
+
 func Shortlist() []Candidate {
 	var doc catalogDoc
 	if err := json.Unmarshal(catalogBytes(), &doc); err == nil && len(doc.Candidates) > 0 {
