@@ -89,9 +89,10 @@ the rows that run now. An `unsupported` row is listed after every usable one. On
 default launch would serve on the Vulkan build (an architecture only mainline
 loads, or a large MoE whose file-backed experts win the backend choice) is
 `ready` but runs far below the CUDA estimate (marked `^`). `CUDABuildOffered`
-says whether the first launch offers the CUDA build; when it does the row keeps
-its rank, and when it does not, Best overall and Fastest list it after the other
-usable rows. Smartest keeps it in capability order.
+says whether the first launch offers the CUDA build. Best overall and Fastest
+list such a row after the rows that run as estimated now; Smartest keeps it in
+capability order. A dense model that spills from the GPU to RAM is estimated
+at CPU matmul speed for its RAM-resident layers.
 
 Attribution is required when using Artificial Analysis data; the catalog and GUI
 include attribution to `https://artificialanalysis.ai/`.

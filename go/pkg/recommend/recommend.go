@@ -244,15 +244,17 @@ func appendReason(r *Recommendation, note string) {
 // Installation state is not capability: Smartest keeps a row whose backend the
 // first launch builds in capability order. speedRanked (Best overall, Fastest)
 // is a practical choice, so there setup feasibility counts: such a row, and a
-// row a default launch serves on Vulkan on an NVIDIA host with no CUDA build
-// offered, follow the rows that serve as estimated now. A needs_setup row's
+// row a default launch serves on Vulkan on an NVIDIA host, follow the rows
+// that serve as estimated now. A needs_setup row's
 // first launch is a 20-40 minute source build that needs git, cmake, a
 // compiler and on NVIDIA the CUDA toolkit, and its speed estimate rests on a
 // backend nobody measured; the one measured row off the default backend
 // (MiMo-V2.6-Flash Q2_K, full rig, matrix15) decoded 2.9 tok/s against 10.5
-// predicted. Best overall #1 is also what `recommend --first` and the
-// installer's first download take. A Vulkan row with the CUDA build offered
-// is ready now and keeps its place.
+// predicted. A Vulkan row reaches its CUDA estimate only after the CUDA build
+// the first launch offers, or never when none is offered; declined or
+// non-interactive it serves at the Vulkan speed (MiMo matrix15: 46 minutes to
+// ready, every Claude Code task 19-53 minutes). Best overall #1 is also what
+// `recommend --first` and the installer's first download take.
 func preferServable(rows []Recommendation, speedRanked bool) {
 	rank := func(r Recommendation) int {
 		switch {
@@ -260,7 +262,7 @@ func preferServable(rows []Recommendation, speedRanked bool) {
 			return 2
 		case speedRanked && r.BackendStatus == BackendNeedsSetup:
 			return 1
-		case speedRanked && r.ServedOnVulkan() && !r.CUDABuildOffered:
+		case speedRanked && r.ServedOnVulkan():
 			return 1
 		}
 		return 0

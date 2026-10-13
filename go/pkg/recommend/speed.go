@@ -30,8 +30,13 @@ const (
 	ramBandwidthGBps    = 60.0 // dual-channel DDR4/DDR5 ballpark; the offload bottleneck
 	decodeEfficiency    = 0.70 // multi-GPU/large-dense fraction of peak bandwidth
 	moeDecodeEfficiency = 0.50 // routing, expert dispatch, and mixed RAM/VRAM traffic
-	maxPredictedTPS     = 400.0
-	defaultVRAMBWGBps   = 350.0
+	// spilledDenseDecodeEfficiency: a dense model split between GPU and CPU
+	// runs its CPU-resident layers at CPU matmul speed, below the RAM bandwidth
+	// ceiling. One measurement: Qwen3.8-27B UD-IQ3_XXS on one RTX 4070 with 32
+	// GiB RAM decoded 4.2-4.8 tok/s where 0.70 predicted 8.2 (October 8).
+	spilledDenseDecodeEfficiency = 0.40
+	maxPredictedTPS              = 400.0
+	defaultVRAMBWGBps            = 350.0
 )
 
 // bytesPerWeight is the effective on-disk/in-memory bytes per parameter for a
@@ -292,6 +297,8 @@ func predictDecodeTPSForFit(caps *detect.Capabilities, c Candidate, quant QuantO
 		// real llama.cpp offload runs; keep dense efficiency separate because its
 		// large contiguous matmuls get much closer to the bandwidth ceiling.
 		efficiency = moeDecodeEfficiency
+	} else if fit == "GPU plus RAM" {
+		efficiency = spilledDenseDecodeEfficiency
 	}
 	tps := efficiency / (perTokenGB * secPerGB)
 	return clampF(tps, 0, maxPredictedTPS)

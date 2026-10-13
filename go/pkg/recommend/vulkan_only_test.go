@@ -9,9 +9,11 @@ import (
 
 // A row the installed Vulkan build loads is ready now. When the first launch
 // offers the CUDA build its estimate assumes, that is a separate fact
-// (CUDABuildOffered), and the row keeps its rank like any row whose backend
-// the launch builds.
-func TestVulkanRowWithCUDABuildOfferedIsReadyAndKeepsRank(t *testing.T) {
+// (CUDABuildOffered). Smartest keeps its capability rank; Best overall and
+// Fastest list it after rows that run as estimated now, as they do a row
+// whose backend the launch builds: MiMo-V2.6-Flash Q2_K, served on Vulkan,
+// took 46 minutes to ready and 19-53 minutes per task (matrix15).
+func TestVulkanRowWithCUDABuildOfferedIsReady(t *testing.T) {
 	t.Cleanup(resetBackendProbes)
 	SetInstalledArchSupport(func(*detect.Capabilities, string) (bool, bool) { return true, true })
 	SetVulkanOnCUDA(func(_ *detect.Capabilities, arch string, _ bool, _ int) bool { return arch == "mimo2" })
@@ -25,11 +27,11 @@ func TestVulkanRowWithCUDABuildOfferedIsReadyAndKeepsRank(t *testing.T) {
 	if q.BackendStatus != BackendReady || q.CUDABuildOffered {
 		t.Fatalf("a CUDA-loadable row was marked %q offered=%v", q.BackendStatus, q.CUDABuildOffered)
 	}
-	for _, speedRanked := range []bool{true, false} {
+	for speedRanked, first := range map[bool]string{true: "Qwen", false: "MiMo"} {
 		rows := []Recommendation{r, q}
 		preferServable(rows, speedRanked)
-		if rows[0].Name != "MiMo" {
-			t.Fatalf("speedRanked=%v moved the Vulkan row with a CUDA build offered: %v", speedRanked, []string{rows[0].Name, rows[1].Name})
+		if rows[0].Name != first {
+			t.Fatalf("speedRanked=%v: %v, want %s first", speedRanked, []string{rows[0].Name, rows[1].Name}, first)
 		}
 	}
 }
