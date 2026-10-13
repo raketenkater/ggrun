@@ -640,7 +640,7 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 		// by bandwidth; try the VRAM-weighted inverse only when the fastest GPU is
 		// not also the roomiest, which is the case where the estimate is most
 		// likely to be wrong about end-to-end speed.
-		if alt := invertDenseSplit(base); alt != nil {
+		if alt := invertDenseSplit(base); alt != nil && byteWeightedCandidateFits(caps, model, alt, opts) {
 			out = append(out, CalibrationCandidate{Name: "split-inverted", Strategy: alt})
 		}
 		for _, candidate := range denseTopologyCandidates(caps, model, base, opts) {
@@ -1127,6 +1127,24 @@ func invertDenseSplit(s *Strategy) *Strategy {
 	return c
 }
 
+// byteWeightedCandidateFits keeps a split candidate a byte-weighted backend
+// would overfill out of calibration: its fractions are read as bytes, so the
+// resource ledger, which prices each device by the backend's walk, must not
+// show a device over its free VRAM. Missing compute evidence is left to exact
+// admission. Other backends keep the candidate.
+func byteWeightedCandidateFits(caps *detect.Capabilities, model *ModelProfile, candidate *Strategy, opts Options) bool {
+	if model == nil || !model.ByteWeightedLayerSplit {
+		return true
+	}
+	if model.NumLayers > 0 {
+		if _, output := backendLayerOwnership(model, kvShapeForStrategy(candidate, false), candidate.TensorSplit); output >= 0 {
+			candidate.MainGPU = output
+		}
+	}
+	ledger := BuildResourceLedger(caps, model, candidate, opts)
+	return ledger.Fits || ledger.NeedsAdmission
+}
+
 // denseTopologyCandidates enumerates legal single-device and bounded
 // multi-device subsets without changing the backend-visible GPU namespace.
 // Unused cards receive a zero tensor share, so the strategy remains a complete
@@ -1218,6 +1236,11 @@ func denseTopologyCandidates(caps *detect.Capabilities, model *ModelProfile, bas
 			candidate.SplitMode = "layer"
 			candidate.PlacementPolicy = policy
 			candidate.MainGPU = splitOutputOwner(split, model.NumLayers)
+			if model.ByteWeightedLayerSplit {
+				if _, output := backendLayerOwnership(model, kvShapeForStrategy(candidate, false), split); output >= 0 {
+					candidate.MainGPU = output
+				}
+			}
 			clearForeignAllocationEvidence(candidate)
 			candidateLedger := BuildResourceLedger(caps, model, candidate, topologyOpts)
 			if !candidateLedger.Fits {

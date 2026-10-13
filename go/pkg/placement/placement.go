@@ -390,6 +390,11 @@ type ModelProfile struct {
 	// asked for 29,920 MiB of KV where windowed pricing planned ~3 GiB.
 	FullContextWindowedKV bool `json:"-"`
 
+	// ByteWeightedLayerSplit is a serving-backend fact, set at backend
+	// selection: the backend assigns blocks to devices by cumulative bytes and
+	// reads --tensor-split as a byte fraction (ik_llama.cpp, iklayersplit.go).
+	ByteWeightedLayerSplit bool `json:"-"`
+
 	// SSM geometry (GGUF ssm.*): sizes the per-slot recurrent state a hybrid
 	// keeps on each recurrent block's device (kvlayers.go).
 	SSMConvKernel   int `json:"ssm_d_conv,omitempty"`
@@ -2609,6 +2614,34 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 		// PCIe-derived balanced weighting rather than guessing.
 		denseBalancedSplit(s, caps, numGPUs, cudaOverheadMB, computeBufForGPU, gpuKVReserveMB)
 	}
+	// A byte-weighted backend reads the split as a fraction of its own byte sum
+	// and rounds each boundary to a block edge (iklayersplit.go). Emit the
+	// fractions whose backend boundaries hold the intended bytes, and refuse a
+	// plan whose weights and KV alone overfill a card beyond its measured
+	// reserves; a cold compute estimate does not refuse.
+	if model.ByteWeightedLayerSplit {
+		gpuKVMB := kvTotalMB
+		if s.KVPlacement == "cpu" {
+			gpuKVMB = 0
+		}
+		measuredComputeForGPU := func(idx int) int {
+			if pc == nil {
+				return 0
+			}
+			if measuredPerGPU := pc.ComputeBufByGPU[idx]; measuredPerGPU > 0 {
+				return measuredPerGPU
+			}
+			return max(0, pc.ComputeBufMB)
+		}
+		split, ok, err := ikDenseSplit(model, kvShapeForStrategy(s, opts.SWAFull), gpuKVMB, s.TensorSplit,
+			ikDenseDevices(s, caps, cudaOverheadMB, computeBufForGPU, measuredComputeForGPU))
+		if ok {
+			if err != nil {
+				return nil, err
+			}
+			s.TensorSplit = split
+		}
+	}
 
 	// Layer split is the portable default for heterogeneous GPUs. The tensor
 	// split path uses NCCL collectives during graph construction and can abort
@@ -3251,9 +3284,10 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	var split []float64
 	var ownedLayers []int
 	outputDev := -1
+	splitShape := kvShapeForStrategy(s, opts.SWAFull)
 
 	// nonExpertChargeMB is the exact VRAM a GPU pays for non-expert weights
-	// under llama.cpp's real slot assignment: its owned repeating layers times
+	// under the backend's real layer assignment: its owned repeating layers times
 	// the per-layer non-expert bytes, the shared experts of its owned layers,
 	// and the whole output head iff it owns the last slot. This replaces the
 	// old pro-rata split share, which spread the ~1GB output head across all
@@ -3261,7 +3295,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	nonExpertChargeMB := func(owned []int, outputDev, gi int) int {
 		if exactLayerCosts && len(model.NonExpertLayerBytes) >= model.NumLayers {
 			charge := 0
-			layerDevices, _ := layerDeviceAssignments(split, model.NumLayers)
+			layerDevices, _ := backendLayerDeviceAssignments(model, splitShape, split)
 			for layer, dev := range layerDevices {
 				if dev != gi {
 					continue
@@ -3291,7 +3325,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			perShexp = float64(shexpTotalMB) / float64(moeLayerCount)
 		}
 		ownedMoELayers := 0
-		layerDevices, _ := layerDeviceAssignments(split, model.NumLayers)
+		layerDevices, _ := backendLayerDeviceAssignments(model, splitShape, split)
 		for layer, dev := range layerDevices {
 			if layer >= moeStartLayer && dev == gi {
 				ownedMoELayers++
@@ -3335,7 +3369,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 			}
 		}
 		split = normalizeSplit(rawSplit)
-		ownedLayers, outputDev = layerOwnership(split, model.NumLayers)
+		ownedLayers, outputDev = backendLayerOwnership(model, splitShape, split)
 		if os.Getenv("GGRUN_TRACE_PLACEMENT") != "" {
 			fmt.Fprintf(os.Stderr, "[trace] split iter used=%v rawSplit=%v split=%v owned=%v outputDev=%d\n", used, rawSplit, split, ownedLayers, outputDev)
 		}
@@ -3437,7 +3471,7 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 	// layer to the expert GPU. A pin to the existing owner adds only routed
 	// experts because its shared/router bytes are already in that owner's base.
 	layersPerGPU := make([]int, numGPUs)
-	layerDevices, _ := layerDeviceAssignments(split, model.NumLayers)
+	layerDevices, _ := backendLayerDeviceAssignments(model, splitShape, split)
 	nextMoELayer := 0
 	for _, gi := range gpuOrder {
 		for nextMoELayer < moeLayerCount {
@@ -8406,8 +8440,9 @@ func computeBuffersFromVRAMDelta(
 	if shexpTotalMB < 0 || shexpTotalMB >= bytesToMiBCeil(model.ExpertBytes) {
 		shexpTotalMB = 0
 	}
-	owned, outputDev := layerOwnership(strategy.TensorSplit, model.NumLayers)
-	layerDevices, _ := layerDeviceAssignments(strategy.TensorSplit, model.NumLayers)
+	kvShape := kvShapeForStrategy(strategy, false)
+	owned, outputDev := backendLayerOwnership(model, kvShape, strategy.TensorSplit)
+	layerDevices, _ := backendLayerDeviceAssignments(model, kvShape, strategy.TensorSplit)
 	moeOwned := make([]int, len(strategy.TensorSplit))
 	moeStart := model.LeadingDense
 	if moeStart < 0 || moeStart >= model.NumLayers {
@@ -8423,7 +8458,6 @@ func computeBuffersFromVRAMDelta(
 	if strings.EqualFold(strategy.KVPlacement, "gpu") && strategy.ContextSize > 0 {
 		kvTotalMB = computeKVTotalMBForStrategy(model, strategy)
 	}
-	kvShape := kvShapeForStrategy(strategy, false)
 
 	computeByGPU := map[int]int{}
 	for gi, g := range gpus {
@@ -10343,13 +10377,30 @@ func denseFillFastestFirstSplit(s *Strategy, caps *detect.Capabilities, numGPUs,
 // GPU deficit would be the same error in a different direction. Returns 0 when
 // the geometry is unknown rather than guessing a share.
 func DeviceKVCacheMB(model *ModelProfile, ctxSize int, kvType, kvPlacement string, swaFull bool, tensorSplit []float64, device int) int {
-	if model == nil || ctxSize <= 0 || model.NumLayers <= 0 || device < 0 {
+	shape := kvCacheShape{Context: ctxSize, KVType: kvType, SWAFull: swaFull}
+	return deviceKVCacheMB(model, shape, kvPlacement, tensorSplit, device)
+}
+
+// StrategyDeviceKVCacheMB is DeviceKVCacheMB at the strategy's own slots,
+// microbatch and MTP state, which a byte-weighted backend's layer assignment
+// and a hybrid's per-slot recurrent state both depend on.
+func StrategyDeviceKVCacheMB(model *ModelProfile, s *Strategy, kvType string, swaFull bool, device int) int {
+	if s == nil {
+		return 0
+	}
+	shape := kvShapeForStrategy(s, swaFull)
+	shape.KVType = kvType
+	return deviceKVCacheMB(model, shape, s.KVPlacement, s.TensorSplit, device)
+}
+
+func deviceKVCacheMB(model *ModelProfile, shape kvCacheShape, kvPlacement string, tensorSplit []float64, device int) int {
+	if model == nil || shape.Context <= 0 || model.NumLayers <= 0 || device < 0 {
 		return 0
 	}
 	if kvPlacement != "" && !strings.EqualFold(kvPlacement, "gpu") {
 		return 0
 	}
-	total := computeKVTotalMB(model, ctxSize, kvType, swaFull)
+	total := computeKVTotalMB(model, shape.Context, shape.KVType, shape.SWAFull)
 	if total <= 0 {
 		return 0
 	}
@@ -10360,7 +10411,6 @@ func DeviceKVCacheMB(model *ModelProfile, ctxSize int, kvType, kvPlacement strin
 		}
 		return 0
 	}
-	owned, _ := layerOwnership(tensorSplit, model.NumLayers)
-	shape := kvCacheShape{Context: ctxSize, KVType: kvType, SWAFull: swaFull}
+	owned, _ := backendLayerOwnership(model, shape, tensorSplit)
 	return kvLayerShareMB(model, shape, total, tensorSplit, owned, device)
 }

@@ -271,8 +271,7 @@ func contextReclaimRequirement(model *placement.ModelProfile, strategy *placemen
 	if kvType == "" {
 		return 0, false
 	}
-	deviceKVMB := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType,
-		strategy.KVPlacement, hasArg(args, "--swa-full"), strategy.TensorSplit, device)
+	deviceKVMB := placement.StrategyDeviceKVCacheMB(model, strategy, kvType, hasArg(args, "--swa-full"), device)
 	if deviceKVMB <= 0 {
 		return 0, false
 	}
@@ -365,10 +364,13 @@ func majorityDevicePricedTokens(model *placement.ModelProfile, strategy *placeme
 		kvType = effectiveMemoryArgValues(args)["cache-k"]
 	}
 	swaFull := hasArg(args, "--swa-full")
-	deviceKV := placement.DeviceKVCacheMB(model, strategy.ContextSize, kvType, strategy.KVPlacement, swaFull, strategy.TensorSplit, device)
-	totalKV := placement.EstimateKVCacheMB(model, strategy.ContextSize, kvType, swaFull)
+	deviceKV := placement.StrategyDeviceKVCacheMB(model, strategy, kvType, swaFull, device)
+	// The total is priced at the same shape as the device share: per-slot
+	// recurrent and windowed state on every device.
+	totalKV := 0
 	devices := 0
-	for _, share := range strategy.TensorSplit {
+	for i, share := range strategy.TensorSplit {
+		totalKV += placement.StrategyDeviceKVCacheMB(model, strategy, kvType, swaFull, i)
 		if share > 0 {
 			devices++
 		}
@@ -1038,7 +1040,9 @@ func automaticContextRecoveryTarget(req *launchRequest, current *placement.Strat
 // deviceKVShareMB estimates the KV cache the failed device holds under
 // currentArgs: the model's KV at the current context times the device's
 // tensor-split share (all of it on a single-device plan). Zero when KV is not
-// on the GPUs or the share is unknown.
+// on the GPUs or the share is unknown. A byte-weighted backend reads the split
+// as bytes, so the share is the KV of the blocks its walk puts on the device
+// (argvDeviceKVCacheMB).
 func deviceKVShareMB(model *placement.ModelProfile, currentArgs []string, device int) int {
 	if model == nil || hasArg(currentArgs, "--no-kv-offload") {
 		return 0
@@ -1059,7 +1063,42 @@ func deviceKVShareMB(model *placement.ModelProfile, currentArgs []string, device
 	if kvType == "" {
 		kvType = "q8_0"
 	}
+	if model.ByteWeightedLayerSplit && values["tensor-split"] != "" {
+		return argvDeviceKVCacheMB(model, currentArgs, values, ctx, kvType, device)
+	}
 	return int(float64(placement.EstimateKVCacheMB(model, ctx, kvType, hasArg(currentArgs, "--swa-full"))) * share)
+}
+
+// argvDeviceKVCacheMB is placement.StrategyDeviceKVCacheMB for the shape an
+// argv states: context, split, slots, microbatch (min of -b and -ub, as the
+// backend takes it) and MTP decoding.
+func argvDeviceKVCacheMB(model *placement.ModelProfile, args []string, values map[string]string, ctx int, kvType string, device int) int {
+	parts := strings.Split(values["tensor-split"], ",")
+	split := make([]float64, len(parts))
+	for i, part := range parts {
+		share, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil || share < 0 {
+			return 0
+		}
+		split[i] = share
+	}
+	ubatch := memoryValueInt(values, "ubatch")
+	if batch := memoryValueInt(values, "batch"); batch > 0 && (ubatch <= 0 || batch < ubatch) {
+		ubatch = batch
+	}
+	s := &placement.Strategy{
+		ContextSize: ctx, TensorSplit: split, Parallel: maxPreflightInt(memoryValueInt(values, "parallel"), 1),
+		UBatchSize: ubatch, KVType: kvType, KVPlacement: "gpu",
+	}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--spec-type" {
+			s.Draft = nil
+			if strings.HasPrefix(args[i+1], "mtp") {
+				s.Draft = &placement.DraftConfig{Type: placement.DraftMTP}
+			}
+		}
+	}
+	return placement.StrategyDeviceKVCacheMB(model, s, kvType, hasArg(args, "--swa-full"), device)
 }
 
 func automaticContextRecoveryTargetWithKV(req *launchRequest, current *placement.Strategy, currentArgs []string, outcome preflightOutcome, deviceKVMB int) (int, bool) {
