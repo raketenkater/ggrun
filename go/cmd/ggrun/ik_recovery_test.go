@@ -73,24 +73,21 @@ func ikDeviceMB(t *testing.T, caps *detect.Capabilities, model *placement.ModelP
 //
 // This drives the launch's DoesNotFit branch against a simulated backend that
 // places blocks by the byte walk (checked against the backend logs in
-// placement's iklayersplit_test.go). Every card holds back the 755 MiB the
-// logged failure implies on CUDA0 (free 11,592 MiB less the walk's 11,485 MiB
-// of weights and KV plus the 648 MiB deficit) as used VRAM, so the planner
-// and the simulated backend agree on capacity and only the layer assignment
-// can differ. Priced by the walk, the first derate fits every card: the
-// deficit does not move. Priced by the slot rule, the derates overfill a card
-// again, which is the logged shape.
+// placement's iklayersplit_test.go) under the allocation guard's limit: free
+// VRAM less PlanningCUDAOverheadByGPU, 1,024 MiB per unmeasured card. (Before
+// the planner reserved that overhead, this test stood it in as a 755 MiB
+// "reserve" of used VRAM, the shortfall the logged failure implied.) Priced by
+// the walk, the first derate fits every card: the deficit does not move.
+// Priced by the slot rule, the derates overfill a card again, which is the
+// logged shape.
 func TestIKKVDerateKeepsEveryDeviceWithinCapacity(t *testing.T) {
-	const reserveMB = 755
 	const starts = 4
 	run := func(byteWalk bool) (fails []preflightOutcome, converged bool) {
 		cfg := &config.Config{CacheDir: t.TempDir()}
 		backend := ikQwen38Profile()
 		model := ikQwen38Profile()
 		caps := ikClaudeCodeBox()
-		for i := range caps.GPUs {
-			caps.GPUs[i].VRAMUsedMB += reserveMB
-		}
+		guard := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
 		be := &backendInfo{Tag: "ik_llama", Identity: "ik", IsIK: true, Help: "       --fit   automatically determine"}
 		req := &launchRequest{CtxFlag: "fit", ClaudeCode: true, Parallel: 4, ParallelSet: true, KVQuality: "q8_0"}
 		applyBackendFeatureCompatibility(req, model, be)
@@ -110,7 +107,7 @@ func TestIKKVDerateKeepsEveryDeviceWithinCapacity(t *testing.T) {
 			held := ikDeviceMB(t, caps, backend, strategy)
 			outcome := preflightOutcome{Device: -1}
 			for i, g := range caps.GPUs {
-				if over := held[i] - g.VRAMFreeMB(); over > 0 {
+				if over := held[i] - (g.VRAMFreeMB() - guard[g.Index]); over > 0 {
 					kv := placement.StrategyDeviceKVCacheMB(backend, strategy, "q8_0", false, i)
 					outcome = preflightOutcome{DoesNotFit: true, Device: i, AllocMB: kv, AllocMBMeasured: true, DeficitMB: over, IsKVCache: true}
 					break
@@ -138,8 +135,8 @@ func TestIKKVDerateKeepsEveryDeviceWithinCapacity(t *testing.T) {
 	}
 
 	fails, converged := run(true)
-	if len(fails) == 0 || fails[0].Device != 0 || fails[0].DeficitMB != 648 || fails[0].AllocMB < 7050 || fails[0].AllocMB > 7052 {
-		t.Fatalf("the simulated first preflight does not reproduce the logged CUDA0 7051 MiB / 648 MiB failure: %+v", fails)
+	if len(fails) == 0 || fails[0].Device != 0 || fails[0].DeficitMB < 648 || fails[0].AllocMB < 7050 || fails[0].AllocMB > 7052 {
+		t.Fatalf("the simulated first preflight does not reproduce the logged CUDA0 7051 MiB failure (deficit >= 648 MiB): %+v", fails)
 	}
 	if !converged || len(fails) != 1 {
 		t.Fatalf("byte-walk recovery: converged=%v after failures %+v; want the first derate to fit every card", converged, fails)

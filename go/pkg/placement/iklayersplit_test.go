@@ -231,7 +231,7 @@ func claudeCodeOptions(t *testing.T, ctx int) Options {
 	return Options{
 		ContextSize: ctx, Parallel: 4, BatchSize: 128, UBatchSize: 128,
 		BatchSizeExplicit: true, UBatchSizeExplicit: true, RequireMeasuredBuffers: true,
-		KVPlacement: "gpu", KVQuality: "q8_0", CacheDir: t.TempDir(),
+		KVPlacement: "gpu", KVQuality: "q8_0", CacheDir: rigOverheadCache(t, claudeCodeBox().GPUs),
 	}
 }
 
@@ -269,7 +269,14 @@ func ikPlanOverfill(t *testing.T, caps *detect.Capabilities, model *ModelProfile
 func TestIKDenseSplitKeepsEveryDeviceWithinCapacityAcrossDerates(t *testing.T) {
 	caps := claudeCodeBox()
 	countOverfilled := 0
-	for _, ctx := range []int{661504, 593920, 518144, 483328, 476160, 262144, 131072} {
+	// The logged sequence started at 661,504, which does not fit this box once
+	// its measured CUDA overhead is reserved; the planner refuses it.
+	for _, ctx := range []int{661504} {
+		if _, err := Compute(caps, qwen38Q5KSProfile(), claudeCodeOptions(t, ctx)); err == nil {
+			t.Errorf("ctx=%d: planned although weights, KV and the measured overhead overfill the box", ctx)
+		}
+	}
+	for _, ctx := range []int{593920, 565248, 518144, 483328, 476160, 262144, 131072} {
 		opts := claudeCodeOptions(t, ctx)
 		model := qwen38Q5KSProfile()
 		s, err := Compute(caps, model, opts)
@@ -416,9 +423,11 @@ func TestByteWeightedSplitLeavesOtherPlansUnchanged(t *testing.T) {
 		ncpumoe int
 		ot      string
 	}{
-		{"dense explicit", qwen38Q5KSProfile(), claudeCodeOptions(t, 593920), 593920, []float64{0.31, 0.62, 0.07}, 0, ""},
-		// The split the failing --claude-code launch emitted.
-		{"dense auto", qwen38Q5KSProfile(), claudeCode, 622592, []float64{0.27, 0.58, 0.15}, 0, ""},
+		// Pinned at 9035b70 + measured-overhead planning (the box's CUDA
+		// overhead now reserved; before it, 593,920 split 0.31/0.62/0.07 and the
+		// failing --claude-code launch's 622,592 at 0.27/0.58/0.15).
+		{"dense explicit", qwen38Q5KSProfile(), claudeCodeOptions(t, 593920), 593920, []float64{0.29, 0.61, 0.1}, 0, ""},
+		{"dense auto", qwen38Q5KSProfile(), claudeCode, 578560, []float64{0.27, 0.59, 0.14}, 0, ""},
 		{"moe explicit", syntheticMoEProfile(), Options{ContextSize: 131072, Parallel: 1, KVPlacement: "gpu", KVQuality: "q8_0", CacheDir: t.TempDir()},
 			131072, []float64{0.28, 0.66, 0.06}, 28, pin("3|4|5|6|7|8", "CUDA1") + "," + pin("9|10", "CUDA0") + "," + pin("11", "CUDA2") + ",exps=CPU"},
 		{"moe auto", syntheticMoEProfile(), Options{Parallel: 4, BatchSize: 128, UBatchSize: 128, BatchSizeExplicit: true, UBatchSizeExplicit: true,
@@ -527,11 +536,11 @@ func TestIKDenseSplitRefusesOnlyOnFirmCapacity(t *testing.T) {
 		}
 	}
 
-	// Explicit contexts planned with cold buffers on the --claude-code box,
-	// which mainline plans (622,592 is the failing launch's split), are not
-	// refused, and their weights and KV fit every card's free VRAM.
+	// Explicit contexts above ik's automatic 565,248 on the --claude-code box,
+	// up to mainline's automatic 578,560, plan with cold buffers, are not
+	// refused, and their weights and KV fit every card less its overhead.
 	caps := claudeCodeBox()
-	for _, ctx := range []int{604160, 610304, 622592} {
+	for _, ctx := range []int{568320, 572416, 578560} {
 		opts := claudeCodeOptions(t, ctx)
 		opts.RequireMeasuredBuffers = false
 		s, err := Compute(caps, qwen38Q5KSProfile(), opts)
@@ -666,6 +675,43 @@ func TestIKResourceLedgerFollowsTheWalk(t *testing.T) {
 	for i, v := range s.TensorSplit {
 		if want := int(math.Ceil(float64(mainline.TotalSizeMB) * v)); shares[i] != want {
 			t.Errorf("mainline CUDA%d weights %d MiB, want the split fraction's %d", i, shares[i], want)
+		}
+	}
+}
+
+// A fresh install has measured nothing. The allocation guard then limits each
+// card to its free VRAM less UnmeasuredCUDAOverheadMB (PlanningCUDAOverheadByGPU),
+// so the dense plan must keep its weights, KV and cold compute reserve inside
+// that limit. With 0 overhead for the unmeasured card, the 2026-10-13
+// --claude-code launch packed CUDA0 to 10 MiB past the guard and each re-plan
+// missed by 650-730 MiB until the start budget ran out.
+func TestDensePlanStaysInsideTheGuardOnAFreshCache(t *testing.T) {
+	caps := claudeCodeBox()
+	model := qwen38Q5KSProfile()
+	for _, slots := range []int{1, 4} {
+		opts := claudeCodeOptions(t, 0)
+		opts.CacheDir = t.TempDir() // nothing measured
+		opts.Parallel = slots
+		s, err := Compute(caps, model, opts)
+		if err != nil {
+			t.Fatalf("slots=%d: %v", slots, err)
+		}
+		if len(s.TensorSplit) != len(caps.GPUs) {
+			continue
+		}
+		shape := kvShapeForStrategy(s, false)
+		modelMB, kvMB := ikDenseDeviceMB(model, shape, computeKVTotalMBForStrategy(model, s), s.TensorSplit)
+		guard := PlanningCUDAOverheadByGPU(opts.CacheDir, caps.GPUs)
+		for i, g := range caps.GPUs {
+			held := modelMB[i] + kvMB[i]
+			if held == 0 {
+				continue
+			}
+			limit := g.VRAMFreeMB() - guard[g.Index]
+			if held+computeFloorMB > limit {
+				t.Errorf("slots=%d ctx=%d split %v: CUDA%d holds %d MiB + %d MiB compute reserve over the guard's %d MiB",
+					slots, s.ContextSize, s.TensorSplit, i, held, computeFloorMB, limit)
+			}
 		}
 	}
 }

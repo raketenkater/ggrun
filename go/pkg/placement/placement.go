@@ -1814,7 +1814,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	// overhead + KV + that tier's actual compute buffer must fit in VRAM. No
 	// percentage guess, no fixed headroom — each tier's compute buffer is the
 	// real cost of running that (u)batch (firstLaunchComputeBufMB).
-	batchBaseMB := totalSizeMB + measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs)) + kvTotalMB
+	batchBaseMB := totalSizeMB + planningCUDAOverheadMB(opts.CacheDir, caps.GPUs) + kvTotalMB
 	compute1024MB := firstLaunchComputeBufMB(model, 1024)
 	compute512MB := firstLaunchComputeBufMB(model, 512)
 	if opts.RequireMeasuredBuffers {
@@ -2359,7 +2359,7 @@ func chooseStrategy(caps *detect.Capabilities, model *ModelProfile, s *Strategy,
 // measured evidence (in which case it is 0 and the contained preflight is the
 // authority).
 func perGPUOverheadMB(caps *detect.Capabilities, model *ModelProfile, s *Strategy, opts Options) (cudaOverheadMB, computeBufMB int) {
-	cudaOverheadMB = measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs))
+	cudaOverheadMB = planningCUDAOverheadMB(opts.CacheDir, caps.GPUs)
 	computeBufMB = computeFloorMB // 1024 default
 	if opts.RequireMeasuredBuffers {
 		computeBufMB = 0
@@ -2482,7 +2482,7 @@ func buildSingleGPU(s *Strategy, caps *detect.Capabilities, model *ModelProfile,
 		return nil, fmt.Errorf("single-GPU strategy requires a GPU")
 	}
 
-	cudaOverheadMB := measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs))
+	cudaOverheadMB := planningCUDAOverheadMB(opts.CacheDir, caps.GPUs)
 	computeBufMB := computeFloorMB
 	if opts.RequireMeasuredBuffers {
 		computeBufMB = 0
@@ -2515,7 +2515,7 @@ func buildMultiGPUDense(s *Strategy, caps *detect.Capabilities, model *ModelProf
 	numGPUs := len(caps.GPUs)
 
 	// Load measured CUDA overhead. Missing probe data is unknown and contributes 0.
-	cudaOverheadMB := measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs))
+	cudaOverheadMB := planningCUDAOverheadMB(opts.CacheDir, caps.GPUs)
 
 	// Load model probe for compute buffer (same as MoE path)
 	probeHit := false
@@ -2703,7 +2703,7 @@ func buildDenseCPUOffload(s *Strategy, caps *detect.Capabilities, model *ModelPr
 	numGPUs := len(caps.GPUs)
 	if numGPUs > 1 {
 		// Load measured CUDA overhead. Missing probe data is unknown and contributes 0.
-		cudaOverheadMB := measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs))
+		cudaOverheadMB := planningCUDAOverheadMB(opts.CacheDir, caps.GPUs)
 
 		// Load model probe for compute buffer
 		computeBufMB := computeFloorMB
@@ -5653,6 +5653,24 @@ func measuredCUDAOverheadMB(sysProbe *systemProbe) int {
 	return 0
 }
 
+// planningCUDAOverheadMB is the per-device CUDA overhead a dense plan reserves
+// on the selected GPUs: the largest PlanningCUDAOverheadByGPU value, which is
+// the measured overhead where one exists and UnmeasuredCUDAOverheadMB
+// otherwise. It is the same term the MoE planner and the allocation guard
+// subtract (free less this overhead is the guard's per-device limit). With 0
+// for an unmeasured device the dense planner's cold compute reserve was spent
+// on the guard's overhead: on a fresh install the 4-slot --claude-code launch
+// of Qwen3.8-27B packed CUDA0 to 10 MiB past the guard, and every re-plan,
+// which drops the cold reserve, missed by 650-730 MiB until the start budget
+// ran out (2026-10-13).
+func planningCUDAOverheadMB(cacheDir string, gpus []detect.GPU) int {
+	most := 0
+	for _, v := range PlanningCUDAOverheadByGPU(cacheDir, gpus) {
+		most = max(most, v)
+	}
+	return most
+}
+
 // ramRuntimeOverheadMB is the non-weight system RAM the runtime needs: CUDA host
 // pinned staging, compute-graph scratch, the mmap page table, and CPU activation
 // buffers. Each term is derived from model dims / file size rather than a flat
@@ -5732,7 +5750,7 @@ func checkMemoryOrDie(caps *detect.Capabilities, model *ModelProfile, s *Strateg
 
 	// Load measured CUDA overhead. Missing probe data is unknown and contributes 0;
 	// preflight/startup OOM recording supplies measured data for later launches.
-	cudaOverheadMB := measuredCUDAOverheadMB(loadSystemProbe(opts.CacheDir, caps.GPUs))
+	cudaOverheadMB := planningCUDAOverheadMB(opts.CacheDir, caps.GPUs)
 
 	// Load model probe for compute buffer
 	computeBufMB := computeFloorMB // 1024 default
@@ -5861,7 +5879,7 @@ func StrategyVRAMHeadroomMB(caps *detect.Capabilities, model *ModelProfile, s *S
 	if kvMB <= 0 {
 		kvMB = computeKVTotalMB(model, s.ContextSize, s.KVType, s.SWAFull)
 	}
-	cudaOverheadMB := measuredCUDAOverheadMB(loadSystemProbe(cacheDir, caps.GPUs))
+	cudaOverheadMB := planningCUDAOverheadMB(cacheDir, caps.GPUs)
 	switch s.Type {
 	case SingleGPU:
 		// Only the selected GPU carries the model weights, KV, and compute graph.

@@ -1837,8 +1837,9 @@ func TestExpertOnlyCapacityRespectsCurrentFreeVRAM(t *testing.T) {
 }
 
 func TestRequireMeasuredBuffersRemovesColdGuessButUsesRecordedCompute(t *testing.T) {
-	cacheDir := t.TempDir()
 	gpus := []detect.GPU{{Index: 0, Name: "GPU", VRAMTotalMB: 8192}}
+	// The subject is the cold compute guess, so the CUDA overhead is measured.
+	cacheDir := measuredOverheadCache(t, gpus, 100)
 	caps := &detect.Capabilities{GPUs: gpus}
 	model := &ModelProfile{Path: "model.gguf", SizeBytes: 7000 * 1024 * 1024, TotalSizeMB: 7000, NumLayers: 32}
 	strategy := &Strategy{ContextSize: 32768, UBatchSize: 512, KVQuality: "mid", KVPlacement: "gpu"}
@@ -5425,7 +5426,9 @@ func TestComputeDenseAutoReducePicksLargestFit(t *testing.T) {
 	// nearly half the window was discarded. Assert the property rather than a
 	// constant -- the chosen context must fit, and one granule more must not.
 	free := caps.GPUs[0].VRAMFreeMB() + caps.GPUs[1].VRAMFreeMB() + caps.GPUs[2].VRAMFreeMB()
-	fixed := 30804 + 3*computeFloorMB
+	// Nothing measured the CUDA overhead, so each card also reserves
+	// UnmeasuredCUDAOverheadMB, as the allocation guard does.
+	fixed := 30804 + 3*(computeFloorMB+UnmeasuredCUDAOverheadMB)
 	kv := computeKVTotalMB(model, strat.ContextSize, strat.KVType, true)
 	if fixed+kv > free {
 		t.Fatalf("ctx=%d does not fit: model+overhead+kv = %d > %d free", strat.ContextSize, fixed+kv, free)
