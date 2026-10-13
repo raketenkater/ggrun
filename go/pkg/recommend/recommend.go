@@ -237,23 +237,29 @@ func appendReason(r *Recommendation, note string) {
 }
 
 // preferServable keeps each list's order but moves rows no supported backend
-// route can load after the rest. Installation state is not capability: a row
-// whose backend the first launch builds keeps its place. What stays last is
-// the K2 Horizon failure: the release backend lacked k2-horizon, nothing
-// offered a build, and a fresh install's top CPU pick could not load.
+// route can load after the rest. What stays last is the K2 Horizon failure:
+// the release backend lacked k2-horizon, nothing offered a build, and a fresh
+// install's top CPU pick could not load.
 //
-// speedRanked (Best overall, Fastest) also moves rows a default launch serves
-// on Vulkan on an NVIDIA host, with no CUDA build offered, after the other
-// servable rows: their estimate assumes CUDA, and the one measurement
+// Installation state is not capability: Smartest keeps a row whose backend the
+// first launch builds in capability order. speedRanked (Best overall, Fastest)
+// is a practical choice, so there setup feasibility counts: such a row, and a
+// row a default launch serves on Vulkan on an NVIDIA host with no CUDA build
+// offered, follow the rows that serve as estimated now. A needs_setup row's
+// first launch is a 20-40 minute source build that needs git, cmake, a
+// compiler and on NVIDIA the CUDA toolkit, and its speed estimate rests on a
+// backend nobody measured; the one measured row off the default backend
 // (MiMo-V2.6-Flash Q2_K, full rig, matrix15) decoded 2.9 tok/s against 10.5
-// predicted on the Vulkan build. When the CUDA build is offered the estimate
-// rests on that build, like every needs_setup row, and the row keeps its
-// place. Smartest does not rank by speed and keeps them in capability order.
+// predicted. Best overall #1 is also what `recommend --first` and the
+// installer's first download take. A Vulkan row with the CUDA build offered
+// is ready now and keeps its place.
 func preferServable(rows []Recommendation, speedRanked bool) {
 	rank := func(r Recommendation) int {
 		switch {
 		case r.BackendStatus == BackendUnsupported:
 			return 2
+		case speedRanked && r.BackendStatus == BackendNeedsSetup:
+			return 1
 		case speedRanked && r.ServedOnVulkan() && !r.CUDABuildOffered:
 			return 1
 		}

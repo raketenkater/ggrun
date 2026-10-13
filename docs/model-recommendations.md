@@ -82,9 +82,10 @@ first launch offers a 20-40 minute build, `unsupported` (marked `!`) when no
 such route exists, and `unknown` when a backend could not be probed. A build
 route is a reviewed recipe, or current mainline when mainline registers the
 architecture (an architecture only ik_llama registers has none), and needs git,
-cmake and a C++ compiler on PATH, nvcc on an NVIDIA host, no backend pinned in
-the config, and a non-Windows host. A `needs_setup` row keeps its rank; an
-`unsupported` row is listed after every usable one. On an NVIDIA host a model a
+cmake and a C++ compiler on PATH, nvcc on an NVIDIA host (unless `--cpu`), no
+backend pinned in the config, and a non-Windows host. Smartest keeps a
+`needs_setup` row in capability order; Best overall and Fastest list it after
+the rows that run now. An `unsupported` row is listed after every usable one. On an NVIDIA host a model a
 default launch would serve on the Vulkan build (an architecture only mainline
 loads, or a large MoE whose file-backed experts win the backend choice) is
 `ready` but runs far below the CUDA estimate (marked `^`). `CUDABuildOffered`

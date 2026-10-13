@@ -98,10 +98,12 @@ func TestNoBackendRouteRanksAfterUsableRows(t *testing.T) {
 	}
 }
 
-// Installation state is not capability: a row whose backend the first launch
-// builds through a supported route keeps its rank in every category, and is
-// marked so a caller that needs a model ready now can select one.
-func TestBackendSetupRouteKeepsRankInEveryCategory(t *testing.T) {
+// Installation state is not capability: in Smartest a row whose backend the
+// first launch builds through a supported route keeps its rank, and is marked
+// so a caller that needs a model ready now can select one. Best overall and
+// Fastest are practical picks: there it follows the ready rows, which keep
+// their order.
+func TestBackendSetupRouteKeepsRankInSmartest(t *testing.T) {
 	t.Cleanup(resetBackendProbes)
 	resetBackendProbes()
 	base := TopCategories(cpuSixteenCaps(), 6)
@@ -112,8 +114,32 @@ func TestBackendSetupRouteKeepsRankInEveryCategory(t *testing.T) {
 	got := TopCategories(cpuSixteenCaps(), 6)
 	baseGroups := categoryGroups(base)
 	for name, group := range categoryGroups(got) {
-		if !reflect.DeepEqual(repos(baseGroups[name]), repos(group)) {
-			t.Fatalf("%s: a backend build route changed the ranking:\nbefore %v\nafter  %v", name, repos(baseGroups[name]), repos(group))
+		if name == "smartest" {
+			if !reflect.DeepEqual(repos(baseGroups[name]), repos(group)) {
+				t.Fatalf("%s: a backend build route changed the ranking:\nbefore %v\nafter  %v", name, repos(baseGroups[name]), repos(group))
+			}
+		} else {
+			seenSetup := false
+			var readyBase, readyGot []string
+			for _, r := range baseGroups[name] {
+				if strings.ToLower(r.Arch) != blocked {
+					readyBase = append(readyBase, r.Repo)
+				}
+			}
+			for _, r := range group {
+				if r.BackendStatus == BackendNeedsSetup {
+					seenSetup = true
+					continue
+				}
+				if seenSetup {
+					t.Fatalf("%s: ready %s ranked after a row that needs a backend build: %v", name, r.Repo, repos(group))
+				}
+				readyGot = append(readyGot, r.Repo)
+			}
+			n := min(len(readyBase), len(readyGot))
+			if !reflect.DeepEqual(readyBase[:n], readyGot[:n]) {
+				t.Fatalf("%s: ready order changed:\nbefore %v\nafter  %v", name, readyBase, readyGot)
+			}
 		}
 		for _, r := range group {
 			if strings.ToLower(r.Arch) != blocked {
@@ -160,9 +186,10 @@ func TestSeniorSmartestPreservesIntelligenceAcrossBackendSetup(t *testing.T) {
 	}
 }
 
-// Per category: a smarter, faster model that needs backend setup outranks a
-// ready one when a supported route builds its backend. When none does it stays
-// listed with its status, after every usable row.
+// A smarter, faster model that needs backend setup outranks a ready one in
+// Smartest when a supported route builds its backend, and follows it in Best
+// overall and Fastest. When no route does it stays listed with its status,
+// after every usable row.
 func TestBackendRouteDecidesRankPerCategory(t *testing.T) {
 	t.Cleanup(resetBackendProbes)
 	yes := true
@@ -182,8 +209,12 @@ func TestBackendRouteDecidesRankPerCategory(t *testing.T) {
 		route := c.route
 		SetBackendRoute(func(*detect.Capabilities, string, bool) bool { return route })
 		for name, group := range categoryGroups(TopCategories(intelligenceTestHardware(), 50)) {
-			if len(group) < 2 || group[0].Repo != c.first {
-				t.Fatalf("route=%v %s: got %v, want %s first", c.route, name, repos(group), c.first)
+			first := c.first
+			if name != "smartest" {
+				first = weak.Repo
+			}
+			if len(group) < 2 || group[0].Repo != first {
+				t.Fatalf("route=%v %s: got %v, want %s first", c.route, name, repos(group), first)
 			}
 			last := group[len(group)-1]
 			if !c.route && (last.Repo != strong.Repo || last.BackendStatus != c.want) {
