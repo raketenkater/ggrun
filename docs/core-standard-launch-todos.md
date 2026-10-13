@@ -3861,3 +3861,42 @@ On the ik path dense launches are not oracle-admitted, so
 log-based source over-recorded 1,775 vs ~600 MiB on MiMo, which is why it is
 MoE/oracle-only): such a plan keeps the 1,024 MiB reserve on later launches.
 Follow-up, not in this change: a dense-safe measurement of CUDA overhead.
+
+## CLAUDE MODE — four slots start now, but SSM-layout output corrupts — 2026-10-13
+
+Candidate e40c127 (ik_llama 1fddd12 + #2356, release flags), full host, the
+owner's ComfyUI stopped with permission. Evidence
+`2tb-disk/ggrun-accept-20261013-evidence/p3/`, `replay-ab/`.
+
+| cell | outcome |
+|---|---|
+| `--claude-code` default, first launch | starts: ready 532 s (companion included), 500,736 tokens over 4 slots after one measured re-plan admitted on exact preflight (the morning's admission failure is gone); three tasks at once: textstats 411 s, inventory 311 s correct, calc TIMEOUT 2,400 s |
+| same, relaunch | PASS: ready 306 s (six short probe loads, 557,056 tokens), ledger correct in 593 s |
+| `--parallel 4` explicit | ready 423 s, 701,440 tokens; textstats 324 s, inventory 390 s correct, calc TIMEOUT 2,400 s |
+| CPU + 16 GiB Smartest Qwen3.8 UD-IQ2_XXS | first launch: calc 2,613 / textstats 1,450 / inventory 1,206 s correct, decode 3.1 tok/s; relaunch ready 9 s, ledger TIMEOUT at 5,400 s |
+
+The calc timeouts are corrupted output, not model looping: one request
+decoded 32,000 tokens (2,065 s) that begin as a tool call and decay into
+`</it>\note` repeats; every HTTP status was 200. Replaying that session's 26
+probe and 45 Claude requests directly against the same argv on 4 slots
+reproduced a corrupted calc reply (`replay_parallel.py`); greedy 768-token
+prompts on 4 staggered slots showed no debris but diverged from the solo
+output after 50-229 characters. Every one-slot session of this model today
+(about a dozen) was clean. The backend also logs `qwen3next mixed-sequence
+batch contains repeated seq_id values; falling back to single-token chunking`
+(2,284 times in the replay): mixed prefill/decode batches of this hybrid
+run one token at a time, so the slots are slower too (1-slot concurrent
+makespan 341 s against >2,400 s). Upstream ik_llama #2628 (per-slot sampler
+state leak) was the first suspect; a build with it could not be compared,
+the arm was invalid (port held by the previous arm), and the sampler state of
+the logged probes (`ignore_eos:false`, empty logit_bias) does not support it.
+
+Fix (f21898d, not a placement change): default Claude mode serves a model
+with an SSM layout (`HasSSM`) on one slot; an explicit `--parallel` or the
+parallel profile is honored with a warning. Test `TestClaudeHybridSSMSlots`.
+Core gate uncached: pass. Explicit 4-slot remains a known failure on this
+backend for the qwen3next family; not hidden: it is reported as such.
+
+Also learned today: the 4,096-token-capped replay reply and the stalled
+cells show Claude Code's 32,000-token max_tokens lets a corrupted stream run
+for 30+ minutes; a server-side output cap would bound it (follow-up).
