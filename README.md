@@ -1,21 +1,21 @@
 # ggrun
 
-ggrun (pronounced "g-run", from "gguf run") is my launcher around
-[llama.cpp](https://github.com/ggml-org/llama.cpp) and ik_llama.cpp. It reads a
-GGUF's tensor layout against the VRAM, RAM, and per-GPU bandwidth actually on
-the machine, then places big MoE models across a mismatched multi-GPU setup so
-the split fits and the server starts without an OOM or a pile of hand-tuned
-flags. I started it because loading one GGUF is easy, but getting that split
-right by hand was not.
+ggrun (pronounced "g-run", from "gguf run") helps you choose and run local
+models on the hardware you already own. It brings model recommendations,
+downloads, backend selection and launch configuration into one terminal UI,
+with a local Claude Code workflow for coding and other agent tasks.
 
-The project is mainly about three things:
+The goal is a short path from installation to useful local work:
 
-1. running big MoE models that do not fit neatly into VRAM;
-2. finding a fast configuration that also stays stable at the context and load I
-   actually want to use;
-3. making Claude Code's Ultracode workflows actually usable with a local model:
-   parallel agents, tools, long contexts, research, and no cloud inference for
-   the model calls.
+1. install with one command;
+2. find a capable model that fits your hardware and useful context requirements;
+3. run it through a compatible backend with automatic memory placement;
+4. connect it to an agent harness for tools, coding and longer workflows.
+
+Underneath, ggrun uses [llama.cpp](https://github.com/ggml-org/llama.cpp),
+ik_llama.cpp and supported forks. Large MoE models split across GPU memory and
+system RAM are a particular focus, alongside dense models and smaller systems.
+The aim is fast, stable, useful work within the available hardware budget.
 
 ggrun is not an inference engine. It reads the GGUF and the machine, builds a
 launch plan for the selected backend, checks that the plan fits, starts the
@@ -42,21 +42,8 @@ Windows (PowerShell):
 $s = irm https://raw.githubusercontent.com/raketenkater/ggrun/main/install.ps1; iex "& { $s }"
 ```
 
-This is written to survive the two things that broke the previous one-liner
-(`iwr -useb ... | iex`):
-
-- **The script used to be served with a UTF-8 BOM.** Piped into `iex`, the BOM is
-  not stripped, so `<# ... #>` was not recognised as a comment block and the help
-  text inside it was parsed as code — the failure surfaced as a confusing error on
-  the line of the usage example, mentioning a cmdlet binding. The BOM is gone, and
-  the form above wraps the text in a script block so any leading character is
-  harmless.
-- **Piped installs had no way to answer the consent prompt.** `Read-Host` in a
-  session with no console stdin throws or hangs. The installer now detects a
-  redirected stdin, like `setup.sh` always has, and skips prompts it cannot ask.
-
-`-AssumeYes` or `LLM_INSTALL_NONINTERACTIVE=1` still force non-interactive
-behaviour if you want it explicitly.
+For unattended Windows installation, use `-AssumeYes` or
+`LLM_INSTALL_NONINTERACTIVE=1`; see [installation details](docs/install.md).
 
 Open a new terminal after adding ggrun to PATH. To launch immediately with the
 standard install location, use `~/ggrun/ggrun` on Linux or
@@ -96,7 +83,9 @@ The cached profile is accepted only on the exact CPU/RAM/GPU/PCI layout that
 produced it. Normal `ggrun detect` and launches fall back to derived PCIe values
 when the profile is absent, stale, incomplete, or corrupt.
 
-![ggrun TUI demo](demo.gif)
+![Earlier ggrun TUI demo](demo.gif)
+
+This recording shows an earlier TUI; the current layout may differ.
 
 ## What it does
 
@@ -161,17 +150,30 @@ model endpoint and wires the local workflow; it does not make a model with weak
 tool use behave like a strong coding model. The complete setup and overrides are
 documented in [docs/usage.md](docs/usage.md#use-with-claude-code).
 
-Known issue: on a multi-GPU host, the 4-slot `--claude-code` launch of
-Qwen3.8-27B does not start yet (the plan's layer split differs from
-ik_llama's); a plain `ggrun model.gguf` launch of the same model does.
+## Measured results
 
-## Numbers from my weird rig
+October 13, 2026, v3.2.11: what a fresh install recommended for four hardware
+profiles on one machine, launched with the defaults and used through Claude
+Code on small repository repair tasks checked by unit tests. Details, limits
+and every timeout are in [docs/launch-performance.md](docs/launch-performance.md).
 
-My reference machine is deliberately awkward: RTX 3090 Ti 24GB, RTX 3060 12GB,
-RTX 4070 12GB, and 212GB RAM on a PCIe Gen 3 board, with the 3060 at x8. These are
-decode results from the dated, reproducible runs in
-[docs/launch-performance.md](docs/launch-performance.md), not a promise that
-every machine gets the same speedup.
+| Hardware profile | Best overall | Smartest | Fastest |
+|---|---|---|---|
+| 3 GPUs (12+24+12 GB), 212 GB RAM | Qwen3.8-27B Q5_K_S: 3/3 tasks, 82-116 s each | GLM-5.3 IQ2_M: not run (disk failure) | Qwen3.6-35B-A3B IQ4_XS: 3/3, 38-43 s |
+| 12 GB GPU + 32 GiB | Qwen3.8-27B IQ2_XXS: 3/3, 85-231 s | same as Best overall | Gemma 4 26B A4B IQ4_XS: 3/3, 153-168 s |
+| 24 GB GPU + 128 GiB | Qwen3.8-27B Q5_K_S: 3/3, 64-79 s | GLM-5.3-Flash IQ3_XXS: backend built on first launch, 3/3, 272-414 s | Qwen3.6-35B-A3B IQ4_XS: 3/3, 20-1,338 s |
+| CPU only, 16 GiB | Qwen3.6-35B-A3B IQ2_XXS: 2/3 (one 1 h timeout) | Qwen3.8-27B IQ2_XXS: 3/3 but 20-44 min each | same as Best overall |
+
+Profiles were imposed with `--gpus`/`--cpu` and `--ram-budget` on an
+i9-10940X with an RTX 4070, RTX 3090 Ti and RTX 3060 (PCIe Gen 3); they do not
+emulate a smaller CPU or slower memory. Single runs per cell.
+
+### Historical: June 22, 2026
+
+The comparison below is the **June 22, 2026 benchmark**, retained as historical
+evidence. That test used an RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, and
+128GB RAM, with the smaller cards on slow PCIe links. It is not a comparison
+of today's releases.
 
 Default placement, 32k context, without `--ai-tune`:
 

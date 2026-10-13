@@ -1,10 +1,68 @@
 # Benchmarks
 
+## Agent workload results — 2026-10-13 (v3.2.11)
+
+What a fresh installation recommends for four hardware profiles, and what
+happened when each recommendation was downloaded and launched with the
+defaults and used through Claude Code. Each first launch ran three small
+repository repair tasks (`calc`, `textstats`, `inventory`; correctness checked
+by each repository's unit tests, never by the model); each relaunch ran one
+longer task (`ledger`, 20-35 turns). Times are wall seconds per task.
+
+- Installation: `setup-linux.sh` default mode into an empty home, from
+  bundles packaged as `release.yml` packages them (ik_llama 1fddd12 + #2356
+  CUDA backend built with the release flags; mainline d2462f8 Vulkan);
+  recommendations from the embedded catalog of 2026-10-13. Downloads are not included in "ready"; one recommended model
+  (GLM-5.3-Flash UD-IQ3_XXS, 112 GB) was downloaded through `ggrun download`
+  in 3 h 6 min.
+- Profiles: `--gpus N --ram-budget X` (or `--cpu`) on the same machine, with
+  the backend's GPU visibility and memory cgroup checked on every launch.
+  Limits do not emulate a smaller CPU, slower memory or other PCIe links.
+- Machine: i9-10940X (14 cores), 212 GB RAM, RTX 4070 12 GB + RTX 3090 Ti
+  24 GB + RTX 3060 12 GB on PCIe Gen 3 (3060 at x8), driver 580.178.04.
+- Prefill is the first long prompt of the session (~9k-21k tokens); decode is
+  the median over requests that generated at least 32 tokens.
+
+Tasks: calc / textstats / inventory on first launch; ledger on relaunch.
+
+| Profile | Category | Model (quant) | First launch: ready; tasks (s) | Relaunch: ready; long task (s) | Context | Prefill / decode tok/s |
+|---|---|---|---|---|---:|---|
+| Full host | Best overall | Qwen3.8-27B UD-Q5_K_S | 121 s; 116 / 82 / 98 | 14 s; 497 | 262,144 | 1,391 / 30.7 |
+| Full host | Smartest | GLM-5.3 UD-IQ2_M (222 GB) | not run: the model disk failed during download | — | — | — |
+| Full host | Fastest | Qwen3.6-35B-A3B UD-IQ4_XS | 315 s; 38 / 38 / 43 | 13 s; 108 | 262,144 | 3,645 / 80.2 |
+| 12 GB GPU + 32 GiB | Best overall, Smartest | Qwen3.8-27B UD-IQ2_XXS | 256 s; 231 / 137 / 85 | 50 s; 470 | 76,800 | 1,119 / 31.2 |
+| 12 GB GPU + 32 GiB | Fastest | Gemma 4 26B A4B IQ4_XS | 225 s; 161 / 153 / 168 | 8 s; 206 | 74,752 | 265 / 30.0 |
+| 24 GB GPU + 128 GiB | Best overall | Qwen3.8-27B UD-Q5_K_S | 175 s; 64 / 79 / 76 | 6 s; 256 | 122,880 | 1,008 / 34.7 |
+| 24 GB GPU + 128 GiB | Smartest | GLM-5.3-Flash UD-IQ3_XXS (112 GB) | backend built automatically (mainline CUDA), then 337 / 272 / 414 | 1,108 s; 992 | 628,736 | — |
+| 24 GB GPU + 128 GiB | Fastest | Qwen3.6-35B-A3B UD-IQ4_XS | 106 s; 23 / 20 / 1,338 | 9 s; 99 | 262,144 | 3,185 / 92.5 |
+| CPU + 16 GiB | Best overall, Fastest | Qwen3.6-35B-A3B UD-IQ2_XXS | 206 s; 323 / 147 / **timeout** (3,600) | 15 s; 586 | 108,544 | 127 / 13.1 |
+| CPU + 16 GiB | Smartest | Qwen3.8-27B UD-IQ2_XXS | 468 s; 2,613 / 1,450 / 1,206 | 9 s; **timeout** (5,400) | 131,072 | 16 / 3.1 |
+
+Notes:
+
+- A timeout is a failure, not a pass. CPU-only Qwen3.8-27B is correct but
+  takes 20-45 minutes per small task and timed out on the long task; on the
+  CPU profile Qwen3.6-35B-A3B timed out once after it repeated a tool call
+  for an hour (the server answered every request).
+- Claude Code mode (`--claude-code`, local reviewer on the third GPU) passed
+  the same tasks on Qwen3.8-27B: three tasks at once in 478 s, the long task
+  in 593 s. Four slots on this model family produced corrupted output on the
+  bundled ik_llama build, so Claude Code mode now uses one slot for it.
+- GLM-5.3-Flash needs a backend newer than the bundled ones: its first launch
+  built current mainline llama.cpp with CUDA (about 15 minutes here) before
+  loading. The full-host Smartest pick (GLM-5.3 UD-IQ2_M, 222 GB) was not
+  measured: the model disk failed during its download.
+- Single runs per cell; expect run-to-run variation, especially for agent
+  task times. No other runtime was measured in this round, so no comparison
+  is claimed here.
+
+## Historical: 2026-06-22 decode comparison
+
 ggrun's default placement vs raw llama.cpp `--fit` (its built-in auto-placement) on the
 same GGUFs, measured with `scripts/bench-v3-comparison.sh`. These are ggrun's defaults —
 no `--ai-tune` (see the note at the end).
 
-Hardware: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, 212GB RAM. Context: 32768,
+June 22, 2026 retest. Hardware then: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, 128GB RAM. Context: 32768,
 256-token decode. CUDA backend: ik_llama.cpp build 4641 (`6c00e87a`). Numbers are from
 the 2026-06-22 retest on this rig.
 
@@ -15,7 +73,7 @@ the 2026-06-22 retest on this rig.
 > every GPU has full PCIe bandwidth, the gap to raw `--fit` is smaller. The single-GPU 4B
 > gain comes from the ik_llama.cpp backend and flag defaults, not PCIe.
 
-## Dense models (CUDA / ik_llama.cpp)
+### Dense models (CUDA / ik_llama.cpp)
 
 | Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun |
 |---|---:|---:|---:|
@@ -25,7 +83,7 @@ the 2026-06-22 retest on this rig.
 ggrun's default placement beats raw `--fit` on both (+47% on the 4B, +54% on the 27B) on
 this rig.
 
-## MoE (CUDA / ik_llama.cpp)
+### MoE (CUDA / ik_llama.cpp)
 
 The MoE models use expert offload across VRAM + system RAM. On asymmetric PCIe
 topologies, dense-layer ownership stays on the fast link while cards at one-third
@@ -42,7 +100,7 @@ load MiniMax-M3 at all (`unknown model architecture: minimax-m3` — ik_llama.cp
 The point of these rows is less the exact tok/s than that the models **run**: ggrun loads
 big MoE models across VRAM + system RAM that don't fit in VRAM alone.
 
-### DeepSeek-V4 long-context service stress
+#### DeepSeek-V4 long-context service stress
 
 The same 1M-context, parallel-4 placement completed a four-request stress run with one
 60,020-token prompt and three concurrent prompts of 4,115, 4,243, and 4,371 tokens. Every
@@ -52,7 +110,7 @@ an OOM, restart, truncation, or health failure. Post-run VRAM was 23,962 / 9,329
 MiB on the 3090 Ti / 3060 / 4070. Reproduce against a running server with
 `scripts/loadtest-moe.py`; its default shape is this exact 60k + 3-worker test.
 
-## Speculative decoding
+### Speculative decoding
 
 Qwen3.6 27B Q5_K_M with ik_llama.cpp, 32k context, one slot, 512 generated tokens:
 
@@ -67,14 +125,14 @@ Speculative decoding is a measured, workload-gated feature: the 278 tok/s row is
 best-case structured prompt with full draft acceptance, and the same setting is slower on
 code output. It should not be advertised as always faster.
 
-## A note on AI Tune
+### A note on AI Tune
 
 The tables above are ggrun's **default** placement — no tuning. `--ai-tune` benchmarks a
 few flag variants and caches the fastest, but on this rig the gains are marginal and
 model-specific (the default often wins the confirmation re-measure), so it's an optional
 extra, not part of the headline numbers.
 
-## Launch Read
+### Launch Read
 
 - ggrun's default placement beats raw llama.cpp `--fit` on every dense model tested here.
 - ggrun runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) across VRAM + RAM that raw

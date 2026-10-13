@@ -3922,3 +3922,33 @@ before the build finished (nothing registered). Now, when the catalog's
 runnable_mainline stamp covers the architecture, the mainline build comes
 before discovery (`TestUnsupportedArchRoutesPreferMainlineWhenItRegisters`).
 The rerun clones ggml-org/llama.cpp master. Core gate uncached: pass.
+
+## GLM-5.3-FLASH BUILD ROUTE, FAULT INJECTION, MODEL DISK FAILURE — 2026-10-13
+
+Candidate `v3.2.10-184-g4ce1f41` (launcher eb1b787d...). Evidence
+`2tb-disk/ggrun-accept-20261013-evidence/p5/` (rescued copy in
+`accept-20261013/evidence-rescue/p5/`).
+
+3090 Ti + 128 GiB Smartest, GLM-5.3-Flash UD-IQ3_XXS (glm5-next), downloaded
+with `ggrun download` in 3 h 6 min (112 GB, unauthenticated HF, shared disk):
+the first launch (LLM_ASSUME_YES) built current ggml-org/llama.cpp master with
+CUDA as backend `llama-cuda-glm5-next` (~15 min), loaded 112 GB (~8.6 min),
+planned 628,736 tokens on one slot and raised ubatch 128 -> 2048 after exact
+preflight. calc 337 / textstats 272 / inventory 414 s, all correct. Relaunch
+ready 1,108 s (one load), ledger 28 turns correct in 992 s; memory.max
+137,438,953,472, CUDA_VISIBLE_DEVICES=1; stream, cancel, reconnect, stop
+14.5 s, nothing left running. PASS.
+
+VRAM fault injection (`run_oom_inject.py`, Qwen3.5-4B on GPU 0, card filled
+to 2 MiB free by a separate process after ready): the backend died with
+"CUDA error: out of memory" in cuMemCreate (pool growth), not the cuBLAS form.
+ggrun read it as a size-less VMM OOM, escalated the reserve 2,048 -> 10,240
+MiB, found every re-plan identical to the failed argv and refused an
+identical relaunch: bounded, clear message, clean exit, no leftover backend.
+The cuBLAS sampling path was not reached; it stays covered by unit tests only.
+
+At 21:44:16 UTC the 2 TB model/evidence disk (Seagate ST2000DM008, ata5)
+failed revalidation after link resets and was disabled; writes since then
+were lost. Not measured because of it: full-host Smartest GLM-5.3 UD-IQ2_M
+(download stopped at ~100 of 222 GB), the TUI recording, and re-reads of the
+p1-p4 raw logs (their numbers are in the entries above).
