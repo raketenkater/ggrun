@@ -318,22 +318,38 @@ func claudeReviewerReservation(req *launchRequest, caps *detect.Capabilities, ca
 // launch reserves that instead of the constant. It runs after the health check,
 // when weights and the CUDA context are resident; the stored value only ever
 // grows, because a sample taken before the reviewer's KV fills would shrink the
-// reservation and overrun on the next long conversation.
-func recordReviewerVRAM(cfg *config.Config, p *server.Process, profile *claudeCompanionProfile) {
+// reservation and overrun on the next long conversation. It returns the
+// measurement, or 0 when there is none.
+func recordReviewerVRAM(cfg *config.Config, p *server.Process, profile *claudeCompanionProfile) int {
 	if cfg == nil || p == nil || p.Cmd == nil || p.Cmd.Process == nil || profile == nil {
-		return
+		return 0
 	}
 	usedMB := placement.QueryVRAMUsedByPID(p.Cmd.Process.Pid)
 	if usedMB <= 0 {
-		return
+		return 0
 	}
 	if err := placement.RecordCompanionVRAM(cfg.CacheDir, profile.companionMeasurementKey(), usedMB); err != nil {
-		return
+		return 0
 	}
 	if usedMB < profile.ReservationVRAMMB {
 		fmt.Printf("[claude-code] Auto reviewer measured at %d MiB; releasing %d MiB the %d MiB reservation withheld\n",
 			usedMB, profile.ReservationVRAMMB-usedMB, profile.ReservationVRAMMB)
 	}
+	return usedMB
+}
+
+// seatReviewerAtMeasurement plans the running reviewer's seat at what it was
+// measured to occupy, for the admission that follows in this launch, as the
+// next launch's reservation will. The main model is admitted with the reviewer
+// resident; keeping the larger constant there made the guard withhold memory
+// the driver reports free, so a backend that fits itself (ik --fit) overran the
+// guard by exactly the difference: 1099 MiB on a 12 GB card, every re-plan,
+// until the start budget ran out (2026-10-14).
+func seatReviewerAtMeasurement(req *launchRequest, measuredMB int) {
+	if req == nil || req.ReviewerReservation == nil || measuredMB <= 0 || measuredMB >= req.ReviewerReservation.VRAMMB {
+		return
+	}
+	req.ReviewerReservation.VRAMMB = measuredMB
 }
 
 // residentReviewerVRAMMB sums the VRAM held by reviewer processes that are
@@ -467,7 +483,7 @@ func startClaudeAutoReviewer(req *launchRequest, cfg *config.Config, caps *detec
 		p, err := server.StartWithTimeoutToEnv(args, port, 5*time.Minute, logWriter, logWriter, env)
 		if err == nil {
 			fmt.Printf("[claude-code] Auto worker/reviewer ready on GPU %d (PID %d, %s, ctx %dk)\n", gpu, p.Cmd.Process.Pid, profile.DisplayName, profile.reviewerContextTokens()/1024)
-			recordReviewerVRAM(cfg, p, profile)
+			seatReviewerAtMeasurement(req, recordReviewerVRAM(cfg, p, profile))
 			return &claudeAutoRuntime{reviewer: p, reviewerLog: logCloser, reviewerPort: port, reviewerGPU: gpu, companion: profile}, nil
 		}
 		lastErr = err

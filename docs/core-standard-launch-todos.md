@@ -3952,3 +3952,58 @@ failed revalidation after link resets and was disabled; writes since then
 were lost. Not measured because of it: full-host Smartest GLM-5.3 UD-IQ2_M
 (download stopped at ~100 of 222 GB), the TUI recording, and re-reads of the
 p1-p4 raw logs (their numbers are in the entries above).
+
+## CLAUDE MODE ON ONE 12 GB GPU — the reviewer's seat and ik --fit — 2026-10-14
+
+Public install (main `bfb2f4e`, release v3.2.11 backends) in an isolated home,
+`LLM_RAM_BUDGET=32G ggrun tui --gpus 0`, top pick Qwen3.8-27B UD-IQ2_XXS
+(6.9 GB, downloaded through the TUI), Claude Code on. Launch FAILED: the
+dense plan went to GPU+RAM with `--fit`; preflight missed CUDA0 by 1001, 809,
+699, 578 MiB and the four-load admission budget ran out. Reproduced off-camera
+on a reset cache (arm A, same deficits, exit 1).
+
+Cause: the planner seats the Auto reviewer at its 6144 MiB reservation; the
+reviewer measured 5045 MiB, but only the next launch used that. The guard
+(free less reserved and overhead) withheld the 1099 MiB the driver reports
+free, while ik's own fit sizes from driver-free less its 1024 MiB margin. Each
+recovery lowered ggrun's budget, which `--fit` never sees, so no re-plan
+could converge.
+
+Fix (branch `fix/fit-follows-guard`): the running reviewer is seated at its
+measurement for this launch's admission; argv that hand placement to ik's
+`--fit` carry `--fit-margin` when the guard is tighter than ik's default
+(expected load-time free less guard limit, unstarted companion seats counted,
+rounded to 256 MiB). Arm D, clean cache: guard 6808 MiB, first preflight fits,
+plan stable, ctx 262,144, ub 512, 65/65 layers and 2213 MiB KV on CUDA0,
+server healthy, Claude Code client started. Intermediate arm B (margin only)
+also converged (51 MiB ubatch derate, `--fit-margin 2304`) but re-verified an
+unchanged plan five times; arm C (margin from a pre-reviewer reading)
+admitted with a 7168 MiB margin and 522 MiB of weights on GPU. Both fixed by
+the final shape. Evidence: `accept-20261013/evidence-clip/fitmargin-ab/`.
+
+Not yet measured: agent task time/decode under the fixed launch, and the
+installer's update prompt (PR #83) still appears on this path.
+
+Agent task under the fixed launch (arm E, same reset, interactive Claude Code,
+Auto mode): calc task correct (one-line fix, tests pass, test file hash
+unchanged) in 20 m 30 s. The first 18,653-token turn took 605 s: ik's fit put
+65/65 layers on CUDA0 but only 2213 of 8704 MiB KV, so prefill ran at ~34
+tok/s against host KV; during it the 2 s health probe reported "backend died
+mid-session" for a live backend (false alarm, status line "backend
+unavailable" until it answered again). For comparison, the non-Claude cell on
+the same card (4070 + 32 GiB) planned ctx 76,800 fully on GPU and ran this
+task in 231 s. Open policy question for tight single GPUs: the 5 GB reviewer
+is what pushes this dense model off the GPU.
+Every main turn reported 0 cached tokens (18.6k-22.2k input each); the backend
+logged "forcing full prompt re-processing due to lack of cache data" after the
+startup canary, so each turn re-prefilled the whole conversation on host KV.
+
+Same task with `--claude-reviewer qwen2b` (reviewer measured 3292 MiB, not
+the 1.4 GB file size; 128k reviewer context): published launcher FAILED the
+same way (7 preflight derates, advisor prompt, no start); this branch
+admitted ctx 262,144, `--fit-margin 1536`, 3320 of 8704 MiB KV on CUDA0,
+task correct in 17 m 25 s (4B reviewer: 20 m 30 s; non-Claude on the same
+card: 231 s at ctx 76,800 fully on GPU). The reviewer size is not the main
+lever; the planner's 262k context with host-resident KV is. Whether Claude
+mode should trade context for GPU-resident KV on tight cards is an owner
+decision (invariant 3).
