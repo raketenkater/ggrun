@@ -85,9 +85,10 @@ when the profile is absent, stale, incomplete, or corrupt.
 
 ![ggrun: install, recommended model, download, launch and a Claude Code fix](demo.gif)
 
-Recorded October 14, 2026 with `main` at `16c2ae1` (v3.2.11 plus fixes), 3 GPUs: public install,
-recommended model, download, automatic launch, and Claude Code fixing a failing
-test. Sped-up parts are captioned with their real duration.
+Recorded October 14, 2026 with `main` at `16c2ae1` (v3.2.11 plus fixes) on
+3 GPUs: public install, recommended model, download, automatic launch, and
+Claude Code fixing a failing test. Sped-up parts are captioned with their real
+duration.
 
 ## What it does
 
