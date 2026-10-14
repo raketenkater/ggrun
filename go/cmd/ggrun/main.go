@@ -3186,7 +3186,8 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, claudeCodeShiftableContext(model, strategy))
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	serverArgs = backendVerbosityArgs(serverArgs, be.Help)
-	return applyRequestDisabledBackendFlags(serverArgs, req)
+	serverArgs = applyRequestDisabledBackendFlags(serverArgs, req)
+	return bindFitToGuard(serverArgs, req, cfg.CacheDir, be, caps, strategy)
 }
 
 func disableBackendFlag(req *launchRequest, flag, reason string) bool {

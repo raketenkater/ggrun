@@ -780,14 +780,7 @@ func runGuardedAllocationPreflight(req *launchRequest, be *backendInfo, cfg *con
 		guardLogPath = guardLog.Name()
 		_ = guardLog.Close()
 		defer os.Remove(guardLogPath)
-		overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
-		gpuLimitsMB := make([]int, len(caps.GPUs))
-		for i, gpu := range caps.GPUs {
-			gpuLimitsMB[i] = gpu.VRAMFreeMB() - overheadByGPU[gpu.Index]
-			if gpuLimitsMB[i] < 0 {
-				gpuLimitsMB[i] = 0
-			}
-		}
+		gpuLimitsMB := allocationGuardLimitsMB(cfg.CacheDir, caps)
 		// Total host allocation is already fail-closed under this probe's cgroup
 		// MemoryMax. Do not add a second pinned-only ceiling: zero in memguard means
 		// deny all, not unlimited, and ik_llama's CPU expert buffer legitimately

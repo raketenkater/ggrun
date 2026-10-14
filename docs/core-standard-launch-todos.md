@@ -3952,3 +3952,34 @@ failed revalidation after link resets and was disabled; writes since then
 were lost. Not measured because of it: full-host Smartest GLM-5.3 UD-IQ2_M
 (download stopped at ~100 of 222 GB), the TUI recording, and re-reads of the
 p1-p4 raw logs (their numbers are in the entries above).
+
+## CLAUDE MODE ON ONE 12 GB GPU — the reviewer's seat and ik --fit — 2026-10-14
+
+Public install (main `bfb2f4e`, release v3.2.11 backends) in an isolated home,
+`LLM_RAM_BUDGET=32G ggrun tui --gpus 0`, top pick Qwen3.8-27B UD-IQ2_XXS
+(6.9 GB, downloaded through the TUI), Claude Code on. Launch FAILED: the
+dense plan went to GPU+RAM with `--fit`; preflight missed CUDA0 by 1001, 809,
+699, 578 MiB and the four-load admission budget ran out. Reproduced off-camera
+on a reset cache (arm A, same deficits, exit 1).
+
+Cause: the planner seats the Auto reviewer at its 6144 MiB reservation; the
+reviewer measured 5045 MiB, but only the next launch used that. The guard
+(free less reserved and overhead) withheld the 1099 MiB the driver reports
+free, while ik's own fit sizes from driver-free less its 1024 MiB margin. Each
+recovery lowered ggrun's budget, which `--fit` never sees, so no re-plan
+could converge.
+
+Fix (branch `fix/fit-follows-guard`): the running reviewer is seated at its
+measurement for this launch's admission; argv that hand placement to ik's
+`--fit` carry `--fit-margin` when the guard is tighter than ik's default
+(expected load-time free less guard limit, unstarted companion seats counted,
+rounded to 256 MiB). Arm D, clean cache: guard 6808 MiB, first preflight fits,
+plan stable, ctx 262,144, ub 512, 65/65 layers and 2213 MiB KV on CUDA0,
+server healthy, Claude Code client started. Intermediate arm B (margin only)
+also converged (51 MiB ubatch derate, `--fit-margin 2304`) but re-verified an
+unchanged plan five times; arm C (margin from a pre-reviewer reading)
+admitted with a 7168 MiB margin and 522 MiB of weights on GPU. Both fixed by
+the final shape. Evidence: `accept-20261013/evidence-clip/fitmargin-ab/`.
+
+Not yet measured: agent task time/decode under the fixed launch, and the
+installer's update prompt (PR #83) still appears on this path.
