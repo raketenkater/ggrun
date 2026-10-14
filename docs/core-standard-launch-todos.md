@@ -3997,3 +3997,13 @@ is what pushes this dense model off the GPU.
 Every main turn reported 0 cached tokens (18.6k-22.2k input each); the backend
 logged "forcing full prompt re-processing due to lack of cache data" after the
 startup canary, so each turn re-prefilled the whole conversation on host KV.
+
+Same task with `--claude-reviewer qwen2b` (reviewer measured 3292 MiB, not
+the 1.4 GB file size; 128k reviewer context): published launcher FAILED the
+same way (7 preflight derates, advisor prompt, no start); this branch
+admitted ctx 262,144, `--fit-margin 1536`, 3320 of 8704 MiB KV on CUDA0,
+task correct in 17 m 25 s (4B reviewer: 20 m 30 s; non-Claude on the same
+card: 231 s at ctx 76,800 fully on GPU). The reviewer size is not the main
+lever; the planner's 262k context with host-resident KV is. Whether Claude
+mode should trade context for GPU-resident KV on tight cards is an owner
+decision (invariant 3).
