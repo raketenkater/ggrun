@@ -3983,3 +3983,14 @@ the final shape. Evidence: `accept-20261013/evidence-clip/fitmargin-ab/`.
 
 Not yet measured: agent task time/decode under the fixed launch, and the
 installer's update prompt (PR #83) still appears on this path.
+
+Agent task under the fixed launch (arm E, same reset, interactive Claude Code,
+Auto mode): calc task correct (one-line fix, tests pass, test file hash
+unchanged) in 20 m 30 s. The first 18,653-token turn took 605 s: ik's fit put
+65/65 layers on CUDA0 but only 2213 of 8704 MiB KV, so prefill ran at ~34
+tok/s against host KV; during it the 2 s health probe reported "backend died
+mid-session" for a live backend (false alarm, status line "backend
+unavailable" until it answered again). For comparison, the non-Claude cell on
+the same card (4070 + 32 GiB) planned ctx 76,800 fully on GPU and ran this
+task in 231 s. Open policy question for tight single GPUs: the 5 GB reviewer
+is what pushes this dense model off the GPU.
