@@ -3185,7 +3185,7 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
 	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, claudeCodeShiftableContext(model, strategy))
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
-	serverArgs = backendVerbosityArgs(serverArgs, be.Help)
+	serverArgs = backendVerbosityArgs(serverArgs, be.Help, be.IsIK)
 	serverArgs = applyRequestDisabledBackendFlags(serverArgs, req)
 	return bindFitToGuard(serverArgs, req, cfg.CacheDir, be, caps, strategy)
 }
@@ -3268,8 +3268,13 @@ func applyRequestDisabledBackendFlags(args []string, req *launchRequest) []strin
 // log unusable, while level 4 adds only these decision points. An explicit
 // backend-supported verbosity flag, or LLAMA_ARG_LOG_VERBOSITY in the
 // environment, still wins.
-func backendVerbosityArgs(args []string, backendHelp string) []string {
-	if os.Getenv("LLAMA_ARG_LOG_VERBOSITY") != "" {
+//
+// ik_llama has no trace level: it prints these lines as warnings and info at
+// its default, and any --verbosity above 0 turns on the server's VERB dump of
+// every request body and slot. One 2-minute Claude Code task wrote a 308 MB log
+// with the prompts in plain text (2026-10-14), so ik gets no level.
+func backendVerbosityArgs(args []string, backendHelp string, isIK bool) []string {
+	if isIK || os.Getenv("LLAMA_ARG_LOG_VERBOSITY") != "" {
 		return args
 	}
 	for _, a := range args {
