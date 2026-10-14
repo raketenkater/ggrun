@@ -3994,3 +3994,6 @@ unavailable" until it answered again). For comparison, the non-Claude cell on
 the same card (4070 + 32 GiB) planned ctx 76,800 fully on GPU and ran this
 task in 231 s. Open policy question for tight single GPUs: the 5 GB reviewer
 is what pushes this dense model off the GPU.
+Every main turn reported 0 cached tokens (18.6k-22.2k input each); the backend
+logged "forcing full prompt re-processing due to lack of cache data" after the
+startup canary, so each turn re-prefilled the whole conversation on host KV.
