@@ -420,3 +420,52 @@ func TestBackendBesideTheInstalledLauncherIsFound(t *testing.T) {
 		t.Fatal("the sibling must come after every existing candidate")
 	}
 }
+
+// A CUDA OOM in the post-load canary that ggrun learned as a reserve relaunches
+// once on its own instead of telling the user to launch again; the relaunch is
+// bounded by its marker and waits for the failed backend's memory.
+func TestVerificationOOMRelaunchesOnceAfterRelease(t *testing.T) {
+	if !shouldRelaunchAfterVerificationOOM(true, false, nil) {
+		t.Fatal("learned verification OOM did not relaunch")
+	}
+	for name, c := range map[string]struct {
+		learned, already bool
+		release          error
+	}{
+		"not learned":      {false, false, nil},
+		"already relaunch": {true, true, nil},
+		"memory held":      {true, false, errors.New("did not return to baseline")},
+	} {
+		if shouldRelaunchAfterVerificationOOM(c.learned, c.already, c.release) {
+			t.Errorf("%s: relaunched", name)
+		}
+	}
+
+	saved := verificationOOMRelaunch
+	defer func() { verificationOOMRelaunch = saved }()
+	var gotArgs []string
+	var gotMarker string
+	calls := 0
+	verificationOOMRelaunch = func(args []string, marker string) error {
+		calls++
+		gotArgs, gotMarker = args, marker
+		return nil
+	}
+	req := &launchRequest{OriginalArgs: []string{"model.gguf", "--claude-code"}}
+	cleaned := false
+
+	t.Setenv(verifyOOMReplanEnv, "")
+	relaunchAfterVerificationOOM(req, false, nil, nil, func() { cleaned = true })
+	if calls != 0 || cleaned {
+		t.Fatalf("relaunched without a learned reserve")
+	}
+	relaunchAfterVerificationOOM(req, true, nil, nil, func() { cleaned = true })
+	if calls != 1 || gotMarker != verifyOOMReplanEnv || len(gotArgs) != 2 || gotArgs[1] != "--claude-code" || !cleaned {
+		t.Fatalf("relaunch calls=%d args=%v marker=%q cleaned=%v", calls, gotArgs, gotMarker, cleaned)
+	}
+	t.Setenv(verifyOOMReplanEnv, "1")
+	relaunchAfterVerificationOOM(req, true, nil, nil, nil)
+	if calls != 1 {
+		t.Fatalf("relaunched a second time")
+	}
+}

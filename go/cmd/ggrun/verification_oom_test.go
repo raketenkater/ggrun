@@ -37,7 +37,7 @@ func TestVerificationOOMRecordsAStackingReserve(t *testing.T) {
 	}
 
 	msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, caps, strategy, args, canaryOOMLog, nil)
-	if !ok || !strings.Contains(msg, "Launch again") {
+	if !ok || !strings.Contains(msg, "is now reserved") {
 		t.Fatalf("verification OOM not learned: ok=%v msg=%q", ok, msg)
 	}
 	first := growth()

@@ -325,6 +325,17 @@ func (e *preflightUnresolvedError) Unwrap() error { return e.err }
 // evidence its first admission measured, so the re-plan cannot repeat.
 const learnedReplanEnv = "GGRUN_LEARNED_REPLAN"
 
+// verifyOOMReplanEnv marks a launch that already relaunched once after a CUDA
+// OOM during its post-load verification, so that relaunch cannot repeat.
+const verifyOOMReplanEnv = "GGRUN_VERIFY_OOM_REPLAN"
+
+// shouldRelaunchAfterVerificationOOM allows one automatic relaunch when the
+// verification OOM was learned as a reserve, this launch has not relaunched for
+// it already, and the failed backend's memory was released.
+func shouldRelaunchAfterVerificationOOM(learned, alreadyRelaunched bool, releaseErr error) bool {
+	return learned && !alreadyRelaunched && releaseErr == nil
+}
+
 // shouldReplanFromLearnedEvidence decides whether a failed first admission may
 // plan once more. The first plan of a never-seen model is computed before any
 // backend measurement exists; the oracle rounds that refused it record exact
