@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
@@ -212,7 +213,7 @@ func TestRecoveryIdentityIgnoresPlanDerivedFlags(t *testing.T) {
 // 1.16 million, measured only in hindsight -- with nothing in the log to say so.
 func TestBackendVerbosityDefaultsToTrace(t *testing.T) {
 	help := "  -lv, --verbosity N   set the verbosity level"
-	got := backendVerbosityArgs([]string{"llama-server", "-m", "m.gguf"}, help)
+	got := backendVerbosityArgs([]string{"llama-server", "-m", "m.gguf"}, help, false)
 	found := ""
 	for i, a := range got {
 		if a == "-lv" && i+1 < len(got) {
@@ -227,22 +228,61 @@ func TestBackendVerbosityDefaultsToTrace(t *testing.T) {
 		{"llama-server", "--verbosity", "2"},
 		{"llama-server", "-lv=2"},
 	} {
-		if out := backendVerbosityArgs(explicit, help); len(out) != len(explicit) {
+		if out := backendVerbosityArgs(explicit, help, false); len(out) != len(explicit) {
 			t.Errorf("%v: ggrun overrode an explicit verbosity -> %v", explicit, out)
 		}
 	}
 	// A backend that does not advertise the flag must not receive it.
-	if out := backendVerbosityArgs([]string{"srv"}, "--some-other-flag"); len(out) != 1 {
+	if out := backendVerbosityArgs([]string{"srv"}, "--some-other-flag", false); len(out) != 1 {
 		t.Errorf("added -lv to a backend that does not support it: %v", out)
 	}
-	// Current ik_llama exposes only the long spelling. Detecting that spelling
-	// but emitting -lv made its parser dump --help and abort every V4 launch.
-	longOnly := backendVerbosityArgs([]string{"srv"}, "  --verbosity N")
+	// A backend exposing only the long spelling must get that spelling: emitting
+	// -lv made ik's parser dump --help and abort every V4 launch. (ik itself now
+	// gets no level; see TestIKBackendGetsNoVerbosityLevel.)
+	longOnly := backendVerbosityArgs([]string{"srv"}, "  --verbosity N", false)
 	if len(longOnly) != 3 || longOnly[1] != "--verbosity" || longOnly[2] != "4" {
 		t.Errorf("long-only backend received the wrong verbosity dialect: %v", longOnly)
 	}
-	if out := backendVerbosityArgs([]string{"srv"}, ""); len(out) != 1 {
+	if out := backendVerbosityArgs([]string{"srv"}, "", false); len(out) != 1 {
 		t.Errorf("guessed a verbosity flag without a help capability surface: %v", out)
+	}
+}
+
+// ik_llama has no trace level: any --verbosity above 0 enables its VERB dump
+// of every request body and slot (a 2-minute Claude Code task wrote 308 MB,
+// prompts in plain text). The lines ggrun reads are printed at its default.
+func TestIKBackendGetsNoVerbosityLevel(t *testing.T) {
+	ikHelp := "  --verbosity N   set verbosity level (0 = default)"
+	if out := backendVerbosityArgs([]string{"srv", "-m", "m.gguf"}, ikHelp, true); len(out) != 3 {
+		t.Fatalf("ik backend received a verbosity level: %v", out)
+	}
+	// A user's explicit level is theirs and still passes through.
+	explicit := []string{"srv", "--verbosity", "1"}
+	if out := backendVerbosityArgs(explicit, ikHelp, true); len(out) != 3 || out[2] != "1" {
+		t.Fatalf("explicit ik verbosity changed: %v", out)
+	}
+	// Mainline keeps its trace level.
+	if out := backendVerbosityArgs([]string{"srv"}, "  -lv, --verbosity N", false); len(out) != 3 || out[2] != "4" {
+		t.Fatalf("mainline lost its trace level: %v", out)
+	}
+}
+
+func TestBuiltIKClaudeLaunchHasNoVerbosity(t *testing.T) {
+	savedUsed, savedFree := runtimeVRAMUsedMB, fitDriverFreeVRAM
+	runtimeVRAMUsedMB = func(int) int { return 0 }
+	fitDriverFreeVRAM = func(*detect.Capabilities) map[int]int { return map[int]int{0: 11000} }
+	defer func() { runtimeVRAMUsedMB, fitDriverFreeVRAM = savedUsed, savedFree }()
+
+	be := &backendInfo{Path: "/x/ik_llama-server-cuda", Dialect: "ik_llama", Tag: "ik_llama", IsIK: true, Identity: "test",
+		Help: ikFitHelp + "\n--verbosity N set verbosity level"}
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, RAMLimitPercent: 95, ClaudeCode: true}
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	s := &placement.Strategy{Type: placement.DenseCPUOffload, BackendSupportsFit: true, ContextSize: 32768, Parallel: 1, BatchSize: 2048, UBatchSize: 512}
+	args := buildLaunchServerArgs(req, cfg, be, fitTestCaps(12282), fitTestModel(262144, 9000), s)
+	for _, a := range args {
+		if a == "--verbosity" || a == "-lv" || a == "--log-verbosity" {
+			t.Fatalf("ik Claude launch carries %s: %v", a, args)
+		}
 	}
 }
 
