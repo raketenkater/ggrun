@@ -6962,6 +6962,7 @@ func cmdLaunch(args []string) {
 	// successful plan; happened-before any reactive retry path, and never on a
 	// plan that only fits because the reviewer was already dropped.
 	strategy = proactivelyDropReviewerForVRAMModel(req, caps, model, strategy, computeStrategy, os.Stdin, os.Stderr, stdinIsTerminal(), cfg.CacheDir)
+	strategy = ensureResumeContext(req, cfg.CacheDir, model, strategy, computeStrategy)
 	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
 		if !errors.Is(err, errMMapDeclined) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
