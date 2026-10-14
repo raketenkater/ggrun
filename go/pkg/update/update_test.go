@@ -43,6 +43,26 @@ func TestVersionUsesEnv(t *testing.T) {
 	}
 }
 
+// A fresh source install is stamped with a bare commit. It must not be offered
+// the latest release as an update; its upstream checkout answers that instead.
+func TestReleaseIsNotOfferedToACommitStampedBuild(t *testing.T) {
+	for _, current := range []string{"bfb2f4e", "3165c03", ""} {
+		if releaseIsNewer(current, "v3.2.11") {
+			t.Errorf("%q: a commit-stamped build was offered v3.2.11", current)
+		}
+	}
+	for _, c := range []struct {
+		current string
+		want    bool
+	}{
+		{"v3.2.10", true}, {"v3.2.11", false}, {"v3.2.11-3-gbfb2f4e", false}, {"v3.2.0-go", true},
+	} {
+		if got := releaseIsNewer(c.current, "v3.2.11"); got != c.want {
+			t.Errorf("releaseIsNewer(%q, v3.2.11) = %v, want %v", c.current, got, c.want)
+		}
+	}
+}
+
 func TestCompareVersionsWithSuffix(t *testing.T) {
 	if compareVersions("v3.0.0-go", "v3.0.1") >= 0 {
 		t.Fatal("expected v3.0.1 to be newer than v3.0.0-go")
