@@ -7221,11 +7221,18 @@ func cmdLaunch(args []string) {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintf(os.Stderr, "Error verifying server profile: %v\n", err)
+		learned := false
 		if p.LogBuf != nil {
-			if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, p.LogBuf.String(), failedFree); ok {
+			if msg, ok, recorded := learnVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, p.LogBuf.String(), failedFree); ok {
 				fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
+				learned = recorded
 			}
 		}
+		relaunchAfterVerificationOOM(req, learned, p, resourceBaseline, func() {
+			if ok {
+				libhub.Cleanup(hubDir)
+			}
+		})
 		os.Exit(1)
 	}
 	checkpointPlanChanged := false
@@ -7597,11 +7604,18 @@ func cmdLaunch(args []string) {
 			_ = newP.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "[launch] recovered placement failed lifecycle verification: %v\n", err)
+			learned := false
 			if newP.LogBuf != nil {
-				if msg, ok := learnFromVerificationOOM(req, cfg, model, be, caps, runtimeCaps, newStrategy, newArgs, newP.LogBuf.String(), failedFree); ok {
+				if msg, ok, recorded := learnVerificationOOM(req, cfg, model, be, caps, runtimeCaps, newStrategy, newArgs, newP.LogBuf.String(), failedFree); ok {
 					fmt.Fprintf(os.Stderr, "[launch] %s\n", msg)
+					learned = recorded
 				}
 			}
+			relaunchAfterVerificationOOM(req, learned, newP, resourceBaseline, func() {
+				if ok {
+					libhub.Cleanup(hubDir)
+				}
+			})
 			os.Exit(1)
 		}
 		if newP.LogBuf != nil {
@@ -7637,6 +7651,36 @@ func cmdLaunch(args []string) {
 	claudeAuto.stop()
 }
 
+// relaunchAfterVerificationOOM starts the launch once more after a CUDA OOM in
+// the first requests after load that learnFromVerificationOOM turned into a
+// recorded reserve. Exiting with "launch again" left the user to restart a
+// launch whose fix ggrun already knew (Qwen3.8-Flash-Next, Claude mode,
+// 2026-10-14: the relaunch fitted with the learned 1238 MiB). It runs at most
+// once per launch and only after the failed process and its memory are gone.
+func relaunchAfterVerificationOOM(req *launchRequest, learned bool, process *server.Process, baseline *detect.Capabilities, cleanup func()) {
+	if !learned || req == nil {
+		return
+	}
+	releaseErr := stopFailedLaunchBeforeAdvisor(process, baseline, failedStartReleaseWait)
+	if !shouldRelaunchAfterVerificationOOM(learned, os.Getenv(verifyOOMReplanEnv) != "", releaseErr) {
+		if releaseErr != nil {
+			fmt.Fprintf(os.Stderr, "[launch] not relaunching: %v\n", releaseErr)
+		}
+		fmt.Fprintln(os.Stderr, "[launch] Launch again to use the adjusted plan.")
+		return
+	}
+	fmt.Fprintln(os.Stderr, "[launch] relaunching once with the adjusted plan")
+	if cleanup != nil {
+		cleanup()
+	}
+	if err := verificationOOMRelaunch(req.OriginalArgs, verifyOOMReplanEnv); err != nil {
+		fmt.Fprintf(os.Stderr, "[launch] could not relaunch (%v). Launch again to use the adjusted plan.\n", err)
+	}
+}
+
+// verificationOOMRelaunch replaces this process; tests substitute it.
+var verificationOOMRelaunch = relaunchLaunch
+
 // learnFromVerificationOOM handles a CUDA OOM during the first requests after
 // load (the functional canary), which the serving loop's runtime recovery never
 // sees because the launch ends at verification. Without it the next launch
@@ -7648,15 +7692,25 @@ func cmdLaunch(args []string) {
 func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo,
 	caps, runtimeCaps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, logData string, failedFree map[int]int,
 ) (string, bool) {
+	msg, ok, _ := learnVerificationOOM(req, cfg, model, be, caps, runtimeCaps, strategy, serverArgs, logData, failedFree)
+	return msg, ok
+}
+
+// learnVerificationOOM is learnFromVerificationOOM that also reports whether the
+// failed plan was revoked and the reserve recorded, which a relaunch needs:
+// without both, the next plan would be the one that just failed.
+func learnVerificationOOM(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo,
+	caps, runtimeCaps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, logData string, failedFree map[int]int,
+) (msg string, ok, recorded bool) {
 	if req == nil || cfg == nil || model == nil || strategy == nil || caps == nil {
-		return "", false
+		return "", false, false
 	}
 	caps = runtimeGrowthCaps(caps, runtimeCaps)
 	tag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	prior := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)
 	device, allocMB, estimated, suspect, ok := runtimeLogCUDAOOM(logData, caps, model, prior, failedFree)
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	what := fmt.Sprintf("CUDA OOM on device %d", device)
 	if suspect != "" {
@@ -7664,12 +7718,12 @@ func learnFromVerificationOOM(req *launchRequest, cfg *config.Config, model *pla
 	}
 	if err := invalidateRuntimeOOMLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs,
 		what+" during the first requests after load"); err != nil {
-		return fmt.Sprintf("%s after load, and the failed profile could not be revoked: %v", what, err), true
+		return fmt.Sprintf("%s after load, and the failed profile could not be revoked: %v", what, err), true, false
 	}
 	if err := recordAbortGrowth(cfg.CacheDir, model, strategy, tag, caps.GPUs, device, allocMB, estimated, prior); err != nil {
-		return fmt.Sprintf("%s after load, and the reserve could not be recorded: %v", what, err), true
+		return fmt.Sprintf("%s after load, and the reserve could not be recorded: %v", what, err), true, false
 	}
-	return fmt.Sprintf("%s after load: the failed plan was revoked and %d MiB is now reserved on that device. Launch again to use the adjusted plan.", what, allocMB), true
+	return fmt.Sprintf("%s after load: the failed plan was revoked and %d MiB is now reserved on that device.", what, allocMB), true, true
 }
 
 func invalidateRuntimeOOMLaunch(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
