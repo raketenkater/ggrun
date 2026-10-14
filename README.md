@@ -83,9 +83,11 @@ The cached profile is accepted only on the exact CPU/RAM/GPU/PCI layout that
 produced it. Normal `ggrun detect` and launches fall back to derived PCIe values
 when the profile is absent, stale, incomplete, or corrupt.
 
-![Earlier ggrun TUI demo](demo.gif)
+![ggrun: install, recommended model, download, launch and a Claude Code fix](demo.gif)
 
-This recording shows an earlier TUI; the current layout may differ.
+Recorded October 14, 2026 on v3.2.11 (`16c2ae1`), 3 GPUs: public install,
+recommended model, download, automatic launch, and Claude Code fixing a failing
+test. Sped-up parts are captioned with their real duration.
 
 ## What it does
 

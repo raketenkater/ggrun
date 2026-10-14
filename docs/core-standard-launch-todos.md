@@ -4026,3 +4026,37 @@ prints that v3.2.11 exists. A default v3.2.10 install tracks main; with that
 checkout at af150b2, `ggrun update` moved the launcher v3.2.10 ->
 v3.2.11-3-gbfb2f4e in 9 s and the model launch passed. The finishing
 v3.2.10 process still printed "newer version available" (cosmetic).
+
+## README CLIP — public install to a Claude Code fix — 2026-10-14
+
+Public `main` 16c2ae1, full host, isolated home under `env -i`; only the 4B
+reviewer GGUF was hardlinked off camera. Install 3 min 20 s; TUI showed
+`16c2ae1 · up to date` (no update prompt); Best overall Qwen3.8-27B UD-Q5_K_S
+(sha256 verified), download 26 min uncached; Claude Code mode launch ~4 min
+(first-launch measurement, no prompts or retries; workflow winner cached:
+decode 26.1 tok/s, prefill 1336.6 tok/s, makespan 16.71 s); calc task: 1-line
+fix, test file unchanged, 4/4 pass, "Worked for 1m 48s". A Claude Code billing
+notice blocked the session 10 min until Enter (not ggrun). Evidence:
+`accept-20261013/evidence-clip/take3/`.
+
+Found: Claude-mode backends get `--verbosity 4` (`backendVerbosityArgs`). On
+ik_llama this turns on the server's VERB output: the 1 min 48 s task wrote a
+308 MB log (217 MB slot dumps, 101 MB request bodies with prompts in plain
+text). Production `.logs` holds 14-31 MB files from the same cause. Needs a
+backend-aware level.
+
+Installer: offers UD-Q8_K_XL where the TUI picks UD-Q5_K_S on the same host;
+declining prints "Download cancelled." then "Model download finished".
+
+## Qwen3.8-Flash-Next Uncensored IQ3_M — full host — 2026-10-14
+
+orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF IQ3_M (2 shards, 89.5 GB,
+qwen4exp). `ggrun download` has no hash check; a stalled Xet transfer hung on a
+dead connection; restarting with Xet rewrote from byte 0; resuming with
+`HF_HUB_DISABLE_XET=1` gave a shard 1 with one flipped bit (0x07 -> 0x17 at
+byte 32,134,860,426), found by streaming the file against the server. Both
+shards now match the repo sha256. Launch (default flags, 3 GPUs): fork backend
+`qwen3-8-flash-next`, first load measured then relaunched CPU MoE 23 -> 19,
+ready ~3.7 min, ctx 262,144, KV q8_0 on GPU. Decode 24.1-24.9 tok/s (38-token
+prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
+
