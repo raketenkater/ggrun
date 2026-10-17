@@ -8,6 +8,11 @@ import os
 import re
 import sys
 import subprocess
+import hashlib
+import json
+import queue
+import threading
+import time
 from pathlib import Path
 
 try:
@@ -58,8 +63,8 @@ def is_calibration_or_adapter(path):
     # and inherit a source precision in their name. They are not weights.
     parts = path.lower().replace("_", "-").split("/")
     return (parts[-1].endswith(("-imatrix.gguf", "-adapter.gguf", "-lora.gguf"))
-            or parts[-1].startswith(("imatrix-", "adapter-", "lora-"))
-            or any(p in {"imatrix", "adapters", "adapter", "lora"} for p in parts[:-1]))
+            or parts[-1].startswith(("imatrix-", "adapter-", "lora-", "indexer-"))
+            or any(p in {"imatrix", "adapters", "adapter", "lora", "sparse-indexer"} for p in parts[:-1]))
 
 
 def is_draft_head_gguf(path):
@@ -429,6 +434,135 @@ def show_progress(progress_bytes, total_bytes, filename):
     print(f"\r   [{bar}] {percent:5.1f}% | {speed_mb:8.2f} MB", end="", flush=True)
 
 
+DOWNLOAD_STALL_SECONDS = 180
+
+# Run the transfer in a child so a wedged native Xet worker can be terminated
+# on Linux and Windows. A Python thread cannot interrupt that native call.
+DOWNLOAD_WORKER = r'''
+import json, sys, time
+from huggingface_hub import hf_hub_download
+from tqdm.auto import tqdm
+class Quiet:
+    def write(self, text): return len(text)
+    def flush(self): pass
+class Progress(tqdm):
+    def __init__(self, *args, **kwargs):
+        self.received = 0
+        self.reported = 0
+        # HF uses this group label for its own tqdm wrapper; plain tqdm does
+        # not accept it (the Xet path supplies it even when HTTP does not).
+        kwargs.pop("name", None)
+        # Keep tqdm.n accurate: Xet reports absolute positions and computes
+        # deltas from it. A disabled tqdm skips its counter updates.
+        kwargs["disable"] = False
+        if not sys.stderr.isatty(): kwargs["file"] = Quiet()
+        super().__init__(*args, **kwargs)
+    def update(self, n=1):
+        result = super().update(n)
+        self.received += max(0, n)
+        now = time.monotonic()
+        if n > 0 and now - self.reported >= 1:
+            print(json.dumps({"bytes": self.received}), flush=True)
+            self.reported = now
+        return result
+path = hf_hub_download(**json.loads(sys.argv[1]), tqdm_class=Progress)
+print(json.dumps({"path": path}), flush=True)
+'''
+
+
+def transfer_file(repo, filename, output_dir, revision, force=False,
+                  stall_seconds=DOWNLOAD_STALL_SECONDS):
+    """Keep normal HF resume/cache behavior, but bound a no-progress stall."""
+    kwargs = dict(repo_id=repo, filename=filename, local_dir=str(output_dir),
+                  revision=revision, library_name="gguf-downloader", force_download=force)
+    proc = subprocess.Popen([sys.executable, "-u", "-c", DOWNLOAD_WORKER, json.dumps(kwargs)],
+                            stdout=subprocess.PIPE, text=True)
+    messages = queue.Queue()
+
+    def read_messages():
+        try:
+            for line in proc.stdout:
+                messages.put(line)
+        finally:
+            messages.put(None)
+
+    reader = threading.Thread(target=read_messages, daemon=True)
+    reader.start()
+    last_progress = time.monotonic()
+    last_display = last_progress
+    received = 0
+    result = None
+    try:
+        while True:
+            if time.monotonic() - last_progress >= stall_seconds:
+                raise TimeoutError(f"no download progress for {stall_seconds:g}s; "
+                                   "partial files retained, rerun to resume")
+            try:
+                line = messages.get(timeout=min(0.25, stall_seconds))
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if message.get("bytes", 0) > received:
+                received = message["bytes"]
+                last_progress = time.monotonic()
+                if last_progress - last_display >= 30:
+                    print(f"   Downloaded {received / 1024**3:.2f} GiB: {filename}", flush=True)
+                    last_display = last_progress
+            if "path" in message:
+                result = message["path"]
+        if proc.wait(timeout=10) != 0 or not result:
+            raise RuntimeError("download worker failed; partial files retained for resume")
+        return Path(result)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        reader.join(timeout=1)
+        proc.stdout.close()
+
+
+def file_manifest(repo, filenames):
+    """Pin every selected shard to the same commit and trusted content hash."""
+    info = HfApi().model_info(repo, files_metadata=True, timeout=30)
+    if not info.sha:
+        raise ValueError("repository metadata did not include a revision; retry")
+    siblings = {s.rfilename: s for s in info.siblings}
+    manifest = {}
+    for name in filenames:
+        sibling = siblings.get(name)
+        if sibling is None or not sibling.size:
+            raise ValueError(f"missing file size in repository metadata: {name}")
+        lfs = sibling.lfs
+        digest = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
+        algorithm = "sha256" if digest else "git-sha1"
+        digest = digest or getattr(sibling, "blob_id", None)
+        if not digest or not re.fullmatch(r"[a-fA-F0-9]{64}" if lfs else r"[a-fA-F0-9]{40}", digest):
+            raise ValueError(f"missing content hash in repository metadata: {name}")
+        manifest[name] = (sibling.size, algorithm, digest.lower())
+    return info.sha, manifest
+
+
+def verify_file(path, identity):
+    size, algorithm, expected = identity
+    path = Path(path)
+    if path.stat().st_size != size:
+        raise ValueError(f"size mismatch: expected {size} bytes, got {path.stat().st_size}")
+    digest = hashlib.sha256() if algorithm == "sha256" else hashlib.sha1()
+    if algorithm == "git-sha1":
+        digest.update(f"blob {size}\0".encode())
+    print(f"   Verifying {algorithm}: {path.name}", flush=True)
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise ValueError(f"{algorithm} mismatch: downloaded file failed verification")
+
+
 def download_files(repo, files_to_download, output_dir):
     """Download model files with progress tracking"""
     print(f"\nDownloading from: {repo}")
@@ -442,19 +576,30 @@ def download_files(repo, files_to_download, output_dir):
         print("Downloading files...")
         downloaded = []
         failed = []
+        revision, manifest = file_manifest(repo, files_to_download)
+        print(f"   Pinned revision: {revision}", flush=True)
 
         for filename in files_to_download:
             try:
                 print(f"\n   Downloading: {filename}")
-                from huggingface_hub import hf_hub_download
-                import tqdm
-
-                filepath = hf_hub_download(
-                    repo_id=repo,
-                    filename=filename,
-                    local_dir=output_dir,
-                    library_name="gguf-downloader",
-                )
+                local = output_dir / filename
+                # Verify existing full-size files too: cached download metadata
+                # is not proof that resumed bytes on disk are correct.
+                identity = manifest[filename]
+                if local.is_file():
+                    try:
+                        verify_file(local, identity)
+                        downloaded.append((filename, str(local)))
+                        print(f"   ok: {filename} (existing file verified)", flush=True)
+                        continue
+                    except ValueError:
+                        # A bad final file can make HF return a stale cache
+                        # hit. Remove only this verified-mismatching target;
+                        # retain .incomplete data so retries keep their progress.
+                        print("   Existing file does not match the requested revision; replacing it.", flush=True)
+                        local.unlink()
+                filepath = transfer_file(repo, filename, output_dir, revision)
+                verify_file(filepath, identity)
 
                 size_gb = Path(filepath).stat().st_size / (1024**3)
                 print(f"   ok: {filename} ({size_gb:.2f} GB)")
@@ -473,7 +618,7 @@ def download_files(repo, files_to_download, output_dir):
 
     except Exception as e:
         print(f"\nError during download: {e}")
-        return [], []
+        return [], list(files_to_download)
 
 
 def update_model_index(repo, selected_quantization, output_dir, downloaded, cache_dir=None):
@@ -834,7 +979,7 @@ def main():
 
         if not files_to_download:
             print("\nNo files found to download.")
-            return
+            sys.exit(1)
 
         print(f"\nWill download {len(files_to_download)} file(s):")
         for f in files_to_download[:5]:  # Show first 5
@@ -863,7 +1008,7 @@ def main():
             print("\nStart download? yes (--yes)")
         if confirm != "y":
             print("Download cancelled.")
-            return
+            sys.exit(130)
 
         # Download
         downloaded, failed = download_files(repo, files_to_download, output_dir)

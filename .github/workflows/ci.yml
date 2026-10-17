@@ -198,7 +198,7 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install pytest huggingface_hub
       - name: Run downloader, recommendation, and hardware-helper pytest suites
-        run: python3 -m pytest tests/test_downloader_quant.py tests/test_update_recommendations.py tests/test_mimo_catalog.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_release_relocation.py tests/test_gpu_e2e.py tests/test_agent_workload.py tests/test_verify_recommended_download.py
+        run: python3 -m pytest tests/test_downloader_quant.py tests/test_download_integrity.py tests/test_update_recommendations.py tests/test_mimo_catalog.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_setup_terminal.py tests/test_release_relocation.py tests/test_gpu_e2e.py tests/test_agent_workload.py tests/test_verify_recommended_download.py
 
   installer-smoke:
     runs-on: ubuntu-latest
@@ -259,12 +259,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Bandwidth helper tests on native Windows
+      - name: Bandwidth and downloader tests on native Windows
         shell: pwsh
         run: |
-          python -m pip install pytest
+          python -m pip install pytest huggingface_hub
           if ($LASTEXITCODE -ne 0) { throw 'pip install pytest failed' }
-          python -m pytest -p no:cacheprovider tests/test_measure_bandwidth.py
+          python -m pytest -p no:cacheprovider tests/test_measure_bandwidth.py tests/test_download_integrity.py tests/test_downloader_quant.py
       - name: Build Windows package and install from local release dir
         shell: pwsh
         run: |

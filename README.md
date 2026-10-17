@@ -64,6 +64,11 @@ available. A green check on `main` does not mean that its fixes are already in
 the [latest release](https://github.com/raketenkater/ggrun/releases/latest).
 See [installation details](docs/install.md) for release and source controls.
 
+Current-source model downloads pin one repository revision and check every
+file's size and content hash, including files reused from an earlier attempt.
+Transfers stop after three minutes without progress and retain partial data
+for a retry. Verifying a large model on a hard drive can take several minutes.
+
 [Install E2E](https://github.com/raketenkater/ggrun/actions/workflows/install-e2e.yml)
 checks fresh installs, model download, serving, and candidate reinstalls on Linux
 and Windows. Candidate checks and published-installer checks are separate;
