@@ -301,26 +301,30 @@ def json_array_at(text: str, start: int) -> str:
 
 
 def parse_open_weight_page_models(page: str) -> list[dict[str, Any]]:
-    # Next.js stores the model table as JSON inside escaped script payloads.
-    # Unescaping " is enough to recover a valid JSON array for the table rows.
-    normalized = html.unescape(page).replace('\\"', '"')
-    rows: list[dict[str, Any]] = []
-    pos = 0
-    while True:
-        idx = normalized.find('"models":[', pos)
-        if idx < 0:
-            break
-        start = normalized.find("[", idx)
-        pos = idx + 1
+    # Decode the transport before reading its JSON. Replacing escaped quotes
+    # globally corrupts quoted names, and table JSON can span multiple chunks.
+    decoder = json.JSONDecoder()
+    chunks = []
+    for match in re.finditer(r"self\.__next_f\.push\(\s*", page):
         try:
-            parsed = json.loads(json_array_at(normalized, start))
-        except (json.JSONDecodeError, ValueError):
+            payload, _ = decoder.raw_decode(page, match.end())
+        except ValueError:
             continue
-        if not isinstance(parsed, list):
-            continue
-        dict_rows = [row for row in parsed if isinstance(row, dict)]
-        if any("isOpenWeights" in row for row in dict_rows):
-            rows.extend(row for row in dict_rows if open_weights(row))
+        if (isinstance(payload, list) and len(payload) > 1
+                and payload[0] == 1 and isinstance(payload[1], str)):
+            chunks.append(payload[1])
+    rows: list[dict[str, Any]] = []
+    # October 2026: initialModels is the scored table; models is now a
+    # navigation summary without licensing or score fields. Support the older
+    # table key too, but never infer openness from the page's query string.
+    for text in (page, "".join(chunks)):
+        for match in re.finditer(r'"(?:initialModels|models)"\s*:\s*(\[)', text):
+            try:
+                parsed, _ = decoder.raw_decode(text, match.start(1))
+            except ValueError:
+                continue
+            rows.extend(row for row in parsed if isinstance(row, dict)
+                        and has_open_weight_metadata(row) and open_weights(row))
     return dedupe_rows(rows)
 
 
