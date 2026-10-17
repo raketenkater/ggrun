@@ -220,6 +220,7 @@ def test_draft_heads_and_projectors_are_not_model_quants(monkeypatch):
         _sibling("dflash-Model-BF16.gguf", 5 * gb),
         _sibling("MTP/mtp-Model-shared-Q8_0.gguf", 3 * gb),
         _sibling("mmproj-Model-BF16.gguf", 3 * gb),
+        _sibling("sparse-indexer/indexer-Model-BF16.gguf", 874342784),
     ]
     monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
     quants = {q["name"]: q["size_bytes"] for q in updater.fetch_hf_quants("owner/Model-GGUF")}

@@ -44,8 +44,8 @@ def is_calibration_or_adapter(path):
     # and inherit a source precision in their name. They are not weights.
     parts = path.lower().replace("_", "-").split("/")
     return (parts[-1].endswith(("-imatrix.gguf", "-adapter.gguf", "-lora.gguf"))
-            or parts[-1].startswith(("imatrix-", "adapter-", "lora-"))
-            or any(p in {"imatrix", "adapters", "adapter", "lora"} for p in parts[:-1]))
+            or parts[-1].startswith(("imatrix-", "adapter-", "lora-", "indexer-"))
+            or any(p in {"imatrix", "adapters", "adapter", "lora", "sparse-indexer"} for p in parts[:-1]))
 
 
 def is_draft_head_gguf(path: str) -> bool:

@@ -310,20 +310,40 @@ fi
 ok_msg="CLI, hardware detection, and backend startup checks passed"
 say "  ✓ $ok_msg"
 
-if (( GUIDE_DOWNLOAD_MODEL )); then
+download_recommended_model() {
+    local first_repo="" first_quant="" recommendation_json repo
     say ""
     say "── Model that fits this machine ──"
     LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" recommend -n 3 || true
-    first_repo="$(LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" recommend --first 2>/dev/null | tail -n 1 || true)"
+    recommendation_json="$(LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" recommend --json -n 1 2>/dev/null || true)"
+    IFS=$'\t' read -r first_repo first_quant < <(python3 -c '
+import json, sys
+try:
+    rows = json.loads(sys.argv[1])["categories"]["Balanced"]
+    if rows:
+        print(rows[0]["repo"] + "\t" + rows[0]["QuantName"])
+except (ValueError, KeyError, TypeError):
+    pass
+' "$recommendation_json") || true
     repo="$(read_tty "Hugging Face repo to download (empty skips)" "$first_repo")"
     if [[ -n "$repo" ]]; then
+        local download_args=(download "$repo")
+        # Preserve the recommender's model AND quant. Re-running the Python
+        # capacity picker selected Q8 where the TUI recommended Q5.
+        if [[ "$repo" == "$first_repo" && -n "$first_quant" ]]; then
+            download_args+=(--quant "$first_quant")
+        fi
         say "Downloading $repo …"
-        if LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" download "$repo" </dev/tty; then
+        if LLM_APP_HOME="$APP_HOME" "$APP_BIN/ggrun" "${download_args[@]}"; then
             say "  Model download finished"
         else
-            warn "Download failed. You can retry: $APP_HOME/ggrun download $repo"
+            warn "Download did not complete. You can retry: $APP_HOME/ggrun ${download_args[*]}"
         fi
     fi
+}
+
+if (( GUIDE_DOWNLOAD_MODEL )); then
+    download_recommended_model </dev/tty
 fi
 
 if (( GUIDE_PATH )); then

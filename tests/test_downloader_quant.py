@@ -98,6 +98,7 @@ def test_main_exits_nonzero_and_skips_index_on_partial_download(monkeypatch, tmp
         cache_dir=None,
         quant="",
         no_repo_search=True,
+        yes=False,
     ))
     monkeypatch.setattr(downloader, "clear_screen", lambda: None)
     monkeypatch.setattr(downloader, "print_header", lambda: None)
@@ -134,6 +135,7 @@ def test_main_exits_nonzero_when_no_files_downloaded(monkeypatch, tmp_path):
         cache_dir=None,
         quant="",
         no_repo_search=True,
+        yes=False,
     ))
     monkeypatch.setattr(downloader, "clear_screen", lambda: None)
     monkeypatch.setattr(downloader, "print_header", lambda: None)
@@ -221,6 +223,17 @@ def test_a_draft_only_repo_still_downloads(monkeypatch):
     downloader = load_downloader()
     monkeypatch.setattr(downloader, "list_repo_files", lambda repo: ["dflash-Model-BF16.gguf", "README.md"])
     assert downloader.get_model_files("owner/Model-DFlash", "BF16") == ["dflash-Model-BF16.gguf"]
+
+
+def test_sparse_indexer_is_not_an_independent_model_quant(monkeypatch):
+    downloader = load_downloader()
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: [
+        "Step-5-Preview-Q4_K_M.gguf",
+        "sparse-indexer/indexer-Step-5-Preview-BF16.gguf",
+    ])
+    assert downloader.get_model_files("owner/Step-5-Preview-GGUF", "BF16") == []
+    assert downloader.get_model_files("owner/Step-5-Preview-GGUF", "Q4_K_M") == [
+        "Step-5-Preview-Q4_K_M.gguf"]
 
 
 def test_listing_and_download_use_the_final_quant_and_complete_shards(monkeypatch):

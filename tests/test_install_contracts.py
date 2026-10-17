@@ -18,6 +18,38 @@ def function(path, name):
 
 
 class InstallContracts(unittest.TestCase):
+    def test_model_offer_preserves_quant_and_reports_cancellation(self):
+        for custom, code in ((False, 0), (True, 0), (False, 130)):
+            with self.subTest(custom=custom, code=code), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                binary = tmp / "ggrun"
+                binary.write_text('''#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1] == "recommend":
+    if "--json" in sys.argv:
+        print(json.dumps({"categories": {"Balanced": [{"repo": "owner/pick", "QuantName": "Q5_K_S"}]}}))
+else:
+    open(os.environ["CALLS"], "w").write(json.dumps(sys.argv[1:]))
+    if os.environ["CODE"] != "0": print("Download cancelled.")
+    sys.exit(int(os.environ["CODE"]))
+''')
+                binary.chmod(0o755)
+                script = function("scripts/setup-home.sh", "download_recommended_model")
+                script += '\nsay() { echo "$*"; }; warn() { echo "$*"; }\n'
+                script += ('read_tty() { echo owner/custom; }\n' if custom
+                           else 'read_tty() { echo "$2"; }\n')
+                script += 'download_recommended_model\n'
+                calls = tmp / "calls"
+                result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True,
+                                        env=dict(os.environ, APP_HOME=str(tmp), APP_BIN=str(tmp),
+                                                 CALLS=str(calls), CODE=str(code)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                import json
+                self.assertEqual(json.loads(calls.read_text()),
+                                 ["download", "owner/custom"] if custom else
+                                 ["download", "owner/pick", "--quant", "Q5_K_S"])
+                self.assertEqual("Model download finished" in result.stdout, code == 0)
+
     def test_source_checkout_accepts_a_pinned_commit(self):
         # `git clone --branch` rejects a commit id, so LLM_SETUP_REF=<sha> (CI and
         # exact-candidate installs) kept no source checkout while the summary

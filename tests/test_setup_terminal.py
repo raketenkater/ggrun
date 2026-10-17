@@ -38,7 +38,12 @@ printf '%s\n' "$*" >> "$GGRUN_TEST_INSTALL_CALLS"
 case "$1" in
   version) echo 'ggrun fixture' ;;
   detect) echo '{}' ;;
-  recommend) echo 'fixture/repo' ;;
+  recommend)
+    if [ "${2:-}" = --json ]; then
+      echo '{"categories":{"Balanced":[{"repo":"fixture/repo","QuantName":"Q5_K_S"}]}}'
+    else
+      echo 'fixture/repo'
+    fi ;;
   download)
     if [ ! -t 0 ]; then echo DOWNLOAD_STDIN_NOT_TTY; exit 2; fi
     echo DOWNLOAD_WITH_CONSOLE
@@ -114,7 +119,8 @@ esac
             text = output.decode(errors="replace")
             self.assertEqual(os.waitstatus_to_exitcode(status), 0, text)
             self.assertIn("DOWNLOAD_WITH_CONSOLE", text)
-            self.assertIn("Warning: Download failed", text)
+            self.assertIn("Warning: Download did not complete", text)
+            self.assertIn("download fixture/repo --quant Q5_K_S", (self.root / "calls").read_text())
             self.assertNotIn("DOWNLOAD_STDIN_NOT_TTY", text)
             self.assertNotIn("command not found", text)
         finally:
