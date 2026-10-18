@@ -78,3 +78,15 @@ func TestCatalogQuantsAreCompleteMainModels(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogExpertGeometryIsMoE(t *testing.T) {
+	var doc catalogDoc
+	if err := json.Unmarshal(catalogJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range doc.Candidates {
+		if row.Experts > 1 && !row.MoE {
+			t.Errorf("%s: GGUF declares %d experts but catalog classifies it as dense", row.Repo, row.Experts)
+		}
+	}
+}
