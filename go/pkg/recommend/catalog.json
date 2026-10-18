@@ -21,7 +21,7 @@
       "hkv": 8,
       "kl": 192,
       "layers": 70,
-      "moe": false,
+      "moe": true,
       "name": "Xiaomi MiMo-V2.6-Pro",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 76,
@@ -44,7 +44,7 @@
       "runnable_mainline": true,
       "size_gb": 516.15,
       "speed": 48,
-      "total_params_b": 0,
+      "total_params_b": 1021.248,
       "vl": 128
     },
     {
@@ -69,7 +69,7 @@
       "kv_lora": 512,
       "layers": 79,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Z AI GLM-5.3 (Max)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by direct",
       "q_lora": 2048,
@@ -153,7 +153,7 @@
       "runnable_mainline": true,
       "size_gb": 435.2,
       "speed": 93,
-      "total_params_b": 0,
+      "total_params_b": 753.864,
       "vl": 512
     },
     {
@@ -178,7 +178,7 @@
       "kl": 192,
       "layers": 95,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "StepFun Step 5 Preview",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 72,
@@ -201,7 +201,7 @@
       "runnable_mainline": true,
       "size_gb": 310.1,
       "speed": 93,
-      "total_params_b": 0,
+      "total_params_b": 600.992,
       "vl": 192
     },
     {
@@ -225,7 +225,7 @@
       "kv_lora": 512,
       "layers": 93,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "Kimi K3 (Max)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -291,7 +291,7 @@
       "runnable_mainline": true,
       "size_gb": 1405.06,
       "speed": 43,
-      "total_params_b": 0,
+      "total_params_b": 2779.483,
       "vl": 74
     },
     {
@@ -315,7 +315,7 @@
       "kv_lora": 512,
       "layers": 46,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Z AI GLM-5.3-Flash",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -471,7 +471,7 @@
       "runnable_mainline": true,
       "size_gb": 187.04,
       "speed": 77,
-      "total_params_b": 0,
+      "total_params_b": 320.759,
       "vl": 512
     },
     {
@@ -496,7 +496,7 @@
       "kv_lora": 512,
       "layers": 73,
       "leading_dense": 4,
-      "moe": false,
+      "moe": true,
       "name": "InclusionAI Ling 3.1 Flash",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -652,7 +652,7 @@
       "runnable_mainline": true,
       "size_gb": 333.39,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 572.121,
       "vl": 128
     },
     {
@@ -675,7 +675,7 @@
       "hkv": 4,
       "kl": 256,
       "layers": 93,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3.8 2.4T A95B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 66,
@@ -740,7 +740,7 @@
       "runnable_mainline": true,
       "size_gb": 1220.85,
       "speed": 38,
-      "total_params_b": 0,
+      "total_params_b": 2446.183,
       "vl": 256
     },
     {
@@ -763,7 +763,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3.8-Flash-Next",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 66,
@@ -840,7 +840,7 @@
       "runnable_mainline": true,
       "size_gb": 103.69,
       "speed": 53,
-      "total_params_b": 0,
+      "total_params_b": 176.944,
       "vl": 256
     },
     {
@@ -862,7 +862,7 @@
       "hkv": 1,
       "kl": 512,
       "layers": 40,
-      "moe": false,
+      "moe": true,
       "name": "DeepSeek V4.1 Flash (Max)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1280,
@@ -898,7 +898,7 @@
       "runnable_mainline": false,
       "size_gb": 414.19,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 748.495,
       "vl": 512
     },
     {
@@ -921,7 +921,7 @@
       "hkv": 16,
       "kl": 64,
       "layers": 62,
-      "moe": false,
+      "moe": true,
       "name": "Meta Muse Spark Open (Xhigh)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 64,
@@ -956,7 +956,7 @@
       "runnable_mainline": true,
       "size_gb": 465.28,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 819.992,
       "vl": 64
     },
     {
@@ -978,7 +978,7 @@
       "hf_quant_updated_at": "2026-10-18T12:16:19Z",
       "kl": 192,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Xiaomi MiMo-V2.6-Flash",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 63,
@@ -1001,7 +1001,7 @@
       "runnable_mainline": true,
       "size_gb": 155.87,
       "speed": 49,
-      "total_params_b": 0,
+      "total_params_b": 308.779,
       "vl": 128
     },
     {
@@ -1023,7 +1023,7 @@
       "hkv": 1,
       "kl": 512,
       "layers": 61,
-      "moe": false,
+      "moe": true,
       "name": "DeepSeek V4 Pro 0813 (Max)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -1071,7 +1071,7 @@
       "runnable_mainline": true,
       "size_gb": 793.64,
       "speed": 93,
-      "total_params_b": 0,
+      "total_params_b": 1573.0,
       "vl": 512
     },
     {
@@ -1252,7 +1252,7 @@
       "runnable_mainline": true,
       "size_gb": 15.33,
       "speed": 42,
-      "total_params_b": 0,
+      "total_params_b": 27.321,
       "vl": 256
     },
     {
@@ -1278,7 +1278,7 @@
       "kv_lora": 512,
       "layers": 53,
       "leading_dense": 2,
-      "moe": false,
+      "moe": true,
       "name": "Motif Technologies Motif 3",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1024,
@@ -1314,7 +1314,7 @@
       "runnable_mainline": false,
       "size_gb": 182.5,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 314.702,
       "vl": 128
     },
     {
@@ -1339,7 +1339,7 @@
       "kl": 128,
       "layers": 61,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Institute of Foundation Models K2 Horizon 375B A23B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 50,
@@ -1494,7 +1494,7 @@
       "runnable_mainline": true,
       "size_gb": 221.47,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 379.167,
       "vl": 128
     },
     {
@@ -1518,7 +1518,7 @@
       "kl": 128,
       "layers": 52,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Reflection Beam 1.0",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 50,
@@ -1601,7 +1601,7 @@
       "runnable_mainline": true,
       "size_gb": 285.48,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 501.268,
       "vl": 128
     },
     {
@@ -1625,7 +1625,7 @@
       "kl": 128,
       "layers": 60,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "MiniMax-M3",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 48,
@@ -1768,7 +1768,7 @@
       "runnable_mainline": true,
       "size_gb": 246.73,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 426.175,
       "vl": 128
     },
     {
@@ -1791,7 +1791,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 60,
-      "moe": false,
+      "moe": true,
       "name": "Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 47,
@@ -1958,7 +1958,7 @@
       "runnable_mainline": true,
       "size_gb": 225.2,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 396.346,
       "vl": 256
     },
     {
@@ -2074,7 +2074,7 @@
       "kv_lora": 512,
       "layers": 61,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "Kimi K2.7 Code",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -2146,7 +2146,7 @@
       "runnable_mainline": true,
       "size_gb": 543.62,
       "speed": 52,
-      "total_params_b": 0,
+      "total_params_b": 1026.408,
       "vl": 512
     },
     {
@@ -2169,7 +2169,7 @@
       "hkv": 8,
       "kl": 128,
       "layers": 42,
-      "moe": false,
+      "moe": true,
       "name": "Thinking Machines Inkling Small",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 42,
@@ -2318,7 +2318,7 @@
       "runnable_mainline": false,
       "size_gb": 151.37,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 263.655,
       "vl": 128
     },
     {
@@ -2343,7 +2343,7 @@
       "kl": 128,
       "layers": 48,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Institute of Foundation Models K2 Horizon MoVA 36B A4B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 42,
@@ -2498,7 +2498,7 @@
       "runnable_mainline": true,
       "size_gb": 21.14,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 37.445,
       "vl": 128
     },
     {
@@ -2522,7 +2522,7 @@
       "hkv": 8,
       "kl": 128,
       "layers": 80,
-      "moe": false,
+      "moe": true,
       "name": "Tencent Hy3",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 42,
@@ -2569,7 +2569,7 @@
       "runnable_mainline": true,
       "size_gb": 166.31,
       "speed": 85,
-      "total_params_b": 0,
+      "total_params_b": 295.034,
       "vl": 128
     },
     {
@@ -2591,7 +2591,7 @@
       "hf_quant_updated_at": "2026-10-18T12:17:04Z",
       "kl": 128,
       "layers": 66,
-      "moe": false,
+      "moe": true,
       "name": "Thinking Machines Inkling (Xhigh)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 41,
@@ -2626,7 +2626,7 @@
       "runnable_mainline": false,
       "size_gb": 533.18,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 947.026,
       "vl": 128
     },
     {
@@ -2649,7 +2649,7 @@
       "kl": 128,
       "layers": 48,
       "leading_dense": 0,
-      "moe": false,
+      "moe": true,
       "name": "Upstage Solar Open2 250B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 41,
@@ -2684,7 +2684,7 @@
       "runnable_mainline": false,
       "size_gb": 126.88,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 250.288,
       "vl": 128
     },
     {
@@ -2709,7 +2709,7 @@
       "kv_lora": 512,
       "layers": 42,
       "leading_dense": 2,
-      "moe": false,
+      "moe": true,
       "name": "InclusionAI Ling-3.0-flash-VL",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 41,
@@ -2876,7 +2876,7 @@
       "runnable_mainline": true,
       "size_gb": 73.26,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 124.414,
       "vl": 128
     },
     {
@@ -2898,7 +2898,7 @@
       "hf_quant_updated_at": "2026-10-18T12:17:15Z",
       "kl": 128,
       "layers": 108,
-      "moe": false,
+      "moe": true,
       "name": "NVIDIA Nemotron 3 Ultra 550B A55B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 38,
@@ -3041,7 +3041,7 @@
       "runnable_mainline": true,
       "size_gb": 334.55,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 549.309,
       "vl": 128
     },
     {
@@ -3066,7 +3066,7 @@
       "kv_lora": 512,
       "layers": 43,
       "leading_dense": 2,
-      "moe": false,
+      "moe": true,
       "name": "InclusionAI Ling-3.0-flash-Fin",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 37,
@@ -3245,7 +3245,7 @@
       "runnable_mainline": true,
       "size_gb": 72.46,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 127.486,
       "vl": 128
     },
     {
@@ -3269,7 +3269,7 @@
       "kl": 128,
       "layers": 38,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "AI9Stars G9v3-39A5B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 36,
@@ -3304,7 +3304,7 @@
       "runnable_mainline": false,
       "size_gb": 21.94,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 38.967,
       "vl": 128
     },
     {
@@ -3329,7 +3329,7 @@
       "kv_lora": 512,
       "layers": 61,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "SK Telecom A.X-K2",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -3347,7 +3347,7 @@
       "runnable_mainline": false,
       "size_gb": 344.99,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 689.771,
       "vl": 512
     },
     {
@@ -3370,7 +3370,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 60,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3.5 397B A17B (Non-reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by direct",
       "quality": 35,
@@ -3555,7 +3555,7 @@
       "runnable_mainline": true,
       "size_gb": 227.33,
       "speed": 56,
-      "total_params_b": 0,
+      "total_params_b": 396.346,
       "vl": 256
     },
     {
@@ -3575,7 +3575,7 @@
       "hf_quant_updated_at": "2026-10-18T12:17:32Z",
       "kl": 128,
       "layers": 88,
-      "moe": false,
+      "moe": true,
       "name": "NVIDIA Nemotron 3.5 Bolt 74B-A9B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 35,
@@ -3664,7 +3664,7 @@
       "runnable_mainline": true,
       "size_gb": 46.77,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 74.043,
       "vl": 128
     },
     {
@@ -3829,7 +3829,7 @@
       "runnable_mainline": true,
       "size_gb": 5.38,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 8.999,
       "vl": 128
     },
     {
@@ -3852,7 +3852,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 40,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3.6 35B A3B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by direct",
       "quality": 30,
@@ -4007,7 +4007,7 @@
       "runnable_mainline": true,
       "size_gb": 20.61,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 34.661,
       "vl": 256
     },
     {
@@ -4030,7 +4030,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3.5 122B A10B (Non-reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by direct",
       "quality": 29,
@@ -4179,7 +4179,7 @@
       "runnable_mainline": true,
       "size_gb": 71.28,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 122.112,
       "vl": 256
     },
     {
@@ -4246,7 +4246,7 @@
       "runnable_mainline": true,
       "size_gb": 15.77,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 27.855,
       "vl": 128
     },
     {
@@ -4268,7 +4268,7 @@
       "hf_quant_updated_at": "2026-10-18T12:17:55Z",
       "kl": 512,
       "layers": 30,
-      "moe": false,
+      "moe": true,
       "name": "Google Gemma 4 26B A4B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 28,
@@ -4441,7 +4441,7 @@
       "runnable_mainline": true,
       "size_gb": 15.87,
       "speed": 67,
-      "total_params_b": 0,
+      "total_params_b": 25.233,
       "vl": 512
     },
     {
@@ -4606,7 +4606,7 @@
       "runnable_mainline": true,
       "size_gb": 3.03,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 5.058,
       "vl": 128
     },
     {
@@ -4804,7 +4804,7 @@
       "runnable_mainline": true,
       "size_gb": 18.25,
       "speed": 35,
-      "total_params_b": 0,
+      "total_params_b": 30.697,
       "vl": 512
     },
     {
@@ -4979,7 +4979,7 @@
       "runnable_mainline": true,
       "size_gb": 69.75,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 125.026,
       "vl": 128
     },
     {
@@ -5015,7 +5015,7 @@
       "runnable_mainline": true,
       "size_gb": 6.5,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 11.907,
       "vl": 512
     },
     {
@@ -5178,7 +5178,7 @@
       "runnable_mainline": true,
       "size_gb": 5.29,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 8.954,
       "vl": 256
     },
     {
@@ -5341,7 +5341,7 @@
       "runnable_mainline": true,
       "size_gb": 2.55,
       "speed": 10,
-      "total_params_b": 0,
+      "total_params_b": 4.206,
       "vl": 256
     },
     {
@@ -5363,7 +5363,7 @@
       "hf_quant_updated_at": "2026-10-18T12:18:32Z",
       "kl": 128,
       "layers": 53,
-      "moe": false,
+      "moe": true,
       "name": "NVIDIA Nemotron 3.5 Lightning",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 21,
@@ -5482,7 +5482,7 @@
       "runnable_mainline": true,
       "size_gb": 23.53,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 32.913,
       "vl": 128
     },
     {
@@ -5674,7 +5674,7 @@
       "runnable_mainline": true,
       "size_gb": 16.79,
       "speed": 77,
-      "total_params_b": 0
+      "total_params_b": 29.277
     },
     {
       "aa_id": "",
@@ -5740,7 +5740,7 @@
       "runnable_mainline": true,
       "size_gb": 1.45,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 2.517,
       "vl": 128
     },
     {
@@ -5762,7 +5762,7 @@
       "hf_quant_updated_at": "2026-10-18T12:18:46Z",
       "kl": 128,
       "layers": 52,
-      "moe": false,
+      "moe": true,
       "name": "NVIDIA Nemotron Cascade 2 30B A3B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 19,
@@ -5935,7 +5935,7 @@
       "runnable_mainline": true,
       "size_gb": 23.03,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 31.578,
       "vl": 128
     },
     {
@@ -5958,7 +5958,7 @@
       "hkv": 8,
       "kl": 64,
       "layers": 36,
-      "moe": false,
+      "moe": true,
       "name": "OpenAI gpt-oss-120b (High)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 19,
@@ -6077,7 +6077,7 @@
       "runnable_mainline": true,
       "size_gb": 58.53,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 116.829,
       "vl": 64
     },
     {
@@ -6120,7 +6120,7 @@
       "runnable_mainline": true,
       "size_gb": 270.28,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 72.55,
       "vl": 128
     },
     {
@@ -6145,7 +6145,7 @@
       "kv_lora": 512,
       "layers": 28,
       "leading_dense": 0,
-      "moe": false,
+      "moe": true,
       "name": "LongCat Flash Lite",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -6193,7 +6193,7 @@
       "runnable_mainline": false,
       "size_gb": 37.47,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 68.562,
       "vl": 512
     },
     {
@@ -6367,7 +6367,7 @@
       "runnable_mainline": true,
       "size_gb": 5.16,
       "speed": 100,
-      "total_params_b": 0
+      "total_params_b": 8.792
     },
     {
       "aa_id": "",
@@ -6391,7 +6391,7 @@
       "kv_lora": 512,
       "layers": 24,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "InclusionAI Ling 3.0 Tiny",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 256,
@@ -6547,7 +6547,7 @@
       "runnable_mainline": true,
       "size_gb": 4.58,
       "speed": 16,
-      "total_params_b": 0,
+      "total_params_b": 7.893,
       "vl": 128
     },
     {
@@ -6722,7 +6722,7 @@
       "runnable_mainline": true,
       "size_gb": 1.77,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 2.989,
       "vl": 128
     },
     {
@@ -6746,7 +6746,7 @@
       "kl": 128,
       "layers": 60,
       "leading_dense": 6,
-      "moe": false,
+      "moe": true,
       "name": "Arcee AI Trinity Large Thinking",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 18,
@@ -6925,7 +6925,7 @@
       "runnable_mainline": true,
       "size_gb": 225.24,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 398.635,
       "vl": 128
     },
     {
@@ -6949,7 +6949,7 @@
       "kl": 128,
       "layers": 46,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 18,
@@ -7116,7 +7116,7 @@
       "runnable_mainline": true,
       "size_gb": 66.46,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 106.852,
       "vl": 128
     },
     {
@@ -7140,7 +7140,7 @@
       "kl": 128,
       "layers": 48,
       "leading_dense": 0,
-      "moe": false,
+      "moe": true,
       "name": "Upstage Solar Open 100B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 17,
@@ -7193,7 +7193,7 @@
       "runnable_mainline": true,
       "size_gb": 57.98,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 102.652,
       "vl": 128
     },
     {
@@ -7215,7 +7215,7 @@
       "hf_quant_updated_at": "2026-10-18T12:19:26Z",
       "kl": 128,
       "layers": 52,
-      "moe": false,
+      "moe": true,
       "name": "NVIDIA Nemotron 3 Nano Omni 30B A3B Reasoning",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 17,
@@ -7352,7 +7352,7 @@
       "runnable_mainline": true,
       "size_gb": 22.25,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 31.578,
       "vl": 128
     },
     {
@@ -7375,7 +7375,7 @@
       "hkv": 8,
       "kl": 64,
       "layers": 24,
-      "moe": false,
+      "moe": true,
       "name": "OpenAI gpt-oss-20b (Low)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 16,
@@ -7554,7 +7554,7 @@
       "runnable_mainline": true,
       "size_gb": 10.87,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 20.915,
       "vl": 64
     },
     {
@@ -7578,7 +7578,7 @@
       "kl": 128,
       "layers": 49,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "Cohere North Mini Code",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 16,
@@ -7721,7 +7721,7 @@
       "runnable_mainline": true,
       "size_gb": 17.88,
       "speed": 91,
-      "total_params_b": 0,
+      "total_params_b": 30.484,
       "vl": 128
     },
     {
@@ -7745,7 +7745,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3 Next 80B A3B Instruct",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 16,
@@ -7912,7 +7912,7 @@
       "runnable_mainline": true,
       "size_gb": 45.17,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 79.674,
       "vl": 256
     },
     {
@@ -7934,7 +7934,7 @@
       "hf_quant_updated_at": "2026-10-18T12:19:45Z",
       "kl": 512,
       "layers": 30,
-      "moe": false,
+      "moe": true,
       "name": "Google DiffusionGemma 26B A4B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 16,
@@ -7975,7 +7975,7 @@
       "runnable_mainline": false,
       "size_gb": 15.65,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 25.251,
       "vl": 512
     },
     {
@@ -7998,7 +7998,7 @@
       "hkv": 8,
       "kl": 128,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Meta Llama 4 Maverick",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 15,
@@ -8171,7 +8171,7 @@
       "runnable_mainline": true,
       "size_gb": 226.09,
       "speed": 46,
-      "total_params_b": 0,
+      "total_params_b": 400.712,
       "vl": 128
     },
     {
@@ -8195,7 +8195,7 @@
       "hkv": 2,
       "kl": 256,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3 Coder Next",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 15,
@@ -8434,7 +8434,7 @@
       "runnable_mainline": true,
       "size_gb": 45.92,
       "speed": 75,
-      "total_params_b": 0,
+      "total_params_b": 79.674,
       "vl": 256
     },
     {
@@ -8608,7 +8608,7 @@
       "runnable_mainline": true,
       "size_gb": 2.16,
       "speed": 100,
-      "total_params_b": 0
+      "total_params_b": 3.66
     },
     {
       "aa_id": "",
@@ -8674,7 +8674,7 @@
       "runnable_mainline": true,
       "size_gb": 11.72,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 20.726,
       "vl": 160
     },
     {
@@ -8843,7 +8843,7 @@
       "runnable_mainline": true,
       "size_gb": 5.03,
       "speed": 38,
-      "total_params_b": 0,
+      "total_params_b": 7.518,
       "vl": 512
     },
     {
@@ -8865,7 +8865,7 @@
       "hf_quant_updated_at": "2026-10-18T12:20:08Z",
       "kl": 128,
       "layers": 52,
-      "moe": false,
+      "moe": true,
       "name": "NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 15,
@@ -9038,7 +9038,7 @@
       "runnable_mainline": true,
       "size_gb": 22.96,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 31.578,
       "vl": 128
     },
     {
@@ -9087,7 +9087,7 @@
       "runnable_mainline": true,
       "size_gb": 0.64,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 1.081,
       "vl": 128
     },
     {
@@ -9121,7 +9121,7 @@
       "repo": "limegreenpeper1/sarvam-105B-GGUF",
       "size_gb": 59.8,
       "speed": 100,
-      "total_params_b": 0
+      "total_params_b": 106.032
     },
     {
       "aa_id": "",
@@ -9223,7 +9223,7 @@
       "runnable_mainline": true,
       "size_gb": 2.28,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 3.934,
       "vl": 128
     },
     {
@@ -9396,7 +9396,7 @@
       "runnable_mainline": true,
       "size_gb": 1.57,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 2.697
     },
     {
       "aa_id": "",
@@ -9582,7 +9582,7 @@
       "runnable_mainline": true,
       "size_gb": 4.28,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 7.586,
       "vl": 128
     },
     {
@@ -9750,7 +9750,7 @@
       "runnable_mainline": true,
       "size_gb": 3.22,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 4.647,
       "vl": 512
     },
     {
@@ -9859,7 +9859,7 @@
       "runnable_mainline": true,
       "size_gb": 4.68,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 8.191,
       "vl": 128
     },
     {
@@ -10046,7 +10046,7 @@
       "runnable_mainline": true,
       "size_gb": 39.6,
       "speed": 93,
-      "total_params_b": 0,
+      "total_params_b": 70.554,
       "vl": 128
     },
     {
@@ -10069,7 +10069,7 @@
       "hkv": 8,
       "layers": 54,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Baidu ERNIE 4.5 300B A47B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 12,
@@ -10242,7 +10242,7 @@
       "runnable_mainline": true,
       "size_gb": 167.78,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 299.484
     },
     {
       "aa_id": "",
@@ -10282,7 +10282,7 @@
       "runnable_mainline": true,
       "size_gb": 22.96,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 12.32,
       "vl": 128
     },
     {
@@ -10389,7 +10389,7 @@
       "runnable_mainline": true,
       "size_gb": 6.08,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 8.888,
       "vl": 128
     },
     {
@@ -10413,7 +10413,7 @@
       "kv_lora": 512,
       "layers": 27,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "Kimi Linear 48B A3B Instruct",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 12,
@@ -10484,7 +10484,7 @@
       "runnable_mainline": true,
       "size_gb": 27.66,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 49.123,
       "vl": 72
     },
     {
@@ -10568,7 +10568,7 @@
       "runnable_mainline": true,
       "size_gb": 228.84,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 410.081
     },
     {
       "aa_id": "",
@@ -10589,7 +10589,7 @@
       "hf_quant_updated_at": "2026-10-18T12:23:29Z",
       "layers": 24,
       "leading_dense": 2,
-      "moe": false,
+      "moe": true,
       "name": "Liquid AI LFM2.5-8B-A1B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 12,
@@ -10732,7 +10732,7 @@
       "runnable_mainline": true,
       "size_gb": 4.96,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 8.468
     },
     {
       "aa_id": "",
@@ -10756,7 +10756,7 @@
       "kl": 128,
       "layers": 32,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "InclusionAI Ring-flash-2.0",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 12,
@@ -10821,7 +10821,7 @@
       "runnable_mainline": true,
       "size_gb": 58.14,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 102.89,
       "vl": 128
     },
     {
@@ -11007,7 +11007,7 @@
       "runnable_mainline": true,
       "size_gb": 18.14,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 32.234
     },
     {
       "aa_id": "",
@@ -11031,7 +11031,7 @@
       "kl": 128,
       "layers": 32,
       "leading_dense": 0,
-      "moe": false,
+      "moe": true,
       "name": "Cohere Command A",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 11,
@@ -11198,7 +11198,7 @@
       "runnable_mainline": true,
       "size_gb": 125.81,
       "speed": 64,
-      "total_params_b": 0,
+      "total_params_b": 218.255,
       "vl": 128
     },
     {
@@ -11361,7 +11361,7 @@
       "runnable_mainline": true,
       "size_gb": 1.19,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 1.882,
       "vl": 256
     },
     {
@@ -11386,7 +11386,7 @@
       "kl": 64,
       "layers": 19,
       "leading_dense": 1,
-      "moe": false,
+      "moe": true,
       "name": "Sarvam 30B (High)",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 11,
@@ -11421,7 +11421,7 @@
       "runnable_mainline": true,
       "size_gb": 18.23,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 32.153,
       "vl": 64
     },
     {
@@ -11607,7 +11607,7 @@
       "runnable_mainline": true,
       "size_gb": 18.14,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 32.234
     },
     {
       "aa_id": "",
@@ -11629,7 +11629,7 @@
       "hkv": 8,
       "kl": 128,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Meta Llama 4 Scout",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 11,
@@ -11802,7 +11802,7 @@
       "runnable_mainline": true,
       "size_gb": 60.87,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 107.77,
       "vl": 128
     },
     {
@@ -11827,7 +11827,7 @@
       "kv_lora": 512,
       "layers": 61,
       "leading_dense": 3,
-      "moe": false,
+      "moe": true,
       "name": "Perplexity R1 1776",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "q_lora": 1536,
@@ -11899,7 +11899,7 @@
       "runnable_mainline": true,
       "size_gb": 376.65,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 671.026,
       "vl": 128
     },
     {
@@ -12067,7 +12067,7 @@
       "runnable_mainline": true,
       "size_gb": 2.32,
       "speed": 45,
-      "total_params_b": 0
+      "total_params_b": 3.836
     },
     {
       "aa_id": "",
@@ -12229,7 +12229,7 @@
       "runnable_mainline": true,
       "size_gb": 0.5,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 0.752,
       "vl": 256
     },
     {
@@ -12416,7 +12416,7 @@
       "runnable_mainline": true,
       "size_gb": 13.35,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 23.572,
       "vl": 128
     },
     {
@@ -12436,7 +12436,7 @@
       "ff": 24576,
       "hf_quant_updated_at": "2026-10-18T12:24:18Z",
       "layers": 72,
-      "moe": false,
+      "moe": true,
       "name": "AI21 Labs Jamba 1.7 Large",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 10,
@@ -12603,7 +12603,7 @@
       "runnable_mainline": true,
       "size_gb": 223.92,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 398.555
     },
     {
       "aa_id": "",
@@ -12623,7 +12623,7 @@
       "ff": 768,
       "hf_quant_updated_at": "2026-10-18T12:24:21Z",
       "layers": 40,
-      "moe": false,
+      "moe": true,
       "name": "IBM Granite 4.0 H Small",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 10,
@@ -12796,7 +12796,7 @@
       "runnable_mainline": true,
       "size_gb": 18.23,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 32.207
     },
     {
       "aa_id": "",
@@ -12982,7 +12982,7 @@
       "runnable_mainline": true,
       "size_gb": 7.67,
       "speed": 82,
-      "total_params_b": 0,
+      "total_params_b": 13.506,
       "vl": 128
     },
     {
@@ -13006,7 +13006,7 @@
       "hkv": 4,
       "kl": 128,
       "layers": 48,
-      "moe": false,
+      "moe": true,
       "name": "Alibaba Qwen3 Omni 30B A3B Instruct",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 10,
@@ -13047,7 +13047,7 @@
       "runnable_mainline": true,
       "size_gb": 17.28,
       "speed": 96,
-      "total_params_b": 0,
+      "total_params_b": 30.533,
       "vl": 128
     },
     {
@@ -13069,7 +13069,7 @@
       "hf_quant_updated_at": "2026-10-18T12:24:32Z",
       "layers": 40,
       "leading_dense": 2,
-      "moe": false,
+      "moe": true,
       "name": "Liquid AI LFM2 24B A2B",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 10,
@@ -13224,7 +13224,7 @@
       "runnable_mainline": true,
       "size_gb": 14.3,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 23.972
     },
     {
       "aa_id": "",
@@ -13295,7 +13295,7 @@
       "runnable_mainline": true,
       "size_gb": 8.43,
       "speed": 42,
-      "total_params_b": 0
+      "total_params_b": 14.66
     },
     {
       "aa_id": "",
@@ -13469,7 +13469,7 @@
       "runnable_mainline": true,
       "size_gb": 1.8,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 3.197
     },
     {
       "aa_id": "",
@@ -13547,7 +13547,7 @@
       "runnable_mainline": true,
       "size_gb": 12.68,
       "speed": 83,
-      "total_params_b": 0,
+      "total_params_b": 20.905,
       "vl": 96
     },
     {
@@ -13733,7 +13733,7 @@
       "runnable_mainline": true,
       "size_gb": 4.16,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 7.298
     },
     {
       "aa_id": "",
@@ -13919,7 +13919,7 @@
       "runnable_mainline": true,
       "size_gb": 4.84,
       "speed": 93,
-      "total_params_b": 0,
+      "total_params_b": 8.49,
       "vl": 128
     },
     {
@@ -14105,7 +14105,7 @@
       "runnable_mainline": true,
       "size_gb": 4.16,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 7.298
     },
     {
       "aa_id": "",
@@ -14247,7 +14247,7 @@
       "runnable_mainline": true,
       "size_gb": 0.68,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 1.17
     },
     {
       "aa_id": "",
@@ -14266,7 +14266,7 @@
       "ff": 14336,
       "hf_quant_updated_at": "2026-10-18T12:25:15Z",
       "layers": 32,
-      "moe": false,
+      "moe": true,
       "name": "AI21 Labs Jamba 1.7 Mini",
       "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
       "quality": 9,
@@ -14439,7 +14439,7 @@
       "runnable_mainline": true,
       "size_gb": 29.04,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 51.57
     },
     {
       "aa_id": "",
@@ -14581,7 +14581,7 @@
       "runnable_mainline": true,
       "size_gb": 0.68,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 1.17
     },
     {
       "aa_id": "",
@@ -14768,7 +14768,7 @@
       "runnable_mainline": true,
       "size_gb": 0.84,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 1.462
     },
     {
       "aa_id": "",
@@ -14864,7 +14864,7 @@
       "runnable_mainline": true,
       "size_gb": 0.24,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 0.268,
       "vl": 256
     },
     {
@@ -15050,7 +15050,7 @@
       "runnable_mainline": true,
       "size_gb": 40.72,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 70.6
     },
     {
       "aa_id": "",
@@ -15238,7 +15238,7 @@
       "runnable_mainline": true,
       "size_gb": 1.96,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 3.403
     },
     {
       "aa_id": "",
@@ -15286,7 +15286,7 @@
       "runnable_mainline": true,
       "size_gb": 4.68,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 8.191,
       "vl": 128
     },
     {
@@ -15473,7 +15473,7 @@
       "runnable_mainline": true,
       "size_gb": 2.0,
       "speed": 100,
-      "total_params_b": 0,
+      "total_params_b": 3.429,
       "vl": 128
     },
     {
@@ -15616,7 +15616,7 @@
       "runnable_mainline": true,
       "size_gb": 0.68,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 1.17
     },
     {
       "aa_id": "",
@@ -15761,7 +15761,7 @@
       "runnable_mainline": true,
       "size_gb": 0.21,
       "speed": 0,
-      "total_params_b": 0
+      "total_params_b": 0.34
     },
     {
       "aa_id": "",
@@ -15857,7 +15857,7 @@
       "runnable_mainline": true,
       "size_gb": 2.0,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 3.349,
       "vl": 128
     },
     {
@@ -16043,7 +16043,7 @@
       "runnable_mainline": true,
       "size_gb": 4.71,
       "speed": 100,
-      "total_params_b": 0
+      "total_params_b": 8.053
     },
     {
       "aa_id": "",
@@ -16203,7 +16203,7 @@
       "runnable_mainline": true,
       "size_gb": 2.7,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 3.974,
       "vl": 128
     },
     {
@@ -16368,11 +16368,11 @@
       "runnable_mainline": true,
       "size_gb": 0.64,
       "speed": 0,
-      "total_params_b": 0,
+      "total_params_b": 1.078,
       "vl": 64
     }
   ],
-  "generated_at": "2026-10-18T12:26:02Z",
+  "generated_at": "2026-10-18T12:38:43Z",
   "source": "Artificial Analysis open-weight leaderboard page; resolved 118 GGUF repos with quant sizes; skipped 31 open-weight rows without matching GGUF quants",
   "version": 2
 }

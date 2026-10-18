@@ -54,6 +54,43 @@ def test_plain_json_table_and_malformed_transport():
     assert updater.parse_open_weight_page_models('<script>self.__next_f.push(notJSON)</script>') == []
 
 
+def test_flattened_row_keeps_gguf_experts_and_artifact_parameter_count(monkeypatch):
+    updater = load_updater()
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {"arch": "glm-dsa", "experts": 256, "exp_used": 8})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"gguf": {"total": 753864139008, "totalFileSize": 435200000000, "architecture": "glm-dsa"}})
+    row = {"name": "GLM-5.3", "isOpenWeights": True, "intelligenceIndex": 44.7}
+    cand = updater.candidate_from_row(row, "org/model", [{"name": "Q4_K_M", "size_gb": 435.2, "size_bytes": 435200000000}], "direct")
+    assert cand["moe"] is True
+    assert cand["total_params_b"] == 753.864
+    assert cand["active_params_b"] == 0  # not total * 8 / 256
+    assert cand["experts"] == 256
+
+
+def test_shape_preserves_known_counts_and_dense_or_missing_evidence():
+    updater = load_updater()
+    shape = updater.candidate_model_shape({"totalParameters": 744, "activeParameters": 40}, {}, {"gguf": {"total": 753864139008}}, [])
+    assert shape == {"total_params_b": 744, "active_params_b": 40, "moe": True}
+    for experts in (0, 1):
+        shape = updater.candidate_model_shape({}, {"experts": experts}, {"gguf": {"total": 27000000000, "totalFileSize": 15000000000}}, [{"size_bytes": 15000000000}])
+        assert shape == {"total_params_b": 27, "active_params_b": 0, "moe": False}
+    assert updater.candidate_model_shape({}, {}, {}, []) == {"total_params_b": 0, "active_params_b": 0, "moe": False}
+    for invalid in (True, "27B", float("nan"), float("inf"), -1):
+        assert updater.candidate_model_shape({}, {}, {"gguf": {"total": invalid, "totalFileSize": 1}}, [{"size_bytes": 1}])["total_params_b"] == 0
+
+
+def test_repo_summary_of_a_companion_cannot_supply_main_parameter_count():
+    updater = load_updater()
+    arch = {"arch": "nemotron_h_moe", "experts": 128}
+    quants = [{"size_bytes": 46000000000}]
+    for summary in [
+        {"total": 1632922404, "architecture": "dflash", "totalFileSize": 1290795104},
+        {"total": 1632922404, "architecture": "nemotron_h_moe", "totalFileSize": 1290795104},
+        {"total": 1632922404, "architecture": "dflash", "totalFileSize": 46000000000},
+    ]:
+        shape = updater.candidate_model_shape({}, arch, {"gguf": summary}, quants)
+        assert shape == {"total_params_b": 0, "active_params_b": 0, "moe": True}
+
+
 def test_representative_size_prefers_q4_over_q8():
     updater = load_updater()
     quants = [

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -1087,16 +1088,44 @@ def candidate_notes(row: dict[str, Any], method: str) -> str:
     return "; ".join(bits)
 
 
-def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, Any]], method: str) -> dict[str, Any]:
+def candidate_model_shape(row: dict[str, Any], arch: dict[str, Any], hf_info: dict[str, Any], quants: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep artifact geometry when the leaderboard omits parameter counts."""
     total = parameters_value(row, "total")
     active = parameters_value(row, "active")
-    moe = total > 0 and active > 0 and active < total * 0.85
+    gguf = hf_info.get("gguf")
+    artifact_total = gguf.get("total") if isinstance(gguf, dict) else None
+    artifact_size = gguf.get("totalFileSize") if isinstance(gguf, dict) else None
+    artifact_arch = str(gguf.get("architecture") or "") if isinstance(gguf, dict) else ""
+    main_artifact = (isinstance(artifact_size, int) and not isinstance(artifact_size, bool)
+                     and artifact_size > 0
+                     and any(q.get("size_bytes") == artifact_size for q in quants))
+    same_arch = not artifact_arch or not arch.get("arch") or artifact_arch == arch["arch"]
+    if (not total and isinstance(artifact_total, (int, float))
+            and not isinstance(artifact_total, bool)
+            and math.isfinite(artifact_total) and artifact_total > 0
+            and main_artifact and same_arch):
+        # HF's GGUF total counts individual parameters; AA reports billions.
+        # Its summary can describe a DFlash head or projector in the same repo.
+        # Accept it only when its size belongs to a complete main artifact.
+        total = artifact_total / 1e9
+    experts = arch.get("experts", 0)
+    moe = ((isinstance(experts, int) and experts > 1)
+           or (total > 0 and active > 0 and active < total * 0.85))
+    # Expert count alone does not tell us active parameter count: attention,
+    # embeddings and shared experts also participate. Leave it unknown.
+    return {"total_params_b": round(total, 3) if total else 0,
+            "active_params_b": round(active, 3) if active else 0,
+            "moe": moe}
+
+
+def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, Any]], method: str) -> dict[str, Any]:
     idx = intelligence(row)
     tps = output_tps(row)
     # Read exact GGUF geometry from one HF range request so the recommender can
     # compute launch overhead with the placement engine's formula, not an
     # estimate. Best-effort: missing geometry leaves the recommender's fallback.
     arch = fetch_gguf_arch(repo) or {}
+    shape = candidate_model_shape(row, arch, fetch_hf_model_info(repo) or {}, quants)
     cand = {
         "aa_id": row_id(row),
         "aa_intelligence_index": round(idx, 3) if idx else 0,
@@ -1104,10 +1133,8 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "aa_query": model_query(row),
         "aa_slug": row_slug(row),
         "aa_updated_at": utc_now(),
-        "active_params_b": round(active, 3) if active else 0,
         "family": candidate_family(row),
         "hf_quant_updated_at": utc_now(),
-        "moe": moe,
         "name": display_name(row),
         "notes": candidate_notes(row, method),
         "quality": quality_score(idx),
@@ -1115,7 +1142,7 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "repo": repo,
         "size_gb": round(representative_size_gb(quants), 2),
         "speed": speed_score(tps),
-        "total_params_b": round(total, 3) if total else 0,
+        **shape,
     }
     if arch:
         # Embed only the geometry fields the overhead formula consumes; keep
