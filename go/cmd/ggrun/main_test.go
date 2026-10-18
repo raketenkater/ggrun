@@ -1403,6 +1403,41 @@ func TestBackendGPUCapableProbe(t *testing.T) {
 	}
 }
 
+// Usage text and failing probes must never serve as GPU activation evidence.
+func TestBackendGPUCapableLegacyBufferProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-backend probe uses a shell script")
+	}
+	for _, tc := range []struct {
+		name, list, buffers string
+		capable, probed     bool
+	}{
+		{"cuda", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'Available buffer types:\n  CPU\n  CUDA0\n  CUDA1'", true, true},
+		{"vulkan", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'Available buffer types:\n  CPU\n  Vulkan0'", true, true},
+		{"metal", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'Available buffer types:\n  CPU\n  Metal'", true, true},
+		{"cpu-with-help", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'Available buffer types:\n  CPU\nerror: invalid parameter\nusage: --device CUDA0 --vulkan'", false, true},
+		{"missing-list", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'usage: --device CUDA0'", false, false},
+		{"wrong-status", "echo 'error: unknown argument: --list-devices'; exit 2", "exit 99", false, false},
+		{"driver-error", "echo 'CUDA driver failed'; exit 1", "exit 99", false, false},
+		{"failed-enumeration", "echo 'Available devices:\nCUDA0: test'; exit 1", "exit 99", false, false},
+		{"crashed-buffer-probe", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'Available buffer types:\nCUDA0'; exit 139", false, false},
+		{"wrong-rejection", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'Available buffer types:\nCUDA0'; exit 1", false, false},
+		{"unknown-option", "echo 'error: unknown argument: --list-devices'; exit 1", "echo 'error: unknown argument: --override-tensor'; exit 1", false, false},
+		{"help-only", "echo 'Available devices:\nusage: --device CUDA0'", "exit 99", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "case \"$1\" in\n--list-devices) " + tc.list + ";;\n--override-tensor)\n" +
+				"[ \"$2\" = 'ggrun_probe=__ggrun_invalid_buffer__' ] || exit 99\n" + tc.buffers +
+				"\necho 'error: Invalid tensor buffer type override: ggrun_probe=__ggrun_invalid_buffer__'\nexit 1;;\n*) exit 99;;\nesac\n"
+			bin := writeFakeBackend(t, "probe", body)
+			capable, probed := backendGPUCapable(bin)
+			if capable != tc.capable || probed != tc.probed {
+				t.Fatalf("got capable=%v probed=%v, want capable=%v probed=%v", capable, probed, tc.capable, tc.probed)
+			}
+		})
+	}
+}
+
 func TestGateBackendGPUStripsGPUsForCPUBuild(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake-backend probe uses a shell script")
