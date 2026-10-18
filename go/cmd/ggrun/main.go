@@ -10122,10 +10122,9 @@ func gateBackendGPU(be *backendInfo, caps *detect.Capabilities) *detect.Capabili
 }
 
 // backendGPUCapable probes whether the backend binary can see any GPU device by
-// running `llama-server --list-devices` (supported by both mainline llama.cpp
-// and ik_llama.cpp, and independent of whether the GPU backend is statically
-// linked or a dynamic ggml-*.{dll,so}). probed is false when the probe could not
-// run or its output was unrecognized, so the caller falls back to prior behavior.
+// running `llama-server --list-devices`. Older CLI surfaces can instead list
+// registered buffer types when rejecting an invalid tensor override. Neither
+// probe loads a model. Missing or ambiguous evidence remains unprobed.
 func backendGPUCapable(binPath string) (capable, probed bool) {
 	if binPath == "" {
 		return false, false
@@ -10133,23 +10132,58 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binPath, "--list-devices").CombinedOutput()
-	if err != nil && len(out) == 0 {
+	if ctx.Err() != nil {
 		return false, false
 	}
-	text := strings.ToLower(string(out))
-	idx := strings.Index(text, "available devices")
-	if idx < 0 {
+	if err == nil {
+		return backendGPUListing(string(out), "available devices:")
+	}
+	// Fall back only for the known unsupported-option response, not crashes,
+	// driver errors or an unsuccessful device enumeration. The deliberately
+	// invalid buffer makes argument parsing stop before model/server startup.
+	exitErr, exited := err.(*exec.ExitError)
+	if !exited || exitErr.ExitCode() != 1 || !strings.Contains(strings.ToLower(string(out)), "unknown argument: --list-devices") {
 		return false, false
 	}
-	// ggrun's placement supports CUDA, Vulkan, and Metal; AMD/Intel GPUs run
-	// through Vulkan. ROCm/HIP/SYCL backends aren't supported, so they're not
-	// probed here.
-	for _, kw := range []string{"cuda", "vulkan", "metal"} {
-		if strings.Contains(text[idx:], kw) {
+	const override = "ggrun_probe=__ggrun_invalid_buffer__"
+	out, err = exec.CommandContext(ctx, binPath, "--override-tensor", override).CombinedOutput()
+	exitErr, exited = err.(*exec.ExitError)
+	if ctx.Err() != nil || !exited || exitErr.ExitCode() != 1 ||
+		!strings.Contains(strings.ToLower(string(out)), "invalid tensor buffer type override: "+override) {
+		return false, false
+	}
+	return backendGPUListing(string(out), "available buffer types:")
+}
+
+// Read only device/buffer entries, never CUDA/Vulkan examples in later help.
+// CPU-only enumeration is known evidence; unrelated or missing text is not.
+func backendGPUListing(output, header string) (capable, probed bool) {
+	found := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(strings.ToLower(line))
+		if !found {
+			found = line == header
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			break
+		}
+		name := strings.TrimSuffix(fields[0], ":")
+		if name == "cpu" || strings.HasPrefix(name, "cpu_") {
+			continue
+		}
+		if name == "metal" {
 			return true, true
 		}
+		for _, prefix := range []string{"cuda", "vulkan", "metal"} {
+			if digits := strings.TrimPrefix(name, prefix); digits != name && digits != "" && strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+				return true, true
+			}
+		}
+		break
 	}
-	return false, true
+	return false, found
 }
 
 func warnModelCompatibility(model *placement.ModelProfile) {
