@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -26,6 +27,31 @@ def test_parse_open_weight_next_payload():
     assert len(rows) == 1
     assert rows[0]["name"] == "Open Model"
     assert updater.huggingface_repo(rows[0]) == "org/model"
+
+
+def test_current_table_spans_flight_chunks_and_preserves_quoted_names():
+    updater = load_updater()
+    row = {"slug": "open-model", "name": 'Open "Reasoning" Model',
+           "isOpenWeights": True, "modelCreatorName": "Creator", "intelligenceIndex": 42.5}
+    wire = "x:" + json.dumps({
+        "models": [{"slug": "navigation-only", "name": "Not a scored model"}],
+        "initialModels": [row, {"name": "Closed model", "isOpenWeights": False}],
+    })
+    cut = wire.index("Reasoning") + 3
+    page = "".join('<script>self.__next_f.push(' + json.dumps([1, chunk]) + ')</script>'
+                   for chunk in [wire[:cut], wire[cut:]])
+    rows = updater.parse_open_weight_page_models(page)
+    assert rows == [row]
+    assert updater.model_creator_name(rows[0]) == "Creator"
+    assert updater.intelligence(rows[0]) == 42.5
+
+
+def test_plain_json_table_and_malformed_transport():
+    updater = load_updater()
+    row = {"name": "Open model", "isOpenWeights": True, "intelligenceIndex": 30}
+    page = '<script type="application/json">' + json.dumps({"models": [row]}) + '</script>'
+    assert updater.parse_open_weight_page_models(page) == [row]
+    assert updater.parse_open_weight_page_models('<script>self.__next_f.push(notJSON)</script>') == []
 
 
 def test_representative_size_prefers_q4_over_q8():
