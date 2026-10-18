@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,6 +200,42 @@ func TestValidateBackendCandidateChecksServerSurfaceAndAccelerator(t *testing.T)
 	cpuOnly := write("cpu-server", "--model --ctx-size --host --port", "CPU")
 	if err := validateBackendCandidate(cpuOnly, "", "cuda"); err == nil || !strings.Contains(err.Error(), "no supported GPU") {
 		t.Fatalf("CPU-only binary accepted for CUDA activation: %v", err)
+	}
+}
+
+func TestValidateBackendCandidateHelpUsageExitDoesNotBypassConformance(t *testing.T) {
+	const surface = "--model --ctx-size --host --port"
+	for _, tc := range []struct {
+		name, help, devices, arch string
+		helpExit, versionExit     int
+		wantError                 string
+	}{
+		{name: "ik_usage_exit", help: "usage: llama-server [options]\n" + surface, helpExit: 1, devices: "CUDA0: test"},
+		{name: "ordinary_success", help: surface, devices: "CUDA0: test"},
+		{name: "no_usage_header", help: surface, helpExit: 1, devices: "CUDA0: test", wantError: "--help failed"},
+		{name: "missing_context", help: "usage: llama-server [options]\n--model --host --port", helpExit: 1, devices: "CUDA0: test", wantError: "--ctx-size"},
+		{name: "usage_error_status", help: "usage: llama-server [options]\n" + surface, helpExit: 2, devices: "CUDA0: test", wantError: "--help failed"},
+		{name: "loader_error_status", help: "usage: llama-server [options]\n" + surface, helpExit: 127, devices: "CUDA0: test", wantError: "--help failed"},
+		{name: "crash_status", help: "usage: llama-server [options]\n" + surface, helpExit: 139, devices: "CUDA0: test", wantError: "--help failed"},
+		{name: "failed_version", help: "usage: llama-server [options]\n" + surface, helpExit: 1, versionExit: 1, devices: "CUDA0: test", wantError: "--version failed"},
+		{name: "cpu_only", help: "usage: llama-server [options]\n" + surface, helpExit: 1, devices: "CPU", wantError: "no supported GPU"},
+		{name: "unverified_arch", help: "usage: llama-server [options]\n" + surface, helpExit: 1, devices: "CUDA0: test", arch: "certainly-not-a-real-architecture", wantError: "architecture"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "llama-server")
+			body := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n--version) echo 'llama-server test'; exit %d ;;\n--help) echo '%s'; exit %d ;;\n--list-devices) echo 'Available devices:'; echo '%s' ;;\n*) exit 1 ;;\nesac\n", tc.versionExit, tc.help, tc.helpExit, tc.devices)
+			if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			err := validateBackendCandidate(path, tc.arch, "cuda")
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("valid backend rejected: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("got %v; want rejection containing %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

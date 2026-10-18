@@ -639,7 +639,22 @@ func validateBackendCandidate(binary, routeArch, accel string) error {
 			return "", fmt.Errorf("%s timed out", flag)
 		}
 		if runErr != nil {
-			return string(out), fmt.Errorf("%s failed: %w", flag, runErr)
+			// Some llama-server forks (including current ik_llama) return 1
+			// after printing normal usage. Recognize only that help convention;
+			// version failures, loader failures, signals and other statuses still
+			// reject activation. Required flags, architecture and GPU checks below
+			// remain mandatory even for a recognized help response.
+			exitErr, exited := runErr.(*exec.ExitError)
+			usage := false
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "usage:") {
+					usage = true
+					break
+				}
+			}
+			if flag != "--help" || !exited || exitErr.ExitCode() != 1 || !usage {
+				return string(out), fmt.Errorf("%s failed: %w", flag, runErr)
+			}
 		}
 		return string(out), nil
 	}
