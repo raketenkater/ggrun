@@ -57,6 +57,7 @@ evidence.
 | MMAP-1, MMAP-2, MMAP-4 | Implemented: production/preflight/recovery/daemon share capability-aware reclaim policy; unknown/anonymous loaders fail closed; mmap remains last-resort and consent-gated | Commit plus live resident/mmap/anonymous cases |
 | MMAP-3 | Host ledger now separates exact reclaimable expert bytes from non-reclaimable runtime, KV, embeddings, and checkpoint reserve | Audit remaining backend-reported buffers/page tables/companions against live cgroup data |
 | MMAP-5 through MMAP-7 | Not complete | Requires the storage/workload and real too-large-model acceptance window |
+| MMAP-8 (sparse lookup tier) | Implemented in source 2026-10-19: arch-proven DeepSeek-V4.1 Engram tables are a separate file-backed tier (parser schema 3), kept off GPU/host resident ledgers only with a `--lazy-mode` backend; `--lazy-mode on` is explicit; fit-pass host row excludes the tier; scope gets a bounded lookup-cache allowance; live smaps/memory.stat check; automatic expert paging beside the tier is refused; load-mode backends receive an explicit mapping choice | Live load blocked: host DRAM fault (63 flips, byte ≡ 10 mod 16) and download in progress. See `docs/large-model-mmap-evidence-20261019.md` |
 | HOT-1 through HOT-6 | Planned, backend-gated resident-MoE performance lane. A 2026-08-28 draft llama.cpp implementation is measured on Qwen3.8-Flash-Next but is not upstream-ready | Isolated fork audit, exact VRAM accounting, correctness and same-workload A/B on this three-GPU Q3 launch; then architecture matrix |
 | PIN/P3 | Deliberately not started | Blocked on appropriate hardware/model artifacts as specified below |
 
@@ -708,6 +709,28 @@ resident plan and precedes selective pinning.
 
 Exit: accepted mmap survives spread traffic without cgroup OOM; anonymous
 experts are refused; a resident winner is never silently replaced by mmap.
+
+- [ ] **MMAP-8 — sparse lookup tables.** A table the exact backend gathers a
+  few rows per token from (DeepSeek-V4.1 Engram, `TENSOR_READ_LAZY` in
+  smalinin/llama.cpp 425badfe) is not execution-weight paging. It is
+  recognised only from the architecture's own `<arch>.engram.layer_ids`, never
+  from a tensor name, an embedding, or "ngram". With `--lazy-mode on` the
+  loader maps it from the file under any `--load-mode`, never moves it to a
+  GPU, and excludes it from MAP_POPULATE and mlock; with lazy mode off it
+  follows its layer onto the GPU (fit pass: CUDA0/CUDA1 model 109,927/120,700
+  MiB). Placement therefore excludes the tier from GPU and host resident
+  ledgers only for a `--lazy-mode` backend and otherwise refuses the model.
+  Execution weights stay resident when they fit; automatic expert paging next
+  to the tier is refused because both would share one reclaim pool. The
+  fit-pass Host row counts the mapped tables (333,327 MiB = 134,102 resident +
+  199,225 tier) and is corrected by exactly the tier. After the canary,
+  memory.high = non-reclaimable ceiling + lookup allowance (≤ tier, ≤ user
+  ceiling), memory.max = high + headroom. A post-load smaps/memory.stat check
+  refuses anonymous, locked, missing or copied mappings and persists the
+  contradiction; missing observations are not proof. Remaining: live load,
+  cold/warm and repeated/spread lookup traffic, major faults, HDD reads,
+  agent-task correctness and timing on the verified 366 GiB model, after the
+  host DRAM fault is resolved.
 
 ## P3 — selective mmap + mlock for models beyond RAM + VRAM
 
