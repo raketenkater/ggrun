@@ -71,6 +71,13 @@ type Info struct {
 	NextNPredictLayers        int     `json:"nextn_predict_layers"`         // MTP/NextN prediction layers
 	IsMoE                     bool    `json:"is_moe"`
 
+	// SparseLookupBytes is the arch-proven lookup-table tier (schema 3+). It is
+	// included in NonExpertBytes for the file-size identity but absent from
+	// NonExpertLayerBytes.
+	SparseLookupBytes      int64   `json:"sparse_lookup_bytes"`
+	SparseLookupLayerBytes []int64 `json:"sparse_lookup_layer_bytes,omitempty"`
+	SparseLookupKind       string  `json:"sparse_lookup_kind,omitempty"`
+	EngramLayerIDs         []int   `json:"engram_layer_ids,omitempty"`
 	// HeadCountKVByLayer and SlidingWindowPattern are the per-block arrays a
 	// mixed-attention model states instead of (or alongside) the scalars.
 	// They are raw metadata; placement validates them against the block count
@@ -248,6 +255,19 @@ func validateParserOutput(script, modelPath string, info *Info) error {
 				"parse_gguf.py at %s is missing required DeepSeek4 byte splits for %s; reinstall ggrun or set LLM_SCRIPT_DIR to the repo tools/gguf directory",
 				script, filepath.Base(modelPath))
 		}
+	}
+	// DeepSeek-V4.1 Engram tables are ~195 GiB. A schema-2 helper folds them
+	// into the per-layer backbone, which bills them to a GPU.
+	if strings.EqualFold(info.Architecture, "deepseek41") && info.TensorAccountingSchema < 3 {
+		return fmt.Errorf(
+			"parse_gguf.py at %s lacks tensor accounting schema 3 (sparse lookup tables) for %s; reinstall ggrun or set LLM_SCRIPT_DIR to the repo tools/gguf directory",
+			script, filepath.Base(modelPath))
+	}
+	if info.SparseLookupBytes < 0 || info.SparseLookupBytes > info.NonExpertBytes ||
+		(info.SparseLookupBytes > 0 && info.SparseLookupKind == "") {
+		return fmt.Errorf(
+			"parse_gguf.py at %s reported an inconsistent sparse lookup tier for %s (%d of %d non-expert bytes, kind %q)",
+			script, filepath.Base(modelPath), info.SparseLookupBytes, info.NonExpertBytes, info.SparseLookupKind)
 	}
 	// qwen4exp may legitimately omit the optional n-gram PLE table. Require a
 	// parser contract new enough to report tensor presence separately, then

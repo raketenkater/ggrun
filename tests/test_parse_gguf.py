@@ -165,7 +165,7 @@ def test_corrupted_gguf():
         f.flush()
         r = parse(f.name)
     assert r == {
-        'tensor_accounting_schema': 2,
+        'tensor_accounting_schema': 3,
         'has_per_layer_token_embd': 0,
         'fused': 0,
         'expert_bytes': 0,
@@ -275,6 +275,61 @@ def test_per_layer_attention_arrays():
     print('  ✓ per_layer_attention_arrays')
 
 
+# Q8_0 (type 8): 34 bytes per 32 elements. A 256-wide row is 272 bytes.
+ENGRAM_TABLE = 'blk.1.engram_embd.weight:256,1024:8'
+ENGRAM_TABLE_BYTES = 1024 * 272
+ENGRAM_DENSE = ['blk.0.attn_kv.weight:256,256:8', 'blk.1.attn_kv.weight:256,256:8',
+                'blk.1.engram_wkv.weight:256,256:8', 'blk.1.ngram_proj.weight:256,256:8',
+                'blk.1.ffn_gate_exps.weight:256,256,4:8']
+DENSE_TENSOR_BYTES = 256 * 256 // 32 * 34
+
+
+def build_engram(path, **kwargs):
+    build(path, arch='deepseek41', layers=2, experts=4, exp_used=2,
+          tensor=[ENGRAM_TABLE] + ENGRAM_DENSE, **kwargs)
+    return parse(path)
+
+
+def test_engram_tables_are_a_separate_sparse_lookup_tier():
+    """DeepSeek-V4.1 Engram tables are gathered a few rows per token and the
+    reviewed backend keeps them file-backed. The arch's own engram.layer_ids
+    metadata, not the tensor name alone, identifies them. They stay in
+    non_expert_bytes for the file-size identity but must leave the per-layer
+    backbone charge, or placement bills ~195 GiB as GPU layer weights."""
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        r = build_engram(f.name, engram_layers='1')
+    assert_eq(r['tensor_accounting_schema'], 3, 'schema')
+    # smalinin/llama.cpp 425badfe lists deepseek41 in llm_arch_is_hybrid.
+    assert_eq(r.get('recurrent'), 1, 'deepseek41 recurrent/hybrid state')
+    assert_eq(r.get('engram_layer_ids'), [1], 'engram_layer_ids')
+    assert_eq(r.get('sparse_lookup_kind'), 'engram', 'sparse_lookup_kind')
+    assert_eq(r.get('sparse_lookup_bytes'), ENGRAM_TABLE_BYTES, 'sparse_lookup_bytes')
+    assert_eq(r.get('sparse_lookup_layer_bytes'), [0, ENGRAM_TABLE_BYTES], 'sparse_lookup_layer_bytes')
+    # attn_kv + engram_wkv + an unrelated "ngram"-named projection stay ordinary.
+    assert_eq(r['non_expert_layer_bytes'], [DENSE_TENSOR_BYTES, 3 * DENSE_TENSOR_BYTES], 'non_expert_layer_bytes')
+    assert_eq(r['non_expert_bytes'], 4 * DENSE_TENSOR_BYTES + ENGRAM_TABLE_BYTES, 'non_expert_bytes identity')
+    print('  ✓ engram_tables_are_a_separate_sparse_lookup_tier')
+
+
+def test_engram_named_tensor_without_proof_stays_resident():
+    """Negative cases: the same tensor without the arch's layer list, with the
+    list under another arch prefix (an early mis-converted GGUF the backend does
+    not read), or at an unlisted layer, remains ordinary resident backbone."""
+    cases = (
+        ('no metadata', {}),
+        ('wrong prefix', {'engram_layers': '1', 'engram_prefix': 'deepseek4'}),
+        ('unlisted layer', {'engram_layers': '0'}),
+    )
+    for label, extra in cases:
+        with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+            r = build_engram(f.name, **extra)
+        assert_eq(r.get('sparse_lookup_bytes', 0), 0, label + ': sparse_lookup_bytes')
+        assert 'sparse_lookup_kind' not in r, f'{label}: unexpected sparse kind {r.get("sparse_lookup_kind")}'
+        assert_eq(r['non_expert_layer_bytes'][1], 3 * DENSE_TENSOR_BYTES + ENGRAM_TABLE_BYTES,
+                  label + ': table charged to its layer')
+    print('  ✓ engram_named_tensor_without_proof_stays_resident')
+
+
 def main():
     print('parse_gguf.py regression tests:')
     test_dense_llama()
@@ -290,6 +345,8 @@ def main():
     test_unknown_ttype_falls_back_to_4bpw()
     test_known_quant_table_has_ik_llama_ids()
     test_per_layer_attention_arrays()
+    test_engram_tables_are_a_separate_sparse_lookup_tier()
+    test_engram_named_tensor_without_proof_stays_resident()
     print('All tests passed.')
 
 

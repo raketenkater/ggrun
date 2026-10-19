@@ -152,6 +152,9 @@ def build(args):
         kv_pairs.append((f'{arch}.attention.sliding_window_pattern', 'bools', [int(v) for v in args.swa_pattern.split(',')]))
     if args.nextn is not None:
         kv_pairs.append((f'{arch}.nextn_predict_layers', 'uint32', args.nextn))
+    if args.engram_layers:
+        prefix = args.engram_prefix or arch
+        kv_pairs.append((f'{prefix}.engram.layer_ids', 'int32s', [int(v) for v in args.engram_layers.split(',')]))
     for item in args.u32 or []:
         name, _, value = item.partition('=')
         kv_pairs.append((f'{arch}.{name}', 'uint32', int(value)))
@@ -196,6 +199,8 @@ def main():
     ap.add_argument('--hkv-arr', default='', help='comma-separated per-layer KV heads (int32 array)')
     ap.add_argument('--swa-pattern', default='', help='comma-separated per-layer 0/1 window flags (bool array)')
     ap.add_argument('--nextn', type=int, default=None)
+    ap.add_argument('--engram-layers', default='', help='comma-separated engram.layer_ids (int32 array)')
+    ap.add_argument('--engram-prefix', default='', help='metadata prefix for engram.layer_ids (default: --arch)')
     ap.add_argument('--u32', action='append', help='extra arch-relative uint32 key, e.g. ssm.conv_kernel=4')
     ap.add_argument('--kl', type=int, default=None)
     ap.add_argument('--vl', type=int, default=None)

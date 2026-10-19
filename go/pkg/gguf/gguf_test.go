@@ -639,3 +639,24 @@ func TestParseReportsRecurrentStateBeyondSSMStateSize(t *testing.T) {
 		})
 	}
 }
+
+func TestDeepSeek41RequiresSparseLookupAccounting(t *testing.T) {
+	stale := &Info{Architecture: "deepseek41", TensorAccountingSchema: 2, NonExpertBytes: 217666510368}
+	if err := validateParserOutput("/old/parse_gguf.py", "/models/ds41.gguf", stale); err == nil ||
+		!strings.Contains(err.Error(), "schema 3") {
+		t.Fatalf("a schema-2 helper bills Engram tables to a GPU and must be refused, got %v", err)
+	}
+	current := &Info{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 217666510368,
+		SparseLookupBytes: 208902215200, SparseLookupKind: "engram"}
+	if err := validateParserOutput("/new/parse_gguf.py", "/models/ds41.gguf", current); err != nil {
+		t.Fatalf("schema-3 helper rejected: %v", err)
+	}
+	for _, bad := range []*Info{
+		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 11, SparseLookupKind: "engram"},
+		{Architecture: "llama", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5},
+	} {
+		if err := validateParserOutput("/x/parse_gguf.py", "/models/m.gguf", bad); err == nil {
+			t.Fatalf("inconsistent lookup tier accepted: %+v", bad)
+		}
+	}
+}
