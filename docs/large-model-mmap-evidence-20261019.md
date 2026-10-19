@@ -139,8 +139,15 @@ is removed. Weights and lookup pages held in RAM can be silently corrupted.
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` (private).
-Checkpoint shard 00010 matched the pinned SHA-256 on the buffered read and on
-the `O_DIRECT` read. On this `fuseblk` (ntfs-3g) mount `O_DIRECT` is served
+Shards 00010, 00007, 00002, 00003 and 00004 matched the pinned SHA-256 on the
+buffered read and on the `O_DIRECT` read. Shard 00005 matched on the buffered
+read but not on the `O_DIRECT` read, and the queue stopped as designed. Two
+repeated `O_DIRECT` reads gave the same wrong hash. A byte comparison found two
+differing bytes, at offsets 17,779,795,818 and 23,447,032,778. Both are
+≡ 10 (mod 16) and differ by XOR `0x10`, the DIMM_D1 signature. The cached
+block-device copy is corrupt. Whether the platter copy is clean is unknown
+until caches are dropped on clean RAM. Shards 00001, 00006, 00008 and 00009 are
+not downloaded. On this `fuseblk` (ntfs-3g) mount `O_DIRECT` is served
 from the block-device cache, so the two reads are independent RAM copies, not
 a platter re-read. HDD free space (~349 GiB) is below the 366.3 GiB set; the
 last 104 GB shard needs the owned failed GLM staging file
