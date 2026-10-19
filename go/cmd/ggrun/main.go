@@ -2886,6 +2886,8 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		BackendIdentity:         be.Identity,
 		CPUExpertMMapCapability: backendCPUExpertMMapCapability(be),
 		CPUExpertMMapEvidence:   be.CPUExpertMMapEvidence,
+		SparseLookupCapability:  backendSparseLookupCapability(be),
+		SparseLookupEvidence:    be.SparseLookupEvidence,
 		SamplingProfile:         samplingProfile,
 		WorkloadProfile:         requestWorkloadProfile(req, model),
 		WorkloadConcurrency:     requestWorkloadConcurrency(req),
@@ -4070,7 +4072,7 @@ func validateObservedMMapPageability(cfg *config.Config, model *placement.ModelP
 func backendStartOptions(req *launchRequest, caps *detect.Capabilities, be *backendInfo, envOverrides []string, serverArgs []string) server.StartOptions {
 	budgetMB := backendMemoryMaxMB(req, caps)
 	highMB, maxMB := budgetMB, budgetMB
-	if budgetMB > 0 && argsMMapBackedExperts(be, serverArgs) {
+	if budgetMB > 0 && (argsMMapBackedExperts(be, serverArgs) || argsFileBackedSparseLookup(be, serverArgs)) {
 		if hostCeiling := hostReclaimCeilingMB(req, caps); hostCeiling > budgetMB {
 			maxMB = hostCeiling
 		}
@@ -4109,6 +4111,12 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 	}
 	plannedFloor := measuredFootprintPlannedFloor(strategy, measured, ceiling)
 	newMax := measuredFootprintCgroupMaxMB(measured, req.CgroupHeadroomMB, plannedFloor, ceiling)
+	if placement.StrategyUsesFileBackedSparseLookup(strategy) {
+		// The lookup tier's page cache gets its own bounded allowance above the
+		// non-reclaimable ceiling instead of being squeezed into the headroom.
+		applySparseLookupScope(p, strategy, measured, plannedFloor, newMax, req.CgroupHeadroomMB, ceiling, strategyUsesReclaimableMMap(strategy))
+		return
+	}
 	if strategyUsesReclaimableMMap(strategy) {
 		// Never collapse a file-backed plan's hard ceiling to its anonymous
 		// working set. memory.max must retain the reclaim band for clean expert
@@ -4339,9 +4347,19 @@ func optimizationSummaryLines(label string, strategy *placement.Strategy, detail
 			label, device.GPU, device.Role, device.FreeMB, device.ModelMB, device.ContextMB,
 			device.GraphMB+device.RuntimeMB, device.SlackMB, device.Evidence))
 	}
+	// Only weights an exact file-backed loader maps are reclaimable; resident
+	// (--no-mmap) or anonymous experts are part of the required bytes.
+	reclaimable := 0
+	if strategyUsesReclaimableMMap(strategy) {
+		reclaimable = ledger.Host.Reclaimable
+	}
 	lines = append(lines, fmt.Sprintf("[%s] host free %d - required %d = slack %d MiB (reclaimable weights %d MiB) [%s]",
 		label, ledger.Host.FreeMB, ledger.Host.RequiredMB, ledger.Host.SlackMB,
-		ledger.Host.Reclaimable, ledger.Host.Evidence))
+		reclaimable, ledger.Host.Evidence))
+	if placement.StrategyUsesFileBackedSparseLookup(strategy) {
+		lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB file-backed (%s on), outside the host and GPU ledgers; their RAM cache is bounded page cache [%s]",
+			label, strategy.SparseLookupMB, placement.SparseLookupLazyFlag, strategy.SparseLookupEvidence))
+	}
 	return lines
 }
 
@@ -5411,7 +5429,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			if req != nil {
 				req.admittedOracleTotals = oracleTotalsByArgv[formatCommand(serverArgs)]
 			}
-			if mmapErr := validateObservedMMapPageability(cfg, model, be, strategy, p); mmapErr != nil {
+			if mmapErr := validateObservedHostTiers(cfg, model, be, strategy, p); mmapErr != nil {
 				memoryRecovery.reject(serverArgs)
 				_ = p.Stop()
 				if exactAdmission {
@@ -9707,6 +9725,8 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		BackendIdentity:         be.Identity,
 		CPUExpertMMapCapability: backendCPUExpertMMapCapability(be),
 		CPUExpertMMapEvidence:   be.CPUExpertMMapEvidence,
+		SparseLookupCapability:  backendSparseLookupCapability(be),
+		SparseLookupEvidence:    be.SparseLookupEvidence,
 		BackendHelp:             be.Help,
 		VisionAuto:              cfg.Vision,
 		SpecMode:                cfg.Spec,
@@ -10250,7 +10270,9 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		TokenizerHash:             info.TokenizerHash,
 		QuantType:                 "", // not parsed from gguf.py output
 		ExpertBytes:               info.ExpertBytes,
-		NonExpertBytes:            info.NonExpertBytes,
+		NonExpertBytes:            info.NonExpertBytes - info.SparseLookupBytes,
+		SparseLookupBytes:         info.SparseLookupBytes,
+		SparseLookupKind:          info.SparseLookupKind,
 		TokenEmbdBytes:            info.TokenEmbdBytes,
 		OutputBytes:               info.OutputBytes,
 		ShexpBytes:                info.ShexpBytes,
@@ -10331,10 +10353,11 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	// case where a GGUF's offsets are unusable and the parser falls back to the
 	// per-ggml-type size table (which mis-sizes new quants like MXFP4): then the
 	// sum drifts from the file and we rescale, keeping the expert:non-expert ratio.
-	if tableTotal := profile.ExpertBytes + profile.NonExpertBytes; tableTotal > 0 && profile.SizeBytes > 0 {
+	if tableTotal := profile.ExpertBytes + profile.NonExpertBytes + profile.SparseLookupBytes; tableTotal > 0 && profile.SizeBytes > 0 {
 		if scale := float64(profile.SizeBytes) / float64(tableTotal); scale < 0.95 || scale > 1.05 {
 			profile.ExpertBytes = int64(float64(profile.ExpertBytes) * scale)
 			profile.NonExpertBytes = int64(float64(profile.NonExpertBytes) * scale)
+			profile.SparseLookupBytes = int64(float64(profile.SparseLookupBytes) * scale)
 			profile.TokenEmbdBytes = int64(float64(profile.TokenEmbdBytes) * scale)
 			profile.OutputBytes = int64(float64(profile.OutputBytes) * scale)
 			profile.ShexpBytes = int64(float64(profile.ShexpBytes) * scale)
@@ -10390,6 +10413,8 @@ type backendInfo struct {
 	Identity                string // version/build hash; invalidates speculative performance profiles
 	CPUExpertMMapCapability placement.CPUExpertMMapCapability
 	CPUExpertMMapEvidence   string
+	SparseLookupCapability  placement.SparseLookupCapability
+	SparseLookupEvidence    string
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
@@ -10558,11 +10583,53 @@ func detectBackend(path string) *backendInfo {
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true
 	}
-	if helpHasExactFlag(help, "--load-mode") && !helpHasExactFlag(help, "--no-mmap") {
+	if backendParsesLoadMode(help) {
 		server.RegisterLoadModeBackend(path)
 	}
 	info.CPUExpertMMapCapability, info.CPUExpertMMapEvidence = probedCPUExpertMMapCapability(info)
+	info.SparseLookupCapability, info.SparseLookupEvidence = probedSparseLookupCapability(info)
 	return info
+}
+
+// backendParsesLoadMode reports a backend whose loader is driven by
+// --load-mode. Such backends default to "auto", which turns mapping off when
+// any device lacks mmap support, and some still accept --mmap/--no-mmap only as
+// deprecated aliases. Translating every such backend states ggrun's mapping
+// choice explicitly at process start while the planner's own argv, and every
+// argv-keyed evidence record, stays unchanged.
+func backendParsesLoadMode(help string) bool {
+	return helpHasExactFlag(help, "--load-mode")
+}
+
+// probedSparseLookupCapability classifies whether the exact backend keeps
+// arch-marked sparse lookup tables (DeepSeek-V4.1 Engram) file-backed. The
+// reviewed loader (smalinin/llama.cpp 425badfe, TENSOR_READ_LAZY) does so for
+// every table it marks once --lazy-mode is on, independent of --load-mode.
+// Only that exact option is accepted; anything else stays unknown, which
+// refuses a model with such a tier instead of charging it to a GPU. The live
+// mapping check after load remains the authority (validateObservedSparseLookup).
+func probedSparseLookupCapability(info *backendInfo) (placement.SparseLookupCapability, string) {
+	if info == nil {
+		return placement.SparseLookupUnknown, "backend probe unavailable"
+	}
+	identity := strings.TrimSpace(info.Identity)
+	if identity == "" {
+		identity = filepath.Base(info.Path)
+	}
+	if strings.TrimSpace(info.Help) == "" || backendLoaderFailed(info.Help) {
+		return placement.SparseLookupUnknown, "lookup-table loader not proven: " + identity
+	}
+	if !helpHasExactFlag(info.Help, placement.SparseLookupLazyFlag) {
+		return placement.SparseLookupUnknown, "backend has no " + placement.SparseLookupLazyFlag + ": " + identity
+	}
+	return placement.SparseLookupFileBacked, "help-probed " + placement.SparseLookupLazyFlag + " loader: " + identity
+}
+
+func backendSparseLookupCapability(be *backendInfo) placement.SparseLookupCapability {
+	if be == nil {
+		return placement.SparseLookupUnknown
+	}
+	return placement.NormalizeSparseLookupCapability(string(be.SparseLookupCapability))
 }
 
 // probedCPUExpertMMapCapability classifies loader memory behavior from the

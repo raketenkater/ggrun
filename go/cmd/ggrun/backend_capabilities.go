@@ -34,6 +34,8 @@ type backendCapabilityRecord struct {
 	Disabled                map[string]backendFlagCapability  `json:"disabled"`
 	CPUExpertMMapCapability placement.CPUExpertMMapCapability `json:"cpu_expert_mmap_capability,omitempty"`
 	CPUExpertMMapEvidence   string                            `json:"cpu_expert_mmap_evidence,omitempty"`
+	SparseLookupCapability  placement.SparseLookupCapability  `json:"sparse_lookup_capability,omitempty"`
+	SparseLookupEvidence    string                            `json:"sparse_lookup_evidence,omitempty"`
 	UpdatedAt               string                            `json:"updated_at"`
 }
 
@@ -82,6 +84,10 @@ func applyCachedBackendCapabilities(req *launchRequest, cacheDir string, model *
 	if record.CPUExpertMMapCapability != "" {
 		be.CPUExpertMMapCapability = placement.NormalizeCPUExpertMMapCapability(string(record.CPUExpertMMapCapability))
 		be.CPUExpertMMapEvidence = record.CPUExpertMMapEvidence
+	}
+	if record.SparseLookupCapability != "" {
+		be.SparseLookupCapability = placement.NormalizeSparseLookupCapability(string(record.SparseLookupCapability))
+		be.SparseLookupEvidence = record.SparseLookupEvidence
 	}
 	flags := make([]string, 0, len(record.Disabled))
 	for flag := range record.Disabled {
@@ -158,6 +164,38 @@ func persistBackendCPUExpertMMapCapability(cacheDir string, model *placement.Mod
 	}
 	record.CPUExpertMMapCapability = placement.NormalizeCPUExpertMMapCapability(string(capability))
 	record.CPUExpertMMapEvidence = strings.TrimSpace(evidence)
+	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicBackendCapabilityWrite(path, append(data, '\n'))
+}
+
+// persistBackendSparseLookupCapability records a live lookup-tier observation
+// for the exact model/backend build, like the CPU-expert record above.
+func persistBackendSparseLookupCapability(cacheDir string, model *placement.ModelProfile, be *backendInfo, capability placement.SparseLookupCapability, evidence string) error {
+	path := backendCapabilityPath(cacheDir, model, be)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	release, err := acquireBackendCapabilityLock(path+".lock", 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer release()
+	record := loadBackendCapabilityRecord(cacheDir, model, be)
+	scope, modelIdentity, backendIdentity := backendCapabilityScope(model, be)
+	if record.Disabled == nil {
+		record.Disabled = make(map[string]backendFlagCapability)
+	}
+	record.SchemaVersion, record.Scope = backendCapabilitySchema, scope
+	record.ModelIdentity, record.BackendIdentity = modelIdentity, backendIdentity
+	if model != nil {
+		record.Architecture = model.ModelArch
+	}
+	record.SparseLookupCapability = placement.NormalizeSparseLookupCapability(string(capability))
+	record.SparseLookupEvidence = strings.TrimSpace(evidence)
 	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {

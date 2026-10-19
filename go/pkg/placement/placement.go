@@ -174,6 +174,12 @@ type Strategy struct {
 	ReclaimableHostWeightsMB int  `json:"reclaimable_host_weights_mb,omitempty"`
 	FlashAttention           bool `json:"flash_attention"`
 	Threads                  int  `json:"threads"`
+	// SparseLookupMB is the planned file-backed sparse lookup tier. It is
+	// outside PlannedHostFootprintMB and every GPU ledger; its resident share
+	// is bounded page cache that the memory scope sizes separately.
+	SparseLookupMB         int                    `json:"sparse_lookup_mb,omitempty"`
+	SparseLookupCapability SparseLookupCapability `json:"sparse_lookup_capability,omitempty"`
+	SparseLookupEvidence   string                 `json:"sparse_lookup_evidence,omitempty"`
 	// CPURange / CPUStrict pin llama.cpp workers to physical cores for both
 	// decode (--threads) and agent prefill (--threads-batch). Hyperthread
 	// siblings share L1/L2 and DRAM ports; CPU-expert MoE is bandwidth-bound
@@ -340,6 +346,11 @@ type ModelProfile struct {
 	CTXTrain               int     `json:"ctx_train"`
 	ModelArch              string  `json:"model_arch"`
 	ExpertUsedCount        int     `json:"expert_used_count,omitempty"`
+	// SparseLookupBytes is the file-backed sparse lookup tier (DeepSeek-V4.1
+	// Engram tables). It is NOT part of NonExpertBytes or any per-layer charge;
+	// SizeBytes still includes it. See sparselookup.go.
+	SparseLookupBytes int64  `json:"sparse_lookup_bytes,omitempty"`
+	SparseLookupKind  string `json:"sparse_lookup_kind,omitempty"`
 	// MeasuredComputeCoefficient is the graph fan-out coefficient (bytes per
 	// hidden-unit per layer per ubatch token, normalised to a 1,048,576-token
 	// context) that this model's compute buffers ACTUALLY showed on previous
@@ -714,7 +725,12 @@ type Options struct {
 	// package callers; an explicit "unknown" fails closed.
 	CPUExpertMMapCapability CPUExpertMMapCapability
 	CPUExpertMMapEvidence   string
-	SamplingProfile         string // default, greedy, recommended, or a hash of explicit sampling overrides
+	// SparseLookupCapability is the exact backend's loader behavior for sparse
+	// lookup tables (see sparselookup.go). Unknown fails closed for models that
+	// have such a tier and is irrelevant for every other model.
+	SparseLookupCapability SparseLookupCapability
+	SparseLookupEvidence   string
+	SamplingProfile        string // default, greedy, recommended, or a hash of explicit sampling overrides
 	// WorkloadProfile scopes placement and probe evidence to scheduler semantics
 	// that can change the effective slot, batch, or cache behavior. An empty
 	// value preserves the legacy generic-serving cache namespace; callers that
@@ -1552,6 +1568,9 @@ func strategySlots(s *Strategy) int {
 // search above.
 func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
 	var err error
+	if _, err = sparseLookupTierMB(model, opts); err != nil {
+		return nil, err
+	}
 	caps, err = restrictGPUs(caps, opts.GPUs)
 	if err != nil {
 		return nil, err
@@ -1651,6 +1670,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		BackendSupportsNoContextShift: backendHelpSupportsExactFlag(opts.BackendHelp, "--no-context-shift"),
 		BackendCheckpointMinStepFlag:  backendCheckpointMinStepFlag(opts.BackendHelp, opts.BackendTag),
 	}
+	applySparseLookupTier(s, model, opts)
 	configureCPUAffinity(s, caps, opts.BackendHelp)
 
 	if s.ContextSize <= 0 {
@@ -1941,6 +1961,7 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 						}
 					}
 					s = restored
+					applySparseLookupTier(s, model, opts)
 					NormalizeBatchSizes(s, model, opts.BatchSizeExplicit, opts.UBatchSizeExplicit)
 					s.PlacementCacheHit = true
 					s.VerifiedConfigReused = true
@@ -3699,6 +3720,9 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		// cache (continuously read/written) plus compute/activation overhead.
 		// (Same reasoning as preWorkingSetFloor above; keep both in sync.)
 		workingSetFloor := ramOverheadMB + cpuKVMB + tokenEmbdMB + checkpointReserve
+		if err := sparseLookupExpertPagingError(model, opts, ramNeeded, ramAvailMB); err != nil {
+			return nil, err
+		}
 		if mmapReclaimable && ramAvailMB >= workingSetFloor {
 			s.MMap = true
 			s.MMapRequired = true
@@ -6594,6 +6618,13 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--no-mmap")
 	}
 
+	// The sparse lookup tier is file-backed only while lazy reads are on, and
+	// that holds under --no-mmap as well. State it so a backend default can
+	// never move ~195 GiB of tables onto a GPU or into anonymous memory.
+	if StrategyUsesFileBackedSparseLookup(s) {
+		args = append(args, SparseLookupLazyFlag, "on")
+	}
+
 	if s.MLock {
 		args = append(args, "--mlock")
 	}
@@ -7714,6 +7745,10 @@ func AllocationPlacementIdentity(strategy *Strategy) string {
 		strconv.FormatBool(strategy.FlashAttention), strconv.FormatBool(strategy.SWAFull), strconv.FormatBool(strategy.UseCUDAGraphs),
 		strconv.Itoa(strategy.CRAM), strconv.Itoa(strategy.MaxCheckpoints), strconv.Itoa(strategy.CheckpointMinStep),
 		SpecCompanionIdentity(strategy.MMProjPath), strconv.Itoa(strategy.MMProjSizeMB), strategy.BackendTag,
+	}
+	if strategy.SparseLookupMB > 0 {
+		// Appended only when present so every existing identity is unchanged.
+		parts = append(parts, "sparse-lookup", strconv.Itoa(strategy.SparseLookupMB), string(strategy.SparseLookupCapability))
 	}
 	if draft := strategy.Draft; draft != nil {
 		parts = append(parts,

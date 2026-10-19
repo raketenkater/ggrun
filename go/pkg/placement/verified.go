@@ -68,6 +68,8 @@ type VerifiedConfig struct {
 	CPUExpertMMapCapability   CPUExpertMMapCapability `json:"cpu_expert_mmap_capability,omitempty"`
 	CPUExpertMMapEvidence     string                  `json:"cpu_expert_mmap_evidence,omitempty"`
 	ReclaimableHostWeightsMB  int                     `json:"reclaimable_host_weights_mb,omitempty"`
+	SparseLookupMB            int                     `json:"sparse_lookup_mb,omitempty"`
+	SparseLookupCapability    SparseLookupCapability  `json:"sparse_lookup_capability,omitempty"`
 	FlashAttention            bool                    `json:"flash_attention"`
 	SWAFull                   bool                    `json:"swa_full"`
 	CRAM                      int                     `json:"cram,omitempty"`
@@ -213,6 +215,8 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 		CPUExpertMMapCapability:  vc.CPUExpertMMapCapability,
 		CPUExpertMMapEvidence:    vc.CPUExpertMMapEvidence,
 		ReclaimableHostWeightsMB: vc.ReclaimableHostWeightsMB,
+		SparseLookupMB:           vc.SparseLookupMB,
+		SparseLookupCapability:   vc.SparseLookupCapability,
 		FlashAttention:           vc.FlashAttention,
 		SWAFull:                  vc.SWAFull,
 		CRAM:                     vc.CRAM,
@@ -351,6 +355,8 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 		CPUExpertMMapCapability:  s.CPUExpertMMapCapability,
 		CPUExpertMMapEvidence:    s.CPUExpertMMapEvidence,
 		ReclaimableHostWeightsMB: s.ReclaimableHostWeightsMB,
+		SparseLookupMB:           s.SparseLookupMB,
+		SparseLookupCapability:   s.SparseLookupCapability,
 		FlashAttention:           s.FlashAttention,
 		SWAFull:                  s.SWAFull,
 		CRAM:                     s.CRAM,

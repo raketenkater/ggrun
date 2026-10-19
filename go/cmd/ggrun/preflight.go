@@ -1044,6 +1044,10 @@ var preflightArgValueFlags = map[string]bool{
 	"-mg": true, "--main-gpu": true,
 	"-dev": true, "--device": true,
 	"--override-kv": true,
+	// Lazy lookup reads decide whether ~195 GiB of Engram tables are counted
+	// at all; the fit pass must see the same tier as the server.
+	"-lzm": true, "--lazy-mode": true,
+	"-lm": true, "--load-mode": true,
 }
 
 // These switches change KV placement, graph shape or host/model allocation.
@@ -1462,6 +1466,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			outcome.Evidence = evidence
 			targetDevs = evidence.Devices
 		} else {
+			targetDevs = oracleDevicesExcludingLookupTier(targetDevs, be, strategy, serverArgs)
 			outcome.Evidence = memoryPlanEvidence{
 				Level:   memoryEvidenceOraclePlanned,
 				Backend: be.Tag,

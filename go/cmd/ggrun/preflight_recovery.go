@@ -1308,6 +1308,8 @@ var memoryArgCanonical = map[string]string{
 	"-fa": "flash-attn", "--flash-attn": "flash-attn",
 	"-mg": "main-gpu", "--main-gpu": "main-gpu",
 	"-dev": "device", "--device": "device",
+	"-lzm": "lazy-mode", "--lazy-mode": "lazy-mode",
+	"-lm": "load-mode", "--load-mode": "load-mode",
 }
 
 // effectiveMemoryArgsFingerprint follows the backend's last-value-wins argv
