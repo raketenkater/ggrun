@@ -41,17 +41,22 @@ func LoadModeArgs(args []string) []string {
 }
 
 // translateLoadMode maps the classic flags onto llama.cpp's load modes:
-// mmap stays the default unless --no-mmap is given, and --mlock is its own
-// mode when mmap is off ("mlock") or combined with it ("mmap+mlock").
+// mmap unless --no-mmap is given, and --mlock is its own mode when mmap is off
+// ("mlock") or combined with it ("mmap+mlock").
+//
+// The absent-flag case is translated too. ggrun's planners read "no --no-mmap"
+// as file-backed, while these backends default to "auto", which turns mapping
+// off when any device lacks mmap support. Leaving the default in place let a
+// plan priced as reclaimable load as anonymous memory.
 func translateLoadMode(args []string) []string {
-	mmapSet, mmap, mlock := false, true, false
+	mmap, mlock := true, false
 	out := make([]string, 0, len(args)+1)
 	for _, a := range args {
 		switch a {
 		case "--no-mmap":
-			mmapSet, mmap = true, false
+			mmap = false
 		case "--mmap":
-			mmapSet, mmap = true, true
+			mmap = true
 		case "--mlock":
 			mlock = true
 		default:
@@ -59,7 +64,7 @@ func translateLoadMode(args []string) []string {
 			continue
 		}
 	}
-	mode := ""
+	mode := "mmap"
 	switch {
 	case mlock && mmap:
 		mode = "mmap+mlock"
@@ -67,11 +72,6 @@ func translateLoadMode(args []string) []string {
 		mode = "mlock"
 	case !mmap:
 		mode = "none"
-	case mmapSet:
-		mode = "mmap"
-	}
-	if mode == "" {
-		return out
 	}
 	return append(out, "--load-mode", mode)
 }

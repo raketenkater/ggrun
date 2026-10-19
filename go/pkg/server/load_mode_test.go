@@ -23,8 +23,12 @@ func TestLoadModeTranslationPreservesResidency(t *testing.T) {
 		{[]string{"s", "--mmap"}, []string{"s", "--load-mode", "mmap"}},
 		// Last spelling wins, as in llama.cpp's own parser.
 		{[]string{"s", "--mmap", "--no-mmap"}, []string{"s", "--load-mode", "none"}},
-		// No loading flag: the backend default (auto = mmap) is the classic default.
-		{[]string{"s", "-m", "x", "-c", "4096"}, []string{"s", "-m", "x", "-c", "4096"}},
+		// No loading flag means mapped to every ggrun planner. The backend's own
+		// default is "auto", which disables mapping when any device lacks mmap
+		// support, so the mapped choice is stated rather than inherited.
+		{[]string{"s", "-m", "x", "-c", "4096"}, []string{"s", "-m", "x", "-c", "4096", "--load-mode", "mmap"}},
+		// Lazy lookup reads are a separate option and pass through unchanged.
+		{[]string{"s", "--no-mmap", "--lazy-mode", "on"}, []string{"s", "--lazy-mode", "on", "--load-mode", "none"}},
 	} {
 		if got := translateLoadMode(tc.in); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("translateLoadMode(%v) = %v, want %v", tc.in, got, tc.want)
