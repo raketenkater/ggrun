@@ -716,10 +716,13 @@ type launchRequest struct {
 	AllowLiveMemoryProbe   bool
 	NoMMap                 bool
 	ForceMMap              bool
-	Parallel               int
-	ParallelSet            bool // --parallel given explicitly; claude-code mode must not override it
-	Threads                int  // --threads; 0 keeps the physical-core default
-	CacheRAMMB             int  // --cache-ram; 0 keeps the derived prompt-cache budget
+	// SparseLookupLazy is the user's explicit lazy-read choice for sparse
+	// lookup tables ("on"/"off"; "" lets placement choose).
+	SparseLookupLazy string
+	Parallel         int
+	ParallelSet      bool // --parallel given explicitly; claude-code mode must not override it
+	Threads          int  // --threads; 0 keeps the physical-core default
+	CacheRAMMB       int  // --cache-ram; 0 keeps the derived prompt-cache budget
 	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. -1 (the zero
 	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
 	// the field exists because leaving the flag unparsed let it fall through to
@@ -1724,6 +1727,47 @@ func setPassthroughBoolFlag(args []string, flag string, enabled bool) []string {
 	return out
 }
 
+// applyNativeLoadMode folds a passthrough --load-mode / -lm choice into the
+// request's mapping constraints, so the planner, exact admission, cache
+// identities and the backend argv all describe the same loading mode. It
+// returns how many argv tokens it consumed and what to pass through instead:
+// none/mmap become ggrun's own --no-mmap/--mmap, the mlock modes add --mlock,
+// and "auto" leaves the choice to ggrun's planner. "dio" has no classic
+// spelling; it is passed through after the generated flags, where the
+// backend's last-wins rule applies it, while the plan treats it as unmapped.
+// An unknown value is passed through for the backend to reject.
+func applyNativeLoadMode(req *launchRequest, args []string, i int) (int, []string) {
+	flag, value, inline := strings.Cut(args[i], "=")
+	if flag != "--load-mode" && flag != "-lm" {
+		return 0, nil
+	}
+	consumed := 1
+	if !inline {
+		if i+1 >= len(args) {
+			return 1, []string{args[i]}
+		}
+		value, consumed = args[i+1], 2
+	}
+	switch value {
+	case "auto":
+		req.NoMMap, req.ForceMMap = false, false
+		return consumed, nil
+	case "none", "mlock", "dio":
+		req.NoMMap, req.ForceMMap = true, false
+	case "mmap", "mmap+mlock":
+		req.NoMMap, req.ForceMMap = false, true
+	default:
+		return consumed, args[i : i+consumed]
+	}
+	switch value {
+	case "mlock", "mmap+mlock":
+		return consumed, []string{"--mlock"}
+	case "dio":
+		return consumed, []string{"--load-mode", "dio"}
+	}
+	return consumed, nil
+}
+
 func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []string {
 	if req == nil || len(args) == 0 {
 		return args
@@ -1768,6 +1812,15 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 			if req.ForceMMap {
 				req.NoMMap = false
 			}
+			continue
+		}
+		if consumed := applyNativeLazyMode(req, args, i); consumed > 0 {
+			i += consumed - 1
+			continue
+		}
+		if consumed, keep := applyNativeLoadMode(req, args, i); consumed > 0 {
+			out = append(out, keep...)
+			i += consumed - 1
 			continue
 		}
 		out = append(out, a)
@@ -2886,8 +2939,6 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		BackendIdentity:         be.Identity,
 		CPUExpertMMapCapability: backendCPUExpertMMapCapability(be),
 		CPUExpertMMapEvidence:   be.CPUExpertMMapEvidence,
-		SparseLookupCapability:  backendSparseLookupCapability(be),
-		SparseLookupEvidence:    be.SparseLookupEvidence,
 		SamplingProfile:         samplingProfile,
 		WorkloadProfile:         requestWorkloadProfile(req, model),
 		WorkloadConcurrency:     requestWorkloadConcurrency(req),
@@ -2926,6 +2977,10 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// another (different serving contract, different emitted flags).
 		ChatTemplate: req.ChatTemplateOverride,
 	}
+	// Sparse lookup tables: the verified loader contract (never a help line),
+	// the advertised lazy flag, and the user's explicit lazy choice.
+	opts.SparseLookupCapability, opts.SparseLookupEvidence, opts.SparseLookupFlag = sparseLookupCapabilityFor(be, model)
+	opts.SparseLookupLazy = req.SparseLookupLazy
 	// Where host-resident experts execute follows the backend's effective
 	// op-offload switch and threshold, which the child process inherits.
 	opts.HostWeightOffload = effectiveOpOffloadFlag(req.ExtraArgs)
@@ -4072,7 +4127,11 @@ func validateObservedMMapPageability(cfg *config.Config, model *placement.ModelP
 func backendStartOptions(req *launchRequest, caps *detect.Capabilities, be *backendInfo, envOverrides []string, serverArgs []string) server.StartOptions {
 	budgetMB := backendMemoryMaxMB(req, caps)
 	highMB, maxMB := budgetMB, budgetMB
-	if budgetMB > 0 && (argsMMapBackedExperts(be, serverArgs) || argsFileBackedSparseLookup(be, serverArgs)) {
+	if budgetMB > 0 && argsLazySparseLookup(be, serverArgs) {
+		// Lazily mapped lookup rows are page cache inside this scope: keep a
+		// reclaim band below the hard limit from the first byte loaded.
+		highMB, maxMB = sparseLookupStartLimits(budgetMB, hostReclaimCeilingMB(req, caps), req.CgroupHeadroomMB)
+	} else if budgetMB > 0 && argsMMapBackedExperts(be, serverArgs) {
 		if hostCeiling := hostReclaimCeilingMB(req, caps); hostCeiling > budgetMB {
 			maxMB = hostCeiling
 		}
@@ -4356,9 +4415,18 @@ func optimizationSummaryLines(label string, strategy *placement.Strategy, detail
 	lines = append(lines, fmt.Sprintf("[%s] host free %d - required %d = slack %d MiB (reclaimable weights %d MiB) [%s]",
 		label, ledger.Host.FreeMB, ledger.Host.RequiredMB, ledger.Host.SlackMB,
 		reclaimable, ledger.Host.Evidence))
-	if placement.StrategyUsesFileBackedSparseLookup(strategy) {
-		lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB file-backed (%s on), outside the host and GPU ledgers; their RAM cache is bounded page cache [%s]",
-			label, strategy.SparseLookupMB, placement.SparseLookupLazyFlag, strategy.SparseLookupEvidence))
+	if strategy != nil && strategy.SparseLookupMB > 0 {
+		switch strategy.SparseLookupPolicy {
+		case placement.SparseLookupPaged:
+			lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB paged (file-backed, lazy rows), outside the host and GPU ledgers; their RAM cache is bounded page cache [%s]",
+				label, strategy.SparseLookupMB, strategy.SparseLookupEvidence))
+		case placement.SparseLookupResident:
+			lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB resident (file-backed, lazy rows), charged to the host ledger [%s]",
+				label, strategy.SparseLookupMB, strategy.SparseLookupEvidence))
+		default:
+			lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB loaded with their layers, charged per layer [%s]",
+				label, strategy.SparseLookupMB, strategy.SparseLookupEvidence))
+		}
 	}
 	return lines
 }
@@ -6735,6 +6803,10 @@ func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelPro
 		"benchmark=" + strconv.FormatBool(req.Benchmark),
 		"worker-benchmark=" + strconv.FormatBool(req.WorkerBenchmark),
 		"workload=" + requestWorkloadProfile(req, model),
+	}
+	if req.SparseLookupLazy != "" {
+		// Appended only when set, so every existing scope key is unchanged.
+		values = append(values, "lookup-lazy="+req.SparseLookupLazy)
 	}
 	return controller.ScopeKey(values...)
 }
@@ -9725,12 +9797,11 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		BackendIdentity:         be.Identity,
 		CPUExpertMMapCapability: backendCPUExpertMMapCapability(be),
 		CPUExpertMMapEvidence:   be.CPUExpertMMapEvidence,
-		SparseLookupCapability:  backendSparseLookupCapability(be),
-		SparseLookupEvidence:    be.SparseLookupEvidence,
 		BackendHelp:             be.Help,
 		VisionAuto:              cfg.Vision,
 		SpecMode:                cfg.Spec,
 	}
+	opts.SparseLookupCapability, opts.SparseLookupEvidence, opts.SparseLookupFlag = sparseLookupCapabilityFor(be, model)
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
 		return nil, fmt.Errorf("compute placement: %w", err)
@@ -10273,6 +10344,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		NonExpertBytes:            info.NonExpertBytes - info.SparseLookupBytes,
 		SparseLookupBytes:         info.SparseLookupBytes,
 		SparseLookupKind:          info.SparseLookupKind,
+		SparseLookupLayerBytes:    info.SparseLookupLayerBytes,
 		TokenEmbdBytes:            info.TokenEmbdBytes,
 		OutputBytes:               info.OutputBytes,
 		ShexpBytes:                info.ShexpBytes,
@@ -10413,8 +10485,9 @@ type backendInfo struct {
 	Identity                string // version/build hash; invalidates speculative performance profiles
 	CPUExpertMMapCapability placement.CPUExpertMMapCapability
 	CPUExpertMMapEvidence   string
-	SparseLookupCapability  placement.SparseLookupCapability
+	SparseLookupCapability  placement.SparseLookupCapability // only a persisted live contradiction ("anonymous")
 	SparseLookupEvidence    string
+	Version                 string // stable --version output; carries the source commit a loader contract is matched on
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
@@ -10564,7 +10637,8 @@ func detectBackend(path string) *backendInfo {
 	out, _ := cmd.CombinedOutput()
 	help := stableBackendProbeOutput(string(out))
 	info.Help = help
-	info.Identity = backendBuildIdentity(path)
+	info.Version = backendVersionOutput(path)
+	info.Identity = backendBuildIdentityFrom(path, info.Version)
 	lowerBase := strings.ToLower(filepath.Base(path))
 	lowerDir := strings.ToLower(filepath.Dir(path))
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
@@ -10585,9 +10659,13 @@ func detectBackend(path string) *backendInfo {
 	}
 	if backendParsesLoadMode(help) {
 		server.RegisterLoadModeBackend(path)
+		// ggrun now states the mapping choice to these builds instead of
+		// inheriting their "auto" default, which disables mapping when a device
+		// lacks mmap support. Evidence recorded under the old translation is
+		// therefore re-measured rather than reused.
+		info.Identity += "+" + loadModeTranslationVersion
 	}
 	info.CPUExpertMMapCapability, info.CPUExpertMMapEvidence = probedCPUExpertMMapCapability(info)
-	info.SparseLookupCapability, info.SparseLookupEvidence = probedSparseLookupCapability(info)
 	return info
 }
 
@@ -10599,37 +10677,6 @@ func detectBackend(path string) *backendInfo {
 // argv-keyed evidence record, stays unchanged.
 func backendParsesLoadMode(help string) bool {
 	return helpHasExactFlag(help, "--load-mode")
-}
-
-// probedSparseLookupCapability classifies whether the exact backend keeps
-// arch-marked sparse lookup tables (DeepSeek-V4.1 Engram) file-backed. The
-// reviewed loader (smalinin/llama.cpp 425badfe, TENSOR_READ_LAZY) does so for
-// every table it marks once --lazy-mode is on, independent of --load-mode.
-// Only that exact option is accepted; anything else stays unknown, which
-// refuses a model with such a tier instead of charging it to a GPU. The live
-// mapping check after load remains the authority (validateObservedSparseLookup).
-func probedSparseLookupCapability(info *backendInfo) (placement.SparseLookupCapability, string) {
-	if info == nil {
-		return placement.SparseLookupUnknown, "backend probe unavailable"
-	}
-	identity := strings.TrimSpace(info.Identity)
-	if identity == "" {
-		identity = filepath.Base(info.Path)
-	}
-	if strings.TrimSpace(info.Help) == "" || backendLoaderFailed(info.Help) {
-		return placement.SparseLookupUnknown, "lookup-table loader not proven: " + identity
-	}
-	if !helpHasExactFlag(info.Help, placement.SparseLookupLazyFlag) {
-		return placement.SparseLookupUnknown, "backend has no " + placement.SparseLookupLazyFlag + ": " + identity
-	}
-	return placement.SparseLookupFileBacked, "help-probed " + placement.SparseLookupLazyFlag + " loader: " + identity
-}
-
-func backendSparseLookupCapability(be *backendInfo) placement.SparseLookupCapability {
-	if be == nil {
-		return placement.SparseLookupUnknown
-	}
-	return placement.NormalizeSparseLookupCapability(string(be.SparseLookupCapability))
 }
 
 // probedCPUExpertMMapCapability classifies loader memory behavior from the
@@ -10676,13 +10723,26 @@ func stableBackendProbeOutput(out string) string {
 }
 
 func backendBuildIdentity(path string) string {
+	return backendBuildIdentityFrom(path, backendVersionOutput(path))
+}
+
+// loadModeTranslationVersion versions evidence for --load-mode builds: v2
+// states an explicit mapping mode when the argv has none.
+const loadModeTranslationVersion = "load-mode-v2"
+
+// backendVersionOutput is the build's stable --version text.
+func backendVersionOutput(path string) string {
 	cmd := exec.Command(path, "--version")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
 		defer libhub.Cleanup(hubDir)
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
 	out, _ := cmd.CombinedOutput()
-	material := strings.TrimSpace(stableBackendProbeOutput(string(out)))
+	return strings.TrimSpace(stableBackendProbeOutput(string(out)))
+}
+
+func backendBuildIdentityFrom(path, version string) string {
+	material := version
 	if fi, err := os.Stat(path); err == nil {
 		material += fmt.Sprintf("\n%s\n%d\n%d", filepath.Base(path), fi.Size(), fi.ModTime().UnixNano())
 	}

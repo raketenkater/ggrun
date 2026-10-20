@@ -82,6 +82,18 @@ _LAYER_ARRAYS = {
     '.attention.sliding_window_pattern': 'swa_pattern',
 }
 
+# Architecture adapters for sparse row-lookup tables. Each entry is reviewed
+# against that architecture's loader: the metadata array (under the
+# architecture's own prefix) listing the layers that own a table, the exact
+# tensor name, and the table kind ggrun reports. A tensor name, an embedding,
+# or the word "ngram" alone never makes a table a lookup tier; whether a
+# backend can read it lazily is a separate, backend-specific contract.
+#   deepseek41: llama.cpp DeepSeek-V4.1 loader (smalinin/llama.cpp 425badfe)
+#   reads LLM_KV_ENGRAM_LAYER_IDS and creates blk.N.engram_embd per listed layer.
+SPARSE_LOOKUP_ADAPTERS = {
+    'deepseek41': {'kind': 'engram', 'layer_key': 'engram.layer_ids', 'tensor': 'blk.{layer}.engram_embd.weight'},
+}
+
 # Recurrent state that llama.cpp keeps beside the KV cache
 # (llm_arch_is_recurrent / llm_arch_is_hybrid). The backend cannot truncate
 # it, so a request that branches inside a cached prompt resumes only from a
@@ -179,11 +191,11 @@ def _read_kv(f, r, kv_count):
             if key == 'tokenizer.ggml.tokens':
                 r['vocab_size'] = al
             layer_key = next((v for k, v in _LAYER_ARRAYS.items() if key.endswith(k)), None)
-            if key.endswith('.engram.layer_ids') and at in _INT_FORMATS and 0 < al <= 4096:
-                # The backend reads this list under its own architecture prefix
-                # only; the prefix is checked against general.architecture
-                # before any table is classified (see _sparse_lookup_layers).
-                r['_engram_layer_ids'] = (key[:-len('.engram.layer_ids')], _read_int_array(f, at, al))
+            lookup_key = any(key.endswith('.' + a['layer_key']) for a in SPARSE_LOOKUP_ADAPTERS.values())
+            if lookup_key and at in _INT_FORMATS and 0 < al <= 4096:
+                # Kept by full key: the adapter for general.architecture decides
+                # which prefix the backend reads (see _sparse_lookup_layers).
+                r.setdefault('_lookup_layer_ids', {})[key] = _read_int_array(f, at, al)
             elif layer_key and at in _INT_FORMATS and 0 < al <= 4096:
                 values = _read_int_array(f, at, al)
                 if layer_key == 'swa_pattern':
@@ -273,17 +285,17 @@ def _read_tensors(f, r, tensor_count):
 
 
 def _sparse_lookup_layers(r):
-    """Layers whose Engram table is a sparse row-lookup tier.
+    """(adapter, layers) whose tables are a sparse row-lookup tier.
 
-    Only DeepSeek-V4.1-style metadata proves this: the architecture's own
-    `<arch>.engram.layer_ids` list. The reviewed backend (smalinin/llama.cpp
-    425badfe) creates exactly those `blk.N.engram_embd` tables with
-    TENSOR_READ_LAZY, so they stay file-backed and gather a few rows per token.
-    A tensor name alone, an embedding, or the word "ngram" is not proof."""
-    entry = r.get('_engram_layer_ids')
-    if not entry or entry[0] != r.get('arch'):
-        return frozenset()
-    return frozenset(v for v in entry[1] if v >= 0)
+    Only an adapter for the model's own architecture, with its layer list under
+    that architecture's prefix, proves this (SPARSE_LOOKUP_ADAPTERS)."""
+    adapter = SPARSE_LOOKUP_ADAPTERS.get(r.get('arch'))
+    if not adapter:
+        return None, frozenset()
+    ids = r.get('_lookup_layer_ids', {}).get(f"{r.get('arch')}.{adapter['layer_key']}")
+    if not ids:
+        return None, frozenset()
+    return adapter, frozenset(v for v in ids if v >= 0)
 
 
 def _account_tensors(r, tensors, header_end, file_size, align):
@@ -321,17 +333,18 @@ def _account_tensors(r, tensors, header_end, file_size, align):
         values = r.setdefault(key, {})
         values[layer] = values.get(layer, 0) + nbytes
 
-    sparse_layers = _sparse_lookup_layers(r)
+    adapter, sparse_layers = _sparse_lookup_layers(r)
     for tname, _, tbytes in tensors:
         nbytes = spans[tname] if span_ok else tbytes
         layer_match = re.match(r'^blk\.(\d+)\.', tname)
         layer = int(layer_match.group(1)) if layer_match else None
-        if layer in sparse_layers and tname == f'blk.{layer}.engram_embd.weight':
+        if layer in sparse_layers and tname == adapter['tensor'].format(layer=layer):
             # Kept in non_expert_bytes for the file-size identity, but never in
-            # the per-layer backbone that placement charges to the layer's GPU.
+            # the per-layer backbone; sparse_lookup_layer_bytes keeps the split
+            # so placement can charge it back to its layer when it must.
             r['non_expert_bytes'] = r.get('non_expert_bytes', 0) + nbytes
             r['sparse_lookup_bytes'] = r.get('sparse_lookup_bytes', 0) + nbytes
-            r['sparse_lookup_kind'] = 'engram'
+            r['sparse_lookup_kind'] = adapter['kind']
             add_layer_bytes('_sparse_lookup_layer_bytes', layer, nbytes)
             continue
         is_shared_expert = '_shexp.' in tname or '_chexp.' in tname
@@ -452,10 +465,10 @@ def parse(path: str) -> Dict[str, Any]:
         if values:
             count = max(layer_count, max(values) + 1)
             r[public_key] = [values.get(i, 0) for i in range(count)]
-    sparse_layers = _sparse_lookup_layers(r)
-    if sparse_layers:
-        r['engram_layer_ids'] = sorted(sparse_layers)
-    r.pop('_engram_layer_ids', None)
+    _, sparse_layers = _sparse_lookup_layers(r)
+    if sparse_layers and r.get('sparse_lookup_bytes'):
+        r['sparse_lookup_layer_ids'] = sorted(sparse_layers)
+    r.pop('_lookup_layer_ids', None)
     r.pop('_align', None)
     # Private parser bookkeeping is not part of the public JSON contract.
     r.pop('_first_moe_layer', None)

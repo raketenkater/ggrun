@@ -9,46 +9,56 @@ import (
 
 // dsv41Profile mirrors parse_gguf.py schema 3 on the pinned
 // prometheusAIR/DeepSeek-V4.1-Flash-1017 IQ2_XS headers (revision 06b82ad):
-// 171.7 GiB of execution weights plus 194.6 GiB of Engram tables.
+// 171.7 GiB of execution weights plus 194.6 GiB of Engram tables in layers 1
+// and 14.
 func dsv41Profile() *ModelProfile {
 	const layers = 40
 	routed := make([]int64, layers)
 	shared := make([]int64, layers)
 	nonExpert := make([]int64, layers)
+	lookup := make([]int64, layers)
 	for i := range routed {
 		routed[i] = (175620096000 - 1504051200) / layers
 		shared[i] = 1504051200 / layers
 		nonExpert[i] = (8764295168 - 2*1323827200) / layers
 	}
+	lookup[1], lookup[14] = 208902215200/2, 208902215200/2
 	return &ModelProfile{
 		Path: "/models/DeepSeek-V4.1-Flash-1017-IQ2_XS-00001-of-00010.gguf", SizeBytes: 393292445504, TotalSizeMB: 375072,
 		NumLayers: layers, IsMoE: true, NumExperts: 384, ExpertUsedCount: 6, ExpertFF: 2304, ExpertSharedCount: 1,
 		HiddenSize: 5120, EmbeddingLength: 5120, HeadCountKV: 1, KeyLength: 512, ValueLength: 512,
 		ContextSize: 65536, CTXTrain: 1048576, ModelArch: "deepseek41", HasShexp: 1,
-		ExpertBytes: 175620096000, NonExpertBytes: 8764295168, SparseLookupBytes: 208902215200, SparseLookupKind: "engram",
+		ExpertBytes: 175620096000, NonExpertBytes: 8764295168,
+		SparseLookupBytes: 208902215200, SparseLookupKind: "engram", SparseLookupLayerBytes: lookup,
 		TokenEmbdBytes: 1323827200, OutputBytes: 1323827200, ShexpBytes: 1504051200,
 		RoutedExpertLayerBytes: routed, ShexpLayerBytes: shared, NonExpertLayerBytes: nonExpert,
 	}
 }
 
 func dsv41Host(freeRAMMB int) *detect.Capabilities {
+	total := 217096
+	if freeRAMMB > total {
+		total = freeRAMMB + 10000
+	}
 	return &detect.Capabilities{
 		GPUs: []detect.GPU{
 			{Index: 0, Name: "RTX 4070", VRAMTotalMB: 12282, VRAMUsedMB: 1, VRAMReservedMB: 408},
 			{Index: 1, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, VRAMUsedMB: 272, VRAMReservedMB: 452},
 			{Index: 2, Name: "RTX 3060", VRAMTotalMB: 12288, VRAMUsedMB: 1, VRAMReservedMB: 378},
 		},
-		RAM: detect.RAMInfo{TotalMB: 217096, FreeMB: freeRAMMB},
+		RAM: detect.RAMInfo{TotalMB: total, FreeMB: freeRAMMB},
 		CPU: detect.CPUInfo{Cores: 14},
 	}
 }
 
+// dsv41Opts describes the command layer's inputs: capability file-backed only
+// under a reviewed loader contract, and the lazy flag the backend advertises.
 func dsv41Opts(t *testing.T, capability SparseLookupCapability) Options {
 	return Options{
 		ContextSize: 32768, KVPlacement: "gpu", KVQuality: "high", UBatchSize: 512,
 		BackendTag: "llama", BackendIdentity: "smalinin/llama.cpp 425badfe", CacheDir: t.TempDir(),
 		CPUExpertMMapCapability: CPUExpertMMapFileBacked, SparseLookupCapability: capability,
-		SparseLookupEvidence: "test",
+		SparseLookupEvidence: "test", SparseLookupFlag: SparseLookupLazyFlag,
 	}
 }
 
@@ -61,50 +71,100 @@ func hasArgPair(args []string, flag, value string) bool {
 	return false
 }
 
-func TestSparseLookupTierFailsClosedWithoutLazyLoader(t *testing.T) {
+const dsv41TierMB = 199225
+
+// Without a reviewed loader contract the tables are ordinary layer tensors:
+// charged with their layer, never treated as reclaimable, and "--lazy-mode
+// off" is stated when the backend advertises the flag. On this host the
+// layers holding ~97 GiB tables cannot go to a GPU, so the refusal says why.
+func TestSparseLookupWithoutContractLoadsWithLayers(t *testing.T) {
 	for _, capability := range []SparseLookupCapability{"", SparseLookupUnknown, SparseLookupAnonymous} {
 		_, err := Compute(dsv41Host(204700), dsv41Profile(), dsv41Opts(t, capability))
-		if err == nil || !strings.Contains(err.Error(), SparseLookupLazyFlag) {
-			t.Fatalf("capability %q: a lookup tier without a lazy loader must be refused, got %v", capability, err)
+		if err == nil || !strings.Contains(err.Error(), "load with their layers") || strings.Contains(err.Error(), "must stay file-backed") {
+			t.Fatalf("capability %q: want an actionable layer-tier refusal, got %v", capability, err)
 		}
 	}
 }
 
-func TestSparseLookupTierStaysOffGPUAndOutOfResidentLedger(t *testing.T) {
+// PR #93 review finding 4: a capable roomy host keeps an accurately charged
+// resident option instead of a blanket lazy-loading requirement.
+func TestRoomyHostHasResidentSparseLookupPlan(t *testing.T) {
+	model := dsv41Profile()
+	// Unknown loader, CPU-only on 900 GB: tables charged with their layers.
+	opts := dsv41Opts(t, SparseLookupUnknown)
+	opts.CPUMode = true
+	s, err := Compute(dsv41Host(900000), model, opts)
+	if err != nil {
+		t.Fatalf("roomy CPU host with an unreviewed loader must still plan: %v", err)
+	}
+	if s.SparseLookupPolicy != SparseLookupLayer || s.PlannedHostFootprintMB < model.TotalSizeMB {
+		t.Fatalf("layer tier must charge the whole model to host: policy=%s footprint=%d model=%d", s.SparseLookupPolicy, s.PlannedHostFootprintMB, model.TotalSizeMB)
+	}
+	if !hasArgPair(s.Args(model.Path, 8080), SparseLookupLazyFlag, "off") {
+		t.Fatalf("an advertised lazy flag is stated off for layer tables: %v", s.Args(model.Path, 8080))
+	}
+	// Reviewed loader on the same host: resident lazy tier, charged once.
+	s, err = Compute(dsv41Host(900000), model, dsv41Opts(t, SparseLookupFileBacked))
+	if err != nil {
+		t.Fatalf("roomy host with a reviewed loader: %v", err)
+	}
+	paged, err := Compute(dsv41Host(900000), model, func() Options {
+		o := dsv41Opts(t, SparseLookupFileBacked)
+		o.sparseLookupPolicy = SparseLookupPaged
+		return o
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The resident plan sizes its runtime against RAM already reduced by the
+	// tier, so compare against the paged plan's footprint within that margin.
+	if s.SparseLookupPolicy != SparseLookupResident || paged.PlannedHostFootprintMB >= dsv41TierMB ||
+		s.PlannedHostFootprintMB < paged.PlannedHostFootprintMB+dsv41TierMB-2048 {
+		t.Fatalf("roomy host: policy=%s footprint=%d, want resident with the paged footprint %d + tier %d",
+			s.SparseLookupPolicy, s.PlannedHostFootprintMB, paged.PlannedHostFootprintMB, dsv41TierMB)
+	}
+	if !hasArgPair(s.Args(model.Path, 8080), SparseLookupLazyFlag, "on") || s.MMapRequired {
+		t.Fatalf("resident lazy tier: args=%v mmapRequired=%v", s.Args(model.Path, 8080), s.MMapRequired)
+	}
+}
+
+// A constrained host pages the tier and keeps execution weights resident.
+func TestConstrainedHostPagesTierAndKeepsExecutionResident(t *testing.T) {
 	model := dsv41Profile()
 	s, err := Compute(dsv41Host(204700), model, dsv41Opts(t, SparseLookupFileBacked))
 	if err != nil {
 		t.Fatalf("execution weights fit RAM+VRAM; the lookup tier must not block the plan: %v", err)
 	}
-	wantMB := bytesToMiBCeil(model.SparseLookupBytes)
-	if s.Type != MoEOffload || s.SparseLookupMB != wantMB || !StrategyUsesFileBackedSparseLookup(s) {
-		t.Fatalf("type=%s sparse=%d capability=%q, want moe_offload with %d MiB file-backed", s.Type, s.SparseLookupMB, s.SparseLookupCapability, wantMB)
+	if s.Type != MoEOffload || s.SparseLookupMB != dsv41TierMB || !StrategyUsesFileBackedSparseLookup(s) {
+		t.Fatalf("type=%s sparse=%d policy=%q, want moe_offload with a %d MiB paged tier", s.Type, s.SparseLookupMB, s.SparseLookupPolicy, dsv41TierMB)
 	}
-	// Resident execution weights fit, so experts stay anonymous and resident;
-	// the lookup tables are the only file-backed tier.
 	if s.MMap || s.MMapRequired {
 		t.Fatalf("expert paging must not be planned when execution weights fit resident: mmap=%v required=%v", s.MMap, s.MMapRequired)
 	}
-	if s.PlannedHostFootprintMB <= 0 || s.PlannedHostFootprintMB >= wantMB {
-		t.Fatalf("planned host footprint %d MiB must exclude the %d MiB lookup tier", s.PlannedHostFootprintMB, wantMB)
+	if s.PlannedHostFootprintMB <= 0 || s.PlannedHostFootprintMB >= dsv41TierMB {
+		t.Fatalf("planned host footprint %d MiB must exclude the %d MiB paged tier", s.PlannedHostFootprintMB, dsv41TierMB)
 	}
 	args := s.Args(model.Path, 8080)
-	if !hasArgPair(args, SparseLookupLazyFlag, "on") || !hasArgPair(args, "--n-cpu-moe", "0") && s.NCPUMoE <= 0 {
-		t.Fatalf("argv must state lazy lookup reads and CPU experts: %v", args)
+	if !hasArgPair(args, SparseLookupLazyFlag, "on") || !strings.Contains(strings.Join(args, " "), "--no-mmap") {
+		t.Fatalf("argv must state lazy lookup reads and resident experts: %v", args)
 	}
-	if !strings.Contains(strings.Join(args, " "), "--no-mmap") {
-		t.Fatalf("resident experts need --no-mmap (lazy tables stay mapped regardless): %v", args)
+	// Automatic context: a resident tier that needs expert paging loses to a
+	// paged tier with resident execution weights.
+	opts := dsv41Opts(t, SparseLookupFileBacked)
+	opts.ContextSize = 0
+	if auto, err := Compute(dsv41Host(204700), model, opts); err != nil || auto.SparseLookupPolicy != SparseLookupPaged || auto.MMapRequired {
+		t.Fatalf("auto context: %v policy=%v", err, auto)
 	}
 }
 
-// The defect this tier fixes: a schema-2 profile folds both ~97 GiB tables
+// The defect this tier fixes: schema-2 accounting folds both ~97 GiB tables
 // into layers 1 and 14 as ordinary backbone, which bills them to a GPU.
 func TestSchema2EngramAccountingCannotPlaceTheModel(t *testing.T) {
 	model := dsv41Profile()
 	model.NonExpertBytes += model.SparseLookupBytes
 	model.NonExpertLayerBytes[1] += model.SparseLookupBytes / 2
 	model.NonExpertLayerBytes[14] += model.SparseLookupBytes / 2
-	model.SparseLookupBytes, model.SparseLookupKind = 0, ""
+	model.SparseLookupBytes, model.SparseLookupKind, model.SparseLookupLayerBytes = 0, "", nil
 	if s, err := Compute(dsv41Host(204700), model, dsv41Opts(t, SparseLookupFileBacked)); err == nil {
 		t.Fatalf("schema-2 accounting unexpectedly produced a plan: type=%s ncpumoe=%d", s.Type, s.NCPUMoE)
 	}
@@ -113,7 +173,7 @@ func TestSchema2EngramAccountingCannotPlaceTheModel(t *testing.T) {
 func TestSparseLookupTierRefusesAutomaticExpertPaging(t *testing.T) {
 	model := dsv41Profile()
 	_, err := Compute(dsv41Host(100000), model, dsv41Opts(t, SparseLookupFileBacked))
-	if err == nil || !strings.Contains(err.Error(), "will not also page experts") {
+	if err == nil || !strings.Contains(err.Error(), "will not also page experts") || !strings.Contains(err.Error(), "resident tier") {
 		t.Fatalf("expert paging beside a paged lookup tier must need explicit consent, got %v", err)
 	}
 	opts := dsv41Opts(t, SparseLookupFileBacked)
@@ -127,17 +187,140 @@ func TestSparseLookupTierRefusesAutomaticExpertPaging(t *testing.T) {
 	}
 }
 
-func TestOrdinaryModelIgnoresSparseLookupCapability(t *testing.T) {
+// Explicit user lazy choices are constraints, never silently replaced.
+func TestExplicitLazyChoiceIsHonored(t *testing.T) {
 	model := dsv41Profile()
-	model.SparseLookupBytes, model.SparseLookupKind, model.ModelArch = 0, "", "deepseek4"
-	model.SizeBytes -= 208902215200
-	for _, capability := range []SparseLookupCapability{SparseLookupUnknown, SparseLookupFileBacked} {
-		s, err := Compute(dsv41Host(204700), model, dsv41Opts(t, capability))
+	opts := dsv41Opts(t, SparseLookupFileBacked)
+	opts.SparseLookupLazy = "off"
+	opts.CPUMode = true
+	s, err := Compute(dsv41Host(900000), model, opts)
+	if err != nil || s.SparseLookupPolicy != SparseLookupLayer || !hasArgPair(s.Args(model.Path, 8080), SparseLookupLazyFlag, "off") {
+		t.Fatalf("explicit off: %v %+v", err, s)
+	}
+	opts = dsv41Opts(t, SparseLookupUnknown)
+	opts.SparseLookupLazy = "on"
+	if _, err := Compute(dsv41Host(900000), model, opts); err == nil || !strings.Contains(err.Error(), "no reviewed lazy-loader contract") {
+		t.Fatalf("explicit on without a contract must be refused with the reason, got %v", err)
+	}
+	opts = dsv41Opts(t, SparseLookupFileBacked)
+	opts.SparseLookupLazy = "on"
+	if s, err := Compute(dsv41Host(204700), model, opts); err != nil || !StrategyUsesLazySparseLookup(s) {
+		t.Fatalf("explicit on with a contract: %v %+v", err, s)
+	}
+}
+
+// synthDenseProfile is a SYNTHETIC dense second architecture with a small
+// sparse table kind. It exercises the generic tier policy only; it does not
+// claim any real model with such tables is supported.
+func synthDenseProfile(tierMiB int) *ModelProfile {
+	const layers = 32
+	nonExpert := make([]int64, layers)
+	lookup := make([]int64, layers)
+	for i := range nonExpert {
+		nonExpert[i] = 6000 << 20 / layers
+	}
+	lookup[0], lookup[16] = int64(tierMiB)<<20/2, int64(tierMiB)<<20/2
+	total := 6000 + tierMiB
+	return &ModelProfile{
+		Path: "/models/synthrow-dense.gguf", TotalSizeMB: total, SizeBytes: int64(total) << 20,
+		NumLayers: layers, HiddenSize: 4096, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+		ContextSize: 32768, CTXTrain: 32768, ModelArch: "synthrow",
+		NonExpertBytes: 6000 << 20, NonExpertLayerBytes: nonExpert,
+		SparseLookupBytes: int64(tierMiB) << 20, SparseLookupKind: "synthetic-rowtable", SparseLookupLayerBytes: lookup,
+		MeasuredKVBytesPerTok: map[string]float64{"f16": 128 * 1024, "q8_0": 64 * 1024},
+	}
+}
+
+func synthOpts(t *testing.T, capability SparseLookupCapability) Options {
+	return Options{
+		ContextSize: 8192, KVPlacement: "auto", KVQuality: "mid", CacheDir: t.TempDir(), BackendTag: "llama",
+		SparseLookupCapability: capability, SparseLookupFlag: SparseLookupLazyFlag,
+	}
+}
+
+func synthCaps(ramFreeMB int, gpus ...detect.GPU) *detect.Capabilities {
+	return &detect.Capabilities{GPUs: gpus, RAM: detect.RAMInfo{TotalMB: ramFreeMB + 4096, FreeMB: ramFreeMB}, CPU: detect.CPUInfo{Cores: 8}}
+}
+
+// SYNTHETIC matrix: dense model, small table, CPU-only / single-GPU /
+// multi-GPU, with and without a reviewed loader.
+func TestSyntheticDenseTierPolicyMatrix(t *testing.T) {
+	single := []detect.GPU{{Index: 0, VRAMTotalMB: 24576}}
+	multi := []detect.GPU{{Index: 0, VRAMTotalMB: 12288}, {Index: 1, VRAMTotalMB: 12288}}
+	for _, tc := range []struct {
+		name       string
+		caps       *detect.Capabilities
+		cpu        bool
+		capability SparseLookupCapability
+		want       SparseLookupPolicy
+	}{
+		{"cpu-only, unknown loader", synthCaps(64000), true, SparseLookupUnknown, SparseLookupLayer},
+		{"cpu-only, reviewed loader", synthCaps(64000), true, SparseLookupFileBacked, SparseLookupResident},
+		{"single GPU, unknown loader", synthCaps(64000, single...), false, SparseLookupUnknown, SparseLookupLayer},
+		{"single GPU, reviewed loader", synthCaps(64000, single...), false, SparseLookupFileBacked, SparseLookupResident},
+		{"multi GPU, unknown loader", synthCaps(64000, multi...), false, SparseLookupUnknown, SparseLookupLayer},
+		{"multi GPU, reviewed loader", synthCaps(64000, multi...), false, SparseLookupFileBacked, SparseLookupResident},
+	} {
+		model := synthDenseProfile(2048)
+		opts := synthOpts(t, tc.capability)
+		opts.CPUMode = tc.cpu
+		s, err := Compute(tc.caps, model, opts)
 		if err != nil {
-			t.Fatalf("capability %q must not affect a model without a lookup tier: %v", capability, err)
+			t.Errorf("%s: %v", tc.name, err)
+			continue
 		}
-		if s.SparseLookupMB != 0 || strings.Contains(strings.Join(s.Args(model.Path, 8080), " "), SparseLookupLazyFlag) {
-			t.Fatalf("ordinary model gained a lookup tier: %d MiB, args %v", s.SparseLookupMB, s.Args(model.Path, 8080))
+		if s.SparseLookupPolicy != tc.want || s.SparseLookupMB != 2048 {
+			t.Errorf("%s: policy=%s tier=%d, want %s 2048", tc.name, s.SparseLookupPolicy, s.SparseLookupMB, tc.want)
+		}
+		want := "off"
+		if tc.want != SparseLookupLayer {
+			want = "on"
+		}
+		if !hasArgPair(s.Args(model.Path, 8080), SparseLookupLazyFlag, want) {
+			t.Errorf("%s: lazy flag must be stated %s: %v", tc.name, want, s.Args(model.Path, 8080))
+		}
+		if tc.cpu && s.PlannedHostFootprintMB > 0 && s.PlannedHostFootprintMB < model.TotalSizeMB {
+			t.Errorf("%s: CPU-only footprint %d must include the %d MiB model with its tables", tc.name, s.PlannedHostFootprintMB, model.TotalSizeMB)
+		}
+	}
+	// A backend without the flag gets no lazy option at all.
+	opts := synthOpts(t, SparseLookupUnknown)
+	opts.SparseLookupFlag = ""
+	if s, err := Compute(synthCaps(64000, single...), synthDenseProfile(2048), opts); err != nil || strings.Contains(strings.Join(s.Args("m", 1), " "), SparseLookupLazyFlag) {
+		t.Fatalf("flagless backend: %v %v", err, s)
+	}
+}
+
+// The layer tier is real resident memory on its layer's device: a table that
+// does not fit the GPU next to the model must change the plan.
+func TestLayerTierIsChargedToTheLayerDevice(t *testing.T) {
+	caps := synthCaps(64000, detect.GPU{Index: 0, VRAMTotalMB: 12288})
+	small, err := Compute(caps, synthDenseProfile(256), synthOpts(t, SparseLookupUnknown))
+	if err != nil {
+		t.Fatal(err)
+	}
+	big, err := Compute(caps, synthDenseProfile(16384), synthOpts(t, SparseLookupUnknown))
+	if err == nil && big.Type == small.Type && big.GPULayers == small.GPULayers {
+		t.Fatalf("a 16 GiB layer table on a 12 GiB GPU did not change the plan: %s/%d", big.Type, big.GPULayers)
+	}
+}
+
+func TestOrdinaryModelIgnoresSparseLookupInputs(t *testing.T) {
+	model := dsv41Profile()
+	model.SparseLookupBytes, model.SparseLookupKind, model.SparseLookupLayerBytes, model.ModelArch = 0, "", nil, "deepseek4"
+	model.SizeBytes -= 208902215200
+	model.TotalSizeMB -= dsv41TierMB
+	for _, capability := range []SparseLookupCapability{SparseLookupUnknown, SparseLookupFileBacked} {
+		for _, lazy := range []string{"", "on", "off"} {
+			opts := dsv41Opts(t, capability)
+			opts.SparseLookupLazy = lazy
+			s, err := Compute(dsv41Host(204700), model, opts)
+			if err != nil {
+				t.Fatalf("capability %q lazy %q must not affect a model without a lookup tier: %v", capability, lazy, err)
+			}
+			if s.SparseLookupMB != 0 || s.SparseLookupPolicy != "" || strings.Contains(strings.Join(s.Args(model.Path, 8080), " "), SparseLookupLazyFlag) {
+				t.Fatalf("ordinary model gained a lookup tier: %d MiB %q, args %v", s.SparseLookupMB, s.SparseLookupPolicy, s.Args(model.Path, 8080))
+			}
 		}
 	}
 	plain := &Strategy{Type: MoEOffload, ContextSize: 4096, MMap: false}
@@ -146,9 +329,35 @@ func TestOrdinaryModelIgnoresSparseLookupCapability(t *testing.T) {
 	if AllocationPlacementIdentity(plain) != before {
 		t.Fatal("allocation identity of a plan without a lookup tier must not change")
 	}
-	plain.SparseLookupMB = 1
-	if AllocationPlacementIdentity(plain) == before {
-		t.Fatal("a lookup tier must scope allocation evidence")
+	plain.SparseLookupMB, plain.SparseLookupPolicy = 1, SparseLookupPaged
+	paged := AllocationPlacementIdentity(plain)
+	plain.SparseLookupPolicy = SparseLookupResident
+	if paged == before || AllocationPlacementIdentity(plain) == paged {
+		t.Fatal("the lookup tier and its policy must scope allocation evidence")
+	}
+	if tag := backendCacheTag(Options{BackendTag: "llama"}); strings.Contains(tag, "lookup=") {
+		t.Fatalf("models without a tier keep their cache namespace: %q", tag)
+	}
+	if backendCacheTag(Options{BackendTag: "llama", sparseLookupPolicy: SparseLookupPaged}) == backendCacheTag(Options{BackendTag: "llama", sparseLookupPolicy: SparseLookupResident}) {
+		t.Fatal("paged and resident evidence must not share a cache namespace")
+	}
+}
+
+func TestResidentTierJoinsFootprintOnce(t *testing.T) {
+	model := dsv41Profile()
+	opts := dsv41Opts(t, SparseLookupFileBacked)
+	opts.sparseLookupPolicy = SparseLookupResident
+	s := &Strategy{PlannedHostFootprintMB: 150000}
+	applySparseLookupTier(s, model, opts)
+	applySparseLookupTier(s, model, opts)
+	if s.PlannedHostFootprintMB != 150000+dsv41TierMB {
+		t.Fatalf("repeated application: footprint %d", s.PlannedHostFootprintMB)
+	}
+	// An underived footprint stays underived (the whole-host ceiling applies).
+	z := &Strategy{}
+	applySparseLookupTier(z, model, opts)
+	if z.PlannedHostFootprintMB != 0 {
+		t.Fatalf("underived footprint became %d", z.PlannedHostFootprintMB)
 	}
 }
 
@@ -166,5 +375,19 @@ func TestVerifiedConfigKeepsSparseLookupTier(t *testing.T) {
 	}
 	if !hasArgPair(restored.Args(model.Path, 8080), SparseLookupLazyFlag, "on") {
 		t.Fatal("relaunch from a verified config must keep lazy lookup reads")
+	}
+	// A record is evidence only for the policy that produced it.
+	opts.sparseLookupPolicy = SparseLookupPaged
+	if !sparseLookupRecordMatches(restored, model, opts) {
+		t.Fatal("matching record rejected")
+	}
+	opts.sparseLookupPolicy = SparseLookupResident
+	if sparseLookupRecordMatches(restored, model, opts) {
+		t.Fatal("a paged record was accepted for the resident policy")
+	}
+	restored.SparseLookupPolicy = ""
+	opts.sparseLookupPolicy = SparseLookupPaged
+	if sparseLookupRecordMatches(restored, model, opts) {
+		t.Fatal("a record from before tier policies was accepted")
 	}
 }

@@ -43,6 +43,9 @@ type preflightDevice struct {
 	ContextMB     int
 	ComputeMB     int
 	UnaccountedMB int // allocator peak not identified by optional backend log labels
+	// SparseLookupExcludedMB is the paged lookup tier already removed from a
+	// Host row whose oracle contract counts it, so it is removed only once.
+	SparseLookupExcludedMB int
 }
 
 type memoryEvidenceLevel string
@@ -1466,7 +1469,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			outcome.Evidence = evidence
 			targetDevs = evidence.Devices
 		} else {
-			targetDevs = oracleDevicesExcludingLookupTier(targetDevs, be, strategy, serverArgs)
+			targetDevs = oracleDevicesExcludingLookupTier(targetDevs, sparseLookupOracleFor(be, model), strategy)
 			outcome.Evidence = memoryPlanEvidence{
 				Level:   memoryEvidenceOraclePlanned,
 				Backend: be.Tag,

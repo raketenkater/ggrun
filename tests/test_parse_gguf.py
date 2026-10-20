@@ -301,7 +301,7 @@ def test_engram_tables_are_a_separate_sparse_lookup_tier():
     assert_eq(r['tensor_accounting_schema'], 3, 'schema')
     # smalinin/llama.cpp 425badfe lists deepseek41 in llm_arch_is_hybrid.
     assert_eq(r.get('recurrent'), 1, 'deepseek41 recurrent/hybrid state')
-    assert_eq(r.get('engram_layer_ids'), [1], 'engram_layer_ids')
+    assert_eq(r.get('sparse_lookup_layer_ids'), [1], 'sparse_lookup_layer_ids')
     assert_eq(r.get('sparse_lookup_kind'), 'engram', 'sparse_lookup_kind')
     assert_eq(r.get('sparse_lookup_bytes'), ENGRAM_TABLE_BYTES, 'sparse_lookup_bytes')
     assert_eq(r.get('sparse_lookup_layer_bytes'), [0, ENGRAM_TABLE_BYTES], 'sparse_lookup_layer_bytes')
@@ -330,6 +330,44 @@ def test_engram_named_tensor_without_proof_stays_resident():
     print('  ✓ engram_named_tensor_without_proof_stays_resident')
 
 
+def test_lookup_metadata_on_an_architecture_without_adapter_stays_resident():
+    """Negative: another architecture carrying the same metadata key and tensor
+    name has no reviewed adapter, so its table stays an ordinary layer tensor."""
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='synthrow', layers=2, engram_layers='1',
+              tensor=[ENGRAM_TABLE, 'blk.0.attn_kv.weight:256,256:8', 'blk.1.attn_kv.weight:256,256:8'])
+        r = parse(f.name)
+    assert_eq(r.get('sparse_lookup_bytes', 0), 0, 'sparse_lookup_bytes')
+    assert 'sparse_lookup_layer_ids' not in r, 'unexpected layer ids'
+    assert_eq(r['non_expert_layer_bytes'][1], DENSE_TENSOR_BYTES + ENGRAM_TABLE_BYTES, 'table charged to its layer')
+    print('  ✓ lookup_metadata_on_an_architecture_without_adapter_stays_resident')
+
+
+def test_synthetic_second_adapter_uses_its_own_metadata():
+    """SYNTHETIC: a test-only adapter for a made-up dense architecture with a
+    different metadata key and tensor name. It proves the adapter table, not the
+    Engram spelling, drives classification. It is not a supported model."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('parse_gguf_under_test', PARSER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.SPARSE_LOOKUP_ADAPTERS['synthrow'] = {
+        'kind': 'synthetic-rowtable', 'layer_key': 'rowtable.layer_ids', 'tensor': 'blk.{layer}.row_table.weight'}
+    table = 'blk.1.row_table.weight:256,1024:8'
+    dense = ['blk.0.attn_kv.weight:256,256:8', 'blk.1.attn_kv.weight:256,256:8',
+             'blk.1.engram_embd.weight:256,256:8']  # the Engram name is ordinary here
+    with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
+        build(f.name, arch='synthrow', layers=2, i32s=['rowtable.layer_ids=1'], tensor=[table] + dense)
+        r = mod.parse(f.name)
+        plain = parse(f.name)  # the shipped parser has no such adapter
+    assert_eq(r.get('sparse_lookup_kind'), 'synthetic-rowtable', 'kind')
+    assert_eq(r.get('sparse_lookup_bytes'), ENGRAM_TABLE_BYTES, 'bytes')
+    assert_eq(r.get('sparse_lookup_layer_ids'), [1], 'layer ids')
+    assert_eq(r['non_expert_layer_bytes'], [DENSE_TENSOR_BYTES, 2 * DENSE_TENSOR_BYTES], 'ordinary layer bytes')
+    assert_eq(plain.get('sparse_lookup_bytes', 0), 0, 'shipped parser must not classify the synthetic table')
+    print('  ✓ synthetic_second_adapter_uses_its_own_metadata')
+
+
 def main():
     print('parse_gguf.py regression tests:')
     test_dense_llama()
@@ -347,6 +385,8 @@ def main():
     test_per_layer_attention_arrays()
     test_engram_tables_are_a_separate_sparse_lookup_tier()
     test_engram_named_tensor_without_proof_stays_resident()
+    test_lookup_metadata_on_an_architecture_without_adapter_stays_resident()
+    test_synthetic_second_adapter_uses_its_own_metadata()
     print('All tests passed.')
 
 

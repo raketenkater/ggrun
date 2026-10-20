@@ -651,9 +651,20 @@ func TestDeepSeek41RequiresSparseLookupAccounting(t *testing.T) {
 	if err := validateParserOutput("/new/parse_gguf.py", "/models/ds41.gguf", current); err != nil {
 		t.Fatalf("schema-3 helper rejected: %v", err)
 	}
+	withLayers := *current
+	withLayers.SparseLookupLayerBytes = []int64{0, 208902215200 / 2, 208902215200 / 2}
+	if err := validateParserOutput("/new/parse_gguf.py", "/models/ds41.gguf", &withLayers); err != nil {
+		t.Fatalf("per-layer split rejected: %v", err)
+	}
 	for _, bad := range []*Info{
 		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 11, SparseLookupKind: "engram"},
 		{Architecture: "llama", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5},
+		// A tier for an architecture without a Go-side adapter, or of the
+		// wrong kind, is a parser mismatch rather than a supported model.
+		{Architecture: "llama", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "engram"},
+		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "ngram"},
+		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "engram",
+			SparseLookupLayerBytes: []int64{2, 2}},
 	} {
 		if err := validateParserOutput("/x/parse_gguf.py", "/models/m.gguf", bad); err == nil {
 			t.Fatalf("inconsistent lookup tier accepted: %+v", bad)

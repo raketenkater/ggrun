@@ -158,6 +158,9 @@ def build(args):
     for item in args.u32 or []:
         name, _, value = item.partition('=')
         kv_pairs.append((f'{arch}.{name}', 'uint32', int(value)))
+    for item in args.i32s or []:
+        name, _, values = item.partition('=')
+        kv_pairs.append((f'{arch}.{name}', 'int32s', [int(v) for v in values.split(',')]))
 
     w_uint64(out, tensor_count)
     w_uint64(out, len(kv_pairs))
@@ -202,6 +205,7 @@ def main():
     ap.add_argument('--engram-layers', default='', help='comma-separated engram.layer_ids (int32 array)')
     ap.add_argument('--engram-prefix', default='', help='metadata prefix for engram.layer_ids (default: --arch)')
     ap.add_argument('--u32', action='append', help='extra arch-relative uint32 key, e.g. ssm.conv_kernel=4')
+    ap.add_argument('--i32s', action='append', help='extra arch-relative int32 array key, e.g. rowtable.layer_ids=1,3')
     ap.add_argument('--kl', type=int, default=None)
     ap.add_argument('--vl', type=int, default=None)
     ap.add_argument('--embd', type=int, default=None)

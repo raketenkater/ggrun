@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -31,10 +32,26 @@ Anonymous:             0 kB
 Locked:             1024 kB
 `
 
+// The pinned fork's real --help/--version lines.
+const (
+	reviewedLazyHelp    = "-lm,   --load-mode MODE   model loading mode (default: auto)\n-lzm,  --lazy-mode MODE   on-demand reading of certain tensors, for example per-layer embeddings"
+	reviewedLazyVersion = "version: 0.4.0-dev (build 11074, commit 425badfe)\nbuilt with GNU 13.3.0 for Linux x86_64"
+	engramTierBytes     = int64(208902215200) // pinned IQ2_XS headers: 199,225 MiB rounded up
+)
+
+func reviewedLazyBackend() *backendInfo {
+	return &backendInfo{Path: "/b/llama-server", Identity: "llama-server-test", Help: reviewedLazyHelp, Version: reviewedLazyVersion}
+}
+
+func engramModel() *placement.ModelProfile {
+	return &placement.ModelProfile{ModelArch: "deepseek41", SparseLookupBytes: engramTierBytes, SparseLookupKind: "engram"}
+}
+
 func lookupStrategy() *placement.Strategy {
 	return &placement.Strategy{
-		SparseLookupMB: 199225, SparseLookupCapability: placement.SparseLookupFileBacked,
-		PlannedHostFootprintMB: 140000, CRAM: 8192,
+		SparseLookupMB: 199225, SparseLookupBytes: engramTierBytes,
+		SparseLookupPolicy: placement.SparseLookupPaged, SparseLookupCapability: placement.SparseLookupFileBacked,
+		SparseLookupFlag: placement.SparseLookupLazyFlag, PlannedHostFootprintMB: 140000, CRAM: 8192,
 	}
 }
 
@@ -69,41 +86,128 @@ func TestSparseLookupObservationRules(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
+	// A resident tier is charged in the host footprint: its non-reclaimable
+	// total is not a contradiction, but a missing mapping still is.
+	resident := lookupStrategy()
+	resident.SparseLookupPolicy = placement.SparseLookupResident
+	resident.PlannedHostFootprintMB = 340000
+	if got := sparseLookupContradiction(resident, healthy, 345000); got != "" {
+		t.Fatalf("resident tier judged by the paged envelope: %q", got)
+	}
+	if got := sparseLookupContradiction(resident, &mappedFileUsage{}, 0); !strings.Contains(got, "no model-file mapping") {
+		t.Fatalf("resident lazy tier without a mapping: %q", got)
+	}
+	layer := lookupStrategy()
+	layer.SparseLookupPolicy = placement.SparseLookupLayer
+	if got := sparseLookupContradiction(layer, nil, 999999); got != "" {
+		t.Fatalf("tables loaded with their layers must not be judged as lazy: %q", got)
+	}
 	if got := sparseLookupContradiction(&placement.Strategy{}, nil, 999999); got != "" {
 		t.Fatalf("a plan without a lookup tier must not be judged by it: %q", got)
 	}
 }
 
-func TestSparseLookupScopeSharesOneLedger(t *testing.T) {
+// PR #93 review finding 5: the reclaim band is reserved before any lookup
+// cache is granted, the user's ceiling is never exceeded, and an insufficient
+// ceiling never throttles the non-reclaimable working set.
+func TestSparseLookupScopeReservesReclaimBand(t *testing.T) {
 	s := lookupStrategy()
-	// Plenty of room: the allowance is capped by the table size.
-	high, max, lookup := sparseLookupScopeLimits(s, 150000, 4096, 400000, false)
-	if lookup != s.SparseLookupMB || high != 150000+s.SparseLookupMB || max != high+4096 {
-		t.Fatalf("roomy host: high=%d max=%d lookup=%d", high, max, lookup)
+	for _, tc := range []struct {
+		name                    string
+		nonRecl, headroom, ceil int
+		keepMax                 bool
+		high, max, lookup       int
+		short                   bool
+	}{
+		// Review reproducer: 150,000 non-reclaimable, 4,096 band, 200,000 ceiling.
+		{"constrained host keeps the band", 150000, 4096, 200000, false, 195904, 200000, 45904, false},
+		{"roomy host caps the cache at the tier", 150000, 4096, 400000, false, 349225, 353321, 199225, false},
+		{"explicit small budget", 60000, 4096, 70000, false, 65904, 70000, 5904, false},
+		{"ceiling below state + band", 198000, 4096, 200000, false, 198000, 200000, 0, true},
+		{"state above ceiling is clamped", 210000, 4096, 200000, false, 200000, 200000, 0, true},
+		{"no configured band", 150000, 0, 200000, false, 200000, 200000, 50000, false},
+		{"mapped CPU experts keep their hard ceiling", 150000, 4096, 200000, true, 195904, 0, 45904, false},
+	} {
+		high, max, lookup, short := sparseLookupScopeLimits(s, tc.nonRecl, tc.headroom, tc.ceil, tc.keepMax)
+		if high != tc.high || max != tc.max || lookup != tc.lookup || short != tc.short {
+			t.Errorf("%s: high=%d max=%d lookup=%d short=%v, want %d %d %d %v",
+				tc.name, high, max, lookup, short, tc.high, tc.max, tc.lookup, tc.short)
+		}
+		if !tc.keepMax && max > tc.ceil {
+			t.Errorf("%s: memory.max %d exceeds the user ceiling %d", tc.name, max, tc.ceil)
+		}
+		if !tc.short && !tc.keepMax && max-high < tc.headroom {
+			t.Errorf("%s: band %d below configured %d", tc.name, max-high, tc.headroom)
+		}
 	}
-	// Typical host: the allowance is what the user's ceiling leaves, and the
-	// hard ceiling never exceeds it.
-	high, max, lookup = sparseLookupScopeLimits(s, 150000, 4096, 200000, false)
-	if lookup != 50000 || high != 200000 || max != 200000 {
-		t.Fatalf("bounded host: high=%d max=%d lookup=%d", high, max, lookup)
+	for _, other := range []*placement.Strategy{{}, {SparseLookupMB: 199225, SparseLookupPolicy: placement.SparseLookupResident}} {
+		if high, _, _, _ := sparseLookupScopeLimits(other, 150000, 4096, 200000, false); high != 0 {
+			t.Fatalf("policy %q keeps the ordinary Fix-B rule, got high=%d", other.SparseLookupPolicy, high)
+		}
 	}
-	// No room left: the non-reclaimable ceiling is never raised past the
-	// user's ceiling and the lookup cache gets nothing.
-	high, max, lookup = sparseLookupScopeLimits(s, 210000, 4096, 200000, false)
-	if lookup != 0 || high != 200000 || max != 200000 {
-		t.Fatalf("over-committed host: high=%d max=%d lookup=%d", high, max, lookup)
+	// Missing telemetry: no measured state or no platform ceiling leave the
+	// scope alone.
+	if high, max, _, _ := sparseLookupScopeLimits(s, 0, 4096, 200000, false); high != 0 || max != 0 {
+		t.Fatalf("unmeasured state resized the scope: high=%d max=%d", high, max)
 	}
-	// Mapped CPU experts keep their existing larger hard ceiling.
-	if _, max, _ = sparseLookupScopeLimits(s, 150000, 4096, 200000, true); max != 0 {
-		t.Fatalf("keepMax must preserve memory.max, got %d", max)
-	}
-	if high, _, _ = sparseLookupScopeLimits(&placement.Strategy{}, 150000, 4096, 200000, false); high != 0 {
-		t.Fatal("plans without a lookup tier keep the ordinary Fix-B rule")
+	if high, max, _, _ := sparseLookupScopeLimits(s, 150000, 4096, 0, false); high != 0 || max != 0 {
+		t.Fatalf("no platform ceiling resized the scope: high=%d max=%d", high, max)
 	}
 }
 
-func TestSparseLookupArgvNeedsCapabilityAndLastValue(t *testing.T) {
-	be := &backendInfo{SparseLookupCapability: placement.SparseLookupFileBacked}
+func TestSparseLookupStartLimitsKeepABand(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		budget, hostCeil, headroom int
+		high, max                  int
+	}{
+		{"percent target below free RAM", 190000, 205000, 4096, 190000, 205000},
+		{"thin derived band widened to the headroom", 200000, 202000, 4096, 197904, 202000},
+		{"explicit budget (no host ceiling)", 150000, 0, 4096, 145904, 150000},
+		{"no headroom configured", 150000, 0, 0, 150000, 150000},
+		{"no scope on this platform", 0, 0, 4096, 0, 0},
+	} {
+		high, max := sparseLookupStartLimits(tc.budget, tc.hostCeil, tc.headroom)
+		if high != tc.high || max != tc.max {
+			t.Errorf("%s: high=%d max=%d, want %d %d", tc.name, high, max, tc.high, tc.max)
+		}
+	}
+}
+
+func TestLazyLookupArgvGetsReclaimBandAtStart(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("backend memory scopes and the reviewed loader are Linux-only")
+	}
+	req := &launchRequest{RAMLimitPercent: 90, CgroupHeadroomMB: 4096}
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 200000, FreeMB: 200000}}
+	be := reviewedLazyBackend()
+	plain := backendStartOptions(req, caps, be, nil, []string{"--no-mmap"})
+	lazy := backendStartOptions(req, caps, be, nil, []string{"--no-mmap", "--lazy-mode", "on"})
+	if plain.MemoryHighMB != plain.MemoryMaxMB {
+		t.Fatalf("resident plan keeps high == max: %+v", plain)
+	}
+	if lazy.MemoryHighMB != plain.MemoryHighMB || lazy.MemoryMaxMB-lazy.MemoryHighMB < req.CgroupHeadroomMB {
+		t.Fatalf("lazy lookup plan needs a reclaim band above the same high: plain=%+v lazy=%+v", plain, lazy)
+	}
+	// An explicit budget is never exceeded; the band comes out of it.
+	req.RamBudgetMB = 150000
+	budgeted := backendStartOptions(req, caps, be, nil, []string{"--lazy-mode", "on"})
+	if budgeted.MemoryMaxMB != 150000 || budgeted.MemoryHighMB != 150000-4096 {
+		t.Fatalf("explicit budget: %+v", budgeted)
+	}
+	// Help alone (no reviewed contract) never earns the band.
+	unreviewed := &backendInfo{Path: "/x/llama-server", Help: reviewedLazyHelp, Version: "version: 1 (build 1, commit deadbeef)"}
+	req.RamBudgetMB = 0
+	if got := backendStartOptions(req, caps, unreviewed, nil, []string{"--lazy-mode", "on"}); got.MemoryHighMB != got.MemoryMaxMB {
+		t.Fatalf("unreviewed lazy loader got a reclaim band: %+v", got)
+	}
+}
+
+func TestSparseLookupArgvNeedsReviewedLoaderAndLastValue(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the reviewed loader contract covers Linux only")
+	}
+	be := reviewedLazyBackend()
 	for _, tc := range []struct {
 		args []string
 		want bool
@@ -114,46 +218,133 @@ func TestSparseLookupArgvNeedsCapabilityAndLastValue(t *testing.T) {
 		{[]string{"--lazy-mode", "auto"}, false},
 		{nil, false},
 	} {
-		if got := argsFileBackedSparseLookup(be, tc.args); got != tc.want {
+		if got := argsLazySparseLookup(be, tc.args); got != tc.want {
 			t.Errorf("%v: got %v want %v", tc.args, got, tc.want)
 		}
 	}
-	if argsFileBackedSparseLookup(&backendInfo{}, []string{"--lazy-mode", "on"}) {
-		t.Fatal("an unclassified backend must not get the lookup reclaim band")
+	if argsLazySparseLookup(&backendInfo{Help: reviewedLazyHelp}, []string{"--lazy-mode", "on"}) {
+		t.Fatal("a backend without a reviewed loader must not get the lookup reclaim band")
 	}
 }
 
-func TestSparseLookupCapabilityProbe(t *testing.T) {
+// PR #93 review finding 2: an advertised flag is availability, not loader
+// semantics. Only a reviewed contract for the exact build, table kind and
+// platform authorizes a file-backed tier.
+func TestSparseLookupCapabilityNeedsReviewedContract(t *testing.T) {
+	model := engramModel()
 	for _, tc := range []struct {
-		help string
+		name string
+		be   *backendInfo
 		want placement.SparseLookupCapability
+		flag string
 	}{
-		{"-lzm,  --lazy-mode MODE   on-demand reading of certain tensors\n--no-mmap", placement.SparseLookupFileBacked},
-		{"--no-mmap  --mlock", placement.SparseLookupUnknown},
-		{"--lazy-moded X", placement.SparseLookupUnknown},
-		{"", placement.SparseLookupUnknown},
+		{"review reproducer: unreviewed build advertising the flag",
+			&backendInfo{Path: "/unknown/llama-server", Identity: "unreviewed-build", Help: "--lazy-mode MODE defer tensor initialization"},
+			placement.SparseLookupUnknown, placement.SparseLookupLazyFlag},
+		{"other commit", &backendInfo{Help: reviewedLazyHelp, Version: "version: 9 (build 9, commit 0123abcd)"}, placement.SparseLookupUnknown, placement.SparseLookupLazyFlag},
+		{"no flag", &backendInfo{Help: "--no-mmap --mlock", Version: reviewedLazyVersion}, placement.SparseLookupUnknown, ""},
+		{"broken help", &backendInfo{Help: "error while loading shared libraries", Version: reviewedLazyVersion}, placement.SparseLookupUnknown, ""},
+		{"empty probe", &backendInfo{}, placement.SparseLookupUnknown, ""},
 	} {
-		got, evidence := probedSparseLookupCapability(&backendInfo{Path: "/b/llama-server", Help: tc.help})
-		if got != tc.want || evidence == "" {
-			t.Errorf("help %q: got %q (%s), want %q", tc.help, got, evidence, tc.want)
+		got, evidence, flag := sparseLookupCapabilityFor(tc.be, model)
+		if got != tc.want || flag != tc.flag || evidence == "" {
+			t.Errorf("%s: got %q flag %q (%s), want %q flag %q", tc.name, got, flag, evidence, tc.want, tc.flag)
 		}
 	}
+	got, evidence, _ := sparseLookupCapabilityFor(reviewedLazyBackend(), model)
+	want := placement.SparseLookupUnknown
+	if runtime.GOOS == "linux" {
+		want = placement.SparseLookupFileBacked
+	}
+	if got != want {
+		t.Fatalf("reviewed build on %s: got %q (%s), want %q", runtime.GOOS, got, evidence, want)
+	}
+	// The review covered Linux only.
+	if c, _ := sparseLookupLoaderFor(reviewedLazyBackend(), "engram", "windows"); c != nil {
+		t.Fatal("Windows matched a Linux-only loader review")
+	}
+	// The contract covers the reviewed table kind only.
+	other := engramModel()
+	other.SparseLookupKind = "synthetic-rowtable"
+	if got, _, _ := sparseLookupCapabilityFor(reviewedLazyBackend(), other); got != placement.SparseLookupUnknown {
+		t.Fatalf("another table kind inherited the engram contract: %q", got)
+	}
+	// A persisted live contradiction overrides the contract.
+	contradicted := reviewedLazyBackend()
+	contradicted.SparseLookupCapability, contradicted.SparseLookupEvidence = placement.SparseLookupAnonymous, "live contradiction: test"
+	if got, _, _ := sparseLookupCapabilityFor(contradicted, model); got != placement.SparseLookupAnonymous {
+		t.Fatalf("persisted contradiction ignored: %q", got)
+	}
+	if got, evidence, flag := sparseLookupCapabilityFor(reviewedLazyBackend(), &placement.ModelProfile{}); got != placement.SparseLookupUnknown || evidence != "" || flag != "" {
+		t.Fatalf("a model without a tier gets no lookup inputs: %q %q %q", got, evidence, flag)
+	}
 }
 
-func TestLazyLookupArgvGetsReclaimBandAtStart(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("backend memory scopes are Linux-only")
+// SYNTHETIC: a second table kind with its own (test-only) reviewed loader.
+// This exercises contract matching for a non-Engram adapter; it is not a
+// claim that any real second architecture is supported.
+func TestSyntheticSecondKindNeedsItsOwnContract(t *testing.T) {
+	saved := reviewedSparseLookupLoaders
+	t.Cleanup(func() { reviewedSparseLookupLoaders = saved })
+	reviewedSparseLookupLoaders = append(append([]sparseLookupLoaderContract(nil), saved...), sparseLookupLoaderContract{
+		ID: "synthetic-rowtable/v1", Commits: []string{"5e7e7e7e"}, Kinds: []string{"synthetic-rowtable"},
+		Platforms: []string{runtime.GOOS}, Flag: placement.SparseLookupLazyFlag, Oracle: sparseLookupOracleResidentOnlyV1, Synthetic: true,
+	})
+	model := &placement.ModelProfile{ModelArch: "synthrow", SparseLookupBytes: 1 << 30, SparseLookupKind: "synthetic-rowtable"}
+	be := &backendInfo{Help: reviewedLazyHelp, Version: "version: 1 (build 1, commit 5e7e7e7e)"}
+	if got, _, _ := sparseLookupCapabilityFor(be, model); got != placement.SparseLookupFileBacked {
+		t.Fatalf("synthetic kind with its contract: %q", got)
 	}
-	req := &launchRequest{RAMLimitPercent: 90}
-	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 200000, FreeMB: 200000}}
-	be := &backendInfo{SparseLookupCapability: placement.SparseLookupFileBacked}
-	plain := backendStartOptions(req, caps, be, nil, []string{"--no-mmap"})
-	lazy := backendStartOptions(req, caps, be, nil, []string{"--no-mmap", "--lazy-mode", "on"})
-	if plain.MemoryHighMB != plain.MemoryMaxMB {
-		t.Fatalf("resident plan keeps high == max: %+v", plain)
+	if got := sparseLookupOracleFor(be, model); got != sparseLookupOracleResidentOnlyV1 {
+		t.Fatalf("synthetic oracle accounting: %q", got)
 	}
-	if lazy.MemoryHighMB != plain.MemoryHighMB || lazy.MemoryMaxMB <= lazy.MemoryHighMB {
-		t.Fatalf("lazy lookup plan needs a reclaim band above the same high: plain=%+v lazy=%+v", plain, lazy)
+	if got, _, _ := sparseLookupCapabilityFor(be, engramModel()); got != placement.SparseLookupUnknown {
+		t.Fatalf("the synthetic build inherited the engram contract: %q", got)
+	}
+}
+
+// PR #93 review finding 3: the fit oracle's Host row is converted only under
+// an explicit, versioned accounting contract, and only once.
+func TestFitPassHostRowFollowsOracleContract(t *testing.T) {
+	s := lookupStrategy()
+	devs := []preflightDevice{{Name: "CUDA0", ModelMB: 10316, ComputeMB: 2913}, {Name: "Host", ModelMB: 333327, ContextMB: 185, ComputeMB: 237}}
+	got := oracleDevicesExcludingLookupTier(devs, sparseLookupOracleInclusiveV1, s)
+	// 208,902,215,200 B is 199,224.6 MiB: the whole MiB (199,224) is removed,
+	// never the rounded-up charge, so the resident row cannot be undercounted.
+	if got[1].ModelMB != 333327-199224 || got[1].SparseLookupExcludedMB != 199224 || got[0] != devs[0] || devs[1].ModelMB != 333327 {
+		t.Fatalf("inclusive oracle must drop exactly the tier without mutating input: %+v (input %+v)", got, devs)
+	}
+	if again := oracleDevicesExcludingLookupTier(got, sparseLookupOracleInclusiveV1, s); !reflect.DeepEqual(again, got) {
+		t.Fatalf("second application changed the row: %+v -> %+v", got, again)
+	}
+	residentRow := []preflightDevice{{Name: "Host", ModelMB: 250000}}
+	for name, tc := range map[string]struct {
+		accounting sparseLookupOracleAccounting
+		s          *placement.Strategy
+		devs       []preflightDevice
+	}{
+		// Review reproducer: a resident-only or unknown oracle reporting
+		// 250,000 MiB must not become 50,775.
+		"resident-only oracle": {sparseLookupOracleResidentOnlyV1, s, residentRow},
+		"unknown oracle":       {sparseLookupOracleUnknown, s, residentRow},
+		"empty accounting":     {"", s, residentRow},
+		"row lacks the tier":   {sparseLookupOracleInclusiveV1, s, []preflightDevice{{Name: "Host", ModelMB: 134102}}},
+		"no tier":              {sparseLookupOracleInclusiveV1, &placement.Strategy{}, devs},
+		"resident policy":      {sparseLookupOracleInclusiveV1, &placement.Strategy{SparseLookupMB: 199225, SparseLookupPolicy: placement.SparseLookupResident}, devs},
+		"layer policy":         {sparseLookupOracleInclusiveV1, &placement.Strategy{SparseLookupMB: 199225, SparseLookupPolicy: placement.SparseLookupLayer}, devs},
+	} {
+		if got := oracleDevicesExcludingLookupTier(tc.devs, tc.accounting, tc.s); !reflect.DeepEqual(got, tc.devs) {
+			t.Errorf("%s: rows changed to %+v", name, got)
+		}
+	}
+	// The contract, not the loader capability, selects the accounting.
+	if runtime.GOOS == "linux" {
+		if got := sparseLookupOracleFor(reviewedLazyBackend(), engramModel()); got != sparseLookupOracleInclusiveV1 {
+			t.Fatalf("reviewed fork oracle accounting: %q", got)
+		}
+	}
+	if got := sparseLookupOracleFor(&backendInfo{Help: reviewedLazyHelp}, engramModel()); got != sparseLookupOracleUnknown {
+		t.Fatalf("unreviewed oracle accounting: %q", got)
 	}
 }
 
@@ -168,40 +359,20 @@ func TestDryRunSummaryLabelsOnlyMappedWeightsReclaimable(t *testing.T) {
 	if !strings.Contains(text, "reclaimable weights 0 MiB") {
 		t.Fatalf("resident (--no-mmap) experts were labelled reclaimable:\n%s", text)
 	}
-	if !strings.Contains(text, "lookup tables 199225 MiB file-backed") {
+	if !strings.Contains(text, "lookup tables 199225 MiB paged") {
 		t.Fatalf("lookup tier missing from the summary:\n%s", text)
+	}
+	s.SparseLookupPolicy = placement.SparseLookupResident
+	if text = strings.Join(optimizationSummaryLines("dry-run", s, true), "\n"); !strings.Contains(text, "199225 MiB resident") {
+		t.Fatalf("resident tier label:\n%s", text)
+	}
+	s.SparseLookupPolicy = placement.SparseLookupLayer
+	if text = strings.Join(optimizationSummaryLines("dry-run", s, true), "\n"); !strings.Contains(text, "loaded with their layers") {
+		t.Fatalf("layer tier label:\n%s", text)
 	}
 	s.MMap = true
 	if text = strings.Join(optimizationSummaryLines("dry-run", s, true), "\n"); !strings.Contains(text, "reclaimable weights 132864 MiB") {
 		t.Fatalf("mapped experts on a file-backed loader are reclaimable:\n%s", text)
-	}
-}
-
-// Measured on the pinned fork (llama-fit-params, 425badfe) against the real
-// IQ2_XS headers and the planned argv.
-func TestFitPassHostRowExcludesOnlyTheLazyTier(t *testing.T) {
-	be := &backendInfo{SparseLookupCapability: placement.SparseLookupFileBacked}
-	s := lookupStrategy()
-	devs := []preflightDevice{{Name: "CUDA0", ModelMB: 10316, ComputeMB: 2913}, {Name: "Host", ModelMB: 333327, ContextMB: 185, ComputeMB: 237}}
-	lazy := []string{"--no-mmap", "--lazy-mode", "on"}
-	got := oracleDevicesExcludingLookupTier(devs, be, s, lazy)
-	if got[1].ModelMB != 134102 || got[0] != devs[0] || devs[1].ModelMB != 333327 {
-		t.Fatalf("host row must drop exactly the lookup tier without mutating input: %+v (input %+v)", got, devs)
-	}
-	for name, tc := range map[string]struct {
-		be   *backendInfo
-		s    *placement.Strategy
-		args []string
-		devs []preflightDevice
-	}{
-		"lazy off":           {be, s, []string{"--lazy-mode", "off"}, devs},
-		"unclassified":       {&backendInfo{}, s, lazy, devs},
-		"no tier":            {be, &placement.Strategy{}, lazy, devs},
-		"row lacks the tier": {be, s, lazy, []preflightDevice{{Name: "Host", ModelMB: 134102}}},
-	} {
-		if got := oracleDevicesExcludingLookupTier(tc.devs, tc.be, tc.s, tc.args); got[len(got)-1].ModelMB != tc.devs[len(tc.devs)-1].ModelMB {
-			t.Errorf("%s: host row changed to %d", name, got[len(got)-1].ModelMB)
-		}
 	}
 }
 
@@ -214,5 +385,81 @@ func TestLoadModeBackendsIncludeDeprecatedAliasBuilds(t *testing.T) {
 	ik := "--no-mmap   do not memory-map model\n--mlock"
 	if !backendParsesLoadMode(fork) || !backendParsesLoadMode(mainline) || backendParsesLoadMode(ik) {
 		t.Fatalf("load-mode dialect: fork=%v mainline=%v ik=%v", backendParsesLoadMode(fork), backendParsesLoadMode(mainline), backendParsesLoadMode(ik))
+	}
+}
+
+// PR #93 review finding 1, request side: a passthrough native load mode is a
+// user constraint that the planner sees too, so planning, admission, cache
+// identity and argv agree.
+func TestPassthroughLoadModeBecomesPlannerConstraint(t *testing.T) {
+	for _, tc := range []struct {
+		extra             []string
+		noMMap, forceMMap bool
+		keep              []string
+	}{
+		{[]string{"--load-mode", "none"}, true, false, nil},
+		{[]string{"--load-mode=mmap"}, false, true, nil},
+		{[]string{"-lm", "mlock"}, true, false, []string{"--mlock"}},
+		{[]string{"-lm=mmap+mlock"}, false, true, []string{"--mlock"}},
+		{[]string{"--load-mode", "dio"}, true, false, []string{"--load-mode", "dio"}},
+		{[]string{"--no-mmap", "--load-mode", "auto"}, false, false, nil},
+		// Last spelling wins, as in the backend.
+		{[]string{"--load-mode", "none", "--mmap"}, false, true, nil},
+		{[]string{"--load-mode", "fast"}, false, false, []string{"--load-mode", "fast"}},
+		{[]string{"--lazy-mode", "on", "-c", "4096"}, false, false, []string{"-c", "4096"}},
+	} {
+		req := &launchRequest{}
+		got := normalizePlacementAwareExtraArgs(req, append([]string(nil), tc.extra...))
+		if len(got) == 0 {
+			got = nil
+		}
+		if req.NoMMap != tc.noMMap || req.ForceMMap != tc.forceMMap || !reflect.DeepEqual(got, tc.keep) {
+			t.Errorf("%v: no-mmap=%v force=%v passthrough=%v, want %v %v %v", tc.extra, req.NoMMap, req.ForceMMap, got, tc.noMMap, tc.forceMMap, tc.keep)
+		}
+	}
+}
+
+func TestPassthroughLazyModeIsExplicitChoice(t *testing.T) {
+	for _, tc := range []struct {
+		extra []string
+		want  string
+	}{
+		{[]string{"--lazy-mode", "on"}, "on"},
+		{[]string{"-lzm=off"}, "off"},
+		{[]string{"--lazy-mode", "on", "--lazy-mode", "auto"}, ""},
+	} {
+		req := &launchRequest{}
+		if got := normalizePlacementAwareExtraArgs(req, append([]string(nil), tc.extra...)); len(got) != 0 || req.SparseLookupLazy != tc.want {
+			t.Errorf("%v: lazy=%q passthrough=%v, want %q and no passthrough", tc.extra, req.SparseLookupLazy, got, tc.want)
+		}
+	}
+	plain := requestedLaunchPolicyIdentity(&launchRequest{}, nil)
+	if lazyOn := requestedLaunchPolicyIdentity(&launchRequest{SparseLookupLazy: "on"}, nil); lazyOn == plain {
+		t.Fatal("an explicit lazy choice must scope the launch policy")
+	}
+}
+
+// Cache and recovery identities treat both spellings of one loading state as
+// one configuration, and accumulate every -ot like the backend does.
+func TestMemoryFingerprintFoldsLoadModeSpellings(t *testing.T) {
+	base := []string{"s", "-c", "4096"}
+	same := [][]string{
+		append(append([]string(nil), base...), "--no-mmap"),
+		append(append([]string(nil), base...), "--load-mode", "none"),
+		append(append([]string(nil), base...), "--mmap", "-lm=none"),
+	}
+	want := effectiveMemoryArgsFingerprint(same[0])
+	for _, args := range same[1:] {
+		if got := effectiveMemoryArgsFingerprint(args); got != want {
+			t.Errorf("%v fingerprint %q != %q", args, got, want)
+		}
+	}
+	if effectiveMemoryArgsFingerprint(append(append([]string(nil), base...), "--mlock", "--no-mmap")) == want {
+		t.Fatal("mlock must change the allocation identity")
+	}
+	one := effectiveMemoryArgsFingerprint([]string{"s", "-ot", "a=CPU"})
+	two := effectiveMemoryArgsFingerprint([]string{"s", "-ot", "b=CUDA0", "-ot", "a=CPU"})
+	if one == two {
+		t.Fatal("a second -ot was dropped from the identity")
 	}
 }

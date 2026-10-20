@@ -11,6 +11,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/server"
 )
 
 // launchMemoryRecovery is the single state machine shared by contained
@@ -931,13 +932,25 @@ func effectiveMemoryArgValues(args []string) map[string]string {
 		if !ok || i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 			continue
 		}
-		values[canonical] = args[i+1]
+		if canonical == "override-tensor" && values[canonical] != "" {
+			// The backend accumulates every -ot in order (first match wins);
+			// only the other memory flags are last-value-wins.
+			values[canonical] += "," + args[i+1]
+		} else {
+			values[canonical] = args[i+1]
+		}
 		i++
 	}
-	for _, flag := range []string{"--no-kv-offload", "--no-mmap", "--mmap"} {
-		if hasArg(args, flag) {
-			values[flag] = "true"
-		}
+	if hasArg(args, "--no-kv-offload") {
+		values["--no-kv-offload"] = "true"
+	}
+	// Classic and native loading flags describe one state. Fold them so
+	// "--no-mmap" and "--load-mode none" are the same allocation identity.
+	delete(values, "load-mode")
+	if mode, err := server.ParseLoadMode(args); err != nil {
+		values["load-mode"] = "invalid"
+	} else if mode.Stated() {
+		values["load-mode"] = mode.Spelling()
 	}
 	return values
 }
