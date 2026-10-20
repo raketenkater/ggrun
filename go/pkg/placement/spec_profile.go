@@ -76,7 +76,7 @@ func SpecTargetIdentity(model *ModelProfile) string {
 		return ""
 	}
 	return specHash(
-		filepath.Base(model.Path), strconv.FormatInt(model.SizeBytes, 10), strconv.Itoa(model.TotalSizeMB),
+		filepath.Base(model.Path), strconv.FormatInt(model.ArtifactSizeBytes(), 10), strconv.Itoa(model.ArtifactTotalSizeMB()),
 		strings.ToLower(model.ModelArch), strconv.Itoa(model.NumLayers), strconv.Itoa(model.EmbeddingLength),
 		strconv.Itoa(model.VocabSize), strings.ToLower(model.TokenizerModel), strings.ToLower(model.TokenizerPre),
 		strings.ToLower(model.TokenizerHash), strconv.Itoa(model.NextNPredictLayers), specArtifactStatIdentity(model.Path),

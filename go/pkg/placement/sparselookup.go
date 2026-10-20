@@ -42,6 +42,13 @@ const (
 	SparseLookupAnonymous  SparseLookupCapability = "anonymous"
 )
 
+// SparseLookupRange is one lookup table's byte range inside a shard file.
+type SparseLookupRange struct {
+	Shard  string `json:"shard"` // shard file basename
+	Offset int64  `json:"offset"`
+	Bytes  int64  `json:"bytes"`
+}
+
 // SparseLookupPolicy is how a plan holds the tier.
 type SparseLookupPolicy string
 
@@ -145,15 +152,49 @@ func sparseLookupModelView(model *ModelProfile, policy SparseLookupPolicy) *Mode
 		}
 		return &view
 	}
-	if view.SizeBytes -= model.SparseLookupBytes; view.SizeBytes < 0 {
-		view.SizeBytes = 0
+	removed := model.SparseLookupBytes
+	if removed > view.SizeBytes {
+		removed = view.SizeBytes
 	}
+	view.SizeBytes -= removed
+	view.sparseLookupViewBytes += removed
 	if view.TotalSizeMB > 0 {
-		if view.TotalSizeMB -= bytesToMiBFloor(model.SparseLookupBytes); view.TotalSizeMB < 1 {
+		if view.TotalSizeMB -= bytesToMiBFloor(removed); view.TotalSizeMB < 1 {
 			view.TotalSizeMB = 1
 		}
 	}
 	return &view
+}
+
+// ArtifactSizeBytes is the model file's size, unchanged by a sparse lookup
+// accounting view. Evidence keys use it, so a measurement recorded against
+// the full profile is found again by a policy's planning pass.
+func (m *ModelProfile) ArtifactSizeBytes() int64 {
+	return m.SizeBytes + m.sparseLookupViewBytes
+}
+
+// ArtifactTotalSizeMB is TotalSizeMB before any sparse lookup view.
+func (m *ModelProfile) ArtifactTotalSizeMB() int {
+	if m.sparseLookupViewBytes <= 0 || m.TotalSizeMB <= 0 {
+		return m.TotalSizeMB
+	}
+	return m.TotalSizeMB + bytesToMiBFloor(m.sparseLookupViewBytes)
+}
+
+// SparseLookupScopedTag scopes evidence to the lookup-tier policy a plan
+// uses. Each policy changes host allocation, so their probe, runtime and
+// prompt-cache measurements are kept apart. Placement readers and command-side
+// writers both call this, so the keys meet. Idempotent; "" leaves the tag
+// unchanged (models without the tier keep their namespace).
+func SparseLookupScopedTag(tag string, policy SparseLookupPolicy) string {
+	if policy == "" {
+		return tag
+	}
+	suffix := "|lookup=" + string(policy)
+	if strings.HasSuffix(tag, suffix) {
+		return tag
+	}
+	return tag + suffix
 }
 
 // syncMeasuredModelFields carries measurements a compute pass recorded on a
@@ -255,6 +296,7 @@ func applySparseLookupTier(s *Strategy, model *ModelProfile, opts Options) {
 		s.SparseLookupFlag = SparseLookupLazyFlag
 	}
 	s.SparseLookupEvidence = opts.SparseLookupEvidence
+	s.SparseLookupRanges = append([]SparseLookupRange(nil), model.SparseLookupRanges...)
 	if !already && s.SparseLookupPolicy == SparseLookupResident && s.PlannedHostFootprintMB > 0 {
 		// A zero footprint means "not derived" (the whole-host ceiling then
 		// applies), so it is not turned into a tier-sized floor.

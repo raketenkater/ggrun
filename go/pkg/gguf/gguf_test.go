@@ -653,6 +653,10 @@ func TestDeepSeek41RequiresSparseLookupAccounting(t *testing.T) {
 	}
 	withLayers := *current
 	withLayers.SparseLookupLayerBytes = []int64{0, 208902215200 / 2, 208902215200 / 2}
+	withLayers.SparseLookupRanges = []SparseLookupRange{
+		{Shard: "ds-00001-of-00010.gguf", Offset: 4096, Bytes: 208902215200 / 2},
+		{Shard: "ds-00009-of-00010.gguf", Offset: 8192, Bytes: 208902215200 / 2},
+	}
 	if err := validateParserOutput("/new/parse_gguf.py", "/models/ds41.gguf", &withLayers); err != nil {
 		t.Fatalf("per-layer split rejected: %v", err)
 	}
@@ -665,6 +669,10 @@ func TestDeepSeek41RequiresSparseLookupAccounting(t *testing.T) {
 		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "ngram"},
 		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "engram",
 			SparseLookupLayerBytes: []int64{2, 2}},
+		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "engram",
+			SparseLookupRanges: []SparseLookupRange{{Shard: "a.gguf", Offset: 0, Bytes: 4}}},
+		{Architecture: "deepseek41", TensorAccountingSchema: 3, NonExpertBytes: 10, SparseLookupBytes: 5, SparseLookupKind: "engram",
+			SparseLookupRanges: []SparseLookupRange{{Offset: 0, Bytes: 5}}},
 	} {
 		if err := validateParserOutput("/x/parse_gguf.py", "/models/m.gguf", bad); err == nil {
 			t.Fatalf("inconsistent lookup tier accepted: %+v", bad)

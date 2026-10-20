@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
+	"github.com/raketenkater/ggrun/pkg/server"
 )
 
 const smapsFixture = `7f0000000000-7f1000000000 r--s 00000000 08:02 212 /models/ds-00008-of-00010.gguf
@@ -56,32 +58,138 @@ func lookupStrategy() *placement.Strategy {
 }
 
 func TestSmapsCountsOnlyModelFileMappings(t *testing.T) {
-	files := map[string]bool{"/models/ds-00008-of-00010.gguf": true, "/models/ds-00009-of-00010.gguf": true}
+	files := map[string]string{"/models/ds-00008-of-00010.gguf": "ds-00008-of-00010.gguf", "/models/ds-00009-of-00010.gguf": "ds-00009-of-00010.gguf"}
 	u := parseSmapsModelUsage(strings.NewReader(smapsFixture), files)
-	if u.Mappings != 2 || u.SizeKB != 204006072 || u.RssKB != 196608 || u.AnonymousKB != 0 || u.LockedKB != 0 {
+	if u.Mappings != 2 || u.SizeKB != 204006072 || u.RssKB != 196608 || u.AnonymousKB != 0 || u.LockedKB != 0 || len(u.Maps) != 2 {
 		t.Fatalf("model mappings mis-summed (anonymous heap and unrelated files must not count): %+v", u)
+	}
+	if m := u.Maps[0]; m.Shard != "ds-00008-of-00010.gguf" || m.Offset != 0 || m.Length != 0x1000000000 {
+		t.Fatalf("mapping range not parsed: %+v", m)
+	}
+}
+
+// Split-VMA fixture: the loader's MADV_RANDOM on each table range splits the
+// shard mapping, so smaps lists the table separately from the execution
+// weights around it. The table is 64 MiB at file offset 1 MiB + 512 B (not
+// page aligned): its mapping starts one partial page early.
+const (
+	tableShard  = "ds-00001-of-00010.gguf"
+	tableOffset = int64(1<<20 + 512)
+	tableBytes  = int64(64 << 20)
+)
+
+func splitSmaps(execLockedKB, tableLockedKB, tableAnonKB int) string {
+	return fmt.Sprintf(`7f0000000000-7f0000100000 r--s 00000000 08:02 300 /models/ds-00001-of-00010.gguf
+Size:               1024 kB
+Rss:                1024 kB
+Anonymous:             0 kB
+Locked:             %d kB
+7f0000100000-7f0004101000 r--s 00100000 08:02 300 /models/ds-00001-of-00010.gguf
+Size:              65540 kB
+Rss:                4096 kB
+Anonymous:            %d kB
+Locked:               %d kB
+7f0004101000-7f0004201000 r--s 04101000 08:02 300 /models/ds-00001-of-00010.gguf
+Size:               1024 kB
+Rss:                1024 kB
+Anonymous:             0 kB
+Locked:             %d kB
+7f1000000000-7f1000100000 r--s 00000000 08:02 301 /models/ds-00002-of-00010.gguf
+Size:               1024 kB
+Rss:                1024 kB
+Anonymous:             0 kB
+Locked:             %d kB
+`, execLockedKB, tableAnonKB, tableLockedKB, execLockedKB, execLockedKB)
+}
+
+func splitFiles() map[string]string {
+	return map[string]string{"/models/ds-00001-of-00010.gguf": tableShard, "/models/ds-00002-of-00010.gguf": "ds-00002-of-00010.gguf"}
+}
+
+func rangedStrategy(policy placement.SparseLookupPolicy) *placement.Strategy {
+	return &placement.Strategy{
+		SparseLookupMB: 64, SparseLookupBytes: tableBytes, SparseLookupPolicy: policy,
+		SparseLookupCapability: placement.SparseLookupFileBacked, PlannedHostFootprintMB: 140000, CRAM: 8192,
+		SparseLookupRanges: []placement.SparseLookupRange{{Shard: tableShard, Offset: tableOffset, Bytes: tableBytes}},
+	}
+}
+
+// PR #93 re-review finding 3: only pages attributable to the lookup tables'
+// own file ranges can contradict the loader.
+func TestSparseLookupObservationAttributesTableRanges(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		smaps      string
+		strategy   *placement.Strategy
+		nonMB      int
+		want, note string
+	}{
+		{"clean table", splitSmaps(0, 0, 0), rangedStrategy(placement.SparseLookupPaged), 140000, "", ""},
+		// Re-review reproducer: --mlock execution weights in the table's shard
+		// and in another shard are not lookup evidence.
+		{"locked execution weights beside clean tables", splitSmaps(1024, 0, 0), rangedStrategy(placement.SparseLookupPaged), 140000, "", ""},
+		{"locked table pages", splitSmaps(0, 4, 0), rangedStrategy(placement.SparseLookupPaged), 140000, "lookup-table mappings are locked", ""},
+		{"anonymous table pages", splitSmaps(0, 0, 4), rangedStrategy(placement.SparseLookupResident), 0, "anonymous copies", ""},
+		{"table range unmapped", splitSmaps(0, 0, 0), func() *placement.Strategy {
+			s := rangedStrategy(placement.SparseLookupPaged)
+			s.SparseLookupRanges[0].Shard = "ds-00003-of-00010.gguf"
+			return s
+		}(), 140000, "cover 0 MiB", ""},
+		{"copied into anonymous memory", splitSmaps(0, 0, 0), rangedStrategy(placement.SparseLookupPaged), 340000, "non-reclaimable exceeds", ""},
+		// A whole-shard mapping that was never split mixes table and other
+		// bytes: its locks are unknown, not a contradiction.
+		{"unsplit mapping with locks", smapsFixture + `7f6000000000-7f6000100000 r--s 00000000 08:02 214 /models/ds-00001-of-00010.gguf
+Size:               1024 kB
+Rss:                1024 kB
+Anonymous:             0 kB
+Locked:             1024 kB
+`, func() *placement.Strategy {
+			s := rangedStrategy(placement.SparseLookupPaged)
+			s.SparseLookupRanges[0].Offset = 0
+			s.SparseLookupRanges[0].Bytes = 8 << 10
+			s.SparseLookupBytes, s.SparseLookupMB = 8<<10, 1
+			return s
+		}(), 140000, "", "not attributable"},
+		{"ranges unknown", splitSmaps(1024, 4, 0), func() *placement.Strategy {
+			s := rangedStrategy(placement.SparseLookupPaged)
+			s.SparseLookupRanges = nil
+			return s
+		}(), 140000, "", "ranges unknown"},
+	} {
+		files := splitFiles()
+		files["/models/ds-00008-of-00010.gguf"] = "ds-00008-of-00010.gguf"
+		files["/models/ds-00009-of-00010.gguf"] = "ds-00009-of-00010.gguf"
+		u := parseSmapsModelUsage(strings.NewReader(tc.smaps), files)
+		got, note := sparseLookupContradiction(tc.strategy, &u, tc.nonMB)
+		if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+			t.Errorf("%s: contradiction %q, want %q", tc.name, got, tc.want)
+		}
+		if tc.note == "" && note != "" || tc.note != "" && !strings.Contains(note, tc.note) {
+			t.Errorf("%s: note %q, want %q", tc.name, note, tc.note)
+		}
 	}
 }
 
 func TestSparseLookupObservationRules(t *testing.T) {
-	healthy := &mappedFileUsage{Mappings: 2, SizeKB: 204006072, RssKB: 196608}
+	files := map[string]string{"/models/ds-00008-of-00010.gguf": "ds-00008-of-00010.gguf", "/models/ds-00009-of-00010.gguf": "ds-00009-of-00010.gguf"}
+	healthy := parseSmapsModelUsage(strings.NewReader(smapsFixture), files)
 	cases := []struct {
 		name  string
 		usage *mappedFileUsage
 		nonMB int
 		want  string
 	}{
-		{"healthy", healthy, 150000, ""},
+		{"healthy", &healthy, 150000, ""},
 		{"no observation is not proof either way", nil, 0, ""},
 		{"no mapping", &mappedFileUsage{}, 150000, "no model-file mapping"},
-		{"short mapping", &mappedFileUsage{Mappings: 1, SizeKB: 1024 * 1024}, 150000, "less than"},
-		{"anonymous copy", &mappedFileUsage{Mappings: 2, SizeKB: 204006072, AnonymousKB: 4}, 150000, "anonymous copies"},
-		{"locked", &mappedFileUsage{Mappings: 2, SizeKB: 204006072, LockedKB: 4}, 150000, "locked"},
-		{"copied into anonymous memory", healthy, 340000, "non-reclaimable exceeds"},
+		{"short mapping without ranges", &mappedFileUsage{Mappings: 1, SizeKB: 1024 * 1024}, 150000, "less than"},
+		// Without table ranges, locks and anonymous pages are not attributable.
+		{"locks without ranges", &mappedFileUsage{Mappings: 2, SizeKB: 204006072, LockedKB: 4}, 150000, ""},
+		{"copied into anonymous memory", &healthy, 340000, "non-reclaimable exceeds"},
 		{"copy seen only through memory.stat", nil, 340000, "non-reclaimable exceeds"},
 	}
 	for _, tc := range cases {
-		got := sparseLookupContradiction(lookupStrategy(), tc.usage, tc.nonMB)
+		got, _ := sparseLookupContradiction(lookupStrategy(), tc.usage, tc.nonMB)
 		if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
@@ -91,18 +199,18 @@ func TestSparseLookupObservationRules(t *testing.T) {
 	resident := lookupStrategy()
 	resident.SparseLookupPolicy = placement.SparseLookupResident
 	resident.PlannedHostFootprintMB = 340000
-	if got := sparseLookupContradiction(resident, healthy, 345000); got != "" {
+	if got, _ := sparseLookupContradiction(resident, &healthy, 345000); got != "" {
 		t.Fatalf("resident tier judged by the paged envelope: %q", got)
 	}
-	if got := sparseLookupContradiction(resident, &mappedFileUsage{}, 0); !strings.Contains(got, "no model-file mapping") {
+	if got, _ := sparseLookupContradiction(resident, &mappedFileUsage{}, 0); !strings.Contains(got, "no model-file mapping") {
 		t.Fatalf("resident lazy tier without a mapping: %q", got)
 	}
 	layer := lookupStrategy()
 	layer.SparseLookupPolicy = placement.SparseLookupLayer
-	if got := sparseLookupContradiction(layer, nil, 999999); got != "" {
+	if got, _ := sparseLookupContradiction(layer, nil, 999999); got != "" {
 		t.Fatalf("tables loaded with their layers must not be judged as lazy: %q", got)
 	}
-	if got := sparseLookupContradiction(&placement.Strategy{}, nil, 999999); got != "" {
+	if got, _ := sparseLookupContradiction(&placement.Strategy{}, nil, 999999); got != "" {
 		t.Fatalf("a plan without a lookup tier must not be judged by it: %q", got)
 	}
 }
@@ -461,5 +569,67 @@ func TestMemoryFingerprintFoldsLoadModeSpellings(t *testing.T) {
 	two := effectiveMemoryArgsFingerprint([]string{"s", "-ot", "b=CUDA0", "-ot", "a=CPU"})
 	if one == two {
 		t.Fatal("a second -ot was dropped from the identity")
+	}
+}
+
+// PR #93 re-review finding 2: the whole request parser folds classic and
+// native loading flags once, in argv order; a later native mode replaces
+// earlier locks and retained native tokens.
+func TestParseLaunchArgsFoldsLoadingModesInOrder(t *testing.T) {
+	for _, tc := range []struct {
+		args              []string
+		noMMap, forceMMap bool
+		want              string // folded mode of the emitted classic flags + passthrough
+	}{
+		{[]string{"model.gguf", "--load-mode", "none", "--mmap"}, false, true, "mmap"},
+		{[]string{"model.gguf", "--load-mode", "mmap", "--no-mmap"}, true, false, "none"},
+		{[]string{"model.gguf", "--mmap", "--load-mode", "none"}, true, false, "none"},
+		{[]string{"model.gguf", "--no-mmap", "-lm=mmap"}, false, true, "mmap"},
+		{[]string{"model.gguf", "--load-mode", "mlock", "--load-mode", "none"}, true, false, "none"},
+		{[]string{"model.gguf", "--load-mode", "dio", "--load-mode", "mmap"}, false, true, "mmap"},
+		{[]string{"model.gguf", "--load-mode", "mmap", "--load-mode", "dio"}, true, false, "dio"},
+		{[]string{"model.gguf", "--mlock", "--load-mode", "mmap"}, false, true, "mmap"},
+		{[]string{"model.gguf", "--load-mode", "none", "--mlock"}, true, false, "mlock"},
+		{[]string{"model.gguf", "--no-mmap", "--load-mode", "auto"}, false, false, "mmap"},
+		{[]string{"model.gguf", "--no-mmap=false"}, false, false, "mmap"},
+		{[]string{"model.gguf", "--mmap", "--no-mmap=false"}, false, true, "mmap"},
+	} {
+		req, err := parseLaunchArgs(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		emitted := []string{"s"}
+		if req.NoMMap {
+			emitted = append(emitted, "--no-mmap")
+		} else if req.ForceMMap {
+			emitted = append(emitted, "--mmap")
+		}
+		emitted = append(emitted, req.ExtraArgs...)
+		mode, err := server.ParseLoadMode(emitted)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if req.NoMMap != tc.noMMap || req.ForceMMap != tc.forceMMap || mode.Spelling() != tc.want {
+			t.Errorf("%v -> no-mmap=%v force=%v emitted=%v (%s); want %v %v %s",
+				tc.args, req.NoMMap, req.ForceMMap, emitted, mode.Spelling(), tc.noMMap, tc.forceMMap, tc.want)
+		}
+	}
+}
+
+// PR #93 re-review finding 1, command side: every evidence writer scopes by
+// the plan's lookup policy exactly as placement's readers do.
+func TestEvidenceTagScopesSparsePolicy(t *testing.T) {
+	be := reviewedLazyBackend()
+	base := scopedProbeBackendTagForStrategy(nil, nil, be, &placement.Strategy{})
+	if strings.Contains(base, "lookup=") {
+		t.Fatalf("plans without a tier keep their namespace: %q", base)
+	}
+	paged := scopedProbeBackendTagForStrategy(nil, nil, be, &placement.Strategy{SparseLookupPolicy: placement.SparseLookupPaged})
+	resident := scopedProbeBackendTagForStrategy(nil, nil, be, &placement.Strategy{SparseLookupPolicy: placement.SparseLookupResident})
+	if paged != placement.SparseLookupScopedTag(base, placement.SparseLookupPaged) || paged == resident {
+		t.Fatalf("policy scoping: base=%q paged=%q resident=%q", base, paged, resident)
+	}
+	if placement.SparseLookupScopedTag(paged, placement.SparseLookupPaged) != paged {
+		t.Fatal("policy scoping must be idempotent")
 	}
 }

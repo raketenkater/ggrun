@@ -298,7 +298,7 @@ def _sparse_lookup_layers(r):
     return adapter, frozenset(v for v in ids if v >= 0)
 
 
-def _account_tensors(r, tensors, header_end, file_size, align):
+def _account_tensors(r, tensors, header_end, file_size, align, shard=None):
     """Accumulate expert/non-expert byte totals for one shard.
 
     Primary sizing is the tensor's real on-disk span (delta between sorted
@@ -334,7 +334,7 @@ def _account_tensors(r, tensors, header_end, file_size, align):
         values[layer] = values.get(layer, 0) + nbytes
 
     adapter, sparse_layers = _sparse_lookup_layers(r)
-    for tname, _, tbytes in tensors:
+    for tname, toff, tbytes in tensors:
         nbytes = spans[tname] if span_ok else tbytes
         layer_match = re.match(r'^blk\.(\d+)\.', tname)
         layer = int(layer_match.group(1)) if layer_match else None
@@ -346,6 +346,11 @@ def _account_tensors(r, tensors, header_end, file_size, align):
             r['sparse_lookup_bytes'] = r.get('sparse_lookup_bytes', 0) + nbytes
             r['sparse_lookup_kind'] = adapter['kind']
             add_layer_bytes('_sparse_lookup_layer_bytes', layer, nbytes)
+            if shard and header_end > 0:
+                # Absolute file range, so a live mapping check can attribute
+                # pages to the table rather than to its shard.
+                r.setdefault('sparse_lookup_ranges', []).append(
+                    {'shard': os.path.basename(shard), 'offset': data_start + toff, 'bytes': nbytes})
             continue
         is_shared_expert = '_shexp.' in tname or '_chexp.' in tname
         is_routed_expert = '_exps.' in tname or '_chexps.' in tname or '.experts.' in tname
@@ -422,7 +427,7 @@ def parse(path: str) -> Dict[str, Any]:
                 _account_tensors(r, tensors, 0, 0, 32)
                 return
             _account_tensors(r, tensors, f.tell(), os.path.getsize(sp),
-                             meta.get('_align', 32))
+                             meta.get('_align', 32), sp)
 
     try:
         read_shard(path, r)

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/gguf"
 	modelstore "github.com/raketenkater/ggrun/pkg/models"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/server"
@@ -325,38 +326,66 @@ func scopeMaxLabel(maxMB int) string {
 	return strconv.Itoa(maxMB) + " MiB"
 }
 
-// mappedFileUsage sums /proc/<pid>/smaps entries whose backing path is one of
-// the model files. Anonymous or locked pages inside those mappings, or no
-// mapping at all, contradict a lazily mapped lookup plan.
+// mappedFileUsage summarizes the /proc/<pid>/smaps mappings whose backing
+// file is one of the model's shards. Totals cover every model mapping; Maps
+// keeps each mapping's file range so lookup-table pages can be told apart from
+// execution weights in the same shard.
 type mappedFileUsage struct {
 	Mappings    int
 	SizeKB      int64
 	RssKB       int64
 	AnonymousKB int64
 	LockedKB    int64
+	Maps        []smapsModelMapping
 }
 
-func parseSmapsModelUsage(r io.Reader, files map[string]bool) mappedFileUsage {
+// smapsModelMapping is one mapping of a model shard: the file byte range it
+// maps and its page counters.
+type smapsModelMapping struct {
+	Shard       string // shard basename as the model profile names it
+	Offset      int64  // file offset of the mapping start
+	Length      int64
+	RssKB       int64
+	AnonymousKB int64
+	LockedKB    int64
+}
+
+// parseSmapsModelUsage reads smaps text. files maps every path spelling of a
+// model shard (as given, absolute, symlink target) to the shard's basename.
+func parseSmapsModelUsage(r io.Reader, files map[string]string) mappedFileUsage {
 	var usage mappedFileUsage
-	inModel := false
+	var cur *smapsModelMapping
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
+		fields := strings.Fields(scanner.Text())
 		if len(fields) == 0 {
 			continue
 		}
 		if !strings.HasSuffix(fields[0], ":") {
 			// Mapping header: "start-end perms offset dev inode [path]".
-			inModel = false
-			if len(fields) >= 6 && files[strings.Join(fields[5:], " ")] {
-				inModel = true
-				usage.Mappings++
+			cur = nil
+			if len(fields) < 6 {
+				continue
 			}
+			shard, ok := files[strings.Join(fields[5:], " ")]
+			if !ok {
+				continue
+			}
+			lo, hi, okRange := strings.Cut(fields[0], "-")
+			start, err1 := strconv.ParseUint(lo, 16, 64)
+			end, err2 := strconv.ParseUint(hi, 16, 64)
+			off, err3 := strconv.ParseUint(fields[2], 16, 64)
+			m := smapsModelMapping{Shard: shard, Offset: -1}
+			if okRange && err1 == nil && err2 == nil && err3 == nil && end >= start {
+				m.Offset, m.Length = int64(off), int64(end-start)
+			}
+			usage.Maps = append(usage.Maps, m)
+			cur = &usage.Maps[len(usage.Maps)-1]
+			usage.Mappings++
 			continue
 		}
-		if !inModel || len(fields) < 2 {
+		if cur == nil || len(fields) < 2 {
 			continue
 		}
 		value, err := strconv.ParseInt(fields[1], 10, 64)
@@ -368,33 +397,120 @@ func parseSmapsModelUsage(r io.Reader, files map[string]bool) mappedFileUsage {
 			usage.SizeKB += value
 		case "Rss:":
 			usage.RssKB += value
+			cur.RssKB += value
 		case "Anonymous:":
 			usage.AnonymousKB += value
+			cur.AnonymousKB += value
 		case "Locked:":
 			usage.LockedKB += value
+			cur.LockedKB += value
 		}
 	}
 	return usage
 }
 
-// sparseLookupContradiction applies the observation rules. A nil usage means
-// the host could not expose mappings, which is not evidence either way. The
-// non-reclaimable envelope applies only to a paged tier: a resident tier is
-// already charged in the plan's host footprint.
-func sparseLookupContradiction(strategy *placement.Strategy, usage *mappedFileUsage, nonReclaimableMB int) string {
-	if strategy == nil || !placement.StrategyUsesLazySparseLookup(strategy) {
-		return ""
+// lookupMappingAttribution splits the model mappings by the lookup tables'
+// file ranges. A mapping that maps only table bytes (up to one partial page at
+// each end, since the loader's MADV_RANDOM split is page-aligned) is a table
+// mapping; one that maps no table bytes is an execution mapping and is not
+// judged here; anything else mixes both and cannot be attributed.
+type lookupMappingAttribution struct {
+	Known        bool  // ranges known for every table and every mapping's range parsed
+	CoveredBytes int64 // table bytes mapped by any model mapping
+	TableAnonKB  int64
+	TableLockKB  int64
+	MixedAnonKB  int64
+	MixedLockKB  int64
+}
+
+const smapsPageBytes = 4096
+
+func attributeLookupMappings(usage *mappedFileUsage, ranges []placement.SparseLookupRange) lookupMappingAttribution {
+	a := lookupMappingAttribution{Known: len(ranges) > 0}
+	if usage == nil || !a.Known {
+		return a
 	}
+	byShard := map[string][]placement.SparseLookupRange{}
+	for _, r := range ranges {
+		byShard[r.Shard] = append(byShard[r.Shard], r)
+	}
+	for _, m := range usage.Maps {
+		if m.Offset < 0 {
+			a.Known = false
+			continue
+		}
+		var overlap int64
+		for _, r := range byShard[m.Shard] {
+			lo := maxInt64(m.Offset, r.Offset)
+			hi := minInt64(m.Offset+m.Length, r.Offset+r.Bytes)
+			if hi > lo {
+				overlap += hi - lo
+			}
+		}
+		a.CoveredBytes += overlap
+		switch {
+		case overlap == 0:
+		case m.Length-overlap < 2*smapsPageBytes:
+			a.TableAnonKB += m.AnonymousKB
+			a.TableLockKB += m.LockedKB
+		default:
+			a.MixedAnonKB += m.AnonymousKB
+			a.MixedLockKB += m.LockedKB
+		}
+	}
+	return a
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// sparseLookupContradiction applies the observation rules and returns the
+// contradiction ("" if none) plus a note for observations it cannot attribute.
+// A nil usage means the host could not expose mappings, which is not evidence
+// either way. Only pages attributable to the lookup tables' own file ranges
+// can contradict the loader: locked or anonymous execution weights in the same
+// or another shard are not lookup evidence. Without table ranges, locks and
+// anonymous pages stay unknown. The non-reclaimable envelope applies only to a
+// paged tier: a resident tier is already charged in the plan's host footprint.
+func sparseLookupContradiction(strategy *placement.Strategy, usage *mappedFileUsage, nonReclaimableMB int) (string, string) {
+	if strategy == nil || !placement.StrategyUsesLazySparseLookup(strategy) {
+		return "", ""
+	}
+	note := ""
 	if usage != nil {
+		tierBytes := strategy.SparseLookupBytes
+		if tierBytes <= 0 {
+			tierBytes = int64(strategy.SparseLookupMB-1) << 20 // MiB is rounded up
+		}
+		a := attributeLookupMappings(usage, strategy.SparseLookupRanges)
 		switch {
 		case usage.Mappings == 0:
-			return "no model-file mapping is present, so the lookup tables cannot be file-backed"
-		case usage.SizeKB < int64(strategy.SparseLookupMB-1)*1024: // tier MiB is rounded up
-			return fmt.Sprintf("model-file mappings cover %d MiB, less than the %d MiB lookup tier", usage.SizeKB/1024, strategy.SparseLookupMB)
-		case usage.AnonymousKB > 0:
-			return fmt.Sprintf("%d KiB of model-file mappings are anonymous copies", usage.AnonymousKB)
-		case usage.LockedKB > 0:
-			return fmt.Sprintf("%d KiB of model-file mappings are locked", usage.LockedKB)
+			return "no model-file mapping is present, so the lookup tables cannot be file-backed", ""
+		case a.Known && a.CoveredBytes < tierBytes-2*smapsPageBytes:
+			return fmt.Sprintf("model-file mappings cover %d MiB of the %d MiB lookup tables", a.CoveredBytes>>20, tierBytes>>20), ""
+		case !a.Known && usage.SizeKB*1024 < tierBytes:
+			return fmt.Sprintf("model-file mappings cover %d MiB, less than the %d MiB lookup tier", usage.SizeKB/1024, strategy.SparseLookupMB), ""
+		case a.Known && a.TableAnonKB > 0:
+			return fmt.Sprintf("%d KiB of lookup-table mappings are anonymous copies", a.TableAnonKB), ""
+		case a.Known && a.TableLockKB > 0:
+			return fmt.Sprintf("%d KiB of lookup-table mappings are locked", a.TableLockKB), ""
+		}
+		switch {
+		case a.Known && (a.MixedAnonKB > 0 || a.MixedLockKB > 0):
+			note = fmt.Sprintf("%d KiB locked / %d KiB anonymous in mappings that mix lookup tables and other tensors; not attributable", a.MixedLockKB, a.MixedAnonKB)
+		case !a.Known && (usage.AnonymousKB > 0 || usage.LockedKB > 0):
+			note = fmt.Sprintf("%d KiB locked / %d KiB anonymous in model mappings; lookup table ranges unknown, not attributable", usage.LockedKB, usage.AnonymousKB)
 		}
 	}
 	if nonReclaimableMB > 0 && placement.StrategyUsesFileBackedSparseLookup(strategy) {
@@ -405,10 +521,10 @@ func sparseLookupContradiction(strategy *placement.Strategy, usage *mappedFileUs
 		limit := strategy.PlannedHostFootprintMB + strategy.CRAM + slack
 		if nonReclaimableMB > limit && nonReclaimableMB > strategy.SparseLookupMB/2 {
 			return fmt.Sprintf("%d MiB non-reclaimable exceeds the %d MiB envelope for a %d MiB file-backed lookup tier",
-				nonReclaimableMB, limit, strategy.SparseLookupMB)
+				nonReclaimableMB, limit, strategy.SparseLookupMB), note
 		}
 	}
-	return ""
+	return "", note
 }
 
 func observeModelMappings(model *placement.ModelProfile, root int) (*mappedFileUsage, error) {
@@ -419,14 +535,15 @@ func observeModelMappings(model *placement.ModelProfile, root int) (*mappedFileU
 	if err != nil {
 		return nil, err
 	}
-	files := map[string]bool{}
+	files := map[string]string{}
 	for _, shard := range shards {
-		files[shard] = true
+		base := filepath.Base(shard)
+		files[shard] = base
 		if abs, err := filepath.Abs(shard); err == nil {
-			files[abs] = true
+			files[abs] = base
 		}
 		if real, err := filepath.EvalSymlinks(shard); err == nil {
-			files[real] = true
+			files[real] = base
 		}
 	}
 	pids := processTreePIDs(root)
@@ -448,6 +565,7 @@ func observeModelMappings(model *placement.ModelProfile, root int) (*mappedFileU
 		total.RssKB += u.RssKB
 		total.AnonymousKB += u.AnonymousKB
 		total.LockedKB += u.LockedKB
+		total.Maps = append(total.Maps, u.Maps...)
 	}
 	if !read {
 		return nil, fmt.Errorf("process mappings unavailable")
@@ -473,7 +591,11 @@ func validateObservedSparseLookup(cfg *config.Config, model *placement.ModelProf
 		fmt.Fprintf(os.Stderr, "[sparse] lookup-tier mapping not observable (%v); relying on the reviewed loader contract only\n", mapErr)
 		return nil
 	}
-	if reason := sparseLookupContradiction(strategy, usage, measuredMB); reason != "" {
+	reason, note := sparseLookupContradiction(strategy, usage, measuredMB)
+	if note != "" {
+		fmt.Fprintf(os.Stderr, "[sparse] lookup-tier observation unknown: %s\n", note)
+	}
+	if reason != "" {
 		evidence := "live contradiction: " + reason
 		be.SparseLookupCapability = placement.SparseLookupAnonymous
 		be.SparseLookupEvidence = evidence
@@ -483,7 +605,7 @@ func validateObservedSparseLookup(cfg *config.Config, model *placement.ModelProf
 		return fmt.Errorf("backend did not keep the %d MiB lookup tier file-backed (%s)", strategy.SparseLookupMB, evidence)
 	}
 	if usage != nil {
-		fmt.Fprintf(os.Stderr, "[sparse] live lookup-tier check (%s): %d model mappings, %d MiB mapped, %d MiB resident, 0 anonymous, 0 locked; %d MiB non-reclaimable\n",
+		fmt.Fprintf(os.Stderr, "[sparse] live lookup-tier check (%s): %d model mappings, %d MiB mapped, %d MiB resident; no table page anonymous or locked; %d MiB non-reclaimable\n",
 			strategy.SparseLookupPolicy, usage.Mappings, usage.SizeKB/1024, usage.RssKB/1024, measuredMB)
 	}
 	return nil
@@ -535,6 +657,18 @@ func oracleDevicesExcludingLookupTier(devs []preflightDevice, accounting sparseL
 		out[i].SparseLookupExcludedMB = tierMB
 		fmt.Fprintf(os.Stderr, "[sparse] fit pass host model %d MiB includes the %d MiB paged lookup tier (%s); resident host model is %d MiB\n",
 			devs[i].ModelMB, tierMB, accounting, out[i].ModelMB)
+	}
+	return out
+}
+
+// sparseLookupRangesFromInfo converts parser ranges into placement's type.
+func sparseLookupRangesFromInfo(in []gguf.SparseLookupRange) []placement.SparseLookupRange {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]placement.SparseLookupRange, len(in))
+	for i, r := range in {
+		out[i] = placement.SparseLookupRange{Shard: r.Shard, Offset: r.Offset, Bytes: r.Bytes}
 	}
 	return out
 }

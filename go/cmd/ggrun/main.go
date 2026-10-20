@@ -995,11 +995,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				}
 				req.RAMHeadroomMB = budget
 				continue
-			case "--no-mmap":
-				req.NoMMap = val == "" || parseBoolFlag(val)
-				if req.NoMMap {
-					req.ForceMMap = false
-				}
+			case "--no-mmap", "--mmap":
+				// Loading flags are folded once, in argv order, together with
+				// native --load-mode spellings (normalizePlacementAwareExtraArgs).
+				req.ExtraArgs = append(req.ExtraArgs, key+"="+strconv.FormatBool(val == "" || parseBoolFlag(val)))
 				continue
 			case "--swa-full":
 				req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", val == "" || parseBoolFlag(val))
@@ -1007,12 +1006,6 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			case "--no-swa-full":
 				disabled := val == "" || parseBoolFlag(val)
 				req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", !disabled)
-				continue
-			case "--mmap":
-				req.ForceMMap = val == "" || parseBoolFlag(val)
-				if req.ForceMMap {
-					req.NoMMap = false
-				}
 				continue
 			case "--spec":
 				req.SpecMode = val
@@ -1279,16 +1272,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.ClaudeProfile = profile
-		case "--no-mmap":
-			req.NoMMap = true
-			req.ForceMMap = false
+		case "--no-mmap", "--mmap":
+			// Folded once, in argv order, with --load-mode (see above).
+			req.ExtraArgs = append(req.ExtraArgs, a)
 		case "--swa-full":
 			req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", true)
 		case "--no-swa-full":
 			req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", false)
-		case "--mmap":
-			req.ForceMMap = true
-			req.NoMMap = false
 		case "--mmproj":
 			v, err := next()
 			if err != nil {
@@ -1637,10 +1627,12 @@ func scopedProbeBackendTagForStrategy(req *launchRequest, model *placement.Model
 	}
 	tag := placement.ScopedBackendCacheTag(evidenceBackendCacheTag(be), workload)
 	swaFull := req != nil && hasArg(req.ExtraArgs, "--swa-full")
+	policy := placement.SparseLookupPolicy("")
 	if strategy != nil {
 		swaFull = strategy.SWAFull
+		policy = strategy.SparseLookupPolicy
 	}
-	return placement.ScopedBackendFeatureTag(tag, swaFull)
+	return placement.SparseLookupScopedTag(placement.ScopedBackendFeatureTag(tag, swaFull), policy)
 }
 
 // resolveKVCacheTypeFlags turns llama.cpp's direct K/V flags into one planned
@@ -1727,45 +1719,95 @@ func setPassthroughBoolFlag(args []string, flag string, enabled bool) []string {
 	return out
 }
 
-// applyNativeLoadMode folds a passthrough --load-mode / -lm choice into the
-// request's mapping constraints, so the planner, exact admission, cache
-// identities and the backend argv all describe the same loading mode. It
-// returns how many argv tokens it consumed and what to pass through instead:
-// none/mmap become ggrun's own --no-mmap/--mmap, the mlock modes add --mlock,
-// and "auto" leaves the choice to ggrun's planner. "dio" has no classic
-// spelling; it is passed through after the generated flags, where the
-// backend's last-wins rule applies it, while the plan treats it as unmapped.
-// An unknown value is passed through for the backend to reject.
-func applyNativeLoadMode(req *launchRequest, args []string, i int) (int, []string) {
+// loadingModeFold folds every loading flag of one request -- ggrun's own
+// --mmap/--no-mmap and the passthrough --mlock and native --load-mode / -lm --
+// once, in original argv order, into the planner's constraints and the
+// passthrough that reaches the backend. A native value replaces the whole
+// state, including an earlier --mlock or "dio"; classic flags compose. The
+// planner, exact admission, cache identities and the backend argv therefore
+// all describe the same final mode. "auto" leaves the mapping to ggrun's
+// planner. "dio" has no classic spelling: it is passed through after the
+// generated flags, where the backend's last-wins rule applies it, and the plan
+// treats it as unmapped. An unknown native value is passed through for the
+// backend to reject and changes nothing.
+type loadingModeFold struct {
+	base    string // "", "mmap", "none" or "dio"
+	mlock   bool
+	invalid []string
+}
+
+func newLoadingModeFold(req *launchRequest) *loadingModeFold {
+	f := &loadingModeFold{}
+	switch {
+	case req.NoMMap:
+		f.base = "none"
+	case req.ForceMMap:
+		f.base = "mmap"
+	}
+	return f
+}
+
+// consume folds the loading flag at args[i] and returns how many tokens it
+// used (0 when args[i] is not a loading flag).
+func (f *loadingModeFold) consume(args []string, i int) int {
 	flag, value, inline := strings.Cut(args[i], "=")
-	if flag != "--load-mode" && flag != "-lm" {
-		return 0, nil
+	switch flag {
+	case "--mmap", "--no-mmap":
+		on := !inline || value == "" || parseBoolFlag(value)
+		mode := "mmap"
+		if flag == "--no-mmap" {
+			mode = "none"
+		}
+		if on {
+			f.base = mode
+		} else if f.base == mode {
+			f.base = "" // "--mmap=false" withdraws only its own choice
+		}
+		return 1
+	case "--mlock":
+		if inline {
+			return 0
+		}
+		f.mlock = true
+		return 1
+	case "--load-mode", "-lm":
+	default:
+		return 0
 	}
 	consumed := 1
 	if !inline {
 		if i+1 >= len(args) {
-			return 1, []string{args[i]}
+			return 0
 		}
 		value, consumed = args[i+1], 2
 	}
 	switch value {
 	case "auto":
-		req.NoMMap, req.ForceMMap = false, false
-		return consumed, nil
-	case "none", "mlock", "dio":
-		req.NoMMap, req.ForceMMap = true, false
-	case "mmap", "mmap+mlock":
-		req.NoMMap, req.ForceMMap = false, true
+		f.base, f.mlock = "", false
+	case "none", "mmap", "dio":
+		f.base, f.mlock = value, false
+	case "mlock":
+		f.base, f.mlock = "none", true
+	case "mmap+mlock":
+		f.base, f.mlock = "mmap", true
 	default:
-		return consumed, args[i : i+consumed]
+		f.invalid = append(f.invalid, args[i:i+consumed]...)
 	}
-	switch value {
-	case "mlock", "mmap+mlock":
-		return consumed, []string{"--mlock"}
-	case "dio":
-		return consumed, []string{"--load-mode", "dio"}
+	return consumed
+}
+
+// apply writes the folded state to the request and appends what the backend
+// still needs to see to the remaining passthrough.
+func (f *loadingModeFold) apply(req *launchRequest, out []string) []string {
+	req.NoMMap = f.base == "none" || f.base == "dio"
+	req.ForceMMap = f.base == "mmap"
+	if f.mlock {
+		out = append(out, "--mlock")
 	}
-	return consumed, nil
+	if f.base == "dio" {
+		out = append(out, "--load-mode", "dio")
+	}
+	return append(out, f.invalid...)
 }
 
 func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []string {
@@ -1775,6 +1817,7 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 	out := args[:0]
 	swaSet := false
 	swaFull := false
+	loading := newLoadingModeFold(req)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--swa-full" {
@@ -1793,33 +1836,11 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 			swaSet, swaFull = true, !(val == "" || parseBoolFlag(val))
 			continue
 		}
-		if a == "--no-mmap" {
-			req.NoMMap = true
-			req.ForceMMap = false
-			continue
-		}
-		if key, val, ok := strings.Cut(a, "="); ok && key == "--no-mmap" {
-			req.NoMMap = val == "" || parseBoolFlag(val)
-			continue
-		}
-		if a == "--mmap" {
-			req.ForceMMap = true
-			req.NoMMap = false
-			continue
-		}
-		if key, val, ok := strings.Cut(a, "="); ok && key == "--mmap" {
-			req.ForceMMap = val == "" || parseBoolFlag(val)
-			if req.ForceMMap {
-				req.NoMMap = false
-			}
-			continue
-		}
 		if consumed := applyNativeLazyMode(req, args, i); consumed > 0 {
 			i += consumed - 1
 			continue
 		}
-		if consumed, keep := applyNativeLoadMode(req, args, i); consumed > 0 {
-			out = append(out, keep...)
+		if consumed := loading.consume(args, i); consumed > 0 {
 			i += consumed - 1
 			continue
 		}
@@ -1828,7 +1849,7 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 	if swaSet && swaFull {
 		out = append(out, "--swa-full")
 	}
-	return out
+	return loading.apply(req, out)
 }
 
 // applyGPUVisibility restricts which devices the backend can enumerate so the
@@ -10345,6 +10366,7 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		SparseLookupBytes:         info.SparseLookupBytes,
 		SparseLookupKind:          info.SparseLookupKind,
 		SparseLookupLayerBytes:    info.SparseLookupLayerBytes,
+		SparseLookupRanges:        sparseLookupRangesFromInfo(info.SparseLookupRanges),
 		TokenEmbdBytes:            info.TokenEmbdBytes,
 		OutputBytes:               info.OutputBytes,
 		ShexpBytes:                info.ShexpBytes,

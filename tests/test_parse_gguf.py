@@ -298,6 +298,15 @@ def test_engram_tables_are_a_separate_sparse_lookup_tier():
     backbone charge, or placement bills ~195 GiB as GPU layer weights."""
     with tempfile.NamedTemporaryFile(suffix='.gguf') as f:
         r = build_engram(f.name, engram_layers='1')
+        size = os.path.getsize(f.name)
+        ranges = r.get('sparse_lookup_ranges') or []
+        assert_eq(len(ranges), 1, 'one table range')
+        assert_eq(ranges[0]['shard'], os.path.basename(f.name), 'range shard')
+        assert_eq(ranges[0]['bytes'], ENGRAM_TABLE_BYTES, 'range bytes')
+        off = ranges[0]['offset']
+        # The header-only builder puts every tensor at data offset 0, so the
+        # table starts where the aligned data section begins.
+        assert_eq(off, (size + 31) // 32 * 32, 'range offset')
     assert_eq(r['tensor_accounting_schema'], 3, 'schema')
     # smalinin/llama.cpp 425badfe lists deepseek41 in llm_arch_is_hybrid.
     assert_eq(r.get('recurrent'), 1, 'deepseek41 recurrent/hybrid state')
@@ -325,6 +334,7 @@ def test_engram_named_tensor_without_proof_stays_resident():
             r = build_engram(f.name, **extra)
         assert_eq(r.get('sparse_lookup_bytes', 0), 0, label + ': sparse_lookup_bytes')
         assert 'sparse_lookup_kind' not in r, f'{label}: unexpected sparse kind {r.get("sparse_lookup_kind")}'
+        assert 'sparse_lookup_ranges' not in r, f'{label}: unexpected table ranges'
         assert_eq(r['non_expert_layer_bytes'][1], 3 * DENSE_TENSOR_BYTES + ENGRAM_TABLE_BYTES,
                   label + ': table charged to its layer')
     print('  ✓ engram_named_tensor_without_proof_stays_resident')

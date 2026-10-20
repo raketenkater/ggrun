@@ -391,3 +391,65 @@ func TestVerifiedConfigKeepsSparseLookupTier(t *testing.T) {
 		t.Fatal("a record from before tier policies was accepted")
 	}
 }
+
+// PR #93 re-review finding 1: a measurement the command side records for a
+// sparse-policy plan (full model profile, its own scoped tag) must be found
+// by the policy's planning pass (reduced model view, backendCacheTag), and
+// must not leak into another policy or backend build.
+func TestSparsePolicyEvidenceRoundTrip(t *testing.T) {
+	full := dsv41Profile()
+	for _, policy := range []SparseLookupPolicy{SparseLookupLayer, SparseLookupResident, SparseLookupPaged} {
+		view := sparseLookupModelView(full, policy)
+		if SpecTargetIdentity(view) != SpecTargetIdentity(full) || kvCachePath("/c", view) != kvCachePath("/c", full) {
+			t.Fatalf("%s view changed the artifact identity", policy)
+		}
+		if view.ArtifactSizeBytes() != full.SizeBytes || view.ArtifactTotalSizeMB() != full.TotalSizeMB {
+			t.Fatalf("%s view: artifact %d/%d, want %d/%d", policy, view.ArtifactSizeBytes(), view.ArtifactTotalSizeMB(), full.SizeBytes, full.TotalSizeMB)
+		}
+	}
+	o := dsv41Opts(t, SparseLookupFileBacked)
+	caps := dsv41Host(204700)
+	first, err := Compute(caps, full, o)
+	if err != nil || first.SparseLookupPolicy != SparseLookupPaged {
+		t.Fatalf("first plan: %v %+v", err, first)
+	}
+	// The command side writes with the full profile and its own tag, scoped by
+	// the plan's policy (scopedProbeBackendTagForStrategy).
+	writerTag := SparseLookupScopedTag(backendCacheTag(Options{BackendTag: o.BackendTag}), first.SparseLookupPolicy)
+	if err := RecordMeasuredComputeBuffers(o.CacheDir, full, first.ContextSize, first.UBatchSize, first.KVQuality, first.KVPlacement,
+		writerTag, caps.GPUs, first.Parallel, map[int]int{1: 2913}); err != nil {
+		t.Fatal(err)
+	}
+	reader := o
+	reader.sparseLookupPolicy = SparseLookupPaged
+	if pc := reader.loadProbeCacheForStrategy(sparseLookupModelView(full, SparseLookupPaged), first, caps.GPUs); pc == nil {
+		t.Fatalf("replan cannot read the measurement: writer %q reader %q", writerTag, backendCacheTag(reader))
+	}
+	other := o
+	other.sparseLookupPolicy = SparseLookupResident
+	if pc := other.loadProbeCacheForStrategy(sparseLookupModelView(full, SparseLookupResident), first, caps.GPUs); pc != nil {
+		t.Fatal("a paged measurement leaked into the resident policy")
+	}
+	build := reader
+	build.BackendTag = "llama@another-build"
+	if pc := build.loadProbeCacheForStrategy(sparseLookupModelView(full, SparseLookupPaged), first, caps.GPUs); pc != nil {
+		t.Fatal("a measurement leaked to another backend build")
+	}
+	// Replan and relaunch from the verified record keep the same evidence scope.
+	again, err := Compute(caps, full, o)
+	if err != nil || again.SparseLookupPolicy != SparseLookupPaged {
+		t.Fatalf("replan: %v %+v", err, again)
+	}
+	if err := RecordMeasuredComputeBuffers(o.CacheDir, full, again.ContextSize, again.UBatchSize, again.KVQuality, again.KVPlacement,
+		SparseLookupScopedTag(backendCacheTag(Options{BackendTag: o.BackendTag}), again.SparseLookupPolicy), caps.GPUs, again.Parallel, map[int]int{1: 2913}); err != nil {
+		t.Fatal(err)
+	}
+	// A relaunch without an explicit ubatch restores the recorded shape.
+	relaunch := reader
+	relaunch.UBatchSize = 0
+	vc := VerifiedConfigToRecord("scope", "model", again, "id", "/bin/llama-server", "", "")
+	if restored := VerifiedToStrategy(&vc, relaunch, caps); restored == nil || restored.SparseLookupPolicy != SparseLookupPaged ||
+		relaunch.loadProbeCacheForStrategy(sparseLookupModelView(full, SparseLookupPaged), restored, caps.GPUs) == nil {
+		t.Fatalf("relaunch from the verified record cannot read the measurement: %+v", restored)
+	}
+}

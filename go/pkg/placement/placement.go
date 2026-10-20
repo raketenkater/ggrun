@@ -184,6 +184,7 @@ type Strategy struct {
 	SparseLookupCapability SparseLookupCapability `json:"sparse_lookup_capability,omitempty"`
 	SparseLookupFlag       string                 `json:"sparse_lookup_flag,omitempty"`
 	SparseLookupEvidence   string                 `json:"sparse_lookup_evidence,omitempty"`
+	SparseLookupRanges     []SparseLookupRange    `json:"sparse_lookup_ranges,omitempty"`
 	// CPURange / CPUStrict pin llama.cpp workers to physical cores for both
 	// decode (--threads) and agent prefill (--threads-batch). Hyperthread
 	// siblings share L1/L2 and DRAM ports; CPU-expert MoE is bandwidth-bound
@@ -358,6 +359,12 @@ type ModelProfile struct {
 	SparseLookupBytes      int64   `json:"sparse_lookup_bytes,omitempty"`
 	SparseLookupKind       string  `json:"sparse_lookup_kind,omitempty"`
 	SparseLookupLayerBytes []int64 `json:"sparse_lookup_layer_bytes,omitempty"`
+	// SparseLookupRanges locate each table in its shard file (when known), so
+	// a live mapping check can attribute pages to the tables themselves.
+	SparseLookupRanges []SparseLookupRange `json:"sparse_lookup_ranges,omitempty"`
+	// sparseLookupViewBytes is what a policy view removed from SizeBytes and
+	// TotalSizeMB (see sparseLookupModelView); artifact identities add it back.
+	sparseLookupViewBytes int64
 	// MeasuredComputeCoefficient is the graph fan-out coefficient (bytes per
 	// hidden-unit per layer per ubatch token, normalised to a 1,048,576-token
 	// context) that this model's compute buffers ACTUALLY showed on previous
@@ -919,13 +926,8 @@ func backendCacheTag(opts Options) string {
 	if tag == "" {
 		tag = opts.BackendTag
 	}
-	tag = ScopedBackendFeatureTag(ScopedBackendCacheTag(tag, opts.WorkloadProfile), opts.SWAFull)
-	if opts.sparseLookupPolicy != "" {
-		// Each lookup-tier policy changes host allocation; keep their probe and
-		// placement evidence apart. Models without the tier are unchanged.
-		tag += "|lookup=" + string(opts.sparseLookupPolicy)
-	}
-	return tag
+	return SparseLookupScopedTag(ScopedBackendFeatureTag(ScopedBackendCacheTag(tag, opts.WorkloadProfile), opts.SWAFull),
+		opts.sparseLookupPolicy)
 }
 
 // ScopedBackendFeatureTag isolates allocation evidence that changes when a
@@ -7394,7 +7396,7 @@ func kvCachePath(cacheDir string, model *ModelProfile) string {
 	if base == "" {
 		base = filepath.Base(model.Path)
 	}
-	return filepath.Join(cacheDir, fmt.Sprintf("kv_%s_%d.cache", base, model.SizeBytes))
+	return filepath.Join(cacheDir, fmt.Sprintf("kv_%s_%d.cache", base, model.ArtifactSizeBytes()))
 }
 
 // loadMeasuredKVRates reads the per-model KV cache into a kvType→bytes/token map.
