@@ -1613,7 +1613,20 @@ func smokeBackend(binary string) error {
 			return "", fmt.Errorf("%s timed out", flag)
 		}
 		if err != nil {
-			return string(out), fmt.Errorf("%s: %w", flag, err)
+			// Current ik_llama returns 1 after printing normal usage. Accept only
+			// that help convention, matching validateBackendCandidate; version
+			// failures, signals and other statuses still reject the build.
+			exitErr, exited := err.(*exec.ExitError)
+			usage := false
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "usage:") {
+					usage = true
+					break
+				}
+			}
+			if flag != "--help" || !exited || exitErr.ExitCode() != 1 || !usage {
+				return string(out), fmt.Errorf("%s: %w", flag, err)
+			}
 		}
 		return string(out), nil
 	}
@@ -1651,6 +1664,22 @@ func smokeBackendConfigured(binary string, cmakeFlags []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binary, "--list-devices").CombinedOutput()
+	if exitErr, exited := err.(*exec.ExitError); exited && exitErr.ExitCode() == 1 &&
+		strings.Contains(strings.ToLower(string(out)), "unknown argument: --list-devices") {
+		// ik_llama has no --list-devices. Same fallback as backendGPUCapable: an
+		// invalid tensor buffer override stops argument parsing before any model
+		// or server startup, after listing the registered buffer types.
+		const override = "ggrun_probe=__ggrun_invalid_buffer__"
+		bufOut, bufErr := exec.CommandContext(ctx, binary, "--override-tensor", override).CombinedOutput()
+		if exitErr, exited := bufErr.(*exec.ExitError); ctx.Err() == nil && exited && exitErr.ExitCode() == 1 &&
+			strings.Contains(strings.ToLower(string(bufOut)), "invalid tensor buffer type override: "+override) {
+			if bufferTypesInclude(string(bufOut), expected) {
+				return nil
+			}
+			return fmt.Errorf("requested %s build does not report a %s buffer type", expected, expected)
+		}
+		return fmt.Errorf("%s device probe failed: --list-devices unsupported and buffer probe inconclusive", expected)
+	}
 	if err != nil && len(out) == 0 {
 		return fmt.Errorf("%s device probe failed: %w", expected, err)
 	}
@@ -1659,6 +1688,28 @@ func smokeBackendConfigured(binary string, cmakeFlags []string) error {
 		return fmt.Errorf("requested %s build does not report a %s device", expected, expected)
 	}
 	return nil
+}
+
+// bufferTypesInclude reads only the "Available buffer types:" entries, never
+// accelerator names that appear in later usage text.
+func bufferTypesInclude(output, accel string) bool {
+	found := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(strings.ToLower(line))
+		if !found {
+			found = line == "available buffer types:"
+			continue
+		}
+		name := strings.TrimSuffix(strings.Fields(line + " ")[0], ":")
+		digits := strings.TrimPrefix(name, accel)
+		if digits != name && digits != "" && strings.Trim(digits, "0123456789") == "" {
+			return true
+		}
+		if name != "cpu" && !strings.HasPrefix(name, "cpu_") {
+			return false
+		}
+	}
+	return false
 }
 
 func promoteBackendBuild(buildDir, stagingDir string, validate func(string) error) error {
