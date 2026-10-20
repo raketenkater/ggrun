@@ -227,6 +227,58 @@ func TestFindParseScriptSkipsStaleParserMissingHostPLE(t *testing.T) {
 	}
 }
 
+// A stale source checkout in the working directory must not shadow a newer
+// installed parser: on 2026-10-20 ggrun run from the owner's app-home checkout
+// picked its schema-2 parser over the installed schema-3 one and refused a
+// DeepSeek-V4.1 model. Among discovered locations the newest declared contract
+// wins; a parser in an explicitly named location stays the user's choice.
+func TestFindParseScriptPrefersNewestTensorAccountingSchema(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) string {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+		abs, _ := filepath.Abs(p)
+		return abs
+	}
+	checkout := write("work/tools/gguf/parse_gguf.py", "r = {\n    'tensor_accounting_schema': 2,\n}\n")
+	installed := write("bin/parse_gguf.py", "r = {\n    'tensor_accounting_schema': 3,\n}\n")
+	t.Setenv("LLM_SCRIPT_DIR", "")
+	t.Setenv("LLM_SERVER_HOME", "")
+	t.Setenv("LLM_APP_HOME", "")
+	t.Setenv("PATH", filepath.Dir(installed))
+	t.Chdir(filepath.Join(dir, "work"))
+	if got := findParseScript(); got != installed {
+		t.Fatalf("stale working-directory parser won: got %s, want %s", got, installed)
+	}
+	// Equal versions keep the established order (working directory first).
+	write("bin/parse_gguf.py", "r = {\n    'tensor_accounting_schema': 2,\n}\n")
+	if got := findParseScript(); got != checkout {
+		t.Fatalf("equal schema: got %s, want %s", got, checkout)
+	}
+	// An explicit LLM_SCRIPT_DIR parser with a contract is never overridden.
+	explicit := write("pinned/parse_gguf.py", "r['tensor_accounting_schema'] = 1\n")
+	t.Setenv("LLM_SCRIPT_DIR", filepath.Dir(explicit))
+	if got := findParseScript(); got != explicit {
+		t.Fatalf("explicit LLM_SCRIPT_DIR overridden: got %s", got)
+	}
+	for body, want := range map[string]int{
+		"r = {'tensor_accounting_schema': 3}": 3,
+		"r['tensor_accounting_schema'] = 12":  12,
+		"# mentions tensor_accounting_schema": 1,
+		"print('no contract')":                0,
+	} {
+		p := write("probe/parse_gguf.py", body)
+		if got := parserTensorAccountingSchema(p); got != want {
+			t.Errorf("%q: schema %d, want %d", body, got, want)
+		}
+	}
+}
+
 func TestValidateParserOutputRejectsQwen4ExpStaleTensorAccounting(t *testing.T) {
 	info := &Info{
 		Architecture:   "qwen4exp",
