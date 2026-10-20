@@ -57,7 +57,7 @@ evidence.
 | MMAP-1, MMAP-2, MMAP-4 | Implemented: production/preflight/recovery/daemon share capability-aware reclaim policy; unknown/anonymous loaders fail closed; mmap remains last-resort and consent-gated | Commit plus live resident/mmap/anonymous cases |
 | MMAP-3 | Host ledger now separates exact reclaimable expert bytes from non-reclaimable runtime, KV, embeddings, and checkpoint reserve | Audit remaining backend-reported buffers/page tables/companions against live cgroup data |
 | MMAP-5 through MMAP-7 | Not complete | Requires the storage/workload and real too-large-model acceptance window |
-| MMAP-8 (sparse lookup tier) | Implemented in source 2026-10-19: arch-proven DeepSeek-V4.1 Engram tables are a separate file-backed tier (parser schema 3), kept off GPU/host resident ledgers only with a `--lazy-mode` backend; `--lazy-mode on` is explicit; fit-pass host row excludes the tier; scope gets a bounded lookup-cache allowance; live smaps/memory.stat check; automatic expert paging beside the tier is refused; load-mode backends receive an explicit mapping choice | Live load blocked: host DRAM fault (63 flips, byte ≡ 10 mod 16) and download in progress. See `docs/large-model-mmap-evidence-20261019.md` |
+| MMAP-8 (sparse lookup tier) | Source, revised after the 2026-10-20 senior review: parser adapters (schema 3) keep the tier and its per-layer split; placement chooses layer / resident / paged from a reviewed loader contract (exact build commit, table kind, platform) and the hardware; explicit `--lazy-mode` is a constraint; fit-pass Host row converted only under a versioned oracle contract; paged scope reserves the reclaim band first; load-mode spellings fold idempotently | Live load blocked: host DRAM fault on DIMM_D1 (fix scheduled 2026-10-23), shards 00008/00009. See `docs/large-model-mmap-evidence-20261019.md` |
 | HOT-1 through HOT-6 | Planned, backend-gated resident-MoE performance lane. A 2026-08-28 draft llama.cpp implementation is measured on Qwen3.8-Flash-Next but is not upstream-ready | Isolated fork audit, exact VRAM accounting, correctness and same-workload A/B on this three-GPU Q3 launch; then architecture matrix |
 | PIN/P3 | Deliberately not started | Blocked on appropriate hardware/model artifacts as specified below |
 
@@ -710,27 +710,33 @@ resident plan and precedes selective pinning.
 Exit: accepted mmap survives spread traffic without cgroup OOM; anonymous
 experts are refused; a resident winner is never silently replaced by mmap.
 
-- [ ] **MMAP-8 — sparse lookup tables.** A table the exact backend gathers a
-  few rows per token from (DeepSeek-V4.1 Engram, `TENSOR_READ_LAZY` in
-  smalinin/llama.cpp 425badfe) is not execution-weight paging. It is
-  recognised only from the architecture's own `<arch>.engram.layer_ids`, never
-  from a tensor name, an embedding, or "ngram". With `--lazy-mode on` the
-  loader maps it from the file under any `--load-mode`, never moves it to a
-  GPU, and excludes it from MAP_POPULATE and mlock; with lazy mode off it
-  follows its layer onto the GPU (fit pass: CUDA0/CUDA1 model 109,927/120,700
-  MiB). Placement therefore excludes the tier from GPU and host resident
-  ledgers only for a `--lazy-mode` backend and otherwise refuses the model.
-  Execution weights stay resident when they fit; automatic expert paging next
-  to the tier is refused because both would share one reclaim pool. The
-  fit-pass Host row counts the mapped tables (333,327 MiB = 134,102 resident +
-  199,225 tier) and is corrected by exactly the tier. After the canary,
-  memory.high = non-reclaimable ceiling + lookup allowance (≤ tier, ≤ user
-  ceiling), memory.max = high + headroom. A post-load smaps/memory.stat check
-  refuses anonymous, locked, missing or copied mappings and persists the
-  contradiction; missing observations are not proof. Remaining: live load,
-  cold/warm and repeated/spread lookup traffic, major faults, HDD reads,
-  agent-task correctness and timing on the verified 366 GiB model, after the
-  host DRAM fault is resolved.
+- [ ] **MMAP-8 — sparse lookup tables.** A table an architecture adapter
+  marks as a sparse row lookup (DeepSeek-V4.1 Engram: `<arch>.engram.layer_ids`,
+  `blk.N.engram_embd.weight`) is not execution-weight paging, and a tensor
+  name or "ngram" never marks one. Placement keeps its bytes and per-layer
+  split and chooses a policy:
+  - *layer*: ordinary tensors with their layer, charged per layer, with
+    `--lazy-mode off` stated when the backend advertises the flag. This is the
+    only policy without a reviewed loader contract.
+  - *resident*: under a reviewed contract (smalinin/llama.cpp 425badfe on
+    Linux: `TENSOR_READ_LAZY` tables use the CPU buffer before `-ot`, are
+    mapped under every `--load-mode`, get `MADV_RANDOM`, stay out of
+    `MAP_POPULATE` and mlock), lazy rows with the whole tier charged to host
+    RAM once.
+  - *paged*: the same contract, tier outside GPU and resident host ledgers.
+    The fit-pass Host row (333,327 = 134,102 resident + 199,225 tier on the
+    pinned headers) is converted only under the versioned inclusive oracle
+    contract. After the canary `memory.max = min(ceiling, non-reclaimable +
+    tier + band)` and `memory.high = max - band`. Automatic expert paging next
+    to a paged tier is refused.
+  Automatic choice prefers resident, then paged for fit or more context, and
+  never prefers a plan that pages experts automatically. A post-load
+  smaps/memory.stat check refuses missing, anonymous or locked mappings (and,
+  for paged, a copied tier) and persists the contradiction; missing
+  observations are not proof. Remaining: live load, cold/warm and
+  repeated/spread lookup traffic, major faults, HDD reads, agent-task
+  correctness and timing on the verified 366 GiB model, after the host DRAM
+  fault is resolved.
 
 ## P3 — selective mmap + mlock for models beyond RAM + VRAM
 

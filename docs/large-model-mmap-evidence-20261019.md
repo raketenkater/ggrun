@@ -56,39 +56,63 @@ The fit pass counts mapped lazy tables as host model memory
 
 1. `parse_gguf.py` put both Engram tables into layers 1 and 14 as ordinary
    backbone: 97.6 GiB per layer, billed to the GPU owning the layer. Schema 3
-   recognises the tier only from `<arch>.engram.layer_ids` under the model's
-   own architecture prefix. On the pinned headers the result is 171.72 GiB of
-   execution weights + 194.56 GiB tier, the publisher's numbers exactly.
-2. No placement tier existed. Placement now refuses a model with this tier on
-   a backend without `--lazy-mode`. Otherwise it keeps the tier out of GPU and
-   resident host ledgers and emits `--lazy-mode on` explicitly.
-3. Exact admission would have refused the plan, because the fit pass reports
-   the mapped tables as host model. The Host row is reduced by exactly the
-   tier, only under lazy mode on a classified backend.
+   recognises the tier only through an architecture adapter
+   (`SPARSE_LOOKUP_ADAPTERS`: `deepseek41` → `<arch>.engram.layer_ids`,
+   `blk.N.engram_embd.weight`). On the pinned headers the result is
+   171.72 GiB of execution weights + 194.56 GiB tier, the publisher's numbers
+   exactly. The per-layer split is kept (`sparse_lookup_layer_bytes`).
+2. No placement tier existed (see the design below).
+3. Exact admission would have refused a paged plan, because the fit pass
+   reports the mapped tables as host model memory.
 4. The absent mmap flag meant `auto` on `--load-mode` builds while every
-   planner read it as mapped. Every `--load-mode` build, including forks that
-   keep deprecated `--mmap/--no-mmap` aliases, now receives `--load-mode mmap`
-   or `none` at process start. The planner argv and argv-keyed evidence are
-   unchanged.
+   planner read it as mapped. Every `--load-mode` build now receives an
+   explicit mode at process start.
 5. The dry-run printed resident `--no-mmap` CPU experts as "reclaimable
    weights". Only mapped experts on a file-backed loader are labelled
    reclaimable.
 
-New fail-closed rules:
+## Senior review fixes (2026-10-20)
 
-- Automatic expert paging beside a paged lookup tier is refused. Only an
-  explicit `--mmap` accepts it as last resort.
-- After the canary, `memory.high` = non-reclaimable ceiling + lookup-cache
-  allowance (at most the tier, at most the user ceiling) and `memory.max` =
-  high + headroom. Anonymous growth squeezes the lookup cache first.
-- After load, `/proc/<pid>/smaps` must show the model files mapped with no
-  anonymous or locked pages, and memory.stat must not show a copied tier.
-  Contradictions are persisted per model/backend. Missing observations are
-  logged and never recorded as proof.
-- `deepseek41` gets recurrent/hybrid checkpoint semantics from the backend's
-  arch list. KV pricing stays generic; exact admission measures it.
+The [PR #93 review](pr93-senior-review-20261020.md) reproduced five failures
+with a test overlay. Each is now a permanent invariant test:
+
+| Finding | Fix | Tests |
+| --- | --- | --- |
+| P1 explicit `--load-mode none` became `... --load-mode mmap` | `server.ParseLoadMode` folds classic and native spellings in argv order (classic flags compose, a native value replaces the state, last wins). An argv that states its mode natively and has no classic flag is returned unchanged, so translation is idempotent. Passthrough `--load-mode`/`-lm` becomes the planner's `--no-mmap`/`--mmap` (+`--mlock`; `dio` passes through, planned unmapped; `auto` leaves ggrun's choice), so plan, admission, argv and cache identity agree. The memory fingerprint folds both spellings and accumulates every `-ot`. Evidence for `--load-mode` builds is re-keyed (`+load-mode-v2`) because the absent-flag default changed. | `TestLoadMode*`, `TestPassthroughLoadModeBecomesPlannerConstraint`, `TestMemoryFingerprintFoldsLoadModeSpellings` |
+| P1 `--lazy-mode` help authorized reclaimable memory | Flag availability and loader semantics are separate. A file-backed capability needs a reviewed loader contract matched on the build's source commit, the table kind and the platform (`llama.cpp-tensor-read-lazy/v1`: commit 425badfe, `engram`, Linux). A help line only lets ggrun state `--lazy-mode off`. A persisted live contradiction overrides the contract. | `TestSparseLookupCapabilityNeedsReviewedContract`, `TestSyntheticSecondKindNeedsItsOwnContract` |
+| P1 fit-oracle Host row reduced on loader capability alone | A separate, versioned oracle accounting contract (`host-row-includes-lazy-tables/v1`, `host-row-resident-only/v1`, unknown). Only the inclusive contract converts the row, by the tier's whole MiB (rounded down), once per row, and never below the tier. Unknown or resident-only oracles are used as reported. | `TestFitPassHostRowFollowsOracleContract` |
+| P2 every table-bearing model needed lazy loading | Three policies: `layer` (ordinary tensors with their layer, charged per layer; the only policy without a contract), `resident` (lazy rows, whole tier charged to host RAM once), `paged` (lazy rows outside the resident ledgers, bounded cache). Automatic choice: resident first, paged when resident does not fit or gives less context; a plan needing automatic expert paging loses to one with resident execution weights. Explicit `--lazy-mode on/off` is a constraint; `on` without a contract is refused with the reason. Verified configs are reused only under the policy that produced them, and placement/probe caches are scoped per policy. | `TestRoomyHostHasResidentSparseLookupPlan`, `TestConstrainedHostPagesTierAndKeepsExecutionResident`, `TestExplicitLazyChoiceIsHonored`, `TestSyntheticDenseTierPolicyMatrix`, `TestLayerTierIsChargedToTheLayerDevice`, `TestResidentTierJoinsFootprintOnce`, `TestVerifiedConfigKeepsSparseLookupTier` |
+| P2 constrained scope lost its reclaim band | The band is reserved first: `max = min(ceiling, non-reclaimable + tier + band)`, `high = max - band`, lookup cache `= high - non-reclaimable`. If the ceiling cannot hold the state plus a band, `high` stays at the non-reclaimable ceiling and the shortfall is logged. At start, a lazy argv gets `high = max - band` within an explicit budget. | `TestSparseLookupScopeReservesReclaimBand`, `TestSparseLookupStartLimitsKeepABand`, `TestLazyLookupArgvGetsReclaimBandAtStart` |
+
+Rerunning the review overlay on the fixed code: the server and placement
+checks pass. The three command-package checks no longer compile because the
+capability probe, scope and oracle helpers changed signature; their exact
+inputs (the unreviewed help string, 150,000/4,096/200,000 MiB, a 250,000 MiB
+resident-only row) are cases in the permanent tests above.
+
+## Sparse lookup tier: design
+
+- Tensor role: the parser adapter table. Go mirrors it
+  (`gguf.sparseLookupArchitectures`) and rejects a tier for an architecture or
+  kind it has no adapter for, or a per-layer split that does not sum to the
+  total.
+- Loader contract: `reviewedSparseLookupLoaders` in `cmd/ggrun`. Only the
+  reviewed fork commit is listed. A synthetic second kind exists only in tests.
+- Policy: `pkg/placement/sparselookup.go`. Placement emits `--lazy-mode on` for
+  resident and paged, and `--lazy-mode off` for layer when the backend
+  advertises the flag. No `-ot` is added, so expert overrides and their
+  recovery parsers are untouched.
+- Guarantee of the scope: one cgroup. Above `memory.high` the kernel reclaims
+  the scope's clean file pages (lookup rows) and throttles growth; anonymous
+  growth past `memory.max` is killed inside the scope. There are no separate
+  kernel budgets for anonymous state and lookup pages. On platforms without
+  cgroup scopes (Windows) there are no limits; the post-load mapping check is
+  Linux-only and its absence is logged, never recorded as proof.
 
 ## Planner and admission on the real headers (no load)
+
+Recorded 2026-10-19 with the pre-review revision (a branch build, since
+removed). The paged policy reproduces this plan; it has not been rerun.
 
 `ggrun memory-probe`, ctx 65,536, pinned fork, this host (212 GiB RAM,
 4070/3090 Ti/3060):
@@ -120,54 +144,68 @@ answer. This is a wiring and lifecycle check only.
 ## Host DRAM fault (blocks correctness acceptance)
 
 A 150 GiB userspace pattern probe ran 36 passes over six patterns
-(`memflip.c`, contained scope). It found 63 bit flips:
+(`memflip.c`, contained scope) and found 63 bit flips, every one at byte
+offset ≡ 10 (mod 16), bits 4–7, in both directions, repeating at fixed
+addresses. A root run of the locator (2026-10-19 13:05 UTC, pagemap physical
+addresses decoded through the Skylake-X memory-controller registers) found 58
+flips, all on **DIMM_D1** (G.Skill F4-3200C16-32GVK, IMC1 channel 1 DIMM 0,
+both ranks). This is a non-ECC DRAM fault (EDAC: ECC disabled), independent
+of the disk and filesystem. The owner scheduled the hardware fix for
+2026-10-23; no BIOS change or reboot was made.
 
-- every flip is at byte offset ≡ 10 (mod 16), bits 4–7, in both directions;
-- the flips repeat at fixed addresses;
-- the signature matches the earlier GLM shard (6 flips) and the DeepSeek
-  Q2_K page-cache flip.
-
-This is a non-ECC DRAM fault (EDAC: ECC disabled) consistent with one x4 DRAM
-device or its data lane. It is independent of the disk and filesystem. The
-physical DIMM is not identified; that needs root pagemap/EDAC address decode.
-Firmware reports the 2666-rated Team Group A2 DIMM running at 3200 MT/s among
-mixed kits. No BIOS change or reboot was made.
-
-Model and runtime correctness cannot be claimed on this host until the fault
-is removed. Weights and lookup pages held in RAM can be silently corrupted.
+Model and runtime correctness cannot be claimed on this host until a rerun
+of the locator shows zero flips. Weights and lookup pages held in RAM can be
+silently corrupted. Hashes that match, and serving that works, are artifact
+and mechanics evidence only.
 
 ## Download
 
-Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` (private).
-Shards 00010, 00007, 00002, 00003 and 00004 matched the pinned SHA-256 on the
-buffered read and on the `O_DIRECT` read. Shard 00005 matched on the buffered
-read but not on the `O_DIRECT` read, and the queue stopped as designed. Two
-repeated `O_DIRECT` reads gave the same wrong hash. A byte comparison found two
-differing bytes, at offsets 17,779,795,818 and 23,447,032,778. Both are
-≡ 10 (mod 16) and differ by XOR `0x10`, the DIMM_D1 signature. The cached
-block-device copy is corrupt. Whether the platter copy is clean is unknown
-until caches are dropped on clean RAM. Shards 00001, 00006, 00008 and 00009 are
-not downloaded. On this `fuseblk` (ntfs-3g) mount `O_DIRECT` is served
-from the block-device cache, so the two reads are independent RAM copies, not
-a platter re-read. HDD free space (~349 GiB) is below the 366.3 GiB set; the
-last 104 GB shard needs the owned failed GLM staging file
-(41,914,650,304 B, inode 212143) removed. That removal was not performed.
+Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and
+`ds-range-repair.jsonl` (private). Status at 2026-10-20 15:30 UTC:
+
+| Shard | State |
+| --- | --- |
+| 00002, 00003, 00004, 00006, 00007, 00010 | pinned SHA-256 on buffered and `O_DIRECT` reads |
+| 00001 | both reads wrong after transfer; block repair rewrote 1 byte (offset 7,654,585,592, mod16 8, XOR 0x40); now verified on both reads |
+| 00005 | buffered right, `O_DIRECT` wrong; block repair rewrote the 2 recorded bytes (17,779,795,818 and 23,447,032,778, mod16 10, XOR 0x10); now verified on both reads |
+| 00008 | both reads wrong after transfer; block repair queued after the GLM-5.3 run so it does not share the HDD with those measurements |
+| 00009 | transferring |
+
+On this `fuseblk` (ntfs-3g) mount `O_DIRECT` is served from the block-device
+cache, so the two reads are independent RAM copies, not a platter re-read.
+Block repair (`range_repair.py`) compares 32 MiB blocks with HTTP range reads
+of the pinned revision. A block is rewritten only when two upstream reads
+agree and both local reads differ. The original bytes are kept, every rewrite
+is read back, the streamed upstream bytes must hash to the pin, and the file
+must then match on both reads. The owned failed GLM staging file and the old
+Q2_K shards were removed with the owner's approval. Further transfers use
+ggrun's production downloader (180 s no-progress stall bound).
 
 ## Matrix
 
-| Case | Unit/fixture | Backend fit pass | Live |
-| --- | --- | --- | --- |
-| Ordinary resident (dense) | existing suite | — | Qwen3.5-4B control, mainline |
-| Explicit mapping on `--load-mode` builds | translation tests | — | `--load-mode mmap` observed |
-| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests | — | not run |
-| Sparse-table mmap (Engram) | parser, placement, scope, smaps, fit-row tests | real headers, lazy on/off | blocked: DRAM fault, download |
-| Unsupported/anonymous lookup loader refused | placement + contradiction tests | lazy off puts tables on GPU | not run |
-| Automatic expert paging beside the tier refused | placement test | — | not run |
-| Windows | cross-compile, vet, test build | — | not run (no Windows GPU run) |
+Live = through a real backend process on this host. Synthetic = unit
+fixtures only; no claim of model support.
 
-Gates run on this branch: `scripts/verify-core-engine.sh` (uncached) passed;
-`go test ./...`, `-race` on changed packages, parser tests, shell estimator,
-safety and MoE suites, and selected pytest suites all pass.
+| Case | Unit / fixture | Backend fit pass | Live |
+| --- | --- | --- | --- |
+| Ordinary resident model, no tier | existing suite + `TestOrdinaryModelIgnoresSparseLookupInputs` | — | Qwen3.5-4B control (2026-10-19, branch binary) |
+| Explicit mapping on `--load-mode` builds; native/legacy fold, idempotence | `TestLoadMode*`, passthrough and fingerprint tests | — | `--load-mode mmap` observed (2026-10-19) |
+| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests | — | not run |
+| Engram, unreviewed loader → layer tier | placement tests | lazy off puts tables on GPU | not run |
+| Engram, reviewed loader, roomy host → resident tier | placement test (900 GB) | — | not possible on this host |
+| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | blocked: shard 00008/00009, DRAM fault |
+| Automatic expert paging beside a paged tier refused | placement test | — | not run |
+| Explicit `--lazy-mode on` without contract refused | placement test | — | not run |
+| Synthetic second architecture (dense, `synthetic-rowtable`) | parser + placement + contract tests, CPU-only / single / multi GPU | — | none (synthetic) |
+| Negative fixtures (no metadata, wrong prefix, unlisted layer, other arch, "ngram" name) | parser tests | — | — |
+| Windows | lookup contract is Linux-only (unknown on Windows → layer tier); cross-compile and CI | — | not run (no Windows GPU run) |
+
+## Gates
+
+After the review fixes (2026-10-20): uncached `scripts/verify-core-engine.sh`
+passed; `go test -count=1 ./...` passed; `GOOS=windows go vet` of the changed
+packages passed; `python3 tests/test_parse_gguf.py` passed. CI results are on
+the PR.
 
 ## Not done
 

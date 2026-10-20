@@ -22,11 +22,14 @@ product lane.
    admission, process-scoped failure containment, observed allocations, and
    clean resource release are the authorities. Mmap/offload is a declared
    last-resort capacity path, not a default speed trick.
-   An arch-proven sparse lookup table that the exact backend reads lazily
-   (DeepSeek-V4.1 Engram) is a separate file-backed tier, not execution-weight
-   paging: it never enters GPU or resident host ledgers, gets an explicit
-   bounded lookup-cache allowance, must be confirmed by live mapping
-   observation, and never authorizes paging execution weights.
+   An architecture-adapter sparse lookup table (DeepSeek-V4.1 Engram first)
+   keeps its bytes in generic accounting. Without a reviewed loader contract
+   for the exact build it is an ordinary layer tensor. With one it may be held
+   resident (charged to host RAM) or, when that does not fit, paged as a
+   separate file-backed tier: outside GPU and resident host ledgers, with a
+   reclaim band reserved before any lookup cache, live mapping observation,
+   and never as a reason to page execution weights. A help line advertising a
+   lazy flag is not a loader contract.
 5. **The objective is real agent work.** Optimize cache-backed turn time and
    requested-concurrency workflow makespan while preserving both prefill and
    decode. Aggregate tok/s alone is never sufficient.
