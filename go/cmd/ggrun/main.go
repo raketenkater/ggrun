@@ -716,10 +716,13 @@ type launchRequest struct {
 	AllowLiveMemoryProbe   bool
 	NoMMap                 bool
 	ForceMMap              bool
-	Parallel               int
-	ParallelSet            bool // --parallel given explicitly; claude-code mode must not override it
-	Threads                int  // --threads; 0 keeps the physical-core default
-	CacheRAMMB             int  // --cache-ram; 0 keeps the derived prompt-cache budget
+	// SparseLookupLazy is the user's explicit lazy-read choice for sparse
+	// lookup tables ("on"/"off"; "" lets placement choose).
+	SparseLookupLazy string
+	Parallel         int
+	ParallelSet      bool // --parallel given explicitly; claude-code mode must not override it
+	Threads          int  // --threads; 0 keeps the physical-core default
+	CacheRAMMB       int  // --cache-ram; 0 keeps the derived prompt-cache budget
 	// MaxCheckpoints overrides the derived --ctx-checkpoints cap. -1 (the zero
 	// value of "unset" is 0, so the setter uses a bool) keeps the derived value;
 	// the field exists because leaving the flag unparsed let it fall through to
@@ -992,11 +995,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				}
 				req.RAMHeadroomMB = budget
 				continue
-			case "--no-mmap":
-				req.NoMMap = val == "" || parseBoolFlag(val)
-				if req.NoMMap {
-					req.ForceMMap = false
-				}
+			case "--no-mmap", "--mmap":
+				// Loading flags are folded once, in argv order, together with
+				// native --load-mode spellings (normalizePlacementAwareExtraArgs).
+				req.ExtraArgs = append(req.ExtraArgs, key+"="+strconv.FormatBool(val == "" || parseBoolFlag(val)))
 				continue
 			case "--swa-full":
 				req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", val == "" || parseBoolFlag(val))
@@ -1004,12 +1006,6 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			case "--no-swa-full":
 				disabled := val == "" || parseBoolFlag(val)
 				req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", !disabled)
-				continue
-			case "--mmap":
-				req.ForceMMap = val == "" || parseBoolFlag(val)
-				if req.ForceMMap {
-					req.NoMMap = false
-				}
 				continue
 			case "--spec":
 				req.SpecMode = val
@@ -1276,16 +1272,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.ClaudeProfile = profile
-		case "--no-mmap":
-			req.NoMMap = true
-			req.ForceMMap = false
+		case "--no-mmap", "--mmap":
+			// Folded once, in argv order, with --load-mode (see above).
+			req.ExtraArgs = append(req.ExtraArgs, a)
 		case "--swa-full":
 			req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", true)
 		case "--no-swa-full":
 			req.ExtraArgs = setPassthroughBoolFlag(req.ExtraArgs, "--swa-full", false)
-		case "--mmap":
-			req.ForceMMap = true
-			req.NoMMap = false
 		case "--mmproj":
 			v, err := next()
 			if err != nil {
@@ -1634,10 +1627,12 @@ func scopedProbeBackendTagForStrategy(req *launchRequest, model *placement.Model
 	}
 	tag := placement.ScopedBackendCacheTag(evidenceBackendCacheTag(be), workload)
 	swaFull := req != nil && hasArg(req.ExtraArgs, "--swa-full")
+	policy := placement.SparseLookupPolicy("")
 	if strategy != nil {
 		swaFull = strategy.SWAFull
+		policy = strategy.SparseLookupPolicy
 	}
-	return placement.ScopedBackendFeatureTag(tag, swaFull)
+	return placement.SparseLookupScopedTag(placement.ScopedBackendFeatureTag(tag, swaFull), policy)
 }
 
 // resolveKVCacheTypeFlags turns llama.cpp's direct K/V flags into one planned
@@ -1724,6 +1719,97 @@ func setPassthroughBoolFlag(args []string, flag string, enabled bool) []string {
 	return out
 }
 
+// loadingModeFold folds every loading flag of one request -- ggrun's own
+// --mmap/--no-mmap and the passthrough --mlock and native --load-mode / -lm --
+// once, in original argv order, into the planner's constraints and the
+// passthrough that reaches the backend. A native value replaces the whole
+// state, including an earlier --mlock or "dio"; classic flags compose. The
+// planner, exact admission, cache identities and the backend argv therefore
+// all describe the same final mode. "auto" leaves the mapping to ggrun's
+// planner. "dio" has no classic spelling: it is passed through after the
+// generated flags, where the backend's last-wins rule applies it, and the plan
+// treats it as unmapped. An unknown native value is passed through for the
+// backend to reject and changes nothing.
+type loadingModeFold struct {
+	base    string // "", "mmap", "none" or "dio"
+	mlock   bool
+	invalid []string
+}
+
+func newLoadingModeFold(req *launchRequest) *loadingModeFold {
+	f := &loadingModeFold{}
+	switch {
+	case req.NoMMap:
+		f.base = "none"
+	case req.ForceMMap:
+		f.base = "mmap"
+	}
+	return f
+}
+
+// consume folds the loading flag at args[i] and returns how many tokens it
+// used (0 when args[i] is not a loading flag).
+func (f *loadingModeFold) consume(args []string, i int) int {
+	flag, value, inline := strings.Cut(args[i], "=")
+	switch flag {
+	case "--mmap", "--no-mmap":
+		on := !inline || value == "" || parseBoolFlag(value)
+		mode := "mmap"
+		if flag == "--no-mmap" {
+			mode = "none"
+		}
+		if on {
+			f.base = mode
+		} else if f.base == mode {
+			f.base = "" // "--mmap=false" withdraws only its own choice
+		}
+		return 1
+	case "--mlock":
+		if inline {
+			return 0
+		}
+		f.mlock = true
+		return 1
+	case "--load-mode", "-lm":
+	default:
+		return 0
+	}
+	consumed := 1
+	if !inline {
+		if i+1 >= len(args) {
+			return 0
+		}
+		value, consumed = args[i+1], 2
+	}
+	switch value {
+	case "auto":
+		f.base, f.mlock = "", false
+	case "none", "mmap", "dio":
+		f.base, f.mlock = value, false
+	case "mlock":
+		f.base, f.mlock = "none", true
+	case "mmap+mlock":
+		f.base, f.mlock = "mmap", true
+	default:
+		f.invalid = append(f.invalid, args[i:i+consumed]...)
+	}
+	return consumed
+}
+
+// apply writes the folded state to the request and appends what the backend
+// still needs to see to the remaining passthrough.
+func (f *loadingModeFold) apply(req *launchRequest, out []string) []string {
+	req.NoMMap = f.base == "none" || f.base == "dio"
+	req.ForceMMap = f.base == "mmap"
+	if f.mlock {
+		out = append(out, "--mlock")
+	}
+	if f.base == "dio" {
+		out = append(out, "--load-mode", "dio")
+	}
+	return append(out, f.invalid...)
+}
+
 func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []string {
 	if req == nil || len(args) == 0 {
 		return args
@@ -1731,6 +1817,7 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 	out := args[:0]
 	swaSet := false
 	swaFull := false
+	loading := newLoadingModeFold(req)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--swa-full" {
@@ -1749,25 +1836,12 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 			swaSet, swaFull = true, !(val == "" || parseBoolFlag(val))
 			continue
 		}
-		if a == "--no-mmap" {
-			req.NoMMap = true
-			req.ForceMMap = false
+		if consumed := applyNativeLazyMode(req, args, i); consumed > 0 {
+			i += consumed - 1
 			continue
 		}
-		if key, val, ok := strings.Cut(a, "="); ok && key == "--no-mmap" {
-			req.NoMMap = val == "" || parseBoolFlag(val)
-			continue
-		}
-		if a == "--mmap" {
-			req.ForceMMap = true
-			req.NoMMap = false
-			continue
-		}
-		if key, val, ok := strings.Cut(a, "="); ok && key == "--mmap" {
-			req.ForceMMap = val == "" || parseBoolFlag(val)
-			if req.ForceMMap {
-				req.NoMMap = false
-			}
+		if consumed := loading.consume(args, i); consumed > 0 {
+			i += consumed - 1
 			continue
 		}
 		out = append(out, a)
@@ -1775,7 +1849,7 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 	if swaSet && swaFull {
 		out = append(out, "--swa-full")
 	}
-	return out
+	return loading.apply(req, out)
 }
 
 // applyGPUVisibility restricts which devices the backend can enumerate so the
@@ -2924,6 +2998,10 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		// another (different serving contract, different emitted flags).
 		ChatTemplate: req.ChatTemplateOverride,
 	}
+	// Sparse lookup tables: the verified loader contract (never a help line),
+	// the advertised lazy flag, and the user's explicit lazy choice.
+	opts.SparseLookupCapability, opts.SparseLookupEvidence, opts.SparseLookupFlag = sparseLookupCapabilityFor(be, model)
+	opts.SparseLookupLazy = req.SparseLookupLazy
 	// Where host-resident experts execute follows the backend's effective
 	// op-offload switch and threshold, which the child process inherits.
 	opts.HostWeightOffload = effectiveOpOffloadFlag(req.ExtraArgs)
@@ -4070,7 +4148,11 @@ func validateObservedMMapPageability(cfg *config.Config, model *placement.ModelP
 func backendStartOptions(req *launchRequest, caps *detect.Capabilities, be *backendInfo, envOverrides []string, serverArgs []string) server.StartOptions {
 	budgetMB := backendMemoryMaxMB(req, caps)
 	highMB, maxMB := budgetMB, budgetMB
-	if budgetMB > 0 && argsMMapBackedExperts(be, serverArgs) {
+	if budgetMB > 0 && argsLazySparseLookup(be, serverArgs) {
+		// Lazily mapped lookup rows are page cache inside this scope: keep a
+		// reclaim band below the hard limit from the first byte loaded.
+		highMB, maxMB = sparseLookupStartLimits(budgetMB, hostReclaimCeilingMB(req, caps), req.CgroupHeadroomMB)
+	} else if budgetMB > 0 && argsMMapBackedExperts(be, serverArgs) {
 		if hostCeiling := hostReclaimCeilingMB(req, caps); hostCeiling > budgetMB {
 			maxMB = hostCeiling
 		}
@@ -4109,6 +4191,12 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 	}
 	plannedFloor := measuredFootprintPlannedFloor(strategy, measured, ceiling)
 	newMax := measuredFootprintCgroupMaxMB(measured, req.CgroupHeadroomMB, plannedFloor, ceiling)
+	if placement.StrategyUsesFileBackedSparseLookup(strategy) {
+		// The lookup tier's page cache gets its own bounded allowance above the
+		// non-reclaimable ceiling instead of being squeezed into the headroom.
+		applySparseLookupScope(p, strategy, measured, plannedFloor, newMax, req.CgroupHeadroomMB, ceiling, strategyUsesReclaimableMMap(strategy))
+		return
+	}
 	if strategyUsesReclaimableMMap(strategy) {
 		// Never collapse a file-backed plan's hard ceiling to its anonymous
 		// working set. memory.max must retain the reclaim band for clean expert
@@ -4339,9 +4427,28 @@ func optimizationSummaryLines(label string, strategy *placement.Strategy, detail
 			label, device.GPU, device.Role, device.FreeMB, device.ModelMB, device.ContextMB,
 			device.GraphMB+device.RuntimeMB, device.SlackMB, device.Evidence))
 	}
+	// Only weights an exact file-backed loader maps are reclaimable; resident
+	// (--no-mmap) or anonymous experts are part of the required bytes.
+	reclaimable := 0
+	if strategyUsesReclaimableMMap(strategy) {
+		reclaimable = ledger.Host.Reclaimable
+	}
 	lines = append(lines, fmt.Sprintf("[%s] host free %d - required %d = slack %d MiB (reclaimable weights %d MiB) [%s]",
 		label, ledger.Host.FreeMB, ledger.Host.RequiredMB, ledger.Host.SlackMB,
-		ledger.Host.Reclaimable, ledger.Host.Evidence))
+		reclaimable, ledger.Host.Evidence))
+	if strategy != nil && strategy.SparseLookupMB > 0 {
+		switch strategy.SparseLookupPolicy {
+		case placement.SparseLookupPaged:
+			lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB paged (file-backed, lazy rows), outside the host and GPU ledgers; their RAM cache is bounded page cache [%s]",
+				label, strategy.SparseLookupMB, strategy.SparseLookupEvidence))
+		case placement.SparseLookupResident:
+			lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB resident (file-backed, lazy rows), charged to the host ledger [%s]",
+				label, strategy.SparseLookupMB, strategy.SparseLookupEvidence))
+		default:
+			lines = append(lines, fmt.Sprintf("[%s] lookup tables %d MiB loaded with their layers, charged per layer [%s]",
+				label, strategy.SparseLookupMB, strategy.SparseLookupEvidence))
+		}
+	}
 	return lines
 }
 
@@ -5411,7 +5518,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			if req != nil {
 				req.admittedOracleTotals = oracleTotalsByArgv[formatCommand(serverArgs)]
 			}
-			if mmapErr := validateObservedMMapPageability(cfg, model, be, strategy, p); mmapErr != nil {
+			if mmapErr := validateObservedHostTiers(cfg, model, be, strategy, p); mmapErr != nil {
 				memoryRecovery.reject(serverArgs)
 				_ = p.Stop()
 				if exactAdmission {
@@ -6717,6 +6824,10 @@ func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelPro
 		"benchmark=" + strconv.FormatBool(req.Benchmark),
 		"worker-benchmark=" + strconv.FormatBool(req.WorkerBenchmark),
 		"workload=" + requestWorkloadProfile(req, model),
+	}
+	if req.SparseLookupLazy != "" {
+		// Appended only when set, so every existing scope key is unchanged.
+		values = append(values, "lookup-lazy="+req.SparseLookupLazy)
 	}
 	return controller.ScopeKey(values...)
 }
@@ -9711,6 +9822,7 @@ func computeServerArgs(modelPath string, port int) ([]string, error) {
 		VisionAuto:              cfg.Vision,
 		SpecMode:                cfg.Spec,
 	}
+	opts.SparseLookupCapability, opts.SparseLookupEvidence, opts.SparseLookupFlag = sparseLookupCapabilityFor(be, model)
 	strategy, err := placement.Compute(caps, model, opts)
 	if err != nil {
 		return nil, fmt.Errorf("compute placement: %w", err)
@@ -10250,7 +10362,11 @@ func infoToProfile(info *gguf.Info, path string) *placement.ModelProfile {
 		TokenizerHash:             info.TokenizerHash,
 		QuantType:                 "", // not parsed from gguf.py output
 		ExpertBytes:               info.ExpertBytes,
-		NonExpertBytes:            info.NonExpertBytes,
+		NonExpertBytes:            info.NonExpertBytes - info.SparseLookupBytes,
+		SparseLookupBytes:         info.SparseLookupBytes,
+		SparseLookupKind:          info.SparseLookupKind,
+		SparseLookupLayerBytes:    info.SparseLookupLayerBytes,
+		SparseLookupRanges:        sparseLookupRangesFromInfo(info.SparseLookupRanges),
 		TokenEmbdBytes:            info.TokenEmbdBytes,
 		OutputBytes:               info.OutputBytes,
 		ShexpBytes:                info.ShexpBytes,
@@ -10331,10 +10447,11 @@ func parseModel(path string) (*placement.ModelProfile, error) {
 	// case where a GGUF's offsets are unusable and the parser falls back to the
 	// per-ggml-type size table (which mis-sizes new quants like MXFP4): then the
 	// sum drifts from the file and we rescale, keeping the expert:non-expert ratio.
-	if tableTotal := profile.ExpertBytes + profile.NonExpertBytes; tableTotal > 0 && profile.SizeBytes > 0 {
+	if tableTotal := profile.ExpertBytes + profile.NonExpertBytes + profile.SparseLookupBytes; tableTotal > 0 && profile.SizeBytes > 0 {
 		if scale := float64(profile.SizeBytes) / float64(tableTotal); scale < 0.95 || scale > 1.05 {
 			profile.ExpertBytes = int64(float64(profile.ExpertBytes) * scale)
 			profile.NonExpertBytes = int64(float64(profile.NonExpertBytes) * scale)
+			profile.SparseLookupBytes = int64(float64(profile.SparseLookupBytes) * scale)
 			profile.TokenEmbdBytes = int64(float64(profile.TokenEmbdBytes) * scale)
 			profile.OutputBytes = int64(float64(profile.OutputBytes) * scale)
 			profile.ShexpBytes = int64(float64(profile.ShexpBytes) * scale)
@@ -10390,6 +10507,9 @@ type backendInfo struct {
 	Identity                string // version/build hash; invalidates speculative performance profiles
 	CPUExpertMMapCapability placement.CPUExpertMMapCapability
 	CPUExpertMMapEvidence   string
+	SparseLookupCapability  placement.SparseLookupCapability // only a persisted live contradiction ("anonymous")
+	SparseLookupEvidence    string
+	Version                 string // stable --version output; carries the source commit a loader contract is matched on
 }
 
 // resolveCtxFlag converts --ctx flag to int: ""/"fit"=0, "max"=native, else number.
@@ -10539,7 +10659,8 @@ func detectBackend(path string) *backendInfo {
 	out, _ := cmd.CombinedOutput()
 	help := stableBackendProbeOutput(string(out))
 	info.Help = help
-	info.Identity = backendBuildIdentity(path)
+	info.Version = backendVersionOutput(path)
+	info.Identity = backendBuildIdentityFrom(path, info.Version)
 	lowerBase := strings.ToLower(filepath.Base(path))
 	lowerDir := strings.ToLower(filepath.Dir(path))
 	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
@@ -10558,11 +10679,26 @@ func detectBackend(path string) *backendInfo {
 	if strings.Contains(help, "--reasoning") {
 		info.SupportsReasoning = true
 	}
-	if helpHasExactFlag(help, "--load-mode") && !helpHasExactFlag(help, "--no-mmap") {
+	if backendParsesLoadMode(help) {
 		server.RegisterLoadModeBackend(path)
+		// ggrun now states the mapping choice to these builds instead of
+		// inheriting their "auto" default, which disables mapping when a device
+		// lacks mmap support. Evidence recorded under the old translation is
+		// therefore re-measured rather than reused.
+		info.Identity += "+" + loadModeTranslationVersion
 	}
 	info.CPUExpertMMapCapability, info.CPUExpertMMapEvidence = probedCPUExpertMMapCapability(info)
 	return info
+}
+
+// backendParsesLoadMode reports a backend whose loader is driven by
+// --load-mode. Such backends default to "auto", which turns mapping off when
+// any device lacks mmap support, and some still accept --mmap/--no-mmap only as
+// deprecated aliases. Translating every such backend states ggrun's mapping
+// choice explicitly at process start while the planner's own argv, and every
+// argv-keyed evidence record, stays unchanged.
+func backendParsesLoadMode(help string) bool {
+	return helpHasExactFlag(help, "--load-mode")
 }
 
 // probedCPUExpertMMapCapability classifies loader memory behavior from the
@@ -10609,13 +10745,26 @@ func stableBackendProbeOutput(out string) string {
 }
 
 func backendBuildIdentity(path string) string {
+	return backendBuildIdentityFrom(path, backendVersionOutput(path))
+}
+
+// loadModeTranslationVersion versions evidence for --load-mode builds: v2
+// states an explicit mapping mode when the argv has none.
+const loadModeTranslationVersion = "load-mode-v2"
+
+// backendVersionOutput is the build's stable --version text.
+func backendVersionOutput(path string) string {
 	cmd := exec.Command(path, "--version")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
 		defer libhub.Cleanup(hubDir)
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
 	out, _ := cmd.CombinedOutput()
-	material := strings.TrimSpace(stableBackendProbeOutput(string(out)))
+	return strings.TrimSpace(stableBackendProbeOutput(string(out)))
+}
+
+func backendBuildIdentityFrom(path, version string) string {
+	material := version
 	if fi, err := os.Stat(path); err == nil {
 		material += fmt.Sprintf("\n%s\n%d\n%d", filepath.Base(path), fi.Size(), fi.ModTime().UnixNano())
 	}

@@ -71,6 +71,16 @@ type Info struct {
 	NextNPredictLayers        int     `json:"nextn_predict_layers"`         // MTP/NextN prediction layers
 	IsMoE                     bool    `json:"is_moe"`
 
+	// SparseLookupBytes is the arch-proven lookup-table tier (schema 3+). It is
+	// included in NonExpertBytes for the file-size identity but absent from
+	// NonExpertLayerBytes.
+	SparseLookupBytes      int64   `json:"sparse_lookup_bytes"`
+	SparseLookupLayerBytes []int64 `json:"sparse_lookup_layer_bytes,omitempty"`
+	SparseLookupKind       string  `json:"sparse_lookup_kind,omitempty"`
+	SparseLookupLayerIDs   []int   `json:"sparse_lookup_layer_ids,omitempty"`
+	// SparseLookupRanges are the tables' absolute byte ranges per shard file,
+	// present only when the shard's tensor offsets were usable.
+	SparseLookupRanges []SparseLookupRange `json:"sparse_lookup_ranges,omitempty"`
 	// HeadCountKVByLayer and SlidingWindowPattern are the per-block arrays a
 	// mixed-attention model states instead of (or alongside) the scalars.
 	// They are raw metadata; placement validates them against the block count
@@ -234,6 +244,18 @@ func parserHasCurrentTensorAccounting(path string) bool {
 	return bytes.Contains(data, []byte("tensor_accounting_schema"))
 }
 
+// SparseLookupRange is one lookup table's byte range inside a shard file.
+type SparseLookupRange struct {
+	Shard  string `json:"shard"` // shard file basename
+	Offset int64  `json:"offset"`
+	Bytes  int64  `json:"bytes"`
+}
+
+// sparseLookupArchitectures mirrors SPARSE_LOOKUP_ADAPTERS in parse_gguf.py:
+// the architectures whose sparse lookup tables the parser classifies, and the
+// kind it reports. A tier for any other architecture is a parser mismatch.
+var sparseLookupArchitectures = map[string]string{"deepseek41": "engram"}
+
 func validateParserOutput(script, modelPath string, info *Info) error {
 	if info == nil {
 		return nil
@@ -248,6 +270,34 @@ func validateParserOutput(script, modelPath string, info *Info) error {
 				"parse_gguf.py at %s is missing required DeepSeek4 byte splits for %s; reinstall ggrun or set LLM_SCRIPT_DIR to the repo tools/gguf directory",
 				script, filepath.Base(modelPath))
 		}
+	}
+	// Sparse lookup tables can be hundreds of GiB (DeepSeek-V4.1 Engram:
+	// ~195 GiB). A schema-2 helper folds them into the per-layer backbone, so
+	// an adapter architecture needs schema 3.
+	adapterKind, adapted := sparseLookupArchitectures[strings.ToLower(info.Architecture)]
+	if adapted && info.TensorAccountingSchema < 3 {
+		return fmt.Errorf(
+			"parse_gguf.py at %s lacks tensor accounting schema 3 (sparse lookup tables) for %s; reinstall ggrun or set LLM_SCRIPT_DIR to the repo tools/gguf directory",
+			script, filepath.Base(modelPath))
+	}
+	var layerSum, rangeSum int64
+	for _, b := range info.SparseLookupLayerBytes {
+		layerSum += b
+	}
+	for _, r := range info.SparseLookupRanges {
+		if r.Offset < 0 || r.Bytes <= 0 || r.Shard == "" {
+			rangeSum = -1
+			break
+		}
+		rangeSum += r.Bytes
+	}
+	if info.SparseLookupBytes < 0 || info.SparseLookupBytes > info.NonExpertBytes ||
+		(info.SparseLookupBytes > 0 && (!adapted || info.SparseLookupKind != adapterKind)) ||
+		(len(info.SparseLookupLayerBytes) > 0 && layerSum != info.SparseLookupBytes) ||
+		(len(info.SparseLookupRanges) > 0 && rangeSum != info.SparseLookupBytes) {
+		return fmt.Errorf(
+			"parse_gguf.py at %s reported an inconsistent sparse lookup tier for %s (%d of %d non-expert bytes, %d by layer, kind %q, architecture %q)",
+			script, filepath.Base(modelPath), info.SparseLookupBytes, info.NonExpertBytes, layerSum, info.SparseLookupKind, info.Architecture)
 	}
 	// qwen4exp may legitimately omit the optional n-gram PLE table. Require a
 	// parser contract new enough to report tensor presence separately, then

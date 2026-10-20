@@ -82,6 +82,18 @@ _LAYER_ARRAYS = {
     '.attention.sliding_window_pattern': 'swa_pattern',
 }
 
+# Architecture adapters for sparse row-lookup tables. Each entry is reviewed
+# against that architecture's loader: the metadata array (under the
+# architecture's own prefix) listing the layers that own a table, the exact
+# tensor name, and the table kind ggrun reports. A tensor name, an embedding,
+# or the word "ngram" alone never makes a table a lookup tier; whether a
+# backend can read it lazily is a separate, backend-specific contract.
+#   deepseek41: llama.cpp DeepSeek-V4.1 loader (smalinin/llama.cpp 425badfe)
+#   reads LLM_KV_ENGRAM_LAYER_IDS and creates blk.N.engram_embd per listed layer.
+SPARSE_LOOKUP_ADAPTERS = {
+    'deepseek41': {'kind': 'engram', 'layer_key': 'engram.layer_ids', 'tensor': 'blk.{layer}.engram_embd.weight'},
+}
+
 # Recurrent state that llama.cpp keeps beside the KV cache
 # (llm_arch_is_recurrent / llm_arch_is_hybrid). The backend cannot truncate
 # it, so a request that branches inside a cached prompt resumes only from a
@@ -93,7 +105,7 @@ _RECURRENT_ARCHS = frozenset({
     'mamba', 'mamba2', 'rwkv6', 'rwkv6qwen2', 'rwkv7', 'arwkv7',
     'jamba', 'falcon-h1', 'plamo2', 'granitehybrid', 'lfm2', 'lfm2moe',
     'nemotron_h', 'nemotron_h_moe', 'qwen3next', 'kimi-linear', 'bailingmoe3',
-    'kimi-k3', 'qwen35', 'qwen35moe', 'qwen4exp', 'deepseek4', 'minimax-01',
+    'kimi-k3', 'qwen35', 'qwen35moe', 'qwen4exp', 'deepseek4', 'deepseek41', 'minimax-01',
     'glm5next', 'inkling',
 })
 
@@ -179,7 +191,12 @@ def _read_kv(f, r, kv_count):
             if key == 'tokenizer.ggml.tokens':
                 r['vocab_size'] = al
             layer_key = next((v for k, v in _LAYER_ARRAYS.items() if key.endswith(k)), None)
-            if layer_key and at in _INT_FORMATS and 0 < al <= 4096:
+            lookup_key = any(key.endswith('.' + a['layer_key']) for a in SPARSE_LOOKUP_ADAPTERS.values())
+            if lookup_key and at in _INT_FORMATS and 0 < al <= 4096:
+                # Kept by full key: the adapter for general.architecture decides
+                # which prefix the backend reads (see _sparse_lookup_layers).
+                r.setdefault('_lookup_layer_ids', {})[key] = _read_int_array(f, at, al)
+            elif layer_key and at in _INT_FORMATS and 0 < al <= 4096:
                 values = _read_int_array(f, at, al)
                 if layer_key == 'swa_pattern':
                     # The loader reads any non-zero entry as "windowed".
@@ -267,7 +284,21 @@ def _read_tensors(f, r, tensor_count):
     return tensors
 
 
-def _account_tensors(r, tensors, header_end, file_size, align):
+def _sparse_lookup_layers(r):
+    """(adapter, layers) whose tables are a sparse row-lookup tier.
+
+    Only an adapter for the model's own architecture, with its layer list under
+    that architecture's prefix, proves this (SPARSE_LOOKUP_ADAPTERS)."""
+    adapter = SPARSE_LOOKUP_ADAPTERS.get(r.get('arch'))
+    if not adapter:
+        return None, frozenset()
+    ids = r.get('_lookup_layer_ids', {}).get(f"{r.get('arch')}.{adapter['layer_key']}")
+    if not ids:
+        return None, frozenset()
+    return adapter, frozenset(v for v in ids if v >= 0)
+
+
+def _account_tensors(r, tensors, header_end, file_size, align, shard=None):
     """Accumulate expert/non-expert byte totals for one shard.
 
     Primary sizing is the tensor's real on-disk span (delta between sorted
@@ -302,10 +333,25 @@ def _account_tensors(r, tensors, header_end, file_size, align):
         values = r.setdefault(key, {})
         values[layer] = values.get(layer, 0) + nbytes
 
-    for tname, _, tbytes in tensors:
+    adapter, sparse_layers = _sparse_lookup_layers(r)
+    for tname, toff, tbytes in tensors:
         nbytes = spans[tname] if span_ok else tbytes
         layer_match = re.match(r'^blk\.(\d+)\.', tname)
         layer = int(layer_match.group(1)) if layer_match else None
+        if layer in sparse_layers and tname == adapter['tensor'].format(layer=layer):
+            # Kept in non_expert_bytes for the file-size identity, but never in
+            # the per-layer backbone; sparse_lookup_layer_bytes keeps the split
+            # so placement can charge it back to its layer when it must.
+            r['non_expert_bytes'] = r.get('non_expert_bytes', 0) + nbytes
+            r['sparse_lookup_bytes'] = r.get('sparse_lookup_bytes', 0) + nbytes
+            r['sparse_lookup_kind'] = adapter['kind']
+            add_layer_bytes('_sparse_lookup_layer_bytes', layer, nbytes)
+            if shard and header_end > 0:
+                # Absolute file range, so a live mapping check can attribute
+                # pages to the table rather than to its shard.
+                r.setdefault('sparse_lookup_ranges', []).append(
+                    {'shard': os.path.basename(shard), 'offset': data_start + toff, 'bytes': nbytes})
+            continue
         is_shared_expert = '_shexp.' in tname or '_chexp.' in tname
         is_routed_expert = '_exps.' in tname or '_chexps.' in tname or '.experts.' in tname
         is_expert = is_routed_expert or is_shared_expert
@@ -358,7 +404,7 @@ def parse(path: str) -> Dict[str, Any]:
     index directly.
     """
     r: Dict[str, Any] = {
-        'tensor_accounting_schema': 2,
+        'tensor_accounting_schema': 3,
         'has_per_layer_token_embd': 0,
         'fused': 0,
         'expert_bytes': 0,
@@ -381,7 +427,7 @@ def parse(path: str) -> Dict[str, Any]:
                 _account_tensors(r, tensors, 0, 0, 32)
                 return
             _account_tensors(r, tensors, f.tell(), os.path.getsize(sp),
-                             meta.get('_align', 32))
+                             meta.get('_align', 32), sp)
 
     try:
         read_shard(path, r)
@@ -416,6 +462,7 @@ def parse(path: str) -> Dict[str, Any]:
         ('_shexp_layer_bytes', 'shexp_layer_bytes'),
         ('_expert_aux_layer_bytes', 'expert_aux_layer_bytes'),
         ('_non_expert_layer_bytes', 'non_expert_layer_bytes'),
+        ('_sparse_lookup_layer_bytes', 'sparse_lookup_layer_bytes'),
     )
     layer_count = r.get('layers', 0)
     for private_key, public_key in layer_keys:
@@ -423,6 +470,10 @@ def parse(path: str) -> Dict[str, Any]:
         if values:
             count = max(layer_count, max(values) + 1)
             r[public_key] = [values.get(i, 0) for i in range(count)]
+    _, sparse_layers = _sparse_lookup_layers(r)
+    if sparse_layers and r.get('sparse_lookup_bytes'):
+        r['sparse_lookup_layer_ids'] = sorted(sparse_layers)
+    r.pop('_lookup_layer_ids', None)
     r.pop('_align', None)
     # Private parser bookkeeping is not part of the public JSON contract.
     r.pop('_first_moe_layer', None)
@@ -450,6 +501,7 @@ SHELL_KEY_MAP = [
     ('output_bytes',      'OUTPUT_BYTES',        0),
     ('shexp_bytes',       'SHEXP_BYTES',         0),
     ('expert_aux_bytes',  'EXPERT_AUX_BYTES',    0),
+    ('sparse_lookup_bytes', 'SPARSE_LOOKUP_BYTES', 0),
     ('arch',              'MODEL_ARCH',          'unknown'),
     ('embd',              'EMBEDDING_LENGTH',    0),
     ('ff',                'FEED_FORWARD_LENGTH', 0),

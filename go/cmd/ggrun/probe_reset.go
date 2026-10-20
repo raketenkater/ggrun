@@ -63,7 +63,7 @@ func runProbeReset(args []string) error {
 		return fmt.Errorf("compute placement scope: %w", err)
 	}
 	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	tag := scopedProbeBackendTag(req, model, be)
+	tag := placement.SparseLookupScopedTag(scopedProbeBackendTag(req, model, be), strategy.SparseLookupPolicy)
 
 	before := placement.RuntimeGraphGrowthByGPU(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize,
 		strategy.KVQuality, strategy.KVPlacement, tag, caps.GPUs, strategy.Parallel)

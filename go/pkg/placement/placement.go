@@ -174,6 +174,17 @@ type Strategy struct {
 	ReclaimableHostWeightsMB int  `json:"reclaimable_host_weights_mb,omitempty"`
 	FlashAttention           bool `json:"flash_attention"`
 	Threads                  int  `json:"threads"`
+	// SparseLookupMB is the model's sparse lookup tier and SparseLookupPolicy
+	// how this plan holds it (see sparselookup.go): inside the per-layer
+	// charges (layer), inside PlannedHostFootprintMB (resident), or outside
+	// every resident ledger as bounded page cache the scope sizes (paged).
+	SparseLookupMB         int                    `json:"sparse_lookup_mb,omitempty"`
+	SparseLookupBytes      int64                  `json:"sparse_lookup_bytes,omitempty"`
+	SparseLookupPolicy     SparseLookupPolicy     `json:"sparse_lookup_policy,omitempty"`
+	SparseLookupCapability SparseLookupCapability `json:"sparse_lookup_capability,omitempty"`
+	SparseLookupFlag       string                 `json:"sparse_lookup_flag,omitempty"`
+	SparseLookupEvidence   string                 `json:"sparse_lookup_evidence,omitempty"`
+	SparseLookupRanges     []SparseLookupRange    `json:"sparse_lookup_ranges,omitempty"`
 	// CPURange / CPUStrict pin llama.cpp workers to physical cores for both
 	// decode (--threads) and agent prefill (--threads-batch). Hyperthread
 	// siblings share L1/L2 and DRAM ports; CPU-expert MoE is bandwidth-bound
@@ -340,6 +351,20 @@ type ModelProfile struct {
 	CTXTrain               int     `json:"ctx_train"`
 	ModelArch              string  `json:"model_arch"`
 	ExpertUsedCount        int     `json:"expert_used_count,omitempty"`
+	// SparseLookupBytes is the architecture-proven sparse lookup tier
+	// (DeepSeek-V4.1 Engram tables). It is NOT part of NonExpertBytes or
+	// NonExpertLayerBytes; SizeBytes still includes it. SparseLookupLayerBytes
+	// is its per-layer split, which the layer policy charges back to each
+	// layer. See sparselookup.go.
+	SparseLookupBytes      int64   `json:"sparse_lookup_bytes,omitempty"`
+	SparseLookupKind       string  `json:"sparse_lookup_kind,omitempty"`
+	SparseLookupLayerBytes []int64 `json:"sparse_lookup_layer_bytes,omitempty"`
+	// SparseLookupRanges locate each table in its shard file (when known), so
+	// a live mapping check can attribute pages to the tables themselves.
+	SparseLookupRanges []SparseLookupRange `json:"sparse_lookup_ranges,omitempty"`
+	// sparseLookupViewBytes is what a policy view removed from SizeBytes and
+	// TotalSizeMB (see sparseLookupModelView); artifact identities add it back.
+	sparseLookupViewBytes int64
 	// MeasuredComputeCoefficient is the graph fan-out coefficient (bytes per
 	// hidden-unit per layer per ubatch token, normalised to a 1,048,576-token
 	// context) that this model's compute buffers ACTUALLY showed on previous
@@ -714,7 +739,19 @@ type Options struct {
 	// package callers; an explicit "unknown" fails closed.
 	CPUExpertMMapCapability CPUExpertMMapCapability
 	CPUExpertMMapEvidence   string
-	SamplingProfile         string // default, greedy, recommended, or a hash of explicit sampling overrides
+	// SparseLookupCapability is the exact backend's verified loader behavior
+	// for this model's sparse lookup tables (see sparselookup.go): file-backed
+	// only under a reviewed loader contract. Unknown keeps the tables ordinary
+	// layer tensors. SparseLookupFlag is the lazy-read option the backend
+	// advertises ("" when it has none); SparseLookupLazy is the user's explicit
+	// "on"/"off" for it ("" leaves the choice to placement).
+	SparseLookupCapability SparseLookupCapability
+	SparseLookupEvidence   string
+	SparseLookupFlag       string
+	SparseLookupLazy       string
+	// sparseLookupPolicy is resolved inside Compute for one candidate pass.
+	sparseLookupPolicy SparseLookupPolicy
+	SamplingProfile    string // default, greedy, recommended, or a hash of explicit sampling overrides
 	// WorkloadProfile scopes placement and probe evidence to scheduler semantics
 	// that can change the effective slot, batch, or cache behavior. An empty
 	// value preserves the legacy generic-serving cache namespace; callers that
@@ -889,7 +926,8 @@ func backendCacheTag(opts Options) string {
 	if tag == "" {
 		tag = opts.BackendTag
 	}
-	return ScopedBackendFeatureTag(ScopedBackendCacheTag(tag, opts.WorkloadProfile), opts.SWAFull)
+	return SparseLookupScopedTag(ScopedBackendFeatureTag(ScopedBackendCacheTag(tag, opts.WorkloadProfile), opts.SWAFull),
+		opts.sparseLookupPolicy)
 }
 
 // ScopedBackendFeatureTag isolates allocation evidence that changes when a
@@ -1129,6 +1167,9 @@ type autoContextSearchResult struct {
 // memory). This keeps "fit" from becoming an aggregate-memory estimate that a
 // later placement overlay can invalidate.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+	if model != nil && model.SparseLookupBytes > 0 && opts.sparseLookupPolicy == "" {
+		return computeSparseLookup(caps, model, opts)
+	}
 	if opts.ContextSize > 0 {
 		return computeResolvedStrategy(caps, model, opts)
 	}
@@ -1551,7 +1592,20 @@ func strategySlots(s *Strategy) int {
 // callers must go through Compute so they receive the placement-backed boundary
 // search above.
 func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+	s, err := computeResolvedStrategyCore(caps, model, opts)
+	if err == nil {
+		// After the builders: a resident lookup tier joins the derived host
+		// footprint exactly once.
+		applySparseLookupTier(s, model, opts)
+	}
+	return s, err
+}
+
+func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
 	var err error
+	if model != nil && model.SparseLookupBytes > 0 && opts.sparseLookupPolicy == "" {
+		return nil, fmt.Errorf("sparse lookup tier policy unresolved; plan through Compute")
+	}
 	caps, err = restrictGPUs(caps, opts.GPUs)
 	if err != nil {
 		return nil, err
@@ -1560,6 +1614,9 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 	caps = applyRAMPolicy(caps, opts)
 	caps = detect.ApplyVRAMHeadroom(caps, opts.VRAMHeadroomMB)
 	caps = detect.ApplyRAMHeadroom(caps, opts.RAMHeadroomMB)
+	if caps, err = sparseLookupResidentCaps(caps, model, opts); err != nil {
+		return nil, err
+	}
 	// Fixed companions (reviewer/worker helpers) are occupied hardware, not a
 	// late annotation. Seat them before KV placement, batch selection, draft
 	// selection, plan-free snapshots, caches, or weight packing so every one of
@@ -1925,6 +1982,11 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		if verr == nil && vc != nil {
 			if _, stale := verifiedConfigFreeVRAMStale(vc, caps); !stale {
 				restored := VerifiedToStrategy(vc, opts, caps)
+				if restored != nil && !sparseLookupRecordMatches(restored, model, opts) {
+					fmt.Fprintf(os.Stderr, "[verified] saved config holds the lookup tier as %q, not %q; re-planning\n",
+						restored.SparseLookupPolicy, opts.sparseLookupPolicy)
+					restored = nil
+				}
 				if restored != nil {
 					restored.CompanionPlacements = append(
 						[]CompanionPlacement(nil), s.CompanionPlacements...,
@@ -3699,6 +3761,9 @@ func buildMoEOffload(s *Strategy, caps *detect.Capabilities, model *ModelProfile
 		// cache (continuously read/written) plus compute/activation overhead.
 		// (Same reasoning as preWorkingSetFloor above; keep both in sync.)
 		workingSetFloor := ramOverheadMB + cpuKVMB + tokenEmbdMB + checkpointReserve
+		if err := sparseLookupExpertPagingError(model, opts, ramNeeded, ramAvailMB); err != nil {
+			return nil, err
+		}
 		if mmapReclaimable && ramAvailMB >= workingSetFloor {
 			s.MMap = true
 			s.MMapRequired = true
@@ -4102,6 +4167,13 @@ func bytesToMiBCeil(n int64) int {
 		return 0
 	}
 	return int((n + 1048576 - 1) / 1048576)
+}
+
+func bytesToMiBFloor(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	return int(n / 1048576)
 }
 
 func ceilDivInt(n, d int) int {
@@ -6594,6 +6666,11 @@ func (s *Strategy) Args(modelPath string, port int) []string {
 		args = append(args, "--no-mmap")
 	}
 
+	// Lazy lookup reads stay file-backed under --no-mmap as well. The choice is
+	// stated so a backend default can never move a lookup tier somewhere the
+	// plan did not charge it.
+	args = append(args, sparseLookupArgs(s)...)
+
 	if s.MLock {
 		args = append(args, "--mlock")
 	}
@@ -7319,7 +7396,7 @@ func kvCachePath(cacheDir string, model *ModelProfile) string {
 	if base == "" {
 		base = filepath.Base(model.Path)
 	}
-	return filepath.Join(cacheDir, fmt.Sprintf("kv_%s_%d.cache", base, model.SizeBytes))
+	return filepath.Join(cacheDir, fmt.Sprintf("kv_%s_%d.cache", base, model.ArtifactSizeBytes()))
 }
 
 // loadMeasuredKVRates reads the per-model KV cache into a kvType→bytes/token map.
@@ -7714,6 +7791,11 @@ func AllocationPlacementIdentity(strategy *Strategy) string {
 		strconv.FormatBool(strategy.FlashAttention), strconv.FormatBool(strategy.SWAFull), strconv.FormatBool(strategy.UseCUDAGraphs),
 		strconv.Itoa(strategy.CRAM), strconv.Itoa(strategy.MaxCheckpoints), strconv.Itoa(strategy.CheckpointMinStep),
 		SpecCompanionIdentity(strategy.MMProjPath), strconv.Itoa(strategy.MMProjSizeMB), strategy.BackendTag,
+	}
+	if strategy.SparseLookupMB > 0 {
+		// Appended only when present so every existing identity is unchanged.
+		parts = append(parts, "sparse-lookup", strconv.Itoa(strategy.SparseLookupMB), string(strategy.SparseLookupPolicy),
+			string(strategy.SparseLookupCapability), strategy.SparseLookupFlag)
 	}
 	if draft := strategy.Draft; draft != nil {
 		parts = append(parts,
