@@ -90,6 +90,20 @@ capability probe, scope and oracle helpers changed signature; their exact
 inputs (the unreviewed help string, 150,000/4,096/200,000 MiB, a 250,000 MiB
 resident-only row) are cases in the permanent tests above.
 
+## Second review fixes (2026-10-20)
+
+The [re-review](pr93-rereview-20261020.md) of `13b1aff` reproduced three more
+failures with a test overlay. Each is now a permanent test:
+
+| Finding | Fix | Tests |
+| --- | --- | --- |
+| P1 sparse-policy plans could not read preflight measurements | One helper, `placement.SparseLookupScopedTag`, scopes evidence by policy for placement readers (`backendCacheTag`) and every command-side writer (`scopedProbeBackendTagForStrategy`, probe reset). A policy view no longer changes the artifact identity: `SpecTargetIdentity` and the measured-KV path use `ArtifactSizeBytes`/`ArtifactTotalSizeMB`, which add back what the view removed. Probe, runtime-growth, prompt-cache, placement-cache and KV-rate keys all go through these. | `TestSparsePolicyEvidenceRoundTrip` (preflight write → replan → verified relaunch, other policy and other build negative), `TestEvidenceTagScopesSparsePolicy` |
+| P1 the full CLI broke loading-mode order | `parseLaunchArgs` no longer applies `--mmap`/`--no-mmap` on sight. All loading flags (classic, `--mlock`, native) fold once in argv order (`loadingModeFold`). A native value replaces earlier locks and retained `dio`; `--mmap=false` withdraws only its own choice. The planner fields and the passthrough come from that one state. | `TestParseLaunchArgsFoldsLoadingModesInOrder` (the four reproducers plus mixed and inline forms) |
+| P2 locked execution weights read as a locked lookup table | The parser now emits each table's absolute byte range per shard (`sparse_lookup_ranges`). The smaps check keeps per-mapping file ranges and judges only mappings that map table bytes alone (one partial page allowed at each end; the loader's `MADV_RANDOM` split is page-aligned). Mappings without table bytes are not judged; mixed mappings, or missing ranges, give "unknown" and a log note, never a persisted contradiction. Coverage is checked against the ranges. | `TestSparseLookupObservationAttributesTableRanges` (clean table + locked execution weights, locked table, anonymous table, unmapped range, unsplit mixed mapping, unknown ranges), parser range test |
+
+On the real headers, layer 1's table is shard 00008 from byte 192 to the end
+(104,449,677,696 B), so that shard's mapping is attributed to the table.
+
 ## Sparse lookup tier: design
 
 - Tensor role: the parser adapter table. Go mirrors it

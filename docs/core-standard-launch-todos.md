@@ -730,10 +730,12 @@ experts are refused; a resident winner is never silently replaced by mmap.
     tier + band)` and `memory.high = max - band`. Automatic expert paging next
     to a paged tier is refused.
   Automatic choice prefers resident, then paged for fit or more context, and
-  never prefers a plan that pages experts automatically. A post-load
-  smaps/memory.stat check refuses missing, anonymous or locked mappings (and,
-  for paged, a copied tier) and persists the contradiction; missing
-  observations are not proof. Remaining: live load, cold/warm and
+  never prefers a plan that pages experts automatically. Evidence keys are
+  scoped by policy through one helper and keep the artifact identity. A
+  post-load smaps/memory.stat check attributes mappings to the tables' file
+  ranges and refuses unmapped, anonymous or locked table pages (and, for
+  paged, a copied tier), persisting the contradiction; execution-weight pages
+  are not judged, and unattributable or missing observations are unknown. Remaining: live load, cold/warm and
   repeated/spread lookup traffic, major faults, HDD reads, agent-task
   correctness and timing on the verified 366 GiB model, after the host DRAM
   fault is resolved.
