@@ -1,6 +1,6 @@
 # ggrun
 
-ggrun (pronounced "ggrun", from "gguf run") helps you choose and run local
+ggrun (from "gguf run") helps you choose and run local
 models on the hardware you already own. It brings model recommendations,
 downloads, backend selection and launch configuration into one terminal UI,
 with a local Claude Code workflow for coding and other agent tasks.
