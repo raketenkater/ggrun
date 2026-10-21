@@ -262,7 +262,7 @@ func computeSparseLookup(caps *detect.Capabilities, model *ModelProfile, opts Op
 		hint = fmt.Sprintf(". The tables load with their layers%s; a backend with a reviewed lazy-loader contract can hold them in host RAM or page them from storage", why)
 	}
 	return nil, fmt.Errorf("model has %d MiB of %s tables and no placement fits: %s%s",
-		bytesToMiBCeil(model.SparseLookupBytes), sparseLookupKind(model), strings.Join(errs, "; "), hint)
+		bytesToMiBCeil(model.SparseLookupBytes), sparseLookupKind(model), strings.TrimRight(strings.Join(errs, "; "), ". \n"), hint)
 }
 
 // sparseLookupPlanBetter ranks candidate a against the current best b:
