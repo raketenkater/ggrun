@@ -106,7 +106,8 @@ On the real headers, layer 1's table is shard 00008 from byte 192 to the end
 
 ## Final review follow-up (2026-10-21)
 
-The [final review](pr93-final-review-20261021.md) of the merged `c392f89`
+The [final review](https://github.com/raketenkater/ggrun/pull/93#issuecomment-6312504286)
+of the merged `c392f89`
 found one missed reader and one overstated log line:
 
 | Finding | Fix | Tests |
@@ -118,7 +119,8 @@ Against the unfixed code, the refresh tests read 0 MiB from the command-side
 writer, or picked up a foreign unscoped entry, and the ledger priced a 3,226 MiB
 estimate instead of the measured graph. Not fixed here (pre-existing, outside
 this tier): the refresh still sizes against raw detected host RAM, without
-Compute's RAM policy or headroom.
+Compute's RAM policy or headroom (core backlog: RUNTIME REFRESH in
+`core-standard-launch-todos.md`).
 
 ## Sparse lookup tier: design
 
