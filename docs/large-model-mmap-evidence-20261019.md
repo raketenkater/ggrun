@@ -193,15 +193,16 @@ and mechanics evidence only.
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and
-`ds-range-repair.jsonl` (private). Status at 2026-10-20 15:30 UTC:
+`ds-range-repair.jsonl` (private). Status at 2026-10-21 16:30 UTC: all ten
+shards match the pin on buffered and `O_DIRECT` reads.
 
 | Shard | State |
 | --- | --- |
 | 00002, 00003, 00004, 00006, 00007, 00010 | pinned SHA-256 on buffered and `O_DIRECT` reads |
 | 00001 | both reads wrong after transfer; block repair rewrote 1 byte (offset 7,654,585,592, mod16 8, XOR 0x40); now verified on both reads |
 | 00005 | buffered right, `O_DIRECT` wrong; block repair rewrote the 2 recorded bytes (17,779,795,818 and 23,447,032,778, mod16 10, XOR 0x10); now verified on both reads |
-| 00008 | both reads wrong after transfer; block repair queued after the GLM-5.3 run so it does not share the HDD with those measurements |
-| 00009 | transferring |
+| 00008 | both reads wrong after transfer; block repair rewrote 2 bytes in one block (92,877,494,250 and 92,877,504,362, mod16 10); now verified on both reads |
+| 00009 | wrong after transfer; block repair rewrote 4 bytes in two blocks (three at mod16 10 from 57,313,309,674 to 57,313,335,146, XOR 0x10; one at 63,123,792,334, mod16 14, XOR 0x40, not the DIMM_D1 pattern); now verified on both reads |
 
 On this `fuseblk` (ntfs-3g) mount `O_DIRECT` is served from the block-device
 cache, so the two reads are independent RAM copies, not a platter re-read.
@@ -225,7 +226,7 @@ fixtures only; no claim of model support.
 | Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests | — | not run |
 | Engram, unreviewed loader → layer tier | placement tests | lazy off puts tables on GPU | not run |
 | Engram, reviewed loader, roomy host → resident tier | placement test (900 GB) | — | not possible on this host |
-| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | blocked: shard 00008/00009, DRAM fault |
+| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | blocked: DRAM fault (shards verified) |
 | Automatic expert paging beside a paged tier refused | placement test | — | not run |
 | Explicit `--lazy-mode on` without contract refused | placement test | — | not run |
 | Synthetic second architecture (dense, `synthetic-rowtable`) | parser + placement + contract tests, CPU-only / single / multi GPU | — | none (synthetic) |
@@ -239,6 +240,9 @@ After the review fixes (2026-10-20): uncached `scripts/verify-core-engine.sh`
 passed; `go test -count=1 ./...` passed; `GOOS=windows go vet` of the changed
 packages passed; `python3 tests/test_parse_gguf.py` passed. CI results are on
 the PR.
+
+After the final-review follow-up and the size/topology matrix (2026-10-21,
+`f1f2916`): uncached `scripts/verify-core-engine.sh` passed.
 
 ## Not done
 
