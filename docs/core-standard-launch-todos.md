@@ -4091,3 +4091,10 @@ shards now match the repo sha256. Launch (default flags, 3 GPUs): fork backend
 ready ~3.7 min, ctx 262,144, KV q8_0 on GPU. Decode 24.1-24.9 tok/s (38-token
 prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
 
+## RUNTIME REFRESH — explicit RAM budget not applied — 2026-10-21
+
+- [ ] `RefreshRuntimeCachePolicy` (Claude relaunch) sizes the prompt cache and
+  checkpoints against freshly detected host RAM. It does not apply Compute's RAM
+  policy or headroom, so an explicit RAM budget can be exceeded on refresh.
+  Found in the PR #97 review; pre-existing, independent of the sparse lookup
+  tier. Fix in core with a refresh-versus-Compute parity test under a RAM limit.

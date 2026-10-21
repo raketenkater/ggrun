@@ -104,6 +104,24 @@ failures with a test overlay. Each is now a permanent test:
 On the real headers, layer 1's table is shard 00008 from byte 192 to the end
 (104,449,677,696 B), so that shard's mapping is attributed to the table.
 
+## Final review follow-up (2026-10-21)
+
+The [final review](https://github.com/raketenkater/ggrun/pull/93#issuecomment-6312504286)
+of the merged `c392f89`
+found one missed reader and one overstated log line:
+
+| Finding | Fix | Tests |
+| --- | --- | --- |
+| P2 Claude relaunch refresh lost scoped prompt-cache measurements | `strategyAccounting` gives exported entry points that take a finished strategy the plan's policy, its scoped tag and its model view. `RefreshRuntimeCachePolicy` reads under the scoped tag and sizes CRAM on Compute's inputs (resident: tier-charged host RAM, footprint before the tier). Audit: `BuildResourceLedger`/`AnalyzeStrategy` (calibration) had the same unscoped read and ignored measured graphs; same fix, and an underived resident footprint now charges the tier. | `TestRuntimeRefreshReadsPolicyScopedPromptCache` (paged, resident, no-evidence parity, other policy and unscoped negatives, ordinary model), `TestResourceLedgerPricesLookupTierOnPolicyView`, `TestPreviousClaudePromptCacheReachesRuntimeRefresh` (served log → record → refresh; other policy; ordinary model) |
+| Summary claimed clean table pages without attribution | The passing check's summary says "table pages unknown" when ranges are missing or a mixed mapping holds locks or anonymous pages. Missing data still never rejects. | `TestSparseLookupObservationSummaryStaysUnknown` |
+
+Against the unfixed code, the refresh tests read 0 MiB from the command-side
+writer, or picked up a foreign unscoped entry, and the ledger priced a 3,226 MiB
+estimate instead of the measured graph. Not fixed here (pre-existing, outside
+this tier): the refresh still sizes against raw detected host RAM, without
+Compute's RAM policy or headroom (core backlog: RUNTIME REFRESH in
+`core-standard-launch-todos.md`).
+
 ## Sparse lookup tier: design
 
 - Tensor role: the parser adapter table. Go mirrors it

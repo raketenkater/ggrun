@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/server"
@@ -631,5 +632,85 @@ func TestEvidenceTagScopesSparsePolicy(t *testing.T) {
 	}
 	if placement.SparseLookupScopedTag(paged, placement.SparseLookupPaged) != paged {
 		t.Fatal("policy scoping must be idempotent")
+	}
+}
+
+// PR #93 final review P2, command side: a previous Claude run's served log is
+// recorded under the plan's scoped tag, and the relaunch refresh (request
+// options, full profile) must read that measurement back. Another policy and
+// an ordinary model stay isolated.
+func TestPreviousClaudePromptCacheReachesRuntimeRefresh(t *testing.T) {
+	const served = "srv alloc: - prompt state size 9650.558 MiB exceeds cache size limit 3584.000 MiB, skipping\n"
+	caps := &detect.Capabilities{
+		GPUs: []detect.GPU{{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564}},
+		RAM:  detect.RAMInfo{TotalMB: 400000, FreeMB: 380000},
+	}
+	model := func(tier int64) *placement.ModelProfile {
+		m := engramModel()
+		m.Path, m.SizeBytes, m.TotalSizeMB, m.NumLayers, m.CTXTrain = "/models/ds-00001-of-00010.gguf", 393292445504, 375072, 40, 1048576
+		if tier == 0 {
+			m.ModelArch, m.SparseLookupBytes, m.SparseLookupKind = "deepseek4", 0, ""
+		}
+		return m
+	}
+	plan := func(policy placement.SparseLookupPolicy) *placement.Strategy {
+		s := lookupStrategy()
+		s.ContextSize, s.UBatchSize, s.Parallel, s.KVQuality, s.KVPlacement = 65536, 512, 1, "high", "gpu"
+		s.SparseLookupPolicy = policy
+		if policy == "" {
+			s.SparseLookupMB, s.SparseLookupBytes, s.SparseLookupCapability, s.SparseLookupFlag = 0, 0, "", ""
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name           string
+		tier           int64
+		writer, reader placement.SparseLookupPolicy
+		want           float64
+	}{
+		{"paged plan", engramTierBytes, placement.SparseLookupPaged, placement.SparseLookupPaged, 9650.558},
+		{"other policy", engramTierBytes, placement.SparseLookupPaged, placement.SparseLookupResident, 0},
+		{"ordinary model", 0, "", "", 9650.558},
+	} {
+		cfg := &config.Config{CacheDir: t.TempDir()}
+		req := &launchRequest{ModelPath: "/models/ds-00001-of-00010.gguf", Port: 18080, ClaudeCode: true, KVPlacement: "gpu", KVQuality: "high"}
+		be := reviewedLazyBackend()
+		m := model(tc.tier)
+		if !recordPreviousClaudePromptCache(req, cfg, m, plan(tc.writer), be, caps, served) {
+			t.Fatalf("%s: the served measurement was not recorded as growth", tc.name)
+		}
+		before := plan(tc.reader)
+		next := placement.RefreshRuntimeCachePolicy(caps, m, before, placementOptionsFromRequest(req, m, be, cfg.CacheDir))
+		if got := next.MeasuredPromptCacheEntryMB; got < tc.want-1 || got > tc.want+1 { // stored at 0.1 MiB
+			t.Fatalf("%s: refresh read %.3f MiB, want %.3f (writer %q)", tc.name, next.MeasuredPromptCacheEntryMB, tc.want,
+				scopedProbeBackendTagForStrategy(req, m, be, plan(tc.writer)))
+		}
+		if tc.want > 0 && next.CRAM <= before.CRAM {
+			t.Fatalf("%s: measured entry did not resize -cram: %d -> %d", tc.name, before.CRAM, next.CRAM)
+		}
+	}
+}
+
+// PR #93 final review: a passing live check claims clean table pages only
+// when every table byte was attributed.
+func TestSparseLookupObservationSummaryStaysUnknown(t *testing.T) {
+	files := splitFiles()
+	clean := parseSmapsModelUsage(strings.NewReader(splitSmaps(0, 0, 0)), files)
+	if got := sparseLookupObservationSummary(rangedStrategy(placement.SparseLookupPaged), &clean, 140000, ""); !strings.Contains(got, "no table page anonymous or locked") {
+		t.Fatalf("attributed clean tables: %q", got)
+	}
+	unranged := rangedStrategy(placement.SparseLookupPaged)
+	unranged.SparseLookupRanges = nil
+	for name, tc := range map[string]struct {
+		s    *placement.Strategy
+		note string
+	}{
+		"ranges unknown":          {unranged, ""},
+		"mixed mapping with note": {rangedStrategy(placement.SparseLookupPaged), "4 KiB locked / 0 KiB anonymous in mappings that mix lookup tables and other tensors; not attributable"},
+	} {
+		got := sparseLookupObservationSummary(tc.s, &clean, 140000, tc.note)
+		if strings.Contains(got, "no table page anonymous or locked") || !strings.Contains(got, "table pages unknown") {
+			t.Errorf("%s: summary overstates the observation: %q", name, got)
+		}
 	}
 }

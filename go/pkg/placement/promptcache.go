@@ -379,11 +379,28 @@ func RefreshRuntimeCachePolicy(caps *detect.Capabilities, model *ModelProfile, s
 		return s
 	}
 	next := cloneStrategy(s)
+	// Read and size under the plan's lookup-tier policy: the measurement was
+	// recorded under its scoped tag, and Compute sized CRAM on its view.
+	model, opts = strategyAccounting(model, s, opts)
 	LoadMeasuredPromptCache(opts.CacheDir, model, next, backendCacheTag(opts), caps.GPUs)
 	totalSizeMB := model.TotalSizeMB
 	if totalSizeMB <= 0 {
 		totalSizeMB = int((model.SizeBytes + 1048575) / 1048576)
 	}
-	applyRuntimeCachePolicy(model, next, caps, totalSizeMB, computeKVTotalMBForStrategy(model, next), opts)
+	// Compute sized a resident tier's cache against host RAM already charged
+	// for the tier and a footprint that did not yet include it; the resolved
+	// footprint now does, so size on the same inputs.
+	hostCaps, sizing := caps, next
+	if opts.sparseLookupPolicy == SparseLookupResident {
+		if residentCaps, err := sparseLookupResidentCaps(caps, model, opts); err == nil {
+			hostCaps = residentCaps
+			if next.SparseLookupMB > 0 && next.PlannedHostFootprintMB > next.SparseLookupMB {
+				sizing = cloneStrategy(next)
+				sizing.PlannedHostFootprintMB -= next.SparseLookupMB
+			}
+		}
+	}
+	applyRuntimeCachePolicy(model, sizing, hostCaps, totalSizeMB, computeKVTotalMBForStrategy(model, next), opts)
+	next.CRAM, next.MaxCheckpoints, next.CheckpointMinStep = sizing.CRAM, sizing.MaxCheckpoints, sizing.CheckpointMinStep
 	return next
 }

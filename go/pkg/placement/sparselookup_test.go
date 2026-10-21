@@ -453,3 +453,129 @@ func TestSparsePolicyEvidenceRoundTrip(t *testing.T) {
 		t.Fatalf("relaunch from the verified record cannot read the measurement: %+v", restored)
 	}
 }
+
+// PR #93 final review P2: the Claude relaunch refresh receives the full
+// profile and request options. It must read the prompt-cache measurement the
+// command side recorded under the plan's policy-scoped tag, size CRAM on the
+// same accounting Compute used, and stay isolated from other policies and
+// from ordinary models.
+func TestRuntimeRefreshReadsPolicyScopedPromptCache(t *testing.T) {
+	for _, tc := range []struct {
+		free   int
+		policy SparseLookupPolicy
+	}{{204700, SparseLookupPaged}, {900000, SparseLookupResident}} {
+		full, caps := dsv41Profile(), dsv41Host(tc.free)
+		opts := dsv41Opts(t, SparseLookupFileBacked)
+		s, err := Compute(caps, full, opts)
+		if err != nil || s.SparseLookupPolicy != tc.policy {
+			t.Fatalf("%s fixture: %v %+v", tc.policy, err, s)
+		}
+		// Without new evidence the refresh reproduces Compute's sizing.
+		if same := RefreshRuntimeCachePolicy(caps, full, s, opts); same.CRAM != s.CRAM || same.MaxCheckpoints != s.MaxCheckpoints {
+			t.Fatalf("%s: refresh without a measurement changed sizing: cram %d -> %d, checkpoints %d -> %d",
+				tc.policy, s.CRAM, same.CRAM, s.MaxCheckpoints, same.MaxCheckpoints)
+		}
+		plain := backendCacheTag(Options{BackendTag: opts.BackendTag})
+		other := SparseLookupResident
+		if tc.policy == SparseLookupResident {
+			other = SparseLookupPaged
+		}
+		record := func(tag string, entryMB float64) {
+			t.Helper()
+			if err := RecordPromptCacheObservation(opts.CacheDir, full, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+				tag, caps.GPUs, s.Parallel, PromptCacheObservation{LargestEntryMB: entryMB}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Evidence for another policy or for the unscoped namespace is not this plan's.
+		record(plain, 99000)
+		record(SparseLookupScopedTag(plain, other), 98000)
+		if leaked := RefreshRuntimeCachePolicy(caps, full, s, opts); leaked.MeasuredPromptCacheEntryMB != 0 {
+			t.Fatalf("%s refresh read foreign evidence: %.0f MiB", tc.policy, leaked.MeasuredPromptCacheEntryMB)
+		}
+		// An entry whose slots+1 working set exceeds the derived budget.
+		slots := max(1, s.Parallel)
+		entryMB := float64(s.CRAM/(slots+1) + 2048)
+		record(SparseLookupScopedTag(plain, tc.policy), entryMB)
+		next := RefreshRuntimeCachePolicy(caps, full, s, opts)
+		if next.MeasuredPromptCacheEntryMB != entryMB {
+			t.Fatalf("%s: relaunch refresh lost the measurement: got %.0f, writer tag %q", tc.policy, next.MeasuredPromptCacheEntryMB, SparseLookupScopedTag(plain, tc.policy))
+		}
+		if next.CRAM <= s.CRAM {
+			t.Fatalf("%s: measured entry did not reach CRAM: %d -> %d", tc.policy, s.CRAM, next.CRAM)
+		}
+		if next.SparseLookupPolicy != s.SparseLookupPolicy || next.ContextSize != s.ContextSize || next.PlannedHostFootprintMB != s.PlannedHostFootprintMB {
+			t.Fatalf("%s: refresh changed the plan: %+v", tc.policy, next)
+		}
+	}
+
+	// An ordinary model keeps the unscoped namespace and ignores scoped entries.
+	model := dsv41Profile()
+	model.SparseLookupBytes, model.SparseLookupKind, model.SparseLookupLayerBytes, model.ModelArch = 0, "", nil, "deepseek4"
+	model.SizeBytes -= 208902215200
+	model.TotalSizeMB -= dsv41TierMB
+	caps, opts := dsv41Host(204700), dsv41Opts(t, SparseLookupFileBacked)
+	s, err := Compute(caps, model, opts)
+	if err != nil || s.SparseLookupPolicy != "" {
+		t.Fatalf("ordinary fixture: %v %+v", err, s)
+	}
+	plain := backendCacheTag(Options{BackendTag: opts.BackendTag})
+	if err := RecordPromptCacheObservation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+		SparseLookupScopedTag(plain, SparseLookupPaged), caps.GPUs, s.Parallel, PromptCacheObservation{LargestEntryMB: 97000}); err != nil {
+		t.Fatal(err)
+	}
+	if got := RefreshRuntimeCachePolicy(caps, model, s, opts); got.MeasuredPromptCacheEntryMB != 0 {
+		t.Fatalf("ordinary model read a policy-scoped entry: %.0f", got.MeasuredPromptCacheEntryMB)
+	}
+	if err := RecordPromptCacheObservation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+		plain, caps.GPUs, s.Parallel, PromptCacheObservation{LargestEntryMB: 3000}); err != nil {
+		t.Fatal(err)
+	}
+	if got := RefreshRuntimeCachePolicy(caps, model, s, opts); got.MeasuredPromptCacheEntryMB != 3000 {
+		t.Fatalf("ordinary model lost its own entry: %.0f", got.MeasuredPromptCacheEntryMB)
+	}
+}
+
+// The resource ledger is another exported reader of a finished strategy: a
+// paged or resident tier is priced on the policy's view (tables are not GPU
+// weights) whether the caller passes the full profile or Compute's view.
+func TestResourceLedgerPricesLookupTierOnPolicyView(t *testing.T) {
+	for _, free := range []int{204700, 900000} {
+		full, caps := dsv41Profile(), dsv41Host(free)
+		opts := dsv41Opts(t, SparseLookupFileBacked)
+		s, err := Compute(caps, full, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The command side records a measured graph under the plan's scoped tag.
+		writerTag := SparseLookupScopedTag(backendCacheTag(Options{BackendTag: opts.BackendTag}), s.SparseLookupPolicy)
+		if err := RecordMeasuredComputeBuffers(opts.CacheDir, full, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+			writerTag, caps.GPUs, s.Parallel, map[int]int{0: 7001, 1: 7002, 2: 7003}); err != nil {
+			t.Fatal(err)
+		}
+		internal := opts
+		internal.sparseLookupPolicy = s.SparseLookupPolicy
+		external := BuildResourceLedger(caps, full, s, opts)
+		if pc := internal.loadProbeCacheForStrategy(full, s, caps.GPUs); pc == nil {
+			t.Fatalf("%s: fixture measurement not readable under %q", s.SparseLookupPolicy, writerTag)
+		}
+		planned := BuildResourceLedger(caps, sparseLookupModelView(full, s.SparseLookupPolicy), s, internal)
+		gpuModelMB := 0
+		for i := range external.Devices {
+			if external.Devices[i].ModelMB != planned.Devices[i].ModelMB || external.Devices[i].GraphMB != planned.Devices[i].GraphMB ||
+				external.Devices[i].RequiredMB != planned.Devices[i].RequiredMB {
+				t.Fatalf("%s device %d: external %+v, planned %+v", s.SparseLookupPolicy, i, external.Devices[i], planned.Devices[i])
+			}
+			gpuModelMB += external.Devices[i].ModelMB
+		}
+		if external.Host != planned.Host || external.Fits != planned.Fits {
+			t.Fatalf("%s host: external %+v fits=%v, planned %+v fits=%v", s.SparseLookupPolicy, external.Host, external.Fits, planned.Host, planned.Fits)
+		}
+		if len(external.MissingComputeGPUs) != 0 {
+			t.Fatalf("%s: measured graphs not read: missing %v", s.SparseLookupPolicy, external.MissingComputeGPUs)
+		}
+		if gpuModelMB >= dsv41TierMB {
+			t.Fatalf("%s: %d MiB of GPU model rows include the lookup tables", s.SparseLookupPolicy, gpuModelMB)
+		}
+	}
+}
