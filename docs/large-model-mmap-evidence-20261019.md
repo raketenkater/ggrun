@@ -241,8 +241,9 @@ passed; `go test -count=1 ./...` passed; `GOOS=windows go vet` of the changed
 packages passed; `python3 tests/test_parse_gguf.py` passed. CI results are on
 the PR.
 
-After the final-review follow-up and the size/topology matrix (2026-10-21,
-`f1f2916`): uncached `scripts/verify-core-engine.sh` passed.
+After the final-review follow-up (#97) and the size/topology matrix, combined
+on main after the #97 merge (2026-10-21): uncached `scripts/verify-core-engine.sh`
+passed.
 
 ## Not done
 
