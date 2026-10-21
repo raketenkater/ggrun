@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -178,6 +180,7 @@ func findParseScript() string {
 			filepath.Join(appHome, "parse_gguf.py"),
 		)
 	}
+	explicit := len(candidates) // locations the user or installer named
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		// A development or source-install binary commonly lives in
@@ -217,31 +220,50 @@ func findParseScript() string {
 		filepath.Join(home, "ggrun", "tools", "gguf", "parse_gguf.py"),
 		filepath.Join(home, "parse_gguf.py"),
 	)
-	var fallback string
-	for _, p := range candidates {
+	// A parser with a tensor-accounting contract in a location named by
+	// LLM_SCRIPT_DIR, LLM_SERVER_HOME or LLM_APP_HOME is an explicit choice.
+	// Among the discovered locations the newest contract wins, so a stale
+	// source checkout in the working directory cannot shadow a newer installed
+	// parser; equal versions keep the order above.
+	var fallback, best string
+	bestSchema := 0
+	for i, p := range candidates {
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
 		abs, _ := filepath.Abs(p)
-		if parserHasCurrentTensorAccounting(abs) {
+		schema := parserTensorAccountingSchema(abs)
+		if schema > 0 && i < explicit {
 			return abs
+		}
+		if schema > bestSchema {
+			best, bestSchema = abs, schema
 		}
 		if fallback == "" {
 			fallback = abs
 		}
 	}
+	if best != "" {
+		return best
+	}
 	return fallback
 }
 
-// parserHasCurrentTensorAccounting is true when the helper exposes a versioned
-// tensor-accounting contract. Looking only for a PLE byte field cannot tell a
-// stale parser from a valid qwen4exp file that simply has no PLE tensor.
-func parserHasCurrentTensorAccounting(path string) bool {
+var parserSchemaPattern = regexp.MustCompile(`tensor_accounting_schema['"]\]?\s*[:=]\s*(\d+)`)
+
+// parserTensorAccountingSchema is the tensor-accounting contract version a
+// helper declares: 0 without the contract, 1 when its version is unreadable.
+func parserTensorAccountingSchema(path string) int {
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
+	if err != nil || !bytes.Contains(data, []byte("tensor_accounting_schema")) {
+		return 0
 	}
-	return bytes.Contains(data, []byte("tensor_accounting_schema"))
+	if m := parserSchemaPattern.FindSubmatch(data); m != nil {
+		if v, err := strconv.Atoi(string(m[1])); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 1
 }
 
 // SparseLookupRange is one lookup table's byte range inside a shard file.
