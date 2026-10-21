@@ -119,6 +119,7 @@ func AnalyzeStrategy(caps *detect.Capabilities, model *ModelProfile, s *Strategy
 	if s == nil {
 		return CandidateEstimate{Confidence: "unknown", Bottleneck: "no strategy"}
 	}
+	model, opts = strategyAccounting(model, s, opts)
 	ledger := BuildResourceLedger(caps, model, s, opts)
 	s.ResourceLedger = &ledger
 	estimate := EstimateStrategyCost(caps, model, s, opts, ledger)
@@ -139,6 +140,9 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 		ledger.Evidence = "incomplete-input"
 		return ledger
 	}
+	// A lookup-tier plan is priced on its policy's view with its scoped
+	// evidence: paged or resident tables are not GPU weights.
+	model, opts = strategyAccounting(model, s, opts)
 
 	runtimeCaps, err := restrictGPUs(caps, opts.GPUs)
 	if err != nil || runtimeCaps == nil {
@@ -267,6 +271,11 @@ func BuildResourceLedger(caps *detect.Capabilities, model *ModelProfile, s *Stra
 		hostRequired = plannedRAMRuntimeOverheadMB(runtimeCaps, model, s.UBatchSize, totalSizeMB, opts)
 		if s.Type == CPUOnly || s.Type == DenseCPUOffload {
 			hostRequired += totalSizeMB
+		}
+		if s.SparseLookupPolicy == SparseLookupResident {
+			// The view left the tables out of the model; a resident tier
+			// still occupies host RAM.
+			hostRequired += s.SparseLookupMB
 		}
 	}
 	ledger.Host = HostResourceLedger{

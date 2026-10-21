@@ -166,6 +166,23 @@ func sparseLookupModelView(model *ModelProfile, policy SparseLookupPolicy) *Mode
 	return &view
 }
 
+// strategyAccounting returns the model view and options a resolved strategy
+// was planned with. Exported entry points that take a finished strategy
+// (runtime refresh, resource ledger) receive the full profile and request
+// options, while Compute planned a lookup-tier model on its policy's view and
+// read policy-scoped evidence. Options that already carry a policy are
+// Compute's own and are returned unchanged, so the view is never applied twice.
+func strategyAccounting(model *ModelProfile, s *Strategy, opts Options) (*ModelProfile, Options) {
+	if model == nil || s == nil || s.SparseLookupPolicy == "" || opts.sparseLookupPolicy != "" {
+		return model, opts
+	}
+	opts.sparseLookupPolicy = s.SparseLookupPolicy
+	if model.SparseLookupBytes > 0 {
+		model = sparseLookupModelView(model, s.SparseLookupPolicy)
+	}
+	return model, opts
+}
+
 // ArtifactSizeBytes is the model file's size, unchanged by a sparse lookup
 // accounting view. Evidence keys use it, so a measurement recorded against
 // the full profile is found again by a policy's planning pass.
