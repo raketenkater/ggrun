@@ -229,6 +229,7 @@ fixtures only; no claim of model support.
 | Automatic expert paging beside a paged tier refused | placement test | — | not run |
 | Explicit `--lazy-mode on` without contract refused | placement test | — | not run |
 | Synthetic second architecture (dense, `synthetic-rowtable`) | parser + placement + contract tests, CPU-only / single / multi GPU | — | none (synthetic) |
+| Synthetic dense and MoE × 2 GiB and 96 GiB tables × CPU-only / single / multi GPU × unknown / reviewed loader (64 GB host) | `TestSyntheticTierSizeTopologyMatrix`: small → resident (reviewed) or layer; large → paged with execution weights resident (reviewed) or a refusal naming the loader contract | — | none (synthetic) |
 | Negative fixtures (no metadata, wrong prefix, unlisted layer, other arch, "ngram" name) | parser tests | — | — |
 | Windows | lookup contract is Linux-only (unknown on Windows → layer tier); cross-compile and CI | — | not run (no Windows GPU run) |
 
