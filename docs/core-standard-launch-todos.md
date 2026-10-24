@@ -4098,3 +4098,69 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   policy or headroom, so an explicit RAM budget can be exceeded on refresh.
   Found in the PR #97 review; pre-existing, independent of the sparse lookup
   tier. Fix in core with a refresh-versus-Compute parity test under a RAM limit.
+
+## CLAUDE MODE — health monitor fires during shutdown — 2026-10-23
+
+- [ ] With `--claude-code`, the 30 s health monitor keeps running while ggrun
+  stops the backend. In the live DeepSeek cold cell (2026-10-23) a normal stop
+  printed "backend died mid-session" and scanned the backend log for an OOM.
+  Nothing was recorded, but a shutdown that left an OOM-like line in the log
+  could revoke a good profile. Cancel `healthCtx` before stopping the backend,
+  and test that a requested stop never reaches the OOM recorder.
+
+## SPARSE LOOKUP PAGED TIER — cold prefill on HDD — 2026-10-23
+
+- [ ] Live DeepSeek V4.1 Flash IQ2_XS, paged tier on an ntfs-3g HDD: a cold
+  prompt ran at 3.2 tok/s and read about 140 MiB of table rows per 1k tokens. A
+  warm repeat ran at 16 tok/s with no disk reads. The first ~13k-token Claude
+  Code request did not finish within the 3,600 s task limit. The plan is
+  correct but too slow for agent use on this storage. Candidates: report the
+  measured row-read cost in the plan and admission summary; warn when the
+  table file sits on a rotational or FUSE device; prefetch the rows of a
+  prompt in one pass. Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## CALIBRATION — elapsed budget excludes slow-loading models — 2026-10-23
+
+- [ ] Live DeepSeek V4.1 Flash IQ2_XS (full load about 20 min): auto
+  calibration refused its finalist `-b 256 -ub 128` because measuring it and
+  restoring the baseline needed about 62 min against the 20 min budget. An
+  explicit launch of that finalist measured warm prefill +29% (20.4 vs 15.7
+  tok/s), above the predicted 1.18. Every relaunch replays "baseline kept",
+  so a slow-loading model never adopts a better measured shape. Options:
+  measure the challenger in the next launch instead of in the same one, or
+  scale the budget to the measured load time. Keep the fail-closed default.
+  Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## PLACEMENT — context fill costs 3x prefill on CPU-MoE models — 2026-10-23
+
+- [ ] Live DeepSeek V4.1 Flash IQ2_XS (37 CPU MoE layers): auto chose ctx
+  1,048,576 over 4 slots. The compute buffers this needs left only `-ub 64`,
+  and warm prefill was 15.6 tok/s. An explicit `-ctx 262144 --parallel 1 -b
+  512 -ub 512` moved KV to the CPU and 4 MoE layers to GPU, and warm prefill
+  rose to 47.0 tok/s (3.0x); decode was unchanged. Context and slots are
+  maximised before microbatch size, though prefill dominates agent sessions.
+  Make context/slots versus ubatch a measured trade in the optimizer (agent
+  cost model), with the context floor taken from the harness's real need.
+  This must not regress models whose KV-on-GPU decode wins.
+  Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## MMAP SCOPE — memory.high collapsed onto mapped experts — 2026-10-24
+
+- [ ] (fix in PR #99) Live GLM-5.3 UD-IQ2_M with `--mmap` (201,504 MiB mapped
+  experts): after the canary, `resizeScopeToMeasuredFootprint` set
+  `memory.high` to the non-reclaimable state + headroom (24,183 MiB).
+  `memory.high` throttles page cache too, so RSS fell from 192 GB to 23 GB,
+  IO pressure reached 46% full, decode was 0.32 tok/s and prefill 0.13–0.44
+  tok/s. Any mmap launch whose mapped experts exceed the non-reclaimable
+  ceiling is throttled the same way. The fix leaves room for the mapped experts up to the planned
+  ceiling minus headroom. A matched live GLM rerun is required after merge.
+
+## TUI — large-model Claude Code launch — 2026-10-24
+
+- [ ] Settings screen shows "Full SWA cache: on (+35.1 GiB KV)" for DeepSeek
+  V4.1 Flash; the launch then turned it off ("--swa-full would cost 5.7x the
+  KV per token"). The screen should show the launch's decision.
+- [ ] With Claude Code on, the TUI starts Claude in its own working
+  directory. Declining Claude's folder-trust prompt ended the session: the
+  backend (20 min load) was stopped and ggrun exited 1 with no message.
+  Teardown was clean. Say why the server stopped, or offer to keep serving.
