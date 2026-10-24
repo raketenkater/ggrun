@@ -447,7 +447,8 @@ passed.
 
 PR #99 (mmap `memory.high`, 2026-10-24): uncached
 `scripts/verify-core-engine.sh` passed; `GOOS=windows go vet ./cmd/ggrun
-./pkg/server` passed.
+./pkg/server` passed. CI: every Linux and Windows job passed; the macOS
+release smoke failed (deprecated, non-blocking).
 
 ## Not done
 
@@ -465,4 +466,4 @@ PR #99 (mmap `memory.high`, 2026-10-24): uncached
   every challenger on 20-minute loads; context is filled before ubatch; the
   relaunch does not reuse the measured CPU MoE count; table page cache is
   lost on relaunch.
-- Linux/Windows CI for the docs branch and for PR #99.
+- Review of PR #99 and of this record.
