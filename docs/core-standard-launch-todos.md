@@ -4154,3 +4154,13 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   tok/s. Any mmap launch whose mapped experts exceed the non-reclaimable
   ceiling is throttled the same way. The fix leaves room for the mapped experts up to the planned
   ceiling minus headroom. A matched live GLM rerun is required after merge.
+
+## TUI — large-model Claude Code launch — 2026-10-24
+
+- [ ] Settings screen shows "Full SWA cache: on (+35.1 GiB KV)" for DeepSeek
+  V4.1 Flash; the launch then turned it off ("--swa-full would cost 5.7x the
+  KV per token"). The screen should show the launch's decision.
+- [ ] With Claude Code on, the TUI starts Claude in its own working
+  directory. Declining Claude's folder-trust prompt ended the session: the
+  backend (20 min load) was stopped and ggrun exited 1 with no message.
+  Teardown was clean. Say why the server stopped, or offer to keep serving.

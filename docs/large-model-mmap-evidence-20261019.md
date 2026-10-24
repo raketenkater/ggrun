@@ -353,6 +353,32 @@ holds the whole session (peak observed context in earlier live runs:
 128,256). The trade is fewer concurrent slots. Cold new text stays
 HDD-bound in every shape.
 
+### DeepSeek V4.1 Flash IQ2_XS through the TUI
+
+`ggrun tui` (PATH binary above), started from a terminal, with `LLM_MODEL_DIR`
+set to the DeepSeek folder and a copy of the DeepSeek cache. Model picked
+from the list, Claude Code turned on (`x`), Launch, Confirm. The dry run
+shows the same command as the CLI cells
+(`--ctx-size fit --kv-placement auto --support-expert auto --claude-code`,
+port 8081).
+
+- Plan as in the CLI cells: paged lookup tier, ctx 1,048,576 (4 slots),
+  `-b 128 -ub 64`. Full SWA was turned off at launch, although the settings
+  screen showed it on.
+- Ready in 20m23s with one load. The live tier check showed 10 mappings,
+  375,072 MiB mapped and no table page anonymous or locked. Memory scope:
+  high 201,856 MiB, max 205,952 MiB.
+- Gateway `127.0.0.1:41303`, Anthropic streaming request: HTTP 200, first
+  token 9.5 s, 69 events in 42.9 s. Cancel after 5 events, backend health
+  ok; reconnect first token 0.35 s (prefix reused), 20.4 s total. Decode
+  2.9 tok/s on a cold page cache.
+- The TUI then started Claude Code in its working directory. Declining the
+  folder-trust prompt ended the session: ggrun exited 1 with no message.
+  The backend stopped within 8 s; there was no leftover process or scope,
+  the GPUs were back to 1 MiB, and 205 GiB was available.
+- Harness note: piping the TUI's output (`| tee`) leaves it on "Loading..."
+  because it never receives a terminal size. Use a real terminal.
+
 ### GLM-5.3 UD-IQ2_M without `--mmap` (refusal)
 
 The first GLM cell (no extra flags) planned for 101 s and then refused:
@@ -454,7 +480,6 @@ release smoke failed (deprecated, non-blocking).
 
 - GLM-5.3 cold and relaunch with `--mmap` after PR #99 is reviewed, merged
   and installed as the PATH binary.
-- TUI launch of a large model (CLI and Claude gateway are covered above).
 - The DeepSeek cells ran on a host with the faulty DRAM pages offlined, not
   on repaired hardware. The offlining is lost on reboot, and the stick
   swap is still pending.
