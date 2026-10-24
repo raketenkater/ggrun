@@ -4143,3 +4143,14 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   cost model), with the context floor taken from the harness's real need.
   This must not regress models whose KV-on-GPU decode wins.
   Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## MMAP SCOPE — memory.high collapsed onto mapped experts — 2026-10-24
+
+- [ ] (fix in PR #99) Live GLM-5.3 UD-IQ2_M with `--mmap` (201,504 MiB mapped
+  experts): after the canary, `resizeScopeToMeasuredFootprint` set
+  `memory.high` to the non-reclaimable state + headroom (24,183 MiB).
+  `memory.high` throttles page cache too, so RSS fell from 192 GB to 23 GB,
+  IO pressure reached 46% full, decode was 0.32 tok/s and prefill 0.13–0.44
+  tok/s. Any mmap launch whose mapped experts exceed the non-reclaimable
+  ceiling is throttled the same way. The fix leaves room for the mapped experts up to the planned
+  ceiling minus headroom. A matched live GLM rerun is required after merge.
