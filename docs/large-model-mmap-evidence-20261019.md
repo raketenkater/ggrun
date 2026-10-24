@@ -363,6 +363,33 @@ planner had moved between 72 and 76 CPU MoE layers and a context of 346k to
 381k tokens before it settled on the last proven plan. The GLM cells were
 re-queued with `--mmap`.
 
+### GLM-5.3 UD-IQ2_M cold with `--mmap` (memory.high collapse)
+
+- Model: 6 shards, 238,577,585,701 bytes, on the HDD. Args
+  `--claude-code --mmap`. Plan: ctx 233,472 (3 slots), `-b 2048 -ub 256`,
+  KV q8_0 on GPU, 201,504 MiB of mapped CPU experts. Two loads (one
+  recovery); ready at 3,869 s. GPU peak 11,047 / 22,822 / 10,521 MiB.
+- Before ready, the short prefill pilot and the calibration baseline both hit
+  their client timeouts, so ggrun served the default placement. The verifier
+  measured 0.1 tok/s prefill and checked the completion endpoint only.
+- At ready the live pageability check measured 838 MiB non-reclaimable.
+  `resizeScopeToMeasuredFootprint` then lowered `memory.high` from 205,963 to
+  24,183 MiB; `memory.max` (210,305 MiB) was unchanged. Within 12 minutes the
+  backend RSS fell from 199,930 to 22,678 MiB and stayed at 22–24 GiB for the
+  rest of the run. `MemAvailable` stayed near 207 GiB throughout.
+- Serving after the resize (2.5 h): 4.26 M major faults and 1.16 TiB read
+  from the HDD (about 132 MiB/s, its sequential ceiling). IO pressure
+  reached 46% full.
+- Pilot request: 298 tokens at 0.44 tok/s. Stream: first token after 736 s,
+  65 chunks, 3,232 s in total. Cancel: 5 events before the abort, health ok;
+  reconnect first token after 319 s. Task `calc` timed out at 3,600 s (0/1);
+  `textstats` and `inventory` were skipped. Stop: 3.6 s, exit 0, no leftover
+  backend. The shutdown "backend died mid-session" message appeared again.
+- The relaunch cell was not run, since it would hit the same throttle. Fix
+  (PR #99): `memory.high` = the non-reclaimable ceiling plus the mapped
+  experts, capped one headroom below `memory.max`, with a warning when the
+  experts do not fit. GLM cold and relaunch are rerun after review and merge.
+
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and
@@ -396,10 +423,10 @@ fixtures only; no claim of model support.
 | --- | --- | --- | --- |
 | Ordinary resident model, no tier | existing suite + `TestOrdinaryModelIgnoresSparseLookupInputs` | — | Qwen3.5-4B control (2026-10-19, branch binary) |
 | Explicit mapping on `--load-mode` builds; native/legacy fold, idempotence | `TestLoadMode*`, passthrough and fingerprint tests | — | `--load-mode mmap` observed (2026-10-19) |
-| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests | — | not run |
+| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests; `TestMMapReclaimHighKeepsMappedExperts` (PR #99) | — | GLM-5.3 (2026-10-24): refusal without `--mmap`; with it, `memory.high` collapse and thrash. Rerun after PR #99 |
 | Engram, unreviewed loader → layer tier | placement tests | lazy off puts tables on GPU | not run |
 | Engram, reviewed loader, roomy host → resident tier | placement test (900 GB) | — | not possible on this host |
-| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | blocked: DRAM fault (shards verified) |
+| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | DeepSeek V4.1 Flash IQ2_XS (2026-10-23, host with faulty pages offlined): cold, relaunch and 4 experiment cells; `ledger` and `calc` correct, one cold timeout |
 | Automatic expert paging beside a paged tier refused | placement test | — | not run |
 | Explicit `--lazy-mode on` without contract refused | placement test | — | not run |
 | Synthetic second architecture (dense, `synthetic-rowtable`) | parser + placement + contract tests, CPU-only / single / multi GPU | — | none (synthetic) |
@@ -418,11 +445,24 @@ After the final-review follow-up (#97) and the size/topology matrix, combined
 on main after the #97 merge (2026-10-21): uncached `scripts/verify-core-engine.sh`
 passed.
 
+PR #99 (mmap `memory.high`, 2026-10-24): uncached
+`scripts/verify-core-engine.sh` passed; `GOOS=windows go vet ./cmd/ggrun
+./pkg/server` passed.
+
 ## Not done
 
-Not done: the live 366 GiB load; memory tiers, major faults and HDD reads
-under cold/warm and repeated/spread lookup traffic; Claude gateway coding and
-tool tasks; cancel, reconnect and relaunch. These need the verified download
-and a clean DRAM result. An HDD random-row lookup rate has not been measured;
-the expected order is about 48 row gathers per token, mostly separate 4 KiB
-pages on a cold cache.
+- GLM-5.3 cold and relaunch with `--mmap` after PR #99 is reviewed, merged
+  and installed as the PATH binary.
+- TUI launch of a large model (CLI and Claude gateway are covered above).
+- The DeepSeek cells ran on a host with the faulty DRAM pages offlined, not
+  on repaired hardware. The offlining is lost on reboot, and the stick
+  swap is still pending.
+- The paged tier on an SSD. Only the device was measured: 7,285 random 4 KiB
+  reads/s at queue depth 1 and 76,235 at depth 16, against about 150 on the
+  HDD. No model run was made, because the SSD has 4.4 GB free.
+- Open defects (backlog in `docs/core-standard-launch-todos.md`): the
+  shutdown health-monitor message; the auto calibration budget rules out
+  every challenger on 20-minute loads; context is filled before ubatch; the
+  relaunch does not reuse the measured CPU MoE count; table page cache is
+  lost on relaunch.
+- Linux/Windows CI for the docs branch and for PR #99.
