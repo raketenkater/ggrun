@@ -323,9 +323,9 @@ func (p *Process) SetMemoryMaxMB(memoryMaxMB int) error {
 
 // SetMemoryHighMB updates the running backend scope's reclaim/throttle
 // boundary without lowering its hard ceiling. Mmap-backed launches use this
-// after the first real canary: measured anonymous state belongs below
-// memory.high, while clean model pages still need the larger memory.max band in
-// which the kernel can evict and re-fault them.
+// after the first real canary. The kernel throttles and reclaims every charged
+// page above memory.high, clean mapped model pages included, so the caller
+// must leave room for the mapped working set, not only the anonymous state.
 func (p *Process) SetMemoryHighMB(memoryHighMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")

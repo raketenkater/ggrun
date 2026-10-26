@@ -4187,6 +4187,55 @@ func TestMeasuredFootprintCgroupMaxMB(t *testing.T) {
 	}
 }
 
+// TestMMapReclaimHighKeepsMappedExperts guards the post-canary memory.high of a
+// file-backed expert plan. The kernel throttles and reclaims every charged page
+// above memory.high, mapped experts included. Live GLM-5.3 (201,504 MiB mapped
+// experts, 2026-10-24) had memory.high tightened to the 24,183 MiB
+// non-reclaimable ceiling: RSS fell from 192 GB to 23 GB, IO pressure reached
+// 46% full, decode 0.32 tok/s. memory.high must leave the mapped experts as
+// much room as the planned ceiling allows, never below the non-reclaimable
+// ceiling, and keep a headroom band below that ceiling.
+func TestMMapReclaimHighKeepsMappedExperts(t *testing.T) {
+	cases := []struct {
+		name                                   string
+		nonReclaimable, mapped, headroom, ceil int
+		wantHigh, wantCached                   int
+	}{
+		{"live GLM: experts exceed RAM, high stops a band below the ceiling", 24183, 201504, 4096, 205963, 201867, 177684},
+		{"experts fit: all of them stay cached", 20000, 30000, 4096, 200000, 50000, 30000},
+		{"ceiling at the non-reclaimable state: never below it", 100000, 50000, 4096, 102000, 100000, 0},
+		{"no headroom configured: up to the ceiling", 20000, 300000, 0, 200000, 200000, 180000},
+		{"unknown ceiling: non-reclaimable plus experts", 20000, 30000, 4096, 0, 50000, 30000},
+		{"no measurement: no resize", 0, 30000, 4096, 200000, 0, 0},
+	}
+	for _, c := range cases {
+		high, cached := mmapExpertReclaimHighMB(c.nonReclaimable, c.mapped, c.headroom, c.ceil)
+		if high != c.wantHigh || cached != c.wantCached {
+			t.Fatalf("%s: got high=%d cached=%d, want high=%d cached=%d", c.name, high, cached, c.wantHigh, c.wantCached)
+		}
+	}
+	for nonRecl := 1000; nonRecl <= 240000; nonRecl += 23000 {
+		for mapped := 0; mapped <= 400000; mapped += 37000 {
+			for _, ceil := range []int{0, 50000, 205963, 500000} {
+				high, cached := mmapExpertReclaimHighMB(nonRecl, mapped, 4096, ceil)
+				if high < nonRecl {
+					t.Fatalf("high %d below the non-reclaimable ceiling %d", high, nonRecl)
+				}
+				if ceil > 0 && high > ceil-4096 && high > nonRecl {
+					t.Fatalf("high %d leaves no reclaim band below ceiling %d", high, ceil)
+				}
+				room := mapped
+				if ceil > 0 {
+					room = min(mapped, max(0, ceil-4096-nonRecl))
+				}
+				if cached != room {
+					t.Fatalf("nonRecl=%d mapped=%d ceil=%d: cached %d, want %d (all the room the ceiling allows)", nonRecl, mapped, ceil, cached, room)
+				}
+			}
+		}
+	}
+}
+
 // TestMeasuredFootprintPlannedFloor guards Fix-B's planned-floor for strategies
 // that derive no PlannedHostFootprintMB. The Qwen3.8 27B crash was exactly this:
 // a MultiGPUDense placement (PlannedHostFootprintMB == 0) made the floor collapse
