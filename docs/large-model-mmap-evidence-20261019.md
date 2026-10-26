@@ -437,6 +437,27 @@ re-queued with `--mmap`.
   so storage reads are still expected. Live effect unverified until the GLM
   rerun.
 
+### GLM-5.3 UD-IQ2_M after PR #99, fresh cache (canary failure)
+
+PATH `ggrun v3.2.12-26-g101af89` (sha256 `0583e43bda653a10…`), `--claude-code
+--mmap`, empty cache directory, 2026-10-26 16:24 UTC.
+
+- The plan differed from the 2026-10-24 cell. After three rejected
+  configurations ggrun kept "the first proven-safe placement": ctx 346,112
+  over 4 slots, KV q8_0 on the CPU (mmap-last-resort), 73 CPU MoE layers,
+  `-ub 64`/`128`. The live pageability check measured 17,735 MiB
+  non-reclaimable (the CPU KV) beside 204,264 MiB of mapped experts.
+- `memory.high` stayed at 205,297 MiB (`memory.max` 209,639) for the whole
+  run, so there was no threshold collapse. The resize after verification
+  was never reached. RSS was 155–190 GiB, of which 17 GiB anonymous. About
+  470 GiB was read from the HDD in 48 minutes.
+- The server came up, but ggrun then failed: "functional canary failed:
+  prefill speed probe: … context deadline exceeded". The driver stopped the
+  queue as unsafe (no ready record).
+- This failure is separate from PR #99. It is a fresh-cache plan that adds
+  17 GiB of CPU KV to a mapped expert set that already exceeds RAM. The
+  error does not say why the probe was slow or what to change.
+
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and

@@ -4170,3 +4170,16 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   directory. Declining Claude's folder-trust prompt ended the session: the
   backend (20 min load) was stopped and ggrun exited 1 with no message.
   Teardown was clean. Say why the server stopped, or offer to keep serving.
+
+## MMAP PLAN — fresh-cache GLM puts KV on CPU beside oversized experts — 2026-10-26
+
+- [ ] Live GLM-5.3 UD-IQ2_M (222.2 GiB, `--mmap`, empty cache, 212 GB host):
+  after three rejected configurations ggrun kept ctx 346,112 / 4 slots with
+  KV q8_0 on the CPU (17.7 GiB anonymous) beside 204 GiB of mapped experts.
+  The page cache could not hold the experts. The HDD read about 470 GiB in
+  48 minutes, and the functional canary's prefill probe timed out, so the
+  launch failed after 49 minutes. With the previous run's learned cache the
+  same build plans KV on GPU (ctx 185,344 / 2 slots). For a model whose
+  mapped experts already exceed the reclaim allowance, CPU KV should cost
+  expert cache in the plan, and the canary failure should name the measured
+  storage paging rather than a client timeout.
