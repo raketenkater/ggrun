@@ -4209,10 +4209,10 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 			fmt.Fprintf(os.Stderr, "[launch] measured-footprint mmap reclaim threshold re-size to %d MiB failed: %v\n", high, err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[launch] mmap reclaim threshold re-sized to %d MiB (non-reclaimable ceiling %d MiB from measured %d MiB + headroom, planned floor %d MiB; %d of %d MiB mapped experts can stay cached; hard ceiling preserved)\n",
+		fmt.Fprintf(os.Stderr, "[launch] mmap reclaim threshold re-sized to %d MiB (non-reclaimable ceiling %d MiB from measured %d MiB + headroom, planned floor %d MiB; cache allowance %d of %d MiB mapped experts; hard ceiling preserved)\n",
 			high, newMax, measured, plannedFloor, cachedMB, strategy.ReclaimableHostWeightsMB)
 		if cachedMB < strategy.ReclaimableHostWeightsMB {
-			fmt.Fprintf(os.Stderr, "[launch] warning: %d MiB of mapped experts do not fit in RAM; tokens that route to them read storage\n",
+			fmt.Fprintf(os.Stderr, "[launch] warning: %d MiB of mapped experts exceed the planned cache allowance and may require storage reads\n",
 				strategy.ReclaimableHostWeightsMB-cachedMB)
 		}
 		return
