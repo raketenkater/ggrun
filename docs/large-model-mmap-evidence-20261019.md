@@ -198,13 +198,21 @@ every 4 KiB page within 1 MiB of each recorded flip: 2,272 pages, 9,088 kB
 found zero flips (receipt 14:54 UTC, CLEAN). A single-page pass the day before
 was not clean, because new flips kept appearing in adjacent pages. The
 offlined pages return on reboot, so this holds only until the next boot or the
-stick swap. The live results below ran on this mitigated host.
+stick swap. This is a time-bounded mitigation receipt, not validation of
+repaired hardware. The live results below ran on this mitigated host.
 
 ## Live acceptance (2026-10-23)
 
 Every cell ran through the PATH `ggrun v3.2.12-23-ge546a94` (sha256
-`b908c7b53dc682b1…`) with `--claude-code`, one large process at a time, with no other GPU or agent workload. The backend was
-`deepseek41-1017` (`425badfe`, sha256 `6b142ef1…`). The harness, sampler and
+`b908c7b53dc682b1…`) with `--claude-code`, one large process at a time, with no other GPU or agent workload. Backends,
+per model:
+
+| Model | Backend | Commit | Binary sha256 |
+| --- | --- | --- | --- |
+| DeepSeek V4.1 Flash IQ2_XS | `deepseek41-1017` (smalinin/llama.cpp) | 425badfe | `6b142ef1113cf78c73f7485b22f71d819c4e788e8cf774e08572a63d308a725f` |
+| GLM-5.3 UD-IQ2_M | ggrun's packaged `llama-server-cuda` (0.6.0-dev, build 11626) | df18bee11 | `98b0ee801ed1fbb928ac628b9cbd60e3044acd79e9a2cc70858afb211cb16283` |
+
+The harness, sampler and
 traffic scripts and the raw records are private
 (`ggrun-accept-20261013-evidence/live-20261022/`).
 
@@ -277,21 +285,26 @@ MoE layers). After readiness and the stream/cancel checks, the hook read
 back the 853k page runs recorded after the `ledger` session. Runs less than
 64 KiB apart were merged, then read in offset order with `pread`. It read
 10,267 MiB in 1,500 s (6.8 MB/s on the HDD), leaving 11.1 GiB of table pages
-cached. Then came Claude Code task `calc`, which timed out cold:
+cached. Then came Claude Code task `calc`, which had timed out in the cold
+cell:
 
-- First request: 12,970 prompt tokens in 811 s at **16.0 tok/s**. Cold, the
-  same prompt took 4,055 s at 3.2 tok/s and `calc` did not finish within
-  3,600 s.
-- `calc` **correct**: 4 tests pass, tests untouched, 7 turns, 1,285 s.
+- First request: 12,970 prompt tokens in 811 s at 16.0 tok/s. This is not a
+  paired measurement: the cold `calc` timed out without completing a request
+  (11,520 tokens processed at 3.22 tok/s). The relaunch's `ledger` task, a
+  different prompt, took 4,055 s for its 13,011-token first request.
+- `calc` **correct**: 4 tests pass, tests untouched, 7 turns, 1,285 s
+  (2,785 s including the 1,500 s prefetch). The `ledger` task (relaunch, no
+  prefetch) took 6,521 s; it is a different task, not a comparison.
 - Later requests that brought new file text fell back to 4.2–8.1 tok/s. The
   prefetch covers only the text that earlier sessions saw.
 - Peak 163,307 MiB; stop 22.1 s, clean.
 
 A session's hot rows are a small set: 3.6 GiB of the 199 GiB tables, and
-11 GiB once merged for the HDD. Keeping that set across a relaunch moves the
-Claude Code system prompt from the cold rate to the warm rate. On an SSD
-(7,285 random 4 KiB reads/s at queue depth 1, measured on this host's SATA
-SSD) the prefetch would take seconds rather than 25 minutes.
+11 GiB once merged for the HDD. With that set prefetched, the first request
+of the prefetched `calc` ran at the warm rate. Hypothesis, not measured: on
+an SSD the prefetch would be much shorter than 25 minutes. Only the device
+was measured (7,285 random 4 KiB reads/s at queue depth 1 on this host's
+SATA SSD); the merged-range prefetch workload was not run on it.
 
 ### DeepSeek experiment: fill idle RAM with table pages
 
@@ -342,16 +355,19 @@ first token 8.5 s, cancel and reconnect ok; stop 21.4 s, clean.
 
 | Lookup traffic | auto (1M ctx, 4 slots, `-ub 64`) | `-ub 128` | 262k ctx, 1 slot, `-ub 512` |
 | --- | --- | --- | --- |
-| warm repeat, prompt tok/s | 15.6–16.0 | 20.1–20.7 | **46.9–47.0 (3.0×)** |
+| warm repeat, prompt tok/s | 15.6–16.0 | 20.1–20.7 | 46.9–47.0 |
 | new text, prompt tok/s | 3.2–4.0 | 3.4–4.4 | 3.7–4.9 |
 | decode tok/s (8-token replies) | 5.3–8.2 | 6.9–8.0 | 5.1–7.7 |
 
-On this host the automatic plan fills context first: 1,048,576 tokens over 4
-slots (the model/policy cap). The compute buffers this needs force `-ub 64`,
-and warm prefill drops to a third. For one Claude Code agent, a 262k slot
-holds the whole session (peak observed context in earlier live runs:
-128,256). The trade is fewer concurrent slots. Cold new text stays
-HDD-bound in every shape.
+These are phase observations from short lookup traffic; neither experiment
+cell ran a coding task. The 262k cell changes slots, total context, batch,
+ubatch, KV location and expert placement together, and per-slot context
+stays 262,144 in both shapes. It identifies a promising complete
+configuration for a single-agent comparison. It does not show which change
+causes the warm-prefill difference, that decode is unchanged (8-token
+samples), or that agent tasks run faster. The `-ub 128` gain is likewise a
+warm-prefill measurement, not a check of the optimizer's predicted
+agent-cost ratio. Cold new text stays HDD-bound in every shape.
 
 ### DeepSeek V4.1 Flash IQ2_XS through the TUI
 
@@ -383,7 +399,8 @@ port 8081).
 
 The first GLM cell (no extra flags) planned for 101 s and then refused:
 "placement requires file-backed mmap; rerun with --mmap to approve it
-explicitly". The model is 223 GB on a 205 GiB host. No weights were loaded,
+explicitly". The model is 238,577,585,701 bytes (222.2 GiB) on a 205 GiB
+host. No weights were loaded,
 no backend was left behind, and the error names the approving flag. The
 planner had moved between 72 and 76 CPU MoE layers and a context of 346k to
 381k tokens before it settled on the last proven plan. The GLM cells were
@@ -411,10 +428,14 @@ re-queued with `--mmap`.
   reconnect first token after 319 s. Task `calc` timed out at 3,600 s (0/1);
   `textstats` and `inventory` were skipped. Stop: 3.6 s, exit 0, no leftover
   backend. The shutdown "backend died mid-session" message appeared again.
-- The relaunch cell was not run, since it would hit the same throttle. Fix
-  (PR #99): `memory.high` = the non-reclaimable ceiling plus the mapped
-  experts, capped one headroom below `memory.max`, with a warning when the
-  experts do not fit. GLM cold and relaunch are rerun after review and merge.
+- The relaunch cell was not run, since it would hit the same throttle.
+  PR #99 addresses the threshold collapse: `memory.high` = the
+  non-reclaimable ceiling plus a mapped-expert cache allowance, capped at the
+  planned sizing ceiling (205,963 MiB here) minus headroom. The hard
+  `memory.max` was 210,305 MiB. Expected for this fixture: high 201,867 MiB.
+  The 201,504 MiB of mapped experts still exceed the 177,684 MiB allowance,
+  so storage reads are still expected. Live effect unverified until the GLM
+  rerun.
 
 ## Download
 

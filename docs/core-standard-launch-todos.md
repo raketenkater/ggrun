@@ -4125,23 +4125,27 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   calibration refused its finalist `-b 256 -ub 128` because measuring it and
   restoring the baseline needed about 62 min against the 20 min budget. An
   explicit launch of that finalist measured warm prefill +29% (20.4 vs 15.7
-  tok/s), above the predicted 1.18. Every relaunch replays "baseline kept",
+  tok/s) in short lookup traffic. That is not a check of the predicted 1.18,
+  which is an agent-cost ratio. Every relaunch replays "baseline kept",
   so a slow-loading model never adopts a better measured shape. Options:
   measure the challenger in the next launch instead of in the same one, or
   scale the budget to the measured load time. Keep the fail-closed default.
   Evidence: docs/large-model-mmap-evidence-20261019.md.
 
-## PLACEMENT — context fill costs 3x prefill on CPU-MoE models — 2026-10-23
+## PLACEMENT — total context and slots chosen before microbatch on CPU-MoE models — 2026-10-23
 
 - [ ] Live DeepSeek V4.1 Flash IQ2_XS (37 CPU MoE layers): auto chose ctx
-  1,048,576 over 4 slots. The compute buffers this needs left only `-ub 64`,
-  and warm prefill was 15.6 tok/s. An explicit `-ctx 262144 --parallel 1 -b
-  512 -ub 512` moved KV to the CPU and 4 MoE layers to GPU, and warm prefill
-  rose to 47.0 tok/s (3.0x); decode was unchanged. Context and slots are
-  maximised before microbatch size, though prefill dominates agent sessions.
-  Make context/slots versus ubatch a measured trade in the optimizer (agent
-  cost model), with the context floor taken from the harness's real need.
-  This must not regress models whose KV-on-GPU decode wins.
+  1,048,576 over 4 slots (262,144 per slot) with `-ub 64`; warm prefill was
+  15.6 tok/s. An explicit `-ctx 262144 --parallel 1 -b 512 -ub 512` (same
+  per-slot context, one slot) moved KV to the CPU and 4 MoE layers to GPU;
+  warm prefill was 47.0 tok/s in short lookup traffic. That cell changed
+  slots, total context, batch, ubatch, KV location and expert placement
+  together and ran no coding task, so it does not isolate a cause or show an
+  agent-task gain; decode came from 8-token samples only. Next: a matched
+  single-agent task comparison of the two complete configurations, keeping
+  useful per-agent context and explicit concurrency. If confirmed, make
+  slots versus ubatch a measured trade in the optimizer. This must not
+  regress models whose KV-on-GPU decode wins.
   Evidence: docs/large-model-mmap-evidence-20261019.md.
 
 ## MMAP SCOPE — memory.high collapsed onto mapped experts — 2026-10-24
@@ -4152,8 +4156,10 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   `memory.high` throttles page cache too, so RSS fell from 192 GB to 23 GB,
   IO pressure reached 46% full, decode was 0.32 tok/s and prefill 0.13–0.44
   tok/s. Any mmap launch whose mapped experts exceed the non-reclaimable
-  ceiling is throttled the same way. The fix leaves room for the mapped experts up to the planned
-  ceiling minus headroom. A matched live GLM rerun is required after merge.
+  ceiling is throttled the same way. The fix adds a mapped-expert cache
+  allowance up to the planned sizing ceiling minus headroom. Here that
+  allowance (177,684 MiB) is still below the mapped experts, so storage reads
+  remain expected. A matched live GLM rerun is required after merge.
 
 ## TUI — large-model Claude Code launch — 2026-10-24
 
