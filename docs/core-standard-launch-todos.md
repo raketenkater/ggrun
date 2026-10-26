@@ -4183,3 +4183,22 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   mapped experts already exceed the reclaim allowance, CPU KV should cost
   expert cache in the plan, and the canary failure should name the measured
   storage paging rather than a client timeout.
+
+## CANARY — timed probes queue behind abandoned requests — 2026-10-26
+
+- [ ] Live GLM-5.3 relaunch (`--mmap`, cold page cache): the calibration
+  pilot's client timed out after 2 min and cancelled. llama.cpp honours a
+  cancel only between ubatches, so the 296-token prefill kept the backend
+  busy for 22 min. The functional canary's prefill probe then missed its
+  timeout and the launch was rejected, although the same plan had just
+  passed three Claude Code tasks. Before starting a timed probe, wait
+  (bounded) until `/slots` reports no request in progress, and do not count
+  that wait against the probe. When a probe still times out on a slow but
+  answering backend, degrade the profile rather than reject it.
+- [ ] Mapped-expert relaunch re-read 287 GB from the HDD although ~199 GB of
+  the files had just been cached. Measure page-cache residency before and
+  after load. If the loader's pass over the GPU tensors evicts the expert
+  pages, ask the backend to drop those ranges after upload.
+- [ ] The mmap cache-allowance warning uses the planned non-reclaimable
+  floor (24,183 MiB) where 965 MiB was measured, so it reported 21.6 GB of
+  experts "exceeding" an allowance that the live cgroup could hold.

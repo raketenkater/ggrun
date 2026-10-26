@@ -458,6 +458,48 @@ PATH `ggrun v3.2.12-26-g101af89` (sha256 `0583e43bda653a10…`), `--claude-code
   17 GiB of CPU KV to a mapped expert set that already exceeds RAM. The
   error does not say why the probe was slow or what to change.
 
+### GLM-5.3 UD-IQ2_M after PR #99, matched (cold accepted, relaunch failed)
+
+PATH `ggrun v3.2.12-26-g101af89`, `--claude-code --mmap`, on a copy of the
+cache left by the 2026-10-24 cell (the closest available start state).
+
+- Plan: ctx 185,344 over 2 slots (the 2026-10-24 cell had 233,472 over 3),
+  `-b 2048 -ub 256`, KV q8_0 on GPU, 198,744 MiB mapped CPU experts. One
+  load; ready at 2,328 s. GPU peak 9,207 / 23,804 / 10,407 MiB.
+- At ready the pageability check measured 965 MiB non-reclaimable, and
+  `memory.high` was set to 201,323 MiB (2026-10-24: 24,183). The logged cache
+  allowance (177,140 MiB) is computed from the planned 24,183 MiB floor, not
+  the measured 965 MiB. RSS held at about 202 GB until the stop. HDD reads
+  were 90–140 MiB/s in the first 10 minutes after ready, then fell to
+  3–7 MiB/s once the experts were cached.
+- Stream: first token 34.1 s, 60 chunks in 170 s. Cancel after 5 events,
+  health ok; reconnect first token 9.5 s.
+- Claude Code tasks, all **correct** with unchanged oracle tests: `calc`
+  2,183 s (6 turns), `textstats` 1,241 s (7), `inventory` 1,334 s (10). On
+  2026-10-24 `calc` timed out at 3,600 s and the other two were skipped.
+- Backend timings over the session's 22 requests: prefill median 5.2 tok/s
+  (p90 9.8), decode median 3.4 tok/s. The first request (296 tokens) ran
+  at 0.48 tok/s on the cold cache. On 2026-10-24 prefill was 0.13–0.44 and
+  decode 0.32 tok/s.
+- Stop: 6.5 s, clean.
+
+Relaunch on the same cache: **failed** with "functional canary failed:
+prefill speed probe: … context deadline exceeded".
+
+- `memory.high` stayed 205,418 MiB, with no collapse. The first load read
+  287 GB from the HDD although the previous backend had just served
+  ~199 GB of the same files from page cache, and a backend-measured re-plan
+  loaded a second time. Hypothesis, not established: with 238.6 GB of files
+  and 212 GB of RAM, a sequential load re-reading the GPU tensors evicts the
+  expert pages that the load needs next.
+- Measured in the backend log: the calibration pilot (296 tokens) hit its
+  2-minute client timeout and the client cancelled it. The server kept
+  prefilling it for 22 more minutes (0.22 tok/s, cold cache), because a
+  cancel takes effect only between ubatches. The canary's prefill probe
+  queued behind it and missed its own timeout, so the launch was rejected.
+  The same server shape had just passed three coding tasks.
+- After the relaunch exited, 199 GB of the GLM files were still cached.
+
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and
