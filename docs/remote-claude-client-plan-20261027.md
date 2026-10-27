@@ -1,6 +1,6 @@
 # Remote Claude Code through ggrun — implementation plan
 
-Status: implementation in progress in the isolated `feat/remote-claude-client` worktree at `.cache/remote-claude/server`, based on `101af89`. The separate client draft lives at `.cache/remote-claude/ggrun-client`. The installed PATH binary and network configuration have not been changed. Publication and live qualification remain pending.
+Status: implemented in isolated branch `feat/remote-claude-client`, based on `101af89`; draft server PR [#101](https://github.com/raketenkater/ggrun/pull/101) and separate client PR [#1](https://github.com/raketenkater/ggrun-client/pull/1) are published. Same-host real Claude/GPU acceptance has started. Worker report compatibility and actual laptop acceptance remain release gates. The installed PATH binary is unchanged. The owner opted into a separate Tailscale Serve endpoint for testing; it is not a product dependency.
 
 ## Product outcome
 
@@ -69,7 +69,7 @@ Old saved TUI launches with `ClaudeCode=true` restore **On this machine**. Add a
 
 ## Laptop repository and upstream relationship
 
-Planned repository: `raketenkater/ggrun-client` (does not exist at planning time). Build a small Go CLI with released binaries and commands such as `connect`, `doctor`, `claude`, `claude --resume` and an internal status/hook command. The user installs Claude Code separately through its official distribution; this repository provides integration, not a redistributed Claude binary.
+Repository: [raketenkater/ggrun-client](https://github.com/raketenkater/ggrun-client), created for this implementation. Build a small Go CLI with released binaries and commands such as `connect`, `doctor`, `claude`, `claude --resume` and an internal status/hook command. The user installs Claude Code separately through its official distribution; this repository provides integration, not a redistributed Claude binary.
 
 Both repositories link each other in their README and setup documentation. ggrun's TUI/CLI connection instructions point to the client installation guide. The client's README identifies ggrun as the serving engine and records supported gateway protocol/server versions. Publish a compatibility matrix and changelog for contract changes. Keep a schema and conformance fixtures in ggrun as the contract source; the client pins a reviewed contract revision. Use released dependencies where useful; avoid a submodule or a requirement to install the entire server on the laptop.
 
@@ -99,39 +99,46 @@ At startup validate server protocol, readiness, identity, context and Claude cli
 
 ## Implementation checkpoint — October 27
 
-The connection contract is provider-neutral HTTP(S). Loopback is the default
-listener; HTTPS proxy, LAN, SSH tunnel and Tailscale are optional deployments.
-Neither program installs, detects or configures Tailscale.
+Implemented and published for review:
 
-Implemented as uncommitted drafts:
+- Server CLI/TUI Off / local / remote modes, saved launches, loopback defaults,
+  authenticated gateway and typed metadata; no mandatory Claude on the server.
+- Shared clientkit policy, private Unix credentials and Windows user DPAPI.
+- Separate client connect/doctor/launch/resume, scoped settings and local tools.
+  Client dependency pins published server commit `e3b47b991081`, without replace.
+- Server Linux/Windows contracts, core/full Go and installer CI passed at that
+  commit. Client native Linux/Windows and six cross-build checks passed at
+  `095262b`. Existing best-effort macOS smoke failure remains documented.
+- Real Claude 2.1.307 fixed a temporary Python project with four unchanged tests;
+  same-session resume passed. Generic path-prefix proxy and the optional owner
+  HTTPS endpoint were exercised from this server. These are not laptop receipts.
+- Headless Qwen served through the real TUI; clean stop released all GPU model
+  allocations before relaunch. Actual context changed between launches, and the
+  client correctly refused to resume into the smaller context.
 
-- Server CLI and TUI three-mode selection, saved launches and stable gateway
-  reservation before loading. Authenticated loading/recovery, health, metadata,
-  model discovery, Messages streaming, cancellation and cached queue status.
-- Shared `clientkit` for typed policy, Workflow rewriting, Unix private files
-  and Windows user-bound credential protection. Local launcher and remote
-  metadata use the same context/alias/timeout policy.
-- Client connect, doctor, Claude child launch and verified resume. Profiles and
-  tools remain client-local; conflicting saved connection settings are diagnosed.
-  Resume currently supports the last connector-managed session per project and
-  connection. Arbitrary older-session selection is outside this first milestone.
-- Protocol schema/fixture, reciprocal docs, Linux/Windows contract CI and client
-  release/install workflow drafts.
+Critical live finding: Claude delivers worker reports using mid-conversation
+system messages for unknown model aliases. The selected Qwen template accepts
+but omits these entries. A completed utility worker therefore does not imply a
+correct caller result. A prompt hint produced a fabricated report and was
+rejected. The bridge compatibility fix rejects unsupported system roles before
+inference so Claude can perform its documented retry using user messages. Its
+error wording must match the qualified Claude version. The corrected guard
+passed a real two-turn worker handoff (four tests accurately reported), the
+unchanged test oracle, package race suites and the uncached core gate. This
+first live fix receipt uses a temporary facade against the loaded model; the
+rebuilt complete server remains to be qualified.
 
-Remaining acceptance gates, in order:
+Remaining gates:
 
-1. Final uncached core and contract gates after edits. Review policy parity and
-   overlapping Claude-mode worker changes before integration.
-2. Review/commit the server feature; pin the client dependency to a remotely
-   resolvable reviewed module version/commit. Remove its development replace.
-3. Publish the separate client repo; obtain native Linux/Windows CI receipts
-   and released-installer validation. No first release exists yet.
-4. Review the candidate before updating the owner's PATH binary. Real TUI
-   headless launch with installed Qwen Flash-Next, cached follow-ups, cancellation
-   and clean stop/relaunch. Recheck active work and memory-health evidence first.
-5. Actual laptop coding task: local edits/tests, utility routing, long workflow,
-   connection loss and resume. Laptop OS remains pending. Fixture executables
-   and cross-builds do not establish this milestone.
+1. Verify the role fallback with actual worker findings and unchanged test
+   oracle; publish reviewed fix and rerun CI.
+2. Preserve disconnect receipt: router and backend idle within 0.204 seconds
+   after content cancellation through the generic prefixed proxy.
+3. Review candidate and update the owner PATH binary through normal validation;
+   qualify exact built revision. Current TUI evidence uses a candidate binary.
+4. Client prerelease artifact and released installer validation.
+5. Actual laptop install/coding/workflow/resume receipt on its OS. Laptop OS
+   remains pending. Same-host HTTPS and Windows CI do not establish this gate.
 
-No feature-complete claim until these gates have receipts. Finish one complete
-remote coding workflow before expanding the UI, model switching or networking.
+See `remote-claude-validation-20261027.md` for exact evidence and limitations.
+No feature-complete or universal compatibility claim until these gates pass.

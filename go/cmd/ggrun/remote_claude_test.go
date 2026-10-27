@@ -13,7 +13,7 @@ import (
 )
 
 func TestRemoteClaudeFlagsDoNotReachBackend(t *testing.T) {
-	t.Setenv("LLM_CONFIG_FILE", "/nonexistent/ggrun-remote-test.env")
+	t.Setenv("LLM_CONFIG", "/nonexistent/ggrun-remote-test.env")
 	args := []string{"model.gguf", "--claude-code", "--headless", "--gateway-host=127.0.0.1", "--gateway-port", "18080", "--gateway-url", "https://models.example/inference", "--gateway-token-file", "/tmp/private-key"}
 	r, err := parseLaunchArgs(args)
 	if err != nil {

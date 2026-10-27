@@ -4378,7 +4378,7 @@ func (m Model) prelaunchParallelLabel() string {
 			return "agent-parallel (4 workflow slots)"
 		default:
 			if m.parallel == "" || m.parallel == "1" {
-				return "automatic (Claude Code policy; target 4 slots)"
+				return "automatic (resolved for this model at launch)"
 			}
 		}
 	}

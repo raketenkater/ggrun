@@ -694,6 +694,9 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		if RejectUnsupportedSystemMessages(w, body) {
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 		if !supportsVision {
