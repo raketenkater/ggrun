@@ -233,10 +233,28 @@ func Path() string {
 // Load reads the config file and env vars, returning a merged config.
 // Precedence: env var > config file > built-in default.
 func Load() (*Config, error) {
-	cfg := Defaults()
-
 	// Snapshot env-set values BEFORE loading file, so env wins.
 	envSnapshot := snapshotEnv()
+
+	cfg, err := LoadPersisted()
+	if err != nil {
+		return nil, err
+	}
+
+	// Re-apply env snapshot so env wins over file
+	if err := applyEnvSnapshot(cfg, envSnapshot); err != nil {
+		return nil, fmt.Errorf("read environment: %w", err)
+	}
+
+	// Fill remaining unset keys from defaults (already in cfg)
+	return cfg, nil
+}
+
+// LoadPersisted reads only the config file over built-in defaults. Edit-and-
+// save callers use it so a one-off LLM_* environment override is not written
+// into the file as if the user had chosen it.
+func LoadPersisted() (*Config, error) {
+	cfg := Defaults()
 
 	// Migrate legacy config.sh if needed
 	cfgPath := Path()
@@ -249,13 +267,6 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("load config: %w", err)
 		}
 	}
-
-	// Re-apply env snapshot so env wins over file
-	if err := applyEnvSnapshot(cfg, envSnapshot); err != nil {
-		return nil, fmt.Errorf("read environment: %w", err)
-	}
-
-	// Fill remaining unset keys from defaults (already in cfg)
 	return cfg, nil
 }
 

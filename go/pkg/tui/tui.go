@@ -3290,11 +3290,12 @@ func (m Model) backendTag() string {
 	}
 }
 
-// persistConfig loads the current config, applies mutate, and writes it back to
+// persistConfig loads the saved config, applies mutate, and writes it back to
 // the canonical config file, preserving all other settings so GUI changes
-// survive across sessions.
+// survive across sessions. It starts from the file, not the environment, so a
+// one-off LLM_* override is never saved as a setting.
 func persistConfig(mutate func(*config.Config)) error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadPersisted()
 	if err != nil {
 		return err
 	}
@@ -3415,7 +3416,7 @@ func (m *Model) applySetting(row settingRow, val string) {
 		return
 	}
 	row.set(m.settingsCfg, val)
-	if err := m.settingsCfg.Save(); err != nil {
+	if err := persistConfig(func(c *config.Config) { row.set(c, val) }); err != nil {
 		m.message = fmt.Sprintf("Warning: %s set to %s for this session — save failed: %v", row.label, val, err)
 		m.messageType = "warning"
 	} else {
