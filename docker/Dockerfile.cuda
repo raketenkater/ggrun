@@ -11,7 +11,7 @@ ARG CUDA_IMAGE=12.4.1
 # Build for common consumer + datacenter archs (Ampere/Ada/Hopper). Override for others.
 ARG CUDA_ARCHITECTURES=75;80;86;89;90
 
-# ---- backend: build llama-server with CUDA ----
+# ---- backend: build llama-server and llama-fit-params with CUDA ----
 FROM nvidia/cuda:${CUDA_IMAGE}-devel-ubuntu22.04 AS backend
 ARG LLAMA_CPP_REF
 ARG CUDA_ARCHITECTURES
@@ -26,7 +26,7 @@ RUN git init llama.cpp \
 RUN cmake -S llama.cpp -B llama.cpp/build \
         -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
         -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
-    && cmake --build llama.cpp/build --config Release -j "$(nproc)" -t llama-server
+    && cmake --build llama.cpp/build --config Release -j "$(nproc)" -t llama-server llama-fit-params
 
 # ---- launcher: build the static Go binary ----
 FROM golang:1.24-bookworm AS gobuild
@@ -59,6 +59,9 @@ ENV LLM_APP_HOME=/opt/ggrun \
     PATH=/opt/ggrun/.bin:$PATH
 COPY --from=gobuild /out/ggrun            /opt/ggrun/.bin/ggrun
 COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/ggrun/.bin/llama-server
+# GPU launches price memory with this no-allocation oracle; without it they
+# need a contained live load, which asks for --allow-live-memory-probe.
+COPY --from=backend /src/llama.cpp/build/bin/llama-fit-params /opt/ggrun/.bin/llama-fit-params
 COPY tools/gguf/parse_gguf.py                  /opt/ggrun/.bin/parse_gguf.py
 COPY tools/download/download_any_gguf.py       /opt/ggrun/.bin/download_any_gguf.py
 COPY tools/models/model_index.py               /opt/ggrun/.bin/model_index.py

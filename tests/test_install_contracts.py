@@ -128,6 +128,18 @@ install_release_bundle ik_llama-server-cuda
                 self.assertEqual("--user" in recorded, not venv)
                 self.assertIn("-m pip install", recorded)
 
+    def test_gpu_images_ship_the_fit_oracle_next_to_the_server(self):
+        # Launch looks for llama-fit-params beside llama-server. Without it a
+        # GPU launch needs a contained live load, which a non-interactive
+        # container refuses without --allow-live-memory-probe.
+        for name in ("Dockerfile.cuda", "Dockerfile.vulkan"):
+            with self.subTest(image=name):
+                text = (ROOT / "docker" / name).read_text()
+                self.assertRegex(text, r"-t llama-server llama-fit-params\b")
+                server = re.search(r"LLAMA_SERVER=(\S+)/llama-server", text).group(1)
+                self.assertRegex(text, r"COPY --from=backend \S+/bin/llama-fit-params +"
+                                 + re.escape(server) + r"/llama-fit-params\n")
+
     def test_setup_recognizes_native_macho_and_rejects_scripts(self):
         script = function("scripts/setup-home.sh", "usable_llama_server")
         for magic, expected in [(b"\xcf\xfa\xed\xfe", 0), (b"\xca\xfe\xba\xbe", 0),
