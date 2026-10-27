@@ -904,6 +904,7 @@ func calibrationCandidateBetter(candidate, current calibrationMeasurement) bool 
 // without processes or GPUs; runCalibration reads them once per call.
 type calibrationSideEffects struct {
 	now             func() time.Time
+	waitIdleSlots   func(*benchmark.Runner) bool
 	probePrefill    func(*benchmark.Runner) (benchmark.PrefillProbe, error)
 	runWorkload     func(r *benchmark.Runner, slots, lanes int) (*benchmark.Result, error)
 	oracleAvailable func(be *backendInfo, model *placement.ModelProfile) bool
@@ -914,9 +915,10 @@ type calibrationSideEffects struct {
 }
 
 var calibrationEffects = calibrationSideEffects{
-	now:          time.Now,
-	probePrefill: (*benchmark.Runner).ProbeAgentPrefill,
-	runWorkload:  (*benchmark.Runner).RunAgentWorkload,
+	now:           time.Now,
+	waitIdleSlots: (*benchmark.Runner).WaitForIdleSlots,
+	probePrefill:  (*benchmark.Runner).ProbeAgentPrefill,
+	runWorkload:   (*benchmark.Runner).RunAgentWorkload,
 	oracleAvailable: func(be *backendInfo, model *placement.ModelProfile) bool {
 		return be != nil && model != nil && findFitParamsBin(be.Path, model.ModelArch) != ""
 	},
@@ -982,6 +984,16 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	}
 
 	baseURL := backendBaseURL(req)
+	// A pilot or earlier sample cancelled by its timeout may still be
+	// prefilling (llama.cpp stops only between ubatches). Each timed step first
+	// waits for idle slots outside its request timeouts but inside the
+	// experiment budget, and a backend still busy at that bound is not measured.
+	waitIdle := func(until time.Time) bool {
+		if !until.After(fx.now()) {
+			return false
+		}
+		return fx.waitIdleSlots(&benchmark.Runner{BaseURL: baseURL, IdleSlotWait: launchProbeIdleSlotWait, Deadline: until})
+	}
 	workloadLanes := requestWorkloadConcurrency(req)
 	utilizationCaps, _ := runtimeGPUCapabilities(caps, req)
 	agentPromptBytes := 0
@@ -1003,15 +1015,18 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				maxUBatch = candidate.Strategy.UBatchSize
 			}
 		}
-		probeTimeout := calibrationAutoProbeTimeout
-		if remaining := exp.remaining(); remaining/4 < probeTimeout {
-			probeTimeout = remaining / 4
+		var probe benchmark.PrefillProbe
+		probeErr := fmt.Errorf("%w: backend still processing an earlier request", errCalibrationBudgetExhausted)
+		if waitIdle(exp.deadline) {
+			probeTimeout := calibrationAutoProbeTimeout
+			if remaining := exp.remaining(); remaining/4 < probeTimeout {
+				probeTimeout = remaining / 4
+			}
+			probeRunner := &benchmark.Runner{
+				BaseURL: baseURL, Model: model.Basename, Timeout: probeTimeout, Deadline: exp.deadline, WorkloadID: scopeKey,
+			}
+			probe, probeErr = fx.probePrefill(probeRunner)
 		}
-		probeRunner := &benchmark.Runner{
-			BaseURL: baseURL, Model: model.Basename, Timeout: probeTimeout, WorkloadID: scopeKey,
-			IdleSlotWait: launchProbeIdleSlotWait,
-		}
-		probe, probeErr := fx.probePrefill(probeRunner)
 		agentPromptBytes = benchmark.SuggestedAgentPromptBytes(probe, activeSlots, maxUBatch, calibrationAutoAgentWaveTarget)
 		if probeErr != nil {
 			fmt.Fprintf(os.Stderr, "[optimize] short prefill pilot failed (%v); using bounded %d-byte/lane fallback\n",
@@ -1030,6 +1045,16 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	// since stopping its measurement early would protect nothing and only
 	// lose the evidence (the loop refuses any challenger that no longer fits).
 	bench := func(active *placement.Strategy, activeProcess *server.Process, deadline time.Time) (*benchmark.Result, error) {
+		waitUntil := exp.deadline
+		if !deadline.IsZero() && deadline.Before(waitUntil) {
+			waitUntil = deadline
+		}
+		if waitUntil.Sub(fx.now()) <= 3*time.Second {
+			return nil, errCalibrationBudgetExhausted
+		}
+		if !waitIdle(waitUntil) {
+			return nil, fmt.Errorf("%w: backend still processing an earlier request", errCalibrationBudgetExhausted)
+		}
 		remaining := exp.remaining()
 		if !deadline.IsZero() {
 			remaining = deadline.Sub(fx.now())
@@ -1047,10 +1072,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		runner := &benchmark.Runner{
 			BaseURL: baseURL, Model: model.Basename, Timeout: requestTimeout, Deadline: deadline,
 			WorkloadID: scopeKey, AgentPromptBytes: agentPromptBytes,
-			// A pilot or earlier sample cancelled by its timeout may still be
-			// prefilling; the wait is outside every request timeout and a
-			// challenger's Deadline still bounds it.
-			IdleSlotWait:    launchProbeIdleSlotWait,
+			// The budget-bounded idle wait above already ran.
 			SampleResources: calibrationProcessResourceSampler(activeProcess),
 			SampleGPUUtilization: func() []benchmark.GPUUtilization {
 				return sampleLaunchGPUUtilization(utilizationCaps)

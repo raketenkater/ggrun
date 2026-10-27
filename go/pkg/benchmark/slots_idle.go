@@ -38,9 +38,26 @@ const (
 // /slots, or with a format it does not recognize, is not waited on: missing
 // evidence keeps the old behavior instead of delaying every probe.
 func (r *Runner) waitForIdleSlots() time.Duration {
+	waited, idle := r.idleSlotWait()
+	if !idle {
+		fmt.Fprintf(os.Stderr, "[benchmark] backend still processing an earlier request after %s; starting the timed probe anyway\n", waited.Round(time.Second))
+	}
+	return waited
+}
+
+// WaitForIdleSlots is the same bounded wait for a caller that decides itself
+// what a still-busy backend means. It reports false only when /slots still
+// showed a processing slot when the bound passed; idle, unknown and a zero
+// IdleSlotWait report true.
+func (r *Runner) WaitForIdleSlots() bool {
+	_, idle := r.idleSlotWait()
+	return idle
+}
+
+func (r *Runner) idleSlotWait() (time.Duration, bool) {
 	limit := r.IdleSlotWait
 	if limit <= 0 {
-		return 0
+		return 0, true
 	}
 	if !r.Deadline.IsZero() {
 		if remaining := time.Until(r.Deadline); remaining < limit {
@@ -63,12 +80,11 @@ func (r *Runner) waitForIdleSlots() time.Duration {
 			if announced {
 				fmt.Fprintf(os.Stderr, "[benchmark] backend idle after %s; starting the timed probe\n", time.Since(started).Round(time.Second))
 			}
-			return time.Since(started)
+			return time.Since(started), true
 		}
 		elapsed := time.Since(started)
 		if elapsed >= limit {
-			fmt.Fprintf(os.Stderr, "[benchmark] backend still processing an earlier request after %s; starting the timed probe anyway\n", elapsed.Round(time.Second))
-			return elapsed
+			return elapsed, false
 		}
 		if !announced {
 			fmt.Fprintf(os.Stderr, "[benchmark] backend is still processing an earlier request; waiting up to %s before the timed probe\n", limit.Round(time.Second))

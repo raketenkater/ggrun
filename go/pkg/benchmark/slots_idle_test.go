@@ -183,6 +183,31 @@ func TestIdleSlotWaitIsBounded(t *testing.T) {
 	}
 }
 
+// A caller that refuses to measure a busy backend learns that the bound passed
+// with a slot still processing; idle and missing evidence stay true.
+func TestWaitForIdleSlotsReportsAStillBusyBackend(t *testing.T) {
+	alwaysBusy := newBusySlotServer(t, time.Hour, false, false, 0)
+	runner := fastIdleRunner(alwaysBusy.URL, time.Hour)
+	runner.Deadline = time.Now().Add(100 * time.Millisecond)
+	started := time.Now()
+	if runner.WaitForIdleSlots() {
+		t.Fatal("a backend busy past the deadline was reported idle")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the wait outlived its deadline by %s", elapsed)
+	}
+	if !fastIdleRunner(newBusySlotServer(t, 100*time.Millisecond, true, false, 0).URL, time.Hour).WaitForIdleSlots() {
+		t.Fatal("a backend that went idle was reported busy")
+	}
+	unknownFormat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":0}]`))
+	}))
+	defer unknownFormat.Close()
+	if !fastIdleRunner(unknownFormat.URL, time.Hour).WaitForIdleSlots() {
+		t.Fatal("unrecognized /slots evidence was reported busy")
+	}
+}
+
 // Invariant: a speed probe that times out on a healthy backend measured
 // nothing and must not reject the profile; on an unhealthy backend it stays an
 // error. Health comes from the caller when supplied, else from /health.
