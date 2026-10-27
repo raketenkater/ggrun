@@ -375,7 +375,6 @@
       "family": "Z AI",
       "ff": 12288,
       "hf_quant_updated_at": "2026-10-19T10:55:39Z",
-      "hkv": 1,
       "kl": 512,
       "kv_lora": 512,
       "layers": 46,

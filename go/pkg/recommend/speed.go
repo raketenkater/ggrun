@@ -18,7 +18,8 @@ import (
 //     model: per-token bytes = active params * bytes/weight, read at a blend of
 //     VRAM and system-RAM bandwidth weighted by how much of the model fits in VRAM.
 //     A MoE with known geometry keeps its always-read backbone in VRAM and
-//     spills only routed experts, each CPU layer paying a fixed hand-off.
+//     spills only routed experts; with measured host bandwidth each CPU
+//     layer also pays a dispatch cost.
 //
 // Neither is a measured intelligence score for a quantized artifact. Cross-model
 // ranking uses catalog intelligence; quant retention is only a local preference.
@@ -35,13 +36,16 @@ const (
 	// measuredRAMDecodeEfficiency: a measured host bandwidth is already a
 	// real-world figure; 0.50 only discounts the optimistic 60 GB/s guess.
 	measuredRAMDecodeEfficiency = 0.90
-	// moeCPULayerSec: per-token cost of each layer whose experts run on the
-	// CPU (GPU<->CPU hand-off, thread barriers), paid on top of the weight
-	// stream. One rig, 26.27 GB/s measured: GLM-5.3-Flash UD-Q3_K_XL decoded
-	// 6.35-6.87 tok/s, Qwen3.8-Flash-Next UD-Q3_K_XL 21.8 (128-token synthetic),
-	// CPU-only Qwen3.6-35B-A3B UD-IQ2_XXS 15.3; bandwidth alone predicts
-	// 8.3, 29.5 and 28.2.
-	moeCPULayerSec = 0.0007
+	// moeCPULayerGB: per-token cost of each layer whose experts run on the
+	// CPU (expert dispatch, thread barriers), as extra GB streamed at the
+	// measured host bandwidth. One rig, 26.27 GB/s measured: GLM-5.3-Flash
+	// UD-Q3_K_XL decoded 6.35-6.87 tok/s, Qwen3.8-Flash-Next UD-Q3_K_XL 21.8
+	// (128-token synthetic), CPU-only Qwen3.6-35B-A3B UD-IQ2_XXS 15.3, where
+	// bandwidth alone predicts 8.3, 29.5 and 28.2; 0.7 ms per layer there.
+	// Expressed in bytes it stays a fixed share of the stream time on other
+	// hosts instead of capping a fast one at 1/(layers*0.7 ms). Only charged
+	// with a measured bandwidth: the 0.50 fallback was fitted without it.
+	moeCPULayerGB = 0.0184
 	// spilledDenseDecodeEfficiency: a dense model split between GPU and CPU
 	// runs its CPU-resident layers at CPU matmul speed, below the RAM bandwidth
 	// ceiling. One measurement: Qwen3.8-27B UD-IQ3_XXS on one RTX 4070 with 32
@@ -333,16 +337,17 @@ func predictMoEDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOpti
 	// also pays router/dispatch synchronization and small expert kernels.
 	// Keep the calibrated GPU-side discount; RAM-side bytes use the measured
 	// host bandwidth nearly as-is.
+	measured := caps != nil && caps.HostMemoryBandwidthMBps > 0
 	ramEff := moeDecodeEfficiency
-	if caps != nil && caps.HostMemoryBandwidthMBps > 0 {
+	if measured {
 		ramEff = measuredRAMDecodeEfficiency
 	}
 	gpuGB := backboneGB*fBackbone + expertGB*fExpert
 	ramGB := backboneGB*(1-fBackbone) + expertGB*(1-fExpert)
 	sec := gpuGB/(gpuBW*moeDecodeEfficiency) + ramGB/(ramBW*ramEff)
-	if moeLayers := c.Layers - c.LeadingDense; c.Layers > 0 && moeLayers > 0 {
+	if moeLayers := c.Layers - c.LeadingDense; measured && c.Layers > 0 && moeLayers > 0 {
 		cpuLayers := float64(c.Layers)*(1-fBackbone) + float64(moeLayers)*fBackbone*(1-fExpert)
-		sec += cpuLayers * moeCPULayerSec
+		sec += cpuLayers * moeCPULayerGB / ramBW
 	}
 	if sec <= 0 {
 		return 0
@@ -351,17 +356,21 @@ func predictMoEDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOpti
 }
 
 // moeRoutedShares returns the routed experts' share of one token's reads and
-// of the model file, from GGUF geometry. ok is false when the geometry is
-// incomplete or inconsistent with the parameter count.
+// of the model file, from GGUF geometry alone. The size-derived total runs
+// high for dynamic quants (Qwen3.8-Flash-Next: 177B for ~122B of weights),
+// which made the backbone look 50 GB large and the split slower than an even
+// spread. ok is false when the geometry is incomplete.
 func moeRoutedShares(c Candidate) (perToken, file float64, ok bool) {
 	moeLayers := float64(c.Layers - c.LeadingDense)
 	expert := 3 * float64(c.Embedding) * float64(c.ExpertFF) / 1e9 // one expert, one layer
 	active := activeParamsFromGeometry(c)
-	if moeLayers <= 0 || expert <= 0 || active <= 0 || c.TotalParamsB <= 0 {
+	if moeLayers <= 0 || expert <= 0 || active <= 0 {
 		return 0, 0, false
 	}
-	perToken = moeLayers * float64(c.ExpertUsed) * expert / active
-	file = moeLayers * float64(c.Experts) * expert / c.TotalParamsB
+	routedActive := moeLayers * float64(c.ExpertUsed) * expert
+	routedTotal := moeLayers * float64(c.Experts) * expert
+	perToken = routedActive / active
+	file = routedTotal / (routedTotal + active - routedActive)
 	if perToken <= 0 || perToken >= 1 || file <= 0 || file >= 1 {
 		return 0, 0, false
 	}
