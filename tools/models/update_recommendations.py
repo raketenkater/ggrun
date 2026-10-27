@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +36,13 @@ QUANT_PATTERN = re.compile(
 
 # Speculative-decoding heads published beside the weights under the same quant
 # names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). Counting them made a
-# 2 GB MTP head a "Q4_0" of a 1T model.
-DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3")
+# 2 GB MTP head a "Q4_0" of a 1T model, and on 2026-10-25 an 8 GB
+# dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf the Q8_0 of a 508 GB model.
+# Shared with tools/download/download_any_gguf.py (test_companion_rule_matches_downloader).
+DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3", "medusa")
+# "mtp" may also name a main model that carries its MTP layers, and "eagle" a
+# main model (RWKV Eagle); the others are heads wherever they appear in a name.
+DRAFT_HEAD_WORDS = frozenset(DRAFT_HEAD_NAMES) - {"mtp", "eagle"}
 
 
 def is_calibration_or_adapter(path):
@@ -51,8 +56,9 @@ def is_calibration_or_adapter(path):
 
 def is_draft_head_gguf(path: str) -> bool:
     parts = path.lower().split("/")
-    return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
-        part in DRAFT_HEAD_NAMES for part in parts[:-1])
+    return (any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES)
+            or any(part in DRAFT_HEAD_NAMES for part in parts[:-1])
+            or bool(set(re.split(r"[-_.]+", parts[-1])) & DRAFT_HEAD_WORDS))
 
 
 # Bytes per parameter by quant label, mirroring bytesPerWeight in
@@ -66,20 +72,26 @@ BYTES_PER_WEIGHT = (
 COMPANION_PARAM_RATIO = 15
 
 
-def drop_companion_sized(variants: list[tuple[str, int | None, Any]]) -> list[tuple[str, int | None, Any]]:
+def drop_companion_sized(variants: list[tuple[str, int | None, Any]],
+                         label: str | None = None) -> list[tuple[str, int | None, Any]]:
     """Drop (quant, size_bytes, item) artifacts implying under 1/15 of the
     largest artifact's parameter count: a draft head or projector that escaped
     the name rules (dspark-X-Q8_0.gguf, 2 GB beside a 300 GB model), never a
-    quant of the model. Unknown sizes are kept. Mirrors
-    tools/download/download_any_gguf.py and dropCompanionSizedQuants in
-    go/pkg/recommend/recommend.go."""
+    quant of the model. Unknown sizes are kept; with a label, drops are
+    reported on stderr. Mirrors tools/download/download_any_gguf.py and
+    dropCompanionSizedQuants in go/pkg/recommend/recommend.go."""
     def implied(quant: str, size: int | None) -> float:
         q = (quant or "").upper()
-        bpw = next((b for label, b in BYTES_PER_WEIGHT if label in q), 0.55)
+        bpw = next((b for tag, b in BYTES_PER_WEIGHT if tag in q), 0.55)
         return size / bpw if size else 0
     params = [implied(quant, size) for quant, size, _ in variants]
     most = max(params, default=0)
-    return [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
+    kept = [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
+    if label and len(kept) != len(variants):
+        dropped = [str(v[0]) for v, p in zip(variants, params) if p and p * COMPANION_PARAM_RATIO < most]
+        print(f"warning: {label}: dropped companion-sized quants {', '.join(dropped)} "
+              f"(under 1/{COMPANION_PARAM_RATIO} of the largest parameter count)", file=sys.stderr)
+    return kept
 
 
 def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
@@ -274,7 +286,7 @@ def fetch_json(api_key: str, url: str) -> dict[str, Any]:
     text = fetch_text(url, headers={"x-api-key": api_key})
     data = json.loads(text)
     if not isinstance(data, dict):
-        raise SystemExit("Artificial Analysis API response was not a JSON object")
+        raise ValueError("Artificial Analysis API response was not a JSON object")
     return data
 
 
@@ -285,7 +297,7 @@ def fetch_public_data(url: str) -> Any:
 def fetch_public_json(url: str) -> dict[str, Any]:
     data = fetch_public_data(url)
     if not isinstance(data, dict):
-        raise SystemExit(f"Public API response for {url} was not a JSON object")
+        raise ValueError(f"Public API response for {url} was not a JSON object")
     return data
 
 
@@ -376,7 +388,7 @@ def fetch_models_from_url(api_key: str, base_url: str, *, paginated: bool) -> li
         data = fetch_json(api_key, url)
         page_rows = data.get("data")
         if not isinstance(page_rows, list):
-            raise SystemExit("Artificial Analysis API response did not contain a data array")
+            raise ValueError("Artificial Analysis API response did not contain a data array")
         rows.extend(row for row in page_rows if isinstance(row, dict))
         pagination = data.get("pagination")
         if not paginated or not isinstance(pagination, dict) or not pagination.get("has_more"):
@@ -389,18 +401,21 @@ def fetch_models(api_key: str) -> list[dict[str, Any]]:
     try:
         return fetch_models_from_url(api_key, API_URL, paginated=True)
     except APIRequestError as exc:
-        if exc.code != 403:
-            raise SystemExit(f"Artificial Analysis API {exc}") from exc
-        print(f"Artificial Analysis API {exc}; falling back to legacy endpoint", file=sys.stderr)
-    try:
-        return fetch_models_from_url(api_key, LEGACY_API_URL, paginated=False)
-    except APIRequestError as exc:
-        raise SystemExit(f"Artificial Analysis API {exc}") from exc
+        if exc.code not in (401, 403):
+            raise
+        # The v2 models endpoint is subscription-only; a free key gets 403.
+        print(f"warning: Artificial Analysis v2 API returned {exc.code}; using the legacy endpoint", file=sys.stderr)
+    return fetch_models_from_url(api_key, LEGACY_API_URL, paginated=False)
 
 
 def load_open_weight_rows(api_key: str) -> tuple[list[dict[str, Any]], str]:
     if api_key:
-        rows = fetch_models(api_key)
+        # Any API failure falls back to the public page, which needs no key.
+        try:
+            rows = fetch_models(api_key)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"warning: Artificial Analysis API unavailable ({exc})", file=sys.stderr)
+            rows = []
         if rows and any(has_open_weight_metadata(row) for row in rows):
             open_rows = [row for row in rows if open_weights(row)]
             if open_rows:
@@ -614,7 +629,7 @@ def fetch_hf_model_info(repo: str) -> dict[str, Any] | None:
     url = f"{HF_MODEL_API_URL}/{encoded}?blobs=true"
     try:
         data = fetch_public_json(url)
-    except (APIRequestError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         warn_hf_error(f"Could not inspect Hugging Face repo {repo}", exc)
         HF_MODEL_CACHE[key] = None
         return None
@@ -658,6 +673,19 @@ def complete_shards(paths: list[str]) -> bool:
     return total > 0 and len(paths) == total and indices == set(range(1, total + 1))
 
 
+def drop_companion_quants(quants: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+    """drop_companion_sized over catalog quant rows."""
+    def size(q: dict[str, Any]) -> int | None:
+        b = q.get("size_bytes")
+        if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 0:
+            return int(b)
+        gb = q.get("size_gb")
+        if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
+            return int(gb * 1073741824)
+        return None
+    return [q for _, _, q in drop_companion_sized([(str(q.get("name") or ""), size(q), q) for q in quants], label)]
+
+
 def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     key = repo.lower()
     if key in HF_QUANT_CACHE:
@@ -694,7 +722,7 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     # Drop companion-sized artifacts before the ambiguity check, so a draft
     # head sharing a label with the model cannot hide the model's own quant.
     complete: dict[str, list[int | None]] = {}
-    for quant, size, _ in drop_companion_sized(variants):
+    for quant, size, _ in drop_companion_sized(variants, repo):
         complete.setdefault(quant, []).append(size)
     quants = []
     for quant, found in complete.items():
@@ -718,7 +746,9 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
 # leading_dense, kv_lora) — those live only inside the GGUF KV metadata block.
 # The geometry is identical across every quant of a model, so one range request
 # per repo (on any one GGUF file) is enough; no per-quant fetch.
-GGUF_HEADER_FETCH_BYTES = 16 * 1024 * 1024  # 16 MiB covers KV metadata + tokenizer for current models
+# 16 MiB covers KV metadata + tokenizer for most models; a large vocabulary
+# (Sarvam 105B) needs the second, larger range.
+GGUF_HEADER_FETCH_STEPS = (16 * 1024 * 1024, 64 * 1024 * 1024)
 HF_GGUF_ARCH_CACHE: dict[str, dict[str, Any] | None] = {}
 
 
@@ -744,14 +774,50 @@ def _representative_gguf_file(siblings: list[dict[str, Any]]) -> str | None:
     return candidates[0][0]
 
 
+def _fetch_gguf_range(url: str, nbytes: int) -> bytes:
+    req_headers = {"Range": f"bytes=0-{nbytes - 1}", "User-Agent": "ggrun-catalog-refresh"}
+    req_headers.update(hf_auth_headers(url))
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read(nbytes)
+
+
+def parse_gguf_header(raw: bytes) -> tuple[dict[str, Any] | None, bool]:
+    """Parse GGUF KV metadata: (meta, complete), or (None, False) when not GGUF.
+
+    complete is False when the bytes ran out mid-metadata; meta then holds the
+    keys read before the cut.
+    """
+    # parse_gguf._read_kv reads from a file-like object; BytesIO works and lets
+    # us reuse the exact tested parser instead of duplicating the KV walk.
+    import io
+    import struct
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gguf"))
+    from parse_gguf import _read_kv
+
+    buf = io.BytesIO(raw)
+    if len(raw) < 24 or buf.read(4) != b"GGUF":
+        return None, False
+    buf.read(4)  # gguf version
+    struct.unpack("<Q", buf.read(8))[0]  # tensor_count (0 on shard 1 of split models)
+    kv_count = struct.unpack("<Q", buf.read(8))[0]
+    meta: dict[str, Any] = {"fused": 0, "expert_bytes": 0, "non_expert_bytes": 0}
+    try:
+        _read_kv(buf, meta, kv_count)
+    except Exception:  # noqa: BLE001 - any parse failure is reported by the caller
+        return meta, False
+    return meta, True
+
+
 def fetch_gguf_arch(repo: str) -> dict[str, Any] | None:
     """Read GGUF KV metadata geometry from one HF range request.
 
     Returns a dict with the fields the placement engine's overhead formula
     needs (arch, layers, experts, exp_used, exp_ff, exp_shared_ff, embd, ff,
     hkv, kl, vl, kv_lora, q_lora, leading_dense, ctx_train), or None when the
-    repo has no GGUF or the header could not be parsed. Best-effort: any
-    failure leaves the caller to fall back to the size-only overhead estimate.
+    repo has no GGUF or the header could not be parsed. Metadata larger than
+    the first range is retried with a larger one. Best-effort: any failure
+    leaves the caller to fall back to the size-only overhead estimate.
     """
     if not repo or "/" not in repo:
         return None
@@ -771,38 +837,33 @@ def fetch_gguf_arch(repo: str) -> dict[str, Any] | None:
         HF_GGUF_ARCH_CACHE[key] = None
         return None
     url = _gguf_resolve_url(repo, fname)
-    # parse_gguf._read_kv reads from a file-like object; BytesIO works and lets
-    # us reuse the exact tested parser instead of duplicating the KV walk.
-    import io
-    import struct
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gguf"))
-    from parse_gguf import _read_kv
-
-    req_headers = {"Range": f"bytes=0-{GGUF_HEADER_FETCH_BYTES - 1}", "User-Agent": "ggrun-catalog-refresh"}
-    req_headers.update(hf_auth_headers(url))
-    try:
-        req = urllib.request.Request(url, headers=req_headers)
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read(GGUF_HEADER_FETCH_BYTES)
-    except Exception as exc:
-        warn_hf_error(f"Could not read GGUF header for {repo}/{fname}", exc)
-        HF_GGUF_ARCH_CACHE[key] = None
-        return None
-    buf = io.BytesIO(raw)
-    try:
-        if buf.read(4) != b"GGUF":
+    meta: dict[str, Any] | None = None
+    complete = truncated = False
+    for nbytes in GGUF_HEADER_FETCH_STEPS:
+        try:
+            raw = _fetch_gguf_range(url, nbytes)
+        except Exception as exc:
+            warn_hf_error(f"Could not read GGUF header for {repo}/{fname}", exc)
             HF_GGUF_ARCH_CACHE[key] = None
             return None
-        buf.read(4)  # gguf version
-        struct.unpack("<Q", buf.read(8))[0]  # tensor_count (0 on shard 1 of split models)
-        kv_count = struct.unpack("<Q", buf.read(8))[0]
-        meta: dict[str, Any] = {"fused": 0, "expert_bytes": 0, "non_expert_bytes": 0}
-        _read_kv(buf, meta, kv_count)
-    except Exception as exc:
-        warn_hf_error(f"GGUF header parse failed for {repo}/{fname}", exc)
+        meta, complete = parse_gguf_header(raw)
+        # A short read is the whole file: a parse error there is not truncation.
+        truncated = meta is not None and not complete and len(raw) >= nbytes
+        if not truncated:
+            break
+    if meta is None or not (complete or truncated):
+        print(f"warning: GGUF header unreadable for {repo}/{fname}; geometry unknown", file=sys.stderr)
         HF_GGUF_ARCH_CACHE[key] = None
         return None
+    if truncated:
+        # The metadata outgrew every range. Sarvam 105B's 262k-entry tokenizer
+        # overran 16 MiB, and dropping the whole header catalogued that MoE as
+        # dense. Keys before the cut are exact, but later geometry may be
+        # missing, so keep only what classifies the model and leave the rest
+        # unknown; the recommender then uses its size-only overhead estimate.
+        print(f"warning: GGUF metadata for {repo}/{fname} exceeds {GGUF_HEADER_FETCH_STEPS[-1] >> 20} MiB; "
+              "keeping only architecture and expert counts", file=sys.stderr)
+        meta = {k: meta[k] for k in ("arch", "experts", "exp_used") if k in meta}
     # Project to the fields the recommender/overhead formula consumes.
     out: dict[str, Any] = {}
     for field in (
@@ -827,7 +888,7 @@ def search_hf_models(query: str, limit: int) -> list[dict[str, Any]]:
     url = f"{HF_MODEL_API_URL}?{urllib.parse.urlencode({'search': query, 'limit': limit})}"
     try:
         data = fetch_public_data(url)
-    except (APIRequestError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         warn_hf_error(f"Hugging Face search unavailable for {query!r}", exc)
         HF_SEARCH_CACHE[key] = []
         return []
@@ -878,11 +939,49 @@ VARIANT_QUALIFIERS = {
     # resolved to the finance retune Ling-3.0-flash-Fin, and the duplicate repo
     # then dropped the base model from the catalog.
     "fin",
+    # Command A+ is not Command A; norm() drops "+", so it is spelled out.
+    "plus",
 }
+# Inflections a qualifier still names: "Distilled" is a distill.
+QUALIFIER_SUFFIXES = ("", "s", "ed", "ing", "ation")
 
 
 def raw_name_tokens(text: str) -> set[str]:
     return set(norm(text).split())
+
+
+def name_qualifiers(text: str) -> set[str]:
+    words = raw_name_tokens(text.replace("+", " plus "))
+    return {q for q in VARIANT_QUALIFIERS for w in words
+            if w.startswith(q) and w[len(q):] in QUALIFIER_SUFFIXES}
+
+
+def spelled_versions(name: str) -> str:
+    """Read "_" between digits as a version dot: Llama-3_3, v1_5."""
+    return re.sub(r"(?<=\d)_(?=\d)", ".", name)
+
+
+def identity_tokens(text: str) -> set[str]:
+    """Name tokens without parenthetical notes; "v1" and "1" are one version."""
+    return {re.sub(r"^v(?=\d)", "", t) for t in tokens(re.sub(r"\([^)]*\)", " ", text))}
+
+
+def fused_versions(text: str) -> set[str]:
+    """Words fusing a family and its version: lfm2, lfm2.5, k2, m3.1, v4.1."""
+    words = re.split(r"[\s_\-/()]+", text.lower())
+    return {w for w in words if re.fullmatch(r"[a-z]+\d+(?:\.\d+)*", w)}
+
+
+def fused_versions_match(target: str, candidate: str) -> bool:
+    """LFM2 is not LFM2.5 and MiniMax M3 is not M3.1: a candidate word that
+    spells the target's family with another version names another model."""
+    wanted = fused_versions(target)
+    for word in fused_versions(candidate):
+        family = re.match(r"[a-z]+", word).group()
+        same_family = {w for w in wanted if re.match(r"[a-z]+", w).group() == family}
+        if same_family and word not in same_family:
+            return False
+    return True
 
 
 def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[str, Any]) -> bool:
@@ -903,7 +1002,7 @@ def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[
 
 
 def auxiliary_repo(repo: str) -> bool:
-    return bool(raw_name_tokens(repo_name(repo)) & {"mtp", "dflash", "draft", "mmproj", "adapter", "lora"})
+    return bool(raw_name_tokens(repo_name(repo)) & ({"mtp", "mmproj", "adapter", "lora"} | DRAFT_HEAD_WORDS))
 
 
 def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
@@ -913,11 +1012,18 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     target_tokens = tokens(target_query)
     # Judge the repository's model name, not its owner: "DevQuasar-4" once
     # supplied the "4" of "Mistral Small 4" for a Small-24B-Base-2501 repo.
-    candidate_name = repo_name(candidate_repo)
+    candidate_name = spelled_versions(repo_name(candidate_repo))
     # Quant and GGUF suffixes are not part of the name: "Q4_0_4_8" once
     # supplied the "4" of "Mistral Small 4" for a Small-Instruct-2409 repo.
     candidate_tokens = tokens(clean_repo_model_name(candidate_name))
     if not target_tokens or not candidate_tokens:
+        return False
+    # Every word of the model's own name must appear: one shared word let
+    # "A.X-K2" resolve to a 3.7B distill and "Command A" to Command A+.
+    own_name = re.sub(r"\([^)]*\)", " ", bare_model_name(row))
+    if not identity_tokens(own_name) <= identity_tokens(clean_repo_model_name(candidate_name)):
+        return False
+    if not fused_versions_match(own_name, clean_repo_model_name(candidate_name)):
         return False
     if not family_match(target_tokens, candidate_tokens):
         return False
@@ -934,9 +1040,8 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
         return False
     # Parenthetical notes ("based on GLM-4.5-Air") describe lineage, not the
     # model's own name.
-    target_raw = raw_name_tokens(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
-    candidate_raw = raw_name_tokens(clean_repo_model_name(candidate_name))
-    if (target_raw & VARIANT_QUALIFIERS) != (candidate_raw & VARIANT_QUALIFIERS):
+    target_qualifiers = name_qualifiers(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
+    if target_qualifiers != name_qualifiers(clean_repo_model_name(candidate_name)):
         return False
     if not creator_prefix_only(clean_repo_model_name(candidate_name), target_tokens, row):
         return False
@@ -1029,7 +1134,9 @@ def quick_hf_score(repo: str, row: dict[str, Any], item: dict[str, Any] | None =
 
 def hf_repo_score(repo: str, row: dict[str, Any], quants: list[dict[str, Any]], item: dict[str, Any] | None = None) -> int:
     score = quick_hf_score(repo, row, item)
-    score += 25 * min(8, len(quants))
+    # Capped low: a well-stocked repo of the wrong model (a distill with eight
+    # quants) must not outscore the right model's sparser repo.
+    score += 10 * min(4, len(quants))
     names = {str(q.get("name") or "").upper() for q in quants}
     if any(q.startswith(("Q4", "IQ4", "MXFP4", "MXP4")) for q in names):
         score += 80
@@ -1038,7 +1145,20 @@ def hf_repo_score(repo: str, row: dict[str, Any], quants: list[dict[str, Any]], 
     return score
 
 
-def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list[dict[str, Any]], str] | None:
+# A model's representative quant may move between refreshes (another repo,
+# another quant ladder), but not by 5x: that is another model.
+MAX_SIZE_JUMP = 5
+
+
+def size_jump(previous_gb: float, quants: list[dict[str, Any]]) -> float:
+    size = representative_size_gb(quants)
+    if previous_gb <= 0 or size <= 0:
+        return 1.0
+    return max(size / previous_gb, previous_gb / size)
+
+
+def resolve_gguf_repo(row: dict[str, Any], search_limit: int,
+                      previous: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]], str] | None:
     ranked: list[tuple[int, str, list[dict[str, Any]], str]] = []
     inspected: set[str] = set()
 
@@ -1081,6 +1201,13 @@ def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list
             if quants:
                 ranked.append((hf_repo_score(repo, row, quants), repo, quants, "direct"))
 
+    previous_gb = float((previous or {}).get("size_gb") or 0)
+    for entry in list(ranked):
+        jump = size_jump(previous_gb, entry[2])
+        if jump > MAX_SIZE_JUMP:
+            print(f"warning: {display_name(row)}: rejected {entry[1]} ({representative_size_gb(entry[2]):g} GB), "
+                  f"{jump:.0f}x off the previous {previous_gb:g} GB", file=sys.stderr)
+            ranked.remove(entry)
     if not ranked:
         return None
     ranked.sort(reverse=True, key=lambda entry: entry[0])
@@ -1207,9 +1334,162 @@ def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(best.values(), key=lambda row: float(row.get("aa_intelligence_index") or 0), reverse=True)
 
 
-def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int) -> dict[str, Any]:
+# A row missing from one leaderboard scrape (Kimi K3, October 2026) is more
+# often a scrape hiccup than a withdrawn model. Its last resolved entry is kept
+# this long after it was last seen, so one bad scrape cannot delete it.
+CARRY_FORWARD_DAYS = 14
+# Losing one of the previous catalog's top rows earns a louder warning.
+TOP_ROWS_WATCHED = 10
+
+# Open-weight models the leaderboard does not score, listed by review. They
+# carry no Artificial Analysis index; quality is a "~" estimate one point under
+# the scored row named by estimate_from, and the recommender ranks every
+# estimated row after the scored ones. Facts were checked against the Hugging
+# Face model cards and config.json on 2026-10-27 (MiniMax-M3.1-Flash: ~428B
+# total, 23B active, 60 layers, 128 experts, 4 per token; Nanbeige4.3-33B:
+# LlamaForCausalLM, 52 layers); the GGUF header wins where they disagree.
+REVIEWED_UNSCORED_MODELS: tuple[dict[str, Any], ...] = (
+    {"name": "MiniMax-M3.1-Flash", "family": "MiniMax", "repo": "unsloth/MiniMax-M3.1-Flash-GGUF",
+     "estimate_from": "MiniMax-M3",
+     "why": "Artificial Analysis lists MiniMax as proprietary, but MiniMaxAI/MiniMax-M3.1-Flash publishes weights",
+     "facts": {"arch": "minimax-m3", "layers": 60, "experts": 128, "exp_used": 4,
+               "total_params_b": 428, "active_params_b": 23, "moe": True}},
+    {"name": "Nanbeige4.3-33B", "family": "Nanbeige", "repo": "bartowski/Nanbeige_Nanbeige4.3-33B-GGUF",
+     "estimate_from": "Nanbeige4.1-3B",
+     "why": "Artificial Analysis has no page for it; Nanbeige/Nanbeige4.3-33B publishes weights",
+     "facts": {"arch": "llama", "layers": 52, "total_params_b": 33.119, "moe": False}},
+)
+
+
+def parse_utc(text: Any) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def previous_row(prev: dict[str, Any]) -> dict[str, Any]:
+    """The leaderboard row a previous catalog entry was built from, as far as it says."""
+    name, family = str(prev.get("name") or ""), str(prev.get("family") or "")
+    if family and name.lower().startswith(family.lower() + " "):
+        name = name[len(family) + 1:]  # display_name() prefixed the creator
+    return {"name": name, "slug": prev.get("aa_slug") or "", "creator": {"name": family}}
+
+
+def previous_matches(prev: dict[str, Any], row: dict[str, Any]) -> bool:
+    """The previous entry still names this model under today's matcher.
+
+    A repo resolved by its constructed name ("direct") was never searched for,
+    so only a searched one can be an old mismatch (Command A -> Command A+).
+    """
+    return ("resolved by direct" in str(prev.get("notes") or "")
+            or candidate_relevant(str(prev.get("repo") or ""), row))
+
+
+def carry_forward(prev: dict[str, Any], row: dict[str, Any], now: datetime, why: str) -> dict[str, Any] | None:
+    """The previous entry, kept while fresh and still the same model, else None."""
+    name = prev.get("name")
+    seen = parse_utc(prev.get("aa_updated_at"))
+    if seen is None or now - seen > timedelta(days=CARRY_FORWARD_DAYS):
+        print(f"warning: {name}: {why}; dropped (last seen {prev.get('aa_updated_at') or 'never'})", file=sys.stderr)
+        return None
+    if not previous_matches(prev, row):
+        print(f"warning: {name}: {why}; dropped, {prev.get('repo')} no longer matches the model", file=sys.stderr)
+        return None
+    cand = dict(prev)
+    cand["quants"] = drop_companion_quants(list(prev.get("quants") or []), str(prev.get("repo")))
+    if not cand["quants"]:
+        return None
+    note = f"last seen on the leaderboard {seen.date().isoformat()}"
+    if note not in str(cand.get("notes") or ""):
+        cand["notes"] = f"{cand.get('notes') or ''}; {note}".lstrip("; ")
+    expires = (seen + timedelta(days=CARRY_FORWARD_DAYS)).date().isoformat()
+    print(f"warning: {name}: {why}; kept the previous entry until {expires}", file=sys.stderr)
+    return cand
+
+
+def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Catalog rows for REVIEWED_UNSCORED_MODELS, ranked below their anchor."""
+    by_name = {str(c.get("name") or "").lower(): c for c in candidates}
+    repos = {str(c.get("repo") or "").lower() for c in candidates}
+    out = []
+    for spec in REVIEWED_UNSCORED_MODELS:
+        name, repo = spec["name"], spec["repo"]
+        if name.lower() in by_name or repo.lower() in repos:
+            continue  # the leaderboard scores it now
+        anchor = by_name.get(spec["estimate_from"].lower())
+        if not anchor or catalog_intelligence(anchor) <= 0 or int(anchor.get("quality") or 0) <= 1:
+            print(f"warning: {name}: no scored {spec['estimate_from']} row to estimate from; not listed", file=sys.stderr)
+            continue
+        quants = fetch_hf_quants(repo)
+        if not quants:
+            old = next((c for c in previous if str(c.get("repo") or "").lower() == repo.lower()), None)
+            quants = drop_companion_quants(list((old or {}).get("quants") or []), repo)
+        if not quants:
+            print(f"warning: {name}: no GGUF quants in {repo}; not listed", file=sys.stderr)
+            continue
+        row = {"name": name, "creator": {"name": spec["family"]}}
+        try:
+            cand = candidate_from_row(row, repo, quants, "reviewed override")
+        except Exception as exc:  # noqa: BLE001 - one bad repo never fails the refresh
+            print(f"warning: {name}: {exc}; not listed", file=sys.stderr)
+            continue
+        for field, want in spec["facts"].items():
+            have = cand.get(field)
+            if field in ("total_params_b", "active_params_b") and not have:
+                cand[field] = want
+            elif field == "moe":
+                cand["moe"] = bool(have) or want
+            elif have is None:
+                cand[field] = want
+            elif have != want:
+                print(f"warning: {name}: GGUF {field}={have}, reviewed {want}; keeping the GGUF value", file=sys.stderr)
+        cand.update({
+            "aa_query": "", "aa_slug": "", "aa_updated_at": "",
+            "family": spec["family"],
+            "quality": int(anchor["quality"]) - 1,
+            "notes": (f"Unscored: {spec['why']}; ~intelligence is an estimate one point under "
+                      f"{anchor['name']}'s score; listed by review"),
+        })
+        out.append(cand)
+    return out
+
+
+def validate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Repair or drop rows the Go catalog tests reject; never fail the refresh."""
+    out = []
+    for cand in candidates:
+        label = f"{cand.get('name')} ({cand.get('repo')})"
+        quants = drop_companion_quants(list(cand.get("quants") or []), label)
+        if not quants:
+            print(f"warning: {label}: no main-model quants; dropped", file=sys.stderr)
+            continue
+        if len(quants) != len(cand.get("quants") or []):
+            cand["quants"] = quants
+            cand["size_gb"] = round(representative_size_gb(quants), 2)
+        experts = cand.get("experts")
+        if isinstance(experts, int) and experts > 1 and not cand.get("moe"):
+            print(f"warning: {label}: {experts} experts but classified dense; marked MoE", file=sys.stderr)
+            cand["moe"] = True
+        out.append(cand)
+    return out
+
+
+def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int,
+                  previous: list[dict[str, Any]] | None = None, now: datetime | None = None) -> dict[str, Any]:
+    previous = [c for c in previous or [] if isinstance(c, dict) and c.get("repo")]
+    now = now or datetime.now(timezone.utc)
+    scored_before = [c for c in previous if catalog_intelligence(c) > 0]
+    by_slug = {str(c.get("aa_slug")): c for c in scored_before if c.get("aa_slug")}
+    by_name = {str(c.get("name") or "").lower(): c for c in scored_before}
+
+    def previous_for(row: dict[str, Any]) -> dict[str, Any] | None:
+        return by_slug.get(row_slug(row)) or by_name.get(display_name(row).lower())
+
     ranked_rows = [row for row in sorted(dedupe_rows(rows), key=intelligence, reverse=True) if intelligence(row) > 0]
     candidates: list[dict[str, Any]] = []
+    carried: list[dict[str, Any]] = []
     skipped = 0
     seen_repos: set[str] = set()
     for row in ranked_rows:
@@ -1217,21 +1497,47 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
             break
         if row.get("deprecated") is True:
             continue
-        resolved = resolve_gguf_repo(row, search_limit)
-        if not resolved:
-            skipped += 1
+        prev = previous_for(row)
+        if prev and not previous_matches(prev, row):
+            prev = None  # an earlier mismatch must not anchor the size guard
+        cand = None
+        try:
+            resolved = resolve_gguf_repo(row, search_limit, prev)
+            if resolved and resolved[0].lower() in seen_repos:
+                continue
+            if resolved:
+                cand = candidate_from_row(row, *resolved)
+        except Exception as exc:  # noqa: BLE001 - one bad repo never fails the refresh
+            print(f"warning: {display_name(row)}: {exc}", file=sys.stderr)
+        if cand is None:
+            kept = carry_forward(prev, row, now, "unresolved this run") if prev else None
+            if kept:
+                carried.append(kept)
+            else:
+                skipped += 1
             continue
-        repo, quants, method = resolved
-        if repo.lower() in seen_repos:
+        seen_repos.add(cand["repo"].lower())
+        candidates.append(cand)
+
+    present = ({row_slug(row) for row in rows} | {display_name(row).lower() for row in rows}) - {""}
+    top = {id(c) for c in sorted(scored_before, key=catalog_intelligence, reverse=True)[:TOP_ROWS_WATCHED]}
+    for prev in scored_before:
+        if {prev.get("aa_slug"), str(prev.get("name") or "").lower()} & present:
             continue
-        seen_repos.add(repo.lower())
-        candidates.append(candidate_from_row(row, repo, quants, method))
-    candidates = dedupe_candidates(candidates)[:limit]
+        if id(prev) in top:
+            print(f"warning: top-{TOP_ROWS_WATCHED} model {prev.get('name')} is missing from the leaderboard scrape", file=sys.stderr)
+        kept = carry_forward(prev, previous_row(prev), now, "missing from the leaderboard scrape")
+        if kept:
+            carried.append(kept)
+    carried = [c for c in carried if str(c["repo"]).lower() not in seen_repos]
+    candidates = dedupe_candidates(candidates + carried)[:limit]
+    kept_count = sum(1 for c in carried if c in candidates)
+    candidates = validate_candidates(candidates + reviewed_candidates(candidates, previous))
     return {
         "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by ggrun hardware fit; Hugging Face GGUF metadata cached from public model APIs",
         "candidates": candidates,
         "generated_at": utc_now(),
-        "source": f"{source_label}; resolved {len(candidates)} GGUF repos with quant sizes; skipped {skipped} open-weight rows without matching GGUF quants",
+        "source": f"{source_label}; resolved {len(candidates) - kept_count} GGUF repos with quant sizes; kept {kept_count} previous rows; skipped {skipped} open-weight rows without matching GGUF quants",
         "version": 2,
     }
 
@@ -1371,7 +1677,12 @@ def main() -> int:
             print_top_models(rows, args.print_top)
         if args.print_open_weights_top > 0:
             print_top_models(rows, args.print_open_weights_top, open_weights_only=True)
-        catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit))
+        try:
+            previous = json.loads(catalog_path.read_text(encoding="utf-8")).get("candidates") or []
+        except (OSError, ValueError, AttributeError) as exc:
+            print(f"warning: previous catalog unreadable ({exc}); nothing carried forward", file=sys.stderr)
+            previous = []
+        catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit), previous)
     except Exception as exc:
         if args.allow_missing_key:
             print(f"recommendation catalog unchanged: {exc}", file=sys.stderr)

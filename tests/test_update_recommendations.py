@@ -434,5 +434,243 @@ def test_companion_rule_matches_downloader():
     downloader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(downloader)
     updater = load_updater()
-    for name in ("DRAFT_HEAD_NAMES", "BYTES_PER_WEIGHT", "COMPANION_PARAM_RATIO"):
+    for name in ("DRAFT_HEAD_NAMES", "DRAFT_HEAD_WORDS", "BYTES_PER_WEIGHT", "COMPANION_PARAM_RATIO"):
         assert getattr(updater, name) == getattr(downloader, name), name
+    # Token-aware: an Eagle-named main model is not a draft head; EAGLE drafts are.
+    for path, want in [("RWKV-Eagle-7B-Q4_K_M.gguf", False), ("rwkv/RWKV-Eagle-7B-Q8_0.gguf", False),
+                       ("eagle3-M-BF16.gguf", True), ("M-eagle-draft-Q8_0.gguf", True),
+                       ("M-EAGLE3-Q8_0.gguf", True), ("eagle/M-Q8_0.gguf", True),
+                       ("dspark-M-Q8_0.gguf", True), ("M-medusa-BF16.gguf", True),
+                       ("M-Q4_K_M.gguf", False)]:
+        for module in (updater, downloader):
+            assert module.is_draft_head_gguf(path) is want, (module.__name__, path)
+
+
+def test_dspark_heads_and_companion_sized_files_are_not_quants(monkeypatch, capsys):
+    """2026-10-25: unsloth/DeepSeek-V4.1-Flash-1017-GGUF listed its 8 GB
+    dspark head as the Q8_0 of a 508 GB model and failed the refresh."""
+    updater = load_updater()
+    siblings = [_sibling(f"UD-Q4_K_XL/DS-1017-UD-Q4_K_XL-0000{i}-of-00002.gguf", 250 * 1024**3) for i in (1, 2)]
+    siblings += [_sibling("dspark-DS-1017-Q8_0.gguf", 7976914240),
+                 _sibling("dspark/dspark-DS-1017-BF16.gguf", 8506281280),
+                 _sibling("DS-1017-draft-Q4_K_M.gguf", 4 * 1024**3),
+                 _sibling("mmproj-BF16.gguf", 972208288)]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert [q["name"] for q in updater.fetch_hf_quants("unsloth/DS-1017-GGUF")] == ["UD-Q4_K_XL"]
+    # An unlabelled companion is caught by size, with a warning.
+    siblings[:] = [_sibling("Model-Q4_K_M.gguf", 300 * 1024**3), _sibling("Model-Q8_0.gguf", 8 * 1024**3),
+                   _sibling("Model-IQ1_S.gguf", 60 * 1024**3)]
+    assert [q["name"] for q in updater.fetch_hf_quants("owner/Model-GGUF")] == ["IQ1_S", "Q4_K_M"]
+    assert "Q8_0" in capsys.readouterr().err
+    assert updater.auxiliary_repo("someone/DS-1017-DSpark-GGUF")
+    assert not updater.is_draft_head_gguf("RWKV-Eagle-7B-Q4_K_M.gguf")
+
+
+def test_identity_requires_every_word_of_the_model_name():
+    updater = load_updater()
+    cases = [
+        # 2026-10-25 regressions: a distill, a "+" variant and a later version.
+        ({"name": "A.X-K2", "creator": {"name": "SK Telecom"}}, "someone/A.X-K2-Distilled-3.7B-GGUF", False),
+        ({"name": "A.X-K2", "creator": {"name": "SK Telecom"}}, "skt/A.X-K2-GGUF", True),
+        ({"name": "Command A", "creator": {"name": "Cohere"}}, "bartowski/command-a-plus-05-2026-GGUF", False),
+        ({"name": "Command A", "creator": {"name": "Cohere"}}, "someone/Command-A+-GGUF", False),
+        ({"name": "Command A", "creator": {"name": "Cohere"}}, "bartowski/CohereForAI_c4ai-command-a-03-2025-GGUF", True),
+        ({"name": "LFM2 24B A2B", "creator": {"name": "Liquid AI"}}, "bartowski/LiquidAI_LFM2.5-24B-A2B-GGUF", False),
+        ({"name": "LFM2 24B A2B", "creator": {"name": "Liquid AI"}}, "bartowski/LiquidAI_LFM2-24B-A2B-GGUF", True),
+        ({"name": "MiniMax-M3", "creator": {"name": "MiniMax"}}, "someone/MiniMax-M3.1-GGUF", False),
+        ({"name": "Qwen3.6 27B", "creator": {"name": "Alibaba"}}, "someone/Qwen3.6-27B-Distillation-GGUF", False),
+        ({"name": "Llama Nemotron Super 49B v1.5", "creator": {"name": "NVIDIA"}},
+         "bartowski/nvidia_Llama-3_3-Nemotron-Super-49B-v1_5-GGUF", True),
+    ]
+    for row, repo, want in cases:
+        assert updater.candidate_relevant(repo, row) is want, (row["name"], repo)
+
+
+def test_quant_count_cannot_outweigh_identity():
+    updater = load_updater()
+    row = {"name": "A.X-K2", "creator": {"name": "SK Telecom"}}
+    few = [{"name": "Q4_K_M", "size_gb": 300}]
+    many = [{"name": n, "size_gb": 300} for n in ("Q4_0", "Q4_1", "Q4_K_S", "IQ4_XS", "IQ4_NL", "MXFP4")] + few
+    assert updater.hf_repo_score("o/A.X-K2-GGUF", row, many) - updater.hf_repo_score("o/A.X-K2-GGUF", row, few) <= 30
+
+
+def test_resolution_rejects_a_repo_far_off_the_previous_size(monkeypatch, capsys):
+    updater = load_updater()
+    row = {"name": "A.X-K2", "creator": {"name": "SK Telecom"}}
+    monkeypatch.setattr(updater, "search_hf_models", lambda *a: [{"id": "skt/A.X-K2-GGUF"}])
+    monkeypatch.setattr(updater, "fetch_hf_quants", lambda repo: [{"name": "Q4_K_M", "size_gb": 2.3, "size_bytes": 1}])
+    assert updater.resolve_gguf_repo(row, 20, {"size_gb": 344.99}) is None
+    assert "off the previous" in capsys.readouterr().err
+    assert updater.resolve_gguf_repo(row, 20, {"size_gb": 3.0})[0] == "skt/A.X-K2-GGUF"
+    assert updater.resolve_gguf_repo(row, 20)[0] == "skt/A.X-K2-GGUF"
+
+
+def _previous(name, repo, seen, index=40.0, slug=""):
+    return {"name": name, "repo": repo, "family": "Kimi", "aa_slug": slug, "aa_intelligence_index": index,
+            "aa_updated_at": seen, "quality": round(index * 1.65), "size_gb": 500, "notes": "row",
+            "quants": [{"name": "Q4_K_M", "size_gb": 500, "size_bytes": 500 * 1024**3}]}
+
+
+def _offline_catalog(updater, monkeypatch, resolved):
+    monkeypatch.setattr(updater, "resolve_gguf_repo", lambda row, limit, prev=None: resolved.get(row["name"]))
+    monkeypatch.setattr(updater, "candidate_from_row", lambda row, repo, quants, method: {
+        "name": updater.display_name(row), "repo": repo, "quants": quants, "aa_slug": updater.row_slug(row),
+        "aa_intelligence_index": updater.intelligence(row), "quality": 50, "notes": "fresh"})
+    monkeypatch.setattr(updater, "REVIEWED_UNSCORED_MODELS", ())
+
+
+def test_a_row_missing_from_one_scrape_is_carried_until_it_expires(monkeypatch, capsys):
+    """Kimi K3 vanished from one leaderboard scrape and was deleted."""
+    from datetime import datetime, timezone
+    updater = load_updater()
+    quants = [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]
+    _offline_catalog(updater, monkeypatch, {"GLM-5.3": ("unsloth/GLM-5.3-GGUF", quants, "hf-search")})
+    rows = [{"name": "GLM-5.3", "slug": "glm-5-3", "intelligenceIndex": 44, "isOpenWeights": True}]
+    previous = [_previous("Kimi K3 (Max)", "unsloth/Kimi-K3-GGUF", "2026-10-19T11:04:37Z", slug="kimi-k3")]
+    now = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    catalog = updater.build_catalog(rows, "test", 100, 20, previous, now)
+    kimi = [c for c in catalog["candidates"] if c["repo"] == "unsloth/Kimi-K3-GGUF"]
+    assert kimi and "last seen on the leaderboard 2026-10-19" in kimi[0]["notes"]
+    assert "kept 1 previous rows" in catalog["source"]
+    err = capsys.readouterr().err
+    assert "top-10 model Kimi K3 (Max) is missing" in err and "until 2026-11-02" in err
+    # Carried twice, the note is not repeated; past the expiry the row goes.
+    again = updater.build_catalog(rows, "test", 100, 20, catalog["candidates"], now)
+    assert [c["notes"] for c in again["candidates"] if "Kimi" in c["name"]] == [kimi[0]["notes"]]
+    late = updater.build_catalog(rows, "test", 100, 20, previous, datetime(2026, 11, 3, tzinfo=timezone.utc))
+    assert [c["repo"] for c in late["candidates"]] == ["unsloth/GLM-5.3-GGUF"]
+
+
+def test_an_unresolved_row_keeps_its_previous_entry_unless_it_was_a_mismatch(monkeypatch):
+    from datetime import datetime, timezone
+    updater = load_updater()
+    _offline_catalog(updater, monkeypatch, {})
+    now = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    rows = [{"name": "Kimi K3 (Max)", "slug": "kimi-k3", "intelligenceIndex": 43.6, "isOpenWeights": True,
+             "creator": {"name": "Kimi"}},
+            {"name": "Command A", "slug": "command-a", "intelligenceIndex": 7, "isOpenWeights": True,
+             "creator": {"name": "Cohere"}}]
+    previous = [_previous("Kimi K3 (Max)", "unsloth/Kimi-K3-GGUF", "2026-10-19T11:04:37Z", slug="kimi-k3"),
+                _previous("Cohere Command A", "bartowski/command-a-plus-05-2026-GGUF", "2026-10-19T11:04:37Z",
+                          index=7, slug="command-a")]
+    catalog = updater.build_catalog(rows, "test", 100, 20, previous, now)
+    assert [c["repo"] for c in catalog["candidates"]] == ["unsloth/Kimi-K3-GGUF"]
+
+
+def test_one_failing_repo_does_not_fail_the_refresh(monkeypatch, capsys):
+    updater = load_updater()
+    monkeypatch.setattr(updater, "REVIEWED_UNSCORED_MODELS", ())
+    quants = [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]
+
+    def resolve(row, limit, prev=None):
+        if row["name"] == "Bad":
+            raise OSError("connection reset")
+        return ("o/Good-GGUF", quants, "hf-search")
+    monkeypatch.setattr(updater, "resolve_gguf_repo", resolve)
+    monkeypatch.setattr(updater, "candidate_from_row", lambda row, repo, q, m: {
+        "name": row["name"], "repo": repo, "quants": q, "aa_intelligence_index": 1})
+    rows = [{"name": "Bad", "intelligenceIndex": 50, "isOpenWeights": True},
+            {"name": "Good", "intelligenceIndex": 40, "isOpenWeights": True}]
+    catalog = updater.build_catalog(rows, "test", 100, 20)
+    assert [c["name"] for c in catalog["candidates"]] == ["Good"]
+    assert "connection reset" in capsys.readouterr().err
+
+
+def test_validation_repairs_or_drops_rows_the_go_tests_reject(capsys):
+    updater = load_updater()
+    gb = 1024**3
+    rows = [{"name": "dense-labelled MoE", "repo": "o/a", "experts": 128, "moe": False,
+             "quants": [{"name": "Q4_K_M", "size_gb": 60, "size_bytes": 60 * gb}]},
+            {"name": "companion", "repo": "o/b", "size_gb": 7.4,
+             "quants": [{"name": "Q8_0", "size_gb": 7.4, "size_bytes": 8 * gb},
+                        {"name": "UD-Q4_K_XL", "size_gb": 480, "size_bytes": 500 * gb}]},
+            {"name": "empty", "repo": "o/c", "quants": []}]
+    out = updater.validate_candidates(rows)
+    assert [r["name"] for r in out] == ["dense-labelled MoE", "companion"]
+    assert out[0]["moe"] is True
+    assert [q["name"] for q in out[1]["quants"]] == ["UD-Q4_K_XL"] and out[1]["size_gb"] == 480
+    assert "marked MoE" in capsys.readouterr().err
+
+
+def test_reviewed_unscored_models_rank_one_point_under_their_scored_anchor(monkeypatch):
+    updater = load_updater()
+    gb = 1024**3
+    monkeypatch.setattr(updater, "fetch_hf_quants", lambda repo: [{"name": "UD-Q4_K_XL", "size_gb": 240, "size_bytes": 240 * gb}])
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {"arch": "minimax-m3", "experts": 128, "exp_used": 4} if "MiniMax" in repo else {"arch": "llama"})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {})
+    scored = [{"name": "MiniMax-M3", "repo": "unsloth/MiniMax-M3-GGUF", "aa_intelligence_index": 29.22, "quality": 48},
+              {"name": "Nanbeige4.1-3B", "repo": "o/Nanbeige4.1-3B-GGUF", "aa_intelligence_index": 8.4, "quality": 14}]
+    rows = {r["name"]: r for r in updater.reviewed_candidates(scored, [])}
+    assert set(rows) == {"MiniMax-M3.1-Flash", "Nanbeige4.3-33B"}
+    flash = rows["MiniMax-M3.1-Flash"]
+    assert flash["aa_intelligence_index"] == 0 and flash["quality"] == 47
+    assert flash["moe"] is True and flash["layers"] == 60 and flash["total_params_b"] == 428
+    assert flash["repo"] == "unsloth/MiniMax-M3.1-Flash-GGUF" and flash["notes"].startswith("Unscored")
+    dense = rows["Nanbeige4.3-33B"]
+    assert dense["quality"] == 13 and dense["moe"] is False and dense["aa_intelligence_index"] == 0
+    # No scored anchor, no estimate: the row is not listed at all.
+    assert [r["name"] for r in updater.reviewed_candidates(scored[1:], [])] == ["Nanbeige4.3-33B"]
+    # Once the leaderboard scores it, the scored row wins.
+    scored.append({"name": "MiniMax-M3.1-Flash", "repo": "x/y", "aa_intelligence_index": 33, "quality": 54})
+    assert [r["name"] for r in updater.reviewed_candidates(scored, [])] == ["Nanbeige4.3-33B"]
+
+
+def test_api_403_and_failures_fall_back_to_the_public_page(monkeypatch, capsys):
+    updater = load_updater()
+    page_rows = [{"name": "Open", "isOpenWeights": True, "intelligenceIndex": 30}]
+    monkeypatch.setattr(updater, "fetch_public_open_weight_rows", lambda: page_rows)
+    calls = []
+
+    def fetch(api_key, url, *, paginated):
+        calls.append(url)
+        if url == updater.API_URL:
+            raise updater.APIRequestError(403, url, "Forbidden")
+        return [{"name": "Legacy row without licensing"}]
+    monkeypatch.setattr(updater, "fetch_models_from_url", fetch)
+    assert updater.load_open_weight_rows("key") == (page_rows, "Artificial Analysis open-weight leaderboard page")
+    assert calls == [updater.API_URL, updater.LEGACY_API_URL]
+    assert "v2 API returned 403; using the legacy endpoint" in capsys.readouterr().err
+
+    def broken(api_key, url, *, paginated):
+        raise updater.APIRequestError(500, url, "Server Error")
+    monkeypatch.setattr(updater, "fetch_models_from_url", broken)
+    assert updater.load_open_weight_rows("key")[0] == page_rows
+
+
+def _gguf(kvs):
+    import struct
+
+    def string(s):
+        b = s.encode()
+        return struct.pack("<Q", len(b)) + b
+    out = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kvs))
+    for key, value in kvs:
+        out += string(key)
+        if isinstance(value, int):
+            out += struct.pack("<I", 4) + struct.pack("<I", value)
+        elif isinstance(value, str):
+            out += struct.pack("<I", 8) + string(value)
+        else:
+            out += struct.pack("<I", 9) + struct.pack("<I", 8) + struct.pack("<Q", len(value))
+            out += b"".join(string(v) for v in value)
+    return out
+
+
+def test_a_large_tokenizer_does_not_hide_moe_geometry(monkeypatch):
+    """Sarvam 105B's 262k-token vocabulary overran the 16 MiB header range;
+    the whole header was discarded and the MoE was catalogued as dense."""
+    updater = load_updater()
+    raw = _gguf([("general.architecture", "deepseek2"), ("deepseek2.block_count", 32),
+                 ("deepseek2.expert_count", 128), ("deepseek2.expert_used_count", 8),
+                 ("tokenizer.ggml.tokens", [f"tok{i}" for i in range(4000)]),
+                 ("deepseek2.attention.head_count_kv", 1), ("deepseek2.attention.key_length", 576),
+                 ("deepseek2.attention.value_length", 512)])
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": [_sibling("m-Q4_K_M.gguf", 60 * 1024**3)]})
+    monkeypatch.setattr(updater, "_fetch_gguf_range", lambda url, n: raw[:n])
+    monkeypatch.setattr(updater, "GGUF_HEADER_FETCH_STEPS", (1024, len(raw) + 10))
+    full = updater.fetch_gguf_arch("o/sarvam-a")
+    assert full["experts"] == 128 and full["layers"] == 32 and full["vl"] == 512
+    monkeypatch.setattr(updater, "GGUF_HEADER_FETCH_STEPS", (512, 1024))
+    assert updater.fetch_gguf_arch("o/sarvam-b") == {"arch": "deepseek2", "experts": 128, "exp_used": 8}
+    monkeypatch.setattr(updater, "_fetch_gguf_range", lambda url, n: b"not a gguf")
+    assert updater.fetch_gguf_arch("o/sarvam-c") is None
