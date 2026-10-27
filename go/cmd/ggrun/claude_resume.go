@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -199,7 +201,9 @@ func claudeLaunchSession(cfg *config.Config, req *launchRequest, serverArgs []st
 		}
 		// The recorded shape stays as it was; only the live gateway changes.
 		spec.RouterPort = routerPort
-		if routerPort > 0 && cacheDir != "" {
+		// A launch without a router clears the recorded one too: the old port
+		// died with its launch and may later belong to another launch's router.
+		if routerPort != rec.RouterPort && cacheDir != "" {
 			rec.RouterPort = routerPort
 			if saveErr := claudesession.Save(cacheDir, rec); saveErr != nil {
 				fmt.Fprintf(os.Stderr, "[claude-code] could not update session record: %v\n", saveErr)
@@ -282,31 +286,40 @@ func portServesLLM(port int) bool {
 }
 
 // portServesClaudeRouter reports whether ggrun's loopback router answers on the
-// port. Its status endpoint is the identity check: a reused ephemeral port held
-// by anything else does not serve /ggrun/router.
-func portServesClaudeRouter(port int) bool {
-	if port <= 0 {
+// recorded router port and fronts the recorded backend. Its status endpoint is
+// the identity check: a reused ephemeral port held by anything else does not
+// serve /ggrun/router, and another launch's router reports another backend.
+func portServesClaudeRouter(rec claudesession.Record) bool {
+	if rec.RouterPort <= 0 || rec.Port <= 0 {
 		return false
 	}
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/ggrun/router", port))
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/ggrun/router", rec.RouterPort))
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	var status map[string]any
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&status) != nil {
+	var status struct {
+		Limit *int64 `json:"limit"`
+		Main  string `json:"main"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&status) != nil || status.Limit == nil {
 		return false
 	}
-	_, ok := status["limit"]
-	return ok
+	// The router reaches its backend on a loopback or bind address; the port
+	// is what identifies this record's backend on this machine.
+	main, err := url.Parse(status.Main)
+	if err != nil {
+		return false
+	}
+	return main.Port() == strconv.Itoa(rec.Port)
 }
 
 // claudeResumeClientPort picks where a live resume points Claude Code. The
 // recorded router carries admission control and Auto reviewer routing; the raw
 // backend has neither, so falling back to it is announced rather than silent.
 func claudeResumeClientPort(rec claudesession.Record) int {
-	if portServesClaudeRouter(rec.RouterPort) {
+	if portServesClaudeRouter(rec) {
 		fmt.Printf("[claude-code] Resuming through the running ggrun router on port %d.\n", rec.RouterPort)
 		return rec.RouterPort
 	}
