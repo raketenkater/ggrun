@@ -4204,15 +4204,22 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 		// it must also leave them room: tightening it to the anonymous state
 		// alone evicted a 197 GiB expert working set down to 24 GiB and made
 		// every token re-read storage (GLM-5.3 live, 2026-10-24).
-		high, cachedMB := mmapExpertReclaimHighMB(newMax, strategy.ReclaimableHostWeightsMB, req.CgroupHeadroomMB, ceiling)
+		// The band is kept below the scope's real memory.max (the reclaim
+		// ceiling for an mmap launch), not the lower planned budget: clamping
+		// to the budget lowered memory.high 4 GiB below its pre-launch value.
+		launchHigh, hardMax := p.MemoryLimitsMB()
+		if hardMax <= 0 {
+			hardMax = ceiling
+		}
+		high, cachedMB := mmapExpertReclaimHighMB(newMax, measured, strategy.ReclaimableHostWeightsMB, req.CgroupHeadroomMB, hardMax, launchHigh)
 		if err := p.SetMemoryHighMB(high); err != nil {
 			fmt.Fprintf(os.Stderr, "[launch] measured-footprint mmap reclaim threshold re-size to %d MiB failed: %v\n", high, err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[launch] mmap reclaim threshold re-sized to %d MiB (non-reclaimable ceiling %d MiB from measured %d MiB + headroom, planned floor %d MiB; cache allowance %d of %d MiB mapped experts; hard ceiling preserved)\n",
-			high, newMax, measured, plannedFloor, cachedMB, strategy.ReclaimableHostWeightsMB)
+		fmt.Fprintf(os.Stderr, "[launch] mmap reclaim threshold re-sized to %d MiB (non-reclaimable ceiling %d MiB from measured %d MiB + headroom, planned floor %d MiB; cache allowance %d of %d MiB mapped experts; hard limit %d MiB preserved)\n",
+			high, newMax, measured, plannedFloor, cachedMB, strategy.ReclaimableHostWeightsMB, hardMax)
 		if cachedMB < strategy.ReclaimableHostWeightsMB {
-			fmt.Fprintf(os.Stderr, "[launch] warning: %d MiB of mapped experts exceed the planned cache allowance and may require storage reads\n",
+			fmt.Fprintf(os.Stderr, "[launch] warning: %d MiB of mapped experts exceed the cache allowance and may require storage reads\n",
 				strategy.ReclaimableHostWeightsMB-cachedMB)
 		}
 		return
@@ -4281,11 +4288,14 @@ func measuredFootprintCgroupMaxMB(measuredMB, headroomMB, plannedFloorMB, ceilin
 }
 
 // mmapExpertReclaimHighMB is memory.high for a running file-backed expert plan:
-// the non-reclaimable ceiling plus room for the mapped experts' page cache,
-// kept a headroom band below the planned ceiling so clean pages are reclaimed
-// before the hard limit. It never drops below the non-reclaimable ceiling.
-// cachedMB is how much of the mapped experts fits under it.
-func mmapExpertReclaimHighMB(nonReclaimableCeilMB, mappedExpertMB, headroomMB, ceilingMB int) (highMB, cachedMB int) {
+// the non-reclaimable ceiling (planned floor included, for safety) plus room for
+// the mapped experts' page cache, kept a headroom band below the scope's real
+// hard limit (memory.max) so clean pages are reclaimed before the kill
+// threshold. It never drops below the non-reclaimable ceiling or the
+// pre-launch memory.high, and never exceeds memory.max; zero limits are
+// unknown. cachedMB is how much of the mapped experts fits under it beside the
+// measured non-reclaimable state, not beside the planned floor.
+func mmapExpertReclaimHighMB(nonReclaimableCeilMB, measuredMB, mappedExpertMB, headroomMB, hardMaxMB, launchHighMB int) (highMB, cachedMB int) {
 	if nonReclaimableCeilMB <= 0 {
 		return 0, 0
 	}
@@ -4296,13 +4306,18 @@ func mmapExpertReclaimHighMB(nonReclaimableCeilMB, mappedExpertMB, headroomMB, c
 		headroomMB = 0
 	}
 	highMB = nonReclaimableCeilMB + mappedExpertMB
-	if limit := ceilingMB - headroomMB; ceilingMB > 0 && highMB > limit {
+	if limit := hardMaxMB - headroomMB; hardMaxMB > 0 && highMB > limit {
 		highMB = limit
 	}
-	if highMB < nonReclaimableCeilMB {
-		highMB = nonReclaimableCeilMB
+	highMB = max(highMB, nonReclaimableCeilMB, launchHighMB)
+	if hardMaxMB > 0 && highMB > hardMaxMB {
+		highMB = hardMaxMB
 	}
-	return highMB, highMB - nonReclaimableCeilMB
+	used := measuredMB
+	if used <= 0 {
+		used = nonReclaimableCeilMB
+	}
+	return highMB, min(mappedExpertMB, max(0, highMB-used))
 }
 
 // hostReclaimCeilingMB is the hard ceiling an mmap-backed plan may reach before

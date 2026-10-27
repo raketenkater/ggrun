@@ -339,7 +339,11 @@ func (p *Process) SetMemoryMaxMB(memoryMaxMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB)
+	if err := setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB); err != nil {
+		return err
+	}
+	p.recordMemoryLimits(0, memoryMaxMB)
+	return nil
 }
 
 // SetMemoryHighMB updates the running backend scope's reclaim/throttle
@@ -351,7 +355,11 @@ func (p *Process) SetMemoryHighMB(memoryHighMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB)
+	if err := setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB); err != nil {
+		return err
+	}
+	p.recordMemoryLimits(memoryHighMB, 0)
+	return nil
 }
 
 func scopeMemoryOOMKillCountAt(cgroup string) (uint64, error) {

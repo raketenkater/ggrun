@@ -350,6 +350,9 @@ esac
 			if err := p.SetMemoryHighMB(32); err != nil {
 				t.Fatal(err)
 			}
+			if high, max := p.MemoryLimitsMB(); high != 32 || max != 64 {
+				t.Fatalf("recorded limits high=%d max=%d, want 32/64", high, max)
+			}
 			if err := p.Stop(); err != nil {
 				t.Fatal(err)
 			}
@@ -379,5 +382,14 @@ func TestScopeBusFailureIsNotSuccessfulCleanup(t *testing.T) {
 	}
 	if err := waitScopeUnitStopped("test.scope", scopeUser, time.Second); err == nil {
 		t.Fatal("failed bus contact was treated as inactive")
+	}
+	// A limit write that failed must not be reported as the scope's limit: the
+	// post-canary reclaim threshold is clamped against it.
+	p := &Process{scopeUnit: "test.scope", scopeMode: scopeUser, memoryHighMB: 10, memoryMaxMB: 20}
+	if p.SetMemoryMaxMB(30) == nil || p.SetMemoryHighMB(15) == nil {
+		t.Fatal("failed limit write reported success")
+	}
+	if high, max := p.MemoryLimitsMB(); high != 10 || max != 20 {
+		t.Fatalf("failed writes changed recorded limits: high=%d max=%d", high, max)
 	}
 }

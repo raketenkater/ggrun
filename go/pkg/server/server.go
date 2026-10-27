@@ -46,6 +46,10 @@ type Process struct {
 	memoryOOMKillCount uint64
 	memoryPeakValid    bool
 	memoryOOMKillValid bool
+	// memoryHighMB/memoryMaxMB are the scope's current limits as ggrun set
+	// them: at launch and by every successful SetMemory*MB. Guarded by statsMu.
+	memoryHighMB int
+	memoryMaxMB  int
 
 	stopOnce sync.Once
 	stopDone chan struct{}
@@ -78,6 +82,28 @@ func (p *Process) MemoryOOMKillCount() (uint64, error) {
 		return 0, fmt.Errorf("backend memory scope statistics are unavailable")
 	}
 	return p.memoryOOMKillCount, nil
+}
+
+// MemoryLimitsMB returns the backend scope's current memory.high and
+// memory.max in MiB as ggrun last set them; zero means no scope or unset.
+func (p *Process) MemoryLimitsMB() (highMB, maxMB int) {
+	if p == nil || p.scopeUnit == "" {
+		return 0, 0
+	}
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	return p.memoryHighMB, p.memoryMaxMB
+}
+
+func (p *Process) recordMemoryLimits(highMB, maxMB int) {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	if highMB > 0 {
+		p.memoryHighMB = highMB
+	}
+	if maxMB > 0 {
+		p.memoryMaxMB = maxMB
+	}
 }
 
 func (p *Process) captureMemoryStats() {
@@ -294,6 +320,8 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 
 	p := &Process{Cmd: cmd, Port: port, host: readinessHost(args), cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
 	if scopeUnit != "" {
+		// The scope argv clamps MemoryHigh to MemoryMax; record the same values.
+		p.recordMemoryLimits(min(opts.MemoryHighMB, opts.MemoryMaxMB), opts.MemoryMaxMB)
 		go p.monitorMemoryStats()
 	}
 	go func() {
