@@ -291,12 +291,7 @@ func dispatchCompat(args []string) bool {
 		return true
 	}
 	if hasArg(args, "--download") {
-		model := firstPositional(args)
-		if model == "" {
-			fmt.Fprintln(os.Stderr, "Usage: ggrun <repo/name> --download")
-			os.Exit(2)
-		}
-		cmdDownload([]string{model})
+		cmdDownload(downloadCompatArgs(args))
 		return true
 	}
 	if hasArg(args, "--ai-tune") {
@@ -8585,7 +8580,7 @@ func cmdGUI() {
 				fmt.Fprintf(os.Stderr, "[download] destination: %s\n", modelDir)
 			}
 			d := download.New(modelDir, cfg.CacheDir, cfg.AppHome)
-			if err := d.RunQuant(req.DownloadRepo, req.DownloadQuant, caps); err != nil {
+			if err := d.RunQuant(req.DownloadRepo, req.DownloadQuant, downloadPlanningCaps(caps, cfg)); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -9416,6 +9411,9 @@ func downloadOptionsFromArgs(args []string, fallbackDir string) (repo, dir, quan
 		case "--quant", "-quant":
 			target = &quant
 		default:
+			if strings.HasPrefix(args[i], "-") {
+				return "", "", "", fmt.Errorf("unknown option %s", args[i])
+			}
 			rest = append(rest, args[i])
 			continue
 		}
@@ -9434,14 +9432,77 @@ func downloadOptionsFromArgs(args []string, fallbackDir string) (repo, dir, quan
 	if len(rest) < 1 {
 		return "", "", "", fmt.Errorf("no repository given")
 	}
+	if len(rest) > 1 {
+		return "", "", "", fmt.Errorf("unexpected argument %s", rest[1])
+	}
 	return rest[0], expandPath(dir), quant, nil
 }
 
+const downloadUsage = `Usage: ggrun download <repo/name> [--dir <path>] [--quant <name>] [--yes]
+       ggrun <repo/name> --download [same options]
+
+  --dir <path>    destination (default: the configured model directory)
+  --quant <name>  download this quantization instead of choosing one
+  --yes, -y       take the recommended quantization without asking
+`
+
+// downloadCompatArgs turns "ggrun <repo> --download ..." into the download
+// argv: the repo plus --dir, --quant, --yes and --help, which mean the same as
+// for "ggrun download". Launch flags stay ignored, as they always were.
+func downloadCompatArgs(args []string) []string {
+	var opts, rest []string
+	for i := 0; i < len(args); i++ {
+		key, _, hasVal := strings.Cut(args[i], "=")
+		switch key {
+		case "--dir", "-dir", "--model-dir", "--quant", "-quant":
+			opts = append(opts, args[i])
+			if !hasVal && i+1 < len(args) {
+				i++
+				opts = append(opts, args[i])
+			}
+		case "--yes", "-y", "-h", "--help":
+			opts = append(opts, args[i])
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+	if repo := firstPositional(rest); repo != "" {
+		return append([]string{repo}, opts...)
+	}
+	return opts
+}
+
+// downloadAssumeYes removes --yes/-y from the download argv and reports it.
+func downloadAssumeYes(args []string) (bool, []string) {
+	yes := false
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			yes = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return yes, rest
+}
+
+// downloadPlanningCaps is the recommender's view of this host: installed RAM
+// under the configured ceiling and headroom, not what happens to be free now.
+func downloadPlanningCaps(caps *detect.Capabilities, cfg *config.Config) *detect.Capabilities {
+	return recommend.PlanningCapabilities(caps, parseBudgetMB(cfg.RamBudget), cfg.RAMLimitPercent,
+		parseBudgetMB(cfg.VRAMHeadroom), parseBudgetMB(cfg.RAMHeadroom))
+}
+
 func cmdDownload(args []string) {
+	if hasArg(args, "-h") || hasArg(args, "--help") {
+		fmt.Print(downloadUsage)
+		return
+	}
 	cfg := loadConfigOrExit()
+	yes, args := downloadAssumeYes(args)
 	repo, modelDir, quant, err := downloadOptionsFromArgs(args, cfg.ModelDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Usage: ggrun download <repo/name> [--dir <path>] [--quant <name>]\n  %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s\n  %v\n", downloadUsage, err)
 		os.Exit(2)
 	}
 
@@ -9460,7 +9521,8 @@ func cmdDownload(args []string) {
 	}
 
 	d := download.New(modelDir, cfg.CacheDir, cfg.AppHome)
-	if err := d.RunQuant(repo, quant, caps); err != nil {
+	d.AssumeYes = yes
+	if err := d.RunQuant(repo, quant, downloadPlanningCaps(caps, cfg)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
