@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/raketenkater/ggrun/clientkit"
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/benchmark"
 	"github.com/raketenkater/ggrun/pkg/chattemplate"
@@ -105,6 +106,8 @@ func main() {
 		cmdClaudeStatus(args[1:])
 	case "claude-workflow-hook":
 		cmdClaudeWorkflowHook(args[1:])
+	case "gateway-token":
+		cmdGatewayToken(args[1:])
 	case "dry-run":
 		cmdDryRun(args[1:])
 	case "probe":
@@ -229,6 +232,11 @@ Launch flags:
                        Set LLM_ALLOW_LIVE_MEMORY_PROBE=true to remember approval
   --vision, -vision    Enable vision (auto-detect mmproj)
   --claude-code        Serve locally and launch Claude Code with workflows/research
+  --headless           With --claude-code, serve laptop clients without launching Claude here
+  --gateway-host str   Remote gateway listener (default 127.0.0.1; transport independent)
+  --gateway-port int   Remote gateway port (default 8080)
+  --gateway-url str    Advertised client base URL, e.g. an HTTPS reverse proxy
+  --gateway-token-file str  Private bearer credential file (created if missing)
   --claude-profile str Claude Code scheduling (requires --claude-code): agent-interactive|agent-parallel
   --claude-reviewer str  Local reviewer/worker for Claude Code (requires --claude-code):
                        auto|qwen|qwen2b|nanbeige|off (default auto). auto and qwen
@@ -255,7 +263,7 @@ Launch flags:
 
 func knownCommand(cmd string) bool {
 	switch cmd {
-	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "freetoken", "daemon", "status", "claude-status", "claude-workflow-hook", "dry-run", "probe", "probe-reset", "memory-probe", "kv-probe", "download", "tune", "spec-test", "recommend", "support", "advisor", "models", "gui", "tui", "config", "backend", "backends", "claude", "update", "--update":
+	case "help", "--help", "-h", "version", "--version", "-v", "detect", "launch", "benchmark", "freetoken", "daemon", "status", "claude-status", "claude-workflow-hook", "gateway-token", "dry-run", "probe", "probe-reset", "memory-probe", "kv-probe", "download", "tune", "spec-test", "recommend", "support", "advisor", "models", "gui", "tui", "config", "backend", "backends", "claude", "update", "--update":
 		return true
 	default:
 		return false
@@ -615,7 +623,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
+			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
 				skip = true
 			}
 			continue
@@ -744,6 +752,7 @@ type launchRequest struct {
 	Benchmark          bool
 	WorkerBenchmark    bool // task-specific support/reviewer quality plus throughput
 	ClaudeCode         bool
+	RemoteClaude       remoteClaudeOptions
 	// ClaudeReviewerOverride selects the local reviewer/worker model when
 	// Claude Code mode starts its Auto companion: "auto" (and the historical
 	// "qwen") resolve to the Qwen3.5-4B worker/reviewer, "qwen2b" forces the
@@ -847,13 +856,18 @@ const (
 )
 
 func parseLaunchArgs(args []string) (*launchRequest, error) {
+	originalArgs := append([]string(nil), args...)
+	args, remoteOptions, remoteErr := extractRemoteClaudeArgs(args)
+	if remoteErr != nil {
+		return nil, remoteErr
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	backendExplicit := configuredBackendExplicit(cfg.Backend)
-	originalArgs := append([]string(nil), args...)
 	req := &launchRequest{
+		RemoteClaude:         remoteOptions,
 		Port:                 cfg.Port,
 		CtxFlag:              cfg.CtxValue(),
 		KVPlacement:          cfg.KVPlacement,
@@ -1488,6 +1502,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	}
 	if req.BatchSizeSet && req.UBatchSizeSet && req.BatchSize < req.UBatchSize {
 		return nil, fmt.Errorf("--batch-size (%d) must be at least --ubatch-size (%d)", req.BatchSize, req.UBatchSize)
+	}
+	if err := validateRemoteClaude(req); err != nil {
+		return nil, err
 	}
 	req.ExtraArgs = normalizePlacementAwareExtraArgs(req, req.ExtraArgs)
 	return req, nil
@@ -6946,6 +6963,12 @@ func cmdLaunch(args []string) {
 	}
 
 	cfg := loadConfigOrExit()
+	remoteService, remoteErr := prepareRemoteClaude(req, cfg)
+	if remoteErr != nil {
+		fmt.Fprintln(os.Stderr, "Error:", remoteErr)
+		os.Exit(2)
+	}
+	defer remoteService.close()
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 
 	model, err := parseModel(req.ModelPath)
@@ -7492,7 +7515,13 @@ func cmdLaunch(args []string) {
 	if claudeAuto != nil {
 		claudeClientPort = claudeAuto.clientPort(req.Port)
 	}
-	if req.ClaudeCode {
+	if err := remoteService.activate(req, model, strategy, be, claudeAuto, serverArgs); err != nil {
+		_ = p.Stop()
+		claudeAuto.stop()
+		fmt.Fprintln(os.Stderr, "Error starting remote gateway:", err)
+		os.Exit(1)
+	}
+	if req.ClaudeCode && !req.RemoteClaude.Headless {
 		// Smooth path: one command brings up the model AND drops the user into
 		// Claude Code wired to it. When claude exits, stop the server too.
 		//
@@ -7625,7 +7654,7 @@ func cmdLaunch(args []string) {
 			os.Exit(code)
 		}
 		// `claude` isn't installed — fall back to the copy-paste recipe.
-		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs)
+		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs, strategy.ContextSize)
 	}
 
 	fmt.Println("[launch] Press Ctrl+C to stop")
@@ -7706,6 +7735,7 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 
+		remoteService.recovering()
 		runtimeOOMRetries++
 		if suspect != "" {
 			fmt.Fprintf(os.Stderr, "[launch] server crashed after health check: %s — reserving %d MiB, re-planning and relaunching (attempt %d/%d)...\n",
@@ -7770,6 +7800,12 @@ func cmdLaunch(args []string) {
 		}
 		resizeScopeToMeasuredFootprint(req, runtimeCaps, newStrategy, newP)
 		p, strategy, serverArgs = newP, newStrategy, newArgs
+		if err := remoteService.activate(req, model, strategy, be, claudeAuto, serverArgs); err != nil {
+			_ = p.Stop()
+			claudeAuto.stop()
+			fmt.Fprintln(os.Stderr, "Error updating remote gateway:", err)
+			os.Exit(1)
+		}
 		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
 		fmt.Println("[launch] Press Ctrl+C to stop")
 		growth = startServingGrowthRecorder(cfg.CacheDir, model, strategy, scopedProbeBackendTagForStrategy(req, model, be, strategy),
@@ -8774,7 +8810,11 @@ func cmdDryRun(args []string) {
 	if s := placement.DraftSummary(strategy.Draft); s != "" {
 		fmt.Printf("[spec] %s\n", s)
 	}
-	printDryRunClaudeNotice(req.ClaudeCode, req.ClaudeReviewerDisabled)
+	if req.RemoteClaude.Headless {
+		printDryRunRemoteClaudeNotice(req)
+	} else {
+		printDryRunClaudeNotice(req.ClaudeCode, req.ClaudeReviewerDisabled)
+	}
 }
 
 // printDryRunClaudeNotice closes a dry-run with the same promise the real
@@ -8829,36 +8869,40 @@ func launchPlanEnvironment(serverArgs []string, envPrefix string, backendPath ..
 // local ggrun endpoint. In Auto mode the port belongs to ggrun's loopback
 // router; normal turns stream to the main llama-server and hidden safety turns
 // go to the dedicated reviewer.
-func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
+func printClaudeCodeRecipe(host string, port int, serverArgs []string, resolvedCtx ...int) {
+	actualCtx := 0
+	if len(resolvedCtx) > 0 {
+		actualCtx = resolvedCtx[0]
+	}
 	clientHost := host
 	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
 		clientHost = "127.0.0.1"
 	}
-	window := claudeCodeAutocompactWindow(serverArgs, 0)
-	pct := claudeCodeAutocompactPct(serverArgs, 0)
-	slot := ""
-	if ctx := argIntValue(serverArgs, "--ctx-size", "-c", "--ctx"); ctx > 0 {
-		par := argIntValue(serverArgs, "--parallel", "-np")
-		if par < 1 {
-			par = 1
-		}
-		slot = fmt.Sprintf(" (~%dk per slot at --parallel %d)", ctx/par/1000, par)
-	}
-	// Foreground tiers use the main alias; Claude's cheap tier uses the router's
-	// local-fast label so it reaches the verified worker without leaving ggrun.
 	fmt.Println()
 	fmt.Println("[claude-code] In another terminal:")
-	// Match claudeCodeEnv: drop any real key so the dummy token + local base URL win,
-	// otherwise Claude Code prefers the real key and routes to api.anthropic.com.
-	fmt.Println("  unset ANTHROPIC_API_KEY")
-	fmt.Printf("  export ANTHROPIC_BASE_URL=http://%s:%d ANTHROPIC_AUTH_TOKEN=ggrun\n", clientHost, port)
-	fmt.Printf("  export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=%s\n", claudeauto.UtilityAlias)
-	fmt.Printf("  export ANTHROPIC_DEFAULT_HAIKU_MODEL=%s ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local\n", claudeauto.UtilityAlias)
-	fmt.Printf("  export CLAUDE_CODE_EFFORT_LEVEL=%s  # xhigh is the agentic default; set max for one demanding session\n", envOr("CLAUDE_CODE_EFFORT_LEVEL", "xhigh"))
-	fmt.Printf("  export API_TIMEOUT_MS=%d  # maximum safe timer: no practical local-inference deadline\n", claudeNoTimeoutMS)
-	fmt.Printf("  export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=%d  # background agents may be quiet during local prefill\n", claudeNoTimeoutMS)
-	fmt.Println("  export CLAUDE_ENABLE_BYTE_WATCHDOG=0 CLAUDE_ENABLE_STREAM_WATCHDOG=0 API_FORCE_IDLE_TIMEOUT=0")
-	fmt.Printf("  export CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d  # compact early to fit the real slot%s\n", window, pct, slot)
+	if runtime.GOOS == "windows" && os.Getenv("MSYSTEM") == "" {
+		fmt.Println("  Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue")
+	} else {
+		fmt.Println("  unset ANTHROPIC_API_KEY")
+	}
+	env := claudeClientProfile(serverArgs, actualCtx).Environment("http://"+net.JoinHostPort(clientHost, strconv.Itoa(port)), "ggrun", os.Environ())
+	known := claudeClientProfile(serverArgs, actualCtx).Environment("http://"+net.JoinHostPort(clientHost, strconv.Itoa(port)), "ggrun", nil)
+	keys := map[string]bool{}
+	for _, kv := range known {
+		k, _, _ := strings.Cut(kv, "=")
+		keys[k] = true
+	}
+	sort.Strings(env)
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if keys[k] {
+			if runtime.GOOS == "windows" && os.Getenv("MSYSTEM") == "" {
+				fmt.Printf("  %s\n", displayCommandWithEnv([]string{kv}, nil))
+			} else {
+				fmt.Printf("  export %s\n", shellQuote(kv))
+			}
+		}
+	}
 	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
 	claudeArgs = claudeCodeWorkflowPromptArgs(claudeArgs)
 	claudeArgs = append(claudeCodePermissionArgs(claudeArgs), claudeArgs...)
@@ -8879,74 +8923,24 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string) {
 // local-fast; ANTHROPIC_API_KEY is dropped so the dummy auth token + base URL
 // take effect.
 func claudeCodeEnv(host string, port int, serverArgs []string, actualCtx int) []string {
-	clientHost := host
-	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
-		clientHost = "127.0.0.1"
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
 	}
-	var env []string
-	for _, kv := range os.Environ() {
-		key, _, _ := strings.Cut(kv, "=")
-		switch key {
-		case "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
-			"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
-			"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-			"CLAUDE_CODE_EFFORT_LEVEL",
-			"API_TIMEOUT_MS", "API_FORCE_IDLE_TIMEOUT", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS",
-			"CLAUDE_ENABLE_BYTE_WATCHDOG", "CLAUDE_ENABLE_STREAM_WATCHDOG",
-			"CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
-			"CLAUDE_CODE_ATTRIBUTION_HEADER":
-			continue
-		}
-		env = append(env, kv)
+	return claudeClientProfile(serverArgs, actualCtx).Environment("http://"+net.JoinHostPort(host, strconv.Itoa(port)), "ggrun", os.Environ())
+}
+
+// Both local execution and remote metadata use the resolved per-slot policy.
+func claudeClientProfile(args []string, actualCtx int) clientkit.Profile {
+	slots := max(1, argIntValue(args, "--parallel", "-np"))
+	ctx := argIntValue(args, "--ctx-size", "-c", "--ctx")
+	if actualCtx > 0 && (ctx <= 0 || actualCtx < ctx) {
+		ctx = actualCtx
 	}
-	return append(env,
-		fmt.Sprintf("ANTHROPIC_BASE_URL=http://%s:%d", clientHost, port),
-		"ANTHROPIC_AUTH_TOKEN=ggrun",
-		"ANTHROPIC_MODEL=local",
-		// The cheap tiers address the utility alias. ggrun's router resolves it
-		// to the companion backend when one is running and falls back to the
-		// main model otherwise, so nothing can reach the vendor API either way.
-		"ANTHROPIC_SMALL_FAST_MODEL="+claudeauto.UtilityAlias,
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL="+claudeauto.UtilityAlias,
-		"ANTHROPIC_DEFAULT_SONNET_MODEL=local",
-		"ANTHROPIC_DEFAULT_OPUS_MODEL=local",
-		// Claude Code prepends an attribution block carrying client version and
-		// a fingerprint. Those bytes sit at the very front of the prompt, so
-		// they change the first tokens on every request and no later turn can
-		// match a prefix -- llama.cpp computes a common prefix of zero, and
-		// every context checkpoint it saved is invalidated against pos_next = 0.
-		//
-		// Measured here: seven checkpoints created across one turn, five
-		// invalidated at pos_next = 0, and 0% reuse of 60,127 prompt tokens
-		// while the checkpoint machinery was working correctly the whole time.
-		// The header is worth nothing against a local backend that has no
-		// vendor telemetry to attribute to.
-		"CLAUDE_CODE_ATTRIBUTION_HEADER=0",
-		// xhigh is Claude Code's recommended balance for coding and agentic work.
-		// The official environment variable also accepts auto/max and lets an
-		// explicit user choice override this local-workflow default.
-		"CLAUDE_CODE_EFFORT_LEVEL="+envOr("CLAUDE_CODE_EFFORT_LEVEL", "xhigh"),
-		// JavaScript's maximum safe timer value is effectively no deadline for a
-		// local session. It covers foreground requests and queued Workflow fan-out.
-		fmt.Sprintf("API_TIMEOUT_MS=%d", claudeNoTimeoutMS),
-		// Background agents and streaming each have independent watchdogs. A giant
-		// local MoE can spend minutes in prompt processing without producing an event.
-		fmt.Sprintf("CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=%d", claudeNoTimeoutMS),
-		"CLAUDE_ENABLE_BYTE_WATCHDOG=0",
-		"CLAUDE_ENABLE_STREAM_WATCHDOG=0",
-		// Compatibility with Claude Code versions that predate the named watchdogs.
-		"API_FORCE_IDLE_TIMEOUT=0",
-		// Claude Code's assumed window has changed across releases and model aliases.
-		// Give it the backend's REAL per-slot capacity directly, then compact at 75%
-		// so an in-flight reply and tool output cannot overflow the slot. The actual
-		// context is the resolved strategy context (which the model's native
-		// context_length may have capped below the requested --ctx-size) — sizing the
-		// autocompact window off the raw --ctx-size lets a request overflow the real
-		// slot before compaction fires (the Muse 250k-requested/131k-actual crash).
-		// User values win.
-		"CLAUDE_CODE_AUTO_COMPACT_WINDOW="+envOr("CLAUDE_CODE_AUTO_COMPACT_WINDOW", strconv.Itoa(claudeCodeAutocompactWindow(serverArgs, actualCtx))),
-		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="+envOr("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", strconv.Itoa(claudeCodeAutocompactPct(serverArgs, actualCtx))),
-	)
+	if ctx <= 0 {
+		ctx = 200000 * slots
+	}
+	slot := max(1, ctx/slots)
+	return clientkit.Profile{ProtocolVersion: clientkit.ProtocolVersion, ModelID: "local", MainAlias: "local", UtilityAlias: claudeauto.UtilityAlias, ContextPerSlot: slot, Slots: slots, Policy: clientkit.Policy{Version: clientkit.PolicyVersion, CompactWindow: min(slot, claudeCodeAutocompactWindow(args, actualCtx)), CompactPercent: claudeCodeAutocompactPct(args, actualCtx), Effort: "xhigh", TimeoutMS: clientkit.MaxTimeoutMS, WorkflowHook: true}}
 }
 
 // envOr returns the current environment value for key, or def if unset/empty.
@@ -9496,6 +9490,10 @@ func cmdTune(args []string) {
 	req, err := parseLaunchArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+	if req.RemoteClaude.Headless {
+		fmt.Fprintln(os.Stderr, "Remote client mode requires a persistent launch; use ggrun launch MODEL --claude-code --headless instead of tune.")
 		os.Exit(2)
 	}
 	if req.ModelPath == "" {

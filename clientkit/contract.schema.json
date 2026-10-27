@@ -1,0 +1,31 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema",
+ "title":"ggrun remote Claude connection protocol v1",
+ "type":"object",
+ "required":["protocol_version","model_id","main_alias","utility_alias","context_per_slot","slots","policy"],
+ "properties":{
+  "protocol_version":{"const":1},
+  "server_version":{"type":"string"},
+  "model_id":{"type":"string","minLength":1,"maxLength":256},
+  "model_name":{"type":"string"},
+  "main_alias":{"type":"string","minLength":1,"maxLength":128},
+  "utility_alias":{"type":"string","minLength":1,"maxLength":128},
+  "context_per_slot":{"type":"integer","minimum":1},
+  "slots":{"type":"integer","minimum":1},
+  "vision":{"type":"boolean"},
+  "separate_worker":{"type":"boolean"},
+  "policy":{
+   "type":"object",
+   "required":["version","compact_window","compact_percent","effort","timeout_ms"],
+   "properties":{
+    "version":{"const":1},
+    "compact_window":{"type":"integer","minimum":1},
+    "compact_percent":{"type":"integer","minimum":1,"maximum":95},
+    "effort":{"enum":["low","medium","high","xhigh","max","auto"]},
+    "timeout_ms":{"type":"integer","minimum":1,"maximum":2147483647},
+    "workflow_hook":{"type":"boolean"}
+   }
+  }
+ },
+ "$comment":"Profile.Validate additionally requires compact_window <= context_per_slot. Unknown fields are descriptive only and are never executed or exported as environment settings."
+}

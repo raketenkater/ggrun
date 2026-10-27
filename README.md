@@ -158,6 +158,16 @@ model endpoint and wires the local workflow; it does not make a model with weak
 tool use behave like a strong coding model. The complete setup and overrides are
 documented in [docs/usage.md](docs/usage.md#use-with-claude-code).
 
+### Claude Code on your laptop
+
+Remote client mode serves the same model gateway without launching Claude Code
+on the inference server. In the TUI choose **Claude Code → Remote client**, then
+connect the separate [ggrun-client](https://github.com/raketenkater/ggrun-client)
+from your laptop project. Tools, files and sessions stay on the laptop; model
+serving and optional reviewer/worker routing stay on the server. Any supported
+HTTP(S) connection can be used; Tailscale is optional. This feature is currently
+being qualified; see [setup and compatibility](docs/remote-claude.md).
+
 ## Measured results
 
 October 13, 2026, v3.2.11: what a fresh install recommended for four hardware

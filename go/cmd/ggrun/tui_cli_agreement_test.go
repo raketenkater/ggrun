@@ -144,13 +144,17 @@ func TestEveryTUILaunchFieldHasADisposition(t *testing.T) {
 // it. The gates exist so an untouched preference does not become a typed flag;
 // see TestUntouchedTUIRowsDoNotBecomeTypedFlags.
 var gatedBy = map[string][]string{
-	"KVQuality":     {"KVQualitySet"},
-	"KVQualitySet":  {"KVQuality"},
-	"Parallel":      {"ParallelSet"},
-	"ParallelSet":   {"Parallel"},
-	"SupportOnline": {"SupportSet"},
-	"SWAFull":       {"SWAFullSet"},
-	"AITuneRounds":  {"AITune"},
+	"GatewayHost":      {"ClaudeHeadless"},
+	"GatewayPort":      {"ClaudeHeadless"},
+	"GatewayURL":       {"ClaudeHeadless"},
+	"GatewayTokenFile": {"ClaudeHeadless"},
+	"KVQuality":        {"KVQualitySet"},
+	"KVQualitySet":     {"KVQuality"},
+	"Parallel":         {"ParallelSet"},
+	"ParallelSet":      {"Parallel"},
+	"SupportOnline":    {"SupportSet"},
+	"SWAFull":          {"SWAFullSet"},
+	"AITuneRounds":     {"AITune"},
 }
 
 // fieldReachesArgv sets one field (with any companion it is gated behind) to a
