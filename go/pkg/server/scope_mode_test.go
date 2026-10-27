@@ -3,8 +3,13 @@
 package server
 
 import (
+	"io"
+	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +147,93 @@ func TestNoLimitNeedsNoScopeInstance(t *testing.T) {
 	}
 	if len(args) != 1 || args[0] != "llama-server" {
 		t.Errorf("unlimited launch was rewrapped: %v", args)
+	}
+}
+
+// A host without systemd (Docker) must have one explicit way to launch, and
+// every refusal must name it. The opt-out is never chosen implicitly: without
+// it the same host still refuses (invariant 4 stays fail-closed by default).
+func TestScopeModeNoneIsTheOnlyUncontainedPath(t *testing.T) {
+	// No systemd-run and no systemctl anywhere on PATH, as in a container.
+	t.Setenv("PATH", t.TempDir())
+	for _, mode := range []string{"", "unsupported", "user"} {
+		withScopeMode(t, mode)
+		args, err := scopedCommandArgsWithUnit([]string{"llama-server"}, 4096, "ggrun-test.scope")
+		if err == nil || len(args) != 0 {
+			t.Fatalf("mode %q launched without systemd: args=%v", mode, args)
+		}
+		if !strings.Contains(err.Error(), "GGRUN_SCOPE_MODE=none") {
+			t.Fatalf("mode %q refusal does not name the opt-out: %q", mode, err)
+		}
+	}
+	withScopeMode(t, "none")
+	args, owner, err := scopedCommandArgsWithLimits([]string{"llama-server", "-m", "m.gguf"}, 2048, 4096, "ggrun-test.scope")
+	if err != nil {
+		t.Fatalf("explicit opt-out refused: %v", err)
+	}
+	if owner != scopeNone {
+		t.Fatalf("opt-out owner = %v, want scopeNone", owner)
+	}
+	if strings.Join(args, " ") != "llama-server -m m.gguf" {
+		t.Fatalf("opt-out argv was wrapped: %v", args)
+	}
+}
+
+// Under the opt-out the started process carries no scope, so every scope
+// observation reports "no memory scope" instead of addressing a unit that was
+// never created, and Stop still terminates the backend.
+func TestScopeModeNoneStartsWithoutAScope(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not installed")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	script := filepath.Join(t.TempDir(), "srv.py")
+	content := "import http.server, socketserver, os\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n" +
+		"        self.send_response(200); self.end_headers(); self.wfile.write(os.environ.get('GGRUN_TEST_ENV', 'unset').encode())\n" +
+		"    def log_message(self, *a): pass\n" +
+		"with socketserver.TCPServer(('127.0.0.1', " + strconv.Itoa(port) + "), H) as httpd:\n" +
+		"    httpd.serve_forever()\n"
+	if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withScopeMode(t, "none")
+	p, err := StartWithTimeoutToOptions([]string{python, script}, port, 15*time.Second, io.Discard, io.Discard,
+		StartOptions{MemoryHighMB: 512, MemoryMaxMB: 1024, EnvOverrides: []string{"GGRUN_TEST_ENV=applied"}})
+	if err != nil {
+		t.Fatalf("opt-out start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+	if p.scopeUnit != "" {
+		t.Fatalf("opt-out created scope %q", p.scopeUnit)
+	}
+	if _, err := p.MemoryPeakBytes(); err == nil || !strings.Contains(err.Error(), "no memory scope") {
+		t.Fatalf("peak on an uncontained backend: %v", err)
+	}
+	if err := p.SetMemoryMaxMB(2048); err == nil {
+		t.Fatal("resize of an uncontained backend reported success")
+	}
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "applied" {
+		t.Fatalf("launch environment overrides lost without a scope: %q", body)
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if p.IsRunning() {
+		t.Fatal("uncontained backend survived Stop")
 	}
 }
 

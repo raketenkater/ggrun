@@ -258,6 +258,12 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		cancel()
 		return nil, err
 	}
+	if owner == scopeNone {
+		// Explicit uncontained opt-out: no unit exists to observe, resize or stop.
+		scopeUnit = ""
+		cmdArgs = args
+		outerEnvOverrides = opts.EnvOverrides
+	}
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 	setSysProcAttr(cmd)
 	// Capture stdout/stderr to a buffer for the post-launch probe. On a TTY we
