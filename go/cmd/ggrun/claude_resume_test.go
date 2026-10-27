@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/claudesession"
+	"github.com/raketenkater/ggrun/pkg/config"
 )
 
 func TestClaudeSessionArgsPinsAMintedSessionID(t *testing.T) {
@@ -530,5 +532,79 @@ func TestClaudeApplyResumeOverridesValueOntoBareFlag(t *testing.T) {
 	got := claudeApplyResumeOverrides(recorded, []string{"--spec", "dflash"})
 	if strings.Join(got, " ") != "/m.gguf --spec dflash --no-mmap" {
 		t.Errorf("got %v", got)
+	}
+}
+
+// A launch records the router Claude Code talked to, so a later resume can
+// attach through admission control instead of the raw backend.
+func TestClaudeLaunchSessionRecordsTheRouterPort(t *testing.T) {
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	req := &launchRequest{ModelPath: "/m.gguf", Port: 8081}
+	spec, err := claudeLaunchSession(cfg, req, nil, 41234)
+	if err != nil || spec == nil {
+		t.Fatalf("claudeLaunchSession: %v", err)
+	}
+	rec, err := claudesession.Load(cfg.CacheDir, spec.ID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if spec.RouterPort != 41234 || rec.RouterPort != 41234 || rec.Port != 8081 {
+		t.Errorf("router not recorded: spec=%d rec=%d backend=%d", spec.RouterPort, rec.RouterPort, rec.Port)
+	}
+
+	direct, err := claudeLaunchSession(cfg, req, nil, req.Port)
+	if err != nil || direct == nil {
+		t.Fatalf("claudeLaunchSession: %v", err)
+	}
+	if direct.RouterPort != 0 {
+		t.Errorf("a client on the backend port is not a router: %d", direct.RouterPort)
+	}
+}
+
+// A live resume goes through the recorded router when it is still serving, and
+// otherwise falls back to the backend with a warning rather than silently.
+func TestClaudeResumeClientPortPrefersTheLiveRouter(t *testing.T) {
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ggrun/router" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"active":0,"queued":0,"limit":1}`)
+	}))
+	defer router.Close()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+	routerPort := router.Listener.Addr().(*net.TCPAddr).Port
+	backendPort := backend.Listener.Addr().(*net.TCPAddr).Port
+
+	done := captureStdout(t)
+	got := claudeResumeClientPort(claudesession.Record{Port: backendPort, RouterPort: routerPort})
+	done()
+	if got != routerPort {
+		t.Errorf("live router ignored: got port %d, want %d", got, routerPort)
+	}
+	// A recorded port that now belongs to a non-router must not be trusted.
+	if got := claudeResumeClientPort(claudesession.Record{Port: backendPort, RouterPort: backendPort}); got != backendPort {
+		t.Errorf("fallback port %d, want backend %d", got, backendPort)
+	}
+	if got := claudeResumeClientPort(claudesession.Record{Port: backendPort}); got != backendPort {
+		t.Errorf("no router recorded: got %d, want backend %d", got, backendPort)
+	}
+}
+
+// Declining Claude's folder-trust prompt ends the client silently, so the
+// launch must say why it stops the backend.
+func TestClaudeClientExitMessageExplainsTheStop(t *testing.T) {
+	if msg := claudeClientExitMessage(0); msg != "" {
+		t.Errorf("clean exit should be quiet, got %q", msg)
+	}
+	if msg := claudeClientExitMessage(1); !strings.Contains(msg, "exited with code 1") || !strings.Contains(msg, "stopping the server") {
+		t.Errorf("non-zero exit not explained: %q", msg)
 	}
 }

@@ -48,6 +48,10 @@ type Record struct {
 	LaunchArgs []string  `json:"launch_args,omitempty"`
 	ServerArgs []string  `json:"server_args,omitempty"`
 	Workflow   *Workflow `json:"workflow,omitempty"`
+	// RouterPort is the loopback gateway Claude Code talked to. It carries
+	// admission control and reviewer routing that the backend Port lacks, and
+	// lives only as long as the ggrun launch that owns it.
+	RouterPort int `json:"router_port,omitempty"`
 }
 
 // NewSessionID returns a random RFC 4122 version 4 UUID. Claude Code's
