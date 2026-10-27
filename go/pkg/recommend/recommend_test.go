@@ -1,6 +1,7 @@
 package recommend
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -426,6 +427,69 @@ func TestMoESpeedEstimateIncludesDispatchCost(t *testing.T) {
 	got := predictDecodeTPS(caps, c, QuantOption{Name: "UD-IQ4_XS", SizeGB: 128.43})
 	if got < 5.0 || got > 7.5 {
 		t.Fatalf("DeepSeek V4-class MoE estimate %.1f tok/s is outside the measured useful range", got)
+	}
+}
+
+// Measured on one rig with host bandwidth probed at 26.27 GB/s. The estimate
+// used to charge the always-read backbone at RAM speed and discount measured
+// bandwidth by 0.5, predicting GLM-5.3-Flash under 4 tok/s.
+func TestMoESpeedEstimateMatchesMeasuredDecode(t *testing.T) {
+	gpuRig := referenceRig()
+	gpuRig.HostMemoryBandwidthMBps = 26273
+	cpuOnly := &detect.Capabilities{OS: "linux", RAM: detect.RAMInfo{TotalMB: 16384, FreeMB: 16384},
+		CPU: detect.CPUInfo{Cores: 14}, HostMemoryBandwidthMBps: 26273}
+	for _, tc := range []struct {
+		name     string
+		caps     *detect.Capabilities
+		quant    QuantOption
+		measured float64
+	}{
+		// eval-time decode while serving agent work, 2026-09-14
+		{"Z AI GLM-5.3-Flash", gpuRig, QuantOption{Name: "UD-Q3_K_XL", SizeGB: 137.4, Dynamic: true}, 6.35},
+		// 128-token synthetic decode, 2026-09-16
+		{"Alibaba Qwen3.8-Flash-Next", gpuRig, QuantOption{Name: "UD-Q3_K_XL", SizeGB: 83.8, Dynamic: true}, 21.82},
+		// CPU only, 16 GiB, relaunch ledger decode, October 8
+		{"Alibaba Qwen3.6 35B A3B (Reasoning)", cpuOnly, QuantOption{Name: "UD-IQ2_XXS", SizeGB: 10.0, Dynamic: true}, 15.3},
+	} {
+		var c Candidate
+		for _, row := range Shortlist() {
+			if row.Name == tc.name {
+				c = row
+			}
+		}
+		if !c.MoE || !hasGeometry(c) {
+			t.Fatalf("%s: catalog row lost its MoE geometry: %+v", tc.name, c)
+		}
+		c.Quants = []QuantOption{tc.quant}
+		rec, ok := evaluate(tc.caps, c)
+		if !ok {
+			t.Fatalf("%s %s no longer fits", tc.name, tc.quant.Name)
+		}
+		t.Logf("%s %s (%s): predicted %.2f tok/s, measured %.2f", tc.name, tc.quant.Name, rec.Fit, rec.PredictedTPS, tc.measured)
+		if math.Abs(rec.PredictedTPS-tc.measured) > 0.30*tc.measured {
+			t.Errorf("%s %s (%s): predicted %.2f tok/s, measured %.2f", tc.name, tc.quant.Name, rec.Fit, rec.PredictedTPS, tc.measured)
+		}
+	}
+}
+
+func TestMoESpeedEstimateKeepsBackboneOnGPU(t *testing.T) {
+	caps := referenceRig()
+	caps.HostMemoryBandwidthMBps = 26273
+	geo := Candidate{MoE: true, TotalParamsB: 320.759, Layers: 46, LeadingDense: 3, Experts: 288,
+		ExpertUsed: 8, ExpertFF: 2048, Embedding: 4096, FeedForward: 12288, HeadCountKV: 1, KeyLength: 512}
+	geo.ActiveParamsB = activeParamsFromGeometry(geo)
+	quant := QuantOption{Name: "UD-Q3_K_XL", SizeGB: 137.4}
+	// Same active count with no layout: the VRAM share is spread evenly and
+	// the backbone streams from RAM.
+	flat := Candidate{MoE: true, TotalParamsB: geo.TotalParamsB, ActiveParamsB: geo.ActiveParamsB}
+	split, even := predictDecodeTPS(caps, geo, quant), predictDecodeTPS(caps, flat, quant)
+	if split <= even {
+		t.Fatalf("backbone-on-GPU estimate %.2f is not above the even spread %.2f", split, even)
+	}
+	// A resident model has no CPU layers to pay for.
+	small := QuantOption{Name: "UD-Q3_K_XL", SizeGB: 20}
+	if a, b := predictDecodeTPS(caps, geo, small), predictDecodeTPS(caps, flat, small); math.Abs(a-b) > 1e-9 {
+		t.Fatalf("resident MoE estimate depends on layout: %.2f vs %.2f", a, b)
 	}
 }
 
