@@ -5,11 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/python"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
@@ -95,9 +95,9 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 		return fmt.Errorf("downloader script not found: %s", d.ScriptPath)
 	}
 
-	py, ok := pythonCommand()
+	py, ok := python.Command()
 	if !ok {
-		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", pythonInstallHint())
+		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", python.InstallHint())
 	}
 	cmd := exec.Command(py, d.scriptArgs(repo, quant, caps, stdinIsTerminal())...)
 	cmd.Stdin = os.Stdin
@@ -152,39 +152,6 @@ func catalogActiveParamsB(repo string) float64 {
 		}
 	}
 	return 0
-}
-
-// pythonCommand returns the path to a usable Python 3 interpreter and whether
-// one was found. On Windows the launcher "py" resolves the newest Python 3.
-func pythonCommand() (string, bool) {
-	for _, name := range []string{"python3", "python", "py"} {
-		path, err := exec.LookPath(name)
-		if err != nil {
-			continue
-		}
-		// Validate it actually runs as Python 3, skipping Windows Store execution
-		// aliases and dead shims that resolve on PATH but don't run. This mirrors
-		// install.ps1 Resolve-Python so the interpreter that received
-		// huggingface_hub is the one we invoke download_any_gguf.py with.
-		check := exec.Command(path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
-		if check.Run() == nil {
-			return path, true
-		}
-	}
-	return "", false
-}
-
-// pythonInstallHint returns an OS-appropriate one-liner for installing Python 3.
-func pythonInstallHint() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "Install it with:  winget install -e --id Python.Python.3.12\n" +
-			"  or from https://www.python.org/downloads/ (tick \"Add python.exe to PATH\"), then reopen the terminal."
-	case "darwin":
-		return "Install it with:  brew install python   (or from https://www.python.org/downloads/)."
-	default:
-		return "Install it with your package manager, e.g.:  sudo apt install python3 python3-pip"
-	}
 }
 
 // stdinIsTerminal reports whether standard input is an interactive terminal,

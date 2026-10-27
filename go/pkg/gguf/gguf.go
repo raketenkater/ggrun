@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/raketenkater/ggrun/pkg/python"
 )
 
 // Info holds parsed GGUF metadata.
@@ -118,7 +120,11 @@ func Parse(path string) (*Info, error) {
 		return nil, fmt.Errorf("parse_gguf.py not found")
 	}
 
-	cmd := exec.Command(pythonCommand(), script, path)
+	py, ok := python.Command()
+	if !ok {
+		return nil, fmt.Errorf("parse_gguf.py needs Python 3, but no working python interpreter was found on PATH.\n%s", python.InstallHint())
+	}
+	cmd := exec.Command(py, script, path)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
@@ -147,15 +153,6 @@ func Parse(path string) (*Info, error) {
 	}
 
 	return &info, nil
-}
-
-func pythonCommand() string {
-	for _, name := range []string{"python3", "python", "py"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path
-		}
-	}
-	return "python3"
 }
 
 func findParseScript() string {
