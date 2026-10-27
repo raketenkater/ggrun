@@ -1,6 +1,6 @@
 # Remote Claude Code through ggrun — implementation plan
 
-Status: implemented in isolated branch `feat/remote-claude-client`, based on `101af89`; draft server PR [#101](https://github.com/raketenkater/ggrun/pull/101) and separate client PR [#1](https://github.com/raketenkater/ggrun-client/pull/1) are published. Same-host real Claude/GPU acceptance has started. Worker report compatibility and actual laptop acceptance remain release gates. The installed PATH binary is unchanged. The owner opted into a separate Tailscale Serve endpoint for testing; it is not a product dependency.
+Status: implemented in isolated branch `feat/remote-claude-client`, based on `101af89`; draft server PR [#101](https://github.com/raketenkater/ggrun/pull/101) and separate client PR [#1](https://github.com/raketenkater/ggrun-client/pull/1) are published. Same-host real Claude/GPU coding, worker handoff, resume, cancellation and clean relaunch passed. The tested Linux candidate is installed on PATH with a rollback copy. Actual laptop acceptance remains a release gate. The owner opted into a separate Tailscale Serve endpoint for testing; it is not a product dependency.
 
 ## Product outcome
 
@@ -123,20 +123,23 @@ correct caller result. A prompt hint produced a fabricated report and was
 rejected. The bridge compatibility fix rejects unsupported system roles before
 inference so Claude can perform its documented retry using user messages. Its
 error wording must match the qualified Claude version. The corrected guard
-passed a real two-turn worker handoff (four tests accurately reported), the
-unchanged test oracle, package race suites and the uncached core gate. This
-first live fix receipt uses a temporary facade against the loaded model; the
-rebuilt complete server remains to be qualified.
+passed both the temporary-facade test and the complete rebuilt TUI server over
+HTTPS: four real tests accurately reported, unchanged oracle. Published alpha
+resume passed. Shutdown released both model processes in 5.029 seconds without
+a false pending marker; clean relaunch passed with the same 144384-token context.
 
 Remaining gates:
 
-1. Verify the role fallback with actual worker findings and unchanged test
-   oracle; publish reviewed fix and rerun CI.
+1. Role fallback and unchanged oracle passed through the complete server;
+   published follow-ups passed native contract/core and Linux E2E CI; Windows
+   E2E was still running at the last checkpoint.
 2. Preserve disconnect receipt: router and backend idle within 0.204 seconds
    after content cancellation through the generic prefixed proxy.
-3. Review candidate and update the owner PATH binary through normal validation;
-   qualify exact built revision. Current TUI evidence uses a candidate binary.
-4. Client prerelease artifact and released installer validation.
+3. Tested candidate `v3.2.12-remote-0b82f8d` is installed on the owner PATH;
+   its SHA-256 matches the TUI-tested build. The previous binary is retained
+   at `.cache/remote-claude/ggrun-before-remote-feature` for rollback.
+4. Client alpha v0.1.0-alpha.1 and its actual released Linux/Windows installers
+   passed CI; stable release waits for actual laptop acceptance.
 5. Actual laptop install/coding/workflow/resume receipt on its OS. Laptop OS
    remains pending. Same-host HTTPS and Windows CI do not establish this gate.
 

@@ -62,7 +62,8 @@ The shared module resolves remotely at `e3b47b991081`; no development replace.
 Live model: existing Qwen3.8 Flash Next Uncensored IQ3_M, approximately 83.4 GiB,
 three NVIDIA GPUs. Existing RAM soft-offline mitigation was checked; no memory
 stress, new model download or competing large model process was introduced.
-Candidate binaries only; the installed PATH binary remains unchanged. Candidate
+The tested Linux candidate is now installed atomically on PATH, with the prior
+binary retained at `.cache/remote-claude/ggrun-before-remote-feature`. Candidate
 version injection used the wrong symbol, so it reports v3.2.0-go; use
 `github.com/raketenkater/ggrun/pkg/update.currentVersion` in the qualified build.
 
@@ -116,9 +117,13 @@ one haiku-tier utility worker completed, the caller accurately reported all four
 passing tests and their real cases, no files changed, and the test oracle SHA-256
 was unchanged. Two turns, 99.230 seconds, 20,008 main cache-read tokens. The
 uncached core gate and claudeauto/remoteclaude race suites passed afterward.
-This first fix receipt uses a temporary authenticated facade calling the actual
-new guard against the loaded model; rebuilt full-server qualification remains
-separate. The original prompt policy is retained; the failed hint is not shipped.
+The initial fix receipt used a temporary facade. The complete rebuilt TUI
+server at `0b82f8d` then passed the same test over the optional HTTPS endpoint:
+two turns, 143.789 seconds, one completed foreground utility worker, all four
+real test names accurately reported and unchanged test oracle. Published alpha
+client v0.1.0-alpha.1 resumed that session in one turn (14.252 seconds), with
+valid JSON stdout and the correct prior result. The original prompt policy is
+retained; the failed hint is not shipped.
 
 ## Shutdown lifecycle follow-up
 
@@ -132,15 +137,34 @@ The serving shutdown now stops its owned router/companion before checking the
 whole-launch memory baseline. Regression coverage requires companion cleanup
 before sampling and preserves backend-memory waiting without any companion.
 This affects CPU-only and GPU serving lifecycles, not placement or performance
-selection. Full rebuilt-server stop/relaunch remains the live acceptance gate.
+selection. The full rebuilt server then stopped in 5.029 seconds: all GPUs returned to
+1 MiB and no release-pending marker remained. Clean relaunch of the exact saved
+request passed, preserving context 144384 and the separate worker. The published
+client doctor and actual auth/private-route checks passed again over HTTPS.
+
+## Published alpha installer
+
+[v0.1.0-alpha.1](https://github.com/raketenkater/ggrun-client/releases/tag/v0.1.0-alpha.1)
+was published by the tag pipeline after native tests and all portable builds.
+[Release run](https://github.com/raketenkater/ggrun-client/actions/runs/40551932536)
+also passed installation of the actual published, checksum-verified binaries on
+Linux and Windows. The Linux installer was independently run into a temporary
+directory on this server; that released binary passed the live resume above.
+This is an alpha, not laptop qualification or a stable product release.
+
+## Owner PATH candidate deployment
+
+After core, race, native contracts and real same-host acceptance, the exact tested
+candidate was atomically copied to the existing PATH target. The symlink remains
+unchanged. `ggrun --version` reports `v3.2.12-remote-0b82f8d`; SHA-256 is
+`07edd57c3a7bdd946dd9116bc736206cc3628626b4bb5f34c79bd8400638097f`.
+The previous binary remains available for rollback. This is an owner development
+candidate, not a stable release. The active server uses the same candidate bytes
+and isolated test configuration; no owner serving preferences were overwritten.
 
 ## Required before completion
 
-- Reviewed follow-up commit/CI, then rebuilt full-server worker handoff.
 - Review overlapping worker resume fixes without duplicating shared policy.
-- Correctly versioned candidate/PATH deployment after gates; no installed binary
-  replacement has occurred yet.
-- First client prerelease and released installer receipts.
 - Actual laptop coding/workflow/disconnect/resume receipt, with files/tools on
   that laptop and server still serving afterward. Laptop OS remains pending.
 - Richer server status UI and Windows real-terminal behavior remain unqualified.
