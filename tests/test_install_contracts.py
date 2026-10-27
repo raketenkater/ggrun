@@ -119,6 +119,31 @@ echo "commit=$SRC_TARBALL_COMMIT"
                 result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
                 self.assertEqual(result.returncode, code, result.stderr + result.stdout)
 
+    def test_upstream_prebuilt_scans_recent_releases(self):
+        # releases/latest can carry no binaries; the newest release that has
+        # the asset wins, and ubuntu-x64 never matches ubuntu-vulkan-x64.
+        dl = "https://github.com/ggml-org/llama.cpp/releases/download"
+        listing = ('[{"tag_name": "b3", "assets": []},'
+                   ' {"tag_name": "b2", "assets": ['
+                   f'{{"name": "llama-b2-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "{dl}/b2/llama-b2-bin-ubuntu-vulkan-x64.tar.gz"}}]}},'
+                   ' {"tag_name": "b1", "assets": ['
+                   f'{{"name": "llama-b1-bin-ubuntu-x64.tar.gz", "browser_download_url": "{dl}/b1/llama-b1-bin-ubuntu-x64.tar.gz"}},'
+                   f'{{"name": "llama-b1-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "{dl}/b1/llama-b1-bin-ubuntu-vulkan-x64.tar.gz"}}]}}]')
+        with tempfile.TemporaryDirectory() as tmp:
+            api = Path(tmp) / "releases.json"
+            api.write_text(listing)
+            for python, name, want in (("", "ubuntu-vulkan-x64", "b2/llama-b2-bin-ubuntu-vulkan-x64"),
+                                       ("", "ubuntu-x64", "b1/llama-b1-bin-ubuntu-x64"),
+                                       ("python3() { return 127; }\n", "ubuntu-x64", "b1/llama-b1-bin-ubuntu-x64"),
+                                       ("", "ubuntu-arm64", None)):
+                with self.subTest(name=name, grep_fallback=bool(python)):
+                    script = function("install.sh", "upstream_prebuilt_url")
+                    script += f'\n{python}upstream_prebuilt_url "{api}" {name}\n'
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), f"{dl}/{want}.tar.gz" if want else "")
+
     def test_cuda_bundle_is_skipped_on_gpus_older_than_its_kernels(self):
         # The bundle is built for compute capability 7.5+; a P40/1080 Ti/V100
         # passes --version and then fails at the first kernel launch.

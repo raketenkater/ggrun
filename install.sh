@@ -1593,6 +1593,29 @@ link_default_llama_server() {
     ln -sfn "$best" "$INSTALL_DIR/llama-server"
 }
 
+# upstream_prebuilt_url prints the newest bin-<name>.tar.gz download URL in a
+# ggml-org llama.cpp releases listing (JSON array, newest first).
+upstream_prebuilt_url() {
+    local api="$1" name="$2" url
+    url="$(python3 - "$api" "$name" <<'PY' 2>/dev/null || true
+import json, sys
+want = "bin-" + sys.argv[2] + ".tar.gz"
+for rel in json.load(open(sys.argv[1])):
+    urls = [a.get("browser_download_url") or "" for a in rel.get("assets") or []
+            if (a.get("name") or "").endswith(want)]
+    if urls:
+        print(urls[0])
+        break
+PY
+)"
+    # grep fallback if python is missing
+    if [[ -z "$url" ]]; then
+        url="$(grep -Eo 'https://github.com/ggml-org/llama.cpp/releases/download/[^"]+bin-ubuntu[^"]+\.tar\.gz' "$api" \
+            | grep -F -- "bin-$name.tar.gz" | head -n 1 || true)"
+    fi
+    printf '%s\n' "$url"
+}
+
 # ggml-org ships Linux CPU and Vulkan prebuilts, not Linux CUDA.
 # Used when a ggrun release has no matching bundle so the one-liner still
 # leaves a working llama-server.
@@ -1608,28 +1631,14 @@ install_upstream_linux_prebuilt() {
     esac
     say "Trying ggml-org llama.cpp $want prebuilt..."
     api="$(mktemp)"
-    if ! curl -fsSL -A ggrun-installer "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" -o "$api"; then
+    # Like install.ps1: the release marked "latest" can carry no binaries while
+    # its builds are published on newer prereleases, so scan the recent list.
+    if ! curl -fsSL -A ggrun-installer "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20" -o "$api"; then
         rm -f "$api"
         return 1
     fi
-    url="$(python3 - "$api" "$name" <<'PY' 2>/dev/null || true
-import json, sys
-want = sys.argv[2]
-data = json.load(open(sys.argv[1]))
-for a in data.get("assets") or []:
-    n = a.get("name") or ""
-    if n.endswith("bin-" + want + ".tar.gz") or ("bin-" + want + ".tar.gz" in n):
-        print(a.get("browser_download_url") or "")
-        break
-PY
-)"
+    url="$(upstream_prebuilt_url "$api" "$name")"
     rm -f "$api"
-    # grep fallback if python is missing
-    if [[ -z "$url" ]]; then
-        url="$(curl -fsSL -A ggrun-installer "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" \
-            | grep -Eo 'https://github.com/ggml-org/llama.cpp/releases/download/[^"]+bin-ubuntu[^"]+\.tar\.gz' \
-            | grep -F "$name" | head -n 1 || true)"
-    fi
     [[ -n "$url" ]] || return 1
     tmp="$(mktemp -d -t ggrun-llama-prebuilt.XXXXXX)"
     archive="$tmp/llama.tgz"
