@@ -4202,3 +4202,26 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
 - [ ] The mmap cache-allowance warning uses the planned non-reclaimable
   floor (24,183 MiB) where 965 MiB was measured, so it reported 21.6 GB of
   experts "exceeding" an allowance that the live cgroup could hold.
+
+## NEW MODELS — full flow through PATH ggrun — 2026-10-27
+
+Both models were downloaded with `ggrun download` (v3.2.12-26-g101af89); the
+recommender catalog (2026-10-19) lists neither.
+
+- [x] Nanbeige4.3-33B (`llama` arch, bartowski Q8_0, 33.6 GB; the
+  downloader's recommendation, "fits entirely in VRAM"): ready in 251 s
+  (3 loads). Claude Code `calc` 174 s, `textstats` 132 s, `inventory` 700 s,
+  all correct with unchanged oracle tests. Stream first token 0.1 s; cancel
+  and reconnect ok; stop 2.5 s. Plan: ctx 34,816, 1 slot, KV q4_0 on GPU.
+- [ ] That plan leaves 34,816 tokens of context because the downloader picks
+  the largest quant that fits VRAM without reserving context. Claude Code's
+  first request alone is ~13k tokens. The quant pick should reserve a useful
+  agent context, or say what it gives up.
+- [ ] MiniMax-M3.1-Flash (`minimax-m3` arch, unsloth UD-IQ3_XXS, 149 GiB):
+  routed to the installed `minimax-m3` fork (danielhanchen/llama.cpp
+  66f43aa), which fails: "wrong number of tensors; expected 1188, got 948".
+  ggrun reports it clearly and suggests `ggrun backend update`. The model
+  card asks for "a llama.cpp build with MiniMax-M3.1 support (including the
+  draft-dspark speculative type)". Next: `ggrun backend update`, then
+  relaunch. The 2.1 GB `dspark-*-Q8_0.gguf` is that speculative draft model;
+  the downloader currently recommends it as the model.
