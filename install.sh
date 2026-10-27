@@ -284,12 +284,37 @@ prepare_persistent_source_repo() {
     SRC_DIR="$SOURCE_REPO_DIR"
 }
 
+# fetch_source_tarball is the no-git source path: a GitHub tarball of the
+# commit SOURCE_REF names, so the build can still be stamped with that commit.
+SRC_TARBALL_COMMIT=""
+fetch_source_tarball() {
+    local dir="$1" sha
+    command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || return 1
+    sha="$(curl -fsL -H 'Accept: application/vnd.github.sha' \
+        "https://api.github.com/repos/$GITHUB_REPO/commits/$SOURCE_REF" 2>/dev/null || true)"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || sha="$SOURCE_REF"
+    curl -fsL --show-error "https://codeload.github.com/$GITHUB_REPO/tar.gz/$sha" |
+        tar -xz -C "$dir" --strip-components=1 || return 1
+    [[ -f "$dir/go/go.mod" ]] || return 1
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && SRC_TARBALL_COMMIT="${sha:0:7}"
+    return 0
+}
+
 ensure_source_repo() {
     [[ -n "$SRC_DIR" ]] && return 0
     if prepare_persistent_source_repo; then
         return 0
     fi
-    command -v git >/dev/null || { err "git required to fetch repo"; exit 1; }
+    if ! command -v git >/dev/null; then
+        SRC_DIR="$(mktemp -d -t ggrun-install.XXXXXX)"
+        say "── git not found; downloading $GITHUB_REPO@$SOURCE_REF source tarball ──"
+        if fetch_source_tarball "$SRC_DIR"; then
+            ok "Unpacked source to $SRC_DIR"
+            return 0
+        fi
+        err "git is not installed and the source tarball download failed; install git and retry"
+        exit 1
+    fi
     SRC_DIR="$(mktemp -d -t ggrun-install.XXXXXX)"
     say "── Cloning $REPO_URL ──"
     if git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 || \
@@ -1106,6 +1131,7 @@ build_go_binary() {
     local ldflags="-s -w"
     local ver
     ver="$(git -C "$SRC_DIR" describe --tags --always 2>/dev/null || true)"
+    [[ -n "$ver" ]] || ver="$SRC_TARBALL_COMMIT"
     [[ -n "$ver" ]] && ldflags="$ldflags -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$ver"
     (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="$ldflags" -o "$out" ./cmd/ggrun)
 }

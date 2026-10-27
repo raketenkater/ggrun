@@ -78,6 +78,36 @@ else:
                                      f'\nclone_source_ref "file://{bare}" "{"0" * 40}" "{missing}"\n'])
             self.assertNotEqual(result.returncode, 0)
 
+    def test_source_tarball_without_git_is_stamped_with_its_commit(self):
+        # Without git, the installer (and so `ggrun update`) had no source at all.
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tree = tmp / ("ggrun-" + sha)
+            (tree / "go").mkdir(parents=True)
+            (tree / "go" / "go.mod").write_text("module x\n")
+            archive = tmp / "src.tar.gz"
+            subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp), tree.name], check=True)
+            dest = tmp / "dest"
+            dest.mkdir()
+            script = function("install.sh", "fetch_source_tarball")
+            script += f"""
+curl() {{
+    case "$*" in
+        *api.github.com/repos/o/r/commits/main*) echo {sha} ;;
+        *codeload.github.com/o/r/tar.gz/{sha}*) cat "{archive}" ;;
+        *) return 22 ;;
+    esac
+}}
+GITHUB_REPO=o/r SOURCE_REF=main SRC_TARBALL_COMMIT=""
+fetch_source_tarball "{dest}"
+echo "commit=$SRC_TARBALL_COMMIT"
+"""
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("commit=" + sha[:7], result.stdout)
+            self.assertTrue((dest / "go" / "go.mod").is_file())
+
     def test_release_bundle_installs_the_memory_guard_where_ggrun_finds_it(self):
         # The guard was only copied into the backend directory, where ggrun never
         # looks, so a fresh install had no CUDA allocation firewall.
