@@ -17,8 +17,8 @@ Linux and macOS. Preserve existing Windows serving paths and regression coverage
 the client and server platform requirements are distinct.
 
 Linux serving has real GPU acceptance. Client native tests and released alpha
-installation passed on Linux/Windows; native macOS client, shared-policy and
-gateway CI are being added. Cross-built macOS artifacts alone are insufficient.
+installation passed on Linux/Windows; native macOS ARM64 client, shared-policy, gateway and published alpha
+installer checks have now passed in CI. Cross-built macOS artifacts alone are insufficient.
 
 macOS default serving is not qualified yet: its 8 GiB packaging runner reports
 5375 MiB available while the CPU plan charges 6720 MiB of runtime and growth

@@ -186,3 +186,10 @@ remote transport failure and must not be hidden by relaxing the CI launch or
 memory guard. Its original log is in server run `40553606872`, job
 `122363606731`. Small-host default serving needs a protected-core policy review.
 Linux and Windows E2E completed successfully for production-code `0b82f8d`.
+
+Subsequent native qualification: client revision `966ebe3` passed macOS ARM64
+native tests and installation of the published v0.1.0-alpha.1 binary. Linux and
+Windows published installer checks passed too. Server revision `9e85a3c` passed
+all three native remote-contract jobs, including macOS ARM64. Intel Mac remains
+cross-built, not natively exercised. The default macOS serving failure above
+remains unresolved; contract success does not qualify Metal inference.
