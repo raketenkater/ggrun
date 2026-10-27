@@ -1344,10 +1344,13 @@ TOP_ROWS_WATCHED = 10
 # Open-weight models the leaderboard does not score, listed by review. They
 # carry no Artificial Analysis index; quality is a "~" estimate one point under
 # the scored row named by estimate_from, and the recommender ranks every
-# estimated row after the scored ones. Facts were checked against the Hugging
-# Face model cards and config.json on 2026-10-27 (MiniMax-M3.1-Flash: ~428B
-# total, 23B active, 60 layers, 128 experts, 4 per token; Nanbeige4.3-33B:
-# LlamaForCausalLM, 52 layers); the GGUF header wins where they disagree.
+# estimated row after the scored ones. They are written under
+# "reviewed_candidates", not "candidates": released binaries fetch main's
+# catalog, rank by quality alone, and would put the estimate above scored
+# rows. Facts were checked against the Hugging Face model cards and
+# config.json on 2026-10-27 (MiniMax-M3.1-Flash: ~428B total, 23B active, 60
+# layers, 128 experts, 4 per token; Nanbeige4.3-33B: LlamaForCausalLM, 52
+# layers); the GGUF header wins where they disagree.
 REVIEWED_UNSCORED_MODELS: tuple[dict[str, Any], ...] = (
     {"name": "MiniMax-M3.1-Flash", "family": "MiniMax", "repo": "unsloth/MiniMax-M3.1-Flash-GGUF",
      "estimate_from": "MiniMax-M3",
@@ -1532,14 +1535,22 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
     carried = [c for c in carried if str(c["repo"]).lower() not in seen_repos]
     candidates = dedupe_candidates(candidates + carried)[:limit]
     kept_count = sum(1 for c in carried if c in candidates)
-    candidates = validate_candidates(candidates + reviewed_candidates(candidates, previous))
+    candidates = validate_candidates(candidates)
+    reviewed = validate_candidates(reviewed_candidates(candidates, previous))
     return {
         "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by ggrun hardware fit; Hugging Face GGUF metadata cached from public model APIs",
         "candidates": candidates,
         "generated_at": utc_now(),
-        "source": f"{source_label}; resolved {len(candidates) - kept_count} GGUF repos with quant sizes; kept {kept_count} previous rows; skipped {skipped} open-weight rows without matching GGUF quants",
+        "reviewed_candidates": reviewed,
+        "source": f"{source_label}; resolved {len(candidates) - kept_count} GGUF repos with quant sizes; kept {kept_count} previous rows; skipped {skipped} open-weight rows without matching GGUF quants; listed {len(reviewed)} reviewed unscored rows",
         "version": 2,
     }
+
+
+def catalog_rows(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Scored and reviewed rows of a catalog document."""
+    return [row for key in ("candidates", "reviewed_candidates")
+            for row in catalog.get(key) or [] if isinstance(row, dict)]
 
 
 # The architecture tables of the backends ggrun builds. A catalog row whose
@@ -1661,7 +1672,7 @@ def main() -> int:
         tables = fetch_upstream_arch_tables()
         if not tables:
             raise SystemExit("upstream architecture tables unavailable")
-        stamp_upstream(catalog.get("candidates", []), tables)
+        stamp_upstream(catalog_rows(catalog), tables)
         tmp = catalog_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(catalog_path)
@@ -1678,7 +1689,7 @@ def main() -> int:
         if args.print_open_weights_top > 0:
             print_top_models(rows, args.print_open_weights_top, open_weights_only=True)
         try:
-            previous = json.loads(catalog_path.read_text(encoding="utf-8")).get("candidates") or []
+            previous = catalog_rows(json.loads(catalog_path.read_text(encoding="utf-8")))
         except (OSError, ValueError, AttributeError) as exc:
             print(f"warning: previous catalog unreadable ({exc}); nothing carried forward", file=sys.stderr)
             previous = []
@@ -1695,7 +1706,7 @@ def main() -> int:
             return 0
         raise SystemExit("no GGUF candidates resolved")
 
-    stamp_upstream(catalog["candidates"], fetch_upstream_arch_tables())
+    stamp_upstream(catalog_rows(catalog), fetch_upstream_arch_tables())
     if args.print_catalog_top > 0:
         print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")

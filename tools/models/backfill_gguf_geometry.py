@@ -35,7 +35,7 @@ def has_geometry(c: dict) -> bool:
 def main() -> int:
     catalog_path = Path(__file__).resolve().parents[2] / "go" / "pkg" / "recommend" / "catalog.json"
     d = json.loads(catalog_path.read_text())
-    candidates = d.get("candidates", [])
+    candidates = d.get("candidates", []) + d.get("reviewed_candidates", [])
     updated = 0
     skipped = 0
     failed = 0

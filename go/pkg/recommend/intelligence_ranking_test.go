@@ -170,3 +170,47 @@ func TestEstimatedRowNeverOutranksAScoredRow(t *testing.T) {
 		t.Fatalf("estimated row displayed %q, want a ~ estimate", got)
 	}
 }
+
+func TestReviewedRowsStayOutOfReleasedClientsCandidates(t *testing.T) {
+	// Released binaries fetch main's catalog and rank by quality alone, so a
+	// reviewed estimate must not be readable as a candidate there.
+	guess := Candidate{Name: "reviewed", Repo: "fixture/reviewed", Quality: 99, AAIntelligence: 70, TotalParamsB: 8,
+		SizeGB: 4.8, Quants: []QuantOption{{Name: "Q4_K_M", SizeGB: 4.8}}}
+	scored := Candidate{Name: "scored", Repo: "fixture/scored", AAIntelligence: 30, TotalParamsB: 8,
+		SizeGB: 4.8, Quants: []QuantOption{{Name: "Q4_K_M", SizeGB: 4.8}}}
+	intelligenceTestCatalog(t, scored)
+	path := filepath.Join(os.Getenv("LLM_CACHE_DIR"), "catalog.json")
+	var doc catalogDoc
+	b, err := os.ReadFile(path)
+	if err == nil {
+		err = json.Unmarshal(b, &doc)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.ReviewedCandidates = []Candidate{guess}
+	if b, err = json.Marshal(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var released struct { // catalogDoc as v3.2.12 and earlier decode it
+		Candidates []Candidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(b, &released); err != nil || len(released.Candidates) != minModels {
+		t.Fatalf("released clients read %d candidates (err %v), want the %d scored rows only", len(released.Candidates), err, minModels)
+	}
+	for _, c := range released.Candidates {
+		if c.Repo == guess.Repo {
+			t.Fatal("a reviewed estimate is listed where released clients rank it by quality")
+		}
+	}
+	rows := TopCategories(intelligenceTestHardware(), 100).Smartest
+	if len(rows) < 2 || rows[0].Repo != scored.Repo || rows[len(rows)-1].Repo != guess.Repo {
+		t.Fatalf("this build must list the reviewed row after every scored one: %+v", rows)
+	}
+	if got := DisplayIntelligence(rows[len(rows)-1]); got != "~60.0" {
+		t.Fatalf("reviewed row displayed %q, want a ~ estimate even with a stray index", got)
+	}
+}

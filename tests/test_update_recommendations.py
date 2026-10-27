@@ -615,6 +615,29 @@ def test_reviewed_unscored_models_rank_one_point_under_their_scored_anchor(monke
     assert [r["name"] for r in updater.reviewed_candidates(scored, [])] == ["Nanbeige4.3-33B"]
 
 
+def test_reviewed_rows_stay_out_of_the_candidates_released_clients_rank(monkeypatch):
+    """Released binaries fetch main's catalog and rank "candidates" by quality
+    alone, so a reviewed estimate must live under its own key."""
+    updater = load_updater()
+    quants = [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]
+    _offline_catalog(updater, monkeypatch, {"GLM-5.3": ("unsloth/GLM-5.3-GGUF", quants, "hf-search")})
+    seen = []
+
+    def reviewed(candidates, previous):
+        seen.append([c["repo"] for c in previous])
+        return [{"name": "Guess", "repo": "o/Guess-GGUF", "quality": 49, "aa_intelligence_index": 0, "quants": quants}]
+    monkeypatch.setattr(updater, "reviewed_candidates", reviewed)
+    rows = [{"name": "GLM-5.3", "slug": "glm-5-3", "intelligenceIndex": 44, "isOpenWeights": True}]
+    catalog = updater.build_catalog(rows, "test", 100, 20)
+    assert [c["repo"] for c in catalog["candidates"]] == ["unsloth/GLM-5.3-GGUF"]
+    assert [c["repo"] for c in catalog["reviewed_candidates"]] == ["o/Guess-GGUF"]
+    assert "listed 1 reviewed unscored rows" in catalog["source"]
+    # The next refresh reads both keys back as previous rows.
+    assert [c["repo"] for c in updater.catalog_rows(catalog)] == ["unsloth/GLM-5.3-GGUF", "o/Guess-GGUF"]
+    updater.build_catalog(rows, "test", 100, 20, updater.catalog_rows(catalog))
+    assert seen[-1] == ["unsloth/GLM-5.3-GGUF", "o/Guess-GGUF"]
+
+
 def test_api_403_and_failures_fall_back_to_the_public_page(monkeypatch, capsys):
     updater = load_updater()
     page_rows = [{"name": "Open", "isOpenWeights": True, "intelligenceIndex": 30}]
