@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	discoveryIndexVersion = 1
-	discoveryIndexFile    = "discovered-models.json"
-	defaultScanMaxEntries = 5_000_000
-	defaultScanMaxTime    = 10 * time.Minute
+	discoveryIndexVersion  = 1
+	discoveryIndexFile     = "discovered-models.json"
+	defaultScanMaxEntries  = 5_000_000
+	defaultScanMaxTime     = 10 * time.Minute
+	rememberScanMaxEntries = 200_000
+	rememberScanMaxTime    = 30 * time.Second
 )
 
 var errScanStopped = errors.New("model discovery limit reached")
@@ -334,6 +336,18 @@ func SaveDiscoveredScan(cacheDir string, result ScanResult) error {
 		paths = append(LoadDiscoveredPaths(cacheDir), paths...)
 	}
 	return SaveDiscoveredPaths(cacheDir, paths)
+}
+
+// RememberModelDir adds the runnable GGUFs under dir to the discovered index,
+// keeping every prior entry, so a model downloaded outside the configured model
+// directory appears in the TUI without a full computer scan. The walk is
+// bounded because dir is user-chosen and may be a large tree.
+func RememberModelDir(cacheDir, dir string) error {
+	result := scanRoots([]string{dir}, nil, rememberScanMaxEntries, rememberScanMaxTime)
+	if len(result.Paths) == 0 {
+		return nil
+	}
+	return SaveDiscoveredScan(cacheDir, ScanResult{Paths: result.Paths, Truncated: true})
 }
 
 // SaveDiscoveredPaths makes a system scan available on later TUI starts.
