@@ -7826,10 +7826,9 @@ func cmdLaunch(args []string) {
 		fmt.Fprintln(os.Stderr, "[launch] Timeout — forcing shutdown...")
 		p.Kill()
 	}
-	if !waitForShutdownRelease(resourceBaseline, shutdownReleaseWait, launchResourcesAtBaseline, time.Sleep) {
+	if !stopCompanionsAndWaitForShutdownRelease(claudeAuto.stop, resourceBaseline, shutdownReleaseWait, launchResourcesAtBaseline, time.Sleep) {
 		markReleasePending(cfg.CacheDir)
 	}
-	claudeAuto.stop()
 }
 
 // relaunchAfterVerificationOOM starts the launch once more after a CUDA OOM in

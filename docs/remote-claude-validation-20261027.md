@@ -120,6 +120,20 @@ This first fix receipt uses a temporary authenticated facade calling the actual
 new guard against the loaded model; rebuilt full-server qualification remains
 separate. The original prompt policy is retained; the failed hint is not shipped.
 
+## Shutdown lifecycle follow-up
+
+The next real stop exposed a false memory-release wait: the main backend had
+exited but the 4B companion still held approximately 5.5 GiB, while the shutdown
+check compared against the baseline from before both processes started. The
+companion was only stopped after the 20-second wait, producing a false pending
+release marker. All allocations did eventually release; this was bounded.
+
+The serving shutdown now stops its owned router/companion before checking the
+whole-launch memory baseline. Regression coverage requires companion cleanup
+before sampling and preserves backend-memory waiting without any companion.
+This affects CPU-only and GPU serving lifecycles, not placement or performance
+selection. Full rebuilt-server stop/relaunch remains the live acceptance gate.
+
 ## Required before completion
 
 - Reviewed follow-up commit/CI, then rebuilt full-server worker handoff.
