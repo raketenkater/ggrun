@@ -10,6 +10,23 @@ The server owns model placement, admission, model processes, KV/prompt caches, o
 
 This is a public-product feature. Addresses, credentials, hardware and model choices are runtime configuration. Ordinary HTTP(S) is the connection contract. Tailscale, a LAN, an SSH tunnel and an existing HTTPS reverse proxy are deployment options. Tailscale is the owner's chosen validation setup, not the default, a mandatory dependency or something either program installs/configures automatically.
 
+## Platform targets — owner clarification
+
+Client: Linux, macOS and Windows. Headless serving targets for this feature:
+Linux and macOS. Preserve existing Windows serving paths and regression coverage;
+the client and server platform requirements are distinct.
+
+Linux serving has real GPU acceptance. Client native tests and released alpha
+installation passed on Linux/Windows; native macOS client, shared-policy and
+gateway CI are being added. Cross-built macOS artifacts alone are insufficient.
+
+macOS default serving is not qualified yet: its 8 GiB packaging runner reports
+5375 MiB available while the CPU plan charges 6720 MiB of runtime and growth
+reserve for a 1 MiB synthetic model. Keep this refusal visible; do not relax
+memory guards or enlarge fake hardware to label the default flow passing. A
+separate protected-core review is required to resolve this small-host admission
+policy. The updated feature scope makes this a real remaining server gate.
+
 ## Fastest path to a useful product — decisions fixed before implementation
 
 The first release is a complete remote CLI workflow, not a replacement Claude frontend or a new network-management product. The server TUI and laptop command must be usable without manual reconstruction of environment variables. Avoid a second mandatory laptop proxy, an account service, SSH-based model management, remote filesystem mounting or new model downloads.
@@ -132,7 +149,7 @@ Remaining gates:
 
 1. Role fallback and unchanged oracle passed through the complete server;
    published follow-ups passed native contract/core and Linux E2E CI; Windows
-   E2E was still running at the last checkpoint.
+   E2E also passed for production-code revision `0b82f8d`.
 2. Preserve disconnect receipt: router and backend idle within 0.204 seconds
    after content cancellation through the generic prefixed proxy.
 3. Tested candidate `v3.2.12-remote-0b82f8d` is installed on the owner PATH;

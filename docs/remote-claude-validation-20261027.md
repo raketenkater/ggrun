@@ -171,3 +171,18 @@ and isolated test configuration; no owner serving preferences were overwritten.
 
 No performance tuning or universal hardware/model support claim follows from
 these transport and correctness checks.
+
+## Expanded platform qualification
+
+Owner target: clients on macOS/Linux/Windows; headless serving on Linux/macOS.
+Native macOS client and remote-server contract jobs are added. Client PR CI now
+installs the existing immutable alpha on each OS; release CI tests the newly
+published version on all three platforms. These jobs must have actual receipts
+before the corresponding native platform is described as qualified.
+
+The default macOS packaging flow still fails admission on its 8 GiB runner:
+1 MiB weights, 6720 MiB host runtime/reserve, 5375 MiB available. This is not a
+remote transport failure and must not be hidden by relaxing the CI launch or
+memory guard. Its original log is in server run `40553606872`, job
+`122363606731`. Small-host default serving needs a protected-core policy review.
+Linux and Windows E2E completed successfully for production-code `0b82f8d`.
