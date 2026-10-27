@@ -535,11 +535,12 @@ function Test-PythonDownloadDeps($Py) {
 }
 
 function Ensure-Python {
-    # Model downloads (recommender) shell out to a Python helper that uses
-    # huggingface_hub. ggrun runs local models without Python, so this is
-    # best-effort and never fatal.
+    # Every model launch reads GGUF metadata with parse_gguf.py, so ggrun needs
+    # Python 3. Model downloads also need huggingface_hub and tqdm. Installing
+    # Python defaults to yes; a missing Python is reported, not fatal, so the
+    # rest of the app home still installs.
     $py = Resolve-Python
-    if (!$py -and (Test-Command 'winget') -and (Confirm-Install 'Python 3.12 via winget (needed for model downloads)')) {
+    if (!$py -and (Test-Command 'winget') -and (Confirm-Install 'Python 3.12 via winget (needed to launch and download models)')) {
         Say 'Installing Python 3 via winget...'
         try { & winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent } catch { }
         # winget updates the persistent PATH, not the current PowerShell
@@ -552,7 +553,7 @@ function Ensure-Python {
         $py = Resolve-Python
     }
     if (!$py) {
-        Warn 'Python 3 not found (needed to download models via the recommender).'
+        Warn 'Python 3 not found. ggrun cannot launch or download models without it.'
         Warn 'Install from https://www.python.org/downloads/ (tick "Add python.exe to PATH"), then run:'
         Warn '  python -m pip install --user huggingface_hub tqdm'
         return
@@ -571,6 +572,19 @@ function Ensure-Python {
         }
     } catch {
         Warn 'Could not install huggingface_hub/tqdm. Run: python -m pip install --user huggingface_hub tqdm'
+    }
+}
+
+function Test-GgufParse($Py, [string]$Parser) {
+    # Every launch runs parse_gguf.py. Check that path on a 24-byte GGUF v3
+    # header (no tensors, no metadata).
+    $gguf = Join-Path $tmp 'selfcheck.gguf'
+    [IO.File]::WriteAllBytes($gguf, [byte[]](@(0x47, 0x47, 0x55, 0x46, 3) + @(0) * 19))
+    try {
+        $out = & $Py.Exe @($Py.Pre) $Parser $gguf 2>$null | Out-String
+        return ($LASTEXITCODE -eq 0 -and $out -match 'tensor_accounting_schema')
+    } catch {
+        return $false
     }
 }
 
@@ -733,6 +747,15 @@ try {
         if ($LASTEXITCODE -ne 0) { Fail 'Installed ggrun failed its version check' }
         & (Join-Path $bin 'ggrun.exe') detect | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail 'Installed ggrun failed hardware detection' }
+        $py = Resolve-Python
+        if ($py) {
+            if (!(Test-GgufParse $py (Join-Path $bin 'parse_gguf.py'))) {
+                Fail "parse_gguf.py failed under $($py.Exe); model launches would fail."
+            }
+            Ok 'GGUF metadata parser works'
+        } else {
+            Warn 'Skipped the GGUF parser check: no Python 3. Install it before launching a model.'
+        }
         & $llamaServer --version | Out-Null
         if ($LASTEXITCODE -ne 0) {
             # On a clean Windows machine the usual cause is a missing Visual C++

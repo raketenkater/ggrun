@@ -878,7 +878,7 @@ if (( ! NONINTERACTIVE )) && [[ "${LLM_INSTALL_PROMPT:-auto}" != "0" && "$BACKEN
         fi
     fi
     if [[ "$PY_DEPS_MODE" == "auto" ]]; then
-        if ask "Install Python downloader helpers for HuggingFace model search/download if missing? [Y/n]" y; then
+        if ask "Install Python 3 (needed to launch models) and the HuggingFace download helpers if missing? [Y/n]" y; then
             PY_DEPS_MODE="install"
         else
             PY_DEPS_MODE="skip"
@@ -1939,7 +1939,7 @@ python3_usable() {
 
 install_python_runtime() {
     [[ "$PY_DEPS_MODE" != "skip" ]] || return 1
-    say "-- Installing Python 3 for model downloads --"
+    say "-- Installing Python 3 (GGUF metadata parsing and model downloads) --"
     if [[ "$OS" == "Darwin" ]]; then
         command -v brew >/dev/null 2>&1 || return 1
         brew install python
@@ -2212,24 +2212,24 @@ if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR
     exit 1
 fi
 
-# ── Stage 4: python deps (for downloader) ──────────────────────────────────
+# ── Stage 4: python (GGUF metadata on every launch; downloader deps) ────────
 say ""
 say "── Python dependencies ──"
 if [[ "$PY_DEPS_MODE" == "skip" ]]; then
-    warn "Skipped python dependency install. Downloader needs huggingface_hub + tqdm."
+    warn "Skipped python dependency install. Launching needs Python 3; downloads also need huggingface_hub + tqdm."
 else
     if ! python3_usable; then
         warn "A usable Python 3 interpreter was not found."
         if ! install_python_runtime || ! python3_usable; then
             if [[ "$OS" == "Darwin" ]]; then
-                err "Python 3 is needed for model search/download. Install Homebrew, then run: brew install python"
+                err "Python 3 is needed to launch models (GGUF metadata) and to download them. Install Homebrew, then run: brew install python"
             else
-                err "Python 3 is needed for model search/download. Install python3 and python3-pip with your package manager."
+                err "Python 3 is needed to launch models (GGUF metadata) and to download them. Install python3 and python3-pip with your package manager."
             fi
             if [[ "$PY_DEPS_MODE" == "install" ]]; then
                 exit 1
             fi
-            warn "Local GGUF serving still works; model search/download is unavailable until Python is installed."
+            warn "ggrun cannot launch or download models until Python 3 is installed."
         fi
     fi
     if python3_usable; then
@@ -2249,6 +2249,26 @@ else
                 warn "Local GGUF serving still works; model search/download is unavailable."
             fi
         fi
+    fi
+fi
+
+# Every launch reads GGUF metadata through parse_gguf.py. Check that path on a
+# 24-byte GGUF v3 header (no tensors, no metadata).
+gguf_parse_selfcheck() {
+    local parser="$INSTALL_DIR/parse_gguf.py" tiny out
+    [[ -f "$parser" ]] || return 0
+    tiny="$(mktemp -t ggrun-selfcheck.XXXXXX)"
+    printf 'GGUF\003\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' >"$tiny"
+    out="$(python3 "$parser" "$tiny" 2>&1)" || true
+    rm -f "$tiny"
+    [[ "$out" == *tensor_accounting_schema* ]] || { say "$out"; return 1; }
+}
+if python3_usable; then
+    if gguf_parse_selfcheck; then
+        ok "GGUF metadata parser works"
+    else
+        err "parse_gguf.py failed on a minimal GGUF; model launches would fail."
+        exit 1
     fi
 fi
 

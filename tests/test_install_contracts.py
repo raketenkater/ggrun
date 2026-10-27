@@ -108,6 +108,17 @@ echo "commit=$SRC_TARBALL_COMMIT"
             self.assertIn("commit=" + sha[:7], result.stdout)
             self.assertTrue((dest / "go" / "go.mod").is_file())
 
+    def test_gguf_parse_selfcheck_runs_the_installed_parser(self):
+        # Every launch needs parse_gguf.py under Python 3; the installer checks it.
+        for body, code in ((None, 0), ("raise SystemExit(1)\n", 1)):
+            with self.subTest(broken=body is not None), tempfile.TemporaryDirectory() as tmp:
+                parser = Path(tmp) / "parse_gguf.py"
+                parser.write_text(body or (ROOT / "tools" / "gguf" / "parse_gguf.py").read_text())
+                script = function("install.sh", "gguf_parse_selfcheck")
+                script += f'\nsay() {{ :; }}\nINSTALL_DIR="{tmp}"\ngguf_parse_selfcheck\n'
+                result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+
     def test_release_bundle_installs_the_memory_guard_where_ggrun_finds_it(self):
         # The guard was only copied into the backend directory, where ggrun never
         # looks, so a fresh install had no CUDA allocation firewall.
