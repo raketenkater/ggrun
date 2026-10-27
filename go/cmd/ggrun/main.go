@@ -7542,57 +7542,44 @@ func cmdLaunch(args []string) {
 		// Run a health monitor alongside Claude so a mid-session backend crash
 		// is recorded immediately — otherwise Claude Code times out silently
 		// and the OOM data is lost until the user notices (audit cross-check #4).
-		healthCtx, healthCancel := context.WithCancel(context.Background())
-		defer healthCancel()
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-healthCtx.Done():
-					return
-				case <-ticker.C:
+		// Every requested stop below calls health.stop() first, which also waits
+		// out a check in flight, so a normal stop is never recorded as a crash.
+		health := startClaudeHealthMonitor(30*time.Second, func() bool { return isServerRunning(req.Host, req.Port) }, func() {
+			// A backend wedged after its fatal line still holds its memory.
+			var failedFree map[int]int
+			if p.IsRunning() {
+				failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps))
+			}
+			fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — checking its log for an OOM to record for the next launch\n")
+			logData := ""
+			if p.LogBuf != nil {
+				logData = p.LogBuf.String()
+			}
+			markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
+			peakMB, hostOOM, recorded, hostErr := recordRuntimeHostCgroupOOM(req, cfg, model, strategy, be, runtimeCaps, serverArgs, p, logData, markerPath)
+			if hostErr != nil {
+				fmt.Fprintf(os.Stderr, "[launch] could not record host cgroup OOM from health monitor: %v\n", hostErr)
+			} else if hostOOM {
+				if recorded {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded host cgroup OOM at %d MiB; revoked the profile and cached host-state evidence for the next launch\n", peakMB)
 				}
-				if !isServerRunning(req.Host, req.Port) {
-					// A backend wedged after its fatal line still holds its memory.
-					var failedFree map[int]int
-					if p.IsRunning() {
-						failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps))
+			} else if p.LogBuf != nil {
+				device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, failedFree)
+				if recordErr != nil {
+					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
+				} else if !ok {
+					if line := runtimeFatalLine(logData); line != "" {
+						fmt.Fprintf(os.Stderr, "[launch] backend failed (not a recognized CUDA OOM): %s — nothing recorded\n", line)
 					}
-					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — checking its log for an OOM to record for the next launch\n")
-					logData := ""
-					if p.LogBuf != nil {
-						logData = p.LogBuf.String()
-					}
-					markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
-					peakMB, hostOOM, recorded, hostErr := recordRuntimeHostCgroupOOM(req, cfg, model, strategy, be, runtimeCaps, serverArgs, p, logData, markerPath)
-					if hostErr != nil {
-						fmt.Fprintf(os.Stderr, "[launch] could not record host cgroup OOM from health monitor: %v\n", hostErr)
-					} else if hostOOM {
-						if recorded {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded host cgroup OOM at %d MiB; revoked the profile and cached host-state evidence for the next launch\n", peakMB)
-						}
-					} else if p.LogBuf != nil {
-						device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, failedFree)
-						if recordErr != nil {
-							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
-						} else if !ok {
-							if line := runtimeFatalLine(logData); line != "" {
-								fmt.Fprintf(os.Stderr, "[launch] backend failed (not a recognized CUDA OOM): %s — nothing recorded\n", line)
-							}
-						} else if suspect != "" {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded suspected CUDA OOM on device %d (%s) and a %d MiB reserve for the next launch\n", device, suspect, reserveMB)
-						} else if ok && estimated {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
-						} else if ok {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
-						}
-					}
-					healthCancel()
-					return
+				} else if suspect != "" {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded suspected CUDA OOM on device %d (%s) and a %d MiB reserve for the next launch\n", device, suspect, reserveMB)
+				} else if ok && estimated {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
+				} else if ok {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
 				}
 			}
-		}()
+		})
 
 		clientHost := req.Host
 		if claudeAuto != nil {
@@ -7615,7 +7602,7 @@ func cmdLaunch(args []string) {
 		sessionSpec, sessionErr := claudeLaunchSession(cfg, req, serverArgs)
 		if sessionErr != nil {
 			progressStop()
-			healthCancel()
+			health.stop()
 			_ = p.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "Error: %v\n", sessionErr)
@@ -7623,7 +7610,7 @@ func cmdLaunch(args []string) {
 		}
 		if code := runClaudeCodeClient(clientHost, claudeClientPort, serverArgs, clientArgs, sessionSpec, strategy.ContextSize); code >= 0 {
 			progressStop()
-			healthCancel()
+			health.stop()
 			// Record on exit as well as on launch: the workflow run ID is
 			// assigned inside Claude Code, so only now is the resume handle
 			// complete.
@@ -7668,6 +7655,9 @@ func cmdLaunch(args []string) {
 			os.Exit(code)
 		}
 		// `claude` isn't installed — fall back to the copy-paste recipe.
+		// The serving loop below watches the backend from here on; its Ctrl+C
+		// stop must not reach this monitor's OOM recorder.
+		health.stop()
 		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs)
 	}
 
