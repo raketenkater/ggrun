@@ -15,6 +15,10 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = attr
 }
 
+// bindToParentLifetime is a no-op on Unix: the parent-death signal and the
+// scope wrapper's parent watch already end the backend with ggrun.
+func bindToParentLifetime(*exec.Cmd) (func(), error) { return nil, nil }
+
 // killProcessTree sends SIGTERM then SIGKILL to the process group.
 func killProcessTree(pid int) {
 	_ = syscall.Kill(-pid, syscall.SIGTERM)

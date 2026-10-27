@@ -50,6 +50,9 @@ type Process struct {
 	// them: at launch and by every successful SetMemory*MB. Guarded by statsMu.
 	memoryHighMB int
 	memoryMaxMB  int
+	// releaseLifetime drops the platform tie that ends the backend with ggrun
+	// (the Windows job object; nil elsewhere). Releasing it kills what is left.
+	releaseLifetime func()
 
 	stopOnce sync.Once
 	stopDone chan struct{}
@@ -319,6 +322,13 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 	}
 
 	p := &Process{Cmd: cmd, Port: port, host: readinessHost(args), cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
+	// Without this tie an abrupt ggrun exit on Windows (Ctrl+C during model
+	// load) left llama-server running and holding its VRAM.
+	if release, err := bindToParentLifetime(cmd); err != nil {
+		fmt.Fprintf(os.Stderr, "[launch] warning: backend will not stop if ggrun exits abruptly: %v\n", err)
+	} else {
+		p.releaseLifetime = release
+	}
 	if scopeUnit != "" {
 		// The scope argv clamps MemoryHigh to MemoryMax; record the same values.
 		p.recordMemoryLimits(min(opts.MemoryHighMB, opts.MemoryMaxMB), opts.MemoryMaxMB)
@@ -654,6 +664,11 @@ func (p *Process) Stop() error {
 			}
 			p.stopErr = fmt.Errorf("process did not exit within 15s")
 		}
+		// The backend has exited or has been force-killed; releasing the tie
+		// also ends anything it left in its job.
+		if p.releaseLifetime != nil {
+			p.releaseLifetime()
+		}
 		if scopeStopped && p.cancel != nil {
 			// Release the command context only after systemd has reaped the
 			// process, so cancellation cannot become a duplicate signal.
@@ -693,6 +708,9 @@ func (p *Process) Kill() {
 	}
 	if p.Cmd != nil && p.Cmd.Process != nil {
 		killProcessTree(p.Cmd.Process.Pid)
+	}
+	if p.releaseLifetime != nil {
+		p.releaseLifetime()
 	}
 }
 
