@@ -119,6 +119,24 @@ echo "commit=$SRC_TARBALL_COMMIT"
                 result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
                 self.assertEqual(result.returncode, code, result.stderr + result.stdout)
 
+    def test_cuda_bundle_is_skipped_on_gpus_older_than_its_kernels(self):
+        # The bundle is built for compute capability 7.5+; a P40/1080 Ti/V100
+        # passes --version and then fails at the first kernel launch.
+        script = "\n".join(function("install.sh", name) for name in
+                           ("nvidia_min_compute_cap", "cuda_bundle_supported"))
+        script += '\nCUDA_BUNDLE_MIN_CC=75\nfind_nvidia_smi() { [[ -n "$SMI" ]] && echo "$SMI"; }\n'
+        script += 'if cuda_bundle_supported; then echo yes; else echo no; fi\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            smi = Path(tmp) / "nvidia-smi"
+            smi.write_text('#!/usr/bin/env bash\nprintf "%s\\n" $CC\n')
+            smi.chmod(0o755)
+            for cc, want in (("8.6", "yes"), ("7.5", "yes"), ("12.0", "yes"), ("6.1", "no"),
+                             ("7.0", "no"), ("8.6 6.1", "no"), ("[N/A]", "yes"), (None, "yes")):
+                with self.subTest(cc=cc):
+                    env = dict(os.environ, SMI=str(smi) if cc else "", CC=cc or "")
+                    result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True, env=env)
+                    self.assertEqual(result.stdout.strip(), want, result.stderr)
+
     def test_release_bundle_installs_the_memory_guard_where_ggrun_finds_it(self):
         # The guard was only copied into the backend directory, where ggrun never
         # looks, so a fresh install had no CUDA allocation firewall.
@@ -140,6 +158,7 @@ release_asset_name() {{ echo ggrun-linux-x86_64-cuda.tar.gz; }}
 find_release_asset_url() {{ [[ $1 == SHA256SUMS ]] && return 1; echo https://example.invalid/$1; }}
 curl() {{ while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && cp "{archive}" "$2"; shift; done; }}
 place_isolated_backend() {{ return 0; }}
+cuda_bundle_supported() {{ return 0; }}
 BACKEND_CHOICE=cuda MAIN_IMPL=go INSTALL_DIR="{install_dir}" LLM_INSTALL_ALLOW_UNVERIFIED=1
 install_release_bundle ik_llama-server-cuda
 """

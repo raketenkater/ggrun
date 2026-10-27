@@ -822,6 +822,30 @@ fi
 
 # Linux auto: CUDA first when an NVIDIA GPU is present, then Vulkan, then CPU.
 # macOS: Metal. Never pick CUDA on a machine with no NVIDIA device.
+# The published Linux CUDA bundle has kernels for compute capability 7.5+
+# (Turing and newer; CMAKE_CUDA_ARCHITECTURES in build-linux-cuda-bundle.sh,
+# with PTX for newer cards). Pascal and Volta (P40, 1080 Ti, V100) load it and
+# then fail at the first kernel launch, so they default to Vulkan instead.
+CUDA_BUNDLE_MIN_CC=75
+
+# nvidia_min_compute_cap prints the lowest compute capability as e.g. 61.
+nvidia_min_compute_cap() {
+    local smi
+    smi="$(find_nvidia_smi 2>/dev/null || true)"
+    [[ -n "$smi" ]] || return 1
+    "$smi" --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
+        awk -F. '$1 ~ /^ *[0-9]+$/ && $2 ~ /^[0-9]+ *$/ { v = $1 * 10 + $2; if (min == "" || v < min) min = v }
+                 END { if (min == "") exit 1; print min }'
+}
+
+# cuda_bundle_supported is true unless a GPU is known to be older than the
+# bundle's kernels. An unknown capability (old driver) keeps the bundle.
+cuda_bundle_supported() {
+    local cc
+    cc="$(nvidia_min_compute_cap)" || return 0
+    (( cc >= CUDA_BUNDLE_MIN_CC ))
+}
+
 auto_backend_candidates() {
     if [[ "$OS" == "Darwin" ]]; then
         echo metal
@@ -831,7 +855,7 @@ auto_backend_candidates() {
         err "Use install.ps1 for native Windows installs, or run this Bash installer on Linux/macOS."
         exit 1
     fi
-    if has_nvidia_gpu; then
+    if has_nvidia_gpu && cuda_bundle_supported; then
         echo cuda
     fi
     echo vulkan
@@ -1163,6 +1187,10 @@ install_legacy_bash_shim() {
 install_release_bundle() {
     local platform asset url sums_url tmp archive payload_root found_backend=0 dest_name="${1:-}"
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
+    if [[ "$BACKEND_CHOICE" == "cuda" ]] && ! cuda_bundle_supported; then
+        warn "The ggrun CUDA bundle needs compute capability 7.5+; this host has $(nvidia_min_compute_cap | sed 's/.$/.&/'). Skipping it."
+        return 1
+    fi
     # CUDA release bundles are published for supported Linux x86_64 hosts. If a
     # matching bundle is unavailable, auto mode can still fall back to Vulkan or
     # CPU before attempting a source build.
@@ -1532,8 +1560,21 @@ fetch_nccl_into_box() {
 }
 
 link_default_llama_server() {
-    local name t kind best=""
+    local name t kind best="" order=() late=()
     for name in ik_llama-server-cuda llama-server-vulkan llama-server-cuda llama-server; do
+        # The CUDA bundle passes --version on any NVIDIA GPU, but one older than
+        # its kernels fails at the first launch, so there it ranks last. A CUDA
+        # build adopted from or compiled on this machine keeps its place.
+        if [[ "$name" == *-cuda && "${BACKEND_REQUEST:-auto}" != "cuda" &&
+              "$(readlink "$INSTALL_DIR/$name" 2>/dev/null)" == "backends/$name/llama-server" ]] &&
+            ! cuda_bundle_supported; then
+            late+=("$name")
+        else
+            order+=("$name")
+        fi
+    done
+    order+=(${late[@]+"${late[@]}"})
+    for name in "${order[@]}"; do
         [[ -e "$INSTALL_DIR/$name" || -L "$INSTALL_DIR/$name" ]] || continue
         kind="$(backend_probe_kind "$name" || true)"
         if [[ "$kind" == "runs" ]]; then
@@ -1542,7 +1583,7 @@ link_default_llama_server() {
         fi
     done
     if [[ -z "$best" ]]; then
-        for name in ik_llama-server-cuda llama-server-vulkan llama-server-cuda llama-server; do
+        for name in "${order[@]}"; do
             [[ -e "$INSTALL_DIR/$name" || -L "$INSTALL_DIR/$name" ]] || continue
             best="$name"
             break
@@ -1859,7 +1900,7 @@ install_auto_release_backends() {
         ensure_vulkan_runtime && ok "Vulkan runtime is installed" || true
     fi
 
-    if has_nvidia_gpu && ! installed_real_server ik_llama-server-cuda; then
+    if has_nvidia_gpu && cuda_bundle_supported && ! installed_real_server ik_llama-server-cuda; then
         BACKEND_CHOICE="cuda"
         say "Installing ik_llama.cpp (CUDA)..."
         if install_release_bundle ik_llama-server-cuda || installed_real_server ik_llama-server-cuda; then
@@ -1895,8 +1936,11 @@ install_auto_release_backends() {
     fi
 
     # Compile only if the CUDA tarball never landed. Do this after llama.cpp
-    # so a gcc/dnf stall cannot skip the Vulkan/CPU pair.
-    if has_nvidia_gpu && ! installed_real_server ik_llama-server-cuda; then
+    # so a gcc/dnf stall cannot skip the Vulkan/CPU pair. A GPU older than the
+    # bundle's kernels keeps Vulkan; a CUDA build for it is an explicit choice.
+    if has_nvidia_gpu && ! cuda_bundle_supported; then
+        say "This NVIDIA GPU predates the CUDA bundle; using Vulkan. LLM_INSTALL_BACKEND=cuda builds CUDA from source."
+    elif has_nvidia_gpu && ! installed_real_server ik_llama-server-cuda; then
         if ! has_cuda_toolkit; then
             ensure_cuda_toolkit || true
         fi

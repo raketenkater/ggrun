@@ -82,6 +82,11 @@ runtime library. Source compile happens only when no CUDA ELF landed and
 `nvcc` is already there. CPU is last if nothing else runs. The NVIDIA
 proprietary driver is never auto-installed. Windows CUDA: `install.ps1 -Backend cuda`.
 
+The Linux CUDA bundle has kernels for compute capability 7.5 and newer (Turing,
+Ampere, Ada; Blackwell through PTX). Older NVIDIA GPUs such as Pascal (P40,
+GTX 1080 Ti) and Volta (V100) get Vulkan by default; `LLM_INSTALL_BACKEND=cuda`
+builds CUDA from source for them instead.
+
 ## Classic install to `~/.local/bin`
 
 ```bash

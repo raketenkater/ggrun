@@ -219,8 +219,22 @@ backend_starts() {
     fi
 }
 
+# The Linux CUDA bundle has kernels for compute capability 7.5+ (see
+# build-linux-cuda-bundle.sh). An older NVIDIA GPU (P40, 1080 Ti, V100) starts
+# it for --version but fails at the first kernel launch, so there the bundle
+# ranks last. A CUDA build adopted from or compiled on this machine keeps its
+# place, and so does the bundle when CUDA was asked for.
+cuda_bundle_on_older_gpu() {
+    [[ "${BACKEND:-auto}" != "cuda" ]] || return 1
+    [[ "$(readlink "$1" 2>/dev/null)" == backends/*-cuda/llama-server ]] || return 1
+    command -v nvidia-smi >/dev/null 2>&1 || return 1
+    nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
+        awk -F. '$1 ~ /^ *[0-9]+$/ && $2 ~ /^[0-9]+ *$/ && $1 * 10 + $2 < 75 { old = 1 } END { exit !old }'
+}
+
 backend_candidates() {
-    printf '%s\n' \
+    local cand late=()
+    for cand in \
         "$APP_BIN/llama-server-cuda" \
         "$APP_BIN/ik_llama-server-cuda" \
         "$APP_BIN/llama-server-vulkan" \
@@ -228,7 +242,14 @@ backend_candidates() {
         "$APP_SRC/llama.cpp/build-cuda/bin/llama-server" \
         "$APP_SRC/ik_llama.cpp/build/bin/llama-server" \
         "$APP_SRC/llama.cpp/build-vulkan/bin/llama-server" \
-        "$APP_SRC/llama.cpp/build/bin/llama-server"
+        "$APP_SRC/llama.cpp/build/bin/llama-server"; do
+        if cuda_bundle_on_older_gpu "$cand"; then
+            late+=("$cand")
+        else
+            printf '%s\n' "$cand"
+        fi
+    done
+    [[ ${#late[@]} -eq 0 ]] || printf '%s\n' "${late[@]}"
 }
 
 backend_bin=""
