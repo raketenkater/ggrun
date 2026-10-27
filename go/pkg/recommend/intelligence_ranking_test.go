@@ -143,3 +143,30 @@ func TestDisplayedIntelligenceIsIndependentOfQuantGuess(t *testing.T) {
 		t.Fatalf("missing intelligence invented a score: %q", got)
 	}
 }
+
+func TestEstimatedRowNeverOutranksAScoredRow(t *testing.T) {
+	// A reviewed open-weight row the leaderboard does not score carries only a
+	// "~" quality estimate; even a generous one must follow scored models.
+	scored := Candidate{Name: "scored", Repo: "fixture/scored", AAIntelligence: 30, TotalParamsB: 8,
+		SizeGB: 4.8, Quants: []QuantOption{{Name: "Q4_K_M", SizeGB: 4.8}}}
+	guess := Candidate{Name: "estimated", Repo: "fixture/estimated", Quality: 99, TotalParamsB: 8,
+		SizeGB: 4.8, Quants: []QuantOption{{Name: "Q4_K_M", SizeGB: 4.8}}}
+	intelligenceTestCatalog(t, guess, scored)
+	caps := intelligenceTestHardware()
+	// The catalog fixture pads with scored 1-point fillers; the estimate
+	// follows those too.
+	cats := TopCategories(caps, 100)
+	for name, rows := range map[string][]Recommendation{"overall": cats.Balanced, "smartest": cats.Smartest,
+		"top": Top(caps, 100)} {
+		if len(rows) < 3 || rows[0].Repo != scored.Repo || rows[len(rows)-1].Repo != guess.Repo {
+			t.Fatalf("%s ranked an estimate above a scored model: %+v", name, rows)
+		}
+	}
+	// Fastest admits only rows near the best intelligence: the fillers drop out.
+	if rows := cats.Fastest; len(rows) != 2 || rows[0].Repo != scored.Repo || rows[1].Repo != guess.Repo {
+		t.Fatalf("fastest ranked an estimate above a scored model: %+v", rows)
+	}
+	if got := DisplayIntelligence(cats.Smartest[len(cats.Smartest)-1]); got != "~60.0" {
+		t.Fatalf("estimated row displayed %q, want a ~ estimate", got)
+	}
+}
