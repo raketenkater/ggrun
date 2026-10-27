@@ -505,7 +505,7 @@ function Resolve-Python {
     # interpreter avoids mistaking the Microsoft Store execution alias for an
     # installed Python. `py` needs -3 to select Python 3 explicitly.
     #
-    # Order MUST match the runtime resolver (go/pkg/download.pythonCommand:
+    # Order MUST match the runtime resolver (go/pkg/python.Command:
     # python3 -> python -> py) so the deps we pip-install land in the very
     # interpreter ggrun later runs download_any_gguf.py with. A mismatch silently
     # installs huggingface_hub into a different interpreter than the one used at
@@ -748,12 +748,13 @@ try {
         & (Join-Path $bin 'ggrun.exe') detect | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail 'Installed ggrun failed hardware detection' }
         $py = Resolve-Python
-        if ($py) {
-            if (!(Test-GgufParse $py (Join-Path $bin 'parse_gguf.py'))) {
+        $parser = Join-Path $bin 'parse_gguf.py'
+        if ($py -and (Test-Path $parser)) {
+            if (!(Test-GgufParse $py $parser)) {
                 Fail "parse_gguf.py failed under $($py.Exe); model launches would fail."
             }
             Ok 'GGUF metadata parser works'
-        } else {
+        } elseif (!$py) {
             Warn 'Skipped the GGUF parser check: no Python 3. Install it before launching a model.'
         }
         & $llamaServer --version | Out-Null
