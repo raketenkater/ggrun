@@ -773,9 +773,9 @@ func rawInstallerPSURLForRef(ref string) string {
 
 func selfUpdateWindowsInstaller(appHome string) error {
 	fmt.Println("═══ Updating ggrun from latest Windows installer ═══")
-	exe := runningBinaryPath()
-	if exe == "" {
-		return fmt.Errorf("cannot resolve the running ggrun.exe")
+	target := windowsInstallerTarget(appHome)
+	if target == "" {
+		return fmt.Errorf("cannot resolve the ggrun.exe the Windows installer writes")
 	}
 
 	res, err := Check()
@@ -801,33 +801,92 @@ func selfUpdateWindowsInstaller(appHome string) error {
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return runInstallerOverRunningBinary(exe, cmd.Run)
+	return runInstallerOverRunningBinary(target, runningBinaryPath(), cmd.Run)
+}
+
+// windowsInstallerTarget is the binary install.ps1 writes:
+// <InstallDir>\.bin\ggrun.exe, where InstallDir defaults to %USERPROFILE%\ggrun
+// when no app home is passed to it.
+func windowsInstallerTarget(appHome string) string {
+	if appHome == "" {
+		home := strings.TrimSpace(os.Getenv("USERPROFILE"))
+		if home == "" {
+			home, _ = os.UserHomeDir()
+		}
+		if home == "" {
+			return ""
+		}
+		appHome = filepath.Join(home, "ggrun")
+	}
+	if abs, err := filepath.Abs(appHome); err == nil {
+		appHome = abs
+	}
+	return filepath.Join(appHome, ".bin", "ggrun.exe")
 }
 
 // runInstallerOverRunningBinary runs an installer that writes a new binary at
-// exe while exe is running. Windows refuses to overwrite a running .exe, so the
-// installer's bundle copy used to stop at ggrun.exe after some DLLs had already
-// been replaced. A running .exe can still be renamed: it is moved aside first,
-// restored on any failure, and removed by the next start (RemoveReplacedBinary).
-func runInstallerOverRunningBinary(exe string, install func() error) error {
-	old, err := moveRunningBinaryAside(exe)
-	if err != nil {
-		return fmt.Errorf("move running ggrun aside: %w", err)
+// target, which may be the running binary. Windows refuses to overwrite a
+// running .exe, so the installer's bundle copy used to stop at ggrun.exe after
+// some DLLs had already been replaced. A running .exe can still be renamed: an
+// existing target is moved aside first, restored on any failure, and removed
+// by the next start (RemoveReplacedBinary) when it is the running binary. A
+// ggrun running from anywhere else is left alone.
+func runInstallerOverRunningBinary(target, running string, install func() error) error {
+	runsTarget := sameBinaryPath(target, running)
+	old := ""
+	if _, err := os.Stat(target); err == nil {
+		if old, err = moveRunningBinaryAside(target); err != nil {
+			return fmt.Errorf("move ggrun aside: %w", err)
+		}
+	}
+	restore := func() {
+		if old != "" {
+			restoreRunningBinary(target, old)
+		}
 	}
 	if err := install(); err != nil {
-		restoreRunningBinary(exe, old)
+		restore()
 		return fmt.Errorf("Windows installer failed: %w", err)
 	}
-	if _, err := os.Stat(exe); err != nil {
-		restoreRunningBinary(exe, old)
-		return fmt.Errorf("Windows installer did not install %s", exe)
+	if _, err := os.Stat(target); err != nil {
+		restore()
+		return fmt.Errorf("Windows installer did not install %s", target)
 	}
-	if err := exec.Command(exe, "--version").Run(); err != nil {
-		restoreRunningBinary(exe, old)
+	if err := exec.Command(target, "--version").Run(); err != nil {
+		restore()
 		return fmt.Errorf("self-check failed after Windows installer")
+	}
+	if old != "" && !runsTarget {
+		// Fails harmlessly while a server still runs it; the next start from
+		// target removes it then.
+		_ = os.Remove(old)
 	}
 	fmt.Println("  ✓ ggrun Windows installer completed and verified. Restart to use the new version.")
 	return nil
+}
+
+// foldPathCase reports whether paths compare case-insensitively, as on NTFS.
+var foldPathCase = runtime.GOOS == "windows"
+
+// sameBinaryPath reports whether a and b name the same file, after resolving
+// links and, on Windows, ignoring case.
+func sameBinaryPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(a); err == nil {
+		a = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(b); err == nil {
+		b = resolved
+	}
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if a == b || (foldPathCase && strings.EqualFold(a, b)) {
+		return true
+	}
+	ia, errA := os.Stat(a)
+	ib, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(ia, ib)
 }
 
 // runningBinaryPath is the executable this process runs from: the file Windows

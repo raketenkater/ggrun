@@ -180,7 +180,7 @@ func TestRunInstallerOverRunningBinary(t *testing.T) {
 			writeScript(t, exe, "echo new\n")
 			return nil
 		}
-		if err := runInstallerOverRunningBinary(exe, install); err != nil {
+		if err := runInstallerOverRunningBinary(exe, exe, install); err != nil {
 			t.Fatal(err)
 		}
 		if got := read(exe); !strings.Contains(got, "new") {
@@ -205,7 +205,7 @@ func TestRunInstallerOverRunningBinary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			writeScript(t, exe, "echo old\n")
 			_ = os.Remove(exe + ".old")
-			if err := runInstallerOverRunningBinary(exe, install); err == nil {
+			if err := runInstallerOverRunningBinary(exe, exe, install); err == nil {
 				t.Fatal("failed update reported success")
 			}
 			if got := read(exe); got != oldBody {
@@ -215,6 +215,105 @@ func TestRunInstallerOverRunningBinary(t *testing.T) {
 				t.Fatalf("moved-aside binary left behind: %v", err)
 			}
 		})
+	}
+}
+
+// install.ps1 writes <app home>\.bin\ggrun.exe. A ggrun running from anywhere
+// else (a dev build, an extracted zip) must stay in place, and the update must
+// check the installed binary rather than the running one.
+func TestRunInstallerOverRunningBinaryElsewhere(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses shell-script stand-ins for ggrun.exe")
+	}
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	dir := t.TempDir()
+	running := filepath.Join(dir, "dev", "ggrun.exe")
+	target := filepath.Join(dir, "home", ".bin", "ggrun.exe")
+	writeNew := func() error { writeScript(t, target, "echo new\n"); return nil }
+
+	for name, existing := range map[string]bool{"fresh app home": false, "existing install": true} {
+		t.Run(name, func(t *testing.T) {
+			writeScript(t, running, "echo dev\n")
+			_ = os.Remove(target)
+			if existing {
+				writeScript(t, target, "echo old\n")
+			}
+			if err := runInstallerOverRunningBinary(target, running, writeNew); err != nil {
+				t.Fatal(err)
+			}
+			if got := read(running); !strings.Contains(got, "dev") {
+				t.Fatalf("running binary = %q, want it untouched", got)
+			}
+			if got := read(target); !strings.Contains(got, "new") {
+				t.Fatalf("installed binary = %q", got)
+			}
+			if stale, _ := filepath.Glob(target + ".*old"); len(stale) != 0 {
+				t.Fatalf("moved-aside copies of a binary that is not running left behind: %v", stale)
+			}
+		})
+	}
+
+	t.Run("failed self-check restores the installed binary", func(t *testing.T) {
+		writeScript(t, running, "echo dev\n")
+		writeScript(t, target, "echo old\n")
+		install := func() error { writeScript(t, target, "exit 3\n"); return nil }
+		if err := runInstallerOverRunningBinary(target, running, install); err == nil {
+			t.Fatal("failed update reported success")
+		}
+		if got := read(target); !strings.Contains(got, "old") {
+			t.Fatalf("installed binary after failed update = %q, want restored original", got)
+		}
+		if got := read(running); !strings.Contains(got, "dev") {
+			t.Fatalf("running binary = %q, want it untouched", got)
+		}
+	})
+}
+
+func TestWindowsInstallerTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	if got, want := windowsInstallerTarget(""), filepath.Join(home, "ggrun", ".bin", "ggrun.exe"); got != want {
+		t.Fatalf("default target = %q, want %q", got, want)
+	}
+	appHome := filepath.Join(home, "apps", "ggrun")
+	if got, want := windowsInstallerTarget(appHome), filepath.Join(appHome, ".bin", "ggrun.exe"); got != want {
+		t.Fatalf("app-home target = %q, want %q", got, want)
+	}
+}
+
+func TestSameBinaryPath(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, ".bin", "ggrun.exe")
+	writeScript(t, exe, "echo ok\n")
+	link := filepath.Join(dir, "linked.exe")
+	if err := os.Symlink(exe, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	other := filepath.Join(dir, "other.exe")
+	writeScript(t, other, "echo ok\n")
+	if !sameBinaryPath(exe, link) {
+		t.Fatal("a link to the target is not the target")
+	}
+	if sameBinaryPath(exe, other) {
+		t.Fatal("a different binary matched the target")
+	}
+	upper := filepath.Join(dir, ".BIN", "GGRUN.EXE")
+	saved := foldPathCase
+	t.Cleanup(func() { foldPathCase = saved })
+	foldPathCase = true
+	if !sameBinaryPath(exe, upper) {
+		t.Fatal("case-insensitive paths did not match")
+	}
+	foldPathCase = false
+	if sameBinaryPath(exe, upper) {
+		t.Fatal("case-sensitive paths matched across case")
 	}
 }
 
