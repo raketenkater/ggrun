@@ -21,6 +21,22 @@ type claudeWorkflowHookInput struct {
 	ToolName       string                 `json:"tool_name"`
 	ToolInput      map[string]interface{} `json:"tool_input"`
 	TranscriptPath string                 `json:"transcript_path"`
+	PermissionMode string                 `json:"permission_mode"`
+}
+
+// claudeWorkflowDecision is the PreToolUse decision for a patched Workflow
+// call. The hook exists to rewrite timeouts, not to grant permission: "allow"
+// skips the prompt in every mode. Only modes that already run Workflow without
+// asking keep the silent approval -- bypassPermissions, and Auto, where each
+// agent's own tool calls still go through the Auto reviewer. Every other mode,
+// and a Claude Code too old to report its mode, gets "ask" with the patched
+// input so the user approves what will actually run.
+func claudeWorkflowDecision(permissionMode string) string {
+	switch permissionMode {
+	case "bypassPermissions", "auto":
+		return "allow"
+	}
+	return "ask"
 }
 
 // cmdClaudeWorkflowHook is invoked by Claude Code's PreToolUse hook. Workflow
@@ -59,8 +75,8 @@ func cmdClaudeWorkflowHook(_ []string) {
 	output := map[string]interface{}{
 		"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "allow",
-			"permissionDecisionReason": "ggrun local Workflow policy",
+			"permissionDecision":       claudeWorkflowDecision(input.PermissionMode),
+			"permissionDecisionReason": fmt.Sprintf("ggrun local Workflow policy: every agent() call gets stallMs: %d", claudeNoTimeoutMS),
 			"updatedInput":             input.ToolInput,
 		},
 	}
