@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
 )
@@ -309,9 +310,24 @@ func loadFile(path string, cfg *Config) error {
 	return scanner.Err()
 }
 
+// unquoteConfigValue reverses the %q quoting Save writes, so a Windows path
+// such as C:\Users\me keeps single backslashes across save/load cycles
+// instead of doubling on every save. Hand-written values that are not valid
+// Go string literals, or whose escapes would decode to control characters
+// (a literal "C:\new\tools"), fall back to plain quote trimming.
+func unquoteConfigValue(raw string) string {
+	val := strings.TrimSpace(raw)
+	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+		if s, err := strconv.Unquote(val); err == nil && !strings.ContainsFunc(s, unicode.IsControl) {
+			return s
+		}
+	}
+	return strings.Trim(val, `"'`)
+}
+
 func setConfigValue(cfg *Config, key, raw, source string) error {
 	key = strings.TrimPrefix(strings.TrimSpace(key), "LLM_")
-	val := strings.Trim(strings.TrimSpace(raw), `"'`)
+	val := unquoteConfigValue(raw)
 	if cfg.sources == nil {
 		cfg.sources = defaultSources()
 	}
@@ -553,49 +569,76 @@ func (c *Config) Save() error {
 		return fmt.Errorf("SUPPORT_EXPERT: %w", err)
 	}
 	c.SupportExpert = supportMode
-	path := Path()
+	var b strings.Builder
+	fmt.Fprintf(&b, "# ggrun configuration\n")
+	fmt.Fprintf(&b, "# Precedence: CLI flag > env var > this file > built-in default\n")
+	fmt.Fprintf(&b, "LLM_PORT=%d\n", c.Port)
+	fmt.Fprintf(&b, "LLM_CTX_SIZE=%q\n", c.CtxValue())
+	fmt.Fprintf(&b, "LLM_MAX_RESTARTS=%d\n", c.MaxRestarts)
+	fmt.Fprintf(&b, "LLM_KEEP_ALIVE=%d\n", c.KeepAlive)
+	fmt.Fprintf(&b, "LLM_HEALTH_TIMEOUT=%d\n", c.HealthTimeout)
+	fmt.Fprintf(&b, "LLM_MODEL_DIR=%q\n", c.ModelDir)
+	fmt.Fprintf(&b, "LLM_CACHE_DIR=%q\n", c.CacheDir)
+	fmt.Fprintf(&b, "LLM_LOG_DIR=%q\n", c.LogDir)
+	fmt.Fprintf(&b, "LLM_RAM_BUDGET=%q\n", c.RamBudget)
+	fmt.Fprintf(&b, "LLM_RAM_LIMIT_PERCENT=%d\n", c.RAMLimitPercent)
+	fmt.Fprintf(&b, "LLM_VRAM_HEADROOM=%q\n", c.VRAMHeadroom)
+	fmt.Fprintf(&b, "LLM_RAM_HEADROOM=%q\n", c.RAMHeadroom)
+	fmt.Fprintf(&b, "LLM_CGROUP_HEADROOM_MB=%d\n", c.CgroupHeadroomMB)
+	fmt.Fprintf(&b, "LLM_KV_PLACEMENT=%q\n", c.KVPlacement)
+	fmt.Fprintf(&b, "LLM_KV_QUALITY=%q\n", c.KVQuality)
+	fmt.Fprintf(&b, "LLM_SWA_FULL=%v\n", c.SWAFull)
+	fmt.Fprintf(&b, "LLM_ASSUME_YES=%v\n", c.AssumeYes)
+	fmt.Fprintf(&b, "LLM_ALLOW_LIVE_MEMORY_PROBE=%v\n", c.AllowLiveMemoryProbe)
+	fmt.Fprintf(&b, "LLM_BACKEND=%q\n", c.Backend)
+	fmt.Fprintf(&b, "LLAMA_SERVER=%q\n", c.LlamaServer)
+	fmt.Fprintf(&b, "LLM_APP_HOME=%q\n", c.AppHome)
+	fmt.Fprintf(&b, "LLM_TUNE_ROUNDS=%d\n", c.TuneRounds)
+	fmt.Fprintf(&b, "LLM_VISION=%v\n", c.Vision)
+	fmt.Fprintf(&b, "LLM_PARALLEL=%d\n", c.Parallel)
+	fmt.Fprintf(&b, "LLM_HOST=%q\n", c.Host)
+	fmt.Fprintf(&b, "LLM_SPEC=%q\n", c.Spec)
+	fmt.Fprintf(&b, "LLM_SUPPORT_EXPERT=%q\n", c.SupportExpert)
+	fmt.Fprintf(&b, "LLM_SUPPORT_ONLINE=%v\n", c.SupportOnline)
+	fmt.Fprintf(&b, "LLM_SUPPORT_MODEL=%q\n", c.SupportModel)
+	return writeConfigFile(Path(), []byte(b.String()))
+}
+
+// writeConfigFile replaces path atomically: a crash or full disk mid-save
+// leaves the previous config intact instead of a truncated file.
+func writeConfigFile(path string, data []byte) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	f, err := os.Create(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	fmt.Fprintf(f, "# ggrun configuration\n")
-	fmt.Fprintf(f, "# Precedence: CLI flag > env var > this file > built-in default\n")
-	fmt.Fprintf(f, "LLM_PORT=%d\n", c.Port)
-	fmt.Fprintf(f, "LLM_CTX_SIZE=%q\n", c.CtxValue())
-	fmt.Fprintf(f, "LLM_MAX_RESTARTS=%d\n", c.MaxRestarts)
-	fmt.Fprintf(f, "LLM_KEEP_ALIVE=%d\n", c.KeepAlive)
-	fmt.Fprintf(f, "LLM_HEALTH_TIMEOUT=%d\n", c.HealthTimeout)
-	fmt.Fprintf(f, "LLM_MODEL_DIR=%q\n", c.ModelDir)
-	fmt.Fprintf(f, "LLM_CACHE_DIR=%q\n", c.CacheDir)
-	fmt.Fprintf(f, "LLM_LOG_DIR=%q\n", c.LogDir)
-	fmt.Fprintf(f, "LLM_RAM_BUDGET=%q\n", c.RamBudget)
-	fmt.Fprintf(f, "LLM_RAM_LIMIT_PERCENT=%d\n", c.RAMLimitPercent)
-	fmt.Fprintf(f, "LLM_VRAM_HEADROOM=%q\n", c.VRAMHeadroom)
-	fmt.Fprintf(f, "LLM_RAM_HEADROOM=%q\n", c.RAMHeadroom)
-	fmt.Fprintf(f, "LLM_CGROUP_HEADROOM_MB=%d\n", c.CgroupHeadroomMB)
-	fmt.Fprintf(f, "LLM_KV_PLACEMENT=%q\n", c.KVPlacement)
-	fmt.Fprintf(f, "LLM_KV_QUALITY=%q\n", c.KVQuality)
-	fmt.Fprintf(f, "LLM_SWA_FULL=%v\n", c.SWAFull)
-	fmt.Fprintf(f, "LLM_ASSUME_YES=%v\n", c.AssumeYes)
-	fmt.Fprintf(f, "LLM_ALLOW_LIVE_MEMORY_PROBE=%v\n", c.AllowLiveMemoryProbe)
-	fmt.Fprintf(f, "LLM_BACKEND=%q\n", c.Backend)
-	fmt.Fprintf(f, "LLAMA_SERVER=%q\n", c.LlamaServer)
-	fmt.Fprintf(f, "LLM_APP_HOME=%q\n", c.AppHome)
-	fmt.Fprintf(f, "LLM_TUNE_ROUNDS=%d\n", c.TuneRounds)
-	fmt.Fprintf(f, "LLM_VISION=%v\n", c.Vision)
-	fmt.Fprintf(f, "LLM_PARALLEL=%d\n", c.Parallel)
-	fmt.Fprintf(f, "LLM_HOST=%q\n", c.Host)
-	fmt.Fprintf(f, "LLM_SPEC=%q\n", c.Spec)
-	fmt.Fprintf(f, "LLM_SUPPORT_EXPERT=%q\n", c.SupportExpert)
-	fmt.Fprintf(f, "LLM_SUPPORT_ONLINE=%v\n", c.SupportOnline)
-	fmt.Fprintf(f, "LLM_SUPPORT_MODEL=%q\n", c.SupportModel)
-	return nil
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Show prints the current config with source attribution.

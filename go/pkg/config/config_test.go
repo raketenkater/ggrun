@@ -352,3 +352,96 @@ func TestEditRefusesNonInteractiveTerminal(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveLoadKeepsWindowsPathsAcrossRepeatedCycles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	t.Setenv("LLM_CONFIG", path)
+	for _, k := range []string{"LLM_MODEL_DIR", "LLM_CACHE_DIR", "LLM_LOG_DIR", "LLAMA_SERVER"} {
+		t.Setenv(k, "")
+	}
+	cfg := Defaults()
+	cfg.ModelDir = `C:\Users\a b\models`
+	cfg.CacheDir = `\\server\share\ggrun cache`
+	cfg.LogDir = `D:\logs\it's "quoted"`
+	cfg.LlamaServer = `C:\Program Files\ggrun\llama-server.exe`
+	for cycle := 0; cycle < 4; cycle++ {
+		if err := cfg.Save(); err != nil {
+			t.Fatalf("cycle %d save: %v", cycle, err)
+		}
+		loaded, err := Load()
+		if err != nil {
+			t.Fatalf("cycle %d load: %v", cycle, err)
+		}
+		for _, got := range []struct{ name, got, want string }{
+			{"model dir", loaded.ModelDir, cfg.ModelDir},
+			{"cache dir", loaded.CacheDir, cfg.CacheDir},
+			{"log dir", loaded.LogDir, cfg.LogDir},
+			{"llama server", loaded.LlamaServer, cfg.LlamaServer},
+		} {
+			if got.got != got.want {
+				t.Fatalf("cycle %d %s = %q, want %q", cycle, got.name, got.got, got.want)
+			}
+		}
+		cfg = loaded
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("save left extra files behind: %v", entries)
+	}
+}
+
+func TestUnquoteConfigValueKeepsHandWrittenWindowsPaths(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`"C:\\Users\\me\\models"`, `C:\Users\me\models`},
+		{`"C:\Users\me\models"`, `C:\Users\me\models`},
+		{`"C:\new\tools"`, `C:\new\tools`},
+		{`'C:\new\tools'`, `C:\new\tools`},
+		{`C:\Users\me`, `C:\Users\me`},
+		{` "/models" `, `/models`},
+		{`"`, ``},
+	} {
+		if got := unquoteConfigValue(tc.raw); got != tc.want {
+			t.Fatalf("unquoteConfigValue(%s) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestSaveReportsWriteFailureAndKeepsPreviousFile(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_CONFIG", filepath.Join(blocker, "config"))
+	if err := Defaults().Save(); err == nil {
+		t.Fatal("save into a path under a regular file must fail")
+	}
+
+	path := filepath.Join(dir, "config")
+	t.Setenv("LLM_CONFIG", path)
+	if err := os.WriteFile(path, []byte("LLM_PORT=9999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Defaults()
+	cfg.Port = -1
+	if err := cfg.Save(); err == nil {
+		t.Fatal("invalid config must not save")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "LLM_PORT=9999\n" {
+		t.Fatalf("previous config changed: %q, %v", data, err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Defaults().Save(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("save must keep the existing file mode %v: %v %v", before.Mode(), info, err)
+	}
+}
