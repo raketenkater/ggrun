@@ -1009,6 +1009,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		}
 		probeRunner := &benchmark.Runner{
 			BaseURL: baseURL, Model: model.Basename, Timeout: probeTimeout, WorkloadID: scopeKey,
+			IdleSlotWait: launchProbeIdleSlotWait,
 		}
 		probe, probeErr := fx.probePrefill(probeRunner)
 		agentPromptBytes = benchmark.SuggestedAgentPromptBytes(probe, activeSlots, maxUBatch, calibrationAutoAgentWaveTarget)
@@ -1046,6 +1047,10 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		runner := &benchmark.Runner{
 			BaseURL: baseURL, Model: model.Basename, Timeout: requestTimeout, Deadline: deadline,
 			WorkloadID: scopeKey, AgentPromptBytes: agentPromptBytes,
+			// A pilot or earlier sample cancelled by its timeout may still be
+			// prefilling; the wait is outside every request timeout and a
+			// challenger's Deadline still bounds it.
+			IdleSlotWait:    launchProbeIdleSlotWait,
 			SampleResources: calibrationProcessResourceSampler(activeProcess),
 			SampleGPUUtilization: func() []benchmark.GPUUtilization {
 				return sampleLaunchGPUUtilization(utilizationCaps)

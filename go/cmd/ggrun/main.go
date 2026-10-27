@@ -6504,12 +6504,39 @@ func launchHardwareIdentity(caps *detect.Capabilities) string {
 	return controller.ScopeKey(parts...)
 }
 
+// launchProbeIdleSlotWait bounds how long a launch canary or calibration probe
+// waits for a backend still finishing an earlier, client-cancelled request.
+// llama.cpp honors cancel only between ubatches; a GLM-5.3 relaunch stayed busy
+// 22 minutes after a 2-minute pilot timed out (2026-10-26).
+const launchProbeIdleSlotWait = 30 * time.Minute
+
+// cacheCanaryGate maps the functional canary to the profile transition it
+// earns. A speed probe that timed out on a still-healthy backend measured
+// nothing: the profile is degraded (served, never promoted), not rejected.
+// Any other error or a non-functional answer rejects it.
+func cacheCanaryGate(canary *benchmark.CacheCanaryResult, canaryErr error) (controller.State, string) {
+	if canaryErr == nil && canary != nil && canary.TooSlow {
+		return controller.StateDegraded, canary.Reason
+	}
+	if canaryErr != nil || canary == nil || !canary.Functional {
+		reason := "functional canary failed"
+		if canaryErr != nil {
+			reason += ": " + canaryErr.Error()
+		} else if canary != nil && canary.Reason != "" {
+			reason += ": " + canary.Reason
+		}
+		return controller.StateRejected, reason
+	}
+	return controller.StateFunctionalVerified, ""
+}
+
 // verifyAndActivateLaunch is the promotion boundary between "the HTTP listener
 // came up" and "this profile may be reused automatically". A cache regression
 // leaves the server available in a clearly reported degraded state, but it does
 // not overwrite the last-known-good placement.
 func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
 	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, claudeRouterURL string,
+	backend watchedBackend,
 ) error {
 	if req == nil || cfg == nil || model == nil || be == nil || strategy == nil {
 		return errors.New("incomplete launch profile")
@@ -6578,22 +6605,23 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 	}
 	runner := &benchmark.Runner{
-		BaseURL:       backendBaseURL(req),
-		Model:         filepath.Base(model.Path),
-		Timeout:       20 * time.Minute,
-		ContextTokens: canaryContext,
-		PrefillBudget: cacheCanaryPrefillBudget,
+		BaseURL:        backendBaseURL(req),
+		Model:          filepath.Base(model.Path),
+		Timeout:        20 * time.Minute,
+		ContextTokens:  canaryContext,
+		PrefillBudget:  cacheCanaryPrefillBudget,
+		IdleSlotWait:   launchProbeIdleSlotWait,
+		BackendHealthy: backendStillHealthy(backend),
 	}
 	canary, canaryErr := runner.RunCacheCanary()
-	if canaryErr != nil || canary == nil || !canary.Functional {
-		reason := "functional canary failed"
-		if canaryErr != nil {
-			reason += ": " + canaryErr.Error()
-		} else if canary != nil && canary.Reason != "" {
-			reason += ": " + canary.Reason
-		}
+	switch state, reason := cacheCanaryGate(canary, canaryErr); state {
+	case controller.StateRejected:
 		_, _ = store.Transition(scope, profile.ID, controller.StateRejected, reason, "cache-canary")
 		return errors.New(reason)
+	case controller.StateDegraded:
+		_, _ = store.Transition(scope, profile.ID, controller.StateDegraded, reason, "cache-canary")
+		fmt.Fprintf(os.Stderr, "[verify] degraded profile: %s; the backend is serving but placement will not be promoted\n", reason)
+		return nil
 	}
 	if _, err = store.Transition(scope, profile.ID, controller.StateFunctionalVerified,
 		"deterministic completion endpoint responded", "cache-canary"); err != nil {
@@ -7361,7 +7389,7 @@ func cmdLaunch(args []string) {
 	verifyWatch := defaultBackendWatch
 	verifyWatch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeCaps) }
 	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", verifyWatch, func() error {
-		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL, processWatch{p})
 	}); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
@@ -7744,7 +7772,7 @@ func cmdLaunch(args []string) {
 		}
 		failedFree = nil
 		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", verifyWatch, func() error {
-			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
+			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL, processWatch{newP})
 		}); err != nil {
 			_ = newP.Stop()
 			claudeAuto.stop()
