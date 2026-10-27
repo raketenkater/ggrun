@@ -87,6 +87,34 @@ Ampere, Ada; Blackwell through PTX). Older NVIDIA GPUs such as Pascal (P40,
 GTX 1080 Ti) and Volta (V100) get Vulkan by default; `LLM_INSTALL_BACKEND=cuda`
 builds CUDA from source for them instead.
 
+## Files and uninstall
+
+The app home holds everything `setup.sh` and `install.ps1` install: the
+launcher, backends, models, config, cache, logs, and under `.src/` the source
+checkout and the Go toolchain used to build and update ggrun. Outside it,
+`setup.sh` may add a `source ~/ggrun/.env.sh` line to `~/.bashrc` (`~/.zshrc`
+on macOS) and `ggrun` / `llm-server` links in `~/.local/bin`; `install.ps1`
+adds the app home to your user `Path`.
+
+To uninstall, stop any running ggrun, move `models/` out first if you want to
+keep them, then:
+
+```bash
+rm -rf ~/ggrun ~/.local/bin/ggrun ~/.local/bin/llm-server ~/.cache/ggrun
+# and delete the "# ggrun" source line from ~/.bashrc
+```
+
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\ggrun"
+# then remove that folder from Path in "Edit environment variables for your account"
+```
+
+The classic install puts the launcher and helper scripts (`ggrun`,
+`llm-server-*`, `*.py`, `llama-server*`, `backends/`) in `~/.local/bin`,
+config in `~/.config/ggrun`, caches in `~/.cache/ggrun`, and backend sources
+plus a downloaded Go toolchain in `$HOME` (`ik_llama.cpp/`, `llama.cpp/`,
+`.llm-server-go/`). Remove those to uninstall; models live in `~/ai_models`.
+
 ## Classic install to `~/.local/bin`
 
 ```bash
