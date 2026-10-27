@@ -215,11 +215,41 @@ func TestProjectKeyMatchesClaudeCodeLayout(t *testing.T) {
 		"/home/mik/ggrun-project/ggrun":   "-home-mik-ggrun-project-ggrun",
 		"/home/mik/ggrun/.src/llm-server": "-home-mik-ggrun--src-llm-server",
 		"/home/mik/ultra-zen":             "-home-mik-ultra-zen",
+		// Observed on disk: Claude Code recorded cwd /tmp/ggrun-cell-calc-_uy_2_42
+		// under projects/-tmp-ggrun-cell-calc--uy-2-42.
+		"/tmp/ggrun-cell-calc-_uy_2_42": "-tmp-ggrun-cell-calc--uy-2-42",
+		`C:\Users\a b\my_app`:           "C--Users-a-b-my-app",
+		`\\server\share\proj (v2)`:      "--server-share-proj--v2-",
+		"/home/me/café/🚀":               "-home-me-caf----",
 	}
 	for in, want := range cases {
 		if got := ProjectKey(in); got != want {
 			t.Errorf("ProjectKey(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestProjectDirFindsHashedKeyForLongPaths(t *testing.T) {
+	projects := t.TempDir()
+	workDir := "/" + strings.Repeat("deep/", 50) + "repo"
+	key := ProjectKey(workDir)
+	if len(key) <= claudeMaxProjectKey {
+		t.Fatalf("test path too short: %d", len(key))
+	}
+	// Without a transcript directory the plain key is the best guess.
+	if got := projectDir(projects, workDir); got != filepath.Join(projects, key) {
+		t.Fatalf("projectDir with no match = %q", got)
+	}
+	hashed := key[:claudeMaxProjectKey] + "-1x2y3z"
+	if err := os.Mkdir(filepath.Join(projects, hashed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectDir(projects, workDir); got != filepath.Join(projects, hashed) {
+		t.Fatalf("projectDir = %q, want the hashed directory %q", got, hashed)
+	}
+	short := "/home/mik/repo"
+	if got := projectDir(projects, short); got != filepath.Join(projects, "-home-mik-repo") {
+		t.Fatalf("short key must not be prefix-matched: %q", got)
 	}
 }
 

@@ -300,7 +300,7 @@ func (r Record) shapeMismatches(serverArgs []string, currentTokens func(projects
 // paying for a relaunch. It mirrors the client's own path construction:
 // <projects>/<projectKey>/<sessionID>/subagents/workflows/<runID>/journal.jsonl
 func JournalPath(projectsDir, workDir, sessionID, runID string) string {
-	return filepath.Join(projectsDir, ProjectKey(workDir), sessionID,
+	return filepath.Join(projectDir(projectsDir, workDir), sessionID,
 		"subagents", "workflows", runID, "journal.jsonl")
 }
 
@@ -310,7 +310,7 @@ func JournalPath(projectsDir, workDir, sessionID, runID string) string {
 //
 // The returned Workflow is nil when the session ran no workflow.
 func LatestRun(projectsDir, workDir, sessionID string) (*Workflow, int) {
-	sessionDir := filepath.Join(projectsDir, ProjectKey(workDir), sessionID)
+	sessionDir := filepath.Join(projectDir(projectsDir, workDir), sessionID)
 	entries, err := os.ReadDir(filepath.Join(sessionDir, "subagents", "workflows"))
 	if err != nil {
 		return nil, 0
@@ -368,7 +368,7 @@ func (r Record) Recoverable() bool {
 	if wf, _ := LatestRun(defaultProjectsDir(), r.WorkDir, r.SessionID); wf != nil {
 		return true
 	}
-	if _, err := os.Stat(filepath.Join(defaultProjectsDir(), ProjectKey(r.WorkDir), r.SessionID+".jsonl")); err == nil {
+	if _, err := os.Stat(filepath.Join(projectDir(defaultProjectsDir(), r.WorkDir), r.SessionID+".jsonl")); err == nil {
 		return true
 	}
 	return false
@@ -410,13 +410,46 @@ func CachedAgents(journalPath string) int {
 	return count
 }
 
-// ProjectKey mirrors Claude Code's per-project directory naming: the absolute
-// path with separators replaced by dashes.
+// claudeMaxProjectKey is Claude Code's cap on a project key; a longer key is
+// cut to this length and suffixed with "-" and a hash of the original path.
+const claudeMaxProjectKey = 200
+
+// ProjectKey mirrors Claude Code's per-project directory naming: every
+// character of the absolute path that is not an ASCII letter or digit becomes
+// a dash, so C:\Users\me\my_app keys as C--Users-me-my-app. Claude Code
+// replaces UTF-16 code units, so a character outside the BMP becomes two
+// dashes. Keys over claudeMaxProjectKey are returned whole; projectDir finds
+// their hashed directory by prefix.
 func ProjectKey(workDir string) string {
-	key := filepath.ToSlash(workDir)
-	key = strings.ReplaceAll(key, "/", "-")
-	key = strings.ReplaceAll(key, ".", "-")
-	return key
+	var b strings.Builder
+	for _, r := range workDir {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// projectDir returns workDir's Claude Code transcript directory. The hash
+// suffix on an over-long key is not reproduced here; the existing directory
+// with the truncated prefix is used instead, as Claude Code itself does.
+func projectDir(projectsDir, workDir string) string {
+	key := ProjectKey(workDir)
+	if len(key) > claudeMaxProjectKey {
+		prefix := key[:claudeMaxProjectKey] + "-"
+		entries, _ := os.ReadDir(projectsDir)
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+				return filepath.Join(projectsDir, entry.Name())
+			}
+		}
+	}
+	return filepath.Join(projectsDir, key)
 }
 
 // defaultProjectsDir locates Claude Code's transcript root the same way the
@@ -444,7 +477,7 @@ func CurrentContextTokens(projectsDir, workDir, sessionID string) (int, bool) {
 	if projectsDir == "" || sessionID == "" {
 		return 0, false
 	}
-	f, err := os.Open(filepath.Join(projectsDir, ProjectKey(workDir), sessionID+".jsonl"))
+	f, err := os.Open(filepath.Join(projectDir(projectsDir, workDir), sessionID+".jsonl"))
 	if err != nil {
 		return 0, false
 	}
