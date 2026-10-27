@@ -407,3 +407,32 @@ def test_identity_rejects_a_domain_finetune():
     assert not updater.candidate_relevant("bartowski/Ling-3.0-flash-Fin-GGUF", base)
     assert updater.candidate_relevant("AtomicChat/Ling-3.0-flash-GGUF", base)
     assert updater.candidate_relevant("bartowski/Ling-3.0-flash-Fin-GGUF", fin)
+
+
+def test_companion_files_are_not_model_quants(monkeypatch):
+    """unsloth/DeepSeek-V4.1-Flash-1017-GGUF, 2026-10-27: dspark heads of
+    7-8 GB as Q8_0 and BF16 beside UD quant folders; an unnamed one sharing
+    the model's label must not hide the model's quant either."""
+    updater = load_updater()
+    gb = 1024**3
+    siblings = [
+        _sibling("UD-Q2_K_XL/M-UD-Q2_K_XL-00001-of-00002.gguf", gb // 100),
+        _sibling("UD-Q2_K_XL/M-UD-Q2_K_XL-00002-of-00002.gguf", 312 * gb),
+        _sibling("dspark-M-Q8_0.gguf", int(7.43 * gb)),
+        _sibling("dspark/dspark-M-BF16.gguf", int(7.92 * gb)),
+        _sibling("Q8_0/M-Q8_0-00001-of-00002.gguf", 400 * gb),
+        _sibling("Q8_0/M-Q8_0-00002-of-00002.gguf", 400 * gb),
+        _sibling("helper-M-Q8_0.gguf", 8 * gb),
+    ]
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"siblings": siblings})
+    assert {q["name"] for q in updater.fetch_hf_quants("owner/M-GGUF")} == {"UD-Q2_K_XL", "Q8_0"}
+
+
+def test_companion_rule_matches_downloader():
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("dl", root / "tools/download/download_any_gguf.py")
+    downloader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(downloader)
+    updater = load_updater()
+    for name in ("DRAFT_HEAD_NAMES", "BYTES_PER_WEIGHT", "COMPANION_PARAM_RATIO"):
+        assert getattr(updater, name) == getattr(downloader, name), name

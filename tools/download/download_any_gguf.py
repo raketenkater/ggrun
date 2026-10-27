@@ -11,6 +11,7 @@ import subprocess
 import hashlib
 import json
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -55,7 +56,7 @@ QUANT_PATTERN = re.compile(
 # Speculative-decoding heads published beside the weights under the same quant
 # names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). They are companions,
 # not a quantization of the model; ggrun fetches drafts itself.
-DRAFT_HEAD_NAMES = ("mtp", "dflash")
+DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3")
 
 
 def is_calibration_or_adapter(path):
@@ -71,6 +72,33 @@ def is_draft_head_gguf(path):
     parts = path.lower().split("/")
     return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
         part in DRAFT_HEAD_NAMES for part in parts[:-1])
+
+
+# Bytes per parameter by quant label, mirroring bytesPerWeight in
+# go/pkg/recommend/speed.go (first match wins, same order).
+BYTES_PER_WEIGHT = (
+    ("F32", 4.0), ("BF16", 2.0), ("F16", 2.0), ("F8", 1.0), ("Q8", 1.06),
+    ("Q6", 0.82), ("Q5", 0.69), ("MXFP4", 0.53), ("MXP4", 0.53), ("IQ4", 0.51),
+    ("Q4", 0.56), ("I4", 0.56), ("IQ3", 0.41), ("Q3", 0.44), ("IQ2", 0.28),
+    ("Q2", 0.33), ("Q1", 0.20),
+)
+COMPANION_PARAM_RATIO = 15
+
+
+def drop_companion_sized(variants):
+    """Drop (quant, size_bytes, item) artifacts implying under 1/15 of the
+    largest artifact's parameter count: a draft head or projector that escaped
+    the name rules (dspark-X-Q8_0.gguf, 2 GB beside a 300 GB model), never a
+    quant of the model. Unknown sizes are kept. Mirrored in
+    tools/models/update_recommendations.py and dropCompanionSizedQuants in
+    go/pkg/recommend/recommend.go."""
+    def implied(quant, size):
+        q = (quant or "").upper()
+        bpw = next((b for label, b in BYTES_PER_WEIGHT if label in q), 0.55)
+        return size / bpw if size else 0
+    params = [implied(quant, size) for quant, size, _ in variants]
+    most = max(params, default=0)
+    return [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
 
 
 def without_draft_heads(paths):
@@ -248,6 +276,14 @@ def _repo_score(candidate_repo, target_repo, quant_list, vram_mb, ram_mb):
 def resolve_best_gguf_repo(repo, vram_mb=0, ram_mb=0, search_enabled=True):
     if not search_enabled:
         return repo
+    # An exact owner/repo that holds GGUFs is the user's choice; search only
+    # stands in for a bare name or a repo without GGUFs (safetensors source).
+    if "/" in repo:
+        try:
+            if any(f.lower().endswith(".gguf") for f in list_repo_files(repo)):
+                return repo
+        except Exception:
+            pass
     query = _model_query(repo)
     if not query:
         return repo
@@ -298,7 +334,14 @@ def resolve_best_gguf_repo(repo, vram_mb=0, ram_mb=0, search_enabled=True):
         print(f"   Selected repo: {repo} (best match among {len(ranked)} GGUF repos)")
     return best
 
-def model_quant_groups(paths):
+def _known_total(paths, sizes):
+    values = [(sizes or {}).get(p) for p in paths]
+    if values and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values):
+        return sum(values)
+    return None
+
+
+def model_quant_groups(paths, sizes=None):
     groups = {}
     for path in without_draft_heads(paths):
         if not path.lower().endswith(".gguf") or "mmproj" in path.lower():
@@ -309,12 +352,21 @@ def model_quant_groups(paths):
         shard = SHARD_PATTERN.fullmatch(path)
         stem = shard.group(1) if shard else path
         groups.setdefault(quant, {}).setdefault(stem, []).append(path)
-    result = {}
-    for quant, variants in groups.items():
-        complete = [files for files in variants.values() if complete_shards(files)]
-        if len(complete) == 1:
-            result[quant] = complete[0]
-    return result
+    # Drop companion-sized artifacts before the ambiguity check, so a draft
+    # head sharing a label with the model cannot hide the model's own quant.
+    variants = drop_companion_sized([
+        (quant, _known_total(files, sizes), files)
+        for quant, stems in groups.items()
+        for files in stems.values() if complete_shards(files)])
+    complete = {}
+    for quant, _, files in variants:
+        complete.setdefault(quant, []).append(files)
+    return {quant: found[0] for quant, found in complete.items() if len(found) == 1}
+
+
+# Sizes from the last listing, so the file selection applies the same
+# companion-size rule as the quant menu it was chosen from.
+_FILE_SIZES = {}
 
 
 def list_available_quantizations(repo):
@@ -332,8 +384,9 @@ def list_available_quantizations(repo):
             elif lfs is not None:
                 size = getattr(lfs, "size", size)
             sizes[sibling.rfilename] = size
+        _FILE_SIZES[repo] = sizes
         quant_sizes = {}
-        for quant, paths in model_quant_groups(list(sizes)).items():
+        for quant, paths in model_quant_groups(list(sizes), sizes).items():
             values = [sizes[p] for p in paths]
             if all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values):
                 quant_sizes[quant] = sum(values)
@@ -375,7 +428,7 @@ def get_model_files(repo, selected_quantization):
 
         files = without_draft_heads(list_repo_files(repo))
 
-        groups = model_quant_groups(files)
+        groups = model_quant_groups(files, _FILE_SIZES.get(repo))
         if selected_quantization:
             # Prefer the exact dynamic label before its supported bare alias.
             for quant in quant_name_aliases(selected_quantization):
@@ -563,29 +616,80 @@ def verify_file(path, identity):
         raise ValueError(f"{algorithm} mismatch: downloaded file failed verification")
 
 
+def download_root(repo, files, output_dir):
+    """Quant subfolders (UD-IQ3_XXS/...) carry no model name, so two repos'
+    shards would share <dir>/UD-IQ3_XXS/. Keep such repos under their name."""
+    if any("/" in f for f in files):
+        return output_dir / _repo_name(repo)
+    return output_dir
+
+
+def missing_bytes(root, manifest, legacy_root=None):
+    """Bytes still to transfer. A full-size target counts as present, and a
+    resumable partial counts for what it holds: huggingface_hub keeps it as
+    *.<etag>.incomplete under <root>/.cache/huggingface/download, and an LFS
+    file's etag is its sha256."""
+    partials = root / ".cache" / "huggingface" / "download"
+    needed = 0
+    for name, (size, algorithm, digest) in manifest.items():
+        local = root / name
+        have = local.stat().st_size if local.is_file() else 0
+        legacy = legacy_root / name if legacy_root else None
+        if legacy and legacy.is_file() and legacy.stat().st_size == size:
+            have = size
+        if algorithm == "sha256":
+            for partial in (partials / name).parent.glob(f"*.{digest}.incomplete"):
+                have = max(have, partial.stat().st_size)
+        needed += max(0, size - have)
+    return needed
+
+
+def check_free_space(root, manifest, legacy_root=None):
+    needed = missing_bytes(root, manifest, legacy_root)
+    free = shutil.disk_usage(root).free
+    if needed > free:
+        raise ValueError(
+            f"not enough free disk space in {root}: need {needed / 1024**3:.1f} GiB more, "
+            f"{free / 1024**3:.1f} GiB free. Free up space or choose another "
+            "destination with --dir <path>.")
+
+
 def download_files(repo, files_to_download, output_dir):
     """Download model files with progress tracking"""
+    root = download_root(repo, files_to_download, output_dir)
     print(f"\nDownloading from: {repo}")
     print(f"   Files to download: {len(files_to_download)}")
-    print(f"   Output: {output_dir}\n")
+    print(f"   Output: {root}\n")
 
     try:
         # Create output directory
-        output_dir.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
 
         print("Downloading files...")
         downloaded = []
         failed = []
         revision, manifest = file_manifest(repo, files_to_download)
         print(f"   Pinned revision: {revision}", flush=True)
+        legacy = output_dir if root != output_dir else None
+        check_free_space(root, manifest, legacy)
 
         for filename in files_to_download:
             try:
                 print(f"\n   Downloading: {filename}")
-                local = output_dir / filename
+                local = root / filename
                 # Verify existing full-size files too: cached download metadata
                 # is not proof that resumed bytes on disk are correct.
                 identity = manifest[filename]
+                # Earlier versions put quant subfolders directly in <dir>;
+                # a verified copy there is reused rather than fetched again.
+                if legacy and not local.is_file() and (legacy / filename).is_file():
+                    try:
+                        verify_file(legacy / filename, identity)
+                        downloaded.append((filename, str(legacy / filename)))
+                        print(f"   ok: {filename} (existing file verified)", flush=True)
+                        continue
+                    except ValueError:
+                        pass
                 if local.is_file():
                     try:
                         verify_file(local, identity)
@@ -598,7 +702,7 @@ def download_files(repo, files_to_download, output_dir):
                         # retain .incomplete data so retries keep their progress.
                         print("   Existing file does not match the requested revision; replacing it.", flush=True)
                         local.unlink()
-                filepath = transfer_file(repo, filename, output_dir, revision)
+                filepath = transfer_file(repo, filename, root, revision)
                 verify_file(filepath, identity)
 
                 size_gb = Path(filepath).stat().st_size / (1024**3)
@@ -659,27 +763,33 @@ def list_files_in_directory(directory, extension=".gguf"):
     return sorted(directory.glob(f"*{extension}"))
 
 
-def print_usage_instructions(repo, output_dir):
+def print_usage_instructions(repo, output_dir, downloaded=()):
     """Print how to use the downloaded model"""
     print("\n" + "=" * 70)
     print("How to use this model:")
     print("=" * 70)
 
-    # Get the model files
-    gguf_files = list_files_in_directory(output_dir, ".gguf")
+    # The files just fetched, which may sit in a quant subfolder.
+    fetched = sorted(Path(p) for _, p in downloaded if str(p).lower().endswith(".gguf"))
+    gguf_files = fetched or list_files_in_directory(output_dir, ".gguf")
 
     if not gguf_files:
         print("\nNo GGUF files found in download directory.")
         return
 
-    print(f"\nModel directory: {output_dir}")
+    print(f"\nModel directory: {gguf_files[0].parent}")
     print("\nAvailable model files:")
     for f in gguf_files:
         size_gb = f.stat().st_size / (1024**3)
         print(f"   - {f.name} ({size_gb:.2f} GB)")
 
     # Check for mmproj files
-    mmproj_files = [f for f in output_dir.glob("mmproj*")]
+    mmproj_files = [f for f in gguf_files if "mmproj" in f.name.lower()]
+    if not fetched:
+        mmproj_files = [f for f in output_dir.glob("mmproj*")]
+    weights = [f for f in gguf_files if f not in mmproj_files]
+    if weights:
+        print(f"\nRun it with ggrun:\n    ggrun \"{weights[0]}\"")
 
     if mmproj_files:
         print("\nAvailable mmproj (vision) files:")
@@ -789,7 +899,18 @@ def get_args():
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="accept the final download confirmation (for detached/resumable jobs)",
+        help="take the recommended quant and skip the confirmation (unattended jobs)",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="never prompt; fail with the choices instead (ggrun sets this when stdin is not a terminal)",
+    )
+    parser.add_argument(
+        "--active-params-b",
+        type=float,
+        default=0,
+        help="active parameters (billions) of a MoE whose repo name does not say",
     )
     parser.add_argument(
         "--no-repo-search",
@@ -835,12 +956,13 @@ def _estimate_overhead_mb(model_size_mb, is_moe, active_b):
     return max(2048, min(overhead, 12288))
 
 
-def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
+def recommend_quant(quant_list, vram_mb, ram_mb, repo="", active_b=0):
     """Recommend the best quantization based on actual file sizes and hardware.
     quant_list: list of (quant_name, size_bytes) sorted by size ascending.
+    active_b: catalog active params for a MoE the repo name does not reveal.
     Returns (quant_name, reason) or (None, None) if nothing fits."""
     total_mb = vram_mb + ram_mb
-    active_b = _detect_moe_active_params(repo)
+    active_b = active_b or _detect_moe_active_params(repo)
     is_moe = active_b > 0
 
     print(
@@ -895,8 +1017,19 @@ def recommend_quant(quant_list, vram_mb, ram_mb, repo=""):
     return quant_name, f"Smallest available ({size_mb / 1024:.1f}GB); may not fit, consider a smaller model"
 
 
-def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant=""):
-    """Let user select quantization"""
+def quant_choice_error(quant_list, reason, suggest_yes=True):
+    """Fail where a prompt would have to be answered with nobody there."""
+    lines = [f"\nError: {reason}", "   Choose one with --quant <name>"
+             + (" (or --yes to take the recommendation):" if suggest_yes else ":")]
+    lines += [f"     --quant {q}   ({size / 1024**3:.1f} GB)" for q, size in quant_list]
+    print("\n".join(lines), file=sys.stderr, flush=True)
+    raise SystemExit(2)
+
+
+def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant="",
+                        assume_yes=False, interactive=True, active_b=0):
+    """Let user select quantization. assume_yes takes the recommendation; a
+    non-interactive run without it fails with the choices instead of prompting."""
     print("\nScanning repository for available quantizations...")
 
     try:
@@ -928,15 +1061,25 @@ def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant=""):
             if normalize_quant_name(q) in requested_aliases:
                 print(f"\nUsing recommended quantization: {q} (matched {requested_quant})")
                 return q
+        if assume_yes or not interactive:
+            quant_choice_error(quant_list, f"quantization {requested_quant} is not in {repo}.", False)
         print(f"\nRequested quantization {requested_quant} was not found; falling back to local selection.")
 
     # Get Recommendation based on actual file sizes
     rec_q = ""
     if vram_mb > 0 or ram_mb > 0:
-        rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb, repo)
+        rec_q, rec_reason = recommend_quant(quant_list, vram_mb, ram_mb, repo, active_b)
         if rec_q:
             print(f"\nRecommended: {rec_q}")
             print(f"   {rec_reason}")
+
+    if assume_yes:
+        if not rec_q:
+            quant_choice_error(quant_list, "no hardware budget to recommend a quantization.", False)
+        print(f"\nUsing recommended quantization: {rec_q} (--yes)")
+        return rec_q
+    if not interactive:
+        quant_choice_error(quant_list, "no terminal to choose a quantization.")
 
     print(f"\nAvailable quantizations:")
     for i, (q, size_bytes) in enumerate(quant_list, 1):
@@ -965,6 +1108,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant=""):
 
 def main():
     args = get_args()
+    interactive = not args.non_interactive and bool(sys.stdin) and sys.stdin.isatty()
     try:
         clear_screen()
         print_header()
@@ -974,7 +1118,8 @@ def main():
         repo = resolve_best_gguf_repo(repo, args.vram, args.ram, not args.no_repo_search)
 
         # Select files to download
-        selected_quantization = select_quantization(repo, args.vram, args.ram, args.quant)
+        selected_quantization = select_quantization(
+            repo, args.vram, args.ram, args.quant, args.yes, interactive, args.active_params_b)
         files_to_download = get_model_files(repo, selected_quantization)
 
         if not files_to_download:
@@ -989,7 +1134,6 @@ def main():
 
         # Get download directory
         output_dir = get_download_directory(args.dir)
-        # Save directly to output_dir without subfolders
 
         # Confirm
         print("\n" + "=" * 70)
@@ -1000,12 +1144,14 @@ def main():
             print(f"Quantization: {selected_quantization}")
         else:
             print("Quantization: All GGUF files")
-        print(f"Output directory: {output_dir}")
+        print(f"Output directory: {download_root(repo, files_to_download, output_dir)}")
         print("=" * 70)
 
-        confirm = "y" if args.yes else input("\nStart download? (y/n): ").strip().lower()
-        if args.yes:
-            print("\nStart download? yes (--yes)")
+        # Nobody can answer without a terminal. Quant selection has already
+        # failed unless the quant was explicit (or the repo offers one set).
+        confirm = "y" if args.yes or not interactive else input("\nStart download? (y/n): ").strip().lower()
+        if args.yes or not interactive:
+            print("\nStart download? yes (" + ("--yes" if args.yes else "no terminal") + ")")
         if confirm != "y":
             print("Download cancelled.")
             sys.exit(130)
@@ -1024,7 +1170,7 @@ def main():
             sys.exit(1)
 
         update_model_index(repo, selected_quantization, output_dir, downloaded, args.cache_dir)
-        print_usage_instructions(repo, output_dir)
+        print_usage_instructions(repo, output_dir, downloaded)
         print("\nDownload complete.")
 
     except KeyboardInterrupt:

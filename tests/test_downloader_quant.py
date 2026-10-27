@@ -99,6 +99,8 @@ def test_main_exits_nonzero_and_skips_index_on_partial_download(monkeypatch, tmp
         quant="",
         no_repo_search=True,
         yes=False,
+        non_interactive=False,
+        active_params_b=0,
     ))
     monkeypatch.setattr(downloader, "clear_screen", lambda: None)
     monkeypatch.setattr(downloader, "print_header", lambda: None)
@@ -136,6 +138,8 @@ def test_main_exits_nonzero_when_no_files_downloaded(monkeypatch, tmp_path):
         quant="",
         no_repo_search=True,
         yes=False,
+        non_interactive=False,
+        active_params_b=0,
     ))
     monkeypatch.setattr(downloader, "clear_screen", lambda: None)
     monkeypatch.setattr(downloader, "print_header", lambda: None)
@@ -298,3 +302,103 @@ def test_bare_quant_request_still_accepts_dynamic_files(monkeypatch):
     names.append("Model-Q4_K_XL.gguf")
     assert downloader.get_model_files("owner/model", "Q4_K_XL") == names[1:]
     assert downloader.get_model_files("owner/model", "UD-Q4_K_XL") == names[:1]
+
+
+# unsloth/MiniMax-M3.1-Flash-GGUF, 2026-10-27: a 1.9 GB dspark draft head, an
+# imatrix and projectors beside UD quant subfolders. The head was offered (and
+# recommended) as "Q8_0".
+MINIMAX_SIBLINGS = [
+    ("UD-IQ1_M/MiniMax-M3.1-Flash-UD-IQ1_M-00001-of-00002.gguf", gib(0.01)),
+    ("UD-IQ1_M/MiniMax-M3.1-Flash-UD-IQ1_M-00002-of-00002.gguf", gib(120.5)),
+    ("UD-Q4_K_XL/MiniMax-M3.1-Flash-UD-Q4_K_XL-00001-of-00002.gguf", gib(0.01)),
+    ("UD-Q4_K_XL/MiniMax-M3.1-Flash-UD-Q4_K_XL-00002-of-00002.gguf", gib(277.0)),
+    ("dspark-MiniMax-M3.1-Flash-Q8_0.gguf", gib(1.95)),
+    ("imatrix_unsloth.gguf", gib(0.43)),
+    ("mmproj-BF16.gguf", gib(1.62)),
+    ("mmproj-F32.gguf", gib(3.22)),
+]
+
+
+def test_companion_files_are_never_offered_or_recommended(monkeypatch):
+    downloader = load_downloader()
+
+    class FakeHfApi:
+        def model_info(self, repo, files_metadata=True):
+            return _Info([_Sibling(n, s) for n, s in MINIMAX_SIBLINGS])
+
+    monkeypatch.setattr(downloader, "HfApi", FakeHfApi)
+    quants = downloader.list_available_quantizations("unsloth/MiniMax-M3.1-Flash-GGUF")
+    assert [q for q, _ in quants] == ["UD-IQ1_M", "UD-Q4_K_XL"]
+    quant, _ = downloader.recommend_quant(quants, vram_mb=24 * 1024, ram_mb=8 * 1024)
+    assert quant == "UD-IQ1_M"  # smallest real quant, never the 1.9 GB head
+
+
+def test_unnamed_companion_cannot_hide_or_replace_the_model_quant(monkeypatch):
+    downloader = load_downloader()
+    names = {"BF16/Model-BF16-00001-of-00002.gguf": gib(300), "BF16/Model-BF16-00002-of-00002.gguf": gib(300),
+             "helper-Model-BF16.gguf": gib(8), "Model-Q8_0.gguf": gib(2), "Model-Q4_K_M.gguf": gib(170)}
+
+    class FakeHfApi:
+        def model_info(self, repo, files_metadata=True):
+            return _Info([_Sibling(n, s) for n, s in names.items()])
+
+    monkeypatch.setattr(downloader, "HfApi", FakeHfApi)
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: list(names))
+    assert dict(downloader.list_available_quantizations("owner/repo")) == {
+        "Q4_K_M": gib(170), "BF16": gib(600)}
+    assert downloader.get_model_files("owner/repo", "BF16") == list(names)[:2]
+    assert downloader.get_model_files("owner/repo", "Q8_0") == []
+    # A plain ladder of one model keeps every quant, TQ1_0 included.
+    ladder = [("Model-TQ1_0.gguf", gib(8)), ("Model-BF16.gguf", gib(66)), ("Model-F32.gguf", gib(132))]
+    kept = downloader.drop_companion_sized([(downloader.artifact_quant(n), s, n) for n, s in ladder])
+    assert len(kept) == 3
+
+
+def test_exact_repo_with_ggufs_skips_the_search(monkeypatch):
+    downloader = load_downloader()
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: ["Model-Q4_K_M.gguf"])
+
+    class NoSearch:
+        def list_models(self, **kwargs):
+            pytest.fail("an exact repo must not be searched")
+
+    monkeypatch.setattr(downloader, "HfApi", NoSearch)
+    repo = "unsloth/MiniMax-M3.1-Flash-GGUF"
+    assert downloader.resolve_best_gguf_repo(repo) == repo
+
+
+def _no_prompt(monkeypatch, downloader):
+    monkeypatch.setattr(downloader, "list_repo_files", lambda repo: ["model-Q4_K_M.gguf"])
+    monkeypatch.setattr(downloader, "list_available_quantizations", lambda repo: [
+        ("Q2_K", gib(10.0)), ("Q4_K_M", gib(20.0))])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": pytest.fail("must not prompt"))
+
+
+def test_yes_takes_the_recommendation_without_prompting(monkeypatch):
+    downloader = load_downloader()
+    _no_prompt(monkeypatch, downloader)
+    assert downloader.select_quantization(
+        "owner/model", 0, 64 * 1024, assume_yes=True, interactive=False) == "Q4_K_M"
+
+
+def test_non_interactive_without_yes_lists_quant_choices(monkeypatch, capsys):
+    downloader = load_downloader()
+    _no_prompt(monkeypatch, downloader)
+    with pytest.raises(SystemExit) as exc:
+        downloader.select_quantization("owner/model", 0, 64 * 1024, interactive=False)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--quant Q2_K" in err and "--quant Q4_K_M" in err and "--yes" in err
+    # An explicit quant that does not exist is not silently replaced.
+    with pytest.raises(SystemExit):
+        downloader.select_quantization("owner/model", 0, 64 * 1024, "Q8_0", assume_yes=True, interactive=False)
+    assert downloader.select_quantization("owner/model", 0, 0, "Q2_K", interactive=False) == "Q2_K"
+
+
+def test_catalog_active_params_make_an_unnamed_moe_use_the_moe_estimate():
+    downloader = load_downloader()
+    quants = [("Q2_K", gib(50)), ("Q4_K_M", gib(100))]
+    # Dense overhead (12 GB cap) misses the Q4 by 2 GB; a 3B-active MoE's (8 GB) fits.
+    vram, ram = 24 * 1024, 112400 - 24 * 1024
+    assert downloader.recommend_quant(quants, vram, ram, "owner/Model-GGUF")[0] == "Q2_K"
+    assert downloader.recommend_quant(quants, vram, ram, "owner/Model-GGUF", 3)[0] == "Q4_K_M"
