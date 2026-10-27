@@ -127,13 +127,38 @@ def test_quant_subfolders_land_under_the_repo_name(monkeypatch, tmp_path, capsys
     assert module.download_files("unsloth/M-GGUF", [name], tmp_path) == ([(name, target)], [])
     module.print_usage_instructions("unsloth/M-GGUF", tmp_path, [(name, target)])
     assert f'ggrun "{target}"' in capsys.readouterr().out
-    # A verified copy where older versions put it is reused, not fetched again.
-    target.unlink()
-    legacy = tmp_path / name
-    legacy.parent.mkdir()
-    legacy.write_bytes(b"good")
-    monkeypatch.setattr(module, "transfer_file", lambda *a, **k: pytest.fail("no refetch"))
-    assert module.download_files("unsloth/M-GGUF", [name], tmp_path) == ([(name, str(legacy))], [])
+
+
+def test_set_started_by_an_older_version_finishes_in_one_directory(monkeypatch, tmp_path):
+    module = downloader()
+    files = [f"UD-IQ3_XXS/M-0000{i}-of-00003.gguf" for i in (1, 2, 3)]
+    monkeypatch.setattr(module, "HfApi", _api([_lfs(f, 4) for f in files]))
+    # Older versions put the subfolder directly in <dir>: two shards finished.
+    for name in files[:2]:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_bytes(b"good")
+    roots = []
+
+    def transfer(repo, filename, root, revision, force=False):
+        roots.append(root)
+        path = root / filename
+        path.write_bytes(b"good")
+        return path
+
+    monkeypatch.setattr(module, "transfer_file", transfer)
+    downloaded, failed = module.download_files("unsloth/M-GGUF", files, tmp_path)
+    assert failed == [] and roots == [tmp_path]
+    assert {Path(path).parent for _, path in downloaded} == {tmp_path / "UD-IQ3_XXS"}
+
+
+def test_older_partial_keeps_the_set_where_it_resumes(tmp_path):
+    module = downloader()
+    files = ["UD-IQ3_XXS/M-00001-of-00002.gguf", "UD-IQ3_XXS/M-00002-of-00002.gguf"]
+    assert module.download_root("unsloth/M-GGUF", files, tmp_path) == tmp_path / "M-GGUF"
+    partials = tmp_path / ".cache" / "huggingface" / "download" / "UD-IQ3_XXS"
+    partials.mkdir(parents=True)
+    (partials / f"h4sh.{'ab' * 32}.incomplete").write_bytes(b"x" * 25)
+    assert module.download_root("unsloth/M-GGUF", files, tmp_path) == tmp_path
 
 
 @pytest.mark.parametrize("files, expected", [([], 1), (["model.gguf"], 130)])

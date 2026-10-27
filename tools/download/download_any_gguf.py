@@ -618,13 +618,22 @@ def verify_file(path, identity):
 
 def download_root(repo, files, output_dir):
     """Quant subfolders (UD-IQ3_XXS/...) carry no model name, so two repos'
-    shards would share <dir>/UD-IQ3_XXS/. Keep such repos under their name."""
-    if any("/" in f for f in files):
-        return output_dir / _repo_name(repo)
-    return output_dir
+    shards would share <dir>/UD-IQ3_XXS/. Keep such repos under their name.
+
+    Earlier versions put the subfolder directly in <dir>. A set already
+    started there (a finished shard, or a huggingface_hub partial) stays there
+    as a whole: llama.cpp finds shards only beside the first one, and the
+    partials resume only under their original root."""
+    if not any("/" in f for f in files):
+        return output_dir
+    partials = output_dir / ".cache" / "huggingface" / "download"
+    for name in files:
+        if (output_dir / name).is_file() or any((partials / name).parent.glob("*.incomplete")):
+            return output_dir
+    return output_dir / _repo_name(repo)
 
 
-def missing_bytes(root, manifest, legacy_root=None):
+def missing_bytes(root, manifest):
     """Bytes still to transfer. A full-size target counts as present, and a
     resumable partial counts for what it holds: huggingface_hub keeps it as
     *.<etag>.incomplete under <root>/.cache/huggingface/download, and an LFS
@@ -634,9 +643,6 @@ def missing_bytes(root, manifest, legacy_root=None):
     for name, (size, algorithm, digest) in manifest.items():
         local = root / name
         have = local.stat().st_size if local.is_file() else 0
-        legacy = legacy_root / name if legacy_root else None
-        if legacy and legacy.is_file() and legacy.stat().st_size == size:
-            have = size
         if algorithm == "sha256":
             for partial in (partials / name).parent.glob(f"*.{digest}.incomplete"):
                 have = max(have, partial.stat().st_size)
@@ -644,8 +650,8 @@ def missing_bytes(root, manifest, legacy_root=None):
     return needed
 
 
-def check_free_space(root, manifest, legacy_root=None):
-    needed = missing_bytes(root, manifest, legacy_root)
+def check_free_space(root, manifest):
+    needed = missing_bytes(root, manifest)
     free = shutil.disk_usage(root).free
     if needed > free:
         raise ValueError(
@@ -670,8 +676,7 @@ def download_files(repo, files_to_download, output_dir):
         failed = []
         revision, manifest = file_manifest(repo, files_to_download)
         print(f"   Pinned revision: {revision}", flush=True)
-        legacy = output_dir if root != output_dir else None
-        check_free_space(root, manifest, legacy)
+        check_free_space(root, manifest)
 
         for filename in files_to_download:
             try:
@@ -680,16 +685,6 @@ def download_files(repo, files_to_download, output_dir):
                 # Verify existing full-size files too: cached download metadata
                 # is not proof that resumed bytes on disk are correct.
                 identity = manifest[filename]
-                # Earlier versions put quant subfolders directly in <dir>;
-                # a verified copy there is reused rather than fetched again.
-                if legacy and not local.is_file() and (legacy / filename).is_file():
-                    try:
-                        verify_file(legacy / filename, identity)
-                        downloaded.append((filename, str(legacy / filename)))
-                        print(f"   ok: {filename} (existing file verified)", flush=True)
-                        continue
-                    except ValueError:
-                        pass
                 if local.is_file():
                     try:
                         verify_file(local, identity)
