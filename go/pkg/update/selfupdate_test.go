@@ -217,3 +217,35 @@ func TestRunInstallerOverRunningBinary(t *testing.T) {
 		})
 	}
 }
+
+// A server still running from an earlier update's .old keeps that file locked
+// on Windows; the next update must still move the running binary aside, and the
+// next start removes every moved-aside binary it can.
+func TestMoveRunningBinaryAsideAroundLockedOld(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "ggrun.exe")
+	if err := os.WriteFile(exe, []byte("running"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A non-empty directory stands in for a file os.Remove cannot delete.
+	if err := os.MkdirAll(filepath.Join(exe+".old", "locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old, err := moveRunningBinaryAside(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old == exe+".old" || !strings.HasSuffix(old, ".old") {
+		t.Fatalf("moved aside to %q, want a unique .old name", old)
+	}
+	if data, err := os.ReadFile(old); err != nil || string(data) != "running" {
+		t.Fatalf("moved-aside binary = %q, %v", data, err)
+	}
+	if _, err := os.Stat(exe); !os.IsNotExist(err) {
+		t.Fatalf("running binary still at %s: %v", exe, err)
+	}
+	removeReplacedBinaries(exe)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left %s: %v", old, err)
+	}
+}

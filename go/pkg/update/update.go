@@ -844,12 +844,12 @@ func runningBinaryPath() string {
 }
 
 // moveRunningBinaryAside renames exe to exe+".old" so an installer can write a
-// new binary at exe. A stale .old from an earlier update is no longer running
-// and is removed first.
+// new binary at exe. A stale .old from an earlier update is removed first; one
+// that a still-running server keeps locked gets a unique name instead.
 func moveRunningBinaryAside(exe string) (string, error) {
 	old := exe + ".old"
 	if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
-		return "", err
+		old = fmt.Sprintf("%s.%d.old", exe, time.Now().UnixNano())
 	}
 	if err := os.Rename(exe, old); err != nil {
 		return "", err
@@ -866,11 +866,18 @@ func restoreRunningBinary(exe, old string) {
 	}
 }
 
-// RemoveReplacedBinary deletes the binary a Windows update moved aside. It
-// fails harmlessly while that old process is still running.
+// RemoveReplacedBinary deletes the binaries a Windows update moved aside. It
+// fails harmlessly while an old process is still running.
 func RemoveReplacedBinary() {
 	if exe := runningBinaryPath(); exe != "" {
-		_ = os.Remove(exe + ".old")
+		removeReplacedBinaries(exe)
+	}
+}
+
+func removeReplacedBinaries(exe string) {
+	stale, _ := filepath.Glob(exe + ".*old")
+	for _, path := range stale {
+		_ = os.Remove(path)
 	}
 }
 
