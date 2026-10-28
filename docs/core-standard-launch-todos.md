@@ -4217,7 +4217,24 @@ recommender catalog (2026-10-19) lists neither.
   the largest quant that fits VRAM without reserving context. Claude Code's
   first request alone is ~13k tokens. The quant pick should reserve a useful
   agent context, or say what it gives up.
-- [ ] MiniMax-M3.1-Flash (`minimax-m3` arch, unsloth UD-IQ3_XXS, 149 GiB):
+- [x] MiniMax-M3.1-Flash on backend `minimax-m31` (`ggrun backend add` of
+  llama.cpp PR #31192, danielhanchen `minimax-m31-upstream` @6b95a99,
+  unmerged; launched with `--backend minimax-m31`), PATH ggrun
+  v3.2.12-70-g4925fd7, 2026-10-28: ready 2,112 s (1 load); Claude Code `calc`
+  1,961 s, `textstats` 2,223 s, `inventory` 2,621 s, all correct with
+  unchanged oracle tests; stream first token 2.8 s; cancel/reconnect ok;
+  stop 27 s. Backend timings: prefill median 9.7 tok/s, decode 2.4 tok/s.
+- [ ] That run did not realize its plan: ggrun planned ctx 361,472 / 4 slots,
+  KV q8_0 on GPU (CUDA1 14.6 GB) and `--tensor-split 0.29,0.65,0.06`, but the
+  backend's MSA KV cache allocated 18.9 GB (+4.7 GB indexer) on the CPU
+  (76,032 cells) and CUDA1 (3090 Ti) received no model buffer (peak 550 MiB).
+  Admission accepted it. After load, compare per-device buffers with the plan
+  and re-plan or warn when they diverge; route MSA models' KV accordingly.
+- [ ] `ggrun backend update minimax-m3` cannot fix a too-old fork for
+  M3.1 (that branch is unchanged since 2026-07-26) yet ggrun suggests it.
+  When the update finds no newer commit, point to an open upstream PR for
+  the architecture (here #31192) instead.
+- [ ] (history) MiniMax-M3.1-Flash (`minimax-m3` arch, unsloth UD-IQ3_XXS, 149 GiB):
   routed to the installed `minimax-m3` fork (danielhanchen/llama.cpp
   66f43aa), which fails: "wrong number of tensors; expected 1188, got 948".
   ggrun reports it clearly and suggests `ggrun backend update`. The model
