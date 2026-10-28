@@ -366,11 +366,9 @@ jobs:
 
   release-install-macos-smoke:
     runs-on: macos-14
-    # Legacy packaging smoke stays informational while small-host default
-    # admission is unresolved (see remote-claude validation). Native macOS
-    # remote contracts run separately. A green contract is not macOS serving
-    # qualification; keep this default-launch failure visible until resolved.
-    continue-on-error: true
+    # macOS is a headless-serving target. Require the packaged install/default
+    # CPU-launch smoke alongside native remote contracts. This synthetic backend
+    # does not establish real Metal inference support.
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6

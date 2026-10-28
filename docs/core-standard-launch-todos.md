@@ -4111,6 +4111,8 @@ on Linux. Ordinary runtime, checkpoints, explicit RAM budget/percent/headroom
 and the placement fit gate remain. Linux containment and already-reserved
 recovery semantics are unchanged. Native Mac/Windows tests check a small cold
 CPU plan and refusal under explicit insufficient budgets/headroom. The uncached
-core gate passed; native CI and unchanged macOS packaged launch are pending.
+core gate passed; native macOS contracts and the unchanged macOS packaged
+launch passed on revision `3617440`. Native Windows and full E2E jobs remain
+tracked in the feature PR.
 This is admission correctness, not a performance promotion or Metal inference
 receipt. The existing Linux live configuration is unaffected.

@@ -209,3 +209,15 @@ Linux-only cgroup growth reserve is not charged when the containment gate is
 absent. Runtime, checkpoint and explicit resource limits remain. Local uncached
 core gate passed; native small-host regression and original macOS packaging CI
 must pass before this is described as resolved.
+
+October 28 native CI result for `3617440`: the original macOS package/install
+and default synthetic CPU launch now passes with its original hardware and
+launch arguments. Native macOS remote contracts, including the small-host
+runtime/budget regressions, also pass. This closes the observed default
+admission failure; real Metal inference remains a distinct acceptance case.
+
+Linux laptop-test readiness was restored independently using the previously
+qualified binary as a transient user service. Authenticated HTTPS doctor passed
+at 144384 tokens/slot with a separate worker; a real Messages request returned
+READY in 3.483 seconds. The user was notified that the first laptop test can
+begin. Its actual remote-device receipt remains pending.

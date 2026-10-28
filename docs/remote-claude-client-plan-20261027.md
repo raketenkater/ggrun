@@ -20,12 +20,12 @@ Linux serving has real GPU acceptance. Client native tests and released alpha
 installation passed on Linux/Windows; native macOS ARM64 client, shared-policy, gateway and published alpha
 installer checks have now passed in CI. Cross-built macOS artifacts alone are insufficient.
 
-macOS default serving is not qualified yet: its 8 GiB packaging runner reports
+The prior macOS small-host failure was: its 8 GiB packaging runner reports
 5375 MiB available while the CPU plan charges 6720 MiB of runtime and growth
-reserve for a 1 MiB synthetic model. Keep this refusal visible; do not relax
-memory guards or enlarge fake hardware to label the default flow passing. A
-separate protected-core review is required to resolve this small-host admission
-policy. The updated feature scope makes this a real remaining server gate.
+reserve for a 1 MiB synthetic model. Revision `3617440` corrects the request-boundary mismatch: Linux cgroup
+headroom is charged only where its containment gate exists. The uncached core
+gate, native macOS contract and original packaged default launch passed without
+changing the fixture or its guards. Real Metal inference is still unqualified.
 
 ## Fastest path to a useful product — decisions fixed before implementation
 
