@@ -123,11 +123,12 @@ func validateRemoteClaude(req *launchRequest) error {
 }
 
 type remoteClaudeService struct {
-	listener net.Listener
-	server   *http.Server
-	handler  atomic.Value
-	options  remoteClaudeOptions
-	key      string
+	listener   net.Listener
+	server     *http.Server
+	handler    atomic.Value
+	options    remoteClaudeOptions
+	key        string
+	stopStatus func()
 }
 type handlerBox struct{ handler http.Handler }
 
@@ -143,6 +144,7 @@ func (s *remoteClaudeService) close() {
 	if s == nil {
 		return
 	}
+	s.stopServingStatus()
 	if s.server != nil {
 		_ = s.server.Close()
 	}
@@ -151,10 +153,26 @@ func (s *remoteClaudeService) close() {
 	}
 }
 func (s *remoteClaudeService) recovering() {
+	s.unavailable("ggrun model is recovering")
+}
+
+func (s *remoteClaudeService) stopping() {
+	s.unavailable("ggrun server is stopping")
+}
+
+func (s *remoteClaudeService) stopServingStatus() {
+	if s != nil && s.stopStatus != nil {
+		s.stopStatus()
+		s.stopStatus = nil
+	}
+}
+
+func (s *remoteClaudeService) unavailable(message string) {
 	if s != nil {
+		s.stopServingStatus()
 		s.handler.Store(handlerBox{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", "5")
-			http.Error(w, "ggrun model is recovering", 503)
+			http.Error(w, message, http.StatusServiceUnavailable)
 		})})
 	}
 }
@@ -231,6 +249,8 @@ func (s *remoteClaudeService) activate(req *launchRequest, model *placement.Mode
 	}
 	fmt.Printf("[remote] Credential is private: use %s to display it explicitly.\n", displayCommand([]string{"ggrun", "gateway-token", "--file", s.options.TokenFile}))
 	fmt.Println("[remote] Laptop disconnects leave the model loaded. Ctrl+C here stops serving.")
+	s.stopServingStatus()
+	s.stopStatus = startRemoteClaudeStatus(os.Stderr, r.router.AdmissionStatus)
 	return nil
 }
 

@@ -84,6 +84,12 @@ generation is not automatically replayed. Stop the server with Ctrl+C in its
 serving terminal. Closing that terminal is not a promise of background
 persistence; use your normal supported service manager for persistent hosting.
 
+While serving, the terminal reports readiness, active main-model requests and
+queued requests. It reads in-memory router counters every two seconds and prints
+only changes; status observation does not poll the model backend. The configured
+main limit is an upper bound, not a guarantee that all requests run concurrently.
+During shutdown, new authenticated requests receive 503 before the model stops.
+
 ## Network examples
 
 - **HTTPS proxy:** proxy a dedicated hostname or path to the loopback gateway.

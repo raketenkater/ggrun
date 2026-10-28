@@ -7686,6 +7686,7 @@ func cmdLaunch(args []string) {
 		// reserve, so an abort's estimate can supersede it.
 		growth.stop()
 		if !crashed {
+			remoteService.stopping()
 			fmt.Fprintln(os.Stderr, "\n[launch] Shutting down...")
 			break
 		}

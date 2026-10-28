@@ -111,7 +111,7 @@ At startup validate server protocol, readiness, identity, context and Claude cli
 2. Client repository: connection profile, doctor, version/capability checks, known local helpers, scoped configuration and real-Claude launch/resume. Add Linux and Windows release/install tests and portable cross-builds; macOS live acceptance can remain explicitly untested initially.
 3. Contract CI in both repositories: supported versions, invalid credentials, unsupported model, context metadata, tool/think/stream round trips, queued cancellation, upstream loss, settings preservation, alias routing and typed metadata rejection. Exercise an intentionally missing `claude` executable in server mode. Test generic direct and reverse-proxy URLs, including path prefixes, IPv6 parsing, unavailable ports and a deliberately absent Tailscale executable. Ensure an unauthenticated call cannot consume inference resources or read metadata/status. Keep tests independent of real model downloads where possible.
 4. Live server acceptance through the owner's PATH ggrun, launched from the TUI in Remote client mode with the installed unrestricted Qwen Flash-Next: compare emitted argv against equivalent local Claude mode, observe gateway auth and generic streaming, verify cached follow-ups, cancellation and clean server stop/relaunch. Respect current GPU work and memory-health status. Add the owner's optional Tailscale path without changing the generic connection contract.
-5. Real laptop acceptance: install the released client artifact on the owner's actual laptop OS, connect through its configured URL (Tailscale for the owner), launch Claude in a laptop project, read/edit/run tests locally, route reviewer/utility calls correctly, exercise a long enough workflow to check timeout behavior, disconnect/reconnect, resume and verify that the model remains loaded. The laptop OS has been requested and is pending; portable implementation and server tests need not wait for it. A local HTTP test or cross-build does not establish this laptop milestone; obtain the real laptop test receipt before declaring completion.
+5. Real laptop acceptance: install the released client artifact on the owner's actual laptop OS, connect through its configured URL (Tailscale for the owner), launch Claude in a laptop project, read/edit/run tests locally, route reviewer/utility calls correctly, exercise a long enough workflow to check timeout behavior, disconnect/reconnect, resume and verify that the model remains loaded. Client targets are Linux, macOS and Windows; native tests/installers pass on all three. The actual device receipt remains pending. A local HTTP test or cross-build does not establish this laptop milestone; obtain the real laptop test receipt before declaring completion.
 6. Return reviewed PRs, linked repo/docs, exact binary/model/Claude identities, test results and explicit remaining limitations. No new model download or broad optimizer retuning is required for this feature.
 
 ## Implementation checkpoint — October 27
@@ -157,8 +157,13 @@ Remaining gates:
    at `.cache/remote-claude/ggrun-before-remote-feature` for rollback.
 4. Client alpha v0.1.0-alpha.1 and its actual released Linux/Windows installers
    passed CI; stable release waits for actual laptop acceptance.
-5. Actual laptop install/coding/workflow/resume receipt on its OS. Laptop OS
-   remains pending. Same-host HTTPS and Windows CI do not establish this gate.
+5. Actual laptop install/coding/workflow/resume receipt remains pending. Client
+   targets are Linux, macOS and Windows; their native CI does not establish this
+   physical-device gate.
 
 See `remote-claude-validation-20261027.md` for exact evidence and limitations.
 No feature-complete or universal compatibility claim until these gates pass.
+
+Requirement-by-requirement audit: `remote-claude-completion-audit-20261028.md`.
+The new headless status display is implemented and unit/race-tested; it must be
+qualified at an intentional relaunch rather than interrupt the owner laptop trial.

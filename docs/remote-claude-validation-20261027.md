@@ -166,8 +166,10 @@ and isolated test configuration; no owner serving preferences were overwritten.
 
 - Review overlapping worker resume fixes without duplicating shared policy.
 - Actual laptop coding/workflow/disconnect/resume receipt, with files/tools on
-  that laptop and server still serving afterward. Laptop OS remains pending.
-- Richer server status UI and Windows real-terminal behavior remain unqualified.
+  that laptop and server still serving afterward. Device receipts remain pending.
+- Headless request/queue display is now implemented and unit/race-tested; its
+  live view must be qualified at an intentional relaunch. Windows real-terminal
+  behavior remains unqualified.
 
 No performance tuning or universal hardware/model support claim follows from
 these transport and correctness checks.
@@ -221,3 +223,15 @@ qualified binary as a transient user service. Authenticated HTTPS doctor passed
 at 144384 tokens/slot with a separate worker; a real Messages request returned
 READY in 3.483 seconds. The user was notified that the first laptop test can
 begin. Its actual remote-device receipt remains pending.
+
+## Serving-view completion audit
+
+The plan required a serving request/queue view. Source now reports readiness,
+active main-model requests, queued requests, configured limit and Ctrl+C stop.
+The observer reads atomic router counters; it does not make backend HTTP calls.
+It prints only changes, stops on cancellation or closed output, and is replaced
+on recovery. Shutdown declares authenticated 503 before stopping model processes.
+Unit/race coverage includes real activation wiring and zero inference requests
+from metadata/status observation. The active owner service is deliberately still
+the previously qualified binary; no large model restart was introduced while
+the owner can begin the requested laptop trial.
