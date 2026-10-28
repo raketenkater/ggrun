@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // DirName is the subdirectory of the ggrun cache holding session records.
@@ -418,8 +419,9 @@ const claudeMaxProjectKey = 200
 // character of the absolute path that is not an ASCII letter or digit becomes
 // a dash, so C:\Users\me\my_app keys as C--Users-me-my-app. Claude Code
 // replaces UTF-16 code units, so a character outside the BMP becomes two
-// dashes. Keys over claudeMaxProjectKey are returned whole; projectDir finds
-// their hashed directory by prefix.
+// dashes. A key over claudeMaxProjectKey is cut and suffixed with the hash of
+// the path, as the client does (Claude Code 2.1.307: slice(0, 200) + "-" +
+// Math.abs(hash).toString(36)).
 func ProjectKey(workDir string) string {
 	var b strings.Builder
 	for _, r := range workDir {
@@ -432,24 +434,32 @@ func ProjectKey(workDir string) string {
 			b.WriteByte('-')
 		}
 	}
-	return b.String()
+	key := b.String()
+	if len(key) <= claudeMaxProjectKey {
+		return key
+	}
+	return key[:claudeMaxProjectKey] + "-" + claudePathHash(workDir)
 }
 
-// projectDir returns workDir's Claude Code transcript directory. The hash
-// suffix on an over-long key is not reproduced here; the existing directory
-// with the truncated prefix is used instead, as Claude Code itself does.
-func projectDir(projectsDir, workDir string) string {
-	key := ProjectKey(workDir)
-	if len(key) > claudeMaxProjectKey {
-		prefix := key[:claudeMaxProjectKey] + "-"
-		entries, _ := os.ReadDir(projectsDir)
-		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-				return filepath.Join(projectsDir, entry.Name())
-			}
-		}
+// claudePathHash is Claude Code's 32-bit string hash over the path's UTF-16
+// code units (h = h*31 + unit, wrapping), printed as base-36 of its absolute
+// value. Two sibling projects under one long prefix therefore get distinct
+// directories, so no prefix guessing is needed.
+func claudePathHash(path string) string {
+	var h int32
+	for _, unit := range utf16.Encode([]rune(path)) {
+		h = (h << 5) - h + int32(unit)
 	}
-	return filepath.Join(projectsDir, key)
+	v := int64(h)
+	if v < 0 {
+		v = -v
+	}
+	return strconv.FormatInt(v, 36)
+}
+
+// projectDir returns workDir's Claude Code transcript directory.
+func projectDir(projectsDir, workDir string) string {
+	return filepath.Join(projectsDir, ProjectKey(workDir))
 }
 
 // defaultProjectsDir locates Claude Code's transcript root the same way the

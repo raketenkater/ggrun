@@ -229,28 +229,49 @@ func TestProjectKeyMatchesClaudeCodeLayout(t *testing.T) {
 	}
 }
 
-func TestProjectDirFindsHashedKeyForLongPaths(t *testing.T) {
+// Long keys carry Claude Code's own hash suffix. The expected values were
+// computed with the client's function copied from Claude Code 2.1.307
+// (slice(0, 200) + "-" + Math.abs(hash).toString(36)) under node.
+func TestProjectKeyHashesLongPathsLikeClaudeCode(t *testing.T) {
+	deep := "/" + strings.Repeat("deep/", 50)
+	cases := map[string]string{
+		deep + "project-a": "aobq66",
+		deep + "project-b": "aobq67",
+		`C:\Users\me\` + strings.Repeat("x_y ", 60) + "\U0001F600end": "aw86qt",
+	}
+	for path, hash := range cases {
+		key := ProjectKey(path)
+		want := sanitizedPrefix(path) + "-" + hash
+		if key != want {
+			t.Errorf("ProjectKey(%.40q...) = ...%q, want ...%q", path, key[claudeMaxProjectKey:], want[claudeMaxProjectKey:])
+		}
+	}
+	// Review 2026-10-28: two sibling projects under one long prefix must not
+	// share a transcript directory.
 	projects := t.TempDir()
-	workDir := "/" + strings.Repeat("deep/", 50) + "repo"
-	key := ProjectKey(workDir)
-	if len(key) <= claudeMaxProjectKey {
-		t.Fatalf("test path too short: %d", len(key))
+	a, b := projectDir(projects, deep+"project-a"), projectDir(projects, deep+"project-b")
+	if a == b {
+		t.Fatalf("two distinct projects select the same transcript directory: %s", a)
 	}
-	// Without a transcript directory the plain key is the best guess.
-	if got := projectDir(projects, workDir); got != filepath.Join(projects, key) {
-		t.Fatalf("projectDir with no match = %q", got)
+	if short := projectDir(projects, "/home/mik/repo"); short != filepath.Join(projects, "-home-mik-repo") {
+		t.Fatalf("short key changed: %q", short)
 	}
-	hashed := key[:claudeMaxProjectKey] + "-1x2y3z"
-	if err := os.Mkdir(filepath.Join(projects, hashed), 0o755); err != nil {
-		t.Fatal(err)
+}
+
+// sanitizedPrefix is the first claudeMaxProjectKey characters of the dashed key.
+func sanitizedPrefix(path string) string {
+	var b strings.Builder
+	for _, r := range path {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
+		default:
+			b.WriteByte('-')
+		}
 	}
-	if got := projectDir(projects, workDir); got != filepath.Join(projects, hashed) {
-		t.Fatalf("projectDir = %q, want the hashed directory %q", got, hashed)
-	}
-	short := "/home/mik/repo"
-	if got := projectDir(projects, short); got != filepath.Join(projects, "-home-mik-repo") {
-		t.Fatalf("short key must not be prefix-matched: %q", got)
-	}
+	return b.String()[:claudeMaxProjectKey]
 }
 
 func TestJournalPathAndCachedAgents(t *testing.T) {
