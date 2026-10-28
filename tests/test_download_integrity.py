@@ -75,12 +75,99 @@ def test_missing_manifest_fails_before_any_transfer(monkeypatch, tmp_path):
     assert module.download_files("owner/repo", ["missing.gguf"], tmp_path) == ([], ["missing.gguf"])
 
 
+def _api(siblings):
+    class Api:
+        def model_info(self, repo, **kwargs):
+            return SimpleNamespace(sha="pinned", siblings=siblings)
+    return Api
+
+
+def _lfs(name, size, content=b"good"):
+    return SimpleNamespace(rfilename=name, size=size, lfs={"sha256": hashlib.sha256(content).hexdigest()})
+
+
+def test_too_little_disk_fails_before_any_transfer(monkeypatch, tmp_path, capsys):
+    module = downloader()
+    files = ["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"]
+    monkeypatch.setattr(module, "HfApi", _api([_lfs(f, 60) for f in files]))
+    monkeypatch.setattr(module, "transfer_file", lambda *a, **k: pytest.fail("no transfer without space"))
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda path: SimpleNamespace(free=100))
+    assert module.download_files("owner/repo", files, tmp_path) == ([], files)
+    out = capsys.readouterr().out
+    assert "not enough free disk space" in out and "--dir" in out
+
+
+def test_needed_space_credits_finished_and_partial_files(tmp_path):
+    module = downloader()
+    digest = "ab" * 32
+    manifest = {"UD-Q2_K/m-00001-of-00002.gguf": (60, "sha256", "cd" * 32),
+                "UD-Q2_K/m-00002-of-00002.gguf": (60, "sha256", digest)}
+    done = tmp_path / "UD-Q2_K" / "m-00001-of-00002.gguf"
+    done.parent.mkdir()
+    done.write_bytes(b"x" * 60)
+    partials = tmp_path / ".cache" / "huggingface" / "download" / "UD-Q2_K"
+    partials.mkdir(parents=True)
+    (partials / f"h4sh.{digest}.incomplete").write_bytes(b"x" * 25)
+    assert module.missing_bytes(tmp_path, manifest) == 35
+
+
+def test_quant_subfolders_land_under_the_repo_name(monkeypatch, tmp_path, capsys):
+    module = downloader()
+    name = "UD-IQ3_XXS/M-UD-IQ3_XXS.gguf"
+    monkeypatch.setattr(module, "HfApi", _api([_lfs(name, 4)]))
+
+    def transfer(repo, filename, root, revision, force=False):
+        path = root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"good")
+        return path
+
+    monkeypatch.setattr(module, "transfer_file", transfer)
+    target = tmp_path / "M-GGUF" / name
+    assert module.download_files("unsloth/M-GGUF", [name], tmp_path) == ([(name, target)], [])
+    module.print_usage_instructions("unsloth/M-GGUF", tmp_path, [(name, target)])
+    assert f'ggrun "{target}"' in capsys.readouterr().out
+
+
+def test_set_started_by_an_older_version_finishes_in_one_directory(monkeypatch, tmp_path):
+    module = downloader()
+    files = [f"UD-IQ3_XXS/M-0000{i}-of-00003.gguf" for i in (1, 2, 3)]
+    monkeypatch.setattr(module, "HfApi", _api([_lfs(f, 4) for f in files]))
+    # Older versions put the subfolder directly in <dir>: two shards finished.
+    for name in files[:2]:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_bytes(b"good")
+    roots = []
+
+    def transfer(repo, filename, root, revision, force=False):
+        roots.append(root)
+        path = root / filename
+        path.write_bytes(b"good")
+        return path
+
+    monkeypatch.setattr(module, "transfer_file", transfer)
+    downloaded, failed = module.download_files("unsloth/M-GGUF", files, tmp_path)
+    assert failed == [] and roots == [tmp_path]
+    assert {Path(path).parent for _, path in downloaded} == {tmp_path / "UD-IQ3_XXS"}
+
+
+def test_older_partial_keeps_the_set_where_it_resumes(tmp_path):
+    module = downloader()
+    files = ["UD-IQ3_XXS/M-00001-of-00002.gguf", "UD-IQ3_XXS/M-00002-of-00002.gguf"]
+    assert module.download_root("unsloth/M-GGUF", files, tmp_path) == tmp_path / "M-GGUF"
+    partials = tmp_path / ".cache" / "huggingface" / "download" / "UD-IQ3_XXS"
+    partials.mkdir(parents=True)
+    (partials / f"h4sh.{'ab' * 32}.incomplete").write_bytes(b"x" * 25)
+    assert module.download_root("unsloth/M-GGUF", files, tmp_path) == tmp_path
+
+
 @pytest.mark.parametrize("files, expected", [([], 1), (["model.gguf"], 130)])
 def test_empty_selection_and_cancel_are_not_success(monkeypatch, tmp_path, files, expected):
     module = downloader()
     monkeypatch.setattr(module, "get_args", lambda: SimpleNamespace(
         repo="owner/repo", dir=str(tmp_path), vram=0, ram=0, quant="Q4_K_M",
-        no_repo_search=True, yes=False, cache_dir=None))
+        no_repo_search=True, yes=False, cache_dir=None, non_interactive=False, active_params_b=0))
+    monkeypatch.setattr(module.sys, "stdin", SimpleNamespace(isatty=lambda: True))  # a user to ask
     monkeypatch.setattr(module, "clear_screen", lambda: None)
     monkeypatch.setattr(module, "print_header", lambda: None)
     monkeypatch.setattr(module, "resolve_best_gguf_repo", lambda repo, *args: repo)

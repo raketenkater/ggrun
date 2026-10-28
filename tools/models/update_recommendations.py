@@ -37,7 +37,7 @@ QUANT_PATTERN = re.compile(
 # Speculative-decoding heads published beside the weights under the same quant
 # names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). Counting them made a
 # 2 GB MTP head a "Q4_0" of a 1T model.
-DRAFT_HEAD_NAMES = ("mtp", "dflash")
+DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3")
 
 
 def is_calibration_or_adapter(path):
@@ -53,6 +53,33 @@ def is_draft_head_gguf(path: str) -> bool:
     parts = path.lower().split("/")
     return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
         part in DRAFT_HEAD_NAMES for part in parts[:-1])
+
+
+# Bytes per parameter by quant label, mirroring bytesPerWeight in
+# go/pkg/recommend/speed.go (first match wins, same order).
+BYTES_PER_WEIGHT = (
+    ("F32", 4.0), ("BF16", 2.0), ("F16", 2.0), ("F8", 1.0), ("Q8", 1.06),
+    ("Q6", 0.82), ("Q5", 0.69), ("MXFP4", 0.53), ("MXP4", 0.53), ("IQ4", 0.51),
+    ("Q4", 0.56), ("I4", 0.56), ("IQ3", 0.41), ("Q3", 0.44), ("IQ2", 0.28),
+    ("Q2", 0.33), ("Q1", 0.20),
+)
+COMPANION_PARAM_RATIO = 15
+
+
+def drop_companion_sized(variants: list[tuple[str, int | None, Any]]) -> list[tuple[str, int | None, Any]]:
+    """Drop (quant, size_bytes, item) artifacts implying under 1/15 of the
+    largest artifact's parameter count: a draft head or projector that escaped
+    the name rules (dspark-X-Q8_0.gguf, 2 GB beside a 300 GB model), never a
+    quant of the model. Unknown sizes are kept. Mirrors
+    tools/download/download_any_gguf.py and dropCompanionSizedQuants in
+    go/pkg/recommend/recommend.go."""
+    def implied(quant: str, size: int | None) -> float:
+        q = (quant or "").upper()
+        bpw = next((b for label, b in BYTES_PER_WEIGHT if label in q), 0.55)
+        return size / bpw if size else 0
+    params = [implied(quant, size) for quant, size, _ in variants]
+    most = max(params, default=0)
+    return [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
 
 
 def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
@@ -657,16 +684,25 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
         shard = SHARD_PATTERN.fullmatch(fname)
         stem = shard.group(1) if shard else fname
         groups.setdefault(quant, {}).setdefault(stem, []).append((fname, size))
+    variants = []
+    for quant, stems in groups.items():
+        for files in stems.values():
+            if not complete_shards([name for name, _ in files]):
+                continue
+            known = all(isinstance(size, int) and not isinstance(size, bool) and size > 0 for _, size in files)
+            variants.append((quant, sum(size for _, size in files) if known else None, files))
+    # Drop companion-sized artifacts before the ambiguity check, so a draft
+    # head sharing a label with the model cannot hide the model's own quant.
+    complete: dict[str, list[int | None]] = {}
+    for quant, size, _ in drop_companion_sized(variants):
+        complete.setdefault(quant, []).append(size)
     quants = []
-    for quant, variants in groups.items():
-        complete = [files for files in variants.values()
-                    if complete_shards([name for name, _ in files])]
-        if len(complete) != 1:
+    for quant, found in complete.items():
+        if len(found) != 1:
             continue  # ambiguous model variants must not be added together
-        files = complete[0]
-        if any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for _, size in files):
+        size = found[0]
+        if size is None:
             continue  # missing size must not make a shard set appear smaller
-        size = sum(size for _, size in files)
         quants.append({"name": quant, "size_gb": round(size / 1073741824, 2),
                        "size_bytes": size, "dynamic": quant.startswith("UD-")})
     quants.sort(key=lambda q: q["size_bytes"])
