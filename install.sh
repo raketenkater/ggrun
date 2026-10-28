@@ -1184,10 +1184,13 @@ install_legacy_bash_shim() {
     fi
 }
 
+# install_release_bundle [dest_name] [launcher_only]
+# launcher_only=1 installs ggrun and its helper scripts and leaves the backend
+# alone; it succeeds when the bundle's ggrun was installed.
 install_release_bundle() {
-    local platform asset url sums_url tmp archive payload_root found_backend=0 dest_name="${1:-}"
+    local platform asset url sums_url tmp archive payload_root found_backend=0 dest_name="${1:-}" launcher_only="${2:-0}"
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
-    if [[ "$BACKEND_CHOICE" == "cuda" ]] && ! cuda_bundle_supported; then
+    if [[ "$launcher_only" != "1" && "$BACKEND_CHOICE" == "cuda" ]] && ! cuda_bundle_supported; then
         warn "The ggrun CUDA bundle needs compute capability 7.5+; this host has $(nvidia_min_compute_cap | sed 's/.$/.&/'). Skipping it."
         return 1
     fi
@@ -1260,6 +1263,12 @@ install_release_bundle() {
         install_go_as_main "$INSTALL_DIR/llm-server-go" || true
     fi
 
+    if [[ "$launcher_only" == "1" ]]; then
+        rm -rf "$tmp"
+        [[ -x "$INSTALL_DIR/ggrun" ]]
+        return
+    fi
+
     if [[ -z "$dest_name" ]]; then
         case "$BACKEND_CHOICE" in
             cuda) dest_name="ik_llama-server-cuda" ;;
@@ -1281,6 +1290,24 @@ install_release_bundle() {
 
     rm -rf "$tmp"
     (( found_backend ))
+}
+
+# Release mode keeps a working backend it found, but nothing else installs the
+# launcher in that mode: take ggrun and its helpers from the checksummed bundle.
+install_release_launcher() {
+    local saved="$BACKEND_CHOICE" fallback=cpu choice rc=1
+    [[ "$OS" == "Darwin" ]] && fallback=metal
+    for choice in "$BACKEND_CHOICE" "$fallback"; do
+        [[ "$choice" == "skip" ]] && continue
+        BACKEND_CHOICE="$choice"
+        if install_release_bundle "" 1; then
+            rc=0
+            break
+        fi
+        [[ "$choice" == "$fallback" ]] && break
+    done
+    BACKEND_CHOICE="$saved"
+    return "$rc"
 }
 
 host_libc() {
@@ -2192,6 +2219,11 @@ if [[ "$INSTALL_MODE" == "auto" || "$INSTALL_MODE" == "release" ]]; then
     elif installed_real_server ik_llama-server-cuda || installed_real_server llama-server-vulkan \
         || installed_real_server llama-server || installed_real_server llama-server-cuda; then
         RELEASE_INSTALLED=1
+        if [[ "$INSTALL_MODE" == "release" && "$MAIN_IMPL" == "go" ]] && ! install_release_launcher; then
+            err "Kept the existing backend, but no release bundle for $(platform_slug 2>/dev/null || echo unknown) provided ggrun."
+            err "Rerun with LLM_INSTALL_MODE=auto to build ggrun from source."
+            exit 1
+        fi
     elif install_release_bundle; then
         RELEASE_INSTALLED=1
     elif [[ "$INSTALL_MODE" == "release" ]]; then
