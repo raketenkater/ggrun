@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,10 +60,16 @@ func (r *Runner) idleSlotWait() (time.Duration, bool) {
 	if limit <= 0 {
 		return 0, true
 	}
-	if !r.Deadline.IsZero() {
-		if remaining := time.Until(r.Deadline); remaining < limit {
-			limit = remaining
-		}
+	started := time.Now()
+	// One absolute end bounds the polls too: a /slots request answered by a
+	// busy scheduler must not carry the wait past the caller's deadline, and a
+	// reply that arrives after it is not success.
+	end := started.Add(limit)
+	if !r.Deadline.IsZero() && r.Deadline.Before(end) {
+		end = r.Deadline
+	}
+	if !started.Before(end) {
+		return 0, false
 	}
 	interval := r.idlePollInterval
 	if interval <= 0 {
@@ -72,32 +79,36 @@ func (r *Runner) idleSlotWait() (time.Duration, bool) {
 	if pollTimeout <= 0 {
 		pollTimeout = idleSlotPollTimeout
 	}
-	client := &http.Client{Timeout: pollTimeout}
-	started := time.Now()
 	announced := false
 	for {
-		if r.slotActivity(client) != slotsBusy {
+		activity := r.slotActivity(min(pollTimeout, time.Until(end)), end)
+		if !time.Now().Before(end) {
+			return time.Since(started), false
+		}
+		if activity != slotsBusy {
 			if announced {
 				fmt.Fprintf(os.Stderr, "[benchmark] backend idle after %s; starting the timed probe\n", time.Since(started).Round(time.Second))
 			}
 			return time.Since(started), true
 		}
-		elapsed := time.Since(started)
-		if elapsed >= limit {
-			return elapsed, false
-		}
 		if !announced {
-			fmt.Fprintf(os.Stderr, "[benchmark] backend is still processing an earlier request; waiting up to %s before the timed probe\n", limit.Round(time.Second))
+			fmt.Fprintf(os.Stderr, "[benchmark] backend is still processing an earlier request; waiting up to %s before the timed probe\n", time.Until(end).Round(time.Second))
 			announced = true
 		}
-		time.Sleep(min(interval, limit-elapsed))
+		time.Sleep(min(interval, time.Until(end)))
 	}
 }
 
 // slotActivity reads GET /slots. Mainline llama.cpp reports is_processing per
 // slot; ik_llama.cpp reports state (0 idle, 1 processing).
-func (r *Runner) slotActivity(client *http.Client) slotActivity {
-	resp, err := client.Get(strings.TrimRight(r.BaseURL, "/") + "/slots")
+func (r *Runner) slotActivity(timeout time.Duration, end time.Time) slotActivity {
+	ctx, cancel := context.WithDeadline(context.Background(), end)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(r.BaseURL, "/")+"/slots", nil)
+	if err != nil {
+		return slotsUnknown
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		if isTimeout(err) {
 			return slotsBusy

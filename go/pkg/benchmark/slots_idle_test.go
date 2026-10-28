@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -205,6 +206,40 @@ func TestWaitForIdleSlotsReportsAStillBusyBackend(t *testing.T) {
 	defer unknownFormat.Close()
 	if !fastIdleRunner(unknownFormat.URL, time.Hour).WaitForIdleSlots() {
 		t.Fatal("unrecognized /slots evidence was reported busy")
+	}
+}
+
+// Invariant: the wait never outlives its deadline, even inside one /slots
+// request answered late by a busy scheduler, and a reply that arrives after the
+// deadline is not success. An expired deadline sends no request at all.
+func TestIdleSlotWaitDeadlineCoversThePoll(t *testing.T) {
+	var requests atomic.Int32
+	lateIdle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+		_, _ = w.Write([]byte(`[{"is_processing":false}]`))
+	}))
+	defer lateIdle.Close()
+
+	runner := &Runner{BaseURL: lateIdle.URL, IdleSlotWait: time.Minute, Deadline: time.Now().Add(20 * time.Millisecond)}
+	started := time.Now()
+	if runner.WaitForIdleSlots() {
+		t.Fatal("an idle reply that arrived after the deadline was reported as success")
+	}
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("the /slots poll carried the wait %s past a 20ms deadline", elapsed)
+	}
+
+	requests.Store(0)
+	expired := &Runner{BaseURL: lateIdle.URL, IdleSlotWait: time.Minute, Deadline: time.Now().Add(-time.Second)}
+	if expired.WaitForIdleSlots() {
+		t.Fatal("an expired deadline reported an idle backend")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("an expired deadline still sent %d /slots request(s)", n)
 	}
 }
 
