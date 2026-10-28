@@ -249,12 +249,35 @@ func TestProjectKeyHashesLongPathsLikeClaudeCode(t *testing.T) {
 	// Review 2026-10-28: two sibling projects under one long prefix must not
 	// share a transcript directory.
 	projects := t.TempDir()
-	a, b := projectDir(projects, deep+"project-a"), projectDir(projects, deep+"project-b")
+	a, b := projectDir(projects, deep+"project-a", "s1"), projectDir(projects, deep+"project-b", "s1")
 	if a == b {
 		t.Fatalf("two distinct projects select the same transcript directory: %s", a)
 	}
-	if short := projectDir(projects, "/home/mik/repo"); short != filepath.Join(projects, "-home-mik-repo") {
+	if short := projectDir(projects, "/home/mik/repo", "s1"); short != filepath.Join(projects, "-home-mik-repo") {
 		t.Fatalf("short key changed: %q", short)
+	}
+}
+
+// A session kept under another hash suffix (as the client accepts after
+// checking the transcript) is still found by its UUID; without that session
+// the exact key is used, never a sibling project's directory.
+func TestProjectDirFindsSessionUnderAnotherSuffix(t *testing.T) {
+	projects := t.TempDir()
+	workDir := "/" + strings.Repeat("deep/", 50) + "project-a"
+	other := filepath.Join(projects, ProjectKey(workDir)[:claudeMaxProjectKey]+"-zzzzzz")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := "072e63a1-819a-4682-a742-559695c3cd76"
+	if err := os.WriteFile(filepath.Join(other, session+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectDir(projects, workDir, session); got != other {
+		t.Fatalf("session under another suffix: got %q, want %q", got, other)
+	}
+	exact := filepath.Join(projects, ProjectKey(workDir))
+	if got := projectDir(projects, workDir, "another-session"); got != exact {
+		t.Fatalf("unknown session must use the exact key, got %q", got)
 	}
 }
 

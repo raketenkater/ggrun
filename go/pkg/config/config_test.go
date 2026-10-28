@@ -399,6 +399,13 @@ func TestUnquoteConfigValueKeepsHandWrittenWindowsPaths(t *testing.T) {
 		{`"C:\Users\me\models"`, `C:\Users\me\models`},
 		{`"C:\new\tools"`, `C:\new\tools`},
 		{`'C:\new\tools'`, `C:\new\tools`},
+		// Valid Go escapes with another meaning: kept as written (review 2026-10-28).
+		{`"E:\2024"`, `E:\2024`},
+		{`"D:\123"`, `D:\123`},
+		{`"C:\x41dir"`, `C:\x41dir`},
+		// What Save writes still decodes.
+		{`"E:\\2024"`, `E:\2024`},
+		{`"D:\\café\\models"`, `D:\café\models`},
 		{`C:\Users\me`, `C:\Users\me`},
 		{` "/models" `, `/models`},
 		{`"`, ``},

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
 )
@@ -323,13 +324,15 @@ func loadFile(path string, cfg *Config) error {
 
 // unquoteConfigValue reverses the %q quoting Save writes, so a Windows path
 // such as C:\Users\me keeps single backslashes across save/load cycles
-// instead of doubling on every save. Hand-written values that are not valid
-// Go string literals, or whose escapes would decode to control characters
-// (a literal "C:\new\tools"), fall back to plain quote trimming.
+// instead of doubling on every save. The decoded value is used only when it is
+// exactly what Save would write back: a hand-written "E:\2024" or "D:\123" is
+// a valid Go literal with a different meaning, and "C:\new\tools" decodes to
+// control characters, so those fall back to plain quote trimming.
 func unquoteConfigValue(raw string) string {
 	val := strings.TrimSpace(raw)
 	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
-		if s, err := strconv.Unquote(val); err == nil && !strings.ContainsFunc(s, unicode.IsControl) {
+		if s, err := strconv.Unquote(val); err == nil && utf8.ValidString(s) &&
+			!strings.ContainsFunc(s, unicode.IsControl) && strconv.Quote(s) == val {
 			return s
 		}
 	}
