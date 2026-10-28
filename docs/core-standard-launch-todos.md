@@ -4150,7 +4150,7 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
 
 ## MMAP SCOPE — memory.high collapsed onto mapped experts — 2026-10-24
 
-- [ ] (fix in PR #99) Live GLM-5.3 UD-IQ2_M with `--mmap` (201,504 MiB mapped
+- [x] (fixed in #99, accepted on the merged build 2026-10-28) Live GLM-5.3 UD-IQ2_M with `--mmap` (201,504 MiB mapped
   experts): after the canary, `resizeScopeToMeasuredFootprint` set
   `memory.high` to the non-reclaimable state + headroom (24,183 MiB).
   `memory.high` throttles page cache too, so RSS fell from 192 GB to 23 GB,
@@ -4186,7 +4186,7 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
 
 ## CANARY — timed probes queue behind abandoned requests — 2026-10-26
 
-- [ ] Live GLM-5.3 relaunch (`--mmap`, cold page cache): the calibration
+- [x] (fixed in #102, live-verified 2026-10-28) Live GLM-5.3 relaunch (`--mmap`, cold page cache): the calibration
   pilot's client timed out after 2 min and cancelled. llama.cpp honours a
   cancel only between ubatches, so the 296-token prefill kept the backend
   busy for 22 min. The functional canary's prefill probe then missed its
@@ -4199,7 +4199,7 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   the files had just been cached. Measure page-cache residency before and
   after load. If the loader's pass over the GPU tensors evicts the expert
   pages, ask the backend to drop those ranges after upload.
-- [ ] The mmap cache-allowance warning uses the planned non-reclaimable
+- [x] (fixed in #102) The mmap cache-allowance warning uses the planned non-reclaimable
   floor (24,183 MiB) where 965 MiB was measured, so it reported 21.6 GB of
   experts "exceeding" an allowance that the live cgroup could hold.
 

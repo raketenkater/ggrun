@@ -500,6 +500,39 @@ prefill speed probe: … context deadline exceeded".
   The same server shape had just passed three coding tasks.
 - After the relaunch exited, 199 GB of the GLM files were still cached.
 
+### GLM-5.3 UD-IQ2_M on the merged build (accepted, 2026-10-28)
+
+PATH `ggrun v3.2.12-70-g4925fd7` (sha256 `db065091611344d2…`): main with
+#99 and the hardening PRs #102–#108. `--claude-code --mmap`, on a copy of the
+cache the accepted 2026-10-26 cell left. Driver acceptance: clean lifecycle
+(ready, stream, cancel and reconnect, clean stop) **and** every named task
+ran and passed with unchanged oracle tests.
+
+| Cell | Ready | Tasks (s, turns) | Stop |
+| --- | --- | --- | --- |
+| launch | 3,372 s, 1 load | `calc` 1,964 (8), `textstats` 876 (6), `inventory` 1,491 (11), all correct | 7.6 s |
+| clean relaunch | 3,204 s, 1 load | `ledger` 4,582 (29), correct, 11 tests | 8.4 s |
+
+- Plan in both: ctx 185,344 over 2 slots, `-ub 256`, KV q8_0 on GPU, 198,744
+  MiB mapped CPU experts. GPU peak about 11.4 / 24.1 / 10.8 GB.
+- The #102 idle-slot wait handled the abandoned startup requests that failed
+  the 2026-10-26 relaunch: "backend is still processing an earlier request;
+  waiting up to 18m0s", then "idle after 9m30s" (launch) and "12m35s" and
+  "2m20s" (relaunch). The canary then measured 2.0 and 0.3 tok/s and marked
+  the profile degraded instead of rejecting it.
+- `memory.high` after the canary was 205,003 and 205,293 MiB, with the
+  cache allowance covering all 198,744 MiB of mapped experts (#102 clamps
+  against the hard limit, 209,099 and 209,389 MiB). RSS peaked at
+  203.8 and 204.9 GB.
+- HDD reads were 458 GB (launch) and 441 GB (relaunch), mostly during the
+  load and the first cold requests. The relaunch's page cache was again
+  mostly gone at start (backlog: mapped-expert relaunch re-read).
+- Stream first token 4.5 s and 31.6 s; cancel after 5 events, health ok;
+  reconnect first token 2.6 s and 2.8 s.
+- Relaunch backend timings (26 requests): prefill median 4.6 tok/s (p90
+  10.2), decode median 3.5 tok/s. 437,617 of the `ledger` session's
+  prompt tokens came from the prompt cache.
+
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and
@@ -533,7 +566,7 @@ fixtures only; no claim of model support.
 | --- | --- | --- | --- |
 | Ordinary resident model, no tier | existing suite + `TestOrdinaryModelIgnoresSparseLookupInputs` | — | Qwen3.5-4B control (2026-10-19, branch binary) |
 | Explicit mapping on `--load-mode` builds; native/legacy fold, idempotence | `TestLoadMode*`, passthrough and fingerprint tests | — | `--load-mode mmap` observed (2026-10-19) |
-| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests; `TestMMapReclaimHighKeepsMappedExperts` (PR #99) | — | GLM-5.3 (2026-10-24): refusal without `--mmap`; with it, `memory.high` collapse and thrash. Rerun after PR #99 |
+| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests; `TestMMapReclaimHighKeepsMappedExperts` (PR #99) | — | GLM-5.3: refusal without `--mmap`; with it, the 2026-10-24 `memory.high` collapse (fixed by #99); on the merged build (2026-10-28) launch and clean relaunch accepted, 4/4 tasks correct |
 | Engram, unreviewed loader → layer tier | placement tests | lazy off puts tables on GPU | not run |
 | Engram, reviewed loader, roomy host → resident tier | placement test (900 GB) | — | not possible on this host |
 | Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | DeepSeek V4.1 Flash IQ2_XS (2026-10-23, host with faulty pages offlined): cold, relaunch and 4 experiment cells; `ledger` and `calc` correct, one cold timeout |
@@ -562,8 +595,6 @@ release smoke failed (deprecated, non-blocking).
 
 ## Not done
 
-- GLM-5.3 cold and relaunch with `--mmap` after PR #99 is reviewed, merged
-  and installed as the PATH binary.
 - The DeepSeek cells ran on a host with the faulty DRAM pages offlined, not
   on repaired hardware. The offlining is lost on reboot, and the stick
   swap is still pending.
@@ -575,4 +606,4 @@ release smoke failed (deprecated, non-blocking).
   every challenger on 20-minute loads; context is filled before ubatch; the
   relaunch does not reuse the measured CPU MoE count; table page cache is
   lost on relaunch.
-- Review of PR #99 and of this record.
+- Review of this record.
