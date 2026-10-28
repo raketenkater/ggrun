@@ -274,7 +274,7 @@ traffic scripts and the raw records are private
 - After the task the two table shards held 1,802 MiB of cached pages each, in
   426k separate runs spread evenly across each 99.6 GB file (about one page in
   55). Hashed n-gram rows have no locality. A session's hot set is small
-  (3.6 GiB), but a blind cache of the first N GiB catches only N/199 of rows.
+  (3.6 GiB), but a blind cache of the first N GiB catches only N/195 of rows.
 - Stop: 22.0 s, clean. The "backend died mid-session" shutdown message
   appeared again.
 
@@ -299,7 +299,7 @@ cell:
   prefetch covers only the text that earlier sessions saw.
 - Peak 163,307 MiB; stop 22.1 s, clean.
 
-A session's hot rows are a small set: 3.6 GiB of the 199 GiB tables, and
+A session's hot rows are a small set: 3.6 GiB of the 194.6 GiB tables, and
 11 GiB once merged for the HDD. With that set prefetched, the first request
 of the prefetched `calc` ran at the warm rate. Hypothesis, not measured: on
 an SSD the prefetch would be much shorter than 25 minutes. Only the device
@@ -321,7 +321,7 @@ hook read the first 18 GiB of each table shard sequentially: 36,864 MiB in
   HDD, no better than the cold cell (3.17–4.02 tok/s, 116–143 MiB). Warm
   repeats ran at 15.3–15.8 tok/s.
 
-Hashed rows have no locality, so a blind cache of N GiB serves about N/199
+Hashed rows have no locality, so a blind cache of N GiB serves about N/195
 of lookups. Filling free RAM is not a useful policy for this tier. Keeping
 the specific hot pages is (previous section).
 
