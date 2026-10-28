@@ -55,8 +55,12 @@ QUANT_PATTERN = re.compile(
 
 # Speculative-decoding heads published beside the weights under the same quant
 # names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). They are companions,
-# not a quantization of the model; ggrun fetches drafts itself.
-DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3")
+# not a quantization of the model; ggrun fetches drafts itself. Shared with
+# tools/models/update_recommendations.py (test_companion_rule_matches_downloader).
+DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3", "medusa")
+# "mtp" may also name a main model that carries its MTP layers, and "eagle" a
+# main model (RWKV Eagle); the others are heads wherever they appear in a name.
+DRAFT_HEAD_WORDS = frozenset(DRAFT_HEAD_NAMES) - {"mtp", "eagle"}
 
 
 def is_calibration_or_adapter(path):
@@ -70,8 +74,9 @@ def is_calibration_or_adapter(path):
 
 def is_draft_head_gguf(path):
     parts = path.lower().split("/")
-    return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
-        part in DRAFT_HEAD_NAMES for part in parts[:-1])
+    return (any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES)
+            or any(part in DRAFT_HEAD_NAMES for part in parts[:-1])
+            or bool(set(re.split(r"[-_.]+", parts[-1])) & DRAFT_HEAD_WORDS))
 
 
 # Bytes per parameter by quant label, mirroring bytesPerWeight in
@@ -85,20 +90,25 @@ BYTES_PER_WEIGHT = (
 COMPANION_PARAM_RATIO = 15
 
 
-def drop_companion_sized(variants):
+def drop_companion_sized(variants, label=None):
     """Drop (quant, size_bytes, item) artifacts implying under 1/15 of the
     largest artifact's parameter count: a draft head or projector that escaped
     the name rules (dspark-X-Q8_0.gguf, 2 GB beside a 300 GB model), never a
-    quant of the model. Unknown sizes are kept. Mirrored in
-    tools/models/update_recommendations.py and dropCompanionSizedQuants in
-    go/pkg/recommend/recommend.go."""
+    quant of the model. Unknown sizes are kept; with a label, drops are
+    reported on stderr. Mirrored in tools/models/update_recommendations.py and
+    dropCompanionSizedQuants in go/pkg/recommend/recommend.go."""
     def implied(quant, size):
         q = (quant or "").upper()
-        bpw = next((b for label, b in BYTES_PER_WEIGHT if label in q), 0.55)
+        bpw = next((b for tag, b in BYTES_PER_WEIGHT if tag in q), 0.55)
         return size / bpw if size else 0
     params = [implied(quant, size) for quant, size, _ in variants]
     most = max(params, default=0)
-    return [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
+    kept = [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
+    if label and len(kept) != len(variants):
+        dropped = [str(v[0]) for v, p in zip(variants, params) if p and p * COMPANION_PARAM_RATIO < most]
+        print(f"warning: {label}: dropped companion-sized quants {', '.join(dropped)} "
+              f"(under 1/{COMPANION_PARAM_RATIO} of the largest parameter count)", file=sys.stderr)
+    return kept
 
 
 def without_draft_heads(paths):
