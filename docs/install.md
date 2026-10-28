@@ -2,7 +2,7 @@
 
 ## Recommended (self-contained app home)
 
-Linux / macOS:
+Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
@@ -28,6 +28,9 @@ git clone https://github.com/raketenkater/ggrun.git
 cd ggrun
 ./setup.sh
 ```
+
+macOS is deprecated: `setup.sh` still runs there with a Metal bundle, but it is
+best-effort and not tested.
 
 ## App home layout
 
@@ -71,7 +74,6 @@ ships these archives, checksummed in `SHA256SUMS`:
 | Platform | Assets |
 |---|---|
 | Linux x86_64 | CPU, Vulkan, CUDA |
-| macOS arm64 | Metal |
 | Windows x86_64 | CPU |
 
 Linux `auto` first searches the machine for an existing `llama-server`
