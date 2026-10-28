@@ -39,12 +39,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip ca-certificates libgomp1 curl \
     && pip3 install --no-cache-dir --break-system-packages huggingface_hub tqdm \
     && rm -rf /var/lib/apt/lists/*
+# No systemd in the container: the backend runs without a ggrun cgroup scope;
+# bound it with the container memory limit (docker run --memory).
 ENV LLM_APP_HOME=/opt/ggrun \
     LLAMA_SERVER=/opt/ggrun/.bin/llama-server \
     LLM_MODEL_DIR=/models \
     LLM_CACHE_DIR=/cache \
     LLM_HOST=0.0.0.0 \
     LLM_PORT=8081 \
+    GGRUN_SCOPE_MODE=none \
     PATH=/opt/ggrun/.bin:$PATH
 COPY --from=gobuild /out/ggrun            /opt/ggrun/.bin/ggrun
 COPY --from=backend /src/llama.cpp/build/bin/llama-server /opt/ggrun/.bin/llama-server

@@ -45,6 +45,7 @@ type PrefillProbe struct {
 // baseline. It does not choose a winner and candidates do not rerun it: the one
 // resulting prompt size is held identical for both sides of the comparison.
 func (r *Runner) ProbeAgentPrefill() (PrefillProbe, error) {
+	r.waitForIdleSlots()
 	prompt := agentBenchmarkLongPromptSized(r.WorkloadID, -1, 0, agentBenchmarkProbeLen)
 	started := time.Now()
 	result, err := r.chatWithOptions(prompt, 1, 1, false, 73)
@@ -138,6 +139,7 @@ func (r *Runner) RunAgentWorkload(slots, lanes int) (*Result, error) {
 	if slots < 1 || lanes < 1 || lanes > 8 {
 		return nil, fmt.Errorf("agent workload requires positive slots and 1..8 requested lanes")
 	}
+	r.waitForIdleSlots()
 
 	warmupBytes := agentBenchmarkProbeLen
 	if r.AgentPromptBytes > 0 && r.AgentPromptBytes < warmupBytes {

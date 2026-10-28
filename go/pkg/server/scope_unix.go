@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,7 +51,15 @@ exit "$status"`
 
 // scopeModeEnvOverride lets tests select a mode without being root and without a
 // real systemd. Read only here so the override cannot leak into other decisions.
+// "none" is also the operator opt-out for hosts without systemd (Docker): the
+// backend runs uncontained while ggrun's pre-launch admission still applies.
 const scopeModeEnvOverride = "GGRUN_SCOPE_MODE"
+
+// scopeOptOutHint names the opt-out in every containment refusal.
+const scopeOptOutHint = " On a host without systemd (for example a container), set " +
+	"GGRUN_SCOPE_MODE=none to run the backend without cgroup memory containment."
+
+var warnUncontainedOnce sync.Once
 
 // resolveScopeMode selects an owner once, before starting a contained process.
 // A directory or inherited session variable does not establish a reachable bus.
@@ -62,6 +71,8 @@ func resolveScopeMode() scopeMode {
 		return scopeSystem
 	case "unsupported":
 		return scopeUnsupported
+	case "none":
+		return scopeNone
 	}
 	return scopeModeForUID(os.Geteuid())
 }
@@ -117,9 +128,19 @@ func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, u
 	if memoryMaxMB <= 0 {
 		return args, scopeUnsupported, nil
 	}
+	// The explicit opt-out is checked before systemd-run is required, so a host
+	// without systemd can launch at all. It is never chosen automatically.
+	if strings.TrimSpace(os.Getenv(scopeModeEnvOverride)) == "none" {
+		warnUncontainedOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "[launch] WARNING: GGRUN_SCOPE_MODE=none: the backend runs WITHOUT cgroup memory "+
+				"containment; the %d MiB limit is not enforced and a runtime overrun can exhaust host RAM. "+
+				"Pre-launch admission still applies.\n", memoryMaxMB)
+		})
+		return args, scopeNone, nil
+	}
 	systemdRun, err := exec.LookPath("systemd-run")
 	if err != nil {
-		return nil, scopeUnsupported, fmt.Errorf("backend memory containment requires systemd-run: %w", err)
+		return nil, scopeUnsupported, fmt.Errorf("backend memory containment requires systemd-run: %w."+scopeOptOutHint, err)
 	}
 	// Refuse before building any argv when no instance can own a scope. This must
 	// be an explicit ggrun-authored error rather than a raw systemd failure
@@ -132,7 +153,7 @@ func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, u
 			"backend memory containment unavailable: no reachable systemd manager. " +
 				"Run in a systemd login session with a working user manager, or as root " +
 				"on a host with a working system manager. " +
-				"Refusing to start an uncontained backend.")
+				"Refusing to start an uncontained backend." + scopeOptOutHint)
 	}
 	out := []string{
 		systemdRun,
@@ -318,7 +339,11 @@ func (p *Process) SetMemoryMaxMB(memoryMaxMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB)
+	if err := setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB); err != nil {
+		return err
+	}
+	p.recordMemoryLimits(0, memoryMaxMB)
+	return nil
 }
 
 // SetMemoryHighMB updates the running backend scope's reclaim/throttle
@@ -330,7 +355,11 @@ func (p *Process) SetMemoryHighMB(memoryHighMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB)
+	if err := setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB); err != nil {
+		return err
+	}
+	p.recordMemoryLimits(memoryHighMB, 0)
+	return nil
 }
 
 func scopeMemoryOOMKillCountAt(cgroup string) (uint64, error) {

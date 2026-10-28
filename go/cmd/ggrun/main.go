@@ -4199,15 +4199,22 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 		// it must also leave them room: tightening it to the anonymous state
 		// alone evicted a 197 GiB expert working set down to 24 GiB and made
 		// every token re-read storage (GLM-5.3 live, 2026-10-24).
-		high, cachedMB := mmapExpertReclaimHighMB(newMax, strategy.ReclaimableHostWeightsMB, req.CgroupHeadroomMB, ceiling)
+		// The band is kept below the scope's real memory.max (the reclaim
+		// ceiling for an mmap launch), not the lower planned budget: clamping
+		// to the budget lowered memory.high 4 GiB below its pre-launch value.
+		launchHigh, hardMax := p.MemoryLimitsMB()
+		if hardMax <= 0 {
+			hardMax = ceiling
+		}
+		high, cachedMB := mmapExpertReclaimHighMB(newMax, measured, strategy.ReclaimableHostWeightsMB, req.CgroupHeadroomMB, hardMax, launchHigh)
 		if err := p.SetMemoryHighMB(high); err != nil {
 			fmt.Fprintf(os.Stderr, "[launch] measured-footprint mmap reclaim threshold re-size to %d MiB failed: %v\n", high, err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[launch] mmap reclaim threshold re-sized to %d MiB (non-reclaimable ceiling %d MiB from measured %d MiB + headroom, planned floor %d MiB; cache allowance %d of %d MiB mapped experts; hard ceiling preserved)\n",
-			high, newMax, measured, plannedFloor, cachedMB, strategy.ReclaimableHostWeightsMB)
+		fmt.Fprintf(os.Stderr, "[launch] mmap reclaim threshold re-sized to %d MiB (non-reclaimable ceiling %d MiB from measured %d MiB + headroom, planned floor %d MiB; cache allowance %d of %d MiB mapped experts; hard limit %d MiB preserved)\n",
+			high, newMax, measured, plannedFloor, cachedMB, strategy.ReclaimableHostWeightsMB, hardMax)
 		if cachedMB < strategy.ReclaimableHostWeightsMB {
-			fmt.Fprintf(os.Stderr, "[launch] warning: %d MiB of mapped experts exceed the planned cache allowance and may require storage reads\n",
+			fmt.Fprintf(os.Stderr, "[launch] warning: %d MiB of mapped experts exceed the cache allowance and may require storage reads\n",
 				strategy.ReclaimableHostWeightsMB-cachedMB)
 		}
 		return
@@ -4276,11 +4283,14 @@ func measuredFootprintCgroupMaxMB(measuredMB, headroomMB, plannedFloorMB, ceilin
 }
 
 // mmapExpertReclaimHighMB is memory.high for a running file-backed expert plan:
-// the non-reclaimable ceiling plus room for the mapped experts' page cache,
-// kept a headroom band below the planned ceiling so clean pages are reclaimed
-// before the hard limit. It never drops below the non-reclaimable ceiling.
-// cachedMB is how much of the mapped experts fits under it.
-func mmapExpertReclaimHighMB(nonReclaimableCeilMB, mappedExpertMB, headroomMB, ceilingMB int) (highMB, cachedMB int) {
+// the non-reclaimable ceiling (planned floor included, for safety) plus room for
+// the mapped experts' page cache, kept a headroom band below the scope's real
+// hard limit (memory.max) so clean pages are reclaimed before the kill
+// threshold. It never drops below the non-reclaimable ceiling or the
+// pre-launch memory.high, and never exceeds memory.max; zero limits are
+// unknown. cachedMB is how much of the mapped experts fits under it beside the
+// measured non-reclaimable state, not beside the planned floor.
+func mmapExpertReclaimHighMB(nonReclaimableCeilMB, measuredMB, mappedExpertMB, headroomMB, hardMaxMB, launchHighMB int) (highMB, cachedMB int) {
 	if nonReclaimableCeilMB <= 0 {
 		return 0, 0
 	}
@@ -4291,13 +4301,18 @@ func mmapExpertReclaimHighMB(nonReclaimableCeilMB, mappedExpertMB, headroomMB, c
 		headroomMB = 0
 	}
 	highMB = nonReclaimableCeilMB + mappedExpertMB
-	if limit := ceilingMB - headroomMB; ceilingMB > 0 && highMB > limit {
+	if limit := hardMaxMB - headroomMB; hardMaxMB > 0 && highMB > limit {
 		highMB = limit
 	}
-	if highMB < nonReclaimableCeilMB {
-		highMB = nonReclaimableCeilMB
+	highMB = max(highMB, nonReclaimableCeilMB, launchHighMB)
+	if hardMaxMB > 0 && highMB > hardMaxMB {
+		highMB = hardMaxMB
 	}
-	return highMB, highMB - nonReclaimableCeilMB
+	used := measuredMB
+	if used <= 0 {
+		used = nonReclaimableCeilMB
+	}
+	return highMB, min(mappedExpertMB, max(0, highMB-used))
 }
 
 // hostReclaimCeilingMB is the hard ceiling an mmap-backed plan may reach before
@@ -6499,12 +6514,39 @@ func launchHardwareIdentity(caps *detect.Capabilities) string {
 	return controller.ScopeKey(parts...)
 }
 
+// launchProbeIdleSlotWait bounds how long a launch canary or calibration probe
+// waits for a backend still finishing an earlier, client-cancelled request.
+// llama.cpp honors cancel only between ubatches; a GLM-5.3 relaunch stayed busy
+// 22 minutes after a 2-minute pilot timed out (2026-10-26).
+const launchProbeIdleSlotWait = 30 * time.Minute
+
+// cacheCanaryGate maps the functional canary to the profile transition it
+// earns. A speed probe that timed out on a still-healthy backend measured
+// nothing: the profile is degraded (served, never promoted), not rejected.
+// Any other error or a non-functional answer rejects it.
+func cacheCanaryGate(canary *benchmark.CacheCanaryResult, canaryErr error) (controller.State, string) {
+	if canaryErr == nil && canary != nil && canary.TooSlow {
+		return controller.StateDegraded, canary.Reason
+	}
+	if canaryErr != nil || canary == nil || !canary.Functional {
+		reason := "functional canary failed"
+		if canaryErr != nil {
+			reason += ": " + canaryErr.Error()
+		} else if canary != nil && canary.Reason != "" {
+			reason += ": " + canary.Reason
+		}
+		return controller.StateRejected, reason
+	}
+	return controller.StateFunctionalVerified, ""
+}
+
 // verifyAndActivateLaunch is the promotion boundary between "the HTTP listener
 // came up" and "this profile may be reused automatically". A cache regression
 // leaves the server available in a clearly reported degraded state, but it does
 // not overwrite the last-known-good placement.
 func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
 	be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, serverArgs []string, claudeRouterURL string,
+	backend watchedBackend,
 ) error {
 	if req == nil || cfg == nil || model == nil || be == nil || strategy == nil {
 		return errors.New("incomplete launch profile")
@@ -6573,22 +6615,23 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 		}
 	}
 	runner := &benchmark.Runner{
-		BaseURL:       backendBaseURL(req),
-		Model:         filepath.Base(model.Path),
-		Timeout:       20 * time.Minute,
-		ContextTokens: canaryContext,
-		PrefillBudget: cacheCanaryPrefillBudget,
+		BaseURL:        backendBaseURL(req),
+		Model:          filepath.Base(model.Path),
+		Timeout:        20 * time.Minute,
+		ContextTokens:  canaryContext,
+		PrefillBudget:  cacheCanaryPrefillBudget,
+		IdleSlotWait:   launchProbeIdleSlotWait,
+		BackendHealthy: backendStillHealthy(backend),
 	}
 	canary, canaryErr := runner.RunCacheCanary()
-	if canaryErr != nil || canary == nil || !canary.Functional {
-		reason := "functional canary failed"
-		if canaryErr != nil {
-			reason += ": " + canaryErr.Error()
-		} else if canary != nil && canary.Reason != "" {
-			reason += ": " + canary.Reason
-		}
+	switch state, reason := cacheCanaryGate(canary, canaryErr); state {
+	case controller.StateRejected:
 		_, _ = store.Transition(scope, profile.ID, controller.StateRejected, reason, "cache-canary")
 		return errors.New(reason)
+	case controller.StateDegraded:
+		_, _ = store.Transition(scope, profile.ID, controller.StateDegraded, reason, "cache-canary")
+		fmt.Fprintf(os.Stderr, "[verify] degraded profile: %s; the backend is serving but placement will not be promoted\n", reason)
+		return nil
 	}
 	if _, err = store.Transition(scope, profile.ID, controller.StateFunctionalVerified,
 		"deterministic completion endpoint responded", "cache-canary"); err != nil {
@@ -7356,7 +7399,7 @@ func cmdLaunch(args []string) {
 	verifyWatch := defaultBackendWatch
 	verifyWatch.onFatal = func() { failedFree = failedBackendFreeVRAM(runtimeCaps) }
 	if err := runWatchingBackend(processWatch{p}, backendBaseURL(req)+"/health", verifyWatch, func() error {
-		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL)
+		return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, strategy, serverArgs, claudeRouterURL, processWatch{p})
 	}); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
@@ -7494,57 +7537,44 @@ func cmdLaunch(args []string) {
 		// Run a health monitor alongside Claude so a mid-session backend crash
 		// is recorded immediately — otherwise Claude Code times out silently
 		// and the OOM data is lost until the user notices (audit cross-check #4).
-		healthCtx, healthCancel := context.WithCancel(context.Background())
-		defer healthCancel()
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-healthCtx.Done():
-					return
-				case <-ticker.C:
+		// Every requested stop below calls health.stop() first, which also waits
+		// out a check in flight, so a normal stop is never recorded as a crash.
+		health := startClaudeHealthMonitor(30*time.Second, func() bool { return isServerRunning(req.Host, req.Port) }, func() {
+			// A backend wedged after its fatal line still holds its memory.
+			var failedFree map[int]int
+			if p.IsRunning() {
+				failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps))
+			}
+			fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — checking its log for an OOM to record for the next launch\n")
+			logData := ""
+			if p.LogBuf != nil {
+				logData = p.LogBuf.String()
+			}
+			markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
+			peakMB, hostOOM, recorded, hostErr := recordRuntimeHostCgroupOOM(req, cfg, model, strategy, be, runtimeCaps, serverArgs, p, logData, markerPath)
+			if hostErr != nil {
+				fmt.Fprintf(os.Stderr, "[launch] could not record host cgroup OOM from health monitor: %v\n", hostErr)
+			} else if hostOOM {
+				if recorded {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded host cgroup OOM at %d MiB; revoked the profile and cached host-state evidence for the next launch\n", peakMB)
 				}
-				if !isServerRunning(req.Host, req.Port) {
-					// A backend wedged after its fatal line still holds its memory.
-					var failedFree map[int]int
-					if p.IsRunning() {
-						failedFree = failedBackendFreeVRAM(runtimeGrowthCaps(caps, runtimeCaps))
+			} else if p.LogBuf != nil {
+				device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, failedFree)
+				if recordErr != nil {
+					fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
+				} else if !ok {
+					if line := runtimeFatalLine(logData); line != "" {
+						fmt.Fprintf(os.Stderr, "[launch] backend failed (not a recognized CUDA OOM): %s — nothing recorded\n", line)
 					}
-					fmt.Fprintf(os.Stderr, "[launch] backend died mid-session — checking its log for an OOM to record for the next launch\n")
-					logData := ""
-					if p.LogBuf != nil {
-						logData = p.LogBuf.String()
-					}
-					markerPath := claudeOOMMarkerPath(cfg, req, model, be, serverArgs)
-					peakMB, hostOOM, recorded, hostErr := recordRuntimeHostCgroupOOM(req, cfg, model, strategy, be, runtimeCaps, serverArgs, p, logData, markerPath)
-					if hostErr != nil {
-						fmt.Fprintf(os.Stderr, "[launch] could not record host cgroup OOM from health monitor: %v\n", hostErr)
-					} else if hostOOM {
-						if recorded {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded host cgroup OOM at %d MiB; revoked the profile and cached host-state evidence for the next launch\n", peakMB)
-						}
-					} else if p.LogBuf != nil {
-						device, reserveMB, estimated, suspect, _, ok, recordErr := recordRuntimeOOMLog(req, cfg, model, strategy, be, caps, logData, markerPath, failedFree)
-						if recordErr != nil {
-							fmt.Fprintf(os.Stderr, "[launch] could not record backend OOM from health monitor: %v\n", recordErr)
-						} else if !ok {
-							if line := runtimeFatalLine(logData); line != "" {
-								fmt.Fprintf(os.Stderr, "[launch] backend failed (not a recognized CUDA OOM): %s — nothing recorded\n", line)
-							}
-						} else if suspect != "" {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded suspected CUDA OOM on device %d (%s) and a %d MiB reserve for the next launch\n", device, suspect, reserveMB)
-						} else if ok && estimated {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
-						} else if ok {
-							fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
-						}
-					}
-					healthCancel()
-					return
+				} else if suspect != "" {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded suspected CUDA OOM on device %d (%s) and a %d MiB reserve for the next launch\n", device, suspect, reserveMB)
+				} else if ok && estimated {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA VMM OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
+				} else if ok {
+					fmt.Fprintf(os.Stderr, "[launch] health monitor recorded CUDA OOM on device %d and a %d MiB reserve for the next launch\n", device, reserveMB)
 				}
 			}
-		}()
+		})
 
 		clientHost := req.Host
 		if claudeAuto != nil {
@@ -7567,7 +7597,7 @@ func cmdLaunch(args []string) {
 		sessionSpec, sessionErr := claudeLaunchSession(cfg, req, serverArgs)
 		if sessionErr != nil {
 			progressStop()
-			healthCancel()
+			health.stop()
 			_ = p.Stop()
 			claudeAuto.stop()
 			fmt.Fprintf(os.Stderr, "Error: %v\n", sessionErr)
@@ -7575,7 +7605,7 @@ func cmdLaunch(args []string) {
 		}
 		if code := runClaudeCodeClient(clientHost, claudeClientPort, serverArgs, clientArgs, sessionSpec, strategy.ContextSize); code >= 0 {
 			progressStop()
-			healthCancel()
+			health.stop()
 			// Record on exit as well as on launch: the workflow run ID is
 			// assigned inside Claude Code, so only now is the resume handle
 			// complete.
@@ -7620,6 +7650,9 @@ func cmdLaunch(args []string) {
 			os.Exit(code)
 		}
 		// `claude` isn't installed — fall back to the copy-paste recipe.
+		// The serving loop below watches the backend from here on; its Ctrl+C
+		// stop must not reach this monitor's OOM recorder.
+		health.stop()
 		printClaudeCodeRecipe(clientHost, claudeClientPort, serverArgs)
 	}
 
@@ -7739,7 +7772,7 @@ func cmdLaunch(args []string) {
 		}
 		failedFree = nil
 		if err := runWatchingBackend(processWatch{newP}, backendBaseURL(req)+"/health", verifyWatch, func() error {
-			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL)
+			return verifyAndActivateLaunch(req, cfg, model, be, runtimeCaps, newStrategy, newArgs, claudeRouterURL, processWatch{newP})
 		}); err != nil {
 			_ = newP.Stop()
 			claudeAuto.stop()

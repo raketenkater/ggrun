@@ -8,4 +8,7 @@ const (
 	scopeUnsupported scopeMode = iota
 	scopeUser
 	scopeSystem
+	// scopeNone is the explicit GGRUN_SCOPE_MODE=none opt-out for hosts without
+	// systemd (containers). No scope exists to observe, resize or stop.
+	scopeNone
 )

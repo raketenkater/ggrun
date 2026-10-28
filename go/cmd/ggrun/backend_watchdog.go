@@ -268,6 +268,17 @@ func waitForShutdownCrashOrWedge(b servingBackend, sigCh <-chan os.Signal, healt
 	}
 }
 
+// backendStillHealthy is the canary's judgement of a backend whose speed probe
+// timed out: still running and no fatal line in its log. /health is not used,
+// because ik_llama.cpp answers it from the busy scheduler; a wedge stays the
+// watchdog's call. Nil leaves the benchmark runner's own /health check.
+func backendStillHealthy(b watchedBackend) func() bool {
+	if b == nil {
+		return nil
+	}
+	return func() bool { return b.IsRunning() && fatalBackendLine(b.Log()) == "" }
+}
+
 // processWatch adapts a launched backend to watchedBackend.
 type processWatch struct{ p *server.Process }
 

@@ -115,6 +115,16 @@ type Runner struct {
 	// ResourceSamplingInterval supersedes GPUUtilizationInterval when set. The
 	// older field remains supported for API and test compatibility.
 	ResourceSamplingInterval time.Duration
+	// IdleSlotWait, when positive, bounds how long the cache canary and agent
+	// probes wait for GET /slots to report no processing slot before their first
+	// timed request. The wait is not part of any request timeout. Zero skips it.
+	IdleSlotWait time.Duration
+	// BackendHealthy decides whether a canary speed probe that timed out met a
+	// slow but working backend. Nil asks /health; any answer counts.
+	BackendHealthy func() bool
+	// Test seams for the idle-slot poll; zero uses the production values.
+	idlePollInterval time.Duration
+	idlePollTimeout  time.Duration
 }
 
 // GPUUtilization is one observed device during a bounded agent workload.
