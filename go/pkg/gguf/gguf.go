@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -350,6 +351,15 @@ func (i *Info) EstimateParams() int64 {
 	return 2*vocab*embed + layers*(4*embed*embed+3*embed*ffn)
 }
 
+// GGUF keys are at most 2^16-1 bytes by spec. A chat template is a few KiB to
+// a few hundred KiB; the cap only stops a corrupt length from sizing a huge
+// allocation. Nested arrays are legal but never deep in real files.
+const (
+	maxGGUFKeyLen       = 1<<16 - 1
+	maxChatTemplateLen  = 16 << 20
+	maxGGUFArrayNesting = 8
+)
+
 // ChatTemplate reads just the `tokenizer.chat_template` metadata string from a
 // GGUF header, without shelling out to parse_gguf.py or walking the tensor
 // table. It is a fast, pure-Go probe used by the chat-template catalog to
@@ -364,92 +374,122 @@ func ChatTemplate(path string) string {
 		return ""
 	}
 	defer f.Close()
+	template, err := readChatTemplate(f)
+	if err != nil {
+		return ""
+	}
+	return template
+}
 
+// readChatTemplate scans GGUF metadata for tokenizer.chat_template. Every
+// length it reads comes from the file, so each is bounded before it sizes an
+// allocation or a skip: a corrupt header is an error, never a panic.
+func readChatTemplate(r io.Reader) (string, error) {
 	var buf [8]byte
-	readFull := func(dst []byte) bool {
-		_, err := io.ReadFull(f, dst)
-		return err == nil
+	readFull := func(dst []byte) error {
+		_, err := io.ReadFull(r, dst)
+		return err
 	}
-	if !readFull(buf[:4]) || string(buf[:4]) != "GGUF" {
-		return ""
+	readU32 := func() (uint32, error) {
+		if err := readFull(buf[:4]); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint32(buf[:4]), nil
 	}
-	if !readFull(buf[:4]) { // version
-		return ""
+	readU64 := func() (uint64, error) {
+		if err := readFull(buf[:8]); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint64(buf[:8]), nil
 	}
-	if !readFull(buf[:8]) { // tensor_count
-		return ""
+	if err := readFull(buf[:4]); err != nil || string(buf[:4]) != "GGUF" {
+		return "", fmt.Errorf("not a GGUF file")
 	}
-	var kvCount uint64
-	if !readFull(buf[:8]) {
-		return ""
+	if _, err := readU32(); err != nil { // version
+		return "", err
 	}
-	kvCount = binary.LittleEndian.Uint64(buf[:8])
+	if _, err := readU64(); err != nil { // tensor_count
+		return "", err
+	}
+	kvCount, err := readU64()
+	if err != nil {
+		return "", err
+	}
 
 	for i := uint64(0); i < kvCount; i++ {
-		if !readFull(buf[:8]) {
-			return ""
+		keyLen, err := readU64()
+		if err != nil {
+			return "", err
 		}
-		keyLen := binary.LittleEndian.Uint64(buf[:8])
+		if keyLen > maxGGUFKeyLen {
+			return "", fmt.Errorf("metadata key %d: length %d exceeds %d", i, keyLen, maxGGUFKeyLen)
+		}
 		key := make([]byte, keyLen)
-		if !readFull(key) {
-			return ""
+		if err := readFull(key); err != nil {
+			return "", err
 		}
-		if !readFull(buf[:4]) {
-			return ""
+		valType, err := readU32()
+		if err != nil {
+			return "", err
 		}
-		valType := binary.LittleEndian.Uint32(buf[:4])
-		switch valType {
-		case 8: // string
-			if !readFull(buf[:8]) {
-				return ""
+		if valType == 8 && string(key) == "tokenizer.chat_template" {
+			valLen, err := readU64()
+			if err != nil {
+				return "", err
 			}
-			valLen := binary.LittleEndian.Uint64(buf[:8])
+			if valLen > maxChatTemplateLen {
+				return "", fmt.Errorf("chat template length %d exceeds %d", valLen, maxChatTemplateLen)
+			}
 			val := make([]byte, valLen)
-			if !readFull(val) {
-				return ""
+			if err := readFull(val); err != nil {
+				return "", err
 			}
-			if string(key) == "tokenizer.chat_template" {
-				return string(val)
-			}
-		case 9: // array — skip element type + count, then each element
-			if !readFull(buf[:4]) {
-				return ""
-			}
-			elemType := binary.LittleEndian.Uint32(buf[:4])
-			if !readFull(buf[:8]) {
-				return ""
-			}
-			arrLen := binary.LittleEndian.Uint64(buf[:8])
-			for j := uint64(0); j < arrLen; j++ {
-				if !skipGGUFValue(f, elemType) {
-					return ""
-				}
-			}
-		default:
-			if !skipGGUFValue(f, valType) {
-				return ""
-			}
+			return string(val), nil
+		}
+		if err := skipGGUFValue(r, valType, 0); err != nil {
+			return "", fmt.Errorf("metadata %q: %w", key, err)
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // skipGGUFValue advances the reader past one GGUF metadata value of the given
-// type id. Returns false on EOF/truncation.
-func skipGGUFValue(r io.Reader, valType uint32) bool {
-	fixed := map[uint32]uint64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+// type id, including arrays. It fails on truncation, an unknown type, or a
+// length no real file could hold.
+func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
+	fixed := map[uint32]int64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 	if n, ok := fixed[valType]; ok {
-		_, err := io.CopyN(io.Discard, r, int64(n))
-		return err == nil
+		_, err := io.CopyN(io.Discard, r, n)
+		return err
 	}
-	if valType == 8 { // string
-		var buf [8]byte
-		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			return false
+	var buf [12]byte
+	switch valType {
+	case 8: // string
+		if _, err := io.ReadFull(r, buf[:8]); err != nil {
+			return err
 		}
-		n := binary.LittleEndian.Uint64(buf[:])
+		n := binary.LittleEndian.Uint64(buf[:8])
+		if n > math.MaxInt64 {
+			return fmt.Errorf("string length %d out of range", n)
+		}
 		_, err := io.CopyN(io.Discard, r, int64(n))
-		return err == nil
+		return err
+	case 9: // array: element type + count, then each element
+		if depth >= maxGGUFArrayNesting {
+			return fmt.Errorf("arrays nested deeper than %d", maxGGUFArrayNesting)
+		}
+		if _, err := io.ReadFull(r, buf[:12]); err != nil {
+			return err
+		}
+		elemType := binary.LittleEndian.Uint32(buf[:4])
+		count := binary.LittleEndian.Uint64(buf[4:12])
+		for j := uint64(0); j < count; j++ {
+			if err := skipGGUFValue(r, elemType, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown value type %d", valType)
 	}
-	return true
 }

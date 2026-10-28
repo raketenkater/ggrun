@@ -215,12 +215,86 @@ func TestProjectKeyMatchesClaudeCodeLayout(t *testing.T) {
 		"/home/mik/ggrun-project/ggrun":   "-home-mik-ggrun-project-ggrun",
 		"/home/mik/ggrun/.src/llm-server": "-home-mik-ggrun--src-llm-server",
 		"/home/mik/ultra-zen":             "-home-mik-ultra-zen",
+		// Observed on disk: Claude Code recorded cwd /tmp/ggrun-cell-calc-_uy_2_42
+		// under projects/-tmp-ggrun-cell-calc--uy-2-42.
+		"/tmp/ggrun-cell-calc-_uy_2_42": "-tmp-ggrun-cell-calc--uy-2-42",
+		`C:\Users\a b\my_app`:           "C--Users-a-b-my-app",
+		`\\server\share\proj (v2)`:      "--server-share-proj--v2-",
+		"/home/me/café/🚀":               "-home-me-caf----",
 	}
 	for in, want := range cases {
 		if got := ProjectKey(in); got != want {
 			t.Errorf("ProjectKey(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// Long keys carry Claude Code's own hash suffix. The expected values were
+// computed with the client's function copied from Claude Code 2.1.307
+// (slice(0, 200) + "-" + Math.abs(hash).toString(36)) under node.
+func TestProjectKeyHashesLongPathsLikeClaudeCode(t *testing.T) {
+	deep := "/" + strings.Repeat("deep/", 50)
+	cases := map[string]string{
+		deep + "project-a": "aobq66",
+		deep + "project-b": "aobq67",
+		`C:\Users\me\` + strings.Repeat("x_y ", 60) + "\U0001F600end": "aw86qt",
+	}
+	for path, hash := range cases {
+		key := ProjectKey(path)
+		want := sanitizedPrefix(path) + "-" + hash
+		if key != want {
+			t.Errorf("ProjectKey(%.40q...) = ...%q, want ...%q", path, key[claudeMaxProjectKey:], want[claudeMaxProjectKey:])
+		}
+	}
+	// Review 2026-10-28: two sibling projects under one long prefix must not
+	// share a transcript directory.
+	projects := t.TempDir()
+	a, b := projectDir(projects, deep+"project-a", "s1"), projectDir(projects, deep+"project-b", "s1")
+	if a == b {
+		t.Fatalf("two distinct projects select the same transcript directory: %s", a)
+	}
+	if short := projectDir(projects, "/home/mik/repo", "s1"); short != filepath.Join(projects, "-home-mik-repo") {
+		t.Fatalf("short key changed: %q", short)
+	}
+}
+
+// A session kept under another hash suffix (as the client accepts after
+// checking the transcript) is still found by its UUID; without that session
+// the exact key is used, never a sibling project's directory.
+func TestProjectDirFindsSessionUnderAnotherSuffix(t *testing.T) {
+	projects := t.TempDir()
+	workDir := "/" + strings.Repeat("deep/", 50) + "project-a"
+	other := filepath.Join(projects, ProjectKey(workDir)[:claudeMaxProjectKey]+"-zzzzzz")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := "072e63a1-819a-4682-a742-559695c3cd76"
+	if err := os.WriteFile(filepath.Join(other, session+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectDir(projects, workDir, session); got != other {
+		t.Fatalf("session under another suffix: got %q, want %q", got, other)
+	}
+	exact := filepath.Join(projects, ProjectKey(workDir))
+	if got := projectDir(projects, workDir, "another-session"); got != exact {
+		t.Fatalf("unknown session must use the exact key, got %q", got)
+	}
+}
+
+// sanitizedPrefix is the first claudeMaxProjectKey characters of the dashed key.
+func sanitizedPrefix(path string) string {
+	var b strings.Builder
+	for _, r := range path {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()[:claudeMaxProjectKey]
 }
 
 func TestJournalPathAndCachedAgents(t *testing.T) {

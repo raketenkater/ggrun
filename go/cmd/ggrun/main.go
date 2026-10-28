@@ -8617,6 +8617,14 @@ func cmdGUI() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+			if modelDir != cfg.ModelDir {
+				// The TUI lists only the configured model dir and the discovered
+				// index, so record the custom destination or the download is
+				// invisible until the next full computer scan.
+				if err := modelstore.RememberModelDir(cfg.CacheDir, modelDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not add %s to the model list: %v\n", modelDir, err)
+				}
+			}
 			return
 		}
 

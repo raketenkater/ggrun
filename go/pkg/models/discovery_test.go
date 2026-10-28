@@ -146,6 +146,40 @@ func TestDiscoveryCacheRoundTripDropsStaleAndInvalidPaths(t *testing.T) {
 	}
 }
 
+func TestRememberModelDirAddsDownloadsAndKeepsPriorPaths(t *testing.T) {
+	cacheDir := t.TempDir()
+	prior := filepath.Join(t.TempDir(), "prior.gguf")
+	downloadDir := filepath.Join(t.TempDir(), "custom folder")
+	downloaded := filepath.Join(downloadDir, "repo", "model-Q4_K_M.gguf")
+	for _, path := range []string{prior, downloaded} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("GGUF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SaveDiscoveredPaths(cacheDir, []string{prior}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RememberModelDir(cacheDir, downloadDir); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadDiscoveredPaths(cacheDir)
+	want := []string{prior, downloaded}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("discovered paths = %#v, want %#v", got, want)
+	}
+	if err := RememberModelDir(cacheDir, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadDiscoveredPaths(cacheDir); len(got) != 2 {
+		t.Fatalf("an empty folder must not drop prior paths: %#v", got)
+	}
+}
+
 func TestTruncatedDiscoveryScanMergesPriorValidPaths(t *testing.T) {
 	cacheDir := t.TempDir()
 	modelDir := t.TempDir()

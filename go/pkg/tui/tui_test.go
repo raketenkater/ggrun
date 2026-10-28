@@ -1748,6 +1748,39 @@ func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	}
 }
 
+func TestApplySettingDoesNotPersistEnvironmentOverrides(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("LLM_PORT", "9555")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Model{settingsCfg: cfg, port: cfg.Port, parallel: "1"}
+	for _, row := range settingRows() {
+		if row.label == "Parallel" {
+			m.applySetting(row, "3")
+		}
+	}
+	if m.messageType != "info" {
+		t.Fatalf("setting not saved: %q", m.message)
+	}
+	saved, err := config.LoadPersisted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Parallel != 3 {
+		t.Fatalf("saved parallel = %d, want 3", saved.Parallel)
+	}
+	if saved.Port == 9555 || saved.AppHome == appHome {
+		t.Fatalf("one-off environment overrides were written to the config file: port=%d app home=%q", saved.Port, saved.AppHome)
+	}
+	if m.settingsCfg.Port != 9555 {
+		t.Fatalf("the live session must keep the environment override, got port %d", m.settingsCfg.Port)
+	}
+}
+
 func TestApplySettingRejectsInvalidSafetyValues(t *testing.T) {
 	m := Model{settingsCfg: config.Defaults(), port: 8081, parallel: "1"}
 	rows := map[string]settingRow{}
