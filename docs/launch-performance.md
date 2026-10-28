@@ -135,8 +135,8 @@ extra, not part of the headline numbers.
 
 ### Launch Read (2026-06-22)
 
-- ggrun's default placement was faster than raw llama.cpp `--fit` on both dense models
-  tested; the 4B gain was a backend difference.
+- ggrun was faster than raw llama.cpp `--fit` on both dense models tested; the 4B gain
+  was a backend difference (ik_llama.cpp vs llama.cpp), not placement.
 - ggrun ran big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) across VRAM + RAM; raw `--fit`
   loaded the 122B but could not load MiniMax-M3 then.
 - Placement was computed from the GGUF and real VRAM, with no manual flags.

@@ -24,13 +24,13 @@ through to `llama-server`.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/raketenkater/ggrun)](https://github.com/raketenkater/ggrun/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#backends)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)](#backends)
 [![CI](https://github.com/raketenkater/ggrun/actions/workflows/ci.yml/badge.svg)](https://github.com/raketenkater/ggrun/actions/workflows/ci.yml)
 [![Install E2E](https://github.com/raketenkater/ggrun/actions/workflows/install-e2e.yml/badge.svg)](https://github.com/raketenkater/ggrun/actions/workflows/install-e2e.yml)
 
 ## Quick start
 
-Linux / macOS:
+Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
@@ -187,7 +187,7 @@ Default placement, 32k context, without `--ai-tune`:
 
 | Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun |
 |---|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 151.4 tok/s |
+| Qwen3.5-4B Q4_K_M (backend difference) | 124.8 | 103.3 | 151.4 tok/s |
 | Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.4 tok/s |
 | Qwen3.5-122B-A10B UD-IQ4_XS | 13.5 | 20.97 | 22.9 tok/s |
 | MiniMax-M3 UD-IQ3_XXS | could not load | could not load | 5.59 tok/s |

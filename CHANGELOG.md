@@ -20,6 +20,10 @@
   the CUDA bundle's kernels do not run there.
 - The catalog refresh survives bad repos, matches model names more strictly,
   and lists reviewed models without a score as estimates after scored ones.
+- Python 3 is required to launch (GGUF metadata); the installer installs it and
+  self-checks `parse_gguf.py`.
+- The Docker images run without a cgroup scope (`GGRUN_SCOPE_MODE=none`), and
+  the GPU images ship `llama-fit-params`.
 
 ### Fixed
 
@@ -35,6 +39,10 @@
   system Go; `parse_gguf.py` runs under a verified Python 3.
 - `LLM_INSTALL_MODE=release` on a host with a working llama-server keeps that
   backend and still installs ggrun from the release bundle.
+- The installer fetches a source tarball when git is missing, and finds upstream
+  llama.cpp prebuilts in recent releases, not only the latest.
+- The TUI lists models downloaded to a custom folder, and saves settings
+  without one-off `LLM_*` environment overrides.
 - The printed Claude Code recipe now sets the same variables as `--claude-code`,
   including `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, so copied setups reuse the cache.
 - The Workflow hook asks before running a rewritten Workflow unless the session

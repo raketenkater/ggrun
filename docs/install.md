@@ -29,8 +29,8 @@ cd ggrun
 ./setup.sh
 ```
 
-macOS is deprecated: `setup.sh` still runs there with a Metal bundle, but it is
-best-effort and not tested.
+macOS is deprecated and untested: `setup.sh` still runs there (Metal), but
+releases may ship no macOS bundle, in which case it builds llama.cpp from source.
 
 ## App home layout
 
