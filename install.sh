@@ -284,12 +284,37 @@ prepare_persistent_source_repo() {
     SRC_DIR="$SOURCE_REPO_DIR"
 }
 
+# fetch_source_tarball is the no-git source path: a GitHub tarball of the
+# commit SOURCE_REF names, so the build can still be stamped with that commit.
+SRC_TARBALL_COMMIT=""
+fetch_source_tarball() {
+    local dir="$1" sha
+    command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || return 1
+    sha="$(curl -fsL -H 'Accept: application/vnd.github.sha' \
+        "https://api.github.com/repos/$GITHUB_REPO/commits/$SOURCE_REF" 2>/dev/null || true)"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || sha="$SOURCE_REF"
+    curl -fsL --show-error "https://codeload.github.com/$GITHUB_REPO/tar.gz/$sha" |
+        tar -xz -C "$dir" --strip-components=1 || return 1
+    [[ -f "$dir/go/go.mod" ]] || return 1
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && SRC_TARBALL_COMMIT="${sha:0:7}"
+    return 0
+}
+
 ensure_source_repo() {
     [[ -n "$SRC_DIR" ]] && return 0
     if prepare_persistent_source_repo; then
         return 0
     fi
-    command -v git >/dev/null || { err "git required to fetch repo"; exit 1; }
+    if ! command -v git >/dev/null; then
+        SRC_DIR="$(mktemp -d -t ggrun-install.XXXXXX)"
+        say "── git not found; downloading $GITHUB_REPO@$SOURCE_REF source tarball ──"
+        if fetch_source_tarball "$SRC_DIR"; then
+            ok "Unpacked source to $SRC_DIR"
+            return 0
+        fi
+        err "git is not installed and the source tarball download failed; install git and retry"
+        exit 1
+    fi
     SRC_DIR="$(mktemp -d -t ggrun-install.XXXXXX)"
     say "── Cloning $REPO_URL ──"
     if git clone --depth=1 --branch "$SOURCE_REF" "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 || \
@@ -797,6 +822,30 @@ fi
 
 # Linux auto: CUDA first when an NVIDIA GPU is present, then Vulkan, then CPU.
 # macOS: Metal. Never pick CUDA on a machine with no NVIDIA device.
+# The published Linux CUDA bundle has kernels for compute capability 7.5+
+# (Turing and newer; CMAKE_CUDA_ARCHITECTURES in build-linux-cuda-bundle.sh,
+# with PTX for newer cards). Pascal and Volta (P40, 1080 Ti, V100) load it and
+# then fail at the first kernel launch, so they default to Vulkan instead.
+CUDA_BUNDLE_MIN_CC=75
+
+# nvidia_min_compute_cap prints the lowest compute capability as e.g. 61.
+nvidia_min_compute_cap() {
+    local smi
+    smi="$(find_nvidia_smi 2>/dev/null || true)"
+    [[ -n "$smi" ]] || return 1
+    "$smi" --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
+        awk -F. '$1 ~ /^ *[0-9]+$/ && $2 ~ /^[0-9]+ *$/ { v = $1 * 10 + $2; if (min == "" || v < min) min = v }
+                 END { if (min == "") exit 1; print min }'
+}
+
+# cuda_bundle_supported is true unless a GPU is known to be older than the
+# bundle's kernels. An unknown capability (old driver) keeps the bundle.
+cuda_bundle_supported() {
+    local cc
+    cc="$(nvidia_min_compute_cap)" || return 0
+    (( cc >= CUDA_BUNDLE_MIN_CC ))
+}
+
 auto_backend_candidates() {
     if [[ "$OS" == "Darwin" ]]; then
         echo metal
@@ -806,7 +855,7 @@ auto_backend_candidates() {
         err "Use install.ps1 for native Windows installs, or run this Bash installer on Linux/macOS."
         exit 1
     fi
-    if has_nvidia_gpu; then
+    if has_nvidia_gpu && cuda_bundle_supported; then
         echo cuda
     fi
     echo vulkan
@@ -853,7 +902,7 @@ if (( ! NONINTERACTIVE )) && [[ "${LLM_INSTALL_PROMPT:-auto}" != "0" && "$BACKEN
         fi
     fi
     if [[ "$PY_DEPS_MODE" == "auto" ]]; then
-        if ask "Install Python downloader helpers for HuggingFace model search/download if missing? [Y/n]" y; then
+        if ask "Install Python 3 (needed to launch models) and the HuggingFace download helpers if missing? [Y/n]" y; then
             PY_DEPS_MODE="install"
         else
             PY_DEPS_MODE="skip"
@@ -1106,6 +1155,7 @@ build_go_binary() {
     local ldflags="-s -w"
     local ver
     ver="$(git -C "$SRC_DIR" describe --tags --always 2>/dev/null || true)"
+    [[ -n "$ver" ]] || ver="$SRC_TARBALL_COMMIT"
     [[ -n "$ver" ]] && ldflags="$ldflags -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$ver"
     (cd "$SRC_DIR/go" && "$GO_CMD" build -trimpath -ldflags="$ldflags" -o "$out" ./cmd/ggrun)
 }
@@ -1137,6 +1187,10 @@ install_legacy_bash_shim() {
 install_release_bundle() {
     local platform asset url sums_url tmp archive payload_root found_backend=0 dest_name="${1:-}"
     [[ "$BACKEND_CHOICE" == "skip" ]] && return 1
+    if [[ "$BACKEND_CHOICE" == "cuda" ]] && ! cuda_bundle_supported; then
+        warn "The ggrun CUDA bundle needs compute capability 7.5+; this host has $(nvidia_min_compute_cap | sed 's/.$/.&/'). Skipping it."
+        return 1
+    fi
     # CUDA release bundles are published for supported Linux x86_64 hosts. If a
     # matching bundle is unavailable, auto mode can still fall back to Vulkan or
     # CPU before attempting a source build.
@@ -1506,8 +1560,21 @@ fetch_nccl_into_box() {
 }
 
 link_default_llama_server() {
-    local name t kind best=""
+    local name t kind best="" order=() late=()
     for name in ik_llama-server-cuda llama-server-vulkan llama-server-cuda llama-server; do
+        # The CUDA bundle passes --version on any NVIDIA GPU, but one older than
+        # its kernels fails at the first launch, so there it ranks last. A CUDA
+        # build adopted from or compiled on this machine keeps its place.
+        if [[ "$name" == *-cuda && "${BACKEND_REQUEST:-auto}" != "cuda" &&
+              "$(readlink "$INSTALL_DIR/$name" 2>/dev/null)" == "backends/$name/llama-server" ]] &&
+            ! cuda_bundle_supported; then
+            late+=("$name")
+        else
+            order+=("$name")
+        fi
+    done
+    order+=(${late[@]+"${late[@]}"})
+    for name in "${order[@]}"; do
         [[ -e "$INSTALL_DIR/$name" || -L "$INSTALL_DIR/$name" ]] || continue
         kind="$(backend_probe_kind "$name" || true)"
         if [[ "$kind" == "runs" ]]; then
@@ -1516,7 +1583,7 @@ link_default_llama_server() {
         fi
     done
     if [[ -z "$best" ]]; then
-        for name in ik_llama-server-cuda llama-server-vulkan llama-server-cuda llama-server; do
+        for name in "${order[@]}"; do
             [[ -e "$INSTALL_DIR/$name" || -L "$INSTALL_DIR/$name" ]] || continue
             best="$name"
             break
@@ -1524,6 +1591,29 @@ link_default_llama_server() {
     fi
     [[ -n "$best" && "$best" != "llama-server" ]] || return 0
     ln -sfn "$best" "$INSTALL_DIR/llama-server"
+}
+
+# upstream_prebuilt_url prints the newest bin-<name>.tar.gz download URL in a
+# ggml-org llama.cpp releases listing (JSON array, newest first).
+upstream_prebuilt_url() {
+    local api="$1" name="$2" url
+    url="$(python3 - "$api" "$name" <<'PY' 2>/dev/null || true
+import json, sys
+want = "bin-" + sys.argv[2] + ".tar.gz"
+for rel in json.load(open(sys.argv[1])):
+    urls = [a.get("browser_download_url") or "" for a in rel.get("assets") or []
+            if (a.get("name") or "").endswith(want)]
+    if urls:
+        print(urls[0])
+        break
+PY
+)"
+    # grep fallback if python is missing
+    if [[ -z "$url" ]]; then
+        url="$(grep -Eo 'https://github.com/ggml-org/llama.cpp/releases/download/[^"]+bin-ubuntu[^"]+\.tar\.gz' "$api" \
+            | grep -F -- "bin-$name.tar.gz" | head -n 1 || true)"
+    fi
+    printf '%s\n' "$url"
 }
 
 # ggml-org ships Linux CPU and Vulkan prebuilts, not Linux CUDA.
@@ -1541,28 +1631,14 @@ install_upstream_linux_prebuilt() {
     esac
     say "Trying ggml-org llama.cpp $want prebuilt..."
     api="$(mktemp)"
-    if ! curl -fsSL -A ggrun-installer "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" -o "$api"; then
+    # Like install.ps1: the release marked "latest" can carry no binaries while
+    # its builds are published on newer prereleases, so scan the recent list.
+    if ! curl -fsSL -A ggrun-installer "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20" -o "$api"; then
         rm -f "$api"
         return 1
     fi
-    url="$(python3 - "$api" "$name" <<'PY' 2>/dev/null || true
-import json, sys
-want = sys.argv[2]
-data = json.load(open(sys.argv[1]))
-for a in data.get("assets") or []:
-    n = a.get("name") or ""
-    if n.endswith("bin-" + want + ".tar.gz") or ("bin-" + want + ".tar.gz" in n):
-        print(a.get("browser_download_url") or "")
-        break
-PY
-)"
+    url="$(upstream_prebuilt_url "$api" "$name")"
     rm -f "$api"
-    # grep fallback if python is missing
-    if [[ -z "$url" ]]; then
-        url="$(curl -fsSL -A ggrun-installer "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" \
-            | grep -Eo 'https://github.com/ggml-org/llama.cpp/releases/download/[^"]+bin-ubuntu[^"]+\.tar\.gz' \
-            | grep -F "$name" | head -n 1 || true)"
-    fi
     [[ -n "$url" ]] || return 1
     tmp="$(mktemp -d -t ggrun-llama-prebuilt.XXXXXX)"
     archive="$tmp/llama.tgz"
@@ -1833,7 +1909,7 @@ install_auto_release_backends() {
         ensure_vulkan_runtime && ok "Vulkan runtime is installed" || true
     fi
 
-    if has_nvidia_gpu && ! installed_real_server ik_llama-server-cuda; then
+    if has_nvidia_gpu && cuda_bundle_supported && ! installed_real_server ik_llama-server-cuda; then
         BACKEND_CHOICE="cuda"
         say "Installing ik_llama.cpp (CUDA)..."
         if install_release_bundle ik_llama-server-cuda || installed_real_server ik_llama-server-cuda; then
@@ -1869,8 +1945,11 @@ install_auto_release_backends() {
     fi
 
     # Compile only if the CUDA tarball never landed. Do this after llama.cpp
-    # so a gcc/dnf stall cannot skip the Vulkan/CPU pair.
-    if has_nvidia_gpu && ! installed_real_server ik_llama-server-cuda; then
+    # so a gcc/dnf stall cannot skip the Vulkan/CPU pair. A GPU older than the
+    # bundle's kernels keeps Vulkan; a CUDA build for it is an explicit choice.
+    if has_nvidia_gpu && ! cuda_bundle_supported; then
+        say "This NVIDIA GPU predates the CUDA bundle; using Vulkan. LLM_INSTALL_BACKEND=cuda builds CUDA from source."
+    elif has_nvidia_gpu && ! installed_real_server ik_llama-server-cuda; then
         if ! has_cuda_toolkit; then
             ensure_cuda_toolkit || true
         fi
@@ -1913,7 +1992,7 @@ python3_usable() {
 
 install_python_runtime() {
     [[ "$PY_DEPS_MODE" != "skip" ]] || return 1
-    say "-- Installing Python 3 for model downloads --"
+    say "-- Installing Python 3 (GGUF metadata parsing and model downloads) --"
     if [[ "$OS" == "Darwin" ]]; then
         command -v brew >/dev/null 2>&1 || return 1
         brew install python
@@ -2186,24 +2265,24 @@ if [[ "$MAIN_IMPL" == "go" && "$INSTALL_MODE" != "scripts" && ! -x "$INSTALL_DIR
     exit 1
 fi
 
-# ── Stage 4: python deps (for downloader) ──────────────────────────────────
+# ── Stage 4: python (GGUF metadata on every launch; downloader deps) ────────
 say ""
 say "── Python dependencies ──"
 if [[ "$PY_DEPS_MODE" == "skip" ]]; then
-    warn "Skipped python dependency install. Downloader needs huggingface_hub + tqdm."
+    warn "Skipped python dependency install. Launching needs Python 3; downloads also need huggingface_hub + tqdm."
 else
     if ! python3_usable; then
         warn "A usable Python 3 interpreter was not found."
         if ! install_python_runtime || ! python3_usable; then
             if [[ "$OS" == "Darwin" ]]; then
-                err "Python 3 is needed for model search/download. Install Homebrew, then run: brew install python"
+                err "Python 3 is needed to launch models (GGUF metadata) and to download them. Install Homebrew, then run: brew install python"
             else
-                err "Python 3 is needed for model search/download. Install python3 and python3-pip with your package manager."
+                err "Python 3 is needed to launch models (GGUF metadata) and to download them. Install python3 and python3-pip with your package manager."
             fi
             if [[ "$PY_DEPS_MODE" == "install" ]]; then
                 exit 1
             fi
-            warn "Local GGUF serving still works; model search/download is unavailable until Python is installed."
+            warn "ggrun cannot launch or download models until Python 3 is installed."
         fi
     fi
     if python3_usable; then
@@ -2223,6 +2302,26 @@ else
                 warn "Local GGUF serving still works; model search/download is unavailable."
             fi
         fi
+    fi
+fi
+
+# Every launch reads GGUF metadata through parse_gguf.py. Check that path on a
+# 24-byte GGUF v3 header (no tensors, no metadata).
+gguf_parse_selfcheck() {
+    local parser="$INSTALL_DIR/parse_gguf.py" tiny out
+    [[ -f "$parser" ]] || return 0
+    tiny="$(mktemp -t ggrun-selfcheck.XXXXXX)"
+    printf 'GGUF\003\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' >"$tiny"
+    out="$(python3 "$parser" "$tiny" 2>&1)" || true
+    rm -f "$tiny"
+    [[ "$out" == *tensor_accounting_schema* ]] || { say "$out"; return 1; }
+}
+if python3_usable; then
+    if gguf_parse_selfcheck; then
+        ok "GGUF metadata parser works"
+    else
+        err "parse_gguf.py failed on a minimal GGUF; model launches would fail."
+        exit 1
     fi
 fi
 
