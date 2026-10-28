@@ -1295,16 +1295,19 @@ install_release_bundle() {
 # Release mode keeps a working backend it found, but nothing else installs the
 # launcher in that mode: take ggrun and its helpers from the checksummed bundle.
 install_release_launcher() {
-    local saved="$BACKEND_CHOICE" fallback=cpu choice rc=1
-    [[ "$OS" == "Darwin" ]] && fallback=metal
-    for choice in "$BACKEND_CHOICE" "$fallback"; do
+    # Only ggrun and its helpers are taken here, and every Linux bundle carries
+    # the same ones, so the small cpu bundle goes first: a CUDA host keeping its
+    # backend should not download the CUDA runtime just for the launcher.
+    local saved="$BACKEND_CHOICE" first=cpu choice rc=1
+    [[ "$OS" == "Darwin" ]] && first=metal
+    for choice in "$first" "$BACKEND_CHOICE"; do
         [[ "$choice" == "skip" ]] && continue
         BACKEND_CHOICE="$choice"
         if install_release_bundle "" 1; then
             rc=0
             break
         fi
-        [[ "$choice" == "$fallback" ]] && break
+        [[ "$choice" == "$saved" ]] && break
     done
     BACKEND_CHOICE="$saved"
     return "$rc"

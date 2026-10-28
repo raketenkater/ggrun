@@ -201,6 +201,11 @@ install_release_bundle ik_llama-server-cuda
             "install_release_bundle", "install_release_launcher", "install_payload_file",
             "release_asset_name", "find_release_asset_url", "verify_release_checksum",
             "install_ggrun_from_source"))
+        for choice, with_cpu_asset in (("cpu", True), ("vulkan", True), ("cuda", False)):
+            with self.subTest(choice=choice, with_cpu_asset=with_cpu_asset):
+                self._release_mode_keeps_backend(stage, helpers, choice, with_cpu_asset)
+
+    def _release_mode_keeps_backend(self, stage, helpers, choice, with_cpu_asset):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             payload = tmp / "src" / "ggrun-linux-x86_64-cpu"
@@ -210,8 +215,9 @@ install_release_bundle ik_llama-server-cuda
             release = tmp / "release"
             release.mkdir()
             asset = "ggrun-linux-x86_64-cpu.tar.gz"
-            subprocess.run(["tar", "-czf", str(release / asset), "-C", str(tmp / "src"), payload.name], check=True)
-            subprocess.run(f"sha256sum {asset} > SHA256SUMS", shell=True, cwd=release, check=True)
+            if with_cpu_asset:
+                subprocess.run(["tar", "-czf", str(release / asset), "-C", str(tmp / "src"), payload.name], check=True)
+                subprocess.run(f"sha256sum {asset} > SHA256SUMS", shell=True, cwd=release, check=True)
             system_server = tmp / "system" / "llama-server"
             system_server.parent.mkdir()
             system_server.write_text("system")
@@ -224,13 +230,18 @@ installed_real_server() {{ [[ -e "$INSTALL_DIR/$1" ]]; }}
 place_isolated_backend() {{ echo backend-replaced; exit 98; }}
 ensure_source_repo() {{ echo unexpected-source-build; exit 99; }}
 platform_slug() {{ echo linux-x86_64; }}
-OS=Linux INSTALL_MODE=release BACKEND_REQUEST=auto BACKEND_CHOICE=cpu MAIN_IMPL=go
+OS=Linux INSTALL_MODE=release BACKEND_REQUEST=auto BACKEND_CHOICE={choice} MAIN_IMPL=go
 INSTALL_DIR="{install_dir}" MODEL_DIR="{tmp}/models" INSTALL_RELEASE_DIR="{release}"
 {stage}
 install_ggrun_from_source
 [[ -x "$INSTALL_DIR/ggrun" ]] || {{ echo "Go ggrun was not installed"; exit 1; }}
 """
             result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+            if not with_cpu_asset:
+                # No bundle provides ggrun: fail with the actionable message.
+                self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                self.assertIn("no release bundle", result.stdout + result.stderr)
+                return
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertTrue((install_dir / "parse_gguf.py").is_file())
             self.assertEqual((install_dir / "llama-server").resolve(), system_server.resolve())
