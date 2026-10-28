@@ -41,7 +41,7 @@ Tasks: calc / textstats / inventory on first launch; ledger on relaunch.
 Notes:
 
 - A timeout is a failure, not a pass. CPU-only Qwen3.8-27B is correct but
-  takes 20-45 minutes per small task and timed out on the long task; on the
+  takes 20-44 minutes per small task and timed out on the long task; on the
   CPU profile Qwen3.6-35B-A3B timed out once after it repeated a tool call
   for an hour (the server answered every request).
 - Claude Code mode (`--claude-code`, local reviewer on the third GPU) passed
@@ -75,13 +75,13 @@ the 2026-06-22 retest on this rig.
 
 ### Dense models (CUDA / ik_llama.cpp)
 
-| Model | Ollama 0.30.8 | raw llama.cpp `--fit` | ggrun |
+| Model | Ollama 0.30.8 (June 2026) | raw llama.cpp `--fit` | ggrun |
 |---|---:|---:|---:|
-| Qwen3.5-4B Q4_K_M | 124.8 | 103.3 | 151.4 |
+| Qwen3.5-4B Q4_K_M (backend difference) | 124.8 | 103.3 | 151.4 |
 | Qwen3.6-27B Q5_K_M | 22.8 | 24.3 | 37.4 |
 
-ggrun's default placement beats raw `--fit` on both (+47% on the 4B, +54% on the 27B) on
-this rig.
+ggrun was faster than raw `--fit` on both on this rig: +54% on the 27B, and +47% on the
+4B, which is a backend difference (ik_llama.cpp vs llama.cpp on one GPU), not placement.
 
 ### MoE (CUDA / ik_llama.cpp)
 
@@ -95,8 +95,9 @@ or less of that bandwidth become whole-expert storage.
 | MiniMax-M3 UD-IQ3_XXS (~149 GiB) | 5.59 | 15.3 | spans VRAM+RAM, ~108 GiB pinned |
 | DeepSeek-V4-Flash UD-IQ4_XS (~128 GiB) | 5.88 | 32.24 | ctx 1M, parallel 4; x1/x4 GPUs store 3 complete expert layers each |
 
-Raw llama.cpp `--fit` loads the 122B at 20.97 decode (ggrun: 22.9, +9% here); it cannot
-load MiniMax-M3 at all (`unknown model architecture: minimax-m3` — ik_llama.cpp only).
+Raw llama.cpp `--fit` loaded the 122B at 20.97 decode (ggrun: 22.9, +9% here). On
+2026-06-22 mainline llama.cpp could not load MiniMax-M3 (`unknown model architecture:
+minimax-m3`); only ik_llama.cpp ran it then.
 The point of these rows is less the exact tok/s than that the models **run**: ggrun loads
 big MoE models across VRAM + system RAM that don't fit in VRAM alone.
 
@@ -132,9 +133,10 @@ few flag variants and caches the fastest, but on this rig the gains are marginal
 model-specific (the default often wins the confirmation re-measure), so it's an optional
 extra, not part of the headline numbers.
 
-### Launch Read
+### Launch Read (2026-06-22)
 
-- ggrun's default placement beats raw llama.cpp `--fit` on every dense model tested here.
-- ggrun runs big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) across VRAM + RAM that raw
-  `--fit` can't fit or can't load at all.
-- Placement is computed from the GGUF and real VRAM, not guessed — no manual flags.
+- ggrun's default placement was faster than raw llama.cpp `--fit` on both dense models
+  tested; the 4B gain was a backend difference.
+- ggrun ran big MoE models (Qwen3.5-122B-A10B, MiniMax-M3) across VRAM + RAM; raw `--fit`
+  loaded the 122B but could not load MiniMax-M3 then.
+- Placement was computed from the GGUF and real VRAM, with no manual flags.
