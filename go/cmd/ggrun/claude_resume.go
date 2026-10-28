@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +30,9 @@ type claudeSessionSpec struct {
 	Resume   bool
 	Workflow *claudesession.Workflow
 	Cached   int
+	// RouterPort is this launch's loopback gateway, 0 when the client talks
+	// to the backend directly.
+	RouterPort int
 }
 
 // claudeProjectsDir is where Claude Code keeps per-project session state.
@@ -154,6 +160,7 @@ func recordClaudeSession(cacheDir string, spec *claudeSessionSpec, modelPath, ba
 		ModelPath:  modelPath,
 		Backend:    backend,
 		Port:       port,
+		RouterPort: spec.RouterPort,
 		LaunchArgs: launchArgs,
 		ServerArgs: serverArgs,
 		Workflow:   spec.Workflow,
@@ -165,10 +172,16 @@ func recordClaudeSession(cacheDir string, spec *claudeSessionSpec, modelPath, ba
 
 // claudeLaunchSession resolves the session for this launch: either a recorded
 // one being resumed, or a freshly minted ID that is recorded for next time.
-func claudeLaunchSession(cfg *config.Config, req *launchRequest, serverArgs []string) (*claudeSessionSpec, error) {
+// clientPort is the port Claude Code talks to; when it differs from the backend
+// port it is ggrun's router, recorded so a later resume can attach through it.
+func claudeLaunchSession(cfg *config.Config, req *launchRequest, serverArgs []string, clientPort int) (*claudeSessionSpec, error) {
 	cacheDir := ""
 	if cfg != nil {
 		cacheDir = cfg.CacheDir
+	}
+	routerPort := 0
+	if req != nil && clientPort > 0 && clientPort != req.Port {
+		routerPort = clientPort
 	}
 	if req != nil && req.ClaudeResume != "" {
 		workDir, err := os.Getwd()
@@ -182,7 +195,21 @@ func claudeLaunchSession(cfg *config.Config, req *launchRequest, serverArgs []st
 		// An explicit session ID owns its recorded backend (its recorded model
 		// must still exist); "latest"/empty picks are requests for the newest
 		// conversation and are reopened against this launch's current model.
-		return claudeResumeSpec(rec, serverArgs, req.ClaudeResumeForce, !isLatestResumeValue(req.ClaudeResume), req.ModelPath)
+		spec, err := claudeResumeSpec(rec, serverArgs, req.ClaudeResumeForce, !isLatestResumeValue(req.ClaudeResume), req.ModelPath)
+		if err != nil {
+			return nil, err
+		}
+		// The recorded shape stays as it was; only the live gateway changes.
+		spec.RouterPort = routerPort
+		// A launch without a router clears the recorded one too: the old port
+		// died with its launch and may later belong to another launch's router.
+		if routerPort != rec.RouterPort && cacheDir != "" {
+			rec.RouterPort = routerPort
+			if saveErr := claudesession.Save(cacheDir, rec); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "[claude-code] could not update session record: %v\n", saveErr)
+			}
+		}
+		return spec, nil
 	}
 	spec, err := newClaudeSessionSpec()
 	if err != nil {
@@ -191,6 +218,7 @@ func claudeLaunchSession(cfg *config.Config, req *launchRequest, serverArgs []st
 		fmt.Fprintf(os.Stderr, "[claude-code] could not mint a session id: %v\n", err)
 		return nil, nil
 	}
+	spec.RouterPort = routerPort
 	var (
 		modelPath  string
 		backend    string
@@ -257,6 +285,49 @@ func portServesLLM(port int) bool {
 	return false
 }
 
+// portServesClaudeRouter reports whether ggrun's loopback router answers on the
+// recorded router port and fronts the recorded backend. Its status endpoint is
+// the identity check: a reused ephemeral port held by anything else does not
+// serve /ggrun/router, and another launch's router reports another backend.
+func portServesClaudeRouter(rec claudesession.Record) bool {
+	if rec.RouterPort <= 0 || rec.Port <= 0 {
+		return false
+	}
+	client := &http.Client{Timeout: 1 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/ggrun/router", rec.RouterPort))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var status struct {
+		Limit *int64 `json:"limit"`
+		Main  string `json:"main"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&status) != nil || status.Limit == nil {
+		return false
+	}
+	// The router reaches its backend on a loopback or bind address; the port
+	// is what identifies this record's backend on this machine.
+	main, err := url.Parse(status.Main)
+	if err != nil {
+		return false
+	}
+	return main.Port() == strconv.Itoa(rec.Port)
+}
+
+// claudeResumeClientPort picks where a live resume points Claude Code. The
+// recorded router carries admission control and Auto reviewer routing; the raw
+// backend has neither, so falling back to it is announced rather than silent.
+func claudeResumeClientPort(rec claudesession.Record) int {
+	if portServesClaudeRouter(rec) {
+		fmt.Printf("[claude-code] Resuming through the running ggrun router on port %d.\n", rec.RouterPort)
+		return rec.RouterPort
+	}
+	fmt.Fprintf(os.Stderr, "[claude-code] warning: no ggrun router is running for this server; Claude Code connects to the backend on port %d directly, "+
+		"without agent admission control or Auto reviewer routing.\n", rec.Port)
+	return rec.Port
+}
+
 // claudeResumeAgainstLive reopens a recorded session against a backend that is
 // already serving on the recorded port, instead of relaunching the recorded
 // launch shape only to die at guardPortFree. The server stays owned by whatever
@@ -270,11 +341,14 @@ func claudeResumeAgainstLive(cacheDir string, rec claudesession.Record) int {
 			spec.Workflow, spec.Cached = wf, cached
 		}
 	}
-	code := runClaudeCodeClient("127.0.0.1", rec.Port, rec.ServerArgs, nil, spec, 0)
+	port := claudeResumeClientPort(rec)
+	// The Workflow hook and status line ride on --settings, as on a normal launch.
+	clientArgs, _ := claudeCodeProgressClientArgs(nil, port)
+	code := runClaudeCodeClient("127.0.0.1", port, rec.ServerArgs, clientArgs, spec, 0)
 	if code == -1 {
 		// `claude` isn't installed; match the normal launch path and print the
 		// copy-paste recipe pointed at the live server instead of exiting blank.
-		printClaudeCodeRecipe("127.0.0.1", rec.Port, rec.ServerArgs)
+		printClaudeCodeRecipe("127.0.0.1", port, rec.ServerArgs, 0)
 		return -1
 	}
 	// Record on exit as well as on launch: the workflow run ID is assigned inside

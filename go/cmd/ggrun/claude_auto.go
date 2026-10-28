@@ -905,8 +905,9 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 	r.router = router
 	// Point Claude Code's cheap tiers at the companion only when the selected
 	// profile explicitly serves worker traffic. A seated Qwen3.5-2B remains a
-	// perfectly valid separate safety reviewer, but local-fast falls through to
-	// the main model because that profile is review-only.
+	// perfectly valid separate safety reviewer; the router still sends it
+	// local-fast prompts that fit its context, so short cheap-tier calls do not
+	// queue behind long main-model streams, and larger ones go to the main model.
 	router.SetCompanion("local", r.workerRouteEnabled())
 	// Tell the router the exact context that was reserved and launched for this
 	// profile. A fixed 64k threshold made the healthy 2B reviewer reject real
@@ -940,7 +941,7 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 	if r.reviewerPort > 0 && r.workerRouteEnabled() {
 		fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, cheap work + safety -> local companion)\n", router.URL())
 	} else if r.reviewerPort > 0 {
-		fmt.Printf("[claude-code] Auto router ready on %s (coding + cheap work -> main model, safety -> local reviewer)\n", router.URL())
+		fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, safety + cheap work that fits -> local reviewer)\n", router.URL())
 	} else {
 		fmt.Printf("[claude-code] agent gateway ready on %s\n", router.URL())
 	}

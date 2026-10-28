@@ -364,6 +364,60 @@ func TestClaudeClientEnvDisablesAttributionHeader(t *testing.T) {
 	}
 }
 
+// The printed copy-paste recipe and the auto-launched client must set the same
+// variables to the same values. The recipe once lacked the attribution header,
+// so users who copied it never reused the prompt cache, and it sized the
+// compact window from --ctx-size instead of the resolved context.
+func TestClaudeRecipeMatchesAutoLaunchEnv(t *testing.T) {
+	for _, v := range claudeCodeEnvVars("127.0.0.1", 8081, nil, 0) {
+		t.Setenv(v.Key, "")
+	}
+	serverArgs := []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"}
+	const actualCtx = 131072
+
+	inherited := map[string]bool{}
+	for _, kv := range os.Environ() {
+		inherited[kv] = true
+	}
+	launched := map[string]bool{}
+	for _, kv := range claudeCodeEnv("0.0.0.0", 8081, serverArgs, actualCtx) {
+		if !inherited[kv] {
+			launched[kv] = true
+		}
+	}
+
+	done := captureStdout(t)
+	printClaudeCodeRecipe("0.0.0.0", 8081, serverArgs, actualCtx)
+	out := done()
+	printed := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "export ")
+		if !ok {
+			continue
+		}
+		rest, _, _ = strings.Cut(rest, "  #")
+		for _, kv := range strings.Fields(rest) {
+			printed[kv] = true
+		}
+	}
+
+	for kv := range launched {
+		if !printed[kv] {
+			t.Errorf("auto-launch sets %s but the printed recipe does not", kv)
+		}
+	}
+	for kv := range printed {
+		if !launched[kv] {
+			t.Errorf("printed recipe sets %s but auto-launch does not", kv)
+		}
+	}
+	for _, want := range []string{"CLAUDE_CODE_ATTRIBUTION_HEADER=0", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=32768"} {
+		if !printed[want] {
+			t.Errorf("printed recipe missing %s:\n%s", want, out)
+		}
+	}
+}
+
 // --no-cached-config must parse as an explicit one-shot escape hatch and must
 // reach placement options as SkipCachedConfig (which implies the placement
 // cache skip inside Compute).
