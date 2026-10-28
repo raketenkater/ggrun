@@ -24,4 +24,4 @@ jobs:
         run: go test -count=1 ./pkg/remoteclaude ./pkg/claudeauto
       - name: CLI ownership and TUI saved-launch compatibility
         working-directory: go
-        run: go test -count=1 ./cmd/ggrun ./pkg/tui -run "Test(Remote|ClaudeModeCycles|EveryTUI)"
+        run: go test -count=1 ./cmd/ggrun ./pkg/tui -run "Test(Remote|ClaudeModeCycles|EveryTUI|HostGrowthReserve|NonLinuxSmallCPUHost)"

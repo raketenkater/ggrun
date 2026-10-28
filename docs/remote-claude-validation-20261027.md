@@ -193,3 +193,19 @@ Windows published installer checks passed too. Server revision `9e85a3c` passed
 all three native remote-contract jobs, including macOS ARM64. Intel Mac remains
 cross-built, not natively exercised. The default macOS serving failure above
 remains unresolved; contract success does not qualify Metal inference.
+
+## October 28 continuation
+
+The earlier temporary execution-session server was no longer running. No main
+or companion process and no GPU allocations remained; HTTPS consequently
+returned 502. Its log did not establish why the controller exited. The exact
+verified Linux configuration was restarted as user unit
+`ggrun-remote-acceptance.service` with Restart=no and a 45-second stop grace.
+User lingering was already enabled. This deployment can outlive the coding
+session; it does not add an automatic service to public product defaults.
+
+The macOS admission issue now has a narrow request-boundary correction:
+Linux-only cgroup growth reserve is not charged when the containment gate is
+absent. Runtime, checkpoint and explicit resource limits remain. Local uncached
+core gate passed; native small-host regression and original macOS packaging CI
+must pass before this is described as resolved.

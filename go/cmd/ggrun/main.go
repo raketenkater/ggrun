@@ -3726,10 +3726,12 @@ func backendMemoryMaxMB(req *launchRequest, caps *detect.Capabilities) int {
 	return limit
 }
 
-// hostGrowthReserveMB is the gate's reserve for placement to plan around; a
-// re-plan that already holds it back (PlacementHostReserveMB) passes 0.
+// hostGrowthReserveMB is the Linux containment gate's reserve for placement
+// to plan around. Other platforms have no cgroup gate; their ordinary runtime,
+// checkpoint and explicit RAM headroom accounting remains in placement.
+// A re-plan already holding the reserve back passes 0 to avoid double charging.
 func hostGrowthReserveMB(req *launchRequest) int {
-	if req == nil || req.PlacementHostReserveMB > 0 || req.CgroupHeadroomMB <= 0 {
+	if runtime.GOOS != "linux" || req == nil || req.PlacementHostReserveMB > 0 || req.CgroupHeadroomMB <= 0 {
 		return 0
 	}
 	return req.CgroupHeadroomMB
