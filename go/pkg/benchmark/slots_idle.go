@@ -47,9 +47,10 @@ func (r *Runner) waitForIdleSlots() time.Duration {
 }
 
 // WaitForIdleSlots is the same bounded wait for a caller that decides itself
-// what a still-busy backend means. It reports false only when /slots still
-// showed a processing slot when the bound passed; idle, unknown and a zero
-// IdleSlotWait report true.
+// what a still-busy backend means. It reports false when /slots still showed a
+// processing slot at the bound, when the deadline had already passed, or when
+// a reply arrived at or after it; idle, unknown and a zero IdleSlotWait within
+// the bound report true.
 func (r *Runner) WaitForIdleSlots() bool {
 	_, idle := r.idleSlotWait()
 	return idle
