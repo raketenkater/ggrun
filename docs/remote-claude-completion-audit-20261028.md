@@ -5,6 +5,17 @@ than treating green tests or same-host requests as real laptop acceptance.
 Public platform targets are clients on Linux/macOS/Windows and headless servers
 on Linux/macOS. Existing Windows serving paths remain regression-covered.
 
+October 29: server `fa3ceba` integrates main `4925fd7`, preserving its local
+Claude health, resume/router, permission and launch hardening. Local execution,
+printed recipes and remote metadata retain one shared clientkit policy. The
+recipe invariant compares complete quoted assignments, including multiline
+headers, on POSIX and PowerShell. The uncached core gate, full Go suite and
+command/router/gateway race tests passed. Alpha.2's actual released-installer
+checks passed on all three client platforms; it was checksum-installed locally.
+The prior service ended by a clean stop, not a crash. October 28 deployment
+identities below are historical; see the October 29 validation update for the
+current deployment. Physical laptop acceptance remains missing.
+
 | Requirement | Current evidence | Result / remaining gate |
 | --- | --- | --- |
 | TUI Off / local / remote, old saved launches and exact argv | Native TUI tests; actual Qwen launch from Remote client mode; saved-request replay | Implemented. TUI does not have a separate planner. |

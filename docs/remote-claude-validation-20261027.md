@@ -254,3 +254,30 @@ service was recreated after stop; the saved request and preferences remain.
 Client c4d6488 passes local race/vet and all 12 PR checks. It rejects empty
 saved routing values, case variants on Windows and resume/fork options that
 bypass connector metadata. Alpha.2 release/install verification is pending.
+# October 29 integrated deployment
+
+Server `fa3ceba` integrates main `4925fd7`. The installed server and user service
+run this same revision. The existing main binary is retained as a rollback.
+Full uncached Go tests, the uncached core-engine gate and command/router/gateway
+race tests passed. Native remote contract CI passed on Linux, Windows and
+Apple Silicon macOS. Other integration CI must be read from the PR checks;
+manual GPU jobs are not substituted for this host's live receipt.
+
+The published checksum-verified client `v0.1.0-alpha.2` resumed an existing
+Claude 2.1.307 session over the owner-selected HTTPS gateway after the server
+restart. It ran the unchanged four-test calculator suite and correctly reported
+the four names and passing result in 93.896 s / two turns. The test-file SHA-256
+remained unchanged. Authenticated profile/health/status checks passed before
+and after; unauthenticated requests returned 401, private routes 404 and an
+unsupported model 400. The server stayed ready after client exit, serving
+144384 tokens/slot with one main slot and a separate 4B worker/reviewer.
+
+The host's ordinary Claude executable had auto-updated to 2.1.312. Doctor
+correctly refused that unqualified version before inference. Acceptance used
+the still-installed 2.1.307 through a private test PATH, leaving the normal
+installation unchanged. Version 2.1.312 is not qualified by this receipt.
+
+Private local receipt: `integrated-receipt-20261029.json` in the isolated
+acceptance directory. This is same-host HTTPS evidence, not physical laptop
+acceptance. The remaining gate is actual laptop installation, local edit/tests,
+worker/Workflow, disconnect and resume.

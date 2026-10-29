@@ -1,6 +1,13 @@
 # Remote Claude Code through ggrun — implementation plan
 
-Status: implemented in isolated branch `feat/remote-claude-client`, based on `101af89`; draft server PR [#101](https://github.com/raketenkater/ggrun/pull/101) and separate client PR [#1](https://github.com/raketenkater/ggrun-client/pull/1) are published. Same-host real Claude/GPU coding, worker handoff, resume, cancellation and clean relaunch passed. The tested Linux candidate is installed on PATH with a rollback copy. Actual laptop acceptance remains a release gate. The owner opted into a separate Tailscale Serve endpoint for testing; it is not a product dependency.
+Status: implemented in `feat/remote-claude-client`, integrated with main `4925fd7`
+at server revision `fa3ceba`. Draft server PR [#101](https://github.com/raketenkater/ggrun/pull/101)
+and client PR [#1](https://github.com/raketenkater/ggrun-client/pull/1) are published.
+Client `v0.1.0-alpha.2` and its actual released-installer checks passed on Linux,
+Windows and Apple Silicon macOS. The integrated server passed the uncached core
+gate, full Go suite and command/router/gateway race tests. Actual laptop
+acceptance remains a release gate. Tailscale is the optional owner deployment,
+not a product dependency.
 
 ## Product outcome
 
