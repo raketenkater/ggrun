@@ -760,7 +760,7 @@ def test_index_change_converts_unscored_rows_with_a_power_fit():
     rows.append({"name": "New", "slug": "new", "isOpenWeights": True, "intelligenceIndex": 33.0})
     out, scale = updater.apply_index_scale(rows, prev, "v4", "v5.0")
     by = {updater.row_slug(r): r for r in out}
-    assert scale["version"] == "v5.0" and scale["pairs"] == 10 and scale["r2"] > 0.999 and "refused" not in scale
+    assert scale["version"] == "v5" and scale["pairs"] == 10 and scale["r2"] > 0.999 and "refused" not in scale
     assert abs(scale["fit"]["a"] - 1.1) < 1e-4
     small = [updater.intelligence(by[f"m{i}"]) for i in range(4)]
     assert all(by[f"m{i}"]["_mapped_from"] == "v4" for i in range(4))
@@ -779,7 +779,7 @@ def test_same_index_version_keeps_converted_scores_without_refitting():
             {"name": "M2", "slug": "m2", "intelligenceIndex": 20.4}]
     out, scale = updater.apply_index_scale(rows, prev, "v5.0", "v5.0")
     by = {updater.row_slug(r): r for r in out}
-    assert "refused" not in scale and "fit" not in scale and scale["version"] == "v5.0"
+    assert "refused" not in scale and "fit" not in scale and scale["version"] == "v5"
     assert updater.intelligence(by["m0"]) == 2.0 and by["m0"]["_mapped_from"] == "v4"
     assert updater.intelligence(by["m1"]) == 9.0 and "_mapped_from" not in by["m1"]
 
@@ -793,7 +793,7 @@ def test_next_index_change_converts_from_the_previous_version():
             for i in range(12)]
     out, scale = updater.apply_index_scale(rows, prev, "v5.0", "v6")
     m0 = next(r for r in out if updater.row_slug(r) == "m0")
-    assert scale["pairs"] == 11 and m0["_mapped_from"] == "v5.0" and abs(updater.intelligence(m0) - 8.0) < 1e-3
+    assert scale["pairs"] == 11 and m0["_mapped_from"] == "v5" and abs(updater.intelligence(m0) - 8.0) < 1e-3
 
 
 def test_index_change_refuses_a_thin_or_weak_fit():
@@ -850,7 +850,7 @@ def test_build_catalog_across_two_refreshes_keeps_one_scale(monkeypatch):
     now = datetime(2026, 10, 29, tzinfo=timezone.utc)
     first = updater.build_catalog(rows, "test", 100, 20, prev, now, prev_version="v4", page_version="v5.0")
     by = {c["repo"]: c for c in first["candidates"]}
-    assert first["aa_index_version"] == "v5.0" and len(by) == 14
+    assert first["aa_index_version"] == "v5" and len(by) == 14
     assert by["o/M1-GGUF"]["aa_index_mapped_from"] == "v4" and "~intelligence mapped" in by["o/M1-GGUF"]["notes"]
     assert by["o/M13-GGUF"]["aa_index_mapped_from"] == "v4"  # carried and converted
     assert abs(by["o/M13-GGUF"]["aa_intelligence_index"] - _v5(43.0)) < 1e-2
@@ -863,4 +863,13 @@ def test_build_catalog_across_two_refreshes_keeps_one_scale(monkeypatch):
     again = {c["repo"]: c["aa_intelligence_index"] for c in second["candidates"]}
     assert again["o/M1-GGUF"] == by["o/M1-GGUF"]["aa_intelligence_index"]
     assert updater.refresh_guard(rows, updater.catalog_rows(first), second, "v5.0") is None
+
+
+def test_version_labels_ignore_a_trailing_zero_and_keep_fit_provenance():
+    updater = load_updater()
+    prev = _prev_rows(3)
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": 4.0 + 3 * i} for i in range(3)]
+    fit = {"kind": "power", "a": 1.3, "b": -1.6}
+    _, scale = updater.apply_index_scale(rows, prev, "v5.0", "v5", fit)
+    assert scale["version"] == "v5" and "pairs" not in scale and scale["fit_from_previous_version"] == fit
 

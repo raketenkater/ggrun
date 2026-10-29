@@ -1552,6 +1552,11 @@ def fit_power(pairs: list[tuple[float, float]]) -> tuple[float, float, float]:
     return a, b, (1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
 
 
+def index_version(label: str | None) -> str | None:
+    """A version label without a trailing ".0" (the page says both v5.0 and v5)."""
+    return re.sub(r"(\.0+)+$", "", label) if label else label
+
+
 def to_current_scale(score: float, scale: dict[str, Any]) -> float:
     """A previous-version score on the current index scale (0 when no fit)."""
     fit = scale.get("fit")
@@ -1561,7 +1566,8 @@ def to_current_scale(score: float, scale: dict[str, Any]) -> float:
 
 
 def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]], prev_version: str,
-                      page_version: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                      page_version: str | None = None,
+                      previous_fit: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Put every row on the current index scale.
 
     The leaderboard names its index version (v5.0 since 2026-10). On a version
@@ -1572,9 +1578,12 @@ def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]]
     leaderboard scores it.
     """
     rows = [dict(r) for r in dedupe_rows(rows)]
+    prev_version, page_version = index_version(prev_version) or "v4", index_version(page_version)
     version = page_version or prev_version
     scale: dict[str, Any] = {"version": version, "previous_version": prev_version, "open_rows": len(rows)}
     before = {str(p["aa_slug"]): p for p in previous if p.get("aa_slug") and catalog_intelligence(p) > 0}
+    if version == prev_version and previous_fit:
+        scale["fit_from_previous_version"] = previous_fit  # provenance of kept ~ scores
     if version != prev_version:
         pairs = [(catalog_intelligence(p), intelligence(row)) for row in rows
                  if intelligence(row) > 0 and (p := before.get(row_slug(row))) and not p.get("aa_index_mapped_from")]
@@ -1619,10 +1628,11 @@ def map_carried(cand: dict[str, Any], scale: dict[str, Any]) -> dict[str, Any] |
 
 def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int,
                   previous: list[dict[str, Any]] | None = None, now: datetime | None = None,
-                  prev_version: str = "v4", page_version: str | None = None) -> dict[str, Any]:
+                  prev_version: str = "v4", page_version: str | None = None,
+                  previous_fit: dict[str, Any] | None = None) -> dict[str, Any]:
     previous = [c for c in previous or [] if isinstance(c, dict) and c.get("repo")]
     now = now or datetime.now(timezone.utc)
-    rows, scale = apply_index_scale(rows, previous, prev_version, page_version)
+    rows, scale = apply_index_scale(rows, previous, prev_version, page_version, previous_fit)
     scored_before = [c for c in previous if catalog_intelligence(c) > 0]
     by_slug = {str(c.get("aa_slug")): c for c in scored_before if c.get("aa_slug")}
     by_name = {str(c.get("name") or "").lower(): c for c in scored_before}
@@ -1711,7 +1721,8 @@ def refresh_guard(rows: list[dict[str, Any]], previous: list[dict[str, Any]],
     scored_count = scale.get("scored_rows", sum(1 for row in dedupe_rows(rows) if intelligence(row) > 0))
     if open_count and scored_count < MIN_SCORED_SHARE * open_count:
         return f"only {scored_count} of {open_count} leaderboard rows carry an intelligence score"
-    version = catalog.get("aa_index_version", prev_version)
+    version = index_version(catalog.get("aa_index_version", prev_version))
+    prev_version = index_version(prev_version) or "v4"
     fresh = [c for c in catalog.get("candidates") or [] if "last seen on the leaderboard" not in str(c.get("notes") or "")]
     if version == prev_version:
         # Same index version: real scores must not move as a whole.
@@ -1876,11 +1887,13 @@ def main() -> int:
             previous_doc = json.loads(catalog_path.read_text(encoding="utf-8"))
             previous = catalog_rows(previous_doc)
             prev_version = str(previous_doc.get("aa_index_version") or "v4")
+            prev_scale = previous_doc.get("aa_index_scale") or {}
+            previous_fit = prev_scale.get("fit") or prev_scale.get("fit_from_previous_version")
         except (OSError, ValueError, AttributeError) as exc:
             print(f"warning: previous catalog unreadable ({exc}); nothing carried forward", file=sys.stderr)
-            previous, prev_version = [], "v4"
+            previous, prev_version, previous_fit = [], "v4", None
         catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit), previous,
-                                prev_version=prev_version, page_version=PAGE_INDEX_VERSION)
+                                prev_version=prev_version, page_version=PAGE_INDEX_VERSION, previous_fit=previous_fit)
         scale = catalog.get("aa_index_scale") or {}
         print(f"index scale: {json.dumps(scale, sort_keys=True)}", file=sys.stderr)
         refused = refresh_guard(rows, previous, catalog, prev_version)
