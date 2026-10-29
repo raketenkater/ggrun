@@ -371,7 +371,8 @@ def parse_open_weight_page_models(page: str) -> list[dict[str, Any]]:
 def fetch_public_open_weight_rows() -> list[dict[str, Any]]:
     global PAGE_INDEX_VERSION
     page = fetch_text(OPEN_WEIGHTS_PAGE_URL, timeout=90)
-    versions = sorted(set(INDEX_VERSION_RE.findall(page)))
+    versions = sorted(set(INDEX_VERSION_RE.findall(page)),
+                      key=lambda v: tuple(int(p) for p in re.findall(r"\d+", v)))
     PAGE_INDEX_VERSION = versions[-1] if versions else None
     rows = parse_open_weight_page_models(page)
     if not rows:
@@ -1310,11 +1311,10 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "speed": speed_score(tps),
         **shape,
     }
-    if row.get("_v4"):
-        cand["aa_index_v4"] = round(float(row["_v4"]), 3)
     if row.get("_mapped_from"):
         cand["aa_index_mapped_from"] = row["_mapped_from"]
-        cand["notes"] = f"{cand['notes']}; ~intelligence mapped from its v4 score until re-evaluated".lstrip("; ")
+        cand["notes"] = (f"{cand['notes']}; ~intelligence mapped from its {row['_mapped_from']} score "
+                         f"until re-evaluated").lstrip("; ")
     if arch:
         # Embed only the geometry fields the overhead formula consumes; keep
         # the catalog lean and the schema explicit.
@@ -1354,10 +1354,10 @@ TOP_ROWS_WATCHED = 10
 MIN_SCORED_SHARE = 0.5
 MIN_KEPT_SHARE = 0.5
 MAX_SCALE_DRIFT = 0.15
-# A leaderboard index version change (v4 -> v5, 2026-10) rescales every score
-# and leaves most models unscored until they are re-evaluated. Rows not yet on
-# the new scale are mapped from their last v4 score by a fit over the models
-# scored on both; the fit must be well supported.
+# A leaderboard index version change (v4 -> v5.0, 2026-10) rescales every
+# score and leaves most models unscored until they are re-evaluated. Those keep
+# a score converted from the previous version by a fit over the models scored
+# on both; the fit must be well supported.
 SCALE_MIN_PAIRS = 8
 SCALE_MIN_R2 = 0.8
 INDEX_VERSION_RE = re.compile(r"Intelligence Index (v\d+(?:\.\d+)?)")
@@ -1434,8 +1434,23 @@ def carry_forward(prev: dict[str, Any], row: dict[str, Any], now: datetime, why:
     return cand
 
 
-def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Catalog rows for REVIEWED_UNSCORED_MODELS, ranked below their anchor."""
+def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[str, Any]],
+                        scale: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Catalog rows for REVIEWED_UNSCORED_MODELS, ranked below their anchor.
+
+    Anchors come from this catalog first. A fallback from the previous catalog
+    is converted when the index version changed, so no old-scale quality is
+    listed next to new-scale rows.
+    """
+    scale = scale or {}
+    changed = scale.get("version") not in (None, scale.get("previous_version"))
+
+    def current(row: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
+        if not row or not changed:
+            return row
+        old = catalog_intelligence(row) if key == "index" else int(row.get("quality") or 0) / 1.65
+        score = to_current_scale(old, scale)
+        return dict(row, aa_intelligence_index=score, quality=quality_score(score)) if score > 0 else None
     by_name = {str(c.get("name") or "").lower(): c for c in candidates}
     repos = {str(c.get("repo") or "").lower() for c in candidates}
     out = []
@@ -1447,16 +1462,16 @@ def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[st
         if not anchor:
             # The anchor can leave one scrape (Nanbeige4.1-3B, 2026-10-29);
             # its last committed score still anchors the estimate.
-            anchor = next((c for c in previous
-                           if str(c.get("name") or "").lower() == spec["estimate_from"].lower()), None)
-        prior = next((c for c in previous if str(c.get("name") or "").lower() == name.lower()
-                      and int(c.get("quality") or 0) > 1), None)
+            anchor = current(next((c for c in previous
+                                   if str(c.get("name") or "").lower() == spec["estimate_from"].lower()), None), "index")
+        prior = current(next((c for c in previous if str(c.get("name") or "").lower() == name.lower()
+                              and int(c.get("quality") or 0) > 1), None), "quality")
         if not anchor or catalog_intelligence(anchor) <= 0 or int(anchor.get("quality") or 0) <= 1:
             if not prior:
                 print(f"warning: {name}: no scored {spec['estimate_from']} row to estimate from; not listed", file=sys.stderr)
                 continue
             # The anchor left the leaderboard; the reviewed row keeps the score
-            # it was listed with (the refresh guard rejects a rescaled scrape).
+            # it was listed with, converted when the index version changed.
             anchor = {"name": prior.get("anchor_name") or spec["estimate_from"], "quality": int(prior["quality"]) + 1}
         quants = fetch_hf_quants(repo)
         if not quants:
@@ -1513,88 +1528,93 @@ def validate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
     return out
 
 
-def previous_v4(prev: dict[str, Any], prev_version: str) -> float:
-    """The last v4 index score a catalog row carries, or 0."""
-    val = prev.get("aa_index_v4")
-    if isinstance(val, (int, float)) and val > 0:
-        return float(val)
-    if prev_version == "v4" and not prev.get("aa_index_mapped_from"):
-        return catalog_intelligence(prev)
-    return 0.0
+def fit_power(pairs: list[tuple[float, float]]) -> tuple[float, float, float]:
+    """Least-squares log y = a*log x + b over positive pairs; R^2 on the raw values.
 
-
-def fit_line(pairs: list[tuple[float, float]]) -> tuple[float, float, float]:
-    """Least-squares y = a*x + b over pairs, with R^2."""
-    n = len(pairs)
-    mx = sum(x for x, _ in pairs) / n
-    my = sum(y for _, y in pairs) / n
-    sxx = sum((x - mx) ** 2 for x, _ in pairs)
+    A power law stays positive and monotone at the low end, where a straight
+    line through the v4 -> v5 pairs (intercept -5.8) clamped 39 small models.
+    """
+    pts = [(math.log(x), math.log(y)) for x, y in pairs if x > 0 and y > 0]
+    n = len(pts)
+    if n < 2:
+        return 0.0, 0.0, 0.0
+    mx = sum(x for x, _ in pts) / n
+    my = sum(y for _, y in pts) / n
+    sxx = sum((x - mx) ** 2 for x, _ in pts)
     if sxx <= 0:
         return 0.0, my, 0.0
-    a = sum((x - mx) * (y - my) for x, y in pairs) / sxx
+    a = sum((x - mx) * (y - my) for x, y in pts) / sxx
     b = my - a * mx
-    ss_tot = sum((y - my) ** 2 for _, y in pairs)
-    ss_res = sum((y - (a * x + b)) ** 2 for x, y in pairs)
+    ys = [y for _, y in pairs if y > 0]
+    mean = sum(ys) / len(ys)
+    ss_tot = sum((y - mean) ** 2 for y in ys)
+    ss_res = sum((y - math.exp(a * math.log(x) + b)) ** 2 for x, y in pairs if x > 0 and y > 0)
     return a, b, (1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+
+def to_current_scale(score: float, scale: dict[str, Any]) -> float:
+    """A previous-version score on the current index scale (0 when no fit)."""
+    fit = scale.get("fit")
+    if score <= 0 or not fit:
+        return 0.0
+    return round(math.exp(fit["a"] * math.log(score) + fit["b"]), 3)
 
 
 def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]], prev_version: str,
                       page_version: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Put every row on one index scale.
+    """Put every row on the current index scale.
 
-    Fresh scores are compared with each model's last v4 score. On the v4 scale
-    nothing changes. On a new scale, rows the leaderboard has not re-evaluated
-    yet get a v4 -> new mapping fitted over the models scored on both, marked
-    as mapped; a weak or thin fit refuses the refresh instead.
+    The leaderboard names its index version (v5.0 since 2026-10). On a version
+    change, models it has not re-evaluated keep a score converted from their
+    previous-version score by a power fit over the models scored on both; a
+    thin or weak fit refuses the refresh. Within one version, a model still
+    unscored keeps the converted score it was listed with until the
+    leaderboard scores it.
     """
-    anchors = {str(p["aa_slug"]): v for p in previous
-               if p.get("aa_slug") and (v := previous_v4(p, prev_version)) > 0}
     rows = [dict(r) for r in dedupe_rows(rows)]
+    version = page_version or prev_version
+    scale: dict[str, Any] = {"version": version, "previous_version": prev_version, "open_rows": len(rows)}
+    before = {str(p["aa_slug"]): p for p in previous if p.get("aa_slug") and catalog_intelligence(p) > 0}
+    if version != prev_version:
+        pairs = [(catalog_intelligence(p), intelligence(row)) for row in rows
+                 if intelligence(row) > 0 and (p := before.get(row_slug(row))) and not p.get("aa_index_mapped_from")]
+        scale["pairs"] = len(pairs)
+        if len(pairs) < SCALE_MIN_PAIRS:
+            scale["refused"] = (f"index changed {prev_version} -> {version} but only {len(pairs)} models are "
+                                f"scored on both; need {SCALE_MIN_PAIRS} to convert the rest")
+        else:
+            a, b, r2 = fit_power(pairs)
+            scale.update(fit={"kind": "power", "a": round(a, 6), "b": round(b, 6)}, r2=round(r2, 3))
+            if r2 < SCALE_MIN_R2 or not 0.2 <= a <= 3.0:
+                scale["refused"] = (f"index changed {prev_version} -> {version} and the conversion fit over "
+                                    f"{len(pairs)} models is weak (exponent {a:.2f}, R^2 {r2:.2f})")
+                scale.pop("fit")
     for row in rows:
-        if row_slug(row) in anchors:
-            row["_v4"] = anchors[row_slug(row)]
-    pairs = [(row["_v4"], intelligence(row)) for row in rows if row.get("_v4") and intelligence(row) > 0]
-    scale: dict[str, Any] = {"version": "v4", "pairs": len(pairs), "open_rows": len(rows)}
-    if pairs:
-        ratios = sorted(y / x for x, y in pairs)
-        median = ratios[len(ratios) // 2]
-        scale["median_ratio"] = round(median, 3)
-        if abs(median - 1) > MAX_SCALE_DRIFT:
-            scale["version"] = page_version or (prev_version if prev_version != "v4" else "v5")
-            if len(pairs) < SCALE_MIN_PAIRS:
-                scale["refused"] = (f"index rescaled (median factor {median:.2f}) but only {len(pairs)} models "
-                                    f"are scored on both scales; need {SCALE_MIN_PAIRS} to map the rest")
-            else:
-                a, b, r2 = fit_line(pairs)
-                scale.update(mapped_from="v4", slope=round(a, 4), intercept=round(b, 4), r2=round(r2, 3))
-                if r2 < SCALE_MIN_R2 or not 0.2 <= a <= 2.0:
-                    scale["refused"] = (f"index rescaled (median factor {median:.2f}) and the v4 -> {scale['version']} "
-                                        f"fit over {len(pairs)} models is weak (slope {a:.2f}, R^2 {r2:.2f})")
-                else:
-                    for row in rows:
-                        if intelligence(row) <= 0 and row.get("_v4"):
-                            row["intelligenceIndex"] = round(max(0.1, a * row["_v4"] + b), 3)
-                            row["_mapped_from"] = "v4"
-        elif prev_version == "v4":
-            for row in rows:  # still v4: the fresh score is the newest v4 anchor
-                if intelligence(row) > 0:
-                    row["_v4"] = intelligence(row)
+        prev = before.get(row_slug(row))
+        if intelligence(row) > 0 or not prev:
+            continue
+        if version != prev_version:
+            score = to_current_scale(catalog_intelligence(prev), scale)
+            if score > 0:
+                row["intelligenceIndex"], row["_mapped_from"] = score, prev_version
+        elif prev.get("aa_index_mapped_from"):
+            row["intelligenceIndex"] = catalog_intelligence(prev)
+            row["_mapped_from"] = prev["aa_index_mapped_from"]
     scale["scored_rows"] = sum(1 for row in rows if intelligence(row) > 0)
     return rows, scale
 
 
-def map_carried(cand: dict[str, Any], scale: dict[str, Any], prev_version: str) -> dict[str, Any] | None:
-    """A carried previous row on the current scale, or None when it cannot be mapped."""
-    if scale.get("version") == prev_version or not scale.get("mapped_from"):
+def map_carried(cand: dict[str, Any], scale: dict[str, Any]) -> dict[str, Any] | None:
+    """A carried previous row on the current scale, or None when it cannot be converted."""
+    if cand.pop("_on_scale", False) or scale.get("version") == scale.get("previous_version"):
         return cand
-    v4 = previous_v4(cand, prev_version)
-    if v4 <= 0:
-        print(f"warning: {cand.get('name')}: carried row has no v4 score to map to {scale['version']}; dropped", file=sys.stderr)
+    score = to_current_scale(catalog_intelligence(cand), scale)
+    if score <= 0:
+        print(f"warning: {cand.get('name')}: carried row cannot be converted to index {scale.get('version')}; dropped",
+              file=sys.stderr)
         return None
-    idx = round(max(0.1, scale["slope"] * v4 + scale["intercept"]), 3)
-    cand = dict(cand, aa_index_v4=round(v4, 3), aa_intelligence_index=idx, quality=quality_score(idx),
-                aa_index_mapped_from="v4")
-    return cand
+    return dict(cand, aa_intelligence_index=score, quality=quality_score(score),
+                aa_index_mapped_from=scale.get("previous_version"))
 
 
 def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int,
@@ -1635,6 +1655,12 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
         if cand is None:
             kept = carry_forward(prev, row, now, "unresolved this run") if prev else None
             if kept:
+                # The scrape scored it on the current scale; keep that score.
+                kept = dict(kept, aa_intelligence_index=round(intelligence(row), 3),
+                            quality=quality_score(intelligence(row)), _on_scale=True)
+                kept.pop("aa_index_mapped_from", None)
+                if row.get("_mapped_from"):
+                    kept["aa_index_mapped_from"] = row["_mapped_from"]
                 carried.append(kept)
             else:
                 skipped += 1
@@ -1652,12 +1678,12 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
         kept = carry_forward(prev, previous_row(prev), now, "missing from the leaderboard scrape")
         if kept:
             carried.append(kept)
-    carried = [c for c in (map_carried(c, scale, prev_version) for c in carried)
+    carried = [c for c in (map_carried(c, scale) for c in carried)
                if c and str(c["repo"]).lower() not in seen_repos]
     candidates = dedupe_candidates(candidates + carried)[:limit]
     kept_count = sum(1 for c in carried if c in candidates)
     candidates = validate_candidates(candidates)
-    reviewed = validate_candidates(reviewed_candidates(candidates, previous))
+    reviewed = validate_candidates(reviewed_candidates(candidates, previous, scale))
     return {
         "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by ggrun hardware fit; Hugging Face GGUF metadata cached from public model APIs",
         "candidates": candidates,
