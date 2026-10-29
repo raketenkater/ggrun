@@ -44,8 +44,11 @@ type Candidate struct {
 	AAQuery        string        `json:"aa_query,omitempty"`
 	AASlug         string        `json:"aa_slug,omitempty"`
 	AAIntelligence float64       `json:"aa_intelligence_index,omitempty"`
-	AAOutputTPS    float64       `json:"aa_output_tps,omitempty"`
-	AAUpdatedAt    string        `json:"aa_updated_at,omitempty"`
+	// AAIndexMappedFrom names the older index version a score was mapped from
+	// while the leaderboard has not re-evaluated the model on the current one.
+	AAIndexMappedFrom string  `json:"aa_index_mapped_from,omitempty"`
+	AAOutputTPS       float64 `json:"aa_output_tps,omitempty"`
+	AAUpdatedAt       string  `json:"aa_updated_at,omitempty"`
 
 	// GGUF geometry read from the binary header by the catalog builder
 	// (tools/models/update_recommendations.py fetch_gguf_arch — one HF range
@@ -300,6 +303,9 @@ const Attribution = "Artificial Analysis intelligence data is used when availabl
 // explicitly marked when Artificial Analysis data is unavailable.
 func DisplayIntelligence(r Recommendation) string {
 	if r.AAIntelligence > 0 {
+		if r.AAIndexMappedFrom != "" {
+			return fmt.Sprintf("~%.1f", r.AAIntelligence)
+		}
 		return fmt.Sprintf("%.1f", r.AAIntelligence)
 	}
 	if r.Quality > 0 {

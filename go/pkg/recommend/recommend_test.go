@@ -1,6 +1,7 @@
 package recommend
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -430,6 +431,28 @@ func TestMoESpeedEstimateIncludesDispatchCost(t *testing.T) {
 	}
 }
 
+// pinnedSpeedRow returns a catalog row as committed when its decode was
+// measured. The scheduled refresh rewrites catalog.json and rows can leave the
+// leaderboard, so the estimate is pinned to these rows, not to the live file.
+func pinnedSpeedRow(t *testing.T, name string) Candidate {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "speed_rows.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []Candidate
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Name == name {
+			return inferParams(dropCompanionSizedQuants(row))
+		}
+	}
+	t.Fatalf("%s: no pinned row in testdata/speed_rows.json", name)
+	return Candidate{}
+}
+
 // Measured on one rig with host bandwidth probed at 26.27 GB/s. The estimate
 // used to charge the always-read backbone at RAM speed and discount measured
 // bandwidth by 0.5, predicting GLM-5.3-Flash under 4 tok/s.
@@ -452,12 +475,7 @@ func TestMoESpeedEstimateMatchesMeasuredDecode(t *testing.T) {
 		// CPU only, 16 GiB, relaunch ledger decode, October 8
 		{"Alibaba Qwen3.6 35B A3B (Reasoning)", cpuOnly, QuantOption{Name: "UD-IQ2_XXS", SizeGB: 10.0, Dynamic: true}, 15.3},
 	} {
-		var c Candidate
-		for _, row := range Shortlist() {
-			if row.Name == tc.name {
-				c = row
-			}
-		}
+		c := pinnedSpeedRow(t, tc.name)
 		// Only the expert layout drives the split; MLA rows may lack hkv.
 		if _, _, ok := moeRoutedShares(c); !c.MoE || !ok {
 			t.Fatalf("%s: catalog row lost its MoE geometry: %+v", tc.name, c)
@@ -633,5 +651,21 @@ func TestUnrunnableArchesFallbackOnBadJSON(t *testing.T) {
 		if !fallbackUnrunnableArch[arch] {
 			t.Fatalf("fallback blocklist missing %q", arch)
 		}
+	}
+}
+
+// A score mapped from an older index version ranks as a score but is shown
+// as an estimate until the leaderboard re-evaluates the model.
+func TestDisplayIntelligenceMarksMappedScores(t *testing.T) {
+	scored := Recommendation{Candidate: Candidate{AAIntelligence: 31.66}}
+	mapped := Recommendation{Candidate: Candidate{AAIntelligence: 27.04, AAIndexMappedFrom: "v4"}}
+	if got := DisplayIntelligence(scored); got != "31.7" {
+		t.Fatalf("scored row shows %q", got)
+	}
+	if got := DisplayIntelligence(mapped); got != "~27.0" {
+		t.Fatalf("mapped row shows %q", got)
+	}
+	if estimated(mapped.Candidate) {
+		t.Fatal("a mapped score must rank with scored rows, not after them")
 	}
 }
