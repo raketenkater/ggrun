@@ -40,9 +40,9 @@ The first release is a complete remote CLI workflow, not a replacement Claude fr
 
 First acceptance is one real coding task from the laptop over the owner's chosen connection, with files and tests executed on the laptop and the model left loaded after client exit. Product tests additionally verify the generic URL path without Tailscale installed. More elaborate network discovery, remote model switching and persistent background-agent supervision can follow evidence from this complete first workflow.
 
-## Current implementation audit
+## Baseline implementation audit
 
-Reference: installed binary `v3.2.12-26-g101af89`, same commit as inspected `origin/main` on October 27. The root checkout is stale and contains extensive unrelated edits; implementation must start from a fresh isolated checkout of current main and coordinate with the worker's hardening changes.
+Pre-implementation reference: installed binary `v3.2.12-26-g101af89`, same commit as inspected `origin/main` on October 27. The root checkout is stale and contains extensive unrelated edits; implementation must start from a fresh isolated checkout of current main and coordinate with the worker's hardening changes.
 
 | Existing behavior | Code | Remote requirement |
 | --- | --- | --- |
@@ -145,7 +145,7 @@ HTTPS: four real tests accurately reported, unchanged oracle. Published alpha
 resume passed. Shutdown released both model processes in 5.029 seconds without
 a false pending marker; clean relaunch passed with the same 144384-token context.
 
-Remaining gates:
+Acceptance checkpoint (current open gates are in the completion audit):
 
 1. Role fallback and unchanged oracle passed through the complete server;
    published follow-ups passed native contract/core and Linux E2E CI; Windows
@@ -165,5 +165,6 @@ See `remote-claude-validation-20261027.md` for exact evidence and limitations.
 No feature-complete or universal compatibility claim until these gates pass.
 
 Requirement-by-requirement audit: `remote-claude-completion-audit-20261028.md`.
-The new headless status display is implemented and unit/race-tested; it must be
-qualified at an intentional relaunch rather than interrupt the owner laptop trial.
+The headless status display passed an isolated real CPU run, including queue,
+cancellation and shutdown. Final 7f352a8 deployment is owner-authorized; actual
+laptop acceptance remains pending.

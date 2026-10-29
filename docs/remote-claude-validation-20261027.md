@@ -235,3 +235,22 @@ Unit/race coverage includes real activation wiring and zero inference requests
 from metadata/status observation. The active owner service is deliberately still
 the previously qualified binary; no large model restart was introduced while
 the owner can begin the requested laptop trial.
+
+## Final CPU lifecycle and hardening pass
+
+Server 7f352a8 ran installed Qwen3.5-4B on CPU only: two threads, 16384 context,
+16384 MiB scope, isolated ports/cache. Startup verified append=6779 and
+branch=4543 reused tokens. Real SSE and active=1/queued=1/idle display passed.
+An initial immediate-idle assertion was too early; the bounded observer then
+measured admission idle at 0.001 s and backend idle at 0.255 s. Only the latter
+establishes cancellation complete; admission counts are not backend-idle proof.
+Shutdown returned 503 and exited cleanly in 0.170 s. The CPU server was stopped;
+the owner GPU PID was unchanged during that isolated test.
+
+The owner authorized final deployment. All GPUs released to 1 MiB before
+installing the tested 7f352a8 bytes on PATH/service path. The transient user
+service was recreated after stop; the saved request and preferences remain.
+
+Client c4d6488 passes local race/vet and all 12 PR checks. It rejects empty
+saved routing values, case variants on Windows and resume/fork options that
+bypass connector metadata. Alpha.2 release/install verification is pending.
