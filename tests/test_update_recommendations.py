@@ -713,9 +713,11 @@ def test_refresh_guard_refuses_a_gutted_or_rescaled_scrape():
     # Most rows unscored.
     sparse = same[:3] + [dict(r, intelligenceIndex=0) for r in same[3:]]
     assert "carry an intelligence score" in updater.refresh_guard(sparse, prev, full)
-    # Same coverage, new scale.
-    rescaled = [dict(r, intelligenceIndex=r["intelligenceIndex"] * 0.7) for r in same]
-    assert "median factor 0.70" in updater.refresh_guard(rescaled, prev, full)
+    # Same index version, but the scores moved as a whole.
+    moved = {"candidates": [dict(c, aa_intelligence_index=c["aa_intelligence_index"] * 0.7) for c in prev]}
+    assert "median factor 0.70" in updater.refresh_guard(same, prev, moved)
+    # A refused rescale is reported as is.
+    assert updater.refresh_guard(same, prev, {"aa_index_scale": {"refused": "weak fit"}, "candidates": []}) == "weak fit"
     # Scores fine, but the catalog collapsed.
     assert "freshly resolved rows" in updater.refresh_guard(same, prev, {"candidates": full["candidates"][:3]})
     # Carried rows do not count as fresh.
@@ -735,4 +737,81 @@ def test_reviewed_row_keeps_its_score_when_the_anchor_leaves_both_catalogs(monke
     # Next refresh: the anchor is gone from both the scrape and the catalog it wrote.
     second = [r for r in updater.reviewed_candidates([], first) if r["name"] == "Nanbeige4.3-33B"]
     assert second and second[0]["quality"] == 13 and "Nanbeige4.1-3B" in second[0]["notes"]
+
+
+def _v4_prev(n):
+    return [{"name": f"M{i}", "repo": f"o/M{i}-GGUF", "aa_slug": f"m{i}", "aa_intelligence_index": 20.0 + 2 * i,
+             "quality": round((20.0 + 2 * i) * 1.65), "aa_updated_at": "2026-10-19T10:55:25Z", "notes": "row",
+             "quants": [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]} for i in range(n)]
+
+
+def test_index_scale_maps_unscored_rows_onto_the_new_version():
+    """v4 -> v5 (2026-10): most rows lost their score; map them from v4 by a fit."""
+    updater = load_updater()
+    prev = _v4_prev(12)
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "isOpenWeights": True,
+             "intelligenceIndex": round(0.7 * (20.0 + 2 * i) - 1, 3) if i < 9 else None} for i in range(12)]
+    rows.append({"name": "New", "slug": "new", "isOpenWeights": True, "intelligenceIndex": 33.0})
+    out, scale = updater.apply_index_scale(rows, prev, "v4", "v5.0")
+    by = {updater.row_slug(r): r for r in out}
+    assert scale["version"] == "v5.0" and scale["pairs"] == 9 and scale["r2"] > 0.99
+    assert abs(scale["slope"] - 0.7) < 1e-6 and abs(scale["intercept"] + 1) < 1e-6
+    assert "refused" not in scale and scale["scored_rows"] == 13
+    m10 = by["m10"]
+    assert m10["_mapped_from"] == "v4" and m10["_v4"] == 40.0 and abs(updater.intelligence(m10) - 27.0) < 1e-6
+    assert by["m0"]["_v4"] == 20.0 and "_mapped_from" not in by["m0"]
+    assert "_v4" not in by["new"] and updater.intelligence(by["new"]) == 33.0
+    # Still the v4 scale: nothing is mapped and fresh scores become the anchors.
+    same = [dict(r, intelligenceIndex=20.0 + 2 * i) for i, r in enumerate(rows[:12])]
+    out, scale = updater.apply_index_scale(same, prev, "v4")
+    assert scale["version"] == "v4" and all("_mapped_from" not in r for r in out)
+
+
+def test_index_scale_refuses_a_thin_or_weak_fit():
+    updater = load_updater()
+    prev = _v4_prev(12)
+    thin = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": 0.7 * (20.0 + 2 * i) if i < 5 else None}
+            for i in range(12)]
+    _, scale = updater.apply_index_scale(thin, prev, "v4")
+    assert "only 5 models" in scale["refused"]
+    noisy = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": [9, 31, 12, 28, 10, 30, 11, 27, 13, 29][i]}
+             for i in range(10)]
+    _, scale = updater.apply_index_scale(noisy, prev, "v4")
+    assert "fit over 10 models is weak" in scale["refused"]
+
+
+def test_carried_rows_are_mapped_or_dropped_on_a_new_scale():
+    updater = load_updater()
+    scale = {"version": "v5.0", "mapped_from": "v4", "slope": 0.7, "intercept": -1.0}
+    row = _v4_prev(1)[0]
+    mapped = updater.map_carried(dict(row), scale, "v4")
+    assert mapped["aa_intelligence_index"] == 13.0 and mapped["aa_index_v4"] == 20.0
+    assert mapped["aa_index_mapped_from"] == "v4" and mapped["quality"] == round(13.0 * 1.65)
+    assert updater.map_carried(dict(row, aa_intelligence_index=0), scale, "v4") is None
+    # Already on the current version: kept as is.
+    assert updater.map_carried(dict(row), dict(scale, version="v4"), "v4") == row
+
+
+def test_build_catalog_on_a_new_index_version_keeps_one_scale(monkeypatch):
+    from datetime import datetime, timezone
+    updater = load_updater()
+    prev = _v4_prev(12)
+    quants = [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]
+    _offline_catalog(updater, monkeypatch, {f"M{i}": (f"o/M{i}-GGUF", quants, "hf-search") for i in range(12)})
+    monkeypatch.setattr(updater, "candidate_from_row", lambda row, repo, quants, method: {
+        "name": updater.display_name(row), "repo": repo, "quants": quants, "aa_slug": updater.row_slug(row),
+        "aa_intelligence_index": updater.intelligence(row), "quality": updater.quality_score(updater.intelligence(row)),
+        "notes": "fresh", **({"aa_index_mapped_from": row["_mapped_from"]} if row.get("_mapped_from") else {})})
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "isOpenWeights": True,
+             "intelligenceIndex": 0.7 * (20.0 + 2 * i) - 1 if i < 9 else None} for i in range(11)]  # M11 left the scrape
+    catalog = updater.build_catalog(rows, "test", 100, 20, prev, datetime(2026, 10, 29, tzinfo=timezone.utc),
+                                    prev_version="v4", page_version="v5.0")
+    by = {c["repo"]: c for c in catalog["candidates"]}
+    assert catalog["aa_index_version"] == "v5.0" and len(by) == 12
+    assert by["o/M10-GGUF"]["aa_index_mapped_from"] == "v4"
+    carried = by["o/M11-GGUF"]  # carried from the previous catalog, mapped to v5 too
+    assert carried["aa_index_mapped_from"] == "v4" and abs(carried["aa_intelligence_index"] - (0.7 * 42 - 1)) < 1e-3
+    top = max(catalog["candidates"], key=lambda c: c["aa_intelligence_index"])
+    assert top["aa_intelligence_index"] < 35  # no old-scale row on top
+    assert updater.refresh_guard(rows, prev, catalog, "v4") is None
 

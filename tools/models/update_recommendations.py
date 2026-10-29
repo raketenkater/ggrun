@@ -369,7 +369,10 @@ def parse_open_weight_page_models(page: str) -> list[dict[str, Any]]:
 
 
 def fetch_public_open_weight_rows() -> list[dict[str, Any]]:
+    global PAGE_INDEX_VERSION
     page = fetch_text(OPEN_WEIGHTS_PAGE_URL, timeout=90)
+    versions = sorted(set(INDEX_VERSION_RE.findall(page)))
+    PAGE_INDEX_VERSION = versions[-1] if versions else None
     rows = parse_open_weight_page_models(page)
     if not rows:
         raise SystemExit("could not extract open-weight rows from Artificial Analysis leaderboard page")
@@ -1307,6 +1310,11 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "speed": speed_score(tps),
         **shape,
     }
+    if row.get("_v4"):
+        cand["aa_index_v4"] = round(float(row["_v4"]), 3)
+    if row.get("_mapped_from"):
+        cand["aa_index_mapped_from"] = row["_mapped_from"]
+        cand["notes"] = f"{cand['notes']}; ~intelligence mapped from its v4 score until re-evaluated".lstrip("; ")
     if arch:
         # Embed only the geometry fields the overhead formula consumes; keep
         # the catalog lean and the schema explicit.
@@ -1346,6 +1354,14 @@ TOP_ROWS_WATCHED = 10
 MIN_SCORED_SHARE = 0.5
 MIN_KEPT_SHARE = 0.5
 MAX_SCALE_DRIFT = 0.15
+# A leaderboard index version change (v4 -> v5, 2026-10) rescales every score
+# and leaves most models unscored until they are re-evaluated. Rows not yet on
+# the new scale are mapped from their last v4 score by a fit over the models
+# scored on both; the fit must be well supported.
+SCALE_MIN_PAIRS = 8
+SCALE_MIN_R2 = 0.8
+INDEX_VERSION_RE = re.compile(r"Intelligence Index (v\d+(?:\.\d+)?)")
+PAGE_INDEX_VERSION: str | None = None
 
 # Open-weight models the leaderboard does not score, listed by review. They
 # carry no Artificial Analysis index; quality is a "~" estimate one point under
@@ -1497,10 +1513,96 @@ def validate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
     return out
 
 
+def previous_v4(prev: dict[str, Any], prev_version: str) -> float:
+    """The last v4 index score a catalog row carries, or 0."""
+    val = prev.get("aa_index_v4")
+    if isinstance(val, (int, float)) and val > 0:
+        return float(val)
+    if prev_version == "v4" and not prev.get("aa_index_mapped_from"):
+        return catalog_intelligence(prev)
+    return 0.0
+
+
+def fit_line(pairs: list[tuple[float, float]]) -> tuple[float, float, float]:
+    """Least-squares y = a*x + b over pairs, with R^2."""
+    n = len(pairs)
+    mx = sum(x for x, _ in pairs) / n
+    my = sum(y for _, y in pairs) / n
+    sxx = sum((x - mx) ** 2 for x, _ in pairs)
+    if sxx <= 0:
+        return 0.0, my, 0.0
+    a = sum((x - mx) * (y - my) for x, y in pairs) / sxx
+    b = my - a * mx
+    ss_tot = sum((y - my) ** 2 for _, y in pairs)
+    ss_res = sum((y - (a * x + b)) ** 2 for x, y in pairs)
+    return a, b, (1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+
+def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]], prev_version: str,
+                      page_version: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Put every row on one index scale.
+
+    Fresh scores are compared with each model's last v4 score. On the v4 scale
+    nothing changes. On a new scale, rows the leaderboard has not re-evaluated
+    yet get a v4 -> new mapping fitted over the models scored on both, marked
+    as mapped; a weak or thin fit refuses the refresh instead.
+    """
+    anchors = {str(p["aa_slug"]): v for p in previous
+               if p.get("aa_slug") and (v := previous_v4(p, prev_version)) > 0}
+    rows = [dict(r) for r in dedupe_rows(rows)]
+    for row in rows:
+        if row_slug(row) in anchors:
+            row["_v4"] = anchors[row_slug(row)]
+    pairs = [(row["_v4"], intelligence(row)) for row in rows if row.get("_v4") and intelligence(row) > 0]
+    scale: dict[str, Any] = {"version": "v4", "pairs": len(pairs), "open_rows": len(rows)}
+    if pairs:
+        ratios = sorted(y / x for x, y in pairs)
+        median = ratios[len(ratios) // 2]
+        scale["median_ratio"] = round(median, 3)
+        if abs(median - 1) > MAX_SCALE_DRIFT:
+            scale["version"] = page_version or (prev_version if prev_version != "v4" else "v5")
+            if len(pairs) < SCALE_MIN_PAIRS:
+                scale["refused"] = (f"index rescaled (median factor {median:.2f}) but only {len(pairs)} models "
+                                    f"are scored on both scales; need {SCALE_MIN_PAIRS} to map the rest")
+            else:
+                a, b, r2 = fit_line(pairs)
+                scale.update(mapped_from="v4", slope=round(a, 4), intercept=round(b, 4), r2=round(r2, 3))
+                if r2 < SCALE_MIN_R2 or not 0.2 <= a <= 2.0:
+                    scale["refused"] = (f"index rescaled (median factor {median:.2f}) and the v4 -> {scale['version']} "
+                                        f"fit over {len(pairs)} models is weak (slope {a:.2f}, R^2 {r2:.2f})")
+                else:
+                    for row in rows:
+                        if intelligence(row) <= 0 and row.get("_v4"):
+                            row["intelligenceIndex"] = round(max(0.1, a * row["_v4"] + b), 3)
+                            row["_mapped_from"] = "v4"
+        elif prev_version == "v4":
+            for row in rows:  # still v4: the fresh score is the newest v4 anchor
+                if intelligence(row) > 0:
+                    row["_v4"] = intelligence(row)
+    scale["scored_rows"] = sum(1 for row in rows if intelligence(row) > 0)
+    return rows, scale
+
+
+def map_carried(cand: dict[str, Any], scale: dict[str, Any], prev_version: str) -> dict[str, Any] | None:
+    """A carried previous row on the current scale, or None when it cannot be mapped."""
+    if scale.get("version") == prev_version or not scale.get("mapped_from"):
+        return cand
+    v4 = previous_v4(cand, prev_version)
+    if v4 <= 0:
+        print(f"warning: {cand.get('name')}: carried row has no v4 score to map to {scale['version']}; dropped", file=sys.stderr)
+        return None
+    idx = round(max(0.1, scale["slope"] * v4 + scale["intercept"]), 3)
+    cand = dict(cand, aa_index_v4=round(v4, 3), aa_intelligence_index=idx, quality=quality_score(idx),
+                aa_index_mapped_from="v4")
+    return cand
+
+
 def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int,
-                  previous: list[dict[str, Any]] | None = None, now: datetime | None = None) -> dict[str, Any]:
+                  previous: list[dict[str, Any]] | None = None, now: datetime | None = None,
+                  prev_version: str = "v4", page_version: str | None = None) -> dict[str, Any]:
     previous = [c for c in previous or [] if isinstance(c, dict) and c.get("repo")]
     now = now or datetime.now(timezone.utc)
+    rows, scale = apply_index_scale(rows, previous, prev_version, page_version)
     scored_before = [c for c in previous if catalog_intelligence(c) > 0]
     by_slug = {str(c.get("aa_slug")): c for c in scored_before if c.get("aa_slug")}
     by_name = {str(c.get("name") or "").lower(): c for c in scored_before}
@@ -1550,7 +1652,8 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
         kept = carry_forward(prev, previous_row(prev), now, "missing from the leaderboard scrape")
         if kept:
             carried.append(kept)
-    carried = [c for c in carried if str(c["repo"]).lower() not in seen_repos]
+    carried = [c for c in (map_carried(c, scale, prev_version) for c in carried)
+               if c and str(c["repo"]).lower() not in seen_repos]
     candidates = dedupe_candidates(candidates + carried)[:limit]
     kept_count = sum(1 for c in carried if c in candidates)
     candidates = validate_candidates(candidates)
@@ -1558,6 +1661,8 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
     return {
         "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by ggrun hardware fit; Hugging Face GGUF metadata cached from public model APIs",
         "candidates": candidates,
+        "aa_index_scale": scale,
+        "aa_index_version": scale["version"],
         "generated_at": utc_now(),
         "reviewed_candidates": reviewed,
         "source": f"{source_label}; resolved {len(candidates) - kept_count} GGUF repos with quant sizes; kept {kept_count} previous rows; skipped {skipped} open-weight rows without matching GGUF quants; listed {len(reviewed)} reviewed unscored rows",
@@ -1566,28 +1671,37 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
 
 
 def refresh_guard(rows: list[dict[str, Any]], previous: list[dict[str, Any]],
-                  catalog: dict[str, Any]) -> str | None:
+                  catalog: dict[str, Any], prev_version: str = "v4") -> str | None:
     """Why this refresh must not replace the catalog, or None.
 
-    2026-10-29: the scrape gave 21 of 100 open-weight rows a score and the
-    scores looked rescaled (GLM-5.3 44.8 -> 31.7); the catalog would have gone
-    from 119 to 21 rows with two carried old-scale rows on top.
+    2026-10-29: the scrape gave 21 of 177 open-weight rows a score on a new
+    index scale (GLM-5.3 44.8 -> 31.7); taken as is, the catalog would have
+    gone from 119 to 21 rows with carried old-scale rows on top.
     """
-    open_rows = dedupe_rows(rows)
-    scored = [row for row in open_rows if intelligence(row) > 0]
-    if open_rows and len(scored) < MIN_SCORED_SHARE * len(open_rows):
-        return f"only {len(scored)} of {len(open_rows)} leaderboard rows carry an intelligence score"
-    before = {str(c.get("aa_slug")): catalog_intelligence(c) for c in previous
-              if c.get("aa_slug") and catalog_intelligence(c) > 0}
-    ratios = sorted(intelligence(row) / before[row_slug(row)] for row in scored if row_slug(row) in before)
-    if len(ratios) >= 5:
-        median = ratios[len(ratios) // 2]
-        if abs(median - 1) > MAX_SCALE_DRIFT:
-            return (f"leaderboard scores moved by a median factor {median:.2f} across {len(ratios)} models "
-                    f"present in both catalogs; refusing to mix the new scale with carried rows")
+    scale = catalog.get("aa_index_scale") or {}
+    if scale.get("refused"):
+        return scale["refused"]
+    open_count = scale.get("open_rows", len(dedupe_rows(rows)))
+    scored_count = scale.get("scored_rows", sum(1 for row in dedupe_rows(rows) if intelligence(row) > 0))
+    if open_count and scored_count < MIN_SCORED_SHARE * open_count:
+        return f"only {scored_count} of {open_count} leaderboard rows carry an intelligence score"
+    version = catalog.get("aa_index_version", prev_version)
     fresh = [c for c in catalog.get("candidates") or [] if "last seen on the leaderboard" not in str(c.get("notes") or "")]
-    if before and len(fresh) < MIN_KEPT_SHARE * len(before):
-        return f"only {len(fresh)} freshly resolved rows against {len(before)} scored rows before"
+    if version == prev_version:
+        # Same index version: real scores must not move as a whole.
+        before = {str(c.get("aa_slug")): catalog_intelligence(c) for c in previous
+                  if c.get("aa_slug") and catalog_intelligence(c) > 0 and not c.get("aa_index_mapped_from")}
+        ratios = sorted(catalog_intelligence(c) / before[str(c.get("aa_slug"))] for c in fresh
+                        if str(c.get("aa_slug")) in before and catalog_intelligence(c) > 0
+                        and not c.get("aa_index_mapped_from"))
+        if len(ratios) >= 5:
+            median = ratios[len(ratios) // 2]
+            if abs(median - 1) > MAX_SCALE_DRIFT:
+                return (f"scores moved by a median factor {median:.2f} across {len(ratios)} models without an "
+                        f"index version change; refusing to mix scales")
+    scored_before = sum(1 for c in previous if catalog_intelligence(c) > 0)
+    if scored_before and len(fresh) < MIN_KEPT_SHARE * scored_before:
+        return f"only {len(fresh)} freshly resolved rows against {scored_before} scored rows before"
     return None
 
 
@@ -1733,12 +1847,17 @@ def main() -> int:
         if args.print_open_weights_top > 0:
             print_top_models(rows, args.print_open_weights_top, open_weights_only=True)
         try:
-            previous = catalog_rows(json.loads(catalog_path.read_text(encoding="utf-8")))
+            previous_doc = json.loads(catalog_path.read_text(encoding="utf-8"))
+            previous = catalog_rows(previous_doc)
+            prev_version = str(previous_doc.get("aa_index_version") or "v4")
         except (OSError, ValueError, AttributeError) as exc:
             print(f"warning: previous catalog unreadable ({exc}); nothing carried forward", file=sys.stderr)
-            previous = []
-        catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit), previous)
-        refused = refresh_guard(rows, previous, catalog)
+            previous, prev_version = [], "v4"
+        catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit), previous,
+                                prev_version=prev_version, page_version=PAGE_INDEX_VERSION)
+        scale = catalog.get("aa_index_scale") or {}
+        print(f"index scale: {json.dumps(scale, sort_keys=True)}", file=sys.stderr)
+        refused = refresh_guard(rows, previous, catalog, prev_version)
     except Exception as exc:
         if args.allow_missing_key:
             print(f"recommendation catalog unchanged: {exc}", file=sys.stderr)

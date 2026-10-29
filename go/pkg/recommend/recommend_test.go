@@ -653,3 +653,19 @@ func TestUnrunnableArchesFallbackOnBadJSON(t *testing.T) {
 		}
 	}
 }
+
+// A score mapped from an older index version ranks as a score but is shown
+// as an estimate until the leaderboard re-evaluates the model.
+func TestDisplayIntelligenceMarksMappedScores(t *testing.T) {
+	scored := Recommendation{Candidate: Candidate{AAIntelligence: 31.66}}
+	mapped := Recommendation{Candidate: Candidate{AAIntelligence: 27.04, AAIndexMappedFrom: "v4"}}
+	if got := DisplayIntelligence(scored); got != "31.7" {
+		t.Fatalf("scored row shows %q", got)
+	}
+	if got := DisplayIntelligence(mapped); got != "~27.0" {
+		t.Fatalf("mapped row shows %q", got)
+	}
+	if estimated(mapped.Candidate) {
+		t.Fatal("a mapped score must rank with scored rows, not after them")
+	}
+}
