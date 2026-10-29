@@ -69,3 +69,12 @@ MODEL=/models/your-model.gguf docker compose up
   ik_llama.cpp CUDA path is a source build (see the top-level README); it is not
   bundled in the container by default.
 - Set `LLM_COMMUNITY_TUNES=off` to disable the shared tune-config lookup.
+- Containers have no systemd, so the images set `GGRUN_SCOPE_MODE=none`: the
+  backend runs without ggrun's per-backend cgroup scope. Pre-launch memory
+  admission still applies; use `docker run --memory` as the hard limit.
+- The CUDA and Vulkan images ship `llama-fit-params` next to `llama-server`, so
+  GPU memory admission runs without loading the model. A custom image without
+  it must pass `--allow-live-memory-probe` to start unattended, and then pays
+  one contained live model load per launch.
+- No image is built or run in CI; the GPU images in particular have not been
+  verified in a container.

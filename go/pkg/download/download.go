@@ -5,11 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/python"
+	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
 // Downloader wraps the download_any_gguf.py script.
@@ -17,6 +18,8 @@ type Downloader struct {
 	ScriptPath string
 	ModelDir   string
 	CacheDir   string
+	// AssumeYes takes the recommended quant and skips the confirmation.
+	AssumeYes bool
 }
 
 // New creates a Downloader with auto-discovered script path.
@@ -92,15 +95,26 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 		return fmt.Errorf("downloader script not found: %s", d.ScriptPath)
 	}
 
-	vramMB := 0
+	py, ok := python.Command()
+	if !ok {
+		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", python.InstallHint())
+	}
+	cmd := exec.Command(py, d.scriptArgs(repo, quant, caps, stdinIsTerminal())...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// scriptArgs builds the downloader argv. caps should be the planning view
+// (recommend.PlanningCapabilities): its RAM is the installed ceiling, so the
+// default quant matches what the recommender would pick on an idle machine.
+func (d *Downloader) scriptArgs(repo, quant string, caps *detect.Capabilities, interactive bool) []string {
+	vramMB, ramMB := 0, 0
 	if caps != nil {
 		vramMB = caps.TotalVRAM()
-	}
-	ramMB := 0
-	if caps != nil {
 		ramMB = caps.RAM.FreeMB
 	}
-
 	args := []string{
 		d.ScriptPath,
 		"--repo", repo,
@@ -112,57 +126,32 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 	if quant != "" && quant != "auto" && quant != "catalog" {
 		args = append(args, "--quant", quant)
 	}
-	// The downloader ends with a "Start download? (y/n)" prompt. With no terminal
-	// attached that raises EOFError and kills the run after the repo and file
-	// list have already been resolved -- which is exactly what happens to a
-	// scripted or queued download. Confirming is only meaningful when there is
-	// someone there to confirm, so skip it precisely when stdin is not a TTY and
-	// leave interactive behaviour untouched.
-	if !stdinIsTerminal() {
+	if active := catalogActiveParamsB(repo); active > 0 {
+		args = append(args, "--active-params-b", strconv.FormatFloat(active, 'f', -1, 64))
+	}
+	if d.AssumeYes {
 		args = append(args, "--yes")
 	}
-	py, ok := pythonCommand()
-	if !ok {
-		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", pythonInstallHint())
+	// With no terminal attached a prompt dies on EOFError after the repo and
+	// file list have been resolved -- exactly what happens to a scripted or
+	// queued download. The script then proceeds only on an explicit --quant
+	// (or --yes) and otherwise fails listing the choices.
+	if !interactive {
+		args = append(args, "--non-interactive")
 	}
-	cmd := exec.Command(py, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return args
 }
 
-// pythonCommand returns the path to a usable Python 3 interpreter and whether
-// one was found. On Windows the launcher "py" resolves the newest Python 3.
-func pythonCommand() (string, bool) {
-	for _, name := range []string{"python3", "python", "py"} {
-		path, err := exec.LookPath(name)
-		if err != nil {
-			continue
-		}
-		// Validate it actually runs as Python 3, skipping Windows Store execution
-		// aliases and dead shims that resolve on PATH but don't run. This mirrors
-		// install.ps1 Resolve-Python so the interpreter that received
-		// huggingface_hub is the one we invoke download_any_gguf.py with.
-		check := exec.Command(path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
-		if check.Run() == nil {
-			return path, true
+// catalogActiveParamsB is the catalog's active parameter count for a MoE repo,
+// so the downloader does not size an unnamed MoE (no A##B in the repo name)
+// as dense. 0 when the repo is not a catalog MoE.
+func catalogActiveParamsB(repo string) float64 {
+	for _, c := range recommend.Shortlist() {
+		if c.MoE && strings.EqualFold(c.Repo, repo) {
+			return c.ActiveParamsB
 		}
 	}
-	return "", false
-}
-
-// pythonInstallHint returns an OS-appropriate one-liner for installing Python 3.
-func pythonInstallHint() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "Install it with:  winget install -e --id Python.Python.3.12\n" +
-			"  or from https://www.python.org/downloads/ (tick \"Add python.exe to PATH\"), then reopen the terminal."
-	case "darwin":
-		return "Install it with:  brew install python   (or from https://www.python.org/downloads/)."
-	default:
-		return "Install it with your package manager, e.g.:  sudo apt install python3 python3-pip"
-	}
+	return 0
 }
 
 // stdinIsTerminal reports whether standard input is an interactive terminal,

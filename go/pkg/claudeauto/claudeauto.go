@@ -665,6 +665,9 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				"active": router.mainActive.Load(),
 				"queued": router.mainQueued.Load(),
 				"limit":  int64(router.maxMainActive),
+				// The fronted backend, so a resume can tell this router from
+				// another launch's router that reused the same ephemeral port.
+				"main": router.mainBaseURL,
 			}
 			if admission := router.sched.status(); admission != nil {
 				status["admission"] = admission

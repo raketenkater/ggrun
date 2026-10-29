@@ -16,6 +16,16 @@
   package installation and its default synthetic CPU launch are required checks;
   these do not establish real Metal inference qualification.
 
+### Fixed
+
+- The printed Claude Code recipe now sets the same variables as `--claude-code`,
+  including `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, so copied setups reuse the cache.
+- The Workflow hook asks before running a rewritten Workflow unless the session
+  is in Auto or `bypassPermissions` mode.
+- `ggrun claude resume` against a live server goes through its ggrun router when
+  it is still running, and installs the Workflow hook either way.
+- A non-zero Claude Code exit now says why the server is stopping.
+
 ## v3.2.11 — 2026-10-13
 
 ### Added

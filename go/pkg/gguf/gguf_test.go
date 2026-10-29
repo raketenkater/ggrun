@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -444,6 +445,90 @@ func TestChatTemplateAbsentReturnsEmpty(t *testing.T) {
 	if got := ChatTemplate(""); got != "" {
 		t.Fatalf("ChatTemplate of empty path = %q, want \"\"", got)
 	}
+}
+
+// chatTemplateHeader builds GGUF header bytes from raw little-endian fields so
+// a test can state corrupt lengths directly.
+func chatTemplateHeader(kvCount uint64, fields ...any) []byte {
+	buf := new(bytes.Buffer)
+	buf.WriteString("GGUF")
+	binary.Write(buf, binary.LittleEndian, uint32(3))
+	binary.Write(buf, binary.LittleEndian, uint64(0))
+	binary.Write(buf, binary.LittleEndian, kvCount)
+	for _, f := range fields {
+		if s, ok := f.(string); ok {
+			buf.WriteString(s)
+			continue
+		}
+		binary.Write(buf, binary.LittleEndian, f)
+	}
+	return buf.Bytes()
+}
+
+func TestReadChatTemplateRejectsCorruptHeadersWithoutPanicking(t *testing.T) {
+	const tmplKey = "tokenizer.chat_template"
+	key := func(s string) []any { return []any{uint64(len(s)), s} }
+	cat := func(parts ...[]any) []any {
+		var out []any
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	valid := chatTemplateHeader(3, cat(
+		key("tokenizer.ggml.tokens"), []any{uint32(9), uint32(8), uint64(2)}, key("a"), key("bc"),
+		key("nested"), []any{uint32(9), uint32(9), uint64(1), uint32(4), uint64(2), uint32(1), uint32(2)},
+		key(tmplKey), []any{uint32(8)}, key("{{ messages }}"),
+	)...)
+	if got, err := readChatTemplate(bytes.NewReader(valid)); err != nil || got != "{{ messages }}" {
+		t.Fatalf("valid header = %q, %v", got, err)
+	}
+
+	cases := map[string][]byte{
+		"key length beyond int64":     chatTemplateHeader(1, uint64(1<<63)),
+		"key length all ones":         chatTemplateHeader(1, ^uint64(0)),
+		"key length above spec limit": chatTemplateHeader(1, uint64(1<<16)),
+		"template length huge":        chatTemplateHeader(1, cat(key(tmplKey), []any{uint32(8), ^uint64(0)})...),
+		"template longer than file":   chatTemplateHeader(1, cat(key(tmplKey), []any{uint32(8), uint64(1 << 20)})...),
+		"other string beyond int64":   chatTemplateHeader(2, cat(key("x"), []any{uint32(8), ^uint64(0)})...),
+		"unknown value type":          chatTemplateHeader(2, cat(key("x"), []any{uint32(99)})...),
+		"array of unknown type":       chatTemplateHeader(2, cat(key("x"), []any{uint32(9), uint32(99), uint64(1)})...),
+		"array count beyond file":     chatTemplateHeader(2, cat(key("x"), []any{uint32(9), uint32(12), ^uint64(0)})...),
+		"kv count beyond file":        chatTemplateHeader(^uint64(0)),
+		"not gguf":                    []byte("GGML"),
+		"empty":                       nil,
+	}
+	deep := []any{}
+	for i := 0; i < maxGGUFArrayNesting+2; i++ {
+		deep = append(deep, uint32(9), uint32(9), uint64(1))
+	}
+	cases["arrays nested too deep"] = chatTemplateHeader(2, cat(key("x"), deep)...)
+	for cut := 0; cut < len(valid); cut++ {
+		cases[fmt.Sprintf("valid header cut at %d", cut)] = valid[:cut]
+	}
+	for name, data := range cases {
+		got, err := readChatTemplate(bytes.NewReader(data))
+		if err == nil {
+			t.Errorf("%s: read %q without error", name, got)
+		}
+	}
+	// The path-level API keeps its "" contract on corrupt files.
+	path := filepath.Join(t.TempDir(), "corrupt.gguf")
+	if err := os.WriteFile(path, cases["key length all ones"], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ChatTemplate(path); got != "" {
+		t.Fatalf("ChatTemplate of corrupt file = %q, want \"\"", got)
+	}
+}
+
+func FuzzReadChatTemplate(f *testing.F) {
+	f.Add(chatTemplateHeader(1, uint64(23), "tokenizer.chat_template", uint32(8), uint64(2), "ok"))
+	f.Add(chatTemplateHeader(1, ^uint64(0)))
+	f.Add(chatTemplateHeader(2, uint64(1), "x", uint32(9), uint32(9), uint64(1)))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = readChatTemplate(bytes.NewReader(data))
+	})
 }
 
 // fixtureKV writes one GGUF metadata entry: key, value type, and payload.

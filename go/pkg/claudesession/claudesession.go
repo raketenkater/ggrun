@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // DirName is the subdirectory of the ggrun cache holding session records.
@@ -47,6 +48,10 @@ type Record struct {
 	LaunchArgs []string  `json:"launch_args,omitempty"`
 	ServerArgs []string  `json:"server_args,omitempty"`
 	Workflow   *Workflow `json:"workflow,omitempty"`
+	// RouterPort is the loopback gateway Claude Code talked to. It carries
+	// admission control and reviewer routing that the backend Port lacks, and
+	// lives only as long as the ggrun launch that owns it.
+	RouterPort int `json:"router_port,omitempty"`
 }
 
 // NewSessionID returns a random RFC 4122 version 4 UUID. Claude Code's
@@ -300,7 +305,7 @@ func (r Record) shapeMismatches(serverArgs []string, currentTokens func(projects
 // paying for a relaunch. It mirrors the client's own path construction:
 // <projects>/<projectKey>/<sessionID>/subagents/workflows/<runID>/journal.jsonl
 func JournalPath(projectsDir, workDir, sessionID, runID string) string {
-	return filepath.Join(projectsDir, ProjectKey(workDir), sessionID,
+	return filepath.Join(projectDir(projectsDir, workDir, sessionID), sessionID,
 		"subagents", "workflows", runID, "journal.jsonl")
 }
 
@@ -310,7 +315,7 @@ func JournalPath(projectsDir, workDir, sessionID, runID string) string {
 //
 // The returned Workflow is nil when the session ran no workflow.
 func LatestRun(projectsDir, workDir, sessionID string) (*Workflow, int) {
-	sessionDir := filepath.Join(projectsDir, ProjectKey(workDir), sessionID)
+	sessionDir := filepath.Join(projectDir(projectsDir, workDir, sessionID), sessionID)
 	entries, err := os.ReadDir(filepath.Join(sessionDir, "subagents", "workflows"))
 	if err != nil {
 		return nil, 0
@@ -368,7 +373,7 @@ func (r Record) Recoverable() bool {
 	if wf, _ := LatestRun(defaultProjectsDir(), r.WorkDir, r.SessionID); wf != nil {
 		return true
 	}
-	if _, err := os.Stat(filepath.Join(defaultProjectsDir(), ProjectKey(r.WorkDir), r.SessionID+".jsonl")); err == nil {
+	if _, err := os.Stat(filepath.Join(projectDir(defaultProjectsDir(), r.WorkDir, r.SessionID), r.SessionID+".jsonl")); err == nil {
 		return true
 	}
 	return false
@@ -410,13 +415,80 @@ func CachedAgents(journalPath string) int {
 	return count
 }
 
-// ProjectKey mirrors Claude Code's per-project directory naming: the absolute
-// path with separators replaced by dashes.
+// claudeMaxProjectKey is Claude Code's cap on a project key; a longer key is
+// cut to this length and suffixed with "-" and a hash of the original path.
+const claudeMaxProjectKey = 200
+
+// ProjectKey mirrors Claude Code's per-project directory naming: every
+// character of the absolute path that is not an ASCII letter or digit becomes
+// a dash, so C:\Users\me\my_app keys as C--Users-me-my-app. Claude Code
+// replaces UTF-16 code units, so a character outside the BMP becomes two
+// dashes. A key over claudeMaxProjectKey is cut and suffixed with the hash of
+// the path, as the client does (Claude Code 2.1.307: slice(0, 200) + "-" +
+// Math.abs(hash).toString(36)).
 func ProjectKey(workDir string) string {
-	key := filepath.ToSlash(workDir)
-	key = strings.ReplaceAll(key, "/", "-")
-	key = strings.ReplaceAll(key, ".", "-")
-	return key
+	var b strings.Builder
+	for _, r := range workDir {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			b.WriteString("--")
+		default:
+			b.WriteByte('-')
+		}
+	}
+	key := b.String()
+	if len(key) <= claudeMaxProjectKey {
+		return key
+	}
+	return key[:claudeMaxProjectKey] + "-" + claudePathHash(workDir)
+}
+
+// claudePathHash is Claude Code's 32-bit string hash over the path's UTF-16
+// code units (h = h*31 + unit, wrapping), printed as base-36 of its absolute
+// value. Two sibling projects under one long prefix therefore get distinct
+// directories, so no prefix guessing is needed.
+func claudePathHash(path string) string {
+	var h int32
+	for _, unit := range utf16.Encode([]rune(path)) {
+		h = (h << 5) - h + int32(unit)
+	}
+	v := int64(h)
+	if v < 0 {
+		v = -v
+	}
+	return strconv.FormatInt(v, 36)
+}
+
+// projectDir returns the Claude Code directory holding sessionID for workDir.
+// It is the exact key; for an over-long key whose session is not there, a
+// same-prefix directory holding <sessionID>.jsonl or <sessionID>/ is used, as
+// the client itself scans same-prefix directories (a transcript kept under
+// another hash suffix). The session UUID makes that match unambiguous.
+func projectDir(projectsDir, workDir, sessionID string) string {
+	key := ProjectKey(workDir)
+	exact := filepath.Join(projectsDir, key)
+	if len(key) <= claudeMaxProjectKey || sessionID == "" || sessionPresent(exact, sessionID) {
+		return exact
+	}
+	prefix := key[:claudeMaxProjectKey] + "-"
+	entries, _ := os.ReadDir(projectsDir)
+	for _, entry := range entries {
+		dir := filepath.Join(projectsDir, entry.Name())
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) && sessionPresent(dir, sessionID) {
+			return dir
+		}
+	}
+	return exact
+}
+
+func sessionPresent(dir, sessionID string) bool {
+	if _, err := os.Stat(filepath.Join(dir, sessionID+".jsonl")); err == nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, sessionID))
+	return err == nil
 }
 
 // defaultProjectsDir locates Claude Code's transcript root the same way the
@@ -444,7 +516,7 @@ func CurrentContextTokens(projectsDir, workDir, sessionID string) (int, bool) {
 	if projectsDir == "" || sessionID == "" {
 		return 0, false
 	}
-	f, err := os.Open(filepath.Join(projectsDir, ProjectKey(workDir), sessionID+".jsonl"))
+	f, err := os.Open(filepath.Join(projectDir(projectsDir, workDir, sessionID), sessionID+".jsonl"))
 	if err != nil {
 		return 0, false
 	}

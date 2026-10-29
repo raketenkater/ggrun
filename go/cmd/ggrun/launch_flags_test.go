@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -361,6 +362,45 @@ func TestClaudeClientEnvDisablesAttributionHeader(t *testing.T) {
 	}
 	if got != "0" {
 		t.Errorf("CLAUDE_CODE_ATTRIBUTION_HEADER=%q, want 0", got)
+	}
+}
+
+// The printed copy-paste recipe and the auto-launched client must set the same
+// variables to the same values. The recipe once lacked the attribution header,
+// so users who copied it never reused the prompt cache, and it sized the
+// compact window from --ctx-size instead of the resolved context.
+func TestClaudeRecipeMatchesAutoLaunchEnv(t *testing.T) {
+	serverArgs := []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"}
+	const actualCtx = 131072
+	policy := claudeClientProfile(serverArgs, actualCtx)
+	known := policy.Environment("http://127.0.0.1:8081", "ggrun", nil)
+	for _, pair := range known {
+		key, _, _ := strings.Cut(pair, "=")
+		t.Setenv(key, "")
+	}
+	launched := map[string]string{}
+	for _, pair := range claudeCodeEnv("0.0.0.0", 8081, serverArgs, actualCtx) {
+		key, value, _ := strings.Cut(pair, "=")
+		launched[key] = value
+	}
+	done := captureStdout(t)
+	printClaudeCodeRecipe("0.0.0.0", 8081, serverArgs, actualCtx)
+	out := done()
+	// Compare complete quoted assignments. A custom-header value contains a
+	// newline; splitting the recipe on whitespace loses the actual policy.
+	for _, pair := range known {
+		key, _, _ := strings.Cut(pair, "=")
+		assignment := key + "=" + launched[key]
+		expected := "  export " + shellQuote(assignment) + "\n"
+		if runtime.GOOS == "windows" && os.Getenv("MSYSTEM") == "" {
+			expected = "  " + displayCommandWithEnv([]string{assignment}, nil) + "\n"
+		}
+		if !strings.Contains(out, expected) {
+			t.Errorf("recipe differs from launched policy for %s", key)
+		}
+	}
+	if launched["CLAUDE_CODE_ATTRIBUTION_HEADER"] != "0" || launched["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "32768" {
+		t.Fatal("recipe and launch lost actual per-slot capacity or stable prefix")
 	}
 }
 

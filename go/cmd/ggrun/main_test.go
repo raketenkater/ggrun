@@ -4193,43 +4193,66 @@ func TestMeasuredFootprintCgroupMaxMB(t *testing.T) {
 // experts, 2026-10-24) had memory.high tightened to the 24,183 MiB
 // non-reclaimable ceiling: RSS fell from 192 GB to 23 GB, IO pressure reached
 // 46% full, decode 0.32 tok/s. memory.high must leave the mapped experts as
-// much room as the planned ceiling allows, never below the non-reclaimable
-// ceiling, and keep a headroom band below that ceiling.
+// much room as the scope's real hard limit (memory.max) allows, keep a headroom
+// band below that limit, and never drop below the non-reclaimable ceiling or
+// the pre-launch memory.high. The 2026-10-26 relaunch clamped against the lower
+// planned budget instead, putting memory.high 4 GiB below its launch value, and
+// warned of a cache shortfall computed from the 24,183 MiB planned floor where
+// 965 MiB non-reclaimable was measured.
 func TestMMapReclaimHighKeepsMappedExperts(t *testing.T) {
 	cases := []struct {
-		name                                   string
-		nonReclaimable, mapped, headroom, ceil int
-		wantHigh, wantCached                   int
+		name                             string
+		nonReclaimable, measured, mapped int
+		headroom, hardMax, launchHigh    int
+		wantHigh, wantCached             int
 	}{
-		{"live GLM: experts exceed RAM, high stops a band below the ceiling", 24183, 201504, 4096, 205963, 201867, 177684},
-		{"experts fit: all of them stay cached", 20000, 30000, 4096, 200000, 50000, 30000},
-		{"ceiling at the non-reclaimable state: never below it", 100000, 50000, 4096, 102000, 100000, 0},
-		{"no headroom configured: up to the ceiling", 20000, 300000, 0, 200000, 200000, 180000},
-		{"unknown ceiling: non-reclaimable plus experts", 20000, 30000, 4096, 0, 50000, 30000},
-		{"no measurement: no resize", 0, 30000, 4096, 200000, 0, 0},
+		{"live GLM: band below the real hard limit, allowance from measured", 24183, 965, 201504, 4096, 215000, 205963, 210904, 201504},
+		{"hard limit is the budget: never below the launch high", 24183, 965, 201504, 4096, 205963, 205963, 205963, 201504},
+		{"experts exceed RAM: allowance beside the measured state", 24183, 965, 300000, 4096, 215000, 200000, 210904, 209939},
+		{"experts fit: all of them stay cached", 20000, 18000, 30000, 4096, 200000, 0, 50000, 30000},
+		{"hard limit at the non-reclaimable state: never below it", 100000, 100000, 50000, 4096, 102000, 0, 100000, 0},
+		{"no headroom configured: up to the hard limit", 20000, 20000, 300000, 0, 200000, 0, 200000, 180000},
+		{"unknown limits: non-reclaimable plus experts", 20000, 20000, 30000, 4096, 0, 0, 50000, 30000},
+		{"unknown measurement: allowance beside the planned floor", 24183, 0, 201504, 4096, 215000, 0, 210904, 186721},
+		{"no non-reclaimable ceiling: no resize", 0, 965, 30000, 4096, 200000, 0, 0, 0},
 	}
 	for _, c := range cases {
-		high, cached := mmapExpertReclaimHighMB(c.nonReclaimable, c.mapped, c.headroom, c.ceil)
+		high, cached := mmapExpertReclaimHighMB(c.nonReclaimable, c.measured, c.mapped, c.headroom, c.hardMax, c.launchHigh)
 		if high != c.wantHigh || cached != c.wantCached {
 			t.Fatalf("%s: got high=%d cached=%d, want high=%d cached=%d", c.name, high, cached, c.wantHigh, c.wantCached)
 		}
 	}
 	for nonRecl := 1000; nonRecl <= 240000; nonRecl += 23000 {
-		for mapped := 0; mapped <= 400000; mapped += 37000 {
-			for _, ceil := range []int{0, 50000, 205963, 500000} {
-				high, cached := mmapExpertReclaimHighMB(nonRecl, mapped, 4096, ceil)
-				if high < nonRecl {
-					t.Fatalf("high %d below the non-reclaimable ceiling %d", high, nonRecl)
-				}
-				if ceil > 0 && high > ceil-4096 && high > nonRecl {
-					t.Fatalf("high %d leaves no reclaim band below ceiling %d", high, ceil)
-				}
-				room := mapped
-				if ceil > 0 {
-					room = min(mapped, max(0, ceil-4096-nonRecl))
-				}
-				if cached != room {
-					t.Fatalf("nonRecl=%d mapped=%d ceil=%d: cached %d, want %d (all the room the ceiling allows)", nonRecl, mapped, ceil, cached, room)
+		for _, measured := range []int{0, 965, nonRecl / 2, nonRecl} {
+			for mapped := 0; mapped <= 400000; mapped += 37000 {
+				for _, hardMax := range []int{0, 50000, 215000, 500000} {
+					for _, launchHigh := range []int{0, hardMax / 2, hardMax} {
+						high, cached := mmapExpertReclaimHighMB(nonRecl, measured, mapped, 4096, hardMax, launchHigh)
+						where := fmt.Sprintf("nonRecl=%d measured=%d mapped=%d hardMax=%d launchHigh=%d: high=%d cached=%d",
+							nonRecl, measured, mapped, hardMax, launchHigh, high, cached)
+						if hardMax > 0 && high > hardMax {
+							t.Fatalf("%s: memory.high above memory.max", where)
+						}
+						if high < launchHigh {
+							t.Fatalf("%s: memory.high lowered below its launch value", where)
+						}
+						if high < nonRecl && (hardMax == 0 || nonRecl <= hardMax) {
+							t.Fatalf("%s: memory.high below the non-reclaimable ceiling", where)
+						}
+						if hardMax > 0 && high > hardMax-4096 && high > max(nonRecl, launchHigh) {
+							t.Fatalf("%s: no reclaim band below the hard limit", where)
+						}
+						used := measured
+						if used <= 0 {
+							used = nonRecl
+						}
+						if want := min(mapped, max(0, high-used)); cached != want {
+							t.Fatalf("%s: allowance %d, want %d beside the measured state", where, cached, want)
+						}
+						if (hardMax == 0 || nonRecl+mapped <= hardMax-4096) && cached != mapped {
+							t.Fatalf("%s: experts fit under the hard limit but were not all allowed", where)
+						}
+					}
 				}
 			}
 		}

@@ -276,6 +276,21 @@ type catalogDoc struct {
 	Source      string      `json:"source"`
 	Attribution string      `json:"attribution"`
 	Candidates  []Candidate `json:"candidates"`
+	// ReviewedCandidates are reviewed open-weight models the leaderboard does
+	// not score. They live outside "candidates" because released binaries
+	// fetch main's catalog and rank by quality alone: there their "~" estimate
+	// would outrank scored rows. Older binaries ignore this key.
+	ReviewedCandidates []Candidate `json:"reviewed_candidates,omitempty"`
+}
+
+// rows lists the scored candidates, then the reviewed ones as estimates.
+func (d catalogDoc) rows() []Candidate {
+	rows := append([]Candidate(nil), d.Candidates...)
+	for _, c := range d.ReviewedCandidates {
+		c.AAIntelligence = 0 // ranked as an estimate whatever the file says
+		rows = append(rows, c)
+	}
+	return rows
 }
 
 const Attribution = "Artificial Analysis intelligence data is used when available; cached locally and filtered by ggrun hardware fit"
@@ -375,10 +390,11 @@ func MainlineRegistersArch(arch string) (registers, known bool) {
 func Shortlist() []Candidate {
 	var doc catalogDoc
 	if err := json.Unmarshal(catalogBytes(), &doc); err == nil && len(doc.Candidates) > 0 {
-		for i := range doc.Candidates {
-			doc.Candidates[i] = inferParams(dropCompanionSizedQuants(doc.Candidates[i]))
+		rows := doc.rows()
+		for i := range rows {
+			rows[i] = inferParams(dropCompanionSizedQuants(rows[i]))
 		}
-		return doc.Candidates
+		return rows
 	}
 	return fallbackShortlist()
 }
@@ -502,6 +518,9 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	// Quant preferences must not become a second cross-model ranking signal.
 	smartPool := append([]Recommendation(nil), rows...)
 	sort.SliceStable(smartPool, func(i, j int) bool {
+		if ei, ej := estimated(smartPool[i].Candidate), estimated(smartPool[j].Candidate); ei != ej {
+			return ej
+		}
 		ki, kj := modelIntelligence(smartPool[i].Candidate), modelIntelligence(smartPool[j].Candidate)
 		if ki == kj {
 			return smartPool[i].QuantSizeGB < smartPool[j].QuantSizeGB
@@ -530,6 +549,9 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 		}
 	}
 	sort.SliceStable(fastPool, func(i, j int) bool {
+		if ei, ej := estimated(fastPool[i].Candidate), estimated(fastPool[j].Candidate); ei != ej {
+			return ej
+		}
 		return fastPool[i].PredictedTPS > fastPool[j].PredictedTPS
 	})
 	preferServable(fastPool, true)
@@ -541,11 +563,15 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 // sortRecommendations orders Best overall: usable models first, then catalog
 // intelligence. A model predicted below the usable floor ranks after every
 // usable one; the discount alone let a 2-tok/s dense model on CPU outrank a
-// usable MoE and time out on a Claude Code task (October 8 matrix).
+// usable MoE and time out on a Claude Code task (October 8 matrix). Within a
+// speed tier, an estimated row follows every scored one.
 func sortRecommendations(rows []Recommendation) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if si, sj := rows[i].SpeedTier == 0, rows[j].SpeedTier == 0; si != sj {
 			return sj
+		}
+		if ei, ej := estimated(rows[i].Candidate), estimated(rows[j].Candidate); ei != ej {
+			return ej
 		}
 		if rows[i].Score == rows[j].Score {
 			if modelIntelligence(rows[i].Candidate) == modelIntelligence(rows[j].Candidate) {
@@ -1156,6 +1182,14 @@ func modelIntelligence(c Candidate) float64 {
 		return float64(c.Quality) / 1.65
 	}
 	return 0
+}
+
+// estimated reports a row ranked on a quality estimate ("~" in the display)
+// rather than an Artificial Analysis score: a reviewed open-weight model the
+// leaderboard does not score, or any row of the offline shortlist. In a mixed
+// catalog an estimate must not outrank a scored model, so it ranks after them.
+func estimated(c Candidate) bool {
+	return c.AAIntelligence <= 0
 }
 
 func intelligenceScore(c Candidate) int {

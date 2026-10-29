@@ -78,6 +78,90 @@ else:
                                      f'\nclone_source_ref "file://{bare}" "{"0" * 40}" "{missing}"\n'])
             self.assertNotEqual(result.returncode, 0)
 
+    def test_source_tarball_without_git_is_stamped_with_its_commit(self):
+        # Without git, the installer (and so `ggrun update`) had no source at all.
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tree = tmp / ("ggrun-" + sha)
+            (tree / "go").mkdir(parents=True)
+            (tree / "go" / "go.mod").write_text("module x\n")
+            archive = tmp / "src.tar.gz"
+            subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp), tree.name], check=True)
+            dest = tmp / "dest"
+            dest.mkdir()
+            script = function("install.sh", "fetch_source_tarball")
+            script += f"""
+curl() {{
+    case "$*" in
+        *api.github.com/repos/o/r/commits/main*) echo {sha} ;;
+        *codeload.github.com/o/r/tar.gz/{sha}*) cat "{archive}" ;;
+        *) return 22 ;;
+    esac
+}}
+GITHUB_REPO=o/r SOURCE_REF=main SRC_TARBALL_COMMIT=""
+fetch_source_tarball "{dest}"
+echo "commit=$SRC_TARBALL_COMMIT"
+"""
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("commit=" + sha[:7], result.stdout)
+            self.assertTrue((dest / "go" / "go.mod").is_file())
+
+    def test_gguf_parse_selfcheck_runs_the_installed_parser(self):
+        # Every launch needs parse_gguf.py under Python 3; the installer checks it.
+        for body, code in ((None, 0), ("raise SystemExit(1)\n", 1)):
+            with self.subTest(broken=body is not None), tempfile.TemporaryDirectory() as tmp:
+                parser = Path(tmp) / "parse_gguf.py"
+                parser.write_text(body or (ROOT / "tools" / "gguf" / "parse_gguf.py").read_text())
+                script = function("install.sh", "gguf_parse_selfcheck")
+                script += f'\nsay() {{ :; }}\nINSTALL_DIR="{tmp}"\ngguf_parse_selfcheck\n'
+                result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+
+    def test_upstream_prebuilt_scans_recent_releases(self):
+        # releases/latest can carry no binaries; the newest release that has
+        # the asset wins, and ubuntu-x64 never matches ubuntu-vulkan-x64.
+        dl = "https://github.com/ggml-org/llama.cpp/releases/download"
+        listing = ('[{"tag_name": "b3", "assets": []},'
+                   ' {"tag_name": "b2", "assets": ['
+                   f'{{"name": "llama-b2-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "{dl}/b2/llama-b2-bin-ubuntu-vulkan-x64.tar.gz"}}]}},'
+                   ' {"tag_name": "b1", "assets": ['
+                   f'{{"name": "llama-b1-bin-ubuntu-x64.tar.gz", "browser_download_url": "{dl}/b1/llama-b1-bin-ubuntu-x64.tar.gz"}},'
+                   f'{{"name": "llama-b1-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "{dl}/b1/llama-b1-bin-ubuntu-vulkan-x64.tar.gz"}}]}}]')
+        with tempfile.TemporaryDirectory() as tmp:
+            api = Path(tmp) / "releases.json"
+            api.write_text(listing)
+            for python, name, want in (("", "ubuntu-vulkan-x64", "b2/llama-b2-bin-ubuntu-vulkan-x64"),
+                                       ("", "ubuntu-x64", "b1/llama-b1-bin-ubuntu-x64"),
+                                       ("python3() { return 127; }\n", "ubuntu-x64", "b1/llama-b1-bin-ubuntu-x64"),
+                                       ("", "ubuntu-arm64", None)):
+                with self.subTest(name=name, grep_fallback=bool(python)):
+                    script = function("install.sh", "upstream_prebuilt_url")
+                    script += f'\n{python}upstream_prebuilt_url "{api}" {name}\n'
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), f"{dl}/{want}.tar.gz" if want else "")
+
+    def test_cuda_bundle_is_skipped_on_gpus_older_than_its_kernels(self):
+        # The bundle is built for compute capability 7.5+; a P40/1080 Ti/V100
+        # passes --version and then fails at the first kernel launch.
+        script = "\n".join(function("install.sh", name) for name in
+                           ("nvidia_min_compute_cap", "cuda_bundle_supported"))
+        script += '\nCUDA_BUNDLE_MIN_CC=75\nfind_nvidia_smi() { [[ -n "$SMI" ]] && echo "$SMI"; }\n'
+        script += 'if cuda_bundle_supported; then echo yes; else echo no; fi\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            smi = Path(tmp) / "nvidia-smi"
+            smi.write_text('#!/usr/bin/env bash\nprintf "%s\\n" $CC\n')
+            smi.chmod(0o755)
+            for cc, want in (("8.6", "yes"), ("7.5", "yes"), ("12.0", "yes"), ("6.1", "no"),
+                             ("7.0", "no"), ("8.6 6.1", "no"), ("[N/A]", "yes"), (None, "yes")):
+                with self.subTest(cc=cc):
+                    env = dict(os.environ, SMI=str(smi) if cc else "", CC=cc or "")
+                    result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True, env=env)
+                    self.assertEqual(result.stdout.strip(), want, result.stderr)
+
     def test_release_bundle_installs_the_memory_guard_where_ggrun_finds_it(self):
         # The guard was only copied into the backend directory, where ggrun never
         # looks, so a fresh install had no CUDA allocation firewall.
@@ -99,6 +183,7 @@ release_asset_name() {{ echo ggrun-linux-x86_64-cuda.tar.gz; }}
 find_release_asset_url() {{ [[ $1 == SHA256SUMS ]] && return 1; echo https://example.invalid/$1; }}
 curl() {{ while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && cp "{archive}" "$2"; shift; done; }}
 place_isolated_backend() {{ return 0; }}
+cuda_bundle_supported() {{ return 0; }}
 BACKEND_CHOICE=cuda MAIN_IMPL=go INSTALL_DIR="{install_dir}" LLM_INSTALL_ALLOW_UNVERIFIED=1
 install_release_bundle ik_llama-server-cuda
 """
@@ -127,6 +212,18 @@ install_release_bundle ik_llama-server-cuda
                 recorded = calls.read_text()
                 self.assertEqual("--user" in recorded, not venv)
                 self.assertIn("-m pip install", recorded)
+
+    def test_gpu_images_ship_the_fit_oracle_next_to_the_server(self):
+        # Launch looks for llama-fit-params beside llama-server. Without it a
+        # GPU launch needs a contained live load, which a non-interactive
+        # container refuses without --allow-live-memory-probe.
+        for name in ("Dockerfile.cuda", "Dockerfile.vulkan"):
+            with self.subTest(image=name):
+                text = (ROOT / "docker" / name).read_text()
+                self.assertRegex(text, r"-t llama-server llama-fit-params\b")
+                server = re.search(r"LLAMA_SERVER=(\S+)/llama-server", text).group(1)
+                self.assertRegex(text, r"COPY --from=backend \S+/bin/llama-fit-params +"
+                                 + re.escape(server) + r"/llama-fit-params\n")
 
     def test_setup_recognizes_native_macho_and_rejects_scripts(self):
         script = function("scripts/setup-home.sh", "usable_llama_server")

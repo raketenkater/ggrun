@@ -63,7 +63,7 @@ func TestCatalogQuantsAreCompleteMainModels(t *testing.T) {
 	if err := json.Unmarshal(catalogJSON, &doc); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range doc.Candidates {
+	for _, row := range doc.rows() {
 		var largest int64
 		for _, q := range row.Quants {
 			if q.SizeBytes > largest {
@@ -84,7 +84,7 @@ func TestCatalogExpertGeometryIsMoE(t *testing.T) {
 	if err := json.Unmarshal(catalogJSON, &doc); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range doc.Candidates {
+	for _, row := range doc.rows() {
 		if row.Experts > 1 && !row.MoE {
 			t.Errorf("%s: GGUF declares %d experts but catalog classifies it as dense", row.Repo, row.Experts)
 		}
