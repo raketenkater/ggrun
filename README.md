@@ -141,7 +141,7 @@ All rows used the full host above (3 GPUs, 212 GiB), Linux, models on an NTFS HD
 
 A smaller new model went through the same download-to-agent flow. Nanbeige4.3-33B Q8_0 (bartowski, 33.6 GB) was downloaded with `ggrun download` on 2026-10-27 (v3.2.12-26-g101af89). It was ready in 251 s and passed tasks in 174 / 132 / 700 s, all correct. The downloader picked the largest quant that fits VRAM, which left 34,816 tokens of context (1 slot, KV q4_0).
 
-`--mmap` and the paged lookup tier are Linux only. Details are in [docs/large-model-mmap-evidence-20261019.md](docs/large-model-mmap-evidence-20261019.md).
+`--mmap` and the paged lookup tier are Linux only. Details: GLM-5.3 and DeepSeek in [docs/large-model-mmap-evidence-20261019.md](docs/large-model-mmap-evidence-20261019.md); MiniMax-M3.1-Flash and Nanbeige4.3 under "NEW MODELS" in [docs/core-standard-launch-todos.md](docs/core-standard-launch-todos.md).
 
 ## Platforms
 
@@ -176,7 +176,7 @@ ggrun model.gguf --benchmark               # load, measure, exit
 ggrun model.gguf --gpus 0,1 --ram-headroom 8G --vram-headroom 2G
 ggrun download <repo/name> --quant <name> --yes
 ggrun models list | browse | path | rm
-ggrun backend list | add | register | remove
+ggrun backend list | add | register | update | rollback | remove
 ggrun claude list | resume                 # recorded Claude Code sessions
 ggrun update                               # ggrun and backends, with rollback
 ```
