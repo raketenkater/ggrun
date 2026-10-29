@@ -191,6 +191,61 @@ install_release_bundle ik_llama-server-cuda
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertEqual((install_dir / "libggrun-memguard.so").read_text(), "libggrun-memguard.so")
 
+    def test_release_mode_with_system_backend_still_installs_launcher(self):
+        # Release mode adopted a working system llama-server, skipped the
+        # bundle, skipped the source build, and then exited "Go ggrun was not
+        # installed".
+        text = (ROOT / "install.sh").read_text()
+        stage = text[text.index("# ── Stage 3"):text.index('say "── Installing scripts to')]
+        helpers = "\n".join(function("install.sh", name) for name in (
+            "install_release_bundle", "install_release_launcher", "install_payload_file",
+            "release_asset_name", "find_release_asset_url", "verify_release_checksum",
+            "install_ggrun_from_source"))
+        for choice, with_cpu_asset in (("cpu", True), ("vulkan", True), ("cuda", False)):
+            with self.subTest(choice=choice, with_cpu_asset=with_cpu_asset):
+                self._release_mode_keeps_backend(stage, helpers, choice, with_cpu_asset)
+
+    def _release_mode_keeps_backend(self, stage, helpers, choice, with_cpu_asset):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            payload = tmp / "src" / "ggrun-linux-x86_64-cpu"
+            (payload / "bin").mkdir(parents=True)
+            for name in ("bin/ggrun", "bin/llama-server", "parse_gguf.py"):
+                (payload / name).write_text("#!/bin/sh\n")
+            release = tmp / "release"
+            release.mkdir()
+            asset = "ggrun-linux-x86_64-cpu.tar.gz"
+            if with_cpu_asset:
+                subprocess.run(["tar", "-czf", str(release / asset), "-C", str(tmp / "src"), payload.name], check=True)
+                subprocess.run(f"sha256sum {asset} > SHA256SUMS", shell=True, cwd=release, check=True)
+            system_server = tmp / "system" / "llama-server"
+            system_server.parent.mkdir()
+            system_server.write_text("system")
+            install_dir = tmp / "bin"
+            script = helpers + f"""
+say() {{ :; }}; ok() {{ :; }}; warn() {{ :; }}; err() {{ echo "ERR $*"; }}
+scan_system_installs() {{ :; }}; report_system_installs() {{ :; }}; drop_fake_installed_backends() {{ :; }}
+adopt_system_backends() {{ ln -s "{system_server}" "$INSTALL_DIR/llama-server"; }}
+installed_real_server() {{ [[ -e "$INSTALL_DIR/$1" ]]; }}
+place_isolated_backend() {{ echo backend-replaced; exit 98; }}
+ensure_source_repo() {{ echo unexpected-source-build; exit 99; }}
+platform_slug() {{ echo linux-x86_64; }}
+OS=Linux INSTALL_MODE=release BACKEND_REQUEST=auto BACKEND_CHOICE={choice} MAIN_IMPL=go
+INSTALL_DIR="{install_dir}" MODEL_DIR="{tmp}/models" INSTALL_RELEASE_DIR="{release}"
+{stage}
+install_ggrun_from_source
+[[ -x "$INSTALL_DIR/ggrun" ]] || {{ echo "Go ggrun was not installed"; exit 1; }}
+"""
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+            if not with_cpu_asset:
+                # No bundle provides ggrun: fail with the actionable message.
+                self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                self.assertIn("no release bundle", result.stdout + result.stderr)
+                return
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((install_dir / "parse_gguf.py").is_file())
+            self.assertEqual((install_dir / "llama-server").resolve(), system_server.resolve())
+
     def test_release_does_not_rebuild_checked_launcher(self):
         script = function("install.sh", "install_ggrun_from_source")
         script += "\nensure_source_repo() { echo unexpected-source-build; exit 99; }\n"

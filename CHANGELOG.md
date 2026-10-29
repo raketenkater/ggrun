@@ -2,8 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- `GGRUN_SCOPE_MODE=none` runs the backend without cgroup memory containment on
+  hosts without systemd.
+- `ggrun download` passes `--dir`, `--quant` and `--yes` through and has
+  `--help`; `--yes` takes the recommended quant.
+
+### Changed
+
+- The downloader skips draft heads and companion-sized files, checks free disk
+  space first, honors an exact repo, and keeps quant subfolders under the repo
+  folder.
+- MoE speed estimates keep the backbone on GPU and scale expert cost with the
+  measured memory bandwidth.
+- Hosts with NVIDIA GPUs older than compute capability 7.5 default to Vulkan;
+  the CUDA bundle's kernels do not run there.
+- The catalog refresh survives bad repos, matches model names more strictly,
+  and lists reviewed models without a score as estimates after scored ones.
+- Python 3 is required to launch (GGUF metadata); the installer installs it and
+  self-checks `parse_gguf.py`.
+- The Docker images run without a cgroup scope (`GGRUN_SCOPE_MODE=none`), and
+  the GPU images ship `llama-fit-params`.
+
 ### Fixed
 
+- A memory-mapped expert plan's `memory.high` leaves room for the mapped
+  experts, so they stay in page cache instead of being re-read per token.
+- Timed launch probes wait for idle slots, and a canary that is only slow on a
+  healthy backend degrades the profile instead of rejecting it.
+- On Windows the backend is killed with ggrun through a job object, and the
+  Claude Code health monitor stops before the backend does.
+- Saved config paths keep Windows backslashes, and config saves are atomic;
+  Claude Code project keys match the client, including long paths.
+- `ggrun update` works on Windows with ggrun running, and on Linux without a
+  system Go; `parse_gguf.py` runs under a verified Python 3.
+- `LLM_INSTALL_MODE=release` on a host with a working llama-server keeps that
+  backend and still installs ggrun from the release bundle.
+- The installer fetches a source tarball when git is missing, and finds upstream
+  llama.cpp prebuilts in recent releases, not only the latest.
+- The TUI lists models downloaded to a custom folder, and saves settings
+  without one-off `LLM_*` environment overrides.
 - The printed Claude Code recipe now sets the same variables as `--claude-code`,
   including `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, so copied setups reuse the cache.
 - The Workflow hook asks before running a rewritten Workflow unless the session
