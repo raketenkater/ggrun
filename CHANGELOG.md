@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.2.13 — 2026-10-29
 
 ### Added
 
@@ -20,6 +20,9 @@
   the CUDA bundle's kernels do not run there.
 - The catalog refresh survives bad repos, matches model names more strictly,
   and lists reviewed models without a score as estimates after scored ones.
+- Recommendations use Artificial Analysis Intelligence Index v5. Models not yet
+  re-evaluated keep a score converted from v4 (shown with `~`); the refresh
+  refuses a thin, gutted or silently rescaled leaderboard scrape.
 - Python 3 is required to launch (GGUF metadata); the installer installs it and
   self-checks `parse_gguf.py`.
 - The Docker images run without a cgroup scope (`GGRUN_SCOPE_MODE=none`), and
