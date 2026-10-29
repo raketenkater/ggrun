@@ -1340,6 +1340,12 @@ def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 CARRY_FORWARD_DAYS = 14
 # Losing one of the previous catalog's top rows earns a louder warning.
 TOP_ROWS_WATCHED = 10
+# A refresh is refused when the scrape looks broken or rescaled: carried rows
+# keep their old scores, so a new scale must never be mixed with them, and a
+# catalog that loses most of its rows would ship to every installed client.
+MIN_SCORED_SHARE = 0.5
+MIN_KEPT_SHARE = 0.5
+MAX_SCALE_DRIFT = 0.15
 
 # Open-weight models the leaderboard does not score, listed by review. They
 # carry no Artificial Analysis index; quality is a "~" estimate one point under
@@ -1427,9 +1433,15 @@ def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[st
             # its last committed score still anchors the estimate.
             anchor = next((c for c in previous
                            if str(c.get("name") or "").lower() == spec["estimate_from"].lower()), None)
+        prior = next((c for c in previous if str(c.get("name") or "").lower() == name.lower()
+                      and int(c.get("quality") or 0) > 1), None)
         if not anchor or catalog_intelligence(anchor) <= 0 or int(anchor.get("quality") or 0) <= 1:
-            print(f"warning: {name}: no scored {spec['estimate_from']} row to estimate from; not listed", file=sys.stderr)
-            continue
+            if not prior:
+                print(f"warning: {name}: no scored {spec['estimate_from']} row to estimate from; not listed", file=sys.stderr)
+                continue
+            # The anchor left the leaderboard; the reviewed row keeps the score
+            # it was listed with (the refresh guard rejects a rescaled scrape).
+            anchor = {"name": prior.get("anchor_name") or spec["estimate_from"], "quality": int(prior["quality"]) + 1}
         quants = fetch_hf_quants(repo)
         if not quants:
             old = next((c for c in previous if str(c.get("repo") or "").lower() == repo.lower()), None)
@@ -1457,6 +1469,7 @@ def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[st
             "aa_query": "", "aa_slug": "", "aa_updated_at": "",
             "family": spec["family"],
             "quality": int(anchor["quality"]) - 1,
+            "anchor_name": anchor["name"],
             "notes": (f"Unscored: {spec['why']}; ~intelligence is an estimate one point under "
                       f"{anchor['name']}'s score; listed by review"),
         })
@@ -1550,6 +1563,32 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
         "source": f"{source_label}; resolved {len(candidates) - kept_count} GGUF repos with quant sizes; kept {kept_count} previous rows; skipped {skipped} open-weight rows without matching GGUF quants; listed {len(reviewed)} reviewed unscored rows",
         "version": 2,
     }
+
+
+def refresh_guard(rows: list[dict[str, Any]], previous: list[dict[str, Any]],
+                  catalog: dict[str, Any]) -> str | None:
+    """Why this refresh must not replace the catalog, or None.
+
+    2026-10-29: the scrape gave 21 of 100 open-weight rows a score and the
+    scores looked rescaled (GLM-5.3 44.8 -> 31.7); the catalog would have gone
+    from 119 to 21 rows with two carried old-scale rows on top.
+    """
+    open_rows = dedupe_rows(rows)
+    scored = [row for row in open_rows if intelligence(row) > 0]
+    if open_rows and len(scored) < MIN_SCORED_SHARE * len(open_rows):
+        return f"only {len(scored)} of {len(open_rows)} leaderboard rows carry an intelligence score"
+    before = {str(c.get("aa_slug")): catalog_intelligence(c) for c in previous
+              if c.get("aa_slug") and catalog_intelligence(c) > 0}
+    ratios = sorted(intelligence(row) / before[row_slug(row)] for row in scored if row_slug(row) in before)
+    if len(ratios) >= 5:
+        median = ratios[len(ratios) // 2]
+        if abs(median - 1) > MAX_SCALE_DRIFT:
+            return (f"leaderboard scores moved by a median factor {median:.2f} across {len(ratios)} models "
+                    f"present in both catalogs; refusing to mix the new scale with carried rows")
+    fresh = [c for c in catalog.get("candidates") or [] if "last seen on the leaderboard" not in str(c.get("notes") or "")]
+    if before and len(fresh) < MIN_KEPT_SHARE * len(before):
+        return f"only {len(fresh)} freshly resolved rows against {len(before)} scored rows before"
+    return None
 
 
 def catalog_rows(catalog: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1699,12 +1738,17 @@ def main() -> int:
             print(f"warning: previous catalog unreadable ({exc}); nothing carried forward", file=sys.stderr)
             previous = []
         catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit), previous)
+        refused = refresh_guard(rows, previous, catalog)
     except Exception as exc:
         if args.allow_missing_key:
             print(f"recommendation catalog unchanged: {exc}", file=sys.stderr)
             return 0
         raise
 
+    if refused:
+        # Not softened by --allow-missing-key: the scheduled job must fail
+        # visibly, and the checked-in catalog stays as it was.
+        raise SystemExit(f"recommendation catalog unchanged: {refused}")
     if not catalog.get("candidates"):
         if args.allow_missing_key:
             print("recommendation catalog unchanged: no GGUF candidates resolved", file=sys.stderr)

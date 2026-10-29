@@ -699,3 +699,40 @@ def test_a_large_tokenizer_does_not_hide_moe_geometry(monkeypatch):
     assert updater.fetch_gguf_arch("o/sarvam-b") == {"arch": "deepseek2", "experts": 128, "exp_used": 8}
     monkeypatch.setattr(updater, "_fetch_gguf_range", lambda url, n: b"not a gguf")
     assert updater.fetch_gguf_arch("o/sarvam-c") is None
+
+
+def test_refresh_guard_refuses_a_gutted_or_rescaled_scrape():
+    """2026-10-29: 21 of 100 rows scored and scores rescaled (GLM-5.3 44.8 -> 31.7);
+    the refresh would have shipped 21 rows instead of 119."""
+    updater = load_updater()
+    prev = [{"name": f"M{i}", "repo": f"o/M{i}-GGUF", "aa_slug": f"m{i}", "aa_intelligence_index": 40.0 - i}
+            for i in range(10)]
+    same = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": 40.0 - i, "isOpenWeights": True} for i in range(10)]
+    full = {"candidates": [dict(p) for p in prev]}
+    assert updater.refresh_guard(same, prev, full) is None
+    # Most rows unscored.
+    sparse = same[:3] + [dict(r, intelligenceIndex=0) for r in same[3:]]
+    assert "carry an intelligence score" in updater.refresh_guard(sparse, prev, full)
+    # Same coverage, new scale.
+    rescaled = [dict(r, intelligenceIndex=r["intelligenceIndex"] * 0.7) for r in same]
+    assert "median factor 0.70" in updater.refresh_guard(rescaled, prev, full)
+    # Scores fine, but the catalog collapsed.
+    assert "freshly resolved rows" in updater.refresh_guard(same, prev, {"candidates": full["candidates"][:3]})
+    # Carried rows do not count as fresh.
+    carried = [dict(c, notes="row; last seen on the leaderboard 2026-10-19") for c in full["candidates"]]
+    assert "freshly resolved rows" in updater.refresh_guard(same, prev, {"candidates": carried})
+
+
+def test_reviewed_row_keeps_its_score_when_the_anchor_leaves_both_catalogs(monkeypatch):
+    updater = load_updater()
+    gb = 1024**3
+    monkeypatch.setattr(updater, "fetch_hf_quants", lambda repo: [{"name": "Q4_K_M", "size_gb": 20, "size_bytes": 20 * gb}])
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {"arch": "llama"})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {})
+    anchor = [{"name": "Nanbeige4.1-3B", "repo": "o/Nanbeige4.1-3B-GGUF", "aa_intelligence_index": 8.4, "quality": 14}]
+    first = [r for r in updater.reviewed_candidates([], anchor) if r["name"] == "Nanbeige4.3-33B"]
+    assert first and first[0]["quality"] == 13 and first[0]["anchor_name"] == "Nanbeige4.1-3B"
+    # Next refresh: the anchor is gone from both the scrape and the catalog it wrote.
+    second = [r for r in updater.reviewed_candidates([], first) if r["name"] == "Nanbeige4.3-33B"]
+    assert second and second[0]["quality"] == 13 and "Nanbeige4.1-3B" in second[0]["notes"]
+

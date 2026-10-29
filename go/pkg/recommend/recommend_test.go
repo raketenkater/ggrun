@@ -1,12 +1,12 @@
 package recommend
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"encoding/json"
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
@@ -431,9 +431,6 @@ func TestMoESpeedEstimateIncludesDispatchCost(t *testing.T) {
 	}
 }
 
-// Measured on one rig with host bandwidth probed at 26.27 GB/s. The estimate
-// used to charge the always-read backbone at RAM speed and discount measured
-// bandwidth by 0.5, predicting GLM-5.3-Flash under 4 tok/s.
 // pinnedSpeedRow returns a catalog row as committed when its decode was
 // measured. The scheduled refresh rewrites catalog.json and rows can leave the
 // leaderboard, so the estimate is pinned to these rows, not to the live file.
@@ -456,6 +453,9 @@ func pinnedSpeedRow(t *testing.T, name string) Candidate {
 	return Candidate{}
 }
 
+// Measured on one rig with host bandwidth probed at 26.27 GB/s. The estimate
+// used to charge the always-read backbone at RAM speed and discount measured
+// bandwidth by 0.5, predicting GLM-5.3-Flash under 4 tok/s.
 func TestMoESpeedEstimateMatchesMeasuredDecode(t *testing.T) {
 	t.Setenv("LLM_CACHE_DIR", t.TempDir())
 	gpuRig := referenceRig()
