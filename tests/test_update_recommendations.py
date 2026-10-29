@@ -610,6 +610,8 @@ def test_reviewed_unscored_models_rank_one_point_under_their_scored_anchor(monke
     assert dense["quality"] == 13 and dense["moe"] is False and dense["aa_intelligence_index"] == 0
     # No scored anchor, no estimate: the row is not listed at all.
     assert [r["name"] for r in updater.reviewed_candidates(scored[1:], [])] == ["Nanbeige4.3-33B"]
+    # An anchor missing from this scrape (2026-10-29) is taken from the previous catalog.
+    assert [r["name"] for r in updater.reviewed_candidates(scored[:1], scored[1:])] == ["MiniMax-M3.1-Flash", "Nanbeige4.3-33B"]
     # Once the leaderboard scores it, the scored row wins.
     scored.append({"name": "MiniMax-M3.1-Flash", "repo": "x/y", "aa_intelligence_index": 33, "quality": 54})
     assert [r["name"] for r in updater.reviewed_candidates(scored, [])] == ["Nanbeige4.3-33B"]

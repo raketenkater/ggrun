@@ -1422,6 +1422,11 @@ def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[st
         if name.lower() in by_name or repo.lower() in repos:
             continue  # the leaderboard scores it now
         anchor = by_name.get(spec["estimate_from"].lower())
+        if not anchor:
+            # The anchor can leave one scrape (Nanbeige4.1-3B, 2026-10-29);
+            # its last committed score still anchors the estimate.
+            anchor = next((c for c in previous
+                           if str(c.get("name") or "").lower() == spec["estimate_from"].lower()), None)
         if not anchor or catalog_intelligence(anchor) <= 0 or int(anchor.get("quality") or 0) <= 1:
             print(f"warning: {name}: no scored {spec['estimate_from']} row to estimate from; not listed", file=sys.stderr)
             continue
