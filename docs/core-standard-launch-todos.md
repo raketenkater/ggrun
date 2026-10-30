@@ -4116,3 +4116,154 @@ launch passed on revision `3617440`. Native Windows and full E2E jobs remain
 tracked in the feature PR.
 This is admission correctness, not a performance promotion or Metal inference
 receipt. The existing Linux live configuration is unaffected.
+
+## CLAUDE MODE — health monitor fires during shutdown — 2026-10-23
+
+- [ ] With `--claude-code`, the 30 s health monitor keeps running while ggrun
+  stops the backend. In the live DeepSeek cold cell (2026-10-23) a normal stop
+  printed "backend died mid-session" and scanned the backend log for an OOM.
+  Nothing was recorded, but a shutdown that left an OOM-like line in the log
+  could revoke a good profile. Cancel `healthCtx` before stopping the backend,
+  and test that a requested stop never reaches the OOM recorder.
+
+## SPARSE LOOKUP PAGED TIER — cold prefill on HDD — 2026-10-23
+
+- [ ] Live DeepSeek V4.1 Flash IQ2_XS, paged tier on an ntfs-3g HDD: a cold
+  prompt ran at 3.2 tok/s and read about 140 MiB of table rows per 1k tokens. A
+  warm repeat ran at 16 tok/s with no disk reads. The first ~13k-token Claude
+  Code request did not finish within the 3,600 s task limit. The plan is
+  correct but too slow for agent use on this storage. Candidates: report the
+  measured row-read cost in the plan and admission summary; warn when the
+  table file sits on a rotational or FUSE device; prefetch the rows of a
+  prompt in one pass. Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## CALIBRATION — elapsed budget excludes slow-loading models — 2026-10-23
+
+- [ ] Live DeepSeek V4.1 Flash IQ2_XS (full load about 20 min): auto
+  calibration refused its finalist `-b 256 -ub 128` because measuring it and
+  restoring the baseline needed about 62 min against the 20 min budget. An
+  explicit launch of that finalist measured warm prefill +29% (20.4 vs 15.7
+  tok/s) in short lookup traffic. That is not a check of the predicted 1.18,
+  which is an agent-cost ratio. Every relaunch replays "baseline kept",
+  so a slow-loading model never adopts a better measured shape. Options:
+  measure the challenger in the next launch instead of in the same one, or
+  scale the budget to the measured load time. Keep the fail-closed default.
+  Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## PLACEMENT — total context and slots chosen before microbatch on CPU-MoE models — 2026-10-23
+
+- [ ] Live DeepSeek V4.1 Flash IQ2_XS (37 CPU MoE layers): auto chose ctx
+  1,048,576 over 4 slots (262,144 per slot) with `-ub 64`; warm prefill was
+  15.6 tok/s. An explicit `-ctx 262144 --parallel 1 -b 512 -ub 512` (same
+  per-slot context, one slot) moved KV to the CPU and 4 MoE layers to GPU;
+  warm prefill was 47.0 tok/s in short lookup traffic. That cell changed
+  slots, total context, batch, ubatch, KV location and expert placement
+  together and ran no coding task, so it does not isolate a cause or show an
+  agent-task gain; decode came from 8-token samples only. Next: a matched
+  single-agent task comparison of the two complete configurations, keeping
+  useful per-agent context and explicit concurrency. If confirmed, make
+  slots versus ubatch a measured trade in the optimizer. This must not
+  regress models whose KV-on-GPU decode wins.
+  Evidence: docs/large-model-mmap-evidence-20261019.md.
+
+## MMAP SCOPE — memory.high collapsed onto mapped experts — 2026-10-24
+
+- [x] (fixed in #99, accepted on the merged build 2026-10-28) Live GLM-5.3 UD-IQ2_M with `--mmap` (201,504 MiB mapped
+  experts): after the canary, `resizeScopeToMeasuredFootprint` set
+  `memory.high` to the non-reclaimable state + headroom (24,183 MiB).
+  `memory.high` throttles page cache too, so RSS fell from 192 GB to 23 GB,
+  IO pressure reached 46% full, decode was 0.32 tok/s and prefill 0.13–0.44
+  tok/s. Any mmap launch whose mapped experts exceed the non-reclaimable
+  ceiling is throttled the same way. The fix adds a mapped-expert cache
+  allowance up to the planned sizing ceiling minus headroom. Here that
+  allowance (177,684 MiB) is still below the mapped experts, so storage reads
+  remain expected. A matched live GLM rerun is required after merge.
+
+## TUI — large-model Claude Code launch — 2026-10-24
+
+- [ ] Settings screen shows "Full SWA cache: on (+35.1 GiB KV)" for DeepSeek
+  V4.1 Flash; the launch then turned it off ("--swa-full would cost 5.7x the
+  KV per token"). The screen should show the launch's decision.
+- [ ] With Claude Code on, the TUI starts Claude in its own working
+  directory. Declining Claude's folder-trust prompt ended the session: the
+  backend (20 min load) was stopped and ggrun exited 1 with no message.
+  Teardown was clean. Say why the server stopped, or offer to keep serving.
+
+## MMAP PLAN — fresh-cache GLM puts KV on CPU beside oversized experts — 2026-10-26
+
+- [ ] Live GLM-5.3 UD-IQ2_M (222.2 GiB, `--mmap`, empty cache, 212 GB host):
+  after three rejected configurations ggrun kept ctx 346,112 / 4 slots with
+  KV q8_0 on the CPU (17.7 GiB anonymous) beside 204 GiB of mapped experts.
+  The page cache could not hold the experts. The HDD read about 470 GiB in
+  48 minutes, and the functional canary's prefill probe timed out, so the
+  launch failed after 49 minutes. With the previous run's learned cache the
+  same build plans KV on GPU (ctx 185,344 / 2 slots). For a model whose
+  mapped experts already exceed the reclaim allowance, CPU KV should cost
+  expert cache in the plan, and the canary failure should name the measured
+  storage paging rather than a client timeout.
+
+## CANARY — timed probes queue behind abandoned requests — 2026-10-26
+
+- [x] (fixed in #102, live-verified 2026-10-28) Live GLM-5.3 relaunch (`--mmap`, cold page cache): the calibration
+  pilot's client timed out after 2 min and cancelled. llama.cpp honours a
+  cancel only between ubatches, so the 296-token prefill kept the backend
+  busy for 22 min. The functional canary's prefill probe then missed its
+  timeout and the launch was rejected, although the same plan had just
+  passed three Claude Code tasks. Before starting a timed probe, wait
+  (bounded) until `/slots` reports no request in progress, and do not count
+  that wait against the probe. When a probe still times out on a slow but
+  answering backend, degrade the profile rather than reject it.
+- [ ] Mapped-expert relaunch re-read 287 GB from the HDD although ~199 GB of
+  the files had just been cached. Measure page-cache residency before and
+  after load. If the loader's pass over the GPU tensors evicts the expert
+  pages, ask the backend to drop those ranges after upload.
+- [x] (fixed in #102) The mmap cache-allowance warning uses the planned non-reclaimable
+  floor (24,183 MiB) where 965 MiB was measured, so it reported 21.6 GB of
+  experts "exceeding" an allowance that the live cgroup could hold.
+
+## NEW MODELS — full flow through PATH ggrun — 2026-10-27
+
+Both models were downloaded with `ggrun download` (v3.2.12-26-g101af89); the
+recommender catalog (2026-10-19) lists neither.
+
+- [x] Nanbeige4.3-33B (`llama` arch, bartowski Q8_0, 33.6 GB; the
+  downloader's recommendation, "fits entirely in VRAM"): ready in 251 s
+  (3 loads). Claude Code `calc` 174 s, `textstats` 132 s, `inventory` 700 s,
+  all correct with unchanged oracle tests. Stream first token 0.1 s; cancel
+  and reconnect ok; stop 2.5 s. Plan: ctx 34,816, 1 slot, KV q4_0 on GPU.
+- [ ] That plan leaves 34,816 tokens of context because the downloader picks
+  the largest quant that fits VRAM without reserving context. Claude Code's
+  first request alone is ~13k tokens. The quant pick should reserve a useful
+  agent context, or say what it gives up.
+- [x] MiniMax-M3.1-Flash on backend `minimax-m31` (`ggrun backend add` of
+  llama.cpp PR #31192, danielhanchen `minimax-m31-upstream` @6b95a99,
+  unmerged; launched with `--backend minimax-m31`), PATH ggrun
+  v3.2.12-70-g4925fd7, 2026-10-28: ready 2,112 s (1 load); Claude Code `calc`
+  1,961 s, `textstats` 2,223 s, `inventory` 2,621 s, all correct with
+  unchanged oracle tests; stream first token 2.8 s; cancel/reconnect ok;
+  stop 27 s. Backend timings: prefill median 9.7 tok/s, decode 2.4 tok/s.
+- [ ] That run did not realize its plan: ggrun planned ctx 361,472 / 4 slots,
+  KV q8_0 on GPU (CUDA1 14.6 GB) and `--tensor-split 0.29,0.65,0.06`, but the
+  backend's MSA KV cache allocated 18.9 GB (+4.7 GB indexer) on the CPU
+  (76,032 cells) and CUDA1 (3090 Ti) received no model buffer (peak 550 MiB).
+  Admission accepted it. After load, compare per-device buffers with the plan
+  and re-plan or warn when they diverge; route MSA models' KV accordingly.
+- [ ] `ggrun backend update minimax-m3` cannot fix a too-old fork for
+  M3.1 (that branch is unchanged since 2026-07-26) yet ggrun suggests it.
+  When the update finds no newer commit, point to an open upstream PR for
+  the architecture (here #31192) instead.
+- [ ] (history) MiniMax-M3.1-Flash (`minimax-m3` arch, unsloth UD-IQ3_XXS, 149 GiB):
+  routed to the installed `minimax-m3` fork (danielhanchen/llama.cpp
+  66f43aa), which fails: "wrong number of tensors; expected 1188, got 948".
+  ggrun reports it clearly and suggests `ggrun backend update`. The model
+  card asks for "a llama.cpp build with MiniMax-M3.1 support (including the
+  draft-dspark speculative type)". Next: `ggrun backend update`, then
+  relaunch. The 2.1 GB `dspark-*-Q8_0.gguf` is that speculative draft model;
+  the downloader currently recommends it as the model.
+
+## REMOTE AGENT AVAILABILITY — 2026-10-30
+
+The no-companion permission deadline and post-canary future-cache/growth
+allowance corrections are documented in
+[the availability review](remote-agent-availability-fixes-20261030.md). The
+uncached core gate passed; long-session OOM acceptance remains open in #117.

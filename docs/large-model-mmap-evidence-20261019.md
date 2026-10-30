@@ -190,6 +190,349 @@ of the locator shows zero flips. Weights and lookup pages held in RAM can be
 silently corrupted. Hashes that match, and serving that works, are artifact
 and mechanics evidence only.
 
+### Mitigation without a reboot (2026-10-23)
+
+The DIMM was not replaced. `offline-bad-ram.sh` (root, private) soft-offlined
+every 4 KiB page within 1 MiB of each recorded flip: 2,272 pages, 9,088 kB
+`HardwareCorrupted`, 32 kernel-held pages skipped. A 193 GiB pattern pass then
+found zero flips (receipt 14:54 UTC, CLEAN). A single-page pass the day before
+was not clean, because new flips kept appearing in adjacent pages. The
+offlined pages return on reboot, so this holds only until the next boot or the
+stick swap. This is a time-bounded mitigation receipt, not validation of
+repaired hardware. The live results below ran on this mitigated host.
+
+## Live acceptance (2026-10-23)
+
+Every cell ran through the PATH `ggrun v3.2.12-23-ge546a94` (sha256
+`b908c7b53dc682b1…`) with `--claude-code`, one large process at a time, with no other GPU or agent workload. Backends,
+per model:
+
+| Model | Backend | Commit | Binary sha256 |
+| --- | --- | --- | --- |
+| DeepSeek V4.1 Flash IQ2_XS | `deepseek41-1017` (smalinin/llama.cpp) | 425badfe | `6b142ef1113cf78c73f7485b22f71d819c4e788e8cf774e08572a63d308a725f` |
+| GLM-5.3 UD-IQ2_M | ggrun's packaged `llama-server-cuda` (0.6.0-dev, build 11626) | df18bee11 | `98b0ee801ed1fbb928ac628b9cbd60e3044acd79e9a2cc70858afb211cb16283` |
+
+The harness, sampler and
+traffic scripts and the raw records are private
+(`ggrun-accept-20261013-evidence/live-20261022/`).
+
+### DeepSeek V4.1 Flash IQ2_XS, cold (paged tier)
+
+- Plan: paged lookup tier (199,224 MiB of tables, file-backed lazy rows),
+  resident host model 150,708 MiB, ctx 1,048,576 (4 × 262,144), KV q8_0 on
+  GPU, `-b 128 -ub 64`, 36 CPU MoE layers. The argv carried `--lazy-mode on
+  -cram 7168`, and the `--no-mmap` request was folded to `--load-mode none`.
+- Live tier check: 10 mappings, 375,072 MiB mapped, no table page anonymous or
+  locked. During serving the sampled table-page RSS stayed at or below
+  2,653 MiB; `memory.peak` was 160,484 MiB under a 205,992 MiB cgroup limit.
+- Ready after 3,003 s: two full loads of about 1,220 s each (oracle plan, then
+  one backend-measured re-plan that moved one MoE layer to GPU). The optimizer
+  refused the challenger: it needed about 1 h 2 min against 12 min of budget.
+- Stream: first token 8.2 s. Cancel after 5 events, health ok, reconnect first
+  token 3.4 s.
+- Lookup traffic (`cache_prompt: false`, 8-token replies; HDD = sda sectors):
+
+| Phase | Prompt tokens | Prompt tok/s | HDD read per request |
+| --- | --- | --- | --- |
+| first request, cold | 943 | 3.24 | 141 MiB |
+| same prompt ×4 | 943 | 16.02 | 0 |
+| five different prompts | 811–1,126 | 3.17–4.02 | 116–143 MiB |
+| first prompt again ×2 | 943 | 15.9–16.0 | 0 |
+
+  Decode in these requests was 1.6–8.2 tok/s. Page-cache residency of the
+  two table shards rose from 53 MiB to 452 MiB each. A cold request is bound
+  by scattered HDD reads through ntfs-3g (about 0.5 MB/s effective). A warm
+  request is bound by CPU expert bandwidth at `-ub 64`.
+- Claude Code task `calc`: timeout at 3,600 s. Its first request (about
+  13.2k prompt tokens) reached 11,520 tokens at 3.22 tok/s and never produced a
+  reply; the two remaining tasks were skipped. Correct tasks: 0.
+- Stop: clean in 23.9 s, no leftover backend or scope, GPUs released. During
+  this stop ggrun printed "backend died mid-session" and checked the backend
+  log for an OOM. The Claude-mode health monitor is still ticking while ggrun
+  shuts the backend down (main.go, `healthCtx`); no OOM was recorded.
+
+### DeepSeek V4.1 Flash IQ2_XS, relaunch
+
+- Ready after 1,621 s with one full load (1,221 s). ggrun planned 37 CPU MoE
+  layers again, not the 36 that the cold cell had measured as fitting, and
+  logged "memory plan stable at oracle-planned evidence". The faster start
+  came from skipping the measurement load, not from reusing its result.
+- Memory scope: non-reclaimable ceiling 170,150 MiB plus a 31,718 MiB lookup
+  cache gave `memory.high` 201,868 MiB and `memory.max` 205,964 MiB. Peak was
+  199,540 MiB as the table page cache filled toward the high mark.
+- Stream: first token 8.5 s. Cancel and reconnect ok (3.5 s).
+- Lookup traffic matched the cold cell to within 2%. The first request read
+  141.5 MiB again, so the table pages cached during the cold cell did not
+  survive the 155 GiB weight reload. Warm repeats ran at 15.6 tok/s, new text
+  at 3.2–4.0 tok/s.
+- Claude Code task `ledger` (limit 7,200 s): **correct**, all 11 tests pass,
+  tests untouched, 28 turns, 6,521 s. The first request was 13,011 prompt
+  tokens in 4,055 s (3.21 tok/s), which is 62% of the task. After it, prompt
+  caching held: 368k prompt tokens came from the cache and 19.5k were
+  processed. Later requests ran at 3.8–14.6 tok/s, depending on how much new
+  text they carried.
+- After the task the two table shards held 1,802 MiB of cached pages each, in
+  426k separate runs spread evenly across each 99.6 GB file (about one page in
+  55). Hashed n-gram rows have no locality. A session's hot set is small
+  (3.6 GiB), but a blind cache of the first N GiB catches only N/195 of rows.
+- Stop: 22.0 s, clean. The "backend died mid-session" shutdown message
+  appeared again.
+
+### DeepSeek experiment: prefetch the previous session's hot pages
+
+Owner-requested. This is the same relaunch (ready 1,638 s, one load, 37 CPU
+MoE layers). After readiness and the stream/cancel checks, the hook read
+back the 853k page runs recorded after the `ledger` session. Runs less than
+64 KiB apart were merged, then read in offset order with `pread`. It read
+10,267 MiB in 1,500 s (6.8 MB/s on the HDD), leaving 11.1 GiB of table pages
+cached. Then came Claude Code task `calc`, which had timed out in the cold
+cell:
+
+- First request: 12,970 prompt tokens in 811 s at 16.0 tok/s. This is not a
+  paired measurement: the cold `calc` timed out without completing a request
+  (11,520 tokens processed at 3.22 tok/s). The relaunch's `ledger` task, a
+  different prompt, took 4,055 s for its 13,011-token first request.
+- `calc` **correct**: 4 tests pass, tests untouched, 7 turns, 1,285 s
+  (2,785 s including the 1,500 s prefetch). The `ledger` task (relaunch, no
+  prefetch) took 6,521 s; it is a different task, not a comparison.
+- Later requests that brought new file text fell back to 4.2–8.1 tok/s. The
+  prefetch covers only the text that earlier sessions saw.
+- Peak 163,307 MiB; stop 22.1 s, clean.
+
+A session's hot rows are a small set: 3.6 GiB of the 194.6 GiB tables, and
+11 GiB once merged for the HDD. With that set prefetched, the first request
+of the prefetched `calc` ran at the warm rate. Hypothesis, not measured: on
+an SSD the prefetch would be much shorter than 25 minutes. Only the device
+was measured (7,285 random 4 KiB reads/s at queue depth 1 on this host's
+SATA SSD); the merged-range prefetch workload was not run on it.
+
+### DeepSeek experiment: fill idle RAM with table pages
+
+Owner-requested, on the same relaunch (ready 1,284 s). After readiness the
+hook read the first 18 GiB of each table shard sequentially: 36,864 MiB in
+307 s (120 MB/s). Then it sent new text it had not sent before.
+
+- Only 16.5 GiB stayed cached (shard 09 15.5 GiB, shard 08 0.6 GiB). The
+  first shard's pages were evicted while the second was read. During serving
+  about 25 GiB was free and about 25 GiB was reclaimable cache: 151 GiB of
+  the host's "cached" memory is the backend's shared-memory weights. The
+  eviction mechanism is not established.
+- New text ran at 3.14–3.96 tok/s and read 125–147 MiB per request from the
+  HDD, no better than the cold cell (3.17–4.02 tok/s, 116–143 MiB). Warm
+  repeats ran at 15.3–15.8 tok/s.
+
+Hashed rows have no locality, so a blind cache of N GiB serves about N/195
+of lookups. Filling free RAM is not a useful policy for this tier. Keeping
+the specific hot pages is (previous section).
+
+### DeepSeek experiment: the optimizer's unmeasured finalist
+
+Owner-requested. In the cold cell, auto calibration had refused to measure
+`-b 256 -ub 128` (predicted relative 1.182) because the experiment needed
+about 62 minutes against its 20-minute budget. This cell launched it
+explicitly: `-b 256 -ub 128 --calibrate off`, on a copy of the DeepSeek
+cache. ggrun kept ctx 1,048,576 with 4 slots and 37 CPU MoE layers. Ready in
+1,273 s with one load; GPU peak 11,389 / 20,246 / 11,277 MiB; host peak
+201,351 MiB; stop 21.9 s, clean.
+
+| Lookup traffic | auto `-b 128 -ub 64` | `-b 256 -ub 128` |
+| --- | --- | --- |
+| warm repeat, prompt tok/s | 15.6–16.0 | **20.1–20.7 (+29%)** |
+| new text, prompt tok/s | 3.2–4.0 | 3.4–4.4 |
+| decode tok/s (8-token replies) | 5.3–8.2 | 6.9–8.0 |
+
+The finalist beats the served baseline by more than the optimizer predicted.
+The elapsed budget, not the evidence, kept it out. On a model whose full
+load takes about 20 minutes, the auto budget cannot measure any challenger.
+
+### DeepSeek experiment: smaller context, larger microbatch
+
+Owner-requested: `-b 512 -ub 512 -ctx 262144 --parallel 1 --calibrate off`.
+ggrun placed the KV cache on the CPU (`--no-kv-offload`) and moved 4 more MoE
+layers to GPU (33 CPU MoE layers instead of 37). Ready in 1,268 s with one
+load; GPU peak 9,727 / 20,754 / 8,873 MiB; host peak 163,954 MiB; stream
+first token 8.5 s, cancel and reconnect ok; stop 21.4 s, clean.
+
+| Lookup traffic | auto (1M ctx, 4 slots, `-ub 64`) | `-ub 128` | 262k ctx, 1 slot, `-ub 512` |
+| --- | --- | --- | --- |
+| warm repeat, prompt tok/s | 15.6–16.0 | 20.1–20.7 | 46.9–47.0 |
+| new text, prompt tok/s | 3.2–4.0 | 3.4–4.4 | 3.7–4.9 |
+| decode tok/s (8-token replies) | 5.3–8.2 | 6.9–8.0 | 5.1–7.7 |
+
+These are phase observations from short lookup traffic; neither experiment
+cell ran a coding task. The 262k cell changes slots, total context, batch,
+ubatch, KV location and expert placement together, and per-slot context
+stays 262,144 in both shapes. It identifies a promising complete
+configuration for a single-agent comparison. It does not show which change
+causes the warm-prefill difference, that decode is unchanged (8-token
+samples), or that agent tasks run faster. The `-ub 128` gain is likewise a
+warm-prefill measurement, not a check of the optimizer's predicted
+agent-cost ratio. Cold new text stays HDD-bound in every shape.
+
+### DeepSeek V4.1 Flash IQ2_XS through the TUI
+
+`ggrun tui` (PATH binary above), started from a terminal, with `LLM_MODEL_DIR`
+set to the DeepSeek folder and a copy of the DeepSeek cache. Model picked
+from the list, Claude Code turned on (`x`), Launch, Confirm. The dry run
+shows the same command as the CLI cells
+(`--ctx-size fit --kv-placement auto --support-expert auto --claude-code`,
+port 8081).
+
+- Plan as in the CLI cells: paged lookup tier, ctx 1,048,576 (4 slots),
+  `-b 128 -ub 64`. Full SWA was turned off at launch, although the settings
+  screen showed it on.
+- Ready in 20m23s with one load. The live tier check showed 10 mappings,
+  375,072 MiB mapped and no table page anonymous or locked. Memory scope:
+  high 201,856 MiB, max 205,952 MiB.
+- Gateway `127.0.0.1:41303`, Anthropic streaming request: HTTP 200, first
+  token 9.5 s, 69 events in 42.9 s. Cancel after 5 events, backend health
+  ok; reconnect first token 0.35 s (prefix reused), 20.4 s total. Decode
+  2.9 tok/s on a cold page cache.
+- The TUI then started Claude Code in its working directory. Declining the
+  folder-trust prompt ended the session: ggrun exited 1 with no message.
+  The backend stopped within 8 s; there was no leftover process or scope,
+  the GPUs were back to 1 MiB, and 205 GiB was available.
+- Harness note: piping the TUI's output (`| tee`) leaves it on "Loading..."
+  because it never receives a terminal size. Use a real terminal.
+
+### GLM-5.3 UD-IQ2_M without `--mmap` (refusal)
+
+The first GLM cell (no extra flags) planned for 101 s and then refused:
+"placement requires file-backed mmap; rerun with --mmap to approve it
+explicitly". The model is 238,577,585,701 bytes (222.2 GiB) on a 205 GiB
+host. No weights were loaded,
+no backend was left behind, and the error names the approving flag. The
+planner had moved between 72 and 76 CPU MoE layers and a context of 346k to
+381k tokens before it settled on the last proven plan. The GLM cells were
+re-queued with `--mmap`.
+
+### GLM-5.3 UD-IQ2_M cold with `--mmap` (memory.high collapse)
+
+- Model: 6 shards, 238,577,585,701 bytes, on the HDD. Args
+  `--claude-code --mmap`. Plan: ctx 233,472 (3 slots), `-b 2048 -ub 256`,
+  KV q8_0 on GPU, 201,504 MiB of mapped CPU experts. Two loads (one
+  recovery); ready at 3,869 s. GPU peak 11,047 / 22,822 / 10,521 MiB.
+- Before ready, the short prefill pilot and the calibration baseline both hit
+  their client timeouts, so ggrun served the default placement. The verifier
+  measured 0.1 tok/s prefill and checked the completion endpoint only.
+- At ready the live pageability check measured 838 MiB non-reclaimable.
+  `resizeScopeToMeasuredFootprint` then lowered `memory.high` from 205,963 to
+  24,183 MiB; `memory.max` (210,305 MiB) was unchanged. Within 12 minutes the
+  backend RSS fell from 199,930 to 22,678 MiB and stayed at 22–24 GiB for the
+  rest of the run. `MemAvailable` stayed near 207 GiB throughout.
+- Serving after the resize (2.5 h): 4.26 M major faults and 1.16 TiB read
+  from the HDD (about 132 MiB/s, its sequential ceiling). IO pressure
+  reached 46% full.
+- Pilot request: 298 tokens at 0.44 tok/s. Stream: first token after 736 s,
+  65 chunks, 3,232 s in total. Cancel: 5 events before the abort, health ok;
+  reconnect first token after 319 s. Task `calc` timed out at 3,600 s (0/1);
+  `textstats` and `inventory` were skipped. Stop: 3.6 s, exit 0, no leftover
+  backend. The shutdown "backend died mid-session" message appeared again.
+- The relaunch cell was not run, since it would hit the same throttle.
+  PR #99 addresses the threshold collapse: `memory.high` = the
+  non-reclaimable ceiling plus a mapped-expert cache allowance, capped at the
+  planned sizing ceiling (205,963 MiB here) minus headroom. The hard
+  `memory.max` was 210,305 MiB. Expected for this fixture: high 201,867 MiB.
+  The 201,504 MiB of mapped experts still exceed the 177,684 MiB allowance,
+  so storage reads are still expected. Live effect unverified until the GLM
+  rerun.
+
+### GLM-5.3 UD-IQ2_M after PR #99, fresh cache (canary failure)
+
+PATH `ggrun v3.2.12-26-g101af89` (sha256 `0583e43bda653a10…`), `--claude-code
+--mmap`, empty cache directory, 2026-10-26 16:24 UTC.
+
+- The plan differed from the 2026-10-24 cell. After three rejected
+  configurations ggrun kept "the first proven-safe placement": ctx 346,112
+  over 4 slots, KV q8_0 on the CPU (mmap-last-resort), 73 CPU MoE layers,
+  `-ub 64`/`128`. The live pageability check measured 17,735 MiB
+  non-reclaimable (the CPU KV) beside 204,264 MiB of mapped experts.
+- `memory.high` stayed at 205,297 MiB (`memory.max` 209,639) for the whole
+  run, so there was no threshold collapse. The resize after verification
+  was never reached. RSS was 155–190 GiB, of which 17 GiB anonymous. About
+  470 GiB was read from the HDD in 48 minutes.
+- The server came up, but ggrun then failed: "functional canary failed:
+  prefill speed probe: … context deadline exceeded". The driver stopped the
+  queue as unsafe (no ready record).
+- This failure is separate from PR #99. It is a fresh-cache plan that adds
+  17 GiB of CPU KV to a mapped expert set that already exceeds RAM. The
+  error does not say why the probe was slow or what to change.
+
+### GLM-5.3 UD-IQ2_M after PR #99, matched (cold accepted, relaunch failed)
+
+PATH `ggrun v3.2.12-26-g101af89`, `--claude-code --mmap`, on a copy of the
+cache left by the 2026-10-24 cell (the closest available start state).
+
+- Plan: ctx 185,344 over 2 slots (the 2026-10-24 cell had 233,472 over 3),
+  `-b 2048 -ub 256`, KV q8_0 on GPU, 198,744 MiB mapped CPU experts. One
+  load; ready at 2,328 s. GPU peak 9,207 / 23,804 / 10,407 MiB.
+- At ready the pageability check measured 965 MiB non-reclaimable, and
+  `memory.high` was set to 201,323 MiB (2026-10-24: 24,183). The logged cache
+  allowance (177,140 MiB) is computed from the planned 24,183 MiB floor, not
+  the measured 965 MiB. RSS held at about 202 GB until the stop. HDD reads
+  were 90–140 MiB/s in the first 10 minutes after ready, then fell to
+  3–7 MiB/s once the experts were cached.
+- Stream: first token 34.1 s, 60 chunks in 170 s. Cancel after 5 events,
+  health ok; reconnect first token 9.5 s.
+- Claude Code tasks, all **correct** with unchanged oracle tests: `calc`
+  2,183 s (6 turns), `textstats` 1,241 s (7), `inventory` 1,334 s (10). On
+  2026-10-24 `calc` timed out at 3,600 s and the other two were skipped.
+- Backend timings over the session's 22 requests: prefill median 5.2 tok/s
+  (p90 9.8), decode median 3.4 tok/s. The first request (296 tokens) ran
+  at 0.48 tok/s on the cold cache. On 2026-10-24 prefill was 0.13–0.44 and
+  decode 0.32 tok/s.
+- Stop: 6.5 s, clean.
+
+Relaunch on the same cache: **failed** with "functional canary failed:
+prefill speed probe: … context deadline exceeded".
+
+- `memory.high` stayed 205,418 MiB, with no collapse. The first load read
+  287 GB from the HDD although the previous backend had just served
+  ~199 GB of the same files from page cache, and a backend-measured re-plan
+  loaded a second time. Hypothesis, not established: with 238.6 GB of files
+  and 212 GB of RAM, a sequential load re-reading the GPU tensors evicts the
+  expert pages that the load needs next.
+- Measured in the backend log: the calibration pilot (296 tokens) hit its
+  2-minute client timeout and the client cancelled it. The server kept
+  prefilling it for 22 more minutes (0.22 tok/s, cold cache), because a
+  cancel takes effect only between ubatches. The canary's prefill probe
+  queued behind it and missed its own timeout, so the launch was rejected.
+  The same server shape had just passed three coding tasks.
+- After the relaunch exited, 199 GB of the GLM files were still cached.
+
+### GLM-5.3 UD-IQ2_M on the merged build (accepted, 2026-10-28)
+
+PATH `ggrun v3.2.12-70-g4925fd7` (sha256 `db065091611344d2…`): main with
+#99 and the hardening PRs #102–#108. `--claude-code --mmap`, on a copy of the
+cache the accepted 2026-10-26 cell left. Driver acceptance: clean lifecycle
+(ready, stream, cancel and reconnect, clean stop) **and** every named task
+ran and passed with unchanged oracle tests.
+
+| Cell | Ready | Tasks (s, turns) | Stop |
+| --- | --- | --- | --- |
+| launch | 3,372 s, 1 load | `calc` 1,964 (8), `textstats` 876 (6), `inventory` 1,491 (11), all correct | 7.6 s |
+| clean relaunch | 3,204 s, 1 load | `ledger` 4,582 (29), correct, 11 tests | 8.4 s |
+
+- Plan in both: ctx 185,344 over 2 slots, `-ub 256`, KV q8_0 on GPU, 198,744
+  MiB mapped CPU experts. GPU peak about 11.4 / 24.1 / 10.8 GB.
+- The #102 idle-slot wait handled the abandoned startup requests that failed
+  the 2026-10-26 relaunch: "backend is still processing an earlier request;
+  waiting up to 18m0s", then "idle after 9m30s" (launch) and "12m35s" and
+  "2m20s" (relaunch). The canary then measured 2.0 and 0.3 tok/s and marked
+  the profile degraded instead of rejecting it.
+- `memory.high` after the canary was 205,003 and 205,293 MiB, with the
+  cache allowance covering all 198,744 MiB of mapped experts (#102 clamps
+  against the hard limit, 209,099 and 209,389 MiB). RSS peaked at
+  203.8 and 204.9 GB.
+- HDD reads were 458 GB (launch) and 441 GB (relaunch), mostly during the
+  load and the first cold requests. The relaunch's page cache was again
+  mostly gone at start (backlog: mapped-expert relaunch re-read).
+- Stream first token 4.5 s and 31.6 s; cancel after 5 events, health ok;
+  reconnect first token 2.6 s and 2.8 s.
+- Relaunch backend timings (26 requests): prefill median 4.6 tok/s (p90
+  10.2), decode median 3.5 tok/s. 437,617 of the `ledger` session's
+  prompt tokens came from the prompt cache.
+
 ## Download
 
 Receipts: `.cache/mmap-goal-20261019/download-receipts.jsonl` and
@@ -223,10 +566,10 @@ fixtures only; no claim of model support.
 | --- | --- | --- | --- |
 | Ordinary resident model, no tier | existing suite + `TestOrdinaryModelIgnoresSparseLookupInputs` | — | Qwen3.5-4B control (2026-10-19, branch binary) |
 | Explicit mapping on `--load-mode` builds; native/legacy fold, idempotence | `TestLoadMode*`, passthrough and fingerprint tests | — | `--load-mode mmap` observed (2026-10-19) |
-| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests | — | not run |
+| Ordinary oversized mmap (CPU experts) | existing MMAP-1..4 tests; `TestMMapReclaimHighKeepsMappedExperts` (PR #99) | — | GLM-5.3: refusal without `--mmap`; with it, the 2026-10-24 `memory.high` collapse (fixed by #99); on the merged build (2026-10-28) launch and clean relaunch accepted, 4/4 tasks correct |
 | Engram, unreviewed loader → layer tier | placement tests | lazy off puts tables on GPU | not run |
 | Engram, reviewed loader, roomy host → resident tier | placement test (900 GB) | — | not possible on this host |
-| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | blocked: DRAM fault (shards verified) |
+| Engram, reviewed loader, this host → paged tier | placement, scope, smaps, oracle tests | real headers, lazy on/off | DeepSeek V4.1 Flash IQ2_XS (2026-10-23, host with faulty pages offlined): cold, relaunch and 4 experiment cells; `ledger` and `calc` correct, one cold timeout |
 | Automatic expert paging beside a paged tier refused | placement test | — | not run |
 | Explicit `--lazy-mode on` without contract refused | placement test | — | not run |
 | Synthetic second architecture (dense, `synthetic-rowtable`) | parser + placement + contract tests, CPU-only / single / multi GPU | — | none (synthetic) |
@@ -245,11 +588,22 @@ After the final-review follow-up (#97) and the size/topology matrix, combined
 on main after the #97 merge (2026-10-21): uncached `scripts/verify-core-engine.sh`
 passed.
 
+PR #99 (mmap `memory.high`, 2026-10-24): uncached
+`scripts/verify-core-engine.sh` passed; `GOOS=windows go vet ./cmd/ggrun
+./pkg/server` passed. CI: every Linux and Windows job passed; the macOS
+release smoke failed (deprecated, non-blocking).
+
 ## Not done
 
-Not done: the live 366 GiB load; memory tiers, major faults and HDD reads
-under cold/warm and repeated/spread lookup traffic; Claude gateway coding and
-tool tasks; cancel, reconnect and relaunch. These need the verified download
-and a clean DRAM result. An HDD random-row lookup rate has not been measured;
-the expected order is about 48 row gathers per token, mostly separate 4 KiB
-pages on a cold cache.
+- The DeepSeek cells ran on a host with the faulty DRAM pages offlined, not
+  on repaired hardware. The offlining is lost on reboot, and the stick
+  swap is still pending.
+- The paged tier on an SSD. Only the device was measured: 7,285 random 4 KiB
+  reads/s at queue depth 1 and 76,235 at depth 16, against about 150 on the
+  HDD. No model run was made, because the SSD has 4.4 GB free.
+- Open defects (backlog in `docs/core-standard-launch-todos.md`): the
+  shutdown health-monitor message; the auto calibration budget rules out
+  every challenger on 20-minute loads; context is filled before ubatch; the
+  relaunch does not reuse the measured CPU MoE count; table page cache is
+  lost on relaunch.
+- Review of this record.

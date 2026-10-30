@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import json
 from pathlib import Path
 
@@ -610,6 +611,8 @@ def test_reviewed_unscored_models_rank_one_point_under_their_scored_anchor(monke
     assert dense["quality"] == 13 and dense["moe"] is False and dense["aa_intelligence_index"] == 0
     # No scored anchor, no estimate: the row is not listed at all.
     assert [r["name"] for r in updater.reviewed_candidates(scored[1:], [])] == ["Nanbeige4.3-33B"]
+    # An anchor missing from this scrape (2026-10-29) is taken from the previous catalog.
+    assert [r["name"] for r in updater.reviewed_candidates(scored[:1], scored[1:])] == ["MiniMax-M3.1-Flash", "Nanbeige4.3-33B"]
     # Once the leaderboard scores it, the scored row wins.
     scored.append({"name": "MiniMax-M3.1-Flash", "repo": "x/y", "aa_intelligence_index": 33, "quality": 54})
     assert [r["name"] for r in updater.reviewed_candidates(scored, [])] == ["Nanbeige4.3-33B"]
@@ -623,7 +626,7 @@ def test_reviewed_rows_stay_out_of_the_candidates_released_clients_rank(monkeypa
     _offline_catalog(updater, monkeypatch, {"GLM-5.3": ("unsloth/GLM-5.3-GGUF", quants, "hf-search")})
     seen = []
 
-    def reviewed(candidates, previous):
+    def reviewed(candidates, previous, scale=None):
         seen.append([c["repo"] for c in previous])
         return [{"name": "Guess", "repo": "o/Guess-GGUF", "quality": 49, "aa_intelligence_index": 0, "quants": quants}]
     monkeypatch.setattr(updater, "reviewed_candidates", reviewed)
@@ -697,3 +700,176 @@ def test_a_large_tokenizer_does_not_hide_moe_geometry(monkeypatch):
     assert updater.fetch_gguf_arch("o/sarvam-b") == {"arch": "deepseek2", "experts": 128, "exp_used": 8}
     monkeypatch.setattr(updater, "_fetch_gguf_range", lambda url, n: b"not a gguf")
     assert updater.fetch_gguf_arch("o/sarvam-c") is None
+
+
+def test_refresh_guard_refuses_a_gutted_or_rescaled_scrape():
+    """2026-10-29: 21 of 100 rows scored and scores rescaled (GLM-5.3 44.8 -> 31.7);
+    the refresh would have shipped 21 rows instead of 119."""
+    updater = load_updater()
+    prev = [{"name": f"M{i}", "repo": f"o/M{i}-GGUF", "aa_slug": f"m{i}", "aa_intelligence_index": 40.0 - i}
+            for i in range(10)]
+    same = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": 40.0 - i, "isOpenWeights": True} for i in range(10)]
+    full = {"candidates": [dict(p) for p in prev]}
+    assert updater.refresh_guard(same, prev, full) is None
+    # Most rows unscored.
+    sparse = same[:3] + [dict(r, intelligenceIndex=0) for r in same[3:]]
+    assert "carry an intelligence score" in updater.refresh_guard(sparse, prev, full)
+    # Same index version, but the scores moved as a whole.
+    moved = {"candidates": [dict(c, aa_intelligence_index=c["aa_intelligence_index"] * 0.7) for c in prev]}
+    assert "median factor 0.70" in updater.refresh_guard(same, prev, moved)
+    # A refused rescale is reported as is.
+    assert updater.refresh_guard(same, prev, {"aa_index_scale": {"refused": "weak fit"}, "candidates": []}) == "weak fit"
+    # Scores fine, but the catalog collapsed.
+    assert "freshly resolved rows" in updater.refresh_guard(same, prev, {"candidates": full["candidates"][:3]})
+    # Carried rows do not count as fresh.
+    carried = [dict(c, notes="row; last seen on the leaderboard 2026-10-19") for c in full["candidates"]]
+    assert "freshly resolved rows" in updater.refresh_guard(same, prev, {"candidates": carried})
+
+
+def test_reviewed_row_keeps_its_score_when_the_anchor_leaves_both_catalogs(monkeypatch):
+    updater = load_updater()
+    gb = 1024**3
+    monkeypatch.setattr(updater, "fetch_hf_quants", lambda repo: [{"name": "Q4_K_M", "size_gb": 20, "size_bytes": 20 * gb}])
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {"arch": "llama"})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {})
+    anchor = [{"name": "Nanbeige4.1-3B", "repo": "o/Nanbeige4.1-3B-GGUF", "aa_intelligence_index": 8.4, "quality": 14}]
+    first = [r for r in updater.reviewed_candidates([], anchor) if r["name"] == "Nanbeige4.3-33B"]
+    assert first and first[0]["quality"] == 13 and first[0]["anchor_name"] == "Nanbeige4.1-3B"
+    # Next refresh: the anchor is gone from both the scrape and the catalog it wrote.
+    second = [r for r in updater.reviewed_candidates([], first) if r["name"] == "Nanbeige4.3-33B"]
+    assert second and second[0]["quality"] == 13 and "Nanbeige4.1-3B" in second[0]["notes"]
+
+
+def _prev_rows(n, version_score=lambda i: 4.0 + 3 * i):
+    return [{"name": f"M{i}", "repo": f"o/M{i}-GGUF", "aa_slug": f"m{i}", "aa_intelligence_index": version_score(i),
+             "quality": round(version_score(i) * 1.65), "aa_updated_at": "2026-10-19T10:55:25Z", "notes": "row",
+             "quants": [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]} for i in range(n)]
+
+
+def _v5(x):
+    return round(0.5 * x ** 1.1, 6)
+
+
+def test_index_change_converts_unscored_rows_with_a_power_fit():
+    """v4 -> v5.0 (2026-10): most rows lost their score. A straight line had a
+    -5.8 intercept and clamped 39 small models; the power fit stays positive."""
+    updater = load_updater()
+    prev = _prev_rows(14)  # v4 scores 4 .. 43
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "isOpenWeights": True,
+             "intelligenceIndex": _v5(4.0 + 3 * i) if i >= 4 else None} for i in range(14)]
+    rows.append({"name": "New", "slug": "new", "isOpenWeights": True, "intelligenceIndex": 33.0})
+    out, scale = updater.apply_index_scale(rows, prev, "v4", "v5.0")
+    by = {updater.row_slug(r): r for r in out}
+    assert scale["version"] == "v5" and scale["pairs"] == 10 and scale["r2"] > 0.999 and "refused" not in scale
+    assert abs(scale["fit"]["a"] - 1.1) < 1e-4
+    small = [updater.intelligence(by[f"m{i}"]) for i in range(4)]
+    assert all(by[f"m{i}"]["_mapped_from"] == "v4" for i in range(4))
+    assert small == sorted(small) and small[0] > 0.1 and abs(small[0] - _v5(4.0)) < 1e-3
+    assert "_mapped_from" not in by["m5"] and updater.intelligence(by["new"]) == 33.0
+
+
+def test_same_index_version_keeps_converted_scores_without_refitting():
+    """Second refresh on v5.0: no fit is needed, so the job cannot stall as
+    v4-era models leave; a re-evaluated model takes its real score."""
+    updater = load_updater()
+    prev = _prev_rows(3, lambda i: [2.0, 7.5, 20.0][i])
+    prev[0]["aa_index_mapped_from"] = prev[1]["aa_index_mapped_from"] = "v4"
+    rows = [{"name": "M0", "slug": "m0", "intelligenceIndex": None},
+            {"name": "M1", "slug": "m1", "intelligenceIndex": 9.0},
+            {"name": "M2", "slug": "m2", "intelligenceIndex": 20.4}]
+    out, scale = updater.apply_index_scale(rows, prev, "v5.0", "v5.0")
+    by = {updater.row_slug(r): r for r in out}
+    assert "refused" not in scale and "fit" not in scale and scale["version"] == "v5"
+    assert updater.intelligence(by["m0"]) == 2.0 and by["m0"]["_mapped_from"] == "v4"
+    assert updater.intelligence(by["m1"]) == 9.0 and "_mapped_from" not in by["m1"]
+
+
+def test_next_index_change_converts_from_the_previous_version():
+    """v5.0 -> v6: anchors are the previous version's scores, mapped ones included."""
+    updater = load_updater()
+    prev = _prev_rows(12)
+    prev[0]["aa_index_mapped_from"] = "v4"
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": 2 * (4.0 + 3 * i) if i else None}
+            for i in range(12)]
+    out, scale = updater.apply_index_scale(rows, prev, "v5.0", "v6")
+    m0 = next(r for r in out if updater.row_slug(r) == "m0")
+    assert scale["pairs"] == 11 and m0["_mapped_from"] == "v5" and abs(updater.intelligence(m0) - 8.0) < 1e-3
+
+
+def test_index_change_refuses_a_thin_or_weak_fit():
+    updater = load_updater()
+    prev = _prev_rows(12)
+    thin = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": _v5(4.0 + 3 * i) if i < 5 else None}
+            for i in range(12)]
+    _, scale = updater.apply_index_scale(thin, prev, "v4", "v5.0")
+    assert "only 5 models" in scale["refused"]
+    noisy = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": [9, 31, 2, 28, 3, 30, 4, 27, 13, 1][i]}
+             for i in range(10)]
+    _, scale = updater.apply_index_scale(noisy, prev, "v4", "v5.0")
+    assert "is weak" in scale["refused"] and "fit" not in scale
+
+
+def test_carried_rows_are_converted_or_dropped_on_a_version_change():
+    updater = load_updater()
+    scale = {"version": "v5.0", "previous_version": "v4", "fit": {"kind": "power", "a": 1.1, "b": math.log(0.5)}}
+    row = _prev_rows(1, lambda i: 20.0)[0]
+    mapped = updater.map_carried(dict(row), scale)
+    assert abs(mapped["aa_intelligence_index"] - _v5(20.0)) < 1e-3 and mapped["aa_index_mapped_from"] == "v4"
+    assert updater.map_carried(dict(row, aa_intelligence_index=0), scale) is None
+    # Scored by this scrape already: kept as is.
+    assert updater.map_carried(dict(row, _on_scale=True), scale)["aa_intelligence_index"] == 20.0
+    assert updater.map_carried(dict(row), dict(scale, version="v4")) == row
+
+
+def test_reviewed_fallbacks_are_converted_on_a_version_change(monkeypatch):
+    updater = load_updater()
+    gb = 1024**3
+    monkeypatch.setattr(updater, "fetch_hf_quants", lambda repo: [{"name": "Q4_K_M", "size_gb": 20, "size_bytes": 20 * gb}])
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {"arch": "llama"})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {})
+    scale = {"version": "v5.0", "previous_version": "v4", "fit": {"kind": "power", "a": 1.1, "b": math.log(0.5)}}
+    old_anchor = [{"name": "Nanbeige4.1-3B", "repo": "o/N-GGUF", "aa_intelligence_index": 8.4, "quality": 14}]
+    row = next(r for r in updater.reviewed_candidates([], old_anchor, scale) if r["name"] == "Nanbeige4.3-33B")
+    assert row["quality"] == updater.quality_score(_v5(8.4)) - 1
+
+
+def test_build_catalog_across_two_refreshes_keeps_one_scale(monkeypatch):
+    """Real candidate_from_row; the first refresh's catalog is fed back in."""
+    from datetime import datetime, timezone
+    updater = load_updater()
+    quants = [{"name": "Q4_K_M", "size_gb": 10, "size_bytes": 10 * 1024**3}]
+    monkeypatch.setattr(updater, "resolve_gguf_repo",
+                        lambda row, limit, prev=None: (f"o/{updater.display_name(row)}-GGUF", quants, "hf-search")
+                        if updater.display_name(row) != "M13" else None)
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {})
+    monkeypatch.setattr(updater, "REVIEWED_UNSCORED_MODELS", ())
+    prev = _prev_rows(14)
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "isOpenWeights": True,
+             "intelligenceIndex": _v5(4.0 + 3 * i) if i >= 4 else None} for i in range(13)]  # M13 left the scrape
+    now = datetime(2026, 10, 29, tzinfo=timezone.utc)
+    first = updater.build_catalog(rows, "test", 100, 20, prev, now, prev_version="v4", page_version="v5.0")
+    by = {c["repo"]: c for c in first["candidates"]}
+    assert first["aa_index_version"] == "v5" and len(by) == 14
+    assert by["o/M1-GGUF"]["aa_index_mapped_from"] == "v4" and "~intelligence mapped" in by["o/M1-GGUF"]["notes"]
+    assert by["o/M13-GGUF"]["aa_index_mapped_from"] == "v4"  # carried and converted
+    assert abs(by["o/M13-GGUF"]["aa_intelligence_index"] - _v5(43.0)) < 1e-2
+    assert max(c["aa_intelligence_index"] for c in first["candidates"]) < _v5(44.0)  # no v4-scale row on top
+    assert updater.refresh_guard(rows, prev, first, "v4") is None
+    # Second refresh, same page: no refit, same scores, nothing refused.
+    second = updater.build_catalog(rows, "test", 100, 20, updater.catalog_rows(first), now,
+                                   prev_version="v5.0", page_version="v5.0")
+    assert "fit" not in second["aa_index_scale"] and "refused" not in second["aa_index_scale"]
+    again = {c["repo"]: c["aa_intelligence_index"] for c in second["candidates"]}
+    assert again["o/M1-GGUF"] == by["o/M1-GGUF"]["aa_intelligence_index"]
+    assert updater.refresh_guard(rows, updater.catalog_rows(first), second, "v5.0") is None
+
+
+def test_version_labels_ignore_a_trailing_zero_and_keep_fit_provenance():
+    updater = load_updater()
+    prev = _prev_rows(3)
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": 4.0 + 3 * i} for i in range(3)]
+    fit = {"kind": "power", "a": 1.3, "b": -1.6}
+    _, scale = updater.apply_index_scale(rows, prev, "v5.0", "v5", fit)
+    assert scale["version"] == "v5" and "pairs" not in scale and scale["fit_from_previous_version"] == fit
+

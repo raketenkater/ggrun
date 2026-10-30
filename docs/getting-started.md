@@ -6,7 +6,7 @@ which model you want.
 
 ## 1. Install
 
-Linux / macOS:
+Linux:
 
 ~~~bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
