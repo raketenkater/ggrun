@@ -90,6 +90,16 @@ func waitForShutdownRelease(baseline *detect.Capabilities, timeout time.Duration
 	return false
 }
 
+// stopCompanionsAndWaitForShutdownRelease releases all launch-owned companions
+// before comparing against the baseline captured before they were started. A
+// live reviewer otherwise makes a successful main-model stop appear incomplete.
+func stopCompanionsAndWaitForShutdownRelease(stopCompanions func(), baseline *detect.Capabilities, timeout time.Duration, atBaseline func(*detect.Capabilities) bool, sleep func(time.Duration)) bool {
+	if stopCompanions != nil {
+		stopCompanions()
+	}
+	return waitForShutdownRelease(baseline, timeout, atBaseline, sleep)
+}
+
 // shutdownReleaseWait bounds how long exit waits for the stopped backend's
 // memory. It stays under the 30 s grace a supervisor typically allows after
 // SIGINT: MiniMax-M3 (about 120 GiB resident) outlasted a 2-minute wait and

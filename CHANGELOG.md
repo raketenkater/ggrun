@@ -28,6 +28,20 @@
 - The Docker images run without a cgroup scope (`GGRUN_SCOPE_MODE=none`), and
   the GPU images ship `llama-fit-params`.
 
+- Remote Claude client mode in the TUI and `--claude-code --headless`: the server
+  serves an authenticated gateway while the separate ggrun-client runs Claude,
+  files and tools on the client computer. HTTP(S) is generic; Tailscale is optional.
+- Headless serving reports active and queued main-model requests from in-memory
+  counters. Shutdown revokes readiness before model teardown.
+- Preserve worker handbacks when a backend template cannot consume system-role
+  entries inside a conversation, using Claude's capability retry.
+- Stop the owned Claude companion before checking whole-launch memory release.
+- Charge Linux cgroup growth reserve only on platforms with the containment gate;
+  default small macOS CPU launches no longer pay a phantom Linux-only reserve.
+- Native remote contract CI on Linux, Windows and Apple Silicon macOS. macOS
+  package installation and its default synthetic CPU launch are required checks;
+  these do not establish real Metal inference qualification.
+
 ### Fixed
 
 - A memory-mapped expert plan's `memory.high` leaves room for the mapped

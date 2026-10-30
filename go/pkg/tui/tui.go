@@ -95,20 +95,25 @@ type Model struct {
 	selectedModel int
 
 	// Advanced config
-	ctxSize        string
-	ctxMode        string
-	kvPlacement    string
-	kvQuality      string
-	swaFull        bool
-	vramHeadroomMB int
-	ramHeadroomMB  int
-	parallel       string
-	parallelSet    bool
-	aitune         bool
-	aituneRounds   int
-	benchmark      bool
-	vision         bool
-	claudeCode     bool
+	ctxSize          string
+	ctxMode          string
+	kvPlacement      string
+	kvQuality        string
+	swaFull          bool
+	vramHeadroomMB   int
+	ramHeadroomMB    int
+	parallel         string
+	parallelSet      bool
+	aitune           bool
+	aituneRounds     int
+	benchmark        bool
+	vision           bool
+	claudeCode       bool
+	claudeHeadless   bool
+	gatewayHost      string
+	gatewayPort      int
+	gatewayURL       string
+	gatewayTokenFile string
 	// claudeReviewer picks the local worker/reviewer model for Claude Code:
 	// "auto" (and "qwen") resolve to the Qwen3.5-4B worker/reviewer, "qwen2b"
 	// forces the small/light Qwen3.5-2B review-only profile, and "nanbeige"
@@ -1001,6 +1006,8 @@ func (m *Model) applyLaunchRequestFields(req *LaunchRequest) {
 	m.aituneRounds = req.AITuneRounds
 	m.benchmark = req.Benchmark
 	m.claudeCode = req.ClaudeCode
+	m.claudeHeadless = req.ClaudeHeadless
+	m.gatewayHost, m.gatewayPort, m.gatewayURL, m.gatewayTokenFile = req.GatewayHost, req.GatewayPort, req.GatewayURL, req.GatewayTokenFile
 	m.claudeProfile = req.ClaudeProfile
 	m.claudeReviewer = req.ClaudeReviewerOverride
 	if req.SupportSet || req.SupportExpert != "" {
@@ -1027,6 +1034,9 @@ func (m Model) cfgRows() []string {
 	rows = append(rows, "vision", "claudecode")
 	if m.claudeCode {
 		rows = append(rows, "claudereviewer", "claudeprofile")
+	}
+	if m.claudeCode && m.claudeHeadless {
+		rows = append(rows, "gatewayhost", "gatewayport", "gatewayurl", "gatewaytoken")
 	}
 	rows = append(rows, "chattemplate")
 	return append(rows, "benchmark", "launch", "dryrun")
@@ -1247,7 +1257,7 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 	case "vision":
 		m.vision = !m.vision
 	case "claudecode":
-		m.claudeCode = !m.claudeCode
+		m.cycleClaudeMode(dir)
 	case "claudereviewer":
 		order := []string{"auto", "qwen", "qwen2b", "nanbeige", "off"}
 		if dir < 0 {
@@ -1311,7 +1321,15 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 	case "vision":
 		m.vision = !m.vision
 	case "claudecode":
-		m.claudeCode = !m.claudeCode
+		m.cycleClaudeMode(1)
+	case "gatewayhost":
+		m.openCfgInput("gatewayhost", m.gatewayHostLabel(), "Gateway bind address; loopback for a proxy/tunnel")
+	case "gatewayport":
+		m.openCfgInput("gatewayport", m.gatewayPortLabel(), "Stable gateway port (different from model port)")
+	case "gatewayurl":
+		m.openCfgInput("gatewayurl", m.gatewayURL, "Advertised HTTP(S) base URL; optional")
+	case "gatewaytoken":
+		m.openCfgInput("gatewaytoken", m.gatewayTokenFile, "Private credential FILE path; blank creates one automatically")
 	case "claudereviewer":
 		m.cycleCfgRow("claudereviewer", 1)
 	case "claudeprofile":
@@ -1351,6 +1369,19 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
 			val := m.input.Value()
 			switch m.inputMode {
+			case "gatewayhost":
+				m.gatewayHost = strings.TrimSpace(val)
+			case "gatewayurl":
+				m.gatewayURL = strings.TrimSpace(val)
+			case "gatewaytoken":
+				m.gatewayTokenFile = strings.TrimSpace(val)
+			case "gatewayport":
+				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 && n <= 65535 {
+					m.gatewayPort = n
+				} else {
+					m.message = "Gateway port must be between 1 and 65535"
+					m.messageType = "warning"
+				}
 			case "ctx":
 				m.setCtx(val)
 			case "parallel":
@@ -1427,7 +1458,7 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "v", "V":
 		m.vision = !m.vision
 	case "x", "X":
-		m.claudeCode = !m.claudeCode
+		m.cycleClaudeMode(1)
 	case "l", "L":
 		if m.openSelectedBackendInstall() {
 			return m, nil
@@ -1882,14 +1913,17 @@ func (m Model) viewModelConfig() string {
 
 	section("Run mode")
 	line("vision", "[v] Vision (mmproj)", boolLabel(m.vision))
-	ccLabel := boolLabel(m.claudeCode)
-	if m.claudeCode {
-		ccLabel += " — serve + print Claude Code env (thinking on)"
-	}
+	ccLabel := m.claudeModeLabel()
 	line("claudecode", "[x] Claude Code", ccLabel)
 	if m.claudeCode {
 		line("claudereviewer", "[e] Reviewer/worker", claudeReviewerLabel(m.claudeReviewer))
 		line("claudeprofile", "[z] Claude profile", claudeProfileLabel(m.claudeProfile))
+	}
+	if m.claudeCode && m.claudeHeadless {
+		line("gatewayhost", "Gateway listen address", m.gatewayHostLabel())
+		line("gatewayport", "Gateway port", m.gatewayPortLabel())
+		line("gatewayurl", "Client URL", m.gatewayURLLabel())
+		line("gatewaytoken", "Credential file", m.gatewayTokenLabel())
 	}
 	line("chattemplate", "[n] Chat template", m.chatTemplateLabel(model))
 	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
@@ -1969,7 +2003,7 @@ func (m Model) updatePrelaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Resume only makes sense in Claude Code mode with a recorded
 			// session; otherwise fall through to no-op rather than launching
 			// something the footer did not offer.
-			if m.claudeCode && m.resumeSession != "" {
+			if m.claudeCode && !m.claudeHeadless && m.resumeSession != "" {
 				req := m.buildLaunchRequest()
 				if req != nil {
 					req.ResumeSession = m.resumeSession
@@ -2136,9 +2170,12 @@ func (m Model) viewPrelaunch() string {
 		b.WriteString(fmt.Sprintf("  Chat template:  auto (%s corrected)\n", entry.Name))
 	}
 	if m.claudeCode {
-		b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", boolLabel(m.claudeCode)))
+		b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", m.claudeModeLabel()))
 		b.WriteString(fmt.Sprintf("  Reviewer/worker: %s\n", claudeReviewerLabel(m.claudeReviewer)))
 		b.WriteString(fmt.Sprintf("  Claude profile: %s\n", claudeProfileLabel(m.claudeProfile)))
+	}
+	if m.claudeCode && m.claudeHeadless {
+		b.WriteString(fmt.Sprintf("  Gateway:        %s:%s\n  Client URL:     %s\n", m.gatewayHostLabel(), m.gatewayPortLabel(), m.gatewayURLLabel()))
 	}
 	if m.tunePath != "" {
 		b.WriteString(fmt.Sprintf("  Tuned config:   %s\n", filepath.Base(m.tunePath)))
@@ -2146,7 +2183,7 @@ func (m Model) viewPrelaunch() string {
 	if m.noCachedConfig {
 		b.WriteString("  Cached config:  ignored (fresh derive)\n")
 	}
-	if m.claudeCode && m.resumeSession != "" {
+	if m.claudeCode && !m.claudeHeadless && m.resumeSession != "" {
 		b.WriteString(fmt.Sprintf("  Resumable:      session %s\n", shortSessionID(m.resumeSession)))
 		if m.resumeRun != "" {
 			b.WriteString(fmt.Sprintf("                  workflow %s, %d agents cached\n", m.resumeRun, m.resumeCached))
@@ -2171,7 +2208,7 @@ func (m Model) viewPrelaunch() string {
 	b.WriteString("\n")
 	b.WriteString(highlightStyle.Render("  [Enter] Confirm and launch"))
 	b.WriteString("\n")
-	if m.claudeCode && m.resumeSession != "" {
+	if m.claudeCode && !m.claudeHeadless && m.resumeSession != "" {
 		b.WriteString(highlightStyle.Render("  [r] Resume that session and its workflow"))
 		b.WriteString("\n")
 	}
@@ -3986,17 +4023,19 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		// which is exactly what made the launch unfittable — and nothing was
 		// permitted to drop it, because the TUI had "typed" it. A setting is a
 		// preference; only a human at the command line is an instruction.
-		SWAFullSet:    m.swaFullTouched,
-		FlashAttn:     true,
-		Parallel:      parallel,
-		ParallelSet:   parallelSet,
-		Vision:        m.vision,
-		Backend:       m.requestBackend(),
-		TuneCache:     m.tunePath,
-		AITune:        m.aitune,
-		AITuneRounds:  m.aituneRounds,
-		Benchmark:     m.benchmark,
-		ClaudeCode:    m.claudeCode,
+		SWAFullSet:     m.swaFullTouched,
+		FlashAttn:      true,
+		Parallel:       parallel,
+		ParallelSet:    parallelSet,
+		Vision:         m.vision,
+		Backend:        m.requestBackend(),
+		TuneCache:      m.tunePath,
+		AITune:         m.aitune,
+		AITuneRounds:   m.aituneRounds,
+		Benchmark:      m.benchmark,
+		ClaudeCode:     m.claudeCode,
+		ClaudeHeadless: m.claudeHeadless,
+		GatewayHost:    m.gatewayHost, GatewayPort: m.gatewayPort, GatewayURL: m.gatewayURL, GatewayTokenFile: m.gatewayTokenFile,
 		ClaudeProfile: m.claudeProfile,
 		// Only emit the reviewer override when the user explicitly deviated from
 		// the automatic choice; an empty value keeps the CLI default.
@@ -4031,27 +4070,32 @@ type LaunchRequest struct {
 	// have to land on a different disk than the default one, and making the
 	// user repoint ModelDir and then remember to put it back is both tedious
 	// and easy to get wrong.
-	DownloadDir   string
-	ModelPath     string
-	Port          int
-	CtxSize       int
-	CtxFlag       string
-	KVPlacement   string
-	KVQuality     string
-	KVQualitySet  bool // TUI explicitly cycled KV quality; emit an explicit override
-	SWAFull       bool
-	SWAFullSet    bool // TUI explicitly selected on/off; emit an override either way
-	FlashAttn     bool
-	Parallel      int
-	ParallelSet   bool // user typed a parallel value (claude-code mode must not override)
-	Vision        bool
-	Backend       string
-	TuneCache     string
-	AITune        bool
-	AITuneRounds  int
-	Benchmark     bool
-	ClaudeCode    bool
-	ClaudeProfile string
+	DownloadDir      string
+	ModelPath        string
+	Port             int
+	CtxSize          int
+	CtxFlag          string
+	KVPlacement      string
+	KVQuality        string
+	KVQualitySet     bool // TUI explicitly cycled KV quality; emit an explicit override
+	SWAFull          bool
+	SWAFullSet       bool // TUI explicitly selected on/off; emit an override either way
+	FlashAttn        bool
+	Parallel         int
+	ParallelSet      bool // user typed a parallel value (claude-code mode must not override)
+	Vision           bool
+	Backend          string
+	TuneCache        string
+	AITune           bool
+	AITuneRounds     int
+	Benchmark        bool
+	ClaudeCode       bool
+	ClaudeHeadless   bool
+	GatewayHost      string
+	GatewayPort      int
+	GatewayURL       string
+	GatewayTokenFile string
+	ClaudeProfile    string
 	// ClaudeReviewerOverride picks the local worker/reviewer model in Claude
 	// Code mode: empty/"auto" and "qwen" resolve to the Qwen3.5-4B
 	// worker/reviewer, "qwen2b" forces the small/light Qwen3.5-2B review-only
@@ -4189,6 +4233,21 @@ func (req *LaunchRequest) LaunchArgs() []string {
 	}
 	if req.ClaudeCode {
 		args = append(args, "--claude-code")
+		if req.ClaudeHeadless {
+			args = append(args, "--headless")
+			if req.GatewayHost != "" {
+				args = append(args, "--gateway-host", req.GatewayHost)
+			}
+			if req.GatewayPort > 0 {
+				args = append(args, "--gateway-port", strconv.Itoa(req.GatewayPort))
+			}
+			if req.GatewayURL != "" {
+				args = append(args, "--gateway-url", req.GatewayURL)
+			}
+			if req.GatewayTokenFile != "" {
+				args = append(args, "--gateway-token-file", req.GatewayTokenFile)
+			}
+		}
 		if req.ClaudeProfile != "" {
 			args = append(args, "--claude-profile", req.ClaudeProfile)
 		}
@@ -4320,7 +4379,7 @@ func (m Model) prelaunchParallelLabel() string {
 			return "agent-parallel (4 workflow slots)"
 		default:
 			if m.parallel == "" || m.parallel == "1" {
-				return "automatic (Claude Code policy; target 4 slots)"
+				return "automatic (resolved for this model at launch)"
 			}
 		}
 	}
