@@ -25,6 +25,26 @@ func TestNoCompanionPermissionDefaultPreservesExplicitChoices(t *testing.T) {
 	}
 }
 
+func TestPermissionDefaultUsesSeatedReviewerNotOnlyEnvironment(t *testing.T) {
+	t.Setenv("GGRUN_CLAUDE_AUTO_REVIEWER", "")
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
+	// The request flag and launch-time companion rejection can leave the env
+	// untouched. The actual local-client boundary must still select prompts.
+	if got := claudeCodePermissionArgs(nil, false); len(got) != 2 || got[1] != "manual" {
+		t.Fatalf("absent seated reviewer selected self-classification: %v", got)
+	}
+	if got := claudeCodePermissionArgs(nil, true); len(got) != 2 || got[1] != "auto" {
+		t.Fatalf("seated reviewer lost Auto mode: %v", got)
+	}
+	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "auto")
+	if got := claudeCodePermissionArgs(nil, false); len(got) != 2 || got[1] != "auto" {
+		t.Fatalf("runtime availability overrode the operator's Auto choice: %v", got)
+	}
+	if got := claudeCodePermissionArgs([]string{"--permission-mode=auto"}, false); got != nil {
+		t.Fatalf("runtime availability overrode explicit CLI permission mode: %v", got)
+	}
+}
+
 func TestMeasuredScopeKeepsFutureCacheAndGrowthAllowance(t *testing.T) {
 	// Portable sizing invariant: a canary that exceeds a static base must not
 	// consume the cache/growth allowance of later agent turns. Applies to CPU,

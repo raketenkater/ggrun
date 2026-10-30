@@ -7610,6 +7610,9 @@ func cmdLaunch(args []string) {
 			clientHost = "127.0.0.1"
 		}
 		clientArgs, statusLineEnabled := claudeCodeProgressClientArgs(nil, claudeClientPort)
+		// Use the seated runtime, not just the environment toggle: --claude-reviewer
+		// off and a companion rejected during launch do not set that variable.
+		clientArgs = append(claudeCodePermissionArgs(clientArgs, claudeAuto != nil && claudeAuto.reviewerPort > 0), clientArgs...)
 		progressEnabled := !progressDisabled()
 		progressStop := func() {}
 		if progressEnabled {
@@ -9006,7 +9009,7 @@ func envOr(key, def string) string {
 // GGRUN_CLAUDE_PERMISSION_MODE can select another current Claude CLI mode. Set it
 // to "inherit" to preserve the user's settings.json default. An explicit
 // --permission-mode in extraArgs always wins.
-func claudeCodePermissionArgs(extraArgs []string) []string {
+func claudeCodePermissionArgs(extraArgs []string, reviewerAvailable ...bool) []string {
 	for _, arg := range extraArgs {
 		if arg == "--permission-mode" || strings.HasPrefix(arg, "--permission-mode=") {
 			return nil
@@ -9015,7 +9018,7 @@ func claudeCodePermissionArgs(extraArgs []string) []string {
 	mode := strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_PERMISSION_MODE"))
 	if mode == "" {
 		mode = "auto"
-		if disabledEnv("GGRUN_CLAUDE_AUTO_REVIEWER") {
+		if disabledEnv("GGRUN_CLAUDE_AUTO_REVIEWER") || (len(reviewerAvailable) > 0 && !reviewerAvailable[0]) {
 			// Native Claude has a shorter classifier deadline than its general
 			// API timeout. A slow main model cannot reliably review itself (#113).
 			mode = "default"
