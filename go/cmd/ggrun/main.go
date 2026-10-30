@@ -4262,8 +4262,9 @@ func resizeScopeToMeasuredFootprint(req *launchRequest, caps *detect.Capabilitie
 // resize then only ever tightens to measured+headroom, never below the
 // pre-launch plan ceiling, and the ceiling clamp keeps the user's safety limit
 // absolute. When the plan under-counts the measured backend (CRAM not yet
-// filled, checkpoint reserve below reality), measured+headroom is the honest
-// floor, not the stale plan estimate.
+// filled, checkpoint reserve below reality), measured+future cache capacity is
+// the honest floor, not the stale plan estimate. The scope adds growth headroom
+// beside that floor and keeps the original host ceiling absolute.
 func measuredFootprintPlannedFloor(strategy *placement.Strategy, measuredMB, ceilingMB int) int {
 	if strategy == nil {
 		return 0
@@ -4274,27 +4275,24 @@ func measuredFootprintPlannedFloor(strategy *placement.Strategy, measuredMB, cei
 		// this plan -- never clamps the scope below the plan ceiling.
 		return ceilingMB
 	}
-	plannedFloor := strategy.PlannedHostFootprintMB + strategy.CRAM
-	if measuredMB > 0 && plannedFloor < measuredMB {
-		// The plan under-counts the measured backend. measured+headroom is the
-		// honest floor, not the stale plan estimate.
-		return measuredMB
-	}
-	return plannedFloor
+	// The canary's measured bytes are not proof that the prompt cache is full.
+	// If the backend exceeds the estimated base, retain the future cache budget
+	// beside that larger base. Dropping CRAM here left only generic headroom
+	// for a cache that can be much larger than that headroom (#117).
+	return max(strategy.PlannedHostFootprintMB, measuredMB) + max(0, strategy.CRAM)
 }
 
 // measuredFootprintCgroupMaxMB is the pure sizing rule for the measured-footprint
-// cgroup (Fix B): the larger of measured non-reclaimable footprint + headroom
-// and the plan's future capacity requirement, clamped to the whole-host ceiling.
+// cgroup: the larger of measured non-reclaimable footprint and the plan's future
+// capacity requirement, plus headroom, clamped to the whole-host ceiling.
 // The plan floor matters because the first canary has not filled CRAM yet.
 func measuredFootprintCgroupMaxMB(measuredMB, headroomMB, plannedFloorMB, ceilingMB int) int {
 	if measuredMB <= 0 || headroomMB <= 0 {
 		return 0
 	}
-	newMax := measuredMB + headroomMB
-	if plannedFloorMB > newMax {
-		newMax = plannedFloorMB
-	}
+	// Headroom remains available after the planned cache fills, rather than
+	// being consumed by it. The original resource ceiling remains absolute.
+	newMax := max(measuredMB, plannedFloorMB) + headroomMB
 	if newMax > ceilingMB {
 		return ceilingMB
 	}
@@ -8998,7 +8996,9 @@ func envOr(key, def string) string {
 	return def
 }
 
-// claudeCodePermissionArgs defaults local Claude Code to Auto. ggrun supplies
+// claudeCodePermissionArgs defaults local Claude Code to Auto with a companion.
+// Disabling the companion defaults to normal permission prompts, because a slow
+// main model may exceed the native classifier deadline. ggrun supplies
 // Auto's otherwise-missing classifier with a dedicated local reviewer and routes
 // only the hidden safety-monitor calls to it; Workflow, MCP, WebFetch, and Bash can
 // therefore run autonomously without bypassing Claude Code's safety rules.
@@ -9015,6 +9015,11 @@ func claudeCodePermissionArgs(extraArgs []string) []string {
 	mode := strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_PERMISSION_MODE"))
 	if mode == "" {
 		mode = "auto"
+		if disabledEnv("GGRUN_CLAUDE_AUTO_REVIEWER") {
+			// Native Claude has a shorter classifier deadline than its general
+			// API timeout. A slow main model cannot reliably review itself (#113).
+			mode = "default"
+		}
 	}
 	if strings.EqualFold(mode, "inherit") {
 		return nil
