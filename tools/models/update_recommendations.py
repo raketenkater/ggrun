@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 import time
 import urllib.error
@@ -1360,6 +1361,7 @@ MAX_SCALE_DRIFT = 0.15
 # on both; the fit must be well supported.
 SCALE_MIN_PAIRS = 8
 SCALE_MIN_R2 = 0.8
+SCALE_IDENTITY_TOL = 0.02
 INDEX_VERSION_RE = re.compile(r"Intelligence Index (v\d+(?:\.\d+)?)")
 PAGE_INDEX_VERSION: str | None = None
 
@@ -1529,22 +1531,20 @@ def validate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def fit_power(pairs: list[tuple[float, float]]) -> tuple[float, float, float]:
-    """Least-squares log y = a*log x + b over positive pairs; R^2 on the raw values.
+    """Theil-Sen fit of log y = a*log x + b over positive pairs; R^2 on the raw values.
 
     A power law stays positive and monotone at the low end, where a straight
     line through the v4 -> v5 pairs (intercept -5.8) clamped 39 small models.
+    Median slopes keep one mismatched low-end pair from bending the fit: least
+    squares in log space let a single (4 -> 7) pair double map(4) and still
+    pass the raw-value R^2 gate.
     """
     pts = [(math.log(x), math.log(y)) for x, y in pairs if x > 0 and y > 0]
-    n = len(pts)
-    if n < 2:
+    slopes = [(y2 - y1) / (x2 - x1) for i, (x1, y1) in enumerate(pts) for x2, y2 in pts[i + 1:] if x2 != x1]
+    if not slopes:
         return 0.0, 0.0, 0.0
-    mx = sum(x for x, _ in pts) / n
-    my = sum(y for _, y in pts) / n
-    sxx = sum((x - mx) ** 2 for x, _ in pts)
-    if sxx <= 0:
-        return 0.0, my, 0.0
-    a = sum((x - mx) * (y - my) for x, y in pts) / sxx
-    b = my - a * mx
+    a = statistics.median(slopes)
+    b = statistics.median(y - a * x for x, y in pts)
     ys = [y for _, y in pairs if y > 0]
     mean = sum(ys) / len(ys)
     ss_tot = sum((y - mean) ** 2 for y in ys)
@@ -1598,6 +1598,15 @@ def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]]
                 scale["refused"] = (f"index changed {prev_version} -> {version} and the conversion fit over "
                                     f"{len(pairs)} models is weak (exponent {a:.2f}, R^2 {r2:.2f})")
                 scale.pop("fit")
+            elif abs(a - 1) < SCALE_IDENTITY_TOL and abs(b) < SCALE_IDENTITY_TOL:
+                # Scores did not move: a stray label on the page, not a rescale.
+                print(f"warning: page names index {version} but scores match {prev_version}; keeping {prev_version}",
+                      file=sys.stderr)
+                version = prev_version
+                scale = {"version": version, "previous_version": prev_version, "open_rows": len(rows),
+                         "ignored_page_version": page_version}
+                if previous_fit:
+                    scale["fit_from_previous_version"] = previous_fit
     for row in rows:
         prev = before.get(row_slug(row))
         if intelligence(row) > 0 or not prev:
@@ -1610,6 +1619,7 @@ def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]]
             row["intelligenceIndex"] = catalog_intelligence(prev)
             row["_mapped_from"] = prev["aa_index_mapped_from"]
     scale["scored_rows"] = sum(1 for row in rows if intelligence(row) > 0)
+    scale["real_scored_rows"] = sum(1 for row in rows if intelligence(row) > 0 and not row.get("_mapped_from"))
     return rows, scale
 
 
@@ -1739,6 +1749,16 @@ def refresh_guard(rows: list[dict[str, Any]], previous: list[dict[str, Any]],
     scored_before = sum(1 for c in previous if catalog_intelligence(c) > 0)
     if scored_before and len(fresh) < MIN_KEPT_SHARE * scored_before:
         return f"only {len(fresh)} freshly resolved rows against {scored_before} scored rows before"
+    if version == prev_version:
+        # Kept ~ scores refill every unscored row, so a scrape that lost its
+        # real scores would pass the checks above; count the real ones.
+        real_before = sum(1 for c in previous if catalog_intelligence(c) > 0 and not c.get("aa_index_mapped_from")
+                          and not c.get("anchor_name")
+                          and "last seen on the leaderboard" not in str(c.get("notes") or ""))
+        real_now = sum(1 for c in fresh if not c.get("aa_index_mapped_from"))
+        if real_before and real_now < MIN_KEPT_SHARE * real_before:
+            return (f"only {real_now} rows carry a leaderboard score against {real_before} before; "
+                    f"the rest are kept estimates")
     return None
 
 

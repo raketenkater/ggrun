@@ -726,6 +726,49 @@ def test_refresh_guard_refuses_a_gutted_or_rescaled_scrape():
     assert "freshly resolved rows" in updater.refresh_guard(same, prev, {"candidates": carried})
 
 
+def test_refresh_guard_counts_real_scores_not_kept_estimates():
+    """Review 2026-11-02: on v5, kept ~ scores refill every unscored row, so a
+    scrape that lost its real scores passed the share checks and dropped the
+    24 real-scored rows (the top of the list)."""
+    updater = load_updater()
+    prev = [{"name": f"M{i}", "repo": f"o/M{i}-GGUF", "aa_slug": f"m{i}", "aa_intelligence_index": 40.0 - i}
+            for i in range(20)]
+    for p in prev[4:]:
+        p["aa_index_mapped_from"] = "v4"
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": None, "isOpenWeights": True} for i in range(20)]
+    out, scale = updater.apply_index_scale(rows, prev, "v5", "v5")
+    assert scale["scored_rows"] == 16 and scale["real_scored_rows"] == 0
+    kept = {"aa_index_scale": scale, "aa_index_version": "v5", "candidates": [dict(p) for p in prev[4:]]}
+    assert "only 0 rows carry a leaderboard score against 4 before" in updater.refresh_guard(rows, prev, kept, "v5")
+    # Real scores present: the same catalog passes.
+    full = dict(kept, candidates=[dict(p) for p in prev])
+    assert updater.refresh_guard(rows, prev, full, "v5") is None
+
+
+def test_one_mismatched_pair_does_not_bend_the_index_fit():
+    """Review 2026-11-02: least squares in log space let one (4 -> 7) pair move
+    map(4) from 1.2 to 2.8 and still pass the raw R^2 gate."""
+    updater = load_updater()
+    pairs = [(4.0 + 3 * i, _v5(4.0 + 3 * i)) for i in range(14)]
+    a, b, _ = updater.fit_power(pairs)
+    a2, b2, r2 = updater.fit_power(pairs + [(4.0, 7.0)])
+    assert r2 >= updater.SCALE_MIN_R2
+    assert abs(math.exp(a2 * math.log(4) + b2) - math.exp(a * math.log(4) + b)) < 0.1 * _v5(4.0)
+
+
+def test_a_version_label_without_a_rescale_keeps_the_version():
+    """Review 2026-11-02: the version is the largest label on the page; a stray
+    "v6" while scores are still v5 flipped the label, and the real v6 rescale
+    would then have taken the same-version path."""
+    updater = load_updater()
+    prev = _prev_rows(12)
+    rows = [{"name": f"M{i}", "slug": f"m{i}", "intelligenceIndex": p["aa_intelligence_index"] if i else None}
+            for i, p in enumerate(prev)]
+    out, scale = updater.apply_index_scale(rows, prev, "v5", "v6")
+    assert scale["version"] == "v5" and scale["ignored_page_version"] == "v6" and "refused" not in scale
+    assert "_mapped_from" not in next(r for r in out if updater.row_slug(r) == "m0")
+
+
 def test_reviewed_row_keeps_its_score_when_the_anchor_leaves_both_catalogs(monkeypatch):
     updater = load_updater()
     gb = 1024**3
