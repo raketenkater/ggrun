@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The catalog refresh counts only real leaderboard scores when checking a
+  scrape, so a scrape that lost its scores no longer passes on kept `~`
+  estimates; the index conversion fit ignores a single mismatched model; a
+  version label on the page without a rescale no longer changes the version.
+
 ## v3.2.13 — 2026-10-29
 
 ### Added
@@ -53,6 +62,26 @@
 - `ggrun claude resume` against a live server goes through its ggrun router when
   it is still running, and installs the Workflow hook either way.
 - A non-zero Claude Code exit now says why the server is stopping.
+
+## v3.2.12 — 2026-10-18
+
+### Changed
+
+- `ggrun download` verifies downloaded files, and the installer keeps the
+  hardware recommendations it printed.
+- Claude Code mode sizes an automatic context for the session being resumed.
+- After a verification OOM the launcher waits for the memory to release and
+  relaunches once with the adjusted plan instead of exiting.
+
+### Fixed
+
+- The catalog refresh decodes the current Artificial Analysis model table and
+  keeps main-model parameter and MoE evidence.
+- ik_llama.cpp: the log level is no longer raised (it logged every request
+  body), and `--fit` stays inside the allocation guard.
+- Backends that print usage and exit 1 are accepted, and GPU buffers are
+  verified on forks without a device-list option.
+- A commit-stamped build is no longer offered every release as an update.
 
 ## v3.2.11 — 2026-10-13
 
