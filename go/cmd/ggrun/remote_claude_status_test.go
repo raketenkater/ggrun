@@ -139,8 +139,14 @@ func TestRemoteStoppingRevokesReadinessAndCancelsStatus(t *testing.T) {
 // the fake backend does not establish model placement or hardware performance.
 func TestRemoteActivationOwnsItsServingDisplay(t *testing.T) {
 	var inference atomic.Int64
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		inference.Add(1)
+		switch r.URL.Path {
+		case "/slots", "/metrics", "/health", "/props":
+			// The progress monitor's passive polling, identical to local mode.
+		default:
+			inference.Add(1)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
@@ -161,7 +167,7 @@ func TestRemoteActivationOwnsItsServingDisplay(t *testing.T) {
 	defer s.close()
 	strategy := &placement.Strategy{ContextSize: 65536, Parallel: 1}
 	if err := s.activate(req, &placement.ModelProfile{Name: "fixture"}, strategy, &backendInfo{Tag: "llama"},
-		&claudeAutoRuntime{router: router}, []string{"--ctx-size", "65536", "--parallel", "1"}); err != nil {
+		&claudeAutoRuntime{router: router}, []string{"--ctx-size", "65536", "--parallel", "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s.stopStatus == nil {
@@ -174,6 +180,15 @@ func TestRemoteActivationOwnsItsServingDisplay(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "fixture") {
 		t.Fatalf("activation did not publish the verified profile: %d %s", w.Code, w.Body.String())
 	}
+	r = httptest.NewRequest("GET", "/ggrun/progress", nil)
+	r.Header.Set("Authorization", "Bearer "+s.key)
+	w = httptest.NewRecorder()
+	s.server.Handler.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"line":"ggrun`) || !strings.Contains(w.Body.String(), `"messages_in_flight":0`) {
+		t.Fatalf("activation did not serve progress: %d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest("GET", "/ggrun/client", nil)
+	r.Header.Set("Authorization", "Bearer "+s.key)
 	s.stopping()
 	if s.stopStatus != nil {
 		t.Fatal("shutdown retained the serving observer")

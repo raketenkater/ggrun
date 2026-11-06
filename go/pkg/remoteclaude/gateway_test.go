@@ -254,3 +254,58 @@ func TestGatewayStreamsAndPropagatesDisconnect(t *testing.T) {
 		t.Fatal("disconnect not propagated")
 	}
 }
+
+// A client compares its own pending request with server-side arrival to tell
+// a slow model apart from a request that never reached the gateway.
+func TestProgressReportsArrivalAndInFlightWithoutBackendWork(t *testing.T) {
+	release := make(chan struct{})
+	var backend atomic.Int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backend.Add(1)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"type":"message","content":[]}`)
+	}))
+	defer up.Close()
+	defer close(release)
+	h, err := NewHandler(up.URL, testKey, testProfile(), WithProgress(func() any { return map[string]string{"line": "ggrun · S0 prefill"} }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := func() map[string]any {
+		r := httptest.NewRequest("GET", "/ggrun/progress", nil)
+		r.Header.Set("Authorization", "Bearer "+testKey)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		var body map[string]any
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil {
+			t.Fatalf("progress: %d %s", w.Code, w.Body.String())
+		}
+		return body
+	}
+	if b := progress(); b["messages_in_flight"] != float64(0) || b["last_request_at"] != nil || b["progress"].(map[string]any)["line"] != "ggrun · S0 prefill" {
+		t.Fatalf("idle progress: %v", b)
+	}
+	go func() {
+		r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"local"}`))
+		r.Header.Set("Authorization", "Bearer "+testKey)
+		h.ServeHTTP(httptest.NewRecorder(), r)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for backend.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	b := progress()
+	if b["messages_in_flight"] != float64(1) || b["last_request_at"] == nil {
+		t.Fatalf("in-flight progress: %v", b)
+	}
+	if backend.Load() != 1 {
+		t.Fatalf("progress polling reached the backend: %d", backend.Load())
+	}
+	r := httptest.NewRequest("GET", "/ggrun/progress", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 401 {
+		t.Fatalf("progress is not authenticated: %d", w.Code)
+	}
+}

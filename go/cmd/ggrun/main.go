@@ -7553,7 +7553,7 @@ func cmdLaunch(args []string) {
 	if claudeAuto != nil {
 		claudeClientPort = claudeAuto.clientPort(req.Port)
 	}
-	if err := remoteService.activate(req, model, strategy, be, claudeAuto, serverArgs); err != nil {
+	if err := remoteService.activate(req, model, strategy, be, claudeAuto, serverArgs, remoteProgressLog(p)); err != nil {
 		_ = p.Stop()
 		claudeAuto.stop()
 		fmt.Fprintln(os.Stderr, "Error starting remote gateway:", err)
@@ -7835,7 +7835,7 @@ func cmdLaunch(args []string) {
 		}
 		resizeScopeToMeasuredFootprint(req, runtimeCaps, newStrategy, newP)
 		p, strategy, serverArgs = newP, newStrategy, newArgs
-		if err := remoteService.activate(req, model, strategy, be, claudeAuto, serverArgs); err != nil {
+		if err := remoteService.activate(req, model, strategy, be, claudeAuto, serverArgs, remoteProgressLog(p)); err != nil {
 			_ = p.Stop()
 			claudeAuto.stop()
 			fmt.Fprintln(os.Stderr, "Error updating remote gateway:", err)

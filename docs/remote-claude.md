@@ -88,6 +88,12 @@ While serving, the terminal reports readiness, active main-model requests and
 queued requests. It reads in-memory router counters every two seconds and prints
 only changes; status observation does not poll the model backend. The configured
 main limit is an upper bound, not a guarantee that all requests run concurrently.
+The authenticated `/ggrun/progress` endpoint gives clients the same live
+prefill/decode progress a local `ggrun claude` status line shows (from the same
+passive progress monitor), plus the gateway's in-flight count and last request
+time, so a client can tell a slow model from a request that never arrived.
+Gateway connections use TCP keepalive; a vanished peer is closed in about a
+minute, cancelling its request.
 During shutdown, new authenticated requests receive 503 before the model stops.
 
 ## Network examples

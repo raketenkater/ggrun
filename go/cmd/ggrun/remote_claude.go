@@ -18,6 +18,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/remoteclaude"
+	"github.com/raketenkater/ggrun/pkg/server"
 )
 
 type remoteClaudeOptions struct {
@@ -189,7 +190,7 @@ func prepareRemoteClaude(req *launchRequest, cfg *config.Config) (*remoteClaudeS
 	if err != nil {
 		return nil, fmt.Errorf("gateway credential: %w", err)
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(o.Host, strconv.Itoa(o.Port)))
+	ln, err := remoteclaude.Listen(net.JoinHostPort(o.Host, strconv.Itoa(o.Port)))
 	if err != nil {
 		return nil, fmt.Errorf("reserve gateway before model load: %w", err)
 	}
@@ -218,14 +219,35 @@ func remoteClaudeProfile(req *launchRequest, model *placement.ModelProfile, stra
 	return p
 }
 
-func (s *remoteClaudeService) activate(req *launchRequest, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, r *claudeAutoRuntime, args []string) error {
+// remoteProgressLog avoids a non-nil interface around a nil log buffer.
+func remoteProgressLog(p *server.Process) claudeProgressLog {
+	if p == nil || p.LogBuf == nil {
+		return nil
+	}
+	return p.LogBuf
+}
+
+// remoteProgress serves the same passive snapshot and status text that a
+// local ggrun Claude session shows. It only reads the monitor's state file.
+func remoteProgress(port int) func() any {
+	return func() any {
+		state, err := readClaudeProgressState(port)
+		if err != nil {
+			return map[string]any{"line": "ggrun · connecting"}
+		}
+		return map[string]any{"line": formatClaudeProgress(state), "state": state}
+	}
+}
+
+func (s *remoteClaudeService) activate(req *launchRequest, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, r *claudeAutoRuntime, args []string, log claudeProgressLog) error {
 	if s == nil {
 		return nil
 	}
 	if r == nil || r.router == nil {
 		return fmt.Errorf("remote Claude mode requires the verified agent gateway")
 	}
-	h, err := remoteclaude.NewHandler(r.router.URL(), s.key, remoteClaudeProfile(req, model, strategy, be, r, args))
+	port := r.clientPort(req.Port)
+	h, err := remoteclaude.NewHandler(r.router.URL(), s.key, remoteClaudeProfile(req, model, strategy, be, r, args), remoteclaude.WithProgress(remoteProgress(port)))
 	if err != nil {
 		return err
 	}
@@ -250,7 +272,12 @@ func (s *remoteClaudeService) activate(req *launchRequest, model *placement.Mode
 	fmt.Printf("[remote] Credential is private: use %s to display it explicitly.\n", displayCommand([]string{"ggrun", "gateway-token", "--file", s.options.TokenFile}))
 	fmt.Println("[remote] Laptop disconnects leave the model loaded. Ctrl+C here stops serving.")
 	s.stopServingStatus()
-	s.stopStatus = startRemoteClaudeStatus(os.Stderr, r.router.AdmissionStatus)
+	stopStatus := startRemoteClaudeStatus(os.Stderr, r.router.AdmissionStatus)
+	stopProgress := func() {}
+	if !progressDisabled() {
+		stopProgress = startClaudeProgressMonitor("127.0.0.1", port, log, false)
+	}
+	s.stopStatus = func() { stopStatus(); stopProgress() }
 	return nil
 }
 

@@ -4,6 +4,7 @@ package remoteclaude
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/raketenkater/ggrun/clientkit"
@@ -25,7 +27,24 @@ type Gateway struct {
 	server   *http.Server
 }
 
-func NewHandler(upstream, token string, profile clientkit.Profile) (http.Handler, error) {
+// Option configures optional gateway features.
+type Option func(*options)
+
+type options struct{ progress func() any }
+
+// WithProgress serves a passive serving-progress snapshot at /ggrun/progress.
+// The callback must not enqueue backend work; clients poll it every few seconds.
+func WithProgress(f func() any) Option { return func(o *options) { o.progress = f } }
+
+func NewHandler(upstream, token string, profile clientkit.Profile, opts ...Option) (http.Handler, error) {
+	var o options
+	for _, f := range opts {
+		f(&o)
+	}
+	// Request activity lets a client tell "server is working" apart from
+	// "my request never arrived" without trusting its own socket state.
+	var lastRequest atomic.Int64
+	var inFlight atomic.Int64
 	if len(token) < 32 || strings.ContainsAny(token, "\r\n\x00") {
 		return nil, fmt.Errorf("gateway token must contain at least 32 characters without line breaks")
 	}
@@ -102,6 +121,9 @@ func NewHandler(upstream, token string, profile clientkit.Profile) (http.Handler
 			}
 			r.Body = io.NopCloser(bytes.NewReader(raw))
 			r.ContentLength = int64(len(raw))
+			lastRequest.Store(time.Now().UnixNano())
+			inFlight.Add(1)
+			defer inFlight.Add(-1)
 			proxy.ServeHTTP(w, r)
 		case "/v1/messages/count_tokens":
 			apiError(w, 501, "not_supported_error", "exact token counting is unavailable; use client estimation")
@@ -114,6 +136,20 @@ func NewHandler(upstream, token string, profile clientkit.Profile) (http.Handler
 			// removed during recovery. Health must not enqueue a backend task.
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case "/ggrun/progress":
+			if r.Method != "GET" {
+				apiError(w, 405, "invalid_request_error", "use GET")
+				return
+			}
+			body := map[string]any{"messages_in_flight": inFlight.Load()}
+			if t := lastRequest.Load(); t > 0 {
+				body["last_request_at"] = time.Unix(0, t).UTC().Format(time.RFC3339Nano)
+			}
+			if o.progress != nil {
+				body["progress"] = o.progress()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(body)
 		case "/ggrun/router":
 			if r.Method != "GET" {
 				apiError(w, 405, "invalid_request_error", "use GET")
@@ -126,12 +162,20 @@ func NewHandler(upstream, token string, profile clientkit.Profile) (http.Handler
 	})), nil
 }
 
-func Start(address, upstream, token string, profile clientkit.Profile) (*Gateway, error) {
-	h, err := NewHandler(upstream, token, profile)
+// Listen enables bounded TCP keepalive so a vanished peer (laptop sleep,
+// network loss) is torn down in about a minute; its proxied request is then
+// cancelled and the model slot is released.
+func Listen(address string) (net.Listener, error) {
+	lc := net.ListenConfig{KeepAliveConfig: net.KeepAliveConfig{Enable: true, Idle: 15 * time.Second, Interval: 10 * time.Second, Count: 4}}
+	return lc.Listen(context.Background(), "tcp", address)
+}
+
+func Start(address, upstream, token string, profile clientkit.Profile, opts ...Option) (*Gateway, error) {
+	h, err := NewHandler(upstream, token, profile, opts...)
 	if err != nil {
 		return nil, err
 	}
-	ln, err := net.Listen("tcp", address)
+	ln, err := Listen(address)
 	if err != nil {
 		return nil, fmt.Errorf("listen for remote Claude gateway: %w", err)
 	}
