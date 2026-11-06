@@ -946,9 +946,14 @@ VARIANT_QUALIFIERS = {
     "fin",
     # Command A+ is not Command A; norm() drops "+", so it is spelled out.
     "plus",
+    # Expert-pruned models have fewer weights than the scored one: MiMo V2.6
+    # Flash was resolved to MiMo-V2.6-Flash-REAP50 at half its size.
+    "prun", "reap",
 }
 # Inflections a qualifier still names: "Distilled" is a distill.
 QUALIFIER_SUFFIXES = ("", "s", "ed", "ing", "ation")
+# Pruning qualifiers may carry the kept share: REAP50, REAP-25.
+NUMBERED_QUALIFIERS = {"reap"}
 
 
 def raw_name_tokens(text: str) -> set[str]:
@@ -958,7 +963,8 @@ def raw_name_tokens(text: str) -> set[str]:
 def name_qualifiers(text: str) -> set[str]:
     words = raw_name_tokens(text.replace("+", " plus "))
     return {q for q in VARIANT_QUALIFIERS for w in words
-            if w.startswith(q) and w[len(q):] in QUALIFIER_SUFFIXES}
+            if w.startswith(q) and (w[len(q):] in QUALIFIER_SUFFIXES
+                                    or q in NUMBERED_QUALIFIERS and w[len(q):].isdigit())}
 
 
 def spelled_versions(name: str) -> str:
