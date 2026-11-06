@@ -707,6 +707,11 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
 		}
+		if mapped := honorDisabledThinking(body); len(mapped) != len(body) {
+			body = mapped
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		}
 		if IsClassifierRequest(body) {
 			// A classifier/security request is normally the separate reviewer's
 			// job. Two user-approved (Option A) cases route it to the MAIN model
