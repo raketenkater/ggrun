@@ -514,7 +514,7 @@ func (m *Model) rebuildMainList() {
 		m.mainList.SetWidth(m.width - 4)
 	}
 	if m.height > 0 {
-		m.mainList.SetHeight(m.height - 12)
+		m.mainList.SetHeight(m.height - 12 - m.whatsNewRows())
 	}
 
 	if prevFilterState != list.Unfiltered && prevFilterValue != "" {
@@ -714,7 +714,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.mainList.SetWidth(msg.Width - 4)
-		m.mainList.SetHeight(msg.Height - 12)
+		m.mainList.SetHeight(msg.Height - 12 - m.whatsNewRows())
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1727,9 +1727,7 @@ func (m Model) viewMain() string {
 
 	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
 	b.WriteString(m.versionLine())
-	if m.whatsNew != "" {
-		b.WriteString("  " + recommendStyle.Render(m.whatsNew) + "\n")
-	}
+	bannerAt := b.Len()
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  Models:   %d recognized (%d elsewhere)\n", len(m.models), external))
@@ -1761,7 +1759,8 @@ func (m Model) viewMain() string {
 		}
 	}
 
-	return b.String()
+	out := b.String()
+	return withWhatsNew(out, bannerAt, m.whatsNew, m.width, m.height)
 }
 
 // versionLine is the start screen's version row: the running build and whether

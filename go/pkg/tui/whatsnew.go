@@ -10,9 +10,7 @@ import (
 // each ID is shown once per user, then recorded in the cache directory.
 const whatsNewID = "ggrun-client-1"
 
-const whatsNewText = "New: ggrun-client — use this machine's model from Claude Code on another computer.\n" +
-	"  Set [x] Claude Code to \"Remote client\" and launch; on the other computer install\n" +
-	"  github.com/raketenkater/ggrun-client and run ggrun-client.  (GGRUN_NO_WHATS_NEW=1 hides this)"
+const whatsNewText = "New: use this model from Claude Code on another computer — [x] Claude Code → Remote client, then ggrun-client (github.com/raketenkater/ggrun-client)"
 
 // takeWhatsNew returns the announcement once and records it as seen, so it
 // is not repeated on later starts. Recording happens on read: a session that
@@ -44,4 +42,29 @@ func takeWhatsNew(cacheDir string) string {
 		return ""
 	}
 	return whatsNewText
+}
+
+// withWhatsNew inserts the one-line announcement at offset when the screen has
+// a spare row for it. A screen taller than the terminal loses its top lines,
+// so the banner must never push the title out of view.
+func withWhatsNew(view string, at int, banner string, width, height int) string {
+	if banner == "" || at < 0 || at > len(view) {
+		return view
+	}
+	if width > 4 && len([]rune(banner))+2 > width {
+		r := []rune(banner)
+		banner = string(r[:width-3]) + "…"
+	}
+	if height > 0 && strings.Count(view, "\n")+2 > height {
+		return view
+	}
+	return view[:at] + "  " + recommendStyle.Render(banner) + "\n" + view[at:]
+}
+
+// whatsNewRows is the screen row the banner takes from the model list.
+func (m Model) whatsNewRows() int {
+	if m.whatsNew == "" {
+		return 0
+	}
+	return 1
 }
