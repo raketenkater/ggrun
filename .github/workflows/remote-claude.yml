@@ -1,0 +1,27 @@
+name: Remote Claude contract
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Shared policy, credential protection and fixture
+        working-directory: clientkit
+        run: go test -count=1 ./...
+      - name: Gateway authentication, streaming, cancellation and Claude role compatibility
+        working-directory: go
+        run: go test -count=1 ./pkg/remoteclaude ./pkg/claudeauto
+      - name: CLI ownership and TUI saved-launch compatibility
+        working-directory: go
+        run: go test -count=1 ./cmd/ggrun ./pkg/tui -run "Test(Remote|ClaudeModeCycles|EveryTUI|HostGrowthReserve|NonLinuxSmallCPUHost)"

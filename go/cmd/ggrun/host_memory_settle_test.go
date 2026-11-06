@@ -185,3 +185,25 @@ func TestContainmentReplanSkipsTheVerifiedConfig(t *testing.T) {
 		t.Fatal("the containment re-plan restored the config the gate refused")
 	}
 }
+
+// A healthy companion must not consume the entire shutdown grace or create a
+// false release-pending marker after the main backend has already exited.
+func TestShutdownReleaseIncludesOwnedCompanions(t *testing.T) {
+	baseline := &detect.Capabilities{}
+	companionAlive := true
+	sleeps := 0
+	ok := stopCompanionsAndWaitForShutdownRelease(func() { companionAlive = false }, baseline, 20*time.Second,
+		func(*detect.Capabilities) bool { return !companionAlive },
+		func(time.Duration) { sleeps++ })
+	if !ok || companionAlive || sleeps != 0 {
+		t.Fatalf("companion caused a false unsettled shutdown: ok=%v alive=%v sleeps=%d", ok, companionAlive, sleeps)
+	}
+	// CPU-only/no-companion launches must still wait for the backend memory.
+	checks := 0
+	ok = stopCompanionsAndWaitForShutdownRelease(nil, baseline, time.Second,
+		func(*detect.Capabilities) bool { checks++; return checks > 1 },
+		func(time.Duration) { sleeps++ })
+	if !ok || sleeps != 1 {
+		t.Fatalf("backend release was skipped: ok=%v sleeps=%d", ok, sleeps)
+	}
+}

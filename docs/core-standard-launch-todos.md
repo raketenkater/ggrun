@@ -4099,6 +4099,24 @@ prompt); 17,638-token prompt: prefill 224.9 tok/s, decode 20.5 tok/s.
   Found in the PR #97 review; pre-existing, independent of the sparse lookup
   tier. Fix in core with a refresh-versus-Compute parity test under a RAM limit.
 
+## PLATFORM CONTAINMENT RESERVE — 2026-10-28
+
+The remote-client macOS packaging job refused its 1 MiB dense CPU fixture:
+6720 MiB runtime/reserve against 5375 MiB available. The 4096 MiB Linux cgroup
+headroom was passed as HostGrowthReserveMB on every OS even though both
+backendMemoryMaxMB and validateHostMemoryContainment disable cgroups off Linux.
+
+The request-to-placement boundary now supplies that gate-specific reserve only
+on Linux. Ordinary runtime, checkpoints, explicit RAM budget/percent/headroom
+and the placement fit gate remain. Linux containment and already-reserved
+recovery semantics are unchanged. Native Mac/Windows tests check a small cold
+CPU plan and refusal under explicit insufficient budgets/headroom. The uncached
+core gate passed; native macOS contracts and the unchanged macOS packaged
+launch passed on revision `3617440`. Native Windows and full E2E jobs remain
+tracked in the feature PR.
+This is admission correctness, not a performance promotion or Metal inference
+receipt. The existing Linux live configuration is unaffected.
+
 ## CLAUDE MODE — health monitor fires during shutdown — 2026-10-23
 
 - [ ] With `--claude-code`, the 30 s health monitor keeps running while ggrun
@@ -4242,3 +4260,10 @@ recommender catalog (2026-10-19) lists neither.
   draft-dspark speculative type)". Next: `ggrun backend update`, then
   relaunch. The 2.1 GB `dspark-*-Q8_0.gguf` is that speculative draft model;
   the downloader currently recommends it as the model.
+
+## REMOTE AGENT AVAILABILITY — 2026-10-30
+
+The no-companion permission deadline and post-canary future-cache/growth
+allowance corrections are documented in
+[the availability review](remote-agent-availability-fixes-20261030.md). The
+uncached core gate passed; long-session OOM acceptance remains open in #117.

@@ -1,0 +1,20 @@
+{
+ "protocol_version":1,
+ "server_version":"fixture",
+ "model_id":"opaque-model-backend-identity",
+ "model_name":"Contract fixture",
+ "main_alias":"local",
+ "utility_alias":"local-fast",
+ "context_per_slot":65536,
+ "slots":1,
+ "vision":false,
+ "separate_worker":false,
+ "policy":{
+  "version":1,
+  "compact_window":65536,
+  "compact_percent":75,
+  "effort":"xhigh",
+  "timeout_ms":2147483647,
+  "workflow_hook":true
+ }
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -369,52 +370,37 @@ func TestClaudeClientEnvDisablesAttributionHeader(t *testing.T) {
 // so users who copied it never reused the prompt cache, and it sized the
 // compact window from --ctx-size instead of the resolved context.
 func TestClaudeRecipeMatchesAutoLaunchEnv(t *testing.T) {
-	for _, v := range claudeCodeEnvVars("127.0.0.1", 8081, nil, 0) {
-		t.Setenv(v.Key, "")
-	}
 	serverArgs := []string{"llama-server", "--ctx-size", "1048576", "--parallel", "4"}
 	const actualCtx = 131072
-
-	inherited := map[string]bool{}
-	for _, kv := range os.Environ() {
-		inherited[kv] = true
+	policy := claudeClientProfile(serverArgs, actualCtx)
+	known := policy.Environment("http://127.0.0.1:8081", "ggrun", nil)
+	for _, pair := range known {
+		key, _, _ := strings.Cut(pair, "=")
+		t.Setenv(key, "")
 	}
-	launched := map[string]bool{}
-	for _, kv := range claudeCodeEnv("0.0.0.0", 8081, serverArgs, actualCtx) {
-		if !inherited[kv] {
-			launched[kv] = true
-		}
+	launched := map[string]string{}
+	for _, pair := range claudeCodeEnv("0.0.0.0", 8081, serverArgs, actualCtx) {
+		key, value, _ := strings.Cut(pair, "=")
+		launched[key] = value
 	}
-
 	done := captureStdout(t)
 	printClaudeCodeRecipe("0.0.0.0", 8081, serverArgs, actualCtx)
 	out := done()
-	printed := map[string]bool{}
-	for _, line := range strings.Split(out, "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "export ")
-		if !ok {
-			continue
+	// Compare complete quoted assignments. A custom-header value contains a
+	// newline; splitting the recipe on whitespace loses the actual policy.
+	for _, pair := range known {
+		key, _, _ := strings.Cut(pair, "=")
+		assignment := key + "=" + launched[key]
+		expected := "  export " + shellQuote(assignment) + "\n"
+		if runtime.GOOS == "windows" && os.Getenv("MSYSTEM") == "" {
+			expected = "  " + displayCommandWithEnv([]string{assignment}, nil) + "\n"
 		}
-		rest, _, _ = strings.Cut(rest, "  #")
-		for _, kv := range strings.Fields(rest) {
-			printed[kv] = true
-		}
-	}
-
-	for kv := range launched {
-		if !printed[kv] {
-			t.Errorf("auto-launch sets %s but the printed recipe does not", kv)
+		if !strings.Contains(out, expected) {
+			t.Errorf("recipe differs from launched policy for %s", key)
 		}
 	}
-	for kv := range printed {
-		if !launched[kv] {
-			t.Errorf("printed recipe sets %s but auto-launch does not", kv)
-		}
-	}
-	for _, want := range []string{"CLAUDE_CODE_ATTRIBUTION_HEADER=0", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=32768"} {
-		if !printed[want] {
-			t.Errorf("printed recipe missing %s:\n%s", want, out)
-		}
+	if launched["CLAUDE_CODE_ATTRIBUTION_HEADER"] != "0" || launched["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "32768" {
+		t.Fatal("recipe and launch lost actual per-slot capacity or stable prefix")
 	}
 }
 

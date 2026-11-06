@@ -3351,6 +3351,7 @@ func TestClaudeCodeSearchMCPArgsEnablesResearchTools(t *testing.T) {
 
 func TestClaudeCodePermissionArgsDefaultsToLocalAuto(t *testing.T) {
 	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
+	t.Setenv("GGRUN_CLAUDE_AUTO_REVIEWER", "")
 	got := claudeCodePermissionArgs(nil)
 	if len(got) != 2 || got[0] != "--permission-mode" || got[1] != "auto" {
 		t.Fatalf("local Claude launch must use the routed Auto reviewer, got %v", got)
@@ -4178,8 +4179,8 @@ func TestMeasuredFootprintCgroupMaxMB(t *testing.T) {
 	}
 	// The canary has not filled the prompt cache yet, so a larger planned
 	// host-footprint+CRAM requirement remains available for later requests.
-	if got := measuredFootprintCgroupMaxMB(70000, 4096, 82000, 100000); got != 82000 {
-		t.Fatalf("planned cache-capacity floor: got %d, want 82000", got)
+	if got := measuredFootprintCgroupMaxMB(70000, 4096, 82000, 100000); got != 86096 {
+		t.Fatalf("planned cache-capacity floor plus headroom: got %d, want 86096", got)
 	}
 	// The whole-host ceiling remains absolute even when the plan asks for more.
 	if got := measuredFootprintCgroupMaxMB(70000, 4096, 82000, 80000); got != 80000 {
@@ -4270,10 +4271,10 @@ func TestMeasuredFootprintPlannedFloor(t *testing.T) {
 	ceiling := 122000
 	measured := 10000
 
-	// A plan with a real host footprint plus CRAM preserves that floor.
+	// Preserve the larger measured base plus future CRAM capacity.
 	dense := &placement.Strategy{Type: placement.MultiGPUDense, PlannedHostFootprintMB: 6000, CRAM: 11264}
-	if got := measuredFootprintPlannedFloor(dense, measured, ceiling); got != 17264 {
-		t.Fatalf("planned host footprint + CRAM floor: got %d, want 17264", got)
+	if got := measuredFootprintPlannedFloor(dense, measured, ceiling); got != 21264 {
+		t.Fatalf("larger measured base + CRAM floor: got %d, want 21264", got)
 	}
 	// The same fully-resident plan with NO derived footprint must NOT collapse to
 	// CRAM: the floor becomes the whole-host ceiling, so the resize can only
@@ -4284,11 +4285,11 @@ func TestMeasuredFootprintPlannedFloor(t *testing.T) {
 		t.Fatalf("no-host-footprint floor must be the whole-host ceiling, got %d", got)
 	}
 	// A plan whose host footprint + CRAM under-counts the measured backend keeps
-	// measured as the honest floor (CRAM not yet filled, checkpoint reserve below
-	// reality), never the stale plan estimate.
+	// measured plus the future cache as the honest floor, never the stale plan
+	// estimate. A canary does not prove CRAM is already populated.
 	under := &placement.Strategy{Type: placement.MoEOffload, PlannedHostFootprintMB: 2000, CRAM: 1024}
-	if got := measuredFootprintPlannedFloor(under, measured, ceiling); got != measured {
-		t.Fatalf("under-counting plan floor must be the measured footprint, got %d", got)
+	if got := measuredFootprintPlannedFloor(under, measured, ceiling); got != measured+under.CRAM {
+		t.Fatalf("under-counting plan floor must preserve measured footprint and future cache, got %d", got)
 	}
 	// A nil strategy yields no floor at all (pure measured+headroom sizing).
 	if got := measuredFootprintPlannedFloor(nil, measured, ceiling); got != 0 {
@@ -4320,13 +4321,13 @@ func TestDenseScopeNotClampedToCRAM(t *testing.T) {
 	dense := &placement.Strategy{Type: placement.MultiGPUDense, PlannedHostFootprintMB: 3000, CRAM: 11264}
 	measured := 27000 // server + CUDA host buffers + KV + checkpoints for Qwen3.8-27B
 	floor := measuredFootprintPlannedFloor(dense, measured, ceiling)
-	if floor != measured {
-		t.Fatalf("dense plan under-counting the measured backend must floor at measured, got %d", floor)
+	if floor != measured+dense.CRAM {
+		t.Fatalf("dense plan under-counting the measured backend must retain future cache capacity, got %d", floor)
 	}
 	newMax := measuredFootprintCgroupMaxMB(measured, req.CgroupHeadroomMB, floor, ceiling)
-	if newMax != measured+req.CgroupHeadroomMB {
-		t.Fatalf("dense scope must be re-sized to measured+headroom (%d), got %d (clamped to CRAM?)",
-			measured+req.CgroupHeadroomMB, newMax)
+	if newMax != measured+dense.CRAM+req.CgroupHeadroomMB {
+		t.Fatalf("dense scope must retain measured+cache+headroom (%d), got %d",
+			measured+dense.CRAM+req.CgroupHeadroomMB, newMax)
 	}
 	if newMax <= dense.CRAM {
 		t.Fatalf("dense scope re-sized to %d MiB, at or below the CRAM budget %d MiB (the Qwen3.8 OOM)", newMax, dense.CRAM)
