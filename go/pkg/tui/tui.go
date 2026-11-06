@@ -211,6 +211,7 @@ type Model struct {
 
 	// Messages
 	message        string
+	whatsNew       string // one-time feature announcement for this session
 	messageType    string // info, warning, error
 	scanningModels bool
 	spinner        spinner.Model
@@ -318,6 +319,7 @@ func sessionModel() Model {
 		spinner:         spin,
 	}
 	m.modelUsage = modelusage.Load(cfg.CacheDir)
+	m.whatsNew = takeWhatsNew(cfg.CacheDir)
 	if m.port <= 0 {
 		m.port = 8081
 	}
@@ -1725,6 +1727,9 @@ func (m Model) viewMain() string {
 
 	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
 	b.WriteString(m.versionLine())
+	if m.whatsNew != "" {
+		b.WriteString("  " + recommendStyle.Render(m.whatsNew) + "\n")
+	}
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  Models:   %d recognized (%d elsewhere)\n", len(m.models), external))
