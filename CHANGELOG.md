@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Remote client mode: serve this machine's model to Claude Code on another
+  computer through [ggrun-client](https://github.com/raketenkater/ggrun-client)
+  (TUI: Claude Code → Remote client). The TUI announces it once after upgrade;
+  `GGRUN_NO_WHATS_NEW=1` hides such notices.
+
 ### Fixed
 
 - The catalog refresh counts only real leaderboard scores when checking a
