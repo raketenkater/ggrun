@@ -199,6 +199,14 @@ def test_modified_derivatives_do_not_inherit_the_original_score():
     assert not updater.candidate_relevant("timteh673/Mistral-Small-4-119B-Uncensored-GGUF", row)
     magistral = {"name": "Magistral Small 1.2", "creator": {"name": "Mistral"}}
     assert not updater.candidate_relevant("mradermacher/Magistral-Small-2509-Heretic-v1.2-i1-GGUF", magistral)
+    mimo = {"name": "MiMo-V2.6-Flash", "creator": {"name": "Xiaomi"}}
+    assert not updater.candidate_relevant("patrickbdevaney/MiMo-V2.6-Flash-REAP50-GGUF", mimo)
+    assert not updater.candidate_relevant("someone/MiMo-V2.6-Flash-REAP-25-GGUF", mimo)
+    assert not updater.candidate_relevant("someone/MiMo-V2.6-Flash-Pruned-GGUF", mimo)
+    assert updater.candidate_relevant("ggml-org/MiMo-V2.6-Flash-RL-GGUF", mimo)
+    qwen = {"name": "Qwen3.8-2.4T-A95B", "creator": {"name": "Alibaba"}}
+    assert not updater.candidate_relevant("hellohazime/Qwen3.8-2.4T-A95B-REAP-256GB-GGUF", qwen)
+    assert updater.candidate_relevant("unsloth/Qwen3.8-2.4T-A95B-GGUF", qwen)
 
 
 def test_quant_suffix_and_retune_prefixes_are_not_identity():
