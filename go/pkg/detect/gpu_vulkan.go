@@ -21,7 +21,7 @@ func detectVulkanGPUs() []GPU {
 	if err != nil {
 		return nil
 	}
-	gpus := parseVulkanGPUs(string(out))
+	gpus := parseVulkanGPUs(string(out), detectRAM().TotalMB)
 	if len(gpus) == 0 {
 		return gpus
 	}
@@ -45,7 +45,11 @@ func detectVulkanGPUs() []GPU {
 	return gpus
 }
 
-func parseVulkanGPUs(summary string) []GPU {
+// parseVulkanGPUs parses `vulkaninfo --summary` output. ramTotalMB is the
+// host's system RAM (used only to synthesize a unified-memory budget for
+// AMD integrated GPUs; see synthesizeIntegratedVRAMMB) — passed in rather
+// than read here so the parser stays pure and unit-testable off-hardware.
+func parseVulkanGPUs(summary string, ramTotalMB int) []GPU {
 	var gpus []GPU
 	var dev vulkanDevice
 	inBlock := false
@@ -60,6 +64,23 @@ func parseVulkanGPUs(summary string) []GPU {
 			return
 		}
 		vramMB := estimateVulkanVRAM(dev.name, dev.deviceType)
+		// AMD APUs (e.g. Strix Halo, Ryzen AI Max, gfx11xx) expose an
+		// integrated GPU whose DEVICE_LOCAL heap is unified system RAM, and
+		// llama.cpp's HIP/ROCm backend on such systems can address most of
+		// system RAM (~96-122 GiB on a 128 GB box; see llama.cpp #20472).
+		// estimateVulkanVRAM returns a flat 2048 MB for integrated GPUs and
+		// parseVulkanHeapVRAM skips them, so the tiny heuristic would
+		// otherwise survive and placement would reject every real model.
+		// Mirror detectAppleSilicon's unified-memory synthesis, scoped to
+		// AMD: Intel iGPUs are aperture-capped rather than unified-memory
+		// SoCs, so synthesizing RAM for them would fabricate VRAM that
+		// their driver cannot actually back. Split out so the sizing rule
+		// is unit-testable off-hardware, same as appleSiliconGPU.
+		if isAMDIntegrated(dev.name, dev.deviceType) {
+			if synth := synthesizeIntegratedVRAMMB(ramTotalMB); synth > vramMB {
+				vramMB = synth
+			}
+		}
 		if vramMB <= 0 {
 			dev = vulkanDevice{}
 			return
@@ -141,6 +162,33 @@ func estimateVulkanVRAM(name, deviceType string) int {
 		return 2048
 	}
 	return estimateVRAMFromName(name)
+}
+
+// isAMDIntegrated reports whether the Vulkan device is an AMD/ATI integrated
+// GPU (APU). Only AMD APUs back their iGPU with unified system RAM that the
+// HIP/ROCm backend can largely address; Intel iGPUs are aperture-capped and
+// must keep the conservative heuristic.
+func isAMDIntegrated(name, deviceType string) bool {
+	if !strings.Contains(strings.ToLower(deviceType), "integrated") {
+		return false
+	}
+	lowerName := strings.ToLower(name)
+	return strings.Contains(lowerName, "amd") || strings.Contains(lowerName, "radeon")
+}
+
+// synthesizeIntegratedVRAMMB sizes the VRAM budget for an AMD integrated GPU
+// (APU, e.g. Strix Halo gfx1151) whose DEVICE_LOCAL heap is unified system
+// RAM. The flat 2048 MB heuristic (estimateVulkanVRAM) would reject every
+// real model; llama.cpp's HIP backend on such systems addresses most of
+// system RAM (~96-122 GiB on 128 GB, per llama.cpp PR #20472). 0.8x leaves
+// ~20% for the OS/desktop and mirrors Apple's Metal fraction (0.75x,
+// detectAppleSilicon) as a conservative unified-memory ceiling. Split out so
+// the rule is unit-testable off-hardware, same as appleSiliconGPU.
+func synthesizeIntegratedVRAMMB(ramTotalMB int) int {
+	if ramTotalMB <= 0 {
+		return 0
+	}
+	return ramTotalMB * 8 / 10
 }
 
 // estimateVRAMFromName tries to guess VRAM from common GPU name patterns.
