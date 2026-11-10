@@ -109,6 +109,53 @@ func TestSmokeBackendRequiresServerSurfaceAndConfiguredDevice(t *testing.T) {
 	}
 }
 
+func TestSmokeBackendAcceptsUsageHelpThatExitsOne(t *testing.T) {
+	write := func(name, helpBody string) string {
+		path := filepath.Join(t.TempDir(), name)
+		body := "#!/bin/sh\ncase \"$1\" in\n" +
+			"  --version) echo 'llama-server test' ;;\n" +
+			"  --help) " + helpBody + "; exit 1 ;;\n" +
+			"  *) exit 1 ;;\nesac\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	usage := write("usage", "echo 'usage: llama-server [options]'; echo '--model --ctx-size --host --port'")
+	if err := smokeBackend(usage); err != nil {
+		t.Fatalf("usage help with exit 1 rejected: %v", err)
+	}
+	noUsage := write("no-usage", "echo 'error: bad flag'; echo '--model --ctx-size --host --port'")
+	if err := smokeBackend(noUsage); err == nil {
+		t.Fatal("exit 1 without a usage line accepted")
+	}
+}
+
+func TestSmokeBackendConfiguredFallsBackToBufferTypes(t *testing.T) {
+	write := func(name, buffers string) string {
+		path := filepath.Join(t.TempDir(), name)
+		body := "#!/bin/sh\ncase \"$1\" in\n" +
+			"  --version) echo 'llama-server test' ;;\n" +
+			"  --help) echo '--model --ctx-size --host --port' ;;\n" +
+			"  --list-devices) echo 'error: unknown argument: --list-devices'; exit 1 ;;\n" +
+			"  --override-tensor) echo 'Available buffer types:'; " + buffers + "; " +
+			"echo 'error: Invalid tensor buffer type override: '\"$2\"; exit 1 ;;\n" +
+			"  *) exit 1 ;;\nesac\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cuda := write("cuda", "echo '  CPU'; echo '  CUDA0'")
+	if err := smokeBackendConfigured(cuda, []string{"-DGGML_CUDA=ON"}); err != nil {
+		t.Fatalf("CUDA buffer type rejected: %v", err)
+	}
+	cpuOnly := write("cpu-only", "echo '  CPU'")
+	if err := smokeBackendConfigured(cpuOnly, []string{"-DGGML_CUDA=ON"}); err == nil {
+		t.Fatal("CPU-only buffer list accepted for a CUDA build")
+	}
+}
+
 func TestUpdateDismissPath(t *testing.T) {
 	dir := t.TempDir()
 	want := filepath.Join(dir, "update_dismissed")
