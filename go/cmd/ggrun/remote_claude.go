@@ -216,7 +216,23 @@ func remoteClaudeProfile(req *launchRequest, model *placement.ModelProfile, stra
 	p.ModelName = model.Name
 	p.Vision = hasArg(args, "--mmproj")
 	p.SeparateWorker = r != nil && r.workerRouteEnabled()
+	p.UtilityRoute = remoteUtilityCapacity(p, r)
 	return p
+}
+
+func remoteUtilityCapacity(p clientkit.Profile, r *claudeAutoRuntime) *clientkit.UtilityRoute {
+	u := &clientkit.UtilityRoute{ContextPerSlot: p.ContextPerSlot, Slots: p.Slots}
+	if r != nil && r.reviewerPort > 0 {
+		// Both worker and review-only companions can receive utility requests.
+		// The current router may fall back to main, so advertise a context safe
+		// for either destination, without promising a particular request route.
+		contextTokens := claudeReviewerContextTokens
+		if r.companion != nil {
+			contextTokens = r.companion.reviewerContextTokens()
+		}
+		u = &clientkit.UtilityRoute{ContextPerSlot: min(p.ContextPerSlot, contextTokens), Slots: 1, SeparateBackend: true, FallbackToMain: true}
+	}
+	return u
 }
 
 // remoteProgressLog avoids a non-nil interface around a nil log buffer.
