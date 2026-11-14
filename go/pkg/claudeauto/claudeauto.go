@@ -707,7 +707,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
 		}
-		if mapped := honorDisabledThinking(body); len(mapped) != len(body) {
+		if mapped := honorDisabledThinking(body); !bytes.Equal(mapped, body) {
 			body = mapped
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
