@@ -93,7 +93,7 @@ jobs:
           - os: ubuntu-latest
             asset: ggrun-linux-x86_64-vulkan.tar.gz
             cmake_flags: -DGGML_VULKAN=ON -DGGML_NATIVE=OFF
-          - os: macos-14
+          - os: macos-15
             asset: ggrun-macos-arm64-metal.tar.gz
             cmake_flags: -DGGML_METAL=ON -DGGML_NATIVE=OFF
             optional: true
