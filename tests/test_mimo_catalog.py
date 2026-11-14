@@ -11,6 +11,11 @@ MANIFESTS = json.loads((ROOT / "tests/fixtures/mimo_v26_hf_artifacts.json").read
 EXPECTED = {
     "pcuenq/MiMo-V2.6-Pro-RL-GGUF": {"MXFP4": 554211765568},
     "ggml-org/MiMo-V2.6-Flash-RL-GGUF": {"Q2_K": 126214593856, "MXFP4": 167369465152},
+    "ggml-org/MiMo-V2.6-Flash-MOPD-GGUF": {
+        "Q2_K_S": 105864191648,
+        "Q2_K": 126365949600,
+        "MXFP4": 167369465248,
+    },
 }
 
 
@@ -48,7 +53,8 @@ def test_embedded_mimo_catalog_offers_only_complete_main_models():
     """The embedded catalog is regenerated on a schedule and may resolve another
     repository for the same model, so check what must hold for any correct
     regeneration rather than pinning today's upstream bytes: the MiMo rows offer
-    no companion-sized quant, and every offered quant is a full main-model total."""
+    no companion-sized quant. Exact shard completeness is covered separately by
+    the frozen-manifest tests; a size floor alone cannot establish it."""
     catalog = json.loads((ROOT / "go/pkg/recommend/catalog.json").read_text())
     rows = {r["name"]: r for r in catalog["candidates"]}
     for name in ("Xiaomi MiMo-V2.6-Pro", "Xiaomi MiMo-V2.6-Flash"):
@@ -56,7 +62,13 @@ def test_embedded_mimo_catalog_offers_only_complete_main_models():
             continue  # the source leaderboard may drop a model; absence is not a wrong offer
         quants = rows[name]["quants"]
         assert quants, name
-        assert all(q["size_bytes"] >= 100 * 1024**3 for q in quants), (name, quants)
+        # A fixed 100 GiB cutoff rejected the complete 98.59 GiB Q2_K_S
+        # MOPD artifact. A conservative one-bit-per-parameter floor still
+        # rejects these models' small MTP/DFlash/projector companions without
+        # equating one historical quant size with a complete model.
+        params = rows[name]["total_params_b"] * 1_000_000_000
+        assert params > 0, name
+        assert all(q["size_bytes"] * 8 >= params for q in quants), (name, quants)
     for row in catalog["candidates"]:
         sizes = [q["size_bytes"] for q in row["quants"] if q.get("size_bytes")]
         if sizes:
