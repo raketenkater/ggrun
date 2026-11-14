@@ -14,6 +14,16 @@
   "slots":{"type":"integer","minimum":1},
   "vision":{"type":"boolean"},
   "separate_worker":{"type":"boolean"},
+  "utility_route":{
+   "type":"object",
+   "required":["context_per_slot","slots","separate_backend","fallback_to_main"],
+   "properties":{
+    "context_per_slot":{"type":"integer","minimum":1},
+    "slots":{"type":"integer","minimum":1},
+    "separate_backend":{"type":"boolean"},
+    "fallback_to_main":{"type":"boolean"}
+   }
+  },
   "policy":{
    "type":"object",
    "required":["version","compact_window","compact_percent","effort","timeout_ms"],

@@ -29,6 +29,9 @@ func honorDisabledThinking(body []byte) []byte {
 			return body
 		}
 	}
+	if kwargs == nil {
+		kwargs = map[string]json.RawMessage{}
+	}
 	kwargs["enable_thinking"] = json.RawMessage("false")
 	encoded, err := json.Marshal(kwargs)
 	if err != nil {

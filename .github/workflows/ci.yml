@@ -365,7 +365,7 @@ jobs:
           trap - EXIT
 
   release-install-macos-smoke:
-    runs-on: macos-14
+    runs-on: macos-15
     # macOS is a headless-serving target. Require the packaged install/default
     # CPU-launch smoke alongside native remote contracts. This synthetic backend
     # does not establish real Metal inference support.
