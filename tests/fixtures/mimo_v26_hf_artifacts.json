@@ -443,5 +443,102 @@
         "size": 2383728864
       }
     ]
+  },
+  {
+    "repo": "ggml-org/MiMo-V2.6-Flash-MOPD-GGUF",
+    "revision": "c9d8697904d2564708b5197d176543983b9d8db5",
+    "siblings": [
+      {
+        "rfilename": "MiMo-V2.6-Flash-MOPD-MXFP4-00001-of-00002.gguf",
+        "lfs": {
+          "size": 5948736
+        },
+        "size": 5948736
+      },
+      {
+        "rfilename": "MiMo-V2.6-Flash-MOPD-MXFP4-00002-of-00002.gguf",
+        "lfs": {
+          "size": 167363516512
+        },
+        "size": 167363516512
+      },
+      {
+        "rfilename": "MiMo-V2.6-Flash-MOPD-Q2_K-00001-of-00002.gguf",
+        "lfs": {
+          "size": 5948992
+        },
+        "size": 5948992
+      },
+      {
+        "rfilename": "MiMo-V2.6-Flash-MOPD-Q2_K-00002-of-00002.gguf",
+        "lfs": {
+          "size": 126360000608
+        },
+        "size": 126360000608
+      },
+      {
+        "rfilename": "MiMo-V2.6-Flash-MOPD-Q2_K_S-00001-of-00002.gguf",
+        "lfs": {
+          "size": 5948992
+        },
+        "size": 5948992
+      },
+      {
+        "rfilename": "MiMo-V2.6-Flash-MOPD-Q2_K_S-00002-of-00002.gguf",
+        "lfs": {
+          "size": 105858242656
+        },
+        "size": 105858242656
+      },
+      {
+        "rfilename": "dflash-MiMo-V2.6-Flash-MOPD-BF16.gguf",
+        "lfs": {
+          "size": 5441972512
+        },
+        "size": 5441972512
+      },
+      {
+        "rfilename": "dflash-MiMo-V2.6-Flash-MOPD-Q8_0.gguf",
+        "lfs": {
+          "size": 2893932832
+        },
+        "size": 2893932832
+      },
+      {
+        "rfilename": "mmproj-MiMo-V2.6-Flash-MOPD-BF16.gguf",
+        "lfs": {
+          "size": 2748509792
+        },
+        "size": 2748509792
+      },
+      {
+        "rfilename": "mmproj-MiMo-V2.6-Flash-MOPD-Q8_0.gguf",
+        "lfs": {
+          "size": 1564438112
+        },
+        "size": 1564438112
+      },
+      {
+        "rfilename": "mtp-MiMo-V2.6-Flash-MOPD-BF16.gguf",
+        "lfs": {
+          "size": 4481536320
+        },
+        "size": 4481536320
+      },
+      {
+        "rfilename": "mtp-MiMo-V2.6-Flash-MOPD-Q4_0.gguf",
+        "lfs": {
+          "size": 1264898368
+        },
+        "size": 1264898368
+      },
+      {
+        "rfilename": "mtp-MiMo-V2.6-Flash-MOPD-Q8_0.gguf",
+        "lfs": {
+          "size": 2383728960
+        },
+        "size": 2383728960
+      }
+    ]
   }
 ]
