@@ -967,18 +967,6 @@ func TestShouldPromoteMoEPlacement(t *testing.T) {
 	}
 }
 
-func TestMeasuredPromotionBypassesPlacementCache(t *testing.T) {
-	opts := measuredPromotionOptions(
-		&launchRequest{CtxFlag: "32768"},
-		&placement.ModelProfile{ModelArch: "qwen3moe", CTXTrain: 32768},
-		&backendInfo{Tag: "llama"},
-		t.TempDir(),
-	)
-	if !opts.SkipPlacementCache {
-		t.Fatal("measured promotion must recompute instead of reloading the sparse placement it is meant to improve")
-	}
-}
-
 func TestStartupLogCUDAOOM(t *testing.T) {
 	log := "loading\n" +
 		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2206.07 MiB on device 0: cudaMalloc failed: out of memory\n" +
@@ -3081,24 +3069,6 @@ func TestRejectedMemoryArgvIdentityBlocksOnlyTheExactFailedPlan(t *testing.T) {
 	}
 	if changed, rejected := recovery.recomputeDecision(failed, failed); changed || rejected {
 		t.Fatalf("identical argv decision = changed %v rejected %v", changed, rejected)
-	}
-}
-
-func TestRecoveredLaunchRetainsFirstSafeAllocationBaselineUnlessForced(t *testing.T) {
-	recovery := newLaunchMemoryRecovery()
-	recovery.reject([]string{"llama-server", "--n-cpu-moe", "35"})
-
-	if !retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateAuto}, recovery) {
-		t.Fatal("automatic allocation promotion was allowed after recovery")
-	}
-	if !retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateOff}, recovery) {
-		t.Fatal("disabled optimization was allowed to promote a recovered allocation")
-	}
-	if retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateOn}, recovery) {
-		t.Fatal("explicit forced calibration was unexpectedly suppressed")
-	}
-	if retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateAuto}, newLaunchMemoryRecovery()) {
-		t.Fatal("clean launch was treated as memory-recovered")
 	}
 }
 

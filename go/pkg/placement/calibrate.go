@@ -30,7 +30,9 @@ import (
 // Version 27 prices host-expert GPU staging separately from CPU execution,
 // charges KV to the layers' owning devices from per-layer geometry, and scopes
 // decisions by the backend's host-weight execution policy.
-const CalibrationSchemaVersion = 27
+// Version 28 measures expert re-packs against the resolved serving baseline;
+// allocation-only promotion no longer bypasses the workload controller.
+const CalibrationSchemaVersion = 28
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 
@@ -493,6 +495,13 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 		return out
 	}
 
+	// Newly measured allocation headroom may fit a denser expert pack. Keep it
+	// a normal challenger: candidate zero is the already-serving configuration,
+	// and only exact admission plus matched work may replace it.
+	if alt := recomputeExpertPackCandidate(caps, model, base, opts); alt != nil {
+		out = append(out, CalibrationCandidate{Name: "expert-pack", Strategy: alt})
+	}
+
 	// Recurrent parallel-agent serving is governed by two independent limits:
 	// n_batch controls how long one scheduler turn may ingest prompts, while
 	// n_ubatch controls physical GPU work and graph allocation. Tune them as
@@ -937,6 +946,31 @@ func sameCalibrationResidency(base, candidate *Strategy) bool {
 	candidateGPUResident := candidate.KVPlacement == "gpu" &&
 		candidate.Type != DenseCPUOffload && candidate.Type != CPUOnly && !candidate.MMapRequired
 	return !baseGPUResident || candidateGPUResident
+}
+
+// recomputeExpertPackCandidate preserves the resolved runtime shape, including
+// a raised microbatch or recovered context. The original automatic request is
+// not a license to reset those coordinates during an allocation-only re-pack.
+func recomputeExpertPackCandidate(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options) *Strategy {
+	if base == nil || base.Type != MoEOffload || base.NCPUMoE <= 0 || base.ContextSize <= 0 {
+		return nil
+	}
+	opts.KVPlacement = base.KVPlacement
+	if base.KVType != "" {
+		opts.KVQuality = base.KVType
+	}
+	alt, err := recomputeBatchCandidate(caps, model, base, opts, base.BatchSize, base.UBatchSize)
+	if err != nil || alt == nil || alt.Type != MoEOffload ||
+		alt.ContextSize != base.ContextSize || alt.Parallel != base.Parallel ||
+		alt.KVPlacement != base.KVPlacement || alt.KVType != base.KVType ||
+		alt.MMap != base.MMap || !sameCalibrationResidency(base, alt) {
+		return nil
+	}
+	if alt.NCPUMoE < base.NCPUMoE ||
+		(alt.NCPUMoE == base.NCPUMoE && alt.OTString != "" && alt.OTString != base.OTString) {
+		return alt
+	}
+	return nil
 }
 
 // recomputeBatchCandidate treats batch/ubatch as placement inputs, not late

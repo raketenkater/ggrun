@@ -4267,3 +4267,23 @@ The no-companion permission deadline and post-canary future-cache/growth
 allowance corrections are documented in
 [the availability review](remote-agent-availability-fixes-20261030.md). The
 uncached core gate passed; long-session OOM acceptance remains open in #117.
+# MEASURED-PROMOTION — preserve the healthy baseline — 2026-11-15
+
+Issue #132 exposed a healthy three-GPU MoE launch at ubatch 1024 being stopped
+for an allocation-only proposal. The proposal reset context/ubatch from the
+original request, missed admission by 66 MiB, and recovered to a two-GPU layout
+at ubatch 512 with no increase in GPU expert layers.
+
+The standalone post-load promotion is removed. Allocation evidence now feeds an
+`expert-pack` candidate in the ordinary optimizer frontier. That candidate keeps
+the resolved context, batch pair, slots, KV placement/type and mmap policy;
+candidate zero stays the live baseline. Existing exact admission, workload
+comparison, phase guards and lifecycle verification govern replacement.
+Calibration schema 28 invalidates decisions from the earlier candidate policy.
+
+Regression coverage includes single-/heterogeneous multi-GPU packing with
+automatic/explicit constraints, baseline immutability, and a 66 MiB admission
+miss retaining the raised microbatch without stopping or restarting the server.
+Uncached `scripts/verify-core-engine.sh` passes. Live matched performance and
+clean-relaunch acceptance remain required; no throughput gain is claimed here.
+

@@ -4730,67 +4730,6 @@ func recordLiveCheckpointEvidence(req *launchRequest, cfg *config.Config, model 
 	return changed
 }
 
-func measuredPromotionOptions(req *launchRequest, model *placement.ModelProfile, be *backendInfo, cacheDir string) placement.Options {
-	opts := placementOptionsFromRequest(req, model, be, cacheDir)
-	opts.SkipPlacementCache = true
-	return opts
-}
-
-func maybePromoteMeasuredPlacement(req *launchRequest, cfg *config.Config, be *backendInfo, caps *detect.Capabilities, model *placement.ModelProfile, current *placement.Strategy, currentArgs []string, memoryRecovery *launchMemoryRecovery) (*placement.Strategy, []string, bool) {
-	if req == nil || cfg == nil || be == nil || caps == nil || model == nil || current == nil || !model.IsMoE || len(caps.GPUs) == 0 {
-		return nil, nil, false
-	}
-	if req.Calibrate == calibrateOff {
-		return nil, nil, false
-	}
-	// A validated .place entry is already the lifecycle winner for this exact
-	// launch shape. Auto mode may consume new measurements for the next planner
-	// pass, but must not stop that server to challenge it with an unproven denser
-	// layout. --calibrate on remains the explicit opt-in to do so.
-	if current.PlacementCacheHit && req.Calibrate != calibrateOn {
-		return nil, nil, false
-	}
-	// A measured KV probe may have been written after the first load. Force the
-	// recompute to reload it instead of reusing the pre-launch model struct state.
-	// Also bypass the placement cache: reloading the placement that just launched
-	// made this calibration pass incapable of filling newly proven free VRAM.
-	// This was especially visible when the Claude reviewer changed the baseline:
-	// a safe but sparse five-block cache kept winning even when six blocks fit.
-	model.MeasuredKVBytesPerTok = nil
-	model.MeasuredKVGeometry = nil
-	opts := measuredPromotionOptions(req, model, be, cfg.CacheDir)
-	next, err := placement.Compute(caps, model, opts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[launch] calibration: measured placement recompute failed: %v\n", err)
-		return nil, nil, false
-	}
-	claudeCodeSlotAdjust(next, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	if !shouldPromoteMoEPlacement(current, next) {
-		return nil, nil, false
-	}
-	nextArgs := buildLaunchServerArgs(req, cfg, be, caps, model, next)
-	if formatCommand(nextArgs) == formatCommand(currentArgs) {
-		return nil, nil, false
-	}
-	if memoryRecovery.isRejected(nextArgs) {
-		fmt.Fprintln(os.Stderr, "[launch] allocation measurement proposed an argv already rejected by this launch; retaining the proven-safe placement")
-		return nil, nil, false
-	}
-	return next, nextArgs, true
-}
-
-// retainRecoveredBaselineForAllocationPromotion keeps the allocator's denser
-// recompute monotonic. Once this lifecycle needed memory recovery, it must not
-// immediately promote another allocation-only guess. The workload optimizer is
-// separate: it may measure the recovered server in place and challenge one
-// non-rejected finalist when the resolved launch has performance headroom.
-func retainRecoveredBaselineForAllocationPromotion(req *launchRequest, memoryRecovery *launchMemoryRecovery) bool {
-	if memoryRecovery == nil || !memoryRecovery.hasRejections() {
-		return false
-	}
-	return req == nil || req.Calibrate != calibrateOn
-}
-
 func startLaunchWithCUDAOOMRecovery(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, serverArgs []string, timeout time.Duration) (*server.Process, *placement.Strategy, []string, error) {
 	return startLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, timeout, newLaunchMemoryRecovery())
 }
@@ -7323,62 +7262,14 @@ func cmdLaunch(args []string) {
 		recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
 		noteBackendLoadedVRAM(serverProcessPID(p))
 	}
-	// Consume allocation measurements before performance calibration. A plan
-	// with fewer CPU experts is only a new baseline candidate until benchmarked;
-	// promoting it after calibration would replace the measured winner with an
-	// unbenchmarked strategy and could undo a faster KV alternate.
-	if p.LogBuf != nil {
-		if retainRecoveredBaselineForAllocationPromotion(req, launchRecovery) {
-			fmt.Printf("[launch] retaining the first proven-safe placement after %d rejected memory configuration(s); measurements will seed the next launch\n", launchRecovery.rejectionCount())
-		} else if nextStrategy, nextArgs, ok := maybePromoteMeasuredPlacement(req, cfg, be, caps, model, strategy, serverArgs, launchRecovery); ok {
-			fmt.Printf("[launch] allocation measurement fits more GPU experts (%d CPU MoE -> %d); establishing the calibrated baseline\n", strategy.NCPUMoE, nextStrategy.NCPUMoE)
-			oldStrategy, oldArgs := strategy, append([]string(nil), serverArgs...)
-			// restorePrevious brings back the pre-promotion placement after a
-			// failed promotion or resource-release failure. The old args are the
-			// currently-serving, health-verified argv — never in the rejected set —
-			// so the restore-exempt start boundary is used (a deliberate fallback
-			// must not be re-gated into a dead box).
-			restorePrevious := func() bool {
-				p, strategy, serverArgs, err = restoreLaunchWithCUDAOOMRecoveryState(req, cfg, model, oldStrategy, be, caps, oldArgs, restartAdmissionWindow(model), launchRecovery)
-				if err != nil {
-					claudeAuto.stop()
-					fmt.Fprintf(os.Stderr, "Error restoring previous loaded placement: %v\n", err)
-					fmt.Fprintln(os.Stderr, "Error: no server is running after failed measured baseline promotion")
-					os.Exit(1)
-				}
-				return true
-			}
-			if !stopCalibrationProcessAndWait(p, "measured baseline promotion", resourceBaseline, 30*time.Second) {
-				// The old process was force-stopped by Stop(); degrade to restoring
-				// it rather than exiting with no server. Mirrors the calibration
-				// winner-restore path.
-				fmt.Fprintln(os.Stderr, "Error: current server/resources did not release before measured baseline promotion; attempting restore of the previous placement")
-				restorePrevious()
-			} else {
-				fmt.Printf("[launch] %s\n", displayCommand(nextArgs))
-				promotedP, promotedStrategy, promotedArgs, promoteErr := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, nextStrategy, be, caps, nextArgs, restartAdmissionWindow(model), launchRecovery)
-				if promoteErr != nil {
-					if !stopCalibrationProcessAndWait(promotedP, "failed measured baseline", resourceBaseline, 30*time.Second) {
-						fmt.Fprintln(os.Stderr, "Error: failed measured baseline did not release resources; refusing an overlapping restore — attempting restore of the previous placement")
-						// promotedP was force-killed; the old placement's resources
-						// are the pre-promotion baseline, so restoring it is safe.
-					}
-					fmt.Fprintf(os.Stderr, "[launch] measured baseline failed (%v); restoring the previously loaded placement\n", promoteErr)
-					restorePrevious()
-				} else {
-					p, strategy, serverArgs = promotedP, promotedStrategy, promotedArgs
-				}
-			}
-			fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
-			if p.LogBuf != nil {
-				recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
-				noteBackendLoadedVRAM(serverProcessPID(p))
-			}
-		}
-	}
-	// First-launch optimization now measures alternatives against the final
-	// allocation-informed baseline. Its returned decision remains provisional
-	// until the winner passes lifecycle and cache verification below.
+	// Allocation evidence seeds optimizer candidates; it must never replace a
+	// healthy baseline before a matched workload comparison. In particular,
+	// re-packing experts from the original request used to discard a proven
+	// microbatch raise and accept a different configuration through recovery.
+	// Reload newly measured geometry for complete candidate recomputes, while
+	// preserving the serving strategy and argv as candidate zero.
+	model.MeasuredKVBytesPerTok = nil
+	model.MeasuredKVGeometry = nil
 	var pendingCalibration *placement.CalibrationDecision
 	plannedCandidates := calibrationPlan(req, cfg, model, be, caps, strategy, func(candidate *placement.Strategy) bool {
 		candidateArgs := buildLaunchServerArgs(req, cfg, be, caps, model, candidate)
