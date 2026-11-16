@@ -30,8 +30,11 @@ type QuantOption struct {
 // download. Quality is the intelligence-first ranking signal refreshed from
 // the checked-in catalog; speed is display metadata only.
 type Candidate struct {
-	Name           string        `json:"name"`
-	Repo           string        `json:"repo"`
+	Name string `json:"name"`
+	Repo string `json:"repo"`
+	// Revision is the repository commit the quant list was read from; a
+	// download reads that commit (review S-09). Empty for rows written before.
+	Revision       string        `json:"revision,omitempty"`
 	Family         string        `json:"family"`
 	SizeGB         float64       `json:"size_gb"`
 	Quality        int           `json:"quality"`

@@ -2657,6 +2657,12 @@ func (m Model) viewRecommended() string {
 				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
 			if idx == m.selectedRecommendation {
 				b.WriteString(prefix + selectedStyle.Render(line) + "\n")
+				// Who publishes the selected download (review S-09).
+				from := "    from " + rec.Repo
+				if owner := recommend.RepoOwner(rec.Repo); owner != "" && !recommend.KnownQuantizer(owner) {
+					from += "  (publisher outside the named quantizers; check it first)"
+				}
+				b.WriteString(mutedStyle.Render(from) + "\n")
 			} else {
 				b.WriteString(prefix + line + "\n")
 			}

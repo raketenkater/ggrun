@@ -104,6 +104,7 @@ def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
     weights = [item for item in ggufs if not is_draft_head_gguf(str(item.get("rfilename") or ""))]
     return weights
 
+# Shared with tools/download/download_any_gguf.py (test_owner_scoring_matches_downloader).
 TRUSTED_GGUF_OWNERS = {
     "unsloth": 140,
     "bartowski": 95,
@@ -112,6 +113,8 @@ TRUSTED_GGUF_OWNERS = {
     "lmstudio-community": 60,
     "second-state": 45,
 }
+
+OTHER_OWNER_SCORE = 20
 
 FAMILY_PREFIXES = {
     "aya",
@@ -1114,7 +1117,7 @@ def base_model_tag_matches(item: dict[str, Any], row: dict[str, Any]) -> bool:
 
 
 def quick_hf_score(repo: str, row: dict[str, Any], item: dict[str, Any] | None = None) -> int:
-    score = TRUSTED_GGUF_OWNERS.get(repo_owner(repo), 20)
+    score = TRUSTED_GGUF_OWNERS.get(repo_owner(repo), OTHER_OWNER_SCORE)
     target_key = norm(model_query(row))
     candidate_key = norm(clean_repo_model_name(repo))
     if huggingface_repo(row).lower() == repo.lower():
@@ -1299,7 +1302,8 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
     # compute launch overhead with the placement engine's formula, not an
     # estimate. Best-effort: missing geometry leaves the recommender's fallback.
     arch = fetch_gguf_arch(repo) or {}
-    shape = candidate_model_shape(row, arch, fetch_hf_model_info(repo) or {}, quants)
+    info = fetch_hf_model_info(repo) or {}
+    shape = candidate_model_shape(row, arch, info, quants)
     cand = {
         "aa_id": row_id(row),
         "aa_intelligence_index": round(idx, 3) if idx else 0,
@@ -1314,6 +1318,9 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "quality": quality_score(idx),
         "quants": quants,
         "repo": repo,
+        # The repository commit the quant list was read from (review S-09):
+        # downloads fetch exactly these files, not whatever the repo holds later.
+        **({"revision": info["sha"]} if re.fullmatch(r"[0-9a-f]{40}", str(info.get("sha") or "")) else {}),
         "size_gb": round(representative_size_gb(quants), 2),
         "speed": speed_score(tps),
         **shape,
