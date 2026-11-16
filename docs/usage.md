@@ -208,10 +208,10 @@ placement optimizer for every workload. It also never changes anything
 that affects output quality — KV-cache quantization and context remain
 constraints, and an explicit `--parallel` is left exactly as set. The core
 standard-launch optimizer may compare automatic slot counts, but AI Tune and
-cached/community tune overlays may not.
+cached tune overlays may not.
 
 Parallel Claude launches use the placement-owned core optimizer above for
-batch/ubatch experiments. Generic/community tune files are not
+batch/ubatch experiments. Generic tune files are not
 automatically applied to Claude mode because they do not encode slot scheduling
 or mixed prefill/decode behavior. When `--ai-tune` is explicitly combined with
 parallel Claude on a hybrid/recurrent model, it uses repeated cache-backed agent

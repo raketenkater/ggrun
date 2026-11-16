@@ -8143,26 +8143,18 @@ func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTa
 		return applySelectedTuneCache(req, serverArgs, caps)
 	}
 	if req.ClaudeCode {
-		// Generic and community throughput tunes do not encode the agent
+		// Generic throughput tunes do not encode the agent
 		// scheduler, context, cache, or semantic-validation workload. They may
 		// override -b/-ub after Claude's fairness adjustment, so fail closed until
 		// the validation registry can select profile-scoped evidence.
-		fmt.Println("[tune] Skipping automatic generic/community tune for Claude Code; use an explicit --tune-cache after workload validation.")
+		fmt.Println("[tune] Skipping automatic generic tune for Claude Code; use an explicit --tune-cache after workload validation.")
 		return serverArgs
 	}
 	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, "", tuneHardwareHash(caps))
 	if path == "" {
-		// No local tune for this model+hardware+backend: try the community
-		// pool. Downloads are sanitized to the tune-flag allow-list and both
-		// hits and misses are cached on disk, so launches stay offline-safe.
-		path = tune.FetchCommunityTune(cacheDir, req.ModelPath, gpuNamesFromCaps(caps), vision, backendTag)
-		if path == "" {
-			return serverArgs
-		}
-		fmt.Printf("[tune] Using community-shared config: %s (LLM_COMMUNITY_TUNES=off to disable)\n", filepath.Base(path))
-	} else {
-		fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
+		return serverArgs
 	}
+	fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
 	autoReq := *req
 	autoReq.TuneCache = path
 	return applySelectedTuneCache(&autoReq, serverArgs, caps)
@@ -9769,10 +9761,6 @@ func cmdTune(args []string) {
 	}
 
 	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
-	tunePath := tune.TuneCachePathForWorkload(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag, agentWorkload)
-	if hint := tune.ShareHint(tunePath); hint != "" {
-		fmt.Println(hint)
-	}
 }
 
 // guardPortFree refuses to start when something is already listening on the
