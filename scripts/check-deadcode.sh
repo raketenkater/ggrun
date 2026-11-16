@@ -7,7 +7,8 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../go"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-GOBIN="$tmp" go install golang.org/x/tools/cmd/deadcode@v0.30.0
+# Build it with the module's Go: a tool built by an older Go cannot load newer packages.
+GOBIN="$tmp" GOTOOLCHAIN="$(go env GOVERSION)" go install golang.org/x/tools/cmd/deadcode@v0.30.0
 for os in linux windows darwin; do
   GOOS="$os" "$tmp/deadcode" -test ./... > "$tmp/$os.raw"
   { grep -v -E 'clientkit/|^pkg/tune/' "$tmp/$os.raw" || true; } | sed -E 's/:[0-9]+:[0-9]+:/:/' | sort -u > "$tmp/$os"
