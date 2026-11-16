@@ -18,6 +18,7 @@
 #           or only needs a GPU driver. CPU is installed when nothing runs.
 #   LLM_INSTALL_MODE=auto|release|build|scripts           default: auto
 #   LLM_INSTALL_RELEASE=latest|vX.Y.Z                      default: latest
+#   LLM_INSTALL_REF=<tag|branch|commit>                    source to build; default: latest release tag
 #   LLM_INSTALL_RELEASE_DIR=<dir>                          local bundle dir (tests/offline)
 #   LLM_INSTALL_PREFIX=<dir>                              default: ~/.local/bin
 #   LLM_INSTALL_MODEL_DIR=<dir>                           default: ~/ai_models
@@ -39,7 +40,9 @@ set -Eeuo pipefail
 REPO_URL="https://github.com/raketenkater/ggrun.git"
 GITHUB_REPO="raketenkater/ggrun"
 SOURCE_REPO_DIR="${LLM_INSTALL_REPO_DIR:-}"
-SOURCE_REF="${LLM_INSTALL_REF:-main}"
+# Empty means the latest release (resolve_source_ref); LLM_INSTALL_REF=main
+# builds the development branch on request.
+SOURCE_REF="${LLM_INSTALL_REF:-}"
 INSTALL_DIR="${LLM_INSTALL_PREFIX:-$HOME/.local/bin}"
 MODEL_DIR="${LLM_INSTALL_MODEL_DIR:-$HOME/ai_models}"
 BACKEND_ROOT="${LLM_INSTALL_BACKEND_ROOT:-$HOME}"
@@ -258,6 +261,7 @@ clone_source_ref() {
 
 prepare_persistent_source_repo() {
     [[ -n "$SOURCE_REPO_DIR" ]] || return 1
+    resolve_source_ref
     command -v git >/dev/null || { warn "git required to keep a source checkout for updates"; return 1; }
     if [[ -e "$SOURCE_REPO_DIR" && ! -d "$SOURCE_REPO_DIR/.git" ]]; then
         warn "$SOURCE_REPO_DIR exists but is not a git checkout; using temporary source instead"
@@ -300,8 +304,27 @@ fetch_source_tarball() {
     return 0
 }
 
+# resolve_source_ref picks the source to build when none was named: the
+# latest release tag (github.com/<repo>/releases/latest redirects to it), so a
+# new install is a release users can name in a bug report, not whatever main
+# holds that minute.
+resolve_source_ref() {
+    [[ -n "$SOURCE_REF" ]] && return 0
+    local tag
+    tag="$(curl -fsSI -A ggrun-installer "https://github.com/$GITHUB_REPO/releases/latest" 2>/dev/null \
+        | tr -d '\r' | sed -nE 's#^[Ll]ocation: .*/releases/tag/([^/?#]+)$#\1#p' | head -n 1)"
+    if [[ -n "$tag" ]]; then
+        SOURCE_REF="$tag"
+        say "  Source: latest release $tag (LLM_INSTALL_REF=main builds the development branch)"
+    else
+        SOURCE_REF="main"
+        warn "Could not resolve the latest release; building main instead"
+    fi
+}
+
 ensure_source_repo() {
     [[ -n "$SRC_DIR" ]] && return 0
+    resolve_source_ref
     if prepare_persistent_source_repo; then
         return 0
     fi
@@ -987,6 +1010,38 @@ find_release_asset_url() {
 }
 
 
+# verify_release_signature checks SHA256SUMS against the cosign bundle the
+# release workflow signs, when cosign is installed: the checksums then come
+# from the release workflow's identity, not only from the same download.
+# Without cosign, or for an older release without a bundle, it says so and
+# continues on the checksum alone.
+COSIGN_IDENTITY_REGEXP="^https://github.com/raketenkater/ggrun/\\.github/workflows/release\\.yml@refs/tags/"
+verify_release_signature() {
+    local tmp="$1" bundle_url
+    if ! command -v cosign >/dev/null 2>&1; then
+        say "  cosign not installed; checksums not signature-checked (install cosign to verify releases)"
+        return 0
+    fi
+    bundle_url="$(find_release_asset_url "SHA256SUMS.bundle" || true)"
+    if [[ -z "$bundle_url" ]]; then
+        warn "This release has no SHA256SUMS.bundle; checksums not signature-checked"
+        return 0
+    fi
+    if ! curl -fsL --show-error "$bundle_url" -o "$tmp/SHA256SUMS.bundle"; then
+        err "Could not download SHA256SUMS.bundle"
+        return 1
+    fi
+    if cosign verify-blob --bundle "$tmp/SHA256SUMS.bundle" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        "$tmp/SHA256SUMS" >/dev/null 2>&1; then
+        ok "Verified the release signature (cosign)"
+        return 0
+    fi
+    err "SHA256SUMS is not signed by ggrun's release workflow; refusing the bundle"
+    return 1
+}
+
 verify_release_checksum() {
     local tmp="$1" asset="$2" match
     [[ -f "$tmp/SHA256SUMS" ]] || return 1
@@ -1225,6 +1280,10 @@ install_release_bundle() {
             return 1
         fi
         ok "Verified checksum for $asset"
+        if ! verify_release_signature "$tmp"; then
+            rm -rf "$tmp"
+            return 1
+        fi
     elif [[ "${LLM_INSTALL_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
         warn "No SHA256SUMS asset found; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — installing UNVERIFIED bundle"
     else

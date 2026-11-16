@@ -199,7 +199,7 @@ install_release_bundle ik_llama-server-cuda
         stage = text[text.index("# ── Stage 3"):text.index('say "── Installing scripts to')]
         helpers = "\n".join(function("install.sh", name) for name in (
             "install_release_bundle", "install_release_launcher", "install_payload_file",
-            "release_asset_name", "find_release_asset_url", "verify_release_checksum",
+            "release_asset_name", "find_release_asset_url", "verify_release_checksum", "verify_release_signature",
             "install_ggrun_from_source"))
         for choice, with_cpu_asset in (("cpu", True), ("vulkan", True), ("cuda", False)):
             with self.subTest(choice=choice, with_cpu_asset=with_cpu_asset):
@@ -294,3 +294,55 @@ install_ggrun_from_source
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallerInstallsTheLatestRelease(unittest.TestCase):
+    """Review W19 (S-02, D4): new installs build the latest release unless a
+    ref is named, and a cosign bundle is checked when cosign is present."""
+
+    helpers = 'say() { echo "$*"; }; ok() { echo "OK $*"; }; warn() { echo "WARN $*"; }; err() { echo "ERR $*"; }\nGITHUB_REPO=o/r\n'
+
+    def run_bash(self, script):
+        return subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+
+    def test_source_ref_defaults_to_the_latest_release_tag(self):
+        fn = function("install.sh", "resolve_source_ref")
+        redirect = 'curl() { printf "HTTP/2 302\\r\\nlocation: https://github.com/o/r/releases/tag/v9.8.7\\r\\n"; }\n'
+        got = self.run_bash(self.helpers + fn + "\n" + redirect + 'SOURCE_REF=""; resolve_source_ref; echo "REF=$SOURCE_REF"')
+        self.assertIn("REF=v9.8.7", got.stdout)
+        named = self.run_bash(self.helpers + fn + "\n" + redirect + 'SOURCE_REF=main; resolve_source_ref; echo "REF=$SOURCE_REF"')
+        self.assertIn("REF=main", named.stdout, "LLM_INSTALL_REF must win")
+        offline = self.run_bash(self.helpers + fn + '\ncurl() { return 7; }\nSOURCE_REF=""; resolve_source_ref; echo "REF=$SOURCE_REF"')
+        self.assertIn("REF=main", offline.stdout)
+        self.assertIn("WARN", offline.stdout)
+        self.assertNotIn(":-main}", (ROOT / "install.sh").read_text().split("SOURCE_REF=")[1].split("\n")[0])
+
+    def signature(self, cosign_rc=None, bundle=True):
+        fn = function("install.sh", "verify_release_signature")
+        with tempfile.TemporaryDirectory() as tmp:
+            stubs = Path(tmp) / "bin"
+            stubs.mkdir()
+            if cosign_rc is not None:
+                (stubs / "cosign").write_text(f"#!/bin/sh\necho \"$@\" > {tmp}/cosign-args\nexit {cosign_rc}\n")
+                (stubs / "cosign").chmod(0o755)
+            script = self.helpers + fn + '\nCOSIGN_IDENTITY_REGEXP="^id$"\n'
+            script += ('find_release_asset_url() { echo https://x/SHA256SUMS.bundle; }\n' if bundle
+                       else 'find_release_asset_url() { return 1; }\n')
+            script += f'curl() {{ while [ $# -gt 0 ]; do [ "$1" = -o ] && touch "$2"; shift; done; }}\nPATH="{stubs}:/usr/bin:/bin"\nverify_release_signature "{tmp}"\n'
+            result = self.run_bash(script)
+            args = (Path(tmp) / "cosign-args").read_text() if (Path(tmp) / "cosign-args").exists() else ""
+            return result, args
+
+    def test_cosign_bundle_is_verified_when_cosign_is_present(self):
+        good, args = self.signature(cosign_rc=0)
+        self.assertEqual(good.returncode, 0, good.stdout)
+        self.assertIn("verify-blob", args)
+        self.assertIn("--certificate-oidc-issuer https://token.actions.githubusercontent.com", args)
+        bad, _ = self.signature(cosign_rc=1)
+        self.assertNotEqual(bad.returncode, 0, "a bad signature must refuse the bundle")
+        none, _ = self.signature(cosign_rc=None)
+        self.assertEqual(none.returncode, 0)
+        self.assertIn("cosign not installed", none.stdout)
+        old, _ = self.signature(cosign_rc=0, bundle=False)
+        self.assertEqual(old.returncode, 0)
+        self.assertIn("no SHA256SUMS.bundle", old.stdout)

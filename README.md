@@ -34,7 +34,7 @@ The installer creates an app home under `~/ggrun` with the launcher, models, con
 
 Before installing anything, it looks for an existing `llama-server`, the NVIDIA driver and the CUDA toolkit. It reuses an existing backend unless it fails to load. Otherwise it installs prebuilts (ik_llama.cpp CUDA on NVIDIA, plus llama.cpp Vulkan; CPU if neither runs) and builds from source only as a fallback. It never installs the NVIDIA driver; it asks before installing Vulkan runtime packages or the CUDA toolkit.
 
-Windows installs the latest release. Linux setup builds ggrun from current `main` (it fetches Go if needed).
+Both install the latest release; Linux builds it from the release tag (it fetches Go if needed). `LLM_SETUP_REF=main` builds the development branch instead.
 
 Installer controls, the app-home layout and uninstall steps are in [docs/install.md](docs/install.md).
 
