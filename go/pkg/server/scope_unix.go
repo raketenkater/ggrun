@@ -444,3 +444,59 @@ func setScopeMemoryLimitMB(unit string, mode scopeMode, cgroupFile, systemdPrope
 	}
 	return fmt.Errorf("set scope %s at %s", cgroupFile, path)
 }
+
+// cgroupFSRoot and scopeControlGroupFn are swapped in tests.
+var (
+	cgroupFSRoot        = "/sys/fs/cgroup"
+	scopeControlGroupFn = scopeControlGroup
+	scopeLimitWait      = 5 * time.Second
+)
+
+// errScopeLimitNotInForce means the backend runs in a scope whose hard memory
+// limit is not the one ggrun asked for.
+var errScopeLimitNotInForce = errors.New("backend memory limit is not in force")
+
+// verifyScopeMemoryLimit reads the scope's memory.max back after start. The
+// containment promise rests on it: systemd can accept MemoryMax= and still
+// leave memory.max at "max" (no memory controller delegated to the user
+// manager, a cgroup v1 host). A scope that cannot be found within the wait is
+// left to the normal readiness path, which reports an exited backend.
+func verifyScopeMemoryLimit(unit string, mode scopeMode, wantMB int) error {
+	if unit == "" || wantMB <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(scopeLimitWait)
+	for {
+		cgroup, err := scopeControlGroupFn(unit, mode)
+		if err == nil {
+			data, readErr := os.ReadFile(cgroupFSRoot + cgroup + "/memory.max")
+			if readErr == nil {
+				return checkMemoryMax(strings.TrimSpace(string(data)), wantMB)
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// checkMemoryMax accepts the requested limit within page rounding, or a
+// stricter one; "max" or a looser limit is not in force.
+func checkMemoryMax(value string, wantMB int) error {
+	if value == "max" {
+		return fmt.Errorf("%w: memory.max is \"max\", wanted %d MiB (is the memory controller delegated to this systemd manager?)", errScopeLimitNotInForce, wantMB)
+	}
+	got, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%w: unreadable memory.max %q", errScopeLimitNotInForce, value)
+	}
+	want := uint64(wantMB) << 20
+	const pageSlack = 64 << 10
+	if got > want+pageSlack {
+		return fmt.Errorf("%w: memory.max is %d MiB, wanted %d MiB", errScopeLimitNotInForce, got>>20, wantMB)
+	}
+	return nil
+}
+
+func scopeOptOutHintText() string { return scopeOptOutHint }

@@ -342,6 +342,14 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		close(p.done)
 	}()
 
+	if scopeUnit != "" {
+		// Fail closed: a launch admitted under a memory limit must not run
+		// without it.
+		if err := verifyScopeMemoryLimit(scopeUnit, owner, opts.MemoryMaxMB); err != nil {
+			_ = p.Stop()
+			return nil, fmt.Errorf("start server: %w."+scopeOptOutHintText(), err)
+		}
+	}
 	start := time.Now()
 	logStartupEvent(logStartupEvents, safeTermErr, "[launch] health check: polling http://%s:%d/health then /v1/models (timeout %s)", readinessHost(args), port, timeout)
 	logStartupEvent(logStartupEvents, safeTermErr, "%s", loadingIntro(args, timeout))
