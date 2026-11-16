@@ -103,17 +103,34 @@ func (s Store) Load(scope string) (Record, error) {
 	if strings.TrimSpace(s.CacheDir) == "" || strings.TrimSpace(scope) == "" {
 		return record, errors.New("profile store requires cache directory and scope")
 	}
-	data, err := os.ReadFile(s.path(scope))
+	record, ok, err := readRecord(s.path(scope), scope)
 	if err != nil {
-		return record, err
-	}
-	if err := json.Unmarshal(data, &record); err != nil {
 		return Record{}, err
 	}
-	if record.SchemaVersion != SchemaVersion || record.Scope != scope {
-		return Record{}, errors.New("profile schema or scope mismatch")
+	if !ok {
+		return Record{}, fmt.Errorf("profile record for %s set aside: %w", scope, os.ErrNotExist)
 	}
 	return record, nil
+}
+
+// readRecord reads one scope's record. A record that does not parse, or
+// belongs to another schema or scope, is moved aside and reported as absent
+// (ok false, nil error): an old or damaged cache must not block a launch, and
+// the evidence is kept for inspection rather than deleted.
+func readRecord(path, scope string) (Record, bool, error) {
+	var record Record
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Record{}, false, err
+	}
+	if json.Unmarshal(data, &record) == nil && record.SchemaVersion == SchemaVersion && record.Scope == scope {
+		return record, true, nil
+	}
+	aside := fmt.Sprintf("%s.unreadable-%d", path, time.Now().UnixNano())
+	if err := os.Rename(path, aside); err != nil {
+		return Record{}, false, fmt.Errorf("set aside unreadable profile record %s: %w", path, err)
+	}
+	return Record{}, false, nil
 }
 
 func (s Store) Begin(profile Profile) (Profile, error) {
@@ -228,13 +245,12 @@ func (s Store) update(scope string, mutate func(*Record) error) error {
 	defer release()
 
 	record := Record{SchemaVersion: SchemaVersion, Scope: scope}
-	if data, readErr := os.ReadFile(s.path(scope)); readErr == nil {
-		if err := json.Unmarshal(data, &record); err != nil {
-			return err
-		}
-		if record.SchemaVersion != SchemaVersion || record.Scope != scope {
-			return errors.New("profile schema or scope mismatch")
-		}
+	existing, ok, readErr := readRecord(s.path(scope), scope)
+	switch {
+	case ok:
+		record = existing
+	case readErr != nil && !os.IsNotExist(readErr):
+		return readErr
 	}
 	if err := mutate(&record); err != nil {
 		return err

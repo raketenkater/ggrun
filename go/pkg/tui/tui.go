@@ -860,8 +860,13 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "s", "S":
 			m.openSettings()
 		case "u", "U":
-			m.launchRequest = &LaunchRequest{Update: true}
-			return m, tea.Quit
+			// A stray key must not start a rebuild: ask first, Cancel default.
+			m.openChoice("Update ggrun now? This exits the TUI and rebuilds.", []string{"Cancel", "Update now"}, "Cancel", ScreenMain, func(cm *Model, choice string) {
+				if choice == "Update now" {
+					cm.launchRequest = &LaunchRequest{Update: true}
+				}
+			})
+			return m, nil
 		case "b", "B":
 			m.openBackendChoice(ScreenMain)
 		case "f", "F":
@@ -1745,7 +1750,7 @@ func (m Model) viewMain() string {
 	if m.modelUsage != nil && hasAnyUsage(m.modelUsage) {
 		b.WriteString(mutedStyle.Render("  sorted by usage: most-used and most-recent first") + "\n")
 	}
-	b.WriteString(mutedStyle.Render("  Enter configure · / or type to filter · x delete"))
+	b.WriteString(mutedStyle.Render("  Enter configure · / filter · x delete"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -3836,7 +3841,7 @@ func (m Model) updateChoice(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = m.choiceReturn
 				m.choiceApply(&m, m.choiceOptions[m.choiceCursor])
 			}
-			if m.launchRequest != nil && len(m.launchRequest.BackendArgs) > 0 {
+			if m.launchRequest != nil && (len(m.launchRequest.BackendArgs) > 0 || m.launchRequest.Update) {
 				return m, tea.Quit
 			}
 		case "q", "Q":
