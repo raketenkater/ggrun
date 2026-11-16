@@ -856,6 +856,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	if remoteErr != nil {
 		return nil, remoteErr
 	}
+	args, formErr := normalizeLaunchFlagForms(args)
+	if formErr != nil {
+		return nil, formErr
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -1114,7 +1118,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 					req.ChatTemplateOverride = entry.Name
 					continue
 				}
-				req.ExtraArgs = append(req.ExtraArgs, a)
+				// Same tokens as the space form, and once: without this
+				// continue the main switch passed it to the backend again.
+				req.ExtraArgs = append(req.ExtraArgs, key, val)
+				continue
 			}
 		}
 		next := func() (string, error) {
@@ -1458,7 +1465,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		default:
 			if strings.HasPrefix(a, "-") {
 				req.ExtraArgs = append(req.ExtraArgs, a)
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				if unknownFlagTakesNext(args, i, req.ModelPath != "") {
 					i++
 					req.ExtraArgs = append(req.ExtraArgs, args[i])
 				}
