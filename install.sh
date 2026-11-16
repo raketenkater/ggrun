@@ -1606,7 +1606,7 @@ fetch_nccl_into_box() {
         return 1
     fi
     local want="${LLM_INSTALL_NCCL_SHA256:-}"
-    [[ -z "$want" && "$url" == "$NCCL_DEFAULT_URL" ]] && want="$NCCL_DEFAULT_SHA256"
+    [[ -z "$want" && "$url" == "${NCCL_DEFAULT_URL:-}" ]] && want="${NCCL_DEFAULT_SHA256:-}"
     if [[ -n "$want" ]]; then
         local got
         got="$(sha256_of "$archive" || true)"
