@@ -4440,6 +4440,17 @@ func printVRAMLedger(strategy *placement.Strategy) {
 	}
 }
 
+// printLearnedReserves shows every stored overhead the plan charged, with its
+// date and source (print only; review P-14).
+func printLearnedReserves(label, cacheDir string, caps *detect.Capabilities) {
+	if caps == nil {
+		return
+	}
+	for _, line := range placement.LearnedReserveLines(label, placement.LearnedReserves(cacheDir, caps.GPUs)) {
+		fmt.Println(line)
+	}
+}
+
 func printOptimizationSummary(label string, strategy *placement.Strategy, detailed bool) {
 	for _, line := range optimizationSummaryLines(label, strategy, detailed) {
 		fmt.Println(line)
@@ -7395,6 +7406,7 @@ func cmdLaunch(args []string) {
 	} else {
 		strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, false)
 		printOptimizationSummary("optimize", strategy, false)
+		printLearnedReserves("optimize", cfg.CacheDir, caps)
 	}
 	req.CalibrationPending = pendingCalibration != nil
 	// A Claude profile is not verified by llama's OpenAI endpoint alone. Bring
@@ -8844,6 +8856,7 @@ func cmdDryRun(args []string) {
 		return
 	}
 	printOptimizationSummary("dry-run", strategy, true)
+	printLearnedReserves("dry-run", cfg.CacheDir, caps)
 	var displayEnv []string
 	if envPrefix != "" {
 		displayEnv = []string{envPrefix}
