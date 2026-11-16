@@ -330,15 +330,6 @@ func TestJournalPathAndCachedAgents(t *testing.T) {
 	}
 }
 
-func valueOf(args []string, key string) string {
-	for i, a := range args {
-		if a == key && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
-}
-
 // Going from --parallel 1 to 2 at the same --ctx-size halves the slot, which
 // the flag comparison alone reads as "cannot hold the session". Measured on a
 // live run the conversation was 82,846 tokens against a new slot of 131,072, so

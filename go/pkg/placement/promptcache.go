@@ -80,9 +80,6 @@ type PromptCacheObservation struct {
 	LargestCheckpointMB float64
 }
 
-// Measured reports whether the observation carries a usable per-token cost.
-func (o PromptCacheObservation) Measured() bool { return o.BytesPerToken > 0 }
-
 // ObservePromptCache extracts prompt-cache accounting from backend log output.
 // It reads whatever is present: the trace-level state line gives the per-token
 // cost directly, while eviction and skip lines still bound the entry size when
@@ -324,16 +321,6 @@ func RecordMeasuredPromptCache(cacheDir string, model *ModelProfile, ctxSize, ub
 	}
 	return writeProbeCacheForModel(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel,
 		compute, growth, estimated, kvPerLayerMB, probeMeasurements{BytesPerToken: bytesPerToken})
-}
-
-// MeasuredPromptCacheBytesPerToken returns a stored measurement, or 0 when this
-// shape has never been observed.
-func MeasuredPromptCacheBytesPerToken(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) float64 {
-	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
-	if pc == nil {
-		return 0
-	}
-	return pc.PromptCacheBytesPerToken
 }
 
 // LargestRoutedExpertLayerMB is the size of the biggest routed-expert layer,

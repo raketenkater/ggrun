@@ -10,8 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 # The model CI serves. A real one: the stories fixtures have training contexts
 # no real model has (stories15M caps a slot at 128 tokens), so CI kept asserting
@@ -25,6 +24,7 @@ jobs:
   preflight:
     name: preflight tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -74,6 +74,7 @@ jobs:
     name: package ${{ matrix.asset }}
     needs: preflight
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     # macOS is deprecated and best-effort: nobody here has a Mac to reproduce on,
     # so it must never hold a release. It still builds and its bundle is still
     # attached when it succeeds; when it fails, publish goes ahead without it.
@@ -237,6 +238,7 @@ jobs:
     name: package ggrun-windows-x86_64-cpu.zip
     needs: preflight
     runs-on: windows-latest
+    timeout-minutes: 60
     env:
       LLAMA_CPP_REF: d2462f8f7ac6d80070a587ffebf6cd73730f4280
       ASSET: ggrun-windows-x86_64-cpu.zip
@@ -355,6 +357,7 @@ jobs:
     name: package ggrun-linux-x86_64-cuda.tar.gz
     needs: preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     env:
       IK_LLAMA_REF: 1fddd12ba861c4815a8633f14d9c5670692099cc
@@ -438,6 +441,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [package, package-windows, package-cuda]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Only this job writes the release and signs with an OIDC identity.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -457,13 +465,13 @@ jobs:
           find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'install.sh' -o -name 'install.ps1' \) -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign release checksums
         run: cosign sign-blob --yes --bundle dist/SHA256SUMS.bundle dist/SHA256SUMS
 
       - name: Attach assets to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/*.tar.gz

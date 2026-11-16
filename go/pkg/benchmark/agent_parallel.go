@@ -330,10 +330,6 @@ func (r *Runner) runMixedAgentPhase(lanes, trial int) (int, time.Duration, float
 	return tokens, decode.elapsed, tokensPerSecond(tokens, decode.elapsed), nil
 }
 
-func agentBenchmarkLongPrompt(workloadID string, trial, lane int) string {
-	return agentBenchmarkLongPromptSized(workloadID, trial, lane, agentBenchmarkPromptLen)
-}
-
 func (r *Runner) agentBenchmarkLongPrompt(trial, lane int) string {
 	length := agentBenchmarkPromptLen
 	if r != nil && r.AgentPromptBytes > 0 {

@@ -1631,10 +1631,6 @@ func listRepoDraftCandidates(client *http.Client, repo, kind string) []string {
 	return paths
 }
 
-func draftFilenameLooksRelevant(name string) bool {
-	return draftFilenameLooksRelevantForKind(name, "draft")
-}
-
 func draftFilenameLooksRelevantForKind(name, kind string) bool {
 	name = strings.ToLower(name)
 	if isNonTextDraftGGUFName(name) {

@@ -156,20 +156,6 @@ func LocalReviewerModelPath(modelDir string) (string, bool) {
 	return "", false
 }
 
-// EnsureReviewerModel validates a user-supplied model, or downloads and
-// verifies the pinned default artifact on first use.
-func EnsureReviewerModel(ctx context.Context, appHome string, progress io.Writer) (string, error) {
-	return EnsureReviewerModelWithModelDir(ctx, appHome, "", progress)
-}
-
-// EnsureReviewerModelWithModelDir is EnsureReviewerModel plus a local model
-// directory: when the pinned artifact is already installed there (matching the
-// folder name in DefaultReviewerLocalDir), it is verified and used directly
-// instead of downloading a private copy.
-func EnsureReviewerModelWithModelDir(ctx context.Context, appHome, modelDir string, progress io.Writer) (string, error) {
-	return EnsureReviewerSpec(ctx, appHome, modelDir, defaultModel, progress)
-}
-
 // EnsureReviewerSpec validates or downloads one pinned reviewer artifact. The
 // caller passes the spec for the profile it is about to launch, because the
 // profile's VRAM reservation describes THAT model: installing a different

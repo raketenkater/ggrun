@@ -1046,10 +1046,6 @@ func (r *claudeAutoRuntime) clientPort(fallback int) int {
 	return fallback
 }
 
-func (r *claudeAutoRuntime) isRunning() bool {
-	return r != nil && r.reviewer != nil && r.reviewer.IsRunning()
-}
-
 func (r *claudeAutoRuntime) stop() {
 	if r == nil {
 		return

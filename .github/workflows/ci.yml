@@ -10,6 +10,7 @@ on:
 jobs:
   core-engine-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -28,6 +29,7 @@ jobs:
 
   windows-terminal:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -43,10 +45,11 @@ jobs:
 
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@2.0.0
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: .
           # Gate on real bugs only for maintained shell entrypoints.
@@ -54,6 +57,7 @@ jobs:
 
   go-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -76,8 +80,29 @@ jobs:
           GOARCH: amd64
         run: go vet ./...
 
+  memguard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test the CUDA memory guard
+        run: make -C native/memguard test
+
+  deadcode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: No unreachable functions
+        run: scripts/check-deadcode.sh
+
   go-cross-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +130,7 @@ jobs:
 
   parser-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -115,6 +141,7 @@ jobs:
 
   estimator-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -129,6 +156,7 @@ jobs:
 
   safety-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -143,6 +171,7 @@ jobs:
 
   setup-home-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -163,6 +192,7 @@ jobs:
 
   model-index-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -173,6 +203,7 @@ jobs:
 
   moe-placement-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -187,6 +218,7 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -202,6 +234,7 @@ jobs:
 
   installer-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -225,6 +258,7 @@ jobs:
 
   package-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Install patchelf
@@ -250,6 +284,7 @@ jobs:
 
   package-windows-smoke:
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -313,6 +348,7 @@ jobs:
 
   release-install-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -366,6 +402,7 @@ jobs:
 
   release-install-macos-smoke:
     runs-on: macos-14
+    timeout-minutes: 60
     # macOS is a headless-serving target. Require the packaged install/default
     # CPU-launch smoke alongside native remote contracts. This synthetic backend
     # does not establish real Metal inference support.
@@ -419,6 +456,7 @@ jobs:
     # tests a locally-built zip, so this is the only job that catches general
     # breakage in the remote download / backend-launch flow (e.g. issue #18).
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Parse-check install.ps1 (pwsh 7 + Windows PowerShell 5.1)

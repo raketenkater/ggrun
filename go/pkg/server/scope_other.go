@@ -2,8 +2,10 @@
 
 package server
 
-import "fmt"
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 func scopedCommandArgs(args []string, memoryMaxMB int) ([]string, error) {
 	return scopedCommandArgsWithUnit(args, memoryMaxMB, "")

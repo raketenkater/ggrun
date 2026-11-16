@@ -181,21 +181,6 @@ func (w *admissionWork) beginLoad(configured time.Duration) (time.Duration, erro
 	return timeout, nil
 }
 
-// boundCheap limits a step that reads no weights (the no-allocation oracle) to
-// the admission's remaining window without charging a load.
-func (w *admissionWork) boundCheap(configured time.Duration) time.Duration {
-	if w == nil {
-		return configured
-	}
-	if remaining := w.remaining(); remaining < configured {
-		if remaining < time.Second {
-			return time.Second
-		}
-		return remaining
-	}
-	return configured
-}
-
 // launchWorkRecord is one line of the local launch-work ledger. Every
 // weight-reading start is recorded whatever its outcome, so the cost of a
 // launch can be reconstructed without trusting printed progress.

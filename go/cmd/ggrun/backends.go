@@ -332,13 +332,6 @@ func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 	return nil
 }
 
-// prepareForkCheckout updates a ggrun-owned fork checkout without trampling
-// local edits. A commit pin wins; otherwise the requested branch (or remote
-// default HEAD) advances to its latest fetched revision.
-func prepareForkCheckout(srcDir, branch, commit string) error {
-	return prepareForkCheckoutRecipe(srcDir, branch, commit, nil)
-}
-
 // resolveShortCommit expands an abbreviated pin to the full commit id. Servers
 // only fetch unadvertised commits by full id, and a llama.cpp build reports
 // just seven hex digits in --version ("version: 1 (d2462f8)"), so the CUDA

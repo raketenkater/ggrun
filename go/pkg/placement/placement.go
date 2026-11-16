@@ -4380,24 +4380,6 @@ func nextUBatchForDeficit(current, allocMB, deficitMB int) (int, bool) {
 	return lower[len(lower)-1], true
 }
 
-// DerateCUDAOOMArgs preserves the historical API for callers that only have an
-// allocation size. New recovery code should call DerateCUDAOOMArgsForDeficit so
-// allocation and deficit cannot be conflated. When the allocation exceeds the
-// current free-memory reading, that difference is usable deficit evidence;
-// otherwise the wrapper makes the smallest monotonic correction.
-func DerateCUDAOOMArgs(args []string, model *ModelProfile, caps *detect.Capabilities, device, allocMB int, isComputeBuffer bool) ([]string, *CacheEntry, bool) {
-	deficitMB := 1
-	if caps != nil {
-		for _, g := range caps.GPUs {
-			if g.Index == device && allocMB > g.VRAMFreeMB() {
-				deficitMB = allocMB - g.VRAMFreeMB()
-				break
-			}
-		}
-	}
-	return DerateCUDAOOMArgsForDeficit(args, model, caps, device, allocMB, deficitMB, isComputeBuffer)
-}
-
 // DerateCUDAOOMArgsForDeficit recovers from one typed cudaMalloc failure.
 // allocMB is the measured failed component; deficitMB is how far it exceeded
 // the guarded device budget. Compute recovery skips ubatch rungs disproved by
@@ -6504,30 +6486,6 @@ func computeAutoContextSize(caps *detect.Capabilities, model *ModelProfile, tota
 	// Preset qualities may fall back to the compact type. An exact llama.cpp
 	// type is user-owned, so preserve it and lower context instead.
 	return 32768, fallbackKVType(model, preferredKVType, opts.KVQuality)
-}
-
-// AutoContextFitVRAM reports the largest context whose KV cache fits alongside
-// the model weights in the VRAM this machine has, and the KV type that achieves
-// it. It is the "fit" answer: callers that want a large window can use it as a
-// ceiling so a generous default does not silently push the KV cache onto the
-// host, which costs far more speed than the extra window is worth.
-//
-// Returns 0 when there is nothing to size against, so callers keep their own
-// default rather than treating an unknown as a constraint.
-func AutoContextFitVRAM(caps *detect.Capabilities, model *ModelProfile, totalSizeMB int, kvType string, opts Options) (int, string) {
-	if caps == nil || model == nil || len(caps.GPUs) == 0 {
-		return 0, kvType
-	}
-	if totalSizeMB <= 0 {
-		totalSizeMB = model.TotalSizeMB
-	}
-	if totalSizeMB <= 0 {
-		totalSizeMB = int(model.SizeBytes / 1024 / 1024)
-	}
-	if totalSizeMB <= 0 {
-		return 0, kvType
-	}
-	return computeAutoContextSize(caps, model, totalSizeMB, kvType, opts)
 }
 
 // Args converts a Strategy into llama-server command-line arguments.
@@ -9923,29 +9881,6 @@ func splitCompactKey(split []float64) string {
 		parts[i] = fmt.Sprintf("%.2f", v)
 	}
 	return strings.Join(parts, ",")
-}
-
-// WriteProbeCache writes a legacy probe cache. Prefer WriteProbeCacheForModel,
-// which writes to the same runtime-signature key that loadProbeCache reads.
-func WriteProbeCache(cacheDir, modelName string, computeBufMB, kvPerLayerMB int) error {
-	if cacheDir == "" {
-		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "ggrun", "probes")
-	}
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return err
-	}
-	// Sanitize model name for filename
-	safeName := strings.ReplaceAll(modelName, "/", "_")
-	path := filepath.Join(cacheDir, safeName+".probe")
-	content := fmt.Sprintf(
-		"# Probe cache for %s\n"+
-			"# Generated: %s\n"+
-			"PROBED_COMPUTE_BUF_MB=%d\n"+
-			"PROBED_KV_PER_LAYER_MB=%d\n",
-		modelName, time.Now().Format(time.RFC3339), computeBufMB, kvPerLayerMB,
-	)
-	return atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // WriteProbeCacheForModel writes measured compute-buffer and KV sizes to the

@@ -40,13 +40,6 @@ const (
 // Release builds override it: go build -ldflags "-X github.com/raketenkater/ggrun/pkg/update.currentVersion=vX.Y.Z"
 var currentVersion = "v3.2.0-go"
 
-// PromptOnStartup checks local repos for updates and asks interactive users
-// whether to run the updater. It intentionally skips non-interactive shells so
-// scripts and CI never block on network or stdin.
-func PromptOnStartup() {
-	PromptOnStartupWithBackendUpdater(nil)
-}
-
 // PromptOnStartupWithBackendUpdater lets the command package extend the update
 // transaction with registered forks while this package keeps terminal/dismiss
 // policy in one place. A nil callback preserves the generic-backend behavior.
@@ -925,21 +918,6 @@ func restoreRunningBinary(exe, old string) {
 	}
 }
 
-// RemoveReplacedBinary deletes the binaries a Windows update moved aside. It
-// fails harmlessly while an old process is still running.
-func RemoveReplacedBinary() {
-	if exe := runningBinaryPath(); exe != "" {
-		removeReplacedBinaries(exe)
-	}
-}
-
-func removeReplacedBinaries(exe string) {
-	stale, _ := filepath.Glob(exe + ".*old")
-	for _, path := range stale {
-		_ = os.Remove(path)
-	}
-}
-
 func powershellInstallCommand(installerPath, appHome string) (*exec.Cmd, error) {
 	shell := ""
 	for _, candidate := range []string{"pwsh", "powershell.exe", "powershell"} {
@@ -1139,14 +1117,6 @@ func installedLLMServerPath() string {
 	return ""
 }
 
-func downloadFile(url, dst string, mode os.FileMode) error {
-	data, err := downloadBytes(url, maxDownloadBytes)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, mode)
-}
-
 func releaseAssetURL(tag, name string) string {
 	return fmt.Sprintf(githubReleaseAssetURL, githubRepo, tag, name)
 }
@@ -1232,154 +1202,6 @@ func rawInstallerURLForName(tag, name string) string {
 		return rawInstallerPSURLForRef(tag)
 	}
 	return rawInstallerURL(tag)
-}
-
-// UpdateBackend updates a backend repo (ik_llama.cpp or llama.cpp).
-func UpdateBackend(name, repoDir string, walkback int) error {
-	buildDir := filepath.Join(repoDir, "build")
-	binary := filepath.Join(buildDir, "bin", "llama-server")
-	fallbackDir := filepath.Join(homeDir(), ".cache", "ggrun", "update-fallbacks")
-	os.MkdirAll(fallbackDir, 0755)
-
-	fmt.Printf("\n═══ Updating %s ═══\n", name)
-	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
-		fmt.Printf("  Skip: %s is not a git repo\n", repoDir)
-		return fmt.Errorf("not a git repo")
-	}
-
-	oldCommit, _ := gitRevParse(repoDir, "HEAD")
-	branch, _ := gitSymbolicRef(repoDir)
-	if branch == "" {
-		// Detached HEAD (e.g. a checkout of a pinned commit): `git pull` refuses
-		// to run, so the backend silently stayed stale. Re-attach to the default
-		// branch first; fall back to master/main if origin/HEAD isn't set.
-		branch = "master"
-		if out, err := exec.Command("git", "-C", repoDir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").Output(); err == nil {
-			if b := strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"); b != "" {
-				branch = b
-			}
-		}
-		fmt.Printf("  Detached HEAD — checking out %s before pull\n", branch)
-		if out, err := exec.Command("git", "-C", repoDir, "checkout", branch).CombinedOutput(); err != nil {
-			fmt.Printf("  FAILED: git checkout %s: %v\n%s\n", branch, err, strings.TrimSpace(string(out)))
-			return fmt.Errorf("git checkout %s failed: %v", branch, err)
-		}
-	}
-
-	oldHash := ""
-	if _, err := os.Stat(binary); err == nil {
-		oldHash = md5sum(binary)
-	}
-	fmt.Printf("  Current: %s\n", oldCommit)
-
-	// Backup working binary outside build dir
-	binaryBackup := filepath.Join(repoDir, ".ggrun.llama-server.backup")
-	if _, err := os.Stat(binary); err == nil {
-		cp(binary, binaryBackup)
-		fmt.Println("  Backed up working binary")
-	}
-
-	// Check for dirty tree
-	if dirty, _ := gitStatusPorcelain(repoDir); dirty != "" {
-		fmt.Println("  Skip: working tree has uncommitted changes:")
-		lines := strings.Split(dirty, "\n")
-		for i, l := range lines {
-			if i >= 5 {
-				break
-			}
-			fmt.Printf("    %s\n", l)
-		}
-		fmt.Printf("    (commit or stash them in %s, then re-run --update)\n", repoDir)
-		os.Remove(binaryBackup)
-		return fmt.Errorf("dirty tree")
-	}
-
-	if out, err := gitPullFFOnly(repoDir); err != nil {
-		fmt.Println("  Warning: fast-forward pull failed, trying rebase...")
-		if out2, err2 := gitPullRebase(repoDir); err2 != nil {
-			fmt.Printf("  FAILED: git pull failed — skipping %s\n", name)
-			os.Remove(binaryBackup)
-			return fmt.Errorf("git pull failed: %v | %v", err, err2)
-		} else {
-			fmt.Println(strings.TrimSpace(out2))
-		}
-	} else {
-		fmt.Println(strings.TrimSpace(out))
-	}
-
-	newCommit, _ := gitRevParse(repoDir, "HEAD")
-	if oldCommit == newCommit {
-		if validateErr := activeBuildComplete(buildDir); validateErr == nil {
-			fmt.Println("  Already up to date and active backend passes conformance.")
-			os.Remove(binaryBackup)
-			return nil
-		} else {
-			fmt.Printf("  Source is current but active backend failed conformance (%v); rebuilding.\n", validateErr)
-		}
-	}
-	fmt.Printf("  Updated: %s\n", newCommit)
-
-	// Walk-back: if HEAD fails to build/test, try up to N-1 parent commits
-	if walkback <= 0 {
-		walkback = 3
-	}
-	var successCommit string
-	for attempt := 0; attempt < walkback; attempt++ {
-		targetCommit := newCommit
-		if attempt > 0 {
-			targetCommit, _ = gitRevParse(repoDir, newCommit+"~"+strconv.Itoa(attempt))
-			if targetCommit == "" {
-				break
-			}
-			fmt.Printf("\n  ── Attempt %d/%d: walking back to %s ──\n", attempt+1, walkback, targetCommit)
-			gitCheckoutQuiet(repoDir, targetCommit)
-		}
-		if buildAndTest(repoDir, buildDir) {
-			successCommit = targetCommit
-			break
-		}
-	}
-
-	if successCommit == "" {
-		fmt.Printf("\n  All %d attempts failed — rolling back to previous version...\n", walkback)
-		gitCheckout(repoDir, oldCommit)
-		if _, err := os.Stat(binaryBackup); err == nil {
-			cp(binaryBackup, binary)
-		}
-		fmt.Printf("  Rolled back to %s\n", oldCommit)
-		os.Remove(binaryBackup)
-		return fmt.Errorf("all build attempts failed")
-	}
-
-	if successCommit != newCommit {
-		marker := filepath.Join(fallbackDir, strings.ReplaceAll(name, "/", "_")+".env")
-		f, _ := os.Create(marker)
-		if f != nil {
-			fmt.Fprintf(f, "repo_dir=%q\n", repoDir)
-			fmt.Fprintf(f, "branch=%q\n", branch)
-			fmt.Fprintf(f, "head_commit=%q\n", newCommit)
-			fmt.Fprintf(f, "fallback_commit=%q\n", successCommit)
-			fmt.Fprintf(f, "recorded_at=%q\n", time.Now().UTC().Format(time.RFC3339))
-			f.Close()
-		}
-		fmt.Printf("  Walk-back succeeded at %s\n", successCommit)
-		fmt.Printf("  Reattaching repo to branch '%s' while keeping built fallback binary.\n", branch)
-		gitCheckoutQuiet(repoDir, branch)
-	}
-
-	newHash := ""
-	if _, err := os.Stat(binary); err == nil {
-		newHash = md5sum(binary)
-	}
-	if oldHash == newHash {
-		fmt.Println("  Binary unchanged (no relevant code changes)")
-	} else {
-		fmt.Println("  New binary built successfully ✓")
-	}
-
-	os.Remove(binaryBackup)
-	fmt.Printf("  %s updated: %s\n", name, successCommit)
-	return nil
 }
 
 // BackendBuildTarget is one active, source-built generic backend. BuildDir is
@@ -2084,10 +1906,6 @@ func gitStatusPorcelain(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-func gitCheckout(dir, rev string) error {
-	return exec.Command("git", "-C", dir, "checkout", rev).Run()
-}
-
 // gitResetHard moves the checked-out branch back to rev. A checkout of the
 // hash would detach HEAD, and every later `git pull --ff-only` would refuse.
 func gitResetHard(dir, rev string) error {
@@ -2129,4 +1947,19 @@ func cp(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0755)
+}
+
+func removeReplacedBinaries(exe string) {
+	stale, _ := filepath.Glob(exe + ".*old")
+	for _, path := range stale {
+		_ = os.Remove(path)
+	}
+}
+
+// RemoveReplacedBinary deletes the binaries a Windows update moved aside. It
+// fails harmlessly while an old process is still running.
+func RemoveReplacedBinary() {
+	if exe := runningBinaryPath(); exe != "" {
+		removeReplacedBinaries(exe)
+	}
 }
