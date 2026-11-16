@@ -577,6 +577,7 @@ type Router struct {
 	stopPollOnce  sync.Once
 	mainActive    atomic.Int64
 	mainQueued    atomic.Int64
+	watch         classifierWatch
 	metrics       *metricsSink
 }
 
@@ -713,6 +714,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.ContentLength = int64(len(body))
 		}
 		if IsClassifierRequest(body) {
+			router.watch.sawClassifier()
 			// A classifier/security request is normally the separate reviewer's
 			// job. Two user-approved (Option A) cases route it to the MAIN model
 			// instead, each with a visible notice — never silently:
@@ -795,6 +797,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.Body = io.NopCloser(bodyReader(body))
 			r.ContentLength = int64(len(body))
 		}
+		router.watch.sawMain(body)
 		// Main-model work only: the reviewer is a different model with its own
 		// template, and its conversations are short enough that a missing
 		// checkpoint costs little.

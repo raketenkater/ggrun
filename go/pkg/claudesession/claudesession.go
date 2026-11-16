@@ -483,6 +483,17 @@ func projectDir(projectsDir, workDir, sessionID string) string {
 	return exact
 }
 
+// TranscriptPresent reports whether Claude Code's transcript for sessionID is
+// where ggrun expects it. False for a session ggrun recorded means Claude
+// Code's private layout moved and resume measurements would be empty
+// (review I-06).
+func TranscriptPresent(projectsDir, workDir, sessionID string) bool {
+	if projectsDir == "" || sessionID == "" {
+		return false
+	}
+	return sessionPresent(projectDir(projectsDir, workDir, sessionID), sessionID)
+}
+
 func sessionPresent(dir, sessionID string) bool {
 	if _, err := os.Stat(filepath.Join(dir, sessionID+".jsonl")); err == nil {
 		return true
