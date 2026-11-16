@@ -183,7 +183,7 @@ A smaller new model went through the same download-to-agent flow. Nanbeige4.3-33
 - Large models from an HDD are slow to start (1,621-3,372 s to ready in the table above) and slow to prefill cold.
 - The downloader picks the largest quant that fits VRAM without reserving context. Nanbeige4.3-33B Q8_0 got 34,816 tokens on 1 slot.
 - MiniMax-M3.1-Flash needs an unmerged llama.cpp PR (#31192) registered as a custom backend. On that run the backend did not follow ggrun's plan (KV cache on CPU, RTX 3090 Ti unused), and admission did not catch it.
-- AI Tune gains are marginal, and speculative decoding was slower on code in the published test. Both are opt-in.
+- Speculative decoding was slower on code in the published test; it is opt-in.
 - Claude Code is a separate install, and the local model's quality limits how well tool use works.
 
 ## Useful commands

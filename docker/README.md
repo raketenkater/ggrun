@@ -51,7 +51,7 @@ The OpenAI-compatible API is then on `http://localhost:8081/v1`.
 
 Volumes:
 - `/models` — your GGUF files (and downloaded vision projectors / quants)
-- `/cache` — AI Tune and probe cache (persist it to keep tuned configs)
+- `/cache` — probe and placement cache (persist it to keep measurements)
 
 ## Full stack with Open WebUI
 
@@ -63,12 +63,11 @@ MODEL=/models/your-model.gguf docker compose up
 
 ## Notes
 
-- GPU placement, KV/batch sizing, and AI Tune work the same as on the host —
+- GPU placement and KV/batch sizing work the same as on the host —
   the launcher detects the GPUs exposed to the container.
 - These images ship the **mainline** llama.cpp backend. The faster
   ik_llama.cpp CUDA path is a source build (see the top-level README); it is not
   bundled in the container by default.
-- Set `LLM_COMMUNITY_TUNES=off` to disable the shared tune-config lookup.
 - Containers have no systemd, so the images set `GGRUN_SCOPE_MODE=none`: the
   backend runs without ggrun's per-backend cgroup scope. Pre-launch memory
   admission still applies; use `docker run --memory` as the hard limit.

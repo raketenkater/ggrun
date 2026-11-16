@@ -44,7 +44,6 @@ import (
 	"github.com/raketenkater/ggrun/pkg/recovery"
 	"github.com/raketenkater/ggrun/pkg/server"
 	"github.com/raketenkater/ggrun/pkg/tui"
-	"github.com/raketenkater/ggrun/pkg/tune"
 	"github.com/raketenkater/ggrun/pkg/update"
 
 	"github.com/charmbracelet/x/term"
@@ -121,7 +120,7 @@ func main() {
 	case "download":
 		cmdDownload(args[1:])
 	case "tune":
-		cmdTune(args[1:])
+		aiTuneRemoved("ggrun tune")
 	case "spec-test":
 		cmdSpecTest(args[1:])
 	case "recommend":
@@ -295,16 +294,14 @@ func dispatchCompat(args []string) bool {
 		return false
 	}
 	if hasArg(args, "--show-configs") {
-		cmdShowConfigs(args)
-		return true
+		aiTuneRemoved("--show-configs")
 	}
 	if hasArg(args, "--download") {
 		cmdDownload(downloadCompatArgs(args))
 		return true
 	}
 	if hasArg(args, "--ai-tune") {
-		cmdTune(args)
-		return true
+		aiTuneRemoved("--ai-tune")
 	}
 	if hasArg(args, "--benchmark") {
 		if firstPositional(args) != "" {
@@ -618,7 +615,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
+			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
 				skip = true
 			}
 			continue
@@ -972,9 +969,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.Backend, req.BackendExplicit = parseBackendFlag(val)
 				continue
 			case "--tune-cache":
-				req.TuneCache = val
-				continue
-			case "--rounds":
+				return nil, errAITuneRemoved(key)
+			case "--rounds": // spec-test's measurement rounds; read there
 				continue
 			case "--ram-budget":
 				budget, err := parseBudgetFlag(key, val)
@@ -1164,7 +1160,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 			req.Calibrate = mode
 			continue
-		case "--dry-run", "--emit-server-argv-json", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
+		case "--ai-tune", "--retune", "--show-configs", "--tune-cache":
+			return nil, errAITuneRemoved(a)
+		case "--rounds": // spec-test's measurement rounds; read there
+			if _, err := next(); err != nil {
+				return nil, err
+			}
+		case "--dry-run", "--emit-server-argv-json", "--download", "--keep-alive":
 			if a == "--emit-server-argv-json" {
 				req.EmitServerArgvJSON = true
 			}
@@ -1311,17 +1313,6 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.Backend, req.BackendExplicit = parseBackendFlag(v)
-		case "--tune-cache":
-			v, err := next()
-			if err != nil {
-				return nil, err
-			}
-			req.TuneCache = v
-		case "--rounds":
-			_, err := next()
-			if err != nil {
-				return nil, err
-			}
 		case "--ram-budget":
 			v, err := next()
 			if err != nil {
@@ -2981,7 +2972,6 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		ForceSpecMoE:            req.ForceSpecMoE,
 		BackendHelp:             be.Help,
 		SpecCandidateValidator:  backendSpecCandidateValidator(be, model.ModelArch),
-		CacheFile:               req.TuneCache,
 		Parallel:                req.Parallel,
 		ParallelExplicit:        req.ParallelSet,
 		Threads:                 req.Threads,
@@ -3270,7 +3260,6 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = append(serverArgs, hy3TemplateArgs(req.ExtraArgs, be)...)
 	serverArgs = append(serverArgs, catalogTemplateArgs(req, cfg, model)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
-	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
 	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, claudeCodeShiftableContext(model, strategy))
@@ -6891,7 +6880,7 @@ func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelPro
 		"gpus=" + req.GPUsFlag,
 		"vision=" + strconv.FormatBool(req.VisionAuto),
 		"mmproj=" + req.MMProjPath,
-		"tune=" + req.TuneCache,
+		"tune=", // AI Tune was removed; kept so existing evidence keys do not change
 		"spec=" + req.SpecMode,
 		"force-spec-moe=" + strconv.FormatBool(req.ForceSpecMoE),
 		"ram-budget=" + strconv.Itoa(req.RamBudgetMB),
@@ -8135,115 +8124,6 @@ func waitForShutdownOrCrash(p *server.Process, sigCh <-chan os.Signal) bool {
 	}
 }
 
-func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTag string, vision bool, caps *detect.Capabilities) []string {
-	if req == nil {
-		return serverArgs
-	}
-	if req.TuneCache != "" {
-		return applySelectedTuneCache(req, serverArgs, caps)
-	}
-	if req.ClaudeCode {
-		// Generic and community throughput tunes do not encode the agent
-		// scheduler, context, cache, or semantic-validation workload. They may
-		// override -b/-ub after Claude's fairness adjustment, so fail closed until
-		// the validation registry can select profile-scoped evidence.
-		fmt.Println("[tune] Skipping automatic generic/community tune for Claude Code; use an explicit --tune-cache after workload validation.")
-		return serverArgs
-	}
-	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, "", tuneHardwareHash(caps))
-	if path == "" {
-		// No local tune for this model+hardware+backend: try the community
-		// pool. Downloads are sanitized to the tune-flag allow-list and both
-		// hits and misses are cached on disk, so launches stay offline-safe.
-		path = tune.FetchCommunityTune(cacheDir, req.ModelPath, gpuNamesFromCaps(caps), vision, backendTag)
-		if path == "" {
-			return serverArgs
-		}
-		fmt.Printf("[tune] Using community-shared config: %s (LLM_COMMUNITY_TUNES=off to disable)\n", filepath.Base(path))
-	} else {
-		fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
-	}
-	autoReq := *req
-	autoReq.TuneCache = path
-	return applySelectedTuneCache(&autoReq, serverArgs, caps)
-}
-
-func gpuNamesFromCaps(caps *detect.Capabilities) []string {
-	if caps == nil {
-		return nil
-	}
-	names := make([]string, 0, len(caps.GPUs))
-	for _, gpu := range caps.GPUs {
-		names = append(names, gpu.Name)
-	}
-	return names
-}
-
-func bestTuneCachePath(cacheDir, modelName, backendTag string, vision bool, workload, hardwareHash string) string {
-	if cacheDir == "" || modelName == "" {
-		return ""
-	}
-	rows := tune.ListTunedConfigs(cacheDir, modelName, tuneCacheBackendTag(backendTag), vision)
-	for _, row := range rows {
-		if row.Workload != workload {
-			continue
-		}
-		if hardwareHash == "" || strings.Contains(filepath.Base(row.Path), "_hw"+hardwareHash+"_") {
-			return row.Path
-		}
-	}
-	return ""
-}
-
-func tuneHardwareHash(caps *detect.Capabilities) string {
-	if caps == nil {
-		return ""
-	}
-	names := make([]string, 0, len(caps.GPUs))
-	for _, gpu := range caps.GPUs {
-		names = append(names, gpu.Name)
-	}
-	if len(names) == 0 {
-		return ""
-	}
-	return tune.BashHardwareHash(names)
-}
-
-func tuneCacheBackendTag(backendTag string) string {
-	b := strings.ToLower(strings.TrimSpace(backendTag))
-	switch {
-	case strings.Contains(b, "vulkan"):
-		return "vulkan"
-	case strings.Contains(b, "ik"):
-		return "ik"
-	default:
-		return "llama"
-	}
-}
-
-func applySelectedTuneCache(req *launchRequest, serverArgs []string, caps *detect.Capabilities) []string {
-	if req == nil || req.TuneCache == "" {
-		return serverArgs
-	}
-	summary, err := tune.LoadTuneFile(req.TuneCache, filepath.Base(req.ModelPath))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid --tune-cache: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("[tune] Using selected AI-tuned config: %s\n", filepath.Base(req.TuneCache))
-	if summary.BaselineWins || len(summary.Flags) == 0 {
-		fmt.Println("[tune] Baseline was best; no override flags applied")
-		return serverArgs
-	}
-	if reason := tuneCacheVRAMGuard(serverArgs, summary.Flags, caps); reason != "" {
-		fmt.Printf("[tune] Skipping cached config %s: %s\n", summary.Name, reason)
-		return serverArgs
-	}
-	serverArgs = tune.ApplyOverrides(serverArgs, summary.Flags, tune.QualityProtectedFlags())
-	fmt.Printf("[tune] Config: %s (expected %.2f tok/s)\n", summary.Name, summary.GenTPS)
-	return serverArgs
-}
-
 func canonicalLaunchFlagName(flag string) string {
 	if idx := strings.Index(flag, "="); idx > 0 {
 		flag = flag[:idx]
@@ -8675,12 +8555,7 @@ func cmdGUI() {
 			fmt.Fprintf(os.Stderr, "Warning: could not save latest TUI launch configuration: %v\n", err)
 		}
 		// Launch usage is recorded inside cmdLaunch (the shared real-server
-		// path for both CLI and TUI launches), so no record is needed here; the
-		// AI-tune path below intentionally skips a server launch.
-		if req.AITune {
-			cmdTune(launchArgs)
-			return
-		}
+		// path for both CLI and TUI launches), so no record is needed here.
 		cmdLaunch(launchArgs)
 		return
 	}
@@ -9385,44 +9260,6 @@ func isServerRunning(host string, port int) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func cmdShowConfigs(args []string) {
-	cfg := loadConfigOrExit()
-	modelName := ""
-	for _, a := range args {
-		if a == "--show-configs" || strings.HasPrefix(a, "-") {
-			continue
-		}
-		modelName = filepath.Base(a)
-		break
-	}
-	if modelName != "" {
-		var rows []tune.ConfigEntry
-		for _, backend := range []string{"llama", "ik", "ik_llama", "vulkan"} {
-			rows = append(rows, tune.ListTunedConfigs(cfg.CacheDir, modelName, backend, false)...)
-			rows = append(rows, tune.ListTunedConfigs(cfg.CacheDir, modelName, backend, true)...)
-		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i].GenTPS > rows[j].GenTPS })
-		if len(rows) == 0 {
-			fmt.Printf("No tuned configs found for %s in %s\n", modelName, cfg.CacheDir)
-			return
-		}
-		for _, row := range rows {
-			fmt.Printf("%s\n  %s\n", row.Label, row.Path)
-		}
-		return
-	}
-
-	matches, _ := filepath.Glob(filepath.Join(cfg.CacheDir, "tune_*.json"))
-	sort.Strings(matches)
-	if len(matches) == 0 {
-		fmt.Printf("No tuned configs found in %s\n", cfg.CacheDir)
-		return
-	}
-	for _, path := range matches {
-		fmt.Println(path)
-	}
-}
-
 func cmdProbe() {
 	mem, err := probe.Probe()
 	if err != nil {
@@ -9589,189 +9426,6 @@ func cmdDownload(args []string) {
 	if err := d.RunQuant(repo, quant, downloadPlanningCaps(caps, cfg)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-}
-
-func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
-	if fallback <= 0 {
-		fallback = 8
-	}
-	for i := 0; i < len(args); i++ {
-		if key, val, ok := strings.Cut(args[i], "="); ok && (key == "--rounds" || key == "-rounds") {
-			n, err := parsePositiveFlag(key, val)
-			if err != nil {
-				return 0, err
-			}
-			return n, nil
-		}
-		if args[i] == "--rounds" || args[i] == "-rounds" {
-			if i+1 >= len(args) {
-				return 0, fmt.Errorf("%s requires a value", args[i])
-			}
-			n, err := parsePositiveFlag(args[i], args[i+1])
-			if err != nil {
-				return 0, err
-			}
-			return n, nil
-		}
-	}
-	return fallback, nil
-}
-
-func cmdTune(args []string) {
-	req, err := parseLaunchArgs(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(2)
-	}
-	if req.RemoteClaude.Headless {
-		fmt.Fprintln(os.Stderr, "Remote client mode requires a persistent launch; use ggrun launch MODEL --claude-code --headless instead of tune.")
-		os.Exit(2)
-	}
-	if req.ModelPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun tune <model.gguf>")
-		os.Exit(2)
-	}
-
-	cfg := loadConfigOrExit()
-	rounds, err := tuneRoundsFromArgs(args, cfg.TuneRounds)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(2)
-	}
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
-
-	model, err := parseModel(req.ModelPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
-		os.Exit(1)
-	}
-	warnModelCompatibility(model)
-
-	be := resolveLaunchBackend(req, model, caps)
-	if be == nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", backendUnavailableMessage(req))
-		os.Exit(1)
-	}
-	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
-	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
-		fmt.Printf("[tune] GPU restriction: %s\n", env)
-	}
-	applyVulkanDeviceOrder(req, be, caps)
-
-	tuneOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-	tuneOpts.ReasoningOff = true // tuning measures throughput, so think-free like benchmarks
-	strategy, err := placement.Compute(caps, model, tuneOpts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
-		os.Exit(1)
-	}
-	strategy.BackendTag = backendDialect(be)
-	// Tune the same slot/batch policy that a real Claude launch uses. Without
-	// this, an agent-parallel tune can benchmark an uncapped hybrid prefill and
-	// later override the fairness policy it was meant to improve.
-	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	agentParallel := 0
-	agentWorkload := ""
-	minTuneImprovement := 0.0
-	if req.ClaudeCode && model.HasSSM > 0 && strategy.Parallel > 1 {
-		agentParallel = strategy.Parallel
-		minTuneImprovement = calibrationMinImprovementPct
-		kvTypeV := strategy.KVTypeV
-		if kvTypeV == "" {
-			kvTypeV = strategy.KVType
-		}
-		agentWorkload = fmt.Sprintf("%s-p%d-c%d-k%s-v%s-%s-%s",
-			tune.AgentParallelWorkloadPrefix, strategy.Parallel, strategy.ContextSize,
-			strategy.KVType, kvTypeV, strategy.KVPlacement, strategy.Type)
-		fmt.Printf("[tune] parallel agent workload: %d slots; ranking safe flags by repeated cache-backed turn time (batch/ubatch remain placement-owned; use --calibrate on to screen pairs)\n", strategy.Parallel)
-	}
-
-	// A completed tune for this model/hardware/backend is reused unless the
-	// user explicitly asks for a fresh run with --retune.
-	if !hasArg(args, "--retune") {
-		cachePath := tune.TuneCachePathForWorkload(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag, agentWorkload)
-		if cachePath != "" && tune.TuneFileComplete(cachePath) {
-			fmt.Printf("[tune] Completed tune cache found: %s\n", cachePath)
-			if agentWorkload != "" {
-				fmt.Println("[tune] Select it with --tune-cache for this exact workload, or use --retune to measure again.")
-			} else {
-				fmt.Println("[tune] It is applied automatically on launch. Re-run with --retune to tune again.")
-			}
-			return
-		}
-	}
-	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
-	serverArgs = append(serverArgs, req.ExtraArgs...)
-	serverArgs = applyRequestDisabledBackendFlags(serverArgs, req)
-	if memMax := backendMemoryMaxMB(req, caps); memMax > 0 {
-		fmt.Printf("[tune] backend memory scope: MemoryMax=%d MiB\n", memMax)
-	}
-	if err := guardPortFree(req.Port, "AI Tune"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	timeout := autoStartupTimeout(model)
-	benchTimeout := 2 * time.Minute
-	if strategy.Type == placement.CPUOnly {
-		benchTimeout = 5 * time.Minute
-	} else if strategy.Type == placement.MoEOffload {
-		benchTimeout = 90 * time.Second
-	}
-
-	cache := tune.NewCache(cfg.CacheDir)
-	engine := &tune.Engine{
-		BaseURL:           backendBaseURL(req),
-		Model:             filepath.Base(req.ModelPath),
-		Rounds:            rounds,
-		Cache:             cache,
-		Caps:              caps,
-		Backend:           be.Tag,
-		Vision:            strategy.MMProjPath != "",
-		MinImprovementPct: minTuneImprovement,
-		BenchmarkTimeout:  benchTimeout,
-		BackendHelp:       be.Help,
-		AgentParallel:     agentParallel,
-		Workload:          agentWorkload,
-		OnProgress: func(msg string) {
-			fmt.Println("[tune]", msg)
-		},
-		StartServer: func(flags []string) (func(), error) {
-			p, err := server.StartWithTimeoutToOptions(flags, req.Port, timeout, os.Stdout, os.Stderr, backendStartOptions(req, caps, be, nil, flags))
-			if err != nil {
-				return nil, err
-			}
-			return func() { _ = p.Stop() }, nil
-		},
-	}
-
-	entry, err := engine.Run(req.ModelPath, serverArgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
-	tunePath := tune.TuneCachePathForWorkload(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag, agentWorkload)
-	if hint := tune.ShareHint(tunePath); hint != "" {
-		fmt.Println(hint)
 	}
 }
 
@@ -10936,4 +10590,17 @@ func backendBuildIdentityFrom(path, version string) string {
 	}
 	sum := sha256.Sum256([]byte(material))
 	return fmt.Sprintf("%s-%x", filepath.Base(path), sum[:12])
+}
+
+// AI Tune was removed (review decision D6): the launch optimizer measures and
+// promotes configurations itself.
+const aiTuneRemovedText = "AI Tune was removed; ggrun's launch optimizer now measures and chooses the configuration (see --calibrate)"
+
+func errAITuneRemoved(flag string) error {
+	return fmt.Errorf("%s: %s", flag, aiTuneRemovedText)
+}
+
+func aiTuneRemoved(what string) {
+	fmt.Fprintf(os.Stderr, "%s: %s\n", what, aiTuneRemovedText)
+	os.Exit(2)
 }
