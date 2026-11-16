@@ -134,3 +134,13 @@ func TestRouterRecordsClassifierVerdictAndClient(t *testing.T) {
 		t.Fatalf("record = %+v", r)
 	}
 }
+
+func TestMeanServiceTimeCountsOnlyMainModelWork(t *testing.T) {
+	sink := &metricsSink{}
+	sink.record(RequestRecord{Route: routeMain, Status: 200, TotalMS: 10_000})
+	sink.record(RequestRecord{Route: routeMain, Kind: kindClassifier, Status: 200, TotalMS: 400})
+	sink.record(RequestRecord{Route: routeMain, Kind: kindUtility, Status: 200, TotalMS: 300})
+	if got := sink.meanMainServiceMS(); got != 10_000 {
+		t.Fatalf("mean service %d, want 10000", got)
+	}
+}

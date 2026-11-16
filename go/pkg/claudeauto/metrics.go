@@ -238,7 +238,9 @@ func (m *metricsSink) record(rec RequestRecord) {
 		}
 	} else if rec.Status >= 200 && rec.Status < 300 {
 		m.successful++
-		if rec.Route == routeMain && rec.TotalMS > rec.QueueMS {
+		// Main-model work only: a classifier or cheap-tier request that fell
+		// back to main is short and would understate the wait.
+		if rec.Route == routeMain && rec.Kind == "" && rec.TotalMS > rec.QueueMS {
 			m.mainServed++
 			m.mainServiceMS += rec.TotalMS - rec.QueueMS
 		}
