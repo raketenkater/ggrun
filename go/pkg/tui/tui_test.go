@@ -325,8 +325,8 @@ func TestExternalDiscoveredModelCannotBeDeletedWithoutTypedConfirmation(t *testi
 	if m.screen != ScreenDownload || m.inputMode != "external-remove-confirm" {
 		t.Fatalf("confirming the offer must open the typed yes screen, screen=%v inputMode=%q", m.screen, m.inputMode)
 	}
-	if m.pendingExternalRemoveIdx != 0 {
-		t.Fatalf("pending external remove index not recorded, got %d", m.pendingExternalRemoveIdx)
+	if m.pendingExternalRemoveID != modelIdentity(path) {
+		t.Fatalf("pending external removal not bound to the file, got %q", m.pendingExternalRemoveID)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the typed screen alone must not touch the file: %v", err)
@@ -346,7 +346,7 @@ func TestExternalDiscoveredModelCannotBeDeletedWithoutTypedConfirmation(t *testi
 	// The lower-level path is guarded too: removeModelAt refuses any external
 	// row whose index was not handed down by the typed screen.
 	m = Model{screen: ScreenMain, modelDir: dir, models: []ModelItem{item}}
-	m.pendingExternalRemoveIdx = -1
+	m.pendingExternalRemoveID = ""
 	m.removeModelAt(0)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("ungated removeModelAt must not touch the file: %v", err)
@@ -388,8 +388,8 @@ func TestExternalDiscoveredModelDeletedAfterTypedConfirmation(t *testing.T) {
 	if m.messageType != "info" || !strings.Contains(m.message, "Removed") {
 		t.Fatalf("expected an info removal message, got type=%q msg=%q", m.messageType, m.message)
 	}
-	if m.pendingExternalRemoveIdx != -1 {
-		t.Fatalf("pending external remove index must be cleared after removal, got %d", m.pendingExternalRemoveIdx)
+	if m.pendingExternalRemoveID != "" {
+		t.Fatalf("pending external removal must be cleared after removal, got %q", m.pendingExternalRemoveID)
 	}
 }
 
@@ -418,7 +418,6 @@ func TestExternalRemoveConfirmEscapedSymlinkDeletesRealTargetOnlyAfterConfirmati
 	dir := t.TempDir()
 	m := Model{screen: ScreenMain, modelDir: dir, models: []ModelItem{item}}
 	m.input = textinput.New()
-	m.pendingExternalRemoveIdx = -1
 
 	// Without confirmation the symlink and its target must be untouched.
 	m.removeModelAt(0)
@@ -431,7 +430,6 @@ func TestExternalRemoveConfirmEscapedSymlinkDeletesRealTargetOnlyAfterConfirmati
 
 	// With typed confirmation the real target is deleted even though the row's
 	// path is a symlink pointing outside the primary directory.
-	m.pendingExternalRemoveIdx = 0
 	m.openExternalRemoveConfirm(0)
 	m.input.SetValue("yes")
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -2547,5 +2545,131 @@ func TestDiscoverModelsInASymlinkedModelDir(t *testing.T) {
 	items := discoverModels(link)
 	if len(items) != 1 || !strings.HasPrefix(items[0].Path, link+string(os.PathSeparator)) {
 		t.Fatalf("discovered %+v, want one model under %s", items, link)
+	}
+}
+
+// C-16 (reproduced 2026-11-13): a computer scan that finishes while a delete
+// dialog is open re-sorts m.models. The dialog must act on the model it named.
+func scanUnderDialogFixture(t *testing.T) (m Model, keep, target, found string) {
+	t.Helper()
+	primary := t.TempDir()
+	externalDir := t.TempDir()
+	keep = filepath.Join(primary, "mmm-Q4_K_M.gguf")
+	target = filepath.Join(primary, "zzz-Q4_K_M.gguf")
+	found = filepath.Join(externalDir, "aaa-Q4_K_M.gguf")
+	for _, p := range []string{keep, target, found} {
+		if err := os.WriteFile(p, []byte("GGUF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	models := loadModels(primary, t.TempDir(), "auto", nil)
+	m = Model{screen: ScreenMain, modelDir: primary, cacheDir: t.TempDir(), backend: "auto",
+		models: models, mainList: newMainList(models), scanningModels: true}
+	m.input = textinput.New()
+	return m, keep, target, found
+}
+
+func indexOfModelPath(t *testing.T, m Model, path string) int {
+	t.Helper()
+	for i, item := range m.models {
+		if item.Path == path {
+			return i
+		}
+	}
+	t.Fatalf("model %s not listed", path)
+	return -1
+}
+
+func confirmChoiceWithPrefix(t *testing.T, m Model, prefix string) Model {
+	t.Helper()
+	for i, opt := range m.choiceOptions {
+		if strings.HasPrefix(opt, prefix) {
+			m.choiceCursor = i
+		}
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(Model)
+}
+
+func TestDeleteDialogSurvivesScanReordering(t *testing.T) {
+	m, keep, target, found := scanUnderDialogFixture(t)
+	m.openRemoveModelChoice(indexOfModelPath(t, m, target))
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found}}})
+	m = confirmChoiceWithPrefix(t, next.(Model), "Confirm: delete ")
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("the model the dialog did not name was deleted: %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("the model the dialog named was not deleted: %v", err)
+	}
+}
+
+func TestDeleteDialogDeletesNothingWhenItsModelIsGone(t *testing.T) {
+	m, keep, target, found := scanUnderDialogFixture(t)
+	m.openRemoveModelChoice(indexOfModelPath(t, m, target))
+	// The model disappears from disk before the scan reloads the list.
+	if err := os.Rename(target, target+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found}}})
+	m = confirmChoiceWithPrefix(t, next.(Model), "Confirm: delete ")
+	for _, p := range []string{keep, found, target + ".moved"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s was touched: %v", p, err)
+		}
+	}
+	if m.messageType != "warning" || !strings.Contains(m.message, "nothing was changed") {
+		t.Fatalf("expected a nothing-changed warning, got %q %q", m.messageType, m.message)
+	}
+}
+
+func TestExternalDeletePromptSurvivesScanReordering(t *testing.T) {
+	m, keep, _, found := scanUnderDialogFixture(t)
+	otherDir := t.TempDir()
+	external := filepath.Join(otherDir, "ttt-Q4_K_M.gguf")
+	if err := os.WriteFile(external, []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.models = mergeModelItems(m.models, discoverModelsFromPaths([]string{external}))
+	m.rebuildMainList()
+	idx := indexOfModelPath(t, m, external)
+	if !m.models[idx].External {
+		t.Fatal("setup: model is not external")
+	}
+	m.openRemoveModelChoice(idx)
+	m = confirmChoiceWithPrefix(t, m, "Remove file ")
+	if m.inputMode != "external-remove-confirm" {
+		t.Fatalf("typed prompt not open: %q", m.inputMode)
+	}
+	prompt := m.message
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found, external}}})
+	m = next.(Model)
+	if m.message != prompt {
+		t.Fatalf("scan replaced the prompt naming the file:\n%q\nwas\n%q", m.message, prompt)
+	}
+	if indexOfModelPath(t, m, external) == idx {
+		t.Fatal("setup: the scan did not move the external model")
+	}
+	m.input.SetValue("yes")
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if _, err := os.Stat(external); !os.IsNotExist(err) {
+		t.Fatalf("the confirmed external file was not deleted: %v (msg %q)", err, m.message)
+	}
+	for _, p := range []string{keep, found} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s was deleted instead: %v", p, err)
+		}
+	}
+}
+
+func TestClearCachesDialogSurvivesScanReordering(t *testing.T) {
+	m, _, target, found := scanUnderDialogFixture(t)
+	m.openClearCachesChoice(indexOfModelPath(t, m, target))
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found}}})
+	m = confirmChoiceWithPrefix(t, next.(Model), "Confirm: clear caches for ")
+	want := "for " + filepath.Base(target)
+	if !strings.Contains(m.message, want) {
+		t.Fatalf("caches cleared for the wrong model: %q (want %q)", m.message, want)
 	}
 }
