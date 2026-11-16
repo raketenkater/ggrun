@@ -1067,3 +1067,23 @@ func (r *claudeAutoRuntime) stop() {
 		r.reviewerLog = nil
 	}
 }
+
+// claudePermissionModeLine states the permission mode Claude Code starts in
+// (S-01): Auto lets reviewed tool calls run without asking.
+func claudePermissionModeLine(clientArgs []string) string {
+	mode := ""
+	for i, a := range clientArgs {
+		if a == "--permission-mode" && i+1 < len(clientArgs) {
+			mode = clientArgs[i+1]
+		} else if v, ok := strings.CutPrefix(a, "--permission-mode="); ok {
+			mode = v
+		}
+	}
+	if mode == "" {
+		return "[claude-code] permission mode: from your Claude settings (GGRUN_CLAUDE_PERMISSION_MODE=inherit or --permission-mode given)"
+	}
+	if mode == "auto" {
+		return "[claude-code] permission mode: auto (tool calls run after a model review; GGRUN_CLAUDE_PERMISSION_MODE=default asks you instead)"
+	}
+	return "[claude-code] permission mode: " + mode
+}

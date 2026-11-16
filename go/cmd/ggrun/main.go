@@ -6702,6 +6702,12 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 				_, _ = store.Transition(scope, profile.ID, controller.StateRejected, reason, "claude-reviewer-canary")
 				return errors.New(reason)
 			}
+			// A reviewer that answers but would allow a clearly destructive
+			// action is weak, not broken: say so and keep serving (S-01).
+			if blockErr := reviewerRunner.RunClaudeReviewerBlockCanary(); blockErr != nil {
+				fmt.Fprintf(os.Stderr, "[claude-code] warning: the Auto reviewer did not block a destructive test action (%v); "+
+					"Auto mode's protection is weak with this reviewer\n", blockErr)
+			}
 		}
 		if reviewerEnabled && req.ReviewerProfile.ServesWorkers {
 			workerRunner := &benchmark.Runner{
@@ -7613,6 +7619,7 @@ func cmdLaunch(args []string) {
 		// Use the seated runtime, not just the environment toggle: --claude-reviewer
 		// off and a companion rejected during launch do not set that variable.
 		clientArgs = append(claudeCodePermissionArgs(clientArgs, claudeAuto != nil && claudeAuto.reviewerPort > 0), clientArgs...)
+		fmt.Println(claudePermissionModeLine(clientArgs))
 		progressEnabled := !progressDisabled()
 		progressStop := func() {}
 		if progressEnabled {
