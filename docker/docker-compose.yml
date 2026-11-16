@@ -15,7 +15,7 @@ services:
     # Model path inside the container, or an HF repo plus `--download`.
     command: ["${MODEL:?set MODEL=/models/<file>.gguf or a HF repo}"]
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     volumes:
       - ${MODELS_DIR:-~/ai_models}:/models
       - llm-cache:/cache
@@ -31,7 +31,7 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     ports:
-      - "3000:8080"
+      - "127.0.0.1:3000:8080"
     environment:
       # Point Open WebUI at ggrun's OpenAI-compatible endpoint.
       - OPENAI_API_BASE_URL=http://ggrun:8081/v1

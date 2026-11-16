@@ -7027,6 +7027,9 @@ func cmdLaunch(args []string) {
 	if launchPort <= 0 {
 		launchPort = cfg.Port
 	}
+	if w := exposedHostWarning(req.Host, launchPort, req.ExtraArgs, os.Getenv); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	if !waitForPredecessorPort(req.Host, launchPort, 75*time.Second, os.Stderr) {
 		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 75s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
 	}
@@ -8740,6 +8743,9 @@ func cmdDryRun(args []string) {
 	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun dry-run <model.gguf>")
 		os.Exit(2)
+	}
+	if w := exposedHostWarning(req.Host, req.Port, req.ExtraArgs, os.Getenv); w != "" {
+		fmt.Fprintln(os.Stderr, w)
 	}
 
 	caps, err := detect.Detect()
