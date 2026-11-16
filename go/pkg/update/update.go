@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
+	"github.com/raketenkater/ggrun/pkg/backendverify"
 
 	"github.com/charmbracelet/x/term"
 )
@@ -1729,6 +1730,28 @@ func backendUpdateCandidates() []repoCandidate {
 	return candidates
 }
 
+// verifyContract is the backend contract check; tests replace it.
+var verifyContract = func(binary, model string) error {
+	_, err := backendverify.Run(binary, model, 3*time.Minute)
+	return err
+}
+
+// verifyCandidate loads GGRUN_BACKEND_VERIFY_MODEL in a candidate build and
+// refuses it when ggrun's log parsers no longer read it (review I-05). With no
+// model configured it says so and does not block: a fresh install may have
+// none yet.
+func verifyCandidate(binary string) error {
+	model := strings.TrimSpace(os.Getenv("GGRUN_BACKEND_VERIFY_MODEL"))
+	if model == "" {
+		fmt.Println("  Backend contract check skipped: set GGRUN_BACKEND_VERIFY_MODEL to a small GGUF to check log compatibility before promotion")
+		return nil
+	}
+	if _, err := os.Stat(model); err != nil {
+		return fmt.Errorf("GGRUN_BACKEND_VERIFY_MODEL: %w", err)
+	}
+	return verifyContract(binary, model)
+}
+
 func buildAndTest(repoDir, buildDir string) bool {
 	nproc := 8
 	if out, err := exec.Command("nproc").Output(); err == nil {
@@ -1786,6 +1809,10 @@ func buildAndTest(repoDir, buildDir string) bool {
 	stagingBinary := filepath.Join(stagingDir, "bin", "llama-server")
 	if err := smokeBackendConfigured(stagingBinary, cmakeFlags); err != nil {
 		fmt.Printf("  Backend conformance failed at this commit: %v\n", err)
+		return false
+	}
+	if err := verifyCandidate(stagingBinary); err != nil {
+		fmt.Printf("  Backend contract check failed at this commit; keeping the current build: %v\n", err)
 		return false
 	}
 	validateActive := func(activeDir string) error {

@@ -7395,6 +7395,7 @@ func cmdLaunch(args []string) {
 	} else {
 		strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, false)
 		printOptimizationSummary("optimize", strategy, false)
+		printBackendBuild("optimize", be)
 	}
 	req.CalibrationPending = pendingCalibration != nil
 	// A Claude profile is not verified by llama's OpenAI endpoint alone. Bring
@@ -8844,6 +8845,7 @@ func cmdDryRun(args []string) {
 		return
 	}
 	printOptimizationSummary("dry-run", strategy, true)
+	printBackendBuild("dry-run", be)
 	var displayEnv []string
 	if envPrefix != "" {
 		displayEnv = []string{envPrefix}
