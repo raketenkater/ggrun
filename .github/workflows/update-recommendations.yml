@@ -55,10 +55,19 @@ jobs:
       - name: Run the CI pytest list
         run: scripts/ci-pytest.sh
 
-      - name: Refuse repository changes for existing rows
+      # The guard runs before the PR so its findings go into the PR body, and
+      # fails the job afterwards: a repository swap is shown for review rather
+      # than silently published or silently dropped.
+      - name: Check repository changes for existing rows
+        id: guard
         run: |
           git show HEAD:go/pkg/recommend/catalog.json > "$RUNNER_TEMP/previous-catalog.json"
-          python3 tools/models/catalog_repo_guard.py "$RUNNER_TEMP/previous-catalog.json" go/pkg/recommend/catalog.json
+          if python3 tools/models/catalog_repo_guard.py "$RUNNER_TEMP/previous-catalog.json" go/pkg/recommend/catalog.json 2> "$RUNNER_TEMP/guard.txt"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            cat "$RUNNER_TEMP/guard.txt"
+          fi
 
       # A pull request, not a push to main: the owner reviews what users will be
       # offered. Pull requests opened with GITHUB_TOKEN do not start other
@@ -66,11 +75,15 @@ jobs:
       - name: Open or update the catalog pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: automation/update-model-recommendations
+          BRANCH: automation/catalog-refresh
         run: |
           if git diff --quiet -- go/pkg/recommend/catalog.json; then
             echo "recommendation catalog unchanged"
             exit 0
+          fi
+          body="Scheduled catalog refresh. The CI pytest list passed in the refresh job."
+          if [ -s "$RUNNER_TEMP/guard.txt" ]; then
+            body="$body"$'\n\n'"**Repository changed for existing rows; review before merging:**"$'\n\n```\n'"$(cat "$RUNNER_TEMP/guard.txt")"$'\n```'
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -78,10 +91,18 @@ jobs:
           git add go/pkg/recommend/catalog.json
           git commit -m "Update model recommendation catalog"
           git push --force origin "$BRANCH"
-          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
-            gh pr create --base main --head "$BRANCH" --title "Update model recommendation catalog" \
-              --body "Scheduled catalog refresh. CI pytest list and the repository-change guard passed in the refresh job." || {
+          number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --body "$body"
+          else
+            gh pr create --base main --head "$BRANCH" --title "Update model recommendation catalog" --body "$body" || {
               echo "::error::could not open the pull request; enable Settings > Actions > General > 'Allow GitHub Actions to create and approve pull requests', or open one from $BRANCH"
               exit 1
             }
           fi
+
+      - name: Fail on repository changes for existing rows
+        if: steps.guard.outputs.changed == 'true'
+        run: |
+          cat "$RUNNER_TEMP/guard.txt"
+          exit 1
