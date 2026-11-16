@@ -736,7 +736,6 @@ def update_model_index(repo, selected_quantization, output_dir, downloaded, cach
     candidates = [
         here.with_name("model_index.py"),
         here.parent.parent / "models" / "model_index.py",
-        output_dir / "model_index.py",
     ]
     indexer = next((p for p in candidates if p.is_file()), None)
     if not indexer:
