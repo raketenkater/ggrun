@@ -27,6 +27,7 @@ import (
 	"github.com/raketenkater/ggrun/clientkit"
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/benchmark"
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/chattemplate"
 	"github.com/raketenkater/ggrun/pkg/claudeauto"
 	"github.com/raketenkater/ggrun/pkg/config"
@@ -5949,8 +5950,9 @@ func failedBackendFreeVRAM(runtime *detect.Capabilities) map[int]int {
 	if runtime == nil || len(runtime.GPUs) == 0 {
 		return nil
 	}
-	out, err := exec.Command("nvidia-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "free VRAM after the failure not sampled")
 		return nil
 	}
 	return freeVRAMByRuntimeDevice(string(out), runtime.GPUs)
@@ -10814,12 +10816,13 @@ func detectUsableBackend(path string) *backendInfo {
 // llama-server --help returns exit code 1, so we check the output regardless of error.
 func detectBackend(path string) *backendInfo {
 	info := &backendInfo{Path: path, Tag: "llama", Dialect: "llama"}
-	cmd := exec.Command(path, "--help")
+	cmd, finish := boundexec.Command(boundexec.ProbeTimeout, path, "--help")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
 		defer libhub.Cleanup(hubDir)
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
-	out, _ := cmd.CombinedOutput()
+	out, helpErr := cmd.CombinedOutput()
+	boundexec.Report(finish(helpErr), "backend capabilities read from partial help output")
 	help := stableBackendProbeOutput(string(out))
 	info.Help = help
 	info.Version = backendVersionOutput(path)
@@ -10917,12 +10920,13 @@ const loadModeTranslationVersion = "load-mode-v2"
 
 // backendVersionOutput is the build's stable --version text.
 func backendVersionOutput(path string) string {
-	cmd := exec.Command(path, "--version")
+	cmd, finish := boundexec.Command(boundexec.ProbeTimeout, path, "--version")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
 		defer libhub.Cleanup(hubDir)
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
-	out, _ := cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	boundexec.Report(finish(err), "backend version unknown")
 	return strings.TrimSpace(stableBackendProbeOutput(string(out)))
 }
 

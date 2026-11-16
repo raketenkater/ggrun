@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 )
 
 // Capabilities represents the full hardware and environment profile.
@@ -23,7 +25,14 @@ type Capabilities struct {
 	Backends                  []Backend `json:"backends"`
 	HostMemoryBandwidthMBps   int       `json:"host_memory_bandwidth_mbps,omitempty"`
 	HostMemoryBandwidthSource string    `json:"host_memory_bandwidth_source,omitempty"`
+	// GPUStateUnknown is set when a GPU probe did not answer in time. The
+	// GPU list is then not evidence of "no GPU", and the planner refuses to
+	// place on it (unknown stays unknown).
+	GPUStateUnknown string `json:"gpu_state_unknown,omitempty"`
 }
+
+// nvidiaProbeTimeout bounds each nvidia-smi call. Tests shorten it.
+var nvidiaProbeTimeout = boundexec.ProbeTimeout
 
 // GPU represents a single GPU device.
 type GPU struct {
@@ -76,14 +85,24 @@ type Backend struct {
 
 // Detect probes the system and returns capabilities.
 func Detect() (*Capabilities, error) {
-	gpus := detectNVIDIA()
-	if len(gpus) == 0 {
+	gpus, nvidiaErr := detectNVIDIA()
+	unknown := ""
+	if boundexec.IsTimeout(nvidiaErr) {
+		// A hung nvidia-smi says nothing about which GPUs exist or how much
+		// memory they have free. Falling back to another vendor or to CPU-only
+		// would plan on a guess.
+		unknown = nvidiaErr.Error()
+		boundexec.Report(nvidiaErr, "GPU state unknown; ggrun will not place a model until it answers")
+	}
+	if len(gpus) == 0 && unknown == "" {
 		gpus = detectVulkanGPUs()
 	}
-	if len(gpus) == 0 {
+	if len(gpus) == 0 && unknown == "" {
 		gpus = detectAppleSilicon()
 	}
-	settleGPUFreeVRAM(gpus)
+	if unknown == "" {
+		settleGPUFreeVRAM(gpus)
+	}
 
 	ram := detectRAM()
 	cpu := detectCPU()
@@ -96,6 +115,8 @@ func Detect() (*Capabilities, error) {
 		RAM:      ram,
 		CPU:      cpu,
 		Backends: backends,
+		// Set only by a probe timeout, never by an ordinary failure.
+		GPUStateUnknown: unknown,
 	}
 	// A profile is optional measured evidence. Missing, corrupt, or stale
 	// profiles never make hardware detection fail: the PCIe topology derived
@@ -104,12 +125,12 @@ func Detect() (*Capabilities, error) {
 	return caps, nil
 }
 
-func detectNVIDIA() []GPU {
-	out, err := exec.Command("nvidia-smi",
+func detectNVIDIA() ([]GPU, error) {
+	out, err := boundexec.Output(nvidiaProbeTimeout, "nvidia-smi",
 		"--query-gpu=index,pci.bus_id,name,memory.total,memory.used,memory.free,driver_version,compute_cap,clocks.max.memory",
-		"--format=csv,noheader,nounits").Output()
+		"--format=csv,noheader,nounits")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// Query PCIe bandwidth separately. Link speed often idles down to Gen1 when
 	// the GPU is not busy, so current gen is not a stable performance signal.
@@ -118,9 +139,10 @@ func detectNVIDIA() []GPU {
 	// max gen with observed current width when current width is lower than max;
 	// otherwise keep max gen/width. Non-NVIDIA and unknown platforms leave
 	// bandwidth empty, and placement falls back to neutral free-VRAM weighting.
-	pcieOut, _ := exec.Command("nvidia-smi",
+	pcieOut, pcieErr := boundexec.Output(nvidiaProbeTimeout, "nvidia-smi",
 		"--query-gpu=pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max",
-		"--format=csv,noheader,nounits").Output()
+		"--format=csv,noheader,nounits")
+	boundexec.Report(pcieErr, "PCIe link data unknown; bandwidth falls back to sysfs")
 	pcieLinks := parseNVIDIAPCIeLinks(string(pcieOut))
 
 	var gpus []GPU
@@ -189,7 +211,7 @@ func detectNVIDIA() []GPU {
 		gpus[i].Index = i
 	}
 
-	return gpus
+	return gpus, nil
 }
 
 // settleGPUFreeVRAM guards against a race where a just-killed process's VRAM
@@ -294,10 +316,11 @@ type nvidiaMemorySample struct {
 // Returns nil on any failure so the caller falls back to whatever it already
 // had rather than zeroing GPUs out.
 func queryNVIDIAMemory() map[string]nvidiaMemorySample {
-	out, err := exec.Command("nvidia-smi",
+	out, err := boundexec.Output(nvidiaProbeTimeout, "nvidia-smi",
 		"--query-gpu=pci.bus_id,memory.used,memory.free",
-		"--format=csv,noheader,nounits").Output()
+		"--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "keeping the first memory reading")
 		return nil
 	}
 	return parseNVIDIAMemory(string(out))

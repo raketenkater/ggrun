@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
@@ -1158,6 +1159,15 @@ type autoContextSearchResult struct {
 	rejectionEvidence string
 }
 
+// knownGPUState refuses capabilities whose GPU probe timed out. An empty GPU
+// list there is not "CPU only"; planning on it would place on a guess.
+func knownGPUState(caps *detect.Capabilities) error {
+	if caps != nil && caps.GPUStateUnknown != "" {
+		return fmt.Errorf("GPU state unknown (%s); not placing a model on it. Check the GPU driver, then retry", caps.GPUStateUnknown)
+	}
+	return nil
+}
+
 // Compute builds a Strategy from hardware capabilities and model profile.
 //
 // Automatic context is deliberately resolved outside computeResolvedStrategy:
@@ -1167,6 +1177,9 @@ type autoContextSearchResult struct {
 // memory). This keeps "fit" from becoming an aggregate-memory estimate that a
 // later placement overlay can invalidate.
 func Compute(caps *detect.Capabilities, model *ModelProfile, opts Options) (*Strategy, error) {
+	if err := knownGPUState(caps); err != nil {
+		return nil, err
+	}
 	if model != nil && model.SparseLookupBytes > 0 && opts.sparseLookupPolicy == "" {
 		return computeSparseLookup(caps, model, opts)
 	}
@@ -4300,6 +4313,9 @@ func splitShareMB(totalMB int, split []float64, idx int) int {
 // penaltyMB is keyed by GPU Index and accumulates across retries. Returns the new
 // strategy, or an error if there's nothing to replan or it no longer fits.
 func ReplanAfterOOM(caps *detect.Capabilities, model *ModelProfile, opts Options, penaltyMB map[int]int) (*Strategy, error) {
+	if err := knownGPUState(caps); err != nil {
+		return nil, err
+	}
 	if caps == nil || model == nil || len(penaltyMB) == 0 {
 		return nil, fmt.Errorf("replan: nothing to do")
 	}
@@ -9181,11 +9197,12 @@ func queryHostNonReclaimableMB(pid int) int {
 
 // QueryVRAMUsed returns current nvidia-smi memory.used for a given GPU index.
 func QueryVRAMUsed(gpuIndex int) int {
-	out, err := exec.Command("nvidia-smi",
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi",
 		"--query-gpu=memory.used", "--format=csv,noheader,nounits",
 		"-i", fmt.Sprintf("%d", gpuIndex),
-	).Output()
+	)
 	if err != nil {
+		boundexec.Report(err, "VRAM use not sampled")
 		return 0
 	}
 	s := strings.TrimSpace(string(out))
@@ -9216,9 +9233,10 @@ func QueryVRAMUsedByPIDOnGPU(pid, gpuIndex int) int {
 	if uuid == "" {
 		return 0
 	}
-	out, err := exec.Command("nvidia-smi",
-		"--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi",
+		"--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "per-process VRAM not sampled")
 		return 0
 	}
 	total := 0
@@ -9241,8 +9259,9 @@ func QueryVRAMUsedByPIDOnGPU(pid, gpuIndex int) int {
 }
 
 func gpuUUIDForIndex(gpuIndex int) string {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader")
 	if err != nil {
+		boundexec.Report(err, "GPU identity not sampled")
 		return ""
 	}
 	for _, line := range strings.Split(string(out), "\n") {
@@ -9268,9 +9287,10 @@ func QueryVRAMUsedByPID(pid int) int {
 	if pid <= 0 {
 		return 0
 	}
-	out, err := exec.Command("nvidia-smi",
-		"--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi",
+		"--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "per-process VRAM not sampled")
 		return 0
 	}
 	total := 0
