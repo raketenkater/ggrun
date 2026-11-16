@@ -572,6 +572,9 @@ func detectCPU() CPUInfo {
 		// and cpuset-constrained services.
 		cores = len(ids)
 	}
+	if quota := cpuQuotaCores(); quota > 0 && quota < cores {
+		cores = quota
+	}
 	return CPUInfo{
 		Model:       model,
 		Cores:       cores,
