@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   refresh:
@@ -48,7 +49,24 @@ jobs:
         working-directory: go
         run: go test ./pkg/recommend
 
-      - name: Commit catalog update
+      - name: Install Python test dependencies
+        run: python3 -m pip install pytest huggingface_hub
+
+      - name: Run the CI pytest list
+        run: scripts/ci-pytest.sh
+
+      - name: Refuse repository changes for existing rows
+        run: |
+          git show HEAD:go/pkg/recommend/catalog.json > "$RUNNER_TEMP/previous-catalog.json"
+          python3 tools/models/catalog_repo_guard.py "$RUNNER_TEMP/previous-catalog.json" go/pkg/recommend/catalog.json
+
+      # A pull request, not a push to main: the owner reviews what users will be
+      # offered. Pull requests opened with GITHUB_TOKEN do not start other
+      # workflows, which is why the checks above run here first.
+      - name: Open or update the catalog pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: automation/update-model-recommendations
         run: |
           if git diff --quiet -- go/pkg/recommend/catalog.json; then
             echo "recommendation catalog unchanged"
@@ -56,7 +74,14 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
           git add go/pkg/recommend/catalog.json
           git commit -m "Update model recommendation catalog"
-          git pull --rebase
-          git push
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" --title "Update model recommendation catalog" \
+              --body "Scheduled catalog refresh. CI pytest list and the repository-change guard passed in the refresh job." || {
+              echo "::error::could not open the pull request; enable Settings > Actions > General > 'Allow GitHub Actions to create and approve pull requests', or open one from $BRANCH"
+              exit 1
+            }
+          fi
