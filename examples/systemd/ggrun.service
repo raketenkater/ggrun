@@ -1,19 +1,33 @@
+# ggrun as a systemd *user* service.
+#
+# ggrun puts each backend in its own memory-limited systemd scope. A user
+# service runs under your user manager, which can create those scopes; a
+# system unit with User= cannot, and ggrun would refuse to start uncontained.
+#
+#   mkdir -p ~/.config/systemd/user ~/.config/ggrun
+#   cp ggrun.service ~/.config/systemd/user/
+#   cp ggrun.env ~/.config/ggrun/service.env      # set GGRUN_MODEL
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ggrun
+#   loginctl enable-linger "$USER"                # keep it running without a login
+#
+# Logs: journalctl --user -u ggrun -f
 [Unit]
-Description=LLM Server (llama.cpp / ik_llama.cpp)
-After=network.target
+Description=ggrun model server
+After=network-online.target
 
 [Service]
 Type=simple
-User=%i
 Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
-# Edit these:
-ExecStart=/home/%i/.local/bin/ggrun /home/%i/ai_models/your-model.gguf
+EnvironmentFile=%h/.config/ggrun/service.env
+# GGRUN_ARGS is split on spaces, e.g. "--port 8081 --ctx fit".
+ExecStart=%h/.local/bin/ggrun ${GGRUN_MODEL} $GGRUN_ARGS
 Restart=on-failure
-RestartSec=5
-# Give time for model loading
-TimeoutStartSec=300
-# OOM killer should prefer this process
-OOMScoreAdjust=500
+RestartSec=10
+# A first launch of a large model can measure for a long time; stopping
+# waits for the backend to release GPU memory.
+TimeoutStopSec=60
+KillMode=mixed
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
