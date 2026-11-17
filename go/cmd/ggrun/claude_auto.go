@@ -903,6 +903,9 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 		return err
 	}
 	r.router = router
+	// Auto mode reviews each tool call through a hidden classifier request;
+	// the router warns if none is ever recognised (review I-04).
+	router.ExpectClassifier(claudeDefaultPermissionModeIsAuto())
 	// Point Claude Code's cheap tiers at the companion only when the selected
 	// profile explicitly serves worker traffic. A seated Qwen3.5-2B remains a
 	// perfectly valid separate safety reviewer; the router still sends it
@@ -1062,4 +1065,15 @@ func (r *claudeAutoRuntime) stop() {
 		_ = r.reviewerLog.Close()
 		r.reviewerLog = nil
 	}
+}
+
+// claudeDefaultPermissionModeIsAuto reports whether ggrun's own Claude launch
+// uses Auto mode (see claudeCodePermissionArgs). Clients that choose another
+// mode themselves can see the router's review warning; its text says so.
+func claudeDefaultPermissionModeIsAuto() bool {
+	mode := strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_PERMISSION_MODE"))
+	if mode == "" {
+		return !disabledEnv("GGRUN_CLAUDE_AUTO_REVIEWER")
+	}
+	return strings.EqualFold(mode, "auto")
 }
