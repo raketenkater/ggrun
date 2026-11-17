@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"runtime"
 	"sync"
+
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 )
 
 var (
@@ -32,11 +34,13 @@ func Command() (string, bool) {
 		if err != nil {
 			continue
 		}
-		check := exec.Command(path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
-		if check.Run() == nil {
+		check, finish := boundexec.Command(boundexec.ProbeTimeout, path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
+		err = finish(check.Run())
+		if err == nil {
 			cache[key] = path
 			return path, true
 		}
+		boundexec.Report(err, "trying the next interpreter")
 	}
 	return "", false
 }
