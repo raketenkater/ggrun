@@ -218,7 +218,7 @@ def spawn(args, transcript, rows=45, cols=160):
     env = dict(os.environ, TERM="xterm-256color", LLM_PORT=str(args.port), LLM_SERVER_NO_UPDATE_CHECK="1",
                # the directory holding the model as given; resolving would follow a
                # symlinked model into its target's folder and list unrelated models
-               LLM_MODEL_DIR=os.path.dirname(os.path.abspath(args.model)), LLM_COMMUNITY_TUNES="off")
+               LLM_MODEL_DIR=os.path.dirname(os.path.abspath(args.model)))
     if args.app_home:
         # What the installed wrappers set (Windows ggrun.cmd: LLM_APP_HOME and .bin on PATH).
         env["LLM_APP_HOME"] = args.app_home
