@@ -255,11 +255,14 @@ jobs:
             timeout 900 "$HOME/ggrun/ggrun" "$MODEL" --cpu --ctx 2048 --port 18845 > "$log" 2>&1 &
           up=0
           for _ in $(seq 300); do
-            if curl -fs http://127.0.0.1:18845/health >/dev/null; then up=1; break; fi
+            if curl -fs http://127.0.0.1:18845/health >/dev/null; then up=1; fi
+            # Stop only once launch is done: a signal during post-launch
+            # verification is not the documented Ctrl+C and was lost.
+            if [ "$up" = 1 ] && grep -q "Press Ctrl+C to stop" "$log"; then break; fi
             sleep 2
           done
           sudo pkill -INT -x ggrun || true
-          for _ in $(seq 30); do pgrep -x llama-server >/dev/null || break; sleep 1; done
+          for _ in $(seq 90); do pgrep -x ggrun >/dev/null || pgrep -x llama-server >/dev/null || break; sleep 1; done
           cat "$log"
           [ "$up" = 1 ] || { echo "::error::root launch did not serve"; exit 1; }
           grep -q "backend memory scope" "$log" || { echo "::error::no contained launch"; exit 1; }
