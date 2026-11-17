@@ -110,7 +110,7 @@ func runSpecTest(args []string) error {
 	if loadErr != nil {
 		return fmt.Errorf("load config: %w", loadErr)
 	}
-	rounds, err := tuneRoundsFromArgs(args, 2)
+	rounds, err := roundsFromArgs(args, 2)
 	if err != nil {
 		return err
 	}
@@ -383,4 +383,23 @@ func saveSpecTestReport(cacheDir string, report specTestReport) (string, error) 
 		return "", err
 	}
 	return path, nil
+}
+
+// roundsFromArgs reads --rounds N (or --rounds=N); fallback when absent.
+func roundsFromArgs(args []string, fallback int) (int, error) {
+	if fallback <= 0 {
+		fallback = 8
+	}
+	for i := 0; i < len(args); i++ {
+		if key, val, ok := strings.Cut(args[i], "="); ok && (key == "--rounds" || key == "-rounds") {
+			return parsePositiveFlag(key, val)
+		}
+		if args[i] == "--rounds" || args[i] == "-rounds" {
+			if i+1 >= len(args) {
+				return 0, fmt.Errorf("%s requires a value", args[i])
+			}
+			return parsePositiveFlag(args[i], args[i+1])
+		}
+	}
+	return fallback, nil
 }

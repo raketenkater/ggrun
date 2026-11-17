@@ -15,7 +15,6 @@ GGUF metadata extraction, and downloading.
 - `go/pkg/benchmark`: serial throughput/correctness probes plus the parallel
   agent benchmark (budget-scaled cold prefill, cached append, aggregate decode,
   and mixed foreground progress).
-- `go/pkg/tune`: AI Tune benchmarking, candidate validation, and cache handling.
 - `go/pkg/update`: self-update, backend update, rollback, and startup update
   checks for interactive users.
 - `go/pkg/tui`: terminal UI launched by running `ggrun` with no arguments (or `ggrun gui`).
@@ -51,23 +50,6 @@ state before memory accounting, the Claude scheduler normalizes its conservative
 baseline, and tune overlays normalize again before emission. This avoids
 llama.cpp silently clamping a command whose displayed configuration and
 effective allocation disagree.
-
-Legacy AI Tune and the core placement optimizer are intentionally separate.
-Tune explores backend performance flags; for a parallel-agent workload it ranks
-them by repeated cache-backed agent turn time. AI Tune always protects batch
-and ubatch, including cached and community overlays. Only the core optimizer
-may change those coupled inputs, because it recomputes the complete
-memory/expert placement. The ordinary `auto` controller calculates all bounded
-neighbors, measures a short baseline prefill to bound one identical prompt
-geometry, then runs repeated cold-ingest-plus-cache-append scenarios for the
-stable baseline and one finalist. Explicit `--calibrate on` is the wider,
-screening-only maintenance sweep. Exact allocation evidence never transfers to
-a changed argv; a denser recompute is contained again, while a lateral MoE split
-cannot displace an already-proven placement. Promotion still requires the
-shared branch/replay, functional/gateway, lifecycle, and clean-relaunch gates.
-Generic, agent-screen, and automatically promoted artifacts are separately
-scoped by model, exact backend build, hardware, context, slots, effective batch
-pair, explicit-intent bits, and a versioned workload profile.
 
 A complete guarded allocator/cgroup peak has a second, stricter placement
 identity covering tensor/expert ownership, batch and ubatch, KV/SWA policy,

@@ -60,7 +60,7 @@ Notes:
 
 ggrun's default placement vs raw llama.cpp `--fit` (its built-in auto-placement) on the
 same GGUFs, measured with `scripts/bench-v3-comparison.sh`. These are ggrun's defaults —
-no `--ai-tune` (see the note at the end).
+no tuning step.
 
 June 22, 2026 retest. Hardware then: RTX 3090 Ti 24GB, RTX 3060 12GB, RTX 4070 12GB, 128GB RAM. Context: 32768,
 256-token decode. CUDA backend: ik_llama.cpp build 4641 (`6c00e87a`). Numbers are from
@@ -125,13 +125,6 @@ Qwen3.6 27B Q5_K_M with ik_llama.cpp, 32k context, one slot, 512 generated token
 Speculative decoding is a measured, workload-gated feature: the 278 tok/s row is one
 best-case structured prompt with full draft acceptance, and the same setting is slower on
 code output. It should not be advertised as always faster.
-
-### A note on AI Tune
-
-The tables above are ggrun's **default** placement — no tuning. `--ai-tune` benchmarks a
-few flag variants and caches the fastest, but on this rig the gains are marginal and
-model-specific (the default often wins the confirmation re-measure), so it's an optional
-extra, not part of the headline numbers.
 
 ### Launch Read (2026-06-22)
 

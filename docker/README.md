@@ -56,7 +56,7 @@ give the backend `--api-key` (or set `LLAMA_API_KEY`), and keep the port behind 
 
 Volumes:
 - `/models` — your GGUF files (and downloaded vision projectors / quants)
-- `/cache` — AI Tune and probe cache (persist it to keep tuned configs)
+- `/cache` — probe and placement cache (persist it to keep measurements)
 
 ## Full stack with Open WebUI
 
@@ -68,7 +68,7 @@ MODEL=/models/your-model.gguf docker compose up
 
 ## Notes
 
-- GPU placement, KV/batch sizing, and AI Tune work the same as on the host —
+- GPU placement and KV/batch sizing work the same as on the host —
   the launcher detects the GPUs exposed to the container.
 - These images ship the **mainline** llama.cpp backend. The faster
   ik_llama.cpp CUDA path is a source build (see the top-level README); it is not
