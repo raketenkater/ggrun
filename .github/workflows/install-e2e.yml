@@ -197,6 +197,14 @@ jobs:
           ls -l "${got[0]}"
           echo "MODEL=${got[0]}" >> "$GITHUB_ENV"
 
+      # The installed backend's log must still be readable by ggrun's planner
+      # parsers (review I-05); a wording change upstream fails here, not as a
+      # silent fallback to estimates on users' machines.
+      - name: Backend contract check
+        run: |
+          set -euo pipefail
+          "$HOME/ggrun/ggrun" backend verify --model "$MODEL" --timeout 5m
+
       # The repo/quant above is fixed by this workflow. A user instead follows
       # ggrun's recommendation for the machine, so do that too: the top pick is
       # checked to be a complete artifact and its bytes must match the catalog.
