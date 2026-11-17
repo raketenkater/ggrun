@@ -183,8 +183,10 @@ type Model struct {
 
 	// Strong typed confirmation for deleting a model discovered outside the
 	// primary directory. The user must type "yes" into the input screen before
-	// removeModelAt may call modelstore.RemoveExternal on that row.
-	pendingExternalRemoveIdx int
+	// removeModelAt may call modelstore.RemoveExternal on that row. It holds
+	// the model's path identity, not its list index: a scan can re-sort the list
+	// while the prompt is open.
+	pendingExternalRemoveID string
 
 	// Resumable Claude Code session for the working directory, discovered when
 	// the pre-launch screen is opened.
@@ -323,7 +325,6 @@ func sessionModel() Model {
 	if m.port <= 0 {
 		m.port = 8081
 	}
-	m.pendingExternalRemoveIdx = -1
 	if m.ctxSize == "" {
 		m.ctxSize = "fit"
 	}
@@ -694,16 +695,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				external++
 			}
 		}
-		seconds := msg.result.Duration.Round(100 * time.Millisecond)
-		m.message = fmt.Sprintf("Computer scan complete: %d runnable model(s), %d outside the primary directory (%s)", len(m.models), external, seconds)
-		m.messageType = "info"
-		if msg.result.Truncated {
-			m.message += "; scan limit reached, showing partial results"
-			m.messageType = "warning"
-		}
-		if msg.cacheErr != nil {
-			m.message += fmt.Sprintf("; results could not be saved: %v", msg.cacheErr)
-			m.messageType = "warning"
+		// The typed external-delete prompt's message names the file that will
+		// be deleted; the scan summary must not replace it.
+		if m.inputMode != "external-remove-confirm" {
+			seconds := msg.result.Duration.Round(100 * time.Millisecond)
+			m.message = fmt.Sprintf("Computer scan complete: %d runnable model(s), %d outside the primary directory (%s)", len(m.models), external, seconds)
+			m.messageType = "info"
+			if msg.result.Truncated {
+				m.message += "; scan limit reached, showing partial results"
+				m.messageType = "warning"
+			}
+			if msg.cacheErr != nil {
+				m.message += fmt.Sprintf("; results could not be saved: %v", msg.cacheErr)
+				m.messageType = "warning"
+			}
 		}
 		if m.screen == ScreenFirstRun && len(m.models) > 0 {
 			m.screen = ScreenMain
@@ -744,7 +749,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Blur()
 				if m.screen == ScreenDownload || m.screen == ScreenBackend {
 					if m.screen == ScreenDownload {
-						m.pendingExternalRemoveIdx = -1
+						m.pendingExternalRemoveID = ""
 					}
 					m.screen = ScreenMain
 					m.message = ""
@@ -1593,13 +1598,21 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 		val := m.input.Value()
 		switch m.inputMode {
 		case "external-remove-confirm":
-			idx := m.pendingExternalRemoveIdx
+			id := m.pendingExternalRemoveID
 			m.inputMode = ""
 			m.input.Blur()
 			m.screen = ScreenMain
 			if strings.TrimSpace(val) != "yes" {
+				m.pendingExternalRemoveID = ""
 				m.message = "External model removal cancelled."
 				m.messageType = ""
+				return m, cmd
+			}
+			idx := m.modelIndexByID(id)
+			if idx < 0 {
+				m.pendingExternalRemoveID = ""
+				m.message = fmt.Sprintf("%s is no longer listed; nothing was deleted.", id)
+				m.messageType = "warning"
 				return m, cmd
 			}
 			m.removeModelAt(idx)
@@ -3634,13 +3647,18 @@ func (m *Model) openRemoveModelChoice(idx int) {
 	if idx < 0 || idx >= len(m.models) {
 		return
 	}
+	// The dialog is bound to the model's path, not its list index: a scan that
+	// finishes while it is open re-sorts m.models (C-16).
 	name := m.models[idx].Name
+	id := modelIdentity(m.models[idx].Path)
 	if m.models[idx].External {
 		m.openChoice("Delete "+name+" outside the primary directory?", []string{"Cancel", "Remove file " + name}, "Cancel", ScreenMain, func(cm *Model, confirm string) {
 			if confirm == "Cancel" {
 				return
 			}
-			cm.openExternalRemoveConfirm(idx)
+			if i := cm.listedModelIndex(id, name); i >= 0 {
+				cm.openExternalRemoveConfirm(i)
+			}
 		})
 		return
 	}
@@ -3648,8 +3666,34 @@ func (m *Model) openRemoveModelChoice(idx int) {
 		if confirm == "Cancel" {
 			return
 		}
-		cm.removeModelAt(idx)
+		if i := cm.listedModelIndex(id, name); i >= 0 {
+			cm.removeModelAt(i)
+		}
 	})
+}
+
+// modelIndexByID finds a model by its path identity in the current list.
+func (m *Model) modelIndexByID(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := range m.models {
+		if modelIdentity(m.models[i].Path) == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// listedModelIndex is modelIndexByID for a confirmed dialog: when the model is
+// gone from the list it says so and acts on nothing.
+func (m *Model) listedModelIndex(id, name string) int {
+	i := m.modelIndexByID(id)
+	if i < 0 {
+		m.message = fmt.Sprintf("%s is no longer listed; nothing was changed.", name)
+		m.messageType = "warning"
+	}
+	return i
 }
 
 // openExternalRemoveConfirm opens the strong typed confirmation screen for a
@@ -3661,7 +3705,10 @@ func (m *Model) openRemoveModelChoice(idx int) {
 // "external-remove-confirm" mode below. Esc on this screen falls through the
 // generic input-screen path and discards the pending removal.
 func (m *Model) openExternalRemoveConfirm(idx int) {
-	m.pendingExternalRemoveIdx = idx
+	if idx < 0 || idx >= len(m.models) {
+		return
+	}
+	m.pendingExternalRemoveID = modelIdentity(m.models[idx].Path)
 	m.screen = ScreenDownload
 	m.inputMode = "external-remove-confirm"
 	m.input.SetValue("")
@@ -3686,17 +3733,16 @@ func (m *Model) removeModelAt(idx int) {
 	// A model outside the primary directory leaves the in-dir removal path: it
 	// is not listed by modelstore.List(m.modelDir), so the match-by-relative-path
 	// logic below could never find it. Removal is gated on the strong typed
-	// "yes" confirmation (openExternalRemoveConfirm): updateInputScreen sets
-	// pendingExternalRemoveIdx to this exact index only after the user typed
-	// "yes", and removes it again afterwards. Anything else reaching this branch
-	// (a stray call, a stale index) is refused.
+	// "yes" confirmation (openExternalRemoveConfirm): pendingExternalRemoveID
+	// names this exact file and is cleared afterwards. Anything else reaching
+	// this branch (a stray call, a stale index) is refused.
 	if item.External {
-		if m.pendingExternalRemoveIdx != idx {
+		if m.pendingExternalRemoveID == "" || m.pendingExternalRemoveID != modelIdentity(item.Path) {
 			m.message = "External model removal requires the typed confirmation."
 			m.messageType = "warning"
 			return
 		}
-		m.pendingExternalRemoveIdx = -1
+		m.pendingExternalRemoveID = ""
 		removed, err := modelstore.RemoveExternal(m.modelDir, item.Path)
 		if err != nil {
 			m.message = fmt.Sprintf("Error removing %s: %v", item.Name, err)
@@ -3757,11 +3803,14 @@ func (m *Model) openClearCachesChoice(idx int) {
 		return
 	}
 	name := m.models[idx].Name
+	id := modelIdentity(m.models[idx].Path)
 	m.openChoice("Clear caches for "+name+"?", []string{"Cancel", "Confirm: clear caches for " + name}, "Cancel", ScreenModelConfig, func(cm *Model, confirm string) {
 		if confirm == "Cancel" {
 			return
 		}
-		cm.clearModelCachesAt(idx)
+		if i := cm.listedModelIndex(id, name); i >= 0 {
+			cm.clearModelCachesAt(i)
+		}
 	})
 }
 
