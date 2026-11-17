@@ -589,7 +589,7 @@ def main():
         (output / "result.json").write_text(json.dumps(result, indent=2))
         raise RuntimeError(result["error"])
     (output / "result.json").write_text(json.dumps(result, indent=2))
-    env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
+    env = dict(os.environ)
     if args.claude_code:
         # With a claude client on PATH ggrun hands it the terminal; this check
         # drives the served endpoint itself, as the acceptance harness does.
