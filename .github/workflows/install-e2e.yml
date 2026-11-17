@@ -245,7 +245,10 @@ jobs:
           [ "$up" = 1 ] || { echo "::error::the user unit did not serve"; exit 1; }
           systemctl --user stop ggrun
           if systemctl --user is-active --quiet ggrun; then echo "::error::unit still active after stop"; exit 1; fi
-          if curl -fs http://127.0.0.1:18849/health >/dev/null; then echo "::error::server still answering after stop"; exit 1; fi
+          # The backend runs in its own memory scope; its watcher stops it a
+          # few seconds after the launcher exits.
+          for _ in $(seq 30); do curl -fs http://127.0.0.1:18849/health >/dev/null || break; sleep 1; done
+          if curl -fs http://127.0.0.1:18849/health >/dev/null; then echo "::error::server still answering 30s after stop"; exit 1; fi
 
       - name: Reinstall candidate without resetting configuration
         if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
