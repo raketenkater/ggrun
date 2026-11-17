@@ -226,7 +226,8 @@ func (r *Router) tryReviewer(w http.ResponseWriter, req *http.Request, proxy *ht
 
 	start := time.Now()
 	deferred := newDeferredWriter(w)
-	metered := &meteredWriter{ResponseWriter: deferred, start: start}
+	metered := &meteredWriter{ResponseWriter: deferred, start: start, capture: true}
+	meta := metaFor(req, kindClassifier)
 	proxy.ServeHTTP(metered, req)
 	if attempt.failed || !reviewerResponseUsable(deferred.status, deferred.hdr, deferred.buf.Bytes()) {
 		// Record the rejected attempt so the metrics log distinguishes "the
@@ -244,7 +245,7 @@ func (r *Router) tryReviewer(w http.ResponseWriter, req *http.Request, proxy *ht
 				fmt.Fprintf(os.Stderr, "[claude-code] reviewer verdict did not parse; answer was: %s\n", snippet)
 			}
 		}
-		r.recordReviewerReject(body, start, metered, reason)
+		r.recordReviewerReject(body, start, metered, reason, meta)
 		return false
 	}
 	deferred.flush()
@@ -252,7 +253,7 @@ func (r *Router) tryReviewer(w http.ResponseWriter, req *http.Request, proxy *ht
 	if stopStrippedReviewerVerdict(reviewerResponseText(deferred.hdr, deferred.buf.Bytes())) {
 		route = routeReviewerStopStripped
 	}
-	r.record(route, body, start, 0, metered)
+	r.record(route, body, start, 0, metered, meta)
 	return true
 }
 
@@ -269,6 +270,7 @@ func (r *Router) tryReviewerUtility(w http.ResponseWriter, req *http.Request, pr
 	start := time.Now()
 	deferred := newDeferredWriter(w)
 	metered := &meteredWriter{ResponseWriter: deferred, start: start}
+	meta := metaFor(req, kindUtility)
 	proxy.ServeHTTP(metered, req)
 	usable := deferred.status >= 200 && deferred.status < 300 && len(bytes.TrimSpace(deferred.buf.Bytes())) > 0
 	if attempt.failed || !usable {
@@ -276,22 +278,22 @@ func (r *Router) tryReviewerUtility(w http.ResponseWriter, req *http.Request, pr
 		if attempt.failed {
 			reason = "upstream-failure"
 		}
-		r.record("utility-rejected/"+reason, body, start, 0, metered)
+		r.record("utility-rejected/"+reason, body, start, 0, metered, meta)
 		return false
 	}
 	deferred.flush()
-	r.record(routeUtility, body, start, 0, metered)
+	r.record(routeUtility, body, start, 0, metered, meta)
 	return true
 }
 
 // recordReviewerReject writes a metrics row for a reviewer answer the router
 // chose not to forward. route "reviewer-rejected" keeps it visible next to the
 // served routes without disturbing the served/reviewer accounting.
-func (r *Router) recordReviewerReject(body []byte, start time.Time, metered *meteredWriter, reason string) {
+func (r *Router) recordReviewerReject(body []byte, start time.Time, metered *meteredWriter, reason string, meta recordMeta) {
 	if r == nil {
 		return
 	}
-	r.record("reviewer-rejected/"+reason, body, start, 0, metered)
+	r.record("reviewer-rejected/"+reason, body, start, 0, metered, meta)
 }
 
 // reviewerVerdictSnippet extracts the reviewer's joined text, trimmed to one
