@@ -1032,7 +1032,7 @@ go_required_version() {
         awk '$1 == "go" { print $2; exit }' "$SRC_DIR/go/go.mod"
         return
     fi
-    printf '1.24.13\n'
+    printf '1.27.4\n'
 }
 
 go_version_parts() {
