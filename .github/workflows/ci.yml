@@ -76,6 +76,23 @@ jobs:
           GOARCH: amd64
         run: go vet ./...
 
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: Scan ggrun for reachable vulnerabilities
+        working-directory: go
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+      - name: Scan clientkit for reachable vulnerabilities
+        working-directory: clientkit
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+
   go-cross-build:
     runs-on: ubuntu-latest
     strategy:
