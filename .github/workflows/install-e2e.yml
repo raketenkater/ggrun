@@ -220,6 +220,33 @@ jobs:
           python3 scripts/verify-installed-serving.py --launcher "$HOME/ggrun/ggrun" \
             --model "$MODEL" --cpu --port 18841 --output evidence/cpu --hash-model
 
+      # Unattended serving uses the shipped user unit (review C-08): ggrun's
+      # memory scopes need a user manager, which a system unit with User=
+      # does not have.
+      - name: Serve through the shipped systemd user unit
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$USER"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          for _ in $(seq 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          mkdir -p ~/.config/systemd/user ~/.config/ggrun
+          sed "s|%h/.local/bin/ggrun|$HOME/ggrun/ggrun|" examples/systemd/ggrun.service > ~/.config/systemd/user/ggrun.service
+          printf 'GGRUN_MODEL=%s\nGGRUN_ARGS=--cpu --port 18849 --ctx 2048\n' "$MODEL" > ~/.config/ggrun/service.env
+          systemctl --user daemon-reload
+          systemctl --user start ggrun
+          up=0
+          for _ in $(seq 180); do
+            if curl -fs http://127.0.0.1:18849/health >/dev/null; then up=1; break; fi
+            systemctl --user is-active --quiet ggrun || break
+            sleep 2
+          done
+          journalctl --user -u ggrun --no-pager | tail -40
+          [ "$up" = 1 ] || { echo "::error::the user unit did not serve"; exit 1; }
+          systemctl --user stop ggrun
+          if systemctl --user is-active --quiet ggrun; then echo "::error::unit still active after stop"; exit 1; fi
+          if curl -fs http://127.0.0.1:18849/health >/dev/null; then echo "::error::server still answering after stop"; exit 1; fi
+
       - name: Reinstall candidate without resetting configuration
         if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
         run: |
