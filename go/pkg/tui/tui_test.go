@@ -2673,3 +2673,26 @@ func TestClearCachesDialogSurvivesScanReordering(t *testing.T) {
 		t.Fatalf("caches cleared for the wrong model: %q (want %q)", m.message, want)
 	}
 }
+
+// C-13: the u key asks before it quits to rebuild; Cancel is the default.
+func TestUpdateKeyAsksFirst(t *testing.T) {
+	m := Model{screen: ScreenMain, mainList: newMainList(nil)}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = next.(Model)
+	if cmd != nil || m.launchRequest != nil || m.screen != ScreenChoice {
+		t.Fatalf("u started an update without asking: screen=%v req=%+v", m.screen, m.launchRequest)
+	}
+	if m.choiceOptions[m.choiceCursor] != "Cancel" {
+		t.Fatalf("default is %q, want Cancel", m.choiceOptions[m.choiceCursor])
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(Model); got.launchRequest != nil {
+		t.Fatal("Cancel still requested an update")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(Model); got.launchRequest == nil || !got.launchRequest.Update || cmd == nil {
+		t.Fatal("confirming did not request the update and quit")
+	}
+}

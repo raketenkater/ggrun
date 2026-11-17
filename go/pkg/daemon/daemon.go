@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,9 @@ type Config struct {
 	// ControlToken authenticates every control route. New generates one when it
 	// is empty, so browser-originated localhost POSTs cannot mutate the daemon.
 	ControlToken string `json:"-"`
+	// TokenFile is where Start writes ControlToken (mode 0600). Empty uses
+	// <user config dir>/ggrun/daemon-<control port>.token.
+	TokenFile string `json:"-"`
 
 	// AllowExplicitServerArgs keeps trusted tests/owners able to provide argv
 	// directly. The public control API defaults to model-path reloads only.
@@ -106,12 +110,62 @@ func (d *Daemon) Start() error {
 	token := d.config.ControlToken
 	d.mu.Unlock()
 	fmt.Printf("[daemon] control API on %s\n", d.addr)
-	fmt.Printf("[daemon] control token: %s\n", token)
+	// The token is a credential: it goes to an owner-only file, never to the
+	// terminal or a log that other users or tools may read.
+	path, werr := d.writeControlToken(token)
+	if werr != nil {
+		return fmt.Errorf("write daemon control token: %w", werr)
+	}
+	fmt.Printf("[daemon] control token in %s (owner-only)\n", path)
 	err := srv.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+// controlTokenPath is the file Start writes the control token to.
+func (d *Daemon) controlTokenPath() (string, error) {
+	if d.config.TokenFile != "" {
+		return d.config.TokenFile, nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "ggrun", fmt.Sprintf("daemon-%d.token", d.config.ControlPort)), nil
+}
+
+func (d *Daemon) writeControlToken(token string) (string, error) {
+	path, err := d.controlTokenPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	// Replace rather than rewrite in place, so an existing file with wider
+	// permissions never holds the new token.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if _, err := tmp.WriteString(token + "\n"); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // Close stops the managed model process and closes the control API. It is safe

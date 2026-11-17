@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -106,5 +109,39 @@ func TestReachedFunctionalSeesDegradedButNotRejected(t *testing.T) {
 	}
 	if store.ReachedFunctional("scope", "args") {
 		t.Fatal("a rejected profile counted as functional")
+	}
+}
+
+// C-12: a damaged or other-schema record is moved aside and treated as
+// absent; it must not make every later launch fail.
+func TestUnreadableOrOtherSchemaRecordIsSetAside(t *testing.T) {
+	for name, body := range map[string]string{
+		"truncated":    `{"schema_version": 1, "scop`,
+		"other schema": `{"schema_version": 999, "scope": "scope"}`,
+		"other scope":  `{"schema_version": ` + strconv.Itoa(SchemaVersion) + `, "scope": "elsewhere"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := Store{CacheDir: t.TempDir()}
+			path := store.path("scope")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Load("scope"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Load = %v, want absent", err)
+			}
+			aside, _ := filepath.Glob(path + ".unreadable-*")
+			if len(aside) != 1 {
+				t.Fatalf("record not moved aside: %v", aside)
+			}
+			if _, err := store.Begin(Profile{Scope: "scope", ArgsHash: "args"}); err != nil {
+				t.Fatalf("a new record could not be written after setting the old one aside: %v", err)
+			}
+			if _, err := store.Load("scope"); err != nil {
+				t.Fatalf("fresh record unreadable: %v", err)
+			}
+		})
 	}
 }
