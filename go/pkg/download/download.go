@@ -137,6 +137,9 @@ func (d *Downloader) scriptArgs(repo, quant string, caps *detect.Capabilities, i
 	if quant != "" && quant != "auto" && quant != "catalog" {
 		args = append(args, "--quant", quant)
 	}
+	if rev := catalogRevision(repo); rev != "" {
+		args = append(args, "--revision", rev)
+	}
 	if active := catalogActiveParamsB(repo); active > 0 {
 		args = append(args, "--active-params-b", strconv.FormatFloat(active, 'f', -1, 64))
 	}
@@ -156,6 +159,16 @@ func (d *Downloader) scriptArgs(repo, quant string, caps *detect.Capabilities, i
 // catalogActiveParamsB is the catalog's active parameter count for a MoE repo,
 // so the downloader does not size an unnamed MoE (no A##B in the repo name)
 // as dense. 0 when the repo is not a catalog MoE.
+// catalogRevision is the commit the catalog pinned for repo, if any.
+func catalogRevision(repo string) string {
+	for _, c := range recommend.Shortlist() {
+		if strings.EqualFold(c.Repo, repo) {
+			return c.Revision
+		}
+	}
+	return ""
+}
+
 func catalogActiveParamsB(repo string) float64 {
 	for _, c := range recommend.Shortlist() {
 		if c.MoE && strings.EqualFold(c.Repo, repo) {
