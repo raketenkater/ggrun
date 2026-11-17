@@ -25,7 +25,8 @@ if [[ "$APP_HOME" == "$HOME/ggrun" && -d "$OLD_APP_HOME" && ! -e "$APP_HOME" ]];
 fi
 INSTALL_MODE="${LLM_SETUP_MODE:-${LLM_INSTALL_MODE:-auto}}"
 BACKEND="${LLM_SETUP_BACKEND:-${LLM_INSTALL_BACKEND:-auto}}"
-INSTALL_REF="${LLM_SETUP_REF:-${LLM_INSTALL_REF:-main}}"
+# Empty lets install.sh pick the latest release.
+INSTALL_REF="${LLM_SETUP_REF:-${LLM_INSTALL_REF:-}}"
 SOURCE_REPO_DIR=""
 # Linked worktrees have a .git file and must still build the local checkout.
 if [[ ! -e "$ROOT/.git" ]]; then
