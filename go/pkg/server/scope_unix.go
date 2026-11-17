@@ -246,11 +246,6 @@ func scopeUnitActive(unit string, mode scopeMode) (bool, error) {
 	return false, fmt.Errorf("read scope %s activity: %w", unit, err)
 }
 
-func scopeMemoryPeakBytes(unit string, mode scopeMode) (uint64, error) {
-	peak, _, peakErr, _ := scopeMemoryStats(unit, mode)
-	return peak, peakErr
-}
-
 func scopeMemoryStats(unit string, mode scopeMode) (uint64, uint64, error, error) {
 	cgroup, err := scopeControlGroup(unit, mode)
 	if err != nil {
@@ -304,14 +299,6 @@ func scopeControlGroup(unit string, mode scopeMode) (string, error) {
 		return "", fmt.Errorf("scope %s has no control group", unit)
 	}
 	return cgroup, nil
-}
-
-func scopeMemoryOOMKillCount(unit string, mode scopeMode) (uint64, error) {
-	cgroup, err := scopeControlGroup(unit, mode)
-	if err != nil {
-		return 0, err
-	}
-	return scopeMemoryOOMKillCountAt(cgroup)
 }
 
 // ScopeNonReclaimableMB reports the backend's current non-reclaimable host

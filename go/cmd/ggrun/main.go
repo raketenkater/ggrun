@@ -4374,9 +4374,8 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement
 		// Append, never truncate. The scope is a hash of the launch shape, not of
 		// one invocation, so every launch and every retry that lands on the same
 		// shape shares this path — and os.Create erased the previous attempt at
-		// the moment the next one started. That is the second of two truncation
-		// sites (pkg/recovery/recovery.go runOnce is the other); fixing only one
-		// still lost the history, as the 2026-08-02 23:11 relaunch showed.
+		// the moment the next one started, losing the history, as the
+		// 2026-08-02 23:11 relaunch showed.
 		if lf, ferr := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); ferr == nil {
 			_, _ = fmt.Fprintf(lf, "[ggrun] launch-scope: %s\n", scope)
 			// The scope is a hash, so a mismatch between two runs is invisible
@@ -8999,14 +8998,6 @@ func claudeClientProfile(args []string, actualCtx int) clientkit.Profile {
 	return clientkit.Profile{ProtocolVersion: clientkit.ProtocolVersion, ModelID: "local", MainAlias: "local", UtilityAlias: claudeauto.UtilityAlias, ContextPerSlot: slot, Slots: slots, Policy: clientkit.Policy{Version: clientkit.PolicyVersion, CompactWindow: min(slot, claudeCodeAutocompactWindow(args, actualCtx)), CompactPercent: claudeCodeAutocompactPct(args, actualCtx), Effort: "xhigh", TimeoutMS: clientkit.MaxTimeoutMS, WorkflowHook: true}}
 }
 
-// envOr returns the current environment value for key, or def if unset/empty.
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
 // claudeCodePermissionArgs defaults local Claude Code to Auto with a companion.
 // Disabling the companion defaults to normal permission prompts, because a slow
 // main model may exceed the native classifier deadline. ggrun supplies
@@ -9350,31 +9341,6 @@ func claudeClientExitMessage(code int) string {
 		return ""
 	}
 	return fmt.Sprintf("[claude-code] Claude Code exited with code %d; stopping the server.", code)
-}
-
-// waitForHealth polls the server's /health (then /v1/models) until it answers or
-// the timeout elapses. Used by the TUI path, where the backend starts in a
-// background goroutine and there's no synchronous readiness signal.
-func waitForHealth(host string, port int, timeout time.Duration) bool {
-	clientHost := host
-	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
-		clientHost = "127.0.0.1"
-	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		for _, path := range []string{"/health", "/v1/models"} {
-			resp, err := client.Get(fmt.Sprintf("http://%s:%d%s", clientHost, port, path))
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					return true
-				}
-			}
-		}
-		time.Sleep(time.Second)
-	}
-	return false
 }
 
 // isServerRunning returns true if the server at host:port responds to /health

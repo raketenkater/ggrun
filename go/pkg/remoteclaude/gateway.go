@@ -171,23 +171,6 @@ func Listen(address string) (net.Listener, error) {
 	return lc.Listen(context.Background(), "tcp", address)
 }
 
-func Start(address, upstream, token string, profile clientkit.Profile, opts ...Option) (*Gateway, error) {
-	h, err := NewHandler(upstream, token, profile, opts...)
-	if err != nil {
-		return nil, err
-	}
-	ln, err := Listen(address)
-	if err != nil {
-		return nil, fmt.Errorf("listen for remote Claude gateway: %w", err)
-	}
-	s := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
-	g := &Gateway{listener: ln, server: s}
-	go func() { _ = s.Serve(ln) }()
-	return g, nil
-}
-func (g *Gateway) Address() string { return g.listener.Addr().String() }
-func (g *Gateway) Close() error    { return g.server.Close() }
-
 func apiError(w http.ResponseWriter, status int, kind, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

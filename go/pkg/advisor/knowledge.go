@@ -168,13 +168,6 @@ func (researcher Researcher) ResearchOfficial(ctx context.Context, incident Inci
 	return sources, nil
 }
 
-// ResearchOfficialHTTP is ResearchOfficial with the default live GitHub host.
-// It exists so the fallback chain reads a single spelling; tests keep the
-// explicit injected-base seam.
-func (researcher Researcher) ResearchOfficialHTTP(ctx context.Context, incident Incident) ([]Source, error) {
-	return researcher.ResearchOfficial(ctx, incident, "")
-}
-
 // defaultModelCardBase is the live Hugging Face host for model-card READMEs.
 // Tests inject a local httptest endpoint via ResearchModelCard's base parameter,
 // mirroring ResearchOfficial's injected-base seam.

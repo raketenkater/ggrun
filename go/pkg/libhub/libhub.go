@@ -193,18 +193,6 @@ func Cleanup(hubDir string) {
 	}
 }
 
-// Env returns LD_LIBRARY_PATH with the hub prepended (process environment form).
-func Env(hubDir string) string {
-	if hubDir == "" {
-		return os.Getenv("LD_LIBRARY_PATH")
-	}
-	old := os.Getenv("LD_LIBRARY_PATH")
-	if old == "" {
-		return hubDir
-	}
-	return hubDir + ":" + old
-}
-
 // ApplyToChildEnv prepends the configured lib hub (from the LLM_SERVER_LIB_HUB
 // env var that Setup's caller exports) to LD_LIBRARY_PATH within a child-process
 // environment slice. Both backend launch paths (server and recovery) call this so

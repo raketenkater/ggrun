@@ -97,11 +97,6 @@ func exeScriptCandidates(exeDir string) []string {
 	return candidates
 }
 
-// Run executes the downloader for the given repo.
-func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
-	return d.RunQuant(repo, "", caps)
-}
-
 // RunQuant executes the downloader with an optional preselected quant.
 func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabilities) error {
 	if d.ScriptPath == "" {

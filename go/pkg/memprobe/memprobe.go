@@ -2,8 +2,6 @@ package memprobe
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,15 +172,6 @@ func (s Summary) DeviceSlice() []DeviceMemory {
 		devices = append(devices, s.Devices[index])
 	}
 	return devices
-}
-
-func CacheKey(parts ...string) string {
-	h := sha256.New()
-	for _, part := range parts {
-		_, _ = h.Write([]byte(part))
-		_, _ = h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 func Save(cacheDir string, plan Plan) (string, error) {
