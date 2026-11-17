@@ -402,3 +402,20 @@ def test_catalog_active_params_make_an_unnamed_moe_use_the_moe_estimate():
     vram, ram = 24 * 1024, 112400 - 24 * 1024
     assert downloader.recommend_quant(quants, vram, ram, "owner/Model-GGUF")[0] == "Q2_K"
     assert downloader.recommend_quant(quants, vram, ram, "owner/Model-GGUF", 3)[0] == "Q4_K_M"
+
+
+def test_pinned_revision_reaches_hugging_face_calls(monkeypatch):
+    """Review S-09: with --revision every listing reads that commit."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("dl_pin", Path(__file__).resolve().parents[1] / "tools/download/download_any_gguf.py")
+    dl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dl)
+    seen = []
+    monkeypatch.setattr(dl, "list_repo_files", lambda repo, **kw: seen.append(kw) or ["m-Q4_K_M.gguf"])
+    monkeypatch.setattr(dl, "PINNED_REVISION", "b" * 40)
+    dl.get_model_files("o/r", "Q4_K_M")
+    assert seen and seen[-1].get("revision") == "b" * 40
+    monkeypatch.setattr(dl, "PINNED_REVISION", None)
+    dl.get_model_files("o/r", "Q4_K_M")
+    assert "revision" not in seen[-1]

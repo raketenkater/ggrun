@@ -29,12 +29,29 @@ except ImportError:
     )
     raise SystemExit(1)
 
+# Shared with tools/models/update_recommendations.py
+# (test_owner_scoring_matches_downloader); the Go list in
+# go/pkg/recommend/owners.go marks owners outside it.
 TRUSTED_GGUF_OWNERS = {
-    "unsloth": 120,
+    "unsloth": 140,
     "bartowski": 95,
     "maziyarpanahi": 80,
     "prithivmlmods": 70,
+    "lmstudio-community": 60,
+    "second-state": 45,
 }
+OTHER_OWNER_SCORE = 20
+
+# --revision: the repository commit the catalog resolved (review S-09). Every
+# listing and download reads that commit, not whatever the repo holds later.
+PINNED_REVISION = None
+
+
+def _pinned(**kwargs):
+    """revision=PINNED_REVISION for Hugging Face calls, only when pinned."""
+    if PINNED_REVISION:
+        kwargs["revision"] = PINNED_REVISION
+    return kwargs
 
 FAMILY_PREFIXES = {
     "qwen",
@@ -265,7 +282,7 @@ def _quant_fits(quant_list, vram_mb, ram_mb, repo):
 
 def _repo_score(candidate_repo, target_repo, quant_list, vram_mb, ram_mb):
     owner = _repo_owner(candidate_repo)
-    score = TRUSTED_GGUF_OWNERS.get(owner, 25)
+    score = TRUSTED_GGUF_OWNERS.get(owner, OTHER_OWNER_SCORE)
     target_key = _norm(_model_query(target_repo))
     candidate_key = _norm(_model_query(candidate_repo))
     if candidate_repo.lower() == target_repo.lower():
@@ -384,7 +401,7 @@ def list_available_quantizations(repo):
     Returns list of (quant_name, total_size_bytes) tuples sorted by size."""
     try:
         api = HfApi()
-        info = api.model_info(repo, files_metadata=True)
+        info = api.model_info(repo, **_pinned(files_metadata=True))
         sizes = {}
         for sibling in info.siblings:
             size = sibling.size
@@ -436,7 +453,7 @@ def get_model_files(repo, selected_quantization):
     try:
         import re
 
-        files = without_draft_heads(list_repo_files(repo))
+        files = without_draft_heads(list_repo_files(repo, **_pinned()))
 
         groups = model_quant_groups(files, _FILE_SIZES.get(repo))
         if selected_quantization:
@@ -591,7 +608,7 @@ def transfer_file(repo, filename, output_dir, revision, force=False,
 
 def file_manifest(repo, filenames):
     """Pin every selected shard to the same commit and trusted content hash."""
-    info = HfApi().model_info(repo, files_metadata=True, timeout=30)
+    info = HfApi().model_info(repo, **_pinned(files_metadata=True, timeout=30))
     if not info.sha:
         raise ValueError("repository metadata did not include a revision; retry")
     siblings = {s.rfilename: s for s in info.siblings}
@@ -900,6 +917,7 @@ def get_args():
     parser.add_argument("--ram", type=int, default=0, help="Available RAM in MB")
     parser.add_argument("--cache-dir", type=str, help="ggrun cache directory")
     parser.add_argument("--quant", type=str, default="", help="preselect a GGUF quantization")
+    parser.add_argument("--revision", type=str, default="", help="repository commit to read (pinned by the catalog)")
     parser.add_argument(
         "--yes",
         action="store_true",
@@ -1037,7 +1055,7 @@ def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant="",
     print("\nScanning repository for available quantizations...")
 
     try:
-        files = list_repo_files(repo)
+        files = list_repo_files(repo, **_pinned())
         has_safetensors = any(f.endswith(".safetensors") for f in files)
         has_ggufs = any(f.endswith(".gguf") for f in files)
 
@@ -1112,6 +1130,8 @@ def select_quantization(repo, vram_mb=0, ram_mb=0, requested_quant="",
 
 def main():
     args = get_args()
+    global PINNED_REVISION
+    PINNED_REVISION = (getattr(args, "revision", "") or "").strip() or None
     interactive = not args.non_interactive and bool(sys.stdin) and sys.stdin.isatty()
     try:
         clear_screen()

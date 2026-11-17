@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -59,4 +60,25 @@ func TestScriptArgsPassCatalogActiveParams(t *testing.T) {
 		return
 	}
 	t.Skip("catalog has no MoE with inferred active params and an unnamed repo")
+}
+
+// S-09: a catalog row's pinned revision reaches the downloader; other repos
+// are read at their current commit.
+func TestCatalogRevisionReachesTheDownloader(t *testing.T) {
+	d := &Downloader{ScriptPath: "dl.py", ModelDir: "/m", CacheDir: "/c"}
+	args := strings.Join(d.scriptArgs("nobody/not-in-catalog-GGUF", "", nil, false), " ")
+	if strings.Contains(args, "--revision") {
+		t.Fatalf("revision for an unknown repo: %s", args)
+	}
+	for _, c := range recommend.Shortlist() {
+		if c.Revision == "" {
+			continue
+		}
+		args := strings.Join(d.scriptArgs(c.Repo, "", nil, false), " ")
+		if !strings.Contains(args, "--revision "+c.Revision) {
+			t.Fatalf("pinned revision missing: %s", args)
+		}
+		return
+	}
+	t.Log("no catalog row carries a revision yet (the next refresh adds them)")
 }
