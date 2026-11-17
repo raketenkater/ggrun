@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/embedscript"
 	"github.com/raketenkater/ggrun/pkg/python"
 )
@@ -112,6 +113,9 @@ type Info struct {
 }
 
 // Parse calls the bundled GGUF metadata helper.
+// parseHelperTimeout bounds parse_gguf.py; tests shorten it.
+var parseHelperTimeout = boundexec.HelperTimeout
+
 func Parse(path string) (*Info, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("model file path is empty")
@@ -133,9 +137,12 @@ func Parse(path string) (*Info, error) {
 	if !ok {
 		return nil, fmt.Errorf("parse_gguf.py needs Python 3, but no working python interpreter was found on PATH.\n%s", python.InstallHint())
 	}
-	cmd := exec.Command(py, script, path)
+	cmd, finish := boundexec.Command(parseHelperTimeout, py, script, path)
 	out, err := cmd.Output()
-	if err != nil {
+	if err = finish(err); err != nil {
+		if boundexec.IsTimeout(err) {
+			return nil, fmt.Errorf("parse_gguf.py did not answer within %s for %s", parseHelperTimeout, filepath.Base(path))
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
 			return nil, fmt.Errorf("parse_gguf.py: %s", exitErr.Stderr)
 		}
