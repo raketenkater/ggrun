@@ -50,6 +50,10 @@ INSTALL_RELEASE="${LLM_INSTALL_RELEASE:-latest}"
 INSTALL_RELEASE_DIR="${LLM_INSTALL_RELEASE_DIR:-}"
 PY_DEPS_MODE="${LLM_INSTALL_PY_DEPS:-auto}"
 DEPS_MODE="${LLM_INSTALL_DEPS:-auto}"
+# What the caller asked for before any prompt: only an explicit
+# LLM_INSTALL_DEPS=install lets a run without a terminal use sudo.
+DEPS_EXPLICIT="${LLM_INSTALL_DEPS:-}"
+PY_DEPS_EXPLICIT="${LLM_INSTALL_PY_DEPS:-}"
 GO_MODE="${LLM_INSTALL_GO:-auto}"
 GO_VERSION_OVERRIDE="${LLM_INSTALL_GO_VERSION:-}"
 GO_BOOTSTRAP_ROOT="${LLM_INSTALL_GO_ROOT:-$BACKEND_ROOT/.llm-server-go}"
@@ -1089,6 +1093,23 @@ go_download_platform() {
     printf '%s-%s\n' "$goos" "$goarch"
 }
 
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# go_published_sha256 NAME prints the sha256 go.dev publishes for one download.
+GO_DL_INDEX_URL="${LLM_INSTALL_GO_INDEX_URL:-https://go.dev/dl/?mode=json&include=all}"
+go_published_sha256() {
+    curl -fsL --show-error "$GO_DL_INDEX_URL" | tr -d '\n ' | tr '}' '\n' \
+        | grep -F "\"filename\":\"$1\"" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p' | head -1
+}
+
 download_go_toolchain() {
     local need platform root url tmp archive extracted_go
     need="$(go_required_version)"
@@ -1109,6 +1130,15 @@ download_go_toolchain() {
     if ! curl -fsL --show-error "$url" -o "$archive"; then
         rm -rf "$tmp"
         warn "Go download failed: $url"
+        return 1
+    fi
+    # A toolchain that builds ggrun is checked against go.dev's own index.
+    local want got
+    want="$(go_published_sha256 "go$need.$platform.tar.gz" || true)"
+    got="$(sha256_of "$archive" || true)"
+    if [[ -z "$want" || -z "$got" || "$want" != "$got" ]]; then
+        rm -rf "$tmp"
+        warn "Go archive go$need.$platform.tar.gz does not match the sha256 go.dev publishes (want ${want:-unavailable}, got ${got:-unavailable}); not installing it"
         return 1
     fi
     if ! tar -xzf "$archive" -C "$tmp"; then
@@ -1555,6 +1585,10 @@ box_has_libnccl() {
 # NVIDIA redist (no login). NCCL is a separate ~210 MB library from the driver.
 # Override with LLM_INSTALL_NCCL_URL= (tests use a tiny local archive).
 NCCL_REDIST_URL="${LLM_INSTALL_NCCL_URL:-https://developer.download.nvidia.com/compute/redist/nccl/v2.21.5/nccl_2.21.5-1+cuda12.4_x86_64.txz}"
+# sha256 of the default archive (downloaded 2026-11-16). An overridden URL is
+# checked against LLM_INSTALL_NCCL_SHA256 when that is set.
+NCCL_DEFAULT_URL="https://developer.download.nvidia.com/compute/redist/nccl/v2.21.5/nccl_2.21.5-1+cuda12.4_x86_64.txz"
+NCCL_DEFAULT_SHA256="d9c53eb3929a45447eb155bc5ace739b8f8ec28578e7cdf44001bd42f0f8a170"
 
 fetch_nccl_into_box() {
     local box="$1" tmp archive lib
@@ -1570,6 +1604,19 @@ fetch_nccl_into_box() {
         rm -rf "$tmp"
         warn "Could not download NCCL. CUDA needs libnccl.so.2 next to llama-server."
         return 1
+    fi
+    local want="${LLM_INSTALL_NCCL_SHA256:-}"
+    [[ -z "$want" && "$url" == "${NCCL_DEFAULT_URL:-}" ]] && want="${NCCL_DEFAULT_SHA256:-}"
+    if [[ -n "$want" ]]; then
+        local got
+        got="$(sha256_of "$archive" || true)"
+        if [[ "$got" != "$want" ]]; then
+            rm -rf "$tmp"
+            warn "NCCL archive sha256 ${got:-unavailable} does not match the pinned $want; not installing it"
+            return 1
+        fi
+    else
+        warn "NCCL archive from $url is not checked against a pinned sha256 (set LLM_INSTALL_NCCL_SHA256)"
     fi
     mkdir -p "$tmp/out"
     if ! tar -xJf "$archive" -C "$tmp/out" 2>/dev/null && ! tar -xf "$archive" -C "$tmp/out" 2>/dev/null; then
@@ -1712,14 +1759,19 @@ install_distro_packages() {
     local pkgs=("$@")
     [[ ${#pkgs[@]} -gt 0 ]] || return 1
     if command -v apt-get >/dev/null 2>&1; then
+        privileged_consent apt-get install -y "${pkgs[@]}" || return 1
         run_privileged apt-get update && run_privileged apt-get install -y "${pkgs[@]}"
     elif command -v dnf >/dev/null 2>&1; then
+        privileged_consent dnf install -y "${pkgs[@]}" || return 1
         run_privileged dnf install -y "${pkgs[@]}"
     elif command -v yum >/dev/null 2>&1; then
+        privileged_consent yum install -y "${pkgs[@]}" || return 1
         run_privileged yum install -y "${pkgs[@]}"
     elif command -v pacman >/dev/null 2>&1; then
+        privileged_consent pacman -Sy --needed --noconfirm "${pkgs[@]}" || return 1
         run_privileged pacman -Sy --needed --noconfirm "${pkgs[@]}"
     elif command -v zypper >/dev/null 2>&1; then
+        privileged_consent zypper install -y "${pkgs[@]}" || return 1
         run_privileged zypper install -y "${pkgs[@]}"
     else
         return 1
@@ -2015,6 +2067,20 @@ run_privileged() {
     fi
 }
 
+# privileged_consent CMD...: show the exact administrator command, packages
+# included, and ask before running it. Without a terminal only an explicit
+# LLM_INSTALL_DEPS=install consents; otherwise print what to run and decline.
+privileged_consent() {
+    (( EUID == 0 )) && { say "  Running: $*"; return 0; }
+    say "  ggrun needs administrator rights for: sudo $*"
+    if (( NONINTERACTIVE )); then
+        [[ "$DEPS_EXPLICIT" == "install" || "${CONSENT_EXPLICIT:-}" == "install" ]] && return 0
+        warn "Not using sudo without a terminal. Run the command above yourself, or set LLM_INSTALL_DEPS=install to allow it."
+        return 1
+    fi
+    ask "Run it now? You may be asked for your password. [Y/n]" y
+}
+
 python3_usable() {
     command -v python3 >/dev/null 2>&1 \
         && python3 -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' >/dev/null 2>&1
@@ -2022,20 +2088,26 @@ python3_usable() {
 
 install_python_runtime() {
     [[ "$PY_DEPS_MODE" != "skip" ]] || return 1
+    local CONSENT_EXPLICIT="$PY_DEPS_EXPLICIT" # LLM_INSTALL_PY_DEPS=install consents
     say "-- Installing Python 3 (GGUF metadata parsing and model downloads) --"
     if [[ "$OS" == "Darwin" ]]; then
         command -v brew >/dev/null 2>&1 || return 1
         brew install python
     elif command -v apt-get >/dev/null 2>&1; then
+        privileged_consent apt-get install -y python3 python3-pip python3-venv || return 1
         run_privileged apt-get update \
             && run_privileged apt-get install -y python3 python3-pip python3-venv
     elif command -v dnf >/dev/null 2>&1; then
+        privileged_consent dnf install -y python3 python3-pip || return 1
         run_privileged dnf install -y python3 python3-pip
     elif command -v yum >/dev/null 2>&1; then
+        privileged_consent yum install -y python3 python3-pip || return 1
         run_privileged yum install -y python3 python3-pip
     elif command -v pacman >/dev/null 2>&1; then
+        privileged_consent pacman -Sy --needed --noconfirm python python-pip || return 1
         run_privileged pacman -Sy --needed --noconfirm python python-pip
     elif command -v zypper >/dev/null 2>&1; then
+        privileged_consent zypper install -y python3 python3-pip || return 1
         run_privileged zypper install -y python3 python3-pip
     else
         return 1
@@ -2061,8 +2133,20 @@ install_python_download_deps() {
     if ! python_in_venv; then
         args=(--user "${args[@]}")
     fi
-    python3 -m pip install "${args[@]}" >/dev/null 2>&1 \
-        || python3 -m pip install --break-system-packages "${args[@]}" >/dev/null 2>&1
+    if python3 -m pip install "${args[@]}" >/dev/null 2>&1; then
+        python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
+        return
+    fi
+    # An externally managed Python (PEP 668) refuses user installs. Overriding
+    # that can break the system's own packages, so it is the user's call.
+    say "  This Python is managed by the system; installing huggingface_hub and tqdm needs:"
+    say "    python3 -m pip install --break-system-packages ${args[*]}"
+    say "  (a virtual environment avoids this: python3 -m venv ~/.venvs/ggrun)"
+    if (( NONINTERACTIVE )) || ! ask "Override the system Python's protection for these two packages? [y/N]" n; then
+        warn "Python download helpers not installed; model downloads need huggingface_hub and tqdm"
+        return 1
+    fi
+    python3 -m pip install --break-system-packages "${args[@]}" >/dev/null 2>&1
     python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
 }
 
@@ -2079,22 +2163,27 @@ install_build_deps() {
     elif command -v apt-get >/dev/null 2>&1; then
         local pkgs=(git cmake build-essential pkg-config libcurl4-openssl-dev)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(libvulkan-dev glslang-tools vulkan-tools)
+        privileged_consent apt-get install -y "${pkgs[@]}" || return 1
         run_privileged apt-get update && run_privileged apt-get install -y "${pkgs[@]}"
     elif command -v dnf >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc gcc-c++ pkgconf-pkg-config libcurl-devel)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-loader-devel vulkan-headers glslang vulkan-tools)
+        privileged_consent dnf install -y "${pkgs[@]}" || return 1
         run_privileged dnf install -y "${pkgs[@]}"
     elif command -v yum >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc gcc-c++ pkgconfig libcurl-devel)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-loader-devel glslang vulkan-tools)
+        privileged_consent yum install -y "${pkgs[@]}" || return 1
         run_privileged yum install -y "${pkgs[@]}"
     elif command -v pacman >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc pkgconf curl)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-headers glslang vulkan-tools)
+        privileged_consent pacman -Sy --needed --noconfirm "${pkgs[@]}" || return 1
         run_privileged pacman -Sy --needed --noconfirm "${pkgs[@]}"
     elif command -v zypper >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc gcc-c++ pkg-config libcurl-devel)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-devel glslang-tools vulkan-tools)
+        privileged_consent zypper install -y "${pkgs[@]}" || return 1
         run_privileged zypper install -y "${pkgs[@]}"
     else
         return 1
