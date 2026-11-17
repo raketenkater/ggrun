@@ -672,6 +672,9 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			if admission := router.sched.status(); admission != nil {
 				status["admission"] = admission
 			}
+			if wait := expectedWaitMS(router.mainQueued.Load(), int64(router.maxMainActive), router.metrics.meanMainServiceMS()); wait > 0 {
+				status["expected_wait_ms"] = wait
+			}
 			if summary := router.MetricsSummary(); summary != nil {
 				status["metrics"] = summary
 			}
@@ -756,14 +759,16 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			body = retargetModel(body, MainAlias)
 			r.Body = io.NopCloser(bodyReader(body))
 			r.ContentLength = int64(len(body))
-			router.serve(w, r, proxy, route, body)
+			router.serve(w, r, proxy, route, body, kindClassifier)
 			return
 		}
 		// Decide the cheap-tier destination before injecting any main-backend
 		// metadata. A companion has a different template and must never receive
 		// message delimiters parsed from the main model. With no companion, rewrite
 		// local-fast back to the actual main alias before forwarding.
+		kind := ""
 		if IsUtilityRequest(body) {
+			kind = kindUtility
 			if router.utilityEnabled() {
 				companionBody := utilityBody(body, router.companionAlias)
 				if router.tryReviewerUtility(w, r, reviewerProxy, companionBody) {
@@ -805,7 +810,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				r.ContentLength = int64(len(body))
 			}
 		}
-		router.serve(w, r, mainProxy, routeMain, body)
+		router.serve(w, r, mainProxy, routeMain, body, kind)
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -823,16 +828,22 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 // serve proxies one routed request and records its timing. Only the main route
 // is admission-controlled: the reviewer lane stays free so a safety review never
 // waits behind coding work.
-func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil.ReverseProxy, route string, body []byte) {
+func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil.ReverseProxy, route string, body []byte, kind string) {
 	start := time.Now()
 	conversation := conversationKey(body)
+	meta := metaFor(req, kind)
 	var queue time.Duration
+	if route == routeMain && r != nil {
+		// What this request found on arrival: the queue it joins and the work
+		// already in service ahead of it.
+		meta.queuedAtArrival, meta.inServiceAtArrival = r.mainQueued.Load(), r.mainActive.Load()
+	}
 	if route == routeMain && r != nil && r.sched != nil {
 		r.mainQueued.Add(1)
 		admission := r.sched.acquireRequest(req.Context(), conversation, laneOf(body), estimatedPromptTokens(body))
 		r.mainQueued.Add(-1)
 		if admission == nil {
-			r.record(route, body, start, time.Since(start), nil)
+			r.record(route, body, start, time.Since(start), nil, meta)
 			return
 		}
 		queue = time.Since(start)
@@ -841,19 +852,19 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil
 			r.mainActive.Add(-1)
 			admission.release()
 		}()
-		metered := &meteredWriter{ResponseWriter: w, start: start, onDecode: admission.markDecode}
+		metered := &meteredWriter{ResponseWriter: w, start: start, onDecode: admission.markDecode, capture: kind == kindClassifier}
 		proxy.ServeHTTP(metered, req)
-		r.record(route, body, start, queue, metered)
+		r.record(route, body, start, queue, metered, meta)
 		return
 	}
-	metered := &meteredWriter{ResponseWriter: w, start: start}
+	metered := &meteredWriter{ResponseWriter: w, start: start, capture: kind == kindClassifier}
 	proxy.ServeHTTP(metered, req)
-	r.record(route, body, start, queue, metered)
+	r.record(route, body, start, queue, metered, meta)
 }
 
 // record stores one request's timing. A nil metered writer means the caller gave
 // up while queued, which is exactly the starvation case worth counting.
-func (r *Router) record(route string, body []byte, start time.Time, queue time.Duration, metered *meteredWriter) {
+func (r *Router) record(route string, body []byte, start time.Time, queue time.Duration, metered *meteredWriter, meta recordMeta) {
 	if r == nil || r.metrics == nil {
 		return
 	}
@@ -866,6 +877,11 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 		TotalMS:      time.Since(start).Milliseconds(),
 		RequestBytes: int64(len(body)),
 		Aborted:      true,
+
+		Kind:               meta.kind,
+		Client:             meta.client,
+		QueuedAtArrival:    meta.queuedAtArrival,
+		InServiceAtArrival: meta.inServiceAtArrival,
 	}
 	if metered != nil {
 		rec.Status = metered.status
@@ -886,6 +902,12 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 			rec.DeadlineBucket = "~60s"
 		case rec.TotalMS >= 550_000 && rec.TotalMS <= 650_000:
 			rec.DeadlineBucket = "~600s"
+		}
+	}
+	if meta.kind == kindClassifier {
+		rec.Verdict = verdictNone
+		if metered != nil && !rec.Aborted {
+			rec.Verdict = classifierVerdict(metered.status, metered.Header(), metered.captured.Bytes())
 		}
 	}
 	r.metrics.record(rec)

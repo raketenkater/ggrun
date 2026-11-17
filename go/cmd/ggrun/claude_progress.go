@@ -77,14 +77,17 @@ type claudeRequestProgress struct {
 }
 
 type claudeProgressState struct {
-	UpdatedAt     time.Time               `json:"updated_at"`
-	TotalSlots    int                     `json:"total_slots"`
-	Active        int                     `json:"active"`
-	Queued        int                     `json:"queued"`
-	Requests      []claudeRequestProgress `json:"requests,omitempty"`
-	Event         string                  `json:"event,omitempty"`
-	StatusDelayed bool                    `json:"status_delayed,omitempty"`
-	Error         string                  `json:"error,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	TotalSlots int       `json:"total_slots"`
+	Active     int       `json:"active"`
+	Queued     int       `json:"queued"`
+	// ExpectedWaitMS is the router's estimate for the last queued request;
+	// 0 when it has none.
+	ExpectedWaitMS int64                   `json:"expected_wait_ms,omitempty"`
+	Requests       []claudeRequestProgress `json:"requests,omitempty"`
+	Event          string                  `json:"event,omitempty"`
+	StatusDelayed  bool                    `json:"status_delayed,omitempty"`
+	Error          string                  `json:"error,omitempty"`
 	// metricsAttempted/metricsOK are monitor-local backoff signals. They are
 	// intentionally not serialized into the status file.
 	metricsAttempted bool
@@ -552,7 +555,9 @@ func pollClaudeProgressWithMetrics(client *http.Client, host string, port int, l
 		state.metricsAttempted = true
 		promptRate, generationRate, queued, state.metricsOK = pollClaudeMetrics(client, baseURL)
 	}
-	state.Queued = queued + pollClaudeRouterQueued(client, baseURL)
+	routerQueued, wait := pollClaudeRouterQueued(client, baseURL)
+	state.Queued = queued + routerQueued
+	state.ExpectedWaitMS = wait
 	for _, slot := range slots {
 		if !slot.IsProcessing {
 			continue
@@ -600,22 +605,37 @@ func pollClaudeProgressWithMetrics(client *http.Client, host string, port int, l
 	return state
 }
 
-func pollClaudeRouterQueued(client *http.Client, baseURL string) int {
+// pollClaudeRouterQueued returns the router's queue depth and its expected
+// wait in milliseconds (0 when unknown).
+func pollClaudeRouterQueued(client *http.Client, baseURL string) (int, int64) {
 	resp, err := client.Get(baseURL + "/ggrun/router")
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0
+		return 0, 0
 	}
 	var status struct {
-		Queued int `json:"queued"`
+		Queued         int   `json:"queued"`
+		ExpectedWaitMS int64 `json:"expected_wait_ms"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&status) != nil {
-		return 0
+		return 0, 0
 	}
-	return status.Queued
+	if status.ExpectedWaitMS < 0 {
+		status.ExpectedWaitMS = 0
+	}
+	return status.Queued, status.ExpectedWaitMS
+}
+
+// queuedText is "N queued", with the expected wait when the router knows it.
+func queuedText(state claudeProgressState) string {
+	text := fmt.Sprintf("%d queued", state.Queued)
+	if state.ExpectedWaitMS > 0 {
+		text += " (~" + formatElapsed(time.Duration(state.ExpectedWaitMS)*time.Millisecond) + " wait)"
+	}
+	return text
 }
 
 func parsePromptLogProgress(text string) []promptLogProgress {
@@ -763,7 +783,7 @@ func formatClaudeProgress(state claudeProgressState) string {
 	}
 	if state.Active == 0 {
 		if state.Queued > 0 {
-			status := fmt.Sprintf("ggrun · %d queued", state.Queued)
+			status := "ggrun · " + queuedText(state)
 			if state.StatusDelayed {
 				status += " · log estimate"
 			}
@@ -819,7 +839,7 @@ func formatClaudeProgress(state claudeProgressState) string {
 		parts = append(parts, fmt.Sprintf("%d active", state.Active))
 	}
 	if state.Queued > 0 {
-		parts = append(parts, fmt.Sprintf("%d queued", state.Queued))
+		parts = append(parts, queuedText(state))
 	}
 	if state.StatusDelayed {
 		// The backend is healthy; only its scheduler-backed /slots endpoint is
