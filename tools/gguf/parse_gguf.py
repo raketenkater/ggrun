@@ -16,6 +16,7 @@ Importable API:
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -110,6 +111,30 @@ _RECURRENT_ARCHS = frozenset({
 })
 
 
+def _stream_end(f):
+    """Byte size of the file behind f (a real file or a BytesIO)."""
+    try:
+        return os.fstat(f.fileno()).st_size
+    except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        here = f.tell()
+        end = f.seek(0, os.SEEK_END)
+        f.seek(here)
+        return end
+
+
+def _read_len(f, end, unit=1, what='length'):
+    """A u64 count from the file, refused when count*unit bytes cannot fit in
+    what is left of it. A hostile or damaged header must not make the parser
+    allocate or loop on a size the file does not have."""
+    raw = f.read(8)
+    if len(raw) != 8:
+        raise EOFError('truncated ' + what)
+    n = struct.unpack('<Q', raw)[0]
+    if n * unit > end - f.tell():
+        raise ValueError('%s %d exceeds the file' % (what, n))
+    return n
+
+
 def _read_int_array(f, at, al):
     fmt = _INT_FORMATS[at]
     size = struct.calcsize('<' + fmt)
@@ -120,8 +145,12 @@ def _read_int_array(f, at, al):
 
 
 def _read_kv(f, r, kv_count):
+    end = _stream_end(f)
+    # Smallest entry: key length (8) + value type (4).
+    if kv_count * 12 > end - f.tell():
+        raise ValueError('kv count %d exceeds the file' % kv_count)
     for _ in range(kv_count):
-        kl = struct.unpack('<Q', f.read(8))[0]
+        kl = _read_len(f, end, what='key length')
         key = f.read(kl).decode('utf-8', errors='replace')
         vt = struct.unpack('<I', f.read(4))[0]
         if any(marker in key for marker in _RECURRENT_KEY_MARKERS):
@@ -177,7 +206,7 @@ def _read_kv(f, r, kv_count):
             if key.endswith('.nextn_predict_layers'): r['nextn_predict_layers'] = val
             if key == 'general.alignment': r['_align'] = val
         elif vt == 8:  # string
-            sl = struct.unpack('<Q', f.read(8))[0]
+            sl = _read_len(f, end, what='string length')
             val = f.read(sl).decode('utf-8', errors='replace')
             if key == 'general.architecture': r['arch'] = val
             elif key == 'general.name': r['name'] = val
@@ -187,7 +216,8 @@ def _read_kv(f, r, kv_count):
             elif key == 'tokenizer.ggml.pre': r['tokenizer_pre'] = val
         elif vt == 9:  # array
             at = struct.unpack('<I', f.read(4))[0]
-            al = struct.unpack('<Q', f.read(8))[0]
+            # Each element takes at least one byte (8 for a string's length).
+            al = _read_len(f, end, unit=8 if at == 8 else max(1, _KV_FIXED.get(at, 1)), what='array length')
             if key == 'tokenizer.ggml.tokens':
                 r['vocab_size'] = al
             layer_key = next((v for k, v in _LAYER_ARRAYS.items() if key.endswith(k)), None)
@@ -213,8 +243,8 @@ def _read_kv(f, r, kv_count):
             elif at == 8:
                 token_hash = hashlib.sha256() if key == 'tokenizer.ggml.tokens' else None
                 for _ in range(al):
-                    length_raw = f.read(8)
-                    length = struct.unpack('<Q', length_raw)[0]
+                    length = _read_len(f, end, what='array string length')
+                    length_raw = struct.pack('<Q', length)
                     value = f.read(length)
                     if token_hash is not None:
                         # Length framing prevents ambiguous concatenations such
@@ -237,15 +267,18 @@ def _read_tensors(f, r, tensor_count):
     table is truncated/corrupt. Byte accounting happens in _account_tensors
     once real on-disk spans are known."""
     tensors = []
+    end = _stream_end(f)
     for _ in range(tensor_count):
         try:
-            tl = struct.unpack('<Q', f.read(8))[0]
+            tl = _read_len(f, end, what='tensor name length')
             tname = f.read(tl).decode('utf-8', errors='replace')
             if 'ffn_up_gate' in tname or 'ffn_gate_up' in tname:
                 r['fused'] = 1
             if '_shexp' in tname or '_chexp' in tname:
                 r['has_shexp'] = 1
             n_dims = struct.unpack('<I', f.read(4))[0]
+            if n_dims * 8 > end - f.tell():
+                raise ValueError('tensor dimension count %d exceeds the file' % n_dims)
             dims = [struct.unpack('<Q', f.read(8))[0] for _ in range(n_dims)]
             # Some HY3 GGUFs omit metadata that the current reviewed fork
             # requires. The tensor layout is authoritative: routed layers have
@@ -418,6 +451,9 @@ def parse(path: str) -> Dict[str, Any]:
             f.read(4)  # version
             tensor_count = struct.unpack('<Q', f.read(8))[0]
             kv_count = struct.unpack('<Q', f.read(8))[0]
+            # Smallest tensor entry: name length, dims count, type, offset.
+            if tensor_count * 24 > os.path.getsize(sp):
+                raise ValueError('tensor count %d exceeds the file' % tensor_count)
             _read_kv(f, meta, kv_count)
             tensors = _read_tensors(f, r, tensor_count)
             if len(tensors) < tensor_count:
