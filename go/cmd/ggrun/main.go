@@ -2767,9 +2767,9 @@ func offerDiscoveredArchForkWith(
 		return false
 	}
 	recipe := candidate.RecipeForModel(discoveredForkModelName(model))
-	source := fmt.Sprintf("Open llama.cpp PR #%d (%s)", candidate.Number, candidate.URL)
+	source := fmt.Sprintf("Open llama.cpp PR #%d (%s, %s)", candidate.Number, candidate.URL, candidate.Provenance())
 	if candidate.Cited {
-		source = fmt.Sprintf("Hugging Face model card cites open llama.cpp PR #%d (%s)", candidate.Number, candidate.URL)
+		source = fmt.Sprintf("Hugging Face model card cites open llama.cpp PR #%d (%s, %s)", candidate.Number, candidate.URL, candidate.Provenance())
 	}
 	if !assumeYes {
 		if !terminal {

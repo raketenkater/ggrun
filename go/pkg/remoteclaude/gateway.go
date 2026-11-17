@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -193,6 +194,9 @@ func apiError(w http.ResponseWriter, status int, kind, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]string{"type": kind, "message": message}})
 }
 
+// authFailureLog receives one line per refused request; tests redirect it.
+var authFailureLog io.Writer = os.Stderr
+
 // Authenticate also protects loading/recovery responses before a model is ready.
 func Authenticate(token string, next http.Handler) http.Handler {
 	want := sha256.Sum256([]byte(token))
@@ -209,6 +213,9 @@ func Authenticate(token string, next http.Handler) http.Handler {
 		}
 		got := sha256.Sum256([]byte(provided))
 		if token == "" || subtle.ConstantTimeCompare(got[:], want[:]) != 1 || (key != "" && key != provided) {
+			// One line per refusal, without the presented credential, so a
+			// guessing client is visible in the server log.
+			fmt.Fprintf(authFailureLog, "[gateway] refused %s %s from %s: invalid gateway credential\n", r.Method, r.URL.Path, r.RemoteAddr)
 			apiError(w, 401, "authentication_error", "invalid gateway credential")
 			return
 		}
