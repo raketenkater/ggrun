@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/raketenkater/ggrun/pkg/config"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/config"
 )
 
 func TestRemoteClaudeFlagsDoNotReachBackend(t *testing.T) {

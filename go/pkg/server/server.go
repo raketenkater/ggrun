@@ -306,11 +306,6 @@ func (b *threadSafeBuffer) Tail(max int) string {
 	return string(data)
 }
 
-// Start launches llama-server with the given args and waits for it to be ready.
-func Start(args []string, port int) (*Process, error) {
-	return StartWithTimeout(args, port, 60*time.Second)
-}
-
 // StartWithTimeout launches llama-server with a custom readiness timeout. The
 // backend's ongoing logs stream to the process's own stdout/stderr.
 func StartWithTimeout(args []string, port int, timeout time.Duration) (*Process, error) {

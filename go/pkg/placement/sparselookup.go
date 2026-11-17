@@ -74,16 +74,6 @@ func NormalizeSparseLookupCapability(value string) SparseLookupCapability {
 	}
 }
 
-// NormalizeSparseLookupPolicy validates an external policy value; anything
-// else is "" (no policy).
-func NormalizeSparseLookupPolicy(value string) SparseLookupPolicy {
-	switch p := SparseLookupPolicy(strings.ToLower(strings.TrimSpace(value))); p {
-	case SparseLookupLayer, SparseLookupResident, SparseLookupPaged:
-		return p
-	}
-	return ""
-}
-
 func sparseLookupKind(model *ModelProfile) string {
 	if model != nil && model.SparseLookupKind != "" {
 		return model.SparseLookupKind + " lookup"

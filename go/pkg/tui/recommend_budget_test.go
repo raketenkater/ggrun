@@ -1,10 +1,11 @@
 package tui
 
 import (
-	"github.com/raketenkater/ggrun/pkg/detect"
-	"github.com/raketenkater/ggrun/pkg/recommend"
 	"reflect"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/recommend"
 )
 
 func TestRecommendationBudgetMatchesCLIPlanning(t *testing.T) {

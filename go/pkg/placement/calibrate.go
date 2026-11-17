@@ -744,24 +744,6 @@ func relativeIntegerDistance(value, baseline int) int {
 	return absInt(value-baseline) * 1024 / baseline
 }
 
-func adjacentBatchRung(value int, upward bool) int {
-	rungs := []int{64, 128, 256, 512, 1024, 2048, 4096, 8192}
-	if upward {
-		for _, rung := range rungs {
-			if rung > value {
-				return rung
-			}
-		}
-		return value
-	}
-	for i := len(rungs) - 1; i >= 0; i-- {
-		if rungs[i] < value {
-			return rungs[i]
-		}
-	}
-	return value
-}
-
 // calibrationContextNeighbors offers smaller automatic context windows for a
 // host-offloaded MoE, because on that shape context and expert residency compete
 // for the same VRAM and the planner currently never weighs one against the other.

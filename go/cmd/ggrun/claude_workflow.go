@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/raketenkater/ggrun/clientkit"
 	"os"
+
+	"github.com/raketenkater/ggrun/clientkit"
 )
 
 // JavaScript timers are signed 32-bit millisecond values. This is the largest

@@ -412,17 +412,6 @@ func applyNVIDIAPCIeLink(gpu *GPU, link nvidiaPCIeLink) {
 	gpu.BandwidthSource = source
 }
 
-// parseComputeCap parses "8.9" → 809, "8.6" → 806 for comparison.
-func parseComputeCap(cc string) int {
-	parts := strings.SplitN(cc, ".", 2)
-	if len(parts) != 2 {
-		return 0
-	}
-	major, _ := strconv.Atoi(parts[0])
-	minor, _ := strconv.Atoi(parts[1])
-	return major*100 + minor
-}
-
 // pcieBandwidth computes PCIe bandwidth in MB/s from generation and lane count.
 func pcieBandwidth(gen, lanes int) int {
 	// Per-lane bandwidth in MB/s (unidirectional)

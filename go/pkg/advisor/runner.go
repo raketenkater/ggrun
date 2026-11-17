@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -494,15 +493,3 @@ func tailText(value string, maxBytes int) string {
 }
 
 func DefaultModelPath(cacheDir string) string { return ArtifactPath(cacheDir, DefaultArtifact) }
-
-func IsInstalled(cacheDir string) bool {
-	return VerifyArtifact(DefaultModelPath(cacheDir), DefaultArtifact) == nil
-}
-
-func ModelDisplayPath(cacheDir string) string {
-	path := DefaultModelPath(cacheDir)
-	if absolute, err := filepath.Abs(path); err == nil {
-		return absolute
-	}
-	return path
-}

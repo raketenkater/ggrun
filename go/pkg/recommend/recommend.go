@@ -413,10 +413,6 @@ func CatalogAttribution() string {
 	return Attribution
 }
 
-func allRecommendations(caps *detect.Capabilities) []Recommendation {
-	return allRecommendationsWithQuantFilter(caps, nil)
-}
-
 // allRecommendationsWithQuantFilter ranks each runnable model at its
 // highest-quality fitting quant. Used with a quant filter by Fastest.
 func allRecommendationsWithQuantFilter(caps *detect.Capabilities, allowQuant func(QuantOption) bool) []Recommendation {
@@ -1151,35 +1147,6 @@ func recommendKVMB(c Candidate, ctxSize int, kvType string) int {
 	return int(float64(kvElemsTotal) * bytesPerElem / 1024 / 1024)
 }
 
-func quantPenalty(q QuantOption) float64 {
-	if q.QualityPenalty > 0 {
-		return q.QualityPenalty
-	}
-	name := strings.ToUpper(q.Name)
-	switch {
-	case strings.Contains(name, "BF16") || strings.Contains(name, "F16") || strings.Contains(name, "F32"):
-		return 0
-	case strings.Contains(name, "Q8"):
-		return 0.4
-	case strings.Contains(name, "Q6") || strings.Contains(name, "IQ6"):
-		return 0.8
-	case strings.Contains(name, "Q5") || strings.Contains(name, "IQ5"):
-		return 1.5
-	case strings.Contains(name, "MXFP4") || strings.Contains(name, "MXP4"):
-		return 2.6
-	case strings.Contains(name, "Q4") || strings.Contains(name, "IQ4") || strings.Contains(name, "I4"):
-		return 3.0
-	case strings.Contains(name, "Q3") || strings.Contains(name, "IQ3"):
-		return 5.0
-	case strings.Contains(name, "Q2") || strings.Contains(name, "IQ2"):
-		return 8.0
-	case strings.Contains(name, "Q1") || strings.Contains(name, "IQ1"):
-		return 12.0
-	default:
-		return 3.5
-	}
-}
-
 func modelIntelligence(c Candidate) float64 {
 	if c.AAIntelligence > 0 {
 		return c.AAIntelligence
@@ -1196,23 +1163,6 @@ func modelIntelligence(c Candidate) float64 {
 // catalog an estimate must not outrank a scored model, so it ranks after them.
 func estimated(c Candidate) bool {
 	return c.AAIntelligence <= 0
-}
-
-func intelligenceScore(c Candidate) int {
-	if c.Quality > 0 {
-		return c.Quality
-	}
-	if c.AAIntelligence > 0 {
-		score := int(c.AAIntelligence*1.65 + 0.5)
-		if score < 1 {
-			return 1
-		}
-		if score > 100 {
-			return 100
-		}
-		return score
-	}
-	return 0
 }
 
 func backendHint(caps *detect.Capabilities) string {
