@@ -711,70 +711,6 @@ func TestEscOnRecommendedClearsHeadroomFocusWithoutLeaving(t *testing.T) {
 	}
 }
 
-func TestOpenTunedPickerRestoresIndexForActiveConfig(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "test-Q4_K_M.gguf"), []byte("GGUF"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	models := discoverModels(dir)
-
-	// ListTunedConfigs (pkg/tune) globs cacheDir for tune_<modelName>_*.json,
-	// requires doc.Model == modelName and a positive best_config.gen_tps, and
-	// infers backend "llama" / non-vision from the absence of "_ik"/"_vulkan"/
-	// "_v_" in the filename — backendTag() defaults to "llama" too, so these
-	// two fixture files match what Model{backend: ""} will actually look up.
-	writeTunedConfig := func(suffix string, genTPS float64) string {
-		path := filepath.Join(cacheDir, fmt.Sprintf("tune_%s_%s.json", models[0].Name, suffix))
-		doc := fmt.Sprintf(`{"model":%q,"baseline_gen_tps":10,"best_config":{"gen_tps":%f,"flags":{}},"rounds":5,"tuned_at":"2026-07-01T00:00:00Z"}`, models[0].Name, genTPS)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	writeTunedConfig("variant-a", 20)
-	activePath := writeTunedConfig("variant-b", 30)
-
-	m := &Model{cacheDir: cacheDir, models: models, selectedModel: 0, tunePath: activePath}
-	m.openTunedPicker()
-
-	if m.screen != ScreenTunedPicker {
-		t.Fatalf("expected openTunedPicker to switch to ScreenTunedPicker, got %v", m.screen)
-	}
-	if m.tunedIndex < 0 || m.tunedIndex >= len(m.tunedConfigs) {
-		t.Fatalf("expected tunedIndex to point at the active config, got %d (len=%d)", m.tunedIndex, len(m.tunedConfigs))
-	}
-	if got := m.tunedConfigs[m.tunedIndex].Path; got != activePath {
-		t.Fatalf("expected the restored index to match the active tuned config; got %q, want %q", got, activePath)
-	}
-}
-
-// TestOpenTunedPickerFallsBackToAutoForStaleTunePath covers the case the
-// happy-path test above doesn't: m.tunePath pointing at a config that no
-// longer exists in the freshly-rebuilt list (e.g. its file was deleted out
-// from under it). openTunedPicker must fall back to -1 ("Auto"), not leave a
-// stale non-matching index in place.
-func TestOpenTunedPickerFallsBackToAutoForStaleTunePath(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "test-Q4_K_M.gguf"), []byte("GGUF"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	models := discoverModels(dir)
-
-	m := &Model{
-		cacheDir:      cacheDir,
-		models:        models,
-		selectedModel: 0,
-		tunePath:      filepath.Join(cacheDir, "tune_"+models[0].Name+"_deleted-config.json"),
-	}
-	m.openTunedPicker()
-
-	if m.tunedIndex != -1 {
-		t.Fatalf("expected tunedIndex to fall back to -1 (Auto) for a tunePath with no matching config, got %d", m.tunedIndex)
-	}
-}
-
 func TestDiscoverModelsHidesAuxiliaryArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{
@@ -1069,14 +1005,6 @@ func TestLaunchArgsAutoBackendDoesNotDisableArchitectureRouting(t *testing.T) {
 	joined := strings.Join(req.LaunchArgs(), " ")
 	if strings.Contains(joined, "--backend") {
 		t.Fatalf("automatic backend must remain implicit so architecture routes can select a fork: %q", joined)
-	}
-}
-
-func TestLaunchArgsCarriesAITuneRounds(t *testing.T) {
-	req := &LaunchRequest{ModelPath: "/models/test.gguf", AITune: true, AITuneRounds: 11}
-	joined := strings.Join(req.LaunchArgs(), " ")
-	if !strings.Contains(joined, "--rounds 11") {
-		t.Fatalf("TUI AI tune rounds must reach cmdTune: %q", joined)
 	}
 }
 
@@ -1511,23 +1439,6 @@ func TestLaunchArgsCarriesClaudeProfileOnlyForClaudeCode(t *testing.T) {
 	}
 }
 
-func TestRunModesAreMutuallyExclusive(t *testing.T) {
-	m := Model{screen: ScreenModelConfig, models: []ModelItem{{Name: "test.gguf"}}, kvPlacement: "auto", ctxMode: "fit", ctxSize: "fit"}
-	m.input = textinput.New()
-	m.cfgCursor = indexOf(m.cfgRows(), "aitune")
-	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = nm.(Model)
-	if !m.aitune || m.benchmark {
-		t.Fatal("AI tune should enable itself and disable benchmark")
-	}
-	m.cfgCursor = indexOf(m.cfgRows(), "benchmark")
-	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = nm.(Model)
-	if !m.benchmark || m.aitune {
-		t.Fatal("benchmark should enable itself and disable AI tune")
-	}
-}
-
 func TestPrelaunchViewShowsSelectedBackend(t *testing.T) {
 	m := Model{
 		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
@@ -1603,8 +1514,8 @@ func TestInitialModelUsesConfigPaths(t *testing.T) {
 	t.Setenv("LLM_CONFIG", cfgPath)
 	t.Setenv("LLM_APP_HOME", appHome)
 	m := InitialModel()
-	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.kvQuality != "q4_0" || !m.swaFull || m.aituneRounds != 9 || m.ctxMode != "manual" || m.ctxSize != "131072" || m.parallel != "3" || m.port != 9091 || !m.vision {
-		t.Fatalf("config not restored: modelDir=%q cacheDir=%q backend=%q kv=%q/%q swa=%v rounds=%d ctx=%q/%q parallel=%q port=%d vision=%v", m.modelDir, m.cacheDir, m.backend, m.kvPlacement, m.kvQuality, m.swaFull, m.aituneRounds, m.ctxMode, m.ctxSize, m.parallel, m.port, m.vision)
+	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.kvQuality != "q4_0" || !m.swaFull || m.ctxMode != "manual" || m.ctxSize != "131072" || m.parallel != "3" || m.port != 9091 || !m.vision {
+		t.Fatalf("config not restored: modelDir=%q cacheDir=%q backend=%q kv=%q/%q swa=%v ctx=%q/%q parallel=%q port=%d vision=%v", m.modelDir, m.cacheDir, m.backend, m.kvPlacement, m.kvQuality, m.swaFull, m.ctxMode, m.ctxSize, m.parallel, m.port, m.vision)
 	}
 	if !m.parallelSet {
 		t.Fatal("an explicitly configured parallel value must remain authoritative for the launch")
@@ -1720,12 +1631,12 @@ func TestApplySettingSyncsKVIntoLiveSession(t *testing.T) {
 func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
 	t.Setenv("LLM_APP_HOME", t.TempDir())
-	m := Model{settingsCfg: config.Defaults(), ctxMode: "fit", ctxSize: "fit", port: 8081, parallel: "1", aituneRounds: 8}
+	m := Model{settingsCfg: config.Defaults(), ctxMode: "fit", ctxSize: "fit", port: 8081, parallel: "1"}
 	rows := map[string]settingRow{}
 	for _, row := range settingRows() {
 		rows[row.label] = row
 	}
-	for _, label := range []string{"Context", "Full SWA cache", "Support expert / optimizer", "Support online research", "Vision", "Port", "Parallel", "AI-tune rounds"} {
+	for _, label := range []string{"Context", "Full SWA cache", "Support expert / optimizer", "Support online research", "Vision", "Port", "Parallel"} {
 		if rows[label].label == "" {
 			t.Fatalf("settings row %q not found", label)
 		}
@@ -1737,9 +1648,8 @@ func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	m.applySetting(rows["Vision"], "on")
 	m.applySetting(rows["Port"], "9099")
 	m.applySetting(rows["Parallel"], "3")
-	m.applySetting(rows["AI-tune rounds"], "12")
-	if m.ctxMode != "max" || !m.swaFull || m.supportExpert != "on" || !m.supportOnline || !m.vision || m.port != 9099 || m.parallel != "3" || m.aituneRounds != 12 {
-		t.Fatalf("launch settings not synced: ctx=%q swa=%v support=%q online=%v vision=%v port=%d parallel=%q rounds=%d", m.ctxMode, m.swaFull, m.supportExpert, m.supportOnline, m.vision, m.port, m.parallel, m.aituneRounds)
+	if m.ctxMode != "max" || !m.swaFull || m.supportExpert != "on" || !m.supportOnline || !m.vision || m.port != 9099 || m.parallel != "3" {
+		t.Fatalf("launch settings not synced: ctx=%q swa=%v support=%q online=%v vision=%v port=%d parallel=%q", m.ctxMode, m.swaFull, m.supportExpert, m.supportOnline, m.vision, m.port, m.parallel)
 	}
 	if !m.parallelSet {
 		t.Fatal("a parallel value explicitly entered in Settings must remain authoritative")

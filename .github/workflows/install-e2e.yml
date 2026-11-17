@@ -281,19 +281,31 @@ jobs:
           python3 scripts/verify-installed-tui.py --launcher "$HOME/ggrun/ggrun" --model "$MODEL" \
             --app-home "$HOME/ggrun" --port 18848 --output evidence/tui
 
-      # Issue #64: `ggrun <model> --ai-tune` as root failed because root has no
-      # user session bus. Run the reporter's command as real root with no
-      # XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS. Last, because it leaves
-      # root-owned files in the install.
-      - name: AI tune as root without a user session (issue 64)
+      # Issue #64: a launch as root failed because root has no user session
+      # bus. Serve as real root with no XDG_RUNTIME_DIR or
+      # DBUS_SESSION_BUS_ADDRESS, then stop. Last, because it leaves root-owned
+      # files in the install.
+      - name: Serve as root without a user session (issue 64)
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/root-ai-tune.log"
+          log="$RUNNER_TEMP/root-launch.log"
           sudo env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
-            timeout 1500 "$HOME/ggrun/ggrun" "$MODEL" --ai-tune --rounds 2 --port 18845 2>&1 | tee "$log"
-          grep -q "backend memory scope" "$log" || { echo "::error::no contained tune launch"; exit 1; }
+            timeout 900 "$HOME/ggrun/ggrun" "$MODEL" --cpu --ctx 2048 --port 18845 > "$log" 2>&1 &
+          up=0
+          for _ in $(seq 300); do
+            if curl -fs http://127.0.0.1:18845/health >/dev/null; then up=1; fi
+            # Stop only once launch is done: a signal during post-launch
+            # verification is not the documented Ctrl+C and was lost.
+            if [ "$up" = 1 ] && grep -q "Press Ctrl+C to stop" "$log"; then break; fi
+            sleep 2
+          done
+          sudo pkill -INT -x ggrun || true
+          for _ in $(seq 90); do pgrep -x ggrun >/dev/null || pgrep -x llama-server >/dev/null || break; sleep 1; done
+          cat "$log"
+          [ "$up" = 1 ] || { echo "::error::root launch did not serve"; exit 1; }
+          grep -q "backend memory scope" "$log" || { echo "::error::no contained launch"; exit 1; }
           if grep -qiE "user scope bus|XDG_RUNTIME_DIR" "$log"; then echo "::error::root still needs a user bus"; exit 1; fi
-          if pgrep -x llama-server; then echo "::error::tune left a backend running"; exit 1; fi
+          if pgrep -x llama-server; then echo "::error::launch left a backend running"; exit 1; fi
           mkdir -p evidence && cp "$log" evidence/
 
       - name: Preserve install and serving evidence

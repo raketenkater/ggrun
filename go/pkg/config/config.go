@@ -48,14 +48,16 @@ type Config struct {
 	Backend              string `json:"backend"`
 	LlamaServer          string `json:"llama_server"`
 	AppHome              string `json:"app_home"`
-	TuneRounds           int    `json:"tune_rounds"`
-	Vision               bool   `json:"vision"`
-	Parallel             int    `json:"parallel"`
-	Host                 string `json:"host"`
-	Spec                 string `json:"spec"`           // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
-	SupportExpert        string `json:"support_expert"` // off, auto (installed-only), on
-	SupportOnline        bool   `json:"support_online"` // official llama.cpp research only
-	SupportModel         string `json:"support_model"`  // optional verified local artifact override
+	// TuneRounds is read from older config files and kept on save; AI Tune
+	// that used it was removed (review D6).
+	TuneRounds    int    `json:"tune_rounds"`
+	Vision        bool   `json:"vision"`
+	Parallel      int    `json:"parallel"`
+	Host          string `json:"host"`
+	Spec          string `json:"spec"`           // off, auto, draft, eagle3, ngram, ngram-mod, ngram-k4v, mtp
+	SupportExpert string `json:"support_expert"` // off, auto (installed-only), on
+	SupportOnline bool   `json:"support_online"` // official llama.cpp research only
+	SupportModel  string `json:"support_model"`  // optional verified local artifact override
 
 	// sources is populated by Load and intentionally not serialized. Keeping
 	// provenance next to the merged value lets `config show` report the source

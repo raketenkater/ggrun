@@ -345,7 +345,6 @@ jobs:
           python tests/build_synthetic_gguf.py --out (Join-Path $app 'models/install-smoke.gguf') --arch llama --name Windows-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 --ctx-train 2048
           $stdout = Join-Path $tmp 'serve.stdout.log'
           $stderr = Join-Path $tmp 'serve.stderr.log'
-          $env:LLM_COMMUNITY_TUNES = 'off'
           $proc = Start-Process -FilePath (Join-Path $app '.bin/ggrun.exe') -ArgumentList @((Join-Path $app 'models/install-smoke.gguf'), '--cpu', '--host', '127.0.0.1', '--port', '19132') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
           try {
             $ready = $false
@@ -398,7 +397,7 @@ jobs:
           python3 tests/build_synthetic_gguf.py --out "$tmp/app/models/install-smoke.gguf" \
             --arch llama --name Linux-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
             --embd 64 --ff 128 --ctx-train 2048
-          LLM_COMMUNITY_TUNES=off "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
+          "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
             --cpu --host 127.0.0.1 --port 19131 >"$tmp/serve.log" 2>&1 &
           server_pid=$!
           trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
@@ -447,7 +446,7 @@ jobs:
           python3 tests/build_synthetic_gguf.py --out "$tmp/app/models/install-smoke.gguf" \
             --arch llama --name macOS-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
             --embd 64 --ff 128 --ctx-train 2048
-          LLM_COMMUNITY_TUNES=off "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
+          "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
             --cpu --host 127.0.0.1 --port 19133 >"$tmp/serve.log" 2>&1 &
           server_pid=$!
           trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
