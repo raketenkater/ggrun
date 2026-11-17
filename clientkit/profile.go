@@ -17,17 +17,29 @@ const PolicyVersion = 1
 const MaxTimeoutMS = 2147483647
 
 type Profile struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	ServerVersion   string `json:"server_version"`
-	ModelID         string `json:"model_id"`
-	ModelName       string `json:"model_name"`
-	MainAlias       string `json:"main_alias"`
-	UtilityAlias    string `json:"utility_alias"`
-	ContextPerSlot  int    `json:"context_per_slot"`
-	Slots           int    `json:"slots"`
-	Vision          bool   `json:"vision"`
-	SeparateWorker  bool   `json:"separate_worker"`
-	Policy          Policy `json:"policy"`
+	ProtocolVersion int           `json:"protocol_version"`
+	ServerVersion   string        `json:"server_version"`
+	ModelID         string        `json:"model_id"`
+	ModelName       string        `json:"model_name"`
+	MainAlias       string        `json:"main_alias"`
+	UtilityAlias    string        `json:"utility_alias"`
+	ContextPerSlot  int           `json:"context_per_slot"`
+	Slots           int           `json:"slots"`
+	Vision          bool          `json:"vision"`
+	SeparateWorker  bool          `json:"separate_worker"`
+	UtilityRoute    *UtilityRoute `json:"utility_route,omitempty"`
+	Policy          Policy        `json:"policy"`
+}
+
+// UtilityRoute describes the existing utility alias, including its fallback.
+// ContextPerSlot is conservative across both destinations; it is not evidence
+// that a particular model can reliably judge a task or meet a native deadline.
+// Nil means an older server has not advertised this capacity.
+type UtilityRoute struct {
+	ContextPerSlot  int  `json:"context_per_slot"`
+	Slots           int  `json:"slots"`
+	SeparateBackend bool `json:"separate_backend"`
+	FallbackToMain  bool `json:"fallback_to_main"`
 }
 
 // Policy contains only known, typed settings. A server cannot provide a shell
@@ -51,6 +63,14 @@ func (p Profile) Validate() error {
 	for _, s := range []string{p.MainAlias, p.UtilityAlias} {
 		if s == "" || len(s) > 128 || strings.ContainsAny(s, "\r\n\x00") {
 			return fmt.Errorf("server returned an invalid model alias")
+		}
+	}
+	if u := p.UtilityRoute; u != nil {
+		if u.ContextPerSlot < 1 || u.Slots < 1 || u.ContextPerSlot > p.ContextPerSlot {
+			return fmt.Errorf("server returned invalid utility route capacity")
+		}
+		if !u.SeparateBackend && (u.ContextPerSlot != p.ContextPerSlot || u.Slots != p.Slots || u.FallbackToMain) {
+			return fmt.Errorf("shared utility route must use main model capacity")
 		}
 	}
 	if p.Policy.CompactWindow < 1 || p.Policy.CompactWindow > p.ContextPerSlot || p.Policy.CompactPercent < 1 || p.Policy.CompactPercent > 95 {
@@ -122,11 +142,12 @@ func (p Profile) Environment(baseURL, token string, inherited []string) []string
 		"ANTHROPIC_MODEL": p.MainAlias, "ANTHROPIC_DEFAULT_OPUS_MODEL": p.MainAlias,
 		"ANTHROPIC_DEFAULT_SONNET_MODEL": p.MainAlias, "ANTHROPIC_DEFAULT_FABLE_MODEL": p.MainAlias,
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL": p.UtilityAlias, "ANTHROPIC_SMALL_FAST_MODEL": p.UtilityAlias,
-		"CLAUDE_CODE_SUBAGENT_MODEL":          p.MainAlias,
-		"CLAUDE_CODE_ATTRIBUTION_HEADER":      "0",
-		"API_TIMEOUT_MS":                      strconv.Itoa(p.Policy.TimeoutMS),
-		"CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": strconv.Itoa(p.Policy.TimeoutMS),
-		"CLAUDE_ENABLE_BYTE_WATCHDOG":         "0", "CLAUDE_ENABLE_STREAM_WATCHDOG": "0", "API_FORCE_IDLE_TIMEOUT": "0",
+		"CLAUDE_CODE_SUBAGENT_MODEL":                 p.MainAlias,
+		"CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS": strconv.Itoa(p.Slots),
+		"CLAUDE_CODE_ATTRIBUTION_HEADER":             "0",
+		"API_TIMEOUT_MS":                             strconv.Itoa(p.Policy.TimeoutMS),
+		"CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS":        strconv.Itoa(p.Policy.TimeoutMS),
+		"CLAUDE_ENABLE_BYTE_WATCHDOG":                "0", "CLAUDE_ENABLE_STREAM_WATCHDOG": "0", "API_FORCE_IDLE_TIMEOUT": "0",
 		"CLAUDE_CODE_MAX_CONTEXT_TOKENS":  strconv.Itoa(p.ContextPerSlot),
 		"CLAUDE_CODE_AUTO_COMPACT_WINDOW": strconv.Itoa(p.Policy.CompactWindow),
 		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": strconv.Itoa(p.Policy.CompactPercent),
@@ -149,6 +170,21 @@ func (p Profile) Environment(baseURL, token string, inherited []string) []string
 	overrides["ANTHROPIC_CUSTOM_HEADERS"] = strings.Join(headers, "\n")
 	if v := old["CLAUDE_CODE_SUBAGENT_MODEL"]; v != "" && p.ClientAlias(v) {
 		overrides["CLAUDE_CODE_SUBAGENT_MODEL"] = v
+	}
+	executorSlots := p.Slots
+	if model := overrides["CLAUDE_CODE_SUBAGENT_MODEL"]; model == p.UtilityAlias || model == "haiku" {
+		executorSlots = 1 // Older servers do not publish utility capacity.
+		if p.UtilityRoute != nil {
+			executorSlots = min(p.Slots, p.UtilityRoute.Slots)
+		}
+	}
+	overrides["CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"] = strconv.Itoa(executorSlots)
+	// This cap describes executor capacity, not total GPUs or reviewer slots.
+	// A lower user limit is intentional; a higher one would overcommit the route.
+	if v := old["CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= executorSlots {
+			overrides["CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"] = strconv.Itoa(n)
+		}
 	}
 	// Preserve explicit, valid client choices within the served capacity.
 	for _, k := range []string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_EFFORT_LEVEL"} {
