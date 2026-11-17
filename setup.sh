@@ -17,7 +17,14 @@ if [[ ! -t 0 && -z "${LLM_SETUP_NONINTERACTIVE:-}" ]] && ! ( : </dev/tty ) 2>/de
 fi
 
 REPO="raketenkater/ggrun"
-REF="${LLM_SETUP_REF:-main}"
+# The latest release unless LLM_SETUP_REF names another ref (for example main).
+REF="${LLM_SETUP_REF:-}"
+if [[ -z "$REF" ]]; then
+    REF="$(curl -fsSI -A ggrun-setup "https://github.com/$REPO/releases/latest" 2>/dev/null \
+        | tr -d '\r' | sed -nE 's#^[Ll]ocation: .*/releases/tag/([^/?#]+)$#\1#p' | head -n 1)"
+    REF="${REF:-main}"
+fi
+export LLM_SETUP_REF="$REF"
 TMP_DIR=""
 
 cleanup() {
