@@ -1,0 +1,921 @@
+64 855
+# of 4508 (hardware, row, quant) cases: 64 the recommender offers but the planner refuses, 855 the planner places but the recommender does not offer
+cpu-32g Alibaba Qwen3.8 27B (Xhigh) UD-Q6_K_L: recommender true planner false
+cpu-32g Alibaba Qwen3.8 27B (Xhigh) UD-Q6_K_XL: recommender true planner false
+cpu-32g Cohere North Mini Code UD-Q6_K_XL: recommender true planner false
+cpu-32g Institute of Foundation Models K2 Horizon MoVA 36B A4B Q5_K_M: recommender true planner false
+cpu-32g Institute of Foundation Models K2 Horizon MoVA 36B A4B Q5_K_S: recommender true planner false
+cpu-32g Meta Llama 3.3 Instruct 70B UD-IQ2_M: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3 Coder Next BF16: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3 Next 80B A3B Instruct BF16: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 122B A10B (Non-reasoning) BF16: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q8_K_XL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) MXFP4_MOE: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q3_K_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q3_K_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q4_K_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q4_K_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q5_K_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q5_K_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q6_K: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q8_0: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ4_NL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ4_XS: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q5_K_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q5_K_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q5_K_XL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q6_K: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q6_K_XL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q8_K_XL: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.8 2.4T A95B UD-IQ1_M: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.8 2.4T A95B UD-IQ1_S: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.8 2.4T A95B UD-IQ2_XXS: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.8 2.4T A95B UD-Q1_0: recommender false planner true
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-IQ1_M: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-IQ1_S: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-IQ2_XS: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-IQ3_XXS: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-IQ4_XS: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-Q2_0: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-Q2_K_XL: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-Q3_K_XL: recommender true planner false
+gpu12x2-ram128 Alibaba Qwen3.8-Flash-Next UD-Q4_K_XL: recommender true planner false
+gpu12x2-ram128 Arcee AI Trinity Large Thinking IQ3_M: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking IQ3_XS: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking IQ4_NL: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking IQ4_XS: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q3_K_L: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q3_K_M: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q3_K_S: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q4_0: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q4_1: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q4_K_L: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q4_K_M: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q4_K_S: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q5_K_L: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q5_K_M: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q5_K_S: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q6_K: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q6_K_L: recommender false planner true
+gpu12x2-ram128 Arcee AI Trinity Large Thinking Q8_0: recommender false planner true
+gpu12x2-ram128 DeepSeek V4 Pro 0813 (Max) BF16: recommender false planner true
+gpu12x2-ram128 DeepSeek V4 Pro 0813 (Max) Q1_0: recommender false planner true
+gpu12x2-ram128 DeepSeek V4 Pro 0813 (Max) Q2_0: recommender false planner true
+gpu12x2-ram128 DeepSeek V4 Pro 0813 (Max) Q2_K: recommender false planner true
+gpu12x2-ram128 DeepSeek V4 Pro 0813 (Max) Q4_0: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B IQ3_M: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B IQ3_XS: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B IQ4_NL: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B IQ4_XS: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_L: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_M: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_S: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q4_0: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q4_1: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q4_K_M: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q4_K_S: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q5_K_M: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q5_K_S: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q6_K: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q6_K_S: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon 375B A23B Q8_0: recommender false planner true
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon MoVA 36B A4B BF16: recommender true planner false
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q6_K: recommender true planner false
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q6_K_L: recommender true planner false
+gpu12x2-ram128 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q8_0: recommender true planner false
+gpu12x2-ram128 Kimi K2.7 Code UD-IQ1_M: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-IQ2_M: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-IQ2_XXS: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-IQ3_S: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-IQ4_XS: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-Q2_K_XL: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-Q3_K_M: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 Kimi K2.7 Code UD-Q8_K_XL: recommender false planner true
+gpu12x2-ram128 Meta Llama 3.3 Instruct 70B BF16: recommender true planner false
+gpu12x2-ram128 Meta Llama 3.3 Instruct 70B F16: recommender true planner false
+gpu12x2-ram128 MiniMax-M3 MXFP4_MOE: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 Q8_0: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-IQ3_S: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-IQ3_XXS: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-IQ4_NL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-IQ4_XS: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q3_K_M: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q4_K_M: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q4_K_S: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q5_K_M: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q5_K_S: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q5_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q6_K: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q6_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3 UD-Q8_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3.1-Flash UD-IQ3_S: recommender false planner true
+gpu12x2-ram128 MiniMax-M3.1-Flash UD-IQ3_XXS: recommender false planner true
+gpu12x2-ram128 MiniMax-M3.1-Flash UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3.1-Flash UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 MiniMax-M3.1-Flash UD-Q8_K_XL: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-IQ1_M: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-IQ1_S: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-IQ2_XXS: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-Q2_K_XL: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 Mistral Large 4 (High) UD-Q5_K_XL: recommender false planner true
+gpu12x2-ram128 Mistral Medium 3.5 UD-Q8_K_XL: recommender true planner false
+gpu12x2-ram128 Mistral Small 4 (Reasoning) BF16: recommender false planner true
+gpu12x2-ram128 Motif Technologies Motif 3 Q4_K_M: recommender false planner true
+gpu12x2-ram128 Motif Technologies Motif 3 Q5_K_M: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_M: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_XS: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ4_NL: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ4_XS: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_L: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_M: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_S: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_0: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_1: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_L: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_M: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_S: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q5_K_M: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q5_K_S: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q6_K: recommender false planner true
+gpu12x2-ram128 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q8_0: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 Q2_K_L: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 Q3_K_M: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 Q4_K_M: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 Q5_K_M: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 Q6_K: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 UD-Q2_K_XL: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Perplexity R1 1776 UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ2_M: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ2_S: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ3_M: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ3_XS: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ4_NL: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 IQ4_XS: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q2_K: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q3_K_L: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q3_K_M: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q3_K_S: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q4_0: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q4_1: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q4_K_M: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q4_K_S: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q5_K_M: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q5_K_S: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q6_K: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q6_K_S: recommender false planner true
+gpu12x2-ram128 Reflection Beam 1.0 Q8_0: recommender false planner true
+gpu12x2-ram128 SK Telecom A.X-K2 IQ4_XS: recommender false planner true
+gpu12x2-ram128 Tencent Hy3 Q4_K_M: recommender false planner true
+gpu12x2-ram128 Tencent Hy3 Q5_K_M: recommender false planner true
+gpu12x2-ram128 Tencent Hy3 Q6_K: recommender false planner true
+gpu12x2-ram128 Tencent Hy3 Q8_0: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small BF16: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-IQ1_M: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-IQ1_S: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-IQ2_XXS: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-Q2_K_XL: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 Thinking Machines Inkling 2 Small UD-Q8_K_XL: recommender false planner true
+gpu12x2-ram128 Xiaomi MiMo-V2.6-Pro MXFP4: recommender false planner true
+gpu12x2-ram128 Xiaomi MiMo-V2.6-Pro Q2_K: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-IQ1_M: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-IQ1_S: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-IQ2_M: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-IQ3_XXS: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-IQ4_XS: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-Q2_K_XL: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-Q3_K_XL: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-Q4_K_XL: recommender false planner true
+gpu12x2-ram128 Z AI GLM-5.3 (Max) UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3 Coder Next BF16: recommender false planner true
+gpu24-ram64 Alibaba Qwen3 Next 80B A3B Instruct BF16: recommender false planner true
+gpu24-ram64 Alibaba Qwen3 Next 80B A3B Instruct UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) BF16: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q5_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q6_K: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q8_0: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q6_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) BF16: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) MXFP4_MOE: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q3_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q3_K_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q4_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q4_K_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q5_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q5_K_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q6_K: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q8_0: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ1_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ2_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ3_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ4_NL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ4_XS: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q5_K_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q5_K_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q6_K: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q6_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8 2.4T A95B UD-IQ1_M: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8 2.4T A95B UD-IQ1_S: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8 2.4T A95B UD-IQ2_XS: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8 2.4T A95B UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8 2.4T A95B UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8 2.4T A95B UD-Q1_0: recommender false planner true
+gpu24-ram64 Alibaba Qwen3.8-Flash-Next UD-IQ2_XS: recommender true planner false
+gpu24-ram64 Alibaba Qwen3.8-Flash-Next UD-IQ3_XXS: recommender true planner false
+gpu24-ram64 Alibaba Qwen3.8-Flash-Next UD-Q2_K_XL: recommender true planner false
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ1_M: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ2_M: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ2_S: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ2_XS: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ2_XXS: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ3_M: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ3_XS: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ3_XXS: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ4_NL: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking IQ4_XS: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q2_K: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q2_K_L: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q3_K_L: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q3_K_M: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q3_K_S: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q3_K_XL: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q4_0: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q4_1: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q4_K_L: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q4_K_M: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q4_K_S: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q5_K_L: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q5_K_M: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q5_K_S: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q6_K: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q6_K_L: recommender false planner true
+gpu24-ram64 Arcee AI Trinity Large Thinking Q8_0: recommender false planner true
+gpu24-ram64 Cohere Command A Q5_K_M: recommender true planner false
+gpu24-ram64 DeepSeek V4 Pro 0813 (Max) BF16: recommender false planner true
+gpu24-ram64 DeepSeek V4 Pro 0813 (Max) Q1_0: recommender false planner true
+gpu24-ram64 DeepSeek V4 Pro 0813 (Max) Q2_0: recommender false planner true
+gpu24-ram64 DeepSeek V4 Pro 0813 (Max) Q2_K: recommender false planner true
+gpu24-ram64 DeepSeek V4 Pro 0813 (Max) Q4_0: recommender false planner true
+gpu24-ram64 DeepSeek V4 Pro 0813 (Max) Q4_1: recommender false planner true
+gpu24-ram64 InclusionAI Ring-flash-2.0 Q8_0: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ1_M: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ2_M: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ2_S: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ2_XS: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ2_XXS: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ3_M: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ3_XS: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ3_XXS: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ4_NL: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B IQ4_XS: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q2_K: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_L: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_M: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_S: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q4_0: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q4_1: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q4_K_M: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q4_K_S: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q5_K_M: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q5_K_S: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q6_K: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q6_K_S: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon 375B A23B Q8_0: recommender false planner true
+gpu24-ram64 Institute of Foundation Models K2 Horizon MoVA 36B A4B BF16: recommender true planner false
+gpu24-ram64 Kimi K2.7 Code UD-IQ1_M: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-IQ2_M: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-IQ3_S: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-IQ4_XS: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-Q3_K_M: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Kimi K2.7 Code UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 LongCat Flash Lite BF16: recommender false planner true
+gpu24-ram64 Meta Llama 3.3 Instruct 70B UD-Q8_K_XL: recommender true planner false
+gpu24-ram64 Meta Llama 4 Maverick IQ4_NL: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick IQ4_XS: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick Q2_K: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick Q2_K_L: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick Q3_K_M: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick Q3_K_S: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick Q4_0: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick Q4_K_S: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-IQ1_M: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-IQ1_S: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-IQ2_M: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Meta Llama 4 Maverick UD-TQ1_0: recommender false planner true
+gpu24-ram64 Meta Llama 4 Scout BF16: recommender false planner true
+gpu24-ram64 Meta Llama 4 Scout Q6_K: recommender false planner true
+gpu24-ram64 Meta Llama 4 Scout Q8_0: recommender false planner true
+gpu24-ram64 Meta Llama 4 Scout UD-Q6_K_XL: recommender false planner true
+gpu24-ram64 Meta Llama 4 Scout UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3 MXFP4_MOE: recommender false planner true
+gpu24-ram64 MiniMax-M3 Q8_0: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ1_M: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ2_M: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ3_S: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ4_NL: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-IQ4_XS: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q3_K_M: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q4_K_M: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q4_K_S: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q5_K_M: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q5_K_S: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q6_K: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q6_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3 UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-IQ1_M: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-IQ3_S: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 MiniMax-M3.1-Flash UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) Q8_0: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-IQ1_M: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-IQ1_S: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Mistral Large 4 (High) UD-Q6_K_XL: recommender false planner true
+gpu24-ram64 Mistral Medium 3.5 Q4_1: recommender true planner false
+gpu24-ram64 Mistral Small 4 (Reasoning) BF16: recommender false planner true
+gpu24-ram64 Mistral Small 4 (Reasoning) Q8_0: recommender false planner true
+gpu24-ram64 Mistral Small 4 (Reasoning) UD-Q5_K_M: recommender false planner true
+gpu24-ram64 Mistral Small 4 (Reasoning) UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Mistral Small 4 (Reasoning) UD-Q6_K: recommender false planner true
+gpu24-ram64 Mistral Small 4 (Reasoning) UD-Q6_K_XL: recommender false planner true
+gpu24-ram64 Mistral Small 4 (Reasoning) UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 Motif Technologies Motif 3 IQ2_S: recommender false planner true
+gpu24-ram64 Motif Technologies Motif 3 IQ3_M: recommender false planner true
+gpu24-ram64 Motif Technologies Motif 3 IQ3_S: recommender false planner true
+gpu24-ram64 Motif Technologies Motif 3 IQ4_XS: recommender false planner true
+gpu24-ram64 Motif Technologies Motif 3 Q4_K_M: recommender false planner true
+gpu24-ram64 Motif Technologies Motif 3 Q5_K_M: recommender false planner true
+gpu24-ram64 NVIDIA Nemotron 3.5 Super VL UD-Q4_K_XL: recommender true planner false
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ1_M: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_M: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_S: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_XS: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_XXS: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_M: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_XS: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_XXS: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ4_NL: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ4_XS: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q2_K: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q2_K_L: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_L: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_M: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_S: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_XL: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_0: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_1: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_L: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_M: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_S: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q5_K_M: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q5_K_S: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q6_K: recommender false planner true
+gpu24-ram64 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q8_0: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 Q2_K_L: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 Q3_K_M: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 Q4_K_M: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 Q5_K_M: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 Q6_K: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 Q8_0: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Perplexity R1 1776 UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q6_K: recommender false planner true
+gpu24-ram64 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q8_0: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ1_M: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ1_S: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ2_M: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ2_S: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ2_XS: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ2_XXS: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ3_M: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ3_XS: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ3_XXS: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ4_NL: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 IQ4_XS: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q2_K: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q3_K_L: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q3_K_M: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q3_K_S: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q4_0: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q4_1: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q4_K_M: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q4_K_S: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q5_K_M: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q5_K_S: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q6_K: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q6_K_S: recommender false planner true
+gpu24-ram64 Reflection Beam 1.0 Q8_0: recommender false planner true
+gpu24-ram64 SK Telecom A.X-K2 IQ4_XS: recommender false planner true
+gpu24-ram64 Sarvam 105B (High) Q8_0: recommender false planner true
+gpu24-ram64 StepFun Step 5 Preview Q2_K: recommender false planner true
+gpu24-ram64 Tencent Hy3 Q2_K: recommender false planner true
+gpu24-ram64 Tencent Hy3 Q3_K_M: recommender false planner true
+gpu24-ram64 Tencent Hy3 Q4_K_M: recommender false planner true
+gpu24-ram64 Tencent Hy3 Q5_K_M: recommender false planner true
+gpu24-ram64 Tencent Hy3 Q6_K: recommender false planner true
+gpu24-ram64 Tencent Hy3 Q8_0: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small BF16: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-IQ1_M: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-IQ1_S: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-IQ2_XXS: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling 2 Small UD-Q8_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small MXFP4_MOE: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-IQ3_S: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-IQ4_NL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-IQ4_XS: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q3_K_M: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q4_K_M: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q4_K_S: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q5_K_M: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q5_K_S: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Thinking Machines Inkling Small UD-Q6_K: recommender false planner true
+gpu24-ram64 Upstage Solar Open 100B (Reasoning) Q8_0: recommender false planner true
+gpu24-ram64 Xiaomi MiMo-V2.6-Pro MXFP4: recommender false planner true
+gpu24-ram64 Xiaomi MiMo-V2.6-Pro Q2_K: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) Q8_0: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-IQ1_M: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-IQ1_S: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-IQ2_M: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-IQ3_XXS: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-IQ4_XS: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-Q2_K_XL: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-Q3_K_XL: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-Q4_K_XL: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-Q5_K_XL: recommender false planner true
+gpu24-ram64 Z AI GLM-5.3 (Max) UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 AI9Stars G9v3-39A5B BF16: recommender false planner true
+gpu8-ram16 AI9Stars G9v3-39A5B IQ4_XS: recommender false planner true
+gpu8-ram16 AI9Stars G9v3-39A5B Q4_K_M: recommender false planner true
+gpu8-ram16 AI9Stars G9v3-39A5B Q8_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next BF16: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next IQ4_NL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next IQ4_XS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next MXFP4_MOE: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q2_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q2_K_L: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q3_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q3_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q4_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q4_1: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q5_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q5_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q6_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next Q8_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ1_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ1_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ2_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ3_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ4_NL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-IQ4_XS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q3_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q3_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q5_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q5_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q5_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q6_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Coder Next UD-Q8_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct BF16: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct IQ4_NL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct IQ4_XS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q2_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q2_K_L: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q3_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q3_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q4_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q4_1: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q5_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q5_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q6_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct Q8_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-IQ1_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-IQ1_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-Q5_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-Q8_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Next 80B A3B Instruct UD-TQ1_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Omni 30B A3B Instruct BF16: recommender false planner true
+gpu8-ram16 Alibaba Qwen3 Omni 30B A3B Instruct Q8_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) MXFP4_MOE: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q3_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q3_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q5_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q5_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) Q6_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ1_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ2_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ3_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ4_NL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-IQ4_XS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q5_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 122B A10B (Non-reasoning) UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) MXFP4_MOE: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q3_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q3_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ1_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ2_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ3_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ4_NL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-IQ4_XS: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 397B A17B (Non-reasoning) UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.5 9B (Non-reasoning) BF16: recommender true planner false
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) BF16: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) MXFP4_MOE: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) Q8_0: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q4_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q4_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q5_K_M: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q5_K_S: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q5_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q6_K: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.6 35B A3B (Reasoning) UD-Q8_K_XL: recommender false planner true
+gpu8-ram16 Alibaba Qwen3.8 27B (Xhigh) Q4_0: recommender true planner false
+gpu8-ram16 Alibaba Qwen3.8 27B (Xhigh) Q4_1: recommender true planner false
+gpu8-ram16 Alibaba Qwen3.8 27B (Xhigh) UD-IQ4_XS: recommender true planner false
+gpu8-ram16 Alibaba Qwen3.8 27B (Xhigh) UD-Q4_K_M: recommender true planner false
+gpu8-ram16 Alibaba Qwen3.8 27B (Xhigh) UD-Q4_K_S: recommender true planner false
+gpu8-ram16 Alibaba Qwen3.8 27B (Xhigh) UD-Q4_K_XL: recommender true planner false
+gpu8-ram16 Allen Institute for AI Molmo2-8B F16: recommender true planner false
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ1_M: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ1_S: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ2_M: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ2_S: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ2_XS: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ2_XXS: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ3_M: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ3_XS: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ3_XXS: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ4_NL: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking IQ4_XS: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q2_K: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q2_K_L: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q3_K_L: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q3_K_M: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q3_K_S: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q3_K_XL: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q4_0: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q4_1: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q4_K_L: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q4_K_M: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q4_K_S: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q5_K_L: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q5_K_M: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q5_K_S: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q6_K: recommender false planner true
+gpu8-ram16 Arcee AI Trinity Large Thinking Q6_K_L: recommender false planner true
+gpu8-ram16 Cohere North Mini Code BF16: recommender false planner true
+gpu8-ram16 Cohere North Mini Code Q8_0: recommender false planner true
+gpu8-ram16 Cohere North Mini Code UD-Q5_K_M: recommender false planner true
+gpu8-ram16 Cohere North Mini Code UD-Q5_K_S: recommender false planner true
+gpu8-ram16 Cohere North Mini Code UD-Q5_K_XL: recommender false planner true
+gpu8-ram16 Cohere North Mini Code UD-Q6_K: recommender false planner true
+gpu8-ram16 Cohere North Mini Code UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 Cohere North Mini Code UD-Q8_K_XL: recommender false planner true
+gpu8-ram16 DeepSeek V4 Pro 0813 (Max) Q1_0: recommender false planner true
+gpu8-ram16 Google Gemma 4 E4B (Reasoning) BF16: recommender true planner false
+gpu8-ram16 InclusionAI Ring-flash-2.0 IQ1_M: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 IQ2_S: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 IQ2_XXS: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 Q2_K: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 Q3_K_M: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 Q4_K_M: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 Q5_K_M: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 Q6_K: recommender false planner true
+gpu8-ram16 InclusionAI Ring-flash-2.0 Q8_0: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ1_M: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ1_S: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ2_M: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ2_S: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ2_XS: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ2_XXS: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ3_M: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ3_XS: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ3_XXS: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B IQ4_XS: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B Q2_K: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_L: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_M: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 375B A23B Q3_K_S: recommender false planner true
+gpu8-ram16 Institute of Foundation Models K2 Horizon 7B BF16: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B IQ2_M: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B IQ2_S: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B IQ3_M: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B IQ3_XS: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B IQ3_XXS: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q2_K: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q3_K_L: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q3_K_M: recommender true planner false
+gpu8-ram16 Institute of Foundation Models K2 Horizon MoVA 36B A4B Q3_K_S: recommender true planner false
+gpu8-ram16 Kimi K2.7 Code UD-IQ1_M: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-IQ2_M: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-IQ3_S: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-IQ4_XS: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-Q3_K_M: recommender false planner true
+gpu8-ram16 Kimi K2.7 Code UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 LongCat Flash Lite BF16: recommender false planner true
+gpu8-ram16 LongCat Flash Lite Q3_K_L: recommender false planner true
+gpu8-ram16 LongCat Flash Lite Q4_K_M: recommender false planner true
+gpu8-ram16 LongCat Flash Lite Q5_K_M: recommender false planner true
+gpu8-ram16 LongCat Flash Lite Q6_K: recommender false planner true
+gpu8-ram16 LongCat Flash Lite Q8_0: recommender false planner true
+gpu8-ram16 Meta Llama 3.3 Instruct 70B UD-IQ1_M: recommender true planner false
+gpu8-ram16 Meta Llama 3.3 Instruct 70B UD-IQ1_S: recommender true planner false
+gpu8-ram16 Meta Llama 4 Scout IQ4_NL: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout IQ4_XS: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout Q2_K: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout Q2_K_L: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout Q3_K_M: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout Q3_K_S: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout Q4_0: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout Q4_K_S: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-IQ1_M: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-IQ1_S: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-IQ2_M: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Meta Llama 4 Scout UD-TQ1_0: recommender false planner true
+gpu8-ram16 Meta Muse Glimmer (High) Q4_K_M: recommender true planner false
+gpu8-ram16 MiniMax-M3 UD-IQ1_M: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-IQ2_M: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-IQ3_S: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-IQ4_XS: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-Q3_K_M: recommender false planner true
+gpu8-ram16 MiniMax-M3 UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 MiniMax-M3.1-Flash UD-IQ1_M: recommender false planner true
+gpu8-ram16 MiniMax-M3.1-Flash UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 MiniMax-M3.1-Flash UD-IQ3_S: recommender false planner true
+gpu8-ram16 MiniMax-M3.1-Flash UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 MiniMax-M3.1-Flash UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 MiniMax-M3.1-Flash UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Mistral Large 4 (High) UD-IQ1_M: recommender false planner true
+gpu8-ram16 Mistral Large 4 (High) UD-IQ1_S: recommender false planner true
+gpu8-ram16 Mistral Large 4 (High) UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) BF16: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) MXFP4_MOE: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) Q8_0: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ1_M: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ2_M: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ3_S: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ4_NL: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-IQ4_XS: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q3_K_M: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q3_K_S: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q4_K_M: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q4_K_S: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q5_K_M: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q5_K_S: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q5_K_XL: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q6_K: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q6_K_XL: recommender false planner true
+gpu8-ram16 Mistral Small 4 (Reasoning) UD-Q8_K_XL: recommender false planner true
+gpu8-ram16 Motif Technologies Motif 3 IQ2_S: recommender false planner true
+gpu8-ram16 Motif Technologies Motif 3 IQ3_M: recommender false planner true
+gpu8-ram16 Motif Technologies Motif 3 IQ3_S: recommender false planner true
+gpu8-ram16 Motif Technologies Motif 3 IQ4_XS: recommender false planner true
+gpu8-ram16 Motif Technologies Motif 3 Q4_K_M: recommender false planner true
+gpu8-ram16 Motif Technologies Motif 3 Q5_K_M: recommender false planner true
+gpu8-ram16 Nanbeige4.3-33B IQ3_S: recommender true planner false
+gpu8-ram16 Nanbeige4.3-33B IQ3_XXS: recommender true planner false
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ1_M: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ1_S: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_M: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_S: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_XS: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ2_XXS: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_M: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_XS: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ3_XXS: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ4_NL: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) IQ4_XS: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q2_K: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q2_K_L: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_L: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_M: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_S: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q3_K_XL: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_0: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_1: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_L: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_M: recommender false planner true
+gpu8-ram16 Nex AGI Nex-N2-Pro (Based on Qwen3.5-397B-A17B) Q4_K_S: recommender false planner true
+gpu8-ram16 Nous Research DeepHermes 3 - Mistral 24B Preview (Non-reasoning) Q4_1: recommender true planner false
+gpu8-ram16 Nous Research DeepHermes 3 - Mistral 24B Preview (Non-reasoning) Q5_K_L: recommender true planner false
+gpu8-ram16 Nous Research DeepHermes 3 - Mistral 24B Preview (Non-reasoning) Q5_K_M: recommender true planner false
+gpu8-ram16 Nous Research DeepHermes 3 - Mistral 24B Preview (Non-reasoning) Q5_K_S: recommender true planner false
+gpu8-ram16 OpenAI gpt-oss-120b (High) BF16: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) IQ2_M: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) IQ3_M: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) IQ4_NL: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) IQ4_XS: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) MXFP4_MOE: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q2_K: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q2_K_L: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q3_K_L: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q3_K_M: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q3_K_S: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q3_K_XL: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q4_0: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q4_1: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q4_K_L: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q4_K_M: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q6_K: recommender false planner true
+gpu8-ram16 OpenAI gpt-oss-120b (High) Q8_0: recommender false planner true
+gpu8-ram16 Perplexity R1 1776 Q2_K_L: recommender false planner true
+gpu8-ram16 Perplexity R1 1776 UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ1_M: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ1_S: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ2_M: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ2_S: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ2_XS: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ2_XXS: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ3_M: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ3_XS: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ3_XXS: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ4_NL: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) IQ4_XS: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q2_K: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q2_K_L: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q3_K_L: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q3_K_M: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q3_K_S: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q3_K_XL: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q4_0: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q4_1: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q4_K_L: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q4_K_M: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q4_K_S: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q5_K_M: recommender false planner true
+gpu8-ram16 Prime Intellect INTELLECT-3 (Based on GLM-4.5-Air) Q5_K_S: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ1_M: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ1_S: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ2_M: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ2_S: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ2_XS: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ2_XXS: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ3_M: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ3_XS: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ3_XXS: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ4_NL: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 IQ4_XS: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q2_K: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q3_K_L: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q3_K_M: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q3_K_S: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q4_0: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q4_1: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q4_K_M: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q4_K_S: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q5_K_M: recommender false planner true
+gpu8-ram16 Reflection Beam 1.0 Q5_K_S: recommender false planner true
+gpu8-ram16 Reka AI Reka Flash 3 Q5_K_M: recommender true planner false
+gpu8-ram16 Reka AI Reka Flash 3 Q6_K: recommender true planner false
+gpu8-ram16 Sarvam 105B (High) Q4_K_M: recommender false planner true
+gpu8-ram16 Sarvam 30B (High) BF16: recommender false planner true
+gpu8-ram16 Sarvam 30B (High) Q6_K: recommender false planner true
+gpu8-ram16 Sarvam 30B (High) Q8_0: recommender false planner true
+gpu8-ram16 StepFun Step3 VL 10B BF16: recommender true planner false
+gpu8-ram16 StepFun Step3 VL 10B F16: recommender true planner false
+gpu8-ram16 Tencent Hy3 Q2_K: recommender false planner true
+gpu8-ram16 Tencent Hy3 Q3_K_M: recommender false planner true
+gpu8-ram16 Tencent Hy3 Q4_K_M: recommender false planner true
+gpu8-ram16 Tencent Hy3 Q5_K_M: recommender false planner true
+gpu8-ram16 Tencent Hy3 Q6_K: recommender false planner true
+gpu8-ram16 Tencent Hy3 Q8_0: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small BF16: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-IQ1_M: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-IQ1_S: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-IQ2_XXS: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-IQ3_XXS: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-Q2_K_XL: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-Q3_K_XL: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-Q4_K_XL: recommender false planner true
+gpu8-ram16 Thinking Machines Inkling 2 Small UD-Q8_K_XL: recommender false planner true
+gpu8-ram16 Trillion Labs Tri-21B-Think Q5_K_M: recommender true planner false
+gpu8-ram16 Trillion Labs Tri-21B-Think Q6_K: recommender true planner false
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) IQ2_XXS: recommender false planner true
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) Q2_K: recommender false planner true
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) Q3_K_M: recommender false planner true
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) Q4_K_M: recommender false planner true
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) Q5_K_M: recommender false planner true
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) Q6_K: recommender false planner true
+gpu8-ram16 Upstage Solar Open 100B (Reasoning) Q8_0: recommender false planner true
+gpu8-ram16 Xiaomi MiMo-V2.6-Pro MXFP4: recommender false planner true
+gpu8-ram16 Xiaomi MiMo-V2.6-Pro Q2_K: recommender false planner true
+gpu8-ram16 Z AI GLM-5.3 (Max) UD-IQ1_M: recommender false planner true
+gpu8-ram16 Z AI GLM-5.3 (Max) UD-IQ1_S: recommender false planner true
+gpu8-ram16 Z AI GLM-5.3 (Max) UD-IQ2_M: recommender false planner true
