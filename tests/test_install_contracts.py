@@ -292,5 +292,100 @@ install_ggrun_from_source
                 self.assertEqual(result.returncode, expected)
 
 
+class InstallerConsentAndIntegrity(unittest.TestCase):
+    """Review W14 (S-02): sudo is asked for with its package list, downloaded
+    toolchains and libraries are checked by sha256, and the system Python's
+    protection is not overridden without consent."""
+
+    helpers = 'say() { echo "$*"; }; ok() { echo "$*"; }; warn() { echo "WARN $*"; }\n'
+
+    def consent(self, noninteractive, explicit, answer="y"):
+        script = self.helpers + function("install.sh", "privileged_consent")
+        script += f'\nask() {{ [[ "{answer}" == y ]]; }}\nNONINTERACTIVE={noninteractive}; DEPS_EXPLICIT="{explicit}"\n'
+        script += 'privileged_consent apt-get install -y git cmake build-essential\n'
+        return subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+
+    @unittest.skipIf(os.geteuid() == 0, "root needs no sudo")
+    def test_sudo_is_shown_with_its_packages_and_needs_consent(self):
+        quiet = self.consent(1, "")
+        self.assertNotEqual(quiet.returncode, 0, "no terminal and no explicit consent must not use sudo")
+        self.assertIn("sudo apt-get install -y git cmake build-essential", quiet.stdout)
+        self.assertEqual(self.consent(1, "install").returncode, 0, "LLM_INSTALL_DEPS=install consents")
+        self.assertEqual(self.consent(0, "", "y").returncode, 0)
+        self.assertNotEqual(self.consent(0, "", "n").returncode, 0)
+
+    def test_go_archive_is_checked_against_the_published_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            archive = tmp / "go.tar.gz"
+            subprocess.run(["bash", "-c", f'mkdir -p {tmp}/src/go/bin && printf "#!/bin/sh\\n" > {tmp}/src/go/bin/go && chmod +x {tmp}/src/go/bin/go && tar -czf {archive} -C {tmp}/src go'], check=True)
+            real = subprocess.run(["sha256sum", str(archive)], capture_output=True, text=True, check=True).stdout.split()[0]
+            for published, ok in ((real, True), ("0" * 64, False)):
+                index = tmp / "index.json"
+                index.write_text('[{"version":"go1.99.1","files":[{"filename":"go1.99.1.linux-amd64.tar.gz",'
+                                 f'"os":"linux","sha256":"{published}","size":1}},'
+                                 '{"filename":"go1.99.1.src.tar.gz","sha256":"' + "1" * 64 + '"}]}]')
+                root = tmp / ("root-ok" if ok else "root-bad")
+                script = self.helpers + "\n".join(function("install.sh", f) for f in ("sha256_of", "go_published_sha256", "download_go_toolchain"))
+                script += f'''
+GO_DL_INDEX_URL="file://{index}"
+go_required_version() {{ echo 1.99.1; }}
+go_download_platform() {{ echo linux-amd64; }}
+go_version_at_least() {{ return 1; }}
+GO_BOOTSTRAP_ROOT="{root}"
+curl() {{ local out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
+  if [ -n "$out" ]; then cp "{archive}" "$out"; else command curl -fsL "file://{index}"; fi; }}
+download_go_toolchain
+'''
+                result = subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual((root / "go1.99.1.linux-amd64" / "bin" / "go").exists(), ok)
+                if not ok:
+                    self.assertIn("does not match the sha256 go.dev publishes", result.stdout)
+
+    def test_nccl_archive_with_a_wrong_sha256_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "pkg" / "lib").mkdir(parents=True)
+            (tmp / "pkg" / "lib" / "libnccl.so.2").write_text("x")
+            archive = tmp / "nccl.txz"
+            subprocess.run(["tar", "-cJf", str(archive), "-C", str(tmp / "pkg"), "lib"], check=True)
+            real = subprocess.run(["sha256sum", str(archive)], capture_output=True, text=True, check=True).stdout.split()[0]
+            for want, ok in ((real, True), ("f" * 64, False)):
+                box = tmp / ("box-ok" if ok else "box-bad")
+                box.mkdir()
+                script = self.helpers + "\n".join(function("install.sh", f) for f in ("sha256_of", "fetch_nccl_into_box"))
+                script += f'''
+NCCL_DEFAULT_URL=unused NCCL_DEFAULT_SHA256=unused
+box_has_libnccl() {{ [ -e "$1/libnccl.so.2" ]; }}
+copy_resolved_lib() {{ cp "$1" "$2/"; }}
+LLM_INSTALL_NCCL_URL="file://{archive}" LLM_INSTALL_NCCL_SHA256="{want}" fetch_nccl_into_box "{box}"
+'''
+                result = subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual((box / "libnccl.so.2").exists(), ok)
+
+    def test_default_nccl_url_carries_a_pinned_sha256(self):
+        text = (ROOT / "install.sh").read_text()
+        self.assertRegex(text, r'NCCL_DEFAULT_SHA256="[0-9a-f]{64}"')
+
+    def test_system_python_protection_is_not_overridden_without_consent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            calls = tmp / "calls"
+            script = self.helpers + function("install.sh", "install_python_download_deps")
+            script += f'''
+python_in_venv() {{ return 1; }}
+ask() {{ return 1; }}
+python3() {{ echo "$*" >> "{calls}"; case "$*" in *--break-system-packages*) return 0;; *"pip install"*) return 1;; *) return 1;; esac; }}
+NONINTERACTIVE=1
+install_python_download_deps
+'''
+            result = subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("--break-system-packages", calls.read_text())
+            self.assertIn("python3 -m pip install --break-system-packages", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
