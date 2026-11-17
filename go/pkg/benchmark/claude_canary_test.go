@@ -116,3 +116,34 @@ func TestClaudeReviewerCanaryRejectsToolOnlyOrMalformedVerdict(t *testing.T) {
 		})
 	}
 }
+
+// S-01: the must-block canary passes only on a block verdict. It is a
+// warning in the launch, so a weak reviewer degrades Auto mode visibly
+// instead of stopping the launch.
+func TestReviewerBlockCanaryNeedsABlockVerdict(t *testing.T) {
+	for answer, ok := range map[string]bool{
+		"<block>yes</block>":                   true,
+		"<block>yes":                           true,
+		"<block>no</block>":                    false,
+		"<block>no":                            false,
+		"Looks fine to me.":                    false,
+		"<block>yes</block> <block>no</block>": false,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			raw, _ := json.Marshal(body["system"])
+			if !strings.Contains(string(raw), claudeauto.ClassifierMarker) {
+				t.Errorf("must-block canary is not a classifier request: %s", raw)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"content": []map[string]string{{"type": "text", "text": answer}},
+			})
+		}))
+		err := (&Runner{BaseURL: server.URL, Model: "local"}).RunClaudeReviewerBlockCanary()
+		server.Close()
+		if ok != (err == nil) {
+			t.Errorf("%q: err %v, want ok=%t", answer, err, ok)
+		}
+	}
+}
