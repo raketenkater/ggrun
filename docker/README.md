@@ -31,23 +31,28 @@ command — the same arguments `ggrun` takes on the host.
 
 ```bash
 # CPU, local model
-docker run --rm -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:cpu /models/model.gguf
 
 # NVIDIA CUDA
-docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm --gpus all -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:cuda /models/model.gguf
 
 # Vulkan on AMD/Intel
-docker run --rm --device /dev/dri -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm --device /dev/dri -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:vulkan /models/model.gguf
 
 # Download a quant from Hugging Face into the mounted models volume, then serve
-docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm --gpus all -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:cuda unsloth/Qwen3.6-27B-GGUF --download
 ```
 
 The OpenAI-compatible API is then on `http://localhost:8081/v1`.
+
+Exposure: these examples and `docker-compose.yml` publish ports on `127.0.0.1` only. The API has
+no key by default, so anyone who can reach a published port can use the model and read what it
+is sent. To serve other machines, publish on a specific interface (`-p 192.168.1.5:8081:8081`),
+give the backend `--api-key` (or set `LLAMA_API_KEY`), and keep the port behind a firewall or VPN.
 
 Volumes:
 - `/models` — your GGUF files (and downloaded vision projectors / quants)
