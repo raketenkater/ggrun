@@ -2,6 +2,7 @@ package gguf
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -14,8 +15,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/raketenkater/ggrun/pkg/embedscript"
 	"github.com/raketenkater/ggrun/pkg/python"
 )
+
+// parseGGUFSource is tools/gguf/parse_gguf.py, embedded so a bare binary can
+// parse models. TestEmbeddedParserMatchesTools keeps the two copies identical.
+//
+//go:generate cp ../../../tools/gguf/parse_gguf.py parse_gguf.py
+//go:embed parse_gguf.py
+var parseGGUFSource string
 
 // Info holds parsed GGUF metadata.
 type Info struct {
@@ -180,49 +189,20 @@ func findParseScript() string {
 	}
 	explicit := len(candidates) // locations the user or installer named
 	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		// A development or source-install binary commonly lives in
-		// <app-home>/.bin while its authoritative scripts live in the adjacent
-		// source checkout. Prefer that checkout just as an explicit
-		// LLM_APP_HOME does; a release-only install simply falls through to the
-		// bundled parser below.
-		if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
-			appHome := filepath.Dir(exeDir)
-			candidates = append(candidates,
-				filepath.Join(appHome, ".src", "llm-server", "tools", "gguf", "parse_gguf.py"),
-				filepath.Join(appHome, ".src", "ggrun", "tools", "gguf", "parse_gguf.py"),
-			)
-		}
-		candidates = append(candidates,
-			filepath.Join(exeDir, "parse_gguf.py"),
-			filepath.Join(exeDir, "..", "tools", "gguf", "parse_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "tools", "gguf", "parse_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "..", "tools", "gguf", "parse_gguf.py"),
-		)
+		candidates = append(candidates, exeParseScriptCandidates(filepath.Dir(exe))...)
 	}
-	wd, _ := os.Getwd()
-	candidates = append(candidates,
-		filepath.Join(wd, "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "..", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "..", "..", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "..", "..", "..", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "parse_gguf.py"),
-		filepath.Join(wd, "..", "parse_gguf.py"),
-	)
-	if p, err := exec.LookPath("parse_gguf.py"); err == nil {
+	// The working directory, PATH and the home directory are never searched:
+	// a model directory or a cloned repository could plant a parse_gguf.py
+	// there and ggrun would execute it. The embedded copy is the last resort,
+	// so a binary with nothing beside it still parses models.
+	if p, err := embedscript.Extract("parse_gguf.py", parseGGUFSource); err == nil {
 		candidates = append(candidates, p)
 	}
-	home, _ := os.UserHomeDir()
-	candidates = append(candidates,
-		filepath.Join(home, "ggrun", "bin", "parse_gguf.py"),
-		filepath.Join(home, "ggrun", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(home, "parse_gguf.py"),
-	)
 	// A parser with a tensor-accounting contract in a location named by
 	// LLM_SCRIPT_DIR, LLM_SERVER_HOME or LLM_APP_HOME is an explicit choice.
 	// Among the discovered locations the newest contract wins, so a stale
-	// source checkout in the working directory cannot shadow a newer installed
-	// parser; equal versions keep the order above.
+	// copy beside the binary cannot shadow the newer embedded parser; equal
+	// versions keep the order above.
 	var fallback, best string
 	bestSchema := 0
 	for i, p := range candidates {
@@ -245,6 +225,22 @@ func findParseScript() string {
 		return best
 	}
 	return fallback
+}
+
+// exeParseScriptCandidates are the helper locations of the binary's own
+// install: beside it, and for a binary in <app-home>/bin or .bin the source
+// checkout the installer keeps in that app home. No walk climbs further, so a
+// binary in ~/.local/bin never reaches files in the home directory.
+func exeParseScriptCandidates(exeDir string) []string {
+	candidates := []string{filepath.Join(exeDir, "parse_gguf.py")}
+	if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
+		appHome := filepath.Dir(exeDir)
+		candidates = append(candidates,
+			filepath.Join(appHome, ".src", "llm-server", "tools", "gguf", "parse_gguf.py"),
+			filepath.Join(appHome, ".src", "ggrun", "tools", "gguf", "parse_gguf.py"),
+		)
+	}
+	return candidates
 }
 
 var parserSchemaPattern = regexp.MustCompile(`tensor_accounting_schema['"]\]?\s*[:=]\s*(\d+)`)
