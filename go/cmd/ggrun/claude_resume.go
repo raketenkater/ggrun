@@ -130,6 +130,13 @@ func claudeResumeSpec(rec claudesession.Record, serverArgs []string, force bool,
 				"pass --claude-resume-force to truncate.",
 			rec.SessionID, strings.Join(lines, "\n"))
 	}
+	if projects := claudeProjectsDir(); projects != "" && !claudesession.TranscriptPresent(projects, rec.WorkDir, rec.SessionID) {
+		// Claude Code keeps transcripts in a private layout ggrun re-derives;
+		// say so when it does not match instead of resuming on empty data.
+		fmt.Printf("[claude-code] warning: no Claude Code transcript for session %s under %s; "+
+			"Claude Code may have moved its session files, so ggrun cannot size this resume from its history\n",
+			rec.SessionID, projects)
+	}
 	spec := &claudeSessionSpec{ID: rec.SessionID, Resume: true, Workflow: rec.Workflow}
 	if spec.Workflow != nil && spec.Workflow.RunID != "" {
 		journal := claudesession.JournalPath(claudeProjectsDir(), rec.WorkDir, rec.SessionID, spec.Workflow.RunID)
