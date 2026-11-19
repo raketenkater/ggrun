@@ -452,3 +452,26 @@ func TestSaveReportsWriteFailureAndKeepsPreviousFile(t *testing.T) {
 		t.Fatalf("save must keep the existing file mode %v: %v %v", before.Mode(), info, err)
 	}
 }
+
+// M-02: every config variable has a GGRUN_ spelling that wins over LLM_.
+func TestGGRUNAliasesSetConfigAndWin(t *testing.T) {
+	for _, k := range EnvKeys {
+		t.Setenv(k, "")
+		t.Setenv(GGRUNAlias(k), "")
+	}
+	t.Setenv("LLM_PORT", "9001")
+	if got := snapshotEnv()["LLM_PORT"]; got != "9001" {
+		t.Fatalf("LLM_PORT alone: %q", got)
+	}
+	t.Setenv("GGRUN_PORT", "9002")
+	if got := snapshotEnv()["LLM_PORT"]; got != "9002" {
+		t.Fatalf("GGRUN_PORT must win: %q", got)
+	}
+	t.Setenv("GGRUN_LLAMA_SERVER", "/opt/llama-server")
+	if got := snapshotEnv()["LLAMA_SERVER"]; got != "/opt/llama-server" {
+		t.Fatalf("GGRUN_LLAMA_SERVER: %q", got)
+	}
+	if GGRUNAlias("LLM_MODEL_DIR") != "GGRUN_MODEL_DIR" || GGRUNAlias("LLAMA_SERVER") != "GGRUN_LLAMA_SERVER" {
+		t.Fatal("alias spelling")
+	}
+}

@@ -273,17 +273,29 @@ func LoadPersisted() (*Config, error) {
 	return cfg, nil
 }
 
+// EnvKeys are the environment variables that set config values. Each also has
+// a GGRUN_ spelling (GGRUN_PORT for LLM_PORT; GGRUN_LLAMA_SERVER for
+// LLAMA_SERVER) that wins when both are set; the LLM_ names keep working.
+var EnvKeys = []string{
+	"LLM_PORT", "LLM_CTX_SIZE", "LLM_MAX_RESTARTS", "LLM_KEEP_ALIVE",
+	"LLM_HEALTH_TIMEOUT", "LLM_MODEL_DIR", "LLM_CACHE_DIR", "LLM_LOG_DIR",
+	"LLM_RAM_BUDGET", "LLM_RAM_LIMIT_PERCENT", "LLM_VRAM_HEADROOM", "LLM_RAM_HEADROOM", "LLM_CGROUP_HEADROOM_MB", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_SWA_FULL", "LLM_ASSUME_YES", "LLM_ALLOW_LIVE_MEMORY_PROBE",
+	"LLM_BACKEND", "LLAMA_SERVER", "LLM_APP_HOME", "LLM_TUNE_ROUNDS",
+	"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC",
+	"LLM_SUPPORT_EXPERT", "LLM_SUPPORT_ONLINE", "LLM_SUPPORT_MODEL",
+}
+
+// GGRUNAlias is the GGRUN_ spelling of an EnvKeys name.
+func GGRUNAlias(key string) string {
+	return "GGRUN_" + strings.TrimPrefix(key, "LLM_")
+}
+
 func snapshotEnv() map[string]string {
 	m := make(map[string]string)
-	for _, k := range []string{
-		"LLM_PORT", "LLM_CTX_SIZE", "LLM_MAX_RESTARTS", "LLM_KEEP_ALIVE",
-		"LLM_HEALTH_TIMEOUT", "LLM_MODEL_DIR", "LLM_CACHE_DIR", "LLM_LOG_DIR",
-		"LLM_RAM_BUDGET", "LLM_RAM_LIMIT_PERCENT", "LLM_VRAM_HEADROOM", "LLM_RAM_HEADROOM", "LLM_CGROUP_HEADROOM_MB", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_SWA_FULL", "LLM_ASSUME_YES", "LLM_ALLOW_LIVE_MEMORY_PROBE",
-		"LLM_BACKEND", "LLAMA_SERVER", "LLM_APP_HOME", "LLM_TUNE_ROUNDS",
-		"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC",
-		"LLM_SUPPORT_EXPERT", "LLM_SUPPORT_ONLINE", "LLM_SUPPORT_MODEL",
-	} {
-		if v := os.Getenv(k); v != "" {
+	for _, k := range EnvKeys {
+		if v := os.Getenv(GGRUNAlias(k)); v != "" {
+			m[k] = v
+		} else if v := os.Getenv(k); v != "" {
 			m[k] = v
 		}
 	}
