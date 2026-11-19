@@ -120,14 +120,24 @@ func renderReference(t *testing.T) string {
 	b.WriteString("do not edit by hand. See [usage.md](usage.md) for what the options do.\n\n")
 	b.WriteString("## Launch flags\n\n`--flag value` and `--flag=value` mean the same. A switch takes `=true`/`=false`.\n")
 	b.WriteString("Flags ggrun does not know are passed to the backend.\n\n| Flag | Takes a value |\n|---|---|\n")
-	names := make([]string, 0, len(launchFlags))
-	for n := range launchFlags {
+	flags := make(map[string]bool, len(launchFlags)+len(remoteClaudeFlags))
+	for n, flag := range launchFlags {
+		flags[n] = flag.value
+	}
+	for n, takesValue := range remoteClaudeFlags {
+		if _, exists := flags[n]; exists {
+			t.Fatalf("launch flag %s is registered more than once", n)
+		}
+		flags[n] = takesValue
+	}
+	names := make([]string, 0, len(flags))
+	for n := range flags {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	for _, n := range names {
 		v := "no (switch)"
-		if launchFlags[n].value {
+		if flags[n] {
 			v = "yes"
 		}
 		fmt.Fprintf(&b, "| `%s` | %s |\n", n, v)

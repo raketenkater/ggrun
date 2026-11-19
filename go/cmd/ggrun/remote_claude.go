@@ -30,6 +30,15 @@ type remoteClaudeOptions struct {
 	TokenFile  string
 }
 
+// Each remote option records whether it takes a value.
+var remoteClaudeFlags = map[string]bool{
+	"--headless":           false,
+	"--gateway-host":       true,
+	"--gateway-port":       true,
+	"--gateway-url":        true,
+	"--gateway-token-file": true,
+}
+
 // Remote-only flags are removed before ordinary launch parsing. Backend flags
 // after -- are never consumed, and the original argv stays available for logs.
 func extractRemoteClaudeArgs(args []string) ([]string, remoteClaudeOptions, error) {
@@ -42,7 +51,12 @@ func extractRemoteClaudeArgs(args []string) ([]string, remoteClaudeOptions, erro
 			break
 		}
 		k, v, eq := strings.Cut(a, "=")
-		if k == "--headless" {
+		takesValue, remote := remoteClaudeFlags[k]
+		if !remote {
+			out = append(out, a)
+			continue
+		}
+		if !takesValue {
 			o.Headless = true
 			if eq {
 				var err error
@@ -53,32 +67,27 @@ func extractRemoteClaudeArgs(args []string) ([]string, remoteClaudeOptions, erro
 			}
 			continue
 		}
+		o.Configured = true
+		if !eq {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return nil, o, fmt.Errorf("%s requires a value", k)
+			}
+			i++
+			v = args[i]
+		}
 		switch k {
-		case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file":
-			o.Configured = true
-			if !eq {
-				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-					return nil, o, fmt.Errorf("%s requires a value", k)
-				}
-				i++
-				v = args[i]
+		case "--gateway-host":
+			o.Host = v
+		case "--gateway-url":
+			o.URL = v
+		case "--gateway-token-file":
+			o.TokenFile = v
+		case "--gateway-port":
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 65535 {
+				return nil, o, fmt.Errorf("invalid gateway port")
 			}
-			switch k {
-			case "--gateway-host":
-				o.Host = v
-			case "--gateway-url":
-				o.URL = v
-			case "--gateway-token-file":
-				o.TokenFile = v
-			case "--gateway-port":
-				n, e := strconv.Atoi(v)
-				if e != nil || n < 1 || n > 65535 {
-					return nil, o, fmt.Errorf("invalid gateway port")
-				}
-				o.Port = n
-			}
-		default:
-			out = append(out, a)
+			o.Port = n
 		}
 	}
 	return out, o, nil

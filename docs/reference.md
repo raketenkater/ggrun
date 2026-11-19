@@ -35,7 +35,12 @@ Flags ggrun does not know are passed to the backend.
 | `--dry-run` | no (switch) |
 | `--emit-server-argv-json` | no (switch) |
 | `--force-spec-moe` | no (switch) |
+| `--gateway-host` | yes |
+| `--gateway-port` | yes |
+| `--gateway-token-file` | yes |
+| `--gateway-url` | yes |
 | `--gpus` | yes |
+| `--headless` | no (switch) |
 | `--host` | yes |
 | `--inventory` | yes |
 | `--keep-alive` | no (switch) |
