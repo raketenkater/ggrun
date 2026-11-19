@@ -121,7 +121,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 | `LLM_SUPPORT_ONLINE` | `GGRUN_SUPPORT_ONLINE` |
 | `LLM_SUPPORT_MODEL` | `GGRUN_SUPPORT_MODEL` |
 
-## Every environment variable the code reads
+## Environment variables read by the Go code
 
 - `CLAUDE_CONFIG_DIR`
 - `COLUMNS`
@@ -134,9 +134,11 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_APP_HOME`
 - `GGRUN_ASSUME_YES`
 - `GGRUN_BACKEND`
+- `GGRUN_BACKEND_FORMAT_RETRY`
 - `GGRUN_BACKEND_VERIFY_MODEL`
 - `GGRUN_CACHE_DIR`
 - `GGRUN_CGROUP_HEADROOM_MB`
+- `GGRUN_CLAUDE_AUTO_REVIEWER`
 - `GGRUN_CLAUDE_AUTO_SELF_REVIEW`
 - `GGRUN_CLAUDE_PERMISSION_MODE`
 - `GGRUN_CLAUDE_PROGRESS`
@@ -148,6 +150,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_KEEP_ALIVE`
 - `GGRUN_KV_PLACEMENT`
 - `GGRUN_KV_QUALITY`
+- `GGRUN_LEARNED_REPLAN`
 - `GGRUN_LLAMA_SERVER`
 - `GGRUN_LOG_DIR`
 - `GGRUN_MAX_RESTARTS`
@@ -159,6 +162,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_RAM_BUDGET`
 - `GGRUN_RAM_HEADROOM`
 - `GGRUN_RAM_LIMIT_PERCENT`
+- `GGRUN_SCOPE_MODE`
 - `GGRUN_SPEC`
 - `GGRUN_SUPPORT_EXPERT`
 - `GGRUN_SUPPORT_MODEL`
@@ -166,10 +170,12 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_SWA_FULL`
 - `GGRUN_TRACE_PLACEMENT`
 - `GGRUN_TUNE_ROUNDS`
+- `GGRUN_VERIFY_OOM_REPLAN`
 - `GGRUN_VISION`
 - `GGRUN_VRAM_HEADROOM`
 - `HOME`
 - `LD_PRELOAD`
+- `LLAMA_API_KEY`
 - `LLAMA_ARG_LOG_VERBOSITY`
 - `LLAMA_SERVER`
 - `LLM_ALLOW_LIVE_MEMORY_PROBE`
