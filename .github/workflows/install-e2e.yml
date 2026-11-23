@@ -250,15 +250,66 @@ jobs:
           for _ in $(seq 30); do curl -fs http://127.0.0.1:18849/health >/dev/null || break; sleep 1; done
           if curl -fs http://127.0.0.1:18849/health >/dev/null; then echo "::error::server still answering 30s after stop"; exit 1; fi
 
-      - name: Reinstall candidate without resetting configuration
+      - name: Update the previous Linux release to this candidate
         if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}
         run: |
-          config="$HOME/ggrun/.config/config"
+          set -euo pipefail
+          previous=v3.2.13
+          asset=ggrun-linux-x86_64-cpu.tar.gz
+          release="https://github.com/raketenkater/ggrun/releases/download/$previous"
+          upgrade="$(mktemp -d "$RUNNER_TEMP/upgrade.XXXXXX")"
+          mkdir -p "$upgrade/home" "$upgrade/bundle"
+          curl -fL --retry 3 "$release/$asset" -o "$upgrade/bundle/$asset"
+          curl -fL --retry 3 "$release/SHA256SUMS" -o "$upgrade/bundle/SHA256SUMS"
+          app="$upgrade/home/ggrun"
+          HOME="$upgrade/home" LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu LLM_INSTALL_SCAN_SYSTEM=0 \
+            LLM_SETUP_DEPS=skip LLM_SETUP_PY_DEPS=skip LLM_SETUP_REF="$previous" \
+            LLM_INSTALL_RELEASE_DIR="$upgrade/bundle" ./setup-linux.sh
+          GOCACHE="$(go env GOCACHE)"
+          GOMODCACHE="$(go env GOMODCACHE)"
+          export GOCACHE GOMODCACHE
+          export HOME="$upgrade/home"
+          "$app/ggrun" version --json > "$upgrade/before.json"
+          test ! -e "$app/.src/ggrun/.git"
+          config="$app/.config/config"
           printf '\nLLM_PORT=19249\n' >> "$config"
-          cp "$config" "$RUNNER_TEMP/config-before-upgrade"
-          LLM_SETUP_MODE=release LLM_SETUP_BACKEND=cpu LLM_INSTALL_SCAN_SYSTEM=0 \
-            LLM_INSTALL_RELEASE_DIR="$RUNNER_TEMP/candidate" ./setup-linux.sh
-          cmp "$RUNNER_TEMP/config-before-upgrade" "$config"
+          printf 'preserve model directory\n' > "$app/models/upgrade-marker"
+          printf 'preserve cache directory\n' > "$app/.cache/upgrade-marker"
+          sha256sum "$config" "$app/models/upgrade-marker" "$app/.cache/upgrade-marker" \
+            "$app/.bin/llama-server" > "$upgrade/preserved.sha256"
+
+          # The published launcher normally updates from main. Supply this
+          # job's exact commit as main through a private local Git mirror.
+          mirror="$upgrade/candidate.git"
+          git init --bare --quiet "$mirror"
+          git -C "$mirror" fetch --quiet --update-shallow "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+          git -C "$mirror" update-ref refs/heads/main "$GITHUB_SHA"
+          (
+            cd "$HOME"
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$mirror.insteadOf" \
+              GIT_CONFIG_VALUE_0=https://github.com/raketenkater/ggrun.git \
+              LLM_INSTALL_DEPS=skip LLM_INSTALL_PY_DEPS=skip LLM_INSTALL_SCAN_SYSTEM=0 \
+              "$app/ggrun" update
+          )
+          "$app/ggrun" version --json > "$upgrade/after.json"
+          sha256sum --check "$upgrade/preserved.sha256"
+          python3 - "$upgrade" "$previous" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          previous = sys.argv[2]
+          before = json.loads((root / "before.json").read_text())
+          after = json.loads((root / "after.json").read_text())
+          exe = (root / "home/ggrun/.bin/ggrun").resolve()
+          if before.get("version") != previous or Path(before.get("executable_resolved", "")) != exe:
+              sys.exit(f"expected installed release {previous}, got {before}")
+          if after.get("revision") != os.environ["GITHUB_SHA"] or after.get("modified") is not False:
+              sys.exit(f"update did not install the exact clean candidate: {after}")
+          if before.get("revision") == after["revision"] or Path(after.get("executable_resolved", "")) != exe:
+              sys.exit(f"update did not replace the installed release: {after}")
+          print(f"Verified update from {previous} to {after['revision']}")
+          PY
 
       # No --cpu. On a runner with no GPU ggrun detects that and plans for the
       # CPU itself, which is a better test than being told; on a self-hosted
