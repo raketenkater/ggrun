@@ -74,6 +74,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -278,22 +280,23 @@ jobs:
           sha256sum "$config" "$app/models/upgrade-marker" "$app/.cache/upgrade-marker" \
             "$app/.bin/llama-server" > "$upgrade/preserved.sha256"
 
-          # The published launcher normally updates from main. Supply this
-          # job's exact commit as main through a private local Git mirror.
+          # Seed a source-backed app home at the same release. A private Git
+          # remote makes the update target deterministic on PRs.
           mirror="$upgrade/candidate.git"
           git init --bare --quiet "$mirror"
-          git -C "$mirror" fetch --quiet --update-shallow "$GITHUB_WORKSPACE" "$GITHUB_SHA"
-          git -C "$mirror" update-ref refs/heads/main "$GITHUB_SHA"
+          release_commit="$(git rev-parse "$previous^{commit}")"
+          git merge-base --is-ancestor "$release_commit" "$GITHUB_SHA"
+          git -C "$mirror" fetch --quiet "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+          git -C "$mirror" update-ref refs/heads/main "$release_commit"
+          git clone --quiet --branch main "$mirror" "$app/.src/ggrun"
+          git -C "$mirror" update-ref refs/heads/main "$GITHUB_SHA" "$release_commit"
           (
             cd "$HOME"
-            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$mirror.insteadOf" \
-              GIT_CONFIG_VALUE_0=https://github.com/raketenkater/ggrun.git \
-              LLM_INSTALL_DEPS=skip LLM_INSTALL_PY_DEPS=skip LLM_INSTALL_SCAN_SYSTEM=0 \
-              "$app/ggrun" update
+            "$app/ggrun" update
           )
           "$app/ggrun" version --json > "$upgrade/after.json"
           sha256sum --check "$upgrade/preserved.sha256"
-          python3 - "$upgrade" "$previous" <<'PY'
+          python3 - "$upgrade" "$previous" "$release_commit" <<'PY'
           import json, os, sys
           from pathlib import Path
 
@@ -302,7 +305,8 @@ jobs:
           before = json.loads((root / "before.json").read_text())
           after = json.loads((root / "after.json").read_text())
           exe = (root / "home/ggrun/.bin/ggrun").resolve()
-          if before.get("version") != previous or Path(before.get("executable_resolved", "")) != exe:
+          if (before.get("version") != previous or before.get("revision") != sys.argv[3]
+                  or Path(before.get("executable_resolved", "")) != exe):
               sys.exit(f"expected installed release {previous}, got {before}")
           if after.get("revision") != os.environ["GITHUB_SHA"] or after.get("modified") is not False:
               sys.exit(f"update did not install the exact clean candidate: {after}")
