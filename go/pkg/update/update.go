@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 const (
 	githubRepo            = "raketenkater/ggrun"
 	githubAPIURL          = "https://api.github.com/repos/%s/releases/latest"
+	githubLatestRelease   = "https://github.com/%s/releases/latest"
 	rawInstallURL         = "https://raw.githubusercontent.com/%s/%s/install.sh"
 	rawInstallPSURL       = "https://raw.githubusercontent.com/%s/%s/install.ps1"
 	githubReleaseAssetURL = "https://github.com/%s/releases/download/%s/%s"
@@ -40,6 +42,8 @@ const (
 // currentVersion is the single source of truth for the binary version.
 // Release builds override it: go build -ldflags "-X github.com/raketenkater/ggrun/pkg/update.currentVersion=vX.Y.Z"
 var currentVersion = "v3.2.0-go"
+
+var taggedRelease = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$`)
 
 // PromptOnStartupWithBackendUpdater lets the command package extend the update
 // transaction with registered forks while this package keeps terminal/dismiss
@@ -295,20 +299,38 @@ type Result struct {
 
 // Check queries GitHub for the latest release and compares it to current.
 func Check() (*Result, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return checkRelease(ctx, &http.Client{}, fmt.Sprintf(githubAPIURL, githubRepo),
+		fmt.Sprintf(githubLatestRelease, githubRepo))
+}
+
+func checkRelease(ctx context.Context, client *http.Client, apiURL, latestURL string) (*Result, error) {
 	current := Version()
-	url := fmt.Sprintf(githubAPIURL, githubRepo)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch release: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("github api %s", resp.Status)
-	}
 	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("decode release: %w", err)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+			return nil, fmt.Errorf("decode release: %w", err)
+		}
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		// The public latest-release page also identifies the release tag on
+		// runners and shared networks that exhaust the unauthenticated API.
+		rel, err = releaseFromRedirect(ctx, client, latestURL)
+		if err != nil {
+			return nil, fmt.Errorf("github api %s; latest release redirect: %w", resp.Status, err)
+		}
+	default:
+		return nil, fmt.Errorf("github api %s", resp.Status)
 	}
 	latest := rel.TagName
 	return &Result{
@@ -317,6 +339,41 @@ func Check() (*Result, error) {
 		HasUpdate: releaseIsNewer(current, latest),
 		URL:       rel.HTMLURL,
 	}, nil
+}
+
+func releaseFromRedirect(ctx context.Context, client *http.Client, latestURL string) (Release, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, latestURL, nil)
+	if err != nil {
+		return Release{}, err
+	}
+	probe := &http.Client{
+		Transport: client.Transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := probe.Do(req)
+	if err != nil {
+		return Release{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return Release{}, fmt.Errorf("expected a redirect, got %s", resp.Status)
+	}
+	location, err := resp.Location()
+	if err != nil {
+		return Release{}, err
+	}
+	prefix := strings.TrimSuffix(req.URL.Path, "/latest") + "/tag/"
+	tag, found := strings.CutPrefix(location.Path, prefix)
+	if location.Scheme != req.URL.Scheme || location.Host != req.URL.Host ||
+		location.User != nil || location.RawQuery != "" || location.Fragment != "" ||
+		!found || !taggedRelease.MatchString(tag) {
+		return Release{}, fmt.Errorf("redirect did not identify a release tag in the ggrun repository")
+	}
+	return Release{TagName: tag, HTMLURL: location.String()}, nil
 }
 
 // StatusState is how this build compares with the newest ggrun available.
