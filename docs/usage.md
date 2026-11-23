@@ -1,5 +1,9 @@
 # Usage
 
+The complete list of launch flags and environment variables, generated from the code, is in
+[reference.md](reference.md). Every `LLM_` configuration variable also has a `GGRUN_` spelling
+(`GGRUN_PORT` for `LLM_PORT`), which wins when both are set.
+
 With no command, `ggrun` opens the interactive TUI. Otherwise it takes a model
 (local path or Hugging Face repo) plus flags.
 
