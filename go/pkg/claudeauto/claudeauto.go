@@ -277,11 +277,37 @@ func reviewerHTTPClient() *http.Client {
 // interrupted in an earlier run is continued instead of re-fetched, and the
 // artifact is only verified and installed once it is complete.
 func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, dest string, progress io.Writer) error {
+	resumed, err := downloadModelOnce(ctx, client, spec, dest, progress)
+	var bad *checksumError
+	if err == nil || !errors.As(err, &bad) || !resumed {
+		return err
+	}
+	// The bytes of a resumed transfer came from more than one response, so a
+	// mismatch may be a bad join rather than a bad artifact. The partial is
+	// already discarded; fetch once from zero. A fresh download that mismatches
+	// is not retried: the same bytes would arrive again.
+	if progress != nil {
+		fmt.Fprintf(progress, "[claude-code] resumed Auto reviewer download failed verification (got %s); discarding it and downloading again from the start\n", bad.got)
+	}
+	_, err = downloadModelOnce(ctx, client, spec, dest, progress)
+	return err
+}
+
+// checksumError reports a completed download whose SHA-256 is not the pinned one.
+type checksumError struct{ got string }
+
+func (e *checksumError) Error() string {
+	return fmt.Sprintf("checksum mismatch (got %s); the partial download was discarded", e.got)
+}
+
+// downloadModelOnce runs the resume/retry loop once and reports whether any
+// attempt continued an existing partial file.
+func downloadModelOnce(ctx context.Context, client *http.Client, spec ModelSpec, dest string, progress io.Writer) (resumed bool, _ error) {
 	if client == nil {
 		client = reviewerHTTPClient()
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("create reviewer cache: %w", err)
+		return resumed, fmt.Errorf("create reviewer cache: %w", err)
 	}
 	part := dest + ".part"
 
@@ -294,6 +320,16 @@ func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, des
 			_ = os.Remove(part)
 			have = 0
 		}
+		if have > 0 && !hasPartIdentity(part, spec) {
+			// No record of which artifact these bytes belong to: do not trust them.
+			_ = os.Remove(part)
+			have = 0
+		}
+		if have > 0 {
+			// Bytes from an earlier response or run: a mismatch may be a bad
+			// join, so it earns one fresh download (downloadModel).
+			resumed = true
+		}
 		if have == spec.Size {
 			break
 		}
@@ -305,7 +341,7 @@ func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, des
 			break
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("download Auto reviewer: %w", ctx.Err())
+			return resumed, fmt.Errorf("download Auto reviewer: %w", ctx.Err())
 		}
 		if attempt < reviewerDownloadAttempts && progress != nil {
 			fmt.Fprintf(progress, "[claude-code] Auto reviewer download interrupted (%v); retrying\n", lastErr)
@@ -313,27 +349,29 @@ func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, des
 	}
 	if size := partialSize(part); size != spec.Size {
 		if lastErr != nil {
-			return fmt.Errorf("download Auto reviewer: %w", lastErr)
+			return resumed, fmt.Errorf("download Auto reviewer: %w", lastErr)
 		}
-		return fmt.Errorf("download Auto reviewer: got %d bytes, want %d", size, spec.Size)
+		return resumed, fmt.Errorf("download Auto reviewer: got %d bytes, want %d", size, spec.Size)
 	}
 	// Verify the assembled file rather than a running hash: with resume the bytes
 	// come from more than one response, and what matters is what landed on disk.
 	sum, err := fileSHA256(part)
 	if err != nil {
-		return fmt.Errorf("verify Auto reviewer: %w", err)
+		return resumed, fmt.Errorf("verify Auto reviewer: %w", err)
 	}
 	if !strings.EqualFold(sum, spec.SHA256) {
 		_ = os.Remove(part)
-		return fmt.Errorf("download Auto reviewer: checksum mismatch (got %s); the partial download was discarded", sum)
+		_ = os.Remove(part + ".id")
+		return resumed, fmt.Errorf("download Auto reviewer: %w", &checksumError{got: sum})
 	}
+	_ = os.Remove(part + ".id")
 	if err := os.Rename(part, dest); err != nil {
-		return fmt.Errorf("install Auto reviewer: %w", err)
+		return resumed, fmt.Errorf("install Auto reviewer: %w", err)
 	}
 	if progress != nil {
 		fmt.Fprintln(progress, "[claude-code] local Auto reviewer downloaded and verified.")
 	}
-	return nil
+	return resumed, nil
 }
 
 // partialSize is how many bytes of a resumable download are already on disk.
@@ -355,6 +393,10 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 	}
 	if have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		// Only continue if the artifact is the one the partial came from.
+		if id := readPartIdentity(part); id != "" && !strings.HasPrefix(id, "W/") {
+			req.Header.Set("If-Range", id)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -369,6 +411,12 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 		if have == 0 {
 			return fmt.Errorf("unexpected HTTP 206 for a fresh download")
 		}
+		// The body must continue exactly where the partial ends, or appending
+		// it splices unrelated bytes into the file.
+		if start, total, ok := parseContentRange(resp.Header.Get("Content-Range")); !ok || start != have || (total > 0 && total != spec.Size) {
+			_ = os.Remove(part)
+			return fmt.Errorf("server resumed at the wrong offset (Content-Range %q, want start %d of %d); restarting", resp.Header.Get("Content-Range"), have, spec.Size)
+		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		// Already have everything the server will give us; let the caller verify.
 		return nil
@@ -376,6 +424,9 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
 
+	if have == 0 {
+		writePartIdentity(part, spec, resp.Header)
+	}
 	flags := os.O_CREATE | os.O_WRONLY
 	if have > 0 {
 		flags |= os.O_APPEND
@@ -405,6 +456,52 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 		return err
 	}
 	return f.Close()
+}
+
+// partIdentity names the artifact a partial file belongs to: the pinned URL and
+// size plus the server's strong validator. It is stored beside the partial.
+func partIdentity(spec ModelSpec, h http.Header) string {
+	etag := h.Get("X-Linked-Etag")
+	if etag == "" {
+		etag = h.Get("ETag")
+	}
+	return spec.URL + "\n" + strconv.FormatInt(spec.Size, 10) + "\n" + etag + "\n"
+}
+
+func writePartIdentity(part string, spec ModelSpec, h http.Header) {
+	_ = os.WriteFile(part+".id", []byte(partIdentity(spec, h)), 0o644)
+}
+
+// readPartIdentity returns the recorded validator ("" when none was served).
+func readPartIdentity(part string) string {
+	lines := strings.Split(string(readFileOrEmpty(part+".id")), "\n")
+	if len(lines) < 3 {
+		return ""
+	}
+	return lines[2]
+}
+
+// hasPartIdentity reports whether the partial was recorded for this spec.
+func hasPartIdentity(part string, spec ModelSpec) bool {
+	lines := strings.Split(string(readFileOrEmpty(part+".id")), "\n")
+	return len(lines) >= 3 && lines[0] == spec.URL && lines[1] == strconv.FormatInt(spec.Size, 10)
+}
+
+func readFileOrEmpty(path string) []byte {
+	b, _ := os.ReadFile(path)
+	return b
+}
+
+// parseContentRange parses "bytes START-END/TOTAL"; total is 0 when "*".
+func parseContentRange(v string) (start, total int64, ok bool) {
+	var end int64
+	if n, _ := fmt.Sscanf(v, "bytes %d-%d/%d", &start, &end, &total); n == 3 {
+		return start, total, true
+	}
+	if n, _ := fmt.Sscanf(v, "bytes %d-%d/*", &start, &end); n == 2 {
+		return start, 0, true
+	}
+	return 0, 0, false
 }
 
 // stallGuard wraps a response body so a transfer that stops producing bytes for
