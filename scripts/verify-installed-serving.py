@@ -144,6 +144,13 @@ def check_port_available(port):
         raise OSError(error, f"could not establish that port {port} has no listener")
 
 
+# Where the final backend load starts. ggrun's admission measurement can load a
+# model several times under one [launch] line, and ik_llama never prints
+# "loading model tensors", so also split at each load's metadata line.
+LAST_LOAD = (r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors"
+             r"|^.*llama_model_loader: loaded meta data")
+
+
 def claude_backend_log(log_text):
     """--claude-code launches write backend output to the file they announce."""
     paths = re.findall(r"(?m)^\[claude-code\] backend logs -> (.+?)\s*$", log_text)
@@ -160,8 +167,7 @@ def claude_backend_log(log_text):
 
 def weight_devices(log):
     # Ignore allocations from abandoned admissions before the final launch.
-    launches = list(re.finditer(
-        r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log))
+    launches = list(re.finditer(LAST_LOAD, log))
     if launches:
         log = log[launches[-1].start():]
     devices = set()
@@ -295,7 +301,7 @@ class GPUSampler:
 
 def device_allocations(log_text):
     """Model/KV/compute MiB per device for the final launch, from the backend log."""
-    launches = list(re.finditer(r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log_text))
+    launches = list(re.finditer(LAST_LOAD, log_text))
     if launches:
         log_text = log_text[launches[-1].start():]
     alloc = {}

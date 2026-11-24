@@ -142,6 +142,16 @@ CUDA3 model buffer size = 0.00 MiB
             self.assertEqual(serving.claude_backend_log(log), "")
         self.assertEqual(serving.claude_backend_log("[launch] /bin/server -m model\n"), "")
 
+    def test_repeated_admission_loads_count_only_the_last(self):
+        load = ("llama_model_loader: loaded meta data with 41 key-value pairs\n"
+                "llm_load_tensors:      CUDA1 buffer size = 14191.40 MiB\n"
+                "llama_kv_cache_init:      CUDA1 KV buffer size =  7737.58 MiB\n")
+        log = "[launch] /bin/server -m model\n" + load.replace("CUDA1 buffer", "CUDA2 buffer") + load + load
+        self.assertEqual(serving.weight_devices(log), ["CUDA1"])
+        alloc = serving.device_allocations(log)
+        self.assertEqual(alloc["CUDA1"], {"model": 14191.4, "kv": 7737.58})
+        self.assertNotIn("CUDA2", alloc)
+
     def test_backend_restart_without_argv_does_not_reuse_old_allocations(self):
         log = """[launch] /bin/server -m model
 load_tensors: loading model tensors
