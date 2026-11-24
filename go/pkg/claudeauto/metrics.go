@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,9 +367,12 @@ func (r *Router) EnableMetrics(path string) error {
 	if r == nil {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
+	}
+	if runtime.GOOS != "windows" {
+		_ = f.Chmod(0o600)
 	}
 	r.metrics = &metricsSink{out: f, closer: f}
 	return nil

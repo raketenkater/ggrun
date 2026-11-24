@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -492,5 +493,22 @@ func TestConversationKeyIsStablePerAgentAndDistinctAcrossAgents(t *testing.T) {
 	}
 	if conversationKey(agentA) == "" {
 		t.Fatal("the per-install user_id blob must still parse; an empty key disables grouping entirely")
+	}
+}
+
+func TestEnableMetricsFileIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	path := filepath.Join(t.TempDir(), "ggrun-claude-requests-1.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &Router{}
+	if err := r.EnableMetrics(path); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
 }

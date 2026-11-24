@@ -4372,7 +4372,8 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement
 		// shape shares this path — and os.Create erased the previous attempt at
 		// the moment the next one started, losing the history, as the
 		// 2026-08-02 23:11 relaunch showed.
-		if lf, ferr := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); ferr == nil {
+		if lf, ferr := openPrivateLog(logPath); ferr == nil {
+			rotateGgrunLogs(filepath.Dir(logPath), logRetainPerKind)
 			_, _ = fmt.Fprintf(lf, "[ggrun] launch-scope: %s\n", scope)
 			// The scope is a hash, so a mismatch between two runs is invisible
 			// from the filenames alone -- diagnosing one cost an afternoon.
