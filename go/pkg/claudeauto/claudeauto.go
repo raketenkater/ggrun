@@ -776,7 +776,7 @@ func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				})
 				proxy, route = mainProxy, routeMain
 			}
-			body = retargetModel(body, MainAlias)
+			body = selfClassifierBody(body)
 			r.Body = io.NopCloser(bodyReader(body))
 			r.ContentLength = int64(len(body))
 			router.serve(w, r, proxy, route, body, kindClassifier)
