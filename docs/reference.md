@@ -164,6 +164,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_NO_WHATS_NEW`
 - `GGRUN_PARALLEL`
 - `GGRUN_PORT`
+- `GGRUN_QUEUE_WAIT_SECONDS`
 - `GGRUN_RAM_BUDGET`
 - `GGRUN_RAM_HEADROOM`
 - `GGRUN_RAM_LIMIT_PERCENT`

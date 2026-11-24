@@ -565,6 +565,7 @@ type Router struct {
 	mainQueued    atomic.Int64
 	watch         classifierWatch
 	metrics       *metricsSink
+	queueWait     time.Duration // GGRUN_QUEUE_WAIT_SECONDS; 0 leaves the wait to the client
 }
 
 // SetCompanion enables the cheap-tier lane. alias is the model name the
@@ -623,6 +624,34 @@ func (r *Router) utilityEnabled() bool {
 // loopback port. Text-only routes replace Anthropic image blocks with a text
 // notice so one image-producing tool result cannot poison every later turn.
 func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMainActive int) (*Router, error) {
+	queueWait, err := queueWaitFromEnv(os.Getenv(queueWaitEnv))
+	if err != nil {
+		return nil, err
+	}
+	if queueWait > 0 && maxMainActive <= 0 {
+		return nil, fmt.Errorf("%s needs main-model admission to be enabled", queueWaitEnv)
+	}
+	return startRouter(mainBaseURL, reviewerBaseURL, supportsVision, maxMainActive, queueWait)
+}
+
+// queueWaitEnv bounds how long a main-model request may wait for admission.
+// Unset keeps today's behaviour: the request waits until the client gives up.
+// Experimental (X-13/E-1): when the bound expires the router answers 429 with
+// Retry-After so the client can back off; the default is decided by E-1.
+const queueWaitEnv = "GGRUN_QUEUE_WAIT_SECONDS"
+
+func queueWaitFromEnv(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 1 || seconds > 3600 {
+		return 0, fmt.Errorf("%s must be a whole number of seconds from 1 to 3600", queueWaitEnv)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMainActive int, queueWait time.Duration) (*Router, error) {
 	mainURL, err := url.Parse(mainBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse main model URL: %w", err)
@@ -639,7 +668,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 	// review can be retried on the main model; utility traffic carries no
 	// attempt and keeps surfacing errors directly.
 	installReviewerFallbackHooks(reviewerProxy)
-	router := &Router{maxMainActive: maxMainActive, mainBaseURL: strings.TrimRight(mainBaseURL, "/")}
+	router := &Router{maxMainActive: maxMainActive, mainBaseURL: strings.TrimRight(mainBaseURL, "/"), queueWait: queueWait}
 	router.separateReviewer = strings.TrimRight(reviewerBaseURL, "/") != strings.TrimRight(mainBaseURL, "/")
 	if maxMainActive > 0 {
 		router.sched = newScheduler(maxMainActive)
@@ -658,6 +687,9 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			}
 			if admission := router.sched.status(); admission != nil {
 				status["admission"] = admission
+			}
+			if router.queueWait > 0 {
+				status["queue_wait_bound_ms"] = router.queueWait.Milliseconds()
 			}
 			if wait := expectedWaitMS(router.mainQueued.Load(), int64(router.maxMainActive), router.metrics.meanMainServiceMS()); wait > 0 {
 				status["expected_wait_ms"] = wait
@@ -829,9 +861,25 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil
 	}
 	if route == routeMain && r != nil && r.sched != nil {
 		r.mainQueued.Add(1)
-		admission := r.sched.acquireRequest(req.Context(), conversation, laneOf(body), estimatedPromptTokens(body))
+		waitContext := req.Context()
+		cancelWait := func() {}
+		if r.queueWait > 0 {
+			waitContext, cancelWait = context.WithTimeout(waitContext, r.queueWait)
+		}
+		admission := r.sched.acquireRequest(waitContext, conversation, laneOf(body), estimatedPromptTokens(body))
+		queueExpired := errors.Is(waitContext.Err(), context.DeadlineExceeded) && req.Context().Err() == nil
+		cancelWait()
 		r.mainQueued.Add(-1)
 		if admission == nil {
+			if queueExpired {
+				metered := &meteredWriter{ResponseWriter: w, start: start}
+				metered.Header().Set("Content-Type", "application/json")
+				metered.Header().Set("Retry-After", "5")
+				metered.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(metered, `{"type":"error","error":{"type":"rate_limit_error","message":"Admission queue wait exceeded. Retry later."}}`)
+				r.record(route, body, start, time.Since(start), metered, meta)
+				return
+			}
 			r.record(route, body, start, time.Since(start), nil, meta)
 			return
 		}
