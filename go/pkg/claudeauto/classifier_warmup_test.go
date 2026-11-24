@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,7 +62,8 @@ func TestWarmupCaptureStoresOnlySystemAndTools(t *testing.T) {
 	if strings.Contains(string(data), secret) || strings.Contains(string(data), `"messages"`) {
 		t.Fatal("saved file contains messages")
 	}
-	if st, _ := os.Stat(file); st.Mode().Perm() != 0o600 {
+	// Windows has no Unix permission bits; the cache directory's ACL applies there.
+	if st, _ := os.Stat(file); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v", st.Mode().Perm())
 	}
 	w := router.warm.Load()
