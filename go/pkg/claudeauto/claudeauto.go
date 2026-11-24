@@ -496,13 +496,22 @@ func IsClassifierRequest(body []byte) bool {
 	var request struct {
 		System json.RawMessage `json:"system"`
 	}
-	if json.Unmarshal(body, &request) != nil || len(request.System) == 0 {
+	if json.Unmarshal(body, &request) != nil {
+		return false
+	}
+	return systemHasClassifierMarker(request.System)
+}
+
+// systemHasClassifierMarker reports whether a raw "system" value (a string or
+// a list of text blocks) carries ClassifierMarker.
+func systemHasClassifierMarker(raw json.RawMessage) bool {
+	if len(raw) == 0 {
 		return false
 	}
 	var blocks []struct {
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(request.System, &blocks) == nil {
+	if json.Unmarshal(raw, &blocks) == nil {
 		for _, block := range blocks {
 			if strings.Contains(block.Text, ClassifierMarker) {
 				return true
@@ -511,7 +520,7 @@ func IsClassifierRequest(body []byte) bool {
 		return false
 	}
 	var system string
-	return json.Unmarshal(request.System, &system) == nil && strings.Contains(system, ClassifierMarker)
+	return json.Unmarshal(raw, &system) == nil && strings.Contains(system, ClassifierMarker)
 }
 
 // Router exposes a loopback-only endpoint and sends classifier requests to the
@@ -565,6 +574,8 @@ type Router struct {
 	mainQueued    atomic.Int64
 	watch         classifierWatch
 	metrics       *metricsSink
+	warm          atomic.Pointer[classifierWarmup]
+	mainInflight  atomic.Int64  // non-warm-up requests inside serve() on the main route
 	queueWait     time.Duration // GGRUN_QUEUE_WAIT_SECONDS; 0 leaves the wait to the client
 }
 
@@ -722,6 +733,11 @@ func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 		if RejectUnsupportedSystemMessages(w, body) {
 			return
 		}
+		warmup := r.Header.Get(warmupHeader) != ""
+		if warmup {
+			r.Header.Del(warmupHeader)
+			r = r.WithContext(context.WithValue(r.Context(), warmupKey{}, true))
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 		if !supportsVision {
@@ -735,7 +751,10 @@ func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.ContentLength = int64(len(body))
 		}
 		if IsClassifierRequest(body) {
-			router.watch.sawClassifier()
+			if !warmup {
+				router.watch.sawClassifier()
+				router.captureClassifier(body)
+			}
 			// A classifier/security request is normally the separate reviewer's
 			// job. Two user-approved (Option A) cases route it to the MAIN model
 			// instead, each with a visible notice — never silently:
@@ -771,6 +790,11 @@ func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				if router.tryReviewer(w, r, reviewerProxy, reviewerClassifierBody(body, alias)) {
 					return
 				}
+				if warmup {
+					// Never spend the main model on a warm-up of the reviewer.
+					http.Error(w, "reviewer could not answer the warm-up", http.StatusBadGateway)
+					return
+				}
 				router.reviewerFailNotice.Do(func() {
 					fmt.Fprintf(os.Stderr, "[claude-code] the Auto reviewer could not answer a review; routing it to the main model instead (self-classify, reviewer unavailable)\n")
 				})
@@ -779,7 +803,14 @@ func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			body = selfClassifierBody(body)
 			r.Body = io.NopCloser(bodyReader(body))
 			r.ContentLength = int64(len(body))
-			router.serve(w, r, proxy, route, body, kindClassifier)
+			kind := kindClassifier
+			if warmup {
+				kind = kindWarmup
+				if route == routeMain {
+					router.warm.Load().setOnMain()
+				}
+			}
+			router.serve(w, r, proxy, route, body, kind)
 			return
 		}
 		// Decide the cheap-tier destination before injecting any main-backend
@@ -851,6 +882,11 @@ func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 // waits behind coding work.
 func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil.ReverseProxy, route string, body []byte, kind string) {
 	start := time.Now()
+	if route == routeMain && r != nil && kind != kindWarmup {
+		r.mainInflight.Add(1)
+		defer r.mainInflight.Add(-1)
+		r.warm.Load().preempt()
+	}
 	conversation := conversationKey(body)
 	meta := metaFor(req, kind)
 	var queue time.Duration
@@ -1035,6 +1071,7 @@ func (r *Router) Close() error {
 	if r.pollStop != nil {
 		r.stopPollOnce.Do(func() { close(r.pollStop) })
 	}
+	r.warm.Load().stop()
 	err := r.server.Shutdown(ctx)
 	if closeErr := r.metrics.close(); err == nil {
 		err = closeErr

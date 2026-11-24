@@ -296,6 +296,9 @@ func (s *remoteClaudeService) activate(req *launchRequest, model *placement.Mode
 	}
 	fmt.Printf("[remote] Credential is private: use %s to display it explicitly.\n", displayCommand([]string{"ggrun", "gateway-token", "--file", s.options.TokenFile}))
 	fmt.Println("[remote] Laptop disconnects leave the model loaded. Ctrl+C here stops serving.")
+	if r.router.WarmClassifier() {
+		fmt.Println("[remote] warming Claude Code's Auto check instructions in the background")
+	}
 	s.stopServingStatus()
 	stopStatus := startRemoteClaudeStatus(os.Stderr, r.router.AdmissionStatus)
 	stopProgress := func() {}

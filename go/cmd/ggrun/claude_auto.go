@@ -941,6 +941,11 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 	} else {
 		fmt.Printf("[claude-code] per-request metrics -> %s\n", metricsPath)
 	}
+	if cfg != nil && cfg.CacheDir != "" {
+		if err := router.EnableClassifierWarmup(filepath.Join(cfg.CacheDir, "claude-classifier-system.json")); err != nil {
+			fmt.Fprintf(os.Stderr, "[claude-code] Auto check warm-up disabled: %v\n", err)
+		}
+	}
 	if r.reviewerPort > 0 && r.workerRouteEnabled() {
 		fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, cheap work + safety -> local companion)\n", router.URL())
 	} else if r.reviewerPort > 0 {
