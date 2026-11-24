@@ -123,6 +123,25 @@ CUDA3 model buffer size = 0.00 MiB
         log += "llm_load_tensors: CUDA1 buffer size = 526.50 MiB\nCUDA2 model buffer size = 12000 MiB\n"
         self.assertEqual(serving.weight_devices(log), ["CUDA1", "CUDA2"])
 
+    def test_claude_code_backend_log_is_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            backend = Path(temp) / "ggrun-claude-server-v2-18845-x.log"
+            backend.write_text("llm_load_tensors: offloaded 25/25 layers to GPU\n"
+                               "llm_load_tensors:      CUDA1 buffer size =   526.50 MiB\n")
+            log = f"[launch] /bin/server -m model --claude-code\n[claude-code] backend logs -> {backend}\n"
+            self.assertEqual(serving.weight_devices(log), [])
+            self.assertEqual(serving.weight_devices(log + serving.claude_backend_log(log)), ["CUDA1"])
+            # A relaunch with the same configuration appends a second load to the same file.
+            load = ("llama_model_loader: loaded meta data with 41 key-value pairs\n"
+                    "llm_load_tensors:      CUDA1 buffer size =   526.50 MiB\n")
+            backend.write_text(load + "llm_load_tensors:      CUDA0 buffer size =   100.00 MiB\n" + load)
+            combined = log + serving.claude_backend_log(log)
+            self.assertEqual(serving.weight_devices(combined), ["CUDA1"])
+            self.assertEqual(serving.device_allocations(combined)["CUDA1"]["model"], 526.5)
+            backend.unlink()
+            self.assertEqual(serving.claude_backend_log(log), "")
+        self.assertEqual(serving.claude_backend_log("[launch] /bin/server -m model\n"), "")
+
     def test_backend_restart_without_argv_does_not_reuse_old_allocations(self):
         log = """[launch] /bin/server -m model
 load_tensors: loading model tensors
