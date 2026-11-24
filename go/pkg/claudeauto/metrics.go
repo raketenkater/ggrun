@@ -91,6 +91,7 @@ type RequestRecord struct {
 const (
 	kindClassifier = "classifier"
 	kindUtility    = "utility"
+	kindWarmup     = "warmup"
 
 	verdictAllow   = "allow"
 	verdictBlock   = "block"
@@ -109,6 +110,9 @@ type recordMeta struct {
 }
 
 func metaFor(req *http.Request, kind string) recordMeta {
+	if kind == kindClassifier && isWarmupRequest(req) {
+		kind = kindWarmup
+	}
 	m := recordMeta{kind: kind}
 	if req != nil {
 		m.client = clientFamily(req.UserAgent())
