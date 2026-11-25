@@ -107,6 +107,9 @@ const (
 type recordMeta struct {
 	kind, client                        string
 	queuedAtArrival, inServiceAtArrival int64
+	// broken: the proxy did not return normally, so the response stream ended
+	// early even though a status was already sent.
+	broken bool
 }
 
 func metaFor(req *http.Request, kind string) recordMeta {
