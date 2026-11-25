@@ -128,12 +128,14 @@ func BaseURL(raw string, allowHTTP bool) (string, error) {
 // OutputBudget is the CLAUDE_CODE_MAX_OUTPUT_TOKENS value for a slot, or 0 to
 // leave Claude Code's default. Claude Code assumes 32,000 output tokens for an
 // unknown model and holds back min(budget, 20,000) before compacting, so a small
-// slot compacted at about 7.6k tokens (E-3: 40,960 slot). Large slots are fine.
+// slot compacted at about 7.6k tokens (E-3: 40,960 slot). The 8,192 floor
+// covers the longest small-model reasoning reply seen (5,912, E-2). Large slots
+// are fine.
 func OutputBudget(contextPerSlot int) int {
 	if contextPerSlot < 1 || contextPerSlot >= 100000 {
 		return 0
 	}
-	return max(4096, (contextPerSlot/8)&^255)
+	return max(8192, (contextPerSlot/8)&^255)
 }
 
 // CompactionEstimate estimates where Claude Code auto-compacts, and the window

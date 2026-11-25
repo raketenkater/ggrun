@@ -66,7 +66,7 @@ func TestProfileAndEnvironment(t *testing.T) {
 
 func TestOutputBudget(t *testing.T) {
 	for _, c := range []struct{ ctx, want int }{
-		{-1, 0}, {0, 0}, {2048, 4096}, {40960, 5120}, {77824, 9728}, {99999, 12288}, {100000, 0}, {262144, 0},
+		{-1, 0}, {0, 0}, {2048, 8192}, {40960, 8192}, {65536, 8192}, {77824, 9728}, {99999, 12288}, {100000, 0}, {262144, 0},
 	} {
 		if got := OutputBudget(c.ctx); got != c.want {
 			t.Errorf("OutputBudget(%d) = %d, want %d", c.ctx, got, c.want)
@@ -93,13 +93,13 @@ func TestEnvironmentOutputBudget(t *testing.T) {
 		in   []string
 		want string
 	}{
-		{"small slot", 40960, nil, "5120"},
+		{"small slot", 40960, nil, "8192"},
 		{"large slot absent", 262144, nil, "<absent>"},
 		{"inherited valid kept", 40960, []string{key + "=8000"}, "8000"},
-		{"inherited text", 40960, []string{key + "=abc"}, "5120"},
-		{"inherited zero", 40960, []string{key + "=0"}, "5120"},
-		{"inherited at context", 40960, []string{key + "=40960"}, "5120"},
-		{"inherited above context", 40960, []string{key + "=50000"}, "5120"},
+		{"inherited text", 40960, []string{key + "=abc"}, "8192"},
+		{"inherited zero", 40960, []string{key + "=0"}, "8192"},
+		{"inherited at context", 40960, []string{key + "=40960"}, "8192"},
+		{"inherited above context", 40960, []string{key + "=50000"}, "8192"},
 		{"large slot passthrough", 262144, []string{key + "=9999"}, "9999"},
 	} {
 		if got := get(mk(c.ctx).Environment("http://x", "t", c.in)); got != c.want {
@@ -122,6 +122,7 @@ func TestCompactionEstimate(t *testing.T) {
 		{"77824 70", 77824, 0, "70", 40476, 77824},
 		{"77824 no pct", 77824, 0, "", 44824, 77824},
 		{"40960 out5120", 40960, 5120, "75", 22840, 40960},
+		{"40960 out8192", 40960, 8192, "75", 19768, 40960},
 		{"tiny floors at 0", 10000, 0, "", 0, 10000},
 	} {
 		env := []string{"CLAUDE_CODE_MAX_CONTEXT_TOKENS=" + itoa(c.ctx)}
