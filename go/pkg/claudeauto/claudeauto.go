@@ -926,13 +926,26 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil
 			admission.release()
 		}()
 		metered := &meteredWriter{ResponseWriter: w, start: start, onDecode: admission.markDecode, capture: kind == kindClassifier}
-		proxy.ServeHTTP(metered, req)
-		r.record(route, body, start, queue, metered, meta)
+		r.proxyAndRecord(proxy, metered, req, route, body, start, queue, meta)
 		return
 	}
 	metered := &meteredWriter{ResponseWriter: w, start: start, capture: kind == kindClassifier}
+	r.proxyAndRecord(proxy, metered, req, route, body, start, queue, meta)
+}
+
+// proxyAndRecord proxies one request and always records it. ReverseProxy panics
+// with http.ErrAbortHandler when the body copy fails after the headers went out
+// (client left or backend died mid-stream); the deferred record still runs, is
+// marked broken, and the panic is left to propagate so net/http aborts the
+// connection.
+func (r *Router) proxyAndRecord(proxy *httputil.ReverseProxy, metered *meteredWriter, req *http.Request, route string, body []byte, start time.Time, queue time.Duration, meta recordMeta) {
+	completed := false
+	defer func() {
+		meta.broken = !completed
+		r.record(route, body, start, queue, metered, meta)
+	}()
 	proxy.ServeHTTP(metered, req)
-	r.record(route, body, start, queue, metered, meta)
+	completed = true
 }
 
 // record stores one request's timing. A nil metered writer means the caller gave
@@ -962,7 +975,7 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 		rec.Usage = metered.usage
 		rec.TTFBMS = metered.ttfb.Milliseconds()
 		rec.DecodeStartMS = metered.decodeStart.Milliseconds()
-		rec.Aborted = metered.status == 0 && metered.written == 0
+		rec.Aborted = metered.status == 0 && metered.written == 0 || meta.broken
 	}
 	if rec.Aborted {
 		if metered == nil {
