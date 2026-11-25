@@ -3412,19 +3412,20 @@ func TestClaudeCodeHybridSingleSlotKeepsPlacementBatch(t *testing.T) {
 
 func TestClaudeCodeSamplingArgs(t *testing.T) {
 	base := []string{"-m", "model.gguf"}
-	got := claudeCodeSamplingArgs(base, true, nil)
+	// "full" is the pre-setting behavior, flag for flag.
+	got := claudeCodeSamplingArgs(base, true, nil, "full", true)
 	for _, want := range []string{"--presence-penalty", "--repeat-penalty", "--repeat-last-n", "--top-k", "--top-p", "--min-p"} {
 		if !hasArg(got, want) {
 			t.Fatalf("expected %s in claude-code sampling defaults, got %v", want, got)
 		}
 	}
 	// non-claude-code: untouched
-	if got := claudeCodeSamplingArgs(base, false, nil); len(got) != len(base) {
+	if got := claudeCodeSamplingArgs(base, false, nil, "full", true); len(got) != len(base) {
 		t.Fatalf("expected no sampling flags outside claude-code mode, got %v", got)
 	}
 	// user-set flag wins: not doubled, others still added
 	user := []string{"-m", "model.gguf", "--presence-penalty", "1.5"}
-	got = claudeCodeSamplingArgs(user, true, nil)
+	got = claudeCodeSamplingArgs(user, true, nil, "full", true)
 	n := 0
 	for _, a := range got {
 		if a == "--presence-penalty" {
@@ -3439,7 +3440,7 @@ func TestClaudeCodeSamplingArgs(t *testing.T) {
 func TestClaudeCodeSamplingArgsDeepSeek4(t *testing.T) {
 	base := []string{"-m", "model.gguf"}
 	model := &placement.ModelProfile{ModelArch: "deepseek4"}
-	got := claudeCodeSamplingArgs(base, true, model)
+	got := claudeCodeSamplingArgs(base, true, model, "late", true)
 	for _, want := range []string{"--temp", "--top-k", "--top-p", "--min-p", "--reasoning-budget"} {
 		if !hasArg(got, want) {
 			t.Fatalf("expected %s in deepseek4 claude-code defaults, got %v", want, got)
@@ -3450,7 +3451,7 @@ func TestClaudeCodeSamplingArgsDeepSeek4(t *testing.T) {
 	}
 
 	user := []string{"-m", "model.gguf", "--reasoning-budget", "-1", "--top-k", "10"}
-	got = claudeCodeSamplingArgs(user, true, model)
+	got = claudeCodeSamplingArgs(user, true, model, "late", true)
 	if got[argIndexOf(got, "--reasoning-budget")+1] != "-1" || got[argIndexOf(got, "--top-k")+1] != "10" {
 		t.Fatalf("user deepseek4 sampling overrides should win, got %v", got)
 	}

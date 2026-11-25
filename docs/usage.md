@@ -317,12 +317,18 @@ Two deliberate restrictions:
 ### Sampling defaults
 
 - **Anti-loop sampling.** The Anthropic API has no repetition-penalty fields and the
-  client only sends temperature, so ggrun sets server-side defaults in claude-code
-  mode (`--presence-penalty 1.0 --repeat-penalty 1.05 --repeat-last-n 512
-  --top-k 20 --top-p 0.95 --min-p 0.0`) — quantized thinking models loop
-  endlessly without them. DeepSeek V4 uses its separately validated
-  `top-k 40` / `min-p 0.05` recipe and closes the reasoning budget. Pass any
-  of these flags yourself (after `--`) and your value wins.
+  client only sends temperature, so ggrun sets server-side penalties in claude-code
+  mode — quantized thinking models loop endlessly without them.
+  `--claude-penalties late|full|off` (config `CLAUDE_PENALTIES`, default `late`):
+  `late` sends `--repeat-penalty 1.05 --repeat-last-n 512 --presence-penalty 0` and
+  runs penalties after top-k (`--samplers`), which avoids a per-vocabulary-entry
+  pass on every token (about 2.2 ms/token on a 248k vocabulary); `full` is
+  presence 1.0 + repeat 1.05 in llama.cpp's default order; `off` sends neutral
+  values. Top-k 20 / top-p 0.95 / min-p 0.0 are sent only when the GGUF has no
+  `general.sampling.*` value for them, and ggrun never sends a temperature.
+  DeepSeek V4 uses its separately validated `top-k 40` / `min-p 0.05` recipe and
+  closes the reasoning budget. Pass any of these flags yourself (after `--`) and
+  your value wins.
 
 ### Prompt caching and hybrid models
 

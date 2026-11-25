@@ -58,6 +58,9 @@ type Config struct {
 	SupportExpert string `json:"support_expert"` // off, auto (installed-only), on
 	SupportOnline bool   `json:"support_online"` // official llama.cpp research only
 	SupportModel  string `json:"support_model"`  // optional verified local artifact override
+	// ClaudePenalties is the Claude Code mode repetition-penalty policy: off,
+	// late (penalties after top-k) or full (llama.cpp default order).
+	ClaudePenalties string `json:"claude_penalties"`
 
 	// sources is populated by Load and intentionally not serialized. Keeping
 	// provenance next to the merged value lets `config show` report the source
@@ -73,7 +76,7 @@ var DefaultKeys = []string{
 	"ASSUME_YES", "ALLOW_LIVE_MEMORY_PROBE",
 	"BACKEND", "LLAMA_SERVER", "APP_HOME",
 	"TUNE_ROUNDS", "VISION", "PARALLEL", "HOST", "SPEC",
-	"SUPPORT_EXPERT", "SUPPORT_ONLINE", "SUPPORT_MODEL",
+	"SUPPORT_EXPERT", "SUPPORT_ONLINE", "SUPPORT_MODEL", "CLAUDE_PENALTIES",
 }
 
 // Defaults returns the built-in defaults.
@@ -114,6 +117,7 @@ func Defaults() *Config {
 		SupportExpert:        "auto",
 		SupportOnline:        false,
 		SupportModel:         "",
+		ClaudePenalties:      DefaultClaudePenalties,
 		sources:              defaultSources(),
 	}
 }
@@ -282,7 +286,7 @@ var EnvKeys = []string{
 	"LLM_RAM_BUDGET", "LLM_RAM_LIMIT_PERCENT", "LLM_VRAM_HEADROOM", "LLM_RAM_HEADROOM", "LLM_CGROUP_HEADROOM_MB", "LLM_KV_PLACEMENT", "LLM_KV_QUALITY", "LLM_SWA_FULL", "LLM_ASSUME_YES", "LLM_ALLOW_LIVE_MEMORY_PROBE",
 	"LLM_BACKEND", "LLAMA_SERVER", "LLM_APP_HOME", "LLM_TUNE_ROUNDS",
 	"LLM_VISION", "LLM_PARALLEL", "LLM_HOST", "LLM_SPEC",
-	"LLM_SUPPORT_EXPERT", "LLM_SUPPORT_ONLINE", "LLM_SUPPORT_MODEL",
+	"LLM_SUPPORT_EXPERT", "LLM_SUPPORT_ONLINE", "LLM_SUPPORT_MODEL", "LLM_CLAUDE_PENALTIES",
 }
 
 // GGRUNAlias is the GGRUN_ spelling of an EnvKeys name.
@@ -466,6 +470,12 @@ func setConfigValue(cfg *Config, key, raw, source string) error {
 		cfg.SupportOnline = parseBool(val)
 	case "SUPPORT_MODEL":
 		cfg.SupportModel = val
+	case "CLAUDE_PENALTIES":
+		mode, err := NormalizeClaudePenalties(val)
+		if err != nil {
+			return err
+		}
+		cfg.ClaudePenalties = mode
 	default:
 		return nil
 	}
@@ -553,6 +563,28 @@ func NormalizeSupportExpert(value string) (string, error) {
 	}
 }
 
+// DefaultClaudePenalties is the built-in Claude Code mode penalty policy. It is
+// the single place to change the default: "late" applies the repetition
+// penalty to the top-k candidates only (about 2.2 ms/token cheaper on a 248k
+// vocabulary than the full-vocabulary pass), "full" is the llama.cpp default
+// order with presence 1.0, and "off" sends neutral penalty values.
+const DefaultClaudePenalties = "late"
+
+// NormalizeClaudePenalties validates a Claude Code penalty policy. Empty means
+// the built-in default.
+func NormalizeClaudePenalties(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "" {
+		mode = DefaultClaudePenalties
+	}
+	switch mode {
+	case "off", "late", "full":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("must be off, late, or full")
+	}
+}
+
 // Save writes the config to the canonical config file.
 func (c *Config) Save() error {
 	if _, err := ParsePort(strconv.Itoa(c.Port)); err != nil {
@@ -597,6 +629,11 @@ func (c *Config) Save() error {
 		return fmt.Errorf("SUPPORT_EXPERT: %w", err)
 	}
 	c.SupportExpert = supportMode
+	penalties, err := NormalizeClaudePenalties(c.ClaudePenalties)
+	if err != nil {
+		return fmt.Errorf("CLAUDE_PENALTIES: %w", err)
+	}
+	c.ClaudePenalties = penalties
 	var b strings.Builder
 	fmt.Fprintf(&b, "# ggrun configuration\n")
 	fmt.Fprintf(&b, "# Precedence: CLI flag > env var > this file > built-in default\n")
@@ -629,6 +666,7 @@ func (c *Config) Save() error {
 	fmt.Fprintf(&b, "LLM_SUPPORT_EXPERT=%q\n", c.SupportExpert)
 	fmt.Fprintf(&b, "LLM_SUPPORT_ONLINE=%v\n", c.SupportOnline)
 	fmt.Fprintf(&b, "LLM_SUPPORT_MODEL=%q\n", c.SupportModel)
+	fmt.Fprintf(&b, "LLM_CLAUDE_PENALTIES=%q\n", c.ClaudePenalties)
 	return writeConfigFile(Path(), []byte(b.String()))
 }
 
@@ -735,6 +773,8 @@ func (c *Config) Show() string {
 			val = strconv.FormatBool(c.SupportOnline)
 		case "SUPPORT_MODEL":
 			val = c.SupportModel
+		case "CLAUDE_PENALTIES":
+			val = c.ClaudePenalties
 		}
 		if val == "" {
 			val = "(empty)"

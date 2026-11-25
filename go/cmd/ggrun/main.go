@@ -244,6 +244,11 @@ Launch flags:
                        Qwen3.5-2B review-only lane; nanbeige the Nanbeige4.2
                        big-MoE worker; off seats no reviewer and the main model
                        self-reviews
+  --claude-penalties str  Claude Code repetition penalties (requires --claude-code):
+                       off|late|full (default late; config CLAUDE_PENALTIES). late
+                       applies them to the top-k candidates only (cheaper per
+                       token); full is llama.cpp's full-vocabulary order; off
+                       sends neutral values
   --chat-template str   Force a corrected chat template from the data-driven catalog
                        by entry name (e.g. nanbeige4.2-3b, qwen3.8-27b) for models whose
                        embedded template llama.cpp's minja engine cannot parse; a value
@@ -616,7 +621,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
+			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--claude-penalties", "--inventory":
 				skip = true
 			}
 			continue
@@ -752,6 +757,12 @@ type launchRequest struct {
 	// small/light Qwen3.5-2B review-only profile, and "nanbeige" forces the
 	// Nanbeige4.2 big-MoE worker. Empty means auto. Set via --claude-reviewer.
 	ClaudeReviewerOverride string
+	// ClaudePenalties is the Claude Code penalty policy (off|late|full) from
+	// the config key CLAUDE_PENALTIES or --claude-penalties. Empty means the
+	// built-in default. ClaudePenaltiesSet records an explicit flag so it can
+	// be refused outside --claude-code.
+	ClaudePenalties    string
+	ClaudePenaltiesSet bool
 	// ClaudeReviewerDisabled routes Auto reviews through the main model
 	// (self-review) instead of seating a separate reviewer. It is set either
 	// after the user accepts the resident fallback at launch, or up front by
@@ -886,6 +897,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		OriginalArgs:         originalArgs,
 		SupportExpert:        cfg.SupportExpert,
 		SupportOnline:        cfg.SupportOnline,
+		ClaudePenalties:      cfg.ClaudePenalties,
 	}
 	if cfg.SWAFull {
 		req.ExtraArgs = append(req.ExtraArgs, "--swa-full")
@@ -919,6 +931,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 					return nil, fmt.Errorf("%s: %w", key, err)
 				}
 				req.SupportExpert = mode
+				continue
+			case "--claude-penalties":
+				mode, err := config.NormalizeClaudePenalties(val)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", key, err)
+				}
+				req.ClaudePenalties, req.ClaudePenaltiesSet = mode, true
 				continue
 			case "--support-online":
 				req.SupportOnline = val == "" || parseBoolFlag(val)
@@ -1150,6 +1169,17 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, fmt.Errorf("%s: %w", a, err)
 			}
 			req.SupportExpert = mode
+			continue
+		case "--claude-penalties":
+			v, err := next()
+			if err != nil {
+				return nil, err
+			}
+			mode, err := config.NormalizeClaudePenalties(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", a, err)
+			}
+			req.ClaudePenalties, req.ClaudePenaltiesSet = mode, true
 			continue
 		case "--benchmark":
 			req.Benchmark = true
@@ -1475,6 +1505,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	}
 	if req.ClaudeProfile != "" && !req.ClaudeCode {
 		return nil, fmt.Errorf("--claude-profile requires --claude-code")
+	}
+	if req.ClaudePenaltiesSet && !req.ClaudeCode {
+		return nil, fmt.Errorf("--claude-penalties requires --claude-code")
 	}
 	// Every --claude-reviewer value is gated the same way. "auto" was once
 	// exempt because it merely restated the default, but it is a real choice
@@ -3100,7 +3133,7 @@ func requestSamplingProfile(req *launchRequest, model *placement.ModelProfile) s
 	if req.UBatchSizeSet {
 		values = append(values, fmt.Sprintf("ubatch-size=%d", req.UBatchSize))
 	}
-	values = claudeCodeSamplingArgs(values, req.ClaudeCode, model)
+	values = claudeCodeSamplingArgs(values, req.ClaudeCode, model, effectiveClaudePenalties(req), true)
 	if len(values) == 0 && !req.ClaudeCode {
 		return "default"
 	}
@@ -3269,7 +3302,9 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = append(serverArgs, catalogTemplateArgs(req, cfg, model)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
-	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
+	var samplingSummary string
+	serverArgs, samplingSummary = claudeCodeSampling(serverArgs, req.ClaudeCode, model, effectiveClaudePenalties(req), claudeSamplersSupported(be))
+	announceClaudeSampling(samplingSummary)
 	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, claudeCodeShiftableContext(model, strategy))
 	serverArgs = claudeCodeProgressServerArgs(serverArgs, req.ClaudeCode, be.Help)
 	serverArgs = backendVerbosityArgs(serverArgs, be.Help, be.IsIK)
@@ -8848,56 +8883,6 @@ func patchPlacementArgs(args []string, s *placement.Strategy) []string {
 		set("-b", strconv.Itoa(s.BatchSize))
 	}
 	return out
-}
-
-// claudeCodeSamplingArgs appends anti-loop sampling defaults in Claude Code mode.
-// The Anthropic /v1/messages conversion only forwards temperature/top_p/top_k from
-// the client (server-chat.cpp), and the Anthropic API has no penalty fields at all —
-// so repetition control MUST come from server-side defaults, and ik_llama ships with
-// every penalty disabled (repeat 1.0, presence 0.0). Quantized thinking models
-// (Qwen3.x model card explicitly warns) fall into endless repetition without them:
-// the user-visible symptom is repeated phrases and the model re-issuing the same
-// tool call, since the tool-call grammar shapes degenerate output into valid JSON.
-// Values: presence-penalty 1.0 (Qwen recommends up to 2 against repetition; 1.0 is
-// mild enough for code), repeat-penalty 1.05 over the last 512 tokens (targets tight
-// local loops, small enough to leave code idioms alone), top-k 20 / top-p 0.95 /
-// min-p 0 (Qwen thinking-mode recommendation; also softens the client's greedy
-// temperature-0 classifier calls, where penalties still apply to the argmax).
-// Any flag the user already passed (ExtraArgs) wins — we skip it here.
-func claudeCodeSamplingArgs(args []string, claudeCode bool, model *placement.ModelProfile) []string {
-	if !claudeCode {
-		return args
-	}
-	defaults := [][2]string{
-		{"--presence-penalty", "1.0"},
-		{"--repeat-penalty", "1.05"},
-		{"--repeat-last-n", "512"},
-		{"--top-k", "20"},
-		{"--top-p", "0.95"},
-		{"--min-p", "0.0"},
-	}
-	if model != nil && strings.EqualFold(model.ModelArch, "deepseek4") {
-		// V4 template starts assistant turns inside <think>. The validated
-		// server recipe closes that immediately; leaving the budget unlimited
-		// made Claude Code requests wander in malformed thinking output and the
-		// Anthropic parser returned 500s before any useful tool call/content.
-		defaults = [][2]string{
-			{"--presence-penalty", "1.0"},
-			{"--repeat-penalty", "1.05"},
-			{"--repeat-last-n", "512"},
-			{"--temp", "0.7"},
-			{"--top-k", "40"},
-			{"--top-p", "0.95"},
-			{"--min-p", "0.05"},
-			{"--reasoning-budget", "0"},
-		}
-	}
-	for _, d := range defaults {
-		if !hasArg(args, d[0]) {
-			args = append(args, d[0], d[1])
-		}
-	}
-	return args
 }
 
 // claudeCodeAliasArgs appends `--alias local` so the backend's /v1/models advertises
