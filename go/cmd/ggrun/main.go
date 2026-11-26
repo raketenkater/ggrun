@@ -232,6 +232,8 @@ Launch flags:
                        Set LLM_ALLOW_LIVE_MEMORY_PROBE=true to remember approval
   --vision, -vision    Enable vision (auto-detect mmproj)
   --claude-code        Serve locally and launch Claude Code with workflows/research
+  --install-claude     With --claude-code, install Claude Code with the official installer if missing, without asking
+                       (otherwise ggrun asks on a terminal; GGRUN_INSTALL_CLAUDE=1 also opts in)
   --headless           With --claude-code, serve laptop clients without launching Claude here
   --gateway-host str   Remote gateway listener (default 127.0.0.1; transport independent)
   --gateway-port int   Remote gateway port (default 8080)
@@ -745,6 +747,7 @@ type launchRequest struct {
 	Benchmark          bool
 	WorkerBenchmark    bool // task-specific support/reviewer quality plus throughput
 	ClaudeCode         bool
+	InstallClaude      bool // --install-claude: install Claude Code without asking
 	RemoteClaude       remoteClaudeOptions
 	// ClaudeReviewerOverride selects the local reviewer/worker model when
 	// Claude Code mode starts its Auto companion: "auto" (and the historical
@@ -912,6 +915,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			switch key {
 			case "--allow-live-memory-probe":
 				req.AllowLiveMemoryProbe = val == "" || parseBoolFlag(val)
+				continue
+			case "--install-claude":
+				req.InstallClaude = val == "" || parseBoolFlag(val)
 				continue
 			case "--support-expert":
 				mode, err := config.NormalizeSupportExpert(val)
@@ -1250,6 +1256,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.VisionAuto = true
 		case "--claude-code":
 			req.ClaudeCode = true
+		case "--install-claude":
+			req.InstallClaude = true
 		case "--claude-reviewer":
 			v, err := next()
 			if err != nil {
@@ -7022,6 +7030,10 @@ func cmdLaunch(args []string) {
 		os.Exit(2)
 	}
 	defer remoteService.close()
+	if err := ensureClaudeBeforeLaunch(req); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 
 	model, err := parseModel(req.ModelPath)
