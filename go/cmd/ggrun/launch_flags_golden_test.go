@@ -59,6 +59,7 @@ var goldenLaunchFlags = []struct {
 	{"--vision", false},
 	{"-vision", false},
 	{"--claude-code", false},
+	{"--install-claude", false},
 	{"--claude-reviewer", true},
 	{"--chat-template", true},
 	{"--claude-resume", true},

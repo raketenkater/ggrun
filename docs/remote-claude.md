@@ -117,6 +117,14 @@ Desktop, Remote Control, cloud sessions and supervisor-hosted background agents
 need separate validation. Exact `/v1/messages/count_tokens` is not currently
 advertised; the gateway returns a recognizable unsupported response.
 
+## Log privacy
+
+`--headless` refuses a backend log verbosity of 5 or more (`-lv`, `--log-verbosity`,
+`--verbosity`, `-v`, or `LLAMA_ARG_LOG_VERBOSITY`), because the backend then logs
+full request bodies. ggrun writes its backend, reviewer and request logs
+(`ggrun-claude-*` in the log directory) with mode 0600 on Linux and macOS, and
+keeps the newest 20 of each kind.
+
 ## Compatibility contract
 
 [`clientkit/contract.schema.json`](../clientkit/contract.schema.json) and its

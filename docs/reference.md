@@ -43,6 +43,7 @@ Flags ggrun does not know are passed to the backend.
 | `--gpus` | yes |
 | `--headless` | no (switch) |
 | `--host` | yes |
+| `--install-claude` | no (switch) |
 | `--inventory` | yes |
 | `--keep-alive` | no (switch) |
 | `--kv` | yes |
@@ -155,6 +156,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_CTX_SIZE`
 - `GGRUN_HEALTH_TIMEOUT`
 - `GGRUN_HOST`
+- `GGRUN_INSTALL_CLAUDE`
 - `GGRUN_KEEP_ALIVE`
 - `GGRUN_KV_PLACEMENT`
 - `GGRUN_KV_QUALITY`

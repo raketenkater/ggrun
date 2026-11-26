@@ -268,6 +268,66 @@ install_ggrun_from_source
                 self.assertEqual("--user" in recorded, not venv)
                 self.assertIn("-m pip install", recorded)
 
+    def test_app_python_install_reuses_replaces_and_keeps_path_clean(self):
+        setup = (ROOT / "scripts/setup-home.sh").read_text()
+        self.assertIn("LLM_INSTALL_APP_PYTHON=1", setup)
+        self.assertNotIn(".ggrun-python", setup)  # the binary finds the venv itself
+        installer = (ROOT / "install.sh").read_text()
+        self.assertRegex(installer, r"elif app_python_ready; then\n\s+ok ")
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "app home" / ".bin"
+            prefix.mkdir(parents=True)
+            fixture = Path(tmp) / "fixture-python"
+            fixture.write_text("""#!/usr/bin/env bash
+if [[ "$1 $2" == '-m pip' ]]; then
+    [[ -z "${PIP_TARGET+x}" && "$PIP_CONFIG_FILE" == /dev/null ]] || exit 2
+    printf '%s\n' "$*" >> "$CALLS"
+    [[ "$PIP_FAIL" != 1 ]] || exit 1
+    touch "${0%/*}/installed"
+else
+    [[ -f "${0%/*}/installed" ]]
+fi
+""")
+            fixture.chmod(0o755)
+            script = function("install.sh", "app_python_ready")
+            script += "\n" + function("install.sh", "install_app_python_download_deps")
+            script += """
+warn() { printf '%s\n' "$*"; }
+python3() {
+    if [[ "$1 $2" == '-m venv' ]]; then
+        mkdir -p "$3/bin"
+        cp "$FIXTURE_PYTHON" "$3/bin/python3"
+    else
+        command python3 "$@"
+    fi
+}
+install_app_python_download_deps
+"""
+            calls = Path(tmp) / "calls"
+            env = dict(os.environ, INSTALL_DIR=str(prefix), FIXTURE_PYTHON=str(fixture),
+                       CALLS=str(calls), PIP_TARGET=str(Path(tmp) / "unwanted"), PIP_FAIL="0")
+
+            def run(**extra):
+                return subprocess.run(["bash", "-eu", "-c", script], env={**env, **extra},
+                                      capture_output=True, text=True, timeout=5)
+
+            current = prefix / ".ggrun-python"
+            for _ in range(2):  # the second run reuses the healthy venv
+                self.assertEqual(run().returncode, 0)
+            self.assertEqual(calls.read_text().splitlines(),
+                             ["-m pip --require-virtualenv install --quiet huggingface_hub tqdm"])
+            self.assertTrue(current.is_symlink())
+            first = current.readlink()
+            (current / "bin/installed").unlink()  # unhealthy: rebuilt, old one removed
+            self.assertEqual(run().returncode, 0)
+            second = current.readlink()
+            self.assertNotEqual(first, second)
+            self.assertFalse((prefix / first).exists())
+            (current / "bin/installed").unlink()  # unhealthy and pip fails: keep the link
+            self.assertNotEqual(run(PIP_FAIL="1").returncode, 0)
+            self.assertEqual(current.readlink(), second)
+            self.assertEqual(len(list(prefix.glob(".ggrun-python.*"))), 1)
+
     def test_gpu_images_ship_the_fit_oracle_next_to_the_server(self):
         # Launch looks for llama-fit-params beside llama-server. Without it a
         # GPU launch needs a contained live load, which a non-interactive

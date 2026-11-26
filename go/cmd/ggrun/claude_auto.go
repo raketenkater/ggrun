@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -862,10 +863,14 @@ func claudeReviewerLog(cfg *config.Config, port int) (io.Writer, io.Closer) {
 		dir = cfg.LogDir
 	}
 	path := filepath.Join(dir, fmt.Sprintf("ggrun-claude-reviewer-%d.log", port))
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return io.Discard, nil
 	}
+	if runtime.GOOS != "windows" {
+		_ = f.Chmod(0o600) // a file an older ggrun created world-readable
+	}
+	rotateGgrunLogs(dir, logRetainPerKind)
 	fmt.Printf("[claude-code] Auto reviewer logs -> %s\n", path)
 	return f, f
 }
@@ -936,6 +941,7 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 	// Recording is evidence, not a dependency: a metrics failure must not stop
 	// the user's launch.
 	metricsPath := claudeRouterMetricsPath(cfg, router.Port())
+	rotateGgrunLogs(filepath.Dir(metricsPath), logRetainPerKind)
 	if err := router.EnableMetrics(metricsPath); err != nil {
 		fmt.Fprintf(os.Stderr, "[claude-code] per-request metrics disabled: %v\n", err)
 	} else {

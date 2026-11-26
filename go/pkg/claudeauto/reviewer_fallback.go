@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -79,6 +81,68 @@ func stopStrippedReviewerVerdict(text string) bool {
 	return text == "<block>no" || text == "<block>yes"
 }
 
+// Claude Code's Auto-mode classifier has a second answer format, "severity",
+// used when its feature flags fall back to defaults (telemetry and nonessential
+// traffic disabled). Stage 1 then ends with "Respond with <severity>N</severity>
+// ONLY", sends "</severity>" as the stop sequence and max_tokens 64; stage 2
+// sends no stop sequence and answers <severity>N</severity> optionally followed
+// by <category>Rule Name</category>. N is an integer 0-100 where 50 is exactly
+// the allow/block boundary: below 50 allows, above 50 blocks.
+var (
+	severityTagRE      = regexp.MustCompile(`<severity>([0-9]{1,3})</severity>`)
+	severityStrippedRE = regexp.MustCompile(`^<severity>([0-9]{1,3})$`)
+)
+
+// severityVariantRequest reports whether a classifier request asks for the
+// severity answer format, by its stop sequence or its answer instructions.
+func severityVariantRequest(body []byte) bool {
+	var req struct {
+		Stop []string `json:"stop_sequences"`
+	}
+	if json.Unmarshal(body, &req) == nil {
+		for _, s := range req.Stop {
+			if s == "</severity>" {
+				return true
+			}
+		}
+	}
+	return bytes.Contains(body, []byte("<severity>N</severity>")) ||
+		bytes.Contains(body, []byte(`\u003cseverity\u003eN\u003c/severity\u003e`))
+}
+
+// severityScore extracts N from one complete severity tag or a stop-stripped
+// "<severity>N". ok is false for anything else, including two tags, prose-mixed
+// partial tags and values above 100.
+func severityScore(text string) (n int, ok bool) {
+	text = strings.TrimSpace(text)
+	m := severityStrippedRE.FindStringSubmatch(text)
+	if m == nil {
+		all := severityTagRE.FindAllStringSubmatch(text, -1)
+		if len(all) != 1 || strings.Count(text, "<severity>") != 1 {
+			return 0, false
+		}
+		m = all[0]
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n > 100 {
+		return 0, false
+	}
+	return n, true
+}
+
+// validReviewerVerdictFor accepts a block-format verdict always, and a
+// severity-format verdict only for a request that asked for that format.
+func validReviewerVerdictFor(text string, severity bool) bool {
+	if validReviewerVerdict(text) {
+		return true
+	}
+	if !severity {
+		return false
+	}
+	_, ok := severityScore(text)
+	return ok
+}
+
 func reviewerJSONText(body []byte) string {
 	var decoded struct {
 		Content []struct {
@@ -142,15 +206,15 @@ func reviewerSSEText(body []byte) string {
 	return strings.Join(texts, "")
 }
 
-func reviewerResponseUsable(status int, header http.Header, body []byte) bool {
+func reviewerResponseUsable(status int, header http.Header, body []byte, severity bool) bool {
 	if status < 200 || status >= 300 || len(bytes.TrimSpace(body)) == 0 {
 		return false
 	}
 	contentType := strings.ToLower(header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") || bytes.HasPrefix(bytes.TrimSpace(body), []byte("event:")) || bytes.HasPrefix(bytes.TrimSpace(body), []byte("data:")) {
-		return validReviewerVerdict(reviewerSSEText(body))
+		return validReviewerVerdictFor(reviewerSSEText(body), severity)
 	}
-	return validReviewerVerdict(reviewerJSONText(body))
+	return validReviewerVerdictFor(reviewerJSONText(body), severity)
 }
 
 func reviewerResponseText(header http.Header, body []byte) string {
@@ -229,7 +293,7 @@ func (r *Router) tryReviewer(w http.ResponseWriter, req *http.Request, proxy *ht
 	metered := &meteredWriter{ResponseWriter: deferred, start: start, capture: true}
 	meta := metaFor(req, kindClassifier)
 	proxy.ServeHTTP(metered, req)
-	if attempt.failed || !reviewerResponseUsable(deferred.status, deferred.hdr, deferred.buf.Bytes()) {
+	if attempt.failed || !reviewerResponseUsable(deferred.status, deferred.hdr, deferred.buf.Bytes(), severityVariantRequest(body)) {
 		// Record the rejected attempt so the metrics log distinguishes "the
 		// reviewer answered but its verdict did not parse" from "the reviewer
 		// never saw the request" — otherwise a template or format mismatch
@@ -250,7 +314,8 @@ func (r *Router) tryReviewer(w http.ResponseWriter, req *http.Request, proxy *ht
 	}
 	deferred.flush()
 	route := routeReviewer
-	if stopStrippedReviewerVerdict(reviewerResponseText(deferred.hdr, deferred.buf.Bytes())) {
+	answer := reviewerResponseText(deferred.hdr, deferred.buf.Bytes())
+	if stopStrippedReviewerVerdict(answer) || severityStrippedRE.MatchString(strings.TrimSpace(answer)) {
 		route = routeReviewerStopStripped
 	}
 	r.record(route, body, start, 0, metered, meta)

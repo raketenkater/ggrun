@@ -3,6 +3,7 @@ package clientkit
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -62,3 +63,86 @@ func TestProfileAndEnvironment(t *testing.T) {
 		t.Fatal("accepted compaction beyond the actual context")
 	}
 }
+
+func TestOutputBudget(t *testing.T) {
+	for _, c := range []struct{ ctx, want int }{
+		{-1, 0}, {0, 0}, {2048, 8192}, {40960, 8192}, {65536, 8192}, {77824, 9728}, {99999, 12288}, {100000, 0}, {262144, 0},
+	} {
+		if got := OutputBudget(c.ctx); got != c.want {
+			t.Errorf("OutputBudget(%d) = %d, want %d", c.ctx, got, c.want)
+		}
+	}
+}
+
+func TestEnvironmentOutputBudget(t *testing.T) {
+	const key = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+	mk := func(ctx int) Profile {
+		return Profile{MainAlias: "local", UtilityAlias: "local-fast", ContextPerSlot: ctx, Slots: 1, Policy: Policy{Version: 1, CompactWindow: ctx, CompactPercent: 75, Effort: "xhigh", TimeoutMS: 1000}}
+	}
+	get := func(env []string) string {
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, key+"="); ok {
+				return v
+			}
+		}
+		return "<absent>"
+	}
+	for _, c := range []struct {
+		name string
+		ctx  int
+		in   []string
+		want string
+	}{
+		{"small slot", 40960, nil, "8192"},
+		{"large slot absent", 262144, nil, "<absent>"},
+		{"inherited valid kept", 40960, []string{key + "=8000"}, "8000"},
+		{"inherited text", 40960, []string{key + "=abc"}, "8192"},
+		{"inherited zero", 40960, []string{key + "=0"}, "8192"},
+		{"inherited at context", 40960, []string{key + "=40960"}, "8192"},
+		{"inherited above context", 40960, []string{key + "=50000"}, "8192"},
+		{"large slot passthrough", 262144, []string{key + "=9999"}, "9999"},
+	} {
+		if got := get(mk(c.ctx).Environment("http://x", "t", c.in)); got != c.want {
+			t.Errorf("%s: %s = %s, want %s", c.name, key, got, c.want)
+		}
+	}
+}
+
+func TestCompactionEstimate(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		ctx, out      int
+		pct           string
+		wantAt, wantW int
+	}{
+		{"40960 default", 40960, 0, "75", 7960, 40960},
+		{"40960 out4096", 40960, 4096, "75", 23864, 40960},
+		{"77824 default", 77824, 0, "75", 43368, 77824},
+		{"77824 out4096", 77824, 4096, "75", 55296, 77824},
+		{"77824 70", 77824, 0, "70", 40476, 77824},
+		{"77824 no pct", 77824, 0, "", 44824, 77824},
+		{"40960 out5120", 40960, 5120, "75", 22840, 40960},
+		{"40960 out8192", 40960, 8192, "75", 19768, 40960},
+		{"tiny floors at 0", 10000, 0, "", 0, 10000},
+	} {
+		env := []string{"CLAUDE_CODE_MAX_CONTEXT_TOKENS=" + itoa(c.ctx)}
+		if c.out > 0 {
+			env = append(env, "CLAUDE_CODE_MAX_OUTPUT_TOKENS="+itoa(c.out))
+		}
+		if c.pct != "" {
+			env = append(env, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="+c.pct)
+		}
+		if at, w := CompactionEstimate(env); at != c.wantAt || w != c.wantW {
+			t.Errorf("%s: got (%d, %d), want (%d, %d)", c.name, at, w, c.wantAt, c.wantW)
+		}
+	}
+	if at, w := CompactionEstimate([]string{"PATH=/bin"}); at != 0 || w != 0 {
+		t.Errorf("no window: got (%d, %d)", at, w)
+	}
+	// The compaction window overrides the context variable.
+	if _, w := CompactionEstimate([]string{"CLAUDE_CODE_MAX_CONTEXT_TOKENS=100000", "CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000"}); w != 50000 {
+		t.Errorf("window = %d, want 50000", w)
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
