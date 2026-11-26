@@ -245,7 +245,8 @@ Launch flags:
                        run the Qwen3.5-4B worker+reviewer; qwen2b the light
                        Qwen3.5-2B review-only lane; nanbeige the Nanbeige4.2
                        big-MoE worker; off seats no reviewer and the main model
-                       self-reviews
+                       self-reviews. A yes to the launch-time self-review question
+                       is saved per model and hardware; any value here replaces it
   --claude-penalties str  Claude Code repetition penalties (requires --claude-code):
                        off|late|full (default off; config CLAUDE_PENALTIES). off
                        sends neutral values; late applies repeat 1.05 to the
@@ -775,6 +776,13 @@ type launchRequest struct {
 	ClaudeResume           string   // session id or "latest": reopen a recorded Claude session
 	ClaudeResumeForce      bool     // accept a resume whose backend shape no longer matches
 	OriginalArgs           []string // launch argv as given, so a resume can reproduce it exactly
+
+	// claudeSelfClassifyApproved marks an interactive yes to a self-classify
+	// question this launch; claudeSelfClassifyRemembered marks that the answer
+	// came from, or is now in, the per-scope choice store.
+	claudeSelfClassifyApproved   bool
+	claudeSelfClassifyRemembered bool
+
 	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
 	// the start boundary last started, when the oracle priced exactly it.
 	admittedOracleTotals map[int]int
@@ -3882,9 +3890,7 @@ func tryResidentWithoutClaudeReviewer(
 	if req == nil || !req.ClaudeCode || !req.NoMMap || req.ClaudeReviewerDisabled || req.ReviewerReservation == nil || compute == nil {
 		return nil, originalErr
 	}
-	candidateReq := *req
-	candidateReq.ReviewerReservation = nil
-	candidateReq.ClaudeReviewerDisabled = true
+	candidateReq := reviewerFreeCandidate(req)
 	candidate, err := compute(&candidateReq)
 	if err != nil || candidate == nil || candidate.MMapRequired {
 		return nil, originalErr
@@ -3895,10 +3901,34 @@ func tryResidentWithoutClaudeReviewer(
 		}
 		return nil, originalErr
 	}
-	req.ReviewerReservation = nil
-	req.ClaudeReviewerDisabled = true
+	adoptReviewerFreeCandidate(req, &candidateReq)
+	req.claudeSelfClassifyApproved = interactive
 	fmt.Fprintln(output, "[launch] separate Auto reviewer disabled; Auto reviews will use the main model")
 	return candidate, nil
+}
+
+// reviewerFreeCandidate is req without the separate Auto reviewer. The reviewer
+// reservation is part of the verified-config scope, so the candidate re-derives
+// its key instead of inheriting the with-reviewer key memoized by the first
+// plan: its lookup and, once adopted, its save then use the key a relaunch
+// without the reviewer computes, and a reviewer-free plan is never filed under
+// a key a reviewer launch would replay.
+func reviewerFreeCandidate(req *launchRequest) launchRequest {
+	candidate := *req
+	candidate.ReviewerReservation = nil
+	candidate.ClaudeReviewerDisabled = true
+	candidate.verifiedScopeKey = ""
+	candidate.verifiedScopeShape = ""
+	return candidate
+}
+
+// adoptReviewerFreeCandidate commits the reviewer drop to req, with the
+// verified-config key the candidate plan was looked up under.
+func adoptReviewerFreeCandidate(req, candidate *launchRequest) {
+	req.ReviewerReservation = nil
+	req.ClaudeReviewerDisabled = true
+	req.verifiedScopeKey = candidate.verifiedScopeKey
+	req.verifiedScopeShape = candidate.verifiedScopeShape
 }
 
 // proactivelyDropReviewerForVRAMModel is the proactive counterpart to
@@ -3944,9 +3974,7 @@ func proactivelyDropReviewerForVRAMModel(
 	if strategy.Type != placement.SingleGPU && strategy.Type != placement.MultiGPUDense {
 		return strategy
 	}
-	candidateReq := *req
-	candidateReq.ReviewerReservation = nil
-	candidateReq.ClaudeReviewerDisabled = true
+	candidateReq := reviewerFreeCandidate(req)
 	candidate, err := compute(&candidateReq)
 	if err != nil || candidate == nil || candidate.MMapRequired {
 		return strategy
@@ -3973,8 +4001,9 @@ func proactivelyDropReviewerForVRAMModel(
 	if err := confirmProactiveSelfReview(input, output, interactive); err != nil {
 		return strategy
 	}
-	req.ReviewerReservation = nil
-	req.ClaudeReviewerDisabled = true
+	adoptReviewerFreeCandidate(req, &candidateReq)
+	// Only an interactive yes is remembered; the env opt-in applies per launch.
+	req.claudeSelfClassifyApproved = interactive
 	fmt.Fprintf(output, "[launch] no VRAM room for a separate Auto reviewer next to the main model; Auto reviews will use the main model (self-review)\n")
 	return candidate
 }
@@ -7120,7 +7149,10 @@ func cmdLaunch(args []string) {
 	// the same ledger before the main model's split is computed, and the planner
 	// returns the GPU the reviewer should occupy. The reservation lives on the
 	// request so every placement.Compute path — first plan and every re-plan —
-	// keeps the reviewer's VRAM accounted.
+	// keeps the reviewer's VRAM accounted. A self-classify answer the user
+	// already gave for this scope applies first, so no reviewer is seated.
+	forgetClaudeSelfClassifyForExplicitReviewer(req, cfg.CacheDir, model, caps, os.Stderr)
+	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
 	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
 	// A dense model that cannot fit on GPU even at reduced context should not be
 	// silently spilled into system RAM. Ask the user; assumeYes / non-terminal
@@ -7187,6 +7219,7 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
+	rememberClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
 	strategy, err = containHostMemory(req, caps, strategy, computeStrategy, validateHostMemoryContainmentWaiting)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -8403,6 +8436,7 @@ func cmdDryRun(args []string) {
 	// Match cmdLaunch exactly: Claude Auto's helper consumes VRAM before the
 	// main model is packed. Without this reservation a dry-run can claim one
 	// additional expert layer fits and disagree with the real launch.
+	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
 	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
 
 	placementOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
