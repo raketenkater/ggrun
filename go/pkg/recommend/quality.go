@@ -83,7 +83,9 @@ func lossAt(bpw float64) float64 {
 }
 
 // minLoss is the loss no model size removes: a 1-bit file of a huge model is
-// still heavily degraded.
+// still heavily degraded. The imatrix factor applies after it on purpose: an
+// imatrix file of a huge model keeps 0.8x of the floor, so a plain and an
+// imatrix file of the same width stay ordered at every size.
 func minLoss(bpw float64) float64 {
 	switch {
 	case bpw < 2.0:
@@ -116,7 +118,9 @@ func sizeScale(c Candidate) float64 {
 }
 
 // estimatedRetention is the retention factor for one file; ok is false when
-// the file's width is unknown.
+// the file's width is unknown. The curve does not know a model trained at low
+// precision (native MXFP4 or NVFP4 weights): such a file is the reference, yet
+// it gets the retention of its width. That errs low, the conservative side.
 func estimatedRetention(c Candidate, p QuantProfile) (float64, bool) {
 	if p.BPW <= 0 {
 		return 0, false

@@ -91,6 +91,9 @@ def main():
                       for row in rows]
         if not rows:
             raise RuntimeError(f"no {a.category} recommendation for this hardware")
+        # This walks the category's rows; the installer downloads
+        # categories.first_pick instead, which also skips files under 3 bits
+        # per weight without an importance matrix.
         chosen = None
         for row in rows:
             sizes = [q["size_bytes"] for q in row.get("quants", []) if q.get("size_bytes")]

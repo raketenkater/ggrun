@@ -268,3 +268,35 @@ func TestPrefillEstimateMatchesTheFittedObservations(t *testing.T) {
 		t.Fatalf("turn %.2f, want 25", got)
 	}
 }
+
+func TestUnservableRowDoesNotSetTheQualityBar(t *testing.T) {
+	rows := []Recommendation{
+		{Candidate: Candidate{Repo: "giant"}, EstimatedQuality: 90, BackendStatus: BackendUnsupported},
+		{Candidate: Candidate{Repo: "served"}, EstimatedQuality: 50},
+		{Candidate: Candidate{Repo: "small"}, EstimatedQuality: 30},
+	}
+	markQualityEligible(rows)
+	if !rows[1].QualityEligible || !rows[2].QualityEligible || !rows[0].QualityEligible {
+		t.Fatalf("eligible: %v %v %v", rows[0].QualityEligible, rows[1].QualityEligible, rows[2].QualityEligible)
+	}
+}
+
+// The within-model "low-bit fallback" test reads the measured width when it
+// has one: a dynamic 2.7-bpw file is not demoted, a plain one is, and a file
+// without a width keeps the name rule.
+func TestLowBitRowUsesTheMeasuredWidth(t *testing.T) {
+	for name, c := range map[string]struct {
+		r    Recommendation
+		want bool
+	}{
+		"dynamic q2":    {Recommendation{QuantName: "UD-Q2_K_XL", QuantProfile: QuantProfile{BPW: 2.7, Source: QuantSourceSize, Imatrix: ImatrixDynamic}}, false},
+		"plain q2":      {Recommendation{QuantName: "Q2_K", QuantProfile: QuantProfile{BPW: 2.7, Source: QuantSourceSize}}, true},
+		"plain q3 wide": {Recommendation{QuantName: "Q2_K", QuantProfile: QuantProfile{BPW: 3.1, Source: QuantSourceHeader}}, false},
+		"nominal":       {Recommendation{QuantName: "Q2_K", QuantProfile: QuantProfile{BPW: 3.1, Source: QuantSourceNominal}}, true},
+		"no width":      {Recommendation{QuantName: "Q4_K_M"}, false},
+	} {
+		if got := lowBitRow(c.r); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
+	}
+}

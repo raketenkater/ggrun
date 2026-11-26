@@ -635,11 +635,15 @@ func qualityBasis(r Recommendation) float64 {
 	return modelIntelligence(r.Candidate)
 }
 
-// markQualityEligible sets QualityEligible against the best row in rows.
+// markQualityEligible sets QualityEligible against the best row in rows. A
+// row no backend route can serve here does not set the bar: it is listed
+// last and cannot be what the user runs.
 func markQualityEligible(rows []Recommendation) {
 	best := 0.0
 	for _, r := range rows {
-		best = math.Max(best, qualityBasis(r))
+		if r.BackendStatus != BackendUnsupported {
+			best = math.Max(best, qualityBasis(r))
+		}
 	}
 	for i := range rows {
 		rows[i].QualityEligible = best > 0 && qualityBasis(rows[i]) >= qualityFloorShare*best
@@ -872,7 +876,7 @@ func betterByScore(a, b Recommendation) bool {
 	// very-low-bit alternatives. If none is usable, keep the normal speed/fit
 	// tradeoff: merely fitting a slow Q8 must not force it over a usable Q2.
 	preferred := func(r Recommendation) bool {
-		return !lowBitQuant(r.QuantName) && (r.PredictedTPS <= 0 || r.PredictedTPS >= usableTPS)
+		return !lowBitRow(r) && (r.PredictedTPS <= 0 || r.PredictedTPS >= usableTPS)
 	}
 	if preferred(a) != preferred(b) {
 		return preferred(a)
@@ -891,6 +895,17 @@ func betterByScore(a, b Recommendation) bool {
 		return a.QuantSizeGB < b.QuantSizeGB
 	}
 	return a.AdjustedIntelligence > b.AdjustedIntelligence
+}
+
+// lowBitRow classifies a file by its measured width when it is known (header
+// or catalog size): under 3 bits per weight without importance-matrix or
+// dynamic evidence, the files the first pick also avoids. A file whose width
+// is unknown or only nominal falls back to its name.
+func lowBitRow(r Recommendation) bool {
+	if p := r.QuantProfile; p.BPW > 0 && p.Source != QuantSourceNominal {
+		return p.BPW < firstPickMinBPW && !p.Imatrixed()
+	}
+	return lowBitQuant(r.QuantName)
 }
 
 // Very-low-bit variants remain within-model fallbacks when memory or speed
