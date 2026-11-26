@@ -68,6 +68,32 @@ func BackendSupportsArch(binaryPath, arch string) (supported, probed bool) {
 	if binaryPath == "" || len(arch) < 2 {
 		return false, false
 	}
+	if !archTokenQuery(arch) {
+		return backendSupportsArchByScan(binaryPath, arch)
+	}
+	// The same question answered from per-file token sets (archcache.go): a
+	// file counts as scanned exactly when the literal scan could read it.
+	archCache.mu.Lock()
+	defer archCache.mu.Unlock()
+	loadArchCacheLocked()
+	defer saveArchCacheLocked()
+	scannedAny := false
+	for _, f := range cachedArchProbeFilesLocked(binaryPath) {
+		tokens, err := archTokensLocked(f)
+		if _, hit := tokens[arch]; hit {
+			return true, true
+		}
+		if err == nil {
+			scannedAny = true
+		}
+	}
+	return false, scannedAny
+}
+
+// backendSupportsArchByScan is the literal scan: it reads every file of the
+// closure for the NUL-bracketed name. It answers queries the token sets cannot
+// represent and is the reference the token path is tested against.
+func backendSupportsArchByScan(binaryPath, arch string) (supported, probed bool) {
 	// Genuine architecture literals are NUL-terminated and follow the previous
 	// string's terminator, so requiring both rejects substrings of paths and of
 	// longer architecture names alike.
