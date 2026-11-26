@@ -103,7 +103,7 @@ func TestGGMLTypeSizesGiveKnownBitsPerWeight(t *testing.T) {
 		if !ok {
 			t.Fatalf("type %d missing", id)
 		}
-		if got := float64(size[1]) * 8 / float64(size[0]); !near(got, bpw) {
+		if got := float64(size[0]) * 8 / float64(size[1]); !near(got, bpw) {
 			t.Errorf("type %d: %.4f bpw, want %.4f", id, got, bpw)
 		}
 	}
