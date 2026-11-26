@@ -307,9 +307,9 @@ func TestLowBitRowUsesTheMeasuredWidth(t *testing.T) {
 // backbone (4.20 overall) must not rate like a 4-bit quant.
 func TestMoERetentionIsKeyedOnTheExperts(t *testing.T) {
 	c := Candidate{TotalParamsB: 280, ActiveParamsB: 13, MoE: true}
-	byExperts, _ := estimatedRetention(c, QuantProfile{BPW: 4.20, ExpertBPW: 2.56, Imatrix: ImatrixKeys})
-	plain, _ := estimatedRetention(c, QuantProfile{BPW: 2.56, Imatrix: ImatrixKeys})
-	overall, _ := estimatedRetention(c, QuantProfile{BPW: 4.20, Imatrix: ImatrixKeys})
+	byExperts, _ := estimatedRetention(c, QuantProfile{BPW: 4.20, ExpertBPW: 2.56, Imatrix: ImatrixName})
+	plain, _ := estimatedRetention(c, QuantProfile{BPW: 2.56, Imatrix: ImatrixName})
+	overall, _ := estimatedRetention(c, QuantProfile{BPW: 4.20, Imatrix: ImatrixName})
 	if byExperts != plain || byExperts >= overall {
 		t.Fatalf("experts %.3f, same-width file %.3f, overall-only %.3f", byExperts, plain, overall)
 	}
