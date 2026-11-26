@@ -9,4 +9,5 @@ exec python3 -m pytest "$@" \
   tests/test_measure_bandwidth.py tests/test_install_contracts.py \
   tests/test_setup_terminal.py tests/test_release_relocation.py \
   tests/test_gpu_e2e.py tests/test_agent_workload.py \
-  tests/test_verify_recommended_download.py tests/test_catalog_repo_guard.py
+  tests/test_verify_recommended_download.py tests/test_catalog_repo_guard.py \
+  tests/test_verify_installed_serving.py
