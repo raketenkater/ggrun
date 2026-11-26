@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/bits"
 	"os"
+	"sort"
 )
 
 // ggmlTypeSize maps a tensor type id to (bytes per block, elements per block).
@@ -28,6 +29,27 @@ const (
 	maxTensorDims  = 8
 )
 
+// layoutBytes is the size ggmlTypeSize gives a tensor of ttype with elems
+// elements; known is false for a type without a listed layout.
+func layoutBytes(ttype uint32, elems uint64) (need uint64, known bool) {
+	size, known := ggmlTypeSize[ttype]
+	if !known {
+		return 0, false
+	}
+	return (elems + size[1] - 1) / size[1] * size[0], true
+}
+
+// offsetOrder returns the indexes of tensors sorted by data offset: a tensor's
+// on-disk span runs from its offset to the next one's.
+func offsetOrder(tensors []tensorEntry) []int {
+	order := make([]int, len(tensors))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool { return tensors[order[a]].offset < tensors[order[b]].offset })
+	return order
+}
+
 type countingReader struct {
 	r *bufio.Reader
 	n int64
@@ -43,8 +65,10 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // (header end rounded up to general.alignment, default 32) plus the largest
 // tensor end (offset + byte size). A file with no tensor data is just its
 // unpadded header. ok is false when the size cannot be known
-// with certainty: unreadable or corrupt header, or a tensor type this package
-// has no layout for. Callers must treat !ok as "no verdict".
+// with certainty: unreadable or corrupt header, a tensor type this package
+// has no layout for, or a tensor whose type layout needs more bytes than its
+// offset span (the table and the file disagree, as in ReadQuantProfile).
+// Callers must treat !ok as "no verdict".
 func ExpectedSize(path string) (expected int64, ok bool) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -122,6 +146,7 @@ func expectedSizeFrom(src io.Reader) (int64, error) {
 		}
 	}
 	var maxEnd uint64
+	tensors := make([]tensorEntry, 0, min(tensorCount, 1<<14))
 	for i := uint64(0); i < tensorCount; i++ {
 		nameLen, err := u64()
 		if err != nil {
@@ -137,7 +162,7 @@ func expectedSizeFrom(src io.Reader) (int64, error) {
 		if err != nil {
 			return -1, err
 		}
-		if nDims > maxTensorDims {
+		if nDims == 0 || nDims > maxTensorDims {
 			return -1, fmt.Errorf("tensor dimension count %d out of range", nDims)
 		}
 		elems := uint64(1)
@@ -161,17 +186,27 @@ func expectedSizeFrom(src io.Reader) (int64, error) {
 		if err != nil {
 			return -1, err
 		}
-		size, known := ggmlTypeSize[ttype]
+		nbytes, known := layoutBytes(ttype, elems)
 		if !known || overflow {
 			return -1, fmt.Errorf("tensor type %d size unknown", ttype)
 		}
-		nbytes := (elems + size[1] - 1) / size[1] * size[0]
+		if elems > 0 { // an empty tensor owns no bytes and may share an offset
+			tensors = append(tensors, tensorEntry{elems: elems, ttype: ttype, offset: offset})
+		}
 		end := offset + nbytes
 		if end < offset || end > 1<<62 {
 			return -1, fmt.Errorf("tensor extent out of range")
 		}
 		if end > maxEnd {
 			maxEnd = end
+		}
+	}
+	order := offsetOrder(tensors)
+	for k := 0; k+1 < len(order); k++ {
+		t := tensors[order[k]]
+		span := tensors[order[k+1]].offset - t.offset
+		if need, _ := layoutBytes(t.ttype, t.elems); need > span {
+			return -1, fmt.Errorf("tensor type %d needs %d bytes but spans %d", t.ttype, need, span)
 		}
 	}
 	headerEnd := uint64(r.n)

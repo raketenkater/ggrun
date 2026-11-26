@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -282,11 +281,7 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 		return p, ErrTensorDataIncomplete
 	}
 	dataSize := uint64(fileSize) - dataStart
-	order := make([]int, len(tensors))
-	for i := range order {
-		order[i] = i
-	}
-	sort.Slice(order, func(a, b int) bool { return tensors[order[a]].offset < tensors[order[b]].offset })
+	order := offsetOrder(tensors)
 	if tensors[order[0]].offset != 0 {
 		return p, fmt.Errorf("tensor data does not start at offset 0")
 	}
@@ -301,8 +296,8 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 			return p, fmt.Errorf("tensor %q: %w", t.name, ErrTensorDataIncomplete)
 		}
 		span := end - t.offset
-		if size, known := ggmlTypeSize[t.ttype]; known {
-			if need := (t.elems + size[1] - 1) / size[1] * size[0]; span < need {
+		if need, known := layoutBytes(t.ttype, t.elems); known {
+			if span < need {
 				return p, fmt.Errorf("tensor %q type %d: %w (%d of %d bytes)", t.name, t.ttype, ErrTensorLayout, span, need)
 			}
 			if imatrixRequiredTypes[t.ttype] && t.name != "token_embd.weight" && t.name != "output.weight" {

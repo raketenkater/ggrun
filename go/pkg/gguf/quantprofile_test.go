@@ -22,6 +22,14 @@ type profileTensor struct {
 // occupies its type's layout size, or spans[name] bytes when given. Shapes
 // too large to materialize get no data section; the reader rejects them first.
 func profileFile(kvs []fixtureKV, tensors []profileTensor, spans map[string]uint64) []byte {
+	data, _ := profileFileAligned(kvs, tensors, spans, 32)
+	return data
+}
+
+// profileFileAligned is profileFile with the data section started at the
+// header end rounded up to align (which the caller states in
+// general.alignment); it also returns the unpadded header length.
+func profileFileAligned(kvs []fixtureKV, tensors []profileTensor, spans map[string]uint64, align int) ([]byte, int) {
 	sizes := make([]uint64, len(tensors))
 	var total uint64
 	for i, tn := range tensors {
@@ -59,12 +67,13 @@ func profileFile(kvs []fixtureKV, tensors []profileTensor, spans map[string]uint
 		binary.Write(buf, binary.LittleEndian, offset)
 		offset += sizes[i]
 	}
+	headerEnd := buf.Len()
 	if len(tensors) == 0 || total > 1<<26 {
-		return buf.Bytes()
+		return buf.Bytes(), headerEnd
 	}
-	pad := (32 - buf.Len()%32) % 32
+	pad := (align - buf.Len()%align) % align
 	buf.Write(make([]byte, pad+int(total)))
-	return buf.Bytes()
+	return buf.Bytes(), headerEnd
 }
 
 func profileHeader(kvs []fixtureKV, tensors []profileTensor) []byte {
@@ -97,6 +106,9 @@ func TestGGMLTypeSizesGiveKnownBitsPerWeight(t *testing.T) {
 		0: 32, 1: 16, 30: 16, 8: 8.5, 2: 4.5, 12: 4.5, 13: 5.5, 14: 6.5625, 11: 3.4375, 10: 2.625,
 		16: 2.0625, 17: 2.3125, 22: 2.5625, 18: 3.0625, 21: 3.4375, 23: 4.25, 20: 4.5,
 		19: 1.5625, 29: 1.75, 39: 4.25,
+		// Legacy blocks: Q4_1 20, Q5_0 22, Q5_1 24 and Q8_1 36 bytes per 32.
+		3: 5, 6: 5.5, 7: 6, 9: 9,
+		24: 8, 25: 16, 26: 32, 27: 64, 28: 64,
 	}
 	for id, bpw := range want {
 		size, ok := ggmlTypeSize[id]
@@ -361,5 +373,168 @@ func TestQuantProfileMetadataOnlyFirstShard(t *testing.T) {
 	writeProfileFixture(t, empty, []fixtureKV{kvU32("general.file_type", 12)}, nil)
 	if _, err := ReadQuantProfileModel(empty); err == nil {
 		t.Fatal("a tensor-less model got a profile")
+	}
+}
+
+// Q5_1 is 24 bytes and Q8_1 36 bytes per 32 weights (ggml's static_asserts),
+// the exact sizes ExpectedSize and the profile use.
+func TestLegacyQuantBlockSizes(t *testing.T) {
+	if got := ggmlTypeSize[7]; got != [2]uint64{24, 32} {
+		t.Errorf("Q5_1 = %v, want 24 bytes per 32", got)
+	}
+	if got := ggmlTypeSize[9]; got != [2]uint64{36, 32} {
+		t.Errorf("Q8_1 = %v, want 36 bytes per 32", got)
+	}
+}
+
+// general.alignment decides where the data section starts. The fixture's
+// header is 90 bytes, so alignment 64 (data at 128) and 32 (data at 96)
+// disagree, and both readers must follow the declared one.
+func TestAlignmentKeyMovesTheDataStartInBothReaders(t *testing.T) {
+	data, hdr := profileFileAligned([]fixtureKV{kvU32("general.alignment", 64)},
+		[]profileTensor{{"a", []uint64{8}, 0}}, nil, 64)
+	if hdr != 90 {
+		t.Fatalf("fixture header is %d bytes, want 90", hdr)
+	}
+	if len(data) != 128+32 {
+		t.Fatalf("fixture is %d bytes, want 160", len(data))
+	}
+	p, err := readProfileBytes(data)
+	if err != nil || p.Params != 8 || p.Bytes != 32 {
+		t.Fatalf("profile = %+v, %v; want 8 params, 32 bytes", p, err)
+	}
+	path := filepath.Join(t.TempDir(), "align64.gguf")
+	writeProfileFile(t, path, data)
+	if got, ok := ExpectedSize(path); !ok || got != 160 {
+		t.Fatalf("ExpectedSize = %d, %v; want 160", got, ok)
+	}
+}
+
+// Two tensors that start at the same offset leave one of them no bytes: no
+// profile, and no expected size. Unknown types isolate the span check from
+// the type table.
+func TestEqualOffsetsAreRejected(t *testing.T) {
+	unknown := []profileTensor{
+		{"a", []uint64{8}, 99}, {"b", []uint64{8}, 99}, {"c", []uint64{8}, 99},
+	}
+	data := profileFile(nil, unknown, map[string]uint64{"a": 0, "b": 0, "c": 64})
+	if _, err := readProfileBytes(data); !errors.Is(err, ErrTensorDataIncomplete) {
+		t.Fatalf("equal offsets: %v", err)
+	}
+	known := []profileTensor{{"a", []uint64{8}, 0}, {"b", []uint64{8}, 0}}
+	path := filepath.Join(t.TempDir(), "same-offset.gguf")
+	writeProfileFile(t, path, profileFile(nil, known, map[string]uint64{"a": 0, "b": 32}))
+	if got, ok := ExpectedSize(path); ok {
+		t.Fatalf("equal offsets gave a verdict: %d", got)
+	}
+}
+
+// A known type in a smaller span than its layout is no verdict for
+// ExpectedSize, as it is no profile for ReadQuantProfile; padding is fine and
+// the last tensor (no span) keeps the table size.
+func TestExpectedSizeChecksTheTypeTableAgainstSpans(t *testing.T) {
+	tensors := []profileTensor{{"a", []uint64{256, 256}, 12}, {"b", []uint64{256, 256}, 14}}
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.gguf")
+	data := profileFile(nil, tensors, nil)
+	writeProfileFile(t, good, data)
+	if got, ok := ExpectedSize(good); !ok || got != int64(len(data)) {
+		t.Fatalf("good file: %d, %v; file is %d", got, ok, len(data))
+	}
+	padded := filepath.Join(dir, "padded.gguf")
+	writeProfileFile(t, padded, profileFile(nil, tensors, map[string]uint64{"a": 256*144 + 32}))
+	if _, ok := ExpectedSize(padded); !ok {
+		t.Fatal("padding after a tensor lost the verdict")
+	}
+	short := filepath.Join(dir, "short.gguf")
+	writeProfileFile(t, short, profileFile(nil, tensors, map[string]uint64{"a": 256*144 - 1}))
+	if got, ok := ExpectedSize(short); ok {
+		t.Fatalf("a tensor larger than its span gave a verdict: %d", got)
+	}
+}
+
+// A tensor with no dimensions is corrupt for both readers.
+func TestZeroDimensionTensorIsRejected(t *testing.T) {
+	data := profileFile(nil, []profileTensor{{"a", nil, 0}}, nil)
+	if _, err := readProfileBytes(data); err == nil {
+		t.Fatal("ReadQuantProfile accepted a 0-dimension tensor")
+	}
+	path := filepath.Join(t.TempDir(), "zero-dims.gguf")
+	writeProfileFile(t, path, data)
+	if got, ok := ExpectedSize(path); ok {
+		t.Fatalf("ExpectedSize accepted a 0-dimension tensor: %d", got)
+	}
+}
+
+func TestRoutedExpertNames(t *testing.T) {
+	data := profileFile(nil, []profileTensor{
+		{"blk.0.ffn_gate_exps.weight", []uint64{64}, 0},
+		{"blk.0.ffn_up_chexps.weight", []uint64{32}, 0},
+		{"blk.0.experts.0.w1.weight", []uint64{16}, 0},
+		{"blk.0.ffn_gate_shexp.weight", []uint64{8}, 0},
+		{"blk.0.attn_q.weight", []uint64{8}, 0},
+	}, nil)
+	p, err := readProfileBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ExpertParams != 64+32+16 || p.ExpertBytes != 4*(64+32+16) || p.Params != 64+32+16+8+8 {
+		t.Fatalf("expert split: %+v", p)
+	}
+}
+
+// The strongest evidence wins whatever order the shards come in.
+func TestShardMergeKeepsTheStrongestImatrixEvidence(t *testing.T) {
+	cases := []struct{ first, later, want string }{
+		{ImatrixKeys, "", ImatrixKeys},
+		{ImatrixKeys, ImatrixTypes, ImatrixKeys},
+		{ImatrixTypes, "", ImatrixTypes},
+		{ImatrixTypes, ImatrixKeys, ImatrixKeys},
+		{"", ImatrixKeys, ImatrixKeys},
+		{"", ImatrixTypes, ImatrixTypes},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		got := QuantProfile{Imatrix: c.first, FileType: -1}.merge(QuantProfile{Imatrix: c.later, FileType: -1})
+		if got.Imatrix != c.want {
+			t.Errorf("merge(%q, %q) = %q, want %q", c.first, c.later, got.Imatrix, c.want)
+		}
+	}
+	// And through real files: keys in shard 1, an IQ2_XXS expert in shard 2.
+	dir := t.TempDir()
+	first := filepath.Join(dir, "m-00001-of-00002.gguf")
+	writeProfileFixture(t, first, []fixtureKV{kvString("quantize.imatrix.file", "x")}, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 256}, 12}})
+	writeProfileFixture(t, filepath.Join(dir, "m-00002-of-00002.gguf"), nil, []profileTensor{{"blk.1.ffn_up_exps.weight", []uint64{256, 256, 4}, 16}})
+	if p, err := ReadQuantProfileModel(first); err != nil || p.Imatrix != ImatrixKeys {
+		t.Fatalf("merged: %+v %v", p, err)
+	}
+}
+
+// A failure is never stored: the second call must fail again rather than
+// return a cached zero profile, and the cache file must hold no entry for the
+// bad shard.
+func TestFailedQuantProfileIsNotCached(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "m-00001-of-00002.gguf")
+	writeProfileFixture(t, first, nil, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 256}, 12}})
+	second := filepath.Join(dir, "m-00002-of-00002.gguf")
+	whole := profileFile(nil, []profileTensor{{"blk.1.attn_q.weight", []uint64{256, 256}, 12}}, nil)
+	writeProfileFile(t, second, whole[:len(whole)-100]) // known type, so the cut shows as a short span
+	cacheDir := filepath.Join(dir, "cache")
+	c := OpenHeaderCache(cacheDir)
+	for i := 0; i < 2; i++ {
+		if p, err := c.QuantProfile(first); err == nil {
+			t.Fatalf("call %d: truncated shard 2 got a profile: %+v", i+1, p)
+		}
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := OpenHeaderCache(cacheDir).QuantProfile(first); err == nil {
+		t.Fatalf("after reload: truncated shard 2 got a profile: %+v", p)
+	}
+	data, _ := os.ReadFile(filepath.Join(cacheDir, headerCacheFile))
+	if bytes.Contains(data, []byte(filepath.Base(second))) {
+		t.Fatalf("failed shard was stored: %s", data)
 	}
 }
