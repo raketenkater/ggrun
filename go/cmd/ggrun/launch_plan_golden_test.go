@@ -186,71 +186,156 @@ func goldenPlanMoE() *placement.ModelProfile {
 	return m
 }
 
-// goldenPlanBaseHelp is the help surface every fixture backend shares.
-const goldenPlanBaseHelp = `-c, --ctx-size N
--ngl, --gpu-layers N
--ot, --override-tensor <tensor name pattern>=<buffer type>,...
---n-cpu-moe N
--ts, --tensor-split N0,N1,N2,...
--sm, --split-mode {none,layer,row}
--mg, --main-gpu INDEX
--fa, --flash-attn [on|off|auto]
--ctk, --cache-type-k TYPE
--ctv, --cache-type-v TYPE
---cache-reuse N
--cram, --cache-ram N
---ctx-checkpoints N
---swa-full
--np, --parallel N
--kvu, --kv-unified
---no-mmap
---mlock
---jinja
---reasoning [on|off|auto]
---reasoning-budget N
---samplers SAMPLERS
---metrics
--lv, --verbosity, --log-verbosity N
---op-offload, --no-op-offload
+// Backend help fixtures. The planner keys behaviour on strings in a backend's
+// --help, so each fixture carries every probed string its upstream advertises,
+// with upstream's flag tokens, and none it lacks. Probed strings and where:
+//
+//	--samplers                    claudeSamplersSupported (mainline, ik)
+//	--metrics                     claudeCodeProgressServerArgs (mainline, ik)
+//	--cache-reuse                 claudeCodeCacheArgs (mainline)
+//	-lv --verbosity --log-verbosity  backendVerbosityArgs (mainline; ik skips)
+//	--swa-full                    applyBackendFeatureCompatibility (mainline)
+//	--ctx-checkpoints             BackendSupportsCheckpointReuse (mainline, ik)
+//	--checkpoint-min-step         backendCheckpointMinStepFlag (mainline)
+//	--ctx-checkpoints-interval    backendCheckpointMinStepFlag (ik)
+//	-fit, --fit [on|off]          BackendSupportsFit, backendFitTakesValue (mainline)
+//	--fit                         BackendSupportsFit, backendSplitsLayersByBytes (ik)
+//	--fit-margin                  bindFitToGuard, guardedFitArgs (ik only)
+//	--kv-offload                  BackendSupportsKVOffload (mainline)
+//	--no-context-shift            BackendSupportsNoContextShift (mainline, ik)
+//	--cpu-range[-batch] --cpu-strict[-batch]  configureCPUAffinity (mainline)
+//	--op-offload --no-op-offload  host weight offload (mainline)
+//	--cache-type-k --cache-type-v --reasoning --reasoning-budget  (mainline, ik)
+//	--load-mode                   backend identity, loader translation (mainline)
+//	--lazy-mode                   backendAdvertisedLazyFlag (mainline)
+//	--reuse-port                  backendBindStyle, launch only (mainline)
+//	ikawrakow, split-mode-graph   ik detection in detectBackend (ik)
+//	ctx-size-draft, spec-autotune newDraftConfig, inert with --spec off (ik)
+//
+// Mainline's speculative types (draft-mtp, draft-dflash, eagle3, ngram-*) are
+// listed by --spec-type from the speculative module, not common/arg.cpp; they
+// are only read with --spec on, which no case uses, so they are left out.
+
+// goldenPlanMainlineHelp is mainline llama.cpp's help for the probed options
+// (common/arg.cpp), without the fit lines.
+const goldenPlanMainlineHelp = `-Cr,   --cpu-range lo-hi                range of CPUs for affinity. Complements --cpu-mask
+--cpu-strict <0|1>                      use strict CPU placement (default: 0)
+-Crb,  --cpu-range-batch lo-hi          ranges of CPUs for affinity. Complements --cpu-mask-batch
+--cpu-strict-batch <0|1>                use strict CPU placement (default: same as --cpu-strict)
+-c,    --ctx-size N                     size of the prompt context (default: 0, 0 = loaded from model)
+--swa-full                              use full-size SWA cache (default: false)
+-ctxcp, --ctx-checkpoints, --swa-checkpoints N  max number of context checkpoints to create per slot (default: 32)
+-cms,  --checkpoint-min-step N          minimum spacing between context checkpoints in tokens (default: 0, 0 = no minimum)
+-cram, --cache-ram N                    set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)
+-kvu,  --kv-unified, -no-kvu, --no-kv-unified  use single unified KV buffer shared across all sequences
+--context-shift, --no-context-shift     whether to use context shift on infinite text generation (default: disabled)
+-fa,   --flash-attn [on|off|auto]       set Flash Attention use ('on', 'off', or 'auto', default: 'auto')
+--samplers SAMPLERS                     samplers that will be used for generation in the order, separated by ';'
+-kvo,  --kv-offload, -nkvo, --no-kv-offload  whether to enable KV cache offloading (default: enabled)
+-ctk,  --cache-type-k TYPE              KV cache data type for K (default: f16)
+-ctv,  --cache-type-v TYPE              KV cache data type for V (default: f16)
+-np,   --parallel N                     number of server slots (default: -1, -1 = auto)
+-lm,   --load-mode MODE                 model loading mode (default: auto)
+-lzm,  --lazy-mode MODE                 on-demand reading of certain tensors, for example per-layer embeddings (default: auto)
+-ot,   --override-tensor <tensor name pattern>=<buffer type>,...  override tensor buffer type
+-ncmoe, --n-cpu-moe N                   keep the Mixture of Experts (MoE) weights of the first N layers in the CPU
+-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto)
+-sm,   --split-mode {none,layer,row,tensor}  how to split the model across multiple GPUs
+-ts,   --tensor-split N0,N1,N2,...      fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1
+-mg,   --main-gpu INDEX                 the GPU to use for the model (with split-mode = none)
+--op-offload, --no-op-offload           whether to offload host tensor operations to device (default: true)
+--reuse-port                            allow multiple sockets to bind to the same port (default: disabled)
+--cache-reuse N                         min chunk size to attempt reusing from the cache via KV shifting (default: 0)
+--metrics                               enable prometheus compatible metrics endpoint (default: disabled)
+--jinja, --no-jinja                     whether to use jinja template engine for chat (default: enabled)
+-rea,  --reasoning [on|off|auto]        Use reasoning/thinking in the chat ('on', 'off', or 'auto', default: 'auto' (detect from template))
+--reasoning-budget N                    token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1)
+-lv,   --verbosity, --log-verbosity N   Set the verbosity threshold. Messages with a higher verbosity will be ignored.
 `
 
-// goldenPlanMainlineFitHelp is mainline llama.cpp's fit surface
-// (common/arg.cpp): a valued --fit and its target options, no --fit-margin.
-const goldenPlanMainlineFitHelp = `-fit,   --fit [on|off]                  whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on')
--fitt,  --fit-target MiB0,MiB1,MiB2,... target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024
--fitc,  --fit-ctx N                     minimum ctx size that can be set by --fit option, default: 4096
+// goldenPlanMainlineFitHelp is mainline's fit surface: a valued --fit and its
+// target options, no --fit-margin.
+const goldenPlanMainlineFitHelp = `-fit,  --fit [on|off]                   whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on')
+-fitt, --fit-target MiB0,MiB1,MiB2,...  target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024
+-fitc, --fit-ctx N                      minimum ctx size that can be set by --fit option, default: 4096
 `
 
-// goldenPlanIKFitHelp is ik_llama.cpp's fit surface (common/common.cpp): a
-// boolean --fit and --fit-margin, which binds the fit to the allocation guard.
-const goldenPlanIKFitHelp = `       --fit-margin N         safety margin in MiB when auto-fitting model offloading
-       --fit                  automatically determine which tensors to offload to the GPU(s)
+// goldenPlanIKHelp is ik_llama.cpp's help for the probed options
+// (common/common.cpp gpt_params_print_usage), including its boolean --fit and
+// --fit-margin.
+const goldenPlanIKHelp = `-v,    --verbose                print verbose information
+       --verbosity N            set specific verbosity level (default: 0)
+-c,    --ctx-size N             size of the prompt context (default: 0, 0 = loaded from model)
+-cd,   --ctx-size-draft N       size of the prompt context for the draft model (default: 0, 0 = loaded from model)
+-ctx-ckpt N, --ctx-checkpoints N           max number of context checkpoints to create per slot (default: 8)
+-ctx-ckpt-i N, --ctx-checkpoints-interval N  minimum number of tokens between each context checkpoint.  (default: 512, <=0 disable)
+-cram, --cache-ram N            set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)
+-fa, --flash-attn (auto|on|off|0|1) set Flash Attention (default: on)
+-smgs, --split-mode-graph-scheduling Force Split Mode Graph Scheduling (default: 0)
+       --samplers SAMPLERS      samplers that will be used for generation in the order, separated by ';'
+       --jinja                  use jinja template for chat (default: disabled)
+-rea,  --reasoning              [on|off|auto]
+       --reasoning-budget N     token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1)
+-nkvo, --no-kv-offload          disable KV offload
+-ctk,  --cache-type-k TYPE      KV cache data type for K (default: f16)
+-ctv,  --cache-type-v TYPE      KV cache data type for V (default: f16)
+-np,   --parallel N             number of parallel sequences to decode (default: 1)
+       --no-context-shift       disable context-shift.
+       --mlock                  force system to keep model in RAM rather than swapping or compressing
+       --no-mmap                do not memory-map model (slower load but may reduce pageouts if not using mlock)
+-ncmoe, --n-cpu-moe N           keep MoE weights of the first N layers in CPU memory
+       --fit-margin N           safety margin in MiB when auto-fitting model offloading
+       --fit                    automatically determine which tensors to offload to the GPU(s)
+-ngl,  --gpu-layers N           number of layers to store in VRAM
+-sm,   --split-mode SPLIT_MODE  how to split the model across multiple GPUs
+-ts,   --tensor-split SPLIT     fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1
+-mg,   --main-gpu i             the GPU to use for the model (with split-mode = none)
+-ot,   --override-tensor NAME   override tensor buffer type as tensor_name=buft, comma-separated
+--spec-autotune                 automatically tune speculative params to maximize tokens/sec
+       --metrics                enable prometheus compatible metrics endpoint (default: disabled)
+       --expiring-logit-bias-file  original PR: https://github.com/ikawrakow/ik_llama.cpp/pull/1731
 `
 
-// goldenPlanBackend is a fresh CUDA backend per case. Paths are under
-// /usr/bin, so no library directory is derived from them, and do not exist,
-// so no architecture probe reads a file.
+// goldenPlanBackend is a fresh CUDA backend per case, with the fields
+// detectBackend derives from that help (see goldenPlanProbedBackend). Paths
+// are under /usr/bin, so no library directory is derived from them, and do not
+// exist, so no architecture probe reads a file.
 //   - "" (mainline): llama.cpp with its valued --fit.
 //   - "ik": ik_llama.cpp with boolean --fit and --fit-margin.
-//   - "nofit": a backend without --fit. Real backends all advertise it; the
-//     case records a known latent defect (see goldenPlanCases).
-func goldenPlanBackend(kind string) *backendInfo {
+//   - "nofit": mainline without the fit lines. Real backends all advertise
+//     --fit; the case records a known latent defect (see goldenPlanCases).
+func goldenPlanBackend(t *testing.T, kind string) *backendInfo {
+	t.Helper()
 	switch kind {
 	case "ik":
-		return &backendInfo{
-			Path: "/usr/bin/ggrun-golden-ik-llama-server", Tag: "ik_llama", Dialect: "ik_llama", IsIK: true,
-			Identity: "golden-ik-build", SupportsReasoning: true, Help: goldenPlanBaseHelp + goldenPlanIKFitHelp,
+		be := goldenPlanProbedBackend("/usr/bin/ggrun-golden-ik-llama-server", "golden-ik-build", goldenPlanIKHelp)
+		if !be.IsIK || be.Tag != "ik_llama" {
+			t.Fatalf("ik fixture help did not probe as ik_llama: %+v", be)
 		}
+		return be
 	case "nofit":
-		return &backendInfo{
-			Path: "/usr/bin/ggrun-golden-nofit-llama-server", Tag: "llama", Dialect: "llama",
-			Identity: "golden-nofit-build", SupportsReasoning: true, Help: goldenPlanBaseHelp,
-		}
+		return goldenPlanProbedBackend("/usr/bin/ggrun-golden-nofit-llama-server", "golden-nofit-build", goldenPlanMainlineHelp)
 	}
-	return &backendInfo{
-		Path: "/usr/bin/ggrun-golden-llama-server", Tag: "llama", Dialect: "llama",
-		Identity: "golden-mainline-build", SupportsReasoning: true, Help: goldenPlanBaseHelp + goldenPlanMainlineFitHelp,
+	return goldenPlanProbedBackend("/usr/bin/ggrun-golden-llama-server", "golden-mainline-build", goldenPlanMainlineHelp+goldenPlanMainlineFitHelp)
+}
+
+// goldenPlanProbedBackend applies detectBackend's help-derived fields to a
+// fixed identity, without running a binary. Not mirrored: the --version text
+// (identity is fixed) and server.RegisterLoadModeBackend, which only changes
+// how a launch translates argv at process start, not the planned argv.
+func goldenPlanProbedBackend(path, identity, help string) *backendInfo {
+	info := &backendInfo{Path: path, Tag: "llama", Dialect: "llama", Help: help, Identity: identity}
+	if strings.Contains(help, "ikawrakow") || strings.Contains(help, "split-mode-graph") {
+		info.IsIK, info.Tag, info.Dialect = true, "ik_llama", "ik_llama"
 	}
+	if strings.Contains(help, "--reasoning") {
+		info.SupportsReasoning = true
+	}
+	if backendParsesLoadMode(help) {
+		info.Identity += "+" + loadModeTranslationVersion
+	}
+	info.CPUExpertMMapCapability, info.CPUExpertMMapEvidence = probedCPUExpertMMapCapability(info)
+	return info
 }
 
 func goldenPlanCases() []goldenPlanCase {
@@ -355,7 +440,7 @@ func goldenPlanDryRun(t *testing.T, c goldenPlanCase) goldenPlanRecord {
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 	warnModelCompatibility(model) // model stands in for parseModel
 
-	be := goldenPlanBackend(c.backend)
+	be := goldenPlanBackend(t, c.backend)
 	// resolveLaunchBackend after selection; normalizeArchKVRequest is the part
 	// of auto selection that edits the request.
 	normalizeArchKVRequest(req, model)
