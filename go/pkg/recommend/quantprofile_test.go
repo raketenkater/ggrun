@@ -100,3 +100,24 @@ func TestEvaluateAttachesTheChosenFilesProfile(t *testing.T) {
 		t.Fatalf("profile %+v", rec.QuantProfile)
 	}
 }
+
+// A MoE known only by its size gets an expert width from its geometry.
+func TestQuantProfileEstimatesExpertWidthFromGeometry(t *testing.T) {
+	c := Candidate{Repo: "fixture/moe", MoE: true, TotalParamsB: 100, Layers: 10, Experts: 64, ExpertUsed: 4,
+		ExpertFF: 1024, Embedding: 4096, HeadCountKV: 8, KeyLength: 128}
+	_, share, ok := moeRoutedShares(c)
+	if !ok {
+		t.Fatal("fixture geometry incomplete")
+	}
+	// A file whose experts are 2.5 bpw and backbone 8.5.
+	overall := share*2.5 + (1-share)*assumedBackboneBPW
+	size := int64(overall * c.TotalParamsB * 1e9 / 8)
+	p := quantProfileFor(c, QuantOption{Name: "IQ2_XS", SizeBytes: size})
+	if !p.ExpertEstimated || math.Abs(p.ExpertBPW-2.5) > 0.01 || p.ExpertBPW >= p.BPW {
+		t.Fatalf("profile %+v (share %.3f)", p, share)
+	}
+	c.MoE = false
+	if p := quantProfileFor(c, QuantOption{Name: "IQ2_XS", SizeBytes: size}); p.ExpertBPW != 0 || p.ExpertEstimated {
+		t.Fatalf("dense model got an expert width: %+v", p)
+	}
+}

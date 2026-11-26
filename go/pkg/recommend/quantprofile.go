@@ -17,6 +17,9 @@ type QuantProfile struct {
 	BPW          float64 `json:"bpw,omitempty"`
 	ExpertBPW    float64 `json:"expert_bpw,omitempty"`
 	NonExpertBPW float64 `json:"non_expert_bpw,omitempty"`
+	// ExpertEstimated: ExpertBPW was derived from the file size and the
+	// catalog's expert geometry (see estimatedExpertBPW), not read.
+	ExpertEstimated bool `json:"expert_estimated,omitempty"`
 	// Source says how BPW was derived: QuantSourceHeader, QuantSourceSize,
 	// QuantSourceNominal, or "" when it is unknown.
 	Source string `json:"source,omitempty"`
@@ -107,7 +110,33 @@ func quantProfileFor(c Candidate, q QuantOption) QuantProfile {
 	if c.paramsFromSizes {
 		p.Source = QuantSourceNominal
 	}
+	if expert, ok := estimatedExpertBPW(c, bpw); ok {
+		p.ExpertBPW, p.ExpertEstimated = expert, true
+	}
 	return p
+}
+
+// assumedBackboneBPW is the width assumed for a MoE's non-expert tensors when
+// only the file size is known: quantizers usually keep attention, shared
+// experts and embeddings at Q8_0 (8.5 bpw). Files read here measured 5.7-8.6,
+// one with F32 side tensors 24.9; a wider real backbone means narrower real
+// experts than this estimate, a narrower one the reverse.
+const assumedBackboneBPW = 8.5
+
+// estimatedExpertBPW splits a MoE file's overall width into its routed
+// experts' share, from the catalog's expert geometry: the overall figure of a
+// low-bit MoE with a Q8_0 backbone rates it like a 4-bit quant (one 2.56-bpw
+// expert file measured 4.20 overall). ok is false without geometry.
+func estimatedExpertBPW(c Candidate, overall float64) (float64, bool) {
+	if !c.MoE {
+		return 0, false
+	}
+	_, share, ok := moeRoutedShares(c)
+	if !ok {
+		return 0, false
+	}
+	expert := (overall - (1-share)*assumedBackboneBPW) / share
+	return clampF(expert, minPlausibleBPW, overall), true
 }
 
 // quantFileKey names a catalog file independently of where it is stored.
