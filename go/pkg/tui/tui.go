@@ -784,7 +784,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
-					if note := m.models[item.index].Incomplete; note != "" {
+					if note := m.refreshIncomplete(item.index); note != "" {
 						m.message = note + "; finish the download before launching"
 						m.messageType = "error"
 						return m, nil
@@ -851,7 +851,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openBackendManager(ScreenMain)
 		case "c", "C":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
-				if note := m.models[item.index].Incomplete; note != "" {
+				if note := m.refreshIncomplete(item.index); note != "" {
 					m.message = note + "; finish the download before launching"
 					m.messageType = "error"
 					return m, nil
@@ -2890,6 +2890,35 @@ func readModelHeaders(models []ModelItem, cacheDir string) []modelHeader {
 	}
 	_ = cache.Save()
 	return out
+}
+
+// refreshIncomplete re-checks one model's download at key press, so a download
+// that finished while the TUI was open stops being refused. The actual size is
+// stat'ed fresh; the declared size comes from the header cache. It updates the
+// stored note and the list row and returns the current note.
+func (m *Model) refreshIncomplete(idx int) string {
+	if idx < 0 || idx >= len(m.models) {
+		return ""
+	}
+	cache := gguf.OpenHeaderCache(m.cacheDir)
+	note := incompleteDownloadNote(cache, m.models[idx].Path)
+	_ = cache.Save()
+	if note == m.models[idx].Incomplete {
+		return note
+	}
+	m.models[idx].Incomplete = note
+	var rec *modelusage.Record
+	if r, ok := m.modelUsage[modelIdentity(m.models[idx].Path)]; ok && r.Launches > 0 {
+		rec = &r
+	}
+	for pos, raw := range m.mainList.Items() {
+		if it, ok := raw.(mainItem); ok && it.isModel && it.index == idx {
+			it.desc = mainModelDesc(m.models[idx], rec)
+			m.mainList.SetItem(pos, it)
+			break
+		}
+	}
+	return note
 }
 
 func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect.Capabilities) []ModelItem {

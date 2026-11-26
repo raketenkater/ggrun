@@ -59,3 +59,47 @@ func TestExpectedSizeCorruptHeaderIsNoVerdict(t *testing.T) {
 		t.Fatal("truncated header gave a verdict")
 	}
 }
+
+// A metadata-only shard (no tensors) is written unpadded by split tools, so
+// its expected size is the unpadded header end.
+func TestExpectedSizeMetadataOnlyShardIsUnpadded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m-00001-of-00002.gguf")
+	writeGGUFFixture(t, path, nil, 32, 0)
+	// The fixture pads the header to the alignment; cut the file back to the
+	// bare header end, which is what ExpectedSize reports for no tensors.
+	hdr, ok := ExpectedSize(path)
+	if !ok || hdr <= 0 {
+		t.Fatalf("ExpectedSize = %d, %v", hdr, ok)
+	}
+	if hdr != 106 {
+		t.Fatalf("bare header end = %d, want 106", hdr)
+	}
+	if hdr%32 == 0 {
+		t.Fatalf("fixture header %d happens to be aligned; test needs an unaligned one", hdr)
+	}
+	if err := os.Truncate(path, hdr); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := ExpectedSize(path)
+	if !ok || got != hdr {
+		t.Fatalf("ExpectedSize = %d, %v; file is %d", got, ok, hdr)
+	}
+	if err := os.Truncate(path, hdr-1); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ExpectedSize(path); !ok || got != hdr {
+		t.Fatalf("one byte short: ExpectedSize = %d, %v; want %d", got, ok, hdr)
+	}
+}
+
+// With tensor data following, the header end is still rounded up to the
+// alignment.
+func TestExpectedSizeWithTensorKeepsAlignment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m.gguf")
+	writeGGUFFixture(t, path, []fixtureTensor{{name: "a", elems: 8, ttype: 0, offset: 0}}, 32, 32)
+	st, _ := os.Stat(path)
+	got, ok := ExpectedSize(path)
+	if !ok || got != st.Size() || got%32 != 0 {
+		t.Fatalf("ExpectedSize = %d, %v; file is %d", got, ok, st.Size())
+	}
+}

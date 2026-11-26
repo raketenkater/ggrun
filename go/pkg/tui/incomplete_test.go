@@ -130,3 +130,34 @@ func TestIncompleteVerdictUsesHeaderCache(t *testing.T) {
 		t.Fatalf("unchanged file re-read: note %q, calls %d", got, calls)
 	}
 }
+
+func TestKeyPressRechecksFinishedDownload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.gguf")
+	writeF32GGUF(t, path, 1024, 10)
+	cacheDir := t.TempDir()
+	models := enrichModelItems([]ModelItem{{Name: "m.gguf", Path: path, Arch: "dense"}}, cacheDir, "auto", nil)
+	if len(models) != 1 || models[0].Incomplete == "" {
+		t.Fatalf("model not marked: %#v", models)
+	}
+	m := Model{screen: ScreenMain, cacheDir: cacheDir, models: models, mainList: newMainList(models)}
+	m.input = textinput.New()
+	m.mainList.Select(3)
+
+	// Still short: refused, as before.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(Model); got.screen != ScreenMain || got.messageType != "error" {
+		t.Fatalf("short model opened screen %v", got.screen)
+	}
+
+	// The download finishes while the TUI is open.
+	writeF32GGUF(t, path, 1024, 4096)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(Model)
+	if got.screen == ScreenMain || got.models[0].Incomplete != "" {
+		t.Fatalf("finished download still blocked: screen %v, note %q", got.screen, got.models[0].Incomplete)
+	}
+	if item, ok := got.mainList.Items()[3].(mainItem); !ok || strings.Contains(item.desc, "incomplete download") {
+		t.Fatalf("list row still marked: %#v", item)
+	}
+}

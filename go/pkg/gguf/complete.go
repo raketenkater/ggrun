@@ -41,7 +41,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // ExpectedSize returns the file size a GGUF header declares: the data start
 // (header end rounded up to general.alignment, default 32) plus the largest
-// tensor end (offset + byte size). ok is false when the size cannot be known
+// tensor end (offset + byte size). A file with no tensor data is just its
+// unpadded header. ok is false when the size cannot be known
 // with certainty: unreadable or corrupt header, or a tensor type this package
 // has no layout for. Callers must treat !ok as "no verdict".
 func ExpectedSize(path string) (expected int64, ok bool) {
@@ -174,6 +175,11 @@ func expectedSizeFrom(src io.Reader) (int64, error) {
 		}
 	}
 	headerEnd := uint64(r.n)
+	if maxEnd == 0 {
+		// No tensor data follows (a metadata-only first shard): split tools
+		// write it unpadded, so the header end is the whole file.
+		return int64(headerEnd), nil
+	}
 	dataStart := (headerEnd + align - 1) / align * align
 	total := dataStart + maxEnd
 	if total < dataStart || total > 1<<62 {
