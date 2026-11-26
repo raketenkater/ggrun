@@ -126,6 +126,9 @@ func validateRemoteClaude(req *launchRequest) error {
 			return fmt.Errorf("headless mode keeps the backend private; set --gateway-host instead of a backend --host passthrough")
 		}
 	}
+	if err := validateHeadlessLogVerbosity(req.ExtraArgs); err != nil {
+		return err
+	}
 	// Headless owns a separate network gateway. A model listener inherited from
 	// older wildcard config must not expose the unauthenticated backend.
 	req.Host = "127.0.0.1"
