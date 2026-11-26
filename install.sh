@@ -2209,6 +2209,44 @@ install_python_download_deps() {
     python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
 }
 
+# ggrun finds this private interpreter next to its binary (pkg/python), so the
+# helper packages stay off PATH. Build in place in a unique directory because
+# venv scripts embed their absolute interpreter path, and publish only after
+# the imports succeed.
+app_python_ready() {
+    local py="$INSTALL_DIR/.ggrun-python/bin/python3"
+    [[ -x "$py" ]] && "$py" -I -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
+}
+
+install_app_python_download_deps() {
+    local prefix current staged old=""
+    prefix="$(cd -- "$INSTALL_DIR" && pwd -P)" || return 1
+    current="$prefix/.ggrun-python"
+    if app_python_ready; then
+        return 0
+    fi
+    if [[ -L "$current" ]]; then
+        old="$(readlink -- "$current" || true)"
+    fi
+    staged="$(mktemp -d "$prefix/.ggrun-python.XXXXXX")" || return 1
+    if ! python3 -m venv "$staged"; then
+        warn "Could not create the app's Python environment. On Debian or Ubuntu install python3-venv, then rerun setup."
+    elif (
+        unset PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER PIP_BREAK_SYSTEM_PACKAGES
+        PIP_CONFIG_FILE=/dev/null "$staged/bin/python3" -m pip --require-virtualenv install --quiet huggingface_hub tqdm
+    ) && "$staged/bin/python3" -I -c 'import huggingface_hub, tqdm' >/dev/null 2>&1 &&
+        ln -s "${staged##*/}" "$staged/current" &&
+        python3 -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$staged/current" "$current"; then
+        # Drop the superseded environment, but only a sibling this function made.
+        if [[ "$old" == .ggrun-python.* && "$old" != */* && "$old" != "${staged##*/}" ]]; then
+            rm -rf -- "${prefix:?}/$old"
+        fi
+        return 0
+    fi
+    rm -rf -- "$staged"
+    return 1
+}
+
 install_build_deps() {
     [[ "$DEPS_MODE" != "skip" ]] || return 1
 
@@ -2471,6 +2509,18 @@ else
     if python3_usable; then
         if python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1; then
             ok "Python download dependencies already installed"
+        elif app_python_ready; then
+            ok "Python download dependencies already installed in the ggrun app"
+        elif [[ "${LLM_INSTALL_APP_PYTHON:-0}" == "1" ]]; then
+            if [[ "$PY_DEPS_MODE" == "install" ]] || ask "Install model download helpers in the ggrun app? [Y/n]" y; then
+                if install_app_python_download_deps; then
+                    ok "Python download dependencies ready in the ggrun app"
+                else
+                    err "Could not install the model download helpers in the ggrun app."
+                    [[ "$PY_DEPS_MODE" == "install" ]] && exit 1
+                    warn "Local GGUF serving still works; model search/download is unavailable."
+                fi
+            fi
         elif ! ensure_python_pip; then
             err "Python 3 is installed, but pip is unavailable. Try: python3 -m ensurepip --user"
             [[ "$PY_DEPS_MODE" == "install" ]] && exit 1

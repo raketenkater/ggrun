@@ -882,3 +882,79 @@ func TestExeParseScriptCandidatesStayInTheInstall(t *testing.T) {
 		}
 	}
 }
+
+func TestSamplingDefaultsReadsScalarKeys(t *testing.T) {
+	key := func(s string) []any { return []any{uint64(len(s)), s} }
+	cat := func(parts ...[]any) []any {
+		var out []any
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	data := chatTemplateHeader(9, cat(
+		key("general.architecture"), []any{uint32(8)}, key("gemma4"),
+		key("tokenizer.ggml.tokens"), []any{uint32(9), uint32(8), uint64(2)}, key("a"), key("bc"),
+		key("general.sampling.top_k"), []any{uint32(5), int32(64)},
+		key("general.sampling.top_p"), []any{uint32(6), float32(0.95)},
+		key("general.sampling.temp"), []any{uint32(6), float32(1.0)},
+		key("general.sampling.penalty_last_n"), []any{uint32(4), uint32(64)},
+		key("general.sampling.sequence"), []any{uint32(8)}, key("top_k;top_p;temperature"),
+		key("general.sampling.mirostat"), []any{uint32(7), uint8(1)},
+		key("general.sampling.xs"), []any{uint32(9), uint32(5), uint64(1), int32(3)},
+	)...)
+	got, err := readSamplingDefaults(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("readSamplingDefaults: %v", err)
+	}
+	want := map[string]string{
+		"top_k": "64", "top_p": "0.95", "temp": "1.0", "penalty_last_n": "64",
+		"sequence": "top_k;top_p;temperature", "mirostat": "true",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q (all: %v)", k, got[k], v, got)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "m.gguf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	byPath, err := SamplingDefaults(path)
+	if err != nil || byPath["top_k"] != "64" {
+		t.Fatalf("SamplingDefaults(path) = %v, %v", byPath, err)
+	}
+}
+
+func TestSamplingDefaultsEmptyWhenNoSamplingKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plain.gguf")
+	writeChatTemplateFixture(t, path, "qwen35", "")
+	got, err := SamplingDefaults(path)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("SamplingDefaults of file without sampling keys = %v, %v; want empty, nil", got, err)
+	}
+}
+
+func TestSamplingDefaultsRejectsBadFiles(t *testing.T) {
+	if _, err := SamplingDefaults(filepath.Join(t.TempDir(), "missing.gguf")); err == nil {
+		t.Error("missing file: want error")
+	}
+	key := func(s string) []any { return []any{uint64(len(s)), s} }
+	cases := map[string][]byte{
+		"not gguf":         []byte("GGML"),
+		"empty":            nil,
+		"kv count too big": chatTemplateHeader(^uint64(0)),
+		"truncated value":  chatTemplateHeader(1, append(key("general.sampling.top_k"), uint32(5), uint8(1))...),
+		"huge string":      chatTemplateHeader(1, append(key("general.sampling.sequence"), uint32(8), ^uint64(0))...),
+		"unknown type":     chatTemplateHeader(1, append(key("general.sampling.top_k"), uint32(99))...),
+	}
+	for name, data := range cases {
+		if got, err := readSamplingDefaults(bytes.NewReader(data)); err == nil {
+			t.Errorf("%s: read %v without error", name, got)
+		}
+	}
+}

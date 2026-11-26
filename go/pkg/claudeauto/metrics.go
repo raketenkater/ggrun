@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -147,11 +148,29 @@ func clientFamily(ua string) string {
 // classifierVerdict reads Claude's <block> verdict the way Claude's parser
 // does (see validReviewerVerdict): <block>yes blocks, <block>no allows.
 func classifierVerdict(status int, header http.Header, body []byte) string {
+	return classifierVerdictFor(status, header, body, false)
+}
+
+// classifierVerdictFor also reads the severity format when the request asked
+// for it: N below 50 allows, above 50 blocks, and exactly 50 (the boundary,
+// which Claude Code's prompt leaves unassigned) is recorded as "severity:50".
+func classifierVerdictFor(status int, header http.Header, body []byte, severity bool) string {
 	if status < 200 || status >= 300 || len(bytes.TrimSpace(body)) == 0 {
 		return verdictNone
 	}
 	text := strings.TrimSpace(reviewerResponseText(header, body))
 	if !validReviewerVerdict(text) {
+		if severity {
+			if n, ok := severityScore(text); ok {
+				switch {
+				case n < 50:
+					return verdictAllow
+				case n > 50:
+					return verdictBlock
+				}
+				return "severity:" + strconv.Itoa(n)
+			}
+		}
 		return verdictInvalid
 	}
 	if strings.Contains(text, "<block>yes") {
@@ -369,9 +388,12 @@ func (r *Router) EnableMetrics(path string) error {
 	if r == nil {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
+	}
+	if runtime.GOOS != "windows" {
+		_ = f.Chmod(0o600)
 	}
 	r.metrics = &metricsSink{out: f, closer: f}
 	return nil

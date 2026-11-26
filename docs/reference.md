@@ -23,6 +23,7 @@ Flags ggrun does not know are passed to the backend.
 | `--chat-template` | yes |
 | `--claude-code` | no (switch) |
 | `--claude-max-active` | yes |
+| `--claude-penalties` | yes |
 | `--claude-profile` | yes |
 | `--claude-resume` | yes |
 | `--claude-resume-force` | no (switch) |
@@ -42,6 +43,7 @@ Flags ggrun does not know are passed to the backend.
 | `--gpus` | yes |
 | `--headless` | no (switch) |
 | `--host` | yes |
+| `--install-claude` | no (switch) |
 | `--inventory` | yes |
 | `--keep-alive` | no (switch) |
 | `--kv` | yes |
@@ -125,6 +127,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 | `LLM_SUPPORT_EXPERT` | `GGRUN_SUPPORT_EXPERT` |
 | `LLM_SUPPORT_ONLINE` | `GGRUN_SUPPORT_ONLINE` |
 | `LLM_SUPPORT_MODEL` | `GGRUN_SUPPORT_MODEL` |
+| `LLM_CLAUDE_PENALTIES` | `GGRUN_CLAUDE_PENALTIES` |
 
 ## Environment variables read by the Go code
 
@@ -145,6 +148,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_CGROUP_HEADROOM_MB`
 - `GGRUN_CLAUDE_AUTO_REVIEWER`
 - `GGRUN_CLAUDE_AUTO_SELF_REVIEW`
+- `GGRUN_CLAUDE_PENALTIES`
 - `GGRUN_CLAUDE_PERMISSION_MODE`
 - `GGRUN_CLAUDE_PROGRESS`
 - `GGRUN_CLAUDE_REVIEWER_BIN`
@@ -152,6 +156,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_CTX_SIZE`
 - `GGRUN_HEALTH_TIMEOUT`
 - `GGRUN_HOST`
+- `GGRUN_INSTALL_CLAUDE`
 - `GGRUN_KEEP_ALIVE`
 - `GGRUN_KV_PLACEMENT`
 - `GGRUN_KV_QUALITY`
@@ -191,6 +196,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `LLM_BANDWIDTH_PROFILE`
 - `LLM_CACHE_DIR`
 - `LLM_CGROUP_HEADROOM_MB`
+- `LLM_CLAUDE_PENALTIES`
 - `LLM_CONFIG`
 - `LLM_CTX_SIZE`
 - `LLM_HEALTH_TIMEOUT`

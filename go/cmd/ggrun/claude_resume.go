@@ -137,6 +137,13 @@ func claudeResumeSpec(rec claudesession.Record, serverArgs []string, force bool,
 			"Claude Code may have moved its session files, so ggrun cannot size this resume from its history\n",
 			rec.SessionID, projects)
 	}
+	runID := ""
+	if rec.Workflow != nil {
+		runID = rec.Workflow.RunID
+	}
+	for _, w := range claudesession.Diagnose(claudeProjectsDir(), rec.WorkDir, rec.SessionID, runID) {
+		fmt.Printf("[claude-code] warning: %s\n", w)
+	}
 	spec := &claudeSessionSpec{ID: rec.SessionID, Resume: true, Workflow: rec.Workflow}
 	if spec.Workflow != nil && spec.Workflow.RunID != "" {
 		journal := claudesession.JournalPath(claudeProjectsDir(), rec.WorkDir, rec.SessionID, spec.Workflow.RunID)

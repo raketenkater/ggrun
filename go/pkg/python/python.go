@@ -5,6 +5,7 @@ package python
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -13,8 +14,39 @@ import (
 
 var (
 	mu    sync.Mutex
-	cache = map[string]string{} // PATH -> verified interpreter
+	cache = map[string]string{} // PATH + app interpreter -> verified interpreter
+
+	// executablePath is os.Executable, replaceable in tests.
+	executablePath = os.Executable
 )
+
+const probeScript = "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)"
+
+// appInterpreter returns the app-owned venv interpreter that setup installs
+// as <dir>/.ggrun-python/bin/python3 next to the ggrun binary, or "". It is
+// found from the binary's location rather than PATH so the helper packages
+// stay off PATH and child processes (agent sessions, user commands) keep
+// seeing the user's own Python.
+func appInterpreter() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	exe, err := executablePath()
+	if err != nil || exe == "" {
+		return ""
+	}
+	dirs := []string{filepath.Dir(exe)}
+	if real, err := filepath.EvalSymlinks(exe); err == nil && filepath.Dir(real) != dirs[0] {
+		dirs = append(dirs, filepath.Dir(real))
+	}
+	for _, dir := range dirs {
+		p := filepath.Join(dir, ".ggrun-python", "bin", "python3")
+		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
+}
 
 // Command returns a Python 3 interpreter that actually runs, and whether one
 // was found. A name that resolves on PATH is not enough: on Windows python3.exe
@@ -22,11 +54,21 @@ var (
 // running the script. The order matches install.ps1 Resolve-Python so the
 // interpreter that received huggingface_hub is the one invoked.
 func Command() (string, bool) {
-	key := os.Getenv("PATH")
+	app := appInterpreter()
+	key := os.Getenv("PATH") + "\x00" + app
 	mu.Lock()
 	defer mu.Unlock()
 	if path, ok := cache[key]; ok {
 		return path, true
+	}
+	if app != "" {
+		check, finish := boundexec.Command(boundexec.ProbeTimeout, app, "-c", probeScript)
+		err := finish(check.Run())
+		if err == nil {
+			cache[key] = app
+			return app, true
+		}
+		boundexec.Report(err, "falling back to PATH")
 	}
 	// Only a hit is cached: a long-running ggrun sees Python installed later.
 	for _, name := range []string{"python3", "python", "py"} {
@@ -34,7 +76,7 @@ func Command() (string, bool) {
 		if err != nil {
 			continue
 		}
-		check, finish := boundexec.Command(boundexec.ProbeTimeout, path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
+		check, finish := boundexec.Command(boundexec.ProbeTimeout, path, "-c", probeScript)
 		err = finish(check.Run())
 		if err == nil {
 			cache[key] = path
