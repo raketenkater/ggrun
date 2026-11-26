@@ -564,11 +564,14 @@ func NormalizeSupportExpert(value string) (string, error) {
 }
 
 // DefaultClaudePenalties is the built-in Claude Code mode penalty policy. It is
-// the single place to change the default: "late" applies the repetition
-// penalty to the top-k candidates only (about 2.2 ms/token cheaper on a 248k
-// vocabulary than the full-vocabulary pass), "full" is the llama.cpp default
-// order with presence 1.0, and "off" sends neutral penalty values.
-const DefaultClaudePenalties = "late"
+// the single place to change the default: "off" sends neutral penalty values,
+// "late" applies repeat 1.05 to the top-k candidates only (about 2.2 ms/token
+// cheaper on a 248k vocabulary than the full-vocabulary pass), and "full" is the
+// llama.cpp default order with presence 1.0. Off is the default because in live
+// W1 runs a repeat penalty broke GLM-4.7-Flash's tool calls in either order
+// (0 of 12 passed against 10 of 12 without it), while only a loop-prone 4B
+// dense model was helped by it.
+const DefaultClaudePenalties = "off"
 
 // NormalizeClaudePenalties validates a Claude Code penalty policy. Empty means
 // the built-in default.

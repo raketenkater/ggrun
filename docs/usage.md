@@ -316,16 +316,17 @@ Two deliberate restrictions:
 
 ### Sampling defaults
 
-- **Anti-loop sampling.** The Anthropic API has no repetition-penalty fields and the
-  client only sends temperature, so ggrun sets server-side penalties in claude-code
-  mode — quantized thinking models loop endlessly without them.
-  `--claude-penalties late|full|off` (config `CLAUDE_PENALTIES`, default `late`):
-  `late` sends `--repeat-penalty 1.05 --repeat-last-n 512 --presence-penalty 0` and
-  runs penalties after top-k (`--samplers`), which avoids a per-vocabulary-entry
-  pass on every token (about 2.2 ms/token on a 248k vocabulary); `full` is
-  presence 1.0 + repeat 1.05 in llama.cpp's default order; `off` sends neutral
-  values. Top-k 20 / top-p 0.95 / min-p 0.0 are sent only when the GGUF has no
-  `general.sampling.*` value for them, and ggrun never sends a temperature.
+- **Repetition penalties.** The Anthropic API has no repetition-penalty fields, so
+  only server-side flags can set them. `--claude-penalties off|late|full` (config
+  `CLAUDE_PENALTIES`, default `off`): `off` sends neutral values; `late` sends
+  `--repeat-penalty 1.05 --repeat-last-n 512 --presence-penalty 0` and runs
+  penalties after top-k (`--samplers`), which avoids a per-vocabulary-entry pass on
+  every token (about 2.2 ms/token on a 248k vocabulary); `full` is presence 1.0 +
+  repeat 1.05 in llama.cpp's default order. A repeat penalty broke GLM-4.7-Flash's
+  tool calls in Claude Code, so it is off by default; try `late` when a small model
+  repeats the same tool call or phrase. Top-k 20 / top-p 0.95 / min-p 0.0 are sent
+  only when the GGUF has no `general.sampling.*` value for them, and ggrun never
+  sends a temperature.
   DeepSeek V4 uses its separately validated `top-k 40` / `min-p 0.05` recipe and
   closes the reasoning budget. Pass any of these flags yourself (after `--`) and
   your value wins.

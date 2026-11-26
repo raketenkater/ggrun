@@ -48,12 +48,12 @@ func TestClaudePenaltyModes(t *testing.T) {
 		t.Fatalf("full = %v", full)
 	}
 
-	// An unknown value behaves as the built-in default.
-	if got := claudeCodeSamplingArgs(base, true, testSamplingModel, "bogus", true); !reflect.DeepEqual(got, late) {
-		t.Fatalf("unknown mode = %v, want the default (%s) = %v", got, config.DefaultClaudePenalties, late)
+	// An unknown value behaves as the built-in default, which sends no active penalty.
+	if got := claudeCodeSamplingArgs(base, true, testSamplingModel, "bogus", true); !reflect.DeepEqual(got, off) {
+		t.Fatalf("unknown mode = %v, want the default (%s) = %v", got, config.DefaultClaudePenalties, off)
 	}
-	if config.DefaultClaudePenalties != "late" {
-		t.Fatalf("provisional default changed to %q; update this test and the report", config.DefaultClaudePenalties)
+	if config.DefaultClaudePenalties != "off" {
+		t.Fatalf("default changed to %q; a repeat penalty broke GLM-4.7-Flash tool calls in E-10, update this test with new evidence", config.DefaultClaudePenalties)
 	}
 }
 

@@ -245,10 +245,10 @@ Launch flags:
                        big-MoE worker; off seats no reviewer and the main model
                        self-reviews
   --claude-penalties str  Claude Code repetition penalties (requires --claude-code):
-                       off|late|full (default late; config CLAUDE_PENALTIES). late
-                       applies them to the top-k candidates only (cheaper per
-                       token); full is llama.cpp's full-vocabulary order; off
-                       sends neutral values
+                       off|late|full (default off; config CLAUDE_PENALTIES). off
+                       sends neutral values; late applies repeat 1.05 to the
+                       top-k candidates only (for small models that loop); full
+                       is presence 1.0 + repeat 1.05 over the whole vocabulary
   --chat-template str   Force a corrected chat template from the data-driven catalog
                        by entry name (e.g. nanbeige4.2-3b, qwen3.8-27b) for models whose
                        embedded template llama.cpp's minja engine cannot parse; a value

@@ -3246,7 +3246,7 @@ func settingRows() []settingRow {
 		{label: "Support expert / optimizer", kind: "enum", options: []string{"auto", "on", "off"},
 			get: func(c *config.Config) string { return c.SupportExpert },
 			set: func(c *config.Config, v string) { c.SupportExpert = v }},
-		{label: "Claude penalties", kind: "enum", options: []string{"late", "full", "off"},
+		{label: "Claude penalties", kind: "enum", options: []string{"off", "late", "full"},
 			get: func(c *config.Config) string { return c.ClaudePenalties },
 			set: func(c *config.Config, v string) { c.ClaudePenalties = v }},
 		{label: "Support online research", kind: "bool",

@@ -87,16 +87,17 @@ func claudeCodeSamplingArgs(args []string, claudeCode bool, model *placement.Mod
 	return out
 }
 
-// claudeCodeSampling appends anti-loop sampling defaults in Claude Code mode
-// and returns a one-line summary of what it chose.
+// claudeCodeSampling appends sampling defaults in Claude Code mode and returns
+// a one-line summary of what it chose.
 //
 // The Anthropic /v1/messages conversion only forwards temperature/top_p/top_k from
-// the client (server-chat.cpp), and the Anthropic API has no penalty fields at all —
-// so repetition control MUST come from server-side defaults, and ik_llama ships with
-// every penalty disabled (repeat 1.0, presence 0.0). Quantized thinking models
-// (Qwen3.x model card explicitly warns) fall into endless repetition without them:
-// the user-visible symptom is repeated phrases and the model re-issuing the same
-// tool call, since the tool-call grammar shapes degenerate output into valid JSON.
+// the client (server-chat.cpp), and the Anthropic API has no penalty fields at all,
+// so repetition control can only come from server-side flags. Penalties are a
+// per-model trade-off, not a safe default: in live W1 runs (E-10) repeat 1.05
+// broke GLM-4.7-Flash's think and tool-call markup in either sampler order (0 of
+// 12 passed, 10 of 12 without it), Qwen3.5-35B-A3B and Gemma 4 did not loop
+// without them, and only Qwen3.5-4B looped more often (8 of 27 runs against 3 of
+// 39). Hence the default "off" and the opt-in "late" for models that loop.
 //
 // Penalties follow the policy (penalties): "full" is presence 1.0 + repeat 1.05
 // over the last 512 tokens in llama.cpp's default order; "late" keeps repeat 1.05
