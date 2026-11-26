@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -121,9 +122,26 @@ type Recommendation struct {
 	PredictedTPS         float64 // estimated decode tok/s on this machine (0 = unknown)
 	// QuantProfile is the chosen file's effective precision and imatrix
 	// evidence (empty fields when unknown).
-	QuantProfile  QuantProfile
-	SpeedTier     int // 2 interactive, 1 usable, 0 slow, -1 unknown
-	BackendStatus BackendStatus
+	QuantProfile QuantProfile
+	// Retention is the chosen file's estimated (or, with RetentionMeasured,
+	// locally measured) share of the full-precision model's quality, and
+	// EstimatedQuality is catalog intelligence times it. 0 = no estimate.
+	// RetentionModel names the curve that produced an estimate.
+	Retention         float64
+	RetentionMeasured bool
+	RetentionModel    string
+	EstimatedQuality  float64
+	// PredictedPrefillTPS estimates prompt processing on this machine and
+	// ReferenceTurnSeconds prices the reference agent turn (15,000 new prompt
+	// tokens, 500 output tokens). 0 = unknown / unpriced.
+	PredictedPrefillTPS  float64
+	ReferenceTurnSeconds float64
+	// QualityEligible: the row's quality (EstimatedQuality, or catalog
+	// intelligence without an estimate) is at least 40% of the best fitting
+	// row's, so Best overall ranks it by reference-turn time.
+	QualityEligible bool
+	SpeedTier       int // 2 interactive, 1 usable, 0 slow, -1 unknown
+	BackendStatus   BackendStatus
 	// CUDABuildOffered: a default launch serves this row on the Vulkan build
 	// although the host has an NVIDIA GPU, and the first launch offers the
 	// CUDA build the speed estimate assumes. The row loads now either way.
@@ -471,9 +489,15 @@ func Top(caps *detect.Capabilities, limit int) []Recommendation {
 // Categories groups recommendations by intent so the intelligence/speed/fit
 // tradeoff is explicit instead of collapsed into one ranked list.
 type Categories struct {
-	Balanced []Recommendation // intelligence first among practical fitting choices
+	Balanced []Recommendation // fastest reference turn among capable fitting choices
 	Smartest []Recommendation // highest base-model intelligence (may be slow)
 	Fastest  []Recommendation // fastest while still genuinely capable
+	// FirstPick is what an automatic download takes (fresh install,
+	// `recommend --first`); nil when nothing qualifies, and FirstPickNote then
+	// says why. It is always present in JSON so a null is not read as an older
+	// binary's missing key.
+	FirstPick     *Recommendation `json:"first_pick"`
+	FirstPickNote string          `json:"first_pick_note,omitempty"`
 }
 
 // TopCategories returns up to n picks per category. Each category is ranked and
@@ -525,6 +549,7 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	sortRecommendations(balancedPool)
 	preferServable(balancedPool, true)
 	balanced := take(balancedPool)
+	firstPick, firstPickNote := chooseFirstPick(balancedPool)
 
 	// Smartest keeps the base-model capability order even when serving is slow.
 	// Quant preferences must not become a second cross-model ranking signal.
@@ -569,21 +594,98 @@ func TopCategories(caps *detect.Capabilities, n int) Categories {
 	preferServable(fastPool, true)
 	fastest := take(fastPool)
 
-	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest}
+	return Categories{Balanced: balanced, Smartest: smartest, Fastest: fastest, FirstPick: firstPick, FirstPickNote: firstPickNote}
 }
 
-// sortRecommendations orders Best overall: usable models first, then catalog
-// intelligence. A model predicted below the usable floor ranks after every
-// usable one; the discount alone let a 2-tok/s dense model on CPU outrank a
-// usable MoE and time out on a Claude Code task (October 8 matrix). Within a
-// speed tier, an estimated row follows every scored one.
+// firstPickMinBPW: below it an automatic download takes only files with
+// importance-matrix or dynamic-quant evidence; plain low-bit files lose most.
+const firstPickMinBPW = 3.0
+
+// NoFirstPickNote is shown when no row qualifies for an automatic download.
+const NoFirstPickNote = "No choice qualifies for an automatic download: each fitting model is below the quality floor, has no backend route here, or is a file under 3 bits per weight without an importance matrix. Pick one from the list to download it anyway."
+
+// chooseFirstPick takes the first Best overall row an automatic download may
+// use: quality-eligible, servable by some backend route, and, below 3 bits
+// per weight, an imatrix or dynamic quant. A row with no width keeps today's
+// behaviour and qualifies.
+func chooseFirstPick(rows []Recommendation) (*Recommendation, string) {
+	for _, r := range rows {
+		if !r.QualityEligible || r.BackendStatus == BackendUnsupported {
+			continue
+		}
+		if bpw := qualityBPW(r.QuantProfile); bpw > 0 && bpw < firstPickMinBPW && !r.QuantProfile.Imatrixed() {
+			continue
+		}
+		pick := r
+		return &pick, ""
+	}
+	return nil, NoFirstPickNote
+}
+
+// qualityFloorShare: a Best overall row is ranked by its reference turn only
+// when its quality is at least this share of the best fitting row's.
+const qualityFloorShare = 0.40
+
+// qualityBasis is what the floor compares: the file's estimated quality, or
+// catalog intelligence for a row without an estimate (today's signal).
+func qualityBasis(r Recommendation) float64 {
+	if r.EstimatedQuality > 0 {
+		return r.EstimatedQuality
+	}
+	return modelIntelligence(r.Candidate)
+}
+
+// markQualityEligible sets QualityEligible against the best row in rows. A
+// row no backend route can serve here does not set the bar: it is listed
+// last and cannot be what the user runs.
+func markQualityEligible(rows []Recommendation) {
+	best := 0.0
+	for _, r := range rows {
+		if r.BackendStatus != BackendUnsupported {
+			best = math.Max(best, qualityBasis(r))
+		}
+	}
+	for i := range rows {
+		rows[i].QualityEligible = best > 0 && qualityBasis(rows[i]) >= qualityFloorShare*best
+	}
+}
+
+// turnClass orders Best overall rows: 0 eligible and priced, 1 eligible but
+// unpriced, 2 below the quality floor.
+func turnClass(r Recommendation) int {
+	switch {
+	case !r.QualityEligible:
+		return 2
+	case r.ReferenceTurnSeconds <= 0:
+		return 1
+	}
+	return 0
+}
+
+// sortRecommendations orders Best overall (decision D9, 2026-11-26): among
+// rows whose quality is at least 40% of the best fitting row's, the shortest
+// estimated reference turn first; unpriced eligible rows, then rows under the
+// floor, follow in the practical order below. Two rules stay ahead of that:
+// a model predicted below the usable decode floor ranks after every usable
+// one (a 2-tok/s dense model on CPU timed out on a Claude Code task, October
+// 8 matrix), and an estimated row follows every scored one. Equal turn
+// times (to 0.1 s) keep the practical order: catalog intelligence with its
+// usability discount, then the smaller download.
 func sortRecommendations(rows []Recommendation) {
+	markQualityEligible(rows)
 	sort.SliceStable(rows, func(i, j int) bool {
 		if si, sj := rows[i].SpeedTier == 0, rows[j].SpeedTier == 0; si != sj {
 			return sj
 		}
 		if ei, ej := estimated(rows[i].Candidate), estimated(rows[j].Candidate); ei != ej {
 			return ej
+		}
+		if ci, cj := turnClass(rows[i]), turnClass(rows[j]); ci != cj {
+			return ci < cj
+		} else if ci == 0 {
+			if ti, tj := math.Round(rows[i].ReferenceTurnSeconds*10), math.Round(rows[j].ReferenceTurnSeconds*10); ti != tj {
+				return ti < tj
+			}
 		}
 		if rows[i].Score == rows[j].Score {
 			if modelIntelligence(rows[i].Candidate) == modelIntelligence(rows[j].Candidate) {
@@ -682,7 +784,8 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 		if effIntel <= 0 {
 			continue
 		}
-		tps := predictDecodeTPSForFit(caps, c, q, fit, gpuSideOverheadMB(caps, c, q))
+		overheadMB := gpuSideOverheadMB(caps, c, q)
+		tps := predictDecodeTPSForFit(caps, c, q, fit, overheadMB)
 		// Quant-retention guesses are not benchmark measurements. Compare
 		// models on their catalog intelligence, discounting only predicted
 		// serving below the usable floor. Extra speed beyond that is not a
@@ -702,6 +805,11 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 			PredictedTPS:         tps,
 			SpeedTier:            speedTier(tps),
 			Score:                int(score * 1000),
+		}
+		applyQualityEstimate(&rec)
+		if tps > 0 {
+			rec.PredictedPrefillTPS = predictPrefillTPSForFit(budget, c, q, fit, overheadMB)
+			rec.ReferenceTurnSeconds = referenceTurnSeconds(rec.PredictedPrefillTPS, tps)
 		}
 		if !ok || isBetter(rec, best) {
 			best = rec
@@ -768,7 +876,7 @@ func betterByScore(a, b Recommendation) bool {
 	// very-low-bit alternatives. If none is usable, keep the normal speed/fit
 	// tradeoff: merely fitting a slow Q8 must not force it over a usable Q2.
 	preferred := func(r Recommendation) bool {
-		return !lowBitQuant(r.QuantName) && (r.PredictedTPS <= 0 || r.PredictedTPS >= usableTPS)
+		return !lowBitRow(r) && (r.PredictedTPS <= 0 || r.PredictedTPS >= usableTPS)
 	}
 	if preferred(a) != preferred(b) {
 		return preferred(a)
@@ -787,6 +895,17 @@ func betterByScore(a, b Recommendation) bool {
 		return a.QuantSizeGB < b.QuantSizeGB
 	}
 	return a.AdjustedIntelligence > b.AdjustedIntelligence
+}
+
+// lowBitRow classifies a file by its measured width when it is known (header
+// or catalog size): under 3 bits per weight without importance-matrix or
+// dynamic evidence, the files the first pick also avoids. A file whose width
+// is unknown or only nominal falls back to its name.
+func lowBitRow(r Recommendation) bool {
+	if p := r.QuantProfile; p.BPW > 0 && p.Source != QuantSourceNominal {
+		return qualityBPW(p) < firstPickMinBPW && !p.Imatrixed()
+	}
+	return lowBitQuant(r.QuantName)
 }
 
 // Very-low-bit variants remain within-model fallbacks when memory or speed

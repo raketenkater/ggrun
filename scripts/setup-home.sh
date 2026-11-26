@@ -342,10 +342,18 @@ download_recommended_model() {
     IFS=$'\t' read -r first_repo first_quant < <(python3 -c '
 import json, sys
 try:
-    rows = json.loads(sys.argv[1])["categories"]["Balanced"]
-    if rows:
-        print(rows[0]["repo"] + "\t" + rows[0]["QuantName"])
-except (ValueError, KeyError, TypeError):
+    cats = json.loads(sys.argv[1])["categories"]
+    # first_pick is null when nothing qualifies for an automatic download;
+    # only a binary without the key falls back to the first Best overall row.
+    if "first_pick" in cats:
+        row = cats["first_pick"]
+        if not row and cats.get("first_pick_note"):
+            print(cats["first_pick_note"], file=sys.stderr)
+    else:
+        row = (cats.get("Balanced") or [None])[0]
+    if row:
+        print(row["repo"] + "\t" + row["QuantName"])
+except (ValueError, KeyError, TypeError, IndexError):
     pass
 ' "$recommendation_json") || true
     repo="$(read_tty "Hugging Face repo to download (empty skips)" "$first_repo")"

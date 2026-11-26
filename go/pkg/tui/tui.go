@@ -2534,6 +2534,7 @@ func (m Model) viewRecommended() string {
 					from += "  (publisher outside the named quantizers; check it first)"
 				}
 				b.WriteString(mutedStyle.Render(from) + "\n")
+				b.WriteString(mutedStyle.Render("    "+recommend.QualityLabel(rec)+" · "+recommend.ReferenceTurnLabel(rec)) + "\n")
 			} else {
 				b.WriteString(prefix + line + "\n")
 			}
@@ -2541,7 +2542,13 @@ func (m Model) viewRecommended() string {
 		}
 		b.WriteString("\n")
 	}
-	writeGroup("Best overall — intelligence first, practical quant", m.recommendationGroups.Balanced)
+	writeGroup("Best overall — fastest reference turn among capable models", m.recommendationGroups.Balanced)
+	if g := m.recommendationGroups; g.FirstPick == nil && g.FirstPickNote != "" {
+		for _, line := range wordWrap(g.FirstPickNote, m.width-4) {
+			b.WriteString(warningStyle.Render("  "+line) + "\n")
+		}
+		b.WriteString("\n")
+	}
 	writeGroup("Smartest — highest intelligence that fits", m.recommendationGroups.Smartest)
 	writeGroup("Fastest — quickest while still capable", m.recommendationGroups.Fastest)
 	if buildShown {
@@ -2554,7 +2561,9 @@ func (m Model) viewRecommended() string {
 		b.WriteString(mutedStyle.Render("  ! No installed backend loads it and no supported route builds one here; listed last.") + "\n")
 	}
 	b.WriteString(mutedStyle.Render("  Intel is base-model catalog intelligence (~ estimated), not quantized accuracy.") + "\n")
-	b.WriteString(mutedStyle.Render("  1–2 bit quants are fallbacks within a model; task accuracy is unverified.") + "\n")
+	for _, line := range wordWrap(recommend.ReferenceTurnNote, m.width-4) {
+		b.WriteString(mutedStyle.Render("  "+line) + "\n")
+	}
 	b.WriteString(mutedStyle.Render("  Speeds are estimates; Benchmark measures this exact machine.") + "\n")
 	b.WriteString(mutedStyle.Render("  Fit uses installed capacity; launch rechecks memory currently free.") + "\n\n")
 
