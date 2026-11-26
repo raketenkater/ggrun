@@ -486,3 +486,75 @@ func TestCachedValueWorksForNonFirstShard(t *testing.T) {
 		t.Fatalf("computed %d times, want 3 (only the grown shard recomputed)", computed)
 	}
 }
+
+func setExeIdentity(t *testing.T, id string) {
+	t.Helper()
+	old := executableIdentity
+	executableIdentity = func() string { return id }
+	t.Cleanup(func() { executableIdentity = old })
+}
+
+func TestHeaderCacheExecutableIdentity(t *testing.T) {
+	calls := stubParse(t)
+	dir := t.TempDir()
+	model := filepath.Join(t.TempDir(), "m.gguf")
+	writeCacheFile(t, model, "GGUF-data")
+
+	setExeIdentity(t, "exe-a")
+	c := OpenHeaderCache(dir)
+	if _, err := c.Info(model); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same binary: the stored entry is kept.
+	c = OpenHeaderCache(dir)
+	if _, err := c.Info(model); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("unchanged executable re-parsed: %d calls", got)
+	}
+
+	// Changed binary: the file is foreign, so everything is recomputed.
+	setExeIdentity(t, "exe-b")
+	c = OpenHeaderCache(dir)
+	if len(c.entries) != 0 {
+		t.Fatalf("changed executable kept %d entries", len(c.entries))
+	}
+	if _, err := c.Info(model); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(calls); got != 2 {
+		t.Fatalf("changed executable did not re-parse: %d calls", got)
+	}
+}
+
+func TestHeaderCacheExecutableFallbackStaysUsable(t *testing.T) {
+	calls := stubParse(t)
+	dir := t.TempDir()
+	model := filepath.Join(t.TempDir(), "m.gguf")
+	writeCacheFile(t, model, "GGUF-data")
+
+	setExeIdentity(t, "exe-unknown")
+	c := OpenHeaderCache(dir)
+	if _, err := c.Info(model); err != nil {
+		t.Fatal(err)
+	}
+	c = reopen(t, c, dir)
+	if _, err := c.Info(model); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("fallback identity did not cache: %d calls", got)
+	}
+}
+
+func TestExeIdentityIsStableAndNeverEmpty(t *testing.T) {
+	a, b := exeIdentity(), exeIdentity()
+	if a == "" || a != b {
+		t.Fatalf("unstable or empty identity: %q vs %q", a, b)
+	}
+}

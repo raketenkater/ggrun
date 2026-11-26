@@ -33,7 +33,7 @@ var parseModel = Parse
 // HeaderCache remembers what ggrun read from GGUF headers, so a model listing
 // does not re-run the parser helper and re-walk every vocabulary on each start.
 // An entry is valid only while the size and modification time of every file of
-// the model, and the parser helper itself, are unchanged. A cache that cannot be
+// the model, and the parser helper and the ggrun binary, are unchanged. A cache that cannot be
 // read or written is simply empty: results are then computed as before.
 type HeaderCache struct {
 	dir         string
@@ -74,19 +74,46 @@ func OpenHeaderCache(dir string) *HeaderCache {
 	return c
 }
 
-// parserFingerprint identifies the parser helper Parse would run, so a changed
-// helper (new fields, fixed byte accounting) discards every stored Info.
+// executableIdentity names the running ggrun binary; tests replace it. Parse
+// also post-processes the helper's output in Go, so a new binary must not
+// reuse Info stored by an older one.
+var executableIdentity = exeIdentity
+
+// exeIdentity is the resolved path, size and modification time of the running
+// executable (one stat, no hashing). Any failure gives a stable fallback.
+func exeIdentity() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "exe-unknown"
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	} else {
+		return "exe-unknown"
+	}
+	st, err := os.Stat(exe)
+	if err != nil {
+		return "exe-unknown"
+	}
+	return fmt.Sprintf("%s:%d:%d", exe, st.Size(), st.ModTime().UnixNano())
+}
+
+// parserFingerprint identifies the parser helper Parse would run and the ggrun
+// binary that post-processes its output, so a changed helper (new fields, fixed
+// byte accounting) or a changed binary discards every stored Info.
 func parserFingerprint() string {
+	exe := sha256.Sum256([]byte(executableIdentity()))
+	exeID := hex.EncodeToString(exe[:4])
 	script := findParseScript()
 	if script == "" {
-		return "none"
+		return "none-" + exeID
 	}
 	data, err := os.ReadFile(script)
 	if err != nil {
-		return "none"
+		return "none-" + exeID
 	}
 	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:8]) + "-" + exeID
 }
 
 func (c *HeaderCache) readFile() map[string]*headerEntry {
