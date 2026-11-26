@@ -89,7 +89,7 @@ func TestOverheadReloadNeedsTheServingLoadToBeTheOnlyLoad(t *testing.T) {
 		if c.nilLed {
 			recovery = nil
 		}
-		got, why := overheadReloadEligible(c.relief, recovery)
+		got, why := overheadReloadEligible(&launchRequest{}, overheadServedPlan(), c.relief, recovery)
 		if got != c.want || (why != "") != c.why {
 			t.Errorf("%s: eligible=%v why=%q", c.name, got, why)
 		}
@@ -147,8 +147,11 @@ func TestOverheadReloadUpgradeIsTheSameShapeAndStrictlyLarger(t *testing.T) {
 type overheadReloadHarness struct {
 	stderr      bytes.Buffer
 	events      []string
+	plans       int
 	stopOK      bool
 	running     bool
+	killWorks   bool
+	releaseErr  error
 	started     *server.Process
 	startResult *placement.Strategy
 	startArgs   []string
@@ -163,6 +166,16 @@ type overheadReloadHarness struct {
 
 func (h *overheadReloadHarness) fx() overheadReloadEffects {
 	return overheadReloadEffects{
+		plan: func(*launchRequest, *config.Config, *placement.ModelProfile, *backendInfo, *detect.Capabilities, *placement.Strategy, []string) (*placement.Strategy, []string, string) {
+			h.plans++
+			return nil, nil, "stub planner"
+		},
+		kill: func(*server.Process) {
+			h.events = append(h.events, "kill")
+			if h.killWorks {
+				h.running = false
+			}
+		},
 		stderr: &h.stderr,
 		stopAndWait: func(*server.Process, string, *detect.Capabilities, time.Duration) bool {
 			if !strings.Contains(h.stderr.String(), "reloading once") {
@@ -175,7 +188,7 @@ func (h *overheadReloadHarness) fx() overheadReloadEffects {
 		release: func(p *server.Process, _ *detect.Capabilities, _ time.Duration) error {
 			h.events = append(h.events, "release")
 			h.released = append(h.released, p)
-			return nil
+			return h.releaseErr
 		},
 		start: func(_ *launchRequest, _ *config.Config, _ *placement.ModelProfile, _ *placement.Strategy, _ *backendInfo, _ *detect.Capabilities,
 			args []string, _ time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string, error) {
@@ -300,5 +313,101 @@ func TestOverheadReloadIsSkippedWithoutRelief(t *testing.T) {
 		if attempted || got.process != served.process {
 			t.Errorf("%s: attempted=%v", name, attempted)
 		}
+	}
+}
+
+// Every lab harness launches with --calibrate off and keys on the first ready
+// line; a one-shot benchmark promises one load; a reused verified config is not
+// a first launch. None of them re-plan, stop or reload, even with relief and a
+// single weight load. Automatic and explicit calibration reach the planner.
+func TestOverheadReloadHonoursCalibrateOffAndOneShotLaunches(t *testing.T) {
+	bin := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in *memory.used*) echo 10039 ;; *) exit 1 ;; esac\n"
+	if err := os.WriteFile(filepath.Join(bin, "nvidia-smi"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", t.TempDir())
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "gpu", VRAMTotalMB: 12282}}}
+	before := measuredOverheadView(cfg.CacheDir, caps)
+	log := "llama_model_load_from_file_impl: using device CUDA0\nload_tensors: CUDA0 model buffer size = 4002.00 MiB\n"
+	placement.RunPostLaunchProbe(cfg.CacheDir, caps.GPUs, log, 0, nil, map[int]int{0: 9428}, true)
+	if relief := measuredOverheadRelief(before, measuredOverheadView(cfg.CacheDir, caps), caps.GPUs); relief[0] != 611 {
+		t.Fatalf("fixture has no relief: %v", relief)
+	}
+	saved := overheadReloadFx
+	defer func() { overheadReloadFx = saved }()
+	run := func(req *launchRequest, edit func(*placement.Strategy)) (*overheadReloadHarness, overheadReload, overheadReload, bool) {
+		h := &overheadReloadHarness{stopOK: true}
+		overheadReloadFx = h.fx()
+		served, _, _ := overheadReloadFixture()
+		if edit != nil {
+			edit(served.strategy)
+		}
+		got, attempted := replanAfterMeasuredOverhead(req, cfg, &placement.ModelProfile{}, &backendInfo{}, caps, caps, before, served, nil)
+		return h, served, got, attempted
+	}
+	for name, c := range map[string]struct {
+		req  *launchRequest
+		edit func(*placement.Strategy)
+	}{
+		"calibrate off":   {&launchRequest{Calibrate: calibrateOff}, nil},
+		"benchmark":       {&launchRequest{Benchmark: true}, nil},
+		"workerbench":     {&launchRequest{WorkerBenchmark: true}, nil},
+		"verified config": {&launchRequest{}, func(s *placement.Strategy) { s.VerifiedConfigReused = true }},
+	} {
+		h, served, got, attempted := run(c.req, c.edit)
+		if attempted || h.plans != 0 || len(h.events) != 0 || got.process != served.process || got.strategy != served.strategy {
+			t.Errorf("%s: attempted=%v plans=%d events=%v", name, attempted, h.plans, h.events)
+		}
+	}
+	for _, mode := range []string{"", calibrateAuto, calibrateOn} {
+		h, _, _, _ := run(&launchRequest{Calibrate: mode}, nil)
+		if h.plans != 1 {
+			t.Errorf("calibrate %q: planner calls = %d, want 1", mode, h.plans)
+		}
+	}
+}
+
+// A process that will not stop is killed before the reload reports that nothing
+// serves: the caller exits next and would leave it running.
+func TestOverheadReloadNeverLeavesAStuckProcessBehind(t *testing.T) {
+	served, candidate, candidateArgs := overheadReloadFixture()
+	h := &overheadReloadHarness{stopOK: true, started: &server.Process{}, startErr: errors.New("CUDA OOM"),
+		releaseErr: errors.New("did not return to baseline"), running: true, killWorks: false}
+	if got := runOverheadReload(h, served, candidate, candidateArgs); got.process != nil ||
+		strings.Join(h.events, ",") != "stop,start,release,kill" {
+		t.Fatalf("events = %v; a failed candidate that survives a kill must stop the reload before any restore", h.events)
+	}
+	h = &overheadReloadHarness{stopOK: true, started: &server.Process{}, startErr: errors.New("CUDA OOM"),
+		releaseErr: errors.New("did not return to baseline"), running: true, killWorks: true, restored: &server.Process{}}
+	if got := runOverheadReload(h, served, candidate, candidateArgs); got.process != h.restored ||
+		strings.Join(h.events, ",") != "stop,start,release,kill,restore" {
+		t.Fatalf("events = %v; a killed candidate must be gone before the serving plan is restored", h.events)
+	}
+	h = &overheadReloadHarness{stopOK: true, startErr: errors.New("deficit"), restoreErr: errors.New("restore OOM"),
+		restored: &server.Process{}, releaseErr: errors.New("did not return to baseline")}
+	h.running = false
+	got := runOverheadReload(h, served, candidate, candidateArgs)
+	if got.process != nil {
+		t.Fatal("a failed restore reported a serving process")
+	}
+	h = &overheadReloadHarness{stopOK: true, startErr: errors.New("deficit"), restoreErr: errors.New("restore OOM"),
+		restored: &server.Process{}}
+	h.events = nil
+	// The restore's own failed process is still running when it returns.
+	h.running, h.killWorks = false, true
+	restoreRunning := h.fx()
+	inner := restoreRunning.restore
+	restoreRunning.restore = func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, s *placement.Strategy, be *backendInfo, caps *detect.Capabilities,
+		args []string, d time.Duration, r *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string, error) {
+		h.running, h.releaseErr = true, errors.New("did not return to baseline")
+		return inner(req, cfg, model, s, be, caps, args, d, r)
+	}
+	got = reloadIntoMeasuredOverheadPlan(restoreRunning, &launchRequest{}, &config.Config{}, &placement.ModelProfile{}, &backendInfo{},
+		&detect.Capabilities{}, served, candidate, candidateArgs, map[int]int{0: 190}, nil)
+	if got.process != nil || !strings.HasSuffix(strings.Join(h.events, ","), "restore,release,kill") {
+		t.Fatalf("events = %v; a running process from a failed restore must be killed", h.events)
 	}
 }

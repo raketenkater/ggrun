@@ -83,16 +83,28 @@ func formatOverheadRelief(relief map[int]int) string {
 }
 
 // overheadReloadEligible decides whether the measurement may reload this
-// launch. The reload is admitted with a fresh memory ledger, as the next launch
-// would be, because every rejection in this one was priced against the guessed
+// launch. It skips the launches calibrationPlan already keeps to one load:
+// --calibrate off (lab harnesses key on the first ready line), the one-shot
+// --benchmark and --worker-benchmark ("load once"), and a plan that is a
+// reused verified config or a tuned winner, which is not a first launch.
+//
+// The reload is admitted with a fresh memory ledger, as the next launch would
+// be, because every rejection in this one was priced against the guessed
 // reserve. That is true only when the serving load is the lifecycle's only
 // weight load: a contained probe or a real CUDA OOM is evidence a fresh ledger
 // would forget, so such a launch keeps its plan and the next launch re-plans.
-func overheadReloadEligible(relief map[int]int, recovery *launchMemoryRecovery) (bool, string) {
+func overheadReloadEligible(req *launchRequest, served *placement.Strategy, relief map[int]int, recovery *launchMemoryRecovery) (bool, string) {
 	if len(relief) == 0 {
 		return false, ""
 	}
-	if recovery == nil || recovery.weightLoads != 1 {
+	switch {
+	case effectiveCalibrationMode(req) == calibrateOff:
+		return false, "--calibrate is off"
+	case req != nil && (req.Benchmark || req.WorkerBenchmark):
+		return false, "a one-shot benchmark loads once"
+	case served != nil && (served.VerifiedConfigReused || served.PerformanceTuned):
+		return false, "the serving plan is a reused verified config"
+	case recovery == nil || recovery.weightLoads != 1:
 		return false, "this launch loaded model weights more than once"
 	}
 	return true, ""
@@ -162,18 +174,22 @@ func overheadReloadCandidate(req *launchRequest, cfg *config.Config, model *plac
 // overheadReloadEffects are the process effects of the reload. Tests replace
 // them to drive every branch without a backend or GPU.
 type overheadReloadEffects struct {
+	plan        func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, served *placement.Strategy, servedArgs []string) (*placement.Strategy, []string, string)
 	stderr      io.Writer
 	stopAndWait func(p *server.Process, label string, baseline *detect.Capabilities, timeout time.Duration) bool
 	running     func(p *server.Process) bool
+	kill        func(p *server.Process)
 	release     func(p *server.Process, baseline *detect.Capabilities, timeout time.Duration) error
 	start       func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, args []string, timeout time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string, error)
 	restore     func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, args []string, timeout time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string, error)
 }
 
 var overheadReloadFx = overheadReloadEffects{
+	plan:        overheadReloadCandidate,
 	stderr:      os.Stderr,
 	stopAndWait: stopCalibrationProcessAndWait,
 	running:     func(p *server.Process) bool { return p != nil && p.IsRunning() },
+	kill:        func(p *server.Process) { p.Kill() },
 	release:     stopFailedLaunchBeforeAdvisor,
 	start:       startLaunchWithCUDAOOMRecoveryState,
 	restore:     restoreLaunchWithCUDAOOMRecoveryState,
@@ -190,25 +206,29 @@ func replanAfterMeasuredOverhead(req *launchRequest, cfg *config.Config, model *
 		return served, false
 	}
 	relief := measuredOverheadRelief(overheadBefore, measuredOverheadView(cfg.CacheDir, runtimeCaps), runtimeCaps.GPUs)
-	if eligible, why := overheadReloadEligible(relief, served.recovery); !eligible {
+	if eligible, why := overheadReloadEligible(req, served.strategy, relief, served.recovery); !eligible {
 		if why != "" {
 			fmt.Fprintf(os.Stderr, "[launch] measured CUDA overhead %s; not reloading because %s; the next launch plans with it\n",
 				formatOverheadRelief(relief), why)
 		}
 		return served, false
 	}
-	candidate, candidateArgs, why := overheadReloadCandidate(req, cfg, model, be, caps, served.strategy, served.args)
+	fx := overheadReloadFx
+	candidate, candidateArgs, why := fx.plan(req, cfg, model, be, caps, served.strategy, served.args)
 	if candidate == nil {
 		fmt.Fprintf(os.Stderr, "[launch] measured CUDA overhead %s; keeping the serving plan: %s\n", formatOverheadRelief(relief), why)
 		return served, false
 	}
-	return reloadIntoMeasuredOverheadPlan(overheadReloadFx, req, cfg, model, be, caps, served, candidate, candidateArgs, relief, resourceBaseline), true
+	return reloadIntoMeasuredOverheadPlan(fx, req, cfg, model, be, caps, served, candidate, candidateArgs, relief, resourceBaseline), true
 }
 
 // reloadIntoMeasuredOverheadPlan stops the serving plan, admits candidate with
 // a fresh memory ledger, and serves the result when it is still an upgrade.
 // Otherwise the serving plan is restored under its own ledger, which now
-// rejects the candidate argv.
+// rejects the candidate argv. At most one backend runs at any point: nothing
+// starts until the previous process is gone, and a process that will not stop
+// is killed before the reload reports that nothing serves, because the caller
+// then exits and would otherwise leave it behind.
 func reloadIntoMeasuredOverheadPlan(fx overheadReloadEffects, req *launchRequest, cfg *config.Config, model *placement.ModelProfile,
 	be *backendInfo, caps *detect.Capabilities, served overheadReload, candidate *placement.Strategy, candidateArgs []string,
 	relief map[int]int, resourceBaseline *detect.Capabilities,
@@ -222,13 +242,20 @@ func reloadIntoMeasuredOverheadPlan(fx overheadReloadEffects, req *launchRequest
 		"[launch] measured CUDA overhead %s is below the %d MiB reserved before it was measured; reloading once into the plan the next launch would choose (ctx %d -> %d, ubatch %d -> %d). This costs %s; the serving plan comes back if the new one is not admitted.\n",
 		formatOverheadRelief(relief), placement.UnmeasuredCUDAOverheadMB,
 		served.strategy.ContextSize, candidate.ContextSize, served.strategy.UBatchSize, candidate.UBatchSize, cost)
+	// abandon releases a failed process and kills it when it is still running.
+	abandon := func(p *server.Process) bool {
+		if relErr := fx.release(p, resourceBaseline, failedStartReleaseWait); relErr != nil && fx.running(p) {
+			fmt.Fprintf(fx.stderr, "[launch] %v; killing it\n", relErr)
+			fx.kill(p)
+			return !fx.running(p)
+		}
+		return true
+	}
 	restoreServed := func() overheadReload {
 		p, s, a, err := fx.restore(req, cfg, model, served.strategy, be, caps, served.args, window, served.recovery)
 		if err != nil {
 			fmt.Fprintf(fx.stderr, "[launch] restoring the serving plan failed: %v\n", err)
-			if p != nil {
-				_ = fx.release(p, resourceBaseline, failedStartReleaseWait)
-			}
+			abandon(p)
 			return overheadReload{recovery: served.recovery}
 		}
 		return overheadReload{process: p, strategy: s, args: a, recovery: served.recovery}
@@ -253,8 +280,8 @@ func reloadIntoMeasuredOverheadPlan(fx overheadReloadEffects, req *launchRequest
 	} else {
 		fmt.Fprintln(fx.stderr, "[launch] the measured-overhead plan was admitted smaller than the serving plan; restoring the plan that was serving")
 	}
-	if relErr := fx.release(p, resourceBaseline, failedStartReleaseWait); relErr != nil && fx.running(p) {
-		fmt.Fprintf(fx.stderr, "[launch] %v\n", relErr)
+	if !abandon(p) {
+		fmt.Fprintln(fx.stderr, "[launch] the measured-overhead process is still running after a kill; not starting another backend")
 		return overheadReload{recovery: served.recovery}
 	}
 	return restoreServed()
