@@ -224,3 +224,41 @@ func TestHeaderCacheStoresQuantProfilePerFile(t *testing.T) {
 		t.Fatalf("cached %+v %v, want %+v", again, err, p)
 	}
 }
+
+// Shard 00001 of a real split model is often metadata only, and it alone
+// carries quantize.imatrix.* and general.file_type.
+func TestQuantProfileMetadataOnlyFirstShard(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "m-00001-of-00003.gguf")
+	writeProfileFixture(t, first, []fixtureKV{kvString("quantize.imatrix.file", "imatrix.gguf"), kvU32("general.file_type", 12)}, nil)
+	writeProfileFixture(t, filepath.Join(dir, "m-00002-of-00003.gguf"), nil, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 256}, 12}})
+	writeProfileFixture(t, filepath.Join(dir, "m-00003-of-00003.gguf"), nil, []profileTensor{{"blk.1.ffn_up_exps.weight", []uint64{256, 256, 4}, 11}})
+	wantBPW := float64(256*256/256*144+256*256*4/256*110) * 8 / float64(256*256*5)
+	check := func(name string, p QuantProfile, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if p.Shards != 3 || p.Imatrix != ImatrixKeys || p.FileType != 12 || !near(p.BPW(), wantBPW) || !near(p.ExpertBPW(), 3.4375) {
+			t.Fatalf("%s: %+v (bpw %.4f, want %.4f)", name, p, p.BPW(), wantBPW)
+		}
+	}
+	p, err := ReadQuantProfileModel(first)
+	check("direct", p, err)
+	cacheDir := filepath.Join(dir, "cache")
+	c := OpenHeaderCache(cacheDir)
+	p, err = c.QuantProfile(first)
+	check("cache", p, err)
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	p, err = OpenHeaderCache(cacheDir).QuantProfile(first)
+	check("stored", p, err)
+
+	// A single file without tensors has no profile.
+	empty := filepath.Join(dir, "empty.gguf")
+	writeProfileFixture(t, empty, []fixtureKV{kvU32("general.file_type", 12)}, nil)
+	if _, err := ReadQuantProfileModel(empty); err == nil {
+		t.Fatal("a tensor-less model got a profile")
+	}
+}

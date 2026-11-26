@@ -135,8 +135,9 @@ const (
 )
 
 // ReadQuantProfile reads one GGUF file's metadata and tensor table from r and
-// stops before the tensor data, so a bounded prefix of a remote file is
-// enough. Every length is bounded before it sizes a read or a skip.
+// stops before the tensor data. Every length is bounded before it sizes a
+// read or a skip. It takes a reader so a header fetched by other means (a
+// bounded HTTP Range read is not implemented yet) can be profiled the same way.
 func ReadQuantProfile(r io.Reader) (QuantProfile, error) {
 	p := QuantProfile{Version: QuantProfileVersion, FileType: -1, Shards: 1}
 	var buf [8]byte
@@ -275,9 +276,10 @@ func ReadQuantProfile(r io.Reader) (QuantProfile, error) {
 	if p.Imatrix == "" && typesImplyImatrix {
 		p.Imatrix = ImatrixTypes
 	}
-	if p.Params <= 0 {
-		return p, fmt.Errorf("no tensors")
-	}
+	// A header without tensors is valid: shard 00001 of a split model is
+	// often metadata only, and it alone carries quantize.imatrix.* and
+	// general.file_type. Whether a model has any weights is decided on the
+	// merged shards.
 	return p, nil
 }
 

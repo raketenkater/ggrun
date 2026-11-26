@@ -87,6 +87,10 @@ func quantProfileFor(c Candidate, q QuantOption) QuantProfile {
 	if c.TotalParamsB <= 0 {
 		return p
 	}
+	// size_bytes is the whole model: the catalog builder sums a complete
+	// shard set and leaves out mmproj, draft and adapter files
+	// (tools/models/update_recommendations.py, model_weight_siblings and the
+	// shard grouping before the size sum).
 	bytes := float64(q.SizeBytes)
 	if bytes <= 0 {
 		bytes = q.SizeGB * (1 << 30) // size_gb is GiB (size_bytes / 1024^3)
