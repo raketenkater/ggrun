@@ -122,14 +122,26 @@ func sizeScale(c Candidate) float64 {
 // precision (native MXFP4 or NVFP4 weights): such a file is the reference, yet
 // it gets the retention of its width. That errs low, the conservative side.
 func estimatedRetention(c Candidate, p QuantProfile) (float64, bool) {
-	if p.BPW <= 0 {
+	bpw := qualityBPW(p)
+	if bpw <= 0 {
 		return 0, false
 	}
-	loss := math.Max(lossAt(p.BPW)*sizeScale(c), minLoss(p.BPW))
+	loss := math.Max(lossAt(bpw)*sizeScale(c), minLoss(bpw))
 	if p.Imatrixed() {
 		loss *= imatrixLossFactor
 	}
 	return clampF(1-loss, minRetention, 1), true
+}
+
+// qualityBPW is the width quality is judged on: a MoE's routed experts when
+// their width is known. Its non-expert tensors are often Q8_0 or wider, which
+// lifts the whole-file figure (one file measured 4.20 bpw overall with 2.56-bpw
+// experts) while most weights, and most of the loss, sit in the experts.
+func qualityBPW(p QuantProfile) float64 {
+	if p.ExpertBPW > 0 {
+		return p.ExpertBPW
+	}
+	return p.BPW
 }
 
 // measuredRetention answers a locally measured retention (for example from a
@@ -171,10 +183,14 @@ func QualityLabel(r Recommendation) string {
 		head = fmt.Sprintf("measured %.2f×", r.Retention)
 	}
 	parts := []string{head}
-	if bpw := r.QuantProfile.BPW; bpw > 0 {
+	if bpw := qualityBPW(r.QuantProfile); bpw > 0 {
 		format := "%.1f bpw"
-		if r.QuantProfile.Source == QuantSourceNominal {
+		experts := r.QuantProfile.ExpertBPW > 0
+		if r.QuantProfile.Source == QuantSourceNominal || (experts && r.QuantProfile.ExpertEstimated) {
 			format = "~%.1f bpw"
+		}
+		if experts {
+			format += " experts"
 		}
 		parts = append(parts, fmt.Sprintf(format, bpw))
 	}

@@ -613,7 +613,7 @@ func chooseFirstPick(rows []Recommendation) (*Recommendation, string) {
 		if !r.QualityEligible || r.BackendStatus == BackendUnsupported {
 			continue
 		}
-		if bpw := r.QuantProfile.BPW; bpw > 0 && bpw < firstPickMinBPW && !r.QuantProfile.Imatrixed() {
+		if bpw := qualityBPW(r.QuantProfile); bpw > 0 && bpw < firstPickMinBPW && !r.QuantProfile.Imatrixed() {
 			continue
 		}
 		pick := r
@@ -903,7 +903,7 @@ func betterByScore(a, b Recommendation) bool {
 // is unknown or only nominal falls back to its name.
 func lowBitRow(r Recommendation) bool {
 	if p := r.QuantProfile; p.BPW > 0 && p.Source != QuantSourceNominal {
-		return p.BPW < firstPickMinBPW && !p.Imatrixed()
+		return qualityBPW(p) < firstPickMinBPW && !p.Imatrixed()
 	}
 	return lowBitQuant(r.QuantName)
 }

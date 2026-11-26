@@ -167,6 +167,8 @@ func TestQualityAndTurnLabels(t *testing.T) {
 		{Recommendation{Retention: 0.97, QuantProfile: QuantProfile{BPW: 4.84, Imatrix: ImatrixDynamic, Source: QuantSourceSize}}, "quality ≈ 0.97× · 4.8 bpw · dynamic"},
 		{Recommendation{Retention: 0.96, QuantProfile: QuantProfile{BPW: 4.84, Source: QuantSourceNominal}}, "quality ≈ 0.96× · ~4.8 bpw"},
 		{Recommendation{}, "quality: no estimate"},
+		{Recommendation{Retention: 0.88, QuantProfile: QuantProfile{BPW: 4.2, ExpertBPW: 2.56, Imatrix: "keys", Source: QuantSourceHeader}}, "quality ≈ 0.88× · 2.6 bpw experts · imatrix"},
+		{Recommendation{Retention: 0.88, QuantProfile: QuantProfile{BPW: 4.2, ExpertBPW: 2.61, ExpertEstimated: true, Source: QuantSourceSize}}, "quality ≈ 0.88× · ~2.6 bpw experts"},
 	} {
 		if got := QualityLabel(c.r); got != c.want {
 			t.Errorf("QualityLabel = %q, want %q", got, c.want)
@@ -298,5 +300,24 @@ func TestLowBitRowUsesTheMeasuredWidth(t *testing.T) {
 		if got := lowBitRow(c.r); got != c.want {
 			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
+	}
+}
+
+// A MoE is judged on its routed experts: a 2.56-bpw expert file with a Q8_0
+// backbone (4.20 overall) must not rate like a 4-bit quant.
+func TestMoERetentionIsKeyedOnTheExperts(t *testing.T) {
+	c := Candidate{TotalParamsB: 280, ActiveParamsB: 13, MoE: true}
+	byExperts, _ := estimatedRetention(c, QuantProfile{BPW: 4.20, ExpertBPW: 2.56, Imatrix: ImatrixKeys})
+	plain, _ := estimatedRetention(c, QuantProfile{BPW: 2.56, Imatrix: ImatrixKeys})
+	overall, _ := estimatedRetention(c, QuantProfile{BPW: 4.20, Imatrix: ImatrixKeys})
+	if byExperts != plain || byExperts >= overall {
+		t.Fatalf("experts %.3f, same-width file %.3f, overall-only %.3f", byExperts, plain, overall)
+	}
+	r := Recommendation{QuantProfile: QuantProfile{BPW: 4.20, ExpertBPW: 2.56, Source: QuantSourceHeader}}
+	if !lowBitRow(r) {
+		t.Fatal("a 2.56-bpw expert file without imatrix evidence is low-bit")
+	}
+	if pick, _ := chooseFirstPick([]Recommendation{{QualityEligible: true, QuantProfile: r.QuantProfile}}); pick != nil {
+		t.Fatal("the first pick took a plain sub-3-bit expert file")
 	}
 }
