@@ -228,6 +228,9 @@ type ModelItem struct {
 	// at enrich time (like KVProfile) so the config screen's chat-template row
 	// never re-opens the .gguf and walks its metadata on every render.
 	ChatTemplate string
+	// Incomplete is set (e.g. "incomplete download: 0.3 of 16.5 GB") when a file
+	// of the model is shorter than its GGUF header declares.
+	Incomplete string
 }
 
 type modelScanFinishedMsg struct {
@@ -389,6 +392,9 @@ func flattenRecommendationCategories(cats recommend.Categories) []recommend.Reco
 // external ones.
 func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 	desc := fmt.Sprintf("%.1fGB · %s", m.SizeGB, m.Arch)
+	if m.Incomplete != "" {
+		desc += " · " + m.Incomplete
+	}
 	if m.AutoBackend != "" {
 		desc += " · backend " + m.AutoBackend
 	} else if m.BackendRecipe != "" {
@@ -777,6 +783,11 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
+					if note := m.models[item.index].Incomplete; note != "" {
+						m.message = note + "; finish the download before launching"
+						m.messageType = "error"
+						return m, nil
+					}
 					// Open the config screen first so settings (context, KV,
 					// Claude Code, …) are discoverable. The recommended defaults
 					// are pre-filled, so launching is one more keypress: press L
@@ -839,6 +850,11 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openBackendManager(ScreenMain)
 		case "c", "C":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
+				if note := m.models[item.index].Incomplete; note != "" {
+					m.message = note + "; finish the download before launching"
+					m.messageType = "error"
+					return m, nil
+				}
 				m.selectedModel = item.index
 				m.backendRouteBypass = false
 				m.replayRequest = nil
@@ -2870,6 +2886,7 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 			}
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)
 		}
+		models[i].Incomplete = incompleteDownloadNote(models[i].Path)
 		visible = append(visible, models[i])
 	}
 	return visible
