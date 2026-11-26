@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,16 +12,49 @@ import (
 	"time"
 )
 
+// ggufHeader is a minimal valid GGUF header: magic, version, zero tensors, zero KVs.
+func ggufHeader(version uint32) []byte {
+	b := []byte("GGUF")
+	b = binary.LittleEndian.AppendUint32(b, version)
+	b = binary.LittleEndian.AppendUint64(b, 0)
+	return binary.LittleEndian.AppendUint64(b, 0)
+}
+
+func writeGGUFModel(t *testing.T, root, name string) {
+	t.Helper()
+	writeGGUF(t, filepath.Join(root, name))
+}
+
+func TestScanRootsSkipsFilesWithoutGGUFHeader(t *testing.T) {
+	root := t.TempDir()
+	writeModel(t, root, "empty.gguf", 0)
+	if err := os.WriteFile(filepath.Join(root, "magic-only.gguf"), []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrong := append([]byte("XXXX"), make([]byte, 20)...)
+	if err := os.WriteFile(filepath.Join(root, "wrong-magic.gguf"), wrong, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ok.gguf"), ggufHeader(3), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := scanRoots([]string{root}, nil, 100, time.Minute)
+	want := []string{filepath.Join(root, "ok.gguf")}
+	if !reflect.DeepEqual(result.Paths, want) {
+		t.Fatalf("paths = %#v, want %#v", result.Paths, want)
+	}
+}
+
 func TestScanRootsFindsSinglesAndFirstShardOnly(t *testing.T) {
 	root := t.TempDir()
-	writeModel(t, root, "single.gguf", 4)
-	writeModel(t, root, "UPPER.GGUF", 4)
-	writeModel(t, root, "nested/bundle-00001-of-00002.gguf", 4)
-	writeModel(t, root, "nested/bundle-00002-of-00002.gguf", 4)
-	writeModel(t, root, "nested/incomplete-00001-of-00003.gguf", 4)
-	writeModel(t, root, "nested/incomplete-00002-of-00003.gguf", 4)
-	writeModel(t, root, "nested/ggml-vocab-llama.gguf", 4)
-	writeModel(t, root, "nested/mmproj-model-f16.gguf", 4)
+	writeGGUFModel(t, root, "single.gguf")
+	writeGGUFModel(t, root, "UPPER.GGUF")
+	writeGGUFModel(t, root, "nested/bundle-00001-of-00002.gguf")
+	writeGGUFModel(t, root, "nested/bundle-00002-of-00002.gguf")
+	writeGGUFModel(t, root, "nested/incomplete-00001-of-00003.gguf")
+	writeGGUFModel(t, root, "nested/incomplete-00002-of-00003.gguf")
+	writeGGUFModel(t, root, "nested/ggml-vocab-llama.gguf")
+	writeGGUFModel(t, root, "nested/mmproj-model-f16.gguf")
 	writeModel(t, root, "nested/notes.txt", 4)
 
 	result := scanRoots([]string{root}, nil, 100, time.Minute)
@@ -43,9 +77,9 @@ func TestScanRootsFindsSinglesAndFirstShardOnly(t *testing.T) {
 func TestScanRootsSkipsMountBoundariesAndNoiseDirectories(t *testing.T) {
 	root := t.TempDir()
 	boundary := filepath.Join(root, "separate-mount")
-	writeModel(t, root, "keep.gguf", 4)
-	writeModel(t, root, ".git/hidden.gguf", 4)
-	writeModel(t, boundary, "scanned-separately.gguf", 4)
+	writeGGUFModel(t, root, "keep.gguf")
+	writeGGUFModel(t, root, ".git/hidden.gguf")
+	writeGGUFModel(t, boundary, "scanned-separately.gguf")
 
 	result := scanRoots([]string{root}, []string{boundary}, 100, time.Minute)
 	want := []string{filepath.Join(root, "keep.gguf")}
@@ -56,8 +90,8 @@ func TestScanRootsSkipsMountBoundariesAndNoiseDirectories(t *testing.T) {
 
 func TestScanRootsStopsAtEntryLimit(t *testing.T) {
 	root := t.TempDir()
-	writeModel(t, root, "one.gguf", 4)
-	writeModel(t, root, "two.gguf", 4)
+	writeGGUFModel(t, root, "one.gguf")
+	writeGGUFModel(t, root, "two.gguf")
 
 	result := scanRoots([]string{root}, nil, 1, time.Minute)
 	if !result.Truncated {
@@ -155,7 +189,7 @@ func TestRememberModelDirAddsDownloadsAndKeepsPriorPaths(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("GGUF"), 0o644); err != nil {
+		if err := os.WriteFile(path, ggufHeader(3), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -225,7 +259,7 @@ func writeGGUF(t *testing.T, path string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("GGUF"), 0o644); err != nil {
+	if err := os.WriteFile(path, ggufHeader(3), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

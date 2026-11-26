@@ -1,8 +1,11 @@
 package models
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -128,6 +131,13 @@ func scanRoots(roots, boundaries []string, maxEntries int, maxDuration time.Dura
 				// enter the persistent discovery cache as a deceptively small model.
 				return nil
 			}
+			// Test fixtures and interrupted writes otherwise show up in the TUI as models.
+			if ok, err := hasGGUFHeader(path); err != nil {
+				result.SkippedErrors++
+				return nil
+			} else if !ok {
+				return nil
+			}
 			real := clean
 			if resolved, err := filepath.EvalSymlinks(clean); err == nil {
 				real = cleanAbs(resolved)
@@ -159,6 +169,24 @@ func scanRoots(roots, boundaries []string, maxEntries int, maxDuration time.Dura
 	sort.Strings(result.Skipped)
 	result.Duration = time.Since(started)
 	return result
+}
+
+// hasGGUFHeader reports whether path starts with a plausible GGUF header:
+// magic, a version of at least 1, then the tensor and KV counts (24 bytes).
+func hasGGUFHeader(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var hdr [24]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return false, nil // shorter than a header
+		}
+		return false, err
+	}
+	return bytes.Equal(hdr[:4], []byte("GGUF")) && binary.LittleEndian.Uint32(hdr[4:8]) >= 1, nil
 }
 
 func isGGUFEntrypoint(name string) bool {
