@@ -375,7 +375,10 @@ func ChatTemplate(path string) string {
 		return ""
 	}
 	defer f.Close()
-	template, err := readChatTemplate(f)
+	// A vocabulary is hundreds of thousands of tiny values; unbuffered, each
+	// one is its own read syscall (tens of seconds for one model on a FUSE
+	// disk). The buffer turns them into memory reads.
+	template, err := readChatTemplate(bufio.NewReaderSize(f, 1<<20))
 	if err != nil {
 		return ""
 	}
@@ -458,10 +461,8 @@ func readChatTemplate(r io.Reader) (string, error) {
 // type id, including arrays. It fails on truncation, an unknown type, or a
 // length no real file could hold.
 func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
-	fixed := map[uint32]int64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
-	if n, ok := fixed[valType]; ok {
-		_, err := io.CopyN(io.Discard, r, n)
-		return err
+	if n, ok := ggufFixedSize[valType]; ok {
+		return discardGGUF(r, n)
 	}
 	var buf [12]byte
 	switch valType {
@@ -473,8 +474,7 @@ func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
 		if n > math.MaxInt64 {
 			return fmt.Errorf("string length %d out of range", n)
 		}
-		_, err := io.CopyN(io.Discard, r, int64(n))
-		return err
+		return discardGGUF(r, int64(n))
 	case 9: // array: element type + count, then each element
 		if depth >= maxGGUFArrayNesting {
 			return fmt.Errorf("arrays nested deeper than %d", maxGGUFArrayNesting)
@@ -484,6 +484,13 @@ func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
 		}
 		elemType := binary.LittleEndian.Uint32(buf[:4])
 		count := binary.LittleEndian.Uint64(buf[4:12])
+		// Fixed-size elements (token types, scores) are skipped in one step.
+		if size, ok := ggufFixedSize[elemType]; ok {
+			if count > uint64(math.MaxInt64)/uint64(size) {
+				return fmt.Errorf("array of %d elements out of range", count)
+			}
+			return discardGGUF(r, int64(count)*size)
+		}
 		for j := uint64(0); j < count; j++ {
 			if err := skipGGUFValue(r, elemType, depth+1); err != nil {
 				return err
@@ -493,6 +500,30 @@ func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
 	default:
 		return fmt.Errorf("unknown value type %d", valType)
 	}
+}
+
+// ggufFixedSize is the byte size of each fixed-width metadata value type.
+var ggufFixedSize = map[uint32]int64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+// discardGGUF skips n bytes. A buffered reader discards them in memory; any
+// other reader falls back to io.CopyN, so a short read is still an error.
+func discardGGUF(r io.Reader, n int64) error {
+	if d, ok := r.(interface{ Discard(int) (int, error) }); ok {
+		for n > 0 {
+			step := int64(math.MaxInt32)
+			if n < step {
+				step = n
+			}
+			got, err := d.Discard(int(step))
+			n -= int64(got)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	_, err := io.CopyN(io.Discard, r, n)
+	return err
 }
 
 // samplingKeyPrefix is the GGUF metadata namespace llama.cpp reads sampler

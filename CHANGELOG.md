@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- The TUI starts much faster with many models: embedded chat templates are
+  read through a buffer instead of one syscall per vocabulary entry, headers
+  are read concurrently, and parsed headers are cached by path, size and
+  modification time.
 - The catalog refresh counts only real leaderboard scores when checking a
   scrape, so a scrape that lost its scores no longer passes on kept `~`
   estimates; the index conversion fit ignores a single mismatched model; a
