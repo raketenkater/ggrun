@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/raketenkater/ggrun/pkg/gguf"
 )
 
 // writeF32GGUF writes a one-tensor GGUF (elems F32 values, alignment 32) whose
@@ -40,12 +42,12 @@ func TestIncompleteDownloadNote(t *testing.T) {
 	dir := t.TempDir()
 	full := filepath.Join(dir, "full.gguf")
 	writeF32GGUF(t, full, 1024, 4096)
-	if got := incompleteDownloadNote(full); got != "" {
+	if got := incompleteDownloadNote(gguf.OpenHeaderCache(""), full); got != "" {
 		t.Fatalf("full file flagged: %q", got)
 	}
 	short := filepath.Join(dir, "short.gguf")
 	writeF32GGUF(t, short, 1024, 4095)
-	if got := incompleteDownloadNote(short); !strings.HasPrefix(got, "incomplete download: 0.0 of 0.0 GB") {
+	if got := incompleteDownloadNote(gguf.OpenHeaderCache(""), short); !strings.HasPrefix(got, "incomplete download: 0.0 of 0.0 GB") {
 		t.Fatalf("short file note = %q", got)
 	}
 
@@ -53,11 +55,11 @@ func TestIncompleteDownloadNote(t *testing.T) {
 	for i, data := range []int{4096, 100} {
 		writeF32GGUF(t, filepath.Join(dir, fmt.Sprintf("big-%05d-of-00002.gguf", i+1)), 1024, data)
 	}
-	if got := incompleteDownloadNote(filepath.Join(dir, "big-00001-of-00002.gguf")); got == "" {
+	if got := incompleteDownloadNote(gguf.OpenHeaderCache(""), filepath.Join(dir, "big-00001-of-00002.gguf")); got == "" {
 		t.Fatal("split model with a short shard not flagged")
 	}
 	writeF32GGUF(t, filepath.Join(dir, "big-00002-of-00002.gguf"), 1024, 4096)
-	if got := incompleteDownloadNote(filepath.Join(dir, "big-00001-of-00002.gguf")); got != "" {
+	if got := incompleteDownloadNote(gguf.OpenHeaderCache(""), filepath.Join(dir, "big-00001-of-00002.gguf")); got != "" {
 		t.Fatalf("complete split model flagged: %q", got)
 	}
 }
@@ -84,5 +86,47 @@ func TestIncompleteModelIsMarkedAndNotLaunchable(t *testing.T) {
 	}
 	if !strings.Contains(got.message, "incomplete download") || got.messageType != "error" {
 		t.Fatalf("message = %q (%s)", got.message, got.messageType)
+	}
+}
+
+func TestIncompleteVerdictUsesHeaderCache(t *testing.T) {
+	calls := 0
+	orig := expectedSize
+	expectedSize = func(path string) (int64, bool) { calls++; return orig(path) }
+	t.Cleanup(func() { expectedSize = orig })
+
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	path := filepath.Join(dir, "m.gguf")
+	writeF32GGUF(t, path, 1024, 4095)
+	note := func() string {
+		cache := gguf.OpenHeaderCache(cacheDir)
+		got := incompleteDownloadNote(cache, path)
+		_ = cache.Save()
+		return got
+	}
+	if got := note(); got == "" || calls != 1 {
+		t.Fatalf("first start: note %q, calls %d", got, calls)
+	}
+	if got := note(); got == "" || calls != 1 {
+		t.Fatalf("second start re-read the header: note %q, calls %d", got, calls)
+	}
+
+	// The download finishes: size changes, the header is read again and the
+	// verdict flips.
+	writeF32GGUF(t, path, 1024, 4096)
+	if got := note(); got != "" || calls != 2 {
+		t.Fatalf("after size change: note %q, calls %d", got, calls)
+	}
+	// Same size, new mtime also invalidates.
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if got := note(); got != "" || calls != 3 {
+		t.Fatalf("after mtime change: note %q, calls %d", got, calls)
+	}
+	if got := note(); got != "" || calls != 3 {
+		t.Fatalf("unchanged file re-read: note %q, calls %d", got, calls)
 	}
 }

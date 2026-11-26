@@ -8,12 +8,17 @@ import (
 	modelstore "github.com/raketenkater/ggrun/pkg/models"
 )
 
+// expectedSize is the header walk behind the verdict; a variable so tests can
+// count how often it runs.
+var expectedSize = gguf.ExpectedSize
+
 // incompleteDownloadNote returns "incomplete download: X of Y GB" when any file
 // of the model is shorter than its GGUF header declares (an interrupted
 // download whose header arrived but whose tensor data did not). For a split
 // model every shard is checked. It returns "" when the model is complete or
-// when no verdict is possible (unreadable header, unknown tensor type).
-func incompleteDownloadNote(path string) string {
+// when no verdict is possible (unreadable header, unknown tensor type). The
+// declared size is cached per file; the actual size is stat'ed every time.
+func incompleteDownloadNote(cache *gguf.HeaderCache, path string) string {
 	files, _, err := modelstore.ResolveGGUFShardFiles(path)
 	if err != nil || len(files) == 0 {
 		return ""
@@ -27,7 +32,8 @@ func incompleteDownloadNote(path string) string {
 		}
 		actual := st.Size()
 		want := actual
-		if expected, ok := gguf.ExpectedSize(file); ok {
+		expected, ok := gguf.CachedValue(cache, file, "expected_size", func() (int64, bool) { return expectedSize(file) })
+		if ok {
 			want = expected
 			if actual < expected {
 				short = true

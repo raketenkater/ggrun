@@ -2839,6 +2839,8 @@ type modelHeader struct {
 	info     *gguf.Info
 	err      error
 	template string
+	// incomplete is the incomplete-download note, "" when complete.
+	incomplete string
 }
 
 // headerReadWorkers bounds the concurrent header reads: each one may run the
@@ -2858,6 +2860,9 @@ func readModelHeaders(models []ModelItem, cacheDir string) []modelHeader {
 		out[i].info, out[i].err = info, err
 		if err == nil && !isAuxiliaryModel(models[i].Name, info.Architecture) {
 			out[i].template = cache.ChatTemplate(path)
+		}
+		if err != nil || !isAuxiliaryModel(models[i].Name, info.Architecture) {
+			out[i].incomplete = incompleteDownloadNote(cache, path)
 		}
 	}
 	workers := min(headerReadWorkers, len(models))
@@ -2941,7 +2946,7 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 			}
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)
 		}
-		models[i].Incomplete = incompleteDownloadNote(models[i].Path)
+		models[i].Incomplete = headers[i].incomplete
 		visible = append(visible, models[i])
 	}
 	return visible
