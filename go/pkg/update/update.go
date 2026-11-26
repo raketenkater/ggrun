@@ -1700,7 +1700,11 @@ func bufferTypesInclude(output, accel string) bool {
 			found = line == "available buffer types:"
 			continue
 		}
-		name := strings.TrimSuffix(strings.Fields(line + " ")[0], ":")
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.TrimSuffix(fields[0], ":")
 		digits := strings.TrimPrefix(name, accel)
 		if digits != name && digits != "" && strings.Trim(digits, "0123456789") == "" {
 			return true

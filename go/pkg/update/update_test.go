@@ -852,3 +852,24 @@ func TestBuildBehindUpstreamComparesTheBuildNotTheCheckout(t *testing.T) {
 		t.Fatal("unstamped build compared against upstream")
 	}
 }
+
+func TestBufferTypesIncludeSkipsBlankLines(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"blank between cpu and cuda", "Available buffer types:\n  CPU\n \t \n  CUDA0\n", true},
+		{"leading blank after header", "Available buffer types:\n\n   CPU\n  CUDA1 (extra)\n", true},
+		{"trailing blank lines", "Available buffer types:\n  CPU\n  CUDA0\n\n  \n", true},
+		{"cpu only then blank and usage", "Available buffer types:\n  CPU\n\n  \nusage: llama-server [options]\n  --device cuda0\n", false},
+		{"cpu only trailing blanks", "Available buffer types:\n  CPU\n\n\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bufferTypesInclude(tc.output, "cuda"); got != tc.want {
+				t.Fatalf("bufferTypesInclude = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
