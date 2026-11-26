@@ -1090,7 +1090,7 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 	if meta.kind == kindClassifier {
 		rec.Verdict = verdictNone
 		if metered != nil && !rec.Aborted {
-			rec.Verdict = classifierVerdict(metered.status, metered.Header(), metered.captured.Bytes())
+			rec.Verdict = classifierVerdictFor(metered.status, metered.Header(), metered.captured.Bytes(), severityVariantRequest(body))
 		}
 	}
 	r.metrics.record(rec)
