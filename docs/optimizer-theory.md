@@ -93,6 +93,16 @@ at that moment. It is not a parameter-count or quant-name class.
   so CPU/disk-backed mmap or another last-resort tier is required. Automatic
   launch serves the stable fallback and does not add another potentially
   minutes-long model reload for a low-confidence speed guess.
+- **CPU resident:** a CPU-only plan held wholly in host RAM. It is resident,
+  but it takes the same baseline-only lane as non-resident; its bottleneck is
+  host layer service, never an idle GPU.
+
+A dense CPU-offload plan is admitted by a pooled VRAM-plus-RAM check, so the
+automatic context search also requires every GPU that carries KV to show
+non-negative slack in the per-device ledger. A dry run whose ledger shows such
+a GPU short prints "plan does not fit as estimated" and exits non-zero. The
+chosen automatic context takes the same batch rule as a typed context, and an
+automatic logical batch never exceeds the context.
 
 Recovery history and residency are separate. A launch can recover from one bad
 argv and still be roomy after the safe argv is measured. Conversely, idle VRAM

@@ -18,6 +18,9 @@ const (
 	ResidencyRoomy       ResidencyClass = "roomy-resident"
 	ResidencyTight       ResidencyClass = "tight-resident"
 	ResidencyNonResident ResidencyClass = "non-resident"
+	// ResidencyCPUResident is a CPU-only plan held wholly in host RAM. It is
+	// resident, but like non-resident it serves the stable baseline only.
+	ResidencyCPUResident ResidencyClass = "cpu-resident"
 )
 
 // DeviceResourceLedger is one device's complete placement account. Estimated
@@ -693,6 +696,11 @@ func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Str
 		if !entry.Active || entry.RequiredMB <= 0 {
 			continue
 		}
+		// A device holding no layers (only a CUDA context or graph reserve)
+		// serves no layer; its 1 MiB floor named the slowest idle card.
+		if s.Type != MoEOffload && entry.ModelMB <= 0 {
+			continue
+		}
 		est.ActiveGPUs++
 		bw := entry.BandwidthMBps
 		if bw <= 0 {
@@ -742,6 +750,26 @@ func EstimateStrategyCost(caps *detect.Capabilities, model *ModelProfile, s *Str
 			maxDeviceCost = deviceCost
 			est.Bottleneck = fmt.Sprintf("GPU %d layer service", entry.GPU)
 		}
+	}
+
+	if s.Type == CPUOnly || s.Type == DenseCPUOffload {
+		// Host-held layers are read at host memory bandwidth. A dense
+		// offload's GPU layer count is the backend's choice, so only a
+		// CPU-only plan's host share is known and priced.
+		hostBW := caps.HostMemoryBandwidthMBps
+		hostMB := model.TotalSizeMB
+		if hostMB <= 0 {
+			hostMB = bytesToMiBCeil(model.SizeBytes)
+		}
+		if s.Type == CPUOnly && hostBW > 0 && hostMB > 0 {
+			hostCost := float64(hostMB) / float64(hostBW)
+			est.DecodeCost += hostCost
+			est.BackboneCost += hostCost
+			prefillWeightCost += hostCost
+		} else {
+			est.Confidence = "low"
+		}
+		est.Bottleneck = "CPU layer service"
 	}
 
 	if s.Type == MoEOffload && s.NCPUMoE > 0 && model.NumLayers > 0 {
@@ -909,6 +937,9 @@ func AnalyzeCandidateFrontier(caps *detect.Capabilities, model *ModelProfile, op
 	}
 	if base.MMapRequired || base.Type == DenseCPUOffload || base.Type == CPUOnly {
 		base.Residency = ResidencyNonResident
+		if base.Type == CPUOnly && !base.MMapRequired {
+			base.Residency = ResidencyCPUResident
+		}
 		base.OptimizationBoundary = SummarizeCandidateFrontier(candidates)
 		return candidates
 	}
