@@ -34,7 +34,9 @@ func TestQueueWaitReturnsRetryableOverloadWithoutTakingASlot(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	bound := 125 * time.Millisecond
+	// Generous: the cancelled request below must be seen as cancelled by the
+	// router well before this bound, even on a slow runner.
+	bound := time.Second
 	router, err := startRouter(backend.URL, backend.URL, false, 1, bound)
 	if err != nil {
 		t.Fatal(err)
@@ -81,10 +83,20 @@ func TestQueueWaitReturnsRetryableOverloadWithoutTakingASlot(t *testing.T) {
 	if err != nil || code != http.StatusTooManyRequests || retry != "5" || calls.Load() != 1 {
 		t.Fatalf("queued overload: status=%d retry=%q calls=%d err=%v", code, retry, calls.Load(), err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), bound/2)
-	_, _, err = post(ctx)
+	// A client that gives up while queued. Cancel only once the router shows the
+	// request queued, and release the backend only once the router has seen the
+	// disconnect: otherwise the abandoned request could still be admitted when
+	// the slot frees and be recorded as served instead of cancelled in queue.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelled := make(chan error, 1)
+	go func() {
+		_, _, err := post(ctx)
+		cancelled <- err
+	}()
+	waitForQueued(t, router, 1)
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
+	waitForQueueEmpty(t, router)
+	if err := <-cancelled; !errors.Is(err, context.Canceled) {
 		t.Fatalf("client cancellation: %v", err)
 	}
 	once.Do(func() { close(release) })
@@ -122,6 +134,19 @@ func TestQueueWaitReturnsRetryableOverloadWithoutTakingASlot(t *testing.T) {
 	if rejectCount != 1 || clientCancelCount != 1 {
 		t.Fatalf("overloads=%d client cancellations=%d", rejectCount, clientCancelCount)
 	}
+}
+
+// waitForQueueEmpty polls until the router has no queued main request.
+func waitForQueueEmpty(t *testing.T, router *Router) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if router.mainQueued.Load() == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("router never noticed the client leaving the queue")
 }
 
 func TestQueueWaitFromEnv(t *testing.T) {
