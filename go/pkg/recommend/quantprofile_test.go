@@ -79,6 +79,9 @@ func TestImatrixFromName(t *testing.T) {
 		if got := imatrixFromName(QuantOption{Name: name}); got != want {
 			t.Errorf("%s: %q, want %q", name, got, want)
 		}
+		if got := (QuantProfile{Imatrix: imatrixFromName(QuantOption{Name: name})}).Imatrixed(); got != (want != "") {
+			t.Errorf("%s: Imatrixed %v", name, got)
+		}
 	}
 	if got := imatrixFromName(QuantOption{Name: "Q3_K_XL", Dynamic: true}); got != ImatrixDynamic {
 		t.Errorf("dynamic flag: %q", got)
