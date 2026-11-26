@@ -18,6 +18,16 @@ cd go && go build ./cmd/ggrun
 For the full clone-and-run setup (app home, models dir, config), see the
 "From a clone" steps in [docs/install.md](docs/install.md#recommended-self-contained-app-home).
 
+## CI-built Linux binary
+
+Every CI run uploads the stamped Linux amd64 binary (14-day retention) as
+`ggrun-linux-amd64-<12-char commit sha>`. Fetch and verify it:
+
+```bash
+gh run download <run-id> --repo raketenkater/ggrun --name ggrun-linux-amd64-<sha> --dir out
+(cd out && sha256sum -c ggrun.sha256 && chmod +x ggrun && ./ggrun version)
+```
+
 ## Reporting bugs and proposing changes
 
 Use the GitHub issue forms for reproducible bugs and focused feature requests.
