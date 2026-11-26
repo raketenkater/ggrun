@@ -475,3 +475,34 @@ func TestGGRUNAliasesSetConfigAndWin(t *testing.T) {
 		t.Fatal("alias spelling")
 	}
 }
+
+func TestClaudePenaltiesSettingRoundTripsAndValidates(t *testing.T) {
+	if got := Defaults().ClaudePenalties; got != DefaultClaudePenalties {
+		t.Fatalf("default ClaudePenalties = %q, want %q", got, DefaultClaudePenalties)
+	}
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	for _, mode := range []string{"off", "late", "full"} {
+		cfg := Defaults()
+		cfg.ClaudePenalties = mode
+		if err := cfg.Save(); err != nil {
+			t.Fatalf("Save(%s): %v", mode, err)
+		}
+		got, err := LoadPersisted()
+		if err != nil || got.ClaudePenalties != mode {
+			t.Fatalf("round trip %s = %q, %v", mode, got.ClaudePenalties, err)
+		}
+		if !got.IsExplicit("CLAUDE_PENALTIES") {
+			t.Errorf("%s: a saved value must read as explicit", mode)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "bad")
+	if err := os.WriteFile(path, []byte("LLM_CLAUDE_PENALTIES=heavy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadFile(path, Defaults()); err == nil {
+		t.Fatal("loadFile accepted an unknown CLAUDE_PENALTIES value")
+	}
+	if got, err := NormalizeClaudePenalties(" LATE "); err != nil || got != "late" {
+		t.Fatalf("Normalize = %q, %v", got, err)
+	}
+}
