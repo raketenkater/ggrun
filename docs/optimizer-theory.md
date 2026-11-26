@@ -243,7 +243,9 @@ placement, or `-ot` onto an old ledger.
 Candidate generation must obey:
 
 - Explicit user values are constraints. An automatic coordinate may move; an
-  explicit coordinate may not.
+  explicit coordinate may not. An explicit `--kv-placement` (CLI or config) gets
+  no `kv-alternate`, and any candidate that moved it is dropped; decisions are
+  scoped by it (calibration schema 29).
 - Context and KV quality remain fixed during ordinary performance A/B.
 - `ubatch <= batch` is invariant before display, accounting, caching, and argv
   emission.
