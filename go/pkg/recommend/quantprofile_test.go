@@ -116,6 +116,20 @@ func TestQuantProfileEstimatesExpertWidthFromGeometry(t *testing.T) {
 	if !p.ExpertEstimated || math.Abs(p.ExpertBPW-2.5) > 0.01 || p.ExpertBPW >= p.BPW {
 		t.Fatalf("profile %+v (share %.3f)", p, share)
 	}
+	// A plain K-quant keeps a backbone just above its overall width.
+	q4 := int64(4.9 * c.TotalParamsB * 1e9 / 8)
+	if p := quantProfileFor(c, QuantOption{Name: "Q4_K_M", SizeBytes: q4}); !p.ExpertEstimated || p.ExpertBPW < 0.95*p.BPW {
+		t.Fatalf("Q4_K_M experts %+v", p)
+	}
+	// With few routed weights the split is not attempted.
+	few := c
+	few.Experts, few.ExpertUsed = 8, 2
+	if _, share, ok := moeRoutedShares(few); !ok || share >= minRoutedParamsShare {
+		t.Fatalf("fixture share %.3f", share)
+	}
+	if p := quantProfileFor(few, QuantOption{Name: "Q4_K_M", SizeBytes: q4}); p.ExpertBPW != 0 || p.ExpertEstimated {
+		t.Fatalf("small routed share got an expert width: %+v", p)
+	}
 	c.MoE = false
 	if p := quantProfileFor(c, QuantOption{Name: "IQ2_XS", SizeBytes: size}); p.ExpertBPW != 0 || p.ExpertEstimated {
 		t.Fatalf("dense model got an expert width: %+v", p)

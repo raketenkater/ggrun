@@ -110,32 +110,44 @@ func quantProfileFor(c Candidate, q QuantOption) QuantProfile {
 	if c.paramsFromSizes {
 		p.Source = QuantSourceNominal
 	}
-	if expert, ok := estimatedExpertBPW(c, bpw); ok {
+	if expert, ok := estimatedExpertBPW(c, q, bpw); ok {
 		p.ExpertBPW, p.ExpertEstimated = expert, true
 	}
 	return p
 }
 
-// assumedBackboneBPW is the width assumed for a MoE's non-expert tensors when
-// only the file size is known: quantizers usually keep attention, shared
-// experts and embeddings at Q8_0 (8.5 bpw). Files read here measured 5.7-8.6,
-// one with F32 side tensors 24.9; a wider real backbone means narrower real
-// experts than this estimate, a narrower one the reverse.
-const assumedBackboneBPW = 8.5
+// assumedBackboneBPW is the width assumed for a dynamic or low-bit MoE's
+// non-expert tensors when only the file size is known: such uploads keep
+// attention, shared experts and embeddings at Q8_0 (8.5 bpw); files read here
+// measured 7.2-8.6 (one with F32 side tensors 24.9). A plain K-quant keeps a
+// backbone just above its overall width (a Q4_K_M: 5.68 against 4.89), so
+// there the backbone is assumed plainBackboneMargin above the overall width.
+const (
+	assumedBackboneBPW   = 8.5
+	plainBackboneMargin  = 0.8
+	lowBitOverallBPW     = 4.5
+	minRoutedParamsShare = 0.8
+)
 
 // estimatedExpertBPW splits a MoE file's overall width into its routed
 // experts' share, from the catalog's expert geometry: the overall figure of a
 // low-bit MoE with a Q8_0 backbone rates it like a 4-bit quant (one 2.56-bpw
-// expert file measured 4.20 overall). ok is false without geometry.
-func estimatedExpertBPW(c Candidate, overall float64) (float64, bool) {
+// expert file measured 4.20 overall). ok is false without geometry, or when
+// routed experts are under 80% of the weights: there the backbone guess would
+// move the expert width too far.
+func estimatedExpertBPW(c Candidate, q QuantOption, overall float64) (float64, bool) {
 	if !c.MoE {
 		return 0, false
 	}
 	_, share, ok := moeRoutedShares(c)
-	if !ok {
+	if !ok || share < minRoutedParamsShare {
 		return 0, false
 	}
-	expert := (overall - (1-share)*assumedBackboneBPW) / share
+	backbone := overall + plainBackboneMargin
+	if q.Dynamic || strings.HasPrefix(strings.ToUpper(q.Name), "UD-") || overall < lowBitOverallBPW {
+		backbone = assumedBackboneBPW
+	}
+	expert := (overall - (1-share)*backbone) / share
 	return clampF(expert, minPlausibleBPW, overall), true
 }
 
