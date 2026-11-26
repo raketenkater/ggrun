@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/config"
+	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
 
@@ -51,9 +52,9 @@ import (
 //     selection (applyBackendFeatureCompatibility, preflightBackendArch) runs.
 //
 // Excluded because they need a live probe, network or nvidia-smi: backend
-// discovery, GGUF parsing, a backend --fit pass (its guard reads live VRAM, so
-// the fixture help has no --fit), the Vulkan device listing (the fixture is a
-// CUDA backend; a call fails the test), draft-model discovery (speculation
+// discovery, GGUF parsing, live VRAM readings (the fit guard's driver free
+// VRAM and live usage are stubbed from the inventory), the Vulkan device
+// listing (the fixtures are CUDA backends; a call fails the test), draft-model discovery (speculation
 // stays off) and the "Model does not fit" process hint of placementErrorMessage
 // (the raw error is recorded). Until planLaunch exists this guards the pieces
 // cmdDryRun calls, not cmdDryRun's own ordering.
@@ -65,10 +66,11 @@ const goldenPlanPath = "testdata/launch_plans_golden.json"
 // goldenPlanCase is one dry run: a hardware inventory, a model and the ggrun
 // flags that follow the model path.
 type goldenPlanCase struct {
-	name  string
-	hw    string
-	model string
-	args  []string
+	name    string
+	backend string // see goldenPlanBackend
+	hw      string
+	model   string
+	args    []string
 }
 
 // goldenPlanRecord is one case's outcome. Plan mirrors the ggrun-server-plan-v1
@@ -184,9 +186,8 @@ func goldenPlanMoE() *placement.ModelProfile {
 	return m
 }
 
-// goldenPlanHelp is a mainline-style help surface. It leaves out --fit and
-// --fit-margin: with them bindFitToGuard reads live VRAM usage.
-const goldenPlanHelp = `-c, --ctx-size N
+// goldenPlanBaseHelp is the help surface every fixture backend shares.
+const goldenPlanBaseHelp = `-c, --ctx-size N
 -ngl, --gpu-layers N
 -ot, --override-tensor <tensor name pattern>=<buffer type>,...
 --n-cpu-moe N
@@ -213,19 +214,48 @@ const goldenPlanHelp = `-c, --ctx-size N
 --op-offload, --no-op-offload
 `
 
-// goldenPlanBackend is a fresh mainline CUDA backend per case. The path is
-// under /usr/bin, so no library directory is derived from it, and does not
-// exist, so no architecture probe reads a file.
-func goldenPlanBackend() *backendInfo {
+// goldenPlanMainlineFitHelp is mainline llama.cpp's fit surface
+// (common/arg.cpp): a valued --fit and its target options, no --fit-margin.
+const goldenPlanMainlineFitHelp = `-fit,   --fit [on|off]                  whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on')
+-fitt,  --fit-target MiB0,MiB1,MiB2,... target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024
+-fitc,  --fit-ctx N                     minimum ctx size that can be set by --fit option, default: 4096
+`
+
+// goldenPlanIKFitHelp is ik_llama.cpp's fit surface (common/common.cpp): a
+// boolean --fit and --fit-margin, which binds the fit to the allocation guard.
+const goldenPlanIKFitHelp = `       --fit-margin N         safety margin in MiB when auto-fitting model offloading
+       --fit                  automatically determine which tensors to offload to the GPU(s)
+`
+
+// goldenPlanBackend is a fresh CUDA backend per case. Paths are under
+// /usr/bin, so no library directory is derived from them, and do not exist,
+// so no architecture probe reads a file.
+//   - "" (mainline): llama.cpp with its valued --fit.
+//   - "ik": ik_llama.cpp with boolean --fit and --fit-margin.
+//   - "nofit": a backend without --fit. Real backends all advertise it; the
+//     case records a known latent defect (see goldenPlanCases).
+func goldenPlanBackend(kind string) *backendInfo {
+	switch kind {
+	case "ik":
+		return &backendInfo{
+			Path: "/usr/bin/ggrun-golden-ik-llama-server", Tag: "ik_llama", Dialect: "ik_llama", IsIK: true,
+			Identity: "golden-ik-build", SupportsReasoning: true, Help: goldenPlanBaseHelp + goldenPlanIKFitHelp,
+		}
+	case "nofit":
+		return &backendInfo{
+			Path: "/usr/bin/ggrun-golden-nofit-llama-server", Tag: "llama", Dialect: "llama",
+			Identity: "golden-nofit-build", SupportsReasoning: true, Help: goldenPlanBaseHelp,
+		}
+	}
 	return &backendInfo{
 		Path: "/usr/bin/ggrun-golden-llama-server", Tag: "llama", Dialect: "llama",
-		Identity: "golden-mainline-build", SupportsReasoning: true, Help: goldenPlanHelp,
+		Identity: "golden-mainline-build", SupportsReasoning: true, Help: goldenPlanBaseHelp + goldenPlanMainlineFitHelp,
 	}
 }
 
 func goldenPlanCases() []goldenPlanCase {
 	var cases []goldenPlanCase
-	add := func(hw, model string, args ...string) {
+	addOn := func(backend, hw, model string, args ...string) {
 		flags := []string{}
 		for _, a := range args {
 			flags = append(flags, strings.TrimLeft(a, "-"))
@@ -234,8 +264,12 @@ func goldenPlanCases() []goldenPlanCase {
 		if len(flags) > 0 {
 			name = hw + "/" + model + "/" + strings.Join(flags, "-")
 		}
-		cases = append(cases, goldenPlanCase{name: name, hw: hw, model: model, args: args})
+		if backend != "" {
+			name = backend + "-backend/" + name
+		}
+		cases = append(cases, goldenPlanCase{name: name, backend: backend, hw: hw, model: model, args: args})
 	}
+	add := func(hw, model string, args ...string) { addOn("", hw, model, args...) }
 	// Every hardware class with every model, automatic context.
 	for _, hw := range []string{"cpu", "gpu12", "gpu24", "mixed3"} {
 		for _, model := range []string{"dense-small", "dense-large", "moe"} {
@@ -254,6 +288,14 @@ func goldenPlanCases() []goldenPlanCase {
 	add("mixed3", "moe", "--claude-code", "--ctx", "32768")
 	// Explicit KV placement.
 	add("gpu24", "dense-large", "--kv-placement", "cpu")
+	// ik_llama: boolean --fit bound to the allocation guard by --fit-margin.
+	addOn("ik", "gpu12", "dense-small", "--claude-code")
+	addOn("ik", "gpu24", "dense-large")
+	addOn("ik", "mixed3", "moe")
+	// Known latent defect: DenseCPUOffload on a backend without --fit emits
+	// -ngl 999 (every layer on the GPU) for a model larger than the card. A fix
+	// is pending; this case changes when it lands.
+	addOn("nofit", "gpu12", "dense-large")
 	return cases
 }
 
@@ -313,7 +355,7 @@ func goldenPlanDryRun(t *testing.T, c goldenPlanCase) goldenPlanRecord {
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 	warnModelCompatibility(model) // model stands in for parseModel
 
-	be := goldenPlanBackend()
+	be := goldenPlanBackend(c.backend)
 	// resolveLaunchBackend after selection; normalizeArchKVRequest is the part
 	// of auto selection that edits the request.
 	normalizeArchKVRequest(req, model)
@@ -407,6 +449,7 @@ func TestGoldenPlanSyntheticMatrix(t *testing.T) {
 		// run or on where the cache lives.
 		t.Run(c.name, func(t *testing.T) {
 			goldenPlanUnsetenv(t, "CUDA_VISIBLE_DEVICES", "GGML_VK_VISIBLE_DEVICES")
+			goldenPlanStubLiveVRAM(t)
 			record = goldenPlanDryRun(t, c)
 			first = goldenPlanMarshal(t, record)
 			second = goldenPlanMarshal(t, goldenPlanDryRun(t, c))
@@ -466,6 +509,26 @@ func TestGoldenPlanSyntheticMatrix(t *testing.T) {
 	}
 	goldenPlanLogEncoded(t, got)
 	t.Fatalf("launch plans differ from %s; if the change is intended, regenerate with -update-launch-plans", goldenPlanPath)
+}
+
+// goldenPlanStubLiveVRAM replaces the fit guard's live readings for one
+// subtest: no live usage beyond the inventory, and driver free VRAM of
+// total - 300 MiB per device (the inventory's vram_used_mb).
+func goldenPlanStubLiveVRAM(t *testing.T) {
+	t.Helper()
+	restoreUsed, restoreFree := runtimeVRAMUsedMB, fitDriverFreeVRAM
+	runtimeVRAMUsedMB = func(int) int { return 0 }
+	fitDriverFreeVRAM = func(runtime *detect.Capabilities) map[int]int {
+		if runtime == nil || len(runtime.GPUs) == 0 {
+			return nil
+		}
+		free := map[int]int{}
+		for _, g := range runtime.GPUs {
+			free[g.Index] = g.VRAMTotalMB - 300
+		}
+		return free
+	}
+	t.Cleanup(func() { runtimeVRAMUsedMB, fitDriverFreeVRAM = restoreUsed, restoreFree })
 }
 
 func goldenPlanMarshal(t *testing.T, record goldenPlanRecord) []byte {
