@@ -57,6 +57,7 @@ var launchFlags = map[string]launchFlag{
 	"--vision":                  {value: false, equalsCase: false},
 	"-vision":                   {value: false, equalsCase: false},
 	"--claude-code":             {value: false, equalsCase: false},
+	"--install-claude":          {value: false, equalsCase: true},
 	"--claude-reviewer":         {value: true, equalsCase: true},
 	"--chat-template":           {value: true, equalsCase: true},
 	"--claude-resume":           {value: true, equalsCase: true},

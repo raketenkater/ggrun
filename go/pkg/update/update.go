@@ -1010,6 +1010,7 @@ func selfUpdateInstallEnv(appHome string) []string {
 		"LLM_INSTALL_REF=main",
 		"LLM_INSTALL_BACKEND=skip",
 		"LLM_INSTALL_MODE=build",
+		"LLM_INSTALL_APP_PYTHON=1",
 	)
 }
 

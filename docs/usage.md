@@ -215,6 +215,7 @@ the selected model and hidden permission reviews to a small local reviewer.
 
 ```bash
 ggrun model.gguf --claude-code   # serve, then launch Claude Code wired to it
+# Claude Code missing? ggrun asks before running Anthropic's official installer (--install-claude / GGRUN_INSTALL_CLAUDE=1 to skip the question)
 ```
 
 If the `claude` CLI is on your PATH, ggrun starts the server and drops you straight
