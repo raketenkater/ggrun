@@ -21,6 +21,7 @@ var launchFlags = map[string]launchFlag{
 	"--support-online":          {value: false, equalsCase: true},
 	"--no-support-online":       {value: false, equalsCase: true},
 	"--support-expert":          {value: true, equalsCase: true},
+	"--claude-penalties":        {value: true, equalsCase: true},
 	"--benchmark":               {value: false, equalsCase: false},
 	"--worker-benchmark":        {value: false, equalsCase: false},
 	"--calibrate":               {value: true, equalsCase: false},
