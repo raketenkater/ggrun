@@ -8646,6 +8646,9 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string, resolvedC
 			}
 		}
 	}
+	if at, window := clientkit.CompactionEstimate(env); window > 0 {
+		fmt.Printf("  # Claude Code compacts at about %d of %d tokens\n", at, window)
+	}
 	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
 	claudeArgs = claudeCodeWorkflowPromptArgs(claudeArgs)
 	claudeArgs = append(claudeCodePermissionArgs(claudeArgs), claudeArgs...)
@@ -9014,6 +9017,9 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string, 
 	defer releaseInterrupt()
 	cmd := exec.Command(claudePath, args...)
 	cmd.Env = claudeCodeEnv(host, port, serverArgs, actualCtx)
+	if at, window := clientkit.CompactionEstimate(cmd.Env); window > 0 {
+		fmt.Fprintf(os.Stderr, "[claude-code] compacts at about %d of %d tokens (estimate)\n", at, window)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
