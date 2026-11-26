@@ -3890,9 +3890,7 @@ func tryResidentWithoutClaudeReviewer(
 	if req == nil || !req.ClaudeCode || !req.NoMMap || req.ClaudeReviewerDisabled || req.ReviewerReservation == nil || compute == nil {
 		return nil, originalErr
 	}
-	candidateReq := *req
-	candidateReq.ReviewerReservation = nil
-	candidateReq.ClaudeReviewerDisabled = true
+	candidateReq := reviewerFreeCandidate(req)
 	candidate, err := compute(&candidateReq)
 	if err != nil || candidate == nil || candidate.MMapRequired {
 		return nil, originalErr
@@ -3903,11 +3901,34 @@ func tryResidentWithoutClaudeReviewer(
 		}
 		return nil, originalErr
 	}
-	req.ReviewerReservation = nil
-	req.ClaudeReviewerDisabled = true
+	adoptReviewerFreeCandidate(req, &candidateReq)
 	req.claudeSelfClassifyApproved = interactive
 	fmt.Fprintln(output, "[launch] separate Auto reviewer disabled; Auto reviews will use the main model")
 	return candidate, nil
+}
+
+// reviewerFreeCandidate is req without the separate Auto reviewer. The reviewer
+// reservation is part of the verified-config scope, so the candidate re-derives
+// its key instead of inheriting the with-reviewer key memoized by the first
+// plan: its lookup and, once adopted, its save then use the key a relaunch
+// without the reviewer computes, and a reviewer-free plan is never filed under
+// a key a reviewer launch would replay.
+func reviewerFreeCandidate(req *launchRequest) launchRequest {
+	candidate := *req
+	candidate.ReviewerReservation = nil
+	candidate.ClaudeReviewerDisabled = true
+	candidate.verifiedScopeKey = ""
+	candidate.verifiedScopeShape = ""
+	return candidate
+}
+
+// adoptReviewerFreeCandidate commits the reviewer drop to req, with the
+// verified-config key the candidate plan was looked up under.
+func adoptReviewerFreeCandidate(req, candidate *launchRequest) {
+	req.ReviewerReservation = nil
+	req.ClaudeReviewerDisabled = true
+	req.verifiedScopeKey = candidate.verifiedScopeKey
+	req.verifiedScopeShape = candidate.verifiedScopeShape
 }
 
 // proactivelyDropReviewerForVRAMModel is the proactive counterpart to
@@ -3953,9 +3974,7 @@ func proactivelyDropReviewerForVRAMModel(
 	if strategy.Type != placement.SingleGPU && strategy.Type != placement.MultiGPUDense {
 		return strategy
 	}
-	candidateReq := *req
-	candidateReq.ReviewerReservation = nil
-	candidateReq.ClaudeReviewerDisabled = true
+	candidateReq := reviewerFreeCandidate(req)
 	candidate, err := compute(&candidateReq)
 	if err != nil || candidate == nil || candidate.MMapRequired {
 		return strategy
@@ -3982,8 +4001,7 @@ func proactivelyDropReviewerForVRAMModel(
 	if err := confirmProactiveSelfReview(input, output, interactive); err != nil {
 		return strategy
 	}
-	req.ReviewerReservation = nil
-	req.ClaudeReviewerDisabled = true
+	adoptReviewerFreeCandidate(req, &candidateReq)
 	// Only an interactive yes is remembered; the env opt-in applies per launch.
 	req.claudeSelfClassifyApproved = interactive
 	fmt.Fprintf(output, "[launch] no VRAM room for a separate Auto reviewer next to the main model; Auto reviews will use the main model (self-review)\n")

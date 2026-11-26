@@ -276,3 +276,90 @@ func TestSelfClassifySaveFailureOnlyWarns(t *testing.T) {
 		t.Fatalf("save failure: out=%q req=%#v", out.String(), req)
 	}
 }
+
+// Invariant: a launch that adopts self-classify files its verified config under
+// the reviewer-free key a remembered relaunch looks up, never under the
+// with-reviewer key the first plan memoized (a relaunch would miss it and
+// re-plan, and a reviewer launch would replay a plan with no reviewer seat).
+func TestSelfClassifyDropFilesVerifiedConfigUnderRelaunchKey(t *testing.T) {
+	t.Setenv("GGRUN_CLAUDE_AUTO_REVIEWER", "")
+	t.Setenv("GGRUN_CLAUDE_AUTO_SELF_REVIEW", "")
+	be := fitTestBackend()
+	caps := fitTestCaps(24564)
+
+	relaunchKey := func(t *testing.T, cacheDir string, model *placement.ModelProfile, compute func(*launchRequest) (*placement.Strategy, error)) string {
+		t.Helper()
+		relaunch := &launchRequest{CtxFlag: "fit", ClaudeCode: true, NoMMap: true}
+		if !applyRememberedClaudeSelfClassify(relaunch, cacheDir, model, caps, io.Discard) {
+			t.Fatal("the answer was not remembered")
+		}
+		relaunch.ReviewerReservation = claudeReviewerReservation(relaunch, caps, cacheDir)
+		if _, err := compute(relaunch); err != nil {
+			t.Fatal(err)
+		}
+		return relaunch.verifiedScopeKey
+	}
+
+	t.Run("reactive", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		model := fitTestModel(65536, 4000)
+		compute := func(r *launchRequest) (*placement.Strategy, error) {
+			placementOptionsFromRequestCaps(r, model, be, cacheDir, caps)
+			if r.ReviewerReservation != nil {
+				return nil, fmt.Errorf("no resident fit with the reviewer")
+			}
+			return &placement.Strategy{Type: placement.MoEOffload}, nil
+		}
+		req := &launchRequest{CtxFlag: "fit", ClaudeCode: true, NoMMap: true, ReviewerReservation: choiceTestReservation()}
+		_, firstErr := compute(req)
+		withReviewer := req.verifiedScopeKey
+		if withReviewer == "" || firstErr == nil {
+			t.Fatalf("first plan did not memoize a with-reviewer key: key=%q err=%v", withReviewer, firstErr)
+		}
+		if _, err := tryResidentWithoutClaudeReviewer(req, firstErr, strings.NewReader("yes\n"), io.Discard, true, compute); err != nil {
+			t.Fatal(err)
+		}
+		rememberClaudeSelfClassify(req, cacheDir, model, caps, io.Discard)
+		saved := verifiedConfigScopeKey(req, model, be, caps)
+		if saved == withReviewer {
+			t.Fatal("the reviewer-free plan is filed under the with-reviewer key")
+		}
+		if lookup := relaunchKey(t, cacheDir, model, compute); saved != lookup {
+			t.Fatalf("saved under %q, relaunch looks up %q", saved, lookup)
+		}
+	})
+
+	t.Run("proactive", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		model := fitTestModel(65536, 22000) // no room for a 4600 MiB reviewer beside it on 24 GB
+		plan := &placement.Strategy{Type: placement.SingleGPU, MainGPU: 0, ContextSize: 65536, KVType: "q4_0", KVPlacement: "gpu"}
+		compute := func(r *launchRequest) (*placement.Strategy, error) {
+			placementOptionsFromRequestCaps(r, model, be, cacheDir, caps)
+			return plan, nil
+		}
+		req := &launchRequest{CtxFlag: "fit", ClaudeCode: true, ReviewerReservation: &placement.CompanionReservation{Name: claudeReviewerCompanionName, VRAMMB: 4600}}
+		if _, err := compute(req); err != nil {
+			t.Fatal(err)
+		}
+		withReviewer := req.verifiedScopeKey
+		proactivelyDropReviewerForVRAMModel(req, caps, model, plan, compute, strings.NewReader("yes\n"), io.Discard, true, "")
+		if !req.ClaudeReviewerDisabled {
+			t.Fatal("the proactive gate did not drop the reviewer")
+		}
+		rememberClaudeSelfClassify(req, cacheDir, model, caps, io.Discard)
+		saved := verifiedConfigScopeKey(req, model, be, caps)
+		if withReviewer == "" || saved == withReviewer {
+			t.Fatalf("the reviewer-free plan is filed under the with-reviewer key %q", withReviewer)
+		}
+		relaunch := &launchRequest{CtxFlag: "fit", ClaudeCode: true}
+		if !applyRememberedClaudeSelfClassify(relaunch, cacheDir, model, caps, io.Discard) {
+			t.Fatal("the answer was not remembered")
+		}
+		if _, err := compute(relaunch); err != nil {
+			t.Fatal(err)
+		}
+		if saved != relaunch.verifiedScopeKey {
+			t.Fatalf("saved under %q, relaunch looks up %q", saved, relaunch.verifiedScopeKey)
+		}
+	})
+}
