@@ -229,6 +229,9 @@ type ModelItem struct {
 	// at enrich time (like KVProfile) so the config screen's chat-template row
 	// never re-opens the .gguf and walks its metadata on every render.
 	ChatTemplate string
+	// Incomplete is set (e.g. "incomplete download: 0.3 of 16.5 GB") when a file
+	// of the model is shorter than its GGUF header declares.
+	Incomplete string
 }
 
 type modelScanFinishedMsg struct {
@@ -390,6 +393,9 @@ func flattenRecommendationCategories(cats recommend.Categories) []recommend.Reco
 // external ones.
 func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 	desc := fmt.Sprintf("%.1fGB · %s", m.SizeGB, m.Arch)
+	if m.Incomplete != "" {
+		desc += " · " + m.Incomplete
+	}
 	if m.AutoBackend != "" {
 		desc += " · backend " + m.AutoBackend
 	} else if m.BackendRecipe != "" {
@@ -778,6 +784,11 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
+					if note := m.refreshIncomplete(item.index); note != "" {
+						m.message = note + "; finish the download before launching"
+						m.messageType = "error"
+						return m, nil
+					}
 					// Open the config screen first so settings (context, KV,
 					// Claude Code, …) are discoverable. The recommended defaults
 					// are pre-filled, so launching is one more keypress: press L
@@ -840,6 +851,11 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openBackendManager(ScreenMain)
 		case "c", "C":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
+				if note := m.refreshIncomplete(item.index); note != "" {
+					m.message = note + "; finish the download before launching"
+					m.messageType = "error"
+					return m, nil
+				}
 				m.selectedModel = item.index
 				m.backendRouteBypass = false
 				m.replayRequest = nil
@@ -2832,6 +2848,8 @@ type modelHeader struct {
 	info     *gguf.Info
 	err      error
 	template string
+	// incomplete is the incomplete-download note, "" when complete.
+	incomplete string
 }
 
 // headerReadWorkers bounds the concurrent header reads: each one may run the
@@ -2851,6 +2869,9 @@ func readModelHeaders(models []ModelItem, cacheDir string) []modelHeader {
 		out[i].info, out[i].err = info, err
 		if err == nil && !isAuxiliaryModel(models[i].Name, info.Architecture) {
 			out[i].template = cache.ChatTemplate(path)
+		}
+		if err != nil || !isAuxiliaryModel(models[i].Name, info.Architecture) {
+			out[i].incomplete = incompleteDownloadNote(cache, path)
 		}
 	}
 	workers := min(headerReadWorkers, len(models))
@@ -2878,6 +2899,35 @@ func readModelHeaders(models []ModelItem, cacheDir string) []modelHeader {
 	}
 	_ = cache.Save()
 	return out
+}
+
+// refreshIncomplete re-checks one model's download at key press, so a download
+// that finished while the TUI was open stops being refused. The actual size is
+// stat'ed fresh; the declared size comes from the header cache. It updates the
+// stored note and the list row and returns the current note.
+func (m *Model) refreshIncomplete(idx int) string {
+	if idx < 0 || idx >= len(m.models) {
+		return ""
+	}
+	cache := gguf.OpenHeaderCache(m.cacheDir)
+	note := incompleteDownloadNote(cache, m.models[idx].Path)
+	_ = cache.Save()
+	if note == m.models[idx].Incomplete {
+		return note
+	}
+	m.models[idx].Incomplete = note
+	var rec *modelusage.Record
+	if r, ok := m.modelUsage[modelIdentity(m.models[idx].Path)]; ok && r.Launches > 0 {
+		rec = &r
+	}
+	for pos, raw := range m.mainList.Items() {
+		if it, ok := raw.(mainItem); ok && it.isModel && it.index == idx {
+			it.desc = mainModelDesc(m.models[idx], rec)
+			m.mainList.SetItem(pos, it)
+			break
+		}
+	}
+	return note
 }
 
 func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect.Capabilities) []ModelItem {
@@ -2934,6 +2984,7 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 			}
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)
 		}
+		models[i].Incomplete = headers[i].incomplete
 		visible = append(visible, models[i])
 	}
 	return visible

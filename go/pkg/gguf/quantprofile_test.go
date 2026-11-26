@@ -17,9 +17,25 @@ type profileTensor struct {
 	ttype uint32
 }
 
-// profileHeader encodes a GGUF v3 header (metadata and tensor table, no data),
-// which is all ReadQuantProfile reads.
-func profileHeader(kvs []fixtureKV, tensors []profileTensor) []byte {
+// profileFile encodes a whole GGUF v3 file: metadata, tensor table and a data
+// section (at the header end rounded up to 32 bytes) in which each tensor
+// occupies its type's layout size, or spans[name] bytes when given. Shapes
+// too large to materialize get no data section; the reader rejects them first.
+func profileFile(kvs []fixtureKV, tensors []profileTensor, spans map[string]uint64) []byte {
+	sizes := make([]uint64, len(tensors))
+	var total uint64
+	for i, tn := range tensors {
+		elems := uint64(1)
+		for _, d := range tn.dims {
+			elems *= d
+		}
+		if span, ok := spans[tn.name]; ok {
+			sizes[i] = span
+		} else if size, ok := ggmlTypeSize[tn.ttype]; ok {
+			sizes[i] = (elems + size[1] - 1) / size[1] * size[0]
+		}
+		total += sizes[i]
+	}
 	buf := new(bytes.Buffer)
 	buf.WriteString("GGUF")
 	binary.Write(buf, binary.LittleEndian, uint32(3))
@@ -31,7 +47,8 @@ func profileHeader(kvs []fixtureKV, tensors []profileTensor) []byte {
 		binary.Write(buf, binary.LittleEndian, kv.vtype)
 		kv.write(buf)
 	}
-	for _, tn := range tensors {
+	var offset uint64
+	for i, tn := range tensors {
 		binary.Write(buf, binary.LittleEndian, uint64(len(tn.name)))
 		buf.WriteString(tn.name)
 		binary.Write(buf, binary.LittleEndian, uint32(len(tn.dims)))
@@ -39,16 +56,35 @@ func profileHeader(kvs []fixtureKV, tensors []profileTensor) []byte {
 			binary.Write(buf, binary.LittleEndian, d)
 		}
 		binary.Write(buf, binary.LittleEndian, tn.ttype)
-		binary.Write(buf, binary.LittleEndian, uint64(0))
+		binary.Write(buf, binary.LittleEndian, offset)
+		offset += sizes[i]
 	}
+	if len(tensors) == 0 || total > 1<<26 {
+		return buf.Bytes()
+	}
+	pad := (32 - buf.Len()%32) % 32
+	buf.Write(make([]byte, pad+int(total)))
 	return buf.Bytes()
+}
+
+func profileHeader(kvs []fixtureKV, tensors []profileTensor) []byte {
+	return profileFile(kvs, tensors, nil)
 }
 
 func writeProfileFixture(t *testing.T, path string, kvs []fixtureKV, tensors []profileTensor) {
 	t.Helper()
-	if err := os.WriteFile(path, profileHeader(kvs, tensors), 0o644); err != nil {
+	writeProfileFile(t, path, profileFile(kvs, tensors, nil))
+}
+
+func writeProfileFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readProfileBytes(data []byte) (QuantProfile, error) {
+	return ReadQuantProfile(bytes.NewReader(data), int64(len(data)))
 }
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
@@ -153,11 +189,76 @@ func TestQuantProfileImatrixFromKeysAndNotFromEmbeddings(t *testing.T) {
 	}
 }
 
-func TestQuantProfileUnknownTypeGivesNoProfile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x.gguf")
-	writeProfileFixture(t, path, nil, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 256}, 99}})
-	if _, err := ReadQuantProfileModel(path); !errors.Is(err, ErrUnknownTensorType) {
-		t.Fatalf("err = %v", err)
+// Type ids from 40 up mean different layouts in different backends (upstream
+// Q2_0 is a fork's F8_E4M3_B128), so a tensor is sized by its span, not by id.
+func TestQuantProfileSizesUnknownTypesByOffsets(t *testing.T) {
+	data := profileFile(nil, []profileTensor{
+		{"blk.0.attn_q.weight", []uint64{256, 256}, 8},          // Q8_0
+		{"blk.0.ffn_up_exps.weight", []uint64{256, 256, 4}, 42}, // 2.25 bpw on disk
+		{"blk.0.ffn_down_exps.weight", []uint64{256, 256, 4}, 99},
+	}, map[string]uint64{"blk.0.ffn_up_exps.weight": 256 * 256 * 4 / 64 * 18, "blk.0.ffn_down_exps.weight": 256 * 256 * 4 / 64 * 18})
+	p, err := readProfileBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(p.ExpertBPW(), 2.25) || !near(p.NonExpertBPW(), 8.5) {
+		t.Fatalf("expert %.4f rest %.4f", p.ExpertBPW(), p.NonExpertBPW())
+	}
+}
+
+// Offsets and the type table agree for known types (no padding here), and a
+// known type in a smaller span than its layout gives no profile.
+func TestQuantProfileOffsetsCrossCheckTheTypeTable(t *testing.T) {
+	tensors := []profileTensor{
+		{"blk.0.attn_q.weight", []uint64{256, 256}, 12},
+		{"blk.0.ffn_down.weight", []uint64{256, 256}, 14},
+	}
+	p, err := readProfileBytes(profileFile(nil, tensors, nil))
+	if err != nil || p.Bytes != 256*256/256*(144+210) {
+		t.Fatalf("%+v %v", p, err)
+	}
+	// Padding after a tensor counts as its bytes: that is what a loader maps.
+	p, err = readProfileBytes(profileFile(nil, tensors, map[string]uint64{"blk.0.attn_q.weight": 256*144 + 32}))
+	if err != nil || p.Bytes != 256*(144+210)+32 {
+		t.Fatalf("padded %+v %v", p, err)
+	}
+	_, err = readProfileBytes(profileFile(nil, tensors, map[string]uint64{"blk.0.attn_q.weight": 256*144 - 1}))
+	if !errors.Is(err, ErrTensorLayout) {
+		t.Fatalf("short span: %v", err)
+	}
+}
+
+// An interrupted download gives no profile: its offsets would read as a tiny
+// width.
+func TestQuantProfileTruncatedFileGivesNoProfile(t *testing.T) {
+	data := profileFile(nil, []profileTensor{
+		{"blk.0.attn_q.weight", []uint64{256, 256}, 99},
+		{"blk.0.ffn_down.weight", []uint64{256, 256}, 99},
+	}, map[string]uint64{"blk.0.attn_q.weight": 40000, "blk.0.ffn_down.weight": 40000})
+	if _, err := readProfileBytes(data); err != nil {
+		t.Fatal(err)
+	}
+	cut := data[:len(data)-40000-100] // the second tensor's data is missing
+	if _, err := readProfileBytes(cut); !errors.Is(err, ErrTensorDataIncomplete) {
+		t.Fatalf("truncated: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "partial.gguf")
+	writeProfileFile(t, path, cut)
+	if _, err := ReadQuantProfileModel(path); err == nil {
+		t.Fatal("a partial file got a profile")
+	}
+}
+
+func TestQuantProfileMissingShardGivesNoProfile(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "m-00001-of-00003.gguf")
+	writeProfileFixture(t, first, []fixtureKV{kvString("quantize.imatrix.file", "x")}, nil)
+	writeProfileFixture(t, filepath.Join(dir, "m-00003-of-00003.gguf"), nil, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 256}, 12}})
+	if p, err := ReadQuantProfileModel(first); err == nil {
+		t.Fatalf("missing shard 2 got a profile: %+v", p)
+	}
+	if p, err := OpenHeaderCache(filepath.Join(dir, "cache")).QuantProfile(first); err == nil {
+		t.Fatalf("missing shard 2 got a cached profile: %+v", p)
 	}
 }
 
@@ -184,20 +285,20 @@ func TestQuantProfileSumsShards(t *testing.T) {
 func TestReadQuantProfileRejectsCorruptHeadersWithoutPanicking(t *testing.T) {
 	good := profileHeader([]fixtureKV{kvString("general.architecture", "llama")},
 		[]profileTensor{{"blk.0.attn_q.weight", []uint64{256, 256}, 12}})
-	if _, err := ReadQuantProfile(bytes.NewReader(good)); err != nil {
+	if _, err := readProfileBytes(good); err != nil {
 		t.Fatalf("good header: %v", err)
 	}
 	for n := 0; n < len(good); n++ {
-		if _, err := ReadQuantProfile(bytes.NewReader(good[:n])); err == nil {
+		if _, err := readProfileBytes(good[:n]); err == nil {
 			t.Fatalf("truncated at %d accepted", n)
 		}
 	}
 	tooManyDims := profileHeader(nil, []profileTensor{{"t", []uint64{1, 1, 1, 1, 1, 1, 1, 1, 1}, 0}})
-	if _, err := ReadQuantProfile(bytes.NewReader(tooManyDims)); err == nil {
+	if _, err := readProfileBytes(tooManyDims); err == nil {
 		t.Fatal("9 dimensions accepted")
 	}
 	huge := profileHeader(nil, []profileTensor{{"t", []uint64{1 << 30, 1 << 30, 1 << 30}, 0}})
-	if _, err := ReadQuantProfile(bytes.NewReader(huge)); err == nil || !strings.Contains(err.Error(), "larger") {
+	if _, err := readProfileBytes(huge); err == nil || !strings.Contains(err.Error(), "larger") {
 		t.Fatalf("overflowing shape: %v", err)
 	}
 }
