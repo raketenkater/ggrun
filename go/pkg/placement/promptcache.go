@@ -80,9 +80,6 @@ type PromptCacheObservation struct {
 	LargestCheckpointMB float64
 }
 
-// Measured reports whether the observation carries a usable per-token cost.
-func (o PromptCacheObservation) Measured() bool { return o.BytesPerToken > 0 }
-
 // ObservePromptCache extracts prompt-cache accounting from backend log output.
 // It reads whatever is present: the trace-level state line gives the per-token
 // cost directly, while eviction and skip lines still bound the entry size when
@@ -326,16 +323,6 @@ func RecordMeasuredPromptCache(cacheDir string, model *ModelProfile, ctxSize, ub
 		compute, growth, estimated, kvPerLayerMB, probeMeasurements{BytesPerToken: bytesPerToken})
 }
 
-// MeasuredPromptCacheBytesPerToken returns a stored measurement, or 0 when this
-// shape has never been observed.
-func MeasuredPromptCacheBytesPerToken(cacheDir string, model *ModelProfile, ctxSize, ubatch int, kvQuality, kvPlacement, backendTag string, gpus []detect.GPU, parallel int) float64 {
-	pc := loadProbeCache(cacheDir, model, ctxSize, ubatch, kvQuality, kvPlacement, backendTag, gpus, parallel)
-	if pc == nil {
-		return 0
-	}
-	return pc.PromptCacheBytesPerToken
-}
-
 // LargestRoutedExpertLayerMB is the size of the biggest routed-expert layer,
 // which is the unit placement actually moves between GPU and CPU.
 //
@@ -379,11 +366,28 @@ func RefreshRuntimeCachePolicy(caps *detect.Capabilities, model *ModelProfile, s
 		return s
 	}
 	next := cloneStrategy(s)
+	// Read and size under the plan's lookup-tier policy: the measurement was
+	// recorded under its scoped tag, and Compute sized CRAM on its view.
+	model, opts = strategyAccounting(model, s, opts)
 	LoadMeasuredPromptCache(opts.CacheDir, model, next, backendCacheTag(opts), caps.GPUs)
 	totalSizeMB := model.TotalSizeMB
 	if totalSizeMB <= 0 {
 		totalSizeMB = int((model.SizeBytes + 1048575) / 1048576)
 	}
-	applyRuntimeCachePolicy(model, next, caps, totalSizeMB, computeKVTotalMBForStrategy(model, next), opts)
+	// Compute sized a resident tier's cache against host RAM already charged
+	// for the tier and a footprint that did not yet include it; the resolved
+	// footprint now does, so size on the same inputs.
+	hostCaps, sizing := caps, next
+	if opts.sparseLookupPolicy == SparseLookupResident {
+		if residentCaps, err := sparseLookupResidentCaps(caps, model, opts); err == nil {
+			hostCaps = residentCaps
+			if next.SparseLookupMB > 0 && next.PlannedHostFootprintMB > next.SparseLookupMB {
+				sizing = cloneStrategy(next)
+				sizing.PlannedHostFootprintMB -= next.SparseLookupMB
+			}
+		}
+	}
+	applyRuntimeCachePolicy(model, sizing, hostCaps, totalSizeMB, computeKVTotalMBForStrategy(model, next), opts)
+	next.CRAM, next.MaxCheckpoints, next.CheckpointMinStep = sizing.CRAM, sizing.MaxCheckpoints, sizing.CheckpointMinStep
 	return next
 }

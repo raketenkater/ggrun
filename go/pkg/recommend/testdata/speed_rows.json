@@ -1,0 +1,460 @@
+[
+ {
+  "aa_id": "",
+  "aa_intelligence_index": 41.807,
+  "aa_output_tps": 77.997,
+  "aa_query": "Z AI GLM 5.3 Flash",
+  "aa_slug": "glm-5-3-flash",
+  "aa_updated_at": "2026-10-19T10:55:39Z",
+  "active_params_b": 0,
+  "arch": "glm5-next",
+  "ctx_train": 1048576,
+  "embd": 4096,
+  "exp_ff": 2048,
+  "exp_used": 8,
+  "experts": 288,
+  "family": "Z AI",
+  "ff": 12288,
+  "hf_quant_updated_at": "2026-10-19T10:55:39Z",
+  "kl": 512,
+  "kv_lora": 512,
+  "layers": 46,
+  "leading_dense": 3,
+  "moe": true,
+  "name": "Z AI GLM-5.3-Flash",
+  "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
+  "q_lora": 1536,
+  "quality": 69,
+  "quants": [
+   {
+    "dynamic": false,
+    "name": "IQ1_S",
+    "size_bytes": 74845873152,
+    "size_gb": 69.71
+   },
+   {
+    "dynamic": false,
+    "name": "IQ1_M",
+    "size_bytes": 83014968416,
+    "size_gb": 77.31
+   },
+   {
+    "dynamic": false,
+    "name": "IQ2_XXS",
+    "size_bytes": 96630711424,
+    "size_gb": 89.99
+   },
+   {
+    "dynamic": false,
+    "name": "IQ2_XS",
+    "size_bytes": 101428274304,
+    "size_gb": 94.46
+   },
+   {
+    "dynamic": false,
+    "name": "IQ2_S",
+    "size_bytes": 107523515552,
+    "size_gb": 100.14
+   },
+   {
+    "dynamic": false,
+    "name": "IQ2_M",
+    "size_bytes": 120618067200,
+    "size_gb": 112.33
+   },
+   {
+    "dynamic": false,
+    "name": "Q2_K",
+    "size_bytes": 125671154912,
+    "size_gb": 117.04
+   },
+   {
+    "dynamic": false,
+    "name": "IQ3_XXS",
+    "size_bytes": 138825147648,
+    "size_gb": 129.29
+   },
+   {
+    "dynamic": false,
+    "name": "IQ3_XS",
+    "size_bytes": 147357148384,
+    "size_gb": 137.24
+   },
+   {
+    "dynamic": false,
+    "name": "Q3_K_S",
+    "size_bytes": 147357148384,
+    "size_gb": 137.24
+   },
+   {
+    "dynamic": false,
+    "name": "Q3_K_M",
+    "size_bytes": 155020141792,
+    "size_gb": 144.37
+   },
+   {
+    "dynamic": false,
+    "name": "Q3_K_L",
+    "size_bytes": 162437768544,
+    "size_gb": 151.28
+   },
+   {
+    "dynamic": false,
+    "name": "IQ3_M",
+    "size_bytes": 166627878240,
+    "size_gb": 155.18
+   },
+   {
+    "dynamic": false,
+    "name": "IQ4_XS",
+    "size_bytes": 177744881024,
+    "size_gb": 165.54
+   },
+   {
+    "dynamic": false,
+    "name": "Q4_0",
+    "size_bytes": 184093197696,
+    "size_gb": 171.45
+   },
+   {
+    "dynamic": false,
+    "name": "Q4_K_S",
+    "size_bytes": 189295994240,
+    "size_gb": 176.3
+   },
+   {
+    "dynamic": false,
+    "name": "IQ4_NL",
+    "size_bytes": 200828233184,
+    "size_gb": 187.04
+   },
+   {
+    "dynamic": false,
+    "name": "Q4_K_M",
+    "size_bytes": 200828233184,
+    "size_gb": 187.04
+   },
+   {
+    "dynamic": false,
+    "name": "Q4_1",
+    "size_bytes": 202609804736,
+    "size_gb": 188.7
+   },
+   {
+    "dynamic": false,
+    "name": "Q5_K_S",
+    "size_bytes": 227912951264,
+    "size_gb": 212.26
+   },
+   {
+    "dynamic": false,
+    "name": "Q5_K_M",
+    "size_bytes": 243691923040,
+    "size_gb": 226.96
+   },
+   {
+    "dynamic": false,
+    "name": "Q6_K_S",
+    "size_bytes": 268171978336,
+    "size_gb": 249.75
+   },
+   {
+    "dynamic": false,
+    "name": "Q6_K",
+    "size_bytes": 281044297408,
+    "size_gb": 261.74
+   },
+   {
+    "dynamic": false,
+    "name": "Q8_0",
+    "size_bytes": 341502043648,
+    "size_gb": 318.05
+   }
+  ],
+  "repo": "bartowski/GLM-5.3-Flash-BF16-GGUF",
+  "runnable": true,
+  "runnable_mainline": true,
+  "size_gb": 187.04,
+  "speed": 78,
+  "total_params_b": 320.759,
+  "vl": 512
+ },
+ {
+  "aa_id": "",
+  "aa_intelligence_index": 39.822,
+  "aa_output_tps": 52.397,
+  "aa_query": "Alibaba Qwen3.8 Flash Next",
+  "aa_slug": "qwen3-8-flash-next",
+  "aa_updated_at": "2026-10-19T10:55:47Z",
+  "active_params_b": 0,
+  "arch": "qwen4exp",
+  "ctx_train": 262144,
+  "embd": 2560,
+  "exp_ff": 640,
+  "exp_shared_ff": 640,
+  "exp_used": 10,
+  "experts": 512,
+  "family": "Alibaba",
+  "hf_quant_updated_at": "2026-10-19T10:55:47Z",
+  "hkv": 2,
+  "kl": 256,
+  "layers": 48,
+  "moe": true,
+  "name": "Alibaba Qwen3.8-Flash-Next",
+  "notes": "Artificial Analysis open-weight row; GGUF resolved by hf-search",
+  "quality": 66,
+  "quants": [
+   {
+    "dynamic": true,
+    "name": "UD-IQ1_S",
+    "size_bytes": 72546461344,
+    "size_gb": 67.56
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ1_M",
+    "size_bytes": 74538755776,
+    "size_gb": 69.42
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q2_K_XL",
+    "size_bytes": 78869128864,
+    "size_gb": 73.45
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ3_XXS",
+    "size_bytes": 81961823936,
+    "size_gb": 76.33
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q3_K_XL",
+    "size_bytes": 89986353824,
+    "size_gb": 83.81
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ4_XS",
+    "size_bytes": 93682584224,
+    "size_gb": 87.25
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q4_K_XL",
+    "size_bytes": 111334654784,
+    "size_gb": 103.69
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q5_K_XL",
+    "size_bytes": 158286406650,
+    "size_gb": 147.42
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q6_K_XL",
+    "size_bytes": 169165382688,
+    "size_gb": 157.55
+   },
+   {
+    "dynamic": false,
+    "name": "Q8_0",
+    "size_bytes": 188225033248,
+    "size_gb": 175.3
+   },
+   {
+    "dynamic": false,
+    "name": "BF16",
+    "size_bytes": 354029930496,
+    "size_gb": 329.72
+   }
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+  "runnable": true,
+  "runnable_mainline": true,
+  "size_gb": 103.69,
+  "speed": 52,
+  "total_params_b": 176.944,
+  "vl": 256
+ },
+ {
+  "aa_id": "",
+  "aa_intelligence_index": 18.229,
+  "aa_output_tps": 134.448,
+  "aa_query": "Alibaba Qwen3.6 35B A3B",
+  "aa_slug": "qwen3-6-35b-a3b",
+  "aa_updated_at": "2026-10-19T10:57:07Z",
+  "active_params_b": 0,
+  "arch": "qwen35moe",
+  "ctx_train": 262144,
+  "embd": 2048,
+  "exp_ff": 512,
+  "exp_shared_ff": 512,
+  "exp_used": 8,
+  "experts": 256,
+  "family": "Alibaba",
+  "hf_quant_updated_at": "2026-10-19T10:57:07Z",
+  "hkv": 2,
+  "kl": 256,
+  "layers": 40,
+  "moe": true,
+  "name": "Alibaba Qwen3.6 35B A3B (Reasoning)",
+  "notes": "Artificial Analysis open-weight row; GGUF resolved by direct",
+  "quality": 30,
+  "quants": [
+   {
+    "dynamic": true,
+    "name": "UD-IQ1_M",
+    "size_bytes": 10047749088,
+    "size_gb": 9.36
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ2_XXS",
+    "size_bytes": 10756586464,
+    "size_gb": 10.02
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ2_M",
+    "size_bytes": 11522702304,
+    "size_gb": 10.73
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q2_K_XL",
+    "size_bytes": 12290628576,
+    "size_gb": 11.45
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ3_XXS",
+    "size_bytes": 13211155424,
+    "size_gb": 12.3
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ3_S",
+    "size_bytes": 13676723168,
+    "size_gb": 12.74
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q3_K_S",
+    "size_bytes": 15359196128,
+    "size_gb": 14.3
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q3_K_M",
+    "size_bytes": 16600710112,
+    "size_gb": 15.46
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q3_K_XL",
+    "size_bytes": 16845511648,
+    "size_gb": 15.69
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ4_XS",
+    "size_bytes": 17730509792,
+    "size_gb": 16.51
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ4_NL",
+    "size_bytes": 18040888288,
+    "size_gb": 16.8
+   },
+   {
+    "dynamic": true,
+    "name": "UD-IQ4_NL_XL",
+    "size_bytes": 19500506080,
+    "size_gb": 18.16
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q4_K_S",
+    "size_bytes": 20893015008,
+    "size_gb": 19.46
+   },
+   {
+    "dynamic": false,
+    "name": "MXFP4_MOE",
+    "size_bytes": 21706144736,
+    "size_gb": 20.22
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q4_K_M",
+    "size_bytes": 22134528992,
+    "size_gb": 20.61
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q4_K_XL",
+    "size_bytes": 22360456160,
+    "size_gb": 20.82
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q5_K_S",
+    "size_bytes": 24942050272,
+    "size_gb": 23.23
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q5_K_M",
+    "size_bytes": 26456194016,
+    "size_gb": 24.64
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q5_K_XL",
+    "size_bytes": 26592508896,
+    "size_gb": 24.77
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q6_K",
+    "size_bytes": 29308320736,
+    "size_gb": 27.3
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q6_K_XL",
+    "size_bytes": 31843777504,
+    "size_gb": 29.66
+   },
+   {
+    "dynamic": false,
+    "name": "Q8_0",
+    "size_bytes": 36903140320,
+    "size_gb": 34.37
+   },
+   {
+    "dynamic": true,
+    "name": "UD-Q8_K_XL",
+    "size_bytes": 38451182560,
+    "size_gb": 35.81
+   },
+   {
+    "dynamic": false,
+    "name": "BF16",
+    "size_bytes": 69376638176,
+    "size_gb": 64.61
+   }
+  ],
+  "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+  "runnable": true,
+  "runnable_mainline": true,
+  "size_gb": 20.61,
+  "speed": 100,
+  "total_params_b": 34.661,
+  "vl": 256
+ }
+]

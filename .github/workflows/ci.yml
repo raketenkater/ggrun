@@ -10,6 +10,7 @@ on:
 jobs:
   core-engine-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -28,6 +29,7 @@ jobs:
 
   windows-terminal:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -43,10 +45,11 @@ jobs:
 
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@2.0.0
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: .
           # Gate on real bugs only for maintained shell entrypoints.
@@ -54,6 +57,7 @@ jobs:
 
   go-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -76,8 +80,47 @@ jobs:
           GOARCH: amd64
         run: go vet ./...
 
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: Scan ggrun for reachable vulnerabilities
+        working-directory: go
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+      - name: Scan clientkit for reachable vulnerabilities
+        working-directory: clientkit
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+
+  memguard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test the CUDA memory guard
+        run: make -C native/memguard test
+
+  deadcode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: No unreachable functions
+        run: scripts/check-deadcode.sh
+
   go-cross-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +148,7 @@ jobs:
 
   parser-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -115,6 +159,7 @@ jobs:
 
   estimator-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -129,6 +174,7 @@ jobs:
 
   safety-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -143,6 +189,7 @@ jobs:
 
   setup-home-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -163,6 +210,7 @@ jobs:
 
   model-index-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -173,6 +221,7 @@ jobs:
 
   moe-placement-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -187,6 +236,7 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -198,10 +248,11 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install pytest huggingface_hub
       - name: Run downloader, recommendation, and hardware-helper pytest suites
-        run: python3 -m pytest tests/test_downloader_quant.py tests/test_download_integrity.py tests/test_update_recommendations.py tests/test_mimo_catalog.py tests/test_measure_bandwidth.py tests/test_install_contracts.py tests/test_setup_terminal.py tests/test_release_relocation.py tests/test_gpu_e2e.py tests/test_agent_workload.py tests/test_verify_recommended_download.py
+        run: scripts/ci-pytest.sh
 
   installer-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -225,6 +276,7 @@ jobs:
 
   package-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Install patchelf
@@ -250,6 +302,7 @@ jobs:
 
   package-windows-smoke:
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -292,7 +345,6 @@ jobs:
           python tests/build_synthetic_gguf.py --out (Join-Path $app 'models/install-smoke.gguf') --arch llama --name Windows-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 --embd 64 --ff 128 --ctx-train 2048
           $stdout = Join-Path $tmp 'serve.stdout.log'
           $stderr = Join-Path $tmp 'serve.stderr.log'
-          $env:LLM_COMMUNITY_TUNES = 'off'
           $proc = Start-Process -FilePath (Join-Path $app '.bin/ggrun.exe') -ArgumentList @((Join-Path $app 'models/install-smoke.gguf'), '--cpu', '--host', '127.0.0.1', '--port', '19132') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
           try {
             $ready = $false
@@ -313,6 +365,7 @@ jobs:
 
   release-install-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -344,7 +397,7 @@ jobs:
           python3 tests/build_synthetic_gguf.py --out "$tmp/app/models/install-smoke.gguf" \
             --arch llama --name Linux-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
             --embd 64 --ff 128 --ctx-train 2048
-          LLM_COMMUNITY_TUNES=off "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
+          "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
             --cpu --host 127.0.0.1 --port 19131 >"$tmp/serve.log" 2>&1 &
           server_pid=$!
           trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
@@ -365,12 +418,11 @@ jobs:
           trap - EXIT
 
   release-install-macos-smoke:
-    runs-on: macos-14
-    # macOS is deprecated and best-effort. It passes today, and the job is kept
-    # so a regression is still visible, but nobody here has a Mac to reproduce
-    # on and it must never be what stands between a change and a green run.
-    # Read its result; do not block on it.
-    continue-on-error: true
+    runs-on: macos-15
+    timeout-minutes: 60
+    # macOS is a headless-serving target. Require the packaged install/default
+    # CPU-launch smoke alongside native remote contracts. This synthetic backend
+    # does not establish real Metal inference support.
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -394,7 +446,7 @@ jobs:
           python3 tests/build_synthetic_gguf.py --out "$tmp/app/models/install-smoke.gguf" \
             --arch llama --name macOS-Install-Smoke --layers 2 --hkv 1 --kl 16 --vl 16 \
             --embd 64 --ff 128 --ctx-train 2048
-          LLM_COMMUNITY_TUNES=off "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
+          "$tmp/app/ggrun" "$tmp/app/models/install-smoke.gguf" \
             --cpu --host 127.0.0.1 --port 19133 >"$tmp/serve.log" 2>&1 &
           server_pid=$!
           trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
@@ -421,6 +473,7 @@ jobs:
     # tests a locally-built zip, so this is the only job that catches general
     # breakage in the remote download / backend-launch flow (e.g. issue #18).
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Parse-check install.ps1 (pwsh 7 + Windows PowerShell 5.1)

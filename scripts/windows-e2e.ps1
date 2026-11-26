@@ -50,6 +50,9 @@ param(
     [ValidateRange(0, 32)][int]$AgentLanes = 0,
     [ValidateRange(1, 50)][int]$AgentRepeats = 3,
     [switch]$PrefixReuse,
+    # The last stage runs the candidate's `ggrun update` against the latest
+    # published release. Skip it to keep the candidate installed afterwards.
+    [switch]$SkipUpdate,
     # Reuse a checkout you already have instead of fetching a scratch one. The
     # script still only ever reads it and builds in place.
     [string]$CheckoutDir = '',
@@ -254,6 +257,40 @@ try {
         & python @vargs | Out-Host
         if ($LASTEXITCODE -ne 0) { throw 'the agent workload failed' }
         $stages.agentWorkload = $dataDir
+    }
+
+    # --------------------------------------------------------------- update
+    # `ggrun update` replaces the running ggrun.exe through the published
+    # installer. Windows cannot overwrite a running .exe, so the candidate
+    # moves itself aside to ggrun.exe.old first; a binary that has the cleanup
+    # removes that file on its next start. Runs last: it installs the release.
+    if (-not $SkipUpdate) {
+        $app = Join-Path $check 'app'
+        $exe = Join-Path $app '.bin\ggrun.exe'
+        $updateLog = Join-Path $check 'evidence\update.txt'
+        $latest = (gh api "repos/$Repo/releases/latest" | ConvertFrom-Json).tag_name
+        Write-Host "==> ggrun update (candidate -> $latest)"
+        $savedHome = $env:LLM_APP_HOME
+        $savedNonInteractive = $env:LLM_INSTALL_NONINTERACTIVE
+        try {
+            $env:LLM_APP_HOME = $app
+            $env:LLM_INSTALL_NONINTERACTIVE = '1'
+            # cmd.exe redirects the streams: PowerShell 5.1 turns native stderr
+            # into errors under ErrorActionPreference Stop.
+            cmd /c "`"$(Join-Path $app 'ggrun.cmd')`" update > `"$updateLog`" 2>&1"
+            $updateText = Get-Content $updateLog -Raw
+            # cmdUpdate reports a failed self-update on stderr and still exits 0.
+            if ($updateText -match 'Self-update:') { throw "ggrun update failed; see $updateLog" }
+            $version = (cmd /c "`"$exe`" version 2>&1" | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "updated ggrun.exe does not run: $version" }
+            if ($version -notmatch [regex]::Escape($latest)) {
+                throw "after update ggrun reports '$version', want $latest; see $updateLog"
+            }
+            $stages.update = @{ to = $latest; version = $version; oldLeft = (Test-Path "$exe.old") }
+        } finally {
+            $env:LLM_APP_HOME = $savedHome
+            $env:LLM_INSTALL_NONINTERACTIVE = $savedNonInteractive
+        }
     }
 
     $stages.passed = $true

@@ -1,14 +1,17 @@
 module github.com/raketenkater/ggrun
 
-go 1.24.13
+go 1.27.4
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/term v0.2.2
+	github.com/raketenkater/ggrun/clientkit v0.0.0
 	golang.org/x/sys v0.38.0
 )
+
+replace github.com/raketenkater/ggrun/clientkit => ../clientkit
 
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect

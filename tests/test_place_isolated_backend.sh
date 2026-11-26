@@ -25,6 +25,9 @@ eval "$(
 
 INSTALL_DIR="$TMP/bin"
 mkdir -p "$INSTALL_DIR" "$TMP/src"
+# Never query the host's GPUs; a case below flips this to an old GPU.
+OLD_GPU=0
+cuda_bundle_supported() { (( ! OLD_GPU )); }
 
 cat >"$TMP/src/llama-server" <<'EOF'
 #!/usr/bin/env bash
@@ -143,3 +146,24 @@ link_default_llama_server
 [[ "$(readlink "$INSTALL_DIR/llama-server")" == "backends/llama-server/llama-server" ]]
 echo "  ✓ default backend stays on the one that runs"
 
+# An old GPU (Pascal/Volta) starts the CUDA bundle for --version but has no
+# kernels in it, so a running Vulkan backend becomes the default instead.
+mkdir -p "$INSTALL_DIR/backends/ik_llama-server-cuda"
+cp "$INSTALL_DIR/backends/llama-server/llama-server" "$INSTALL_DIR/backends/ik_llama-server-cuda/llama-server"
+cp "$INSTALL_DIR/backends/llama-server/llama-server" "$INSTALL_DIR/backends/llama-server-vulkan/llama-server"
+ln -sfn "backends/ik_llama-server-cuda/llama-server" "$INSTALL_DIR/ik_llama-server-cuda"
+rm "$INSTALL_DIR/llama-server"
+link_default_llama_server
+[[ "$(readlink "$INSTALL_DIR/llama-server")" == "ik_llama-server-cuda" ]]
+rm "$INSTALL_DIR/llama-server"
+OLD_GPU=1 link_default_llama_server
+[[ "$(readlink "$INSTALL_DIR/llama-server")" == "llama-server-vulkan" ]]
+rm "$INSTALL_DIR/llama-server"
+OLD_GPU=1 BACKEND_REQUEST=cuda link_default_llama_server
+[[ "$(readlink "$INSTALL_DIR/llama-server")" == "ik_llama-server-cuda" ]]
+# A CUDA build adopted from this machine was compiled for its GPU.
+ln -sfn "$INSTALL_DIR/backends/ik_llama-server-cuda/llama-server" "$INSTALL_DIR/ik_llama-server-cuda"
+rm "$INSTALL_DIR/llama-server"
+OLD_GPU=1 link_default_llama_server
+[[ "$(readlink "$INSTALL_DIR/llama-server")" == "ik_llama-server-cuda" ]]
+echo "  ✓ default backend is Vulkan, not the CUDA bundle, on GPUs older than its kernels"

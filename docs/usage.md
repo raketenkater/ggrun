@@ -1,5 +1,9 @@
 # Usage
 
+The complete list of launch flags and environment variables, generated from the code, is in
+[reference.md](reference.md). Every `LLM_` configuration variable also has a `GGRUN_` spelling
+(`GGRUN_PORT` for `LLM_PORT`), which wins when both are set.
+
 With no command, `ggrun` opens the interactive TUI. Otherwise it takes a model
 (local path or Hugging Face repo) plus flags.
 
@@ -34,12 +38,6 @@ ggrun model.gguf --calibrate off    # serve the stable planner estimate without 
 # Vision
 ggrun model.gguf --vision
 ggrun model.gguf --mmproj /path/to/mmproj.gguf
-
-# Tuning and cached configs
-ggrun model.gguf --ai-tune
-ggrun model.gguf --ai-tune --retune
-ggrun --show-configs
-ggrun model.gguf --tune-cache ~/.cache/ggrun/tune.json
 
 # Speculative decoding
 ggrun model.gguf --spec auto
@@ -190,39 +188,11 @@ launches do not repeat that consent question. Set it to `false` in the config to
 restore per-launch prompting; `--allow-live-memory-probe` remains a one-launch
 override.
 
-## AI Tune
+## Tuning
 
-`--ai-tune` starts from the launcher heuristic, benchmarks it, tests candidate flag sets,
-and stores the best successful result in the local cache. Because it re-measures against
-whatever llama.cpp / ik_llama.cpp build you currently have, it keeps your launch flags in
-step with the backends as they change upstream, instead of you tracking new flags and
-defaults by hand. The served model can propose candidate flags, but the launcher validates
-them against backend help, memory headroom, crash behavior, and benchmark results before a
-cache entry is reused. A 1% noise floor guards against replacing a good baseline with
-single-run noise.
-
-AI Tune changes safe performance knobs such as threads, flash attention,
-mmap/mlock, defrag, and speculative decoding. It never changes batch or
-microbatch: both require coupled placement recomputation and belong to the core
-placement optimizer for every workload. It also never changes anything
-that affects output quality — KV-cache quantization and context remain
-constraints, and an explicit `--parallel` is left exactly as set. The core
-standard-launch optimizer may compare automatic slot counts, but AI Tune and
-cached/community tune overlays may not.
-
-Parallel Claude launches use the placement-owned core optimizer above for
-batch/ubatch experiments. Generic/community tune files are not
-automatically applied to Claude mode because they do not encode slot scheduling
-or mixed prefill/decode behavior. When `--ai-tune` is explicitly combined with
-parallel Claude on a hybrid/recurrent model, it uses repeated cache-backed agent
-turn time for the remaining safe flags and refuses all batch/ubatch proposals.
-Those results are stored separately by slots, context, KV layout, and
-placement; they cannot overwrite or auto-select as a generic serial tune. Tune
-overlays protect the existing batch pair, with `ubatch <= batch` normalization
-retained as defense in depth; explicit `--batch-size` and `--ubatch-size` remain
-user-owned.
-
-See [launch-performance.md](launch-performance.md) for the benchmark tables and method.
+AI Tune was removed. The standard launch optimizer measures and chooses the
+configuration itself (see `--calibrate`), so `--ai-tune`, `--retune`,
+`--show-configs` and `--tune-cache` now stop with that message.
 
 ## Speculative decoding
 
@@ -245,6 +215,7 @@ the selected model and hidden permission reviews to a small local reviewer.
 
 ```bash
 ggrun model.gguf --claude-code   # serve, then launch Claude Code wired to it
+# Claude Code missing? ggrun asks before running Anthropic's official installer (--install-claude / GGRUN_INSTALL_CLAUDE=1 to skip the question)
 ```
 
 If the `claude` CLI is on your PATH, ggrun starts the server and drops you straight
@@ -253,9 +224,11 @@ toggle **[x] Claude Code**, launch.) If `claude` isn't installed, ggrun prints t
 env to run it yourself in another terminal:
 
 ```bash
+unset ANTHROPIC_API_KEY
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8081 ANTHROPIC_AUTH_TOKEN=ggrun
 export ANTHROPIC_MODEL=local ANTHROPIC_SMALL_FAST_MODEL=local-fast
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=local-fast ANTHROPIC_DEFAULT_SONNET_MODEL=local ANTHROPIC_DEFAULT_OPUS_MODEL=local
+export CLAUDE_CODE_ATTRIBUTION_HEADER=0     # stable prompt prefix, so the backend reuses its cache
 export CLAUDE_CODE_EFFORT_LEVEL=xhigh       # agentic default; use max for one demanding session
 export API_TIMEOUT_MS=2147483647            # maximum safe timer; no practical inference deadline
 export CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=2147483647
@@ -264,11 +237,16 @@ export CLAUDE_CODE_AUTO_COMPACT_WINDOW=262144 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75
 claude --permission-mode auto --disallowedTools WebSearch
 ```
 
+The printed recipe and the auto-launched client are built from the same list,
+so a copied recipe gets the same prompt-cache reuse and timeouts.
+
 Foreground tiers point at `local`; Claude's cheap/Haiku tiers address the
 router-only `local-fast` alias. With a worker-capable companion, that alias
-uses it; with `qwen2b`, `off`, or no seated worker it is rewritten to the
-main `local` model. Both aliases stay inside ggrun, so no inference call can
-leave for `api.anthropic.com`.
+uses it. With a review-only reviewer such as `qwen2b`, it goes to that
+reviewer when the prompt fits the reviewer's context, so short cheap-tier calls do not queue behind long main-model work;
+larger prompts, and every call under `off`, go to the main `local` model. Both
+aliases stay inside ggrun, so no inference call can leave for
+`api.anthropic.com`.
 
 ### Resuming a session and its workflow
 
@@ -290,6 +268,12 @@ Code to continue the interrupted workflow run from its journal. Agents that had
 finished replay from cache without a model call; agents still running when the
 session stopped re-run. The summary printed before launch states how many agents
 are actually recoverable.
+
+If the recorded backend is still serving, resume attaches to it instead of
+loading a second copy. It goes through that launch's ggrun router when the router
+is still running, keeping agent admission and Auto reviewer routing; otherwise it
+warns and connects to the backend directly. The Workflow hook is installed either
+way.
 
 Two deliberate restrictions:
 
@@ -326,7 +310,9 @@ Two deliberate restrictions:
   stream-idle watchdogs, and gives llama-server no practical socket deadline. Claude's
   Workflow tool has a separate 180-second `stallMs`; a session-only PreToolUse hook
   deterministically rewrites every `agent()` call to the maximum safe value before it
-  runs. Startup, process-health, and shell-command guards remain active so a real crash
+  runs. The hook approves the rewritten Workflow only in Auto and `bypassPermissions`
+  modes (each agent's own tool calls still go through the mode's checks); in every
+  other mode Claude Code asks you to confirm the rewritten script. Startup, process-health, and shell-command guards remain active so a real crash
   or hung command is still visible.
 
 ### Sampling defaults
@@ -374,8 +360,9 @@ Two deliberate restrictions:
   exact security-monitor requests and routes them to a pinned local companion.
   The default `auto` profile is Qwen3.5-4B and also handles explicit
   `local-fast` cheap-tier work. `--claude-reviewer qwen2b` selects the smaller
-  review-only Qwen3.5-2B; its presence does not authorize worker traffic, so
-  `local-fast` falls back to the admitted main model. `nanbeige` is an
+  review-only Qwen3.5-2B; it is not a worker, but `local-fast` prompts that
+  fit its context still go to it rather than queueing behind the main model,
+  and larger ones fall back to the admitted main model. `nanbeige` is an
   explicit larger worker/reviewer choice, and `off` seats no companion and
   visibly self-reviews on the main model. The companion's reservation is part
   of main placement, and its measured VRAM replaces the conservative initial

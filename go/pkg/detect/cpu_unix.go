@@ -52,12 +52,78 @@ func detectPhysicalCores() int {
 		}
 	}
 
-	// Fallback: logical cores / 2 (HT assumption)
-	n := runtime.NumCPU()
-	if n >= 4 {
-		return n / 2
+	return fallbackPhysicalCores(runtime.GOARCH, runtime.NumCPU())
+}
+
+// fallbackPhysicalCores is the core count when no topology is readable. x86
+// hosts usually run two hardware threads per core; ARM cores do not, and their
+// /proc/cpuinfo has no "physical id", so halving would idle half the machine.
+func fallbackPhysicalCores(goarch string, logical int) int {
+	if goarch == "arm64" || goarch == "arm" {
+		return logical
 	}
-	return n
+	if logical >= 4 {
+		return logical / 2
+	}
+	return logical
+}
+
+// Roots for the Linux topology and cgroup reads; tests point them at fixtures.
+var (
+	sysCPUDir      = "/sys/devices/system/cpu"
+	procSelfCgroup = "/proc/self/cgroup"
+	procSelfStatus = "/proc/self/status"
+	cgroupFSRoot   = "/sys/fs/cgroup"
+)
+
+// cpuQuotaCores is the CPU quota of this process's cgroup (v2 cpu.max, the
+// smallest along the path), rounded up to whole cores; 0 when unlimited or
+// unknown. A container limited to 4 CPUs on a 64-core host must not start 64
+// worker threads that the kernel then throttles.
+func cpuQuotaCores() int {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	data, err := os.ReadFile(procSelfCgroup)
+	if err != nil {
+		return 0
+	}
+	path := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "0::"); ok {
+			path = strings.TrimSpace(rest)
+		}
+	}
+	if path == "" {
+		return 0
+	}
+	best := 0
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if q := readCPUMax(filepath.Join(cgroupFSRoot, dir, "cpu.max")); q > 0 && (best == 0 || q < best) {
+			best = q
+		}
+		if dir == "/" || dir == "." || dir == "" {
+			break
+		}
+	}
+	return best
+}
+
+func readCPUMax(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 || fields[0] == "max" {
+		return 0
+	}
+	quota, err1 := strconv.ParseInt(fields[0], 10, 64)
+	period, err2 := strconv.ParseInt(fields[1], 10, 64)
+	if err1 != nil || err2 != nil || quota <= 0 || period <= 0 {
+		return 0
+	}
+	return int((quota + period - 1) / period)
 }
 
 func detectPhysicalCPUList() []int {
@@ -67,7 +133,7 @@ func detectPhysicalCPUList() []int {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
-	entries, err := os.ReadDir("/sys/devices/system/cpu")
+	entries, err := os.ReadDir(sysCPUDir)
 	if err != nil {
 		return nil
 	}
@@ -89,10 +155,10 @@ func detectPhysicalCPUList() []int {
 		if len(allowed) > 0 && !allowed[id] {
 			continue
 		}
-		if online, err := os.ReadFile(filepath.Join("/sys/devices/system/cpu", name, "online")); err == nil && strings.TrimSpace(string(online)) == "0" {
+		if online, err := os.ReadFile(filepath.Join(sysCPUDir, name, "online")); err == nil && strings.TrimSpace(string(online)) == "0" {
 			continue
 		}
-		base := filepath.Join("/sys/devices/system/cpu", name, "topology")
+		base := filepath.Join(sysCPUDir, name, "topology")
 		pkg, err := os.ReadFile(filepath.Join(base, "physical_package_id"))
 		if err != nil {
 			continue
@@ -118,7 +184,7 @@ func detectPhysicalCPUList() []int {
 }
 
 func linuxAllowedCPUSet() map[int]bool {
-	data, err := os.ReadFile("/proc/self/status")
+	data, err := os.ReadFile(procSelfStatus)
 	if err != nil {
 		return nil
 	}

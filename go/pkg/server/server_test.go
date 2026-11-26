@@ -315,6 +315,9 @@ func TestScopeSetMemoryMaxMBAndNonReclaimable(t *testing.T) {
 		t.Fatalf("start healthy scoped server: %v", err)
 	}
 	defer func() { _ = p.Stop() }()
+	if high, max := p.MemoryLimitsMB(); high != 0 || max != 1024 {
+		t.Fatalf("launch limits high=%d max=%d, want unset/1024", high, max)
+	}
 	// Changing the resolver after startup must not redirect this real scope's
 	// observations, limit updates, or teardown to another systemd instance.
 	t.Setenv("GGRUN_SCOPE_MODE", "unsupported")

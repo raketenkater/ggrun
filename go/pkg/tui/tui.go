@@ -30,7 +30,6 @@ import (
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/probe"
 	"github.com/raketenkater/ggrun/pkg/recommend"
-	"github.com/raketenkater/ggrun/pkg/tune"
 	"github.com/raketenkater/ggrun/pkg/update"
 )
 
@@ -52,7 +51,6 @@ const (
 	ScreenMain Screen = iota
 	ScreenModelConfig
 	ScreenPrelaunch
-	ScreenTunedPicker
 	ScreenSettings
 	ScreenDownload
 	ScreenBackend
@@ -95,20 +93,23 @@ type Model struct {
 	selectedModel int
 
 	// Advanced config
-	ctxSize        string
-	ctxMode        string
-	kvPlacement    string
-	kvQuality      string
-	swaFull        bool
-	vramHeadroomMB int
-	ramHeadroomMB  int
-	parallel       string
-	parallelSet    bool
-	aitune         bool
-	aituneRounds   int
-	benchmark      bool
-	vision         bool
-	claudeCode     bool
+	ctxSize          string
+	ctxMode          string
+	kvPlacement      string
+	kvQuality        string
+	swaFull          bool
+	vramHeadroomMB   int
+	ramHeadroomMB    int
+	parallel         string
+	parallelSet      bool
+	benchmark        bool
+	vision           bool
+	claudeCode       bool
+	claudeHeadless   bool
+	gatewayHost      string
+	gatewayPort      int
+	gatewayURL       string
+	gatewayTokenFile string
 	// claudeReviewer picks the local worker/reviewer model for Claude Code:
 	// "auto" (and "qwen") resolve to the Qwen3.5-4B worker/reviewer, "qwen2b"
 	// forces the small/light Qwen3.5-2B review-only profile, and "nanbeige"
@@ -143,11 +144,6 @@ type Model struct {
 	// change the inputs they depend on (setCtx, cycleCfgRow, openCfgInput).
 	cfgMemo *configMemo
 
-	// Tuned config
-	tunedConfigs []tune.ConfigEntry
-	tunedIndex   int // -1 = auto, 0+ = selected
-	tunePath     string
-
 	// Inputs
 	input     textinput.Model
 	inputMode string
@@ -178,8 +174,10 @@ type Model struct {
 
 	// Strong typed confirmation for deleting a model discovered outside the
 	// primary directory. The user must type "yes" into the input screen before
-	// removeModelAt may call modelstore.RemoveExternal on that row.
-	pendingExternalRemoveIdx int
+	// removeModelAt may call modelstore.RemoveExternal on that row. It holds
+	// the model's path identity, not its list index: a scan can re-sort the list
+	// while the prompt is open.
+	pendingExternalRemoveID string
 
 	// Resumable Claude Code session for the working directory, discovered when
 	// the pre-launch screen is opened.
@@ -206,6 +204,7 @@ type Model struct {
 
 	// Messages
 	message        string
+	whatsNew       string // one-time feature announcement for this session
 	messageType    string // info, warning, error
 	scanningModels bool
 	spinner        spinner.Model
@@ -215,7 +214,6 @@ type Model struct {
 type ModelItem struct {
 	Name          string
 	Path          string
-	Tuned         int
 	SizeGB        float64
 	Arch          string
 	Architecture  string // exact GGUF architecture, without display suffixes
@@ -270,10 +268,6 @@ func sessionModel() Model {
 	if backend == "" {
 		backend = "auto"
 	}
-	rounds := cfg.TuneRounds
-	if rounds <= 0 {
-		rounds = 8
-	}
 	ctxValue := cfg.CtxValue()
 	ctxMode := cfg.CtxMode()
 	parallel := ""
@@ -307,16 +301,15 @@ func sessionModel() Model {
 		vision:          cfg.Vision,
 		supportExpert:   cfg.SupportExpert,
 		supportOnline:   cfg.SupportOnline,
-		aituneRounds:    rounds,
 		ramLimitPercent: cfg.RAMLimitPercent,
 		ramBudgetMB:     config.ParseBudgetMB(cfg.RamBudget),
 		spinner:         spin,
 	}
 	m.modelUsage = modelusage.Load(cfg.CacheDir)
+	m.whatsNew = takeWhatsNew(cfg.CacheDir)
 	if m.port <= 0 {
 		m.port = 8081
 	}
-	m.pendingExternalRemoveIdx = -1
 	if m.ctxSize == "" {
 		m.ctxSize = "fit"
 	}
@@ -400,9 +393,6 @@ func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 		desc += " · backend " + m.AutoBackend
 	} else if m.BackendRecipe != "" {
 		desc += " · backend " + m.BackendRecipe
-	}
-	if m.Tuned > 0 {
-		desc += fmt.Sprintf(" · tuned %d", m.Tuned)
 	}
 	// The fits estimate is the single most useful datapoint for dense models.
 	if m.FitCtx > 0 {
@@ -507,7 +497,7 @@ func (m *Model) rebuildMainList() {
 		m.mainList.SetWidth(m.width - 4)
 	}
 	if m.height > 0 {
-		m.mainList.SetHeight(m.height - 12)
+		m.mainList.SetHeight(m.height - 12 - m.whatsNewRows())
 	}
 
 	if prevFilterState != list.Unfiltered && prevFilterValue != "" {
@@ -526,25 +516,6 @@ func (m *Model) rebuildMainList() {
 			m.mainList.Select(prevIndex)
 		}
 	}
-}
-
-// openTunedPicker rebuilds the tuned-config list for the current model and
-// opens the picker with the cursor on whatever config is actually active
-// (m.tunePath), instead of always defaulting to "Auto". Without this,
-// reopening the picker just to look — then reflexively pressing Enter to
-// close it — silently reverted an already-chosen tuned config back to Auto.
-func (m *Model) openTunedPicker() {
-	m.tunedConfigs = tune.ListTunedConfigs(m.cacheDir, m.models[m.selectedModel].Name, m.backendTag(), false)
-	m.tunedIndex = -1
-	if m.tunePath != "" {
-		for i, c := range m.tunedConfigs {
-			if c.Path == m.tunePath {
-				m.tunedIndex = i
-				break
-			}
-		}
-	}
-	m.screen = ScreenTunedPicker
 }
 
 type mainItem struct {
@@ -687,16 +658,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				external++
 			}
 		}
-		seconds := msg.result.Duration.Round(100 * time.Millisecond)
-		m.message = fmt.Sprintf("Computer scan complete: %d runnable model(s), %d outside the primary directory (%s)", len(m.models), external, seconds)
-		m.messageType = "info"
-		if msg.result.Truncated {
-			m.message += "; scan limit reached, showing partial results"
-			m.messageType = "warning"
-		}
-		if msg.cacheErr != nil {
-			m.message += fmt.Sprintf("; results could not be saved: %v", msg.cacheErr)
-			m.messageType = "warning"
+		// The typed external-delete prompt's message names the file that will
+		// be deleted; the scan summary must not replace it.
+		if m.inputMode != "external-remove-confirm" {
+			seconds := msg.result.Duration.Round(100 * time.Millisecond)
+			m.message = fmt.Sprintf("Computer scan complete: %d runnable model(s), %d outside the primary directory (%s)", len(m.models), external, seconds)
+			m.messageType = "info"
+			if msg.result.Truncated {
+				m.message += "; scan limit reached, showing partial results"
+				m.messageType = "warning"
+			}
+			if msg.cacheErr != nil {
+				m.message += fmt.Sprintf("; results could not be saved: %v", msg.cacheErr)
+				m.messageType = "warning"
+			}
 		}
 		if m.screen == ScreenFirstRun && len(m.models) > 0 {
 			m.screen = ScreenMain
@@ -707,7 +682,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.mainList.SetWidth(msg.Width - 4)
-		m.mainList.SetHeight(msg.Height - 12)
+		m.mainList.SetHeight(msg.Height - 12 - m.whatsNewRows())
 		return m, nil
 
 	case tea.KeyMsg:
@@ -737,7 +712,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Blur()
 				if m.screen == ScreenDownload || m.screen == ScreenBackend {
 					if m.screen == ScreenDownload {
-						m.pendingExternalRemoveIdx = -1
+						m.pendingExternalRemoveID = ""
 					}
 					m.screen = ScreenMain
 					m.message = ""
@@ -748,7 +723,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// control before leaving) - let the per-screen dispatch below run
 			// instead of jumping straight to Main and skipping it.
 			switch m.screen {
-			case ScreenPrelaunch, ScreenTunedPicker, ScreenRecommended:
+			case ScreenPrelaunch, ScreenRecommended:
 			case ScreenMain:
 			default:
 				m.screen = ScreenMain
@@ -765,8 +740,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateModelConfig(msg)
 	case ScreenPrelaunch:
 		return m.updatePrelaunch(msg)
-	case ScreenTunedPicker:
-		return m.updateTunedPicker(msg)
 	case ScreenFirstRun:
 		return m.updateFirstRun(msg)
 	case ScreenRecommended:
@@ -853,8 +826,13 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "s", "S":
 			m.openSettings()
 		case "u", "U":
-			m.launchRequest = &LaunchRequest{Update: true}
-			return m, tea.Quit
+			// A stray key must not start a rebuild: ask first, Cancel default.
+			m.openChoice("Update ggrun now? This exits the TUI and rebuilds.", []string{"Cancel", "Update now"}, "Cancel", ScreenMain, func(cm *Model, choice string) {
+				if choice == "Update now" {
+					cm.launchRequest = &LaunchRequest{Update: true}
+				}
+			})
+			return m, nil
 		case "b", "B":
 			m.openBackendChoice(ScreenMain)
 		case "f", "F":
@@ -996,11 +974,10 @@ func (m *Model) applyLaunchRequestFields(req *LaunchRequest) {
 		m.parallel = strconv.Itoa(req.Parallel)
 	}
 	m.vision = req.Vision
-	m.tunePath = req.TuneCache
-	m.aitune = req.AITune
-	m.aituneRounds = req.AITuneRounds
 	m.benchmark = req.Benchmark
 	m.claudeCode = req.ClaudeCode
+	m.claudeHeadless = req.ClaudeHeadless
+	m.gatewayHost, m.gatewayPort, m.gatewayURL, m.gatewayTokenFile = req.GatewayHost, req.GatewayPort, req.GatewayURL, req.GatewayTokenFile
 	m.claudeProfile = req.ClaudeProfile
 	m.claudeReviewer = req.ClaudeReviewerOverride
 	if req.SupportSet || req.SupportExpert != "" {
@@ -1011,7 +988,6 @@ func (m *Model) applyLaunchRequestFields(req *LaunchRequest) {
 	m.noCachedConfig = req.NoCachedConfig
 	m.chatTemplate = req.ChatTemplate
 	m.resumeSession, m.resumeRun, m.resumeCached = req.ResumeSession, "", 0
-	m.refreshTunedCounts()
 }
 
 // cfgRows returns the ordered focusable rows of the Advanced config screen.
@@ -1020,13 +996,13 @@ func (m Model) cfgRows() []string {
 	if m.selectedBackendRecipe() != nil {
 		rows = append(rows, "backend-install")
 	}
-	rows = append(rows, "context", "parallel", "kv", "kvq", "swa", "tuned", "aitune")
-	if m.aitune {
-		rows = append(rows, "rounds")
-	}
+	rows = append(rows, "context", "parallel", "kv", "kvq", "swa")
 	rows = append(rows, "vision", "claudecode")
 	if m.claudeCode {
 		rows = append(rows, "claudereviewer", "claudeprofile")
+	}
+	if m.claudeCode && m.claudeHeadless {
+		rows = append(rows, "gatewayhost", "gatewayport", "gatewayurl", "gatewaytoken")
 	}
 	rows = append(rows, "chattemplate")
 	return append(rows, "benchmark", "launch", "dryrun")
@@ -1239,15 +1215,10 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 		} else {
 			m.setCtx(nextOption(order, cur))
 		}
-	case "aitune":
-		m.aitune = !m.aitune
-		if m.aitune {
-			m.benchmark = false
-		}
 	case "vision":
 		m.vision = !m.vision
 	case "claudecode":
-		m.claudeCode = !m.claudeCode
+		m.cycleClaudeMode(dir)
 	case "claudereviewer":
 		order := []string{"auto", "qwen", "qwen2b", "nanbeige", "off"}
 		if dir < 0 {
@@ -1278,9 +1249,6 @@ func (m *Model) cycleCfgRow(row string, dir int) {
 		}
 	case "benchmark":
 		m.benchmark = !m.benchmark
-		if m.benchmark {
-			m.aitune = false
-		}
 	}
 }
 
@@ -1299,19 +1267,18 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 		m.cycleCfgRow("kvq", 1)
 	case "swa":
 		m.cycleCfgRow("swa", 1)
-	case "tuned":
-		m.openTunedPicker()
-	case "rounds":
-		m.openCfgInput("aitune", strconv.Itoa(m.aituneRounds), "AI tune rounds (1-30, default 8)")
-	case "aitune":
-		m.aitune = !m.aitune
-		if m.aitune {
-			m.benchmark = false
-		}
 	case "vision":
 		m.vision = !m.vision
 	case "claudecode":
-		m.claudeCode = !m.claudeCode
+		m.cycleClaudeMode(1)
+	case "gatewayhost":
+		m.openCfgInput("gatewayhost", m.gatewayHostLabel(), "Gateway bind address; loopback for a proxy/tunnel")
+	case "gatewayport":
+		m.openCfgInput("gatewayport", m.gatewayPortLabel(), "Stable gateway port (different from model port)")
+	case "gatewayurl":
+		m.openCfgInput("gatewayurl", m.gatewayURL, "Advertised HTTP(S) base URL; optional")
+	case "gatewaytoken":
+		m.openCfgInput("gatewaytoken", m.gatewayTokenFile, "Private credential FILE path; blank creates one automatically")
 	case "claudereviewer":
 		m.cycleCfgRow("claudereviewer", 1)
 	case "claudeprofile":
@@ -1320,9 +1287,6 @@ func (m Model) activateCfgRow(row string) (tea.Model, tea.Cmd) {
 		m.cycleCfgRow("chattemplate", 1)
 	case "benchmark":
 		m.benchmark = !m.benchmark
-		if m.benchmark {
-			m.aitune = false
-		}
 	case "launch":
 		if m.openSelectedBackendInstall() {
 			return m, nil
@@ -1344,13 +1308,26 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Free-text edit mode (context / parallel / AI-tune rounds).
+	// Free-text edit mode (context / parallel).
 	if m.inputMode != "" {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
 			val := m.input.Value()
 			switch m.inputMode {
+			case "gatewayhost":
+				m.gatewayHost = strings.TrimSpace(val)
+			case "gatewayurl":
+				m.gatewayURL = strings.TrimSpace(val)
+			case "gatewaytoken":
+				m.gatewayTokenFile = strings.TrimSpace(val)
+			case "gatewayport":
+				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 && n <= 65535 {
+					m.gatewayPort = n
+				} else {
+					m.message = "Gateway port must be between 1 and 65535"
+					m.messageType = "warning"
+				}
 			case "ctx":
 				m.setCtx(val)
 			case "parallel":
@@ -1364,10 +1341,6 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.message = "Warning: Parallel must be a positive integer"
 					m.messageType = "warning"
-				}
-			case "aitune":
-				if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n >= 1 && n <= 30 {
-					m.aituneRounds = n
 				}
 			}
 			m.inputMode = ""
@@ -1410,24 +1383,12 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cycleCfgRow("kvq", 1)
 	case "w", "W":
 		m.cycleCfgRow("swa", 1)
-	case "a", "A":
-		m.aitune = !m.aitune
-		if m.aitune {
-			m.benchmark = false
-		}
-	case "r", "R":
-		if m.aitune {
-			m.openCfgInput("aitune", strconv.Itoa(m.aituneRounds), "AI tune rounds (1-30, default 8)")
-		}
 	case "b", "B":
 		m.benchmark = !m.benchmark
-		if m.benchmark {
-			m.aitune = false
-		}
 	case "v", "V":
 		m.vision = !m.vision
 	case "x", "X":
-		m.claudeCode = !m.claudeCode
+		m.cycleClaudeMode(1)
 	case "l", "L":
 		if m.openSelectedBackendInstall() {
 			return m, nil
@@ -1441,8 +1402,6 @@ func (m Model) updateModelConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messageType = "info"
 	case "i", "I":
 		m.openSelectedBackendInstall()
-	case "t", "T":
-		m.openTunedPicker()
 	case "e", "E":
 		if m.claudeCode {
 			m.cycleCfgRow("claudereviewer", 1)
@@ -1560,13 +1519,21 @@ func (m Model) updateInputScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 		val := m.input.Value()
 		switch m.inputMode {
 		case "external-remove-confirm":
-			idx := m.pendingExternalRemoveIdx
+			id := m.pendingExternalRemoveID
 			m.inputMode = ""
 			m.input.Blur()
 			m.screen = ScreenMain
 			if strings.TrimSpace(val) != "yes" {
+				m.pendingExternalRemoveID = ""
 				m.message = "External model removal cancelled."
 				m.messageType = ""
+				return m, cmd
+			}
+			idx := m.modelIndexByID(id)
+			if idx < 0 {
+				m.pendingExternalRemoveID = ""
+				m.message = fmt.Sprintf("%s is no longer listed; nothing was deleted.", id)
+				m.messageType = "warning"
 				return m, cmd
 			}
 			m.removeModelAt(idx)
@@ -1655,8 +1622,6 @@ func (m Model) View() string {
 		return m.viewModelConfig()
 	case ScreenPrelaunch:
 		return m.viewPrelaunch()
-	case ScreenTunedPicker:
-		return m.viewTunedPicker()
 	case ScreenRecommended:
 		return m.viewRecommended()
 	case ScreenSettings:
@@ -1694,6 +1659,7 @@ func (m Model) viewMain() string {
 
 	b.WriteString(titleStyle.Render("═══ ggrun ═══") + "\n")
 	b.WriteString(m.versionLine())
+	bannerAt := b.Len()
 	b.WriteString(fmt.Sprintf("  Backend:  %s\n", m.backend))
 	b.WriteString(fmt.Sprintf("  Hardware: %s\n", hwSummary(restrictedCapabilities(m.caps))))
 	b.WriteString(fmt.Sprintf("  Models:   %d recognized (%d elsewhere)\n", len(m.models), external))
@@ -1711,7 +1677,7 @@ func (m Model) viewMain() string {
 	if m.modelUsage != nil && hasAnyUsage(m.modelUsage) {
 		b.WriteString(mutedStyle.Render("  sorted by usage: most-used and most-recent first") + "\n")
 	}
-	b.WriteString(mutedStyle.Render("  Enter configure · / or type to filter · x delete"))
+	b.WriteString(mutedStyle.Render("  Enter configure · / filter · x delete"))
 
 	if m.message != "" {
 		b.WriteString("\n")
@@ -1725,7 +1691,8 @@ func (m Model) viewMain() string {
 		}
 	}
 
-	return b.String()
+	out := b.String()
+	return withWhatsNew(out, bannerAt, m.whatsNew, m.width, m.height)
 }
 
 // versionLine is the start screen's version row: the running build and whether
@@ -1848,10 +1815,6 @@ func (m Model) viewModelConfig() string {
 	} else if m.kvPlacement == "cpu" {
 		kvLabel = "cpu (more GPU experts for short chat)"
 	}
-	tuneLabel := "auto"
-	if m.tunePath != "" {
-		tuneLabel = filepath.Base(m.tunePath)
-	}
 
 	kvQualityLabel := kvQualityLabel(m.kvQuality)
 
@@ -1873,23 +1836,19 @@ func (m Model) viewModelConfig() string {
 	swaLabel := m.swaLabel(model)
 	line("swa", "[w] Full SWA cache", swaLabel)
 
-	section("Tuning")
-	line("tuned", "[t] Tuned config", tuneLabel)
-	line("aitune", "[a] AI tune", boolLabel(m.aitune))
-	if m.aitune {
-		line("rounds", "[r] AI tune rounds", strconv.Itoa(m.aituneRounds))
-	}
-
 	section("Run mode")
 	line("vision", "[v] Vision (mmproj)", boolLabel(m.vision))
-	ccLabel := boolLabel(m.claudeCode)
-	if m.claudeCode {
-		ccLabel += " — serve + print Claude Code env (thinking on)"
-	}
+	ccLabel := m.claudeModeLabel()
 	line("claudecode", "[x] Claude Code", ccLabel)
 	if m.claudeCode {
 		line("claudereviewer", "[e] Reviewer/worker", claudeReviewerLabel(m.claudeReviewer))
 		line("claudeprofile", "[z] Claude profile", claudeProfileLabel(m.claudeProfile))
+	}
+	if m.claudeCode && m.claudeHeadless {
+		line("gatewayhost", "Gateway listen address", m.gatewayHostLabel())
+		line("gatewayport", "Gateway port", m.gatewayPortLabel())
+		line("gatewayurl", "Client URL", m.gatewayURLLabel())
+		line("gatewaytoken", "Credential file", m.gatewayTokenLabel())
 	}
 	line("chattemplate", "[n] Chat template", m.chatTemplateLabel(model))
 	line("benchmark", "[b] Benchmark mode", boolLabel(m.benchmark))
@@ -1969,7 +1928,7 @@ func (m Model) updatePrelaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Resume only makes sense in Claude Code mode with a recorded
 			// session; otherwise fall through to no-op rather than launching
 			// something the footer did not offer.
-			if m.claudeCode && m.resumeSession != "" {
+			if m.claudeCode && !m.claudeHeadless && m.resumeSession != "" {
 				req := m.buildLaunchRequest()
 				if req != nil {
 					req.ResumeSession = m.resumeSession
@@ -2123,11 +2082,6 @@ func (m Model) viewPrelaunch() string {
 	b.WriteString(fmt.Sprintf("  KV placement:   %s\n", m.kvPlacement))
 	b.WriteString(fmt.Sprintf("  KV quality:     %s\n", kvQualityLabel(m.kvQuality)))
 	b.WriteString(fmt.Sprintf("  Full SWA cache: %s\n", m.swaLabel(model)))
-	if m.aitune {
-		b.WriteString(fmt.Sprintf("  AI tune:        %s (%d rounds)\n", boolLabel(m.aitune), m.aituneRounds))
-	} else {
-		b.WriteString(fmt.Sprintf("  AI tune:        %s\n", boolLabel(m.aitune)))
-	}
 	b.WriteString(fmt.Sprintf("  Vision:         %s\n", boolLabel(m.vision)))
 	b.WriteString(fmt.Sprintf("  Benchmark:      %s\n", boolLabel(m.benchmark)))
 	if m.chatTemplate != "" {
@@ -2136,17 +2090,17 @@ func (m Model) viewPrelaunch() string {
 		b.WriteString(fmt.Sprintf("  Chat template:  auto (%s corrected)\n", entry.Name))
 	}
 	if m.claudeCode {
-		b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", boolLabel(m.claudeCode)))
+		b.WriteString(fmt.Sprintf("  Claude Code:    %s\n", m.claudeModeLabel()))
 		b.WriteString(fmt.Sprintf("  Reviewer/worker: %s\n", claudeReviewerLabel(m.claudeReviewer)))
 		b.WriteString(fmt.Sprintf("  Claude profile: %s\n", claudeProfileLabel(m.claudeProfile)))
 	}
-	if m.tunePath != "" {
-		b.WriteString(fmt.Sprintf("  Tuned config:   %s\n", filepath.Base(m.tunePath)))
+	if m.claudeCode && m.claudeHeadless {
+		b.WriteString(fmt.Sprintf("  Gateway:        %s:%s\n  Client URL:     %s\n", m.gatewayHostLabel(), m.gatewayPortLabel(), m.gatewayURLLabel()))
 	}
 	if m.noCachedConfig {
 		b.WriteString("  Cached config:  ignored (fresh derive)\n")
 	}
-	if m.claudeCode && m.resumeSession != "" {
+	if m.claudeCode && !m.claudeHeadless && m.resumeSession != "" {
 		b.WriteString(fmt.Sprintf("  Resumable:      session %s\n", shortSessionID(m.resumeSession)))
 		if m.resumeRun != "" {
 			b.WriteString(fmt.Sprintf("                  workflow %s, %d agents cached\n", m.resumeRun, m.resumeCached))
@@ -2171,7 +2125,7 @@ func (m Model) viewPrelaunch() string {
 	b.WriteString("\n")
 	b.WriteString(highlightStyle.Render("  [Enter] Confirm and launch"))
 	b.WriteString("\n")
-	if m.claudeCode && m.resumeSession != "" {
+	if m.claudeCode && !m.claudeHeadless && m.resumeSession != "" {
 		b.WriteString(highlightStyle.Render("  [r] Resume that session and its workflow"))
 		b.WriteString("\n")
 	}
@@ -2197,65 +2151,6 @@ func (m Model) viewPrelaunch() string {
 	if body, clipped := clipToFocused(b.String(), m.viewportLines()); clipped {
 		return body + "\n" + mutedStyle.Render("  (use ↑/↓ to review the full summary)")
 	}
-	return b.String()
-}
-
-func (m Model) updateTunedPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc":
-			m.screen = ScreenModelConfig
-			return m, nil
-		case "enter":
-			if m.tunedIndex >= 0 && m.tunedIndex < len(m.tunedConfigs) {
-				m.tunePath = m.tunedConfigs[m.tunedIndex].Path
-			} else {
-				m.tunePath = ""
-			}
-			m.screen = ScreenModelConfig
-			return m, nil
-		case "up", "k":
-			m.tunedIndex--
-			if m.tunedIndex < -1 {
-				m.tunedIndex = len(m.tunedConfigs) - 1
-			}
-		case "down", "j":
-			m.tunedIndex++
-			if m.tunedIndex >= len(m.tunedConfigs) {
-				m.tunedIndex = -1
-			}
-		case "q", "Q":
-			return m, tea.Quit
-		}
-	}
-	return m, nil
-}
-
-func (m Model) viewTunedPicker() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("═══ Tuned Configs ═══") + "\n\n")
-	if len(m.tunedConfigs) == 0 {
-		b.WriteString("  No tuned configs match this model/backend.\n")
-		b.WriteString("  Run AI tune to create one.\n")
-	} else {
-		if m.tunedIndex == -1 {
-			b.WriteString(selectedStyle.Render("> [0] Auto / heuristic cache selection") + "\n")
-		} else {
-			b.WriteString("  [0] Auto / heuristic cache selection\n")
-		}
-		for i, entry := range m.tunedConfigs {
-			if i == m.tunedIndex {
-				b.WriteString(selectedStyle.Render(fmt.Sprintf("> [%d] %s", i+1, entry.Label)) + "\n")
-				b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s", filepath.Base(entry.Path))) + "\n")
-			} else {
-				b.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, entry.Label))
-				b.WriteString(subtitleStyle.Render(fmt.Sprintf("     %s", filepath.Base(entry.Path))) + "\n")
-			}
-		}
-	}
-	b.WriteString("\n")
-	b.WriteString("  [Enter] Select  [Esc] Cancel  [↑/↓] Navigate\n")
 	return b.String()
 }
 
@@ -2616,6 +2511,12 @@ func (m Model) viewRecommended() string {
 				name, recommend.DisplayFit(rec.Fit), quant, rec.QuantSizeGB, recommend.DisplayIntelligence(rec), tps)
 			if idx == m.selectedRecommendation {
 				b.WriteString(prefix + selectedStyle.Render(line) + "\n")
+				// Who publishes the selected download (review S-09).
+				from := "    from " + rec.Repo
+				if owner := recommend.RepoOwner(rec.Repo); owner != "" && !recommend.KnownQuantizer(owner) {
+					from += "  (publisher outside the named quantizers; check it first)"
+				}
+				b.WriteString(mutedStyle.Render(from) + "\n")
 			} else {
 				b.WriteString(prefix + line + "\n")
 			}
@@ -2930,7 +2831,6 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 		backendTag = "ik"
 	}
 	for i := range models {
-		modelBackendTag := backendTag
 		if info, err := gguf.Parse(models[i].Path); err == nil {
 			if isAuxiliaryModel(models[i].Name, info.Architecture) {
 				continue
@@ -2955,13 +2855,11 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 				// is selected for this model even when the user's default is pinned to
 				// mainline or generic ik_llama.
 				if routed := backends.ForArch(info.Architecture); routed != nil {
-					modelBackendTag = routed.Tag
 					models[i].AutoBackend = routed.Tag
 				} else if helper := backends.SoleHelperForArch(info.Architecture); helper != nil {
 					// The CLI routes an architecture served only by a helper-only
 					// fork to that fork (selectBackendForModel). Mirror it, or an
 					// installed helper recipe keeps being offered for install.
-					modelBackendTag = helper.Tag
 					models[i].AutoBackend = helper.Tag
 				} else if recipes := backends.RecipesForArch(info.Architecture); len(recipes) > 0 {
 					// Catalog order is preference order. For architectures with an
@@ -2972,7 +2870,6 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 			}
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)
 		}
-		models[i].Tuned = tune.CountTunedConfigs(cacheDir, models[i].Name, modelBackendTag)
 		visible = append(visible, models[i])
 	}
 	return visible
@@ -3290,30 +3187,17 @@ func (m Model) backendTag() string {
 	}
 }
 
-// persistConfig loads the current config, applies mutate, and writes it back to
+// persistConfig loads the saved config, applies mutate, and writes it back to
 // the canonical config file, preserving all other settings so GUI changes
-// survive across sessions.
+// survive across sessions. It starts from the file, not the environment, so a
+// one-off LLM_* override is never saved as a setting.
 func persistConfig(mutate func(*config.Config)) error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadPersisted()
 	if err != nil {
 		return err
 	}
 	mutate(cfg)
 	return cfg.Save()
-}
-
-// refreshTunedCounts recomputes per-model tuned config counts for the current
-// backend and rebuilds the main list so the counts reflect the active backend.
-func (m *Model) refreshTunedCounts() {
-	tag := m.backendTag()
-	for i := range m.models {
-		modelTag := tag
-		if m.models[i].AutoBackend != "" {
-			modelTag = m.models[i].AutoBackend
-		}
-		m.models[i].Tuned = tune.CountTunedConfigs(m.cacheDir, m.models[i].Name, modelTag)
-	}
-	m.rebuildMainList()
 }
 
 // settingRow describes one editable config setting on the Settings screen.
@@ -3400,9 +3284,6 @@ func settingRows() []settingRow {
 		{label: "Parallel", kind: "text",
 			get: func(c *config.Config) string { return strconv.Itoa(c.Parallel) },
 			set: atoiSet(func(c *config.Config, n int) { c.Parallel = n })},
-		{label: "AI-tune rounds", kind: "text",
-			get: func(c *config.Config) string { return strconv.Itoa(c.TuneRounds) },
-			set: atoiSet(func(c *config.Config, n int) { c.TuneRounds = n })},
 	}
 }
 
@@ -3415,7 +3296,7 @@ func (m *Model) applySetting(row settingRow, val string) {
 		return
 	}
 	row.set(m.settingsCfg, val)
-	if err := m.settingsCfg.Save(); err != nil {
+	if err := persistConfig(func(c *config.Config) { row.set(c, val) }); err != nil {
 		m.message = fmt.Sprintf("Warning: %s set to %s for this session — save failed: %v", row.label, val, err)
 		m.messageType = "warning"
 	} else {
@@ -3449,7 +3330,7 @@ func (m *Model) applySetting(row settingRow, val string) {
 		m.refreshRecommendations()
 	case "Backend":
 		m.backend = val
-		m.refreshTunedCounts()
+		m.rebuildMainList()
 	case "Model directory":
 		m.modelDir = val
 		m.models = loadRecognizedModels(val, m.cacheDir, m.backend, m.caps)
@@ -3467,8 +3348,6 @@ func (m *Model) applySetting(row settingRow, val string) {
 		if m.settingsCfg.Parallel > 0 {
 			m.parallel = strconv.Itoa(m.settingsCfg.Parallel)
 		}
-	case "AI-tune rounds":
-		m.aituneRounds = m.settingsCfg.TuneRounds
 	}
 }
 
@@ -3477,7 +3356,7 @@ func validateSettingValue(label, val string) error {
 	case "Port":
 		_, err := config.ParsePort(val)
 		return err
-	case "Parallel", "AI-tune rounds":
+	case "Parallel":
 		n, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil || n < 0 {
 			return fmt.Errorf("must be a non-negative integer")
@@ -3537,7 +3416,7 @@ func (m *Model) openBackendChoice(ret Screen) {
 			mm.message = "Backend saved: " + v
 			mm.messageType = "info"
 		}
-		mm.refreshTunedCounts()
+		mm.rebuildMainList()
 	})
 }
 
@@ -3592,13 +3471,18 @@ func (m *Model) openRemoveModelChoice(idx int) {
 	if idx < 0 || idx >= len(m.models) {
 		return
 	}
+	// The dialog is bound to the model's path, not its list index: a scan that
+	// finishes while it is open re-sorts m.models (C-16).
 	name := m.models[idx].Name
+	id := modelIdentity(m.models[idx].Path)
 	if m.models[idx].External {
 		m.openChoice("Delete "+name+" outside the primary directory?", []string{"Cancel", "Remove file " + name}, "Cancel", ScreenMain, func(cm *Model, confirm string) {
 			if confirm == "Cancel" {
 				return
 			}
-			cm.openExternalRemoveConfirm(idx)
+			if i := cm.listedModelIndex(id, name); i >= 0 {
+				cm.openExternalRemoveConfirm(i)
+			}
 		})
 		return
 	}
@@ -3606,8 +3490,34 @@ func (m *Model) openRemoveModelChoice(idx int) {
 		if confirm == "Cancel" {
 			return
 		}
-		cm.removeModelAt(idx)
+		if i := cm.listedModelIndex(id, name); i >= 0 {
+			cm.removeModelAt(i)
+		}
 	})
+}
+
+// modelIndexByID finds a model by its path identity in the current list.
+func (m *Model) modelIndexByID(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := range m.models {
+		if modelIdentity(m.models[i].Path) == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// listedModelIndex is modelIndexByID for a confirmed dialog: when the model is
+// gone from the list it says so and acts on nothing.
+func (m *Model) listedModelIndex(id, name string) int {
+	i := m.modelIndexByID(id)
+	if i < 0 {
+		m.message = fmt.Sprintf("%s is no longer listed; nothing was changed.", name)
+		m.messageType = "warning"
+	}
+	return i
 }
 
 // openExternalRemoveConfirm opens the strong typed confirmation screen for a
@@ -3619,7 +3529,10 @@ func (m *Model) openRemoveModelChoice(idx int) {
 // "external-remove-confirm" mode below. Esc on this screen falls through the
 // generic input-screen path and discards the pending removal.
 func (m *Model) openExternalRemoveConfirm(idx int) {
-	m.pendingExternalRemoveIdx = idx
+	if idx < 0 || idx >= len(m.models) {
+		return
+	}
+	m.pendingExternalRemoveID = modelIdentity(m.models[idx].Path)
 	m.screen = ScreenDownload
 	m.inputMode = "external-remove-confirm"
 	m.input.SetValue("")
@@ -3644,17 +3557,16 @@ func (m *Model) removeModelAt(idx int) {
 	// A model outside the primary directory leaves the in-dir removal path: it
 	// is not listed by modelstore.List(m.modelDir), so the match-by-relative-path
 	// logic below could never find it. Removal is gated on the strong typed
-	// "yes" confirmation (openExternalRemoveConfirm): updateInputScreen sets
-	// pendingExternalRemoveIdx to this exact index only after the user typed
-	// "yes", and removes it again afterwards. Anything else reaching this branch
-	// (a stray call, a stale index) is refused.
+	// "yes" confirmation (openExternalRemoveConfirm): pendingExternalRemoveID
+	// names this exact file and is cleared afterwards. Anything else reaching
+	// this branch (a stray call, a stale index) is refused.
 	if item.External {
-		if m.pendingExternalRemoveIdx != idx {
+		if m.pendingExternalRemoveID == "" || m.pendingExternalRemoveID != modelIdentity(item.Path) {
 			m.message = "External model removal requires the typed confirmation."
 			m.messageType = "warning"
 			return
 		}
-		m.pendingExternalRemoveIdx = -1
+		m.pendingExternalRemoveID = ""
 		removed, err := modelstore.RemoveExternal(m.modelDir, item.Path)
 		if err != nil {
 			m.message = fmt.Sprintf("Error removing %s: %v", item.Name, err)
@@ -3715,11 +3627,14 @@ func (m *Model) openClearCachesChoice(idx int) {
 		return
 	}
 	name := m.models[idx].Name
+	id := modelIdentity(m.models[idx].Path)
 	m.openChoice("Clear caches for "+name+"?", []string{"Cancel", "Confirm: clear caches for " + name}, "Cancel", ScreenModelConfig, func(cm *Model, confirm string) {
 		if confirm == "Cancel" {
 			return
 		}
-		cm.clearModelCachesAt(idx)
+		if i := cm.listedModelIndex(id, name); i >= 0 {
+			cm.clearModelCachesAt(i)
+		}
 	})
 }
 
@@ -3794,7 +3709,7 @@ func (m Model) updateChoice(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = m.choiceReturn
 				m.choiceApply(&m, m.choiceOptions[m.choiceCursor])
 			}
-			if m.launchRequest != nil && len(m.launchRequest.BackendArgs) > 0 {
+			if m.launchRequest != nil && (len(m.launchRequest.BackendArgs) > 0 || m.launchRequest.Update) {
 				return m, tea.Quit
 			}
 		case "q", "Q":
@@ -3985,17 +3900,16 @@ func (m Model) buildLaunchRequest() *LaunchRequest {
 		// which is exactly what made the launch unfittable — and nothing was
 		// permitted to drop it, because the TUI had "typed" it. A setting is a
 		// preference; only a human at the command line is an instruction.
-		SWAFullSet:    m.swaFullTouched,
-		FlashAttn:     true,
-		Parallel:      parallel,
-		ParallelSet:   parallelSet,
-		Vision:        m.vision,
-		Backend:       m.requestBackend(),
-		TuneCache:     m.tunePath,
-		AITune:        m.aitune,
-		AITuneRounds:  m.aituneRounds,
-		Benchmark:     m.benchmark,
-		ClaudeCode:    m.claudeCode,
+		SWAFullSet:     m.swaFullTouched,
+		FlashAttn:      true,
+		Parallel:       parallel,
+		ParallelSet:    parallelSet,
+		Vision:         m.vision,
+		Backend:        m.requestBackend(),
+		Benchmark:      m.benchmark,
+		ClaudeCode:     m.claudeCode,
+		ClaudeHeadless: m.claudeHeadless,
+		GatewayHost:    m.gatewayHost, GatewayPort: m.gatewayPort, GatewayURL: m.gatewayURL, GatewayTokenFile: m.gatewayTokenFile,
 		ClaudeProfile: m.claudeProfile,
 		// Only emit the reviewer override when the user explicitly deviated from
 		// the automatic choice; an empty value keeps the CLI default.
@@ -4030,27 +3944,29 @@ type LaunchRequest struct {
 	// have to land on a different disk than the default one, and making the
 	// user repoint ModelDir and then remember to put it back is both tedious
 	// and easy to get wrong.
-	DownloadDir   string
-	ModelPath     string
-	Port          int
-	CtxSize       int
-	CtxFlag       string
-	KVPlacement   string
-	KVQuality     string
-	KVQualitySet  bool // TUI explicitly cycled KV quality; emit an explicit override
-	SWAFull       bool
-	SWAFullSet    bool // TUI explicitly selected on/off; emit an override either way
-	FlashAttn     bool
-	Parallel      int
-	ParallelSet   bool // user typed a parallel value (claude-code mode must not override)
-	Vision        bool
-	Backend       string
-	TuneCache     string
-	AITune        bool
-	AITuneRounds  int
-	Benchmark     bool
-	ClaudeCode    bool
-	ClaudeProfile string
+	DownloadDir      string
+	ModelPath        string
+	Port             int
+	CtxSize          int
+	CtxFlag          string
+	KVPlacement      string
+	KVQuality        string
+	KVQualitySet     bool // TUI explicitly cycled KV quality; emit an explicit override
+	SWAFull          bool
+	SWAFullSet       bool // TUI explicitly selected on/off; emit an override either way
+	FlashAttn        bool
+	Parallel         int
+	ParallelSet      bool // user typed a parallel value (claude-code mode must not override)
+	Vision           bool
+	Backend          string
+	Benchmark        bool
+	ClaudeCode       bool
+	ClaudeHeadless   bool
+	GatewayHost      string
+	GatewayPort      int
+	GatewayURL       string
+	GatewayTokenFile string
+	ClaudeProfile    string
 	// ClaudeReviewerOverride picks the local worker/reviewer model in Claude
 	// Code mode: empty/"auto" and "qwen" resolve to the Qwen3.5-4B
 	// worker/reviewer, "qwen2b" forces the small/light Qwen3.5-2B review-only
@@ -4156,12 +4072,6 @@ func (req *LaunchRequest) LaunchArgs() []string {
 	if req.Backend != "" && req.Backend != "auto" {
 		args = append(args, "--backend", req.Backend)
 	}
-	if req.TuneCache != "" {
-		args = append(args, "--tune-cache", req.TuneCache)
-	}
-	if req.AITune && req.AITuneRounds > 0 {
-		args = append(args, "--rounds", strconv.Itoa(req.AITuneRounds))
-	}
 	if req.ParallelSet && req.Parallel > 0 {
 		args = append(args, "--parallel", strconv.Itoa(req.Parallel))
 	}
@@ -4188,6 +4098,21 @@ func (req *LaunchRequest) LaunchArgs() []string {
 	}
 	if req.ClaudeCode {
 		args = append(args, "--claude-code")
+		if req.ClaudeHeadless {
+			args = append(args, "--headless")
+			if req.GatewayHost != "" {
+				args = append(args, "--gateway-host", req.GatewayHost)
+			}
+			if req.GatewayPort > 0 {
+				args = append(args, "--gateway-port", strconv.Itoa(req.GatewayPort))
+			}
+			if req.GatewayURL != "" {
+				args = append(args, "--gateway-url", req.GatewayURL)
+			}
+			if req.GatewayTokenFile != "" {
+				args = append(args, "--gateway-token-file", req.GatewayTokenFile)
+			}
+		}
 		if req.ClaudeProfile != "" {
 			args = append(args, "--claude-profile", req.ClaudeProfile)
 		}
@@ -4319,7 +4244,7 @@ func (m Model) prelaunchParallelLabel() string {
 			return "agent-parallel (4 workflow slots)"
 		default:
 			if m.parallel == "" || m.parallel == "1" {
-				return "automatic (Claude Code policy; target 4 slots)"
+				return "automatic (resolved for this model at launch)"
 			}
 		}
 	}

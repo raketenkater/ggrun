@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,7 +51,15 @@ exit "$status"`
 
 // scopeModeEnvOverride lets tests select a mode without being root and without a
 // real systemd. Read only here so the override cannot leak into other decisions.
+// "none" is also the operator opt-out for hosts without systemd (Docker): the
+// backend runs uncontained while ggrun's pre-launch admission still applies.
 const scopeModeEnvOverride = "GGRUN_SCOPE_MODE"
+
+// scopeOptOutHint names the opt-out in every containment refusal.
+const scopeOptOutHint = " On a host without systemd (for example a container), set " +
+	"GGRUN_SCOPE_MODE=none to run the backend without cgroup memory containment."
+
+var warnUncontainedOnce sync.Once
 
 // resolveScopeMode selects an owner once, before starting a contained process.
 // A directory or inherited session variable does not establish a reachable bus.
@@ -62,6 +71,8 @@ func resolveScopeMode() scopeMode {
 		return scopeSystem
 	case "unsupported":
 		return scopeUnsupported
+	case "none":
+		return scopeNone
 	}
 	return scopeModeForUID(os.Geteuid())
 }
@@ -117,9 +128,19 @@ func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, u
 	if memoryMaxMB <= 0 {
 		return args, scopeUnsupported, nil
 	}
+	// The explicit opt-out is checked before systemd-run is required, so a host
+	// without systemd can launch at all. It is never chosen automatically.
+	if strings.TrimSpace(os.Getenv(scopeModeEnvOverride)) == "none" {
+		warnUncontainedOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "[launch] WARNING: GGRUN_SCOPE_MODE=none: the backend runs WITHOUT cgroup memory "+
+				"containment; the %d MiB limit is not enforced and a runtime overrun can exhaust host RAM. "+
+				"Pre-launch admission still applies.\n", memoryMaxMB)
+		})
+		return args, scopeNone, nil
+	}
 	systemdRun, err := exec.LookPath("systemd-run")
 	if err != nil {
-		return nil, scopeUnsupported, fmt.Errorf("backend memory containment requires systemd-run: %w", err)
+		return nil, scopeUnsupported, fmt.Errorf("backend memory containment requires systemd-run: %w."+scopeOptOutHint, err)
 	}
 	// Refuse before building any argv when no instance can own a scope. This must
 	// be an explicit ggrun-authored error rather than a raw systemd failure
@@ -132,7 +153,7 @@ func scopedCommandArgsWithLimits(args []string, memoryHighMB, memoryMaxMB int, u
 			"backend memory containment unavailable: no reachable systemd manager. " +
 				"Run in a systemd login session with a working user manager, or as root " +
 				"on a host with a working system manager. " +
-				"Refusing to start an uncontained backend.")
+				"Refusing to start an uncontained backend." + scopeOptOutHint)
 	}
 	out := []string{
 		systemdRun,
@@ -225,11 +246,6 @@ func scopeUnitActive(unit string, mode scopeMode) (bool, error) {
 	return false, fmt.Errorf("read scope %s activity: %w", unit, err)
 }
 
-func scopeMemoryPeakBytes(unit string, mode scopeMode) (uint64, error) {
-	peak, _, peakErr, _ := scopeMemoryStats(unit, mode)
-	return peak, peakErr
-}
-
 func scopeMemoryStats(unit string, mode scopeMode) (uint64, uint64, error, error) {
 	cgroup, err := scopeControlGroup(unit, mode)
 	if err != nil {
@@ -285,14 +301,6 @@ func scopeControlGroup(unit string, mode scopeMode) (string, error) {
 	return cgroup, nil
 }
 
-func scopeMemoryOOMKillCount(unit string, mode scopeMode) (uint64, error) {
-	cgroup, err := scopeControlGroup(unit, mode)
-	if err != nil {
-		return 0, err
-	}
-	return scopeMemoryOOMKillCountAt(cgroup)
-}
-
 // ScopeNonReclaimableMB reports the backend's current non-reclaimable host
 // footprint (anon + shmem + slab) from its own cgroup's memory.stat. This is
 // the measured post-launch footprint Fix B sizes the running scope's MemoryMax
@@ -318,19 +326,27 @@ func (p *Process) SetMemoryMaxMB(memoryMaxMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB)
+	if err := setScopeMemoryMaxMB(p.scopeUnit, p.scopeMode, memoryMaxMB); err != nil {
+		return err
+	}
+	p.recordMemoryLimits(0, memoryMaxMB)
+	return nil
 }
 
 // SetMemoryHighMB updates the running backend scope's reclaim/throttle
 // boundary without lowering its hard ceiling. Mmap-backed launches use this
-// after the first real canary: measured anonymous state belongs below
-// memory.high, while clean model pages still need the larger memory.max band in
-// which the kernel can evict and re-fault them.
+// after the first real canary. The kernel throttles and reclaims every charged
+// page above memory.high, clean mapped model pages included, so the caller
+// must leave room for the mapped working set, not only the anonymous state.
 func (p *Process) SetMemoryHighMB(memoryHighMB int) error {
 	if p == nil || p.scopeUnit == "" {
 		return fmt.Errorf("backend has no memory scope")
 	}
-	return setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB)
+	if err := setScopeMemoryHighMB(p.scopeUnit, p.scopeMode, memoryHighMB); err != nil {
+		return err
+	}
+	p.recordMemoryLimits(memoryHighMB, 0)
+	return nil
 }
 
 func scopeMemoryOOMKillCountAt(cgroup string) (uint64, error) {
@@ -415,3 +431,59 @@ func setScopeMemoryLimitMB(unit string, mode scopeMode, cgroupFile, systemdPrope
 	}
 	return fmt.Errorf("set scope %s at %s", cgroupFile, path)
 }
+
+// cgroupFSRoot and scopeControlGroupFn are swapped in tests.
+var (
+	cgroupFSRoot        = "/sys/fs/cgroup"
+	scopeControlGroupFn = scopeControlGroup
+	scopeLimitWait      = 5 * time.Second
+)
+
+// errScopeLimitNotInForce means the backend runs in a scope whose hard memory
+// limit is not the one ggrun asked for.
+var errScopeLimitNotInForce = errors.New("backend memory limit is not in force")
+
+// verifyScopeMemoryLimit reads the scope's memory.max back after start. The
+// containment promise rests on it: systemd can accept MemoryMax= and still
+// leave memory.max at "max" (no memory controller delegated to the user
+// manager, a cgroup v1 host). A scope that cannot be found within the wait is
+// left to the normal readiness path, which reports an exited backend.
+func verifyScopeMemoryLimit(unit string, mode scopeMode, wantMB int) error {
+	if unit == "" || wantMB <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(scopeLimitWait)
+	for {
+		cgroup, err := scopeControlGroupFn(unit, mode)
+		if err == nil {
+			data, readErr := os.ReadFile(cgroupFSRoot + cgroup + "/memory.max")
+			if readErr == nil {
+				return checkMemoryMax(strings.TrimSpace(string(data)), wantMB)
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// checkMemoryMax accepts the requested limit within page rounding, or a
+// stricter one; "max" or a looser limit is not in force.
+func checkMemoryMax(value string, wantMB int) error {
+	if value == "max" {
+		return fmt.Errorf("%w: memory.max is \"max\", wanted %d MiB (is the memory controller delegated to this systemd manager?)", errScopeLimitNotInForce, wantMB)
+	}
+	got, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%w: unreadable memory.max %q", errScopeLimitNotInForce, value)
+	}
+	want := uint64(wantMB) << 20
+	const pageSlack = 64 << 10
+	if got > want+pageSlack {
+		return fmt.Errorf("%w: memory.max is %d MiB, wanted %d MiB", errScopeLimitNotInForce, got>>20, wantMB)
+	}
+	return nil
+}
+
+func scopeOptOutHintText() string { return scopeOptOutHint }

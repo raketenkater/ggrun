@@ -17,6 +17,9 @@ import (
 //  2. predicted decode tok/s on the *current* machine, from a memory-bandwidth
 //     model: per-token bytes = active params * bytes/weight, read at a blend of
 //     VRAM and system-RAM bandwidth weighted by how much of the model fits in VRAM.
+//     A MoE with known geometry keeps its always-read backbone in VRAM and
+//     spills only routed experts; with measured host bandwidth each CPU
+//     layer also pays a dispatch cost.
 //
 // Neither is a measured intelligence score for a quantized artifact. Cross-model
 // ranking uses catalog intelligence; quant retention is only a local preference.
@@ -30,6 +33,19 @@ const (
 	ramBandwidthGBps    = 60.0 // dual-channel DDR4/DDR5 ballpark; the offload bottleneck
 	decodeEfficiency    = 0.70 // multi-GPU/large-dense fraction of peak bandwidth
 	moeDecodeEfficiency = 0.50 // routing, expert dispatch, and mixed RAM/VRAM traffic
+	// measuredRAMDecodeEfficiency: a measured host bandwidth is already a
+	// real-world figure; 0.50 only discounts the optimistic 60 GB/s guess.
+	measuredRAMDecodeEfficiency = 0.90
+	// moeCPULayerGB: per-token cost of each layer whose experts run on the
+	// CPU (expert dispatch, thread barriers), as extra GB streamed at the
+	// measured host bandwidth. One rig, 26.27 GB/s measured: GLM-5.3-Flash
+	// UD-Q3_K_XL decoded 6.35-6.87 tok/s, Qwen3.8-Flash-Next UD-Q3_K_XL 21.8
+	// (128-token synthetic), CPU-only Qwen3.6-35B-A3B UD-IQ2_XXS 15.3, where
+	// bandwidth alone predicts 8.3, 29.5 and 28.2; 0.7 ms per layer there.
+	// Expressed in bytes it stays a fixed share of the stream time on other
+	// hosts instead of capping a fast one at 1/(layers*0.7 ms). Only charged
+	// with a measured bandwidth: the 0.50 fallback was fitted without it.
+	moeCPULayerGB = 0.0184
 	// spilledDenseDecodeEfficiency: a dense model split between GPU and CPU
 	// runs its CPU-resident layers at CPU matmul speed, below the RAM bandwidth
 	// ceiling. One measurement: Qwen3.8-27B UD-IQ3_XXS on one RTX 4070 with 32
@@ -273,16 +289,19 @@ func predictDecodeTPSForFit(caps *detect.Capabilities, c Candidate, quant QuantO
 	if spilled {
 		usableVRAMGB -= float64(gpuOverheadMB) / 1024.0
 	}
-	// fraction of the model's weights resident in VRAM
-	f := 0.0
-	if vramBW > 0 {
-		f = clampF(usableVRAMGB/quant.SizeGB, 0, 1)
+	if vramBW <= 0 {
+		usableVRAMGB = 0
 	}
-	// Blended seconds-per-GB: VRAM-resident bytes read fast, RAM-resident slow.
 	// An explicit hardware profile replaces the generic RAM fallback. The host
 	// parallel memcpy probe reports aggregate read+write memory-controller
 	// traffic, a practical ceiling for the CPU-resident weight stream.
 	ramBW := hostMemoryBandwidthGBps(caps)
+	if c.MoE {
+		return predictMoEDecodeTPS(caps, c, quant, perTokenGB, usableVRAMGB, vramBWorRAM(vramBW, ramBW), ramBW)
+	}
+	// fraction of the model's weights resident in VRAM
+	f := clampF(usableVRAMGB/quant.SizeGB, 0, 1)
+	// Blended seconds-per-GB: VRAM-resident bytes read fast, RAM-resident slow.
 	secPerGB := f/vramBWorRAM(vramBW, ramBW) + (1-f)/ramBW
 	if secPerGB <= 0 {
 		return 0
@@ -290,18 +309,72 @@ func predictDecodeTPSForFit(caps *detect.Capabilities, c Candidate, quant QuantO
 	efficiency := decodeEfficiency
 	if singleDense {
 		efficiency = denseSingleGPUEfficiency(activeB)
-	} else if c.MoE {
-		// Active-parameter bandwidth alone overstates MoE throughput: each token
-		// also pays router/dispatch synchronization and small expert kernels,
-		// especially when experts span RAM and several GPUs. Calibrated against
-		// real llama.cpp offload runs; keep dense efficiency separate because its
-		// large contiguous matmuls get much closer to the bandwidth ceiling.
-		efficiency = moeDecodeEfficiency
 	} else if fit == "GPU plus RAM" {
 		efficiency = spilledDenseDecodeEfficiency
 	}
 	tps := efficiency / (perTokenGB * secPerGB)
 	return clampF(tps, 0, maxPredictedTPS)
+}
+
+// predictMoEDecodeTPS splits a MoE token's reads the way the launcher places
+// them: attention, dense and shared-expert tensors are read every token and
+// stay on the GPU first; only routed experts spill to RAM. Spreading the VRAM
+// fraction evenly over all active weights sent GLM-5.3-Flash's always-read
+// backbone to RAM speed. Without geometry the even spread remains.
+func predictMoEDecodeTPS(caps *detect.Capabilities, c Candidate, quant QuantOption, perTokenGB, usableVRAMGB, gpuBW, ramBW float64) float64 {
+	backboneGB, expertGB, backboneFileGB := perTokenGB, 0.0, quant.SizeGB
+	if routedShare, fileShare, ok := moeRoutedShares(c); ok {
+		expertGB = perTokenGB * routedShare
+		backboneGB = perTokenGB - expertGB
+		backboneFileGB = quant.SizeGB * (1 - fileShare)
+	}
+	fBackbone := clampF(usableVRAMGB/backboneFileGB, 0, 1)
+	fExpert := 1.0
+	if expertFileGB := quant.SizeGB - backboneFileGB; expertFileGB > 0 {
+		fExpert = clampF((usableVRAMGB-backboneFileGB)/expertFileGB, 0, 1)
+	}
+	// Active-parameter bandwidth alone overstates MoE throughput: each token
+	// also pays router/dispatch synchronization and small expert kernels.
+	// Keep the calibrated GPU-side discount; RAM-side bytes use the measured
+	// host bandwidth nearly as-is.
+	measured := caps != nil && caps.HostMemoryBandwidthMBps > 0
+	ramEff := moeDecodeEfficiency
+	if measured {
+		ramEff = measuredRAMDecodeEfficiency
+	}
+	gpuGB := backboneGB*fBackbone + expertGB*fExpert
+	ramGB := backboneGB*(1-fBackbone) + expertGB*(1-fExpert)
+	sec := gpuGB/(gpuBW*moeDecodeEfficiency) + ramGB/(ramBW*ramEff)
+	if moeLayers := c.Layers - c.LeadingDense; measured && c.Layers > 0 && moeLayers > 0 {
+		cpuLayers := float64(c.Layers)*(1-fBackbone) + float64(moeLayers)*fBackbone*(1-fExpert)
+		sec += cpuLayers * moeCPULayerGB / ramBW
+	}
+	if sec <= 0 {
+		return 0
+	}
+	return clampF(1/sec, 0, maxPredictedTPS)
+}
+
+// moeRoutedShares returns the routed experts' share of one token's reads and
+// of the model file, from GGUF geometry alone. The size-derived total runs
+// high for dynamic quants (Qwen3.8-Flash-Next: 177B for ~122B of weights),
+// which made the backbone look 50 GB large and the split slower than an even
+// spread. ok is false when the geometry is incomplete.
+func moeRoutedShares(c Candidate) (perToken, file float64, ok bool) {
+	moeLayers := float64(c.Layers - c.LeadingDense)
+	expert := 3 * float64(c.Embedding) * float64(c.ExpertFF) / 1e9 // one expert, one layer
+	active := activeParamsFromGeometry(c)
+	if moeLayers <= 0 || expert <= 0 || active <= 0 {
+		return 0, 0, false
+	}
+	routedActive := moeLayers * float64(c.ExpertUsed) * expert
+	routedTotal := moeLayers * float64(c.Experts) * expert
+	perToken = routedActive / active
+	file = routedTotal / (routedTotal + active - routedActive)
+	if perToken <= 0 || perToken >= 1 || file <= 0 || file >= 1 {
+		return 0, 0, false
+	}
+	return perToken, file, true
 }
 
 func hostMemoryBandwidthGBps(caps *detect.Capabilities) float64 {

@@ -1,22 +1,34 @@
 package download
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/embedscript"
+	"github.com/raketenkater/ggrun/pkg/python"
+	"github.com/raketenkater/ggrun/pkg/recommend"
 )
+
+// downloaderSource is tools/download/download_any_gguf.py, embedded so a bare
+// binary can download. TestEmbeddedDownloaderMatchesTools keeps them identical.
+//
+//go:generate cp ../../../tools/download/download_any_gguf.py download_any_gguf.py
+//go:embed download_any_gguf.py
+var downloaderSource string
 
 // Downloader wraps the download_any_gguf.py script.
 type Downloader struct {
 	ScriptPath string
 	ModelDir   string
 	CacheDir   string
+	// AssumeYes takes the recommended quant and skips the confirmation.
+	AssumeYes bool
 }
 
 // New creates a Downloader with auto-discovered script path.
@@ -30,57 +42,59 @@ func New(modelDir, cacheDir, appHome string) *Downloader {
 }
 
 func findScript(appHome string) string {
-	// The installed copy wins over whatever sits in the working directory: a
-	// model directory can hold an older downloader that ignores --repo and
-	// waits for input (October 8, `ggrun download` run from AI_Models).
+	// Only locations the user, the installer or the binary's own install
+	// name are searched. The working directory and PATH are not: a model
+	// directory can hold an older downloader that ignores --repo and waits for
+	// input (October 8, `ggrun download` run from AI_Models), or a planted one.
 	var candidates []string
-	// Check LLM_SERVER_HOME env var (repo root)
+	if dir := os.Getenv("LLM_SCRIPT_DIR"); dir != "" {
+		candidates = append(candidates,
+			filepath.Join(dir, "download_any_gguf.py"),
+			filepath.Join(dir, "tools", "download", "download_any_gguf.py"),
+		)
+	}
 	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, "download_any_gguf.py"),
 			filepath.Join(home, "tools", "download", "download_any_gguf.py"),
 		)
 	}
-	// Check configured app home
-	if appHome != "" {
+	for _, home := range []string{os.Getenv("LLM_APP_HOME"), appHome} {
+		if home == "" {
+			continue
+		}
 		candidates = append(candidates,
-			filepath.Join(appHome, ".bin", "download_any_gguf.py"),
-			filepath.Join(appHome, "bin", "download_any_gguf.py"),
-			filepath.Join(appHome, "download_any_gguf.py"),
+			filepath.Join(home, ".bin", "download_any_gguf.py"),
+			filepath.Join(home, "bin", "download_any_gguf.py"),
+			filepath.Join(home, "download_any_gguf.py"),
 		)
 	}
-	// Try relative to binary (installed alongside ggrun)
 	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(exeDir, "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "tools", "download", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "tools", "download", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "..", "download_any_gguf.py"),
-		)
+		candidates = append(candidates, exeScriptCandidates(filepath.Dir(exe))...)
 	}
-	// A source checkout run from the repo or go/ directory.
-	candidates = append(candidates,
-		filepath.Join("tools", "download", "download_any_gguf.py"),
-		filepath.Join("..", "tools", "download", "download_any_gguf.py"),
-		filepath.Join("..", "..", "tools", "download", "download_any_gguf.py"),
-		"download_any_gguf.py",
-		filepath.Join("..", "download_any_gguf.py"),
-		filepath.Join("..", "..", "download_any_gguf.py"),
-	)
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
 			return c
 		}
+	}
+	// Nothing on disk: the copy compiled into the binary.
+	if p, err := embedscript.Extract("download_any_gguf.py", downloaderSource); err == nil {
+		return p
 	}
 	return ""
 }
 
-// Run executes the downloader for the given repo.
-func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
-	return d.RunQuant(repo, "", caps)
+// exeScriptCandidates are the downloader locations of the binary's own
+// install: beside it, and for a binary in <app-home>/bin or .bin the source
+// checkout in that app home. No walk climbs further, so a binary in
+// ~/.local/bin never reaches files in the home directory.
+func exeScriptCandidates(exeDir string) []string {
+	candidates := []string{filepath.Join(exeDir, "download_any_gguf.py")}
+	if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(exeDir), ".src", "ggrun", "tools", "download", "download_any_gguf.py"))
+	}
+	return candidates
 }
 
 // RunQuant executes the downloader with an optional preselected quant.
@@ -92,15 +106,26 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 		return fmt.Errorf("downloader script not found: %s", d.ScriptPath)
 	}
 
-	vramMB := 0
+	py, ok := python.Command()
+	if !ok {
+		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", python.InstallHint())
+	}
+	cmd := exec.Command(py, d.scriptArgs(repo, quant, caps, stdinIsTerminal())...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// scriptArgs builds the downloader argv. caps should be the planning view
+// (recommend.PlanningCapabilities): its RAM is the installed ceiling, so the
+// default quant matches what the recommender would pick on an idle machine.
+func (d *Downloader) scriptArgs(repo, quant string, caps *detect.Capabilities, interactive bool) []string {
+	vramMB, ramMB := 0, 0
 	if caps != nil {
 		vramMB = caps.TotalVRAM()
-	}
-	ramMB := 0
-	if caps != nil {
 		ramMB = caps.RAM.FreeMB
 	}
-
 	args := []string{
 		d.ScriptPath,
 		"--repo", repo,
@@ -112,57 +137,45 @@ func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabiliti
 	if quant != "" && quant != "auto" && quant != "catalog" {
 		args = append(args, "--quant", quant)
 	}
-	// The downloader ends with a "Start download? (y/n)" prompt. With no terminal
-	// attached that raises EOFError and kills the run after the repo and file
-	// list have already been resolved -- which is exactly what happens to a
-	// scripted or queued download. Confirming is only meaningful when there is
-	// someone there to confirm, so skip it precisely when stdin is not a TTY and
-	// leave interactive behaviour untouched.
-	if !stdinIsTerminal() {
+	if rev := catalogRevision(repo); rev != "" {
+		args = append(args, "--revision", rev)
+	}
+	if active := catalogActiveParamsB(repo); active > 0 {
+		args = append(args, "--active-params-b", strconv.FormatFloat(active, 'f', -1, 64))
+	}
+	if d.AssumeYes {
 		args = append(args, "--yes")
 	}
-	py, ok := pythonCommand()
-	if !ok {
-		return fmt.Errorf("Python 3 is required to download models, but no python interpreter was found on PATH.\n%s", pythonInstallHint())
+	// With no terminal attached a prompt dies on EOFError after the repo and
+	// file list have been resolved -- exactly what happens to a scripted or
+	// queued download. The script then proceeds only on an explicit --quant
+	// (or --yes) and otherwise fails listing the choices.
+	if !interactive {
+		args = append(args, "--non-interactive")
 	}
-	cmd := exec.Command(py, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return args
 }
 
-// pythonCommand returns the path to a usable Python 3 interpreter and whether
-// one was found. On Windows the launcher "py" resolves the newest Python 3.
-func pythonCommand() (string, bool) {
-	for _, name := range []string{"python3", "python", "py"} {
-		path, err := exec.LookPath(name)
-		if err != nil {
-			continue
-		}
-		// Validate it actually runs as Python 3, skipping Windows Store execution
-		// aliases and dead shims that resolve on PATH but don't run. This mirrors
-		// install.ps1 Resolve-Python so the interpreter that received
-		// huggingface_hub is the one we invoke download_any_gguf.py with.
-		check := exec.Command(path, "-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)")
-		if check.Run() == nil {
-			return path, true
+// catalogActiveParamsB is the catalog's active parameter count for a MoE repo,
+// so the downloader does not size an unnamed MoE (no A##B in the repo name)
+// as dense. 0 when the repo is not a catalog MoE.
+// catalogRevision is the commit the catalog pinned for repo, if any.
+func catalogRevision(repo string) string {
+	for _, c := range recommend.Shortlist() {
+		if strings.EqualFold(c.Repo, repo) {
+			return c.Revision
 		}
 	}
-	return "", false
+	return ""
 }
 
-// pythonInstallHint returns an OS-appropriate one-liner for installing Python 3.
-func pythonInstallHint() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "Install it with:  winget install -e --id Python.Python.3.12\n" +
-			"  or from https://www.python.org/downloads/ (tick \"Add python.exe to PATH\"), then reopen the terminal."
-	case "darwin":
-		return "Install it with:  brew install python   (or from https://www.python.org/downloads/)."
-	default:
-		return "Install it with your package manager, e.g.:  sudo apt install python3 python3-pip"
+func catalogActiveParamsB(repo string) float64 {
+	for _, c := range recommend.Shortlist() {
+		if c.MoE && strings.EqualFold(c.Repo, repo) {
+			return c.ActiveParamsB
+		}
 	}
+	return 0
 }
 
 // stdinIsTerminal reports whether standard input is an interactive terminal,

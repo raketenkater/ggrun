@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -451,5 +452,218 @@ func TestSparsePolicyEvidenceRoundTrip(t *testing.T) {
 	if restored := VerifiedToStrategy(&vc, relaunch, caps); restored == nil || restored.SparseLookupPolicy != SparseLookupPaged ||
 		relaunch.loadProbeCacheForStrategy(sparseLookupModelView(full, SparseLookupPaged), restored, caps.GPUs) == nil {
 		t.Fatalf("relaunch from the verified record cannot read the measurement: %+v", restored)
+	}
+}
+
+// PR #93 final review P2: the Claude relaunch refresh receives the full
+// profile and request options. It must read the prompt-cache measurement the
+// command side recorded under the plan's policy-scoped tag, size CRAM on the
+// same accounting Compute used, and stay isolated from other policies and
+// from ordinary models.
+func TestRuntimeRefreshReadsPolicyScopedPromptCache(t *testing.T) {
+	for _, tc := range []struct {
+		free   int
+		policy SparseLookupPolicy
+	}{{204700, SparseLookupPaged}, {900000, SparseLookupResident}} {
+		full, caps := dsv41Profile(), dsv41Host(tc.free)
+		opts := dsv41Opts(t, SparseLookupFileBacked)
+		s, err := Compute(caps, full, opts)
+		if err != nil || s.SparseLookupPolicy != tc.policy {
+			t.Fatalf("%s fixture: %v %+v", tc.policy, err, s)
+		}
+		// Without new evidence the refresh reproduces Compute's sizing.
+		if same := RefreshRuntimeCachePolicy(caps, full, s, opts); same.CRAM != s.CRAM || same.MaxCheckpoints != s.MaxCheckpoints {
+			t.Fatalf("%s: refresh without a measurement changed sizing: cram %d -> %d, checkpoints %d -> %d",
+				tc.policy, s.CRAM, same.CRAM, s.MaxCheckpoints, same.MaxCheckpoints)
+		}
+		plain := backendCacheTag(Options{BackendTag: opts.BackendTag})
+		other := SparseLookupResident
+		if tc.policy == SparseLookupResident {
+			other = SparseLookupPaged
+		}
+		record := func(tag string, entryMB float64) {
+			t.Helper()
+			if err := RecordPromptCacheObservation(opts.CacheDir, full, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+				tag, caps.GPUs, s.Parallel, PromptCacheObservation{LargestEntryMB: entryMB}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Evidence for another policy or for the unscoped namespace is not this plan's.
+		record(plain, 99000)
+		record(SparseLookupScopedTag(plain, other), 98000)
+		if leaked := RefreshRuntimeCachePolicy(caps, full, s, opts); leaked.MeasuredPromptCacheEntryMB != 0 {
+			t.Fatalf("%s refresh read foreign evidence: %.0f MiB", tc.policy, leaked.MeasuredPromptCacheEntryMB)
+		}
+		// An entry whose slots+1 working set exceeds the derived budget.
+		slots := max(1, s.Parallel)
+		entryMB := float64(s.CRAM/(slots+1) + 2048)
+		record(SparseLookupScopedTag(plain, tc.policy), entryMB)
+		next := RefreshRuntimeCachePolicy(caps, full, s, opts)
+		if next.MeasuredPromptCacheEntryMB != entryMB {
+			t.Fatalf("%s: relaunch refresh lost the measurement: got %.0f, writer tag %q", tc.policy, next.MeasuredPromptCacheEntryMB, SparseLookupScopedTag(plain, tc.policy))
+		}
+		if next.CRAM <= s.CRAM {
+			t.Fatalf("%s: measured entry did not reach CRAM: %d -> %d", tc.policy, s.CRAM, next.CRAM)
+		}
+		if next.SparseLookupPolicy != s.SparseLookupPolicy || next.ContextSize != s.ContextSize || next.PlannedHostFootprintMB != s.PlannedHostFootprintMB {
+			t.Fatalf("%s: refresh changed the plan: %+v", tc.policy, next)
+		}
+	}
+
+	// An ordinary model keeps the unscoped namespace and ignores scoped entries.
+	model := dsv41Profile()
+	model.SparseLookupBytes, model.SparseLookupKind, model.SparseLookupLayerBytes, model.ModelArch = 0, "", nil, "deepseek4"
+	model.SizeBytes -= 208902215200
+	model.TotalSizeMB -= dsv41TierMB
+	caps, opts := dsv41Host(204700), dsv41Opts(t, SparseLookupFileBacked)
+	s, err := Compute(caps, model, opts)
+	if err != nil || s.SparseLookupPolicy != "" {
+		t.Fatalf("ordinary fixture: %v %+v", err, s)
+	}
+	plain := backendCacheTag(Options{BackendTag: opts.BackendTag})
+	if err := RecordPromptCacheObservation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+		SparseLookupScopedTag(plain, SparseLookupPaged), caps.GPUs, s.Parallel, PromptCacheObservation{LargestEntryMB: 97000}); err != nil {
+		t.Fatal(err)
+	}
+	if got := RefreshRuntimeCachePolicy(caps, model, s, opts); got.MeasuredPromptCacheEntryMB != 0 {
+		t.Fatalf("ordinary model read a policy-scoped entry: %.0f", got.MeasuredPromptCacheEntryMB)
+	}
+	if err := RecordPromptCacheObservation(opts.CacheDir, model, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+		plain, caps.GPUs, s.Parallel, PromptCacheObservation{LargestEntryMB: 3000}); err != nil {
+		t.Fatal(err)
+	}
+	if got := RefreshRuntimeCachePolicy(caps, model, s, opts); got.MeasuredPromptCacheEntryMB != 3000 {
+		t.Fatalf("ordinary model lost its own entry: %.0f", got.MeasuredPromptCacheEntryMB)
+	}
+}
+
+// The resource ledger is another exported reader of a finished strategy: a
+// paged or resident tier is priced on the policy's view (tables are not GPU
+// weights) whether the caller passes the full profile or Compute's view.
+func TestResourceLedgerPricesLookupTierOnPolicyView(t *testing.T) {
+	for _, free := range []int{204700, 900000} {
+		full, caps := dsv41Profile(), dsv41Host(free)
+		opts := dsv41Opts(t, SparseLookupFileBacked)
+		s, err := Compute(caps, full, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The command side records a measured graph under the plan's scoped tag.
+		writerTag := SparseLookupScopedTag(backendCacheTag(Options{BackendTag: opts.BackendTag}), s.SparseLookupPolicy)
+		if err := RecordMeasuredComputeBuffers(opts.CacheDir, full, s.ContextSize, s.UBatchSize, s.KVQuality, s.KVPlacement,
+			writerTag, caps.GPUs, s.Parallel, map[int]int{0: 7001, 1: 7002, 2: 7003}); err != nil {
+			t.Fatal(err)
+		}
+		internal := opts
+		internal.sparseLookupPolicy = s.SparseLookupPolicy
+		external := BuildResourceLedger(caps, full, s, opts)
+		if pc := internal.loadProbeCacheForStrategy(full, s, caps.GPUs); pc == nil {
+			t.Fatalf("%s: fixture measurement not readable under %q", s.SparseLookupPolicy, writerTag)
+		}
+		planned := BuildResourceLedger(caps, sparseLookupModelView(full, s.SparseLookupPolicy), s, internal)
+		gpuModelMB := 0
+		for i := range external.Devices {
+			if external.Devices[i].ModelMB != planned.Devices[i].ModelMB || external.Devices[i].GraphMB != planned.Devices[i].GraphMB ||
+				external.Devices[i].RequiredMB != planned.Devices[i].RequiredMB {
+				t.Fatalf("%s device %d: external %+v, planned %+v", s.SparseLookupPolicy, i, external.Devices[i], planned.Devices[i])
+			}
+			gpuModelMB += external.Devices[i].ModelMB
+		}
+		if external.Host != planned.Host || external.Fits != planned.Fits {
+			t.Fatalf("%s host: external %+v fits=%v, planned %+v fits=%v", s.SparseLookupPolicy, external.Host, external.Fits, planned.Host, planned.Fits)
+		}
+		if len(external.MissingComputeGPUs) != 0 {
+			t.Fatalf("%s: measured graphs not read: missing %v", s.SparseLookupPolicy, external.MissingComputeGPUs)
+		}
+		if gpuModelMB >= dsv41TierMB {
+			t.Fatalf("%s: %d MiB of GPU model rows include the lookup tables", s.SparseLookupPolicy, gpuModelMB)
+		}
+	}
+}
+
+// synthMoEProfile is a SYNTHETIC MoE second architecture with the same
+// synthetic table kind as synthDenseProfile. It exercises the generic tier
+// policy only; no real model with such tables is claimed to be supported.
+func synthMoEProfile(tierMiB int) *ModelProfile {
+	const layers = 24
+	routed := make([]int64, layers)
+	nonExpert := make([]int64, layers)
+	lookup := make([]int64, layers)
+	for i := range routed {
+		routed[i] = 20000 << 20 / layers
+		nonExpert[i] = 2000 << 20 / layers
+	}
+	lookup[2], lookup[12] = int64(tierMiB)<<20/2, int64(tierMiB)<<20/2
+	total := 22000 + tierMiB
+	return &ModelProfile{
+		Path: "/models/synthrow-moe.gguf", TotalSizeMB: total, SizeBytes: int64(total) << 20,
+		NumLayers: layers, IsMoE: true, NumExperts: 64, ExpertUsedCount: 4, ExpertFF: 1024,
+		HiddenSize: 2048, EmbeddingLength: 2048, HeadCountKV: 4, KeyLength: 128, ValueLength: 128,
+		ContextSize: 32768, CTXTrain: 32768, ModelArch: "synthrow-moe",
+		ExpertBytes: 20000 << 20, NonExpertBytes: 2000 << 20, RoutedExpertLayerBytes: routed, NonExpertLayerBytes: nonExpert,
+		SparseLookupBytes: int64(tierMiB) << 20, SparseLookupKind: "synthetic-rowtable", SparseLookupLayerBytes: lookup,
+		MeasuredKVBytesPerTok: map[string]float64{"f16": 64 * 1024, "q8_0": 32 * 1024},
+	}
+}
+
+// SYNTHETIC matrix, dense and MoE x small (2 GiB) and large (96 GiB, above
+// host RAM) tables x CPU-only / single-GPU / multi-GPU x unknown and reviewed
+// loader, on a 64 GB host. A small table is resident when a reviewed loader
+// can hold it lazily and loads with its layers otherwise. A large table pages
+// from storage under a reviewed loader, keeping execution weights resident and
+// the tier out of the host footprint; without one the refusal names the
+// missing loader contract. Unit evidence only.
+func TestSyntheticTierSizeTopologyMatrix(t *testing.T) {
+	const host, small, large = 64000, 2048, 98304
+	topologies := map[string]*detect.Capabilities{
+		"cpu-only":   synthCaps(host),
+		"single-gpu": synthCaps(host, detect.GPU{Index: 0, VRAMTotalMB: 24576}),
+		"multi-gpu":  synthCaps(host, detect.GPU{Index: 0, VRAMTotalMB: 12288}, detect.GPU{Index: 1, VRAMTotalMB: 12288}),
+	}
+	profiles := map[string]func(int) *ModelProfile{"dense": synthDenseProfile, "moe": synthMoEProfile}
+	for kind, profile := range profiles {
+		for _, tier := range []int{small, large} {
+			for topo, caps := range topologies {
+				for _, capability := range []SparseLookupCapability{SparseLookupUnknown, SparseLookupFileBacked} {
+					name := fmt.Sprintf("%s/%dMiB/%s/%s", kind, tier, topo, capability)
+					model := profile(tier)
+					opts := synthOpts(t, capability)
+					opts.CPUMode = topo == "cpu-only"
+					s, err := Compute(caps, model, opts)
+					reviewed := capability == SparseLookupFileBacked
+					if tier == large && !reviewed {
+						if err == nil || !strings.Contains(err.Error(), "reviewed lazy-loader contract") || strings.Contains(err.Error(), "..") {
+							t.Errorf("%s: want an actionable refusal naming the loader contract, got %v", name, err)
+						}
+						continue
+					}
+					if err != nil {
+						t.Errorf("%s: %v", name, err)
+						continue
+					}
+					want := SparseLookupLayer
+					switch {
+					case reviewed && tier == small:
+						want = SparseLookupResident
+					case reviewed:
+						want = SparseLookupPaged
+					}
+					if s.SparseLookupPolicy != want || s.SparseLookupMB != tier || s.MMapRequired {
+						t.Errorf("%s: policy=%s tier=%d mmapRequired=%v, want %s %d resident execution weights",
+							name, s.SparseLookupPolicy, s.SparseLookupMB, s.MMapRequired, want, tier)
+					}
+					if want == SparseLookupPaged && s.PlannedHostFootprintMB >= tier {
+						t.Errorf("%s: paged tier charged to host footprint %d", name, s.PlannedHostFootprintMB)
+					}
+					lazy := "on"
+					if want == SparseLookupLayer {
+						lazy = "off"
+					}
+					if !hasArgPair(s.Args(model.Path, 8080), SparseLookupLazyFlag, lazy) {
+						t.Errorf("%s: lazy flag must be stated %s: %v", name, lazy, s.Args(model.Path, 8080))
+					}
+				}
+			}
+		}
 	}
 }

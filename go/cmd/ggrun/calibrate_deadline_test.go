@@ -83,7 +83,8 @@ func newBudgetHarness(t *testing.T, baselineLoad, baselineWorkload time.Duration
 	}
 	workloads := 0
 	h.fx = calibrationSideEffects{
-		now: h.clock.now,
+		now:           h.clock.now,
+		waitIdleSlots: func(*benchmark.Runner) bool { return true },
 		probePrefill: func(*benchmark.Runner) (benchmark.PrefillProbe, error) {
 			return benchmark.PrefillProbe{}, errors.New("no pilot")
 		},
@@ -490,6 +491,89 @@ func TestSlowBaselineKeepsServing(t *testing.T) {
 	if decision == nil || decision.FinalistAttempts != 1 || decision.FinalistFailureClass != "elapsed-budget" {
 		t.Fatalf("slow baseline search not recorded as one bounded attempt: %+v", decision)
 	}
+}
+
+// A pilot cancelled by its timeout can keep the backend prefilling for many
+// minutes (GLM-5.3, 2026-10-26: 22 more minutes). The idle wait before each
+// timed step is part of the experiment: no wait outlives the optimization
+// deadline, a backend still busy at it is not measured, and a step that does
+// run sizes its request timeout from the time left after the wait.
+func TestIdleSlotWaitStaysInsideTheExperimentBudget(t *testing.T) {
+	t.Run("still busy at the deadline", func(t *testing.T) {
+		h := newBudgetHarness(t, time.Minute, 2*time.Minute)
+		var waits []time.Time
+		h.fx.waitIdleSlots = func(r *benchmark.Runner) bool {
+			waits = append(waits, r.Deadline)
+			if r.Deadline.IsZero() || r.IdleSlotWait <= 0 {
+				t.Fatalf("idle wait unbounded: deadline=%v wait=%s", r.Deadline, r.IdleSlotWait)
+			}
+			h.clock.t = r.Deadline
+			return false
+		}
+		probed := false
+		h.fx.probePrefill = func(*benchmark.Runner) (benchmark.PrefillProbe, error) {
+			probed = true
+			return benchmark.PrefillProbe{}, errors.New("no pilot")
+		}
+		p, _, _, _ := h.run()
+		if len(waits) == 0 {
+			t.Fatal("no idle wait before the timed steps")
+		}
+		for _, d := range waits {
+			if d.After(h.deadline()) {
+				t.Fatalf("idle wait ran to %s, past the optimization deadline %s", d, h.deadline())
+			}
+		}
+		if probed || h.count("baseline workload") != 0 || h.count("candidate workload") != 0 {
+			t.Fatalf("a still-busy backend was measured: pilot=%v events=%v", probed, h.events)
+		}
+		if p != h.baseline || h.count("stop") != 0 || len(h.starts) != 0 {
+			t.Fatalf("busy baseline was disturbed: %v", h.events)
+		}
+		if h.clock.now().After(h.deadline()) {
+			t.Fatalf("calibration ran %s past its deadline", h.clock.now().Sub(h.deadline()))
+		}
+	})
+	t.Run("idle late in the budget", func(t *testing.T) {
+		h := newBudgetHarness(t, time.Minute, 30*time.Second)
+		lateBy := 18 * time.Minute
+		h.fx.waitIdleSlots = func(r *benchmark.Runner) bool {
+			if r.Deadline.After(h.deadline()) {
+				t.Fatalf("idle wait deadline %s past the optimization deadline %s", r.Deadline, h.deadline())
+			}
+			h.clock.advance(lateBy)
+			lateBy = 0
+			return true
+		}
+		var pilot, baseline *benchmark.Runner
+		h.fx.probePrefill = func(r *benchmark.Runner) (benchmark.PrefillProbe, error) {
+			pilot = r
+			return benchmark.PrefillProbe{}, errors.New("no pilot")
+		}
+		run := h.fx.runWorkload
+		h.fx.runWorkload = func(r *benchmark.Runner, slots, lanes int) (*benchmark.Result, error) {
+			if baseline == nil {
+				baseline = r
+				if left := h.deadline().Sub(h.clock.now()); r.Timeout > left/3 {
+					t.Fatalf("baseline request timeout %s sized before the wait; %s left", r.Timeout, left)
+				}
+			}
+			if r.IdleSlotWait != 0 {
+				t.Fatalf("workload runner waits again for %s outside the budget", r.IdleSlotWait)
+			}
+			return run(r, slots, lanes)
+		}
+		h.run()
+		if pilot == nil || pilot.Deadline.IsZero() || pilot.Deadline.After(h.deadline()) || pilot.IdleSlotWait != 0 {
+			t.Fatalf("pilot not bounded by the experiment: %+v", pilot)
+		}
+		if pilot.Timeout > (2*time.Minute)/4 {
+			t.Fatalf("pilot timeout %s sized before the wait", pilot.Timeout)
+		}
+		if baseline == nil {
+			t.Fatal("baseline was not measured after the backend went idle")
+		}
+	})
 }
 
 // winsAfter makes the finalist win and moves the clock to at when the measured

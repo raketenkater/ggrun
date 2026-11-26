@@ -2,15 +2,30 @@ package gguf
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+
+	"github.com/raketenkater/ggrun/pkg/boundexec"
+	"github.com/raketenkater/ggrun/pkg/embedscript"
+	"github.com/raketenkater/ggrun/pkg/python"
 )
+
+// parseGGUFSource is tools/gguf/parse_gguf.py, embedded so a bare binary can
+// parse models. TestEmbeddedParserMatchesTools keeps the two copies identical.
+//
+//go:generate cp ../../../tools/gguf/parse_gguf.py parse_gguf.py
+//go:embed parse_gguf.py
+var parseGGUFSource string
 
 // Info holds parsed GGUF metadata.
 type Info struct {
@@ -98,6 +113,9 @@ type Info struct {
 }
 
 // Parse calls the bundled GGUF metadata helper.
+// parseHelperTimeout bounds parse_gguf.py; tests shorten it.
+var parseHelperTimeout = boundexec.HelperTimeout
+
 func Parse(path string) (*Info, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("model file path is empty")
@@ -115,9 +133,16 @@ func Parse(path string) (*Info, error) {
 		return nil, fmt.Errorf("parse_gguf.py not found")
 	}
 
-	cmd := exec.Command(pythonCommand(), script, path)
+	py, ok := python.Command()
+	if !ok {
+		return nil, fmt.Errorf("parse_gguf.py needs Python 3, but no working python interpreter was found on PATH.\n%s", python.InstallHint())
+	}
+	cmd, finish := boundexec.Command(parseHelperTimeout, py, script, path)
 	out, err := cmd.Output()
-	if err != nil {
+	if err = finish(err); err != nil {
+		if boundexec.IsTimeout(err) {
+			return nil, fmt.Errorf("parse_gguf.py did not answer within %s for %s", parseHelperTimeout, filepath.Base(path))
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
 			return nil, fmt.Errorf("parse_gguf.py: %s", exitErr.Stderr)
 		}
@@ -146,15 +171,6 @@ func Parse(path string) (*Info, error) {
 	return &info, nil
 }
 
-func pythonCommand() string {
-	for _, name := range []string{"python3", "python", "py"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path
-		}
-	}
-	return "python3"
-}
-
 func findParseScript() string {
 	candidates := []string{}
 	if p := os.Getenv("LLM_SCRIPT_DIR"); p != "" {
@@ -178,70 +194,77 @@ func findParseScript() string {
 			filepath.Join(appHome, "parse_gguf.py"),
 		)
 	}
+	explicit := len(candidates) // locations the user or installer named
 	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		// A development or source-install binary commonly lives in
-		// <app-home>/.bin while its authoritative scripts live in the adjacent
-		// source checkout. Prefer that checkout just as an explicit
-		// LLM_APP_HOME does; a release-only install simply falls through to the
-		// bundled parser below.
-		if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
-			appHome := filepath.Dir(exeDir)
-			candidates = append(candidates,
-				filepath.Join(appHome, ".src", "llm-server", "tools", "gguf", "parse_gguf.py"),
-				filepath.Join(appHome, ".src", "ggrun", "tools", "gguf", "parse_gguf.py"),
-			)
-		}
-		candidates = append(candidates,
-			filepath.Join(exeDir, "parse_gguf.py"),
-			filepath.Join(exeDir, "..", "tools", "gguf", "parse_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "tools", "gguf", "parse_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "..", "tools", "gguf", "parse_gguf.py"),
-		)
+		candidates = append(candidates, exeParseScriptCandidates(filepath.Dir(exe))...)
 	}
-	wd, _ := os.Getwd()
-	candidates = append(candidates,
-		filepath.Join(wd, "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "..", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "..", "..", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "..", "..", "..", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(wd, "parse_gguf.py"),
-		filepath.Join(wd, "..", "parse_gguf.py"),
-	)
-	if p, err := exec.LookPath("parse_gguf.py"); err == nil {
+	// The working directory, PATH and the home directory are never searched:
+	// a model directory or a cloned repository could plant a parse_gguf.py
+	// there and ggrun would execute it. The embedded copy is the last resort,
+	// so a binary with nothing beside it still parses models.
+	if p, err := embedscript.Extract("parse_gguf.py", parseGGUFSource); err == nil {
 		candidates = append(candidates, p)
 	}
-	home, _ := os.UserHomeDir()
-	candidates = append(candidates,
-		filepath.Join(home, "ggrun", "bin", "parse_gguf.py"),
-		filepath.Join(home, "ggrun", "tools", "gguf", "parse_gguf.py"),
-		filepath.Join(home, "parse_gguf.py"),
-	)
-	var fallback string
-	for _, p := range candidates {
+	// A parser with a tensor-accounting contract in a location named by
+	// LLM_SCRIPT_DIR, LLM_SERVER_HOME or LLM_APP_HOME is an explicit choice.
+	// Among the discovered locations the newest contract wins, so a stale
+	// copy beside the binary cannot shadow the newer embedded parser; equal
+	// versions keep the order above.
+	var fallback, best string
+	bestSchema := 0
+	for i, p := range candidates {
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
 		abs, _ := filepath.Abs(p)
-		if parserHasCurrentTensorAccounting(abs) {
+		schema := parserTensorAccountingSchema(abs)
+		if schema > 0 && i < explicit {
 			return abs
+		}
+		if schema > bestSchema {
+			best, bestSchema = abs, schema
 		}
 		if fallback == "" {
 			fallback = abs
 		}
 	}
+	if best != "" {
+		return best
+	}
 	return fallback
 }
 
-// parserHasCurrentTensorAccounting is true when the helper exposes a versioned
-// tensor-accounting contract. Looking only for a PLE byte field cannot tell a
-// stale parser from a valid qwen4exp file that simply has no PLE tensor.
-func parserHasCurrentTensorAccounting(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
+// exeParseScriptCandidates are the helper locations of the binary's own
+// install: beside it, and for a binary in <app-home>/bin or .bin the source
+// checkout the installer keeps in that app home. No walk climbs further, so a
+// binary in ~/.local/bin never reaches files in the home directory.
+func exeParseScriptCandidates(exeDir string) []string {
+	candidates := []string{filepath.Join(exeDir, "parse_gguf.py")}
+	if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
+		appHome := filepath.Dir(exeDir)
+		candidates = append(candidates,
+			filepath.Join(appHome, ".src", "llm-server", "tools", "gguf", "parse_gguf.py"),
+			filepath.Join(appHome, ".src", "ggrun", "tools", "gguf", "parse_gguf.py"),
+		)
 	}
-	return bytes.Contains(data, []byte("tensor_accounting_schema"))
+	return candidates
+}
+
+var parserSchemaPattern = regexp.MustCompile(`tensor_accounting_schema['"]\]?\s*[:=]\s*(\d+)`)
+
+// parserTensorAccountingSchema is the tensor-accounting contract version a
+// helper declares: 0 without the contract, 1 when its version is unreadable.
+func parserTensorAccountingSchema(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(data, []byte("tensor_accounting_schema")) {
+		return 0
+	}
+	if m := parserSchemaPattern.FindSubmatch(data); m != nil {
+		if v, err := strconv.Atoi(string(m[1])); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 1
 }
 
 // SparseLookupRange is one lookup table's byte range inside a shard file.
@@ -328,6 +351,15 @@ func (i *Info) EstimateParams() int64 {
 	return 2*vocab*embed + layers*(4*embed*embed+3*embed*ffn)
 }
 
+// GGUF keys are at most 2^16-1 bytes by spec. A chat template is a few KiB to
+// a few hundred KiB; the cap only stops a corrupt length from sizing a huge
+// allocation. Nested arrays are legal but never deep in real files.
+const (
+	maxGGUFKeyLen       = 1<<16 - 1
+	maxChatTemplateLen  = 16 << 20
+	maxGGUFArrayNesting = 8
+)
+
 // ChatTemplate reads just the `tokenizer.chat_template` metadata string from a
 // GGUF header, without shelling out to parse_gguf.py or walking the tensor
 // table. It is a fast, pure-Go probe used by the chat-template catalog to
@@ -342,92 +374,122 @@ func ChatTemplate(path string) string {
 		return ""
 	}
 	defer f.Close()
+	template, err := readChatTemplate(f)
+	if err != nil {
+		return ""
+	}
+	return template
+}
 
+// readChatTemplate scans GGUF metadata for tokenizer.chat_template. Every
+// length it reads comes from the file, so each is bounded before it sizes an
+// allocation or a skip: a corrupt header is an error, never a panic.
+func readChatTemplate(r io.Reader) (string, error) {
 	var buf [8]byte
-	readFull := func(dst []byte) bool {
-		_, err := io.ReadFull(f, dst)
-		return err == nil
+	readFull := func(dst []byte) error {
+		_, err := io.ReadFull(r, dst)
+		return err
 	}
-	if !readFull(buf[:4]) || string(buf[:4]) != "GGUF" {
-		return ""
+	readU32 := func() (uint32, error) {
+		if err := readFull(buf[:4]); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint32(buf[:4]), nil
 	}
-	if !readFull(buf[:4]) { // version
-		return ""
+	readU64 := func() (uint64, error) {
+		if err := readFull(buf[:8]); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint64(buf[:8]), nil
 	}
-	if !readFull(buf[:8]) { // tensor_count
-		return ""
+	if err := readFull(buf[:4]); err != nil || string(buf[:4]) != "GGUF" {
+		return "", fmt.Errorf("not a GGUF file")
 	}
-	var kvCount uint64
-	if !readFull(buf[:8]) {
-		return ""
+	if _, err := readU32(); err != nil { // version
+		return "", err
 	}
-	kvCount = binary.LittleEndian.Uint64(buf[:8])
+	if _, err := readU64(); err != nil { // tensor_count
+		return "", err
+	}
+	kvCount, err := readU64()
+	if err != nil {
+		return "", err
+	}
 
 	for i := uint64(0); i < kvCount; i++ {
-		if !readFull(buf[:8]) {
-			return ""
+		keyLen, err := readU64()
+		if err != nil {
+			return "", err
 		}
-		keyLen := binary.LittleEndian.Uint64(buf[:8])
+		if keyLen > maxGGUFKeyLen {
+			return "", fmt.Errorf("metadata key %d: length %d exceeds %d", i, keyLen, maxGGUFKeyLen)
+		}
 		key := make([]byte, keyLen)
-		if !readFull(key) {
-			return ""
+		if err := readFull(key); err != nil {
+			return "", err
 		}
-		if !readFull(buf[:4]) {
-			return ""
+		valType, err := readU32()
+		if err != nil {
+			return "", err
 		}
-		valType := binary.LittleEndian.Uint32(buf[:4])
-		switch valType {
-		case 8: // string
-			if !readFull(buf[:8]) {
-				return ""
+		if valType == 8 && string(key) == "tokenizer.chat_template" {
+			valLen, err := readU64()
+			if err != nil {
+				return "", err
 			}
-			valLen := binary.LittleEndian.Uint64(buf[:8])
+			if valLen > maxChatTemplateLen {
+				return "", fmt.Errorf("chat template length %d exceeds %d", valLen, maxChatTemplateLen)
+			}
 			val := make([]byte, valLen)
-			if !readFull(val) {
-				return ""
+			if err := readFull(val); err != nil {
+				return "", err
 			}
-			if string(key) == "tokenizer.chat_template" {
-				return string(val)
-			}
-		case 9: // array — skip element type + count, then each element
-			if !readFull(buf[:4]) {
-				return ""
-			}
-			elemType := binary.LittleEndian.Uint32(buf[:4])
-			if !readFull(buf[:8]) {
-				return ""
-			}
-			arrLen := binary.LittleEndian.Uint64(buf[:8])
-			for j := uint64(0); j < arrLen; j++ {
-				if !skipGGUFValue(f, elemType) {
-					return ""
-				}
-			}
-		default:
-			if !skipGGUFValue(f, valType) {
-				return ""
-			}
+			return string(val), nil
+		}
+		if err := skipGGUFValue(r, valType, 0); err != nil {
+			return "", fmt.Errorf("metadata %q: %w", key, err)
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // skipGGUFValue advances the reader past one GGUF metadata value of the given
-// type id. Returns false on EOF/truncation.
-func skipGGUFValue(r io.Reader, valType uint32) bool {
-	fixed := map[uint32]uint64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+// type id, including arrays. It fails on truncation, an unknown type, or a
+// length no real file could hold.
+func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
+	fixed := map[uint32]int64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 	if n, ok := fixed[valType]; ok {
-		_, err := io.CopyN(io.Discard, r, int64(n))
-		return err == nil
+		_, err := io.CopyN(io.Discard, r, n)
+		return err
 	}
-	if valType == 8 { // string
-		var buf [8]byte
-		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			return false
+	var buf [12]byte
+	switch valType {
+	case 8: // string
+		if _, err := io.ReadFull(r, buf[:8]); err != nil {
+			return err
 		}
-		n := binary.LittleEndian.Uint64(buf[:])
+		n := binary.LittleEndian.Uint64(buf[:8])
+		if n > math.MaxInt64 {
+			return fmt.Errorf("string length %d out of range", n)
+		}
 		_, err := io.CopyN(io.Discard, r, int64(n))
-		return err == nil
+		return err
+	case 9: // array: element type + count, then each element
+		if depth >= maxGGUFArrayNesting {
+			return fmt.Errorf("arrays nested deeper than %d", maxGGUFArrayNesting)
+		}
+		if _, err := io.ReadFull(r, buf[:12]); err != nil {
+			return err
+		}
+		elemType := binary.LittleEndian.Uint32(buf[:4])
+		count := binary.LittleEndian.Uint64(buf[4:12])
+		for j := uint64(0); j < count; j++ {
+			if err := skipGGUFValue(r, elemType, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown value type %d", valType)
 	}
-	return true
 }

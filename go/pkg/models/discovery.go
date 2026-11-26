@@ -1,22 +1,28 @@
 package models
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	discoveryIndexVersion = 1
-	discoveryIndexFile    = "discovered-models.json"
-	defaultScanMaxEntries = 5_000_000
-	defaultScanMaxTime    = 10 * time.Minute
+	discoveryIndexVersion  = 1
+	discoveryIndexFile     = "discovered-models.json"
+	defaultScanMaxEntries  = 5_000_000
+	defaultScanMaxTime     = 10 * time.Minute
+	rememberScanMaxEntries = 200_000
+	rememberScanMaxTime    = 30 * time.Second
 )
 
 var errScanStopped = errors.New("model discovery limit reached")
@@ -32,6 +38,12 @@ type ScanResult struct {
 	SkippedErrors int
 	Truncated     bool
 	Duration      time.Duration
+	// Visited lists the roots whose walk actually started. Skipped lists
+	// directories inside them that were not entered (mount boundaries such as
+	// an unmounted automount, unreadable directories). A complete scan proves
+	// absence only for paths covered by Visited and not by Skipped.
+	Visited []string
+	Skipped []string
 }
 
 type mountRecord struct {
@@ -55,6 +67,8 @@ func scanRoots(roots, boundaries []string, maxEntries int, maxDuration time.Dura
 	started := time.Now()
 	result := ScanResult{Roots: append([]string(nil), roots...)}
 	seen := make(map[string]bool)
+	visited := make(map[string]bool)
+	skipped := make(map[string]bool)
 	boundarySet := make(map[string]bool, len(boundaries))
 	for _, path := range boundaries {
 		if clean := cleanAbs(path); clean != "" {
@@ -81,14 +95,25 @@ func scanRoots(roots, boundaries []string, maxEntries int, maxDuration time.Dura
 			}
 			if walkErr != nil {
 				result.SkippedErrors++
-				if entry != nil && entry.IsDir() {
+				if clean := cleanAbs(path); clean == root {
+					skipped[root] = true
+					return filepath.SkipDir
+				} else if entry != nil && entry.IsDir() {
+					skipped[clean] = true
 					return filepath.SkipDir
 				}
 				return nil
 			}
 			clean := cleanAbs(path)
+			if clean == root {
+				visited[root] = true
+			}
 			if entry.IsDir() {
-				if clean != root && (boundarySet[clean] || skipDiscoveryDirectory(clean, entry.Name())) {
+				if clean != root && boundarySet[clean] {
+					skipped[clean] = true
+					return filepath.SkipDir
+				}
+				if clean != root && skipDiscoveryDirectory(clean, entry.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -104,6 +129,13 @@ func scanRoots(roots, boundaries []string, maxEntries int, maxDuration time.Dura
 			if _, _, err := ResolveGGUFShardFiles(path); err != nil {
 				// An interrupted split-model download is not runnable and must not
 				// enter the persistent discovery cache as a deceptively small model.
+				return nil
+			}
+			// Test fixtures and interrupted writes otherwise show up in the TUI as models.
+			if ok, err := hasGGUFHeader(path); err != nil {
+				result.SkippedErrors++
+				return nil
+			} else if !ok {
 				return nil
 			}
 			real := clean
@@ -126,8 +158,35 @@ func scanRoots(roots, boundaries []string, maxEntries int, maxDuration time.Dura
 	sort.Slice(result.Paths, func(i, j int) bool {
 		return strings.ToLower(result.Paths[i]) < strings.ToLower(result.Paths[j])
 	})
+	for path := range visited {
+		result.Visited = append(result.Visited, path)
+		delete(skipped, path) // a boundary that was also walked as its own root
+	}
+	for path := range skipped {
+		result.Skipped = append(result.Skipped, path)
+	}
+	sort.Strings(result.Visited)
+	sort.Strings(result.Skipped)
 	result.Duration = time.Since(started)
 	return result
+}
+
+// hasGGUFHeader reports whether path starts with a plausible GGUF header:
+// magic, a version of at least 1, then the tensor and KV counts (24 bytes).
+func hasGGUFHeader(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var hdr [24]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return false, nil // shorter than a header
+		}
+		return false, err
+	}
+	return bytes.Equal(hdr[:4], []byte("GGUF")) && binary.LittleEndian.Uint32(hdr[4:8]) >= 1, nil
 }
 
 func isGGUFEntrypoint(name string) bool {
@@ -185,10 +244,54 @@ func cleanAbs(path string) string {
 	return filepath.Clean(path)
 }
 
+// readMountInfo and triggerAutomounts are variables so tests can inject a fake
+// mount table without real mounts.
+var (
+	readMountInfo = func() (string, error) {
+		data, err := os.ReadFile("/proc/self/mountinfo")
+		return string(data), err
+	}
+	triggerAutomounts = defaultTriggerAutomounts
+)
+
+const automountTriggerTimeout = 3 * time.Second
+
+// defaultTriggerAutomounts touches each given autofs mountpoint so the kernel
+// mounts it, waiting at most automountTriggerTimeout in total. A dead disk
+// blocks only abandoned goroutines, never the scan.
+func defaultTriggerAutomounts(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, path := range paths {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			if f, err := os.Open(path); err == nil {
+				_, _ = f.ReadDir(1) // opening a systemd automount dir mounts it
+				_ = f.Close()
+			}
+		}(path)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(automountTriggerTimeout):
+	}
+}
+
 func computerScanPlan(configuredRoot string) ([]string, []string) {
 	if runtime.GOOS == "linux" {
-		if data, err := os.ReadFile("/proc/self/mountinfo"); err == nil {
-			if roots, boundaries := linuxMountScanPlan(string(data)); len(roots) > 0 {
+		if data, err := readMountInfo(); err == nil {
+			if pending := pendingAutofsMounts(data); len(pending) > 0 {
+				triggerAutomounts(pending)
+				if again, err := readMountInfo(); err == nil {
+					data = again
+				}
+			}
+			if roots, boundaries := linuxMountScanPlan(data); len(roots) > 0 {
 				return roots, boundaries
 			}
 		}
@@ -221,7 +324,34 @@ func computerScanPlan(configuredRoot string) ([]string, []string) {
 	return uniquePaths(roots), nil
 }
 
-func linuxMountScanPlan(mountInfo string) ([]string, []string) {
+// pendingAutofsMounts returns autofs mountpoints with no real filesystem
+// mounted over them yet.
+func pendingAutofsMounts(mountInfo string) []string {
+	state := map[string]bool{} // path -> still only autofs
+	var order []string
+	for _, rec := range parseMountInfo(mountInfo) {
+		path := cleanAbs(rec.path)
+		if path == "" {
+			continue
+		}
+		auto := strings.EqualFold(rec.fsType, "autofs")
+		if prev, ok := state[path]; !ok {
+			order = append(order, path)
+			state[path] = auto
+		} else {
+			state[path] = prev && auto
+		}
+	}
+	var out []string
+	for _, path := range order {
+		if state[path] {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+func parseMountInfo(mountInfo string) []mountRecord {
 	var records []mountRecord
 	for _, line := range strings.Split(mountInfo, "\n") {
 		fields := strings.Fields(line)
@@ -240,6 +370,11 @@ func linuxMountScanPlan(mountInfo string) ([]string, []string) {
 			fsType: fields[sep+1],
 		})
 	}
+	return records
+}
+
+func linuxMountScanPlan(mountInfo string) ([]string, []string) {
+	records := parseMountInfo(mountInfo)
 
 	local := make(map[string]bool)
 	boundaries := make(map[string]bool)
@@ -325,15 +460,66 @@ type discoveryIndex struct {
 	Paths     []string `json:"paths"`
 }
 
-// SaveDiscoveredScan persists a completed system scan. A truncated scan has
-// not proved that paths outside the visited prefix disappeared, so merge its
-// findings with the still-valid prior index instead of replacing that index.
+// SaveDiscoveredScan persists a system scan. A truncated scan has not proved
+// that paths outside the visited prefix disappeared, so it merges with the
+// prior index. A complete scan replaces only entries it actually covered: a
+// root that was not visited (an automount disk not mounted yet, an unreadable
+// root) or a directory it skipped keeps its saved entries.
 func SaveDiscoveredScan(cacheDir string, result ScanResult) error {
 	paths := append([]string(nil), result.Paths...)
 	if result.Truncated {
 		paths = append(LoadDiscoveredPaths(cacheDir), paths...)
+	} else {
+		for _, prior := range LoadDiscoveredPaths(cacheDir) {
+			if !scanCovers(result, prior) {
+				paths = append(paths, prior)
+			}
+		}
 	}
 	return SaveDiscoveredPaths(cacheDir, paths)
+}
+
+// scanCovers reports whether the scan walked the place path lives in: the
+// longest visited-root or skipped-directory prefix of path must be a root.
+func scanCovers(result ScanResult, path string) bool {
+	path = cleanAbs(path)
+	best, bestVisited := -1, false
+	check := func(dirs []string, visited bool) {
+		for _, dir := range dirs {
+			dir = cleanAbs(dir)
+			if dir == "" || !pathWithin(dir, path) {
+				continue
+			}
+			if len(dir) > best || (len(dir) == best && visited) {
+				best, bestVisited = len(dir), visited
+			}
+		}
+	}
+	check(result.Skipped, false)
+	check(result.Visited, true)
+	return best >= 0 && bestVisited
+}
+
+func pathWithin(dir, path string) bool {
+	if dir == path {
+		return true
+	}
+	if !strings.HasSuffix(dir, string(filepath.Separator)) {
+		dir += string(filepath.Separator)
+	}
+	return strings.HasPrefix(path, dir)
+}
+
+// RememberModelDir adds the runnable GGUFs under dir to the discovered index,
+// keeping every prior entry, so a model downloaded outside the configured model
+// directory appears in the TUI without a full computer scan. The walk is
+// bounded because dir is user-chosen and may be a large tree.
+func RememberModelDir(cacheDir, dir string) error {
+	result := scanRoots([]string{dir}, nil, rememberScanMaxEntries, rememberScanMaxTime)
+	if len(result.Paths) == 0 {
+		return nil
+	}
+	return SaveDiscoveredScan(cacheDir, ScanResult{Paths: result.Paths, Truncated: true})
 }
 
 // SaveDiscoveredPaths makes a system scan available on later TUI starts.

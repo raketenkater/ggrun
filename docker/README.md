@@ -31,27 +31,32 @@ command — the same arguments `ggrun` takes on the host.
 
 ```bash
 # CPU, local model
-docker run --rm -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:cpu /models/model.gguf
 
 # NVIDIA CUDA
-docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm --gpus all -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:cuda /models/model.gguf
 
 # Vulkan on AMD/Intel
-docker run --rm --device /dev/dri -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm --device /dev/dri -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:vulkan /models/model.gguf
 
 # Download a quant from Hugging Face into the mounted models volume, then serve
-docker run --rm --gpus all -p 8081:8081 -v ~/ai_models:/models \
+docker run --rm --gpus all -p 127.0.0.1:8081:8081 -v ~/ai_models:/models \
   ggrun:cuda unsloth/Qwen3.6-27B-GGUF --download
 ```
 
 The OpenAI-compatible API is then on `http://localhost:8081/v1`.
 
+Exposure: these examples and `docker-compose.yml` publish ports on `127.0.0.1` only. The API has
+no key by default, so anyone who can reach a published port can use the model and read what it
+is sent. To serve other machines, publish on a specific interface (`-p 192.168.1.5:8081:8081`),
+give the backend `--api-key` (or set `LLAMA_API_KEY`), and keep the port behind a firewall or VPN.
+
 Volumes:
 - `/models` — your GGUF files (and downloaded vision projectors / quants)
-- `/cache` — AI Tune and probe cache (persist it to keep tuned configs)
+- `/cache` — probe and placement cache (persist it to keep measurements)
 
 ## Full stack with Open WebUI
 
@@ -63,9 +68,17 @@ MODEL=/models/your-model.gguf docker compose up
 
 ## Notes
 
-- GPU placement, KV/batch sizing, and AI Tune work the same as on the host —
+- GPU placement and KV/batch sizing work the same as on the host —
   the launcher detects the GPUs exposed to the container.
 - These images ship the **mainline** llama.cpp backend. The faster
   ik_llama.cpp CUDA path is a source build (see the top-level README); it is not
   bundled in the container by default.
-- Set `LLM_COMMUNITY_TUNES=off` to disable the shared tune-config lookup.
+- Containers have no systemd, so the images set `GGRUN_SCOPE_MODE=none`: the
+  backend runs without ggrun's per-backend cgroup scope. Pre-launch memory
+  admission still applies; use `docker run --memory` as the hard limit.
+- The CUDA and Vulkan images ship `llama-fit-params` next to `llama-server`, so
+  GPU memory admission runs without loading the model. A custom image without
+  it must pass `--allow-live-memory-probe` to start unattended, and then pays
+  one contained live model load per launch.
+- No image is built or run in CI; the GPU images in particular have not been
+  verified in a container.

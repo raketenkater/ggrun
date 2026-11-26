@@ -236,6 +236,7 @@ func TestSelfUpdateInstallEnvPreservesAppHome(t *testing.T) {
 		"LLM_INSTALL_MODE=build",
 		"LLM_INSTALL_MAIN=go",
 		"LLM_INSTALL_NONINTERACTIVE=1",
+		"LLM_INSTALL_APP_PYTHON=1",
 	}
 	for _, want := range checks {
 		if !envHas(env, want) {
@@ -717,6 +718,7 @@ func TestSelfUpdateRebuildsWhenSourceAlreadyCurrent(t *testing.T) {
 	write(binary, "#!/bin/sh\necho stale\n", 0755)
 	// Exercise the update transaction without compiling or using the network.
 	write(filepath.Join(fakeBin, "go"), `#!/bin/sh
+[ "$1" = env ] && { echo go1.99.0; exit 0; }
 while [ "$#" -gt 0 ]; do
  if [ "$1" = "-o" ]; then shift; output="$1"; fi
  shift
@@ -726,6 +728,7 @@ chmod +x "$output"
 `, 0755)
 	t.Setenv("LLM_SERVER_REPO", repo)
 	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := SelfUpdate(); err != nil {
 		t.Fatal(err)
@@ -871,5 +874,29 @@ func TestBufferTypesIncludeSkipsBlankLines(t *testing.T) {
 				t.Fatalf("bufferTypesInclude = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// I-05: a candidate build whose log fails the contract check is refused, so
+// buildAndTest returns before promotion and the current build stays.
+func TestCandidateFailingTheContractCheckIsRefused(t *testing.T) {
+	model := filepath.Join(t.TempDir(), "m.gguf")
+	if err := os.WriteFile(model, []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := verifyContract
+	t.Cleanup(func() { verifyContract = old })
+	verifyContract = func(string, string) error { return errors.New("no KV size") }
+	t.Setenv("GGRUN_BACKEND_VERIFY_MODEL", model)
+	if err := verifyCandidate("/staging/bin/llama-server"); err == nil {
+		t.Fatal("failing contract check accepted")
+	}
+	verifyContract = func(string, string) error { return nil }
+	if err := verifyCandidate("/staging/bin/llama-server"); err != nil {
+		t.Fatalf("passing check refused: %v", err)
+	}
+	t.Setenv("GGRUN_BACKEND_VERIFY_MODEL", "")
+	if err := verifyCandidate("/staging/bin/llama-server"); err != nil {
+		t.Fatalf("unconfigured check must not block: %v", err)
 	}
 }

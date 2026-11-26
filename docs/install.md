@@ -2,7 +2,7 @@
 
 ## Recommended (self-contained app home)
 
-Linux / macOS:
+Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
@@ -29,6 +29,9 @@ cd ggrun
 ./setup.sh
 ```
 
+macOS is deprecated and untested: `setup.sh` still runs there (Metal), but
+releases may ship no macOS bundle, in which case it builds llama.cpp from source.
+
 ## App home layout
 
 `setup.sh` creates a clean app home under `~/ggrun`:
@@ -38,7 +41,7 @@ ggrun       launcher (no arguments opens the terminal GUI)
 models/          GGUF models and downloaded vision projectors
 .bin/            Go binary, tools, and bundled backend when available
 .config/         local config loaded by the launcher (single source of truth)
-.cache/          AI Tune and model index cache
+.cache/          probe and model index cache
 .logs/           setup and server logs
 .src/            backend source/build fallback
 ```
@@ -71,7 +74,6 @@ ships these archives, checksummed in `SHA256SUMS`:
 | Platform | Assets |
 |---|---|
 | Linux x86_64 | CPU, Vulkan, CUDA |
-| macOS arm64 | Metal |
 | Windows x86_64 | CPU |
 
 Linux `auto` first searches the machine for an existing `llama-server`
@@ -81,6 +83,39 @@ A downloaded CUDA binary is kept even if `--version` fails on a missing CUDA
 runtime library. Source compile happens only when no CUDA ELF landed and
 `nvcc` is already there. CPU is last if nothing else runs. The NVIDIA
 proprietary driver is never auto-installed. Windows CUDA: `install.ps1 -Backend cuda`.
+
+The Linux CUDA bundle has kernels for compute capability 7.5 and newer (Turing,
+Ampere, Ada; Blackwell through PTX). Older NVIDIA GPUs such as Pascal (P40,
+GTX 1080 Ti) and Volta (V100) get Vulkan by default; `LLM_INSTALL_BACKEND=cuda`
+builds CUDA from source for them instead.
+
+## Files and uninstall
+
+The app home holds everything `setup.sh` and `install.ps1` install: the
+launcher, backends, models, config, cache, logs, and under `.src/` the source
+checkout and the Go toolchain used to build and update ggrun. Outside it,
+`setup.sh` may add a `source ~/ggrun/.env.sh` line to `~/.bashrc` (`~/.zshrc`
+on macOS) and `ggrun` / `llm-server` links in `~/.local/bin`; `install.ps1`
+adds the app home to your user `Path`.
+
+To uninstall, stop any running ggrun, move `models/` out first if you want to
+keep them, then:
+
+```bash
+rm -rf ~/ggrun ~/.local/bin/ggrun ~/.local/bin/llm-server ~/.cache/ggrun
+# and delete the "# ggrun" source line from ~/.bashrc
+```
+
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\ggrun"
+# then remove that folder from Path in "Edit environment variables for your account"
+```
+
+The classic install puts the launcher and helper scripts (`ggrun`,
+`llm-server-*`, `*.py`, `llama-server*`, `backends/`) in `~/.local/bin`,
+config in `~/.config/ggrun`, caches in `~/.cache/ggrun`, and backend sources
+plus a downloaded Go toolchain in `$HOME` (`ik_llama.cpp/`, `llama.cpp/`,
+`.llm-server-go/`). Remove those to uninstall; models live in `~/ai_models`.
 
 ## Classic install to `~/.local/bin`
 

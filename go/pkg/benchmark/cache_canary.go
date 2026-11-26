@@ -3,6 +3,7 @@ package benchmark
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,8 +26,14 @@ type CacheCanaryResult struct {
 	ColdPromptTPS      float64 `json:"cold_prompt_tps,omitempty"`
 	AppendPromptTPS    float64 `json:"append_prompt_tps,omitempty"`
 	BranchPromptTPS    float64 `json:"branch_prompt_tps,omitempty"`
-	Reason             string  `json:"reason,omitempty"`
+	// TooSlow reports that the prefill speed probe timed out while the backend
+	// stayed healthy: nothing was measured or verified, and nothing failed.
+	TooSlow bool   `json:"too_slow,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
+
+// errEndpointTooSlow marks a speed probe that timed out on a healthy backend.
+var errEndpointTooSlow = errors.New("endpoint answered too slowly to measure")
 
 type canaryMessage struct {
 	Role    string `json:"role"`
@@ -68,6 +75,7 @@ func canaryEvidence(label string, r *canaryResponse) string {
 // verifies the completion endpoint and reports that reuse was not provable,
 // rather than failing a launch that is otherwise healthy.
 func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
+	r.waitForIdleSlots()
 	words, cacheProvable := r.canarySegmentWords()
 	if words <= 0 {
 		// Not even the instruction frame fits. Sending the framed canary anyway
@@ -77,6 +85,9 @@ func (r *Runner) RunCacheCanary() (*CacheCanaryResult, error) {
 	}
 	if r.PrefillBudget > 0 && cacheProvable {
 		fitted, provable, probe, reason, err := r.fitCanaryToPrefillBudget(words)
+		if errors.Is(err, errEndpointTooSlow) {
+			return &CacheCanaryResult{TooSlow: true, Reason: err.Error()}, nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -215,6 +226,11 @@ func (r *Runner) minimalFunctionalCanary() (*CacheCanaryResult, error) {
 func (r *Runner) fitCanaryToPrefillBudget(words int) (fitted int, provable bool, probe *canaryResponse, reason string, err error) {
 	probe, err = r.canaryChat([]canaryMessage{{Role: "user", Content: "Reply GGRUN_OK."}})
 	if err != nil {
+		// A timeout on a backend that is still healthy says the endpoint is too
+		// slow to measure here, not that the profile is broken.
+		if isTimeout(err) && r.backendHealthy() {
+			return 0, false, nil, "", fmt.Errorf("%w: prefill speed probe: %v", errEndpointTooSlow, err)
+		}
 		return 0, false, nil, "", fmt.Errorf("prefill speed probe: %w", err)
 	}
 	segment := canarySegment("alpha", words)

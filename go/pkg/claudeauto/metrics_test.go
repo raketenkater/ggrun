@@ -2,12 +2,14 @@ package claudeauto
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -492,5 +494,88 @@ func TestConversationKeyIsStablePerAgentAndDistinctAcrossAgents(t *testing.T) {
 	}
 	if conversationKey(agentA) == "" {
 		t.Fatal("the per-install user_id blob must still parse; an empty key disables grouping entirely")
+	}
+}
+
+func TestEnableMetricsFileIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	path := filepath.Join(t.TempDir(), "ggrun-claude-requests-1.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &Router{}
+	if err := r.EnableMetrics(path); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+}
+
+// A stream that breaks after the headers went out makes ReverseProxy panic with
+// http.ErrAbortHandler. The request must still be recorded, once, as aborted in
+// service, and the status the client already saw must be kept.
+func TestRouterRecordsStreamBrokenMidBody(t *testing.T) {
+	backendDone := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(backendDone)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer backend.Close()
+
+	router, path := newTestRouter(t, backend.URL, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, router.URL()+"/v1/messages",
+		strings.NewReader(`{"model":"local","stream":true,"system":"coding agent","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if _, err := bufio.NewReader(resp.Body).ReadString('\n'); err != nil {
+		t.Fatalf("read first event line: %v", err)
+	}
+	cancel()
+
+	records := waitForRecords(t, path, 1)
+	select {
+	case <-backendDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend request was never cancelled")
+	}
+	// Give a spurious second record the chance to appear before counting.
+	time.Sleep(100 * time.Millisecond)
+	if records = readRecords(t, path); len(records) != 1 {
+		t.Fatalf("records = %d, want exactly 1: %+v", len(records), records)
+	}
+	rec := records[0]
+	if !rec.Aborted || rec.CancelPhase != "service" {
+		t.Errorf("aborted=%v cancel_phase=%q, want true/service", rec.Aborted, rec.CancelPhase)
+	}
+	if rec.Status != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Status)
+	}
+	if rec.Usage.InputTokens != 7 {
+		t.Errorf("partial usage lost: input tokens = %d, want 7", rec.Usage.InputTokens)
+	}
+	s := router.MetricsSummary()
+	if s["requests"] != int64(1) && s["requests"] != 1 {
+		t.Errorf("summary requests = %v, want 1", s["requests"])
+	}
+	if s["aborted"] != int64(1) && s["aborted"] != 1 {
+		t.Errorf("summary aborted = %v, want 1", s["aborted"])
+	}
+	if s["aborted_in_service"] != int64(1) && s["aborted_in_service"] != 1 {
+		t.Errorf("summary aborted_in_service = %v, want 1", s["aborted_in_service"])
 	}
 }

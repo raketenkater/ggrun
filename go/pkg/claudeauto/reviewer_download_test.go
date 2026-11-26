@@ -187,3 +187,146 @@ func TestReviewerHTTPClientHasNoWholeRequestDeadline(t *testing.T) {
 		t.Errorf("client timeout = %v, want 0; a large artifact on a slow link is not a hung request", got)
 	}
 }
+
+// A server that answers a resume with 206 but from the wrong offset (a bad
+// join) yields a file of the right size and the wrong bytes. That must never be
+// kept: the download restarts from zero and ends verified.
+func TestDownloadModelRecoversFromMisalignedResume(t *testing.T) {
+	payload, sum := testArtifact(t, 256*1024)
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		n := calls.Add(1)
+		if n == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload[:64*1024])
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		}
+		if r.Header.Get("Range") != "" {
+			// Wrong offset, right length: the tail is shifted by 1 KiB.
+			start := int64(65536)
+			bad := append(append([]byte{}, payload[start+1024:]...), make([]byte, 1024)...)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(payload)-1, len(payload)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(bad)
+			return
+		}
+		serveRange(w, r, payload)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "reviewer.gguf")
+	spec := ModelSpec{URL: srv.URL, Name: "reviewer.gguf", Size: int64(len(payload)), SHA256: sum}
+	if err := downloadModel(context.Background(), srv.Client(), spec, dest, io.Discard); err != nil {
+		t.Fatalf("downloadModel: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	gs := sha256.Sum256(got)
+	if hex.EncodeToString(gs[:]) != sum {
+		t.Fatal("kept file does not match the pinned checksum")
+	}
+}
+
+// If the resumed bytes verify wrong even though the join looked right, the
+// partial is discarded and one full re-download is made; a second mismatch is
+// reported, not installed, and not retried again.
+func TestDownloadModelChecksumFailureAfterResumeRetriesOnceFromZero(t *testing.T) {
+	payload, sum := testArtifact(t, 128*1024)
+	var full, ranged atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			if full.Add(1) == 1 {
+				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(payload[:32*1024])
+				w.(http.Flusher).Flush()
+				panic(http.ErrAbortHandler)
+			}
+			serveRange(w, r, payload)
+			return
+		}
+		ranged.Add(1)
+		// Correct offsets but corrupt content.
+		corrupt := append([]byte{}, payload[32*1024:]...)
+		corrupt[10] ^= 0xff
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", 32*1024, len(payload)-1, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(corrupt)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "reviewer.gguf")
+	spec := ModelSpec{URL: srv.URL, Name: "reviewer.gguf", Size: int64(len(payload)), SHA256: sum}
+	if err := downloadModel(context.Background(), srv.Client(), spec, dest, io.Discard); err != nil {
+		t.Fatalf("downloadModel: %v", err)
+	}
+	if ranged.Load() != 1 {
+		t.Errorf("ranged requests = %d, want 1", ranged.Load())
+	}
+	got, _ := os.ReadFile(dest)
+	gs := sha256.Sum256(got)
+	if hex.EncodeToString(gs[:]) != sum {
+		t.Fatal("kept file does not match the pinned checksum")
+	}
+}
+
+// A complete-size partial left by an earlier run (killed before the rename) that
+// is a bad join must not end the download: it counts as resumed, so the
+// mismatch earns one fresh download.
+func TestDownloadModelRetriesFullSizeBadPartialFromEarlierRun(t *testing.T) {
+	payload, sum := testArtifact(t, 64*1024)
+	var full atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			full.Add(1)
+		}
+		serveRange(w, r, payload)
+	}))
+	defer srv.Close()
+	dest := filepath.Join(t.TempDir(), "reviewer.gguf")
+	spec := ModelSpec{URL: srv.URL, Name: "reviewer.gguf", Size: int64(len(payload)), SHA256: sum}
+	bad := append([]byte{}, payload...)
+	bad[100] ^= 0xff
+	if err := os.WriteFile(dest+".part", bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writePartIdentity(dest+".part", spec, http.Header{})
+	if err := downloadModel(context.Background(), srv.Client(), spec, dest, io.Discard); err != nil {
+		t.Fatalf("downloadModel: %v", err)
+	}
+	if full.Load() != 1 {
+		t.Errorf("fresh downloads = %d, want 1", full.Load())
+	}
+	got, _ := os.ReadFile(dest)
+	gs := sha256.Sum256(got)
+	if hex.EncodeToString(gs[:]) != sum {
+		t.Fatal("kept file does not match the pinned checksum")
+	}
+}
+
+// A partial with no recorded identity (an older ggrun, or another artifact) is
+// not resumed.
+func TestDownloadModelDoesNotResumeUnidentifiedPartial(t *testing.T) {
+	payload, sum := testArtifact(t, 64*1024)
+	var sawRange atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange.Store(true)
+		}
+		serveRange(w, r, payload)
+	}))
+	defer srv.Close()
+	dest := filepath.Join(t.TempDir(), "reviewer.gguf")
+	if err := os.WriteFile(dest+".part", make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := ModelSpec{URL: srv.URL, Name: "reviewer.gguf", Size: int64(len(payload)), SHA256: sum}
+	if err := downloadModel(context.Background(), srv.Client(), spec, dest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sawRange.Load() {
+		t.Error("an unidentified partial was resumed")
+	}
+}

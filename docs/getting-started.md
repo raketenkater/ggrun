@@ -6,7 +6,7 @@ which model you want.
 
 ## 1. Install
 
-Linux / macOS:
+Linux:
 
 ~~~bash
 curl -fsSL https://raw.githubusercontent.com/raketenkater/ggrun/main/setup.sh | bash
@@ -45,7 +45,9 @@ ggrun models list
 ggrun <model.gguf>
 ~~~
 
-ggrun download chooses a quant using detected VRAM and RAM (equivalently: `ggrun <owner/repository> --download`, the form used in the top-level README). ggrun models list
+ggrun download chooses a quant using detected VRAM and RAM (equivalently: `ggrun <owner/repository> --download`, the form used in the top-level README). Add `--yes` to take the recommendation
+without asking, `--quant <name>` to pick one, or `--dir <path>` for another
+disk; `ggrun download --help` lists the options. ggrun models list
 shows the downloaded GGUFs, including split GGUFs as one model. Use the name
 printed by that command to launch a model.
 

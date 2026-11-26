@@ -2653,202 +2653,6 @@ func TestResolveModelPathUsesConfiguredModelDir(t *testing.T) {
 	}
 }
 
-func TestApplyTuneCacheAutoSelectsBest(t *testing.T) {
-	cacheDir := t.TempDir()
-	modelPath := filepath.Join(t.TempDir(), "model.gguf")
-	if err := os.WriteFile(modelPath, []byte("gguf"), 0644); err != nil {
-		t.Fatalf("write model: %v", err)
-	}
-	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hw12345678_vulkan.json")
-	doc := `{
-		"model": "model.gguf",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {
-			"name": "threads12",
-			"flags": {"--threads": "12"},
-			"gen_tps": 120.0,
-			"pp_tps": 300.0
-		},
-		"rounds": 1,
-		"tuned_at": "2026-05-28T00:00:00Z"
-	}`
-	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
-		t.Fatalf("write tune cache: %v", err)
-	}
-
-	args := applyTuneCache(&launchRequest{ModelPath: modelPath}, []string{"llama-server", "--threads", "8"}, cacheDir, "vulkan", false, nil)
-	if !hasArgValue(args, "--threads", "12") {
-		t.Fatalf("expected cached --threads override, got %v", args)
-	}
-}
-
-func TestApplyTuneCacheSkipsMemoryExpandingOverrideWhenVRAMHeadroomIsLow(t *testing.T) {
-	cacheDir := t.TempDir()
-	modelPath := filepath.Join(t.TempDir(), "model.gguf")
-	if err := os.WriteFile(modelPath, []byte("gguf"), 0644); err != nil {
-		t.Fatalf("write model: %v", err)
-	}
-	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hw12345678_vulkan.json")
-	doc := `{
-		"model": "model.gguf",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {
-			"name": "larger-ubatch",
-			"flags": {"-ub": "2048"},
-			"gen_tps": 120.0,
-			"pp_tps": 300.0
-		},
-		"rounds": 1,
-		"tuned_at": "2026-06-02T00:00:00Z"
-	}`
-	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
-		t.Fatalf("write tune cache: %v", err)
-	}
-	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, VRAMUsedMB: 21000}}}
-	base := []string{"llama-server", "--device", "Vulkan0", "-ub", "1024"}
-
-	args := applyTuneCache(&launchRequest{ModelPath: modelPath, TuneCache: cachePath}, base, cacheDir, "vulkan", false, caps)
-	if !hasArgValue(args, "-ub", "1024") {
-		t.Fatalf("expected low-headroom guard to keep base -ub, got %v", args)
-	}
-}
-
-func TestApplyTuneCacheAllowsNonVRAMOverrideWhenVRAMHeadroomIsLow(t *testing.T) {
-	cacheDir := t.TempDir()
-	modelPath := filepath.Join(t.TempDir(), "model.gguf")
-	if err := os.WriteFile(modelPath, []byte("gguf"), 0644); err != nil {
-		t.Fatalf("write model: %v", err)
-	}
-	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hw12345678_vulkan.json")
-	doc := `{
-		"model": "model.gguf",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {
-			"name": "threads12",
-			"flags": {"--threads": "12"},
-			"gen_tps": 120.0,
-			"pp_tps": 300.0
-		},
-		"rounds": 1,
-		"tuned_at": "2026-06-02T00:00:00Z"
-	}`
-	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
-		t.Fatalf("write tune cache: %v", err)
-	}
-	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "RTX 3090 Ti", VRAMTotalMB: 24564, VRAMUsedMB: 24000}}}
-	base := []string{"llama-server", "--device", "Vulkan0", "--threads", "8"}
-
-	args := applyTuneCache(&launchRequest{ModelPath: modelPath, TuneCache: cachePath}, base, cacheDir, "vulkan", false, caps)
-	if !hasArgValue(args, "--threads", "12") {
-		t.Fatalf("expected non-VRAM override to apply, got %v", args)
-	}
-}
-
-func TestApplyTuneCacheDoesNotCrossBackend(t *testing.T) {
-	cacheDir := t.TempDir()
-	modelPath := filepath.Join(t.TempDir(), "model.gguf")
-	if err := os.WriteFile(modelPath, []byte("gguf"), 0644); err != nil {
-		t.Fatalf("write model: %v", err)
-	}
-	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hw12345678_vulkan.json")
-	doc := `{
-		"model": "model.gguf",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {
-			"name": "threads12",
-			"flags": {"--threads": "12"},
-			"gen_tps": 120.0,
-			"pp_tps": 300.0
-		},
-		"rounds": 1,
-		"tuned_at": "2026-05-28T00:00:00Z"
-	}`
-	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
-		t.Fatalf("write tune cache: %v", err)
-	}
-
-	args := applyTuneCache(&launchRequest{ModelPath: modelPath}, []string{"llama-server", "--threads", "8"}, cacheDir, "llama", false, nil)
-	if !hasArgValue(args, "--threads", "8") {
-		t.Fatalf("expected backend-scoped cache to be ignored, got %v", args)
-	}
-}
-
-func TestBestTuneCachePathFiltersHardwareHash(t *testing.T) {
-	cacheDir := t.TempDir()
-	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hwdeadbeef_vulkan.json")
-	doc := `{
-		"model": "model.gguf",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {
-			"name": "threads12",
-			"flags": {"--threads": "12"},
-			"gen_tps": 120.0,
-			"pp_tps": 300.0
-		},
-		"rounds": 1,
-		"tuned_at": "2026-05-28T00:00:00Z"
-	}`
-	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
-		t.Fatalf("write tune cache: %v", err)
-	}
-	agentPath := filepath.Join(cacheDir, "tune_model.gguf_4_hwdeadbeef_vulkan_agent-parallel-v1-p2.json")
-	agentDoc := `{
-		"model": "model.gguf",
-		"workload": "agent-parallel-v1-p2",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {"name": "agent-batch", "flags": {"-b": "256", "-ub": "256"}, "gen_tps": 999.0, "pp_tps": 300.0},
-		"rounds": 4,
-		"tuned_at": "2026-05-29T00:00:00Z"
-	}`
-	if err := os.WriteFile(agentPath, []byte(agentDoc), 0644); err != nil {
-		t.Fatalf("write agent tune cache: %v", err)
-	}
-	if got := bestTuneCachePath(cacheDir, "model.gguf", "vulkan", false, "", "badc0ffe"); got != "" {
-		t.Fatalf("expected wrong-hardware cache to be ignored, got %s", got)
-	}
-	if got := bestTuneCachePath(cacheDir, "model.gguf", "vulkan", false, "", "deadbeef"); got != cachePath {
-		t.Fatalf("expected matching hardware cache, got %s", got)
-	}
-	if got := bestTuneCachePath(cacheDir, "model.gguf", "vulkan", false, "agent-parallel-v1-p2", "deadbeef"); got != agentPath {
-		t.Fatalf("expected matching agent workload cache, got %s", got)
-	}
-}
-
-func TestApplyTuneCacheSkipsAutomaticGenericTuneForClaudeCode(t *testing.T) {
-	cacheDir := t.TempDir()
-	modelPath := filepath.Join(t.TempDir(), "model.gguf")
-	if err := os.WriteFile(modelPath, []byte("gguf"), 0644); err != nil {
-		t.Fatalf("write model: %v", err)
-	}
-	cachePath := filepath.Join(cacheDir, "tune_model.gguf_4_hwdeadbeef_vulkan.json")
-	doc := `{
-		"model": "model.gguf",
-		"baseline_gen_tps": 100.0,
-		"baseline_wins": false,
-		"best_config": {"name": "threads12", "flags": {"--threads": "12"}, "gen_tps": 120.0, "pp_tps": 300.0},
-		"rounds": 1,
-		"tuned_at": "2026-05-28T00:00:00Z"
-	}`
-	if err := os.WriteFile(cachePath, []byte(doc), 0644); err != nil {
-		t.Fatalf("write generic tune cache: %v", err)
-	}
-	base := []string{"llama-server", "--threads", "8"}
-	got := applyTuneCache(&launchRequest{ModelPath: modelPath, ClaudeCode: true}, base, cacheDir, "vulkan", false, nil)
-	if !hasArgValue(got, "--threads", "8") {
-		t.Fatalf("automatic generic tune changed Claude Code args: %v", got)
-	}
-	got = applyTuneCache(&launchRequest{ModelPath: modelPath, ClaudeCode: true, TuneCache: cachePath}, base, cacheDir, "vulkan", false, nil)
-	if !hasArgValue(got, "--threads", "12") {
-		t.Fatalf("explicit Claude Code tune was not honored: %v", got)
-	}
-}
-
 func hasArgValue(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && args[i+1] == value {
@@ -3351,6 +3155,7 @@ func TestClaudeCodeSearchMCPArgsEnablesResearchTools(t *testing.T) {
 
 func TestClaudeCodePermissionArgsDefaultsToLocalAuto(t *testing.T) {
 	t.Setenv("GGRUN_CLAUDE_PERMISSION_MODE", "")
+	t.Setenv("GGRUN_CLAUDE_AUTO_REVIEWER", "")
 	got := claudeCodePermissionArgs(nil)
 	if len(got) != 2 || got[0] != "--permission-mode" || got[1] != "auto" {
 		t.Fatalf("local Claude launch must use the routed Auto reviewer, got %v", got)
@@ -4178,12 +3983,84 @@ func TestMeasuredFootprintCgroupMaxMB(t *testing.T) {
 	}
 	// The canary has not filled the prompt cache yet, so a larger planned
 	// host-footprint+CRAM requirement remains available for later requests.
-	if got := measuredFootprintCgroupMaxMB(70000, 4096, 82000, 100000); got != 82000 {
-		t.Fatalf("planned cache-capacity floor: got %d, want 82000", got)
+	if got := measuredFootprintCgroupMaxMB(70000, 4096, 82000, 100000); got != 86096 {
+		t.Fatalf("planned cache-capacity floor plus headroom: got %d, want 86096", got)
 	}
 	// The whole-host ceiling remains absolute even when the plan asks for more.
 	if got := measuredFootprintCgroupMaxMB(70000, 4096, 82000, 80000); got != 80000 {
 		t.Fatalf("planned floor must clamp to ceiling: got %d, want 80000", got)
+	}
+}
+
+// TestMMapReclaimHighKeepsMappedExperts guards the post-canary memory.high of a
+// file-backed expert plan. The kernel throttles and reclaims every charged page
+// above memory.high, mapped experts included. Live GLM-5.3 (201,504 MiB mapped
+// experts, 2026-10-24) had memory.high tightened to the 24,183 MiB
+// non-reclaimable ceiling: RSS fell from 192 GB to 23 GB, IO pressure reached
+// 46% full, decode 0.32 tok/s. memory.high must leave the mapped experts as
+// much room as the scope's real hard limit (memory.max) allows, keep a headroom
+// band below that limit, and never drop below the non-reclaimable ceiling or
+// the pre-launch memory.high. The 2026-10-26 relaunch clamped against the lower
+// planned budget instead, putting memory.high 4 GiB below its launch value, and
+// warned of a cache shortfall computed from the 24,183 MiB planned floor where
+// 965 MiB non-reclaimable was measured.
+func TestMMapReclaimHighKeepsMappedExperts(t *testing.T) {
+	cases := []struct {
+		name                             string
+		nonReclaimable, measured, mapped int
+		headroom, hardMax, launchHigh    int
+		wantHigh, wantCached             int
+	}{
+		{"live GLM: band below the real hard limit, allowance from measured", 24183, 965, 201504, 4096, 215000, 205963, 210904, 201504},
+		{"hard limit is the budget: never below the launch high", 24183, 965, 201504, 4096, 205963, 205963, 205963, 201504},
+		{"experts exceed RAM: allowance beside the measured state", 24183, 965, 300000, 4096, 215000, 200000, 210904, 209939},
+		{"experts fit: all of them stay cached", 20000, 18000, 30000, 4096, 200000, 0, 50000, 30000},
+		{"hard limit at the non-reclaimable state: never below it", 100000, 100000, 50000, 4096, 102000, 0, 100000, 0},
+		{"no headroom configured: up to the hard limit", 20000, 20000, 300000, 0, 200000, 0, 200000, 180000},
+		{"unknown limits: non-reclaimable plus experts", 20000, 20000, 30000, 4096, 0, 0, 50000, 30000},
+		{"unknown measurement: allowance beside the planned floor", 24183, 0, 201504, 4096, 215000, 0, 210904, 186721},
+		{"no non-reclaimable ceiling: no resize", 0, 965, 30000, 4096, 200000, 0, 0, 0},
+	}
+	for _, c := range cases {
+		high, cached := mmapExpertReclaimHighMB(c.nonReclaimable, c.measured, c.mapped, c.headroom, c.hardMax, c.launchHigh)
+		if high != c.wantHigh || cached != c.wantCached {
+			t.Fatalf("%s: got high=%d cached=%d, want high=%d cached=%d", c.name, high, cached, c.wantHigh, c.wantCached)
+		}
+	}
+	for nonRecl := 1000; nonRecl <= 240000; nonRecl += 23000 {
+		for _, measured := range []int{0, 965, nonRecl / 2, nonRecl} {
+			for mapped := 0; mapped <= 400000; mapped += 37000 {
+				for _, hardMax := range []int{0, 50000, 215000, 500000} {
+					for _, launchHigh := range []int{0, hardMax / 2, hardMax} {
+						high, cached := mmapExpertReclaimHighMB(nonRecl, measured, mapped, 4096, hardMax, launchHigh)
+						where := fmt.Sprintf("nonRecl=%d measured=%d mapped=%d hardMax=%d launchHigh=%d: high=%d cached=%d",
+							nonRecl, measured, mapped, hardMax, launchHigh, high, cached)
+						if hardMax > 0 && high > hardMax {
+							t.Fatalf("%s: memory.high above memory.max", where)
+						}
+						if high < launchHigh {
+							t.Fatalf("%s: memory.high lowered below its launch value", where)
+						}
+						if high < nonRecl && (hardMax == 0 || nonRecl <= hardMax) {
+							t.Fatalf("%s: memory.high below the non-reclaimable ceiling", where)
+						}
+						if hardMax > 0 && high > hardMax-4096 && high > max(nonRecl, launchHigh) {
+							t.Fatalf("%s: no reclaim band below the hard limit", where)
+						}
+						used := measured
+						if used <= 0 {
+							used = nonRecl
+						}
+						if want := min(mapped, max(0, high-used)); cached != want {
+							t.Fatalf("%s: allowance %d, want %d beside the measured state", where, cached, want)
+						}
+						if (hardMax == 0 || nonRecl+mapped <= hardMax-4096) && cached != mapped {
+							t.Fatalf("%s: experts fit under the hard limit but were not all allowed", where)
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -4198,10 +4075,10 @@ func TestMeasuredFootprintPlannedFloor(t *testing.T) {
 	ceiling := 122000
 	measured := 10000
 
-	// A plan with a real host footprint plus CRAM preserves that floor.
+	// Preserve the larger measured base plus future CRAM capacity.
 	dense := &placement.Strategy{Type: placement.MultiGPUDense, PlannedHostFootprintMB: 6000, CRAM: 11264}
-	if got := measuredFootprintPlannedFloor(dense, measured, ceiling); got != 17264 {
-		t.Fatalf("planned host footprint + CRAM floor: got %d, want 17264", got)
+	if got := measuredFootprintPlannedFloor(dense, measured, ceiling); got != 21264 {
+		t.Fatalf("larger measured base + CRAM floor: got %d, want 21264", got)
 	}
 	// The same fully-resident plan with NO derived footprint must NOT collapse to
 	// CRAM: the floor becomes the whole-host ceiling, so the resize can only
@@ -4212,11 +4089,11 @@ func TestMeasuredFootprintPlannedFloor(t *testing.T) {
 		t.Fatalf("no-host-footprint floor must be the whole-host ceiling, got %d", got)
 	}
 	// A plan whose host footprint + CRAM under-counts the measured backend keeps
-	// measured as the honest floor (CRAM not yet filled, checkpoint reserve below
-	// reality), never the stale plan estimate.
+	// measured plus the future cache as the honest floor, never the stale plan
+	// estimate. A canary does not prove CRAM is already populated.
 	under := &placement.Strategy{Type: placement.MoEOffload, PlannedHostFootprintMB: 2000, CRAM: 1024}
-	if got := measuredFootprintPlannedFloor(under, measured, ceiling); got != measured {
-		t.Fatalf("under-counting plan floor must be the measured footprint, got %d", got)
+	if got := measuredFootprintPlannedFloor(under, measured, ceiling); got != measured+under.CRAM {
+		t.Fatalf("under-counting plan floor must preserve measured footprint and future cache, got %d", got)
 	}
 	// A nil strategy yields no floor at all (pure measured+headroom sizing).
 	if got := measuredFootprintPlannedFloor(nil, measured, ceiling); got != 0 {
@@ -4248,13 +4125,13 @@ func TestDenseScopeNotClampedToCRAM(t *testing.T) {
 	dense := &placement.Strategy{Type: placement.MultiGPUDense, PlannedHostFootprintMB: 3000, CRAM: 11264}
 	measured := 27000 // server + CUDA host buffers + KV + checkpoints for Qwen3.8-27B
 	floor := measuredFootprintPlannedFloor(dense, measured, ceiling)
-	if floor != measured {
-		t.Fatalf("dense plan under-counting the measured backend must floor at measured, got %d", floor)
+	if floor != measured+dense.CRAM {
+		t.Fatalf("dense plan under-counting the measured backend must retain future cache capacity, got %d", floor)
 	}
 	newMax := measuredFootprintCgroupMaxMB(measured, req.CgroupHeadroomMB, floor, ceiling)
-	if newMax != measured+req.CgroupHeadroomMB {
-		t.Fatalf("dense scope must be re-sized to measured+headroom (%d), got %d (clamped to CRAM?)",
-			measured+req.CgroupHeadroomMB, newMax)
+	if newMax != measured+dense.CRAM+req.CgroupHeadroomMB {
+		t.Fatalf("dense scope must retain measured+cache+headroom (%d), got %d",
+			measured+dense.CRAM+req.CgroupHeadroomMB, newMax)
 	}
 	if newMax <= dense.CRAM {
 		t.Fatalf("dense scope re-sized to %d MiB, at or below the CRAM budget %d MiB (the Qwen3.8 OOM)", newMax, dense.CRAM)

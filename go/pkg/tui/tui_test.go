@@ -325,8 +325,8 @@ func TestExternalDiscoveredModelCannotBeDeletedWithoutTypedConfirmation(t *testi
 	if m.screen != ScreenDownload || m.inputMode != "external-remove-confirm" {
 		t.Fatalf("confirming the offer must open the typed yes screen, screen=%v inputMode=%q", m.screen, m.inputMode)
 	}
-	if m.pendingExternalRemoveIdx != 0 {
-		t.Fatalf("pending external remove index not recorded, got %d", m.pendingExternalRemoveIdx)
+	if m.pendingExternalRemoveID != modelIdentity(path) {
+		t.Fatalf("pending external removal not bound to the file, got %q", m.pendingExternalRemoveID)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the typed screen alone must not touch the file: %v", err)
@@ -346,7 +346,7 @@ func TestExternalDiscoveredModelCannotBeDeletedWithoutTypedConfirmation(t *testi
 	// The lower-level path is guarded too: removeModelAt refuses any external
 	// row whose index was not handed down by the typed screen.
 	m = Model{screen: ScreenMain, modelDir: dir, models: []ModelItem{item}}
-	m.pendingExternalRemoveIdx = -1
+	m.pendingExternalRemoveID = ""
 	m.removeModelAt(0)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("ungated removeModelAt must not touch the file: %v", err)
@@ -388,8 +388,8 @@ func TestExternalDiscoveredModelDeletedAfterTypedConfirmation(t *testing.T) {
 	if m.messageType != "info" || !strings.Contains(m.message, "Removed") {
 		t.Fatalf("expected an info removal message, got type=%q msg=%q", m.messageType, m.message)
 	}
-	if m.pendingExternalRemoveIdx != -1 {
-		t.Fatalf("pending external remove index must be cleared after removal, got %d", m.pendingExternalRemoveIdx)
+	if m.pendingExternalRemoveID != "" {
+		t.Fatalf("pending external removal must be cleared after removal, got %q", m.pendingExternalRemoveID)
 	}
 }
 
@@ -418,7 +418,6 @@ func TestExternalRemoveConfirmEscapedSymlinkDeletesRealTargetOnlyAfterConfirmati
 	dir := t.TempDir()
 	m := Model{screen: ScreenMain, modelDir: dir, models: []ModelItem{item}}
 	m.input = textinput.New()
-	m.pendingExternalRemoveIdx = -1
 
 	// Without confirmation the symlink and its target must be untouched.
 	m.removeModelAt(0)
@@ -431,7 +430,6 @@ func TestExternalRemoveConfirmEscapedSymlinkDeletesRealTargetOnlyAfterConfirmati
 
 	// With typed confirmation the real target is deleted even though the row's
 	// path is a symlink pointing outside the primary directory.
-	m.pendingExternalRemoveIdx = 0
 	m.openExternalRemoveConfirm(0)
 	m.input.SetValue("yes")
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -710,70 +708,6 @@ func TestEscOnRecommendedClearsHeadroomFocusWithoutLeaving(t *testing.T) {
 	}
 	if m.screen != ScreenRecommended {
 		t.Fatalf("expected the first esc to stay on Recommended (defocus only), got screen=%v", m.screen)
-	}
-}
-
-func TestOpenTunedPickerRestoresIndexForActiveConfig(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "test-Q4_K_M.gguf"), []byte("GGUF"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	models := discoverModels(dir)
-
-	// ListTunedConfigs (pkg/tune) globs cacheDir for tune_<modelName>_*.json,
-	// requires doc.Model == modelName and a positive best_config.gen_tps, and
-	// infers backend "llama" / non-vision from the absence of "_ik"/"_vulkan"/
-	// "_v_" in the filename — backendTag() defaults to "llama" too, so these
-	// two fixture files match what Model{backend: ""} will actually look up.
-	writeTunedConfig := func(suffix string, genTPS float64) string {
-		path := filepath.Join(cacheDir, fmt.Sprintf("tune_%s_%s.json", models[0].Name, suffix))
-		doc := fmt.Sprintf(`{"model":%q,"baseline_gen_tps":10,"best_config":{"gen_tps":%f,"flags":{}},"rounds":5,"tuned_at":"2026-07-01T00:00:00Z"}`, models[0].Name, genTPS)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	writeTunedConfig("variant-a", 20)
-	activePath := writeTunedConfig("variant-b", 30)
-
-	m := &Model{cacheDir: cacheDir, models: models, selectedModel: 0, tunePath: activePath}
-	m.openTunedPicker()
-
-	if m.screen != ScreenTunedPicker {
-		t.Fatalf("expected openTunedPicker to switch to ScreenTunedPicker, got %v", m.screen)
-	}
-	if m.tunedIndex < 0 || m.tunedIndex >= len(m.tunedConfigs) {
-		t.Fatalf("expected tunedIndex to point at the active config, got %d (len=%d)", m.tunedIndex, len(m.tunedConfigs))
-	}
-	if got := m.tunedConfigs[m.tunedIndex].Path; got != activePath {
-		t.Fatalf("expected the restored index to match the active tuned config; got %q, want %q", got, activePath)
-	}
-}
-
-// TestOpenTunedPickerFallsBackToAutoForStaleTunePath covers the case the
-// happy-path test above doesn't: m.tunePath pointing at a config that no
-// longer exists in the freshly-rebuilt list (e.g. its file was deleted out
-// from under it). openTunedPicker must fall back to -1 ("Auto"), not leave a
-// stale non-matching index in place.
-func TestOpenTunedPickerFallsBackToAutoForStaleTunePath(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "test-Q4_K_M.gguf"), []byte("GGUF"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	models := discoverModels(dir)
-
-	m := &Model{
-		cacheDir:      cacheDir,
-		models:        models,
-		selectedModel: 0,
-		tunePath:      filepath.Join(cacheDir, "tune_"+models[0].Name+"_deleted-config.json"),
-	}
-	m.openTunedPicker()
-
-	if m.tunedIndex != -1 {
-		t.Fatalf("expected tunedIndex to fall back to -1 (Auto) for a tunePath with no matching config, got %d", m.tunedIndex)
 	}
 }
 
@@ -1071,14 +1005,6 @@ func TestLaunchArgsAutoBackendDoesNotDisableArchitectureRouting(t *testing.T) {
 	joined := strings.Join(req.LaunchArgs(), " ")
 	if strings.Contains(joined, "--backend") {
 		t.Fatalf("automatic backend must remain implicit so architecture routes can select a fork: %q", joined)
-	}
-}
-
-func TestLaunchArgsCarriesAITuneRounds(t *testing.T) {
-	req := &LaunchRequest{ModelPath: "/models/test.gguf", AITune: true, AITuneRounds: 11}
-	joined := strings.Join(req.LaunchArgs(), " ")
-	if !strings.Contains(joined, "--rounds 11") {
-		t.Fatalf("TUI AI tune rounds must reach cmdTune: %q", joined)
 	}
 }
 
@@ -1513,23 +1439,6 @@ func TestLaunchArgsCarriesClaudeProfileOnlyForClaudeCode(t *testing.T) {
 	}
 }
 
-func TestRunModesAreMutuallyExclusive(t *testing.T) {
-	m := Model{screen: ScreenModelConfig, models: []ModelItem{{Name: "test.gguf"}}, kvPlacement: "auto", ctxMode: "fit", ctxSize: "fit"}
-	m.input = textinput.New()
-	m.cfgCursor = indexOf(m.cfgRows(), "aitune")
-	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = nm.(Model)
-	if !m.aitune || m.benchmark {
-		t.Fatal("AI tune should enable itself and disable benchmark")
-	}
-	m.cfgCursor = indexOf(m.cfgRows(), "benchmark")
-	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = nm.(Model)
-	if !m.benchmark || m.aitune {
-		t.Fatal("benchmark should enable itself and disable AI tune")
-	}
-}
-
 func TestPrelaunchViewShowsSelectedBackend(t *testing.T) {
 	m := Model{
 		models:        []ModelItem{{Name: "DeepSeek", Path: "/models/deepseek.gguf"}},
@@ -1605,8 +1514,8 @@ func TestInitialModelUsesConfigPaths(t *testing.T) {
 	t.Setenv("LLM_CONFIG", cfgPath)
 	t.Setenv("LLM_APP_HOME", appHome)
 	m := InitialModel()
-	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.kvQuality != "q4_0" || !m.swaFull || m.aituneRounds != 9 || m.ctxMode != "manual" || m.ctxSize != "131072" || m.parallel != "3" || m.port != 9091 || !m.vision {
-		t.Fatalf("config not restored: modelDir=%q cacheDir=%q backend=%q kv=%q/%q swa=%v rounds=%d ctx=%q/%q parallel=%q port=%d vision=%v", m.modelDir, m.cacheDir, m.backend, m.kvPlacement, m.kvQuality, m.swaFull, m.aituneRounds, m.ctxMode, m.ctxSize, m.parallel, m.port, m.vision)
+	if m.modelDir != modelDir || m.cacheDir != cacheDir || m.backend != "vulkan" || m.kvPlacement != "gpu" || m.kvQuality != "q4_0" || !m.swaFull || m.ctxMode != "manual" || m.ctxSize != "131072" || m.parallel != "3" || m.port != 9091 || !m.vision {
+		t.Fatalf("config not restored: modelDir=%q cacheDir=%q backend=%q kv=%q/%q swa=%v ctx=%q/%q parallel=%q port=%d vision=%v", m.modelDir, m.cacheDir, m.backend, m.kvPlacement, m.kvQuality, m.swaFull, m.ctxMode, m.ctxSize, m.parallel, m.port, m.vision)
 	}
 	if !m.parallelSet {
 		t.Fatal("an explicitly configured parallel value must remain authoritative for the launch")
@@ -1722,12 +1631,12 @@ func TestApplySettingSyncsKVIntoLiveSession(t *testing.T) {
 func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
 	t.Setenv("LLM_APP_HOME", t.TempDir())
-	m := Model{settingsCfg: config.Defaults(), ctxMode: "fit", ctxSize: "fit", port: 8081, parallel: "1", aituneRounds: 8}
+	m := Model{settingsCfg: config.Defaults(), ctxMode: "fit", ctxSize: "fit", port: 8081, parallel: "1"}
 	rows := map[string]settingRow{}
 	for _, row := range settingRows() {
 		rows[row.label] = row
 	}
-	for _, label := range []string{"Context", "Full SWA cache", "Support expert / optimizer", "Support online research", "Vision", "Port", "Parallel", "AI-tune rounds"} {
+	for _, label := range []string{"Context", "Full SWA cache", "Support expert / optimizer", "Support online research", "Vision", "Port", "Parallel"} {
 		if rows[label].label == "" {
 			t.Fatalf("settings row %q not found", label)
 		}
@@ -1739,12 +1648,44 @@ func TestApplySettingSyncsLaunchCriticalValues(t *testing.T) {
 	m.applySetting(rows["Vision"], "on")
 	m.applySetting(rows["Port"], "9099")
 	m.applySetting(rows["Parallel"], "3")
-	m.applySetting(rows["AI-tune rounds"], "12")
-	if m.ctxMode != "max" || !m.swaFull || m.supportExpert != "on" || !m.supportOnline || !m.vision || m.port != 9099 || m.parallel != "3" || m.aituneRounds != 12 {
-		t.Fatalf("launch settings not synced: ctx=%q swa=%v support=%q online=%v vision=%v port=%d parallel=%q rounds=%d", m.ctxMode, m.swaFull, m.supportExpert, m.supportOnline, m.vision, m.port, m.parallel, m.aituneRounds)
+	if m.ctxMode != "max" || !m.swaFull || m.supportExpert != "on" || !m.supportOnline || !m.vision || m.port != 9099 || m.parallel != "3" {
+		t.Fatalf("launch settings not synced: ctx=%q swa=%v support=%q online=%v vision=%v port=%d parallel=%q", m.ctxMode, m.swaFull, m.supportExpert, m.supportOnline, m.vision, m.port, m.parallel)
 	}
 	if !m.parallelSet {
 		t.Fatal("a parallel value explicitly entered in Settings must remain authoritative")
+	}
+}
+
+func TestApplySettingDoesNotPersistEnvironmentOverrides(t *testing.T) {
+	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "config"))
+	appHome := t.TempDir()
+	t.Setenv("LLM_APP_HOME", appHome)
+	t.Setenv("LLM_PORT", "9555")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Model{settingsCfg: cfg, port: cfg.Port, parallel: "1"}
+	for _, row := range settingRows() {
+		if row.label == "Parallel" {
+			m.applySetting(row, "3")
+		}
+	}
+	if m.messageType != "info" {
+		t.Fatalf("setting not saved: %q", m.message)
+	}
+	saved, err := config.LoadPersisted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Parallel != 3 {
+		t.Fatalf("saved parallel = %d, want 3", saved.Parallel)
+	}
+	if saved.Port == 9555 || saved.AppHome == appHome {
+		t.Fatalf("one-off environment overrides were written to the config file: port=%d app home=%q", saved.Port, saved.AppHome)
+	}
+	if m.settingsCfg.Port != 9555 {
+		t.Fatalf("the live session must keep the environment override, got port %d", m.settingsCfg.Port)
 	}
 }
 
@@ -2514,5 +2455,154 @@ func TestDiscoverModelsInASymlinkedModelDir(t *testing.T) {
 	items := discoverModels(link)
 	if len(items) != 1 || !strings.HasPrefix(items[0].Path, link+string(os.PathSeparator)) {
 		t.Fatalf("discovered %+v, want one model under %s", items, link)
+	}
+}
+
+// C-16 (reproduced 2026-11-13): a computer scan that finishes while a delete
+// dialog is open re-sorts m.models. The dialog must act on the model it named.
+func scanUnderDialogFixture(t *testing.T) (m Model, keep, target, found string) {
+	t.Helper()
+	primary := t.TempDir()
+	externalDir := t.TempDir()
+	keep = filepath.Join(primary, "mmm-Q4_K_M.gguf")
+	target = filepath.Join(primary, "zzz-Q4_K_M.gguf")
+	found = filepath.Join(externalDir, "aaa-Q4_K_M.gguf")
+	for _, p := range []string{keep, target, found} {
+		if err := os.WriteFile(p, []byte("GGUF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	models := loadModels(primary, t.TempDir(), "auto", nil)
+	m = Model{screen: ScreenMain, modelDir: primary, cacheDir: t.TempDir(), backend: "auto",
+		models: models, mainList: newMainList(models), scanningModels: true}
+	m.input = textinput.New()
+	return m, keep, target, found
+}
+
+func indexOfModelPath(t *testing.T, m Model, path string) int {
+	t.Helper()
+	for i, item := range m.models {
+		if item.Path == path {
+			return i
+		}
+	}
+	t.Fatalf("model %s not listed", path)
+	return -1
+}
+
+func confirmChoiceWithPrefix(t *testing.T, m Model, prefix string) Model {
+	t.Helper()
+	for i, opt := range m.choiceOptions {
+		if strings.HasPrefix(opt, prefix) {
+			m.choiceCursor = i
+		}
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(Model)
+}
+
+func TestDeleteDialogSurvivesScanReordering(t *testing.T) {
+	m, keep, target, found := scanUnderDialogFixture(t)
+	m.openRemoveModelChoice(indexOfModelPath(t, m, target))
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found}}})
+	m = confirmChoiceWithPrefix(t, next.(Model), "Confirm: delete ")
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("the model the dialog did not name was deleted: %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("the model the dialog named was not deleted: %v", err)
+	}
+}
+
+func TestDeleteDialogDeletesNothingWhenItsModelIsGone(t *testing.T) {
+	m, keep, target, found := scanUnderDialogFixture(t)
+	m.openRemoveModelChoice(indexOfModelPath(t, m, target))
+	// The model disappears from disk before the scan reloads the list.
+	if err := os.Rename(target, target+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found}}})
+	m = confirmChoiceWithPrefix(t, next.(Model), "Confirm: delete ")
+	for _, p := range []string{keep, found, target + ".moved"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s was touched: %v", p, err)
+		}
+	}
+	if m.messageType != "warning" || !strings.Contains(m.message, "nothing was changed") {
+		t.Fatalf("expected a nothing-changed warning, got %q %q", m.messageType, m.message)
+	}
+}
+
+func TestExternalDeletePromptSurvivesScanReordering(t *testing.T) {
+	m, keep, _, found := scanUnderDialogFixture(t)
+	otherDir := t.TempDir()
+	external := filepath.Join(otherDir, "ttt-Q4_K_M.gguf")
+	if err := os.WriteFile(external, []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.models = mergeModelItems(m.models, discoverModelsFromPaths([]string{external}))
+	m.rebuildMainList()
+	idx := indexOfModelPath(t, m, external)
+	if !m.models[idx].External {
+		t.Fatal("setup: model is not external")
+	}
+	m.openRemoveModelChoice(idx)
+	m = confirmChoiceWithPrefix(t, m, "Remove file ")
+	if m.inputMode != "external-remove-confirm" {
+		t.Fatalf("typed prompt not open: %q", m.inputMode)
+	}
+	prompt := m.message
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found, external}}})
+	m = next.(Model)
+	if m.message != prompt {
+		t.Fatalf("scan replaced the prompt naming the file:\n%q\nwas\n%q", m.message, prompt)
+	}
+	if indexOfModelPath(t, m, external) == idx {
+		t.Fatal("setup: the scan did not move the external model")
+	}
+	m.input.SetValue("yes")
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if _, err := os.Stat(external); !os.IsNotExist(err) {
+		t.Fatalf("the confirmed external file was not deleted: %v (msg %q)", err, m.message)
+	}
+	for _, p := range []string{keep, found} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s was deleted instead: %v", p, err)
+		}
+	}
+}
+
+func TestClearCachesDialogSurvivesScanReordering(t *testing.T) {
+	m, _, target, found := scanUnderDialogFixture(t)
+	m.openClearCachesChoice(indexOfModelPath(t, m, target))
+	next, _ := m.Update(modelScanFinishedMsg{result: modelstore.ScanResult{Paths: []string{found}}})
+	m = confirmChoiceWithPrefix(t, next.(Model), "Confirm: clear caches for ")
+	want := "for " + filepath.Base(target)
+	if !strings.Contains(m.message, want) {
+		t.Fatalf("caches cleared for the wrong model: %q (want %q)", m.message, want)
+	}
+}
+
+// C-13: the u key asks before it quits to rebuild; Cancel is the default.
+func TestUpdateKeyAsksFirst(t *testing.T) {
+	m := Model{screen: ScreenMain, mainList: newMainList(nil)}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = next.(Model)
+	if cmd != nil || m.launchRequest != nil || m.screen != ScreenChoice {
+		t.Fatalf("u started an update without asking: screen=%v req=%+v", m.screen, m.launchRequest)
+	}
+	if m.choiceOptions[m.choiceCursor] != "Cancel" {
+		t.Fatalf("default is %q, want Cancel", m.choiceOptions[m.choiceCursor])
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(Model); got.launchRequest != nil {
+		t.Fatal("Cancel still requested an update")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(Model); got.launchRequest == nil || !got.launchRequest.Update || cmd == nil {
+		t.Fatal("confirming did not request the update and quit")
 	}
 }

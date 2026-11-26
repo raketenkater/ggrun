@@ -1,9 +1,10 @@
 package recommend
 
 import (
-	"github.com/raketenkater/ggrun/pkg/detect"
 	"reflect"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 func TestPlanningCapabilitiesUsesCapacityAndHonorsCeilings(t *testing.T) {

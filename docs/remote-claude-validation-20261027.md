@@ -1,0 +1,283 @@
+# Remote Claude implementation validation — October 27
+
+Base: `101af89`. Isolated branch `feat/remote-claude-client`; root checkout and
+the other worker's seven branches were preserved. This is a development receipt,
+not release acceptance or a performance result.
+
+## Scope and invariants
+
+All model/hardware classes use the existing normal launch/admission and Claude
+router. Changes in main only parse remote options, own the gateway lifecycle,
+skip local client ownership in headless mode and share client policy. Placement,
+calibration, GPU selection and scheduler algorithms are unchanged. Linux and
+Windows, CPU-only and GPU paths remain required; this host's selected model and
+private network are validation cases only. Tailscale is not a dependency.
+
+The remote gateway is independent from private backend ports. It reserves its
+port before loading, authenticates even loading/recovery responses, publishes
+only typed metadata, preserves the Messages body and streaming protocol, and
+never exposes backend administration. Known fixed request headers bind a client
+to the model identity and context it configured; a changed model or reduced
+runtime capacity is rejected before inference.
+
+Client files/tools/sessions live where the actual Claude child process runs.
+Credentials stay outside project repositories; Unix owner-only files and Windows
+user DPAPI are separate implementations. Client release workflows refuse a
+development module replace and require native CI before publication.
+
+## Local checks passed
+
+- Uncached `scripts/verify-core-engine.sh`: protected package tests and vet.
+- Full `go test -count=1 ./pkg/tui`: 79.859 seconds; includes existing behavior.
+- Shared clientkit `go test -race -count=1 ./...`: profile fixture, aliases,
+  context bounds, private credential creation/read/replacement and URL handling.
+- Gateway `go test -race -count=1 ./pkg/remoteclaude`: authentication, protected
+  routes, future fields, headers, tool/thinking/usage responses, unbuffered ping,
+  active disconnect, queued cancellation through the real router, and stale
+  model/context rejection before inference.
+- Client `go test -race -count=1 ./...`: prefixed URL, credential/redirect/error
+  handling, private profile, model/context-bound resume (including a grown
+  session), settings conflicts, Workflow mutation without granting permission,
+  real child executable/CWD/scoped environment and server survival after exit.
+- Client `go vet ./...`; Windows amd64 client and server cross-builds.
+- `git diff --check`.
+
+The unit-test child is a native fixture. Actual Claude/GPU acceptance is recorded
+separately below; fixture coverage alone is not live compatibility evidence.
+
+## Published CI and same-host live acceptance
+
+Server draft PR [#101](https://github.com/raketenkater/ggrun/pull/101), commit
+`e3b47b991081`: Linux/Windows native contracts, core, full Go/race/vet,
+installer E2E and portable builds passed. The existing best-effort macOS smoke
+fails because its synthetic model exceeds the runtime reservation on that runner;
+macOS remains low priority, not qualified. GPU CI was skipped; GPU evidence below
+comes from this server instead.
+
+Client draft PR [#1](https://github.com/raketenkater/ggrun-client/pull/1), commit
+`095262b`: both native platforms and all six cross-build checks passed. This
+includes native Windows DPAPI, not a real Windows Claude terminal session.
+The shared module resolves remotely at `e3b47b991081`; no development replace.
+
+Live model: existing Qwen3.8 Flash Next Uncensored IQ3_M, approximately 83.4 GiB,
+three NVIDIA GPUs. Existing RAM soft-offline mitigation was checked; no memory
+stress, new model download or competing large model process was introduced.
+The tested Linux candidate is now installed atomically on PATH, with the prior
+binary retained at `.cache/remote-claude/ggrun-before-remote-feature`. Candidate
+version injection used the wrong symbol, so it reports v3.2.0-go; use
+`github.com/raketenkater/ggrun/pkg/update.currentVersion` in the qualified build.
+
+Real Claude CLI 2.1.307, temporary project:
+
+- Coding task: corrected calc.py, all four unchanged unittest cases passed;
+  5 turns, 90.295 seconds, 28,473 cache-read tokens.
+- Same-session resume: four tests passed without edits; 3 turns, 39.891 seconds,
+  20,607 cache-read tokens. Different tasks, not a speed comparison.
+- Resume notice originally polluted JSON stdout. Client `095262b` moves it to
+  stderr and adds a regression using an actual native child executable.
+- Actual gateway auth/route/model tests passed: protected unauthenticated routes
+  return 401, backend administration 404, unsupported model 400.
+- Generic HTTP reverse proxy with `/llm/` prefix connected and streamed.
+- Disconnect check observed first content at 1.117 seconds, then both router
+  admission idle and private backend `is_processing=false` within 0.204 seconds.
+  The server remained ready. This is one cancellation receipt, not a latency SLA.
+- Clean stop released model allocations (all GPUs at approximately 1 MiB) before
+  TUI headless relaunch. TUI three-way toggle and saved launch path exercised.
+- Relaunch changed actual per-slot context from 152,576 to 144,384; resume into
+  the smaller capacity was correctly refused before inference. Seamless resume
+  across reduced capacity is not promised.
+- Optional owner Tailscale HTTPS on previously unused 8444 was configured;
+  existing 443, 8006 and 8443 mappings were preserved and checked. Authenticated
+  connect and real Claude requests worked from this server over that endpoint.
+  This is same-host tailnet transport, not a remote laptop receipt.
+
+## Worker report compatibility: discovered release blocker
+
+A real foreground haiku-tier Agent call reached the utility worker, ran all four
+tests and completed its handback. Reviewer and main routes returned 200, yet the
+caller repeatedly missed the report and reached its turn limit. A prompt hint
+made a second attempt finish with invented test findings and was rejected.
+
+Root cause: Claude sends the report as `messages[].role=system`; the selected
+Qwen Jinja template silently omits late system/developer messages. Neither HTTP
+success nor a completed worker proves the caller received its findings.
+
+The [official gateway protocol guide](https://code.claude.com/docs/en/llm-gateway-protocol)
+documents a capability-rejection retry carrying that text in user messages.
+The message bridge now rejects unsupported system roles before admission or
+inference. Top-level system and ordinary user/assistant requests stay unchanged.
+Claude 2.1.307 requires both `Unexpected role` and `input message role` in the
+error to recognize the fallback; a first shorter error failed immediately.
+The generic bridge role contract applies to both local and remote Claude modes,
+independent of CPU/GPU/model choice. Native system-role support needs an explicit
+backend/template capability contract, not one template assumed universal.
+
+The corrected role rejection passed a real Claude 2.1.307 foreground Agent test:
+one haiku-tier utility worker completed, the caller accurately reported all four
+passing tests and their real cases, no files changed, and the test oracle SHA-256
+was unchanged. Two turns, 99.230 seconds, 20,008 main cache-read tokens. The
+uncached core gate and claudeauto/remoteclaude race suites passed afterward.
+The initial fix receipt used a temporary facade. The complete rebuilt TUI
+server at `0b82f8d` then passed the same test over the optional HTTPS endpoint:
+two turns, 143.789 seconds, one completed foreground utility worker, all four
+real test names accurately reported and unchanged test oracle. Published alpha
+client v0.1.0-alpha.1 resumed that session in one turn (14.252 seconds), with
+valid JSON stdout and the correct prior result. The original prompt policy is
+retained; the failed hint is not shipped.
+
+## Shutdown lifecycle follow-up
+
+The next real stop exposed a false memory-release wait: the main backend had
+exited but the 4B companion still held approximately 5.5 GiB, while the shutdown
+check compared against the baseline from before both processes started. The
+companion was only stopped after the 20-second wait, producing a false pending
+release marker. All allocations did eventually release; this was bounded.
+
+The serving shutdown now stops its owned router/companion before checking the
+whole-launch memory baseline. Regression coverage requires companion cleanup
+before sampling and preserves backend-memory waiting without any companion.
+This affects CPU-only and GPU serving lifecycles, not placement or performance
+selection. The full rebuilt server then stopped in 5.029 seconds: all GPUs returned to
+1 MiB and no release-pending marker remained. Clean relaunch of the exact saved
+request passed, preserving context 144384 and the separate worker. The published
+client doctor and actual auth/private-route checks passed again over HTTPS.
+
+## Published alpha installer
+
+[v0.1.0-alpha.1](https://github.com/raketenkater/ggrun-client/releases/tag/v0.1.0-alpha.1)
+was published by the tag pipeline after native tests and all portable builds.
+[Release run](https://github.com/raketenkater/ggrun-client/actions/runs/40551932536)
+also passed installation of the actual published, checksum-verified binaries on
+Linux and Windows. The Linux installer was independently run into a temporary
+directory on this server; that released binary passed the live resume above.
+This is an alpha, not laptop qualification or a stable product release.
+
+## Owner PATH candidate deployment
+
+After core, race, native contracts and real same-host acceptance, the exact tested
+candidate was atomically copied to the existing PATH target. The symlink remains
+unchanged. `ggrun --version` reports `v3.2.12-remote-0b82f8d`; SHA-256 is
+`07edd57c3a7bdd946dd9116bc736206cc3628626b4bb5f34c79bd8400638097f`.
+The previous binary remains available for rollback. This is an owner development
+candidate, not a stable release. The active server uses the same candidate bytes
+and isolated test configuration; no owner serving preferences were overwritten.
+
+## Required before completion
+
+- Review overlapping worker resume fixes without duplicating shared policy.
+- Actual laptop coding/workflow/disconnect/resume receipt, with files/tools on
+  that laptop and server still serving afterward. Device receipts remain pending.
+- Headless request/queue display is now implemented and unit/race-tested; its
+  live view must be qualified at an intentional relaunch. Windows real-terminal
+  behavior remains unqualified.
+
+No performance tuning or universal hardware/model support claim follows from
+these transport and correctness checks.
+
+## Expanded platform qualification
+
+Owner target: clients on macOS/Linux/Windows; headless serving on Linux/macOS.
+Native macOS client and remote-server contract jobs are added. Client PR CI now
+installs the existing immutable alpha on each OS; release CI tests the newly
+published version on all three platforms. These jobs must have actual receipts
+before the corresponding native platform is described as qualified.
+
+The default macOS packaging flow still fails admission on its 8 GiB runner:
+1 MiB weights, 6720 MiB host runtime/reserve, 5375 MiB available. This is not a
+remote transport failure and must not be hidden by relaxing the CI launch or
+memory guard. Its original log is in server run `40553606872`, job
+`122363606731`. Small-host default serving needs a protected-core policy review.
+Linux and Windows E2E completed successfully for production-code `0b82f8d`.
+
+Subsequent native qualification: client revision `966ebe3` passed macOS ARM64
+native tests and installation of the published v0.1.0-alpha.1 binary. Linux and
+Windows published installer checks passed too. Server revision `9e85a3c` passed
+all three native remote-contract jobs, including macOS ARM64. Intel Mac remains
+cross-built, not natively exercised. The default macOS serving failure above
+remains unresolved; contract success does not qualify Metal inference.
+
+## October 28 continuation
+
+The earlier temporary execution-session server was no longer running. No main
+or companion process and no GPU allocations remained; HTTPS consequently
+returned 502. Its log did not establish why the controller exited. The exact
+verified Linux configuration was restarted as user unit
+`ggrun-remote-acceptance.service` with Restart=no and a 45-second stop grace.
+User lingering was already enabled. This deployment can outlive the coding
+session; it does not add an automatic service to public product defaults.
+
+The macOS admission issue now has a narrow request-boundary correction:
+Linux-only cgroup growth reserve is not charged when the containment gate is
+absent. Runtime, checkpoint and explicit resource limits remain. Local uncached
+core gate passed; native small-host regression and original macOS packaging CI
+must pass before this is described as resolved.
+
+October 28 native CI result for `3617440`: the original macOS package/install
+and default synthetic CPU launch now passes with its original hardware and
+launch arguments. Native macOS remote contracts, including the small-host
+runtime/budget regressions, also pass. This closes the observed default
+admission failure; real Metal inference remains a distinct acceptance case.
+
+Linux laptop-test readiness was restored independently using the previously
+qualified binary as a transient user service. Authenticated HTTPS doctor passed
+at 144384 tokens/slot with a separate worker; a real Messages request returned
+READY in 3.483 seconds. The user was notified that the first laptop test can
+begin. Its actual remote-device receipt remains pending.
+
+## Serving-view completion audit
+
+The plan required a serving request/queue view. Source now reports readiness,
+active main-model requests, queued requests, configured limit and Ctrl+C stop.
+The observer reads atomic router counters; it does not make backend HTTP calls.
+It prints only changes, stops on cancellation or closed output, and is replaced
+on recovery. Shutdown declares authenticated 503 before stopping model processes.
+Unit/race coverage includes real activation wiring and zero inference requests
+from metadata/status observation. The active owner service is deliberately still
+the previously qualified binary; no large model restart was introduced while
+the owner can begin the requested laptop trial.
+
+## Final CPU lifecycle and hardening pass
+
+Server 7f352a8 ran installed Qwen3.5-4B on CPU only: two threads, 16384 context,
+16384 MiB scope, isolated ports/cache. Startup verified append=6779 and
+branch=4543 reused tokens. Real SSE and active=1/queued=1/idle display passed.
+An initial immediate-idle assertion was too early; the bounded observer then
+measured admission idle at 0.001 s and backend idle at 0.255 s. Only the latter
+establishes cancellation complete; admission counts are not backend-idle proof.
+Shutdown returned 503 and exited cleanly in 0.170 s. The CPU server was stopped;
+the owner GPU PID was unchanged during that isolated test.
+
+The owner authorized final deployment. All GPUs released to 1 MiB before
+installing the tested 7f352a8 bytes on PATH/service path. The transient user
+service was recreated after stop; the saved request and preferences remain.
+
+Client c4d6488 passes local race/vet and all 12 PR checks. It rejects empty
+saved routing values, case variants on Windows and resume/fork options that
+bypass connector metadata. Alpha.2 release/install verification is pending.
+# October 29 integrated deployment
+
+Server `fa3ceba` integrates main `4925fd7`. The installed server and user service
+run this same revision. The existing main binary is retained as a rollback.
+Full uncached Go tests, the uncached core-engine gate and command/router/gateway
+race tests passed. Native remote contract CI passed on Linux, Windows and
+Apple Silicon macOS. Other integration CI must be read from the PR checks;
+manual GPU jobs are not substituted for this host's live receipt.
+
+The published checksum-verified client `v0.1.0-alpha.2` resumed an existing
+Claude 2.1.307 session over the owner-selected HTTPS gateway after the server
+restart. It ran the unchanged four-test calculator suite and correctly reported
+the four names and passing result in 93.896 s / two turns. The test-file SHA-256
+remained unchanged. Authenticated profile/health/status checks passed before
+and after; unauthenticated requests returned 401, private routes 404 and an
+unsupported model 400. The server stayed ready after client exit, serving
+144384 tokens/slot with one main slot and a separate 4B worker/reviewer.
+
+The host's ordinary Claude executable had auto-updated to 2.1.312. Doctor
+correctly refused that unqualified version before inference. Acceptance used
+the still-installed 2.1.307 through a private test PATH, leaving the normal
+installation unchanged. Version 2.1.312 is not qualified by this receipt.
+
+Private local receipt: `integrated-receipt-20261029.json` in the isolated
+acceptance directory. This is same-host HTTPS evidence, not physical laptop
+acceptance. The remaining gate is actual laptop installation, local edit/tests,
+worker/Workflow, disconnect and resume.

@@ -29,7 +29,6 @@ func TestTUISelectionsSurviveTheArgvRoundTrip(t *testing.T) {
 		ParallelSet:    true,
 		Vision:         true,
 		Backend:        "cuda",
-		TuneCache:      "off",
 		Benchmark:      true,
 		SupportExpert:  "on",
 		SupportOnline:  true,
@@ -64,7 +63,6 @@ func TestTUISelectionsSurviveTheArgvRoundTrip(t *testing.T) {
 		{"ParallelSet", parsed.ParallelSet, true},
 		{"VisionAuto", parsed.VisionAuto, true},
 		{"Backend", parsed.Backend, req.Backend},
-		{"TuneCache", parsed.TuneCache, req.TuneCache},
 		{"Benchmark", parsed.Benchmark, true},
 		{"SupportExpert", parsed.SupportExpert, req.SupportExpert},
 		{"SupportOnline", parsed.SupportOnline, true},
@@ -144,13 +142,17 @@ func TestEveryTUILaunchFieldHasADisposition(t *testing.T) {
 // it. The gates exist so an untouched preference does not become a typed flag;
 // see TestUntouchedTUIRowsDoNotBecomeTypedFlags.
 var gatedBy = map[string][]string{
-	"KVQuality":     {"KVQualitySet"},
-	"KVQualitySet":  {"KVQuality"},
-	"Parallel":      {"ParallelSet"},
-	"ParallelSet":   {"Parallel"},
-	"SupportOnline": {"SupportSet"},
-	"SWAFull":       {"SWAFullSet"},
-	"AITuneRounds":  {"AITune"},
+	"GatewayHost":      {"ClaudeHeadless"},
+	"GatewayPort":      {"ClaudeHeadless"},
+	"GatewayURL":       {"ClaudeHeadless"},
+	"GatewayTokenFile": {"ClaudeHeadless"},
+	"KVQuality":        {"KVQualitySet"},
+	"KVQualitySet":     {"KVQuality"},
+	"Parallel":         {"ParallelSet"},
+	"ParallelSet":      {"Parallel"},
+	"SupportOnline":    {"SupportSet"},
+	"SWAFull":          {"SWAFullSet"},
+	"AITuneRounds":     {"AITune"},
 }
 
 // fieldReachesArgv sets one field (with any companion it is gated behind) to a

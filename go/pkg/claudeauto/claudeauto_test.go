@@ -180,13 +180,20 @@ func TestRouterLimitsConcurrentMainRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var status struct{ Active, Queued, Limit int }
+	var status struct {
+		Active, Queued, Limit int
+		Main                  string
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if status.Active != 1 || status.Queued != 1 || status.Limit != 1 {
 		t.Fatalf("unexpected router status: %+v", status)
+	}
+	// A resume identifies its router by the backend it fronts.
+	if status.Main != backend.URL {
+		t.Fatalf("router status main=%q, want %q", status.Main, backend.URL)
 	}
 	close(release)
 	for range 2 {

@@ -74,16 +74,6 @@ func NormalizeSparseLookupCapability(value string) SparseLookupCapability {
 	}
 }
 
-// NormalizeSparseLookupPolicy validates an external policy value; anything
-// else is "" (no policy).
-func NormalizeSparseLookupPolicy(value string) SparseLookupPolicy {
-	switch p := SparseLookupPolicy(strings.ToLower(strings.TrimSpace(value))); p {
-	case SparseLookupLayer, SparseLookupResident, SparseLookupPaged:
-		return p
-	}
-	return ""
-}
-
 func sparseLookupKind(model *ModelProfile) string {
 	if model != nil && model.SparseLookupKind != "" {
 		return model.SparseLookupKind + " lookup"
@@ -166,6 +156,23 @@ func sparseLookupModelView(model *ModelProfile, policy SparseLookupPolicy) *Mode
 	return &view
 }
 
+// strategyAccounting returns the model view and options a resolved strategy
+// was planned with. Exported entry points that take a finished strategy
+// (runtime refresh, resource ledger) receive the full profile and request
+// options, while Compute planned a lookup-tier model on its policy's view and
+// read policy-scoped evidence. Options that already carry a policy are
+// Compute's own and are returned unchanged, so the view is never applied twice.
+func strategyAccounting(model *ModelProfile, s *Strategy, opts Options) (*ModelProfile, Options) {
+	if model == nil || s == nil || s.SparseLookupPolicy == "" || opts.sparseLookupPolicy != "" {
+		return model, opts
+	}
+	opts.sparseLookupPolicy = s.SparseLookupPolicy
+	if model.SparseLookupBytes > 0 {
+		model = sparseLookupModelView(model, s.SparseLookupPolicy)
+	}
+	return model, opts
+}
+
 // ArtifactSizeBytes is the model file's size, unchanged by a sparse lookup
 // accounting view. Evidence keys use it, so a measurement recorded against
 // the full profile is found again by a policy's planning pass.
@@ -245,7 +252,7 @@ func computeSparseLookup(caps *detect.Capabilities, model *ModelProfile, opts Op
 		hint = fmt.Sprintf(". The tables load with their layers%s; a backend with a reviewed lazy-loader contract can hold them in host RAM or page them from storage", why)
 	}
 	return nil, fmt.Errorf("model has %d MiB of %s tables and no placement fits: %s%s",
-		bytesToMiBCeil(model.SparseLookupBytes), sparseLookupKind(model), strings.Join(errs, "; "), hint)
+		bytesToMiBCeil(model.SparseLookupBytes), sparseLookupKind(model), strings.TrimRight(strings.Join(errs, "; "), ". \n"), hint)
 }
 
 // sparseLookupPlanBetter ranks candidate a against the current best b:

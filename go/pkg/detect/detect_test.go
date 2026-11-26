@@ -82,7 +82,7 @@ func TestDetectRAMLinux(t *testing.T) {
 }
 
 func TestDetectNVIDIA(t *testing.T) {
-	gpus := detectNVIDIA()
+	gpus, _ := detectNVIDIA()
 	// May or may not have nvidia-smi
 	_ = gpus
 }

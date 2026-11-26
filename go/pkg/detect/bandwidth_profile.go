@@ -380,23 +380,11 @@ func findBandwidthScript() string {
 			filepath.Join(appHome, ".src", "ggrun", "tools", "hardware", "measure_bandwidth.py"),
 		)
 	}
+	// Only the binary's own directory: no walk above it (a binary in
+	// ~/.local/bin would reach the home directory), and never the working
+	// directory or PATH, where a planted measure_bandwidth.py would be run.
 	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(exeDir, "measure_bandwidth.py"),
-			filepath.Join(exeDir, "..", "tools", "hardware", "measure_bandwidth.py"),
-			filepath.Join(exeDir, "..", "..", "tools", "hardware", "measure_bandwidth.py"),
-		)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(wd, "tools", "hardware", "measure_bandwidth.py"),
-			filepath.Join(wd, "..", "tools", "hardware", "measure_bandwidth.py"),
-			filepath.Join(wd, "measure_bandwidth.py"),
-		)
-	}
-	if path, err := exec.LookPath("measure_bandwidth.py"); err == nil {
-		candidates = append(candidates, path)
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "measure_bandwidth.py"))
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {

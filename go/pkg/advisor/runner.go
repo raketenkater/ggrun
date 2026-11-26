@@ -11,12 +11,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/server"
 )
@@ -363,8 +363,9 @@ func availableRAMMB() int {
 }
 
 func gpuUsedMB() map[int]int {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "VRAM use not sampled")
 		return nil
 	}
 	result := map[int]int{}
@@ -492,15 +493,3 @@ func tailText(value string, maxBytes int) string {
 }
 
 func DefaultModelPath(cacheDir string) string { return ArtifactPath(cacheDir, DefaultArtifact) }
-
-func IsInstalled(cacheDir string) bool {
-	return VerifyArtifact(DefaultModelPath(cacheDir), DefaultArtifact) == nil
-}
-
-func ModelDisplayPath(cacheDir string) string {
-	path := DefaultModelPath(cacheDir)
-	if absolute, err := filepath.Abs(path); err == nil {
-		return absolute
-	}
-	return path
-}

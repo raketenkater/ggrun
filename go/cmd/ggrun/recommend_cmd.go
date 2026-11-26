@@ -216,7 +216,7 @@ func cmdRecommend(args []string) {
 			return
 		}
 		fmt.Printf("\n%s\n", title)
-		fmt.Printf("  %-36s %-10s %-8s %6s %6s %8s\n", "Model", "Fit", "Quant", "Size", "Intel", "Est.speed")
+		fmt.Printf("  %-36s %-10s %-8s %6s %6s %8s  %s\n", "Model", "Fit", "Quant", "Size", "Intel", "Est.speed", "From")
 		for _, r := range rows {
 			name := r.Name
 			limit := 36
@@ -232,13 +232,14 @@ func cmdRecommend(args []string) {
 			if r.PredictedTPS > 0 {
 				tps = fmt.Sprintf("%.0f t/s", r.PredictedTPS)
 			}
-			fmt.Printf("  %-36s %-10s %-8s %5.1fG %6s %8s\n",
-				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, recommend.DisplayIntelligence(r), tps)
+			fmt.Printf("  %-36s %-10s %-8s %5.1fG %6s %8s  %s\n",
+				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, recommend.DisplayIntelligence(r), tps, recommend.OwnerLabel(r.Repo))
 		}
 	}
 	printRecGroup("Best overall — intelligence first, practical quant", cats.Balanced)
 	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
+	fmt.Println("  " + recommend.OwnerLegend())
 	for _, marker := range []string{" *", " +", " ^", " !"} {
 		if shown[marker] {
 			fmt.Println("\n" + recommendationFootnotes[marker])

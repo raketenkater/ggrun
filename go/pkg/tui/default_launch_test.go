@@ -1,12 +1,13 @@
 package tui
 
 import (
-	"github.com/raketenkater/ggrun/pkg/detect"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
 // TUIDefaultLaunchArgs is the argv a fresh TUI emits for a model with every

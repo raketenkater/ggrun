@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -862,10 +863,14 @@ func claudeReviewerLog(cfg *config.Config, port int) (io.Writer, io.Closer) {
 		dir = cfg.LogDir
 	}
 	path := filepath.Join(dir, fmt.Sprintf("ggrun-claude-reviewer-%d.log", port))
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return io.Discard, nil
 	}
+	if runtime.GOOS != "windows" {
+		_ = f.Chmod(0o600) // a file an older ggrun created world-readable
+	}
+	rotateGgrunLogs(dir, logRetainPerKind)
 	fmt.Printf("[claude-code] Auto reviewer logs -> %s\n", path)
 	return f, f
 }
@@ -903,10 +908,14 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 		return err
 	}
 	r.router = router
+	// Auto mode reviews each tool call through a hidden classifier request;
+	// the router warns if none is ever recognised (review I-04).
+	router.ExpectClassifier(claudeDefaultPermissionModeIsAuto())
 	// Point Claude Code's cheap tiers at the companion only when the selected
 	// profile explicitly serves worker traffic. A seated Qwen3.5-2B remains a
-	// perfectly valid separate safety reviewer, but local-fast falls through to
-	// the main model because that profile is review-only.
+	// perfectly valid separate safety reviewer; the router still sends it
+	// local-fast prompts that fit its context, so short cheap-tier calls do not
+	// queue behind long main-model streams, and larger ones go to the main model.
 	router.SetCompanion("local", r.workerRouteEnabled())
 	// Tell the router the exact context that was reserved and launched for this
 	// profile. A fixed 64k threshold made the healthy 2B reviewer reject real
@@ -932,15 +941,21 @@ func (r *claudeAutoRuntime) startRouter(cfg *config.Config, mainHost string, mai
 	// Recording is evidence, not a dependency: a metrics failure must not stop
 	// the user's launch.
 	metricsPath := claudeRouterMetricsPath(cfg, router.Port())
+	rotateGgrunLogs(filepath.Dir(metricsPath), logRetainPerKind)
 	if err := router.EnableMetrics(metricsPath); err != nil {
 		fmt.Fprintf(os.Stderr, "[claude-code] per-request metrics disabled: %v\n", err)
 	} else {
 		fmt.Printf("[claude-code] per-request metrics -> %s\n", metricsPath)
 	}
+	if cfg != nil && cfg.CacheDir != "" {
+		if err := router.EnableClassifierWarmup(filepath.Join(cfg.CacheDir, "claude-classifier-system.json")); err != nil {
+			fmt.Fprintf(os.Stderr, "[claude-code] Auto check warm-up disabled: %v\n", err)
+		}
+	}
 	if r.reviewerPort > 0 && r.workerRouteEnabled() {
 		fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, cheap work + safety -> local companion)\n", router.URL())
 	} else if r.reviewerPort > 0 {
-		fmt.Printf("[claude-code] Auto router ready on %s (coding + cheap work -> main model, safety -> local reviewer)\n", router.URL())
+		fmt.Printf("[claude-code] Auto router ready on %s (coding -> main model, safety + cheap work that fits -> local reviewer)\n", router.URL())
 	} else {
 		fmt.Printf("[claude-code] agent gateway ready on %s\n", router.URL())
 	}
@@ -1045,10 +1060,6 @@ func (r *claudeAutoRuntime) clientPort(fallback int) int {
 	return fallback
 }
 
-func (r *claudeAutoRuntime) isRunning() bool {
-	return r != nil && r.reviewer != nil && r.reviewer.IsRunning()
-}
-
 func (r *claudeAutoRuntime) stop() {
 	if r == nil {
 		return
@@ -1065,4 +1076,35 @@ func (r *claudeAutoRuntime) stop() {
 		_ = r.reviewerLog.Close()
 		r.reviewerLog = nil
 	}
+}
+
+// claudeDefaultPermissionModeIsAuto reports whether ggrun's own Claude launch
+// uses Auto mode (see claudeCodePermissionArgs). Clients that choose another
+// mode themselves can see the router's review warning; its text says so.
+func claudeDefaultPermissionModeIsAuto() bool {
+	mode := strings.TrimSpace(os.Getenv("GGRUN_CLAUDE_PERMISSION_MODE"))
+	if mode == "" {
+		return !disabledEnv("GGRUN_CLAUDE_AUTO_REVIEWER")
+	}
+	return strings.EqualFold(mode, "auto")
+}
+
+// claudePermissionModeLine states the permission mode Claude Code starts in
+// (S-01): Auto lets reviewed tool calls run without asking.
+func claudePermissionModeLine(clientArgs []string) string {
+	mode := ""
+	for i, a := range clientArgs {
+		if a == "--permission-mode" && i+1 < len(clientArgs) {
+			mode = clientArgs[i+1]
+		} else if v, ok := strings.CutPrefix(a, "--permission-mode="); ok {
+			mode = v
+		}
+	}
+	if mode == "" {
+		return "[claude-code] permission mode: from your Claude settings (GGRUN_CLAUDE_PERMISSION_MODE=inherit or --permission-mode given)"
+	}
+	if mode == "auto" {
+		return "[claude-code] permission mode: auto (tool calls run after a model review; GGRUN_CLAUDE_PERMISSION_MODE=default asks you instead)"
+	}
+	return "[claude-code] permission mode: " + mode
 }

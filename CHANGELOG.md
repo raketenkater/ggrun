@@ -2,6 +2,108 @@
 
 ## Unreleased
 
+### Added
+
+- Remote client mode: serve this machine's model to Claude Code on another
+  computer through [ggrun-client](https://github.com/raketenkater/ggrun-client)
+  (TUI: Claude Code → Remote client). The TUI announces it once after upgrade;
+  `GGRUN_NO_WHATS_NEW=1` hides such notices.
+
+### Fixed
+
+- The catalog refresh counts only real leaderboard scores when checking a
+  scrape, so a scrape that lost its scores no longer passes on kept `~`
+  estimates; the index conversion fit ignores a single mismatched model; a
+  version label on the page without a rescale no longer changes the version.
+
+## v3.2.13 — 2026-10-29
+
+### Added
+
+- `GGRUN_SCOPE_MODE=none` runs the backend without cgroup memory containment on
+  hosts without systemd.
+- `ggrun download` passes `--dir`, `--quant` and `--yes` through and has
+  `--help`; `--yes` takes the recommended quant.
+
+### Changed
+
+- The downloader skips draft heads and companion-sized files, checks free disk
+  space first, honors an exact repo, and keeps quant subfolders under the repo
+  folder.
+- MoE speed estimates keep the backbone on GPU and scale expert cost with the
+  measured memory bandwidth.
+- Hosts with NVIDIA GPUs older than compute capability 7.5 default to Vulkan;
+  the CUDA bundle's kernels do not run there.
+- The catalog refresh survives bad repos, matches model names more strictly,
+  and lists reviewed models without a score as estimates after scored ones.
+- Recommendations use Artificial Analysis Intelligence Index v5. Models not yet
+  re-evaluated keep a score converted from v4 (shown with `~`); the refresh
+  refuses a thin, gutted or silently rescaled leaderboard scrape.
+- Python 3 is required to launch (GGUF metadata); the installer installs it and
+  self-checks `parse_gguf.py`.
+- The Docker images run without a cgroup scope (`GGRUN_SCOPE_MODE=none`), and
+  the GPU images ship `llama-fit-params`.
+
+- Remote Claude client mode in the TUI and `--claude-code --headless`: the server
+  serves an authenticated gateway while the separate ggrun-client runs Claude,
+  files and tools on the client computer. HTTP(S) is generic; Tailscale is optional.
+- Headless serving reports active and queued main-model requests from in-memory
+  counters. Shutdown revokes readiness before model teardown.
+- Preserve worker handbacks when a backend template cannot consume system-role
+  entries inside a conversation, using Claude's capability retry.
+- Stop the owned Claude companion before checking whole-launch memory release.
+- Charge Linux cgroup growth reserve only on platforms with the containment gate;
+  default small macOS CPU launches no longer pay a phantom Linux-only reserve.
+- Native remote contract CI on Linux, Windows and Apple Silicon macOS. macOS
+  package installation and its default synthetic CPU launch are required checks;
+  these do not establish real Metal inference qualification.
+
+### Fixed
+
+- A memory-mapped expert plan's `memory.high` leaves room for the mapped
+  experts, so they stay in page cache instead of being re-read per token.
+- Timed launch probes wait for idle slots, and a canary that is only slow on a
+  healthy backend degrades the profile instead of rejecting it.
+- On Windows the backend is killed with ggrun through a job object, and the
+  Claude Code health monitor stops before the backend does.
+- Saved config paths keep Windows backslashes, and config saves are atomic;
+  Claude Code project keys match the client, including long paths.
+- `ggrun update` works on Windows with ggrun running, and on Linux without a
+  system Go; `parse_gguf.py` runs under a verified Python 3.
+- `LLM_INSTALL_MODE=release` on a host with a working llama-server keeps that
+  backend and still installs ggrun from the release bundle.
+- The installer fetches a source tarball when git is missing, and finds upstream
+  llama.cpp prebuilts in recent releases, not only the latest.
+- The TUI lists models downloaded to a custom folder, and saves settings
+  without one-off `LLM_*` environment overrides.
+- The printed Claude Code recipe now sets the same variables as `--claude-code`,
+  including `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, so copied setups reuse the cache.
+- The Workflow hook asks before running a rewritten Workflow unless the session
+  is in Auto or `bypassPermissions` mode.
+- `ggrun claude resume` against a live server goes through its ggrun router when
+  it is still running, and installs the Workflow hook either way.
+- A non-zero Claude Code exit now says why the server is stopping.
+
+## v3.2.12 — 2026-10-18
+
+### Changed
+
+- `ggrun download` verifies downloaded files, and the installer keeps the
+  hardware recommendations it printed.
+- Claude Code mode sizes an automatic context for the session being resumed.
+- After a verification OOM the launcher waits for the memory to release and
+  relaunches once with the adjusted plan instead of exiting.
+
+### Fixed
+
+- The catalog refresh decodes the current Artificial Analysis model table and
+  keeps main-model parameter and MoE evidence.
+- ik_llama.cpp: the log level is no longer raised (it logged every request
+  body), and `--fit` stays inside the allocation guard.
+- Backends that print usage and exit 1 are accepted, and GPU buffers are
+  verified on forks without a device-list option.
+- A commit-stamped build is no longer offered every release as an update.
+
 ## v3.2.11 — 2026-10-13
 
 ### Added

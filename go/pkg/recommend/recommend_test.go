@@ -1,6 +1,8 @@
 package recommend
 
 import (
+	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -429,6 +431,144 @@ func TestMoESpeedEstimateIncludesDispatchCost(t *testing.T) {
 	}
 }
 
+// pinnedSpeedRow returns a catalog row as committed when its decode was
+// measured. The scheduled refresh rewrites catalog.json and rows can leave the
+// leaderboard, so the estimate is pinned to these rows, not to the live file.
+func pinnedSpeedRow(t *testing.T, name string) Candidate {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "speed_rows.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []Candidate
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Name == name {
+			return inferParams(dropCompanionSizedQuants(row))
+		}
+	}
+	t.Fatalf("%s: no pinned row in testdata/speed_rows.json", name)
+	return Candidate{}
+}
+
+// Measured on one rig with host bandwidth probed at 26.27 GB/s. The estimate
+// used to charge the always-read backbone at RAM speed and discount measured
+// bandwidth by 0.5, predicting GLM-5.3-Flash under 4 tok/s.
+func TestMoESpeedEstimateMatchesMeasuredDecode(t *testing.T) {
+	t.Setenv("LLM_CACHE_DIR", t.TempDir())
+	gpuRig := referenceRig()
+	gpuRig.HostMemoryBandwidthMBps = 26273
+	cpuOnly := &detect.Capabilities{OS: "linux", RAM: detect.RAMInfo{TotalMB: 16384, FreeMB: 16384},
+		CPU: detect.CPUInfo{Cores: 14}, HostMemoryBandwidthMBps: 26273}
+	for _, tc := range []struct {
+		name     string
+		caps     *detect.Capabilities
+		quant    QuantOption
+		measured float64
+	}{
+		// eval-time decode while serving agent work, 2026-09-14
+		{"Z AI GLM-5.3-Flash", gpuRig, QuantOption{Name: "UD-Q3_K_XL", SizeGB: 137.4, Dynamic: true}, 6.35},
+		// 128-token synthetic decode, 2026-09-16
+		{"Alibaba Qwen3.8-Flash-Next", gpuRig, QuantOption{Name: "UD-Q3_K_XL", SizeGB: 83.8, Dynamic: true}, 21.82},
+		// CPU only, 16 GiB, relaunch ledger decode, October 8
+		{"Alibaba Qwen3.6 35B A3B (Reasoning)", cpuOnly, QuantOption{Name: "UD-IQ2_XXS", SizeGB: 10.0, Dynamic: true}, 15.3},
+	} {
+		c := pinnedSpeedRow(t, tc.name)
+		// Only the expert layout drives the split; MLA rows may lack hkv.
+		if _, _, ok := moeRoutedShares(c); !c.MoE || !ok {
+			t.Fatalf("%s: catalog row lost its MoE geometry: %+v", tc.name, c)
+		}
+		c.Quants = []QuantOption{tc.quant}
+		rec, ok := evaluate(tc.caps, c)
+		if !ok {
+			t.Fatalf("%s %s no longer fits", tc.name, tc.quant.Name)
+		}
+		t.Logf("%s %s (%s): predicted %.2f tok/s, measured %.2f", tc.name, tc.quant.Name, rec.Fit, rec.PredictedTPS, tc.measured)
+		if math.Abs(rec.PredictedTPS-tc.measured) > 0.30*tc.measured {
+			t.Errorf("%s %s (%s): predicted %.2f tok/s, measured %.2f", tc.name, tc.quant.Name, rec.Fit, rec.PredictedTPS, tc.measured)
+		}
+	}
+}
+
+func TestMoESpeedEstimateKeepsBackboneOnGPU(t *testing.T) {
+	caps := referenceRig()
+	caps.HostMemoryBandwidthMBps = 26273
+	geo := Candidate{MoE: true, TotalParamsB: 320.759, Layers: 46, LeadingDense: 3, Experts: 288,
+		ExpertUsed: 8, ExpertFF: 2048, Embedding: 4096, FeedForward: 12288, HeadCountKV: 1, KeyLength: 512}
+	geo.ActiveParamsB = activeParamsFromGeometry(geo)
+	quant := QuantOption{Name: "UD-Q3_K_XL", SizeGB: 137.4}
+	// Same active count with no layout: the VRAM share is spread evenly and
+	// the backbone streams from RAM.
+	flat := Candidate{MoE: true, TotalParamsB: geo.TotalParamsB, ActiveParamsB: geo.ActiveParamsB}
+	split, even := predictDecodeTPS(caps, geo, quant), predictDecodeTPS(caps, flat, quant)
+	if split <= even {
+		t.Fatalf("backbone-on-GPU estimate %.2f is not above the even spread %.2f", split, even)
+	}
+	// A resident model has no CPU layers to pay for.
+	small := QuantOption{Name: "UD-Q3_K_XL", SizeGB: 20}
+	if a, b := predictDecodeTPS(caps, geo, small), predictDecodeTPS(caps, flat, small); math.Abs(a-b) > 1e-9 {
+		t.Fatalf("resident MoE estimate depends on layout: %.2f vs %.2f", a, b)
+	}
+}
+
+// The per-layer dispatch cost was fitted on one 26 GB/s rig. It must not cap
+// a fast CPU-only host near 1/(layers*0.7 ms): every term scales with the
+// measured bandwidth, so the estimate does too.
+func TestMoESpeedEstimateScalesWithCPUOnlyBandwidth(t *testing.T) {
+	c := Candidate{MoE: true, TotalParamsB: 34.66, Layers: 40, Experts: 256, ExpertUsed: 8,
+		ExpertFF: 512, ExpertShFF: 512, Embedding: 2048, HeadCountKV: 2, KeyLength: 256}
+	c.ActiveParamsB = activeParamsFromGeometry(c)
+	quant := QuantOption{Name: "UD-IQ2_XXS", SizeGB: 10.0}
+	host := func(mbps int) *detect.Capabilities {
+		return &detect.Capabilities{OS: "linux", RAM: detect.RAMInfo{TotalMB: 65536, FreeMB: 65536},
+			CPU: detect.CPUInfo{Cores: 64}, HostMemoryBandwidthMBps: mbps}
+	}
+	slow, fast := predictDecodeTPS(host(26273), c, quant), predictDecodeTPS(host(200000), c, quant)
+	if want := slow * 200000 / 26273; math.Abs(fast-want) > 0.01*want {
+		t.Fatalf("200 GB/s CPU-only estimate %.1f tok/s, want %.1f (26 GB/s gives %.1f)", fast, want, slow)
+	}
+	if fast < 60 {
+		t.Fatalf("3B-active MoE on a 200 GB/s CPU-only host capped at %.1f tok/s", fast)
+	}
+}
+
+// Without a measured host bandwidth the layout may only move always-read
+// bytes to the GPU: no catalog MoE may come out slower than the even spread,
+// and a CPU-only host keeps the even spread exactly.
+func TestMoESpeedEstimateUnmeasuredHostsNotSlowerThanEvenSpread(t *testing.T) {
+	t.Setenv("LLM_CACHE_DIR", t.TempDir())
+	ram := func(gb int) detect.RAMInfo { return detect.RAMInfo{TotalMB: gb << 10, FreeMB: gb << 10} }
+	cuda := []detect.Backend{{Name: "cuda", Path: "/bin/llama-server"}}
+	hosts := map[string]*detect.Capabilities{
+		"cpu-only 64 GB": {OS: "linux", RAM: ram(64), CPU: detect.CPUInfo{Cores: 16}},
+		"3090 + 64 GB": {OS: "linux", RAM: ram(64), CPU: detect.CPUInfo{Cores: 16}, Backends: cuda,
+			GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 3090", VRAMTotalMB: 24576}}},
+		"4060 laptop + 32 GB": {OS: "windows", RAM: ram(32), CPU: detect.CPUInfo{Cores: 8}, Backends: cuda,
+			GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 4060 Laptop GPU", VRAMTotalMB: 8188}}},
+	}
+	checked := 0
+	for _, c := range Shortlist() {
+		if !c.MoE || c.ActiveParamsB <= 0 {
+			continue
+		}
+		flat := Candidate{MoE: true, TotalParamsB: c.TotalParamsB, ActiveParamsB: c.ActiveParamsB}
+		for name, caps := range hosts {
+			for _, q := range c.Quants {
+				got, even := predictDecodeTPS(caps, c, q), predictDecodeTPS(caps, flat, q)
+				if got < even*(1-1e-9) || (len(caps.GPUs) == 0 && math.Abs(got-even) > 1e-9*even) {
+					t.Errorf("%s %s on %s: %.2f tok/s, even spread %.2f", c.Name, q.Name, name, got, even)
+				}
+				checked++
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no catalog MoE rows checked")
+	}
+}
+
 func TestMoESpeedEstimateUsesMeasuredHostMemoryBandwidth(t *testing.T) {
 	candidate := Candidate{MoE: true, TotalParamsB: 200, ActiveParamsB: 12}
 	quant := QuantOption{Name: "Q4_K_M", SizeGB: 110}
@@ -511,5 +651,21 @@ func TestUnrunnableArchesFallbackOnBadJSON(t *testing.T) {
 		if !fallbackUnrunnableArch[arch] {
 			t.Fatalf("fallback blocklist missing %q", arch)
 		}
+	}
+}
+
+// A score mapped from an older index version ranks as a score but is shown
+// as an estimate until the leaderboard re-evaluates the model.
+func TestDisplayIntelligenceMarksMappedScores(t *testing.T) {
+	scored := Recommendation{Candidate: Candidate{AAIntelligence: 31.66}}
+	mapped := Recommendation{Candidate: Candidate{AAIntelligence: 27.04, AAIndexMappedFrom: "v4"}}
+	if got := DisplayIntelligence(scored); got != "31.7" {
+		t.Fatalf("scored row shows %q", got)
+	}
+	if got := DisplayIntelligence(mapped); got != "~27.0" {
+		t.Fatalf("mapped row shows %q", got)
+	}
+	if estimated(mapped.Candidate) {
+		t.Fatal("a mapped score must rank with scored rows, not after them")
 	}
 }

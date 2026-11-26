@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/gguf"
 )
 
@@ -15,26 +14,6 @@ import (
 type ContextEstimate struct {
 	MaxCtx int // ContextLength from GGUF metadata
 	FitCtx int // Largest empirically proven ctx from probe cache
-}
-
-// DetectMaxCtx returns the model's trained max context from GGUF metadata.
-func DetectMaxCtx(modelPath string) int {
-	info, err := gguf.Parse(modelPath)
-	if err != nil {
-		return 0
-	}
-	return info.ContextLength
-}
-
-// EstimateFitCtx returns the largest context size empirically proven to work
-// for this model on this hardware, based on probe cache entries.
-// It only returns values from successful loads — no extrapolation.
-func EstimateFitCtx(modelPath, cacheDir string) int {
-	info, err := gguf.Parse(modelPath)
-	if err != nil {
-		return 0
-	}
-	return EstimateFitCtxForInfo(modelPath, cacheDir, info, totalSystemMemoryMB())
 }
 
 // EstimateFitCtxForInfo is the metadata-aware form used by model browsers.
@@ -110,12 +89,4 @@ func EstimateFitCtxForInfo(modelPath, cacheDir string, info *gguf.Info, totalSys
 	}
 
 	return maxValidCtx
-}
-
-func totalSystemMemoryMB() int {
-	caps, err := detect.Detect()
-	if err != nil || caps == nil {
-		return 0
-	}
-	return caps.TotalVRAM() + caps.RAM.TotalMB
 }

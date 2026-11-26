@@ -156,20 +156,6 @@ func LocalReviewerModelPath(modelDir string) (string, bool) {
 	return "", false
 }
 
-// EnsureReviewerModel validates a user-supplied model, or downloads and
-// verifies the pinned default artifact on first use.
-func EnsureReviewerModel(ctx context.Context, appHome string, progress io.Writer) (string, error) {
-	return EnsureReviewerModelWithModelDir(ctx, appHome, "", progress)
-}
-
-// EnsureReviewerModelWithModelDir is EnsureReviewerModel plus a local model
-// directory: when the pinned artifact is already installed there (matching the
-// folder name in DefaultReviewerLocalDir), it is verified and used directly
-// instead of downloading a private copy.
-func EnsureReviewerModelWithModelDir(ctx context.Context, appHome, modelDir string, progress io.Writer) (string, error) {
-	return EnsureReviewerSpec(ctx, appHome, modelDir, defaultModel, progress)
-}
-
 // EnsureReviewerSpec validates or downloads one pinned reviewer artifact. The
 // caller passes the spec for the profile it is about to launch, because the
 // profile's VRAM reservation describes THAT model: installing a different
@@ -291,11 +277,37 @@ func reviewerHTTPClient() *http.Client {
 // interrupted in an earlier run is continued instead of re-fetched, and the
 // artifact is only verified and installed once it is complete.
 func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, dest string, progress io.Writer) error {
+	resumed, err := downloadModelOnce(ctx, client, spec, dest, progress)
+	var bad *checksumError
+	if err == nil || !errors.As(err, &bad) || !resumed {
+		return err
+	}
+	// The bytes of a resumed transfer came from more than one response, so a
+	// mismatch may be a bad join rather than a bad artifact. The partial is
+	// already discarded; fetch once from zero. A fresh download that mismatches
+	// is not retried: the same bytes would arrive again.
+	if progress != nil {
+		fmt.Fprintf(progress, "[claude-code] resumed Auto reviewer download failed verification (got %s); discarding it and downloading again from the start\n", bad.got)
+	}
+	_, err = downloadModelOnce(ctx, client, spec, dest, progress)
+	return err
+}
+
+// checksumError reports a completed download whose SHA-256 is not the pinned one.
+type checksumError struct{ got string }
+
+func (e *checksumError) Error() string {
+	return fmt.Sprintf("checksum mismatch (got %s); the partial download was discarded", e.got)
+}
+
+// downloadModelOnce runs the resume/retry loop once and reports whether any
+// attempt continued an existing partial file.
+func downloadModelOnce(ctx context.Context, client *http.Client, spec ModelSpec, dest string, progress io.Writer) (resumed bool, _ error) {
 	if client == nil {
 		client = reviewerHTTPClient()
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("create reviewer cache: %w", err)
+		return resumed, fmt.Errorf("create reviewer cache: %w", err)
 	}
 	part := dest + ".part"
 
@@ -308,6 +320,16 @@ func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, des
 			_ = os.Remove(part)
 			have = 0
 		}
+		if have > 0 && !hasPartIdentity(part, spec) {
+			// No record of which artifact these bytes belong to: do not trust them.
+			_ = os.Remove(part)
+			have = 0
+		}
+		if have > 0 {
+			// Bytes from an earlier response or run: a mismatch may be a bad
+			// join, so it earns one fresh download (downloadModel).
+			resumed = true
+		}
 		if have == spec.Size {
 			break
 		}
@@ -319,7 +341,7 @@ func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, des
 			break
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("download Auto reviewer: %w", ctx.Err())
+			return resumed, fmt.Errorf("download Auto reviewer: %w", ctx.Err())
 		}
 		if attempt < reviewerDownloadAttempts && progress != nil {
 			fmt.Fprintf(progress, "[claude-code] Auto reviewer download interrupted (%v); retrying\n", lastErr)
@@ -327,27 +349,29 @@ func downloadModel(ctx context.Context, client *http.Client, spec ModelSpec, des
 	}
 	if size := partialSize(part); size != spec.Size {
 		if lastErr != nil {
-			return fmt.Errorf("download Auto reviewer: %w", lastErr)
+			return resumed, fmt.Errorf("download Auto reviewer: %w", lastErr)
 		}
-		return fmt.Errorf("download Auto reviewer: got %d bytes, want %d", size, spec.Size)
+		return resumed, fmt.Errorf("download Auto reviewer: got %d bytes, want %d", size, spec.Size)
 	}
 	// Verify the assembled file rather than a running hash: with resume the bytes
 	// come from more than one response, and what matters is what landed on disk.
 	sum, err := fileSHA256(part)
 	if err != nil {
-		return fmt.Errorf("verify Auto reviewer: %w", err)
+		return resumed, fmt.Errorf("verify Auto reviewer: %w", err)
 	}
 	if !strings.EqualFold(sum, spec.SHA256) {
 		_ = os.Remove(part)
-		return fmt.Errorf("download Auto reviewer: checksum mismatch (got %s); the partial download was discarded", sum)
+		_ = os.Remove(part + ".id")
+		return resumed, fmt.Errorf("download Auto reviewer: %w", &checksumError{got: sum})
 	}
+	_ = os.Remove(part + ".id")
 	if err := os.Rename(part, dest); err != nil {
-		return fmt.Errorf("install Auto reviewer: %w", err)
+		return resumed, fmt.Errorf("install Auto reviewer: %w", err)
 	}
 	if progress != nil {
 		fmt.Fprintln(progress, "[claude-code] local Auto reviewer downloaded and verified.")
 	}
-	return nil
+	return resumed, nil
 }
 
 // partialSize is how many bytes of a resumable download are already on disk.
@@ -369,6 +393,10 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 	}
 	if have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		// Only continue if the artifact is the one the partial came from.
+		if id := readPartIdentity(part); id != "" && !strings.HasPrefix(id, "W/") {
+			req.Header.Set("If-Range", id)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -383,6 +411,12 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 		if have == 0 {
 			return fmt.Errorf("unexpected HTTP 206 for a fresh download")
 		}
+		// The body must continue exactly where the partial ends, or appending
+		// it splices unrelated bytes into the file.
+		if start, total, ok := parseContentRange(resp.Header.Get("Content-Range")); !ok || start != have || (total > 0 && total != spec.Size) {
+			_ = os.Remove(part)
+			return fmt.Errorf("server resumed at the wrong offset (Content-Range %q, want start %d of %d); restarting", resp.Header.Get("Content-Range"), have, spec.Size)
+		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		// Already have everything the server will give us; let the caller verify.
 		return nil
@@ -390,6 +424,9 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
 
+	if have == 0 {
+		writePartIdentity(part, spec, resp.Header)
+	}
 	flags := os.O_CREATE | os.O_WRONLY
 	if have > 0 {
 		flags |= os.O_APPEND
@@ -419,6 +456,52 @@ func fetchIntoPart(ctx context.Context, client *http.Client, spec ModelSpec, par
 		return err
 	}
 	return f.Close()
+}
+
+// partIdentity names the artifact a partial file belongs to: the pinned URL and
+// size plus the server's strong validator. It is stored beside the partial.
+func partIdentity(spec ModelSpec, h http.Header) string {
+	etag := h.Get("X-Linked-Etag")
+	if etag == "" {
+		etag = h.Get("ETag")
+	}
+	return spec.URL + "\n" + strconv.FormatInt(spec.Size, 10) + "\n" + etag + "\n"
+}
+
+func writePartIdentity(part string, spec ModelSpec, h http.Header) {
+	_ = os.WriteFile(part+".id", []byte(partIdentity(spec, h)), 0o644)
+}
+
+// readPartIdentity returns the recorded validator ("" when none was served).
+func readPartIdentity(part string) string {
+	lines := strings.Split(string(readFileOrEmpty(part+".id")), "\n")
+	if len(lines) < 3 {
+		return ""
+	}
+	return lines[2]
+}
+
+// hasPartIdentity reports whether the partial was recorded for this spec.
+func hasPartIdentity(part string, spec ModelSpec) bool {
+	lines := strings.Split(string(readFileOrEmpty(part+".id")), "\n")
+	return len(lines) >= 3 && lines[0] == spec.URL && lines[1] == strconv.FormatInt(spec.Size, 10)
+}
+
+func readFileOrEmpty(path string) []byte {
+	b, _ := os.ReadFile(path)
+	return b
+}
+
+// parseContentRange parses "bytes START-END/TOTAL"; total is 0 when "*".
+func parseContentRange(v string) (start, total int64, ok bool) {
+	var end int64
+	if n, _ := fmt.Sscanf(v, "bytes %d-%d/%d", &start, &end, &total); n == 3 {
+		return start, total, true
+	}
+	if n, _ := fmt.Sscanf(v, "bytes %d-%d/*", &start, &end); n == 2 {
+		return start, 0, true
+	}
+	return 0, 0, false
 }
 
 // stallGuard wraps a response body so a transfer that stops producing bytes for
@@ -510,13 +593,22 @@ func IsClassifierRequest(body []byte) bool {
 	var request struct {
 		System json.RawMessage `json:"system"`
 	}
-	if json.Unmarshal(body, &request) != nil || len(request.System) == 0 {
+	if json.Unmarshal(body, &request) != nil {
+		return false
+	}
+	return systemHasClassifierMarker(request.System)
+}
+
+// systemHasClassifierMarker reports whether a raw "system" value (a string or
+// a list of text blocks) carries ClassifierMarker.
+func systemHasClassifierMarker(raw json.RawMessage) bool {
+	if len(raw) == 0 {
 		return false
 	}
 	var blocks []struct {
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(request.System, &blocks) == nil {
+	if json.Unmarshal(raw, &blocks) == nil {
 		for _, block := range blocks {
 			if strings.Contains(block.Text, ClassifierMarker) {
 				return true
@@ -525,7 +617,7 @@ func IsClassifierRequest(body []byte) bool {
 		return false
 	}
 	var system string
-	return json.Unmarshal(request.System, &system) == nil && strings.Contains(system, ClassifierMarker)
+	return json.Unmarshal(raw, &system) == nil && strings.Contains(system, ClassifierMarker)
 }
 
 // Router exposes a loopback-only endpoint and sends classifier requests to the
@@ -577,7 +669,11 @@ type Router struct {
 	stopPollOnce  sync.Once
 	mainActive    atomic.Int64
 	mainQueued    atomic.Int64
+	watch         classifierWatch
 	metrics       *metricsSink
+	warm          atomic.Pointer[classifierWarmup]
+	mainInflight  atomic.Int64  // non-warm-up requests inside serve() on the main route
+	queueWait     time.Duration // GGRUN_QUEUE_WAIT_SECONDS; 0 leaves the wait to the client
 }
 
 // SetCompanion enables the cheap-tier lane. alias is the model name the
@@ -636,6 +732,34 @@ func (r *Router) utilityEnabled() bool {
 // loopback port. Text-only routes replace Anthropic image blocks with a text
 // notice so one image-producing tool result cannot poison every later turn.
 func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMainActive int) (*Router, error) {
+	queueWait, err := queueWaitFromEnv(os.Getenv(queueWaitEnv))
+	if err != nil {
+		return nil, err
+	}
+	if queueWait > 0 && maxMainActive <= 0 {
+		return nil, fmt.Errorf("%s needs main-model admission to be enabled", queueWaitEnv)
+	}
+	return startRouter(mainBaseURL, reviewerBaseURL, supportsVision, maxMainActive, queueWait)
+}
+
+// queueWaitEnv bounds how long a main-model request may wait for admission.
+// Unset keeps today's behaviour: the request waits until the client gives up.
+// Experimental (X-13/E-1): when the bound expires the router answers 429 with
+// Retry-After so the client can back off; the default is decided by E-1.
+const queueWaitEnv = "GGRUN_QUEUE_WAIT_SECONDS"
+
+func queueWaitFromEnv(value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 1 || seconds > 3600 {
+		return 0, fmt.Errorf("%s must be a whole number of seconds from 1 to 3600", queueWaitEnv)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func startRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMainActive int, queueWait time.Duration) (*Router, error) {
 	mainURL, err := url.Parse(mainBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse main model URL: %w", err)
@@ -652,7 +776,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 	// review can be retried on the main model; utility traffic carries no
 	// attempt and keeps surfacing errors directly.
 	installReviewerFallbackHooks(reviewerProxy)
-	router := &Router{maxMainActive: maxMainActive, mainBaseURL: strings.TrimRight(mainBaseURL, "/")}
+	router := &Router{maxMainActive: maxMainActive, mainBaseURL: strings.TrimRight(mainBaseURL, "/"), queueWait: queueWait}
 	router.separateReviewer = strings.TrimRight(reviewerBaseURL, "/") != strings.TrimRight(mainBaseURL, "/")
 	if maxMainActive > 0 {
 		router.sched = newScheduler(maxMainActive)
@@ -665,9 +789,18 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				"active": router.mainActive.Load(),
 				"queued": router.mainQueued.Load(),
 				"limit":  int64(router.maxMainActive),
+				// The fronted backend, so a resume can tell this router from
+				// another launch's router that reused the same ephemeral port.
+				"main": router.mainBaseURL,
 			}
 			if admission := router.sched.status(); admission != nil {
 				status["admission"] = admission
+			}
+			if router.queueWait > 0 {
+				status["queue_wait_bound_ms"] = router.queueWait.Milliseconds()
+			}
+			if wait := expectedWaitMS(router.mainQueued.Load(), int64(router.maxMainActive), router.metrics.meanMainServiceMS()); wait > 0 {
+				status["expected_wait_ms"] = wait
 			}
 			if summary := router.MetricsSummary(); summary != nil {
 				status["metrics"] = summary
@@ -694,6 +827,14 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		if RejectUnsupportedSystemMessages(w, body) {
+			return
+		}
+		warmup := r.Header.Get(warmupHeader) != ""
+		if warmup {
+			r.Header.Del(warmupHeader)
+			r = r.WithContext(context.WithValue(r.Context(), warmupKey{}, true))
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 		if !supportsVision {
@@ -701,7 +842,16 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
 		}
+		if mapped := honorDisabledThinking(body); !bytes.Equal(mapped, body) {
+			body = mapped
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		}
 		if IsClassifierRequest(body) {
+			if !warmup {
+				router.watch.sawClassifier()
+				router.captureClassifier(body)
+			}
 			// A classifier/security request is normally the separate reviewer's
 			// job. Two user-approved (Option A) cases route it to the MAIN model
 			// instead, each with a visible notice — never silently:
@@ -737,22 +887,36 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				if router.tryReviewer(w, r, reviewerProxy, reviewerClassifierBody(body, alias)) {
 					return
 				}
+				if warmup {
+					// Never spend the main model on a warm-up of the reviewer.
+					http.Error(w, "reviewer could not answer the warm-up", http.StatusBadGateway)
+					return
+				}
 				router.reviewerFailNotice.Do(func() {
 					fmt.Fprintf(os.Stderr, "[claude-code] the Auto reviewer could not answer a review; routing it to the main model instead (self-classify, reviewer unavailable)\n")
 				})
 				proxy, route = mainProxy, routeMain
 			}
-			body = retargetModel(body, MainAlias)
+			body = selfClassifierBody(body)
 			r.Body = io.NopCloser(bodyReader(body))
 			r.ContentLength = int64(len(body))
-			router.serve(w, r, proxy, route, body)
+			kind := kindClassifier
+			if warmup {
+				kind = kindWarmup
+				if route == routeMain {
+					router.warm.Load().setOnMain()
+				}
+			}
+			router.serve(w, r, proxy, route, body, kind)
 			return
 		}
 		// Decide the cheap-tier destination before injecting any main-backend
 		// metadata. A companion has a different template and must never receive
 		// message delimiters parsed from the main model. With no companion, rewrite
 		// local-fast back to the actual main alias before forwarding.
+		kind := ""
 		if IsUtilityRequest(body) {
+			kind = kindUtility
 			if router.utilityEnabled() {
 				companionBody := utilityBody(body, router.companionAlias)
 				if router.tryReviewerUtility(w, r, reviewerProxy, companionBody) {
@@ -784,6 +948,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 			r.Body = io.NopCloser(bodyReader(body))
 			r.ContentLength = int64(len(body))
 		}
+		router.watch.sawMain(body)
 		// Main-model work only: the reviewer is a different model with its own
 		// template, and its conversations are short enough that a missing
 		// checkpoint costs little.
@@ -794,7 +959,7 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 				r.ContentLength = int64(len(body))
 			}
 		}
-		router.serve(w, r, mainProxy, routeMain, body)
+		router.serve(w, r, mainProxy, routeMain, body, kind)
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -812,16 +977,43 @@ func StartRouter(mainBaseURL, reviewerBaseURL string, supportsVision bool, maxMa
 // serve proxies one routed request and records its timing. Only the main route
 // is admission-controlled: the reviewer lane stays free so a safety review never
 // waits behind coding work.
-func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil.ReverseProxy, route string, body []byte) {
+func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil.ReverseProxy, route string, body []byte, kind string) {
 	start := time.Now()
+	if route == routeMain && r != nil && kind != kindWarmup {
+		r.mainInflight.Add(1)
+		defer r.mainInflight.Add(-1)
+		r.warm.Load().preempt()
+	}
 	conversation := conversationKey(body)
+	meta := metaFor(req, kind)
 	var queue time.Duration
+	if route == routeMain && r != nil {
+		// What this request found on arrival: the queue it joins and the work
+		// already in service ahead of it.
+		meta.queuedAtArrival, meta.inServiceAtArrival = r.mainQueued.Load(), r.mainActive.Load()
+	}
 	if route == routeMain && r != nil && r.sched != nil {
 		r.mainQueued.Add(1)
-		admission := r.sched.acquireRequest(req.Context(), conversation, laneOf(body), estimatedPromptTokens(body))
+		waitContext := req.Context()
+		cancelWait := func() {}
+		if r.queueWait > 0 {
+			waitContext, cancelWait = context.WithTimeout(waitContext, r.queueWait)
+		}
+		admission := r.sched.acquireRequest(waitContext, conversation, laneOf(body), estimatedPromptTokens(body))
+		queueExpired := errors.Is(waitContext.Err(), context.DeadlineExceeded) && req.Context().Err() == nil
+		cancelWait()
 		r.mainQueued.Add(-1)
 		if admission == nil {
-			r.record(route, body, start, time.Since(start), nil)
+			if queueExpired {
+				metered := &meteredWriter{ResponseWriter: w, start: start}
+				metered.Header().Set("Content-Type", "application/json")
+				metered.Header().Set("Retry-After", "5")
+				metered.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(metered, `{"type":"error","error":{"type":"rate_limit_error","message":"Admission queue wait exceeded. Retry later."}}`)
+				r.record(route, body, start, time.Since(start), metered, meta)
+				return
+			}
+			r.record(route, body, start, time.Since(start), nil, meta)
 			return
 		}
 		queue = time.Since(start)
@@ -830,19 +1022,32 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, proxy *httputil
 			r.mainActive.Add(-1)
 			admission.release()
 		}()
-		metered := &meteredWriter{ResponseWriter: w, start: start, onDecode: admission.markDecode}
-		proxy.ServeHTTP(metered, req)
-		r.record(route, body, start, queue, metered)
+		metered := &meteredWriter{ResponseWriter: w, start: start, onDecode: admission.markDecode, capture: kind == kindClassifier}
+		r.proxyAndRecord(proxy, metered, req, route, body, start, queue, meta)
 		return
 	}
-	metered := &meteredWriter{ResponseWriter: w, start: start}
+	metered := &meteredWriter{ResponseWriter: w, start: start, capture: kind == kindClassifier}
+	r.proxyAndRecord(proxy, metered, req, route, body, start, queue, meta)
+}
+
+// proxyAndRecord proxies one request and always records it. ReverseProxy panics
+// with http.ErrAbortHandler when the body copy fails after the headers went out
+// (client left or backend died mid-stream); the deferred record still runs, is
+// marked broken, and the panic is left to propagate so net/http aborts the
+// connection.
+func (r *Router) proxyAndRecord(proxy *httputil.ReverseProxy, metered *meteredWriter, req *http.Request, route string, body []byte, start time.Time, queue time.Duration, meta recordMeta) {
+	completed := false
+	defer func() {
+		meta.broken = !completed
+		r.record(route, body, start, queue, metered, meta)
+	}()
 	proxy.ServeHTTP(metered, req)
-	r.record(route, body, start, queue, metered)
+	completed = true
 }
 
 // record stores one request's timing. A nil metered writer means the caller gave
 // up while queued, which is exactly the starvation case worth counting.
-func (r *Router) record(route string, body []byte, start time.Time, queue time.Duration, metered *meteredWriter) {
+func (r *Router) record(route string, body []byte, start time.Time, queue time.Duration, metered *meteredWriter, meta recordMeta) {
 	if r == nil || r.metrics == nil {
 		return
 	}
@@ -855,6 +1060,11 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 		TotalMS:      time.Since(start).Milliseconds(),
 		RequestBytes: int64(len(body)),
 		Aborted:      true,
+
+		Kind:               meta.kind,
+		Client:             meta.client,
+		QueuedAtArrival:    meta.queuedAtArrival,
+		InServiceAtArrival: meta.inServiceAtArrival,
 	}
 	if metered != nil {
 		rec.Status = metered.status
@@ -862,7 +1072,7 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 		rec.Usage = metered.usage
 		rec.TTFBMS = metered.ttfb.Milliseconds()
 		rec.DecodeStartMS = metered.decodeStart.Milliseconds()
-		rec.Aborted = metered.status == 0 && metered.written == 0
+		rec.Aborted = metered.status == 0 && metered.written == 0 || meta.broken
 	}
 	if rec.Aborted {
 		if metered == nil {
@@ -875,6 +1085,12 @@ func (r *Router) record(route string, body []byte, start time.Time, queue time.D
 			rec.DeadlineBucket = "~60s"
 		case rec.TotalMS >= 550_000 && rec.TotalMS <= 650_000:
 			rec.DeadlineBucket = "~600s"
+		}
+	}
+	if meta.kind == kindClassifier {
+		rec.Verdict = verdictNone
+		if metered != nil && !rec.Aborted {
+			rec.Verdict = classifierVerdictFor(metered.status, metered.Header(), metered.captured.Bytes(), severityVariantRequest(body))
 		}
 	}
 	r.metrics.record(rec)
@@ -965,6 +1181,7 @@ func (r *Router) Close() error {
 	if r.pollStop != nil {
 		r.stopPollOnce.Do(func() { close(r.pollStop) })
 	}
+	r.warm.Load().stop()
 	err := r.server.Shutdown(ctx)
 	if closeErr := r.metrics.close(); err == nil {
 		err = closeErr

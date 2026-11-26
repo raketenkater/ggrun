@@ -78,6 +78,90 @@ else:
                                      f'\nclone_source_ref "file://{bare}" "{"0" * 40}" "{missing}"\n'])
             self.assertNotEqual(result.returncode, 0)
 
+    def test_source_tarball_without_git_is_stamped_with_its_commit(self):
+        # Without git, the installer (and so `ggrun update`) had no source at all.
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tree = tmp / ("ggrun-" + sha)
+            (tree / "go").mkdir(parents=True)
+            (tree / "go" / "go.mod").write_text("module x\n")
+            archive = tmp / "src.tar.gz"
+            subprocess.run(["tar", "-czf", str(archive), "-C", str(tmp), tree.name], check=True)
+            dest = tmp / "dest"
+            dest.mkdir()
+            script = function("install.sh", "fetch_source_tarball")
+            script += f"""
+curl() {{
+    case "$*" in
+        *api.github.com/repos/o/r/commits/main*) echo {sha} ;;
+        *codeload.github.com/o/r/tar.gz/{sha}*) cat "{archive}" ;;
+        *) return 22 ;;
+    esac
+}}
+GITHUB_REPO=o/r SOURCE_REF=main SRC_TARBALL_COMMIT=""
+fetch_source_tarball "{dest}"
+echo "commit=$SRC_TARBALL_COMMIT"
+"""
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("commit=" + sha[:7], result.stdout)
+            self.assertTrue((dest / "go" / "go.mod").is_file())
+
+    def test_gguf_parse_selfcheck_runs_the_installed_parser(self):
+        # Every launch needs parse_gguf.py under Python 3; the installer checks it.
+        for body, code in ((None, 0), ("raise SystemExit(1)\n", 1)):
+            with self.subTest(broken=body is not None), tempfile.TemporaryDirectory() as tmp:
+                parser = Path(tmp) / "parse_gguf.py"
+                parser.write_text(body or (ROOT / "tools" / "gguf" / "parse_gguf.py").read_text())
+                script = function("install.sh", "gguf_parse_selfcheck")
+                script += f'\nsay() {{ :; }}\nINSTALL_DIR="{tmp}"\ngguf_parse_selfcheck\n'
+                result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+
+    def test_upstream_prebuilt_scans_recent_releases(self):
+        # releases/latest can carry no binaries; the newest release that has
+        # the asset wins, and ubuntu-x64 never matches ubuntu-vulkan-x64.
+        dl = "https://github.com/ggml-org/llama.cpp/releases/download"
+        listing = ('[{"tag_name": "b3", "assets": []},'
+                   ' {"tag_name": "b2", "assets": ['
+                   f'{{"name": "llama-b2-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "{dl}/b2/llama-b2-bin-ubuntu-vulkan-x64.tar.gz"}}]}},'
+                   ' {"tag_name": "b1", "assets": ['
+                   f'{{"name": "llama-b1-bin-ubuntu-x64.tar.gz", "browser_download_url": "{dl}/b1/llama-b1-bin-ubuntu-x64.tar.gz"}},'
+                   f'{{"name": "llama-b1-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "{dl}/b1/llama-b1-bin-ubuntu-vulkan-x64.tar.gz"}}]}}]')
+        with tempfile.TemporaryDirectory() as tmp:
+            api = Path(tmp) / "releases.json"
+            api.write_text(listing)
+            for python, name, want in (("", "ubuntu-vulkan-x64", "b2/llama-b2-bin-ubuntu-vulkan-x64"),
+                                       ("", "ubuntu-x64", "b1/llama-b1-bin-ubuntu-x64"),
+                                       ("python3() { return 127; }\n", "ubuntu-x64", "b1/llama-b1-bin-ubuntu-x64"),
+                                       ("", "ubuntu-arm64", None)):
+                with self.subTest(name=name, grep_fallback=bool(python)):
+                    script = function("install.sh", "upstream_prebuilt_url")
+                    script += f'\n{python}upstream_prebuilt_url "{api}" {name}\n'
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), f"{dl}/{want}.tar.gz" if want else "")
+
+    def test_cuda_bundle_is_skipped_on_gpus_older_than_its_kernels(self):
+        # The bundle is built for compute capability 7.5+; a P40/1080 Ti/V100
+        # passes --version and then fails at the first kernel launch.
+        script = "\n".join(function("install.sh", name) for name in
+                           ("nvidia_min_compute_cap", "cuda_bundle_supported"))
+        script += '\nCUDA_BUNDLE_MIN_CC=75\nfind_nvidia_smi() { [[ -n "$SMI" ]] && echo "$SMI"; }\n'
+        script += 'if cuda_bundle_supported; then echo yes; else echo no; fi\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            smi = Path(tmp) / "nvidia-smi"
+            smi.write_text('#!/usr/bin/env bash\nprintf "%s\\n" $CC\n')
+            smi.chmod(0o755)
+            for cc, want in (("8.6", "yes"), ("7.5", "yes"), ("12.0", "yes"), ("6.1", "no"),
+                             ("7.0", "no"), ("8.6 6.1", "no"), ("[N/A]", "yes"), (None, "yes")):
+                with self.subTest(cc=cc):
+                    env = dict(os.environ, SMI=str(smi) if cc else "", CC=cc or "")
+                    result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True, env=env)
+                    self.assertEqual(result.stdout.strip(), want, result.stderr)
+
     def test_release_bundle_installs_the_memory_guard_where_ggrun_finds_it(self):
         # The guard was only copied into the backend directory, where ggrun never
         # looks, so a fresh install had no CUDA allocation firewall.
@@ -99,12 +183,68 @@ release_asset_name() {{ echo ggrun-linux-x86_64-cuda.tar.gz; }}
 find_release_asset_url() {{ [[ $1 == SHA256SUMS ]] && return 1; echo https://example.invalid/$1; }}
 curl() {{ while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && cp "{archive}" "$2"; shift; done; }}
 place_isolated_backend() {{ return 0; }}
+cuda_bundle_supported() {{ return 0; }}
 BACKEND_CHOICE=cuda MAIN_IMPL=go INSTALL_DIR="{install_dir}" LLM_INSTALL_ALLOW_UNVERIFIED=1
 install_release_bundle ik_llama-server-cuda
 """
             result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertEqual((install_dir / "libggrun-memguard.so").read_text(), "libggrun-memguard.so")
+
+    def test_release_mode_with_system_backend_still_installs_launcher(self):
+        # Release mode adopted a working system llama-server, skipped the
+        # bundle, skipped the source build, and then exited "Go ggrun was not
+        # installed".
+        text = (ROOT / "install.sh").read_text()
+        stage = text[text.index("# ── Stage 3"):text.index('say "── Installing scripts to')]
+        helpers = "\n".join(function("install.sh", name) for name in (
+            "install_release_bundle", "install_release_launcher", "install_payload_file",
+            "release_asset_name", "find_release_asset_url", "verify_release_checksum", "verify_release_signature",
+            "install_ggrun_from_source"))
+        for choice, with_cpu_asset in (("cpu", True), ("vulkan", True), ("cuda", False)):
+            with self.subTest(choice=choice, with_cpu_asset=with_cpu_asset):
+                self._release_mode_keeps_backend(stage, helpers, choice, with_cpu_asset)
+
+    def _release_mode_keeps_backend(self, stage, helpers, choice, with_cpu_asset):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            payload = tmp / "src" / "ggrun-linux-x86_64-cpu"
+            (payload / "bin").mkdir(parents=True)
+            for name in ("bin/ggrun", "bin/llama-server", "parse_gguf.py"):
+                (payload / name).write_text("#!/bin/sh\n")
+            release = tmp / "release"
+            release.mkdir()
+            asset = "ggrun-linux-x86_64-cpu.tar.gz"
+            if with_cpu_asset:
+                subprocess.run(["tar", "-czf", str(release / asset), "-C", str(tmp / "src"), payload.name], check=True)
+                subprocess.run(f"sha256sum {asset} > SHA256SUMS", shell=True, cwd=release, check=True)
+            system_server = tmp / "system" / "llama-server"
+            system_server.parent.mkdir()
+            system_server.write_text("system")
+            install_dir = tmp / "bin"
+            script = helpers + f"""
+say() {{ :; }}; ok() {{ :; }}; warn() {{ :; }}; err() {{ echo "ERR $*"; }}
+scan_system_installs() {{ :; }}; report_system_installs() {{ :; }}; drop_fake_installed_backends() {{ :; }}
+adopt_system_backends() {{ ln -s "{system_server}" "$INSTALL_DIR/llama-server"; }}
+installed_real_server() {{ [[ -e "$INSTALL_DIR/$1" ]]; }}
+place_isolated_backend() {{ echo backend-replaced; exit 98; }}
+ensure_source_repo() {{ echo unexpected-source-build; exit 99; }}
+platform_slug() {{ echo linux-x86_64; }}
+OS=Linux INSTALL_MODE=release BACKEND_REQUEST=auto BACKEND_CHOICE={choice} MAIN_IMPL=go
+INSTALL_DIR="{install_dir}" MODEL_DIR="{tmp}/models" INSTALL_RELEASE_DIR="{release}"
+{stage}
+install_ggrun_from_source
+[[ -x "$INSTALL_DIR/ggrun" ]] || {{ echo "Go ggrun was not installed"; exit 1; }}
+"""
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+            if not with_cpu_asset:
+                # No bundle provides ggrun: fail with the actionable message.
+                self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                self.assertIn("no release bundle", result.stdout + result.stderr)
+                return
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((install_dir / "parse_gguf.py").is_file())
+            self.assertEqual((install_dir / "llama-server").resolve(), system_server.resolve())
 
     def test_release_does_not_rebuild_checked_launcher(self):
         script = function("install.sh", "install_ggrun_from_source")
@@ -128,6 +268,78 @@ install_release_bundle ik_llama-server-cuda
                 self.assertEqual("--user" in recorded, not venv)
                 self.assertIn("-m pip install", recorded)
 
+    def test_app_python_install_reuses_replaces_and_keeps_path_clean(self):
+        setup = (ROOT / "scripts/setup-home.sh").read_text()
+        self.assertIn("LLM_INSTALL_APP_PYTHON=1", setup)
+        self.assertNotIn(".ggrun-python", setup)  # the binary finds the venv itself
+        installer = (ROOT / "install.sh").read_text()
+        self.assertRegex(installer, r"elif app_python_ready; then\n\s+ok ")
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "app home" / ".bin"
+            prefix.mkdir(parents=True)
+            fixture = Path(tmp) / "fixture-python"
+            fixture.write_text("""#!/usr/bin/env bash
+if [[ "$1 $2" == '-m pip' ]]; then
+    [[ -z "${PIP_TARGET+x}" && "$PIP_CONFIG_FILE" == /dev/null ]] || exit 2
+    printf '%s\n' "$*" >> "$CALLS"
+    [[ "$PIP_FAIL" != 1 ]] || exit 1
+    touch "${0%/*}/installed"
+else
+    [[ -f "${0%/*}/installed" ]]
+fi
+""")
+            fixture.chmod(0o755)
+            script = function("install.sh", "app_python_ready")
+            script += "\n" + function("install.sh", "install_app_python_download_deps")
+            script += """
+warn() { printf '%s\n' "$*"; }
+python3() {
+    if [[ "$1 $2" == '-m venv' ]]; then
+        mkdir -p "$3/bin"
+        cp "$FIXTURE_PYTHON" "$3/bin/python3"
+    else
+        command python3 "$@"
+    fi
+}
+install_app_python_download_deps
+"""
+            calls = Path(tmp) / "calls"
+            env = dict(os.environ, INSTALL_DIR=str(prefix), FIXTURE_PYTHON=str(fixture),
+                       CALLS=str(calls), PIP_TARGET=str(Path(tmp) / "unwanted"), PIP_FAIL="0")
+
+            def run(**extra):
+                return subprocess.run(["bash", "-eu", "-c", script], env={**env, **extra},
+                                      capture_output=True, text=True, timeout=5)
+
+            current = prefix / ".ggrun-python"
+            for _ in range(2):  # the second run reuses the healthy venv
+                self.assertEqual(run().returncode, 0)
+            self.assertEqual(calls.read_text().splitlines(),
+                             ["-m pip --require-virtualenv install --quiet huggingface_hub tqdm"])
+            self.assertTrue(current.is_symlink())
+            first = current.readlink()
+            (current / "bin/installed").unlink()  # unhealthy: rebuilt, old one removed
+            self.assertEqual(run().returncode, 0)
+            second = current.readlink()
+            self.assertNotEqual(first, second)
+            self.assertFalse((prefix / first).exists())
+            (current / "bin/installed").unlink()  # unhealthy and pip fails: keep the link
+            self.assertNotEqual(run(PIP_FAIL="1").returncode, 0)
+            self.assertEqual(current.readlink(), second)
+            self.assertEqual(len(list(prefix.glob(".ggrun-python.*"))), 1)
+
+    def test_gpu_images_ship_the_fit_oracle_next_to_the_server(self):
+        # Launch looks for llama-fit-params beside llama-server. Without it a
+        # GPU launch needs a contained live load, which a non-interactive
+        # container refuses without --allow-live-memory-probe.
+        for name in ("Dockerfile.cuda", "Dockerfile.vulkan"):
+            with self.subTest(image=name):
+                text = (ROOT / "docker" / name).read_text()
+                self.assertRegex(text, r"-t llama-server llama-fit-params\b")
+                server = re.search(r"LLAMA_SERVER=(\S+)/llama-server", text).group(1)
+                self.assertRegex(text, r"COPY --from=backend \S+/bin/llama-fit-params +"
+                                 + re.escape(server) + r"/llama-fit-params\n")
+
     def test_setup_recognizes_native_macho_and_rejects_scripts(self):
         script = function("scripts/setup-home.sh", "usable_llama_server")
         for magic, expected in [(b"\xcf\xfa\xed\xfe", 0), (b"\xca\xfe\xba\xbe", 0),
@@ -140,5 +352,152 @@ install_release_bundle ik_llama-server-cuda
                 self.assertEqual(result.returncode, expected)
 
 
+class InstallerConsentAndIntegrity(unittest.TestCase):
+    """Review W14 (S-02): sudo is asked for with its package list, downloaded
+    toolchains and libraries are checked by sha256, and the system Python's
+    protection is not overridden without consent."""
+
+    helpers = 'say() { echo "$*"; }; ok() { echo "$*"; }; warn() { echo "WARN $*"; }\n'
+
+    def consent(self, noninteractive, explicit, answer="y"):
+        script = self.helpers + function("install.sh", "privileged_consent")
+        script += f'\nask() {{ [[ "{answer}" == y ]]; }}\nNONINTERACTIVE={noninteractive}; DEPS_EXPLICIT="{explicit}"\n'
+        script += 'privileged_consent apt-get install -y git cmake build-essential\n'
+        return subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+
+    @unittest.skipIf(os.geteuid() == 0, "root needs no sudo")
+    def test_sudo_is_shown_with_its_packages_and_needs_consent(self):
+        quiet = self.consent(1, "")
+        self.assertNotEqual(quiet.returncode, 0, "no terminal and no explicit consent must not use sudo")
+        self.assertIn("sudo apt-get install -y git cmake build-essential", quiet.stdout)
+        self.assertEqual(self.consent(1, "install").returncode, 0, "LLM_INSTALL_DEPS=install consents")
+        self.assertEqual(self.consent(0, "", "y").returncode, 0)
+        self.assertNotEqual(self.consent(0, "", "n").returncode, 0)
+
+    def test_go_archive_is_checked_against_the_published_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            archive = tmp / "go.tar.gz"
+            subprocess.run(["bash", "-c", f'mkdir -p {tmp}/src/go/bin && printf "#!/bin/sh\\n" > {tmp}/src/go/bin/go && chmod +x {tmp}/src/go/bin/go && tar -czf {archive} -C {tmp}/src go'], check=True)
+            real = subprocess.run(["sha256sum", str(archive)], capture_output=True, text=True, check=True).stdout.split()[0]
+            for published, ok in ((real, True), ("0" * 64, False)):
+                index = tmp / "index.json"
+                index.write_text('[{"version":"go1.99.1","files":[{"filename":"go1.99.1.linux-amd64.tar.gz",'
+                                 f'"os":"linux","sha256":"{published}","size":1}},'
+                                 '{"filename":"go1.99.1.src.tar.gz","sha256":"' + "1" * 64 + '"}]}]')
+                root = tmp / ("root-ok" if ok else "root-bad")
+                script = self.helpers + "\n".join(function("install.sh", f) for f in ("sha256_of", "go_published_sha256", "download_go_toolchain"))
+                script += f'''
+GO_DL_INDEX_URL="file://{index}"
+go_required_version() {{ echo 1.99.1; }}
+go_download_platform() {{ echo linux-amd64; }}
+go_version_at_least() {{ return 1; }}
+GO_BOOTSTRAP_ROOT="{root}"
+curl() {{ local out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
+  if [ -n "$out" ]; then cp "{archive}" "$out"; else command curl -fsL "file://{index}"; fi; }}
+download_go_toolchain
+'''
+                result = subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual((root / "go1.99.1.linux-amd64" / "bin" / "go").exists(), ok)
+                if not ok:
+                    self.assertIn("does not match the sha256 go.dev publishes", result.stdout)
+
+    def test_nccl_archive_with_a_wrong_sha256_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "pkg" / "lib").mkdir(parents=True)
+            (tmp / "pkg" / "lib" / "libnccl.so.2").write_text("x")
+            archive = tmp / "nccl.txz"
+            subprocess.run(["tar", "-cJf", str(archive), "-C", str(tmp / "pkg"), "lib"], check=True)
+            real = subprocess.run(["sha256sum", str(archive)], capture_output=True, text=True, check=True).stdout.split()[0]
+            for want, ok in ((real, True), ("f" * 64, False)):
+                box = tmp / ("box-ok" if ok else "box-bad")
+                box.mkdir()
+                script = self.helpers + "\n".join(function("install.sh", f) for f in ("sha256_of", "fetch_nccl_into_box"))
+                script += f'''
+NCCL_DEFAULT_URL=unused NCCL_DEFAULT_SHA256=unused
+box_has_libnccl() {{ [ -e "$1/libnccl.so.2" ]; }}
+copy_resolved_lib() {{ cp "$1" "$2/"; }}
+LLM_INSTALL_NCCL_URL="file://{archive}" LLM_INSTALL_NCCL_SHA256="{want}" fetch_nccl_into_box "{box}"
+'''
+                result = subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual((box / "libnccl.so.2").exists(), ok)
+
+    def test_default_nccl_url_carries_a_pinned_sha256(self):
+        text = (ROOT / "install.sh").read_text()
+        self.assertRegex(text, r'NCCL_DEFAULT_SHA256="[0-9a-f]{64}"')
+
+    def test_system_python_protection_is_not_overridden_without_consent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            calls = tmp / "calls"
+            script = self.helpers + function("install.sh", "install_python_download_deps")
+            script += f'''
+python_in_venv() {{ return 1; }}
+ask() {{ return 1; }}
+python3() {{ echo "$*" >> "{calls}"; case "$*" in *--break-system-packages*) return 0;; *"pip install"*) return 1;; *) return 1;; esac; }}
+NONINTERACTIVE=1
+install_python_download_deps
+'''
+            result = subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("--break-system-packages", calls.read_text())
+            self.assertIn("python3 -m pip install --break-system-packages", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallerInstallsTheLatestRelease(unittest.TestCase):
+    """Review W19 (S-02, D4): new installs build the latest release unless a
+    ref is named, and a cosign bundle is checked when cosign is present."""
+
+    helpers = 'say() { echo "$*"; }; ok() { echo "OK $*"; }; warn() { echo "WARN $*"; }; err() { echo "ERR $*"; }\nGITHUB_REPO=o/r\n'
+
+    def run_bash(self, script):
+        return subprocess.run(["bash", "-u", "-c", script], capture_output=True, text=True)
+
+    def test_source_ref_defaults_to_the_latest_release_tag(self):
+        fn = function("install.sh", "resolve_source_ref")
+        redirect = 'curl() { printf "HTTP/2 302\\r\\nlocation: https://github.com/o/r/releases/tag/v9.8.7\\r\\n"; }\n'
+        got = self.run_bash(self.helpers + fn + "\n" + redirect + 'SOURCE_REF=""; resolve_source_ref; echo "REF=$SOURCE_REF"')
+        self.assertIn("REF=v9.8.7", got.stdout)
+        named = self.run_bash(self.helpers + fn + "\n" + redirect + 'SOURCE_REF=main; resolve_source_ref; echo "REF=$SOURCE_REF"')
+        self.assertIn("REF=main", named.stdout, "LLM_INSTALL_REF must win")
+        offline = self.run_bash(self.helpers + fn + '\ncurl() { return 7; }\nSOURCE_REF=""; resolve_source_ref; echo "REF=$SOURCE_REF"')
+        self.assertIn("REF=main", offline.stdout)
+        self.assertIn("WARN", offline.stdout)
+        self.assertNotIn(":-main}", (ROOT / "install.sh").read_text().split("SOURCE_REF=")[1].split("\n")[0])
+
+    def signature(self, cosign_rc=None, bundle=True):
+        fn = function("install.sh", "verify_release_signature")
+        with tempfile.TemporaryDirectory() as tmp:
+            stubs = Path(tmp) / "bin"
+            stubs.mkdir()
+            if cosign_rc is not None:
+                (stubs / "cosign").write_text(f"#!/bin/sh\necho \"$@\" > {tmp}/cosign-args\nexit {cosign_rc}\n")
+                (stubs / "cosign").chmod(0o755)
+            script = self.helpers + fn + '\nCOSIGN_IDENTITY_REGEXP="^id$"\n'
+            script += ('find_release_asset_url() { echo https://x/SHA256SUMS.bundle; }\n' if bundle
+                       else 'find_release_asset_url() { return 1; }\n')
+            script += f'curl() {{ while [ $# -gt 0 ]; do [ "$1" = -o ] && touch "$2"; shift; done; }}\nPATH="{stubs}:/usr/bin:/bin"\nverify_release_signature "{tmp}"\n'
+            result = self.run_bash(script)
+            args = (Path(tmp) / "cosign-args").read_text() if (Path(tmp) / "cosign-args").exists() else ""
+            return result, args
+
+    def test_cosign_bundle_is_verified_when_cosign_is_present(self):
+        good, args = self.signature(cosign_rc=0)
+        self.assertEqual(good.returncode, 0, good.stdout)
+        self.assertIn("verify-blob", args)
+        self.assertIn("--certificate-oidc-issuer https://token.actions.githubusercontent.com", args)
+        bad, _ = self.signature(cosign_rc=1)
+        self.assertNotEqual(bad.returncode, 0, "a bad signature must refuse the bundle")
+        none, _ = self.signature(cosign_rc=None)
+        self.assertEqual(none.returncode, 0)
+        self.assertIn("cosign not installed", none.stdout)
+        old, _ = self.signature(cosign_rc=0, bundle=False)
+        self.assertEqual(old.returncode, 0)
+        self.assertIn("no SHA256SUMS.bundle", old.stdout)

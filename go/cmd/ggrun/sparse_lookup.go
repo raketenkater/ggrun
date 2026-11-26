@@ -605,10 +605,24 @@ func validateObservedSparseLookup(cfg *config.Config, model *placement.ModelProf
 		return fmt.Errorf("backend did not keep the %d MiB lookup tier file-backed (%s)", strategy.SparseLookupMB, evidence)
 	}
 	if usage != nil {
-		fmt.Fprintf(os.Stderr, "[sparse] live lookup-tier check (%s): %d model mappings, %d MiB mapped, %d MiB resident; no table page anonymous or locked; %d MiB non-reclaimable\n",
-			strategy.SparseLookupPolicy, usage.Mappings, usage.SizeKB/1024, usage.RssKB/1024, measuredMB)
+		fmt.Fprintf(os.Stderr, "[sparse] %s\n", sparseLookupObservationSummary(strategy, usage, measuredMB, note))
 	}
 	return nil
+}
+
+// sparseLookupObservationSummary states what a passing live check saw. It
+// claims clean table pages only when every table byte was attributed; mixed
+// or unattributed mappings stay explicitly unknown (never a rejection).
+func sparseLookupObservationSummary(strategy *placement.Strategy, usage *mappedFileUsage, measuredMB int, note string) string {
+	verdict := "no table page anonymous or locked"
+	switch {
+	case note != "":
+		verdict = "table pages unknown: " + note
+	case !attributeLookupMappings(usage, strategy.SparseLookupRanges).Known:
+		verdict = "table pages unknown: lookup-table ranges not attributable; no model-mapping page anonymous or locked"
+	}
+	return fmt.Sprintf("live lookup-tier check (%s): %d model mappings, %d MiB mapped, %d MiB resident; %s; %d MiB non-reclaimable",
+		strategy.SparseLookupPolicy, usage.Mappings, usage.SizeKB/1024, usage.RssKB/1024, verdict, measuredMB)
 }
 
 // validateObservedHostTiers runs the CPU-expert and lookup-tier observations.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -186,5 +187,59 @@ func TestClaudeWorkflowHookRejectsAnUnpatchableNamedWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "inline script or scriptPath") || !strings.Contains(stderr.String(), "could not enforce") {
 		t.Fatalf("denial was not actionable: out=%q stderr=%q", out.String(), stderr.String())
+	}
+}
+
+// The hook rewrites timeouts; it must not grant permission the session's mode
+// would not. Modes that prompt get "ask" with the patched input, so the user
+// approves the script that will actually run.
+func TestClaudeWorkflowHookAsksOutsideAutonomousModes(t *testing.T) {
+	for _, tc := range []struct {
+		mode, want string
+	}{
+		{"default", "ask"},
+		{"acceptEdits", "ask"},
+		{"plan", "ask"},
+		{"dontAsk", "ask"},
+		{"", "ask"}, // older Claude Code without permission_mode
+		{"auto", "allow"},
+		{"bypassPermissions", "allow"},
+	} {
+		inR, inW, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		outR, outW, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldIn, oldOut := os.Stdin, os.Stdout
+		os.Stdin, os.Stdout = inR, outW
+		go func() {
+			_, _ = fmt.Fprintf(inW, `{"tool_name":"Workflow","tool_input":{"script":"await agent('x')"},"permission_mode":%q}`, tc.mode)
+			_ = inW.Close()
+		}()
+		cmdClaudeWorkflowHook(nil)
+		_ = outW.Close()
+		os.Stdin, os.Stdout = oldIn, oldOut
+		var out bytes.Buffer
+		_, _ = out.ReadFrom(outR)
+
+		var got struct {
+			HookSpecificOutput struct {
+				PermissionDecision string                 `json:"permissionDecision"`
+				UpdatedInput       map[string]interface{} `json:"updatedInput"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("mode %q: bad hook output %q: %v", tc.mode, out.String(), err)
+		}
+		if got.HookSpecificOutput.PermissionDecision != tc.want {
+			t.Errorf("mode %q: decision %q, want %q", tc.mode, got.HookSpecificOutput.PermissionDecision, tc.want)
+		}
+		script, _ := got.HookSpecificOutput.UpdatedInput["script"].(string)
+		if !strings.Contains(script, fmt.Sprintf("stallMs: %d", claudeNoTimeoutMS)) {
+			t.Errorf("mode %q: patched input missing from %q decision: %q", tc.mode, tc.want, out.String())
+		}
 	}
 }

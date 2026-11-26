@@ -270,7 +270,7 @@ func TestEmbeddedCatalogStampsMainlineWithTheUnion(t *testing.T) {
 	if err := json.Unmarshal(catalogJSON, &doc); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range doc.Candidates {
+	for _, c := range doc.rows() {
 		if c.Arch == "" || c.Runnable == nil {
 			continue
 		}

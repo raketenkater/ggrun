@@ -15,12 +15,13 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +37,13 @@ QUANT_PATTERN = re.compile(
 
 # Speculative-decoding heads published beside the weights under the same quant
 # names (mtp-X-Q8_0.gguf, MTP/..., dflash-X-BF16.gguf). Counting them made a
-# 2 GB MTP head a "Q4_0" of a 1T model.
-DRAFT_HEAD_NAMES = ("mtp", "dflash")
+# 2 GB MTP head a "Q4_0" of a 1T model, and on 2026-10-25 an 8 GB
+# dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf the Q8_0 of a 508 GB model.
+# Shared with tools/download/download_any_gguf.py (test_companion_rule_matches_downloader).
+DRAFT_HEAD_NAMES = ("mtp", "dflash", "dspark", "draft", "eagle", "eagle3", "medusa")
+# "mtp" may also name a main model that carries its MTP layers, and "eagle" a
+# main model (RWKV Eagle); the others are heads wherever they appear in a name.
+DRAFT_HEAD_WORDS = frozenset(DRAFT_HEAD_NAMES) - {"mtp", "eagle"}
 
 
 def is_calibration_or_adapter(path):
@@ -51,8 +57,42 @@ def is_calibration_or_adapter(path):
 
 def is_draft_head_gguf(path: str) -> bool:
     parts = path.lower().split("/")
-    return any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES) or any(
-        part in DRAFT_HEAD_NAMES for part in parts[:-1])
+    return (any(parts[-1].startswith(name + "-") for name in DRAFT_HEAD_NAMES)
+            or any(part in DRAFT_HEAD_NAMES for part in parts[:-1])
+            or bool(set(re.split(r"[-_.]+", parts[-1])) & DRAFT_HEAD_WORDS))
+
+
+# Bytes per parameter by quant label, mirroring bytesPerWeight in
+# go/pkg/recommend/speed.go (first match wins, same order).
+BYTES_PER_WEIGHT = (
+    ("F32", 4.0), ("BF16", 2.0), ("F16", 2.0), ("F8", 1.0), ("Q8", 1.06),
+    ("Q6", 0.82), ("Q5", 0.69), ("MXFP4", 0.53), ("MXP4", 0.53), ("IQ4", 0.51),
+    ("Q4", 0.56), ("I4", 0.56), ("IQ3", 0.41), ("Q3", 0.44), ("IQ2", 0.28),
+    ("Q2", 0.33), ("Q1", 0.20),
+)
+COMPANION_PARAM_RATIO = 15
+
+
+def drop_companion_sized(variants: list[tuple[str, int | None, Any]],
+                         label: str | None = None) -> list[tuple[str, int | None, Any]]:
+    """Drop (quant, size_bytes, item) artifacts implying under 1/15 of the
+    largest artifact's parameter count: a draft head or projector that escaped
+    the name rules (dspark-X-Q8_0.gguf, 2 GB beside a 300 GB model), never a
+    quant of the model. Unknown sizes are kept; with a label, drops are
+    reported on stderr. Mirrors tools/download/download_any_gguf.py and
+    dropCompanionSizedQuants in go/pkg/recommend/recommend.go."""
+    def implied(quant: str, size: int | None) -> float:
+        q = (quant or "").upper()
+        bpw = next((b for tag, b in BYTES_PER_WEIGHT if tag in q), 0.55)
+        return size / bpw if size else 0
+    params = [implied(quant, size) for quant, size, _ in variants]
+    most = max(params, default=0)
+    kept = [v for v, p in zip(variants, params) if not p or p * COMPANION_PARAM_RATIO >= most]
+    if label and len(kept) != len(variants):
+        dropped = [str(v[0]) for v, p in zip(variants, params) if p and p * COMPANION_PARAM_RATIO < most]
+        print(f"warning: {label}: dropped companion-sized quants {', '.join(dropped)} "
+              f"(under 1/{COMPANION_PARAM_RATIO} of the largest parameter count)", file=sys.stderr)
+    return kept
 
 
 def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
@@ -64,6 +104,7 @@ def model_weight_siblings(siblings: list[Any]) -> list[dict[str, Any]]:
     weights = [item for item in ggufs if not is_draft_head_gguf(str(item.get("rfilename") or ""))]
     return weights
 
+# Shared with tools/download/download_any_gguf.py (test_owner_scoring_matches_downloader).
 TRUSTED_GGUF_OWNERS = {
     "unsloth": 140,
     "bartowski": 95,
@@ -72,6 +113,8 @@ TRUSTED_GGUF_OWNERS = {
     "lmstudio-community": 60,
     "second-state": 45,
 }
+
+OTHER_OWNER_SCORE = 20
 
 FAMILY_PREFIXES = {
     "aya",
@@ -247,7 +290,7 @@ def fetch_json(api_key: str, url: str) -> dict[str, Any]:
     text = fetch_text(url, headers={"x-api-key": api_key})
     data = json.loads(text)
     if not isinstance(data, dict):
-        raise SystemExit("Artificial Analysis API response was not a JSON object")
+        raise ValueError("Artificial Analysis API response was not a JSON object")
     return data
 
 
@@ -258,7 +301,7 @@ def fetch_public_data(url: str) -> Any:
 def fetch_public_json(url: str) -> dict[str, Any]:
     data = fetch_public_data(url)
     if not isinstance(data, dict):
-        raise SystemExit(f"Public API response for {url} was not a JSON object")
+        raise ValueError(f"Public API response for {url} was not a JSON object")
     return data
 
 
@@ -330,7 +373,11 @@ def parse_open_weight_page_models(page: str) -> list[dict[str, Any]]:
 
 
 def fetch_public_open_weight_rows() -> list[dict[str, Any]]:
+    global PAGE_INDEX_VERSION
     page = fetch_text(OPEN_WEIGHTS_PAGE_URL, timeout=90)
+    versions = sorted(set(INDEX_VERSION_RE.findall(page)),
+                      key=lambda v: tuple(int(p) for p in re.findall(r"\d+", v)))
+    PAGE_INDEX_VERSION = versions[-1] if versions else None
     rows = parse_open_weight_page_models(page)
     if not rows:
         raise SystemExit("could not extract open-weight rows from Artificial Analysis leaderboard page")
@@ -349,7 +396,7 @@ def fetch_models_from_url(api_key: str, base_url: str, *, paginated: bool) -> li
         data = fetch_json(api_key, url)
         page_rows = data.get("data")
         if not isinstance(page_rows, list):
-            raise SystemExit("Artificial Analysis API response did not contain a data array")
+            raise ValueError("Artificial Analysis API response did not contain a data array")
         rows.extend(row for row in page_rows if isinstance(row, dict))
         pagination = data.get("pagination")
         if not paginated or not isinstance(pagination, dict) or not pagination.get("has_more"):
@@ -362,18 +409,21 @@ def fetch_models(api_key: str) -> list[dict[str, Any]]:
     try:
         return fetch_models_from_url(api_key, API_URL, paginated=True)
     except APIRequestError as exc:
-        if exc.code != 403:
-            raise SystemExit(f"Artificial Analysis API {exc}") from exc
-        print(f"Artificial Analysis API {exc}; falling back to legacy endpoint", file=sys.stderr)
-    try:
-        return fetch_models_from_url(api_key, LEGACY_API_URL, paginated=False)
-    except APIRequestError as exc:
-        raise SystemExit(f"Artificial Analysis API {exc}") from exc
+        if exc.code not in (401, 403):
+            raise
+        # The v2 models endpoint is subscription-only; a free key gets 403.
+        print(f"warning: Artificial Analysis v2 API returned {exc.code}; using the legacy endpoint", file=sys.stderr)
+    return fetch_models_from_url(api_key, LEGACY_API_URL, paginated=False)
 
 
 def load_open_weight_rows(api_key: str) -> tuple[list[dict[str, Any]], str]:
     if api_key:
-        rows = fetch_models(api_key)
+        # Any API failure falls back to the public page, which needs no key.
+        try:
+            rows = fetch_models(api_key)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"warning: Artificial Analysis API unavailable ({exc})", file=sys.stderr)
+            rows = []
         if rows and any(has_open_weight_metadata(row) for row in rows):
             open_rows = [row for row in rows if open_weights(row)]
             if open_rows:
@@ -587,7 +637,7 @@ def fetch_hf_model_info(repo: str) -> dict[str, Any] | None:
     url = f"{HF_MODEL_API_URL}/{encoded}?blobs=true"
     try:
         data = fetch_public_json(url)
-    except (APIRequestError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         warn_hf_error(f"Could not inspect Hugging Face repo {repo}", exc)
         HF_MODEL_CACHE[key] = None
         return None
@@ -631,6 +681,19 @@ def complete_shards(paths: list[str]) -> bool:
     return total > 0 and len(paths) == total and indices == set(range(1, total + 1))
 
 
+def drop_companion_quants(quants: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+    """drop_companion_sized over catalog quant rows."""
+    def size(q: dict[str, Any]) -> int | None:
+        b = q.get("size_bytes")
+        if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 0:
+            return int(b)
+        gb = q.get("size_gb")
+        if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
+            return int(gb * 1073741824)
+        return None
+    return [q for _, _, q in drop_companion_sized([(str(q.get("name") or ""), size(q), q) for q in quants], label)]
+
+
 def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
     key = repo.lower()
     if key in HF_QUANT_CACHE:
@@ -657,16 +720,25 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
         shard = SHARD_PATTERN.fullmatch(fname)
         stem = shard.group(1) if shard else fname
         groups.setdefault(quant, {}).setdefault(stem, []).append((fname, size))
+    variants = []
+    for quant, stems in groups.items():
+        for files in stems.values():
+            if not complete_shards([name for name, _ in files]):
+                continue
+            known = all(isinstance(size, int) and not isinstance(size, bool) and size > 0 for _, size in files)
+            variants.append((quant, sum(size for _, size in files) if known else None, files))
+    # Drop companion-sized artifacts before the ambiguity check, so a draft
+    # head sharing a label with the model cannot hide the model's own quant.
+    complete: dict[str, list[int | None]] = {}
+    for quant, size, _ in drop_companion_sized(variants, repo):
+        complete.setdefault(quant, []).append(size)
     quants = []
-    for quant, variants in groups.items():
-        complete = [files for files in variants.values()
-                    if complete_shards([name for name, _ in files])]
-        if len(complete) != 1:
+    for quant, found in complete.items():
+        if len(found) != 1:
             continue  # ambiguous model variants must not be added together
-        files = complete[0]
-        if any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for _, size in files):
+        size = found[0]
+        if size is None:
             continue  # missing size must not make a shard set appear smaller
-        size = sum(size for _, size in files)
         quants.append({"name": quant, "size_gb": round(size / 1073741824, 2),
                        "size_bytes": size, "dynamic": quant.startswith("UD-")})
     quants.sort(key=lambda q: q["size_bytes"])
@@ -682,7 +754,9 @@ def fetch_hf_quants(repo: str) -> list[dict[str, Any]]:
 # leading_dense, kv_lora) — those live only inside the GGUF KV metadata block.
 # The geometry is identical across every quant of a model, so one range request
 # per repo (on any one GGUF file) is enough; no per-quant fetch.
-GGUF_HEADER_FETCH_BYTES = 16 * 1024 * 1024  # 16 MiB covers KV metadata + tokenizer for current models
+# 16 MiB covers KV metadata + tokenizer for most models; a large vocabulary
+# (Sarvam 105B) needs the second, larger range.
+GGUF_HEADER_FETCH_STEPS = (16 * 1024 * 1024, 64 * 1024 * 1024)
 HF_GGUF_ARCH_CACHE: dict[str, dict[str, Any] | None] = {}
 
 
@@ -708,14 +782,50 @@ def _representative_gguf_file(siblings: list[dict[str, Any]]) -> str | None:
     return candidates[0][0]
 
 
+def _fetch_gguf_range(url: str, nbytes: int) -> bytes:
+    req_headers = {"Range": f"bytes=0-{nbytes - 1}", "User-Agent": "ggrun-catalog-refresh"}
+    req_headers.update(hf_auth_headers(url))
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read(nbytes)
+
+
+def parse_gguf_header(raw: bytes) -> tuple[dict[str, Any] | None, bool]:
+    """Parse GGUF KV metadata: (meta, complete), or (None, False) when not GGUF.
+
+    complete is False when the bytes ran out mid-metadata; meta then holds the
+    keys read before the cut.
+    """
+    # parse_gguf._read_kv reads from a file-like object; BytesIO works and lets
+    # us reuse the exact tested parser instead of duplicating the KV walk.
+    import io
+    import struct
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gguf"))
+    from parse_gguf import _read_kv
+
+    buf = io.BytesIO(raw)
+    if len(raw) < 24 or buf.read(4) != b"GGUF":
+        return None, False
+    buf.read(4)  # gguf version
+    struct.unpack("<Q", buf.read(8))[0]  # tensor_count (0 on shard 1 of split models)
+    kv_count = struct.unpack("<Q", buf.read(8))[0]
+    meta: dict[str, Any] = {"fused": 0, "expert_bytes": 0, "non_expert_bytes": 0}
+    try:
+        _read_kv(buf, meta, kv_count)
+    except Exception:  # noqa: BLE001 - any parse failure is reported by the caller
+        return meta, False
+    return meta, True
+
+
 def fetch_gguf_arch(repo: str) -> dict[str, Any] | None:
     """Read GGUF KV metadata geometry from one HF range request.
 
     Returns a dict with the fields the placement engine's overhead formula
     needs (arch, layers, experts, exp_used, exp_ff, exp_shared_ff, embd, ff,
     hkv, kl, vl, kv_lora, q_lora, leading_dense, ctx_train), or None when the
-    repo has no GGUF or the header could not be parsed. Best-effort: any
-    failure leaves the caller to fall back to the size-only overhead estimate.
+    repo has no GGUF or the header could not be parsed. Metadata larger than
+    the first range is retried with a larger one. Best-effort: any failure
+    leaves the caller to fall back to the size-only overhead estimate.
     """
     if not repo or "/" not in repo:
         return None
@@ -735,38 +845,33 @@ def fetch_gguf_arch(repo: str) -> dict[str, Any] | None:
         HF_GGUF_ARCH_CACHE[key] = None
         return None
     url = _gguf_resolve_url(repo, fname)
-    # parse_gguf._read_kv reads from a file-like object; BytesIO works and lets
-    # us reuse the exact tested parser instead of duplicating the KV walk.
-    import io
-    import struct
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gguf"))
-    from parse_gguf import _read_kv
-
-    req_headers = {"Range": f"bytes=0-{GGUF_HEADER_FETCH_BYTES - 1}", "User-Agent": "ggrun-catalog-refresh"}
-    req_headers.update(hf_auth_headers(url))
-    try:
-        req = urllib.request.Request(url, headers=req_headers)
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read(GGUF_HEADER_FETCH_BYTES)
-    except Exception as exc:
-        warn_hf_error(f"Could not read GGUF header for {repo}/{fname}", exc)
-        HF_GGUF_ARCH_CACHE[key] = None
-        return None
-    buf = io.BytesIO(raw)
-    try:
-        if buf.read(4) != b"GGUF":
+    meta: dict[str, Any] | None = None
+    complete = truncated = False
+    for nbytes in GGUF_HEADER_FETCH_STEPS:
+        try:
+            raw = _fetch_gguf_range(url, nbytes)
+        except Exception as exc:
+            warn_hf_error(f"Could not read GGUF header for {repo}/{fname}", exc)
             HF_GGUF_ARCH_CACHE[key] = None
             return None
-        buf.read(4)  # gguf version
-        struct.unpack("<Q", buf.read(8))[0]  # tensor_count (0 on shard 1 of split models)
-        kv_count = struct.unpack("<Q", buf.read(8))[0]
-        meta: dict[str, Any] = {"fused": 0, "expert_bytes": 0, "non_expert_bytes": 0}
-        _read_kv(buf, meta, kv_count)
-    except Exception as exc:
-        warn_hf_error(f"GGUF header parse failed for {repo}/{fname}", exc)
+        meta, complete = parse_gguf_header(raw)
+        # A short read is the whole file: a parse error there is not truncation.
+        truncated = meta is not None and not complete and len(raw) >= nbytes
+        if not truncated:
+            break
+    if meta is None or not (complete or truncated):
+        print(f"warning: GGUF header unreadable for {repo}/{fname}; geometry unknown", file=sys.stderr)
         HF_GGUF_ARCH_CACHE[key] = None
         return None
+    if truncated:
+        # The metadata outgrew every range. Sarvam 105B's 262k-entry tokenizer
+        # overran 16 MiB, and dropping the whole header catalogued that MoE as
+        # dense. Keys before the cut are exact, but later geometry may be
+        # missing, so keep only what classifies the model and leave the rest
+        # unknown; the recommender then uses its size-only overhead estimate.
+        print(f"warning: GGUF metadata for {repo}/{fname} exceeds {GGUF_HEADER_FETCH_STEPS[-1] >> 20} MiB; "
+              "keeping only architecture and expert counts", file=sys.stderr)
+        meta = {k: meta[k] for k in ("arch", "experts", "exp_used") if k in meta}
     # Project to the fields the recommender/overhead formula consumes.
     out: dict[str, Any] = {}
     for field in (
@@ -791,7 +896,7 @@ def search_hf_models(query: str, limit: int) -> list[dict[str, Any]]:
     url = f"{HF_MODEL_API_URL}?{urllib.parse.urlencode({'search': query, 'limit': limit})}"
     try:
         data = fetch_public_data(url)
-    except (APIRequestError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         warn_hf_error(f"Hugging Face search unavailable for {query!r}", exc)
         HF_SEARCH_CACHE[key] = []
         return []
@@ -842,11 +947,55 @@ VARIANT_QUALIFIERS = {
     # resolved to the finance retune Ling-3.0-flash-Fin, and the duplicate repo
     # then dropped the base model from the catalog.
     "fin",
+    # Command A+ is not Command A; norm() drops "+", so it is spelled out.
+    "plus",
+    # Expert-pruned models have fewer weights than the scored one: MiMo V2.6
+    # Flash was resolved to MiMo-V2.6-Flash-REAP50 at half its size.
+    "prun", "reap",
 }
+# Inflections a qualifier still names: "Distilled" is a distill.
+QUALIFIER_SUFFIXES = ("", "s", "ed", "ing", "ation")
+# Pruning qualifiers may carry the kept share: REAP50, REAP-25.
+NUMBERED_QUALIFIERS = {"reap"}
 
 
 def raw_name_tokens(text: str) -> set[str]:
     return set(norm(text).split())
+
+
+def name_qualifiers(text: str) -> set[str]:
+    words = raw_name_tokens(text.replace("+", " plus "))
+    return {q for q in VARIANT_QUALIFIERS for w in words
+            if w.startswith(q) and (w[len(q):] in QUALIFIER_SUFFIXES
+                                    or q in NUMBERED_QUALIFIERS and w[len(q):].isdigit())}
+
+
+def spelled_versions(name: str) -> str:
+    """Read "_" between digits as a version dot: Llama-3_3, v1_5."""
+    return re.sub(r"(?<=\d)_(?=\d)", ".", name)
+
+
+def identity_tokens(text: str) -> set[str]:
+    """Name tokens without parenthetical notes; "v1" and "1" are one version."""
+    return {re.sub(r"^v(?=\d)", "", t) for t in tokens(re.sub(r"\([^)]*\)", " ", text))}
+
+
+def fused_versions(text: str) -> set[str]:
+    """Words fusing a family and its version: lfm2, lfm2.5, k2, m3.1, v4.1."""
+    words = re.split(r"[\s_\-/()]+", text.lower())
+    return {w for w in words if re.fullmatch(r"[a-z]+\d+(?:\.\d+)*", w)}
+
+
+def fused_versions_match(target: str, candidate: str) -> bool:
+    """LFM2 is not LFM2.5 and MiniMax M3 is not M3.1: a candidate word that
+    spells the target's family with another version names another model."""
+    wanted = fused_versions(target)
+    for word in fused_versions(candidate):
+        family = re.match(r"[a-z]+", word).group()
+        same_family = {w for w in wanted if re.match(r"[a-z]+", w).group() == family}
+        if same_family and word not in same_family:
+            return False
+    return True
 
 
 def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[str, Any]) -> bool:
@@ -867,7 +1016,7 @@ def creator_prefix_only(candidate_name: str, target_tokens: set[str], row: dict[
 
 
 def auxiliary_repo(repo: str) -> bool:
-    return bool(raw_name_tokens(repo_name(repo)) & {"mtp", "dflash", "draft", "mmproj", "adapter", "lora"})
+    return bool(raw_name_tokens(repo_name(repo)) & ({"mtp", "mmproj", "adapter", "lora"} | DRAFT_HEAD_WORDS))
 
 
 def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
@@ -877,11 +1026,18 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
     target_tokens = tokens(target_query)
     # Judge the repository's model name, not its owner: "DevQuasar-4" once
     # supplied the "4" of "Mistral Small 4" for a Small-24B-Base-2501 repo.
-    candidate_name = repo_name(candidate_repo)
+    candidate_name = spelled_versions(repo_name(candidate_repo))
     # Quant and GGUF suffixes are not part of the name: "Q4_0_4_8" once
     # supplied the "4" of "Mistral Small 4" for a Small-Instruct-2409 repo.
     candidate_tokens = tokens(clean_repo_model_name(candidate_name))
     if not target_tokens or not candidate_tokens:
+        return False
+    # Every word of the model's own name must appear: one shared word let
+    # "A.X-K2" resolve to a 3.7B distill and "Command A" to Command A+.
+    own_name = re.sub(r"\([^)]*\)", " ", bare_model_name(row))
+    if not identity_tokens(own_name) <= identity_tokens(clean_repo_model_name(candidate_name)):
+        return False
+    if not fused_versions_match(own_name, clean_repo_model_name(candidate_name)):
         return False
     if not family_match(target_tokens, candidate_tokens):
         return False
@@ -898,9 +1054,8 @@ def candidate_relevant(candidate_repo: str, row: dict[str, Any]) -> bool:
         return False
     # Parenthetical notes ("based on GLM-4.5-Air") describe lineage, not the
     # model's own name.
-    target_raw = raw_name_tokens(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
-    candidate_raw = raw_name_tokens(clean_repo_model_name(candidate_name))
-    if (target_raw & VARIANT_QUALIFIERS) != (candidate_raw & VARIANT_QUALIFIERS):
+    target_qualifiers = name_qualifiers(" ".join([target_query, re.sub(r"\([^)]*\)", " ", row_name(row))]))
+    if target_qualifiers != name_qualifiers(clean_repo_model_name(candidate_name)):
         return False
     if not creator_prefix_only(clean_repo_model_name(candidate_name), target_tokens, row):
         return False
@@ -962,7 +1117,7 @@ def base_model_tag_matches(item: dict[str, Any], row: dict[str, Any]) -> bool:
 
 
 def quick_hf_score(repo: str, row: dict[str, Any], item: dict[str, Any] | None = None) -> int:
-    score = TRUSTED_GGUF_OWNERS.get(repo_owner(repo), 20)
+    score = TRUSTED_GGUF_OWNERS.get(repo_owner(repo), OTHER_OWNER_SCORE)
     target_key = norm(model_query(row))
     candidate_key = norm(clean_repo_model_name(repo))
     if huggingface_repo(row).lower() == repo.lower():
@@ -993,7 +1148,9 @@ def quick_hf_score(repo: str, row: dict[str, Any], item: dict[str, Any] | None =
 
 def hf_repo_score(repo: str, row: dict[str, Any], quants: list[dict[str, Any]], item: dict[str, Any] | None = None) -> int:
     score = quick_hf_score(repo, row, item)
-    score += 25 * min(8, len(quants))
+    # Capped low: a well-stocked repo of the wrong model (a distill with eight
+    # quants) must not outscore the right model's sparser repo.
+    score += 10 * min(4, len(quants))
     names = {str(q.get("name") or "").upper() for q in quants}
     if any(q.startswith(("Q4", "IQ4", "MXFP4", "MXP4")) for q in names):
         score += 80
@@ -1002,7 +1159,20 @@ def hf_repo_score(repo: str, row: dict[str, Any], quants: list[dict[str, Any]], 
     return score
 
 
-def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list[dict[str, Any]], str] | None:
+# A model's representative quant may move between refreshes (another repo,
+# another quant ladder), but not by 5x: that is another model.
+MAX_SIZE_JUMP = 5
+
+
+def size_jump(previous_gb: float, quants: list[dict[str, Any]]) -> float:
+    size = representative_size_gb(quants)
+    if previous_gb <= 0 or size <= 0:
+        return 1.0
+    return max(size / previous_gb, previous_gb / size)
+
+
+def resolve_gguf_repo(row: dict[str, Any], search_limit: int,
+                      previous: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]], str] | None:
     ranked: list[tuple[int, str, list[dict[str, Any]], str]] = []
     inspected: set[str] = set()
 
@@ -1045,6 +1215,13 @@ def resolve_gguf_repo(row: dict[str, Any], search_limit: int) -> tuple[str, list
             if quants:
                 ranked.append((hf_repo_score(repo, row, quants), repo, quants, "direct"))
 
+    previous_gb = float((previous or {}).get("size_gb") or 0)
+    for entry in list(ranked):
+        jump = size_jump(previous_gb, entry[2])
+        if jump > MAX_SIZE_JUMP:
+            print(f"warning: {display_name(row)}: rejected {entry[1]} ({representative_size_gb(entry[2]):g} GB), "
+                  f"{jump:.0f}x off the previous {previous_gb:g} GB", file=sys.stderr)
+            ranked.remove(entry)
     if not ranked:
         return None
     ranked.sort(reverse=True, key=lambda entry: entry[0])
@@ -1125,7 +1302,8 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
     # compute launch overhead with the placement engine's formula, not an
     # estimate. Best-effort: missing geometry leaves the recommender's fallback.
     arch = fetch_gguf_arch(repo) or {}
-    shape = candidate_model_shape(row, arch, fetch_hf_model_info(repo) or {}, quants)
+    info = fetch_hf_model_info(repo) or {}
+    shape = candidate_model_shape(row, arch, info, quants)
     cand = {
         "aa_id": row_id(row),
         "aa_intelligence_index": round(idx, 3) if idx else 0,
@@ -1140,10 +1318,17 @@ def candidate_from_row(row: dict[str, Any], repo: str, quants: list[dict[str, An
         "quality": quality_score(idx),
         "quants": quants,
         "repo": repo,
+        # The repository commit the quant list was read from (review S-09):
+        # downloads fetch exactly these files, not whatever the repo holds later.
+        **({"revision": info["sha"]} if re.fullmatch(r"[0-9a-f]{40}", str(info.get("sha") or "")) else {}),
         "size_gb": round(representative_size_gb(quants), 2),
         "speed": speed_score(tps),
         **shape,
     }
+    if row.get("_mapped_from"):
+        cand["aa_index_mapped_from"] = row["_mapped_from"]
+        cand["notes"] = (f"{cand['notes']}; ~intelligence mapped from its {row['_mapped_from']} score "
+                         f"until re-evaluated").lstrip("; ")
     if arch:
         # Embed only the geometry fields the overhead formula consumes; keep
         # the catalog lean and the schema explicit.
@@ -1171,9 +1356,316 @@ def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(best.values(), key=lambda row: float(row.get("aa_intelligence_index") or 0), reverse=True)
 
 
-def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int) -> dict[str, Any]:
+# A row missing from one leaderboard scrape (Kimi K3, October 2026) is more
+# often a scrape hiccup than a withdrawn model. Its last resolved entry is kept
+# this long after it was last seen, so one bad scrape cannot delete it.
+CARRY_FORWARD_DAYS = 14
+# Losing one of the previous catalog's top rows earns a louder warning.
+TOP_ROWS_WATCHED = 10
+# A refresh is refused when the scrape looks broken or rescaled: carried rows
+# keep their old scores, so a new scale must never be mixed with them, and a
+# catalog that loses most of its rows would ship to every installed client.
+MIN_SCORED_SHARE = 0.5
+MIN_KEPT_SHARE = 0.5
+MAX_SCALE_DRIFT = 0.15
+# A leaderboard index version change (v4 -> v5.0, 2026-10) rescales every
+# score and leaves most models unscored until they are re-evaluated. Those keep
+# a score converted from the previous version by a fit over the models scored
+# on both; the fit must be well supported.
+SCALE_MIN_PAIRS = 8
+SCALE_MIN_R2 = 0.8
+SCALE_IDENTITY_TOL = 0.02
+INDEX_VERSION_RE = re.compile(r"Intelligence Index (v\d+(?:\.\d+)?)")
+PAGE_INDEX_VERSION: str | None = None
+
+# Open-weight models the leaderboard does not score, listed by review. They
+# carry no Artificial Analysis index; quality is a "~" estimate one point under
+# the scored row named by estimate_from, and the recommender ranks every
+# estimated row after the scored ones. They are written under
+# "reviewed_candidates", not "candidates": released binaries fetch main's
+# catalog, rank by quality alone, and would put the estimate above scored
+# rows. Facts were checked against the Hugging Face model cards and
+# config.json on 2026-10-27 (MiniMax-M3.1-Flash: ~428B total, 23B active, 60
+# layers, 128 experts, 4 per token; Nanbeige4.3-33B: LlamaForCausalLM, 52
+# layers); the GGUF header wins where they disagree.
+REVIEWED_UNSCORED_MODELS: tuple[dict[str, Any], ...] = (
+    {"name": "MiniMax-M3.1-Flash", "family": "MiniMax", "repo": "unsloth/MiniMax-M3.1-Flash-GGUF",
+     "estimate_from": "MiniMax-M3",
+     "why": "Artificial Analysis lists MiniMax as proprietary, but MiniMaxAI/MiniMax-M3.1-Flash publishes weights",
+     "facts": {"arch": "minimax-m3", "layers": 60, "experts": 128, "exp_used": 4,
+               "total_params_b": 428, "active_params_b": 23, "moe": True}},
+    {"name": "Nanbeige4.3-33B", "family": "Nanbeige", "repo": "bartowski/Nanbeige_Nanbeige4.3-33B-GGUF",
+     "estimate_from": "Nanbeige4.1-3B",
+     "why": "Artificial Analysis has no page for it; Nanbeige/Nanbeige4.3-33B publishes weights",
+     "facts": {"arch": "llama", "layers": 52, "total_params_b": 33.119, "moe": False}},
+)
+
+
+def parse_utc(text: Any) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def previous_row(prev: dict[str, Any]) -> dict[str, Any]:
+    """The leaderboard row a previous catalog entry was built from, as far as it says."""
+    name, family = str(prev.get("name") or ""), str(prev.get("family") or "")
+    if family and name.lower().startswith(family.lower() + " "):
+        name = name[len(family) + 1:]  # display_name() prefixed the creator
+    return {"name": name, "slug": prev.get("aa_slug") or "", "creator": {"name": family}}
+
+
+def previous_matches(prev: dict[str, Any], row: dict[str, Any]) -> bool:
+    """The previous entry still names this model under today's matcher.
+
+    A repo resolved by its constructed name ("direct") was never searched for,
+    so only a searched one can be an old mismatch (Command A -> Command A+).
+    """
+    return ("resolved by direct" in str(prev.get("notes") or "")
+            or candidate_relevant(str(prev.get("repo") or ""), row))
+
+
+def carry_forward(prev: dict[str, Any], row: dict[str, Any], now: datetime, why: str) -> dict[str, Any] | None:
+    """The previous entry, kept while fresh and still the same model, else None."""
+    name = prev.get("name")
+    seen = parse_utc(prev.get("aa_updated_at"))
+    if seen is None or now - seen > timedelta(days=CARRY_FORWARD_DAYS):
+        print(f"warning: {name}: {why}; dropped (last seen {prev.get('aa_updated_at') or 'never'})", file=sys.stderr)
+        return None
+    if not previous_matches(prev, row):
+        print(f"warning: {name}: {why}; dropped, {prev.get('repo')} no longer matches the model", file=sys.stderr)
+        return None
+    cand = dict(prev)
+    cand["quants"] = drop_companion_quants(list(prev.get("quants") or []), str(prev.get("repo")))
+    if not cand["quants"]:
+        return None
+    note = f"last seen on the leaderboard {seen.date().isoformat()}"
+    if note not in str(cand.get("notes") or ""):
+        cand["notes"] = f"{cand.get('notes') or ''}; {note}".lstrip("; ")
+    expires = (seen + timedelta(days=CARRY_FORWARD_DAYS)).date().isoformat()
+    print(f"warning: {name}: {why}; kept the previous entry until {expires}", file=sys.stderr)
+    return cand
+
+
+def reviewed_candidates(candidates: list[dict[str, Any]], previous: list[dict[str, Any]],
+                        scale: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Catalog rows for REVIEWED_UNSCORED_MODELS, ranked below their anchor.
+
+    Anchors come from this catalog first. A fallback from the previous catalog
+    is converted when the index version changed, so no old-scale quality is
+    listed next to new-scale rows.
+    """
+    scale = scale or {}
+    changed = scale.get("version") not in (None, scale.get("previous_version"))
+
+    def current(row: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
+        if not row or not changed:
+            return row
+        old = catalog_intelligence(row) if key == "index" else int(row.get("quality") or 0) / 1.65
+        score = to_current_scale(old, scale)
+        return dict(row, aa_intelligence_index=score, quality=quality_score(score)) if score > 0 else None
+    by_name = {str(c.get("name") or "").lower(): c for c in candidates}
+    repos = {str(c.get("repo") or "").lower() for c in candidates}
+    out = []
+    for spec in REVIEWED_UNSCORED_MODELS:
+        name, repo = spec["name"], spec["repo"]
+        if name.lower() in by_name or repo.lower() in repos:
+            continue  # the leaderboard scores it now
+        anchor = by_name.get(spec["estimate_from"].lower())
+        if not anchor:
+            # The anchor can leave one scrape (Nanbeige4.1-3B, 2026-10-29);
+            # its last committed score still anchors the estimate.
+            anchor = current(next((c for c in previous
+                                   if str(c.get("name") or "").lower() == spec["estimate_from"].lower()), None), "index")
+        prior = current(next((c for c in previous if str(c.get("name") or "").lower() == name.lower()
+                              and int(c.get("quality") or 0) > 1), None), "quality")
+        if not anchor or catalog_intelligence(anchor) <= 0 or int(anchor.get("quality") or 0) <= 1:
+            if not prior:
+                print(f"warning: {name}: no scored {spec['estimate_from']} row to estimate from; not listed", file=sys.stderr)
+                continue
+            # The anchor left the leaderboard; the reviewed row keeps the score
+            # it was listed with, converted when the index version changed.
+            anchor = {"name": prior.get("anchor_name") or spec["estimate_from"], "quality": int(prior["quality"]) + 1}
+        quants = fetch_hf_quants(repo)
+        if not quants:
+            old = next((c for c in previous if str(c.get("repo") or "").lower() == repo.lower()), None)
+            quants = drop_companion_quants(list((old or {}).get("quants") or []), repo)
+        if not quants:
+            print(f"warning: {name}: no GGUF quants in {repo}; not listed", file=sys.stderr)
+            continue
+        row = {"name": name, "creator": {"name": spec["family"]}}
+        try:
+            cand = candidate_from_row(row, repo, quants, "reviewed override")
+        except Exception as exc:  # noqa: BLE001 - one bad repo never fails the refresh
+            print(f"warning: {name}: {exc}; not listed", file=sys.stderr)
+            continue
+        for field, want in spec["facts"].items():
+            have = cand.get(field)
+            if field in ("total_params_b", "active_params_b") and not have:
+                cand[field] = want
+            elif field == "moe":
+                cand["moe"] = bool(have) or want
+            elif have is None:
+                cand[field] = want
+            elif have != want:
+                print(f"warning: {name}: GGUF {field}={have}, reviewed {want}; keeping the GGUF value", file=sys.stderr)
+        cand.update({
+            "aa_query": "", "aa_slug": "", "aa_updated_at": "",
+            "family": spec["family"],
+            "quality": int(anchor["quality"]) - 1,
+            "anchor_name": anchor["name"],
+            "notes": (f"Unscored: {spec['why']}; ~intelligence is an estimate one point under "
+                      f"{anchor['name']}'s score; listed by review"),
+        })
+        out.append(cand)
+    return out
+
+
+def validate_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Repair or drop rows the Go catalog tests reject; never fail the refresh."""
+    out = []
+    for cand in candidates:
+        label = f"{cand.get('name')} ({cand.get('repo')})"
+        quants = drop_companion_quants(list(cand.get("quants") or []), label)
+        if not quants:
+            print(f"warning: {label}: no main-model quants; dropped", file=sys.stderr)
+            continue
+        if len(quants) != len(cand.get("quants") or []):
+            cand["quants"] = quants
+            cand["size_gb"] = round(representative_size_gb(quants), 2)
+        experts = cand.get("experts")
+        if isinstance(experts, int) and experts > 1 and not cand.get("moe"):
+            print(f"warning: {label}: {experts} experts but classified dense; marked MoE", file=sys.stderr)
+            cand["moe"] = True
+        out.append(cand)
+    return out
+
+
+def fit_power(pairs: list[tuple[float, float]]) -> tuple[float, float, float]:
+    """Theil-Sen fit of log y = a*log x + b over positive pairs; R^2 on the raw values.
+
+    A power law stays positive and monotone at the low end, where a straight
+    line through the v4 -> v5 pairs (intercept -5.8) clamped 39 small models.
+    Median slopes keep one mismatched low-end pair from bending the fit: least
+    squares in log space let a single (4 -> 7) pair double map(4) and still
+    pass the raw-value R^2 gate.
+    """
+    pts = [(math.log(x), math.log(y)) for x, y in pairs if x > 0 and y > 0]
+    slopes = [(y2 - y1) / (x2 - x1) for i, (x1, y1) in enumerate(pts) for x2, y2 in pts[i + 1:] if x2 != x1]
+    if not slopes:
+        return 0.0, 0.0, 0.0
+    a = statistics.median(slopes)
+    b = statistics.median(y - a * x for x, y in pts)
+    ys = [y for _, y in pairs if y > 0]
+    mean = sum(ys) / len(ys)
+    ss_tot = sum((y - mean) ** 2 for y in ys)
+    ss_res = sum((y - math.exp(a * math.log(x) + b)) ** 2 for x, y in pairs if x > 0 and y > 0)
+    return a, b, (1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+
+def index_version(label: str | None) -> str | None:
+    """A version label without a trailing ".0" (the page says both v5.0 and v5)."""
+    return re.sub(r"(\.0+)+$", "", label) if label else label
+
+
+def to_current_scale(score: float, scale: dict[str, Any]) -> float:
+    """A previous-version score on the current index scale (0 when no fit)."""
+    fit = scale.get("fit")
+    if score <= 0 or not fit:
+        return 0.0
+    return round(math.exp(fit["a"] * math.log(score) + fit["b"]), 3)
+
+
+def apply_index_scale(rows: list[dict[str, Any]], previous: list[dict[str, Any]], prev_version: str,
+                      page_version: str | None = None,
+                      previous_fit: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Put every row on the current index scale.
+
+    The leaderboard names its index version (v5.0 since 2026-10). On a version
+    change, models it has not re-evaluated keep a score converted from their
+    previous-version score by a power fit over the models scored on both; a
+    thin or weak fit refuses the refresh. Within one version, a model still
+    unscored keeps the converted score it was listed with until the
+    leaderboard scores it.
+    """
+    rows = [dict(r) for r in dedupe_rows(rows)]
+    prev_version, page_version = index_version(prev_version) or "v4", index_version(page_version)
+    version = page_version or prev_version
+    scale: dict[str, Any] = {"version": version, "previous_version": prev_version, "open_rows": len(rows)}
+    before = {str(p["aa_slug"]): p for p in previous if p.get("aa_slug") and catalog_intelligence(p) > 0}
+    if version == prev_version and previous_fit:
+        scale["fit_from_previous_version"] = previous_fit  # provenance of kept ~ scores
+    if version != prev_version:
+        pairs = [(catalog_intelligence(p), intelligence(row)) for row in rows
+                 if intelligence(row) > 0 and (p := before.get(row_slug(row))) and not p.get("aa_index_mapped_from")]
+        scale["pairs"] = len(pairs)
+        if len(pairs) < SCALE_MIN_PAIRS:
+            scale["refused"] = (f"index changed {prev_version} -> {version} but only {len(pairs)} models are "
+                                f"scored on both; need {SCALE_MIN_PAIRS} to convert the rest")
+        else:
+            a, b, r2 = fit_power(pairs)
+            scale.update(fit={"kind": "power", "a": round(a, 6), "b": round(b, 6)}, r2=round(r2, 3))
+            if r2 < SCALE_MIN_R2 or not 0.2 <= a <= 3.0:
+                scale["refused"] = (f"index changed {prev_version} -> {version} and the conversion fit over "
+                                    f"{len(pairs)} models is weak (exponent {a:.2f}, R^2 {r2:.2f})")
+                scale.pop("fit")
+            elif abs(a - 1) < SCALE_IDENTITY_TOL and abs(b) < SCALE_IDENTITY_TOL:
+                # Scores did not move: a stray label on the page, not a rescale.
+                print(f"warning: page names index {version} but scores match {prev_version}; keeping {prev_version}",
+                      file=sys.stderr)
+                version = prev_version
+                scale = {"version": version, "previous_version": prev_version, "open_rows": len(rows),
+                         "ignored_page_version": page_version}
+                if previous_fit:
+                    scale["fit_from_previous_version"] = previous_fit
+    for row in rows:
+        prev = before.get(row_slug(row))
+        if intelligence(row) > 0 or not prev:
+            continue
+        if version != prev_version:
+            score = to_current_scale(catalog_intelligence(prev), scale)
+            if score > 0:
+                row["intelligenceIndex"], row["_mapped_from"] = score, prev_version
+        elif prev.get("aa_index_mapped_from"):
+            row["intelligenceIndex"] = catalog_intelligence(prev)
+            row["_mapped_from"] = prev["aa_index_mapped_from"]
+    scale["scored_rows"] = sum(1 for row in rows if intelligence(row) > 0)
+    scale["real_scored_rows"] = sum(1 for row in rows if intelligence(row) > 0 and not row.get("_mapped_from"))
+    return rows, scale
+
+
+def map_carried(cand: dict[str, Any], scale: dict[str, Any]) -> dict[str, Any] | None:
+    """A carried previous row on the current scale, or None when it cannot be converted."""
+    if cand.pop("_on_scale", False) or scale.get("version") == scale.get("previous_version"):
+        return cand
+    score = to_current_scale(catalog_intelligence(cand), scale)
+    if score <= 0:
+        print(f"warning: {cand.get('name')}: carried row cannot be converted to index {scale.get('version')}; dropped",
+              file=sys.stderr)
+        return None
+    return dict(cand, aa_intelligence_index=score, quality=quality_score(score),
+                aa_index_mapped_from=scale.get("previous_version"))
+
+
+def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, search_limit: int,
+                  previous: list[dict[str, Any]] | None = None, now: datetime | None = None,
+                  prev_version: str = "v4", page_version: str | None = None,
+                  previous_fit: dict[str, Any] | None = None) -> dict[str, Any]:
+    previous = [c for c in previous or [] if isinstance(c, dict) and c.get("repo")]
+    now = now or datetime.now(timezone.utc)
+    rows, scale = apply_index_scale(rows, previous, prev_version, page_version, previous_fit)
+    scored_before = [c for c in previous if catalog_intelligence(c) > 0]
+    by_slug = {str(c.get("aa_slug")): c for c in scored_before if c.get("aa_slug")}
+    by_name = {str(c.get("name") or "").lower(): c for c in scored_before}
+
+    def previous_for(row: dict[str, Any]) -> dict[str, Any] | None:
+        return by_slug.get(row_slug(row)) or by_name.get(display_name(row).lower())
+
     ranked_rows = [row for row in sorted(dedupe_rows(rows), key=intelligence, reverse=True) if intelligence(row) > 0]
     candidates: list[dict[str, Any]] = []
+    carried: list[dict[str, Any]] = []
     skipped = 0
     seen_repos: set[str] = set()
     for row in ranked_rows:
@@ -1181,23 +1673,112 @@ def build_catalog(rows: list[dict[str, Any]], source_label: str, limit: int, sea
             break
         if row.get("deprecated") is True:
             continue
-        resolved = resolve_gguf_repo(row, search_limit)
-        if not resolved:
-            skipped += 1
+        prev = previous_for(row)
+        if prev and not previous_matches(prev, row):
+            prev = None  # an earlier mismatch must not anchor the size guard
+        cand = None
+        try:
+            resolved = resolve_gguf_repo(row, search_limit, prev)
+            if resolved and resolved[0].lower() in seen_repos:
+                continue
+            if resolved:
+                cand = candidate_from_row(row, *resolved)
+        except Exception as exc:  # noqa: BLE001 - one bad repo never fails the refresh
+            print(f"warning: {display_name(row)}: {exc}", file=sys.stderr)
+        if cand is None:
+            kept = carry_forward(prev, row, now, "unresolved this run") if prev else None
+            if kept:
+                # The scrape scored it on the current scale; keep that score.
+                kept = dict(kept, aa_intelligence_index=round(intelligence(row), 3),
+                            quality=quality_score(intelligence(row)), _on_scale=True)
+                kept.pop("aa_index_mapped_from", None)
+                if row.get("_mapped_from"):
+                    kept["aa_index_mapped_from"] = row["_mapped_from"]
+                carried.append(kept)
+            else:
+                skipped += 1
             continue
-        repo, quants, method = resolved
-        if repo.lower() in seen_repos:
+        seen_repos.add(cand["repo"].lower())
+        candidates.append(cand)
+
+    present = ({row_slug(row) for row in rows} | {display_name(row).lower() for row in rows}) - {""}
+    top = {id(c) for c in sorted(scored_before, key=catalog_intelligence, reverse=True)[:TOP_ROWS_WATCHED]}
+    for prev in scored_before:
+        if {prev.get("aa_slug"), str(prev.get("name") or "").lower()} & present:
             continue
-        seen_repos.add(repo.lower())
-        candidates.append(candidate_from_row(row, repo, quants, method))
-    candidates = dedupe_candidates(candidates)[:limit]
+        if id(prev) in top:
+            print(f"warning: top-{TOP_ROWS_WATCHED} model {prev.get('name')} is missing from the leaderboard scrape", file=sys.stderr)
+        kept = carry_forward(prev, previous_row(prev), now, "missing from the leaderboard scrape")
+        if kept:
+            carried.append(kept)
+    carried = [c for c in (map_carried(c, scale) for c in carried)
+               if c and str(c["repo"]).lower() not in seen_repos]
+    candidates = dedupe_candidates(candidates + carried)[:limit]
+    kept_count = sum(1 for c in carried if c in candidates)
+    candidates = validate_candidates(candidates)
+    reviewed = validate_candidates(reviewed_candidates(candidates, previous, scale))
     return {
         "attribution": "Artificial Analysis intelligence data cached from https://artificialanalysis.ai/ and filtered by ggrun hardware fit; Hugging Face GGUF metadata cached from public model APIs",
         "candidates": candidates,
+        "aa_index_scale": scale,
+        "aa_index_version": scale["version"],
         "generated_at": utc_now(),
-        "source": f"{source_label}; resolved {len(candidates)} GGUF repos with quant sizes; skipped {skipped} open-weight rows without matching GGUF quants",
+        "reviewed_candidates": reviewed,
+        "source": f"{source_label}; resolved {len(candidates) - kept_count} GGUF repos with quant sizes; kept {kept_count} previous rows; skipped {skipped} open-weight rows without matching GGUF quants; listed {len(reviewed)} reviewed unscored rows",
         "version": 2,
     }
+
+
+def refresh_guard(rows: list[dict[str, Any]], previous: list[dict[str, Any]],
+                  catalog: dict[str, Any], prev_version: str = "v4") -> str | None:
+    """Why this refresh must not replace the catalog, or None.
+
+    2026-10-29: the scrape gave 21 of 177 open-weight rows a score on a new
+    index scale (GLM-5.3 44.8 -> 31.7); taken as is, the catalog would have
+    gone from 119 to 21 rows with carried old-scale rows on top.
+    """
+    scale = catalog.get("aa_index_scale") or {}
+    if scale.get("refused"):
+        return scale["refused"]
+    open_count = scale.get("open_rows", len(dedupe_rows(rows)))
+    scored_count = scale.get("scored_rows", sum(1 for row in dedupe_rows(rows) if intelligence(row) > 0))
+    if open_count and scored_count < MIN_SCORED_SHARE * open_count:
+        return f"only {scored_count} of {open_count} leaderboard rows carry an intelligence score"
+    version = index_version(catalog.get("aa_index_version", prev_version))
+    prev_version = index_version(prev_version) or "v4"
+    fresh = [c for c in catalog.get("candidates") or [] if "last seen on the leaderboard" not in str(c.get("notes") or "")]
+    if version == prev_version:
+        # Same index version: real scores must not move as a whole.
+        before = {str(c.get("aa_slug")): catalog_intelligence(c) for c in previous
+                  if c.get("aa_slug") and catalog_intelligence(c) > 0 and not c.get("aa_index_mapped_from")}
+        ratios = sorted(catalog_intelligence(c) / before[str(c.get("aa_slug"))] for c in fresh
+                        if str(c.get("aa_slug")) in before and catalog_intelligence(c) > 0
+                        and not c.get("aa_index_mapped_from"))
+        if len(ratios) >= 5:
+            median = ratios[len(ratios) // 2]
+            if abs(median - 1) > MAX_SCALE_DRIFT:
+                return (f"scores moved by a median factor {median:.2f} across {len(ratios)} models without an "
+                        f"index version change; refusing to mix scales")
+    scored_before = sum(1 for c in previous if catalog_intelligence(c) > 0)
+    if scored_before and len(fresh) < MIN_KEPT_SHARE * scored_before:
+        return f"only {len(fresh)} freshly resolved rows against {scored_before} scored rows before"
+    if version == prev_version:
+        # Kept ~ scores refill every unscored row, so a scrape that lost its
+        # real scores would pass the checks above; count the real ones.
+        real_before = sum(1 for c in previous if catalog_intelligence(c) > 0 and not c.get("aa_index_mapped_from")
+                          and not c.get("anchor_name")
+                          and "last seen on the leaderboard" not in str(c.get("notes") or ""))
+        real_now = sum(1 for c in fresh if not c.get("aa_index_mapped_from"))
+        if real_before and real_now < MIN_KEPT_SHARE * real_before:
+            return (f"only {real_now} rows carry a leaderboard score against {real_before} before; "
+                    f"the rest are kept estimates")
+    return None
+
+
+def catalog_rows(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Scored and reviewed rows of a catalog document."""
+    return [row for key in ("candidates", "reviewed_candidates")
+            for row in catalog.get(key) or [] if isinstance(row, dict)]
 
 
 # The architecture tables of the backends ggrun builds. A catalog row whose
@@ -1319,7 +1900,7 @@ def main() -> int:
         tables = fetch_upstream_arch_tables()
         if not tables:
             raise SystemExit("upstream architecture tables unavailable")
-        stamp_upstream(catalog.get("candidates", []), tables)
+        stamp_upstream(catalog_rows(catalog), tables)
         tmp = catalog_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(catalog_path)
@@ -1335,20 +1916,37 @@ def main() -> int:
             print_top_models(rows, args.print_top)
         if args.print_open_weights_top > 0:
             print_top_models(rows, args.print_open_weights_top, open_weights_only=True)
-        catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit))
+        try:
+            previous_doc = json.loads(catalog_path.read_text(encoding="utf-8"))
+            previous = catalog_rows(previous_doc)
+            prev_version = str(previous_doc.get("aa_index_version") or "v4")
+            prev_scale = previous_doc.get("aa_index_scale") or {}
+            previous_fit = prev_scale.get("fit") or prev_scale.get("fit_from_previous_version")
+        except (OSError, ValueError, AttributeError) as exc:
+            print(f"warning: previous catalog unreadable ({exc}); nothing carried forward", file=sys.stderr)
+            previous, prev_version, previous_fit = [], "v4", None
+        catalog = build_catalog(rows, source_label, max(1, args.catalog_limit), max(1, args.hf_search_limit), previous,
+                                prev_version=prev_version, page_version=PAGE_INDEX_VERSION, previous_fit=previous_fit)
+        scale = catalog.get("aa_index_scale") or {}
+        print(f"index scale: {json.dumps(scale, sort_keys=True)}", file=sys.stderr)
+        refused = refresh_guard(rows, previous, catalog, prev_version)
     except Exception as exc:
         if args.allow_missing_key:
             print(f"recommendation catalog unchanged: {exc}", file=sys.stderr)
             return 0
         raise
 
+    if refused:
+        # Not softened by --allow-missing-key: the scheduled job must fail
+        # visibly, and the checked-in catalog stays as it was.
+        raise SystemExit(f"recommendation catalog unchanged: {refused}")
     if not catalog.get("candidates"):
         if args.allow_missing_key:
             print("recommendation catalog unchanged: no GGUF candidates resolved", file=sys.stderr)
             return 0
         raise SystemExit("no GGUF candidates resolved")
 
-    stamp_upstream(catalog["candidates"], fetch_upstream_arch_tables())
+    stamp_upstream(catalog_rows(catalog), fetch_upstream_arch_tables())
     if args.print_catalog_top > 0:
         print_catalog_models(catalog, args.print_catalog_top)
     tmp = catalog_path.with_suffix(".tmp")
