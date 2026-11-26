@@ -245,7 +245,8 @@ Launch flags:
                        run the Qwen3.5-4B worker+reviewer; qwen2b the light
                        Qwen3.5-2B review-only lane; nanbeige the Nanbeige4.2
                        big-MoE worker; off seats no reviewer and the main model
-                       self-reviews
+                       self-reviews. A yes to the launch-time self-review question
+                       is saved per model and hardware; any value here replaces it
   --chat-template str   Force a corrected chat template from the data-driven catalog
                        by entry name (e.g. nanbeige4.2-3b, qwen3.8-27b) for models whose
                        embedded template llama.cpp's minja engine cannot parse; a value
@@ -764,6 +765,13 @@ type launchRequest struct {
 	ClaudeResume           string   // session id or "latest": reopen a recorded Claude session
 	ClaudeResumeForce      bool     // accept a resume whose backend shape no longer matches
 	OriginalArgs           []string // launch argv as given, so a resume can reproduce it exactly
+
+	// claudeSelfClassifyApproved marks an interactive yes to a self-classify
+	// question this launch; claudeSelfClassifyRemembered marks that the answer
+	// came from, or is now in, the per-scope choice store.
+	claudeSelfClassifyApproved   bool
+	claudeSelfClassifyRemembered bool
+
 	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
 	// the start boundary last started, when the oracle priced exactly it.
 	admittedOracleTotals map[int]int
@@ -3862,6 +3870,7 @@ func tryResidentWithoutClaudeReviewer(
 	}
 	req.ReviewerReservation = nil
 	req.ClaudeReviewerDisabled = true
+	req.claudeSelfClassifyApproved = interactive
 	fmt.Fprintln(output, "[launch] separate Auto reviewer disabled; Auto reviews will use the main model")
 	return candidate, nil
 }
@@ -3940,6 +3949,8 @@ func proactivelyDropReviewerForVRAMModel(
 	}
 	req.ReviewerReservation = nil
 	req.ClaudeReviewerDisabled = true
+	// Only an interactive yes is remembered; the env opt-in applies per launch.
+	req.claudeSelfClassifyApproved = interactive
 	fmt.Fprintf(output, "[launch] no VRAM room for a separate Auto reviewer next to the main model; Auto reviews will use the main model (self-review)\n")
 	return candidate
 }
@@ -7146,7 +7157,10 @@ func cmdLaunch(args []string) {
 	// the same ledger before the main model's split is computed, and the planner
 	// returns the GPU the reviewer should occupy. The reservation lives on the
 	// request so every placement.Compute path — first plan and every re-plan —
-	// keeps the reviewer's VRAM accounted.
+	// keeps the reviewer's VRAM accounted. A self-classify answer the user
+	// already gave for this scope applies first, so no reviewer is seated.
+	forgetClaudeSelfClassifyForExplicitReviewer(req, cfg.CacheDir, model, caps, os.Stderr)
+	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
 	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
 	// A dense model that cannot fit on GPU even at reduced context should not be
 	// silently spilled into system RAM. Ask the user; assumeYes / non-terminal
@@ -7213,6 +7227,7 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
+	rememberClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
 	strategy, err = containHostMemory(req, caps, strategy, computeStrategy, validateHostMemoryContainmentWaiting)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -8477,6 +8492,7 @@ func cmdDryRun(args []string) {
 	// Match cmdLaunch exactly: Claude Auto's helper consumes VRAM before the
 	// main model is packed. Without this reservation a dry-run can claim one
 	// additional expert layer fits and disagree with the real launch.
+	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
 	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
 
 	placementOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
