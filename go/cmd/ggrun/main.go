@@ -7282,6 +7282,8 @@ func cmdLaunch(args []string) {
 	// process may start.
 	resourceBaseline := captureLaunchResourceBaseline(caps)
 	launchRecovery := newLaunchMemoryRecovery()
+	// Which devices this launch plans against the unmeasured overhead reserve.
+	overheadBefore := measuredOverheadView(cfg.CacheDir, runtimeCaps)
 	// The first start gets room for a probe, a corrected probe and a slow
 	// production load; every nested step shares that one window.
 	p, strategy, serverArgs, err := startLaunchWithCUDAOOMRecoveryState(req, cfg, model, strategy, be, caps, serverArgs, startupAdmissionWindow(model), launchRecovery)
@@ -7335,6 +7337,24 @@ func cmdLaunch(args []string) {
 	// preserving the serving strategy and argv as candidate zero.
 	model.MeasuredKVBytesPerTok = nil
 	model.MeasuredKVGeometry = nil
+	// A first launch planned against the unmeasured CUDA overhead reserve reloads
+	// once into the plan the measurement allows; see overhead_reload.go.
+	if reload, attempted := replanAfterMeasuredOverhead(req, cfg, model, be, caps, runtimeCaps, overheadBefore,
+		overheadReload{process: p, strategy: strategy, args: serverArgs, recovery: launchRecovery}, resourceBaseline); attempted && reload.process != p {
+		if reload.process == nil {
+			claudeAuto.stop()
+			fmt.Fprintln(os.Stderr, "Error: the reload after measuring CUDA overhead left no running server")
+			os.Exit(1)
+		}
+		p, strategy, serverArgs, launchRecovery = reload.process, reload.strategy, reload.args, reload.recovery
+		fmt.Printf("[launch] Server running on port %d (PID %d)\n", req.Port, p.Cmd.Process.Pid)
+		if p.LogBuf != nil {
+			recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, p.LogBuf.String(), baselineVRAM, serverProcessPID(p))
+			noteBackendLoadedVRAM(serverProcessPID(p))
+		}
+		model.MeasuredKVBytesPerTok = nil
+		model.MeasuredKVGeometry = nil
+	}
 	var pendingCalibration *placement.CalibrationDecision
 	plannedCandidates := calibrationPlan(req, cfg, model, be, caps, strategy, func(candidate *placement.Strategy) bool {
 		candidateArgs := buildLaunchServerArgs(req, cfg, be, caps, model, candidate)
