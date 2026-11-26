@@ -353,8 +353,9 @@ func TestHeaderCacheConcurrentUseAndSaveMerge(t *testing.T) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Entries) != len(paths)+1 {
-		t.Fatalf("entries = %d, want %d (the other process's entry was lost)", len(f.Entries), len(paths)+1)
+	// Each model has a per-model entry and a per-file value entry.
+	if want := 2*len(paths) + 1; len(f.Entries) != want {
+		t.Fatalf("entries = %d, want %d (the other process's entry was lost)", len(f.Entries), want)
 	}
 }
 
