@@ -8419,6 +8419,13 @@ func cmdDryRun(args []string) {
 		printVRAMLedger(strategy)
 		fmt.Printf("[trace] NCPUMoE=%d OT=%s\n", strategy.NCPUMoE, strategy.OTString)
 	}
+	if refusal := dryRunFitRefusal(strategy); refusal != "" {
+		if !req.EmitServerArgvJSON {
+			printOptimizationSummary("dry-run", strategy, true)
+		}
+		fmt.Fprintln(os.Stderr, refusal)
+		os.Exit(1)
+	}
 
 	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 	envPrefix := applyGPUVisibility(req, backendDialect(be))
