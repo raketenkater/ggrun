@@ -189,6 +189,7 @@ func TestSelfUpdateInstallEnvPreservesAppHome(t *testing.T) {
 		"LLM_INSTALL_MODE=build",
 		"LLM_INSTALL_MAIN=go",
 		"LLM_INSTALL_NONINTERACTIVE=1",
+		"LLM_INSTALL_APP_PYTHON=1",
 	}
 	for _, want := range checks {
 		if !envHas(env, want) {
