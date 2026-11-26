@@ -48,3 +48,9 @@ func incompleteDownloadNote(cache *gguf.HeaderCache, path string) string {
 	const gb = 1024 * 1024 * 1024
 	return fmt.Sprintf("incomplete download: %.1f of %.1f GB", float64(haveBytes)/gb, float64(wantBytes)/gb)
 }
+
+// incompleteRefusal is the one-line refusal for a model the TUI will not open
+// for launching. `ggrun launch <path>` is not gated, so it is the way out.
+func incompleteRefusal(note string) string {
+	return note + "; finish the download, or run ggrun launch <path> anyway"
+}

@@ -785,7 +785,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok {
 				if item.isModel {
 					if note := m.refreshIncomplete(item.index); note != "" {
-						m.message = note + "; finish the download before launching"
+						m.message = incompleteRefusal(note)
 						m.messageType = "error"
 						return m, nil
 					}
@@ -852,7 +852,7 @@ func (m Model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c", "C":
 			if item, ok := m.mainList.SelectedItem().(mainItem); ok && item.isModel {
 				if note := m.refreshIncomplete(item.index); note != "" {
-					m.message = note + "; finish the download before launching"
+					m.message = incompleteRefusal(note)
 					m.messageType = "error"
 					return m, nil
 				}
@@ -909,6 +909,7 @@ func (m Model) openLatestLaunch() (tea.Model, tea.Cmd) {
 		m.messageType = "warning"
 		return m, nil
 	}
+	prevBackend := m.backend
 	if req.Backend == "" {
 		m.backend = "auto"
 	} else {
@@ -918,6 +919,12 @@ func (m Model) openLatestLaunch() (tea.Model, tea.Cmd) {
 	if !m.selectModelPath(req.ModelPath) {
 		m.message = fmt.Sprintf("Latest configuration model is not a runnable GGUF: %s", req.ModelPath)
 		m.messageType = "warning"
+		return m, nil
+	}
+	if note := m.refreshIncomplete(m.selectedModel); note != "" {
+		m.backend = prevBackend
+		m.message = incompleteRefusal(note)
+		m.messageType = "error"
 		return m, nil
 	}
 
@@ -4424,6 +4431,15 @@ func afterBackendInstallModel(req *LaunchRequest) Model {
 		} else {
 			m.messageType = "warning"
 		}
+		m.screen = ScreenMain
+		return m
+	}
+	if note := m.refreshIncomplete(m.selectedModel); note != "" {
+		m.message = incompleteRefusal(note)
+		if failure := strings.TrimSpace(req.BackendInstallError); failure != "" {
+			m.message = "Backend install failed: " + failure + ". " + m.message
+		}
+		m.messageType = "error"
 		m.screen = ScreenMain
 		return m
 	}
