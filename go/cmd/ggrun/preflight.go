@@ -16,12 +16,13 @@ import (
 	"strings"
 	"time"
 
+	"net"
+
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/memprobe"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/server"
-	"net"
 )
 
 // Launch preflight: before paying a real model load (15+ minutes for a big MoE

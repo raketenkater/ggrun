@@ -1,5 +1,9 @@
 # Usage
 
+The complete list of launch flags and environment variables, generated from the code, is in
+[reference.md](reference.md). Every `LLM_` configuration variable also has a `GGRUN_` spelling
+(`GGRUN_PORT` for `LLM_PORT`), which wins when both are set.
+
 With no command, `ggrun` opens the interactive TUI. Otherwise it takes a model
 (local path or Hugging Face repo) plus flags.
 
@@ -34,12 +38,6 @@ ggrun model.gguf --calibrate off    # serve the stable planner estimate without 
 # Vision
 ggrun model.gguf --vision
 ggrun model.gguf --mmproj /path/to/mmproj.gguf
-
-# Tuning and cached configs
-ggrun model.gguf --ai-tune
-ggrun model.gguf --ai-tune --retune
-ggrun --show-configs
-ggrun model.gguf --tune-cache ~/.cache/ggrun/tune.json
 
 # Speculative decoding
 ggrun model.gguf --spec auto
@@ -190,39 +188,11 @@ launches do not repeat that consent question. Set it to `false` in the config to
 restore per-launch prompting; `--allow-live-memory-probe` remains a one-launch
 override.
 
-## AI Tune
+## Tuning
 
-`--ai-tune` starts from the launcher heuristic, benchmarks it, tests candidate flag sets,
-and stores the best successful result in the local cache. Because it re-measures against
-whatever llama.cpp / ik_llama.cpp build you currently have, it keeps your launch flags in
-step with the backends as they change upstream, instead of you tracking new flags and
-defaults by hand. The served model can propose candidate flags, but the launcher validates
-them against backend help, memory headroom, crash behavior, and benchmark results before a
-cache entry is reused. A 1% noise floor guards against replacing a good baseline with
-single-run noise.
-
-AI Tune changes safe performance knobs such as threads, flash attention,
-mmap/mlock, defrag, and speculative decoding. It never changes batch or
-microbatch: both require coupled placement recomputation and belong to the core
-placement optimizer for every workload. It also never changes anything
-that affects output quality — KV-cache quantization and context remain
-constraints, and an explicit `--parallel` is left exactly as set. The core
-standard-launch optimizer may compare automatic slot counts, but AI Tune and
-cached/community tune overlays may not.
-
-Parallel Claude launches use the placement-owned core optimizer above for
-batch/ubatch experiments. Generic/community tune files are not
-automatically applied to Claude mode because they do not encode slot scheduling
-or mixed prefill/decode behavior. When `--ai-tune` is explicitly combined with
-parallel Claude on a hybrid/recurrent model, it uses repeated cache-backed agent
-turn time for the remaining safe flags and refuses all batch/ubatch proposals.
-Those results are stored separately by slots, context, KV layout, and
-placement; they cannot overwrite or auto-select as a generic serial tune. Tune
-overlays protect the existing batch pair, with `ubatch <= batch` normalization
-retained as defense in depth; explicit `--batch-size` and `--ubatch-size` remain
-user-owned.
-
-See [launch-performance.md](launch-performance.md) for the benchmark tables and method.
+AI Tune was removed. The standard launch optimizer measures and chooses the
+configuration itself (see `--calibrate`), so `--ai-tune`, `--retune`,
+`--show-configs` and `--tune-cache` now stop with that message.
 
 ## Speculative decoding
 
@@ -245,6 +215,7 @@ the selected model and hidden permission reviews to a small local reviewer.
 
 ```bash
 ggrun model.gguf --claude-code   # serve, then launch Claude Code wired to it
+# Claude Code missing? ggrun asks before running Anthropic's official installer (--install-claude / GGRUN_INSTALL_CLAUDE=1 to skip the question)
 ```
 
 If the `claude` CLI is on your PATH, ggrun starts the server and drops you straight

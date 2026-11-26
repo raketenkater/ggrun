@@ -924,3 +924,31 @@ def test_version_labels_ignore_a_trailing_zero_and_keep_fit_provenance():
     _, scale = updater.apply_index_scale(rows, prev, "v5.0", "v5", fit)
     assert scale["version"] == "v5" and "pairs" not in scale and scale["fit_from_previous_version"] == fit
 
+
+
+def test_owner_scoring_matches_downloader():
+    """Review S-09: the catalog and the downloader rank owners the same way."""
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("dl_owners", root / "tools/download/download_any_gguf.py")
+    downloader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(downloader)
+    updater = load_updater()
+    assert updater.TRUSTED_GGUF_OWNERS == downloader.TRUSTED_GGUF_OWNERS
+    assert updater.OTHER_OWNER_SCORE == downloader.OTHER_OWNER_SCORE
+    go_owners = (root / "go/pkg/recommend/owners.go").read_text()
+    for owner in updater.TRUSTED_GGUF_OWNERS:
+        assert f'"{owner}"' in go_owners, owner
+
+
+def test_catalog_row_pins_the_resolved_revision(monkeypatch):
+    """Review S-09: a row records the commit its quant list was read from."""
+    updater = load_updater()
+    sha = "a" * 40
+    monkeypatch.setattr(updater, "fetch_gguf_arch", lambda repo: {})
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"sha": sha, "siblings": []})
+    row = {"name": "Model X", "slug": "model-x"}
+    quants = [{"name": "Q4_K_M", "size_gb": 4.0, "size_bytes": 4 * 1024**3}]
+    cand = updater.candidate_from_row(row, "owner/Model-X-GGUF", quants, "hf-search")
+    assert cand["revision"] == sha
+    monkeypatch.setattr(updater, "fetch_hf_model_info", lambda repo: {"sha": "not-a-sha"})
+    assert "revision" not in updater.candidate_from_row(row, "owner/Model-X-GGUF", quants, "hf-search")

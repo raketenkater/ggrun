@@ -144,10 +144,30 @@ def check_port_available(port):
         raise OSError(error, f"could not establish that port {port} has no listener")
 
 
+# Where the final backend load starts. ggrun's admission measurement can load a
+# model several times under one [launch] line, and ik_llama never prints
+# "loading model tensors", so also split at each load's metadata line.
+LAST_LOAD = (r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors"
+             r"|^.*llama_model_loader: loaded meta data")
+
+
+def claude_backend_log(log_text):
+    """--claude-code launches write backend output to the file they announce."""
+    paths = re.findall(r"(?m)^\[claude-code\] backend logs -> (.+?)\s*$", log_text)
+    if not paths:
+        return ""
+    try:
+        text = Path(paths[-1]).read_text(errors="replace")
+    except OSError:
+        return ""
+    # Launches with the same configuration append to one file; keep the last load.
+    loads = list(re.finditer(r"(?m)^.*llama_model_loader: loaded meta data", text))
+    return "\n" + (text[loads[-1].start():] if loads else text)
+
+
 def weight_devices(log):
     # Ignore allocations from abandoned admissions before the final launch.
-    launches = list(re.finditer(
-        r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log))
+    launches = list(re.finditer(LAST_LOAD, log))
     if launches:
         log = log[launches[-1].start():]
     devices = set()
@@ -281,7 +301,7 @@ class GPUSampler:
 
 def device_allocations(log_text):
     """Model/KV/compute MiB per device for the final launch, from the backend log."""
-    launches = list(re.finditer(r"(?m)^\[launch\] .* -m |^.*(?:llm_)?load_tensors: loading model tensors", log_text))
+    launches = list(re.finditer(LAST_LOAD, log_text))
     if launches:
         log_text = log_text[launches[-1].start():]
     alloc = {}
@@ -589,7 +609,7 @@ def main():
         (output / "result.json").write_text(json.dumps(result, indent=2))
         raise RuntimeError(result["error"])
     (output / "result.json").write_text(json.dumps(result, indent=2))
-    env = dict(os.environ, LLM_COMMUNITY_TUNES="off")
+    env = dict(os.environ)
     if args.claude_code:
         # With a claude client on PATH ggrun hands it the terminal; this check
         # drives the served endpoint itself, as the acceptance harness does.
@@ -626,6 +646,7 @@ def main():
             else:
                 raise RuntimeError("timed out waiting for launcher readiness and health")
             log_text = (output / "serve.log").read_text(errors="replace")
+            log_text += claude_backend_log(log_text)
             result["identity"]["backend"] = backend_identity(log_text)
             if result["identity"]["backend"]:
                 result["identity"]["model"]["companions"] = companion_identity(

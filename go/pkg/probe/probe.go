@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
@@ -28,10 +29,11 @@ func Probe() (*Memory, error) {
 }
 
 func probeGPUFree() []int {
-	out, err := exec.Command("nvidia-smi",
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi",
 		"--query-gpu=index,memory.free",
-		"--format=csv,noheader,nounits").Output()
+		"--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "free VRAM not sampled")
 		return nil
 	}
 	var free []int

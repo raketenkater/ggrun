@@ -1,9 +1,10 @@
 package main
 
 import (
+	"testing"
+
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
-	"testing"
 )
 
 func TestRecommendRestrictionsAndValidation(t *testing.T) {

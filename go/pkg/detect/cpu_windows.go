@@ -57,3 +57,6 @@ func detectRAMWindows() RAMInfo {
 		FreeMB:  int(mem.AvailPhys / 1024 / 1024),
 	}
 }
+
+// cpuQuotaCores: Windows job-object CPU limits are not read; 0 is unknown.
+func cpuQuotaCores() int { return 0 }

@@ -32,6 +32,30 @@ type ArchForkPR struct {
 	// Cited is true when a Hugging Face GGUF model card named this official
 	// llama.cpp PR. Discovery still clones the PR head, not the card's text.
 	Cited bool
+	// Author and AuthorAssociation (GitHub's OWNER, MEMBER, COLLABORATOR,
+	// CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE...) say who wrote the code ggrun
+	// would build; CIState is the head commit's check result. The user sees
+	// all three before agreeing to build an unreviewed PR.
+	Author            string
+	AuthorAssociation string
+	CIState           string
+}
+
+// Provenance is the one-line account of who wrote a PR and how its CI stands.
+func (p ArchForkPR) Provenance() string {
+	author := strings.TrimSpace(p.Author)
+	if author == "" {
+		author = "unknown author"
+	}
+	assoc := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(p.AuthorAssociation), "_", " "))
+	if assoc == "" {
+		assoc = "association unknown"
+	}
+	ci := strings.TrimSpace(p.CIState)
+	if ci == "" {
+		ci = "unknown"
+	}
+	return fmt.Sprintf("by %s (%s to llama.cpp), CI %s", author, assoc, ci)
 }
 
 // ArchForkSearch is the architecture-generic lookup for an unsupported GGUF.
@@ -249,7 +273,50 @@ func SearchArchForks(ctx context.Context, query ArchForkSearch, client ForkSearc
 	if len(merged) == 0 {
 		return nil, githubErr
 	}
+	// Only the first candidate is offered, so only it costs a CI lookup.
+	merged[0].CIState = fetchCIState(ctx, client.HTTP, client.GitHubBase, merged[0].Commit)
 	return merged, nil
+}
+
+// fetchCIState summarises the check runs on a commit: "failing" when any
+// failed, "running" while any is unfinished, "passing" when all finished
+// without failure, "none" when there are none, "unknown" when GitHub did not
+// answer.
+func fetchCIState(ctx context.Context, client *http.Client, base, sha string) string {
+	if !gitCommitSHA.MatchString(sha) {
+		return "unknown"
+	}
+	body, err := getGitHubJSON(ctx, client, fmt.Sprintf("%s/repos/ggml-org/llama.cpp/commits/%s/check-runs?per_page=100", base, sha))
+	if err != nil {
+		return "unknown"
+	}
+	var runs struct {
+		Total int `json:"total_count"`
+		Runs  []struct {
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		} `json:"check_runs"`
+	}
+	if json.Unmarshal(body, &runs) != nil {
+		return "unknown"
+	}
+	if runs.Total == 0 || len(runs.Runs) == 0 {
+		return "none"
+	}
+	running := false
+	for _, r := range runs.Runs {
+		switch strings.ToLower(r.Conclusion) {
+		case "failure", "timed_out", "cancelled", "action_required", "startup_failure":
+			return "failing"
+		}
+		if !strings.EqualFold(r.Status, "completed") {
+			running = true
+		}
+	}
+	if running {
+		return "running"
+	}
+	return "passing"
 }
 
 func (c ForkSearchClient) resolve() ForkSearchClient {
@@ -554,7 +621,11 @@ func fetchLlamaCppPR(ctx context.Context, client *http.Client, base, arch string
 		URL    string `json:"html_url"`
 		State  string `json:"state"`
 		Merged bool   `json:"merged"`
-		Head   struct {
+		User   struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		AuthorAssociation string `json:"author_association"`
+		Head              struct {
 			Ref  string `json:"ref"`
 			SHA  string `json:"sha"`
 			Repo *struct {
@@ -594,6 +665,9 @@ func fetchLlamaCppPR(ctx context.Context, client *http.Client, base, arch string
 		GitURL: strings.TrimSpace(raw.Head.Repo.CloneURL),
 		Branch: branch,
 		Commit: commit,
+
+		Author:            strings.TrimSpace(raw.User.Login),
+		AuthorAssociation: strings.TrimSpace(raw.AuthorAssociation),
 	}, nil
 }
 

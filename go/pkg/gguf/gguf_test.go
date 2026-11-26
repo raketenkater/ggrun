@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/embedscript"
 )
 
 type fixtureTensor struct {
@@ -228,55 +230,102 @@ func TestFindParseScriptSkipsStaleParserMissingHostPLE(t *testing.T) {
 	}
 }
 
-// A stale source checkout in the working directory must not shadow a newer
-// installed parser: on 2026-10-20 ggrun run from the owner's app-home checkout
-// picked its schema-2 parser over the installed schema-3 one and refused a
-// DeepSeek-V4.1 model. Among discovered locations the newest declared contract
-// wins; a parser in an explicitly named location stays the user's choice.
-func TestFindParseScriptPrefersNewestTensorAccountingSchema(t *testing.T) {
+func redirectScriptCache(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
-	write := func(rel, body string) string {
-		p := filepath.Join(dir, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+	old := embedscript.CacheDir
+	embedscript.CacheDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { embedscript.CacheDir = old })
+	return dir
+}
+
+// S-10 (reproduced 2026-11-13): a parse_gguf.py in the working directory was
+// executed. Neither the working directory, PATH nor the home directory may
+// supply the helper; with nothing installed the embedded copy is used.
+func TestFindParseScriptIgnoresWorkingDirectoryPathAndHome(t *testing.T) {
+	cache := redirectScriptCache(t)
+	planted := t.TempDir()
+	body := []byte("META = {'tensor_accounting_schema': 999}\n")
+	for _, rel := range []string{"parse_gguf.py", "tools/gguf/parse_gguf.py", "ggrun/bin/parse_gguf.py", "ggrun/tools/gguf/parse_gguf.py"} {
+		p := filepath.Join(planted, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(p, []byte(body), 0755); err != nil {
+		if err := os.WriteFile(p, body, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		abs, _ := filepath.Abs(p)
-		return abs
 	}
-	checkout := write("work/tools/gguf/parse_gguf.py", "r = {\n    'tensor_accounting_schema': 2,\n}\n")
-	installed := write("bin/parse_gguf.py", "r = {\n    'tensor_accounting_schema': 3,\n}\n")
 	t.Setenv("LLM_SCRIPT_DIR", "")
 	t.Setenv("LLM_SERVER_HOME", "")
 	t.Setenv("LLM_APP_HOME", "")
-	t.Setenv("PATH", filepath.Dir(installed))
-	t.Chdir(filepath.Join(dir, "work"))
-	if got := findParseScript(); got != installed {
-		t.Fatalf("stale working-directory parser won: got %s, want %s", got, installed)
+	t.Setenv("PATH", planted)
+	t.Setenv("HOME", planted)
+	t.Chdir(planted)
+	got := findParseScript()
+	if strings.HasPrefix(got, planted) {
+		t.Fatalf("planted helper selected: %s", got)
 	}
-	// Equal versions keep the established order (working directory first).
-	write("bin/parse_gguf.py", "r = {\n    'tensor_accounting_schema': 2,\n}\n")
-	if got := findParseScript(); got != checkout {
-		t.Fatalf("equal schema: got %s, want %s", got, checkout)
+	if filepath.Dir(got) != cache {
+		t.Fatalf("got %s, want the embedded copy under %s", got, cache)
 	}
-	// An explicit LLM_SCRIPT_DIR parser with a contract is never overridden.
-	explicit := write("pinned/parse_gguf.py", "r['tensor_accounting_schema'] = 1\n")
-	t.Setenv("LLM_SCRIPT_DIR", filepath.Dir(explicit))
+	data, err := os.ReadFile(got)
+	if err != nil || string(data) != parseGGUFSource {
+		t.Fatalf("resolved helper is not the embedded parser (err %v)", err)
+	}
+}
+
+// A parser in a location named by LLM_SCRIPT_DIR, LLM_SERVER_HOME or
+// LLM_APP_HOME with a tensor-accounting contract is the user's choice, even
+// when the embedded parser declares a newer contract.
+func TestFindParseScriptExplicitLocationWins(t *testing.T) {
+	redirectScriptCache(t)
+	dir := t.TempDir()
+	explicit := filepath.Join(dir, "parse_gguf.py")
+	if err := os.WriteFile(explicit, []byte("r['tensor_accounting_schema'] = 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_SCRIPT_DIR", dir)
+	t.Setenv("LLM_SERVER_HOME", "")
+	t.Setenv("LLM_APP_HOME", "")
 	if got := findParseScript(); got != explicit {
 		t.Fatalf("explicit LLM_SCRIPT_DIR overridden: got %s", got)
 	}
+	// An explicit file without the contract is skipped for the embedded one.
+	if err := os.WriteFile(explicit, []byte("print('old')\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findParseScript(); got == explicit {
+		t.Fatalf("contract-less explicit parser chosen over the embedded one")
+	}
+}
+
+func TestParserTensorAccountingSchema(t *testing.T) {
+	dir := t.TempDir()
 	for body, want := range map[string]int{
 		"r = {'tensor_accounting_schema': 3}": 3,
 		"r['tensor_accounting_schema'] = 12":  12,
 		"# mentions tensor_accounting_schema": 1,
 		"print('no contract')":                0,
 	} {
-		p := write("probe/parse_gguf.py", body)
+		p := filepath.Join(dir, "parse_gguf.py")
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if got := parserTensorAccountingSchema(p); got != want {
 			t.Errorf("%q: schema %d, want %d", body, got, want)
 		}
+	}
+}
+
+// The embedded parser is a copy of tools/gguf/parse_gguf.py; run
+// `go generate ./pkg/gguf` after editing the tools copy.
+func TestEmbeddedParserMatchesTools(t *testing.T) {
+	tools, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", "gguf", "parse_gguf.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tools) != parseGGUFSource {
+		t.Fatal("go/pkg/gguf/parse_gguf.py differs from tools/gguf/parse_gguf.py; run `go generate ./pkg/gguf`")
 	}
 }
 
@@ -813,6 +862,23 @@ func TestDeepSeek41RequiresSparseLookupAccounting(t *testing.T) {
 	} {
 		if err := validateParserOutput("/x/parse_gguf.py", "/models/m.gguf", bad); err == nil {
 			t.Fatalf("inconsistent lookup tier accepted: %+v", bad)
+		}
+	}
+}
+
+// The binary's own locations never climb out of its directory and app home:
+// for ~/.local/bin/ggrun, nothing directly in ~ or ~/tools is a candidate.
+func TestExeParseScriptCandidatesStayInTheInstall(t *testing.T) {
+	home := t.TempDir()
+	for _, exeDir := range []string{filepath.Join(home, ".local", "bin"), filepath.Join(home, "go", "bin"), filepath.Join(home, "app", ".bin"), filepath.Join(home, "repo", "go")} {
+		root := exeDir
+		if b := filepath.Base(exeDir); b == "bin" || b == ".bin" {
+			root = filepath.Dir(exeDir)
+		}
+		for _, c := range exeParseScriptCandidates(exeDir) {
+			if !strings.HasPrefix(filepath.Clean(c), root+string(filepath.Separator)) {
+				t.Errorf("exe %s: candidate %s leaves %s", exeDir, c, root)
+			}
 		}
 	}
 }

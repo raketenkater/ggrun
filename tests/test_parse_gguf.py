@@ -378,6 +378,53 @@ def test_synthetic_second_adapter_uses_its_own_metadata():
     print('  ✓ synthetic_second_adapter_uses_its_own_metadata')
 
 
+def test_hostile_lengths_are_refused_without_huge_reads():
+    """A header length larger than the file must be refused, not read: a
+    2**60-byte key would otherwise make the parser allocate or spin."""
+    import struct as st
+    import tempfile
+    import time as tm
+    huge = 1 << 60
+    def kv_header(tensor_count, kv_count):
+        return b'GGUF' + st.pack('<I', 3) + st.pack('<Q', tensor_count) + st.pack('<Q', kv_count)
+    def key(name):
+        return st.pack('<Q', len(name)) + name
+    cases = {
+        'key length': kv_header(0, 1) + st.pack('<Q', huge),
+        'string length': kv_header(0, 1) + key(b'general.name') + st.pack('<I', 8) + st.pack('<Q', huge),
+        'array length': kv_header(0, 1) + key(b'tokenizer.ggml.scores') + st.pack('<I', 9) + st.pack('<I', 6) + st.pack('<Q', huge),
+        'string array element': kv_header(0, 1) + key(b'tokenizer.ggml.tokens') + st.pack('<I', 9) + st.pack('<I', 8) + st.pack('<Q', 1) + st.pack('<Q', huge),
+        'kv count': kv_header(0, huge),
+        'tensor count': kv_header(huge, 0),
+        'tensor name length': kv_header(1, 0) + st.pack('<Q', huge),
+    }
+    with tempfile.TemporaryDirectory() as d:
+        for name, blob in cases.items():
+            path = os.path.join(d, name.replace(' ', '_') + '.gguf')
+            with open(path, 'wb') as fh:
+                fh.write(blob + b'\0' * 64)
+            start = tm.monotonic()
+            r = parse(path)
+            elapsed = tm.monotonic() - start
+            assert elapsed < 2, '%s: took %.1fs' % (name, elapsed)
+            assert r.get('tensor_accounting_schema') == 3, name
+            assert 'name' not in r and 'tokenizer_hash' not in r, '%s: used a refused value: %r' % (name, r)
+    # The refusal is the length bound itself, raised before any read.
+    import importlib.util
+    import io as _io
+    spec = importlib.util.spec_from_file_location('parse_gguf_under_test', PARSER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for blob in (st.pack('<Q', huge) + b'\0' * 32, key(b'general.name') + st.pack('<I', 8) + st.pack('<Q', 1 << 20)):
+        try:
+            mod._read_kv(_io.BytesIO(blob), {}, 1)
+        except ValueError as exc:
+            assert 'exceeds the file' in str(exc), exc
+        else:
+            raise AssertionError('oversized length was read instead of refused')
+    print('  ✓ hostile_lengths_are_refused_without_huge_reads')
+
+
 def main():
     print('parse_gguf.py regression tests:')
     test_dense_llama()
@@ -397,6 +444,7 @@ def main():
     test_engram_named_tensor_without_proof_stays_resident()
     test_lookup_metadata_on_an_architecture_without_adapter_stays_resident()
     test_synthetic_second_adapter_uses_its_own_metadata()
+    test_hostile_lengths_are_refused_without_huge_reads()
     print('All tests passed.')
 
 

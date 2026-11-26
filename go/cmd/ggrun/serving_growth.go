@@ -3,13 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/placement"
 )
@@ -203,8 +203,9 @@ func backendTreeVRAMByPhysicalGPU(root int) map[int]int {
 		return nil
 	}
 	indexByUUID := map[string]int{}
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader")
 	if err != nil {
+		boundexec.Report(err, "backend VRAM not sampled")
 		return nil
 	}
 	for _, line := range strings.Split(string(out), "\n") {
@@ -216,8 +217,9 @@ func backendTreeVRAMByPhysicalGPU(root int) map[int]int {
 			indexByUUID[strings.TrimSpace(f[1])] = idx
 		}
 	}
-	apps, err := exec.Command("nvidia-smi", "--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits").Output()
+	apps, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi", "--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "backend VRAM not sampled")
 		return nil
 	}
 	used := map[int]int{}

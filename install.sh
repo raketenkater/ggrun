@@ -18,6 +18,7 @@
 #           or only needs a GPU driver. CPU is installed when nothing runs.
 #   LLM_INSTALL_MODE=auto|release|build|scripts           default: auto
 #   LLM_INSTALL_RELEASE=latest|vX.Y.Z                      default: latest
+#   LLM_INSTALL_REF=<tag|branch|commit>                    source to build; default: latest release tag
 #   LLM_INSTALL_RELEASE_DIR=<dir>                          local bundle dir (tests/offline)
 #   LLM_INSTALL_PREFIX=<dir>                              default: ~/.local/bin
 #   LLM_INSTALL_MODEL_DIR=<dir>                           default: ~/ai_models
@@ -39,7 +40,9 @@ set -Eeuo pipefail
 REPO_URL="https://github.com/raketenkater/ggrun.git"
 GITHUB_REPO="raketenkater/ggrun"
 SOURCE_REPO_DIR="${LLM_INSTALL_REPO_DIR:-}"
-SOURCE_REF="${LLM_INSTALL_REF:-main}"
+# Empty means the latest release (resolve_source_ref); LLM_INSTALL_REF=main
+# builds the development branch on request.
+SOURCE_REF="${LLM_INSTALL_REF:-}"
 INSTALL_DIR="${LLM_INSTALL_PREFIX:-$HOME/.local/bin}"
 MODEL_DIR="${LLM_INSTALL_MODEL_DIR:-$HOME/ai_models}"
 BACKEND_ROOT="${LLM_INSTALL_BACKEND_ROOT:-$HOME}"
@@ -50,6 +53,10 @@ INSTALL_RELEASE="${LLM_INSTALL_RELEASE:-latest}"
 INSTALL_RELEASE_DIR="${LLM_INSTALL_RELEASE_DIR:-}"
 PY_DEPS_MODE="${LLM_INSTALL_PY_DEPS:-auto}"
 DEPS_MODE="${LLM_INSTALL_DEPS:-auto}"
+# What the caller asked for before any prompt: only an explicit
+# LLM_INSTALL_DEPS=install lets a run without a terminal use sudo.
+DEPS_EXPLICIT="${LLM_INSTALL_DEPS:-}"
+PY_DEPS_EXPLICIT="${LLM_INSTALL_PY_DEPS:-}"
 GO_MODE="${LLM_INSTALL_GO:-auto}"
 GO_VERSION_OVERRIDE="${LLM_INSTALL_GO_VERSION:-}"
 GO_BOOTSTRAP_ROOT="${LLM_INSTALL_GO_ROOT:-$BACKEND_ROOT/.llm-server-go}"
@@ -258,6 +265,7 @@ clone_source_ref() {
 
 prepare_persistent_source_repo() {
     [[ -n "$SOURCE_REPO_DIR" ]] || return 1
+    resolve_source_ref
     command -v git >/dev/null || { warn "git required to keep a source checkout for updates"; return 1; }
     if [[ -e "$SOURCE_REPO_DIR" && ! -d "$SOURCE_REPO_DIR/.git" ]]; then
         warn "$SOURCE_REPO_DIR exists but is not a git checkout; using temporary source instead"
@@ -300,8 +308,27 @@ fetch_source_tarball() {
     return 0
 }
 
+# resolve_source_ref picks the source to build when none was named: the
+# latest release tag (github.com/<repo>/releases/latest redirects to it), so a
+# new install is a release users can name in a bug report, not whatever main
+# holds that minute.
+resolve_source_ref() {
+    [[ -n "$SOURCE_REF" ]] && return 0
+    local tag
+    tag="$(curl -fsSI -A ggrun-installer "https://github.com/$GITHUB_REPO/releases/latest" 2>/dev/null \
+        | tr -d '\r' | sed -nE 's#^[Ll]ocation: .*/releases/tag/([^/?#]+)$#\1#p' | head -n 1)"
+    if [[ -n "$tag" ]]; then
+        SOURCE_REF="$tag"
+        say "  Source: latest release $tag (LLM_INSTALL_REF=main builds the development branch)"
+    else
+        SOURCE_REF="main"
+        warn "Could not resolve the latest release; building main instead"
+    fi
+}
+
 ensure_source_repo() {
     [[ -n "$SRC_DIR" ]] && return 0
+    resolve_source_ref
     if prepare_persistent_source_repo; then
         return 0
     fi
@@ -987,6 +1014,38 @@ find_release_asset_url() {
 }
 
 
+# verify_release_signature checks SHA256SUMS against the cosign bundle the
+# release workflow signs, when cosign is installed: the checksums then come
+# from the release workflow's identity, not only from the same download.
+# Without cosign, or for an older release without a bundle, it says so and
+# continues on the checksum alone.
+COSIGN_IDENTITY_REGEXP="^https://github.com/raketenkater/ggrun/\\.github/workflows/release\\.yml@refs/tags/"
+verify_release_signature() {
+    local tmp="$1" bundle_url
+    if ! command -v cosign >/dev/null 2>&1; then
+        say "  cosign not installed; checksums not signature-checked (install cosign to verify releases)"
+        return 0
+    fi
+    bundle_url="$(find_release_asset_url "SHA256SUMS.bundle" || true)"
+    if [[ -z "$bundle_url" ]]; then
+        warn "This release has no SHA256SUMS.bundle; checksums not signature-checked"
+        return 0
+    fi
+    if ! curl -fsL --show-error "$bundle_url" -o "$tmp/SHA256SUMS.bundle"; then
+        err "Could not download SHA256SUMS.bundle"
+        return 1
+    fi
+    if cosign verify-blob --bundle "$tmp/SHA256SUMS.bundle" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        "$tmp/SHA256SUMS" >/dev/null 2>&1; then
+        ok "Verified the release signature (cosign)"
+        return 0
+    fi
+    err "SHA256SUMS is not signed by ggrun's release workflow; refusing the bundle"
+    return 1
+}
+
 verify_release_checksum() {
     local tmp="$1" asset="$2" match
     [[ -f "$tmp/SHA256SUMS" ]] || return 1
@@ -1032,7 +1091,7 @@ go_required_version() {
         awk '$1 == "go" { print $2; exit }' "$SRC_DIR/go/go.mod"
         return
     fi
-    printf '1.24.13\n'
+    printf '1.27.4\n'
 }
 
 go_version_parts() {
@@ -1089,6 +1148,23 @@ go_download_platform() {
     printf '%s-%s\n' "$goos" "$goarch"
 }
 
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# go_published_sha256 NAME prints the sha256 go.dev publishes for one download.
+GO_DL_INDEX_URL="${LLM_INSTALL_GO_INDEX_URL:-https://go.dev/dl/?mode=json&include=all}"
+go_published_sha256() {
+    curl -fsL --show-error "$GO_DL_INDEX_URL" | tr -d '\n ' | tr '}' '\n' \
+        | grep -F "\"filename\":\"$1\"" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p' | head -1
+}
+
 download_go_toolchain() {
     local need platform root url tmp archive extracted_go
     need="$(go_required_version)"
@@ -1109,6 +1185,15 @@ download_go_toolchain() {
     if ! curl -fsL --show-error "$url" -o "$archive"; then
         rm -rf "$tmp"
         warn "Go download failed: $url"
+        return 1
+    fi
+    # A toolchain that builds ggrun is checked against go.dev's own index.
+    local want got
+    want="$(go_published_sha256 "go$need.$platform.tar.gz" || true)"
+    got="$(sha256_of "$archive" || true)"
+    if [[ -z "$want" || -z "$got" || "$want" != "$got" ]]; then
+        rm -rf "$tmp"
+        warn "Go archive go$need.$platform.tar.gz does not match the sha256 go.dev publishes (want ${want:-unavailable}, got ${got:-unavailable}); not installing it"
         return 1
     fi
     if ! tar -xzf "$archive" -C "$tmp"; then
@@ -1225,6 +1310,10 @@ install_release_bundle() {
             return 1
         fi
         ok "Verified checksum for $asset"
+        if ! verify_release_signature "$tmp"; then
+            rm -rf "$tmp"
+            return 1
+        fi
     elif [[ "${LLM_INSTALL_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
         warn "No SHA256SUMS asset found; LLM_INSTALL_ALLOW_UNVERIFIED=1 set — installing UNVERIFIED bundle"
     else
@@ -1555,6 +1644,10 @@ box_has_libnccl() {
 # NVIDIA redist (no login). NCCL is a separate ~210 MB library from the driver.
 # Override with LLM_INSTALL_NCCL_URL= (tests use a tiny local archive).
 NCCL_REDIST_URL="${LLM_INSTALL_NCCL_URL:-https://developer.download.nvidia.com/compute/redist/nccl/v2.21.5/nccl_2.21.5-1+cuda12.4_x86_64.txz}"
+# sha256 of the default archive (downloaded 2026-11-16). An overridden URL is
+# checked against LLM_INSTALL_NCCL_SHA256 when that is set.
+NCCL_DEFAULT_URL="https://developer.download.nvidia.com/compute/redist/nccl/v2.21.5/nccl_2.21.5-1+cuda12.4_x86_64.txz"
+NCCL_DEFAULT_SHA256="d9c53eb3929a45447eb155bc5ace739b8f8ec28578e7cdf44001bd42f0f8a170"
 
 fetch_nccl_into_box() {
     local box="$1" tmp archive lib
@@ -1570,6 +1663,19 @@ fetch_nccl_into_box() {
         rm -rf "$tmp"
         warn "Could not download NCCL. CUDA needs libnccl.so.2 next to llama-server."
         return 1
+    fi
+    local want="${LLM_INSTALL_NCCL_SHA256:-}"
+    [[ -z "$want" && "$url" == "${NCCL_DEFAULT_URL:-}" ]] && want="${NCCL_DEFAULT_SHA256:-}"
+    if [[ -n "$want" ]]; then
+        local got
+        got="$(sha256_of "$archive" || true)"
+        if [[ "$got" != "$want" ]]; then
+            rm -rf "$tmp"
+            warn "NCCL archive sha256 ${got:-unavailable} does not match the pinned $want; not installing it"
+            return 1
+        fi
+    else
+        warn "NCCL archive from $url is not checked against a pinned sha256 (set LLM_INSTALL_NCCL_SHA256)"
     fi
     mkdir -p "$tmp/out"
     if ! tar -xJf "$archive" -C "$tmp/out" 2>/dev/null && ! tar -xf "$archive" -C "$tmp/out" 2>/dev/null; then
@@ -1712,14 +1818,19 @@ install_distro_packages() {
     local pkgs=("$@")
     [[ ${#pkgs[@]} -gt 0 ]] || return 1
     if command -v apt-get >/dev/null 2>&1; then
+        privileged_consent apt-get install -y "${pkgs[@]}" || return 1
         run_privileged apt-get update && run_privileged apt-get install -y "${pkgs[@]}"
     elif command -v dnf >/dev/null 2>&1; then
+        privileged_consent dnf install -y "${pkgs[@]}" || return 1
         run_privileged dnf install -y "${pkgs[@]}"
     elif command -v yum >/dev/null 2>&1; then
+        privileged_consent yum install -y "${pkgs[@]}" || return 1
         run_privileged yum install -y "${pkgs[@]}"
     elif command -v pacman >/dev/null 2>&1; then
+        privileged_consent pacman -Sy --needed --noconfirm "${pkgs[@]}" || return 1
         run_privileged pacman -Sy --needed --noconfirm "${pkgs[@]}"
     elif command -v zypper >/dev/null 2>&1; then
+        privileged_consent zypper install -y "${pkgs[@]}" || return 1
         run_privileged zypper install -y "${pkgs[@]}"
     else
         return 1
@@ -2015,6 +2126,20 @@ run_privileged() {
     fi
 }
 
+# privileged_consent CMD...: show the exact administrator command, packages
+# included, and ask before running it. Without a terminal only an explicit
+# LLM_INSTALL_DEPS=install consents; otherwise print what to run and decline.
+privileged_consent() {
+    (( EUID == 0 )) && { say "  Running: $*"; return 0; }
+    say "  ggrun needs administrator rights for: sudo $*"
+    if (( NONINTERACTIVE )); then
+        [[ "$DEPS_EXPLICIT" == "install" || "${CONSENT_EXPLICIT:-}" == "install" ]] && return 0
+        warn "Not using sudo without a terminal. Run the command above yourself, or set LLM_INSTALL_DEPS=install to allow it."
+        return 1
+    fi
+    ask "Run it now? You may be asked for your password. [Y/n]" y
+}
+
 python3_usable() {
     command -v python3 >/dev/null 2>&1 \
         && python3 -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' >/dev/null 2>&1
@@ -2022,20 +2147,26 @@ python3_usable() {
 
 install_python_runtime() {
     [[ "$PY_DEPS_MODE" != "skip" ]] || return 1
+    local CONSENT_EXPLICIT="$PY_DEPS_EXPLICIT" # LLM_INSTALL_PY_DEPS=install consents
     say "-- Installing Python 3 (GGUF metadata parsing and model downloads) --"
     if [[ "$OS" == "Darwin" ]]; then
         command -v brew >/dev/null 2>&1 || return 1
         brew install python
     elif command -v apt-get >/dev/null 2>&1; then
+        privileged_consent apt-get install -y python3 python3-pip python3-venv || return 1
         run_privileged apt-get update \
             && run_privileged apt-get install -y python3 python3-pip python3-venv
     elif command -v dnf >/dev/null 2>&1; then
+        privileged_consent dnf install -y python3 python3-pip || return 1
         run_privileged dnf install -y python3 python3-pip
     elif command -v yum >/dev/null 2>&1; then
+        privileged_consent yum install -y python3 python3-pip || return 1
         run_privileged yum install -y python3 python3-pip
     elif command -v pacman >/dev/null 2>&1; then
+        privileged_consent pacman -Sy --needed --noconfirm python python-pip || return 1
         run_privileged pacman -Sy --needed --noconfirm python python-pip
     elif command -v zypper >/dev/null 2>&1; then
+        privileged_consent zypper install -y python3 python3-pip || return 1
         run_privileged zypper install -y python3 python3-pip
     else
         return 1
@@ -2061,9 +2192,59 @@ install_python_download_deps() {
     if ! python_in_venv; then
         args=(--user "${args[@]}")
     fi
-    python3 -m pip install "${args[@]}" >/dev/null 2>&1 \
-        || python3 -m pip install --break-system-packages "${args[@]}" >/dev/null 2>&1
+    if python3 -m pip install "${args[@]}" >/dev/null 2>&1; then
+        python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
+        return
+    fi
+    # An externally managed Python (PEP 668) refuses user installs. Overriding
+    # that can break the system's own packages, so it is the user's call.
+    say "  This Python is managed by the system; installing huggingface_hub and tqdm needs:"
+    say "    python3 -m pip install --break-system-packages ${args[*]}"
+    say "  (a virtual environment avoids this: python3 -m venv ~/.venvs/ggrun)"
+    if (( NONINTERACTIVE )) || ! ask "Override the system Python's protection for these two packages? [y/N]" n; then
+        warn "Python download helpers not installed; model downloads need huggingface_hub and tqdm"
+        return 1
+    fi
+    python3 -m pip install --break-system-packages "${args[@]}" >/dev/null 2>&1
     python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
+}
+
+# ggrun finds this private interpreter next to its binary (pkg/python), so the
+# helper packages stay off PATH. Build in place in a unique directory because
+# venv scripts embed their absolute interpreter path, and publish only after
+# the imports succeed.
+app_python_ready() {
+    local py="$INSTALL_DIR/.ggrun-python/bin/python3"
+    [[ -x "$py" ]] && "$py" -I -c 'import huggingface_hub, tqdm' >/dev/null 2>&1
+}
+
+install_app_python_download_deps() {
+    local prefix current staged old=""
+    prefix="$(cd -- "$INSTALL_DIR" && pwd -P)" || return 1
+    current="$prefix/.ggrun-python"
+    if app_python_ready; then
+        return 0
+    fi
+    if [[ -L "$current" ]]; then
+        old="$(readlink -- "$current" || true)"
+    fi
+    staged="$(mktemp -d "$prefix/.ggrun-python.XXXXXX")" || return 1
+    if ! python3 -m venv "$staged"; then
+        warn "Could not create the app's Python environment. On Debian or Ubuntu install python3-venv, then rerun setup."
+    elif (
+        unset PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER PIP_BREAK_SYSTEM_PACKAGES
+        PIP_CONFIG_FILE=/dev/null "$staged/bin/python3" -m pip --require-virtualenv install --quiet huggingface_hub tqdm
+    ) && "$staged/bin/python3" -I -c 'import huggingface_hub, tqdm' >/dev/null 2>&1 &&
+        ln -s "${staged##*/}" "$staged/current" &&
+        python3 -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$staged/current" "$current"; then
+        # Drop the superseded environment, but only a sibling this function made.
+        if [[ "$old" == .ggrun-python.* && "$old" != */* && "$old" != "${staged##*/}" ]]; then
+            rm -rf -- "${prefix:?}/$old"
+        fi
+        return 0
+    fi
+    rm -rf -- "$staged"
+    return 1
 }
 
 install_build_deps() {
@@ -2079,22 +2260,27 @@ install_build_deps() {
     elif command -v apt-get >/dev/null 2>&1; then
         local pkgs=(git cmake build-essential pkg-config libcurl4-openssl-dev)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(libvulkan-dev glslang-tools vulkan-tools)
+        privileged_consent apt-get install -y "${pkgs[@]}" || return 1
         run_privileged apt-get update && run_privileged apt-get install -y "${pkgs[@]}"
     elif command -v dnf >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc gcc-c++ pkgconf-pkg-config libcurl-devel)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-loader-devel vulkan-headers glslang vulkan-tools)
+        privileged_consent dnf install -y "${pkgs[@]}" || return 1
         run_privileged dnf install -y "${pkgs[@]}"
     elif command -v yum >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc gcc-c++ pkgconfig libcurl-devel)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-loader-devel glslang vulkan-tools)
+        privileged_consent yum install -y "${pkgs[@]}" || return 1
         run_privileged yum install -y "${pkgs[@]}"
     elif command -v pacman >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc pkgconf curl)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-headers glslang vulkan-tools)
+        privileged_consent pacman -Sy --needed --noconfirm "${pkgs[@]}" || return 1
         run_privileged pacman -Sy --needed --noconfirm "${pkgs[@]}"
     elif command -v zypper >/dev/null 2>&1; then
         local pkgs=(git cmake make gcc gcc-c++ pkg-config libcurl-devel)
         [[ "$BACKEND_CHOICE" == "vulkan" ]] && pkgs+=(vulkan-devel glslang-tools vulkan-tools)
+        privileged_consent zypper install -y "${pkgs[@]}" || return 1
         run_privileged zypper install -y "${pkgs[@]}"
     else
         return 1
@@ -2323,6 +2509,18 @@ else
     if python3_usable; then
         if python3 -c 'import huggingface_hub, tqdm' >/dev/null 2>&1; then
             ok "Python download dependencies already installed"
+        elif app_python_ready; then
+            ok "Python download dependencies already installed in the ggrun app"
+        elif [[ "${LLM_INSTALL_APP_PYTHON:-0}" == "1" ]]; then
+            if [[ "$PY_DEPS_MODE" == "install" ]] || ask "Install model download helpers in the ggrun app? [Y/n]" y; then
+                if install_app_python_download_deps; then
+                    ok "Python download dependencies ready in the ggrun app"
+                else
+                    err "Could not install the model download helpers in the ggrun app."
+                    [[ "$PY_DEPS_MODE" == "install" ]] && exit 1
+                    warn "Local GGUF serving still works; model search/download is unavailable."
+                fi
+            fi
         elif ! ensure_python_pip; then
             err "Python 3 is installed, but pip is unavailable. Try: python3 -m ensurepip --user"
             [[ "$PY_DEPS_MODE" == "install" ]] && exit 1

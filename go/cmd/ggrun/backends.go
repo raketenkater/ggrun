@@ -61,6 +61,9 @@ Examples:
 update <tag>    Rebuild a backend at its recipe's current commit. The build it
                 replaces is kept, so a failed or bad update can be undone.
 rollback <tag>  Point a backend back at the build the last update replaced.
+verify --model SMALL.gguf [--server-bin PATH]
+                Load a small model on CPU and check that ggrun's log parsers
+                still read this backend (exits non-zero when they do not).
 `)
 }
 
@@ -86,6 +89,8 @@ func cmdBackend(args []string) {
 		cmdBackendUpdate(args[1:])
 	case "rollback":
 		cmdBackendRollback(args[1:])
+	case "verify":
+		cmdBackendVerify(args[1:])
 	case "remove", "rm":
 		cmdBackendRemove(args[1:])
 	default:
@@ -330,13 +335,6 @@ func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 		fmt.Printf("Architecture %q verified for helper use; main-model auto-routing remains unchanged.\n", be.RouteArch)
 	}
 	return nil
-}
-
-// prepareForkCheckout updates a ggrun-owned fork checkout without trampling
-// local edits. A commit pin wins; otherwise the requested branch (or remote
-// default HEAD) advances to its latest fetched revision.
-func prepareForkCheckout(srcDir, branch, commit string) error {
-	return prepareForkCheckoutRecipe(srcDir, branch, commit, nil)
 }
 
 // resolveShortCommit expands an abbreviated pin to the full commit id. Servers

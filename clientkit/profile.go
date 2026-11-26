@@ -125,6 +125,52 @@ func BaseURL(raw string, allowHTTP bool) (string, error) {
 	return strings.TrimRight(u.String(), "/"), nil
 }
 
+// OutputBudget is the CLAUDE_CODE_MAX_OUTPUT_TOKENS value for a slot, or 0 to
+// leave Claude Code's default. Claude Code assumes 32,000 output tokens for an
+// unknown model and holds back min(budget, 20,000) before compacting, so a small
+// slot compacted at about 7.6k tokens (E-3: 40,960 slot). The 8,192 floor
+// covers the longest small-model reasoning reply seen (5,912, E-2). Large slots
+// are fine.
+func OutputBudget(contextPerSlot int) int {
+	if contextPerSlot < 1 || contextPerSlot >= 100000 {
+		return 0
+	}
+	return max(8192, (contextPerSlot/8)&^255)
+}
+
+// CompactionEstimate estimates where Claude Code auto-compacts, and the window
+// it uses, from a final KEY=VALUE environment. It is a formula fitted to Claude
+// Code 2.1.332 measurements, not read from its source, and may drift. It returns
+// (0, 0) when no window or context variable is present.
+func CompactionEstimate(env []string) (at, window int) {
+	vals := map[string]string{}
+	for _, pair := range env {
+		if k, v, ok := strings.Cut(pair, "="); ok {
+			vals[k] = v
+		}
+	}
+	num := func(k string) (int, bool) {
+		n, err := strconv.Atoi(vals[k])
+		return n, err == nil && n >= 1
+	}
+	window, ok := num("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+	if !ok {
+		if window, ok = num("CLAUDE_CODE_MAX_CONTEXT_TOKENS"); !ok {
+			return 0, 0
+		}
+	}
+	out, ok := num("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+	if !ok {
+		out = 32000
+	}
+	w := window - min(out, 20000)
+	at = w - 13000
+	if pct, ok := num("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"); ok {
+		at = min(w*pct/100, at)
+	}
+	return max(at, 0), window
+}
+
 // Environment is shared by the server's local Claude launcher and the laptop
 // connector. It changes only this child process; saved Claude settings survive.
 func (p Profile) Environment(baseURL, token string, inherited []string) []string {
@@ -205,6 +251,14 @@ func (p Profile) Environment(baseURL, token string, inherited []string) []string
 			}
 		}
 		overrides[k] = v
+	}
+	// A small slot needs a smaller output budget or Claude Code compacts early.
+	// With no budget the variable is left alone, so an inherited value survives.
+	if b := OutputBudget(p.ContextPerSlot); b > 0 {
+		overrides["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = strconv.Itoa(b)
+		if n, err := strconv.Atoi(old["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]); err == nil && n >= 1 && n < p.ContextPerSlot {
+			overrides["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = old["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+		}
 	}
 	out := make([]string, 0, len(inherited)+len(overrides))
 	for _, pair := range inherited {

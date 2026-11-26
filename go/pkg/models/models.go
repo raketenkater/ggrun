@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrNotFound reports a model name that is not present in the configured model
@@ -69,9 +70,10 @@ func ResolveGGUFShardFiles(path string) (files []string, sharded bool, err error
 	return files, true, nil
 }
 
-// List finds GGUF files below root. It follows file symlinks for their sizes
-// but never follows symlinked directories, so a model directory cannot cause a
-// recursive walk of another filesystem. Split GGUFs are grouped into one model.
+// List finds GGUF files below root. It follows file and folder symlinks (a
+// models directory often links to a larger disk); loops are broken by tracking
+// the real path of every directory entered, and the walk is bounded in depth,
+// entries and time. Split GGUFs are grouped into one model.
 func List(root string) ([]Model, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -86,10 +88,7 @@ func List(root string) ([]Model, error) {
 	}
 
 	grouped := map[string]*Model{}
-	err = filepath.WalkDir(WalkRoot(root), func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
+	err = walkFollowingLinks(root, func(path string, entry fs.DirEntry) error {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".gguf") {
 			return nil
 		}
@@ -127,6 +126,67 @@ func List(root string) ([]Model, error) {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out, nil
+}
+
+const (
+	listMaxDepth   = 32
+	listMaxEntries = 500_000
+	listMaxTime    = 30 * time.Second
+)
+
+// walkFollowingLinks calls fn for every non-directory entry below root,
+// descending into symlinked directories. A directory whose real path was
+// already entered is skipped (loops, duplicate links). An unreadable
+// subdirectory is skipped; hitting a limit ends the walk with what was found.
+func walkFollowingLinks(root string, fn func(path string, entry fs.DirEntry) error) error {
+	start := time.Now()
+	entries := 0
+	visited := map[string]bool{}
+	var walk func(dir string, depth int) error
+	walk = func(dir string, depth int) error {
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return nil
+		}
+		if visited[real] {
+			return nil
+		}
+		visited[real] = true
+		list, err := os.ReadDir(dir)
+		if err != nil {
+			if depth == 0 {
+				return err
+			}
+			return nil
+		}
+		for _, entry := range list {
+			entries++
+			if entries > listMaxEntries || time.Since(start) > listMaxTime {
+				return nil
+			}
+			path := filepath.Join(dir, entry.Name())
+			isDir := entry.IsDir()
+			if entry.Type()&os.ModeSymlink != 0 {
+				if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+					isDir = true
+				}
+			}
+			if isDir {
+				if depth+1 > listMaxDepth {
+					continue
+				}
+				if err := walk(path, depth+1); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := fn(path, entry); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(root, 0)
 }
 
 // WalkRoot is root with a trailing separator when root itself is a symlink to

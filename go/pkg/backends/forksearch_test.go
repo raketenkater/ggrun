@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 
 func TestSearchArchForkPRsReturnsOpenHeadFork(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch {
 		case r.URL.Path == "/search/issues":
 			q := r.URL.Query().Get("q")
@@ -37,11 +42,13 @@ func TestSearchArchForkPRsReturnsOpenHeadFork(t *testing.T) {
 			})
 		case r.URL.Path == "/repos/ggml-org/llama.cpp/pulls/27742":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"number":   27742,
-				"title":    "model: add Qwen3.8-Flash-Next (qwen4exp)",
-				"html_url": "https://github.com/ggml-org/llama.cpp/pull/27742",
-				"state":    "open",
-				"merged":   false,
+				"number":             27742,
+				"title":              "model: add Qwen3.8-Flash-Next (qwen4exp)",
+				"html_url":           "https://github.com/ggml-org/llama.cpp/pull/27742",
+				"state":              "open",
+				"merged":             false,
+				"user":               map[string]any{"login": "pr-author"},
+				"author_association": "CONTRIBUTOR",
 				"head": map[string]any{
 					"ref": "qwen4exp/qwen3.8-flash-next",
 					"sha": "250b61446efc91e3a179c8677956f2667c8fbda0",
@@ -68,6 +75,9 @@ func TestSearchArchForkPRsReturnsOpenHeadFork(t *testing.T) {
 		pr.Branch != "qwen4exp/qwen3.8-flash-next" || pr.Commit != "250b61446efc91e3a179c8677956f2667c8fbda0" {
 		t.Fatalf("discovered PR = %+v", pr)
 	}
+	if pr.Author != "pr-author" || pr.AuthorAssociation != "CONTRIBUTOR" || pr.CIState != "passing" {
+		t.Fatalf("provenance not recorded: %+v", pr)
+	}
 	recipe := pr.Recipe()
 	if recipe.Tag != "qwen4exp" || recipe.RouteArch != "qwen4exp" || recipe.GitURL != pr.GitURL {
 		t.Fatalf("recipe from PR = %+v", recipe)
@@ -80,6 +90,10 @@ func TestSearchArchForkPRsReturnsOpenHeadFork(t *testing.T) {
 
 func TestSearchArchForkPRsSkipsMergedAndUnknownArch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch r.URL.Path {
 		case "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -151,6 +165,10 @@ func TestBackendTagFromModelDropsShardAndQuant(t *testing.T) {
 
 func TestSearchArchForkPRsRejectsNonGitHubHead(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch r.URL.Path {
 		case "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -186,6 +204,10 @@ func TestSearchArchForkPRsRejectsNonGitHubHead(t *testing.T) {
 
 func TestSearchArchForkPRsPrefersAddTitleOverLaterFix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch r.URL.Path {
 		case "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -218,6 +240,10 @@ func TestSearchArchForkPRsPrefersAddTitleOverLaterFix(t *testing.T) {
 
 func TestSearchArchForksPrefersHuggingFaceCitedPR(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch {
 		case r.URL.Path == "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -257,6 +283,10 @@ func TestSearchArchForksPrefersHuggingFaceCitedPR(t *testing.T) {
 
 func TestSearchArchForksIgnoresNonOfficialPullLinks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch {
 		case r.URL.Path == "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
@@ -293,6 +323,10 @@ https://github.com/ggml-org/llama.cpp/pull/27742
 
 func TestSearchArchForksUsesHubSearchWhenMetadataMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch {
 		case r.URL.Path == "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
@@ -358,6 +392,10 @@ func writeOpenPR(w http.ResponseWriter, number int, title, branch, sha string) {
 
 func TestSearchArchForksRejectsUnrelatedCardCitedPR(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch {
 		case r.URL.Path == "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
@@ -388,6 +426,10 @@ func TestSearchArchForksRejectsUnrelatedCardCitedPR(t *testing.T) {
 
 func TestSearchArchForkPRsRejectsMalformedCommitSHA(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		switch r.URL.Path {
 		case "/search/issues":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
@@ -413,6 +455,10 @@ func TestSearchArchForkPRsRejectsMalformedCommitSHA(t *testing.T) {
 func TestSearchArchForkPRsCapsDetailFetches(t *testing.T) {
 	detailFetches := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			io.WriteString(w, `{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}`)
+			return
+		}
 		if r.URL.Path == "/search/issues" {
 			items := make([]map[string]any, 10)
 			for i := range items {
@@ -433,5 +479,34 @@ func TestSearchArchForkPRsCapsDetailFetches(t *testing.T) {
 	}
 	if len(got) != 0 || detailFetches != maxGitHubPRFetches {
 		t.Fatalf("got=%+v detail fetches=%d, want cap %d", got, detailFetches, maxGitHubPRFetches)
+	}
+}
+
+// S-04: the prompt shows who wrote the PR, their relation to llama.cpp and
+// the head commit's CI result before ggrun builds it.
+func TestForkPRProvenanceAndCIState(t *testing.T) {
+	pr := ArchForkPR{Author: "someone", AuthorAssociation: "FIRST_TIME_CONTRIBUTOR", CIState: "failing"}
+	if got := pr.Provenance(); got != "by someone (first time contributor to llama.cpp), CI failing" {
+		t.Fatalf("provenance %q", got)
+	}
+	if got := (ArchForkPR{}).Provenance(); !strings.Contains(got, "unknown author") || !strings.Contains(got, "CI unknown") {
+		t.Fatalf("empty provenance %q", got)
+	}
+	sha := "250b61446efc91e3a179c8677956f2667c8fbda0"
+	for body, want := range map[string]string{
+		`{"total_count":2,"check_runs":[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"failure"}]}`: "failing",
+		`{"total_count":2,"check_runs":[{"status":"completed","conclusion":"success"},{"status":"in_progress","conclusion":null}]}`:    "running",
+		`{"total_count":2,"check_runs":[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"skipped"}]}`: "passing",
+		`{"total_count":0,"check_runs":[]}`: "none",
+		`not json`:                          "unknown",
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+		if got := fetchCIState(context.Background(), srv.Client(), srv.URL, sha); got != want {
+			t.Errorf("%s: got %s, want %s", body, got, want)
+		}
+		srv.Close()
+	}
+	if got := fetchCIState(context.Background(), http.DefaultClient, "http://127.0.0.1:1", "not-a-sha"); got != "unknown" {
+		t.Errorf("bad sha: %s", got)
 	}
 }

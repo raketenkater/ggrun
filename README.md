@@ -34,7 +34,7 @@ The installer creates an app home under `~/ggrun` with the launcher, models, con
 
 Before installing anything, it looks for an existing `llama-server`, the NVIDIA driver and the CUDA toolkit. It reuses an existing backend unless it fails to load. Otherwise it installs prebuilts (ik_llama.cpp CUDA on NVIDIA, plus llama.cpp Vulkan; CPU if neither runs) and builds from source only as a fallback. It never installs the NVIDIA driver; it asks before installing Vulkan runtime packages or the CUDA toolkit.
 
-Windows installs the latest release. Linux setup builds ggrun from current `main` (it fetches Go if needed).
+Both install the latest release; Linux builds it from the release tag (it fetches Go if needed). `LLM_SETUP_REF=main` builds the development branch instead.
 
 Installer controls, the app-home layout and uninstall steps are in [docs/install.md](docs/install.md).
 
@@ -67,7 +67,7 @@ llama.cpp's `--fit` is on by default and fits a model to free memory well. If on
 
 - **Placement weighted by bandwidth on mismatched rigs.** One fast-link GPU owns the dense layers, and slower-link GPUs store whole expert layers. A per-device ledger from the GGUF counts the KV cache, SWA, recurrent state, compute buffers and an optional companion model.
 - **Admission before serving.** The plan is checked against `llama-fit-params` or an allocation-only dry run. When neither is available, ggrun asks before running a contained full-load probe. It re-plans until the plan fits.
-- **Host memory containment on Linux.** Each backend runs in its own cgroup v2 scope (through systemd). MemoryHigh and MemoryMax come from the RAM policy, so a breach kills the backend, not the machine. ggrun refuses resident plans whose host footprint plus reserve would exceed the whole-host ceiling. If a model fits only with weights paged from disk, ggrun stops and asks `Use mmap? [y/N]`; non-interactive runs need `--mmap`. Hosts without systemd, such as containers, can set `GGRUN_SCOPE_MODE=none`. The backend then runs uncontained, and only the pre-launch check applies.
+- **Host memory containment on Linux.** Each backend runs in its own cgroup v2 scope (through systemd). MemoryHigh and MemoryMax come from the RAM policy, so a breach kills the backend, not the machine. ggrun refuses resident plans whose host footprint plus reserve would exceed the whole-host ceiling. If a model fits only with weights paged from disk, ggrun stops and asks `Use mmap? [y/N]`; non-interactive runs need `--mmap`. Hosts without systemd, such as containers, can set `GGRUN_SCOPE_MODE=none`. The backend then runs uncontained, and only the pre-launch check applies. To serve unattended, use the `systemd --user` unit in [`examples/systemd/`](examples/systemd/ggrun.service); a system unit with `User=` has no user manager to create the scopes.
 - **Backend chosen by architecture.** ggrun uses an installed backend that registers the model's architecture. If none does, it offers a reviewed pinned fork recipe, a current mainline CUDA build, or an open llama.cpp PR for that architecture as an unreviewed fork.
 - **Recommendations that launch.** Models are ranked by Artificial Analysis intelligence within the detected VRAM/RAM. Each row shows the best quant that fits, a speed estimate, and whether an installed backend can run the model now or needs a build first.
 - **Claude Code settings for long agent sessions:**
@@ -183,7 +183,7 @@ A smaller new model went through the same download-to-agent flow. Nanbeige4.3-33
 - Large models from an HDD are slow to start (1,621-3,372 s to ready in the table above) and slow to prefill cold.
 - The downloader picks the largest quant that fits VRAM without reserving context. Nanbeige4.3-33B Q8_0 got 34,816 tokens on 1 slot.
 - MiniMax-M3.1-Flash needs an unmerged llama.cpp PR (#31192) registered as a custom backend. On that run the backend did not follow ggrun's plan (KV cache on CPU, RTX 3090 Ti unused), and admission did not catch it.
-- AI Tune gains are marginal, and speculative decoding was slower on code in the published test. Both are opt-in.
+- Speculative decoding was slower on code in the published test; it is opt-in.
 - Claude Code is a separate install, and the local model's quality limits how well tool use works.
 
 ## Useful commands

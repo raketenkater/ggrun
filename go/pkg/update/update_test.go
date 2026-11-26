@@ -189,6 +189,7 @@ func TestSelfUpdateInstallEnvPreservesAppHome(t *testing.T) {
 		"LLM_INSTALL_MODE=build",
 		"LLM_INSTALL_MAIN=go",
 		"LLM_INSTALL_NONINTERACTIVE=1",
+		"LLM_INSTALL_APP_PYTHON=1",
 	}
 	for _, want := range checks {
 		if !envHas(env, want) {
@@ -805,5 +806,29 @@ func TestBuildBehindUpstreamComparesTheBuildNotTheCheckout(t *testing.T) {
 	}
 	if _, _, ok := buildBehindUpstream(dev, "v3.2.0-go"); ok {
 		t.Fatal("unstamped build compared against upstream")
+	}
+}
+
+// I-05: a candidate build whose log fails the contract check is refused, so
+// buildAndTest returns before promotion and the current build stays.
+func TestCandidateFailingTheContractCheckIsRefused(t *testing.T) {
+	model := filepath.Join(t.TempDir(), "m.gguf")
+	if err := os.WriteFile(model, []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := verifyContract
+	t.Cleanup(func() { verifyContract = old })
+	verifyContract = func(string, string) error { return errors.New("no KV size") }
+	t.Setenv("GGRUN_BACKEND_VERIFY_MODEL", model)
+	if err := verifyCandidate("/staging/bin/llama-server"); err == nil {
+		t.Fatal("failing contract check accepted")
+	}
+	verifyContract = func(string, string) error { return nil }
+	if err := verifyCandidate("/staging/bin/llama-server"); err != nil {
+		t.Fatalf("passing check refused: %v", err)
+	}
+	t.Setenv("GGRUN_BACKEND_VERIFY_MODEL", "")
+	if err := verifyCandidate("/staging/bin/llama-server"); err != nil {
+		t.Fatalf("unconfigured check must not block: %v", err)
 	}
 }

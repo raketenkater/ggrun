@@ -2,8 +2,10 @@
 
 package server
 
-import "fmt"
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 func scopedCommandArgs(args []string, memoryMaxMB int) ([]string, error) {
 	return scopedCommandArgsWithUnit(args, memoryMaxMB, "")
@@ -73,3 +75,7 @@ func (p *Process) SetMemoryMaxMB(int) error {
 func (p *Process) SetMemoryHighMB(int) error {
 	return fmt.Errorf("backend memory scopes are only implemented on Linux/systemd")
 }
+
+func verifyScopeMemoryLimit(string, scopeMode, int) error { return nil }
+
+func scopeOptOutHintText() string { return "" }

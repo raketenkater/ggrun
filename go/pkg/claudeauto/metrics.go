@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -70,6 +72,111 @@ type RequestRecord struct {
 	RequestBytes  int64 `json:"request_bytes"`
 	ResponseBytes int64 `json:"response_bytes"`
 	Usage         Usage `json:"usage"`
+
+	// Kind is "classifier" (Auto-mode permission review), "utility" (cheap
+	// tier) or empty (main-model work). Verdict is set for classifier requests
+	// only: allow, block, invalid (an answer Claude cannot parse) or none (no
+	// answer: aborted, HTTP error or empty). Together they let a refused tool
+	// call be attributed from the records afterwards.
+	Kind    string `json:"kind,omitempty"`
+	Verdict string `json:"verdict,omitempty"`
+	// Client is the first product token of the User-Agent, lower case, at most
+	// 32 characters (e.g. "claude-cli"). Never anything from the body.
+	Client string `json:"client,omitempty"`
+	// QueuedAtArrival and InServiceAtArrival are the main route's queue depth
+	// and requests in service when this request arrived.
+	QueuedAtArrival    int64 `json:"queued_at_arrival"`
+	InServiceAtArrival int64 `json:"in_service_at_arrival"`
+}
+
+const (
+	kindClassifier = "classifier"
+	kindUtility    = "utility"
+	kindWarmup     = "warmup"
+
+	verdictAllow   = "allow"
+	verdictBlock   = "block"
+	verdictInvalid = "invalid"
+	verdictNone    = "none"
+
+	// classifierCaptureBytes bounds the response kept to read a verdict;
+	// verdicts are a few tokens.
+	classifierCaptureBytes = 64 << 10
+)
+
+// recordMeta is what the router knows about a request besides its timing.
+type recordMeta struct {
+	kind, client                        string
+	queuedAtArrival, inServiceAtArrival int64
+	// broken: the proxy did not return normally, so the response stream ended
+	// early even though a status was already sent.
+	broken bool
+}
+
+func metaFor(req *http.Request, kind string) recordMeta {
+	if kind == kindClassifier && isWarmupRequest(req) {
+		kind = kindWarmup
+	}
+	m := recordMeta{kind: kind}
+	if req != nil {
+		m.client = clientFamily(req.UserAgent())
+	}
+	return m
+}
+
+// clientFamily is the first product token of a User-Agent ("claude-cli/2.1
+// (external)" -> "claude-cli"), lower case, at most 32 characters of
+// [a-z0-9._-].
+func clientFamily(ua string) string {
+	fields := strings.Fields(ua)
+	if len(fields) == 0 {
+		return ""
+	}
+	product, _, _ := strings.Cut(fields[0], "/")
+	var b strings.Builder
+	for _, c := range strings.ToLower(product) {
+		if b.Len() >= 32 {
+			break
+		}
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// classifierVerdict reads Claude's <block> verdict the way Claude's parser
+// does (see validReviewerVerdict): <block>yes blocks, <block>no allows.
+func classifierVerdict(status int, header http.Header, body []byte) string {
+	return classifierVerdictFor(status, header, body, false)
+}
+
+// classifierVerdictFor also reads the severity format when the request asked
+// for it: N below 50 allows, above 50 blocks, and exactly 50 (the boundary,
+// which Claude Code's prompt leaves unassigned) is recorded as "severity:50".
+func classifierVerdictFor(status int, header http.Header, body []byte, severity bool) string {
+	if status < 200 || status >= 300 || len(bytes.TrimSpace(body)) == 0 {
+		return verdictNone
+	}
+	text := strings.TrimSpace(reviewerResponseText(header, body))
+	if !validReviewerVerdict(text) {
+		if severity {
+			if n, ok := severityScore(text); ok {
+				switch {
+				case n < 50:
+					return verdictAllow
+				case n > 50:
+					return verdictBlock
+				}
+				return "severity:" + strconv.Itoa(n)
+			}
+		}
+		return verdictInvalid
+	}
+	if strings.Contains(text, "<block>yes") {
+		return verdictBlock
+	}
+	return verdictAllow
 }
 
 // PrefillMS is time to the first generated delta minus queue wait: the
@@ -123,6 +230,10 @@ type metricsSink struct {
 	maxQueueMS       int64
 	maxPrefillMS     int64
 	usage            Usage
+	// mainServed and mainServiceMS give the running mean service time of
+	// completed main-route requests, for the expected-wait estimate.
+	mainServed    int64
+	mainServiceMS int64
 }
 
 func (m *metricsSink) record(rec RequestRecord) {
@@ -153,6 +264,12 @@ func (m *metricsSink) record(rec RequestRecord) {
 		}
 	} else if rec.Status >= 200 && rec.Status < 300 {
 		m.successful++
+		// Main-model work only: a classifier or cheap-tier request that fell
+		// back to main is short and would understate the wait.
+		if rec.Route == routeMain && rec.Kind == "" && rec.TotalMS > rec.QueueMS {
+			m.mainServed++
+			m.mainServiceMS += rec.TotalMS - rec.QueueMS
+		}
 		m.prefillMS += rec.PrefillMS()
 		m.decodeMS += rec.DecodeMS()
 		if p := rec.PrefillMS(); p > m.maxPrefillMS {
@@ -211,7 +328,37 @@ func (m *metricsSink) summary() map[string]any {
 	if m.count > 0 {
 		s["queue_ms_mean"] = m.queueMS / m.count
 	}
+	if m.mainServed > 0 {
+		s["main_service_ms_mean"] = m.mainServiceMS / m.mainServed
+	}
 	return s
+}
+
+// meanMainServiceMS is the running mean service time of completed main-route
+// requests; 0 before the first one.
+func (m *metricsSink) meanMainServiceMS() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mainServed == 0 {
+		return 0
+	}
+	return m.mainServiceMS / m.mainServed
+}
+
+// expectedWaitMS estimates how long the last queued request waits: the queue
+// drains limit requests per mean service time. 0 means unknown (nothing
+// queued, or no completed request to take a mean from).
+func expectedWaitMS(queued, limit, meanServiceMS int64) int64 {
+	if queued <= 0 || meanServiceMS <= 0 {
+		return 0
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	return (queued*meanServiceMS + limit - 1) / limit
 }
 
 func (m *metricsSink) close() error {
@@ -241,9 +388,12 @@ func (r *Router) EnableMetrics(path string) error {
 	if r == nil {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
+	}
+	if runtime.GOOS != "windows" {
+		_ = f.Chmod(0o600)
 	}
 	r.metrics = &metricsSink{out: f, closer: f}
 	return nil
@@ -318,6 +468,10 @@ type meteredWriter struct {
 	onDecode    func()
 	decodeSeen  bool
 	decodeStart time.Duration
+	// capture keeps up to classifierCaptureBytes of the response so a
+	// classifier verdict can be read after it has streamed to the client.
+	capture  bool
+	captured bytes.Buffer
 }
 
 func (w *meteredWriter) WriteHeader(status int) {
@@ -336,6 +490,11 @@ func (w *meteredWriter) Write(p []byte) (int, error) {
 	}
 	w.written += int64(len(p))
 	w.scan(p)
+	if w.capture {
+		if room := classifierCaptureBytes - w.captured.Len(); room > 0 {
+			w.captured.Write(p[:min(room, len(p))])
+		}
+	}
 	return w.ResponseWriter.Write(p)
 }
 

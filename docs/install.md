@@ -41,7 +41,7 @@ ggrun       launcher (no arguments opens the terminal GUI)
 models/          GGUF models and downloaded vision projectors
 .bin/            Go binary, tools, and bundled backend when available
 .config/         local config loaded by the launcher (single source of truth)
-.cache/          AI Tune and model index cache
+.cache/          probe and model index cache
 .logs/           setup and server logs
 .src/            backend source/build fallback
 ```

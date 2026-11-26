@@ -1,6 +1,7 @@
 package download
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,9 +10,17 @@ import (
 	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/embedscript"
 	"github.com/raketenkater/ggrun/pkg/python"
 	"github.com/raketenkater/ggrun/pkg/recommend"
 )
+
+// downloaderSource is tools/download/download_any_gguf.py, embedded so a bare
+// binary can download. TestEmbeddedDownloaderMatchesTools keeps them identical.
+//
+//go:generate cp ../../../tools/download/download_any_gguf.py download_any_gguf.py
+//go:embed download_any_gguf.py
+var downloaderSource string
 
 // Downloader wraps the download_any_gguf.py script.
 type Downloader struct {
@@ -33,57 +42,59 @@ func New(modelDir, cacheDir, appHome string) *Downloader {
 }
 
 func findScript(appHome string) string {
-	// The installed copy wins over whatever sits in the working directory: a
-	// model directory can hold an older downloader that ignores --repo and
-	// waits for input (October 8, `ggrun download` run from AI_Models).
+	// Only locations the user, the installer or the binary's own install
+	// name are searched. The working directory and PATH are not: a model
+	// directory can hold an older downloader that ignores --repo and waits for
+	// input (October 8, `ggrun download` run from AI_Models), or a planted one.
 	var candidates []string
-	// Check LLM_SERVER_HOME env var (repo root)
+	if dir := os.Getenv("LLM_SCRIPT_DIR"); dir != "" {
+		candidates = append(candidates,
+			filepath.Join(dir, "download_any_gguf.py"),
+			filepath.Join(dir, "tools", "download", "download_any_gguf.py"),
+		)
+	}
 	if home := os.Getenv("LLM_SERVER_HOME"); home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, "download_any_gguf.py"),
 			filepath.Join(home, "tools", "download", "download_any_gguf.py"),
 		)
 	}
-	// Check configured app home
-	if appHome != "" {
+	for _, home := range []string{os.Getenv("LLM_APP_HOME"), appHome} {
+		if home == "" {
+			continue
+		}
 		candidates = append(candidates,
-			filepath.Join(appHome, ".bin", "download_any_gguf.py"),
-			filepath.Join(appHome, "bin", "download_any_gguf.py"),
-			filepath.Join(appHome, "download_any_gguf.py"),
+			filepath.Join(home, ".bin", "download_any_gguf.py"),
+			filepath.Join(home, "bin", "download_any_gguf.py"),
+			filepath.Join(home, "download_any_gguf.py"),
 		)
 	}
-	// Try relative to binary (installed alongside ggrun)
 	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(exeDir, "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "tools", "download", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "tools", "download", "download_any_gguf.py"),
-			filepath.Join(exeDir, "..", "..", "..", "download_any_gguf.py"),
-		)
+		candidates = append(candidates, exeScriptCandidates(filepath.Dir(exe))...)
 	}
-	// A source checkout run from the repo or go/ directory.
-	candidates = append(candidates,
-		filepath.Join("tools", "download", "download_any_gguf.py"),
-		filepath.Join("..", "tools", "download", "download_any_gguf.py"),
-		filepath.Join("..", "..", "tools", "download", "download_any_gguf.py"),
-		"download_any_gguf.py",
-		filepath.Join("..", "download_any_gguf.py"),
-		filepath.Join("..", "..", "download_any_gguf.py"),
-	)
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
 			return c
 		}
+	}
+	// Nothing on disk: the copy compiled into the binary.
+	if p, err := embedscript.Extract("download_any_gguf.py", downloaderSource); err == nil {
+		return p
 	}
 	return ""
 }
 
-// Run executes the downloader for the given repo.
-func (d *Downloader) Run(repo string, caps *detect.Capabilities) error {
-	return d.RunQuant(repo, "", caps)
+// exeScriptCandidates are the downloader locations of the binary's own
+// install: beside it, and for a binary in <app-home>/bin or .bin the source
+// checkout in that app home. No walk climbs further, so a binary in
+// ~/.local/bin never reaches files in the home directory.
+func exeScriptCandidates(exeDir string) []string {
+	candidates := []string{filepath.Join(exeDir, "download_any_gguf.py")}
+	if base := filepath.Base(exeDir); base == ".bin" || base == "bin" {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(exeDir), ".src", "ggrun", "tools", "download", "download_any_gguf.py"))
+	}
+	return candidates
 }
 
 // RunQuant executes the downloader with an optional preselected quant.
@@ -126,6 +137,9 @@ func (d *Downloader) scriptArgs(repo, quant string, caps *detect.Capabilities, i
 	if quant != "" && quant != "auto" && quant != "catalog" {
 		args = append(args, "--quant", quant)
 	}
+	if rev := catalogRevision(repo); rev != "" {
+		args = append(args, "--revision", rev)
+	}
 	if active := catalogActiveParamsB(repo); active > 0 {
 		args = append(args, "--active-params-b", strconv.FormatFloat(active, 'f', -1, 64))
 	}
@@ -145,6 +159,16 @@ func (d *Downloader) scriptArgs(repo, quant string, caps *detect.Capabilities, i
 // catalogActiveParamsB is the catalog's active parameter count for a MoE repo,
 // so the downloader does not size an unnamed MoE (no A##B in the repo name)
 // as dense. 0 when the repo is not a catalog MoE.
+// catalogRevision is the commit the catalog pinned for repo, if any.
+func catalogRevision(repo string) string {
+	for _, c := range recommend.Shortlist() {
+		if strings.EqualFold(c.Repo, repo) {
+			return c.Revision
+		}
+	}
+	return ""
+}
+
 func catalogActiveParamsB(repo string) float64 {
 	for _, c := range recommend.Shortlist() {
 		if c.MoE && strings.EqualFold(c.Repo, repo) {

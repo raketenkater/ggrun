@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/raketenkater/ggrun/pkg/config"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/raketenkater/ggrun/pkg/config"
 )
 
 func TestRemoteClaudeFlagsDoNotReachBackend(t *testing.T) {
@@ -135,5 +136,18 @@ func TestRemoteDryRunDoesNotPromiseALocalClaudeProcess(t *testing.T) {
 	out := capture()
 	if strings.Contains(out, "opens Claude Code") || !strings.Contains(out, "without starting Claude Code") || !strings.Contains(out, "127.0.0.1:8080") {
 		t.Fatal(out)
+	}
+}
+
+func TestClaudeRecipeSizesOutputBudgetForSmallSlot(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
+	t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
+	t.Setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "")
+	args := []string{"--ctx-size", "40960", "--parallel", "1"}
+	capture := captureStdout(t)
+	printClaudeCodeRecipe("127.0.0.1", 8080, args, 40960)
+	out := capture()
+	if !strings.Contains(out, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192") || !strings.Contains(out, "# Claude Code compacts at about 19768 of 40960 tokens") {
+		t.Fatal("recipe lacks the small-slot output budget or estimate:", out)
 	}
 }

@@ -23,7 +23,7 @@ RUN cmake -S llama.cpp -B llama.cpp/build \
     && cmake --build llama.cpp/build --config Release -j "$(nproc)" -t llama-server
 
 # ---- launcher: build the static Go binary ----
-FROM golang:1.24-bookworm AS gobuild
+FROM golang:1.27-bookworm AS gobuild
 ARG LLM_VERSION=
 WORKDIR /src/go
 COPY go/go.mod go/go.sum ./

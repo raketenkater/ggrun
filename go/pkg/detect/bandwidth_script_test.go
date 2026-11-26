@@ -195,3 +195,30 @@ func TestDigestIsContentAddressed(t *testing.T) {
 		t.Fatal("digest did not change when the embedded script changed; a stale extraction would be reused")
 	}
 }
+
+// S-10: a measure_bandwidth.py planted in the working directory or on PATH
+// must never be executed; with no installed copy the embedded probe is used.
+func TestPlantedProbeInWorkingDirectoryOrPathIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	resetBandwidthScriptCache(t, dir)
+	clearScriptEnv(t)
+	planted := t.TempDir()
+	for _, rel := range []string{"measure_bandwidth.py", "tools/hardware/measure_bandwidth.py"} {
+		p := filepath.Join(planted, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("# planted\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", planted)
+	t.Chdir(planted)
+	got := findBandwidthScript()
+	if got == "" || strings.HasPrefix(got, planted) {
+		t.Fatalf("planted probe selected or nothing found: %q", got)
+	}
+	if data, err := os.ReadFile(got); err != nil || string(data) != measureBandwidthSource {
+		t.Fatalf("resolved probe is not the embedded one (err %v)", err)
+	}
+}

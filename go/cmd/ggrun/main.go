@@ -27,6 +27,7 @@ import (
 	"github.com/raketenkater/ggrun/clientkit"
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/benchmark"
+	"github.com/raketenkater/ggrun/pkg/boundexec"
 	"github.com/raketenkater/ggrun/pkg/chattemplate"
 	"github.com/raketenkater/ggrun/pkg/claudeauto"
 	"github.com/raketenkater/ggrun/pkg/config"
@@ -44,7 +45,6 @@ import (
 	"github.com/raketenkater/ggrun/pkg/recovery"
 	"github.com/raketenkater/ggrun/pkg/server"
 	"github.com/raketenkater/ggrun/pkg/tui"
-	"github.com/raketenkater/ggrun/pkg/tune"
 	"github.com/raketenkater/ggrun/pkg/update"
 
 	"github.com/charmbracelet/x/term"
@@ -121,7 +121,7 @@ func main() {
 	case "download":
 		cmdDownload(args[1:])
 	case "tune":
-		cmdTune(args[1:])
+		aiTuneRemoved("ggrun tune")
 	case "spec-test":
 		cmdSpecTest(args[1:])
 	case "recommend":
@@ -232,6 +232,8 @@ Launch flags:
                        Set LLM_ALLOW_LIVE_MEMORY_PROBE=true to remember approval
   --vision, -vision    Enable vision (auto-detect mmproj)
   --claude-code        Serve locally and launch Claude Code with workflows/research
+  --install-claude     With --claude-code, install Claude Code with the official installer if missing, without asking
+                       (otherwise ggrun asks on a terminal; GGRUN_INSTALL_CLAUDE=1 also opts in)
   --headless           With --claude-code, serve laptop clients without launching Claude here
   --gateway-host str   Remote gateway listener (default 127.0.0.1; transport independent)
   --gateway-port int   Remote gateway port (default 8080)
@@ -295,16 +297,14 @@ func dispatchCompat(args []string) bool {
 		return false
 	}
 	if hasArg(args, "--show-configs") {
-		cmdShowConfigs(args)
-		return true
+		aiTuneRemoved("--show-configs")
 	}
 	if hasArg(args, "--download") {
 		cmdDownload(downloadCompatArgs(args))
 		return true
 	}
 	if hasArg(args, "--ai-tune") {
-		cmdTune(args)
-		return true
+		aiTuneRemoved("--ai-tune")
 	}
 	if hasArg(args, "--benchmark") {
 		if firstPositional(args) != "" {
@@ -618,7 +618,7 @@ func firstPositional(args []string) string {
 		if strings.HasPrefix(a, "-") {
 			// Must stay in sync with the value-taking flags in parseLaunchArgs.
 			switch a {
-			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--tune-cache", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
+			case "--gateway-host", "--gateway-port", "--gateway-url", "--gateway-token-file", "--model", "-m", "--port", "-port", "--ctx", "-ctx", "--ctx-size", "-c", "--kv", "-kv", "--kv-placement", "--kv-quality", "--gpus", "--host", "--server-bin", "--mmproj", "--backend", "--rounds", "--ram-budget", "--ram-limit-percent", "--vram-headroom", "--ram-headroom", "--spec", "--parallel", "--claude-profile", "--lib-path", "--threads", "-t", "--cache-ram", "-cram", "--batch-size", "-b", "--ubatch-size", "-ub", "--support-expert", "--inventory":
 				skip = true
 			}
 			continue
@@ -747,6 +747,7 @@ type launchRequest struct {
 	Benchmark          bool
 	WorkerBenchmark    bool // task-specific support/reviewer quality plus throughput
 	ClaudeCode         bool
+	InstallClaude      bool // --install-claude: install Claude Code without asking
 	RemoteClaude       remoteClaudeOptions
 	// ClaudeReviewerOverride selects the local reviewer/worker model when
 	// Claude Code mode starts its Auto companion: "auto" (and the historical
@@ -856,6 +857,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 	if remoteErr != nil {
 		return nil, remoteErr
 	}
+	args, formErr := normalizeLaunchFlagForms(args)
+	if formErr != nil {
+		return nil, formErr
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -910,6 +915,9 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			switch key {
 			case "--allow-live-memory-probe":
 				req.AllowLiveMemoryProbe = val == "" || parseBoolFlag(val)
+				continue
+			case "--install-claude":
+				req.InstallClaude = val == "" || parseBoolFlag(val)
 				continue
 			case "--support-expert":
 				mode, err := config.NormalizeSupportExpert(val)
@@ -972,9 +980,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				req.Backend, req.BackendExplicit = parseBackendFlag(val)
 				continue
 			case "--tune-cache":
-				req.TuneCache = val
-				continue
-			case "--rounds":
+				return nil, errAITuneRemoved(key)
+			case "--rounds": // spec-test's measurement rounds; read there
 				continue
 			case "--ram-budget":
 				budget, err := parseBudgetFlag(key, val)
@@ -1114,7 +1121,10 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 					req.ChatTemplateOverride = entry.Name
 					continue
 				}
-				req.ExtraArgs = append(req.ExtraArgs, a)
+				// Same tokens as the space form, and once: without this
+				// continue the main switch passed it to the backend again.
+				req.ExtraArgs = append(req.ExtraArgs, key, val)
+				continue
 			}
 		}
 		next := func() (string, error) {
@@ -1164,7 +1174,13 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 			req.Calibrate = mode
 			continue
-		case "--dry-run", "--emit-server-argv-json", "--ai-tune", "--retune", "--download", "--show-configs", "--keep-alive":
+		case "--ai-tune", "--retune", "--show-configs", "--tune-cache":
+			return nil, errAITuneRemoved(a)
+		case "--rounds": // spec-test's measurement rounds; read there
+			if _, err := next(); err != nil {
+				return nil, err
+			}
+		case "--dry-run", "--emit-server-argv-json", "--download", "--keep-alive":
 			if a == "--emit-server-argv-json" {
 				req.EmitServerArgvJSON = true
 			}
@@ -1240,6 +1256,8 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			req.VisionAuto = true
 		case "--claude-code":
 			req.ClaudeCode = true
+		case "--install-claude":
+			req.InstallClaude = true
 		case "--claude-reviewer":
 			v, err := next()
 			if err != nil {
@@ -1311,17 +1329,6 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 				return nil, err
 			}
 			req.Backend, req.BackendExplicit = parseBackendFlag(v)
-		case "--tune-cache":
-			v, err := next()
-			if err != nil {
-				return nil, err
-			}
-			req.TuneCache = v
-		case "--rounds":
-			_, err := next()
-			if err != nil {
-				return nil, err
-			}
 		case "--ram-budget":
 			v, err := next()
 			if err != nil {
@@ -1458,7 +1465,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 		default:
 			if strings.HasPrefix(a, "-") {
 				req.ExtraArgs = append(req.ExtraArgs, a)
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				if unknownFlagTakesNext(args, i, req.ModelPath != "") {
 					i++
 					req.ExtraArgs = append(req.ExtraArgs, args[i])
 				}
@@ -2766,9 +2773,9 @@ func offerDiscoveredArchForkWith(
 		return false
 	}
 	recipe := candidate.RecipeForModel(discoveredForkModelName(model))
-	source := fmt.Sprintf("Open llama.cpp PR #%d (%s)", candidate.Number, candidate.URL)
+	source := fmt.Sprintf("Open llama.cpp PR #%d (%s, %s)", candidate.Number, candidate.URL, candidate.Provenance())
 	if candidate.Cited {
-		source = fmt.Sprintf("Hugging Face model card cites open llama.cpp PR #%d (%s)", candidate.Number, candidate.URL)
+		source = fmt.Sprintf("Hugging Face model card cites open llama.cpp PR #%d (%s, %s)", candidate.Number, candidate.URL, candidate.Provenance())
 	}
 	if !assumeYes {
 		if !terminal {
@@ -2981,7 +2988,6 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 		ForceSpecMoE:            req.ForceSpecMoE,
 		BackendHelp:             be.Help,
 		SpecCandidateValidator:  backendSpecCandidateValidator(be, model.ModelArch),
-		CacheFile:               req.TuneCache,
 		Parallel:                req.Parallel,
 		ParallelExplicit:        req.ParallelSet,
 		Threads:                 req.Threads,
@@ -3270,7 +3276,6 @@ func buildLaunchServerArgs(req *launchRequest, cfg *config.Config, be *backendIn
 	serverArgs = append(serverArgs, hy3TemplateArgs(req.ExtraArgs, be)...)
 	serverArgs = append(serverArgs, catalogTemplateArgs(req, cfg, model)...)
 	serverArgs = append(serverArgs, req.ExtraArgs...)
-	serverArgs = applyTuneCache(req, serverArgs, cfg.CacheDir, be.Tag, strategy.MMProjPath != "", caps)
 	serverArgs = claudeCodeAliasArgs(serverArgs, req.ClaudeCode)
 	serverArgs = claudeCodeSamplingArgs(serverArgs, req.ClaudeCode, model)
 	serverArgs = claudeCodeCacheArgs(serverArgs, req.ClaudeCode, be.Help, claudeCodeShiftableContext(model, strategy))
@@ -4373,10 +4378,10 @@ func startLaunchProcess(req *launchRequest, cfg *config.Config, model *placement
 		// Append, never truncate. The scope is a hash of the launch shape, not of
 		// one invocation, so every launch and every retry that lands on the same
 		// shape shares this path — and os.Create erased the previous attempt at
-		// the moment the next one started. That is the second of two truncation
-		// sites (pkg/recovery/recovery.go runOnce is the other); fixing only one
-		// still lost the history, as the 2026-08-02 23:11 relaunch showed.
-		if lf, ferr := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); ferr == nil {
+		// the moment the next one started, losing the history, as the
+		// 2026-08-02 23:11 relaunch showed.
+		if lf, ferr := openPrivateLog(logPath); ferr == nil {
+			rotateGgrunLogs(filepath.Dir(logPath), logRetainPerKind)
 			_, _ = fmt.Fprintf(lf, "[ggrun] launch-scope: %s\n", scope)
 			// The scope is a hash, so a mismatch between two runs is invisible
 			// from the filenames alone -- diagnosing one cost an afternoon.
@@ -4437,6 +4442,17 @@ func printVRAMLedger(strategy *placement.Strategy) {
 		}
 		fmt.Printf("[launch] CUDA%d %-11s free %6d - fixed %6d = room %6d MiB -> %2d expert layers, %5d MiB stranded\n",
 			e.GPU, role, e.FreeMB, e.FixedMB, e.RoomMB, e.ExpertLayers, e.StrandedMB)
+	}
+}
+
+// printLearnedReserves shows every stored overhead the plan charged, with its
+// date and source (print only; review P-14).
+func printLearnedReserves(label, cacheDir string, caps *detect.Capabilities) {
+	if caps == nil {
+		return
+	}
+	for _, line := range placement.LearnedReserveLines(label, placement.LearnedReserves(cacheDir, caps.GPUs)) {
+		fmt.Println(line)
 	}
 }
 
@@ -5888,8 +5904,9 @@ func failedBackendFreeVRAM(runtime *detect.Capabilities) map[int]int {
 	if runtime == nil || len(runtime.GPUs) == 0 {
 		return nil
 	}
-	out, err := exec.Command("nvidia-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits").Output()
+	out, err := boundexec.Output(boundexec.ProbeTimeout, "nvidia-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits")
 	if err != nil {
+		boundexec.Report(err, "free VRAM after the failure not sampled")
 		return nil
 	}
 	return freeVRAMByRuntimeDevice(string(out), runtime.GPUs)
@@ -6641,6 +6658,12 @@ func verifyAndActivateLaunch(req *launchRequest, cfg *config.Config, model *plac
 				_, _ = store.Transition(scope, profile.ID, controller.StateRejected, reason, "claude-reviewer-canary")
 				return errors.New(reason)
 			}
+			// A reviewer that answers but would allow a clearly destructive
+			// action is weak, not broken: say so and keep serving (S-01).
+			if blockErr := reviewerRunner.RunClaudeReviewerBlockCanary(); blockErr != nil {
+				fmt.Fprintf(os.Stderr, "[claude-code] warning: the Auto reviewer did not block a destructive test action (%v); "+
+					"Auto mode's protection is weak with this reviewer\n", blockErr)
+			}
 		}
 		if reviewerEnabled && req.ReviewerProfile.ServesWorkers {
 			workerRunner := &benchmark.Runner{
@@ -6830,7 +6853,7 @@ func requestedLaunchPolicyIdentity(req *launchRequest, model *placement.ModelPro
 		"gpus=" + req.GPUsFlag,
 		"vision=" + strconv.FormatBool(req.VisionAuto),
 		"mmproj=" + req.MMProjPath,
-		"tune=" + req.TuneCache,
+		"tune=", // AI Tune was removed; kept so existing evidence keys do not change
 		"spec=" + req.SpecMode,
 		"force-spec-moe=" + strconv.FormatBool(req.ForceSpecMoE),
 		"ram-budget=" + strconv.Itoa(req.RamBudgetMB),
@@ -6946,6 +6969,10 @@ func cmdLaunch(args []string) {
 		os.Exit(2)
 	}
 	defer remoteService.close()
+	if err := ensureClaudeBeforeLaunch(req); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 
 	model, err := parseModel(req.ModelPath)
@@ -6965,6 +6992,9 @@ func cmdLaunch(args []string) {
 	launchPort := req.Port
 	if launchPort <= 0 {
 		launchPort = cfg.Port
+	}
+	if w := exposedHostWarning(req.Host, launchPort, req.ExtraArgs, os.Getenv); w != "" {
+		fmt.Fprintln(os.Stderr, w)
 	}
 	if !waitForPredecessorPort(req.Host, launchPort, 75*time.Second, os.Stderr) {
 		fmt.Fprintf(os.Stderr, "[launch] port %d is still occupied after 75s; continuing, but placement may see its VRAM as used and the bind may fail\n", launchPort)
@@ -7286,6 +7316,8 @@ func cmdLaunch(args []string) {
 	} else {
 		strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, false)
 		printOptimizationSummary("optimize", strategy, false)
+		printLearnedReserves("optimize", cfg.CacheDir, caps)
+		printBackendBuild("optimize", be)
 	}
 	req.CalibrationPending = pendingCalibration != nil
 	// A Claude profile is not verified by llama's OpenAI endpoint alone. Bring
@@ -7504,6 +7536,7 @@ func cmdLaunch(args []string) {
 		// Use the seated runtime, not just the environment toggle: --claude-reviewer
 		// off and a companion rejected during launch do not set that variable.
 		clientArgs = append(claudeCodePermissionArgs(clientArgs, claudeAuto != nil && claudeAuto.reviewerPort > 0), clientArgs...)
+		fmt.Println(claudePermissionModeLine(clientArgs))
 		progressEnabled := !progressDisabled()
 		progressStop := func() {}
 		if progressEnabled {
@@ -8026,343 +8059,11 @@ func waitForShutdownOrCrash(p *server.Process, sigCh <-chan os.Signal) bool {
 	}
 }
 
-func applyTuneCache(req *launchRequest, serverArgs []string, cacheDir, backendTag string, vision bool, caps *detect.Capabilities) []string {
-	if req == nil {
-		return serverArgs
-	}
-	if req.TuneCache != "" {
-		return applySelectedTuneCache(req, serverArgs, caps)
-	}
-	if req.ClaudeCode {
-		// Generic and community throughput tunes do not encode the agent
-		// scheduler, context, cache, or semantic-validation workload. They may
-		// override -b/-ub after Claude's fairness adjustment, so fail closed until
-		// the validation registry can select profile-scoped evidence.
-		fmt.Println("[tune] Skipping automatic generic/community tune for Claude Code; use an explicit --tune-cache after workload validation.")
-		return serverArgs
-	}
-	path := bestTuneCachePath(cacheDir, filepath.Base(req.ModelPath), backendTag, vision, "", tuneHardwareHash(caps))
-	if path == "" {
-		// No local tune for this model+hardware+backend: try the community
-		// pool. Downloads are sanitized to the tune-flag allow-list and both
-		// hits and misses are cached on disk, so launches stay offline-safe.
-		path = tune.FetchCommunityTune(cacheDir, req.ModelPath, gpuNamesFromCaps(caps), vision, backendTag)
-		if path == "" {
-			return serverArgs
-		}
-		fmt.Printf("[tune] Using community-shared config: %s (LLM_COMMUNITY_TUNES=off to disable)\n", filepath.Base(path))
-	} else {
-		fmt.Printf("[tune] Auto-selected cached config: %s\n", filepath.Base(path))
-	}
-	autoReq := *req
-	autoReq.TuneCache = path
-	return applySelectedTuneCache(&autoReq, serverArgs, caps)
-}
-
-func gpuNamesFromCaps(caps *detect.Capabilities) []string {
-	if caps == nil {
-		return nil
-	}
-	names := make([]string, 0, len(caps.GPUs))
-	for _, gpu := range caps.GPUs {
-		names = append(names, gpu.Name)
-	}
-	return names
-}
-
-func bestTuneCachePath(cacheDir, modelName, backendTag string, vision bool, workload, hardwareHash string) string {
-	if cacheDir == "" || modelName == "" {
-		return ""
-	}
-	rows := tune.ListTunedConfigs(cacheDir, modelName, tuneCacheBackendTag(backendTag), vision)
-	for _, row := range rows {
-		if row.Workload != workload {
-			continue
-		}
-		if hardwareHash == "" || strings.Contains(filepath.Base(row.Path), "_hw"+hardwareHash+"_") {
-			return row.Path
-		}
-	}
-	return ""
-}
-
-func tuneHardwareHash(caps *detect.Capabilities) string {
-	if caps == nil {
-		return ""
-	}
-	names := make([]string, 0, len(caps.GPUs))
-	for _, gpu := range caps.GPUs {
-		names = append(names, gpu.Name)
-	}
-	if len(names) == 0 {
-		return ""
-	}
-	return tune.BashHardwareHash(names)
-}
-
-func tuneCacheBackendTag(backendTag string) string {
-	b := strings.ToLower(strings.TrimSpace(backendTag))
-	switch {
-	case strings.Contains(b, "vulkan"):
-		return "vulkan"
-	case strings.Contains(b, "ik"):
-		return "ik"
-	default:
-		return "llama"
-	}
-}
-
-func applySelectedTuneCache(req *launchRequest, serverArgs []string, caps *detect.Capabilities) []string {
-	if req == nil || req.TuneCache == "" {
-		return serverArgs
-	}
-	summary, err := tune.LoadTuneFile(req.TuneCache, filepath.Base(req.ModelPath))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid --tune-cache: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("[tune] Using selected AI-tuned config: %s\n", filepath.Base(req.TuneCache))
-	if summary.BaselineWins || len(summary.Flags) == 0 {
-		fmt.Println("[tune] Baseline was best; no override flags applied")
-		return serverArgs
-	}
-	if reason := tuneCacheVRAMGuard(serverArgs, summary.Flags, caps); reason != "" {
-		fmt.Printf("[tune] Skipping cached config %s: %s\n", summary.Name, reason)
-		return serverArgs
-	}
-	serverArgs = tune.ApplyOverrides(serverArgs, summary.Flags, tune.QualityProtectedFlags())
-	fmt.Printf("[tune] Config: %s (expected %.2f tok/s)\n", summary.Name, summary.GenTPS)
-	return serverArgs
-}
-
-func canonicalLaunchFlagName(flag string) string {
-	if idx := strings.Index(flag, "="); idx > 0 {
-		flag = flag[:idx]
-	}
-	switch flag {
-	case "-b", "--batch-size":
-		return "-b"
-	case "-ub", "--ubatch-size":
-		return "-ub"
-	case "-np", "--parallel":
-		return "--parallel"
-	case "-fa", "--flash-attn":
-		return "--flash-attn"
-	case "--mg", "--main-gpu":
-		return "-mg"
-	case "-ot", "--override-tensor":
-		return "-ot"
-	case "--dev", "-dev", "--device":
-		return "--device"
-	default:
-		return flag
-	}
-}
-
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
-}
-
-func tuneCacheVRAMGuard(baseArgs []string, overrides map[string]interface{}, caps *detect.Capabilities) string {
-	if caps == nil || len(caps.GPUs) == 0 || !tuneOverridesIncreaseVRAM(baseArgs, overrides) {
-		return ""
-	}
-	selected := tuneSelectedGPUIndices(baseArgs, caps)
-	if len(selected) == 0 {
-		return ""
-	}
-	minFree := 0
-	minTotal := 0
-	for i, idx := range selected {
-		if idx < 0 || idx >= len(caps.GPUs) {
-			continue
-		}
-		gpu := caps.GPUs[idx]
-		free := gpu.VRAMFreeMB()
-		if i == 0 || free < minFree {
-			minFree = free
-			minTotal = gpu.VRAMTotalMB
-		}
-	}
-	if minFree <= 0 || minTotal <= 0 {
-		return ""
-	}
-	needed := tuneRuntimeHeadroomMB(minTotal)
-	if minFree < needed {
-		return fmt.Sprintf("runtime VRAM headroom is low on selected GPU(s): min free %d MiB < guard %d MiB for memory-expanding flags", minFree, needed)
-	}
-	return ""
-}
-
-func tuneRuntimeHeadroomMB(gpuTotalMB int) int {
-	guard := gpuTotalMB / 5
-	if guard < 4096 {
-		guard = 4096
-	}
-	if guard > 8192 {
-		guard = 8192
-	}
-	return guard
-}
-
-func tuneOverridesIncreaseVRAM(baseArgs []string, overrides map[string]interface{}) bool {
-	base := argMap(baseArgs)
-	if tuneIntOverrideGreater(overrides, base, "-b", 2048) || tuneIntOverrideGreater(overrides, base, "-ub", 512) || tuneIntOverrideGreater(overrides, base, "--parallel", 1) {
-		return true
-	}
-	for _, key := range []string{"--cache-type-k", "--cache-type-v"} {
-		if val, ok := tuneOverrideString(overrides, key); ok && kvCacheRank(val) > kvCacheRank(base[key]) {
-			return true
-		}
-	}
-	if val, ok := tuneOverrideString(overrides, "--flash-attn"); ok && strings.EqualFold(val, "off") && !strings.EqualFold(base["--flash-attn"], "off") {
-		return true
-	}
-	if _, ok := tuneOverrideString(overrides, "--spec-type"); ok && base["--spec-type"] == "" {
-		return true
-	}
-	for _, key := range []string{"--spec-draft-n-max", "--draft-max", "--spec-ngram-mod-n-max"} {
-		if tuneIntOverrideGreater(overrides, base, key, 0) {
-			return true
-		}
-	}
-	return false
-}
-
-func tuneIntOverrideGreater(overrides map[string]interface{}, base map[string]string, key string, fallback int) bool {
-	val, ok := tuneOverrideString(overrides, key)
-	if !ok {
-		return false
-	}
-	next, err := strconv.Atoi(strings.TrimSpace(val))
-	if err != nil {
-		return false
-	}
-	cur := fallback
-	if raw := strings.TrimSpace(base[key]); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			cur = n
-		}
-	}
-	return next > cur
-}
-
-func tuneOverrideString(overrides map[string]interface{}, key string) (string, bool) {
-	for k, v := range overrides {
-		if canonicalLaunchFlagName(k) == key {
-			return strings.TrimSpace(fmt.Sprint(v)), true
-		}
-	}
-	return "", false
-}
-
-func kvCacheRank(kind string) int {
-	s := strings.ToLower(strings.TrimSpace(kind))
-	s = strings.TrimPrefix(s, "ggml_")
-	switch s {
-	case "", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1":
-		return 1
-	case "q8_0", "q8_1", "bf16":
-		return 2
-	case "f16", "fp16", "f32", "fp32":
-		return 3
-	default:
-		return 1
-	}
-}
-
-func argMap(args []string) map[string]string {
-	out := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		key := canonicalLaunchFlagName(args[i])
-		if key == "" || !strings.HasPrefix(key, "-") {
-			continue
-		}
-		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			out[key] = args[i+1]
-			i++
-		} else {
-			out[key] = "true"
-		}
-	}
-	return out
-}
-
-func tuneSelectedGPUIndices(args []string, caps *detect.Capabilities) []int {
-	seen := map[int]bool{}
-	add := func(idx int) {
-		if idx >= 0 && idx < len(caps.GPUs) {
-			seen[idx] = true
-		}
-	}
-	values := argMap(args)
-	for _, key := range []string{"--device", "-dev", "--dev"} {
-		for _, idx := range indicesFromDeviceList(values[key]) {
-			add(idx)
-		}
-	}
-	for _, idx := range indicesFromTensorSplit(values["--tensor-split"]) {
-		add(idx)
-	}
-	for _, idx := range indicesFromDeviceList(values["-ot"]) {
-		add(idx)
-	}
-	if len(seen) == 0 {
-		for _, key := range []string{"-mg", "--main-gpu"} {
-			if n, err := strconv.Atoi(strings.TrimSpace(values[key])); err == nil {
-				add(n)
-			}
-		}
-	}
-	if len(seen) == 0 {
-		for i := range caps.GPUs {
-			add(i)
-		}
-	}
-	out := make([]int, 0, len(seen))
-	for idx := range seen {
-		out = append(out, idx)
-	}
-	sort.Ints(out)
-	return out
-}
-
-func indicesFromTensorSplit(value string) []int {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	out := []int{}
-	for i, part := range parts {
-		if f, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err == nil && f > 0 {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-func indicesFromDeviceList(value string) []int {
-	out := []int{}
-	for i := 0; i < len(value); i++ {
-		if !unicode.IsDigit(rune(value[i])) {
-			continue
-		}
-		j := i + 1
-		for j < len(value) && unicode.IsDigit(rune(value[j])) {
-			j++
-		}
-		prefix := strings.ToLower(value[maxInt(0, i-8):i])
-		if strings.Contains(prefix, "cuda") || strings.Contains(prefix, "vulkan") || strings.Contains(prefix, "gpu") {
-			if n, err := strconv.Atoi(value[i:j]); err == nil {
-				out = append(out, n)
-			}
-		}
-		i = j - 1
-	}
-	return out
 }
 
 // cmdKVProbe measures a model's real KV cache size by launching it twice at
@@ -8566,12 +8267,7 @@ func cmdGUI() {
 			fmt.Fprintf(os.Stderr, "Warning: could not save latest TUI launch configuration: %v\n", err)
 		}
 		// Launch usage is recorded inside cmdLaunch (the shared real-server
-		// path for both CLI and TUI launches), so no record is needed here; the
-		// AI-tune path below intentionally skips a server launch.
-		if req.AITune {
-			cmdTune(launchArgs)
-			return
-		}
+		// path for both CLI and TUI launches), so no record is needed here.
 		cmdLaunch(launchArgs)
 		return
 	}
@@ -8631,6 +8327,9 @@ func cmdDryRun(args []string) {
 	if req.ModelPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun dry-run <model.gguf>")
 		os.Exit(2)
+	}
+	if w := exposedHostWarning(req.Host, req.Port, req.ExtraArgs, os.Getenv); w != "" {
+		fmt.Fprintln(os.Stderr, w)
 	}
 
 	caps, err := detect.Detect()
@@ -8735,6 +8434,8 @@ func cmdDryRun(args []string) {
 		return
 	}
 	printOptimizationSummary("dry-run", strategy, true)
+	printLearnedReserves("dry-run", cfg.CacheDir, caps)
+	printBackendBuild("dry-run", be)
 	var displayEnv []string
 	if envPrefix != "" {
 		displayEnv = []string{envPrefix}
@@ -8836,6 +8537,9 @@ func printClaudeCodeRecipe(host string, port int, serverArgs []string, resolvedC
 			}
 		}
 	}
+	if at, window := clientkit.CompactionEstimate(env); window > 0 {
+		fmt.Printf("  # Claude Code compacts at about %d of %d tokens\n", at, window)
+	}
 	claudeArgs, _ := claudeCodeProgressClientArgs(nil, port)
 	claudeArgs = claudeCodeWorkflowPromptArgs(claudeArgs)
 	claudeArgs = append(claudeCodePermissionArgs(claudeArgs), claudeArgs...)
@@ -8880,14 +8584,6 @@ func claudeClientProfile(args []string, actualCtx int) clientkit.Profile {
 	}
 	slot := max(1, ctx/slots)
 	return clientkit.Profile{ProtocolVersion: clientkit.ProtocolVersion, ModelID: "local", MainAlias: "local", UtilityAlias: claudeauto.UtilityAlias, ContextPerSlot: slot, Slots: slots, Policy: clientkit.Policy{Version: clientkit.PolicyVersion, CompactWindow: min(slot, claudeCodeAutocompactWindow(args, actualCtx)), CompactPercent: claudeCodeAutocompactPct(args, actualCtx), Effort: "xhigh", TimeoutMS: clientkit.MaxTimeoutMS, WorkflowHook: true}}
-}
-
-// envOr returns the current environment value for key, or def if unset/empty.
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 // claudeCodePermissionArgs defaults local Claude Code to Auto with a companion.
@@ -9212,6 +8908,9 @@ func runClaudeCodeClient(host string, port int, serverArgs, extraArgs []string, 
 	defer releaseInterrupt()
 	cmd := exec.Command(claudePath, args...)
 	cmd.Env = claudeCodeEnv(host, port, serverArgs, actualCtx)
+	if at, window := clientkit.CompactionEstimate(cmd.Env); window > 0 {
+		fmt.Fprintf(os.Stderr, "[claude-code] compacts at about %d of %d tokens (estimate)\n", at, window)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -9235,31 +8934,6 @@ func claudeClientExitMessage(code int) string {
 	return fmt.Sprintf("[claude-code] Claude Code exited with code %d; stopping the server.", code)
 }
 
-// waitForHealth polls the server's /health (then /v1/models) until it answers or
-// the timeout elapses. Used by the TUI path, where the backend starts in a
-// background goroutine and there's no synchronous readiness signal.
-func waitForHealth(host string, port int, timeout time.Duration) bool {
-	clientHost := host
-	if clientHost == "" || clientHost == "0.0.0.0" || clientHost == "::" {
-		clientHost = "127.0.0.1"
-	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		for _, path := range []string{"/health", "/v1/models"} {
-			resp, err := client.Get(fmt.Sprintf("http://%s:%d%s", clientHost, port, path))
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					return true
-				}
-			}
-		}
-		time.Sleep(time.Second)
-	}
-	return false
-}
-
 // isServerRunning returns true if the server at host:port responds to /health
 // with 200 OK within a short timeout.
 func isServerRunning(host string, port int) bool {
@@ -9274,44 +8948,6 @@ func isServerRunning(host string, port int) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
-}
-
-func cmdShowConfigs(args []string) {
-	cfg := loadConfigOrExit()
-	modelName := ""
-	for _, a := range args {
-		if a == "--show-configs" || strings.HasPrefix(a, "-") {
-			continue
-		}
-		modelName = filepath.Base(a)
-		break
-	}
-	if modelName != "" {
-		var rows []tune.ConfigEntry
-		for _, backend := range []string{"llama", "ik", "ik_llama", "vulkan"} {
-			rows = append(rows, tune.ListTunedConfigs(cfg.CacheDir, modelName, backend, false)...)
-			rows = append(rows, tune.ListTunedConfigs(cfg.CacheDir, modelName, backend, true)...)
-		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i].GenTPS > rows[j].GenTPS })
-		if len(rows) == 0 {
-			fmt.Printf("No tuned configs found for %s in %s\n", modelName, cfg.CacheDir)
-			return
-		}
-		for _, row := range rows {
-			fmt.Printf("%s\n  %s\n", row.Label, row.Path)
-		}
-		return
-	}
-
-	matches, _ := filepath.Glob(filepath.Join(cfg.CacheDir, "tune_*.json"))
-	sort.Strings(matches)
-	if len(matches) == 0 {
-		fmt.Printf("No tuned configs found in %s\n", cfg.CacheDir)
-		return
-	}
-	for _, path := range matches {
-		fmt.Println(path)
-	}
 }
 
 func cmdProbe() {
@@ -9480,189 +9116,6 @@ func cmdDownload(args []string) {
 	if err := d.RunQuant(repo, quant, downloadPlanningCaps(caps, cfg)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-}
-
-func tuneRoundsFromArgs(args []string, fallback int) (int, error) {
-	if fallback <= 0 {
-		fallback = 8
-	}
-	for i := 0; i < len(args); i++ {
-		if key, val, ok := strings.Cut(args[i], "="); ok && (key == "--rounds" || key == "-rounds") {
-			n, err := parsePositiveFlag(key, val)
-			if err != nil {
-				return 0, err
-			}
-			return n, nil
-		}
-		if args[i] == "--rounds" || args[i] == "-rounds" {
-			if i+1 >= len(args) {
-				return 0, fmt.Errorf("%s requires a value", args[i])
-			}
-			n, err := parsePositiveFlag(args[i], args[i+1])
-			if err != nil {
-				return 0, err
-			}
-			return n, nil
-		}
-	}
-	return fallback, nil
-}
-
-func cmdTune(args []string) {
-	req, err := parseLaunchArgs(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(2)
-	}
-	if req.RemoteClaude.Headless {
-		fmt.Fprintln(os.Stderr, "Remote client mode requires a persistent launch; use ggrun launch MODEL --claude-code --headless instead of tune.")
-		os.Exit(2)
-	}
-	if req.ModelPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun tune <model.gguf>")
-		os.Exit(2)
-	}
-
-	cfg := loadConfigOrExit()
-	rounds, err := tuneRoundsFromArgs(args, cfg.TuneRounds)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(2)
-	}
-
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
-	}
-
-	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
-
-	model, err := parseModel(req.ModelPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
-		os.Exit(1)
-	}
-	warnModelCompatibility(model)
-
-	be := resolveLaunchBackend(req, model, caps)
-	if be == nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", backendUnavailableMessage(req))
-		os.Exit(1)
-	}
-	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
-	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
-		fmt.Printf("[tune] GPU restriction: %s\n", env)
-	}
-	applyVulkanDeviceOrder(req, be, caps)
-
-	tuneOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-	tuneOpts.ReasoningOff = true // tuning measures throughput, so think-free like benchmarks
-	strategy, err := placement.Compute(caps, model, tuneOpts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
-		os.Exit(1)
-	}
-	strategy.BackendTag = backendDialect(be)
-	// Tune the same slot/batch policy that a real Claude launch uses. Without
-	// this, an agent-parallel tune can benchmark an uncapped hybrid prefill and
-	// later override the fairness policy it was meant to improve.
-	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	agentParallel := 0
-	agentWorkload := ""
-	minTuneImprovement := 0.0
-	if req.ClaudeCode && model.HasSSM > 0 && strategy.Parallel > 1 {
-		agentParallel = strategy.Parallel
-		minTuneImprovement = calibrationMinImprovementPct
-		kvTypeV := strategy.KVTypeV
-		if kvTypeV == "" {
-			kvTypeV = strategy.KVType
-		}
-		agentWorkload = fmt.Sprintf("%s-p%d-c%d-k%s-v%s-%s-%s",
-			tune.AgentParallelWorkloadPrefix, strategy.Parallel, strategy.ContextSize,
-			strategy.KVType, kvTypeV, strategy.KVPlacement, strategy.Type)
-		fmt.Printf("[tune] parallel agent workload: %d slots; ranking safe flags by repeated cache-backed turn time (batch/ubatch remain placement-owned; use --calibrate on to screen pairs)\n", strategy.Parallel)
-	}
-
-	// A completed tune for this model/hardware/backend is reused unless the
-	// user explicitly asks for a fresh run with --retune.
-	if !hasArg(args, "--retune") {
-		cachePath := tune.TuneCachePathForWorkload(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag, agentWorkload)
-		if cachePath != "" && tune.TuneFileComplete(cachePath) {
-			fmt.Printf("[tune] Completed tune cache found: %s\n", cachePath)
-			if agentWorkload != "" {
-				fmt.Println("[tune] Select it with --tune-cache for this exact workload, or use --retune to measure again.")
-			} else {
-				fmt.Println("[tune] It is applied automatically on launch. Re-run with --retune to tune again.")
-			}
-			return
-		}
-	}
-	if err := confirmRequiredMMap(req, strategy, os.Stdin, os.Stderr, stdinIsTerminal()); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if err := validateHostMemoryContainmentWaiting(req, caps, strategy); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	serverArgs := append([]string{be.Path}, strategy.Args(req.ModelPath, req.Port)...)
-	serverArgs = append(serverArgs, req.ExtraArgs...)
-	serverArgs = applyRequestDisabledBackendFlags(serverArgs, req)
-	if memMax := backendMemoryMaxMB(req, caps); memMax > 0 {
-		fmt.Printf("[tune] backend memory scope: MemoryMax=%d MiB\n", memMax)
-	}
-	if err := guardPortFree(req.Port, "AI Tune"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	timeout := autoStartupTimeout(model)
-	benchTimeout := 2 * time.Minute
-	if strategy.Type == placement.CPUOnly {
-		benchTimeout = 5 * time.Minute
-	} else if strategy.Type == placement.MoEOffload {
-		benchTimeout = 90 * time.Second
-	}
-
-	cache := tune.NewCache(cfg.CacheDir)
-	engine := &tune.Engine{
-		BaseURL:           backendBaseURL(req),
-		Model:             filepath.Base(req.ModelPath),
-		Rounds:            rounds,
-		Cache:             cache,
-		Caps:              caps,
-		Backend:           be.Tag,
-		Vision:            strategy.MMProjPath != "",
-		MinImprovementPct: minTuneImprovement,
-		BenchmarkTimeout:  benchTimeout,
-		BackendHelp:       be.Help,
-		AgentParallel:     agentParallel,
-		Workload:          agentWorkload,
-		OnProgress: func(msg string) {
-			fmt.Println("[tune]", msg)
-		},
-		StartServer: func(flags []string) (func(), error) {
-			p, err := server.StartWithTimeoutToOptions(flags, req.Port, timeout, os.Stdout, os.Stderr, backendStartOptions(req, caps, be, nil, flags))
-			if err != nil {
-				return nil, err
-			}
-			return func() { _ = p.Stop() }, nil
-		},
-	}
-
-	entry, err := engine.Run(req.ModelPath, serverArgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("[tune] Best config: %.1f tok/s\n", entry.Result.GenTPS)
-	tunePath := tune.TuneCachePathForWorkload(cfg.CacheDir, req.ModelPath, gpuNamesFromCaps(caps), strategy.MMProjPath != "", be.Tag, agentWorkload)
-	if hint := tune.ShareHint(tunePath); hint != "" {
-		fmt.Println(hint)
 	}
 }
 
@@ -10705,12 +10158,13 @@ func detectUsableBackend(path string) *backendInfo {
 // llama-server --help returns exit code 1, so we check the output regardless of error.
 func detectBackend(path string) *backendInfo {
 	info := &backendInfo{Path: path, Tag: "llama", Dialect: "llama"}
-	cmd := exec.Command(path, "--help")
+	cmd, finish := boundexec.Command(boundexec.ProbeTimeout, path, "--help")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
 		defer libhub.Cleanup(hubDir)
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
-	out, _ := cmd.CombinedOutput()
+	out, helpErr := cmd.CombinedOutput()
+	boundexec.Report(finish(helpErr), "backend capabilities read from partial help output")
 	help := stableBackendProbeOutput(string(out))
 	info.Help = help
 	info.Version = backendVersionOutput(path)
@@ -10808,12 +10262,13 @@ const loadModeTranslationVersion = "load-mode-v2"
 
 // backendVersionOutput is the build's stable --version text.
 func backendVersionOutput(path string) string {
-	cmd := exec.Command(path, "--version")
+	cmd, finish := boundexec.Command(boundexec.ProbeTimeout, path, "--version")
 	if hubDir, ok, _ := libhub.Setup(path); ok {
 		defer libhub.Cleanup(hubDir)
 		cmd.Env = libhub.ApplyHubToChildEnv(os.Environ(), hubDir)
 	}
-	out, _ := cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	boundexec.Report(finish(err), "backend version unknown")
 	return strings.TrimSpace(stableBackendProbeOutput(string(out)))
 }
 
@@ -10827,4 +10282,17 @@ func backendBuildIdentityFrom(path, version string) string {
 	}
 	sum := sha256.Sum256([]byte(material))
 	return fmt.Sprintf("%s-%x", filepath.Base(path), sum[:12])
+}
+
+// AI Tune was removed (review decision D6): the launch optimizer measures and
+// promotes configurations itself.
+const aiTuneRemovedText = "AI Tune was removed; ggrun's launch optimizer now measures and chooses the configuration (see --calibrate)"
+
+func errAITuneRemoved(flag string) error {
+	return fmt.Errorf("%s: %s", flag, aiTuneRemovedText)
+}
+
+func aiTuneRemoved(what string) {
+	fmt.Fprintf(os.Stderr, "%s: %s\n", what, aiTuneRemovedText)
+	os.Exit(2)
 }

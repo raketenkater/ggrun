@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -234,5 +237,48 @@ func TestDaemonCarriesMmapReclaimBand(t *testing.T) {
 	high, max = (Config{MemoryMaxMB: 114000, MemoryHighMB: 100000}).memoryHighMaxMB([]string{"llama-server", "--n-cpu-moe", "48"})
 	if !(high > 0 && high < max) {
 		t.Fatalf("mmap plan must carry a reclaim band, got high=%d max=%d", high, max)
+	}
+}
+
+// S-06: the control token goes to an owner-only file, not the terminal.
+func TestControlTokenIsWrittenOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "daemon.token")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(path)), "unrelated"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := New(Config{ControlToken: "secret-token", TokenFile: path})
+	got, err := d.writeControlToken("secret-token")
+	if err != nil || got != path {
+		t.Fatalf("write: %v %s", err, got)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(b)) != "secret-token" {
+		t.Fatalf("token file %q %v", b, err)
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+			t.Fatalf("token file mode %v", st.Mode().Perm())
+		}
+		// A pre-existing world-readable file is replaced, not reused.
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.writeControlToken("next"); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+			t.Fatalf("rewritten token file mode %v", st.Mode().Perm())
+		}
+	}
+}
+
+func TestDefaultTokenPathIsPerControlPort(t *testing.T) {
+	d := New(Config{ControlPort: 9191})
+	p, err := d.controlTokenPath()
+	if err != nil {
+		t.Skip(err)
+	}
+	if filepath.Base(p) != "daemon-9191.token" || filepath.Base(filepath.Dir(p)) != "ggrun" {
+		t.Fatalf("path %s", p)
 	}
 }

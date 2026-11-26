@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -156,11 +155,37 @@ type StartOptions struct {
 	MemoryMaxMB int
 }
 
-// threadSafeBuffer is a bytes.Buffer protected by a mutex for concurrent writes.
+// Backend log retention. A verbose backend writes hundreds of megabytes over a
+// long session; keeping all of it in memory grows ggrun without bound. The
+// head holds the load phase, which the buffer, KV and offload parsers read;
+// the tail holds recent output for the watchdog and failure reports.
+const (
+	logHeadCap = 16 << 20
+	logTailCap = 16 << 20
+)
+
+// threadSafeBuffer is the backend's captured output: the first headCap bytes
+// and the most recent tailCap bytes, behind a mutex. Offsets are absolute byte
+// counts of everything written, so Since stays monotonic after dropping.
 type threadSafeBuffer struct {
 	mu        sync.Mutex
-	buf       bytes.Buffer
+	head      []byte
+	tail      []byte
+	written   int
 	lastWrite time.Time
+	// headCap and tailCap override the defaults in tests.
+	headCap, tailCap int
+}
+
+func (b *threadSafeBuffer) caps() (int, int) {
+	h, t := b.headCap, b.tailCap
+	if h <= 0 {
+		h = logHeadCap
+	}
+	if t <= 0 {
+		t = logTailCap
+	}
+	return h, t
 }
 
 func (b *threadSafeBuffer) Write(p []byte) (int, error) {
@@ -169,7 +194,31 @@ func (b *threadSafeBuffer) Write(p []byte) (int, error) {
 	if len(p) > 0 {
 		b.lastWrite = time.Now()
 	}
-	return b.buf.Write(p)
+	headCap, tailCap := b.caps()
+	b.written += len(p)
+	rest := p
+	if room := headCap - len(b.head); room > 0 && len(b.tail) == 0 {
+		n := min(room, len(rest))
+		b.head = append(b.head, rest[:n]...)
+		rest = rest[n:]
+	}
+	if len(rest) > 0 {
+		b.tail = append(b.tail, rest...)
+		// Compact only after a quarter of slack, so trimming is amortised.
+		if len(b.tail) > tailCap+tailCap/4 {
+			b.tail = append([]byte(nil), b.tail[len(b.tail)-tailCap:]...)
+		}
+	}
+	return len(p), nil
+}
+
+// dropped is how many bytes between head and tail are no longer kept.
+func (b *threadSafeBuffer) dropped() int {
+	return b.written - len(b.head) - len(b.tail)
+}
+
+func (b *threadSafeBuffer) gapMarker() string {
+	return fmt.Sprintf("\n[ggrun: %d bytes of backend output not kept]\n", b.dropped())
 }
 
 // LastWrite is when the backend last produced output; zero when it never did.
@@ -213,35 +262,48 @@ func (e *StartupFailure) Unwrap() error {
 func (b *threadSafeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.String()
+	if b.dropped() == 0 {
+		return string(b.head) + string(b.tail)
+	}
+	return string(b.head) + b.gapMarker() + string(b.tail)
 }
 
 // Since returns the output written after offset and the new end offset, so a
 // watcher that runs for the whole serving session reads each byte once instead
 // of copying a log that reaches hundreds of megabytes at verbose levels.
+// Offsets count every byte written; output that is no longer kept is replaced
+// by one marker line.
 func (b *threadSafeBuffer) Since(offset int) (string, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	data := b.buf.Bytes()
-	if offset < 0 || offset > len(data) {
+	if offset < 0 || offset > b.written {
 		offset = 0
 	}
-	return string(data[offset:]), len(data)
+	tailStart := b.written - len(b.tail)
+	switch {
+	case offset >= tailStart:
+		return string(b.tail[offset-tailStart:]), b.written
+	case offset < len(b.head):
+		if b.dropped() == 0 {
+			return string(b.head[offset:]) + string(b.tail), b.written
+		}
+		return string(b.head[offset:]) + b.gapMarker() + string(b.tail), b.written
+	default:
+		return b.gapMarker() + string(b.tail), b.written
+	}
 }
 
 func (b *threadSafeBuffer) Tail(max int) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	data := b.buf.Bytes()
+	if len(b.tail) >= max {
+		return string(b.tail[len(b.tail)-max:])
+	}
+	data := append(append([]byte(nil), b.head...), b.tail...)
 	if len(data) > max {
 		data = data[len(data)-max:]
 	}
 	return string(data)
-}
-
-// Start launches llama-server with the given args and waits for it to be ready.
-func Start(args []string, port int) (*Process, error) {
-	return StartWithTimeout(args, port, 60*time.Second)
 }
 
 // StartWithTimeout launches llama-server with a custom readiness timeout. The
@@ -342,6 +404,14 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 		close(p.done)
 	}()
 
+	if scopeUnit != "" {
+		// Fail closed: a launch admitted under a memory limit must not run
+		// without it.
+		if err := verifyScopeMemoryLimit(scopeUnit, owner, opts.MemoryMaxMB); err != nil {
+			_ = p.Stop()
+			return nil, fmt.Errorf("start server: %w."+scopeOptOutHintText(), err)
+		}
+	}
 	start := time.Now()
 	logStartupEvent(logStartupEvents, safeTermErr, "[launch] health check: polling http://%s:%d/health then /v1/models (timeout %s)", readinessHost(args), port, timeout)
 	logStartupEvent(logStartupEvents, safeTermErr, "%s", loadingIntro(args, timeout))
