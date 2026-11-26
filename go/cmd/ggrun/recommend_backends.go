@@ -107,6 +107,9 @@ func buildCanStart(tools, nvidiaHost bool, accel string) bool {
 // installed backend loads. Results are cached per architecture for the
 // process; installing a backend means a new ggrun process anyway.
 func enableInstalledArchSupport() {
+	// Every caller that probes backends for recommendations also wants the
+	// exact precision of catalog files already on disk.
+	enableLocalQuantProfiles()
 	var mu sync.Mutex
 	type answer struct{ loads, known bool }
 	cache := map[string]answer{}
