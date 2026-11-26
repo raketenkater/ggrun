@@ -518,11 +518,17 @@ def backend_identity(log_text):
     return ident
 
 
-def revision_matches(ident, expected):
-    """The installed launcher was built from the expected commit."""
+def revision_matches(ident, expected, release_tag=""):
+    """The installed launcher was built from the expected commit.
+
+    A released bundle may carry no revision; with release_tag it still matches
+    when its version stamp is exactly that tag.
+    """
     build = ident.get("build") or {}
     revision = build.get("revision") or ""
     stamped = build.get("version") or ident.get("version_text") or ""
+    if release_tag and not revision and stamped.strip() == release_tag:
+        return True
     return bool(expected) and (revision.startswith(expected) or expected.startswith(revision or "\0")
                                or re.search(r"-g" + re.escape(expected[:7]), stamped) is not None)
 
@@ -565,6 +571,9 @@ def main():
                         help="Require weight allocations on this many devices in the final launch")
     parser.add_argument("--expect-revision", default="",
                         help="Fail unless the installed launcher was built from this commit")
+    parser.add_argument("--expect-release-tag", default="",
+                        help="With --expect-revision, also accept a launcher with no revision whose "
+                             "version stamp is exactly this release tag")
     hashing = parser.add_mutually_exclusive_group()
     hashing.add_argument("--hash-model", action="store_true",
                          help="Record the sha256 of every model shard (reads every byte)")
@@ -604,7 +613,7 @@ def main():
         result["phases_s"] = phases
     result["identity"] = {"launcher": launcher_identity(args.launcher)}
     result["identity"]["model"] = model_identity(args.model, model_hash, args.fingerprint_model)
-    if args.expect_revision and not revision_matches(result["identity"]["launcher"], args.expect_revision):
+    if args.expect_revision and not revision_matches(result["identity"]["launcher"], args.expect_revision, args.expect_release_tag):
         result["error"] = f"installed launcher is not revision {args.expect_revision}: {result['identity']['launcher']}"
         (output / "result.json").write_text(json.dumps(result, indent=2))
         raise RuntimeError(result["error"])
