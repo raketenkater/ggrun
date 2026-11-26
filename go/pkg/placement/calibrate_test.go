@@ -70,7 +70,10 @@ func TestCalibrationCandidatesMoEAddsKVAlternate(t *testing.T) {
 		ContextSize: 8192, Parallel: 1, BatchSize: 2048, UBatchSize: 512,
 		NCPUMoE: 40, OTString: "blk.ffn=CPU",
 	}
-	opts := Options{ContextSize: 8192, KVPlacement: "cpu", KVQuality: "mid", Parallel: 1, CacheDir: t.TempDir()}
+	// KV placement is automatic here: the base resolved to cpu, and only an
+	// automatic placement is a coordinate calibration may move. An explicit one
+	// is a constraint (TestCalibrationCandidatesNeverMoveExplicitKVPlacement).
+	opts := Options{ContextSize: 8192, KVPlacement: "auto", KVQuality: "mid", Parallel: 1, CacheDir: t.TempDir()}
 	if _, err := recomputeBatchCandidate(caps, model, base, opts, 2048, 1024); err != nil {
 		t.Fatalf("recompute 2048/1024: %v", err)
 	}
@@ -111,7 +114,8 @@ func TestCalibrationCandidatesMoEKVGPUFlipsToCPU(t *testing.T) {
 		Path: "m.gguf", IsMoE: true, TotalSizeMB: 64 * 1024, NumLayers: 60, NumExperts: 128,
 		ExpertBytes: 56 * 1024 * 1024 * 1024, NonExpertBytes: 8 * 1024 * 1024 * 1024,
 	}
-	got := CalibrationCandidates(caps, model, base, Options{ContextSize: 8192, KVPlacement: "gpu"})
+	// Automatic KV that resolved to gpu may alternate; an explicit gpu may not.
+	got := CalibrationCandidates(caps, model, base, Options{ContextSize: 8192, KVPlacement: "auto"})
 	found := false
 	for _, candidate := range got {
 		if candidate.Name == "kv-alternate" && candidate.Strategy.KVPlacement == "cpu" {
@@ -120,6 +124,164 @@ func TestCalibrationCandidatesMoEKVGPUFlipsToCPU(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("KV=gpu should alternate to cpu, got %+v", got)
+	}
+}
+
+// Contract invariant 3: an explicit KV placement is a constraint. The same
+// fixtures that alternate under an automatic placement must, under an explicit
+// one, yield no kv-alternate and no candidate from any generator with another
+// KV placement.
+func TestCalibrationCandidatesNeverMoveExplicitKVPlacement(t *testing.T) {
+	// Each case reuses the fixture of the automatic test that proves its flip
+	// (TestCalibrationCandidatesMoEAddsKVAlternate, ...MoEKVGPUFlipsToCPU).
+	for _, tc := range []struct {
+		kv, flipped string
+		caps        func() *detect.Capabilities
+		model       *ModelProfile
+		base        *Strategy
+		opts        Options
+	}{
+		{
+			kv: "cpu", flipped: "gpu",
+			caps: func() *detect.Capabilities {
+				return &detect.Capabilities{
+					GPUs: []detect.GPU{
+						{Index: 0, VRAMTotalMB: 24576, BandwidthMBps: 32000},
+						{Index: 1, VRAMTotalMB: 12288, BandwidthMBps: 8000},
+					},
+					RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 131072}, CPU: detect.CPUInfo{Cores: 16},
+				}
+			},
+			model: &ModelProfile{
+				Path: "m.gguf", IsMoE: true, TotalSizeMB: 64 * 1024, NumLayers: 60, NumExperts: 128,
+				ExpertBytes: 56 * 1024 * 1024 * 1024, NonExpertBytes: 8 * 1024 * 1024 * 1024,
+				ContextSize: 8192, HiddenSize: 4096, HeadCountKV: 8, KeyLength: 128, ValueLength: 128,
+			},
+			base: &Strategy{
+				Type: MoEOffload, KVPlacement: "cpu", KVQuality: "mid", KVType: "q8_0",
+				ContextSize: 8192, Parallel: 1, BatchSize: 2048, UBatchSize: 512,
+				NCPUMoE: 40, OTString: "blk.ffn=CPU",
+			},
+			opts: Options{ContextSize: 8192, KVQuality: "mid", Parallel: 1},
+		},
+		{
+			kv: "gpu", flipped: "cpu",
+			caps: func() *detect.Capabilities {
+				return &detect.Capabilities{
+					GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}, {Index: 1, VRAMTotalMB: 12288}},
+					RAM:  detect.RAMInfo{TotalMB: 131072, FreeMB: 131072}, CPU: detect.CPUInfo{Cores: 16},
+				}
+			},
+			model: &ModelProfile{
+				Path: "m.gguf", IsMoE: true, TotalSizeMB: 64 * 1024, NumLayers: 60, NumExperts: 128,
+				ExpertBytes: 56 * 1024 * 1024 * 1024, NonExpertBytes: 8 * 1024 * 1024 * 1024,
+			},
+			base: &Strategy{Type: MoEOffload, KVPlacement: "gpu"},
+			opts: Options{ContextSize: 8192},
+		},
+	} {
+		t.Run(tc.kv, func(t *testing.T) {
+			// Control: the fixture really can flip KV when it is automatic, so
+			// the explicit assertions below are not vacuous.
+			auto := tc.opts
+			auto.KVPlacement = "auto"
+			auto.CacheDir = t.TempDir()
+			flipped := false
+			for _, candidate := range CalibrationCandidates(tc.caps(), tc.model, tc.base, auto) {
+				if candidate.Name == "kv-alternate" && candidate.Strategy.KVPlacement == tc.flipped {
+					flipped = true
+				}
+			}
+			if !flipped {
+				t.Fatalf("automatic KV=%s no longer produces the kv-alternate control", tc.kv)
+			}
+
+			explicit := tc.opts
+			explicit.KVPlacement = tc.kv
+			explicit.CacheDir = t.TempDir()
+			got := CalibrationCandidates(tc.caps(), tc.model, tc.base, explicit)
+			if len(got) == 0 || got[0].Name != "default" || got[0].Strategy != tc.base {
+				t.Fatalf("the serving baseline must stay candidate zero: %+v", got)
+			}
+			for _, candidate := range got {
+				if candidate.Name == "kv-alternate" {
+					t.Fatalf("explicit KV=%s was challenged by kv-alternate", tc.kv)
+				}
+				if candidate.Strategy == nil || candidate.Strategy.KVPlacement != tc.kv {
+					t.Fatalf("explicit KV=%s moved by candidate %q: %+v", tc.kv, candidate.Name, candidate.Strategy)
+				}
+			}
+		})
+	}
+}
+
+// The final guard covers every generator, including ones that change KV only
+// indirectly through a full recompute (topology, batch, expert pack).
+func TestHoldExplicitKVPlacementDropsIndirectFlips(t *testing.T) {
+	candidates := func() []CalibrationCandidate {
+		return []CalibrationCandidate{
+			{Name: "default", Strategy: &Strategy{KVPlacement: "gpu"}},
+			{Name: "moe-topology-memory", Strategy: &Strategy{KVPlacement: "gpu"}},
+			{Name: "moe-owner-1", Strategy: &Strategy{KVPlacement: "cpu"}},
+			{Name: "ubatch-1024", Strategy: &Strategy{KVPlacement: "cpu"}},
+			{Name: "expert-pack", Strategy: &Strategy{KVPlacement: "gpu"}},
+			{Name: "broken", Strategy: nil},
+		}
+	}
+	for _, requested := range []string{"cpu", " CPU "} {
+		got := holdExplicitKVPlacement(candidates(), Options{KVPlacement: requested})
+		names := make([]string, 0, len(got))
+		for _, candidate := range got {
+			names = append(names, candidate.Name)
+		}
+		// The baseline stays even though it disagrees: it is what is serving, and
+		// candidate zero is never a challenger.
+		if strings.Join(names, ",") != "default,moe-owner-1,ubatch-1024" {
+			t.Fatalf("explicit KV=%q kept %v", requested, names)
+		}
+	}
+	for _, automatic := range []string{"", "auto", " AUTO "} {
+		if got := holdExplicitKVPlacement(candidates(), Options{KVPlacement: automatic}); len(got) != 6 {
+			t.Fatalf("automatic KV=%q filtered candidates: %d left", automatic, len(got))
+		}
+	}
+}
+
+func TestExplicitKVPlacementRecognisesOnlyFixedRequests(t *testing.T) {
+	for raw, want := range map[string]string{"gpu": "gpu", " GPU": "gpu", "cpu": "cpu", "CPU ": "cpu"} {
+		if got, ok := explicitKVPlacement(Options{KVPlacement: raw}); !ok || got != want {
+			t.Fatalf("explicitKVPlacement(%q) = %q, %v; want %q", raw, got, ok, want)
+		}
+	}
+	for _, raw := range []string{"", "auto", "Auto", " auto "} {
+		if got, ok := explicitKVPlacement(Options{KVPlacement: raw}); ok || got != "" {
+			t.Fatalf("explicitKVPlacement(%q) = %q, %v; want automatic", raw, got, ok)
+		}
+	}
+}
+
+// A decision searched under an explicit KV placement saw a narrower candidate
+// set than an automatic launch that resolved the same way, so the two must not
+// share calibration evidence. Verified-config keys (no base) are unchanged.
+func TestCalibrationScopeSeparatesExplicitAndAutomaticKVPlacement(t *testing.T) {
+	model := &ModelProfile{Path: "m.gguf"}
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "gpu", VRAMTotalMB: 24576}}}
+	base := &Strategy{Type: MoEOffload, KVPlacement: "cpu", ContextSize: 8192, Parallel: 1, BatchSize: 2048, UBatchSize: 512}
+	unset := NewCalibrationScopeKey(model, caps, Options{}, base).String()
+	auto := NewCalibrationScopeKey(model, caps, Options{KVPlacement: "auto"}, base).String()
+	explicit := NewCalibrationScopeKey(model, caps, Options{KVPlacement: "cpu"}, base).String()
+	if unset != auto {
+		t.Fatal("empty and auto KV placement must share one automatic scope")
+	}
+	if auto == explicit {
+		t.Fatal("automatic and explicit KV placement shared a calibration scope")
+	}
+	if NewCalibrationScopeKey(model, caps, Options{KVPlacement: "auto"}, nil).String() !=
+		NewCalibrationScopeKey(model, caps, Options{KVPlacement: "cpu"}, nil).String() {
+		t.Fatal("verified-config keys (no base) must not change with this scope component")
+	}
+	if CalibrationSchemaVersion < 29 {
+		t.Fatalf("CalibrationSchemaVersion = %d; decisions that may have flipped an explicit KV placement need at least 29", CalibrationSchemaVersion)
 	}
 }
 
