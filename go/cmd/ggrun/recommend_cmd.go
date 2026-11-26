@@ -180,7 +180,7 @@ func cmdRecommend(args []string) {
 			Hardware   *detect.Capabilities `json:"planning_hardware"`
 			Categories recommend.Categories `json:"categories"`
 			Note       string               `json:"note"`
-		}{caps, cats, "Advisory capacity and estimated speeds; launch rechecks actual hardware. Repeat restrictions on launch. AAIntelligence is base-model catalog data; AdjustedIntelligence and QualityRetained are within-model quant heuristics, not measured accuracy."}, "", "  ")
+		}{caps, cats, "Advisory capacity and estimated speeds; launch rechecks actual hardware. Repeat restrictions on launch. AAIntelligence is base-model catalog data; AdjustedIntelligence and QualityRetained are within-model quant heuristics. Retention and EstimatedQuality are estimates from the file's bits per weight, model size and imatrix evidence (RetentionModel names the curve), not measured accuracy. Best overall ranks rows with QualityEligible by ReferenceTurnSeconds. first_pick is null when no row qualifies for an automatic download."}, "", "  ")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -189,8 +189,12 @@ func cmdRecommend(args []string) {
 		return
 	}
 	if opts.first {
-		if len(cats.Balanced) > 0 {
-			fmt.Println(cats.Balanced[0].Repo)
+		// Same ranking as Best overall; nothing is printed when no row
+		// qualifies for an automatic download, and stderr says why.
+		if cats.FirstPick != nil {
+			fmt.Println(cats.FirstPick.Repo)
+		} else if cats.FirstPickNote != "" {
+			fmt.Fprintln(os.Stderr, cats.FirstPickNote)
 		}
 		return
 	}
@@ -234,9 +238,15 @@ func cmdRecommend(args []string) {
 			}
 			fmt.Printf("  %-36s %-10s %-8s %5.1fG %6s %8s  %s\n",
 				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, recommend.DisplayIntelligence(r), tps, recommend.OwnerLabel(r.Repo))
+			fmt.Printf("    %s · %s\n", recommend.QualityLabel(r), recommend.ReferenceTurnLabel(r))
 		}
 	}
-	printRecGroup("Best overall — intelligence first, practical quant", cats.Balanced)
+	printRecGroup("Best overall — fastest reference turn among capable models", cats.Balanced)
+	if cats.FirstPick == nil && cats.FirstPickNote != "" {
+		fmt.Println("  " + cats.FirstPickNote)
+	} else if cats.FirstPick != nil && (len(cats.Balanced) == 0 || cats.FirstPick.Repo != cats.Balanced[0].Repo) {
+		fmt.Printf("  Automatic download takes %s %s (the rows above it are under the quality floor, have no backend route here, or are files under 3 bits per weight without an importance matrix).\n", cats.FirstPick.Name, cats.FirstPick.QuantName)
+	}
 	printRecGroup("Smartest — highest intelligence that fits", cats.Smartest)
 	printRecGroup("Fastest — quickest while still capable", cats.Fastest)
 	fmt.Println("  " + recommend.OwnerLegend())
@@ -246,7 +256,7 @@ func cmdRecommend(args []string) {
 		}
 	}
 	fmt.Println("\nIntel is base-model catalog intelligence (~ marks an estimate), not quantized accuracy.")
-	fmt.Println("1–2 bit quants are fallback choices within a model; their task accuracy is unverified.")
+	fmt.Println(recommend.ReferenceTurnNote)
 	fmt.Println("\nSpeed is an estimate for ranking; run --benchmark on the downloaded model for a measured result.")
 	fmt.Println("Fit uses installed capacity; every launch rechecks currently free RAM and VRAM.")
 	fmt.Printf("\n%s\n", recommend.CatalogAttribution())

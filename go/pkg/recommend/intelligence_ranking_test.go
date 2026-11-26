@@ -48,9 +48,15 @@ func TestModelIntelligenceOutranksQuantRetentionGuess(t *testing.T) {
 		t.Fatalf("fixture no longer reproduces the misleading quant ordering: strong=%+v weak=%+v", a, b)
 	}
 	cats := TopCategories(caps, 2)
-	for name, rows := range map[string][]Recommendation{"overall": cats.Balanced, "smartest": cats.Smartest, "top": Top(caps, 2)} {
-		if len(rows) != 2 || rows[0].Repo != strong.Repo || rows[1].Repo != weak.Repo {
-			t.Fatalf("%s ranked an unmeasured quant-retention guess above model intelligence: %+v", name, rows)
+	if rows := cats.Smartest; len(rows) != 2 || rows[0].Repo != strong.Repo || rows[1].Repo != weak.Repo {
+		t.Fatalf("smartest ranked an unmeasured quant-retention guess above model intelligence: %+v", rows)
+	}
+	// Best overall (D9) ranks both, being above the quality floor, by the
+	// reference turn: the smaller model is faster here.
+	for name, rows := range map[string][]Recommendation{"overall": cats.Balanced, "top": Top(caps, 2)} {
+		if len(rows) != 2 || rows[0].Repo != weak.Repo || !rows[0].QualityEligible || !rows[1].QualityEligible ||
+			rows[0].ReferenceTurnSeconds >= rows[1].ReferenceTurnSeconds {
+			t.Fatalf("%s did not rank eligible rows by reference turn: %+v", name, rows)
 		}
 	}
 }
