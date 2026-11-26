@@ -135,16 +135,41 @@ jobs:
             goarch: amd64
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go/go.mod
           cache: false
       - name: Cross-build Go ggrun
+        if: ${{ !(matrix.goos == 'linux' && matrix.goarch == 'amd64') }}
         working-directory: go
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build -o /tmp/ggrun-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/ggrun
+      - name: Build stamped Linux amd64 ggrun
+        if: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' }}
+        working-directory: go
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          V=$(git describe --tags --always --dirty)
+          mkdir -p /tmp/ggrun-out
+          go build -trimpath -ldflags "-s -w -X github.com/raketenkater/ggrun/pkg/update.currentVersion=$V" -o /tmp/ggrun-out/ggrun ./cmd/ggrun
+          (cd /tmp/ggrun-out && sha256sum ggrun > ggrun.sha256)
+          echo "SHORT_SHA=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+      - name: Upload stamped Linux amd64 ggrun
+        if: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ggrun-linux-amd64-${{ env.SHORT_SHA }}
+          path: |
+            /tmp/ggrun-out/ggrun
+            /tmp/ggrun-out/ggrun.sha256
+          retention-days: 14
+          if-no-files-found: error
 
   parser-tests:
     runs-on: ubuntu-latest
