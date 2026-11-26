@@ -82,6 +82,10 @@ type Candidate struct {
 	// RunnableMainline is stamped from the mainline table alone: the
 	// architecture a current-mainline build can load. Absent when unknown.
 	RunnableMainline *bool `json:"runnable_mainline,omitempty"`
+
+	// paramsFromSizes: TotalParamsB was inferred from quant sizes and nominal
+	// widths (paramsFromQuantSizes), so a width derived from it is nominal.
+	paramsFromSizes bool
 }
 
 // NeedsForkBackend reports that no upstream backend registers this model's
@@ -115,8 +119,11 @@ type Recommendation struct {
 	AdjustedIntelligence float64 // heuristic used only to choose quants within one model
 	QualityRetained      float64 // within-model quant preference, not measured intelligence retention
 	PredictedTPS         float64 // estimated decode tok/s on this machine (0 = unknown)
-	SpeedTier            int     // 2 interactive, 1 usable, 0 slow, -1 unknown
-	BackendStatus        BackendStatus
+	// QuantProfile is the chosen file's effective precision and imatrix
+	// evidence (empty fields when unknown).
+	QuantProfile  QuantProfile
+	SpeedTier     int // 2 interactive, 1 usable, 0 slow, -1 unknown
+	BackendStatus BackendStatus
 	// CUDABuildOffered: a default launch serves this row on the Vulkan build
 	// although the host has an NVIDIA GPU, and the first launch offers the
 	// CUDA build the speed estimate assumes. The row loads now either way.
@@ -691,6 +698,7 @@ func evaluateWithSelector(caps *detect.Capabilities, c Candidate, allowQuant fun
 			MemoryNeedGB:         needGB,
 			AdjustedIntelligence: effIntel,
 			QualityRetained:      retained,
+			QuantProfile:         quantProfileFor(c, q),
 			PredictedTPS:         tps,
 			SpeedTier:            speedTier(tps),
 			Score:                int(score * 1000),

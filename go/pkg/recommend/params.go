@@ -33,6 +33,7 @@ func inferParams(c Candidate) Candidate {
 	}
 	if c.TotalParamsB <= 0 {
 		c.TotalParamsB = paramsFromQuantSizes(c.Quants)
+		c.paramsFromSizes = c.TotalParamsB > 0
 	}
 	if c.MoE && c.ActiveParamsB <= 0 && c.TotalParamsB > 0 {
 		// Hybrid layouts (Mamba/attention mixes) break the per-layer formula;
