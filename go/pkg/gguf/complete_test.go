@@ -84,11 +84,13 @@ func TestExpectedSizeMetadataOnlyShardIsUnpadded(t *testing.T) {
 	if !ok || got != hdr {
 		t.Fatalf("ExpectedSize = %d, %v; file is %d", got, ok, hdr)
 	}
+	// One byte short cuts into the header itself, which cannot be parsed:
+	// no verdict rather than a guess.
 	if err := os.Truncate(path, hdr-1); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := ExpectedSize(path); !ok || got != hdr {
-		t.Fatalf("one byte short: ExpectedSize = %d, %v; want %d", got, ok, hdr)
+	if got, ok := ExpectedSize(path); ok {
+		t.Fatalf("truncated header gave a verdict: %d", got)
 	}
 }
 
