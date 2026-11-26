@@ -1,6 +1,7 @@
 package gguf
 
 import (
+	"bufio"
 	"bytes"
 	_ "embed"
 	"encoding/binary"
@@ -374,7 +375,10 @@ func ChatTemplate(path string) string {
 		return ""
 	}
 	defer f.Close()
-	template, err := readChatTemplate(f)
+	// A vocabulary is hundreds of thousands of tiny values; unbuffered, each
+	// one is its own read syscall (tens of seconds for one model on a FUSE
+	// disk). The buffer turns them into memory reads.
+	template, err := readChatTemplate(bufio.NewReaderSize(f, 1<<20))
 	if err != nil {
 		return ""
 	}
@@ -457,10 +461,8 @@ func readChatTemplate(r io.Reader) (string, error) {
 // type id, including arrays. It fails on truncation, an unknown type, or a
 // length no real file could hold.
 func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
-	fixed := map[uint32]int64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
-	if n, ok := fixed[valType]; ok {
-		_, err := io.CopyN(io.Discard, r, n)
-		return err
+	if n, ok := ggufFixedSize[valType]; ok {
+		return discardGGUF(r, n)
 	}
 	var buf [12]byte
 	switch valType {
@@ -472,8 +474,7 @@ func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
 		if n > math.MaxInt64 {
 			return fmt.Errorf("string length %d out of range", n)
 		}
-		_, err := io.CopyN(io.Discard, r, int64(n))
-		return err
+		return discardGGUF(r, int64(n))
 	case 9: // array: element type + count, then each element
 		if depth >= maxGGUFArrayNesting {
 			return fmt.Errorf("arrays nested deeper than %d", maxGGUFArrayNesting)
@@ -483,6 +484,13 @@ func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
 		}
 		elemType := binary.LittleEndian.Uint32(buf[:4])
 		count := binary.LittleEndian.Uint64(buf[4:12])
+		// Fixed-size elements (token types, scores) are skipped in one step.
+		if size, ok := ggufFixedSize[elemType]; ok {
+			if count > uint64(math.MaxInt64)/uint64(size) {
+				return fmt.Errorf("array of %d elements out of range", count)
+			}
+			return discardGGUF(r, int64(count)*size)
+		}
 		for j := uint64(0); j < count; j++ {
 			if err := skipGGUFValue(r, elemType, depth+1); err != nil {
 				return err
@@ -492,4 +500,176 @@ func skipGGUFValue(r io.Reader, valType uint32, depth int) error {
 	default:
 		return fmt.Errorf("unknown value type %d", valType)
 	}
+}
+
+// ggufFixedSize is the byte size of each fixed-width metadata value type.
+var ggufFixedSize = map[uint32]int64{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+// discardGGUF skips n bytes. A buffered reader discards them in memory; any
+// other reader falls back to io.CopyN, so a short read is still an error.
+func discardGGUF(r io.Reader, n int64) error {
+	if d, ok := r.(interface{ Discard(int) (int, error) }); ok {
+		for n > 0 {
+			step := int64(math.MaxInt32)
+			if n < step {
+				step = n
+			}
+			got, err := d.Discard(int(step))
+			n -= int64(got)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	_, err := io.CopyN(io.Discard, r, n)
+	return err
+}
+
+// samplingKeyPrefix is the GGUF metadata namespace llama.cpp reads sampler
+// defaults from (general.sampling.top_k, .top_p, .min_p, .temp, ...).
+const samplingKeyPrefix = "general.sampling."
+
+// maxSamplingStringLen bounds a general.sampling.* string value (for example
+// the sampler sequence); real ones are a few dozen bytes.
+const maxSamplingStringLen = 1 << 12
+
+// SamplingDefaults returns the scalar general.sampling.* metadata keys of a
+// GGUF, keyed by the suffix after the prefix ("top_k" -> "64", "temp" ->
+// "1.0"). Floats keep a decimal point so they read as floats. Array values and
+// other namespaces are skipped. It reads only the metadata section, never
+// tensor data, and returns an empty map when the file has no such keys.
+func SamplingDefaults(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// A tokenizer vocabulary is a quarter-million tiny strings; buffer so each
+	// is not its own read syscall.
+	return readSamplingDefaults(bufio.NewReaderSize(f, 1<<20))
+}
+
+func readSamplingDefaults(r io.Reader) (map[string]string, error) {
+	var buf [8]byte
+	readFull := func(dst []byte) error {
+		_, err := io.ReadFull(r, dst)
+		return err
+	}
+	readU32 := func() (uint32, error) {
+		if err := readFull(buf[:4]); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint32(buf[:4]), nil
+	}
+	readU64 := func() (uint64, error) {
+		if err := readFull(buf[:8]); err != nil {
+			return 0, err
+		}
+		return binary.LittleEndian.Uint64(buf[:8]), nil
+	}
+	if err := readFull(buf[:4]); err != nil || string(buf[:4]) != "GGUF" {
+		return nil, fmt.Errorf("not a GGUF file")
+	}
+	if _, err := readU32(); err != nil { // version
+		return nil, err
+	}
+	if _, err := readU64(); err != nil { // tensor_count
+		return nil, err
+	}
+	kvCount, err := readU64()
+	if err != nil {
+		return nil, err
+	}
+
+	out := map[string]string{}
+	for i := uint64(0); i < kvCount; i++ {
+		keyLen, err := readU64()
+		if err != nil {
+			return nil, err
+		}
+		if keyLen > maxGGUFKeyLen {
+			return nil, fmt.Errorf("metadata key %d: length %d exceeds %d", i, keyLen, maxGGUFKeyLen)
+		}
+		key := make([]byte, keyLen)
+		if err := readFull(key); err != nil {
+			return nil, err
+		}
+		valType, err := readU32()
+		if err != nil {
+			return nil, err
+		}
+		name, sampling := strings.CutPrefix(string(key), samplingKeyPrefix)
+		if !sampling || name == "" || valType == 9 {
+			if err := skipGGUFValue(r, valType, 0); err != nil {
+				return nil, fmt.Errorf("metadata %q: %w", key, err)
+			}
+			continue
+		}
+		val, err := readSamplingScalar(r, valType)
+		if err != nil {
+			return nil, fmt.Errorf("metadata %q: %w", key, err)
+		}
+		out[name] = val
+	}
+	return out, nil
+}
+
+// readSamplingScalar decodes one non-array GGUF value as a string.
+func readSamplingScalar(r io.Reader, valType uint32) (string, error) {
+	var buf [8]byte
+	size := map[uint32]int{0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}[valType]
+	if valType == 8 {
+		if _, err := io.ReadFull(r, buf[:8]); err != nil {
+			return "", err
+		}
+		n := binary.LittleEndian.Uint64(buf[:8])
+		if n > maxSamplingStringLen {
+			return "", fmt.Errorf("string length %d exceeds %d", n, maxSamplingStringLen)
+		}
+		val := make([]byte, n)
+		if _, err := io.ReadFull(r, val); err != nil {
+			return "", err
+		}
+		return string(val), nil
+	}
+	if size == 0 {
+		return "", fmt.Errorf("unknown value type %d", valType)
+	}
+	if _, err := io.ReadFull(r, buf[:size]); err != nil {
+		return "", err
+	}
+	le := binary.LittleEndian
+	switch valType {
+	case 0:
+		return strconv.FormatUint(uint64(buf[0]), 10), nil
+	case 1:
+		return strconv.FormatInt(int64(int8(buf[0])), 10), nil
+	case 2:
+		return strconv.FormatUint(uint64(le.Uint16(buf[:2])), 10), nil
+	case 3:
+		return strconv.FormatInt(int64(int16(le.Uint16(buf[:2]))), 10), nil
+	case 4:
+		return strconv.FormatUint(uint64(le.Uint32(buf[:4])), 10), nil
+	case 5:
+		return strconv.FormatInt(int64(int32(le.Uint32(buf[:4]))), 10), nil
+	case 6:
+		return formatSamplingFloat(float64(math.Float32frombits(le.Uint32(buf[:4]))), 32), nil
+	case 7:
+		return strconv.FormatBool(buf[0] != 0), nil
+	case 10:
+		return strconv.FormatUint(le.Uint64(buf[:8]), 10), nil
+	case 11:
+		return strconv.FormatInt(int64(le.Uint64(buf[:8])), 10), nil
+	default: // 12: float64
+		return formatSamplingFloat(math.Float64frombits(le.Uint64(buf[:8])), 64), nil
+	}
+}
+
+func formatSamplingFloat(v float64, bits int) string {
+	s := strconv.FormatFloat(v, 'g', -1, bits)
+	if !strings.ContainsAny(s, ".eEIN") { // integral: keep it reading as a float
+		s += ".0"
+	}
+	return s
 }

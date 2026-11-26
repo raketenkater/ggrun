@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -2833,6 +2834,59 @@ func mergeModelItems(groups ...[]ModelItem) []ModelItem {
 	return merged
 }
 
+// modelHeader is what the list needs from one model's GGUF header.
+type modelHeader struct {
+	info     *gguf.Info
+	err      error
+	template string
+}
+
+// headerReadWorkers bounds the concurrent header reads: each one may run the
+// parser helper, so it is capped well below a large core count.
+const headerReadWorkers = 8
+
+// readModelHeaders reads every model's header concurrently, through the header
+// cache (gguf-headers.json in cacheDir): a model whose files are unchanged
+// since the last start costs two stats instead of a helper process and a walk
+// of its vocabulary. Results are indexed like models.
+func readModelHeaders(models []ModelItem, cacheDir string) []modelHeader {
+	out := make([]modelHeader, len(models))
+	cache := gguf.OpenHeaderCache(cacheDir)
+	read := func(i int) {
+		path := models[i].Path
+		info, err := cache.Info(path)
+		out[i].info, out[i].err = info, err
+		if err == nil && !isAuxiliaryModel(models[i].Name, info.Architecture) {
+			out[i].template = cache.ChatTemplate(path)
+		}
+	}
+	workers := min(headerReadWorkers, len(models))
+	if workers <= 1 {
+		for i := range models {
+			read(i)
+		}
+	} else {
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					read(i)
+				}
+			}()
+		}
+		for i := range models {
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
+	}
+	_ = cache.Save()
+	return out
+}
+
 func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect.Capabilities) []ModelItem {
 	visible := models[:0]
 	totalSysMemMB := 0
@@ -2846,8 +2900,9 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 	case "ik_llama":
 		backendTag = "ik"
 	}
+	headers := readModelHeaders(models, cacheDir)
 	for i := range models {
-		if info, err := gguf.Parse(models[i].Path); err == nil {
+		if info, err := headers[i].info, headers[i].err; err == nil {
 			if isAuxiliaryModel(models[i].Name, info.Architecture) {
 				continue
 			}
@@ -2858,7 +2913,7 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 			// Capture the embedded chat template once here, alongside KVProfile, so
 			// the config screen's per-render chat-template row never re-opens the
 			// .gguf and walks its metadata KV table (~700ms on a 17GB model).
-			models[i].ChatTemplate = gguf.ChatTemplate(models[i].Path)
+			models[i].ChatTemplate = headers[i].template
 			if info.Architecture != "" {
 				models[i].Arch = info.Architecture
 			}
@@ -3263,6 +3318,9 @@ func settingRows() []settingRow {
 		{label: "Support expert / optimizer", kind: "enum", options: []string{"auto", "on", "off"},
 			get: func(c *config.Config) string { return c.SupportExpert },
 			set: func(c *config.Config, v string) { c.SupportExpert = v }},
+		{label: "Claude penalties", kind: "enum", options: []string{"off", "late", "full"},
+			get: func(c *config.Config) string { return c.ClaudePenalties },
+			set: func(c *config.Config, v string) { c.ClaudePenalties = v }},
 		{label: "Support online research", kind: "bool",
 			get: func(c *config.Config) string { return boolLabel(c.SupportOnline) },
 			set: func(c *config.Config, v string) { c.SupportOnline = v == "on" }},

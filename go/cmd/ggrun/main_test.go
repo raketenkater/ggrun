@@ -967,18 +967,6 @@ func TestShouldPromoteMoEPlacement(t *testing.T) {
 	}
 }
 
-func TestMeasuredPromotionBypassesPlacementCache(t *testing.T) {
-	opts := measuredPromotionOptions(
-		&launchRequest{CtxFlag: "32768"},
-		&placement.ModelProfile{ModelArch: "qwen3moe", CTXTrain: 32768},
-		&backendInfo{Tag: "llama"},
-		t.TempDir(),
-	)
-	if !opts.SkipPlacementCache {
-		t.Fatal("measured promotion must recompute instead of reloading the sparse placement it is meant to improve")
-	}
-}
-
 func TestStartupLogCUDAOOM(t *testing.T) {
 	log := "loading\n" +
 		"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2206.07 MiB on device 0: cudaMalloc failed: out of memory\n" +
@@ -2888,24 +2876,6 @@ func TestRejectedMemoryArgvIdentityBlocksOnlyTheExactFailedPlan(t *testing.T) {
 	}
 }
 
-func TestRecoveredLaunchRetainsFirstSafeAllocationBaselineUnlessForced(t *testing.T) {
-	recovery := newLaunchMemoryRecovery()
-	recovery.reject([]string{"llama-server", "--n-cpu-moe", "35"})
-
-	if !retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateAuto}, recovery) {
-		t.Fatal("automatic allocation promotion was allowed after recovery")
-	}
-	if !retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateOff}, recovery) {
-		t.Fatal("disabled optimization was allowed to promote a recovered allocation")
-	}
-	if retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateOn}, recovery) {
-		t.Fatal("explicit forced calibration was unexpectedly suppressed")
-	}
-	if retainRecoveredBaselineForAllocationPromotion(&launchRequest{Calibrate: calibrateAuto}, newLaunchMemoryRecovery()) {
-		t.Fatal("clean launch was treated as memory-recovered")
-	}
-}
-
 func TestSharedLaunchRecoveryRefusesRejectedEntryArgv(t *testing.T) {
 	args := []string{"llama-server", "--n-cpu-moe", "35", "--swa-full"}
 	recovery := newLaunchMemoryRecovery()
@@ -3412,19 +3382,20 @@ func TestClaudeCodeHybridSingleSlotKeepsPlacementBatch(t *testing.T) {
 
 func TestClaudeCodeSamplingArgs(t *testing.T) {
 	base := []string{"-m", "model.gguf"}
-	got := claudeCodeSamplingArgs(base, true, nil)
+	// "full" is the pre-setting behavior, flag for flag.
+	got := claudeCodeSamplingArgs(base, true, nil, "full", true)
 	for _, want := range []string{"--presence-penalty", "--repeat-penalty", "--repeat-last-n", "--top-k", "--top-p", "--min-p"} {
 		if !hasArg(got, want) {
 			t.Fatalf("expected %s in claude-code sampling defaults, got %v", want, got)
 		}
 	}
 	// non-claude-code: untouched
-	if got := claudeCodeSamplingArgs(base, false, nil); len(got) != len(base) {
+	if got := claudeCodeSamplingArgs(base, false, nil, "full", true); len(got) != len(base) {
 		t.Fatalf("expected no sampling flags outside claude-code mode, got %v", got)
 	}
 	// user-set flag wins: not doubled, others still added
 	user := []string{"-m", "model.gguf", "--presence-penalty", "1.5"}
-	got = claudeCodeSamplingArgs(user, true, nil)
+	got = claudeCodeSamplingArgs(user, true, nil, "full", true)
 	n := 0
 	for _, a := range got {
 		if a == "--presence-penalty" {
@@ -3439,7 +3410,7 @@ func TestClaudeCodeSamplingArgs(t *testing.T) {
 func TestClaudeCodeSamplingArgsDeepSeek4(t *testing.T) {
 	base := []string{"-m", "model.gguf"}
 	model := &placement.ModelProfile{ModelArch: "deepseek4"}
-	got := claudeCodeSamplingArgs(base, true, model)
+	got := claudeCodeSamplingArgs(base, true, model, "late", true)
 	for _, want := range []string{"--temp", "--top-k", "--top-p", "--min-p", "--reasoning-budget"} {
 		if !hasArg(got, want) {
 			t.Fatalf("expected %s in deepseek4 claude-code defaults, got %v", want, got)
@@ -3450,7 +3421,7 @@ func TestClaudeCodeSamplingArgsDeepSeek4(t *testing.T) {
 	}
 
 	user := []string{"-m", "model.gguf", "--reasoning-budget", "-1", "--top-k", "10"}
-	got = claudeCodeSamplingArgs(user, true, model)
+	got = claudeCodeSamplingArgs(user, true, model, "late", true)
 	if got[argIndexOf(got, "--reasoning-budget")+1] != "-1" || got[argIndexOf(got, "--top-k")+1] != "10" {
 		t.Fatalf("user deepseek4 sampling overrides should win, got %v", got)
 	}

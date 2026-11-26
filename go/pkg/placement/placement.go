@@ -550,6 +550,16 @@ func NormalizeBatchSizes(s *Strategy, model *ModelProfile, batchExplicit, ubatch
 	return s.BatchSize != oldBatch || s.UBatchSize != oldUBatch
 }
 
+// capAutomaticBatchAtContext lowers an automatic logical batch to the context
+// size. llama.cpp clamps n_batch to n_ctx for causal models, so a larger value
+// only misstates the launch. NormalizeBatchSizes then keeps ubatch <= batch.
+func capAutomaticBatchAtContext(s *Strategy, batchExplicit bool) {
+	if s == nil || batchExplicit || s.ContextSize <= 0 || s.BatchSize <= s.ContextSize {
+		return
+	}
+	s.BatchSize = s.ContextSize
+}
+
 // isRecurrentOrHybrid reports whether the model carries recurrent state that a
 // context checkpoint must preserve and restore. DeepSeek4's GGUFs do not expose
 // the generic SSM metadata bit, so its architecture name is the signal there.
@@ -1261,6 +1271,12 @@ func computeAutomaticContextStrategy(caps *detect.Capabilities, model *ModelProf
 					)
 					finalOpts.SkipPlacementCache = opts.SkipPlacementCache
 					finalOpts.DenseCPUOffloadPrompt = nil
+					// The search pins the batch pair to keep admission monotonic;
+					// the chosen point takes the same batch rule as a typed
+					// context. If that plan does not fit, the pinned one stays.
+					if opts.RuntimePolicy == nil {
+						finalOpts.BatchSize, finalOpts.UBatchSize = opts.BatchSize, opts.UBatchSize
+					}
 					final, finalErr := computeResolvedStrategy(caps, model, finalOpts)
 					if finalErr != nil || final == nil || !tier.accepts(final) {
 						final = result.strategy
@@ -1610,6 +1626,13 @@ func computeResolvedStrategy(caps *detect.Capabilities, model *ModelProfile, opt
 		// After the builders: a resident lookup tier joins the derived host
 		// footprint exactly once.
 		applySparseLookupTier(s, model, opts)
+		// A context-search candidate must fit each GPU's ledger, not only
+		// the pooled check; an explicit context is left to exact admission.
+		if opts.AutomaticContextCandidate {
+			if fitErr := denseOffloadKVFitError(caps, model, s, opts); fitErr != nil {
+				return nil, fitErr
+			}
+		}
 	}
 	return s, err
 }
@@ -1909,6 +1932,7 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 	if opts.UBatchSize > 0 {
 		s.UBatchSize = opts.UBatchSize
 	}
+	capAutomaticBatchAtContext(s, opts.BatchSizeExplicit)
 	NormalizeBatchSizes(s, model, opts.BatchSizeExplicit, opts.UBatchSizeExplicit)
 	if opts.RuntimePolicy != nil {
 		opts.RuntimePolicy(s)
@@ -1999,6 +2023,12 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 					fmt.Fprintf(os.Stderr, "[verified] saved config holds the lookup tier as %q, not %q; re-planning\n",
 						restored.SparseLookupPolicy, opts.sparseLookupPolicy)
 					restored = nil
+				}
+				if restored != nil {
+					if flag := verifiedConfigExplicitConflict(vc, opts); flag != "" {
+						fmt.Fprintf(os.Stderr, "[verified] explicit %s invalidates the saved config for this scope; re-planning\n", flag)
+						restored = nil
+					}
 				}
 				if restored != nil {
 					restored.CompanionPlacements = append(

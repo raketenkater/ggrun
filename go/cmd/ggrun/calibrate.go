@@ -241,8 +241,10 @@ func automaticCalibrationFinalistPlan(req *launchRequest, cfg *config.Config, mo
 	opts := placementOptionsFromRequest(req, model, be, cacheDir)
 	candidates = placement.AnalyzeCandidateFrontier(caps, model, opts, candidates)
 	if len(candidates) > 0 && candidates[0].Strategy != nil &&
-		candidates[0].Strategy.Residency == placement.ResidencyNonResident {
-		// Required mmap/dense CPU offload is the last-resort fit lane. Its stable
+		(candidates[0].Strategy.Residency == placement.ResidencyNonResident ||
+			candidates[0].Strategy.Residency == placement.ResidencyCPUResident) {
+		// Required mmap/dense CPU offload is the last-resort fit lane, and a
+		// CPU-only plan keeps the same baseline-only lane. Its stable
 		// baseline may collect evidence, but ordinary launch must not pay another
 		// very long load to chase a low-confidence performance estimate. An
 		// explicit --calibrate on maintenance run remains available.
