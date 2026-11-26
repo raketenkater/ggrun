@@ -32,7 +32,9 @@ import (
 // decisions by the backend's host-weight execution policy.
 // Version 28 measures expert re-packs against the resolved serving baseline;
 // allocation-only promotion no longer bypasses the workload controller.
-const CalibrationSchemaVersion = 28
+// Version 29 never moves an explicit KV placement; a decision recorded under 28
+// for such a launch may have promoted a flipped placement.
+const CalibrationSchemaVersion = 29
 
 var calibrationShardBasename = regexp.MustCompile(`(?i)^(.*)-00001-of-[0-9]{5}\.gguf$`)
 
@@ -486,7 +488,44 @@ type batchPair struct {
 // The launcher measures each candidate with the selected workload benchmark and
 // keeps the fastest under the scope key; the default is always candidate 0 so a
 // failed or inconclusive calibration degrades to today's behavior.
+//
+// An explicit KV placement is a user constraint (contract invariant 3): no
+// candidate whose KV placement differs from the request is returned, whichever
+// generator produced it.
 func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options) []CalibrationCandidate {
+	return holdExplicitKVPlacement(generateCalibrationCandidates(caps, model, base, opts), opts)
+}
+
+// explicitKVPlacement returns the requested KV placement when it constrains the
+// plan. Empty and "auto" leave it to the planner. Options cannot tell a CLI flag
+// from a config-file value; Compute honours both as a fixed request, so both
+// count as explicit here too.
+func explicitKVPlacement(opts Options) (string, bool) {
+	requested := strings.ToLower(strings.TrimSpace(opts.KVPlacement))
+	if requested == "" || requested == "auto" {
+		return "", false
+	}
+	return requested, true
+}
+
+// holdExplicitKVPlacement drops every challenger that moved an explicit KV
+// placement. Candidate zero is the serving baseline and always stays.
+func holdExplicitKVPlacement(candidates []CalibrationCandidate, opts Options) []CalibrationCandidate {
+	requested, ok := explicitKVPlacement(opts)
+	if !ok || len(candidates) < 2 {
+		return candidates
+	}
+	out := candidates[:1]
+	for _, candidate := range candidates[1:] {
+		if candidate.Strategy != nil &&
+			strings.EqualFold(strings.TrimSpace(candidate.Strategy.KVPlacement), requested) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func generateCalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base *Strategy, opts Options) []CalibrationCandidate {
 	if caps == nil || model == nil || base == nil {
 		return nil
 	}
@@ -628,15 +667,18 @@ func CalibrationCandidates(caps *detect.Capabilities, model *ModelProfile, base 
 		// expert policy. Changing KV placement changes both VRAM expert capacity
 		// and host RAM, so this must be a fresh Compute pass. Flipping the field on
 		// a cloned strategy produced candidates that had never passed either
-		// memory ledger.
-		altKV := "cpu"
-		if base.KVPlacement == "cpu" {
-			altKV = "gpu"
-		}
-		altOpts := calibrationBaseOptions(opts, base)
-		altOpts.KVPlacement = altKV
-		if alt, err := Compute(caps, model, altOpts); err == nil && alt != nil && alt.Type == MoEOffload && alt.KVPlacement == altKV {
-			out = append(out, CalibrationCandidate{Name: "kv-alternate", Strategy: alt})
+		// memory ledger. An explicit KV placement is a constraint, not a
+		// coordinate, so it never gets an alternate.
+		if _, explicit := explicitKVPlacement(opts); !explicit {
+			altKV := "cpu"
+			if base.KVPlacement == "cpu" {
+				altKV = "gpu"
+			}
+			altOpts := calibrationBaseOptions(opts, base)
+			altOpts.KVPlacement = altKV
+			if alt, err := Compute(caps, model, altOpts); err == nil && alt != nil && alt.Type == MoEOffload && alt.KVPlacement == altKV {
+				out = append(out, CalibrationCandidate{Name: "kv-alternate", Strategy: alt})
+			}
 		}
 		for _, candidate := range moeTopologyCandidates(caps, model, base, opts) {
 			if !calibrationCandidateExists(out, candidate.Strategy) {
@@ -1472,6 +1514,12 @@ type CalibrationScopeKey struct {
 	// policy is not performance evidence for another. Empty otherwise, which
 	// keeps verified-config keys (built without a base) unchanged.
 	HostExecution string
+	// KVPlacementRequest is an explicit --kv-placement. The resolved placement
+	// is already in BasePlacement, but an explicit request searches a narrower
+	// candidate set than an automatic one that resolved the same way, so their
+	// decisions are not interchangeable. Empty when automatic or without a
+	// base, which keeps those keys unchanged.
+	KVPlacementRequest string
 }
 
 // NewCalibrationScopeKey builds the key from the same identity sources the
@@ -1563,10 +1611,21 @@ func NewCalibrationScopeKey(model *ModelProfile, caps *detect.Capabilities, opts
 			string(effectiveCPUExpertMMapCapability(opts)),
 			opts.CPUExpertMMapEvidence,
 		),
-		SWAFull:       opts.SWAFull,
-		ChatTemplate:  opts.ChatTemplate,
-		HostExecution: hostExecutionScope(caps, opts, base),
+		SWAFull:            opts.SWAFull,
+		ChatTemplate:       opts.ChatTemplate,
+		HostExecution:      hostExecutionScope(caps, opts, base),
+		KVPlacementRequest: calibrationKVPlacementRequest(opts, base),
 	}
+}
+
+// calibrationKVPlacementRequest scopes decisions by an explicit KV placement.
+// Verified-config keys are built without a base and stay unchanged.
+func calibrationKVPlacementRequest(opts Options, base *Strategy) string {
+	if base == nil {
+		return ""
+	}
+	requested, _ := explicitKVPlacement(opts)
+	return requested
 }
 
 func calibrationCompanionPolicy(companions []CompanionReservation) string {
@@ -1606,6 +1665,9 @@ func (k CalibrationScopeKey) String() string {
 	// did before this component existed.
 	if k.HostExecution != "" {
 		parts = append(parts, "host-exec="+k.HostExecution)
+	}
+	if k.KVPlacementRequest != "" {
+		parts = append(parts, "kv-request="+k.KVPlacementRequest)
 	}
 	return specHash(parts...)
 }
