@@ -204,10 +204,117 @@ func TestTruncatedDiscoveryScanMergesPriorValidPaths(t *testing.T) {
 		t.Fatalf("truncated scan replaced prior paths: got %#v, want %#v", got, want)
 	}
 
-	if err := SaveDiscoveredScan(cacheDir, ScanResult{Paths: []string{foundNow}}); err != nil {
+	if err := SaveDiscoveredScan(cacheDir, ScanResult{Paths: []string{foundNow}, Visited: []string{modelDir}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := LoadDiscoveredPaths(cacheDir); !reflect.DeepEqual(got, []string{foundNow}) {
 		t.Fatalf("complete scan should replace index, got %#v", got)
+	}
+}
+
+func fakeMountInfo(t *testing.T, info string) {
+	t.Helper()
+	oldRead, oldTrigger := readMountInfo, triggerAutomounts
+	readMountInfo = func() (string, error) { return info, nil }
+	triggerAutomounts = func([]string) {}
+	t.Cleanup(func() { readMountInfo, triggerAutomounts = oldRead, oldTrigger })
+}
+
+func writeGGUF(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("GGUF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompleteScanKeepsSavedModelsUnderUnmountedAutofsRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mountinfo is Linux-specific")
+	}
+	auto := t.TempDir()
+	saved := filepath.Join(auto, "hdd", "big.gguf")
+	writeGGUF(t, saved)
+	disk := t.TempDir()
+	fakeMountInfo(t, "36 25 0:32 / "+auto+" rw - autofs systemd-1 rw\n37 36 8:1 / "+disk+" rw - ext4 /dev/sdb1 rw")
+	cacheDir := t.TempDir()
+	if err := SaveDiscoveredPaths(cacheDir, []string{saved}); err != nil {
+		t.Fatal(err)
+	}
+	roots, boundaries := computerScanPlan("")
+	result := scanRoots(roots, boundaries, 1000, time.Minute)
+	if result.Truncated {
+		t.Fatal("scan unexpectedly truncated")
+	}
+	if err := SaveDiscoveredScan(cacheDir, result); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadDiscoveredPaths(cacheDir); !reflect.DeepEqual(got, []string{saved}) {
+		t.Fatalf("saved = %#v, want %q kept", got, saved)
+	}
+}
+
+func TestCompleteScanReplacesEntriesUnderMountedRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mountinfo is Linux-specific")
+	}
+	disk := t.TempDir()
+	gone := filepath.Join(disk, "gone.gguf")
+	kept := filepath.Join(disk, "kept.gguf")
+	writeGGUF(t, gone)
+	writeGGUF(t, kept)
+	fakeMountInfo(t, "37 36 8:1 / "+disk+" rw - ext4 /dev/sdb1 rw")
+	cacheDir := t.TempDir()
+	if err := SaveDiscoveredPaths(cacheDir, []string{gone, kept}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	roots, boundaries := computerScanPlan("")
+	result := scanRoots(roots, boundaries, 1000, time.Minute)
+	if err := SaveDiscoveredScan(cacheDir, result); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadDiscoveredPaths(cacheDir); !reflect.DeepEqual(got, []string{kept}) {
+		t.Fatalf("saved = %#v, want only %q", got, kept)
+	}
+	// The deleted entry must not be resurrected even if it were still listed.
+	if scanCovers(result, gone) == false {
+		t.Fatalf("scan should cover %q", gone)
+	}
+}
+
+func TestPendingAutofsMountsTriggeredOnceThenRescanned(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mountinfo is Linux-specific")
+	}
+	auto := t.TempDir()
+	before := "36 25 0:32 / " + auto + " rw - autofs systemd-1 rw"
+	after := before + "\n40 36 8:1 / " + auto + " rw - ext4 /dev/sdb1 rw"
+	mounted := false
+	oldRead, oldTrigger := readMountInfo, triggerAutomounts
+	t.Cleanup(func() { readMountInfo, triggerAutomounts = oldRead, oldTrigger })
+	readMountInfo = func() (string, error) {
+		if mounted {
+			return after, nil
+		}
+		return before, nil
+	}
+	var triggered []string
+	triggerAutomounts = func(p []string) { triggered = p; mounted = true }
+	roots, _ := computerScanPlan("")
+	if !reflect.DeepEqual(triggered, []string{auto}) || len(roots) != 1 || roots[0] != auto {
+		t.Fatalf("triggered=%v roots=%v, want %q mounted and scanned", triggered, roots, auto)
+	}
+}
+
+func TestDefaultTriggerAutomountsIsBounded(t *testing.T) {
+	started := time.Now()
+	defaultTriggerAutomounts([]string{t.TempDir(), filepath.Join(t.TempDir(), "missing")})
+	if time.Since(started) > automountTriggerTimeout+time.Second {
+		t.Fatal("trigger exceeded its bound")
 	}
 }
