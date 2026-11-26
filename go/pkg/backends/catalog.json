@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "comment": "Reviewed fork recipes and generic backend-family rules, embedded in ggrun and validated at load (see catalog.go). Recipe order is significant: lookups and listings follow it. Optional per-recipe fields kind, required_tensor_types, tensor_count, superseded_by, evidence and expires are defined but unused so far. Patch files live under patches/ and are pinned by sha256.",
+  "recipes": [
+    {
+      "name": "nanbeige42",
+      "note": "NanoBeige support is upstream llama.cpp, not a permanent fork. Pin the first reviewed merge commit so `ggrun support install --with-backend` can build a known architecture-capable helper backend even when the machine's normal production backend intentionally stays older. The reviewed Nanbeige4.2 GGUF predates upstream's final metadata spelling: it uses loop_count plus a logical block count, while upstream b77d646 expects num_loops plus a physical block count. The patch makes the loader support both unambiguously.",
+      "description": "Upstream llama.cpp with native Nanbeige4.2 looped-transformer support",
+      "tag": "nanbeige42",
+      "git_url": "https://github.com/ggml-org/llama.cpp.git",
+      "branch": "master",
+      "commit": "b77d646751d01c0962bc203b6809e9d94f7d50b7",
+      "route_arch": "nanbeige",
+      "helper_only": true,
+      "patches": [
+        {
+          "name": "0001-accept-loop-count-gguf-schema.patch",
+          "file": "nanbeige42/0001-accept-loop-count-gguf-schema.patch",
+          "sha256": "6aa0a0777d8c043040c5aa41d5f9d71880025b0e78fef6a84d04bd8da1466143"
+        }
+      ]
+    },
+    {
+      "name": "hy3",
+      "description": "Tencent Hy3 / hy_v3 support with built-in MTP and its reviewed chat template",
+      "tag": "hy3",
+      "git_url": "https://github.com/noonr48/ik_llama-hy3.git",
+      "branch": "hy3-support",
+      "commit": "f46c95ee90d8c8200b0147c646b883405020b482",
+      "route_arch": "hy_v3",
+      "patches": [
+        {
+          "name": "hy3/0001-fix-router-tensor-name",
+          "file": "hy3/0001-fix-router-tensor-name.patch",
+          "sha256": "689947b8644078d6b911ad55833477c5a4c518e330c0330b4a945589c526781e"
+        }
+      ]
+    },
+    {
+      "name": "minimax-m3",
+      "description": "Preliminary MiniMax-M3 support with native structured tool-call parsing",
+      "tag": "minimax-m3",
+      "git_url": "https://github.com/danielhanchen/llama.cpp.git",
+      "branch": "minimax-m3",
+      "commit": "66f43aa655a07999c7746fe9ff5ede94835e921e",
+      "route_arch": "minimax-m3"
+    },
+    {
+      "name": "laguna",
+      "note": "Poolside's own fork, not the upstream pull request. The upstream PR (joerowell/llama.cpp @ add-laguna) serves Laguna correctly but implements only the target architecture. Its loader builds 69 of the 76 tensors the published DFlash drafter contains, so any speculative launch dies during model load: done_getting_tensors: wrong number of tensors; expected 76, got 69. Poolside state it directly: \"Upstream llama.cpp ships the generic DFlash framework but not the Laguna decoder contract this draft model needs.\" Speculation is the largest measured lever on a RAM-resident MoE -- a forward pass costs nearly the same carrying one token or a micro-batch -- so a recipe that cannot load the drafter forfeits it. The patch: common/speculative.cpp calls std::isfinite without including <cmath>; the declaration reaches poolside's compiler transitively and ours not at all, so the fork builds for them and fails here at 95% with \"'isfinite' is not a member of 'std'\". Adding the include is the whole fix and changes no behaviour.",
+      "description": "Poolside Laguna support including the DFlash drafter (poolside fork, not the upstream PR)",
+      "tag": "laguna",
+      "git_url": "https://github.com/poolsideai/llama.cpp.git",
+      "branch": "laguna",
+      "commit": "04b2b72cb54048ead292884adbe11f284e3ec950",
+      "route_arch": "laguna",
+      "patches": [
+        {
+          "name": "laguna/0001-include-cmath-for-isfinite",
+          "file": "laguna/0001-include-cmath-for-isfinite.patch",
+          "sha256": "d824bf82bdcdcb01126c83a232b0d0444a051b1164ebe5a8e8c4490ab6d46f3d"
+        }
+      ]
+    },
+    {
+      "name": "laguna-upstream-pr",
+      "note": "Kept selectable: it is the branch heading for upstream, so it is the one to test against when the PR merges, and it remains a working target-only fallback if the poolside fork regresses.",
+      "description": "Laguna target architecture from the open upstream llama.cpp PR (no DFlash drafter)",
+      "tag": "laguna-upstream-pr",
+      "git_url": "https://github.com/joerowell/llama.cpp.git",
+      "branch": "add-laguna",
+      "commit": "54f214a09b8c4e709357ae661a77925edb154f13",
+      "route_arch": "laguna"
+    }
+  ],
+  "name_rules": [
+    {
+      "match": "arch_prefix",
+      "value": "minimax-m",
+      "requires": "ik_llama",
+      "note": "minimax-m2, minimax-m3, ... require the ik_llama family. Shared by CLI preflight and the TUI so an auto continue-once choice cannot select a backend the CLI will immediately reject."
+    }
+  ]
+}

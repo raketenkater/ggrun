@@ -7,7 +7,6 @@ package backends
 
 import (
 	"bytes"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,112 +69,6 @@ type Recipe struct {
 	HelperOnly  bool          `json:"helper_only,omitempty"`
 	Accel       string        `json:"accel,omitempty"`
 	Patches     []RecipePatch `json:"-"`
-}
-
-//go:embed patches/hy3/0001-fix-router-tensor-name.patch
-var hy3RouterTensorNamePatch []byte
-
-// The reviewed Nanbeige4.2 GGUF predates upstream's final metadata spelling:
-// it uses loop_count plus a logical block count, while upstream b77d646 expects
-// num_loops plus a physical block count. The loader supports both unambiguously.
-//
-//go:embed patches/nanbeige42/0001-accept-loop-count-gguf-schema.patch
-var nanbeige42LoopCountPatch []byte
-
-// common/speculative.cpp calls std::isfinite without including <cmath>. The
-// declaration reaches poolside's compiler transitively and ours not at all, so
-// the fork builds for them and fails here at 95% with "'isfinite' is not a
-// member of 'std'". Adding the include is the whole fix and changes no
-// behaviour.
-//
-//go:embed patches/laguna/0001-include-cmath-for-isfinite.patch
-var lagunaCmathPatch []byte
-
-var builtinRecipes = []Recipe{
-	{
-		// NanoBeige support is upstream llama.cpp, not a permanent fork. Pin the
-		// first reviewed merge commit so `ggrun support install --with-backend`
-		// can build a known architecture-capable helper backend even when the
-		// machine's normal production backend intentionally stays older.
-		Name:        "nanbeige42",
-		Description: "Upstream llama.cpp with native Nanbeige4.2 looped-transformer support",
-		Tag:         "nanbeige42",
-		GitURL:      "https://github.com/ggml-org/llama.cpp.git",
-		Branch:      "master",
-		Commit:      "b77d646751d01c0962bc203b6809e9d94f7d50b7",
-		RouteArch:   "nanbeige",
-		HelperOnly:  true,
-		Accel:       "",
-		Patches: []RecipePatch{{
-			Name:     "0001-accept-loop-count-gguf-schema.patch",
-			contents: nanbeige42LoopCountPatch,
-		}},
-	},
-	{
-		Name:        "hy3",
-		Description: "Tencent Hy3 / hy_v3 support with built-in MTP and its reviewed chat template",
-		Tag:         "hy3",
-		GitURL:      "https://github.com/noonr48/ik_llama-hy3.git",
-		Branch:      "hy3-support",
-		Commit:      "f46c95ee90d8c8200b0147c646b883405020b482",
-		RouteArch:   "hy_v3",
-		Accel:       "",
-		Patches: []RecipePatch{{
-			Name:     "hy3/0001-fix-router-tensor-name",
-			contents: hy3RouterTensorNamePatch,
-		}},
-	},
-	{
-		Name:        "minimax-m3",
-		Description: "Preliminary MiniMax-M3 support with native structured tool-call parsing",
-		Tag:         "minimax-m3",
-		GitURL:      "https://github.com/danielhanchen/llama.cpp.git",
-		Branch:      "minimax-m3",
-		Commit:      "66f43aa655a07999c7746fe9ff5ede94835e921e",
-		RouteArch:   "minimax-m3",
-		Accel:       "",
-	},
-	{
-		// Poolside's own fork, not the upstream pull request.
-		//
-		// The upstream PR (joerowell/llama.cpp @ add-laguna) serves Laguna
-		// correctly but implements only the target architecture. Its loader
-		// builds 69 of the 76 tensors the published DFlash drafter contains, so
-		// any speculative launch dies during model load:
-		//
-		//   done_getting_tensors: wrong number of tensors; expected 76, got 69
-		//
-		// Poolside state it directly: "Upstream llama.cpp ships the generic
-		// DFlash framework but not the Laguna decoder contract this draft model
-		// needs." Speculation is the largest measured lever on a RAM-resident
-		// MoE -- a forward pass costs nearly the same carrying one token or a
-		// micro-batch -- so a recipe that cannot load the drafter forfeits it.
-		Name:        "laguna",
-		Description: "Poolside Laguna support including the DFlash drafter (poolside fork, not the upstream PR)",
-		Tag:         "laguna",
-		GitURL:      "https://github.com/poolsideai/llama.cpp.git",
-		Branch:      "laguna",
-		Commit:      "04b2b72cb54048ead292884adbe11f284e3ec950",
-		RouteArch:   "laguna",
-		Accel:       "",
-		Patches: []RecipePatch{{
-			Name:     "laguna/0001-include-cmath-for-isfinite",
-			contents: lagunaCmathPatch,
-		}},
-	},
-	{
-		// Kept selectable: it is the branch heading for upstream, so it is the
-		// one to test against when the PR merges, and it remains a working
-		// target-only fallback if the poolside fork regresses.
-		Name:        "laguna-upstream-pr",
-		Description: "Laguna target architecture from the open upstream llama.cpp PR (no DFlash drafter)",
-		Tag:         "laguna-upstream-pr",
-		GitURL:      "https://github.com/joerowell/llama.cpp.git",
-		Branch:      "add-laguna",
-		Commit:      "54f214a09b8c4e709357ae661a77925edb154f13",
-		RouteArch:   "laguna",
-		Accel:       "",
-	},
 }
 
 // Recipes returns a copy of the reviewed built-in recipe catalog.
@@ -291,11 +184,7 @@ func HasState(dir string) bool {
 // attempted. Keep this shared by CLI preflight and the TUI so an "auto"
 // continue-once choice cannot select a backend the CLI will immediately reject.
 func RequiredBackendForArch(arch string) string {
-	a := strings.ToLower(strings.TrimSpace(arch))
-	if strings.HasPrefix(a, "minimax-m") { // minimax-m2, minimax-m3, ...
-		return "ik_llama"
-	}
-	return ""
+	return loadedCatalog.requiredBackend(arch)
 }
 
 // pointerPath is where the app home pointer lives, always under the user's own
