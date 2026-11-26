@@ -92,6 +92,9 @@ type launchMemoryRecovery struct {
 	// derated from the overshoot until the start budget refused the launch.
 	provenStrategy *placement.Strategy
 	provenArgs     []string
+	// deviceReplans counts the device-penalty re-plans a compute-bound deficit
+	// has taken at the ubatch floor; maxComputeBoundDeviceReplans bounds it.
+	deviceReplans int
 }
 
 // noteMeasuredReplan records the admitted plan a backend-measured re-plan is
@@ -587,7 +590,8 @@ func recoverPreflightOOM(
 	// would come from the same estimate, and on MiMo-V2.6-Flash such candidates
 	// only shed one 1,024-token context granule per round against a 0.6-1.8 GiB
 	// deficit until the re-plan budget ran out.
-	if recovery != nil && (recovery.lastRecoveryMethod == "context-replanned" || recovery.lastRecoveryMethod == "replanned") {
+	if recovery != nil && (recovery.lastRecoveryMethod == "context-replanned" || recovery.lastRecoveryMethod == "replanned" ||
+		recovery.lastRecoveryMethod == "device-replanned") {
 		recovery.plannerDisproved = true
 	}
 	next, nextArgs, method, err := recoverPreflightOOMOnce(req, cfg, model, be, caps, runtimeCaps, visibleToPhysical,
@@ -682,6 +686,14 @@ func recoverPreflightOOMOnce(
 	// failing closed, so it is retained below as a last resort when no other
 	// lever moves.
 	if oracleReplanEligible && oracleContextDropCoversDeficit(model, strategy, serverArgs, candidate, outcome) {
+		// At the ubatch floor this drop would be the first context derate, so
+		// the device re-plan is tried before it.
+		if ubatchAtFitFloor(serverArgs) {
+			if next, nextArgs, ok := computeBoundDeviceReplan(req, cfg, model, be, caps, visibleToPhysical,
+				strategy, serverArgs, oomPenalty, outcome, recovery); ok {
+				return next, nextArgs, "device-replanned", nil
+			}
+		}
 		candidate.PerformanceTuned = false
 		return candidate, candidateArgs, "context-replanned", nil
 	}
@@ -693,6 +705,16 @@ func recoverPreflightOOMOnce(
 	// only when none is -- MiniMax-M3's re-plan kept its context and failed
 	// closed 103-151 MiB short with 5,929 MiB of KV on the device.
 	untyped := !outcome.IsComputeBuffer && !outcome.IsKVCache
+	// A compute-bound deficit that survives the ubatch floor has one lever left
+	// before context: move load off the failed device. Its result is only a
+	// candidate for the caller's next exact preflight; a refusal falls through
+	// to the context derate or fail-closed below on a later round.
+	if !changed && ubatchAtFitFloor(serverArgs) {
+		if next, nextArgs, ok := computeBoundDeviceReplan(req, cfg, model, be, caps, visibleToPhysical,
+			strategy, serverArgs, oomPenalty, outcome, recovery); ok {
+			return next, nextArgs, "device-replanned", nil
+		}
+	}
 	if !changed && !(untyped && oracleReplanEligible) {
 		// Context is the last automatic compute-memory lever. It cannot be an
 		// argv patch: context changes KV, graph, CRAM, checkpoint, placement-cache,
@@ -731,6 +753,118 @@ func recoverPreflightOOMOnce(
 		)
 	}
 	return nextStrategy, nextArgs, method, nil
+}
+
+// maxComputeBoundDeviceReplans bounds the device-penalty re-plan per launch.
+// Each attempt costs one exact preflight from the shared re-plan budget, and a
+// refused attempt leaves the ladder the launch would have taken without it.
+const maxComputeBoundDeviceReplans = 1
+
+// replanAfterDeviceOOM is the device-penalty re-plan. It is a variable only so
+// tests can pin the planner's answer.
+var replanAfterDeviceOOM = placement.ReplanAfterOOM
+
+// ubatchAtFitFloor reports whether args already run the smallest ubatch the fit
+// ladder can derate to.
+func ubatchAtFitFloor(args []string) bool {
+	ladder := placement.UBatchFitLadder
+	ub := placement.CurrentUBatch(args)
+	return len(ladder) > 0 && ub > 0 && ub <= ladder[len(ladder)-1]
+}
+
+// computeBoundDeviceReplan re-plans a compute-bound deficit with the failed
+// device's shortfall charged to it, at the current context, slots, KV and
+// ubatch. A compute deficit never reached the device-penalty branch, so a
+// fresh install whose first 3-GPU preflight was short on one card derated
+// context until the planner dropped that card (2026-11-26). The candidate is
+// returned only when it changes the argv, relieves the failed device and keeps
+// every workload coordinate; the caller's exact preflight is its admission.
+// The penalty is committed to oomPenalty only for a returned candidate.
+func computeBoundDeviceReplan(
+	req *launchRequest,
+	cfg *config.Config,
+	model *placement.ModelProfile,
+	be *backendInfo,
+	caps *detect.Capabilities,
+	visibleToPhysical map[int]int,
+	strategy *placement.Strategy,
+	serverArgs []string,
+	oomPenalty map[int]int,
+	outcome preflightOutcome,
+	recovery *launchMemoryRecovery,
+) (*placement.Strategy, []string, bool) {
+	if recovery == nil || recovery.deviceReplans >= maxComputeBoundDeviceReplans ||
+		!outcome.IsComputeBuffer || outcome.Device < 0 || outcome.DeficitMB <= 0 ||
+		req == nil || cfg == nil || be == nil || caps == nil || model == nil ||
+		strategy == nil || strategy.ContextSize <= 0 {
+		return nil, nil, false
+	}
+	recovery.deviceReplans++
+	penalty := make(map[int]int, len(oomPenalty)+1)
+	for dev, mb := range oomPenalty {
+		penalty[dev] = mb
+	}
+	penalty[physicalGPUIndex(outcome.Device, visibleToPhysical)] += outcome.DeficitMB
+	opts := boundByProvenLimits(placementOptionsFromRequest(req, model, be, cfg.CacheDir), recovery)
+	// The context is pinned: this lever moves load, and an explicit context is
+	// never derated here.
+	opts.ContextSize = strategy.ContextSize
+	opts.AutoContextMax = 0
+	opts.Parallel = maxPreflightInt(strategy.Parallel, 1)
+	opts.AutoParallel = false
+	opts.BatchSize = strategy.BatchSize
+	opts.UBatchSize = strategy.UBatchSize
+	opts.UBatchSizeExplicit = true
+	opts.SkipPlacementCache = true
+	opts.CacheFile = ""
+	opts.VerifiedConfigScopeKey = ""
+	fmt.Fprintf(os.Stderr,
+		"[launch] CUDA%d is %d MiB short with ubatch at its floor; re-planning with that deficit charged to the device before any context derate\n",
+		outcome.Device, outcome.DeficitMB)
+	next, err := replanAfterDeviceOOM(caps, model, opts, penalty)
+	reason := ""
+	switch {
+	case err != nil:
+		reason = err.Error()
+	case next == nil:
+		reason = "the re-plan returned no strategy"
+	}
+	if reason == "" {
+		next = holdExpertResidency(caps, model, opts, next, recovery.expertResidencyFloor(), outcome.Device)
+		if next.ContextSize != strategy.ContextSize || next.Parallel != strategy.Parallel ||
+			next.KVType != strategy.KVType || next.KVTypeV != strategy.KVTypeV ||
+			next.KVPlacement != strategy.KVPlacement || next.MMapRequired != strategy.MMapRequired ||
+			next.UBatchSize > strategy.UBatchSize || recovery.undoesProvenExpertRelief(next) {
+			reason = "the re-plan changed context, slots, KV, mmap or ubatch"
+		}
+	}
+	var nextArgs []string
+	if reason == "" {
+		next.ContextAuto = strategy.ContextAuto
+		next.ContextFitTier = strategy.ContextFitTier
+		next.ContextFitRejected = strategy.ContextFitRejected
+		next.ContextFitEvidence = strategy.ContextFitEvidence
+		next.PerformanceTuned = false
+		nextArgs = buildLaunchServerArgs(req, cfg, be, caps, model, next)
+		switch {
+		case effectiveMemoryArgsFingerprint(nextArgs) == effectiveMemoryArgsFingerprint(serverArgs):
+			reason = "the re-plan did not change the effective memory arguments"
+		case recovery.isRejected(nextArgs):
+			reason = "the re-plan reproduced an argv this launch already rejected"
+		case !candidateRelievesFailedDevice(serverArgs, nextArgs, outcome.Device):
+			reason = fmt.Sprintf("the re-plan did not move load off CUDA%d", outcome.Device)
+		}
+	}
+	if reason != "" {
+		fmt.Fprintf(os.Stderr, "[launch] device re-plan not taken (%s)\n", reason)
+		return nil, nil, false
+	}
+	if oomPenalty != nil {
+		for dev, mb := range penalty {
+			oomPenalty[dev] = mb
+		}
+	}
+	return next, nextArgs, true
 }
 
 // oracleComputeBoundOutcome classifies an oracle deficit that the failed
