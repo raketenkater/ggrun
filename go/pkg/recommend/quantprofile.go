@@ -117,14 +117,17 @@ func quantProfileFor(c Candidate, q QuantOption) QuantProfile {
 }
 
 // assumedBackboneBPW is the width assumed for a dynamic or low-bit MoE's
-// non-expert tensors when only the file size is known: such uploads keep
-// attention, shared experts and embeddings at Q8_0 (8.5 bpw); files read here
-// measured 7.2-8.6 (one with F32 side tensors 24.9). A plain K-quant keeps a
-// backbone just above its overall width (a Q4_K_M: 5.68 against 4.89), so
-// there the backbone is assumed plainBackboneMargin above the overall width.
+// non-expert tensors when only the file size is known. Backbones read here
+// measured 5.68 (a plain Q4_K_M) to 8.56, and 24.9 in one file with F32 side
+// tensors. Each assumption sits at or above the measured range of its kind,
+// so the expert width it yields errs low: a dynamic or low-bit upload is
+// assumed to carry 9.0 bits per weight outside its experts, a plain K-quant
+// plainBackboneMargin above its overall width (one Q4_K_M: 5.68 against
+// 4.89). A wider real backbone (F32 side tensors) still makes the estimate
+// high, which is why the label marks it "~".
 const (
-	assumedBackboneBPW   = 8.5
-	plainBackboneMargin  = 0.8
+	assumedBackboneBPW   = 9.0
+	plainBackboneMargin  = 1.0
 	lowBitOverallBPW     = 4.5
 	minRoutedParamsShare = 0.8
 )
