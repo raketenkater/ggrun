@@ -2001,6 +2001,12 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 					restored = nil
 				}
 				if restored != nil {
+					if flag := verifiedConfigExplicitConflict(vc, opts); flag != "" {
+						fmt.Fprintf(os.Stderr, "[verified] explicit %s invalidates the saved config for this scope; re-planning\n", flag)
+						restored = nil
+					}
+				}
+				if restored != nil {
 					restored.CompanionPlacements = append(
 						[]CompanionPlacement(nil), s.CompanionPlacements...,
 					)
