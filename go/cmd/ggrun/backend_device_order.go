@@ -103,16 +103,40 @@ func matchBackendDevices(gpus []detect.GPU, listed []listedDevice) ([]int, error
 // every one of those at once. It also carries the --gpus selection, which the
 // generic path wrote as ggrun indices and so selected the wrong physical card.
 func vulkanDeviceOrderEnv(req *launchRequest, be *backendInfo, caps *detect.Capabilities, list func(string) ([]listedDevice, error)) (string, error) {
-	if be == nil || !strings.EqualFold(be.Dialect, "vulkan") || caps == nil || len(caps.GPUs) == 0 {
+	if !vulkanDeviceOrderApplies(be, caps) {
 		return "", nil
 	}
 	listed, err := list(be.Path)
 	if err != nil {
 		return "", err
 	}
+	key, value, err := vulkanDeviceOrder(req, be, caps, listed)
+	if err != nil || key == "" {
+		return "", err
+	}
+	if err := os.Setenv(key, value); err != nil {
+		return "", err
+	}
+	return key + "=" + value, nil
+}
+
+// vulkanDeviceOrderApplies reports whether vulkanDeviceOrderEnv lists devices:
+// only a Vulkan backend on a host with detected GPUs.
+func vulkanDeviceOrderApplies(be *backendInfo, caps *detect.Capabilities) bool {
+	return be != nil && strings.EqualFold(be.Dialect, "vulkan") && caps != nil && len(caps.GPUs) > 0
+}
+
+// vulkanDeviceOrder is the variable and value vulkanDeviceOrderEnv exports for
+// the backend's own device listing, or two empty strings when the order is
+// already ggrun's and --gpus is not given. It runs nothing and reads no
+// process state.
+func vulkanDeviceOrder(req *launchRequest, be *backendInfo, caps *detect.Capabilities, listed []listedDevice) (key, value string, err error) {
+	if !vulkanDeviceOrderApplies(be, caps) {
+		return "", "", nil
+	}
 	perm, err := matchBackendDevices(caps.GPUs, listed)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	selected := make([]int, len(caps.GPUs))
 	for i := range selected {
@@ -121,14 +145,14 @@ func vulkanDeviceOrderEnv(req *launchRequest, be *backendInfo, caps *detect.Capa
 	restricted := req != nil && strings.TrimSpace(req.GPUsFlag) != ""
 	if restricted {
 		if selected, err = parseGPUIndices(req.GPUsFlag); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	parts := make([]string, 0, len(selected))
 	identity := true
 	for pos, idx := range selected {
 		if idx < 0 || idx >= len(perm) {
-			return "", fmt.Errorf("--gpus index %d is not a detected GPU", idx)
+			return "", "", fmt.Errorf("--gpus index %d is not a detected GPU", idx)
 		}
 		if perm[idx] != pos {
 			identity = false
@@ -136,13 +160,9 @@ func vulkanDeviceOrderEnv(req *launchRequest, be *backendInfo, caps *detect.Capa
 		parts = append(parts, strconv.Itoa(perm[idx]))
 	}
 	if identity && !restricted {
-		return "", nil
+		return "", "", nil
 	}
-	value := strings.Join(parts, ",")
-	if err := os.Setenv("GGML_VK_VISIBLE_DEVICES", value); err != nil {
-		return "", err
-	}
-	return "GGML_VK_VISIBLE_DEVICES=" + value, nil
+	return "GGML_VK_VISIBLE_DEVICES", strings.Join(parts, ","), nil
 }
 
 // applyVulkanDeviceOrder runs vulkanDeviceOrderEnv for a launch and reports it.
