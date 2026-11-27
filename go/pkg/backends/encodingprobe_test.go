@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"testing/iotest"
 )
@@ -45,72 +47,127 @@ func TestEncodingsInHelpMatchesWholeWordsIgnoringCase(t *testing.T) {
 	}
 }
 
-// Q1_0 is a substring of STQ1_0 and the prefix of Q1_0_G128, and build paths
-// embedded in a binary hold names too; only a whole NUL-bracketed literal
-// counts, in the case the catalog spells.
-func TestScanEncodingLiteralsNeedsWholeLiterals(t *testing.T) {
-	decoys := lits("STQ1_0", "Q1_0_G128", "q1_0_g128", "/home/build/Q1_0/ggml.c", "xQ1_0", "Q1_0x", "stq1_0x")
-	got, _, complete, err := scanEncodingLiterals(bytes.NewReader(decoys), []string{"Q1_0", "STQ1_0"}, 5, 0)
-	if err != nil || !complete {
-		t.Fatalf("complete=%v err=%v", complete, err)
+// The type-name strings below are cut from real builds (read-only byte dumps,
+// 2026-11-27).
+//
+// mainlineTable: libggml-base.so.0.29.0 of a mainline llama.cpp CUDA build, 733 kB
+// into the file, from the end of the op-name table through the type names.
+// "f16" is not a string of its own there: the linker merged it into "bf16\0",
+// as it did "q2_0" into "tq2_0\0" and "q1_0" into "tq1_0\0".
+const mainlineTable = "\x00OPT_STEP_SGD\x00f32\x00q4_0\x00q4_1\x00DEPRECATED\x00q5_0\x00q5_1\x00q8_0\x00q8_1\x00" +
+	"q2_K\x00q3_K\x00q4_K\x00q5_K\x00q6_K\x00q8_K\x00iq2_xxs\x00iq2_xs\x00iq3_xxs\x00iq1_s\x00iq4_nl\x00" +
+	"iq3_s\x00iq2_s\x00iq4_xs\x00i8\x00i16\x00i32\x00i64\x00f64\x00iq1_m\x00bf16\x00tq1_0\x00tq2_0\x00" +
+	"mxfp4\x00nvfp4\x00f8_e4m3\x00parent_size >= node_size\x00buffer_id >= 0\x00"
+
+// ikTable: libggml.so of an ik_llama.cpp build, 42.7 MB into the file; the table
+// starts without f32 and f16 and carries the fork's own types (q1_0_g128, the
+// _r4 and _kt families). Shortened after "q8_k_r8".
+const ikTable = "\x00LATENT_ATTN\x00DS4_COMP\x00q4_0\x00q4_1\x00DEPRECATED\x00q5_0\x00q5_1\x00q8_0\x00q8_1\x00" +
+	"q2_K\x00q3_K\x00q4_K\x00q5_K\x00q6_K\x00q8_K\x00iq2_xxs\x00iq2_xs\x00iq3_xxs\x00iq1_s\x00iq4_nl\x00" +
+	"iq3_s\x00iq2_s\x00iq4_xs\x00iq1_m\x00bf16\x00q4_0_4x4\x00q4_0_4x8\x00q4_0_8x8\x00i2_s\x00q1_0_g128\x00" +
+	"q8_0_x4\x00q8_1_x4\x00q8_2_x4\x00q6_0\x00iq1_bn\x00iq2_bn\x00q8_K64\x00iq2_k\x00iq3_k\x00iq4_k\x00" +
+	"iq5_k\x00iq6_k\x00iq4_ks\x00iq2_ks\x00iq4_kss\x00q8_K16\x00q8_K32\x00q8_KR8\x00q8_K128\x00q8_KV\x00" +
+	"iq5_ks\x00iq2_kt\x00iq3_kt\x00iq4_kt\x00iq3_ks\x00iq2_kl\x00iq1_kt\x00q4_0_r8\x00q8_k_r8\x00galloc != NULL\x00"
+
+// The first pair alone also occurs outside the table: the ik_llama.cpp server
+// binary holds "\0q4_0\0q4_1\0" once and no second pair.
+const pairOnly = "\x00ggml_row_size\x00q4_0\x00q4_1\x00some_other_list\x00"
+
+func tableOf(t *testing.T, blob string, chunk int, pad int) (names map[string]bool) {
+	t.Helper()
+	data := append(bytes.Repeat([]byte("x\x00"), pad), blob...)
+	region, _, _, complete, err := scanTypeTable(bytes.NewReader(data), chunk, 0, nil)
+	if err != nil || !complete || region == nil {
+		t.Fatalf("chunk %d pad %d: region %d bytes complete %v err %v", chunk, pad, len(region), complete, err)
 	}
-	if want := []string{"STQ1_0"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("found %v, want %v: Q1_0 appears only inside other literals", got, want)
+	names = map[string]bool{}
+	for _, tok := range typeTableTokens(region) {
+		names[tok] = true
 	}
-	withIt := lits("STQ1_0", "Q1_0_G128", "Q1_0")
-	got, _, _, err = scanEncodingLiterals(bytes.NewReader(withIt), []string{"Q1_0", "STQ1_0", "Q2_0"}, 5, 0)
-	if err != nil || !reflect.DeepEqual(got, []string{"Q1_0", "STQ1_0"}) {
-		t.Fatalf("found %v err %v", got, err)
-	}
+	return names
 }
 
-// ggml spells type names in lower case; a catalog name matches either spelling,
-// and is reported as the caller wrote it.
-func TestScanEncodingLiteralsMatchesLowerCaseSpelling(t *testing.T) {
-	blob := lits("q8_0", "stq1_0")
-	got, _, _, err := scanEncodingLiterals(bytes.NewReader(blob), []string{"STQ1_0", "Q8_0", "q4_0"}, 5, 0)
-	if err != nil || !reflect.DeepEqual(got, []string{"Q8_0", "STQ1_0"}) {
-		t.Fatalf("found %v err %v", got, err)
-	}
-}
-
-// A literal is found wherever it falls against the read chunks.
-func TestScanEncodingLiteralsAcrossChunkBoundaries(t *testing.T) {
-	for chunk := 1; chunk <= 9; chunk++ {
-		for pad := 0; pad < 12; pad++ {
-			blob := append(bytes.Repeat([]byte("x"), pad), lits("Q8_0", "STQ1_0")...)
-			got, read, complete, err := scanEncodingLiterals(bytes.NewReader(blob), []string{"STQ1_0", "Q8_0"}, chunk, 0)
-			if err != nil || !reflect.DeepEqual(got, []string{"Q8_0", "STQ1_0"}) {
-				t.Fatalf("chunk %d pad %d: found %v err %v", chunk, pad, got, err)
-			}
-			if !complete || read > int64(len(blob)) {
-				t.Fatalf("chunk %d pad %d: complete=%v read=%d of %d", chunk, pad, complete, read, len(blob))
+func TestTypeTableIsFoundWhereverItFallsAgainstTheChunks(t *testing.T) {
+	for _, blob := range []string{mainlineTable, ikTable} {
+		for chunk := 1; chunk <= 70; chunk += 3 {
+			for pad := 0; pad < 40; pad += 7 {
+				names := tableOf(t, blob, chunk, pad)
+				if !names["q4_K"] || !names["bf16"] || !names["iq4_xs"] {
+					t.Fatalf("chunk %d pad %d: tokens %v", chunk, pad, names)
+				}
 			}
 		}
 	}
-	// Reads of one byte at a time behave the same.
-	got, _, _, err := scanEncodingLiterals(iotest.OneByteReader(bytes.NewReader(lits("STQ1_0"))), []string{"STQ1_0"}, 64, 0)
-	if err != nil || !reflect.DeepEqual(got, []string{"STQ1_0"}) {
-		t.Fatalf("one-byte reads: %v %v", got, err)
+	// A large first block: the table sits well past the first reads.
+	big := append(bytes.Repeat([]byte("abc\x00"), 5000), mainlineTable...)
+	if region, _, _, complete, err := scanTypeTable(bytes.NewReader(big), 1000, 0, nil); err != nil || !complete || region == nil {
+		t.Fatalf("big: %d %v %v", len(region), complete, err)
 	}
 }
 
-func TestScanEncodingLiteralsIsBounded(t *testing.T) {
-	blob := append(bytes.Repeat([]byte{'x'}, 1000), lits("STQ1_0")...)
-	got, read, complete, err := scanEncodingLiterals(bytes.NewReader(blob), []string{"STQ1_0"}, 64, 500)
-	if err != nil || complete || len(got) != 0 || read != 500 {
-		t.Fatalf("over the limit: found %v read %d complete %v err %v", got, read, complete, err)
+func TestClassifyAgainstTheRealTables(t *testing.T) {
+	asked := []string{"Q4_K", "IQ4_XS", "Q8_0", "F16", "BF16", "TQ1_0", "TQ2_0", "Q2_0", "Q1_0", "STQ1_0", "NO_SUCH_TYPE_XYZ", "q4_k", "mxfp4"}
+	cases := []struct {
+		label        string
+		blob         string
+		found        []string
+		undetermined map[string]string
+	}{
+		// f16, q2_0 and q1_0 exist only as tails of strings the linker kept.
+		{"mainline", mainlineTable,
+			[]string{"Q4_K", "IQ4_XS", "Q8_0", "BF16", "TQ1_0", "TQ2_0", "q4_k", "mxfp4"},
+			map[string]string{"F16": "bf16", "Q2_0": "tq2_0", "Q1_0": "tq1_0"}},
+		// ik: no tq types, no mxfp4 in this cut; q1_0_g128 is not a q1_0.
+		{"ik", ikTable,
+			[]string{"Q4_K", "IQ4_XS", "Q8_0", "BF16", "q4_k"},
+			map[string]string{"F16": "bf16"}},
 	}
-	// A reader that never makes progress ends in an error, not a hang.
-	_, _, complete, err = scanEncodingLiterals(zeroReader{}, []string{"STQ1_0"}, 64, 0)
-	if err == nil || complete {
+	for _, tc := range cases {
+		names := tableOf(t, tc.blob, 64, 3)
+		var tokens []string
+		for n := range names {
+			tokens = append(tokens, n)
+		}
+		sort.Strings(tokens)
+		found, undetermined := classifyTypeNames(asked, tokens, nil)
+		if !reflect.DeepEqual(found, tc.found) || !reflect.DeepEqual(undetermined, tc.undetermined) {
+			t.Errorf("%s: found %v undetermined %v\n want %v %v", tc.label, found, undetermined, tc.found, tc.undetermined)
+		}
+	}
+}
+
+func TestTypeTableNeedsBothPairs(t *testing.T) {
+	region, _, _, complete, err := scanTypeTable(bytes.NewReader([]byte(pairOnly)), 8, 0, nil)
+	if err != nil || !complete || region != nil {
+		t.Fatalf("one pair is no table: %d bytes complete %v err %v", len(region), complete, err)
+	}
+	// The second pair too far from the first.
+	far := "\x00q4_0\x00q4_1\x00" + strings.Repeat("padding\x00", 20) + "q8_0\x00q8_1\x00"
+	if region, _, _, _, _ := scanTypeTable(bytes.NewReader([]byte(far)), 8, 0, nil); region != nil {
+		t.Fatal("a second pair beyond the gap counted")
+	}
+	// The first occurrence is a decoy, the second a real table.
+	both := append([]byte(pairOnly), mainlineTable...)
+	if region, _, _, _, _ := scanTypeTable(bytes.NewReader(both), 16, 0, nil); region == nil {
+		t.Fatal("a decoy hid the table")
+	}
+}
+
+func TestScanTypeTableIsBounded(t *testing.T) {
+	blob := append(bytes.Repeat([]byte{'x'}, 1000), mainlineTable...)
+	region, _, read, complete, err := scanTypeTable(bytes.NewReader(blob), 64, 500, nil)
+	if err != nil || complete || region != nil || read != 500 {
+		t.Fatalf("over the limit: %d bytes, read %d, complete %v, err %v", len(region), read, complete, err)
+	}
+	if _, _, _, complete, err = scanTypeTable(zeroReader{}, 64, 0, nil); err == nil || complete {
 		t.Fatalf("stalled reader: complete=%v err=%v", complete, err)
 	}
-	// A failing reader reports what it found before failing.
-	got, _, complete, err = scanEncodingLiterals(io.MultiReader(bytes.NewReader(lits("Q8_0")), iotest.ErrReader(io.ErrClosedPipe)),
-		[]string{"Q8_0", "STQ1_0"}, 64, 0)
-	if err == nil || complete || !reflect.DeepEqual(got, []string{"Q8_0"}) {
-		t.Fatalf("failing reader: found %v complete %v err %v", got, complete, err)
+	_, _, _, complete, err = scanTypeTable(io.MultiReader(bytes.NewReader([]byte("abc")), iotest.ErrReader(io.ErrClosedPipe)), 64, 0, nil)
+	if err == nil || complete {
+		t.Fatalf("failing reader: complete=%v err=%v", complete, err)
+	}
+	if got, _, _, _, err := scanTypeTable(iotest.OneByteReader(bytes.NewReader([]byte(mainlineTable))), 64, 0, nil); err != nil || got == nil {
+		t.Fatalf("one-byte reads: %v", err)
 	}
 }
 
@@ -120,6 +177,9 @@ func (zeroReader) Read([]byte) (int, error) { return 0, nil }
 
 func writeEncodingFixture(t *testing.T, dir, name string, data []byte) string {
 	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		t.Fatal(err)
@@ -127,113 +187,243 @@ func writeEncodingFixture(t *testing.T, dir, name string, data []byte) string {
 	return p
 }
 
-func TestProbeBackendEncodingsReadsTheGgmlLibraryBesideTheBinary(t *testing.T) {
+var probeNames = []string{"Q4_K", "F16", "Q2_0", "STQ1_0", "NO_SUCH_TYPE_XYZ"}
+
+func TestProbeReadsTheTableBesideTheBinary(t *testing.T) {
 	dir := t.TempDir()
-	bin := writeEncodingFixture(t, dir, "llama-server", lits("hy_v4", "/build/Q1_0/x"))
-	writeEncodingFixture(t, dir, "libggml-base.so.0", lits("q8_0", "STQ1_0", "Q1_0_G128"))
-	writeEncodingFixture(t, dir, "ggml-cuda.dll", lits("Q4_0_CUDA"))
-	writeEncodingFixture(t, dir, "notes.txt", lits("ZZZ_9")) // not a library: never read
-	names := []string{"STQ1_0", "Q1_0", "ZZZ_9"}
-
-	got := ProbeBackendEncodings(bin, "", names)
-	if want := map[string]string{"STQ1_0": "libggml-base.so.0"}; !reflect.DeepEqual(got.Found, want) {
-		t.Fatalf("found %v, want %v", got.Found, want)
+	bin := writeEncodingFixture(t, dir, "llama-server", lits("hy_v4", "/build/q4_K/x"))
+	writeEncodingFixture(t, dir, "libllama.so", lits("q4_K", "f16")) // an unrelated table: never evidence
+	writeEncodingFixture(t, dir, "libggml-base.so.0", []byte(mainlineTable))
+	writeEncodingFixture(t, dir, "notes.txt", []byte(mainlineTable))
+	got := ProbeBackendEncodings(bin, "", probeNames)
+	if !got.TableSeen || !got.Complete {
+		t.Fatalf("table not seen: %+v", got)
 	}
-	if !got.Complete {
-		t.Fatal("every file was read in full, so absence is evidence")
+	if !reflect.DeepEqual(got.Found, map[string]string{"Q4_K": "libggml-base.so.0"}) ||
+		!reflect.DeepEqual(got.Undetermined, map[string]string{"F16": "bf16", "Q2_0": "tq2_0"}) {
+		t.Fatalf("found %v undetermined %v", got.Found, got.Undetermined)
 	}
-
-	// The binary itself counts (a static build), and help text counts. Its type
-	// table is shown to be there by the canary literal every table carries.
-	static := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("f16", "STQ1_0", "Q1_0"))
-	got = ProbeBackendEncodings(static, "allowed: q8_0", []string{"Q8_0", "STQ1_0", "Q1_0", "ZZZ_9"})
-	want := map[string]string{"Q8_0": "help", "STQ1_0": "llama-server", "Q1_0": "llama-server"}
-	if !reflect.DeepEqual(got.Found, want) || !got.Complete {
-		t.Fatalf("static build: %+v, want %v", got, want)
-	}
-}
-
-// A binary read in full is no proof of absence when the type table was not
-// among the files read (a system install: libraries not located), unless the
-// canary literal shows it was; a ggml library read in full is enough. A name
-// spelled in lower case in the table is found.
-func TestProbeBackendEncodingsCompleteNeedsTheTypeTable(t *testing.T) {
-	noTable := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("hy_v4", "q8_0"))
-	got := ProbeBackendEncodings(noTable, "", []string{"STQ1_0"})
-	if len(got.Found) != 0 || got.Complete {
-		t.Fatalf("no ggml library and no canary: %+v", got)
-	}
-	withCanary := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("hy_v4", "f16"))
-	got = ProbeBackendEncodings(withCanary, "", []string{"STQ1_0"})
-	if len(got.Found) != 0 || !got.Complete {
-		t.Fatalf("canary present, name absent: %+v", got)
-	}
-	dir := t.TempDir()
-	bin := writeEncodingFixture(t, dir, "llama-server", lits("hy_v4"))
-	writeEncodingFixture(t, dir, "libggml-base.so", lits("q8_0", "stq1_0"))
-	got = ProbeBackendEncodings(bin, "", []string{"STQ1_0", "ZZZ_9"})
-	if !reflect.DeepEqual(got.Found, map[string]string{"STQ1_0": "libggml-base.so"}) || !got.Complete {
-		t.Fatalf("lower-case spelling in a ggml library: %+v", got)
-	}
-	// A ggml library that could not be read in full leaves it open.
-	dir = t.TempDir()
-	bin = writeEncodingFixture(t, dir, "llama-server", lits("hy_v4"))
-	lib := writeEncodingFixture(t, dir, "libggml-base.so", lits("q8_0"))
-	if err := os.Chmod(lib, 0); err == nil {
-		if f, openErr := os.Open(lib); openErr != nil { // not readable (not root, not Windows)
-			got = ProbeBackendEncodings(bin, "", []string{"STQ1_0"})
-			if got.Complete {
-				t.Fatalf("unreadable ggml library: %+v", got)
-			}
-		} else {
-			f.Close()
+	for name, want := range map[string]bool{"STQ1_0": true, "NO_SUCH_TYPE_XYZ": true, "Q4_K": false, "F16": false, "Q2_0": false} {
+		if got.Absent(name) != want {
+			t.Errorf("Absent(%q) = %v, want %v", name, got.Absent(name), want)
 		}
 	}
 }
 
-// Once the byte budget is spent no further file is read, and absence proves
-// nothing: a literal in a file past the budget is not found.
-func TestProbeBackendEncodingsStopsAtTheByteBudget(t *testing.T) {
+// A static build keeps the table in the binary itself.
+func TestProbeReadsTheTableInTheBinary(t *testing.T) {
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", append([]byte("ELFish\x00"), ikTable...))
+	got := ProbeBackendEncodings(bin, "allowed: f16", []string{"Q8_0", "F16", "TQ1_0"})
+	if !got.Complete || got.Found["Q8_0"] != "llama-server" || got.Found["F16"] != "help" || !got.Absent("TQ1_0") {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// Without a table nothing is known: a table-less binary, one pair only, no
+// libraries located, no build given, a missing file.
+func TestProbeWithoutTheTableProvesNothing(t *testing.T) {
+	for label, bin := range map[string]string{
+		"table-less":  writeEncodingFixture(t, t.TempDir(), "llama-server", lits("hy_v4", "q8_0", "f16")),
+		"one pair":    writeEncodingFixture(t, t.TempDir(), "llama-server", []byte(pairOnly)),
+		"missing":     filepath.Join(t.TempDir(), "missing"),
+		"empty named": "",
+	} {
+		got := ProbeBackendEncodings(bin, "", []string{"STQ1_0", "Q8_0"})
+		if got.Complete || got.TableSeen || len(got.Found) != 0 || len(got.Undetermined) != 0 || got.Absent("STQ1_0") {
+			t.Errorf("%s: %+v", label, got)
+		}
+	}
+	// Help alone is partial evidence: a hit is found, the rest stays open.
+	got := ProbeBackendEncodings("", "allowed: f16", []string{"F16", "STQ1_0"})
+	if !reflect.DeepEqual(got.Found, map[string]string{"F16": "help"}) || got.Complete || got.Absent("STQ1_0") {
+		t.Fatalf("help only: %+v", got)
+	}
+	if got = ProbeBackendEncodings("", "", nil); !got.Complete {
+		t.Fatalf("no names: %+v", got)
+	}
+	if got = ProbeBackendEncodings("", "q8_0", []string{"Q8_0"}); !got.Complete || got.Found["Q8_0"] != "help" {
+		t.Fatalf("all in help: %+v", got)
+	}
+}
+
+// The libraries of a build tree sit outside the binary's directory; its RUNPATH
+// says where. Directories are confined to the build tree.
+func TestProbeFollowsRunpathInsideTheBuildTree(t *testing.T) {
+	base := t.TempDir()
+	bin := writeEncodingFixture(t, filepath.Join(base, "build", "bin"), "llama-server", lits("hy_v4"))
+	writeEncodingFixture(t, filepath.Join(base, "build", "ggml", "src"), "libggml.so", []byte(ikTable))
+	writeEncodingFixture(t, filepath.Join(base, "outside"), "libggml.so", []byte(mainlineTable))
+	old := runpathEntries
+	defer func() { runpathEntries = old }()
+
+	runpathEntries = func(string) []string { return []string{"$ORIGIN/../ggml/src:$ORIGIN/../../outside:"} }
+	got := ProbeBackendEncodings(bin, "", []string{"Q4_K", "TQ1_0"})
+	if !got.TableSeen || got.Found["Q4_K"] != "libggml.so" || !got.Absent("TQ1_0") {
+		t.Fatalf("runpath inside the tree: %+v", got)
+	}
+
+	// Only the outside directory is named: it is not read.
+	runpathEntries = func(string) []string { return []string{"${ORIGIN}/../../outside"} }
+	got = ProbeBackendEncodings(bin, "", []string{"Q4_K"})
+	if got.TableSeen || got.Complete || len(got.Found) != 0 {
+		t.Fatalf("a directory outside the build tree was read: %+v", got)
+	}
+
+	// No runpath: the libraries are not located.
+	runpathEntries = func(string) []string { return nil }
+	if got = ProbeBackendEncodings(bin, "", []string{"Q4_K"}); got.Complete || got.TableSeen {
+		t.Fatalf("no runpath: %+v", got)
+	}
+}
+
+func TestProbeSkipsSymlinksLeavingTheBuildTree(t *testing.T) {
+	base := t.TempDir()
+	target := writeEncodingFixture(t, filepath.Join(base, "outside"), "real.so", []byte(mainlineTable))
+	bin := writeEncodingFixture(t, filepath.Join(base, "build", "bin"), "llama-server", lits("hy_v4"))
+	if err := os.Symlink(target, filepath.Join(base, "build", "bin", "libggml-evil.so")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	got := ProbeBackendEncodings(bin, "", []string{"Q4_K"})
+	if got.TableSeen || len(got.Found) != 0 {
+		t.Fatalf("followed a symlink out of the tree: %+v", got)
+	}
+	// A symlink to a file inside the tree is the same file, read once.
+	writeEncodingFixture(t, filepath.Join(base, "build", "bin"), "libggml-base.so.0.1", []byte(mainlineTable))
+	if err := os.Symlink("libggml-base.so.0.1", filepath.Join(base, "build", "bin", "libggml-base.so")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	files := encodingProbeFiles(bin)
+	n := 0
+	for _, f := range files {
+		if filepath.Base(f) == "libggml-base.so.0.1" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("libggml-base listed %d times: %v", n, files)
+	}
+}
+
+func TestExpandRunpath(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "build", "bin")
+	got := expandRunpath(origin, []string{"$ORIGIN/../src:${ORIGIN}:relative/dir::  ", "/abs/lib"})
+	want := []string{filepath.Join(filepath.Dir(origin), "src"), origin}
+	if abs := "/abs/lib"; filepath.IsAbs(abs) {
+		want = append(want, filepath.Clean(abs))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	root := filepath.Dir(origin)
+	for path, ok := range map[string]bool{root: true, origin: true, filepath.Dir(root): false, filepath.Join(root, "..", "x"): false} {
+		if within(root, path) != ok {
+			t.Errorf("within(%q, %q) = %v", root, path, !ok)
+		}
+	}
+}
+
+// The byte budget bounds the whole probe: no file is read once it is spent.
+func TestProbeStopsAtTheByteBudget(t *testing.T) {
 	dir := t.TempDir()
 	filler := bytes.Repeat([]byte{'x'}, 60)
 	bin := writeEncodingFixture(t, dir, "llama-server", filler)
 	writeEncodingFixture(t, dir, "libggml-a.so", filler)
 	writeEncodingFixture(t, dir, "libggml-b.so", filler)
-	writeEncodingFixture(t, dir, "libggml-c.so", lits("STQ1_0"))
+	writeEncodingFixture(t, dir, "libggml-c.so", []byte(mainlineTable))
 	// 150 bytes: the binary takes 60, libggml-a 60, libggml-b gets 30, libggml-c nothing.
-	got := probeBackendEncodings(bin, "", []string{"STQ1_0"}, 100, 150, 48)
-	if len(got.Found) != 0 || got.Complete {
+	got := probeBackendEncodings(bin, "", []string{"Q4_K"}, 100, 150, 48)
+	if got.TableSeen || got.Complete || len(got.Found) != 0 {
 		t.Fatalf("budget spent: %+v", got)
 	}
-	// With room for everything the literal is found.
-	got = probeBackendEncodings(bin, "", []string{"STQ1_0"}, 100, 1000, 48)
-	if got.Found["STQ1_0"] != "libggml-c.so" || !got.Complete {
+	got = probeBackendEncodings(bin, "", []string{"Q4_K"}, 100000, 1<<20, 48)
+	if got.Found["Q4_K"] != "libggml-c.so" || !got.Complete {
 		t.Fatalf("budget not spent: %+v", got)
 	}
-	// A cap on the file count leaves it open as well.
-	got = probeBackendEncodings(bin, "", []string{"ZZZ_9"}, 100, 1000, 2)
-	if got.Complete {
+	// A cap on the file count keeps libggml-c out of reach.
+	got = probeBackendEncodings(bin, "", []string{"Q4_K"}, 100000, 1<<20, 2)
+	if got.Complete || got.TableSeen {
 		t.Fatalf("file cap: %+v", got)
 	}
 }
 
-func TestProbeBackendEncodingsSaysWhenAbsenceProvesNothing(t *testing.T) {
-	// No build given: only the help text speaks, and it is partial evidence.
-	got := ProbeBackendEncodings("", "allowed: f16", []string{"F16", "STQ1_0"})
-	if !reflect.DeepEqual(got.Found, map[string]string{"F16": "help"}) || got.Complete {
-		t.Fatalf("help only: %+v", got)
+// ikScalarNames: the ik build's library keeps the short literals "i8", "i16",
+// "i32", "f32", "i64" and "f64" in a string table of the gguf value types, 2.3 kB
+// before the type-name anchor, and the type table points at those copies. Cut
+// from the ik build's library (op names shortened).
+const ikScalarNames = "\x00GEGLU_ERF\x00GEGLU_QUICK\x00u8\x00i8\x00u16\x00i16\x00u32\x00i32\x00f32\x00bool\x00arr\x00u64\x00i64\x00f64\x00ABS\x00SGN\x00NEG\x00"
+
+// ikLibrary is that layout: the scalar names, 2.3 kB of other strings, the table.
+func ikLibrary() []byte {
+	return append(append([]byte(ikScalarNames), bytes.Repeat([]byte("ADD\x00"), 575)...), ikTable...)
+}
+
+// A name the table region lacks but the file carries as a NUL-terminated string
+// is undetermined, never absent.
+func TestProbeNamesOutsideTheTableRegionAreUndetermined(t *testing.T) {
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", ikLibrary())
+	scalars := []string{"F32", "F64", "I8", "I16", "I32", "I64"}
+	names := append([]string{"Q4_K", "TQ1_0", "NO_SUCH_TYPE_XYZ"}, scalars...)
+	got := ProbeBackendEncodings(bin, "", names)
+	if !got.TableSeen || !got.Complete {
+		t.Fatalf("%+v", got)
 	}
-	// An unreadable binary is not an answer either.
-	got = ProbeBackendEncodings(filepath.Join(t.TempDir(), "missing"), "", []string{"STQ1_0"})
-	if len(got.Found) != 0 || got.Complete {
-		t.Fatalf("missing binary: %+v", got)
+	for _, n := range scalars {
+		if got.Undetermined[n] != outsideTable || got.Absent(n) {
+			t.Errorf("%s: undetermined %q absent %v", n, got.Undetermined[n], got.Absent(n))
+		}
 	}
-	// Nothing asked, nothing to prove.
-	if got = ProbeBackendEncodings("", "", nil); !got.Complete || len(got.Found) != 0 {
-		t.Fatalf("no names: %+v", got)
+	if got.Found["Q4_K"] == "" || !got.Absent("TQ1_0") || !got.Absent("NO_SUCH_TYPE_XYZ") {
+		t.Fatalf("found %v undetermined %v", got.Found, got.Undetermined)
 	}
-	// Everything found in the help text needs no file at all.
-	if got = ProbeBackendEncodings("", "q8_0", []string{"Q8_0"}); !got.Complete || got.Found["Q8_0"] != "help" {
-		t.Fatalf("all in help: %+v", got)
+}
+
+// Property: no name present as "name\0" anywhere in the scanned bytes, in any
+// case and with any left boundary, comes back absent; whole table strings come
+// back found.
+func TestProbeNeverReportsAnAbsentNameThatTheFileCarries(t *testing.T) {
+	blob := append(ikLibrary(), mainlineTable...)
+	blob = append(blob, "\x00Some_MIXED_Case\x00ggml_f16\x00"...)
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", blob)
+	seen := map[string]bool{}
+	var names []string
+	for _, str := range bytes.Split(blob, []byte{0}) {
+		for i := 0; i < len(str); i++ {
+			tail := str[i:]
+			ok := len(tail) >= 2 && len(tail) <= 32
+			for _, c := range tail {
+				ok = ok && encodingWordByte(c)
+			}
+			if ok && !seen[string(tail)] {
+				seen[string(tail)] = true
+				names = append(names, string(tail), strings.ToUpper(string(tail)))
+			}
+		}
+	}
+	got := ProbeBackendEncodings(bin, "", names)
+	if !got.Complete {
+		t.Fatalf("%+v", got)
+	}
+	for _, n := range names {
+		if got.Absent(n) {
+			t.Errorf("%q occurs in the file as a NUL-terminated string but is reported absent", n)
+		}
+	}
+}
+
+// When a read bound cuts the file holding the table short, names found stay
+// found but nothing is proven absent: Complete is false.
+func TestProbeFileCutShortIsNotComplete(t *testing.T) {
+	blob := append(append([]byte(mainlineTable), bytes.Repeat([]byte{'x'}, 8000)...), "\x00q1_0\x00"...)
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", blob)
+	got := probeBackendEncodings(bin, "", []string{"Q4_K", "STQ1_0"}, int64(len(mainlineTable)+4500), 1<<20, 48)
+	if !got.TableSeen || got.Complete || got.Absent("STQ1_0") {
+		t.Fatalf("cut short: %+v", got)
+	}
+	if got.Found["Q4_K"] != "llama-server" {
+		t.Fatalf("a name in the table region is still found: %+v", got)
+	}
+	got = probeBackendEncodings(bin, "", []string{"Q4_K", "STQ1_0"}, 1<<20, 1<<20, 48)
+	if !got.Complete || !got.Absent("STQ1_0") {
+		t.Fatalf("read in full: %+v", got)
 	}
 }
