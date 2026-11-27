@@ -80,18 +80,19 @@ type Support struct {
 // TUI.
 func (s Support) Note() string { return s.Reason }
 
-// Short is the list-row wording of the state ("" for ready and unknown, which
-// a list row does not flag).
+// Short is the list-row wording of the state, at most 26 columns so a list
+// row keeps its other badges at 80 columns ("" for ready and unknown, which a
+// list row does not flag).
 func (s Support) Short() string {
 	switch s.State {
 	case SupportInstall:
-		return "no installed backend loads it; first launch offers a build"
+		return "backend build offered"
 	case SupportUnsupported:
-		return "no backend here loads it"
+		return "not in installed backends"
 	case SupportNoEncoding:
-		return "needs a tensor encoding no installed backend has"
+		return "needs a missing encoding"
 	case SupportUnknownArch:
-		return "architecture unknown to ggrun"
+		return "unknown architecture"
 	}
 	return ""
 }
@@ -102,6 +103,20 @@ func (s Support) Short() string {
 func ResolveSupport(in SupportInput) Support { return loadedCatalog.resolveSupport(in) }
 
 const buildMinutes = "about 20-40 min"
+
+// launchLooks is what a first launch still does for an architecture no
+// installed backend lists and no reviewed route builds (unsupportedArchRoutes):
+// search open llama.cpp pull requests for a fork and offer a mainline update.
+const launchLooks = "a launch will still look for a mainline update or an open llama.cpp pull request that adds it"
+
+// named renders an installed backend's name for a sentence ("" when unnamed;
+// a name is a registered tag or a family, never a filesystem path).
+func named(name string) string {
+	if name == "" {
+		return "an installed backend"
+	}
+	return "installed backend " + name
+}
 
 func (c *parsedCatalog) resolveSupport(in SupportInput) Support {
 	arch := strings.ToLower(strings.TrimSpace(in.Arch))
@@ -129,16 +144,23 @@ func (c *parsedCatalog) resolveSupport(in SupportInput) Support {
 	switch {
 	case len(loaders) > 0 && len(req.Unchecked) > 0:
 		s.State = SupportUnknown
-		s.Reason = fmt.Sprintf("installed backend %s loads %s, but the catalog entries %s need tensor encodings and this file's are not known yet; download the file or run a launch to check",
-			loaders[0].Name, arch, strings.Join(req.Unchecked, ", "))
+		s.Reason = fmt.Sprintf("%s registers %s, but the catalog entries %s depend on tensor encodings and this file's tensor types are not known (not downloaded yet, or read by an older header parser)",
+			named(loaders[0].Name), arch, strings.Join(req.Unchecked, ", "))
 		return s
 	case len(loaders) > 0:
 		s.State, s.Backend = SupportReady, loaders[0].Name
-		s.Reason = fmt.Sprintf("loads with installed backend %s", loaders[0].Name)
+		if req.Family != "" {
+			// The arch literal is all that is known; which family the build
+			// is, the resolver cannot tell yet.
+			s.Reason = fmt.Sprintf("%s lists %s; the catalog requires the %s backend family for it, and the installed build's family was not checked",
+				named(loaders[0].Name), arch, req.Family)
+		} else {
+			s.Reason = fmt.Sprintf("%s registers %s", named(loaders[0].Name), arch)
+		}
 		return s
 	case len(in.Installed) == 0:
 		s.State = SupportUnknown
-		s.Reason = "no installed backend was found, so loading " + arch + " cannot be checked; run `ggrun backend recipes` or reinstall ggrun"
+		s.Reason = "no llama-server backend was found, so loading " + arch + " cannot be checked (`ggrun backend list` shows the registered ones)"
 		return s
 	case !allProbed:
 		s.State = SupportUnknown
@@ -151,16 +173,18 @@ func (c *parsedCatalog) resolveSupport(in SupportInput) Support {
 		if command != "" {
 			s.Install += " (or run `" + command + "`)"
 		}
-		s.Reason = "no installed backend loads " + arch + "; " + s.Install
+		s.Reason = "the installed backends do not list " + arch + "; " + s.Install
 		return s
 	}
 	s.State = SupportUnsupported
-	s.Reason = "no installed backend loads " + arch + " and no supported route builds one here"
-	if why := c.noRouteDetail(arch, req.Family, in); why != "" {
-		s.Reason += "; " + why
-	} else if !c.knowsArch(arch) && !in.MainlineKnown {
+	switch why := c.noRouteDetail(arch, req.Family, in); {
+	case why != "":
+		s.Reason = "the installed backends do not list " + arch + "; " + why + "; " + launchLooks
+	case !c.knowsArch(arch) && !in.MainlineKnown:
 		s.State = SupportUnknownArch
-		s.Reason = "no installed backend loads " + arch + ", and neither the backend catalog nor the model catalog knows this architecture; install a backend that registers it (`ggrun backend install <recipe>`, see `ggrun backend recipes`)"
+		s.Reason = "the installed backends do not list " + arch + " and no ggrun catalog has an entry for it; " + launchLooks
+	default:
+		s.Reason = "the installed backends do not list " + arch + ", and no reviewed recipe or current llama.cpp build covers it; " + launchLooks
 	}
 	return s
 }
@@ -173,7 +197,7 @@ func (c *parsedCatalog) resolveEncodings(s Support, arch string, rec Recipe, in 
 	for _, b := range loaders {
 		if strings.EqualFold(b.Name, rec.Tag) {
 			s.State, s.Backend = SupportReady, b.Name
-			s.Reason = fmt.Sprintf("loads with installed backend %s, the catalog entry for the tensor encodings %s", b.Name, list)
+			s.Reason = fmt.Sprintf("%s is the catalog entry for the tensor encodings %s and registers %s", named(b.Name), list, arch)
 			return s
 		}
 	}
@@ -194,7 +218,7 @@ func (c *parsedCatalog) resolveEncodings(s Support, arch string, rec Recipe, in 
 		}
 		if has {
 			s.State, s.Backend = SupportReady, b.Name
-			s.Reason = fmt.Sprintf("loads with installed backend %s, which carries the tensor encodings %s", b.Name, list)
+			s.Reason = fmt.Sprintf("%s registers %s and carries the tensor encodings %s", named(b.Name), arch, list)
 			return s
 		}
 		if !lacks {

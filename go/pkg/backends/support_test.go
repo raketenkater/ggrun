@@ -38,9 +38,11 @@ func TestResolveSupportTable(t *testing.T) {
 		reason  string
 	}{
 		{"no architecture", SupportInput{Installed: []InstalledBackend{loads}}, SupportUnknown, "", "architecture is not known"},
-		{"no installed backend", SupportInput{Arch: "llama"}, SupportUnknown, "", "no installed backend was found"},
+		{"no installed backend", SupportInput{Arch: "llama"}, SupportUnknown, "", "no llama-server backend was found"},
 		{"unreadable backend", SupportInput{Arch: "llama", Installed: []InstalledBackend{lacks, unread}}, SupportUnknown, "", "could not be read"},
-		{"arch unknown to catalog but loaded", SupportInput{Arch: "llama", Installed: []InstalledBackend{lacks, loads}}, SupportReady, "main", "loads with installed backend main"},
+		{"arch unknown to catalog but loaded", SupportInput{Arch: "llama", Installed: []InstalledBackend{lacks, loads}}, SupportReady, "main", "installed backend main registers llama"},
+		{"unnamed backend is never a path", SupportInput{Arch: "llama", Installed: []InstalledBackend{{Path: "/b/x", LoadsArch: true, Probed: true}}}, SupportReady, "", "an installed backend registers llama"},
+		{"family rule: ready, family not claimed", SupportInput{Arch: "minimax-m9", Installed: []InstalledBackend{loads}}, SupportReady, "main", "requires the ik_llama backend family for it, and the installed build's family was not checked"},
 		{"unreadable does not hide a loader", SupportInput{Arch: "llama", Installed: []InstalledBackend{unread, loads}}, SupportReady, "main", ""},
 		{"mainline registers: build", SupportInput{Arch: "llama", Installed: []InstalledBackend{lacks}, MainlineRegisters: true, MainlineKnown: true}, SupportInstall, "", "build current llama.cpp"},
 		{"mainline registers, build blocked", SupportInput{Arch: "llama", Installed: []InstalledBackend{lacks}, MainlineRegisters: true, MainlineKnown: true, BuildBlocked: blocked}, SupportUnsupported, "", blocked},
@@ -48,11 +50,11 @@ func TestResolveSupportTable(t *testing.T) {
 		{"recipe route blocked", SupportInput{Arch: "forky", Installed: []InstalledBackend{lacks}, BuildBlocked: blocked}, SupportUnsupported, "", "fork-arch recipe needs a source build, but " + blocked},
 		{"helper recipe: accelerated build, no install command", SupportInput{Arch: "helped", Installed: []InstalledBackend{lacks}}, SupportInstall, "", "accelerated backend from the reviewed helper-src"},
 		{"family rule blocks a mainline build", SupportInput{Arch: "minimax-m9", Installed: []InstalledBackend{lacks}, MainlineRegisters: true, MainlineKnown: true}, SupportUnsupported, "", "ik_llama backend family"},
-		{"stamped not-mainline arch, no route", SupportInput{Arch: "inkling", Installed: []InstalledBackend{lacks}, MainlineKnown: true}, SupportUnsupported, "", "no supported route builds one here"},
-		{"arch unknown everywhere", SupportInput{Arch: "neverheard", Installed: []InstalledBackend{lacks}}, SupportUnknownArch, "", "neither the backend catalog nor the model catalog knows"},
+		{"stamped not-mainline arch, no route", SupportInput{Arch: "inkling", Installed: []InstalledBackend{lacks}, MainlineKnown: true}, SupportUnsupported, "", "no reviewed recipe or current llama.cpp build covers it; a launch will still look"},
+		{"arch unknown everywhere", SupportInput{Arch: "neverheard", Installed: []InstalledBackend{lacks}}, SupportUnknownArch, "", "no ggrun catalog has an entry for it; a launch will still look for a mainline update"},
 
 		// Tensor encodings.
-		{"encoding entry, types unknown, loader: cannot tell", SupportInput{Arch: "hy_v4", Installed: []InstalledBackend{loads}}, SupportUnknown, "", "needs-stq need tensor encodings"},
+		{"encoding entry, types unknown, loader: cannot tell", SupportInput{Arch: "hy_v4", Installed: []InstalledBackend{loads}}, SupportUnknown, "", "needs-stq depend on tensor encodings"},
 		{"types known, encoding not used: ready", SupportInput{Arch: "hy_v4", Types: plainTypes, Installed: []InstalledBackend{loads}}, SupportReady, "main", ""},
 		{"encoding used, no probe cached: cannot tell", SupportInput{Arch: "hy_v4", Types: stq, Installed: []InstalledBackend{loads}}, SupportUnknown, "", "ggrun backend install needs-stq"},
 		{"encoding used, cached probe finds it", SupportInput{Arch: "hy_v4", Types: stq, Installed: []InstalledBackend{withProbe(loads, true)}}, SupportReady, "main", "carries the tensor encodings STQ1_0"},
@@ -69,6 +71,12 @@ func TestResolveSupportTable(t *testing.T) {
 		}
 		if got.Note() != got.Reason {
 			t.Errorf("%s: Note is not the reason", tc.name)
+		}
+		if strings.Contains(got.Reason, "/b/") || strings.Contains(got.Reason, "<recipe>") {
+			t.Errorf("%s: reason carries a path or a placeholder: %q", tc.name, got.Reason)
+		}
+		if len(got.Short()) > 26 {
+			t.Errorf("%s: Short %q is wider than 26 columns", tc.name, got.Short())
 		}
 		if (got.State == SupportReady || got.State == SupportUnknown) != (got.Short() == "") {
 			t.Errorf("%s: Short %q does not match state %s", tc.name, got.Short(), got.State)

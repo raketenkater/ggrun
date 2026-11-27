@@ -172,21 +172,51 @@ func defaultLaunchUsesVulkan(candidates []autoBackendCandidate, arch string, moe
 	return chosen != nil && strings.EqualFold(chosen.Dialect, "vulkan")
 }
 
-// installedBackendsFor answers the arch probe for every installed backend path,
-// named by its registered tag where it has one. It reads only the arch probe
-// (cached on disk by file identity); it never runs a backend or starts an
-// encoding probe, so every Encodings is nil until such a cache exists.
-func installedBackendsFor(paths []string, arch string, probe backendArchProbe, tags map[string]string) []backends.InstalledBackend {
+// installedBackendsFor answers the arch probe for the installed backend paths,
+// in order, named by their registered tag or detected name (never a path;
+// "" when neither exists). It reads only the arch probe (file reads cached on
+// disk by file identity); it never starts a process or an encoding probe, so
+// every Encodings is nil until such a cache exists. With stopAtLoader it stops
+// at the first backend that registers arch, as archLoadedBy does: that one
+// already settles the state when no catalog encoding entry needs every loader.
+func installedBackendsFor(paths []string, arch string, probe backendArchProbe, names map[string]string, stopAtLoader bool) []backends.InstalledBackend {
 	out := make([]backends.InstalledBackend, 0, len(paths))
 	for _, path := range paths {
-		name := tags[path]
-		if name == "" {
-			name = path
-		}
 		loads, probed := probe(path, arch)
-		out = append(out, backends.InstalledBackend{Name: name, Path: path, LoadsArch: loads, Probed: probed})
+		out = append(out, backends.InstalledBackend{Name: names[path], Path: path, LoadsArch: loads, Probed: probed})
+		if stopAtLoader && loads && probed {
+			break
+		}
 	}
 	return out
+}
+
+// backendNames maps installed backend paths to a display name: the registered
+// tag, else the name detection gave the binary.
+func backendNames(caps *detect.Capabilities) map[string]string {
+	names := map[string]string{}
+	if caps != nil {
+		for _, b := range caps.Backends {
+			if n := strings.TrimSpace(b.Name); n != "" && !strings.ContainsAny(n, `/\`) {
+				names[strings.TrimSpace(b.Path)] = n
+			}
+		}
+	}
+	for _, b := range backends.Load() {
+		names[strings.TrimSpace(b.Path)] = b.Tag
+	}
+	return names
+}
+
+// rowSupportInput is the resolver input for a recommendation row.
+func rowSupportInput(r recommend.Recommendation, installed []backends.InstalledBackend, blocked string) backends.SupportInput {
+	return backends.SupportInput{
+		Arch:              r.Arch,
+		Installed:         installed,
+		MainlineRegisters: r.MainlineRegisters(),
+		MainlineKnown:     r.RunnableMainline != nil || r.Runnable != nil,
+		BuildBlocked:      blocked,
+	}
 }
 
 // buildBlockedReason says why the first launch cannot start a source build,
@@ -195,7 +225,7 @@ func installedBackendsFor(paths []string, arch string, probe backendArchProbe, t
 func buildBlockedReason(goos string, pinned, tools, nvidiaHost bool, accel string) string {
 	switch {
 	case pinned:
-		return "a backend is pinned in the config, which turns the build offers off"
+		return "a backend is pinned in the config (set backend to auto to get the build offers back)"
 	case goos == "windows":
 		return "source builds are not available on Windows"
 	case !tools:
@@ -208,7 +238,10 @@ func buildBlockedReason(goos string, pinned, tools, nvidiaHost bool, accel strin
 
 // enableSharedBackendSupport installs backends.ResolveSupport as the one answer
 // for recommendation rows and the TUI model list. Both hooks are read only by
-// recommend.TopCategories and the TUI list; no launch path reads them.
+// recommend.TopCategories and the TUI list; no launch path reads them. Answers
+// are memoized per architecture for the process (one cmdGUI pass); what they
+// read is files only (backends.json, the arch-token cache and the backend
+// files it has not seen, the model catalog JSON), no process is started.
 func enableSharedBackendSupport(pinned, tools bool, accel string) {
 	var mu sync.Mutex
 	installed := map[string][]backends.InstalledBackend{}
@@ -220,11 +253,9 @@ func enableSharedBackendSupport(pinned, tools bool, accel string) {
 		if got, ok := installed[arch]; ok {
 			return got
 		}
-		tags := map[string]string{}
-		for _, b := range backends.Load() {
-			tags[strings.TrimSpace(b.Path)] = b.Tag
-		}
-		got := installedBackendsFor(installedBackendPaths(caps), arch, backends.BackendSupportsArch, tags)
+		req := backends.ResolveRequirement(arch, nil)
+		stop := req.Recipe == nil && len(req.Unchecked) == 0
+		got := installedBackendsFor(installedBackendPaths(caps), arch, backends.BackendSupportsArch, backendNames(caps), stop)
 		installed[arch] = got
 		return got
 	}
@@ -233,13 +264,7 @@ func enableSharedBackendSupport(pinned, tools bool, accel string) {
 	}
 	localTypes := localRowTypes()
 	recommend.SetBackendSupport(func(caps *detect.Capabilities, r recommend.Recommendation) backends.Support {
-		in := backends.SupportInput{
-			Arch:              r.Arch,
-			Installed:         installedFor(caps, r.Arch),
-			MainlineRegisters: r.MainlineRegisters(),
-			MainlineKnown:     r.RunnableMainline != nil || r.Runnable != nil,
-			BuildBlocked:      blocked(caps),
-		}
+		in := rowSupportInput(r, installedFor(caps, r.Arch), blocked(caps))
 		// A remote row's types are unknown. Read a downloaded copy's only
 		// when the catalog has an encoding entry for the architecture.
 		if len(backends.ResolveRequirement(r.Arch, nil).Unchecked) > 0 {

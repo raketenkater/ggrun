@@ -247,6 +247,30 @@ func SetBackendSupport(fn func(caps *detect.Capabilities, arch string, types []g
 	backendSupport = fn
 }
 
+// truncateCols cuts s to at most width columns (runes), marking a cut with
+// "…"; width <= 0 means 80 columns minus margin, as wordWrap assumes.
+func truncateCols(s string, width int) string {
+	if width <= 0 {
+		width = 78
+	}
+	r := []rune(s)
+	if len(r) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(r[:width-1]) + "…"
+}
+
+// screenWidth is the terminal width, or 80 before the first size message.
+func (m Model) screenWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return 80
+}
+
 // supportListNote is the list-row wording of a model's backend support: only
 // for a model with no installed route and no recipe offer, whose own wording
 // already says which backend it uses.
@@ -423,8 +447,6 @@ func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 		desc += " · backend " + m.AutoBackend
 	} else if m.BackendRecipe != "" {
 		desc += " · backend " + m.BackendRecipe
-	} else if note := supportListNote(m); note != "" {
-		desc += " · " + note
 	}
 	// The fits estimate is the single most useful datapoint for dense models.
 	if m.FitCtx > 0 {
@@ -435,6 +457,11 @@ func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 		if !usage.LastUsedAt.IsZero() {
 			desc += " " + timeAgo(usage.LastUsedAt)
 		}
+	}
+	// After the fits and usage badges, so those stay visible at 80 columns;
+	// Short is at most 26 columns.
+	if note := supportListNote(m); note != "" {
+		desc += " · " + note
 	}
 	if m.External {
 		desc += " · discovered"
@@ -1879,7 +1906,9 @@ func (m Model) viewModelConfig() string {
 		statline("Backend", m.backend)
 	}
 	if model.AutoBackend == "" && model.BackendRecipe == "" && model.Support.Short() != "" {
-		statline("Support", model.Support.Note())
+		// One terminal row, so the focus clipping's line count holds; the
+		// 31 columns are statline's indent and label.
+		statline("Support", truncateCols(model.Support.Note(), m.screenWidth()-31))
 	}
 	line("context", "[c] Context size", ctxLabel)
 	line("parallel", "[p] Parallel slots", parallelLabel)
@@ -2570,7 +2599,8 @@ func (m Model) viewRecommended() string {
 				}
 				b.WriteString(mutedStyle.Render(from) + "\n")
 				if rec.BackendNote != "" && rec.BackendStatus != recommend.BackendReady {
-					b.WriteString(mutedStyle.Render("    "+rec.BackendNote) + "\n")
+					// One terminal row, as the clipping counts it.
+					b.WriteString(mutedStyle.Render("    "+truncateCols(rec.BackendNote, m.screenWidth()-4)) + "\n")
 				}
 			} else {
 				b.WriteString(prefix + line + "\n")
@@ -3010,7 +3040,10 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 					// entry is the reviewed full-featured default.
 					models[i].BackendRecipe = recipes[0].Name
 				}
-				if backendSupport != nil {
+				// Only where nothing above already words the backend: a routed
+				// or recipe row never shows the note, so it is not resolved
+				// (no arch probe of the installed backends for it).
+				if backendSupport != nil && models[i].AutoBackend == "" && models[i].BackendRecipe == "" {
 					models[i].Support = backendSupport(caps, info.Architecture, info.TensorTypes)
 				}
 			}
