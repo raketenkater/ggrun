@@ -47,6 +47,11 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		if err != nil {
 			return nil, &planError{Code: 2, Message: fmt.Sprintf("Error reading inventory: %v", err), Err: err}
 		}
+		// Refused, never renumbered: saved host records store per-card values by
+		// index under an identity that ignores the index (validateInventoryNumbering).
+		if err := validateInventoryNumbering(caps.GPUs); err != nil {
+			return nil, &planError{Code: 2, Message: fmt.Sprintf("Error reading inventory: %v", err), Err: err}
+		}
 		defer useInventoryReadings(caps, req)()
 	} else {
 		caps, err = in.Detect()
