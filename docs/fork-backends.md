@@ -115,10 +115,12 @@ user's backend, check yourself and pass `--force-not-running` (it never
 overrides a process that is seen).
 
 A tree that may hold local work (a stash, commits on no remote branch or
-reviewed pin (tags included), files newer than the git index, no `.git`, or a
-linked worktree, judged from the `.git` files without running git; staged changes
-and edits older than the index cannot be seen) is deleted only with
-`--yes --discard-local-work`; a typed `y` is not enough.
+reviewed pin, any tag not at such a commit, files newer than the git index, no
+`.git`, or a linked worktree, judged from the `.git` files without running git;
+staged changes and edits older than the index cannot be seen) is deleted only with
+`--yes --discard-local-work`; a typed `y` is not enough. The files cannot tell an
+upstream tag from one made here, so a full upstream clone with its release tags
+always needs the flag; the plan lists at most five names per kind and a count.
 
 `ggrun backend gc` lists `.src/fork-*` trees no registration uses (and none a
 `.bin` link points at, except `<tag>-server-<accel>` links of tags no longer
