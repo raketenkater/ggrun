@@ -8413,7 +8413,7 @@ func loadInventory(path string) (*detect.Capabilities, error) {
 	// captured inventory carries whatever VRAM was in use at capture time, so a
 	// stale capture would plan around a server that has since exited.
 	fmt.Fprintf(os.Stderr,
-		"[inventory] planning against %d GPU(s) from %s (planning only; no device is touched)\n",
+		"[inventory] planning against %d GPU(s) from %s (planning only; this host's GPUs are not detected or queried; the backend binary and the model reader still run, and this host's cached measurements are used)\n",
 		len(caps.GPUs), path)
 	return caps, nil
 }

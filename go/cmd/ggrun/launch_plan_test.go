@@ -73,10 +73,11 @@ func planLaunchExpectError(t *testing.T, plan *launchPlan, planErr *planError, c
 	}
 }
 
-// The "Model does not fit" placement error is not in the console golden: its
-// message carries placementErrorMessage's /proc scan for running llama-server
-// processes, which another test of the same `go test ./...` can start. Here
-// the cause is pinned exactly and the hint is allowed in either form.
+// The "Model does not fit" placement error is not in the console golden: a
+// dry run without an inventory appends placementErrorMessage's /proc scan for
+// running llama-server processes, which another test of the same `go test
+// ./...` can start. An inventory plan does not scan this host, so here the
+// message is pinned exactly, without the hint.
 func TestPlanLaunchReturnsModelDoesNotFitAsAValue(t *testing.T) {
 	launchOrderTestEnv(t)
 	c := launchOrderCase{goldenPlanCase: goldenPlanCase{name: "gpu12-ram32/moe/no-mmap", hw: "gpu12-ram32", model: "moe", args: []string{"--no-mmap"}}}
@@ -96,10 +97,8 @@ func TestPlanLaunchReturnsModelDoesNotFitAsAValue(t *testing.T) {
 		if !goldenPlanIsPlacementError(planErr) || planErr.Code != 1 {
 			t.Fatalf("error = exit %d %q, want a placement error with exit 1", planErr.Code, planErr.Message)
 		}
-		base := "Error computing placement: " + cause
-		const hint = "\n\nActive llama-server process(es) are currently consuming memory; if you are switching models, stop the current server and retry:\n"
-		if planErr.Message != base && !strings.HasPrefix(planErr.Message, base+hint) {
-			t.Fatalf("message = %q, want %q, optionally followed by the running-server hint", planErr.Message, base)
+		if want := "Error computing placement: " + cause; planErr.Message != want {
+			t.Fatalf("message = %q, want %q without this host's running-server hint", planErr.Message, want)
 		}
 		if n := planErr.note(); n.Stream != planStderr || n.Text != planErr.Message+"\n" {
 			t.Fatalf("error prints %+v, want the message on stderr", n)
@@ -157,10 +156,10 @@ func TestPlanLaunchErrorsAreValuesInTodaysOrder(t *testing.T) {
 			return in, notes
 		}
 
-		// Detect fails first, before a missing inventory is read; the exposure
-		// warning is already out.
+		// Without an inventory, Detect failing ends the plan first; the
+		// exposure warning is already out.
 		req, model := planLaunchFixture(t, c.hw, c.model, "--host", "0.0.0.0")
-		req.InventoryPath = filepath.Join(t.TempDir(), "missing.json")
+		req.InventoryPath = ""
 		in, notes := inputs(req, model)
 		in.Detect = func() (*detect.Capabilities, error) { return nil, errors.New("no probe") }
 		plan, planErr := planLaunch(req, in)
@@ -170,11 +169,16 @@ func TestPlanLaunchErrorsAreValuesInTodaysOrder(t *testing.T) {
 			t.Fatalf("notes = %+v, want the exposure warning %+v", *notes, want)
 		}
 
-		// A missing inventory: exit 2.
+		// A missing inventory: exit 2. Detect is not run for an inventory
+		// plan, so its failure cannot win.
 		req, model = planLaunchFixture(t, c.hw, c.model)
 		req.InventoryPath = filepath.Join(t.TempDir(), "missing.json")
 		_, readErr := os.ReadFile(req.InventoryPath)
 		in, notes = inputs(req, model)
+		in.Detect = func() (*detect.Capabilities, error) {
+			t.Error("an inventory plan detected this host's hardware")
+			return nil, errors.New("no probe")
+		}
 		plan, planErr = planLaunch(req, in)
 		planLaunchExpectError(t, plan, planErr, 2, fmt.Sprintf("Error reading inventory: %v", readErr))
 		if len(*notes) != 0 {
