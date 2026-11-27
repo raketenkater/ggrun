@@ -109,15 +109,16 @@ of producing a placement plan with the wrong KV-memory estimate.
 launch shapes of the same model on a short agent workload and keeps the faster
 one only if it passes the launch checks. It does not choose the model or the
 quant, and it is not what makes a plan fit; admission does that. An unchanged
-launch reuses the saved verified config. When the model, backend, GPUs, free
-memory the config was verified against, or another scope input changes, ggrun
-plans again and may measure again.
+launch reuses the saved verified config. When the model, backend, GPUs or
+another scope input changes, ggrun plans again and may measure again. A saved
+config is also re-planned when a GPU has more than 1 GiB more free memory than
+when it was verified; with less free memory it is tried and admission decides.
 
 `--no-cached-config` ignores saved plans for one launch: the placement cache,
-verified configs, the saved calibration winner and cached probe and KV
-measurements. It saves no verified config and deletes nothing, so it is not a
-reset: the saved bandwidth profile is still used, and the next launch without
-it uses the saved data again.
+the verified config, the saved calibration winner and this launch's own probe
+records. It still uses the per-GPU overhead and memory-growth figures that
+earlier launches measured, and it still writes its own probe records; it saves
+no verified config. It deletes nothing, so it is not a reset.
 
 ggrun's placement planner computes where a model's weights, experts, KV cache,
 and runtime graph live from the GGUF and measured memory — but more than one
