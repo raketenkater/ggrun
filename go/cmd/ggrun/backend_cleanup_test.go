@@ -196,7 +196,7 @@ func TestBackendRemovePurgeDryRunListsOnly(t *testing.T) {
 	if f.tags() != "a,b" || !f.exists(".src/fork-a/src/main.cpp") {
 		t.Fatal("dry run changed something")
 	}
-	for _, want := range []string{"fork-a", "source tree", "Dry run"} {
+	for _, want := range []string{"fork-a", "source tree", "Dry run", "local work: none detected (staged changes and edits older than the git index cannot be seen without git)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
 		}

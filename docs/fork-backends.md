@@ -106,7 +106,7 @@ deletes the backend's `.src/fork-*` source tree and builds. It first lists what
 goes, with sizes, and asks (or takes `--yes`; with no terminal and no `--yes`
 it refuses). `--dry-run` only lists. It refuses a tree outside `.src`, a
 symlinked tree, a symlinked `.src` (the trees then belong to another app home),
-a tree another registration uses, a tree with linked git worktrees (remove them
+a tree another registration uses, a tree with linked git worktrees or a `core.worktree` outside it (remove them
 first with `git worktree remove`), the mainline and ik checkouts, a tree changed
 in the last 30 minutes, and any tree a running process executes from or has as
 its working directory. It never kills anything. The process check reads `/proc`,
@@ -115,12 +115,14 @@ user's backend, check yourself and pass `--force-not-running` (it never
 overrides a process that is seen).
 
 A tree that may hold local work (a stash, commits on no remote branch or
-reviewed pin, files newer than the git index, no `.git`, or a linked worktree,
-judged from the `.git` files without running git) is deleted only with
+reviewed pin (tags included), files newer than the git index, no `.git`, or a
+linked worktree, judged from the `.git` files without running git; staged changes
+and edits older than the index cannot be seen) is deleted only with
 `--yes --discard-local-work`; a typed `y` is not enough.
 
 `ggrun backend gc` lists `.src/fork-*` trees no registration uses (and none a
-`.bin` link points at), plus leftover `build-*-prev-*`/`-candidate-*`
+`.bin` link points at, except `<tag>-server-<accel>` links of tags no longer
+registered, which go with the tree), plus leftover `build-*-prev-*`/`-candidate-*`
 directories of failed or replaced updates. It deletes nothing by default;
 `--delete` asks first, `--yes` does not. It needs a readable `backends.json`
 and re-reads it after the confirmation. Same refusals as `--purge`.

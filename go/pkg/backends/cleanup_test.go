@@ -729,6 +729,15 @@ func TestLocalWorkFromGitFiles(t *testing.T) {
 		{name: "local branch ahead of the remote", want: "refs/heads/work", setup: func(h *cleanupHome, tree string) {
 			h.write(".src/fork-x/.git/refs/heads/work", other+"\n")
 		}},
+		{name: "commit reachable only from a tag", want: "refs/tags/v1", setup: func(h *cleanupHome, tree string) {
+			h.write(".src/fork-x/.git/refs/tags/v1", other+"\n")
+		}},
+		{name: "packed tag at an unpublished commit", want: "refs/tags/v2", setup: func(h *cleanupHome, tree string) {
+			h.write(".src/fork-x/.git/packed-refs", other+" refs/tags/v2\n")
+		}},
+		{name: "tag at a published commit is fine", setup: func(h *cleanupHome, tree string) {
+			h.write(".src/fork-x/.git/refs/tags/v3", testSHA+"\n")
+		}},
 		{name: "HEAD at a reviewed pin counts as published", setup: func(h *cleanupHome, tree string) {
 			h.write(".src/fork-x/.git/HEAD", "f46c95ee90d8c8200b0147c646b883405020b482\n")
 			_ = os.Remove(filepath.Join(tree, ".git", "refs", "remotes", "origin", "main"))
@@ -819,5 +828,129 @@ func TestRegistrationCountsEvenWhenBinaryIsGoneAndSpelledThroughASymlink(t *test
 	plans, _ := PlanGC(env)
 	if len(plans) != 1 {
 		t.Errorf("app home as symlink: %d plans", len(plans))
+	}
+}
+
+func TestDeleteChecksProcessesAgainRightBeforeRemoving(t *testing.T) {
+	h := newCleanupHome(t)
+	bin := h.fork("fork-race")
+	h.settle()
+	calls := 0
+	env := h.env([]Backend{{Tag: "r", Path: bin}}, nil)
+	env.Processes = func() ([]ProcInfo, error) {
+		calls++
+		if calls >= 2 { // appears after checkPlan and the tree walks
+			return []ProcInfo{{PID: 77, Exe: bin}}, nil
+		}
+		return nil, nil
+	}
+	if _, err := env.Delete(TreePlan{Path: filepath.Join(h.Home, ".src", "fork-race")}); !errors.Is(err, ErrRunning) {
+		t.Fatalf("got %v after %d process-table reads", err, calls)
+	}
+	if calls < 2 || !h.exists(".src/fork-race/src/main.cpp") {
+		t.Fatalf("the process table must be read again right before removal (reads: %d)", calls)
+	}
+}
+
+func TestCoreWorktreeOutsideTheTreeCountsAsLoadBearing(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "checkout")
+	cases := []struct {
+		name, config string
+		refuse       bool
+	}{
+		{"absolute path elsewhere", "[core]\n\tbare = false\n\tworktree = " + outside + "\n", true},
+		{"relative path leaving the tree", "[core]\n\tworktree = ../../outside\n", true},
+		{"relative path to the tree itself", "[core]\n\tworktree = ..\n", false},
+		{"same key in another section", "[remote \"core\"]\n\tworktree = /elsewhere\n", false},
+		{"no worktree key", "[core]\n\tbare = false\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCleanupHome(t)
+			bin := h.fork("fork-cw")
+			h.write(".src/fork-cw/.git/config", tc.config)
+			h.settle()
+			env := h.env([]Backend{{Tag: "cw", Path: bin}}, nil)
+			_, err := PlanPurge(env, "cw")
+			if tc.refuse {
+				if !errors.Is(err, ErrLinkedWorktrees) || !strings.Contains(err.Error(), "core.worktree") {
+					t.Fatalf("got %v", err)
+				}
+				if tc.name == "absolute path elsewhere" && !strings.Contains(err.Error(), outside) {
+					t.Fatalf("must name the path: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
+func TestGCRemovesLinksLeftByRemovedBackendsOnly(t *testing.T) {
+	h := newCleanupHome(t)
+	binGone := h.fork("fork-gone")
+	h.fork("fork-registered-link")
+	h.fork("fork-probed-link")
+	elsewhere := h.write(".bin/elsewhere-binary", "x")
+	_ = elsewhere
+	h.symlink(binGone, ".bin/gone-server-cuda")
+	h.symlink(filepath.Join(h.Home, ".src", "fork-registered-link", "build-cuda", "bin", "llama-server"), ".bin/live-server-cuda")
+	h.symlink(filepath.Join(h.Home, ".src", "fork-probed-link", "build-cuda", "bin", "llama-server"), ".bin/llama-server-vulkan")
+	h.settle()
+	// "live" is registered, but from a different tree, so its link still points here.
+	env := h.env([]Backend{{Tag: "live", Path: elsewhere}}, nil)
+	plans, err := PlanGC(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]TreePlan{}
+	for _, p := range plans {
+		got[filepath.Base(p.Path)] = p
+	}
+	gone := got["fork-gone"]
+	if gone.Blocked != "" || len(gone.Leftover) != 1 || filepath.Base(gone.Leftover[0]) != "gone-server-cuda" {
+		t.Fatalf("a link left by a removed backend must be listed and not block: %+v", gone)
+	}
+	if p := got["fork-registered-link"]; !strings.Contains(p.Blocked, "live-server-cuda") || len(p.Leftover) != 0 {
+		t.Fatalf("a registered tag's link must block: %+v", p)
+	}
+	if p := got["fork-probed-link"]; !strings.Contains(p.Blocked, "llama-server-vulkan") || len(p.Leftover) != 0 {
+		t.Fatalf("a probed name must block: %+v", p)
+	}
+	removed, err := env.Delete(gone)
+	if err != nil || len(removed) != 2 {
+		t.Fatalf("%v %v", err, removed)
+	}
+	if h.exists(".src/fork-gone") || h.exists(".bin/gone-server-cuda") {
+		t.Fatal("tree and its leftover link must both go")
+	}
+	for _, kept := range []string{".bin/live-server-cuda", ".bin/llama-server-vulkan", ".bin/elsewhere-binary", ".src/fork-registered-link/src/main.cpp", ".src/fork-probed-link/src/main.cpp"} {
+		if !h.exists(kept) {
+			t.Fatalf("%s must survive", kept)
+		}
+	}
+}
+
+func TestLeftoverLinkNaming(t *testing.T) {
+	env := CleanupEnv{Backends: []Backend{{Tag: "Live"}}}
+	for name, want := range map[string]bool{
+		"old-server-cuda":         true,
+		"old-server-vulkan":       true,
+		"old-server-cpu":          true,
+		"old-server-cuda.exe":     true,
+		"live-server-cuda":        false, // registered (case-insensitive)
+		"llama-server-cuda":       false, // probed by a launch
+		"ik_llama-server-cuda":    false,
+		"llama-server":            false,
+		"llama-server-vulkan.exe": false,
+		"-server-cuda":            false,
+		"custom":                  false,
+		"old-server-rocm":         false,
+	} {
+		if got := env.leftoverLink(filepath.Join("/home/.bin", name)); got != want {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
 	}
 }

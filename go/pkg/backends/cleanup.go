@@ -92,7 +92,10 @@ type TreePlan struct {
 	Files  int       // regular files inside
 	Newest time.Time // newest modification time inside
 	Links  []string  // .bin symlinks that point into the tree and go with it
-	Tags   []string  // registrations that point into the tree
+	// Leftover are the Links named <tag>-server-<accel> whose tag is no longer
+	// registered (left by a plain `backend remove`); gc removes them with the tree.
+	Leftover []string
+	Tags     []string // registrations that point into the tree
 	// LocalWork is what might exist only in this tree ("" when none was found
 	// and everything could be read); see CleanupEnv.LocalWork. Whole trees only.
 	LocalWork string
@@ -573,8 +576,18 @@ func PlanGC(env CleanupEnv) ([]TreePlan, error) {
 				err = fmt.Errorf("local work: %s; delete only with --yes --discard-local-work", p.LocalWork)
 			}
 		}
-		if err == nil && p.Kind == "orphan source tree" && len(p.Links) > 0 {
-			err = fmt.Errorf("referenced from .bin by %s; remove the link if it is unused", strings.Join(p.Links, ", "))
+		if p.Kind == "orphan source tree" {
+			var blocking []string
+			for _, l := range p.Links {
+				if env.leftoverLink(l) {
+					p.Leftover = append(p.Leftover, l)
+				} else {
+					blocking = append(blocking, l)
+				}
+			}
+			if err == nil && len(blocking) > 0 {
+				err = fmt.Errorf("referenced from .bin by %s; remove the link if it is unused", strings.Join(blocking, ", "))
+			}
 		}
 		if err != nil {
 			p.Blocked = err.Error()
@@ -621,6 +634,41 @@ func PlanGC(env CleanupEnv) ([]TreePlan, error) {
 	return out, nil
 }
 
+// probedBinName reports names a launch looks for in .bin without any
+// registration (the bundled llama-server and ik_llama-server builds).
+func probedBinName(name string) bool {
+	n := strings.TrimSuffix(strings.ToLower(name), ".exe")
+	return strings.HasPrefix(n, "llama-server") || strings.HasPrefix(n, "ik_llama-server")
+}
+
+// leftoverLink reports a .bin symlink that `backend add` made for a backend that
+// is no longer registered: named <tag>-server-<accel>, tag not registered, and
+// not a name a launch probes.
+func (env CleanupEnv) leftoverLink(link string) bool {
+	name := filepath.Base(link)
+	if probedBinName(name) {
+		return false
+	}
+	base := strings.TrimSuffix(name, ".exe")
+	for _, accel := range []string{"cuda", "vulkan", "cpu"} {
+		suffix := "-server-" + accel
+		if !strings.HasSuffix(base, suffix) {
+			continue
+		}
+		tag := strings.TrimSuffix(base, suffix)
+		if tag == "" {
+			return false
+		}
+		for _, b := range env.Backends {
+			if strings.EqualFold(b.Tag, tag) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // Delete removes one planned directory and the .bin links that point into it.
 // It re-checks every rule first and removes the resolved path it checked, never
 // the plan's own string: a plan whose path is not absolute and clean, or does
@@ -645,6 +693,15 @@ func (env CleanupEnv) Delete(p TreePlan) ([]string, error) {
 		if lw := env.LocalWork(real); lw != "" {
 			return nil, fmt.Errorf("%w: %s", ErrLocalWork, lw)
 		}
+	}
+	// The tree walks above take time: look at the process table once more,
+	// immediately before removing, to keep the gap as small as it can be.
+	procs, err := env.runningFrom(real)
+	if err != nil {
+		return nil, err
+	}
+	if len(procs) > 0 {
+		return nil, fmt.Errorf("%w %s: %s", ErrRunning, real, describeProcs(procs))
 	}
 	var removed []string
 	if err := os.RemoveAll(real); err != nil {

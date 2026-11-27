@@ -21,6 +21,10 @@ func checkWorktrees(tree string) error {
 	if err != nil || !info.IsDir() {
 		return nil // no .git, or a .git file (this tree is itself a linked worktree)
 	}
+	if wt := coreWorktree(gitDir); wt != "" && !pathWithin(tree, wt) {
+		return fmt.Errorf("%w: %s's .git/config sets core.worktree to %s outside the tree, so that directory's checkout depends on it; point it back or remove it first",
+			ErrLinkedWorktrees, tree, wt)
+	}
 	dir := filepath.Join(gitDir, "worktrees")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -43,6 +47,40 @@ func checkWorktrees(tree string) error {
 	sort.Strings(names)
 	return fmt.Errorf("%w: %s is the main checkout of %d git worktree(s): %s; run `git worktree remove <path>` in it for each (or `git worktree prune` if they are gone) first",
 		ErrLinkedWorktrees, tree, len(names), strings.Join(names, ", "))
+}
+
+// coreWorktree returns the cleaned absolute core.worktree from .git/config, or
+// "" when it is not set. A relative value is relative to the .git directory.
+func coreWorktree(gitDir string) string {
+	b, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		return ""
+	}
+	inCore := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			sect := strings.ToLower(strings.TrimSpace(strings.Trim(line, "[] \t")))
+			inCore = sect == "core"
+			continue
+		}
+		if !inCore {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "worktree") {
+			continue
+		}
+		val = strings.Trim(strings.TrimSpace(val), `"`)
+		if val == "" {
+			return ""
+		}
+		if !filepath.IsAbs(val) {
+			val = filepath.Join(gitDir, val)
+		}
+		return filepath.Clean(val)
+	}
+	return ""
 }
 
 func isHex40(s string) bool { return isHexDigest(strings.ToLower(s), 40) }
@@ -102,9 +140,11 @@ func (env CleanupEnv) publishedCommits() map[string]bool {
 }
 
 // LocalWork says what in a whole source tree might exist nowhere else, or ""
-// when nothing was found and everything could be read. It looks only at files:
+// when nothing was detected and everything could be read. It looks only at files:
 // a stash ref; HEAD or a local branch at a commit that is neither a remote
-// branch tip nor a reviewed pin; files newer than the git index. A tree with
+// branch tip nor a reviewed pin, tags included; files newer than the git index.
+// It cannot see staged changes, or edits and untracked files older than the
+// last rewrite of the index, so "" means "none detected", not "none". A tree with
 // no readable .git, or that is a linked worktree, is "unknown". Recipe patches
 // make files newer than the index, so a patched tree reports possible changes.
 func (env CleanupEnv) LocalWork(tree string) string {
@@ -149,7 +189,7 @@ func (env CleanupEnv) LocalWork(tree string) string {
 		unknown = append(unknown, "HEAD unreadable")
 	}
 	for name, sha := range refs {
-		if strings.HasPrefix(name, "refs/heads/") && !published[sha] {
+		if (strings.HasPrefix(name, "refs/heads/") || strings.HasPrefix(name, "refs/tags/")) && !published[sha] {
 			unpublished = append(unpublished, name)
 		}
 	}

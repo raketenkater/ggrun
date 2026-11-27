@@ -112,13 +112,20 @@ func printPlan(out io.Writer, p backends.TreePlan, now time.Time) {
 	case p.LocalWork != "":
 		fmt.Fprintf(out, "    local work: %s\n", p.LocalWork)
 	case p.Kind != "stale build directory" && p.Blocked == "":
-		fmt.Fprintln(out, "    local work: none found (read from the .git files)")
+		fmt.Fprintln(out, "    local work: none detected (staged changes and edits older than the git index cannot be seen without git)")
 	}
 	if len(p.Tags) > 0 && p.Kind != "source tree" {
 		fmt.Fprintf(out, "    belongs to registered backend(s): %s\n", strings.Join(p.Tags, ", "))
 	}
+	left := map[string]bool{}
+	for _, l := range p.Leftover {
+		left[l] = true
+		fmt.Fprintf(out, "    also removes link %s (link left by a removed backend)\n", l)
+	}
 	for _, l := range p.Links {
-		fmt.Fprintf(out, "    also removes link %s\n", l)
+		if !left[l] {
+			fmt.Fprintf(out, "    also removes link %s\n", l)
+		}
 	}
 	if p.Blocked != "" {
 		fmt.Fprintf(out, "    NOT removable now: %s\n", p.Blocked)
