@@ -1,5 +1,5 @@
 {
- "comment": "First calibration suite for tools/perf/make_synthetic_gguf.py. Data only: no measurements. expected_file_bytes is plan(spec).file_size; tests/test_synthetic_gguf.py keeps it in step. Generate one file: make_synthetic_gguf.py --arch ... --out FILE (spec keys map to the flags; quant is the matrix type). Every file sets context_length 65536: depth is a request property, the harness passes -c itself.",
+ "comment": "Head dim 128 and 2 query heads per KV head along the layer and width axes (depth-kv is full multi-head on purpose; moe-realshape keeps 4 per KV head). First calibration suite for tools/perf/make_synthetic_gguf.py. Data only: no measurements. expected_file_bytes is plan(spec).file_size; tests/test_synthetic_gguf.py keeps it in step. Generate one file: make_synthetic_gguf.py --arch ... --out FILE (spec keys map to the flags; quant is the matrix type). Every file sets context_length 65536: depth is a request property, the harness passes -c itself.",
  "seed": 1,
  "files": [
   {
@@ -14,8 +14,8 @@
     "layers": 16,
     "embd": 512,
     "ff": 1536,
-    "heads": 8,
-    "kv_heads": 4,
+    "heads": 4,
+    "kv_heads": 2,
     "seed": 1,
     "name": "ggrun-synth-fixed-floor"
    },
@@ -35,8 +35,8 @@
     "layers": 48,
     "embd": 512,
     "ff": 1536,
-    "heads": 8,
-    "kv_heads": 4,
+    "heads": 4,
+    "kv_heads": 2,
     "seed": 1,
     "name": "ggrun-synth-layers-48"
    },
@@ -99,13 +99,13 @@
     "embd": 3072,
     "ff": 8192,
     "heads": 24,
-    "kv_heads": 8,
+    "kv_heads": 12,
     "seed": 1,
     "name": "ggrun-synth-bytes-large-2"
    },
-   "expected_file_bytes": 912686976,
-   "active_weight_bytes": 909527040,
-   "kv_bytes_per_token_f16": 65536
+   "expected_file_bytes": 940998528,
+   "active_weight_bytes": 937838592,
+   "kv_bytes_per_token_f16": 98304
   },
   {
    "id": "type-q4_0",
@@ -261,6 +261,6 @@
    "kv_bytes_per_token_f16": 8192
   }
  ],
- "total_bytes": 6937781152,
+ "total_bytes": 6966092704,
  "quick_tier_bytes": 1226082048
 }

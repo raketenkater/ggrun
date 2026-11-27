@@ -24,9 +24,11 @@ and a MoE file differ only in the feed-forward tensors):
   * a SentencePiece ("llama") vocabulary of --vocab tokens: <unk>, <s>, </s>, the
     256 <0xNN> byte tokens, "▁" and the printable ASCII characters, then filler
     pieces. Every token is unique and non-empty, as the loaders require;
-  * tensor data from a deterministic pool (SHAKE-256 and random.random() seeded
-    from --seed), tiled with a per-tensor phase, so a multi-GiB file is written
-    in bounded memory and is identical on every Python 3 version.
+  * tensor data from a deterministic pool (SHAKE-256 bytes from --seed summed into
+    bell-shaped values with integer arithmetic; no libm, no random module), tiled
+    with a per-tensor phase, so a multi-GiB file is written in bounded memory and
+    is meant to be byte-identical on every platform and Python 3 version (CI
+    compares a committed fixture; only Linux CPython 3.11 and 3.12 are checked).
 
 Values (so a forward pass stays finite): RMSNorm gains are 1.0; every matrix has
 standard deviation 1/sqrt(fan_in); the token embedding has standard deviation 1.
@@ -55,7 +57,6 @@ import hashlib
 import json
 import math
 import os
-import random
 import struct
 import sys
 from dataclasses import dataclass, asdict
@@ -425,16 +426,17 @@ class Pools:
         self._cache = {}
 
     def _standard(self):
+        """Zero-mean, unit-std values: Irwin-Hall sums of 12 SHAKE-256 uint16 per value
+        (integer arithmetic, then IEEE + - * / and sqrt only, no libm), standardised
+        on the pool's own sample moments."""
         if self._gauss is None:
-            rng = random.Random(self.seed)
-            g = []
-            while len(g) < self.float_len:
-                r = math.sqrt(-2.0 * math.log(1.0 - rng.random()))
-                a = 2.0 * math.pi * rng.random()
-                g += [r * math.cos(a), r * math.sin(a)]
-            g = g[:self.float_len]
-            mean = sum(g) / len(g)
-            std = math.sqrt(sum((x - mean) ** 2 for x in g) / len(g))
+            n = self.float_len
+            g = [0] * n
+            for k in range(12):
+                col = struct.unpack('<%dH' % n, _seed_bytes(self.seed, 'gauss%d' % k, 2 * n))
+                g = [a + b for a, b in zip(g, col)]
+            mean = sum(g) / n
+            std = math.sqrt(sum((x - mean) * (x - mean) for x in g) / n)
             self._gauss = [(x - mean) / std for x in g]
         return self._gauss
 

@@ -52,4 +52,17 @@ func TestSyntheticGeneratorFixtureSatisfiesReaders(t *testing.T) {
 			t.Fatalf("type %d = %+v, want %+v", u.Type, u, w)
 		}
 	}
+
+	// ggrun's own entry point: the Python helper's view of the same file.
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if info.Architecture != "llama" || info.BlockCount != 2 || info.EmbeddingLength != 64 ||
+		info.FeedForwardLength != 128 || info.VocabSize != 360 || info.ExpertBytes != 0 {
+		t.Fatalf("parsed %+v", info)
+	}
+	if info.TokenEmbdBytes != 46080 || info.OutputBytes != 46080 || info.NonExpertBytes != 257280 {
+		t.Fatalf("bytes: token_embd %d output %d non-expert %d", info.TokenEmbdBytes, info.OutputBytes, info.NonExpertBytes)
+	}
 }

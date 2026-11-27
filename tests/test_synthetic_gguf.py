@@ -28,7 +28,7 @@ MANIFEST = os.path.join(ROOT, 'tools', 'perf', 'calibration_suite.json')
 FIXTURE = os.path.join(ROOT, 'go', 'pkg', 'gguf', 'testdata', 'synthetic-dense-tiny.gguf.fixture')
 
 
-def _load(name, path):
+def _import(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
@@ -36,8 +36,8 @@ def _load(name, path):
     return mod
 
 
-gen = _load('make_synthetic_gguf', GEN_PATH)
-parser = _load('parse_gguf', PARSER_PATH)
+gen = _import('make_synthetic_gguf', GEN_PATH)
+parser = _import('parse_gguf', PARSER_PATH)
 Spec = gen.Spec
 
 TINY = dict(arch='dense', layers=3, embd=64, ff=128, heads=2, kv_heads=1, vocab=360, ctx=512)
