@@ -1917,22 +1917,32 @@ func normalizePlacementAwareExtraArgs(req *launchRequest, args []string) []strin
 // matches reality. Returns the env assignment for display, or "" when neither
 // --gpus nor --cpu was given.
 func applyGPUVisibility(req *launchRequest, backendTag string) string {
+	key, value := gpuVisibilityEnv(req, backendTag)
+	if key == "" {
+		return ""
+	}
+	os.Setenv(key, value)
+	return key + "=" + value
+}
+
+// gpuVisibilityEnv is the variable and value applyGPUVisibility exports, or
+// two empty strings when nothing is restricted. It reads no process state.
+func gpuVisibilityEnv(req *launchRequest, backendTag string) (key, value string) {
 	if req != nil && req.CPUMode && !strings.EqualFold(backendTag, "vulkan") {
 		// A CPU-only launch must not see any device. A CUDA build given -ngl 0
 		// still opens a context on every visible card and may run large-batch
 		// matmuls there, on GPUs another process may be using.
-		os.Setenv("CUDA_VISIBLE_DEVICES", "-1")
-		return "CUDA_VISIBLE_DEVICES=-1"
+		return "CUDA_VISIBLE_DEVICES", "-1"
 	}
 	if req == nil || req.GPUsFlag == "" {
-		return ""
+		return "", ""
 	}
 	indices, err := parseGPUIndices(req.GPUsFlag)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	if len(indices) == 0 {
-		return ""
+		return "", ""
 	}
 	// Keep PCI ordering so renumbered placement indices line up with the
 	// backend's enumeration of the visible subset.
@@ -1945,8 +1955,7 @@ func applyGPUVisibility(req *launchRequest, backendTag string) string {
 	if strings.EqualFold(backendTag, "vulkan") {
 		envKey = "GGML_VK_VISIBLE_DEVICES"
 	}
-	os.Setenv(envKey, list)
-	return envKey + "=" + list
+	return envKey, list
 }
 
 // parseGPUIndices is shared by parsing, placement and visibility setup so an
