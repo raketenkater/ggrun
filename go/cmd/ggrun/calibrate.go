@@ -158,9 +158,11 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 	// Compare negative admission evidence with the finalist that automatic mode
 	// will actually load, not the first raw candidate. The finalist planner can
 	// reorder the calculated set, and comparing before that step caused the same
-	// failed argv to be retried on every launch.
+	// failed argv to be retried on every launch. The decision records the
+	// calculated finalist of the plan it searched, so a finalist redirected
+	// after the baseline measurement still covers this identical plan.
 	if mode == calibrateAuto && cachedDecision != nil &&
-		cachedDecision.SuppressesAutomaticAdmissionRetry(candidates[1].Name) {
+		cachedDecision.SuppressesAutomaticSearch(candidates[1].Name) {
 		return nil
 	}
 	if len(candidates) > budget.MaxCandidates {
@@ -957,6 +959,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 	if len(candidates) < 2 {
 		return p, strategy, serverArgs, nil
 	}
+	// The planned finalist, before any telemetry- or phase-directed swap below;
+	// every decision records it so the next identical plan is recognised.
+	calculatedFinalist := candidates[1].Name
 	mode := effectiveCalibrationMode(req)
 	budget := calibrationBudgetFor(mode)
 	scope := calibrationScope(req, model, be, caps, strategy)
@@ -1414,6 +1419,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if outcome == searchBudgetBound {
 			pending := scopedCalibrationDecision(scope, model, defaultResult, measurements[0])
 			annotateOptimizationDecision(pending, candidates, measurements)
+			recordCalculatedFinalist(pending, calculatedFinalist)
 			if pending != nil {
 				prev, _ := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
 				markFinalistUnmeasured(pending, prev)
@@ -1431,6 +1437,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		}
 		pending := scopedCalibrationDecision(scope, model, defaultResult, measurements[0])
 		annotateOptimizationDecision(pending, candidates, measurements)
+		recordCalculatedFinalist(pending, calculatedFinalist)
 		pending.FinalistFailureClass = stableFailureClass
 		pending.FinalistFailureReason = stableFailureReason
 		if mode == calibrateAuto {
@@ -1519,6 +1526,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	pending := scopedCalibrationDecision(scope, model, defaultResult, best)
 	annotateOptimizationDecision(pending, candidates, measurements)
+	recordCalculatedFinalist(pending, calculatedFinalist)
 	if winnerRestartFailed {
 		// The finalist measured, but it could not be put back into service.
 		// Recording that as baseline-won would bury a faster finalist as
@@ -1657,6 +1665,16 @@ func annotateOptimizationDecision(decision *placement.CalibrationDecision, candi
 		}
 		return
 	}
+}
+
+// recordCalculatedFinalist stores the plan's calculated finalist on a decision
+// annotated from the measured candidate order, which a directed swap may have
+// reordered. The next launch's calibrationPlan compares against it.
+func recordCalculatedFinalist(decision *placement.CalibrationDecision, calculated string) {
+	if decision == nil || decision.Finalist == "" {
+		return
+	}
+	decision.CalculatedFinalist = calculated
 }
 
 func prioritizeCalibrationFinalist(candidates []placement.CalibrationCandidate, finalist placement.CalibrationCandidate) []placement.CalibrationCandidate {

@@ -136,6 +136,7 @@ type CalibrationDecision struct {
 	BaselineResidency      ResidencyClass        `json:"baseline_residency,omitempty"`
 	BaselineBottleneck     string                `json:"baseline_bottleneck,omitempty"`
 	Finalist               string                `json:"finalist,omitempty"`
+	CalculatedFinalist     string                `json:"calculated_finalist,omitempty"` // see SuppressesAutomaticSearch
 	FinalistOutcome        string                `json:"finalist_outcome,omitempty"`
 	FinalistFailureClass   string                `json:"finalist_failure_class,omitempty"`
 	FinalistFailureReason  string                `json:"finalist_failure_reason,omitempty"`
@@ -218,6 +219,24 @@ func (d *CalibrationDecision) SuppressesAutomaticAdmissionRetry(finalist string)
 		}
 	}
 	return false
+}
+
+// SuppressesAutomaticSearch reports whether this decision already answers the
+// bounded search whose plan calculated the given finalist. CalculatedFinalist
+// records the finalist the plan calculated before any telemetry- or
+// phase-directed swap; Finalist is the one actually measured. A decision that
+// records it covers only a plan with that same calculated finalist, judged by
+// the outcome of the finalist it measured. A record without the field (written
+// before it existed) keeps the older comparison against Finalist. The caller
+// has already bound the decision to the scope key and schema.
+func (d *CalibrationDecision) SuppressesAutomaticSearch(calculatedFinalist string) bool {
+	if d == nil || calculatedFinalist == "" {
+		return false
+	}
+	if d.CalculatedFinalist == "" {
+		return d.SuppressesAutomaticAdmissionRetry(calculatedFinalist)
+	}
+	return d.CalculatedFinalist == calculatedFinalist && d.SuppressesAutomaticAdmissionRetry(d.Finalist)
 }
 
 // LoadCalibrationDecision reads a prior calibration for the scope, rejecting
