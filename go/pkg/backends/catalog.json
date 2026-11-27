@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "Reviewed fork recipes and generic backend-family rules, embedded in ggrun and validated at load (see catalog.go). Recipe order is significant: lookups and listings follow it. Optional per-recipe fields kind, required_tensor_types, tensor_count, superseded_by, evidence and expires are defined but unused so far. Patch files live under patches/ and are pinned by sha256.",
+  "comment": "Reviewed fork recipes and generic backend-family rules, embedded in ggrun and validated at load (see catalog.go). Recipe order is significant: lookups and listings follow it. Optional per-recipe fields kind, tensor_count, superseded_by, evidence and expires are defined but unused so far; required_tensor_types is read by ResolveRequirement (no shipped entry uses it yet). Patch files live under patches/ and are pinned by sha256.",
   "recipes": [
     {
       "name": "nanbeige42",

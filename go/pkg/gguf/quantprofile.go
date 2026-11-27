@@ -137,6 +137,22 @@ type tensorEntry struct {
 // of many split models) is valid and contributes only its metadata. Every
 // length is bounded before it sizes a read or a skip.
 func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
+	p, _, err := readProfileAndTypes(src, fileSize)
+	return p, err
+}
+
+// ReadTypeHistogram reads one GGUF file's tensor type histogram from r with the
+// same walk and the same failures as ReadQuantProfile (see TypeUsage).
+func ReadTypeHistogram(src io.Reader, fileSize int64) ([]TypeUsage, error) {
+	_, acc, err := readProfileAndTypes(src, fileSize)
+	if err != nil {
+		return nil, err
+	}
+	return acc.result()
+}
+
+// readProfileAndTypes is the one tensor-table walk behind both.
+func readProfileAndTypes(src io.Reader, fileSize int64) (QuantProfile, *typeAcc, error) {
 	p := QuantProfile{Version: QuantProfileVersion, FileType: -1, Shards: 1}
 	r := &countingReader{r: bufio.NewReaderSize(src, 1<<20)}
 	var buf [8]byte
@@ -174,36 +190,36 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 	}
 
 	if b, err := readFull(4); err != nil || string(b) != "GGUF" {
-		return p, fmt.Errorf("not a GGUF file")
+		return p, nil, fmt.Errorf("not a GGUF file")
 	}
 	version, err := readU32()
 	if err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if version < 2 || version > 3 {
-		return p, fmt.Errorf("GGUF version %d is not supported", version)
+		return p, nil, fmt.Errorf("GGUF version %d is not supported", version)
 	}
 	tensorCount, err := readU64()
 	if err != nil {
-		return p, err
+		return p, nil, err
 	}
 	kvCount, err := readU64()
 	if err != nil {
-		return p, err
+		return p, nil, err
 	}
 	if tensorCount > maxProfileTensors || kvCount > maxProfileKVs {
-		return p, fmt.Errorf("header declares %d tensors and %d metadata keys", tensorCount, kvCount)
+		return p, nil, fmt.Errorf("header declares %d tensors and %d metadata keys", tensorCount, kvCount)
 	}
 
 	align := uint64(32)
 	for i := uint64(0); i < kvCount; i++ {
 		key, err := readName("metadata key")
 		if err != nil {
-			return p, err
+			return p, nil, err
 		}
 		valType, err := readU32()
 		if err != nil {
-			return p, err
+			return p, nil, err
 		}
 		switch {
 		case strings.HasPrefix(key, "quantize.imatrix."):
@@ -211,7 +227,7 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 		case key == "general.alignment" && valType == 4:
 			v, err := readU32()
 			if err != nil {
-				return p, err
+				return p, nil, err
 			}
 			if v > 0 {
 				align = uint64(v)
@@ -220,7 +236,7 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 		case key == "general.file_type" && valType != 8 && valType != 9:
 			v, err := readSamplingScalar(r, valType)
 			if err != nil {
-				return p, fmt.Errorf("metadata %q: %w", key, err)
+				return p, nil, fmt.Errorf("metadata %q: %w", key, err)
 			}
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				p.FileType = n
@@ -228,62 +244,64 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 			continue
 		}
 		if err := skipGGUFValue(r, valType, 0); err != nil {
-			return p, fmt.Errorf("metadata %q: %w", key, err)
+			return p, nil, fmt.Errorf("metadata %q: %w", key, err)
 		}
 	}
 
 	tensors := make([]tensorEntry, 0, min(tensorCount, 1<<14))
+	acc := newTypeAcc()
 	for i := uint64(0); i < tensorCount; i++ {
 		name, err := readName("tensor name")
 		if err != nil {
-			return p, err
+			return p, nil, err
 		}
 		nDims, err := readU32()
 		if err != nil {
-			return p, err
+			return p, nil, err
 		}
 		if nDims == 0 || nDims > maxTensorDims {
-			return p, fmt.Errorf("tensor %q has %d dimensions", name, nDims)
+			return p, nil, fmt.Errorf("tensor %q has %d dimensions", name, nDims)
 		}
 		elements := uint64(1)
 		for d := uint32(0); d < nDims; d++ {
 			dim, err := readU64()
 			if err != nil {
-				return p, err
+				return p, nil, err
 			}
 			if dim == 0 {
 				elements = 0
 				continue
 			}
 			if dim > maxTensorElements || elements > maxTensorElements/dim {
-				return p, fmt.Errorf("tensor %q is larger than any real model", name)
+				return p, nil, fmt.Errorf("tensor %q is larger than any real model", name)
 			}
 			elements *= dim
 		}
 		ttype, err := readU32()
 		if err != nil {
-			return p, err
+			return p, nil, err
 		}
 		offset, err := readU64()
 		if err != nil {
-			return p, err
+			return p, nil, err
 		}
+		acc.entry(ttype, name, elements)
 		if elements > 0 { // an empty tensor owns no bytes and may share an offset
 			tensors = append(tensors, tensorEntry{name, elements, ttype, offset})
 		}
 	}
 	if len(tensors) == 0 {
-		return p, nil
+		return p, acc, nil
 	}
 
 	dataStart := (uint64(r.n) + align - 1) / align * align
 	if fileSize <= 0 || uint64(fileSize) <= dataStart {
-		return p, ErrTensorDataIncomplete
+		return p, nil, ErrTensorDataIncomplete
 	}
 	dataSize := uint64(fileSize) - dataStart
 	order := offsetOrder(tensors)
 	if tensors[order[0]].offset != 0 {
-		return p, fmt.Errorf("tensor data does not start at offset 0")
+		return p, nil, fmt.Errorf("tensor data does not start at offset 0")
 	}
 	typesImplyImatrix := false
 	for k, i := range order {
@@ -293,12 +311,13 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 			end = tensors[order[k+1]].offset
 		}
 		if t.offset >= dataSize || end > dataSize || end <= t.offset {
-			return p, fmt.Errorf("tensor %q: %w", t.name, ErrTensorDataIncomplete)
+			return p, nil, fmt.Errorf("tensor %q: %w", t.name, ErrTensorDataIncomplete)
 		}
 		span := end - t.offset
+		acc.addBytes(t.ttype, span)
 		if need, known := layoutBytes(t.ttype, t.elems); known {
 			if span < need {
-				return p, fmt.Errorf("tensor %q type %d: %w (%d of %d bytes)", t.name, t.ttype, ErrTensorLayout, span, need)
+				return p, nil, fmt.Errorf("tensor %q type %d: %w (%d of %d bytes)", t.name, t.ttype, ErrTensorLayout, span, need)
 			}
 			if imatrixRequiredTypes[t.ttype] && t.name != "token_embd.weight" && t.name != "output.weight" {
 				typesImplyImatrix = true
@@ -314,7 +333,7 @@ func ReadQuantProfile(src io.Reader, fileSize int64) (QuantProfile, error) {
 	if p.Imatrix == "" && typesImplyImatrix {
 		p.Imatrix = ImatrixTypes
 	}
-	return p, nil
+	return p, acc, nil
 }
 
 // routedExpertTensor matches parse_gguf.py's routed-expert test.

@@ -111,6 +111,13 @@ type Info struct {
 	// wider than SSM, which also describes the block layout: GLM-5.3-Flash and
 	// Inkling state no ssm.state_size but still resume only from checkpoints.
 	RecurrentState int `json:"recurrent"`
+
+	// TensorTypes is the tensor type histogram (see TypeUsage), written by the
+	// helper from its own tensor-table walk. It is absent for a helper that
+	// predates it and for a file whose offsets are unusable (an interrupted
+	// download, a truncated table, a missing shard), so an empty value means
+	// "unknown", never "no tensors of any type".
+	TensorTypes []TypeUsage `json:"tensor_types,omitempty"`
 }
 
 // Parse calls the bundled GGUF metadata helper.
