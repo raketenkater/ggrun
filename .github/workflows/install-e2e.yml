@@ -332,13 +332,20 @@ jobs:
           [ -f "$RUNNER_TEMP/unit-diag.sh" ] || { echo "::error::unit-diag.sh missing (systemd step did not run)"; exit 1; }
           # shellcheck disable=SC1091
           . "$RUNNER_TEMP/unit-diag.sh"
+          command -v strace >/dev/null || sudo apt-get install -y -qq strace >/dev/null || true
           table="$RUNNER_TEMP/stop-during-load.tsv"
-          printf 'iter\tmoment\tport\tstop_s\thealthy_at_stop\tdown_10s\tdown_30s\tdown_after_s\tscope_before_stop\tsurvivors\tlast_launcher_line\n' > "$table"
+          straces="$RUNNER_TEMP/wrapper-strace.tsv"
+          printf 'iter\tmoment\twrapper\tterms_received\treached_kill_KILL\twrapper_exit\n' > "$straces"
+          printf 'iter\tmoment\tport\tstop_s\thealthy_at_stop\tdown_10s\tdown_30s\tdown_after_s\toom_group\tscope_before_stop\tsurvivors\tlast_launcher_line\n' > "$table"
+          argv_shown=no
           print_table() {
             echo "=== stop-during-load summary"
             column -t -s "$(printf '\t')" "$table" || cat "$table"
             echo "=== per moment: tries, still answering at 10 s, at 30 s"
             awk -F'\t' 'NR>1 { n[$2]++; if ($6=="no") a[$2]++; if ($7=="no") b[$2]++ } END { for (m in n) printf "%-16s %3d %3d %3d\n", m, n[m], a[m]+0, b[m]+0 }' "$table" | sort
+            echo "=== wrapper under strace (first-healthy, healthy+1s)"
+            column -t -s "$(printf '\t')" "$straces" || cat "$straces"
+            awk -F'\t' 'NR>1 && $3!="-" { n++; if ($4+0 > 1) m++; if ($5=="yes") k++ } END { printf "traced tries %d, wrapper got more than one SIGTERM in %d, reached kill(-child, SIGKILL) in %d\n", n, m+0, k+0 }' "$straces"
             { echo '### Stop during load'; echo '```'; column -t -s "$(printf '\t')" "$table" || cat "$table"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           }
           trap print_table EXIT
@@ -382,6 +389,34 @@ jobs:
             esac
             healthy=no; answering "$port" && healthy=yes
             before="$(scope_members)"
+            # The backend's own scope: memory.oom.group, and the wrapper as
+            # systemd-run handed it over (shows any ${...} expansion).
+            llama=""; wrapper=""; watcher=""; oom=-
+            for p in $(scope_pids); do [ "$(cat "/proc/$p/comm" 2>/dev/null)" = llama-server ] && llama=$p; done
+            if [ -n "$llama" ]; then
+              oom="$(cat "/sys/fs/cgroup$(cut -d: -f3 "/proc/$llama/cgroup" 2>/dev/null)/memory.oom.group" 2>/dev/null || echo unreadable)"
+              wrapper="$(awk '/^PPid:/{print $2}' "/proc/$llama/status" 2>/dev/null || true)"
+              [ "$(cat "/proc/$wrapper/comm" 2>/dev/null)" = sh ] || wrapper=""
+            fi
+            if [ -n "$wrapper" ] && [ "$argv_shown" = no ]; then
+              argv_shown=yes
+              echo "--- wrapper argv as received (pid $wrapper), oom.group=$oom"
+              tr '\0' '\n' < "/proc/$wrapper/cmdline" | head -8 || true
+            fi
+            spid=""; trace="$RUNNER_TEMP/strace-$i.txt"
+            if [ -n "$wrapper" ] && { [ "$moment" = first-healthy ] || [ "$moment" = healthy+1s ]; }; then
+              for p in $(scope_pids); do
+                [ "$(cat "/proc/$p/comm" 2>/dev/null)" = sh ] && [ "$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)" = "$wrapper" ] && watcher=$p
+              done
+              # Bounded: strace ends when the traced shells exit, timeout otherwise.
+              sudo timeout 25 strace -f -tt -e trace=signal,kill,tgkill,exit_group -o "$trace" \
+                -p "$wrapper" ${watcher:+-p "$watcher"} 2>/dev/null &
+              spid=$!
+              for _ in $(seq 50); do
+                [ "$(awk '/^TracerPid:/{print $2}' "/proc/$wrapper/status" 2>/dev/null || echo 0)" != 0 ] && break
+                sleep 0.02
+              done
+            fi
             t_stop="$(date +%s.%N)"
             systemctl --user stop ggrun || true
             t_stopped="$(date +%s.%N)"
@@ -410,8 +445,18 @@ jobs:
             last="$(journalctl --user -u ggrun -o short-unix --no-pager 2>/dev/null \
               | awk -v s="$since" -v t="$t_stop" '$1+0 >= s && $1+0 < t { sub(/^[^ ]+ [^ ]+ [^ ]+: /, ""); if ($0 ~ /^\[/) l=$0 } END { print l }' \
               | tr '\t' ' ' | cut -c1-90 || true)"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$port" "$stop_s" "$healthy" "$down10" "$down30" \
-              "$down_after" "$before" "$survivors" "${last:-<none>}" >> "$table"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$port" "$stop_s" "$healthy" "$down10" "$down30" \
+              "$down_after" "$oom" "$before" "$survivors" "${last:-<none>}" >> "$table"
+            if [ -n "$spid" ]; then
+              for _ in $(seq 60); do kill -0 "$spid" 2>/dev/null || break; sleep 0.5; done
+              wait "$spid" 2>/dev/null || true
+              echo "--- iteration $i ($moment): wrapper $wrapper, watcher ${watcher:-?} under strace"
+              grep -E -- '--- SIG|kill\(|tgkill\(|exit_group|\+\+\+' "$trace" 2>/dev/null | grep -v SIGCHLD | cut -c1-200 || true
+              terms="$(grep -cE "^$wrapper +[0-9:.]+ --- SIGTERM" "$trace" 2>/dev/null || true)"
+              reached=no; grep -qE "^$wrapper +[0-9:.]+ kill\(-[0-9]+, SIGKILL" "$trace" 2>/dev/null && reached=yes
+              wexit="$(grep -E "^$wrapper +[0-9:.]+ \+\+\+" "$trace" 2>/dev/null | tail -1 | sed 's/.*+++ \(.*\) +++/\1/' || true)"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$wrapper" "${terms:-0}" "$reached" "${wexit:-unknown}" >> "$straces"
+            fi
             cleanup_backends "$port"
           done
 
