@@ -113,10 +113,11 @@ launch reuses the saved verified config. When the model, backend, GPUs, free
 memory the config was verified against, or another scope input changes, ggrun
 plans again and may measure again.
 
-`--no-cached-config` ignores saved plans for one launch (the placement cache,
-verified configs and the cached measurements they use) and saves no verified
-config. It deletes nothing, so it is not a reset: the next launch without it
-uses the saved data again.
+`--no-cached-config` ignores saved plans for one launch: the placement cache,
+verified configs, the saved calibration winner and cached probe and KV
+measurements. It saves no verified config and deletes nothing, so it is not a
+reset: the saved bandwidth profile is still used, and the next launch without
+it uses the saved data again.
 
 ggrun's placement planner computes where a model's weights, experts, KV cache,
 and runtime graph live from the GGUF and measured memory — but more than one

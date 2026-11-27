@@ -34,16 +34,16 @@ name architectures explicitly:
 ggrun backend install hy3 --cuda-arch "86;89"
 ```
 
-The MiniMax-M3 recipe pins the open preliminary-support branch revision that
-includes its dedicated structured tool-call parser. Its architecture route is
-`minimax-m3`. Sparse attention is not implemented in that revision, so it uses
-the mathematically correct dense fallback and remains an experimental backend
-until the 60k agent/workflow farm passes on the target machine.
+The MiniMax-M3 recipe pins a preliminary-support branch revision that includes
+its dedicated structured tool-call parser (its llama.cpp PR was closed
+unmerged). Its architecture route is `minimax-m3`. Sparse attention is not implemented in that revision, so it uses
+the mathematically correct dense fallback and remains an experimental backend.
 
 The Laguna recipe pins Poolside's own `llama.cpp` fork, which also loads the
 DFlash drafter, and routes GGUFs with `general.architecture=laguna` to that
-isolated build. The `laguna-upstream-pr` recipe pins the open upstream PR
-revision instead; it serves the target model but cannot load the drafter.
+isolated build. The `laguna-upstream-pr` recipe pins the upstream PR revision
+instead; it serves the target model but cannot load the drafter. That PR has
+since merged into mainline llama.cpp.
 DFlash GGUFs are companion speculators rather than standalone target models and
 are not offered in the TUI.
 

@@ -142,7 +142,7 @@ No other runtime was measured in this round, so the table makes no comparison. R
 
 ## Large models on one host
 
-All rows used the full host above (3 GPUs, 212 GiB), Linux, models on an NTFS HDD and `--claude-code`. They ran on `main` after v3.2.12, which is not yet in a release. Each row is one run. Tasks are Claude Code repository fixes checked by the repositories' unchanged unit tests. Prefill and decode here are medians from the backend log over the session's requests.
+All rows used the full host above (3 GPUs, 212 GiB), Linux, models on an NTFS HDD and `--claude-code`. They ran on `main` between v3.2.12 and v3.2.13. Each row is one run. Tasks are Claude Code repository fixes checked by the repositories' unchanged unit tests. Prefill and decode here are medians from the backend log over the session's requests.
 
 | Model (quant, size) | Date, build | Ready | Tasks (s) | Context | Prefill / decode tok/s |
 |---|---|---:|---|---:|---|
@@ -171,7 +171,7 @@ A smaller new model went through the same download-to-agent flow. Nanbeige4.3-33
 | Linux + NVIDIA | Most tested. ik_llama.cpp CUDA or mainline CUDA, cgroup containment (needs systemd), bandwidth profile. GPUs below compute capability 7.5 get Vulkan by default. |
 | Linux AMD / Intel | Mainline llama.cpp through Vulkan. No ROCm. AMD APU unified memory is broken ([#49](https://github.com/raketenkater/ggrun/issues/49)). |
 | CPU only | Works; the CPU rows above show what that means for agent tasks. |
-| GPUs from more than one vendor | Not supported yet. ggrun uses one vendor: NVIDIA GPUs when any are found, otherwise Vulkan devices. |
+| GPUs from more than one vendor | Not supported yet. When an NVIDIA GPU is found, GPUs from other vendors are ignored. |
 | Windows | Installer and CPU serving are verified in CI. CUDA comes from upstream llama.cpp prebuilts or a source build, not a ggrun bundle. GPU serving is unverified. There is no memory containment (the backend is stopped when ggrun exits), and fork builds are disabled. |
 | Docker | `docker/` has CPU, CUDA and Vulkan images. They set `GGRUN_SCOPE_MODE=none`: no cgroup containment, but pre-launch admission still applies; use `docker run --memory` as the hard limit. No image is built in CI, and the GPU images have not been verified in a container. |
 
