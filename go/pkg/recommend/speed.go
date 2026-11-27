@@ -202,25 +202,63 @@ func vramBandwidthGBps(name string) float64 {
 	return defaultVRAMBWGBps
 }
 
-// weightedVRAMBandwidth returns VRAM bandwidth averaged across GPUs, weighted by
-// each GPU's share of total VRAM (where the model's weights end up living).
+// weightedVRAMBandwidth returns the effective bandwidth of a layer split over
+// the GPUs. The cards run their layers in turn, so a token's time is the sum of
+// bytes_i/bw_i: the bytes-weighted harmonic mean, not the arithmetic one (a
+// fast card cannot make up for a slow one's layers). The recommender has no
+// per-card placement, so each card's share of total VRAM stands in for its
+// share of the bytes.
 func weightedVRAMBandwidth(caps *detect.Capabilities) float64 {
 	if caps == nil || len(caps.GPUs) == 0 {
 		return 0
 	}
-	var num, den float64
-	for _, g := range caps.GPUs {
-		w := float64(g.VRAMTotalMB)
-		if w <= 0 {
-			w = 1
-		}
-		num += vramBandwidthGBps(g.Name) * w
-		den += w
+	shares := make([]float64, len(caps.GPUs))
+	bws := make([]float64, len(caps.GPUs))
+	for i, g := range caps.GPUs {
+		shares[i] = float64(g.VRAMTotalMB)
+		bws[i] = vramBandwidthGBps(g.Name)
 	}
-	if den == 0 {
+	return harmonicBandwidth(shares, bws)
+}
+
+// harmonicBandwidth is sum(w_i) / sum(w_i/bw_i). A device with no share holds
+// no bytes and is skipped, as is one without a bandwidth; when no device has a
+// share they weigh equally, and with nothing left the default VRAM bandwidth
+// is returned. Identical bandwidths (one device included) return that value
+// exactly, as the arithmetic mean did.
+func harmonicBandwidth(shares, bws []float64) float64 {
+	noShare := true
+	for _, w := range shares {
+		if w > 0 {
+			noShare = false
+			break
+		}
+	}
+	var wSum, tSum, first float64
+	same := true
+	for i, bw := range bws {
+		w := 1.0
+		if !noShare {
+			w = shares[i]
+		}
+		if w <= 0 || bw <= 0 {
+			continue
+		}
+		if first == 0 {
+			first = bw
+		} else if bw != first {
+			same = false
+		}
+		wSum += w
+		tSum += w / bw
+	}
+	if tSum <= 0 {
 		return defaultVRAMBWGBps
 	}
-	return num / den
+	if same {
+		return first
+	}
+	return wSum / tSum
 }
 
 // denseSingleGPUBandwidth returns the fastest GPU that can hold this quant with
