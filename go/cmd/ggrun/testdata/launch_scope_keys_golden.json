@@ -1,0 +1,199 @@
+[
+  {
+    "case": "mixed3/moe/claude-code",
+    "outcome": "plan",
+    "profile_policy_identity": "f64cb278c945ec5cfc2a38ba2d64dea6",
+    "verified_scope_key": "72673f904b2f2caa678ba4c761a69faca0507a9f736be74a741576792a2f640b-plan6",
+    "verified_scope_shape": "d7db1588bf46fcb163b5f363df7931a66ad32fdb6e72ba00a6b15895b377fd6e|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "7eecc1ea5310c9168b85cdb02c9b8de4",
+    "launch_log_scope": "c2baea6b5d70f1cd4ca83dbb",
+    "calibration_scope_key": "0fba3081fb7b039ffa0dd7127a236182bc7ef3679a02cdf7c182241e62fb9808",
+    "argv_hash": "28c3e4d050d5da6ca2f6bc635b7465b5",
+    "reviewer_free_candidate": {
+      "verified_scope_key": "c811df7b6ffd1e488d38705c32f243781fc6ea627a02652364113dcc3efa2f70-plan6",
+      "launch_profile_scope": "fd25221d56a71a6acbc2bcba7631aa40"
+    },
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "c2baea6b5d70f1cd4ca83dbb",
+      "calibration_scope_key": "0fba3081fb7b039ffa0dd7127a236182bc7ef3679a02cdf7c182241e62fb9808",
+      "argv_hash": "28c3e4d050d5da6ca2f6bc635b7465b5"
+    }
+  },
+  {
+    "case": "mixed3/moe/claude-code+reviewer-off",
+    "outcome": "plan",
+    "profile_policy_identity": "f64cb278c945ec5cfc2a38ba2d64dea6",
+    "verified_scope_key": "c811df7b6ffd1e488d38705c32f243781fc6ea627a02652364113dcc3efa2f70-plan6",
+    "verified_scope_shape": "d7db1588bf46fcb163b5f363df7931a66ad32fdb6e72ba00a6b15895b377fd6e|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "fd25221d56a71a6acbc2bcba7631aa40",
+    "launch_log_scope": "c2baea6b5d70f1cd4ca83dbb",
+    "calibration_scope_key": "fb49b8a8fbb1ae883869c594011d7c73b4213e3ddea109a6c66712d64d29bd1e",
+    "argv_hash": "68c09f2dda2a739ce1d237b71c5f1b95",
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "c2baea6b5d70f1cd4ca83dbb",
+      "calibration_scope_key": "fb49b8a8fbb1ae883869c594011d7c73b4213e3ddea109a6c66712d64d29bd1e",
+      "argv_hash": "68c09f2dda2a739ce1d237b71c5f1b95"
+    }
+  },
+  {
+    "case": "gpu24/deepseek4-moe/arch-kv-promotion",
+    "outcome": "plan",
+    "profile_policy_identity": "f41dc1e1112f9cada294e11512e8cb26",
+    "verified_scope_key": "c2ad8747b9431440546595e2e25114520386075b3953f47127290342600300f4-plan6",
+    "verified_scope_shape": "53b2ac35785a304a67aed2cc387d7758330ede39906929d3309f96112af4bcfe|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "8420d6ee9af1e6f977287bde928aac02",
+    "launch_log_scope": "65f7404de3b7fe6e073547a4",
+    "calibration_scope_key": "0d1c08020042686576fdfcce06590b0a59f41b08fdcabb8e724c713b114819a0",
+    "argv_hash": "77e39f541478785b0900a9d22de20475",
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "65f7404de3b7fe6e073547a4",
+      "calibration_scope_key": "0d1c08020042686576fdfcce06590b0a59f41b08fdcabb8e724c713b114819a0",
+      "argv_hash": "77e39f541478785b0900a9d22de20475"
+    }
+  },
+  {
+    "case": "gpu24/dense-small/auto",
+    "outcome": "plan",
+    "profile_policy_identity": "f41dc1e1112f9cada294e11512e8cb26",
+    "verified_scope_key": "11e7f0d5c31df8b5f7cdebe19d32f908f59c27dbfb1d9044fc4e5d6ee52cee42-plan6",
+    "verified_scope_shape": "38999bb9b569016cf298727f01bb0be4d83b37d86aec42e4152d38b787f9090a|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "0d1496583b29f434190b26a0325f6bac",
+    "launch_log_scope": "83a37bd2cba51c7852843b96",
+    "calibration_scope_key": "c2105039a7e901bc84c04483fd8abc05bac8c1cf154f461577968741a0087b34",
+    "argv_hash": "df0649a0cce1c0179c6d844e01ca328e",
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "83a37bd2cba51c7852843b96",
+      "calibration_scope_key": "c2105039a7e901bc84c04483fd8abc05bac8c1cf154f461577968741a0087b34",
+      "argv_hash": "df0649a0cce1c0179c6d844e01ca328e"
+    }
+  },
+  {
+    "case": "gpu24/dense-small/swa-full-withdrawn",
+    "outcome": "plan",
+    "profile_policy_identity": "f41dc1e1112f9cada294e11512e8cb26",
+    "verified_scope_key": "11e7f0d5c31df8b5f7cdebe19d32f908f59c27dbfb1d9044fc4e5d6ee52cee42-plan6",
+    "verified_scope_shape": "38999bb9b569016cf298727f01bb0be4d83b37d86aec42e4152d38b787f9090a|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "0d1496583b29f434190b26a0325f6bac",
+    "launch_log_scope": "83a37bd2cba51c7852843b96",
+    "calibration_scope_key": "c2105039a7e901bc84c04483fd8abc05bac8c1cf154f461577968741a0087b34",
+    "argv_hash": "df0649a0cce1c0179c6d844e01ca328e",
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "83a37bd2cba51c7852843b96",
+      "calibration_scope_key": "c2105039a7e901bc84c04483fd8abc05bac8c1cf154f461577968741a0087b34",
+      "argv_hash": "df0649a0cce1c0179c6d844e01ca328e"
+    }
+  },
+  {
+    "case": "gpu24/dense-small/claude-code",
+    "outcome": "plan",
+    "profile_policy_identity": "f64cb278c945ec5cfc2a38ba2d64dea6",
+    "verified_scope_key": "daf52764977eff6855bd7e06e297000339e6749134d43893f26936616aa2bdf4-plan6",
+    "verified_scope_shape": "38999bb9b569016cf298727f01bb0be4d83b37d86aec42e4152d38b787f9090a|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "f52669a0f03f35d3ece19a404f5454dc",
+    "launch_log_scope": "0b7d427fff06531cec29ff0c",
+    "calibration_scope_key": "cc0324da461f4fb1216b5bf9b94f550d6b4eb7c3a55c0ac3d22322d4f9ee0484",
+    "argv_hash": "119dba0b58d41624e058f689a8ffe3c8",
+    "reviewer_free_candidate": {
+      "verified_scope_key": "fb9ed181db2a89870106e77f44ea191105018772439323f36ddab56b0b4ffac2-plan6",
+      "launch_profile_scope": "69c0a5fb39a8be736c25e89e9225e0cf"
+    },
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "0b7d427fff06531cec29ff0c",
+      "calibration_scope_key": "cc0324da461f4fb1216b5bf9b94f550d6b4eb7c3a55c0ac3d22322d4f9ee0484",
+      "argv_hash": "119dba0b58d41624e058f689a8ffe3c8"
+    }
+  },
+  {
+    "case": "gpu24/dense-small/claude-code+swa-full-withdrawn",
+    "outcome": "plan",
+    "profile_policy_identity": "c6ca3d97c9e42a19d33ea6ea455b1d1c",
+    "verified_scope_key": "daf52764977eff6855bd7e06e297000339e6749134d43893f26936616aa2bdf4-plan6",
+    "verified_scope_shape": "38999bb9b569016cf298727f01bb0be4d83b37d86aec42e4152d38b787f9090a|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "325b176144b24ea460507d951bbc7a55",
+    "launch_log_scope": "0b7d427fff06531cec29ff0c",
+    "calibration_scope_key": "cc0324da461f4fb1216b5bf9b94f550d6b4eb7c3a55c0ac3d22322d4f9ee0484",
+    "argv_hash": "119dba0b58d41624e058f689a8ffe3c8",
+    "reviewer_free_candidate": {
+      "verified_scope_key": "fb9ed181db2a89870106e77f44ea191105018772439323f36ddab56b0b4ffac2-plan6",
+      "launch_profile_scope": "cd88327202d473f5d21c75317e8e4a56"
+    },
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "0b7d427fff06531cec29ff0c",
+      "calibration_scope_key": "cc0324da461f4fb1216b5bf9b94f550d6b4eb7c3a55c0ac3d22322d4f9ee0484",
+      "argv_hash": "119dba0b58d41624e058f689a8ffe3c8"
+    }
+  },
+  {
+    "case": "mixed3/moe/claude-code-gpus-1,2",
+    "outcome": "plan",
+    "profile_policy_identity": "b5ec4d6d4d15f6834de5facb5b3be39e",
+    "verified_scope_key": "0a1ff4c847ba97c56762a57d7f6e35fa56356eb32e305966651bbffadb638300-plan6",
+    "verified_scope_shape": "d7db1588bf46fcb163b5f363df7931a66ad32fdb6e72ba00a6b15895b377fd6e|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "94834f7e87ea7a8588db6501d86b1295",
+    "launch_log_scope": "1a3cf20b61fe47510fc91135",
+    "calibration_scope_key": "b8c3d5576cc982de83f611bee78f456b1bf49c97aa8dea6ca1d45076ffc7c1da",
+    "calibration_scope_key_runtime_view": "067b6c302bf8c760c568c93d481781725dd6698a6b039e273e9dd93b0c3e8e14",
+    "argv_hash": "06eb0194a85803ee5655ef2e2b8be2cd",
+    "reviewer_free_candidate": {
+      "verified_scope_key": "c3a9bac40d4db435beefd0d73b9d4c9d428218d4a81c07d5a16be903270f61d1-plan6",
+      "launch_profile_scope": "c67821d85312a5177786afe580d5c0f9"
+    },
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "1a3cf20b61fe47510fc91135",
+      "calibration_scope_key": "b8c3d5576cc982de83f611bee78f456b1bf49c97aa8dea6ca1d45076ffc7c1da",
+      "argv_hash": "06eb0194a85803ee5655ef2e2b8be2cd"
+    }
+  },
+  {
+    "case": "gpu24/dense-small/claude-code+self-review-on",
+    "outcome": "plan",
+    "profile_policy_identity": "f64cb278c945ec5cfc2a38ba2d64dea6",
+    "verified_scope_key": "fb9ed181db2a89870106e77f44ea191105018772439323f36ddab56b0b4ffac2-plan6",
+    "verified_scope_shape": "38999bb9b569016cf298727f01bb0be4d83b37d86aec42e4152d38b787f9090a|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "69c0a5fb39a8be736c25e89e9225e0cf",
+    "launch_log_scope": "f6985062efb308cee58e4a9f",
+    "calibration_scope_key": "ba39e39113d116a3183570595cef4ff06920788f4156823a420eb46e0b48bd36",
+    "argv_hash": "b8880da7f37737adfc4016e70cbc5aae",
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "0b7d427fff06531cec29ff0c",
+      "calibration_scope_key": "cc0324da461f4fb1216b5bf9b94f550d6b4eb7c3a55c0ac3d22322d4f9ee0484",
+      "argv_hash": "119dba0b58d41624e058f689a8ffe3c8"
+    }
+  },
+  {
+    "case": "gpu24/dense-small/claude-code+self-review-on+reviewer-off",
+    "outcome": "plan",
+    "profile_policy_identity": "f64cb278c945ec5cfc2a38ba2d64dea6",
+    "verified_scope_key": "fb9ed181db2a89870106e77f44ea191105018772439323f36ddab56b0b4ffac2-plan6",
+    "verified_scope_shape": "38999bb9b569016cf298727f01bb0be4d83b37d86aec42e4152d38b787f9090a|golden-mainline-build+load-mode-v2|llama|/usr/bin/ggrun-golden-llama-server",
+    "launch_profile_scope": "69c0a5fb39a8be736c25e89e9225e0cf",
+    "launch_log_scope": "f6985062efb308cee58e4a9f",
+    "calibration_scope_key": "ba39e39113d116a3183570595cef4ff06920788f4156823a420eb46e0b48bd36",
+    "argv_hash": "b8880da7f37737adfc4016e70cbc5aae",
+    "dry_run_order": {
+      "profile_policy_identity": "",
+      "verified_scope_key": "",
+      "launch_log_scope": "f6985062efb308cee58e4a9f",
+      "calibration_scope_key": "ba39e39113d116a3183570595cef4ff06920788f4156823a420eb46e0b48bd36",
+      "argv_hash": "b8880da7f37737adfc4016e70cbc5aae"
+    }
+  }
+]
