@@ -92,3 +92,28 @@ ggrun backend register --tag new-model --path /path/to/llama-server \
 Use `ggrun backend list` to see the binary, source revision and route. A CLI or
 config `--backend` selection remains authoritative and disables automatic
 architecture routing for that launch.
+
+## Status and cleanup
+
+`ggrun backend status` reports, per backend and without network access: the
+build's age, whether its build or checkout is off the recipe's pinned commit,
+and whether the catalog marks the recipe `superseded_by` something upstream
+(with the catalog's evidence). It never changes which backend a launch picks.
+`ggrun backend update` prints a one-line note for a superseded entry.
+
+`ggrun backend remove <tag>` unregisters a backend. With `--purge` it also
+deletes the backend's `.src/fork-*` source tree and builds. It first lists what
+goes, with sizes, and asks (or takes `--yes`; with no terminal and no `--yes`
+it refuses). `--dry-run` only lists. It refuses a tree outside `.src`, a
+symlinked tree, a tree another registration uses, the mainline and ik
+checkouts, and any tree a running process executes from or has as its working
+directory; it never kills anything. Where ggrun cannot list processes (Windows,
+macOS) it refuses unless `--force-not-running` says you checked.
+
+`ggrun backend gc` lists `.src/fork-*` trees no registration uses, plus
+leftover `build-*-prev-*`/`-candidate-*` directories of failed or replaced
+updates. It deletes nothing by default; `--delete` asks first, `--yes` does not.
+Same refusals, and trees changed in the last 30 minutes are skipped.
+
+Each build records its duration and resulting tree size in `backends.json`
+(`build`); the next build of that tag quotes them instead of "30-60 min".

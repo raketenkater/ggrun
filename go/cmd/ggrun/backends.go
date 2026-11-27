@@ -37,7 +37,13 @@ func backendUsage() {
   install <recipe> [flags]          Build/register a reviewed recipe (for example hy3)
   add <git-url> [flags]             Clone, build, and register a custom llama.cpp backend
   register [flags]                  Register an already-built binary
-  remove <tag>                      Unregister a backend
+  remove <tag> [--purge] [--dry-run] [--yes] [--force-not-running]
+                                    Unregister a backend; --purge also deletes its
+                                    source tree and builds (asks first, or --yes)
+  status                            Build age, upstream-superseded and pin check
+  gc [--delete] [--yes] [--force-not-running]
+                                    List source trees and build directories no
+                                    backend uses; --delete asks, --yes does not
 
 add/register flags:
   --tag <name>          Selection name (default: derived from URL)
@@ -93,6 +99,10 @@ func cmdBackend(args []string) {
 		cmdBackendVerify(args[1:])
 	case "remove", "rm":
 		cmdBackendRemove(args[1:])
+	case "status":
+		cmdBackendStatus()
+	case "gc":
+		cmdBackendGC(args[1:])
 	default:
 		backendUsage()
 		os.Exit(2)
@@ -211,23 +221,6 @@ func cmdBackendRegister(args []string) {
 	fmt.Printf("Registered backend %q → %s (route-arch: %s)\n", be.Tag, be.Path, be.RouteArch)
 }
 
-func cmdBackendRemove(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "remove needs a tag")
-		os.Exit(2)
-	}
-	found, err := backends.Remove(args[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "remove failed: %v\n", err)
-		os.Exit(1)
-	}
-	if !found {
-		fmt.Fprintf(os.Stderr, "no backend tagged %q\n", args[0])
-		os.Exit(1)
-	}
-	fmt.Printf("Removed backend %q\n", args[0])
-}
-
 func cmdBackendAdd(args []string) {
 	cmdBackendAddRecipe(args, nil)
 }
@@ -302,11 +295,13 @@ func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 		return fmt.Errorf("source checkout failed: %v", err)
 	}
 
-	fmt.Printf("[backend] building (%s)… this can take 30–60 min\n", accel)
+	fmt.Printf("[backend] building (%s)… %s\n", accel, buildEstimate(backends.ByTag(tag)))
+	buildStarted := time.Now()
 	bin, err := buildLlamaFork(srcDir, accel, f["cuda-arch"])
 	if err != nil {
 		return fmt.Errorf("build failed: %v", err)
 	}
+	measured := recordBuild(srcDir, accel, time.Since(buildStarted))
 	if err := validateBackendCandidate(bin, f["route-arch"], accel); err != nil {
 		return fmt.Errorf("backend conformance failed; refusing registration: %v", err)
 	}
@@ -315,7 +310,7 @@ func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 	}
 
 	actualCommit, _ := gitOutput(srcDir, "rev-parse", "HEAD")
-	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit), HelperOnly: strings.EqualFold(f["helper-only"], "true")}
+	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit), HelperOnly: strings.EqualFold(f["helper-only"], "true"), Build: measured}
 	if recipe != nil {
 		be.AppliedPatches = recipe.PatchNames()
 	}

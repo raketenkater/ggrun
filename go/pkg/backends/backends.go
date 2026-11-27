@@ -35,6 +35,17 @@ type Backend struct {
 	// to the build that was working an hour ago, and each retained build costs a
 	// full compiled tree on disk.
 	Previous *BackendVersion `json:"previous,omitempty"`
+	// Build is the measured cost of the last build, recorded when it finishes
+	// so the next build of the same recipe can quote it instead of a constant.
+	Build *BuildRecord `json:"build,omitempty"`
+}
+
+// BuildRecord is what one finished build cost on this machine.
+type BuildRecord struct {
+	Seconds   int64  `json:"seconds"`              // wall time of the compile
+	TreeBytes int64  `json:"tree_bytes,omitempty"` // size of the source tree with its builds afterwards
+	Accel     string `json:"accel,omitempty"`
+	At        string `json:"at,omitempty"` // RFC3339 completion time
 }
 
 // BackendVersion is a superseded build, retained only if its binary still
@@ -69,6 +80,14 @@ type Recipe struct {
 	HelperOnly  bool          `json:"helper_only,omitempty"`
 	Accel       string        `json:"accel,omitempty"`
 	Patches     []RecipePatch `json:"-"`
+
+	// Catalog metadata, empty for most entries. SupersededBy says what replaced
+	// the recipe upstream (read by `ggrun backend status`); it never changes
+	// which backend a launch selects.
+	Kind         string   `json:"kind,omitempty"`
+	SupersededBy string   `json:"superseded_by,omitempty"`
+	Evidence     []string `json:"evidence,omitempty"`
+	Expires      string   `json:"expires,omitempty"`
 }
 
 // Recipes returns a copy of the reviewed built-in recipe catalog.

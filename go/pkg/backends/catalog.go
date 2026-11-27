@@ -184,6 +184,7 @@ func loadCatalog(data []byte, patches fs.FS) (*parsedCatalog, error) {
 			Name: r.Name, Description: r.Description, Tag: r.Tag, GitURL: r.GitURL,
 			Branch: r.Branch, Commit: r.Commit, RouteArch: r.RouteArch,
 			HelperOnly: r.HelperOnly, Accel: r.Accel,
+			Kind: r.Kind, SupersededBy: r.SupersededBy, Evidence: r.Evidence, Expires: r.Expires,
 		}
 		seenPatch := map[string]bool{}
 		for _, p := range r.Patches {
