@@ -76,7 +76,7 @@ const pairOnly = "\x00ggml_row_size\x00q4_0\x00q4_1\x00some_other_list\x00"
 func tableOf(t *testing.T, blob string, chunk int, pad int) (names map[string]bool) {
 	t.Helper()
 	data := append(bytes.Repeat([]byte("x\x00"), pad), blob...)
-	region, _, complete, err := scanTypeTable(bytes.NewReader(data), chunk, 0)
+	region, _, _, complete, err := scanTypeTable(bytes.NewReader(data), chunk, 0, nil)
 	if err != nil || !complete || region == nil {
 		t.Fatalf("chunk %d pad %d: region %d bytes complete %v err %v", chunk, pad, len(region), complete, err)
 	}
@@ -100,7 +100,7 @@ func TestTypeTableIsFoundWhereverItFallsAgainstTheChunks(t *testing.T) {
 	}
 	// A large first block: the table sits well past the first reads.
 	big := append(bytes.Repeat([]byte("abc\x00"), 5000), mainlineTable...)
-	if region, _, complete, err := scanTypeTable(bytes.NewReader(big), 1000, 0); err != nil || !complete || region == nil {
+	if region, _, _, complete, err := scanTypeTable(bytes.NewReader(big), 1000, 0, nil); err != nil || !complete || region == nil {
 		t.Fatalf("big: %d %v %v", len(region), complete, err)
 	}
 }
@@ -129,7 +129,7 @@ func TestClassifyAgainstTheRealTables(t *testing.T) {
 			tokens = append(tokens, n)
 		}
 		sort.Strings(tokens)
-		found, undetermined := classifyTypeNames(asked, tokens)
+		found, undetermined := classifyTypeNames(asked, tokens, nil)
 		if !reflect.DeepEqual(found, tc.found) || !reflect.DeepEqual(undetermined, tc.undetermined) {
 			t.Errorf("%s: found %v undetermined %v\n want %v %v", tc.label, found, undetermined, tc.found, tc.undetermined)
 		}
@@ -137,36 +137,36 @@ func TestClassifyAgainstTheRealTables(t *testing.T) {
 }
 
 func TestTypeTableNeedsBothPairs(t *testing.T) {
-	region, _, complete, err := scanTypeTable(bytes.NewReader([]byte(pairOnly)), 8, 0)
+	region, _, _, complete, err := scanTypeTable(bytes.NewReader([]byte(pairOnly)), 8, 0, nil)
 	if err != nil || !complete || region != nil {
 		t.Fatalf("one pair is no table: %d bytes complete %v err %v", len(region), complete, err)
 	}
 	// The second pair too far from the first.
 	far := "\x00q4_0\x00q4_1\x00" + strings.Repeat("padding\x00", 20) + "q8_0\x00q8_1\x00"
-	if region, _, _, _ := scanTypeTable(bytes.NewReader([]byte(far)), 8, 0); region != nil {
+	if region, _, _, _, _ := scanTypeTable(bytes.NewReader([]byte(far)), 8, 0, nil); region != nil {
 		t.Fatal("a second pair beyond the gap counted")
 	}
 	// The first occurrence is a decoy, the second a real table.
 	both := append([]byte(pairOnly), mainlineTable...)
-	if region, _, _, _ := scanTypeTable(bytes.NewReader(both), 16, 0); region == nil {
+	if region, _, _, _, _ := scanTypeTable(bytes.NewReader(both), 16, 0, nil); region == nil {
 		t.Fatal("a decoy hid the table")
 	}
 }
 
 func TestScanTypeTableIsBounded(t *testing.T) {
 	blob := append(bytes.Repeat([]byte{'x'}, 1000), mainlineTable...)
-	region, read, complete, err := scanTypeTable(bytes.NewReader(blob), 64, 500)
+	region, _, read, complete, err := scanTypeTable(bytes.NewReader(blob), 64, 500, nil)
 	if err != nil || complete || region != nil || read != 500 {
 		t.Fatalf("over the limit: %d bytes, read %d, complete %v, err %v", len(region), read, complete, err)
 	}
-	if _, _, complete, err = scanTypeTable(zeroReader{}, 64, 0); err == nil || complete {
+	if _, _, _, complete, err = scanTypeTable(zeroReader{}, 64, 0, nil); err == nil || complete {
 		t.Fatalf("stalled reader: complete=%v err=%v", complete, err)
 	}
-	_, _, complete, err = scanTypeTable(io.MultiReader(bytes.NewReader([]byte("abc")), iotest.ErrReader(io.ErrClosedPipe)), 64, 0)
+	_, _, _, complete, err = scanTypeTable(io.MultiReader(bytes.NewReader([]byte("abc")), iotest.ErrReader(io.ErrClosedPipe)), 64, 0, nil)
 	if err == nil || complete {
 		t.Fatalf("failing reader: complete=%v err=%v", complete, err)
 	}
-	if got, _, _, err := scanTypeTable(iotest.OneByteReader(bytes.NewReader([]byte(mainlineTable))), 64, 0); err != nil || got == nil {
+	if got, _, _, _, err := scanTypeTable(iotest.OneByteReader(bytes.NewReader([]byte(mainlineTable))), 64, 0, nil); err != nil || got == nil {
 		t.Fatalf("one-byte reads: %v", err)
 	}
 }
@@ -343,5 +343,87 @@ func TestProbeStopsAtTheByteBudget(t *testing.T) {
 	got = probeBackendEncodings(bin, "", []string{"Q4_K"}, 100000, 1<<20, 2)
 	if got.Complete || got.TableSeen {
 		t.Fatalf("file cap: %+v", got)
+	}
+}
+
+// ikScalarNames: the ik build's library keeps the short literals "i8", "i16",
+// "i32", "f32", "i64" and "f64" in a string table of the gguf value types, 2.3 kB
+// before the type-name anchor, and the type table points at those copies. Cut
+// from the ik build's library (op names shortened).
+const ikScalarNames = "\x00GEGLU_ERF\x00GEGLU_QUICK\x00u8\x00i8\x00u16\x00i16\x00u32\x00i32\x00f32\x00bool\x00arr\x00u64\x00i64\x00f64\x00ABS\x00SGN\x00NEG\x00"
+
+// ikLibrary is that layout: the scalar names, 2.3 kB of other strings, the table.
+func ikLibrary() []byte {
+	return append(append([]byte(ikScalarNames), bytes.Repeat([]byte("ADD\x00"), 575)...), ikTable...)
+}
+
+// A name the table region lacks but the file carries as a NUL-terminated string
+// is undetermined, never absent.
+func TestProbeNamesOutsideTheTableRegionAreUndetermined(t *testing.T) {
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", ikLibrary())
+	scalars := []string{"F32", "F64", "I8", "I16", "I32", "I64"}
+	names := append([]string{"Q4_K", "TQ1_0", "NO_SUCH_TYPE_XYZ"}, scalars...)
+	got := ProbeBackendEncodings(bin, "", names)
+	if !got.TableSeen || !got.Complete {
+		t.Fatalf("%+v", got)
+	}
+	for _, n := range scalars {
+		if got.Undetermined[n] != outsideTable || got.Absent(n) {
+			t.Errorf("%s: undetermined %q absent %v", n, got.Undetermined[n], got.Absent(n))
+		}
+	}
+	if got.Found["Q4_K"] == "" || !got.Absent("TQ1_0") || !got.Absent("NO_SUCH_TYPE_XYZ") {
+		t.Fatalf("found %v undetermined %v", got.Found, got.Undetermined)
+	}
+}
+
+// Property: no name present as "name\0" anywhere in the scanned bytes, in any
+// case and with any left boundary, comes back absent; whole table strings come
+// back found.
+func TestProbeNeverReportsAnAbsentNameThatTheFileCarries(t *testing.T) {
+	blob := append(ikLibrary(), mainlineTable...)
+	blob = append(blob, "\x00Some_MIXED_Case\x00ggml_f16\x00"...)
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", blob)
+	seen := map[string]bool{}
+	var names []string
+	for _, str := range bytes.Split(blob, []byte{0}) {
+		for i := 0; i < len(str); i++ {
+			tail := str[i:]
+			ok := len(tail) >= 2 && len(tail) <= 32
+			for _, c := range tail {
+				ok = ok && encodingWordByte(c)
+			}
+			if ok && !seen[string(tail)] {
+				seen[string(tail)] = true
+				names = append(names, string(tail), strings.ToUpper(string(tail)))
+			}
+		}
+	}
+	got := ProbeBackendEncodings(bin, "", names)
+	if !got.Complete {
+		t.Fatalf("%+v", got)
+	}
+	for _, n := range names {
+		if got.Absent(n) {
+			t.Errorf("%q occurs in the file as a NUL-terminated string but is reported absent", n)
+		}
+	}
+}
+
+// When a read bound cuts the file holding the table short, names found stay
+// found but nothing is proven absent: Complete is false.
+func TestProbeFileCutShortIsNotComplete(t *testing.T) {
+	blob := append(append([]byte(mainlineTable), bytes.Repeat([]byte{'x'}, 8000)...), "\x00q1_0\x00"...)
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", blob)
+	got := probeBackendEncodings(bin, "", []string{"Q4_K", "STQ1_0"}, int64(len(mainlineTable)+4500), 1<<20, 48)
+	if !got.TableSeen || got.Complete || got.Absent("STQ1_0") {
+		t.Fatalf("cut short: %+v", got)
+	}
+	if got.Found["Q4_K"] != "llama-server" {
+		t.Fatalf("a name in the table region is still found: %+v", got)
+	}
+	got = probeBackendEncodings(bin, "", []string{"Q4_K", "STQ1_0"}, 1<<20, 1<<20, 48)
+	if !got.Complete || !got.Absent("STQ1_0") {
+		t.Fatalf("read in full: %+v", got)
 	}
 }

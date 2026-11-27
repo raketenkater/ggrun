@@ -37,13 +37,22 @@ import (
 // Undetermined is neither found nor absent. Only strings in the table count, so
 // an unrelated table elsewhere in the build cannot report a name found.
 //
+// Names outside the table. The linker keeps one copy of an identical short
+// literal ("f32", "i64"), and that copy may sit in another string table, so the
+// table region can lack a name the backend has. The scan of the file that holds
+// the table therefore also records every requested name that occurs anywhere in
+// it as "name" followed by NUL (case-insensitive, any left boundary, so also as
+// the tail of a longer string). Such a name that is not a table string is
+// Undetermined, never absent. This costs no extra pass: the file is read in
+// full once, and when a limit cuts it short Complete is false.
+//
 // What a hit means: the backend's type table has the name; it does not prove
 // the GPU backends have kernels for it, and a help hit may only be the
 // KV-cache type list.
 
 const (
 	encodingScanChunk    = 4 << 20
-	encodingMaxFileBytes = 256 << 20 // read per file
+	encodingMaxFileBytes = 512 << 20 // read per file; a whole library (an ik build's is 346 MB)
 	encodingMaxTotal     = 1 << 30   // read per backend
 	encodingMaxFiles     = 48
 
@@ -67,13 +76,17 @@ type EncodingProbe struct {
 	// holding the table (a symlink resolved).
 	Found map[string]string
 	// Undetermined maps each requested name that is no string of the type table
-	// but a suffix of one (name -> that string) to it. It is neither found nor
-	// absent: use Absent, never "not in Found", to ask whether a name is missing.
+	// but may still be a type of the backend to the evidence: the longer table
+	// string it ends (name -> "bf16"), or "outside the type table" when the name
+	// occurs elsewhere in the file as a NUL-terminated string. It is neither
+	// found nor absent: use Absent, never "not in Found", to ask whether a name
+	// is missing.
 	Undetermined map[string]string
 	// TableSeen is true when a file with a recognisable type table was read.
 	TableSeen bool
-	// Complete is true when every requested name was found, or the type table
-	// was read (TableSeen). Only then does a name that is in neither Found nor
+	// Complete is true when every requested name was found, or the file holding
+	// the type table was read in full: TableSeen and not cut short by a read
+	// bound. Only then does a name that is in neither Found nor
 	// Undetermined mean the backend lacks it. When false nothing is known about
 	// the names not in Found: no build was given, no file held the table, a file
 	// was unreadable or over the read bounds, or the libraries holding the table
@@ -131,21 +144,24 @@ func uniqueEncodingNames(names []string) []string {
 	return out
 }
 
-// scanTypeTable streams r for the type table anchor and returns the region
-// around it, reading at most limit bytes (0 = no limit) in reads of chunk
-// bytes. region is nil when the stream holds no table; complete is false when
-// the limit or an error ended the scan before the answer was known.
-func scanTypeTable(r io.Reader, chunk int, limit int64) (region []byte, read int64, complete bool, err error) {
+// scanTypeTable streams r once, reading at most limit bytes (0 = no limit) in
+// reads of chunk bytes. It returns the region around the type table anchor (nil
+// when the stream holds none) and which of names occur anywhere in the stream as
+// "name" followed by NUL, ignoring case. complete is true only when the stream
+// was read to its end: a limit or an error leaves region and occurs as far as
+// they got, with complete false.
+func scanTypeTable(r io.Reader, chunk int, limit int64, names []string) (region []byte, occurs map[string]bool, read int64, complete bool, err error) {
 	if chunk < 1 {
 		chunk = encodingScanChunk
 	}
 	buf := make([]byte, chunk)
+	tr := newNeedleSet(names)
 	var win []byte
 	from := 0 // win[from:] has not been searched for an anchor start
 	eof := false
 	idle := 0
 	for {
-		for {
+		for region == nil {
 			i := bytes.Index(win[from:], tableAnchorA)
 			if i < 0 {
 				if n := len(win) - len(tableAnchorA) + 1; n > from {
@@ -167,21 +183,25 @@ func scanTypeTable(r io.Reader, chunk int, limit int64) (region []byte, read int
 				if hi > len(win) {
 					hi = len(win)
 				}
-				return append([]byte(nil), win[lo:hi]...), read, true, nil
+				region = append([]byte(nil), win[lo:hi]...)
+				win = nil
+				break
 			}
 			from = i + 1
 		}
 		if eof {
-			return nil, read, true, nil
+			return region, tr.result(), read, true, nil
 		}
-		if drop := from - tableRegionBefore; drop > 0 {
-			win = append([]byte(nil), win[drop:]...)
-			from -= drop
+		if region == nil {
+			if drop := from - tableRegionBefore; drop > 0 {
+				win = append([]byte(nil), win[drop:]...)
+				from -= drop
+			}
 		}
 		want := len(buf)
 		if limit > 0 {
 			if read >= limit {
-				return nil, read, false, nil
+				return region, tr.result(), read, false, nil
 			}
 			if int64(want) > limit-read {
 				want = int(limit - read)
@@ -189,10 +209,13 @@ func scanTypeTable(r io.Reader, chunk int, limit int64) (region []byte, read int
 		}
 		n, readErr := r.Read(buf[:want])
 		read += int64(n)
-		win = append(win, buf[:n]...)
+		tr.feed(buf[:n])
+		if region == nil {
+			win = append(win, buf[:n]...)
+		}
 		if n == 0 && readErr == nil {
 			if idle++; idle > 100 {
-				return nil, read, false, io.ErrNoProgress
+				return region, tr.result(), read, false, io.ErrNoProgress
 			}
 		} else {
 			idle = 0
@@ -200,9 +223,70 @@ func scanTypeTable(r io.Reader, chunk int, limit int64) (region []byte, read int
 		if readErr == io.EOF {
 			eof = true
 		} else if readErr != nil {
-			return nil, read, false, readErr
+			return region, tr.result(), read, false, readErr
 		}
 	}
+}
+
+// needleSet records which names occur in a stream as lower-case "name\0".
+type needleSet struct {
+	names   []string
+	needles [][]byte
+	seen    []bool
+	left    int
+	overlap int
+	carry   []byte
+}
+
+func newNeedleSet(names []string) *needleSet {
+	s := &needleSet{}
+	for _, n := range uniqueEncodingNames(names) {
+		needle := append([]byte(strings.ToLower(n)), 0)
+		s.names = append(s.names, n)
+		s.needles = append(s.needles, needle)
+		if len(needle)-1 > s.overlap {
+			s.overlap = len(needle) - 1
+		}
+	}
+	s.seen = make([]bool, len(s.names))
+	s.left = len(s.names)
+	return s
+}
+
+// feed adds the next bytes of the stream.
+func (s *needleSet) feed(data []byte) {
+	if s.left == 0 || len(data) == 0 {
+		return
+	}
+	window := make([]byte, 0, len(s.carry)+len(data))
+	window = append(append(window, s.carry...), data...)
+	if len(window) > s.overlap {
+		s.carry = append(s.carry[:0], window[len(window)-s.overlap:]...)
+	} else {
+		s.carry = append(s.carry[:0], window...)
+	}
+	for i, c := range window { // ASCII lower-casing, in place
+		if c >= 'A' && c <= 'Z' {
+			window[i] = c + 0x20
+		}
+	}
+	for i, needle := range s.needles {
+		if !s.seen[i] && bytes.Contains(window, needle) {
+			s.seen[i] = true
+			s.left--
+		}
+	}
+}
+
+// result lists the names seen.
+func (s *needleSet) result() map[string]bool {
+	out := map[string]bool{}
+	for i, n := range s.names {
+		if s.seen[i] {
+			out[n] = true
+		}
+	}
+	return out
 }
 
 // tableAnchorHolds checks the second pair after a first pair at w[0:].
@@ -242,9 +326,14 @@ func typeTableTokens(region []byte) []string {
 	return out
 }
 
+// outsideTable is the Undetermined evidence for a name that is no table string
+// but occurs elsewhere in the file as a NUL-terminated string.
+const outsideTable = "outside the type table"
+
 // classifyTypeNames splits names into those that are strings of the table
-// (found) and those that are only a suffix of one (undetermined: name -> string).
-func classifyTypeNames(names, tokens []string) (found []string, undetermined map[string]string) {
+// (found) and those that are only a suffix of one (undetermined: name -> string),
+// or occur elsewhere in the file (undetermined: outsideTable).
+func classifyTypeNames(names, tokens []string, occurs map[string]bool) (found []string, undetermined map[string]string) {
 	undetermined = map[string]string{}
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
@@ -268,6 +357,9 @@ func classifyTypeNames(names, tokens []string) (found []string, undetermined map
 				undetermined[name] = tokens[i]
 				break
 			}
+		}
+		if _, ok := undetermined[name]; !ok && occurs[name] {
+			undetermined[name] = outsideTable
 		}
 	}
 	return found, undetermined
@@ -438,6 +530,7 @@ func probeBackendEncodings(binaryPath, help string, names []string, maxFileBytes
 		files = files[:maxFiles]
 	}
 	budget := maxTotal
+	fullyRead := false // the file holding the table was read to its end
 	for _, f := range files {
 		if budget <= 0 {
 			break
@@ -446,13 +539,14 @@ func probeBackendEncodings(binaryPath, help string, names []string, maxFileBytes
 		if budget < limit {
 			limit = budget
 		}
-		region, read, _, _ := scanEncodingFile(f, limit)
+		region, occurs, read, complete, _ := scanEncodingFile(f, limit, remaining)
 		budget -= read
 		if region == nil {
 			continue
 		}
 		probe.TableSeen = true
-		found, undetermined := classifyTypeNames(remaining, typeTableTokens(region))
+		fullyRead = complete
+		found, undetermined := classifyTypeNames(remaining, typeTableTokens(region), occurs)
 		for _, n := range found {
 			probe.Found[n] = filepath.Base(f)
 		}
@@ -461,15 +555,15 @@ func probeBackendEncodings(binaryPath, help string, names []string, maxFileBytes
 		}
 		break
 	}
-	probe.Complete = probe.TableSeen
+	probe.Complete = probe.TableSeen && fullyRead
 	return probe
 }
 
-func scanEncodingFile(path string, limit int64) ([]byte, int64, bool, error) {
+func scanEncodingFile(path string, limit int64, names []string) ([]byte, map[string]bool, int64, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, nil, 0, false, err
 	}
 	defer f.Close()
-	return scanTypeTable(f, encodingScanChunk, limit)
+	return scanTypeTable(f, encodingScanChunk, limit, names)
 }
