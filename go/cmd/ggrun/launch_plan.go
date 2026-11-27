@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -171,8 +172,11 @@ type launchPlan struct {
 //     the planner, not by the driver);
 //   - resident reviewer: none; an inventory cannot describe running processes;
 //   - Nano reviewer GPU check (--claude-reviewer nanbeige; it runs the reviewer
-//     backend with --list-devices): capable when the inventory lists a GPU,
-//     which plans the opt-in's larger seat.
+//     backend with --list-devices and needs a CUDA device there): capable only
+//     when an inventory GPU's name says NVIDIA. detect.GPU carries no vendor,
+//     and ComputeCap holds the Vulkan API version on Vulkan inventories, so the
+//     name is the only marker; a card it cannot identify counts as not
+//     capable, which keeps the Qwen reviewer a non-CUDA machine could run.
 func useInventoryReadings(inv *detect.Capabilities, req *launchRequest) (restore func()) {
 	savedUsed, savedFree, savedResident, savedNano := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable
 	byIndex := map[int]detect.GPU{}
@@ -196,7 +200,17 @@ func useInventoryReadings(inv *detect.Capabilities, req *launchRequest) (restore
 		return free
 	}
 	residentReviewerVRAM = func(string) int { return 0 }
-	claudeNanoGPUCapable = func(string) bool { return inv != nil && len(inv.GPUs) > 0 }
+	claudeNanoGPUCapable = func(string) bool {
+		if inv == nil {
+			return false
+		}
+		for _, g := range inv.GPUs {
+			if strings.Contains(strings.ToLower(g.Name), "nvidia") {
+				return true
+			}
+		}
+		return false
+	}
 	return func() {
 		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable = savedUsed, savedFree, savedResident, savedNano
 	}

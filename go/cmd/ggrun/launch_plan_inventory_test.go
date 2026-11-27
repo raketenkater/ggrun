@@ -2,8 +2,10 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -294,8 +296,8 @@ func TestInventoryPlanDerivesLiveReadingsFromTheInventory(t *testing.T) {
 			t.Cleanup(func() { claudeNanoArtifactReady, claudeNanoBackend = savedReady, savedBackend })
 			host := &inventoryTestHost{inventory: goldenPlanInventories["gpu24"]}
 			host.install(t)
-			reviewer := func(withInventory bool) string {
-				req, model := inventoryTestFixture(t, goldenPlanInventories["gpu24"], "dense-small", "--claude-code", "--claude-reviewer", "nanbeige")
+			reviewer := func(withInventory bool, inventory string) string {
+				req, model := inventoryTestFixture(t, inventory, "dense-small", "--claude-code", "--claude-reviewer", "nanbeige")
 				if !withInventory {
 					req.InventoryPath = ""
 				}
@@ -305,13 +307,95 @@ func TestInventoryPlanDerivesLiveReadingsFromTheInventory(t *testing.T) {
 				}
 				return p.Req.ReviewerReservation.Name
 			}
-			if got := reviewer(true); got != claudeNanoCompanionName || host.nano != 0 {
-				t.Fatalf("inventory plan seats %q after %d device listings, want %q from the inventory's GPUs and none", got, host.nano, claudeNanoCompanionName)
+			if got := reviewer(true, goldenPlanInventories["gpu24"]); got != claudeNanoCompanionName || host.nano != 0 {
+				t.Fatalf("NVIDIA inventory plan seats %q after %d device listings, want %q and none", got, host.nano, claudeNanoCompanionName)
 			}
-			if got := reviewer(false); got == claudeNanoCompanionName || host.nano == 0 {
+			// A card the inventory does not name as NVIDIA cannot be shown to
+			// have a CUDA device: the Qwen reviewer, as the real check would
+			// conclude on that machine.
+			nvidia24 := goldenPlanGPU(0, 24576, 16, 1008000)
+			for vendor, card := range map[string]string{
+				"amd":     strings.Replace(nvidia24, "NVIDIA synthetic", "AMD Radeon synthetic", 1),
+				"unknown": strings.Replace(nvidia24, "NVIDIA synthetic", "synthetic", 1),
+			} {
+				if got := reviewer(true, goldenPlanInventory(card)); got == claudeNanoCompanionName || host.nano != 0 {
+					t.Fatalf("%s inventory plan seats %q after %d device listings, want the Qwen reviewer and none", vendor, got, host.nano)
+				}
+			}
+			if got := reviewer(false, goldenPlanInventories["gpu24"]); got == claudeNanoCompanionName || host.nano == 0 {
 				t.Fatalf("host plan seats %q after %d device listings; the host's listing must decide", got, host.nano)
 			}
 		})
+	})
+
+	// --gpus on three different cards: the readers must answer for the
+	// selected PHYSICAL card behind each runtime index. The fixture makes a
+	// reader keyed by the runtime (visible) index give a different margin.
+	t.Run("fit-margin-gpus", func(t *testing.T) {
+		card := func(index, totalMB, usedMB, reservedMB int) string {
+			return strings.Replace(goldenPlanGPU(index, totalMB, 16, 504000), `"vram_used_mb":300`,
+				fmt.Sprintf(`"vram_used_mb":%d,"vram_reserved_mb":%d`, usedMB, reservedMB), 1)
+		}
+		inventory := goldenPlanInventory(card(0, 12288, 6300, 0), card(1, 24576, 16300, 3000), card(2, 16384, 300, 6000))
+		for _, gpus := range []string{"1", "2,0"} {
+			launchOrderRunCase(t, launchOrderCase{goldenPlanCase: goldenPlanCase{name: "ik/three-cards/dense-large/gpus-" + gpus}}, func(t *testing.T) {
+				host := &inventoryTestHost{inventory: inventory, fatal: true}
+				host.install(t)
+				req, model := inventoryTestFixture(t, inventory, "dense-large", "--gpus", gpus)
+				p, planErr := planLaunch(req, host.inputs(t, "gpus", model, goldenPlanBackend(t, "ik")))
+				if planErr != nil || p == nil || p.Refusal != nil {
+					t.Fatalf("plan %+v, error %+v; want a plan", p, planErr)
+				}
+				if !backendFitsItself(p.ServerArgv) {
+					t.Fatalf("--gpus %s does not reach the --fit binding: %v", gpus, p.ServerArgv)
+				}
+				inv := p.Caps.GPUs
+				// The selection as the backend numbers it: sorted physical
+				// indexes, renumbered from 0.
+				var physical []int
+				for _, f := range strings.Split(gpus, ",") {
+					n, _ := strconv.Atoi(f)
+					physical = append(physical, n)
+				}
+				sort.Ints(physical)
+				selected := &detect.Capabilities{}
+				for visible, idx := range physical {
+					g := inv[idx]
+					g.Index = visible
+					selected.GPUs = append(selected.GPUs, g)
+				}
+				limits := allocationGuardLimitsMB(p.Config.CacheDir, selected)
+				margin := func(gaps []int) string {
+					m := gaps[0]
+					for _, g := range gaps {
+						m = max(m, g)
+					}
+					if m <= ikDefaultFitMarginMB {
+						return ""
+					}
+					return strconv.Itoa((m + fitMarginStepMB - 1) / fitMarginStepMB * fitMarginStepMB)
+				}
+				var right, wrong []int
+				for visible, idx := range physical {
+					g := inv[idx]
+					overhead := g.VRAMTotalMB - g.VRAMUsedMB - g.VRAMReservedMB - limits[visible]
+					// Selected card: driver free total - used, guard limit as planned.
+					right = append(right, g.VRAMTotalMB-g.VRAMUsedMB-limits[visible])
+					// Readers indexed by the visible index read card `visible`.
+					other := inv[visible]
+					used := max(g.VRAMUsedMB, other.VRAMUsedMB)
+					limit := max(g.VRAMTotalMB-used-g.VRAMReservedMB-overhead, 0)
+					wrong = append(wrong, min(other.VRAMTotalMB-other.VRAMUsedMB, g.VRAMTotalMB-used)-limit)
+				}
+				want := margin(right)
+				if want == "" || want == margin(wrong) {
+					t.Fatalf("fixture cannot tell the mapping apart: selected-card margin %q, visible-index margin %q", want, margin(wrong))
+				}
+				if got := inventoryTestArgValue(p.ServerArgv, fitMarginFlag); got != want {
+					t.Fatalf("--gpus %s: %s = %q, want %q from the selected physical cards (a visible-index reader gives %q)", gpus, fitMarginFlag, got, want, margin(wrong))
+				}
+			})
+		}
 	})
 
 	t.Run("vulkan-order", func(t *testing.T) {
