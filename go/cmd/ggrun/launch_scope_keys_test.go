@@ -457,7 +457,9 @@ func scopeKeyProperties(t *testing.T, c scopeKeyCase, run launchOrderRun, home s
 		edit   func(*launchRequest)
 		rekeys bool
 	}{
-		{"KV quality", func(r *launchRequest) { r.KVQuality = "q4_0" }, true},
+		// The resolved strategy carries its own KV quality, which the key
+		// takes over the request's; only the strategy edit below moves it.
+		{"a request-only KV quality edit", func(r *launchRequest) { r.KVQuality = "q4_0" }, false},
 		{"--swa-full in the passthrough", func(r *launchRequest) { r.ExtraArgs = append(append([]string(nil), r.ExtraArgs...), "--swa-full") }, true},
 		{"the seated reviewer", func(r *launchRequest) { r.ReviewerReservation = nil }, seated},
 		{"ProfilePolicyIdentity", func(r *launchRequest) { r.ProfilePolicyIdentity += "x" }, false},
@@ -474,6 +476,12 @@ func scopeKeyProperties(t *testing.T, c scopeKeyCase, run launchOrderRun, home s
 		scopeKeyExpectDiff(t, name, "the --gpus restriction is part of the calibration key", calOf(func(r *launchRequest) { r.GPUsFlag = "" }), cal)
 	}
 	grown := *run.strategy
+	grown.KVQuality = "q4_0"
+	if run.strategy.KVQuality == "" || run.strategy.KVQuality == "q4_0" {
+		t.Errorf("%s: the strategy's KV quality is %q, so the strategy-over-request check cannot bite", name, run.strategy.KVQuality)
+	}
+	scopeKeyExpectDiff(t, name, "the calibration key follows the strategy's KV quality", calibrationScopeKey(req, model, be, caps, &grown), cal)
+	grown = *run.strategy
 	grown.ContextSize += 1024
 	scopeKeyExpectDiff(t, name, "the calibration key follows the strategy's context", calibrationScopeKey(req, model, be, caps, &grown), cal)
 	grown = *run.strategy
@@ -610,6 +618,11 @@ func TestLaunchScopeKeyPinning(t *testing.T) {
 					launch = launchOrderReplay(t, c.launchOrderCase, true, nil)
 					again = launchOrderReplay(t, c.launchOrderCase, true, nil)
 				})
+				for _, r := range []launchOrderRun{dry, launch} {
+					if r.record.Outcome != "plan" {
+						t.Errorf("%s (%s order): outcome %q %s, want a plan so every key is computed", c.name, r.record.Order, r.record.Outcome, r.record.Error)
+					}
+				}
 				rec := scopeKeyRecordOf(c, dry, launch, home)
 				if second := scopeKeyRecordOf(c, dry, again, home); !bytes.Equal(scopeKeyMarshal(t, rec), scopeKeyMarshal(t, second)) {
 					t.Errorf("%s: two identical launch-order replays computed different keys\nfirst:  %s\nsecond: %s", c.name, scopeKeyMarshal(t, rec), scopeKeyMarshal(t, second))
