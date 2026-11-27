@@ -226,3 +226,262 @@ func TestUnstartedCompanionSeatIsNotCountedAsFree(t *testing.T) {
 		t.Fatalf("margin %d counts the unstarted reviewer's seat as free", m)
 	}
 }
+
+// fitBindingCaps is a three-GPU host. The launch is restricted with --gpus 1,2,
+// so the backend sees physical 1 as CUDA0 and physical 2 as CUDA1. Physical 0
+// has the largest would-be gap: a margin taken over the physical inventory
+// instead of the runtime devices would be 9216, not 4096.
+func fitBindingCaps() *detect.Capabilities {
+	return &detect.Capabilities{
+		GPUs: []detect.GPU{
+			{Index: 0, Name: "GPU A", PCIBusID: "00000000:01:00.0", VRAMTotalMB: 12282, VRAMUsedMB: 300, VRAMReservedMB: 8000},
+			{Index: 1, Name: "GPU B", PCIBusID: "00000000:02:00.0", VRAMTotalMB: 24564, VRAMUsedMB: 500, VRAMReservedMB: 1000},
+			{Index: 2, Name: "GPU C", PCIBusID: "00000000:03:00.0", VRAMTotalMB: 12288, VRAMUsedMB: 400, VRAMReservedMB: 3000},
+		},
+		RAM: detect.RAMInfo{TotalMB: 262144, FreeMB: 200000},
+		CPU: detect.CPUInfo{Cores: 24},
+	}
+}
+
+// fitBindingDriverCSV is nvidia-smi's "pci.bus_id, memory.free" for the three
+// physical GPUs, before the reviewer has started.
+const fitBindingDriverCSV = "00000000:01:00.0, 11900\n00000000:02:00.0, 23000\n00000000:03:00.0, 8000\n"
+
+const fitBindingReviewer = "claude-auto-reviewer"
+
+func fitBindingIK() *backendInfo {
+	return &backendInfo{Path: "/x/ik_llama-server-cuda", Dialect: "ik_llama", Tag: "ik_llama", IsIK: true, Identity: "test", Help: goldenPlanIKHelp}
+}
+
+// fitBindingPlan is a backend-fit plan under --gpus 1,2 with the reviewer's
+// 6144 MiB seat planned on physical GPU seatPhysical (-1: on the CPU).
+func fitBindingPlan(seatPhysical int) (*launchRequest, *placement.Strategy) {
+	req := &launchRequest{CtxFlag: "fit", Parallel: 1, ParallelSet: true, RAMLimitPercent: 95, GPUsFlag: "1,2",
+		ReviewerReservation: &placement.CompanionReservation{Name: fitBindingReviewer, VRAMMB: 6144}}
+	s := &placement.Strategy{Type: placement.DenseCPUOffload, BackendSupportsFit: true, ContextSize: 32768, Parallel: 1, BatchSize: 2048, UBatchSize: 512,
+		CompanionPlacements: []placement.CompanionPlacement{{Name: fitBindingReviewer, GPU: seatPhysical}}}
+	return req, s
+}
+
+// fitBindingProbe records what the binding asked of the host.
+type fitBindingProbe struct {
+	runtime     []detect.Capabilities // the views handed to the driver reading
+	usedQueried map[int]bool          // physical indexes whose live usage was read
+}
+
+// stubFitBindingHost replaces both live readings, so no nvidia-smi runs, and
+// points the home directory at a temp dir: with no system probe in the cache
+// dir, the overhead lookup would otherwise search ~/.cache/ggrun.
+func stubFitBindingHost(t *testing.T, driver func(*detect.Capabilities) map[int]int) *fitBindingProbe {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	p := &fitBindingProbe{usedQueried: map[int]bool{}}
+	savedUsed, savedFree := runtimeVRAMUsedMB, fitDriverFreeVRAM
+	runtimeVRAMUsedMB = func(physical int) int {
+		p.usedQueried[physical] = true
+		return 0
+	}
+	fitDriverFreeVRAM = func(runtime *detect.Capabilities) map[int]int {
+		if runtime != nil {
+			view := *runtime
+			view.GPUs = append([]detect.GPU(nil), runtime.GPUs...)
+			p.runtime = append(p.runtime, view)
+		}
+		return driver(runtime)
+	}
+	t.Cleanup(func() { runtimeVRAMUsedMB, fitDriverFreeVRAM = savedUsed, savedFree })
+	return p
+}
+
+func fitBindingDriver(csv string) func(*detect.Capabilities) map[int]int {
+	return func(runtime *detect.Capabilities) map[int]int {
+		if runtime == nil {
+			return nil
+		}
+		return freeVRAMByRuntimeDevice(csv, runtime.GPUs)
+	}
+}
+
+// fitDev is one runtime device as the binding's formula reads it; used
+// includes a planned companion seat.
+type fitDev struct{ total, used, reserved, driverFree int }
+
+// documentedFitMargin is guardedFitArgs' documented margin written out
+// independently: ceil256 of the largest min(driverFree, total-used) - limit,
+// with limit = total - used - reserved - the unmeasured CUDA overhead, or -1
+// when that gap is within ik's default.
+func documentedFitMargin(devs []fitDev) int {
+	gap := 0
+	for _, d := range devs {
+		free := min(d.driverFree, d.total-d.used)
+		gap = max(gap, free-(d.total-d.used-d.reserved-placement.UnmeasuredCUDAOverheadMB))
+	}
+	if gap <= ikDefaultFitMarginMB {
+		return -1
+	}
+	return (gap + fitMarginStepMB - 1) / fitMarginStepMB * fitMarginStepMB
+}
+
+func fitMarginCount(args []string) int {
+	n := 0
+	for _, a := range args {
+		if a == fitMarginFlag {
+			n++
+		}
+	}
+	return n
+}
+
+func hasArgPair(args []string, name, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == name && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// The ik --fit-margin binding, end to end through buildLaunchServerArgs on a
+// renumbered --gpus view. The launch-plan golden never reaches the margin
+// branch (its stubbed driver free equals the inventory's), so this pins the
+// binding before the launch path is restructured.
+//
+// Runtime view with the reviewer seated on physical 2:
+//
+//	CUDA0 = physical 1: limit 24564-500-1000-1024 = 22040, seen free min(23000, 24064) = 23000, gap 960
+//	CUDA1 = physical 2: limit 12288-6544-3000-1024 = 1720, seen free min(8000, 5744) = 5744, gap 4024
+//
+// margin = ceil256(4024) = 4096. With the seat charged to physical 1 instead it
+// is 2048, with no seat no margin, and over all three physical GPUs 9216.
+func TestFitMarginBindingThroughBuildLaunchServerArgs(t *testing.T) {
+	seatOn2 := []fitDev{{24564, 500, 1000, 23000}, {12288, 400 + 6144, 3000, 8000}}
+	if got := documentedFitMargin(seatOn2); got != 4096 {
+		t.Fatalf("fixture: documented margin %d, want the hand-computed 4096", got)
+	}
+	model := fitTestModel(262144, 9000)
+	build := func(cfg *config.Config, be *backendInfo, req *launchRequest, s *placement.Strategy) []string {
+		return buildLaunchServerArgs(req, cfg, be, fitBindingCaps(), model, s)
+	}
+	forbidden := func(t *testing.T) func(*detect.Capabilities) map[int]int {
+		return func(*detect.Capabilities) map[int]int {
+			t.Errorf("driver free VRAM read although the binding cannot apply")
+			return nil
+		}
+	}
+
+	t.Run("margin is the formula over the runtime devices", func(t *testing.T) {
+		p := stubFitBindingHost(t, fitBindingDriver(fitBindingDriverCSV))
+		req, s := fitBindingPlan(2)
+		args := build(&config.Config{CacheDir: t.TempDir()}, fitBindingIK(), req, s)
+		if m := fitMarginOf(t, args); m != documentedFitMargin(seatOn2) {
+			t.Fatalf("margin %d, want %d: %v", m, documentedFitMargin(seatOn2), args)
+		}
+		if len(p.runtime) == 0 {
+			t.Fatal("the binding never read driver free VRAM")
+		}
+		view := p.runtime[len(p.runtime)-1]
+		if len(view.GPUs) != 2 || view.GPUs[0].Index != 0 || view.GPUs[1].Index != 1 ||
+			view.GPUs[0].PCIBusID != "00000000:02:00.0" || view.GPUs[1].PCIBusID != "00000000:03:00.0" {
+			t.Fatalf("driver read for %+v, want CUDA0 = physical 1 and CUDA1 = physical 2", view.GPUs)
+		}
+		if p.usedQueried[0] || !p.usedQueried[1] || !p.usedQueried[2] {
+			t.Fatalf("live usage read for physical %v, want 1 and 2 only", p.usedQueried)
+		}
+	})
+
+	t.Run("three rebuilds give one identical margin", func(t *testing.T) {
+		stubFitBindingHost(t, fitBindingDriver(fitBindingDriverCSV))
+		req, s := fitBindingPlan(2)
+		cfg := &config.Config{CacheDir: t.TempDir()}
+		first := build(cfg, fitBindingIK(), req, s)
+		for i := 0; i < 3; i++ {
+			args := build(cfg, fitBindingIK(), req, s)
+			if formatCommand(args) != formatCommand(first) {
+				t.Fatalf("rebuild %d differs:\n%v\n%v", i+1, first, args)
+			}
+			if n := fitMarginCount(args); n != 1 {
+				t.Fatalf("rebuild %d carries %d %s: %v", i+1, n, fitMarginFlag, args)
+			}
+		}
+	})
+
+	t.Run("a user margin is kept", func(t *testing.T) {
+		stubFitBindingHost(t, fitBindingDriver(fitBindingDriverCSV))
+		req, s := fitBindingPlan(2)
+		req.ExtraArgs = []string{fitMarginFlag, "300"}
+		args := build(&config.Config{CacheDir: t.TempDir()}, fitBindingIK(), req, s)
+		if n, m := fitMarginCount(args), fitMarginOf(t, args); n != 1 || m != 300 {
+			t.Fatalf("%d %s, value %d; want the user's single 300: %v", n, fitMarginFlag, m, args)
+		}
+	})
+
+	t.Run("the seat is charged to its physical index", func(t *testing.T) {
+		for _, c := range []struct {
+			seat     int
+			devs     []fitDev
+			want     int
+			wantUsed [2]int
+		}{
+			{seat: 2, devs: seatOn2, want: 4096, wantUsed: [2]int{500, 400 + 6144}},
+			{seat: 1, devs: []fitDev{{24564, 500 + 6144, 1000, 23000}, {12288, 400, 3000, 8000}}, want: 2048, wantUsed: [2]int{500 + 6144, 400}},
+			{seat: -1, devs: []fitDev{{24564, 500, 1000, 23000}, {12288, 400, 3000, 8000}}, want: -1, wantUsed: [2]int{500, 400}},
+		} {
+			if got := documentedFitMargin(c.devs); got != c.want {
+				t.Fatalf("fixture seat %d: documented margin %d, want %d", c.seat, got, c.want)
+			}
+			p := stubFitBindingHost(t, fitBindingDriver(fitBindingDriverCSV))
+			req, s := fitBindingPlan(c.seat)
+			args := build(&config.Config{CacheDir: t.TempDir()}, fitBindingIK(), req, s)
+			if m := fitMarginOf(t, args); m != c.want {
+				t.Errorf("seat on physical %d: margin %d, want %d: %v", c.seat, m, c.want, args)
+			}
+			if len(p.runtime) == 0 {
+				t.Fatalf("seat on physical %d: the binding never read driver free VRAM", c.seat)
+			}
+			view := p.runtime[len(p.runtime)-1]
+			if len(view.GPUs) != 2 || view.GPUs[0].VRAMUsedMB != c.wantUsed[0] || view.GPUs[1].VRAMUsedMB != c.wantUsed[1] {
+				t.Errorf("seat on physical %d: runtime view %+v, want used %v", c.seat, view.GPUs, c.wantUsed)
+			}
+		}
+	})
+
+	t.Run("no margin for mainline help", func(t *testing.T) {
+		stubFitBindingHost(t, forbidden(t))
+		req, s := fitBindingPlan(2)
+		s.BackendFitTakesValue = true
+		be := &backendInfo{Path: "/x/llama-server", Dialect: "llama", Tag: "llama", Identity: "test", Help: goldenPlanMainlineHelp + goldenPlanMainlineFitHelp}
+		args := build(&config.Config{CacheDir: t.TempDir()}, be, req, s)
+		if !hasArgPair(args, "--fit", "on") || fitMarginCount(args) != 0 {
+			t.Fatalf("mainline argv %v, want --fit on and no %s", args, fitMarginFlag)
+		}
+	})
+
+	t.Run("no margin for fit off", func(t *testing.T) {
+		stubFitBindingHost(t, forbidden(t))
+		req, s := fitBindingPlan(2)
+		s.Type, s.TensorSplit, s.BackendFitTakesValue = placement.MultiGPUDense, []float64{0.5, 0.5}, true
+		args := build(&config.Config{CacheDir: t.TempDir()}, fitBindingIK(), req, s)
+		if !hasArgPair(args, "--fit", "off") || fitMarginCount(args) != 0 {
+			t.Fatalf("explicit layout argv %v, want --fit off and no %s", args, fitMarginFlag)
+		}
+	})
+
+	for name, driver := range map[string]func(*detect.Capabilities) map[int]int{
+		"no margin when the driver is unreadable": func(*detect.Capabilities) map[int]int { return nil },
+		"no margin when a device is not sampled":  fitBindingDriver("00000000:01:00.0, 11900\n00000000:02:00.0, 23000\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := stubFitBindingHost(t, driver)
+			req, s := fitBindingPlan(2)
+			args := build(&config.Config{CacheDir: t.TempDir()}, fitBindingIK(), req, s)
+			if len(p.runtime) == 0 {
+				t.Fatal("the binding never read driver free VRAM")
+			}
+			if !hasArg(args, "--fit") || fitMarginCount(args) != 0 {
+				t.Fatalf("argv %v, want --fit and no %s", args, fitMarginFlag)
+			}
+		})
+	}
+}
