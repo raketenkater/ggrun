@@ -151,6 +151,7 @@ func updateRegisteredBackend(tag string) error {
 	// reviewed commit pin and the patches. Falling back to the record's own
 	// branch keeps hand-added forks updatable too.
 	recipe := backends.RecipeByName(tag)
+	fmt.Print(supersededNote(tag, recipe))
 	branch, commit := be.Branch, be.Commit
 	forceRebuild := false
 	if recipe != nil {
@@ -226,7 +227,7 @@ func updateRegisteredBackend(tag string) error {
 			_ = pruneCandidateBuildDir(candidateBuildDir, layout.buildDir)
 		}
 	}()
-	fmt.Printf("[backend] building isolated candidate (%s)… this can take 30–60 min\n", layout.accel)
+	fmt.Printf("[backend] building isolated candidate (%s)… %s\n", layout.accel, buildEstimate(be))
 	candidateBin, err := buildLlamaForkAt(layout.srcDir, candidateBuildDir, layout.accel, "")
 	if err != nil {
 		restoreSource("build failed")
@@ -400,6 +401,7 @@ func rollbackRegisteredBackend(tag string) (backends.Backend, error) {
 	restored.Commit = be.Previous.Commit
 	restored.AppliedPatches = be.Previous.AppliedPatches
 	restored.Previous = current
+	restored.Build = nil // the record described the build just rolled away
 	if err := backends.Upsert(restored); err != nil {
 		revert()
 		return backends.Backend{}, fmt.Errorf("register rollback failed; active build put back: %w", err)

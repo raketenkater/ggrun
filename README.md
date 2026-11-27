@@ -197,7 +197,7 @@ ggrun model.gguf --benchmark               # load, measure, exit
 ggrun model.gguf --gpus 0,1 --ram-headroom 8G --vram-headroom 2G
 ggrun download <repo/name> --quant <name> --yes
 ggrun models list | browse | path | rm
-ggrun backend list | add | register | update | rollback | remove
+ggrun backend list | status | add | register | update | rollback | remove | gc
 ggrun claude list | resume                 # recorded Claude Code sessions
 ggrun update                               # ggrun and backends, with rollback
 ```

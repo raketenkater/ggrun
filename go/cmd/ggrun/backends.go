@@ -37,7 +37,20 @@ func backendUsage() {
   install <recipe> [flags]          Build/register a reviewed recipe (for example hy3)
   add <git-url> [flags]             Clone, build, and register a custom llama.cpp backend
   register [flags]                  Register an already-built binary
-  remove <tag>                      Unregister a backend
+  remove <tag> [--purge] [--dry-run] [--yes] [--force-not-running]
+             [--discard-local-work]
+                                    Unregister a backend; --purge also deletes its
+                                    source tree and builds (asks first, or --yes)
+  status                            Build age, upstream-superseded and pin check
+  gc [--delete] [--yes] [--force-not-running] [--discard-local-work]
+                                    List source trees and build directories no
+                                    backend uses; --delete asks, --yes does not
+  A tree that may hold local work (commits, stashes, edits, or unknown) is
+  deleted only with --yes --discard-local-work. Deletion also refuses trees with
+  linked git worktrees, a symlinked .src, and trees changed in the last 30 minutes.
+  The running-process check reads /proc, so it covers only this user's processes
+  on Linux; elsewhere, or for another user's backend, check yourself and pass
+  --force-not-running.
 
 add/register flags:
   --tag <name>          Selection name (default: derived from URL)
@@ -93,6 +106,10 @@ func cmdBackend(args []string) {
 		cmdBackendVerify(args[1:])
 	case "remove", "rm":
 		cmdBackendRemove(args[1:])
+	case "status":
+		cmdBackendStatus()
+	case "gc":
+		cmdBackendGC(args[1:])
 	default:
 		backendUsage()
 		os.Exit(2)
@@ -209,23 +226,6 @@ func cmdBackendRegister(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Registered backend %q → %s (route-arch: %s)\n", be.Tag, be.Path, be.RouteArch)
-}
-
-func cmdBackendRemove(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "remove needs a tag")
-		os.Exit(2)
-	}
-	found, err := backends.Remove(args[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "remove failed: %v\n", err)
-		os.Exit(1)
-	}
-	if !found {
-		fmt.Fprintf(os.Stderr, "no backend tagged %q\n", args[0])
-		os.Exit(1)
-	}
-	fmt.Printf("Removed backend %q\n", args[0])
 }
 
 func cmdBackendAdd(args []string) {
