@@ -8475,6 +8475,7 @@ func cmdDryRun(args []string) {
 			ClaudeProfile        string                          `json:"claude_profile,omitempty"`
 			LaunchScope          string                          `json:"launch_scope,omitempty"`
 			MemoryMaxMB          int                             `json:"memory_max_mb,omitempty"`
+			MemoryHighMB         int                             `json:"memory_high_mb,omitempty"`
 			Environment          map[string]string               `json:"environment"`
 			ServerArgv           []string                        `json:"server_argv"`
 			Residency            placement.ResidencyClass        `json:"residency,omitempty"`
@@ -8490,6 +8491,7 @@ func cmdDryRun(args []string) {
 			ClaudeProfile:        effectiveClaudeProfile(req),
 			LaunchScope:          plan.LaunchScope,
 			MemoryMaxMB:          plan.MemoryMaxMB,
+			MemoryHighMB:         plan.MemoryHighMB,
 			Environment:          plan.Environment,
 			ServerArgv:           serverArgs,
 			Residency:            strategy.Residency,
