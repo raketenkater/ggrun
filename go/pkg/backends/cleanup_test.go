@@ -2,6 +2,7 @@ package backends
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -772,6 +773,109 @@ func TestLocalWorkFromGitFiles(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// packedTags is a packed-refs file holding n tags named refs/tags/t0000...
+// at sha, with the header git writes.
+func packedTags(n int, sha string) string {
+	var b strings.Builder
+	b.WriteString("# pack-refs with: peeled fully-peeled sorted \n")
+	b.WriteString(testSHA + " refs/remotes/origin/main\n")
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "%s refs/tags/t%04d\n", sha, i)
+	}
+	return b.String()
+}
+
+func TestLocalWorkTagsCountAndListsAreCapped(t *testing.T) {
+	other := "cccccccccccccccccccccccccccccccccccccccc"
+	tagObj := "dddddddddddddddddddddddddddddddddddddddd"
+	cases := []struct {
+		name     string
+		setup    func(h *cleanupHome)
+		want     []string // substrings, all required
+		tagNames int      // exact count of "refs/tags/" in the result
+		absent   []string
+	}{
+		{name: "no tags is unchanged", setup: func(h *cleanupHome) {}},
+		{name: "packed upstream tags at a remote tip are published", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", packedTags(5000, testSHA))
+		}},
+		{name: "5000 packed tags still count, five listed", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", packedTags(5000, other))
+		}, want: []string{"5000 tag(s) not at a remote branch tip", "may exist only here",
+			"(refs/tags/t0000, refs/tags/t0001, refs/tags/t0002, refs/tags/t0003, refs/tags/t0004 and 4995 more)"},
+			tagNames: 5, absent: []string{"commits not on any remote branch", "t0005"}},
+		{name: "exactly five tags are all listed", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", packedTags(5, other))
+		}, want: []string{"5 tag(s)", "refs/tags/t0004)"}, tagNames: 5, absent: []string{"more"}},
+		{name: "six tags list five and one more", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", packedTags(6, other))
+		}, want: []string{"6 tag(s)", "refs/tags/t0004 and 1 more)"}, tagNames: 5, absent: []string{"t0005"}},
+		{name: "loose local tag at an unpublished commit", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/refs/tags/mine", other+"\n")
+		}, want: []string{"1 tag(s)", "(refs/tags/mine)"}, tagNames: 1},
+		{name: "local tag packed by pack-refs --all still counts", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", packedTags(3, testSHA)+other+" refs/tags/mine\n")
+		}, want: []string{"1 tag(s)", "(refs/tags/mine)"}, tagNames: 1},
+		{name: "annotated tag counts once by its tag object, peeled line ignored", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", "# pack-refs with: peeled fully-peeled sorted \n"+
+				tagObj+" refs/tags/v1\n^"+testSHA+"\n")
+		}, want: []string{"1 tag(s)", "(refs/tags/v1)"}, tagNames: 1, absent: []string{"^"}},
+		{name: "a local branch is listed before thousands of tags", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/packed-refs", packedTags(5000, other))
+			h.write(".src/fork-x/.git/refs/heads/work", other+"\n")
+		}, want: []string{"commits not on any remote branch or reviewed pin (refs/heads/work); 5000 tag(s)"}, tagNames: 5},
+		{name: "branch list is capped too", setup: func(h *cleanupHome) {
+			for i := 0; i < 6; i++ {
+				h.write(fmt.Sprintf(".src/fork-x/.git/refs/heads/b%d", i), other+"\n")
+			}
+		}, want: []string{"(refs/heads/b0, refs/heads/b1, refs/heads/b2, refs/heads/b3, refs/heads/b4 and 1 more)"},
+			absent: []string{"b5", "tag(s)"}},
+		{name: "HEAD on a local branch is named once", setup: func(h *cleanupHome) {
+			h.write(".src/fork-x/.git/HEAD", "ref: refs/heads/work\n")
+			h.write(".src/fork-x/.git/refs/heads/work", other+"\n")
+		}, want: []string{"reviewed pin (refs/heads/work)"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCleanupHome(t)
+			h.fork("fork-x")
+			tc.setup(h)
+			got := h.env(nil, nil).LocalWork(filepath.Join(h.Home, ".src", "fork-x"))
+			if len(tc.want) == 0 && got != "" {
+				t.Fatalf("got %q, want no local work", got)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Fatalf("got %q, want substring %q", got, w)
+				}
+			}
+			for _, a := range tc.absent {
+				if strings.Contains(got, a) {
+					t.Fatalf("got %q, must not contain %q", got, a)
+				}
+			}
+			if n := strings.Count(got, "refs/tags/"); n != tc.tagNames {
+				t.Fatalf("got %d tag names in %q, want %d", n, got, tc.tagNames)
+			}
+		})
+	}
+}
+
+func TestDeleteStillNeedsTheDiscardFlagForThousandsOfTags(t *testing.T) {
+	h := newCleanupHome(t)
+	h.fork("fork-tags")
+	h.write(".src/fork-tags/.git/packed-refs", packedTags(5000, "cccccccccccccccccccccccccccccccccccccccc"))
+	h.settle()
+	env := h.env(nil, nil)
+	plan := TreePlan{Path: filepath.Join(h.Home, ".src", "fork-tags")}
+	if _, err := env.Delete(plan); !errors.Is(err, ErrLocalWork) {
+		t.Fatalf("got %v", err)
+	}
+	if !h.exists(".src/fork-tags/src/main.cpp") {
+		t.Fatal("removed without the flag")
 	}
 }
 
