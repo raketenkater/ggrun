@@ -245,7 +245,8 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 			run.record.Outcome, run.record.Error = "placement-error", planErr.Err.Error()
 			return run
 		}
-		// The first plan is the calibrated strategy. explainServingOptimization
+		// The first plan is the calibrated strategy, after the shared
+		// resume-context step. explainServingOptimization
 		// keeps candidate zero (the same strategy) and sets only its ledger,
 		// estimate, bottleneck, residency and boundary, none of which the
 		// fingerprint reads; buildLaunchServerArgs re-runs NormalizeBatchSizes,
@@ -335,6 +336,7 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 		if strategy.VerifiedConfigReused {
 			run.steps = append(run.steps, "verified-replay")
 		}
+		firstSteps := len(run.steps)
 		// step records name when next differs from the current strategy, or
 		// when the step rewrote the request.
 		step := func(name, before string, next *placement.Strategy) {
@@ -345,8 +347,14 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 		}
 		before := launchOrderFingerprint(strategy, req)
 		step("reviewer-drop", before, proactivelyDropReviewerForVRAMModel(req, caps, model, strategy, computeStrategy, noInput(), io.Discard, false, cfg.CacheDir))
-		before = launchOrderFingerprint(strategy, req)
-		step("resume-context", before, ensureResumeContext(req, cfg.CacheDir, model, strategy, computeStrategy))
+		// The resume-context step is shared: planLaunch runs it on its first
+		// plan too, so it is not a launch-only step. When no launch-only step
+		// changed the plan before it, the plan it returns is the one the dry
+		// run's first plan is compared with.
+		strategy = ensureResumeContext(req, cfg.CacheDir, model, strategy, computeStrategy)
+		if len(run.steps) == firstSteps {
+			run.firstPlan = launchOrderFingerprint(strategy, req)
+		}
 		// Non-interactive, confirmRequiredMMap either passes or refuses; the
 		// declined branch (errMMapDeclined) needs an interactive "no".
 		if err := confirmRequiredMMap(req, strategy, noInput(), io.Discard, false); err != nil {
@@ -413,8 +421,6 @@ var launchOrderDivergence = []string{
 	"gpu24/dense-small/auto+verified-config: argv",
 	"gpu24/dense-small/claude-code+self-review-on: reviewer-drop",
 	"gpu24/dense-small/claude-code+self-review-on: argv",
-	"mixed3/moe/claude-resume: resume-context",
-	"mixed3/moe/claude-resume: argv",
 	"gpu12-ram32/moe/auto: mmap-consent",
 	"gpu12-ram32/moe/auto: outcome",
 	"gpu12-ram32/moe/no-mmap: placement-fallback",

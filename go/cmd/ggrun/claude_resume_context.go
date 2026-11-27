@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -63,29 +64,41 @@ var resumeSessionTokens = func(cacheDir, value string) (string, int, bool) {
 func ensureResumeContext(req *launchRequest, cacheDir string, model *placement.ModelProfile, strategy *placement.Strategy,
 	compute func(*launchRequest) (*placement.Strategy, error),
 ) *placement.Strategy {
+	planned, _ := resumeContextPlan(req, cacheDir, model, strategy, compute, os.Stdout, os.Stderr)
+	return planned
+}
+
+// resumeContextPlan is ensureResumeContext with its output streams named, so
+// the dry run (planLaunch) can print the same lines through its note sink.
+// unread is true when the step needed the session's size and could not read
+// it; the strategy then comes back unchanged and nothing is printed, as in a
+// launch.
+func resumeContextPlan(req *launchRequest, cacheDir string, model *placement.ModelProfile, strategy *placement.Strategy,
+	compute func(*launchRequest) (*placement.Strategy, error), stdout, stderr io.Writer,
+) (planned *placement.Strategy, unread bool) {
 	if req == nil || strategy == nil || !req.ClaudeCode || req.ClaudeResume == "" || req.ClaudeResumeForce || compute == nil {
-		return strategy
+		return strategy, false
 	}
 	session, tokens, ok := resumeSessionTokens(cacheDir, req.ClaudeResume)
 	if !ok || tokens <= 0 {
-		return strategy
+		return strategy, true
 	}
 	need := resumeContextNeed(tokens)
 	slots := max(strategy.Parallel, 1)
 	if strategy.ContextSize/slots >= need {
-		return strategy
+		return strategy, false
 	}
 	if model != nil && model.CTXTrain > 0 && need > model.CTXTrain {
-		fmt.Fprintf(os.Stderr, "[claude-code] session %s is %d tokens; with room for a reply it needs %d, more than this model's %d. Compact it in Claude Code (/compact) first.\n",
+		fmt.Fprintf(stderr, "[claude-code] session %s is %d tokens; with room for a reply it needs %d, more than this model's %d. Compact it in Claude Code (/compact) first.\n",
 			session, tokens, need, model.CTXTrain)
-		return strategy
+		return strategy, false
 	}
 	if !ctxFlagIsAutomatic(req.CtxFlag) {
-		fmt.Fprintf(os.Stderr, "[claude-code] session %s is %d tokens and needs about %d per slot; --ctx %s gives %d. Raise --ctx to resume it.\n",
+		fmt.Fprintf(stderr, "[claude-code] session %s is %d tokens and needs about %d per slot; --ctx %s gives %d. Raise --ctx to resume it.\n",
 			session, tokens, need, req.CtxFlag, strategy.ContextSize/slots)
-		return strategy
+		return strategy, false
 	}
-	fmt.Printf("[claude-code] session %s is %d tokens; the plan gives %d per slot; planning %d per slot so it can resume\n",
+	fmt.Fprintf(stdout, "[claude-code] session %s is %d tokens; the plan gives %d per slot; planning %d per slot so it can resume\n",
 		session, tokens, strategy.ContextSize/slots, need)
 	candidate := *req
 	candidate.CtxFlag = strconv.Itoa(need * slots)
@@ -98,10 +111,10 @@ func ensureResumeContext(req *launchRequest, cacheDir string, model *placement.M
 		planned, err = compute(&candidate)
 	}
 	if err != nil || planned == nil {
-		fmt.Fprintf(os.Stderr, "[claude-code] could not plan %d tokens per slot (%v); launching with %d, which this session does not fit\n",
+		fmt.Fprintf(stderr, "[claude-code] could not plan %d tokens per slot (%v); launching with %d, which this session does not fit\n",
 			need, err, strategy.ContextSize/slots)
-		return strategy
+		return strategy, false
 	}
 	*req = candidate
-	return planned
+	return planned, false
 }
