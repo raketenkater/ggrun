@@ -7,6 +7,7 @@ package main
 // flip when the defect is fixed.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,9 +299,12 @@ func TestVerifiedConfig_OlderPlanLogicRecordIsUnusable_KnownCost(t *testing.T) {
 	}
 }
 
-// reusePinMoELaunch is the MoE fixture of TestComputeReusesVerifiedConfigForMoE
-// (placement.Compute plans it), reached through the launch's own option
-// builder, so the verified-config key is the one a real launch computes.
+// reusePinMoELaunch is the MoE geometry of TestComputeReusesVerifiedConfigForMoE
+// (placement.Compute plans it), shrunk to about 60 GB so the experts fit host
+// RAM and the launch is resident (the 146 GB original is non-resident, whose
+// last-resort lane is never challenged). It is reached through the launch's
+// own option builder, so the verified-config key is the one a real launch
+// computes.
 func reusePinMoELaunch(t *testing.T) (*config.Config, *placement.ModelProfile, *backendInfo, *detect.Capabilities, func() *launchRequest) {
 	t.Helper()
 	dir := t.TempDir()
@@ -315,9 +319,9 @@ func reusePinMoELaunch(t *testing.T) (*config.Config, *placement.ModelProfile, *
 		CPU: detect.CPUInfo{Cores: 16},
 	}
 	model := &placement.ModelProfile{
-		Path: filepath.Join(dir, "moe.gguf"), SizeBytes: 146 << 30, TotalSizeMB: 146 * 1024,
+		Path: filepath.Join(dir, "moe.gguf"), SizeBytes: int64(43*1300+4096) << 20, TotalSizeMB: 43*1300 + 4096,
 		NumLayers: 43, IsMoE: true, NumExperts: 256,
-		ExpertBytes: int64(43 * 3289 * 1024 * 1024), NonExpertBytes: int64(7680 * 1024 * 1024),
+		ExpertBytes: int64(43*1300) << 20, NonExpertBytes: int64(4096) << 20,
 		ContextSize: 32768, EmbeddingLength: 4096, HeadCountKV: 1, KeyLength: 512, ValueLength: 512,
 		ExpertUsedCount: 6, ExpertFF: 2048, ModelArch: "llama",
 	}
@@ -337,6 +341,13 @@ func reusePinCompute(t *testing.T, req *launchRequest, cfg *config.Config, model
 	return strategy
 }
 
+// reusePinPlanShape says why a first launch planned no search.
+func reusePinPlanShape(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, s *placement.Strategy) string {
+	return fmt.Sprintf("type=%s residency=%s mmapRequired=%v ncpumoe=%d ctx=%d frontier=%v",
+		s.Type, s.Residency, s.MMapRequired, s.NCPUMoE, s.ContextSize,
+		reusePinNames(calibrationCandidates(req, cfg, model, be, caps, s)))
+}
+
 // The good path. First launch: no saved state, calibrationPlan schedules the
 // bounded search; the baseline wins with complete evidence on an active
 // profile, so the decision (agent-workflow) and the verified config are saved.
@@ -354,7 +365,8 @@ func TestCalibrationPaidOnce_CalibratedLaunchThenIdenticalRelaunchStartsDirect(t
 	}
 	plan := calibrationPlan(req, cfg, model, be, caps, first)
 	if len(plan) < 2 {
-		t.Errorf("precondition: the first launch schedules no search (%v), so nothing is paid", reusePinNames(plan))
+		t.Errorf("precondition: the first launch schedules no search (%v), so nothing is paid; %s",
+			reusePinNames(plan), reusePinPlanShape(req, cfg, model, be, caps, first))
 	} else {
 		decision := reusePinMeasuredDecision(t, calibrationScope(req, model, be, caps, first), model, plan)
 		if !automaticCalibrationEvidenceValid(decision) {
@@ -402,7 +414,8 @@ func TestCalibrationPlan_SchemaBumpWithVerifiedConfigStartsDirect(t *testing.T) 
 			t.Fatal(err)
 		}
 	} else {
-		t.Errorf("precondition: the first launch schedules no search (%v)", reusePinNames(plan))
+		t.Errorf("precondition: the first launch schedules no search (%v); %s",
+			reusePinNames(plan), reusePinPlanShape(req, cfg, model, be, caps, first))
 	}
 	tuned := *first
 	tuned.PerformanceTuned = true
