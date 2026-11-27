@@ -85,6 +85,16 @@ const (
 	launchExtGoldenPath   = "testdata/launch_plans_golden_ext.json"
 )
 
+// launchOrderGoldenRAM is the golden inventories' host memory. The extended
+// cases add one host with 32 GB, too little to hold the MoE model's experts,
+// so the mmap consent and host-memory containment steps have a plan to act on.
+const launchOrderGoldenRAM = `"ram":{"total_mb":131072,"free_mb":122880}`
+
+var launchOrderInventories = map[string]string{
+	"gpu12-ram32": strings.Replace(goldenPlanInventory(goldenPlanGPU(0, 12288, 16, 504000)),
+		launchOrderGoldenRAM, `"ram":{"total_mb":32768,"free_mb":28672}`, 1),
+}
+
 // launchOrderCase is a golden case plus what the extended file adds: extra
 // environment for the run and a seeded cache ("verified-config" or
 // "self-classify-choice").
@@ -188,7 +198,14 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 	cacheDir := t.TempDir()
 	t.Setenv("LLM_CACHE_DIR", cacheDir)
 	inventory := filepath.Join(t.TempDir(), "inventory.json")
-	if err := os.WriteFile(inventory, []byte(goldenPlanInventories[c.hw]), 0o600); err != nil {
+	hw, ok := goldenPlanInventories[c.hw]
+	if !ok {
+		hw = launchOrderInventories[c.hw]
+	}
+	if hw == "" || (!ok && strings.Contains(hw, launchOrderGoldenRAM)) {
+		t.Fatalf("%s: no inventory %q, or its RAM was not replaced", c.name, c.hw)
+	}
+	if err := os.WriteFile(inventory, []byte(hw), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	model := goldenPlanModels[c.model]()
@@ -379,7 +396,15 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 // "first-plan" means the plan differed before any launch-only step ran
 // (caps-aware placement options, the dense-offload hook, calibration's slot
 // adjustment order).
-var launchOrderDivergence = []string{}
+var launchOrderDivergence = []string{
+	"gpu24/dense-small/auto+verified-config: verified-replay",
+	"gpu24/dense-small/auto+verified-config: first-plan",
+	"gpu24/dense-small/auto+verified-config: argv",
+	"gpu24/dense-small/claude-code+self-review-on: reviewer-drop",
+	"gpu24/dense-small/claude-code+self-review-on: argv",
+	"mixed3/moe/claude-resume: resume-context",
+	"mixed3/moe/claude-resume: argv",
+}
 
 // launchOrderDivergenceOf compares one case's two orders.
 func launchOrderDivergenceOf(dry, launch launchOrderRun) []string {
@@ -653,6 +678,11 @@ func launchOrderExtCases() []launchOrderCase {
 		selfReview,
 		mk("mixed3/moe/claude-code-mmap", "", "mixed3", "moe", "--claude-code", "--mmap"),
 		mk("mixed3/moe/claude-resume", "", "mixed3", "moe", "--claude-resume", "golden-session"),
+		mk("gpu12-ram32/moe/auto", "", "gpu12-ram32", "moe"),
+		mk("gpu12-ram32/moe/mmap", "", "gpu12-ram32", "moe", "--mmap"),
+		mk("gpu12-ram32/moe/no-mmap", "", "gpu12-ram32", "moe", "--no-mmap"),
+		mk("gpu12-ram32/dense-large/no-mmap", "", "gpu12-ram32", "dense-large", "--no-mmap"),
+		mk("gpu12-ram32/moe/claude-code-mmap", "", "gpu12-ram32", "moe", "--claude-code", "--mmap"),
 	}
 }
 
