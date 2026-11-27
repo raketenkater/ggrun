@@ -91,6 +91,7 @@ type goldenPlanJSON struct {
 	ClaudeProfile        string                          `json:"claude_profile,omitempty"`
 	LaunchScope          string                          `json:"launch_scope,omitempty"`
 	MemoryMaxMB          int                             `json:"memory_max_mb,omitempty"`
+	MemoryHighMB         int                             `json:"memory_high_mb,omitempty"`
 	Environment          map[string]string               `json:"environment"`
 	ServerArgv           []string                        `json:"server_argv"`
 	Residency            placement.ResidencyClass        `json:"residency,omitempty"`
@@ -504,6 +505,7 @@ func goldenPlanJSONOf(plan *launchPlan) *goldenPlanJSON {
 		ClaudeProfile:        effectiveClaudeProfile(plan.Req),
 		LaunchScope:          plan.LaunchScope,
 		MemoryMaxMB:          plan.MemoryMaxMB,
+		MemoryHighMB:         plan.MemoryHighMB,
 		Environment:          plan.Environment,
 		ServerArgv:           plan.ServerArgv,
 		Residency:            plan.Strategy.Residency,

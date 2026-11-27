@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -419,6 +420,114 @@ func TestPlanLaunchLeavesProcessEnvironmentAndConsoleAlone(t *testing.T) {
 	}
 }
 
+// The plan's memory limits are the ones the launch starts the backend with:
+// startLaunchProcess's backendStartOptions call on the same request, hardware,
+// backend and argv. Resident plans keep MemoryHigh == MemoryMax at the budget;
+// mmap-backed CPU experts raise MemoryMax to the host reclaim ceiling, which
+// backendMemoryMaxMB alone (the old memory_max_mb) under-reported.
+func TestPlanLaunchMemoryLimitsAreTheLaunchStartLimits(t *testing.T) {
+	launchOrderTestEnv(t)
+	if runtime.GOOS != "linux" {
+		t.Skip("backend memory scopes are Linux-only")
+	}
+	for _, tc := range []struct {
+		name, backend, hw, model string
+		args                     []string
+		mmapBand                 bool
+	}{
+		{name: "resident/gpu12/dense-small", hw: "gpu12", model: "dense-small"},
+		{name: "resident-cpu-experts/mixed3/moe", hw: "mixed3", model: "moe"},
+		{name: "mmap-experts/gpu12-ram32/moe", hw: "gpu12-ram32", model: "moe", args: []string{"--mmap"}, mmapBand: true},
+		{name: "mmap-experts/mixed3/moe/claude-code", hw: "mixed3", model: "moe", args: []string{"--claude-code", "--mmap"}, mmapBand: true},
+	} {
+		c := launchOrderCase{goldenPlanCase: goldenPlanCase{name: tc.name, hw: tc.hw, model: tc.model, args: tc.args}}
+		launchOrderRunCase(t, c, func(t *testing.T) {
+			req, model := planLaunchFixture(t, c.hw, c.model, c.args...)
+			in := goldenPlanInputs(t, c.name, model, goldenPlanBackend(t, tc.backend), nil)
+			in.Inventory = planLaunchSilentInventory
+			plan, planErr := planLaunch(req, in)
+			if planErr != nil || plan == nil || plan.Refusal != nil {
+				t.Fatalf("plan %+v, error %+v; want a plan", plan, planErr)
+			}
+			start := backendStartOptions(plan.Req, plan.Caps, plan.Backend, hostExpertPinningEnv(plan.Backend, plan.ServerArgv), plan.ServerArgv)
+			if plan.MemoryHighMB != start.MemoryHighMB || plan.MemoryMaxMB != start.MemoryMaxMB {
+				t.Fatalf("plan limits high=%d max=%d, launch start limits high=%d max=%d", plan.MemoryHighMB, plan.MemoryMaxMB, start.MemoryHighMB, start.MemoryMaxMB)
+			}
+			budget := backendMemoryMaxMB(plan.Req, plan.Caps)
+			if budget <= 0 || plan.MemoryHighMB != budget {
+				t.Fatalf("MemoryHigh %d, want the plan budget %d", plan.MemoryHighMB, budget)
+			}
+			if gotBand := plan.MemoryMaxMB > plan.MemoryHighMB; gotBand != tc.mmapBand {
+				t.Fatalf("high=%d max=%d (argv %q): reclaim band %v, want %v", plan.MemoryHighMB, plan.MemoryMaxMB, plan.ServerArgv, gotBand, tc.mmapBand)
+			}
+			if tc.mmapBand && plan.MemoryMaxMB != hostReclaimCeilingMB(plan.Req, plan.Caps) {
+				t.Fatalf("mmap-backed MemoryMax %d, want the host reclaim ceiling %d", plan.MemoryMaxMB, hostReclaimCeilingMB(plan.Req, plan.Caps))
+			}
+		})
+	}
+}
+
+// A lazy sparse-lookup argv (no golden fixture has a reviewed loader) gets the
+// banded start limits through planBackendProcess, the function planLaunch calls.
+func TestPlanBackendProcessLazyLookupLimitsAreTheLaunchStartLimits(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("backend memory scopes and the reviewed loader are Linux-only")
+	}
+	req := &launchRequest{RAMLimitPercent: 90, CgroupHeadroomMB: 4096}
+	caps := &detect.Capabilities{RAM: detect.RAMInfo{TotalMB: 200000, FreeMB: 200000}}
+	be := reviewedLazyBackend()
+	for _, argv := range [][]string{{"/b/llama-server", "--no-mmap"}, {"/b/llama-server", "--no-mmap", "--lazy-mode", "on"}} {
+		_, high, max := planBackendProcess(req, caps, be, argv, "")
+		start := backendStartOptions(req, caps, be, hostExpertPinningEnv(be, argv), argv)
+		if high != start.MemoryHighMB || max != start.MemoryMaxMB || max <= 0 {
+			t.Fatalf("%q: plan high=%d max=%d, launch start high=%d max=%d", argv, high, max, start.MemoryHighMB, start.MemoryMaxMB)
+		}
+		if lazy := argsLazySparseLookup(be, argv); lazy != (max > high) {
+			t.Fatalf("%q: lazy=%v but high=%d max=%d", argv, lazy, high, max)
+		}
+	}
+}
+
+// The plan's environment carries what the launch adds for its argv
+// (GGML_CUDA_NO_PINNED=1 for ik with CPU experts, hostExpertPinningEnv) and
+// nothing from the caller's environment beyond launchPlanEnvironment's
+// allow-list, even when the caller exports the same variable.
+func TestPlanLaunchEnvironmentHasLaunchOverridesAndNoCallerLeak(t *testing.T) {
+	launchOrderTestEnv(t)
+	allowed := map[string]bool{"CUDA_DEVICE_ORDER": true, "CUDA_SCALE_LAUNCH_QUEUES": true, "LD_LIBRARY_PATH": true}
+	for _, tc := range []struct {
+		name, backend, hw, model string
+		wantNoPinned             bool
+	}{
+		{name: "ik/mixed3/moe", backend: "ik", hw: "mixed3", model: "moe", wantNoPinned: true},
+		{name: "ik/gpu24/moe", backend: "ik", hw: "gpu24", model: "moe", wantNoPinned: true},
+		{name: "ik/gpu24/dense-large", backend: "ik", hw: "gpu24", model: "dense-large"},
+		{name: "mainline/mixed3/moe", hw: "mixed3", model: "moe"},
+	} {
+		c := launchOrderCase{goldenPlanCase: goldenPlanCase{name: tc.name, hw: tc.hw, model: tc.model}}
+		c.env = map[string]string{"GGML_CUDA_NO_PINNED": "1", "GGRUN_TEST_UNRELATED_SECRET": "do-not-report", "HF_TOKEN": "do-not-report"}
+		launchOrderRunCase(t, c, func(t *testing.T) {
+			req, model := planLaunchFixture(t, c.hw, c.model)
+			in := goldenPlanInputs(t, c.name, model, goldenPlanBackend(t, tc.backend), nil)
+			in.Inventory = planLaunchSilentInventory
+			plan, planErr := planLaunch(req, in)
+			if planErr != nil || plan == nil || plan.Refusal != nil {
+				t.Fatalf("plan %+v, error %+v; want a plan", plan, planErr)
+			}
+			pinning := hostExpertPinningEnv(plan.Backend, plan.ServerArgv)
+			if got := plan.Environment["GGML_CUDA_NO_PINNED"]; (got == "1") != tc.wantNoPinned || (len(pinning) > 0) != tc.wantNoPinned {
+				t.Fatalf("GGML_CUDA_NO_PINNED=%q in the plan, launch pinning env %q; want present=%v (argv %q)", got, pinning, tc.wantNoPinned, plan.ServerArgv)
+			}
+			for key, value := range plan.Environment {
+				if allowed[key] || (tc.wantNoPinned && key == "GGML_CUDA_NO_PINNED") {
+					continue
+				}
+				t.Errorf("plan environment carries %s=%q, outside the allow-list and the launch's own overrides", key, value)
+			}
+		})
+	}
+}
+
 // cmdDryRun hands planning to planLaunch: a planning call in its body would be
 // a second planner the goldens do not witness.
 func TestCmdDryRunDoesNotPlanItself(t *testing.T) {
@@ -447,6 +556,7 @@ func TestCmdDryRunDoesNotPlanItself(t *testing.T) {
 		"gpuVisibilityEnv": true, "applyGPUVisibility": true, "vulkanDeviceOrder": true,
 		"vulkanDeviceOrderEnv": true, "applyVulkanDeviceOrder": true, "listVulkanDevices": true,
 		"launchPlanEnvironment": true, "backendMemoryMaxMB": true, "claudeLaunchLogScope": true,
+		"planBackendProcess": true, "backendStartOptions": true, "hostExpertPinningEnv": true,
 		"os.Setenv": true, "exposedHostWarning": true,
 	}
 	planCalls := 0

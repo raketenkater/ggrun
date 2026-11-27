@@ -118,7 +118,8 @@ type launchOrderRecord struct {
 	Plan     *goldenPlanJSON      `json:"plan,omitempty"`
 	Strategy *launchOrderStrategy `json:"strategy,omitempty"`
 	// PinningEnv is what the launch adds to the child environment for these
-	// argv (hostExpertPinningEnv); the dry run's environment never shows it.
+	// argv (hostExpertPinningEnv); the plan's environment carries it too
+	// (planBackendProcess).
 	PinningEnv []string `json:"pinning_env,omitempty"`
 }
 
@@ -378,6 +379,7 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 	}
 
 	run.record.Outcome = "plan"
+	environment, memoryHighMB, memoryMaxMB := planBackendProcess(req, caps, be, serverArgs, envPrefix)
 	run.record.Plan = &goldenPlanJSON{
 		Schema:               "ggrun-server-plan-v1",
 		ModelPath:            req.ModelPath,
@@ -385,8 +387,9 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 		BackendID:            be.Identity,
 		ClaudeProfile:        effectiveClaudeProfile(req),
 		LaunchScope:          claudeLaunchLogScope(req, model, be, serverArgs),
-		MemoryMaxMB:          backendMemoryMaxMB(req, caps),
-		Environment:          launchPlanEnvironment(serverArgs, envPrefix, be.Path),
+		MemoryMaxMB:          memoryMaxMB,
+		MemoryHighMB:         memoryHighMB,
+		Environment:          environment,
 		ServerArgv:           serverArgs,
 		Residency:            strategy.Residency,
 		Bottleneck:           strategy.OptimizationBottleneck,
