@@ -601,6 +601,50 @@ func TestPredictDecodeTPSDenseSingleGPUUsesFastestFittingCard(t *testing.T) {
 	}
 }
 
+// A layer split runs the cards in turn, so their bandwidths combine as the
+// share-weighted harmonic mean; the arithmetic mean over-predicted any mix.
+func TestHarmonicBandwidthCombinesSequentialCards(t *testing.T) {
+	arith := func(w, bw []float64) float64 {
+		var n, d float64
+		for i := range w {
+			n += w[i] * bw[i]
+			d += w[i]
+		}
+		return n / d
+	}
+	for _, tc := range []struct {
+		name    string
+		w, bw   []float64
+		want    float64
+		belowAM bool
+	}{
+		{"one card", []float64{12288}, []float64{504}, 504, false},
+		{"two equal cards", []float64{12288, 12288}, []float64{936, 936}, 936, false},
+		// 36864 / (24576/1008 + 12288/360) = 36864 / (2048/35) = 630; mean 792
+		{"24 GB fast + 12 GB slow", []float64{24576, 12288}, []float64{1008, 360}, 630, true},
+		// 49152 / (12288/504 + 24576/1008 + 12288/360) = 96*105/17; mean 720
+		{"three unequal cards", []float64{12288, 24576, 12288}, []float64{504, 1008, 360}, 96.0 * 105 / 17, true},
+		{"zero share ignored", []float64{24576, 12288, 0}, []float64{1008, 360, 224}, 630, false},
+		{"zero bandwidth ignored", []float64{24576, 12288}, []float64{1008, 0}, 1008, false},
+		{"no shares weigh equally", []float64{0, 0}, []float64{1008, 360}, 2 / (1/1008.0 + 1/360.0), false},
+		{"no bandwidth falls back", []float64{12288}, []float64{0}, defaultVRAMBWGBps, false},
+		{"no devices falls back", nil, nil, defaultVRAMBWGBps, false},
+	} {
+		got := harmonicBandwidth(tc.w, tc.bw)
+		if math.IsInf(got, 0) || math.IsNaN(got) || math.Abs(got-tc.want) > 1e-9*tc.want {
+			t.Errorf("%s: %v GB/s, want %v", tc.name, got, tc.want)
+		}
+		if tc.belowAM && !(got < arith(tc.w, tc.bw)) {
+			t.Errorf("%s: %v GB/s is not below the arithmetic mean %v", tc.name, got, arith(tc.w, tc.bw))
+		}
+	}
+	// One card stays bit-for-bit what it was.
+	one := &detect.Capabilities{GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24564}}}
+	if got := weightedVRAMBandwidth(one); got != 1008 {
+		t.Fatalf("single-card bandwidth %v, want 1008", got)
+	}
+}
+
 func TestPredictDecodeTPSSmallDenseIncludesKernelBoundScaling(t *testing.T) {
 	caps := &detect.Capabilities{GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24564}}}
 	candidate := Candidate{TotalParamsB: 4}
