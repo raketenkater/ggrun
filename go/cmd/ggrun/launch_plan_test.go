@@ -114,8 +114,9 @@ func TestPlanLaunchReturnsModelDoesNotFitAsAValue(t *testing.T) {
 // reaches it through planLaunch: placement.Compute refuses an automatic-context
 // dense offload whose GPU KV does not fit (computeResolvedStrategy), and with
 // an explicit context the estimated ledger of every fixture tried carries no
-// KV on a GPU. It needs a measured allocation in the cache. The value
-// planLaunch returns for it is pinned here.
+// KV on a GPU. A measured allocation in the cache may reach it; that is not
+// verified. The helper planLaunch calls for it is pinned here; the branch in
+// planLaunch and cmdDryRun that carries it is not exercised.
 func TestPlanFitRefusalIsExitOneOnStderr(t *testing.T) {
 	over := &placement.Strategy{Type: placement.DenseCPUOffload, ResourceLedger: &placement.ResourceLedger{Devices: []placement.DeviceResourceLedger{
 		{GPU: 0, FreeMB: 1587, ContextMB: 4000, SlackMB: -2758},
