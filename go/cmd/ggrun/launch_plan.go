@@ -17,6 +17,10 @@ import (
 // its notes go to in.Note in the order and on the stream cmdDryRun used to
 // print them, and an error that ends the dry run comes back as a planError.
 //
+// With --claude-resume it runs the launch's resume-context step on its first
+// plan (resumeContextPlan): the re-plan line and its warnings reach in.Note on
+// the streams the launch prints them on.
+//
 // The functions it calls still print some lines directly (backend selection,
 // the arch KV rule, placement.Compute, slot adjustment, calibration reuse,
 // batch normalisation, the Claude sampling summary, printVRAMLedger under
@@ -90,8 +94,18 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, planNoteWriter{stream: planStderr, note: note})
 	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
 
-	placementOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-	strategy, err := placement.Compute(caps, model, placementOpts)
+	// The dry run's plan for one request: placement, the Claude slot adjustment
+	// and a calibration decision for that exact scope. The first plan and the
+	// resume re-plan below both use it.
+	computeStrategy := func(candidate *launchRequest) (*placement.Strategy, error) {
+		next, computeErr := placement.Compute(caps, model, placementOptionsFromRequest(candidate, model, be, cfg.CacheDir))
+		if computeErr != nil {
+			return nil, computeErr
+		}
+		claudeCodeSlotAdjust(next, model, candidate.ClaudeCode, candidate.ParallelSet, candidate.BatchSizeSet, candidate.UBatchSizeSet)
+		return applyCalibrationDecision(candidate, cfg, model, be, caps, next), nil
+	}
+	strategy, err := computeStrategy(req)
 	if err != nil {
 		// The running-server hint scans this host's processes, which say
 		// nothing about an inventory's machine.
@@ -101,8 +115,17 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		}
 		return nil, &planError{Code: 1, Message: "Error computing placement: " + msg, Err: err}
 	}
-	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
+	// The launch's own step (cmdLaunch runs ensureResumeContext on its first
+	// plan): with --claude-resume, re-plan so the resumed session fits. Shared,
+	// not a planPolicy field. The session's size is read from this machine's
+	// session records and Claude Code transcripts even for an inventory plan:
+	// the session lives where the user launches, and the inventory describes
+	// hardware, not conversations.
+	strategy, unread := resumeContextPlan(req, cfg.CacheDir, model, strategy, computeStrategy,
+		planNoteWriter{stream: planStdout, note: note}, planNoteWriter{stream: planStderr, note: note})
+	if unread {
+		note(planNote{Stream: planStderr, Text: fmt.Sprintf("[dry-run] could not read the size of Claude session %s on this machine; a launch plans the same context without it, and stops with an error after the server starts if no resumable record of the session exists here\n", req.ClaudeResume)})
+	}
 	strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, in.Policy.FullFrontier)
 
 	if os.Getenv("GGRUN_TRACE_PLACEMENT") != "" {
