@@ -143,6 +143,16 @@ func recommendationMarker(r recommend.Recommendation) string {
 	return ""
 }
 
+// recommendationNote is the shared resolver's wording for a row flagged "+"
+// or "!", the same sentence the TUI shows under the selected row.
+func recommendationNote(r recommend.Recommendation) string {
+	switch r.BackendStatus {
+	case recommend.BackendNeedsSetup, recommend.BackendUnsupported:
+		return r.BackendNote
+	}
+	return ""
+}
+
 var recommendationFootnotes = map[string]string{
 	" *": "* No upstream backend loads this architecture yet; the first launch offers a reviewed fork or searches open llama.cpp PRs for one.",
 	" +": "+ No installed backend loads this architecture; the first launch offers to build one (about 20-40 min).",
@@ -234,6 +244,9 @@ func cmdRecommend(args []string) {
 			}
 			fmt.Printf("  %-36s %-10s %-8s %5.1fG %6s %8s  %s\n",
 				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, recommend.DisplayIntelligence(r), tps, recommend.OwnerLabel(r.Repo))
+			if note := recommendationNote(r); note != "" {
+				fmt.Printf("      %s\n", note)
+			}
 		}
 	}
 	printRecGroup("Best overall — intelligence first, practical quant", cats.Balanced)

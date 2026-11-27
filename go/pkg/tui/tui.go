@@ -232,6 +232,29 @@ type ModelItem struct {
 	// Incomplete is set (e.g. "incomplete download: 0.3 of 16.5 GB") when a file
 	// of the model is shorter than its GGUF header declares.
 	Incomplete string
+	// Support is the shared resolver's answer (backends.ResolveSupport), for
+	// display only: AutoBackend and BackendRecipe stay what a launch uses.
+	Support backends.Support
+}
+
+// backendSupport is the shared resolver with the launcher's installed-backend
+// facts, installed by the launcher; nil leaves Support empty.
+var backendSupport func(caps *detect.Capabilities, arch string, types []gguf.TypeUsage) backends.Support
+
+// SetBackendSupport installs the shared backend-support resolver used to word
+// the model list. It never changes what a launch request carries.
+func SetBackendSupport(fn func(caps *detect.Capabilities, arch string, types []gguf.TypeUsage) backends.Support) {
+	backendSupport = fn
+}
+
+// supportListNote is the list-row wording of a model's backend support: only
+// for a model with no installed route and no recipe offer, whose own wording
+// already says which backend it uses.
+func supportListNote(m ModelItem) string {
+	if m.AutoBackend != "" || m.BackendRecipe != "" {
+		return ""
+	}
+	return m.Support.Short()
 }
 
 type modelScanFinishedMsg struct {
@@ -400,6 +423,8 @@ func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 		desc += " · backend " + m.AutoBackend
 	} else if m.BackendRecipe != "" {
 		desc += " · backend " + m.BackendRecipe
+	} else if note := supportListNote(m); note != "" {
+		desc += " · " + note
 	}
 	// The fits estimate is the single most useful datapoint for dense models.
 	if m.FitCtx > 0 {
@@ -1853,6 +1878,9 @@ func (m Model) viewModelConfig() string {
 	default:
 		statline("Backend", m.backend)
 	}
+	if model.AutoBackend == "" && model.BackendRecipe == "" && model.Support.Short() != "" {
+		statline("Support", model.Support.Note())
+	}
 	line("context", "[c] Context size", ctxLabel)
 	line("parallel", "[p] Parallel slots", parallelLabel)
 	line("kv", "[K] KV placement", kvLabel)
@@ -2541,6 +2569,9 @@ func (m Model) viewRecommended() string {
 					from += "  (publisher outside the named quantizers; check it first)"
 				}
 				b.WriteString(mutedStyle.Render(from) + "\n")
+				if rec.BackendNote != "" && rec.BackendStatus != recommend.BackendReady {
+					b.WriteString(mutedStyle.Render("    "+rec.BackendNote) + "\n")
+				}
 			} else {
 				b.WriteString(prefix + line + "\n")
 			}
@@ -2978,6 +3009,9 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 					// alternative recipe (Laguna's upstream target-only fork), the first
 					// entry is the reviewed full-featured default.
 					models[i].BackendRecipe = recipes[0].Name
+				}
+				if backendSupport != nil {
+					models[i].Support = backendSupport(caps, info.Architecture, info.TensorTypes)
 				}
 			}
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)

@@ -3,15 +3,20 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/gguf"
+	"github.com/raketenkater/ggrun/pkg/models"
 	"github.com/raketenkater/ggrun/pkg/placement"
 	"github.com/raketenkater/ggrun/pkg/recommend"
+	"github.com/raketenkater/ggrun/pkg/tui"
 )
 
 // installedBackendPaths lists the backend binaries a default launch can pick:
@@ -136,6 +141,7 @@ func enableInstalledArchSupport() {
 	recommend.SetBackendRoute(func(caps *detect.Capabilities, arch string, mainline bool) bool {
 		return backendBuildRoute(arch, mainline, pinned, buildCanStart(tools, hostHasNVIDIAGPU(caps), accel))
 	})
+	enableSharedBackendSupport(pinned, tools, accel)
 	var candidates []autoBackendCandidate
 	candidatesLoaded := false
 	recommend.SetVulkanOnCUDA(func(caps *detect.Capabilities, arch string, moe bool, sizeMB int) bool {
@@ -164,4 +170,149 @@ func defaultLaunchUsesVulkan(candidates []autoBackendCandidate, arch string, moe
 	model := &placement.ModelProfile{ModelArch: arch, IsMoE: moe, TotalSizeMB: sizeMB}
 	chosen, _ := chooseAutoBackend(candidates, arch, probe, model)
 	return chosen != nil && strings.EqualFold(chosen.Dialect, "vulkan")
+}
+
+// installedBackendsFor answers the arch probe for every installed backend path,
+// named by its registered tag where it has one. It reads only the arch probe
+// (cached on disk by file identity); it never runs a backend or starts an
+// encoding probe, so every Encodings is nil until such a cache exists.
+func installedBackendsFor(paths []string, arch string, probe backendArchProbe, tags map[string]string) []backends.InstalledBackend {
+	out := make([]backends.InstalledBackend, 0, len(paths))
+	for _, path := range paths {
+		name := tags[path]
+		if name == "" {
+			name = path
+		}
+		loads, probed := probe(path, arch)
+		out = append(out, backends.InstalledBackend{Name: name, Path: path, LoadsArch: loads, Probed: probed})
+	}
+	return out
+}
+
+// buildBlockedReason says why the first launch cannot start a source build,
+// "" exactly when !pinned && buildCanStart(tools, nvidiaHost, accel) on a
+// platform where buildToolsPresent can be true.
+func buildBlockedReason(goos string, pinned, tools, nvidiaHost bool, accel string) string {
+	switch {
+	case pinned:
+		return "a backend is pinned in the config, which turns the build offers off"
+	case goos == "windows":
+		return "source builds are not available on Windows"
+	case !tools:
+		return "a source build needs git, cmake and a C++ compiler on PATH"
+	case nvidiaHost && accel != "cuda":
+		return "an NVIDIA build needs the CUDA toolkit (nvcc)"
+	}
+	return ""
+}
+
+// enableSharedBackendSupport installs backends.ResolveSupport as the one answer
+// for recommendation rows and the TUI model list. Both hooks are read only by
+// recommend.TopCategories and the TUI list; no launch path reads them.
+func enableSharedBackendSupport(pinned, tools bool, accel string) {
+	var mu sync.Mutex
+	installed := map[string][]backends.InstalledBackend{}
+	mainline := map[string][2]bool{}
+	installedFor := func(caps *detect.Capabilities, arch string) []backends.InstalledBackend {
+		arch = strings.ToLower(strings.TrimSpace(arch))
+		mu.Lock()
+		defer mu.Unlock()
+		if got, ok := installed[arch]; ok {
+			return got
+		}
+		tags := map[string]string{}
+		for _, b := range backends.Load() {
+			tags[strings.TrimSpace(b.Path)] = b.Tag
+		}
+		got := installedBackendsFor(installedBackendPaths(caps), arch, backends.BackendSupportsArch, tags)
+		installed[arch] = got
+		return got
+	}
+	blocked := func(caps *detect.Capabilities) string {
+		return buildBlockedReason(runtime.GOOS, pinned, tools, hostHasNVIDIAGPU(caps), accel)
+	}
+	localTypes := localRowTypes()
+	recommend.SetBackendSupport(func(caps *detect.Capabilities, r recommend.Recommendation) backends.Support {
+		in := backends.SupportInput{
+			Arch:              r.Arch,
+			Installed:         installedFor(caps, r.Arch),
+			MainlineRegisters: r.MainlineRegisters(),
+			MainlineKnown:     r.RunnableMainline != nil || r.Runnable != nil,
+			BuildBlocked:      blocked(caps),
+		}
+		// A remote row's types are unknown. Read a downloaded copy's only
+		// when the catalog has an encoding entry for the architecture.
+		if len(backends.ResolveRequirement(r.Arch, nil).Unchecked) > 0 {
+			in.Types = localTypes(r)
+		}
+		return backends.ResolveSupport(in)
+	})
+	tui.SetBackendSupport(func(caps *detect.Capabilities, arch string, types []gguf.TypeUsage) backends.Support {
+		key := strings.ToLower(strings.TrimSpace(arch))
+		mu.Lock()
+		m, ok := mainline[key]
+		mu.Unlock()
+		if !ok {
+			reg, known := recommend.MainlineRegistersArch(key)
+			m = [2]bool{reg, known}
+			mu.Lock()
+			mainline[key] = m
+			mu.Unlock()
+		}
+		return backends.ResolveSupport(backends.SupportInput{
+			Arch:              arch,
+			Types:             types,
+			Installed:         installedFor(caps, arch),
+			MainlineRegisters: m[0],
+			MainlineKnown:     m[1],
+			BuildBlocked:      blocked(caps),
+		})
+	})
+}
+
+// localRowTypes returns the tensor type histogram of a recommendation row's
+// downloaded file (matched as enableLocalQuantProfiles matches it), nil when
+// none is on disk or it cannot be read.
+func localRowTypes() func(recommend.Recommendation) []gguf.TypeUsage {
+	cfg, err := config.Load()
+	if err != nil || strings.TrimSpace(cfg.ModelDir) == "" {
+		return func(recommend.Recommendation) []gguf.TypeUsage { return nil }
+	}
+	root := cfg.ModelDir
+	var (
+		once   sync.Once
+		listed []models.Model
+	)
+	return func(r recommend.Recommendation) []gguf.TypeUsage {
+		var q recommend.QuantOption
+		for _, opt := range r.Quants {
+			if strings.EqualFold(opt.Name, r.QuantName) {
+				q = opt
+				break
+			}
+		}
+		if q.SizeBytes <= 0 {
+			return nil
+		}
+		once.Do(func() {
+			done := make(chan []models.Model, 1)
+			go func() {
+				list, _ := models.List(root)
+				done <- list
+			}()
+			select {
+			case listed = <-done:
+			case <-time.After(localModelListTimeout):
+			}
+		})
+		path, ok := matchLocalModel(listed, root, q)
+		if !ok {
+			return nil
+		}
+		types, err := gguf.ReadTypeHistogramModel(filepath.Clean(path))
+		if err != nil {
+			return nil
+		}
+		return types
+	}
 }

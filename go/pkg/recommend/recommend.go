@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/detect"
 )
 
@@ -128,6 +129,11 @@ type Recommendation struct {
 	// although the host has an NVIDIA GPU, and the first launch offers the
 	// CUDA build the speed estimate assumes. The row loads now either way.
 	CUDABuildOffered bool
+	// BackendSupport and BackendNote are the shared resolver's state and
+	// wording (backends.ResolveSupport), set when the launcher installed
+	// SetBackendSupport; empty otherwise.
+	BackendSupport backends.SupportState `json:",omitempty"`
+	BackendNote    string                `json:",omitempty"`
 }
 
 // BackendStatus says how the first launch gets a backend that serves a row.
@@ -227,6 +233,10 @@ func markBackendStatus(caps *detect.Capabilities, r *Recommendation) {
 		}
 		return
 	}
+	if backendSupport != nil {
+		applyBackendSupport(r, backendSupport(caps, *r))
+		return
+	}
 	loads, known := installedArchSupport(caps, r.Arch)
 	switch {
 	case !known:
@@ -238,6 +248,45 @@ func markBackendStatus(caps *detect.Capabilities, r *Recommendation) {
 	default:
 		r.BackendStatus = BackendUnsupported
 		appendReason(r, "no installed backend loads "+r.Arch+" and no supported route builds one here")
+	}
+}
+
+// backendSupport answers a row through the shared resolver
+// (backends.ResolveSupport). Only the launcher knows the installed backends
+// and the build feasibility, so it supplies the inputs.
+var backendSupport func(caps *detect.Capabilities, r Recommendation) backends.Support
+
+// SetBackendSupport installs the shared resolver for rows. When set it decides
+// BackendStatus in place of the installed-arch and build-route hooks, which
+// still gate the check and the Vulkan-on-CUDA probe. nil restores them.
+func SetBackendSupport(fn func(caps *detect.Capabilities, r Recommendation) backends.Support) {
+	backendSupport = fn
+}
+
+// StatusForSupport maps a resolver state onto the row status ranking uses.
+// Every state that cannot load now and offers no build ranks as unsupported.
+func StatusForSupport(state backends.SupportState) BackendStatus {
+	switch state {
+	case backends.SupportReady:
+		return BackendReady
+	case backends.SupportInstall:
+		return BackendNeedsSetup
+	case backends.SupportUnsupported, backends.SupportNoEncoding, backends.SupportUnknownArch:
+		return BackendUnsupported
+	}
+	return BackendUnknown
+}
+
+func applyBackendSupport(r *Recommendation, s backends.Support) {
+	r.BackendStatus = StatusForSupport(s.State)
+	r.BackendSupport, r.BackendNote = s.State, s.Note()
+	switch r.BackendStatus {
+	case BackendNeedsSetup, BackendUnsupported:
+		appendReason(r, s.Note())
+	case BackendUnknown:
+		if !s.Requirement.None() {
+			appendReason(r, s.Note())
+		}
 	}
 }
 
