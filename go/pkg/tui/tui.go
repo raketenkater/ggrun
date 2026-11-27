@@ -232,6 +232,53 @@ type ModelItem struct {
 	// Incomplete is set (e.g. "incomplete download: 0.3 of 16.5 GB") when a file
 	// of the model is shorter than its GGUF header declares.
 	Incomplete string
+	// Support is the shared resolver's answer (backends.ResolveSupport), for
+	// display only: AutoBackend and BackendRecipe stay what a launch uses.
+	Support backends.Support
+}
+
+// backendSupport is the shared resolver with the launcher's installed-backend
+// facts, installed by the launcher; nil leaves Support empty.
+var backendSupport func(caps *detect.Capabilities, arch string, types []gguf.TypeUsage) backends.Support
+
+// SetBackendSupport installs the shared backend-support resolver used to word
+// the model list. It never changes what a launch request carries.
+func SetBackendSupport(fn func(caps *detect.Capabilities, arch string, types []gguf.TypeUsage) backends.Support) {
+	backendSupport = fn
+}
+
+// truncateCols cuts s to at most width columns (runes), marking a cut with
+// "…"; width <= 0 means 80 columns minus margin, as wordWrap assumes.
+func truncateCols(s string, width int) string {
+	if width <= 0 {
+		width = 78
+	}
+	r := []rune(s)
+	if len(r) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(r[:width-1]) + "…"
+}
+
+// screenWidth is the terminal width, or 80 before the first size message.
+func (m Model) screenWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return 80
+}
+
+// supportListNote is the list-row wording of a model's backend support: only
+// for a model with no installed route and no recipe offer, whose own wording
+// already says which backend it uses.
+func supportListNote(m ModelItem) string {
+	if m.AutoBackend != "" || m.BackendRecipe != "" {
+		return ""
+	}
+	return m.Support.Short()
 }
 
 type modelScanFinishedMsg struct {
@@ -410,6 +457,11 @@ func mainModelDesc(m ModelItem, usage *modelusage.Record) string {
 		if !usage.LastUsedAt.IsZero() {
 			desc += " " + timeAgo(usage.LastUsedAt)
 		}
+	}
+	// After the fits and usage badges, so those stay visible at 80 columns;
+	// Short is at most 26 columns.
+	if note := supportListNote(m); note != "" {
+		desc += " · " + note
 	}
 	if m.External {
 		desc += " · discovered"
@@ -1853,6 +1905,11 @@ func (m Model) viewModelConfig() string {
 	default:
 		statline("Backend", m.backend)
 	}
+	if model.AutoBackend == "" && model.BackendRecipe == "" && model.Support.Short() != "" {
+		// One terminal row, so the focus clipping's line count holds; the
+		// 31 columns are statline's indent and label.
+		statline("Support", truncateCols(model.Support.Note(), m.screenWidth()-31))
+	}
 	line("context", "[c] Context size", ctxLabel)
 	line("parallel", "[p] Parallel slots", parallelLabel)
 	line("kv", "[K] KV placement", kvLabel)
@@ -2541,6 +2598,10 @@ func (m Model) viewRecommended() string {
 					from += "  (publisher outside the named quantizers; check it first)"
 				}
 				b.WriteString(mutedStyle.Render(from) + "\n")
+				if rec.BackendNote != "" && rec.BackendStatus != recommend.BackendReady {
+					// One terminal row, as the clipping counts it.
+					b.WriteString(mutedStyle.Render("    "+truncateCols(rec.BackendNote, m.screenWidth()-4)) + "\n")
+				}
 			} else {
 				b.WriteString(prefix + line + "\n")
 			}
@@ -2978,6 +3039,12 @@ func enrichModelItems(models []ModelItem, cacheDir, backend string, caps *detect
 					// alternative recipe (Laguna's upstream target-only fork), the first
 					// entry is the reviewed full-featured default.
 					models[i].BackendRecipe = recipes[0].Name
+				}
+				// Only where nothing above already words the backend: a routed
+				// or recipe row never shows the note, so it is not resolved
+				// (no arch probe of the installed backends for it).
+				if backendSupport != nil && models[i].AutoBackend == "" && models[i].BackendRecipe == "" {
+					models[i].Support = backendSupport(caps, info.Architecture, info.TensorTypes)
 				}
 			}
 			models[i].FitCtx = probe.EstimateFitCtxForInfo(models[i].Path, cacheDir, info, totalSysMemMB)

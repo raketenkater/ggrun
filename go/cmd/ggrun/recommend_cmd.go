@@ -143,6 +143,43 @@ func recommendationMarker(r recommend.Recommendation) string {
 	return ""
 }
 
+// recommendationNote is the shared resolver's wording for a row flagged "+"
+// or "!", the same sentence the TUI shows under the selected row.
+func recommendationNote(r recommend.Recommendation) string {
+	switch r.BackendStatus {
+	case recommend.BackendNeedsSetup, recommend.BackendUnsupported:
+		return r.BackendNote
+	}
+	return ""
+}
+
+// recommendationNoteWidth bounds a note line to the table's own width (the
+// row format above is 100 columns wide), indented under the model name.
+const recommendationNoteWidth = 100
+
+// recommendationNoteLines word-wraps a note at spaces into indented lines no
+// wider than recommendationNoteWidth (a single longer word stays whole).
+func recommendationNoteLines(note string) []string {
+	const indent = "      "
+	var lines []string
+	cur := ""
+	for _, w := range strings.Fields(note) {
+		switch {
+		case cur == "":
+			cur = indent + w
+		case len(cur)+1+len(w) > recommendationNoteWidth:
+			lines = append(lines, cur)
+			cur = indent + w
+		default:
+			cur += " " + w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
 var recommendationFootnotes = map[string]string{
 	" *": "* No upstream backend loads this architecture yet; the first launch offers a reviewed fork or searches open llama.cpp PRs for one.",
 	" +": "+ No installed backend loads this architecture; the first launch offers to build one (about 20-40 min).",
@@ -234,6 +271,9 @@ func cmdRecommend(args []string) {
 			}
 			fmt.Printf("  %-36s %-10s %-8s %5.1fG %6s %8s  %s\n",
 				name, recommend.DisplayFit(r.Fit), r.QuantName, r.QuantSizeGB, recommend.DisplayIntelligence(r), tps, recommend.OwnerLabel(r.Repo))
+			for _, line := range recommendationNoteLines(recommendationNote(r)) {
+				fmt.Println(line)
+			}
 		}
 	}
 	printRecGroup("Best overall — intelligence first, practical quant", cats.Balanced)
