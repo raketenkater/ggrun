@@ -262,8 +262,8 @@ func harmonicBandwidth(shares, bws []float64) float64 {
 }
 
 // denseSingleGPUBandwidth returns the fastest GPU that can hold this quant with
-// the same conservative capacity factor used by the recommender. Dense models
-// that fit one card are launched on one card, so averaging in slower unused GPUs
+// the same conservative capacity factor used by the recommender. Models that
+// fit one card are launched on one card, so averaging in slower unused GPUs
 // badly under-predicts them (Qwen3.6-27B measured 40.15 t/s on the 3090 Ti while
 // the old three-card average predicted 26 t/s).
 func denseSingleGPUBandwidth(caps *detect.Capabilities, sizeGB float64) (float64, bool) {
@@ -316,10 +316,13 @@ func predictDecodeTPSForFit(caps *detect.Capabilities, c Candidate, quant QuantO
 
 	vramBW := weightedVRAMBandwidth(caps)
 	singleDense := false
-	if !c.MoE && !spilled {
+	// The planner places any model, MoE or dense, that fits one card on that
+	// card alone (placement chooseStrategy returns SingleGPU before it looks at
+	// MoE), so a MoE whose file fits one card reads at that card's bandwidth.
+	if fit == "" || fit == "single GPU" {
 		if bw, ok := denseSingleGPUBandwidth(caps, quant.SizeGB); ok {
 			vramBW = bw
-			singleDense = true
+			singleDense = !c.MoE
 		}
 	}
 	budget := hardware(caps)
