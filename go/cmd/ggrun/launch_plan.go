@@ -19,7 +19,9 @@ import (
 // The functions it calls still print some lines directly (backend selection,
 // the arch KV rule, placement.Compute, slot adjustment, calibration reuse,
 // batch normalisation, the Claude sampling summary, printVRAMLedger under
-// GGRUN_TRACE_PLACEMENT); their output is unchanged and stays where it is.
+// GGRUN_TRACE_PLACEMENT); their text is unchanged. In JSON mode cmdDryRun
+// runs planLaunch under withStdoutOnStderr, so their stdout lines and the
+// stdout notes reach stderr instead.
 // resolveLaunchBackend can still exit through preflightIKOnlyArch.
 func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 	note := in.Note
@@ -189,6 +191,21 @@ func printPlanNote(n planNote) {
 		return
 	}
 	fmt.Fprint(os.Stderr, n.Text)
+}
+
+// withStdoutOnStderr runs fn with os.Stdout set to os.Stderr and puts the
+// previous os.Stdout back when fn returns or panics. The dry run uses it in
+// JSON mode so stdout carries only the plan document. It swaps the Go
+// variable, not file descriptor 1: everything that looks up os.Stdout when it
+// prints (fmt.Print*, printPlanNote, a child given cmd.Stdout = os.Stdout)
+// follows it; a child with no Stdout set gets the null device either way.
+// Not safe beside goroutines that use os.Stdout concurrently; planning starts
+// none that outlive it.
+func withStdoutOnStderr(fn func()) {
+	saved := os.Stdout
+	os.Stdout = os.Stderr
+	defer func() { os.Stdout = saved }()
+	fn()
 }
 
 // planNoteWriter turns a callee's writes into notes on one stream.
