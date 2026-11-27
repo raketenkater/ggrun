@@ -150,6 +150,17 @@
     "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu12.json (planning only; no device is touched)\nError: No installed backend supports the llama architecture. The $RUN/home/app/.bin/llama-server-cuda backend does not support it.\n  It requires a newer llama.cpp mainline or a fork that adds the architecture. Run ggrun in a terminal and it will search open llama.cpp PRs for a supporting fork or offer a mainline backend update; set LLM_ASSUME_YES=true to accept them without a prompt.\n"
   },
   {
+    "case": "auto-backend/arch-literal/gpu12",
+    "args": [
+      "models/Synthetic-Dense-8B-Q4_K_M.gguf",
+      "--inventory",
+      "inventories/gpu12.json"
+    ],
+    "exit_code": 0,
+    "stdout": "[dry-run] tight-resident, ctx 131072 total / 131072 per agent, kv gpu/q8_0, batch 8192/1024, parallel 1, bottleneck GPU 0 layer service (incomplete-compute-evidence)\n[dry-run] calculated 28 candidates (0 feasible, 0 exact): batch 64..8192, ubatch 32..2048, parallel 1..4, 1 topology shape(s)\n[dry-run] CUDA0 model       free  11988 - model   3919 - KV     0 - graph/runtime  1024 = slack   7045 MiB [missing-compute-measurement]\n[dry-run] host free 122880 - required 3294 = slack 119586 MiB (reclaimable weights 0 MiB) [gguf-and-probe-estimate]\n[dry-run] backend $RUN/home/app/.bin/llama-server-cuda (version: 9999 (0000000))\n$RUN/home/app/.bin/llama-server-cuda -m models/Synthetic-Dense-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8081 --ctx-size 131072 --flash-attn on -b 8192 -ub 1024 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --threads 16 --threads-batch 16 --kv-offload --no-context-shift --parallel 1 -ngl 999 --fit off -mg 0 --device CUDA0 -cram 11264 --timeout 2147483647 -lv 4\n",
+    "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu12.json (planning only; no device is touched)\n[placement] context fit: 131072 tokens, 1 slot(s), KV q8_0 on gpu (gpu-resident; model/policy context cap reached)\n"
+  },
+  {
     "case": "dense-offload-gpu-kv/gpu2",
     "args": [
       "models/Synthetic-Dense-8B-Q4_K_M.gguf",
@@ -184,6 +195,23 @@
     "stdout": "{\"schema\":\"ggrun-server-plan-v1\",\"model_path\":\"models/Synthetic-Dense-8B-Q4_K_M.gguf\",\"backend_tag\":\"llama\",\"backend_identity\":\"llama-server-e026cfee8257aedfbe8894b9+load-mode-v2\",\"launch_scope\":\"aebf5b99e06dfabe816268eb\",\"memory_max_mb\":116326,\"environment\":{\"CUDA_DEVICE_ORDER\":\"PCI_BUS_ID\"},\"server_argv\":[\"backend/llama-server\",\"-m\",\"models/Synthetic-Dense-8B-Q4_K_M.gguf\",\"--host\",\"127.0.0.1\",\"--port\",\"8081\",\"--ctx-size\",\"131072\",\"--flash-attn\",\"on\",\"-b\",\"2048\",\"-ub\",\"512\",\"--cache-type-k\",\"q8_0\",\"--cache-type-v\",\"q8_0\",\"--jinja\",\"--threads\",\"16\",\"--threads-batch\",\"16\",\"--kv-offload\",\"--no-context-shift\",\"--parallel\",\"1\",\"--fit\",\"on\",\"--no-mmap\",\"-cram\",\"11264\",\"--timeout\",\"2147483647\",\"-lv\",\"4\"],\"residency\":\"non-resident\",\"optimization_bottleneck\":\"CPU layer service\",\"resource_ledger\":{\"devices\":[{\"gpu\":0,\"role\":\"main/layers\",\"free_mb\":1748,\"graph_mb\":1024,\"required_mb\":1024,\"slack_mb\":724,\"active\":true,\"evidence\":\"missing-compute-measurement\",\"bandwidth_mbps\":224000}],\"host\":{\"free_mb\":122880,\"runtime_mb\":3919,\"required_mb\":3919,\"slack_mb\":118961,\"evidence\":\"gguf-and-probe-estimate\"},\"exact\":false,\"evidence\":\"incomplete-compute-evidence\",\"fits\":false,\"needs_admission\":true,\"missing_compute_gpus\":[0]},\"optimization_boundary\":{\"candidate_count\":28,\"feasible_count\":0,\"unmeasured_count\":28,\"min_batch\":32,\"max_batch\":8192,\"min_ubatch\":32,\"max_ubatch\":2048,\"min_parallel\":1,\"max_parallel\":4,\"topologies\":[\"dense_cpu_offload\"],\"device_slack_mb\":{\"0\":724},\"host_slack_mb\":118961,\"evidence\":\"incomplete-compute-evidence\"}}\n",
     "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu2.json (planning only; no device is touched)\n",
     "stdout_is_one_json_document": true
+  },
+  {
+    "case": "dense-offload-gpu-kv/nofit-backend/gpu2",
+    "args": [
+      "models/Synthetic-Dense-8B-Q4_K_M.gguf",
+      "--server-bin",
+      "backend-nofit/llama-server",
+      "--inventory",
+      "inventories/gpu2.json",
+      "--ctx",
+      "131072",
+      "--kv-placement",
+      "gpu"
+    ],
+    "exit_code": 0,
+    "stdout": "[dry-run] non-resident, ctx 131072 total / 131072 per agent, kv gpu/q8_0, batch 2048/512, parallel 1, bottleneck CPU layer service (incomplete-compute-evidence)\n[dry-run] calculated 28 candidates (0 feasible, 0 exact): batch 32..8192, ubatch 32..2048, parallel 1..4, 1 topology shape(s)\n[dry-run] CUDA0 main/layers free   1748 - model      0 - KV     0 - graph/runtime  1024 = slack    724 MiB [missing-compute-measurement]\n[dry-run] host free 122880 - required 3919 = slack 118961 MiB (reclaimable weights 0 MiB) [gguf-and-probe-estimate]\n[dry-run] backend backend-nofit/llama-server (version: 9999 (0000001))\nbackend-nofit/llama-server -m models/Synthetic-Dense-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8081 --ctx-size 131072 --flash-attn on -b 2048 -ub 512 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --threads 16 --threads-batch 16 --kv-offload --no-context-shift --parallel 1 -ngl 999 -mg 0 --no-mmap -cram 11264 --timeout 2147483647 -lv 4\n",
+    "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu2.json (planning only; no device is touched)\n"
   },
   {
     "case": "gpus-index-missing/gpu12",

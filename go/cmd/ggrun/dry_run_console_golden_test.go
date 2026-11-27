@@ -44,6 +44,9 @@ import (
 // Normalised: the fixture root becomes $ROOT and the per-run directory $RUN.
 // Nothing else is rewritten.
 //
+// Not reached: dryRunFitRefusal. With these fixtures a dense CPU-offload plan
+// never puts KV on a GPU ledger, with or without backend --fit.
+//
 // Left out: a "Model does not fit" placement error. placementErrorMessage then
 // scans /proc for running llama-server processes (activeLlamaServerMemoryHint),
 // which another package's test can be running at the same moment.
@@ -121,8 +124,11 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// run's own fit check does not fire.
 		{name: "dense-offload-gpu-kv/gpu2", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu")},
 		{name: "dense-offload-gpu-kv/gpu2/emit-json", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu", "--emit-server-argv-json"), json: true},
-		// The same on a backend without --fit: dryRunFitRefusal's case.
-		{name: "fit-refusal/nofit-backend/gpu2", args: append([]string{dryRunConsoleDense, "--server-bin", dryRunConsoleNoFit, "--inventory", "inventories/gpu2.json"}, "--ctx", "131072", "--kv-placement", "gpu")},
+		// The same on a backend without --fit. The ledger still carries no KV on
+		// the card, so dryRunFitRefusal does not fire here either, and the argv
+		// keeps -ngl 999 for a model larger than the card (the known latent
+		// defect the plan golden's nofit case records).
+		{name: "dense-offload-gpu-kv/nofit-backend/gpu2", args: append([]string{dryRunConsoleDense, "--server-bin", dryRunConsoleNoFit, "--inventory", "inventories/gpu2.json"}, "--ctx", "131072", "--kv-placement", "gpu")},
 		{name: "gpus-index-missing/gpu12", args: dense("gpu12", "--gpus", "9")},
 		{name: "unknown-flag/gpu12", args: dense("gpu12", "--no-such-ggrun-flag")},
 		{name: "flag-missing-value", args: dense("gpu12", "--ctx")},
