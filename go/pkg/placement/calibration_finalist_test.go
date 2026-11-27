@@ -36,13 +36,13 @@ func TestSuppressesAutomaticSearch_EqualsRetryPredicateWithoutSwap(t *testing.T)
 	for _, d := range boundedDecisionCases() {
 		legacy := d
 		recorded := d
-		recorded.CalculatedFinalist = d.Finalist
+		recorded.CalculatedFinalist, recorded.CalculatedFingerprint = d.Finalist, "fp"
 		for _, asked := range []string{"f", "g", ""} {
 			want := asked != "" && d.SuppressesAutomaticAdmissionRetry(asked)
-			if got := legacy.SuppressesAutomaticSearch(asked); got != want {
+			if got := legacy.SuppressesAutomaticSearch(asked, "fp"); got != want {
 				t.Errorf("legacy %+v asked %q: got %v want %v", d, asked, got, want)
 			}
-			if got := recorded.SuppressesAutomaticSearch(asked); got != want {
+			if got := recorded.SuppressesAutomaticSearch(asked, "fp"); got != want {
 				t.Errorf("recorded %+v asked %q: got %v want %v", d, asked, got, want)
 			}
 		}
@@ -54,22 +54,33 @@ func TestSuppressesAutomaticSearch_EqualsRetryPredicateWithoutSwap(t *testing.T)
 // measured one, or any other candidate, is a different plan and searches.
 func TestSuppressesAutomaticSearch_BindsToRecordedCalculatedFinalist(t *testing.T) {
 	d := CalibrationDecision{Winner: "default", ValidationLevel: CalibrationValidationBaselineBounded,
-		Finalist: "directed", CalculatedFinalist: "calculated", FinalistOutcome: "baseline-won"}
-	if !d.SuppressesAutomaticSearch("calculated") {
+		Finalist: "directed", CalculatedFinalist: "calculated", CalculatedFingerprint: "fp", FinalistOutcome: "baseline-won"}
+	if !d.SuppressesAutomaticSearch("calculated", "fp") {
 		t.Error("a bounded decision does not cover the plan it searched")
 	}
 	for _, other := range []string{"directed", "another", ""} {
-		if d.SuppressesAutomaticSearch(other) {
+		if d.SuppressesAutomaticSearch(other, "fp") {
 			t.Errorf("a decision for calculated finalist %q suppressed the plan with %q", d.CalculatedFinalist, other)
 		}
 	}
+	// The same name with another strategy is another experiment.
+	for _, fp := range []string{"other", ""} {
+		if d.SuppressesAutomaticSearch("calculated", fp) {
+			t.Errorf("same-name finalist with strategy %q was suppressed", fp)
+		}
+	}
+	nameOnly := d
+	nameOnly.CalculatedFingerprint = ""
+	if nameOnly.SuppressesAutomaticSearch("calculated", "") || nameOnly.SuppressesAutomaticSearch("calculated", "fp") {
+		t.Error("a recorded name without a strategy fingerprint suppressed the search")
+	}
 	d.Winner = "directed"
 	d.FinalistOutcome = "promoted"
-	if d.SuppressesAutomaticSearch("calculated") {
+	if d.SuppressesAutomaticSearch("calculated", "fp") {
 		t.Error("a promoted winner went through the retry predicate")
 	}
 	var nilDecision *CalibrationDecision
-	if nilDecision.SuppressesAutomaticSearch("calculated") {
+	if nilDecision.SuppressesAutomaticSearch("calculated", "fp") {
 		t.Error("a nil decision suppressed the search")
 	}
 }

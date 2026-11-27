@@ -162,7 +162,7 @@ func calibrationPlan(req *launchRequest, cfg *config.Config, model *placement.Mo
 	// calculated finalist of the plan it searched, so a finalist redirected
 	// after the baseline measurement still covers this identical plan.
 	if mode == calibrateAuto && cachedDecision != nil &&
-		cachedDecision.SuppressesAutomaticSearch(candidates[1].Name) {
+		cachedDecision.SuppressesAutomaticSearch(candidates[1].Name, placement.CalibrationStrategyFingerprint(candidates[1].Strategy)) {
 		return nil
 	}
 	if len(candidates) > budget.MaxCandidates {
@@ -916,6 +916,9 @@ type calibrationSideEffects struct {
 	stopAndWait     func(p *server.Process, label string, baseline *detect.Capabilities, timeout time.Duration) bool
 	startExact      func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, args []string, timeout time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string, error)
 	restart         func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, strategy *placement.Strategy, be *backendInfo, caps *detect.Capabilities, args []string, window time.Duration, recovery *launchMemoryRecovery) (*server.Process, *placement.Strategy, []string)
+	// directFinalist is the phase-directed finalist selector; nil means
+	// bottleneckDirectedCalibrationFinalist. A seam for tests only.
+	directFinalist func(req *launchRequest, cfg *config.Config, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy, diagnosis placement.WorkloadBottleneck, recovery *launchMemoryRecovery) (placement.CalibrationCandidate, bool)
 }
 
 var calibrationEffects = calibrationSideEffects{
@@ -960,8 +963,9 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		return p, strategy, serverArgs, nil
 	}
 	// The planned finalist, before any telemetry- or phase-directed swap below;
-	// every decision records it so the next identical plan is recognised.
+	// decisions record it so the next identical plan is recognised.
 	calculatedFinalist := candidates[1].Name
+	calculatedFingerprint := placement.CalibrationStrategyFingerprint(candidates[1].Strategy)
 	mode := effectiveCalibrationMode(req)
 	budget := calibrationBudgetFor(mode)
 	scope := calibrationScope(req, model, be, caps, strategy)
@@ -1149,7 +1153,11 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 				strategy.OptimizationBottleneck = measuredBottleneck
 			}
 		}
-		if finalist, ok := bottleneckDirectedCalibrationFinalist(req, cfg, model, be, caps, strategy, baselineDiagnosis, memoryRecovery); ok {
+		directFinalist := fx.directFinalist
+		if directFinalist == nil {
+			directFinalist = bottleneckDirectedCalibrationFinalist
+		}
+		if finalist, ok := directFinalist(req, cfg, model, be, caps, strategy, baselineDiagnosis, memoryRecovery); ok {
 			if candidates[1].Name != finalist.Name {
 				fmt.Printf("[optimize] replacing calculated finalist %s with phase-directed %s for %s/%s\n",
 					candidates[1].Name, finalist.Name, baselineDiagnosis.PrimaryPhase, baselineDiagnosis.Primary)
@@ -1419,7 +1427,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		if outcome == searchBudgetBound {
 			pending := scopedCalibrationDecision(scope, model, defaultResult, measurements[0])
 			annotateOptimizationDecision(pending, candidates, measurements)
-			recordCalculatedFinalist(pending, calculatedFinalist)
+			recordCalculatedFinalist(pending, calculatedFinalist, calculatedFingerprint, candidates[1].Name)
 			if pending != nil {
 				prev, _ := placement.LoadCalibrationDecision(cfg.CacheDir, scopeKey)
 				markFinalistUnmeasured(pending, prev)
@@ -1437,7 +1445,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 		}
 		pending := scopedCalibrationDecision(scope, model, defaultResult, measurements[0])
 		annotateOptimizationDecision(pending, candidates, measurements)
-		recordCalculatedFinalist(pending, calculatedFinalist)
+		recordCalculatedFinalist(pending, calculatedFinalist, calculatedFingerprint, candidates[1].Name)
 		pending.FinalistFailureClass = stableFailureClass
 		pending.FinalistFailureReason = stableFailureReason
 		if mode == calibrateAuto {
@@ -1526,7 +1534,7 @@ func runCalibration(req *launchRequest, cfg *config.Config, model *placement.Mod
 
 	pending := scopedCalibrationDecision(scope, model, defaultResult, best)
 	annotateOptimizationDecision(pending, candidates, measurements)
-	recordCalculatedFinalist(pending, calculatedFinalist)
+	recordCalculatedFinalist(pending, calculatedFinalist, calculatedFingerprint, candidates[1].Name)
 	if winnerRestartFailed {
 		// The finalist measured, but it could not be put back into service.
 		// Recording that as baseline-won would bury a faster finalist as
@@ -1667,14 +1675,35 @@ func annotateOptimizationDecision(decision *placement.CalibrationDecision, candi
 	}
 }
 
-// recordCalculatedFinalist stores the plan's calculated finalist on a decision
-// annotated from the measured candidate order, which a directed swap may have
-// reordered. The next launch's calibrationPlan compares against it.
-func recordCalculatedFinalist(decision *placement.CalibrationDecision, calculated string) {
-	if decision == nil || decision.Finalist == "" {
+// recordCalculatedFinalist stores the plan's calculated finalist (name and
+// strategy fingerprint, both taken before any swap) on a decision annotated
+// from the measured candidate order, which a directed swap may have reordered;
+// lead is the finalist that order put first. The next launch's calibrationPlan
+// compares against it. It is recorded only when the decision's finalist is the
+// calculated or the lead finalist: a decision about an admission fallback
+// keeps the older comparison, so a failed primary that was never measured is
+// not skipped.
+func recordCalculatedFinalist(decision *placement.CalibrationDecision, calculated, fingerprint, lead string) {
+	if decision == nil || decision.Finalist == "" || calculated == "" || fingerprint == "" {
+		return
+	}
+	if decision.Finalist != calculated && decision.Finalist != lead {
 		return
 	}
 	decision.CalculatedFinalist = calculated
+	decision.CalculatedFingerprint = fingerprint
+}
+
+// boundedBaselineKeptLine reports a saved bounded decision. It promises a
+// skipped search only when the decision covers its own recorded plan; an
+// unmeasured finalist below the attempt cap, or a decision about an admission
+// fallback, is searched again.
+func boundedBaselineKeptLine(decision *placement.CalibrationDecision, path string) string {
+	prefix := fmt.Sprintf("[optimize] baseline kept for %s (%s); the profile serves but could not prove cache reuse", decision.Finalist, decision.FinalistOutcome)
+	if decision.SuppressesAutomaticSearch(decision.CalculatedFinalist, decision.CalculatedFingerprint) {
+		return fmt.Sprintf("%s, so identical launches skip this search while the calculated finalist stays %s (%s)", prefix, decision.CalculatedFinalist, path)
+	}
+	return fmt.Sprintf("%s; the next identical launch searches again (%s)", prefix, path)
 }
 
 func prioritizeCalibrationFinalist(candidates []placement.CalibrationCandidate, finalist placement.CalibrationCandidate) []placement.CalibrationCandidate {
