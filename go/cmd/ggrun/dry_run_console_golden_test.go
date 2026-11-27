@@ -159,7 +159,36 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// The same inventory plan as emit-json/gpu12, entered through main's
 		// dispatch of "dry-run".
 		{name: "main/dry-run/gpu12/emit-json", args: append([]string{"dry-run"}, dense("gpu12", "--emit-server-argv-json")...), viaMain: true},
+		// An inventory whose card indexes are not the ones ggrun would give
+		// those cards is refused (exit 2), never renumbered.
+		{name: "inventory-index-duplicate", args: dense("dup-index")},
+		{name: "inventory-index-duplicate/emit-json", args: dense("dup-index", "--emit-server-argv-json")},
+		{name: "inventory-index-gap", args: dense("gap")},
+		{name: "inventory-index-gap/emit-json", args: dense("gap", "--emit-server-argv-json")},
+		{name: "inventory-index-negative", args: dense("negative")},
+		{name: "inventory-index-negative/emit-json", args: dense("negative", "--emit-server-argv-json")},
+		{name: "inventory-index-permuted", args: dense("permuted")},
+		{name: "inventory-index-permuted/emit-json", args: dense("permuted", "--emit-server-argv-json")},
+		{name: "inventory-bus-id-duplicate", args: dense("dup-bus")},
+		{name: "inventory-bus-id-duplicate/emit-json", args: dense("dup-bus", "--emit-server-argv-json")},
+		// Without bus ids the order cannot be derived: 0..N-1 in list order plans.
+		{name: "inventory-no-bus-ids", args: dense("no-bus")},
+		{name: "inventory-no-bus-ids/emit-json", args: dense("no-bus", "--emit-server-argv-json")},
+		// --gpus on an inventory with no GPU is rejected before planning.
+		{name: "gpus-index/no-gpu-inventory", args: dense("cpu", "--gpus", "0")},
+		{name: "gpus-index/no-gpu-inventory/emit-json", args: dense("cpu", "--gpus", "0", "--emit-server-argv-json")},
 	}
+}
+
+// dryRunConsoleGPUBus is goldenPlanGPU with its bus id replaced; bus "" drops it.
+func dryRunConsoleGPUBus(index, vramMB, lanes, memBW int, bus string) string {
+	g := goldenPlanGPU(index, vramMB, lanes, memBW)
+	from := fmt.Sprintf(`,"pci_bus_id":"00000000:%02X:00.0"`, index+1)
+	to := ""
+	if bus != "" {
+		to = `,"pci_bus_id":"` + bus + `"`
+	}
+	return strings.Replace(g, from, to, 1)
 }
 
 // TestDryRunConsoleHelper is the child: it runs cmdDryRun with the arguments
@@ -301,6 +330,18 @@ func dryRunConsoleFixture(t *testing.T, python string) string {
 		"gpu12":  goldenPlanInventories["gpu12"],
 		"mixed3": goldenPlanInventories["mixed3"],
 		"gpu2":   goldenPlanInventory(goldenPlanGPU(0, 2048, 16, 224000)),
+		"cpu":    goldenPlanInventories["cpu"],
+		"dup-index": goldenPlanInventory(goldenPlanGPU(0, 12288, 16, 504000),
+			dryRunConsoleGPUBus(0, 24576, 16, 1008000, "00000000:02:00.0")),
+		"gap":      goldenPlanInventory(goldenPlanGPU(0, 12288, 16, 504000), goldenPlanGPU(2, 12288, 8, 360000)),
+		"negative": goldenPlanInventory(goldenPlanGPU(-1, 12288, 16, 504000), goldenPlanGPU(0, 24576, 16, 1008000)),
+		// The cards of a two-card host, with the indexes swapped against bus order.
+		"permuted": goldenPlanInventory(dryRunConsoleGPUBus(0, 12288, 16, 504000, "00000000:02:00.0"),
+			dryRunConsoleGPUBus(1, 24576, 16, 1008000, "00000000:01:00.0")),
+		"dup-bus": goldenPlanInventory(goldenPlanGPU(0, 12288, 16, 504000),
+			dryRunConsoleGPUBus(1, 24576, 16, 1008000, "00000000:01:00.0")),
+		"no-bus": goldenPlanInventory(dryRunConsoleGPUBus(0, 24576, 16, 1008000, ""),
+			dryRunConsoleGPUBus(1, 12288, 16, 504000, "")),
 	}
 	for name, body := range inventories {
 		if err := os.WriteFile(filepath.Join(root, "inventories", name+".json"), []byte(body), 0o600); err != nil {
