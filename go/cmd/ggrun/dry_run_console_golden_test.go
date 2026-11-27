@@ -66,6 +66,7 @@ const (
 	dryRunConsoleGoldenPath = "testdata/dry_run_console_golden.json"
 	dryRunConsoleHelperEnv  = "GGRUN_DRY_RUN_CONSOLE_HELPER"
 	dryRunConsoleArgsEnv    = "GGRUN_DRY_RUN_CONSOLE_ARGS"
+	dryRunConsoleMainEnv    = "GGRUN_DRY_RUN_CONSOLE_MAIN"
 )
 
 type dryRunConsoleCase struct {
@@ -77,7 +78,16 @@ type dryRunConsoleCase struct {
 	// "literal" appends the NUL-bracketed architecture name the loader probe
 	// looks for (backends.BackendSupportsArch) after the script's exit.
 	autoBackend string
-	json        bool // --emit-server-argv-json: record whether stdout is one JSON document and check the contract
+	// viaMain runs the child through main with args as its command line
+	// (args[0] is the command), so the real argument dispatch is covered.
+	viaMain bool
+}
+
+// jsonMode reports whether the case asks for --emit-server-argv-json: the
+// record then says whether stdout is one JSON document and the contract is
+// checked.
+func (c dryRunConsoleCase) jsonMode() bool {
+	return hasArg(c.args, "--emit-server-argv-json")
 }
 
 type dryRunConsoleRecord struct {
@@ -105,14 +115,14 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 	return []dryRunConsoleCase{
 		{name: "plain/gpu12", args: dense("gpu12")},
 		{name: "plain/mixed3", args: dense("mixed3")},
-		{name: "emit-json/gpu12", args: dense("gpu12", "--emit-server-argv-json"), json: true},
+		{name: "emit-json/gpu12", args: dense("gpu12", "--emit-server-argv-json")},
 		{name: "claude-code/gpu12", args: dense("gpu12", "--claude-code")},
-		{name: "claude-code/gpu12/emit-json", args: dense("gpu12", "--claude-code", "--emit-server-argv-json"), json: true},
+		{name: "claude-code/gpu12/emit-json", args: dense("gpu12", "--claude-code", "--emit-server-argv-json")},
 		// claudeCodeSlotAdjust lowers --parallel and warns about the slot size.
-		{name: "claude-code/gpu12/ctx16384/emit-json", args: dense("gpu12", "--claude-code", "--ctx", "16384", "--emit-server-argv-json"), json: true},
+		{name: "claude-code/gpu12/ctx16384/emit-json", args: dense("gpu12", "--claude-code", "--ctx", "16384", "--emit-server-argv-json")},
 		// The deepseek4 KV rule promotes a quantised K-cache on mainline.
-		{name: "arch-kv-rule/deepseek4/gpu12/emit-json", args: on(dryRunConsoleDeepSeek4, "gpu12", "--kv-quality", "q8_0", "--emit-server-argv-json"), json: true},
-		{name: "trace-placement/gpu12/emit-json", args: dense("gpu12", "--emit-server-argv-json"), env: []string{"GGRUN_TRACE_PLACEMENT=1"}, json: true},
+		{name: "arch-kv-rule/deepseek4/gpu12/emit-json", args: on(dryRunConsoleDeepSeek4, "gpu12", "--kv-quality", "q8_0", "--emit-server-argv-json")},
+		{name: "trace-placement/gpu12/emit-json", args: dense("gpu12", "--emit-server-argv-json"), env: []string{"GGRUN_TRACE_PLACEMENT=1"}},
 		{name: "exposed-host/gpu12", args: dense("gpu12", "--host", "0.0.0.0")},
 		// Automatic backend selection: no --server-bin, the backend in the app home.
 		// The loader probe reads the script, finds no architecture literal and
@@ -123,7 +133,7 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// and GPU KV. A backend with --fit plans no KV on the card, so the dry
 		// run's own fit check does not fire.
 		{name: "dense-offload-gpu-kv/gpu2", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu")},
-		{name: "dense-offload-gpu-kv/gpu2/emit-json", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu", "--emit-server-argv-json"), json: true},
+		{name: "dense-offload-gpu-kv/gpu2/emit-json", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu", "--emit-server-argv-json")},
 		// The same on a backend without --fit. The ledger still carries no KV on
 		// the card, so dryRunFitRefusal does not fire here either, and the argv
 		// keeps -ngl 999 for a model larger than the card (the known latent
@@ -136,13 +146,17 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		{name: "model-file-missing", args: on("models/missing.gguf", "gpu12")},
 		{name: "inventory-file-missing", args: dense("missing")},
 		// JSON mode with notes from several callees, and a JSON-mode error.
-		{name: "trace-placement/claude-code/gpu12/emit-json", args: dense("gpu12", "--claude-code", "--emit-server-argv-json"), env: []string{"GGRUN_TRACE_PLACEMENT=1"}, json: true},
-		{name: "model-file-missing/emit-json", args: on("models/missing.gguf", "gpu12", "--emit-server-argv-json"), json: true},
+		{name: "trace-placement/claude-code/gpu12/emit-json", args: dense("gpu12", "--claude-code", "--emit-server-argv-json"), env: []string{"GGRUN_TRACE_PLACEMENT=1"}},
+		{name: "model-file-missing/emit-json", args: on("models/missing.gguf", "gpu12", "--emit-server-argv-json")},
+		// The same inventory plan as emit-json/gpu12, entered through main's
+		// dispatch of "dry-run".
+		{name: "main/dry-run/gpu12/emit-json", args: append([]string{"dry-run"}, dense("gpu12", "--emit-server-argv-json")...), viaMain: true},
 	}
 }
 
 // TestDryRunConsoleHelper is the child: it runs cmdDryRun with the arguments
-// the parent passes and exits with its status. It does nothing in a normal run.
+// the parent passes, or main with them as its command line, and exits with its
+// status. It does nothing in a normal run.
 func TestDryRunConsoleHelper(t *testing.T) {
 	if os.Getenv(dryRunConsoleHelperEnv) != "1" {
 		return
@@ -152,7 +166,12 @@ func TestDryRunConsoleHelper(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "helper: bad args: %v\n", err)
 		os.Exit(97)
 	}
-	cmdDryRun(args)
+	if os.Getenv(dryRunConsoleMainEnv) == "1" {
+		os.Args = append([]string{"ggrun"}, args...)
+		main()
+	} else {
+		cmdDryRun(args)
+	}
 	os.Exit(0)
 }
 
@@ -190,7 +209,7 @@ func TestDryRunConsoleGolden(t *testing.T) {
 		for i := range runs {
 			runs[i] = dryRunConsoleRun(t, c, roots[i])
 		}
-		if c.json {
+		if c.jsonMode() {
 			if r := runs[0]; r.ExitCode == 0 && !*r.StdoutOneJSON {
 				contract = append(contract, fmt.Sprintf("%s: exit 0 but stdout is not exactly one JSON document: %q", c.name, r.Stdout))
 			} else if r.ExitCode != 0 && r.Stdout != "" {
@@ -323,6 +342,9 @@ func dryRunConsoleRun(t *testing.T, c dryRunConsoleCase, root string) dryRunCons
 		"LLM_CACHE_DIR=" + filepath.Join(home, "cache"),
 		"LLM_SERVER_SKIP_DRAFT_DOWNLOAD=1",
 	}
+	if c.viaMain {
+		env = append(env, dryRunConsoleMainEnv+"=1")
+	}
 	env = append(env, c.env...)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -344,7 +366,7 @@ func dryRunConsoleRun(t *testing.T, c dryRunConsoleCase, root string) dryRunCons
 		return strings.ReplaceAll(s, root, "$ROOT")
 	}
 	record := dryRunConsoleRecord{Case: c.name, Args: c.args, Env: c.env, ExitCode: exit, Stdout: normalise(stdout.String()), Stderr: normalise(stderr.String())}
-	if c.json {
+	if c.jsonMode() {
 		one := dryRunConsoleOneJSON(stdout.Bytes())
 		record.StdoutOneJSON = &one
 	}

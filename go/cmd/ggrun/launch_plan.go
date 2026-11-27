@@ -32,18 +32,25 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		note(planNote{Stream: planStderr, Text: w + "\n"})
 	}
 
-	caps, err := in.Detect()
-	if err != nil {
-		return nil, &planError{Code: 1, Message: fmt.Sprintf("Error detecting hardware: %v", err), Err: err}
-	}
 	// A dry-run may plan for a DIFFERENT machine, or for this one while another
 	// process holds its VRAM. Planning-only: real launches refuse the flag
 	// outright (see loadInventory), because exact-argv admission and observed
-	// allocations are the authority for what actually fits.
-	if in.Policy.Inventory && req.InventoryPath != "" {
+	// allocations are the authority for what actually fits. An inventory plan
+	// reads nothing from this host's devices: no detection, and the live
+	// readings planning takes later come from the inventory (useInventoryReadings).
+	fromInventory := in.Policy.Inventory && req.InventoryPath != ""
+	var caps *detect.Capabilities
+	var err error
+	if fromInventory {
 		caps, err = in.Inventory(req.InventoryPath)
 		if err != nil {
 			return nil, &planError{Code: 2, Message: fmt.Sprintf("Error reading inventory: %v", err), Err: err}
+		}
+		defer useInventoryReadings(caps, req)()
+	} else {
+		caps, err = in.Detect()
+		if err != nil {
+			return nil, &planError{Code: 1, Message: fmt.Sprintf("Error detecting hardware: %v", err), Err: err}
 		}
 	}
 
@@ -73,7 +80,13 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 	placementOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
 	strategy, err := placement.Compute(caps, model, placementOpts)
 	if err != nil {
-		return nil, &planError{Code: 1, Message: "Error computing placement: " + placementErrorMessage(err), Err: err}
+		// The running-server hint scans this host's processes, which say
+		// nothing about an inventory's machine.
+		msg := err.Error()
+		if !fromInventory {
+			msg = placementErrorMessage(err)
+		}
+		return nil, &planError{Code: 1, Message: "Error computing placement: " + msg, Err: err}
 	}
 	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
 	strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
@@ -95,7 +108,15 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		plan.EnvPrefix = key + "=" + value
 	}
 	if vulkanDeviceOrderApplies(be, caps) {
-		listed, vkErr := in.ListVulkan(be.Path)
+		var listed []listedDevice
+		var vkErr error
+		if fromInventory {
+			// No backend runs: the inventory's order stands for the backend's.
+			listed = inventoryVulkanListing(caps)
+			note(planNote{Stream: planStderr, Text: "[dry-run] Vulkan device order taken from the inventory; not checked against the backend's own listing\n"})
+		} else {
+			listed, vkErr = in.ListVulkan(be.Path)
+		}
 		key, value := "", ""
 		if vkErr == nil {
 			key, value, vkErr = vulkanDeviceOrder(req, be, caps, listed)
@@ -133,10 +154,68 @@ type launchPlan struct {
 	LaunchScope string            // claudeLaunchLogScope, the plan JSON's "launch_scope"
 }
 
+// useInventoryReadings points the live readers planning consults at inv for
+// the rest of an inventory plan and returns the function that puts the
+// previous readers back; planLaunch defers it, so every return and a panic
+// restore them. The readers are package variables (test seams) read by
+// runtimeGPUCapabilitiesForLaunch, bindFitToGuard, claudeReviewerReservation
+// and resolveClaudeCompanionProfile, which the launch shares; swapping them here keeps
+// those bodies and the launch untouched. Not safe beside goroutines that call
+// the readers concurrently: planning starts none that outlive it, and nothing
+// plans concurrently with a dry run in one process.
+//
+//   - used VRAM: the inventory's own vram_used_mb, so the live floor adds
+//     nothing to what the inventory already charges;
+//   - driver free VRAM: total - used of the inventory card, what a driver on
+//     that machine would report (ggrun's own vram_reserved_mb is withheld by
+//     the planner, not by the driver);
+//   - resident reviewer: none; an inventory cannot describe running processes;
+//   - Nano reviewer GPU check (--claude-reviewer nanbeige; it runs the reviewer
+//     backend with --list-devices): capable when the inventory lists a GPU,
+//     which plans the opt-in's larger seat.
+func useInventoryReadings(inv *detect.Capabilities, req *launchRequest) (restore func()) {
+	savedUsed, savedFree, savedResident, savedNano := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable
+	byIndex := map[int]detect.GPU{}
+	if inv != nil {
+		for _, g := range inv.GPUs {
+			byIndex[g.Index] = g
+		}
+	}
+	runtimeVRAMUsedMB = func(physical int) int { return byIndex[physical].VRAMUsedMB }
+	fitDriverFreeVRAM = func(runtime *detect.Capabilities) map[int]int {
+		if runtime == nil || len(runtime.GPUs) == 0 {
+			return nil
+		}
+		_, visibleToPhysical := runtimeGPUCapabilities(inv, req)
+		free := map[int]int{}
+		for _, g := range runtime.GPUs {
+			if card, ok := byIndex[physicalGPUIndex(g.Index, visibleToPhysical)]; ok {
+				free[g.Index] = max(card.VRAMTotalMB-card.VRAMUsedMB, 0)
+			}
+		}
+		return free
+	}
+	residentReviewerVRAM = func(string) int { return 0 }
+	claudeNanoGPUCapable = func(string) bool { return inv != nil && len(inv.GPUs) > 0 }
+	return func() {
+		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable = savedUsed, savedFree, savedResident, savedNano
+	}
+}
+
+// inventoryVulkanListing is the device listing an inventory plan uses in place
+// of the backend's: the inventory's GPUs in their own order.
+func inventoryVulkanListing(inv *detect.Capabilities) []listedDevice {
+	listed := make([]listedDevice, len(inv.GPUs))
+	for i, g := range inv.GPUs {
+		listed[i] = listedDevice{Index: i, Name: g.Name, TotalMB: g.VRAMTotalMB}
+	}
+	return listed
+}
+
 // planPolicy holds what the dry run does that a launch does not (D1, D31, D32
 // of the W11 design). The dry run is its only user so far.
 type planPolicy struct {
-	Inventory    bool // read --inventory in place of the detected hardware
+	Inventory    bool // read --inventory in place of the detected hardware and the live readings
 	FullFrontier bool // explainServingOptimization's fullFrontier
 	FitRefusal   bool // refuse a plan whose own ledger says GPU KV does not fit
 }
@@ -145,7 +224,8 @@ var dryRunPlanPolicy = planPolicy{Inventory: true, FullFrontier: true, FitRefusa
 
 // planInputs are planLaunch's readers and its note sink. dryRunPlanInputs
 // gives the production ones; the golden tests inject fakes for hardware,
-// model, backend and the Vulkan listing.
+// model, backend and the Vulkan listing. With an inventory, Detect and
+// ListVulkan are not called.
 type planInputs struct {
 	Policy         planPolicy
 	Detect         func() (*detect.Capabilities, error)
