@@ -77,7 +77,7 @@ type dryRunConsoleCase struct {
 	// "literal" appends the NUL-bracketed architecture name the loader probe
 	// looks for (backends.BackendSupportsArch) after the script's exit.
 	autoBackend string
-	json        bool // --emit-server-argv-json: record whether stdout is one JSON document
+	json        bool // --emit-server-argv-json: record whether stdout is one JSON document and check the contract
 }
 
 type dryRunConsoleRecord struct {
@@ -135,6 +135,9 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		{name: "no-model", args: []string{"--inventory", "inventories/gpu12.json"}},
 		{name: "model-file-missing", args: on("models/missing.gguf", "gpu12")},
 		{name: "inventory-file-missing", args: dense("missing")},
+		// JSON mode with notes from several callees, and a JSON-mode error.
+		{name: "trace-placement/claude-code/gpu12/emit-json", args: dense("gpu12", "--claude-code", "--emit-server-argv-json"), env: []string{"GGRUN_TRACE_PLACEMENT=1"}, json: true},
+		{name: "model-file-missing/emit-json", args: on("models/missing.gguf", "gpu12", "--emit-server-argv-json"), json: true},
 	}
 }
 
@@ -172,10 +175,27 @@ func TestDryRunConsoleGolden(t *testing.T) {
 	roots := [2]string{dryRunConsoleFixture(t, python), dryRunConsoleFixture(t, python)}
 
 	var records []dryRunConsoleRecord
+	// The JSON interface's contract, checked for every JSON-mode case and
+	// reported after the golden comparison (so a recording run still logs the
+	// file): a successful run prints exactly one JSON document on stdout and
+	// nothing else; a failed run prints nothing on stdout.
+	var contract []string
+	defer func() {
+		for _, msg := range contract {
+			t.Error(msg)
+		}
+	}()
 	for _, c := range dryRunConsoleCases() {
 		var runs [2]dryRunConsoleRecord
 		for i := range runs {
 			runs[i] = dryRunConsoleRun(t, c, roots[i])
+		}
+		if c.json {
+			if r := runs[0]; r.ExitCode == 0 && !*r.StdoutOneJSON {
+				contract = append(contract, fmt.Sprintf("%s: exit 0 but stdout is not exactly one JSON document: %q", c.name, r.Stdout))
+			} else if r.ExitCode != 0 && r.Stdout != "" {
+				contract = append(contract, fmt.Sprintf("%s: exit %d but stdout is not empty: %q", c.name, r.ExitCode, r.Stdout))
+			}
 		}
 		first, second := dryRunConsoleMarshal(t, runs[0]), dryRunConsoleMarshal(t, runs[1])
 		if !bytes.Equal(first, second) {

@@ -8443,7 +8443,16 @@ func cmdDryRun(args []string) {
 	}
 
 	// planLaunch prints nothing itself; its notes print here as they happen.
-	plan, planErr := planLaunch(req, dryRunPlanInputs(printPlanNote))
+	var plan *launchPlan
+	var planErr *planError
+	runPlan := func() { plan, planErr = planLaunch(req, dryRunPlanInputs(printPlanNote)) }
+	if req.EmitServerArgvJSON {
+		// stdout carries the plan document and nothing else: whatever planning
+		// prints on stdout goes to stderr, in order with stderr's own lines.
+		withStdoutOnStderr(runPlan)
+	} else {
+		runPlan()
+	}
 	if planErr != nil {
 		printPlanNote(planErr.note())
 		os.Exit(planErr.Code)

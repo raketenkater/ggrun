@@ -395,3 +395,88 @@ func TestCmdDryRunDoesNotPlanItself(t *testing.T) {
 		t.Fatalf("cmdDryRun refers to planLaunch %d times, want once", planCalls)
 	}
 }
+
+// withStdoutOnStderr is the dry run's JSON-mode guard: inside it, stdout
+// prints (direct ones and stdout notes) reach stderr in order with stderr's
+// own lines; on every way out, a plan error, a refused plan and a panic
+// included, os.Stdout is what it was before.
+func TestWithStdoutOnStderrRestoresStdout(t *testing.T) {
+	origOut, origErr := os.Stdout, os.Stderr
+	t.Cleanup(func() { os.Stdout, os.Stderr = origOut, origErr })
+	dir := t.TempDir()
+	create := func(name string) *os.File {
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+	out, errOut := create("stdout"), create("stderr")
+	os.Stdout, os.Stderr = out, errOut
+	restored := func(step string) {
+		t.Helper()
+		if os.Stdout != out || os.Stderr != errOut {
+			os.Stdout, os.Stderr = origOut, origErr
+			t.Fatalf("%s: os.Stdout/os.Stderr not restored", step)
+		}
+	}
+
+	// An error returned by planLaunch itself.
+	var planErr *planError
+	withStdoutOnStderr(func() {
+		if os.Stdout != errOut {
+			t.Error("os.Stdout inside the guard is not os.Stderr")
+		}
+		fmt.Print("direct stdout line\n")
+		printPlanNote(planNote{Stream: planStdout, Text: "stdout note\n"})
+		printPlanNote(planNote{Stream: planStderr, Text: "stderr note\n"})
+		_, planErr = planLaunch(&launchRequest{Host: "127.0.0.1"}, planInputs{
+			Detect: func() (*detect.Capabilities, error) { return nil, errors.New("no probe") },
+		})
+	})
+	restored("plan error")
+	if planErr == nil || planErr.Message != "Error detecting hardware: no probe" {
+		t.Fatalf("planErr = %+v", planErr)
+	}
+
+	// A refused plan.
+	var plan *launchPlan
+	withStdoutOnStderr(func() {
+		fmt.Println("refusal path line")
+		plan = &launchPlan{Refusal: &planError{Code: 1, Message: "refused"}}
+	})
+	restored("refusal")
+	if plan.Refusal == nil {
+		t.Fatal("refusal lost")
+	}
+
+	// A panic.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("no panic")
+			}
+		}()
+		withStdoutOnStderr(func() {
+			fmt.Println("before panic")
+			panic("boom")
+		})
+	}()
+	restored("panic")
+
+	fmt.Print("after the guard\n")
+	read := func(f *os.File) string {
+		b, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if got := read(out); got != "after the guard\n" {
+		t.Errorf("stdout = %q, want only the line printed after the guard", got)
+	}
+	if got, want := read(errOut), "direct stdout line\nstdout note\nstderr note\nrefusal path line\nbefore panic\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
