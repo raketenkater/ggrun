@@ -1,0 +1,266 @@
+{
+ "comment": "Head dim 128 and 2 query heads per KV head along the layer and width axes (depth-kv is full multi-head on purpose; moe-realshape keeps 4 per KV head). First calibration suite for tools/perf/make_synthetic_gguf.py. Data only: no measurements. expected_file_bytes is plan(spec).file_size; tests/test_synthetic_gguf.py keeps it in step. Generate one file: make_synthetic_gguf.py --arch ... --out FILE (spec keys map to the flags; quant is the matrix type). Every file sets context_length 65536: depth is a request property, the harness passes -c itself.",
+ "seed": 1,
+ "files": [
+  {
+   "id": "fixed-floor",
+   "tier": "quick",
+   "from": "design B run A / design A D1",
+   "isolates": "per-token fixed cost: c0 plus 16 layers of per-layer cost; the bytes term is far below it on a fast card",
+   "compare": "compare with layers-48 (same width, 3x layers) and bytes-mid / bytes-large-1 (same layers, wider)",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 512,
+    "ff": 1536,
+    "heads": 4,
+    "kv_heads": 2,
+    "seed": 1,
+    "name": "ggrun-synth-fixed-floor"
+   },
+   "expected_file_bytes": 29448064,
+   "active_weight_bytes": 28904448,
+   "kv_bytes_per_token_f16": 16384
+  },
+  {
+   "id": "layers-48",
+   "tier": "quick",
+   "from": "design B run C / design A D3",
+   "isolates": "cost per layer: same width as fixed-floor, 48 layers; the weight-bytes difference is small",
+   "compare": "slope (t[layers-48] - t[fixed-floor]) / 32",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 48,
+    "embd": 512,
+    "ff": 1536,
+    "heads": 4,
+    "kv_heads": 2,
+    "seed": 1,
+    "name": "ggrun-synth-layers-48"
+   },
+   "expected_file_bytes": 86219456,
+   "active_weight_bytes": 85658624,
+   "kv_bytes_per_token_f16": 49152
+  },
+  {
+   "id": "bytes-mid",
+   "tier": "quick",
+   "from": "design B run Mid",
+   "isolates": "self-check: the fixed-floor to bytes-large-1 line must predict this file; the residual is the model-misspecification term",
+   "compare": "same layer count as fixed-floor and bytes-large-1, width between them",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 1024,
+    "ff": 2816,
+    "heads": 8,
+    "kv_heads": 4,
+    "seed": 1,
+    "name": "ggrun-synth-bytes-mid"
+   },
+   "expected_file_bytes": 108420992,
+   "active_weight_bytes": 107354112,
+   "kv_bytes_per_token_f16": 32768
+  },
+  {
+   "id": "bytes-large-1",
+   "tier": "quick",
+   "from": "design B run B (small point) / design A D2",
+   "isolates": "weight-streaming rate: same layers as fixed-floor, about 15x the bytes, so t[large] - t[fixed-floor] = bytes / rate with the fixed part cancelled; also the base file for depth and prefill (ubatch) arms",
+   "compare": "slope against fixed-floor and bytes-mid; resize --embd/--ff so bytes / rate is at least 3 ms on the measured device",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 2048,
+    "ff": 5632,
+    "heads": 16,
+    "kv_heads": 8,
+    "seed": 1,
+    "name": "ggrun-synth-bytes-large-1"
+   },
+   "expected_file_bytes": 429158272,
+   "active_weight_bytes": 427044864,
+   "kv_bytes_per_token_f16": 65536
+  },
+  {
+   "id": "bytes-large-2",
+   "tier": "full",
+   "from": "design B run B (large point)",
+   "isolates": "second bytes point for the streaming rate (about 2x bytes-large-1); a card with more than ~0.6 TB/s needs it for a 3 ms difference",
+   "compare": "three-point line with fixed-floor and bytes-large-1",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 3072,
+    "ff": 8192,
+    "heads": 24,
+    "kv_heads": 12,
+    "seed": 1,
+    "name": "ggrun-synth-bytes-large-2"
+   },
+   "expected_file_bytes": 940998528,
+   "active_weight_bytes": 937838592,
+   "kv_bytes_per_token_f16": 98304
+  },
+  {
+   "id": "type-q4_0",
+   "tier": "full",
+   "from": "design B run B-type (legacy class); design A T1",
+   "isolates": "quant-type kernel cost at EQUAL weight bytes: Q4_0 and Q4_K are both 4.5 bits per weight",
+   "compare": "t[type-q4_0] - t[bytes-large-1]",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_0",
+    "layers": 16,
+    "embd": 2048,
+    "ff": 5632,
+    "heads": 16,
+    "kv_heads": 8,
+    "seed": 1,
+    "name": "ggrun-synth-type-q4_0"
+   },
+   "expected_file_bytes": 429158272,
+   "active_weight_bytes": 427044864,
+   "kv_bytes_per_token_f16": 65536
+  },
+  {
+   "id": "type-q8_0",
+   "tier": "full",
+   "from": "design B run B-type; design A T1",
+   "isolates": "quant-type cost across a bytes change (8.5 bits per weight): bytes term predicted from bytes-large-1 plus the Q4_0 type factor",
+   "compare": "residual of the bytes-large-1 line at 1.9x bytes",
+   "spec": {
+    "arch": "dense",
+    "quant": "q8_0",
+    "layers": 16,
+    "embd": 2048,
+    "ff": 5632,
+    "heads": 16,
+    "kv_heads": 8,
+    "seed": 1,
+    "name": "ggrun-synth-type-q8_0"
+   },
+   "expected_file_bytes": 806645632,
+   "active_weight_bytes": 804532224,
+   "kv_bytes_per_token_f16": 65536
+  },
+  {
+   "id": "depth-kv",
+   "tier": "full",
+   "from": "design B run B-depth / design A depth point",
+   "isolates": "KV read cost: bytes-large-1 geometry with full multi-head KV (128 KiB of f16 KV per token of context), so the depth slope stands out",
+   "compare": "decode at depth 0 versus 4k/16k of cached prompt on this file; also bytes-large-1 (64 KiB/token) at the same depths",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 2048,
+    "ff": 5632,
+    "heads": 16,
+    "kv_heads": 16,
+    "seed": 1,
+    "name": "ggrun-synth-depth-kv"
+   },
+   "expected_file_bytes": 466907008,
+   "active_weight_bytes": 464793600,
+   "kv_bytes_per_token_f16": 131072
+  },
+  {
+   "id": "pair-dense",
+   "tier": "quick",
+   "from": "design A D1 / E1 dense half",
+   "isolates": "dense half of the equal-active-bytes pair: FFN width 2048",
+   "compare": "against pair-moe: same attention, same weight bytes read per token (the MoE reads 2.4% more for the router)",
+   "spec": {
+    "arch": "dense",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 1024,
+    "ff": 2048,
+    "heads": 8,
+    "kv_heads": 4,
+    "seed": 1,
+    "name": "ggrun-synth-pair-dense"
+   },
+   "expected_file_bytes": 87187328,
+   "active_weight_bytes": 86120448,
+   "kv_bytes_per_token_f16": 32768
+  },
+  {
+   "id": "pair-moe",
+   "tier": "quick",
+   "from": "design A E1 / design B run M1",
+   "isolates": "cost of routed layers at equal active bytes: 32 experts of FFN width 512 (0.3 MB per expert matrix), 4 used = FFN width 2048",
+   "compare": "(t[pair-moe] - t[pair-dense]) / 16 layers = per-layer routing and expert-gather cost",
+   "spec": {
+    "arch": "moe",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 1024,
+    "ff": 512,
+    "heads": 8,
+    "kv_heads": 4,
+    "experts": 32,
+    "experts_used": 4,
+    "seed": 1,
+    "name": "ggrun-synth-pair-moe"
+   },
+   "expected_file_bytes": 485647936,
+   "active_weight_bytes": 88217600,
+   "kv_bytes_per_token_f16": 32768
+  },
+  {
+   "id": "moe-slice2m",
+   "tier": "full",
+   "from": "design B run M2",
+   "isolates": "expert-slice size: 16 experts of FFN width 1792, 2 used (2 MB per expert matrix); slice-size saturation against pair-moe; also the hybrid CPU-expert arm",
+   "compare": "against pair-moe: per-layer cost versus slice bytes",
+   "spec": {
+    "arch": "moe",
+    "quant": "q4_k",
+    "layers": 16,
+    "embd": 2048,
+    "ff": 1792,
+    "heads": 16,
+    "kv_heads": 8,
+    "experts": 16,
+    "experts_used": 2,
+    "seed": 1,
+    "name": "ggrun-synth-moe-slice2m"
+   },
+   "expected_file_bytes": 1705276992,
+   "active_weight_bytes": 315895808,
+   "kv_bytes_per_token_f16": 65536
+  },
+  {
+   "id": "moe-realshape",
+   "tier": "full",
+   "from": "task: transfer to real MoE files",
+   "isolates": "per-layer geometry of a Qwen3-30B-A3B-class model (embd 2048, 128 experts of width 768, 8 used) with 4 layers; no q/k norms",
+   "compare": "per-layer cost here versus the per-layer cost implied by a real A3B file of the same geometry (48 layers): the transfer check",
+   "spec": {
+    "arch": "moe",
+    "quant": "q4_k",
+    "layers": 4,
+    "embd": 2048,
+    "ff": 768,
+    "heads": 16,
+    "kv_heads": 4,
+    "experts": 128,
+    "experts_used": 8,
+    "seed": 1,
+    "name": "ggrun-synth-moe-realshape"
+   },
+   "expected_file_bytes": 1391024224,
+   "active_weight_bytes": 114896896,
+   "kv_bytes_per_token_f16": 8192
+  }
+ ],
+ "total_bytes": 6966092704,
+ "quick_tier_bytes": 1226082048
+}
