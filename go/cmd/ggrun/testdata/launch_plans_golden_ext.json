@@ -3667,5 +3667,543 @@
         }
       ]
     }
+  },
+  {
+    "case": "gpu12-ram32/moe/auto",
+    "order": "dry-run",
+    "args": [],
+    "outcome": "plan",
+    "plan": {
+      "schema": "ggrun-server-plan-v1",
+      "model_path": "synthetic/moe.gguf",
+      "backend_tag": "llama",
+      "backend_identity": "golden-mainline-build+load-mode-v2",
+      "launch_scope": "22948c47e2521b8d5bb06b75",
+      "memory_max_mb": 27033,
+      "environment": {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+      },
+      "server_argv": [
+        "/usr/bin/ggrun-golden-llama-server",
+        "-m",
+        "synthetic/moe.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8081",
+        "--ctx-size",
+        "69632",
+        "--flash-attn",
+        "on",
+        "-b",
+        "2048",
+        "-ub",
+        "128",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--jinja",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--kv-offload",
+        "--no-context-shift",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "--fit",
+        "off",
+        "-mg",
+        "0",
+        "-ot",
+        "exps=CPU",
+        "--n-cpu-moe",
+        "37",
+        "-cram",
+        "2560",
+        "--timeout",
+        "2147483647",
+        "-lv",
+        "4"
+      ],
+      "residency": "non-resident",
+      "optimization_bottleneck": "CPU expert bandwidth",
+      "resource_ledger": {
+        "devices": [
+          {
+            "gpu": 0,
+            "role": "main/layers",
+            "free_mb": 11988,
+            "model_mb": 5938,
+            "context_mb": 2890,
+            "graph_mb": 1024,
+            "required_mb": 9852,
+            "slack_mb": 2136,
+            "active": true,
+            "evidence": "missing-compute-measurement",
+            "bandwidth_mbps": 504000
+          }
+        ],
+        "host": {
+          "free_mb": 28672,
+          "runtime_mb": 3896,
+          "required_mb": 3896,
+          "slack_mb": 24776,
+          "reclaimable_mb": 75776,
+          "evidence": "gguf-and-probe-estimate"
+        },
+        "exact": false,
+        "evidence": "incomplete-compute-evidence",
+        "fits": false,
+        "needs_admission": true,
+        "missing_compute_gpus": [
+          0
+        ]
+      },
+      "optimization_boundary": {
+        "candidate_count": 1,
+        "feasible_count": 0,
+        "unmeasured_count": 1,
+        "min_batch": 2048,
+        "max_batch": 2048,
+        "min_ubatch": 128,
+        "max_ubatch": 128,
+        "min_parallel": 1,
+        "max_parallel": 1,
+        "topologies": [
+          "moe_offload:link"
+        ],
+        "device_slack_mb": {
+          "0": 2136
+        },
+        "host_slack_mb": 24776,
+        "evidence": "incomplete-compute-evidence"
+      }
+    },
+    "strategy": {
+      "type": "moe_offload",
+      "context_size": 69632,
+      "parallel": 1,
+      "mmap_required": true
+    }
+  },
+  {
+    "case": "gpu12-ram32/moe/auto",
+    "order": "launch",
+    "args": [],
+    "outcome": "mmap-refusal",
+    "error": "placement requires file-backed mmap; rerun with --mmap to approve it explicitly",
+    "strategy": {
+      "type": "moe_offload",
+      "context_size": 69632,
+      "parallel": 1,
+      "mmap_required": true
+    }
+  },
+  {
+    "case": "gpu12-ram32/moe/mmap",
+    "order": "dry-run",
+    "args": [
+      "--mmap"
+    ],
+    "outcome": "plan",
+    "plan": {
+      "schema": "ggrun-server-plan-v1",
+      "model_path": "synthetic/moe.gguf",
+      "backend_tag": "llama",
+      "backend_identity": "golden-mainline-build+load-mode-v2",
+      "launch_scope": "22948c47e2521b8d5bb06b75",
+      "memory_max_mb": 27033,
+      "environment": {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+      },
+      "server_argv": [
+        "/usr/bin/ggrun-golden-llama-server",
+        "-m",
+        "synthetic/moe.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8081",
+        "--ctx-size",
+        "69632",
+        "--flash-attn",
+        "on",
+        "-b",
+        "2048",
+        "-ub",
+        "128",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--jinja",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--kv-offload",
+        "--no-context-shift",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "--fit",
+        "off",
+        "-mg",
+        "0",
+        "-ot",
+        "exps=CPU",
+        "--n-cpu-moe",
+        "37",
+        "-cram",
+        "2560",
+        "--timeout",
+        "2147483647",
+        "-lv",
+        "4"
+      ],
+      "residency": "non-resident",
+      "optimization_bottleneck": "CPU expert bandwidth",
+      "resource_ledger": {
+        "devices": [
+          {
+            "gpu": 0,
+            "role": "main/layers",
+            "free_mb": 11988,
+            "model_mb": 5938,
+            "context_mb": 2890,
+            "graph_mb": 1024,
+            "required_mb": 9852,
+            "slack_mb": 2136,
+            "active": true,
+            "evidence": "missing-compute-measurement",
+            "bandwidth_mbps": 504000
+          }
+        ],
+        "host": {
+          "free_mb": 28672,
+          "runtime_mb": 3896,
+          "required_mb": 3896,
+          "slack_mb": 24776,
+          "reclaimable_mb": 75776,
+          "evidence": "gguf-and-probe-estimate"
+        },
+        "exact": false,
+        "evidence": "incomplete-compute-evidence",
+        "fits": false,
+        "needs_admission": true,
+        "missing_compute_gpus": [
+          0
+        ]
+      },
+      "optimization_boundary": {
+        "candidate_count": 29,
+        "feasible_count": 0,
+        "unmeasured_count": 29,
+        "min_batch": 32,
+        "max_batch": 8192,
+        "min_ubatch": 32,
+        "max_ubatch": 2048,
+        "min_parallel": 1,
+        "max_parallel": 2,
+        "topologies": [
+          "moe_offload:link"
+        ],
+        "device_slack_mb": {
+          "0": 2136
+        },
+        "host_slack_mb": 24776,
+        "evidence": "incomplete-compute-evidence"
+      }
+    },
+    "strategy": {
+      "type": "moe_offload",
+      "context_size": 69632,
+      "parallel": 1,
+      "mmap_required": true
+    }
+  },
+  {
+    "case": "gpu12-ram32/moe/mmap",
+    "order": "launch",
+    "args": [
+      "--mmap"
+    ],
+    "outcome": "plan",
+    "plan": {
+      "schema": "ggrun-server-plan-v1",
+      "model_path": "synthetic/moe.gguf",
+      "backend_tag": "llama",
+      "backend_identity": "golden-mainline-build+load-mode-v2",
+      "launch_scope": "22948c47e2521b8d5bb06b75",
+      "memory_max_mb": 27033,
+      "environment": {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+      },
+      "server_argv": [
+        "/usr/bin/ggrun-golden-llama-server",
+        "-m",
+        "synthetic/moe.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8081",
+        "--ctx-size",
+        "69632",
+        "--flash-attn",
+        "on",
+        "-b",
+        "2048",
+        "-ub",
+        "128",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--jinja",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--kv-offload",
+        "--no-context-shift",
+        "--parallel",
+        "1",
+        "-ngl",
+        "999",
+        "--fit",
+        "off",
+        "-mg",
+        "0",
+        "-ot",
+        "exps=CPU",
+        "--n-cpu-moe",
+        "37",
+        "-cram",
+        "2560",
+        "--timeout",
+        "2147483647",
+        "-lv",
+        "4"
+      ]
+    },
+    "strategy": {
+      "type": "moe_offload",
+      "context_size": 69632,
+      "parallel": 1,
+      "mmap_required": true
+    }
+  },
+  {
+    "case": "gpu12-ram32/moe/no-mmap",
+    "order": "dry-run",
+    "args": [
+      "--no-mmap"
+    ],
+    "outcome": "placement-error",
+    "error": "automatic context fit found no admissible plan: Model does not fit on this system: no GPU has free VRAM after CUDA/compute overhead"
+  },
+  {
+    "case": "gpu12-ram32/moe/no-mmap",
+    "order": "launch",
+    "args": [
+      "--no-mmap"
+    ],
+    "outcome": "placement-error",
+    "error": "automatic context fit found no admissible plan: Model does not fit on this system: no GPU has free VRAM after CUDA/compute overhead"
+  },
+  {
+    "case": "gpu12-ram32/dense-large/no-mmap",
+    "order": "dry-run",
+    "args": [
+      "--no-mmap"
+    ],
+    "outcome": "plan",
+    "plan": {
+      "schema": "ggrun-server-plan-v1",
+      "model_path": "synthetic/dense-large.gguf",
+      "backend_tag": "llama",
+      "backend_identity": "golden-mainline-build+load-mode-v2",
+      "launch_scope": "fd728efddb16cb7eaede42a6",
+      "memory_max_mb": 27033,
+      "environment": {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+      },
+      "server_argv": [
+        "/usr/bin/ggrun-golden-llama-server",
+        "-m",
+        "synthetic/dense-large.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8081",
+        "--ctx-size",
+        "32768",
+        "-b",
+        "2048",
+        "-ub",
+        "512",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--jinja",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--no-kv-offload",
+        "--no-context-shift",
+        "--parallel",
+        "1",
+        "--fit",
+        "on",
+        "--no-mmap",
+        "-cram",
+        "4096",
+        "--timeout",
+        "2147483647",
+        "-lv",
+        "4"
+      ],
+      "residency": "non-resident",
+      "optimization_bottleneck": "memory admission",
+      "resource_ledger": {
+        "devices": [
+          {
+            "gpu": 0,
+            "role": "main/layers",
+            "free_mb": 11988,
+            "graph_mb": 1024,
+            "required_mb": 1024,
+            "slack_mb": 10964,
+            "active": true,
+            "evidence": "missing-compute-measurement",
+            "bandwidth_mbps": 504000
+          }
+        ],
+        "host": {
+          "free_mb": 28672,
+          "runtime_mb": 29287,
+          "required_mb": 29287,
+          "slack_mb": -615,
+          "evidence": "gguf-and-probe-estimate"
+        },
+        "exact": false,
+        "evidence": "incomplete-compute-evidence",
+        "fits": false,
+        "missing_compute_gpus": [
+          0
+        ]
+      },
+      "optimization_boundary": {
+        "candidate_count": 25,
+        "feasible_count": 0,
+        "min_batch": 32,
+        "max_batch": 8192,
+        "min_ubatch": 32,
+        "max_ubatch": 2048,
+        "min_parallel": 1,
+        "max_parallel": 1,
+        "topologies": [
+          "dense_cpu_offload"
+        ],
+        "device_slack_mb": {
+          "0": 10964
+        },
+        "host_slack_mb": -615,
+        "evidence": "incomplete-compute-evidence"
+      }
+    },
+    "strategy": {
+      "type": "dense_cpu_offload",
+      "context_size": 32768,
+      "parallel": 1
+    }
+  },
+  {
+    "case": "gpu12-ram32/dense-large/no-mmap",
+    "order": "launch",
+    "args": [
+      "--no-mmap"
+    ],
+    "outcome": "plan",
+    "plan": {
+      "schema": "ggrun-server-plan-v1",
+      "model_path": "synthetic/dense-large.gguf",
+      "backend_tag": "llama",
+      "backend_identity": "golden-mainline-build+load-mode-v2",
+      "launch_scope": "fd728efddb16cb7eaede42a6",
+      "memory_max_mb": 27033,
+      "environment": {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+      },
+      "server_argv": [
+        "/usr/bin/ggrun-golden-llama-server",
+        "-m",
+        "synthetic/dense-large.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8081",
+        "--ctx-size",
+        "32768",
+        "-b",
+        "2048",
+        "-ub",
+        "512",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--jinja",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--no-kv-offload",
+        "--no-context-shift",
+        "--parallel",
+        "1",
+        "--fit",
+        "on",
+        "--no-mmap",
+        "-cram",
+        "4096",
+        "--timeout",
+        "2147483647",
+        "-lv",
+        "4"
+      ]
+    },
+    "strategy": {
+      "type": "dense_cpu_offload",
+      "context_size": 32768,
+      "parallel": 1
+    }
+  },
+  {
+    "case": "gpu12-ram32/moe/claude-code-mmap",
+    "order": "dry-run",
+    "args": [
+      "--claude-code",
+      "--mmap"
+    ],
+    "outcome": "placement-error",
+    "error": "automatic context fit found no admissible plan: Model does not fit on this system: no GPU has free VRAM after CUDA/compute overhead"
+  },
+  {
+    "case": "gpu12-ram32/moe/claude-code-mmap",
+    "order": "launch",
+    "args": [
+      "--claude-code",
+      "--mmap"
+    ],
+    "outcome": "placement-error",
+    "error": "automatic context fit found no admissible plan: Model does not fit on this system: no GPU has free VRAM after CUDA/compute overhead"
   }
 ]

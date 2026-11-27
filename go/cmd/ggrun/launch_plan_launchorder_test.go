@@ -404,6 +404,10 @@ var launchOrderDivergence = []string{
 	"gpu24/dense-small/claude-code+self-review-on: argv",
 	"mixed3/moe/claude-resume: resume-context",
 	"mixed3/moe/claude-resume: argv",
+	"gpu12-ram32/moe/auto: mmap-consent",
+	"gpu12-ram32/moe/auto: outcome",
+	"gpu12-ram32/moe/no-mmap: placement-fallback",
+	"gpu12-ram32/moe/claude-code-mmap: placement-fallback",
 }
 
 // launchOrderDivergenceOf compares one case's two orders.
