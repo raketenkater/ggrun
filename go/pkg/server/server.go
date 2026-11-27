@@ -378,12 +378,16 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 
 	cmd.Env = OverrideEnv(ChildEnv(os.Environ(), args), outerEnvOverrides)
 
+	// A shutdown signal from here until the caller's own loop owns it stops
+	// this backend instead of killing ggrun around it.
+	installSignalGuard()
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
 	p := &Process{Cmd: cmd, Port: port, host: readinessHost(args), cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
+	trackLive(p)
 	// Without this tie an abrupt ggrun exit on Windows (Ctrl+C during model
 	// load) left llama-server running and holding its VRAM.
 	if release, err := bindToParentLifetime(cmd); err != nil {
@@ -690,6 +694,7 @@ func (p *Process) Stop() error {
 	}
 	p.stopOnce.Do(func() {
 		defer close(p.stopDone)
+		defer untrackLive(p)
 		p.captureMemoryStats()
 		var scopeErr error
 		scopeStopped := false
@@ -782,6 +787,7 @@ func (p *Process) Kill() {
 	if p.releaseLifetime != nil {
 		p.releaseLifetime()
 	}
+	untrackLive(p)
 }
 
 var scopeCounter atomic.Uint64

@@ -7721,6 +7721,7 @@ func cmdLaunch(args []string) {
 	fmt.Println("[launch] Press Ctrl+C to stop")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
+	server.OwnShutdownSignals()
 	growth := startServingGrowthRecorder(cfg.CacheDir, model, strategy, scopedProbeBackendTagForStrategy(req, model, be, strategy),
 		runtimeGrowthCaps(caps, runtimeCaps), visibleToPhysical, serverProcessPID(p))
 
@@ -9512,10 +9513,11 @@ func cmdDaemon(args []string) {
 		ComputeMemory: computeMemory,
 	})
 	errCh := make(chan error, 1)
-	go func() { errCh <- d.Start() }()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
 	defer signal.Stop(sigCh)
+	server.OwnShutdownSignals()
+	go func() { errCh <- d.Start() }()
 
 	select {
 	case err := <-errCh:
